@@ -68,10 +68,6 @@ pub(crate) fn sample_to_f32(sample: i32, bits: u8) -> f32 {
 /// A non-finite value is [`CodecError::NonFinite`]. A value outside the
 /// depth's range after rounding is [`CodecError::OutOfRange`]: it is not
 /// clipped.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the encoder reads mix samples with it")
-)]
 pub(crate) fn f32_to_sample(value: f32, bits: u8) -> Result<i32, CodecError> {
     if !value.is_finite() {
         return Err(CodecError::NonFinite);
@@ -119,7 +115,6 @@ pub(crate) fn to_pcm(
 }
 
 /// Reads mix samples back into `bits`-deep integers, appending to `out`.
-#[expect(dead_code, reason = "the encoder reads mix samples with it")]
 pub(crate) fn from_pcm(pcm: &Pcm, bits: u8, out: &mut Vec<i32>) -> Result<(), CodecError> {
     match pcm.format {
         SampleFormat::I16 => {

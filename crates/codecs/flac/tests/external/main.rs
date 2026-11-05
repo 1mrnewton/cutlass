@@ -10,4 +10,5 @@
 )]
 
 mod decode_oracle;
+mod encode_oracle;
 mod support;

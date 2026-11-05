@@ -239,6 +239,20 @@ pub fn read_wav(path: &Path) -> (Vec<i32>, u32, usize) {
     panic!("no data chunk in {}", path.display());
 }
 
+/// The sample rate in a WAV file's fmt chunk.
+pub fn wav_rate(path: &Path) -> u32 {
+    let bytes = std::fs::read(path).expect("read wav");
+    let mut at = 12;
+    while at + 8 <= bytes.len() {
+        let len = u32::from_le_bytes(bytes[at + 4..at + 8].try_into().expect("len")) as usize;
+        if &bytes[at..at + 4] == b"fmt " {
+            return u32::from_le_bytes(bytes[at + 12..at + 16].try_into().expect("rate"));
+        }
+        at += 8 + len + (len & 1);
+    }
+    panic!("no fmt chunk in {}", path.display());
+}
+
 /// One frame's byte range from `flac --analyze`.
 pub struct AnalyzedFrame {
     pub offset: usize,

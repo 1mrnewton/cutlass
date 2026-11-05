@@ -170,13 +170,11 @@ impl BitWriter {
     }
 
     /// Writes a two's complement value `count` bits wide, at most 33.
-    #[cfg_attr(not(test), expect(dead_code, reason = "the encoder writes with it"))]
     pub(crate) fn put_signed(&mut self, count: u32, value: i64) {
         self.put_long(count, value as u64);
     }
 
     /// Writes `zeros` zero bits and a one.
-    #[cfg_attr(not(test), expect(dead_code, reason = "the encoder writes with it"))]
     pub(crate) fn put_unary(&mut self, zeros: u64) {
         let mut left = zeros;
         while left >= 32 {
@@ -187,7 +185,6 @@ impl BitWriter {
     }
 
     /// Pads with zero bits to a byte boundary.
-    #[cfg_attr(not(test), expect(dead_code, reason = "the encoder writes with it"))]
     pub(crate) fn align(&mut self) {
         if self.pending > 0 {
             let pad = 8 - self.pending;
@@ -200,12 +197,26 @@ impl BitWriter {
     }
 
     /// Bits written so far.
-    #[expect(dead_code, reason = "the encoder writes with it")]
     pub(crate) fn bit_len(&self) -> u64 {
         u64::try_from(self.out.len())
             .unwrap_or(u64::MAX / 8)
             .saturating_mul(8)
             + u64::from(self.pending)
+    }
+
+    /// Appends every bit `other` holds.
+    pub(crate) fn append(&mut self, other: &Self) {
+        for byte in &other.out {
+            self.put(8, u64::from(*byte));
+        }
+        self.put(other.pending, other.acc);
+    }
+
+    /// Drops every bit, keeping the allocation.
+    pub(crate) fn clear(&mut self) {
+        self.out.clear();
+        self.acc = 0;
+        self.pending = 0;
     }
 
     /// The bytes. Call [`Self::align`] first.

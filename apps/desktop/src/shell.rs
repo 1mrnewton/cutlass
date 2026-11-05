@@ -10786,6 +10786,16 @@ mod tests {
         );
 
         desktop.select(Some(SegmentId::new("picture")));
+        // A title's letter animation does not go on a picture.
+        assert!(
+            desktop
+                .set_animation(
+                    true,
+                    Some("cutlass-anim-in-typewriter".to_owned()),
+                    Micros(500_000)
+                )
+                .is_err()
+        );
         let none = desktop.animations().unwrap();
         assert_eq!(
             (none.enter, none.leave, none.length),

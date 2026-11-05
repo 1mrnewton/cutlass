@@ -18,7 +18,7 @@ use crate::shell::{
     Inspection, LetterCase, Panel, SILENT_DB, Shell, ShellError, TextLook, volume_db,
 };
 use crate::{icons, tokens};
-use cutlass_model::{ANIMATION_PRESETS, AnimType, Micros};
+use cutlass_model::{ANIMATION_PRESETS, AnimType, Micros, Motion};
 
 use super::ViewState;
 
@@ -640,7 +640,8 @@ fn animation_tab(
     if state.page < 2
         && let Some(animations) = shell.animations()
     {
-        animation_side(shell, ui, state, &animations, state.page == 0);
+        let letters = std::ptr::eq(motions, TEXT_MOTIONS);
+        animation_side(shell, ui, state, &animations, state.page == 0, letters);
         return;
     }
     later_note(ui, "Animations");
@@ -824,14 +825,15 @@ fn graph_row(ui: &mut Ui, keys: &cutlass_editor::ClipKeys) -> Option<Option<Stri
     picked
 }
 
-/// One side's grid: None, then each preset of that side, the chosen one
-/// outlined; then the chosen one's length, which previews as it drags.
+/// One side's grid: None, then each preset of that side (a title's letter
+/// animations only with `letters`), the chosen one outlined; then the chosen one's length, which previews as it drags.
 fn animation_side(
     shell: &mut Shell,
     ui: &mut Ui,
     state: &mut InspectorState,
     animations: &cutlass_editor::ClipAnimations,
     enter: bool,
+    letters: bool,
 ) {
     let kind = if enter { AnimType::In } else { AnimType::Out };
     let chosen = if enter {
@@ -846,7 +848,8 @@ fn animation_side(
         ui.spacing_mut().item_spacing = Vec2::splat(6.0);
         let presets = ANIMATION_PRESETS
             .iter()
-            .filter(|preset| preset.kind == kind);
+            .filter(|preset| preset.kind == kind)
+            .filter(|preset| letters || !matches!(preset.motion, Motion::Letters(_)));
         let tiles = std::iter::once(("None", None)).chain(
             presets.map(|preset| (preset.name, Some((preset.resource_id, preset.duration)))),
         );

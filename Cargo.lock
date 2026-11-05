@@ -1077,6 +1077,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "cutlass-platform-linux"
+version = "0.1.0"
+
+[[package]]
 name = "cutlass-platform-windows"
 version = "0.1.0"
 dependencies = [
@@ -1101,6 +1105,7 @@ dependencies = [
  "cutlass-pcm",
  "cutlass-platform-android",
  "cutlass-platform-apple",
+ "cutlass-platform-linux",
  "cutlass-platform-windows",
  "cutlass-renderer-software",
  "cutlass-riff",

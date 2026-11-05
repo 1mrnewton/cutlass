@@ -62,6 +62,7 @@ members = [
     "crates/picture",
     "crates/platform-android",
     "crates/platform-apple",
+    "crates/platform-linux",
     "crates/platform-windows",
     "crates/playback",
     "crates/pool",

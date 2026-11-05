@@ -9,6 +9,7 @@ const WIN: u32 = 64;
 const PROB_SHIFT: u32 = 6;
 const MIN_PROB: u32 = 4;
 
+#[derive(Clone, Copy)]
 pub struct Msac<'a> {
     buf: &'a [u8],
     pos: usize,
@@ -32,7 +33,7 @@ impl<'a> Msac<'a> {
         s
     }
 
-    #[inline]
+    #[inline(always)]
     fn refill(&mut self) {
         let c = WIN as i32 - self.cnt - 24;
         // Fast path: eight bytes at once. Bits of the byte after the last
@@ -46,27 +47,21 @@ impl<'a> Msac<'a> {
             self.cnt = WIN as i32 - (c - 8 * n) - 24;
             return;
         }
-        self.refill_slow();
+        let (pos, dif, cnt) = refill_slow(self.buf, self.pos, self.dif, self.cnt);
+        self.pos = pos;
+        self.dif = dif;
+        self.cnt = cnt;
     }
 
-    #[cold]
-    fn refill_slow(&mut self) {
-        let mut c = WIN as i32 - self.cnt - 24;
-        let mut dif = self.dif;
-        loop {
-            if self.pos >= self.buf.len() {
-                dif |= !(!0xffu64 << c);
-                break;
-            }
-            dif |= u64::from(self.buf[self.pos] ^ 0xff) << c;
-            self.pos += 1;
-            c -= 8;
-            if c < 0 {
-                break;
-            }
-        }
-        self.dif = dif;
-        self.cnt = WIN as i32 - c - 24;
+    /// Runs `f` on a copy of the decoder state held in a local, then stores
+    /// it back: inside a loop the state then stays in registers instead of
+    /// going through memory for every symbol.
+    #[inline(always)]
+    pub fn with_local<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        let mut m = *self;
+        let r = f(&mut m);
+        *self = m;
+        r
     }
 
     #[inline(always)]
@@ -82,7 +77,7 @@ impl<'a> Msac<'a> {
     }
 
     /// read_bool() with probability one half (also read_literal bits).
-    #[inline]
+    #[inline(always)]
     pub fn bool_equi(&mut self) -> bool {
         let r = self.rng;
         let mut dif = self.dif;
@@ -98,7 +93,7 @@ impl<'a> Msac<'a> {
     }
 
     /// Boolean with a fixed inverted probability `f` (no adaptation).
-    #[inline]
+    #[inline(always)]
     pub fn bool_prob(&mut self, f: u32) -> bool {
         let r = self.rng;
         let mut dif = self.dif;
@@ -114,7 +109,7 @@ impl<'a> Msac<'a> {
     }
 
     /// Adaptive boolean on a 2-entry inverted CDF.
-    #[inline]
+    #[inline(always)]
     pub fn bool_adapt(&mut self, cdf: &mut [u16; 2]) -> bool {
         let bit = self.bool_prob(u32::from(cdf[0]));
         if self.allow_update {
@@ -140,6 +135,9 @@ impl<'a> Msac<'a> {
     /// adapt upwards.
     #[inline(always)]
     pub fn symbol<const N: usize>(&mut self, cdf: &mut [u16; N]) -> usize {
+        if N <= 4 {
+            return self.symbol_small(cdf);
+        }
         let n = N - 1; // number of probability entries
         let c = (self.dif >> (WIN - 16)) as u16;
         let r = (self.rng & 0xff00) as u16;
@@ -173,8 +171,61 @@ impl<'a> Msac<'a> {
         val
     }
 
+    /// [`Msac::symbol`] for at most 4 symbols: the thresholds in scalar
+    /// registers and the adaptation on the four 16-bit lanes of one `u64`.
+    #[inline(always)]
+    fn symbol_small<const N: usize>(&mut self, cdf: &mut [u16; N]) -> usize {
+        let n = N - 1;
+        let c = (self.dif >> (WIN - 16)) as u32;
+        let r8 = self.rng >> 8;
+        // The thresholds decrease with the index, so the symbols below the
+        // decoded one are those whose threshold exceeds `c`.
+        let mut u = self.rng;
+        let mut vv = 0;
+        let mut val = 0;
+        let mut prev = 0;
+        for i in 0..n {
+            let v = ((r8 * (u32::from(cdf[i]) >> PROB_SHIFT)) >> (7 - PROB_SHIFT))
+                + MIN_PROB * (n - i) as u32;
+            if i == 0 {
+                vv = v;
+            } else if c < prev {
+                u = prev;
+                vv = v;
+            }
+            val += usize::from(c < v);
+            prev = v;
+        }
+        if c < prev {
+            u = prev;
+            vv = 0;
+        }
+        self.norm(self.dif - (u64::from(vv) << (WIN - 16)), u - vv);
+        if self.allow_update {
+            // All N lanes, the counter included, in one word.
+            let mut w = 0u64;
+            for (i, &v) in cdf.iter().enumerate() {
+                w |= u64::from(v) << (16 * i);
+            }
+            let count = (w >> (16 * n)) as u32;
+            let rate = 4 + (count >> 4) + u32::from(n > 2);
+            let lanes = (1u64 << (16 * n)) - 1;
+            let x = w & lanes;
+            let low = 0x0001_0001_0001_0001 & lanes;
+            let keep = low * (0xFFFF >> rate);
+            let down = x - ((x >> rate) & keep);
+            let up = x + ((((low << 15) - x) >> rate) & keep);
+            let m = (1u64 << (16 * val)) - 1;
+            let y = (up & m) | (down & !m) | (u64::from(count + u32::from(count < 32)) << (16 * n));
+            for (i, v) in cdf.iter_mut().enumerate() {
+                *v = (y >> (16 * i)) as u16;
+            }
+        }
+        val
+    }
+
     /// L(n): n raw bits, MSB first.
-    #[inline]
+    #[inline(always)]
     pub fn literal(&mut self, n: u32) -> u32 {
         let mut x = 0;
         for _ in 0..n {
@@ -184,7 +235,22 @@ impl<'a> Msac<'a> {
     }
 
     /// read_golomb()
+    #[inline(always)]
     pub fn golomb(&mut self) -> u32 {
+        let (m, v) = Self::golomb_by_value(*self);
+        *self = m;
+        v
+    }
+
+    /// [`Msac::golomb`] on a copy of the state, which keeps the caller's
+    /// state out of memory.
+    #[inline(never)]
+    fn golomb_by_value(mut m: Self) -> (Self, u32) {
+        let v = m.golomb_inner();
+        (m, v)
+    }
+
+    fn golomb_inner(&mut self) -> u32 {
         let mut len = 0u32;
         loop {
             if self.bool_equi() {
@@ -216,6 +282,28 @@ impl<'a> Msac<'a> {
         let extra = self.literal(1);
         (v << 1) - m + extra
     }
+}
+
+/// The refill near the end of the data. Takes and returns plain values, so
+/// a caller keeping the state in a local (see [`Msac::with_local`]) can
+/// keep it in registers.
+#[cold]
+#[inline(never)]
+fn refill_slow(buf: &[u8], mut pos: usize, mut dif: u64, cnt: i32) -> (usize, u64, i32) {
+    let mut c = WIN as i32 - cnt - 24;
+    loop {
+        if pos >= buf.len() {
+            dif |= !(!0xffu64 << c);
+            break;
+        }
+        dif |= u64::from(buf[pos] ^ 0xff) << c;
+        pos += 1;
+        c -= 8;
+        if c < 0 {
+            break;
+        }
+    }
+    (pos, dif, WIN as i32 - c - 24)
 }
 
 /// Converts a spec CDF row (N values ending in 32768, then the counter) to

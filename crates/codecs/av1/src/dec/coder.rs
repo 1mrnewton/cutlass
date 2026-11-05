@@ -17,6 +17,12 @@ pub trait Coder {
     fn literal(&mut self, n: u32, v: u32) -> u32;
     fn golomb(&mut self, v: u32) -> u32;
     fn ns(&mut self, n: u32, v: u32) -> u32;
+    /// Runs `f` on the coder; the decoder runs it on a copy of its state
+    /// held in a local, which a loop can keep in registers.
+    #[inline(always)]
+    fn with_local<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        f(self)
+    }
 }
 
 impl Coder for Msac<'_> {
@@ -44,5 +50,9 @@ impl Coder for Msac<'_> {
     #[inline(always)]
     fn ns(&mut self, n: u32, _v: u32) -> u32 {
         Msac::ns(self, n)
+    }
+    #[inline(always)]
+    fn with_local<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        Msac::with_local(self, f)
     }
 }

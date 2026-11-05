@@ -3755,195 +3755,218 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
             let tx_class = get_tx_class(tx_type);
             let eob_multisize = tx_w_log2(tx).min(5) + tx_h_log2(tx).min(5) - 4;
             let ectx = usize::from(tx_class != 0);
-            let cdf = &mut self.cdf;
-            let we = want_eob.max(1);
-            let w_pt = if we <= 2 {
-                we
-            } else {
-                (31 - ((we - 1) as u32).leading_zeros()) as usize + 2
-            };
-            let w_extra = we.saturating_sub(if w_pt < 2 {
-                w_pt
-            } else {
-                (1 << (w_pt - 2)) + 1
-            });
-            let wp = w_pt - 1;
-            let eob_pt = 1 + match eob_multisize {
-                0 => self.msac.symbol(&mut cdf.eob_pt_16[ptype][ectx], wp),
-                1 => self.msac.symbol(&mut cdf.eob_pt_32[ptype][ectx], wp),
-                2 => self.msac.symbol(&mut cdf.eob_pt_64[ptype][ectx], wp),
-                3 => self.msac.symbol(&mut cdf.eob_pt_128[ptype][ectx], wp),
-                4 => self.msac.symbol(&mut cdf.eob_pt_256[ptype][ectx], wp),
-                5 => self.msac.symbol(&mut cdf.eob_pt_512[ptype], wp),
-                _ => self.msac.symbol(&mut cdf.eob_pt_1024[ptype], wp),
-            };
-            eob = if eob_pt < 2 {
-                eob_pt
-            } else {
-                (1 << (eob_pt - 2)) + 1
-            };
-            let eob_shift = eob_pt as i32 - 3;
-            if eob_shift >= 0 {
-                if self.msac.bool_adapt(
-                    &mut cdf.eob_extra[tx_sz_ctx][ptype][eob_pt - 3],
-                    (w_extra >> eob_shift) & 1 != 0,
-                ) {
-                    eob += 1 << eob_shift;
-                }
-                for i in 1..(eob_pt as i32 - 2).max(0) {
-                    let sh = (eob_pt as i32 - 2).max(0) - 1 - i;
-                    if self.msac.literal(1, ((w_extra >> sh) & 1) as u32) != 0 {
-                        eob += 1 << sh;
-                    }
-                }
-            }
-            // Level decoding on a padded levels buffer.
-            let adj = ADJUSTED_TX_SIZE[tx as usize];
-            let bwl = tx_w_log2(adj);
-            let width = 1usize << bwl;
-            let height = tx_h(adj);
-            let lstride = width + 4;
-            let levels = &mut self.scratch.levels;
-            let coeff_base_cdf = &mut cdf.coeff_base[tx_sz_ctx][ptype];
-            let coeff_br_cdf = &mut cdf.coeff_br[tx_sz_ctx.min(3)][ptype];
-            // The eob coefficient.
-            let n = height << bwl;
-            let last = eob - 1;
-            let ctx = if last == 0 {
-                0
-            } else if last <= n / 8 {
-                1
-            } else if last <= n / 4 {
-                2
-            } else {
-                3
-            };
-            let want = &self.scratch.want;
-            let wfirst = if C::WRITE {
-                (want[scan[last] as usize].unsigned_abs().clamp(1, 3) - 1) as usize
-            } else {
-                0
-            };
-            let first = 1 + self
-                .msac
-                .symbol(&mut cdf.coeff_base_eob[tx_sz_ctx][ptype][ctx], wfirst)
-                as u32;
-            let tab = level_table(tx as usize, tx_class);
-            let args = LevelArgs {
-                scan,
-                tab,
-                eob,
-                lstride,
-                first,
-                want,
-            };
-            let nzc = &mut self.scratch.nz_scan;
-            let n_nz = match tx_class {
-                0 => read_levels::<0, C>(
-                    &mut self.msac,
-                    coeff_base_cdf,
-                    coeff_br_cdf,
-                    levels,
-                    nzc,
-                    &args,
-                ),
-                1 => read_levels::<1, C>(
-                    &mut self.msac,
-                    coeff_base_cdf,
-                    coeff_br_cdf,
-                    levels,
-                    nzc,
-                    &args,
-                ),
-                _ => read_levels::<2, C>(
-                    &mut self.msac,
-                    coeff_base_cdf,
-                    coeff_br_cdf,
-                    levels,
-                    nzc,
-                    &args,
-                ),
-            };
-            // Signs and Golomb remainder.
-            let dq = &mut self.scratch.coefs;
-            let mut nz_rows = 0usize;
-            let mut nz_cols = 0usize;
+            let cdf = &mut *self.cdf;
+            let scratch = &mut self.scratch;
+            let above_dc = &self.above_dc[plane];
+            let left_dc = &self.left_dc[plane];
             let bd = self.bd;
-            let lim = 1i64 << (7 + bd);
-            let dshift = qinfo.denom.trailing_zeros();
-            let cbwl = bwl.min(5);
-            // The nonzero coefficients, in scan order.
-            for k in (0..n_nz).rev() {
-                let c = usize::from(self.scratch.nz_scan[k]);
-                let li = (tab[c] & 0xFFFF) as usize;
-                let mut q = i32::from(self.scratch.levels[li] >> 8);
-                let pos = scan[c] as usize;
-                let sign = if c == 0 {
-                    // dc_sign ctx
-                    let mut dc_sign = 0i32;
-                    for k in 0..w4 {
-                        if x4 + k < max_x4 {
-                            match self.above_dc[plane][x4 + k] {
-                                1 => dc_sign -= 1,
-                                2 => dc_sign += 1,
-                                _ => {}
-                            }
-                        }
-                    }
-                    for k in 0..h4 {
-                        if y4 + k < max_y4 {
-                            match self.left_dc[plane][(ly0 + k) & 31] {
-                                1 => dc_sign -= 1,
-                                2 => dc_sign += 1,
-                                _ => {}
-                            }
-                        }
-                    }
-                    let ctx = match dc_sign.cmp(&0) {
-                        std::cmp::Ordering::Less => 1,
-                        std::cmp::Ordering::Greater => 2,
-                        std::cmp::Ordering::Equal => 0,
+            // The symbols of the block, with the decoder state in locals.
+            let (e, cul, dcc) = self.msac.with_local(
+                #[inline(always)]
+                |msac| {
+                    let we = want_eob.max(1);
+                    let w_pt = if we <= 2 {
+                        we
+                    } else {
+                        (31 - ((we - 1) as u32).leading_zeros()) as usize + 2
                     };
-                    self.msac.bool_adapt(
-                        &mut self.cdf.dc_sign[ptype][ctx],
-                        self.scratch.want[pos] < 0,
-                    )
-                } else {
-                    self.msac.literal(1, u32::from(self.scratch.want[pos] < 0)) != 0
-                };
-                if q > 14 {
-                    let g = self
-                        .msac
-                        .golomb(self.scratch.want[pos].unsigned_abs().saturating_sub(15));
-                    q = (g as i32).wrapping_add(15);
-                }
-                if pos == 0 {
-                    dc_category = if sign { 1 } else { 2 };
-                }
-                let q = q & 0xFFFFF;
-                cul_level += q as u32;
-                // Dequantize (7.12.3 step 1).
-                let i = pos >> cbwl;
-                let j = pos - (i << cbwl);
-                let qv = if pos == 0 { qinfo.dc } else { qinfo.ac };
-                let q2 = match qinfo.qm {
-                    Some(m) => crate::dsp::round2(qv * i32::from(m[pos]), 5),
-                    None => qv,
-                };
-                let dqv = ((i64::from(q) * i64::from(q2)) & 0xFFFFFF) >> dshift;
-                let v = if sign { -dqv } else { dqv };
-                dq[pos] = v.clamp(-lim, lim - 1) as i32;
-                nz_rows = nz_rows.max(i + 1);
-                nz_cols = nz_cols.max(j + 1);
-            }
-            // Reset the levels read (only nonzero ones were written nonzero).
-            let levels = &mut self.scratch.levels;
-            for &c in &self.scratch.nz_scan[..n_nz] {
-                levels[(tab[usize::from(c)] & 0xFFFF) as usize] = 0;
-            }
-            self.scratch.nz_rows = nz_rows.max(1);
-            self.scratch.nz_cols = nz_cols.max(1);
-            cul_level = cul_level.min(63);
+                    let w_extra = we.saturating_sub(if w_pt < 2 {
+                        w_pt
+                    } else {
+                        (1 << (w_pt - 2)) + 1
+                    });
+                    let wp = w_pt - 1;
+                    let eob_pt = 1 + match eob_multisize {
+                        0 => msac.symbol(&mut cdf.eob_pt_16[ptype][ectx], wp),
+                        1 => msac.symbol(&mut cdf.eob_pt_32[ptype][ectx], wp),
+                        2 => msac.symbol(&mut cdf.eob_pt_64[ptype][ectx], wp),
+                        3 => msac.symbol(&mut cdf.eob_pt_128[ptype][ectx], wp),
+                        4 => msac.symbol(&mut cdf.eob_pt_256[ptype][ectx], wp),
+                        5 => msac.symbol(&mut cdf.eob_pt_512[ptype], wp),
+                        _ => msac.symbol(&mut cdf.eob_pt_1024[ptype], wp),
+                    };
+                    let mut eob = if eob_pt < 2 {
+                        eob_pt
+                    } else {
+                        (1 << (eob_pt - 2)) + 1
+                    };
+                    let eob_shift = eob_pt as i32 - 3;
+                    if eob_shift >= 0 {
+                        if msac.bool_adapt(
+                            &mut cdf.eob_extra[tx_sz_ctx][ptype][eob_pt - 3],
+                            (w_extra >> eob_shift) & 1 != 0,
+                        ) {
+                            eob += 1 << eob_shift;
+                        }
+                        for i in 1..(eob_pt as i32 - 2).max(0) {
+                            let sh = (eob_pt as i32 - 2).max(0) - 1 - i;
+                            if msac.literal(1, ((w_extra >> sh) & 1) as u32) != 0 {
+                                eob += 1 << sh;
+                            }
+                        }
+                    }
+                    // Level decoding on a padded levels buffer.
+                    let adj = ADJUSTED_TX_SIZE[tx as usize];
+                    let bwl = tx_w_log2(adj);
+                    let width = 1usize << bwl;
+                    let height = tx_h(adj);
+                    let lstride = width + 4;
+                    let levels = &mut *scratch.levels;
+                    let nzc = &mut *scratch.nz_scan;
+                    let coeff_base_cdf = &mut cdf.coeff_base[tx_sz_ctx][ptype];
+                    let coeff_br_cdf = &mut cdf.coeff_br[tx_sz_ctx.min(3)][ptype];
+                    // The eob coefficient.
+                    let n = height << bwl;
+                    let last = eob - 1;
+                    let ctx = if last == 0 {
+                        0
+                    } else if last <= n / 8 {
+                        1
+                    } else if last <= n / 4 {
+                        2
+                    } else {
+                        3
+                    };
+                    let want = &scratch.want;
+                    let wfirst = if C::WRITE {
+                        (want[scan[last] as usize].unsigned_abs().clamp(1, 3) - 1) as usize
+                    } else {
+                        0
+                    };
+                    let first = 1 + msac
+                        .symbol(&mut cdf.coeff_base_eob[tx_sz_ctx][ptype][ctx], wfirst)
+                        as u32;
+                    let tab = level_table(tx as usize, tx_class);
+                    let args = LevelArgs {
+                        scan,
+                        tab,
+                        eob,
+                        lstride,
+                        first,
+                        want,
+                    };
+                    macro_rules! levels {
+                        ($class:literal) => {
+                            match bwl {
+                                2 => read_levels::<$class, 8, C>(
+                                    msac,
+                                    coeff_base_cdf,
+                                    coeff_br_cdf,
+                                    levels,
+                                    nzc,
+                                    &args,
+                                ),
+                                3 => read_levels::<$class, 12, C>(
+                                    msac,
+                                    coeff_base_cdf,
+                                    coeff_br_cdf,
+                                    levels,
+                                    nzc,
+                                    &args,
+                                ),
+                                4 => read_levels::<$class, 20, C>(
+                                    msac,
+                                    coeff_base_cdf,
+                                    coeff_br_cdf,
+                                    levels,
+                                    nzc,
+                                    &args,
+                                ),
+                                _ => read_levels::<$class, 36, C>(
+                                    msac,
+                                    coeff_base_cdf,
+                                    coeff_br_cdf,
+                                    levels,
+                                    nzc,
+                                    &args,
+                                ),
+                            }
+                        };
+                    }
+                    let n_nz = match tx_class {
+                        0 => levels!(0),
+                        1 => levels!(1),
+                        _ => levels!(2),
+                    };
+                    // Signs and Golomb remainder.
+                    let dq = &mut scratch.coefs;
+                    let mut nz_rows = 0usize;
+                    let mut nz_cols = 0usize;
+                    let lim = 1i64 << (7 + bd);
+                    let dshift = qinfo.denom.trailing_zeros();
+                    let cbwl = bwl.min(5);
+                    let mut cul_level = 0u32;
+                    let mut dc_category = 0u8;
+                    // The nonzero coefficients, in scan order.
+                    for &c in nzc[..n_nz].iter().rev() {
+                        let c = usize::from(c);
+                        let li = (tab[c] & LEVELS_MASK) as usize;
+                        let mut q = i32::from(levels[li] >> 8);
+                        levels[li] = 0;
+                        let pos = scan[c] as usize;
+                        let wpos = if C::WRITE { want[pos] } else { 0 };
+                        let sign = if c == 0 {
+                            // dc_sign ctx
+                            let mut dc_sign = 0i32;
+                            for k in 0..w4 {
+                                if x4 + k < max_x4 {
+                                    match above_dc[x4 + k] {
+                                        1 => dc_sign -= 1,
+                                        2 => dc_sign += 1,
+                                        _ => {}
+                                    }
+                                }
+                            }
+                            for k in 0..h4 {
+                                if y4 + k < max_y4 {
+                                    match left_dc[(ly0 + k) & 31] {
+                                        1 => dc_sign -= 1,
+                                        2 => dc_sign += 1,
+                                        _ => {}
+                                    }
+                                }
+                            }
+                            let ctx = match dc_sign.cmp(&0) {
+                                std::cmp::Ordering::Less => 1,
+                                std::cmp::Ordering::Greater => 2,
+                                std::cmp::Ordering::Equal => 0,
+                            };
+                            msac.bool_adapt(&mut cdf.dc_sign[ptype][ctx], wpos < 0)
+                        } else {
+                            msac.literal(1, u32::from(wpos < 0)) != 0
+                        };
+                        if q > 14 {
+                            let g = msac.golomb(wpos.unsigned_abs().saturating_sub(15));
+                            q = (g as i32).wrapping_add(15);
+                        }
+                        if pos == 0 {
+                            dc_category = if sign { 1 } else { 2 };
+                        }
+                        let q = q & 0xFFFFF;
+                        cul_level += q as u32;
+                        // Dequantize (7.12.3 step 1).
+                        let i = pos >> cbwl;
+                        let j = pos - (i << cbwl);
+                        let qv = if pos == 0 { qinfo.dc } else { qinfo.ac };
+                        let q2 = match qinfo.qm {
+                            Some(m) => crate::dsp::round2(qv * i32::from(m[pos]), 5),
+                            None => qv,
+                        };
+                        let dqv = ((i64::from(q) * i64::from(q2)) & 0xFFFFFF) >> dshift;
+                        let v = if sign { -dqv } else { dqv };
+                        dq[pos] = v.clamp(-lim, lim - 1) as i32;
+                        nz_rows = nz_rows.max(i + 1);
+                        nz_cols = nz_cols.max(j + 1);
+                    }
+                    // Levels read as zero were never written.
+                    scratch.nz_rows = nz_rows.max(1);
+                    scratch.nz_cols = nz_cols.max(1);
+                    (eob, cul_level.min(63), dc_category)
+                },
+            );
+            eob = e;
+            cul_level = cul;
+            dc_category = dcc;
         }
         let an = self.above_level[plane].len();
         if x4 + w4 <= an {
@@ -4053,19 +4076,28 @@ fn read_br<C: Coder>(msac: &mut C, cdf: &mut [u16; 4], wl: u32) -> u32 {
     level
 }
 
+/// Length of the padded levels buffer: any index below `LEVELS_MASK + 1`
+/// plus the farthest neighbour offset (4 rows of at most 63) stays inside.
+pub const LEVELS_LEN: usize = 2048 + 4 * 64 + 4;
+/// Mask of the levels buffer index in a [`level_table`] entry.
+const LEVELS_MASK: u32 = 0x7FF;
+
 /// Reads coeff_base / coeff_br for scan positions eob-1 down to 0 (the
 /// eob position's base level is `args.first`). `levels` is a zeroed padded
-/// buffer with stride `lstride` (= width + 4) of [`level_entry`] values.
+/// buffer with stride `LS` (= width + 4) of [`level_entry`] values.
+/// Returns the number of scan indices written to `nz`: the eob position,
+/// then every nonzero one below it in decreasing order.
 #[inline(always)]
-fn read_levels<const CLASS: usize, C: Coder>(
+fn read_levels<const CLASS: usize, const LS: usize, C: Coder>(
     msac: &mut C,
     base_cdf: &mut [[u16; 4]; 42],
     br_cdf: &mut [[u16; 4]; 21],
-    levels: &mut [u16],
-    nz: &mut [u16],
+    levels: &mut [u16; LEVELS_LEN],
+    nz: &mut [u16; 1024],
     a: &LevelArgs<'_>,
 ) -> usize {
-    let ls = a.lstride;
+    debug_assert_eq!(a.lstride, LS);
+    let ls = LS;
     let offs: [usize; 5] = std::array::from_fn(|i| {
         SIG_REF_DIFF_OFFSET[CLASS][i][0] as usize * ls + SIG_REF_DIFF_OFFSET[CLASS][i][1] as usize
     });
@@ -4077,7 +4109,7 @@ fn read_levels<const CLASS: usize, C: Coder>(
         }
     };
     // Sums of the neighbour entries: (3 magnitude neighbours, all 5).
-    let sums = |levels: &[u16], li: usize| {
+    let sums = |levels: &[u16; LEVELS_LEN], li: usize| {
         let s3 = u32::from(levels[li + offs[0]])
             + u32::from(levels[li + offs[1]])
             + u32::from(levels[li + offs[2]]);
@@ -4087,14 +4119,12 @@ fn read_levels<const CLASS: usize, C: Coder>(
         )
     };
     let last = a.eob - 1;
-    let tab = &a.tab[..a.eob];
-    let nz = &mut nz[..a.eob];
     // The eob coefficient (nonzero).
     nz[0] = last as u16;
     let mut n = 1;
     {
-        let e = tab[last];
-        let li = (e & 0xFFFF) as usize;
+        let e = a.tab[last];
+        let li = (e & LEVELS_MASK) as usize;
         let mut level = a.first;
         if level > 2 {
             let (s3, _) = sums(levels, li);
@@ -4106,9 +4136,8 @@ fn read_levels<const CLASS: usize, C: Coder>(
     if last == 0 {
         return n;
     }
-    for c in (1..last).rev() {
-        let e = tab[c];
-        let li = (e & 0xFFFF) as usize;
+    for (c, &e) in a.tab[..last].iter().enumerate().skip(1).rev() {
+        let li = (e & LEVELS_MASK) as usize;
         let (s3, s5) = sums(levels, li);
         let m = (((s5 & 0xFF) + 1) >> 1).min(4);
         let ctx = (m + ((e >> 16) & 0xFF)) as usize;
@@ -4119,7 +4148,7 @@ fn read_levels<const CLASS: usize, C: Coder>(
             level = read_br(msac, &mut br_cdf[(mag + (e >> 24)) as usize], wl);
         }
         levels[li] = level_entry(level);
-        nz[n] = c as u16;
+        nz[n & 1023] = c as u16;
         n += usize::from(level != 0);
     }
     // The DC coefficient.
@@ -4136,7 +4165,7 @@ fn read_levels<const CLASS: usize, C: Coder>(
         level = read_br(msac, &mut br_cdf[mag as usize], wl);
     }
     levels[0] = level_entry(level);
-    nz[n] = 0;
+    nz[n & 1023] = 0;
     n + usize::from(level != 0)
 }
 

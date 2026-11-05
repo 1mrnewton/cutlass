@@ -627,8 +627,9 @@ const TEXT_MOTIONS: &[&[&str]] = &[
 ];
 
 /// The In, Out, and Combo or Loop slots, each a grid of animations that
-/// starts with None. In and Out store the shared presets on a picture or
-/// title, with a length; the rest are still to come.
+/// starts with None. In, Out and Loop store the shared presets on a
+/// picture or title, with a length (a loop's is one round); Combo is still
+/// to come.
 fn animation_tab(
     shell: &mut Shell,
     ui: &mut Ui,
@@ -637,11 +638,17 @@ fn animation_tab(
     motions: &[&[&str]],
 ) {
     pages(ui, slots, &mut state.page);
-    if state.page < 2
+    let kind = match (state.page, slots.get(2)) {
+        (0, _) => Some(AnimType::In),
+        (1, _) => Some(AnimType::Out),
+        (2, Some(&"Loop")) => Some(AnimType::Loop),
+        _ => None,
+    };
+    if let Some(kind) = kind
         && let Some(animations) = shell.animations()
     {
         let letters = std::ptr::eq(motions, TEXT_MOTIONS);
-        animation_side(shell, ui, state, &animations, state.page == 0, letters);
+        animation_side(shell, ui, state, &animations, kind, letters);
         return;
     }
     later_note(ui, "Animations");
@@ -832,14 +839,13 @@ fn animation_side(
     ui: &mut Ui,
     state: &mut InspectorState,
     animations: &cutlass_editor::ClipAnimations,
-    enter: bool,
+    kind: AnimType,
     letters: bool,
 ) {
-    let kind = if enter { AnimType::In } else { AnimType::Out };
-    let chosen = if enter {
-        &animations.enter
-    } else {
-        &animations.leave
+    let chosen = match kind {
+        AnimType::In => &animations.enter,
+        AnimType::Out => &animations.leave,
+        _ => &animations.looped,
     };
     let chosen_id = chosen.as_ref().map(|side| side.resource_id.as_str());
     let mut picked = None;
@@ -872,7 +878,7 @@ fn animation_side(
         let (id, duration) = preset.map_or((None, Micros(0)), |(id, duration)| {
             (Some(id.to_owned()), duration)
         });
-        send(shell, |shell| shell.set_animation(enter, id, duration));
+        send(shell, |shell| shell.set_animation(kind, id, duration));
         return;
     }
     let Some(side) = chosen else {
@@ -881,15 +887,17 @@ fn animation_side(
     ui.add_space(8.0);
     let seconds = side.duration.0 as f64 / 1e6;
     let longest = (animations.length.0 as f64 / 1e6).max(0.1);
-    let key = if enter { "anim-in" } else { "anim-out" };
-    if let Some(value) = slider(ui, state, key, "Duration", seconds, 0.1..=longest, |v| {
+    let (key, label) = match kind {
+        AnimType::In => ("anim-in", "Duration"),
+        AnimType::Out => ("anim-out", "Duration"),
+        _ => ("anim-loop", "Speed"),
+    };
+    if let Some(value) = slider(ui, state, key, label, seconds, 0.1..=longest, |v| {
         format!("{v:.1}s")
     }) {
         let id = side.resource_id.clone();
         let duration = Micros((value * 1e6).round() as i64);
-        send(shell, |shell| {
-            shell.set_animation(enter, Some(id), duration)
-        });
+        send(shell, |shell| shell.set_animation(kind, Some(id), duration));
     }
 }
 

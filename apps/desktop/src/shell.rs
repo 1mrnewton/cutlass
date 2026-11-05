@@ -4427,12 +4427,13 @@ impl Shell {
         cutlass_editor::clip_animations(draft, segment_id, &sizes)
     }
 
-    /// Give the selected clip the in (`enter`) or out animation
-    /// `resource_id`, `duration` long, or clear that side with `None`. The
-    /// session keeps the two inside the clip. One undo step.
+    /// Give the selected clip the in, out or loop animation `resource_id`,
+    /// `duration` long, or clear that one with `None`. The session keeps the
+    /// in and out inside the clip; a loop's duration is one round. One undo
+    /// step.
     pub fn set_animation(
         &mut self,
-        enter: bool,
+        kind: cutlass_model::AnimType,
         resource_id: Option<String>,
         duration: Micros,
     ) -> Result<(), ShellError> {
@@ -4449,11 +4450,6 @@ impl Shell {
             ));
         }
         self.refuse_locked(&segment_id)?;
-        let kind = if enter {
-            cutlass_model::AnimType::In
-        } else {
-            cutlass_model::AnimType::Out
-        };
         self.apply(Request::SetAnimation {
             segment_id,
             kind,
@@ -10779,7 +10775,11 @@ mod tests {
         assert_eq!(desktop.animations(), None);
         assert_eq!(
             desktop
-                .set_animation(true, Some("cutlass-anim-in-slide-up".to_owned()), Micros(1))
+                .set_animation(
+                    cutlass_model::AnimType::In,
+                    Some("cutlass-anim-in-slide-up".to_owned()),
+                    Micros(1)
+                )
                 .unwrap_err()
                 .to_string(),
             "only a picture or title takes animations"
@@ -10790,7 +10790,7 @@ mod tests {
         assert!(
             desktop
                 .set_animation(
-                    true,
+                    cutlass_model::AnimType::In,
                     Some("cutlass-anim-in-typewriter".to_owned()),
                     Micros(500_000)
                 )
@@ -10803,14 +10803,14 @@ mod tests {
         );
         desktop
             .set_animation(
-                true,
+                cutlass_model::AnimType::In,
                 Some("cutlass-anim-in-slide-up".to_owned()),
                 Micros(700_000),
             )
             .unwrap();
         desktop
             .set_animation(
-                false,
+                cutlass_model::AnimType::Out,
                 Some("cutlass-anim-out-zoom-out".to_owned()),
                 Micros(700_000),
             )
@@ -10822,10 +10822,24 @@ mod tests {
         assert_eq!(enter.duration, Micros(700_000));
         // The two share the clip, so the out side gets what is left.
         assert_eq!(leave.duration, Micros(300_000));
+        // A loop plays the whole clip beside them, a round each duration.
+        desktop
+            .set_animation(
+                cutlass_model::AnimType::Loop,
+                Some("cutlass-anim-loop-swing".to_owned()),
+                Micros(400_000),
+            )
+            .unwrap();
+        let looped = desktop.animations().unwrap().looped.unwrap();
+        assert_eq!(looped.duration, Micros(400_000));
+        desktop.undo().unwrap();
+        assert_eq!(desktop.animations().unwrap().looped, None);
 
         desktop.undo().unwrap();
         assert_eq!(desktop.animations().unwrap().leave, None);
-        desktop.set_animation(true, None, Micros(0)).unwrap();
+        desktop
+            .set_animation(cutlass_model::AnimType::In, None, Micros(0))
+            .unwrap();
         assert_eq!(desktop.animations().unwrap().enter, None);
     }
 

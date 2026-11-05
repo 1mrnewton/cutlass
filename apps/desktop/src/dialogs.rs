@@ -18,6 +18,7 @@ pub(crate) enum Picker {
     SaveExport,
     SaveStill,
     SaveLog,
+    SkillFolder,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -43,6 +44,16 @@ impl Dialogs {
     pub(crate) fn open_project(&mut self, parent: Option<&eframe::Frame>) {
         let dialog = dialog(parent);
         self.start(Picker::OpenProject, async move {
+            dialog
+                .pick_folder()
+                .await
+                .map(|file| file.path().to_path_buf())
+        });
+    }
+
+    pub(crate) fn skill_folder(&mut self, parent: Option<&eframe::Frame>) {
+        let dialog = dialog(parent);
+        self.start(Picker::SkillFolder, async move {
             dialog
                 .pick_folder()
                 .await

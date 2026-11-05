@@ -131,6 +131,20 @@ enum LibraryTarget {
     Folder(String),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SettingsTab {
+    General,
+    Assistant,
+    Shortcuts,
+}
+
+/// Settings that turn on something that sends data off the machine, or
+/// adds skills, held until the user allows it.
+struct Approval {
+    settings: Box<cutlass_settings::Settings>,
+    actions: Vec<cutlass_agent::ApprovalAction>,
+}
+
 pub struct ViewState {
     preview: Option<egui::TextureHandle>,
     export_open: bool,
@@ -139,8 +153,13 @@ pub struct ViewState {
     /// The third-party notices, read when the Licenses window opens.
     licenses: Option<cutlass_licenses::Notices>,
     settings_open: bool,
+    settings_tab: SettingsTab,
     /// The action whose new keys the settings window waits for.
     recording: Option<&'static str>,
+    /// Each server's arguments as typed, by row, while the window is open.
+    server_args: std::collections::HashMap<usize, String>,
+    /// A settings change waiting for the user to allow what it turns on.
+    approval: Option<Approval>,
     /// The dialog's choices; its path is `export_path`.
     export: ExportRequest,
     /// Write a MOV rather than an MP4.
@@ -219,7 +238,10 @@ impl Default for ViewState {
             project_dialog: None,
             licenses: None,
             settings_open: false,
+            settings_tab: SettingsTab::General,
             recording: None,
+            server_args: std::collections::HashMap::new(),
+            approval: None,
             export: ExportRequest::default(),
             export_mov: false,
             export_mbps: None,
@@ -336,7 +358,10 @@ pub fn show(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Option
     }
     settings_keys(shell, ui, view);
     if view.settings_open {
-        settings_window(shell, ui, view);
+        settings_window(shell, ui, view, parent);
+    }
+    if view.approval.is_some() {
+        approval_dialog(shell, ui, view);
     }
     dropped_files(shell, ui);
 }
@@ -987,8 +1012,14 @@ const MAC: bool = cfg!(target_os = "macos");
 
 /// Playback, the side panels, the platform codecs and the shortcuts. A
 /// change saves at once.
-fn settings_window(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
+fn settings_window(
+    shell: &mut Shell,
+    ui: &mut Ui,
+    view: &mut ViewState,
+    parent: Option<&eframe::Frame>,
+) {
     let mut settings = shell.settings().clone();
+    let mut add_folder = false;
     let mut reset = false;
     let mut record = None;
     let mut clear = None;
@@ -997,80 +1028,110 @@ fn settings_window(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
             ui.add_space(16.0);
             ui.vertical(|ui| {
                 ui.set_max_width(372.0);
-                settings_heading(ui, "Playback");
-                ui.checkbox(&mut settings.playback.loop_playback, "Loop at the end");
-                ui.checkbox(
-                    &mut settings.playback.scrub_audio,
-                    "Play sound while the playhead is dragged",
-                );
-                choice_row(ui, "A seek", |ui| {
-                    let seek = &mut settings.playback.seek_during_playback;
-                    for (value, name) in [
-                        (
-                            cutlass_settings::SeekDuringPlayback::KeepPlaying,
-                            "keeps playing",
-                        ),
-                        (cutlass_settings::SeekDuringPlayback::Pause, "pauses"),
+                ui.horizontal(|ui| {
+                    for (tab, name) in [
+                        (SettingsTab::General, "General"),
+                        (SettingsTab::Assistant, "Assistant"),
+                        (SettingsTab::Shortcuts, "Shortcuts"),
                     ] {
-                        if ui.selectable_label(*seek == value, name).clicked() {
-                            *seek = value;
+                        if ui
+                            .selectable_label(view.settings_tab == tab, name)
+                            .clicked()
+                        {
+                            view.settings_tab = tab;
                         }
                     }
                 });
-                settings_heading(ui, "Panels");
-                for (id, name) in [(PANEL_LIBRARY, "Library"), (PANEL_INSPECTOR, "Inspector")] {
-                    let mut open = settings.panel_open(id);
-                    if ui.checkbox(&mut open, name).changed() {
-                        settings.set_panel_open(id, open);
+                match view.settings_tab {
+                    SettingsTab::General => {
+                        settings_heading(ui, "Playback");
+                        ui.checkbox(&mut settings.playback.loop_playback, "Loop at the end");
+                        ui.checkbox(
+                            &mut settings.playback.scrub_audio,
+                            "Play sound while the playhead is dragged",
+                        );
+                        choice_row(ui, "A seek", |ui| {
+                            let seek = &mut settings.playback.seek_during_playback;
+                            for (value, name) in [
+                                (
+                                    cutlass_settings::SeekDuringPlayback::KeepPlaying,
+                                    "keeps playing",
+                                ),
+                                (cutlass_settings::SeekDuringPlayback::Pause, "pauses"),
+                            ] {
+                                if ui.selectable_label(*seek == value, name).clicked() {
+                                    *seek = value;
+                                }
+                            }
+                        });
+                        settings_heading(ui, "Panels");
+                        for (id, name) in
+                            [(PANEL_LIBRARY, "Library"), (PANEL_INSPECTOR, "Inspector")]
+                        {
+                            let mut open = settings.panel_open(id);
+                            if ui.checkbox(&mut open, name).changed() {
+                                settings.set_panel_open(id, open);
+                            }
+                        }
+                        settings_heading(ui, "Hardware codecs");
+                        ui.checkbox(
+                            &mut settings.hardware.decode,
+                            "Decode with the system codecs",
+                        );
+                        ui.checkbox(
+                            &mut settings.hardware.encode,
+                            "Encode with the system codecs",
+                        );
+                        ui.label(
+                            RichText::new("These take effect when Cutlass opens again.")
+                                .color(tokens::FAINT),
+                        );
+                    }
+                    SettingsTab::Assistant => {
+                        assistant_settings(
+                            ui,
+                            &mut settings,
+                            &mut view.server_args,
+                            &mut add_folder,
+                        );
+                    }
+                    SettingsTab::Shortcuts => {
+                        ui.add_space(8.0);
+                        reset = ui.button("Reset shortcuts").clicked();
+                        ui.add_space(4.0);
+                        for (action, label) in cutlass_settings::ACTIONS {
+                            ui.horizontal(|ui| {
+                                let (rect, _) =
+                                    ui.allocate_exact_size(Vec2::new(200.0, 20.0), Sense::hover());
+                                ui.painter().text(
+                                    rect.left_center(),
+                                    Align2::LEFT_CENTER,
+                                    *label,
+                                    FontId::proportional(tokens::TYPE_SIZE),
+                                    tokens::MUTED,
+                                );
+                                let keys = settings.keys_for(action);
+                                let shown = if view.recording == Some(*action) {
+                                    "Press keys…".to_owned()
+                                } else if keys.is_empty() {
+                                    "None".to_owned()
+                                } else {
+                                    cutlass_settings::keys_label(keys, MAC)
+                                };
+                                if ui
+                                    .add(egui::Button::new(shown).min_size(Vec2::new(110.0, 20.0)))
+                                    .on_hover_text("Click, then press the new keys")
+                                    .clicked()
+                                {
+                                    record = Some(*action);
+                                }
+                                if !keys.is_empty() && ui.small_button("Clear").clicked() {
+                                    clear = Some(*action);
+                                }
+                            });
+                        }
                     }
                 }
-                settings_heading(ui, "Hardware codecs");
-                ui.checkbox(
-                    &mut settings.hardware.decode,
-                    "Decode with the system codecs",
-                );
-                ui.checkbox(
-                    &mut settings.hardware.encode,
-                    "Encode with the system codecs",
-                );
-                ui.label(
-                    RichText::new("These take effect when Cutlass opens again.")
-                        .color(tokens::FAINT),
-                );
-                settings_heading(ui, "Shortcuts");
-                for (action, label) in cutlass_settings::ACTIONS {
-                    ui.horizontal(|ui| {
-                        let (rect, _) =
-                            ui.allocate_exact_size(Vec2::new(200.0, 20.0), Sense::hover());
-                        ui.painter().text(
-                            rect.left_center(),
-                            Align2::LEFT_CENTER,
-                            *label,
-                            FontId::proportional(tokens::TYPE_SIZE),
-                            tokens::MUTED,
-                        );
-                        let keys = settings.keys_for(action);
-                        let shown = if view.recording == Some(*action) {
-                            "Press keys…".to_owned()
-                        } else if keys.is_empty() {
-                            "None".to_owned()
-                        } else {
-                            cutlass_settings::keys_label(keys, MAC)
-                        };
-                        if ui
-                            .add(egui::Button::new(shown).min_size(Vec2::new(110.0, 20.0)))
-                            .on_hover_text("Click, then press the new keys")
-                            .clicked()
-                        {
-                            record = Some(*action);
-                        }
-                        if !keys.is_empty() && ui.small_button("Clear").clicked() {
-                            clear = Some(*action);
-                        }
-                    });
-                }
-                ui.add_space(8.0);
-                reset = ui.button("Reset shortcuts").clicked();
             });
         });
     });
@@ -1084,12 +1145,166 @@ fn settings_window(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
     if record.is_some() {
         view.recording = record;
     }
-    shell.update_settings(|current| *current = settings);
+    if add_folder {
+        view.dialogs.skill_folder(parent);
+    }
+    propose_settings(shell, view, settings);
     let escape = view.recording.is_none() && ui.input(|input| input.key_pressed(egui::Key::Escape));
-    if closed || escape {
+    if (closed || escape) && view.approval.is_none() {
         view.settings_open = false;
         view.recording = None;
+        view.server_args.clear();
     }
+}
+
+/// Write `settings`, or hold them for the approval dialog when they turn on
+/// the cloud model, the online sandbox or a remote server, or add skills.
+fn propose_settings(shell: &mut Shell, view: &mut ViewState, settings: cutlass_settings::Settings) {
+    if view.approval.is_some() {
+        return;
+    }
+    let actions = cutlass_agent::pending_approvals(shell.settings(), &settings);
+    if actions.is_empty() {
+        shell.update_settings(|current| *current = settings);
+    } else {
+        view.approval = Some(Approval {
+            settings: Box::new(settings),
+            actions,
+        });
+    }
+}
+
+fn approval_dialog(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
+    let Some(approval) = view.approval.as_ref() else {
+        return;
+    };
+    let mut answer = None;
+    let ((), closed) = widgets::dialog(ui, "Allow this?", |ui| {
+        ui.horizontal(|ui| {
+            ui.add_space(16.0);
+            ui.vertical(|ui| {
+                ui.set_max_width(372.0);
+                for action in &approval.actions {
+                    ui.label(action.prompt());
+                    ui.add_space(6.0);
+                }
+                ui.horizontal(|ui| {
+                    if ui.button("Allow").clicked() {
+                        answer = Some(true);
+                    }
+                    if ui.button("Don't allow").clicked() {
+                        answer = Some(false);
+                    }
+                });
+            });
+        });
+    });
+    let refused = closed || ui.input(|input| input.key_pressed(egui::Key::Escape));
+    match answer {
+        Some(true) => {
+            if let Some(approval) = view.approval.take() {
+                shell.update_settings(|current| *current = *approval.settings);
+            }
+        }
+        Some(false) => view.approval = None,
+        None if refused => view.approval = None,
+        None => {}
+    }
+}
+
+/// The assistant's model and sandbox switches, its step cap and memory, its
+/// MCP servers and its skill folders.
+fn assistant_settings(
+    ui: &mut Ui,
+    settings: &mut cutlass_settings::Settings,
+    server_args: &mut std::collections::HashMap<usize, String>,
+    add_folder: &mut bool,
+) {
+    use cutlass_settings::McpServer;
+    settings_heading(ui, "Model");
+    ui.checkbox(&mut settings.model.local, "Local model");
+    ui.checkbox(
+        &mut settings.model.cloud,
+        "Cloud model (sends messages off this computer)",
+    );
+    ui.checkbox(&mut settings.sandbox.local, "Run code on this computer");
+    ui.checkbox(&mut settings.sandbox.online, "Run code online");
+    ui.checkbox(&mut settings.memory, "Remember across conversations");
+    choice_row(ui, "Steps a turn", |ui| {
+        ui.add(egui::DragValue::new(&mut settings.step_cap).range(1..=1000));
+    });
+    settings_heading(ui, "MCP servers");
+    let mut remove = None;
+    for (index, server) in settings.mcp_servers.iter_mut().enumerate() {
+        ui.push_id(("server", index), |ui| {
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut server.enabled, "");
+                ui.add(
+                    egui::TextEdit::singleline(&mut server.name)
+                        .hint_text("Name")
+                        .desired_width(120.0),
+                );
+                for (kind, name) in [(McpServer::STDIO, "Program"), (McpServer::REMOTE, "URL")] {
+                    if ui.selectable_label(server.kind == kind, name).clicked() {
+                        kind.clone_into(&mut server.kind);
+                    }
+                }
+                if ui.small_button("Remove").clicked() {
+                    remove = Some(index);
+                }
+            });
+            if server.kind == McpServer::REMOTE {
+                ui.add(
+                    egui::TextEdit::singleline(&mut server.url)
+                        .hint_text("https://…")
+                        .desired_width(340.0),
+                );
+            } else {
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut server.command)
+                            .hint_text("Program")
+                            .desired_width(140.0),
+                    );
+                    let args = server_args
+                        .entry(index)
+                        .or_insert_with(|| server.args.join(" "));
+                    if ui
+                        .add(
+                            egui::TextEdit::singleline(args)
+                                .hint_text("Arguments")
+                                .desired_width(190.0),
+                        )
+                        .changed()
+                    {
+                        server.args = args.split_whitespace().map(str::to_owned).collect();
+                    }
+                });
+            }
+            ui.add_space(4.0);
+        });
+    }
+    if let Some(index) = remove {
+        settings.mcp_servers.remove(index);
+        server_args.clear();
+    }
+    if ui.button("Add server").clicked() {
+        settings.mcp_servers.push(McpServer::default());
+    }
+    settings_heading(ui, "Skill folders");
+    let mut remove = None;
+    for (index, folder) in settings.skill_folders.iter().enumerate() {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(&folder.path).color(tokens::MUTED));
+            if ui.small_button("Remove").clicked() {
+                remove = Some(index);
+            }
+        });
+    }
+    if let Some(index) = remove {
+        settings.skill_folders.remove(index);
+    }
+    *add_folder = ui.button("Add folder…").clicked();
 }
 
 fn settings_heading(ui: &mut Ui, text: &str) {
@@ -5711,6 +5926,22 @@ fn apply_dialog(shell: &mut Shell, view: &mut ViewState, finished: Finished) {
             write_export(shell, view)
         }
         Picker::SaveStill => shell.export_still(&path),
+        Picker::SkillFolder => {
+            let mut settings = shell.settings().clone();
+            let path = path.display().to_string();
+            if !settings
+                .skill_folders
+                .iter()
+                .any(|folder| folder.path == path)
+            {
+                settings.skill_folders.push(cutlass_settings::SkillFolder {
+                    path,
+                    ..Default::default()
+                });
+            }
+            propose_settings(shell, view, settings);
+            Ok(())
+        }
         Picker::SaveLog => Shell::export_log(&path).map(|()| {
             shell.set_notice(format!("Saved the log to {}", path.display()));
         }),
@@ -7043,11 +7274,15 @@ mod tests {
             "Settings",
             "Playback",
             "Panels",
+            "Hardware codecs",
             "Shortcuts",
-            "Play or pause",
         ] {
             assert!(painted.contains(text), "{text} in {painted}");
         }
+        view.settings_tab = SettingsTab::Shortcuts;
+        let painted = painted_text(&run(&mut shell, &mut view, Vec::new()));
+        assert!(painted.contains("Play or pause"), "{painted}");
+        assert!(painted.contains("Reset shortcuts"), "{painted}");
         view.recording = Some("split");
         run(
             &mut shell,
@@ -7077,6 +7312,77 @@ mod tests {
             vec![key(egui::Key::Escape, egui::Modifiers::NONE)],
         );
         assert!(!view.settings_open);
+    }
+
+    #[test]
+    fn turning_on_what_leaves_the_machine_waits_for_the_users_allow() {
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        let mut view = ViewState::new();
+        view.settings_open = true;
+        view.settings_tab = SettingsTab::Assistant;
+        let ctx = egui::Context::default();
+        let run = |shell: &mut Shell, view: &mut ViewState, events: Vec<egui::Event>| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0))),
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, view, None),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        let click = |pos: Pos2| {
+            let pos = pos + Vec2::new(4.0, 6.0);
+            let event = |pressed| egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::default(),
+            };
+            vec![egui::Event::PointerMoved(pos), event(true), event(false)]
+        };
+        let painted = painted_text(&run(&mut shell, &mut view, Vec::new()));
+        for text in ["Model", "Cloud model", "MCP servers", "Skill folders"] {
+            assert!(painted.contains(text), "{text} in {painted}");
+        }
+        view.dialogs.finish_for_test(
+            Picker::SkillFolder,
+            Some(std::path::PathBuf::from("/skills")),
+        );
+        let output = run(&mut shell, &mut view, Vec::new());
+        assert!(view.approval.is_some());
+        let output = if painted_text(&output).contains("Add the skills in /skills") {
+            output
+        } else {
+            run(&mut shell, &mut view, Vec::new())
+        };
+        assert!(painted_text(&output).contains("Add the skills in /skills"));
+        let refuse = text_pos(&output, "Don't allow").expect("the refuse button");
+        run(&mut shell, &mut view, click(refuse));
+        assert!(view.approval.is_none());
+        assert!(shell.settings().skill_folders.is_empty());
+
+        let mut cloud = shell.settings().clone();
+        cloud.model.cloud = true;
+        cloud.memory = false;
+        propose_settings(&mut shell, &mut view, cloud);
+        assert!(!shell.settings().model.cloud);
+        let output = run(&mut shell, &mut view, Vec::new());
+        assert!(painted_text(&output).contains("Turn on the cloud model"));
+        let allow = text_pos(&output, "Allow").expect("the allow button");
+        run(&mut shell, &mut view, click(allow));
+        assert!(view.approval.is_none());
+        assert!(shell.settings().model.cloud);
+        assert!(!shell.settings().memory);
+        // A change that sends nothing away is written at once.
+        let mut off = shell.settings().clone();
+        off.model.cloud = false;
+        propose_settings(&mut shell, &mut view, off);
+        assert!(view.approval.is_none());
+        assert!(!shell.settings().model.cloud);
     }
 
     #[test]

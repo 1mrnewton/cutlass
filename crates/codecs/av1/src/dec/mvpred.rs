@@ -358,11 +358,13 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
                 self.hdr.order_hints[rf.max(0) as usize],
             )
         });
+        // Neighbouring positions often hold the same field entry.
+        let mut memo = None;
         let mut dr = 0;
         while dr < h4.min(16) {
             let mut dc = 0;
             while dc < w4.min(16) {
-                self.add_tpl_ref_mv(dr as isize, dc as isize, is_compound, dist);
+                self.add_tpl_ref_mv(dr as isize, dc as isize, is_compound, dist, &mut memo);
                 dc += step_w;
             }
             dr += step_h;
@@ -378,14 +380,23 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
                 let row = (self.b.mi_row & 15) as isize + dr;
                 let col = (self.b.mi_col & 15) as isize + dc;
                 if (0..16).contains(&row) && (0..16).contains(&col) {
-                    self.add_tpl_ref_mv(dr, dc, is_compound, dist);
+                    self.add_tpl_ref_mv(dr, dc, is_compound, dist, &mut memo);
                 }
             }
         }
     }
 
     /// `dist`: the distances from this frame to the block's references.
-    fn add_tpl_ref_mv(&mut self, dr: isize, dc: isize, is_compound: bool, dist: [i32; 2]) {
+    /// `memo`: the last field entry seen and its candidates (projected,
+    /// precision lowered).
+    fn add_tpl_ref_mv(
+        &mut self,
+        dr: isize,
+        dc: isize,
+        is_compound: bool,
+        dist: [i32; 2],
+        memo: &mut Option<(MfEntry, [Mv; 2])>,
+    ) {
         let r = (self.b.mi_row as isize + dr) | 1;
         let c = (self.b.mi_col as isize + dc) | 1;
         if !self.inside(r, c) {
@@ -403,13 +414,25 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
             .get(y8 * w8 + x8)
             .copied()
             .unwrap_or_default();
-        let field = |l: usize| -> Mv { field_mv(entry, dist[l]) };
-        if !is_compound {
-            let mut cand = field(0);
-            if cand.row == i16::MIN {
-                return;
+        if entry.offset == 0 {
+            return;
+        }
+        let cands = match *memo {
+            Some((e, c)) if e == entry => c,
+            _ => {
+                let mut c = [field_mv(entry, dist[0]), Mv::ZERO];
+                if is_compound {
+                    c[1] = field_mv(entry, dist[1]);
+                }
+                for m in c.iter_mut() {
+                    self.lower_mv_precision(m);
+                }
+                *memo = Some((entry, c));
+                c
             }
-            self.lower_mv_precision(&mut cand);
+        };
+        if !is_compound {
+            let cand = cands[0];
             if dr == 0 && dc == 0 {
                 let g = self.b.global_mvs[0];
                 self.b.zero_mv_ctx = usize::from(
@@ -426,16 +449,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
                 self.b.num_mv_found += 1;
             }
         } else {
-            let mut c0 = field(0);
-            if c0.row == i16::MIN {
-                return;
-            }
-            let mut c1 = field(1);
-            if c1.row == i16::MIN {
-                return;
-            }
-            self.lower_mv_precision(&mut c0);
-            self.lower_mv_precision(&mut c1);
+            let [c0, c1] = cands;
             if dr == 0 && dc == 0 {
                 let g = self.b.global_mvs;
                 let far = |a: Mv, b: Mv| {
@@ -701,7 +715,7 @@ fn round2_signed(x: i32, n: u32) -> i32 {
 
 /// One projected motion field entry: the source motion vector and the
 /// distance it covers (`ref_offset`, 0 when no projection landed here).
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct MfEntry {
     pub mv: Mv,
     pub offset: i8,

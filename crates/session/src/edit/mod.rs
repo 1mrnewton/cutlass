@@ -26,6 +26,7 @@ mod own;
 mod place;
 mod placement;
 mod rate;
+mod replace;
 mod reverse;
 mod rotate;
 mod speed;
@@ -512,6 +513,10 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             },
         ),
         Request::Import { medium } => import::import(draft, medium.clone()),
+        Request::ReplaceMedia {
+            segment_id,
+            material_id,
+        } => replace::replace_media(draft, segment_id, material_id),
         Request::InsertTrack { track_id, kind } => track::insert_track(draft, track_id, kind),
         Request::RemoveTrack { track_id } => track::remove_track(draft, track_id),
         Request::RenameTrack { track_id, name } => track::rename_track(draft, track_id, name),

@@ -500,6 +500,7 @@ pub fn request_name(request: &Request) -> &'static str {
         Request::SetAnimation { .. } => "set_animation",
         Request::KeyPose { .. } => "key_pose",
         Request::Import { .. } => "import",
+        Request::ReplaceMedia { .. } => "replace_media",
         Request::InsertTrack { .. } => "insert_track",
         Request::RemoveTrack { .. } => "remove_track",
         Request::RenameTrack { .. } => "rename_track",

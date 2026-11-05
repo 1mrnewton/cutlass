@@ -419,6 +419,12 @@ pub enum Request {
     },
     /// Add a material to the library. This does not place a segment.
     Import { medium: ImportedMedium },
+    /// Play `material_id` in `segment_id` in place of its media, keeping
+    /// the clip's edits. A picture takes a picture, a sound a sound.
+    ReplaceMedia {
+        segment_id: SegmentId,
+        material_id: MaterialId,
+    },
     /// Add an empty lane. Video and mixed lanes are overlays above the main track.
     /// Audio is inserted under the main track. This does not place a segment.
     InsertTrack { track_id: TrackId, kind: TrackType },

@@ -13,7 +13,8 @@ Signing is ad hoc (`codesign -s -`) unless `CODESIGN_IDENTITY` names a
 Developer ID Application certificate in the keychain; then it signs with
 the hardened runtime and a timestamp. With `NOTARY_PROFILE` also set (a
 `xcrun notarytool store-credentials` profile), the DMG is notarized and
-stapled. `BUNDLE_ID` sets the bundle identifier.
+stapled. `BUNDLE_ID` sets the bundle identifier, and `BUNDLE_VERSION` the
+version in Info.plist (default: the workspace version).
 """
 
 import os
@@ -35,6 +36,8 @@ MEDIA = [
 
 
 def version() -> str:
+    if os.environ.get("BUNDLE_VERSION"):
+        return os.environ["BUNDLE_VERSION"]
     for line in (ROOT / "Cargo.toml").read_text().splitlines():
         if line.startswith("version = "):
             return line.split('"')[1]

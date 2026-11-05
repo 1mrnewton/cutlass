@@ -9,5 +9,6 @@
     clippy::unwrap_used
 )]
 
+mod mux_oracle;
 mod oracle;
 mod support;

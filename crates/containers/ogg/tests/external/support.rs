@@ -253,3 +253,90 @@ pub fn ffmpeg_payload(path: &Path) -> Vec<u8> {
     );
     out.stdout
 }
+
+fn gstreamer_on_path() -> bool {
+    Command::new("gst-launch-1.0")
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+/// Audio packets GStreamer's `oggdemux` returns: (size, granule end).
+///
+/// GStreamer's Ogg demuxer is a second implementation, independent of
+/// libavformat. `None` when `gst-launch-1.0` is not installed.
+pub fn gstreamer_packets(path: &Path) -> Option<Vec<(usize, i64)>> {
+    if !gstreamer_on_path() {
+        return None;
+    }
+    let location = format!("location={}", path.display());
+    let out = Command::new("gst-launch-1.0")
+        .args([
+            "-v",
+            "filesrc",
+            &location,
+            "!",
+            "oggdemux",
+            "!",
+            "fakesink",
+            "silent=false",
+        ])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut packets = Vec::new();
+    for line in text.lines() {
+        let Some(at) = line.find("chain   ******* (fakesink0:sink) (") else {
+            continue;
+        };
+        let rest = &line[at + "chain   ******* (fakesink0:sink) (".len()..];
+        if rest.contains(" header ") {
+            continue;
+        }
+        let size = rest.split(' ').next()?.parse().ok()?;
+        let end = rest
+            .split(", ")
+            .find_map(|part| part.strip_prefix("offset_end: "))?
+            .parse()
+            .ok()?;
+        packets.push((size, end));
+    }
+    Some(packets)
+}
+
+/// Samples per channel GStreamer's `oggdemux ! opusdec` decodes.
+pub fn gstreamer_decoded_samples(path: &Path, scratch: &Path) -> Option<u64> {
+    if !gstreamer_on_path() {
+        return None;
+    }
+    let raw = scratch.join("gst.raw");
+    let status = Command::new("gst-launch-1.0")
+        .args([
+            "-q",
+            "filesrc",
+            &format!("location={}", path.display()),
+            "!",
+            "oggdemux",
+            "!",
+            "opusdec",
+            "!",
+            "audioconvert",
+            "!",
+            "audio/x-raw,format=S16LE,channels=1,rate=48000",
+            "!",
+            "filesink",
+            &format!("location={}", raw.display()),
+        ])
+        .status()
+        .ok()?;
+    if !status.success() {
+        return None;
+    }
+    let len = std::fs::metadata(&raw).ok()?.len();
+    Some(len / 2)
+}

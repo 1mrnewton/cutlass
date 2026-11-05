@@ -16,16 +16,16 @@ use cutlass_ogg::{OggDemux, packet_samples};
 
 use crate::support::{
     environment, ffmpeg, ffmpeg_decoded_samples, ffmpeg_payload, ffprobe_packets, ffprobe_stream,
-    pick, scratch, sha256_hex,
+    gstreamer_decoded_samples, gstreamer_packets, pick, scratch, sha256_hex,
 };
 
-struct Variant {
-    name: &'static str,
+pub struct Variant {
+    pub name: &'static str,
     source: &'static [&'static str],
     args: &'static [&'static str],
 }
 
-const VARIANTS: &[Variant] = &[
+pub const VARIANTS: &[Variant] = &[
     Variant {
         name: "libopus-stereo-96k",
         source: &[".m4a"],
@@ -130,7 +130,7 @@ const VARIANTS: &[Variant] = &[
     },
 ];
 
-fn encode(root: &Path, dir: &Path, variant: &Variant) -> Option<PathBuf> {
+pub fn encode(root: &Path, dir: &Path, variant: &Variant) -> Option<PathBuf> {
     let source = variant
         .source
         .iter()
@@ -143,13 +143,13 @@ fn encode(root: &Path, dir: &Path, variant: &Variant) -> Option<PathBuf> {
     Some(out)
 }
 
-fn open(path: &Path) -> OggDemux<File> {
+pub fn open(path: &Path) -> OggDemux<File> {
     let file = File::open(path).expect("open");
     let len = file.metadata().expect("meta").len();
     OggDemux::open(file, len).expect("ogg open")
 }
 
-fn read_all(demux: &mut OggDemux<File>) -> Vec<Packet> {
+pub fn read_all(demux: &mut OggDemux<File>) -> Vec<Packet> {
     let mut packets = Vec::new();
     while let Some(packet) = demux.read_packet().expect("read") {
         packets.push(packet);
@@ -157,11 +157,11 @@ fn read_all(demux: &mut OggDemux<File>) -> Vec<Packet> {
     packets
 }
 
-fn pts(packet: &Packet) -> i64 {
+pub fn pts(packet: &Packet) -> i64 {
     packet.timestamp().presentation().expect("pts")
 }
 
-fn duration(packet: &Packet) -> i64 {
+pub fn duration(packet: &Packet) -> i64 {
     packet.timestamp().duration().expect("duration")
 }
 
@@ -291,11 +291,43 @@ fn check_against_ffmpeg(path: &Path, name: &str, dir: &Path) {
     assert!(demux.gaps().is_empty());
     assert_eq!(demux.crc_failures(), 0);
     assert_eq!(demux.lost_pages(), 0);
+    check_against_gstreamer(path, name, dir, &packets, decoded);
     eprintln!(
         "{name}: {} packets, pre-skip {pre_skip}, start {start}, end {end}, trailing {:?}, decoded {decoded}",
         packets.len(),
         info.trailing
     );
+}
+
+/// GStreamer's `oggdemux` is a second demuxer, independent of libavformat:
+/// same packet sizes, each packet ending at the same granule, and
+/// `opusdec` decoding the same number of samples.
+pub fn check_against_gstreamer(
+    path: &Path,
+    name: &str,
+    dir: &Path,
+    packets: &[Packet],
+    decoded: u64,
+) {
+    let Some(theirs) = gstreamer_packets(path) else {
+        eprintln!("{name}: GStreamer comparison skipped, gst-launch-1.0 is not on PATH");
+        return;
+    };
+    assert_eq!(packets.len(), theirs.len(), "{name} GStreamer packet count");
+    for (index, (mine, (size, end))) in packets.iter().zip(&theirs).enumerate() {
+        assert_eq!(
+            mine.bytes().len(),
+            *size,
+            "{name} GStreamer packet {index} size"
+        );
+        assert_eq!(
+            pts(mine) + duration(mine),
+            *end,
+            "{name} GStreamer packet {index} end"
+        );
+    }
+    let samples = gstreamer_decoded_samples(path, dir).expect("gst decode");
+    assert_eq!(samples, decoded, "{name} GStreamer decoded samples");
 }
 
 fn check_seeks(path: &Path, name: &str) {

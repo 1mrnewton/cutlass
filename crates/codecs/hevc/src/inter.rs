@@ -156,7 +156,7 @@ impl<'a> SliceDecoder<'a, '_> {
         let w4 = self.pic.w4;
         for row in (y >> 2)..((y + h) >> 2) {
             let start = row * w4 + (x >> 2);
-            self.pic.mvf[start..start + (w >> 2)].fill(field);
+            self.pic.mvf.fill(start, w >> 2, field);
         }
         self.motion_compensate(x, y, w, h, field)
     }
@@ -217,11 +217,11 @@ impl<'a> SliceDecoder<'a, '_> {
                 && pb.ycb + pb.h <= ny as usize
                 && pb.xcb + pb.w > nx as usize)
         };
-        available && self.pic.info[self.pic.at4(nx as usize, ny as usize)] & 3 == MODE_INTER
+        available && self.pic.info.get(self.pic.at4(nx as usize, ny as usize)) & 3 == MODE_INTER
     }
 
     fn neighbour(&self, nx: isize, ny: isize) -> MvField {
-        self.pic.mvf[self.pic.at4(nx as usize, ny as usize)]
+        self.pic.mv_at(nx as usize, ny as usize)
     }
 
     /// Merge motion (clauses 8.5.3.2.2 to 8.5.3.2.5).
@@ -579,12 +579,11 @@ impl<'a> SliceDecoder<'a, '_> {
         } else {
             None
         };
-        let width = self.pic.width;
         for c in 0..3 {
-            let (cx, cy, cw, ch, stride) = if c == 0 {
-                (x, y, w, h, width)
+            let (cx, cy, cw, ch) = if c == 0 {
+                (x, y, w, h)
             } else {
-                (x / 2, y / 2, w / 2, h / 2, width / 2)
+                (x / 2, y / 2, w / 2, h / 2)
             };
             let mut used = [false; 2];
             for list in 0..2 {
@@ -635,16 +634,8 @@ impl<'a> SliceDecoder<'a, '_> {
                 used[0].then(|| &p0[0][..cw * ch]),
                 used[1].then(|| &p1[0][..cw * ch]),
             ];
-            let start = cy * stride + cx;
-            mc::store(
-                &mut self.pic.planes[c][start..],
-                stride,
-                cw,
-                ch,
-                bit_depth,
-                pred,
-                weights.map(|w| w[c]),
-            );
+            let (dst, stride) = self.out.from(c, cx, cy);
+            mc::store(dst, stride, cw, ch, bit_depth, pred, weights.map(|w| w[c]));
         }
         Ok(())
     }

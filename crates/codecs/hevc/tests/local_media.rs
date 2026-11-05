@@ -147,6 +147,61 @@ mod local_media {
         );
     }
 
+    /// The first pictures of an iPhone 4K clip (wavefronts, 68 CTB rows)
+    /// with one worker and with eight: every sample the same.
+    #[test]
+    fn iphone_threads_match_one_thread() {
+        let Some(dir) = local_files() else {
+            eprintln!("skipped: no local-files folder");
+            return;
+        };
+        let path = dir.join("IMG_9197.mov");
+        if !path.is_file() {
+            eprintln!("skipped: IMG_9197.mov is not in local-files");
+            return;
+        }
+        let decode = |threads: usize| -> Vec<Vec<u16>> {
+            let file = std::fs::File::open(&path).expect("open");
+            let mut demux = IsoBmffFile::open(std::io::BufReader::new(file)).expect("demux");
+            let stream = demux
+                .streams()
+                .iter()
+                .find(|s| matches!(s.params().codec(), StreamCodec::Known(CodecId::Hevc)))
+                .cloned()
+                .expect("HEVC track");
+            let mut params = CodecParams::video(CodecId::Hevc, 0, 0);
+            params.extra = stream.params().extradata().to_vec();
+            let mut decoder = HevcDecoder::open_with_threads(&params, threads).expect("decoder");
+            let mut got = Vec::new();
+            let mut pushed = 0;
+            while pushed < 12 {
+                let Some(packet) = demux.read_packet().expect("packet") else {
+                    break;
+                };
+                if packet.stream() != stream.id().get() {
+                    continue;
+                }
+                let unit = Packet::video(packet.bytes().to_vec(), pushed, 1, 30, packet.keyframe());
+                got.extend(decoder.push(&unit).expect("push"));
+                pushed += 1;
+            }
+            got.extend(decoder.drain().expect("drain"));
+            got.iter()
+                .map(|f| {
+                    let p = f.yuv420p10.as_ref().expect("10-bit");
+                    [p.y(), p.u(), p.v()].concat()
+                })
+                .collect()
+        };
+        let one = decode(1);
+        let eight = decode(8);
+        assert!(!one.is_empty());
+        assert_eq!(one.len(), eight.len());
+        for (index, (a, b)) in one.iter().zip(&eight).enumerate() {
+            assert!(a == b, "picture {index} differs with eight workers");
+        }
+    }
+
     #[test]
     fn iphone_main10_uhd() {
         check("IMG_9197.mov");

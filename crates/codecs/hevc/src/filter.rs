@@ -1,8 +1,13 @@
 //! In-loop filters: the deblocking filter (clause 8.7.2) and sample
 //! adaptive offset (clause 8.7.3), run over a whole decoded picture.
 
+use std::sync::Mutex;
+use std::sync::atomic::Ordering::Relaxed;
+
+use cutlass_pool::Pool;
+
 use crate::ctu::chroma_qp;
-use crate::picture::{FLAG_KEEP, Picture};
+use crate::picture::{Band, FLAG_KEEP, Picture, lock, split_bands};
 
 /// `tC′` of table 8-12, indexed by `Q`.
 const TC: [i32; 54] = [
@@ -187,13 +192,14 @@ impl Picture {
         let header = &self.slice_of(query.q.0, query.q.1)?.header;
         let ip = self.at4(query.p.0, query.p.1);
         let iq = self.at4(query.q.0, query.q.1);
-        let qp = (i32::from(self.qp[ip]) + i32::from(self.qp[iq]) + 1) >> 1;
+        let qp_at = |at: usize| i32::from(self.qp.get(at) as i8);
+        let qp = (qp_at(ip) + qp_at(iq) + 1) >> 1;
         Some((
             qp,
             header.beta_offset,
             header.tc_offset,
-            self.info[ip] & FLAG_KEEP != 0,
-            self.info[iq] & FLAG_KEEP != 0,
+            self.info.get(ip) & FLAG_KEEP != 0,
+            self.info.get(iq) & FLAG_KEEP != 0,
         ))
     }
 
@@ -227,16 +233,39 @@ impl Picture {
     }
 
     /// The deblocking filter over the whole picture: every vertical edge,
-    /// then every horizontal edge (clause 8.7.2).
-    pub fn deblock(&mut self) {
+    /// then every horizontal edge (clause 8.7.2). Bands of rows run on the
+    /// pool's workers; no edge of one direction reaches another band.
+    pub fn deblock(&self, planes: &mut [Vec<u16>; 3], pool: &Pool) {
         let (width, height) = (self.width, self.height);
+        // Vertical edges change only their own rows: any 8-row bands do.
+        let step = band_rows(height, pool);
+        let mut tops: Vec<usize> = (0..height).step_by(step).collect();
+        let bands = split_bands(planes, width, &tops, height);
+        pool.slices(bands.len(), |i| {
+            let mut band = lock(&bands[i]);
+            self.deblock_vertical(&mut band, tops[i], tops.get(i + 1).map_or(height, |&t| t));
+        });
+        drop(bands);
+        // A horizontal edge on row y reads rows y - 4 to y + 3: bands start
+        // 4 rows past the 8 grid.
+        tops = std::iter::once(0)
+            .chain((step + 4..height).step_by(step))
+            .collect();
+        let bands = split_bands(planes, width, &tops, height);
+        pool.slices(bands.len(), |i| {
+            let mut band = lock(&bands[i]);
+            self.deblock_horizontal(&mut band, tops[i], tops.get(i + 1).map_or(height, |&t| t));
+        });
+    }
+
+    fn deblock_vertical(&self, band: &mut Band<'_>, top: usize, bottom: usize) {
+        let width = self.width;
         let ver_stride = width / 8 + 1;
         let cw = width / 2;
         let offsets = [self.pps.cb_qp_offset, self.pps.cr_qp_offset];
-        // Vertical edges.
-        for y in (0..height).step_by(4) {
+        for y in (top..bottom).step_by(4) {
             for x in (8..width).step_by(8) {
-                let bs = self.bs_ver[(y >> 2) * ver_stride + (x >> 3)];
+                let bs = self.bs_ver.get((y >> 2) * ver_stride + (x >> 3));
                 if bs == 0 {
                     continue;
                 }
@@ -247,30 +276,35 @@ impl Picture {
                 };
                 if let Some(st) = self.luma_strength(&query) {
                     let edge = Edge {
-                        pos: y * width + x,
+                        pos: (y - top) * width + x,
                         across: 1,
                         along: width,
                     };
-                    luma_edge(&mut self.planes[0], edge, st);
+                    luma_edge(band[0], edge, st);
                 }
                 if bs == 2 && x % 16 == 0 && y % 8 == 0 {
                     for (c, &offset) in offsets.iter().enumerate() {
                         if let Some(st) = self.chroma_strength(&query, offset) {
                             let edge = Edge {
-                                pos: (y / 2) * cw + x / 2,
+                                pos: (y / 2 - top / 2) * cw + x / 2,
                                 across: 1,
                                 along: cw,
                             };
-                            chroma_edge(&mut self.planes[c + 1], edge, st);
+                            chroma_edge(band[c + 1], edge, st);
                         }
                     }
                 }
             }
         }
-        // Horizontal edges.
-        for y in (8..height).step_by(8) {
+    }
+
+    fn deblock_horizontal(&self, band: &mut Band<'_>, top: usize, bottom: usize) {
+        let width = self.width;
+        let cw = width / 2;
+        let offsets = [self.pps.cb_qp_offset, self.pps.cr_qp_offset];
+        for y in (top.next_multiple_of(8).max(8)..bottom).step_by(8) {
             for x in (0..width).step_by(4) {
-                let bs = self.bs_hor[(y >> 3) * self.w4 + (x >> 2)];
+                let bs = self.bs_hor.get((y >> 3) * self.w4 + (x >> 2));
                 if bs == 0 {
                     continue;
                 }
@@ -281,21 +315,21 @@ impl Picture {
                 };
                 if let Some(st) = self.luma_strength(&query) {
                     let edge = Edge {
-                        pos: y * width + x,
+                        pos: (y - top) * width + x,
                         across: width,
                         along: 1,
                     };
-                    luma_edge(&mut self.planes[0], edge, st);
+                    luma_edge(band[0], edge, st);
                 }
                 if bs == 2 && y % 16 == 0 && x % 8 == 0 {
                     for (c, &offset) in offsets.iter().enumerate() {
                         if let Some(st) = self.chroma_strength(&query, offset) {
                             let edge = Edge {
-                                pos: (y / 2) * cw + x / 2,
+                                pos: (y / 2 - top / 2) * cw + x / 2,
                                 across: cw,
                                 along: 1,
                             };
-                            chroma_edge(&mut self.planes[c + 1], edge, st);
+                            chroma_edge(band[c + 1], edge, st);
                         }
                     }
                 }
@@ -313,13 +347,13 @@ impl Picture {
         if !self.pps.loop_filter_across_tiles && layout.tile_of[cur] != layout.tile_of[nb] {
             return false;
         }
-        if self.ctb_slice_addr[cur] == self.ctb_slice_addr[nb] {
+        if self.slice_addr(cur) == self.slice_addr(nb) {
             return true;
         }
         let slice = |rs: usize| {
             self.ctb_slice
                 .get(rs)
-                .and_then(|&i| self.slices.get(usize::from(i)))
+                .and_then(|i| self.slices.get(usize::from(i.load(Relaxed))))
         };
         let (Some(a), Some(b)) = (slice(cur), slice(nb)) else {
             return false;
@@ -331,8 +365,9 @@ impl Picture {
         }
     }
 
-    /// Sample adaptive offset over the whole picture (clause 8.7.3).
-    pub fn sao(&mut self) {
+    /// Sample adaptive offset over the whole picture (clause 8.7.3), one
+    /// CTB row on each pool job. Every CTB reads the deblocked samples.
+    pub fn sao(&self, planes: &mut [Vec<u16>; 3], pool: &Pool) {
         let any = self
             .slices
             .iter()
@@ -340,7 +375,22 @@ impl Picture {
         if !any || !self.sps.sao {
             return;
         }
-        let deblocked = self.planes.clone();
+        let deblocked = copy_planes(planes, pool);
+        let ctb_w = self.layout.ctb_width as usize;
+        let ctb_h = self.layout.ctb_height as usize;
+        let log2_ctb = u32::from(self.layout.log2_ctb);
+        let tops: Vec<usize> = (0..ctb_h).map(|ry| ry << log2_ctb).collect();
+        let bands = split_bands(planes, self.width, &tops, self.height);
+        pool.slices(ctb_h, |ry| {
+            let mut band = lock(&bands[ry]);
+            for rx in 0..ctb_w {
+                self.sao_ctb(ry * ctb_w + rx, &deblocked, &mut band);
+            }
+        });
+    }
+
+    /// SAO of CTB `rs` into `band`, the CTB row that holds it.
+    fn sao_ctb(&self, rs: usize, deblocked: &[Vec<u16>; 3], band: &mut Band<'_>) {
         let ctb_w = self.layout.ctb_width as usize;
         let ctb_h = self.layout.ctb_height as usize;
         let log2_ctb = u32::from(self.layout.log2_ctb);
@@ -348,149 +398,149 @@ impl Picture {
         let max = (1i32 << bit_depth) - 1;
         let keep_possible =
             self.pps.transquant_bypass || self.sps.pcm.is_some_and(|p| p.loop_filter_disabled);
-        for ry in 0..ctb_h {
-            for rx in 0..ctb_w {
-                let rs = ry * ctb_w + rx;
-                let params = self.sao[rs];
-                // May this CTB read each of its eight neighbours?
-                let mut cross = [[false; 3]; 3];
-                for (dy, row) in cross.iter_mut().enumerate() {
-                    for (dx, cell) in row.iter_mut().enumerate() {
-                        let nx = rx as isize + dx as isize - 1;
-                        let ny = ry as isize + dy as isize - 1;
-                        if nx < 0 || ny < 0 || nx as usize >= ctb_w || ny as usize >= ctb_h {
-                            continue;
-                        }
-                        *cell = self.sao_may_cross(rs, ny as usize * ctb_w + nx as usize);
-                    }
+        let (rx, ry) = (rs % ctb_w, rs / ctb_w);
+        let params = self.sao.get(rs);
+        // May this CTB read each of its eight neighbours?
+        let mut cross = [[false; 3]; 3];
+        for (dy, row) in cross.iter_mut().enumerate() {
+            for (dx, cell) in row.iter_mut().enumerate() {
+                let nx = rx as isize + dx as isize - 1;
+                let ny = ry as isize + dy as isize - 1;
+                if nx < 0 || ny < 0 || nx as usize >= ctb_w || ny as usize >= ctb_h {
+                    continue;
                 }
-                for (c, p) in params.iter().enumerate() {
-                    if p.kind == 0 {
-                        continue;
-                    }
-                    let sub = u32::from(c > 0);
-                    let pw = self.width >> sub;
-                    let ph = self.height >> sub;
-                    let size = 1usize << (log2_ctb - sub);
-                    let x0 = rx * size;
-                    let y0 = ry * size;
-                    let x1 = (x0 + size).min(pw);
-                    let y1 = (y0 + size).min(ph);
-                    let region = Region {
-                        x0,
-                        y0,
-                        x1,
-                        y1,
-                        pw,
-                        sub,
-                        keep_possible,
-                    };
-                    let src = &deblocked[c];
-                    if p.kind == 1 {
-                        let mut table = [0i32; 32];
-                        for k in 0..4 {
-                            table[(k + usize::from(p.class)) & 31] = i32::from(p.offsets[k]);
+                *cell = self.sao_may_cross(rs, ny as usize * ctb_w + nx as usize);
+            }
+        }
+        for (c, p) in params.iter().enumerate() {
+            if p.kind == 0 {
+                continue;
+            }
+            let sub = u32::from(c > 0);
+            let pw = self.width >> sub;
+            let ph = self.height >> sub;
+            let size = 1usize << (log2_ctb - sub);
+            let x0 = rx * size;
+            let y0 = ry * size;
+            let x1 = (x0 + size).min(pw);
+            let y1 = (y0 + size).min(ph);
+            let region = Region {
+                x0,
+                y0,
+                x1,
+                y1,
+                pw,
+                sub,
+                keep_possible,
+                top: y0,
+            };
+            let src = &deblocked[c];
+            if p.kind == 1 {
+                let mut table = [0i32; 32];
+                for k in 0..4 {
+                    table[(k + usize::from(p.class)) & 31] = i32::from(p.offsets[k]);
+                }
+                let shift = bit_depth - 5;
+                self.sao_apply(band[c], &region, |x, y| {
+                    let v = i32::from(src[y * pw + x]);
+                    Some((v + table[(v >> shift) as usize]).clamp(0, max))
+                });
+            } else {
+                let (ax, ay, bx, by): (isize, isize, isize, isize) = match p.class {
+                    0 => (-1, 0, 1, 0),
+                    1 => (0, -1, 0, 1),
+                    2 => (-1, -1, 1, 1),
+                    _ => (1, -1, -1, 1),
+                };
+                let offsets = p.offsets;
+                if !keep_possible && cross.iter().flatten().all(|&ok| ok) {
+                    // Every neighbour may be read: only the picture
+                    // edges limit the samples that change.
+                    let left = usize::from(x0 == 0 && (ax < 0 || bx < 0));
+                    let right = usize::from(x1 == pw && (ax > 0 || bx > 0));
+                    let top = usize::from(y0 == 0 && (ay < 0 || by < 0));
+                    let bottom = usize::from(y1 == ph && (ay > 0 || by > 0));
+                    let add = [
+                        i32::from(offsets[0]),
+                        i32::from(offsets[1]),
+                        0,
+                        i32::from(offsets[2]),
+                        i32::from(offsets[3]),
+                    ];
+                    let da = ay * pw as isize + ax;
+                    let db = by * pw as isize + bx;
+                    let dst = &mut *band[c];
+                    for y in y0 + top..y1 - bottom {
+                        for x in x0 + left..x1 - right {
+                            let at = y * pw + x;
+                            let out = (y - y0) * pw + x;
+                            let v = i32::from(src[at]);
+                            let a = i32::from(src[(at as isize + da) as usize]);
+                            let b = i32::from(src[(at as isize + db) as usize]);
+                            let edge = (2 + (v - a).signum() + (v - b).signum()) as usize;
+                            let delta = add[edge];
+                            if delta != 0 {
+                                dst[out] = (v + delta).clamp(0, max) as u16;
+                            }
                         }
-                        let shift = bit_depth - 5;
-                        self.sao_apply(c, &region, |x, y| {
-                            let v = i32::from(src[y * pw + x]);
-                            Some((v + table[(v >> shift) as usize]).clamp(0, max))
-                        });
+                    }
+                    continue;
+                }
+                let cell = |v: isize, lo: usize, hi: usize| -> usize {
+                    if v < lo as isize {
+                        0
+                    } else if v >= hi as isize {
+                        2
                     } else {
-                        let (ax, ay, bx, by): (isize, isize, isize, isize) = match p.class {
-                            0 => (-1, 0, 1, 0),
-                            1 => (0, -1, 0, 1),
-                            2 => (-1, -1, 1, 1),
-                            _ => (1, -1, -1, 1),
-                        };
-                        let offsets = p.offsets;
-                        if !keep_possible && cross.iter().flatten().all(|&ok| ok) {
-                            // Every neighbour may be read: only the picture
-                            // edges limit the samples that change.
-                            let left = usize::from(x0 == 0 && (ax < 0 || bx < 0));
-                            let right = usize::from(x1 == pw && (ax > 0 || bx > 0));
-                            let top = usize::from(y0 == 0 && (ay < 0 || by < 0));
-                            let bottom = usize::from(y1 == ph && (ay > 0 || by > 0));
-                            let add = [
-                                i32::from(offsets[0]),
-                                i32::from(offsets[1]),
-                                0,
-                                i32::from(offsets[2]),
-                                i32::from(offsets[3]),
-                            ];
-                            let da = ay * pw as isize + ax;
-                            let db = by * pw as isize + bx;
-                            let dst = &mut self.planes[c];
-                            for y in y0 + top..y1 - bottom {
-                                for x in x0 + left..x1 - right {
-                                    let at = y * pw + x;
-                                    let v = i32::from(src[at]);
-                                    let a = i32::from(src[(at as isize + da) as usize]);
-                                    let b = i32::from(src[(at as isize + db) as usize]);
-                                    let edge = (2 + (v - a).signum() + (v - b).signum()) as usize;
-                                    let delta = add[edge];
-                                    if delta != 0 {
-                                        dst[at] = (v + delta).clamp(0, max) as u16;
-                                    }
-                                }
-                            }
-                            continue;
-                        }
-                        let cell = |v: isize, lo: usize, hi: usize| -> usize {
-                            if v < lo as isize {
-                                0
-                            } else if v >= hi as isize {
-                                2
-                            } else {
-                                1
-                            }
-                        };
-                        self.sao_apply(c, &region, |x, y| {
-                            let (xa, ya) = (x as isize + ax, y as isize + ay);
-                            let (xb, yb) = (x as isize + bx, y as isize + by);
-                            if xa < 0
-                                || ya < 0
-                                || xb < 0
-                                || yb < 0
-                                || xa as usize >= pw
-                                || xb as usize >= pw
-                                || ya as usize >= ph
-                                || yb as usize >= ph
-                            {
-                                return None;
-                            }
-                            if !cross[cell(ya, y0, y1)][cell(xa, x0, x1)]
-                                || !cross[cell(yb, y0, y1)][cell(xb, x0, x1)]
-                            {
-                                return None;
-                            }
-                            let v = i32::from(src[y * pw + x]);
-                            let a = i32::from(src[ya as usize * pw + xa as usize]);
-                            let b = i32::from(src[yb as usize * pw + xb as usize]);
-                            let edge = 2 + (v - a).signum() + (v - b).signum();
-                            let k = match edge {
-                                0 => 0,
-                                1 => 1,
-                                3 => 2,
-                                4 => 3,
-                                _ => return None,
-                            };
-                            Some((v + i32::from(offsets[k])).clamp(0, max))
-                        });
+                        1
                     }
-                }
+                };
+                self.sao_apply(band[c], &region, |x, y| {
+                    let (xa, ya) = (x as isize + ax, y as isize + ay);
+                    let (xb, yb) = (x as isize + bx, y as isize + by);
+                    if xa < 0
+                        || ya < 0
+                        || xb < 0
+                        || yb < 0
+                        || xa as usize >= pw
+                        || xb as usize >= pw
+                        || ya as usize >= ph
+                        || yb as usize >= ph
+                    {
+                        return None;
+                    }
+                    if !cross[cell(ya, y0, y1)][cell(xa, x0, x1)]
+                        || !cross[cell(yb, y0, y1)][cell(xb, x0, x1)]
+                    {
+                        return None;
+                    }
+                    let v = i32::from(src[y * pw + x]);
+                    let a = i32::from(src[ya as usize * pw + xa as usize]);
+                    let b = i32::from(src[yb as usize * pw + xb as usize]);
+                    let edge = 2 + (v - a).signum() + (v - b).signum();
+                    let k = match edge {
+                        0 => 0,
+                        1 => 1,
+                        3 => 2,
+                        4 => 3,
+                        _ => return None,
+                    };
+                    Some((v + i32::from(offsets[k])).clamp(0, max))
+                });
             }
         }
     }
 
-    fn sao_apply(&mut self, c: usize, r: &Region, f: impl Fn(usize, usize) -> Option<i32>) {
+    fn sao_apply(&self, dst: &mut [u16], r: &Region, f: impl Fn(usize, usize) -> Option<i32>) {
         for y in r.y0..r.y1 {
             for x in r.x0..r.x1 {
-                if r.keep_possible && self.info[self.at4(x << r.sub, y << r.sub)] & FLAG_KEEP != 0 {
+                if r.keep_possible
+                    && self.info.get(self.at4(x << r.sub, y << r.sub)) & FLAG_KEEP != 0
+                {
                     continue;
                 }
                 if let Some(v) = f(x, y) {
-                    self.planes[c][y * r.pw + x] = v as u16;
+                    dst[(y - r.top) * r.pw + x] = v as u16;
                 }
             }
         }
@@ -506,4 +556,35 @@ struct Region {
     pw: usize,
     sub: u32,
     keep_possible: bool,
+    /// First component row of the band written.
+    top: usize,
+}
+
+/// Rows per band: the picture split about four times per worker, on the 8 grid.
+fn band_rows(height: usize, pool: &Pool) -> usize {
+    let bands = pool.workers() * 4;
+    height.div_ceil(bands).next_multiple_of(8).max(8)
+}
+
+/// A copy of the planes, made by the pool's workers.
+fn copy_planes(planes: &[Vec<u16>; 3], pool: &Pool) -> [Vec<u16>; 3] {
+    const CHUNK: usize = 1 << 16;
+    let mut out = [
+        vec![0; planes[0].len()],
+        vec![0; planes[1].len()],
+        vec![0; planes[2].len()],
+    ];
+    let mut jobs = Vec::new();
+    for (dst, src) in out.iter_mut().zip(planes) {
+        for (d, s) in dst.chunks_mut(CHUNK).zip(src.chunks(CHUNK)) {
+            jobs.push(Mutex::new((d, s)));
+        }
+    }
+    pool.slices(jobs.len(), |i| {
+        let mut job = lock(&jobs[i]);
+        let (d, s) = &mut *job;
+        d.copy_from_slice(s);
+    });
+    drop(jobs);
+    out
 }

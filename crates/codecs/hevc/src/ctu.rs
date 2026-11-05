@@ -2,12 +2,17 @@
 //! prediction and transform units, residual coding, SAO syntax, and the
 //! reconstruction each of them drives.
 
+use std::sync::atomic::Ordering::Relaxed;
+
 use cutlass_decode::CodecError;
 
 use crate::cabac::{self, Cabac};
 use crate::intra::{self, Refs};
+use cutlass_pool::Rows;
+
 use crate::picture::{
-    FLAG_CBF, FLAG_KEEP, FLAG_PCM, FLAG_SKIP, MODE_INTER, MODE_INTRA, MvField, Picture, SaoParams,
+    FLAG_CBF, FLAG_KEEP, FLAG_PCM, FLAG_SKIP, MODE_INTER, MODE_INTRA, MvField, Picture, Samples,
+    SaoParams, lock,
 };
 use crate::ps::{Pps, Sps};
 use crate::slice::SliceType;
@@ -60,8 +65,26 @@ pub struct Cu {
     pub intra_split: bool,
 }
 
+/// One CTB row of a wavefront slice segment, decoded beside the rows above
+/// and below it.
+#[derive(Clone, Copy)]
+pub struct Wave<'p> {
+    /// The CTB row this worker starts at.
+    pub row: usize,
+    /// Progress of the row above, by CTB column. `None` when that row is done.
+    pub above: Option<&'p Rows>,
+    /// Progress of this row.
+    pub mine: &'p Rows,
+    /// Stop at the end of the row: a later worker decodes the next one.
+    pub row_only: bool,
+}
+
 pub struct SliceDecoder<'a, 'p> {
-    pub pic: &'p mut Picture,
+    pub pic: &'p Picture,
+    pub out: Samples<'p>,
+    /// The first CTB, raster order, when it is not the segment's first.
+    pub start_rs: Option<usize>,
+    pub wave: Option<Wave<'p>>,
     pub slice: usize,
     pub sps: &'a Sps,
     pub pps: &'a Pps,
@@ -227,23 +250,32 @@ impl<'a, 'p> SliceDecoder<'a, 'p> {
         let ctb_size = 1usize << self.sps.log2_ctb;
         let ctb_w = layout.ctb_width as usize;
         let total = layout.ctb_count() as usize;
-        let mut ts = layout.rs_to_ts[header.segment_address as usize] as usize;
+        let start_rs = self.start_rs.unwrap_or(header.segment_address as usize);
+        let Some(&start_ts) = layout.rs_to_ts.get(start_rs) else {
+            return Err(malformed("slice runs past the picture"));
+        };
+        let mut ts = start_ts as usize;
         let slice_addr = self.pic.slices[self.slice].slice_addr;
-        let mut first = true;
+        let mut first = self.start_rs.is_none();
+        let height = self.pic.height;
         loop {
             let Some(&rs) = layout.ts_to_rs.get(ts) else {
                 return Err(malformed("slice runs past the picture"));
             };
             let rs = rs as usize;
-            if self.pic.ctb_slice[rs] != u16::MAX {
+            let col = rs % ctb_w;
+            let in_wave = self.wave.filter(|w| w.row == rs / ctb_w);
+            if let Some(above) = in_wave.and_then(|w| w.above) {
+                above.wait(col as u32 + 1);
+            }
+            if self.pic.ctb_slice[rs].load(Relaxed) != u16::MAX {
                 return Err(malformed("a CTB decoded twice"));
             }
             self.ctb_rs = rs;
-            self.ctb_x = (rs % ctb_w) * ctb_size;
+            self.ctb_x = col * ctb_size;
             self.ctb_y = (rs / ctb_w) * ctb_size;
-            self.pic.ctb_slice[rs] = self.slice as u16;
-            self.pic.ctb_slice_addr[rs] = slice_addr;
-            let col = rs % ctb_w;
+            self.pic.ctb_slice[rs].store(self.slice as u16, Relaxed);
+            self.pic.ctb_slice_addr[rs].store(slice_addr, Relaxed);
             let tile_start =
                 ts == 0 || layout.tile_of[rs] != layout.tile_of[layout.ts_to_rs[ts - 1] as usize];
             let row_start =
@@ -256,8 +288,7 @@ impl<'a, 'p> SliceDecoder<'a, 'p> {
                     self.sync_wpp();
                     self.first_qg = true;
                 } else {
-                    self.cabac.ctx = self.pic.dependent_ctx;
-                    self.last_qp = self.pic.dependent_qp;
+                    (self.cabac.ctx, self.last_qp) = *lock(&self.pic.dependent);
                     self.first_qg = false;
                 }
             } else if tile_start || row_start {
@@ -271,12 +302,15 @@ impl<'a, 'p> SliceDecoder<'a, 'p> {
             }
             first = false;
             self.coding_tree_unit()?;
-            self.pic.ctbs_done += 1;
             if self.pps.entropy_sync
                 && col as u32 == layout.tile_col_start(col as u32) + 1
-                && let Some(slot) = self.pic.wpp_ctx.get_mut(rs)
+                && let Some(slot) = lock(&self.pic.wpp_ctx).get_mut(rs)
             {
                 *slot = Some(Box::new(self.cabac.ctx));
+            }
+            if let Some(wave) = in_wave {
+                self.out.publish(self.ctb_x, self.ctb_y, ctb_size, height);
+                wave.mine.report_through(col as u32);
             }
             let end = self.cabac.terminate();
             if self.cabac.overrun() {
@@ -284,9 +318,11 @@ impl<'a, 'p> SliceDecoder<'a, 'p> {
             }
             ts += 1;
             if end {
+                if self.next_entry < self.entries.len() {
+                    return Err(malformed("slice ends before its last entry point"));
+                }
                 if self.pps.dependent_slices {
-                    self.pic.dependent_ctx = self.cabac.ctx;
-                    self.pic.dependent_qp = self.last_qp;
+                    *lock(&self.pic.dependent) = (self.cabac.ctx, self.last_qp);
                 }
                 return Ok(());
             }
@@ -300,6 +336,9 @@ impl<'a, 'p> SliceDecoder<'a, 'p> {
                 self.pps.entropy_sync && next_col as u32 == layout.tile_col_start(next_col as u32);
             if (next_tile || next_row) && !self.cabac.terminate() {
                 return Err(malformed("end_of_subset_one_bit"));
+            }
+            if next_row && in_wave.is_some_and(|w| w.row_only) {
+                return Ok(());
             }
         }
     }
@@ -356,7 +395,7 @@ impl<'a, 'p> SliceDecoder<'a, 'p> {
         {
             let ctb_w = self.pic.layout.ctb_width as usize;
             let above_right = self.ctb_rs - ctb_w + 1;
-            if let Some(Some(ctx)) = self.pic.wpp_ctx.get(above_right) {
+            if let Some(Some(ctx)) = lock(&self.pic.wpp_ctx).get(above_right) {
                 self.cabac.ctx = **ctx;
                 return;
             }
@@ -389,7 +428,7 @@ impl<'a, 'p> SliceDecoder<'a, 'p> {
             merge_left = self.cabac.decide(cabac::SAO_MERGE);
         }
         if merge_left {
-            self.pic.sao[rs] = self.pic.sao[rs - 1];
+            self.pic.sao.set(rs, self.pic.sao.get(rs - 1));
             return Ok(());
         }
         if rs >= ctb_w
@@ -397,7 +436,7 @@ impl<'a, 'p> SliceDecoder<'a, 'p> {
             && layout.tile_of[rs] == layout.tile_of[rs - ctb_w]
             && self.cabac.decide(cabac::SAO_MERGE)
         {
-            self.pic.sao[rs] = self.pic.sao[rs - ctb_w];
+            self.pic.sao.set(rs, self.pic.sao.get(rs - ctb_w));
             return Ok(());
         }
         let bit_depth = u32::from(self.sps.bit_depth);
@@ -452,7 +491,7 @@ impl<'a, 'p> SliceDecoder<'a, 'p> {
                 *out = value;
             }
         }
-        self.pic.sao[rs] = params;
+        self.pic.sao.set(rs, params);
         Ok(())
     }
 
@@ -469,12 +508,12 @@ impl<'a, 'p> SliceDecoder<'a, 'p> {
         {
             let mut inc = 0;
             if self.pic.available(x0, y0, x0 as isize - 1, y0 as isize)
-                && u32::from(self.pic.depth[self.pic.at4(x0 - 1, y0)]) > depth
+                && u32::from(self.pic.depth.get(self.pic.at4(x0 - 1, y0))) > depth
             {
                 inc += 1;
             }
             if self.pic.available(x0, y0, x0 as isize, y0 as isize - 1)
-                && u32::from(self.pic.depth[self.pic.at4(x0, y0 - 1)]) > depth
+                && u32::from(self.pic.depth.get(self.pic.at4(x0, y0 - 1))) > depth
             {
                 inc += 1;
             }
@@ -514,7 +553,7 @@ impl<'a, 'p> SliceDecoder<'a, 'p> {
         let ctb = self.ctb_rs;
         let neighbour = |pic: &Picture, nx: isize, ny: isize| -> i32 {
             if pic.available(x, y, nx, ny) && pic.ctb_rs(nx as usize, ny as usize) == ctb {
-                i32::from(pic.qp[pic.at4(nx as usize, ny as usize)])
+                i32::from(pic.qp.get(pic.at4(nx as usize, ny as usize)) as i8)
             } else {
                 prev
             }
@@ -529,13 +568,6 @@ impl<'a, 'p> SliceDecoder<'a, 'p> {
         let offset = self.sps.qp_bd_offset();
         self.qp_y =
             (self.qp_pred + self.qp_delta + 52 + 2 * offset).rem_euclid(52 + offset) - offset;
-    }
-
-    fn fill4<T: Copy>(map: &mut [T], w4: usize, x: usize, y: usize, w: usize, h: usize, value: T) {
-        for row in (y >> 2)..((y + h) >> 2) {
-            let start = row * w4 + (x >> 2);
-            map[start..start + (w >> 2)].fill(value);
-        }
     }
 
     fn coding_unit(
@@ -556,17 +588,19 @@ impl<'a, 'p> SliceDecoder<'a, 'p> {
         if self.pps.transquant_bypass {
             self.cu.bypass = self.cabac.decide(cabac::TRANSQUANT_BYPASS);
         }
-        Self::fill4(&mut self.pic.depth, w4, x0, y0, size, size, depth as u8);
+        self.pic
+            .depth
+            .fill4(w4, (x0, y0), (size, size), depth as u8);
         let mut skip = false;
         if self.slice_type != SliceType::I {
             let mut inc = 0;
             if self.pic.available(x0, y0, x0 as isize - 1, y0 as isize)
-                && self.pic.info[self.pic.at4(x0 - 1, y0)] & FLAG_SKIP != 0
+                && self.pic.info.get(self.pic.at4(x0 - 1, y0)) & FLAG_SKIP != 0
             {
                 inc += 1;
             }
             if self.pic.available(x0, y0, x0 as isize, y0 as isize - 1)
-                && self.pic.info[self.pic.at4(x0, y0 - 1)] & FLAG_SKIP != 0
+                && self.pic.info.get(self.pic.at4(x0, y0 - 1)) & FLAG_SKIP != 0
             {
                 inc += 1;
             }
@@ -574,15 +608,9 @@ impl<'a, 'p> SliceDecoder<'a, 'p> {
         }
         let keep = if self.cu.bypass { FLAG_KEEP } else { 0 };
         if skip {
-            Self::fill4(
-                &mut self.pic.info,
-                w4,
-                x0,
-                y0,
-                size,
-                size,
-                MODE_INTER | FLAG_SKIP | keep,
-            );
+            self.pic
+                .info
+                .fill4(w4, (x0, y0), (size, size), MODE_INTER | FLAG_SKIP | keep);
             self.cu.part = PART_2NX2N;
             self.prediction_unit(x0, y0, (size, size), depth, 0, true)?;
             self.merge_2nx2n = true;
@@ -604,7 +632,7 @@ impl<'a, 'p> SliceDecoder<'a, 'p> {
         };
         self.cu.part = part;
         let mode = if intra { MODE_INTRA } else { MODE_INTER };
-        Self::fill4(&mut self.pic.info, w4, x0, y0, size, size, mode | keep);
+        self.pic.info.fill4(w4, (x0, y0), (size, size), mode | keep);
         let mut pcm = false;
         if intra {
             self.cu.intra_split = part == PART_NXN;
@@ -624,8 +652,8 @@ impl<'a, 'p> SliceDecoder<'a, 'p> {
                     } else {
                         0
                     };
-                Self::fill4(&mut self.pic.info, w4, x0, y0, size, size, flags);
-                Self::fill4(&mut self.pic.intra_mode, w4, x0, y0, size, size, 1);
+                self.pic.info.fill4(w4, (x0, y0), (size, size), flags);
+                self.pic.intra_mode.fill4(w4, (x0, y0), (size, size), 1);
             } else {
                 self.intra_modes(x0, y0, log2)?;
             }
@@ -688,8 +716,10 @@ impl<'a, 'p> SliceDecoder<'a, 'p> {
     fn finish_cu(&mut self) {
         let size = 1usize << self.cu.log2;
         let w4 = self.pic.w4;
-        let qp = self.qp_y as i8;
-        Self::fill4(&mut self.pic.qp, w4, self.cu.x, self.cu.y, size, size, qp);
+        let qp = self.qp_y as i8 as u8;
+        self.pic
+            .qp
+            .fill4(w4, (self.cu.x, self.cu.y), (size, size), qp);
         self.last_qp = self.qp_y;
         self.first_qg = false;
     }
@@ -754,21 +784,19 @@ impl<'a, 'p> SliceDecoder<'a, 'p> {
         }
         let mut reader = crate::bits::Bits::new(&rest[..bytes]);
         let bit_depth = u32::from(self.sps.bit_depth);
-        let width = self.pic.width;
+        let (plane, stride) = self.out.from(0, x0, y0);
         for y in 0..size {
             for x in 0..size {
                 let v = reader.u(luma_bits)?;
-                self.pic.planes[0][(y0 + y) * width + x0 + x] =
-                    (v << (bit_depth - luma_bits)) as u16;
+                plane[y * stride + x] = (v << (bit_depth - luma_bits)) as u16;
             }
         }
-        let cw = width / 2;
         for c in 1..3 {
+            let (plane, stride) = self.out.from(c, x0 / 2, y0 / 2);
             for y in 0..size / 2 {
                 for x in 0..size / 2 {
                     let v = reader.u(chroma_bits)?;
-                    self.pic.planes[c][(y0 / 2 + y) * cw + x0 / 2 + x] =
-                        (v << (bit_depth - chroma_bits)) as u16;
+                    plane[y * stride + x] = (v << (bit_depth - chroma_bits)) as u16;
                 }
             }
         }
@@ -828,15 +856,9 @@ impl<'a, 'p> SliceDecoder<'a, 'p> {
                     mode
                 };
                 self.cu.luma_modes[idx] = mode;
-                Self::fill4(
-                    &mut self.pic.intra_mode,
-                    w4,
-                    x,
-                    y,
-                    pb.max(4),
-                    pb.max(4),
-                    mode,
-                );
+                self.pic
+                    .intra_mode
+                    .fill4(w4, (x, y), (pb.max(4), pb.max(4)), mode);
             }
         }
         // intra_chroma_pred_mode
@@ -866,11 +888,11 @@ impl<'a, 'p> SliceDecoder<'a, 'p> {
             }
         }
         let at = self.pic.at4(nx as usize, ny as usize);
-        let info = self.pic.info[at];
+        let info = self.pic.info.get(at);
         if info & 3 != MODE_INTRA || info & FLAG_PCM != 0 {
             return 1;
         }
-        self.pic.intra_mode[at]
+        self.pic.intra_mode.get(at)
     }
 
     fn transform_tree(
@@ -987,7 +1009,9 @@ impl<'a, 'p> SliceDecoder<'a, 'p> {
         for row in (y0 >> 2)..((y0 + size) >> 2) {
             for col in (x0 >> 2)..((x0 + size) >> 2) {
                 let at = row * w4 + col;
-                self.pic.info[at] = (self.pic.info[at] & !FLAG_CBF) | flag_cbf;
+                self.pic
+                    .info
+                    .set(at, (self.pic.info.get(at) & !FLAG_CBF) | flag_cbf);
             }
         }
         self.deblock_tu(x0, y0, size);
@@ -1033,10 +1057,26 @@ impl<'a, 'p> SliceDecoder<'a, 'p> {
         let (px, py) = (x / scale, y / scale);
         let mut refs = Refs::new(n);
         let constrained = self.pps.constrained_intra_pred;
-        let pic: &Picture = &*self.pic;
+        let pic: &Picture = self.pic;
         // Availability is checked per 4 luma samples (2 chroma samples).
         let unit = 4 / scale;
-        let plane = &pic.planes[c];
+        // The row above a band belongs to another worker: copy what this
+        // block may read of it once.
+        let mut line = [0u16; 129];
+        let line_x = px.saturating_sub(1);
+        let from_line = py > 0 && !self.out.holds(c, py - 1);
+        if from_line {
+            let end = (px + 2 * n).min(plane_w);
+            self.out.above(c, line_x, &mut line[..end - line_x]);
+        }
+        let out = &self.out;
+        let above = |sx: usize| -> i32 {
+            if from_line {
+                i32::from(line[sx - line_x])
+            } else {
+                i32::from(out.get(c, sx, py - 1))
+            }
+        };
         let check = |pic: &Picture, sx: isize, sy: isize| -> bool {
             // sx, sy in component samples.
             let lx = sx * scale as isize;
@@ -1044,7 +1084,7 @@ impl<'a, 'p> SliceDecoder<'a, 'p> {
             if !pic.available(x, y, lx, ly) {
                 return false;
             }
-            !constrained || pic.info[pic.at4(lx as usize, ly as usize)] & 3 == MODE_INTRA
+            !constrained || pic.info.get(pic.at4(lx as usize, ly as usize)) & 3 == MODE_INTRA
         };
         // Left column, bottom to top, and the corner.
         let ni = n as isize;
@@ -1056,7 +1096,7 @@ impl<'a, 'p> SliceDecoder<'a, 'p> {
                 let sy = base + k;
                 let idx = refs.left(sy as i32);
                 if ok {
-                    refs.samples[idx] = i32::from(plane[(py + sy as usize) * plane_w + px - 1]);
+                    refs.samples[idx] = i32::from(out.get(c, px - 1, py + sy as usize));
                     refs.available[idx] = true;
                 }
             }
@@ -1064,7 +1104,7 @@ impl<'a, 'p> SliceDecoder<'a, 'p> {
         }
         if check(pic, px as isize - 1, py as isize - 1) {
             let idx = refs.left(-1);
-            refs.samples[idx] = i32::from(plane[(py - 1) * plane_w + px - 1]);
+            refs.samples[idx] = above(px - 1);
             refs.available[idx] = true;
         }
         let mut xx = 0isize;
@@ -1074,7 +1114,7 @@ impl<'a, 'p> SliceDecoder<'a, 'p> {
                 let sx = xx + k;
                 let idx = refs.top(sx as i32);
                 if ok {
-                    refs.samples[idx] = i32::from(plane[(py - 1) * plane_w + px + sx as usize]);
+                    refs.samples[idx] = above(px + sx as usize);
                     refs.available[idx] = true;
                 }
             }
@@ -1085,15 +1125,8 @@ impl<'a, 'p> SliceDecoder<'a, 'p> {
         if c == 0 {
             intra::filter(&mut refs, mode, self.sps.strong_intra_smoothing, bit_depth);
         }
-        let start = py * plane_w + px;
-        intra::predict(
-            &refs,
-            mode,
-            c == 0,
-            bit_depth,
-            &mut self.pic.planes[c][start..],
-            plane_w,
-        );
+        let (dst, stride) = self.out.from(c, px, py);
+        intra::predict(&refs, mode, c == 0, bit_depth, dst, stride);
     }
 
     /// `residual_coding` (clause 7.3.8.11) and the reconstruction of its
@@ -1166,20 +1199,15 @@ impl<'a, 'p> SliceDecoder<'a, 'p> {
             return Err(malformed("last significant coefficient"));
         }
         let sub = n >> 2;
-        // Find the last sub-block and position.
-        let mut last_sub = 0;
-        let mut last_pos = 0;
-        'find: for i in (0..sub * sub).rev() {
-            let (xs, ys) = sub_scan(sub, scan, i);
-            for p in (0..16).rev() {
-                let (xp, yp) = scan4(scan)[p];
-                if (xs << 2) + usize::from(xp) == last_x && (ys << 2) + usize::from(yp) == last_y {
-                    last_sub = i;
-                    last_pos = p;
-                    break 'find;
-                }
-            }
-        }
+        // The scan positions of the last sub-block and of the last
+        // coefficient inside it.
+        let last_sub = (0..sub * sub)
+            .find(|&i| sub_scan(sub, scan, i) == (last_x >> 2, last_y >> 2))
+            .unwrap_or(0);
+        let last_pos = scan4(scan)
+            .iter()
+            .position(|&(xp, yp)| (usize::from(xp), usize::from(yp)) == (last_x & 3, last_y & 3))
+            .unwrap_or(0);
         let mut csbf = [[false; 8]; 8];
         let sign_hiding = self.pps.sign_data_hiding && !self.cu.bypass;
         let mut greater1_state = 1u32;
@@ -1482,16 +1510,11 @@ impl<'a, 'p> SliceDecoder<'a, 'p> {
                 transform::inverse(coeffs, log2, dst, bit_depth, mx, my);
             }
         }
-        let (scale, plane_w) = if c == 0 {
-            (1, self.pic.width)
-        } else {
-            (2, self.pic.width / 2)
-        };
-        let (px, py) = (x0 / scale, y0 / scale);
+        let scale = if c == 0 { 1 } else { 2 };
         let max = (1i32 << bit_depth) - 1;
-        let plane = &mut self.pic.planes[c];
+        let (plane, stride) = self.out.from(c, x0 / scale, y0 / scale);
         for y in 0..n {
-            let row = &mut plane[(py + y) * plane_w + px..(py + y) * plane_w + px + n];
+            let row = &mut plane[y * stride..y * stride + n];
             for (x, sample) in row.iter_mut().enumerate() {
                 *sample = (i32::from(*sample) + coeffs[y * n + x]).clamp(0, max) as u16;
             }
@@ -1510,7 +1533,8 @@ impl<'a, 'p> SliceDecoder<'a, 'p> {
         let w4 = self.pic.w4;
         for row in (self.cu.y >> 2)..((self.cu.y + size) >> 2) {
             for col in (self.cu.x >> 2)..((self.cu.x + size) >> 2) {
-                self.pic.info[row * w4 + col] &= !FLAG_CBF;
+                let at = row * w4 + col;
+                self.pic.info.set(at, self.pic.info.get(at) & !FLAG_CBF);
             }
         }
         self.edges(self.cu.x, self.cu.y, size, size, true);
@@ -1561,8 +1585,7 @@ impl<'a, 'p> SliceDecoder<'a, 'p> {
         if p_ctb == q_ctb {
             return true;
         }
-        if self.pic.ctb_slice_addr[p_ctb] != slice.slice_addr
-            && !slice.header.loop_filter_across_slices
+        if self.pic.slice_addr(p_ctb) != slice.slice_addr && !slice.header.loop_filter_across_slices
         {
             return false;
         }
@@ -1584,11 +1607,12 @@ impl<'a, 'p> SliceDecoder<'a, 'p> {
             if self.edge_allowed(x, y, x as isize - 1, y as isize) {
                 let bs = self.strength(x - 1, y, x, y, tu);
                 let at = (y >> 2) * stride + (x >> 3);
-                if tu {
-                    self.pic.bs_ver[at] = bs;
+                let bs = if tu {
+                    bs
                 } else {
-                    self.pic.bs_ver[at] = self.pic.bs_ver[at].max(bs);
-                }
+                    self.pic.bs_ver.get(at).max(bs)
+                };
+                self.pic.bs_ver.set(at, bs);
             }
             y += 4;
         }
@@ -1604,11 +1628,12 @@ impl<'a, 'p> SliceDecoder<'a, 'p> {
             if self.edge_allowed(x, y, x as isize, y as isize - 1) {
                 let bs = self.strength(x, y - 1, x, y, tu);
                 let at = (y >> 3) * w4 + (x >> 2);
-                if tu {
-                    self.pic.bs_hor[at] = bs;
+                let bs = if tu {
+                    bs
                 } else {
-                    self.pic.bs_hor[at] = self.pic.bs_hor[at].max(bs);
-                }
+                    self.pic.bs_hor.get(at).max(bs)
+                };
+                self.pic.bs_hor.set(at, bs);
             }
             x += 4;
         }
@@ -1618,16 +1643,16 @@ impl<'a, 'p> SliceDecoder<'a, 'p> {
     fn strength(&self, px: usize, py: usize, qx: usize, qy: usize, tu: bool) -> u8 {
         let p = self.pic.at4(px, py);
         let q = self.pic.at4(qx, qy);
-        let pi = self.pic.info[p];
-        let qi = self.pic.info[q];
+        let pi = self.pic.info.get(p);
+        let qi = self.pic.info.get(q);
         if pi & 3 == MODE_INTRA || qi & 3 == MODE_INTRA {
             return 2;
         }
         if tu && (pi & FLAG_CBF != 0 || qi & FLAG_CBF != 0) {
             return 1;
         }
-        let pm = self.pic.mvf[p];
-        let qm = self.pic.mvf[q];
+        let pm = self.pic.mvf.get(p);
+        let qm = self.pic.mvf.get(q);
         let p_slice = self.pic.slice_of(px, py);
         let q_slice = &self.pic.slices[self.slice];
         let uid =

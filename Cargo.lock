@@ -980,6 +980,7 @@ dependencies = [
  "cutlass-decode",
  "cutlass-encode",
  "cutlass-isobmff",
+ "cutlass-pool",
 ]
 
 [[package]]

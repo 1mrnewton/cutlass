@@ -13,6 +13,7 @@
 //! | Loop filters | deblocking with slice and PPS overrides, SAO |
 //! | Picture partitions | slices, dependent slice segments, tiles, wavefronts, entry points |
 //! | Reference handling | RPS with inter-RPS prediction, long-term pictures, list modification, missing-reference generation, RASL skipping, C.5.2 bumping |
+//! | Threads | the CTB rows of a wavefront slice segment on the shared pool, each row two CTBs behind the one above; deblocking and SAO in bands of rows; output identical for any worker count |
 //! | Not supported | 4:0:0, 4:2:2, 4:4:4, range-extension tools, multilayer, 3D, screen content: refused as `Unsupported` |
 //!
 //! Limits: at most 16888 samples on an edge and 35 651 584 luma samples

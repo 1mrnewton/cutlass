@@ -10,10 +10,14 @@ use cutlass_decode::{
     Yuv420p10,
 };
 
+use cutlass_pool::{Pool, Rows};
+
 use crate::cabac::{CONTEXTS, Cabac};
-use crate::ctu::{Cu, SliceDecoder};
+use crate::ctu::{Cu, SliceDecoder, Wave};
 use crate::nal::{self, Nal};
-use crate::picture::{ColMv, Decoded, Picture, RefPic, SliceCtx};
+use crate::picture::{
+    self, ColMv, Decoded, Lines, Picture, RefPic, Samples, SliceCtx, lock, split_bands,
+};
 use crate::ps::{self, Layout, Pps, Sps};
 use crate::slice::{self, SliceHeader, SliceType};
 
@@ -146,6 +150,7 @@ impl State {
 /// The picture being decoded, with its reference picture set.
 struct Pending {
     pic: Picture,
+    planes: [Vec<u16>; 3],
     output: bool,
     meta: Arc<Meta>,
     /// The last independent slice segment header, for dependent ones.
@@ -158,15 +163,47 @@ struct Pending {
 }
 
 /// Native HEVC (H.265) decoder: Main and Main 10, 4:2:0.
+///
+/// The CTB rows of a wavefront slice segment decode on the pool's workers,
+/// each row two CTBs behind the one above, and the loop filters run in bands
+/// of rows. The output does not depend on the number of workers.
 pub struct HevcDecoder {
     length_size: u8,
     extra: Vec<u8>,
     state: State,
     drained: bool,
+    workers: Workers,
+}
+
+/// The pool a decoder runs on.
+enum Workers {
+    Shared,
+    Own(Pool),
+}
+
+impl Workers {
+    fn pool(&self) -> &Pool {
+        match self {
+            Self::Shared => Pool::shared(),
+            Self::Own(pool) => pool,
+        }
+    }
 }
 
 impl HevcDecoder {
+    /// A decoder on the process pool: as many workers as the machine runs
+    /// at once, at most 16.
     pub fn open(params: &CodecParams) -> Result<Self, CodecError> {
+        Self::open_with(params, Workers::Shared)
+    }
+
+    /// A decoder with its own `threads` workers, at most 16. Zero or one
+    /// decodes on the caller.
+    pub fn open_with_threads(params: &CodecParams, threads: usize) -> Result<Self, CodecError> {
+        Self::open_with(params, Workers::Own(Pool::new(threads)))
+    }
+
+    fn open_with(params: &CodecParams, workers: Workers) -> Result<Self, CodecError> {
         if params.codec != CodecId::Hevc {
             return Err(CodecError::Unsupported { what: "codec" });
         }
@@ -175,6 +212,7 @@ impl HevcDecoder {
             extra: params.extra.clone(),
             state: State::new(),
             drained: false,
+            workers,
         };
         dec.apply_extra()?;
         Ok(dec)
@@ -199,6 +237,7 @@ impl HevcDecoder {
 
     fn decode(&self, state: &mut State, packet: &Packet) -> Result<Vec<VideoOutput>, CodecError> {
         let nals = nal::access_unit(&packet.data, self.length_size)?;
+        let pool = self.workers.pool();
         let mut out = Vec::new();
         let mut current: Option<Pending> = None;
         let mut skipping = false;
@@ -210,7 +249,7 @@ impl HevcDecoder {
                 nal::SPS | nal::PPS => state.store_param(nal)?,
                 nal::EOS | nal::EOB => {
                     if let Some(done) = current.take() {
-                        finish(state, done, &mut out);
+                        finish(state, done, pool, &mut out);
                     }
                     state.after_eos = true;
                 }
@@ -218,24 +257,24 @@ impl HevcDecoder {
                     let first = nal.rbsp.first().is_some_and(|b| b & 0x80 != 0);
                     if first {
                         if let Some(done) = current.take() {
-                            finish(state, done, &mut out);
+                            finish(state, done, pool, &mut out);
                         }
                         let (header, _, _) = parse(state, nal, None)?;
                         current = start_picture(state, nal, &header, packet, &mut out)?;
                         skipping = current.is_none();
                         if let Some(pending) = current.as_mut() {
-                            decode_slice(pending, nal, header)?;
+                            decode_slice(pending, nal, header, pool)?;
                         }
                     } else if !skipping && let Some(pending) = current.as_mut() {
                         let (header, _, _) = parse(state, nal, pending.independent.as_ref())?;
-                        decode_slice(pending, nal, header)?;
+                        decode_slice(pending, nal, header, pool)?;
                     }
                 }
                 _ => {}
             }
         }
         if let Some(done) = current.take() {
-            finish(state, done, &mut out);
+            finish(state, done, pool, &mut out);
         }
         Ok(out)
     }
@@ -402,10 +441,12 @@ fn start_picture(
 
     let layout = Arc::new(Layout::new(&sps, &pps)?);
     let pic = Picture::new(sps.clone(), pps.clone(), layout, poc)?;
+    let planes = picture::planes(pic.width, pic.height)?;
     let output = header.pic_output && !(nal.is_rasl() && state.no_rasl_output);
     let uid = state.uid();
     Ok(Some(Pending {
         pic,
+        planes,
         output,
         meta: Arc::new(Meta {
             pts: packet.pts,
@@ -479,7 +520,12 @@ fn ref_lists(pending: &Pending, header: &SliceHeader) -> Result<[Vec<RefPic>; 2]
     Ok(lists)
 }
 
-fn decode_slice(pending: &mut Pending, nal: &Nal, header: SliceHeader) -> Result<(), CodecError> {
+fn decode_slice(
+    pending: &mut Pending,
+    nal: &Nal,
+    header: SliceHeader,
+    pool: &Pool,
+) -> Result<(), CodecError> {
     if !header.dependent {
         pending.slice_addr = header.segment_address;
         pending.independent = Some(header.clone());
@@ -522,6 +568,7 @@ fn decode_slice(pending: &mut Pending, nal: &Nal, header: SliceHeader) -> Result
         }
         entries.push(at);
     }
+    let segment = header.segment_address as usize;
     pending.pic.slices.push(SliceCtx {
         header,
         refs,
@@ -533,55 +580,138 @@ fn decode_slice(pending: &mut Pending, nal: &Nal, header: SliceHeader) -> Result
     if index >= usize::from(u16::MAX) {
         return Err(CodecError::Limit { what: "slices" });
     }
-    let sps = pending.pic.sps.clone();
-    let pps = pending.pic.pps.clone();
-    let mut decoder = SliceDecoder {
-        pic: &mut pending.pic,
-        slice: index,
-        sps: &sps,
-        pps: &pps,
-        cabac: Cabac::new(data, [0; CONTEXTS]),
+    let job = SliceJob {
+        index,
         data,
-        entries,
-        next_entry: 0,
-        qp_y: qp,
-        qp_pred: qp,
-        last_qp: qp,
-        first_qg: true,
-        qp_delta_coded: false,
-        qp_delta: 0,
-        cu: Cu::default(),
-        coeffs: [0; 32 * 32],
-        pred: [[0; 64 * 64]; 2],
-        ctb_x: 0,
-        ctb_y: 0,
-        ctb_rs: 0,
-        merge_2nx2n: false,
+        entries: &entries,
+        qp,
         slice_type,
-        mc: crate::mc::Scratch::default(),
     };
-    decoder.decode()
+    let pic = &pending.pic;
+    let layout = &pic.layout;
+    let ctb_w = layout.ctb_width as usize;
+    let first_row = segment / ctb_w;
+    let rows = entries.len() + 1;
+    let wavefront = pool.workers() > 1
+        && pic.pps.entropy_sync
+        && !pic.pps.tiles
+        && segment.is_multiple_of(ctb_w)
+        && rows > 1
+        && first_row + rows <= layout.ctb_height as usize;
+    if !wavefront {
+        let out = Samples::whole(&mut pending.planes, pic.width);
+        return job.decoder(pic, out, None, 0, None).decode();
+    }
+    // One worker for each CTB row of the segment. The first holds every row
+    // above too; the last holds every row below, where the segment may go on
+    // without entry points.
+    let log2_ctb = u32::from(layout.log2_ctb);
+    let lines = Lines::new(pic.width, layout.ctb_height as usize, log2_ctb);
+    let gates: Vec<Rows> = (0..rows).map(|_| Rows::new(ctb_w as u32)).collect();
+    let tops: Vec<usize> = std::iter::once(0)
+        .chain((1..rows).map(|r| (first_row + r) << log2_ctb))
+        .collect();
+    let bands = split_bands(&mut pending.planes, pic.width, &tops, pic.height);
+    let results = pool.slices(rows, |r| {
+        let _done = Done(&gates[r]);
+        let band = std::mem::take(&mut *lock(&bands[r]));
+        let out = Samples::band(band, tops[r], pic.width, &lines);
+        let wave = Wave {
+            row: first_row + r,
+            above: r.checked_sub(1).map(|above| &gates[above]),
+            mine: &gates[r],
+            row_only: r + 1 < rows,
+        };
+        let start = (r > 0).then_some((first_row + r) * ctb_w);
+        job.decoder(pic, out, start, r.saturating_sub(1), Some(wave))
+            .decode()
+    });
+    results.into_iter().collect()
+}
+
+/// Marks a row worker's row finished however it stops, so the row below
+/// never waits for a worker that has returned.
+struct Done<'a>(&'a Rows);
+
+impl Drop for Done<'_> {
+    fn drop(&mut self) {
+        self.0.report_through(u32::MAX);
+    }
+}
+
+/// What every worker of one slice segment starts from.
+struct SliceJob<'a> {
+    index: usize,
+    data: &'a [u8],
+    entries: &'a [usize],
+    qp: i32,
+    slice_type: SliceType,
+}
+
+impl<'a> SliceJob<'a> {
+    fn decoder<'p>(
+        &self,
+        pic: &'p Picture,
+        out: Samples<'p>,
+        start_rs: Option<usize>,
+        next_entry: usize,
+        wave: Option<Wave<'p>>,
+    ) -> SliceDecoder<'p, 'p>
+    where
+        'a: 'p,
+    {
+        let qp = self.qp;
+        SliceDecoder {
+            pic,
+            out,
+            start_rs,
+            wave,
+            slice: self.index,
+            sps: &pic.sps,
+            pps: &pic.pps,
+            cabac: Cabac::new(self.data, [0; CONTEXTS]),
+            data: self.data,
+            entries: self.entries.to_vec(),
+            next_entry,
+            qp_y: qp,
+            qp_pred: qp,
+            last_qp: qp,
+            first_qg: true,
+            qp_delta_coded: false,
+            qp_delta: 0,
+            cu: Cu::default(),
+            coeffs: [0; 32 * 32],
+            pred: [[0; 64 * 64]; 2],
+            ctb_x: 0,
+            ctb_y: 0,
+            ctb_rs: 0,
+            merge_2nx2n: false,
+            slice_type: self.slice_type,
+            mc: crate::mc::Scratch::default(),
+        }
+    }
 }
 
 /// Loop filters, the motion kept for later pictures, and the decoded
 /// picture buffer (clause C.5.2.3).
-fn finish(state: &mut State, pending: Pending, out: &mut Vec<VideoOutput>) {
+fn finish(state: &mut State, pending: Pending, pool: &Pool, out: &mut Vec<VideoOutput>) {
     let Pending {
-        mut pic,
+        pic,
+        mut planes,
         output,
         meta,
         uid,
         ..
     } = pending;
-    pic.deblock();
-    pic.sao();
+    pic.deblock(&mut planes, pool);
+    pic.sao(&mut planes, pool);
     let col_stride = pic.width.div_ceil(16);
     let col_rows = pic.height.div_ceil(16);
     let mut col = vec![ColMv::default(); col_stride * col_rows];
     for by in 0..col_rows {
         for bx in 0..col_stride {
             let (x, y) = (bx * 16, by * 16);
-            let field = pic.mvf[pic.at4(x, y)];
+            let field = pic.mv_at(x, y);
             if field.pred == 0 {
                 continue;
             }
@@ -614,7 +744,7 @@ fn finish(state: &mut State, pending: Pending, out: &mut Vec<VideoOutput>) {
     let decoded = Decoded {
         width: pic.width,
         height: pic.height,
-        planes: std::mem::take(&mut pic.planes),
+        planes,
         col,
         col_stride,
         poc,

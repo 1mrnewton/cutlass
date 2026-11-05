@@ -173,6 +173,70 @@ mod oracle {
         got
     }
 
+    /// Every picture of `bytes` decoded with `threads` workers: the 8-bit
+    /// planes and, above 8 bits, the full samples.
+    fn decode_with_threads(bytes: &[u8], threads: usize) -> Vec<Vec<Vec<u16>>> {
+        let mut params = CodecParams::video(CodecId::Hevc, 0, 0);
+        params.nal_length_size = 0;
+        let mut decoder = HevcDecoder::open_with_threads(&params, threads).expect("open");
+        let mut got = Vec::new();
+        for (n, unit) in access_units(bytes).iter().enumerate() {
+            let pictures = decoder
+                .push(&Packet::video(unit.clone(), n as i64, 1, 30, n == 0))
+                .unwrap_or_else(|err| panic!("access unit {n}: {err:?}"));
+            got.extend(pictures);
+        }
+        got.extend(decoder.drain().expect("drain"));
+        got.iter()
+            .map(|frame| {
+                let p = &frame.picture;
+                let mut planes: Vec<Vec<u16>> = [p.y(), p.u(), p.v()]
+                    .iter()
+                    .map(|plane| plane.iter().map(|&b| u16::from(b)).collect())
+                    .collect();
+                if let Some(p) = &frame.yuv420p10 {
+                    planes.extend([p.y().to_vec(), p.u().to_vec(), p.v().to_vec()]);
+                }
+                if let Some(p) = &frame.yuv420_high {
+                    planes.extend([p.y().to_vec(), p.u().to_vec(), p.v().to_vec()]);
+                }
+                planes
+            })
+            .collect()
+    }
+
+    /// The case matches ffmpeg on the process pool, and two, five and
+    /// sixteen workers return exactly what one returns.
+    fn check_threads(case: &Case<'_>) {
+        if !check(case) {
+            return;
+        }
+        let Some(ff) = ffmpeg() else {
+            return;
+        };
+        let tag: String = case
+            .name
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+            .collect();
+        let Some((bytes, _)) = encode(&ff, case, &tag) else {
+            return;
+        };
+        let one = decode_with_threads(&bytes, 1);
+        assert!(!one.is_empty(), "{}: no pictures", case.name);
+        for threads in [2, 5, 16] {
+            let many = decode_with_threads(&bytes, threads);
+            assert_eq!(many.len(), one.len(), "{}: picture count", case.name);
+            for (index, (a, b)) in one.iter().zip(&many).enumerate() {
+                assert!(
+                    a == b,
+                    "{}: picture {index} differs with {threads} workers",
+                    case.name
+                );
+            }
+        }
+    }
+
     fn first_difference(
         name: &str,
         frame: usize,
@@ -517,6 +581,41 @@ mod oracle {
         });
     }
 
+    /// Wavefronts over many CTB rows, so rows decode on several workers at
+    /// once: 32×32 CTBs in 640×352 make 11 rows of 20.
+    #[test]
+    fn wavefront_rows_on_several_workers() {
+        let params = format!("{BASE}:wpp=1:ctu=32:bframes=3:ref=3");
+        check_threads(&Case {
+            size: (640, 352),
+            frames: 12,
+            ..case("threads wpp", &params)
+        });
+    }
+
+    /// Wavefronts in four slices, each starting on a row, at 10 bits.
+    #[test]
+    fn wavefront_slices_on_several_workers() {
+        let params = format!("{BASE}:wpp=1:ctu=32:slices=4:bframes=2");
+        check_threads(&Case {
+            size: (640, 352),
+            frames: 12,
+            bits: 10,
+            ..case("threads wpp slices", &params)
+        });
+    }
+
+    /// Without wavefronts only the loop filters spread over the workers.
+    #[test]
+    fn loop_filters_on_several_workers() {
+        let params = format!("{BASE}:ctu=32:bframes=2");
+        check_threads(&Case {
+            size: (640, 352),
+            frames: 8,
+            ..case("threads filters", &params)
+        });
+    }
+
     /// Main 12, a format-range-extensions profile with none of its tools on.
     #[test]
     fn main_twelve() {
@@ -574,7 +673,14 @@ mod oracle {
             p.nal_length_size = 0;
             p
         };
-        let mut decoder = HevcDecoder::open(&params).expect("open");
+        // HEVC_BENCH_THREADS picks the worker count; unset is the process pool.
+        let mut decoder = match std::env::var("HEVC_BENCH_THREADS") {
+            Ok(threads) => {
+                HevcDecoder::open_with_threads(&params, threads.parse().expect("threads"))
+            }
+            Err(_) => HevcDecoder::open(&params),
+        }
+        .expect("open");
         let start = std::time::Instant::now();
         let mut got = Vec::new();
         for (n, unit) in units.iter().enumerate() {

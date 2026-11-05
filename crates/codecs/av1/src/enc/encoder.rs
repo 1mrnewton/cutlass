@@ -782,8 +782,14 @@ impl Av1Enc {
             filter_intra: speed < 7,
             tx64: ev("AV1_TX64", 0.0) > 0.0,
             rd_partition: ev("AV1_RDP", 1.0) > 0.0,
-            ref_mask: [false, true, true, true, true, true, true, true],
+            // LAST, LAST2, LAST3, GOLDEN, BWDREF, ALTREF2, ALTREF.
+            ref_mask: match (speed, ev("AV1_REFS", 0.0) as u32) {
+                (_, 1) | (0..=3, 0) => [false, true, true, true, true, true, true, true],
+                (_, 2) => [false, true, false, false, true, true, false, true],
+                _ => [false, true, false, false, false, true, false, true],
+            },
             rd_inter_intra: ev("AV1_RDII", 1.0) > 0.0,
+            early_none: ev("AV1_EN", 16.0),
         };
         let qp = QuantParams {
             // Per bit; inter frames trade residual for rate more readily.
@@ -833,6 +839,7 @@ impl Av1Enc {
                 plan_q: 0,
                 cfl_choice: (0, 0),
                 intra_choice: (0, None),
+                est_hint: (0, 0),
                 plan_delta_lf: [0; 4],
                 src: Some(src),
                 enc: qp,

@@ -297,6 +297,8 @@ pub struct TileDec<'a, P: Pixel, C: Coder = Msac<'a>> {
     pub cfl_choice: (i8, i8),
     /// Angle delta and filter intra mode found by the luma mode search.
     pub intra_choice: (i8, Option<u8>),
+    /// Motion of the last partition estimate (seeds the next one).
+    pub est_hint: (i32, i32),
     pub plan_delta_lf: [i8; 4],
     pub cdf: &'a mut CdfContext,
     pub mi_row_start: usize,

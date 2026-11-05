@@ -52,6 +52,9 @@ pub struct ModeParams {
     pub ref_mask: [bool; 8],
     /// Decide intra against inter by transform-coded RD instead of SATD.
     pub rd_inter_intra: bool,
+    /// Partition early exit: keep a block whole when its estimate is below
+    /// this many bits' worth of cost.
+    pub early_none: f64,
 }
 
 impl Default for ModeParams {
@@ -73,6 +76,7 @@ impl Default for ModeParams {
             rd_partition: true,
             ref_mask: [false, true, true, true, true, true, true, true],
             rd_inter_intra: true,
+            early_none: 16.0,
         }
     }
 }
@@ -226,8 +230,8 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         };
         above[EDGE_OFF - 1] = corner;
         left[EDGE_OFF - 1] = corner;
-        let mut pred = [P::default(); 64 * 64];
-        let mut best_pred = [P::default(); 64 * 64];
+        let mut pred = take_buf(&mut self.scratch.enc_px[1], 64 * 64, P::default());
+        let mut best_pred = take_buf(&mut self.scratch.enc_px[2], 64 * 64, P::default());
         let mut best = (f64::MAX, 0.0);
         let lam = self.mode.lambda_satd;
         for (mode, bits) in [
@@ -256,7 +260,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
                 best_pred[..pw * ph].copy_from_slice(&pred[..pw * ph]);
             }
         }
-        let mut res = [0i32; 64 * 64];
+        let mut res = take_buf(&mut self.scratch.enc_i32[2], 64 * 64, 0);
         self.residual_of(&best_pred, pw, x, y, pw, ph, &mut res);
         let mut cost = self.tx_cost(&res[..pw * ph], pw, ph, tx) + lam_bits * best.1;
         if self.mode.inter_frame
@@ -264,7 +268,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         {
             let rp = &rv.pic.planes[0];
             let params = MeParams {
-                max_range: self.mode.me_range / 2,
+                max_range: self.mode.me_range / 4,
                 subpel: 0,
                 ..MeParams::default()
             };
@@ -281,12 +285,13 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
                 rp.stride,
                 rp.w,
                 rp.h,
-                &[(0, 0)],
+                &[(0, 0), self.est_hint],
                 &params,
                 &cost_fn,
                 bd,
             );
             let (dy, dx) = (me.mv.0 >> 3, me.mv.1 >> 3);
+            self.est_hint = me.mv;
             for i in 0..ph {
                 let ry = (y as i32 + i as i32 + dy).clamp(0, rp.h as i32 - 1) as usize;
                 for j in 0..pw {
@@ -298,6 +303,9 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
             let mvb = 2.0 + bits(me.mv.0) + bits(me.mv.1);
             cost = cost.min(self.tx_cost(&res[..pw * ph], pw, ph, tx) + lam_bits * mvb);
         }
+        self.scratch.enc_px[1] = pred;
+        self.scratch.enc_px[2] = best_pred;
+        self.scratch.enc_i32[2] = res;
         cost * scale
     }
 
@@ -388,6 +396,10 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
             return PARTITION_NONE;
         }
         let none = self.est_block(x, y, n, n);
+        // A block that is already cheap is not worth splitting.
+        if none < self.split_penalty(self.mode.early_none) {
+            return PARTITION_NONE;
+        }
         let split = self.est_block(x, y, half, half)
             + self.est_block(x + half, y, half, half)
             + self.est_block(x, y + half, half, half)
@@ -543,7 +555,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
 
     /// Estimated D + lambda * R of coding residual `res` (w x h, stride w) with
     /// transform blocks of size `tx` (DCT, dead-zone quantization).
-    fn tx_cost(&self, res: &[i32], w: usize, h: usize, tx: u8) -> f64 {
+    fn tx_cost(&mut self, res: &[i32], w: usize, h: usize, tx: u8) -> f64 {
         let tw = tx_w(tx);
         let th = tx_h(tx);
         let qi = self.dequant_info(0, 0, tx);
@@ -551,10 +563,10 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         let lam = self.enc.lambda;
         let mut d = 0f64;
         let mut bits = 0f64;
-        let mut blk = [0i32; 64 * 64];
-        let mut coefs = [0i32; 64 * 64];
         let mid = P::from_i32(1 << (bd - 1));
-        let mut rec = [mid; 64 * 64];
+        let mut blk = take_buf(&mut self.scratch.enc_i32[0], 64 * 64, 0);
+        let mut coefs = take_buf(&mut self.scratch.enc_i32[1], 64 * 64, 0);
+        let mut rec = take_buf(&mut self.scratch.enc_px[0], 64 * 64, mid);
         let round = 48i64;
         let mut y0 = 0;
         while y0 < h {
@@ -615,6 +627,9 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
             }
             y0 += th;
         }
+        self.scratch.enc_i32[0] = blk;
+        self.scratch.enc_i32[1] = coefs;
+        self.scratch.enc_px[0] = rec;
         d + lam * bits
     }
 
@@ -1009,7 +1024,12 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
             .collect();
         let pred0 = stack[0];
         let params = MeParams {
-            max_range: self.mode.me_range,
+            // Secondary references only refine around their predicted vectors.
+            max_range: if rf == LAST_FRAME || rf == BWDREF_FRAME {
+                self.mode.me_range
+            } else {
+                self.mode.me_range / 4
+            },
             subpel: if hp {
                 self.mode.subpel
             } else {
@@ -1312,6 +1332,16 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         }
         true
     }
+}
+
+/// Takes a work buffer out of the scratch, sized to at least `n` (it is
+/// only zeroed when first allocated; callers overwrite what they read).
+fn take_buf<T: Copy>(v: &mut Vec<T>, n: usize, fill: T) -> Vec<T> {
+    let mut b = std::mem::take(v);
+    if b.len() < n {
+        b.resize(n, fill);
+    }
+    b
 }
 
 /// Rough bit count of a motion vector component difference (1/8 units).

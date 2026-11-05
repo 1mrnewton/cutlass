@@ -871,6 +871,7 @@ fn decode_frame<P: Pixel>(
             plan_q: 0,
             cfl_choice: (0, 0),
             intra_choice: (0, None),
+            est_hint: (0, 0),
             plan_delta_lf: [0; 4],
             color_map_y: std::mem::take(&mut color_map_y),
             color_map_uv: std::mem::take(&mut color_map_uv),

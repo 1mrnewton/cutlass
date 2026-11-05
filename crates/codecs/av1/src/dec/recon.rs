@@ -31,6 +31,10 @@ pub struct Scratch<P> {
     pub mask: Vec<u8>,
     pub emu: Vec<P>,
     pub obmc: Vec<P>,
+    /// Encoder work buffers (empty until the encoder first uses them).
+    pub enc_i32: [Vec<i32>; 4],
+    pub enc_px: [Vec<P>; 4],
+    pub enc_q: Option<Box<crate::enc::quant::QuantScratch>>,
 }
 
 impl<P: Pixel> Scratch<P> {
@@ -51,6 +55,9 @@ impl<P: Pixel> Scratch<P> {
             mask: vec![0; 128 * 128],
             emu: vec![P::default(); (128 * 2 + 16) * (128 * 2 + 16)],
             obmc: vec![P::default(); 128 * 128],
+            enc_i32: Default::default(),
+            enc_px: Default::default(),
+            enc_q: None,
         }
     }
 }

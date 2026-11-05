@@ -535,6 +535,10 @@ pub struct MeScratch<P: Pixel> {
     /// Partition estimates of the current superblock: `[x, y, w, h]`, cost
     /// and motion (kept here for the mode decision, which owns this scratch).
     pub est_memo: Vec<([usize; 4], f64, (i32, i32))>,
+    /// The mode search's recent predictions of the current block.
+    pub pred_cache: Vec<(super::rdo::PredKey, Vec<P>)>,
+    /// The transform cost of the chosen inter prediction and transform size.
+    pub tx_memo: Option<(super::rdo::PredKey, u8, f64)>,
 }
 
 impl<P: Pixel> MeScratch<P> {
@@ -543,6 +547,8 @@ impl<P: Pixel> MeScratch<P> {
             pred: vec![P::default(); MAX_BLOCK * MAX_BLOCK],
             edge: vec![P::default(); EDGE_SIDE * EDGE_SIDE],
             est_memo: Vec::with_capacity(128),
+            pred_cache: Vec::new(),
+            tx_memo: None,
         }
     }
 }

@@ -134,6 +134,20 @@ struct InterChoice {
     cost: f64,
 }
 
+/// What a translational prediction in the mode search depends on.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct PredKey {
+    plane: usize,
+    refs: [i8; 2],
+    mv: [Mv; 2],
+    filters: [u8; 2],
+    area: [usize; 4],
+    intrabc: bool,
+}
+
+/// Predictions kept per block by the mode search.
+const PRED_CACHE: usize = 6;
+
 const PARTITION_NONE: usize = 0;
 const PARTITION_HORZ: usize = 1;
 const PARTITION_VERT: usize = 2;
@@ -640,6 +654,8 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         let h = tx_h(tx).min(block_height(bs));
         let lam = self.mode.lambda_satd;
 
+        self.me_scratch.tx_memo = None;
+
         // Intra luma.
         self.cur_filters = [0, 0];
         let saved = self.b.clone();
@@ -947,7 +963,21 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
                 best = (t, c);
             }
         }
+        let key = self.pred_key(0, pb.ref_frame, pb.mv, [x, y, w, h]);
+        self.me_scratch.tx_memo = Some((key, best.0, best.1));
         best.0
+    }
+
+    /// The cache key of a prediction with the current filters.
+    fn pred_key(&self, plane: usize, refs: [i8; 2], mv: [Mv; 2], area: [usize; 4]) -> PredKey {
+        PredKey {
+            plane,
+            refs,
+            mv,
+            filters: self.cur_filters,
+            area,
+            intrabc: self.b.use_intrabc,
+        }
     }
 
     fn pick_intra_tx(&mut self, pb: &Block, tx: u8, max_tx: u8) -> u8 {
@@ -1415,11 +1445,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
                 continue;
             }
             let warped = mode == GLOBALMV && self.predict_global_warp_into_scratch(rf, x, y, w, h);
-            if !warped
-                && self
-                    .predict_into_scratch(0, rf, x, y, w, h, mv, [0, 0])
-                    .is_err()
-            {
+            if !warped && !self.pred_plane_f(0, [rf, NONE], [mv, Mv::ZERO], x, y, w, h, [0, 0]) {
                 continue;
             }
             let sp = &src.planes[0];
@@ -1479,6 +1505,20 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         h: usize,
         filters: [u8; 2],
     ) -> bool {
+        let n = w * h;
+        let key = PredKey {
+            plane,
+            refs,
+            mv,
+            filters,
+            area: [x, y, w, h],
+            intrabc: self.b.use_intrabc,
+        };
+        let cache = &mut self.me_scratch.pred_cache;
+        if let Some(e) = cache.iter().find(|e| e.0 == key) {
+            self.scratch.obmc[..n].copy_from_slice(&e.1[..n]);
+            return true;
+        }
         if self
             .predict_into_scratch(plane, refs[0], x, y, w, h, mv[0], filters)
             .is_err()
@@ -1486,17 +1526,27 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
             return false;
         }
         if refs[1] > INTRA_FRAME {
-            let first: Vec<P> = self.scratch.obmc[..w * h].to_vec();
+            let first: Vec<P> = self.scratch.obmc[..n].to_vec();
             if self
                 .predict_into_scratch(plane, refs[1], x, y, w, h, mv[1], filters)
                 .is_err()
             {
                 return false;
             }
-            for (d, s) in self.scratch.obmc[..w * h].iter_mut().zip(&first) {
+            for (d, s) in self.scratch.obmc[..n].iter_mut().zip(&first) {
                 *d = P::from_i32((d.to_i32() + s.to_i32() + 1) >> 1);
             }
         }
+        // Keep the last few predictions; the oldest buffer is reused.
+        let cache = &mut self.me_scratch.pred_cache;
+        let mut buf = if cache.len() >= PRED_CACHE {
+            cache.remove(0).1
+        } else {
+            Vec::new()
+        };
+        buf.clear();
+        buf.extend_from_slice(&self.scratch.obmc[..n]);
+        cache.push((key, buf));
         true
     }
 
@@ -1842,11 +1892,17 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         if cw == 0 || ch == 0 || cw != w || ch != h {
             return false;
         }
-        let mut res = vec![0i32; w * h];
-        let pred = std::mem::take(&mut self.scratch.obmc);
-        self.residual_of(&pred, w, x, y, w, h, &mut res);
-        self.scratch.obmc = pred;
-        let coded = self.tx_cost(&res, w, h, tx);
+        let key = self.pred_key(0, pb.ref_frame, pb.mv, [x, y, w, h]);
+        let coded = match self.me_scratch.tx_memo {
+            Some((k, t, c)) if k == key && t == tx => c,
+            _ => {
+                let mut res = vec![0i32; w * h];
+                let pred = std::mem::take(&mut self.scratch.obmc);
+                self.residual_of(&pred, w, x, y, w, h, &mut res);
+                self.scratch.obmc = pred;
+                self.tx_cost(&res, w, h, tx)
+            }
+        };
         if (e as f64) >= coded {
             return false;
         }

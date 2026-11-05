@@ -3740,34 +3740,16 @@ impl Shell {
     }
 
     fn place_extracted(&mut self, source_id: &SegmentId) -> Result<(), ShellError> {
-        let existing = {
-            let draft = self.session_draft()?;
-            let (segment, _) = locate(draft, source_id).ok_or_else(|| {
-                ShellError::Unavailable("the clip is not on the timeline".to_owned())
-            })?;
-            let target = segment.target.clone();
-            draft
-                .tracks
-                .iter()
-                .find(|track| {
-                    track.kind == TrackType::Audio
-                        && !track.attribute.contains(TrackAttribute::LOCK)
-                        && track
-                            .segments
-                            .iter()
-                            .all(|other| other.target.overlaps(&target).ok() == Some(false))
-                })
-                .map(|track| track.id.clone())
+        let mut next_id = self.next_id;
+        let mut fresh = |prefix: &str| {
+            next_id = next_id.saturating_add(1);
+            format!("{prefix}-{next_id}")
         };
-        let track_id = existing.unwrap_or_else(|| TrackId::new(self.fresh("sound")));
-        let segment_id = SegmentId::new(self.fresh("sound"));
-        let material_id = MaterialId::new(self.fresh("sound"));
-        self.apply(Request::ExtractAudio {
-            source_id: source_id.clone(),
-            track_id,
-            segment_id,
-            material_id,
-        })
+        let request = cutlass_editor::extract_request(self.session_draft()?, source_id, &mut fresh);
+        self.next_id = next_id;
+        let request = request
+            .ok_or_else(|| ShellError::Unavailable("the clip is not on the timeline".to_owned()))?;
+        self.apply(request)
     }
 
     /// The selected clip is a video, so Split scenes can cut it.

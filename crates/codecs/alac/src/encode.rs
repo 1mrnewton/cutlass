@@ -773,15 +773,15 @@ impl AlacEncoder {
     fn packet(&mut self, block: &[i32]) -> Result<Packet, CodecError> {
         let channels = usize::from(self.frame.config.channels);
         let count = block.len() / channels;
+        // The first cookie goes out before any statistics exist.
+        let opening = (!self.sent_cookie).then(|| self.frame.cookie().to_bytes());
         let bytes = self.frame.encode(block, count);
         let duration = i64::try_from(count).map_err(|_| CodecError::Limit {
             what: "frame samples",
         })?;
         let mut packet = Packet::audio(bytes, self.clock, duration, self.frame.config.sample_rate);
-        if !self.sent_cookie {
-            packet
-                .side
-                .push(SideData::Config(self.frame.cookie().to_bytes()));
+        if let Some(cookie) = opening {
+            packet.side.push(SideData::Config(cookie));
             self.sent_cookie = true;
         }
         self.clock = self.clock.saturating_add(duration);

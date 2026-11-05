@@ -9,6 +9,7 @@
 
 mod decode_oracle;
 mod encode_oracle;
+mod lifecycle;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -373,4 +374,38 @@ pub(crate) fn channel_map(ours: &[i32], theirs: &[i32], channels: usize) -> Vec<
             found
         })
         .collect()
+}
+
+/// A deterministic signal: a tone per channel, a slow sweep, and noise,
+/// at `depth` bits. Interleaved, `frames` samples per channel.
+pub(crate) fn synth(channels: usize, frames: usize, depth: u32, seed: u32) -> Vec<i32> {
+    let mut state = seed | 1;
+    let peak = f64::from((1u32 << (depth - 1)) - 1);
+    let mut out = Vec::with_capacity(channels * frames);
+    for i in 0..frames {
+        let t = i as f64 / 44_100.0;
+        for c in 0..channels {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            let noise = f64::from(state) / f64::from(u32::MAX) - 0.5;
+            let tone = (std::f64::consts::TAU * (220.0 + 110.0 * c as f64) * t).sin();
+            let sweep = (std::f64::consts::TAU * (50.0 + 2000.0 * t) * t).sin();
+            let value = peak * (0.5 * tone + 0.3 * sweep + 0.05 * noise);
+            out.push(value.round() as i32);
+        }
+    }
+    out
+}
+
+/// Interleaved stereo or mono parameters for the trait openers.
+pub(crate) fn params(cookie: &[u8], layout: ChannelLayout) -> cutlass_codec::access::CodecParams {
+    let parsed = Cookie::parse(cookie).expect("cookie");
+    let mut params = cutlass_codec::access::CodecParams::audio(
+        cutlass_codec::CodecId::Alac,
+        parsed.config.sample_rate,
+        layout,
+    );
+    params.extra = cookie.to_vec();
+    params
 }

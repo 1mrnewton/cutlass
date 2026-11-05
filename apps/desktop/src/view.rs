@@ -18,6 +18,7 @@ use crate::shell::{ExportRequest, ListedProject, MovePreview, Shell, ShellError}
 use crate::tokens;
 use crate::widgets;
 
+mod grade;
 mod inspector;
 
 const CARD_W: f32 = 144.0;
@@ -6451,6 +6452,120 @@ mod tests {
         ] {
             assert!(lines.iter().any(|line| line == label), "{label}: {lines:?}");
         }
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn the_colour_pages_paint_and_a_dragged_curve_point_is_saved() {
+        use cutlass_effects::{CurveChannel, Wheel};
+        let temp = std::env::temp_dir().join(format!("cutlass-grade-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let mut draft = cutlass_model::Draft::empty("draft");
+        draft
+            .materials
+            .videos
+            .push(cutlass_model::MaterialVideo::new("movie"));
+        draft.tracks[0].segments.push(cutlass_model::Segment::new(
+            "main",
+            "movie",
+            cutlass_model::TimeRange::new(0, 2_000_000),
+        ));
+        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        shell.select(Some(SegmentId::new("main")));
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let frame = |shell: &mut Shell, view: &mut ViewState, events: Vec<egui::Event>| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 2400.0))),
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, view, None),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        for (page, labels) in [
+            (1, ["Red", "Hue", "Saturation", "Lightness"].as_slice()),
+            (2, ["RGB", "Green", "Reset curve"].as_slice()),
+            (3, ["Lift", "Gamma", "Gain", "Brightness"].as_slice()),
+        ] {
+            view.inspector.focus(inspector::Focus {
+                tab: 4,
+                page,
+                section: None,
+            });
+            let _ = frame(&mut shell, &mut view, Vec::new());
+            let lines = galleys(&frame(&mut shell, &mut view, Vec::new()));
+            for label in labels {
+                assert!(
+                    lines.iter().any(|line| line == label),
+                    "{page} {label}: {lines:?}"
+                );
+            }
+        }
+        // Back on Curves, drag the top end of the line down.
+        view.inspector.focus(inspector::Focus {
+            tab: 4,
+            page: 2,
+            section: None,
+        });
+        let _ = frame(&mut shell, &mut view, Vec::new());
+        let output = frame(&mut shell, &mut view, Vec::new());
+        let ends: Vec<Pos2> = output
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Circle(circle)
+                    if circle.radius == 4.5 && circle.fill == egui::Color32::WHITE =>
+                {
+                    Some(circle.center)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ends.len(), 2, "{ends:?}");
+        let top = ends
+            .iter()
+            .copied()
+            .min_by(|a, b| a.y.total_cmp(&b.y))
+            .unwrap();
+        let press = |pos: Pos2, pressed: bool| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        let lower = top + Vec2::new(0.0, 60.0);
+        let _ = frame(
+            &mut shell,
+            &mut view,
+            vec![egui::Event::PointerMoved(top), press(top, true)],
+        );
+        let _ = frame(
+            &mut shell,
+            &mut view,
+            vec![egui::Event::PointerMoved(top + Vec2::new(0.0, 20.0))],
+        );
+        let _ = frame(
+            &mut shell,
+            &mut view,
+            vec![egui::Event::PointerMoved(lower)],
+        );
+        let _ = frame(&mut shell, &mut view, vec![press(lower, false)]);
+        let _ = frame(&mut shell, &mut view, Vec::new());
+        let grade = shell.inspection().unwrap().grade;
+        let curve = grade.curve(CurveChannel::Rgb);
+        assert_eq!(curve.len(), 2, "{curve:?}");
+        assert!(curve[1].1 < 0.9 && curve[1].0 > 0.99, "{curve:?}");
+        // One drag is one undo step.
+        shell.undo().unwrap();
+        assert!(shell.inspection().unwrap().grade.is_identity());
+        assert_eq!(shell.inspection().unwrap().grade.wheel(Wheel::Lift).x, 0.0);
         let _ = std::fs::remove_dir_all(&temp);
     }
 

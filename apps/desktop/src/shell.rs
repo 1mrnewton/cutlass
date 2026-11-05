@@ -295,6 +295,8 @@ pub struct Inspection {
     pub blend: cutlass_effects::BlendMode,
     /// The clip's adjust sliders.
     pub adjust: cutlass_effects::Adjust,
+    /// The clip's curves, wheels and HSL.
+    pub grade: cutlass_effects::Grade,
     /// Fade-in duration, microseconds.
     pub fade_in: i64,
     /// Fade-out duration, microseconds.
@@ -3388,6 +3390,7 @@ impl Shell {
             blend: cutlass_effects::segment_blend(draft, segment)
                 .unwrap_or(cutlass_effects::BlendMode::SourceOver),
             adjust: cutlass_effects::segment_adjust(draft, segment),
+            grade: cutlass_effects::segment_grade(draft, segment),
             fade_in: fade_durations(draft, segment).0,
             fade_out: fade_durations(draft, segment).1,
             material,
@@ -4406,6 +4409,63 @@ impl Shell {
             material_id,
             key: key.kind().to_owned(),
             value,
+        })
+    }
+
+    /// Set HSL colour `color` (0 red to 7 magenta) on the selected picture:
+    /// hue, saturation and lightness from -1 to 1.
+    pub fn set_hsl(&mut self, color: u8, values: [f64; 3]) -> Result<(), ShellError> {
+        let segment_id = self.adjust_segment()?;
+        self.refuse_locked(&segment_id)?;
+        let material_id = MaterialId::new(self.fresh("hsl"));
+        let [hue, saturation, lightness] = values;
+        self.apply(Request::SetHsl {
+            segment_id,
+            material_id,
+            color,
+            hue,
+            saturation,
+            lightness,
+        })
+    }
+
+    /// Set one curve on the selected picture; no points is the straight line.
+    pub fn set_curve(
+        &mut self,
+        channel: cutlass_effects::CurveChannel,
+        points: &[(f32, f32)],
+    ) -> Result<(), ShellError> {
+        let segment_id = self.adjust_segment()?;
+        self.refuse_locked(&segment_id)?;
+        let material_id = MaterialId::new(self.fresh("curves"));
+        self.apply(Request::SetCurve {
+            segment_id,
+            material_id,
+            channel: channel.key().to_owned(),
+            points: points
+                .iter()
+                .map(|(x, y)| [f64::from(*x), f64::from(*y)])
+                .collect(),
+        })
+    }
+
+    /// Set one colour wheel on the selected picture.
+    pub fn set_wheel(
+        &mut self,
+        wheel: cutlass_effects::Wheel,
+        setting: cutlass_effects::WheelSetting,
+    ) -> Result<(), ShellError> {
+        let segment_id = self.adjust_segment()?;
+        self.refuse_locked(&segment_id)?;
+        let material_id = MaterialId::new(self.fresh("wheels"));
+        let setting = setting.held();
+        self.apply(Request::SetWheel {
+            segment_id,
+            material_id,
+            wheel: wheel.key().to_owned(),
+            x: f64::from(setting.x),
+            y: f64::from(setting.y),
+            luma: f64::from(setting.luma),
         })
     }
 
@@ -10617,6 +10677,44 @@ mod tests {
                 .iter()
                 .all(|track| track.kind != TrackType::Filter)
         );
+    }
+
+    #[test]
+    fn hsl_and_wheels_are_set_on_a_picture() {
+        use cutlass_effects::{Wheel, WheelSetting};
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        let mut video = MaterialVideo::new("picture");
+        video.path = "clip.mp4".to_owned();
+        draft.materials.videos.push(video);
+        draft.tracks[0].segments.push(Segment::new(
+            "picture",
+            "picture",
+            TimeRange::new(0, 1_000_000),
+        ));
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.select(Some(SegmentId::new("picture")));
+        desktop.set_hsl(4, [0.2, -0.5, 0.0]).unwrap();
+        desktop
+            .set_wheel(
+                Wheel::Gain,
+                WheelSetting {
+                    x: 3.0,
+                    y: 4.0,
+                    luma: 0.1,
+                },
+            )
+            .unwrap();
+        let grade = desktop.inspection().unwrap().grade;
+        assert_eq!(grade.hsl[4], [0.2, -0.5, 0.0]);
+        let gain = grade.wheel(Wheel::Gain);
+        assert!((gain.x - 0.6).abs() < 1e-6 && (gain.y - 0.8).abs() < 1e-6);
+        assert!(desktop.set_hsl(9, [0.1, 0.0, 0.0]).is_err());
+        desktop.undo().unwrap();
+        desktop.undo().unwrap();
+        assert!(desktop.inspection().unwrap().grade.is_identity());
     }
 
     #[test]

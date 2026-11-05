@@ -48,6 +48,12 @@ pub(super) struct InspectorState {
     /// A tab, page, and section a menu row asked for, opened on the next
     /// frame the panel draws.
     pending: Option<Focus>,
+    /// The HSL colour shown, 0 red to 7 magenta.
+    pub(super) hsl_color: usize,
+    /// The curve shown: RGB, red, green, blue.
+    pub(super) curve_channel: usize,
+    /// A curve point being dragged, and the points as they are now.
+    pub(super) curve_drag: Option<(usize, Vec<(f32, f32)>)>,
 }
 
 /// Where a clip menu row sends the inspector.
@@ -333,8 +339,7 @@ fn adjust_panel(
         &["Basic", "HSL", "Curves", "Color wheel", "Mask"],
         &mut state.page,
     );
-    if state.page != 0 {
-        later_note(ui, ["", "HSL", "Curves", "Color wheel", "Mask"][state.page]);
+    if colour_page(shell, ui, state, inspection) {
         return;
     }
     state.open.insert("adjust".to_owned());
@@ -887,8 +892,7 @@ fn adjust_tab(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState, inspec
         &["Basic", "HSL", "Curves", "Color wheel", "Mask"],
         &mut state.page,
     );
-    if state.page != 0 {
-        later_note(ui, ["", "HSL", "Curves", "Color wheel", "Mask"][state.page]);
+    if colour_page(shell, ui, state, inspection) {
         return;
     }
     for label in ["Auto adjust", "Color match", "Color correction", "LUT"] {
@@ -896,6 +900,24 @@ fn adjust_tab(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState, inspec
     }
     adjust_sliders(shell, ui, state, inspection);
     footer(ui, &["Apply to all", "Save as preset"]);
+}
+
+/// The HSL, Curves, Color wheel or Mask page, when one is picked; false on
+/// the Basic page.
+fn colour_page(
+    shell: &mut Shell,
+    ui: &mut Ui,
+    state: &mut InspectorState,
+    inspection: &Inspection,
+) -> bool {
+    match state.page {
+        0 => return false,
+        1 => super::grade::hsl_page(shell, ui, state, inspection),
+        2 => super::grade::curves_page(shell, ui, state, inspection),
+        3 => super::grade::wheels_page(shell, ui, state, inspection),
+        _ => later_note(ui, "Mask"),
+    }
+    true
 }
 
 /// The Adjust section: a switch that resets every slider, and the sliders.
@@ -1393,7 +1415,7 @@ fn text_parts(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState, look: 
 // Controls.
 
 /// Send one edit and show its refusal.
-fn send(shell: &mut Shell, edit: impl FnOnce(&mut Shell) -> Result<(), ShellError>) {
+pub(super) fn send(shell: &mut Shell, edit: impl FnOnce(&mut Shell) -> Result<(), ShellError>) {
     if let Err(error) = edit(shell) {
         shell.set_notice(error.to_string());
     }
@@ -1621,7 +1643,7 @@ fn later_note(ui: &mut Ui, what: &str) {
     );
 }
 
-fn note(ui: &mut Ui, text: &str) {
+pub(super) fn note(ui: &mut Ui, text: &str) {
     ui.add_space(8.0);
     ui.label(RichText::new(text).size(12.0).color(tokens::MUTED));
     ui.add_space(4.0);
@@ -1700,7 +1722,7 @@ fn label_row(ui: &mut Ui, label: &str, add: impl FnOnce(&mut Ui)) {
 /// A slider row: name, track, value box. Each new value is sent as the
 /// track moves, so the preview follows; the shell joins a held drag into
 /// one undo step.
-fn slider(
+pub(super) fn slider(
     ui: &mut Ui,
     state: &mut InspectorState,
     key: &str,

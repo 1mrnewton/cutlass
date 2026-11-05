@@ -302,10 +302,10 @@ fn lf_own_rows(u0: usize, u1: usize, first: bool, last: bool) -> core::ops::Rang
     lo..hi.max(lo)
 }
 
-fn lf_chunk<P: Pixel>(job: &LfJob<'_, '_>, data: &mut [P], sharp: u8, bd: u32) {
+/// Filters `job`'s rows; `data` starts at plane sample row `row0`.
+fn lf_chunk<P: Pixel>(job: &LfJob<'_, '_>, data: &mut [P], row0: usize, sharp: u8, bd: u32) {
     let (u0, u1, stride) = (job.u0, job.u1, job.stride);
     let nc = job.vert.nc;
-    let row0 = u0 * 4;
     // Vertical edges: decisions for a strip of unit rows, then runs down
     // each column.
     let mut grid = vec![(0u8, 0u8); LF_STRIP_UNITS * nc];
@@ -442,7 +442,7 @@ pub fn loop_filter<P: Pixel>(
                     first: g == 0,
                     last: g + 1 == t,
                 };
-                lf_chunk(&job, data, sharp, bd);
+                lf_chunk(&job, data, job.u0 * 4, sharp, bd);
             }
         };
         std::thread::scope(|s| {
@@ -475,6 +475,92 @@ pub fn loop_filter<P: Pixel>(
             }
         }
     }
+}
+
+/// Loop filter (7.14) of the superblock rows holding the luma 4x4 rows
+/// `mi_r0..mi_r1` (`last`: up to the bottom of the frame), on the calling
+/// thread. Rows above `mi_r0` must be filtered already and the rows below
+/// not yet: the edges of these rows only reach samples of these rows and
+/// the 7 rows above them, so filtering superblock rows in order gives the
+/// result of [`loop_filter`].
+pub fn loop_filter_rows<P: Pixel>(
+    seq: &SequenceHeader,
+    hdr: &FrameHeader,
+    fs: &FrameState,
+    pic: &mut Picture<P>,
+    mi_r0: usize,
+    mi_r1: usize,
+    last: bool,
+) {
+    if hdr.loop_filter.level[0] == 0 && hdr.loop_filter.level[1] == 0 {
+        return;
+    }
+    let bd = pic.bd;
+    let sharp = hdr.loop_filter.sharpness;
+    for plane in 0..seq.num_planes() {
+        if plane > 0 && hdr.loop_filter.level[1 + plane] == 0 {
+            continue;
+        }
+        let (sx, sy) = if plane > 0 {
+            (
+                usize::from(seq.subsampling_x),
+                usize::from(seq.subsampling_y),
+            )
+        } else {
+            (0, 0)
+        };
+        let vert = LfPlane::new(hdr, fs, plane, 0, sx, sy);
+        let horz = LfPlane::new(hdr, fs, plane, 1, sx, sy);
+        let nr = fs.mi_rows.div_ceil(1 << sy);
+        let u0 = mi_r0 >> sy;
+        let u1 = if last { nr } else { (mi_r1 >> sy).min(nr) };
+        if u0 >= u1 {
+            continue;
+        }
+        let pl = &mut pic.planes[plane];
+        let job = LfJob {
+            vert: &vert,
+            horz: &horz,
+            stride: pl.stride,
+            u0,
+            u1,
+            first: true,
+            last: true,
+        };
+        lf_chunk(&job, &mut pl.data, 0, sharp, bd);
+    }
+}
+
+/// CDEF (7.15) of the 64x64 areas whose first luma 4x4 row is in
+/// `mi_r0..mi_r1`, from `src` into `dst` (whose rows there start as a copy
+/// of `src`), on the calling thread. `pads` is scratch from [`cdef_pads`].
+pub fn cdef_sb_rows<P: Pixel>(
+    seq: &SequenceHeader,
+    hdr: &FrameHeader,
+    fs: &FrameState,
+    src: &Picture<P>,
+    dst: &mut Picture<P>,
+    mi_r0: usize,
+    mi_r1: usize,
+    pads: &mut [Vec<u16>; 3],
+) {
+    let num_planes = seq.num_planes();
+    let out = CdefOut {
+        row0: [0; 3],
+        stride: core::array::from_fn(|p| dst.planes.get(p).map_or(0, |pl| pl.stride)),
+    };
+    let mut chunks: Vec<&mut [P]> = dst
+        .planes
+        .iter_mut()
+        .take(num_planes)
+        .map(|pl| &mut pl.data[..])
+        .collect();
+    cdef_rows(seq, hdr, fs, src, &mut chunks, &out, mi_r0..mi_r1, pads);
+}
+
+/// Scratch for [`cdef_sb_rows`].
+pub fn cdef_pads() -> [Vec<u16>; 3] {
+    core::array::from_fn(|_| vec![0u16; CDEF_PAD_STRIDE * CDEF_PAD_STRIDE])
 }
 
 /// Side, in samples, of the padded copy of one 64x64 luma area in [`cdef`].

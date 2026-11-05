@@ -20,8 +20,8 @@ use super::obu::{
 };
 use super::postfilter;
 use super::recon::Scratch;
-use super::tile::{RefView, TileDec, malformed};
-use super::types::{INTRA_FRAME, Mv};
+use super::tile::{RefView, RowHook, TileDec, malformed};
+use super::types::{INTRA_FRAME, MiInfo, Mv};
 
 type R<T> = Result<T, CodecError>;
 
@@ -816,30 +816,21 @@ fn recycle<P: Pixel>(pool: &mut Vec<Picture<P>>, p: Picture<P>) {
     }
 }
 
-/// Decodes all tiles of a frame and runs the in-loop filters. Returns the
-/// final picture and the CDFs saved from the context tile.
-fn decode_frame<P: Pixel>(
+/// Decodes the tiles of a frame into `cur`, calling `on_row(fs, cur, r0,
+/// r1)` after each superblock row of each tile (luma 4x4 rows `r0..r1`).
+/// Returns the CDFs saved from the context tile.
+fn decode_tiles<P: Pixel>(
     seq: &SequenceHeader,
     hdr: &FrameHeader,
     fs: &mut FrameState,
     tiles: &[(usize, Vec<u8>)],
     cdf: &mut CdfContext,
-    refs: [Option<&Picture<P>>; 8],
+    refs: &[Option<&Picture<P>>; 8],
     ref_hdr: &[RefHeaderState; 8],
-    lr_scratch: &mut LrScratch,
-    pool: &mut Vec<Picture<P>>,
-    threads: usize,
-) -> R<(Picture<P>, Box<CdfContext>)> {
+    cur: &mut Picture<P>,
+    on_row: &mut RowHook<'_, P>,
+) -> R<Box<CdfContext>> {
     let num_planes = seq.num_planes();
-    let mut cur = take_picture::<P>(
-        pool,
-        hdr.frame_width as usize,
-        hdr.frame_height as usize,
-        num_planes,
-        seq.subsampling_x,
-        seq.subsampling_y,
-        seq.bit_depth,
-    );
     let mut saved: Option<Box<CdfContext>> = None;
     let sb128 = seq.use_128x128_superblock;
     let ti = &hdr.tile_info;
@@ -871,7 +862,7 @@ fn decode_frame<P: Pixel>(
             seq,
             hdr,
             fs: &mut *fs,
-            cur: &mut cur,
+            cur: &mut *cur,
             refs: ref_views,
             msac: Msac::new(data, hdr.disable_cdf_update),
             cdf: &mut tile_cdf,
@@ -916,7 +907,7 @@ fn decode_frame<P: Pixel>(
             color_map_uv: std::mem::take(&mut color_map_uv),
             scratch: std::mem::replace(&mut scratch, Scratch::empty()),
         };
-        let res = td.decode_tile();
+        let res = td.decode_tile_rows(&mut *on_row);
         above_level = std::mem::take(&mut td.above_level);
         above_dc = std::mem::take(&mut td.above_dc);
         above_seg_pred = std::mem::take(&mut td.above_seg_pred);
@@ -930,9 +921,186 @@ fn decode_frame<P: Pixel>(
             saved = Some(tile_cdf);
         }
     }
-    let saved = saved.unwrap_or_else(|| Box::new(cdf.clone()));
-    // decode_frame_wrapup: in-loop filters.
-    postfilter::loop_filter(seq, hdr, fs, &mut cur, threads);
+    Ok(saved.unwrap_or_else(|| Box::new(cdf.clone())))
+}
+
+/// One superblock row of the frame being decoded, copied for
+/// [`filter_rows_worker`]: luma 4x4 rows `r0..r1`, their samples, mode info,
+/// loop filter transform sizes and CDEF indices.
+#[derive(Default)]
+struct RowMsg<P> {
+    r0: usize,
+    r1: usize,
+    last: bool,
+    /// Per plane: first sample row and the rows (whole strides).
+    px: [(usize, Vec<P>); 3],
+    /// First 4x4 row copied and the mode info / transform size rows (the
+    /// last row reaches the end of the arrays).
+    mi_row0: usize,
+    mi: Vec<MiInfo>,
+    lf_tx: [Vec<u8>; 3],
+    cdef_row0: usize,
+    cdef: Vec<i8>,
+}
+
+impl<P: Pixel> RowMsg<P> {
+    fn fill(
+        &mut self,
+        fs: &FrameState,
+        cur: &Picture<P>,
+        sb4: usize,
+        r0: usize,
+        r1: usize,
+        last: bool,
+        sub_y: bool,
+    ) {
+        self.r0 = r0;
+        self.r1 = r1;
+        self.last = last;
+        for (p, pl) in cur.planes.iter().enumerate().take(3) {
+            let sy = usize::from(p > 0 && sub_y);
+            let y0 = (4 * r0) >> sy;
+            let y1 = if last {
+                pl.alloc_h
+            } else {
+                ((4 * r1) >> sy).min(pl.alloc_h)
+            };
+            let (row0, v) = &mut self.px[p];
+            *row0 = y0;
+            v.clear();
+            v.extend_from_slice(&pl.data[y0 * pl.stride..y1 * pl.stride]);
+        }
+        let st = fs.mi_stride;
+        let end = if last { fs.mi.len() } else { r1 * st };
+        self.mi_row0 = r0;
+        self.mi.clear();
+        self.mi.extend_from_slice(&fs.mi[r0 * st..end]);
+        // The transform size maps are indexed in each plane's 4x4 units.
+        for (p, (d, s)) in self.lf_tx.iter_mut().zip(&fs.lf_tx).enumerate() {
+            let sy = usize::from(p > 0 && sub_y);
+            let e = if last { s.len() } else { (r1 >> sy) * st };
+            d.clear();
+            d.extend_from_slice(&s[(r0 >> sy) * st..e]);
+        }
+        let cs = fs.cdef_stride;
+        let c0 = r0 >> 4;
+        let c1 = if last {
+            fs.cdef_idx.len()
+        } else {
+            ((r0 + sb4) >> 4) * cs
+        };
+        self.cdef_row0 = c0;
+        self.cdef.clear();
+        self.cdef
+            .extend_from_slice(&fs.cdef_idx[(c0 * cs).min(c1)..c1.min(fs.cdef_idx.len())]);
+    }
+
+    /// Writes the copied rows into `fs` and `pic`.
+    fn apply(&self, fs: &mut FrameState, pic: &mut Picture<P>, sub_y: bool) {
+        for (pl, (row0, v)) in pic.planes.iter_mut().zip(&self.px) {
+            let o = row0 * pl.stride;
+            pl.data[o..o + v.len()].copy_from_slice(v);
+        }
+        let o = self.mi_row0 * fs.mi_stride;
+        fs.mi[o..o + self.mi.len()].copy_from_slice(&self.mi);
+        for (p, (d, s)) in fs.lf_tx.iter_mut().zip(&self.lf_tx).enumerate() {
+            let o = (self.mi_row0 >> usize::from(p > 0 && sub_y)) * fs.mi_stride;
+            d[o..o + s.len()].copy_from_slice(s);
+        }
+        let o = self.cdef_row0 * fs.cdef_stride;
+        fs.cdef_idx[o..o + self.cdef.len()].copy_from_slice(&self.cdef);
+    }
+}
+
+/// Copies the sample rows of luma 4x4 rows `r0..r1` (to the bottom of the
+/// allocation when `last`) from `src` to `dst`.
+fn copy_rows<P: Pixel>(
+    src: &Picture<P>,
+    dst: &mut Picture<P>,
+    r0: usize,
+    r1: usize,
+    last: bool,
+    sub_y: bool,
+) {
+    for (p, (d, s)) in dst.planes.iter_mut().zip(&src.planes).enumerate() {
+        let sy = usize::from(p > 0 && sub_y);
+        let y0 = (4 * r0) >> sy;
+        let y1 = if last {
+            s.alloc_h
+        } else {
+            ((4 * r1) >> sy).min(s.alloc_h)
+        };
+        let r = y0 * s.stride..y1 * s.stride;
+        d.data[r.clone()].copy_from_slice(&s.data[r]);
+    }
+}
+
+/// Deblocks (when `lf_on`) the superblock rows arriving on `rx` into
+/// `deb`, and runs CDEF into `cdef_dst` one superblock row behind, as each
+/// row's CDEF reads deblocked samples of the next. Spent messages go back on
+/// `back` for reuse.
+fn filter_rows_worker<P: Pixel>(
+    seq: &SequenceHeader,
+    hdr: &FrameHeader,
+    fs: &mut FrameState,
+    deb: &mut Picture<P>,
+    mut cdef_dst: Option<&mut Picture<P>>,
+    lf_on: bool,
+    rx: std::sync::mpsc::Receiver<RowMsg<P>>,
+    back: std::sync::mpsc::Sender<RowMsg<P>>,
+) {
+    let mut pads = postfilter::cdef_pads();
+    let mut pending: Option<(usize, usize)> = None;
+    for m in rx {
+        m.apply(fs, deb, seq.subsampling_y);
+        if lf_on {
+            postfilter::loop_filter_rows(seq, hdr, fs, deb, m.r0, m.r1, m.last);
+        }
+        if let Some(dst) = cdef_dst.as_deref_mut() {
+            let sub_y = seq.subsampling_y;
+            if let Some((a, b)) = pending.take() {
+                copy_rows(deb, dst, a, b, false, sub_y);
+                postfilter::cdef_sb_rows(seq, hdr, fs, deb, dst, a, b, &mut pads);
+            }
+            if m.last {
+                copy_rows(deb, dst, m.r0, m.r1, true, sub_y);
+                postfilter::cdef_sb_rows(seq, hdr, fs, deb, dst, m.r0, m.r1, &mut pads);
+            } else {
+                pending = Some((m.r0, m.r1));
+            }
+        }
+        let _ = back.send(m);
+    }
+}
+
+/// Decodes all tiles of a frame and runs the in-loop filters. Returns the
+/// final picture and the CDFs saved from the context tile.
+fn decode_frame<P: Pixel>(
+    seq: &SequenceHeader,
+    hdr: &FrameHeader,
+    fs: &mut FrameState,
+    tiles: &[(usize, Vec<u8>)],
+    cdf: &mut CdfContext,
+    refs: [Option<&Picture<P>>; 8],
+    ref_hdr: &[RefHeaderState; 8],
+    lr_scratch: &mut LrScratch,
+    pool: &mut Vec<Picture<P>>,
+    threads: usize,
+) -> R<(Picture<P>, Box<CdfContext>)> {
+    let num_planes = seq.num_planes();
+    let new_pic = |pool: &mut Vec<Picture<P>>| {
+        take_picture::<P>(
+            pool,
+            hdr.frame_width as usize,
+            hdr.frame_height as usize,
+            num_planes,
+            seq.subsampling_x,
+            seq.subsampling_y,
+            seq.bit_depth,
+        )
+    };
+    let mut cur = new_pic(pool);
+    let lf_on = hdr.loop_filter.level[0] != 0 || hdr.loop_filter.level[1] != 0;
     let cdef_on = seq.enable_cdef
         && !hdr.coded_lossless
         && !hdr.allow_intrabc
@@ -941,12 +1109,73 @@ fn decode_frame<P: Pixel>(
             || hdr.cdef.y_sec[0] != 0
             || hdr.cdef.uv_pri[0] != 0
             || hdr.cdef.uv_sec[0] != 0);
-    let cdef_pic = if cdef_on {
-        let mut d = copy_picture(pool, &cur);
-        postfilter::cdef(seq, hdr, fs, &cur, &mut d, threads);
-        Some(d)
+    // With one tile column, superblock rows complete in order: deblocking
+    // and CDEF then run on a second thread one superblock row behind.
+    let pipeline =
+        threads > 1 && hdr.tile_info.cols == 1 && !hdr.use_superres && (lf_on || cdef_on);
+    let (saved, cur, cdef_pic) = if pipeline {
+        let mut deb = new_pic(pool);
+        let mut cdef_dst = if cdef_on { Some(new_pic(pool)) } else { None };
+        let mut pf_fs = fs.filter_shell();
+        let saved = std::thread::scope(|s| {
+            let (tx, rx) = std::sync::mpsc::channel::<RowMsg<P>>();
+            let (back_tx, back_rx) = std::sync::mpsc::channel::<RowMsg<P>>();
+            let deb = &mut deb;
+            let cdef_dst = cdef_dst.as_mut();
+            let pf_fs = &mut pf_fs;
+            let worker = s.spawn(move || {
+                filter_rows_worker(seq, hdr, pf_fs, deb, cdef_dst, lf_on, rx, back_tx);
+            });
+            let sb4 = if seq.use_128x128_superblock { 32 } else { 16 };
+            let res = decode_tiles(
+                seq,
+                hdr,
+                fs,
+                tiles,
+                cdf,
+                &refs,
+                ref_hdr,
+                &mut cur,
+                &mut |fs: &FrameState, cur: &Picture<P>, r0: usize, r1: usize| {
+                    let mut m = back_rx.try_recv().unwrap_or_default();
+                    m.fill(fs, cur, sb4, r0, r1, r1 >= fs.mi_rows, seq.subsampling_y);
+                    // A send only fails once the worker is gone (it panicked):
+                    // the join below reports that.
+                    let _ = tx.send(m);
+                },
+            );
+            drop(tx);
+            let joined = worker.join();
+            match (res, joined) {
+                (Err(e), _) => Err(e),
+                (Ok(_), Err(_)) => Err(malformed("in-loop filter thread")),
+                (Ok(c), Ok(())) => Ok(c),
+            }
+        })?;
+        recycle(pool, cur);
+        (saved, deb, cdef_dst)
     } else {
-        None
+        let saved = decode_tiles(
+            seq,
+            hdr,
+            fs,
+            tiles,
+            cdf,
+            &refs,
+            ref_hdr,
+            &mut cur,
+            &mut |_: &FrameState, _: &Picture<P>, _: usize, _: usize| {},
+        )?;
+        // decode_frame_wrapup: in-loop filters.
+        postfilter::loop_filter(seq, hdr, fs, &mut cur, threads);
+        let cdef_pic = if cdef_on {
+            let mut d = copy_picture(pool, &cur);
+            postfilter::cdef(seq, hdr, fs, &cur, &mut d, threads);
+            Some(d)
+        } else {
+            None
+        };
+        (saved, cur, cdef_pic)
     };
     let (up_cdef, up_deblocked) = if hdr.use_superres {
         let c = postfilter::superres(seq, hdr, cdef_pic.as_ref().unwrap_or(&cur));

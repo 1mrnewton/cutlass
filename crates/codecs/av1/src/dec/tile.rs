@@ -42,6 +42,10 @@ use super::types::{
 
 pub type R<T> = Result<T, CodecError>;
 
+/// Called after each superblock row a tile decodes, with the frame state,
+/// the picture and the luma 4x4 rows `r0..r1` of the row.
+pub type RowHook<'h, P> = dyn FnMut(&FrameState, &Picture<P>, usize, usize) + 'h;
+
 pub fn malformed(what: &'static str) -> CodecError {
     CodecError::Malformed { at_bit: 0, what }
 }
@@ -510,6 +514,26 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
                 self.code_superblock(r, c)?;
                 c += sb4;
             }
+            r += sb4;
+        }
+        Ok(())
+    }
+
+    /// [`Self::decode_tile`], calling `on_row(fs, cur, r0, r1)` after each
+    /// superblock row (luma 4x4 rows `r0..r1`).
+    pub fn decode_tile_rows(&mut self, on_row: &mut RowHook<'_, P>) -> R<()> {
+        self.begin_tile();
+        let sb4 = self.sb_size4;
+        let mut r = self.mi_row_start;
+        while r < self.mi_row_end {
+            self.begin_sb_row();
+            let mut c = self.mi_col_start;
+            while c < self.mi_col_end {
+                self.code_superblock(r, c)?;
+                c += sb4;
+            }
+            let r1 = (r + sb4).min(self.mi_row_end);
+            on_row(self.fs, self.cur, r, r1);
             r += sb4;
         }
         Ok(())

@@ -159,6 +159,30 @@ impl FrameState {
         }
     }
 
+    /// A state of the same size holding only what the in-loop filters read
+    /// (mode info, loop filter transform sizes, CDEF indices), to be filled
+    /// row by row.
+    pub fn filter_shell(&self) -> Self {
+        Self {
+            mi_cols: self.mi_cols,
+            mi_rows: self.mi_rows,
+            mi_stride: self.mi_stride,
+            mi: vec![MiInfo::default(); self.mi.len()],
+            uv_modes: Vec::new(),
+            tx_types: Vec::new(),
+            inter_tx_sizes: Vec::new(),
+            lf_tx: std::array::from_fn(|p| vec![0; self.lf_tx[p].len()]),
+            segment_ids: Vec::new(),
+            prev_segment_ids: None,
+            cdef_idx: vec![-1; self.cdef_idx.len()],
+            cdef_stride: self.cdef_stride,
+            lr: Default::default(),
+            lr_cols: self.lr_cols,
+            lr_rows: self.lr_rows,
+            motion_field: Vec::new(),
+        }
+    }
+
     #[inline(always)]
     pub fn mi_at(&self, row: usize, col: usize) -> &MiInfo {
         &self.mi[row * self.mi_stride + col]

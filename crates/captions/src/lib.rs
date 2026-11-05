@@ -10,6 +10,7 @@ mod animate;
 mod clock;
 mod page;
 mod select;
+mod style;
 
 use std::error::Error;
 use std::fmt;
@@ -24,12 +25,13 @@ pub use animate::{
 pub use clock::{ClockPlace, WordClock, WordSpan, held_end, sample, word_millis, words};
 pub use page::{
     CaptionLine, CaptionPage, LetterMap, MappedLetter, PageLimits, Pages, WordBytes, map_letters,
-    paginate,
+    map_page, page_at, paginate,
 };
 pub use select::{
     KeywordRange, REMATCH_LIMIT, RangeKind, Selection, SplitPiece, TextRange, rematch, select,
     split_keyword,
 };
+pub use style::{CAPTION_STYLES, CaptionStyle, WordLook, caption_style};
 
 /// Why a caption sample could not be produced.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -130,8 +132,35 @@ pub fn sample_caption(query: &CaptionQuery<'_>) -> Result<CaptionFrame, CaptionE
     let clock = sample(columns, query.timeline, query.placed_at)?;
     let spans = words(columns)?;
     let pages = paginate(&spans, query.limits);
-    let letters = map_letters(query.font, query.material, &spans)?;
-    let selection = select(&spans, clock.millis, query.keywords, columns)?;
+    // With limits, only the page under way is laid out and drawn.
+    let paged = query.limits.words_per_line > 0 || query.limits.lines_per_page > 0;
+    let (letters, shown) = match page_at(&pages, clock.millis).filter(|_| paged) {
+        Some(page) => {
+            let letters = map_page(query.font, query.material, &spans, &pages, page)?;
+            let shown: Vec<WordSpan<'_>> = spans
+                .iter()
+                .filter(|word| {
+                    letters
+                        .words
+                        .iter()
+                        .any(|placed| placed.index == word.index)
+                })
+                .cloned()
+                .collect();
+            (letters, shown)
+        }
+        None => (
+            map_letters(query.font, query.material, &spans)?,
+            spans.clone(),
+        ),
+    };
+    let keywords: Vec<KeywordRange> = query
+        .keywords
+        .iter()
+        .filter(|keyword| shown.iter().any(|word| word.index == keyword.word))
+        .cloned()
+        .collect();
+    let selection = select(&shown, clock.millis, &keywords, columns)?;
     let batches = batches(
         &letters,
         &selection,
@@ -224,6 +253,43 @@ mod tests {
             ],
         };
         styles
+    }
+
+    #[test]
+    fn with_limits_only_the_page_under_way_is_laid_out_on_its_lines() {
+        let mut text = material("");
+        put_words(
+            &mut text.words,
+            &[
+                ("AB", 0, 100),
+                ("BA", 100, 200),
+                ("AA", 200, 300),
+                ("BB", 300, 400),
+                ("A", 400, 500),
+            ],
+        );
+        let styles = RangeStyles::identity();
+        let mut paged = query(&text, 150_000, &[], &styles);
+        paged.limits = PageLimits {
+            words_per_line: 2,
+            lines_per_page: 1,
+        };
+        let first = sample_caption(&paged).unwrap();
+        assert_eq!(first.letters.text, "AB BA");
+        paged.timeline = Micros(350_000);
+        let second = sample_caption(&paged).unwrap();
+        assert_eq!(second.letters.text, "AA BB");
+        // The spoken word is the one the page shows.
+        assert_eq!(second.selection.reading[0].word, 3);
+        // Two lines a page put the next line under the first.
+        paged.limits.lines_per_page = 2;
+        paged.timeline = Micros(50_000);
+        let tall = sample_caption(&paged).unwrap();
+        assert_eq!(tall.letters.text, "AB BA\nAA BB");
+        assert_eq!(tall.letters.layout.lines.len(), 2);
+        // Without limits every word is drawn, as before.
+        let whole = sample_caption(&query(&text, 50_000, &[], &styles)).unwrap();
+        assert_eq!(whole.letters.text, "AB BA AA BB A");
     }
 
     #[test]

@@ -102,6 +102,9 @@ pub struct Decoder {
     vscale: u8,
     segment_map: Vec<u8>,
     pool: Vec<Frame>,
+    /// Macroblocks decoded per luma mode, for tests that check coverage.
+    #[cfg(test)]
+    pub(crate) mode_counts: [u64; 10],
 }
 
 /// Work for one frame, kept apart so a frame's results commit at once.
@@ -184,6 +187,10 @@ impl Decoder {
             filter::filter_frame(&mut planes, &work.filters, h.filter_simple);
         }
         work.segments = segments;
+        #[cfg(test)]
+        for mb in &work.mbs {
+            self.mode_counts[usize::from(mb.y_mode).min(9)] += 1;
+        }
 
         // Commit.
         self.persist = parsed.next;
@@ -642,6 +649,11 @@ impl Vp8Decoder {
             inner: Decoder::new(),
             cancel: Arc::new(AtomicBool::new(false)),
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn mode_counts(&self) -> [u64; 10] {
+        self.inner.mode_counts
     }
 
     /// The horizontal and vertical upscaling the stream asks for

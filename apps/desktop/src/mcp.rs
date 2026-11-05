@@ -56,11 +56,11 @@ pub fn serve(
         settings,
         NoPlayer,
         Probe,
-        Unbuilt,
-        Unbuilt,
+        Unbuilt(NOT_HERE),
+        Unbuilt(NOT_HERE),
         (
-            Unbuilt,
-            Unbuilt,
+            Unbuilt(NOT_HERE),
+            Unbuilt(NOT_HERE),
             NoSandbox,
             Refuse,
             McpClient::new(NoServers),
@@ -113,7 +113,7 @@ impl Player for NoPlayer {
 }
 
 /// Reads a file's header for its length, size and streams.
-struct Probe;
+pub(crate) struct Probe;
 
 impl Media for Probe {
     fn probe(&mut self, path: &str) -> Result<MediaInfo, String> {
@@ -140,38 +140,38 @@ impl Media for Probe {
 }
 
 /// Transcription, the catalog, packages and export, which this host does
-/// not run yet.
-struct Unbuilt;
+/// not run yet; the text says where they are.
+pub(crate) struct Unbuilt(pub(crate) &'static str);
 
 impl Speech for Unbuilt {
     fn start(&mut self, _start_us: i64, _duration_us: i64) -> Result<String, String> {
-        Err(format!("transcription is {NOT_HERE}"))
+        Err(format!("transcription is {}", self.0))
     }
 
     fn poll(&mut self, _job_id: &str) -> Result<String, String> {
-        Err(format!("transcription is {NOT_HERE}"))
+        Err(format!("transcription is {}", self.0))
     }
 }
 
 impl Catalog for Unbuilt {
     fn search(&mut self, _query: &str) -> Result<Vec<String>, String> {
-        Err(format!("the catalog is {NOT_HERE}"))
+        Err(format!("the catalog is {}", self.0))
     }
 }
 
 impl Packages for Unbuilt {
     fn ensure(&mut self, _package_id: &str) -> Result<(), String> {
-        Err(format!("packages are {NOT_HERE}"))
+        Err(format!("packages are {}", self.0))
     }
 }
 
 impl Export for Unbuilt {
     fn start(&mut self, _path: &str) -> Result<String, String> {
-        Err(format!("export is {NOT_HERE}"))
+        Err(format!("export is {}", self.0))
     }
 }
 
-struct NoSandbox;
+pub(crate) struct NoSandbox;
 
 impl Sandbox for NoSandbox {
     fn run(&mut self, _source: &str, _input_json: &str) -> Result<String, SandboxError> {

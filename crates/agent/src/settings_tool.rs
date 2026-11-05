@@ -79,6 +79,12 @@ impl SettingsTool {
         }
     }
 
+    /// Settings a host already holds, read from `path` at `generation`.
+    #[must_use]
+    pub fn held(path: impl Into<PathBuf>, generation: u64, settings: Settings) -> Self {
+        Self::ready(path.into(), generation, settings)
+    }
+
     /// The generation and settings held in memory.
     #[must_use]
     pub fn get(&self) -> SettingsView {

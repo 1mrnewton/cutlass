@@ -46,6 +46,7 @@ use cutlass_transcription::{
     Recognizer, caption_request, columns, fit, words_on_timeline,
 };
 
+mod assistant;
 mod inspector;
 
 pub use inspector::{LetterCase, Panel, SILENT_DB, TextLook, gain_of_db, volume_db};

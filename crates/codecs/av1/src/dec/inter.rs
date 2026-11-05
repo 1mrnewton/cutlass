@@ -432,11 +432,21 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         } else {
             (w + 7, h + 7)
         };
-        // Source: the reference plane, or an edge-emulated copy.
-        let inside = ix - 3 >= 0
-            && iy - 3 >= 0
-            && ix - 3 + fw as i64 <= pw as i64
-            && iy - 3 + fh as i64 <= ph as i64;
+        // Source: the reference plane, or an edge-emulated copy. Unscaled,
+        // a direction without a fraction reads no samples beside the block
+        // (the filters copy), so only the samples read need to be inside.
+        let (left, right) = if scaled || (sx0 >> 6) & 15 != 0 {
+            (3, fw as i64 - 3)
+        } else {
+            (0, w as i64)
+        };
+        let (top, bottom) = if scaled || (sy0 >> 6) & 15 != 0 {
+            (3, fh as i64 - 3)
+        } else {
+            (0, h as i64)
+        };
+        let inside =
+            ix - left >= 0 && iy - top >= 0 && ix + right <= pw as i64 && iy + bottom <= ph as i64;
         let use_emu = !inside || self.b.use_intrabc;
         if use_emu {
             let (src, sstride): (&[P], usize) = if self.b.use_intrabc {

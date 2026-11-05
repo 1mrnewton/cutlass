@@ -957,11 +957,19 @@ impl Projection {
                         mv,
                         offset: ref_offset as i8,
                     };
-                    for x in x8..end {
-                        let base8 = (x as i32 >> 3) << 3;
-                        let px = x as i32 + dx;
-                        if px >= 0 && px < w8 as i32 && px >= base8 - 8 && px < base8 + 16 {
-                            row[px as usize] = e;
+                    if dx.abs() <= 8 {
+                        // Inside the window of 8 columns either side of
+                        // every source group: only the frame clips.
+                        let a = (x8 as i32 + dx).clamp(0, w8 as i32) as usize;
+                        let b = (end as i32 + dx).clamp(0, w8 as i32) as usize;
+                        row[a..b].fill(e);
+                    } else {
+                        for x in x8..end {
+                            let base8 = (x as i32 >> 3) << 3;
+                            let px = x as i32 + dx;
+                            if px >= 0 && px < w8 as i32 && px >= base8 - 8 && px < base8 + 16 {
+                                row[px as usize] = e;
+                            }
                         }
                     }
                 }

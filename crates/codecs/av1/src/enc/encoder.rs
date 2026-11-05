@@ -1270,6 +1270,7 @@ impl Av1Enc {
             fast_tx_dist: ev("AV1_FTD", 1.0) > 0.0,
             rect_partitions: ev("AV1_RECT", 0.0) > 0.0,
             subpel_pruned: ev("AV1_SPP", if speed >= 5 { 1.0 } else { 0.0 }) > 0.0,
+            subpel_sad_steps: ev("AV1_SPSAD", 0.0) as u8,
             intra_refine_ratio: ev("AV1_IRR", if speed >= 5 { 1.0 } else { 0.0 }),
             intra_sweep_ratio: ev("AV1_IRS", if speed >= 5 { 2.0 } else { 0.0 }),
             inter_clear_ratio: ev("AV1_ICR", if speed >= 5 { 1.2 } else { 0.0 }),

@@ -78,6 +78,8 @@ pub struct ModeParams {
     pub rect_partitions: bool,
     /// Sub-sample motion search tries 5 instead of 8 neighbours per step.
     pub subpel_pruned: bool,
+    /// Sub-sample motion search steps compared by SAD (see `MeParams`).
+    pub subpel_sad_steps: u8,
     /// Inter frames: intra angle deltas and filter intra are tried only when
     /// the best intra SATD cost is below this multiple of the inter one (0: always).
     pub intra_refine_ratio: f64,
@@ -170,6 +172,7 @@ impl Default for ModeParams {
             fast_tx_dist: true,
             rect_partitions: false,
             subpel_pruned: false,
+            subpel_sad_steps: 0,
             intra_refine_ratio: 0.0,
             intra_sweep_ratio: 0.0,
             inter_clear_ratio: 0.0,
@@ -1697,6 +1700,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
             filter: self.mode.me_filter,
             subpel_pruned: self.mode.subpel_pruned,
             max_ring: self.mode.me_ring,
+            subpel_sad_steps: self.mode.subpel_sad_steps,
             ..MeParams::default()
         };
         let cost_fn = |r: i32, c: i32| -> u32 {
@@ -2106,6 +2110,12 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         let h = block_height(pb.bsize).min(self.fs.mi_rows * 4 - y);
         let (w, h) = (w & !3, h & !3);
         if w == 0 || h == 0 {
+            return [0, 0];
+        }
+        // Whole-sample vectors copy the reference whatever the filter: the
+        // cheapest signalling (regular) wins.
+        let n = if pb.ref_frame[1] > INTRA_FRAME { 2 } else { 1 };
+        if pb.mv[..n].iter().all(|m| m.row & 7 == 0 && m.col & 7 == 0) {
             return [0, 0];
         }
         let lam = self.mode.lambda_satd;

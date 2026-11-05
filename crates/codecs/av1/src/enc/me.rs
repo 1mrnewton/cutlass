@@ -51,7 +51,7 @@ fn sad_rows<P: Pixel>(
     for r in 0..h {
         let (ra, rb) = (&a[r * a_stride..][..w], &b[r * b_stride..][..w]);
         let mut s = 0u32;
-        for (&x, &y) in ra[..w].iter().zip(&rb[..w]) {
+        for (&x, &y) in ra.iter().zip(rb) {
             s += (x.to_i32() - y.to_i32()).unsigned_abs();
         }
         sum += s;
@@ -390,15 +390,7 @@ fn row_stage(v: [i16; 8], perm: [usize; 8], sign: [i16; 8]) -> [i16; 8] {
 /// differences widened to 32 bits. Differences lie in `-255..=255`, so every
 /// 16-bit intermediate stays within `32 * 255`.
 #[inline(always)]
-fn hadamard8_abs_8bit<P: Pixel>(a: &[P], a_stride: usize, b: &[P], b_stride: usize) -> u32 {
-    let a = &a[..7 * a_stride + 8];
-    let b = &b[..7 * b_stride + 8];
-    let mut m = [[0i16; 8]; 8];
-    for (r, row) in m.iter_mut().enumerate() {
-        let ra = &a[r * a_stride..][..8];
-        let rb = &b[r * b_stride..][..8];
-        *row = core::array::from_fn(|k| (ra[k].to_i32() - rb[k].to_i32()) as i16);
-    }
+fn hadamard8_abs_8bit(m: &mut [[i16; 8]; 8]) -> u32 {
     for half in [1, 2, 4] {
         let mut i = 0;
         while i < 8 {
@@ -411,7 +403,7 @@ fn hadamard8_abs_8bit<P: Pixel>(a: &[P], a_stride: usize, b: &[P], b_stride: usi
         }
     }
     let mut acc = [0i32; 4];
-    for row in &m {
+    for row in m.iter() {
         let v = row_stage(*row, [4, 5, 6, 7, 0, 1, 2, 3], [1, 1, 1, 1, -1, -1, -1, -1]);
         let v = row_stage(v, [2, 3, 0, 1, 6, 7, 4, 5], [1, 1, -1, -1, 1, 1, -1, -1]);
         for k in 0..4 {
@@ -432,14 +424,29 @@ fn satd_tiles<P: Pixel, const N: usize>(
     h: usize,
 ) -> u32 {
     let mut total = 0u32;
+    if N == 8 && !P::HBD {
+        // The rows of a strip of tiles are sliced once, so the tiles need no
+        // bounds checks of their own.
+        let n = w / 8;
+        for by in (0..h / 8).map(|t| t * 8) {
+            let ra: [&[P]; 8] = core::array::from_fn(|r| &a[(by + r) * a_stride..][..n * 8]);
+            let rb: [&[P]; 8] = core::array::from_fn(|r| &b[(by + r) * b_stride..][..n * 8]);
+            for t in 0..n {
+                let o = t * 8;
+                let mut m = [[0i16; 8]; 8];
+                for (row, (xa, xb)) in m.iter_mut().zip(ra.iter().zip(&rb)) {
+                    let (xa, xb) = (&xa[o..o + 8], &xb[o..o + 8]);
+                    *row = core::array::from_fn(|k| (xa[k].to_i32() - xb[k].to_i32()) as i16);
+                }
+                total += (hadamard8_abs_8bit(&mut m) + 1) >> 1;
+            }
+        }
+        return total;
+    }
     for by in (0..h).step_by(N) {
         for bx in (0..w).step_by(N) {
             let (ta, tb) = (&a[by * a_stride + bx..], &b[by * b_stride + bx..]);
-            let s = if N == 8 && !P::HBD {
-                hadamard8_abs_8bit(ta, a_stride, tb, b_stride)
-            } else {
-                hadamard_abs::<P, N>(ta, a_stride, tb, b_stride)
-            };
+            let s = hadamard_abs::<P, N>(ta, a_stride, tb, b_stride);
             total += (s + 1) >> 1;
         }
     }
@@ -555,6 +562,9 @@ pub struct MeParams {
     /// Sub-sample steps try the four axis neighbours and then only the
     /// diagonal between the better ones (5 predictions instead of 8).
     pub subpel_pruned: bool,
+    /// The first this many sub-sample steps compare half the SAD instead
+    /// of the SATD (the last step always uses the SATD).
+    pub subpel_sad_steps: u8,
 }
 
 impl Default for MeParams {
@@ -567,6 +577,7 @@ impl Default for MeParams {
             max_iters: 8,
             max_ring: 16,
             subpel_pruned: false,
+            subpel_sad_steps: 0,
         }
     }
 }
@@ -698,7 +709,7 @@ impl<P: Pixel> Default for MeScratch<P> {
 }
 
 /// The reference plane and the block being searched.
-struct Search<'a, P: Pixel> {
+struct Search<'a, P: Pixel, F: Fn(i32, i32) -> u32> {
     src: &'a [P],
     src_stride: usize,
     x: isize,
@@ -709,7 +720,7 @@ struct Search<'a, P: Pixel> {
     ref_stride: usize,
     ref_w: usize,
     ref_h: usize,
-    mv_cost: &'a dyn Fn(i32, i32) -> u32,
+    mv_cost: &'a F,
     bd: u32,
     filter_x: usize,
     filter_y: usize,
@@ -752,7 +763,7 @@ fn four_tap(filter: u8) -> usize {
     }
 }
 
-impl<P: Pixel> Search<'_, P> {
+impl<P: Pixel, F: Fn(i32, i32) -> u32> Search<'_, P, F> {
     fn src_block(&self) -> &[P] {
         &self.src[self.y as usize * self.src_stride + self.x as usize..]
     }
@@ -771,6 +782,7 @@ impl<P: Pixel> Search<'_, P> {
 
     /// The reference block at full-sample offset `(dy, dx)`: directly from
     /// the plane when inside, else edge-emulated into `edge` (stride `w`).
+    #[inline(always)]
     fn ref_block<'b>(&'b self, edge: &'b mut [P], dy: i32, dx: i32) -> (&'b [P], usize) {
         let px = self.x + dx as isize;
         let py = self.y + dy as isize;
@@ -1028,7 +1040,7 @@ pub fn motion_search<P: Pixel>(
     ref_h: usize,
     candidates: &[(i32, i32)],
     params: &MeParams,
-    mv_cost: &dyn Fn(i32, i32) -> u32,
+    mv_cost: &impl Fn(i32, i32) -> u32,
     bd: u32,
 ) -> MeResult {
     let filter = usize::from(params.filter);
@@ -1244,9 +1256,16 @@ pub fn motion_search<P: Pixel>(
         let (r8_lo, r8_hi) = (row_lo * 8, row_hi * 8);
         let (c8_lo, c8_hi) = (col_lo * 8, col_hi * 8);
         let src_blk = s.src_block();
+        let levels = usize::from(params.subpel.min(3));
+        let sad_steps = usize::from(params.subpel_sad_steps).min(levels.saturating_sub(1));
+        let half_sad = |p: &[P], ps: usize| sad(src_blk, src_stride, p, ps, w, h).div_ceil(2);
         {
             let (blk, bs) = s.ref_block(edge, best.row, best.col);
-            let d = satd(src_blk, src_stride, blk, bs, w, h);
+            let d = if sad_steps > 0 {
+                half_sad(blk, bs)
+            } else {
+                satd(src_blk, src_stride, blk, bs, w, h)
+            };
             mv.dist = d;
             mv.cost = d.saturating_add(mv_cost(mv.row, mv.col));
             // The full-sample prediction is the reference block itself.
@@ -1255,8 +1274,13 @@ pub fn motion_search<P: Pixel>(
             }
             *best_pred_ok = true;
         }
-        let levels = usize::from(params.subpel.min(3));
-        for &st in &[4i32, 2, 1][..levels] {
+        for (li, &st) in [4i32, 2, 1][..levels].iter().enumerate() {
+            if li == sad_steps && li > 0 {
+                // The SATD steps start from the SATD of the best so far.
+                let d = satd(src_blk, src_stride, &best_pred[..], w, w, h);
+                mv.dist = d;
+                mv.cost = d.saturating_add(mv_cost(mv.row, mv.col));
+            }
             let (cy, cx) = (mv.row, mv.col);
             // Costs of the four axis neighbours (SQUARE starts with them).
             let mut cross = [u32::MAX; 4];
@@ -1279,7 +1303,11 @@ pub fn motion_search<P: Pixel>(
                     continue;
                 }
                 s.predict_shared(cols, pred, edge, (r, c));
-                let d = satd(src_blk, src_stride, &pred[..], w, w, h);
+                let d = if li < sad_steps {
+                    half_sad(&pred[..], w)
+                } else {
+                    satd(src_blk, src_stride, &pred[..], w, w, h)
+                };
                 let cost = d.saturating_add(rate);
                 if i < 4 {
                     cross[i] = cost;

@@ -1,135 +1,111 @@
 # cutlass-av1
 
-Native safe Rust AV1 decoder and encoder in this crate. No `unsafe`. The build does not link libaom, dav1d, SVT-AV1, or FFmpeg. FFmpeg 8.1.1 at `/opt/homebrew/bin/ffmpeg` is an oracle for tests, the example, and the bench. `STATUS.md` is the support record. This file is the measured record of the same limits.
+An AV1 decoder and encoder in safe Rust (`#![forbid(unsafe_code)]`, no
+dependencies outside this workspace, no C libraries). FFmpeg with libdav1d,
+libaom, SVT-AV1 and rav1e is used only as a test oracle and as the
+benchmark baseline. `STATUS.md` is the detailed support and test record.
 
-## What this crate is
+## Decoder
 
-`cutlass-av1` decodes and encodes AV1 packets through the shared codec traits. `Av1Decoder` reconstructs a picture from one temporal unit. `Av1Encoder` emits a keyframe. `register_decoders` and `register_encoders` add those types to the shared factories.
+`dec::decoder::Av1Core` implements the decoding process of the AV1
+specification (v1.0.0 with errata 1) for all three profiles:
 
-A frame the decoder does not implement returns `CodecError` before a picture is published. A failed packet leaves the reference slots as they were. `drain` is empty. `reset` drops the slots and keeps the sequence.
+- 8, 10 and 12 bits; 4:2:0, 4:2:2, 4:4:4 and monochrome; odd sizes.
+- Every intra tool: directional modes with angle deltas and edge filtering,
+  smooth/Paeth, recursive filter intra, chroma from luma, palette, intra
+  block copy.
+- Every inter tool: single and compound references, NEWMV/NEAR/NEAREST/
+  GLOBAL and the compound modes, reference MV projection
+  (`use_ref_frame_mvs`), OBMC, local and global warped motion, wedge,
+  difference-weighted and distance-weighted compound, inter-intra, skip
+  mode, switchable and dual interpolation filters, scaled references
+  (reference scaling and frame size changes).
+- All transforms (DCT/ADST/flip/identity up to 64 points, WHT for
+  lossless), quantizer matrices, segmentation, delta q / delta lf.
+- Deblocking, CDEF, loop restoration (Wiener and self-guided), super
+  resolution, film grain synthesis.
+- 64x64 and 128x128 superblocks, uniform and non-uniform tiles, multiple
+  tile groups, hidden frames, `show_existing_frame`, error resilient and
+  intra-only frames, frame ids, order hints.
+- Low-overhead OBU streams (as in IVF, MP4 and Matroska) and Annex B
+  length-delimited temporal units (`Av1Core::decode_annexb`).
 
-## Specification
+Not implemented: large-scale tile decoding (`OBU_TILE_LIST`, the light-field
+extension). libdav1d, and therefore FFmpeg, does not implement it either.
+Only operating point 0 is output.
 
-The normative document is the AOMedia AV1 Bitstream & Decoding Process Specification, version 1.0.0 with Errata 1, 8 January 2019, tag `v1.0.0-errata1`. Syntax, the decoding process, the parsing process, and the default CDF, scan, quantizer, and block-size tables in that document are the rules this crate implements. Annex A names Main profile and levels. Annex B is the length-delimited temporal-unit format.
+Correctness: the output of 46 streams produced by libaom, SVT-AV1 and rav1e
+through FFmpeg, covering the tools above, matches libdav1d byte for byte
+(`tools/conf.py`, `tools/checkall.sh`). A mutation fuzzer
+(`examples/av1fuzz.rs`) finds no panics; corrupt input returns a
+`CodecError` and leaves the reference frames unchanged.
 
-This crate reads low-overhead OBUs with `obu_has_size_field = 1`. That is the payload an IVF frame or an ISOBMFF sample carries after the container removes its own length. AV1 in ISOBMFF (`av1C`) and AV1 in Matroska stay in the container crates.
+With several threads (`Av1Core::threads`) parsing, reconstruction and the
+post filters run in a pipeline. It is about 2x slower than libdav1d, which
+uses hand-written assembly (numbers in `STATUS.md`).
 
-Film grain synthesis is part of the output process in that specification. When a frame sends its own grain parameters, the noise is added to the shown picture. The reference keeps the picture from before that step.
+## Encoder
 
-Main profile allows 10-bit 4:2:0 and monochrome. This crate rejects both, so it is not a Main-profile-compliant decoder.
+`enc::encoder::Av1Enc` codes 8/10/12-bit 4:2:0, 4:2:2, 4:4:4 and
+monochrome (and RGB via the public wrapper). It runs the decoder's own tile
+syntax code with an arithmetic *writer*, so every bitstream it produces is
+decoded by construction; an internal `Av1Core` decodes each packet to make
+the reference frames. Tools used:
+
+- Hierarchical mini-GOPs (8 frames by default) behind a hidden alt-ref,
+  `show_existing_frame`, up to seven references, per-layer q offsets.
+- Partition search from transform-coded RD estimates (4x4 to 64x64).
+- Intra: all 13 modes, angle deltas, filter intra, chroma from luma,
+  palette (with per-frame screen content detection).
+- Inter: motion search over every distinct reference (pruned by speed),
+  NEAREST/NEAR/GLOBAL/NEW and compound NEAREST/NEW, temporal MV prediction,
+  switchable interpolation filters, local warped motion, OBMC, skip mode.
+  Global motion estimation and alt-ref temporal filtering are optional.
+- Transform type and size by RD; RDOQ with exact coefficient rates from the
+  live CDFs.
+- Per-frame search of the deblocking level and CDEF strengths.
+- Constant q or a bitrate target (`RateControl::Bitrate`).
+
+Quality and speed against FFmpeg's encoders are in `STATUS.md`. In short:
+it needs about 7% fewer bits than rav1e `-speed 8` for the same PSNR, and
+13-20% more than libaom `-cpu-used 6` on natural video; it runs at about
+half the speed of libaom at that preset (single thread).
 
 ## API
 
-Open a decoder with `CodecParams::video`, which names 8-bit 4:2:0. The frame header carries the picture size. `Decoder::push` takes one temporal unit. `AsView` splits a shown picture back into planes.
-
 ```rust
-use cutlass_av1::{AsView, Av1Decoder};
-use cutlass_decode::{CodecError, CodecId, CodecParams, Decoder, Packet};
+use cutlass_av1::{Av1Decoder, Av1Encoder};
+use cutlass_decode::{CodecId, CodecParams, Decoder};
+use cutlass_encode::Encoder;
 
-fn shown_size(bytes: &[u8]) -> Result<(u32, u32), CodecError> {
-    let params = CodecParams::video(CodecId::Av1, 64, 64);
-    let mut decoder = Av1Decoder::open(&params)?;
-    let outputs = decoder.push(&Packet::video(bytes.to_vec(), 0, 1, 30, true))?;
-    let picture = outputs
-        .first()
-        .and_then(|output| output.as_video())
-        .ok_or(CodecError::InvalidApi {
-            what: "no picture",
-        })?;
-    Ok((picture.picture.y.width(), picture.picture.y.height()))
+let params = CodecParams::video(CodecId::Av1, 352, 288);
+let mut enc = Av1Encoder::open(&params)?;
+enc.set_quality(120); // base q index; or set a bitrate in CodecParams
+enc.set_speed(6);     // 0 slowest/best .. 10 fastest
+enc.set_gop(8);       // 1 = no reordering, one packet per picture
+let mut packets = Vec::new();
+// for each picture: packets.extend(enc.push_frame(&frame)?);
+packets.extend(enc.drain()?);
+
+let mut dec = Av1Decoder::open(&params)?;
+for p in &packets {
+    for out in dec.push(p)? { /* out.as_video() */ }
 }
 ```
 
-`Av1Encoder::open` takes the same `CodecParams` shape for a 4:2:0 picture whose edges are at most 4096. `set_quality` sets the quantizer index used when `bitrate` is zero. `Encoder::push_frame` emits a temporal delimiter, a sequence header, and one keyframe of DC-predicted 4×4 and 8×8 blocks with the 2D DCT. The loop filter and CDF update stay off. A picture that repeats the previous one is a frame that shows reference slot 0.
+Lower level: `dec::decoder::Av1Core::decode(&[u8])` takes one temporal
+unit and returns the shown frames; `enc::encoder::Av1Enc::encode` takes
+plane slices and returns finished temporal units (`flush` at the end).
 
-## Support
+## Examples and tools
 
-The decoder's scope is progressive 8-bit 4:2:0, `seq_profile` 0, one operating point, and dimensions up to 4096×2304. An edge above 4096 is `Limit`.
-
-Implemented for that scope, and matched against dav1d on the keyframe fixtures named in `STATUS.md`:
-
-- Sequence headers, frame headers, temporal delimiters, frame OBUs, padding, and metadata OBUs that are skipped.
-- Eight reference slots, `show_existing_frame`, and a hidden frame (`show_frame = 0` returns no picture).
-- Intra prediction, including the recursive filter on DC luma, chroma-from-luma, and directional modes.
-- Inverse DCT through 64 points, identity and 1D transforms, and an extended intra transform set on a keyframe. A keyframe may select its transform size.
-- Deblocking when the luma loop-filter levels are non-zero. A frame whose two luma levels are zero stays unfiltered.
-- CDEF, uniform tiles, a quantizer matrix, and a superblock quantizer delta.
-- Super resolution on a keyframe: reconstruction uses the coded width, and the shown picture is the upscaled width.
-- Wiener, self-guided, and switchable loop restoration on a keyframe.
-- Film grain on the shown picture: luma, chroma, overlap, and chroma grain scaled from luma. The reference is stored before grain.
-
-Within-frame CDF adaptation is implemented. The encoder leaves CDEF, restoration, super resolution, and film grain off. The decoder applies those tools when a supported keyframe sends them.
-
-The encoder emits keyframes only. Its quality and rate tests passed in `cargo test -p cutlass-av1` on this machine. It does not emit inter frames.
-
-## Accuracy
-
-`cargo test -p cutlass-av1` on this machine passed 61 tests. The embedded keyframe fixtures in that suite match dav1d byte for byte on the tools listed above, including CDEF, film grain, uniform tiles, a quantizer matrix, a superblock quantizer delta, super resolution, Wiener, self-guided, and switchable restoration, the recursive intra filter, and selectable transform sizes.
-
-`a_production_av1_keyframe_matches_dav1d_when_present` passed. The bench below also printed `pixels: match` for that same 3840×2160 keyframe, compared with FFmpeg's libdav1d before either time was taken.
-
-`single_reference_frames_match_dav1d` matches dav1d on error-resilient frames that keep the largest transform and leave compound, warped, overlapped, reference-motion, order hint, CDEF, restoration, and film grain off. `order_hint_frames_match_dav1d` matches with order hint on, each frame repeating the eight reference hints. `film_grain_stays_off_the_reference` predicts a second frame from the picture stored before grain. A later frame of the 2160p file is outside these checks.
-
-Hostile packets in the suite return an error and leave a stored reference usable. The 30-minute fuzz campaign was not run.
-
-## Performance
-
-One sample, measured with `cargo bench -p cutlass-av1` on Thu Oct 29 21:08:47 GMT 2026.
-
-`sysctl -n machdep.cpu.brand_string` printed `Apple M5 Pro`.
-
-`/opt/homebrew/bin/ffmpeg -version` began `ffmpeg version 8.1.1 Copyright (c) 2000-2026 the FFmpeg developers`.
-
-The library harness ignored 61 unit tests. `benches/decode.rs` then printed:
-
-```text
-workload: 3840x2160 keyframe, 37259 bytes, from New MacBook Pro with PROLED XDR Display： The first-ever Mac with Touch (2160p, av1).mp4
-machine: Apple M5 Pro, 18 cores
-ffmpeg: ffmpeg version 8.1.1 Copyright (c) 2000-2026 the FFmpeg developers
-one sample. cutlass times one Av1Decoder::push in this process. ffmpeg times one process and includes startup. bench profile, no link-time optimization. cutlass decodes tiles in parallel.
-pixels: match
-cutlass-av1: 0.0305 s  one push
-ffmpeg libdav1d -threads 1: 0.0338 s  one process, includes startup
-```
-
-`0.0305 s` is one `Av1Decoder::push` inside the bench process, after the pixel check. `0.0338 s` is the wall time of one `ffmpeg` process with `-threads 1` and `-c:v libdav1d`, and that figure includes process startup. The bench profile has no link-time optimization. This decoder decodes its tiles in parallel.
-
-The 720×480 30 fps gate was not re-measured here. `STATUS.md` records that gate as a miss. Peak resident memory was not measured. The decoder keeps eight reference pictures plus the frame being decoded.
-
-## Example
-
-`examples/roundtrip.rs` asks ffmpeg to write one 64×64 AV1 keyframe, decodes that keyframe with `Av1Decoder`, and compares the picture to ffmpeg's libdav1d decode of the same file.
-
-```text
-cargo run --release -p cutlass-av1 --example roundtrip
-```
-
-On this machine that printed:
-
-```text
-64x64 match
-```
-
-If ffmpeg is missing, the example prints `skip: ffmpeg is not installed` and exits 0. The bench uses the same line.
-
-## Gaps
-
-Refused with a typed error before a picture is published:
-
-- 10-bit, 12-bit, monochrome, 4:2:2, and 4:4:4.
-- A profile other than 0, a second operating point, and the decoder model.
-- 128×128 superblocks, large-scale tile lists, a tile group outside a frame, and non-uniform tile spacing.
-- An OBU without a size field, and a reserved OBU type.
-- A render size that differs from the coded size.
-- Screen-content tools, palette, and intra block copy.
-- Lossless (`base_q_idx` 0).
-- Segmentation, a per-superblock loop-filter delta, and a loop-filter delta update.
-- Film grain copied from another frame. A show-existing frame does not re-apply grain.
-- Compound prediction, warped motion, overlapped motion, reference-frame motion vectors, short reference signaling, and global motion.
-- CDF state carried from another frame, an inter frame that selects its transform size, a scaled reference, and interintra on an inter frame.
-
-Super resolution on an inter frame is not proven.
-
-The encoder does not emit inter frames, CDEF, restoration, super resolution, or film grain. Its blocks stay DC-predicted 4×4 and 8×8.
-
-Still open, as `STATUS.md` records: the 30-minute packet fuzz, the 720×480 realtime gate, and a peak-memory measurement. Containers are outside this crate.
+- `examples/av1dec.rs` IVF to raw YUV (`--features stats` prints tool use).
+- `examples/av1enc.rs` Y4M to IVF (`--q`, `--kbps`, `--speed`, `--gop`,
+  `--keyint`, `--tiles`, `--recon`).
+- `examples/av1bench.rs` decode timing with a thread count.
+- `examples/av1fuzz.rs` mutation fuzzer.
+- `tools/` the scripts behind the numbers in `STATUS.md`: stream generation
+  and libdav1d comparison (`conf.py`, `cases.py`, `checkall.sh`), the
+  encoder format matrix (`encmatrix.sh`), and rate-distortion comparisons
+  (`rdcmp.sh`, `kbd.sh`, `bd.py`). Encoder constants can be overridden from
+  the environment for sweeps when built with `--features tune`.

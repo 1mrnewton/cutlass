@@ -412,9 +412,10 @@ mod tests {
         if let Ok(name) = std::env::var("CUTLASS_LOCAL_MODEL") {
             settings.model.local_name = name;
         }
-        let mut assistant = Assistant::default();
-        assistant.draft =
-            "How many clips are on the main track? Read the project first.".to_owned();
+        let mut assistant = Assistant {
+            draft: "How many clips are on the main track? Read the project first.".to_owned(),
+            ..Assistant::default()
+        };
         assistant.send(&settings);
         let deadline = Instant::now() + Duration::from_secs(600);
         while assistant.poll(&mut shell) {
@@ -435,6 +436,21 @@ mod tests {
             "{:?}",
             assistant.entries
         );
+
+        // And an edit: one split, one undo step in the window.
+        assistant.entries.clear();
+        assistant.draft = "Split clip a at 1 second.".to_owned();
+        assistant.send(&settings);
+        let deadline = Instant::now() + Duration::from_secs(600);
+        while assistant.poll(&mut shell) {
+            assert!(Instant::now() < deadline, "the model did not answer");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        eprintln!("{:#?}", assistant.entries);
+        let clips = shell.draft().unwrap().tracks[0].segments.len();
+        assert_eq!(clips, 2, "{:?}", assistant.entries);
+        shell.undo().unwrap();
+        assert_eq!(shell.draft().unwrap().tracks[0].segments.len(), 1);
         let _ = std::fs::remove_dir_all(&path);
     }
 }

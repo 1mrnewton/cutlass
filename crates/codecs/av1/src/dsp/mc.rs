@@ -646,6 +646,7 @@ pub fn prep<P: Pixel>(
             8 => prep_copy::<P, 8>(tmp, src, src_off, src_stride, w, h, 7 - r0, bias),
             16 => prep_copy::<P, 16>(tmp, src, src_off, src_stride, w, h, 7 - r0, bias),
             32 => prep_copy::<P, 32>(tmp, src, src_off, src_stride, w, h, 7 - r0, bias),
+            64 => prep_copy::<P, 64>(tmp, src, src_off, src_stride, w, h, 7 - r0, bias),
             _ => prep_copy::<P, 0>(tmp, src, src_off, src_stride, w, h, 7 - r0, bias),
         },
         (true, false) => h_pass_dyn::<P, i16>(
@@ -916,6 +917,7 @@ pub fn avg<P: Pixel>(
         8 => avg_w::<P, 8>(dst, dst_stride, t0, t1, w, h, bd),
         16 => avg_w::<P, 16>(dst, dst_stride, t0, t1, w, h, bd),
         32 => avg_w::<P, 32>(dst, dst_stride, t0, t1, w, h, bd),
+        64 => avg_w::<P, 64>(dst, dst_stride, t0, t1, w, h, bd),
         _ => avg_w::<P, 0>(dst, dst_stride, t0, t1, w, h, bd),
     }
 }
@@ -935,6 +937,7 @@ pub fn avg_copy<P: Pixel>(
         8 => avg_copy_w::<P, 8>(dst, dst_stride, a, a_stride, b, b_stride, w, h),
         16 => avg_copy_w::<P, 16>(dst, dst_stride, a, a_stride, b, b_stride, w, h),
         32 => avg_copy_w::<P, 32>(dst, dst_stride, a, a_stride, b, b_stride, w, h),
+        64 => avg_copy_w::<P, 64>(dst, dst_stride, a, a_stride, b, b_stride, w, h),
         _ => avg_copy_w::<P, 0>(dst, dst_stride, a, a_stride, b, b_stride, w, h),
     }
 }

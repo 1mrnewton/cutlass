@@ -1661,19 +1661,27 @@ fn ref_data(seq: &SequenceHeader, hdr: &FrameHeader, fs: &FrameState) -> RefData
                 relative_dist(seq, hdr.ref_order_hint[ref_idx], hdr.order_hint) < 0
             }
         });
+        let ok = |r: i8, mv: Mv| {
+            r > INTRA_FRAME
+                && past[r as usize & 7]
+                && i32::from(mv.row).abs() < (1 << 12)
+                && i32::from(mv.col).abs() < (1 << 12)
+        };
         for y8 in 0..h8 {
-            for x8 in 0..w8 {
-                let m = fs.mi_at(2 * y8 + 1, 2 * x8 + 1);
-                for list in 0..2 {
-                    let r = m.ref_frame[list];
-                    let mv = m.mv[list];
-                    if r > INTRA_FRAME
-                        && past[r as usize & 7]
-                        && i32::from(mv.row).abs() < (1 << 12)
-                        && i32::from(mv.col).abs() < (1 << 12)
-                    {
-                        mf_ref[y8 * w8 + x8] = r;
-                        mf_mv[y8 * w8 + x8] = mv;
+            let at = (2 * y8 + 1) * fs.mi_stride;
+            let Some(mi) = fs.mi.get(at..at + 2 * w8) else {
+                break;
+            };
+            let refs = &mut mf_ref[y8 * w8..][..w8];
+            let mvs = &mut mf_mv[y8 * w8..][..w8];
+            for ((m, r), v) in mi.chunks_exact(2).zip(refs).zip(mvs) {
+                let m = &m[1];
+                // The second list wins when both qualify.
+                for list in [1, 0] {
+                    if ok(m.ref_frame[list], m.mv[list]) {
+                        *r = m.ref_frame[list];
+                        *v = m.mv[list];
+                        break;
                     }
                 }
             }
@@ -1860,6 +1868,7 @@ fn decode_tiles<P: Pixel>(
     logs: Option<&Mutex<RowPools>>,
     mut feed: Option<&mut MfFeed>,
     on_row: &mut RowHook<'_, P>,
+    spares: Option<&Mutex<Spares<P>>>,
 ) -> R<Box<CdfContext>> {
     let num_planes = seq.num_planes();
     let mut saved: Option<Box<CdfContext>> = None;
@@ -1869,7 +1878,9 @@ fn decode_tiles<P: Pixel>(
     let mut scratch = if logs.is_some() {
         Scratch::<P>::parsing()
     } else {
-        Scratch::<P>::new()
+        spares
+            .and_then(|s| lock(s).scratch.pop())
+            .unwrap_or_default()
     };
     let n_above = fs.mi_stride + 64;
     let mut above_level: [Vec<u8>; 3] = std::array::from_fn(|_| vec![0u8; n_above]);
@@ -1934,7 +1945,7 @@ fn decode_tiles<P: Pixel>(
             src: None,
             enc: Default::default(),
             mode: Default::default(),
-            me_scratch: Default::default(),
+            me_scratch: crate::enc::me::MeScratch::empty(),
             plan_q: 0,
             cfl_choice: (0, 0),
             intra_choice: (0, None),
@@ -1968,6 +1979,9 @@ fn decode_tiles<P: Pixel>(
         if *tile_num == ti.context_update_tile_id as usize {
             saved = Some(tile_cdf);
         }
+    }
+    if let (Some(s), None) = (spares, logs) {
+        lock(s).scratch.push(scratch);
     }
     Ok(saved.unwrap_or_else(|| Box::new(cdf.clone())))
 }
@@ -2169,7 +2183,7 @@ fn recon_worker<'r, P: PicturePixel>(
         src: None,
         enc: Default::default(),
         mode: Default::default(),
-        me_scratch: Default::default(),
+        me_scratch: crate::enc::me::MeScratch::empty(),
         plan_q: 0,
         cfl_choice: (0, 0),
         intra_choice: (0, None),
@@ -2605,6 +2619,7 @@ fn decode_frame_async<P: PicturePixel>(
                 // the job reports that.
                 let _ = rtx.send((m, log));
             },
+            None,
         )
     };
     drop(feed);
@@ -2799,6 +2814,7 @@ fn decode_frame_sync<P: PicturePixel>(
                   _: usize,
                   _: usize,
                   _: bool| {},
+            Some(spares),
         )?;
         // decode_frame_wrapup: in-loop filters, CDEF and loop restoration
         // in place.

@@ -644,6 +644,20 @@ impl<P: Pixel> MeScratch<P> {
             tx_tmp: vec![0; 64 * 32],
         }
     }
+
+    /// A placeholder that allocates nothing (decoding never searches).
+    pub fn empty() -> Self {
+        Self {
+            cols: ColRows::default(),
+            pred: Vec::new(),
+            edge: Vec::new(),
+            est_memo: Vec::new(),
+            win: Vec::new(),
+            pred_cache: Vec::new(),
+            tx_memo: None,
+            tx_tmp: Vec::new(),
+        }
+    }
 }
 
 impl<P: Pixel> Default for MeScratch<P> {

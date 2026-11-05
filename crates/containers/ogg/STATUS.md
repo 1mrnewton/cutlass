@@ -1,6 +1,6 @@
 # Ogg support record
 
-Branch `opus-ogg`. Native safe Rust in `cutlass-ogg`. `#![forbid(unsafe_code)]`, workspace lints. No bundled C, FFmpeg, or GStreamer: both are test oracles only. The crate depends on `cutlass-codec` and `cutlass-container`.
+Branch `opus` (built on `opus-ogg`). Native safe Rust in `cutlass-ogg`. `#![forbid(unsafe_code)]`, workspace lints. No bundled C, FFmpeg, or GStreamer: both are test oracles only. The crate depends on `cutlass-codec` and `cutlass-container`.
 
 Demux and mux of Ogg (RFC 3533) with the Opus mapping (RFC 7845) are in scope. Other Ogg mappings are listed and skipped. Opus in WebM or Matroska is out of scope.
 
@@ -100,7 +100,7 @@ Every length read from the file is checked against these before a buffer is rese
 | Forward input | Read, no seek | n/a | `a_forward_input_reads_the_same_packets_and_refuses_seek` | Verified |
 | Vorbis, FLAC, Theora, Speex packets | Not returned | Refused | `an_unknown_mapping_is_listed_and_its_pages_skipped` | Unsupported |
 | Opus in WebM or Matroska | n/a | n/a | n/a | Out of scope |
-| Engine, ffi, and probe registration | n/a | n/a | Outside this crate | Not done here |
+| App registration | Desktop and phone readers, `cutlass-probe` | Sound export to `.opus` | `an_opus_file_opens_seeks_and_decodes_after_the_pre_skip` (desktop), `an_ogg_opus_file_is_audio_as_long_as_its_samples_after_the_pre_skip` (probe), `sound_alone_writes_an_opus_file` (export), the desktop export test | Verified. Ogg files of other mappings are refused by the probe ("only Opus in Ogg is available") |
 | Linux and Windows | Not run | Not run | This file was written on macOS | Not run |
 
 ## Commands and results
@@ -178,4 +178,4 @@ The campaigns found three muxer bugs, each fixed with a behavior test: a stream 
 - Chained files return the first link only.
 - cargo-fuzz not run (reason above).
 - Linux and Windows not run.
-- Registration in the engine, probe list, and ffi is outside this crate.
+- The engine's probe duration is the last packet's end, so it counts the pre-skip; `cutlass-probe` reports the edit's length.

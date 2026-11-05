@@ -867,25 +867,43 @@ impl Projection<'_> {
         for y8 in y0..y0 + rows {
             let row_ref = &rd.mf_ref[y8 * w8..y8 * w8 + w8];
             let row_mv = &rd.mf_mv[y8 * w8..y8 * w8 + w8];
-            for x8 in 0..w8 {
+            let mut x8 = 0;
+            while x8 < w8 {
                 let src_ref = row_ref[x8];
-                if src_ref <= INTRA_FRAME {
-                    continue;
-                }
-                let ref_offset = self.offsets[src_ref as usize];
+                let ref_offset = if src_ref > INTRA_FRAME {
+                    self.offsets[src_ref as usize & 7]
+                } else {
+                    0
+                };
                 if ref_offset <= 0 || ref_offset > 31 {
+                    x8 += 1;
                     continue;
                 }
+                // A run of positions with this reference and motion vector
+                // shares the projection.
                 let mv = row_mv[x8];
+                let mut end = x8 + 1;
+                while end < w8 && row_ref[end] == src_ref && row_mv[end] == mv {
+                    end += 1;
+                }
                 let proj = mv_projection(mv, num, ref_offset);
                 let proj_y = project_pos(y8 as i32, i32::from(proj.row), dst_sign, h8 as i32, 0);
-                let proj_x = project_pos(x8 as i32, i32::from(proj.col), dst_sign, w8 as i32, 8);
-                if let (Some(py), Some(px)) = (proj_y, proj_x) {
-                    band[(py as usize - y0) * w8 + px as usize] = MfEntry {
+                if let Some(py) = proj_y {
+                    let row = &mut band[(py as usize - y0) * w8..][..w8];
+                    let dx = dst_sign * project_offset(i32::from(proj.col));
+                    let e = MfEntry {
                         mv,
                         offset: ref_offset as i8,
                     };
+                    for x in x8..end {
+                        let base8 = (x as i32 >> 3) << 3;
+                        let px = x as i32 + dx;
+                        if px >= 0 && px < w8 as i32 && px >= base8 - 8 && px < base8 + 16 {
+                            row[px as usize] = e;
+                        }
+                    }
                 }
+                x8 = end;
             }
         }
     }
@@ -910,14 +928,19 @@ fn mv_projection(mv: Mv, num: i32, den: i32) -> Mv {
     Mv::new(p(mv.row), p(mv.col))
 }
 
-fn project_pos(v8: i32, delta: i32, dst_sign: i32, max8: i32, max_off8: i32) -> Option<i32> {
-    let base8 = (v8 >> 3) << 3;
-    let offset8 = if delta >= 0 {
+/// The offset, in 8x8 units, of a projected motion vector component.
+#[inline]
+fn project_offset(delta: i32) -> i32 {
+    if delta >= 0 {
         delta >> (3 + 1 + 2)
     } else {
         -((-delta) >> (3 + 1 + 2))
-    };
-    let v = v8 + dst_sign * offset8;
+    }
+}
+
+fn project_pos(v8: i32, delta: i32, dst_sign: i32, max8: i32, max_off8: i32) -> Option<i32> {
+    let base8 = (v8 >> 3) << 3;
+    let v = v8 + dst_sign * project_offset(delta);
     if v < 0 || v >= max8 || v < base8 - max_off8 || v >= base8 + 8 + max_off8 {
         None
     } else {

@@ -3404,6 +3404,7 @@ fn ruler_and_lanes(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
     {
         shell.set_notice(error.to_string());
     }
+    paint_rendered_spans(shell, ui, lanes_left, ruler);
     let marker_clicked = paint_ruler_markers(shell, ui, lanes_left, ruler);
     if ruler_hit.clicked()
         && let Some(pointer) = ruler_hit.interact_pointer_pos()
@@ -3549,6 +3550,8 @@ fn paint_clip_menu(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
                 Ok(())
             }
             "compound" => shell.create_compound(),
+            "render-preview" => shell.render_selected(false),
+            "render-full" => shell.render_selected(true),
             "variable-speed" => {
                 shell.toggle_speed_curves();
                 Ok(())
@@ -5386,6 +5389,31 @@ fn drag_clip_edge(
         index,
         Some(edge),
     );
+}
+
+/// A green line along the ruler's foot over each stretch a render plays.
+fn paint_rendered_spans(shell: &Shell, ui: &Ui, lanes_left: f32, ruler: Rect) {
+    for (start, end) in shell.rendered_spans() {
+        let x = |time: Micros| {
+            lane_x(
+                lanes_left,
+                shell.pixel_size(),
+                shell.view_origin().0,
+                time.0,
+            )
+        };
+        let line = Rect::from_min_max(
+            Pos2::new(x(start).max(lanes_left), ruler.bottom() - 3.0),
+            Pos2::new(x(end), ruler.bottom() - 1.0),
+        );
+        if line.width() > 0.0 && ruler.intersects(line) {
+            ui.painter().with_clip_rect(ruler).rect_filled(
+                line,
+                0.0,
+                Color32::from_rgb(0x3D, 0xDC, 0x6A),
+            );
+        }
+    }
 }
 
 fn paint_ruler_markers(shell: &mut Shell, ui: &mut Ui, lanes_left: f32, ruler: Rect) -> bool {

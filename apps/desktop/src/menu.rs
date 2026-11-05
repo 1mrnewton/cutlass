@@ -133,8 +133,8 @@ const VIDEO: &[Entry] = &[
         "render",
         "Render",
         &[
-            todo("render-preview", "Preview", ""),
-            todo("render-full", "Full", ""),
+            done("render-preview", "Preview", ""),
+            done("render-full", "Full", ""),
         ],
     ),
 ];
@@ -214,7 +214,7 @@ const COMPOSITION: &[Entry] = &[
     CUT,
     DELETE,
     SEP,
-    todo("render-preview", "Render", ""),
+    done("render-preview", "Render", ""),
     SEP,
     DEACTIVATE,
     REPLACE,
@@ -678,7 +678,7 @@ mod tests {
         assert_eq!(built("edit"), Some(true));
         assert_eq!(built("copy"), Some(true));
         assert_eq!(built("range"), Some(true));
-        assert_eq!(built("render"), Some(false));
+        assert_eq!(built("render"), Some(true));
         assert_eq!(built("isolate-voice"), Some(false));
     }
 
@@ -777,14 +777,16 @@ mod tests {
     fn a_click_on_a_todo_row_picks_it_as_not_built() {
         let ctx = Context::default();
         let (_, output) = frame(&ctx, 1000.0, Vec::new());
-        let render = label_at(&output, "Render").expect("the Render row") + Vec2::new(4.0, 6.0);
-        frame(&ctx, 1000.0, vec![egui::Event::PointerMoved(render)]);
-        let (_, output) = frame(&ctx, 1000.0, vec![egui::Event::PointerMoved(render)]);
-        let row = label_at(&output, "Preview").expect("the Preview row") + Vec2::new(4.0, 6.0);
+        let isolate = label_at(&output, "Isolate voice").expect("the Isolate voice row")
+            + Vec2::new(4.0, 6.0);
+        frame(&ctx, 1000.0, vec![egui::Event::PointerMoved(isolate)]);
+        let (_, output) = frame(&ctx, 1000.0, vec![egui::Event::PointerMoved(isolate)]);
+        let row =
+            label_at(&output, "Keep voice").expect("the Keep voice row") + Vec2::new(4.0, 6.0);
         frame(&ctx, 1000.0, vec![egui::Event::PointerMoved(row)]);
         let (shown, _) = frame(&ctx, 1000.0, click(row));
         let picked = shown.picked.expect("a pick");
-        assert_eq!((picked.id, picked.built), ("render-preview", false));
+        assert_eq!((picked.id, picked.built), ("isolate-keep-voice", false));
     }
 
     #[test]

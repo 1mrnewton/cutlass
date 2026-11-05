@@ -49,6 +49,7 @@ use cutlass_transcription::{
 mod assistant;
 mod compound;
 mod inspector;
+mod render;
 pub use assistant::AgentRun;
 
 pub use inspector::{LetterCase, Panel, SILENT_DB, TextLook, gain_of_db, volume_db};
@@ -611,6 +612,8 @@ pub struct Shell {
     readers: ReaderFactory,
     transport: Transport,
     preview_cache: RefCell<FrameCache>,
+    /// Stretches of the timeline drawn ahead, which the preview plays.
+    renders: render::Renders,
     /// The lanes as last built, with the revision they were built at.
     lanes_cache: RefCell<Option<(u64, Arc<[LaneView]>)>>,
     settings: Settings,
@@ -729,6 +732,7 @@ impl Shell {
             ),
             transport: Transport::new(),
             preview_cache: RefCell::new(FrameCache::new()),
+            renders: render::Renders::new(Self::home().renders()),
             lanes_cache: RefCell::new(None),
             settings,
             settings_file: None,
@@ -1246,6 +1250,7 @@ impl Shell {
         }
         self.transport.forget_files();
         self.silence();
+        self.find_renders();
         Ok(())
     }
 
@@ -2062,7 +2067,14 @@ impl Shell {
     /// [`Self::attach_gpu`]. A frame already on the canvas is not drawn again.
     pub fn preview_texture(&mut self) -> Result<Option<(egui::TextureId, [u32; 2])>, ShellError> {
         let time = self.sample_time().0;
-        let session = self.session.as_ref().ok_or(ShellError::NoProject)?;
+        let main = self.session.as_ref().ok_or(ShellError::NoProject)?;
+        // A render standing for this stretch plays in its place.
+        let key = self.render_key_if_any();
+        let (session, preview_cache) = match key.and_then(|key| self.renders.at(key, Micros(time)))
+        {
+            Some(render) => (&render.session, &self.renders.cache),
+            None => (main, &self.preview_cache),
+        };
         let Some(gpu) = self.gpu.as_mut() else {
             return Ok(None);
         };
@@ -2075,7 +2087,7 @@ impl Shell {
             return Ok(Some(shown));
         }
         let mut device = SoftwareDevice::new();
-        let mut cache = self.preview_cache.borrow_mut();
+        let mut cache = preview_cache.borrow_mut();
         cache.set_patient(false);
         let composed = cache
             .layers(
@@ -2109,11 +2121,15 @@ impl Shell {
     }
 
     pub fn preview_bytes(&self) -> Result<Picture, ShellError> {
-        let session = self.session.as_ref().ok_or(ShellError::NoProject)?;
+        let main = self.session.as_ref().ok_or(ShellError::NoProject)?;
         let time = self.sample_time();
+        let (session, cache) = match self.rendered_at(time) {
+            Some(render) => (&render.session, &self.renders.cache),
+            None => (main, &self.preview_cache),
+        };
         let mut device = SoftwareDevice::new();
         let root = self.path.clone();
-        let mut cache = self.preview_cache.borrow_mut();
+        let mut cache = cache.borrow_mut();
         cache.set_patient(true);
         let picture = cache
             .frame(
@@ -12216,7 +12232,7 @@ mod tests {
     }
 
     /// A two-second color project, 64 by 32, at 30 frames a second.
-    fn movie_project(dir: &Path) {
+    pub(super) fn movie_project(dir: &Path) {
         let mut draft = Draft::empty("draft");
         draft.canvas_config.width = 64;
         draft.canvas_config.height = 32;
@@ -12238,7 +12254,7 @@ mod tests {
         Folder::new(draft).save(dir).unwrap();
     }
 
-    fn land_job(desktop: &mut Shell) {
+    pub(super) fn land_job(desktop: &mut Shell) {
         // A debug Rust encoder on a small CI runner takes well over a minute.
         let until = std::time::Instant::now() + std::time::Duration::from_secs(300);
         while desktop.poll_job() && std::time::Instant::now() < until {

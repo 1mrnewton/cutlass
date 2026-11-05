@@ -311,6 +311,41 @@ pub fn set_text_background(
     Ok(())
 }
 
+/// The room a bubble leaves around the letters, in ems, when it has none.
+const BUBBLE_PAD: (f64, f64) = (0.35, 0.3);
+
+/// Shape the background as the bubble keyed `bubble`, or a plain box again
+/// when it is empty. A title with no background yet gets a white one, its
+/// white letters turn black, and it gets room around the letters.
+pub fn set_text_bubble(
+    draft: &mut Draft,
+    segment_id: &SegmentId,
+    bubble: &str,
+) -> Result<(), EditError> {
+    let bubble = bubble.trim();
+    if !bubble.is_empty() && cutlass_model::Bubble::of(bubble).is_none() {
+        return Err(EditError::TextStyle);
+    }
+    let index = own_text(draft, segment_id)?;
+    let text = &mut draft.materials.texts[index];
+    text.bubble = bubble.to_owned();
+    if bubble.is_empty() {
+        return Ok(());
+    }
+    if text.background_style == 0 || text.background_color.is_empty() {
+        text.background_style = 1;
+        text.background_color = "#FFFFFF".to_owned();
+        text.background_alpha = 1.0;
+        if text.text_color.is_empty() || text.text_color.eq_ignore_ascii_case("#FFFFFF") {
+            text.text_color = "#000000".to_owned();
+        }
+    }
+    if text.background_width < BUBBLE_PAD.0 && text.background_height < BUBBLE_PAD.1 {
+        (text.background_width, text.background_height) = BUBBLE_PAD;
+    }
+    Ok(())
+}
+
 /// Make the letters glow in `color`. `glow` is the strength and the range,
 /// each from 0 to 1. The glow is a bloom effect among the clip's sidecars:
 /// one only this clip points at is changed in place, and otherwise a new
@@ -568,7 +603,28 @@ mod tests {
         assert_eq!(text.background_style, 0);
         assert!(text.background_color.is_empty());
 
+        let bubble = |key: &str| Request::SetTextBubble {
+            segment_id: "a".into(),
+            bubble: key.to_owned(),
+        };
+        let revision = session.revision();
+        session.apply(revision, &[bubble("speech")]).unwrap();
+        let text = &session.draft().materials.texts[0];
+        assert_eq!(text.bubble, "speech");
+        assert_eq!(
+            (text.background_style, text.background_color.as_str()),
+            (1, "#FFFFFF")
+        );
+        assert!(text.background_width >= 0.35);
+        let revision = session.revision();
+        session.apply(revision, &[bubble("")]).unwrap();
+        let text = &session.draft().materials.texts[0];
+        assert!(text.bubble.is_empty());
+        // The box stays until the background is taken off.
+        assert_eq!(text.background_style, 1);
+
         for (request, error) in [
+            (bubble("cloud"), EditError::TextStyle),
             (outline("#000000", 1.0), EditError::TextStyle),
             (outline("black", 0.1), EditError::TextColor),
             (background("#000000", 2.0), EditError::TextStyle),
@@ -583,7 +639,8 @@ mod tests {
                 EditError::TextStyle,
             ),
         ] {
-            assert_eq!(session.apply(2, &[request]).unwrap_err(), error);
+            let revision = session.revision();
+            assert_eq!(session.apply(revision, &[request]).unwrap_err(), error);
         }
     }
 

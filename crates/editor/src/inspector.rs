@@ -75,6 +75,8 @@ pub struct TextLook {
     pub glow_strength: f64,
     /// 0 to 1.
     pub glow_range: f64,
+    /// The bubble's key; empty for a plain box or none.
+    pub bubble: String,
 }
 
 /// What a part takes when its color is first picked and its numbers are
@@ -170,6 +172,7 @@ pub fn text_look(draft: &Draft, segment: &Segment) -> Option<TextLook> {
         glow_color,
         glow_strength,
         glow_range,
+        bubble: text.bubble.clone(),
     })
 }
 

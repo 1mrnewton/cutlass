@@ -238,6 +238,13 @@ pub enum Request {
         alpha: f64,
         round: f64,
     },
+    /// Shape the title's background as the [`cutlass_model::Bubble`] keyed
+    /// `bubble`, or a plain box again when it is empty. A title with no
+    /// background yet gets a white one, and white letters turn black.
+    SetTextBubble {
+        segment_id: SegmentId,
+        bubble: String,
+    },
     /// Place a new text clip saying `content` in `face`, from `start` for
     /// `duration`. `track_id` is created as a text row when it is missing.
     AddText {

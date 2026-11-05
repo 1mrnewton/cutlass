@@ -477,6 +477,7 @@ pub fn request_name(request: &Request) -> &'static str {
         Request::SetTextOutline { .. } => "set_text_outline",
         Request::SetTextShadow { .. } => "set_text_shadow",
         Request::SetTextBackground { .. } => "set_text_background",
+        Request::SetTextBubble { .. } => "set_text_bubble",
         Request::SetTextGlow { .. } => "set_text_glow",
         Request::AddText { .. } => "add_text",
         Request::AddEffect { .. } => "add_effect",

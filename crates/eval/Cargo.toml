@@ -19,6 +19,7 @@ cutlass-gpu = { path = "../gpu", version = "0.1.0" }
 cutlass-codec = { path = "../codec", version = "0.1.0" }
 cutlass-color = { path = "../color", version = "0.1.0" }
 cutlass-decode = { path = "../decode", version = "0.1.0" }
+cutlass-logger = { path = "../logger", version = "0.1.0" }
 
 [dev-dependencies]
 cutlass-session = { path = "../session", version = "0.1.0" }

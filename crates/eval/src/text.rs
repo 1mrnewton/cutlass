@@ -197,11 +197,13 @@ fn title_picture(
         let mut larger = material.clone();
         larger.font_size *= density;
         larger.line_max_width *= density;
-        let mut source =
+        let mut source = logged(
+            "title",
+            segment,
             TextSource::open_with_faces(faces.face, None, &larger, glow, segment, &|path| {
                 faces.named(path)
-            })
-            .ok()?;
+            }),
+        )?;
         if !steps.is_empty() {
             let poses = source
                 .letters()
@@ -261,12 +263,43 @@ pub fn text_size(draft: &Draft, fonts: &dyn Fonts, segment: &Segment) -> Option<
     let face = fonts.face(&material.font_path)?;
     let glow = glow(draft, segment);
     let faces = Faces { fonts, face };
-    let source =
+    let source = logged(
+        "title",
+        segment,
         TextSource::open_with_faces(face, None, material, glow.as_ref(), segment, &|path| {
             faces.named(path)
-        })
-        .ok()?;
+        }),
+    )?;
     Some(source.size())
+}
+
+/// How many draw failures are logged before the rest are only counted, so
+/// a title that fails on every frame does not fill the log.
+const LOGGED_FAILURES: usize = 64;
+
+/// `result`'s value, or nothing with the failure logged the first time a
+/// clip hits it: a title or caption that cannot draw says why.
+fn logged<T, E: std::fmt::Display>(
+    what: &str,
+    segment: &Segment,
+    result: Result<T, E>,
+) -> Option<T> {
+    use std::sync::Mutex;
+    static SEEN: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    match result {
+        Ok(value) => Some(value),
+        Err(error) => {
+            let line = format!("{what} {} did not draw: {error}", segment.id);
+            if let Ok(mut seen) = SEEN.lock()
+                && seen.len() < LOGGED_FAILURES
+                && !seen.contains(&line)
+            {
+                cutlass_logger::warn!("{line}");
+                seen.push(line);
+            }
+            None
+        }
+    }
 }
 
 /// A title's own face, and the shell's fonts for its ranges.
@@ -337,9 +370,9 @@ fn caption_picture(
         keywords: &caption_keywords(material),
         styles: &styles,
         stagger_shift_ms: material.caption_stagger_ms.max(0),
-    })
-    .ok()?;
-    let looks = caption_looks(&frame, text_fill(material).ok()?)?;
+    });
+    let frame = logged("caption", segment, frame)?;
+    let looks = caption_looks(&frame, logged("caption", segment, text_fill(material))?)?;
     let hidden = GlyphLook {
         pose: LetterPose {
             alpha: 0.0,
@@ -353,11 +386,13 @@ fn caption_picture(
         page.is_rich_text = false;
         page.font_size *= density;
         page.line_max_width *= density;
-        let mut source =
+        let mut source = logged(
+            "caption",
+            segment,
             TextSource::open_with_faces(faces.face, None, &page, glow, segment, &|path| {
                 faces.named(path)
-            })
-            .ok()?;
+            }),
+        )?;
         let each: Vec<GlyphLook> = source
             .records()
             .iter()

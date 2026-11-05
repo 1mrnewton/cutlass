@@ -300,42 +300,7 @@ pub fn elements_for(config: u8) -> Option<&'static [ElementKind]> {
 }
 
 pub fn layout_for(config: u8) -> Option<ChannelLayout> {
-    let channels = match config {
-        1 => ChannelLayout::mono().channels().to_vec(),
-        2 => ChannelLayout::stereo().channels().to_vec(),
-        3 => vec![
-            Channel::FrontCenter,
-            Channel::FrontLeft,
-            Channel::FrontRight,
-        ],
-        4 => vec![
-            Channel::FrontCenter,
-            Channel::FrontLeft,
-            Channel::FrontRight,
-            Channel::BackCenter,
-        ],
-        5 => vec![
-            Channel::FrontCenter,
-            Channel::FrontLeft,
-            Channel::FrontRight,
-            Channel::BackLeft,
-            Channel::BackRight,
-        ],
-        6 => ChannelLayout::five_one().channels().to_vec(),
-        7 => ChannelLayout::seven_one_wide().channels().to_vec(),
-        11 => vec![
-            Channel::FrontCenter,
-            Channel::FrontLeft,
-            Channel::FrontRight,
-            Channel::BackLeft,
-            Channel::BackRight,
-            Channel::BackCenter,
-            Channel::Lfe,
-        ],
-        12 => ChannelLayout::seven_one().channels().to_vec(),
-        _ => return None,
-    };
-    ChannelLayout::new(channels).ok()
+    ChannelLayout::from_aac_config(config)
 }
 
 pub fn parse_asc(data: &[u8], mpeg2: bool) -> Result<AudioConfig, CodecError> {

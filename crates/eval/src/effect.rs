@@ -300,12 +300,19 @@ fn global_marks<'a>(draft: &'a Draft, time: Micros, stack: &[StackLayer<'_>]) ->
         .filter(|(_, _, _, id)| {
             !matches!(entry(id).map(|row| row.kind), Some(PackageKind::Blend(_)))
         })
-        .map(|(track_index, segment_index, segment, _)| Mark {
-            render_index: segment.render_index,
-            track_index,
-            segment_index,
-            segment,
-            adjust: None,
+        .filter_map(|(track_index, segment_index, segment, _)| {
+            // A bundled filter is a look: adjust sliders, not a package.
+            let adjust = cutlass_effects::segment_look(draft, segment);
+            if adjust.is_some_and(|adjust| adjust.is_identity()) {
+                return None;
+            }
+            Some(Mark {
+                render_index: segment.render_index,
+                track_index,
+                segment_index,
+                segment,
+                adjust,
+            })
         })
         .chain(adjustment_layers(draft, time, stack))
         .collect();

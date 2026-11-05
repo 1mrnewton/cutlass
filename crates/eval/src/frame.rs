@@ -802,6 +802,39 @@ mod tests {
     }
 
     #[test]
+    fn a_bundled_filter_runs_its_look_at_its_strength() {
+        let draft = color_clip("0xFF404040", false);
+        let mut session = cutlass_session::Session::open(draft);
+        let clip = cutlass_model::SegmentId::new("bright");
+        session
+            .apply(
+                0,
+                &[cutlass_session::Request::AddFilter {
+                    track_id: "looks".into(),
+                    segment_id: clip.clone(),
+                    material_id: "f".into(),
+                    start: Micros(0),
+                    duration: Micros(1_000),
+                    filter_id: "look/bright".to_owned(),
+                }],
+            )
+            .unwrap();
+        let full = pixels(session.draft(), 0);
+        assert!(full[0] > 64, "{full:?}");
+        session
+            .apply(
+                1,
+                &[cutlass_session::Request::SetEffectStrength {
+                    segment_id: clip,
+                    material_id: "f2".into(),
+                    value: 0.0,
+                }],
+            )
+            .unwrap();
+        assert_eq!(pixels(session.draft(), 0), [64, 64, 64, 255].repeat(2));
+    }
+
+    #[test]
     fn the_project_canvas_color_is_under_every_layer() {
         let mut draft = Draft::empty("draft");
         draft.canvas_config.width = 2;

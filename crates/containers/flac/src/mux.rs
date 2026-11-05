@@ -471,7 +471,9 @@ impl<W: Write + Seek + Send> Mux for FlacMux<W> {
             match StreamInfo::from_extra(extra) {
                 Some(info) if info.sample_rate == rate && info.channels == channels => Some(info),
                 _ => {
-                    return Err(self.fail(rejected("the extradata is not this stream's STREAMINFO")));
+                    return Err(
+                        self.fail(rejected("the extradata is not this stream's STREAMINFO"))
+                    );
                 }
             }
         };

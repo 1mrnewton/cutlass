@@ -1229,6 +1229,38 @@ mod tests {
     }
 
     #[test]
+    fn a_bubble_shapes_the_background_and_grows_the_picture_for_its_tail() {
+        let mut boxed = material("AB");
+        boxed.background_style = 1;
+        boxed.background_color = "#00FF00".to_owned();
+        boxed.background_width = 0.3;
+        boxed.background_height = 0.3;
+        let (box_w, box_h, plain) = picture(&boxed);
+        let green = |rgba: &[u8]| {
+            rgba.chunks(4)
+                .filter(|pixel| *pixel == [0, 255, 0, 255])
+                .count()
+        };
+        for bubble in cutlass_model::Bubble::ALL {
+            boxed.bubble = bubble.key().to_owned();
+            let (width, height, rgba) = picture(&boxed);
+            assert!(width >= box_w && height >= box_h, "{bubble:?}");
+            assert!(green(&rgba) > 0, "{bubble:?}");
+            assert!(has(&rgba, [255, 255, 255, 255]), "{bubble:?}");
+            assert_ne!(rgba, plain, "{bubble:?}");
+        }
+        // A speech bubble's tail hangs below the box, on the left.
+        boxed.bubble = "speech".to_owned();
+        let (width, height, rgba) = picture(&boxed);
+        assert!(height > box_h);
+        let low = &rgba[((height * 7 / 8) * width * 4) as usize..];
+        assert_eq!(halves(width, low, [0, 255, 0, 255]), (true, false));
+        // An unknown bubble is a plain box.
+        boxed.bubble = "cloud".to_owned();
+        assert_eq!(picture(&boxed), (box_w, box_h, plain));
+    }
+
+    #[test]
     fn letters_are_counted_by_glyph_and_word_and_a_pose_hides_or_moves_one() {
         let text = material("AB AB");
         let mut source = TextSource::open(TTF, None, &text, &segment()).unwrap();

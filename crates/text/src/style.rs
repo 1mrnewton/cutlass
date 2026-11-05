@@ -6,7 +6,10 @@
 //! from 0 to 1 (a quarter of an em at 1), and `background_width` and
 //! `background_height` the room around the letters in ems. The angle is in
 //! degrees, counterclockwise from the right. `background_round_radius` from
-//! 0 to 1 rounds the box's corners up to half its height.
+//! 0 to 1 rounds the box's corners up to half its height. A title's
+//! `bubble` shapes the box as a [`Bubble`] instead: a speech bubble's tail,
+//! a thought's puffs and a burst's spikes reach out past the box, and the
+//! picture grows to hold them.
 //!
 //! A glow is the clip's `bloom` effect: its `strength` from 0 to 1 is how
 //! bright it is, and its `range` from 0 to 1 how far it spreads, up to
@@ -15,7 +18,7 @@
 //! An outline is grown from the glyph distance field, so it reaches at most
 //! the field's spread beyond each letter; a wider one is drawn that wide.
 
-use cutlass_model::{BloomParams, MaterialText};
+use cutlass_model::{BloomParams, Bubble, MaterialText};
 
 use crate::TextError;
 use crate::atlas::{ATLAS_EM, SPREAD};
@@ -64,6 +67,8 @@ pub(crate) struct Background {
     pub(crate) pad_y: f32,
     /// 0 square to 1 fully round ends.
     pub(crate) round: f32,
+    /// The shape it takes instead of a box.
+    pub(crate) shape: Option<Bubble>,
 }
 
 /// A box in picture pixels.
@@ -159,6 +164,7 @@ impl Style {
                     pad_x: em(material.background_width, font_size),
                     pad_y: em(material.background_height, font_size),
                     round,
+                    shape: Bubble::of(&material.bubble),
                 })
             };
         let glow = match bloom {
@@ -195,7 +201,7 @@ impl Style {
             area = area.union(cells.grow(reach, reach));
         }
         if let Some(background) = &self.background {
-            area = area.union(background.area(cells, font_size));
+            area = area.union(background.extent(background.area(cells, font_size)));
         }
         area
     }
@@ -275,6 +281,31 @@ impl Background {
         let pad = cell_pad(font_size);
         cells.grow(self.pad_x - pad, self.pad_y - pad)
     }
+
+    /// All a bubble around the box `body` covers, its tail and spikes too.
+    pub(crate) fn extent(&self, body: Area) -> Area {
+        let w = body.right - body.left;
+        let h = body.bottom - body.top;
+        match self.shape {
+            None | Some(Bubble::Pill) => body,
+            Some(Bubble::Speech) => Area {
+                bottom: body.bottom + 0.45 * h,
+                ..body
+            },
+            Some(Bubble::Thought) => {
+                let cloud = body.grow(0.2 * w / 2.0, 0.35 * h / 2.0);
+                let puffs = Area {
+                    left: body.left + 0.05 * w - 0.1 * h,
+                    top: body.bottom,
+                    right: body.left + 0.15 * w + 0.15 * h,
+                    bottom: body.bottom + 0.72 * h,
+                };
+                cloud.union(puffs)
+            }
+            Some(Bubble::Burst) => body.grow(0.55 * w / 2.0, 0.55 * h / 2.0),
+            Some(Bubble::Banner) => body.grow(0.35 * h, 0.0),
+        }
+    }
 }
 
 /// What [`compose`] paints into a premultiplied picture `width` pixels
@@ -315,7 +346,10 @@ pub(crate) fn compose(layers: &Layers<'_>, rgba: &mut [u8]) {
         height,
     } = *layers;
     if let (Some(back), Some(area)) = (&style.background, background) {
-        paint_box(rgba, width, height, area, back);
+        match back.shape {
+            None => paint_box(rgba, width, height, area, back),
+            Some(shape) => paint_bubble(rgba, width, height, area, back.color, shape),
+        }
     }
     for (shadow, mask) in shadows {
         let blurred = blur(mask, width, height, shadow.blur);
@@ -382,6 +416,124 @@ fn paint_box(rgba: &mut [u8], width: usize, height: usize, area: Area, back: &Ba
             over(rgba, y * width + x, back.color, cover);
         }
     }
+}
+
+/// A bubble around the box `body`, with one pixel of soft edge.
+fn paint_bubble(
+    rgba: &mut [u8],
+    width: usize,
+    height: usize,
+    body: Area,
+    color: [u8; 4],
+    shape: Bubble,
+) {
+    let w = body.right - body.left;
+    let h = body.bottom - body.top;
+    if !(w > 0.0 && h > 0.0) {
+        return;
+    }
+    let (hw, hh) = (w / 2.0, h / 2.0);
+    let (cx, cy) = (body.left + hw, body.top + hh);
+    let tail = [
+        (body.left + 0.18 * w, body.bottom - 1.0),
+        (body.left + 0.4 * w, body.bottom - 1.0),
+        (body.left + 0.08 * w, body.bottom + 0.45 * h),
+    ];
+    let notched = [
+        (body.left - 0.35 * h, body.top),
+        (body.right + 0.35 * h, body.top),
+        (body.right + 0.1 * h, cy),
+        (body.right + 0.35 * h, body.bottom),
+        (body.left - 0.35 * h, body.bottom),
+        (body.left - 0.1 * h, cy),
+    ];
+    let spikes: Vec<(f32, f32)> = (0..28_u8)
+        .map(|k| {
+            let turn = f32::from(k) * std::f32::consts::PI / 14.0;
+            let reach = if k % 2 == 0 { 1.55 } else { 1.18 };
+            (cx + turn.cos() * hw * reach, cy + turn.sin() * hh * reach)
+        })
+        .collect();
+    for y in 0..height {
+        for x in 0..width {
+            let p = (pixel(x) + 0.5, pixel(y) + 0.5);
+            let local = (p.0 - cx, p.1 - cy);
+            let distance = match shape {
+                Bubble::Pill => rounded_box(local, hw, hh, hw.min(hh)),
+                Bubble::Speech => {
+                    rounded_box(local, hw, hh, 0.35 * hw.min(hh)).min(polygon(&tail, p))
+                }
+                Bubble::Thought => ellipse(local, hw * 1.2, hh * 1.35)
+                    .min(circle(
+                        p,
+                        (body.left + 0.15 * w, body.bottom + 0.3 * h),
+                        0.15 * h,
+                    ))
+                    .min(circle(
+                        p,
+                        (body.left + 0.05 * w, body.bottom + 0.62 * h),
+                        0.09 * h,
+                    )),
+                Bubble::Burst => polygon(&spikes, p),
+                Bubble::Banner => polygon(&notched, p),
+            };
+            let cover = (0.5 - distance).clamp(0.0, 1.0);
+            over(rgba, y * width + x, color, cover);
+        }
+    }
+}
+
+/// Signed distance from `p`, about the middle, to a box `hw` by `hh` half
+/// sizes with corners rounded `radius`.
+fn rounded_box(p: (f32, f32), hw: f32, hh: f32, radius: f32) -> f32 {
+    let qx = p.0.abs() - (hw - radius);
+    let qy = p.1.abs() - (hh - radius);
+    qx.max(0.0).hypot(qy.max(0.0)) + qx.max(qy).min(0.0) - radius
+}
+
+/// About the signed distance from `p`, about the middle, to an ellipse.
+fn ellipse(p: (f32, f32), rx: f32, ry: f32) -> f32 {
+    let k0 = (p.0 / rx).hypot(p.1 / ry);
+    let k1 = (p.0 / (rx * rx)).hypot(p.1 / (ry * ry));
+    if k1 > 0.0 {
+        k0 * (k0 - 1.0) / k1
+    } else {
+        -rx.min(ry)
+    }
+}
+
+fn circle(p: (f32, f32), center: (f32, f32), radius: f32) -> f32 {
+    (p.0 - center.0).hypot(p.1 - center.1) - radius
+}
+
+/// Signed distance from `p` to a closed polygon: negative inside.
+fn polygon(points: &[(f32, f32)], p: (f32, f32)) -> f32 {
+    let Some(&first) = points.first() else {
+        return f32::INFINITY;
+    };
+    let mut nearest = (p.0 - first.0).powi(2) + (p.1 - first.1).powi(2);
+    let mut sign = 1.0;
+    let mut previous = points[points.len() - 1];
+    for &point in points {
+        let edge = (previous.0 - point.0, previous.1 - point.1);
+        let w = (p.0 - point.0, p.1 - point.1);
+        let length = edge.0 * edge.0 + edge.1 * edge.1;
+        let along = if length > 0.0 {
+            ((w.0 * edge.0 + w.1 * edge.1) / length).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let b = (w.0 - edge.0 * along, w.1 - edge.1 * along);
+        nearest = nearest.min(b.0 * b.0 + b.1 * b.1);
+        let above = p.1 >= point.1;
+        let below = p.1 < previous.1;
+        let turns = edge.0 * w.1 > edge.1 * w.0;
+        if (above && below && turns) || (!above && !below && !turns) {
+            sign = -sign;
+        }
+        previous = point;
+    }
+    sign * nearest.sqrt()
 }
 
 /// Three box blurs, close to a gaussian `radius` pixels wide.

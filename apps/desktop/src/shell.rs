@@ -17,21 +17,22 @@ use std::time::{Duration, Instant};
 use cutlass_decode::{CodecId, CodecParams, DecodeFactory};
 use cutlass_editor::{
     Append, AppendLane, ClipMove, DropGesture, DropOutcome, EFFECT_LENGTH, EffectPlace,
-    GestureError, MoveGesture, MovePlan, Pointer, TITLE_LENGTH, TimelineScale, TitlePlace,
-    TrimGesture, TrimPlan, Zoom, ZoomBounds, append_placement, drop_gesture, effect_of_card,
-    effect_requests, effect_row_for, effect_target, fit_pixel_size, free_row, hit_test,
-    last_accuracy_step, material_span, minimum_pixel_size, move_requests, plan_move,
-    title_requests, title_style, trim_gesture,
+    GestureError, MediaPlace, MoveGesture, MovePlan, Pointer, TITLE_LENGTH, TimelineScale,
+    TitlePlace, TransitionMiss, TrimGesture, TrimPlan, Zoom, ZoomBounds, append_placement,
+    drop_gesture, effect_of_card, effect_requests, effect_row_for, effect_target, fit_pixel_size,
+    free_row, hit_test, last_accuracy_step, material_span, media_requests, minimum_pixel_size,
+    move_requests, plan_move, title_requests, title_style, transition_of_card, transition_request,
+    trim_gesture,
 };
 use cutlass_encode::EncodeFactory;
 use cutlass_engine::{Thumb, ThumbKey, Thumbnails, Waveforms};
 use cutlass_eval::{ReaderFactory, SceneError, scene_cuts, source_on_timeline};
 use cutlass_model::{
-    Crop, Draft, FrameRate, FreezeInfo, MaterialAudio, MaterialId, MaterialRef, MaterialTransition,
-    MaterialVideo, MetaType, Micros, Segment, SegmentId, TimeMarkItem, TimeRange, TimecodeLabel,
-    TrackAttribute, TrackId, TrackType, WordColumns, beat_timeline_time, blend_window,
-    linkage_from_biz, segment_beats, segment_time_mark, source_time_at, time_mark_items,
-    track_holds_beats, user_beats, visible_beats, visible_marks,
+    Crop, Draft, FrameRate, FreezeInfo, MaterialAudio, MaterialId, MaterialRef, MaterialVideo,
+    MetaType, Micros, Segment, SegmentId, TimeMarkItem, TimeRange, TimecodeLabel, TrackAttribute,
+    TrackId, TrackType, WordColumns, beat_timeline_time, blend_window, linkage_from_biz,
+    segment_beats, segment_time_mark, source_time_at, time_mark_items, track_holds_beats,
+    user_beats, visible_beats, visible_marks,
 };
 use cutlass_playback::{
     AudioHost, FilmCell, FrameCache, PLAY_FRAMES, Program, Transport, film_cells, media_file,
@@ -58,23 +59,7 @@ use cutlass_probe::{self as probe, Probed};
 /// Long-side steps the export dialog offers.
 pub const SHORT_SIDES: [i32; 6] = [480, 720, 1080, 1440, 2160, 4320];
 
-/// A blend the Transitions shelf can drop onto a main-track cut.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct TransitionOffer {
-    pub id: &'static str,
-    pub name: &'static str,
-    /// Preset length in microseconds. A short clip stores a shorter blend.
-    pub duration: i64,
-    /// `true` splits the window across the cut. `false` keeps it on the outgoing clip.
-    pub overlap: bool,
-}
-
-impl TransitionOffer {
-    #[must_use]
-    pub fn card_id(self) -> String {
-        format!("transition:{}", self.id)
-    }
-}
+pub use cutlass_editor::{TRANSITION_OFFERS, TransitionOffer};
 
 /// How long a notice shows, its fade in and out included.
 pub const NOTICE_SHOWN: Duration = Duration::from_millis(2_160);
@@ -89,22 +74,6 @@ pub use cutlass_playback::ClipWave;
 
 /// The color stored on a marker dropped from the timeline.
 pub const MARKER_COLOR: &str = "#E8B931";
-
-/// Dissolve crosses the cut. Dip stays on the outgoing clip.
-pub const TRANSITION_OFFERS: &[TransitionOffer] = &[
-    TransitionOffer {
-        id: "dissolve",
-        name: "Dissolve",
-        duration: 500_000,
-        overlap: true,
-    },
-    TransitionOffer {
-        id: "dip",
-        name: "Dip",
-        duration: 400_000,
-        overlap: false,
-    },
-];
 
 #[derive(Debug)]
 pub enum ShellError {
@@ -2439,44 +2408,16 @@ impl Shell {
         lane: Option<TrackType>,
         first_clip: bool,
     ) -> Result<(), ShellError> {
-        let segment_id = SegmentId::new(self.fresh("seg"));
-        let mut requests = Vec::new();
-        if let Some(kind) = lane {
-            requests.push(Request::InsertTrack {
-                track_id: track_id.clone(),
-                kind,
-            });
-        }
-        let mut segment = Segment::new(
-            segment_id.clone(),
-            material_id,
-            TimeRange::new(start.0, duration.0),
-        );
-        segment.source_range = Some(TimeRange::new(0, duration.0));
-        let link_owner = if self.linkage_enabled() {
-            let draft = self.session_draft()?;
-            let on_main = draft
-                .tracks
-                .iter()
-                .any(|track| track.id == track_id && track.is_main());
-            if on_main {
-                None
-            } else {
-                exclusive_main_owner(draft, start, duration)
-            }
-        } else {
-            None
-        };
-        requests.push(Request::Place {
+        let place = MediaPlace {
             track_id,
-            segment: Box::new(segment),
-        });
-        if let Some(owner) = link_owner {
-            requests.push(Request::Link {
-                owner,
-                dependent: segment_id.clone(),
-            });
-        }
+            segment_id: SegmentId::new(self.fresh("seg")),
+            material_id: material_id.to_owned(),
+            start,
+            duration,
+            new_lane: lane,
+        };
+        let requests = media_requests(self.session_draft()?, &place, self.linkage_enabled());
+        let segment_id = place.segment_id;
         self.apply_requests(&requests)?;
         self.select(Some(segment_id));
         if first_clip {
@@ -2631,47 +2572,39 @@ impl Shell {
     /// The two clips must touch. The blend does not open a lane and does not
     /// move either clip. A preset longer than the clips is shortened to fit.
     pub fn drop_transition(&mut self, card_id: &str, x: f64, y: f64) -> Result<(), ShellError> {
-        let offer = TRANSITION_OFFERS
-            .iter()
-            .find(|offer| offer.card_id() == card_id)
-            .copied()
-            .ok_or_else(|| {
-                ShellError::Unavailable("the transition is not in the library".to_owned())
-            })?;
-        let x = self.time_zero_x(x);
-        let scale = self.scale();
-        let threshold = snap_window(self.pixel_size);
-        let (segment_id, fitted) = {
-            let draft = self.session_draft()?;
-            let hit = hit_test(draft, scale, Pointer { x, y })
-                .map_err(|_| ShellError::Unavailable("the drag could not be read".to_owned()))?;
-            let Some(hit) = hit else {
-                return Err(ShellError::Unavailable(
-                    "the drag missed the lanes".to_owned(),
-                ));
-            };
-            if !hit.lane.main {
-                return Err(ShellError::Unavailable(
-                    "a transition sits on the main track".to_owned(),
-                ));
+        let offer = transition_of_card(card_id).ok_or_else(|| {
+            ShellError::Unavailable("the transition is not in the library".to_owned())
+        })?;
+        let pointer = Pointer {
+            x: self.time_zero_x(x),
+            y,
+        };
+        let material_id = MaterialId::new(self.fresh("transition"));
+        let request = transition_request(
+            self.session_draft()?,
+            offer,
+            pointer,
+            self.scale(),
+            snap_window(self.pixel_size),
+            material_id,
+        )
+        .map_err(|miss| match miss {
+            TransitionMiss::Locked => ShellError::Locked,
+            TransitionMiss::BadScale => {
+                ShellError::Unavailable("the drag could not be read".to_owned())
             }
-            let (segment_id, outgoing, incoming) = main_cut(draft, hit.time, threshold)?;
-            let fitted = fit_transition(offer.duration, outgoing, incoming, offer.overlap)
-                .ok_or_else(|| ShellError::Unavailable("the clips are too short".to_owned()))?;
-            (segment_id, fitted)
-        };
-        let transition = MaterialTransition {
-            id: MaterialId::new(self.fresh("transition")),
-            kind: "transition".to_owned(),
-            name: offer.name.to_owned(),
-            duration: Micros(fitted),
-            is_overlap: offer.overlap,
-            ..Default::default()
-        };
-        self.apply(Request::SetTransition {
-            segment_id,
-            transition: Box::new(transition),
-        })
+            TransitionMiss::OffLanes => {
+                ShellError::Unavailable("the drag missed the lanes".to_owned())
+            }
+            TransitionMiss::NotMain => {
+                ShellError::Unavailable("a transition sits on the main track".to_owned())
+            }
+            TransitionMiss::NoCut => ShellError::Unavailable("the drop missed the cut".to_owned()),
+            TransitionMiss::TooShort => {
+                ShellError::Unavailable("the clips are too short".to_owned())
+            }
+        })?;
+        self.apply(request)
     }
 
     pub fn zoom_in(&mut self) -> Result<(), ShellError> {
@@ -5829,105 +5762,6 @@ fn ensure_shortcut(settings: &mut Settings, action: &str, keys: &str) {
 
 fn bit(attribute: TrackAttribute, flag: i32) -> bool {
     attribute.0 & flag != 0
-}
-
-/// The outgoing clip of the touching main-track cut nearest `time`.
-///
-/// A gap is not a cut. The last two numbers are the outgoing and incoming
-/// durations.
-fn main_cut(
-    draft: &Draft,
-    time: Micros,
-    threshold: Micros,
-) -> Result<(SegmentId, i64, i64), ShellError> {
-    let track = draft
-        .tracks
-        .iter()
-        .find(|track| track.is_main())
-        .ok_or_else(|| ShellError::Unavailable("the drop missed the cut".to_owned()))?;
-    if track.attribute.contains(TrackAttribute::LOCK) {
-        return Err(ShellError::Locked);
-    }
-    let mut ordered: Vec<_> = track.segments.iter().collect();
-    ordered.sort_by_key(|segment| segment.target.start.0);
-    let mut best: Option<(i64, SegmentId, i64, i64)> = None;
-    for pair in ordered.windows(2) {
-        let left = pair[0];
-        let right = pair[1];
-        if left.target.duration.0 <= 0 || right.target.duration.0 <= 0 {
-            continue;
-        }
-        let cut = left.target.end().0;
-        if right.target.start.0 != cut {
-            continue;
-        }
-        let distance = (time.0 - cut).saturating_abs();
-        if distance > threshold.0 {
-            continue;
-        }
-        let closer = best
-            .as_ref()
-            .is_none_or(|(best_distance, _, _, _)| distance < *best_distance);
-        if closer {
-            best = Some((
-                distance,
-                left.id.clone(),
-                left.target.duration.0,
-                right.target.duration.0,
-            ));
-        }
-    }
-    best.map(|(_, id, outgoing, incoming)| (id, outgoing, incoming))
-        .ok_or_else(|| ShellError::Unavailable("the drop missed the cut".to_owned()))
-}
-
-/// Shorten `preset` so the blend window stays inside both clips.
-fn fit_transition(preset: i64, outgoing: i64, incoming: i64, overlap: bool) -> Option<i64> {
-    if preset <= 0 || outgoing <= 0 || incoming <= 0 {
-        return None;
-    }
-    let fitted = if overlap {
-        let even = outgoing.min(incoming).saturating_mul(2);
-        let odd = outgoing
-            .min(incoming.saturating_sub(1))
-            .saturating_mul(2)
-            .saturating_add(1);
-        even.max(odd).min(preset)
-    } else {
-        preset.min(outgoing)
-    };
-    if fitted <= 0 { None } else { Some(fitted) }
-}
-
-/// The one main-track clip `span` sits on, when it sits on no other.
-/// A locked main lane is not an owner. Touching at an endpoint is not an overlap.
-fn exclusive_main_owner(draft: &Draft, start: Micros, duration: Micros) -> Option<SegmentId> {
-    let end = start.0.checked_add(duration.0)?;
-    if duration.0 <= 0 {
-        return None;
-    }
-    let mut owner = None;
-    for track in &draft.tracks {
-        if !track.is_main() || track.attribute.contains(TrackAttribute::LOCK) {
-            continue;
-        }
-        for segment in &track.segments {
-            let segment_end = segment
-                .target
-                .start
-                .0
-                .checked_add(segment.target.duration.0)?;
-            let overlaps = start.0 < segment_end && segment.target.start.0 < end;
-            if !overlaps {
-                continue;
-            }
-            if owner.is_some() {
-                return None;
-            }
-            owner = Some(segment.id.clone());
-        }
-    }
-    owner
 }
 
 fn draft_has_linkage(draft: &Draft) -> bool {

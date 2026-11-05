@@ -110,6 +110,14 @@ pub struct MaterialText {
         skip_serializing_if = "String::is_empty"
     )]
     pub bubble: String,
+    /// The caption style its words are drawn in, by key; empty is plain.
+    /// The app's own, like `bubble`.
+    #[serde(
+        default,
+        rename = "cutlass_caption_style",
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub caption_style: String,
     #[serde(flatten, default)]
     pub rest: Map<String, Value>,
 }
@@ -179,10 +187,25 @@ impl Default for MaterialText {
             sub_type: 0,
             recognize_type: 0,
             bubble: String::new(),
+            caption_style: String::new(),
             rest: Map::new(),
         }
     }
 }
+
+/// The keys a caption's style may have, as `cutlass_captions` draws them.
+pub const CAPTION_STYLE_KEYS: [&str; 10] = [
+    "classic",
+    "karaoke",
+    "highlight",
+    "pop",
+    "word-by-word",
+    "one-word",
+    "neon",
+    "bold-box",
+    "fade",
+    "rise",
+];
 
 /// A shape a title's background takes instead of a plain box.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

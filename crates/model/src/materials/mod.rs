@@ -43,7 +43,7 @@ pub use speed::{
     constant_target_duration, curve_speed_at, curve_speed_factor, curve_target_duration,
     split_curve,
 };
-pub use text::{Bubble, MaterialText};
+pub use text::{Bubble, CAPTION_STYLE_KEYS, MaterialText};
 pub use transition::{MaterialTransition, blend_extents, blend_window};
 pub use video::{Crop, FreezeInfo, MaterialVideo};
 pub use words::WordColumns;

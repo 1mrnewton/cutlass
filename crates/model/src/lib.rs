@@ -47,10 +47,10 @@ pub use keyframe::{
 };
 pub use linkage::{KindSwitches, LinkageSettings, linkage_from_biz};
 pub use materials::{
-    BloomParams, Bubble, ConstantSpeedError, Crop, CurveSpeed, FreezeInfo, MaterialAnimations,
-    MaterialAudio, MaterialAudioFade, MaterialCanvas, MaterialColorConfig, MaterialDraft,
-    MaterialEffect, MaterialHsl, MaterialPictureAdjust, MaterialPluginEffect, MaterialRef,
-    MaterialShape, MaterialSpeed, MaterialText, MaterialTransition, MaterialVideo,
+    BloomParams, Bubble, CAPTION_STYLE_KEYS, ConstantSpeedError, Crop, CurveSpeed, FreezeInfo,
+    MaterialAnimations, MaterialAudio, MaterialAudioFade, MaterialCanvas, MaterialColorConfig,
+    MaterialDraft, MaterialEffect, MaterialHsl, MaterialPictureAdjust, MaterialPluginEffect,
+    MaterialRef, MaterialShape, MaterialSpeed, MaterialText, MaterialTransition, MaterialVideo,
     MaterialVideoEffect, Materials, RawMaterial, RichFill, RichFont, RichPaint, RichShadow,
     RichSolid, RichStroke, RichStyle, RichText, SpeedPoint, SpeedPreset, StickerAnimation,
     TimeMarkItem, VisibleBeat, VisibleMark, WordColumns, beat_timeline_time, blend_extents,

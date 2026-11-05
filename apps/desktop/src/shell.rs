@@ -293,6 +293,8 @@ pub struct Inspection {
     pub letterbox: String,
     /// How the clip mixes with the picture below it.
     pub blend: cutlass_effects::BlendMode,
+    /// The clip's adjust sliders.
+    pub adjust: cutlass_effects::Adjust,
     /// Fade-in duration, microseconds.
     pub fade_in: i64,
     /// Fade-out duration, microseconds.
@@ -3276,6 +3278,7 @@ impl Shell {
             letterbox: letterbox_color(draft, segment),
             blend: cutlass_effects::segment_blend(draft, segment)
                 .unwrap_or(cutlass_effects::BlendMode::SourceOver),
+            adjust: cutlass_effects::segment_adjust(draft, segment),
             fade_in: fade_durations(draft, segment).0,
             fade_out: fade_durations(draft, segment).1,
             material,
@@ -4278,6 +4281,47 @@ impl Shell {
             material_id,
             mode: mode.package_id().to_owned(),
         })
+    }
+
+    /// Set one adjust slider on the selected picture; zero takes it off.
+    pub fn set_adjust(
+        &mut self,
+        key: cutlass_effects::AdjustKey,
+        value: f64,
+    ) -> Result<(), ShellError> {
+        let segment_id = self.picture_segment("adjustments belong on a picture")?;
+        self.refuse_locked(&segment_id)?;
+        let material_id = MaterialId::new(self.fresh("adjust"));
+        self.apply(Request::SetAdjust {
+            segment_id,
+            material_id,
+            key: key.kind().to_owned(),
+            value,
+        })
+    }
+
+    /// Put every adjust slider on the selected picture back to zero, as one
+    /// undo step. Nothing set is nothing done.
+    pub fn reset_adjust(&mut self) -> Result<(), ShellError> {
+        let segment_id = self.picture_segment("adjustments belong on a picture")?;
+        self.refuse_locked(&segment_id)?;
+        let Some(adjust) = self.inspection().map(|inspection| inspection.adjust) else {
+            return Ok(());
+        };
+        let requests: Vec<Request> = cutlass_effects::AdjustKey::ALL
+            .into_iter()
+            .filter(|key| adjust.get(*key) != 0.0)
+            .map(|key| Request::SetAdjust {
+                segment_id: segment_id.clone(),
+                material_id: MaterialId::new(""),
+                key: key.kind().to_owned(),
+                value: 0.0,
+            })
+            .collect();
+        if requests.is_empty() {
+            return Ok(());
+        }
+        self.apply_requests(&requests)
     }
 
     pub fn set_opacity(&mut self, opacity: f64) -> Result<(), ShellError> {
@@ -10291,6 +10335,57 @@ mod tests {
         assert_eq!(desktop.inspection().unwrap().blend, BlendMode::Multiply);
         desktop.undo().unwrap();
         assert_eq!(desktop.inspection().unwrap().blend, BlendMode::Screen);
+    }
+
+    #[test]
+    fn adjust_sliders_are_set_and_reset_in_one_undo_step() {
+        use cutlass_effects::AdjustKey;
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        let mut video = MaterialVideo::new("picture");
+        video.path = "clip.mp4".to_owned();
+        draft.materials.videos.push(video);
+        draft.tracks[0].segments.push(Segment::new(
+            "picture",
+            "picture",
+            TimeRange::new(0, 1_000_000),
+        ));
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.select(Some(SegmentId::new("picture")));
+        assert!(desktop.inspection().unwrap().adjust.is_identity());
+        desktop.reset_adjust().unwrap();
+        assert!(!desktop.can_undo());
+        desktop.set_adjust(AdjustKey::Temperature, 0.4).unwrap();
+        desktop.set_adjust(AdjustKey::Contrast, -0.2).unwrap();
+        let adjust = desktop.inspection().unwrap().adjust;
+        assert!((adjust.get(AdjustKey::Temperature) - 0.4).abs() < 1e-6);
+        assert!((adjust.get(AdjustKey::Contrast) + 0.2).abs() < 1e-6);
+        assert!(desktop.set_adjust(AdjustKey::Grain, -0.5).is_err());
+        desktop.reset_adjust().unwrap();
+        assert!(desktop.inspection().unwrap().adjust.is_identity());
+        desktop.undo().unwrap();
+        assert!(
+            (desktop
+                .inspection()
+                .unwrap()
+                .adjust
+                .get(AdjustKey::Contrast)
+                + 0.2)
+                .abs()
+                < 1e-6
+        );
+        assert!(
+            (desktop
+                .inspection()
+                .unwrap()
+                .adjust
+                .get(AdjustKey::Temperature)
+                - 0.4)
+                .abs()
+                < 1e-6
+        );
     }
 
     #[test]

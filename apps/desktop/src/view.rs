@@ -6362,6 +6362,40 @@ mod tests {
                 );
             }
         }
+        // The video clip's Adjust tab shows its sliders with their values.
+        shell.select(Some(SegmentId::new("main")));
+        shell
+            .set_adjust(cutlass_effects::AdjustKey::Temperature, 0.4)
+            .unwrap();
+        for _ in 0..2 {
+            view.inspector.focus(inspector::Focus {
+                tab: 4,
+                page: 0,
+                section: Some("adjust"),
+            });
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 2400.0))),
+                    ..Default::default()
+                },
+                |ui| show(&mut shell, ui, &mut view, None),
+            );
+            output.textures_delta.clear();
+        }
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 2400.0))),
+                ..Default::default()
+            },
+            |ui| show(&mut shell, ui, &mut view, None),
+        );
+        let lines = galleys(&output);
+        output.textures_delta.clear();
+        for label in [
+            "Adjust", "Exposure", "Temp", "Tint", "Clarity", "Grain", "40",
+        ] {
+            assert!(lines.iter().any(|line| line == label), "{label}: {lines:?}");
+        }
         let _ = std::fs::remove_dir_all(&temp);
     }
 

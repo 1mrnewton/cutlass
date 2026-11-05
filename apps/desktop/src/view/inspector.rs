@@ -195,7 +195,7 @@ fn video_panel(
         2 if still => note(ui, "A photo has no speed."),
         2 => speed_row(shell, ui, state, inspection),
         3 => animation_tab(shell, ui, state, &["In", "Out", "Combo"], VIDEO_MOTIONS),
-        4 => adjust_tab(ui, state),
+        4 => adjust_tab(shell, ui, state, inspection),
         _ => later_note(ui, "AI stylize"),
     }
 }
@@ -872,7 +872,7 @@ fn animation_side(
 }
 
 /// The Adjust tab of a picture: the color rows, each to come.
-fn adjust_tab(ui: &mut Ui, state: &mut InspectorState) {
+fn adjust_tab(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState, inspection: &Inspection) {
     pages(
         ui,
         &["Basic", "HSL", "Curves", "Color wheel", "Mask"],
@@ -882,16 +882,44 @@ fn adjust_tab(ui: &mut Ui, state: &mut InspectorState) {
         later_note(ui, ["", "HSL", "Curves", "Color wheel", "Mask"][state.page]);
         return;
     }
-    for label in [
-        "Auto adjust",
-        "Color match",
-        "Color correction",
-        "LUT",
-        "Adjust",
-    ] {
+    for label in ["Auto adjust", "Color match", "Color correction", "LUT"] {
         later_row(ui, label);
     }
+    adjust_sliders(shell, ui, state, inspection);
     footer(ui, &["Apply to all", "Save as preset"]);
+}
+
+/// The Adjust section: a switch that resets every slider, and the sliders.
+fn adjust_sliders(
+    shell: &mut Shell,
+    ui: &mut Ui,
+    state: &mut InspectorState,
+    inspection: &Inspection,
+) {
+    let on = !inspection.adjust.is_identity();
+    let header = section(ui, state, "adjust", "Adjust", Some((on, true)), false);
+    if header.toggled {
+        if on {
+            send(shell, Shell::reset_adjust);
+        } else {
+            state.open.insert("adjust".to_owned());
+        }
+    }
+    if !header.open && !state.open.contains("adjust") {
+        return;
+    }
+    body(ui, |ui| {
+        for key in cutlass_effects::AdjustKey::ALL {
+            let stored = (f64::from(inspection.adjust.get(key)) * 100.0).round();
+            let low = f64::from(key.min()) * 100.0;
+            let id = format!("adjust-{}", key.kind());
+            if let Some(value) = slider(ui, state, &id, key.label(), stored, low..=100.0, |v| {
+                format!("{v:.0}")
+            }) {
+                send(shell, |shell| shell.set_adjust(key, value / 100.0));
+            }
+        }
+    });
 }
 
 // The text panel's Basic page.

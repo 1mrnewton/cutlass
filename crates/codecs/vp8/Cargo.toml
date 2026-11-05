@@ -10,6 +10,9 @@ description = "The vp8 codec."
 cutlass-decode = { path = "../../decode", version = "0.1.0" }
 cutlass-encode = { path = "../../encode", version = "0.1.0" }
 
+[dev-dependencies]
+cutlass-isobmff = { path = "../../containers/isobmff", version = "0.1.0" }
+
 [lints]
 workspace = true
 

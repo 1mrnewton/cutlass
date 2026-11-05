@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use cutlass_encode::video::{VideoEncoder, VideoInput};
-use cutlass_encode::{CodecError, CodecId, CodecParams, Packet, PixelFormat};
+use cutlass_encode::{CodecError, CodecId, CodecParams, Packet, PixelFormat, SideData};
 
 use crate::bool_coder::BoolEncoder;
 use crate::decode::{Frame, mb_filter};
@@ -176,6 +176,18 @@ impl Vp8Encoder {
             segment_map: Vec::new(),
             cancel: Arc::new(AtomicBool::new(false)),
         })
+    }
+
+    /// The `vpcC` payload (version 1, after the box header) an ISOBMFF
+    /// track of this stream carries: profile 0, 8-bit 4:2:0, limited
+    /// range, BT.601 matrix. The first packet after open or reset also
+    /// carries it as [`SideData::Config`].
+    #[must_use]
+    pub fn vpcc_record() -> Vec<u8> {
+        // Version 1 and flags; profile; level (none for VP8); bit depth 8,
+        // chroma 4:2:0 co-located, limited range; primaries and transfer
+        // unspecified, matrix BT.601; no initialization data.
+        vec![1, 0, 0, 0, 0, 0, (8 << 4) | (1 << 1), 2, 2, 6, 0, 0]
     }
 
     /// The reconstruction a decoder holds after the last frame, at the
@@ -395,13 +407,11 @@ impl Vp8Encoder {
                 self.rate.last_q = Some(q);
             }
         }
-        Ok(Packet::video(
-            data,
-            input.pts,
-            input.duration,
-            input.timescale,
-            key,
-        ))
+        let mut packet = Packet::video(data, input.pts, input.duration, input.timescale, key);
+        if self.frame_index == 1 {
+            packet.side.push(SideData::Config(Self::vpcc_record()));
+        }
+        Ok(packet)
     }
 
     #[allow(clippy::too_many_arguments)]

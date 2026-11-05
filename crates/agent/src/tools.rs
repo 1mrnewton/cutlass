@@ -8,10 +8,11 @@ use std::fmt;
 use std::path::Path;
 
 use cutlass_model::{Micros, SegmentId, TrackId};
+use cutlass_session::Request;
 use cutlass_settings::{McpServer, Settings};
 
 use crate::approval::{ApprovalAction, Approver, authorize, authorize_then};
-use crate::draft::{ApplyInput, DraftQuery, DraftTools};
+use crate::draft::{ApplyInput, ApplyMode, DraftQuery, DraftTools};
 use crate::r#loop::{ToolOutcome, ToolSink};
 use crate::mcp::{McpClient, McpError, McpTransport};
 use crate::model::{ToolCall, ToolDefinition};
@@ -453,12 +454,13 @@ where
         }
     }
 
-    /// Parses a model tool call. `draft.apply` and `settings.set` are rejected.
+    /// Parses a model tool call. `draft.apply` takes JSON; `settings.set` is
+    /// rejected, as settings change only through the host.
     pub fn parse(&self, name: &str, arguments: &str) -> Result<Invocation, ToolError> {
         let arguments = arguments.trim();
         match name {
             "draft.query" => parse_query(arguments),
-            "draft.apply" => Err(bad("draft.apply")),
+            "draft.apply" => parse_apply(arguments),
             "draft.undo" => bare(arguments, "draft.undo", Invocation::DraftUndo),
             "draft.redo" => bare(arguments, "draft.redo", Invocation::DraftRedo),
             "settings.get" => bare(arguments, "settings.get", Invocation::SettingsGet),
@@ -537,7 +539,10 @@ where
 fn description(name: &str) -> &'static str {
     match name {
         "draft.query" => "Compact view of the open draft plus its revision.",
-        "draft.apply" => "Session requests as one combo, or a dry run.",
+        "draft.apply" => {
+            "Session requests as one combo, or a dry run. JSON: {\"expected_revision\":N, \
+             \"requests\":[{\"op\":\"move\",...}], \"dry_run\":false, \"request_id\":\"...\"}."
+        }
         "draft.undo" => "Restore the draft from before the last committed combo.",
         "draft.redo" => "Reapply the combo that undo removed.",
         "settings.get" => "Read the settings generation and the switches that leave the machine.",
@@ -781,6 +786,37 @@ fn parse_query(arguments: &str) -> Result<Invocation, ToolError> {
         }));
     }
     Err(bad("draft.query"))
+}
+
+/// `draft.apply` as JSON. The revision is required, so a combo built on an
+/// old read is refused rather than applied over newer edits.
+fn parse_apply(arguments: &str) -> Result<Invocation, ToolError> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Apply {
+        expected_revision: u64,
+        requests: Vec<Request>,
+        #[serde(default)]
+        dry_run: bool,
+        #[serde(default)]
+        request_id: Option<String>,
+    }
+    let apply: Apply = serde_json::from_str(arguments).map_err(|error| {
+        ToolError::BadArguments(format!("bad arguments for draft.apply: {error}"))
+    })?;
+    if apply.requests.is_empty() {
+        return Err(bad("draft.apply"));
+    }
+    Ok(Invocation::DraftApply(ApplyInput {
+        request_id: apply.request_id.filter(|id| !id.is_empty()),
+        expected_revision: apply.expected_revision,
+        requests: apply.requests,
+        mode: if apply.dry_run {
+            ApplyMode::DryRun
+        } else {
+            ApplyMode::Commit
+        },
+    }))
 }
 
 fn parse_export(arguments: &str) -> Result<Invocation, ToolError> {
@@ -1332,6 +1368,52 @@ mod tests {
             "revision=3"
         );
         assert_eq!(registry.draft.session().draft().tracks[0].segments.len(), 1);
+    }
+
+    #[test]
+    fn draft_apply_reads_json_and_refuses_a_stale_revision() {
+        let temp = Temp::new();
+        let mut registry = open(&temp, Gate::refuse());
+        let place = serde_json::to_string(&place()).unwrap();
+        let dry = registry
+            .parse(
+                "draft.apply",
+                &format!(r#"{{"expected_revision":0,"requests":[{place}],"dry_run":true}}"#),
+            )
+            .unwrap();
+        assert!(matches!(
+            &dry,
+            Invocation::DraftApply(input) if input.mode == ApplyMode::DryRun
+        ));
+        assert_eq!(registry.invoke(dry).unwrap(), "revision=1 committed=false");
+        assert_eq!(registry.draft.session().revision(), 0);
+        let commit = format!(r#"{{"expected_revision":0,"requests":[{place}],"request_id":"x"}}"#);
+        let applied = registry
+            .invoke(registry.parse("draft.apply", &commit).unwrap())
+            .unwrap();
+        assert_eq!(applied, "revision=1 committed=true");
+        // The same request id repeats its first answer.
+        let again = registry
+            .invoke(registry.parse("draft.apply", &commit).unwrap())
+            .unwrap();
+        assert_eq!(again, applied);
+        let moved = r#"{"expected_revision":0,"requests":[{"op":"move","segment_id":"a","track_id":"main","start":5}]}"#;
+        assert!(
+            registry
+                .invoke(registry.parse("draft.apply", moved).unwrap())
+                .is_err()
+        );
+        assert_eq!(registry.draft.session().revision(), 1);
+        for bad in [
+            r#"{"expected_revision":1,"requests":[]}"#,
+            r#"{"requests":[]}"#,
+            r#"{"expected_revision":1,"requests":[],"approved":true}"#,
+        ] {
+            assert!(matches!(
+                registry.parse("draft.apply", bad),
+                Err(ToolError::BadArguments(_))
+            ));
+        }
     }
 
     #[test]

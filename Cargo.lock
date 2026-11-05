@@ -635,6 +635,8 @@ dependencies = [
  "cutlass-model",
  "cutlass-session",
  "cutlass-settings",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

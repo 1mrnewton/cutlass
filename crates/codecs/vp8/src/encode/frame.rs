@@ -85,6 +85,11 @@ pub struct Setup<'a> {
     pub golden: Option<&'a Frame>,
     /// 0 is the most thorough.
     pub speed: u8,
+    /// Segment of each macroblock, when segmentation is on, with each
+    /// segment's quantizer and multiplier.
+    pub segments: Option<&'a [u8]>,
+    pub seg_dq: [Dequant; 4],
+    pub seg_lambda16: [u64; 4],
 }
 
 /// The coded frame before entropy coding.
@@ -1045,7 +1050,19 @@ pub fn code_frame(src: &Source, s: &Setup<'_>) -> Coded {
                     src_c[p][r * 8..r * 8 + 8].copy_from_slice(&plane[at..at + 8]);
                 }
             }
-            let decision = {
+            let seg = s.segments.map_or(0, |map| map[i] & 3);
+            let local;
+            let s = if s.segments.is_some() {
+                local = Setup {
+                    dq: s.seg_dq[usize::from(seg)],
+                    lambda16: s.seg_lambda16[usize::from(seg)],
+                    ..*s
+                };
+                &local
+            } else {
+                s
+            };
+            let mut decision = {
                 let m = MbCtx {
                     mbx,
                     mby,
@@ -1075,6 +1092,7 @@ pub fn code_frame(src: &Source, s: &Setup<'_>) -> Coded {
                     (None, None) => continue,
                 }
             };
+            decision.mb.segment = seg;
             commit(&mut coded, i, mbx, mby, decision, &mut left_ctx, above, s);
         }
     }

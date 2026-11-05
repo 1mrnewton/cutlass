@@ -417,6 +417,19 @@ fn gate_quality_and_rate_against_libvpx() {
             f64::from(frames) / seconds
         );
     }
+    // Activity segments, reported only: they trade PSNR for flat areas.
+    let segmented = Vp8Options {
+        segments: true,
+        ..Vp8Options::default()
+    };
+    let _ = compare_with_libvpx(
+        "16929689_1920_1080_30fps.mp4",
+        width,
+        height,
+        frames,
+        bitrate,
+        segmented,
+    );
 }
 
 /// Moving content makes the encoder send new vector probabilities, and the
@@ -440,4 +453,35 @@ fn probability_updates_are_sent() {
         mv > 0 && coeff > 0,
         "mv updates {mv}, coefficient updates {coeff}"
     );
+}
+
+/// Activity segments: the map on key and golden frames, the quantizer
+/// offsets on every frame, in both quantizer modes.
+#[test]
+fn segments_decode_identically() {
+    for (name, bitrate, quantizer) in [
+        ("seg_q", 0, 30),
+        ("seg_q_edge", 0, 125),
+        ("seg_rate", 400_000, 0),
+    ] {
+        let opts = Vp8Options {
+            segments: true,
+            bitrate,
+            quantizer,
+            golden_interval: 3,
+            keyframe_interval: 8,
+            ..Vp8Options::default()
+        };
+        let (frames, _) = encode_synthetic(176, 144, 10, opts);
+        let mut state = crate::header::Persist::default();
+        let mut maps = 0;
+        for frame in &frames {
+            let parsed = crate::header::parse(frame, &state).expect("parse");
+            assert!(parsed.header.segmentation.enabled, "{name}");
+            maps += usize::from(parsed.header.segmentation.update_map);
+            state = parsed.next;
+        }
+        assert!(maps >= 3, "{name}: {maps} map updates");
+        check(name, 176, 144, 10, opts);
+    }
 }

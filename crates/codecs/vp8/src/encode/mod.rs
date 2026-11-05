@@ -54,6 +54,10 @@ pub struct Vp8Options {
     pub partitions: usize,
     /// 0 is the most thorough; 2 is the fastest.
     pub speed: u8,
+    /// Four segments by luma activity: flat areas get a finer quantizer
+    /// and busy areas a coarser one. Off by default; it trades PSNR for
+    /// detail in smooth areas.
+    pub segments: bool,
 }
 
 impl Default for Vp8Options {
@@ -65,6 +69,7 @@ impl Default for Vp8Options {
             golden_interval: 16,
             partitions: 1,
             speed: 1,
+            segments: false,
         }
     }
 }
@@ -94,6 +99,8 @@ pub struct Vp8Encoder {
     prob_last: u8,
     prob_golden: u8,
     rate: RateControl,
+    /// Segment of each macroblock, kept between map updates.
+    segment_map: Vec<u8>,
     cancel: Arc<AtomicBool>,
 }
 
@@ -166,6 +173,7 @@ impl Vp8Encoder {
             prob_last: 200,
             prob_golden: 128,
             rate: RateControl::default(),
+            segment_map: Vec::new(),
             cancel: Arc::new(AtomicBool::new(false)),
         })
     }
@@ -253,8 +261,19 @@ impl Vp8Encoder {
             self.persist.probs.clone()
         };
         let dq = Dequant::new(i32::from(q), &QuantIndices::default());
-        let ac = i64::from(AC_Q[usize::from(q)]);
-        let lambda16 = ((ac * ac * 9) / 16).max(1) as u64;
+        let lambda16 = lambda_for(q);
+        // Segments: a new map on key and golden frames, the quantizer
+        // offsets on every frame so each stays inside 0..127.
+        let update_map = self.opts.segments
+            && (key || golden_refresh || self.segment_map.len() != src.mbw * src.mbh);
+        if update_map {
+            self.segment_map = activity_segments(&src);
+        }
+        let seg_quant: [i8; 4] = std::array::from_fn(|i| {
+            (i32::from(SEGMENT_OFFSETS[i])).clamp(-i32::from(q), 127 - i32::from(q)) as i8
+        });
+        let seg_q: [u8; 4] =
+            std::array::from_fn(|i| (i32::from(q) + i32::from(seg_quant[i])) as u8);
         let coeff_costs = Costs::new(&base.coeff);
         let mode_costs = ModeCosts::new(key, &base.y_mode, &base.uv_mode);
         let mv_costs = MvCosts::new(&base.mv);
@@ -279,10 +298,36 @@ impl Vp8Encoder {
                 self.golden.as_deref()
             },
             speed: self.opts.speed,
+            segments: self.opts.segments.then_some(self.segment_map.as_slice()),
+            seg_dq: seg_q.map(|sq| Dequant::new(i32::from(sq), &QuantIndices::default())),
+            seg_lambda16: seg_q.map(lambda_for),
         };
         let mut coded = code_frame(&src, &setup);
         let (mbw, mbh) = (src.mbw, src.mbh);
         let mut h = self.header(key, golden_refresh, q, &base, &coded, mbw, mbh);
+        if self.opts.segments {
+            let mut counts = [0u32; 4];
+            for &seg in &self.segment_map {
+                counts[usize::from(seg & 3)] += 1;
+            }
+            h.segmentation = Segmentation {
+                enabled: true,
+                update_map,
+                update_data: true,
+                absolute: false,
+                quant: seg_quant,
+                filter: [0; 4],
+                tree_probs: if update_map {
+                    [
+                        flag_prob(counts[0] + counts[1], counts[2] + counts[3]),
+                        flag_prob(counts[0], counts[1]),
+                        flag_prob(counts[2], counts[3]),
+                    ]
+                } else {
+                    [255; 3]
+                },
+            };
+        }
         h.filter_level = search_filter(&src, &coded, &h, q);
         if h.filter_level > 0 {
             let filters: Vec<_> = coded
@@ -443,6 +488,42 @@ impl Vp8Encoder {
             prob_golden: if key { 0 } else { flag_prob(gold[0], gold[1]) },
         }
     }
+}
+
+/// Quantizer offsets of the four activity segments, flattest first.
+const SEGMENT_OFFSETS: [i8; 4] = [-8, -3, 2, 6];
+
+/// The rate-distortion multiplier for a quantizer index.
+fn lambda_for(q: u8) -> u64 {
+    let ac = i64::from(AC_Q[usize::from(q.min(127))]);
+    ((ac * ac * 9) / 16).max(1) as u64
+}
+
+/// Splits the macroblocks into four equal groups by luma variance.
+fn activity_segments(src: &Source) -> Vec<u8> {
+    let ys = src.mbw * 16;
+    let variance: Vec<u64> = (0..src.mbw * src.mbh)
+        .map(|i| {
+            let (mbx, mby) = (i % src.mbw, i / src.mbw);
+            let (mut sum, mut sq) = (0u64, 0u64);
+            for r in 0..16 {
+                let at = (mby * 16 + r) * ys + mbx * 16;
+                for &p in &src.y[at..at + 16] {
+                    sum += u64::from(p);
+                    sq += u64::from(p) * u64::from(p);
+                }
+            }
+            sq * 256 - sum * sum
+        })
+        .collect();
+    let mut sorted = variance.clone();
+    sorted.sort_unstable();
+    let n = sorted.len();
+    let cut = [sorted[n / 4], sorted[n / 2], sorted[(3 * n) / 4]];
+    variance
+        .iter()
+        .map(|&v| cut.iter().filter(|&&c| v >= c).count() as u8)
+        .collect()
 }
 
 /// Picks the loop-filter level whose output is closest to the source.

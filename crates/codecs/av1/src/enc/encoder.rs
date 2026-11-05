@@ -287,12 +287,18 @@ impl Av1Enc {
             && cfg.tile_rows_log2 == 0
             && cfg.width >= 1280
         {
-            // One tile column per thread, each at least 512 samples wide.
+            // One tile per thread: columns at least 512 samples wide, then
+            // rows at least 512 samples high.
             let mut l = 0;
             while (2usize << l) <= cfg.threads && (cfg.width >> (l + 1)) >= 512 && l < 6 {
                 l += 1;
             }
             cfg.tile_cols_log2 = l;
+            let mut r = 0;
+            while (2usize << (l + r)) <= cfg.threads && (cfg.height >> (r + 1)) >= 512 && r < 6 {
+                r += 1;
+            }
+            cfg.tile_rows_log2 = r;
         }
         let threads = cfg.threads.max(1);
         let q0 = match cfg.rc {

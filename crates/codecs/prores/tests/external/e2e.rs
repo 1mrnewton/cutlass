@@ -1,7 +1,8 @@
 //! A real clip through the whole path: ffmpeg writes ProRes, this
 //! repository demuxes, decodes, re-encodes and muxes it, and ffprobe,
 //! ffmpeg and AVFoundation open the result. Frames, times, the profile and
-//! the color tags must come through.
+//! the color tags must come through. AVFoundation reads color from the
+//! movie's `colr` box, which the muxer takes from the first frame header.
 
 use std::path::Path;
 use std::process::Command;
@@ -182,6 +183,19 @@ fn round_trip(trip: &Trip) {
         assert!(
             reread.iter().any(|l| l == "nb_read_frames=8"),
             "{}: AVFoundation frames {reread:?}",
+            trip.name
+        );
+        let colors = |lines: &[String]| -> Vec<String> {
+            lines
+                .iter()
+                .filter(|l| l.starts_with("color_"))
+                .cloned()
+                .collect()
+        };
+        assert_eq!(
+            colors(&reread),
+            colors(&after),
+            "{}: AVFoundation color tags",
             trip.name
         );
     }

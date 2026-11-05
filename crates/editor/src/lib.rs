@@ -28,6 +28,7 @@ mod ripple;
 mod ruler;
 mod snap;
 mod stage;
+mod text_effect;
 mod title;
 mod tools;
 mod transition_shelf;
@@ -83,6 +84,9 @@ pub use stage::{
     MAX_SCALE, MIN_SCALE, NoText, Pose, SCALE_REACH, SNAP_REACH, StageAlign, StageBox,
     StageGesture, StageGuides, StageStep, TURN_REACH, TextSizes, canvas_size, keyed_pose,
     stage_align, stage_box, stage_gesture, stage_pick,
+};
+pub use text_effect::{
+    NO_TEXT_EFFECT, TEXT_EFFECTS, TextEffect, text_effect_of, text_effect_requests,
 };
 pub use title::{
     TITLE_CARD_PREFIX, TITLE_LENGTH, TITLE_STYLES, TitlePlace, TitleStyle, title_requests,

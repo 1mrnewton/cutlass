@@ -16,5 +16,9 @@ cutlass-container = { path = "../../container", version = "0.1.0" }
 cutlass-isobmff = { path = "../../containers/isobmff", version = "0.1.0" }
 cutlass-ogg = { path = "../../containers/ogg", version = "0.1.0" }
 
+[[bench]]
+name = "against_ffmpeg"
+harness = false
+
 [lints]
 workspace = true

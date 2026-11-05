@@ -11,6 +11,7 @@ pub mod mode_cost;
 pub mod msac_enc;
 pub mod obu_write;
 pub mod palette;
+pub mod part_rd;
 pub mod quant;
 pub mod rdo;
 pub mod rowmt;

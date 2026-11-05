@@ -544,6 +544,8 @@ pub struct MeParams {
     pub border: i32,
     /// Moves allowed per step size of the full-sample pattern search.
     pub max_iters: u32,
+    /// Largest ring radius the full-sample search starts with.
+    pub max_ring: i32,
     /// Sub-sample steps try the four axis neighbours and then only the
     /// diagonal between the better ones (5 predictions instead of 8).
     pub subpel_pruned: bool,
@@ -557,6 +559,7 @@ impl Default for MeParams {
             filter: 0,
             border: 16,
             max_iters: 8,
+            max_ring: 16,
             subpel_pruned: false,
         }
     }
@@ -584,6 +587,9 @@ pub struct MeScratch<P: Pixel> {
     /// Partition estimates of the current superblock: `[x, y, w, h]`, cost
     /// and motion (kept here for the mode decision, which owns this scratch).
     pub est_memo: Vec<([usize; 4], f64, (i32, i32))>,
+    /// The partition the next `enc_partition` of this node (row, column,
+    /// size) returns.
+    pub force_part: Option<(usize, usize, u8, usize)>,
     /// Edge-emulated reference area of a pattern search that reaches past the plane.
     win: Vec<P>,
     /// The mode search's recent predictions of the current block.
@@ -638,6 +644,7 @@ impl<P: Pixel> MeScratch<P> {
             pred: vec![P::default(); MAX_BLOCK * MAX_BLOCK],
             edge: vec![P::default(); EDGE_SIDE * EDGE_SIDE],
             est_memo: Vec::with_capacity(128),
+            force_part: None,
             win: Vec::new(),
             pred_cache: Vec::new(),
             tx_memo: None,
@@ -1115,7 +1122,7 @@ pub fn motion_search<P: Pixel>(
         let wc_hi = (best.col + range).min(col_hi);
         let in_window = |dy: i32, dx: i32| dy >= wr_lo && dy <= wr_hi && dx >= wc_lo && dx <= wc_hi;
         let mut max_step = 1i32;
-        while max_step * 2 <= range.min(16) {
+        while max_step * 2 <= range.min(params.max_ring) {
             max_step *= 2;
         }
         // Rings of radius 1, 2, 4, .., max_step around the start; the best

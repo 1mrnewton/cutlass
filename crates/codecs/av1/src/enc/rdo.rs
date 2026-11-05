@@ -35,6 +35,8 @@ pub struct ModeParams {
     pub skip_sse_per_px: f64,
     pub inter_frame: bool,
     pub me_range: i32,
+    /// Largest ring radius of the motion search's first stage.
+    pub me_ring: i32,
     /// 0 = full pel only, 2 = quarter pel, 3 = eighth pel.
     pub subpel: u8,
     pub intra_modes: u8,
@@ -115,6 +117,25 @@ pub struct ModeParams {
     /// only while DC's SATD cost is within this factor of the inter one
     /// (0: always; screen content always tries them).
     pub est_intra_ratio: f64,
+    /// Intra frames: partitions chosen by coding each candidate (closed loop).
+    pub part_rd: bool,
+    /// Inter frames: largest node whose estimated split is checked closed
+    /// loop against coding it whole (0: none).
+    pub merge_check: usize,
+    /// That check codes the whole block first and keeps it when it codes
+    /// no residual.
+    pub merge_none_first: bool,
+    /// Inter merge check coding the whole block first: it is kept without
+    /// trying the split when it costs below this multiple of the split's estimate.
+    pub merge_accept: f64,
+    /// ... and searches transform types up to this level (see
+    /// `QuantParams::tx_type_search`) when coding the whole block.
+    pub merge_tx_search: u8,
+    /// Intra frames, per node size 16, 32 and 64: the split is not tried
+    /// where the estimate of the whole block is below this many bits per
+    /// sample, and the whole block is not tried where it is above this.
+    pub intra_split_skip: [f64; 3],
+    pub intra_none_skip: [f64; 3],
 }
 
 impl Default for ModeParams {
@@ -126,6 +147,7 @@ impl Default for ModeParams {
             skip_sse_per_px: 1.0,
             inter_frame: false,
             me_range: 32,
+            me_ring: 16,
             subpel: 2,
             intra_modes: 13,
             tx_depth: 1,
@@ -163,6 +185,13 @@ impl Default for ModeParams {
             compound_modes: true,
             palette_cache: true,
             est_intra_ratio: 0.0,
+            part_rd: false,
+            merge_check: 0,
+            merge_none_first: false,
+            merge_accept: 0.0,
+            merge_tx_search: 3,
+            intra_split_skip: [0.0; 3],
+            intra_none_skip: [f64::MAX; 3],
         }
     }
 }
@@ -511,7 +540,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
     }
 
     /// The partition estimate of an area, computed once per superblock.
-    fn est_block(&mut self, x: usize, y: usize, w: usize, h: usize) -> f64 {
+    pub(crate) fn est_block(&mut self, x: usize, y: usize, w: usize, h: usize) -> f64 {
         let key = [x, y, w, h];
         if let Some(&(_, v, _)) = self.me_scratch.est_memo.iter().find(|e| e.0 == key) {
             return v;
@@ -549,6 +578,14 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         has_rows: bool,
         has_cols: bool,
     ) -> usize {
+        if let Some(f) = self.me_scratch.force_part
+            && f.0 == r
+            && f.1 == c
+            && f.2 == bsize
+        {
+            self.me_scratch.force_part = None;
+            return f.3;
+        }
         let p = self.enc_partition_pick(r, c, bsize, has_rows, has_cols);
         // A partition whose blocks have no chroma size in this subsampling is not allowed.
         let sub = PARTITION_SUBSIZE[p][bsize as usize];
@@ -560,7 +597,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         p
     }
 
-    fn enc_partition_pick(
+    pub(crate) fn enc_partition_pick(
         &mut self,
         r: usize,
         c: usize,
@@ -1659,6 +1696,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
             },
             filter: self.mode.me_filter,
             subpel_pruned: self.mode.subpel_pruned,
+            max_ring: self.mode.me_ring,
             ..MeParams::default()
         };
         let cost_fn = |r: i32, c: i32| -> u32 {

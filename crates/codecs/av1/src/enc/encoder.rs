@@ -72,6 +72,27 @@ impl Coder for MsacEnc {
     fn mark(&mut self, tag: u32) {
         MsacEnc::mark(self, tag);
     }
+    fn checkpoint(
+        &self,
+        base: Option<&super::msac_enc::CoderMark>,
+    ) -> Option<super::msac_enc::CoderMark> {
+        let base = match base {
+            Some(super::msac_enc::CoderMark::Enc(b)) => Some(b),
+            Some(_) => return None,
+            None => None,
+        };
+        Some(super::msac_enc::CoderMark::Enc(MsacEnc::checkpoint(
+            self, base,
+        )))
+    }
+    fn restore(&mut self, s: &super::msac_enc::CoderMark) {
+        if let super::msac_enc::CoderMark::Enc(s) = s {
+            MsacEnc::restore(self, s);
+        }
+    }
+    fn bits_written(&self) -> f64 {
+        self.tell_bits() as f64
+    }
 }
 
 /// How the encoder chooses quantizers.
@@ -1187,13 +1208,27 @@ impl Av1Enc {
             1.0
         };
         let speed = self.cfg.speed;
+        // Wide frames move by more samples: the search reaches about a
+        // fifteenth of the width (48 up to 720 columns).
+        let me_range = ev(
+            "AV1_MER",
+            if speed >= 8 {
+                16.0
+            } else {
+                (hdr.frame_width as f64 / 15.0).clamp(48.0, 128.0)
+            },
+        ) as i32;
         let mode = ModeParams {
             lambda_satd: ev("AV1_LS", 0.8) * qstep * lscale.sqrt(),
             min_block: ev("AV1_MINB", if speed >= 8 { 16.0 } else { 8.0 }) as usize,
             max_block: ev("AV1_MAXB", 64.0) as usize,
             skip_sse_per_px: ev("AV1_SK", 4.0) * qstep * qstep * lscale,
             inter_frame: !key,
-            me_range: ev("AV1_MER", if speed >= 8 { 16.0 } else { 48.0 }) as i32,
+            me_range,
+            me_ring: ev(
+                "AV1_RING",
+                if me_range > 48 { me_range as f64 } else { 16.0 },
+            ) as i32,
             subpel: ev(
                 "AV1_SUBPEL",
                 if speed >= 9 {
@@ -1257,6 +1292,26 @@ impl Av1Enc {
             compound_modes: ev("AV1_CMM", 1.0) > 0.0,
             palette_cache: ev("AV1_PCACHE", 1.0) > 0.0,
             est_intra_ratio: ev("AV1_EIP", if speed >= 5 { 2.0 } else { 0.0 }),
+            part_rd: ev("AV1_PRD", if speed <= 6 { 1.0 } else { 0.0 }) > 0.0,
+            merge_check: match (ev("AV1_PRDF", 0.0) as u32, spec.level == u32::MAX) {
+                (1, true) | (2, false) => 0,
+                _ => ev("AV1_PRDI", 0.0) as usize,
+            },
+            merge_none_first: ev("AV1_PRDN", 0.0) > 0.0,
+            merge_accept: ev("AV1_PRDA", 0.0),
+            merge_tx_search: ev("AV1_PRDL", 3.0) as u8,
+            // Flat 16x16 areas are not split, busy 32x32 ones and 64x64
+            // ones are not coded whole (by the estimate per sample).
+            intra_split_skip: [
+                ev("AV1_KS16", 0.3),
+                ev("AV1_KS32", 0.03),
+                ev("AV1_KS64", 0.0),
+            ],
+            intra_none_skip: [
+                ev("AV1_KN16", f64::MAX),
+                ev("AV1_KN32", 1.0),
+                ev("AV1_KN64", 0.0),
+            ],
             intra_rd_cands: ev(
                 "AV1_IRD",
                 if speed >= 7 {
@@ -1279,9 +1334,20 @@ impl Av1Enc {
             tx_type_search: if speed >= 9 {
                 0
             } else {
-                ev("AV1_TXS", if speed >= 7 { 1.0 } else { 3.0 }) as u8
+                (if key {
+                    ev(
+                        "AV1_TXSK",
+                        ev("AV1_TXS", if speed >= 7 { 1.0 } else { 3.0 }),
+                    )
+                } else {
+                    ev("AV1_TXS", if speed >= 7 { 1.0 } else { 3.0 })
+                }) as u8
             },
-            tx_type_keep: ev("AV1_TXK", 3.0) as u8,
+            tx_type_keep: (if key {
+                ev("AV1_TXKK", ev("AV1_TXK", 3.0))
+            } else {
+                ev("AV1_TXK", 3.0)
+            }) as u8,
             rdoq: if speed >= 9 {
                 0
             } else if speed >= 7 {

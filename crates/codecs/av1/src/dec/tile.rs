@@ -1245,7 +1245,7 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
         usize::from(left) * 2 + usize::from(above)
     }
 
-    fn decode_partition(&mut self, r: usize, c: usize, bsize: u8) -> R<()> {
+    pub(crate) fn decode_partition(&mut self, r: usize, c: usize, bsize: u8) -> R<()> {
         if r >= self.fs.mi_rows || c >= self.fs.mi_cols {
             return Ok(());
         }
@@ -1256,6 +1256,14 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
         let quarter = half >> 1;
         let has_rows = (r + half) < self.fs.mi_rows;
         let has_cols = (c + half) < self.fs.mi_cols;
+        // The encoder may code the node itself, trying its partitions.
+        if C::WRITE
+            && bsize >= BLOCK_8X8
+            && self.plan.blocks.is_empty()
+            && self.enc_partition_trials(r, c, bsize, has_rows && has_cols)?
+        {
+            return Ok(());
+        }
         let partition: usize = if bsize < BLOCK_8X8 {
             0
         } else {

@@ -64,6 +64,10 @@ pub struct Settings {
     /// Local notes. They leave the machine only while the cloud model is on.
     #[serde(default = "default_on")]
     pub memory: bool,
+    /// Project folders opened lately, newest first, at most
+    /// [`RECENT_LIMIT`].
+    #[serde(default)]
+    pub recent_projects: Vec<std::path::PathBuf>,
     /// Keys this file does not name.
     #[serde(flatten, default)]
     pub rest: Map<String, Value>,
@@ -82,8 +86,22 @@ impl Default for Settings {
             skill_folders: Vec::new(),
             step_cap: DEFAULT_STEP_CAP,
             memory: true,
+            recent_projects: Vec::new(),
             rest: Map::new(),
         }
+    }
+}
+
+/// How many recent projects the settings keep.
+pub const RECENT_LIMIT: usize = 10;
+
+impl Settings {
+    /// Put `path` first among the recent projects, once, and drop the
+    /// oldest past [`RECENT_LIMIT`].
+    pub fn note_recent(&mut self, path: &std::path::Path) {
+        self.recent_projects.retain(|recent| recent != path);
+        self.recent_projects.insert(0, path.to_path_buf());
+        self.recent_projects.truncate(RECENT_LIMIT);
     }
 }
 
@@ -438,5 +456,26 @@ mod tests {
         assert!(error.is_err());
         let error = serde_json::from_str::<Settings>("[]");
         assert!(error.is_err());
+    }
+
+    #[test]
+    fn a_recent_project_moves_to_the_front_once_and_the_list_is_capped() {
+        let mut settings = Settings::default();
+        for n in 0..12 {
+            settings.note_recent(std::path::Path::new(&format!("/p/{n}")));
+        }
+        assert_eq!(settings.recent_projects.len(), super::RECENT_LIMIT);
+        assert_eq!(settings.recent_projects[0], std::path::Path::new("/p/11"));
+        settings.note_recent(std::path::Path::new("/p/5"));
+        assert_eq!(settings.recent_projects[0], std::path::Path::new("/p/5"));
+        assert_eq!(settings.recent_projects.len(), super::RECENT_LIMIT);
+        assert_eq!(
+            settings
+                .recent_projects
+                .iter()
+                .filter(|path| path.ends_with("5"))
+                .count(),
+            1
+        );
     }
 }

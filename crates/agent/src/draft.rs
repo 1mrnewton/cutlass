@@ -449,6 +449,7 @@ pub fn request_name(request: &Request) -> &'static str {
         Request::SetTrackAttribute { .. } => "set_track_attribute",
         Request::SetConstantSpeed { .. } => "set_constant_speed",
         Request::SetCurveSpeed { .. } => "set_curve_speed",
+        Request::SetChangePitch { .. } => "set_change_pitch",
         Request::SetTransition { .. } => "set_transition",
         Request::Split { .. } => "split",
         Request::Link { .. } => "link",

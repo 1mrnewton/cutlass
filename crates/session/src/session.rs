@@ -630,6 +630,55 @@ mod tests {
     }
 
     #[test]
+    fn change_pitch_turns_on_and_off_and_a_preset_curve_sets_the_length() {
+        let (mut session, track) = session();
+        let mut segment = Segment::new("a", "media", TimeRange::new(0, 2_000_000));
+        segment.source_range = Some(TimeRange::new(0, 2_000_000));
+        session
+            .apply(
+                0,
+                &[Request::Place {
+                    track_id: track.clone(),
+                    segment: Box::new(segment),
+                }],
+            )
+            .unwrap();
+        let points = cutlass_model::SpeedPreset::FlashIn.points();
+        session
+            .apply(
+                1,
+                &[
+                    Request::SetChangePitch {
+                        segment_id: "a".into(),
+                        on: true,
+                    },
+                    Request::SetCurveSpeed {
+                        segment_id: "a".into(),
+                        speed_id: MaterialId::new("curve"),
+                        points: points.clone(),
+                    },
+                ],
+            )
+            .unwrap();
+        let segment = &session.draft().tracks[0].segments[0];
+        assert!(segment.is_tone_modify);
+        let factor = cutlass_model::curve_speed_factor(&points).unwrap();
+        #[allow(clippy::cast_possible_truncation)]
+        let length = (2_000_000.0 * factor).round() as i64;
+        assert_eq!(segment.target.duration, Micros(length));
+        session
+            .apply(
+                2,
+                &[Request::SetChangePitch {
+                    segment_id: "a".into(),
+                    on: false,
+                }],
+            )
+            .unwrap();
+        assert!(!session.draft().tracks[0].segments[0].is_tone_modify);
+    }
+
+    #[test]
     fn a_curve_speed_maps_duration_by_the_integral_and_trim_uses_that_factor() {
         let (mut session, track) = session();
         let mut segment = Segment::new("a", "media", TimeRange::new(0, 2_000_000));

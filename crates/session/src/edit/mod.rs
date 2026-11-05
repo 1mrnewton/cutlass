@@ -222,6 +222,9 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             speed_id,
             points,
         } => speed::set_curve_speed(draft, segment_id, speed_id, points),
+        Request::SetChangePitch { segment_id, on } => {
+            speed::set_change_pitch(draft, segment_id, *on)
+        }
         Request::SetTransition {
             segment_id,
             transition,

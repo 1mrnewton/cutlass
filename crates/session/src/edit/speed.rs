@@ -206,6 +206,18 @@ pub fn set_constant_speed(
     Ok(())
 }
 
+/// Let the clip's pitch follow its speed, or keep it.
+pub fn set_change_pitch(
+    draft: &mut Draft,
+    segment_id: &SegmentId,
+    on: bool,
+) -> Result<(), EditError> {
+    let (track_index, segment_index) = locate(draft, segment_id)?;
+    ensure_unlocked(draft.tracks[track_index].attribute)?;
+    draft.tracks[track_index].segments[segment_index].is_tone_modify = on;
+    Ok(())
+}
+
 pub(super) fn locate(draft: &Draft, segment_id: &SegmentId) -> Result<(usize, usize), EditError> {
     for (track_index, track) in draft.tracks.iter().enumerate() {
         if let Some(segment_index) = track

@@ -91,6 +91,9 @@ pub enum Request {
         speed_id: MaterialId,
         points: Vec<SpeedPoint>,
     },
+    /// Let the clip's pitch follow its speed (`on`), or keep the pitch as
+    /// the speed changes.
+    SetChangePitch { segment_id: SegmentId, on: bool },
     /// Store a blend on the outgoing segment. Target ranges still only touch.
     SetTransition {
         segment_id: SegmentId,

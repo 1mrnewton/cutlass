@@ -39,8 +39,9 @@ pub use rich::{
 };
 pub use shape::MaterialShape;
 pub use speed::{
-    ConstantSpeedError, CurveSpeed, MaterialSpeed, SpeedPoint, constant_target_duration,
-    curve_speed_factor, curve_target_duration, split_curve,
+    ConstantSpeedError, CurveSpeed, MaterialSpeed, SpeedPoint, SpeedPreset,
+    constant_target_duration, curve_speed_at, curve_speed_factor, curve_target_duration,
+    split_curve,
 };
 pub use text::MaterialText;
 pub use transition::{MaterialTransition, blend_extents, blend_window};

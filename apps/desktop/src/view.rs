@@ -1591,6 +1591,8 @@ fn asset_column(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect
                     shell.add_filter(&id)
                 } else if id.starts_with(crate::shell::STICKER_CARD_PREFIX) {
                     shell.add_sticker(&id)
+                } else if id.starts_with(cutlass_editor::TEMPLATE_CARD_PREFIX) {
+                    shell.add_template(&id)
                 } else {
                     shell.add_medium(&id)
                 };
@@ -2289,6 +2291,13 @@ fn bin_cards(
                 }
                 cards.push(title_card(style));
             }
+            // The title templates follow the single styles.
+            for template in cutlass_editor::TITLE_TEMPLATES {
+                if !query.is_empty() && !template.name.to_lowercase().contains(&query) {
+                    continue;
+                }
+                cards.push(template_card(template));
+            }
         }
         Shelf::Effects => {
             for effect in cutlass_editor::effect_cards() {
@@ -2334,9 +2343,26 @@ fn bin_cards(
                 });
             }
         }
-        Shelf::Templates => {}
+        Shelf::Templates => {
+            for template in cutlass_editor::TITLE_TEMPLATES {
+                if !query.is_empty() && !template.name.to_lowercase().contains(&query) {
+                    continue;
+                }
+                cards.push(template_card(template));
+            }
+        }
     }
     cards
+}
+
+fn template_card(template: &cutlass_editor::TitleTemplate) -> BinCard {
+    BinCard {
+        id: template.card_id(),
+        name: template.name.to_owned(),
+        meta: template.meta.to_owned(),
+        on_timeline: false,
+        look: CardLook::Title(Color32::from_hex(template.color()).unwrap_or(Color32::WHITE)),
+    }
 }
 
 fn effect_card(effect: cutlass_editor::EffectCard) -> BinCard {
@@ -4054,6 +4080,8 @@ fn release_library_drop(
         shell.drop_filter(&material_id, x, y)
     } else if material_id.starts_with(crate::shell::STICKER_CARD_PREFIX) {
         shell.drop_sticker(&material_id, x, y)
+    } else if material_id.starts_with(cutlass_editor::TEMPLATE_CARD_PREFIX) {
+        shell.drop_template(&material_id, x, y)
     } else {
         shell.drop_medium(&material_id, x, y)
     };

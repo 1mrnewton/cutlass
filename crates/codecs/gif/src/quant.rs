@@ -129,7 +129,9 @@ pub(crate) fn quantize(rgba: &[u8]) -> Indexed {
     }
     palette.resize(1 << bits, [0, 0, 0]);
     let indexes = rgba
-        .as_chunks::<4>().0.iter()
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|pixel| {
             lookup
                 .get(&key([pixel[0], pixel[1], pixel[2]]))
@@ -176,7 +178,9 @@ mod tests {
         let indexed = quantize(&rgba);
         assert!(indexed.palette.len() <= 256);
         let worst = rgba
-            .as_chunks::<4>().0.iter()
+            .as_chunks::<4>()
+            .0
+            .iter()
             .zip(&indexed.indexes)
             .map(|(pixel, index)| {
                 let color = indexed.palette[usize::from(*index)];

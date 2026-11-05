@@ -19,7 +19,6 @@ use crate::dec::obu::{
     OBU_FRAME_HEADER, OBU_SEQUENCE_HEADER, OBU_TEMPORAL_DELIMITER, OperatingPoint,
     PRIMARY_REF_NONE, Quant, SequenceHeader, TX_MODE_SELECT, parse_frame_header,
 };
-use crate::dec::tile::{RefView, TileDec};
 use crate::dsp::Pixel;
 use crate::spec::tables::{AC_QLOOKUP, DC_QLOOKUP};
 
@@ -185,6 +184,10 @@ pub struct Av1Enc {
     /// follow `sb_work`, the coding work of the last frame's superblocks.
     auto_tiles: bool,
     sb_work: Vec<u32>,
+    /// Loop filter level and CDEF strengths (y pri, y sec, uv pri, uv sec)
+    /// the last frame nothing predicts from chose, until the next such
+    /// frame takes them.
+    leaf_filters: Option<(u8, [u8; 4])>,
 }
 
 /// log2 of the delta q step of per-superblock quantizers.
@@ -193,11 +196,16 @@ const DELTA_Q_RES: u8 = 2;
 /// TPL block statistics and the display index of each frame they cover.
 type TplGroup = (super::tpl::TplStats, Vec<u64>);
 
+/// Threads per automatic tile. Superblock rows run in a wavefront inside
+/// each tile, so fewer tiles than threads still keep the threads busy, but
+/// a frame whose work sits in a few superblock rows parallelizes better
+/// across tiles. One tile per thread is the fastest at 1080p; a single
+/// tile (any value above the thread count) costs about 2% less rate there
+/// but takes about 10% longer on content whose motion is concentrated.
+const TILE_THREADS: usize = 1;
+
 /// A global motion type and its parameters.
 type GmModel = (u8, [i32; 6]);
-
-/// A coded tile and, for the context tile, the CDFs it ended with.
-type TileCoded = (MsacEnc, Option<Box<CdfContext>>);
 
 /// What a decoder makes of a coded frame, for [`Av1Core::install_frame`].
 struct FrameRecon {
@@ -330,20 +338,19 @@ impl Av1Enc {
         };
         let mut cfg = cfg;
         let mut auto_tiles = false;
-        if cfg.threads > 1
-            && cfg.tile_cols_log2 == 0
-            && cfg.tile_rows_log2 == 0
-            && cfg.width >= 1280
-        {
-            // One tile per thread: columns at least 512 samples wide, then
-            // rows at least 512 samples high.
+        // Tiles per thread (their superblock rows are coded side by side
+        // too, see `rowmt`).
+        let tiles = cfg.threads / TILE_THREADS;
+        if tiles >= 2 && cfg.tile_cols_log2 == 0 && cfg.tile_rows_log2 == 0 && cfg.width >= 1280 {
+            // Columns at least 512 samples wide, then rows at least 512
+            // samples high.
             let mut l = 0;
-            while (2usize << l) <= cfg.threads && (cfg.width >> (l + 1)) >= 512 && l < 6 {
+            while (2usize << l) <= tiles && (cfg.width >> (l + 1)) >= 512 && l < 6 {
                 l += 1;
             }
             cfg.tile_cols_log2 = l;
             let mut r = 0;
-            while (2usize << (l + r)) <= cfg.threads && (cfg.height >> (r + 1)) >= 512 && r < 6 {
+            while (2usize << (l + r)) <= tiles && (cfg.height >> (r + 1)) >= 512 && r < 6 {
                 r += 1;
             }
             cfg.tile_rows_log2 = r;
@@ -379,6 +386,7 @@ impl Av1Enc {
             tpl: None,
             auto_tiles,
             sb_work: Vec::new(),
+            leaf_filters: None,
         })
     }
 
@@ -1248,6 +1256,7 @@ impl Av1Enc {
             screen_est: ev("AV1_SCE", 1.0) > 0.0,
             compound_modes: ev("AV1_CMM", 1.0) > 0.0,
             palette_cache: ev("AV1_PCACHE", 1.0) > 0.0,
+            est_intra_ratio: ev("AV1_EIP", if speed >= 5 { 2.0 } else { 0.0 }),
             intra_rd_cands: ev(
                 "AV1_IRD",
                 if speed >= 7 {
@@ -1283,7 +1292,7 @@ impl Av1Enc {
         };
         let _ = dcq;
         let ti = hdr.tile_info.clone();
-        let n_above = fs.mi_stride + 64;
+        let ctx_tile = ti.context_update_tile_id as usize;
         // Per-64x64 CDEF strengths are chosen after coding: the tiles log
         // their symbols and are coded again with the cdef_idx values.
         let cdef_fb = self.cfg.speed < 8
@@ -1298,159 +1307,37 @@ impl Av1Enc {
             && !hdr.coded_lossless
             && !hdr.allow_intrabc
             && !hdr.use_superres;
-        let mut tile_bytes: Vec<MsacEnc> = Vec::with_capacity(ti.cols * ti.rows);
-        // The CDFs the context tile ends with (saved with the frame).
-        let ctx_tile = ti.context_update_tile_id as usize;
-        let mut saved_cdf: Option<Box<CdfContext>> = None;
-        let run_tile = |tile: usize, fs: &mut FrameState, cur: &mut Picture<P>| -> R<TileCoded> {
-            let tile_row = tile / ti.cols;
-            let tile_col = tile % ti.cols;
-            let mut tile_cdf = Box::new((*cdf).clone());
-            let ref_views: [Option<RefView<'_, P>>; 8] = std::array::from_fn(|i| {
+        // The tiles, superblock rows in a wavefront (see `rowmt`).
+        let job = super::rowmt::TileJob {
+            seq: &seq,
+            hdr: &hdr,
+            refs: std::array::from_fn(|i| {
                 if i == 0 || hdr.frame_is_intra {
                     return None;
                 }
                 let slot = hdr.ref_frame_idx[i - 1] as usize;
                 let pic = ref_pics[slot].as_deref()?;
-                let p = P::view(pic)?;
-                Some(RefView {
-                    pic: p,
-                    mirror: None,
+                Some(super::rowmt::RefInfo {
+                    pic: P::view(pic)?,
                     upscaled_width: refs_hdr[slot].upscaled_width as usize,
                     frame_height: refs_hdr[slot].frame_height as usize,
                     frame_width: refs_hdr[slot].frame_width as usize,
                 })
-            });
-            let mut td = TileDec {
-                seq: &seq,
-                hdr: &hdr,
-                fs,
-                cur,
-                refs: ref_views,
-                mirrors: Vec::new(),
-                msac: {
-                    let mut m = MsacEnc::new(!hdr.disable_cdf_update);
-                    if cdef_fb || lr_on {
-                        m.record();
-                    }
-                    m
-                },
-                pb: Default::default(),
-                plan: crate::dec::tile::EncPlan {
-                    sb_q: sb_q.clone(),
-                    sb_cols,
-                    base_lambda: (qp.lambda, mode.lambda_satd, mode.skip_sse_per_px),
-                    ..Default::default()
-                },
-                plan_q: 0,
-                cfl_choice: (0, 0),
-                intra_choice: (0, None),
-                est_hint: (0, 0),
-                cur_filters: [0, 0],
-                plan_delta_lf: [0; 4],
-                src: Some(src),
-                enc: qp,
-                mode,
-                me_scratch: Default::default(),
-                cdf: &mut tile_cdf,
-                mi_row_start: ti.mi_row_starts[tile_row] as usize,
-                mi_row_end: ti.mi_row_starts[tile_row + 1] as usize,
-                mi_col_start: ti.mi_col_starts[tile_col] as usize,
-                mi_col_end: ti.mi_col_starts[tile_col + 1] as usize,
-                sb_size: if seq.use_128x128_superblock { 15 } else { 12 },
-                sb_size4: if seq.use_128x128_superblock { 32 } else { 16 },
-                bd: seq.bit_depth,
-                sub_x: seq.subsampling_x,
-                sub_y: seq.subsampling_y,
-                num_planes: seq.num_planes(),
-                above_level: std::array::from_fn(|_| vec![0u8; n_above]),
-                above_dc: std::array::from_fn(|_| vec![0u8; n_above]),
-                above_seg_pred: vec![0u8; n_above],
-                left_level: [[0; 32]; 3],
-                left_dc: [[0; 32]; 3],
-                left_seg_pred: [0; 32],
-                above_palette: std::array::from_fn(|_| vec![[0u16; 8]; n_above]),
-                left_palette: [[[0; 8]; 32]; 2],
-                delta_lf: [0; 4],
-                current_q_index: i32::from(hdr.quant.base_q_idx),
-                read_deltas: false,
-                ref_lr_wiener: [[[0; 3]; 2]; 3],
-                ref_sgr_xqd: [[0; 2]; 3],
-                block_decoded: [[[false; 35]; 35]; 3],
-                b: Default::default(),
-                color_map_y: vec![0u8; 128 * 128],
-                color_map_uv: vec![0u8; 128 * 128],
-                scratch: Default::default(),
-                rec: None,
-            };
-            td.decode_tile()?;
-            let TileDec { msac, .. } = td;
-            Ok((msac, (tile == ctx_tile).then_some(tile_cdf)))
+            }),
+            src,
+            init_cdf: &cdf,
+            qp,
+            mode,
+            sb_q: &sb_q,
+            sb_cols,
+            record: cdef_fb || lr_on,
+            threads: self.cfg.threads.max(1),
         };
-        let n_tiles = ti.cols * ti.rows;
-        let threads = self.cfg.threads.max(1).min(n_tiles);
-        if threads <= 1 {
-            for tile in 0..n_tiles {
-                let (m, c) = run_tile(tile, &mut fs, &mut cur)?;
-                tile_bytes.push(m);
-                saved_cdf = saved_cdf.or(c);
-            }
-        } else {
-            // Tiles are independent: each thread codes its tiles into its own
-            // frame state and picture, whose tile areas are merged afterwards.
-            let proto = &fs;
-            let mk_pic = || {
-                Picture::<P>::new(
-                    hdr.frame_width as usize,
-                    hdr.frame_height as usize,
-                    seq.num_planes(),
-                    seq.subsampling_x,
-                    seq.subsampling_y,
-                    seq.bit_depth,
-                )
-            };
-            type TileOut<P> = (Vec<(usize, TileCoded)>, FrameState, Picture<P>);
-            let outs: Vec<R<TileOut<P>>> = std::thread::scope(|sc| {
-                let handles: Vec<_> = (0..threads)
-                    .map(|t| {
-                        let run_tile = &run_tile;
-                        let mk_pic = &mk_pic;
-                        let (seq, hdr) = (&seq, &hdr);
-                        sc.spawn(move || -> R<TileOut<P>> {
-                            let mut f = FrameState::new(seq, hdr);
-                            f.motion_field = proto.motion_field.clone();
-                            let mut c = mk_pic();
-                            let mut out = Vec::new();
-                            for tile in (t..n_tiles).step_by(threads) {
-                                out.push((tile, run_tile(tile, &mut f, &mut c)?));
-                            }
-                            Ok((out, f, c))
-                        })
-                    })
-                    .collect();
-                handles
-                    .into_iter()
-                    .map(|h| {
-                        h.join().unwrap_or(Err(CodecError::InvalidApi {
-                            what: "tile thread",
-                        }))
-                    })
-                    .collect()
-            });
-            let mut bytes: Vec<Option<MsacEnc>> = (0..n_tiles).map(|_| None).collect();
-            for o in outs {
-                let (tiles, f, c) = o?;
-                for (tile, (b, cdfs)) in tiles {
-                    let r0 = ti.mi_row_starts[tile / ti.cols] as usize;
-                    let r1 = ti.mi_row_starts[tile / ti.cols + 1] as usize;
-                    let c0 = ti.mi_col_starts[tile % ti.cols] as usize;
-                    let c1 = ti.mi_col_starts[tile % ti.cols + 1] as usize;
-                    merge_tile(&mut fs, &f, &mut cur, &c, r0, r1, c0, c1);
-                    bytes[tile] = Some(b);
-                    saved_cdf = saved_cdf.or(cdfs);
-                }
-            }
-            tile_bytes = bytes.into_iter().flatten().collect();
+        let mut saved_cdf: Option<Box<CdfContext>> = None;
+        let mut tile_bytes: Vec<MsacEnc> = Vec::with_capacity(ti.cols * ti.rows);
+        for (m, c) in super::rowmt::code_tiles(&job, &mut fs, &mut cur)? {
+            tile_bytes.push(m);
+            saved_cdf = saved_cdf.or(c);
         }
         let use_wiener_cdf = cdf.use_wiener;
         let init_cdf = cdf;
@@ -1481,42 +1368,147 @@ impl Av1Enc {
                 .map(|f| (f64::from(base_lvl) * f).round().clamp(0.0, 63.0) as u8)
                 .collect();
             levels.dedup();
-            let try_level = |l: u8, t: usize| -> (u64, Picture<P>) {
+            // Above speed 4 every other frame nothing predicts from takes
+            // the filter strengths the one before chose instead of
+            // searching (its loop filter level is then the only one tried).
+            let leaf = spec.level == u32::MAX && !key && self.cfg.speed >= 5;
+            let reuse = if leaf { self.leaf_filters.take() } else { None };
+            if let Some((l, _)) = reuse {
+                levels = vec![l];
+            }
+            // Below speed 4 each level filters the whole frame. Else every
+            // other 64-row area is filtered and measured (of at least 4, as
+            // the CDEF search does), each area of each level a job of its
+            // own on a copy of the rows it touches, and the chosen level
+            // then filters the whole frame.
+            let sb_rows = fs.mi_rows.div_ceil(16);
+            let sampled = !full && sb_rows >= 4 && !seq.use_128x128_superblock && levels.len() > 1;
+            let level_hdr = |l: u8| {
                 let mut h2 = hdr.clone();
                 h2.loop_filter.level = [l, l, l, l];
-                let mut pic = cur.clone();
-                crate::dec::postfilter::loop_filter(&seq, &h2, &fs, &mut pic, t);
-                (picture_sse(&pic, src), pic)
+                h2
             };
-            // The levels are tried side by side, sharing the threads.
             let n = levels.len();
-            let tried: Vec<(u64, Picture<P>)> = if threads > 1 && n > 1 {
-                std::thread::scope(|sc| {
-                    let hs: Vec<_> = levels
-                        .iter()
-                        .enumerate()
-                        .map(|(i, &l)| {
-                            let t = (threads / n + usize::from(i < threads % n)).max(1);
-                            let try_level = &try_level;
-                            sc.spawn(move || try_level(l, t))
-                        })
-                        .collect();
-                    hs.into_iter()
-                        .map(|h| {
-                            h.join().map_err(|_| CodecError::InvalidApi {
+            let tried: Vec<(u64, Option<Picture<P>>)> = if sampled {
+                let areas: Vec<usize> = (0..fs.mi_rows).step_by(32).collect();
+                let hdrs: Vec<FrameHeader> = levels.iter().map(|&l| level_hdr(l)).collect();
+                let n_jobs = n * areas.len();
+                let next = std::sync::atomic::AtomicUsize::new(0);
+                let job_sse = |pic: &mut Picture<P>, j: usize| -> u64 {
+                    let (h2, r0) = (&hdrs[j / areas.len()], areas[j % areas.len()]);
+                    // Two 4x4 rows more, so the edge below the area is
+                    // filtered too; the filters reach 8 rows past the rows
+                    // they filter.
+                    let r1 = (r0 + 18).min(fs.mi_rows);
+                    for (p, (d, s)) in pic.planes.iter_mut().zip(&cur.planes).enumerate() {
+                        let sy = usize::from(p > 0 && seq.subsampling_y);
+                        let y0 = ((r0 * 4) >> sy).saturating_sub(8);
+                        let y1 = (((r1 * 4) >> sy) + 8).min(d.alloc_h);
+                        d.data[y0 * d.stride..y1 * d.stride]
+                            .copy_from_slice(&s.data[y0 * s.stride..y1 * s.stride]);
+                    }
+                    crate::dec::postfilter::loop_filter_rows(
+                        &seq,
+                        h2,
+                        &fs,
+                        pic,
+                        r0,
+                        r1,
+                        r1 == fs.mi_rows,
+                    );
+                    let mut e = 0;
+                    for (p, (pa, pb)) in pic.planes.iter().zip(&src.planes).enumerate() {
+                        let sy = usize::from(p > 0 && seq.subsampling_y);
+                        e += plane_rows_sse(pa, pb, (r0 * 4) >> sy, ((r0 + 16) * 4) >> sy);
+                    }
+                    e
+                };
+                let run = || -> Vec<(usize, u64)> {
+                    let mut pic = Picture::<P>::new(
+                        hdr.frame_width as usize,
+                        hdr.frame_height as usize,
+                        seq.num_planes(),
+                        seq.subsampling_x,
+                        seq.subsampling_y,
+                        seq.bit_depth,
+                    );
+                    let mut out = Vec::new();
+                    loop {
+                        let j = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if j >= n_jobs {
+                            return out;
+                        }
+                        out.push((j, job_sse(&mut pic, j)));
+                    }
+                };
+                let t = threads.min(n_jobs);
+                let parts: Vec<(usize, u64)> = if t > 1 {
+                    std::thread::scope(|sc| {
+                        let hs: Vec<_> = (1..t).map(|_| sc.spawn(run)).collect();
+                        let mut all = run();
+                        for h in hs {
+                            all.extend(h.join().map_err(|_| CodecError::InvalidApi {
                                 what: "loop filter thread",
-                            })
-                        })
-                        .collect::<R<Vec<_>>>()
-                })?
-            } else {
-                levels.iter().map(|&l| try_level(l, threads)).collect()
-            };
-            for (l, (e, pic)) in levels.into_iter().zip(tried) {
-                if best_lf.as_ref().is_none_or(|b| e < b.0) {
-                    best_h.loop_filter.level = [l, l, l, l];
-                    best_lf = Some((e, pic));
+                            })?);
+                        }
+                        Ok::<_, CodecError>(all)
+                    })?
+                } else {
+                    run()
+                };
+                let mut sums = vec![0u64; n];
+                for (j, e) in parts {
+                    sums[j / areas.len()] += e;
                 }
+                sums.into_iter().map(|e| (e, None)).collect()
+            } else {
+                let try_level = |l: u8, t: usize| -> (u64, Option<Picture<P>>) {
+                    let mut pic = cur.clone();
+                    crate::dec::postfilter::loop_filter(&seq, &level_hdr(l), &fs, &mut pic, t);
+                    (picture_sse(&pic, src), Some(pic))
+                };
+                // The levels are tried side by side, sharing the threads.
+                if threads > 1 && n > 1 {
+                    std::thread::scope(|sc| {
+                        let hs: Vec<_> = levels
+                            .iter()
+                            .enumerate()
+                            .map(|(i, &l)| {
+                                let t = (threads / n + usize::from(i < threads % n)).max(1);
+                                let try_level = &try_level;
+                                sc.spawn(move || try_level(l, t))
+                            })
+                            .collect();
+                        hs.into_iter()
+                            .map(|h| {
+                                h.join().map_err(|_| CodecError::InvalidApi {
+                                    what: "loop filter thread",
+                                })
+                            })
+                            .collect::<R<Vec<_>>>()
+                    })?
+                } else {
+                    levels.iter().map(|&l| try_level(l, threads)).collect()
+                }
+            };
+            let mut best: Option<(u64, u8, Option<Picture<P>>)> = None;
+            for (l, (e, pic)) in levels.into_iter().zip(tried) {
+                if best.as_ref().is_none_or(|b| e < b.0) {
+                    best = Some((e, l, pic));
+                }
+            }
+            if let Some((e, l, pic)) = best {
+                best_h.loop_filter.level = [l, l, l, l];
+                let pic = match pic {
+                    Some(p) => p,
+                    None => {
+                        let mut p = cur.clone();
+                        let h2 = level_hdr(l);
+                        crate::dec::postfilter::loop_filter(&seq, &h2, &fs, &mut p, threads);
+                        p
+                    }
+                };
+                best_lf = Some((e, pic));
             }
             if let Some((_, deblocked)) = best_lf.as_ref()
                 && cdef_fb
@@ -1548,6 +1540,13 @@ impl Av1Enc {
                     super::cdef_search::set_strength(&mut best_h, k, st);
                 }
                 cdef_choice = Some(ch);
+            } else if let Some((_, [yp, ys, up, us])) = reuse
+                && seq.enable_cdef
+            {
+                best_h.cdef.y_pri = [yp; 8];
+                best_h.cdef.y_sec = [ys; 8];
+                best_h.cdef.uv_pri = [up; 8];
+                best_h.cdef.uv_sec = [us; 8];
             } else if let Some((_, deblocked)) = best_lf.as_ref()
                 && seq.enable_cdef
             {
@@ -1628,6 +1627,13 @@ impl Av1Enc {
                     p.apply(&mut best_h);
                 }
                 cdef_out = Some(cdef_pic);
+            }
+            if leaf && reuse.is_none() {
+                let c = &best_h.cdef;
+                self.leaf_filters = Some((
+                    best_h.loop_filter.level[0],
+                    [c.y_pri[0], c.y_sec[0], c.uv_pri[0], c.uv_sec[0]],
+                ));
             }
             hdr_bytes = write_frame_header(&best_h, &ctx, &opts);
         }
@@ -1761,53 +1767,6 @@ pub(crate) fn ev(_name: &str, default: f64) -> f64 {
     default
 }
 
-/// Copies the tile area (mode info rows r0..r1, columns c0..c1, in 4x4
-/// units) of a tile's frame state and picture into the frame's.
-fn merge_tile<P: Pixel>(
-    fs: &mut FrameState,
-    tf: &FrameState,
-    cur: &mut Picture<P>,
-    tc: &Picture<P>,
-    r0: usize,
-    r1: usize,
-    c0: usize,
-    c1: usize,
-) {
-    let st = fs.mi_stride;
-    for r in r0..r1 {
-        let (a, b) = (r * st + c0, r * st + c1);
-        fs.mi[a..b].copy_from_slice(&tf.mi[a..b]);
-        fs.uv_modes[a..b].copy_from_slice(&tf.uv_modes[a..b]);
-        fs.tx_types[a..b].copy_from_slice(&tf.tx_types[a..b]);
-        fs.inter_tx_sizes[a..b].copy_from_slice(&tf.inter_tx_sizes[a..b]);
-        fs.segment_ids[a..b].copy_from_slice(&tf.segment_ids[a..b]);
-    }
-    for (p, pl) in cur.planes.iter_mut().enumerate() {
-        let sx = usize::from(pl.w < tc.planes[0].w && p > 0);
-        let sy = usize::from(pl.h < tc.planes[0].h && p > 0);
-        let (pr0, pr1) = (r0 >> sy, r1.div_ceil(1 << sy));
-        let (pc0, pc1) = (c0 >> sx, c1.div_ceil(1 << sx));
-        for r in pr0..pr1 {
-            let (a, b) = (r * st + pc0, r * st + pc1);
-            fs.lf_tx[p][a..b].copy_from_slice(&tf.lf_tx[p][a..b]);
-        }
-        let tp = &tc.planes[p];
-        let (y0, y1) = ((pr0 * 4).min(pl.alloc_h), (pr1 * 4).min(pl.alloc_h));
-        let (x0, x1) = ((pc0 * 4).min(pl.stride), (pc1 * 4).min(pl.stride));
-        for y in y0..y1 {
-            pl.data[y * pl.stride + x0..y * pl.stride + x1]
-                .copy_from_slice(&tp.data[y * tp.stride + x0..y * tp.stride + x1]);
-        }
-    }
-    let cs = fs.cdef_stride;
-    for r in r0 / 16..r1.div_ceil(16) {
-        let (a, b) = (r * cs + c0 / 16, r * cs + c1.div_ceil(16));
-        if b <= fs.cdef_idx.len() {
-            fs.cdef_idx[a..b].copy_from_slice(&tf.cdef_idx[a..b]);
-        }
-    }
-}
-
 /// Squared error over the visible area of every plane.
 fn picture_sse<P: Pixel>(a: &Picture<P>, b: &Picture<P>) -> u64 {
     a.planes
@@ -1916,19 +1875,22 @@ fn source_picture<P: Pixel>(
 mod tests {
     use super::{AnyPicture, Av1Core, Av1Enc, EncConfig, InputFrame, RateControl};
 
-    fn encode(threads: usize) -> Vec<u8> {
-        let (w, h) = (160usize, 96usize);
+    fn encode(threads: usize, tiles_log2: u32) -> Vec<u8> {
+        let (w, h) = (320usize, 192usize);
         let mut cfg = EncConfig::new(w, h);
         cfg.rc = RateControl::Qindex(90);
-        cfg.tile_cols_log2 = 1;
-        cfg.tile_rows_log2 = 1;
+        cfg.tile_cols_log2 = tiles_log2;
+        cfg.tile_rows_log2 = tiles_log2;
         cfg.threads = threads;
         cfg.gop = 4;
         let mut enc = Av1Enc::new(cfg).expect("encoder");
         let mut out = Vec::new();
         for f in 0..5usize {
             let y: Vec<u8> = (0..w * h)
-                .map(|i| ((i % w) * 3 + (i / w) * 2 + f * 5) as u8)
+                .map(|i| {
+                    let (x, y) = (i % w, i / w);
+                    ((x * 3 + y * 2 + f * 5) ^ (x * y / 7 + f)) as u8
+                })
                 .collect();
             let c = vec![100u8; (w / 2) * (h / 2)];
             for u in enc
@@ -1949,7 +1911,13 @@ mod tests {
 
     #[test]
     fn tile_threads_do_not_change_the_bitstream() {
-        assert_eq!(encode(1), encode(3));
+        assert_eq!(encode(1, 1), encode(3, 1));
+    }
+
+    #[test]
+    fn row_threads_do_not_change_the_bitstream() {
+        assert_eq!(encode(1, 0), encode(2, 0));
+        assert_eq!(encode(1, 0), encode(4, 0));
     }
 
     /// Visible samples of every plane.
@@ -1979,7 +1947,8 @@ mod tests {
         for (speed, lr, tiles, threads, bd) in [
             (6u8, false, 0u32, 1usize, 8u32),
             (6, true, 1, 2, 8),
-            (3, true, 0, 1, 10),
+            (3, true, 0, 2, 10),
+            (6, true, 0, 3, 8),
             (8, false, 1, 2, 8),
             (10, false, 0, 1, 8),
         ] {

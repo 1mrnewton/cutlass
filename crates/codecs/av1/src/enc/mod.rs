@@ -13,6 +13,7 @@ pub mod obu_write;
 pub mod palette;
 pub mod quant;
 pub mod rdo;
+pub mod rowmt;
 pub mod tf;
 pub mod tiles;
 pub mod tpl;

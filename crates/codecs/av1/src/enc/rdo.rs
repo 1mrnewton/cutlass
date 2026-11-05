@@ -111,6 +111,10 @@ pub struct ModeParams {
     pub compound_modes: bool,
     /// Palette colours the neighbours' palettes offer are charged as cached.
     pub palette_cache: bool,
+    /// Partition estimates of inter frames try the intra modes past DC
+    /// only while DC's SATD cost is within this factor of the inter one
+    /// (0: always; screen content always tries them).
+    pub est_intra_ratio: f64,
 }
 
 impl Default for ModeParams {
@@ -158,6 +162,7 @@ impl Default for ModeParams {
             screen_est: true,
             compound_modes: true,
             palette_cache: true,
+            est_intra_ratio: 0.0,
         }
     }
 }
@@ -190,7 +195,7 @@ pub struct PredKey {
 }
 
 /// Predictions kept per block by the mode search.
-const PRED_CACHE: usize = 6;
+const PRED_CACHE: usize = 12;
 
 const PARTITION_NONE: usize = 0;
 const PARTITION_HORZ: usize = 1;
@@ -334,34 +339,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         left[EDGE_OFF - 1] = corner;
         let mut pred = take_buf(&mut self.scratch.enc_px[1], 64 * 64, P::default());
         let mut best_pred = take_buf(&mut self.scratch.enc_px[2], 64 * 64, P::default());
-        let mut best = (f64::MAX, 0.0);
         let lam = self.mode.lambda_satd;
-        for (mode, bits) in [
-            (DC_PRED, 1.5),
-            (1, 3.0),
-            (2, 3.0),
-            (SMOOTH_PRED, 3.0),
-            (PAETH_PRED, 3.0),
-        ] {
-            let (mut a, mut l) = (above, left);
-            predict_clipped(
-                &mut pred, pw, pw, ph, mode, 0, &mut a, &mut l, have_left, have_above, false,
-                false, pw, ph, bd,
-            );
-            let d = f64::from(satd(
-                &sp.data[y * sp.stride + x..],
-                sp.stride,
-                &pred,
-                pw,
-                pw,
-                ph,
-            ));
-            let c = d + lam * bits;
-            if c < best.0 {
-                best = (c, bits);
-                best_pred[..pw * ph].copy_from_slice(&pred[..pw * ph]);
-            }
-        }
         let mut res = take_buf(&mut self.scratch.enc_i32[2], 64 * 64, 0);
         let mut inter = None;
         let mut est_mv = None;
@@ -468,6 +446,51 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         } else {
             0.0
         };
+        // Intra modes; past DC only while DC is not far behind inter.
+        let prune = if self.hdr.allow_screen_content_tools {
+            0.0
+        } else {
+            self.mode.est_intra_ratio
+        };
+        let mut best = (f64::MAX, 0.0);
+        let mut trial = take_buf(&mut self.scratch.enc_px[3], 64 * 64, P::default());
+        for (i, (mode, bits)) in [
+            (DC_PRED, 1.5),
+            (1, 3.0),
+            (2, 3.0),
+            (SMOOTH_PRED, 3.0),
+            (PAETH_PRED, 3.0),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if i == 1
+                && prune > 0.0
+                && let Some((s, _)) = inter
+                && best.0 > s * prune
+            {
+                break;
+            }
+            let (mut a, mut l) = (above, left);
+            predict_clipped(
+                &mut trial, pw, pw, ph, mode, 0, &mut a, &mut l, have_left, have_above, false,
+                false, pw, ph, bd,
+            );
+            let d = f64::from(satd(
+                &sp.data[y * sp.stride + x..],
+                sp.stride,
+                &trial,
+                pw,
+                pw,
+                ph,
+            ));
+            let c = d + lam * bits;
+            if c < best.0 {
+                best = (c, bits);
+                std::mem::swap(&mut best_pred, &mut trial);
+            }
+        }
+        self.scratch.enc_px[3] = trial;
         // Transform-code only the candidates whose SATD cost is not far
         // behind the other's.
         let t = self.mode.est_skip_ratio;
@@ -1787,23 +1810,49 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
             self.scratch.obmc[..n].copy_from_slice(&e.1[..n]);
             return true;
         }
-        if self
-            .predict_into_scratch(plane, refs[0], x, y, w, h, mv[0], filters)
-            .is_err()
-        {
-            return false;
-        }
         if refs[1] > INTRA_FRAME {
-            let first: Vec<P> = self.scratch.obmc[..n].to_vec();
-            if self
-                .predict_into_scratch(plane, refs[1], x, y, w, h, mv[1], filters)
-                .is_err()
-            {
-                return false;
+            // The average of the two single predictions, which the search
+            // has often made already.
+            let single = |k: usize| PredKey {
+                refs: [refs[k], NONE],
+                mv: [mv[k], Mv::ZERO],
+                ..key
+            };
+            let (k0, k1) = (single(0), single(1));
+            let c0 = cache.iter().position(|e| e.0 == k0);
+            let c1 = cache.iter().position(|e| e.0 == k1);
+            let first: Vec<P> = match c0 {
+                Some(i) => cache[i].1[..n].to_vec(),
+                None => {
+                    if self
+                        .predict_into_scratch(plane, refs[0], x, y, w, h, mv[0], filters)
+                        .is_err()
+                    {
+                        return false;
+                    }
+                    self.scratch.obmc[..n].to_vec()
+                }
+            };
+            let cache = &self.me_scratch.pred_cache;
+            match c1 {
+                Some(i) => self.scratch.obmc[..n].copy_from_slice(&cache[i].1[..n]),
+                None => {
+                    if self
+                        .predict_into_scratch(plane, refs[1], x, y, w, h, mv[1], filters)
+                        .is_err()
+                    {
+                        return false;
+                    }
+                }
             }
             for (d, s) in self.scratch.obmc[..n].iter_mut().zip(&first) {
                 *d = P::from_i32((d.to_i32() + s.to_i32() + 1) >> 1);
             }
+        } else if self
+            .predict_into_scratch(plane, refs[0], x, y, w, h, mv[0], filters)
+            .is_err()
+        {
+            return false;
         }
         // Keep the last few predictions; the oldest buffer is reused.
         let cache = &mut self.me_scratch.pred_cache;

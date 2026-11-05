@@ -13,6 +13,31 @@ use super::msac::Msac;
 /// are `cdef_idx` positions.
 pub const SB_MARK: u32 = 1 << 31;
 
+/// The inverted probability `bool_prob` takes for the event "the symbol is
+/// in `mask`" (bit `i`: symbol `i`) under the inverted CDF `cdf` (its last
+/// entry is the adaptation counter).
+#[inline(always)]
+pub fn masked_prob<const N: usize>(cdf: &[u16; N], mask: u16) -> u32 {
+    let n = N - 1;
+    // Cumulative probability of the symbols below `i`, i in 0..=n.
+    let below = |i: usize| -> u32 {
+        if i == 0 {
+            0
+        } else if i > n {
+            32768
+        } else {
+            32768 - u32::from(cdf[i - 1])
+        }
+    };
+    let mut s = 0;
+    for i in 0..16 {
+        if mask & (1 << i) != 0 {
+            s += below(i + 1) - below(i);
+        }
+    }
+    s
+}
+
 pub trait Coder {
     /// True when the coder writes the values it is given.
     const WRITE: bool;
@@ -22,6 +47,21 @@ pub trait Coder {
     fn literal(&mut self, n: u32, v: u32) -> u32;
     fn golomb(&mut self, v: u32) -> u32;
     fn ns(&mut self, n: u32, v: u32) -> u32;
+    /// A boolean whose probability is the sum of the probabilities of the
+    /// symbols in `mask` (bit `i`: symbol `i`) of the inverted CDF `cdf`
+    /// (see [`masked_prob`]); `cdf` does not adapt.
+    #[inline(always)]
+    fn bool_masked<const N: usize>(&mut self, cdf: &[u16; N], mask: u16, v: bool) -> bool {
+        self.bool_prob(masked_prob(cdf, mask), v)
+    }
+    /// [`Coder::symbol`] on a [`super::cdf::pack4`] CDF.
+    #[inline(always)]
+    fn symbol_packed(&mut self, cdf: &mut u64, v: usize) -> usize {
+        let mut c = super::cdf::unpack4(*cdf);
+        let s = self.symbol(&mut c, v);
+        *cdf = super::cdf::pack4(c);
+        s
+    }
     /// Tags the current stream position (an encoder hook; see
     /// `MsacEnc::mark`).
     #[inline(always)]

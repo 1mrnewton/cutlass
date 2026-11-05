@@ -1232,25 +1232,6 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
         usize::from(left) * 2 + usize::from(above)
     }
 
-    /// Partition CDF in spec (non-inverted, cumulative) form, 10 or 8 entries.
-    fn partition_spec_cdf(&self, bsl: u32, ctx: usize) -> [u32; 10] {
-        let mut out = [32768u32; 10];
-        let mut fill = |inv: &[u16]| {
-            let n = inv.len() - 1;
-            for i in 0..n {
-                out[i] = 32768 - u32::from(inv[i]);
-            }
-        };
-        match bsl {
-            1 => fill(&self.cdf.partition_w8[ctx]),
-            2 => fill(&self.cdf.partition_w16[ctx]),
-            3 => fill(&self.cdf.partition_w32[ctx]),
-            4 => fill(&self.cdf.partition_w64[ctx]),
-            _ => fill(&self.cdf.partition_w128[ctx]),
-        }
-        out
-    }
-
     fn decode_partition(&mut self, r: usize, c: usize, bsize: u8) -> R<()> {
         if r >= self.fs.mi_rows || c >= self.fs.mi_cols {
             return Ok(());
@@ -1286,24 +1267,28 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
                     _ => self.msac.symbol(&mut self.cdf.partition_w128[ctx], want),
                 }
             } else if has_cols || has_rows {
-                let pc = self.partition_spec_cdf(bsl, ctx);
-                let p = |i: usize| pc[i] - if i == 0 { 0 } else { pc[i - 1] };
-                let psum = if has_cols {
-                    // split_or_horz
-                    let mut s = p(2) + p(3) + p(4) + p(6) + p(7);
-                    if bsize != BLOCK_128X128 {
-                        s += p(9);
-                    }
-                    s
+                // split_or_horz / split_or_vert: cdf[0] = 32768 - psum,
+                // inverted form = psum.
+                let mask: u16 = if has_cols {
+                    (1 << 2) | (1 << 3) | (1 << 4) | (1 << 6) | (1 << 7)
                 } else {
-                    let mut s = p(1) + p(3) + p(4) + p(5) + p(6);
-                    if bsize != BLOCK_128X128 {
-                        s += p(8);
-                    }
-                    s
+                    (1 << 1) | (1 << 3) | (1 << 4) | (1 << 5) | (1 << 6)
+                } | if bsize == BLOCK_128X128 {
+                    0
+                } else if has_cols {
+                    1 << 9
+                } else {
+                    1 << 8
                 };
-                // cdf[0] = 32768 - psum, inverted form = psum.
-                let bit = self.msac.bool_prob(psum, want == 3);
+                let v = want == 3;
+                let m = &mut self.msac;
+                let bit = match bsl {
+                    1 => m.bool_masked(&self.cdf.partition_w8[ctx], mask, v),
+                    2 => m.bool_masked(&self.cdf.partition_w16[ctx], mask, v),
+                    3 => m.bool_masked(&self.cdf.partition_w32[ctx], mask, v),
+                    4 => m.bool_masked(&self.cdf.partition_w64[ctx], mask, v),
+                    _ => m.bool_masked(&self.cdf.partition_w128[ctx], mask, v),
+                };
                 if has_cols {
                     if bit { 3 } else { 1 }
                 } else if bit {
@@ -4503,13 +4488,10 @@ fn read_br<C: Coder>(msac: &mut C, cdf: &mut u64, wl: u32) -> u32 {
     level
 }
 
-/// [`Coder::symbol`] on a [`super::cdf::pack4`] CDF.
+/// [`Coder::symbol_packed`].
 #[inline(always)]
 fn symbol_packed<C: Coder>(msac: &mut C, cdf: &mut u64, want: usize) -> u32 {
-    let mut c = super::cdf::unpack4(*cdf);
-    let s = msac.symbol(&mut c, want) as u32;
-    *cdf = super::cdf::pack4(c);
-    s
+    msac.symbol_packed(cdf, want) as u32
 }
 
 /// Length of the padded levels buffer: any index below `LEVELS_MASK + 1`

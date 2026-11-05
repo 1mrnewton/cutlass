@@ -14,6 +14,7 @@ mod grade;
 mod import;
 mod keyframe;
 mod lane;
+mod layer;
 mod linkage;
 mod lut;
 mod magnet;
@@ -172,6 +173,8 @@ pub enum EditError {
     CanvasSize,
     /// The canvas ratio is not one of the project shapes.
     CanvasRatio,
+    /// Arrange moves picture clips, and only with Free layer on.
+    FreeLayer,
     /// A letterbox color belongs on a video or a composition.
     Letterbox,
     /// A letterbox blur is not a fraction from 0 through 1.
@@ -587,6 +590,11 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             name::set_project_name(draft, name);
             Ok(())
         }
+        Request::SetFreeLayer { on } => {
+            layer::set_free_layer(draft, *on);
+            Ok(())
+        }
+        Request::Arrange { segment_id, step } => layer::arrange(draft, segment_id, *step),
     }
 }
 

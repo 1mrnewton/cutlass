@@ -524,6 +524,8 @@ pub fn request_name(request: &Request) -> &'static str {
         Request::SetDropFrame { .. } => "set_drop_frame",
         Request::SetColorSpace { .. } => "set_color_space",
         Request::SetProjectName { .. } => "set_project_name",
+        Request::SetFreeLayer { .. } => "set_free_layer",
+        Request::Arrange { .. } => "arrange",
     }
 }
 

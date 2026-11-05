@@ -18,5 +18,5 @@ pub use edit::{
     follow_first_picture, ratio_request,
 };
 pub use history::UNDO_LIMIT;
-pub use request::{ImportedMedium, Request, TrimEdge};
+pub use request::{Arrange, ImportedMedium, Request, TrimEdge};
 pub use session::Session;

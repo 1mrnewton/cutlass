@@ -915,6 +915,83 @@ impl Av1Enc {
             tile_bytes.push(msac.finish());
         }
         drop(cdf);
+        // Choose the in-loop filter strengths on the reconstruction. Tile
+        // syntax does not depend on them (one CDEF strength, no deltas), so
+        // only the header is rewritten.
+        let mut hdr_bytes = hdr_bytes;
+        if self.cfg.speed < 8 && !hdr.coded_lossless && !hdr.allow_intrabc {
+            let full = self.cfg.speed < 4;
+            let threads = self.core.threads.max(1);
+            let mut best_h = intent.clone();
+            let base_lvl = intent.loop_filter.level[0];
+            let mut best_lf: Option<(u64, Picture<P>)> = None;
+            let lf_f: &[f64] = if full {
+                &[0.0, 0.5, 0.75, 1.0, 1.25, 1.6]
+            } else {
+                &[0.6, 1.0, 1.4]
+            };
+            let mut levels: Vec<u8> = lf_f
+                .iter()
+                .map(|f| (f64::from(base_lvl) * f).round().clamp(0.0, 63.0) as u8)
+                .collect();
+            levels.dedup();
+            for l in levels {
+                let mut h2 = hdr.clone();
+                h2.loop_filter.level = [l, l, l, l];
+                let mut pic = cur.clone();
+                crate::dec::postfilter::loop_filter(&seq, &h2, &fs, &mut pic, threads);
+                let e = picture_sse(&pic, src);
+                if best_lf.as_ref().is_none_or(|b| e < b.0) {
+                    best_h.loop_filter.level = [l, l, l, l];
+                    best_lf = Some((e, pic));
+                }
+            }
+            if let Some((lf_sse, deblocked)) = best_lf
+                && seq.enable_cdef
+            {
+                let p0 = intent.cdef.y_pri[0];
+                let mut best_c = (lf_sse, None::<(u8, u8)>);
+                let mut out = deblocked.clone();
+                let pris: &[u8] = if full {
+                    &[p0 / 2, p0, (p0 * 3 / 2).min(15), (p0 * 2).min(15)]
+                } else {
+                    &[p0 / 2, p0, (p0 * 3 / 2).min(15)]
+                };
+                let secs: &[u8] = if full { &[0, 1, 2, 4] } else { &[0, 2] };
+                for &pri in pris {
+                    for &sec in secs {
+                        if pri == 0 && sec == 0 {
+                            continue;
+                        }
+                        let mut h2 = hdr.clone();
+                        h2.cdef.y_pri = [pri; 8];
+                        h2.cdef.y_sec = [sec; 8];
+                        h2.cdef.uv_pri = [pri / 2; 8];
+                        h2.cdef.uv_sec = [sec.min(2) / 2 * 2; 8];
+                        crate::dec::postfilter::cdef(&seq, &h2, &fs, &deblocked, &mut out, threads);
+                        let e = picture_sse(&out, src);
+                        if e < best_c.0 {
+                            best_c = (e, Some((pri, sec)));
+                        }
+                    }
+                }
+                match best_c.1 {
+                    Some((pri, sec)) => {
+                        best_h.cdef.y_pri = [pri; 8];
+                        best_h.cdef.y_sec = [sec; 8];
+                        best_h.cdef.uv_pri = [pri / 2; 8];
+                        best_h.cdef.uv_sec = [sec.min(2) / 2 * 2; 8];
+                    }
+                    None => {
+                        best_h.cdef.y_pri = [0; 8];
+                        best_h.cdef.y_sec = [0; 8];
+                        best_h.cdef.uv_pri = [0; 8];
+                        best_h.cdef.uv_sec = [0; 8];
+                    }
+                }
+            }
+            hdr_bytes = write_frame_header(&best_h, &ctx, &opts);
+        }
         // Frame OBU: header, then one tile group with every tile.
         let mut payload = hdr_bytes;
         payload.extend_from_slice(&write_tile_group(
@@ -925,6 +1002,22 @@ impl Av1Enc {
         ));
         Ok(payload)
     }
+}
+
+/// Squared error over the visible area of every plane.
+fn picture_sse<P: Pixel>(a: &Picture<P>, b: &Picture<P>) -> u64 {
+    let mut e = 0u64;
+    for (pa, pb) in a.planes.iter().zip(&b.planes) {
+        for y in 0..pa.h {
+            let ra = &pa.data[y * pa.stride..][..pa.w];
+            let rb = &pb.data[y * pb.stride..][..pa.w];
+            for (x, z) in ra.iter().zip(rb) {
+                let d = i64::from(x.to_i32() - z.to_i32());
+                e += (d * d) as u64;
+            }
+        }
+    }
+    e
 }
 
 /// Screen content (text, graphics) has many blocks of few, contrasting

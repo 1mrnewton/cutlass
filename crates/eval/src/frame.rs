@@ -267,7 +267,12 @@ fn gpu_layers(
             },
             Paint::Nest(nested) => nested.gpu(),
             Paint::Text(text) => text.gpu(),
-            Paint::Mixed(_) => None,
+            Paint::Mixed(mixed) => Some(vec![GpuLayer::transition(
+                mixed.moment.kind,
+                mixed.moment.t(),
+                mixed.outgoing.clone(),
+                mixed.incoming.clone(),
+            )]),
         };
         let mut drawn = match gpu {
             Some(gpu) => gpu,
@@ -436,11 +441,24 @@ enum Paint<'a> {
     Mixed(Mixed),
 }
 
-struct Mixed(CpuBytes);
+/// A clip in a transition: both pictures and the moment, mixed on the GPU
+/// when the frame is drawn there and on the CPU when it is composed.
+struct Mixed {
+    moment: crate::transition::Moment,
+    outgoing: CpuBytes,
+    incoming: CpuBytes,
+}
 
 impl PictureSource for Mixed {
     fn sample(&self, _time: Micros) -> Sample {
-        Sample::Ready(Picture::Cpu(self.0.clone()))
+        let (width, height) = (self.outgoing.width(), self.outgoing.height());
+        match self
+            .moment
+            .mix(self.outgoing.rgba(), self.incoming.rgba(), width, height)
+        {
+            Some(mixed) => Sample::Ready(Picture::Cpu(mixed)),
+            None => Sample::Miss,
+        }
     }
 }
 
@@ -491,13 +509,25 @@ fn apply_transitions(
         ) else {
             continue;
         };
-        let (outgoing, incoming) = cut.ordered(covering.rgba(), partner.rgba());
-        let Some(mixed) =
-            crate::transition::fade(store, draft, cut, outgoing, incoming, width, height)
-        else {
+        let Some(moment) = crate::transition::moment(store, draft, cut) else {
             continue;
         };
-        layers[index].paint = Paint::Mixed(Mixed(mixed));
+        let size = (width, height);
+        if (covering.width(), covering.height()) != size
+            || (partner.width(), partner.height()) != size
+        {
+            continue;
+        }
+        let (outgoing, incoming) = if cut.covers_outgoing() {
+            (covering, partner)
+        } else {
+            (partner, covering)
+        };
+        layers[index].paint = Paint::Mixed(Mixed {
+            moment,
+            outgoing,
+            incoming,
+        });
     }
 }
 

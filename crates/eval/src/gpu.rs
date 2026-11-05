@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use cutlass_compositor::Frame;
 use cutlass_decode::Surface;
-use cutlass_effects::{BlendMode, Step};
+use cutlass_effects::{BlendMode, Step, TransitionKind};
 use cutlass_gpu::{Affine, Placement, YuvTone};
 use cutlass_picture::CpuBytes;
 
@@ -41,6 +41,14 @@ pub enum GpuSource {
     Blend {
         mode: BlendMode,
         layers: Box<FrameLayers>,
+    },
+    /// Moment `t` of a built-in transition between two canvas-sized
+    /// premultiplied pictures.
+    Transition {
+        kind: TransitionKind,
+        t: f32,
+        outgoing: CpuBytes,
+        incoming: CpuBytes,
     },
 }
 
@@ -110,6 +118,26 @@ impl GpuLayer {
             source: GpuSource::Blend {
                 mode,
                 layers: Box::new(child),
+            },
+            placement,
+            backdrop: None,
+        }
+    }
+
+    /// A transition between two canvas-sized pictures.
+    pub(crate) fn transition(
+        kind: TransitionKind,
+        t: f32,
+        outgoing: CpuBytes,
+        incoming: CpuBytes,
+    ) -> Self {
+        let placement = Placement::canvas(outgoing.width(), outgoing.height());
+        Self {
+            source: GpuSource::Transition {
+                kind,
+                t,
+                outgoing,
+                incoming,
             },
             placement,
             backdrop: None,

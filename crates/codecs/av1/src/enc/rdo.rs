@@ -35,6 +35,8 @@ pub struct ModeParams {
     pub skip_sse_per_px: f64,
     pub inter_frame: bool,
     pub me_range: i32,
+    /// Largest ring radius of the motion search's first stage.
+    pub me_ring: i32,
     /// 0 = full pel only, 2 = quarter pel, 3 = eighth pel.
     pub subpel: u8,
     pub intra_modes: u8,
@@ -145,6 +147,7 @@ impl Default for ModeParams {
             skip_sse_per_px: 1.0,
             inter_frame: false,
             me_range: 32,
+            me_ring: 16,
             subpel: 2,
             intra_modes: 13,
             tx_depth: 1,
@@ -1693,6 +1696,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
             },
             filter: self.mode.me_filter,
             subpel_pruned: self.mode.subpel_pruned,
+            max_ring: self.mode.me_ring,
             ..MeParams::default()
         };
         let cost_fn = |r: i32, c: i32| -> u32 {

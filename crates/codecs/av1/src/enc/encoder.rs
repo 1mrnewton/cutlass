@@ -1208,13 +1208,27 @@ impl Av1Enc {
             1.0
         };
         let speed = self.cfg.speed;
+        // Wide frames move by more samples: the search reaches about a
+        // fifteenth of the width (48 up to 720 columns).
+        let me_range = ev(
+            "AV1_MER",
+            if speed >= 8 {
+                16.0
+            } else {
+                (hdr.frame_width as f64 / 15.0).clamp(48.0, 128.0)
+            },
+        ) as i32;
         let mode = ModeParams {
             lambda_satd: ev("AV1_LS", 0.8) * qstep * lscale.sqrt(),
             min_block: ev("AV1_MINB", if speed >= 8 { 16.0 } else { 8.0 }) as usize,
             max_block: ev("AV1_MAXB", 64.0) as usize,
             skip_sse_per_px: ev("AV1_SK", 4.0) * qstep * qstep * lscale,
             inter_frame: !key,
-            me_range: ev("AV1_MER", if speed >= 8 { 16.0 } else { 48.0 }) as i32,
+            me_range,
+            me_ring: ev(
+                "AV1_RING",
+                if me_range > 48 { me_range as f64 } else { 16.0 },
+            ) as i32,
             subpel: ev(
                 "AV1_SUBPEL",
                 if speed >= 9 {

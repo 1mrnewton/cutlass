@@ -1214,6 +1214,7 @@ impl Av1Enc {
             intra_sweep_ratio: ev("AV1_IRS", if speed >= 5 { 2.0 } else { 0.0 }),
             inter_clear_ratio: ev("AV1_ICR", if speed >= 5 { 1.2 } else { 0.0 }),
             est_skip_ratio: ev("AV1_EST", if speed >= 5 { 2.0 } else { 0.0 }),
+            est_intra_ratio: ev("AV1_EIP", if speed >= 5 { 2.0 } else { 0.0 }),
             intra_rd_cands: ev(
                 "AV1_IRD",
                 if speed >= 6 {

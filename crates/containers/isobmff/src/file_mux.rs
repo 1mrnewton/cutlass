@@ -386,6 +386,8 @@ mod tests {
             .unwrap();
         mux.write_packet(&packet(sound.get(), vec![0; 1600 * 4], 0, 1600, 48_000))
             .unwrap();
+        mux.write_packet(&packet(sound.get(), vec![7; 800 * 4], 1600, 800, 48_000))
+            .unwrap();
         mux.finish(&[
             TrackDuration {
                 track: picture,
@@ -395,7 +397,7 @@ mod tests {
             TrackDuration {
                 track: sound,
                 timescale: Timescale::new(48_000),
-                ticks: 1600,
+                ticks: 2400,
             },
         ])
         .unwrap();
@@ -403,6 +405,22 @@ mod tests {
         assert!(bytes.windows(4).any(|w| w == b"apch"));
         assert!(!bytes.windows(4).any(|w| w == b"apcn"));
         assert!(bytes.windows(4).any(|w| w == b"sowt"));
+
+        // Read back, the sound is every byte that went in, at its time.
+        let mut file = crate::IsoBmffFile::open(Cursor::new(bytes)).unwrap();
+        let mut sound_bytes = Vec::new();
+        let mut last_end = 0;
+        while let Some(packet) = cutlass_container::Demux::read_packet(&mut file).unwrap() {
+            if packet.stream() == sound.get() {
+                let time = packet.timestamp();
+                assert_eq!(time.presentation_or_decode(), Some(last_end));
+                last_end += time.duration().unwrap();
+                sound_bytes.extend_from_slice(packet.bytes());
+            }
+        }
+        assert_eq!(last_end, 2400);
+        assert_eq!(sound_bytes.len(), 2400 * 4);
+        assert_eq!(sound_bytes[1600 * 4], 7);
     }
 
     #[test]

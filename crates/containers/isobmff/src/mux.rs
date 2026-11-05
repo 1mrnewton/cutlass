@@ -757,6 +757,10 @@ fn stbl(
 ) -> Result<Vec<u8>, Error> {
     let mut body = Vec::new();
     body.extend(stsd(track)?);
+    if let Some(frame) = pcm_frame_bytes(track) {
+        body.extend(pcm_tables(samples, frame, map_offset));
+        return Ok(box_bytes(b"stbl", &body));
+    }
     body.extend(stts(samples));
     if samples.iter().any(|sample| sample.pts != sample.dts) {
         body.extend(ctts(samples)?);
@@ -767,6 +771,63 @@ fn stbl(
         body.extend(stss(samples));
     }
     Ok(box_bytes(b"stbl", &body))
+}
+
+/// The bytes of one audio frame of a raw PCM track, or `None` for any
+/// other track.
+fn pcm_frame_bytes(track: &TrackOut) -> Option<u32> {
+    if track.params.codec != CodecId::Pcm {
+        return None;
+    }
+    let MediaKind::Audio(audio) = track.params.kind else {
+        return None;
+    };
+    let bytes = u32::from(audio.channels) * u32::from(audio.bits_per_sample / 8);
+    (bytes > 0).then_some(bytes)
+}
+
+/// Sample tables for raw PCM, as QuickTime reads them: each audio frame is
+/// one sample of one tick, and each written packet is one chunk.
+fn pcm_tables(samples: &[&Held], frame: u32, map_offset: &impl Fn(u64) -> u64) -> Vec<u8> {
+    let frames: Vec<u32> = samples.iter().map(|sample| sample.size / frame).collect();
+    let total: u32 = frames
+        .iter()
+        .fold(0, |sum, count| sum.saturating_add(*count));
+    let mut stts = vec![0, 0, 0, 0];
+    if total == 0 {
+        stts.extend_from_slice(&0u32.to_be_bytes());
+    } else {
+        stts.extend_from_slice(&1u32.to_be_bytes());
+        stts.extend_from_slice(&total.to_be_bytes());
+        stts.extend_from_slice(&1u32.to_be_bytes());
+    }
+    let mut runs: Vec<(u32, u32)> = Vec::new();
+    for (index, count) in frames.iter().enumerate() {
+        if runs.last().is_some_and(|(_, last)| last == count) {
+            continue;
+        }
+        runs.push((u32::try_from(index + 1).unwrap_or(u32::MAX), *count));
+    }
+    let mut stsc = vec![0, 0, 0, 0];
+    stsc.extend_from_slice(&u32::try_from(runs.len()).unwrap_or(0).to_be_bytes());
+    for (first, count) in runs {
+        stsc.extend_from_slice(&first.to_be_bytes());
+        stsc.extend_from_slice(&count.to_be_bytes());
+        stsc.extend_from_slice(&1u32.to_be_bytes());
+    }
+    let mut co64 = vec![0, 0, 0, 0];
+    co64.extend_from_slice(&u32::try_from(samples.len()).unwrap_or(0).to_be_bytes());
+    for sample in samples {
+        co64.extend_from_slice(&map_offset(sample.offset).to_be_bytes());
+    }
+    let mut stsz = vec![0, 0, 0, 0];
+    stsz.extend_from_slice(&frame.to_be_bytes());
+    stsz.extend_from_slice(&total.to_be_bytes());
+    let mut out = box_bytes(b"stts", &stts);
+    out.extend(box_bytes(b"stsc", &stsc));
+    out.extend(box_bytes(b"co64", &co64));
+    out.extend(box_bytes(b"stsz", &stsz));
+    out
 }
 
 fn stsd(track: &TrackOut) -> Result<Vec<u8>, Error> {

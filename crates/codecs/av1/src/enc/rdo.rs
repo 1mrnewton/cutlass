@@ -358,6 +358,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         }
         let mut res = take_buf(&mut self.scratch.enc_i32[2], 64 * 64, 0);
         let mut inter = None;
+        let mut est_mv = None;
         if self.mode.inter_frame
             && let Some(rv) = self.refs[LAST_FRAME as usize].as_ref()
         {
@@ -405,6 +406,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
             );
             let (dy, dx) = (me.mv.0 >> 3, me.mv.1 >> 3);
             self.est_hint = me.mv;
+            est_mv = Some((dy, dx));
             for i in 0..ph {
                 let ry = (y as i32 + i as i32 + dy).clamp(0, rp.h as i32 - 1) as usize;
                 for j in 0..pw {
@@ -424,6 +426,8 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
             inter = Some((d + lam * mvb, mvb));
         }
         // Screen content intra frames: a palette, by transform-coded RD.
+        // (In inter frames it would favour intra blocks whose chroma the
+        // block decision then serves badly.)
         let mut cost = f64::MAX;
         if self.hdr.allow_screen_content_tools
             && !self.mode.inter_frame
@@ -444,11 +448,10 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         }
         let chroma = if self.hdr.allow_screen_content_tools
             && self.mode.screen_est
-            && !self.mode.inter_frame
             && pw == cw
             && ph == ch
         {
-            self.est_chroma_sc(x, y, pw, ph)
+            self.est_chroma_sc(x, y, pw, ph, est_mv)
         } else {
             0.0
         };

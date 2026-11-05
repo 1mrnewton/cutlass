@@ -346,11 +346,19 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         best
     }
 
-    /// Partition estimate of the chroma of a screen content intra area
-    /// (`pw` x `ph` luma samples at (`x`, `y`)): the better of a DC
-    /// prediction from the source neighbours and a U/V palette, each with its
-    /// residual transform-coded, in the units of `tx_cost`.
-    pub(crate) fn est_chroma_sc(&mut self, x: usize, y: usize, pw: usize, ph: usize) -> f64 {
+    /// Partition estimate of the chroma of a screen content area (`pw` x
+    /// `ph` luma samples at (`x`, `y`)): the best of a DC prediction from the
+    /// source neighbours, a U/V palette and, given the luma estimate's
+    /// full-sample motion `mv` from LAST, that motion; each with its residual
+    /// transform-coded, in the units of `tx_cost`.
+    pub(crate) fn est_chroma_sc(
+        &mut self,
+        x: usize,
+        y: usize,
+        pw: usize,
+        ph: usize,
+        mv: Option<(i32, i32)>,
+    ) -> f64 {
         let Some(src) = self.src else { return 0.0 };
         if self.num_planes < 3 {
             return 0.0;
@@ -398,6 +406,29 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
             dc_cost += self.tx_cost_any(&res, cw, ch, tx);
         }
         let mut best = dc_cost + lam_b * 2.0;
+        // Full-sample motion of the luma estimate.
+        if let Some((dy, dx)) = mv
+            && let Some(rv) = self.refs[crate::dec::types::LAST_FRAME as usize].as_ref()
+        {
+            let (dy, dx) = (dy >> sy, dx >> sx);
+            let mut r2 = vec![0i32; 2 * cw * ch];
+            for plane in 1..3 {
+                let rp = &rv.pic.planes[plane];
+                let p = &src.planes[plane];
+                let out = &mut r2[(plane - 1) * cw * ch..][..cw * ch];
+                for i in 0..ch {
+                    let ry = (cy as i32 + i as i32 + dy).clamp(0, rp.h as i32 - 1) as usize;
+                    for j in 0..cw {
+                        let rx = (cx as i32 + j as i32 + dx).clamp(0, rp.w as i32 - 1) as usize;
+                        out[i * cw + j] = p.data[(cy + i) * p.stride + cx + j].to_i32()
+                            - rp.data[ry * rp.stride + rx].to_i32();
+                    }
+                }
+            }
+            let inter_cost = self.tx_cost_any(&r2[..cw * ch], cw, ch, tx)
+                + self.tx_cost_any(&r2[cw * ch..], cw, ch, tx);
+            best = best.min(inter_cost);
+        }
         if !self.hdr.allow_screen_content_tools {
             return best;
         }

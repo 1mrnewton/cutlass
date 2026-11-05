@@ -757,6 +757,23 @@ mod tests {
     }
 
     #[test]
+    fn a_token_partition_shorter_than_its_size_is_truncated() {
+        let header = FrameHeader {
+            partitions: 4,
+            ..key_header()
+        };
+        let mut data = write(&header, &Persist::default());
+        let parsed = parse(&data, &Persist::default()).expect("whole frame");
+        assert_eq!(parsed.tokens.len(), 4);
+        // The third partition declares 3 bytes and 2 remain.
+        data.truncate(data.len() - 4);
+        assert!(matches!(
+            parse(&data, &Persist::default()),
+            Err(CodecError::Truncated { .. })
+        ));
+    }
+
+    #[test]
     fn a_partition_table_past_the_end_is_truncated() {
         let header = key_header();
         let mut data = write(&header, &Persist::default());

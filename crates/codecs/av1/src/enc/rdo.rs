@@ -654,7 +654,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         let (picked_inter, picked_rd) = if self.mode.inter_frame {
             let list = self.pick_inter(x, y, block_width(bs), block_height(bs));
             self.b = saved.clone();
-            self.rerank_inter(list, x, y, w, h, tx)
+            self.rerank_inter(list, &pb, x, y, w, h, tx)
         } else {
             (None, None)
         };
@@ -672,13 +672,15 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         pb.use_filter_intra = fi.is_some();
         pb.filter_intra_mode = fi.unwrap_or(0);
         let mut intra_cost = intra_cost;
+        let mut pal_bits = 0.0;
         let (bw, bh) = (block_width(bs), block_height(bs));
         if self.hdr.allow_screen_content_tools && bw.min(bh) >= 8 && bw.max(bh) <= 64 {
             // The mode cost was measured on the first transform block only.
             let whole = intra_cost * ((bw * bh) as f64 / (w * h) as f64);
-            if let Some((n, colors, cost, _)) = self.pick_palette_y(x, y, bw, bh)
+            if let Some((n, colors, cost, pbits)) = self.pick_palette_y(x, y, bw, bh)
                 && cost < whole
             {
+                pal_bits = pbits;
                 pb.y_mode = DC_PRED;
                 pb.angle_delta_y = 0;
                 pb.use_filter_intra = false;
@@ -700,49 +702,72 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
             if clear > 0.0 && best_cost > c.cost * clear {
                 // Intra is far behind: no transform-coded comparison.
                 inter_choice = Some(c);
-            } else if self.mode.rd_inter_intra && pb.palette_size_y == 0 {
+            } else if self.mode.rd_inter_intra && (pb.palette_size_y == 0 || self.mode.screen_est) {
                 // Transform-coded RD on the first transform block's area.
                 let fw = self.fs.mi_cols * 4;
                 let fh = self.fs.mi_rows * 4;
                 if x + w <= fw && y + h <= fh {
                     let lam_b = self.enc.lambda;
                     let mut res = vec![0i32; w * h];
-                    self.b.is_inter = false;
-                    self.b.use_filter_intra = pb.use_filter_intra;
-                    self.b.filter_intra_mode = pb.filter_intra_mode;
-                    self.b.angle_delta_y = pb.angle_delta_y;
-                    self.b.palette_size_y = 0;
-                    let sb_mask = self.sb_size4 - 1;
-                    let (sr, sc) = (self.b.mi_row & sb_mask, self.b.mi_col & sb_mask);
-                    let bdf = &self.block_decoded[0];
-                    let ar = bdf[sr][sc + (w >> 2) + 1];
-                    let bl = bdf[sr + (h >> 2) + 1][sc];
-                    let (al, au) = (self.b.avail_l, self.b.avail_u);
-                    self.predict_intra(
-                        0,
-                        x,
-                        y,
-                        al,
-                        au,
-                        ar,
-                        bl,
-                        pb.y_mode,
-                        w.trailing_zeros(),
-                        h.trailing_zeros(),
-                    );
-                    let cp = &self.cur.planes[0];
-                    let pred: Vec<P> = (0..h)
-                        .flat_map(|i| cp.data[(y + i) * cp.stride + x..][..w].to_vec())
-                        .collect();
+                    let pred: Vec<P> = if pb.palette_size_y > 0 {
+                        let n = usize::from(pb.palette_size_y);
+                        (0..h)
+                            .flat_map(|i| (0..w).map(move |j| (i, j)))
+                            .map(|(i, j)| {
+                                let k = usize::from(self.color_map_y[i * bw + j]).min(n - 1);
+                                P::from_i32(i32::from(pb.palette_y[k]))
+                            })
+                            .collect()
+                    } else {
+                        self.b.is_inter = false;
+                        self.b.use_filter_intra = pb.use_filter_intra;
+                        self.b.filter_intra_mode = pb.filter_intra_mode;
+                        self.b.angle_delta_y = pb.angle_delta_y;
+                        self.b.palette_size_y = 0;
+                        let sb_mask = self.sb_size4 - 1;
+                        let (sr, sc) = (self.b.mi_row & sb_mask, self.b.mi_col & sb_mask);
+                        let bdf = &self.block_decoded[0];
+                        let ar = bdf[sr][sc + (w >> 2) + 1];
+                        let bl = bdf[sr + (h >> 2) + 1][sc];
+                        let (al, au) = (self.b.avail_l, self.b.avail_u);
+                        self.predict_intra(
+                            0,
+                            x,
+                            y,
+                            al,
+                            au,
+                            ar,
+                            bl,
+                            pb.y_mode,
+                            w.trailing_zeros(),
+                            h.trailing_zeros(),
+                        );
+                        let cp = &self.cur.planes[0];
+                        (0..h)
+                            .flat_map(|i| cp.data[(y + i) * cp.stride + x..][..w].to_vec())
+                            .collect()
+                    };
                     self.residual_of(&pred, w, x, y, w, h, &mut res);
                     let ib = self.mode.inter_flag_bits;
-                    let intra_rd = self.tx_cost(&res, w, h, tx)
+                    let mut intra_rd = self.tx_cost(&res, w, h, tx)
                         + lam_b
-                            * if ib {
-                                self.is_inter_bits(false) + 4.0
-                            } else {
-                                5.0
-                            };
+                            * (pal_bits
+                                + if ib {
+                                    self.is_inter_bits(false) + 4.0
+                                } else {
+                                    5.0
+                                });
+                    // Screen content: the chroma decides too.
+                    let chroma = self.hdr.allow_screen_content_tools
+                        && self.mode.screen_est
+                        && pb.has_chroma
+                        && w == bw
+                        && h == bh;
+                    let mut inter_chroma = 0.0;
+                    if chroma {
+                        intra_rd += self.est_chroma_sc(x, y, bw, bh, None);
+                        inter_chroma = self.inter_chroma_cost(&pb, c.refs, c.mv);
+                    }
                     let mut inter_rd = f64::MAX;
                     if let Some(rd) = picked_rd {
                         inter_rd = rd
@@ -766,7 +791,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
                             };
                         inter_rd = self.tx_cost(&res, w, h, tx) + lam_b * bits;
                     }
-                    if inter_rd < intra_rd {
+                    if inter_rd + inter_chroma < intra_rd {
                         inter_choice = Some(c);
                     }
                 } else if c.cost < best_cost {
@@ -831,6 +856,40 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         self.pb = pb;
         self.plan_q = self.plan.sb_target.unwrap_or(self.current_q_index);
         self.plan_delta_lf = self.delta_lf;
+    }
+
+    /// Transform-coded cost of the chroma residual of the block `pb` predicted
+    /// by `refs` / `mv` (0 when a prediction is not available).
+    fn inter_chroma_cost(&mut self, pb: &Block, refs: [i8; 2], mv: [Mv; 2]) -> f64 {
+        let Some(src) = self.src else { return 0.0 };
+        let (sx, sy) = (usize::from(self.sub_x), usize::from(self.sub_y));
+        let cx = (pb.mi_col * 4) >> sx;
+        let cy = (pb.mi_row * 4) >> sy;
+        let cw = (block_width(pb.bsize) >> sx).max(4);
+        let ch = (block_height(pb.bsize) >> sy).max(4);
+        let uv_tx = self.get_tx_size_for(1, 0, pb.bsize);
+        if !cw.is_multiple_of(tx_w(uv_tx)) || !ch.is_multiple_of(tx_h(uv_tx)) {
+            return 0.0;
+        }
+        let mut res = vec![0i32; cw * ch];
+        let mut cost = 0.0;
+        for plane in 1..3 {
+            let sp = &src.planes[plane];
+            if cx + cw > sp.w || cy + ch > sp.h {
+                return 0.0;
+            }
+            if !self.pred_plane_f(plane, refs, mv, cx, cy, cw, ch, [0, 0]) {
+                return 0.0;
+            }
+            for i in 0..ch {
+                for j in 0..cw {
+                    res[i * cw + j] = sp.data[(cy + i) * sp.stride + cx + j].to_i32()
+                        - self.scratch.obmc[i * cw + j].to_i32();
+                }
+            }
+            cost += self.tx_cost(&res, cw, ch, uv_tx);
+        }
+        cost
     }
 
     /// [`Self::tx_cost`] for the other mode decision modules.
@@ -1931,6 +1990,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
     fn rerank_inter(
         &mut self,
         list: Vec<InterChoice>,
+        pb: &Block,
         x: usize,
         y: usize,
         w: usize,
@@ -1946,8 +2006,9 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         }
         let lam_b = self.enc.lambda;
         let mut res = vec![0i32; w * h];
-        let mut best: Option<(InterChoice, f64, f64)> = None;
+        let mut best: Option<(InterChoice, f64, f64, f64)> = None;
         let lim = first.map_or(f64::MAX, |c| c.cost * self.mode.inter_rd_ratio);
+        let chroma = self.hdr.allow_screen_content_tools && self.mode.screen_est && pb.has_chroma;
         for c in list.iter().take(k) {
             if c.cost > lim {
                 break;
@@ -1961,12 +2022,17 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
             let e: f64 = res.iter().map(|&v| f64::from(v * v)).sum();
             let coded = self.tx_cost(&res, w, h, tx);
             let rd = coded.min(e + lam_b) + lam_b * c.bits;
-            if best.as_ref().is_none_or(|b| rd < b.1) {
-                best = Some((*c, rd, coded));
+            let rank = if chroma {
+                rd + self.inter_chroma_cost(pb, c.refs, c.mv)
+            } else {
+                rd
+            };
+            if best.as_ref().is_none_or(|b| rank < b.3) {
+                best = Some((*c, rd, coded, rank));
             }
         }
         match best {
-            Some((c, rd, coded)) => {
+            Some((c, rd, coded, _)) => {
                 // The transform size search starts from this cost.
                 let key = self.pred_key(0, c.refs, c.mv, [x, y, w, h]);
                 self.me_scratch.tx_memo = Some((key, tx, coded));

@@ -103,11 +103,18 @@ fn rejected(message: &str) -> MuxError {
     }
 }
 
-/// The box writer's parameters for `stream`: H.264 or HEVC pictures, or
-/// AAC sound.
+/// ProRes profiles a picture track may name in its extradata: Proxy, LT,
+/// 422 and HQ, by their sample entry.
+const PRORES_ENTRIES: [[u8; 4]; 4] = [*b"apco", *b"apcs", *b"apcn", *b"apch"];
+
+/// The box writer's parameters for `stream`: H.264, HEVC or ProRes
+/// pictures, or AAC or 16-bit PCM sound. A ProRes track whose extradata is
+/// a profile's four-character code is written with that sample entry.
 fn box_params(stream: &NewStream) -> Result<StreamParams, MuxError> {
     let StreamCodec::Known(codec) = stream.params.codec() else {
-        return Err(rejected("mp4 export writes H.264, HEVC, ProRes, and AAC"));
+        return Err(rejected(
+            "mp4 export writes H.264, HEVC, ProRes, AAC, and PCM",
+        ));
     };
     let scale = BoxScale(stream.timescale.ticks_per_second());
     let mut params = match codec {
@@ -123,7 +130,7 @@ fn box_params(stream: &NewStream) -> Result<StreamParams, MuxError> {
             };
             StreamParams::video(codec, scale, size.width(), size.height())
         }
-        Id::Aac => {
+        Id::Aac | Id::Pcm => {
             let rate = stream
                 .params
                 .sample_rate()
@@ -132,11 +139,29 @@ fn box_params(stream: &NewStream) -> Result<StreamParams, MuxError> {
                 .params
                 .channels()
                 .ok_or_else(|| rejected("a sound track needs channels"))?;
-            StreamParams::audio(CodecId::Aac, scale, rate, channels, 16, SampleFormat::S16Le)
+            let codec = if *codec == Id::Aac {
+                CodecId::Aac
+            } else {
+                CodecId::Pcm
+            };
+            StreamParams::audio(codec, scale, rate, channels, 16, SampleFormat::S16Le)
         }
-        _ => return Err(rejected("mp4 export writes H.264, HEVC, ProRes, and AAC")),
+        _ => {
+            return Err(rejected(
+                "mp4 export writes H.264, HEVC, ProRes, AAC, and PCM",
+            ));
+        }
     };
-    params.extradata = stream.params.extradata().to_vec();
+    let extradata = stream.params.extradata();
+    if *codec == Id::Prores
+        && let Some(entry) = PRORES_ENTRIES
+            .iter()
+            .find(|entry| extradata == entry.as_slice())
+    {
+        params.sample_entry = *entry;
+    } else {
+        params.extradata = extradata.to_vec();
+    }
     Ok(params)
 }
 
@@ -320,7 +345,65 @@ impl<W: Write + Seek> Mux for Mp4Mux<W> {
 
 #[cfg(test)]
 mod tests {
-    use super::bare_asc;
+    use std::io::Cursor;
+
+    use cutlass_codec::{
+        CodecId as Id, FrameSize, Packet, StreamCodec, StreamParams, Timescale, Timestamp,
+    };
+    use cutlass_container::{Mux, NewStream, TrackDuration};
+
+    use super::{Mp4Mux, bare_asc};
+    use crate::mux::FileBrand;
+
+    fn packet(stream: u32, data: Vec<u8>, pts: i64, duration: i64, scale: u32) -> Packet {
+        let time = Timestamp::try_new(Some(pts), Some(pts), Some(duration)).unwrap();
+        Packet::try_new(stream, data, time, Timescale::new(scale), true).unwrap()
+    }
+
+    #[test]
+    fn a_movie_names_its_prores_profile_and_carries_pcm() {
+        let mut mux = Mp4Mux::with_brand(Cursor::new(Vec::new()), FileBrand::Mov);
+        let picture = mux
+            .add_stream(NewStream {
+                params: StreamParams::video(
+                    StreamCodec::Known(Id::Prores),
+                    FrameSize::try_new(64, 64).unwrap(),
+                    b"apch".to_vec(),
+                ),
+                timescale: Timescale::new(30),
+                language: None,
+            })
+            .unwrap();
+        let sound = mux
+            .add_stream(NewStream {
+                params: StreamParams::try_audio(StreamCodec::Known(Id::Pcm), 48_000, 2, Vec::new())
+                    .unwrap(),
+                timescale: Timescale::new(48_000),
+                language: None,
+            })
+            .unwrap();
+        mux.write_packet(&packet(picture.get(), vec![1; 64], 0, 1, 30))
+            .unwrap();
+        mux.write_packet(&packet(sound.get(), vec![0; 1600 * 4], 0, 1600, 48_000))
+            .unwrap();
+        mux.finish(&[
+            TrackDuration {
+                track: picture,
+                timescale: Timescale::new(30),
+                ticks: 1,
+            },
+            TrackDuration {
+                track: sound,
+                timescale: Timescale::new(48_000),
+                ticks: 1600,
+            },
+        ])
+        .unwrap();
+        let bytes = mux.into_writer().unwrap().into_inner();
+        assert!(bytes.windows(4).any(|w| w == b"apch"));
+        assert!(!bytes.windows(4).any(|w| w == b"apcn"));
+        assert!(bytes.windows(4).any(|w| w == b"sowt"));
+    }
 
     #[test]
     fn an_es_descriptor_gives_up_its_audio_specific_config() {

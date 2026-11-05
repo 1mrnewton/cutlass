@@ -608,6 +608,15 @@ pub struct MovePreview {
 
 /// How far ahead playback opens clips and decodes their first pictures.
 const PREROLL: Micros = Micros(1_000_000);
+/// Card ids on the sticker shelf: this prefix, then the sticker's id.
+pub const STICKER_CARD_PREFIX: &str = "sticker:";
+
+/// How long a sticker lasts when it is placed.
+const STICKER_LENGTH: Micros = Micros(3_000_000);
+
+/// A placed sticker's size against the canvas it would fill.
+const STICKER_SCALE: f64 = 0.4;
+
 pub struct Shell {
     decoders: DecodeFactory,
     encoders: EncodeFactory,
@@ -2729,6 +2738,122 @@ impl Shell {
             face: self.face.name().to_owned(),
         };
         self.apply_requests(&title_requests(style, &place))?;
+        self.select(Some(place.segment_id));
+        Ok(())
+    }
+
+    /// Add the sticker shelf's `card_id` at the playhead, on the first
+    /// sticker row with room, else on a new one. The new sticker is picked.
+    pub fn add_sticker(&mut self, card_id: &str) -> Result<(), ShellError> {
+        let start = self.playhead;
+        let track_id = free_row(
+            self.session_draft()?,
+            TrackType::Sticker,
+            start,
+            STICKER_LENGTH,
+        );
+        self.place_sticker(card_id, track_id, start)
+    }
+
+    /// Place the sticker shelf's `card_id` where it was dropped on the lanes.
+    pub fn drop_sticker(&mut self, card_id: &str, x: f64, y: f64) -> Result<(), ShellError> {
+        let x = self.time_zero_x(x);
+        let outcome = {
+            let gesture = DropGesture {
+                kind: TrackType::Sticker,
+                duration: STICKER_LENGTH,
+                pointer: Pointer { x, y },
+                scale: self.scale(),
+                playhead: self.playhead,
+                snap_threshold: self.snap_threshold(),
+                guides: self.guide_times(),
+            };
+            drop_gesture(self.session_draft()?, &gesture)
+                .map_err(|_| ShellError::Unavailable("the drag could not be read".to_owned()))?
+        };
+        match outcome {
+            DropOutcome::Miss => Err(ShellError::Unavailable(
+                "the drag missed the lanes".to_owned(),
+            )),
+            DropOutcome::Place { track_id, start } => {
+                self.place_sticker(card_id, Some(track_id), start)
+            }
+            DropOutcome::NewLane { start, .. } => self.place_sticker(card_id, None, start),
+        }
+    }
+
+    /// Place a sticker on `track_id`, or on a new sticker row. The picture is
+    /// written into the project the first time and its library item is
+    /// shared after that; adding it, the row, the clip and its size are one
+    /// undo step.
+    fn place_sticker(
+        &mut self,
+        card_id: &str,
+        track_id: Option<TrackId>,
+        start: Micros,
+    ) -> Result<(), ShellError> {
+        let sticker = card_id
+            .strip_prefix(STICKER_CARD_PREFIX)
+            .and_then(cutlass_stickers::sticker)
+            .ok_or_else(|| {
+                ShellError::Unavailable("the sticker is not on the sticker shelf".to_owned())
+            })?;
+        let project = self.path.clone().ok_or(ShellError::NoProject)?;
+        let stored = format!("Resources/{}", sticker.file_name());
+        let mut requests = Vec::new();
+        let known = self
+            .session_draft()?
+            .materials
+            .videos
+            .iter()
+            .find(|video| video.path == stored)
+            .map(|video| video.id.as_str().to_owned());
+        let material_id = match known {
+            Some(id) => id,
+            None => {
+                let file = project.join(&stored);
+                if !file.is_file() {
+                    let png = sticker.png().map_err(ShellError::Io)?;
+                    if let Some(folder) = file.parent() {
+                        std::fs::create_dir_all(folder)
+                            .map_err(|error| ShellError::Io(error.to_string()))?;
+                    }
+                    std::fs::write(&file, png)
+                        .map_err(|error| ShellError::Io(error.to_string()))?;
+                }
+                let material_id = self.fresh("mat");
+                let mut material = MaterialVideo::new(material_id.as_str());
+                material.kind = MetaType::Sticker.as_str().to_owned();
+                material.path = stored;
+                material.duration = MaterialVideo::MAPPING_DURATION;
+                let side = i32::try_from(cutlass_stickers::STICKER_SIDE).unwrap_or(0);
+                material.width = side;
+                material.height = side;
+                requests.push(Request::Import {
+                    medium: ImportedMedium::Video(Box::new(material)),
+                });
+                material_id
+            }
+        };
+        let new_lane = track_id.is_none().then_some(TrackType::Sticker);
+        let place = MediaPlace {
+            track_id: track_id.unwrap_or_else(|| TrackId::new(self.fresh("track"))),
+            segment_id: SegmentId::new(self.fresh("seg")),
+            material_id,
+            start,
+            duration: STICKER_LENGTH,
+            new_lane,
+        };
+        requests.extend(media_requests(
+            self.session_draft()?,
+            &place,
+            self.linkage_enabled(),
+        ));
+        requests.push(Request::SetScale {
+            segment_id: place.segment_id.clone(),
+            scale: STICKER_SCALE,
+        });
+        self.apply_requests(&requests)?;
         self.select(Some(place.segment_id));
         Ok(())
     }
@@ -9349,6 +9474,84 @@ mod tests {
         assert_eq!(desktop.marks().mark_out, Some(Micros(2_000_000)));
         desktop.select(None);
         assert!(desktop.toggle_active().is_err());
+    }
+
+    #[test]
+    fn a_sticker_is_written_once_placed_small_and_undoes_in_one_step() {
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        draft.canvas_config.width = 64;
+        draft.canvas_config.height = 64;
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.pixel_size = 0.001;
+        let rows = |desktop: &Shell| {
+            desktop
+                .draft()
+                .unwrap()
+                .tracks
+                .iter()
+                .filter(|track| track.kind == TrackType::Sticker)
+                .map(|track| track.segments.len())
+                .collect::<Vec<_>>()
+        };
+        let middle = |desktop: &Shell| {
+            let picture = desktop.preview_bytes().unwrap();
+            let at = ((picture.height / 2) * picture.width + picture.width / 2) as usize * 4;
+            [picture.rgba[at], picture.rgba[at + 1], picture.rgba[at + 2]]
+        };
+        let clear = middle(&desktop);
+
+        desktop.add_sticker("sticker:heart").unwrap();
+        assert_eq!(rows(&desktop), [1]);
+        assert!(temp.path.join("Resources/sticker-heart.png").is_file());
+        let draft = desktop.draft().unwrap();
+        assert_eq!(draft.materials.videos[0].kind, "sticker");
+        let picked = desktop.selected().cloned().unwrap();
+        let segment = draft
+            .tracks
+            .iter()
+            .flat_map(|track| &track.segments)
+            .find(|segment| segment.id == picked)
+            .unwrap();
+        assert_eq!(segment.target, TimeRange::new(0, 3_000_000));
+        assert!((segment.clip.scale.x - 0.4).abs() < 1e-9);
+        // The heart's red is in the middle of the canvas.
+        let red = middle(&desktop);
+        assert_ne!(red, clear);
+        assert!(red[0] > 200 && red[1] < 120, "{red:?}");
+
+        // A second sticker over the first opens a second row.
+        desktop.add_sticker("sticker:star").unwrap();
+        assert_eq!(rows(&desktop), [1, 1]);
+        // The same sticker again shares its picture.
+        desktop.seek(Micros(4_000_000));
+        desktop.add_sticker("sticker:heart").unwrap();
+        assert_eq!(rows(&desktop), [2, 1]);
+        assert_eq!(desktop.draft().unwrap().materials.videos.len(), 2);
+
+        desktop.undo().unwrap();
+        assert_eq!(rows(&desktop), [1, 1]);
+        desktop.undo().unwrap();
+        assert_eq!(rows(&desktop), [1]);
+        assert_eq!(desktop.draft().unwrap().materials.videos.len(), 1);
+
+        let sticker_row = crate::tokens::LANE_HEIGHT / 2.0;
+        desktop
+            .drop_sticker(
+                "sticker:bolt",
+                lane_time(&desktop, 5_000_000.0),
+                sticker_row,
+            )
+            .unwrap();
+        assert_eq!(rows(&desktop), [2], "the drop lands after the heart");
+        assert!(desktop.add_sticker("sticker:nope").is_err());
+        assert!(
+            desktop
+                .drop_sticker("title:nope", 0.0, sticker_row)
+                .is_err()
+        );
     }
 
     #[test]

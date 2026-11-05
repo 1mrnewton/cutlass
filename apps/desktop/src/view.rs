@@ -105,7 +105,7 @@ impl Shelf {
             Self::Media => "No media yet. Use File → Import.",
             Self::Audio => "No audio yet. Use File → Import.",
             Self::Text => "No title matches the search.",
-            Self::Stickers => "No stickers in this project.",
+            Self::Stickers => "No stickers.",
             Self::Effects => "No effect matches the search.",
             Self::Transitions => "No transitions in this project.",
             Self::Filters => "No filters in this project.",
@@ -1589,6 +1589,8 @@ fn asset_column(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect
                     shell.add_adjustment()
                 } else if id.starts_with(cutlass_editor::FILTER_CARD_PREFIX) {
                     shell.add_filter(&id)
+                } else if id.starts_with(crate::shell::STICKER_CARD_PREFIX) {
+                    shell.add_sticker(&id)
                 } else {
                     shell.add_medium(&id)
                 };
@@ -2063,6 +2065,32 @@ fn fill_looks(shell: &mut Shell, ctx: &egui::Context, cards: &mut [BinCard]) {
                     };
                     card.look = CardLook::Picture(Some((texture, [width, height])));
                 }
+                CardLook::Picture(_) if card.id.starts_with(crate::shell::STICKER_CARD_PREFIX) => {
+                    let Some(sticker) = card
+                        .id
+                        .strip_prefix(crate::shell::STICKER_CARD_PREFIX)
+                        .and_then(cutlass_stickers::sticker)
+                    else {
+                        continue;
+                    };
+                    let key = cutlass_engine::ThumbKey {
+                        path: card.id.clone().into(),
+                        time: Micros(0),
+                    };
+                    let (width, height) = (96, 64);
+                    let texture = if let Some(entry) = textures.shown.get_mut(&key) {
+                        entry.1 = textures.frame;
+                        entry.0.id()
+                    } else {
+                        let thumb = cutlass_engine::Thumb {
+                            width,
+                            height,
+                            rgba: sticker_poster(sticker, width, height),
+                        };
+                        film_texture(ctx, textures, key, &thumb)
+                    };
+                    card.look = CardLook::Picture(Some((texture, [width, height])));
+                }
                 CardLook::Picture(_) => {
                     if let Some((key, Some(thumb))) = shell.poster(&card.id) {
                         let texture = film_texture(ctx, textures, key, &thumb);
@@ -2295,7 +2323,18 @@ fn bin_cards(
                 });
             }
         }
-        Shelf::Stickers | Shelf::Templates => {}
+        Shelf::Stickers => {
+            for sticker in cutlass_stickers::search(&query) {
+                cards.push(BinCard {
+                    id: format!("{}{}", crate::shell::STICKER_CARD_PREFIX, sticker.id),
+                    name: sticker.name.to_owned(),
+                    meta: card_meta(3_000_000),
+                    on_timeline: false,
+                    look: CardLook::Picture(None),
+                });
+            }
+        }
+        Shelf::Templates => {}
     }
     cards
 }
@@ -2308,6 +2347,23 @@ fn effect_card(effect: cutlass_editor::EffectCard) -> BinCard {
         on_timeline: false,
         look: CardLook::Swatch,
     }
+}
+
+/// A sticker on a clear card `width` by `height`, as tall as the card and
+/// in the middle, so the card's cover crop keeps all of it.
+fn sticker_poster(sticker: &cutlass_stickers::Sticker, width: u32, height: u32) -> Vec<u8> {
+    let side = height.min(width);
+    let drawn = sticker.rgba(side);
+    let mut rgba = vec![0_u8; (width * height * 4) as usize];
+    let left = (width - side) / 2;
+    let top = (height - side) / 2;
+    for row in 0..side {
+        let from = (row * side * 4) as usize;
+        let to = (((top + row) * width + left) * 4) as usize;
+        let span = (side * 4) as usize;
+        rgba[to..to + span].copy_from_slice(&drawn[from..from + span]);
+    }
+    rgba
 }
 
 fn title_card(style: &cutlass_editor::TitleStyle) -> BinCard {
@@ -3996,6 +4052,8 @@ fn release_library_drop(
         shell.drop_adjustment(x, y)
     } else if material_id.starts_with(cutlass_editor::FILTER_CARD_PREFIX) {
         shell.drop_filter(&material_id, x, y)
+    } else if material_id.starts_with(crate::shell::STICKER_CARD_PREFIX) {
+        shell.drop_sticker(&material_id, x, y)
     } else {
         shell.drop_medium(&material_id, x, y)
     };

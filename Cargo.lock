@@ -589,6 +589,7 @@ dependencies = [
  "cutlass-riff",
  "cutlass-session",
  "cutlass-settings",
+ "cutlass-stickers",
  "cutlass-still",
  "cutlass-storage",
  "cutlass-store",

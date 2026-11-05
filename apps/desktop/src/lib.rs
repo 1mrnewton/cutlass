@@ -34,6 +34,11 @@ pub fn register_codecs_with(
 ) -> (cutlass_decode::DecodeFactory, cutlass_encode::EncodeFactory) {
     let mut decoders = cutlass_decode::DecodeFactory::new();
     let mut encoders = cutlass_encode::EncodeFactory::new();
+    // FLAC is the Rust codec on every platform, ahead of the platform audio
+    // codecs: it is bit-exact, and its encoder hands the muxer the
+    // STREAMINFO (sample count and MD5) a FLAC file is finished with.
+    cutlass_flac::register_decoders(&mut decoders);
+    cutlass_flac::register_encoders(&mut encoders);
     #[cfg(target_os = "macos")]
     {
         // Pictures stay in their IOSurface; the preview samples them in place.

@@ -387,14 +387,14 @@ impl Default for ExportRequest {
     }
 }
 
-/// The sound of an export: AAC (in an MP4, a movie or an M4A) or 16-bit PCM
-/// (in a movie or a WAV).
+/// The sound of an export: AAC (in an MP4, a movie or an M4A), 16-bit PCM
+/// (in a movie or a WAV), or 16-bit FLAC (alone, in a FLAC file).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SoundFormat {
     pub codec: CodecId,
     pub sample_rate: u32,
     pub channels: u16,
-    /// Bits a second; PCM ignores it.
+    /// Bits a second; PCM and FLAC ignore it.
     pub bitrate: u32,
 }
 
@@ -416,11 +416,7 @@ impl SoundFormat {
     fn export(self) -> cutlass_export::AudioExport {
         cutlass_export::AudioExport {
             codec: self.codec,
-            bitrate: if self.codec == CodecId::Pcm {
-                0
-            } else {
-                self.bitrate
-            },
+            bitrate: if self.lossless() { 0 } else { self.bitrate },
             sample_rate: self.sample_rate,
             channels: self.channels,
             limiter: 0,
@@ -430,11 +426,17 @@ impl SoundFormat {
     /// The extension of a file of this sound alone.
     #[must_use]
     pub fn extension(self) -> &'static str {
-        if self.codec == CodecId::Pcm {
-            "wav"
-        } else {
-            "m4a"
+        match self.codec {
+            CodecId::Pcm => "wav",
+            CodecId::Flac => "flac",
+            _ => "m4a",
         }
+    }
+
+    /// PCM and FLAC keep every sample; a bitrate means nothing to them.
+    #[must_use]
+    pub fn lossless(self) -> bool {
+        matches!(self.codec, CodecId::Pcm | CodecId::Flac)
     }
 }
 
@@ -5838,10 +5840,10 @@ impl Shell {
             main = Some(self.movie_output(request, &base, captions.clone())?);
         } else if request.sound {
             let audio = request.audio.export();
-            let container = if audio.codec == CodecId::Pcm {
-                cutlass_codec::ContainerId::Riff
-            } else {
-                cutlass_codec::ContainerId::Isobmff
+            let container = match audio.codec {
+                CodecId::Pcm => cutlass_codec::ContainerId::Riff,
+                CodecId::Flac => cutlass_codec::ContainerId::Flac,
+                _ => cutlass_codec::ContainerId::Isobmff,
             };
             main = Some(ExportOutput::Sound {
                 path: request.path.with_extension(request.audio.extension()),
@@ -5913,6 +5915,11 @@ impl Shell {
         if request.sound && request.audio.codec == CodecId::Pcm && !mov {
             return Err(ShellError::Unavailable(
                 "PCM sound is written in a MOV".to_owned(),
+            ));
+        }
+        if request.sound && request.audio.codec == CodecId::Flac {
+            return Err(ShellError::Unavailable(
+                "FLAC sound is written alone, in a FLAC file".to_owned(),
             ));
         }
         let bitrate = match request.bitrate {
@@ -12496,6 +12503,36 @@ mod tests {
         assert_eq!(
             &std::fs::read(temp.path.join("sound.wav")).unwrap()[..4],
             b"RIFF"
+        );
+
+        // FLAC alone is a FLAC file the readers open again; in a movie it
+        // is refused.
+        let flac_sound = super::SoundFormat {
+            codec: CodecId::Flac,
+            ..super::SoundFormat::default()
+        };
+        run(
+            &mut desktop,
+            ExportRequest {
+                path: temp.path.join("sound.mp4"),
+                picture: false,
+                audio: flac_sound,
+                ..ExportRequest::default()
+            },
+        );
+        let flac = temp.path.join("sound.flac");
+        assert_eq!(&std::fs::read(&flac).unwrap()[..4], b"fLaC");
+        let info = crate::readers::installed_readers().probe(&flac).unwrap();
+        assert!(info.duration.is_some_and(|duration| duration.0 > 0));
+        let flac_movie = desktop.export(ExportRequest {
+            path: temp.path.join("flac.mov"),
+            short_side: 480,
+            audio: flac_sound,
+            ..ExportRequest::default()
+        });
+        assert_eq!(
+            flac_movie.unwrap_err().to_string(),
+            "FLAC sound is written alone, in a FLAC file"
         );
 
         // A GIF alone, and then again beside a movie, which finds it taken.

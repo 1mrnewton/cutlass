@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use cutlass_codec::ContainerId;
 use cutlass_encode::EncodeFactory;
 use cutlass_eval::{Fonts, ReaderFactory};
+use cutlass_flac_container::FlacMux;
 use cutlass_isobmff::{FileBrand, Mp4Mux};
 use cutlass_model::Draft;
 use cutlass_render::Renderer;
@@ -134,7 +135,8 @@ fn write_part(
 }
 
 /// Write only the timeline's sound over `request.range` to `destination`:
-/// AAC in an M4A file, or PCM in a WAV file, as `request.audio` names.
+/// AAC in an M4A file, PCM in a WAV file, or FLAC in a FLAC file, as
+/// `request.audio` names.
 /// The file is written beside its destination and moved there when done.
 pub fn write_sound(
     sources: &MovieSources<'_>,
@@ -166,6 +168,18 @@ pub fn write_sound(
             }
             (CodecId::Pcm, ContainerId::Riff) => {
                 let mut mux = WavMux::new(out);
+                export_sound(
+                    sources.draft,
+                    request,
+                    sources.encoders,
+                    &mut mux,
+                    audio,
+                    Some(progress),
+                )?;
+                mux.into_inner()
+            }
+            (CodecId::Flac, ContainerId::Flac) => {
+                let mut mux = FlacMux::new(out);
                 export_sound(
                     sources.draft,
                     request,
@@ -300,6 +314,7 @@ mod tests {
         let mut encoders = EncodeFactory::new();
         cutlass_aac::register_encoders(&mut encoders);
         cutlass_pcm::register_encoders(&mut encoders);
+        cutlass_flac::register_encoders(&mut encoders);
         let draft = Draft::empty("D");
         let readers = ReaderFactory::new();
         let sources = MovieSources {
@@ -330,12 +345,21 @@ mod tests {
     }
 
     #[test]
-    fn sound_alone_writes_an_m4a_or_a_wav() {
+    fn sound_alone_writes_an_m4a_a_wav_or_a_flac() {
         let (_, m4a) = written(CodecId::Aac, ContainerId::Isobmff, "cut.m4a");
         assert_eq!(&m4a[4..12], b"ftypM4A ");
         let (_, wav) = written(CodecId::Pcm, ContainerId::Riff, "cut.wav");
         assert_eq!(&wav[0..4], b"RIFF");
         assert_eq!(&wav[8..12], b"WAVE");
+        let (_, flac) = written(CodecId::Flac, ContainerId::Flac, "cut.flac");
+        assert_eq!(&flac[..4], b"fLaC");
+        let length = flac.len() as u64;
+        let demux =
+            cutlass_flac_container::FlacDemux::open(std::io::Cursor::new(flac), length).unwrap();
+        let info = demux.stream_info();
+        assert_eq!((info.bits, info.channels), (16, 2));
+        assert!(info.total_samples > 0, "streaminfo written back at finish");
+        assert_ne!(info.md5, [0; 16]);
     }
 
     #[test]

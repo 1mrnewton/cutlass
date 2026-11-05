@@ -820,6 +820,8 @@ dependencies = [
  "cutlass-container",
  "cutlass-encode",
  "cutlass-eval",
+ "cutlass-flac",
+ "cutlass-flac-container",
  "cutlass-gif",
  "cutlass-gpu",
  "cutlass-isobmff",
@@ -849,6 +851,8 @@ dependencies = [
  "cutlass-encode",
  "cutlass-eval",
  "cutlass-export",
+ "cutlass-flac",
+ "cutlass-flac-container",
  "cutlass-h264",
  "cutlass-isobmff",
  "cutlass-jpeg",
@@ -888,7 +892,11 @@ dependencies = [
 name = "cutlass-flac-container"
 version = "0.1.0"
 dependencies = [
+ "cutlass-codec",
  "cutlass-container",
+ "cutlass-decode",
+ "cutlass-encode",
+ "cutlass-flac",
 ]
 
 [[package]]
@@ -1132,6 +1140,8 @@ dependencies = [
  "cutlass-aiff",
  "cutlass-codec",
  "cutlass-container",
+ "cutlass-flac",
+ "cutlass-flac-container",
  "cutlass-isobmff",
  "cutlass-jpeg",
  "cutlass-model",

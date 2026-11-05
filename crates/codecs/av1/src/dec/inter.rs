@@ -744,6 +744,43 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         true
     }
 
+    /// Encoder: the overlapped (OBMC) luma prediction of the single-reference
+    /// block `self.b` at (x, y) into `scratch.obmc` (stride w), when the
+    /// block may signal OBMC.
+    pub fn predict_obmc_into_scratch(&mut self, x: usize, y: usize, w: usize, h: usize) -> bool {
+        let bs = self.b.bsize;
+        let rf = self.b.ref_frame[0];
+        if !self.hdr.is_motion_mode_switchable
+            || self.b.ref_frame[1] > INTRA_FRAME
+            || block_width(bs).min(block_height(bs)) < 8
+            || ((self.b.y_mode == GLOBALMV || self.b.y_mode == GLOBAL_GLOBALMV)
+                && self.hdr.gm_type[rf.max(0) as usize] > TRANSLATION)
+            || !self.has_overlappable_candidates()
+        {
+            return false;
+        }
+        let mv = self.b.mv[0];
+        let f = self.b.interp_filter;
+        if self
+            .block_pred(0, rf, x, y, w, h, mv, f, &Dst::Frame)
+            .is_err()
+        {
+            return false;
+        }
+        self.b.motion_mode = OBMC;
+        let ok = self.overlapped_mc(0, w, h).is_ok();
+        self.b.motion_mode = super::types::SIMPLE;
+        if !ok {
+            return false;
+        }
+        let pl = &self.cur.planes[0];
+        for i in 0..h {
+            self.scratch.obmc[i * w..i * w + w]
+                .copy_from_slice(&pl.data[(y + i) * pl.stride + x..][..w]);
+        }
+        true
+    }
+
     /// Encoder: the global-motion warp prediction from `rf` of the luma
     /// block at (x, y) into `scratch.obmc` (stride w), when GLOBALMV would
     /// warp there.

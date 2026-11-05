@@ -829,6 +829,7 @@ impl Av1Enc {
             filter_search: speed < 8,
             me_filter: ev("AV1_MEF", 0.0) as u8,
             local_warp: hdr.allow_warped_motion,
+            obmc: hdr.is_motion_mode_switchable && ev("AV1_OBMC", 1.0) > 0.0,
             intra_rd_cands: ev(
                 "AV1_IRD",
                 if speed >= 8 {

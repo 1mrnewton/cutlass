@@ -12,6 +12,7 @@
 
 mod config;
 mod movie;
+mod prerender;
 mod run;
 mod sidecars;
 mod sound;
@@ -23,6 +24,9 @@ pub use config::{
 };
 pub use movie::{
     MOVIE_SOUND, MovieSources, part_path, video_bitrate, write_gif, write_movie, write_sound,
+};
+pub use prerender::{
+    PREVIEW_SIDE, read_render_name, render_key, render_name, render_request, render_side, stand_in,
 };
 pub use run::{
     ExportResult, ExportRun, ExportedFrame, export, export_sound, frame_indexes,

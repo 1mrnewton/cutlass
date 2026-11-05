@@ -831,6 +831,7 @@ dependencies = [
  "cutlass-session",
  "cutlass-still",
  "image",
+ "serde_json",
 ]
 
 [[package]]

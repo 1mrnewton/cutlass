@@ -18,6 +18,7 @@ cutlass-isobmff = { path = "../containers/isobmff", version = "0.1.0" }
 cutlass-riff = { path = "../containers/riff", version = "0.1.0" }
 cutlass-still = { path = "../containers/still", version = "0.1.0" }
 cutlass-renderer-software = { path = "../renderer-software", version = "0.1.0" }
+serde_json = "1.0.154"
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
 
 [dev-dependencies]

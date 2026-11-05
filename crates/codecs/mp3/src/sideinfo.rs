@@ -6,9 +6,7 @@
 
 use cutlass_decode::CodecError;
 
-use crate::bits::BitReader;
-#[cfg(test)]
-use crate::bits::BitWriter;
+use crate::bits::{BitReader, BitWriter};
 use crate::header::FrameHeader;
 
 /// Block type 2, three short windows.
@@ -120,7 +118,6 @@ impl SideInfo {
     }
 
     /// Write side information in the layout [`Self::parse`] reads.
-    #[cfg(test)]
     pub(crate) fn write(&self, header: &FrameHeader, writer: &mut BitWriter) {
         let lsf = header.version.lsf();
         let channels = header.channels();

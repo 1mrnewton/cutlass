@@ -6,22 +6,37 @@
 
 #![forbid(unsafe_code)]
 
+mod analysis;
 mod bits;
 mod decode;
+mod encode;
 pub mod header;
+mod huffenc;
 mod huffman;
 mod layer3;
+mod psy;
+mod quantize;
 mod sideinfo;
 mod synth;
 mod tables;
 
 pub use decode::{DECODER_DELAY, Mp3Decoder};
+pub use encode::{ENCODER_DELAY, Mp3Encoder, Mp3EncoderConfig, Mp3Rate};
 
 use cutlass_decode::{CodecError, CodecId, CodecParams, DecodeFactory, Decoder};
 
 /// Register this crate as the software Layer III decoder.
 pub fn register_decoders(factory: &mut DecodeFactory) {
     factory.register(CodecId::Mp3, open_decoder);
+}
+
+/// Register this crate as the software Layer III encoder.
+pub fn register_encoders(factory: &mut cutlass_encode::EncodeFactory) {
+    factory.register(CodecId::Mp3, open_encoder);
+}
+
+fn open_encoder(params: &CodecParams) -> Result<Box<dyn cutlass_encode::Encoder>, CodecError> {
+    Ok(Box::new(Mp3Encoder::open(params)?))
 }
 
 fn open_decoder(params: &CodecParams) -> Result<Box<dyn Decoder>, CodecError> {

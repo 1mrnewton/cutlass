@@ -69,7 +69,6 @@ impl Code {
     }
 
     /// `(length, codeword)` by symbol, right-aligned; length 0 is absent.
-    #[cfg(test)]
     pub(crate) fn by_symbol(&self) -> Vec<(u8, u32)> {
         let mut table = vec![(0u8, 0u32); 256];
         for ((&start, &len), &sym) in self.starts.iter().zip(&self.lens).zip(&self.syms) {

@@ -354,7 +354,7 @@ pub(crate) fn read_spectrum(
     Ok(line)
 }
 
-fn pow43() -> &'static [f32] {
+pub(crate) fn pow43() -> &'static [f32] {
     static TABLE: OnceLock<Vec<f32>> = OnceLock::new();
     TABLE.get_or_init(|| {
         (0..=MAX_QUANT)

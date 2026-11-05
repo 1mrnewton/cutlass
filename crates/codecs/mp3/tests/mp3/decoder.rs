@@ -56,7 +56,11 @@ fn the_container_and_the_decoder_read_the_same_headers() {
 /// in samples, and the SNR of what the sine does not explain.
 fn fit_sine(pcm: &[f32], channels: usize, rate: u32, offset: usize) -> (f64, f64, f64) {
     let w = 2.0 * std::f64::consts::PI * 1000.0 / f64::from(rate);
-    let samples: Vec<f64> = pcm.iter().step_by(channels).map(|s| f64::from(*s)).collect();
+    let samples: Vec<f64> = pcm
+        .iter()
+        .step_by(channels)
+        .map(|s| f64::from(*s))
+        .collect();
     let range = 200..samples.len() - 200;
     let (mut xs, mut xc, mut ss, mut cc) = (0.0, 0.0, 0.0, 0.0);
     for i in range.clone() {

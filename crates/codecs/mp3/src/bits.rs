@@ -96,7 +96,6 @@ impl<'a> BitReader<'a> {
 }
 
 /// Appends bits to a byte vector, most significant bit first.
-#[cfg(test)]
 #[derive(Clone, Debug, Default)]
 pub(crate) struct BitWriter {
     bytes: Vec<u8>,
@@ -104,7 +103,6 @@ pub(crate) struct BitWriter {
     filled: u32,
 }
 
-#[cfg(test)]
 impl BitWriter {
     pub(crate) fn new() -> Self {
         Self::default()
@@ -126,6 +124,7 @@ impl BitWriter {
         self.acc &= (1u64 << self.filled) - 1;
     }
 
+    #[cfg(test)]
     pub(crate) fn bits(&self) -> usize {
         self.bytes.len() * 8 + self.filled as usize
     }

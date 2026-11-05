@@ -16,8 +16,6 @@ pub struct BoolDecoder<'a> {
     /// Valid bits in `value` past the top 8. Below zero means a refill.
     count: i32,
     range: u32,
-    /// Zero bytes supplied past the end of `data`.
-    zeros: usize,
 }
 
 impl<'a> BoolDecoder<'a> {
@@ -29,7 +27,6 @@ impl<'a> BoolDecoder<'a> {
             value: 0,
             count: -8,
             range: 255,
-            zeros: 0,
         };
         decoder.fill();
         decoder
@@ -43,7 +40,7 @@ impl<'a> BoolDecoder<'a> {
                 self.pos += 1;
                 byte
             } else {
-                self.zeros += 1;
+                // Past the end, a partition reads as zeros.
                 0
             };
             self.value |= u64::from(byte) << shift;
@@ -122,13 +119,6 @@ impl<'a> BoolDecoder<'a> {
             }
             index = usize::from(next.unsigned_abs());
         }
-    }
-
-    /// Zero bytes the coder has supplied past the end of its partition.
-    /// The window reads ahead, so a few are normal at the end.
-    #[must_use]
-    pub fn overread(&self) -> usize {
-        self.zeros
     }
 }
 
@@ -232,14 +222,10 @@ impl BoolEncoder {
     }
 
     /// Bytes written so far, not counting the bits still in the coder.
+    #[cfg(test)]
     #[must_use]
     pub fn len(&self) -> usize {
         self.out.len()
-    }
-
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.out.is_empty()
     }
 
     /// Flushes the coder and returns the partition.
@@ -429,7 +415,6 @@ mod tests {
         for _ in 0..1000 {
             assert!(!decoder.read(128));
         }
-        assert!(decoder.overread() > 100);
     }
 
     #[test]

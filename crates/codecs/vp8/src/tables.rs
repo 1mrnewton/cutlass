@@ -585,6 +585,7 @@ pub const SUB_MV_REF_TREE: [i8; 6] = [0, 2, -1, 4, -2, -3];
 /// `split_mv_tree`: 16×8, 8×16, 8×8, 4×4 are leaves 0 to 3.
 pub const SPLIT_MV_TREE: [i8; 6] = [-3, 2, -2, 4, 0, -1];
 /// Section 13.2 `coeff_tree`. Leaves are token numbers; EOB is 11.
+#[cfg(test)]
 pub const COEFF_TREE: [i8; 22] = [
     -11, 2, 0, 4, -1, 6, 8, 12, -2, 10, -3, -4, 14, 16, -5, -6, 18, 20, -7, -8, -9, -10,
 ];

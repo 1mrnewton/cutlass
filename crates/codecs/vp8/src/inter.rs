@@ -105,7 +105,13 @@ pub fn predict(
     if fx == 0 {
         for r in 0..h {
             let s = base + r * src_stride + 2;
-            vertical(src, s, src_stride, vtaps, &mut out[r * out_stride..r * out_stride + w]);
+            vertical(
+                src,
+                s,
+                src_stride,
+                vtaps,
+                &mut out[r * out_stride..r * out_stride + w],
+            );
         }
         return;
     }
@@ -116,7 +122,13 @@ pub fn predict(
         horizontal(&src[s..s + w + PAD], htaps, &mut mid[r * w..r * w + w]);
     }
     for r in 0..h {
-        vertical(&mid, r * w, w, vtaps, &mut out[r * out_stride..r * out_stride + w]);
+        vertical(
+            &mid,
+            r * w,
+            w,
+            vtaps,
+            &mut out[r * out_stride..r * out_stride + w],
+        );
     }
 }
 
@@ -172,6 +184,7 @@ mod tests {
 
     /// The reference decoder's way: always two passes over an explicitly
     /// edge-extended window.
+    #[allow(clippy::too_many_arguments)]
     fn slow(
         p: &[u8],
         w: usize,
@@ -194,8 +207,8 @@ mod tests {
         for r in 0..bh + 5 {
             for c in 0..bw {
                 let mut sum = 64;
-                for t in 0..6 {
-                    sum += at(x + c as i32 + t as i32 - 2, y + r as i32 - 2) * ht[t];
+                for (t, &tap) in ht.iter().enumerate() {
+                    sum += at(x + c as i32 + t as i32 - 2, y + r as i32 - 2) * tap;
                 }
                 mid[r * bw + c] = (sum >> 7).clamp(0, 255);
             }

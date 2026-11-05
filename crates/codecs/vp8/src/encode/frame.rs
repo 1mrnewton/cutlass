@@ -10,7 +10,7 @@ use crate::modes::{
 };
 use crate::predict::{self, B_PRED, CHROMA_BUF, CHROMA_STRIDE, LUMA_BUF, LUMA_STRIDE};
 use crate::tokens::{
-    Context, Dequant, TYPE_CHROMA, TYPE_Y2, TYPE_Y_AFTER_Y2, TYPE_Y_WITH_DC, skip_mb,
+    Context, Dequant, TYPE_CHROMA, TYPE_Y_AFTER_Y2, TYPE_Y_WITH_DC, TYPE_Y2, skip_mb,
 };
 use crate::transform::{fdct, fwht, idct_add, iwht};
 
@@ -74,7 +74,6 @@ pub struct Setup<'a> {
     pub coeff_costs: &'a Costs,
     pub mode_costs: &'a ModeCosts,
     pub mv_costs: &'a MvCosts,
-    pub prob_skip: u8,
     pub prob_intra: u8,
     pub prob_last: u8,
     pub prob_golden: u8,
@@ -393,12 +392,22 @@ fn intra_chroma(
             }
         }
         let c = code_chroma(src, &pred, s, left, above, rounding(true));
-        let j = rd(c.sse, c.rate + s.mode_costs.uv[usize::from(mode)], s.lambda16);
+        let j = rd(
+            c.sse,
+            c.rate + s.mode_costs.uv[usize::from(mode)],
+            s.lambda16,
+        );
         if best.as_ref().is_none_or(|b| j < b.2) {
             best = Some((mode, c, j));
         }
     }
-    best.unwrap_or_else(|| (0, code_chroma(src, &[[128; 64]; 2], s, left, above, rounding(true)), u64::MAX))
+    best.unwrap_or_else(|| {
+        (
+            0,
+            code_chroma(src, &[[128; 64]; 2], s, left, above, rounding(true)),
+            u64::MAX,
+        )
+    })
 }
 
 /// Everything a macroblock decision looks at.
@@ -432,7 +441,11 @@ fn decide_intra(recon: &Frame, m: &MbCtx<'_>, s: &Setup<'_>, limit: u64) -> Opti
             let at = (r + 1) * LUMA_STRIDE + 1;
             pred[r * 16..r * 16 + 16].copy_from_slice(&buf[at..at + 16]);
         }
-        let score = rd(sse(&pred, &m.src_y), s.mode_costs.y[usize::from(mode)], s.lambda16);
+        let score = rd(
+            sse(&pred, &m.src_y),
+            s.mode_costs.y[usize::from(mode)],
+            s.lambda16,
+        );
         ranked.push((score, mode, pred));
     }
     ranked.sort_by_key(|e| e.0);
@@ -440,7 +453,11 @@ fn decide_intra(recon: &Frame, m: &MbCtx<'_>, s: &Setup<'_>, limit: u64) -> Opti
     let mut best: Option<(u64, u8, LumaKind)> = None;
     for &(_, mode, ref pred) in ranked.iter().take(keep) {
         let l = code_luma_y2(&m.src_y, pred, s, &m.left, &m.above, round);
-        let j = rd(l.sse, l.rate + s.mode_costs.y[usize::from(mode)] + intra_flag, s.lambda16);
+        let j = rd(
+            l.sse,
+            l.rate + s.mode_costs.y[usize::from(mode)] + intra_flag,
+            s.lambda16,
+        );
         if best.as_ref().is_none_or(|b| j < b.0) {
             best = Some((j, mode, LumaKind::Y2(Box::new(l))));
         }
@@ -453,7 +470,9 @@ fn decide_intra(recon: &Frame, m: &MbCtx<'_>, s: &Setup<'_>, limit: u64) -> Opti
         if base < bound {
             let am = m.above_sub.map(|x| &x.b_modes);
             let lm = m.left_sub.map(|x| &x.b_modes);
-            if let Some(bp) = code_bpred(&m.src_y, &edges, s, &m.left, &m.above, am, lm, bound - base) {
+            if let Some(bp) =
+                code_bpred(&m.src_y, &edges, s, &m.left, &m.above, am, lm, bound - base)
+            {
                 let j = rd(bp.sse, bp.rate + b_cost, s.lambda16);
                 if best.as_ref().is_none_or(|b| j < b.0) {
                     best = Some((j, B_PRED, LumaKind::B(Box::new(bp))));
@@ -502,7 +521,13 @@ fn inter_candidates(m: &MbCtx<'_>, s: &Setup<'_>, out: &mut Vec<Candidate>) {
     let refs: [(u8, Option<&Frame>); 2] = [(LAST, s.last), (GOLDEN, s.golden)];
     for (ref_frame, frame) in refs {
         let Some(frame) = frame else { continue };
-        let near = find_near(m.above_mb, m.left_mb, m.above_left_mb, &sign_bias, ref_frame);
+        let near = find_near(
+            m.above_mb,
+            m.left_mb,
+            m.above_left_mb,
+            &sign_bias,
+            ref_frame,
+        );
         let modes = inter_mode_costs(&near.probs);
         let ref_cost = inter_flag
             + if ref_frame == LAST {
@@ -515,7 +540,10 @@ fn inter_candidates(m: &MbCtx<'_>, s: &Setup<'_>, out: &mut Vec<Candidate>) {
         let nearv = near.near.clamp(&bounds);
         let plane = frame.luma();
         let push = |mode: u8, mv: Mv, rate: u32, out: &mut Vec<Candidate>| {
-            if out.iter().any(|c| c.ref_frame == ref_frame && c.mv == mv && c.rate <= rate) {
+            if out
+                .iter()
+                .any(|c| c.ref_frame == ref_frame && c.mv == mv && c.rate <= rate)
+            {
                 return;
             }
             let mut pred = [0u8; 256];
@@ -530,7 +558,12 @@ fn inter_candidates(m: &MbCtx<'_>, s: &Setup<'_>, out: &mut Vec<Candidate>) {
                 pred,
             });
         };
-        push(ZEROMV, Mv::ZERO, ref_cost + modes[usize::from(ZEROMV - NEARESTMV)], out);
+        push(
+            ZEROMV,
+            Mv::ZERO,
+            ref_cost + modes[usize::from(ZEROMV - NEARESTMV)],
+            out,
+        );
         push(NEARESTMV, nearest, ref_cost + modes[0], out);
         push(NEARMV, nearv, ref_cost + modes[1], out);
         // NEWMV: search around the predictors.
@@ -562,7 +595,13 @@ fn inter_candidates(m: &MbCtx<'_>, s: &Setup<'_>, out: &mut Vec<Candidate>) {
             window,
             penalty: &penalty,
             filter: Filter::SixTap,
-            range: if golden_extra { 2 } else if s.speed == 0 { 16 } else { 8 },
+            range: if golden_extra {
+                2
+            } else if s.speed == 0 {
+                16
+            } else {
+                8
+            },
             subpel: true,
         };
         let (mv, _) = search::search(&search, &[best, nearest, nearv, Mv::ZERO]);
@@ -602,7 +641,11 @@ fn decide_inter(m: &MbCtx<'_>, s: &Setup<'_>) -> Option<Decision> {
     let mut best: Option<Decision> = None;
     for cand in cands.iter().take(keep) {
         let luma = code_luma_y2(&m.src_y, &cand.pred, s, &m.left, &m.above, round);
-        let frame = if cand.ref_frame == GOLDEN { s.golden } else { s.last };
+        let frame = if cand.ref_frame == GOLDEN {
+            s.golden
+        } else {
+            s.last
+        };
         let Some(frame) = frame else { continue };
         let mb = MbInfo {
             y_mode: cand.mode,
@@ -618,7 +661,11 @@ fn decide_inter(m: &MbCtx<'_>, s: &Setup<'_>) -> Option<Decision> {
         let cmv = chroma_mvs(&mb, &sub, false)[0];
         let cpred = inter_chroma_pred(frame, m.mbx, m.mby, cmv);
         let chroma = code_chroma(&m.src_c, &cpred, s, &m.left, &m.above, round);
-        let j = rd(luma.sse + chroma.sse, luma.rate + chroma.rate + cand.rate, s.lambda16);
+        let j = rd(
+            luma.sse + chroma.sse,
+            luma.rate + chroma.rate + cand.rate,
+            s.lambda16,
+        );
         if best.as_ref().is_none_or(|b| j < b.j) {
             best = Some(Decision {
                 mb,
@@ -648,7 +695,7 @@ pub fn code_frame(src: &Source, s: &Setup<'_>) -> Coded {
     let mut above_ctx: Vec<Context> = vec![[0; 9]; mbw];
     for mby in 0..mbh {
         let mut left_ctx: Context = [0; 9];
-        for mbx in 0..mbw {
+        for (mbx, above) in above_ctx.iter_mut().enumerate() {
             let i = mby * mbw + mbx;
             let mut src_y = [0u8; 256];
             for r in 0..16 {
@@ -669,7 +716,7 @@ pub fn code_frame(src: &Source, s: &Setup<'_>) -> Coded {
                     src_y,
                     src_c,
                     left: left_ctx,
-                    above: above_ctx[mbx],
+                    above: *above,
                     above_mb: (mby > 0).then(|| &coded.mbs[i - mbw]),
                     left_mb: (mbx > 0).then(|| &coded.mbs[i - 1]),
                     above_left_mb: (mby > 0 && mbx > 0).then(|| &coded.mbs[i - mbw - 1]),
@@ -692,7 +739,7 @@ pub fn code_frame(src: &Source, s: &Setup<'_>) -> Coded {
                     (None, None) => continue,
                 }
             };
-            commit(&mut coded, i, mbx, mby, decision, &mut left_ctx, &mut above_ctx[mbx], s);
+            commit(&mut coded, i, mbx, mby, decision, &mut left_ctx, above, s);
         }
     }
     coded
@@ -728,7 +775,10 @@ fn commit(
         }
     }
     blocks[16..24].copy_from_slice(&d.chroma.q);
-    for (p, plane) in [&mut coded.recon.u, &mut coded.recon.v].into_iter().enumerate() {
+    for (p, plane) in [&mut coded.recon.u, &mut coded.recon.v]
+        .into_iter()
+        .enumerate()
+    {
         for r in 0..8 {
             let at = (mby * 8 + r) * cs + mbx * 8;
             plane[at..at + 8].copy_from_slice(&d.chroma.recon[p][r * 8..r * 8 + 8]);

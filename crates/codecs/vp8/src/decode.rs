@@ -254,10 +254,10 @@ impl Decoder {
         self.refs = Some(next);
         if let Some(old) = old {
             for frame in [old.last, old.golden, old.altref] {
-                if let Ok(frame) = Arc::try_unwrap(frame) {
-                    if self.pool.len() < 4 {
-                        self.pool.push(frame);
-                    }
+                if let Ok(frame) = Arc::try_unwrap(frame)
+                    && self.pool.len() < 4
+                {
+                    self.pool.push(frame);
                 }
             }
         }
@@ -366,7 +366,7 @@ fn decode_frame(
     for mby in 0..mbh {
         let mut left_ctx: Context = [0; 9];
         let part = &mut token_bits[mby % partitions.len()];
-        for mbx in 0..mbw {
+        for (mbx, above) in above_ctx.iter_mut().enumerate() {
             let i = mby * mbw + mbx;
             let mut mb = MbInfo::default();
             if h.segmentation.update_map {
@@ -402,7 +402,7 @@ fn decode_frame(
             let has_y2 = mb.y_mode != B_PRED && mb.y_mode != SPLITMV;
             coeffs.clear();
             if mb.skip {
-                tokens::skip_mb(&mut left_ctx, &mut above_ctx[mbx], has_y2);
+                tokens::skip_mb(&mut left_ctx, above, has_y2);
             } else {
                 let segment = if h.segmentation.enabled {
                     usize::from(mb.segment & 3)
@@ -413,7 +413,7 @@ fn decode_frame(
                     part,
                     &h.probs.coeff,
                     &mut left_ctx,
-                    &mut above_ctx[mbx],
+                    above,
                     has_y2,
                     &dq[segment],
                     &mut coeffs,

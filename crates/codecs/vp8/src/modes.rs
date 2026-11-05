@@ -28,7 +28,6 @@ pub const ALTREF: u8 = 3;
 pub const LEFT_4X4: u8 = 0;
 pub const ABOVE_4X4: u8 = 1;
 pub const ZERO_4X4: u8 = 2;
-pub const NEW_4X4: u8 = 3;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Mv {
@@ -379,6 +378,7 @@ fn read_split(
             LEFT_4X4 => left,
             ABOVE_4X4 => above,
             ZERO_4X4 => Mv::ZERO,
+            // NEW_4X4.
             _ => read_mv(bits, ctx.mv_probs).add(best),
         };
         for (slot, &p) in sub.mvs.iter_mut().zip(map.iter()).skip(k) {

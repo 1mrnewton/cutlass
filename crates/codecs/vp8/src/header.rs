@@ -396,8 +396,8 @@ fn split_partitions(data: &[u8], count: usize, offset: usize) -> Result<Vec<&[u8
     }
     let (sizes, mut rest) = data.split_at(table);
     let mut parts = Vec::with_capacity(count);
-    for size in sizes.chunks_exact(3) {
-        let len = usize::from(size[0]) | (usize::from(size[1]) << 8) | (usize::from(size[2]) << 16);
+    for &[b0, b1, b2] in sizes.as_chunks::<3>().0 {
+        let len = usize::from(b0) | (usize::from(b1) << 8) | (usize::from(b2) << 16);
         if len > rest.len() {
             return Err(truncated(offset + data.len(), "vp8 token partition"));
         }
@@ -415,7 +415,6 @@ pub struct HeaderWriter<'a> {
     /// The probabilities the decoder holds before this frame.
     pub previous: &'a Probs,
     /// Segmentation the decoder holds before this frame.
-    pub previous_segmentation: &'a Segmentation,
     /// Loop-filter deltas the decoder holds before this frame.
     pub previous_deltas: &'a FilterDeltas,
 }
@@ -511,11 +510,10 @@ impl HeaderWriter<'_> {
         } else {
             self.previous.clone()
         };
-        for i in 0..4 {
-            for j in 0..8 {
-                for k in 0..3 {
-                    for l in 0..11 {
-                        let new = h.probs.coeff[i][j][k][l];
+        for (i, plane) in h.probs.coeff.iter().enumerate() {
+            for (j, band) in plane.iter().enumerate() {
+                for (k, ctx) in band.iter().enumerate() {
+                    for (l, &new) in ctx.iter().enumerate() {
                         let changed = new != base.coeff[i][j][k][l];
                         bits.write(COEFF_UPDATE_PROBS[i][j][k][l], changed);
                         if changed {
@@ -547,9 +545,8 @@ impl HeaderWriter<'_> {
                     bits.literal(8, u32::from(prob));
                 }
             }
-            for c in 0..2 {
-                for n in 0..19 {
-                    let new = h.probs.mv[c][n];
+            for (c, component) in h.probs.mv.iter().enumerate() {
+                for (n, &new) in component.iter().enumerate() {
                     let changed = new != base.mv[c][n];
                     bits.write(MV_UPDATE_PROBS[c][n], changed);
                     if changed {
@@ -675,7 +672,6 @@ mod tests {
         HeaderWriter {
             header,
             previous: &state.probs,
-            previous_segmentation: &state.segmentation,
             previous_deltas: &state.deltas,
         }
         .write(&mut bits);

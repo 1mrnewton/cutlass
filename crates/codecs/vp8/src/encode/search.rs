@@ -7,10 +7,8 @@ use crate::modes::Mv;
 /// pixel `(x, y)` against `src` (stride 16).
 #[must_use]
 pub fn sad16(plane: RefPlane<'_>, x: i32, y: i32, src: &[u8; 256], limit: u32) -> u32 {
-    let inside = x >= 0
-        && y >= 0
-        && (x as usize) + 16 <= plane.width
-        && (y as usize) + 16 <= plane.height;
+    let inside =
+        x >= 0 && y >= 0 && (x as usize) + 16 <= plane.width && (y as usize) + 16 <= plane.height;
     let mut total = 0u32;
     if inside {
         let base = y as usize * plane.stride + x as usize;
@@ -50,7 +48,14 @@ pub fn sse16(a: &[u8; 256], b: &[u8; 256]) -> u32 {
 }
 
 /// Predicts the 16×16 luma block at macroblock `(mbx, mby)` moved by `mv`.
-pub fn predict16(plane: RefPlane<'_>, mbx: usize, mby: usize, mv: Mv, filter: Filter, out: &mut [u8; 256]) {
+pub fn predict16(
+    plane: RefPlane<'_>,
+    mbx: usize,
+    mby: usize,
+    mv: Mv,
+    filter: Filter,
+    out: &mut [u8; 256],
+) {
     inter::predict(
         plane,
         (mbx * 16) as i32 + (mv.col >> 2),
@@ -74,7 +79,10 @@ pub struct Window {
 
 impl Window {
     fn contains(&self, mv: Mv) -> bool {
-        mv.row >= self.min.row && mv.row <= self.max.row && mv.col >= self.min.col && mv.col <= self.max.col
+        mv.row >= self.min.row
+            && mv.row <= self.max.row
+            && mv.col >= self.min.col
+            && mv.col <= self.max.col
     }
 }
 
@@ -105,7 +113,14 @@ pub fn search(s: &Search<'_>, starts: &[Mv]) -> (Mv, u32) {
         if p >= limit {
             return u32::MAX;
         }
-        sad16(s.plane, x0 + (mv.col >> 2), y0 + (mv.row >> 2), s.src, limit - p).saturating_add(p)
+        sad16(
+            s.plane,
+            x0 + (mv.col >> 2),
+            y0 + (mv.row >> 2),
+            s.src,
+            limit - p,
+        )
+        .saturating_add(p)
     };
     let mut best = Mv::ZERO;
     let mut best_score = u32::MAX;
@@ -173,7 +188,16 @@ pub fn search(s: &Search<'_>, starts: &[Mv]) -> (Mv, u32) {
     };
     for step in [2, 1] {
         let center = best;
-        for (dr, dc) in [(-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1), (1, -1), (1, 1)] {
+        for (dr, dc) in [
+            (-1, 0),
+            (1, 0),
+            (0, -1),
+            (0, 1),
+            (-1, -1),
+            (-1, 1),
+            (1, -1),
+            (1, 1),
+        ] {
             let mv = Mv::new(center.row + dr * step, center.col + dc * step);
             if !s.window.contains(mv) {
                 continue;

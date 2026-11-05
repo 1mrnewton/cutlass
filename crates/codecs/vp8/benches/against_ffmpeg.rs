@@ -58,12 +58,32 @@ fn main() -> Result<(), String> {
 
     // Decode.
     let ivf = dir.path.join("decode.ivf");
-    run(&ffmpeg, &[
-        "-f", "lavfi", "-i", &format!("testsrc2=size={DECODE_W}x{DECODE_H}:rate=30"),
-        "-frames:v", &DECODE_FRAMES.to_string(), "-c:v", "libvpx", "-b:v", "6M",
-        "-deadline", "good", "-cpu-used", "4", "-threads", "1", "-auto-alt-ref", "0",
-        "-f", "ivf", path_str(&ivf)?,
-    ])?;
+    run(
+        &ffmpeg,
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            &format!("testsrc2=size={DECODE_W}x{DECODE_H}:rate=30"),
+            "-frames:v",
+            &DECODE_FRAMES.to_string(),
+            "-c:v",
+            "libvpx",
+            "-b:v",
+            "6M",
+            "-deadline",
+            "good",
+            "-cpu-used",
+            "4",
+            "-threads",
+            "1",
+            "-auto-alt-ref",
+            "0",
+            "-f",
+            "ivf",
+            path_str(&ivf)?,
+        ],
+    )?;
     let frames = read_ivf(&std::fs::read(&ivf).map_err(|e| e.to_string())?)?;
     let packets: Vec<Packet> = frames
         .iter()
@@ -89,9 +109,20 @@ fn main() -> Result<(), String> {
     row("cutlass", frames.len(), ours_time);
     for decoder in ["vp8", "libvpx"] {
         let t = median(|| {
-            ffmpeg_bench(&ffmpeg, &[
-                "-threads", "1", "-c:v", decoder, "-i", path_str(&ivf)?, "-f", "null", "-",
-            ])
+            ffmpeg_bench(
+                &ffmpeg,
+                &[
+                    "-threads",
+                    "1",
+                    "-c:v",
+                    decoder,
+                    "-i",
+                    path_str(&ivf)?,
+                    "-f",
+                    "null",
+                    "-",
+                ],
+            )
         })?;
         row(&format!("ffmpeg {decoder}"), frames.len(), t);
     }
@@ -101,7 +132,19 @@ fn main() -> Result<(), String> {
         .join("../../../../local-files/file_example_WEBM_1920_3_7MB.webm");
     if webm.is_file() {
         let real = dir.path.join("real.ivf");
-        run(&ffmpeg, &["-i", path_str(&webm)?, "-an", "-c:v", "copy", "-f", "ivf", path_str(&real)?])?;
+        run(
+            &ffmpeg,
+            &[
+                "-i",
+                path_str(&webm)?,
+                "-an",
+                "-c:v",
+                "copy",
+                "-f",
+                "ivf",
+                path_str(&real)?,
+            ],
+        )?;
         let frames = read_ivf(&std::fs::read(&real).map_err(|e| e.to_string())?)?;
         let packets: Vec<Packet> = frames
             .iter()
@@ -127,9 +170,20 @@ fn main() -> Result<(), String> {
         row("cutlass", frames.len(), ours_time);
         for decoder in ["vp8", "libvpx"] {
             let t = median(|| {
-                ffmpeg_bench(&ffmpeg, &[
-                    "-threads", "1", "-c:v", decoder, "-i", path_str(&real)?, "-f", "null", "-",
-                ])
+                ffmpeg_bench(
+                    &ffmpeg,
+                    &[
+                        "-threads",
+                        "1",
+                        "-c:v",
+                        decoder,
+                        "-i",
+                        path_str(&real)?,
+                        "-f",
+                        "null",
+                        "-",
+                    ],
+                )
             })?;
             row(&format!("ffmpeg {decoder}"), frames.len(), t);
         }
@@ -137,11 +191,22 @@ fn main() -> Result<(), String> {
 
     // Encode.
     let raw = dir.path.join("encode.yuv");
-    run(&ffmpeg, &[
-        "-f", "lavfi", "-i", &format!("testsrc2=size={ENCODE_W}x{ENCODE_H}:rate=30"),
-        "-frames:v", &ENCODE_FRAMES.to_string(), "-pix_fmt", "yuv420p", "-f", "rawvideo",
-        path_str(&raw)?,
-    ])?;
+    run(
+        &ffmpeg,
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            &format!("testsrc2=size={ENCODE_W}x{ENCODE_H}:rate=30"),
+            "-frames:v",
+            &ENCODE_FRAMES.to_string(),
+            "-pix_fmt",
+            "yuv420p",
+            "-f",
+            "rawvideo",
+            path_str(&raw)?,
+        ],
+    )?;
     let source = std::fs::read(&raw).map_err(|e| e.to_string())?;
     let inputs = inputs_of(&source)?;
     let opts = Vp8Options {
@@ -164,9 +229,33 @@ fn main() -> Result<(), String> {
     let size = format!("{ENCODE_W}x{ENCODE_H}");
     let rate = BITRATE.to_string();
     let libvpx_args = [
-        "-f", "rawvideo", "-pix_fmt", "yuv420p", "-s", &size, "-r", "30", "-i", path_str(&raw)?,
-        "-c:v", "libvpx", "-b:v", &rate, "-deadline", "good", "-cpu-used", "4", "-threads", "1",
-        "-auto-alt-ref", "0", "-lag-in-frames", "0", "-f", "ivf", path_str(&libvpx_ivf)?,
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "yuv420p",
+        "-s",
+        &size,
+        "-r",
+        "30",
+        "-i",
+        path_str(&raw)?,
+        "-c:v",
+        "libvpx",
+        "-b:v",
+        &rate,
+        "-deadline",
+        "good",
+        "-cpu-used",
+        "4",
+        "-threads",
+        "1",
+        "-auto-alt-ref",
+        "0",
+        "-lag-in-frames",
+        "0",
+        "-f",
+        "ivf",
+        path_str(&libvpx_ivf)?,
     ];
     let libvpx_time = median(|| ffmpeg_bench(&ffmpeg, &libvpx_args))?;
     let libvpx_frames = read_ivf(&std::fs::read(&libvpx_ivf).map_err(|e| e.to_string())?)?;
@@ -195,7 +284,10 @@ fn main() -> Result<(), String> {
 }
 
 fn row(name: &str, frames: usize, seconds: f64) {
-    println!("{name:<14} {seconds:>8.3} s   {:>8.1} fps", fps(frames, seconds));
+    println!(
+        "{name:<14} {seconds:>8.3} s   {:>8.1} fps",
+        fps(frames, seconds)
+    );
 }
 
 fn fps(frames: usize, seconds: f64) -> f64 {
@@ -225,7 +317,8 @@ fn decode(packets: &[Packet], width: u32, height: u32) -> Result<Vec<VideoFrame>
 }
 
 fn encode(inputs: &[VideoInput], opts: Vp8Options) -> Result<(Vec<Vec<u8>>, f64), String> {
-    let mut encoder = Vp8Encoder::with_options(ENCODE_W, ENCODE_H, opts).map_err(|e| e.to_string())?;
+    let mut encoder =
+        Vp8Encoder::with_options(ENCODE_W, ENCODE_H, opts).map_err(|e| e.to_string())?;
     let started = Instant::now();
     let mut out = Vec::with_capacity(inputs.len());
     for input in inputs {
@@ -247,8 +340,12 @@ fn inputs_of(yuv: &[u8]) -> Result<Vec<VideoInput>, String> {
                 ENCODE_W,
                 ENCODE_H,
                 Plane::tight(ENCODE_W, ENCODE_H, f[..w * h].to_vec()).map_err(|e| e.to_string())?,
-                Plane::tight(ENCODE_W / 2, ENCODE_H / 2, f[w * h..w * h + cw * ch].to_vec())
-                    .map_err(|e| e.to_string())?,
+                Plane::tight(
+                    ENCODE_W / 2,
+                    ENCODE_H / 2,
+                    f[w * h..w * h + cw * ch].to_vec(),
+                )
+                .map_err(|e| e.to_string())?,
                 Plane::tight(ENCODE_W / 2, ENCODE_H / 2, f[w * h + cw * ch..].to_vec())
                     .map_err(|e| e.to_string())?,
             )
@@ -294,15 +391,19 @@ fn psnr_y(source: &[u8], decoded: &[u8]) -> f64 {
 }
 
 fn ffmpeg_bin() -> Option<PathBuf> {
-    ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", "ffmpeg"]
-        .into_iter()
-        .map(PathBuf::from)
-        .find(|path| {
-            Command::new(path)
-                .arg("-version")
-                .output()
-                .is_ok_and(|o| o.status.success())
-        })
+    [
+        "/opt/homebrew/bin/ffmpeg",
+        "/usr/local/bin/ffmpeg",
+        "ffmpeg",
+    ]
+    .into_iter()
+    .map(PathBuf::from)
+    .find(|path| {
+        Command::new(path)
+            .arg("-version")
+            .output()
+            .is_ok_and(|o| o.status.success())
+    })
 }
 
 fn path_str(path: &Path) -> Result<&str, String> {
@@ -341,10 +442,24 @@ fn ffmpeg_bench(ffmpeg: &Path, args: &[&str]) -> Result<f64, String> {
 }
 
 fn ffmpeg_raw(ffmpeg: &Path, decoder: &str, ivf: &Path, out: &Path) -> Result<Vec<u8>, String> {
-    run(ffmpeg, &[
-        "-threads", "1", "-c:v", decoder, "-i", path_str(ivf)?, "-fps_mode", "passthrough",
-        "-f", "rawvideo", "-pix_fmt", "yuv420p", path_str(out)?,
-    ])?;
+    run(
+        ffmpeg,
+        &[
+            "-threads",
+            "1",
+            "-c:v",
+            decoder,
+            "-i",
+            path_str(ivf)?,
+            "-fps_mode",
+            "passthrough",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "yuv420p",
+            path_str(out)?,
+        ],
+    )?;
     std::fs::read(out).map_err(|e| e.to_string())
 }
 
@@ -355,7 +470,8 @@ fn read_ivf(data: &[u8]) -> Result<Vec<Vec<u8>>, String> {
     let mut at = usize::from(u16::from_le_bytes([data[6], data[7]]));
     let mut frames = Vec::new();
     while at + 12 <= data.len() {
-        let size = u32::from_le_bytes([data[at], data[at + 1], data[at + 2], data[at + 3]]) as usize;
+        let size =
+            u32::from_le_bytes([data[at], data[at + 1], data[at + 2], data[at + 3]]) as usize;
         at += 12;
         let frame = data.get(at..at + size).ok_or("ivf frame")?;
         frames.push(frame.to_vec());

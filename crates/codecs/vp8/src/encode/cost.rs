@@ -3,7 +3,7 @@
 use crate::bool_coder::cost;
 use crate::tables::{
     B_MODE_PROBS, B_MODE_TREE, KF_B_MODE_PROBS, KF_UV_MODE_PROBS, KF_Y_MODE_PROBS, KF_Y_MODE_TREE,
-    MV_REF_TREE, SMALL_MV_TREE, SUB_MV_REF_PROBS, SUB_MV_REF_TREE, UV_MODE_TREE, Y_MODE_TREE,
+    MV_REF_TREE, SMALL_MV_TREE, UV_MODE_TREE, Y_MODE_TREE,
 };
 
 /// The branches from the root of `tree` to `symbol`, as (probability
@@ -49,7 +49,6 @@ pub struct ModeCosts {
     pub kf_b: Box<[[[u32; 10]; 10]; 10]>,
     /// Inter frames.
     pub b: [u32; 10],
-    pub sub_mv: [[u32; 4]; 5],
 }
 
 impl ModeCosts {
@@ -78,16 +77,7 @@ impl ModeCosts {
             }
         }
         let b = std::array::from_fn(|m| tree_cost(&B_MODE_TREE, &B_MODE_PROBS, m as u8));
-        let sub_mv = std::array::from_fn(|c| {
-            std::array::from_fn(|m| tree_cost(&SUB_MV_REF_TREE, &SUB_MV_REF_PROBS[c], m as u8))
-        });
-        Self {
-            y,
-            uv,
-            kf_b,
-            b,
-            sub_mv,
-        }
+        Self { y, uv, kf_b, b }
     }
 }
 
@@ -156,7 +146,7 @@ fn component_cost(p: &[u8; 19], d: i32) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{tree_path, MvCosts};
+    use super::{MvCosts, tree_path};
     use crate::tables::{B_MODE_TREE, DEFAULT_MV_PROBS, MV_REF_TREE};
 
     #[test]

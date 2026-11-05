@@ -206,12 +206,12 @@ impl Vp8Encoder {
             }
         }
         // Do not swing too far from the last frame of an inter run.
-        if kind == KIND_INTER {
-            if let Some(last) = self.rate.last_q {
-                let lo = i32::from(last) - 12;
-                let hi = i32::from(last) + 12;
-                return i32::from(best).clamp(lo.max(0), hi.min(127)) as u8;
-            }
+        if kind == KIND_INTER
+            && let Some(last) = self.rate.last_q
+        {
+            let lo = i32::from(last) - 12;
+            let hi = i32::from(last) + 12;
+            return i32::from(best).clamp(lo.max(0), hi.min(127)) as u8;
         }
         best
     }
@@ -228,11 +228,9 @@ impl Vp8Encoder {
             self.width as usize,
             self.height as usize,
         );
-        let key = self.last.is_none()
-            || self.since_key >= self.opts.keyframe_interval.max(1);
-        let golden_refresh = !key
-            && self.opts.golden_interval > 0
-            && self.since_golden >= self.opts.golden_interval;
+        let key = self.last.is_none() || self.since_key >= self.opts.keyframe_interval.max(1);
+        let golden_refresh =
+            !key && self.opts.golden_interval > 0 && self.since_golden >= self.opts.golden_interval;
         let kind = if key {
             KIND_KEY
         } else if golden_refresh {
@@ -247,7 +245,11 @@ impl Vp8Encoder {
             _ => per_frame,
         } - self.rate.debt / 10;
         let q = self.choose_q(kind, target.max(per_frame / 4));
-        let base = if key { Probs::default() } else { self.persist.probs.clone() };
+        let base = if key {
+            Probs::default()
+        } else {
+            self.persist.probs.clone()
+        };
         let dq = Dequant::new(i32::from(q), &QuantIndices::default());
         let ac = i64::from(AC_Q[usize::from(q)]);
         let lambda16 = ((ac * ac * 9) / 16).max(1) as u64;
@@ -265,12 +267,15 @@ impl Vp8Encoder {
             coeff_costs: &coeff_costs,
             mode_costs: &mode_costs,
             mv_costs: &mv_costs,
-            prob_skip: self.prob_skip,
             prob_intra: self.prob_intra,
             prob_last: self.prob_last,
             prob_golden: self.prob_golden,
             last: if key { None } else { self.last.as_deref() },
-            golden: if key || !golden_differs { None } else { self.golden.as_deref() },
+            golden: if key || !golden_differs {
+                None
+            } else {
+                self.golden.as_deref()
+            },
             speed: self.opts.speed,
         };
         let mut coded = code_frame(&src, &setup);
@@ -298,7 +303,6 @@ impl Vp8Encoder {
         HeaderWriter {
             header: &h,
             previous: &self.persist.probs,
-            previous_segmentation: &self.persist.segmentation,
             previous_deltas: &self.persist.deltas,
         }
         .write(&mut first);
@@ -338,7 +342,13 @@ impl Vp8Encoder {
                 self.rate.last_q = Some(q);
             }
         }
-        Ok(Packet::video(data, input.pts, input.duration, input.timescale, key))
+        Ok(Packet::video(
+            data,
+            input.pts,
+            input.duration,
+            input.timescale,
+            key,
+        ))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -416,7 +426,11 @@ impl Vp8Encoder {
             probs,
             skip_enabled: true,
             prob_skip: flag_prob(skips[0], skips[1]),
-            prob_intra: if key { 0 } else { flag_prob(inter[0], inter[1]) },
+            prob_intra: if key {
+                0
+            } else {
+                flag_prob(inter[0], inter[1])
+            },
             prob_last: if key { 0 } else { flag_prob(refs[0], refs[1]) },
             prob_golden: if key { 0 } else { flag_prob(gold[0], gold[1]) },
         }
@@ -429,7 +443,9 @@ fn search_filter(src: &Source, coded: &Coded, h: &FrameHeader, q: u8) -> u8 {
     let mbh = coded.recon.mbh;
     let error = |level: u8| -> u64 {
         if level == 0 {
-            return plane_sse(&coded.recon.y, &src.y) + plane_sse(&coded.recon.u, &src.u) + plane_sse(&coded.recon.v, &src.v);
+            return plane_sse(&coded.recon.y, &src.y)
+                + plane_sse(&coded.recon.u, &src.u)
+                + plane_sse(&coded.recon.v, &src.v);
         }
         let mut hh = h.clone();
         hh.filter_level = level;

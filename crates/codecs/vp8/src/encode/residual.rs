@@ -41,17 +41,50 @@ fn token_path(token: usize) -> &'static [(usize, bool)] {
         4 => &[(1, true), (2, true), (3, false), (4, true), (5, true)],
         5 => &[(1, true), (2, true), (3, true), (6, false), (7, false)],
         6 => &[(1, true), (2, true), (3, true), (6, false), (7, true)],
-        7 => &[(1, true), (2, true), (3, true), (6, true), (8, false), (9, false)],
-        8 => &[(1, true), (2, true), (3, true), (6, true), (8, false), (9, true)],
-        9 => &[(1, true), (2, true), (3, true), (6, true), (8, true), (10, false)],
-        _ => &[(1, true), (2, true), (3, true), (6, true), (8, true), (10, true)],
+        7 => &[
+            (1, true),
+            (2, true),
+            (3, true),
+            (6, true),
+            (8, false),
+            (9, false),
+        ],
+        8 => &[
+            (1, true),
+            (2, true),
+            (3, true),
+            (6, true),
+            (8, false),
+            (9, true),
+        ],
+        9 => &[
+            (1, true),
+            (2, true),
+            (3, true),
+            (6, true),
+            (8, true),
+            (10, false),
+        ],
+        _ => &[
+            (1, true),
+            (2, true),
+            (3, true),
+            (6, true),
+            (8, true),
+            (10, true),
+        ],
     }
 }
 
 /// What walking a block's tokens produces.
 pub enum Event {
     /// A tree branch with an adaptive probability.
-    Node { band: usize, ctx: usize, node: usize, bit: bool },
+    Node {
+        band: usize,
+        ctx: usize,
+        node: usize,
+        bit: bool,
+    },
     /// An extra bit or sign with a fixed probability.
     Fixed { prob: u8, bit: bool },
 }
@@ -66,13 +99,23 @@ pub fn walk(q: &QBlock, ctx: usize, first: usize, mut f: impl FnMut(Event)) {
     while c < end {
         let band = COEFF_BANDS[c];
         if check_eob {
-            f(Event::Node { band, ctx, node: 0, bit: true });
+            f(Event::Node {
+                band,
+                ctx,
+                node: 0,
+                bit: true,
+            });
         }
         let level = i32::from(q.levels[c]);
         let v = level.abs().min(MAX_LEVEL);
         let (token, cat) = token_of(v);
         for &(node, bit) in token_path(token) {
-            f(Event::Node { band, ctx, node, bit });
+            f(Event::Node {
+                band,
+                ctx,
+                node,
+                bit,
+            });
         }
         if token >= 5 {
             let extra = v - CAT_BASE[cat];
@@ -85,7 +128,10 @@ pub fn walk(q: &QBlock, ctx: usize, first: usize, mut f: impl FnMut(Event)) {
             }
         }
         if v != 0 {
-            f(Event::Fixed { prob: 128, bit: level < 0 });
+            f(Event::Fixed {
+                prob: 128,
+                bit: level < 0,
+            });
         }
         ctx = match v {
             0 => 0,
@@ -96,14 +142,30 @@ pub fn walk(q: &QBlock, ctx: usize, first: usize, mut f: impl FnMut(Event)) {
         c += 1;
     }
     if c < 16 {
-        f(Event::Node { band: COEFF_BANDS[c], ctx, node: 0, bit: false });
+        f(Event::Node {
+            band: COEFF_BANDS[c],
+            ctx,
+            node: 0,
+            bit: false,
+        });
     }
 }
 
 /// Writes a block's tokens.
-pub fn write_block(w: &mut BoolEncoder, probs: &[[[u8; 11]; 3]; 8], ctx: usize, first: usize, q: &QBlock) {
+pub fn write_block(
+    w: &mut BoolEncoder,
+    probs: &[[[u8; 11]; 3]; 8],
+    ctx: usize,
+    first: usize,
+    q: &QBlock,
+) {
     walk(q, ctx, first, |event| match event {
-        Event::Node { band, ctx, node, bit } => w.write(probs[band][ctx][node], bit),
+        Event::Node {
+            band,
+            ctx,
+            node,
+            bit,
+        } => w.write(probs[band][ctx][node], bit),
         Event::Fixed { prob, bit } => w.write(prob, bit),
     });
 }
@@ -113,7 +175,13 @@ pub type Counts = [[[[[u32; 2]; 11]; 3]; 8]; 4];
 
 pub fn count_block(counts: &mut [[[[u32; 2]; 11]; 3]; 8], ctx: usize, first: usize, q: &QBlock) {
     walk(q, ctx, first, |event| {
-        if let Event::Node { band, ctx, node, bit } = event {
+        if let Event::Node {
+            band,
+            ctx,
+            node,
+            bit,
+        } = event
+        {
             counts[band][ctx][node][usize::from(bit)] += 1;
         }
     });
@@ -122,7 +190,8 @@ pub fn count_block(counts: &mut [[[[u32; 2]; 11]; 3]; 8], ctx: usize, first: usi
 /// Cost in 1/256 bit of `zeros` and `ones` coded at `prob`.
 #[must_use]
 pub fn branch_cost(prob: u8, counts: [u32; 2]) -> u64 {
-    u64::from(counts[0]) * u64::from(cost(prob, false)) + u64::from(counts[1]) * u64::from(cost(prob, true))
+    u64::from(counts[0]) * u64::from(cost(prob, false))
+        + u64::from(counts[1]) * u64::from(cost(prob, true))
 }
 
 /// The probability that codes `counts` best.
@@ -189,14 +258,14 @@ impl Costs {
                 token_no_eob: [[[0; 11]; 3]; 8],
                 eob: [[0; 3]; 8],
             };
-            for band in 0..8 {
-                for ctx in 0..3 {
-                    let p = &probs[t][band][ctx];
+            for (band, bands) in probs[t].iter().enumerate() {
+                for (ctx, p) in bands.iter().enumerate() {
                     tc.eob[band][ctx] = cost(p[0], false) as u16;
                     for token in 0..11 {
                         let path: u32 = token_path(token).iter().map(|&(n, b)| cost(p[n], b)).sum();
                         tc.token_no_eob[band][ctx][token] = path.min(u32::from(u16::MAX)) as u16;
-                        tc.token[band][ctx][token] = (path + cost(p[0], true)).min(u32::from(u16::MAX)) as u16;
+                        tc.token[band][ctx][token] =
+                            (path + cost(p[0], true)).min(u32::from(u16::MAX)) as u16;
                     }
                 }
             }
@@ -265,7 +334,13 @@ pub struct Rounding {
 /// Quantizes a block of raster-order coefficients. Returns the levels and
 /// writes the dequantized raster coefficients the decoder will see.
 #[must_use]
-pub fn quantize(coeffs: &[i16; 16], dq: [i32; 2], round: Rounding, first: usize, deq: &mut [i16; 16]) -> QBlock {
+pub fn quantize(
+    coeffs: &[i16; 16],
+    dq: [i32; 2],
+    round: Rounding,
+    first: usize,
+    deq: &mut [i16; 16],
+) -> QBlock {
     let mut q = QBlock {
         levels: [0; 16],
         end: first as u8,
@@ -334,7 +409,12 @@ mod tests {
             let costs = Costs::new(&probs);
             let mut predicted = 0u32;
             let mut counts = [[[[[0u32; 2]; 11]; 3]; 8]; 4];
-            let mut write = |ty: usize, slot_l: usize, slot_a: usize, first: usize, q: &QBlock, w: &mut BoolEncoder| {
+            let mut write = |ty: usize,
+                             slot_l: usize,
+                             slot_a: usize,
+                             first: usize,
+                             q: &QBlock,
+                             w: &mut BoolEncoder| {
                 let ctx = usize::from(left[slot_l] + above[slot_a]);
                 predicted += costs.block(ty, ctx, first, q);
                 count_block(&mut counts[ty], ctx, first, q);
@@ -344,8 +424,8 @@ mod tests {
                 above[slot_a] = has;
             };
             write(1, 8, 8, 0, &blocks[24], &mut w);
-            for b in 0..16 {
-                write(0, b >> 2, b & 3, 1, &blocks[b], &mut w);
+            for (b, block) in blocks[..16].iter().enumerate() {
+                write(0, b >> 2, b & 3, 1, block, &mut w);
             }
             for i in 0..8 {
                 let l = 4 + (i >> 2) * 2 + ((i & 3) >> 1);
@@ -354,14 +434,23 @@ mod tests {
             }
             let before = w.len();
             let data = w.finish();
-            assert!(predicted / 256 <= (data.len() as u32 + 4) * 8 && (before as u32) * 8 <= predicted / 256 + 64);
+            assert!(
+                predicted / 256 <= (data.len() as u32 + 4) * 8
+                    && (before as u32) * 8 <= predicted / 256 + 64
+            );
             let mut bits = BoolDecoder::new(&data);
             let mut out = MbCoeffs::default();
             let (mut l, mut a) = ([0u8; 9], [0u8; 9]);
             read_mb(&mut bits, &probs, &mut l, &mut a, true, &dq, &mut out);
             for (b, block) in blocks.iter().enumerate() {
-                let index = if b < 16 { b } else if b < 24 { b } else { 24 };
-                let factors = if b == 24 { dq.y2 } else if b >= 16 { dq.uv } else { dq.y1 };
+                let index = b.min(24);
+                let factors = if b == 24 {
+                    dq.y2
+                } else if b >= 16 {
+                    dq.uv
+                } else {
+                    dq.y1
+                };
                 for c in 0..16 {
                     let want = (i32::from(block.levels[c]) * factors[usize::from(c > 0)]) as i16;
                     let got = out.blocks[index][ZIGZAG[c]];

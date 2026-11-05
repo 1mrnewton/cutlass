@@ -79,7 +79,10 @@ fn malformed_headers_are_rejected() {
     // A wrong start code.
     let mut bad = key.clone();
     bad[3] ^= 0xff;
-    assert!(matches!(decoder.decode(&bad), Err(CodecError::Malformed { .. })));
+    assert!(matches!(
+        decoder.decode(&bad),
+        Err(CodecError::Malformed { .. })
+    ));
     // A zero size.
     let mut bad = key.clone();
     bad[6] = 0;
@@ -127,14 +130,22 @@ fn decoder_contract() {
     let mut decoder = Vp8Decoder::open(&CodecParams::video(CodecId::Vp8, 40, 24)).expect("open");
     assert_eq!(decoder.codec(), CodecId::Vp8);
     // An empty packet is a dropped frame.
-    assert!(decoder.push(&Packet::video(Vec::new(), 0, 1, 30, false)).expect("empty").is_empty());
+    assert!(
+        decoder
+            .push(&Packet::video(Vec::new(), 0, 1, 30, false))
+            .expect("empty")
+            .is_empty()
+    );
     let mut got = Vec::new();
     for (i, frame) in frames.iter().enumerate() {
         let out = decoder
             .push(&Packet::video(frame.clone(), 7 + i as i64, 2, 60, i == 0))
             .expect("push");
         assert_eq!(out.len(), 1);
-        assert_eq!((out[0].pts, out[0].duration, out[0].timescale), (7 + i as i64, 2, 60));
+        assert_eq!(
+            (out[0].pts, out[0].duration, out[0].timescale),
+            (7 + i as i64, 2, 60)
+        );
         let f = &out[0].frame;
         assert_eq!((f.width, f.height), (40, 24));
         got.extend_from_slice(&f.y.samples);
@@ -145,7 +156,11 @@ fn decoder_contract() {
     assert!(decoder.drain().expect("drain").is_empty());
     assert!(decoder.drain().expect("drain twice").is_empty());
     decoder.reset();
-    assert!(decoder.push(&Packet::video(frames[1].clone(), 0, 1, 30, false)).is_err());
+    assert!(
+        decoder
+            .push(&Packet::video(frames[1].clone(), 0, 1, 30, false))
+            .is_err()
+    );
     decoder.cancel_flag().store(true, Ordering::Relaxed);
     assert!(matches!(
         decoder.push(&Packet::video(frames[0].clone(), 0, 1, 30, true)),
@@ -203,7 +218,10 @@ fn encoder_contract() {
     assert!(rated.push(&clockless).is_err());
     assert_eq!(input(w, h, 0).frame.format, PixelFormat::Yuv420p);
     encoder.cancel_flag().store(true, Ordering::Relaxed);
-    assert!(matches!(encoder.push(&input(w, h, 9)), Err(CodecError::Cancelled)));
+    assert!(matches!(
+        encoder.push(&input(w, h, 9)),
+        Err(CodecError::Cancelled)
+    ));
     encoder.reset();
     assert!(
         matches!(encoder.push(&input(w, h, 9)), Err(CodecError::Cancelled)),
@@ -339,13 +357,13 @@ fn decoder_fuzz_does_not_panic() {
         for frame in &stream[..prefix] {
             decoder.decode(frame).expect("corpus");
         }
-        for at in prefix..stream.len() {
+        for good in &stream[prefix..] {
             let bytes = if rng.below(3) == 0 {
-                stream[at].clone()
+                good.clone()
             } else if rng.below(16) == 0 {
                 (0..rng.below(512)).map(|_| rng.byte()).collect()
             } else {
-                mutate(&mut rng, &stream[at])
+                mutate(&mut rng, good)
             };
             match decoder.decode(&bytes) {
                 Ok(Some(p)) => {

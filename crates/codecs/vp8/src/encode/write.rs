@@ -1,6 +1,6 @@
 //! Writing a coded frame: macroblock modes, vectors, and tokens.
 
-use crate::bool_coder::{BoolEncoder, cost};
+use crate::bool_coder::BoolEncoder;
 use crate::header::{CoeffProbs, FrameHeader};
 use crate::modes::{
     ALTREF, Bounds, INTRA, LAST, MbInfo, Mv, NEARESTMV, NEWMV, SPLITMV, SubInfo, find_near,
@@ -10,7 +10,7 @@ use crate::tables::{
     B_MODE_PROBS, B_MODE_TREE, KF_B_MODE_PROBS, KF_UV_MODE_PROBS, KF_Y_MODE_PROBS, KF_Y_MODE_TREE,
     MV_REF_TREE, SMALL_MV_TREE, UV_MODE_TREE, Y_MODE_TREE,
 };
-use crate::tokens::{Context, TYPE_CHROMA, TYPE_Y2, TYPE_Y_AFTER_Y2, TYPE_Y_WITH_DC, skip_mb};
+use crate::tokens::{Context, TYPE_CHROMA, TYPE_Y_AFTER_Y2, TYPE_Y_WITH_DC, TYPE_Y2, skip_mb};
 
 use super::cost::tree_path;
 use super::frame::Coded;
@@ -46,7 +46,12 @@ fn write_mv(w: &mut BoolEncoder, probs: &[[u8; 19]; 2], d: Mv) {
 
 /// Walks the macroblocks the way the decoder reads them and calls `f` with
 /// each one and its neighbours.
-fn for_each_mb(coded: &Coded, mbw: usize, mbh: usize, mut f: impl FnMut(usize, usize, usize, Neighbours<'_>)) {
+fn for_each_mb(
+    coded: &Coded,
+    mbw: usize,
+    mbh: usize,
+    mut f: impl FnMut(usize, usize, usize, Neighbours<'_>),
+) {
     for mby in 0..mbh {
         for mbx in 0..mbw {
             let i = mby * mbw + mbx;
@@ -104,7 +109,11 @@ pub fn write_modes(w: &mut BoolEncoder, h: &FrameHeader, coded: &Coded, mbw: usi
                     } else {
                         sub.b_modes[b - 1]
                     };
-                    w.tree(&B_MODE_TREE, &KF_B_MODE_PROBS[usize::from(a)][usize::from(l)], sub.b_modes[b]);
+                    w.tree(
+                        &B_MODE_TREE,
+                        &KF_B_MODE_PROBS[usize::from(a)][usize::from(l)],
+                        sub.b_modes[b],
+                    );
                 }
             }
             w.tree(&UV_MODE_TREE, &KF_UV_MODE_PROBS, mb.uv_mode);
@@ -130,7 +139,11 @@ pub fn write_modes(w: &mut BoolEncoder, h: &FrameHeader, coded: &Coded, mbw: usi
         let bounds = Bounds::new(mbx, mby, mbw, mbh);
         let best = near.best.clamp(&bounds);
         if mb.y_mode == NEWMV {
-            write_mv(w, &h.probs.mv, Mv::new(mb.mv.row - best.row, mb.mv.col - best.col));
+            write_mv(
+                w,
+                &h.probs.mv,
+                Mv::new(mb.mv.row - best.row, mb.mv.col - best.col),
+            );
         } else if mb.y_mode == SPLITMV {
             // The encoder does not choose SPLITMV.
         }
@@ -151,12 +164,11 @@ fn for_each_block(
     for mby in 0..mbh {
         row(mby);
         let mut left: Context = [0; 9];
-        for mbx in 0..mbw {
+        for (mbx, a) in above.iter_mut().enumerate() {
             let i = mby * mbw + mbx;
             let mb = &coded.mbs[i];
             let blocks = &coded.blocks[i];
             let has_y2 = mb.y_mode != B_PRED && mb.y_mode != SPLITMV;
-            let a = &mut above[mbx];
             if mb.skip {
                 skip_mb(&mut left, a, has_y2);
                 continue;
@@ -195,15 +207,27 @@ fn for_each_block(
 #[must_use]
 pub fn count_tokens(coded: &Coded, mbw: usize, mbh: usize) -> Box<Counts> {
     let mut counts = Box::new([[[[[0u32; 2]; 11]; 3]; 8]; 4]);
-    for_each_block(coded, mbw, mbh, |_| {}, |ty, ctx, first, q| {
-        count_block(&mut counts[ty], ctx, first, q);
-    });
+    for_each_block(
+        coded,
+        mbw,
+        mbh,
+        |_| {},
+        |ty, ctx, first, q| {
+            count_block(&mut counts[ty], ctx, first, q);
+        },
+    );
     counts
 }
 
 /// Writes the token partitions.
 #[must_use]
-pub fn write_tokens(coded: &Coded, mbw: usize, mbh: usize, probs: &CoeffProbs, partitions: usize) -> Vec<Vec<u8>> {
+pub fn write_tokens(
+    coded: &Coded,
+    mbw: usize,
+    mbh: usize,
+    probs: &CoeffProbs,
+    partitions: usize,
+) -> Vec<Vec<u8>> {
     let mut writers: Vec<BoolEncoder> = (0..partitions).map(|_| BoolEncoder::new()).collect();
     let current = std::cell::Cell::new(0);
     for_each_block(
@@ -219,7 +243,12 @@ pub fn write_tokens(coded: &Coded, mbw: usize, mbh: usize, probs: &CoeffProbs, p
 /// Chooses a probability array for a tree from symbol counts, keeping the
 /// old one unless the new one pays for its `update_bits`.
 #[must_use]
-pub fn choose_tree_probs<const N: usize>(tree: &[i8], old: &[u8; N], symbols: &[u32], update_bits: u32) -> Option<[u8; N]> {
+pub fn choose_tree_probs<const N: usize>(
+    tree: &[i8],
+    old: &[u8; N],
+    symbols: &[u32],
+    update_bits: u32,
+) -> Option<[u8; N]> {
     let mut nodes = [[0u32; 2]; N];
     for (symbol, &count) in symbols.iter().enumerate() {
         for (i, bit) in tree_path(tree, symbol as u8) {
@@ -230,7 +259,8 @@ pub fn choose_tree_probs<const N: usize>(tree: &[i8], old: &[u8; N], symbols: &[
     }
     let new: [u8; N] = std::array::from_fn(|i| best_prob(nodes[i]));
     let old_cost: u64 = (0..N).map(|i| branch_cost(old[i], nodes[i])).sum();
-    let new_cost: u64 = (0..N).map(|i| branch_cost(new[i], nodes[i])).sum::<u64>() + u64::from(update_bits) * 256;
+    let new_cost: u64 =
+        (0..N).map(|i| branch_cost(new[i], nodes[i])).sum::<u64>() + u64::from(update_bits) * 256;
     (new != *old && new_cost < old_cost).then_some(new)
 }
 
@@ -238,10 +268,4 @@ pub fn choose_tree_probs<const N: usize>(tree: &[i8], old: &[u8; N], symbols: &[
 #[must_use]
 pub fn flag_prob(falses: u32, trues: u32) -> u8 {
     best_prob([falses, trues])
-}
-
-/// Cost of the flag counts at a probability, for estimates.
-#[must_use]
-pub fn flag_cost(prob: u8, falses: u32, trues: u32) -> u64 {
-    u64::from(falses) * u64::from(cost(prob, false)) + u64::from(trues) * u64::from(cost(prob, true))
 }

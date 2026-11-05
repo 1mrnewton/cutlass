@@ -41,23 +41,13 @@ impl Dequant {
 pub type Context = [u8; 9];
 
 /// Coefficients of one macroblock: 16 Y, 4 U, 4 V, then Y2.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct MbCoeffs {
     pub blocks: [[i16; 16]; 25],
     /// Per block: 0 when empty, 1 when only the first coefficient may be
     /// set, 2 otherwise.
     pub shape: [u8; 25],
     pub any: bool,
-}
-
-impl Default for MbCoeffs {
-    fn default() -> Self {
-        Self {
-            blocks: [[0; 16]; 25],
-            shape: [0; 25],
-            any: false,
-        }
-    }
 }
 
 impl MbCoeffs {

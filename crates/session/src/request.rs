@@ -1,10 +1,13 @@
+use serde::{Deserialize, Serialize};
+
 use cutlass_model::{
     AnimType, CommonKeyframeGroup, Crop, FreezeInfo, MaterialAudio, MaterialId, MaterialTransition,
     MaterialVideo, Micros, Segment, SegmentId, SpeedPoint, TrackId, TrackType, WordColumns,
 };
 
 /// A media record stored in the library. A segment places it later.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ImportedMedium {
     /// A picture, including a still stored as a video material.
     Video(Box<MaterialVideo>),
@@ -13,7 +16,8 @@ pub enum ImportedMedium {
 }
 
 /// Which edge of a segment a trim moves.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum TrimEdge {
     /// The timeline start. The end stays put.
     Start,
@@ -22,7 +26,11 @@ pub enum TrimEdge {
 }
 
 /// One change. A combo is a slice of these.
-#[derive(Clone, Debug, PartialEq)]
+///
+/// As JSON a request names its kind in `op`, in snake case, beside its
+/// fields: `{"op":"move","segment_id":"a","track_id":"t","start":0}`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
 pub enum Request {
     /// Insert `segment` on `track_id`, ordered by its target start.
     Place {
@@ -372,4 +380,50 @@ pub enum Request {
     SetColorSpace { space: i32 },
     /// Store the project name. Surrounding whitespace is dropped.
     SetProjectName { name: String },
+}
+
+#[cfg(test)]
+mod tests {
+    use cutlass_model::{Micros, Segment, SegmentId, TimeRange, TrackId};
+
+    use super::{Request, TrimEdge};
+
+    #[test]
+    fn a_request_reads_from_json_with_its_op() {
+        let requests: Vec<Request> = serde_json::from_str(
+            r#"[
+                {"op":"move","segment_id":"a","track_id":"t","start":250000},
+                {"op":"trim","segment_id":"a","edge":"end","time":900000}
+            ]"#,
+        )
+        .unwrap();
+        assert_eq!(
+            requests,
+            [
+                Request::Move {
+                    segment_id: SegmentId::new("a"),
+                    track_id: TrackId::new("t"),
+                    start: Micros(250_000),
+                },
+                Request::Trim {
+                    segment_id: SegmentId::new("a"),
+                    edge: TrimEdge::End,
+                    time: Micros(900_000),
+                },
+            ]
+        );
+        assert!(serde_json::from_str::<Request>(r#"{"op":"fly"}"#).is_err());
+        assert!(serde_json::from_str::<Request>(r#"{"op":"move","segment_id":"a"}"#).is_err());
+    }
+
+    #[test]
+    fn a_placed_segment_survives_a_round_trip() {
+        let request = Request::Place {
+            track_id: TrackId::new("main"),
+            segment: Box::new(Segment::new("s", "m", TimeRange::new(0, 1_000_000))),
+        };
+        let text = serde_json::to_string(&request).unwrap();
+        assert!(text.starts_with(r#"{"op":"place""#), "{text}");
+        assert_eq!(serde_json::from_str::<Request>(&text).unwrap(), request);
+    }
 }

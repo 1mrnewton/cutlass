@@ -76,6 +76,15 @@ pub struct ModeParams {
     pub rect_partitions: bool,
     /// Sub-sample motion search tries 5 instead of 8 neighbours per step.
     pub subpel_pruned: bool,
+    /// Inter frames: intra angle deltas and filter intra are tried only when
+    /// the best intra SATD cost is below this multiple of the inter one (0: always).
+    pub intra_refine_ratio: f64,
+    /// Inter frames: the oblique intra directions are tried only when the best
+    /// of DC, V, H, SMOOTH and PAETH is below this multiple of the inter cost (0: always).
+    pub intra_sweep_ratio: f64,
+    /// Inter frames: inter is taken without the transform-coded comparison
+    /// when the intra SATD cost exceeds this multiple of the inter one (0: never).
+    pub inter_clear_ratio: f64,
 }
 
 impl Default for ModeParams {
@@ -109,6 +118,9 @@ impl Default for ModeParams {
             fast_tx_dist: true,
             rect_partitions: false,
             subpel_pruned: false,
+            intra_refine_ratio: 0.0,
+            intra_sweep_ratio: 0.0,
+            inter_clear_ratio: 0.0,
         }
     }
 }
@@ -621,7 +633,22 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         // Intra luma.
         self.cur_filters = [0, 0];
         let saved = self.b.clone();
-        let (best_mode, intra_cost) = self.pick_intra_luma(x, y, w, h, tx);
+        // Inter first: an intra search far behind it skips its refinements.
+        let picked_inter = if self.mode.inter_frame {
+            let c = self.pick_inter(x, y, block_width(bs), block_height(bs));
+            self.b = saved.clone();
+            c
+        } else {
+            None
+        };
+        let limit = |t: f64| match &picked_inter {
+            Some(c) if t > 0.0 => c.cost * t,
+            _ => f64::MAX,
+        };
+        let refine_limit = limit(self.mode.intra_refine_ratio);
+        let sweep_limit = limit(self.mode.intra_sweep_ratio);
+        let (best_mode, intra_cost) =
+            self.pick_intra_luma(x, y, w, h, tx, refine_limit, sweep_limit);
         pb.y_mode = best_mode;
         let (angle, fi) = self.intra_choice;
         pb.angle_delta_y = angle;
@@ -651,10 +678,12 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
                 0.0
             };
         let mut inter_choice: Option<InterChoice> = None;
-        if self.mode.inter_frame
-            && let Some(c) = self.pick_inter(x, y, block_width(bs), block_height(bs))
-        {
-            if self.mode.rd_inter_intra && pb.palette_size_y == 0 {
+        if let Some(c) = picked_inter {
+            let clear = self.mode.inter_clear_ratio;
+            if clear > 0.0 && best_cost > c.cost * clear {
+                // Intra is far behind: no transform-coded comparison.
+                inter_choice = Some(c);
+            } else if self.mode.rd_inter_intra && pb.palette_size_y == 0 {
                 // Transform-coded RD on the first transform block's area.
                 let fw = self.fs.mi_cols * 4;
                 let fh = self.fs.mi_rows * 4;
@@ -967,7 +996,18 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         }
     }
 
-    fn pick_intra_luma(&mut self, x: usize, y: usize, w: usize, h: usize, tx: u8) -> (u8, f64) {
+    /// Best luma intra mode by SATD (refined by transform RD, angle deltas and
+    /// filter intra; the last two only while the cost is below `refine_limit`).
+    fn pick_intra_luma(
+        &mut self,
+        x: usize,
+        y: usize,
+        w: usize,
+        h: usize,
+        tx: u8,
+        refine_limit: f64,
+        sweep_limit: f64,
+    ) -> (u8, f64) {
         let Some(src) = self.src else {
             return (DC_PRED, 0.0);
         };
@@ -990,7 +1030,20 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         let mut best = (DC_PRED, f64::MAX);
         let mut cands: Vec<(f64, u8, f64)> = Vec::with_capacity(13);
         let n_modes = self.mode.intra_modes.min(13);
-        for mode in 0..n_modes {
+        // With a sweep limit the non-directional modes, V and H go first and
+        // the other directions only when one of them is below the limit.
+        let order: [u8; 13] = if sweep_limit < f64::MAX {
+            [0, 1, 2, 9, 12, 3, 4, 5, 6, 7, 8, 10, 11]
+        } else {
+            [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+        };
+        for (i, &mode) in order.iter().enumerate() {
+            if mode >= n_modes {
+                continue;
+            }
+            if i == 5 && best.1 > sweep_limit {
+                break;
+            }
             self.predict_intra(0, x, y, al, au, have_ar, have_bl, mode, lw, lh);
             let cp = &self.cur.planes[0];
             let sp = &src.planes[0];
@@ -1053,7 +1106,8 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         let mut angle = 0i8;
         let mut fi: Option<u8> = None;
         // Angle refinements of a directional winner.
-        if self.mode.angle_deltas && (1..=8).contains(&best.0) && bs >= BLOCK_8X8 {
+        let refine = best.1 <= refine_limit;
+        if refine && self.mode.angle_deltas && (1..=8).contains(&best.0) && bs >= BLOCK_8X8 {
             let base = best.0;
             for d in [-3i8, -2, -1, 1, 2, 3] {
                 self.b.angle_delta_y = d;
@@ -1067,7 +1121,8 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
             self.b.angle_delta_y = 0;
         }
         // Recursive filter intra (signalled as DC_PRED).
-        if self.mode.filter_intra
+        if refine
+            && self.mode.filter_intra
             && self.seq.enable_filter_intra
             && block_width(bs).max(block_height(bs)) <= 32
         {

@@ -127,3 +127,32 @@ jobs:
         run: |
           cargo build -p cutlass
           ${{ matrix.python }} scripts/smoke.py ${{ matrix.binary }}
+
+  appimage:
+    # The Linux release build as an AppImage, on the oldest supported
+    # Ubuntu so its glibc runs on newer systems. The built AppImage runs the
+    # same smoke test as the plain binary, then is kept as an artifact.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: GTK and ALSA headers
+        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libasound2-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release -p cutlass
+      - name: appimagetool 1.9.1
+        run: |
+          curl -sSL -o "$RUNNER_TEMP/appimagetool" https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage
+          echo "ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0  $RUNNER_TEMP/appimagetool" | sha256sum -c -
+          chmod +x "$RUNNER_TEMP/appimagetool"
+      - name: Package
+        run: APPIMAGETOOL="$RUNNER_TEMP/appimagetool" python3 scripts/appimage.py target/release/cutlass dist/Cutlass-x86_64.AppImage
+      - name: Smoke test the AppImage
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+        run: python3 scripts/smoke.py dist/Cutlass-x86_64.AppImage
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Cutlass-x86_64.AppImage
+          path: dist/Cutlass-x86_64.AppImage

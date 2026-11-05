@@ -14,3 +14,5 @@ mod common;
 mod decoder;
 #[cfg(test)]
 mod encoder;
+#[cfg(test)]
+mod fuzz;

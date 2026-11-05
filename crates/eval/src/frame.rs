@@ -766,6 +766,42 @@ mod tests {
     }
 
     #[test]
+    fn an_adjustment_layer_runs_over_the_picture_below_it() {
+        let draft = color_clip("0xFF404040", false);
+        let mut session = cutlass_session::Session::open(draft);
+        let layer = cutlass_model::SegmentId::new("layer");
+        session
+            .apply(
+                0,
+                &[
+                    cutlass_session::Request::AddAdjustment {
+                        track_id: "look".into(),
+                        segment_id: layer.clone(),
+                        material_id: "adj".into(),
+                        start: Micros(0),
+                        duration: Micros(1_000),
+                    },
+                    cutlass_session::Request::SetAdjust {
+                        segment_id: layer,
+                        material_id: "bright".into(),
+                        key: "exposure".to_owned(),
+                        value: 0.5,
+                    },
+                ],
+            )
+            .unwrap();
+        let mut draft = session.draft().clone();
+        assert_eq!(pixels(&draft, 0), [128, 128, 128, 255].repeat(2));
+        let row = draft
+            .tracks
+            .iter_mut()
+            .find(|track| track.id.as_str() == "look")
+            .unwrap();
+        row.segments[0].visible = false;
+        assert_eq!(pixels(&draft, 0), [64, 64, 64, 255].repeat(2));
+    }
+
+    #[test]
     fn the_project_canvas_color_is_under_every_layer() {
         let mut draft = Draft::empty("draft");
         draft.canvas_config.width = 2;

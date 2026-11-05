@@ -16,8 +16,8 @@
 
 use cutlass_compositor::{ComposeError, Device, Extent, Frame, submit};
 use cutlass_effects::{
-    Adjust, EffectSource, PackageKind, PackageStore, Step, animation_package_id, bundled_recipe,
-    entry, package_id, plugin_package_id, segment_package_id, video_package_id,
+    ADJUSTMENT, Adjust, EffectSource, PackageKind, PackageStore, Step, animation_package_id,
+    bundled_recipe, entry, package_id, plugin_package_id, segment_package_id, video_package_id,
 };
 use cutlass_model::{Draft, MaterialRef, Micros, Segment, SegmentId, TrackAttribute};
 use cutlass_picture::{CpuBytes, Picture, PictureSource, Sample, rgba_len};
@@ -53,6 +53,8 @@ struct Mark<'a> {
     track_index: usize,
     segment_index: usize,
     segment: &'a Segment,
+    /// An adjustment layer's sliders; otherwise the segment's package runs.
+    adjust: Option<Adjust>,
 }
 
 enum ClipFilter {
@@ -158,14 +160,17 @@ pub(crate) fn present<D: Device>(
             let frame = paint(pass.device, pass.extent, pass.time, base.take(), &batch)?;
             batch.clear();
             let bytes = cpu_of(frame, pass.extent)?;
-            base = Some(apply_unary(
-                pass.store,
-                pass.draft,
-                mark.segment,
-                bytes,
-                pass.extent,
-                pass.time,
-            ));
+            base = Some(match mark.adjust.as_ref() {
+                Some(adjust) => adjusted(adjust, bytes, pass.time),
+                None => apply_unary(
+                    pass.store,
+                    pass.draft,
+                    mark.segment,
+                    bytes,
+                    pass.extent,
+                    pass.time,
+                ),
+            });
         }
     }
     paint(pass.device, pass.extent, pass.time, base, &batch)
@@ -300,10 +305,55 @@ fn global_marks<'a>(draft: &'a Draft, time: Micros, stack: &[StackLayer<'_>]) ->
             track_index,
             segment_index,
             segment,
+            adjust: None,
         })
+        .chain(adjustment_layers(draft, time, stack))
         .collect();
     marks.sort_by_key(|mark| (mark.render_index, mark.track_index, mark.segment_index));
     marks
+}
+
+/// Adjustment layers covering `time` with a slider set, on visible rows.
+fn adjustment_layers<'a>(
+    draft: &'a Draft,
+    time: Micros,
+    stack: &[StackLayer<'_>],
+) -> impl Iterator<Item = Mark<'a>> {
+    let drawn_now: Vec<(usize, usize)> = stack
+        .iter()
+        .map(|layer| (layer.track_index, layer.segment_index))
+        .collect();
+    draft
+        .tracks
+        .iter()
+        .enumerate()
+        .filter(|(_, track)| !track.attribute.contains(TrackAttribute::HIDE))
+        .flat_map(|(track_index, track)| {
+            track
+                .segments
+                .iter()
+                .enumerate()
+                .map(move |(segment_index, segment)| (track_index, segment_index, segment))
+        })
+        .filter(move |(track_index, segment_index, segment)| {
+            segment.visible
+                && !drawn_now.contains(&(*track_index, *segment_index))
+                && covers(segment.target.start.0, segment.target.duration.0, time.0)
+                && matches!(
+                    draft.materials.get(segment.material_id.as_str()),
+                    Some(MaterialRef::Effect(effect)) if effect.kind == ADJUSTMENT
+                )
+        })
+        .filter_map(move |(track_index, segment_index, segment)| {
+            let adjust = cutlass_effects::segment_adjust(draft, segment);
+            (!adjust.is_identity()).then_some(Mark {
+                render_index: segment.render_index,
+                track_index,
+                segment_index,
+                segment,
+                adjust: Some(adjust),
+            })
+        })
 }
 
 /// A recipe effect at one frame: where it sits among the layers, its steps

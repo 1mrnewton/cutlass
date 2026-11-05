@@ -7,6 +7,7 @@
 //! `WEBP_REQUIRE_ORACLES` is set, in which case it fails. Nothing here runs
 //! when the crate is built as a library.
 
+mod alpha;
 mod lossy;
 mod oracle;
 mod stills;

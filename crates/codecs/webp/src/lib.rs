@@ -10,6 +10,7 @@
 
 #![forbid(unsafe_code)]
 
+mod alpha;
 mod decoder;
 mod limits;
 mod lossless;

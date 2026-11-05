@@ -51,12 +51,12 @@ fn corpus_stills_match_dwebp_exactly() {
             ));
         }
         if let Some(planes) = lossy_planes(&bytes) {
-            if planes != dwebp_yuv(&dwebp, &path) {
+            if planes.yuva() != dwebp_yuv(&dwebp, &path) {
                 failures.push(format!("{}: planes against dwebp", path.display()));
             }
             if let Some(ffmpeg) = &ffmpeg
                 && let Some(theirs) = ffmpeg_yuv(ffmpeg, &path)
-                && planes != theirs
+                && planes.yuv != theirs
             {
                 failures.push(format!("{}: planes against ffmpeg", path.display()));
             }

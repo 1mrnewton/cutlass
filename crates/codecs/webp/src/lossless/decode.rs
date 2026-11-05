@@ -206,6 +206,14 @@ pub(crate) fn decode(data: &[u8]) -> Result<(Header, Vec<u32>), CodecError> {
 }
 
 /// Transforms, then the spatially coded image, then the inverse transforms.
+/// A headerless image stream of `width` x `height`, as an `ALPH` chunk
+/// carries it (RFC 9649 section 2.7.1.2).
+pub(crate) fn decode_stream(data: &[u8], width: u32, height: u32) -> Result<Vec<u32>, CodecError> {
+    picture_ok(width, height)?;
+    let mut reader = BitReader::new(data);
+    image_stream(&mut reader, width, height)
+}
+
 fn image_stream(
     reader: &mut BitReader<'_>,
     width: u32,

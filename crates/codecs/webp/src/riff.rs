@@ -198,30 +198,52 @@ fn extended<'a>(chunks: &[Chunk<'a>]) -> Result<Still<'a>, CodecError> {
     })
 }
 
+/// Append one chunk, padded to an even length.
+#[cfg(test)]
+pub(crate) fn put_chunk(out: &mut Vec<u8>, fourcc: &[u8; 4], payload: &[u8]) {
+    out.extend_from_slice(fourcc);
+    out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+    out.extend_from_slice(payload);
+    if payload.len() % 2 == 1 {
+        out.push(0);
+    }
+}
+
+/// A whole file of `chunks`.
+#[cfg(test)]
+pub(crate) fn file(chunks: &[(&[u8; 4], &[u8])]) -> Vec<u8> {
+    let mut body = Vec::new();
+    for (fourcc, payload) in chunks {
+        put_chunk(&mut body, fourcc, payload);
+    }
+    let mut out = b"RIFF".to_vec();
+    out.extend_from_slice(&(body.len() as u32 + 4).to_le_bytes());
+    out.extend_from_slice(b"WEBP");
+    out.extend_from_slice(&body);
+    out
+}
+
+/// The chunks of a whole file, for tests that rebuild one.
+#[cfg(test)]
+pub(crate) fn chunks(data: &[u8]) -> Vec<([u8; 4], Vec<u8>)> {
+    walk(data, 12, data.len())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|chunk| (chunk.fourcc, chunk.data.to_vec()))
+        .collect()
+}
+
+/// The ten-byte `VP8X` payload.
+#[cfg(test)]
+pub(crate) fn vp8x(flags: u8, width: u32, height: u32) -> [u8; 10] {
+    let w = (width - 1).to_le_bytes();
+    let h = (height - 1).to_le_bytes();
+    [flags, 0, 0, 0, w[0], w[1], w[2], h[0], h[1], h[2]]
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Bitstream, parse};
-
-    fn put_chunk(out: &mut Vec<u8>, fourcc: &[u8; 4], payload: &[u8]) {
-        out.extend_from_slice(fourcc);
-        out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
-        out.extend_from_slice(payload);
-        if payload.len() % 2 == 1 {
-            out.push(0);
-        }
-    }
-
-    fn file(chunks: &[(&[u8; 4], &[u8])]) -> Vec<u8> {
-        let mut body = Vec::new();
-        for (fourcc, payload) in chunks {
-            put_chunk(&mut body, fourcc, payload);
-        }
-        let mut out = b"RIFF".to_vec();
-        out.extend_from_slice(&(body.len() as u32 + 4).to_le_bytes());
-        out.extend_from_slice(b"WEBP");
-        out.extend_from_slice(&body);
-        out
-    }
+    use super::{Bitstream, file, parse, vp8x};
 
     #[test]
     fn a_simple_lossless_file_is_one_bitstream() {
@@ -234,13 +256,37 @@ mod tests {
     #[test]
     fn an_extended_still_carries_its_canvas_and_icc() {
         let data = file(&[
-            (b"VP8X", &[0x20, 0, 0, 0, 2, 0, 0, 4, 0, 0]),
+            (b"VP8X", &vp8x(0x20, 3, 5)),
             (b"ICCP", b"icc"),
             (b"VP8L", &[0x2f, 1, 2, 3, 4]),
         ]);
         let still = parse(&data).unwrap();
         assert_eq!(still.canvas, Some((3, 5)));
         assert_eq!(still.icc, Some(&b"icc"[..]));
+    }
+
+    #[test]
+    fn alph_belongs_to_a_lossy_picture_only() {
+        let lossy = file(&[
+            (b"VP8X", &vp8x(0x10, 3, 5)),
+            (b"ALPH", &[0, 1, 2]),
+            (b"VP8 ", &[9; 11]),
+        ]);
+        let still = parse(&lossy).unwrap();
+        let Bitstream::Lossy { vp8, alpha } = still.bitstream else {
+            panic!("lossy");
+        };
+        assert_eq!(vp8.len(), 11);
+        assert_eq!(alpha, Some(&[0u8, 1, 2][..]));
+        let lossless = file(&[
+            (b"VP8X", &vp8x(0x10, 3, 5)),
+            (b"ALPH", &[0, 1, 2]),
+            (b"VP8L", &[0x2f, 1, 2, 3, 4]),
+        ]);
+        assert!(matches!(
+            parse(&lossless).unwrap().bitstream,
+            Bitstream::Lossless(_)
+        ));
     }
 
     #[test]

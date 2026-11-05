@@ -2,6 +2,7 @@
 
 use cutlass_decode::CodecError;
 
+use crate::alpha;
 use crate::lossless;
 use crate::lossy;
 use crate::riff::Bitstream;
@@ -21,15 +22,21 @@ pub(crate) struct Picture {
 pub(crate) fn decode(bitstream: Bitstream<'_>) -> Result<Picture, CodecError> {
     match bitstream {
         Bitstream::Lossy { vp8, alpha } => {
-            if alpha.is_some() {
-                return Err(CodecError::Unsupported { what: "webp alpha" });
-            }
             let planes = lossy::decode(vp8)?;
+            let width = planes.width as u32;
+            let height = planes.height as u32;
+            let mut rgba = lossy::yuv::to_rgba(&planes);
+            if let Some(chunk) = alpha {
+                let plane = alpha::decode(chunk, width, height)?;
+                for (pixel, value) in rgba.as_chunks_mut::<4>().0.iter_mut().zip(plane) {
+                    pixel[3] = value;
+                }
+            }
             Ok(Picture {
-                width: planes.width as u32,
-                height: planes.height as u32,
-                rgba: lossy::yuv::to_rgba(&planes),
-                alpha: false,
+                width,
+                height,
+                rgba,
+                alpha: alpha.is_some(),
             })
         }
         Bitstream::Lossless(data) => {

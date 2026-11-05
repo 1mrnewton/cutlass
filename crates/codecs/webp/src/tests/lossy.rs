@@ -32,14 +32,27 @@ fn opaque_rgba(width: u32, height: u32) -> Vec<u8> {
 }
 
 /// The cropped, packed Y, U and V planes of this crate's decode.
-fn our_yuv(bytes: &[u8]) -> Vec<u8> {
+fn our_yuv(bytes: &[u8]) -> LossyPlanes {
     lossy_planes(bytes).expect("lossy")
 }
 
+/// Packed Y, U and V, and the alpha plane when there is one.
+pub(crate) struct LossyPlanes {
+    pub yuv: Vec<u8>,
+    pub alpha: Vec<u8>,
+}
+
+impl LossyPlanes {
+    /// The layout of `dwebp -yuv`: Y, U, V, then alpha.
+    pub(crate) fn yuva(&self) -> Vec<u8> {
+        [&self.yuv[..], &self.alpha[..]].concat()
+    }
+}
+
 /// The planes of a lossy still, `None` for a lossless one.
-pub(crate) fn lossy_planes(bytes: &[u8]) -> Option<Vec<u8>> {
+pub(crate) fn lossy_planes(bytes: &[u8]) -> Option<LossyPlanes> {
     let still = riff::parse(bytes).expect("riff");
-    let Bitstream::Lossy { vp8, .. } = still.bitstream else {
+    let Bitstream::Lossy { vp8, alpha } = still.bitstream else {
         return None;
     };
     let planes = lossy::decode(vp8).expect("decode");
@@ -54,7 +67,10 @@ pub(crate) fn lossy_planes(bytes: &[u8]) -> Option<Vec<u8>> {
             out.extend_from_slice(&plane[row * planes.uv_stride..][..cw]);
         }
     }
-    Some(out)
+    let alpha = alpha.map_or_else(Vec::new, |chunk| {
+        crate::alpha::decode(chunk, w as u32, h as u32).expect("alpha")
+    });
+    Some(LossyPlanes { yuv: out, alpha })
 }
 
 fn sources(dir: &Path) -> Vec<PathBuf> {
@@ -97,14 +113,18 @@ fn check(dwebp: &Path, ffmpeg: Option<&Path>, path: &Path) {
     );
     let planes = our_yuv(&bytes);
     assert!(
-        planes == dwebp_yuv(dwebp, path),
+        planes.yuva() == dwebp_yuv(dwebp, path),
         "{} planes against dwebp",
         path.display()
     );
     if let Some(ffmpeg) = ffmpeg
         && let Some(theirs) = ffmpeg_yuv(ffmpeg, path)
     {
-        assert!(planes == theirs, "{} planes against ffmpeg", path.display());
+        assert!(
+            planes.yuv == theirs,
+            "{} planes against ffmpeg",
+            path.display()
+        );
     }
 }
 

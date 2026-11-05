@@ -873,6 +873,26 @@ mod tests {
     }
 
     #[test]
+    fn a_keyed_clip_shows_what_is_below_its_key_colour() {
+        let mut draft = color_clip("0xFF00FF00", false);
+        draft.canvas_config.background = Some("#808080".to_owned());
+        let mut session = cutlass_session::Session::open(draft);
+        session
+            .apply(
+                0,
+                &[cutlass_session::Request::SetChroma {
+                    segment_id: cutlass_model::SegmentId::new("segment"),
+                    material_id: "key".into(),
+                    color: "#00ff00".to_owned(),
+                    strength: 0.4,
+                    shadow: 0.0,
+                }],
+            )
+            .unwrap();
+        assert_eq!(pixels(session.draft(), 0), [128, 128, 128, 255].repeat(2));
+    }
+
+    #[test]
     fn the_project_canvas_color_is_under_every_layer() {
         let mut draft = Draft::empty("draft");
         draft.canvas_config.width = 2;

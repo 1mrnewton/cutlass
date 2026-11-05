@@ -119,31 +119,28 @@ impl<'a> Msac<'a> {
         let n = N - 1; // number of probability entries
         let c = (self.dif >> (WIN - 16)) as u32;
         let r = self.rng >> 8;
-        let mut u;
-        let mut v = self.rng;
+        // v[i] for every entry; the decoded symbol is the number of entries
+        // whose v is above c (v decreases with i).
+        let mut v = [0u32; N];
         let mut val = 0usize;
-        loop {
-            u = v;
-            if val == n {
-                v = 0;
-                break;
-            }
-            v = ((r * (u32::from(cdf[val]) >> PROB_SHIFT)) >> (7 - PROB_SHIFT))
-                + MIN_PROB * (n - val) as u32;
-            if c >= v {
-                break;
-            }
-            val += 1;
+        for i in 0..n {
+            v[i] = ((r * (u32::from(cdf[i]) >> PROB_SHIFT)) >> (7 - PROB_SHIFT))
+                + MIN_PROB * (n - i) as u32;
+            val += usize::from(c < v[i]);
         }
-        self.norm(self.dif - (u64::from(v) << (WIN - 16)), u - v);
+        let u = if val == 0 { self.rng } else { v[val - 1] };
+        let vv = if val >= n { 0 } else { v[val] };
+        self.norm(self.dif - (u64::from(vv) << (WIN - 16)), u - vv);
         if self.allow_update {
             let count = cdf[n];
             let rate = 4 + (count >> 4) + u16::from(n > 2);
-            for i in 0..val {
-                cdf[i] += (32768 - cdf[i]) >> rate;
-            }
-            for i in val..n {
-                cdf[i] -= cdf[i] >> rate;
+            for i in 0..n {
+                let x = cdf[i];
+                cdf[i] = if i < val {
+                    x + ((32768 - x) >> rate)
+                } else {
+                    x - (x >> rate)
+                };
             }
             cdf[n] = count + u16::from(count < 32);
         }

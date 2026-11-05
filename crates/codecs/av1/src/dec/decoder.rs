@@ -90,6 +90,8 @@ pub struct Av1Core {
     lr_scratch: LrScratch,
     /// Apply film grain to shown pictures.
     pub apply_grain: bool,
+    pool8: Vec<Picture<u8>>,
+    pool16: Vec<Picture<u16>>,
     /// Largest picture (upscaled width x height) accepted; larger is `Limit`.
     /// The default is the largest picture any AV1 level allows.
     pub max_pixels: u64,
@@ -115,6 +117,8 @@ impl Av1Core {
             pending: None,
             lr_scratch: LrScratch::new(),
             apply_grain: true,
+            pool8: Vec::new(),
+            pool16: Vec::new(),
             max_pixels: 35_651_584,
         }
     }
@@ -449,6 +453,7 @@ impl Av1Core {
                 refs,
                 &self.ref_hdr,
                 &mut self.lr_scratch,
+                &mut self.pool8,
             )?;
             (AnyPicture::U8(pic), c)
         } else {
@@ -471,6 +476,7 @@ impl Av1Core {
                 refs,
                 &self.ref_hdr,
                 &mut self.lr_scratch,
+                &mut self.pool16,
             )?;
             (AnyPicture::U16(pic), c)
         };
@@ -518,10 +524,22 @@ impl Av1Core {
                 data,
                 cdf: Arc::from(final_cdf),
             };
+            let mut old = Vec::new();
             for i in 0..8 {
                 if (hdr.refresh_frame_flags >> i) & 1 != 0 {
                     self.ref_hdr[i] = rh.clone();
-                    self.slots[i] = Some(slot.clone());
+                    if let Some(o) = self.slots[i].replace(slot.clone()) {
+                        old.push(o.pic);
+                    }
+                }
+            }
+            drop(slot);
+            for p in old {
+                if let Ok(p) = Arc::try_unwrap(p) {
+                    match p {
+                        AnyPicture::U8(p) => recycle(&mut self.pool8, p),
+                        AnyPicture::U16(p) => recycle(&mut self.pool16, p),
+                    }
                 }
             }
         }
@@ -676,6 +694,73 @@ fn grain_apply<P: Pixel>(
     dst
 }
 
+/// Takes a picture of the given format from the pool, or allocates one.
+/// Pooled pictures keep old samples; the decoder writes every sample it reads.
+fn take_picture<P: Pixel>(
+    pool: &mut Vec<Picture<P>>,
+    w: usize,
+    h: usize,
+    num_planes: usize,
+    sub_x: bool,
+    sub_y: bool,
+    bd: u32,
+) -> Picture<P> {
+    let fresh_geometry = |w: usize, h: usize| ((w + 127 + 160) & !63, (h + 127 + 160) & !63);
+    let (aw, ah) = fresh_geometry(w, h);
+    if let Some(i) = pool.iter().position(|p| {
+        p.planes.len() == num_planes
+            && p.sub_x == sub_x
+            && p.sub_y == sub_y
+            && p.bd == bd
+            && p.planes[0].stride == aw
+            && p.planes[0].alloc_h == ah
+    }) {
+        let mut p = pool.swap_remove(i);
+        for (k, pl) in p.planes.iter_mut().enumerate() {
+            let (sx, sy) = if k > 0 {
+                (sub_x, sub_y)
+            } else {
+                (false, false)
+            };
+            pl.w = (w + usize::from(sx)) >> u32::from(sx);
+            pl.h = (h + usize::from(sy)) >> u32::from(sy);
+        }
+        return p;
+    }
+    Picture::new(w, h, num_planes, sub_x, sub_y, bd)
+}
+
+/// A pooled copy of `src`.
+fn copy_picture<P: Pixel>(pool: &mut Vec<Picture<P>>, src: &Picture<P>) -> Picture<P> {
+    let mut d = take_picture(
+        pool,
+        src.planes[0].w,
+        src.planes[0].h,
+        src.planes.len(),
+        src.sub_x,
+        src.sub_y,
+        src.bd,
+    );
+    for (dp, sp) in d.planes.iter_mut().zip(&src.planes) {
+        if dp.data.len() == sp.data.len() && dp.stride == sp.stride {
+            dp.data.copy_from_slice(&sp.data);
+            dp.w = sp.w;
+            dp.h = sp.h;
+        } else {
+            *dp = sp.clone();
+        }
+    }
+    d
+}
+
+const POOL_MAX: usize = 6;
+
+fn recycle<P: Pixel>(pool: &mut Vec<Picture<P>>, p: Picture<P>) {
+    if pool.len() < POOL_MAX {
+        pool.push(p);
+    }
+}
+
 /// Decodes all tiles of a frame and runs the in-loop filters. Returns the
 /// final picture and the CDFs saved from the context tile.
 fn decode_frame<P: Pixel>(
@@ -687,9 +772,11 @@ fn decode_frame<P: Pixel>(
     refs: [Option<&Picture<P>>; 8],
     ref_hdr: &[RefHeaderState; 8],
     lr_scratch: &mut LrScratch,
+    pool: &mut Vec<Picture<P>>,
 ) -> R<(Picture<P>, Box<CdfContext>)> {
     let num_planes = seq.num_planes();
-    let mut cur = Picture::<P>::new(
+    let mut cur = take_picture::<P>(
+        pool,
         hdr.frame_width as usize,
         hdr.frame_height as usize,
         num_planes,
@@ -795,7 +882,7 @@ fn decode_frame<P: Pixel>(
             || hdr.cdef.uv_pri[0] != 0
             || hdr.cdef.uv_sec[0] != 0);
     let cdef_pic = if cdef_on {
-        let mut d = cur.clone();
+        let mut d = copy_picture(pool, &cur);
         postfilter::cdef(seq, hdr, fs, &cur, &mut d);
         Some(d)
     } else {
@@ -808,16 +895,32 @@ fn decode_frame<P: Pixel>(
         } else {
             None
         };
+        recycle(pool, cur);
+        if let Some(p) = cdef_pic {
+            recycle(pool, p);
+        }
         (c, d)
     } else {
-        (cdef_pic.unwrap_or_else(|| cur.clone()), None)
+        match cdef_pic {
+            Some(c) => (c, Some(cur)),
+            None => (cur, None),
+        }
     };
     let mut final_pic = if hdr.lr.uses_lr {
-        let deblocked = up_deblocked.as_ref().unwrap_or(&cur);
-        let mut out = up_cdef.clone();
-        postfilter::loop_restoration(seq, hdr, fs, &up_cdef, deblocked, &mut out, lr_scratch);
+        let mut out = copy_picture(pool, &up_cdef);
+        {
+            let deblocked = up_deblocked.as_ref().unwrap_or(&up_cdef);
+            postfilter::loop_restoration(seq, hdr, fs, &up_cdef, deblocked, &mut out, lr_scratch);
+        }
+        recycle(pool, up_cdef);
+        if let Some(p) = up_deblocked {
+            recycle(pool, p);
+        }
         out
     } else {
+        if let Some(p) = up_deblocked {
+            recycle(pool, p);
+        }
         up_cdef
     };
     // Visible size.

@@ -520,6 +520,9 @@ pub const MV_MAX: i32 = (1 << 14) - 1;
 const MAX_BLOCK: usize = 128;
 /// Edge-emulation buffer side: the block plus the 8-tap footprint.
 const EDGE_SIDE: usize = MAX_BLOCK + 7;
+/// Full-sample offset around the best candidate that an edge-emulated
+/// search window covers.
+const WIN_REACH: i32 = 24;
 
 /// Motion search settings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -581,6 +584,8 @@ pub struct MeScratch<P: Pixel> {
     /// Partition estimates of the current superblock: `[x, y, w, h]`, cost
     /// and motion (kept here for the mode decision, which owns this scratch).
     pub est_memo: Vec<([usize; 4], f64, (i32, i32))>,
+    /// Edge-emulated reference area of a pattern search that reaches past the plane.
+    win: Vec<P>,
     /// The mode search's recent predictions of the current block.
     pub pred_cache: Vec<(super::rdo::PredKey, Vec<P>)>,
     /// The transform cost of the chosen inter prediction and transform size.
@@ -593,6 +598,7 @@ impl<P: Pixel> MeScratch<P> {
             pred: vec![P::default(); MAX_BLOCK * MAX_BLOCK],
             edge: vec![P::default(); EDGE_SIDE * EDGE_SIDE],
             est_memo: Vec::with_capacity(128),
+            win: Vec::new(),
             pred_cache: Vec::new(),
             tx_memo: None,
         }
@@ -621,6 +627,14 @@ struct Search<'a, P: Pixel> {
     bd: u32,
     filter_x: usize,
     filter_y: usize,
+    /// An edge-emulated copy of the reference area the pattern search
+    /// covers when it reaches past the plane (`win_w == 0`: none), with its
+    /// top-left plane position.
+    win: &'a [P],
+    win_x: isize,
+    win_y: isize,
+    win_w: usize,
+    win_h: usize,
 }
 
 /// Running best full-sample offset (samples) or MV (1/8 samples).
@@ -657,6 +671,18 @@ impl<P: Pixel> Search<'_, P> {
         &self.src[self.y as usize * self.src_stride + self.x as usize..]
     }
 
+    /// Index in `win` of the `w` x `h` area at plane position `(px, py)`,
+    /// when the window holds all of it.
+    fn in_win(&self, px: isize, py: isize, w: usize, h: usize) -> Option<usize> {
+        let (dx, dy) = (px - self.win_x, py - self.win_y);
+        (self.win_w > 0
+            && dx >= 0
+            && dy >= 0
+            && dx as usize + w <= self.win_w
+            && dy as usize + h <= self.win_h)
+            .then(|| dy as usize * self.win_w + dx as usize)
+    }
+
     /// The reference block at full-sample offset `(dy, dx)`: directly from
     /// the plane when inside, else edge-emulated into `edge` (stride `w`).
     fn ref_block<'b>(&'b self, edge: &'b mut [P], dy: i32, dx: i32) -> (&'b [P], usize) {
@@ -671,6 +697,8 @@ impl<P: Pixel> Search<'_, P> {
                 &self.refp[py as usize * self.ref_stride + px as usize..],
                 self.ref_stride,
             )
+        } else if let Some(o) = self.in_win(px, py, self.w, self.h) {
+            (&self.win[o..], self.win_w)
         } else {
             emu_edge(
                 edge,
@@ -733,6 +761,22 @@ impl<P: Pixel> Search<'_, P> {
                 self.refp,
                 iy as usize * self.ref_stride + ix as usize,
                 self.ref_stride,
+                w,
+                h,
+                mx,
+                my,
+                self.filter_x,
+                self.filter_y,
+                self.bd,
+            );
+        } else if let Some(o) = self.in_win(ix - 3, iy - 3, w + 7, h + 7) {
+            let ws = self.win_w;
+            put(
+                pred,
+                w,
+                self.win,
+                o + 3 * ws + 3,
+                ws,
                 w,
                 h,
                 mx,
@@ -839,8 +883,15 @@ pub fn motion_search<P: Pixel>(
         } else {
             filter
         },
+        win: &[],
+        win_x: 0,
+        win_y: 0,
+        win_w: 0,
+        win_h: 0,
     };
-    let MeScratch { pred, edge, .. } = scratch;
+    let MeScratch {
+        pred, edge, win, ..
+    } = scratch;
 
     // Full-sample window (offsets in samples).
     let full_max = MV_MAX >> 3;
@@ -884,8 +935,34 @@ pub fn motion_search<P: Pixel>(
         }
     }
 
-    // (2) Pattern search around the best candidate.
+    // (2) Pattern search around the best candidate. When the area it is
+    // likely to cover (plus the interpolation taps) reaches past the plane,
+    // that area is edge-emulated once instead of block by block.
     let range = params.max_range.max(0);
+    let reach = range.min(WIN_REACH) as isize;
+    let (wx0, wy0) = (
+        x as isize + best.col as isize - reach - 4,
+        y as isize + best.row as isize - reach - 4,
+    );
+    let (ww, wh) = (w + 2 * reach as usize + 8, h + 2 * reach as usize + 8);
+    let s = if range > 0
+        && (wx0 < 0 || wy0 < 0 || wx0 as usize + ww > ref_w || wy0 as usize + wh > ref_h)
+    {
+        if win.len() < ww * wh {
+            win.resize(ww * wh, P::default());
+        }
+        emu_edge(win, ww, refp, ref_stride, ref_w, ref_h, wx0, wy0, ww, wh);
+        Search {
+            win: &win[..],
+            win_x: wx0,
+            win_y: wy0,
+            win_w: ww,
+            win_h: wh,
+            ..s
+        }
+    } else {
+        s
+    };
     if range > 0 {
         let wr_lo = (best.row - range).max(row_lo);
         let wr_hi = (best.row + range).min(row_hi);

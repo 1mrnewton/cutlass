@@ -19,7 +19,7 @@ use cutlass_model::{
     Micros, Segment, SegmentId, TrackAttribute, UniformScale, WordColumns, segment_bloom,
 };
 use cutlass_picture::{CpuBytes, Picture, PictureSource, Sample};
-use cutlass_text::{DrawnGlyph, Layout, PlacedGlyph, TextSource, paint_glyphs, text_fill};
+use cutlass_text::{GlyphLook, TextSource, text_fill};
 
 use crate::Fonts;
 use crate::gpu::{GpuLayer, GpuSource};
@@ -126,11 +126,18 @@ pub(crate) fn text_layers(
                 continue;
             }
             let (raster, transform) = if words_present(material) {
-                let Some(bytes) = caption_picture(face, material, segment.target.start, time)
-                else {
+                let wanted = density(&clip, &uniform, material.font_size);
+                let Some((drawn, bytes)) = caption_picture(
+                    Faces { fonts, face },
+                    material,
+                    glow(draft, segment).as_ref(),
+                    segment,
+                    time,
+                    wanted,
+                ) else {
                     continue;
                 };
-                (bytes, transform)
+                (bytes, transform.dense(drawn))
             } else {
                 let wanted = density(&clip, &uniform, material.font_size);
                 let glow = glow(draft, segment);
@@ -296,16 +303,20 @@ fn columns_present(columns: &WordColumns) -> bool {
 
 /// Word columns replace `content`. The caption's style, when it names one,
 /// pages the words and gives the curves; otherwise every word is drawn
-/// plain. An empty style keeps the material color. A sampled color that is
+/// plain. The page is drawn as a title is, so the material's outline,
+/// shadow, glow and box hold for it, at `density` pixels to each shown
+/// pixel. An empty style keeps the material color; a sampled color that is
 /// not opaque white replaces it. Position is a pixel shift, right and down;
-/// scale sizes a word about its middle, and a background is a box behind
-/// it. Rotation on the style is not applied.
+/// scale sizes a word about its middle, and a background is a round box
+/// behind the word. Rotation on the style is not applied.
 fn caption_picture(
-    face: &[u8],
+    faces: Faces<'_>,
     material: &MaterialText,
-    placed_at: Micros,
+    glow: Option<&BloomParams>,
+    segment: &Segment,
     time: Micros,
-) -> Option<CpuBytes> {
+    density: f64,
+) -> Option<(f64, CpuBytes)> {
     let style = cutlass_captions::caption_style(&material.caption_style);
     let styles = style.map_or_else(RangeStyles::identity, |style| {
         style.styles(material.font_size)
@@ -319,96 +330,107 @@ fn caption_picture(
     );
     let frame = sample_caption(&CaptionQuery {
         material,
-        font: face,
+        font: faces.face,
         timeline: time,
-        placed_at,
+        placed_at: segment.target.start,
         limits,
         keywords: &[],
         styles: &styles,
         stagger_shift_ms: 0,
     })
     .ok()?;
-    let base = text_fill(material).ok()?;
+    let looks = caption_looks(&frame, text_fill(material).ok()?)?;
+    let hidden = GlyphLook {
+        pose: LetterPose {
+            alpha: 0.0,
+            ..LetterPose::REST
+        },
+        ..GlyphLook::REST
+    };
+    let draw = |density: f64| {
+        let mut page = material.clone();
+        page.content.clone_from(&frame.letters.text);
+        page.is_rich_text = false;
+        page.font_size *= density;
+        page.line_max_width *= density;
+        let mut source =
+            TextSource::open_with_faces(faces.face, None, &page, glow, segment, &|path| {
+                faces.named(path)
+            })
+            .ok()?;
+        let each: Vec<GlyphLook> = source
+            .records()
+            .iter()
+            .map(|record| looks.get(&record.source).copied().unwrap_or(hidden))
+            .collect();
+        source.set_looks(&each);
+        match source.sample(time) {
+            Sample::Ready(Picture::Cpu(bytes)) => Some((density, bytes)),
+            _ => None,
+        }
+    };
+    if density > 1.0
+        && let Some(drawn) = draw(density)
+    {
+        return Some(drawn);
+    }
+    draw(1.0)
+}
+
+/// How each glyph of the caption's page looks, by its place in the page's
+/// text. A glyph the style does not draw has none.
+fn caption_looks(
+    frame: &cutlass_captions::CaptionFrame,
+    base: [u8; 4],
+) -> Option<HashMap<usize, GlyphLook>> {
+    let font_size = frame.letters.layout.font_size;
+    if !font_size.is_finite() || font_size <= 0.0 {
+        return None;
+    }
     // Each word's middle, so a word sized up grows about it.
     let mut spans: HashMap<usize, (f32, f32)> = HashMap::new();
+    let mut words: HashMap<usize, usize> = HashMap::new();
     for letter in &frame.letters.letters {
         if let Some(word) = letter.word {
             let span = spans.entry(word).or_insert((f32::MAX, f32::MIN));
             span.0 = span.0.min(letter.glyph.x);
             span.1 = span.1.max(letter.glyph.x);
+            words.insert(letter.source, word);
         }
     }
-    let word_of = |glyph: &PlacedGlyph| {
-        frame
-            .letters
-            .letters
-            .iter()
-            .find(|letter| letter.source == glyph.source && letter.glyph.x == glyph.x)
-            .and_then(|letter| letter.word)
-    };
-    let mut drawn = Vec::new();
-    for batch in &frame.batches {
-        for sample in &batch.glyphs {
-            let Some(baseline) = baseline_of(&frame.letters.layout, &sample.glyph) else {
-                continue;
-            };
-            let Some(shift_x) = shift_px(sample.style.position_x) else {
-                continue;
-            };
-            let Some(shift_y) = shift_px(sample.style.position_y) else {
-                continue;
-            };
-            let Some(fill) = ink_color(base, sample.style.color) else {
-                continue;
-            };
-            let Some(back) = back_color(sample.style.background) else {
-                continue;
-            };
+    let mut looks = HashMap::new();
+    for sample in frame.batches.iter().flat_map(|batch| &batch.glyphs) {
+        let look = (|| {
+            let shift_x = shift_px(sample.style.position_x)?;
+            let shift_y = shift_px(sample.style.position_y)?;
+            let fill = ink_color(base, sample.style.color)?;
+            let back = back_color(sample.style.background)?;
             #[allow(clippy::cast_possible_truncation)]
             let scale = sample.style.scale_x as f32;
             if !scale.is_finite() || scale <= 0.0 {
-                continue;
+                return None;
             }
-            let middle = word_of(&sample.glyph)
-                .and_then(|word| spans.get(&word))
+            let middle = words
+                .get(&sample.glyph.source)
+                .and_then(|word| spans.get(word))
                 .map_or(sample.glyph.x, |(left, right)| (left + right) / 2.0);
-            drawn.push(HeldGlyph {
-                placed: sample.glyph.clone(),
-                baseline,
-                fill,
-                shift_x: shift_x + (sample.glyph.x - middle) * (scale - 1.0),
-                shift_y,
-                scale,
+            let dx = shift_x + (sample.glyph.x - middle) * (scale - 1.0);
+            Some(GlyphLook {
+                pose: LetterPose {
+                    alpha: 1.0,
+                    dx: f64::from(dx / font_size),
+                    dy: f64::from(shift_y / font_size),
+                    scale: f64::from(scale),
+                },
+                ink: (fill != base).then_some(fill),
                 back,
-            });
+            })
+        })();
+        if let Some(look) = look {
+            looks.insert(sample.glyph.source, look);
         }
     }
-    let borrowed: Vec<DrawnGlyph<'_>> = drawn
-        .iter()
-        .map(|glyph| DrawnGlyph {
-            placed: &glyph.placed,
-            baseline: glyph.baseline,
-            fill: glyph.fill,
-            shift_x: glyph.shift_x,
-            shift_y: glyph.shift_y,
-            scale: glyph.scale,
-            back: glyph.back,
-        })
-        .collect();
-    match paint_glyphs(face, frame.letters.layout.font_size, &borrowed) {
-        Ok(Picture::Cpu(bytes)) => Some(bytes),
-        Ok(Picture::Platform(_)) | Err(_) => None,
-    }
-}
-
-struct HeldGlyph {
-    placed: PlacedGlyph,
-    baseline: f32,
-    fill: [u8; 4],
-    shift_x: f32,
-    shift_y: f32,
-    scale: f32,
-    back: [u8; 4],
+    Some(looks)
 }
 
 /// A box color from a sampled background: clear when it has no opacity.
@@ -422,15 +444,6 @@ fn back_color(color: Rgba) -> Option<[u8; 4]> {
         unit_byte(color.blue)?,
         unit_byte(color.alpha)?,
     ])
-}
-
-fn baseline_of(layout: &Layout, glyph: &PlacedGlyph) -> Option<f32> {
-    layout.lines.iter().find_map(|line| {
-        let found = line.glyphs.iter().any(|item| {
-            item.source == glyph.source && item.glyph_id == glyph.glyph_id && item.x == glyph.x
-        });
-        found.then_some(line.baseline)
-    })
 }
 
 fn shift_px(value: f64) -> Option<f32> {
@@ -888,7 +901,28 @@ mod tests {
         // Highlight puts a yellow box behind the spoken word.
         draft.materials.texts[0].caption_style = "highlight".to_owned();
         let boxed = pixels(&draft, 100_000);
-        assert!(yellow(&boxed) > yellow(&early) * 2);
+        // A box is one unbroken run of yellow across the word; inked
+        // letters alone are broken up by the gaps between their strokes.
+        let run = |rgba: &[u8]| {
+            rgba.chunks(width * 4)
+                .map(|row| {
+                    row.chunks(4)
+                        .fold((0, 0), |(best, now), pixel| {
+                            let on = pixel[0] > 200 && pixel[1] > 180 && pixel[2] < 120;
+                            let now = if on && pixel[3] == 255 { now + 1 } else { 0 };
+                            (best.max(now), now)
+                        })
+                        .0
+                })
+                .max()
+                .unwrap_or(0)
+        };
+        assert!(
+            run(&boxed) > run(&early) * 2,
+            "{} {}",
+            run(&boxed),
+            run(&early)
+        );
         // Word by word hides the words not yet spoken.
         draft.materials.texts[0].caption_style = "word-by-word".to_owned();
         let first = pixels(&draft, 100_000);
@@ -903,5 +937,42 @@ mod tests {
         // An unknown style draws the words plain.
         draft.materials.texts[0].caption_style = "loud".to_owned();
         assert_eq!(pixels(&draft, 100_000), plain);
+    }
+
+    #[test]
+    fn a_caption_takes_its_material_outline_shadow_and_box_like_a_title() {
+        let mut draft = text_segment("", false);
+        draft.materials.texts[0].words = words(&[("AB", 0, 500), ("BA", 500, 1_000)]);
+        let has = |rgba: &[u8], color: [u8; 4]| rgba.chunks(4).any(|pixel| pixel == color);
+        let plain = pixels(&draft, 100_000);
+        assert!(ink(&plain));
+        assert!(!has(&plain, [255, 0, 0, 255]));
+        let text = &mut draft.materials.texts[0];
+        text.border_color = "#FF0000".to_owned();
+        text.border_alpha = 1.0;
+        text.border_width = 0.08;
+        let outlined = pixels(&draft, 100_000);
+        assert!(has(&outlined, [255, 0, 0, 255]), "a red outline");
+        assert!(ink(&outlined), "white letters inside it");
+        let text = &mut draft.materials.texts[0];
+        text.border_color = String::new();
+        text.background_style = 1;
+        text.background_color = "#0000FF".to_owned();
+        text.background_alpha = 1.0;
+        let boxed = pixels(&draft, 100_000);
+        assert!(has(&boxed, [0, 0, 255, 255]), "a blue box behind the page");
+        let text = &mut draft.materials.texts[0];
+        text.background_style = 0;
+        text.has_shadow = true;
+        text.shadow_color = "#00FF00".to_owned();
+        text.shadow_alpha = 1.0;
+        text.shadow_distance = 8.0;
+        let shaded = pixels(&draft, 100_000);
+        assert!(
+            shaded
+                .chunks(4)
+                .any(|pixel| pixel[1] > 100 && pixel[0] < 50 && pixel[3] > 100),
+            "a green shadow"
+        );
     }
 }

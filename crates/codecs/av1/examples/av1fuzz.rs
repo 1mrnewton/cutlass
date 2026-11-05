@@ -1,8 +1,14 @@
 //! Mutation fuzzer: corrupts real IVF streams and checks that decoding never panics.
 //!
 //! Usage: av1fuzz <iterations> <file.ivf>...
+//!
+//! Odd iterations decode with `Av1Core::decode_delayed` and `drain`
+//! (frames reconstructed beside the parsing of the next ones); panics on
+//! any thread count.
 
 #![allow(clippy::print_stdout, clippy::print_stderr)]
+
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use cutlass_av1::dec::decoder::Av1Core;
 
@@ -33,10 +39,11 @@ fn main() {
         seed ^= seed << 17;
         seed
     };
+    static PANICS: AtomicUsize = AtomicUsize::new(0);
     std::panic::set_hook(Box::new(|info| {
+        PANICS.fetch_add(1, Ordering::Relaxed);
         eprintln!("PANIC: {info}");
     }));
-    let mut panics = 0;
     for path in &args[2..] {
         let Ok(data) = std::fs::read(path) else {
             continue;
@@ -78,18 +85,23 @@ fn main() {
             let r = std::panic::catch_unwind(|| {
                 let mut core = Av1Core::new();
                 core.max_pixels = 1 << 20;
-                for f in &fr {
+                let delayed = it % 2 == 1;
+                for (i, f) in fr.iter().enumerate() {
                     if f.is_empty() {
                         continue;
                     }
-                    let _ = core.decode(f);
+                    if delayed {
+                        let _ = core.decode_delayed(f, i as u64);
+                    } else {
+                        let _ = core.decode(f);
+                    }
                 }
+                while delayed && core.drain().is_err() {}
             });
             if r.is_err() {
-                panics += 1;
                 eprintln!("  in {path} iteration {it}");
             }
         }
     }
-    println!("panics: {panics}");
+    println!("panics: {}", PANICS.load(Ordering::Relaxed));
 }

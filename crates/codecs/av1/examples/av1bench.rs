@@ -3,10 +3,13 @@
 //!
 //! Usage: av1bench <in.ivf> [threads] [out.yuv]
 //! `threads` sets `Av1Core::threads` (default: available parallelism).
+//! Frames go through `Av1Core::decode_delayed` and `Av1Core::drain`.
 
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
 use std::io::Write;
+
+use cutlass_av1::dec::decoder::DecodedFrame;
 
 use cutlass_av1::dec::decoder::{AnyPicture, Av1Core};
 
@@ -32,6 +35,7 @@ fn main() -> Result<(), String> {
     let hdr_len = u16::from_le_bytes([data[6], data[7]]) as usize;
     let mut pos = hdr_len;
     let mut n = 0;
+    let mut n_in = 0u64;
     let start = std::time::Instant::now();
     while pos + 12 <= data.len() {
         let size =
@@ -39,36 +43,54 @@ fn main() -> Result<(), String> {
         pos += 12;
         let frame = &data[pos..(pos + size).min(data.len())];
         pos += size;
-        let frames = core.decode(frame).map_err(|e| format!("frame {n}: {e}"))?;
-        for f in frames {
-            if let Some(out) = out.as_mut() {
-                match &*f.picture {
-                    AnyPicture::U8(p) => {
-                        for pl in &p.planes {
-                            for y in 0..pl.h {
-                                out.write_all(&pl.data[y * pl.stride..y * pl.stride + pl.w])
-                                    .map_err(|e| e.to_string())?;
-                            }
-                        }
-                    }
-                    AnyPicture::U16(p) => {
-                        for pl in &p.planes {
-                            for y in 0..pl.h {
-                                for v in &pl.data[y * pl.stride..y * pl.stride + pl.w] {
-                                    out.write_all(&v.to_le_bytes()).map_err(|e| e.to_string())?;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+        let frames = core
+            .decode_delayed(frame, n_in)
+            .map_err(|e| format!("frame {n_in}: {e}"))?;
+        n_in += 1;
+        for (_, f) in frames {
+            write_frame(out.as_mut(), &f)?;
             n += 1;
         }
+    }
+    for (_, f) in core.drain().map_err(|e| format!("drain: {e}"))? {
+        write_frame(out.as_mut(), &f)?;
+        n += 1;
+    }
+    if let Some(out) = out.as_mut() {
+        out.flush().map_err(|e| e.to_string())?;
     }
     eprintln!(
         "{n} frames in {:.3}s ({} threads)",
         start.elapsed().as_secs_f64(),
         core.threads
     );
+    #[cfg(feature = "stats")]
+    eprintln!("{}", cutlass_av1::dec::decoder::prof::report());
+    Ok(())
+}
+
+fn write_frame(out: Option<&mut impl Write>, f: &DecodedFrame) -> Result<(), String> {
+    let Some(out) = out else {
+        return Ok(());
+    };
+    match &*f.picture {
+        AnyPicture::U8(p) => {
+            for pl in &p.planes {
+                for y in 0..pl.h {
+                    out.write_all(&pl.data[y * pl.stride..y * pl.stride + pl.w])
+                        .map_err(|e| e.to_string())?;
+                }
+            }
+        }
+        AnyPicture::U16(p) => {
+            for pl in &p.planes {
+                for y in 0..pl.h {
+                    for v in &pl.data[y * pl.stride..y * pl.stride + pl.w] {
+                        out.write_all(&v.to_le_bytes()).map_err(|e| e.to_string())?;
+                    }
+                }
+            }
+        }
+    }
     Ok(())
 }

@@ -4,6 +4,12 @@
 //! shared [`Decoder`] trait: it maps bit depth and subsampling to a
 //! [`PixelFormat`], pads odd 4:2:0 sizes to even (repeating the last column
 //! and row), and fills monochrome chroma with the neutral value.
+//!
+//! Frames decode with [`Av1Core::decode_delayed`]: a pushed packet's
+//! picture may come out of a later push or of [`Decoder::drain`], while
+//! the next packets are parsed beside its reconstruction.
+
+use std::collections::VecDeque;
 
 use cutlass_decode::{
     CodecError, CodecId, CodecParams, ColorPrimaries, Decoder, Output, Packet, PictureInfo,
@@ -19,6 +25,9 @@ pub struct Av1Decoder {
     core: Av1Core,
     /// Configuration OBUs from an `av1C` box, decoded before the first packet.
     config_obus: Vec<u8>,
+    /// Packets whose pictures may still come out: tag, pts and timescale.
+    timing: VecDeque<(u64, i64, u32)>,
+    next_tag: u64,
 }
 
 impl Av1Decoder {
@@ -35,6 +44,8 @@ impl Av1Decoder {
         let mut d = Self {
             core: Av1Core::new(),
             config_obus,
+            timing: VecDeque::new(),
+            next_tag: 0,
         };
         d.load_config()?;
         Ok(d)
@@ -48,9 +59,27 @@ impl Av1Decoder {
         Ok(())
     }
 
-    /// Decodes one temporal unit into the crate's own frame type.
+    /// Decodes one temporal unit into the crate's own frame type, waiting
+    /// for its pictures (and returning any a push kept back before them).
     pub fn decode_frames(&mut self, data: &[u8]) -> Result<Vec<DecodedFrame>, CodecError> {
+        self.timing.clear();
         self.core.decode(data)
+    }
+
+    /// The outputs of frames from the packets tagged `frames`.
+    fn outputs(&mut self, frames: Vec<(u64, DecodedFrame)>) -> Result<Vec<Output>, CodecError> {
+        let mut out = Vec::with_capacity(frames.len());
+        for (tag, f) in &frames {
+            while self.timing.front().is_some_and(|t| t.0 < *tag) {
+                self.timing.pop_front();
+            }
+            let (pts, timescale) = match self.timing.front() {
+                Some(&(t, pts, ts)) if t == *tag => (pts, ts),
+                _ => (0, 1),
+            };
+            out.push(Output::Picture(picture_output(f, pts, timescale)?));
+        }
+        Ok(out)
     }
 }
 
@@ -196,24 +225,21 @@ impl Decoder for Av1Decoder {
                 what: "empty packet",
             });
         }
-        let frames = self.core.decode(&packet.data)?;
-        let mut out = Vec::with_capacity(frames.len());
-        for f in &frames {
-            out.push(Output::Picture(picture_output(
-                f,
-                packet.pts,
-                packet.timescale,
-            )?));
-        }
-        Ok(out)
+        let tag = self.next_tag;
+        self.next_tag += 1;
+        self.timing.push_back((tag, packet.pts, packet.timescale));
+        let frames = self.core.decode_delayed(&packet.data, tag)?;
+        self.outputs(frames)
     }
 
     fn drain(&mut self) -> Result<Vec<Output>, CodecError> {
-        Ok(Vec::new())
+        let frames = self.core.drain()?;
+        self.outputs(frames)
     }
 
     fn reset(&mut self) {
         self.core.reset();
+        self.timing.clear();
     }
 }
 
@@ -355,8 +381,8 @@ mod tests {
         let second = encoder.push_picture(&input(picture, 1)).expect("second");
         assert!(second[0].data.len() < first[0].data.len());
         let mut decoder = Av1Decoder::open(&params).expect("decoder");
-        let a = decoder.push(&first[0]).expect("decode first");
-        let b = decoder.push(&second[0]).expect("decode second");
+        let a = push_now(&mut decoder, &first[0]).expect("decode first");
+        let b = push_now(&mut decoder, &second[0]).expect("decode second");
         assert_eq!(
             a[0].as_video().expect("video").picture.y.samples(),
             b[0].as_video().expect("video").picture.y.samples()
@@ -374,11 +400,11 @@ mod tests {
             .expect("first");
         let second = encoder.push_picture(&input(picture, 1)).expect("second");
         let mut decoder = Av1Decoder::open(&params).expect("decoder");
-        let shown = decoder.push(&first[0]).expect("decode");
+        let shown = push_now(&mut decoder, &first[0]).expect("decode");
         let mut broken = second[0].clone();
         broken.data = vec![0xff, 0x00, 0x01];
         assert!(decoder.push(&broken).is_err());
-        let again = decoder.push(&second[0]).expect("reference still there");
+        let again = push_now(&mut decoder, &second[0]).expect("reference still there");
         assert_eq!(
             shown[0].as_video().expect("video").picture.y.samples(),
             again[0].as_video().expect("video").picture.y.samples()
@@ -413,7 +439,7 @@ mod tests {
             .expect("first");
         let repeat = encoder.push_picture(&input(picture, 1)).expect("repeat");
         let mut decoder = Av1Decoder::open(&params).expect("open");
-        let shown = decoder.push(&first[0]).expect("decode");
+        let shown = push_now(&mut decoder, &first[0]).expect("decode");
         let mut state = 0x1234_5678u32;
         for _ in 0..200 {
             state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
@@ -444,6 +470,44 @@ mod tests {
         let _ = shown;
     }
 
+    /// Pushes `packet` and drains, so its pictures come out now.
+    fn push_now(
+        decoder: &mut Av1Decoder,
+        packet: &cutlass_decode::Packet,
+    ) -> Result<Vec<cutlass_decode::Output>, cutlass_decode::CodecError> {
+        let mut out = decoder.push(packet)?;
+        out.extend(decoder.drain()?);
+        Ok(out)
+    }
+
+    #[test]
+    fn pictures_keep_their_packet_timing() {
+        let params = CodecParams::video(CodecId::Av1, 128, 128);
+        let mut encoder = Av1Encoder::open(&params).expect("encoder");
+        encoder.set_gop(1);
+        let mut packets = Vec::new();
+        for i in 0..6u8 {
+            packets.extend(
+                encoder
+                    .push_picture(&input(solid(128, 128, 30 + 20 * i), i64::from(i)))
+                    .expect("push"),
+            );
+        }
+        let mut decoder = Av1Decoder::open(&params).expect("decoder");
+        let mut out = Vec::new();
+        for p in &packets {
+            out.extend(decoder.push(p).expect("decode"));
+        }
+        out.extend(decoder.drain().expect("drain"));
+        assert_eq!(out.len(), packets.len());
+        for (o, p) in out.iter().zip(&packets) {
+            let cutlass_decode::Output::Picture(pic) = o else {
+                panic!("not a picture");
+            };
+            assert_eq!(pic.pts(), p.pts);
+        }
+    }
+
     fn frame_digest(bytes: &[u8]) -> u64 {
         let mut hash = 0xcbf2_9ce4_8422_2325u64;
         for byte in bytes {
@@ -454,8 +518,9 @@ mod tests {
     }
 
     fn push_frame(decoder: &mut Av1Decoder, data: &[u8], pts: i64) -> Vec<u8> {
-        let shown = decoder
-            .push(&cutlass_decode::Packet {
+        let shown = push_now(
+            decoder,
+            &cutlass_decode::Packet {
                 stream: 0,
                 data: data.to_vec(),
                 pts,
@@ -463,8 +528,9 @@ mod tests {
                 timescale: 30,
                 keyframe: pts == 0,
                 side: Vec::new(),
-            })
-            .unwrap_or_else(|error| panic!("frame {pts}: {error:?}"));
+            },
+        )
+        .unwrap_or_else(|error| panic!("frame {pts}: {error:?}"));
         let picture = &shown[0].as_video().expect("video").picture;
         let mut packed = picture.y.samples().to_vec();
         packed.extend_from_slice(picture.u.samples());
@@ -537,8 +603,9 @@ mod tests {
         ];
         let params = CodecParams::video(CodecId::Av1, 64, 64);
         let mut decoder = Av1Decoder::open(&params).expect("open");
-        let error = decoder
-            .push(&cutlass_decode::Packet {
+        let error = push_now(
+            &mut decoder,
+            &cutlass_decode::Packet {
                 stream: 0,
                 data: payload.to_vec(),
                 pts: 0,
@@ -546,8 +613,9 @@ mod tests {
                 timescale: 30,
                 keyframe: true,
                 side: Vec::new(),
-            })
-            .expect("lossless");
+            },
+        )
+        .expect("lossless");
         assert_eq!(error.len(), 1);
     }
 
@@ -1454,8 +1522,9 @@ mod tests {
         stale[9] ^= 1;
         let mut decoder = Av1Decoder::open(&params).expect("open");
         push_frame(&mut decoder, frames[0], 0);
-        let error = decoder
-            .push(&cutlass_decode::Packet {
+        let error = push_now(
+            &mut decoder,
+            &cutlass_decode::Packet {
                 stream: 0,
                 data: stale,
                 pts: 1,
@@ -1463,8 +1532,9 @@ mod tests {
                 timescale: 30,
                 keyframe: false,
                 side: Vec::new(),
-            })
-            .expect_err("stale order hint");
+            },
+        )
+        .expect_err("stale order hint");
         assert!(matches!(
             error,
             cutlass_decode::CodecError::Malformed { .. }

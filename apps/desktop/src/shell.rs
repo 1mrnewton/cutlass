@@ -28,11 +28,11 @@ use cutlass_encode::EncodeFactory;
 use cutlass_engine::{Thumb, ThumbKey, Thumbnails, Waveforms};
 use cutlass_eval::{ReaderFactory, SceneError, scene_cuts, source_on_timeline};
 use cutlass_model::{
-    Crop, Draft, FrameRate, FreezeInfo, MaterialAudio, MaterialId, MaterialRef, MaterialVideo,
-    MetaType, Micros, Segment, SegmentId, TimeMarkItem, TimeRange, TimecodeLabel, TrackAttribute,
-    TrackId, TrackType, WordColumns, beat_timeline_time, blend_window, linkage_from_biz,
-    segment_beats, segment_time_mark, source_time_at, time_mark_items, track_holds_beats,
-    user_beats, visible_beats, visible_marks,
+    Crop, Draft, FrameRate, MaterialAudio, MaterialId, MaterialRef, MaterialVideo, MetaType,
+    Micros, Segment, SegmentId, TimeMarkItem, TimeRange, TimecodeLabel, TrackAttribute, TrackId,
+    TrackType, WordColumns, beat_timeline_time, blend_window, linkage_from_biz, segment_beats,
+    segment_time_mark, source_time_at, time_mark_items, track_holds_beats, user_beats,
+    visible_beats, visible_marks,
 };
 use cutlass_playback::{
     AudioHost, FilmCell, FrameCache, PLAY_FRAMES, Program, Transport, film_cells, media_file,
@@ -3182,31 +3182,19 @@ impl Shell {
                 ShellError::Unavailable("nothing is selected".to_owned())
             });
         };
-        let playhead = self.playhead;
-        let freeze = {
-            let draft = self.session_draft()?;
-            let (segment, _) = locate(draft, &segment_id).ok_or_else(|| {
-                ShellError::Unavailable("the clip is not on the timeline".to_owned())
+        let freeze = cutlass_eval::freeze_toggle(self.session_draft()?, &segment_id, self.playhead)
+            .map_err(|miss| {
+                ShellError::Unavailable(
+                    match miss {
+                        cutlass_eval::FreezeMiss::UnknownSegment => {
+                            "the clip is not on the timeline"
+                        }
+                        cutlass_eval::FreezeMiss::NotVideo => "a freeze belongs on video",
+                        cutlass_eval::FreezeMiss::NoFrame => "the clip has no frame to hold",
+                    }
+                    .to_owned(),
+                )
             })?;
-            let Some(MaterialRef::Video(video)) = draft.materials.get(segment.material_id.as_str())
-            else {
-                return Err(ShellError::Unavailable(
-                    "a freeze belongs on video".to_owned(),
-                ));
-            };
-            if video.freeze.is_some() {
-                None
-            } else {
-                let timestamp = held_frame(draft, segment, playhead)?;
-                Some(FreezeInfo {
-                    source_material_id: video.id.as_str().to_owned(),
-                    source_material_path: video.path.clone(),
-                    reverse_material_path: video.reverse_path.clone(),
-                    timestamp,
-                    rest: Default::default(),
-                })
-            }
-        };
         self.refuse_locked(&segment_id)?;
         self.apply(Request::SetFreeze { segment_id, freeze })
     }
@@ -5769,18 +5757,6 @@ fn draft_has_linkage(draft: &Draft) -> bool {
         .relationships
         .iter()
         .any(|item| item.kind == "linkage" && !item.id_to_id.is_empty())
-}
-
-fn held_frame(draft: &Draft, segment: &Segment, playhead: Micros) -> Result<Micros, ShellError> {
-    let start = segment.target.start;
-    let end = segment.target.end().0;
-    let time = if playhead.0 >= start.0 && playhead.0 < end {
-        playhead
-    } else {
-        start
-    };
-    cutlass_eval::freeze_timestamp(draft, segment, time)
-        .ok_or_else(|| ShellError::Unavailable("the clip has no frame to hold".to_owned()))
 }
 
 /// Twelve pixels, in microseconds. A bad pixel size snaps to nothing.

@@ -8,7 +8,11 @@ mod coder;
 mod cwrs;
 mod energy;
 mod laplace;
+mod mdct;
+mod pitch;
+mod postfilter;
 mod rate;
+pub(crate) mod softclip;
 mod tables;
 mod vq;
 

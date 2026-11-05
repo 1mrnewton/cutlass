@@ -14,6 +14,8 @@ use crate::profile::Profile;
 
 /// Every slice is 8 macroblocks wide where the row allows.
 const LOG2_SLICE: u32 = 3;
+/// Where the search starts without a previous frame: HQ's usual index.
+const FIRST_GUESS: u8 = 4;
 /// A slice's size is a 16-bit field.
 const MAX_SLICE: u32 = 65_535;
 /// Our encoder's four-character identifier.
@@ -50,6 +52,7 @@ pub(crate) fn encode_frame(
     profile: Profile,
     color: ColorCodes,
     budget_scale: f64,
+    hint: Option<u8>,
     pool: &Pool,
     cancel: &AtomicBool,
 ) -> Result<Encoded, CodecError> {
@@ -103,26 +106,60 @@ pub(crate) fn encode_frame(
         sizes.iter().map(|&s| u64::from(s)).sum()
     };
 
-    // The finest index whose frame fits the budget.
-    let chosen = if total_at(1, &mut probes) <= budget {
-        1
-    } else if total_at(224, &mut probes) > budget {
-        224
-    } else {
-        let (mut low, mut high) = (1u8, 224u8);
-        while high - low > 1 {
+    // The finest index whose frame fits the budget, searched outward from
+    // the last frame's index: galloping, then bisecting the bracket. Video
+    // changes slowly, so most frames settle in two probes.
+    let mut fits = |index: u8| total_at(index, &mut probes) <= budget;
+    let start = hint.unwrap_or(FIRST_GUESS).clamp(1, 224);
+    let (mut bad, mut good) = if fits(start) {
+        let mut good = start;
+        let mut step = 1u8;
+        loop {
+            if good == 1 {
+                break (0, 1);
+            }
             if cancelled() {
                 return Err(CodecError::Cancelled);
             }
-            let mid = low + (high - low) / 2;
-            if total_at(mid, &mut probes) <= budget {
-                high = mid;
+            let next = good.saturating_sub(step).max(1);
+            if fits(next) {
+                good = next;
+                step = step.saturating_mul(2);
             } else {
-                low = mid;
+                break (next, good);
             }
         }
-        high
+    } else {
+        let mut bad = start;
+        let mut step = 1u8;
+        loop {
+            if bad == 224 {
+                break (223, 224);
+            }
+            if cancelled() {
+                return Err(CodecError::Cancelled);
+            }
+            let next = bad.saturating_add(step).min(224);
+            if next == 224 || fits(next) {
+                break (bad, next);
+            }
+            bad = next;
+            step = step.saturating_mul(2);
+        }
     };
+    while good - bad > 1 {
+        if cancelled() {
+            return Err(CodecError::Cancelled);
+        }
+        let mid = bad + (good - bad) / 2;
+        if fits(mid) {
+            good = mid;
+        } else {
+            bad = mid;
+        }
+    }
+    let chosen = good;
+    probes.entry(chosen).or_insert_with(|| probe(chosen));
     let mut indices = vec![chosen; geometry.slices()];
     let mut sizes = probes.get(&chosen).cloned().unwrap_or_default();
     // Spend what is left: move slices one index finer, spread over the picture.

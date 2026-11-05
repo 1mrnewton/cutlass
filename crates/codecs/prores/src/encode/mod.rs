@@ -197,6 +197,7 @@ impl ProresEncoder {
             self.profile,
             color,
             self.budget_scale,
+            self.last_index,
             pool,
             &self.cancel,
         )?;

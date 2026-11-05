@@ -55,6 +55,12 @@ pub struct ModeParams {
     /// Partition early exit: keep a block whole when its estimate is below
     /// this many bits' worth of cost.
     pub early_none: f64,
+    /// Intra luma modes re-ranked by transform-coded RD (1 = SATD only).
+    pub intra_rd_cands: u8,
+    /// Scale of the signalling cost charged to a split in partition search.
+    pub split_bits_scale: f64,
+    /// Choose the interpolation filter per block (frame filter switchable).
+    pub filter_search: bool,
 }
 
 impl Default for ModeParams {
@@ -77,6 +83,9 @@ impl Default for ModeParams {
             ref_mask: [false, true, true, true, true, true, true, true],
             rd_inter_intra: true,
             early_none: 16.0,
+            intra_rd_cands: 3,
+            split_bits_scale: 1.0,
+            filter_search: true,
         }
     }
 }
@@ -99,7 +108,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
     /// The cost of the extra signalling a split brings, in the units `est_block` returns.
     fn split_penalty(&self, bits: f64) -> f64 {
         if self.mode.rd_partition {
-            self.enc.lambda * bits
+            self.enc.lambda * bits * self.mode.split_bits_scale
         } else {
             self.mode.lambda_satd * bits
         }
@@ -541,6 +550,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         let lam = self.mode.lambda_satd;
 
         // Intra luma.
+        self.cur_filters = [0, 0];
         let saved = self.b.clone();
         let (best_mode, intra_cost) = self.pick_intra_luma(x, y, w, h, tx);
         pb.y_mode = best_mode;
@@ -649,6 +659,10 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
             pb.mv = c.mv;
             pb.ref_mv_idx = c.idx;
             pb.interp_filter = [0, 0];
+            if self.hdr.interpolation_filter == 4 && self.mode.filter_search {
+                pb.interp_filter = self.pick_filter(&pb);
+            }
+            self.cur_filters = pb.interp_filter;
             pb.uv_mode = DC_PRED;
             pb.tx_size = self.pick_inter_tx(&pb, tx);
         } else {
@@ -877,6 +891,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         self.b.angle_delta_y = 0;
         let lam = self.mode.lambda_satd;
         let mut best = (DC_PRED, f64::MAX);
+        let mut cands: Vec<(f64, u8, f64)> = Vec::with_capacity(13);
         let n_modes = self.mode.intra_modes.min(13);
         for mode in 0..n_modes {
             self.predict_intra(0, x, y, al, au, have_ar, have_bl, mode, lw, lh);
@@ -896,8 +911,33 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
                 _ => 3.5,
             };
             let cost = f64::from(d) + lam * rate;
+            cands.push((cost, mode, rate));
             if cost < best.1 {
                 best = (mode, cost);
+            }
+        }
+        // Transform-coded RD among the best few SATD candidates.
+        let k = usize::from(self.mode.intra_rd_cands);
+        if k > 1 && w <= 64 && h <= 64 {
+            cands.sort_by(|a, b| a.0.total_cmp(&b.0));
+            let lam_b = self.enc.lambda;
+            let mut best_rd = f64::MAX;
+            let mut res = vec![0i32; w * h];
+            for &(sc, mode, rate) in cands.iter().take(k) {
+                self.predict_intra(0, x, y, al, au, have_ar, have_bl, mode, lw, lh);
+                let cp = &self.cur.planes[0];
+                let sp = &src.planes[0];
+                for i in 0..h {
+                    for j in 0..w {
+                        res[i * w + j] = sp.data[(y + i) * sp.stride + x + j].to_i32()
+                            - cp.data[(y + i) * cp.stride + x + j].to_i32();
+                    }
+                }
+                let rd = self.tx_cost(&res, w, h, tx) + lam_b * rate;
+                if rd < best_rd {
+                    best_rd = rd;
+                    best = (mode, sc);
+                }
             }
         }
         let sat = |s: &Self| -> f64 {
@@ -1248,8 +1288,23 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         w: usize,
         h: usize,
     ) -> bool {
+        let f = self.cur_filters;
+        self.pred_plane_f(plane, refs, mv, x, y, w, h, f)
+    }
+
+    fn pred_plane_f(
+        &mut self,
+        plane: usize,
+        refs: [i8; 2],
+        mv: [Mv; 2],
+        x: usize,
+        y: usize,
+        w: usize,
+        h: usize,
+        filters: [u8; 2],
+    ) -> bool {
         if self
-            .predict_into_scratch(plane, refs[0], x, y, w, h, mv[0], [0, 0])
+            .predict_into_scratch(plane, refs[0], x, y, w, h, mv[0], filters)
             .is_err()
         {
             return false;
@@ -1257,7 +1312,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         if refs[1] > INTRA_FRAME {
             let first: Vec<P> = self.scratch.obmc[..w * h].to_vec();
             if self
-                .predict_into_scratch(plane, refs[1], x, y, w, h, mv[1], [0, 0])
+                .predict_into_scratch(plane, refs[1], x, y, w, h, mv[1], filters)
                 .is_err()
             {
                 return false;
@@ -1267,6 +1322,57 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
             }
         }
         true
+    }
+
+    /// Interpolation filter (same both directions) with the least SATD.
+    fn pick_filter(&mut self, pb: &Block) -> [u8; 2] {
+        let Some(src) = self.src else { return [0, 0] };
+        let x = pb.mi_col * 4;
+        let y = pb.mi_row * 4;
+        let w = block_width(pb.bsize).min(self.fs.mi_cols * 4 - x);
+        let h = block_height(pb.bsize).min(self.fs.mi_rows * 4 - y);
+        let (w, h) = (w & !3, h & !3);
+        if w == 0 || h == 0 {
+            return [0, 0];
+        }
+        let lam = self.mode.lambda_satd;
+        let mut best = ([0u8, 0u8], f64::MAX);
+        let dual = self.seq.enable_dual_filter;
+        let mut combos: Vec<([u8; 2], f64)> = Vec::with_capacity(9);
+        for fy in 0..3u8 {
+            for fx in 0..3u8 {
+                if fy != fx && !dual {
+                    continue;
+                }
+                let bits = if fy == 0 && fx == 0 {
+                    0.6
+                } else if fy == fx {
+                    2.0
+                } else {
+                    3.5
+                };
+                combos.push(([fy, fx], bits));
+            }
+        }
+        for (f, bits) in combos {
+            if !self.pred_plane_f(0, pb.ref_frame, pb.mv, x, y, w, h, f) {
+                continue;
+            }
+            let sp = &src.planes[0];
+            let d = f64::from(satd(
+                &sp.data[y * sp.stride + x..],
+                sp.stride,
+                &self.scratch.obmc,
+                w,
+                w,
+                h,
+            ));
+            let c = d + lam * bits;
+            if c < best.1 {
+                best = (f, c);
+            }
+        }
+        best.0
     }
 
     /// The best inter choice over every distinct reference and, when the

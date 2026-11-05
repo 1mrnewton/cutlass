@@ -258,6 +258,8 @@ impl Av1Enc {
             seq_force_screen_content_tools: 2,
             seq_force_integer_mv: 2,
             enable_cdef: true,
+            enable_ref_frame_mvs: true,
+            enable_dual_filter: std::env::var("AV1_DUAL").is_ok(),
             bit_depth: cfg.bit_depth,
             mono_chrome: cfg.mono,
             color_primaries: cfg.color_primaries,
@@ -658,6 +660,7 @@ impl Av1Enc {
             primary_ref_frame: if key { PRIMARY_REF_NONE } else { 0 },
             refresh_frame_flags: spec.refresh,
             reference_select: spec.reference_select,
+            use_ref_frame_mvs: !key && ev("AV1_RFMV", 1.0) > 0.0,
             frame_width: self.cfg.width as u32,
             frame_height: self.cfg.height as u32,
             upscaled_width: self.cfg.width as u32,
@@ -666,7 +669,11 @@ impl Av1Enc {
             superres_denom: 8,
             ref_frame_idx: spec.ref_frame_idx,
             allow_high_precision_mv: !key && q < 128,
-            interpolation_filter: 0,
+            interpolation_filter: if key || self.cfg.speed >= 8 || ev("AV1_SWF", 1.0) == 0.0 {
+                0
+            } else {
+                4
+            },
             tile_info: {
                 let mi_cols = 2 * ((self.cfg.width as u32 + 7) >> 3);
                 let mi_rows = 2 * ((self.cfg.height as u32 + 7) >> 3);
@@ -741,6 +748,12 @@ impl Av1Enc {
             c
         };
         let mut fs = FrameState::new(&seq, &hdr);
+        if hdr.use_ref_frame_mvs {
+            // Projected motion of the references, as the decoder builds it.
+            let refs_data: [Option<Arc<crate::dec::frame::RefData>>; 8] =
+                std::array::from_fn(|i| self.core.slot_data(i));
+            fs.motion_field = crate::dec::mvpred::motion_field_estimation(&seq, &hdr, &refs_data);
+        }
         let mut cur = Picture::<P>::new(
             hdr.frame_width as usize,
             hdr.frame_height as usize,
@@ -766,7 +779,7 @@ impl Av1Enc {
         let mode = ModeParams {
             lambda_satd: ev("AV1_LS", 0.9) * qstep,
             min_block: ev("AV1_MINB", if speed >= 8 { 16.0 } else { 8.0 }) as usize,
-            max_block: ev("AV1_MAXB", 32.0) as usize,
+            max_block: ev("AV1_MAXB", 64.0) as usize,
             skip_sse_per_px: ev("AV1_SK", 4.0) * qstep * qstep,
             inter_frame: !key,
             me_range: if speed >= 8 { 16 } else { 48 },
@@ -782,7 +795,7 @@ impl Av1Enc {
             cfl: speed < 9,
             angle_deltas: speed < 7,
             filter_intra: speed < 7,
-            tx64: ev("AV1_TX64", 0.0) > 0.0,
+            tx64: ev("AV1_TX64", 1.0) > 0.0,
             rd_partition: ev("AV1_RDP", 1.0) > 0.0,
             // LAST, LAST2, LAST3, GOLDEN, BWDREF, ALTREF2, ALTREF.
             ref_mask: match (speed, ev("AV1_REFS", 0.0) as u32) {
@@ -792,6 +805,18 @@ impl Av1Enc {
             },
             rd_inter_intra: ev("AV1_RDII", 1.0) > 0.0,
             early_none: ev("AV1_EN", 16.0),
+            split_bits_scale: ev("AV1_SP", 1.0),
+            filter_search: speed < 8,
+            intra_rd_cands: ev(
+                "AV1_IRD",
+                if speed >= 8 {
+                    1.0
+                } else if speed >= 5 {
+                    3.0
+                } else {
+                    5.0
+                },
+            ) as u8,
         };
         let qp = QuantParams {
             // Per bit; inter frames trade residual for rate more readily.
@@ -842,6 +867,7 @@ impl Av1Enc {
                 cfl_choice: (0, 0),
                 intra_choice: (0, None),
                 est_hint: (0, 0),
+                cur_filters: [0, 0],
                 plan_delta_lf: [0; 4],
                 src: Some(src),
                 enc: qp,

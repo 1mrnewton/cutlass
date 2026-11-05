@@ -299,6 +299,8 @@ pub struct TileDec<'a, P: Pixel, C: Coder = Msac<'a>> {
     pub intra_choice: (i8, Option<u8>),
     /// Motion of the last partition estimate (seeds the next one).
     pub est_hint: (i32, i32),
+    /// Interpolation filters of the inter choice being evaluated (encoder).
+    pub cur_filters: [u8; 2],
     pub plan_delta_lf: [i8; 4],
     pub cdf: &'a mut CdfContext,
     pub mi_row_start: usize,

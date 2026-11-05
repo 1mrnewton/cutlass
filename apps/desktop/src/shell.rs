@@ -1907,7 +1907,7 @@ impl Shell {
         let layers = cutlass_render::frame_layers(composed)
             .map_err(|error| ShellError::Eval(error.to_string()))?;
         let shown = gpu
-            .show(&layers, key)
+            .show(layers, key)
             .map_err(|error| ShellError::Eval(error.to_string()))?;
         if stale {
             gpu.forget();
@@ -7085,6 +7085,70 @@ mod tests {
     pub(super) fn shell() -> Shell {
         let (decoders, encoders) = crate::register_codecs();
         Shell::new(decoders, encoders, Settings::default())
+    }
+
+    /// Four seconds of a 3840x2160 60 fps BT.2020 HLG movie, repainted at
+    /// about 120 Hz as the window does: no repaint waits on a late picture.
+    /// Run with `--release --ignored --nocapture` for the timing.
+    #[test]
+    #[ignore = "plays a 4K60 HDR movie in real time"]
+    fn a_4k60_hdr_movie_plays_without_late_pictures() {
+        let movie = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../local-files/15215997_3840_2160_60fps.mp4");
+        if !movie.is_file() {
+            eprintln!("skipped: the 4K60 HDR movie is missing");
+            return;
+        }
+        let instance = eframe::wgpu::Instance::new(
+            eframe::wgpu::InstanceDescriptor::new_without_display_handle(),
+        );
+        let Ok(state) = pollster::block_on(eframe::egui_wgpu::RenderState::create(
+            &eframe::egui_wgpu::WgpuConfiguration::default(),
+            &instance,
+            None,
+            eframe::egui_wgpu::RendererOptions::default(),
+        )) else {
+            eprintln!("skipped: no GPU");
+            return;
+        };
+        let temp = Temp::new();
+        let mut draft = crate::open_movie::movie_draft(&movie, 1920, 1080, false).unwrap();
+        draft.tracks[0].segments[0].target = TimeRange::new(0, 20_000_000);
+        draft.tracks[0].segments[0].source_range = Some(TimeRange::new(0, 20_000_000));
+        draft.materials.videos[0].duration = Micros(20_000_000);
+        draft.duration = Micros(20_000_000);
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.attach_gpu(&state);
+        desktop.preview_texture().unwrap().expect("first frame");
+        desktop.play();
+        let start = std::time::Instant::now();
+        let mut last = start;
+        let (mut paints, mut stale, mut busy) = (0_u32, 0_u32, std::time::Duration::ZERO);
+        let mut worst = std::time::Duration::ZERO;
+        while start.elapsed() < std::time::Duration::from_secs(4) {
+            let now = std::time::Instant::now();
+            desktop.advance(i64::try_from((now - last).as_micros()).unwrap());
+            last = now;
+            let t = std::time::Instant::now();
+            desktop.preview_texture().unwrap();
+            let spent = t.elapsed();
+            busy += spent;
+            worst = worst.max(spent);
+            paints += 1;
+            if desktop.preview_pending() {
+                stale += 1;
+            }
+            std::thread::sleep(std::time::Duration::from_micros(8_333).saturating_sub(spent));
+        }
+        eprintln!(
+            "playhead {} ms after 4000 ms, {paints} paints, {stale} late, preview {:.2} ms a paint, worst {:.2} ms",
+            desktop.playhead.0 / 1000,
+            busy.as_secs_f64() * 1000.0 / f64::from(paints),
+            worst.as_secs_f64() * 1000.0,
+        );
+        assert_eq!(stale, 0, "{stale} of {paints} paints showed a late picture");
     }
 
     #[test]

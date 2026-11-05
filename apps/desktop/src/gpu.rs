@@ -24,6 +24,9 @@ pub(crate) struct Preview {
     egui: Arc<RwLock<egui_wgpu::Renderer>>,
     canvas: Option<(Canvas, egui::TextureId)>,
     drawn: Option<Drawn>,
+    /// The layers on the canvas. Their pictures are shared with the clip
+    /// caches, so a frame that brings the same ones is not drawn again.
+    frame: Option<FrameLayers>,
 }
 
 impl Preview {
@@ -33,6 +36,7 @@ impl Preview {
             egui: Arc::clone(&state.renderer),
             canvas: None,
             drawn: None,
+            frame: None,
         }
     }
 
@@ -64,10 +68,12 @@ impl Preview {
         self.renderer.read(canvas).ok()
     }
 
-    /// Draw `frame` and remember it as `key`.
+    /// Draw `frame` and remember it as `key`. A frame equal to the one on
+    /// the canvas is not drawn again: a repaint between two source pictures
+    /// only takes the new key.
     pub(crate) fn show(
         &mut self,
-        frame: &FrameLayers,
+        frame: FrameLayers,
         key: Drawn,
     ) -> Result<(egui::TextureId, [u32; 2]), RenderError> {
         let size = (frame.width, frame.height);
@@ -95,6 +101,7 @@ impl Preview {
                 ),
             };
             self.canvas = Some((canvas, id));
+            self.frame = None;
         }
         self.drawn = None;
         let Some((canvas, id)) = self.canvas.as_ref() else {
@@ -103,7 +110,11 @@ impl Preview {
                 height: size.1,
             });
         };
-        self.renderer.draw_frame(canvas, frame)?;
+        if self.frame.as_ref() != Some(&frame) {
+            self.frame = None;
+            self.renderer.draw_frame(canvas, &frame)?;
+            self.frame = Some(frame);
+        }
         self.drawn = Some(key);
         Ok((*id, [size.0, size.1]))
     }

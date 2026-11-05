@@ -828,15 +828,19 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
                 base_eob: &self.cdf.coeff_base_eob[env.tx_sz_ctx][ptype],
                 dc_sign: bool_cost(self.cdf.dc_sign[ptype][env.dc_ctx][0], coefs[0] < 0),
             };
+            // The rate of the last RDOQ pass, when it is the rate of the final
+            // levels: each level's contexts come from positions later in the
+            // scan, which that pass has already settled.
+            let mut opt_rate = None;
             if rdoq > 0 {
-                levels_pass(
+                opt_rate = Some(levels_pass(
                     &lay,
                     &costs,
                     &mut lv[..],
                     eob,
                     Some((&*dist, lam)),
                     &mut rec[..],
-                );
+                ));
                 // End of block: keep the prefix ending at scan index e - 1
                 // and zero the rest, for the best total cost.
                 let total_zero: f64 = rec[..eob].iter().map(|r| r.d_zero).sum();
@@ -869,7 +873,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
                         lv[p as usize] = 0;
                     }
                     eob = best_e;
-                    if rdoq > 1 {
+                    opt_rate = (rdoq > 1).then(|| {
                         levels_pass(
                             &lay,
                             &costs,
@@ -877,12 +881,15 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
                             eob,
                             Some((&*dist, lam)),
                             &mut rec[..],
-                        );
-                    }
+                        )
+                    });
                 }
             }
             // Exact rate of what will be written.
-            let coef_rate = levels_pass(&lay, &costs, &mut lv[..], eob, None, &mut rec[..]);
+            let coef_rate = match opt_rate {
+                Some(r) => r,
+                None => levels_pass(&lay, &costs, &mut lv[..], eob, None, &mut rec[..]),
+            };
             let mut rate =
                 bool_cost(skip_cdf, false) + self.eob_cost(&env, tx, lay.class, eob) + coef_rate;
             if plane == 0 {

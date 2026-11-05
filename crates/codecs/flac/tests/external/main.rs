@@ -11,4 +11,5 @@
 
 mod decode_oracle;
 mod encode_oracle;
+mod fuzz;
 mod support;

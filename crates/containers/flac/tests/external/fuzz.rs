@@ -193,7 +193,7 @@ fn campaign(budget: Duration, seeds: u64) -> u64 {
 
 #[test]
 fn a_short_demux_and_mux_campaign() {
-    let exercised = campaign(Duration::from_secs(20), 300);
+    let exercised = campaign(Duration::from_secs(20), 2000);
     assert!(exercised > 0);
     eprintln!("flac container fuzz exercised {exercised} seeds");
 }

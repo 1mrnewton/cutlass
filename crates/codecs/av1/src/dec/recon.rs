@@ -15,8 +15,7 @@ use super::types::{
 
 /// Reusable buffers for one tile.
 pub struct Scratch<P> {
-    pub levels: Vec<u8>,
-    pub quant: Vec<i32>,
+    pub levels: Vec<u16>,
     /// Planned levels of the transform block being written (encoder).
     pub want: Vec<i32>,
     pub coefs: Vec<i32>,
@@ -41,7 +40,6 @@ impl<P: Pixel> Scratch<P> {
     pub fn new() -> Self {
         Self {
             levels: vec![0; 36 * 36],
-            quant: vec![0; 1024],
             want: vec![0; 1024],
             coefs: vec![0; 64 * 64],
             nz_rows: 0,
@@ -58,6 +56,28 @@ impl<P: Pixel> Scratch<P> {
             enc_i32: Default::default(),
             enc_px: Default::default(),
             enc_q: None,
+        }
+    }
+}
+
+impl<P: Pixel> Scratch<P> {
+    /// A placeholder that allocates nothing.
+    pub fn empty() -> Self {
+        Self {
+            levels: Vec::new(),
+            want: Vec::new(),
+            coefs: Vec::new(),
+            nz_rows: 0,
+            nz_cols: 0,
+            tx_type: 0,
+            above: [P::default(); EDGE_LEN],
+            left: [P::default(); EDGE_LEN],
+            ac: Vec::new(),
+            tmp0: Vec::new(),
+            tmp1: Vec::new(),
+            mask: Vec::new(),
+            emu: Vec::new(),
+            obmc: Vec::new(),
         }
     }
 }

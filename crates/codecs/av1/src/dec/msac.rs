@@ -34,6 +34,23 @@ impl<'a> Msac<'a> {
 
     #[inline]
     fn refill(&mut self) {
+        let c = WIN as i32 - self.cnt - 24;
+        // Fast path: eight bytes at once. Bits of the byte after the last
+        // whole one consumed may land below `c`; the next refill ORs the
+        // same bits in again.
+        if let Some(b) = self.buf.get(self.pos..).and_then(|s| s.first_chunk::<8>()) {
+            let v = !u64::from_be_bytes(*b);
+            self.dif |= v >> (56 - c);
+            let n = (c >> 3) + 1;
+            self.pos += n as usize;
+            self.cnt = WIN as i32 - (c - 8 * n) - 24;
+            return;
+        }
+        self.refill_slow();
+    }
+
+    #[cold]
+    fn refill_slow(&mut self) {
         let mut c = WIN as i32 - self.cnt - 24;
         let mut dif = self.dif;
         loop {
@@ -114,7 +131,7 @@ impl<'a> Msac<'a> {
     }
 
     /// Adaptive symbol over an N-entry inverted CDF (N symbols).
-    #[inline]
+    #[inline(always)]
     pub fn symbol<const N: usize>(&mut self, cdf: &mut [u16; N]) -> usize {
         let n = N - 1; // number of probability entries
         let c = (self.dif >> (WIN - 16)) as u32;
@@ -134,13 +151,10 @@ impl<'a> Msac<'a> {
         if self.allow_update {
             let count = cdf[n];
             let rate = 4 + (count >> 4) + u16::from(n > 2);
-            for i in 0..n {
-                let x = cdf[i];
-                cdf[i] = if i < val {
-                    x + ((32768 - x) >> rate)
-                } else {
-                    x - (x >> rate)
-                };
+            for (i, x) in cdf[..n].iter_mut().enumerate() {
+                let up = *x + ((32768 - *x) >> rate);
+                let down = *x - (*x >> rate);
+                *x = if i < val { up } else { down };
             }
             cdf[n] = count + u16::from(count < 32);
         }

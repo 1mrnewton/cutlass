@@ -11,15 +11,14 @@ use crate::spec::tables::{
     DEFAULT_SCAN_4X4, DEFAULT_SCAN_4X8, DEFAULT_SCAN_4X16, DEFAULT_SCAN_8X4, DEFAULT_SCAN_8X8,
     DEFAULT_SCAN_8X16, DEFAULT_SCAN_8X32, DEFAULT_SCAN_16X4, DEFAULT_SCAN_16X8, DEFAULT_SCAN_16X16,
     DEFAULT_SCAN_16X32, DEFAULT_SCAN_32X8, DEFAULT_SCAN_32X16, DEFAULT_SCAN_32X32,
-    FILTER_INTRA_MODE_TO_INTRA_DIR, INTRA_MODE_CONTEXT, MAG_REF_OFFSET_WITH_TX_CLASS,
-    MAX_TX_DEPTH_TABLE, MAX_TX_SIZE_RECT, MCOL_SCAN_4X4, MCOL_SCAN_4X8, MCOL_SCAN_4X16,
-    MCOL_SCAN_8X4, MCOL_SCAN_8X8, MCOL_SCAN_8X16, MCOL_SCAN_16X4, MCOL_SCAN_16X8, MCOL_SCAN_16X16,
-    MODE_TO_TXFM, MROW_SCAN_4X4, MROW_SCAN_4X8, MROW_SCAN_4X16, MROW_SCAN_8X4, MROW_SCAN_8X8,
-    MROW_SCAN_8X16, MROW_SCAN_16X4, MROW_SCAN_16X8, MROW_SCAN_16X16, PALETTE_COLOR_CONTEXT,
-    PALETTE_COLOR_HASH_MULTIPLIERS, PARTITION_SUBSIZE, SGR_PARAMS, SIG_REF_DIFF_OFFSET, SIZE_GROUP,
-    SPLIT_TX_SIZE, TX_SIZE_SQR, TX_SIZE_SQR_UP, TX_TYPE_IN_SET_INTER, TX_TYPE_IN_SET_INTRA,
-    TX_TYPE_INTER_INV_SET1, TX_TYPE_INTER_INV_SET2, TX_TYPE_INTER_INV_SET3, TX_TYPE_INTRA_INV_SET1,
-    TX_TYPE_INTRA_INV_SET2, WEDGE_BITS,
+    FILTER_INTRA_MODE_TO_INTRA_DIR, INTRA_MODE_CONTEXT, MAX_TX_DEPTH_TABLE, MAX_TX_SIZE_RECT,
+    MCOL_SCAN_4X4, MCOL_SCAN_4X8, MCOL_SCAN_4X16, MCOL_SCAN_8X4, MCOL_SCAN_8X8, MCOL_SCAN_8X16,
+    MCOL_SCAN_16X4, MCOL_SCAN_16X8, MCOL_SCAN_16X16, MODE_TO_TXFM, MROW_SCAN_4X4, MROW_SCAN_4X8,
+    MROW_SCAN_4X16, MROW_SCAN_8X4, MROW_SCAN_8X8, MROW_SCAN_8X16, MROW_SCAN_16X4, MROW_SCAN_16X8,
+    MROW_SCAN_16X16, PALETTE_COLOR_CONTEXT, PALETTE_COLOR_HASH_MULTIPLIERS, PARTITION_SUBSIZE,
+    SGR_PARAMS, SIG_REF_DIFF_OFFSET, SIZE_GROUP, SPLIT_TX_SIZE, TX_SIZE_SQR, TX_SIZE_SQR_UP,
+    TX_TYPE_IN_SET_INTER, TX_TYPE_IN_SET_INTRA, TX_TYPE_INTER_INV_SET1, TX_TYPE_INTER_INV_SET2,
+    TX_TYPE_INTER_INV_SET3, TX_TYPE_INTRA_INV_SET1, TX_TYPE_INTRA_INV_SET2, WEDGE_BITS,
 };
 
 use super::cdf::CdfContext;
@@ -394,6 +393,20 @@ pub fn neg_interleave(x: i32, r: i32, max: i32) -> i32 {
     }
 }
 
+/// `d.fill(v)` without a library call for the short power-of-two runs of
+/// 4x4 unit maps.
+#[inline(always)]
+pub(crate) fn fill_small<T: Copy>(d: &mut [T], v: T) {
+    match d.len() {
+        1 => d[0] = v,
+        2 => d.copy_from_slice(&[v; 2]),
+        4 => d.copy_from_slice(&[v; 4]),
+        8 => d.copy_from_slice(&[v; 8]),
+        16 => d.copy_from_slice(&[v; 16]),
+        _ => d.fill(v),
+    }
+}
+
 pub fn get_tx_class(tx_type: u8) -> usize {
     match tx_type {
         V_DCT | V_ADST | V_FLIPADST => 2,
@@ -552,23 +565,24 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
     }
 
     fn clear_block_decoded_flags(&mut self, r: usize, c: usize) {
-        let sb4 = self.sb_size4 as isize;
+        let sb4 = self.sb_size4;
         for plane in 0..self.num_planes {
             let (sx, sy) = self.plane_sub(plane);
-            let sbw4 = ((self.mi_col_end - c) >> sx) as isize;
-            let sbh4 = ((self.mi_row_end - r) >> sy) as isize;
+            let sbw4 = (self.mi_col_end - c) >> sx;
+            let sbh4 = (self.mi_row_end - r) >> sy;
+            let w = (sb4 >> sx) + 2;
+            let h = (sb4 >> sy) + 2;
             let bd = &mut self.block_decoded[plane];
-            for y in -1..=(sb4 >> sy) {
-                for x in -1..=(sb4 >> sx) {
-                    let v = if y < 0 && x < sbw4 {
-                        true
-                    } else {
-                        x < 0 && y < sbh4
-                    };
-                    bd[(y + 1) as usize][(x + 1) as usize] = v;
-                }
+            // Row -1 is decoded left of the tile's right edge, column -1
+            // above its bottom edge.
+            let n = (sbw4 + 1).min(w);
+            bd[0] = [false; 35];
+            bd[0][..n].fill(true);
+            for (y, row) in bd[1..h].iter_mut().enumerate() {
+                *row = [false; 35];
+                row[0] = y < sbh4;
             }
-            bd[((sb4 >> sy) + 1) as usize][0] = false;
+            bd[h - 1][0] = false;
         }
     }
 
@@ -1040,21 +1054,22 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
             delta_lf: self.delta_lf,
         };
         let stride = self.fs.mi_stride;
+        let set_uv = b.ref_frame[0] == INTRA_FRAME && b.has_chroma;
         for y in 0..h4 {
             let row = &mut self.fs.mi[(b.mi_row + y) * stride + b.mi_col..][..w4];
-            for m in row.iter_mut() {
-                let uv = m.uv_mode;
-                *m = info;
-                if !(b.ref_frame[0] == INTRA_FRAME && b.has_chroma) {
-                    m.uv_mode = uv;
+            if set_uv {
+                row.fill(info);
+            } else {
+                for m in row.iter_mut() {
+                    *m = MiInfo {
+                        uv_mode: m.uv_mode,
+                        ..info
+                    };
                 }
             }
         }
         for y in 0..h4 {
-            let s = &mut self.fs.segment_ids[(b.mi_row + y) * stride + b.mi_col..][..w4];
-            for v in s.iter_mut() {
-                *v = b.segment_id;
-            }
+            self.fs.segment_ids[(b.mi_row + y) * stride + b.mi_col..][..w4].fill(b.segment_id);
         }
         // Palette colors for later palette caches.
         if self.hdr.allow_screen_content_tools {
@@ -3241,21 +3256,18 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
             }
         }
         let st = self.fs.mi_stride;
+        let lf = &mut self.fs.lf_tx[plane];
         for i in 0..step_y {
             let r = (row >> sy) + i;
-            for j in 0..step_x {
-                self.fs.lf_tx[plane][r * st + (col >> sx) + j] = tx;
-            }
+            fill_small(&mut lf[r * st + (col >> sx)..][..step_x], tx);
         }
         let bdf = &mut self.block_decoded[plane];
-        for i in 0..step_y {
-            for j in 0..step_x {
-                let yy = (sub_row >> sy) + i + 1;
-                let xx = (sub_col >> sx) + j + 1;
-                if yy < 35 && xx < 35 {
-                    bdf[yy][xx] = true;
-                }
-            }
+        let x0 = ((sub_col >> sx) + 1).min(35);
+        let x1 = (x0 + step_x).min(35);
+        let y0 = ((sub_row >> sy) + 1).min(35);
+        let y1 = (y0 + step_y).min(35);
+        for r in &mut bdf[y0..y1] {
+            fill_small(&mut r[x0..x1], true);
         }
         Ok(())
     }
@@ -3378,9 +3390,10 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
         }
         let st = self.fs.mi_stride;
         for j in 0..(tx_h(tx) >> 2) {
-            for v in &mut self.fs.tx_types[(y4 + j) * st + x4..][..tx_w(tx) >> 2] {
-                *v = t;
-            }
+            fill_small(
+                &mut self.fs.tx_types[(y4 + j) * st + x4..][..tx_w(tx) >> 2],
+                t,
+            );
         }
     }
 
@@ -3482,9 +3495,7 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
             if plane == 0 {
                 let st = self.fs.mi_stride;
                 for j in 0..h4 {
-                    for v in &mut self.fs.tx_types[(y4 + j) * st + x4..][..w4] {
-                        *v = 0;
-                    }
+                    fill_small(&mut self.fs.tx_types[(y4 + j) * st + x4..][..w4], 0);
                 }
             }
         } else {
@@ -3547,7 +3558,6 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
             let height = tx_h(adj);
             let lstride = width + 4;
             let levels = &mut self.scratch.levels;
-            let quant = &mut self.scratch.quant;
             let coeff_base_cdf = &mut cdf.coeff_base[tx_sz_ctx][ptype];
             let coeff_br_cdf = &mut cdf.coeff_br[tx_sz_ctx.min(3)][ptype];
             // The eob coefficient.
@@ -3572,54 +3582,41 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
                 .msac
                 .symbol(&mut cdf.coeff_base_eob[tx_sz_ctx][ptype][ctx], wfirst)
                 as u32;
+            let tab = level_table(tx as usize, tx_class);
             let args = LevelArgs {
                 scan,
+                tab,
                 eob,
-                bwl,
                 lstride,
-                tx: tx as usize,
                 first,
                 want,
             };
             match tx_class {
-                0 => read_levels::<0, C>(
-                    &mut self.msac,
-                    coeff_base_cdf,
-                    coeff_br_cdf,
-                    levels,
-                    quant,
-                    &args,
-                ),
-                1 => read_levels::<1, C>(
-                    &mut self.msac,
-                    coeff_base_cdf,
-                    coeff_br_cdf,
-                    levels,
-                    quant,
-                    &args,
-                ),
-                _ => read_levels::<2, C>(
-                    &mut self.msac,
-                    coeff_base_cdf,
-                    coeff_br_cdf,
-                    levels,
-                    quant,
-                    &args,
-                ),
+                0 => {
+                    read_levels::<0, C>(&mut self.msac, coeff_base_cdf, coeff_br_cdf, levels, &args)
+                }
+                1 => {
+                    read_levels::<1, C>(&mut self.msac, coeff_base_cdf, coeff_br_cdf, levels, &args)
+                }
+                _ => {
+                    read_levels::<2, C>(&mut self.msac, coeff_base_cdf, coeff_br_cdf, levels, &args)
+                }
             }
             // Signs and Golomb remainder.
-            let tw = w.min(32);
-            let th = h.min(32);
             let dq = &mut self.scratch.coefs;
             let mut nz_rows = 0usize;
             let mut nz_cols = 0usize;
             let bd = self.bd;
+            let lim = 1i64 << (7 + bd);
+            let dshift = qinfo.denom.trailing_zeros();
+            let cbwl = bwl.min(5);
             for c in 0..eob {
-                let pos = scan[c] as usize;
-                let mut q = quant[pos];
+                let li = (tab[c] & 0xFFFF) as usize;
+                let mut q = i32::from(self.scratch.levels[li] >> 8);
                 if q == 0 {
                     continue;
                 }
+                let pos = scan[c] as usize;
                 let sign = if c == 0 {
                     // dc_sign ctx
                     let mut dc_sign = 0i32;
@@ -3665,44 +3662,47 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
                 let q = q & 0xFFFFF;
                 cul_level += q as u32;
                 // Dequantize (7.12.3 step 1).
-                let i = pos >> bwl.min(5);
-                let j = pos - (i << bwl.min(5));
-                let _ = tw;
+                let i = pos >> cbwl;
+                let j = pos - (i << cbwl);
                 let qv = if pos == 0 { qinfo.dc } else { qinfo.ac };
                 let q2 = match qinfo.qm {
                     Some(m) => crate::dsp::round2(qv * i32::from(m[pos]), 5),
                     None => qv,
                 };
-                let mut dqv = (i64::from(q) * i64::from(q2)) & 0xFFFFFF;
-                dqv /= i64::from(qinfo.denom);
-                let lim = 1i64 << (7 + bd);
+                let dqv = ((i64::from(q) * i64::from(q2)) & 0xFFFFFF) >> dshift;
                 let v = if sign { -dqv } else { dqv };
                 dq[pos] = v.clamp(-lim, lim - 1) as i32;
                 nz_rows = nz_rows.max(i + 1);
                 nz_cols = nz_cols.max(j + 1);
-                let _ = th;
             }
-            // Reset quant at the scan positions read.
+            // Reset the levels read.
             let levels = &mut self.scratch.levels;
-            for &p in &scan[..eob] {
-                let p = p as usize;
-                quant[p] = 0;
-                levels[p + ((p >> bwl) << 2)] = 0;
+            for &e in &tab[..eob] {
+                levels[(e & 0xFFFF) as usize] = 0;
             }
             self.scratch.nz_rows = nz_rows.max(1);
             self.scratch.nz_cols = nz_cols.max(1);
             cul_level = cul_level.min(63);
         }
-        for i in 0..w4 {
-            if x4 + i < self.above_level[plane].len() {
-                self.above_level[plane][x4 + i] = cul_level as u8;
-                self.above_dc[plane][x4 + i] = dc_category;
+        let an = self.above_level[plane].len();
+        if x4 + w4 <= an {
+            fill_small(&mut self.above_level[plane][x4..x4 + w4], cul_level as u8);
+            fill_small(&mut self.above_dc[plane][x4..x4 + w4], dc_category);
+        } else {
+            for i in x4..an {
+                self.above_level[plane][i] = cul_level as u8;
+                self.above_dc[plane][i] = dc_category;
             }
         }
-        for i in 0..h4 {
-            let ly = (ly0 + i) & 31;
-            self.left_level[plane][ly] = cul_level as u8;
-            self.left_dc[plane][ly] = dc_category;
+        if ly0 + h4 <= 32 {
+            fill_small(&mut self.left_level[plane][ly0..ly0 + h4], cul_level as u8);
+            fill_small(&mut self.left_dc[plane][ly0..ly0 + h4], dc_category);
+        } else {
+            for i in 0..h4 {
+                let ly = (ly0 + i) & 31;
+                self.left_level[plane][ly] = cul_level as u8;
+                self.left_dc[plane][ly] = dc_category;
+            }
         }
         Ok(eob)
     }
@@ -3710,129 +3710,165 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
 
 struct LevelArgs<'s> {
     scan: &'s [u16],
+    /// [`level_table`] of the transform size and class.
+    tab: &'s [u32],
     /// Planned signed levels (encoder), indexed by position.
     want: &'s [i32],
     eob: usize,
-    bwl: u32,
     lstride: usize,
-    tx: usize,
     first: u32,
 }
 
-/// Per transform size, the 2D coeff_base context offset of each position
-/// (Coeff_Base_Ctx_Offset expanded over the adjusted transform area).
-fn ctx_offset_table(tx: usize) -> &'static [u8] {
+/// Per transform size and class, one entry per scan index `c`: the
+/// position's index in the padded levels buffer (bits 0..16), its
+/// coeff_base context offset (bits 16..24) and its coeff_br context offset
+/// (bits 24..32). Entry 0 (the DC) has both offsets 0.
+fn level_table(tx: usize, class: usize) -> &'static [u32] {
     use std::sync::OnceLock;
-    static TABLES: OnceLock<Vec<Vec<u8>>> = OnceLock::new();
+    static TABLES: OnceLock<Vec<Vec<u32>>> = OnceLock::new();
     let t = TABLES.get_or_init(|| {
-        (0..19)
-            .map(|tx| {
+        let mut out = Vec::with_capacity(19 * 3);
+        for tx in 0..19 {
+            for class in 0..3 {
                 let adj = ADJUSTED_TX_SIZE[tx];
                 let bwl = tx_w_log2(adj);
-                let w = 1usize << bwl;
-                let h = tx_h(adj);
-                let mut v = vec![0u8; w * h];
-                for r in 0..h {
-                    for c in 0..w {
-                        v[r * w + c] = COEFF_BASE_CTX_OFFSET[tx][r.min(4)][c.min(4)];
-                    }
-                }
-                v
-            })
-            .collect()
+                let mask = (1usize << bwl) - 1;
+                // A tx_type of the class picks the scan.
+                let tx_type = [0, H_DCT, V_DCT][class];
+                let scan = get_scan(tx as u8, tx_type);
+                let v = scan
+                    .iter()
+                    .map(|&p| {
+                        let pos = p as usize;
+                        let row = pos >> bwl;
+                        let col = pos & mask;
+                        let li = pos + (row << 2);
+                        let (base, near) = match class {
+                            0 => (
+                                COEFF_BASE_CTX_OFFSET[tx][row.min(4)][col.min(4)],
+                                row < 2 && col < 2,
+                            ),
+                            1 => (COEFF_BASE_POS_CTX_OFFSET[col.min(2)], col == 0),
+                            _ => (COEFF_BASE_POS_CTX_OFFSET[row.min(2)], row == 0),
+                        };
+                        let (base, br) = if pos == 0 {
+                            (0, 0)
+                        } else {
+                            (u32::from(base), if near { 7 } else { 14 })
+                        };
+                        li as u32 | base << 16 | br << 24
+                    })
+                    .collect();
+                out.push(v);
+            }
+        }
+        out
     });
-    &t[tx]
+    &t[tx * 3 + class]
+}
+
+/// The value kept in the levels buffer for a coefficient level `l` (at most
+/// 15): `min(l, 3)` in the low byte, `l` in the high byte, so one sum of
+/// neighbours gives both context magnitudes.
+#[inline(always)]
+fn level_entry(l: u32) -> u16 {
+    (l.min(3) | (l << 8)) as u16
+}
+
+/// Reads coeff_br for a coefficient whose base level is 3; returns the level.
+#[inline(always)]
+fn read_br<C: Coder>(msac: &mut C, cdf: &mut [u16; 4], wl: u32) -> u32 {
+    let mut level = 3;
+    let mut rem = wl.saturating_sub(3);
+    for _ in 0..4 {
+        let wb = rem.min(3);
+        rem -= wb;
+        let br = msac.symbol(cdf, wb as usize) as u32;
+        level += br;
+        if br < 3 {
+            break;
+        }
+    }
+    level
 }
 
 /// Reads coeff_base / coeff_br for scan positions eob-1 down to 0 (the
 /// eob position's base level is `args.first`). `levels` is a zeroed padded
-/// buffer with stride `lstride` (= width + 4); position `pos` lives at
-/// `pos + 4 * row`.
+/// buffer with stride `lstride` (= width + 4) of [`level_entry`] values.
 #[inline(always)]
 fn read_levels<const CLASS: usize, C: Coder>(
     msac: &mut C,
     base_cdf: &mut [[u16; 4]; 42],
     br_cdf: &mut [[u16; 4]; 21],
-    levels: &mut [u8],
-    quant: &mut [i32],
+    levels: &mut [u16],
     a: &LevelArgs<'_>,
 ) {
     let ls = a.lstride;
     let offs: [usize; 5] = std::array::from_fn(|i| {
         SIG_REF_DIFF_OFFSET[CLASS][i][0] as usize * ls + SIG_REF_DIFF_OFFSET[CLASS][i][1] as usize
     });
-    let br_offs: [usize; 3] = std::array::from_fn(|i| {
-        MAG_REF_OFFSET_WITH_TX_CLASS[CLASS][i][0] as usize * ls
-            + MAG_REF_OFFSET_WITH_TX_CLASS[CLASS][i][1] as usize
-    });
-    let ctx_tab = ctx_offset_table(a.tx);
-    let mask = (1usize << a.bwl) - 1;
-    let mut c = a.eob;
-    while c > 0 {
-        c -= 1;
-        let pos = a.scan[c] as usize;
-        let row = pos >> a.bwl;
-        let col = pos & mask;
-        let li = pos + (row << 2);
-        let wl = if C::WRITE {
-            a.want[pos].unsigned_abs()
+    let want = |c: usize| {
+        if C::WRITE {
+            a.want[a.scan[c] as usize].unsigned_abs()
         } else {
             0
-        };
-        let mut level = if c == a.eob - 1 {
-            a.first
-        } else {
-            let mut mag = 0u32;
-            for o in offs {
-                mag += u32::from(levels[li + o]).min(3);
-            }
-            let m = ((mag + 1) >> 1).min(4) as usize;
-            let ctx = if CLASS == 0 {
-                if pos == 0 {
-                    0
-                } else {
-                    m + ctx_tab[pos] as usize
-                }
-            } else {
-                let idx = if CLASS == 2 { row } else { col };
-                m + COEFF_BASE_POS_CTX_OFFSET[idx.min(2)] as usize
-            };
-            msac.symbol(&mut base_cdf[ctx], wl.min(3) as usize) as u32
-        };
-        if level > 2 {
-            let mut mag = 0u32;
-            for o in br_offs {
-                mag += u32::from(levels[li + o]);
-            }
-            let mag = ((mag + 1) >> 1).min(6) as usize;
-            let near = if CLASS == 0 {
-                row < 2 && col < 2
-            } else if CLASS == 1 {
-                col == 0
-            } else {
-                row == 0
-            };
-            let ctx = if pos == 0 {
-                mag
-            } else if near {
-                mag + 7
-            } else {
-                mag + 14
-            };
-            let mut rem = wl.saturating_sub(3);
-            for _ in 0..4 {
-                let wb = rem.min(3);
-                rem -= wb;
-                let br = msac.symbol(&mut br_cdf[ctx], wb as usize) as u32;
-                level += br;
-                if br < 3 {
-                    break;
-                }
-            }
         }
-        levels[li] = level.min(15) as u8;
-        quant[pos] = level as i32;
+    };
+    // Sums of the neighbour entries: (3 magnitude neighbours, all 5).
+    let sums = |levels: &[u16], li: usize| {
+        let s3 = u32::from(levels[li + offs[0]])
+            + u32::from(levels[li + offs[1]])
+            + u32::from(levels[li + offs[2]]);
+        (
+            s3,
+            s3 + u32::from(levels[li + offs[3]]) + u32::from(levels[li + offs[4]]),
+        )
+    };
+    let last = a.eob - 1;
+    let tab = &a.tab[..a.eob];
+    // The eob coefficient.
+    {
+        let e = tab[last];
+        let li = (e & 0xFFFF) as usize;
+        let mut level = a.first;
+        if level > 2 {
+            let (s3, _) = sums(levels, li);
+            let mag = (((s3 >> 8) + 1) >> 1).min(6);
+            level = read_br(msac, &mut br_cdf[(mag + (e >> 24)) as usize], want(last));
+        }
+        levels[li] = level_entry(level);
     }
+    if last == 0 {
+        return;
+    }
+    for c in (1..last).rev() {
+        let e = tab[c];
+        let li = (e & 0xFFFF) as usize;
+        let (s3, s5) = sums(levels, li);
+        let m = (((s5 & 0xFF) + 1) >> 1).min(4);
+        let ctx = (m + ((e >> 16) & 0xFF)) as usize;
+        let wl = want(c);
+        let mut level = msac.symbol(&mut base_cdf[ctx], wl.min(3) as usize) as u32;
+        if level > 2 {
+            let mag = (((s3 >> 8) + 1) >> 1).min(6);
+            level = read_br(msac, &mut br_cdf[(mag + (e >> 24)) as usize], wl);
+        }
+        levels[li] = level_entry(level);
+    }
+    // The DC coefficient.
+    let (s3, s5) = sums(levels, 0);
+    let ctx = if CLASS == 0 {
+        0
+    } else {
+        ((((s5 & 0xFF) + 1) >> 1).min(4) + u32::from(COEFF_BASE_POS_CTX_OFFSET[0])) as usize
+    };
+    let wl = want(0);
+    let mut level = msac.symbol(&mut base_cdf[ctx], wl.min(3) as usize) as u32;
+    if level > 2 {
+        let mag = (((s3 >> 8) + 1) >> 1).min(6);
+        level = read_br(msac, &mut br_cdf[mag as usize], wl);
+    }
+    levels[0] = level_entry(level);
 }
 
 fn ceil_log2(x: u32) -> u32 {

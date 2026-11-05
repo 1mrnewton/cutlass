@@ -99,6 +99,9 @@ pub struct Av1Core {
     pub apply_grain: bool,
     pool8: Vec<Picture<u8>>,
     pool16: Vec<Picture<u16>>,
+    /// Pictures handed out (shown or still referenced) that return to the
+    /// pools once nothing else holds them.
+    outstanding: Vec<Arc<AnyPicture>>,
     /// Largest picture (upscaled width x height) accepted; larger is `Limit`.
     /// The default is the largest picture any AV1 level allows.
     pub max_pixels: u64,
@@ -130,6 +133,7 @@ impl Av1Core {
             apply_grain: true,
             pool8: Vec::new(),
             pool16: Vec::new(),
+            outstanding: Vec::new(),
             max_pixels: 35_651_584,
             threads: std::thread::available_parallelism().map_or(1, usize::from),
         }
@@ -439,6 +443,7 @@ impl Av1Core {
                 }
             }
         }
+        self.reclaim_pictures();
         let refs_data: [Option<Arc<RefData>>; 8] =
             std::array::from_fn(|i| self.slots[i].as_ref().map(|s| s.data.clone()));
         let mut fs = FrameState::new(seq, &hdr);
@@ -558,15 +563,42 @@ impl Av1Core {
             }
             drop(slot);
             for p in old {
-                if let Ok(p) = Arc::try_unwrap(p) {
-                    match p {
-                        AnyPicture::U8(p) => recycle(&mut self.pool8, p),
-                        AnyPicture::U16(p) => recycle(&mut self.pool16, p),
+                self.release_picture(p);
+            }
+        } else {
+            self.release_picture(pic);
+        }
+        Ok(shown)
+    }
+
+    /// Recycles `p` if nothing else holds it, else remembers it until the
+    /// holders (the caller's frames, other slots) let go.
+    fn release_picture(&mut self, p: Arc<AnyPicture>) {
+        match Arc::try_unwrap(p) {
+            Ok(AnyPicture::U8(p)) => recycle(&mut self.pool8, p),
+            Ok(AnyPicture::U16(p)) => recycle(&mut self.pool16, p),
+            Err(p) => {
+                if !self.outstanding.iter().any(|o| Arc::ptr_eq(o, &p)) {
+                    if self.outstanding.len() >= 16 {
+                        self.outstanding.remove(0);
                     }
+                    self.outstanding.push(p);
                 }
             }
         }
-        Ok(shown)
+    }
+
+    /// Moves outstanding pictures nobody else holds back to the pools.
+    fn reclaim_pictures(&mut self) {
+        let mut i = 0;
+        while i < self.outstanding.len() {
+            if Arc::strong_count(&self.outstanding[i]) == 1 {
+                let p = self.outstanding.swap_remove(i);
+                self.release_picture(p);
+            } else {
+                i += 1;
+            }
+        }
     }
 }
 
@@ -882,7 +914,7 @@ fn decode_frame<P: Pixel>(
             plan_delta_lf: [0; 4],
             color_map_y: std::mem::take(&mut color_map_y),
             color_map_uv: std::mem::take(&mut color_map_uv),
-            scratch: std::mem::take(&mut scratch),
+            scratch: std::mem::replace(&mut scratch, Scratch::empty()),
         };
         let res = td.decode_tile();
         above_level = std::mem::take(&mut td.above_level);
@@ -891,7 +923,7 @@ fn decode_frame<P: Pixel>(
         above_palette = std::mem::take(&mut td.above_palette);
         color_map_y = std::mem::take(&mut td.color_map_y);
         color_map_uv = std::mem::take(&mut td.color_map_uv);
-        scratch = std::mem::take(&mut td.scratch);
+        scratch = std::mem::replace(&mut td.scratch, Scratch::empty());
         drop(td);
         res?;
         if *tile_num == ti.context_update_tile_id as usize {

@@ -2181,6 +2181,7 @@ fn recon_worker<'r, P: PicturePixel>(
         scratch,
         rec: None,
     };
+    td.scratch.above_line_y = [usize::MAX; 3];
     for (m, mut log) in rx {
         if !fills.is_empty() {
             let mut bottom = 0;
@@ -2237,22 +2238,49 @@ fn recon_worker<'r, P: PicturePixel>(
             continue;
         };
         let tf = std::time::Instant::now();
+        if filt.lf_on && !m.last {
+            // The row is deblocked now; the next one predicts from its
+            // unfiltered bottom row.
+            save_above_lines(td.cur, &mut td.scratch, 4 * m.r1);
+        }
         filt.row(seq, hdr, td.fs, td.cur, &m);
         prof::add(prof::FILTER, tf);
         let mut pool = lock(rows);
         pool.msgs.push(m);
         pool.logs.push(log);
     }
+    td.scratch.above_line_y = [usize::MAX; 3];
     Ok((
         std::mem::take(&mut td.mirrors),
         std::mem::replace(&mut td.scratch, Scratch::empty()),
     ))
 }
 
+/// Saves the row above luma row `y` (and the chroma rows above it) of
+/// every plane of `cur` in `sc` for intra prediction.
+fn save_above_lines<P: PicturePixel>(cur: &Picture<P>, sc: &mut Scratch<P>, y: usize) {
+    for (p, pl) in cur.planes.iter().enumerate().take(3) {
+        let sy = usize::from(p > 0 && cur.sub_y);
+        let r = (y >> sy).wrapping_sub(1);
+        let Some(row) = pl
+            .data
+            .get(r.wrapping_mul(pl.stride)..)
+            .and_then(|d| d.get(..pl.stride))
+        else {
+            sc.above_line_y[p] = usize::MAX;
+            continue;
+        };
+        sc.above_line[p].clear();
+        sc.above_line[p].extend_from_slice(row);
+        sc.above_line_y[p] = r;
+    }
+}
+
 /// The in-loop filters of a frame, run by its reconstruction thread on
-/// the superblock rows behind it: a row is deblocked in place once the
-/// row below is reconstructed (whose intra prediction reads its unfiltered
-/// bottom samples), and gets CDEF and loop restoration, also in place,
+/// the superblock rows behind it: a row is deblocked in place once it is
+/// reconstructed (the row below predicts from a copy of its unfiltered
+/// bottom samples, see [`save_above_lines`]), and gets CDEF and loop
+/// restoration, also in place,
 /// once the row below is deblocked (they read 2 and 3 rows past it). Final
 /// rows are published to `publish` for the frames that reference this one.
 struct InlineFilter<'a, P> {
@@ -2267,9 +2295,7 @@ struct InlineFilter<'a, P> {
     publish: &'a FrameJob,
     /// Where the buffers of the bands come from.
     spares: &'a Mutex<Spares<P>>,
-    /// Reconstructed luma 4x4 rows waiting for deblocking, and deblocked
-    /// ones waiting for CDEF and loop restoration.
-    to_deblock: Option<(usize, usize)>,
+    /// Deblocked luma 4x4 rows waiting for CDEF and loop restoration.
     to_filter: Option<(usize, usize)>,
     published: usize,
 }
@@ -2285,14 +2311,7 @@ impl<P: PicturePixel> InlineFilter<'_, P> {
         m: &RowMsg,
     ) {
         m.apply_meta(fs, seq.subsampling_y);
-        if let Some((a, b)) = self.to_deblock.take() {
-            self.deblock(seq, hdr, fs, cur, a, b, false);
-        }
-        if m.last {
-            self.deblock(seq, hdr, fs, cur, m.r0, m.r1, true);
-        } else {
-            self.to_deblock = Some((m.r0, m.r1));
-        }
+        self.deblock(seq, hdr, fs, cur, m.r0, m.r1, m.last);
     }
 
     fn deblock(
@@ -2708,7 +2727,6 @@ impl<P: PicturePixel> Backend<P> {
                 lf_on,
                 publish: &job,
                 spares: &spares,
-                to_deblock: None,
                 to_filter: None,
                 published: 0,
             };

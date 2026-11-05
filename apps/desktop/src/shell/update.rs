@@ -229,10 +229,9 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use cutlass_settings::Settings;
-    use cutlass_update::{Installed, Platform, Version};
+    use cutlass_update::{Platform, Version};
 
-    use super::{RUNNING_VERSION, fetch_and_install};
-    use crate::jobs::Progress;
+    use super::RUNNING_VERSION;
     use crate::shell::Shell;
 
     type Routes = Vec<(String, Vec<u8>)>;
@@ -454,6 +453,11 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn the_job_downloads_checks_and_puts_the_package_in_place() {
+        use super::fetch_and_install;
+        use cutlass_update::Installed;
+
+        use crate::jobs::Progress;
+
         let dir =
             std::env::temp_dir().join(format!("cutlass-desktop-update-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);

@@ -1027,6 +1027,7 @@ dependencies = [
 name = "cutlass-ogg"
 version = "0.1.0"
 dependencies = [
+ "cutlass-codec",
  "cutlass-container",
 ]
 

@@ -116,6 +116,8 @@ pub struct VideoEncoder {
     width: u32,
     height: u32,
     bitrate: i32,
+    /// Cap each second at the bitrate.
+    constant: bool,
     session: *mut std::ffi::c_void,
     output: Mutex<Queue>,
     drained: bool,
@@ -172,6 +174,7 @@ pub fn open_encoder(params: &CodecParams) -> Result<Box<dyn Encoder>, CodecError
         width,
         height,
         bitrate,
+        constant: params.constant_rate,
         session: ptr::null_mut(),
         output: Mutex::new(Queue {
             packets: Vec::new(),
@@ -181,7 +184,14 @@ pub fn open_encoder(params: &CodecParams) -> Result<Box<dyn Encoder>, CodecError
         cancel: Arc::new(AtomicBool::new(false)),
     });
     let raw = Box::into_raw(encoder);
-    match create_compress(params.codec, width, height, bitrate, raw.cast()) {
+    match create_compress(
+        params.codec,
+        width,
+        height,
+        bitrate,
+        params.constant_rate,
+        raw.cast(),
+    ) {
         Ok(session) => unsafe { (*raw).session = session },
         Err(err) => {
             drop(unsafe { Box::from_raw(raw) });
@@ -471,6 +481,7 @@ impl Encoder for VideoEncoder {
             self.width,
             self.height,
             self.bitrate,
+            self.constant,
             raw.cast(),
         ) {
             self.session = session;
@@ -1350,6 +1361,7 @@ fn create_compress(
     width: u32,
     height: u32,
     bitrate: i32,
+    constant: bool,
     refcon: *mut std::ffi::c_void,
 ) -> Result<*mut std::ffi::c_void, CodecError> {
     let attributes = bgra_attributes()?;
@@ -1378,13 +1390,23 @@ fn create_compress(
             what: "videotoolbox",
         });
     }
-    apply_properties(raw, codec, bitrate);
+    apply_properties(raw, codec, bitrate, constant);
     Ok(raw)
 }
 
-fn apply_properties(session: *mut std::ffi::c_void, codec: CodecId, bitrate: i32) {
+fn apply_properties(session: *mut std::ffi::c_void, codec: CodecId, bitrate: i32, constant: bool) {
     let Ok(rate) = cf::number_i32(bitrate) else {
         return;
+    };
+    // A constant rate caps each second at the bitrate: bytes, then seconds.
+    let limits = if constant {
+        let bytes = cf::number_i32(bitrate / 8).ok();
+        let second = cf::number_f64(1.0).ok();
+        bytes
+            .zip(second)
+            .and_then(|(bytes, second)| cf::array(&[bytes.as_ptr(), second.as_ptr()]).ok())
+    } else {
+        None
     };
     let Ok(interval) = cf::number_i32(30) else {
         return;
@@ -1398,6 +1420,13 @@ fn apply_properties(session: *mut std::ffi::c_void, codec: CodecId, bitrate: i32
             sys::kVTCompressionPropertyKey_AverageBitRate,
             rate.as_ptr(),
         );
+        if let Some(limits) = &limits {
+            let _ = sys::VTSessionSetProperty(
+                session,
+                sys::kVTCompressionPropertyKey_DataRateLimits,
+                limits.as_ptr(),
+            );
+        }
         let _ = sys::VTSessionSetProperty(
             session,
             sys::kVTCompressionPropertyKey_AllowFrameReordering,
@@ -1748,6 +1777,25 @@ mod tests {
             )
             .expect("frame"),
         )
+    }
+
+    #[test]
+    fn a_constant_rate_session_still_encodes() {
+        let mut params = video_params(CodecId::H264, 64, 64);
+        params.constant_rate = true;
+        let Ok(mut encoder) = open_encoder(&params) else {
+            return;
+        };
+        let mut packets = Vec::new();
+        for pts in 0..4 {
+            packets.extend(
+                encoder
+                    .push_frame(&solid(64, 64, [200, 30, 30, 255], pts))
+                    .unwrap(),
+            );
+        }
+        packets.extend(encoder.drain().unwrap());
+        assert!(!packets.is_empty());
     }
 
     /// Every output of `packets`, then the pictures `drain` releases.

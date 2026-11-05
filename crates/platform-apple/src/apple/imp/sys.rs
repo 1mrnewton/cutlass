@@ -153,6 +153,8 @@ unsafe extern "C" {
 
     pub static kCFTypeDictionaryValueCallBacks: u8;
 
+    pub static kCFTypeArrayCallBacks: u8;
+
     pub static kCFBooleanTrue: *const c_void;
 
     pub static kCFBooleanFalse: *const c_void;
@@ -198,6 +200,13 @@ unsafe extern "C" {
 
     pub fn CFDictionaryGetValue(dict: *const c_void, key: *const c_void) -> *const c_void;
 
+    pub fn CFArrayCreate(
+        allocator: *const c_void,
+        values: *const *const c_void,
+        count: CFIndex,
+        callbacks: *const c_void,
+    ) -> *mut c_void;
+
     pub fn CFArrayGetCount(array: *const c_void) -> CFIndex;
 
     pub fn CFArrayGetValueAtIndex(array: *const c_void, index: CFIndex) -> *const c_void;
@@ -206,6 +215,8 @@ unsafe extern "C" {
 #[link(name = "VideoToolbox", kind = "framework")]
 unsafe extern "C" {
     pub static kVTCompressionPropertyKey_AverageBitRate: *const c_void;
+
+    pub static kVTCompressionPropertyKey_DataRateLimits: *const c_void;
 
     pub static kVTCompressionPropertyKey_AllowFrameReordering: *const c_void;
 

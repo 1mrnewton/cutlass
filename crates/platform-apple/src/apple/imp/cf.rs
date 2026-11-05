@@ -128,6 +128,20 @@ pub fn dictionary(keys: &[*const c_void], values: &[*const c_void]) -> Result<Cf
     })
 }
 
+pub fn array(values: &[*const c_void]) -> Result<Cf, CodecError> {
+    let count =
+        sys::CFIndex::try_from(values.len()).map_err(|_| CodecError::Limit { what: "cf array" })?;
+    let ptr = unsafe {
+        sys::CFArrayCreate(
+            ptr::null(),
+            values.as_ptr(),
+            count,
+            (&raw const sys::kCFTypeArrayCallBacks).cast(),
+        )
+    };
+    Cf::from_owned(ptr).ok_or(CodecError::Limit { what: "cf array" })
+}
+
 pub fn boolean(value: bool) -> *const c_void {
     unsafe {
         if value {

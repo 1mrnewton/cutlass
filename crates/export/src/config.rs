@@ -74,6 +74,44 @@ pub struct ExportRequest {
     pub late_by: i64,
     /// Hold `bitrate` over each second instead of on average.
     pub constant_rate: bool,
+    /// The ProRes flavor when `codec` is ProRes; other codecs ignore it.
+    pub prores: ProresProfile,
+}
+
+/// The ProRes flavors a movie may be written in, smallest first.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ProresProfile {
+    Proxy,
+    Light,
+    /// ProRes 422.
+    #[default]
+    Standard,
+    High,
+}
+
+impl ProresProfile {
+    pub const ALL: [Self; 4] = [Self::Proxy, Self::Light, Self::Standard, Self::High];
+
+    /// The sample entry, which the encoder and the movie file both name.
+    #[must_use]
+    pub fn code(self) -> [u8; 4] {
+        match self {
+            Self::Proxy => *b"apco",
+            Self::Light => *b"apcs",
+            Self::Standard => *b"apcn",
+            Self::High => *b"apch",
+        }
+    }
+
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Proxy => "Proxy",
+            Self::Light => "LT",
+            Self::Standard => "422",
+            Self::High => "HQ",
+        }
+    }
 }
 
 /// Why export did not write a file.
@@ -277,6 +315,7 @@ mod tests {
             sidecar: None,
             late_by: 0,
             constant_rate: false,
+            prores: crate::ProresProfile::Standard,
         }
     }
 

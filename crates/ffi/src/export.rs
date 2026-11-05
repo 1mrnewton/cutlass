@@ -78,6 +78,7 @@ pub(crate) fn export_movie(
         sidecar: None,
         late_by: 0,
         constant_rate: false,
+        prores: cutlass_export::ProresProfile::Standard,
     };
     let encoders = encoders();
     let result = cutlass_export::write_movie(

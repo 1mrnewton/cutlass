@@ -4881,6 +4881,7 @@ impl Shell {
             sidecar: None,
             late_by: 0,
             constant_rate: false,
+            prores: cutlass_export::ProresProfile::Standard,
         };
         let mut encoders = EncodeFactory::new();
         cutlass_png::register_encoders(&mut encoders);
@@ -4946,6 +4947,7 @@ impl Shell {
             sidecar: None,
             late_by: 0,
             constant_rate: false,
+            prores: cutlass_export::ProresProfile::Standard,
         };
         cutlass_export::validate(&movie).map_err(export_failure)?;
         let root = self.path.clone();

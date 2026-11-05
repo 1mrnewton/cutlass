@@ -373,6 +373,16 @@ fn write_body(
     write_sidecar(dir, &name, &body).map(Some)
 }
 
+/// What a picture track carries before its first packet: a ProRes track
+/// names its profile.
+fn picture_extra(request: &ExportRequest) -> Vec<u8> {
+    if request.codec == cutlass_codec::CodecId::Prores {
+        request.prores.code().to_vec()
+    } else {
+        Vec::new()
+    }
+}
+
 fn open_video(
     factory: &EncodeFactory,
     request: &ExportRequest,
@@ -382,6 +392,9 @@ fn open_video(
         CodecParams::with_format(request.codec, output.0, output.1, PixelFormat::Rgba8);
     params.bitrate = request.bitrate;
     params.constant_rate = request.constant_rate;
+    if request.codec == cutlass_codec::CodecId::Prores {
+        params.extra = request.prores.code().to_vec();
+    }
     factory.open(&params).map_err(ExportError::Encoder)
 }
 
@@ -420,7 +433,11 @@ fn add_tracks<M: Mux>(
     let size = FrameSize::try_new(output.0, output.1).map_err(|_| ExportError::Canvas)?;
     let video = mux
         .add_stream(NewStream {
-            params: StreamParams::video(StreamCodec::Known(request.codec), size, Vec::new()),
+            params: StreamParams::video(
+                StreamCodec::Known(request.codec),
+                size,
+                picture_extra(request),
+            ),
             timescale: Timescale::new(request.frame_rate.numerator),
             language: None,
         })
@@ -1177,6 +1194,7 @@ mod tests {
             sidecar: None,
             late_by: 0,
             constant_rate: false,
+            prores: crate::ProresProfile::Standard,
         }
     }
 

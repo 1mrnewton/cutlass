@@ -68,7 +68,8 @@ pub fn part_path(destination: &Path) -> Option<PathBuf> {
 }
 
 /// Write `request` to `destination` as an MP4, or a QuickTime movie when
-/// the destination ends in `.mov`. `progress` hears the frames done and the
+/// the destination ends in `.mov`. A caption sidecar the request asks for
+/// is written in the same folder. `progress` hears the frames done and the
 /// frames in all after each picture, and stops the export by returning
 /// false. Clip sound is each clip's file, mixed as in playback.
 pub fn write_movie(
@@ -113,7 +114,8 @@ fn write_part(
             factory: sources.encoders,
             readers: sources.readers,
             mux: &mut mux,
-            destination: None,
+            // A caption file goes beside the movie.
+            destination: request.sidecar.as_ref().and(part.parent()),
             root: sources.root,
             fonts: sources.fonts,
             renderer: sources.renderer,
@@ -288,6 +290,7 @@ mod tests {
             sidecar: None,
             late_by: 0,
             constant_rate: false,
+            prores: crate::ProresProfile::Standard,
         }
     }
 
@@ -366,6 +369,7 @@ mod tests {
             sidecar: None,
             late_by: 0,
             constant_rate: false,
+            prores: crate::ProresProfile::Standard,
         };
         let path = dir.join("cut.gif");
         let result = write_gif(&sources, &request, true, &path, &mut |_, _| true).unwrap();

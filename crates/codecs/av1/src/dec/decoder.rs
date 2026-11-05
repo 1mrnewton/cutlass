@@ -456,7 +456,7 @@ pub struct Av1Core {
     /// The default is the largest picture any AV1 level allows.
     pub max_pixels: u64,
     /// Threads decoding may use; 1 decodes on the calling thread. Defaults
-    /// to `std::thread::available_parallelism()`. With 3 or more, a frame's
+    /// to `std::thread::available_parallelism()`. With 2 or more, a frame's
     /// reconstruction and in-loop filters run on threads of their own, and
     /// with [`Self::decode_delayed`] the next frame is parsed meanwhile.
     pub threads: usize,
@@ -559,7 +559,7 @@ impl Av1Core {
     /// Decodes one temporal unit and returns the shown frames that are
     /// ready, oldest first, each with the `tag` of the call that decoded
     /// it. The reconstruction and in-loop filters of a frame may still run
-    /// when the call returns (with 3 or more [`Self::threads`]), so the next
+    /// when the call returns (with 2 or more [`Self::threads`]), so the next
     /// unit is parsed meanwhile; at most [`Self::frame_delay`] shown frames
     /// are kept back. [`Self::drain`] returns the rest.
     ///
@@ -1854,7 +1854,7 @@ fn filter_rows_worker<P: PicturePixel>(
 /// Decodes all tiles of a frame and runs the in-loop filters. Returns the
 /// job of the final picture and the CDFs saved from the context tile.
 ///
-/// With 3 or more threads and a frame the threaded pipeline takes, only
+/// With 2 or more threads and a frame the threaded pipeline takes, only
 /// parsing happens before the return: reconstruction and the filters run
 /// on threads of their own (see [`Backend`]), and the job finishes when
 /// they are done. Otherwise the references are waited for first and the
@@ -1882,13 +1882,14 @@ fn decode_frame<P: PicturePixel>(
             || hdr.cdef.y_sec[0] != 0
             || hdr.cdef.uv_pri[0] != 0
             || hdr.cdef.uv_sec[0] != 0);
-    // With one tile column, superblock rows complete in order: deblocking
-    // and CDEF then run on a second thread one superblock row behind.
+    // With one tile column, superblock rows complete in order: they are
+    // reconstructed and filtered on threads of their own, a superblock row
+    // behind parsing.
     let pipeline = threads > 1
         && hdr.tile_info.cols == 1
         && !hdr.use_superres
         && (lf_on || cdef_on || hdr.lr.uses_lr);
-    if pipeline && threads > 2 {
+    if pipeline {
         return decode_frame_async(
             seq, hdr, fs, tiles, cdf, ref_jobs, ref_hdr, shells, px, mf, lf_on, cdef_on,
         );
@@ -1902,8 +1903,7 @@ fn decode_frame<P: PicturePixel>(
     let refs: [Option<&Picture<P>>; 8] =
         std::array::from_fn(|i| held[i].as_deref().and_then(P::view));
     let (pic, saved) = decode_frame_sync(
-        seq, hdr, fs, tiles, cdf, refs, ref_hdr, lr_scratch, shells, px, threads, mf, pipeline,
-        lf_on, cdef_on,
+        seq, hdr, fs, tiles, cdf, refs, ref_hdr, lr_scratch, px, threads, mf, cdef_on,
     )?;
     Ok((FrameJob::ready(Ok(Arc::new(P::wrap(pic)))), saved))
 }
@@ -2212,8 +2212,7 @@ impl<P: PicturePixel> Backend<P> {
 }
 
 /// [`decode_frame`] with the references at hand: parsing and
-/// reconstruction on this thread, the in-loop filters on a second one
-/// (when `pipeline`) or after the tiles.
+/// reconstruction on this thread, then the in-loop filters (on `threads`).
 fn decode_frame_sync<P: PicturePixel>(
     seq: &SequenceHeader,
     hdr: &FrameHeader,
@@ -2223,115 +2222,25 @@ fn decode_frame_sync<P: PicturePixel>(
     refs: [Option<&Picture<P>>; 8],
     ref_hdr: &[RefHeaderState; 8],
     lr_scratch: &mut LrScratch,
-    shells: &mut Vec<FrameState>,
     px: &mut PixState<P>,
     threads: usize,
     mf: Option<&MfPlan<'_>>,
-    pipeline: bool,
-    lf_on: bool,
     cdef_on: bool,
 ) -> R<(Picture<P>, Box<CdfContext>)> {
-    let num_planes = seq.num_planes();
     let pool = &mut px.pool;
-    let new_pic = |pool: &mut Vec<Picture<P>>| {
-        take_picture::<P>(
-            pool,
-            hdr.frame_width as usize,
-            hdr.frame_height as usize,
-            num_planes,
-            seq.subsampling_x,
-            seq.subsampling_y,
-            seq.bit_depth,
-        )
-    };
-    let mut cur = new_pic(pool);
-    // With the pipeline, the motion field is computed band by band on a
-    // thread of its own while the tiles are parsed (see MfFeed).
+    let mut cur = take_picture::<P>(
+        pool,
+        hdr.frame_width as usize,
+        hdr.frame_height as usize,
+        seq.num_planes(),
+        seq.subsampling_x,
+        seq.subsampling_y,
+        seq.bit_depth,
+    );
     if let Some(p) = mf {
-        fs.motion_field = if pipeline {
-            vec![MfEntry::default(); p.w8 * p.h8]
-        } else {
-            p.run(threads)
-        };
+        fs.motion_field = p.run(threads);
     }
-    let mut lr_pic = None;
-    let (saved, cur, cdef_pic) = if pipeline {
-        let mut deb = new_pic(pool);
-        let mut cdef_dst = if cdef_on { Some(new_pic(pool)) } else { None };
-        let mut lr_dst = if hdr.lr.uses_lr {
-            Some(new_pic(pool))
-        } else {
-            None
-        };
-        let mut pf_fs = take_shell(shells, fs);
-        let rows = &*px.rows;
-        let saved = std::thread::scope(|s| {
-            let (tx, rx) = std::sync::mpsc::channel::<RowMsg<P>>();
-            let out = FilterOut {
-                deb: &mut deb,
-                cdef: cdef_dst.as_mut(),
-                lr: lr_dst.as_mut(),
-                lr_scratch: &mut *lr_scratch,
-            };
-            let pf_fs = &mut pf_fs;
-            let worker = s.spawn(move || {
-                filter_rows_worker(seq, hdr, pf_fs, out, lf_on, rx, rows, None);
-            });
-            let sb4 = if seq.use_128x128_superblock { 32 } else { 16 };
-            let sub_y = seq.subsampling_y;
-            let mut feed = mf.filter(|p| p.bands() > 0).map(|plan| {
-                let (mtx, rx) = std::sync::mpsc::channel::<(usize, Vec<MfEntry>)>();
-                s.spawn(move || {
-                    for k in 0..plan.bands() {
-                        let rows = (plan.h8 - 8 * k).min(8);
-                        let mut band = vec![MfEntry::default(); rows * plan.w8];
-                        plan.run_band(k, &mut band);
-                        if mtx.send((k, band)).is_err() {
-                            break;
-                        }
-                    }
-                });
-                MfFeed { rx, have: 0 }
-            });
-            let res = decode_tiles(
-                seq,
-                hdr,
-                fs,
-                tiles,
-                cdf,
-                &refs,
-                ref_hdr,
-                &mut cur,
-                false,
-                feed.as_mut(),
-                &mut |fs: &FrameState,
-                      cur: &Picture<P>,
-                      _: Option<&mut ReconLog>,
-                      r0: usize,
-                      r1: usize,
-                      _: bool| {
-                    let mut m = lock(rows).msgs.pop().unwrap_or_default();
-                    let last = r1 >= fs.mi_rows;
-                    m.fill_meta(fs, sb4, r0, r1, last, sub_y, true);
-                    m.fill_px(cur, sub_y);
-                    // A send only fails once the worker is gone (it
-                    // panicked): the join below reports that.
-                    let _ = tx.send(m);
-                },
-            );
-            drop(tx);
-            let joined = worker.join();
-            match (res, joined) {
-                (Err(e), _) => Err(e),
-                (Ok(_), Err(_)) => Err(malformed("in-loop filter thread")),
-                (Ok(c), Ok(())) => Ok(c),
-            }
-        })?;
-        shells.push(pf_fs);
-        recycle(pool, cur);
-        lr_pic = lr_dst;
-        (saved, deb, cdef_dst)
-    } else {
+    let (saved, cur, cdef_pic) = {
         let saved = decode_tiles(
             seq,
             hdr,
@@ -2379,13 +2288,7 @@ fn decode_frame_sync<P: PicturePixel>(
             None => (cur, None),
         }
     };
-    let mut final_pic = if let Some(out) = lr_pic {
-        recycle(pool, up_cdef);
-        if let Some(p) = up_deblocked {
-            recycle(pool, p);
-        }
-        out
-    } else if hdr.lr.uses_lr {
+    let mut final_pic = if hdr.lr.uses_lr {
         let mut out = copy_picture(pool, &up_cdef);
         {
             let deblocked = up_deblocked.as_ref().unwrap_or(&up_cdef);

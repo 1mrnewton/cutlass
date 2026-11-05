@@ -72,6 +72,8 @@ pub struct ModeParams {
     pub skip_mode_sse: f64,
     /// Estimate transform distortion in the transform domain (no inverse).
     pub fast_tx_dist: bool,
+    /// Also try horizontal and vertical halves in partition search.
+    pub rect_partitions: bool,
 }
 
 impl Default for ModeParams {
@@ -103,6 +105,7 @@ impl Default for ModeParams {
             skip_mode: true,
             skip_mode_sse: 4.0,
             fast_tx_dist: true,
+            rect_partitions: false,
         }
     }
 }
@@ -529,11 +532,25 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
             + self.est_block(x, y + half, half, half)
             + self.est_block(x + half, y + half, half, half)
             + self.split_penalty(8.0);
-        if split < none {
-            PARTITION_SPLIT
-        } else {
-            PARTITION_NONE
+        let mut best = (PARTITION_NONE, none);
+        if split < best.1 {
+            best = (PARTITION_SPLIT, split);
         }
+        if self.mode.rect_partitions {
+            let horz = self.est_block(x, y, n, half)
+                + self.est_block(x, y + half, n, half)
+                + self.split_penalty(4.0);
+            if horz < best.1 {
+                best = (PARTITION_HORZ, horz);
+            }
+            let vert = self.est_block(x, y, half, n)
+                + self.est_block(x + half, y, half, n)
+                + self.split_penalty(4.0);
+            if vert < best.1 {
+                best = (PARTITION_VERT, vert);
+            }
+        }
+        best.0
     }
 
     /// Decides one block's modes. `self.b` already holds the block position,

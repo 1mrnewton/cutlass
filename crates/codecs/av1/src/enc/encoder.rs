@@ -856,6 +856,7 @@ impl Av1Enc {
             skip_mode: true,
             skip_mode_sse: ev("AV1_SMS", 6.0),
             fast_tx_dist: ev("AV1_FTD", 1.0) > 0.0,
+            rect_partitions: ev("AV1_RECT", 0.0) > 0.0,
             intra_rd_cands: ev(
                 "AV1_IRD",
                 if speed >= 6 {

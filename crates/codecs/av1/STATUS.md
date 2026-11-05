@@ -91,14 +91,18 @@ updates small CDFs as packed lanes; callgrind puts the whole decode at
 Produces 8/10/12-bit 4:2:0, 4:2:2, 4:4:4, monochrome, any size
 (`tools/encmatrix.sh`: every format decodes in libdav1d to exactly the
 encoder's reconstruction). Tools in use: hierarchical mini-GOPs with hidden
-alt-refs and up to seven references, RD partition search to 64x64, all
-intra modes with angle deltas, filter intra, CFL, palette, compound
-prediction, temporal MV prediction, switchable filters, local warped
-motion, OBMC, skip mode, RD transform type and size, RDOQ with exact
+alt-refs and up to seven references (up to 32 frames long on static
+content, whose alt-refs are temporally filtered), RD partition search to
+64x64, all intra modes with angle deltas, filter intra, CFL, luma and U/V
+palettes (screen content), compound prediction with the NEAREST/NEAR/NEW
+mode combinations, temporal MV prediction, switchable filters, local
+warped motion, OBMC, skip mode, mode decisions charged with the exact
+signalling cost from the CDFs, RD transform type and size, RDOQ with exact
 coefficient rates, per-frame deblocking and CDEF strength search, constant
 q or bitrate rate control. Optional: global motion, alt-ref temporal
-filtering. Not used: intra block copy, wedge/difference-weighted compound,
-inter-intra, loop restoration, super resolution, segmentation.
+filtering on all content. Not used: intra block copy,
+wedge/difference-weighted compound, inter-intra, loop restoration, super
+resolution, segmentation.
 
 ### Quality and speed against FFmpeg's encoders
 
@@ -109,8 +113,8 @@ encoder for equal PSNR (negative = fewer bits).
 
 | Clip | vs libaom cpu-used 6 | vs SVT-AV1 preset 8 | vs rav1e speed 8 |
 | --- | --- | --- | --- |
-| natural, 352x288, 30 frames (aom test clip) | +10.2% | +26.7% | -11.7% |
-| synthetic `testsrc2`, 640x360, 10 frames | +69.5% | +29.5% | +1.1% |
+| natural, 352x288, 30 frames (aom test clip) | +0.4% | +15.7% | -17.6% |
+| synthetic `testsrc2`, 640x360, 10 frames | +24.1% | -6.8% | -29.7% |
 
 (BD-rate over the overlapping PSNR range of each pair; the synthetic clip's
 numbers are higher than in earlier versions of this file mostly because
@@ -128,9 +132,10 @@ output independent of the thread count): ours 7.3 s, libaom
 So the encoder beats rav1e at its default speed on natural video and is
 behind libaom and SVT-AV1, which have years of tuning (temporal dependency
 models, more search, assembly kernels). `tools/kbd.sh` (q 60..220 against
-libaom crf 20..50, long GOP) puts the natural-video gap to libaom at +5% on
-30 frames, +10% on 60 frames and +9% on a single key frame; synthetic
-content (flat areas, text, fast cuts) is the weak spot.
+libaom crf 20..50, long GOP) now puts ours 3.5% ahead of libaom on the
+30-frame natural clip, 1% behind on 60 frames (whose static second scene
+alone is 16% behind) and 8% behind on a single key frame; synthetic
+content (`testsrc2`, 10 frames) is 23% behind.
 
 ## Checks
 

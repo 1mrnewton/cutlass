@@ -1201,6 +1201,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "cutlass-stickers"
+version = "0.1.0"
+dependencies = [
+ "cutlass-encode",
+ "cutlass-png",
+]
+
+[[package]]
 name = "cutlass-still"
 version = "0.1.0"
 dependencies = [

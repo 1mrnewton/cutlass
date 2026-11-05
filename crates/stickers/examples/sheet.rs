@@ -1,0 +1,12 @@
+//! Write every sticker as a PNG into the folder named on the command line.
+
+fn main() {
+    let Some(folder) = std::env::args_os().nth(1).map(std::path::PathBuf::from) else {
+        return;
+    };
+    for sticker in cutlass_stickers::STICKERS {
+        if let Ok(png) = sticker.png() {
+            let _ = std::fs::write(folder.join(sticker.file_name()), png);
+        }
+    }
+}

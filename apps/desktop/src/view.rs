@@ -6459,6 +6459,79 @@ mod tests {
     }
 
     #[test]
+    fn an_open_project_lays_out_the_same_at_every_display_scale() {
+        use std::collections::BTreeMap;
+
+        let temp = std::env::temp_dir().join(format!("cutlass-scale-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let mut draft = cutlass_model::Draft::empty("draft");
+        let mut title = cutlass_model::MaterialText::new("title");
+        title.content = "Hello".to_owned();
+        draft.materials.texts.push(title);
+        let mut text = cutlass_model::Track::main("text");
+        text.kind = cutlass_model::TrackType::Text;
+        text.segments.push(cutlass_model::Segment::new(
+            "words",
+            "title",
+            cutlass_model::TimeRange::new(0, 2_000_000),
+        ));
+        draft.tracks.push(text);
+        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        // One context moves between monitors, as a window dragged across
+        // a mixed-DPI desk does.
+        let mut frame = |scale: f32| {
+            let mut input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0))),
+                ..Default::default()
+            };
+            input.viewports.insert(
+                egui::ViewportId::ROOT,
+                egui::ViewportInfo {
+                    native_pixels_per_point: Some(scale),
+                    ..Default::default()
+                },
+            );
+            let mut placed = BTreeMap::new();
+            // The second pass settles sizes measured in the first.
+            for _ in 0..2 {
+                let mut output = ctx.run_ui(input.clone(), |ui| {
+                    show(&mut shell, ui, &mut view, None);
+                });
+                assert!((output.pixels_per_point - scale).abs() < f32::EPSILON);
+                placed.clear();
+                for line in galleys(&output) {
+                    if let Some(pos) = text_pos(&output, &line) {
+                        placed.insert(line, pos);
+                    }
+                }
+                output.textures_delta.clear();
+            }
+            placed
+        };
+        let one = frame(1.0);
+        assert!(one.contains_key("Hello") && one.len() > 30, "{one:?}");
+        for scale in [2.0, 1.5, 1.0] {
+            let other = frame(scale);
+            for (line, pos) in &one {
+                let moved = other
+                    .get(line)
+                    .unwrap_or_else(|| panic!("{line:?} is missing at {scale}x"));
+                assert!(
+                    (moved.x - pos.x).abs() <= 1.0 && (moved.y - pos.y).abs() <= 1.0,
+                    "{line:?} moved from {pos:?} to {moved:?} at {scale}x"
+                );
+            }
+        }
+        drop(shell);
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
     fn each_kind_of_clip_paints_its_own_inspector_panel() {
         use cutlass_model::{
             Draft, MaterialAudio, MaterialEffect, MaterialText, MaterialVideo, RawMaterial,

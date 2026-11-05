@@ -7466,6 +7466,63 @@ mod tests {
     }
 
     #[test]
+    fn a_menu_bar_item_runs_its_command() {
+        use cutlass_model::{Segment, SegmentId, TimeRange};
+
+        let temp = std::env::temp_dir().join(format!("cutlass-menubar-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let mut draft = cutlass_model::Draft::empty("draft");
+        draft
+            .materials
+            .material_colors
+            .push(cutlass_model::MaterialColorConfig {
+                id: "color".into(),
+                is_color_clip: true,
+                solid_color: "0xFF336699".to_owned(),
+                ..cutlass_model::MaterialColorConfig::default()
+            });
+        draft.tracks[0]
+            .segments
+            .push(Segment::new("one", "color", TimeRange::new(0, 2_000_000)));
+        draft.duration = Micros(2_000_000);
+        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        let mut view = ViewState::new();
+        // With no project, a project command says so and nothing runs.
+        run_menu(&mut shell, &mut view, None, crate::menubar::EXPORT);
+        assert!(!view.export_open);
+        shell.open_folder(&temp).unwrap();
+        shell.select(Some(SegmentId::new("one")));
+        shell.seek(Micros(1_000_000));
+        run_menu(&mut shell, &mut view, None, "split");
+        assert_eq!(shell.draft().unwrap().tracks[0].segments.len(), 2);
+        run_menu(&mut shell, &mut view, None, "undo");
+        assert_eq!(shell.draft().unwrap().tracks[0].segments.len(), 1);
+        run_menu(&mut shell, &mut view, None, crate::menubar::EXPORT);
+        assert!(view.export_open);
+        run_menu(&mut shell, &mut view, None, crate::menubar::SETTINGS);
+        assert!(view.settings_open);
+        run_menu(&mut shell, &mut view, None, crate::menubar::LICENSES);
+        assert!(view.licenses.is_some());
+        // Every item runs without a panic.
+        for item in crate::menubar::items() {
+            if [
+                crate::menubar::OPEN,
+                crate::menubar::IMPORT,
+                crate::menubar::EXPORT_LOG,
+            ]
+            .contains(&item.id)
+            {
+                continue; // These open the system's file dialog.
+            }
+            run_menu(&mut shell, &mut view, None, item.id);
+        }
+        drop(shell);
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
     fn an_open_project_paints_the_editor() {
         let temp = std::env::temp_dir().join(format!("cutlass-editor-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&temp);

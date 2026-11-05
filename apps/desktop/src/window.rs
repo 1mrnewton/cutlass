@@ -56,17 +56,12 @@ pub fn run() -> eframe::Result {
             // Other hosts, such as `cutlass mcp`, reach the open project here.
             let ctx = creation.egui_ctx.clone();
             shell.listen(std::sync::Arc::new(move || ctx.request_repaint()));
-            #[cfg(target_os = "macos")]
-            let menu_bar = {
-                let ctx = creation.egui_ctx.clone();
-                crate::menubar::Native::install(move || ctx.request_repaint())
-            };
             Ok(Box::new(DesktopWindow {
                 shell,
                 view: ViewState::new(),
                 last_time: None,
                 #[cfg(target_os = "macos")]
-                menu_bar,
+                menu_bar: None,
             }))
         }),
     )
@@ -137,6 +132,15 @@ impl eframe::App for DesktopWindow {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let now = ui.input(|input| input.time);
         advance_if_playing(&mut self.shell, &mut self.last_time, now);
+        // Put up on the first frame, once the system's own launch menu is.
+        #[cfg(target_os = "macos")]
+        if self.menu_bar.is_none() {
+            let ctx = ui.ctx().clone();
+            self.menu_bar = crate::menubar::Native::install(move || ctx.request_repaint());
+            if self.menu_bar.is_none() {
+                cutlass_logger::warn!("the system menu bar could not be built");
+            }
+        }
         #[cfg(target_os = "macos")]
         if let Some(bar) = self.menu_bar.as_ref() {
             for id in bar.take() {

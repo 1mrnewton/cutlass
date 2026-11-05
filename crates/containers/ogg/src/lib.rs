@@ -1,1 +1,12 @@
+//! Ogg framing (RFC 3533) with the Opus mapping (RFC 7845).
 #![forbid(unsafe_code)]
+
+pub mod crc;
+mod limits;
+pub mod page;
+
+pub use limits::{
+    MAX_COMMENTS, MAX_LINK_PROBES, MAX_OPUS_PACKET_PER_STREAM, MAX_PAGE_BYTES, MAX_RESYNC_BYTES,
+    MAX_SEEK_PROBES, MAX_START_SCAN_BYTES, MAX_TAIL_SCAN_BYTES, MUX_PAGE_BYTES, MUX_PAGE_SAMPLES,
+    OPUS_PREROLL, OPUS_RATE, PAGE_HEADER_BYTES, PROBE_BYTES,
+};

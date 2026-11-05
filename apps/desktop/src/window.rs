@@ -24,6 +24,10 @@ pub fn run() -> eframe::Result {
     {
         viewport = viewport.with_decorations(false);
     }
+    // Finder sends a bundled app its documents as an Apple Event; listen
+    // before the event loop so the ones that launch the app arrive too.
+    #[cfg(target_os = "macos")]
+    cutlass_platform_apple::listen_for_opened_files();
     eframe::run_native(
         "Cutlass",
         eframe::NativeOptions {
@@ -56,6 +60,11 @@ pub fn run() -> eframe::Result {
             // Other hosts, such as `cutlass mcp`, reach the open project here.
             let ctx = creation.egui_ctx.clone();
             shell.listen(std::sync::Arc::new(move || ctx.request_repaint()));
+            #[cfg(target_os = "macos")]
+            {
+                let ctx = creation.egui_ctx.clone();
+                cutlass_platform_apple::wake_on_opened_files(move || ctx.request_repaint());
+            }
             Ok(Box::new(DesktopWindow {
                 shell,
                 view: ViewState::new(),
@@ -132,6 +141,18 @@ impl eframe::App for DesktopWindow {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let now = ui.input(|input| input.time);
         advance_if_playing(&mut self.shell, &mut self.last_time, now);
+        // Documents Finder opened with the app: a project folder opens and
+        // files import, as when they are dropped on the window.
+        #[cfg(target_os = "macos")]
+        {
+            let opened = cutlass_platform_apple::take_opened_files();
+            if !opened.is_empty() {
+                cutlass_logger::info!("finder opened {} item(s)", opened.len());
+                if let Err(error) = self.shell.drop_files(&opened) {
+                    self.shell.set_notice(error.to_string());
+                }
+            }
+        }
         // Put up on the first frame, once the system's own launch menu is.
         #[cfg(target_os = "macos")]
         if self.menu_bar.is_none() {

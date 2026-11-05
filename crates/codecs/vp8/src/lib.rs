@@ -21,6 +21,8 @@ mod transform;
 mod prove;
 #[cfg(test)]
 mod prove_encode;
+#[cfg(test)]
+mod prove_lifecycle;
 
 pub use decode::{Decoder, Picture, Vp8Decoder};
 pub use encode::{Vp8Encoder, Vp8Options};

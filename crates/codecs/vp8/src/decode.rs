@@ -102,6 +102,8 @@ pub struct Decoder {
     vscale: u8,
     segment_map: Vec<u8>,
     pool: Vec<Frame>,
+    /// Largest key-frame area accepted; 0 accepts every legal size.
+    max_pixels: u64,
     /// Macroblocks decoded per luma mode, for tests that check coverage.
     #[cfg(test)]
     pub(crate) mode_counts: [u64; 10],
@@ -121,8 +123,19 @@ impl Decoder {
         Self::default()
     }
 
+    /// A decoder that refuses key frames larger than `max_pixels`, as a
+    /// bound on memory and time for untrusted input.
+    #[must_use]
+    pub fn with_max_pixels(max_pixels: u64) -> Self {
+        Self {
+            max_pixels,
+            ..Self::default()
+        }
+    }
+
+    /// Drops the references and probabilities; keeps the size limit.
     pub fn reset(&mut self) {
-        *self = Self::default();
+        *self = Self::with_max_pixels(self.max_pixels);
     }
 
     /// Display size of the stream so far.
@@ -135,6 +148,12 @@ impl Decoder {
     pub fn decode(&mut self, data: &[u8]) -> Result<Option<Picture>, CodecError> {
         let parsed = header::parse(data, &self.persist)?;
         let h = parsed.header;
+        let area = u64::from(h.tag.width) * u64::from(h.tag.height);
+        if h.tag.key && self.max_pixels > 0 && area > self.max_pixels {
+            return Err(CodecError::Limit {
+                what: "vp8 picture area",
+            });
+        }
         let (mbw, mbh) = if h.tag.key {
             (
                 (h.tag.width as usize).div_ceil(16),

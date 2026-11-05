@@ -353,9 +353,16 @@ fn decoder_fuzz_does_not_panic() {
         // Decode a good prefix, then mutated frames, then check the
         // decoder still takes a good key frame.
         let mut decoder = Decoder::with_max_pixels(1 << 16);
+        // The engine's decoder sees the same packets, with a random
+        // container configuration.
+        let mut params = CodecParams::video(CodecId::Vp8, 16, 16);
+        params.extra = (0..rng.below(16)).map(|_| rng.byte()).collect();
+        let mut engine = crate::EngineDecoder::open_limited(&params, 1 << 16).expect("engine");
         let prefix = rng.below(stream.len());
-        for frame in &stream[..prefix] {
+        for (i, frame) in stream[..prefix].iter().enumerate() {
             decoder.decode(frame).expect("corpus");
+            let packet = Packet::video(frame.clone(), i as i64, 1, 30, i == 0);
+            cutlass_decode::Decoder::push(&mut engine, &packet).expect("engine corpus");
         }
         for good in &stream[prefix..] {
             let bytes = if rng.below(3) == 0 {
@@ -365,7 +372,24 @@ fn decoder_fuzz_does_not_panic() {
             } else {
                 mutate(&mut rng, good)
             };
-            match decoder.decode(&bytes) {
+            let packet = Packet::video(bytes.clone(), inputs as i64, 1, 30, false);
+            let engine_out = cutlass_decode::Decoder::push(&mut engine, &packet);
+            let core = decoder.decode(&bytes);
+            // Both views of one decoder agree on picture, nothing, or error.
+            match (&core, &engine_out) {
+                (Ok(Some(_)), Ok(out)) => assert_eq!(out.len(), 1, "seed {seed:#x} input {inputs}"),
+                (Ok(None), Ok(out)) => assert!(out.is_empty(), "seed {seed:#x} input {inputs}"),
+                (Err(_), Err(_)) => {}
+                // An empty packet is a dropped frame to the engine.
+                (Err(_), Ok(out)) if bytes.is_empty() && out.is_empty() => {}
+                _ => panic!(
+                    "seed {seed:#x} input {inputs}: engine and core disagree: {} bytes, core {:?}, engine {:?}",
+                    bytes.len(),
+                    core.as_ref().map(Option::is_some),
+                    engine_out.as_ref().map(Vec::len)
+                ),
+            }
+            match core {
                 Ok(Some(p)) => {
                     let (w, h) = decoder.size();
                     assert!(
@@ -388,5 +412,154 @@ fn decoder_fuzz_does_not_panic() {
     }
     eprintln!(
         "vp8 fuzz seed {seed:#x} seconds {secs} inputs {inputs} pictures {pictures} errors {errors} findings 0"
+    );
+}
+
+/// `VP8_ENC_FUZZ_SECS` (default 2) and `VP8_ENC_FUZZ_SEED`: random
+/// options (legal and not), sizes, content, and push, force-key, reset,
+/// and drain orders. A refused open names an illegal option; every stream
+/// decodes, one picture per shown frame, to the encoder's reconstruction.
+#[test]
+fn encoder_fuzz_does_not_panic() {
+    let secs = std::env::var("VP8_ENC_FUZZ_SECS")
+        .ok()
+        .and_then(|t| t.parse::<u64>().ok())
+        .unwrap_or(2);
+    let seed = std::env::var("VP8_ENC_FUZZ_SEED")
+        .ok()
+        .and_then(|t| t.parse::<u64>().ok())
+        .unwrap_or(0x5650_3845_4e43);
+    let mut rng = Rng(seed.max(1));
+    let started = std::time::Instant::now();
+    let limit = std::time::Duration::from_secs(secs);
+    let (mut rounds, mut refused, mut frames, mut packets_out) = (0u64, 0u64, 0u64, 0u64);
+    while started.elapsed() < limit {
+        rounds += 1;
+        let pick = |rng: &mut Rng, values: &[u32]| values[rng.below(values.len())];
+        let hidden_altref = rng.below(3) == 0;
+        let mut opts = Vp8Options {
+            bitrate: pick(&mut rng, &[0, 0, 50_000, 400_000, 3_000_000]),
+            quantizer: pick(&mut rng, &[0, 4, 24, 63, 127]) as u8,
+            keyframe_interval: pick(&mut rng, &[0, 1, 2, 5, 150]),
+            golden_interval: if hidden_altref {
+                pick(&mut rng, &[2, 3, 5, 16])
+            } else {
+                pick(&mut rng, &[0, 1, 2, 3, 5, 16])
+            },
+            partitions: pick(&mut rng, &[1, 2, 4, 8]) as usize,
+            speed: pick(&mut rng, &[0, 1, 2, 3]) as u8,
+            segments: rng.below(2) == 0,
+            version: pick(&mut rng, &[0, 0, 1, 2, 3]) as u8,
+            hidden_altref,
+            error_resilient: rng.below(4) == 0,
+            sharpness: pick(&mut rng, &[0, 3, 7]) as u8,
+            scale: [
+                pick(&mut rng, &[0, 1, 3]) as u8,
+                pick(&mut rng, &[0, 2, 3]) as u8,
+            ],
+        };
+        let mut width = pick(&mut rng, &[1, 2, 7, 16, 17, 33, 48, 80]);
+        let mut height = pick(&mut rng, &[1, 3, 15, 16, 32, 47, 64]);
+        // One round in eight breaks one setting.
+        if rng.below(8) == 0 {
+            match rng.below(9) {
+                0 => opts.quantizer = 128 + rng.byte() % 128,
+                1 => opts.partitions = pick(&mut rng, &[0, 3, 5, 9, 16]) as usize,
+                2 => opts.version = 4 + rng.byte() % 252,
+                3 => opts.sharpness = 8 + rng.byte() % 248,
+                4 => opts.scale[rng.below(2)] = 4 + rng.byte() % 252,
+                5 => {
+                    opts.hidden_altref = true;
+                    opts.golden_interval = pick(&mut rng, &[0, 1, 65, 1000]);
+                }
+                6 => width = 0,
+                7 => height = 0,
+                _ => width = 16_384 + rng.below(4) as u32,
+            }
+        }
+        let legal = width > 0
+            && height > 0
+            && width <= 16_383
+            && opts.quantizer <= 127
+            && matches!(opts.partitions, 1 | 2 | 4 | 8)
+            && opts.version <= 3
+            && opts.sharpness <= 7
+            && opts.scale.iter().all(|&s| s <= 3)
+            && (!opts.hidden_altref || (2..=64).contains(&opts.golden_interval));
+        let mut encoder = match Vp8Encoder::with_options(width, height, opts) {
+            Ok(encoder) => encoder,
+            Err(_) => {
+                assert!(!legal, "seed {seed:#x} round {rounds}: refused {opts:?}");
+                refused += 1;
+                continue;
+            }
+        };
+        assert!(legal, "seed {seed:#x} round {rounds}: accepted {opts:?}");
+        let mut stream: Vec<Vec<u8>> = Vec::new();
+        let check = |encoder: &Vp8Encoder, stream: &[Vec<u8>]| {
+            let mut decoder = Decoder::new();
+            let mut shown = 0;
+            for frame in stream {
+                if let Some(picture) = decoder.decode(frame).expect("our packets decode") {
+                    let mut ours = Vec::new();
+                    crop(&encoder.shown_recon[shown], width, height, &mut ours);
+                    assert_eq!(pack(&picture), ours, "seed {seed:#x} round {rounds}");
+                    shown += 1;
+                }
+            }
+            assert_eq!(
+                shown,
+                encoder.shown_recon.len(),
+                "seed {seed:#x} round {rounds}"
+            );
+        };
+        for t in 0..1 + rng.below(12) as u32 {
+            match rng.below(10) {
+                0 => encoder.force_keyframe(),
+                1 => {
+                    check(&encoder, &stream);
+                    encoder.reset();
+                    stream.clear();
+                    continue;
+                }
+                2 => {
+                    stream.extend(encoder.drain().expect("drain").into_iter().map(|p| p.data));
+                }
+                _ => {}
+            }
+            let mut input = input(width, height, t);
+            match rng.below(6) {
+                // Noise, flat, or the moving picture.
+                0 => {
+                    for p in &mut input.frame.y.samples {
+                        *p = rng.byte();
+                    }
+                }
+                1 => {
+                    let level = rng.byte();
+                    input.frame.y.samples.fill(level);
+                    input.frame.u.samples.fill(128);
+                }
+                _ => {}
+            }
+            input.duration = 1 + rng.below(3) as i64;
+            if rng.below(20) == 0 {
+                // A picture of another size is refused and changes nothing.
+                let wrong = VideoInput {
+                    frame: synthetic(width + 2, height, t),
+                    ..input.clone()
+                };
+                assert!(encoder.push(&wrong).is_err());
+            }
+            let out = encoder.push(&input).expect("push");
+            frames += 1;
+            packets_out += out.len() as u64;
+            stream.extend(out.into_iter().map(|p| p.data));
+        }
+        stream.extend(encoder.drain().expect("drain").into_iter().map(|p| p.data));
+        check(&encoder, &stream);
+    }
+    eprintln!(
+        "vp8 encoder fuzz seed {seed:#x} seconds {secs} rounds {rounds} refused {refused} frames {frames} packets {packets_out} findings 0"
     );
 }

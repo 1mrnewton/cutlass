@@ -57,12 +57,17 @@ impl EngineDecoder {
     /// otherwise, which is what a VP8 frame with colour space 0 means
     /// (RFC 6386 Section 9.2).
     pub fn open(params: &CodecParams) -> Result<Self, CodecError> {
+        Self::open_limited(params, MAX_PIXELS)
+    }
+
+    /// [`Self::open`] refusing key frames over `max_pixels`.
+    pub(crate) fn open_limited(params: &CodecParams, max_pixels: u64) -> Result<Self, CodecError> {
         if params.codec != CodecId::Vp8 {
             return Err(CodecError::Unsupported { what: "codec" });
         }
         let (primaries, transfer) = vpcc_colour(&params.extra);
         Ok(Self {
-            inner: decode::Decoder::with_max_pixels(MAX_PIXELS),
+            inner: decode::Decoder::with_max_pixels(max_pixels),
             primaries,
             transfer,
         })

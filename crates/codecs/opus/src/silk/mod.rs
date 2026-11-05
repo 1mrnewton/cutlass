@@ -1,6 +1,9 @@
 //! The SILK layer (RFC 6716 section 4.2), with the resampler that brings
 //! its 8, 12, or 16 kHz output to the API rate.
 
+mod fixed;
+mod tables;
+
 use crate::range::RangeDecoder;
 use cutlass_decode::CodecError;
 
@@ -57,6 +60,8 @@ impl SilkDecoder {
         out: &mut [i16],
     ) -> Result<usize, CodecError> {
         let _ = (ctl, loss, new_packet, rd, out);
-        Err(CodecError::Unsupported { what: "SILK decode" })
+        Err(CodecError::Unsupported {
+            what: "SILK decode",
+        })
     }
 }

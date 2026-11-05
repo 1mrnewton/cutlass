@@ -1114,6 +1114,18 @@ fn settings_window(
                                 settings.set_panel_open(id, open);
                             }
                         }
+                        settings_heading(ui, "Import");
+                        let mut copy = !settings.import.link;
+                        if ui
+                            .checkbox(&mut copy, "Copy imported files into the project")
+                            .changed()
+                        {
+                            settings.import.link = !copy;
+                        }
+                        ui.label(
+                            RichText::new("Off, the project points at each file where it is.")
+                                .color(tokens::FAINT),
+                        );
                         settings_heading(ui, "Hardware codecs");
                         ui.checkbox(
                             &mut settings.hardware.decode,

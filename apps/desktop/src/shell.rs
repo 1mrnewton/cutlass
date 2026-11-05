@@ -1680,7 +1680,8 @@ impl Shell {
     fn import_file_in(&mut self, path: &Path) -> Result<(), ShellError> {
         let probed = probe::probe(path).map_err(|error| ShellError::Probe(error.to_string()))?;
         let project = self.path.clone().ok_or(ShellError::NoProject)?;
-        let (stored, copied) = place_in_project(&project, path, None)?;
+        let link = self.settings.import.link;
+        let (stored, copied) = place_in_project(&project, path, None, link)?;
         let imported = self.import_medium(probed, stored);
         if imported.is_err()
             && let Some(copied) = copied
@@ -1704,13 +1705,15 @@ impl Shell {
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .ok_or_else(|| ShellError::Io("the file has no name".to_owned()))?;
+        let link = self.settings.import.link;
         self.start_job("Replace", move |progress| {
             progress.stage(&format!("Reading {name}"));
             let placed = probe::probe(&source)
                 .map_err(|error| ShellError::Probe(error.to_string()))
                 .and_then(|probed| {
                     progress.stage(&format!("Copying {name}"));
-                    let (stored, copied) = place_in_project(&project, &source, Some(progress))?;
+                    let (stored, copied) =
+                        place_in_project(&project, &source, Some(progress), link)?;
                     Ok((probed, stored, CopyGuard(copied)))
                 });
             Box::new(move |shell: &mut Shell| {
@@ -1750,13 +1753,15 @@ impl Shell {
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .ok_or_else(|| ShellError::Io("the file has no name".to_owned()))?;
+        let link = self.settings.import.link;
         self.start_job("Import", move |progress| {
             progress.stage(&format!("Reading {name}"));
             let placed = probe::probe(&source)
                 .map_err(|error| ShellError::Probe(error.to_string()))
                 .and_then(|probed| {
                     progress.stage(&format!("Copying {name}"));
-                    let (stored, copied) = place_in_project(&project, &source, Some(progress))?;
+                    let (stored, copied) =
+                        place_in_project(&project, &source, Some(progress), link)?;
                     Ok((probed, stored, CopyGuard(copied)))
                 });
             Box::new(move |shell: &mut Shell| {
@@ -7318,10 +7323,15 @@ fn copy_reporting(
     copied
 }
 
+/// Where an imported file is kept, as the path the project stores, and the
+/// copy made, if any. A file already in the project is kept where it is. A
+/// file outside it is copied into `Resources`, or, when `link` is on,
+/// stored by its full path and not copied.
 fn place_in_project(
     project: &Path,
     source: &Path,
     progress: Option<&crate::jobs::Progress>,
+    link: bool,
 ) -> Result<(String, Option<PathBuf>), ShellError> {
     let project = project
         .canonicalize()
@@ -7334,6 +7344,9 @@ fn place_in_project(
             .strip_prefix(&project)
             .map_err(|error| ShellError::Io(error.to_string()))?;
         return Ok((portable(relative), None));
+    }
+    if link {
+        return Ok((source_path.to_string_lossy().into_owned(), None));
     }
     let resources = project.join("Resources");
     std::fs::create_dir_all(&resources).map_err(|error| ShellError::Io(error.to_string()))?;
@@ -8877,6 +8890,53 @@ mod tests {
         assert!(desktop.lanes().iter().all(|lane| lane.clips.is_empty()));
         desktop.redo().unwrap();
         assert_eq!(desktop.lanes()[0].clips.len(), 1);
+    }
+
+    #[test]
+    fn a_linked_import_points_at_the_file_and_copies_nothing() {
+        let temp = Temp::new();
+        empty_project(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.update_settings(|settings| settings.import.link = true);
+        let picture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../crates/engine/fixtures/pattern.png");
+        desktop.import_file(&picture).unwrap();
+        let stored = desktop.draft().unwrap().materials.videos[0].path.clone();
+        assert_eq!(
+            PathBuf::from(&stored),
+            picture.canonicalize().unwrap(),
+            "the project keeps the file's own path"
+        );
+        let copies = |path: &Path| {
+            std::fs::read_dir(path.join("Resources"))
+                .map(|entries| {
+                    entries
+                        .flatten()
+                        .filter(|entry| entry.file_name().to_string_lossy().contains("pattern"))
+                        .count()
+                })
+                .unwrap_or(0)
+        };
+        assert_eq!(copies(&temp.path), 0, "nothing was copied");
+        // It plays from where it is.
+        let id = desktop.draft().unwrap().materials.videos[0]
+            .id
+            .as_str()
+            .to_owned();
+        desktop.pixel_size = 0.001;
+        let clear = desktop.preview_bytes().unwrap();
+        desktop
+            .drop_medium(&id, 0.0, crate::tokens::LANE_HEIGHT / 2.0)
+            .unwrap();
+        assert_ne!(
+            digest(&clear.rgba),
+            digest(&desktop.preview_bytes().unwrap().rgba)
+        );
+        // Copying again puts the next import in the project.
+        desktop.update_settings(|settings| settings.import.link = false);
+        desktop.import_file(&picture).unwrap();
+        assert_eq!(copies(&temp.path), 1);
     }
 
     #[test]

@@ -229,31 +229,62 @@ pub mod prof {
     pub const CPU_TASK_UNREF: usize = 4;
     const CPU_NAMES: [&str; 5] = ["main", "task", "backend", "mf", "task_unref"];
     static CPU: [AtomicU64; 5] = [const { AtomicU64::new(0) }; 5];
+    static FLT: [AtomicU64; 5] = [const { AtomicU64::new(0) }; 5];
 
-    /// The processor time of the calling thread so far, in nanoseconds
-    /// (0 without the `prof` feature).
-    pub fn thread_cpu() -> u64 {
+    /// The processor time of the calling thread so far, in nanoseconds,
+    /// and its minor page faults (0 without the `prof` feature).
+    pub fn thread_cpu() -> (u64, u64) {
         if !cfg!(feature = "prof") {
-            return 0;
+            return (0, 0);
         }
-        std::fs::read_to_string("/proc/thread-self/schedstat")
+        let t = std::fs::read_to_string("/proc/thread-self/schedstat")
             .ok()
             .and_then(|s| s.split(' ').next().and_then(|v| v.parse::<u64>().ok()))
-            .unwrap_or(0)
+            .unwrap_or(0);
+        // Field 10 of the thread's stat.
+        let f = std::fs::read_to_string("/proc/thread-self/stat")
+            .ok()
+            .and_then(|st| {
+                st.rsplit(')')
+                    .next()
+                    .and_then(|r| r.split(' ').nth(8).and_then(|v| v.parse::<u64>().ok()))
+            })
+            .unwrap_or(0);
+        (t, f)
     }
 
-    /// Adds the processor time of the calling thread since `t0` (a
-    /// [`thread_cpu`]) to kind `k`.
-    pub fn cpu_since(k: usize, t0: u64) {
+    /// Adds the processor time and page faults of the calling thread since
+    /// `t0` (a [`thread_cpu`]) to kind `k`.
+    pub fn cpu_since(k: usize, t0: (u64, u64)) {
         if cfg!(feature = "prof") {
-            CPU[k].fetch_add(thread_cpu().saturating_sub(t0), Ordering::Relaxed);
+            let (t, f) = thread_cpu();
+            CPU[k].fetch_add(t.saturating_sub(t0.0), Ordering::Relaxed);
+            FLT[k].fetch_add(f.saturating_sub(t0.1), Ordering::Relaxed);
         }
     }
 
     /// Adds the processor time of the calling thread so far to kind `k`
     /// (call it as the thread ends).
     pub fn cpu(k: usize) {
-        cpu_since(k, 0);
+        cpu_since(k, (0, 0));
+    }
+
+    /// Allocations of the pooled buffers (pool misses).
+    pub const NEW_PIC: usize = 0;
+    pub const NEW_STATE: usize = 1;
+    pub const NEW_SHELL: usize = 2;
+    pub const NEW_LOG: usize = 3;
+    pub const NEW_BAND: usize = 4;
+    pub const NEW_MIRROR: usize = 5;
+    const NEW_NAMES: [&str; 6] = ["pic", "state", "shell", "log", "band", "mirror"];
+    static NEW: [AtomicU64; 6] = [const { AtomicU64::new(0) }; 6];
+
+    /// Counts an allocation of kind `k`.
+    #[inline]
+    pub fn count(k: usize) {
+        if cfg!(feature = "prof") {
+            NEW[k].fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     pub fn report() -> String {
@@ -270,11 +301,22 @@ pub mod prof {
         {
             s.push_str(&format!("faults={f} "));
         }
+        // Peak resident memory.
+        if let Ok(st) = std::fs::read_to_string("/proc/self/status")
+            && let Some(l) = st.lines().find(|l| l.starts_with("VmHWM:"))
+        {
+            s.push_str(&format!("hwm={}kB ", l[6..].trim().trim_end_matches(" kB")));
+        }
+        s.push_str("| new ");
+        for (n, v) in NEW_NAMES.iter().zip(&NEW) {
+            s.push_str(&format!("{n}={} ", v.load(Ordering::Relaxed)));
+        }
         s.push_str("| cpu ");
-        for (n, v) in CPU_NAMES.iter().zip(&CPU) {
+        for ((n, v), f) in CPU_NAMES.iter().zip(&CPU).zip(&FLT) {
             s.push_str(&format!(
-                "{n}={:.3}s ",
-                v.load(Ordering::Relaxed) as f64 * 1e-9
+                "{n}={:.3}s/{} ",
+                v.load(Ordering::Relaxed) as f64 * 1e-9,
+                f.load(Ordering::Relaxed)
             ));
         }
         s
@@ -502,6 +544,7 @@ impl RefFill {
         prof::add(prof::WAIT_REFS, t);
         let _copy = prof::Span(prof::MIRROR, std::time::Instant::now());
         if m.planes.is_empty() && !bands.is_empty() {
+            prof::count(prof::NEW_MIRROR);
             *m = take_picture::<P>(
                 &mut lock(spares).pics,
                 self.width,
@@ -1521,6 +1564,9 @@ impl<P: PicturePixel> FrameTask<P> {
                 None => sp.states.pop(),
             }
         };
+        if spare.is_none() {
+            prof::count(prof::NEW_STATE);
+        }
         let mut fs = FrameState::reuse(spare, seq, hdr);
         // Motion field estimation runs in decode_frame.
         let mf_plan = hdr
@@ -1750,6 +1796,7 @@ fn take_picture<P: Pixel>(
         }
         return p;
     }
+    prof::count(prof::NEW_PIC);
     Picture::new(w, h, num_planes, sub_x, sub_y, bd)
 }
 
@@ -2002,7 +2049,10 @@ impl RowMsg {
 fn take_shell(shells: &mut Vec<FrameState>, fs: &FrameState) -> FrameState {
     match shells.iter().position(|f| f.fits_filter_shell(fs)) {
         Some(i) => shells.swap_remove(i).reshape_filter_shell(fs),
-        None => fs.filter_shell(),
+        None => {
+            prof::count(prof::NEW_SHELL);
+            fs.filter_shell()
+        }
     }
 }
 
@@ -2105,7 +2155,7 @@ fn recon_worker<'r, P: PicturePixel>(
                 if !b.is_inter {
                     continue;
                 }
-                bottom = bottom.max(4 * (b.mi_row + super::types::bh4(b.bsize)));
+                bottom = bottom.max(4 * (b.mi_row as usize + super::types::bh4(b.bsize)));
                 for l in 0..2 {
                     if b.ref_frame[l] > INTRA_FRAME {
                         max_down = max_down.max(i32::from(b.mv[l].row));
@@ -2231,7 +2281,10 @@ impl<P: PicturePixel> InlineFilter<'_, P> {
             let done = if self.lr_on { 4 * d - 8 } else { 4 * d };
             if done > self.published && self.publish.watched() {
                 let tc = std::time::Instant::now();
-                let bufs = lock(self.spares).bands.pop().unwrap_or_default();
+                let bufs = lock(self.spares).bands.pop().unwrap_or_else(|| {
+                    prof::count(prof::NEW_BAND);
+                    Default::default()
+                });
                 self.publish
                     .publish(band_of(cur, self.published, done, bufs));
                 prof::add(prof::PUBLISH, tc);
@@ -2480,7 +2533,10 @@ fn decode_frame_async<P: PicturePixel>(
                     m.fill_meta(fs, sb4, r0, r1, r1 >= fs.mi_rows, sub_y);
                     m
                 });
-                let mut spare = lock(rows).logs.pop().unwrap_or_default();
+                let mut spare = lock(rows).logs.pop().unwrap_or_else(|| {
+                    prof::count(prof::NEW_LOG);
+                    ReconLog::default()
+                });
                 // Room for a typical chunk, so that logs rarely grow while
                 // the parser fills them.
                 spare.blocks.reserve(LOG_RESERVE_BLOCKS);

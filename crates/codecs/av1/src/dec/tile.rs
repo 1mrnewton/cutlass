@@ -61,7 +61,10 @@ pub struct ReconLog {
     pub blocks: Vec<BlockRec>,
     pub ops: Vec<TxOp>,
     pub coefs: Vec<i32>,
-    pub color_maps: Vec<u8>,
+    /// Palette colors and color maps of palette blocks.
+    pub extra: Vec<u16>,
+    /// Warp samples of local warp blocks.
+    pub cands: Vec<[i32; 4]>,
 }
 
 impl ReconLog {
@@ -70,7 +73,8 @@ impl ReconLog {
         self.blocks.clear();
         self.ops.clear();
         self.coefs.clear();
-        self.color_maps.clear();
+        self.extra.clear();
+        self.cands.clear();
     }
 }
 
@@ -84,14 +88,179 @@ pub struct SbRec {
     pub first_block: usize,
 }
 
-/// A block of a [`ReconLog`]: its state when prediction starts, its first
-/// transform block and (palette blocks) its color maps.
+/// A block of a [`ReconLog`]: what prediction and reconstruction read of
+/// its state when prediction starts, its first transform block and, when
+/// it has any, where its palette (colors and color maps, in
+/// [`ReconLog::extra`]) and its local warp samples (in [`ReconLog::cands`])
+/// start.
 pub struct BlockRec {
-    pub b: Block,
-    /// The mode info stored for the block (see [`TileDec::write_mode_info`]).
-    pub mi: MiInfo,
-    pub first_op: usize,
-    pub color_maps: Option<usize>,
+    pub b: RecBlock,
+    pub first_op: u32,
+    pub extra: Option<(u32, u32)>,
+}
+
+/// The fields of a [`Block`] that reconstruction reads (the motion vector
+/// prediction outputs, palette colors and warp samples stay with the
+/// parse), and the block's loop filter deltas.
+#[derive(Clone, Copy)]
+pub struct RecBlock {
+    pub mi_row: u32,
+    pub mi_col: u32,
+    pub mv: [Mv; 2],
+    pub ref_frame: [i8; 2],
+    pub delta_lf: [i8; 4],
+    pub bsize: u8,
+    pub has_chroma: bool,
+    pub avail_u: bool,
+    pub avail_l: bool,
+    pub avail_u_chroma: bool,
+    pub avail_l_chroma: bool,
+    pub skip: bool,
+    pub skip_mode: bool,
+    pub segment_id: u8,
+    pub lossless: bool,
+    pub is_inter: bool,
+    pub use_intrabc: bool,
+    pub y_mode: u8,
+    pub uv_mode: u8,
+    pub angle_delta_y: i8,
+    pub angle_delta_uv: i8,
+    pub cfl_alpha_u: i8,
+    pub cfl_alpha_v: i8,
+    pub use_filter_intra: bool,
+    pub filter_intra_mode: u8,
+    pub palette_size_y: u8,
+    pub palette_size_uv: u8,
+    pub tx_size: u8,
+    pub interp_filter: [u8; 2],
+    pub motion_mode: u8,
+    pub interintra: bool,
+    pub interintra_mode: u8,
+    pub wedge_interintra: bool,
+    pub wedge_index: u8,
+    pub wedge_sign: u8,
+    pub mask_type: u8,
+    pub compound_type: u8,
+    pub comp_group_idx: u8,
+    pub compound_idx: u8,
+    pub num_samples: u8,
+}
+
+impl RecBlock {
+    fn of(b: &Block, delta_lf: [i8; 4]) -> Self {
+        Self {
+            mi_row: b.mi_row as u32,
+            mi_col: b.mi_col as u32,
+            mv: b.mv,
+            ref_frame: b.ref_frame,
+            delta_lf,
+            bsize: b.bsize,
+            has_chroma: b.has_chroma,
+            avail_u: b.avail_u,
+            avail_l: b.avail_l,
+            avail_u_chroma: b.avail_u_chroma,
+            avail_l_chroma: b.avail_l_chroma,
+            skip: b.skip,
+            skip_mode: b.skip_mode,
+            segment_id: b.segment_id,
+            lossless: b.lossless,
+            is_inter: b.is_inter,
+            use_intrabc: b.use_intrabc,
+            y_mode: b.y_mode,
+            uv_mode: b.uv_mode,
+            angle_delta_y: b.angle_delta_y,
+            angle_delta_uv: b.angle_delta_uv,
+            cfl_alpha_u: b.cfl_alpha_u,
+            cfl_alpha_v: b.cfl_alpha_v,
+            use_filter_intra: b.use_filter_intra,
+            filter_intra_mode: b.filter_intra_mode,
+            palette_size_y: b.palette_size_y,
+            palette_size_uv: b.palette_size_uv,
+            tx_size: b.tx_size,
+            interp_filter: b.interp_filter,
+            motion_mode: b.motion_mode,
+            interintra: b.interintra,
+            interintra_mode: b.interintra_mode,
+            wedge_interintra: b.wedge_interintra,
+            wedge_index: b.wedge_index,
+            wedge_sign: b.wedge_sign,
+            mask_type: b.mask_type,
+            compound_type: b.compound_type,
+            comp_group_idx: b.comp_group_idx,
+            compound_idx: b.compound_idx,
+            num_samples: b.num_samples.min(8) as u8,
+        }
+    }
+
+    /// Writes the fields into `b` (the others keep stale values that
+    /// reconstruction does not read).
+    fn apply(&self, b: &mut Block) {
+        b.mi_row = self.mi_row as usize;
+        b.mi_col = self.mi_col as usize;
+        b.mv = self.mv;
+        b.ref_frame = self.ref_frame;
+        b.bsize = self.bsize;
+        b.has_chroma = self.has_chroma;
+        b.avail_u = self.avail_u;
+        b.avail_l = self.avail_l;
+        b.avail_u_chroma = self.avail_u_chroma;
+        b.avail_l_chroma = self.avail_l_chroma;
+        b.skip = self.skip;
+        b.skip_mode = self.skip_mode;
+        b.segment_id = self.segment_id;
+        b.lossless = self.lossless;
+        b.is_inter = self.is_inter;
+        b.use_intrabc = self.use_intrabc;
+        b.y_mode = self.y_mode;
+        b.uv_mode = self.uv_mode;
+        b.angle_delta_y = self.angle_delta_y;
+        b.angle_delta_uv = self.angle_delta_uv;
+        b.cfl_alpha_u = self.cfl_alpha_u;
+        b.cfl_alpha_v = self.cfl_alpha_v;
+        b.use_filter_intra = self.use_filter_intra;
+        b.filter_intra_mode = self.filter_intra_mode;
+        b.palette_size_y = self.palette_size_y;
+        b.palette_size_uv = self.palette_size_uv;
+        b.tx_size = self.tx_size;
+        b.interp_filter = self.interp_filter;
+        b.motion_mode = self.motion_mode;
+        b.interintra = self.interintra;
+        b.interintra_mode = self.interintra_mode;
+        b.wedge_interintra = self.wedge_interintra;
+        b.wedge_index = self.wedge_index;
+        b.wedge_sign = self.wedge_sign;
+        b.mask_type = self.mask_type;
+        b.compound_type = self.compound_type;
+        b.comp_group_idx = self.comp_group_idx;
+        b.compound_idx = self.compound_idx;
+        b.num_samples = usize::from(self.num_samples);
+    }
+}
+
+/// The mode info stored for block `b` (see [`TileDec::write_mode_info`]).
+#[inline(always)]
+fn mode_info_of(b: &Block, delta_lf: [i8; 4]) -> MiInfo {
+    MiInfo {
+        ref_frame: b.ref_frame,
+        mv: if b.ref_frame[1] > INTRA_FRAME {
+            b.mv
+        } else {
+            [b.mv[0], Mv::ZERO]
+        },
+        bsize: b.bsize,
+        y_mode: b.y_mode,
+        is_inter: b.is_inter,
+        skip: b.skip,
+        skip_mode: b.skip_mode,
+        segment_id: b.segment_id,
+        tx_size: b.tx_size,
+        palette_size: [b.palette_size_y, b.palette_size_uv],
+        comp_group_idx: b.comp_group_idx,
+        compound_idx: b.compound_idx,
+        interp_filter: b.interp_filter,
+        motion_mode: b.motion_mode,
+        delta_lf,
+    }
 }
 
 /// A transform block of a [`ReconLog`]: the arguments of transform_block(),
@@ -1275,24 +1444,32 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
         if self.b.skip {
             self.reset_block_context();
         }
-        let mi = self.store_mode_info_pre();
+        self.store_mode_info_pre();
         #[cfg(feature = "stats")]
         self.count_tools();
         if let Some(log) = self.rec.as_deref_mut() {
             let b = &self.b;
-            let color_maps = if b.palette_size_y != 0 || b.palette_size_uv != 0 {
-                let at = log.color_maps.len();
-                log.color_maps.extend_from_slice(&self.color_map_y);
-                log.color_maps.extend_from_slice(&self.color_map_uv);
-                Some(at)
-            } else {
-                None
-            };
+            let palette = b.palette_size_y != 0 || b.palette_size_uv != 0;
+            let warp = b.motion_mode == LOCALWARP;
+            let extra = (palette || warp).then(|| {
+                let at = (log.extra.len() as u32, log.cands.len() as u32);
+                if palette {
+                    for c in [&b.palette_y, &b.palette_u, &b.palette_v] {
+                        log.extra.extend_from_slice(c);
+                    }
+                    let maps = self.color_map_y.iter().chain(&self.color_map_uv);
+                    log.extra.extend(maps.map(|&v| u16::from(v)));
+                }
+                if warp {
+                    log.cands
+                        .extend_from_slice(&b.cand_list[..b.num_samples.min(8)]);
+                }
+                at
+            });
             log.blocks.push(BlockRec {
-                b: b.clone(),
-                mi,
-                first_op: log.ops.len(),
-                color_maps,
+                b: RecBlock::of(b, self.delta_lf),
+                first_op: log.ops.len() as u32,
+                extra,
             });
         } else {
             self.compute_prediction()?;
@@ -1325,29 +1502,8 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
 
     /// The part of the block's mode info that prediction needs (spec stores
     /// it before compute_prediction). Returns the mode info stored.
-    fn store_mode_info_pre(&mut self) -> MiInfo {
-        let b = &self.b;
-        let info = MiInfo {
-            ref_frame: b.ref_frame,
-            mv: if b.ref_frame[1] > INTRA_FRAME {
-                b.mv
-            } else {
-                [b.mv[0], Mv::ZERO]
-            },
-            bsize: b.bsize,
-            y_mode: b.y_mode,
-            is_inter: b.is_inter,
-            skip: b.skip,
-            skip_mode: b.skip_mode,
-            segment_id: b.segment_id,
-            tx_size: b.tx_size,
-            palette_size: [b.palette_size_y, b.palette_size_uv],
-            comp_group_idx: b.comp_group_idx,
-            compound_idx: b.compound_idx,
-            interp_filter: b.interp_filter,
-            motion_mode: b.motion_mode,
-            delta_lf: self.delta_lf,
-        };
+    fn store_mode_info_pre(&mut self) {
+        let info = mode_info_of(&self.b, self.delta_lf);
         // Kept in memory so each store is a plain 28-byte copy (field by
         // field stores of the scalarized value cost several times more).
         let info = std::hint::black_box(info);
@@ -1373,7 +1529,6 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
                 self.left_palette[1][ly] = b.palette_u;
             }
         }
-        info
     }
 
     /// Stores `info` as the mode info of every 4x4 of the block `self.b`
@@ -3692,20 +3847,40 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
                 .get(si + 1)
                 .map_or(log.blocks.len(), |n| n.first_block);
             while bi < end {
-                std::mem::swap(&mut self.b, &mut log.blocks[bi].b);
                 let rec = &log.blocks[bi];
-                self.write_mode_info(&rec.mi);
-                if let Some(at) = rec.color_maps {
-                    let ny = self.color_map_y.len();
-                    let nuv = self.color_map_uv.len();
-                    self.color_map_y
-                        .copy_from_slice(&log.color_maps[at..at + ny]);
-                    self.color_map_uv
-                        .copy_from_slice(&log.color_maps[at + ny..at + ny + nuv]);
+                rec.b.apply(&mut self.b);
+                let info = std::hint::black_box(mode_info_of(&self.b, rec.b.delta_lf));
+                self.write_mode_info(&info);
+                if let Some((at, cands)) = rec.extra {
+                    let b = &mut self.b;
+                    if b.palette_size_y != 0 || b.palette_size_uv != 0 {
+                        let src = &log.extra[at as usize..];
+                        for (k, c) in [&mut b.palette_y, &mut b.palette_u, &mut b.palette_v]
+                            .into_iter()
+                            .enumerate()
+                        {
+                            c.copy_from_slice(&src[8 * k..8 * k + 8]);
+                        }
+                        let ny = self.color_map_y.len();
+                        let nuv = self.color_map_uv.len();
+                        for (d, &v) in self.color_map_y.iter_mut().zip(&src[24..24 + ny]) {
+                            *d = v as u8;
+                        }
+                        for (d, &v) in self.color_map_uv.iter_mut().zip(&src[24 + ny..][..nuv]) {
+                            *d = v as u8;
+                        }
+                    }
+                    if b.motion_mode == LOCALWARP {
+                        let n = b.num_samples;
+                        b.cand_list[..n].copy_from_slice(&log.cands[cands as usize..][..n]);
+                    }
                 }
                 self.compute_prediction()?;
-                let op_end = log.blocks.get(bi + 1).map_or(log.ops.len(), |n| n.first_op);
-                for op in &log.ops[rec.first_op..op_end] {
+                let op_end = log
+                    .blocks
+                    .get(bi + 1)
+                    .map_or(log.ops.len(), |n| n.first_op as usize);
+                for op in &log.ops[rec.first_op as usize..op_end] {
                     self.replay_tx(op, &log.coefs);
                 }
                 bi += 1;

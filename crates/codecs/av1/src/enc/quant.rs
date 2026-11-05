@@ -254,6 +254,8 @@ pub struct QuantScratch {
     levels: [i32; 32 * 32],
     lv: [u32; 32 * 32],
     rec: [Rec; 32 * 32],
+    /// Dequantized levels of the candidate being reconstructed.
+    dqbuf: [i32; 32 * 32],
     dist: Dist,
 }
 
@@ -266,10 +268,11 @@ impl QuantScratch {
             levels: [0; 32 * 32],
             lv: [0; 32 * 32],
             rec: [Rec::default(); 32 * 32],
+            dqbuf: [0; 32 * 32],
             dist: Dist {
                 ac: [0; 32 * 32],
                 q2: [0; 32 * 32],
-                denom: 1,
+                denom_log2: 0,
                 lim: 1,
                 g2: 1.0,
             },
@@ -282,7 +285,8 @@ struct Dist {
     ac: [i64; 32 * 32],
     /// Dequantization step per position (quantizer matrix applied).
     q2: [i64; 32 * 32],
-    denom: i64,
+    /// log2 of the dequantization divisor (1, 2 or 4).
+    denom_log2: u32,
     lim: i64,
     /// Squared gain from the dequantized domain to samples.
     g2: f64,
@@ -292,7 +296,7 @@ impl Dist {
     /// Dequantized magnitude of level `l` at `pos`, as `coeffs()` computes it.
     #[inline]
     fn dq(&self, pos: usize, l: u32) -> i64 {
-        (((i64::from(l) * self.q2[pos]) & 0xFF_FFFF) / self.denom).min(self.lim - 1)
+        (((i64::from(l) * self.q2[pos]) & 0xFF_FFFF) >> self.denom_log2).min(self.lim - 1)
     }
 
     /// Distortion (in squared sample errors) of level `l` at `pos`.
@@ -527,6 +531,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         lv: &[i32],
         res_sse: u64,
         rec: &mut [P],
+        dq: &mut [i32],
     ) -> u64 {
         let w = tx_w(tx);
         let h = tx_h(tx);
@@ -534,8 +539,8 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         let th = h.min(32);
         let bd = self.bd;
         let qi = self.dequant_info(plane, t, tx);
-        let mut dq = [0i32; 32 * 32];
         let dq = &mut dq[..tw * th];
+        dq.fill(0);
         let mut nz_rows = 0;
         let mut nz_cols = 0;
         for i in 0..th {
@@ -658,6 +663,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
             levels,
             lv,
             rec,
+            dqbuf,
             dist,
         } = &mut *qs;
         let sp = &src.planes[plane];
@@ -717,7 +723,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         } else {
             f64::MAX
         };
-        dist.denom = 1;
+        dist.denom_log2 = 0;
         dist.lim = 1i64 << (7 + bd);
         dist.g2 = g2;
         for &t in &cands[..nc] {
@@ -727,7 +733,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
                 fwd_txfm(&res[..], w, &mut coefs[..], tx as usize, t as usize, bd);
             }
             let qi = self.dequant_info(plane, t, tx);
-            dist.denom = i64::from(qi.denom);
+            dist.denom_log2 = qi.denom.trailing_zeros();
             let lay = Layout::new(tx, t);
             // Initial levels: dead-zone rounding, or rounding to nearest as
             // the starting point of RDOQ.
@@ -741,7 +747,9 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
                 }
                 .max(1);
                 let a = i64::from(c.unsigned_abs()) * i64::from(qi.denom);
-                let l = (a + i64::from(q2) * i64::from(rnd) / 128) / i64::from(q2);
+                // An exact quotient: both operands are well below 2^26.
+                let n = a + i64::from(q2) * i64::from(rnd) / 128;
+                let l = (n as f64 / f64::from(q2)) as i64;
                 lv[pos] = (l as u32).min(MAX_LEVEL);
                 dist.ac[pos] = i64::from(c.unsigned_abs());
                 dist.q2[pos] = i64::from(q2);
@@ -826,7 +834,17 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
                 let l = lv[pos] as i32;
                 levels[pos] = if coefs[pos] < 0 { -l } else { l };
             }
-            let d = self.recon_dist(plane, x, y, tx, t, &levels[..tw * th], res_sse, &mut rbuf);
+            let d = self.recon_dist(
+                plane,
+                x,
+                y,
+                tx,
+                t,
+                &levels[..tw * th],
+                res_sse,
+                &mut rbuf,
+                &mut dqbuf[..],
+            );
             let cost = d as f64 + lam * f64::from(rate);
             // Lossless must stay exact: never trade levels for rate.
             if lossless || cost < best_cost {
@@ -835,11 +853,8 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
                 best[..tw * th].copy_from_slice(&levels[..tw * th]);
             }
         }
-        let want = &mut self.scratch.want;
-        for v in want.iter_mut() {
-            *v = 0;
-        }
-        want[..tw * th].copy_from_slice(&best[..tw * th]);
+        // The coefficient coder reads scan positions below tw * th only.
+        self.scratch.want[..tw * th].copy_from_slice(&best[..tw * th]);
         self.scratch.enc_q = Some(qs);
         self.scratch.enc_px[3] = rbuf;
         best_type

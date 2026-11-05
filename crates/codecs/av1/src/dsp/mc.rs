@@ -77,32 +77,24 @@ pub fn prep_bias(bd: u32) -> i32 {
 // Scratch buffers
 // ---------------------------------------------------------------------------
 
-/// Runs `f` on a zeroed stack buffer of `N` samples. Kept out of line so
-/// the caller's frame (and its stack probe) stays small.
-#[inline(never)]
-fn mid_on_stack<const N: usize, R>(f: impl FnOnce(&mut [i16]) -> R) -> R {
-    let mut b = [0i16; N];
-    f(&mut b)
-}
-
-/// Runs `f` on a zeroed scratch buffer of at least `need` samples, held on
-/// the stack in size classes so small blocks do not clear a large buffer.
+/// Runs `f` on a scratch buffer of at least `need` samples, kept per thread
+/// between calls. Its contents are stale: every caller writes the samples
+/// it reads first.
 #[inline(always)]
 fn with_mid<R>(need: usize, f: impl FnOnce(&mut [i16]) -> R) -> R {
-    if need <= 320 {
-        mid_on_stack::<320, R>(f)
-    } else if need <= 1280 {
-        mid_on_stack::<1280, R>(f)
-    } else if need <= 4608 {
-        mid_on_stack::<4608, R>(f)
-    } else if need <= 17280 {
-        mid_on_stack::<17280, R>(f)
-    } else if need <= 34816 {
-        mid_on_stack::<34816, R>(f)
-    } else {
-        let mut b = vec![0i16; need];
-        f(&mut b)
+    thread_local! {
+        static MID: core::cell::RefCell<Vec<i16>> = const { core::cell::RefCell::new(Vec::new()) };
     }
+    MID.with(|m| match m.try_borrow_mut() {
+        Ok(mut m) => {
+            if m.len() < need {
+                m.resize(need, 0);
+            }
+            f(&mut m[..need])
+        }
+        // Not reentered today; a nested call gets a buffer of its own.
+        Err(_) => f(&mut vec![0i16; need]),
+    })
 }
 
 // ---------------------------------------------------------------------------

@@ -836,9 +836,9 @@ impl Av1Enc {
             skip_mode_sse: ev("AV1_SMS", 6.0),
             intra_rd_cands: ev(
                 "AV1_IRD",
-                if speed >= 8 {
+                if speed >= 6 {
                     1.0
-                } else if speed >= 5 {
+                } else if speed >= 4 {
                     3.0
                 } else {
                     5.0

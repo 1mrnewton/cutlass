@@ -1091,6 +1091,10 @@ fn settings_window(
                             &mut settings.playback.scrub_audio,
                             "Play sound while the playhead is dragged",
                         );
+                        ui.checkbox(
+                            &mut settings.playback.proxies,
+                            "Play proxies of 4K and long clips in the viewer",
+                        );
                         choice_row(ui, "A seek", |ui| {
                             let seek = &mut settings.playback.seek_during_playback;
                             for (value, name) in [
@@ -3646,6 +3650,7 @@ fn paint_clip_menu(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
             "compound" => shell.create_compound(),
             "render-preview" => shell.render_selected(false),
             "render-full" => shell.render_selected(true),
+            "make-proxies" => shell.make_proxies(),
             "variable-speed" => {
                 shell.toggle_speed_curves();
                 Ok(())

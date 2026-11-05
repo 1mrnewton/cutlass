@@ -13,8 +13,8 @@ use cutlass_model::{Draft, MaterialVideo, Micros, Segment, TimeRange, Track};
 use crate::ExportRequest;
 use crate::prerender::render_request;
 
-/// The short side a proxy is drawn at.
-pub const PROXY_SIDE: u32 = 540;
+/// The short side a proxy is drawn at: the smallest export step.
+pub const PROXY_SIDE: u32 = crate::VIDEO_SHORT_SIDES[0];
 
 /// A source whose short side is above this wants a proxy.
 const LARGE_SIDE: u32 = 1080;
@@ -100,7 +100,7 @@ mod tests {
         std::fs::write(&file, b"one").unwrap();
         let first = proxy_name(&file).unwrap();
         assert_eq!(proxy_name(&file), Some(first.clone()));
-        assert!(first.ends_with("-540.mp4"));
+        assert!(first.ends_with("-480.mp4"));
         std::fs::write(&file, b"longer").unwrap();
         assert_ne!(proxy_name(&file), Some(first));
         assert_eq!(proxy_name(&folder.join("gone.mp4")), None);
@@ -126,5 +126,6 @@ mod tests {
         assert_eq!(request.short_side, PROXY_SIDE);
         assert!(request.audio.is_none());
         assert_eq!(request.range, TimeRange::new(0, 5_000_000));
+        assert!(crate::validate(&request).is_ok());
     }
 }

@@ -49,6 +49,7 @@ use cutlass_transcription::{
 mod assistant;
 mod compound;
 mod inspector;
+mod proxy;
 mod render;
 pub use assistant::AgentRun;
 
@@ -625,6 +626,7 @@ pub struct Shell {
     preview_cache: RefCell<FrameCache>,
     /// Stretches of the timeline drawn ahead, which the preview plays.
     renders: render::Renders,
+    proxies: proxy::Proxies,
     /// The lanes as last built, with the revision they were built at.
     lanes_cache: RefCell<Option<(u64, Arc<[LaneView]>)>>,
     settings: Settings,
@@ -744,6 +746,7 @@ impl Shell {
             transport: Transport::new(),
             preview_cache: RefCell::new(FrameCache::new()),
             renders: render::Renders::new(Self::home().renders()),
+            proxies: proxy::Proxies::new(Self::home().proxies()),
             lanes_cache: RefCell::new(None),
             settings,
             settings_file: None,
@@ -1262,6 +1265,7 @@ impl Shell {
         self.transport.forget_files();
         self.silence();
         self.find_renders();
+        self.find_proxies();
         Ok(())
     }
 
@@ -1919,7 +1923,7 @@ impl Shell {
         if let Some(session) = self.session.as_ref() {
             self.preview_cache.borrow_mut().preroll(
                 session,
-                &self.readers,
+                self.preview_readers(),
                 self.path.as_deref(),
                 self.playhead,
                 PREROLL,
@@ -2053,6 +2057,7 @@ impl Shell {
     pub(crate) fn set_readers(&mut self, readers: ReaderFactory) {
         self.transport.forget_mixer();
         self.readers = readers;
+        self.find_proxies();
         self.preview_cache.borrow_mut().clear();
         self.transport.forget_files();
     }
@@ -2091,6 +2096,9 @@ impl Shell {
             Some(render) => (&render.session, &self.renders.cache),
             None => (main, &self.preview_cache),
         };
+        let readers = self
+            .proxies
+            .preview(&self.readers, self.settings.playback.proxies);
         let Some(gpu) = self.gpu.as_mut() else {
             return Ok(None);
         };
@@ -2110,7 +2118,7 @@ impl Shell {
                 session,
                 &mut device,
                 Micros(time),
-                &self.readers,
+                readers,
                 self.path.as_deref(),
                 &*self.face,
             )
@@ -2152,7 +2160,7 @@ impl Shell {
                 session,
                 &mut device,
                 time,
-                &self.readers,
+                self.preview_readers(),
                 root.as_deref(),
                 &*self.face,
             )
@@ -2253,6 +2261,9 @@ impl Shell {
     pub fn update_settings(&mut self, change: impl FnOnce(&mut Settings)) {
         let before = self.settings.clone();
         change(&mut self.settings);
+        if self.settings.playback.proxies != before.playback.proxies {
+            self.preview_cache.borrow_mut().clear();
+        }
         if self.settings != before {
             self.save_settings();
         }

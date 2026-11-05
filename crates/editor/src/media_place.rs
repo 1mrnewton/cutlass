@@ -89,6 +89,47 @@ fn exclusive_main_owner(draft: &Draft, start: Micros, duration: Micros) -> Optio
     owner
 }
 
+/// The first unlocked audio row with room for `target`.
+#[must_use]
+pub fn sound_row(draft: &Draft, target: &TimeRange) -> Option<TrackId> {
+    draft
+        .tracks
+        .iter()
+        .find(|track| {
+            track.kind == TrackType::Audio
+                && !track.attribute.contains(TrackAttribute::LOCK)
+                && track
+                    .segments
+                    .iter()
+                    .all(|other| other.target.overlaps(target).ok() == Some(false))
+        })
+        .map(|track| track.id.clone())
+}
+
+/// The request that places a video clip's sound on its own clip, lined up
+/// with it, on a free audio row or a new one. `None` when the clip is not on
+/// the timeline. `fresh` makes an unused id from a prefix.
+pub fn extract_request(
+    draft: &Draft,
+    source_id: &SegmentId,
+    fresh: &mut dyn FnMut(&str) -> String,
+) -> Option<Request> {
+    let target = draft
+        .tracks
+        .iter()
+        .flat_map(|track| &track.segments)
+        .find(|segment| &segment.id == source_id)?
+        .target
+        .clone();
+    let track_id = sound_row(draft, &target).unwrap_or_else(|| TrackId::new(fresh("sound")));
+    Some(Request::ExtractAudio {
+        source_id: source_id.clone(),
+        track_id,
+        segment_id: SegmentId::new(fresh("sound")),
+        material_id: cutlass_model::MaterialId::new(fresh("sound")),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -160,6 +201,32 @@ mod tests {
             link_owner(&media_requests(&draft, &place("t", 500_000, 500_000), true)),
             Some(&SegmentId::new("a"))
         );
+    }
+
+    #[test]
+    fn extracted_sound_takes_a_free_audio_row_or_opens_one() {
+        let mut draft = draft();
+        let mut fresh = |prefix: &str| format!("{prefix}-new");
+        let Some(Request::ExtractAudio { track_id, .. }) =
+            extract_request(&draft, &SegmentId::new("a"), &mut fresh)
+        else {
+            panic!("an extract request");
+        };
+        assert_eq!(track_id, TrackId::new("sound-new"));
+        let mut sound = cutlass_model::Track::main(TrackId::new("music"));
+        sound.kind = TrackType::Audio;
+        sound.segments.push(Segment::new(
+            "song",
+            "m",
+            TimeRange::new(5_000_000, 1_000_000),
+        ));
+        draft.tracks.push(sound);
+        assert_eq!(
+            sound_row(&draft, &TimeRange::new(0, 1_000_000)),
+            Some(TrackId::new("music"))
+        );
+        assert_eq!(sound_row(&draft, &TimeRange::new(5_000_000, 10)), None);
+        assert!(extract_request(&draft, &SegmentId::new("z"), &mut fresh).is_none());
     }
 
     #[test]

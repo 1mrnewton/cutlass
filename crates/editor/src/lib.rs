@@ -58,7 +58,7 @@ pub use library::{
     delete_folder, folder_trail, hide_file, library_files, library_folders, next_folder_name,
     parent_of, place, rename_folder,
 };
-pub use media_place::{MediaPlace, media_requests};
+pub use media_place::{MediaPlace, extract_request, media_requests, sound_row};
 pub use reorder::{place_of, reorder_start};
 pub use ripple::{close_gap, gap_at, ripple_delete};
 pub use ruler::{RulerStep, Tick, clock, ruler_step, ruler_ticks, zoom_ceiling};

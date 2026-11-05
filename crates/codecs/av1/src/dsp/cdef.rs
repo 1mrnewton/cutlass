@@ -24,7 +24,7 @@ use super::Pixel;
 use crate::spec::tables::{CDEF_DIRECTIONS, CDEF_PRI_TAPS, CDEF_SEC_TAPS, CDEF_UV_DIR, DIV_TABLE};
 
 /// Value in the padded source of a sample that is not CdefAvailable.
-pub const CDEF_UNAVAILABLE: u16 = u16::MAX;
+pub const CDEF_UNAVAILABLE: u16 = i16::MAX as u16;
 
 /// Border, in samples, around a block in the padded source of [`cdef_filter`].
 pub const CDEF_BORDER: usize = 2;
@@ -304,11 +304,13 @@ fn load<const W: usize, const R: usize, const L: usize>(
     src: &[u16],
     start: usize,
     stride: usize,
-) -> [u16; L] {
-    let mut v = [0u16; L];
+) -> [i16; L] {
+    let mut v = [0i16; L];
     for r in 0..R {
         let row = &src[start + r * stride..start + r * stride + W];
-        v[r * W..r * W + W].copy_from_slice(row);
+        for (d, &s) in v[r * W..r * W + W].iter_mut().zip(row) {
+            *d = s as i16;
+        }
     }
     v
 }
@@ -316,35 +318,38 @@ fn load<const W: usize, const R: usize, const L: usize>(
 /// Adds `tap * constrain(p - x)` for both signs of `off` to `sum`, and
 /// (when `MINMAX`) tracks the minimum / maximum of the available taps in
 /// `mn` / `mx` (the latter as `p + 1` wrapping, so unavailable samples, which
-/// are `u16::MAX`, become 0 and never win).
+/// are `i16::MAX`, become `i16::MIN` and never win; they never win the
+/// minimum either).
 ///
-/// Everything runs on 16-bit lanes. `|p - x|` is formed with saturating
-/// subtractions, so an unavailable `p` gives at least `65535 - 4095`, whose
-/// shift by at most `damping - floor_log2(thr)` still exceeds `thr` (damping
-/// is at most 10): the saturating `thr - (|d| >> shift)` is then 0. Every
-/// constrained value is at most 240 (12-bit primary strength), so the
-/// weighted sums stay far inside `i16`.
+/// Everything runs on signed 16-bit lanes. For an unavailable `p`,
+/// `|p - x| >= 32767 - 4095`, whose shift by at most
+/// `damping - floor_log2(thr)` still exceeds `thr` (damping is at most 10):
+/// `thr - (|d| >> shift)` is then negative and the tap 0. Every constrained
+/// value is at most 240 (12-bit primary strength), so the weighted sums stay
+/// far inside `i16`.
 #[inline(always)]
 fn taps<const W: usize, const R: usize, const L: usize, const MINMAX: bool>(
     src: &[u16],
     c: usize,
     stride: usize,
     off: isize,
-    x: &[u16; L],
-    thr: u16,
+    x: &[i16; L],
+    thr: i16,
     shift: u32,
     tap: i16,
     sum: &mut [i16; L],
-    mn: &mut [u16; L],
-    mx: &mut [u16; L],
+    mn: &mut [i16; L],
+    mx: &mut [i16; L],
 ) {
     for o in [off, -off] {
         let p = load::<W, R, L>(src, (c as isize + o) as usize, stride);
         for l in 0..L {
-            let (a, b) = (p[l], x[l]);
-            let ad = a.saturating_sub(b) | b.saturating_sub(a);
-            let v = ad.min(thr.saturating_sub(ad >> shift)) as i16;
-            let v = if a < b { v.wrapping_neg() } else { v };
+            let d = p[l].wrapping_sub(x[l]);
+            let ad = d.max(d.wrapping_neg());
+            let t = thr.wrapping_sub(ad >> shift).max(0);
+            let v = ad.min(t);
+            let m = d >> 15;
+            let v = (v ^ m).wrapping_sub(m);
             sum[l] = sum[l].wrapping_add(tap.wrapping_mul(v));
         }
         if MINMAX {
@@ -377,7 +382,7 @@ fn block<
     p: &Params,
 ) {
     let b = CDEF_BORDER;
-    let (pri, sec) = (p.pri as u16, p.sec as u16);
+    let (pri, sec) = (p.pri as i16, p.sec as i16);
     let pt = [p.pt[0] as i16, p.pt[1] as i16];
     let st = CDEF_SEC_TAPS[0].map(i16::from);
     let mut i = 0;
@@ -392,78 +397,45 @@ fn block<
         }
         if PRI {
             for k in 0..2 {
-                if PRI && SEC {
-                    taps::<W, R, L, true>(
-                        src,
-                        c,
-                        stride,
-                        p.pri_off[k],
-                        &x,
-                        pri,
-                        p.pri_shift,
-                        pt[k],
-                        &mut sum,
-                        &mut mn,
-                        &mut mx,
-                    );
-                } else {
-                    taps::<W, R, L, false>(
-                        src,
-                        c,
-                        stride,
-                        p.pri_off[k],
-                        &x,
-                        pri,
-                        p.pri_shift,
-                        pt[k],
-                        &mut sum,
-                        &mut mn,
-                        &mut mx,
-                    );
-                }
+                taps::<W, R, L, SEC>(
+                    src,
+                    c,
+                    stride,
+                    p.pri_off[k],
+                    &x,
+                    pri,
+                    p.pri_shift,
+                    pt[k],
+                    &mut sum,
+                    &mut mn,
+                    &mut mx,
+                );
             }
         }
         if SEC {
             for (k, &off) in p.sec_off.iter().enumerate() {
-                let tap = st[k >> 1];
-                if PRI && SEC {
-                    taps::<W, R, L, true>(
-                        src,
-                        c,
-                        stride,
-                        off,
-                        &x,
-                        sec,
-                        p.sec_shift,
-                        tap,
-                        &mut sum,
-                        &mut mn,
-                        &mut mx,
-                    );
-                } else {
-                    taps::<W, R, L, false>(
-                        src,
-                        c,
-                        stride,
-                        off,
-                        &x,
-                        sec,
-                        p.sec_shift,
-                        tap,
-                        &mut sum,
-                        &mut mn,
-                        &mut mx,
-                    );
-                }
+                taps::<W, R, L, PRI>(
+                    src,
+                    c,
+                    stride,
+                    off,
+                    &x,
+                    sec,
+                    p.sec_shift,
+                    st[k >> 1],
+                    &mut sum,
+                    &mut mn,
+                    &mut mx,
+                );
             }
         }
         let mut y = [0i16; L];
         for l in 0..L {
             let s = sum[l];
-            let s = (s + 8 - i16::from(s < 0)) >> 4;
-            y[l] = x[l] as i16 + s;
+            let s = (s + 8 + (s >> 15)) >> 4;
+            y[l] = x[l] + s;
             if PRI && SEC {
-                y[l] = y[l].max(mn[l] as i16).min((mx[l] - 1) as i16);
+                y[l] = y[l].max(mn[l]).min(mx[l] - 1);
             }
         }
         for r in 0..R {
@@ -495,19 +467,19 @@ fn filter_scalar<P: Pixel>(
             let c = base + j;
             let x = src[c] as i32;
             let mut sum = 0i32;
-            let mut mx = (x as u16).wrapping_add(1);
-            let mut mn = x as u16;
+            let mut mx = (x as i16).wrapping_add(1);
+            let mut mn = x as i16;
             for k in 0..2 {
                 for sign in [-1isize, 1] {
                     let v = src[(c as isize + sign * p.pri_off[k]) as usize];
                     sum += p.pt[k] * constrain(v as i32 - x, p.pri, p.pri_shift);
-                    mx = mx.max(v.wrapping_add(1));
-                    mn = mn.min(v);
+                    mx = mx.max((v as i16).wrapping_add(1));
+                    mn = mn.min(v as i16);
                     for so in [p.sec_off[2 * k], p.sec_off[2 * k + 1]] {
                         let q = src[(c as isize + sign * so) as usize];
                         sum += st[k] * constrain(q as i32 - x, p.sec, p.sec_shift);
-                        mx = mx.max(q.wrapping_add(1));
-                        mn = mn.min(q);
+                        mx = mx.max((q as i16).wrapping_add(1));
+                        mn = mn.min(q as i16);
                     }
                 }
             }

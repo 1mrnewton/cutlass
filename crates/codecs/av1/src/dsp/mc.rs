@@ -575,16 +575,13 @@ pub fn prep<P: Pixel>(
     let fh = half(&SUBPEL_FILTERS[fx][mx]);
     let fv = half(&SUBPEL_FILTERS[fy][my]);
     match (mx != 0, my != 0) {
-        (false, false) => {
-            let sh = 7 - r0;
-            for r in 0..h {
-                let d = &mut tmp[r * w..][..w];
-                let s = &src[src_off + r * src_stride..][..w];
-                for c in 0..w {
-                    d[c] = ((s[c].to_i32() as i16) << sh) - bias;
-                }
-            }
-        }
+        (false, false) => match w {
+            4 => prep_copy::<P, 4>(tmp, src, src_off, src_stride, w, h, 7 - r0, bias),
+            8 => prep_copy::<P, 8>(tmp, src, src_off, src_stride, w, h, 7 - r0, bias),
+            16 => prep_copy::<P, 16>(tmp, src, src_off, src_stride, w, h, 7 - r0, bias),
+            32 => prep_copy::<P, 32>(tmp, src, src_off, src_stride, w, h, 7 - r0, bias),
+            _ => prep_copy::<P, 0>(tmp, src, src_off, src_stride, w, h, 7 - r0, bias),
+        },
         (true, false) => h_pass_dyn::<P, i16>(
             tmp,
             w,
@@ -647,6 +644,28 @@ pub fn prep<P: Pixel>(
             r0,
             move |a, b| (a << 2).wrapping_add((b + 32) >> 6).wrapping_sub(bias),
         ),
+    }
+}
+
+/// Whole-sample [`prep`] for blocks `W` wide (0: any width).
+#[inline(always)]
+fn prep_copy<P: Pixel, const W: usize>(
+    tmp: &mut [i16],
+    src: &[P],
+    src_off: usize,
+    src_stride: usize,
+    w: usize,
+    h: usize,
+    sh: u32,
+    bias: i16,
+) {
+    let w = if W != 0 { W } else { w };
+    for r in 0..h {
+        let d = &mut tmp[r * w..][..w];
+        let s = &src[src_off + r * src_stride..][..w];
+        for c in 0..w {
+            d[c] = ((s[c].to_i32() as i16) << sh) - bias;
+        }
     }
 }
 
@@ -826,8 +845,43 @@ pub fn avg<P: Pixel>(
     h: usize,
     bd: u32,
 ) {
+    match w {
+        4 => avg_w::<P, 4>(dst, dst_stride, t0, t1, w, h, bd),
+        8 => avg_w::<P, 8>(dst, dst_stride, t0, t1, w, h, bd),
+        16 => avg_w::<P, 16>(dst, dst_stride, t0, t1, w, h, bd),
+        32 => avg_w::<P, 32>(dst, dst_stride, t0, t1, w, h, bd),
+        _ => avg_w::<P, 0>(dst, dst_stride, t0, t1, w, h, bd),
+    }
+}
+
+/// [`avg`] for blocks `W` wide (0: any width).
+#[inline(always)]
+fn avg_w<P: Pixel, const W: usize>(
+    dst: &mut [P],
+    dst_stride: usize,
+    t0: &[i16],
+    t1: &[i16],
+    w: usize,
+    h: usize,
+    bd: u32,
+) {
+    let w = if W != 0 { W } else { w };
     let sh = 1 + inter_post_round(bd, true);
     let off = (1 << (sh - 1)) + 2 * prep_bias(bd);
+    if !P::HBD {
+        // 8-bit intermediates lie in -5150..=9245: the sum and the rounding
+        // stay inside i16.
+        let off = off as i16;
+        for r in 0..h {
+            let d = &mut dst[r * dst_stride..][..w];
+            let a = &t0[r * w..][..w];
+            let b = &t1[r * w..][..w];
+            for c in 0..w {
+                d[c] = clip16::<P>((a[c] + b[c] + off) >> sh, 255);
+            }
+        }
+        return;
+    }
     for r in 0..h {
         let d = &mut dst[r * dst_stride..][..w];
         let a = &t0[r * w..][..w];

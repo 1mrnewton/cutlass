@@ -15,12 +15,14 @@
 
 #![forbid(unsafe_code)]
 
+pub mod adjust;
 pub mod blend;
 pub mod catalog;
 pub mod package;
 pub mod recipe;
 pub mod source;
 
+pub use adjust::{Adjust, AdjustKey, adjust_rgba, segment_adjust};
 pub use blend::{BLEND_WGSL, blend_pixel, blend_unit, segment_blend};
 pub use catalog::{
     ADD, ANIM_IN, ANIM_LOOP, ANIM_OUT, BlendMode, CONTRAST, CatalogEntry, DIFFERENCE, Distort,

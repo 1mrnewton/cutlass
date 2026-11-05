@@ -8271,6 +8271,9 @@ mod tests {
         assert_eq!(reopened.folder.draft.tracks[0].segments[0].volume, 0.5);
     }
 
+    // Windows does not move a folder while a file in it is open, and the
+    // held `.locked` is.
+    #[cfg(not(windows))]
     #[test]
     fn a_missing_folder_is_named_and_the_session_stays() {
         let temp = Temp::new();

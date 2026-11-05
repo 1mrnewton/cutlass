@@ -179,6 +179,10 @@ pub struct Av1Enc {
     /// follow `sb_work`, the coding work of the last frame's superblocks.
     auto_tiles: bool,
     sb_work: Vec<u32>,
+    /// Loop filter level and CDEF strengths (y pri, y sec, uv pri, uv sec)
+    /// the last frame nothing predicts from chose, until the next such
+    /// frame takes them.
+    leaf_filters: Option<(u8, [u8; 4])>,
 }
 
 /// log2 of the delta q step of per-superblock quantizers.
@@ -375,6 +379,7 @@ impl Av1Enc {
             tpl: None,
             auto_tiles,
             sb_work: Vec::new(),
+            leaf_filters: None,
         })
     }
 
@@ -1323,13 +1328,21 @@ impl Av1Enc {
                 .map(|f| (f64::from(base_lvl) * f).round().clamp(0.0, 63.0) as u8)
                 .collect();
             levels.dedup();
+            // Above speed 4 every other frame nothing predicts from takes
+            // the filter strengths the one before chose instead of
+            // searching (its loop filter level is then the only one tried).
+            let leaf = spec.level == u32::MAX && !key && self.cfg.speed >= 5;
+            let reuse = if leaf { self.leaf_filters.take() } else { None };
+            if let Some((l, _)) = reuse {
+                levels = vec![l];
+            }
             // Below speed 4 each level filters the whole frame. Else every
             // other 64-row area is filtered and measured (of at least 4, as
             // the CDEF search does), each area of each level a job of its
             // own on a copy of the rows it touches, and the chosen level
             // then filters the whole frame.
             let sb_rows = fs.mi_rows.div_ceil(16);
-            let sampled = !full && sb_rows >= 4 && !seq.use_128x128_superblock;
+            let sampled = !full && sb_rows >= 4 && !seq.use_128x128_superblock && levels.len() > 1;
             let level_hdr = |l: u8| {
                 let mut h2 = hdr.clone();
                 h2.loop_filter.level = [l, l, l, l];
@@ -1487,6 +1500,13 @@ impl Av1Enc {
                     super::cdef_search::set_strength(&mut best_h, k, st);
                 }
                 cdef_choice = Some(ch);
+            } else if let Some((_, [yp, ys, up, us])) = reuse
+                && seq.enable_cdef
+            {
+                best_h.cdef.y_pri = [yp; 8];
+                best_h.cdef.y_sec = [ys; 8];
+                best_h.cdef.uv_pri = [up; 8];
+                best_h.cdef.uv_sec = [us; 8];
             } else if let Some((_, deblocked)) = best_lf.as_ref()
                 && seq.enable_cdef
             {
@@ -1567,6 +1587,13 @@ impl Av1Enc {
                     p.apply(&mut best_h);
                 }
                 cdef_out = Some(cdef_pic);
+            }
+            if leaf && reuse.is_none() {
+                let c = &best_h.cdef;
+                self.leaf_filters = Some((
+                    best_h.loop_filter.level[0],
+                    [c.y_pri[0], c.y_sec[0], c.uv_pri[0], c.uv_sec[0]],
+                ));
             }
             hdr_bytes = write_frame_header(&best_h, &ctx, &opts);
         }

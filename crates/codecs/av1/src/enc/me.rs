@@ -370,6 +370,52 @@ fn hadamard_abs<P: Pixel, const N: usize>(
     s
 }
 
+/// One butterfly stage inside an 8-lane row: lane `k` pairs with
+/// `v[perm[k]]` and receives the sum (`sign[k] = 1`) or the difference
+/// (`sign[k] = -1`). Single-source lane permutations become shuffles.
+#[inline(always)]
+fn row_stage(v: [i16; 8], perm: [usize; 8], sign: [i16; 8]) -> [i16; 8] {
+    core::array::from_fn(|k| v[perm[k]].wrapping_add(v[k].wrapping_mul(sign[k])))
+}
+
+/// [`hadamard_abs`] of an 8x8 block of 8-bit samples in 16-bit lanes, one
+/// row per vector: the row-index stages across rows, two column-index
+/// stages by lane permutations and the last one as pairwise sums and
+/// differences widened to 32 bits. Differences lie in `-255..=255`, so every
+/// 16-bit intermediate stays within `32 * 255`.
+#[inline(always)]
+fn hadamard8_abs_8bit<P: Pixel>(a: &[P], a_stride: usize, b: &[P], b_stride: usize) -> u32 {
+    let a = &a[..7 * a_stride + 8];
+    let b = &b[..7 * b_stride + 8];
+    let mut m = [[0i16; 8]; 8];
+    for (r, row) in m.iter_mut().enumerate() {
+        let ra = &a[r * a_stride..][..8];
+        let rb = &b[r * b_stride..][..8];
+        *row = core::array::from_fn(|k| (ra[k].to_i32() - rb[k].to_i32()) as i16);
+    }
+    for half in [1, 2, 4] {
+        let mut i = 0;
+        while i < 8 {
+            for j in i..i + half {
+                let (x, y) = (m[j], m[j + half]);
+                m[j] = core::array::from_fn(|k| x[k].wrapping_add(y[k]));
+                m[j + half] = core::array::from_fn(|k| x[k].wrapping_sub(y[k]));
+            }
+            i += 2 * half;
+        }
+    }
+    let mut acc = [0i32; 4];
+    for row in &m {
+        let v = row_stage(*row, [4, 5, 6, 7, 0, 1, 2, 3], [1, 1, 1, 1, -1, -1, -1, -1]);
+        let v = row_stage(v, [2, 3, 0, 1, 6, 7, 4, 5], [1, 1, -1, -1, 1, 1, -1, -1]);
+        for k in 0..4 {
+            let (x, y) = (i32::from(v[2 * k]), i32::from(v[2 * k + 1]));
+            acc[k] += (x + y).abs() + (x - y).abs();
+        }
+    }
+    acc.iter().sum::<i32>() as u32
+}
+
 #[inline(always)]
 fn satd_tiles<P: Pixel, const N: usize>(
     a: &[P],
@@ -382,12 +428,12 @@ fn satd_tiles<P: Pixel, const N: usize>(
     let mut total = 0u32;
     for by in (0..h).step_by(N) {
         for bx in (0..w).step_by(N) {
-            let s = hadamard_abs::<P, N>(
-                &a[by * a_stride + bx..],
-                a_stride,
-                &b[by * b_stride + bx..],
-                b_stride,
-            );
+            let (ta, tb) = (&a[by * a_stride + bx..], &b[by * b_stride + bx..]);
+            let s = if N == 8 && !P::HBD {
+                hadamard8_abs_8bit(ta, a_stride, tb, b_stride)
+            } else {
+                hadamard_abs::<P, N>(ta, a_stride, tb, b_stride)
+            };
             total += (s + 1) >> 1;
         }
     }

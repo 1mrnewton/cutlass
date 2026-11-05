@@ -3743,6 +3743,10 @@ fn paint_clip_menu(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
             "render-preview" => shell.render_selected(false),
             "render-full" => shell.render_selected(true),
             "make-proxies" => shell.make_proxies(),
+            "arrange-forward" => shell.arrange(cutlass_session::Arrange::Forward),
+            "arrange-backward" => shell.arrange(cutlass_session::Arrange::Backward),
+            "arrange-front" => shell.arrange(cutlass_session::Arrange::Front),
+            "arrange-back" => shell.arrange(cutlass_session::Arrange::Back),
             "variable-speed" => {
                 shell.toggle_speed_curves();
                 Ok(())
@@ -6325,6 +6329,10 @@ fn project_dialog(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
                         }
                     }
                 });
+                ui.checkbox(
+                    &mut settings.free_layer,
+                    "Free layer: stack clips with Arrange, not by their tracks",
+                );
                 ui.add_space(8.0);
                 save = ui.button("Save").clicked();
             });

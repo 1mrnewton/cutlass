@@ -119,6 +119,7 @@ const VIDEO: &[Entry] = &[
     done("link-media", "Link to media", ""),
     done("open-file", "Open file location", ""),
     done("make-proxies", "Make proxy", ""),
+    ARRANGE,
     SEP,
     done("edit-effects", "Edit effects", ""),
     done("variable-speed", "Show variable speed animation", "⌥K"),
@@ -154,6 +155,19 @@ const AUDIO: &[Entry] = &[
     REPLACE_SOUND,
 ];
 
+/// Stack a picture clip above or below the clips it overlaps, with Free
+/// layer on in the project settings.
+const ARRANGE: Entry = sub(
+    "arrange",
+    "Arrange",
+    &[
+        done("arrange-forward", "Bring forward", ""),
+        done("arrange-backward", "Send backward", ""),
+        done("arrange-front", "Bring to front", ""),
+        done("arrange-back", "Send to back", ""),
+    ],
+);
+
 const TEXT: &[Entry] = &[
     COPY,
     CUT,
@@ -161,6 +175,7 @@ const TEXT: &[Entry] = &[
     SEP,
     done("edit-text", "Edit text", ""),
     done("style", "Style", ""),
+    ARRANGE,
     SEP,
     DEACTIVATE,
     REPLACE,
@@ -172,6 +187,7 @@ const STICKER: &[Entry] = &[
     DELETE,
     SEP,
     done("flip", "Flip", ""),
+    ARRANGE,
     SEP,
     DEACTIVATE,
     REPLACE,
@@ -661,6 +677,7 @@ mod tests {
                 "link-media",
                 "open-file",
                 "make-proxies",
+                "arrange",
                 "edit-effects",
                 "variable-speed",
                 "range",

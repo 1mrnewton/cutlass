@@ -66,7 +66,13 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
             let mut pred_w = block_width(self.b.bsize) >> sx;
             let mut pred_h = block_height(self.b.bsize) >> sy;
             let mut some_use_intra = false;
-            for r in 0..(n4h << sy) {
+            // Unless the candidates start before the block (chroma of
+            // blocks narrower or shorter than 8), they are the block's own
+            // 4x4s, inter when its first reference is.
+            let own = cand_row == self.b.mi_row
+                && cand_col == self.b.mi_col
+                && self.b.ref_frame[0] > INTRA_FRAME;
+            for r in 0..if own { 0 } else { n4h << sy } {
                 for c in 0..(n4w << sx) {
                     if self.mi(cand_row + r, cand_col + c).ref_frame[0] == INTRA_FRAME {
                         some_use_intra = true;

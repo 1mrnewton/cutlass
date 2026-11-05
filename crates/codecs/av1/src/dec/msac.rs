@@ -11,8 +11,8 @@ const MIN_PROB: u32 = 4;
 
 #[derive(Clone, Copy)]
 pub struct Msac<'a> {
+    /// The bytes not yet read.
     buf: &'a [u8],
-    pos: usize,
     dif: u64,
     rng: u32,
     cnt: i32,
@@ -23,7 +23,6 @@ impl<'a> Msac<'a> {
     pub fn new(data: &'a [u8], disable_cdf_update: bool) -> Self {
         let mut s = Self {
             buf: data,
-            pos: 0,
             dif: 0,
             rng: 0x8000,
             cnt: -15,
@@ -39,16 +38,16 @@ impl<'a> Msac<'a> {
         // Fast path: eight bytes at once. Bits of the byte after the last
         // whole one consumed may land below `c`; the next refill ORs the
         // same bits in again.
-        if let Some(b) = self.buf.get(self.pos..).and_then(|s| s.first_chunk::<8>()) {
+        if let Some(b) = self.buf.first_chunk::<8>() {
             let v = !u64::from_be_bytes(*b);
             self.dif |= v >> (56 - c);
             let n = (c >> 3) + 1;
-            self.pos += n as usize;
+            self.buf = self.buf.get(n as usize..).unwrap_or_default();
             self.cnt = WIN as i32 - (c - 8 * n) - 24;
             return;
         }
-        let (pos, dif, cnt) = refill_slow(self.buf, self.pos, self.dif, self.cnt);
-        self.pos = pos;
+        let (buf, dif, cnt) = refill_slow(self.buf, self.dif, self.cnt);
+        self.buf = buf;
         self.dif = dif;
         self.cnt = cnt;
     }
@@ -289,21 +288,21 @@ impl<'a> Msac<'a> {
 /// keep it in registers.
 #[cold]
 #[inline(never)]
-fn refill_slow(buf: &[u8], mut pos: usize, mut dif: u64, cnt: i32) -> (usize, u64, i32) {
+fn refill_slow(mut buf: &[u8], mut dif: u64, cnt: i32) -> (&[u8], u64, i32) {
     let mut c = WIN as i32 - cnt - 24;
     loop {
-        if pos >= buf.len() {
+        let Some((&b, rest)) = buf.split_first() else {
             dif |= !(!0xffu64 << c);
             break;
-        }
-        dif |= u64::from(buf[pos] ^ 0xff) << c;
-        pos += 1;
+        };
+        dif |= u64::from(b ^ 0xff) << c;
+        buf = rest;
         c -= 8;
         if c < 0 {
             break;
         }
     }
-    (pos, dif, WIN as i32 - c - 24)
+    (buf, dif, WIN as i32 - c - 24)
 }
 
 /// Converts a spec CDF row (N values ending in 32768, then the counter) to

@@ -76,7 +76,7 @@ All numbers are from this machine (Apple M5 Pro), release builds, one thread, ff
 | Rate at 1 Mb/s | 0.85×–1.15× of target | 1.004×, 1.006×, 1.008× of 625,000 bytes | same | Pass |
 | Decode 1080p, one thread | ≥ 60 fps | testsrc2 254.5 fps; the 901-frame WebM 289.6 fps. ffmpeg `vp8` 508.5 and 828.1 fps, `libvpx` 438.0 and 853.2 fps, so 0.35×–0.58× of ffmpeg | `cargo bench -p cutlass-vp8` | Pass |
 | Encode 640×360, default preset | ≥ 30 fps | testsrc2 66.9 fps; the three natural clips 53.9–56.7 fps. libvpx good cpu-used 4: 852 fps | `cargo bench -p cutlass-vp8`, gate test | Pass |
-| Decoder fuzz | ≥ 30 min, findings 0 | 1800 s, 5,922,430 inputs, findings 0 | `decoder_fuzz_does_not_panic` | Verified |
+| Decoder fuzz | ≥ 30 min, findings 0 | 1800 s, 5,922,430 inputs, findings 0 | `decoder_fuzz_does_not_panic` | Pass |
 | `cargo fmt --all -- --check` | Clean | Clean for this crate. `crates/codecs/gif/src/quant.rs` differs on `development` already (not touched here) | | Pass for VP8 |
 | `cargo lint` | Clean | Clean, also `--target x86_64-unknown-linux-gnu` for this crate | | Pass |
 | `cargo test -p cutlass-vp8` | Pass | 51 unit and oracle tests and 1 integration test pass in debug and release | | Pass |

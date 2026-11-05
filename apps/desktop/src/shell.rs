@@ -4620,10 +4620,108 @@ impl Shell {
     pub fn auto_adjust(&mut self) -> Result<(), ShellError> {
         let segment_id = self.picture_segment("auto adjust looks at a picture")?;
         self.refuse_locked(&segment_id)?;
+        let own = self.drawn_alone(&segment_id)?;
+        let adjust = cutlass_effects::auto_adjust(&own);
+        self.set_auto_keys(&segment_id, &adjust)
+    }
+
+    /// Bring the selected picture's look toward `reference`'s, each drawn
+    /// alone and without its colour work at the playhead. One undo step.
+    pub fn match_colour(&mut self, reference: &SegmentId) -> Result<(), ShellError> {
+        let segment_id = self.picture_segment("colour match looks at a picture")?;
+        self.refuse_locked(&segment_id)?;
+        if *reference == segment_id {
+            return Err(ShellError::Unavailable(
+                "pick another clip to match".to_owned(),
+            ));
+        }
+        let own = self.drawn_alone(&segment_id)?;
+        let goal = self.drawn_alone(reference)?;
+        let adjust = cutlass_effects::match_adjust(&own, &goal);
+        self.set_auto_keys(&segment_id, &adjust)
+    }
+
+    /// The other picture clips the selected one can match, by name, in
+    /// timeline order.
+    pub fn match_choices(&self) -> Vec<(SegmentId, String)> {
+        let Some(selected) = self.selected().cloned() else {
+            return Vec::new();
+        };
+        let Ok(draft) = self.session_draft() else {
+            return Vec::new();
+        };
+        let mut choices: Vec<(i64, SegmentId, String)> = draft
+            .tracks
+            .iter()
+            .flat_map(|track| {
+                track
+                    .segments
+                    .iter()
+                    .map(move |segment| (&track.kind, segment))
+            })
+            .filter(|(_, segment)| segment.id != selected)
+            .filter(|(kind, segment)| cutlass_editor::can_turn(draft, segment, kind))
+            .filter(|(_, segment)| {
+                matches!(
+                    draft.materials.get(segment.material_id.as_str()),
+                    Some(MaterialRef::Video(_))
+                )
+            })
+            .map(|(_, segment)| {
+                (
+                    segment.target.start.0,
+                    segment.id.clone(),
+                    clip_name(draft, segment),
+                )
+            })
+            .collect();
+        choices.sort_by_key(|(start, _, _)| *start);
+        choices
+            .into_iter()
+            .map(|(_, id, name)| (id, name))
+            .collect()
+    }
+
+    /// Set the sliders auto adjust and colour match set to `adjust`'s, in
+    /// one undo step; the ones already there are left.
+    fn set_auto_keys(
+        &mut self,
+        segment_id: &SegmentId,
+        adjust: &cutlass_effects::Adjust,
+    ) -> Result<(), ShellError> {
+        let current = {
+            let draft = self.session_draft()?;
+            placed(draft, segment_id)
+                .map(|(segment, _)| cutlass_effects::segment_adjust(draft, segment))
+                .unwrap_or_default()
+        };
+        let mut requests = Vec::new();
+        for key in cutlass_effects::AUTO_KEYS {
+            let value = adjust.get(key);
+            if value == current.get(key) {
+                continue;
+            }
+            let material_id = MaterialId::new(self.fresh("adjust"));
+            requests.push(Request::SetAdjust {
+                segment_id: segment_id.clone(),
+                material_id,
+                key: key.kind().to_owned(),
+                value: f64::from(value),
+            });
+        }
+        if requests.is_empty() {
+            return Ok(());
+        }
+        self.apply_requests(&requests)
+    }
+
+    /// `segment_id` drawn alone, without its colour work, on a clear
+    /// canvas, at the playhead or the nearest frame of the clip.
+    fn drawn_alone(&self, segment_id: &SegmentId) -> Result<Vec<u8>, ShellError> {
         let mut draft = self.session_draft()?.clone();
         let mut span = None;
         for track in &mut draft.tracks {
-            track.segments.retain(|segment| segment.id == segment_id);
+            track.segments.retain(|segment| segment.id == *segment_id);
             if let Some(segment) = track.segments.first() {
                 span = Some(segment.target.clone());
             }
@@ -4670,29 +4768,7 @@ impl Shell {
                 &*self.face,
             )
             .map_err(|error| ShellError::Eval(error.to_string()))?;
-        let adjust = cutlass_effects::auto_adjust(&picture.rgba);
-        let current = self
-            .inspection()
-            .map(|inspection| inspection.adjust)
-            .unwrap_or_default();
-        let mut requests = Vec::new();
-        for key in cutlass_effects::AUTO_KEYS {
-            let value = adjust.get(key);
-            if value == current.get(key) {
-                continue;
-            }
-            let material_id = MaterialId::new(self.fresh("adjust"));
-            requests.push(Request::SetAdjust {
-                segment_id: segment_id.clone(),
-                material_id,
-                key: key.kind().to_owned(),
-                value: f64::from(value),
-            });
-        }
-        if requests.is_empty() {
-            return Ok(());
-        }
-        self.apply_requests(&requests)
+        Ok(picture.rgba)
     }
 
     pub fn set_opacity(&mut self, opacity: f64) -> Result<(), ShellError> {
@@ -10772,7 +10848,7 @@ mod tests {
     }
 
     #[test]
-    fn auto_adjust_evens_out_a_dark_blue_picture_in_one_undo_step() {
+    fn auto_adjust_and_colour_match_set_the_sliders_in_one_undo_step() {
         use cutlass_effects::AdjustKey;
         let temp = Temp::new();
         let png = temp.path.join("dark.png");
@@ -10795,6 +10871,22 @@ mod tests {
         let mut segment = Segment::new("color", "photo", TimeRange::new(0, 1_000_000));
         segment.source_range = Some(TimeRange::new(0, 1_000_000));
         draft.tracks[0].segments.push(segment);
+        let warm_png = temp.path.join("warm.png");
+        image::RgbaImage::from_fn(8, 4, |x, _| {
+            let lift = u8::try_from(x * 8).unwrap();
+            image::Rgba([0xB0 + lift, 0x80 + lift, 0x40 + lift, 0xFF])
+        })
+        .save(&warm_png)
+        .unwrap();
+        let mut warm = MaterialVideo::new("warm");
+        warm.kind = "photo".to_owned();
+        warm.path = warm_png.display().to_string();
+        warm.width = 8;
+        warm.height = 4;
+        draft.materials.videos.push(warm);
+        let mut segment = Segment::new("warm", "warm", TimeRange::new(1_000_000, 1_000_000));
+        segment.source_range = Some(TimeRange::new(0, 1_000_000));
+        draft.tracks[0].segments.push(segment);
         Folder::new(draft).save(&temp.path).unwrap();
         let mut desktop = shell();
         desktop.open_folder(&temp.path).unwrap();
@@ -10812,8 +10904,27 @@ mod tests {
         let adjust = desktop.inspection().unwrap().adjust;
         assert!((adjust.get(AdjustKey::Exposure) + 0.8).abs() < 1e-6);
         assert_eq!(adjust.get(AdjustKey::Temperature), 0.0);
+        // Colour match warms the blue picture toward the warm one.
+        let choices = desktop.match_choices();
+        assert_eq!(choices.len(), 1, "{choices:?}");
+        assert_eq!(choices[0].0, SegmentId::new("warm"));
+        desktop.match_colour(&SegmentId::new("warm")).unwrap();
+        let matched = desktop.inspection().unwrap().adjust;
+        assert!(matched.get(AdjustKey::Temperature) > 0.5, "{matched:?}");
+        assert!(matched.get(AdjustKey::Exposure) > 0.5, "{matched:?}");
+        assert!(desktop.match_colour(&SegmentId::new("color")).is_err());
+        desktop.undo().unwrap();
+        assert_eq!(
+            desktop
+                .inspection()
+                .unwrap()
+                .adjust
+                .get(AdjustKey::Temperature),
+            0.0
+        );
         desktop.select(None);
         assert!(desktop.auto_adjust().is_err());
+        assert!(desktop.match_choices().is_empty());
     }
 
     #[test]

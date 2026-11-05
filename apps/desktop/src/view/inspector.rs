@@ -919,9 +919,32 @@ fn adjust_tab(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState, inspec
         });
     });
     divider(ui);
-    for label in ["Color match", "Color correction"] {
-        later_row(ui, label);
+    let choices = shell.match_choices();
+    let mut matched = None;
+    ui.horizontal(|ui| {
+        ui.set_min_height(40.0);
+        ui.label(RichText::new("Color match").size(13.0).color(tokens::TEXT));
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.add_enabled_ui(!choices.is_empty(), |ui| {
+                egui::ComboBox::from_id_salt("color-match")
+                    .selected_text(RichText::new("Match to…").size(12.0))
+                    .show_ui(ui, |ui| {
+                        for (id, name) in &choices {
+                            if ui.selectable_label(false, name).clicked() {
+                                matched = Some(id.clone());
+                            }
+                        }
+                    })
+                    .response
+                    .on_disabled_hover_text("Add another picture clip to match");
+            });
+        });
+    });
+    if let Some(reference) = matched {
+        send(shell, |shell| shell.match_colour(&reference));
     }
+    divider(ui);
+    later_row(ui, "Color correction");
     lut_section(shell, ui, state, inspection);
     adjust_sliders(shell, ui, state, inspection);
     footer(ui, &["Apply to all", "Save as preset"]);

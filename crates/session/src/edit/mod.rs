@@ -9,6 +9,7 @@ mod effect;
 mod extract;
 mod fade;
 mod freeze;
+mod grade;
 mod import;
 mod keyframe;
 mod lane;
@@ -391,6 +392,34 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             TimeRange::new(start.0, duration.0),
             filter_id,
         ),
+        Request::SetHsl {
+            segment_id,
+            material_id,
+            color,
+            hue,
+            saturation,
+            lightness,
+        } => grade::set_hsl(
+            draft,
+            segment_id,
+            material_id,
+            *color,
+            [*hue, *saturation, *lightness],
+        ),
+        Request::SetCurve {
+            segment_id,
+            material_id,
+            channel,
+            points,
+        } => grade::set_curve(draft, segment_id, material_id, channel, points),
+        Request::SetWheel {
+            segment_id,
+            material_id,
+            wheel,
+            x,
+            y,
+            luma,
+        } => grade::set_wheel(draft, segment_id, material_id, wheel, [*x, *y, *luma]),
         Request::SetAdjust {
             segment_id,
             material_id,

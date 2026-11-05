@@ -293,6 +293,35 @@ pub enum Request {
         duration: Micros,
         filter_id: String,
     },
+    /// Set HSL colour `color`, 0 red to 7 magenta, on the clip: `hue`,
+    /// `saturation` and `lightness` from -1 to 1. All zero takes it off.
+    SetHsl {
+        segment_id: SegmentId,
+        material_id: MaterialId,
+        color: u8,
+        hue: f64,
+        saturation: f64,
+        lightness: f64,
+    },
+    /// Set the clip's curve `channel` (`rgb`, `red`, `green` or `blue`) to
+    /// `points`, each `[x, y]` from 0 to 1. None, or the diagonal, is the
+    /// straight line.
+    SetCurve {
+        segment_id: SegmentId,
+        material_id: MaterialId,
+        channel: String,
+        points: Vec<[f64; 2]>,
+    },
+    /// Set the clip's colour wheel `wheel` (`lift`, `gamma` or `gain`): the
+    /// puck at `x`, `y` inside the unit circle, the ring at `luma`.
+    SetWheel {
+        segment_id: SegmentId,
+        material_id: MaterialId,
+        wheel: String,
+        x: f64,
+        y: f64,
+        luma: f64,
+    },
     /// Set the adjust slider `key`, its reference name such as
     /// `temperature`, to `value`: -1 to 1, or 0 to 1 for fade, sharpen and
     /// grain. Zero takes it off. `material_id` names a new slider material.

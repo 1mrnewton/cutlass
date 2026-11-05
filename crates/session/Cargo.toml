@@ -10,8 +10,6 @@ description = "Requests, combos, and the undo stack."
 cutlass-effects = { path = "../effects", version = "0.1.0" }
 cutlass-model = { path = "../model", version = "0.1.0" }
 serde = { version = "1.0.229", features = ["derive"] }
-
-[dev-dependencies]
 serde_json = "1.0.154"
 
 [lints]

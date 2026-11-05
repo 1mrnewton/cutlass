@@ -44,16 +44,20 @@ pub struct Vbri {
 }
 
 /// Read a Xing or Info tag. The bytes before the id must be the header and
-/// a zero side-information block, which is how the tag is written.
+/// a zero side-information block, which is how the tag is written. A frame
+/// with a CRC keeps its two CRC bytes, which are not zero; LAME then still
+/// writes the id right after the side-information length, as if there were
+/// no CRC, while other writers move it two bytes on.
 #[must_use]
 pub fn read_xing(frame: &[u8], header: &Header) -> Option<Xing> {
     if header.layer != 3 {
         return None;
     }
     let base = 4 + side_info_len(header);
-    read_xing_at(frame, base).or_else(|| {
+    let zero_from = if header.crc { 6 } else { 4 };
+    read_xing_at(frame, base, zero_from).or_else(|| {
         if header.crc {
-            read_xing_at(frame, base + 2)
+            read_xing_at(frame, base + 2, zero_from)
         } else {
             None
         }
@@ -74,11 +78,11 @@ pub fn is_tag_frame(frame: &[u8], header: &Header) -> bool {
     read_xing(frame, header).is_some() || read_vbri(frame, header).is_some()
 }
 
-fn read_xing_at(frame: &[u8], offset: usize) -> Option<Xing> {
-    if offset < 4 || frame.len() < offset + 8 {
+fn read_xing_at(frame: &[u8], offset: usize, zero_from: usize) -> Option<Xing> {
+    if offset < zero_from || frame.len() < offset + 8 {
         return None;
     }
-    if frame[4..offset].iter().any(|byte| *byte != 0) {
+    if frame[zero_from..offset].iter().any(|byte| *byte != 0) {
         return None;
     }
     let id = &frame[offset..offset + 4];
@@ -303,6 +307,30 @@ mod tests {
         assert_eq!(tag.toc.expect("toc")[50], 50);
         assert_eq!(tag.encoder_delay, Some(576));
         assert_eq!(tag.trailing_padding, Some(100));
+    }
+
+    #[test]
+    fn an_info_tag_after_a_crc_is_read_where_lame_writes_it() {
+        let (raw, size) = encode_layer3(MpegVersion::Mpeg2, 64, 22_050, false, 2).expect("hdr");
+        let raw = raw & !0x0001_0000;
+        let header = parse_header(raw).expect("parse");
+        assert!(header.crc);
+        let mut frame = vec![0u8; usize::try_from(size).expect("size")];
+        frame[..4].copy_from_slice(&raw.to_be_bytes());
+        frame[4..6].copy_from_slice(&[0xAE, 0xCA]);
+        let at = 4 + side_info_len(&header);
+        frame[at..at + 4].copy_from_slice(b"Info");
+        frame[at + 4..at + 8].copy_from_slice(&0x03u32.to_be_bytes());
+        frame[at + 8..at + 12].copy_from_slice(&40u32.to_be_bytes());
+        frame[at + 12..at + 16].copy_from_slice(&8000u32.to_be_bytes());
+        frame[at + 16..at + 25].copy_from_slice(b"LAME3.100");
+        let packed: u32 = (576 << 12) | 900;
+        frame[at + 37..at + 40].copy_from_slice(&packed.to_be_bytes()[1..]);
+        let tag = read_xing(&frame, &header).expect("info");
+        assert!(tag.cbr);
+        assert_eq!(tag.frames, Some(40));
+        assert_eq!(tag.encoder_delay, Some(576));
+        assert_eq!(tag.trailing_padding, Some(900));
     }
 
     #[test]

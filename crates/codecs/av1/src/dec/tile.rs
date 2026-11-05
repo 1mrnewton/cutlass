@@ -591,15 +591,15 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
             let unit_size = self.hdr.lr.unit_size[plane] as usize;
             let unit_rows = self.fs.lr_rows[plane];
             let unit_cols = self.fs.lr_cols[plane];
-            let row_start = (r * (4 >> sy) + unit_size - 1) / unit_size;
-            let row_end = unit_rows.min(((r + h) * (4 >> sy) + unit_size - 1) / unit_size);
+            let row_start = (r * (4 >> sy)).div_ceil(unit_size);
+            let row_end = unit_rows.min(((r + h) * (4 >> sy)).div_ceil(unit_size));
             let (num, den) = if self.hdr.use_superres {
                 ((4 >> sx) * self.hdr.superres_denom as usize, unit_size * 8)
             } else {
                 (4 >> sx, unit_size)
             };
-            let col_start = (c * num + den - 1) / den;
-            let col_end = unit_cols.min(((c + w) * num + den - 1) / den);
+            let col_start = (c * num).div_ceil(den);
+            let col_end = unit_cols.min(((c + w) * num).div_ceil(den));
             for ur in row_start..row_end {
                 for uc in col_start..col_end {
                     self.read_lr_unit(plane, ur, uc, ftype)?;
@@ -1235,9 +1235,7 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
         };
         let pred = if prev_u == -1 {
             if prev_l == -1 { 0 } else { prev_l }
-        } else if prev_l == -1 {
-            prev_u
-        } else if prev_ul == prev_u {
+        } else if prev_l == -1 || prev_ul == prev_u {
             prev_u
         } else {
             prev_l
@@ -1518,7 +1516,7 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
 
     fn palette_cache(&self, plane_type: usize) -> ([u16; 16], usize) {
         let b = &self.b;
-        let above_n = if (b.mi_row * 4) % 64 != 0 {
+        let above_n = if !(b.mi_row * 4).is_multiple_of(64) {
             self.mi(b.mi_row - 1, b.mi_col).palette_size[plane_type] as usize
         } else {
             0
@@ -2230,7 +2228,7 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
         let left_intra = left[0] <= INTRA_FRAME;
         let above_single = above[1] <= INTRA_FRAME;
         let left_single = left[1] <= INTRA_FRAME;
-        let bwd = |f: i8| f >= BWDREF_FRAME && f <= ALTREF_FRAME;
+        let bwd = |f: i8| (BWDREF_FRAME..=ALTREF_FRAME).contains(&f);
         let comp = if self.hdr.reference_select && bw4(self.b.bsize).min(bh4(self.b.bsize)) >= 2 {
             let ctx = if au && al {
                 if above_single && left_single {
@@ -2597,8 +2595,7 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
         if !self.b.skip_mode
             && self.seq.enable_interintra_compound
             && !is_compound
-            && bs >= BLOCK_8X8
-            && bs <= BLOCK_32X32
+            && (BLOCK_8X8..=BLOCK_32X32).contains(&bs)
         {
             let ctx = SIZE_GROUP[bs as usize] as usize - 1;
             self.b.interintra = self
@@ -2972,8 +2969,7 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
         let cdf = &mut self.cdf;
         let sign = self.msac.bool_adapt(&mut cdf.mv_sign[ctx][comp], w_sign);
         let class = self.msac.symbol(&mut cdf.mv_class[ctx][comp], w_class);
-        let mag;
-        if class == 0 {
+        let mag = if class == 0 {
             let bit = usize::from(
                 self.msac
                     .bool_adapt(&mut cdf.mv_class0_bit[ctx][comp], w_int != 0),
@@ -2992,7 +2988,7 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
             } else {
                 1
             };
-            mag = ((bit << 3) | (fr << 1) | hp) + 1;
+            ((bit << 3) | (fr << 1) | hp) + 1
         } else {
             let mut d = 0usize;
             for i in 0..class {
@@ -3013,8 +3009,8 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
                 1
             };
             m += ((d << 3) | (fr << 1) | hp) + 1;
-            mag = m;
-        }
+            m
+        };
         if sign { -(mag as i32) } else { mag as i32 }
     }
 

@@ -234,15 +234,13 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
                 0.0
             };
         let mut inter_choice: Option<(u8, Mv, usize)> = None;
-        if self.mode.inter_frame {
-            if let Some((mode, mv, idx, cost)) =
+        if self.mode.inter_frame
+            && let Some((mode, mv, idx, cost)) =
                 self.pick_inter(x, y, block_width(bs), block_height(bs))
-            {
-                if cost < best_cost {
-                    best_cost = cost;
-                    inter_choice = Some((mode, mv, idx));
-                }
-            }
+            && cost < best_cost
+        {
+            best_cost = cost;
+            inter_choice = Some((mode, mv, idx));
         }
         self.b = saved;
         let _ = best_cost;
@@ -367,12 +365,8 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
     }
 
     fn get_tx_size_for(&self, plane: usize, tx: u8, bsize: u8) -> u8 {
-        let saved = self.b.bsize;
-        let _ = saved;
         let _ = plane;
         // Chroma transform size as get_tx_size computes it for `bsize`.
-        let mut b = self.b.clone();
-        b.bsize = bsize;
         let uv = MAX_TX_SIZE_RECT[plane_residual_size(bsize, self.sub_x, self.sub_y) as usize];
         if tx_w(uv) == 64 || tx_h(uv) == 64 {
             if tx_w(uv) == 16 {

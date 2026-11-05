@@ -252,7 +252,7 @@ mod tests {
                 symbol += 1;
                 prev = cur;
                 let f = (1u32 << 15) - u32::from(cdf[symbol as usize]);
-                cur = ((self.range >> 8) * (f >> 6) >> 1) + 4 * (n as u32 - symbol as u32 - 1);
+                cur = (((self.range >> 8) * (f >> 6)) >> 1) + 4 * (n as u32 - symbol as u32 - 1);
                 if self.value >= cur {
                     break;
                 }

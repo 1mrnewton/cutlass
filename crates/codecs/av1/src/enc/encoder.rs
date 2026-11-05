@@ -225,7 +225,9 @@ impl Av1Enc {
                 what: "sample size",
             });
         }
-        let key = self.frame_num % u64::from(self.cfg.keyint.max(1)) == 0;
+        let key = self
+            .frame_num
+            .is_multiple_of(u64::from(self.cfg.keyint.max(1)));
         let q = self.rc_q.round().clamp(1.0, 255.0) as u8;
         let mut out = Vec::new();
         write_obu(&mut out, OBU_TEMPORAL_DELIMITER, 0, 0, false, &[]);
@@ -340,13 +342,13 @@ impl Av1Enc {
             temporal_id: 0,
             spatial_id: 0,
         };
-        let opts = FrameHeaderWriteOptions::default();
+        let opts = FrameHeaderWriteOptions;
         let hdr_bytes = write_frame_header(&intent, &ctx, &opts);
         // The parser derives every dependent field exactly as a decoder will.
         let hdr = parse_frame_header(&hdr_bytes, &ctx)?;
         let src = source_picture(&self.cfg, &seq, input);
         // Initial CDFs.
-        let mut cdf: Box<CdfContext> = if hdr.primary_ref_frame == PRIMARY_REF_NONE {
+        let cdf: Box<CdfContext> = if hdr.primary_ref_frame == PRIMARY_REF_NONE {
             CdfContext::new(hdr.quant.base_q_idx)
         } else {
             let slot = hdr.ref_frame_idx[hdr.primary_ref_frame as usize] as usize;

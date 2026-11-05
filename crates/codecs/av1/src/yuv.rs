@@ -4,10 +4,7 @@
 //! size stays representable. The shared picture output is even 4:2:0 only.
 //! Conversion happens at the trait boundary.
 
-use cutlass_decode::{
-    CodecError, ColorPrimaries, Output, PictureInfo, PictureOutput, PictureSamples, PixelFormat,
-    Transfer,
-};
+use cutlass_decode::{CodecError, Output, PictureSamples, PixelFormat};
 
 /// One tightly packed sample plane. `samples.len()` is `width * height`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -150,33 +147,6 @@ impl AsView for Output {
 }
 
 /// Pack even 4:2:0 into the shared picture output.
-pub fn picture_output(
-    picture: &Yuv420,
-    pts: i64,
-    timescale: u32,
-) -> Result<PictureOutput, CodecError> {
-    let width = picture.y.width();
-    let height = picture.y.height();
-    let mut bytes = Vec::with_capacity(
-        picture.y.samples().len() + picture.u.samples().len() + picture.v.samples().len(),
-    );
-    bytes.extend_from_slice(picture.y.samples());
-    bytes.extend_from_slice(picture.u.samples());
-    bytes.extend_from_slice(picture.v.samples());
-    PictureOutput::cpu(
-        PictureInfo {
-            width,
-            height,
-            pixel: PixelFormat::Yuv420p,
-            primaries: ColorPrimaries::Unspecified,
-            transfer: Transfer::Unspecified,
-        },
-        bytes,
-        pts,
-        timescale,
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::{Plane, Yuv420};

@@ -1,12 +1,11 @@
-//! AV1 encoder and decoder.
+//! AV1 encoder and decoder in safe Rust.
 //!
-//! The support record is `STATUS.md` next to this crate. Loop restoration and
-//! film grain are applied for 8-bit 4:2:0. A single-reference frame may carry
-//! an order hint. A frame may use a uniform tile grid, a quantizer matrix,
-//! and a superblock quantizer delta. DC luma may use the recursive intra
-//! filter.
-//! Lossless and bit depths other than 8 are rejected. Compound, warped, and
-//! overlapped motion are rejected.
+//! The decoder ([`dec`]) implements the whole AV1 decoding process of the
+//! specification for every profile: 8, 10 and 12 bits, 4:2:0, 4:2:2, 4:4:4
+//! and monochrome, all intra, inter, compound, warped and screen-content
+//! tools, the in-loop filters, super resolution, scaled references and film
+//! grain. The encoder ([`enc`]) codes those bitstreams through the decoder's
+//! own syntax code. `STATUS.md` next to this crate is the support record.
 
 #![forbid(unsafe_code)]
 // Kernels index fixed-size tables and take many scalar parameters, as the
@@ -19,27 +18,12 @@
     clippy::erasing_op
 )]
 
-mod bits;
-mod cdef;
-mod deblock;
 pub mod dec;
 mod decode;
-mod dims;
 pub mod dsp;
 pub mod enc;
 mod encode;
-mod grain;
-mod header;
-mod idct;
-mod inter;
-mod predict;
-mod qm;
-mod restore;
 pub mod spec;
-mod superres;
-mod symbol;
-mod tables;
-mod tile;
 mod yuv;
 
 pub use decode::Av1Decoder;

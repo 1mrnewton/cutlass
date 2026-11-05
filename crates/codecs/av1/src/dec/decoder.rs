@@ -192,13 +192,14 @@ impl Av1Core {
                     let Some(seq) = self.seq.clone() else {
                         return Err(malformed("frame before sequence header"));
                     };
-                    if let Some(op) = seq.operating_points.first() {
-                        if op.idc != 0 && obu.has_extension {
-                            let in_t = (op.idc >> obu.temporal_id) & 1;
-                            let in_s = (op.idc >> (obu.spatial_id + 8)) & 1;
-                            if in_t == 0 || in_s == 0 {
-                                continue;
-                            }
+                    if let Some(op) = seq.operating_points.first()
+                        && op.idc != 0
+                        && obu.has_extension
+                    {
+                        let in_t = (op.idc >> obu.temporal_id) & 1;
+                        let in_s = (op.idc >> (obu.spatial_id + 8)) & 1;
+                        if in_t == 0 || in_s == 0 {
+                            continue;
                         }
                     }
                     let ctx = HeaderContext {
@@ -427,10 +428,11 @@ impl Av1Core {
         }
         if hdr.primary_ref_frame != PRIMARY_REF_NONE {
             let slot_idx = hdr.ref_frame_idx[hdr.primary_ref_frame as usize] as usize;
-            if let Some(rd) = &refs_data[slot_idx] {
-                if rd.mi_rows == fs.mi_rows && rd.mi_cols == fs.mi_cols {
-                    fs.prev_segment_ids = Some(rd.segment_ids.clone());
-                }
+            if let Some(rd) = &refs_data[slot_idx]
+                && rd.mi_rows == fs.mi_rows
+                && rd.mi_cols == fs.mi_cols
+            {
+                fs.prev_segment_ids = Some(rd.segment_ids.clone());
             }
         }
         let (pic, saved_cdf) = if seq.bit_depth == 8 {
@@ -563,8 +565,8 @@ fn ref_data(seq: &SequenceHeader, hdr: &FrameHeader, fs: &FrameState) -> RefData
                         let dist = relative_dist(seq, hdr.ref_order_hint[ref_idx], hdr.order_hint);
                         if dist < 0 {
                             let mv = m.mv[list];
-                            if i32::from(mv.row).abs() <= (1 << 12) - 1
-                                && i32::from(mv.col).abs() <= (1 << 12) - 1
+                            if i32::from(mv.row).abs() < (1 << 12)
+                                && i32::from(mv.col).abs() < (1 << 12)
                             {
                                 mf_ref[y8 * w8 + x8] = r;
                                 mf_mv[y8 * w8 + x8] = mv;

@@ -178,23 +178,23 @@ fn main() -> Result<(), String> {
         ivf.extend_from_slice(&n.to_le_bytes());
         ivf.extend_from_slice(&pkt);
         total += pkt.len();
-        if let Some(Ok(f)) = recon.as_mut() {
-            if let Some(pic) = enc.last_recon() {
-                match &**pic {
-                    AnyPicture::U8(p) => {
-                        for pl in &p.planes {
-                            for r in 0..pl.h {
-                                f.write_all(&pl.data[r * pl.stride..r * pl.stride + pl.w])
-                                    .map_err(|e| e.to_string())?;
-                            }
+        if let Some(Ok(f)) = recon.as_mut()
+            && let Some(pic) = enc.last_recon()
+        {
+            match &**pic {
+                AnyPicture::U8(p) => {
+                    for pl in &p.planes {
+                        for r in 0..pl.h {
+                            f.write_all(&pl.data[r * pl.stride..r * pl.stride + pl.w])
+                                .map_err(|e| e.to_string())?;
                         }
                     }
-                    AnyPicture::U16(p) => {
-                        for pl in &p.planes {
-                            for r in 0..pl.h {
-                                for v in &pl.data[r * pl.stride..r * pl.stride + pl.w] {
-                                    f.write_all(&v.to_le_bytes()).map_err(|e| e.to_string())?;
-                                }
+                }
+                AnyPicture::U16(p) => {
+                    for pl in &p.planes {
+                        for r in 0..pl.h {
+                            for v in &pl.data[r * pl.stride..r * pl.stride + pl.w] {
+                                f.write_all(&v.to_le_bytes()).map_err(|e| e.to_string())?;
                             }
                         }
                     }

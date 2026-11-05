@@ -41,8 +41,9 @@ through FFmpeg, covering the tools above, matches libdav1d byte for byte
 `CodecError` and leaves the reference frames unchanged.
 
 With several threads (`Av1Core::threads`) parsing, reconstruction and the
-post filters run in a pipeline. It is about 2x slower than libdav1d, which
-uses hand-written assembly (numbers in `STATUS.md`).
+post filters run in a pipeline. It takes about 1.9x the time of libdav1d
+single threaded and 1.6x with 4 threads; libdav1d uses hand-written
+assembly (numbers in `STATUS.md`).
 
 ## Encoder
 
@@ -69,9 +70,10 @@ the reference frames. Tools used:
   does not depend on the thread count.
 
 Quality and speed against FFmpeg's encoders are in `STATUS.md`. In short:
-it needs about 7% fewer bits than rav1e `-speed 8` for the same PSNR, and
-12-18% more than libaom `-cpu-used 6` on natural video; it runs at about
-half the speed of libaom at that preset (single thread).
+on natural video it needs about 12% fewer bits than rav1e `-speed 8` for
+the same PSNR and 5-10% more than libaom `-cpu-used 6`; synthetic content
+is further behind. It runs at about half the speed of libaom at that
+preset (single thread).
 
 ## API
 
@@ -103,7 +105,8 @@ plane slices and returns finished temporal units (`flush` at the end).
 
 - `examples/av1dec.rs` IVF to raw YUV (`--features stats` prints tool use).
 - `examples/av1enc.rs` Y4M to IVF (`--q`, `--kbps`, `--speed`, `--gop`,
-  `--keyint`, `--tiles`, `--recon`).
+  `--keyint`, `--tiles`, `--threads`, `--global-motion`,
+  `--temporal-filter`, `--recon`).
 - `examples/av1bench.rs` decode timing with a thread count.
 - `examples/av1fuzz.rs` mutation fuzzer.
 - `tools/` the scripts behind the numbers in `STATUS.md`: stream generation

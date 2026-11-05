@@ -52,16 +52,22 @@ including process start, best of 3; same machine and load for both.
 
 | Threads | cutlass-av1 | libdav1d (FFmpeg) |
 | --- | --- | --- |
-| 1 | 0.89 s | 0.42 s |
-| 2 | 0.81 s | 0.31 s |
-| 4 | 0.63 s | 0.31 s |
+| 1 | 0.77-0.79 s | 0.39-0.43 s |
+| 2 | 0.73 s | 0.31 s |
+| 3 | 0.48 s | 0.30 s |
+| 4 | 0.48-0.49 s | 0.30 s |
 
-The decoder is about 2x slower than libdav1d, which uses hand-written
-assembly for its kernels; this crate relies on autovectorization only.
+Single threaded the decoder takes about 1.9x the time of libdav1d, which
+uses hand-written assembly for its kernels; this crate relies on
+autovectorization only. With 4 threads the gap is about 1.6x.
 Threading: with 3+ threads parsing and reconstruction run on separate
-threads, and deblocking, CDEF and loop restoration follow one superblock row
-behind on a third; motion field projection is split in bands. Tiles are not
-decoded in parallel yet.
+threads, and deblocking, CDEF and loop restoration follow behind on a
+third; motion field estimation runs alongside parsing, band by band. Tiles
+are not decoded in parallel yet, and one frame is finished before the next
+starts (about 20% of the 4-thread time is that end-of-frame tail).
+The coefficient reader keeps the arithmetic decoder state in registers and
+updates small CDFs as packed lanes; callgrind puts the whole decode at
+6.3G instructions single threaded.
 
 ## Encoder
 
@@ -81,18 +87,22 @@ inter-intra, loop restoration, super resolution, segmentation.
 
 ### Quality and speed against FFmpeg's encoders
 
-`tools/rdcmp.sh`, single thread each. Ours at speed 6 (q 60..180); libaom
+`tools/rdcmp.sh`, single thread each. Ours at speed 6 (q 60..220); libaom
 `-cpu-used 6` (crf 25..49); SVT-AV1 `-preset 8` (crf 25..49); rav1e
 `-speed 8` (qp 60..180). BD-rate: bits ours needs relative to the other
 encoder for equal PSNR (negative = fewer bits).
 
 | Clip | vs libaom cpu-used 6 | vs SVT-AV1 preset 8 | vs rav1e speed 8 |
 | --- | --- | --- | --- |
-| natural, 352x288, 30 frames (aom test clip) | +18.2% | +35.6% | -6.8% |
-| synthetic `testsrc2`, 640x360, 10 frames | +53.5% | +15.7% | -6.8% |
+| natural, 352x288, 30 frames (aom test clip) | +10.2% | +26.7% | -11.7% |
+| synthetic `testsrc2`, 640x360, 10 frames | +69.5% | +29.5% | +1.1% |
 
-Encoding speed on the natural clip: ours 9-15 fps, libaom 22-33, SVT-AV1
-29-40, rav1e 9-25.
+(BD-rate over the overlapping PSNR range of each pair; the synthetic clip's
+numbers are higher than in earlier versions of this file mostly because
+the q grid now reaches lower rates, where the gap is wider.)
+
+Encoding speed on the natural clip: ours 10-15 fps, libaom 24-32, SVT-AV1
+29-43, rav1e 9-27.
 
 Multi-threaded, 1920x1080, 20 frames, 4 threads each (wall time; the
 encoder splits HD frames into tile columns and codes them in parallel, with
@@ -100,10 +110,12 @@ output independent of the thread count): ours 7.3 s, libaom
 `-cpu-used 6 -row-mt 1` 2.7 s, SVT-AV1 `-preset 8` 1.5 s, rav1e `-speed 8`
 13.0 s.
 
-So the encoder beats rav1e at its default speed in quality and is behind
-libaom and SVT-AV1, which have years of tuning (temporal dependency models,
-more search, assembly kernels). `tools/kbd.sh` (finer q grid, 5 points)
-puts the natural-video gap to libaom at +12%.
+So the encoder beats rav1e at its default speed on natural video and is
+behind libaom and SVT-AV1, which have years of tuning (temporal dependency
+models, more search, assembly kernels). `tools/kbd.sh` (q 60..220 against
+libaom crf 20..50, long GOP) puts the natural-video gap to libaom at +5% on
+30 frames, +10% on 60 frames and +9% on a single key frame; synthetic
+content (flat areas, text, fast cuts) is the weak spot.
 
 ## Checks
 

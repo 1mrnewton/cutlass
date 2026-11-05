@@ -428,6 +428,11 @@ impl<'a> LrWriter<'a> {
         }
     }
 
+    /// The `use_wiener` CDF as the units coded so far left it.
+    pub fn use_wiener_cdf(&self) -> [u16; 2] {
+        self.use_wiener
+    }
+
     /// read_lr() of the superblock at mi (`r`, `c`).
     pub fn write_sb(&mut self, e: &mut MsacEnc, r: usize, c: usize) {
         let (w, h) = (self.sb_mi, self.sb_mi);

@@ -962,12 +962,56 @@ impl Av1Core {
         if !job.is_done() {
             self.in_flight.push(job.clone());
         }
-        // Reference frame update process (7.20).
-        let mut final_cdf = if hdr.disable_frame_end_update_cdf {
+        let final_cdf = if hdr.disable_frame_end_update_cdf {
             cdf
         } else {
             saved_cdf
         };
+        self.store_frame(seq, &hdr, &fs, job, final_cdf, tag);
+        self.spare_fs = Some(fs);
+        Ok(())
+    }
+
+    /// Takes in a frame reconstructed outside the decoder, as decoding its
+    /// tiles would have left it: an encoder's own reconstruction of a
+    /// frame it coded, with `hdr` the frame's header (parsed against this
+    /// decoder's state), `fs` the frame state its tiles left, `pic` the
+    /// final picture (after every in-loop filter) and `cdf` the CDFs to
+    /// save with it (those of the context tile, or the frame's initial
+    /// ones when the frame end update is disabled). Returns the frame if
+    /// it is shown.
+    pub fn install_frame(
+        &mut self,
+        hdr: &FrameHeader,
+        fs: &FrameState,
+        pic: AnyPicture,
+        cdf: Box<CdfContext>,
+    ) -> R<Vec<DecodedFrame>> {
+        let Some(seq) = self.seq.clone() else {
+            return Err(malformed("frame before sequence header"));
+        };
+        if hdr.show_existing_frame || fs.mi_rows != hdr.mi_rows as usize {
+            return Err(CodecError::InvalidApi {
+                what: "installed frame",
+            });
+        }
+        let job = FrameJob::ready(Ok(Arc::new(pic)));
+        self.store_frame(&seq, hdr, fs, job, cdf, 0);
+        let out = self.take_outputs(0)?;
+        Ok(out.into_iter().map(|(_, f)| f).collect())
+    }
+
+    /// Queues a frame for output if shown and runs the reference frame
+    /// update process (7.20) with its picture `job` and CDFs `cdf`.
+    fn store_frame(
+        &mut self,
+        seq: &SequenceHeader,
+        hdr: &FrameHeader,
+        fs: &FrameState,
+        job: Arc<FrameJob>,
+        mut final_cdf: Box<CdfContext>,
+        tag: u64,
+    ) {
         final_cdf.clear_counts();
         let rh = RefHeaderState {
             valid: true,
@@ -1003,7 +1047,7 @@ impl Av1Core {
             });
         }
         if hdr.refresh_frame_flags != 0 {
-            let data = Arc::new(ref_data(seq, &hdr, &fs));
+            let data = Arc::new(ref_data(seq, hdr, fs));
             let slot = Slot {
                 pic: job,
                 data,
@@ -1025,8 +1069,6 @@ impl Av1Core {
         } else {
             self.release_picture(job);
         }
-        self.spare_fs = Some(fs);
-        Ok(())
     }
 
     /// Recycles the picture of `j` if nothing else holds it, else remembers

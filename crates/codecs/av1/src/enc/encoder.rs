@@ -190,6 +190,17 @@ type TplGroup = (super::tpl::TplStats, Vec<u64>);
 /// A global motion type and its parameters.
 type GmModel = (u8, [i32; 6]);
 
+/// A coded tile and, for the context tile, the CDFs it ended with.
+type TileCoded = (MsacEnc, Option<Box<CdfContext>>);
+
+/// What a decoder makes of a coded frame, for [`Av1Core::install_frame`].
+struct FrameRecon {
+    hdr: FrameHeader,
+    fs: FrameState,
+    pic: AnyPicture,
+    cdf: Box<CdfContext>,
+}
+
 /// One temporal unit: the packet and the reconstruction of its shown frame.
 pub struct EncodedUnit {
     pub data: Vec<u8>,
@@ -635,13 +646,21 @@ impl Av1Enc {
                     filtered = super::tf::temporal_filter(src, &others, qstep, self.cfg.bit_depth);
                     src = &filtered;
                 }
-                let frame = self.encode_frame(src, &spec)?;
-                write_obu(tu, OBU_FRAME, 0, 0, false, &frame);
+                let (frame, recon) = self.encode_frame(src, &spec)?;
                 for (i, s) in self.slot_disp.iter_mut().enumerate() {
                     if spec.refresh & (1 << i) != 0 {
                         *s = Some(disp);
                     }
                 }
+                if let Some(r) = recon {
+                    // The decoder takes the headers before the frame, then
+                    // the encoder's own reconstruction of the frame.
+                    self.core.decode(&tu[start..])?;
+                    write_obu(tu, OBU_FRAME, 0, 0, false, &frame);
+                    let shown = self.core.install_frame(&r.hdr, &r.fs, r.pic, r.cdf)?;
+                    return Ok(shown.into_iter().last().map(|f| f.picture));
+                }
+                write_obu(tu, OBU_FRAME, 0, 0, false, &frame);
             }
         }
         // Reconstruct exactly as a decoder does; this also checks the packet.
@@ -1036,7 +1055,11 @@ impl Av1Enc {
         h
     }
 
-    fn encode_frame<P: PicturePixel>(&mut self, src: &Picture<P>, spec: &FrameSpec) -> R<Vec<u8>> {
+    fn encode_frame<P: PicturePixel>(
+        &mut self,
+        src: &Picture<P>,
+        spec: &FrameSpec,
+    ) -> R<(Vec<u8>, Option<FrameRecon>)> {
         let seq = self.seq.clone();
         let key = spec.key;
         let q = spec.q;
@@ -1235,7 +1258,10 @@ impl Av1Enc {
             && !hdr.allow_intrabc
             && !hdr.use_superres;
         let mut tile_bytes: Vec<MsacEnc> = Vec::with_capacity(ti.cols * ti.rows);
-        let run_tile = |tile: usize, fs: &mut FrameState, cur: &mut Picture<P>| -> R<MsacEnc> {
+        // The CDFs the context tile ends with (saved with the frame).
+        let ctx_tile = ti.context_update_tile_id as usize;
+        let mut saved_cdf: Option<Box<CdfContext>> = None;
+        let run_tile = |tile: usize, fs: &mut FrameState, cur: &mut Picture<P>| -> R<TileCoded> {
             let tile_row = tile / ti.cols;
             let tile_col = tile % ti.cols;
             let mut tile_cdf = Box::new((*cdf).clone());
@@ -1318,13 +1344,15 @@ impl Av1Enc {
             };
             td.decode_tile()?;
             let TileDec { msac, .. } = td;
-            Ok(msac)
+            Ok((msac, (tile == ctx_tile).then_some(tile_cdf)))
         };
         let n_tiles = ti.cols * ti.rows;
         let threads = self.cfg.threads.max(1).min(n_tiles);
         if threads <= 1 {
             for tile in 0..n_tiles {
-                tile_bytes.push(run_tile(tile, &mut fs, &mut cur)?);
+                let (m, c) = run_tile(tile, &mut fs, &mut cur)?;
+                tile_bytes.push(m);
+                saved_cdf = saved_cdf.or(c);
             }
         } else {
             // Tiles are independent: each thread codes its tiles into its own
@@ -1340,7 +1368,7 @@ impl Av1Enc {
                     seq.bit_depth,
                 )
             };
-            type TileOut<P> = (Vec<(usize, MsacEnc)>, FrameState, Picture<P>);
+            type TileOut<P> = (Vec<(usize, TileCoded)>, FrameState, Picture<P>);
             let outs: Vec<R<TileOut<P>>> = std::thread::scope(|sc| {
                 let handles: Vec<_> = (0..threads)
                     .map(|t| {
@@ -1371,19 +1399,20 @@ impl Av1Enc {
             let mut bytes: Vec<Option<MsacEnc>> = (0..n_tiles).map(|_| None).collect();
             for o in outs {
                 let (tiles, f, c) = o?;
-                for (tile, b) in tiles {
+                for (tile, (b, cdfs)) in tiles {
                     let r0 = ti.mi_row_starts[tile / ti.cols] as usize;
                     let r1 = ti.mi_row_starts[tile / ti.cols + 1] as usize;
                     let c0 = ti.mi_col_starts[tile % ti.cols] as usize;
                     let c1 = ti.mi_col_starts[tile % ti.cols + 1] as usize;
                     merge_tile(&mut fs, &f, &mut cur, &c, r0, r1, c0, c1);
                     bytes[tile] = Some(b);
+                    saved_cdf = saved_cdf.or(cdfs);
                 }
             }
             tile_bytes = bytes.into_iter().flatten().collect();
         }
         let use_wiener_cdf = cdf.use_wiener;
-        drop(cdf);
+        let init_cdf = cdf;
         if self.auto_tiles {
             self.sb_work = super::tiles::sb_work(&fs);
         }
@@ -1393,12 +1422,14 @@ impl Av1Enc {
         let mut hdr_bytes = hdr_bytes;
         let mut cdef_choice: Option<super::cdef_search::CdefChoice> = None;
         let mut lr_plan: Option<super::lr_search::LrPlan> = None;
+        // The CDEF output of the chosen strengths, if made.
+        let mut cdef_out: Option<Picture<P>> = None;
+        let mut best_lf: Option<(u64, Picture<P>)> = None;
         if self.cfg.speed < 8 && !hdr.coded_lossless && !hdr.allow_intrabc {
             let full = self.cfg.speed < 4;
             let threads = self.core.threads.max(1);
             let mut best_h = intent.clone();
             let base_lvl = intent.loop_filter.level[0];
-            let mut best_lf: Option<(u64, Picture<P>)> = None;
             let lf_f: &[f64] = if full {
                 &[0.0, 0.5, 0.75, 1.0, 1.25, 1.6]
             } else {
@@ -1530,16 +1561,19 @@ impl Av1Enc {
                 if let Some(p) = &lr_plan {
                     p.apply(&mut best_h);
                 }
+                cdef_out = Some(cdef_pic);
             }
             hdr_bytes = write_frame_header(&best_h, &ctx, &opts);
         }
+        let mut ctx_wiener = None;
         let tile_bytes: Vec<Vec<u8>> = tile_bytes
             .into_iter()
-            .map(|m| {
+            .enumerate()
+            .map(|(tile, m)| {
                 let mut lw = lr_plan
                     .as_ref()
                     .map(|p| super::lr_search::LrWriter::new(p, use_wiener_cdf, &seq));
-                m.replay(&mut |tag: u32, e: &mut MsacEnc| {
+                let bytes = m.replay(&mut |tag: u32, e: &mut MsacEnc| {
                     if tag & crate::dec::coder::SB_MARK != 0 {
                         if let Some(w) = lw.as_mut() {
                             let r = ((tag >> 15) & 0x7fff) as usize;
@@ -1550,10 +1584,15 @@ impl Av1Enc {
                         let v = ch.idx.get(tag as usize).copied().unwrap_or(0).max(0);
                         e.literal(u32::from(ch.bits), v as u32);
                     }
-                })
+                });
+                if tile == ctx_tile {
+                    ctx_wiener = lw.map(|w| w.use_wiener_cdf());
+                }
+                bytes
             })
             .collect();
         // Frame OBU: header, then one tile group with every tile.
+        let final_hdr = parse_frame_header(&hdr_bytes, &ctx)?;
         let mut payload = hdr_bytes;
         payload.extend_from_slice(&write_tile_group(
             &ti,
@@ -1561,7 +1600,82 @@ impl Av1Enc {
             ti.cols * ti.rows - 1,
             &tile_bytes,
         ));
-        Ok(payload)
+        // The reference the frame leaves, reconstructed as a decoder does
+        // from what the tiles left.
+        let Some(mut cdf) = saved_cdf else {
+            return Ok((payload, None));
+        };
+        if final_hdr.use_superres {
+            return Ok((payload, None));
+        }
+        if let Some(ch) = &cdef_choice {
+            fs.cdef_idx.clone_from(&ch.idx);
+        }
+        if let Some(p) = &lr_plan {
+            fs.lr = p.units.clone();
+            fs.lr_cols = p.cols;
+            fs.lr_rows = p.rows;
+        }
+        let threads = self.core.threads.max(1);
+        let deblocked = match best_lf {
+            Some((_, d)) => d,
+            None => {
+                crate::dec::postfilter::loop_filter(&seq, &final_hdr, &fs, &mut cur, threads);
+                cur
+            }
+        };
+        let c = &final_hdr.cdef;
+        let cdef_on = seq.enable_cdef
+            && !final_hdr.coded_lossless
+            && !final_hdr.allow_intrabc
+            && (c.bits > 0
+                || c.y_pri[0] != 0
+                || c.y_sec[0] != 0
+                || c.uv_pri[0] != 0
+                || c.uv_sec[0] != 0);
+        let cdef_pic = match (cdef_on, cdef_out) {
+            (false, _) => None,
+            (true, Some(p)) => Some(p),
+            (true, None) => {
+                let mut d = deblocked.clone();
+                crate::dec::postfilter::cdef(&seq, &final_hdr, &fs, &deblocked, &mut d, threads);
+                Some(d)
+            }
+        };
+        let filtered = cdef_pic.as_ref().unwrap_or(&deblocked);
+        let pic = if final_hdr.lr.uses_lr {
+            let mut out = filtered.clone();
+            crate::dec::postfilter::loop_restoration(
+                &seq,
+                &final_hdr,
+                &fs,
+                filtered,
+                &deblocked,
+                &mut out,
+                &mut crate::dsp::lr::LrScratch::new(),
+                threads,
+            );
+            out
+        } else {
+            match cdef_pic {
+                Some(p) => p,
+                None => deblocked,
+            }
+        };
+        if let Some(w) = ctx_wiener {
+            cdf.use_wiener = w;
+        }
+        let recon = FrameRecon {
+            cdf: if final_hdr.disable_frame_end_update_cdf {
+                init_cdf
+            } else {
+                cdf
+            },
+            hdr: final_hdr,
+            fs,
+            pic: P::wrap(pic),
+        };
+        Ok((payload, Some(recon)))
     }
 }
 
@@ -1734,7 +1848,7 @@ fn source_picture<P: Pixel>(
 
 #[cfg(test)]
 mod tests {
-    use super::{Av1Enc, EncConfig, InputFrame, RateControl};
+    use super::{AnyPicture, Av1Core, Av1Enc, EncConfig, InputFrame, RateControl};
 
     fn encode(threads: usize) -> Vec<u8> {
         let (w, h) = (160usize, 96usize);
@@ -1770,5 +1884,86 @@ mod tests {
     #[test]
     fn tile_threads_do_not_change_the_bitstream() {
         assert_eq!(encode(1), encode(3));
+    }
+
+    /// Visible samples of every plane.
+    fn samples(p: &AnyPicture) -> Vec<Vec<u16>> {
+        fn rows<P: crate::dsp::Pixel>(p: &crate::dec::frame::Picture<P>) -> Vec<Vec<u16>> {
+            p.planes
+                .iter()
+                .map(|pl| {
+                    (0..pl.h)
+                        .flat_map(|y| pl.data[y * pl.stride..][..pl.w].iter())
+                        .map(|v| v.to_i32() as u16)
+                        .collect()
+                })
+                .collect()
+        }
+        match p {
+            AnyPicture::U8(p) => rows(p),
+            AnyPicture::U16(p) => rows(p),
+        }
+    }
+
+    /// The encoder's reconstruction (built from its own tiles, not decoded)
+    /// matches what a decoder makes of the bitstream.
+    #[test]
+    fn reconstruction_matches_the_decoder() {
+        let (w, h) = (136usize, 72usize);
+        for (speed, lr, tiles, threads, bd) in [
+            (6u8, false, 0u32, 1usize, 8u32),
+            (6, true, 1, 2, 8),
+            (3, true, 0, 1, 10),
+            (8, false, 1, 2, 8),
+            (10, false, 0, 1, 8),
+        ] {
+            let mut cfg = EncConfig::new(w, h);
+            cfg.rc = RateControl::Qindex(110);
+            cfg.speed = speed;
+            cfg.loop_restoration = lr;
+            cfg.tile_cols_log2 = tiles;
+            cfg.threads = threads;
+            cfg.bit_depth = bd;
+            cfg.gop = 4;
+            let mut enc = Av1Enc::new(cfg).expect("encoder");
+            let mut units = Vec::new();
+            for f in 0..6usize {
+                let px = |i: usize, s: usize| -> u16 {
+                    let (x, y) = (i % s, i / s);
+                    let v = (x * 7 + y * 3 + f * 4) % 200 + ((x / 9 + y / 5 + f) % 3) * 20;
+                    (v as u16) << (bd - 8)
+                };
+                let y: Vec<u16> = (0..w * h).map(|i| px(i, w)).collect();
+                let c: Vec<u16> = (0..(w / 2) * (h / 2)).map(|i| px(i * 3, w / 2)).collect();
+                let input = InputFrame {
+                    planes: [&y[..], &c[..], &c[..]],
+                    strides: [w, w / 2, w / 2],
+                };
+                if bd == 8 {
+                    let y8: Vec<u8> = y.iter().map(|&v| v as u8).collect();
+                    let c8: Vec<u8> = c.iter().map(|&v| v as u8).collect();
+                    let input8 = InputFrame {
+                        planes: [&y8[..], &c8[..], &c8[..]],
+                        strides: [w, w / 2, w / 2],
+                    };
+                    units.extend(enc.encode(&input8).expect("encode"));
+                } else {
+                    units.extend(enc.encode(&input).expect("encode"));
+                }
+            }
+            if bd == 8 {
+                units.extend(enc.flush::<u8>().expect("flush"));
+            } else {
+                units.extend(enc.flush::<u16>().expect("flush"));
+            }
+            let mut dec = Av1Core::new();
+            dec.threads = 1;
+            for u in &units {
+                let shown = dec.decode(&u.data).expect("decode");
+                let got = shown.last().map(|f| samples(&f.picture));
+                let want = u.recon.as_deref().map(samples);
+                assert!(got == want, "speed {speed} lr {lr} bd {bd}");
+            }
+        }
     }
 }

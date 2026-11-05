@@ -1207,7 +1207,10 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
         let h4 = bh4(b.bsize).min(self.fs.mi_rows - b.mi_row);
         let stride = self.fs.mi_stride;
         for y in 0..h4 {
-            self.fs.segment_ids[(b.mi_row + y) * stride + b.mi_col..][..w4].fill(b.segment_id);
+            fill_small(
+                &mut self.fs.segment_ids[(b.mi_row + y) * stride + b.mi_col..][..w4],
+                b.segment_id,
+            );
         }
         // Palette colors for later palette caches.
         if self.hdr.allow_screen_content_tools {
@@ -1245,7 +1248,7 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
                 self.fs.mi.copy_within(o0..o0 + w4, o);
             }
             if set_uv {
-                self.fs.uv_modes[o..o + w4].fill(b.uv_mode);
+                fill_small(&mut self.fs.uv_modes[o..o + w4], b.uv_mode);
             }
         }
     }

@@ -103,7 +103,7 @@ pub struct EncConfig {
     pub threads: usize,
     /// Denoise alt-refs with their neighbours (coded with an overlay frame).
     pub temporal_filter: bool,
-    /// Doubles the mini-GOP where the content barely changes.
+    /// Doubles or quadruples the mini-GOP where the content barely changes.
     pub adaptive_gop: bool,
     /// Wiener loop restoration per 64x64 unit (experimental: about 1% on
     /// a key frame, but it costs the natural test clips about as much).
@@ -442,7 +442,7 @@ impl Av1Enc {
             let to_key = keyint - d % keyint;
             // Static content takes mini-GOPs two or four times as long.
             let longest = if self.cfg.adaptive_gop && gop >= 4 {
-                gop << ev("AV1_GOPL", 1.0) as u32
+                gop << ev("AV1_GOPL", 2.0) as u32
             } else {
                 gop
             };

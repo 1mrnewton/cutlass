@@ -33,6 +33,7 @@ const MAX_BITRATE: u32 = 510_000;
 
 /// Frame length choices for [`OpusEncoder::open_with`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) enum FrameDuration {
     Ms2_5,
     Ms5,

@@ -241,7 +241,7 @@ pub fn parse(data: &[u8], self_delimited: bool) -> Result<Frames, CodecError> {
                 end = at + 2 * len;
             } else {
                 let rest = data.len() - at;
-                if rest % 2 != 0 {
+                if !rest.is_multiple_of(2) {
                     return Err(malformed(at, "odd code 1 payload"));
                 }
                 frames.push((at, rest / 2));
@@ -452,12 +452,9 @@ pub(crate) fn pack(
         let count = frames.len() as u8 | if vbr { 0x80 } else { 0 };
         out.push(count | if padding.is_some() { 0x40 } else { 0 });
         if let Some((length_bytes, content)) = padding {
-            let mut left = content;
-            for _ in 0..length_bytes.saturating_sub(1) {
-                out.push(255);
-                left = left.saturating_sub(254);
-            }
-            out.push(left as u8);
+            let full = length_bytes.saturating_sub(1);
+            out.extend(std::iter::repeat_n(255u8, full));
+            out.push(content.saturating_sub(254 * full) as u8);
         }
         out.extend_from_slice(&header);
         for frame in frames {
@@ -575,7 +572,10 @@ mod tests {
 
     #[test]
     fn an_empty_packet_and_a_long_frame_are_refused() {
-        assert!(matches!(parse(&[], false), Err(CodecError::Truncated { .. })));
+        assert!(matches!(
+            parse(&[], false),
+            Err(CodecError::Truncated { .. })
+        ));
         let mut packet = vec![0xF8];
         packet.extend(vec![0; MAX_FRAME_BYTES + 1]);
         assert!(parse(&packet, false).is_err());

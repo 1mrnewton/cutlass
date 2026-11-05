@@ -19,6 +19,7 @@ mod mdct;
 mod pitch;
 mod postfilter;
 mod rate;
+#[cfg(test)]
 pub(crate) mod softclip;
 mod tables;
 mod vq;
@@ -40,6 +41,8 @@ use crate::range::RangeDecoder;
 use cutlass_decode::CodecError;
 
 pub(crate) use encoder::{CeltConfig, CeltEncoder, RateMode};
+/// The 120-sample overlap window; the Opus layer cross-fades with it.
+pub(crate) use tables::WINDOW as OVERLAP_WINDOW;
 
 /// Samples of decoded history kept per channel (`DECODE_BUFFER_SIZE`).
 const DECODE_BUFFER_SIZE: usize = 2048;

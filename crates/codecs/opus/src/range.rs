@@ -57,8 +57,7 @@ impl<'a> RangeDecoder<'a> {
             end_offs: 0,
             end_window: 0,
             nend_bits: 0,
-            nbits_total: (CODE_BITS + 1
-                - ((CODE_BITS - CODE_EXTRA) / SYM_BITS) * SYM_BITS) as i32,
+            nbits_total: (CODE_BITS + 1 - ((CODE_BITS - CODE_EXTRA) / SYM_BITS) * SYM_BITS) as i32,
             offs: 0,
             rng: 1 << CODE_EXTRA,
             val: 0,
@@ -239,6 +238,7 @@ impl<'a> RangeDecoder<'a> {
     }
 
     /// Whether a uniform integer was out of range.
+    #[cfg(test)]
     pub(crate) fn error(&self) -> bool {
         self.error
     }
@@ -448,6 +448,7 @@ impl RangeEncoder {
     }
 
     /// Overwrites the first `nbits` bits already coded (at most 8).
+    #[cfg(test)]
     pub(crate) fn patch_initial_bits(&mut self, value: u32, nbits: u32) {
         let shift = SYM_BITS - nbits;
         let mask = ((1u32 << nbits) - 1) << shift;
@@ -494,11 +495,6 @@ impl RangeEncoder {
     /// Bytes this frame may use.
     pub(crate) fn storage(&self) -> u32 {
         self.storage
-    }
-
-    /// Bytes written from the front so far.
-    pub(crate) fn range_bytes(&self) -> u32 {
-        self.offs
     }
 
     pub(crate) fn error(&self) -> bool {
@@ -555,11 +551,6 @@ impl RangeEncoder {
                 }
             }
         }
-    }
-
-    /// The coded frame. Call after [`Self::done`].
-    pub(crate) fn bytes(&self) -> &[u8] {
-        &self.buf[..(self.storage as usize).min(self.buf.len())]
     }
 
     pub(crate) fn into_bytes(mut self) -> Vec<u8> {
@@ -637,7 +628,7 @@ mod tests {
                     let bits = 1 + rand.next() % 24;
                     Op::Bits(rand.next() & ((1 << bits) - 1), bits)
                 }
-                2 => Op::Logp(rand.next() % 3 == 0, 1 + rand.next() % 15),
+                2 => Op::Logp(rand.next().is_multiple_of(3), 1 + rand.next() % 15),
                 3 => Op::Icdf((rand.next() % 5) as usize),
                 _ => {
                     let total = 2 + rand.next() % 1000;

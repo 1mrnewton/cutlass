@@ -266,7 +266,6 @@ pub(crate) const OVERLAP: usize = 120;
 /// MDCT size of one 2.5 ms block.
 pub(crate) const SHORT_MDCT_SIZE: usize = 120;
 /// Largest LM: 960 = 120 << 3.
-pub(crate) const MAX_LM: usize = 3;
 /// Rows in [`BAND_ALLOCATION`].
 pub(crate) const NB_ALLOC_VECTORS: usize = 11;
 /// Most fine energy bits per band and channel (`MAX_FINE_BITS`).

@@ -139,8 +139,10 @@ fn scratch() -> PathBuf {
 
 fn floats(bytes: &[u8]) -> Vec<f32> {
     bytes
-        .chunks_exact(4)
-        .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|b| f32::from_le_bytes(*b))
         .collect()
 }
 
@@ -266,8 +268,10 @@ fn synthetic() -> Vec<Item> {
 
 fn mono(stereo: &[f32]) -> Vec<f32> {
     stereo
-        .chunks_exact(2)
-        .map(|p| 0.5 * (p[0] + p[1]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|[l, r]| 0.5 * (l + r))
         .collect()
 }
 

@@ -18,29 +18,11 @@ impl Coder<'_, '_> {
     }
 
     #[inline]
-    pub(crate) fn tell(&self) -> i32 {
-        match self {
-            Self::Dec(d) => d.tell(),
-            Self::Enc(e) => e.tell(),
-        }
-    }
-
-    #[inline]
     pub(crate) fn tell_frac(&self) -> i32 {
         match self {
             Self::Dec(d) => d.tell_frac() as i32,
             Self::Enc(e) => e.tell_frac() as i32,
         }
-    }
-
-    /// Bytes the frame may use.
-    #[inline]
-    pub(crate) fn storage(&self) -> i32 {
-        let bytes = match self {
-            Self::Dec(d) => d.storage(),
-            Self::Enc(e) => e.storage(),
-        };
-        i32::try_from(bytes).unwrap_or(i32::MAX)
     }
 
     #[inline]
@@ -73,17 +55,6 @@ impl Coder<'_, '_> {
             Self::Dec(d) => d.dec_bits(bits),
             Self::Enc(e) => {
                 e.enc_bits(value, bits);
-                value
-            }
-        }
-    }
-
-    #[inline]
-    pub(crate) fn icdf(&mut self, value: usize, icdf: &[u8], ftb: u32) -> usize {
-        match self {
-            Self::Dec(d) => d.dec_icdf(icdf, ftb),
-            Self::Enc(e) => {
-                e.enc_icdf(value, icdf, ftb);
                 value
             }
         }

@@ -156,6 +156,10 @@ fn video_panel(
                 cutout_page(shell, ui, state, inspection);
                 return;
             }
+            if state.page == 2 {
+                mask_page(shell, ui, state, inspection);
+                return;
+            }
             if state.page != 0 {
                 later_note(ui, ["", "Cutout", "Mask", "Enhance"][state.page]);
                 return;
@@ -999,6 +1003,183 @@ fn cutout_page(
             send(shell, |shell| {
                 shell.set_chroma(&hex, strength, value / 100.0)
             });
+        }
+    });
+}
+
+/// The Mask page: a shape cuts the clip in its own frame. None takes the
+/// mask off; the sliders place, size, turn and soften it.
+fn mask_page(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState, inspection: &Inspection) {
+    use cutlass_effects::{Mask, MaskShape};
+    let mask = inspection.mask;
+    body(ui, |ui| {
+        let mut picked: Option<Option<MaskShape>> = None;
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .selectable_label(mask.is_none(), RichText::new("None").size(12.0))
+                .clicked()
+            {
+                picked = Some(None);
+            }
+            for shape in MaskShape::ALL {
+                let on = mask.is_some_and(|mask| mask.shape == shape);
+                if ui
+                    .selectable_label(on, RichText::new(shape.label()).size(12.0))
+                    .clicked()
+                {
+                    picked = Some(Some(shape));
+                }
+            }
+        });
+        match picked {
+            Some(None) if mask.is_some() => send(shell, |shell| shell.set_mask(None)),
+            Some(Some(shape)) if mask.is_none_or(|mask| mask.shape != shape) => {
+                let next = mask.map_or_else(|| Mask::new(shape), |mask| Mask { shape, ..mask });
+                send(shell, |shell| shell.set_mask(Some(next)));
+            }
+            _ => {}
+        }
+        let Some(mask) = mask else {
+            ui.add_space(6.0);
+            ui.label(
+                RichText::new("Pick a shape to mask the clip.")
+                    .size(11.0)
+                    .color(tokens::MUTED),
+            );
+            return;
+        };
+        ui.add_space(6.0);
+        let percent = |v: f64| format!("{v:.0}%");
+        let mut changed = None;
+        let mut field = |ui: &mut Ui,
+                         state: &mut InspectorState,
+                         key: &str,
+                         label: &str,
+                         stored: f32,
+                         scale: f64,
+                         range: std::ops::RangeInclusive<f64>,
+                         show: &dyn Fn(f64) -> String,
+                         put: fn(&mut Mask, f32)| {
+            if let Some(value) = slider(
+                ui,
+                state,
+                key,
+                label,
+                (f64::from(stored) * scale).round(),
+                range,
+                show,
+            ) {
+                let mut next = mask;
+                #[allow(clippy::cast_possible_truncation)]
+                put(&mut next, (value / scale) as f32);
+                changed = Some(next);
+            }
+        };
+        field(
+            ui,
+            state,
+            "mask-x",
+            "X",
+            mask.x,
+            100.0,
+            -200.0..=200.0,
+            &percent,
+            |m, v| m.x = v,
+        );
+        field(
+            ui,
+            state,
+            "mask-y",
+            "Y",
+            mask.y,
+            100.0,
+            -200.0..=200.0,
+            &percent,
+            |m, v| m.y = v,
+        );
+        match mask.shape {
+            MaskShape::Linear => {}
+            MaskShape::Mirror => {
+                field(
+                    ui,
+                    state,
+                    "mask-height",
+                    "Band",
+                    mask.height,
+                    100.0,
+                    0.0..=400.0,
+                    &percent,
+                    |m, v| m.height = v,
+                );
+            }
+            _ => {
+                field(
+                    ui,
+                    state,
+                    "mask-width",
+                    "Width",
+                    mask.width,
+                    100.0,
+                    0.0..=400.0,
+                    &percent,
+                    |m, v| m.width = v,
+                );
+                field(
+                    ui,
+                    state,
+                    "mask-height",
+                    "Height",
+                    mask.height,
+                    100.0,
+                    0.0..=400.0,
+                    &percent,
+                    |m, v| m.height = v,
+                );
+            }
+        }
+        field(
+            ui,
+            state,
+            "mask-rotation",
+            "Rotate",
+            mask.rotation,
+            1.0,
+            -180.0..=180.0,
+            &|v| format!("{v:.0}°"),
+            |m, v| m.rotation = v,
+        );
+        field(
+            ui,
+            state,
+            "mask-feather",
+            "Feather",
+            mask.feather,
+            100.0,
+            0.0..=100.0,
+            &|v| format!("{v:.0}"),
+            |m, v| m.feather = v,
+        );
+        if mask.shape == MaskShape::Rectangle {
+            field(
+                ui,
+                state,
+                "mask-round",
+                "Round corners",
+                mask.round,
+                100.0,
+                0.0..=100.0,
+                &|v| format!("{v:.0}"),
+                |m, v| m.round = v,
+            );
+        }
+        if switch_row(ui, "Invert", mask.invert, true).clicked() {
+            changed = Some(Mask {
+                invert: !mask.invert,
+                ..mask
+            });
+        }
+        if let Some(next) = changed {
+            send(shell, |shell| shell.set_mask(Some(next)));
         }
     });
 }

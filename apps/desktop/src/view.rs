@@ -6616,6 +6616,55 @@ mod tests {
         shell.set_chroma("", 0.0, 0.0).unwrap();
         assert!(shell.inspection().unwrap().chroma.is_none());
         assert!(shell.set_chroma("#00ff00", 2.0, 0.0).is_err());
+        // The Mask page: a click on a shape masks the clip, and its
+        // sliders show; None takes the mask off.
+        view.inspector.focus(inspector::Focus {
+            tab: 0,
+            page: 2,
+            section: None,
+        });
+        let _ = frame(&mut shell, &mut view, Vec::new());
+        let output = frame(&mut shell, &mut view, Vec::new());
+        assert!(
+            galleys(&output)
+                .iter()
+                .any(|line| line == "Pick a shape to mask the clip.")
+        );
+        let circle = text_pos(&output, "Circle").expect("circle shape") + Vec2::new(4.0, 4.0);
+        let _ = frame(
+            &mut shell,
+            &mut view,
+            vec![egui::Event::PointerMoved(circle)],
+        );
+        let _ = frame(&mut shell, &mut view, vec![press(circle, true)]);
+        let _ = frame(&mut shell, &mut view, vec![press(circle, false)]);
+        let mask = shell.inspection().unwrap().mask.expect("a mask");
+        assert_eq!(mask.shape, cutlass_effects::MaskShape::Circle);
+        let lines = galleys(&frame(&mut shell, &mut view, Vec::new()));
+        for label in [
+            "X", "Y", "Width", "Height", "Rotate", "Feather", "Invert", "50%",
+        ] {
+            assert!(lines.iter().any(|line| line == label), "{label}: {lines:?}");
+        }
+        assert!(!lines.iter().any(|line| line == "Round corners"));
+        shell
+            .set_mask(Some(cutlass_effects::Mask {
+                shape: cutlass_effects::MaskShape::Rectangle,
+                ..mask
+            }))
+            .unwrap();
+        let output = frame(&mut shell, &mut view, Vec::new());
+        assert!(galleys(&output).iter().any(|line| line == "Round corners"));
+        let none = text_pos(&output, "None").expect("none") + Vec2::new(4.0, 4.0);
+        let _ = frame(&mut shell, &mut view, vec![egui::Event::PointerMoved(none)]);
+        let _ = frame(&mut shell, &mut view, vec![press(none, true)]);
+        let _ = frame(&mut shell, &mut view, vec![press(none, false)]);
+        assert!(shell.inspection().unwrap().mask.is_none());
+        shell.undo().unwrap();
+        assert_eq!(
+            shell.inspection().unwrap().mask.map(|mask| mask.shape),
+            Some(cutlass_effects::MaskShape::Rectangle)
+        );
         let _ = std::fs::remove_dir_all(&temp);
     }
 

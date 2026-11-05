@@ -303,6 +303,8 @@ pub struct Inspection {
     pub lut: Option<(String, f32)>,
     /// The clip's chroma key.
     pub chroma: Option<cutlass_effects::Chroma>,
+    /// The clip's mask.
+    pub mask: Option<cutlass_effects::Mask>,
     /// Fade-in duration, microseconds.
     pub fade_in: i64,
     /// Fade-out duration, microseconds.
@@ -3399,6 +3401,7 @@ impl Shell {
             grade: cutlass_effects::segment_grade(draft, segment),
             lut: cutlass_effects::segment_lut(draft, segment).map(|lut| (lut.name, lut.strength)),
             chroma: cutlass_effects::segment_chroma(draft, segment),
+            mask: cutlass_effects::segment_mask(draft, segment),
             fade_in: fade_durations(draft, segment).0,
             fade_out: fade_durations(draft, segment).1,
             material,
@@ -4505,6 +4508,19 @@ impl Shell {
             color: color.to_owned(),
             strength,
             shadow,
+        })
+    }
+
+    /// Put `mask` on the selected picture, in its own frame, or take its
+    /// mask off.
+    pub fn set_mask(&mut self, mask: Option<cutlass_effects::Mask>) -> Result<(), ShellError> {
+        let segment_id = self.picture_segment("a mask belongs on a picture")?;
+        self.refuse_locked(&segment_id)?;
+        let material_id = MaterialId::new(self.fresh("mask"));
+        self.apply(Request::SetMask {
+            segment_id,
+            material_id,
+            mask,
         })
     }
 

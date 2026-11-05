@@ -8,9 +8,9 @@ use crate::dec::coder::Coder;
 use crate::dec::tile::{Block, TileDec};
 use crate::dec::types::{
     ALTREF_FRAME, BLOCK_8X8, BWDREF_FRAME, DC_PRED, GLOBALMV, GOLDEN_FRAME, INTRA_FRAME,
-    LAST_FRAME, Mv, NEAREST_NEARESTMV, NEARESTMV, NEARMV, NEW_NEWMV, NEWMV, NONE, PAETH_PRED,
-    SMOOTH_PRED, UV_CFL_PRED, bh4, block_height, block_width, bw4, mi_height_log2, mi_width_log2,
-    plane_residual_size, tx_h, tx_w,
+    LAST_FRAME, Mv, NEAR_NEARMV, NEAREST_NEARESTMV, NEAREST_NEWMV, NEARESTMV, NEARMV,
+    NEW_NEARESTMV, NEW_NEWMV, NEWMV, NONE, PAETH_PRED, SMOOTH_PRED, UV_CFL_PRED, bh4, block_height,
+    block_width, bw4, mi_height_log2, mi_width_log2, plane_residual_size, tx_h, tx_w,
 };
 use crate::dsp::Pixel;
 use crate::dsp::ipred::{EDGE_LEN, EDGE_OFF, cfl_ac, cfl_pred, predict_clipped};
@@ -107,6 +107,8 @@ pub struct ModeParams {
     /// Screen content intra frames: partition estimates include a palette
     /// and the chroma.
     pub screen_est: bool,
+    /// Compound modes beyond NEAREST_NEARESTMV and NEW_NEWMV.
+    pub compound_modes: bool,
 }
 
 impl Default for ModeParams {
@@ -152,6 +154,7 @@ impl Default for ModeParams {
             inter_flag_bits: true,
             exact_intra_rates: true,
             screen_est: true,
+            compound_modes: true,
         }
     }
 }
@@ -2157,30 +2160,64 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
                 i32::from(a.col) - i32::from(b.col),
             )
         };
-        let opts = if self.mode.exact_rates {
+        let mut opts: Vec<(u8, [Mv; 2], f64, usize)> = Vec::with_capacity(5);
+        if self.mode.exact_rates {
             let rb = self.ref_bits([f, bk]) - 3.0;
-            [
-                (
-                    NEAREST_NEARESTMV,
-                    [s0[0], s0[1]],
-                    self.mode_bits(true, NEAREST_NEARESTMV, 0) + rb,
-                ),
-                (
-                    NEW_NEWMV,
-                    [fmv, bmv],
-                    self.mode_bits(true, NEW_NEWMV, 0)
-                        + self.mv_bits(dm(fmv, s0[0]))
-                        + self.mv_bits(dm(bmv, s0[1]))
-                        + rb,
-                ),
-            ]
+            opts.push((
+                NEAREST_NEARESTMV,
+                [s0[0], s0[1]],
+                self.mode_bits(true, NEAREST_NEARESTMV, 0) + rb,
+                0,
+            ));
+            opts.push((
+                NEW_NEWMV,
+                [fmv, bmv],
+                self.mode_bits(true, NEW_NEWMV, 0)
+                    + self.mv_bits(dm(fmv, s0[0]))
+                    + self.mv_bits(dm(bmv, s0[1]))
+                    + rb,
+                0,
+            ));
+            if self.mode.compound_modes {
+                // One new vector against the other's nearest.
+                opts.push((
+                    NEAREST_NEWMV,
+                    [s0[0], bmv],
+                    self.mode_bits(true, NEAREST_NEWMV, 0) + self.mv_bits(dm(bmv, s0[1])) + rb,
+                    0,
+                ));
+                opts.push((
+                    NEW_NEARESTMV,
+                    [fmv, s0[1]],
+                    self.mode_bits(true, NEW_NEARESTMV, 0) + self.mv_bits(dm(fmv, s0[0])) + rb,
+                    0,
+                ));
+                if self.b.num_mv_found > 1 {
+                    let s1 = self.b.ref_stack_mv[1];
+                    opts.push((
+                        NEAR_NEARMV,
+                        [s1[0], s1[1]],
+                        self.mode_bits(true, NEAR_NEARMV, 1) + rb,
+                        1,
+                    ));
+                }
+            }
         } else {
-            [
-                (NEAREST_NEARESTMV, [s0[0], s0[1]], 2.0),
-                (NEW_NEWMV, [fmv, bmv], 4.0 + d(fmv, s0[0]) + d(bmv, s0[1])),
-            ]
-        };
-        for (mode, mv, rate) in opts {
+            opts.push((NEAREST_NEARESTMV, [s0[0], s0[1]], 2.0, 0));
+            opts.push((
+                NEW_NEWMV,
+                [fmv, bmv],
+                4.0 + d(fmv, s0[0]) + d(bmv, s0[1]),
+                0,
+            ));
+        }
+        for (mode, mv, rate, idx) in opts {
+            if mode != NEAREST_NEARESTMV
+                && mode != NEW_NEWMV
+                && (mv == [s0[0], s0[1]] || mv == [fmv, bmv])
+            {
+                continue;
+            }
             if !self.pred_luma([f, bk], mv, x, y, w, h) {
                 continue;
             }
@@ -2198,7 +2235,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
                 refs: [f, bk],
                 mode,
                 mv,
-                idx: 0,
+                idx,
                 cost,
                 bits: rate + 3.0,
             });

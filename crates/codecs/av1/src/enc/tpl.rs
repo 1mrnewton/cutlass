@@ -200,6 +200,7 @@ fn inter_pass<P: Pixel>(
         max_range: (2 * dist).clamp(4, 16),
         subpel: 1,
         border: 0,
+        subpel_pruned: true,
         ..MeParams::default()
     };
     let cost = |r: i32, c: i32| -> u32 { (r.unsigned_abs() + c.unsigned_abs()) >> 3 };

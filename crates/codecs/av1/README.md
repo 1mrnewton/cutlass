@@ -65,10 +65,12 @@ the reference frames. Tools used:
   live CDFs.
 - Per-frame search of the deblocking level and CDEF strengths.
 - Constant q or a bitrate target (`RateControl::Bitrate`).
+- Tile-parallel coding on several threads (`set_threads`); the bitstream
+  does not depend on the thread count.
 
 Quality and speed against FFmpeg's encoders are in `STATUS.md`. In short:
 it needs about 7% fewer bits than rav1e `-speed 8` for the same PSNR, and
-13-20% more than libaom `-cpu-used 6` on natural video; it runs at about
+12-18% more than libaom `-cpu-used 6` on natural video; it runs at about
 half the speed of libaom at that preset (single thread).
 
 ## API

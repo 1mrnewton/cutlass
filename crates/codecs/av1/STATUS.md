@@ -94,15 +94,21 @@ encoder for equal PSNR (negative = fewer bits).
 Encoding speed on the natural clip: ours 9-15 fps, libaom 22-33, SVT-AV1
 29-40, rav1e 9-25.
 
+Multi-threaded, 1920x1080, 20 frames, 4 threads each (wall time; the
+encoder splits HD frames into tile columns and codes them in parallel, with
+output independent of the thread count): ours 7.3 s, libaom
+`-cpu-used 6 -row-mt 1` 2.7 s, SVT-AV1 `-preset 8` 1.5 s, rav1e `-speed 8`
+13.0 s.
+
 So the encoder beats rav1e at its default speed in quality and is behind
 libaom and SVT-AV1, which have years of tuning (temporal dependency models,
 more search, assembly kernels). `tools/kbd.sh` (finer q grid, 5 points)
-puts the natural-video gap to libaom at +13%.
+puts the natural-video gap to libaom at +12%.
 
 ## Checks
 
 `cargo fmt`, `cargo clippy -p cutlass-av1 --all-targets -- -D warnings`
-and `cargo test -p cutlass-av1 --release` (102 tests: transform, filter,
+and `cargo test -p cutlass-av1 --release` (103 tests: transform, filter,
 predictor and coder kernels against spec transliterations, header and
 OBU round trips, Annex B, encoder/decoder API including reordered GOPs and
-error recovery) pass.
+error recovery, thread-independent tile coding) pass.

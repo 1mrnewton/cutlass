@@ -659,6 +659,7 @@ impl<P: Pixel> MeScratch<P> {
             pred: Vec::new(),
             edge: Vec::new(),
             est_memo: Vec::new(),
+            force_part: None,
             win: Vec::new(),
             pred_cache: Vec::new(),
             tx_memo: None,

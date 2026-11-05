@@ -183,6 +183,29 @@ impl FrameState {
         }
     }
 
+    /// Whether `self`, a [`Self::filter_shell`], has the array sizes of a
+    /// filter shell of `fs` (its contents are rewritten row by row).
+    pub fn fits_filter_shell(&self, fs: &FrameState) -> bool {
+        self.mi_stride == fs.mi_stride
+            && self.mi.len() == fs.mi.len()
+            && self.cdef_idx.len() == fs.cdef_idx.len()
+            && self
+                .lf_tx
+                .iter()
+                .zip(&fs.lf_tx)
+                .all(|(a, b)| a.len() == b.len())
+    }
+
+    /// Takes on the dimensions of `fs` (see [`Self::fits_filter_shell`]).
+    pub fn reshape_filter_shell(mut self, fs: &FrameState) -> Self {
+        self.mi_cols = fs.mi_cols;
+        self.mi_rows = fs.mi_rows;
+        self.cdef_stride = fs.cdef_stride;
+        self.lr_cols = fs.lr_cols;
+        self.lr_rows = fs.lr_rows;
+        self
+    }
+
     #[inline(always)]
     pub fn mi_at(&self, row: usize, col: usize) -> &MiInfo {
         &self.mi[row * self.mi_stride + col]

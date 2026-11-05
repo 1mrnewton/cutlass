@@ -269,6 +269,45 @@ pub fn lr_planes<P: Pixel>(planes: Vec<LrPlane<'_, P>>, scratch: &mut LrScratch,
     scratch.workers = workers;
 }
 
+/// [`lr_planes`] on the calling thread for the stripes `stripes` only
+/// (stripe `k` starts at luma row `64 k - 8`); `dst` is the whole plane.
+pub fn lr_planes_stripes<P: Pixel>(
+    planes: Vec<LrPlane<'_, P>>,
+    scratch: &mut LrScratch,
+    stripes: core::ops::Range<usize>,
+) {
+    for p in planes {
+        if p.plane_w == 0
+            || p.plane_h == 0
+            || p.unit_size == 0
+            || p.units_per_row == 0
+            || p.units_rows == 0
+        {
+            continue;
+        }
+        let g = LrGeom {
+            stride: p.stride,
+            plane_w: p.plane_w,
+            plane_h: p.plane_h,
+            unit_size: p.unit_size,
+            units_per_row: p.units_per_row,
+            units_rows: p.units_rows,
+            sy: p.sub_y as u32,
+            bd: p.bd,
+        };
+        lr_stripes(
+            p.dst,
+            0,
+            p.cdef,
+            p.deblocked,
+            p.units,
+            &g,
+            stripes.clone(),
+            scratch,
+        );
+    }
+}
+
 /// Filtered samples per extra thread below which [`lr_planes`] uses fewer
 /// threads.
 const LR_THREAD_WORK: usize = 1 << 18;

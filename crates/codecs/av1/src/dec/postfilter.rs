@@ -10,7 +10,7 @@ use crate::dsp::cdef::{
     cdef_pad_block, cdef_uv_dir,
 };
 use crate::dsp::lf::{filter_horizontal_edge, filter_vertical_edge};
-use crate::dsp::lr::{LrPlane, LrScratch, LrUnit, lr_planes};
+use crate::dsp::lr::{LrPlane, LrScratch, LrUnit, lr_planes, lr_planes_stripes};
 use crate::dsp::superres::upscale_plane;
 
 use super::frame::{FrameState, Picture};
@@ -845,20 +845,9 @@ pub fn superres<P: Pixel>(seq: &SequenceHeader, hdr: &FrameHeader, src: &Picture
     out
 }
 
-/// Loop restoration (7.17). `cdef` is UpscaledCdefFrame, `deblocked` is
-/// UpscaledCurrFrame; the result replaces `out` (initially a copy of `cdef`).
-pub fn loop_restoration<P: Pixel>(
-    seq: &SequenceHeader,
-    hdr: &FrameHeader,
-    fs: &FrameState,
-    cdef: &Picture<P>,
-    deblocked: &Picture<P>,
-    out: &mut Picture<P>,
-    scratch: &mut LrScratch,
-    threads: usize,
-) {
-    let num_planes = seq.num_planes();
-    let units: Vec<Vec<LrUnit>> = (0..num_planes)
+/// The loop restoration units of every plane in the form [`LrPlane`] reads.
+pub fn lr_units(seq: &SequenceHeader, fs: &FrameState) -> Vec<Vec<LrUnit>> {
+    (0..seq.num_planes())
         .map(|p| {
             fs.lr[p]
                 .iter()
@@ -881,7 +870,20 @@ pub fn loop_restoration<P: Pixel>(
                 })
                 .collect()
         })
-        .collect();
+        .collect()
+}
+
+/// The [`LrPlane`]s of the planes loop restoration filters.
+fn lr_plane_args<'a, P: Pixel>(
+    seq: &SequenceHeader,
+    hdr: &FrameHeader,
+    fs: &FrameState,
+    cdef: &'a Picture<P>,
+    deblocked: &'a Picture<P>,
+    out: &'a mut Picture<P>,
+    units: &'a [Vec<LrUnit>],
+) -> Vec<LrPlane<'a, P>> {
+    let num_planes = seq.num_planes();
     let mut planes = Vec::new();
     for (p, dst) in out.planes.iter_mut().enumerate().take(num_planes) {
         if hdr.lr.frame_type[p] == 0 {
@@ -907,5 +909,41 @@ pub fn loop_restoration<P: Pixel>(
             bd: cdef.bd,
         });
     }
+    planes
+}
+
+/// Loop restoration (7.17). `cdef` is UpscaledCdefFrame, `deblocked` is
+/// UpscaledCurrFrame; the result replaces `out` (initially a copy of `cdef`).
+pub fn loop_restoration<P: Pixel>(
+    seq: &SequenceHeader,
+    hdr: &FrameHeader,
+    fs: &FrameState,
+    cdef: &Picture<P>,
+    deblocked: &Picture<P>,
+    out: &mut Picture<P>,
+    scratch: &mut LrScratch,
+    threads: usize,
+) {
+    let units = lr_units(seq, fs);
+    let planes = lr_plane_args(seq, hdr, fs, cdef, deblocked, out, &units);
     lr_planes(planes, scratch, threads);
+}
+
+/// [`loop_restoration`] of the stripes `stripes` only (stripe `k` starts
+/// at luma row `64 k - 8`), on the calling thread, with `units` from
+/// [`lr_units`]. Stripe `k` reads CDEF output up to the end of superblock
+/// row `k` and deblocked samples a few rows into it.
+pub fn loop_restoration_stripes<P: Pixel>(
+    seq: &SequenceHeader,
+    hdr: &FrameHeader,
+    fs: &FrameState,
+    cdef: &Picture<P>,
+    deblocked: &Picture<P>,
+    out: &mut Picture<P>,
+    units: &[Vec<LrUnit>],
+    scratch: &mut LrScratch,
+    stripes: core::ops::Range<usize>,
+) {
+    let planes = lr_plane_args(seq, hdr, fs, cdef, deblocked, out, units);
+    lr_planes_stripes(planes, scratch, stripes);
 }

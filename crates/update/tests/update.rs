@@ -247,6 +247,79 @@ fn an_unreachable_or_missing_feed_is_a_network_error() {
     assert!(matches!(closed, Err(UpdateError::Network(_))));
 }
 
+/// The Linux update as it runs: the feed offers a newer AppImage, it is
+/// fetched and checked, put over the running one, and started once the old
+/// process has quit. The AppImages are shell scripts that say they ran.
+#[cfg(unix)]
+#[test]
+fn an_appimage_is_replaced_and_the_new_one_starts_after_the_old_quits() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::{Duration, Instant};
+
+    use cutlass_update::{Installed, install};
+
+    let platform = Platform::Linux { arch: "x86_64" };
+    let dir = scratch("appimage");
+    let ran = dir.join("ran");
+    let appimage = dir.join("Cutlass.AppImage");
+    fs::write(&appimage, "#!/bin/sh\necho old > \"$0.old\"\n").unwrap();
+    fs::set_permissions(&appimage, fs::Permissions::from_mode(0o755)).unwrap();
+    let package = format!("#!/bin/sh\necho new > '{}'\n", ran.display()).into_bytes();
+    let (feed_server, _files) = release(platform, &package, "v0.2.0");
+    let running = Version::parse("0.1.0").unwrap();
+    let offer = check(
+        &Http::new(),
+        &format!("{}/feed", feed_server.base),
+        &running,
+        platform,
+    )
+    .unwrap()
+    .unwrap();
+    let downloaded = download(
+        Http::new(),
+        &offer,
+        &dir.join("Updates"),
+        &mut |_| {},
+        &|| false,
+    )
+    .unwrap();
+
+    let installed = Installed::detect(
+        platform,
+        &dir.join("squashfs-root/AppRun"),
+        Some(appimage.as_os_str()),
+    )
+    .unwrap();
+    assert_eq!(installed, Installed::AppImage(appimage.clone()));
+    // The "running app": a process the relaunch waits for.
+    let mut app = std::process::Command::new("sleep")
+        .arg("1")
+        .spawn()
+        .unwrap();
+    let relaunch = install(&installed, &downloaded, &offer.version, app.id()).unwrap();
+    assert_eq!(fs::read(&appimage).unwrap(), package);
+    assert_eq!(
+        fs::metadata(&appimage).unwrap().permissions().mode() & 0o777,
+        0o755
+    );
+    assert!(!dir.join(".Cutlass.AppImage.update").exists());
+    relaunch.spawn().unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(!ran.exists(), "the new app waits for the old one to quit");
+    app.wait().unwrap();
+    let until = Instant::now() + Duration::from_secs(10);
+    while !ran.exists() {
+        assert!(Instant::now() < until, "the new AppImage never started");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(fs::read_to_string(&ran).unwrap(), "new\n");
+    assert!(
+        !dir.join("Cutlass.AppImage.old").exists(),
+        "the old one never ran"
+    );
+    fs::remove_dir_all(&dir).unwrap();
+}
+
 #[cfg(target_os = "macos")]
 mod macos {
     use std::path::{Path, PathBuf};

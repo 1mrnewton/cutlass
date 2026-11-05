@@ -25,6 +25,9 @@ pub struct Scratch<P> {
     pub coefs: Vec<i32>,
     pub nz_rows: usize,
     pub nz_cols: usize,
+    /// Whether `coeffs` put the coefficients of the transform block in the
+    /// reconstruction log itself (see `TxOp`) rather than in `coefs`.
+    pub logged: bool,
     pub tx_type: u8,
     pub above: [P; EDGE_LEN],
     pub left: [P; EDGE_LEN],
@@ -49,6 +52,7 @@ impl<P: Pixel> Scratch<P> {
             coefs: vec![0; 64 * 64],
             nz_rows: 0,
             nz_cols: 0,
+            logged: false,
             tx_type: 0,
             above: [P::default(); EDGE_LEN],
             left: [P::default(); EDGE_LEN],
@@ -75,6 +79,7 @@ impl<P: Pixel> Scratch<P> {
             coefs: Vec::new(),
             nz_rows: 0,
             nz_cols: 0,
+            logged: false,
             tx_type: 0,
             above: [P::default(); EDGE_LEN],
             left: [P::default(); EDGE_LEN],

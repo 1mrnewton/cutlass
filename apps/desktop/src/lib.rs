@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
+pub mod assistant;
 mod dialogs;
 mod face;
 mod gpu;

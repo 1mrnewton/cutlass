@@ -18,6 +18,7 @@ use crate::shell::{ExportRequest, ListedProject, MovePreview, Shell, ShellError}
 use crate::tokens;
 use crate::widgets;
 
+mod assistant;
 mod grade;
 mod inspector;
 
@@ -219,6 +220,8 @@ pub struct ViewState {
     /// How far the lanes are moved down from where they center on the main
     /// lane, in points; negative shows lanes further down.
     lane_scroll: f32,
+    /// The assistant's conversation, and whether its panel is open.
+    pub assistant: crate::assistant::Assistant,
 }
 
 /// Where a track head's menu opened, and for which track.
@@ -278,6 +281,7 @@ impl Default for ViewState {
             marquee_press: None,
             marquee: None,
             lane_scroll: 0.0,
+            assistant: crate::assistant::Assistant::default(),
         }
     }
 }
@@ -303,6 +307,10 @@ pub fn show(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Option
             .request_repaint_after(std::time::Duration::from_millis(100));
     }
     show_imported(shell, view);
+    if view.assistant.poll(shell) {
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(50));
+    }
     if std::mem::take(&mut view.ask_still) {
         let name = shell.project_name();
         view.dialogs.save_still(parent, &name);
@@ -840,6 +848,28 @@ fn project_bar(
         view.export_open = true;
     }
     shell.chrome.export = true;
+    let toggle = Rect::from_min_size(
+        export.left_center() - Vec2::new(12.0 + 84.0, 13.0),
+        Vec2::new(84.0, 26.0),
+    );
+    let open = view.assistant.open;
+    let response = ui
+        .scope_builder(egui::UiBuilder::new().max_rect(toggle), |ui| {
+            ui.add(
+                egui::Button::new(RichText::new("Assistant").size(12.0).color(if open {
+                    tokens::TEXT
+                } else {
+                    tokens::MUTED
+                }))
+                .selected(open)
+                .min_size(toggle.size()),
+            )
+        })
+        .inner
+        .on_hover_text("Ask Cutlass to edit (⌘J)");
+    if response.clicked() {
+        view.assistant.open = !open;
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -1369,7 +1399,11 @@ fn regions(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, row: Rect, size
         Vec2::new(sizes.inspector, row.height()),
     );
     panel(ui, inspector);
-    inspector_panel(shell, ui, view, inspector);
+    if view.assistant.open {
+        assistant::panel(shell, ui, &mut view.assistant, inspector);
+    } else {
+        inspector_panel(shell, ui, view, inspector);
+    }
     shell.chrome.inspector = true;
 }
 
@@ -6053,7 +6087,14 @@ fn parse_mbps(text: &str) -> Option<u32> {
     Some((mbps * 1_000_000.0).round() as u32)
 }
 
-fn shortcuts(shell: &mut Shell, ui: &Ui, view: &ViewState) {
+fn shortcuts(shell: &mut Shell, ui: &Ui, view: &mut ViewState) {
+    if !view.settings_open
+        && shell.draft().is_some()
+        && ui.input(|input| input.modifiers.command && input.key_pressed(egui::Key::J))
+    {
+        view.assistant.open = !view.assistant.open;
+        return;
+    }
     if ui.ctx().text_edit_focused() || view.settings_open || view.licenses.is_some() {
         return;
     }
@@ -6692,6 +6733,149 @@ mod tests {
             inspection.mask.map(|mask| mask.shape),
             Some(cutlass_effects::MaskShape::Rectangle)
         );
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    /// A local model on this machine that answers each POST with the next
+    /// of `replies`, then stops listening.
+    fn local_model(replies: Vec<serde_json::Value>) -> (u16, std::thread::JoinHandle<usize>) {
+        use std::io::{BufRead, BufReader, Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let mut answered = 0;
+            for message in replies {
+                let (stream, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut length = 0;
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    if line.trim().is_empty() {
+                        break;
+                    }
+                    if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = value.trim().parse().unwrap();
+                    }
+                }
+                let mut body = vec![0; length];
+                reader.read_exact(&mut body).unwrap();
+                let answer = serde_json::json!({ "choices": [{ "index": 0, "message": message }] })
+                    .to_string();
+                let mut stream = stream;
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{answer}",
+                    answer.len()
+                )
+                .unwrap();
+                answered += 1;
+            }
+            answered
+        });
+        (port, server)
+    }
+
+    #[test]
+    fn the_assistant_panel_sends_runs_a_step_and_shows_the_answer() {
+        let temp = std::env::temp_dir().join(format!("cutlass-chat-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let mut draft = cutlass_model::Draft::empty("draft");
+        draft.tracks[0].segments.push(cutlass_model::Segment::new(
+            "a",
+            "missing",
+            cutlass_model::TimeRange::new(0, 3_000_000),
+        ));
+        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        let (port, server) = local_model(vec![
+            serde_json::json!({
+                "role": "assistant",
+                "content": "Moving the playhead.",
+                "tool_calls": [{ "id": "c1", "type": "function",
+                    "function": { "name": "player_seek", "arguments": "{\"input\":\"1500000\"}" } }],
+            }),
+            serde_json::json!({ "role": "assistant", "content": "The playhead is at 1.5 s." }),
+        ]);
+        let mut settings = Settings::default();
+        settings.model.local_url = format!("http://127.0.0.1:{port}/v1/chat/completions");
+        settings.model.local_name = "test-model".to_owned();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, settings);
+        shell.open_folder(&temp).unwrap();
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let frame = |shell: &mut Shell, view: &mut ViewState, events: Vec<egui::Event>| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 1000.0))),
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, view, None),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        let press = |pos: Pos2, pressed: bool| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        let click = |shell: &mut Shell, view: &mut ViewState, at: Pos2| {
+            let _ = frame(shell, view, vec![egui::Event::PointerMoved(at)]);
+            let _ = frame(shell, view, vec![press(at, true)]);
+            frame(shell, view, vec![press(at, false)])
+        };
+        let output = frame(&mut shell, &mut view, Vec::new());
+        let toggle = text_pos(&output, "Assistant").expect("the toggle") + Vec2::new(4.0, 4.0);
+        let _ = click(&mut shell, &mut view, toggle);
+        assert!(view.assistant.open);
+        let output = frame(&mut shell, &mut view, Vec::new());
+        let lines = galleys(&output);
+        for label in ["test-model on this machine", "Send", assistant::HINT] {
+            assert!(lines.iter().any(|line| line == label), "{label}: {lines:?}");
+        }
+        // Type in the box and send.
+        let hint = text_pos(&output, assistant::HINT).expect("the box") + Vec2::new(4.0, 4.0);
+        let _ = click(&mut shell, &mut view, hint);
+        let _ = frame(
+            &mut shell,
+            &mut view,
+            vec![egui::Event::Text("go to 1.5 seconds".to_owned())],
+        );
+        let output = frame(&mut shell, &mut view, Vec::new());
+        let send = text_pos(&output, "Send").expect("send") + Vec2::new(4.0, 4.0);
+        let _ = click(&mut shell, &mut view, send);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while view.assistant.busy() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the turn did not finish"
+            );
+            let lines = galleys(&frame(&mut shell, &mut view, Vec::new()));
+            if view.assistant.busy() {
+                assert!(
+                    lines
+                        .iter()
+                        .any(|line| line == "Stop" || line == "Working…"),
+                    "{lines:?}"
+                );
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(server.join().unwrap(), 2);
+        assert_eq!(shell.playhead(), Micros(1_500_000));
+        let lines = galleys(&frame(&mut shell, &mut view, Vec::new()));
+        for label in [
+            "go to 1.5 seconds",
+            "Moving the playhead.",
+            "✓ player.seek 1500000",
+            "The playhead is at 1.5 s.",
+        ] {
+            assert!(lines.iter().any(|line| line == label), "{label}: {lines:?}");
+        }
+        assert!(view.assistant.draft.is_empty());
         let _ = std::fs::remove_dir_all(&temp);
     }
 

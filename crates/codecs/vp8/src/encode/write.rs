@@ -4,15 +4,17 @@ use crate::bool_coder::BoolEncoder;
 use crate::header::{CoeffProbs, FrameHeader};
 use crate::modes::{
     ALTREF, Bounds, INTRA, LAST, MbInfo, Mv, NEARESTMV, NEWMV, SPLITMV, SubInfo, find_near,
+    sub_mv_context,
 };
 use crate::predict::B_PRED;
 use crate::tables::{
     B_MODE_PROBS, B_MODE_TREE, KF_B_MODE_PROBS, KF_UV_MODE_PROBS, KF_Y_MODE_PROBS, KF_Y_MODE_TREE,
-    MV_REF_TREE, SMALL_MV_TREE, UV_MODE_TREE, Y_MODE_TREE,
+    MV_PARTITIONS, MV_REF_TREE, SMALL_MV_TREE, SPLIT_COUNTS, SPLIT_MV_PROBS, SPLIT_MV_TREE,
+    SUB_MV_REF_PROBS, SUB_MV_REF_TREE, UV_MODE_TREE, Y_MODE_TREE,
 };
 use crate::tokens::{Context, TYPE_CHROMA, TYPE_Y_AFTER_Y2, TYPE_Y_WITH_DC, TYPE_Y2, skip_mb};
 
-use super::cost::tree_path;
+use super::cost::{NEW_4X4, split_mode, tree_path};
 use super::frame::Coded;
 use super::residual::{Counts, QBlock, best_prob, branch_cost, count_block, write_block};
 
@@ -145,7 +147,38 @@ pub fn write_modes(w: &mut BoolEncoder, h: &FrameHeader, coded: &Coded, mbw: usi
                 Mv::new(mb.mv.row - best.row, mb.mv.col - best.col),
             );
         } else if mb.y_mode == SPLITMV {
-            // The encoder does not choose SPLITMV.
+            let partition = usize::from(mb.partition & 3);
+            w.tree(&SPLIT_MV_TREE, &SPLIT_MV_PROBS, mb.partition & 3);
+            let map = &MV_PARTITIONS[partition];
+            for j in 0..SPLIT_COUNTS[partition] {
+                let Some(k) = map.iter().position(|&p| usize::from(p) == j) else {
+                    continue;
+                };
+                let left = if k & 3 == 0 {
+                    n.left_sub.map_or(Mv::ZERO, |s| s.mvs[k + 3])
+                } else {
+                    sub.mvs[k - 1]
+                };
+                let above = if k < 4 {
+                    n.above_sub.map_or(Mv::ZERO, |s| s.mvs[k + 12])
+                } else {
+                    sub.mvs[k - 4]
+                };
+                let mv = sub.mvs[k];
+                let (mode, _) = split_mode(left, above, mv);
+                w.tree(
+                    &SUB_MV_REF_TREE,
+                    &SUB_MV_REF_PROBS[sub_mv_context(left, above)],
+                    mode,
+                );
+                if mode == NEW_4X4 {
+                    write_mv(
+                        w,
+                        &h.probs.mv,
+                        Mv::new(mv.row - best.row, mv.col - best.col),
+                    );
+                }
+            }
         }
     });
 }

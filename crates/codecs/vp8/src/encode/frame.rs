@@ -3,18 +3,22 @@
 
 use crate::bool_coder::cost;
 use crate::decode::{Frame, chroma_mvs};
+use crate::inter::RefPlane;
 use crate::inter::{self, Filter};
 use crate::modes::{
-    Bounds, GOLDEN, INTRA, LAST, MbInfo, Mv, NEARESTMV, NEARMV, NEWMV, SubInfo, ZEROMV, find_near,
-    implied_b_mode,
+    Bounds, GOLDEN, INTRA, LAST, MbInfo, Mv, NEARESTMV, NEARMV, NEWMV, SPLITMV, SubInfo, ZEROMV,
+    find_near, implied_b_mode,
 };
 use crate::predict::{self, B_PRED, CHROMA_BUF, CHROMA_STRIDE, LUMA_BUF, LUMA_STRIDE};
+use crate::tables::{MV_PARTITIONS, SPLIT_COUNTS};
 use crate::tokens::{
     Context, Dequant, TYPE_CHROMA, TYPE_Y_AFTER_Y2, TYPE_Y_WITH_DC, TYPE_Y2, skip_mb,
 };
 use crate::transform::{fdct, fwht, idct_add, iwht};
 
-use super::cost::{MAX_MV_DELTA, ModeCosts, MvCosts, inter_mode_costs};
+use super::cost::{
+    MAX_MV_DELTA, ModeCosts, MvCosts, NEW_4X4, inter_mode_costs, split_costs, split_mode,
+};
 use super::residual::{Costs, QBlock, Rounding, quantize};
 use super::search::{self, Search, Window};
 
@@ -175,6 +179,56 @@ fn code_luma_y2(
         let ctx = usize::from(l[r] + a[c]);
         out.rate += s.coeff_costs.block(TYPE_Y_AFTER_Y2, ctx, 1, &q);
         let has = u8::from(q.end > 1);
+        l[r] = has;
+        a[c] = has;
+        out.q[b] = q;
+    }
+    out.sse = sse(&out.recon, src);
+    out
+}
+
+/// A macroblock's luma residual with each block's DC in the block, as
+/// SPLITMV codes it.
+#[derive(Clone)]
+struct LumaPlain {
+    q: [QBlock; 16],
+    recon: [u8; 256],
+    sse: u32,
+    rate: u32,
+}
+
+fn code_luma_plain(
+    src: &[u8; 256],
+    pred: &[u8; 256],
+    s: &Setup<'_>,
+    left: &Context,
+    above: &Context,
+    round: Rounding,
+) -> LumaPlain {
+    let mut out = LumaPlain {
+        q: [QBlock::default(); 16],
+        recon: *pred,
+        sse: 0,
+        rate: 0,
+    };
+    let (mut l, mut a) = (*left, *above);
+    for b in 0..16 {
+        let (r, c) = (b >> 2, b & 3);
+        let mut res = [0i16; 16];
+        for y in 0..4 {
+            for x in 0..4 {
+                let i = (4 * r + y) * 16 + 4 * c + x;
+                res[4 * y + x] = i16::from(src[i]) - i16::from(pred[i]);
+            }
+        }
+        let mut deq = [0i16; 16];
+        let q = quantize(&fdct(&res), s.dq.y1, round, 0, &mut deq);
+        if q.end > 0 {
+            idct_add(&deq, &mut out.recon, 4 * r * 16 + 4 * c, 16);
+        }
+        let ctx = usize::from(l[r] + a[c]);
+        out.rate += s.coeff_costs.block(TYPE_Y_WITH_DC, ctx, 0, &q);
+        let has = u8::from(q.end > 0);
         l[r] = has;
         a[c] = has;
         out.q[b] = q;
@@ -359,6 +413,7 @@ struct Decision {
 enum LumaKind {
     Y2(Box<LumaY2>),
     B(Box<BPred>),
+    Plain(Box<LumaPlain>),
 }
 
 impl Decision {
@@ -485,7 +540,7 @@ fn decide_intra(recon: &Frame, m: &MbCtx<'_>, s: &Setup<'_>, limit: u64) -> Opti
     let mut sub = SubInfo::default();
     match &luma {
         LumaKind::B(bp) => sub.b_modes = bp.modes,
-        LumaKind::Y2(_) => sub.b_modes = [implied_b_mode(y_mode); 16],
+        LumaKind::Y2(_) | LumaKind::Plain(_) => sub.b_modes = [implied_b_mode(y_mode); 16],
     }
     let mb = MbInfo {
         y_mode,
@@ -512,7 +567,24 @@ struct Candidate {
     pred: [u8; 256],
 }
 
-fn inter_candidates(m: &MbCtx<'_>, s: &Setup<'_>, out: &mut Vec<Candidate>) {
+/// What SPLITMV needs from one reference's candidate pass.
+struct RefInfo {
+    ref_frame: u8,
+    /// The clamped best vector new vectors are coded against.
+    best: Mv,
+    /// Reference and SPLITMV mode cost.
+    rate: u32,
+    /// The searched 16×16 vector.
+    new: Mv,
+    window: Window,
+}
+
+fn inter_candidates(
+    m: &MbCtx<'_>,
+    s: &Setup<'_>,
+    out: &mut Vec<Candidate>,
+    refs_out: &mut Vec<RefInfo>,
+) {
     let mbw = s.last.map_or(1, |f| f.mbw);
     let mbh = s.last.map_or(1, |f| f.mbh);
     let bounds = Bounds::new(m.mbx, m.mby, mbw, mbh);
@@ -605,6 +677,13 @@ fn inter_candidates(m: &MbCtx<'_>, s: &Setup<'_>, out: &mut Vec<Candidate>) {
             subpel: true,
         };
         let (mv, _) = search::search(&search, &[best, nearest, nearv, Mv::ZERO]);
+        refs_out.push(RefInfo {
+            ref_frame,
+            best,
+            rate: ref_cost + modes[usize::from(SPLITMV - NEARESTMV)],
+            new: mv,
+            window,
+        });
         let dr = mv.row - best.row;
         let dc = mv.col - best.col;
         if dr.abs() <= MAX_MV_DELTA && dc.abs() <= MAX_MV_DELTA {
@@ -634,7 +713,8 @@ fn inter_chroma_pred(frame: &Frame, mbx: usize, mby: usize, mv: Mv) -> [[u8; 64]
 
 fn decide_inter(m: &MbCtx<'_>, s: &Setup<'_>) -> Option<Decision> {
     let mut cands = Vec::with_capacity(8);
-    inter_candidates(m, s, &mut cands);
+    let mut refs = Vec::with_capacity(2);
+    inter_candidates(m, s, &mut cands, &mut refs);
     cands.sort_by_key(|c| c.score);
     let keep = if s.speed == 0 { 3 } else { 2 };
     let round = rounding(false);
@@ -676,7 +756,263 @@ fn decide_inter(m: &MbCtx<'_>, s: &Setup<'_>) -> Option<Decision> {
             });
         }
     }
+    // SPLITMV, when the whole-block prediction leaves enough error for
+    // smaller parts to pay for their vectors.
+    let Some(top) = cands.first() else {
+        return best;
+    };
+    let step = u64::from(s.dq.y1[1].unsigned_abs());
+    let worth =
+        s.speed == 0 || u64::from(search::sse16(&top.pred, &m.src_y)) > 256 * step * step / 8;
+    let Some(info) = refs.iter().find(|r| r.ref_frame == top.ref_frame) else {
+        return best;
+    };
+    if s.speed > 1 || !worth {
+        return best;
+    }
+    // 8×8 parts are searched; 16×8 and 8×16 start from their vectors.
+    let keep = |d: Option<Decision>, best: &mut Option<Decision>| {
+        if let Some(d) = d
+            && best.as_ref().is_none_or(|b| d.j < b.j)
+        {
+            *best = Some(d);
+        }
+    };
+    let quarters = decide_split(m, s, info, 2, true, &[]);
+    let seeds: Vec<Mv> = quarters.as_ref().map_or_else(Vec::new, |d| {
+        vec![d.sub.mvs[0], d.sub.mvs[2], d.sub.mvs[8], d.sub.mvs[10]]
+    });
+    keep(quarters, &mut best);
+    let thorough = s.speed == 0;
+    keep(decide_split(m, s, info, 0, thorough, &seeds), &mut best);
+    keep(decide_split(m, s, info, 1, thorough, &seeds), &mut best);
+    if thorough {
+        keep(decide_split(m, s, info, 3, true, &seeds), &mut best);
+    }
     best
+}
+
+/// The rectangle of part `j` of a SPLITMV partitioning, in pixels inside
+/// the macroblock: x, y, width, height.
+fn part_rect(partition: u8, j: usize) -> (usize, usize, usize, usize) {
+    match partition {
+        0 => (0, 8 * j, 16, 8),
+        1 => (8 * j, 0, 8, 16),
+        2 => (8 * (j & 1), 8 * (j >> 1), 8, 8),
+        _ => (4 * (j & 3), 4 * (j >> 2), 4, 4),
+    }
+}
+
+/// Predicts one rectangle of the macroblock's luma into `out` (stride 16).
+#[allow(clippy::too_many_arguments)]
+fn predict_rect(
+    plane: RefPlane<'_>,
+    mbx: usize,
+    mby: usize,
+    rect: (usize, usize, usize, usize),
+    mv: Mv,
+    out: &mut [u8; 256],
+) {
+    let (x, y, w, h) = rect;
+    inter::predict(
+        plane,
+        (mbx * 16 + x) as i32 + (mv.col >> 2),
+        (mby * 16 + y) as i32 + (mv.row >> 2),
+        ((mv.col & 3) * 2) as usize,
+        ((mv.row & 3) * 2) as usize,
+        w,
+        h,
+        Filter::SixTap,
+        &mut out[y * 16 + x..],
+        16,
+    );
+}
+
+fn rect_sse(a: &[u8; 256], b: &[u8; 256], rect: (usize, usize, usize, usize)) -> u32 {
+    let (x, y, w, h) = rect;
+    (y..y + h)
+        .map(|r| {
+            sse(
+                &a[r * 16 + x..r * 16 + x + w],
+                &b[r * 16 + x..r * 16 + x + w],
+            )
+        })
+        .sum()
+}
+
+/// SPLITMV with one partitioning: each part takes the left, above, zero,
+/// or a searched vector by rate and distortion, then the residual is coded
+/// without Y2. Every vector stays inside the macroblock bounds, where
+/// decoders agree on the prediction without clamping.
+fn decide_split(
+    m: &MbCtx<'_>,
+    s: &Setup<'_>,
+    info: &RefInfo,
+    partition: u8,
+    refine: bool,
+    seeds: &[Mv],
+) -> Option<Decision> {
+    let frame = if info.ref_frame == GOLDEN {
+        s.golden
+    } else {
+        s.last
+    }?;
+    let plane = frame.luma();
+    let map = &MV_PARTITIONS[usize::from(partition)];
+    let mut sub = SubInfo {
+        b_modes: [0; 16],
+        mvs: [Mv::ZERO; 16],
+    };
+    let mut rate = info.rate + split_costs()[usize::from(partition)];
+    let mut pred = [0u8; 256];
+    let window = info.window;
+    let inside = |mv: Mv| {
+        mv.row >= window.min.row
+            && mv.row <= window.max.row
+            && mv.col >= window.min.col
+            && mv.col <= window.max.col
+    };
+    for j in 0..SPLIT_COUNTS[usize::from(partition)] {
+        let k = map.iter().position(|&p| usize::from(p) == j)?;
+        let left = if k & 3 == 0 {
+            m.left_sub.map_or(Mv::ZERO, |n| n.mvs[k + 3])
+        } else {
+            sub.mvs[k - 1]
+        };
+        let above = if k < 4 {
+            m.above_sub.map_or(Mv::ZERO, |n| n.mvs[k + 12])
+        } else {
+            sub.mvs[k - 4]
+        };
+        let rect = part_rect(partition, j);
+        let mut trial = [0u8; 256];
+        let mut eval = |mv: Mv| -> (u64, u32) {
+            let (mode, mut bits) = split_mode(left, above, mv);
+            if mode == NEW_4X4 {
+                bits += s
+                    .mv_costs
+                    .cost(mv.row - info.best.row, mv.col - info.best.col);
+            }
+            predict_rect(plane, m.mbx, m.mby, rect, mv, &mut trial);
+            (rd(rect_sse(&trial, &m.src_y, rect), bits, s.lambda16), bits)
+        };
+        let mut best_mv = Mv::ZERO;
+        let mut best = eval(Mv::ZERO);
+        let mut tried = vec![Mv::ZERO];
+        let mut consider =
+            |mv: Mv, best_mv: &mut Mv, best: &mut (u64, u32), tried: &mut Vec<Mv>| -> bool {
+                if !inside(mv) || tried.contains(&mv) {
+                    return false;
+                }
+                tried.push(mv);
+                let r = eval(mv);
+                if r.0 < best.0 {
+                    *best = r;
+                    *best_mv = mv;
+                    return true;
+                }
+                false
+            };
+        for &mv in [left, above, info.new, info.best].iter().chain(seeds) {
+            consider(mv, &mut best_mv, &mut best, &mut tried);
+        }
+        let steps: &[i32] = if refine { &[8, 4] } else { &[] };
+        // Refine around the best start: whole pixels, then halves and quarters.
+        for &step in steps {
+            for _ in 0..4 {
+                let center = best_mv;
+                let mut moved = false;
+                for (dr, dc) in [(-step, 0), (step, 0), (0, -step), (0, step)] {
+                    moved |= consider(
+                        Mv::new(center.row + dr, center.col + dc),
+                        &mut best_mv,
+                        &mut best,
+                        &mut tried,
+                    );
+                }
+                if !moved {
+                    break;
+                }
+            }
+        }
+        let subpel: &[i32] = if refine { &[2, 1] } else { &[] };
+        for &step in subpel {
+            let center = best_mv;
+            for (dr, dc) in [
+                (-1, 0),
+                (1, 0),
+                (0, -1),
+                (0, 1),
+                (-1, -1),
+                (-1, 1),
+                (1, -1),
+                (1, 1),
+            ] {
+                consider(
+                    Mv::new(center.row + dr * step, center.col + dc * step),
+                    &mut best_mv,
+                    &mut best,
+                    &mut tried,
+                );
+            }
+        }
+        let (mode, _) = split_mode(left, above, best_mv);
+        if mode == NEW_4X4 {
+            let (dr, dc) = (best_mv.row - info.best.row, best_mv.col - info.best.col);
+            if dr.abs() > MAX_MV_DELTA || dc.abs() > MAX_MV_DELTA {
+                return None;
+            }
+        }
+        rate += best.1;
+        for (slot, &p) in sub.mvs.iter_mut().zip(map.iter()) {
+            if usize::from(p) == j {
+                *slot = best_mv;
+            }
+        }
+        predict_rect(plane, m.mbx, m.mby, rect, best_mv, &mut pred);
+    }
+    let mb = MbInfo {
+        y_mode: SPLITMV,
+        uv_mode: 0,
+        ref_frame: info.ref_frame,
+        mv: sub.mvs[15],
+        partition,
+        ..MbInfo::default()
+    };
+    let round = rounding(false);
+    let luma = code_luma_plain(&m.src_y, &pred, s, &m.left, &m.above, round);
+    let cmv = chroma_mvs(&mb, &sub, false);
+    let mut cpred = [[0u8; 64]; 2];
+    for (p, out) in cpred.iter_mut().enumerate() {
+        for (k, mv) in cmv.iter().enumerate() {
+            let (r, c) = (k >> 1, k & 1);
+            inter::predict(
+                frame.chroma(p == 1),
+                (m.mbx * 8 + 4 * c) as i32 + (mv.col >> 3),
+                (m.mby * 8 + 4 * r) as i32 + (mv.row >> 3),
+                (mv.col & 7) as usize,
+                (mv.row & 7) as usize,
+                4,
+                4,
+                Filter::SixTap,
+                &mut out[4 * r * 8 + 4 * c..],
+                8,
+            );
+        }
+    }
+    let chroma = code_chroma(&m.src_c, &cpred, s, &m.left, &m.above, round);
+    let j = rd(
+        luma.sse + chroma.sse,
+        luma.rate + chroma.rate + rate,
+        s.lambda16,
+    );
+    Some(Decision {
+        mb,
+        sub,
+        luma: LumaKind::Plain(Box::new(luma)),
+        chroma,
+        j,
+    })
 }
 
 /// Codes a whole frame's macroblocks.
@@ -764,6 +1100,13 @@ fn commit(
         LumaKind::Y2(l) => {
             blocks[..16].copy_from_slice(&l.q);
             blocks[24] = l.y2;
+            for r in 0..16 {
+                let at = (mby * 16 + r) * ys + mbx * 16;
+                coded.recon.y[at..at + 16].copy_from_slice(&l.recon[r * 16..r * 16 + 16]);
+            }
+        }
+        LumaKind::Plain(l) => {
+            blocks[..16].copy_from_slice(&l.q);
             for r in 0..16 {
                 let at = (mby * 16 + r) * ys + mbx * 16;
                 coded.recon.y[at..at + 16].copy_from_slice(&l.recon[r * 16..r * 16 + 16]);

@@ -6,7 +6,7 @@ use cutlass_encode::{Plane, VideoFrame};
 
 use crate::decode::Frame;
 use crate::prove::{
-    Ivf, decode_shown, ffmpeg_bin, ffmpeg_yuv, first_difference, temp_dir, write_ivf,
+    Ivf, decode_counted, ffmpeg_bin, ffmpeg_yuv, first_difference, temp_dir, write_ivf,
 };
 use crate::{Vp8Encoder, Vp8Options};
 
@@ -98,14 +98,16 @@ pub(crate) fn encode_synthetic(
     (packets, recon)
 }
 
-fn check(name: &str, width: u32, height: u32, count: u32, opts: Vp8Options) {
+/// Encodes, checks all three decoders against the reconstruction, and
+/// returns the macroblocks per luma mode.
+fn check(name: &str, width: u32, height: u32, count: u32, opts: Vp8Options) -> [u64; 10] {
     let (packets, recon) = encode_synthetic(width, height, count, opts);
     let stream = Ivf {
         width,
         height,
         frames: packets,
     };
-    let ours = decode_shown(&stream);
+    let (ours, modes) = decode_counted(&stream);
     if let Some(diff) = first_difference(&ours, &recon, width, height) {
         panic!("{name}: our decoder differs from the reconstruction at {diff}");
     }
@@ -113,7 +115,7 @@ fn check(name: &str, width: u32, height: u32, count: u32, opts: Vp8Options) {
     let bytes: usize = stream.frames.iter().map(Vec::len).sum();
     let Some(ffmpeg) = ffmpeg_bin() else {
         eprintln!("{name}: {bytes} bytes; ffmpeg missing, oracles skipped");
-        return;
+        return modes;
     };
     let dir = temp_dir(name);
     let ivf = dir.join("ours.ivf");
@@ -125,8 +127,33 @@ fn check(name: &str, width: u32, height: u32, count: u32, opts: Vp8Options) {
         }
         assert_eq!(theirs.len(), recon.len(), "{name}: {decoder} bytes");
     }
-    eprintln!("{name}: {count} frames, {bytes} bytes, identical in all three decoders");
+    eprintln!(
+        "{name}: {count} frames, {bytes} bytes, identical in all three decoders; modes {modes:?}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
+    modes
+}
+
+/// DC, V, H, TM, B_PRED, NEAREST, NEAR, ZERO, NEW, and SPLIT all occur.
+#[test]
+fn every_macroblock_mode_is_chosen() {
+    let mut total = [0u64; 10];
+    for (name, speed, q) in [
+        ("modes_fine", 0, 12),
+        ("modes_mid", 1, 40),
+        ("modes_coarse", 0, 90),
+    ] {
+        let opts = Vp8Options {
+            quantizer: q,
+            speed,
+            golden_interval: 4,
+            ..Vp8Options::default()
+        };
+        for (t, m) in total.iter_mut().zip(check(name, 160, 96, 10, opts)) {
+            *t += m;
+        }
+    }
+    assert!(total.iter().all(|&m| m > 0), "modes {total:?}");
 }
 
 #[test]

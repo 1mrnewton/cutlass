@@ -1,10 +1,40 @@
 //! Bit costs of modes and motion vectors, in 1/256 bit.
 
 use crate::bool_coder::cost;
+use crate::modes::{ABOVE_4X4, LEFT_4X4, Mv, ZERO_4X4, sub_mv_context};
 use crate::tables::{
     B_MODE_PROBS, B_MODE_TREE, KF_B_MODE_PROBS, KF_UV_MODE_PROBS, KF_Y_MODE_PROBS, KF_Y_MODE_TREE,
-    MV_REF_TREE, SMALL_MV_TREE, UV_MODE_TREE, Y_MODE_TREE,
+    MV_REF_TREE, SMALL_MV_TREE, SPLIT_MV_PROBS, SPLIT_MV_TREE, SUB_MV_REF_PROBS, SUB_MV_REF_TREE,
+    UV_MODE_TREE, Y_MODE_TREE,
 };
+
+/// A split part's vector mode, the fourth (a new vector).
+pub const NEW_4X4: u8 = 3;
+
+/// The cheapest sub-block vector mode that gives `mv` next to `left` and
+/// `above`, and its cost without any new vector.
+#[must_use]
+pub fn split_mode(left: Mv, above: Mv, mv: Mv) -> (u8, u32) {
+    let probs = &SUB_MV_REF_PROBS[sub_mv_context(left, above)];
+    let mut best = (NEW_4X4, tree_cost(&SUB_MV_REF_TREE, probs, NEW_4X4));
+    for (mode, matches) in [
+        (LEFT_4X4, mv == left),
+        (ABOVE_4X4, mv == above),
+        (ZERO_4X4, mv.is_zero()),
+    ] {
+        let c = tree_cost(&SUB_MV_REF_TREE, probs, mode);
+        if matches && c < best.1 {
+            best = (mode, c);
+        }
+    }
+    best
+}
+
+/// Cost of each SPLITMV partitioning, 16×8, 8×16, 8×8, and 4×4.
+#[must_use]
+pub fn split_costs() -> [u32; 4] {
+    std::array::from_fn(|p| tree_cost(&SPLIT_MV_TREE, &SPLIT_MV_PROBS, p as u8))
+}
 
 /// The branches from the root of `tree` to `symbol`, as (probability
 /// index, bit).

@@ -7,6 +7,7 @@ mod face;
 mod gpu;
 pub mod icons;
 pub mod jobs;
+pub mod mcp;
 mod menu;
 mod readers;
 

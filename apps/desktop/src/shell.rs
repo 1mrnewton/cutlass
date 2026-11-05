@@ -1118,6 +1118,22 @@ impl Shell {
         self.session.as_ref().map(Session::revision)
     }
 
+    /// The open session, for a host that edits it elsewhere.
+    pub fn session(&self) -> Option<&Session> {
+        self.session.as_ref()
+    }
+
+    /// Take `session` as the open one, keeping its linkage. A headless host
+    /// edits a copy and hands it back before it saves.
+    pub fn adopt_session(&mut self, session: Session) -> Result<(), ShellError> {
+        if self.session.is_none() {
+            return Err(ShellError::NoProject);
+        }
+        self.session = Some(session);
+        self.lanes_cache.replace(None);
+        Ok(())
+    }
+
     pub fn draft(&self) -> Option<&Draft> {
         self.session.as_ref().map(Session::draft)
     }

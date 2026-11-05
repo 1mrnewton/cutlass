@@ -22,6 +22,7 @@ use crate::spec::tables::{
 };
 
 use super::cdf::CdfContext;
+use super::decoder::Mirror;
 use super::frame::{FrameState, Picture};
 use super::msac::{Hot, Msac};
 use super::obu::{
@@ -526,19 +527,31 @@ pub struct PlannedTx {
 pub struct RefView<'a, P> {
     pub pic: &'a Picture<P>,
     /// The samples are in [`TileDec::mirrors`] at this index instead of
-    /// `pic`: a copy filled row by row while the reference still decodes.
+    /// `pic`: the bands of final rows the reference published so far,
+    /// while it still decodes.
     pub mirror: Option<usize>,
     pub upscaled_width: usize,
     pub frame_height: usize,
     pub frame_width: usize,
 }
 
-/// The samples of `rv` (see [`RefView::mirror`]).
+/// Rows `y0..y1` of plane `plane` of `rv` (see [`RefView::mirror`]): the
+/// samples from row `y0` on and their stride, or `None` when no one band
+/// holds them.
 #[inline(always)]
-pub fn ref_picture<'s, P>(rv: &'s RefView<'_, P>, mirrors: &'s [Picture<P>]) -> &'s Picture<P> {
+pub fn ref_rows<'s, P>(
+    rv: &'s RefView<'_, P>,
+    mirrors: &'s [Mirror<P>],
+    plane: usize,
+    y0: usize,
+    y1: usize,
+) -> Option<(&'s [P], usize)> {
     match rv.mirror {
-        Some(k) => &mirrors[k],
-        None => rv.pic,
+        Some(k) => mirrors.get(k)?.rows(plane, y0, y1),
+        None => {
+            let p = rv.pic.planes.get(plane)?;
+            Some((p.data.get(y0 * p.stride..)?, p.stride))
+        }
     }
 }
 
@@ -549,8 +562,8 @@ pub struct TileDec<'a, P: Pixel, C: Coder = Msac<'a>> {
     pub cur: &'a mut Picture<P>,
     /// Indexed by reference frame type 1..=7.
     pub refs: [Option<RefView<'a, P>>; 8],
-    /// Copies of references still being decoded (see [`RefView::mirror`]).
-    pub mirrors: Vec<Picture<P>>,
+    /// The bands of references still being decoded (see [`RefView::mirror`]).
+    pub mirrors: Vec<Mirror<P>>,
     pub msac: C,
     /// The planned block (encoder only); the source of written values.
     pub pb: Block,

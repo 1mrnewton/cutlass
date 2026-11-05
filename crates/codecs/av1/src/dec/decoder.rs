@@ -171,6 +171,12 @@ impl Av1Core {
 
     /// Decodes one temporal unit and returns the frames it shows. A unit that
     /// fails leaves the reference state as it was before the call.
+    /// Decodes one Annex B (length-delimited) temporal unit.
+    pub fn decode_annexb(&mut self, data: &[u8]) -> R<Vec<DecodedFrame>> {
+        let low = super::obu::annexb_to_low_overhead(data)?;
+        self.decode(&low)
+    }
+
     pub fn decode(&mut self, data: &[u8]) -> R<Vec<DecodedFrame>> {
         let saved = (self.seq.clone(), self.ref_hdr.clone(), self.slots.clone());
         let r = self.decode_unit(data);

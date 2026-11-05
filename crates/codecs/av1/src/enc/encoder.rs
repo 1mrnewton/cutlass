@@ -807,6 +807,7 @@ impl Av1Enc {
             early_none: ev("AV1_EN", 16.0),
             split_bits_scale: ev("AV1_SP", 1.0),
             filter_search: speed < 8,
+            me_filter: ev("AV1_MEF", 0.0) as u8,
             intra_rd_cands: ev(
                 "AV1_IRD",
                 if speed >= 8 {

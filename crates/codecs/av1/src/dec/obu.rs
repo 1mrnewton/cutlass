@@ -1622,6 +1622,67 @@ pub struct Obu<'a> {
     pub payload: &'a [u8],
 }
 
+/// Converts one Annex B temporal unit (`temporal_unit( sz )`, spec Annex B)
+/// into the low-overhead format: every OBU gets `obu_has_size_field = 1`.
+pub fn annexb_to_low_overhead(data: &[u8]) -> R<Vec<u8>> {
+    let mut out = Vec::with_capacity(data.len() + 16);
+    let mut rest = data;
+    let take = |buf: &mut &[u8], what: &'static str| -> R<usize> {
+        let (v, n) = super::bits::leb128(buf)?;
+        let v = usize::try_from(v).map_err(|_| CodecError::Limit { what })?;
+        if n + v > buf.len() {
+            return Err(CodecError::Truncated {
+                at_bit: (buf.len() * 8) as u64,
+                what,
+            });
+        }
+        *buf = &buf[n..];
+        Ok(v)
+    };
+    while !rest.is_empty() {
+        let tu_size = take(&mut rest, "temporal_unit_size")?;
+        let (mut tu, after) = rest.split_at(tu_size);
+        rest = after;
+        while !tu.is_empty() {
+            let fu_size = take(&mut tu, "frame_unit_size")?;
+            let (mut fu, after) = tu.split_at(fu_size);
+            tu = after;
+            while !fu.is_empty() {
+                let obu_len = take(&mut fu, "obu_length")?;
+                let (obu, after) = fu.split_at(obu_len);
+                fu = after;
+                let Some(&h) = obu.first() else {
+                    return Err(malformed("empty obu"));
+                };
+                let ext = usize::from(h & 4 != 0);
+                if obu.len() < 1 + ext {
+                    return Err(malformed("obu extension"));
+                }
+                let mut body = &obu[1 + ext..];
+                if h & 2 != 0 {
+                    // Already sized: keep only the declared payload.
+                    let n = take(&mut body, "obu_size")?;
+                    body = &body[..n];
+                }
+                out.push(h | 2);
+                out.extend_from_slice(&obu[1..1 + ext]);
+                let mut v = body.len() as u64;
+                loop {
+                    let b = (v & 0x7f) as u8;
+                    v >>= 7;
+                    if v == 0 {
+                        out.push(b);
+                        break;
+                    }
+                    out.push(b | 0x80);
+                }
+                out.extend_from_slice(body);
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// Splits a low-overhead bitstream (or one Annex-B-free temporal unit) into OBUs.
 pub fn split_obus(mut data: &[u8]) -> R<Vec<Obu<'_>>> {
     let mut out = Vec::new();
@@ -1670,4 +1731,100 @@ pub fn split_obus(mut data: &[u8]) -> R<Vec<Obu<'_>>> {
         data = &data[end..];
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod annexb_tests {
+    use super::{annexb_to_low_overhead, split_obus};
+
+    fn leb(v: usize) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut v = v as u64;
+        loop {
+            let b = (v & 0x7f) as u8;
+            v >>= 7;
+            if v == 0 {
+                out.push(b);
+                return out;
+            }
+            out.push(b | 0x80);
+        }
+    }
+
+    #[test]
+    fn annexb_units_become_sized_obus() {
+        // A temporal delimiter (no size field) and a padding OBU with one.
+        let td = vec![0x10u8];
+        let pad = vec![0x7a, 0x02, 0xaa, 0xbb];
+        let mut fu = leb(td.len());
+        fu.extend_from_slice(&td);
+        fu.extend(leb(pad.len()));
+        fu.extend_from_slice(&pad);
+        let mut tu = leb(fu.len());
+        tu.extend_from_slice(&fu);
+        let mut data = leb(tu.len());
+        data.extend_from_slice(&tu);
+        let low = annexb_to_low_overhead(&data).expect("convert");
+        assert_eq!(low, vec![0x12, 0x00, 0x7a, 0x02, 0xaa, 0xbb]);
+        let obus = split_obus(&low).expect("split");
+        assert_eq!(obus.len(), 2);
+        assert_eq!(obus[1].payload, &[0xaa, 0xbb]);
+        assert!(annexb_to_low_overhead(&[0x05, 0x01]).is_err());
+    }
+
+    #[test]
+    fn annexb_stream_decodes_like_low_overhead() {
+        use crate::dec::decoder::{AnyPicture, Av1Core};
+        use crate::enc::encoder::{Av1Enc, EncConfig, InputFrame, RateControl};
+        let (w, h) = (48usize, 32usize);
+        let mut cfg = EncConfig::new(w, h);
+        cfg.rc = RateControl::Qindex(80);
+        cfg.gop = 4;
+        let mut enc = Av1Enc::new(cfg).expect("encoder");
+        let mut units = Vec::new();
+        for f in 0..6u8 {
+            let y: Vec<u8> = (0..w * h)
+                .map(|i| (i as u8).wrapping_mul(3).wrapping_add(f * 9))
+                .collect();
+            let c = vec![128u8; (w / 2) * (h / 2)];
+            units.extend(
+                enc.encode(&InputFrame {
+                    planes: [&y, &c, &c],
+                    strides: [w, w / 2, w / 2],
+                })
+                .expect("encode"),
+            );
+        }
+        units.extend(enc.flush::<u8>().expect("flush"));
+        let (mut a, mut b) = (Av1Core::new(), Av1Core::new());
+        let mut shown = 0;
+        for u in &units {
+            // Annex B: each OBU without its size field, length-prefixed, in one
+            // frame unit per temporal unit.
+            let mut fu = Vec::new();
+            for obu in split_obus(&u.data).expect("split") {
+                let mut o = vec![(obu.obu_type << 3) | if obu.has_extension { 4 } else { 0 }];
+                o.extend_from_slice(obu.payload);
+                fu.extend(leb(o.len()));
+                fu.extend(o);
+            }
+            let mut tu = leb(fu.len());
+            tu.extend(fu);
+            let mut ab = leb(tu.len());
+            ab.extend(tu);
+            let x = a.decode(&u.data).expect("low overhead");
+            let y = b.decode_annexb(&ab).expect("annex b");
+            assert_eq!(x.len(), y.len());
+            for (p, q) in x.iter().zip(&y) {
+                match (&*p.picture, &*q.picture) {
+                    (AnyPicture::U8(p), AnyPicture::U8(q)) => {
+                        assert_eq!(p.planes[0].data, q.planes[0].data);
+                    }
+                    _ => panic!("8-bit pictures expected"),
+                }
+                shown += 1;
+            }
+        }
+        assert_eq!(shown, 6);
+    }
 }

@@ -61,6 +61,8 @@ pub struct ModeParams {
     pub split_bits_scale: f64,
     /// Choose the interpolation filter per block (frame filter switchable).
     pub filter_search: bool,
+    /// Interpolation filter the sub-sample motion search evaluates with.
+    pub me_filter: u8,
 }
 
 impl Default for ModeParams {
@@ -86,6 +88,7 @@ impl Default for ModeParams {
             intra_rd_cands: 3,
             split_bits_scale: 1.0,
             filter_search: true,
+            me_filter: 0,
         }
     }
 }
@@ -1193,6 +1196,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
             } else {
                 self.mode.subpel.min(2)
             },
+            filter: self.mode.me_filter,
             ..MeParams::default()
         };
         let cost_fn = |r: i32, c: i32| -> u32 {

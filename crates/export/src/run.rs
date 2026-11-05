@@ -212,6 +212,72 @@ where
     })
 }
 
+/// Write only the timeline's sound over `request.range` into `mux`.
+///
+/// The mix is the one a movie carries, taken one frame window at a time at
+/// `request.frame_rate`. The short side and the picture codec are not read.
+/// `progress` hears the windows done and the windows in all, and stops the
+/// export by returning false.
+pub fn export_sound<M, F>(
+    draft: &Draft,
+    request: &ExportRequest,
+    factory: &EncodeFactory,
+    mux: &mut M,
+    mut audio: F,
+    progress: Option<&mut dyn FnMut(u64, u64) -> bool>,
+) -> Result<cutlass_container::FinishedMux, ExportError>
+where
+    M: Mux,
+    F: FnMut(&SegmentId, Micros, u32, u32) -> Result<ClipPcm, ExportError>,
+{
+    let settings = request.audio.as_ref().ok_or(ExportError::AudioLayout)?;
+    validate_rate(request.frame_rate)?;
+    if settings.sample_rate == 0 || !matches!(settings.channels, 1 | 2) {
+        return Err(ExportError::AudioLayout);
+    }
+    if mux.family() != request.container {
+        return Err(ExportError::Container);
+    }
+    let indexes = frame_indexes(request.frame_rate, &request.range)?;
+    let mut encoder = open_audio(factory, request)?.ok_or(ExportError::AudioLayout)?;
+    let stream = add_audio(mux, settings)?;
+    let mut ticks = 0;
+    let total = u64::try_from(indexes.len()).map_err(|_| ExportError::Limit)?;
+    let mut progress = progress;
+    let written = (|| {
+        for (done, index) in indexes.iter().enumerate() {
+            let time = request
+                .frame_rate
+                .frame_start(*index)
+                .ok_or(ExportError::FrameRate)?;
+            let mut samples = mix_window(draft, settings, request, time, &mut audio)?;
+            if settings.codec == cutlass_codec::CodecId::Pcm {
+                samples = to_i16(samples)?;
+            }
+            let packets = encoder
+                .push(&AudioInput { pcm: samples })
+                .map_err(ExportError::Encoder)?;
+            write_packets(mux, stream.get(), &packets, &mut ticks)?;
+            if let Some(report) = progress.as_mut() {
+                let done = u64::try_from(done + 1).map_err(|_| ExportError::Limit)?;
+                if !report(done, total) {
+                    return Err(ExportError::Cancelled);
+                }
+            }
+        }
+        let packets = encoder.drain().map_err(ExportError::Encoder)?;
+        write_packets(mux, stream.get(), &packets, &mut ticks)?;
+        mux.interleave().map_err(ExportError::Mux)?;
+        mux.finish(&[TrackDuration {
+            track: stream,
+            timescale: Timescale::new(settings.sample_rate),
+            ticks,
+        }])
+        .map_err(|failed| ExportError::Mux(failed.reason().clone()))
+    })();
+    written.map_err(|error| stop(mux, error))
+}
+
 fn validate_rate(rate: FrameRate) -> Result<(), ExportError> {
     if rate.numerator == 0 || rate.denominator == 0 {
         Err(ExportError::FrameRate)
@@ -327,6 +393,10 @@ fn open_audio(
     };
     let mut params = CodecParams::audio(audio.codec, audio.sample_rate, layout(audio.channels)?);
     params.bitrate = audio.bitrate;
+    if audio.codec == cutlass_codec::CodecId::Pcm {
+        // A WAV holds 16-bit samples.
+        params.sample_format = Some(cutlass_encode::SampleFormat::I16);
+    }
     factory
         .open(&params)
         .map(Some)
@@ -680,6 +750,20 @@ where
     } else {
         to_channels(mixed.pcm, settings.channels)
     }
+}
+
+/// `pcm` as 16-bit samples, clipped at full scale.
+fn to_i16(pcm: Pcm) -> Result<Pcm, ExportError> {
+    if pcm.as_i16().is_some() {
+        return Ok(pcm);
+    }
+    let samples = pcm
+        .as_f32()
+        .ok_or(ExportError::AudioLayout)?
+        .iter()
+        .map(|sample| (sample.clamp(-1.0, 1.0) * 32_767.0).round() as i16)
+        .collect();
+    Pcm::from_i16(pcm.rate, pcm.layout.clone(), samples).map_err(|_| ExportError::AudioLayout)
 }
 
 /// `pcm` with `channels` channels, as the encoder was opened: mono is copied

@@ -920,6 +920,53 @@ pub fn avg<P: Pixel>(
     }
 }
 
+/// `COMPOUND_AVERAGE` of two whole-sample predictions, read straight from
+/// the references: [`prep`] then [`avg`] reduce to `(a + b + 1) >> 1`.
+pub fn avg_copy<P: Pixel>(
+    dst: &mut [P],
+    dst_stride: usize,
+    (a, a_stride): (&[P], usize),
+    (b, b_stride): (&[P], usize),
+    w: usize,
+    h: usize,
+) {
+    match w {
+        4 => avg_copy_w::<P, 4>(dst, dst_stride, a, a_stride, b, b_stride, w, h),
+        8 => avg_copy_w::<P, 8>(dst, dst_stride, a, a_stride, b, b_stride, w, h),
+        16 => avg_copy_w::<P, 16>(dst, dst_stride, a, a_stride, b, b_stride, w, h),
+        32 => avg_copy_w::<P, 32>(dst, dst_stride, a, a_stride, b, b_stride, w, h),
+        _ => avg_copy_w::<P, 0>(dst, dst_stride, a, a_stride, b, b_stride, w, h),
+    }
+}
+
+#[inline(always)]
+fn avg_copy_w<P: Pixel, const W: usize>(
+    dst: &mut [P],
+    dst_stride: usize,
+    a: &[P],
+    a_stride: usize,
+    b: &[P],
+    b_stride: usize,
+    w: usize,
+    h: usize,
+) {
+    let w = if W != 0 { W } else { w };
+    for r in 0..h {
+        let d = &mut dst[r * dst_stride..][..w];
+        let x = &a[r * a_stride..][..w];
+        let y = &b[r * b_stride..][..w];
+        for c in 0..w {
+            if P::HBD {
+                d[c] = P::from_i32((x[c].to_i32() + y[c].to_i32() + 1) >> 1);
+            } else {
+                // A 16-bit sum: the rounding average of two bytes.
+                let s = (x[c].to_i32() as u16 + y[c].to_i32() as u16 + 1) >> 1;
+                d[c] = P::from_i32(i32::from(s));
+            }
+        }
+    }
+}
+
 /// [`avg`] for blocks `W` wide (0: any width).
 #[inline(always)]
 fn avg_w<P: Pixel, const W: usize>(

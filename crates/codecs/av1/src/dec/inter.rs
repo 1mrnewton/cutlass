@@ -129,6 +129,15 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
                 self.b.local_valid = mc::setup_shear(&self.b.local_warp).is_some();
             }
         }
+        if is_compound
+            && self.b.compound_type == COMPOUND_AVERAGE
+            && self.whole_sample_average(plane, x, y, w, h, &cand)
+        {
+            if self.b.motion_mode == OBMC {
+                self.overlapped_mc(plane, w, h)?;
+            }
+            return Ok(());
+        }
         let is_ii = self.b.is_inter && self.b.ref_frame[1] == INTRA_FRAME;
         if is_ii {
             // Save the intra prediction; the inter prediction goes to the frame.
@@ -265,6 +274,91 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         Ok(())
     }
 
+    /// The offset in plane `plane` of the reference `ref_frame` of the
+    /// block at `(x, y)` its motion vector `mv` points to, when the
+    /// reference is unscaled, the position whole samples and the block
+    /// inside the reference (the prediction is then a plain copy).
+    fn whole_sample_offset(
+        &self,
+        plane: usize,
+        ref_frame: i8,
+        x: usize,
+        y: usize,
+        w: usize,
+        h: usize,
+        mv: Mv,
+    ) -> Option<usize> {
+        let (pw, ph, up_w, rh) = self.ref_geometry(plane, ref_frame);
+        let (sx0, sy0, step_x, step_y) = self.scale_mv(plane, up_w, rh, x, y, mv);
+        if step_x != 1024 || step_y != 1024 || (sx0 | sy0) & (15 << 6) != 0 {
+            return None;
+        }
+        let (ix, iy) = (sx0 >> 10, sy0 >> 10);
+        if ix < 0 || iy < 0 || ix + w as i64 > pw as i64 || iy + h as i64 > ph as i64 {
+            return None;
+        }
+        let rv = self.refs[ref_frame as usize].as_ref()?;
+        let p = &ref_picture(rv, &self.mirrors).planes[plane];
+        Some(iy as usize * p.stride + ix as usize)
+    }
+
+    /// `COMPOUND_AVERAGE` of two predictions that are both plain copies
+    /// (see [`Self::whole_sample_offset`]): the compound rounding then
+    /// reduces to `(a + b + 1) >> 1` at every bit depth. Returns false,
+    /// predicting nothing, unless both are.
+    fn whole_sample_average(
+        &mut self,
+        plane: usize,
+        x: usize,
+        y: usize,
+        w: usize,
+        h: usize,
+        cand: &super::types::MiInfo,
+    ) -> bool {
+        if self.b.use_intrabc {
+            return false;
+        }
+        let (sx, sy) = self.plane_sub(plane);
+        let ym = self.b.y_mode;
+        let global = ym == GLOBALMV || ym == GLOBAL_GLOBALMV;
+        let mut offs = [0usize; 2];
+        for l in 0..2 {
+            let (rf, mv) = (cand.ref_frame[l], cand.mv[l]);
+            // Whole luma (1/8) or chroma (1/16) samples.
+            if (i32::from(mv.row) & ((8 << sy) - 1)) | (i32::from(mv.col) & ((8 << sx) - 1)) != 0
+                || rf <= INTRA_FRAME
+                || (global && self.hdr.gm_type[rf as usize] > TRANSLATION)
+            {
+                return false;
+            }
+            match self.whole_sample_offset(plane, rf, x, y, w, h, mv) {
+                Some(o) => offs[l] = o,
+                None => return false,
+            }
+        }
+        let refs = &self.refs;
+        let mirrors = &self.mirrors;
+        let (Some(r0), Some(r1)) = (
+            refs[cand.ref_frame[0] as usize].as_ref(),
+            refs[cand.ref_frame[1] as usize].as_ref(),
+        ) else {
+            return false;
+        };
+        let p0 = &ref_picture(r0, mirrors).planes[plane];
+        let p1 = &ref_picture(r1, mirrors).planes[plane];
+        let pl = &mut self.cur.planes[plane];
+        let st = pl.stride;
+        mc::avg_copy(
+            &mut pl.data[y * st + x..],
+            st,
+            (&p0.data[offs[0]..], p0.stride),
+            (&p1.data[offs[1]..], p1.stride),
+            w,
+            h,
+        );
+        true
+    }
+
     /// Predicts a single-reference block into `scratch.obmc` (stride `w`)
     /// for mode decision.
     pub fn predict_into_scratch(
@@ -357,8 +451,16 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         let (sx, sy) = self.plane_sub(plane);
         let fw = i64::from(self.hdr.frame_width);
         let fh = i64::from(self.hdr.frame_height);
-        let x_scale = (((ref_up_w as i64) << 14) + fw / 2) / fw;
-        let y_scale = (((ref_h as i64) << 14) + fh / 2) / fh;
+        // Unscaled references (the common case) need no division.
+        let scale = |r: i64, f: i64| {
+            if r == f {
+                1 << 14
+            } else {
+                ((r << 14) + f / 2) / f
+            }
+        };
+        let x_scale = scale(ref_up_w as i64, fw);
+        let y_scale = scale(ref_h as i64, fh);
         let orig_x = ((x as i64) << 4) + ((2 * i64::from(mv.col)) >> sx) + 8;
         let orig_y = ((y as i64) << 4) + ((2 * i64::from(mv.row)) >> sy) + 8;
         let base_x = orig_x * x_scale - (8 << 14);

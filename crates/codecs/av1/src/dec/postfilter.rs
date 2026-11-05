@@ -719,10 +719,10 @@ pub fn cdef_in_place<P: Pixel>(
     fs: &FrameState,
     pic: &mut Picture<P>,
     threads: usize,
+    sc: &mut CdefScratch<P>,
 ) {
-    let mut lines = CdefLines::default();
-    cdef_save_lines(seq, fs, pic, &mut lines, 0..usize::MAX);
-    cdef_threads(seq, hdr, fs, pic, &lines, threads);
+    cdef_save_lines(seq, fs, pic, &mut sc.lines, 0..usize::MAX);
+    cdef_threads(seq, hdr, fs, pic, &sc.lines, threads);
 }
 
 /// [`cdef_in_place`] once the boundaries are saved.

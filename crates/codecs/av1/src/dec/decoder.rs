@@ -2784,14 +2784,17 @@ fn decode_frame_sync<P: PicturePixel>(
         saved
     };
     let lr = hdr.lr.uses_lr;
-    let mut bounds = postfilter::LrBounds::default();
+    let (mut cdef_sc, mut bounds) = lock(spares)
+        .filters
+        .pop()
+        .unwrap_or_else(|| (postfilter::cdef_pads(), postfilter::LrBounds::default()));
     let mut final_pic = if hdr.use_superres {
         if lr {
             let d = postfilter::superres(seq, hdr, &cur);
             postfilter::lr_save_frame_bounds(seq, hdr, &d, &mut bounds, 0..usize::MAX);
         }
         if cdef_on {
-            postfilter::cdef_in_place(seq, hdr, fs, &mut cur, threads);
+            postfilter::cdef_in_place(seq, hdr, fs, &mut cur, threads, &mut cdef_sc);
         }
         let up = postfilter::superres(seq, hdr, &cur);
         recycle(&mut lock(spares).pics, cur);
@@ -2801,7 +2804,7 @@ fn decode_frame_sync<P: PicturePixel>(
             postfilter::lr_save_frame_bounds(seq, hdr, &cur, &mut bounds, 0..usize::MAX);
         }
         if cdef_on {
-            postfilter::cdef_in_place(seq, hdr, fs, &mut cur, threads);
+            postfilter::cdef_in_place(seq, hdr, fs, &mut cur, threads, &mut cdef_sc);
         }
         cur
     };
@@ -2816,6 +2819,7 @@ fn decode_frame_sync<P: PicturePixel>(
             threads,
         );
     }
+    lock(spares).filters.push((cdef_sc, bounds));
     set_visible_size(seq, hdr, &mut final_pic);
     Ok((final_pic, saved))
 }

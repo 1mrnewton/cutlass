@@ -8,6 +8,10 @@ use crate::dsp::Pixel;
 
 use super::me::satd;
 
+/// A U/V palette: size, U colours (ascending), V colours, SATD cost with
+/// the signalling, and the signalling bits.
+type UvPalette = (u8, [u16; 8], [u16; 8], f64, f64);
+
 /// Weight of the U/V palette's signalling bits against prediction SATD.
 const UV_BITS_WEIGHT: f64 = 5.0;
 
@@ -205,17 +209,30 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
     /// colors in the same order, SATD cost with an estimate of the colour
     /// and map bits). The color map is left in `self.color_map_uv`.
     pub(crate) fn pick_palette_uv(&mut self, pb: &Block) -> Option<(u8, [u16; 8], [u16; 8], f64)> {
+        let bw0 = crate::dec::types::block_width(pb.bsize);
+        let bh0 = crate::dec::types::block_height(pb.bsize);
+        self.pick_palette_uv_at(pb.mi_col * 4, pb.mi_row * 4, bw0, bh0)
+            .map(|r| (r.0, r.1, r.2, r.3))
+    }
+
+    /// [`Self::pick_palette_uv`] for the luma area `bw0` x `bh0` at
+    /// (`x0`, `y0`); also returns the signalling bits.
+    fn pick_palette_uv_at(
+        &mut self,
+        x0: usize,
+        y0: usize,
+        bw0: usize,
+        bh0: usize,
+    ) -> Option<UvPalette> {
         let src = self.src?;
         if self.num_planes < 3 {
             return None;
         }
         let (sx, sy) = (usize::from(self.sub_x), usize::from(self.sub_y));
-        let bw0 = crate::dec::types::block_width(pb.bsize);
-        let bh0 = crate::dec::types::block_height(pb.bsize);
-        let x = (pb.mi_col * 4) >> sx;
-        let y = (pb.mi_row * 4) >> sy;
-        let on_w0 = bw0.min(self.fs.mi_cols * 4 - pb.mi_col * 4);
-        let on_h0 = bh0.min(self.fs.mi_rows * 4 - pb.mi_row * 4);
+        let x = x0 >> sx;
+        let y = y0 >> sy;
+        let on_w0 = bw0.min(self.fs.mi_cols * 4 - x0);
+        let on_h0 = bh0.min(self.fs.mi_rows * 4 - y0);
         let (mut bw, mut bh) = (bw0 >> sx, bh0 >> sy);
         let (mut on_w, mut on_h) = (on_w0 >> sx, on_h0 >> sy);
         if bw < 4 {
@@ -247,7 +264,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         let mut map = vec![0u8; bw * bh];
         let mut pu = vec![P::default(); bw * bh];
         let mut pv = vec![P::default(); bw * bh];
-        let mut best: Option<(u8, [u16; 8], [u16; 8], f64)> = None;
+        let mut best: Option<UvPalette> = None;
         let mut best_map = vec![0u8; bw * bh];
         let maxv = (1i32 << self.bd) - 1;
         let mut worse = 0;
@@ -319,12 +336,85 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
                     u[i] = c[0] as u16;
                     v[i] = c[1] as u16;
                 }
-                best = Some((n as u8, u, v, cost));
+                best = Some((n as u8, u, v, cost, bits));
                 best_map.copy_from_slice(&map);
             }
         }
         if self.color_map_uv.len() >= bw * bh {
             self.color_map_uv[..bw * bh].copy_from_slice(&best_map);
+        }
+        best
+    }
+
+    /// Partition estimate of the chroma of a screen content intra area
+    /// (`pw` x `ph` luma samples at (`x`, `y`)): the better of a DC
+    /// prediction from the source neighbours and a U/V palette, each with its
+    /// residual transform-coded, in the units of `tx_cost`.
+    pub(crate) fn est_chroma_sc(&mut self, x: usize, y: usize, pw: usize, ph: usize) -> f64 {
+        let Some(src) = self.src else { return 0.0 };
+        if self.num_planes < 3 {
+            return 0.0;
+        }
+        let (sx, sy) = (usize::from(self.sub_x), usize::from(self.sub_y));
+        let (cx, cy, cw, ch) = (x >> sx, y >> sy, (pw >> sx).max(4), (ph >> sy).max(4));
+        let (tw, th) = (cw.min(32), ch.min(32));
+        let Some(tx) = (0..19u8)
+            .find(|&t| crate::dec::types::tx_w(t) == tw && crate::dec::types::tx_h(t) == th)
+        else {
+            return 0.0;
+        };
+        let lam_b = self.enc.lambda;
+        let mut res = vec![0i32; cw * ch];
+        // DC from the source neighbours.
+        let mut dc_cost = 0.0;
+        for plane in 1..3 {
+            let p = &src.planes[plane];
+            if cx + cw > p.w || cy + ch > p.h {
+                return 0.0;
+            }
+            let (mut sum, mut n) = (0i64, 0i64);
+            if cy > 0 {
+                for j in 0..cw {
+                    sum += i64::from(p.data[(cy - 1) * p.stride + cx + j].to_i32());
+                }
+                n += cw as i64;
+            }
+            if cx > 0 {
+                for i in 0..ch {
+                    sum += i64::from(p.data[(cy + i) * p.stride + cx - 1].to_i32());
+                }
+                n += ch as i64;
+            }
+            let dc = if n > 0 {
+                ((sum + n / 2) / n) as i32
+            } else {
+                1 << (self.bd - 1)
+            };
+            for i in 0..ch {
+                for j in 0..cw {
+                    res[i * cw + j] = p.data[(cy + i) * p.stride + cx + j].to_i32() - dc;
+                }
+            }
+            dc_cost += self.tx_cost_any(&res, cw, ch, tx);
+        }
+        let mut best = dc_cost + lam_b * 2.0;
+        if !self.hdr.allow_screen_content_tools {
+            return best;
+        }
+        if let Some((n, u, v, _, bits)) = self.pick_palette_uv_at(x, y, pw, ph) {
+            let mut pal_cost = lam_b * bits;
+            for (plane, colors) in [(1usize, u), (2, v)] {
+                let p = &src.planes[plane];
+                for i in 0..ch {
+                    for j in 0..cw {
+                        let k = usize::from(self.color_map_uv[i * cw + j]).min(usize::from(n) - 1);
+                        res[i * cw + j] =
+                            p.data[(cy + i) * p.stride + cx + j].to_i32() - i32::from(colors[k]);
+                    }
+                }
+                pal_cost += self.tx_cost_any(&res, cw, ch, tx);
+            }
+            best = best.min(pal_cost);
         }
         best
     }

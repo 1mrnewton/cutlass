@@ -104,6 +104,9 @@ pub struct ModeParams {
     /// Intra mode decisions charge mode, angle, filter intra and CFL bits
     /// from the CDFs.
     pub exact_intra_rates: bool,
+    /// Screen content intra frames: partition estimates include a palette
+    /// and the chroma.
+    pub screen_est: bool,
 }
 
 impl Default for ModeParams {
@@ -148,6 +151,7 @@ impl Default for ModeParams {
             intra_split_pred: true,
             inter_flag_bits: true,
             exact_intra_rates: true,
+            screen_est: true,
         }
     }
 }
@@ -419,13 +423,41 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
             ));
             inter = Some((d + lam * mvb, mvb));
         }
+        // Screen content intra frames: a palette, by transform-coded RD.
+        let mut cost = f64::MAX;
+        if self.hdr.allow_screen_content_tools
+            && !self.mode.inter_frame
+            && pw == cw
+            && ph == ch
+            && pw.min(ph) >= 8
+            && self.mode.screen_est
+            && let Some((n, colors, _, pbits)) = self.pick_palette_y(x, y, pw, ph)
+        {
+            for i in 0..ph {
+                for j in 0..pw {
+                    let k = usize::from(self.color_map_y[i * pw + j]).min(usize::from(n) - 1);
+                    res[i * pw + j] =
+                        sp.data[(y + i) * sp.stride + x + j].to_i32() - i32::from(colors[k]);
+                }
+            }
+            cost = self.tx_cost(&res[..pw * ph], pw, ph, tx) + lam_bits * pbits;
+        }
+        let chroma = if self.hdr.allow_screen_content_tools
+            && self.mode.screen_est
+            && !self.mode.inter_frame
+            && pw == cw
+            && ph == ch
+        {
+            self.est_chroma_sc(x, y, pw, ph)
+        } else {
+            0.0
+        };
         // Transform-code only the candidates whose SATD cost is not far
         // behind the other's.
         let t = self.mode.est_skip_ratio;
-        let mut cost = f64::MAX;
         if inter.is_none_or(|(s, _)| t <= 0.0 || s * t >= best.0) {
             self.residual_of(&best_pred, pw, x, y, pw, ph, &mut res);
-            cost = self.tx_cost(&res[..pw * ph], pw, ph, tx) + lam_bits * best.1;
+            cost = cost.min(self.tx_cost(&res[..pw * ph], pw, ph, tx) + lam_bits * best.1);
         }
         if let Some((s, mvb)) = inter
             && (t <= 0.0 || s <= best.0 * t)
@@ -436,7 +468,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         self.scratch.enc_px[1] = pred;
         self.scratch.enc_px[2] = best_pred;
         self.scratch.enc_i32[2] = res;
-        cost * scale
+        (cost + chroma) * scale
     }
 
     /// The partition estimate of an area, computed once per superblock.
@@ -796,6 +828,11 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         self.pb = pb;
         self.plan_q = self.plan.sb_target.unwrap_or(self.current_q_index);
         self.plan_delta_lf = self.delta_lf;
+    }
+
+    /// [`Self::tx_cost`] for the other mode decision modules.
+    pub(crate) fn tx_cost_any(&mut self, res: &[i32], w: usize, h: usize, tx: u8) -> f64 {
+        self.tx_cost(res, w, h, tx)
     }
 
     /// Estimated D + lambda * R of coding residual `res` (w x h, stride w) with

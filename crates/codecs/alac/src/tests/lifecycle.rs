@@ -63,6 +63,26 @@ fn the_registered_decoder_gives_exact_sixteen_bit_pcm_at_each_packet_time() {
 }
 
 #[test]
+fn a_padded_last_frame_is_trimmed_to_its_packet_duration() {
+    let (samples, cookie, packets) = stream(16, 4096);
+    let mut decoder = decoder(&cookie);
+    let mut short = packets[0].clone();
+    short.duration = 1000;
+    let audio = audio(decoder.push(&short).expect("push"));
+    let pcm = audio.pcm.as_i16().expect("i16");
+    assert_eq!(pcm.len(), 2000);
+    assert!(pcm.iter().zip(&samples).all(|(&a, &b)| i32::from(a) == b));
+    // Another clock, or no duration, keeps the whole frame.
+    let mut other_clock = short.clone();
+    other_clock.timescale = 48_000;
+    let audio = self::audio(decoder.push(&other_clock).expect("push"));
+    assert_eq!(audio.pcm.samples, 4096);
+    short.duration = 0;
+    let audio = self::audio(decoder.push(&short).expect("push"));
+    assert_eq!(audio.pcm.samples, 4096);
+}
+
+#[test]
 fn twenty_four_bit_pcm_is_exact_in_float() {
     let (samples, cookie, packets) = stream(24, 5000);
     let mut decoder = decoder(&cookie);

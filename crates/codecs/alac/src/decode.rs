@@ -26,7 +26,8 @@ pub struct DecodedFrame {
 ///
 /// ALAC frames are independent: there is no state between packets, so
 /// `drain` is empty and `reset` has nothing to drop. A failed packet leaves
-/// the decoder as it was.
+/// the decoder as it was. Through [`Decoder::push`], a packet whose
+/// duration is shorter than its frame is trimmed to that duration.
 #[derive(Debug)]
 pub struct AlacDecoder {
     cookie: Cookie,
@@ -168,9 +169,20 @@ impl Decoder for AlacDecoder {
         CodecId::Alac
     }
 
+    /// A packet that lasts less than its frame, at the stream's rate, gives
+    /// only that many samples: AudioToolbox pads the last frame to full
+    /// length and states the real length in the container.
     fn push(&mut self, packet: &Packet) -> Result<Vec<Output>, CodecError> {
         self.check_side(packet)?;
-        self.decode_into(&packet.data)?;
+        let frames = self.decode_into(&packet.data)?;
+        if packet.timescale == self.rate
+            && let Ok(lasts) = usize::try_from(packet.duration)
+            && lasts > 0
+            && lasts < frames
+        {
+            self.samples
+                .truncate(lasts * usize::from(self.cookie.config.channels));
+        }
         let pcm = self.pcm()?;
         Ok(vec![Output::Audio(AudioOutput {
             pcm,

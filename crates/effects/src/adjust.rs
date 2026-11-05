@@ -12,6 +12,10 @@
 
 use cutlass_model::{Draft, MaterialRef, Segment};
 
+/// The material `type` of an adjustment layer: a clip on an adjust row
+/// whose sliders run over every picture below it.
+pub const ADJUSTMENT: &str = "adjust";
+
 /// One adjust slider.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum AdjustKey {

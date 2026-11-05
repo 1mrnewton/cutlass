@@ -363,6 +363,19 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             material_id,
             mode,
         } => blend::set_blend(draft, segment_id, material_id, mode),
+        Request::AddAdjustment {
+            track_id,
+            segment_id,
+            material_id,
+            start,
+            duration,
+        } => adjust::add_adjustment(
+            draft,
+            track_id,
+            segment_id,
+            material_id,
+            TimeRange::new(start.0, duration.0),
+        ),
         Request::SetAdjust {
             segment_id,
             material_id,

@@ -4,10 +4,45 @@
 //! materials, with the slider's reference name as its `type` and the setting
 //! in `value`. A slider at zero has no material.
 
-use cutlass_effects::AdjustKey;
-use cutlass_model::{Draft, MaterialEffect, MaterialId, MaterialRef, SegmentId, TrackType};
+use cutlass_effects::{ADJUSTMENT, AdjustKey};
+use cutlass_model::{
+    Draft, MaterialEffect, MaterialId, MaterialRef, Segment, SegmentId, TimeRange, TrackId,
+    TrackType,
+};
 
 use super::{EditError, ensure_unlocked};
+
+/// Put an adjustment layer over `target` on `track_id`, an adjust row made
+/// when it is missing. It starts with every slider at zero.
+pub fn add_adjustment(
+    draft: &mut Draft,
+    track_id: &TrackId,
+    segment_id: &SegmentId,
+    material_id: &MaterialId,
+    target: TimeRange,
+) -> Result<(), EditError> {
+    if material_id.is_empty() || draft.materials.get(material_id.as_str()).is_some() {
+        return Err(EditError::DuplicateMaterial);
+    }
+    if let Some(track) = draft.tracks.iter().find(|track| &track.id == track_id) {
+        if !matches!(track.kind, TrackType::Adjust) {
+            return Err(EditError::TrackKind);
+        }
+        ensure_unlocked(track.attribute)?;
+    } else {
+        super::track::insert_track(draft, track_id, &TrackType::Adjust)?;
+    }
+    let mut segment = Segment::new(segment_id.clone(), material_id.clone(), target);
+    segment.render_index = TrackType::Adjust.render_floor().unwrap_or(0);
+    super::place::place(draft, track_id, segment)?;
+    draft.materials.effects.push(MaterialEffect {
+        kind: ADJUSTMENT.to_owned(),
+        name: "Adjustment".to_owned(),
+        value: Some(1.0),
+        ..MaterialEffect::new(material_id.clone())
+    });
+    Ok(())
+}
 
 /// Set the slider named `key` (such as `temperature` or `light_sensation`)
 /// on `segment_id` to `value`, from -1 to 1 (0 to 1 for fade, sharpen and
@@ -96,7 +131,7 @@ mod tests {
         Draft, MaterialId, Segment, SegmentId, TimeRange, Track, TrackAttribute, TrackType,
     };
 
-    use super::set_adjust;
+    use super::{add_adjustment, set_adjust};
     use crate::edit::EditError;
 
     fn draft() -> Draft {
@@ -127,6 +162,55 @@ mod tests {
         assert_eq!(draft.tracks[0].segments[0].extra_material_refs.len(), 1);
         set_adjust(&mut draft, &a, &MaterialId::new("w"), "exposure", 0.0).unwrap();
         assert_eq!(draft.materials.effects.len(), 1);
+    }
+
+    #[test]
+    fn an_adjustment_layer_goes_on_an_adjust_row_and_takes_sliders() {
+        let mut draft = draft();
+        let row = cutlass_model::TrackId::new("look");
+        let layer = SegmentId::new("layer");
+        add_adjustment(
+            &mut draft,
+            &row,
+            &layer,
+            &MaterialId::new("adj"),
+            TimeRange::new(0, 500_000),
+        )
+        .unwrap();
+        let track = draft.tracks.iter().find(|track| track.id == row).unwrap();
+        assert_eq!(track.kind, TrackType::Adjust);
+        assert_eq!(track.segments[0].render_index, 7_000);
+        set_adjust(&mut draft, &layer, &MaterialId::new("e"), "exposure", 0.5).unwrap();
+        let track = draft.tracks.iter().find(|track| track.id == row).unwrap();
+        let read = segment_adjust(&draft, &track.segments[0]);
+        assert_eq!(read.get(AdjustKey::Exposure), 0.5);
+        let main = draft
+            .tracks
+            .iter()
+            .find(|track| track.kind == TrackType::Video)
+            .unwrap()
+            .id
+            .clone();
+        assert!(matches!(
+            add_adjustment(
+                &mut draft,
+                &main,
+                &SegmentId::new("again"),
+                &MaterialId::new("adj2"),
+                TimeRange::new(0, 1),
+            ),
+            Err(EditError::TrackKind)
+        ));
+        assert!(matches!(
+            add_adjustment(
+                &mut draft,
+                &row,
+                &SegmentId::new("again"),
+                &MaterialId::new("adj"),
+                TimeRange::new(600_000, 1),
+            ),
+            Err(EditError::DuplicateMaterial)
+        ));
     }
 
     #[test]

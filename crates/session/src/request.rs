@@ -271,6 +271,16 @@ pub enum Request {
         material_id: MaterialId,
         mode: String,
     },
+    /// Put an adjustment layer from `start` for `duration` on `track_id`,
+    /// an adjust row made when it is missing. Its sliders, set with
+    /// [`Request::SetAdjust`], run over every picture below it.
+    AddAdjustment {
+        track_id: TrackId,
+        segment_id: SegmentId,
+        material_id: MaterialId,
+        start: Micros,
+        duration: Micros,
+    },
     /// Set the adjust slider `key`, its reference name such as
     /// `temperature`, to `value`: -1 to 1, or 0 to 1 for fade, sharpen and
     /// grain. Zero takes it off. `material_id` names a new slider material.

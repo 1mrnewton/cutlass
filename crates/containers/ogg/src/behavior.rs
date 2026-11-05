@@ -262,6 +262,40 @@ fn a_cropped_start_keeps_granule_time_and_moves_the_edit() {
 }
 
 #[test]
+fn a_cropped_start_and_an_end_trim_do_not_share_the_first_page() {
+    // On one first-and-last page the demuxer would read the start as the
+    // granule minus all samples, so the muxer splits off the last packet.
+    let bytes = mux_one(0, 1_920, &[100; 4], 480);
+    let layout = pages(&bytes);
+    assert_eq!(layout.len(), 4);
+    assert_eq!(layout[2].2.flags & FLAG_EOS, 0);
+    assert_eq!(layout[2].2.granule, 1_920 + 3 * 960);
+    assert_eq!(layout[3].2.flags & FLAG_EOS, FLAG_EOS);
+    assert_eq!(layout[3].2.granule, 1_920 + 3 * 960 + 480);
+    let mut demux = open(&bytes);
+    assert_eq!(demux.opus(0).expect("info").start, Some(1_920));
+    assert_eq!(
+        times(&read_all(&mut demux)),
+        vec![(1_920, 960), (2_880, 960), (3_840, 960), (4_800, 480)]
+    );
+    // From 0 the single page is unambiguous and stays whole.
+    assert_eq!(pages(&mux_one(0, 0, &[100; 4], 480)).len(), 3);
+
+    // One trimmed packet after 0 cannot be written.
+    let mut mux = OggMux::new(Cursor::new(Vec::new()));
+    let track = mux.add_stream(opus_stream(2, head(2, 0))).expect("stream");
+    mux.write_packet(&packet(track.get(), payload(100, 0), 960, 480))
+        .expect("write");
+    let refused = mux.finish(&[TrackDuration {
+        track,
+        timescale: Timescale::new(48_000),
+        ticks: 480,
+    }]);
+    assert!(refused.is_err());
+    assert_eq!(mux.status(), MuxStatus::Failed);
+}
+
+#[test]
 fn a_packet_across_three_pages_and_255_multiples_round_trip() {
     let mut mux = OggMux::new(Cursor::new(Vec::new()));
     let track = mux

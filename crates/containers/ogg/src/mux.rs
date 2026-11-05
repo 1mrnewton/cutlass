@@ -64,6 +64,13 @@ struct Track {
     trimmed: bool,
     /// Sum of packet durations.
     sum: i64,
+    /// Start of the first packet.
+    first: Option<i64>,
+    /// Audio pages written.
+    audio_pages: u32,
+    /// Where the last packet started on the page being filled: lacing
+    /// index, body offset, and the page's granule and samples before it.
+    last_packet: Option<(usize, usize, i64, i64)>,
 }
 
 impl Track {
@@ -208,12 +215,49 @@ impl<W: Write> OggMux<W> {
             &track.body,
         );
         track.sequence = track.sequence.wrapping_add(1);
+        track.audio_pages = track.audio_pages.saturating_add(1);
         track.continued = track.lacing.last() == Some(&255);
         track.lacing.clear();
         track.body.clear();
         track.granule = -1;
         track.page_samples = 0;
         self.emit(&page)
+    }
+
+    /// RFC 7845 section 4.5 reads a first audio page that is also the last
+    /// as starting at its granule minus its samples, or at 0 when the
+    /// granule is smaller. A stream that starts after 0 and trims its end
+    /// cannot say both on that one page, so the packets before the trimmed
+    /// one go on a page of their own. One trimmed packet alone, starting
+    /// after 0, cannot be written.
+    fn separate_trim_from_start(&mut self, index: usize) -> Result<(), MuxError> {
+        let track = &mut self.tracks[index];
+        if track.audio_pages > 0 || !track.trimmed || track.first.is_none_or(|first| first == 0) {
+            return Ok(());
+        }
+        let Some((lacing_at, body_at, granule, samples)) = track.last_packet else {
+            return Ok(());
+        };
+        if lacing_at == 0 {
+            return Err(rejected(format!(
+                "Opus stream {} is one trimmed packet starting at {}; Ogg reads that as starting at 0",
+                track.id.get(),
+                track.first.unwrap_or(0)
+            )));
+        }
+        let tail_lacing = track.lacing.split_off(lacing_at);
+        let tail_body = track.body.split_off(body_at);
+        let end = track.granule;
+        let tail_samples = track.page_samples.saturating_sub(samples);
+        track.granule = granule;
+        track.page_samples = samples;
+        self.flush_page(index, false)?;
+        let track = &mut self.tracks[index];
+        track.lacing = tail_lacing;
+        track.body = tail_body;
+        track.granule = end;
+        track.page_samples = tail_samples;
+        Ok(())
     }
 
     /// Adds one packet's lacing and bytes, closing pages as they fill.
@@ -223,12 +267,22 @@ impl<W: Write> OggMux<W> {
         }
         let lacing = crate::page::lacing_for(data.len());
         let mut offset = 0;
+        let mut starting = true;
         let mut values = lacing.iter().peekable();
         while let Some(&value) = values.next() {
             if self.tracks[index].lacing.len() >= 255 {
                 self.flush_page(index, false)?;
             }
             let track = &mut self.tracks[index];
+            if starting {
+                track.last_packet = Some((
+                    track.lacing.len(),
+                    track.body.len(),
+                    track.granule,
+                    track.page_samples,
+                ));
+                starting = false;
+            }
             let len = usize::from(value);
             track.lacing.push(value);
             track.body.extend_from_slice(&data[offset..offset + len]);
@@ -356,6 +410,7 @@ impl<W: Write> OggMux<W> {
         }
         self.write_headers()?;
         for index in 0..self.tracks.len() {
+            self.separate_trim_from_start(index)?;
             self.flush_page(index, true)?;
         }
         self.writer
@@ -451,6 +506,9 @@ impl<W: Write> Mux for OggMux<W> {
             next: None,
             trimmed: false,
             sum: 0,
+            first: None,
+            audio_pages: 0,
+            last_packet: None,
         });
         let index = self.tracks.len() - 1;
         if !stream.params.extradata().is_empty()
@@ -478,6 +536,9 @@ impl<W: Write> Mux for OggMux<W> {
             return Err(self.fail(error));
         }
         let track = &mut self.tracks[index];
+        if track.next.is_none() {
+            track.first = Some(pts);
+        }
         track.next = Some(end);
         track.trimmed = duration < samples;
         track.sum = track.sum.saturating_add(duration);

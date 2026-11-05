@@ -7,8 +7,10 @@
 //! turns the skip into a failure. `../local-files` is the real media; a
 //! missing folder skips too.
 
+mod campaign;
 mod decode_oracle;
 mod encode_oracle;
+mod hostile;
 mod lifecycle;
 
 use std::path::{Path, PathBuf};

@@ -501,6 +501,8 @@ pub fn request_name(request: &Request) -> &'static str {
         Request::KeyPose { .. } => "key_pose",
         Request::Import { .. } => "import",
         Request::ReplaceMedia { .. } => "replace_media",
+        Request::CreateCompound { .. } => "create_compound",
+        Request::Ungroup { .. } => "ungroup",
         Request::InsertTrack { .. } => "insert_track",
         Request::RemoveTrack { .. } => "remove_track",
         Request::RenameTrack { .. } => "rename_track",

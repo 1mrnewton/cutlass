@@ -1008,6 +1008,67 @@ mod tests {
     }
 
     #[test]
+    fn a_compound_clip_draws_what_its_clips_drew_and_ungroups_to_the_same() {
+        let mut draft = color_clip("0xFFFF0000", false);
+        draft.materials.material_colors.push(MaterialColorConfig {
+            id: "green".into(),
+            is_color_clip: true,
+            solid_color: "0xFF00FF00".to_owned(),
+            ..MaterialColorConfig::default()
+        });
+        draft.materials.material_colors.push(MaterialColorConfig {
+            id: "blue".into(),
+            is_color_clip: true,
+            solid_color: "0xFF0000FF".to_owned(),
+            ..MaterialColorConfig::default()
+        });
+        draft.tracks[0].segments.push(Segment::new(
+            "second",
+            "green",
+            TimeRange::new(1_000_000, 1_000_000),
+        ));
+        let mut over = cutlass_model::Track::main("over");
+        over.flag = cutlass_model::TrackFlag::default();
+        let mut blue = Segment::new("over", "blue", TimeRange::new(500_000, 1_000_000));
+        blue.clip.alpha = 0.5;
+        blue.render_index = 1;
+        over.segments.push(blue);
+        draft.tracks.push(over);
+        let times = [200_000, 700_000, 1_200_000, 1_700_000];
+        let before: Vec<Vec<u8>> = times.iter().map(|time| pixels(&draft, *time)).collect();
+        let mut session = cutlass_session::Session::open(draft);
+        session
+            .apply(
+                0,
+                &[cutlass_session::Request::CreateCompound {
+                    segment_ids: vec!["segment".into(), "second".into(), "over".into()],
+                    segment_id: "nest".into(),
+                    material_id: "inside".into(),
+                }],
+            )
+            .unwrap();
+        assert_eq!(session.draft().tracks[0].segments.len(), 1);
+        let nested: Vec<Vec<u8>> = times
+            .iter()
+            .map(|time| pixels(session.draft(), *time))
+            .collect();
+        assert_eq!(nested, before);
+        session
+            .apply(
+                1,
+                &[cutlass_session::Request::Ungroup {
+                    segment_id: "nest".into(),
+                }],
+            )
+            .unwrap();
+        let back: Vec<Vec<u8>> = times
+            .iter()
+            .map(|time| pixels(session.draft(), *time))
+            .collect();
+        assert_eq!(back, before);
+    }
+
+    #[test]
     fn the_project_canvas_color_is_under_every_layer() {
         let mut draft = Draft::empty("draft");
         draft.canvas_config.width = 2;

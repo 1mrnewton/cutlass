@@ -22,6 +22,7 @@ mod mask;
 mod mirror;
 mod move_segment;
 mod name;
+mod nest;
 mod own;
 mod place;
 mod placement;
@@ -156,6 +157,9 @@ pub enum EditError {
     Lut,
     /// A mask number is out of its range.
     Mask,
+    /// The clip is not a compound clip, or it plays its inside at another
+    /// speed, or a cut inside would split a speed curve.
+    Compound,
     /// The clip is not an effect, a filter, or an adjustment.
     NotEffect,
     /// An effect binds to a picture clip, and only an effect clip binds.
@@ -513,6 +517,12 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             },
         ),
         Request::Import { medium } => import::import(draft, medium.clone()),
+        Request::CreateCompound {
+            segment_ids,
+            segment_id,
+            material_id,
+        } => nest::create_compound(draft, segment_ids, segment_id, material_id),
+        Request::Ungroup { segment_id } => nest::ungroup(draft, segment_id),
         Request::ReplaceMedia {
             segment_id,
             material_id,

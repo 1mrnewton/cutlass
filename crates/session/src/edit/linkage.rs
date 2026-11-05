@@ -550,7 +550,7 @@ fn drop_pair(draft: &mut Draft, owner: &SegmentId, dependent: &SegmentId) {
     });
 }
 
-fn drop_pairs_where(draft: &mut Draft, mut drop_this: impl FnMut(&LinkPair) -> bool) {
+pub(super) fn drop_pairs_where(draft: &mut Draft, mut drop_this: impl FnMut(&LinkPair) -> bool) {
     for relationship in &mut draft.relationships {
         if relationship.kind == "linkage" {
             relationship.id_to_id.retain(|pair| !drop_this(pair));

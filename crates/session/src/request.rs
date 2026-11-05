@@ -419,6 +419,16 @@ pub enum Request {
     },
     /// Add a material to the library. This does not place a segment.
     Import { medium: ImportedMedium },
+    /// Make the clips `segment_ids` one compound clip `segment_id` playing
+    /// a draft of their own, stored as the material `material_id`.
+    CreateCompound {
+        segment_ids: Vec<SegmentId>,
+        segment_id: SegmentId,
+        material_id: MaterialId,
+    },
+    /// Put the clips the compound clip `segment_id` shows back on the
+    /// timeline in its place.
+    Ungroup { segment_id: SegmentId },
     /// Play `material_id` in `segment_id` in place of its media, keeping
     /// the clip's edits. A picture takes a picture, a sound a sound.
     ReplaceMedia {

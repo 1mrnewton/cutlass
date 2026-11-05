@@ -650,9 +650,8 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
                 ],
                 first_block: log.blocks.len(),
             });
-        } else {
-            self.clear_block_decoded_flags(r, c);
         }
+        self.clear_block_decoded_flags(r, c);
         self.read_lr(r, c, self.sb_size)?;
         self.decode_partition(r, c, self.sb_size)
     }
@@ -3380,9 +3379,10 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
                 base_y: base_y as u32,
                 coef: coef as u32,
             });
-        } else {
-            self.tx_mark_decoded(plane, start_x, start_y, tx);
         }
+        // Also while recording: mode info prediction asks whether the 4x4s
+        // above right are decoded yet (see `decoded`).
+        self.tx_mark_decoded(plane, start_x, start_y, tx);
         Ok(())
     }
 

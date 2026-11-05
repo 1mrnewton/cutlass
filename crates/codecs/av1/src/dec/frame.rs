@@ -87,6 +87,35 @@ pub struct RefData {
     pub saved_order_hints: [u32; 8],
 }
 
+/// The loop restoration units of each plane (all unset), with their
+/// columns and rows.
+#[allow(clippy::type_complexity)]
+fn lr_units(
+    seq: &SequenceHeader,
+    hdr: &FrameHeader,
+) -> ([Vec<LrUnitParams>; 3], [usize; 3], [usize; 3]) {
+    let mut lr: [Vec<LrUnitParams>; 3] = Default::default();
+    let mut lr_cols = [0; 3];
+    let mut lr_rows = [0; 3];
+    for p in 0..seq.num_planes() {
+        if hdr.lr.frame_type[p] != 0 {
+            let (sx, sy) = if p > 0 {
+                (u32::from(seq.subsampling_x), u32::from(seq.subsampling_y))
+            } else {
+                (0, 0)
+            };
+            let size = hdr.lr.unit_size[p] as usize;
+            let count = |unit: usize, frame: usize| ((frame + (unit >> 1)) / unit).max(1);
+            let rw = (hdr.upscaled_width as usize + ((1 << sx) >> 1)) >> sx;
+            let rh = (hdr.frame_height as usize + ((1 << sy) >> 1)) >> sy;
+            lr_cols[p] = count(size, rw);
+            lr_rows[p] = count(size, rh);
+            lr[p] = vec![LrUnitParams::default(); lr_cols[p] * lr_rows[p]];
+        }
+    }
+    (lr, lr_cols, lr_rows)
+}
+
 /// Mutable state of the frame being decoded.
 pub struct FrameState {
     pub mi_cols: usize,
@@ -120,25 +149,7 @@ impl FrameState {
         let rows = (mi_rows + 32) & !31;
         let n = mi_stride * rows;
         let cdef_stride = mi_stride / 16 + 1;
-        let mut lr: [Vec<LrUnitParams>; 3] = Default::default();
-        let mut lr_cols = [0; 3];
-        let mut lr_rows = [0; 3];
-        for p in 0..seq.num_planes() {
-            if hdr.lr.frame_type[p] != 0 {
-                let (sx, sy) = if p > 0 {
-                    (u32::from(seq.subsampling_x), u32::from(seq.subsampling_y))
-                } else {
-                    (0, 0)
-                };
-                let size = hdr.lr.unit_size[p] as usize;
-                let count = |unit: usize, frame: usize| ((frame + (unit >> 1)) / unit).max(1);
-                let rw = (hdr.upscaled_width as usize + ((1 << sx) >> 1)) >> sx;
-                let rh = (hdr.frame_height as usize + ((1 << sy) >> 1)) >> sy;
-                lr_cols[p] = count(size, rw);
-                lr_rows[p] = count(size, rh);
-                lr[p] = vec![LrUnitParams::default(); lr_cols[p] * lr_rows[p]];
-            }
-        }
+        let (lr, lr_cols, lr_rows) = lr_units(seq, hdr);
         Self {
             mi_cols,
             mi_rows,
@@ -159,6 +170,28 @@ impl FrameState {
         }
     }
 
+    /// [`Self::new`], reusing the arrays of `old` (the state of an earlier
+    /// frame) when the frame has the same size in 4x4 units. Every 4x4 of
+    /// the frame is written by its block before it is read, and the 4x4s
+    /// past the frame edges are never written, so only the CDEF indices,
+    /// loop restoration units and per-frame extras start afresh.
+    pub fn reuse(old: Option<Self>, seq: &SequenceHeader, hdr: &FrameHeader) -> Self {
+        match old {
+            Some(mut fs)
+                if fs.mi_cols == hdr.mi_cols as usize && fs.mi_rows == hdr.mi_rows as usize =>
+            {
+                let (lr, lr_cols, lr_rows) = lr_units(seq, hdr);
+                fs.cdef_idx.fill(-1);
+                fs.lr = lr;
+                fs.lr_cols = lr_cols;
+                fs.lr_rows = lr_rows;
+                fs.prev_segment_ids = None;
+                fs.motion_field = Vec::new();
+                fs
+            }
+            _ => Self::new(seq, hdr),
+        }
+    }
     /// A state of the same size holding only what the in-loop filters read
     /// (mode info, loop filter transform sizes, CDEF indices), to be filled
     /// row by row.

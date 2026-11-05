@@ -97,6 +97,8 @@ pub struct Av1Core {
     lr_scratch: LrScratch,
     /// Copies of the frame state the worker threads use, kept for reuse.
     shells: Vec<FrameState>,
+    /// The state of the last frame, whose arrays the next one reuses.
+    spare_fs: Option<FrameState>,
     /// Row messages and reconstruction logs of the threaded pipeline, kept
     /// with their buffers for the next frames.
     rows8: RowPools<u8>,
@@ -137,6 +139,7 @@ impl Av1Core {
             pending: None,
             lr_scratch: LrScratch::new(),
             shells: Vec::new(),
+            spare_fs: None,
             rows8: RowPools::default(),
             rows16: RowPools::default(),
             apply_grain: true,
@@ -455,7 +458,7 @@ impl Av1Core {
         self.reclaim_pictures();
         let refs_data: [Option<Arc<RefData>>; 8] =
             std::array::from_fn(|i| self.slots[i].as_ref().map(|s| s.data.clone()));
-        let mut fs = FrameState::new(seq, &hdr);
+        let mut fs = FrameState::reuse(self.spare_fs.take(), seq, &hdr);
         if hdr.use_ref_frame_mvs {
             fs.motion_field = motion_field_estimation(seq, &hdr, &refs_data, self.threads);
         }
@@ -581,6 +584,7 @@ impl Av1Core {
         } else {
             self.release_picture(pic);
         }
+        self.spare_fs = Some(fs);
         Ok(shown)
     }
 

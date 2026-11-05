@@ -9,8 +9,8 @@ use super::frame::RefData;
 use super::obu::{FrameHeader, SequenceHeader, TRANSLATION, relative_dist};
 use super::tile::TileDec;
 use super::types::{
-    GLOBAL_GLOBALMV, GLOBALMV, INTRA_FRAME, Mv, NONE, NOT_WRITTEN, bh4, block_height, block_width,
-    bw4, has_newmv,
+    GLOBAL_GLOBALMV, GLOBALMV, INTRA_FRAME, Mv, NONE, bh4, block_height, block_width, bw4,
+    has_newmv,
 };
 
 const REF_CAT_LEVEL: u32 = 640;
@@ -188,6 +188,19 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         mv.clamp(to_left - border, to_right + border)
     }
 
+    /// Whether the luma 4x4 at (`r`, `c`), inside the tile and at most one
+    /// row above and one column left or right of the current superblock,
+    /// has been decoded in this frame (the spec's "RefFrames has been
+    /// written"), from the BlockDecoded flags.
+    fn decoded(&self, r: isize, c: isize) -> bool {
+        let m = self.sb_size4 as isize - 1;
+        let r0 = self.b.mi_row as isize & !m;
+        let c0 = self.b.mi_col as isize & !m;
+        let y = (r - r0 + 1).clamp(0, 34) as usize;
+        let x = (c - c0 + 1).clamp(0, 34) as usize;
+        self.block_decoded[0][y][x]
+    }
+
     fn inside(&self, r: isize, c: isize) -> bool {
         c >= self.mi_col_start as isize
             && c < self.mi_col_end as isize
@@ -264,7 +277,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
     ) {
         let r = self.b.mi_row as isize + delta_row;
         let c = self.b.mi_col as isize + delta_col;
-        if self.inside(r, c) && self.mi(r as usize, c as usize).ref_frame[0] != NOT_WRITTEN {
+        if self.inside(r, c) && self.decoded(r, c) {
             self.add_ref_mv_candidate(r as usize, c as usize, is_compound, 4, found);
         }
     }
@@ -647,10 +660,10 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         if !self.inside(r, c) {
             return;
         }
-        let m = *self.mi(r as usize, c as usize);
-        if m.ref_frame[0] == NOT_WRITTEN {
+        if !self.decoded(r, c) {
             return;
         }
+        let m = *self.mi(r as usize, c as usize);
         if m.ref_frame[0] != self.b.ref_frame[0] || m.ref_frame[1] != NONE {
             return;
         }

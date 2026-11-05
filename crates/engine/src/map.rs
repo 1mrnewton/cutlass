@@ -229,11 +229,16 @@ fn sound_for(draft: &Draft, id: &SegmentId, video_id: &MaterialId) -> bool {
     )
 }
 
-/// Text, a sticker, a shape, or a solid color is not a decoder input.
+/// Text, a shape, a solid color, or anything on a graphic row is not a
+/// decoder input; a picture file on a sticker row is.
 #[must_use]
 pub fn is_graphic(draft: &Draft, segment: &Segment) -> bool {
+    // A picture file on a sticker row, such as a sticker or a GIF, is media.
+    let picture = matches!(material(draft, segment), Some(MaterialRef::Video(_)));
     if draft.tracks.iter().any(|track| {
-        track.segments.iter().any(|item| item.id == segment.id) && graphic_track(&track.kind)
+        track.segments.iter().any(|item| item.id == segment.id)
+            && graphic_track(&track.kind)
+            && !(picture && track.kind == TrackType::Sticker)
     }) {
         return true;
     }

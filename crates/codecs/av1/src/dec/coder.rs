@@ -8,6 +8,11 @@
 
 use super::msac::Msac;
 
+/// [`Coder::mark`] tags with this bit set are superblock starts, followed by
+/// the superblock's mi row (bits 15..30) and column (bits 0..15); other tags
+/// are `cdef_idx` positions.
+pub const SB_MARK: u32 = 1 << 31;
+
 pub trait Coder {
     /// True when the coder writes the values it is given.
     const WRITE: bool;

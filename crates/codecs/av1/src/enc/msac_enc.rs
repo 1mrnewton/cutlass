@@ -91,10 +91,11 @@ impl MsacEnc {
         self.marks.iter().map(|m| m.1)
     }
 
-    /// Codes the logged intervals again into a new stream, inserting before
-    /// each mark the literal `insert(tag) = (bits, value)`; returns the
-    /// finished stream. Without a log, finishes this one unchanged.
-    pub fn replay(self, insert: &dyn Fn(u32) -> (u32, u32)) -> Vec<u8> {
+    /// Codes the logged intervals again into a new stream; before each mark
+    /// `insert(tag, coder)` may code more symbols (whose contexts nothing
+    /// logged depends on). Returns the finished stream. Without a log,
+    /// finishes this one unchanged.
+    pub fn replay(self, insert: &mut dyn FnMut(u32, &mut MsacEnc)) -> Vec<u8> {
         let Some(log) = self.log else {
             return self.finish();
         };
@@ -105,15 +106,13 @@ impl MsacEnc {
                 if at != i {
                     break;
                 }
-                let (n, v) = insert(tag);
-                e.literal(n, v);
+                insert(tag, &mut e);
                 marks.next();
             }
             e.encode_op(*op);
         }
         for &(_, tag) in marks {
-            let (n, v) = insert(tag);
-            e.literal(n, v);
+            insert(tag, &mut e);
         }
         e.finish()
     }
@@ -840,7 +839,10 @@ mod tests {
             let reference = plain.finish();
             let bits = round % 4;
             let ins = move |tag: u32| (bits, tag & ((1 << bits) - 1));
-            let data = e.replay(&ins);
+            let data = e.replay(&mut |tag, e: &mut MsacEnc| {
+                let (n, v) = ins(tag);
+                e.literal(n, v);
+            });
             if bits == 0 {
                 assert_eq!(data, reference);
             }

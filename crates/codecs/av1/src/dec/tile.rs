@@ -709,6 +709,8 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
             self.num_planes
         };
         self.clear_block_decoded_flags(r, c, planes);
+        self.msac
+            .mark(super::coder::SB_MARK | ((r as u32) << 15) | c as u32);
         self.read_lr(r, c, self.sb_size)?;
         self.decode_partition(r, c, self.sb_size)
     }

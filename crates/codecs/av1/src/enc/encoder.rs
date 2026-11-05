@@ -105,6 +105,9 @@ pub struct EncConfig {
     pub temporal_filter: bool,
     /// Doubles the mini-GOP where the content barely changes.
     pub adaptive_gop: bool,
+    /// Wiener loop restoration per 64x64 unit (experimental: about 1% on
+    /// a key frame, but it costs the natural test clips about as much).
+    pub loop_restoration: bool,
     /// Estimate a global motion model per reference (experimental: it does
     /// not pay off on the natural test clip yet).
     pub global_motion: bool,
@@ -130,6 +133,7 @@ impl EncConfig {
             keyint: 120,
             gop: 8,
             adaptive_gop: true,
+            loop_restoration: false,
             temporal_filter: false,
             threads: 1,
             global_motion: false,
@@ -292,6 +296,7 @@ impl Av1Enc {
             enable_ref_frame_mvs: true,
             enable_warped_motion: true,
             enable_dual_filter: ev("AV1_DUAL", 0.0) > 0.0,
+            enable_restoration: cfg.loop_restoration && cfg.speed < 8,
             bit_depth: cfg.bit_depth,
             mono_chrome: cfg.mono,
             color_primaries: cfg.color_primaries,
@@ -1201,6 +1206,12 @@ impl Av1Enc {
             && !hdr.coded_lossless
             && !hdr.allow_intrabc
             && ev("AV1_CDEFB", 0.0) > 0.0;
+        // Loop restoration likewise (its syntax starts each superblock).
+        let lr_on = seq.enable_restoration
+            && self.cfg.speed < 8
+            && !hdr.coded_lossless
+            && !hdr.allow_intrabc
+            && !hdr.use_superres;
         let mut tile_bytes: Vec<MsacEnc> = Vec::with_capacity(ti.cols * ti.rows);
         let run_tile = |tile: usize, fs: &mut FrameState, cur: &mut Picture<P>| -> R<MsacEnc> {
             let tile_row = tile / ti.cols;
@@ -1230,7 +1241,7 @@ impl Av1Enc {
                 mirrors: Vec::new(),
                 msac: {
                     let mut m = MsacEnc::new(!hdr.disable_cdf_update);
-                    if cdef_fb {
+                    if cdef_fb || lr_on {
                         m.record();
                     }
                     m
@@ -1349,12 +1360,14 @@ impl Av1Enc {
             }
             tile_bytes = bytes.into_iter().flatten().collect();
         }
+        let use_wiener_cdf = cdf.use_wiener;
         drop(cdf);
         // Choose the in-loop filter strengths on the reconstruction. Tile
         // syntax does not depend on them (one CDEF strength, no deltas), so
         // only the header is rewritten.
         let mut hdr_bytes = hdr_bytes;
         let mut cdef_choice: Option<super::cdef_search::CdefChoice> = None;
+        let mut lr_plan: Option<super::lr_search::LrPlan> = None;
         if self.cfg.speed < 8 && !hdr.coded_lossless && !hdr.allow_intrabc {
             let full = self.cfg.speed < 4;
             let threads = self.core.threads.max(1);
@@ -1412,7 +1425,7 @@ impl Av1Enc {
                     super::cdef_search::set_strength(&mut best_h, k, st);
                 }
                 cdef_choice = Some(ch);
-            } else if let Some((lf_sse, deblocked)) = best_lf
+            } else if let Some((lf_sse, deblocked)) = best_lf.as_ref()
                 && seq.enable_cdef
             {
                 let uv_search = seq.num_planes() > 1 && ev("AV1_CDUV", 1.0) > 0.0;
@@ -1439,9 +1452,9 @@ impl Av1Enc {
                 let rows: Vec<usize> = (0..sb_rows).step_by(step).collect();
                 let sy = usize::from(seq.subsampling_y);
                 let mut best_c = if step == 1 {
-                    (lf_sse, None::<(u8, u8)>)
+                    (*lf_sse, None::<(u8, u8)>)
                 } else {
-                    (sb_rows_sse(&deblocked, src, &rows, sy), None)
+                    (sb_rows_sse(deblocked, src, &rows, sy), None)
                 };
                 let eval = |&(pri, sec): &(u8, u8), out: &mut Picture<P>| -> u64 {
                     let mut h2 = hdr.clone();
@@ -1457,13 +1470,13 @@ impl Av1Enc {
                     h2.cdef.uv_pri = [up; 8];
                     h2.cdef.uv_sec = [us; 8];
                     let mut pads = crate::dec::postfilter::cdef_pads();
-                    copy_sb_rows(out, &deblocked, &rows, sy);
+                    copy_sb_rows(out, deblocked, &rows, sy);
                     for &i in &rows {
                         crate::dec::postfilter::cdef_sb_rows(
                             &seq,
                             &h2,
                             &fs,
-                            &deblocked,
+                            deblocked,
                             out,
                             i * 16,
                             (i + 1) * 16,
@@ -1480,7 +1493,7 @@ impl Av1Enc {
                     let parts: Vec<Vec<(usize, u64)>> = std::thread::scope(|sc| {
                         let hs: Vec<_> = (0..nt)
                             .map(|t| {
-                                let (eval, combos, deblocked) = (&eval, &combos, &deblocked);
+                                let (eval, combos) = (&eval, &combos);
                                 sc.spawn(move || {
                                     let mut out = deblocked.clone();
                                     (t..combos.len())
@@ -1538,7 +1551,7 @@ impl Av1Enc {
                             // (0, 0), which comes first; every later
                             // candidate rewrites the same blocks.
                             crate::dec::postfilter::cdef(
-                                &seq, &h2, &fs, &deblocked, &mut out, threads,
+                                &seq, &h2, &fs, deblocked, &mut out, threads,
                             );
                             let e = chroma_sse(&out, src);
                             if e < best_uv.0 {
@@ -1550,16 +1563,50 @@ impl Av1Enc {
                     best_h.cdef.uv_sec = [best_uv.1.1; 8];
                 }
             }
+            if lr_on && let Some((_, deblocked)) = best_lf.as_ref() {
+                // Loop restoration on the final CDEF output.
+                let mut h2 = hdr.clone();
+                h2.cdef = best_h.cdef.clone();
+                h2.loop_filter = best_h.loop_filter.clone();
+                let mut cdef_pic = deblocked.clone();
+                if seq.enable_cdef {
+                    crate::dec::postfilter::cdef(&seq, &h2, &fs, deblocked, &mut cdef_pic, threads);
+                }
+                lr_plan = super::lr_search::search(
+                    &seq,
+                    &h2,
+                    &mut fs,
+                    &cdef_pic,
+                    deblocked,
+                    src,
+                    qp.lambda * ev("AV1_LRL", 1.0),
+                    ev("AV1_LRU", 64.0) as u32,
+                    threads,
+                );
+                if let Some(p) = &lr_plan {
+                    p.apply(&mut best_h);
+                }
+            }
             hdr_bytes = write_frame_header(&best_h, &ctx, &opts);
         }
         let tile_bytes: Vec<Vec<u8>> = tile_bytes
             .into_iter()
-            .map(|m| match &cdef_choice {
-                Some(ch) => m.replay(&|tag: u32| {
-                    let v = ch.idx.get(tag as usize).copied().unwrap_or(0).max(0);
-                    (u32::from(ch.bits), v as u32)
-                }),
-                None => m.replay(&|_| (0, 0)),
+            .map(|m| {
+                let mut lw = lr_plan
+                    .as_ref()
+                    .map(|p| super::lr_search::LrWriter::new(p, use_wiener_cdf, &seq));
+                m.replay(&mut |tag: u32, e: &mut MsacEnc| {
+                    if tag & crate::dec::coder::SB_MARK != 0 {
+                        if let Some(w) = lw.as_mut() {
+                            let r = ((tag >> 15) & 0x7fff) as usize;
+                            let c = (tag & 0x7fff) as usize;
+                            w.write_sb(e, r, c);
+                        }
+                    } else if let Some(ch) = &cdef_choice {
+                        let v = ch.idx.get(tag as usize).copied().unwrap_or(0).max(0);
+                        e.literal(u32::from(ch.bits), v as u32);
+                    }
+                })
             })
             .collect();
         // Frame OBU: header, then one tile group with every tile.

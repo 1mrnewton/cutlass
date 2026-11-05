@@ -1,7 +1,7 @@
 //! Encodes a Y4M file with the Rust AV1 encoder and writes IVF.
 //!
 //! Usage: av1enc <in.y4m> <out.ivf> [--q N | --kbps N] [--speed N] [--keyint N] [--frames N]
-//!        [--tiles COLSLOG2xROWSLOG2] [--recon out.yuv] [--gop N]
+//!        [--tiles COLSLOG2xROWSLOG2] [--recon out.yuv] [--gop N] [--loop-restoration]
 //!        [--global-motion] [--temporal-filter] [--threads N]
 
 #![allow(clippy::print_stdout, clippy::print_stderr)]
@@ -150,6 +150,9 @@ fn main() -> Result<(), String> {
     }
     if args.iter().any(|a| a == "--temporal-filter") {
         cfg.temporal_filter = true;
+    }
+    if args.iter().any(|a| a == "--loop-restoration") {
+        cfg.loop_restoration = true;
     }
     if let Some(s) = arg(&args, "--threads") {
         cfg.threads = s.parse().map_err(|_| "threads")?;

@@ -10,6 +10,7 @@
 mod alpha;
 mod animation;
 mod encoder;
+mod end_to_end;
 mod lossless_encode;
 mod lossy;
 mod lossy_encode;

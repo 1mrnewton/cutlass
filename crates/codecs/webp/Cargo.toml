@@ -15,3 +15,6 @@ workspace = true
 
 [dev-dependencies]
 cutlass-png = { path = "../png", version = "0.1.0" }
+cutlass-codec = { path = "../../codec", version = "0.1.0" }
+cutlass-container = { path = "../../container", version = "0.1.0" }
+cutlass-still = { path = "../../containers/still", version = "0.1.0" }

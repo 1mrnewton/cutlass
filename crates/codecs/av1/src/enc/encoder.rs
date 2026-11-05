@@ -16,7 +16,7 @@ use crate::dec::frame::{FrameState, Picture};
 use crate::dec::obu::{
     Cdef, FrameHeader, HeaderContext, INTER_FRAME, KEY_FRAME, LoopFilter, OBU_FRAME,
     OBU_SEQUENCE_HEADER, OBU_TEMPORAL_DELIMITER, OperatingPoint, PRIMARY_REF_NONE, Quant,
-    SequenceHeader, TX_MODE_LARGEST, TileInfo, parse_frame_header,
+    SequenceHeader, TX_MODE_LARGEST, parse_frame_header,
 };
 use crate::dec::tile::{RefView, TileDec};
 use crate::dsp::Pixel;
@@ -24,7 +24,10 @@ use crate::spec::tables::{AC_QLOOKUP, DC_QLOOKUP};
 
 use super::bitwriter::write_obu;
 use super::msac_enc::MsacEnc;
-use super::obu_write::{FrameHeaderWriteOptions, write_frame_header, write_sequence_header};
+use super::obu_write::{
+    FrameHeaderWriteOptions, uniform_tile_info, write_frame_header, write_sequence_header,
+    write_tile_group,
+};
 use super::quant::QuantParams;
 use super::rdo::ModeParams;
 
@@ -296,10 +299,20 @@ impl Av1Enc {
             ref_frame_idx: [0; 7],
             allow_high_precision_mv: !key && q < 128,
             interpolation_filter: 0,
-            tile_info: TileInfo {
-                cols_log2: self.cfg.tile_cols_log2,
-                rows_log2: self.cfg.tile_rows_log2,
-                ..TileInfo::default()
+            tile_info: {
+                let mi_cols = 2 * ((self.cfg.width as u32 + 7) >> 3);
+                let mi_rows = 2 * ((self.cfg.height as u32 + 7) >> 3);
+                let mut ti = uniform_tile_info(
+                    &self.seq,
+                    mi_cols,
+                    mi_rows,
+                    self.cfg.tile_cols_log2,
+                    self.cfg.tile_rows_log2,
+                );
+                if ti.cols * ti.rows > 1 {
+                    ti.tile_size_bytes = 4;
+                }
+                ti
             },
             quant: Quant {
                 base_q_idx: q,
@@ -342,7 +355,7 @@ impl Av1Enc {
             temporal_id: 0,
             spatial_id: 0,
         };
-        let opts = FrameHeaderWriteOptions;
+        let opts = FrameHeaderWriteOptions::default();
         let hdr_bytes = write_frame_header(&intent, &ctx, &opts);
         // The parser derives every dependent field exactly as a decoder will.
         let hdr = parse_frame_header(&hdr_bytes, &ctx)?;
@@ -468,23 +481,12 @@ impl Av1Enc {
         drop(cdf);
         // Frame OBU: header, then one tile group with every tile.
         let mut payload = hdr_bytes;
-        let num_tiles = ti.cols * ti.rows;
-        let mut tg = super::bitwriter::BitWriter::new();
-        if num_tiles > 1 {
-            tg.f(1, 0);
-        }
-        tg.byte_alignment();
-        payload.extend_from_slice(&tg.bytes());
-        let tsb = ti.tile_size_bytes as usize;
-        for (i, t) in tile_bytes.iter().enumerate() {
-            if i + 1 < num_tiles {
-                let sz = t.len() - 1;
-                for k in 0..tsb {
-                    payload.push((sz >> (8 * k)) as u8);
-                }
-            }
-            payload.extend_from_slice(t);
-        }
+        payload.extend_from_slice(&write_tile_group(
+            &ti,
+            0,
+            ti.cols * ti.rows - 1,
+            &tile_bytes,
+        ));
         Ok(payload)
     }
 }

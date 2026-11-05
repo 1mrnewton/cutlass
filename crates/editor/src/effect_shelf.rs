@@ -22,6 +22,29 @@ pub const EFFECT_CARD_PREFIX: &str = "effect:";
 /// at zero, that runs over every picture below it.
 pub const ADJUSTMENT_CARD: &str = "adjustment:basic";
 
+/// A filter card's id starts with this, then the look's `effect_id`.
+pub const FILTER_CARD_PREFIX: &str = "filter:";
+
+/// The bundled filters as `(card id, name)`, in shelf order.
+#[must_use]
+pub fn filter_cards() -> Vec<(String, &'static str)> {
+    cutlass_effects::LOOKS
+        .iter()
+        .map(|look| {
+            (
+                format!("{FILTER_CARD_PREFIX}{}", look.effect_id()),
+                look.name,
+            )
+        })
+        .collect()
+}
+
+/// The bundled filter a card id names.
+#[must_use]
+pub fn filter_of_card(card_id: &str) -> Option<&'static cutlass_effects::Look> {
+    cutlass_effects::bundled_look(card_id.strip_prefix(FILTER_CARD_PREFIX)?)
+}
+
 /// One card on the effects shelf.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EffectCard {
@@ -125,6 +148,21 @@ fn follows_another(draft: &Draft, clip: &SegmentId) -> bool {
         .filter(|relationship| relationship.kind == "linkage")
         .flat_map(|relationship| &relationship.id_to_id)
         .any(|pair| &pair.dependent == clip)
+}
+
+#[cfg(test)]
+mod filter_tests {
+    use super::{filter_cards, filter_of_card};
+
+    #[test]
+    fn every_filter_card_names_its_look() {
+        let cards = filter_cards();
+        assert_eq!(cards.len(), 20);
+        for (id, name) in cards {
+            assert_eq!(filter_of_card(&id).map(|look| look.name), Some(name));
+        }
+        assert!(filter_of_card("effect:look/warm").is_none());
+    }
 }
 
 #[cfg(test)]

@@ -30,7 +30,7 @@ pub use catalog::{
     INVERT, MULTIPLY, PIXELATE, PIXELATE_BLOCK, PackageKind, SCREEN, SOURCE_OVER, TRANSITION_FADE,
     Transition, entries, entry,
 };
-pub use look::{FILTER, LOOK_PREFIX, LOOKS, Look, bundled_look, segment_look};
+pub use look::{FILTER, LOOK_PREFIX, LOOKS, Look, bundled_look, look_poster, segment_look};
 pub use package::{
     Located, MAX_PACKAGE_BYTES, MissingPackages, Package, PackageError, PackageStore,
     animation_package_id, load, load_segment, load_transition, map_storage_error, package_id,

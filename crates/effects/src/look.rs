@@ -8,7 +8,7 @@
 
 use cutlass_model::{Draft, MaterialRef, Segment};
 
-use crate::adjust::{Adjust, AdjustKey, segment_adjust};
+use crate::adjust::{Adjust, AdjustKey, adjust_rgba, segment_adjust};
 
 /// The `effect_id` prefix of a bundled filter.
 pub const LOOK_PREFIX: &str = "look/";
@@ -198,6 +198,42 @@ pub fn bundled_look(effect_id: &str) -> Option<&'static Look> {
     LOOKS.iter().find(|look| look.id == id)
 }
 
+/// A small poster for `look`: a drawn scene (sky, sun, hills, a red
+/// house) with the look over it, as opaque RGBA, `width` × `height`.
+#[must_use]
+pub fn look_poster(look: &Look, width: u32, height: u32) -> Vec<u8> {
+    let mut rgba = Vec::with_capacity(width as usize * height as usize * 4);
+    for y in 0..height {
+        for x in 0..width {
+            #[allow(clippy::cast_precision_loss)]
+            let (u, v) = (
+                (x as f32 + 0.5) / width as f32,
+                (y as f32 + 0.5) / height as f32,
+            );
+            let hill = 0.62 + 0.08 * (u * 7.0).sin() * (1.0 - u * 0.5);
+            let sun = ((u - 0.72).powi(2) + (v - 0.28).powi(2) * 0.6).sqrt() < 0.11;
+            let house = (0.2..0.38).contains(&u) && (hill - 0.18..hill).contains(&v);
+            let colour = if house {
+                [0.78, 0.22, 0.18]
+            } else if v > hill {
+                let shade = 1.0 - (v - hill) * 1.2;
+                [0.22 * shade, 0.55 * shade, 0.26 * shade]
+            } else if sun {
+                [1.0, 0.86, 0.45]
+            } else {
+                [0.35 + 0.35 * v, 0.6 + 0.2 * v, 0.95]
+            };
+            for channel in colour {
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                rgba.push((channel.clamp(0.0, 1.0) * 255.0).round() as u8);
+            }
+            rgba.push(255);
+        }
+    }
+    adjust_rgba(&look.at(1.0), &mut rgba, width, height, 7);
+    rgba
+}
+
 /// What a filter clip does: its look at its strength, with the clip's own
 /// sliders added. `None` when the clip is not a bundled filter.
 #[must_use]
@@ -221,7 +257,7 @@ pub fn segment_look(draft: &Draft, segment: &Segment) -> Option<Adjust> {
 mod tests {
     use cutlass_model::{Draft, MaterialEffect, MaterialId, Segment, TimeRange};
 
-    use super::{FILTER, LOOKS, bundled_look, segment_look};
+    use super::{FILTER, LOOKS, bundled_look, look_poster, segment_look};
     use crate::adjust::AdjustKey;
 
     #[test]
@@ -239,6 +275,20 @@ mod tests {
         }
         assert!(bundled_look("warm").is_none());
         assert!(bundled_look("look/none").is_none());
+    }
+
+    #[test]
+    fn each_poster_is_the_scene_under_its_own_look() {
+        let posters: Vec<Vec<u8>> = LOOKS.iter().map(|look| look_poster(look, 24, 16)).collect();
+        for (index, poster) in posters.iter().enumerate() {
+            assert_eq!(poster.len(), 24 * 16 * 4);
+            assert!(poster.chunks(4).all(|pixel| pixel[3] == 255));
+            assert!(
+                posters[index + 1..].iter().all(|other| other != poster),
+                "{}",
+                LOOKS[index].id
+            );
+        }
     }
 
     #[test]

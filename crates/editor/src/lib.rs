@@ -42,8 +42,9 @@ pub use clip_rules::{can_turn, magnet_request};
 pub use clipboard::{ClipboardMiss, CopiedClip, copy_clips, paste_requests};
 pub use controls::{MAX_VOLUME, SPEED_MARKS, speed_at, speed_position, volume_at, volume_position};
 pub use effect_shelf::{
-    ADJUSTMENT_CARD, EFFECT_CARD_PREFIX, EFFECT_LENGTH, EffectCard, EffectPlace, effect_cards,
-    effect_of_card, effect_requests, effect_row_for, effect_target,
+    ADJUSTMENT_CARD, EFFECT_CARD_PREFIX, EFFECT_LENGTH, EffectCard, EffectPlace,
+    FILTER_CARD_PREFIX, effect_cards, effect_of_card, effect_requests, effect_row_for,
+    effect_target, filter_cards, filter_of_card,
 };
 pub use filmstrip::{FilmTile, MAX_TILES, film_tiles};
 pub use fling::{

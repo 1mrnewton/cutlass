@@ -167,3 +167,153 @@ fn bitrate_mode_decodes_identically() {
     };
     check("rate", 176, 144, 20, opts);
 }
+
+/// Raw yuv420p frames of a local file scaled to `width`×`height`.
+pub(crate) fn local_yuv(name: &str, width: u32, height: u32, frames: u32) -> Option<Vec<u8>> {
+    let source = crate::prove::local_root()?.join(name);
+    if !source.is_file() {
+        return None;
+    }
+    let ffmpeg = ffmpeg_bin()?;
+    let dir = temp_dir("source");
+    let out = dir.join("src.yuv");
+    let status = std::process::Command::new(&ffmpeg)
+        .args(["-y", "-hide_banner", "-loglevel", "error", "-i"])
+        .arg(&source)
+        .args([
+            "-an",
+            "-vf",
+            &format!("scale={width}:{height}:flags=bicubic"),
+            "-frames:v",
+            &frames.to_string(),
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "yuv420p",
+        ])
+        .arg(&out)
+        .output()
+        .expect("ffmpeg");
+    assert!(status.status.success(), "{}", String::from_utf8_lossy(&status.stderr));
+    let data = std::fs::read(&out).expect("yuv");
+    let _ = std::fs::remove_dir_all(&dir);
+    Some(data)
+}
+
+pub(crate) fn frame_of(yuv: &[u8], width: u32, height: u32, index: usize) -> VideoFrame {
+    let (w, h) = (width as usize, height as usize);
+    let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
+    let size = w * h + 2 * cw * ch;
+    let f = &yuv[index * size..(index + 1) * size];
+    VideoFrame::yuv420p(
+        width,
+        height,
+        Plane::tight(width, height, f[..w * h].to_vec()).expect("y"),
+        Plane::tight(width.div_ceil(2), height.div_ceil(2), f[w * h..w * h + cw * ch].to_vec()).expect("u"),
+        Plane::tight(width.div_ceil(2), height.div_ceil(2), f[w * h + cw * ch..].to_vec()).expect("v"),
+    )
+    .expect("frame")
+}
+
+/// PSNR of the luma planes over all frames, from the total squared error.
+pub(crate) fn psnr_y(a: &[u8], b: &[u8], width: u32, height: u32) -> f64 {
+    let (w, h) = (width as usize, height as usize);
+    let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
+    let size = w * h + 2 * cw * ch;
+    let frames = a.len().min(b.len()) / size;
+    let mut sse = 0f64;
+    for f in 0..frames {
+        for i in 0..w * h {
+            let d = f64::from(a[f * size + i]) - f64::from(b[f * size + i]);
+            sse += d * d;
+        }
+    }
+    let mse = sse / (frames * w * h) as f64;
+    10.0 * (255.0 * 255.0 / mse.max(1e-10)).log10()
+}
+
+/// Our encoder and libvpx (good, cpu-used 4, one thread) at the same
+/// bitrate on one source. Returns (ours psnr, ours bytes, ours seconds,
+/// libvpx psnr, libvpx bytes).
+pub(crate) fn compare_with_libvpx(
+    name: &str,
+    width: u32,
+    height: u32,
+    frames: u32,
+    bitrate: u32,
+    opts: Vp8Options,
+) -> Option<(f64, usize, f64, f64, usize)> {
+    let source = local_yuv(name, width, height, frames)?;
+    let ffmpeg = ffmpeg_bin()?;
+    let dir = temp_dir("compare");
+    let mut encoder = Vp8Encoder::with_options(width, height, Vp8Options { bitrate, ..opts }).expect("open");
+    let mut packets = Vec::new();
+    let mut recon = Vec::new();
+    let count = frames as usize;
+    let inputs: Vec<VideoFrame> = (0..count).map(|i| frame_of(&source, width, height, i)).collect();
+    let start = std::time::Instant::now();
+    for (i, frame) in inputs.into_iter().enumerate() {
+        let input = VideoInput {
+            frame,
+            pts: i as i64,
+            duration: 1,
+            timescale: 30,
+        };
+        let out = encoder.push(&input).expect("push");
+        packets.extend(out.into_iter().map(|p| p.data));
+        crop(encoder.reconstruction().expect("recon"), width, height, &mut recon);
+    }
+    let seconds = start.elapsed().as_secs_f64();
+    let ours_bytes: usize = packets.iter().map(Vec::len).sum();
+    let ivf = dir.join("ours.ivf");
+    write_ivf(&ivf, width, height, &packets);
+    let decoded = ffmpeg_yuv(&ffmpeg, &ivf, "libvpx");
+    assert!(first_difference(&decoded, &recon, width, height).is_none(), "{name}: libvpx decodes ours differently");
+    let ours_psnr = psnr_y(&source, &recon, width, height);
+
+    let raw = dir.join("src.yuv");
+    std::fs::write(&raw, &source).expect("raw");
+    let theirs = dir.join("libvpx.ivf");
+    let status = std::process::Command::new(&ffmpeg)
+        .args(["-y", "-hide_banner", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "yuv420p", "-s"])
+        .arg(format!("{width}x{height}"))
+        .args(["-r", "30", "-i"])
+        .arg(&raw)
+        .args([
+            "-c:v", "libvpx", "-b:v", &bitrate.to_string(), "-deadline", "good", "-cpu-used", "4",
+            "-threads", "1", "-auto-alt-ref", "0", "-lag-in-frames", "0", "-f", "ivf",
+        ])
+        .arg(&theirs)
+        .output()
+        .expect("libvpx");
+    assert!(status.status.success(), "{}", String::from_utf8_lossy(&status.stderr));
+    let theirs_stream = crate::prove::parse_ivf(&std::fs::read(&theirs).expect("ivf"));
+    let theirs_bytes: usize = theirs_stream.frames.iter().map(Vec::len).sum();
+    let theirs_yuv = ffmpeg_yuv(&ffmpeg, &theirs, "libvpx");
+    let theirs_psnr = psnr_y(&source, &theirs_yuv, width, height);
+    let _ = std::fs::remove_dir_all(&dir);
+    eprintln!(
+        "{name} {width}x{height} {frames}f @{bitrate}: ours {ours_psnr:.2} dB {ours_bytes} B {:.1} fps; libvpx {theirs_psnr:.2} dB {theirs_bytes} B",
+        f64::from(frames) / seconds
+    );
+    Some((ours_psnr, ours_bytes, seconds, theirs_psnr, theirs_bytes))
+}
+
+/// Release only: `cargo test --release -p cutlass-vp8 -- --ignored gate`.
+#[test]
+#[ignore = "release-mode gate on local files"]
+fn gate_quality_and_rate_against_libvpx() {
+    let (width, height, frames, bitrate) = (640, 360, 150, 1_000_000);
+    let target = f64::from(bitrate) / 8.0 * f64::from(frames) / 30.0;
+    for name in ["16929689_1920_1080_30fps.mp4", "7688387224072670472.mp4", "IMG_8144.MP4"] {
+        let Some((ours, bytes, seconds, theirs, _)) =
+            compare_with_libvpx(name, width, height, frames, bitrate, Vp8Options::default())
+        else {
+            continue;
+        };
+        let rate = bytes as f64 / target;
+        assert!((0.85..=1.15).contains(&rate), "{name}: rate {rate:.3} of target");
+        assert!(ours >= theirs - 2.0, "{name}: {ours:.2} dB against libvpx {theirs:.2} dB");
+        assert!(f64::from(frames) / seconds >= 30.0, "{name}: encode {:.1} fps", f64::from(frames) / seconds);
+    }
+}

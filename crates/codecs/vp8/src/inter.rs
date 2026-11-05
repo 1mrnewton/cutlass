@@ -104,10 +104,8 @@ pub fn predict(
     let vtaps = filter.taps(fy);
     if fx == 0 {
         for r in 0..h {
-            for c in 0..w {
-                let s = base + r * src_stride + c + 2;
-                out[r * out_stride + c] = vertical_at(src, s, src_stride, vtaps);
-            }
+            let s = base + r * src_stride + 2;
+            vertical(src, s, src_stride, vtaps, &mut out[r * out_stride..r * out_stride + w]);
         }
         return;
     }
@@ -118,35 +116,48 @@ pub fn predict(
         horizontal(&src[s..s + w + PAD], htaps, &mut mid[r * w..r * w + w]);
     }
     for r in 0..h {
-        for c in 0..w {
-            out[r * out_stride + c] = vertical_at(&mid, r * w + c, w, vtaps);
-        }
+        vertical(&mid, r * w, w, vtaps, &mut out[r * out_stride..r * out_stride + w]);
     }
 }
 
+/// One row through the horizontal filter: `src` holds `out.len() + 5`
+/// pixels starting two before the first output.
 #[inline]
 fn horizontal(src: &[u8], taps: &[i32; 6], out: &mut [u8]) {
-    for (c, pixel) in out.iter_mut().enumerate() {
-        let s = &src[c..c + 6];
-        let sum = i32::from(s[0]) * taps[0]
-            + i32::from(s[1]) * taps[1]
-            + i32::from(s[2]) * taps[2]
-            + i32::from(s[3]) * taps[3]
-            + i32::from(s[4]) * taps[4]
-            + i32::from(s[5]) * taps[5];
-        *pixel = ((sum + 64) >> 7).clamp(0, 255) as u8;
+    let w = out.len();
+    let s0 = &src[..w];
+    let s1 = &src[1..=w];
+    let s2 = &src[2..w + 2];
+    let s3 = &src[3..w + 3];
+    let s4 = &src[4..w + 4];
+    let s5 = &src[5..w + 5];
+    for c in 0..w {
+        let sum = i32::from(s0[c]) * taps[0]
+            + i32::from(s1[c]) * taps[1]
+            + i32::from(s2[c]) * taps[2]
+            + i32::from(s3[c]) * taps[3]
+            + i32::from(s4[c]) * taps[4]
+            + i32::from(s5[c]) * taps[5];
+        out[c] = ((sum + 64) >> 7).clamp(0, 255) as u8;
     }
 }
 
+/// One row through the vertical filter: the six input rows start at `at`
+/// (two rows above the output row) with `stride` between them.
 #[inline]
-fn vertical_at(src: &[u8], at: usize, stride: usize, taps: &[i32; 6]) -> u8 {
-    let sum = i32::from(src[at]) * taps[0]
-        + i32::from(src[at + stride]) * taps[1]
-        + i32::from(src[at + 2 * stride]) * taps[2]
-        + i32::from(src[at + 3 * stride]) * taps[3]
-        + i32::from(src[at + 4 * stride]) * taps[4]
-        + i32::from(src[at + 5 * stride]) * taps[5];
-    ((sum + 64) >> 7).clamp(0, 255) as u8
+fn vertical(src: &[u8], at: usize, stride: usize, taps: &[i32; 6], out: &mut [u8]) {
+    let w = out.len();
+    let row = |k: usize| &src[at + k * stride..at + k * stride + w];
+    let (r0, r1, r2, r3, r4, r5) = (row(0), row(1), row(2), row(3), row(4), row(5));
+    for c in 0..w {
+        let sum = i32::from(r0[c]) * taps[0]
+            + i32::from(r1[c]) * taps[1]
+            + i32::from(r2[c]) * taps[2]
+            + i32::from(r3[c]) * taps[3]
+            + i32::from(r4[c]) * taps[4]
+            + i32::from(r5[c]) * taps[5];
+        out[c] = ((sum + 64) >> 7).clamp(0, 255) as u8;
+    }
 }
 
 #[cfg(test)]

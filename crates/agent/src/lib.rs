@@ -11,6 +11,7 @@
 mod approval;
 mod chat;
 mod draft;
+mod forward;
 mod r#loop;
 mod mcp;
 mod mcp_server;
@@ -27,6 +28,7 @@ pub use draft::{
     ApplyInput, ApplyMode, ApplyResult, DraftError, DraftQuery, DraftTools, FullSnapshot,
     ProjectSnapshot, QueryView, RangeSnapshot, SegmentSnapshot, TrackSnapshot, request_name,
 };
+pub use forward::{Forward, Forwarded, ProjectSocket, Wake};
 pub use r#loop::{LoopError, ToolOutcome, ToolSink, Turn, cap_from_settings, run, run_after};
 pub use mcp::{McpClient, McpError, McpTransport};
 pub use mcp_server::{MCP_PROTOCOL_VERSION, McpServer};

@@ -6,6 +6,7 @@ mod demux;
 mod error;
 mod limits;
 mod logical;
+mod mux;
 mod opus;
 pub mod page;
 mod probe;
@@ -18,5 +19,6 @@ pub use limits::{
     MAX_SEEK_PROBES, MAX_START_SCAN_BYTES, MAX_TAIL_SCAN_BYTES, MUX_PAGE_BYTES, MUX_PAGE_SAMPLES,
     OPUS_PREROLL, OPUS_RATE, PAGE_HEADER_BYTES, PROBE_BYTES,
 };
+pub use mux::{FIRST_SERIAL, OggMux, VENDOR};
 pub use opus::{OpusHead, OpusTags, packet_samples};
 pub use probe::{OggFamily, probe};

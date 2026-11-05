@@ -449,7 +449,8 @@ mod tests {
             .nth(1)
             .map(|(at, _)| at)
             .expect("two frames");
-        let params = CodecParams::with_format(CodecId::Webp, 40, 30, cutlass_decode::PixelFormat::Rgba8);
+        let params =
+            CodecParams::with_format(CodecId::Webp, 40, 30, cutlass_decode::PixelFormat::Rgba8);
         let mut decoder = super::decoders().open(&params).expect("webp");
         assert_eq!(Decoder::codec(decoder.as_ref()), CodecId::Webp);
         let mut frames = 0;
@@ -461,7 +462,10 @@ mod tests {
                 let Output::Picture(picture) = output else {
                     panic!("picture");
                 };
-                assert!(matches!(picture.samples(), cutlass_decode::PictureSamples::Cpu(_)));
+                assert!(matches!(
+                    picture.samples(),
+                    cutlass_decode::PictureSamples::Cpu(_)
+                ));
                 assert_eq!((picture.info().width, picture.info().height), (40, 30));
                 frames += 1;
             }

@@ -33,6 +33,11 @@ pub fn register_codecs_with(
 ) -> (cutlass_decode::DecodeFactory, cutlass_encode::EncodeFactory) {
     let mut decoders = cutlass_decode::DecodeFactory::new();
     let mut encoders = cutlass_encode::EncodeFactory::new();
+    // Rust audio codecs go ahead of the platform ones, so a file decodes
+    // and encodes the same on every platform. ALAC is bit-exact either way;
+    // the Rust encoder also hands the muxer the final cookie.
+    cutlass_alac::register_decoders(&mut decoders);
+    cutlass_alac::register_encoders(&mut encoders);
     #[cfg(target_os = "macos")]
     {
         // Pictures stay in their IOSurface; the preview samples them in place.
@@ -56,8 +61,6 @@ pub fn register_codecs_with(
     cutlass_av1::register_encoders(&mut encoders);
     cutlass_pcm::register_decoders(&mut decoders);
     cutlass_pcm::register_encoders(&mut encoders);
-    cutlass_alac::register_decoders(&mut decoders);
-    cutlass_alac::register_encoders(&mut encoders);
     cutlass_h264::register_decoders(&mut decoders);
     cutlass_h264::register_encoders(&mut encoders);
     (decoders, encoders)
@@ -251,6 +254,29 @@ mod tests {
             cutlass_decode::Decoder::codec(decoder.as_ref()),
             CodecId::Alac
         );
+    }
+
+    #[test]
+    fn the_rust_alac_encoder_goes_ahead_of_the_platform_one() {
+        use cutlass_decode::{ChannelLayout, Pcm, SampleFormat};
+        use cutlass_encode::{AudioInput, Encoder};
+
+        let (_, encoders) = super::register_codecs();
+        let mut spec = CodecParams::audio(CodecId::Alac, 48_000, ChannelLayout::stereo());
+        spec.sample_format = Some(SampleFormat::F32);
+        let samples: Vec<f32> = (0..2 * 5000)
+            .map(|i| ((i as f32) * 0.013).sin() * 0.5)
+            .collect();
+        let pcm = Pcm::from_f32(48_000, ChannelLayout::stereo(), samples).expect("pcm");
+        let input = AudioInput { pcm };
+        let encode = |encoder: &mut dyn Encoder| {
+            let mut packets = encoder.push(&input).expect("push");
+            packets.extend(encoder.drain().expect("drain"));
+            packets
+        };
+        let mut app = encoders.open(&spec).expect("app alac encoder");
+        let mut rust = cutlass_alac::AlacEncoder::open(&spec).expect("rust alac encoder");
+        assert_eq!(encode(app.as_mut()), encode(&mut rust));
     }
 
     #[test]

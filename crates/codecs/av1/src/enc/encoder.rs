@@ -172,9 +172,11 @@ pub struct Av1Enc {
     /// Temporal importance of the frames of the current mini-GOP (display
     /// index, importance), from the TPL model.
     tpl_imp: Vec<(u64, f64)>,
-    /// The current mini-GOP was found static: its alt-ref is temporally
-    /// filtered.
+    /// The current mini-GOP was found static (and the content is not screen
+    /// content): its alt-ref is temporally filtered.
     static_gop: bool,
+    /// The frame being coded is screen content.
+    screen: bool,
     /// The model's block statistics and the display index of each of its
     /// frames, for per-superblock quantizers.
     tpl: Option<TplGroup>,
@@ -355,6 +357,7 @@ impl Av1Enc {
             slot_disp: [None; 8],
             tpl_imp: Vec::new(),
             static_gop: false,
+            screen: false,
             tpl: None,
         })
     }
@@ -453,7 +456,9 @@ impl Av1Enc {
                 let ln = long.min(to_key).min(self.lookahead.len() as u64);
                 if ln > gop && self.is_static::<P>(d - 1, ln) {
                     n = ln;
-                    self.static_gop = true;
+                    // (Screen content redraws what it changes: filtering
+                    // across frames would blend that.)
+                    self.static_gop = !self.screen;
                     break;
                 }
                 long /= 2;
@@ -605,7 +610,6 @@ impl Av1Enc {
                     let sh = write_sequence_header(&self.seq);
                     write_obu(tu, OBU_SEQUENCE_HEADER, 0, 0, false, &sh);
                 }
-                let spec = self.plan_frame(disp, key, show, level);
                 let idx = (disp - self.next_disp) as usize;
                 let Some(src) = self.lookahead.get(idx).cloned() else {
                     return Err(CodecError::InvalidApi { what: "lookahead" });
@@ -615,6 +619,8 @@ impl Av1Enc {
                         what: "sample size",
                     });
                 };
+                self.screen = self.cfg.speed < 10 && is_screen_content(src, self.cfg.bit_depth);
+                let spec = self.plan_frame(disp, key, show, level);
                 let filtered;
                 let mut src = src;
                 if !show && level == 0 && self.use_tf() {
@@ -802,7 +808,15 @@ impl Av1Enc {
                 } else {
                     ev("AV1_TPLA", 0.9)
                 };
-                let target = step * imp.powf(-alpha).max(ev("AV1_TPLMIN", 0.3));
+                // The model (SATD at half resolution) overstates how much
+                // of screen content's detail later frames take from the
+                // alt-ref (it smooths away what is redrawn every frame).
+                let floor = if self.screen {
+                    ev("AV1_TPLMINS", 0.5)
+                } else {
+                    ev("AV1_TPLMIN", 0.3)
+                };
+                let target = step * imp.powf(-alpha).max(floor);
                 let mut q = qi;
                 while q > 0 && f64::from(AC_QLOOKUP[bdi][q - 1]) >= target {
                     q -= 1;
@@ -1047,8 +1061,7 @@ impl Av1Enc {
                 }
             }
         }
-        intent.allow_screen_content_tools =
-            self.cfg.speed < 10 && is_screen_content(src, self.cfg.bit_depth);
+        intent.allow_screen_content_tools = self.screen;
         let sb_cols = self.cfg.width.div_ceil(64);
         let sb_rows = self.cfg.height.div_ceil(64);
         let sb_q = if ev("AV1_DQ", 0.0) > 0.0 && !seq.use_128x128_superblock {

@@ -326,6 +326,9 @@ pub(crate) struct Layers<'a> {
     pub(crate) shadows: &'a [(Shadow, Vec<f32>)],
     pub(crate) shape: &'a [f32],
     pub(crate) background: Option<Area>,
+    /// Boxes behind runs of glyphs, before the origin.
+    pub(crate) boxes: &'a [crate::paint::WordBox],
+    pub(crate) origin: (f32, f32),
     pub(crate) width: usize,
     pub(crate) height: usize,
 }
@@ -342,6 +345,8 @@ pub(crate) fn compose(layers: &Layers<'_>, rgba: &mut [u8]) {
         shadows,
         shape,
         background,
+        boxes,
+        origin,
         width,
         height,
     } = *layers;
@@ -350,6 +355,11 @@ pub(crate) fn compose(layers: &Layers<'_>, rgba: &mut [u8]) {
             None => paint_box(rgba, width, height, area, back),
             Some(shape) => paint_bubble(rgba, width, height, area, back.color, shape),
         }
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    let (box_w, box_h) = (width as u32, height as u32);
+    for word in boxes {
+        crate::paint::paint_round_box(rgba, box_w, box_h, word, origin);
     }
     for (shadow, mask) in shadows {
         let blurred = blur(mask, width, height, shadow.blur);

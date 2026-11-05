@@ -126,21 +126,42 @@ struct InkGlyph {
 }
 
 /// A box behind a run of glyphs, in picture pixels before the origin.
-struct WordBox {
-    left: f32,
-    top: f32,
-    right: f32,
-    bottom: f32,
+pub(crate) struct WordBox {
+    pub(crate) left: f32,
+    pub(crate) top: f32,
+    pub(crate) right: f32,
+    pub(crate) bottom: f32,
     /// Straight RGBA.
-    color: [u8; 4],
-    radius: f32,
+    pub(crate) color: [u8; 4],
+    pub(crate) radius: f32,
+}
+
+impl WordBox {
+    /// A box round `record` with room about it, for text at `font_size`.
+    pub(crate) fn round(record: &GlyphRecord, color: [u8; 4], font_size: f32) -> Self {
+        let (pad_x, pad_y) = (font_size * 0.12, font_size * 0.08);
+        Self {
+            left: record.x - pad_x,
+            top: record.y - pad_y,
+            right: record.x + record.width + pad_x,
+            bottom: record.y + record.height + pad_y,
+            color,
+            radius: font_size * 0.18,
+        }
+    }
+
+    /// Grow to hold `other` too.
+    pub(crate) fn join(&mut self, other: &Self) {
+        self.left = self.left.min(other.left);
+        self.top = self.top.min(other.top);
+        self.right = self.right.max(other.right);
+        self.bottom = self.bottom.max(other.bottom);
+    }
 }
 
 /// One round box behind each run of drawn glyphs that share a box color
 /// and a line, with room around them.
 fn word_boxes(ink: &[InkGlyph], font_size: f32) -> Vec<WordBox> {
-    let pad_x = font_size * 0.12;
-    let pad_y = font_size * 0.08;
     let mut boxes: Vec<WordBox> = Vec::new();
     let mut last: Option<([u8; 4], f32)> = None;
     for glyph in ink {
@@ -154,21 +175,11 @@ fn word_boxes(ink: &[InkGlyph], font_size: f32) -> Vec<WordBox> {
         if record.width <= 0.0 || record.height <= 0.0 {
             continue;
         }
+        let around = WordBox::round(record, glyph.back, font_size);
         let joins = last == Some((glyph.back, glyph.line));
-        if joins && let Some(open) = boxes.last_mut() {
-            open.left = open.left.min(record.x - pad_x);
-            open.top = open.top.min(record.y - pad_y);
-            open.right = open.right.max(record.x + record.width + pad_x);
-            open.bottom = open.bottom.max(record.y + record.height + pad_y);
-        } else {
-            boxes.push(WordBox {
-                left: record.x - pad_x,
-                top: record.y - pad_y,
-                right: record.x + record.width + pad_x,
-                bottom: record.y + record.height + pad_y,
-                color: glyph.back,
-                radius: font_size * 0.18,
-            });
+        match boxes.last_mut() {
+            Some(open) if joins => open.join(&around),
+            _ => boxes.push(around),
         }
         last = Some((glyph.back, glyph.line));
     }
@@ -177,7 +188,13 @@ fn word_boxes(ink: &[InkGlyph], font_size: f32) -> Vec<WordBox> {
 
 /// A box with round corners and one pixel of soft edge, laid over what is
 /// there.
-fn paint_round_box(rgba: &mut [u8], width: u32, height: u32, word: &WordBox, origin: (f32, f32)) {
+pub(crate) fn paint_round_box(
+    rgba: &mut [u8],
+    width: u32,
+    height: u32,
+    word: &WordBox,
+    origin: (f32, f32),
+) {
     let half_w = (word.right - word.left) / 2.0;
     let half_h = (word.bottom - word.top) / 2.0;
     let radius = word.radius.min(half_w).min(half_h).max(0.0);
@@ -360,8 +377,18 @@ mod tests {
             panic!("platform");
         };
         assert!(boxed.width() > still.width() && boxed.height() > still.height());
-        assert!(boxed.rgba().chunks(4).any(|pixel| pixel == [0, 0, 255, 255]));
-        assert!(boxed.rgba().chunks(4).any(|pixel| pixel == [255, 0, 0, 255]));
+        assert!(
+            boxed
+                .rgba()
+                .chunks(4)
+                .any(|pixel| pixel == [0, 0, 255, 255])
+        );
+        assert!(
+            boxed
+                .rgba()
+                .chunks(4)
+                .any(|pixel| pixel == [255, 0, 0, 255])
+        );
 
         let Picture::Cpu(empty) = paint_glyphs(TTF, 64.0, &[]).expect("empty") else {
             panic!("platform");

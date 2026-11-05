@@ -21,7 +21,7 @@ pub use layout::{Alignment, Layout, Line, PlacedGlyph, layout, layout_text};
 pub use mesh::{GlyphRecord, TextMesh, build, build_text};
 pub use paint::{DrawnGlyph, paint_glyphs};
 pub use shape::{MAX_CHARS, ShapeItem, Shaped, ShapedGlyph, shape, shape_text};
-pub use source::{TextSource, text_fill};
+pub use source::{GlyphLook, TextSource, text_fill};
 
 use std::error::Error;
 use std::fmt;

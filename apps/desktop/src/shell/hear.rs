@@ -185,6 +185,7 @@ mod tests {
                 .join(super::speech_model::SPEECH.file)
                 .is_file()
         {
+            cutlass_transcription::weights_missing("the sound or the speech model");
             eprintln!("skipped: the sound or the speech model is missing");
             return;
         }

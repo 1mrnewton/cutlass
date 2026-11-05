@@ -24,6 +24,23 @@ mod prepare;
 mod search;
 mod timestamp;
 mod unified;
+
+/// Set in a tagged run, the tests that need the real speech weights fail
+/// when the weights are missing instead of skipping.
+pub const REQUIRE_SPEECH_MODEL: &str = "CUTLASS_REQUIRE_SPEECH_MODEL";
+
+/// Called by a real-weights test that found `what` missing, before it
+/// skips: in a tagged run ([`REQUIRE_SPEECH_MODEL`]) it fails instead.
+///
+/// # Panics
+///
+/// When [`REQUIRE_SPEECH_MODEL`] is set.
+pub fn weights_missing(what: &str) {
+    assert!(
+        std::env::var_os(REQUIRE_SPEECH_MODEL).is_none(),
+        "{REQUIRE_SPEECH_MODEL} is set and {what} is missing"
+    );
+}
 mod words;
 
 pub use captions::{

@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::dsp::Pixel;
 use crate::dsp::cdef::{
-    CDEF_BORDER, adjust_luma_pri_strength, cdef_damping, cdef_direction, cdef_filter,
+    CDEF_PAD_STRIDE, adjust_luma_pri_strength, cdef_damping, cdef_direction, cdef_filter,
     cdef_pad_block, cdef_uv_dir,
 };
 use crate::dsp::lf::{filter_horizontal_edge, filter_vertical_edge};
@@ -562,9 +562,6 @@ pub fn cdef_sb_rows<P: Pixel>(
 pub fn cdef_pads() -> [Vec<u16>; 3] {
     core::array::from_fn(|_| vec![0u16; CDEF_PAD_STRIDE * CDEF_PAD_STRIDE])
 }
-
-/// Side, in samples, of the padded copy of one 64x64 luma area in [`cdef`].
-const CDEF_PAD_STRIDE: usize = 64 + 2 * CDEF_BORDER;
 
 /// CDEF process (7.15). `src` is the deblocked frame; `dst` starts as a copy of it.
 ///

@@ -24,10 +24,14 @@ use super::Pixel;
 use crate::spec::tables::{CDEF_DIRECTIONS, CDEF_PRI_TAPS, CDEF_SEC_TAPS, CDEF_UV_DIR, DIV_TABLE};
 
 /// Value in the padded source of a sample that is not CdefAvailable.
-pub const CDEF_UNAVAILABLE: u16 = i16::MAX as u16;
+pub const CDEF_UNAVAILABLE: u16 = 0x7000;
 
 /// Border, in samples, around a block in the padded source of [`cdef_filter`].
 pub const CDEF_BORDER: usize = 2;
+
+/// Stride of the padded copy of one 64x64 area (luma) that [`cdef_filter`]
+/// runs its vector kernel on.
+pub const CDEF_PAD_STRIDE: usize = 64 + 2 * CDEF_BORDER;
 
 /// Weights of the diagonal partial sums in the direction cost: an entry
 /// summing `n` samples gets `Div_Table[n]` (the spec's cost loops written as
@@ -200,6 +204,9 @@ fn constrain(diff: i32, threshold: i32, shift: u32) -> i32 {
 /// shifted by `bd - 8`, luma primary adjusted), `dir` the direction, and
 /// `damping` the per-plane damping from [`cdef_damping`] (at most 10, as in
 /// any conformant stream).
+///
+/// 8x8, 4x4 and 4x8 blocks with `src_stride == CDEF_PAD_STRIDE` take the
+/// vector kernel; anything else the scalar one.
 pub fn cdef_filter<P: Pixel>(
     dst: &mut [P],
     dst_stride: usize,
@@ -224,11 +231,16 @@ pub fn cdef_filter<P: Pixel>(
         return;
     }
     let p = Params::new(src_stride, pri, sec, dir, damping, bd);
-    match (w, h % 4) {
-        (8, 0) => dispatch::<P, 8, 4, 32>(dst, dst_stride, src, src_stride, h, &p),
-        (4, 0) => dispatch::<P, 4, 4, 16>(dst, dst_stride, src, src_stride, h, &p),
-        _ => filter_scalar(dst, dst_stride, src, src_stride, w, h, &p),
+    if src_stride == CDEF_PAD_STRIDE {
+        let k = Kernel::new(&p);
+        match (w, h) {
+            (8, 8) => return dispatch::<P, 8, 8, 1, 8>(dst, dst_stride, src, &k),
+            (4, 4) => return dispatch::<P, 4, 4, 2, 8>(dst, dst_stride, src, &k),
+            (4, 8) => return dispatch::<P, 4, 8, 2, 8>(dst, dst_stride, src, &k),
+            _ => {}
+        }
     }
+    filter_scalar(dst, dst_stride, src, src_stride, w, h, &p);
 }
 
 /// Per-block constants of [`cdef_filter`].
@@ -282,93 +294,122 @@ impl Params {
     }
 }
 
-#[inline(always)]
-fn dispatch<P: Pixel, const W: usize, const R: usize, const L: usize>(
-    dst: &mut [P],
-    dst_stride: usize,
-    src: &[u16],
-    src_stride: usize,
-    h: usize,
-    p: &Params,
-) {
-    match (p.pri != 0, p.sec != 0) {
-        (true, true) => block::<P, W, R, L, true, true>(dst, dst_stride, src, src_stride, h, p),
-        (true, false) => block::<P, W, R, L, true, false>(dst, dst_stride, src, src_stride, h, p),
-        _ => block::<P, W, R, L, false, true>(dst, dst_stride, src, src_stride, h, p),
+/// Largest distance, in the padded source with stride [`CDEF_PAD_STRIDE`],
+/// between a sample and one of its taps.
+const TAP_SPAN: usize = 2 * CDEF_PAD_STRIDE + 2;
+
+/// [`Params`] for the vector kernel: tap offsets relative to the padded
+/// block's first sample, `o` for the tap at `+off` and `2 * TAP_SPAN - o` for
+/// the one at `-off` (so both stay inside the padded block).
+struct Kernel {
+    pri_thr: u16,
+    sec_thr: u16,
+    pri_shift: u32,
+    sec_shift: u32,
+    pt: [i16; 2],
+    pri_o: [usize; 2],
+    sec_o: [usize; 4],
+}
+
+impl Kernel {
+    #[inline(always)]
+    fn new(p: &Params) -> Self {
+        let o = |off: isize| (off + TAP_SPAN as isize).clamp(0, 2 * TAP_SPAN as isize) as usize;
+        Self {
+            pri_thr: p.pri as u16,
+            sec_thr: p.sec as u16,
+            pri_shift: p.pri_shift.min(15),
+            sec_shift: p.sec_shift.min(15),
+            pt: [p.pt[0] as i16, p.pt[1] as i16],
+            pri_o: p.pri_off.map(o),
+            sec_o: p.sec_off.map(o),
+        }
     }
 }
 
-/// Loads `R` rows of `W` samples starting at `start` into `L = W * R` lanes.
 #[inline(always)]
-fn load<const W: usize, const R: usize, const L: usize>(
+fn dispatch<P: Pixel, const W: usize, const H: usize, const R: usize, const L: usize>(
+    dst: &mut [P],
+    dst_stride: usize,
     src: &[u16],
-    start: usize,
-    stride: usize,
-) -> [i16; L] {
+    k: &Kernel,
+) {
+    match (k.pri_thr != 0, k.sec_thr != 0) {
+        (true, true) => block::<P, W, H, R, L, true, true>(dst, dst_stride, src, k),
+        (true, false) => block::<P, W, H, R, L, true, false>(dst, dst_stride, src, k),
+        _ => block::<P, W, H, R, L, false, true>(dst, dst_stride, src, k),
+    }
+}
+
+/// `R` rows of `W` samples of [`CDEF_PAD_STRIDE`]-strided `win` from
+/// column `o` (at most `2 * TAP_SPAN`), as `L = W * R` lanes.
+#[inline(always)]
+fn gather<const W: usize, const R: usize, const L: usize>(win: &[u16], o: usize) -> [i16; L] {
+    let o = o.min(2 * TAP_SPAN);
     let mut v = [0i16; L];
     for r in 0..R {
-        let row = &src[start + r * stride..start + r * stride + W];
-        for (d, &s) in v[r * W..r * W + W].iter_mut().zip(row) {
-            *d = s as i16;
+        let s = r * CDEF_PAD_STRIDE + o;
+        let src: &[u16; W] = win[s..s + W].try_into().unwrap_or(&[0; W]);
+        for j in 0..W {
+            v[r * W + j] = src[j] as i16;
         }
     }
     v
 }
 
-/// Adds `tap * constrain(p - x)` for both signs of `off` to `sum`, and
-/// (when `MINMAX`) tracks the minimum / maximum of the available taps in
-/// `mn` / `mx` (the latter as `p + 1` wrapping, so unavailable samples, which
-/// are `i16::MAX`, become `i16::MIN` and never win; they never win the
-/// minimum either).
+/// Adds `tap * constrain(p - x)` for the taps at `o` and its mirror image,
+/// and (when `MINMAX`) folds them into `mn` / `mx`.
 ///
-/// Everything runs on signed 16-bit lanes. For an unavailable `p`,
-/// `|p - x| >= 32767 - 4095`, whose shift by at most
-/// `damping - floor_log2(thr)` still exceeds `thr` (damping is at most 10):
-/// `thr - (|d| >> shift)` is then negative and the tap 0. Every constrained
-/// value is at most 240 (12-bit primary strength), so the weighted sums stay
-/// far inside `i16`.
+/// Everything runs on 16-bit lanes. `constrain(d)` is `d` clamped to
+/// `+-max(0, thr - (|d| >> shift))`, the lower bound a saturating unsigned
+/// subtraction. An unavailable tap ([`CDEF_UNAVAILABLE`]) has
+/// `|d| >= 0x7000 - 4095`, which shifted by at most 6 (the damping minus the
+/// strength's log2, both scaled by `bd - 8`) still exceeds any threshold
+/// (at most 240): it adds 0. It never wins the minimum, and `p & 0xfff`,
+/// which keeps every real sample (at most 12 bits) and clears the marker,
+/// leaves it out of the maximum.
 #[inline(always)]
-fn taps<const W: usize, const R: usize, const L: usize, const MINMAX: bool>(
-    src: &[u16],
-    c: usize,
-    stride: usize,
-    off: isize,
+fn taps<const W: usize, const R: usize, const L: usize, const MINMAX: bool, const MUL: bool>(
+    win: &[u16],
+    o: usize,
     x: &[i16; L],
-    thr: i16,
+    thr: u16,
     shift: u32,
     tap: i16,
     sum: &mut [i16; L],
     mn: &mut [i16; L],
     mx: &mut [i16; L],
 ) {
-    for o in [off, -off] {
-        let p = load::<W, R, L>(src, (c as isize + o) as usize, stride);
+    let o = o.min(2 * TAP_SPAN);
+    for o in [o, 2 * TAP_SPAN - o] {
+        let p = gather::<W, R, L>(win, o);
         for l in 0..L {
             let d = p[l].wrapping_sub(x[l]);
-            let ad = d.max(d.wrapping_neg());
-            let t = thr.wrapping_sub(ad >> shift).max(0);
-            let v = ad.min(t);
-            let m = d >> 15;
-            let v = (v ^ m).wrapping_sub(m);
-            sum[l] = sum[l].wrapping_add(tap.wrapping_mul(v));
+            let ad = d.max(0i16.wrapping_sub(d)) as u16;
+            let t = thr.saturating_sub(ad.wrapping_shr(shift)) as i16;
+            let v = d.max(0i16.wrapping_sub(t)).min(t);
+            let v = if MUL { tap.wrapping_mul(v) } else { v };
+            sum[l] = sum[l].wrapping_add(v);
         }
         if MINMAX {
             for l in 0..L {
                 mn[l] = mn[l].min(p[l]);
-                mx[l] = mx[l].max(p[l].wrapping_add(1));
+                mx[l] = mx[l].max(p[l] & 0xfff);
             }
         }
     }
 }
 
-/// [`cdef_filter`] for blocks `W` samples wide, `R` rows at a time
-/// (`L = W * R` lanes). With only one of the primary / secondary filters
-/// the result never leaves the range of the taps (their weights add up to
-/// 12 < 16), so the clamp is only needed when both run.
+/// [`cdef_filter`] for `W x H` blocks in a padded source of stride
+/// [`CDEF_PAD_STRIDE`], `R` rows (`L = W * R` samples) at a time. With only one of
+/// the primary / secondary filters the result never leaves the range of the
+/// taps (their weights add up to 12 < 16), so the clamp is only needed when
+/// both run.
 #[inline(always)]
 fn block<
     P: Pixel,
     const W: usize,
+    const H: usize,
     const R: usize,
     const L: usize,
     const PRI: bool,
@@ -377,35 +418,28 @@ fn block<
     dst: &mut [P],
     dst_stride: usize,
     src: &[u16],
-    stride: usize,
-    h: usize,
-    p: &Params,
+    k: &Kernel,
 ) {
-    let b = CDEF_BORDER;
-    let (pri, sec) = (p.pri as i16, p.sec as i16);
-    let pt = [p.pt[0] as i16, p.pt[1] as i16];
-    let st = CDEF_SEC_TAPS[0].map(i16::from);
-    let mut i = 0;
-    while i < h {
-        let c = (i + b) * stride + b;
-        let x = load::<W, R, L>(src, c, stride);
+    for i in 0..H / R {
+        let row = i * R;
+        // The padded rows `row .. row + R + 4`.
+        let s = row * CDEF_PAD_STRIDE;
+        let Some(win) = src.get(s..s + (R - 1) * CDEF_PAD_STRIDE + 2 * TAP_SPAN + W) else {
+            return;
+        };
+        let x = gather::<W, R, L>(win, TAP_SPAN);
         let mut sum = [0i16; L];
         let mut mn = x;
         let mut mx = x;
-        for v in &mut mx {
-            *v += 1;
-        }
         if PRI {
-            for k in 0..2 {
-                taps::<W, R, L, SEC>(
-                    src,
-                    c,
-                    stride,
-                    p.pri_off[k],
+            for t in 0..2 {
+                taps::<W, R, L, SEC, true>(
+                    win,
+                    k.pri_o[t],
                     &x,
-                    pri,
-                    p.pri_shift,
-                    pt[k],
+                    k.pri_thr,
+                    k.pri_shift,
+                    k.pt[t],
                     &mut sum,
                     &mut mn,
                     &mut mx,
@@ -413,16 +447,32 @@ fn block<
             }
         }
         if SEC {
-            for (k, &off) in p.sec_off.iter().enumerate() {
-                taps::<W, R, L, PRI>(
-                    src,
-                    c,
-                    stride,
-                    off,
+            // Weight 2 for the inner taps, 1 for the outer ones.
+            let mut s2 = [0i16; L];
+            for t in 0..2 {
+                taps::<W, R, L, PRI, false>(
+                    win,
+                    k.sec_o[t],
                     &x,
-                    sec,
-                    p.sec_shift,
-                    st[k >> 1],
+                    k.sec_thr,
+                    k.sec_shift,
+                    1,
+                    &mut s2,
+                    &mut mn,
+                    &mut mx,
+                );
+            }
+            for l in 0..L {
+                sum[l] = sum[l].wrapping_add(s2[l].wrapping_add(s2[l]));
+            }
+            for t in 2..4 {
+                taps::<W, R, L, PRI, false>(
+                    win,
+                    k.sec_o[t],
+                    &x,
+                    k.sec_thr,
+                    k.sec_shift,
+                    1,
                     &mut sum,
                     &mut mn,
                     &mut mx,
@@ -435,16 +485,17 @@ fn block<
             let s = (s + 8 + (s >> 15)) >> 4;
             y[l] = x[l] + s;
             if PRI && SEC {
-                y[l] = y[l].max(mn[l]).min(mx[l] - 1);
+                y[l] = y[l].max(mn[l]).min(mx[l]);
             }
         }
         for r in 0..R {
-            let out = &mut dst[(i + r) * dst_stride..(i + r) * dst_stride + W];
+            let Some(out) = dst.get_mut((row + r) * dst_stride..(row + r) * dst_stride + W) else {
+                return;
+            };
             for j in 0..W {
                 out[j] = P::from_i32(i32::from(y[r * W + j]));
             }
         }
-        i += R;
     }
 }
 
@@ -467,23 +518,23 @@ fn filter_scalar<P: Pixel>(
             let c = base + j;
             let x = src[c] as i32;
             let mut sum = 0i32;
-            let mut mx = (x as i16).wrapping_add(1);
+            let mut mx = x as i16;
             let mut mn = x as i16;
             for k in 0..2 {
                 for sign in [-1isize, 1] {
                     let v = src[(c as isize + sign * p.pri_off[k]) as usize];
                     sum += p.pt[k] * constrain(v as i32 - x, p.pri, p.pri_shift);
-                    mx = mx.max((v as i16).wrapping_add(1));
+                    mx = mx.max((v & 0xfff) as i16);
                     mn = mn.min(v as i16);
                     for so in [p.sec_off[2 * k], p.sec_off[2 * k + 1]] {
                         let q = src[(c as isize + sign * so) as usize];
                         sum += st[k] * constrain(q as i32 - x, p.sec, p.sec_shift);
-                        mx = mx.max((q as i16).wrapping_add(1));
+                        mx = mx.max((q & 0xfff) as i16);
                         mn = mn.min(q as i16);
                     }
                 }
             }
-            let mx = mx as i32 - 1;
+            let mx = mx as i32;
             let mn = mn as i32;
             let y = x + ((8 + sum - (sum < 0) as i32) >> 4);
             out[j] = P::from_i32(y.clamp(mn, mx));
@@ -494,8 +545,8 @@ fn filter_scalar<P: Pixel>(
 #[cfg(test)]
 mod tests {
     use super::{
-        CDEF_UNAVAILABLE, adjust_luma_pri_strength, cdef_damping, cdef_direction, cdef_filter,
-        cdef_pad_block, cdef_uv_dir,
+        CDEF_PAD_STRIDE, CDEF_UNAVAILABLE, adjust_luma_pri_strength, cdef_damping, cdef_direction,
+        cdef_filter, cdef_pad_block, cdef_uv_dir,
     };
     use crate::dsp::Pixel;
     use crate::spec::tables::{CDEF_DIRECTIONS, CDEF_PRI_TAPS, CDEF_SEC_TAPS, DIV_TABLE};
@@ -732,7 +783,11 @@ mod tests {
                 dir as usize,
                 bd,
             );
-            let pstride = bw + 4 + rng.range(3) as usize;
+            let pstride = if rng.range(2) == 0 {
+                CDEF_PAD_STRIDE
+            } else {
+                bw + 4 + rng.range(3) as usize
+            };
             let mut pad = vec![0u16; pstride * (bh + 4)];
             cdef_pad_block(&mut pad, pstride, &plane, stride, bx, by, bw, bh, pw, ph);
             let mut out = vec![P::default(); bw * bh];

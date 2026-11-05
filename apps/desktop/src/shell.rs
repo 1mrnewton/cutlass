@@ -400,10 +400,19 @@ impl SoundFormat {
     /// The extension of a file of this sound alone.
     #[must_use]
     pub fn extension(self) -> &'static str {
-        if self.codec == CodecId::Pcm {
-            "wav"
-        } else {
-            "m4a"
+        match self.codec {
+            CodecId::Pcm => "wav",
+            CodecId::Mp3 => "mp3",
+            _ => "m4a",
+        }
+    }
+
+    /// The container of a file of this sound alone.
+    fn container(self) -> cutlass_codec::ContainerId {
+        match self.codec {
+            CodecId::Pcm => cutlass_codec::ContainerId::Riff,
+            CodecId::Mp3 => cutlass_codec::ContainerId::Mp3,
+            _ => cutlass_codec::ContainerId::Isobmff,
         }
     }
 }
@@ -5372,11 +5381,7 @@ impl Shell {
             main = Some(self.movie_output(request, &base, captions.clone())?);
         } else if request.sound {
             let audio = request.audio.export();
-            let container = if audio.codec == CodecId::Pcm {
-                cutlass_codec::ContainerId::Riff
-            } else {
-                cutlass_codec::ContainerId::Isobmff
-            };
+            let container = request.audio.container();
             main = Some(ExportOutput::Sound {
                 path: request.path.with_extension(request.audio.extension()),
                 request: cutlass_export::ExportRequest {
@@ -5447,6 +5452,11 @@ impl Shell {
         if request.sound && request.audio.codec == CodecId::Pcm && !mov {
             return Err(ShellError::Unavailable(
                 "PCM sound is written in a MOV".to_owned(),
+            ));
+        }
+        if request.sound && request.audio.codec == CodecId::Mp3 {
+            return Err(ShellError::Unavailable(
+                "MP3 sound is written alone, without a picture".to_owned(),
             ));
         }
         let bitrate = match request.bitrate {
@@ -11765,6 +11775,56 @@ mod tests {
         assert_eq!(
             &std::fs::read(temp.path.join("sound.wav")).unwrap()[..4],
             b"RIFF"
+        );
+
+        // MP3 is sound alone: the same samples as the WAV once the LAME
+        // tag's delay and padding are trimmed, and refused beside a picture.
+        run(
+            &mut desktop,
+            ExportRequest {
+                path: temp.path.join("sound.mp4"),
+                picture: false,
+                audio: super::SoundFormat {
+                    codec: CodecId::Mp3,
+                    sample_rate: 44_100,
+                    channels: 1,
+                    bitrate: 128_000,
+                },
+                ..ExportRequest::default()
+            },
+        );
+        {
+            use cutlass_mp3_container::Mp3Demux;
+            let wav = std::fs::read(temp.path.join("sound.wav")).unwrap();
+            let data = wav.windows(4).position(|w| w == b"data").unwrap();
+            let wav_samples = (wav.len() - data - 8) as i64 / 2;
+            let mp3 = std::fs::File::open(temp.path.join("sound.mp3")).unwrap();
+            let mut demux = Mp3Demux::open(std::io::BufReader::new(mp3)).unwrap();
+            let trim = cutlass_mp3_container::Demux::streams(&demux)[0]
+                .trim
+                .unwrap();
+            assert_eq!(trim.encoder_delay, cutlass_mp3::ENCODER_DELAY);
+            let mut coded = 0;
+            while let Some(packet) = cutlass_mp3_container::Demux::next_packet(&mut demux).unwrap()
+            {
+                assert!(matches!(packet.data.len(), 417 | 418));
+                coded += packet.duration;
+            }
+            let trimmed = coded - i64::from(trim.encoder_delay) - i64::from(trim.trailing_padding);
+            assert_eq!(trimmed, wav_samples);
+        }
+        let mp3_movie = desktop.export(ExportRequest {
+            path: temp.path.join("mp3.mp4"),
+            short_side: 480,
+            audio: super::SoundFormat {
+                codec: CodecId::Mp3,
+                ..super::SoundFormat::default()
+            },
+            ..ExportRequest::default()
+        });
+        assert_eq!(
+            mp3_movie.unwrap_err().to_string(),
+            "MP3 sound is written alone, without a picture"
         );
 
         // A GIF alone, and then again beside a movie, which finds it taken.

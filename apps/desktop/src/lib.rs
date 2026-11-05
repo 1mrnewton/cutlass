@@ -59,6 +59,7 @@ pub fn register_codecs_with(
     cutlass_h264::register_decoders(&mut decoders);
     cutlass_h264::register_encoders(&mut encoders);
     cutlass_mp3::register_decoders(&mut decoders);
+    cutlass_mp3::register_encoders(&mut encoders);
     (decoders, encoders)
 }
 

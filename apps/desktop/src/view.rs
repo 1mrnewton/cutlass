@@ -5757,9 +5757,12 @@ fn export_choices(shell: &Shell, ui: &mut Ui, view: &mut ViewState) {
         });
     }
     ui.checkbox(&mut export.sound, "Audio");
-    // PCM goes in a MOV or a WAV, never an MP4.
+    // PCM goes in a MOV or a WAV, never an MP4. MP3 is sound alone.
     let pcm_fits = view.export_mov || !export.picture;
-    if !pcm_fits && export.audio.codec == CodecId::Pcm {
+    let mp3_fits = !export.picture;
+    if (!pcm_fits && export.audio.codec == CodecId::Pcm)
+        || (!mp3_fits && export.audio.codec == CodecId::Mp3)
+    {
         export.audio.codec = CodecId::Aac;
     }
     if export.sound {
@@ -5770,6 +5773,10 @@ fn export_choices(shell: &Shell, ui: &mut Ui, view: &mut ViewState) {
                 .clicked()
             {
                 audio.codec = CodecId::Aac;
+            }
+            let mp3 = egui::Button::selectable(audio.codec == CodecId::Mp3, "MP3");
+            if ui.add_enabled(mp3_fits, mp3).clicked() {
+                audio.codec = CodecId::Mp3;
             }
             let pcm = egui::Button::selectable(audio.codec == CodecId::Pcm, "PCM");
             if ui.add_enabled(pcm_fits, pcm).clicked() {

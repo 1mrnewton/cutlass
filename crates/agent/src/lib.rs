@@ -121,8 +121,8 @@ mod tests {
             Ok("job".to_owned())
         }
 
-        fn poll(&mut self, _job_id: &str) -> Result<String, String> {
-            Ok(String::new())
+        fn poll(&mut self, _job_id: &str) -> Result<Option<String>, String> {
+            Ok(Some(String::new()))
         }
     }
 

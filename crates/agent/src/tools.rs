@@ -113,8 +113,9 @@ pub enum SpeechPoll {
 pub trait Speech {
     /// Starts a job for `[start_us, start_us + duration_us)` and returns its id.
     fn start(&mut self, start_us: i64, duration_us: i64) -> Result<String, String>;
-    /// Returns the words for `job_id`, or an error string from the host.
-    fn poll(&mut self, job_id: &str) -> Result<String, String>;
+    /// Returns the words for `job_id`, `None` while the host is still
+    /// listening, or an error string from the host.
+    fn poll(&mut self, job_id: &str) -> Result<Option<String>, String>;
 }
 
 /// Searches bundled effect and animation ids.
@@ -359,6 +360,18 @@ where
             mcp,
             speech_jobs: BTreeMap::new(),
         }
+    }
+
+    /// The transcription jobs this registry started, so a host that builds
+    /// a registry for each call can hand them to the next one.
+    #[must_use]
+    pub fn take_speech_jobs(&mut self) -> BTreeMap<String, SpeechJob> {
+        std::mem::take(&mut self.speech_jobs)
+    }
+
+    /// Carry on the jobs an earlier registry started.
+    pub fn set_speech_jobs(&mut self, jobs: BTreeMap<String, SpeechJob>) {
+        self.speech_jobs = jobs;
     }
 
     /// Runs one call and returns its text.
@@ -691,8 +704,10 @@ fn poll_speech(
     if draft.session().revision() != stored {
         return Ok(format_poll(SpeechPoll::Stale));
     }
-    let words = polled.map_err(ToolError::Host)?;
-    Ok(format_poll(SpeechPoll::Ready { words }))
+    Ok(format_poll(match polled.map_err(ToolError::Host)? {
+        Some(words) => SpeechPoll::Ready { words },
+        None => SpeechPoll::Pending,
+    }))
 }
 
 fn format_poll(poll: SpeechPoll) -> String {
@@ -1062,10 +1077,11 @@ mod tests {
             Ok(self.job_id.clone())
         }
 
-        fn poll(&mut self, job_id: &str) -> Result<String, String> {
+        fn poll(&mut self, job_id: &str) -> Result<Option<String>, String> {
             self.polls += 1;
             self.polled_id = job_id.to_owned();
-            Ok(self.words.clone())
+            // An empty answer stands for a job still listening.
+            Ok((!self.words.is_empty()).then(|| self.words.clone()))
         }
     }
 
@@ -1511,6 +1527,19 @@ mod tests {
             })
             .unwrap();
         assert_eq!(ready, "words=hello from speech");
+        // A job still listening is pending, and its jobs carry on into the
+        // next registry a host builds.
+        registry.speech.words.clear();
+        let pending = registry
+            .invoke(Invocation::SpeechPoll {
+                job_id: "job-1".to_owned(),
+            })
+            .unwrap();
+        assert_eq!(pending, "pending");
+        "hello from speech".clone_into(&mut registry.speech.words);
+        let jobs = registry.take_speech_jobs();
+        assert_eq!(jobs.len(), 1);
+        registry.set_speech_jobs(jobs);
         registry
             .invoke(Invocation::DraftApply(ApplyInput {
                 request_id: None,
@@ -1527,7 +1556,7 @@ mod tests {
             .unwrap();
         assert_eq!(stale, "stale");
         assert!(!stale.contains("hello"));
-        assert_eq!(registry.speech.polls, 2);
+        assert_eq!(registry.speech.polls, 3);
         assert_eq!(registry.speech.polled_id, "job-1");
     }
 

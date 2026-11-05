@@ -721,11 +721,80 @@ pub fn motion_field_estimation(
     refs: &[Option<std::sync::Arc<RefData>>; 8],
     threads: usize,
 ) -> Vec<MfEntry> {
+    motion_field_plan(seq, hdr, refs).run(threads)
+}
+
+/// The projections of motion field estimation (7.9) for one frame. Every
+/// band of 8 rows of 8x8 positions only receives projections from the same
+/// rows of the references, so bands can be computed separately.
+pub struct MfPlan<'a> {
+    passes: Vec<Projection<'a>>,
+    pub w8: usize,
+    pub h8: usize,
+}
+
+impl MfPlan<'_> {
+    /// Number of bands of 8 rows.
+    pub fn bands(&self) -> usize {
+        if self.passes.is_empty() || self.w8 == 0 {
+            0
+        } else {
+            self.h8.div_ceil(8)
+        }
+    }
+
+    /// Fills band `k`: `band` holds field rows `8 k..` (whole rows, all
+    /// unset).
+    pub fn run_band(&self, k: usize, band: &mut [MfEntry]) {
+        for pass in &self.passes {
+            pass.run(band, 8 * k, self.w8, self.h8);
+        }
+    }
+
+    /// The whole field, on up to `threads` threads.
+    pub fn run(&self, threads: usize) -> Vec<MfEntry> {
+        let (w8, h8) = (self.w8, self.h8);
+        let mut field = vec![MfEntry::default(); w8 * h8];
+        if self.bands() == 0 {
+            return field;
+        }
+        let groups = h8.div_ceil(8);
+        let t = threads.clamp(1, groups);
+        let per = groups.div_ceil(t) * 8 * w8;
+        let passes = &self.passes;
+        let run = |y0: usize, band: &mut [MfEntry]| {
+            for pass in passes {
+                pass.run(band, y0, w8, h8);
+            }
+        };
+        if t == 1 {
+            run(0, &mut field);
+        } else {
+            std::thread::scope(|s| {
+                let mut chunks = field.chunks_mut(per).enumerate();
+                let first = chunks.next();
+                for (i, band) in chunks {
+                    s.spawn(move || run(i * per / w8, band));
+                }
+                if let Some((_, band)) = first {
+                    run(0, band);
+                }
+            });
+        }
+        field
+    }
+}
+
+/// The [`MfPlan`] of the frame `hdr`.
+pub fn motion_field_plan<'a>(
+    seq: &SequenceHeader,
+    hdr: &FrameHeader,
+    refs: &'a [Option<std::sync::Arc<RefData>>; 8],
+) -> MfPlan<'a> {
     let mi_cols = hdr.mi_cols as usize;
     let mi_rows = hdr.mi_rows as usize;
     let w8 = mi_cols >> 1;
     let h8 = mi_rows >> 1;
-    let mut field = vec![MfEntry::default(); w8 * h8];
     let last_idx = hdr.ref_frame_idx[0] as usize;
     let cur_gold = hdr.order_hints[4];
     let last_alt = refs[last_idx]
@@ -778,33 +847,7 @@ pub fn motion_field_estimation(
     if ref_stamp >= 0 {
         project(2, -1);
     }
-    if passes.is_empty() || w8 == 0 {
-        return field;
-    }
-    let groups = h8.div_ceil(8);
-    let t = threads.clamp(1, groups);
-    let per = groups.div_ceil(t) * 8 * w8;
-    let passes = &passes;
-    let run = |y0: usize, band: &mut [MfEntry]| {
-        for pass in passes {
-            pass.run(band, y0, w8, h8);
-        }
-    };
-    if t == 1 {
-        run(0, &mut field);
-    } else {
-        std::thread::scope(|s| {
-            let mut chunks = field.chunks_mut(per).enumerate();
-            let first = chunks.next();
-            for (i, band) in chunks {
-                s.spawn(move || run(i * per / w8, band));
-            }
-            if let Some((_, band)) = first {
-                run(0, band);
-            }
-        });
-    }
-    field
+    MfPlan { passes, w8, h8 }
 }
 
 /// One reference's projection in [`motion_field_estimation`].

@@ -11,7 +11,7 @@ use crate::dsp::lr::LrScratch;
 use super::cdf::CdfContext;
 use super::frame::{FrameState, LrUnitParams, Picture, RefData};
 use super::msac::Msac;
-use super::mvpred::motion_field_estimation;
+use super::mvpred::{MfEntry, MfPlan, motion_field_plan};
 use super::obu::{
     FrameHeader, GrainParams, HeaderContext, KEY_FRAME, OBU_FRAME, OBU_FRAME_HEADER,
     OBU_REDUNDANT_FRAME_HEADER, OBU_SEQUENCE_HEADER, OBU_TILE_GROUP, OBU_TILE_LIST,
@@ -459,9 +459,10 @@ impl Av1Core {
         let refs_data: [Option<Arc<RefData>>; 8] =
             std::array::from_fn(|i| self.slots[i].as_ref().map(|s| s.data.clone()));
         let mut fs = FrameState::reuse(self.spare_fs.take(), seq, &hdr);
-        if hdr.use_ref_frame_mvs {
-            fs.motion_field = motion_field_estimation(seq, &hdr, &refs_data, self.threads);
-        }
+        // Motion field estimation runs in decode_frame.
+        let mf_plan = hdr
+            .use_ref_frame_mvs
+            .then(|| motion_field_plan(seq, &hdr, &refs_data));
         if hdr.primary_ref_frame != PRIMARY_REF_NONE {
             let slot_idx = hdr.ref_frame_idx[hdr.primary_ref_frame as usize] as usize;
             if let Some(rd) = &refs_data[slot_idx]
@@ -495,6 +496,7 @@ impl Av1Core {
                 &mut self.rows8,
                 &mut self.pool8,
                 self.threads,
+                mf_plan.as_ref(),
             )?;
             (AnyPicture::U8(pic), c)
         } else {
@@ -521,6 +523,7 @@ impl Av1Core {
                 &mut self.rows16,
                 &mut self.pool16,
                 self.threads,
+                mf_plan.as_ref(),
             )?;
             (AnyPicture::U16(pic), c)
         };
@@ -846,6 +849,7 @@ fn decode_tiles<P: Pixel>(
     ref_hdr: &[RefHeaderState; 8],
     cur: &mut Picture<P>,
     record: bool,
+    mut feed: Option<&mut MfFeed>,
     on_row: &mut RowHook<'_, P>,
 ) -> R<Box<CdfContext>> {
     let num_planes = seq.num_planes();
@@ -926,7 +930,11 @@ fn decode_tiles<P: Pixel>(
             scratch: std::mem::replace(&mut scratch, Scratch::empty()),
             rec: if record { Some(Box::default()) } else { None },
         };
-        let res = td.decode_tile_rows(&mut *on_row);
+        let res = td.decode_tile_rows(&mut *on_row, &mut |fs: &mut FrameState, r1: usize| {
+            if let Some(f) = feed.as_deref_mut() {
+                f.need(fs, r1);
+            }
+        });
         above_level = std::mem::take(&mut td.above_level);
         above_dc = std::mem::take(&mut td.above_dc);
         above_seg_pred = std::mem::take(&mut td.above_seg_pred);
@@ -990,6 +998,29 @@ fn add_mi_blocks(out: &mut Vec<MiRect>, fs: &FrameState, log: &ReconLog) {
             mi: rec.mi,
         }
     }));
+}
+
+/// Motion field bands arriving from the thread computing them, in order.
+struct MfFeed {
+    rx: std::sync::mpsc::Receiver<(usize, Vec<MfEntry>)>,
+    /// Bands already in the frame state.
+    have: usize,
+}
+
+impl MfFeed {
+    /// Waits for the bands luma 4x4 rows up to `r1` use and stores them.
+    fn need(&mut self, fs: &mut FrameState, r1: usize) {
+        let w8 = fs.mi_cols >> 1;
+        let need = r1.div_ceil(2).div_ceil(8);
+        while self.have < need {
+            let Ok((k, band)) = self.rx.recv() else {
+                return;
+            };
+            let at = 8 * k * w8;
+            fs.motion_field[at..at + band.len()].copy_from_slice(&band);
+            self.have = k + 1;
+        }
+    }
 }
 
 /// Spare [`RowMsg`]s and [`ReconLog`]s, with their buffers.
@@ -1339,6 +1370,7 @@ fn decode_frame<P: Pixel>(
     rows: &mut RowPools<P>,
     pool: &mut Vec<Picture<P>>,
     threads: usize,
+    mf: Option<&MfPlan<'_>>,
 ) -> R<(Picture<P>, Box<CdfContext>)> {
     let num_planes = seq.num_planes();
     let new_pic = |pool: &mut Vec<Picture<P>>| {
@@ -1368,6 +1400,15 @@ fn decode_frame<P: Pixel>(
         && hdr.tile_info.cols == 1
         && !hdr.use_superres
         && (lf_on || cdef_on || hdr.lr.uses_lr);
+    // With the pipeline, the motion field is computed band by band on a
+    // thread of its own while the tiles are parsed (see MfFeed).
+    if let Some(p) = mf {
+        fs.motion_field = if pipeline {
+            vec![MfEntry::default(); p.w8 * p.h8]
+        } else {
+            p.run(threads)
+        };
+    }
     let mut lr_pic = None;
     let (saved, cur, cdef_pic) = if pipeline {
         let mut deb = new_pic(pool);
@@ -1404,6 +1445,20 @@ fn decode_frame<P: Pixel>(
             });
             let sb4 = if seq.use_128x128_superblock { 32 } else { 16 };
             let sub_y = seq.subsampling_y;
+            let mut feed = mf.filter(|p| p.bands() > 0).map(|plan| {
+                let (mtx, rx) = std::sync::mpsc::channel::<(usize, Vec<MfEntry>)>();
+                s.spawn(move || {
+                    for k in 0..plan.bands() {
+                        let rows = (plan.h8 - 8 * k).min(8);
+                        let mut band = vec![MfEntry::default(); rows * plan.w8];
+                        plan.run_band(k, &mut band);
+                        if mtx.send((k, band)).is_err() {
+                            break;
+                        }
+                    }
+                });
+                MfFeed { rx, have: 0 }
+            });
             let (res, recon_res) = if let Some(rc_fs) = rc_fs.as_mut() {
                 let (rtx, rrx) = std::sync::mpsc::channel::<(Option<RowMsg<P>>, ReconLog)>();
                 let (log_tx, log_rx) = std::sync::mpsc::channel::<ReconLog>();
@@ -1429,6 +1484,7 @@ fn decode_frame<P: Pixel>(
                     ref_hdr,
                     &mut no_pixels,
                     true,
+                    feed.as_mut(),
                     &mut |fs: &FrameState,
                           _: &Picture<P>,
                           log: Option<&mut ReconLog>,
@@ -1474,6 +1530,7 @@ fn decode_frame<P: Pixel>(
                     ref_hdr,
                     &mut cur,
                     false,
+                    feed.as_mut(),
                     &mut |fs: &FrameState,
                           cur: &Picture<P>,
                           _: Option<&mut ReconLog>,
@@ -1522,6 +1579,7 @@ fn decode_frame<P: Pixel>(
             ref_hdr,
             &mut cur,
             false,
+            None,
             &mut |_: &FrameState,
                   _: &Picture<P>,
                   _: Option<&mut ReconLog>,

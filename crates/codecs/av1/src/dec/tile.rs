@@ -592,13 +592,19 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
     /// after each superblock row (luma 4x4 rows `r0..r1`). While recording
     /// it also calls `on_row(.., false)` every few superblocks inside a row,
     /// so reconstruction can follow closer behind.
-    pub fn decode_tile_rows(&mut self, on_row: &mut RowHook<'_, P>) -> R<()> {
+    /// `before_row(fs, r1)` runs before each superblock row.
+    pub fn decode_tile_rows(
+        &mut self,
+        on_row: &mut RowHook<'_, P>,
+        before_row: &mut dyn FnMut(&mut FrameState, usize),
+    ) -> R<()> {
         self.begin_tile();
         let sb4 = self.sb_size4;
         let mut r = self.mi_row_start;
         while r < self.mi_row_end {
             self.begin_sb_row();
             let r1 = (r + sb4).min(self.mi_row_end);
+            before_row(self.fs, r1);
             let mut c = self.mi_col_start;
             let mut n = 0;
             while c < self.mi_col_end {

@@ -28,7 +28,7 @@
 //! doubled vector as a candidate at full resolution.
 
 use crate::dsp::Pixel;
-use crate::dsp::mc::{emu_edge, put};
+use crate::dsp::mc::{emu_edge, put, put_h_rows, put_v_rows};
 
 // ---------------------------------------------------------------------------
 // SAD / SSE
@@ -592,11 +592,49 @@ pub struct MeScratch<P: Pixel> {
     pub tx_memo: Option<(super::rdo::PredKey, u8, f64)>,
     /// Intermediate of the estimate transform.
     pub tx_tmp: Vec<i16>,
+    /// Horizontal-pass rows the sub-sample search shares.
+    cols: ColRows,
+}
+
+/// One reference column and horizontal phase of the sub-sample search:
+/// its horizontal-pass rows (see [`put_h_rows`]), held for source rows
+/// `lo..hi` with buffer row 0 at source row `row0`.
+#[derive(Clone, Debug, Default)]
+struct ColSlot {
+    /// `(ix, mx)`, or `None` when unused.
+    key: Option<(isize, usize)>,
+    row0: isize,
+    lo: isize,
+    hi: isize,
+    mid: Vec<i16>,
+    high: Vec<i16>,
+}
+
+/// Rows of the sub-sample candidates of one search that share a column
+/// and horizontal phase (the predictions above and below each other), so
+/// each row is filtered horizontally once.
+#[derive(Clone, Debug, Default)]
+struct ColRows {
+    slots: [ColSlot; 3],
+    next: usize,
+}
+
+/// Rows a [`ColSlot`] holds beyond those of one prediction, above and
+/// below.
+const COL_PAD: usize = 2;
+
+impl ColRows {
+    fn clear(&mut self) {
+        for s in &mut self.slots {
+            s.key = None;
+        }
+    }
 }
 
 impl<P: Pixel> MeScratch<P> {
     pub fn new() -> Self {
         Self {
+            cols: ColRows::default(),
             pred: vec![P::default(); MAX_BLOCK * MAX_BLOCK],
             edge: vec![P::default(); EDGE_SIDE * EDGE_SIDE],
             est_memo: Vec::with_capacity(128),
@@ -742,6 +780,92 @@ impl<P: Pixel> Search<'_, P> {
         } else {
             Some((d + rate, d))
         }
+    }
+
+    /// [`Self::predict`], filtering each source row horizontally once for
+    /// the predictions in one column and phase (those inside the plane
+    /// with both fractions nonzero).
+    fn predict_shared(&self, cols: &mut ColRows, pred: &mut [P], edge: &mut [P], mv: (i32, i32)) {
+        let py = self.y * 8 + mv.0 as isize;
+        let px = self.x * 8 + mv.1 as isize;
+        let (iy, ix) = (py >> 3, px >> 3);
+        let my = ((py & 7) * 2) as usize;
+        let mx = ((px & 7) * 2) as usize;
+        let (w, h) = (self.w, self.h);
+        if mx == 0
+            || my == 0
+            || ix < 3
+            || iy < 3
+            || ix as usize + w + 4 > self.ref_w
+            || iy as usize + h + 4 > self.ref_h
+        {
+            return self.predict(pred, edge, mv);
+        }
+        let cap = h + 7 + 2 * COL_PAD;
+        let (lo, hi) = (iy - 3, iy + h as isize + 4);
+        let key = Some((ix, mx));
+        let k = match cols
+            .slots
+            .iter()
+            .position(|s| s.key == key && lo >= s.row0 && hi <= s.row0 + cap as isize)
+        {
+            Some(k) => k,
+            None => {
+                let k = cols.next;
+                cols.next = (k + 1) % cols.slots.len();
+                let s = &mut cols.slots[k];
+                s.key = key;
+                s.row0 = lo - COL_PAD as isize;
+                s.lo = lo;
+                s.hi = lo;
+                if s.mid.len() < cap * w {
+                    s.mid.resize(cap * w, 0);
+                    s.high.resize(cap * w, 0);
+                }
+                k
+            }
+        };
+        let s = &mut cols.slots[k];
+        let fill = |a: isize, b: isize, s: &mut ColSlot| {
+            let o = (a - s.row0) as usize * w;
+            put_h_rows(
+                &mut s.mid[o..],
+                &mut s.high[o..],
+                self.refp,
+                a as usize * self.ref_stride + ix as usize - 3,
+                self.ref_stride,
+                w,
+                (b - a) as usize,
+                mx,
+                self.filter_x,
+                self.bd,
+            );
+        };
+        if s.lo == s.hi {
+            fill(lo, hi, s);
+            (s.lo, s.hi) = (lo, hi);
+        } else {
+            if lo < s.lo {
+                fill(lo, s.lo, s);
+                s.lo = lo;
+            }
+            if hi > s.hi {
+                fill(s.hi, hi, s);
+                s.hi = hi;
+            }
+        }
+        put_v_rows(
+            pred,
+            w,
+            &s.mid,
+            &s.high,
+            (lo - s.row0) as usize * w,
+            w,
+            h,
+            my,
+            self.filter_y,
+            self.bd,
+        );
     }
 
     /// Interpolates the prediction for `mv` (1/8 samples) into `pred`
@@ -893,7 +1017,11 @@ pub fn motion_search<P: Pixel>(
         win_h: 0,
     };
     let MeScratch {
-        pred, edge, win, ..
+        pred,
+        edge,
+        win,
+        cols,
+        ..
     } = scratch;
 
     // Full-sample window (offsets in samples).
@@ -1038,6 +1166,8 @@ pub fn motion_search<P: Pixel>(
 
     // (3) Sub-sample refinement.
     if params.subpel > 0 {
+        // Rows of an earlier search (another block or plane) do not apply.
+        cols.clear();
         let (r8_lo, r8_hi) = (row_lo * 8, row_hi * 8);
         let (c8_lo, c8_hi) = (col_lo * 8, col_hi * 8);
         let src_blk = s.src_block();
@@ -1070,7 +1200,7 @@ pub fn motion_search<P: Pixel>(
                 if rate >= mv.cost {
                     continue;
                 }
-                s.predict(pred, edge, (r, c));
+                s.predict_shared(cols, pred, edge, (r, c));
                 let d = satd(src_blk, src_stride, &pred[..], w, w, h);
                 let cost = d.saturating_add(rate);
                 if i < 4 {

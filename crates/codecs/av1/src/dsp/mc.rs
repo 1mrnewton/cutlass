@@ -547,6 +547,80 @@ pub fn put<P: Pixel>(
     }
 }
 
+/// The horizontal pass of [`put`] with both fractions nonzero, for sharing
+/// between predictions with the same `(startX >> 10, mx)` and filter `fx`:
+/// writes the intermediate of `rows` source rows to `mid` and its high
+/// parts (`>> 8`) to `hi` (both with stride `w`). `src_start` indexes the
+/// sample 3 left of the first output sample of the first row.
+pub fn put_h_rows<P: Pixel>(
+    mid: &mut [i16],
+    hi: &mut [i16],
+    src: &[P],
+    src_start: usize,
+    src_stride: usize,
+    w: usize,
+    rows: usize,
+    mx: usize,
+    fx: usize,
+    bd: u32,
+) {
+    let fh = half(&SUBPEL_FILTERS[fx][mx]);
+    h_pass_dyn::<P, i16>(
+        mid,
+        w,
+        src,
+        src_start,
+        src_stride,
+        w,
+        rows,
+        &fh,
+        inter_round0(bd) - 1,
+        |v| v,
+    );
+    for (h8, &m) in hi[..rows * w].iter_mut().zip(&mid[..rows * w]) {
+        *h8 = m >> 8;
+    }
+}
+
+/// The vertical pass of [`put`] with both fractions nonzero, from the rows
+/// [`put_h_rows`] made: `top` indexes (in `mid` and `hi`, stride `w`) the
+/// intermediate row 3 above the block. Equals [`put`] of the same block.
+pub fn put_v_rows<P: Pixel>(
+    dst: &mut [P],
+    dst_stride: usize,
+    mid: &[i16],
+    hi: &[i16],
+    top: usize,
+    w: usize,
+    h: usize,
+    my: usize,
+    fy: usize,
+    bd: u32,
+) {
+    let n = inter_round1(bd, false) - 1;
+    let rnd = 1i16 << (n - 1);
+    let sh = n - 8;
+    let max = if P::HBD {
+        ((1i32 << bd) - 1) as i16
+    } else {
+        255
+    };
+    let fv = half(&SUBPEL_FILTERS[fy][my]);
+    v_pass_dyn::<i16, P, V_SPLIT_HI>(
+        dst,
+        dst_stride,
+        mid,
+        hi,
+        top,
+        w,
+        w,
+        h,
+        &fv,
+        |v| v,
+        move |a, b| clip16::<P>((a + ((b + rnd) >> 8)) >> sh, max),
+    );
+}
+
 /// Like [`put`], but writes the compound intermediate (`isCompound = 1`,
 /// minus [`prep_bias`]) to `tmp` with stride `w`.
 pub fn prep<P: Pixel>(
@@ -1506,7 +1580,8 @@ mod tests {
     use super::{
         Pixel, avg, diffwtd_mask, emu_edge, ii_smooth_mask, interintra_blend, mask_blend,
         obmc_blend_above, obmc_blend_left, obmc_mask, prep, prep_bias, prep_scaled, put,
-        put_scaled, scaled_footprint, setup_shear, w_avg, warp_8x8_prep, warp_8x8_put, wedge_mask,
+        put_h_rows, put_scaled, put_v_rows, scaled_footprint, setup_shear, w_avg, warp_8x8_prep,
+        warp_8x8_put, wedge_mask,
     };
     use crate::spec::tables::{
         DIV_LUT, II_WEIGHTS_1D, NUM_4X4_BLOCKS_HIGH, NUM_4X4_BLOCKS_WIDE, SUBPEL_FILTERS,
@@ -1947,6 +2022,69 @@ mod tests {
     #[test]
     fn put_unscaled() {
         run_mc(false, false, 1500);
+    }
+
+    /// Shared horizontal rows (`put_h_rows`, `put_v_rows`) give `put`.
+    fn check_shared_rows<P: Pixel>(rng: &mut Rng, bd: u32) {
+        let sizes = [2usize, 4, 8, 16, 32, 64];
+        let w = sizes[rng.below(sizes.len())];
+        let h = sizes[rng.below(sizes.len())];
+        let stride = w + 16;
+        let rows = h + 12;
+        let src: Vec<P> = (0..stride * rows)
+            .map(|_| P::from_i32(rng.below(1 << bd) as i32))
+            .collect();
+        let fx = rng.below(6);
+        let fy = rng.below(6);
+        let mx = 1 + rng.below(15);
+        // Rows from 1 above to 3 below the block's own rows.
+        let n = h + 11;
+        let mut mid = vec![0i16; n * w];
+        let mut hi = vec![0i16; n * w];
+        put_h_rows(
+            &mut mid,
+            &mut hi,
+            &src,
+            stride + 1,
+            stride,
+            w,
+            n,
+            mx,
+            fx,
+            bd,
+        );
+        for dy in 0..4 {
+            let my = 1 + rng.below(15);
+            // The block starts at source row 4 + dy, column 4.
+            let mut want = vec![P::from_i32(0); w * h];
+            put(
+                &mut want,
+                w,
+                &src,
+                (4 + dy) * stride + 4,
+                stride,
+                w,
+                h,
+                mx,
+                my,
+                fx,
+                fy,
+                bd,
+            );
+            let mut got = vec![P::from_i32(0); w * h];
+            put_v_rows(&mut got, w, &mid, &hi, dy * w, w, h, my, fy, bd);
+            assert_eq!(got, want, "w {w} h {h} mx {mx} my {my} bd {bd}");
+        }
+    }
+
+    #[test]
+    fn put_shared_rows() {
+        let mut rng = Rng(0x2545_f491_4f6c_dd1d);
+        for _ in 0..400 {
+            check_shared_rows::<u8>(&mut rng, 8);
+            check_shared_rows::<u16>(&mut rng, 10);
+            check_shared_rows::<u16>(&mut rng, 12);
+        }
     }
 
     #[test]

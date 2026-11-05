@@ -396,16 +396,33 @@ impl<'m, 'a> Hot<'m, 'a> {
             (u, vv) = (v2, 0);
         }
         // As in `Msac::symbol_small`, on one word stored at once. The
-        // counter (at most 32) picks the rate: `k = count >> 4`.
-        let k = (w >> 52) as usize & 3;
-        let rate = 5 + k as u32;
-        let x = w + SYM4_INC[k];
-        let down = x - ((x >> rate) & SYM4_KEEP[k]);
-        let up = x + (((0x8000_8000_8000u64.wrapping_sub(x)) >> rate) & SYM4_KEEP[k]);
-        *cdf = down ^ ((up ^ down) & SYM4_BELOW[val as usize & 3]);
+        // counter (at most 32) picks the rate: `k = count >> 4`. Most CDFs
+        // soon reach 32, the last rate, with constant shifts.
+        let below = SYM4_BELOW[val as usize & 3];
+        *cdf = if w >> 53 != 0 {
+            let keep = 0x0001_0001_0001 * (0xFFFF >> 7);
+            let down = w - ((w >> 7) & keep);
+            let up = w + (((0x8000_8000_8000u64.wrapping_sub(w)) >> 7) & keep);
+            down ^ ((up ^ down) & below)
+        } else {
+            sym4_adapt_young(w, below)
+        };
         self.norm(self.dif - (u64::from(vv) << (WIN - 16)), u - vv);
         val
     }
+}
+
+/// [`Hot::sym4`]'s adaptation of a CDF whose counter is below 32; `below`
+/// masks the lanes of the symbols below the decoded one.
+#[cold]
+#[inline(never)]
+fn sym4_adapt_young(w: u64, below: u64) -> u64 {
+    let k = (w >> 52) as usize & 3;
+    let rate = 5 + k as u32;
+    let x = w + SYM4_INC[k];
+    let down = x - ((x >> rate) & SYM4_KEEP[k]);
+    let up = x + (((0x8000_8000_8000u64.wrapping_sub(x)) >> rate) & SYM4_KEEP[k]);
+    down ^ ((up ^ down) & below)
 }
 
 /// [`Hot::sym4`]'s lane masks of the adaptation per `count >> 4`: the bits

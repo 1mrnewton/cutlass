@@ -64,36 +64,6 @@ fn simple_ok(buf: &[u8], at: usize, step: usize, limit: i32) -> bool {
 }
 
 #[inline]
-fn normal_ok(buf: &[u8], at: usize, step: usize, edge: i32, interior: i32) -> bool {
-    if !simple_ok(buf, at, step, edge) {
-        return false;
-    }
-    let p3 = px(buf, at, step, -4);
-    let p2 = px(buf, at, step, -3);
-    let p1 = px(buf, at, step, -2);
-    let p0 = px(buf, at, step, -1);
-    let q0 = px(buf, at, step, 0);
-    let q1 = px(buf, at, step, 1);
-    let q2 = px(buf, at, step, 2);
-    let q3 = px(buf, at, step, 3);
-    (p3 - p2).abs() <= interior
-        && (p2 - p1).abs() <= interior
-        && (p1 - p0).abs() <= interior
-        && (q3 - q2).abs() <= interior
-        && (q2 - q1).abs() <= interior
-        && (q1 - q0).abs() <= interior
-}
-
-#[inline]
-fn hev(buf: &[u8], at: usize, step: usize, threshold: i32) -> bool {
-    let p1 = px(buf, at, step, -2);
-    let p0 = px(buf, at, step, -1);
-    let q0 = px(buf, at, step, 0);
-    let q1 = px(buf, at, step, 1);
-    (p1 - p0).abs() > threshold || (q1 - q0).abs() > threshold
-}
-
-#[inline]
 fn common(buf: &mut [u8], at: usize, step: usize, outer: bool) {
     let p1 = px(buf, at, step, -2);
     let p0 = px(buf, at, step, -1);
@@ -115,32 +85,78 @@ fn common(buf: &mut [u8], at: usize, step: usize, outer: bool) {
     }
 }
 
+/// Filters 16 positions across a normal edge at once. Row `k` of `r`
+/// holds tap `k` (p3, p2, p1, p0, q0, q1, q2, q3) of every position
+/// (Sections 15.3 and 15.4). Every lane takes the same steps and a
+/// select, so the loop vectorizes.
 #[inline]
-fn mb_edge(buf: &mut [u8], at: usize, step: usize) {
-    let p2 = px(buf, at, step, -3);
-    let p1 = px(buf, at, step, -2);
-    let p0 = px(buf, at, step, -1);
-    let q0 = px(buf, at, step, 0);
-    let q1 = px(buf, at, step, 1);
-    let q2 = px(buf, at, step, 2);
-    let w = s8(s8(p1 - q1) + 3 * (q0 - p0));
-    let a = (27 * w + 63) >> 7;
-    buf[at - step] = u8c(p0 + a);
-    buf[at] = u8c(q0 - a);
-    let a = (18 * w + 63) >> 7;
-    buf[at - 2 * step] = u8c(p1 + a);
-    buf[at + step] = u8c(q1 - a);
-    let a = (9 * w + 63) >> 7;
-    buf[at - 3 * step] = u8c(p2 + a);
-    buf[at + 2 * step] = u8c(q2 - a);
+#[expect(
+    clippy::needless_range_loop,
+    reason = "one lane index walks all eight tap rows in step"
+)]
+fn normal_lanes(r: &mut [[u8; 16]; 8], edge: i16, interior: i16, hev_t: i16, macroblock: bool) {
+    let s8 = |x: i16| x.clamp(-128, 127);
+    let u8c = |x: i16| x.clamp(0, 255) as u8;
+    for i in 0..16 {
+        let p3 = i16::from(r[0][i]);
+        let p2 = i16::from(r[1][i]);
+        let p1 = i16::from(r[2][i]);
+        let p0 = i16::from(r[3][i]);
+        let q0 = i16::from(r[4][i]);
+        let q1 = i16::from(r[5][i]);
+        let q2 = i16::from(r[6][i]);
+        let q3 = i16::from(r[7][i]);
+        let on = ((p0 - q0).abs() * 2 + ((p1 - q1).abs() >> 1) <= edge)
+            & ((p3 - p2).abs() <= interior)
+            & ((p2 - p1).abs() <= interior)
+            & ((p1 - p0).abs() <= interior)
+            & ((q3 - q2).abs() <= interior)
+            & ((q2 - q1).abs() <= interior)
+            & ((q1 - q0).abs() <= interior);
+        let high = ((p1 - p0).abs() > hev_t) | ((q1 - q0).abs() > hev_t);
+        let w = s8(s8(p1 - q1) + 3 * (q0 - p0));
+        // The whole-macroblock filter, for a low-variance macroblock edge.
+        let wide = macroblock & !high;
+        let a27 = (27 * w + 63) >> 7;
+        let a18 = (18 * w + 63) >> 7;
+        let a9 = (9 * w + 63) >> 7;
+        // The common filter: with p1 - q1 on a high-variance edge, and
+        // moving p1 and q1 as well on a low-variance inner edge.
+        let a = if high { w } else { s8(3 * (q0 - p0)) };
+        let f1 = (a + 4).min(127) >> 3;
+        let f2 = (a + 3).min(127) >> 3;
+        let f3 = (f1 + 1) >> 1;
+        // Selects, not branches, and unconditional stores.
+        let d1 = if wide { a9 } else { 0 };
+        let d2 = if wide {
+            a18
+        } else if high {
+            0
+        } else {
+            f3
+        };
+        let dp0 = if wide { a27 } else { f2 };
+        let dq0 = if wide { a27 } else { f1 };
+        let (d1, d2, dp0, dq0) = if on { (d1, d2, dp0, dq0) } else { (0, 0, 0, 0) };
+        r[1][i] = u8c(p2 + d1);
+        r[2][i] = u8c(p1 + d2);
+        r[3][i] = u8c(p0 + dp0);
+        r[4][i] = u8c(q0 - dq0);
+        r[5][i] = u8c(q1 - d2);
+        r[6][i] = u8c(q2 - d1);
+    }
 }
 
-/// Filters `count` positions along an edge. `at` is the first q0 pixel,
-/// `step` crosses the edge, and `along` walks it.
+/// Filters `count` (at most 16) positions along an edge. `at` is the
+/// first q0 pixel, `step` crosses the edge, and `along` walks it.
 #[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::needless_range_loop,
+    reason = "a vertical edge transposes rows into lanes by index"
+)]
 fn normal_edge(
     buf: &mut [u8],
-    mut at: usize,
+    at: usize,
     step: usize,
     along: usize,
     count: usize,
@@ -149,20 +165,37 @@ fn normal_edge(
     hev_t: i32,
     macroblock: bool,
 ) {
-    for _ in 0..count {
-        if normal_ok(buf, at, step, edge, interior) {
-            let high = hev(buf, at, step, hev_t);
-            if macroblock {
-                if high {
-                    common(buf, at, step, true);
-                } else {
-                    mb_edge(buf, at, step);
-                }
-            } else {
-                common(buf, at, step, high);
+    let count = count.min(16);
+    let (edge, interior, hev_t) = (edge as i16, interior as i16, hev_t as i16);
+    let mut r = [[0u8; 16]; 8];
+    if step == 1 {
+        // A vertical edge: each position is eight bytes of one row,
+        // transposed into lanes and back.
+        for k in 0..count {
+            let start = at + k * along - 4;
+            for (j, &v) in buf[start..start + 8].iter().enumerate() {
+                r[j][k] = v;
             }
         }
-        at += along;
+        normal_lanes(&mut r, edge, interior, hev_t, macroblock);
+        for k in 0..count {
+            let start = at + k * along - 4;
+            for (j, v) in buf[start + 1..start + 7].iter_mut().enumerate() {
+                *v = r[j + 1][k];
+            }
+        }
+        return;
+    }
+    // A horizontal edge: each tap is a run of one row.
+    let base = at - 4 * step;
+    for (k, row) in r.iter_mut().enumerate() {
+        let from = base + k * step;
+        row[..count].copy_from_slice(&buf[from..from + count]);
+    }
+    normal_lanes(&mut r, edge, interior, hev_t, macroblock);
+    for (k, row) in r.iter().enumerate().skip(1).take(6) {
+        let to = base + k * step;
+        buf[to..to + count].copy_from_slice(&row[..count]);
     }
 }
 

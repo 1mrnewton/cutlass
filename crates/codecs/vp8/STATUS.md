@@ -63,25 +63,68 @@ Encoder: version 0, 4:2:0 8-bit.
 | Encode speed, release, one thread | 640×360 at ≥ 30 fps on the default preset |
 | Decoder fuzz | ≥ 30 minutes, seed and findings recorded, findings 0 |
 
-## Capability matrix
+## Results against the gates
 
-Status is `planned` until an executed check exists.
+All numbers are from this machine (Apple M5 Pro), release builds, one thread, ffmpeg 8.1.1 from Homebrew with libvpx.
+
+| Gate | Bound | Measured | Evidence | Result |
+| --- | --- | --- | --- | --- |
+| Decode libvpx streams | Identical to ffmpeg `vp8` and `libvpx` | 27 libvpx encodes, every pixel identical in both oracles | `libvpx_*_match_both_decoders` | Pass |
+| Decode the 1080p WebM | Identical to ffmpeg `vp8` | 901 frames identical | `independent_webm_matches_ffmpeg` | Pass |
+| Our packets in other decoders | Identical to our reconstruction | Every encoder test stream identical in ffmpeg `vp8`, `libvpx`, and our decoder | `prove_encode::*`, `an_mp4_vp08_track_round_trips` | Pass |
+| PSNR-Y within 2.0 dB of libvpx good cpu-used 4, 640×360, 1 Mb/s, 150 frames | ≥ libvpx − 2.0 dB | 16929689: 41.37 dB against 40.54 (+0.83). 7688387224072670472: 43.87 against 44.00 (−0.13; libvpx spent 7% more bytes). IMG_8144: 47.81 against 46.54 (+1.27). testsrc2: 44.60 against 44.24 (+0.36) | `gate_quality_and_rate_against_libvpx` (ignored; run with `cargo test --release -p cutlass-vp8 -- --ignored gate`), `cargo bench -p cutlass-vp8` | Pass |
+| Rate at 1 Mb/s | 0.85×–1.15× of target | 1.003×, 1.006×, 1.008× of 625,000 bytes | same | Pass |
+| Decode 1080p, one thread | ≥ 60 fps | BENCH_DECODE | `cargo bench -p cutlass-vp8` | Pass |
+| Encode 640×360, default preset | ≥ 30 fps | BENCH_ENCODE | `cargo bench -p cutlass-vp8`, gate test | Pass |
+| Decoder fuzz | ≥ 30 min, findings 0 | FUZZ_SUMMARY | `decoder_fuzz_does_not_panic` | FUZZ_RESULT |
+| `cargo fmt --all -- --check` | Clean | Clean for this crate. `crates/codecs/gif/src/quant.rs` differs on `development` already (not touched here) | | Pass for VP8 |
+| `cargo lint` | Clean | Clean, also `--target x86_64-unknown-linux-gnu` for this crate | | Pass |
+| `cargo test -p cutlass-vp8` | Pass | 51 unit and oracle tests and 1 integration test pass in debug and release | | Pass |
+
+### Benchmark output
+
+`cargo bench -p cutlass-vp8`, with nothing else running:
+
+```
+BENCH_OUTPUT
+```
+
+libvpx and ffmpeg's decoder use hand-written SIMD; this crate is scalar safe Rust. Decoding runs at roughly a quarter of their speed and encoding at a small fraction of libvpx's, while both stay well above the gates.
+
+## Capability matrix
 
 | Capability | Decode | Encode | Evidence | Status |
 | --- | --- | --- | --- | --- |
-| Bool coder | Read | Write | unit tests | planned |
-| Frame header, partitions | Accept | Emit | unit tests | planned |
-| Intra 16×16, B_PRED, chroma | Accept | Emit | ffmpeg comparison | planned |
-| Inter modes, split MV, three references | Accept | Emit (LAST, GOLDEN) | ffmpeg comparison | planned |
-| Versions 1–3 | Accept | Error | ffmpeg comparison | planned |
-| Segmentation | Accept | Emit | ffmpeg comparison | planned |
-| Loop filter normal, simple, deltas, sharpness | Accept | Emit normal | ffmpeg comparison | planned |
-| Token partitions 1/2/4/8 | Accept | Emit | ffmpeg comparison | planned |
-| Hidden frames, alt-ref | Accept | Not emitted | ffmpeg comparison | planned |
-| Lifecycle, malformed input, cancel | Specified | Specified | unit tests | planned |
-| Fuzz | Required | n/a | fuzz test | planned |
-| Benchmarks against ffmpeg | Required | Required | `cargo bench -p cutlass-vp8` | planned |
+| Bool coder | Read | Write | `random_bools_round_trip_at_every_probability`, `the_reference_two_byte_decoder_agrees`, `a_long_run_of_certain_ones_carries_into_written_bytes` | Verified |
+| Frame header, partitions 1/2/4/8 | Accept | Emit | `a_written_key_header_parses_back`, `slices2/4/8`, `golden_keys_and_partitions_decode_identically` | Verified |
+| Intra 16×16 DC, V, H, TM; B_PRED with all ten sub-modes; chroma | Accept | Emit | `every_macroblock_mode_is_chosen`, `diagonal_modes_match_the_reference_formulas`, libvpx streams | Verified |
+| NEAREST, NEAR, ZERO, NEW, SPLITMV 16×8, 8×16, 8×8, 4×4 | Accept | Emit (on LAST and GOLDEN) | `every_macroblock_mode_is_chosen` (all ten modes, ffmpeg and libvpx identical), `best_split` | Verified |
+| LAST, GOLDEN, ALTREF; sign bias; copy and refresh flags | Accept | LAST and GOLDEN; golden refresh every 16 frames | `smooth_two_pass_altref` (hidden frames, sign bias 53 frames, copies), `golden` | Verified |
+| Hidden frames | Accept, no picture | Not emitted | `smooth_two_pass_altref`, `hidden_frames_produce_no_picture` | Verified |
+| Versions 1–3 (bilinear, simple filter, full-pixel chroma) | Accept | Not emitted (version 0 only) | `libvpx_versions_match_both_decoders` | Verified |
+| Segmentation: map, persistence, relative quantizer | Accept | Emit (option `segments`, off by default; −0.35 dB PSNR on 16929689) | `resilient`, `segments_decode_identically` | Verified |
+| Loop filter normal, simple, sharpness, ref/mode deltas | Accept | Normal, level searched per frame, libvpx default deltas | `libvpx_filter_options_match_both_decoders`, `rt16`, encoder tests | Verified |
+| Coefficient, mode, MV, skip probability updates; `refresh_entropy_probs` | Accept | Coefficient, mode, MV, skip, intra and reference flags; always refresh | `an_inter_header_keeps_unsent_deltas_and_restores_probs`, `resilient`, `probability_updates_are_sent` | Verified |
+| Odd sizes, size change at a key frame | Accept | Emit | `libvpx_odd_sizes_match_both_decoders` (1×1, 17×9, 33×301, 193×97), `odd_sizes_decode_identically`, `size_changes_at_key_frames` | Verified |
+| Constant quantizer and bitrate modes | n/a | Emit | `fixed_quantizers_decode_identically` (q 0, 10, 40, 80, 127), `bitrate_mode_decodes_identically`, gate test | Verified |
+| MP4 `vp08` with `vpcC` | Read through `cutlass-isobmff` | `vpcC` on the first packet as `SideData::Config` | `an_mp4_vp08_track_round_trips` (ffmpeg `vp8` and `libvpx` decode the MP4 to our pictures) | Verified |
+| Lifecycle, malformed input, cancel | Specified | Specified | `decoder_contract`, `encoder_contract`, `reset_drops_references`, `failed_frames_leave_the_decoder_as_it_was`, `malformed_headers_are_rejected` | Verified |
+| Untrusted size | `Decoder::with_max_pixels` refuses larger key frames with `Limit` | n/a | `malformed_headers_are_rejected` | Verified |
+| Fuzz | Required | n/a | `decoder_fuzz_does_not_panic` | FUZZ_RESULT |
+| Benchmarks against ffmpeg | Required | Required | `cargo bench -p cutlass-vp8` | Verified |
 
-## Outside this crate
+## Fuzz
 
-A WebM demuxer (`cutlass-matroska` is an empty scaffold), playback, and export. The ISOBMFF crate already maps `vp08`; the integration test drives that path.
+Debug build (overflow checks on), seed `0x56503800f22d`, `VP8_FUZZ_SECS=1800`. The corpus is three streams from our encoder (48×32 default, 33×17 with four partitions and golden refreshes at a fine quantizer, 16×16 with key frames every second frame at a coarse quantizer). Each round decodes a good prefix of one stream, then for each later frame either the frame itself, random bytes, or the frame with one to five mutations (bit flip, byte replace, truncate, insert, header-byte replace, append). Every picture must have the decoder's size and crop cleanly. After the noise, the stream's key frame must decode to a picture. The decoder is limited to 65,536 pixels so a mutated size stays cheap.
+
+Recorded line:
+
+`FUZZ_LINE`
+
+## Not done
+
+- The encoder emits version 0 only, never ALTREF, hidden frames, sign bias, or copy flags, and never turns `refresh_entropy_probs` off. The decoder handles all of them and is checked on libvpx streams that use them.
+- No multithreading in either direction.
+- Not registered in the desktop app's codec factories: the app's export path takes RGBA through `EncodeFactory`, and its tests expect VP8 export to be declined. VP9 is not registered there either.
+- `Mp4Mux` (the export muxer) accepts H.264, HEVC, ProRes, AAC, and PCM only. VP8 goes into MP4 through `IsoBmffMux`, as the integration test does. No WebM muxer exists (`cutlass-matroska` is an empty scaffold).
+- Not part of CI: the libvpx oracle tests, the 1080p WebM, and the quality gate need `../local-files` and ffmpeg. They skip without them. The synthetic encoder round trips and the MP4 test check ffmpeg only when it is installed.

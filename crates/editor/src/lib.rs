@@ -29,6 +29,7 @@ mod ripple;
 mod ruler;
 mod snap;
 mod stage;
+mod template;
 mod text_effect;
 mod title;
 mod tools;
@@ -86,6 +87,10 @@ pub use stage::{
     MAX_SCALE, MIN_SCALE, NoText, Pose, SCALE_REACH, SNAP_REACH, StageAlign, StageBox,
     StageGesture, StageGuides, StageStep, TURN_REACH, TextSizes, canvas_size, keyed_pose,
     stage_align, stage_box, stage_gesture, stage_pick,
+};
+pub use template::{
+    TEMPLATE_CARD_PREFIX, TITLE_TEMPLATES, TemplatePlace, TitleTemplate, Widget, template_requests,
+    title_template,
 };
 pub use text_effect::{
     NO_TEXT_EFFECT, TEXT_EFFECTS, TextEffect, text_effect_of, text_effect_requests,

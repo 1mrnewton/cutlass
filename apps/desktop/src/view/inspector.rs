@@ -38,7 +38,7 @@ const LATER: &str = "Later: Cutlass has no edit for this yet";
 pub(super) struct InspectorState {
     clip: String,
     tab: usize,
-    page: usize,
+    pub(super) page: usize,
     open: HashSet<String>,
     /// Typed text in a number or word field while it has focus.
     fields: HashMap<String, String>,
@@ -54,6 +54,8 @@ pub(super) struct InspectorState {
     pub(super) curve_channel: usize,
     /// A curve point being dragged, and the points as they are now.
     pub(super) curve_drag: Option<(usize, Vec<(f32, f32)>)>,
+    /// A speed curve point being dragged, and the points as they are now.
+    pub(super) speed_drag: Option<(usize, Vec<(f64, f64)>)>,
     /// The LUT file picker was asked for; the view opens it.
     pub(super) wants_lut: bool,
 }
@@ -209,7 +211,7 @@ fn video_panel(
             }
         }
         2 if still => note(ui, "A photo has no speed."),
-        2 => speed_row(shell, ui, state, inspection),
+        2 => super::speed::speed_tab(shell, ui, state, inspection),
         3 => animation_tab(shell, ui, state, &["In", "Out", "Combo"], VIDEO_MOTIONS),
         4 => adjust_tab(shell, ui, state, inspection),
         _ => later_note(ui, "AI stylize"),
@@ -268,9 +270,13 @@ fn audio_panel(
     state: &mut InspectorState,
     inspection: &Inspection,
 ) {
+    let tab = state.tab;
     tabs(ui, &["Audio", "Speed"], &mut state.tab);
+    if tab != state.tab {
+        state.page = 0;
+    }
     if state.tab == 1 {
-        speed_row(shell, ui, state, inspection);
+        super::speed::speed_tab(shell, ui, state, inspection);
         return;
     }
     body(ui, |ui| {
@@ -574,17 +580,6 @@ fn sound_sliders(
     ) {
         send(shell, |shell| shell.set_fade_out(value));
     }
-}
-
-fn speed_row(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState, inspection: &Inspection) {
-    body(ui, |ui| {
-        let speed = (inspection.speed * 10.0).round() / 10.0;
-        if let Some(value) = slider(ui, state, "speed", "Speed", speed, 0.1..=4.0, |v| {
-            format!("{v:.1}×")
-        }) {
-            send(shell, |shell| shell.set_speed(value));
-        }
-    });
 }
 
 const VIDEO_MOTIONS: &[&[&str]] = &[
@@ -1827,7 +1822,7 @@ fn tabs(ui: &mut Ui, labels: &[&str], current: &mut usize) {
 }
 
 /// The rounded page switch under the tabs.
-fn pages(ui: &mut Ui, labels: &[&str], current: &mut usize) {
+pub(super) fn pages(ui: &mut Ui, labels: &[&str], current: &mut usize) {
     ui.add_space(12.0);
     let width = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(Vec2::new(width, 30.0), Sense::hover());
@@ -2060,7 +2055,7 @@ fn later_tiles(ui: &mut Ui, names: &[&str]) {
 }
 
 /// The indented body under a section.
-fn body(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
+pub(super) fn body(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
     ui.add_space(4.0);
     ui.vertical(add);
     ui.add_space(4.0);
@@ -2275,7 +2270,7 @@ fn parse_hex(text: &str) -> Option<Color32> {
     Some(Color32::from_rgb(r, g, b))
 }
 
-fn switch_row(ui: &mut Ui, label: &str, on: bool, editable: bool) -> egui::Response {
+pub(super) fn switch_row(ui: &mut Ui, label: &str, on: bool, editable: bool) -> egui::Response {
     let response = ui
         .horizontal(|ui| {
             ui.label(RichText::new(label).size(12.0).color(tokens::TEXT));

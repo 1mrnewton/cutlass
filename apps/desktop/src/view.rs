@@ -21,6 +21,7 @@ use crate::widgets;
 mod assistant;
 mod grade;
 mod inspector;
+mod speed;
 
 const CARD_W: f32 = 144.0;
 const CARD_H: f32 = 96.0;
@@ -6518,6 +6519,145 @@ mod tests {
         ] {
             assert!(lines.iter().any(|line| line == label), "{label}: {lines:?}");
         }
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn a_speed_preset_is_picked_and_a_dragged_curve_point_is_one_undo_step() {
+        use cutlass_model::SpeedPreset;
+        let temp = std::env::temp_dir().join(format!("cutlass-speed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let mut draft = cutlass_model::Draft::empty("draft");
+        draft
+            .materials
+            .videos
+            .push(cutlass_model::MaterialVideo::new("movie"));
+        let mut clip = cutlass_model::Segment::new(
+            "main",
+            "movie",
+            cutlass_model::TimeRange::new(0, 2_000_000),
+        );
+        clip.source_range = Some(cutlass_model::TimeRange::new(0, 2_000_000));
+        draft.tracks[0].segments.push(clip);
+        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        shell.select(Some(SegmentId::new("main")));
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let frame = |shell: &mut Shell, view: &mut ViewState, events: Vec<egui::Event>| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 1200.0))),
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, view, None),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        let press = |pos: Pos2, pressed: bool| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        let click = |shell: &mut Shell, view: &mut ViewState, pos: Pos2| {
+            let _ = frame(
+                shell,
+                view,
+                vec![egui::Event::PointerMoved(pos), press(pos, true)],
+            );
+            let _ = frame(shell, view, vec![press(pos, false)]);
+            frame(shell, view, Vec::new())
+        };
+        view.inspector.focus(inspector::Focus {
+            tab: 2,
+            page: 1,
+            section: None,
+        });
+        let _ = frame(&mut shell, &mut view, Vec::new());
+        let output = frame(&mut shell, &mut view, Vec::new());
+        let lines = galleys(&output);
+        for label in [
+            "Normal",
+            "Curve",
+            "None",
+            "Montage",
+            "Jump cut",
+            "Flash out",
+            "Custom",
+            "Change pitch",
+        ] {
+            assert!(lines.iter().any(|line| line == label), "{label}: {lines:?}");
+        }
+        let hero = text_pos(&output, "Hero").unwrap();
+        let output = click(&mut shell, &mut view, hero);
+        let inspection = shell.inspection().unwrap();
+        assert_eq!(inspection.speed_curve, Some(SpeedPreset::Hero.points()));
+        let factor = cutlass_model::curve_speed_factor(&SpeedPreset::Hero.points()).unwrap();
+        #[allow(clippy::cast_possible_truncation)]
+        let length = (2_000_000.0 * factor).round() as i64;
+        assert_eq!(inspection.duration, Micros(length));
+        // Drag the third point, in the slow middle, up to run faster.
+        let dots: Vec<Pos2> = output
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Circle(circle)
+                    if circle.radius == 4.5 && circle.fill == egui::Color32::WHITE =>
+                {
+                    Some(circle.center)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(dots.len(), 6, "{dots:?}");
+        let slow = dots[2];
+        let higher = slow - Vec2::new(0.0, 40.0);
+        let _ = frame(
+            &mut shell,
+            &mut view,
+            vec![egui::Event::PointerMoved(slow), press(slow, true)],
+        );
+        let _ = frame(
+            &mut shell,
+            &mut view,
+            vec![egui::Event::PointerMoved(slow - Vec2::new(0.0, 20.0))],
+        );
+        let _ = frame(
+            &mut shell,
+            &mut view,
+            vec![egui::Event::PointerMoved(higher)],
+        );
+        // Nothing is sent while the point is held.
+        assert_eq!(
+            shell.inspection().unwrap().speed_curve,
+            Some(SpeedPreset::Hero.points())
+        );
+        let _ = frame(&mut shell, &mut view, vec![press(higher, false)]);
+        let output = frame(&mut shell, &mut view, Vec::new());
+        let curve = shell.inspection().unwrap().speed_curve.unwrap();
+        assert!(curve[2].y > 0.4, "{curve:?}");
+        assert!(galleys(&output).iter().any(|line| line == "Custom"));
+        shell.undo().unwrap();
+        assert_eq!(
+            shell.inspection().unwrap().speed_curve,
+            Some(SpeedPreset::Hero.points())
+        );
+        // None goes back to the constant speed and its length.
+        let none = text_pos(&output, "None").unwrap();
+        let _ = click(&mut shell, &mut view, none);
+        let inspection = shell.inspection().unwrap();
+        assert_eq!(inspection.speed_curve, None);
+        assert_eq!(inspection.duration, Micros(2_000_000));
+        // The pitch switch is one step too.
+        shell.set_change_pitch(true).unwrap();
+        assert!(shell.inspection().unwrap().change_pitch);
+        shell.undo().unwrap();
+        assert!(!shell.inspection().unwrap().change_pitch);
         let _ = std::fs::remove_dir_all(&temp);
     }
 

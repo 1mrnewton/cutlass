@@ -309,6 +309,10 @@ pub struct Inspection {
     pub mask: Option<cutlass_effects::Mask>,
     /// Where the clip's colour work, or the adjustment layer, shows.
     pub color_mask: Option<cutlass_effects::Mask>,
+    /// The speed curve in force, when the clip runs on one.
+    pub speed_curve: Option<Vec<cutlass_model::SpeedPoint>>,
+    /// The pitch follows the speed.
+    pub change_pitch: bool,
     /// Fade-in duration, microseconds.
     pub fade_in: i64,
     /// Fade-out duration, microseconds.
@@ -3407,6 +3411,8 @@ impl Shell {
             chroma: cutlass_effects::segment_chroma(draft, segment),
             mask: cutlass_effects::segment_mask(draft, segment),
             color_mask: cutlass_effects::segment_color_mask(draft, segment),
+            speed_curve: speed_curve(draft, segment),
+            change_pitch: segment.is_tone_modify,
             fade_in: fade_durations(draft, segment).0,
             fade_out: fade_durations(draft, segment).1,
             material,
@@ -3426,6 +3432,29 @@ impl Shell {
         let segment_id = self.selected().cloned().ok_or(ShellError::NoProject)?;
         self.refuse_locked(&segment_id)?;
         self.apply(Request::SetConstantSpeed { segment_id, speed })
+    }
+
+    /// Run the selected clip on the speed curve `points`, `x` the share of
+    /// the source and `y` the speed there. Its length follows the curve.
+    pub fn set_speed_curve(
+        &mut self,
+        points: &[cutlass_model::SpeedPoint],
+    ) -> Result<(), ShellError> {
+        let segment_id = self.selected().cloned().ok_or(ShellError::NoProject)?;
+        self.refuse_locked(&segment_id)?;
+        let speed_id = MaterialId::new(self.fresh("speed"));
+        self.apply(Request::SetCurveSpeed {
+            segment_id,
+            speed_id,
+            points: points.to_vec(),
+        })
+    }
+
+    /// Let the selected clip's pitch follow its speed, or keep it.
+    pub fn set_change_pitch(&mut self, on: bool) -> Result<(), ShellError> {
+        let segment_id = self.selected().cloned().ok_or(ShellError::NoProject)?;
+        self.refuse_locked(&segment_id)?;
+        self.apply(Request::SetChangePitch { segment_id, on })
     }
 
     fn selected_video(&self) -> Option<&MaterialVideo> {
@@ -6775,6 +6804,20 @@ fn next_face(names: &[String], current: &str) -> Option<String> {
         .map(|index| index.saturating_add(1))
         .unwrap_or(0);
     Some(names[index % names.len()].clone())
+}
+
+/// The speed curve `segment` runs on: its curve material's points, when it
+/// has two or more.
+fn speed_curve(draft: &Draft, segment: &Segment) -> Option<Vec<cutlass_model::SpeedPoint>> {
+    segment.extra_material_refs.iter().find_map(|material_id| {
+        let speed = draft
+            .materials
+            .speeds
+            .iter()
+            .find(|speed| &speed.id == material_id)?;
+        let points = &speed.curve_speed.as_ref()?.speed_points;
+        (speed.mode == cutlass_model::SpeedMode::Curve && points.len() >= 2).then(|| points.clone())
+    })
 }
 
 fn letterbox_color(draft: &Draft, segment: &Segment) -> String {

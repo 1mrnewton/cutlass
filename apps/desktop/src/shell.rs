@@ -36,9 +36,7 @@ use cutlass_playback::{
     AudioHost, FilmCell, FrameCache, PLAY_FRAMES, Program, Transport, film_cells, media_file,
 };
 use cutlass_renderer_software::SoftwareDevice;
-use cutlass_session::{
-    CANVAS_SHAPES, CanvasShape, EditError, ImportedMedium, Request, Session, TrimEdge,
-};
+use cutlass_session::{EditError, ImportedMedium, Request, Session, TrimEdge};
 use cutlass_settings::{SeekDuringPlayback, Settings, Shortcut};
 use cutlass_storage::Home;
 use cutlass_store::{Folder, Hold, StoreError};
@@ -2833,14 +2831,14 @@ impl Shell {
             .draft()
             .and_then(Draft::frame_rate)
             .unwrap_or(FrameRate::FPS_30);
-        rate_label(rate)
+        cutlass_editor::rate_label(rate)
     }
 
     /// Drop frame is a timecode label for 29.97 and 59.94.
     pub fn drop_frame_available(&self) -> bool {
         self.draft()
             .and_then(Draft::frame_rate)
-            .is_some_and(drop_rate)
+            .is_some_and(cutlass_editor::is_drop_rate)
     }
 
     /// Whether timecode labels use the drop-frame separator.
@@ -2853,10 +2851,10 @@ impl Shell {
     /// Every other rate turns it off. One undo restores the rate and the label.
     pub fn cycle_frame_rate(&mut self) -> Result<(), ShellError> {
         let current = self.session_draft()?.frame_rate();
-        let next = next_rate(current);
-        let drop_frame = drop_rate(next);
+        let next = cutlass_editor::next_rate(current);
+        let drop_frame = cutlass_editor::is_drop_rate(next);
         self.apply(Request::SetFrameRate {
-            fps: stored_fps(next),
+            fps: cutlass_editor::rate_fps(next),
             drop_frame,
         })
     }
@@ -2870,7 +2868,7 @@ impl Shell {
             let canvas = &self.session_draft()?.canvas_config;
             (canvas.width, canvas.height)
         };
-        let next = next_canvas(width, height);
+        let next = cutlass_editor::next_canvas(width, height);
         self.apply(Request::SetCanvasSize {
             width: next.width,
             height: next.height,
@@ -2882,7 +2880,7 @@ impl Shell {
     /// spaces is shown as that int.
     pub fn color_space_label(&self) -> String {
         let space = self.draft().map(|draft| draft.color_space).unwrap_or(0);
-        color_space_name(space)
+        cutlass_editor::color_space_name(space)
     }
 
     /// Store the project name. Surrounding whitespace is dropped. An empty
@@ -2904,7 +2902,7 @@ impl Shell {
     pub fn cycle_color_space(&mut self) -> Result<(), ShellError> {
         let current = self.session_draft()?.color_space;
         self.apply(Request::SetColorSpace {
-            space: next_color_space(current),
+            space: cutlass_editor::next_color_space(current),
         })
     }
 
@@ -5901,84 +5899,6 @@ fn file_name(path: &str) -> String {
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.to_owned())
-}
-
-/// The shape after the one this frame matches. A new project is 1920×1080,
-/// so the next shape is 9:16.
-fn next_canvas(width: i32, height: i32) -> CanvasShape {
-    let index = CANVAS_SHAPES
-        .iter()
-        .position(|shape| shape.width == width && shape.height == height)
-        .map(|index| index.saturating_add(1))
-        .unwrap_or(0);
-    CANVAS_SHAPES[index % CANVAS_SHAPES.len()]
-}
-
-const COLOR_SPACES: [(i32, &str); 5] = [
-    (-1, "Unknown"),
-    (0, "None"),
-    (2, "SDR 2020"),
-    (67, "HLG"),
-    (2084, "PQ"),
-];
-
-fn color_space_name(space: i32) -> String {
-    COLOR_SPACES
-        .iter()
-        .find(|item| item.0 == space)
-        .map(|item| item.1.to_owned())
-        .unwrap_or_else(|| space.to_string())
-}
-
-fn next_color_space(current: i32) -> i32 {
-    let index = COLOR_SPACES
-        .iter()
-        .position(|item| item.0 == current)
-        .map(|index| index.saturating_add(1))
-        .unwrap_or(0);
-    COLOR_SPACES[index % COLOR_SPACES.len()].0
-}
-
-const PROJECT_RATES: [FrameRate; 9] = [
-    FrameRate::FPS_23_976,
-    FrameRate::FPS_24,
-    FrameRate::FPS_25,
-    FrameRate::FPS_29_97,
-    FrameRate::FPS_30,
-    FrameRate::FPS_50,
-    FrameRate::FPS_59_94,
-    FrameRate::FPS_60,
-    FrameRate::FPS_120,
-];
-
-fn next_rate(current: Option<FrameRate>) -> FrameRate {
-    let index = current
-        .and_then(|rate| PROJECT_RATES.iter().position(|item| *item == rate))
-        .map(|index| index.saturating_add(1))
-        .unwrap_or(0);
-    PROJECT_RATES[index % PROJECT_RATES.len()]
-}
-
-fn drop_rate(rate: FrameRate) -> bool {
-    matches!(
-        (rate.numerator, rate.denominator),
-        (30_000, 1001) | (60_000, 1001)
-    )
-}
-
-fn stored_fps(rate: FrameRate) -> f64 {
-    f64::from(rate.numerator) / f64::from(rate.denominator)
-}
-
-fn rate_label(rate: FrameRate) -> String {
-    let name = match (rate.numerator, rate.denominator) {
-        (24_000, 1001) => "23.976",
-        (30_000, 1001) => "29.97",
-        (60_000, 1001) => "59.94",
-        (numerator, 1) => return format!("{numerator} fps"),
-        _ => "Frame rate",
-    };
-    format!("{name} fps")
 }
 
 fn format_timecode(label: TimecodeLabel) -> String {

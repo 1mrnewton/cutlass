@@ -313,6 +313,9 @@ pub fn show(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Option
         ui.ctx()
             .request_repaint_after(std::time::Duration::from_millis(100));
     }
+    if shell.serve_forwarded() {
+        ui.ctx().request_repaint();
+    }
     show_imported(shell, view);
     if view.assistant.poll(shell) {
         ui.ctx()

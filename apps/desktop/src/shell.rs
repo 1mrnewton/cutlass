@@ -49,6 +49,7 @@ use cutlass_transcription::{
 mod assistant;
 mod compound;
 mod inspector;
+mod listen;
 mod proxy;
 mod render;
 pub use assistant::AgentRun;
@@ -647,6 +648,10 @@ pub struct Shell {
     library_edits: u64,
     library_saved: u64,
     hold: Option<Hold>,
+    /// The loopback socket other hosts reach the held project on.
+    socket: Option<cutlass_agent::ProjectSocket>,
+    /// Asks the window for a frame; set once the window listens.
+    wake: Option<cutlass_agent::Wake>,
     /// The session revision the project folder holds, and when it was written.
     saved: Option<(u64, Instant)>,
     path: Option<PathBuf>,
@@ -761,6 +766,8 @@ impl Shell {
             library_edits: 0,
             library_saved: 0,
             hold: None,
+            socket: None,
+            wake: None,
             path: None,
             playhead: Micros(0),
             playing: false,
@@ -1099,6 +1106,7 @@ impl Shell {
         self.lanes_cache.replace(None);
         self.card_waves.clear();
         self.folder = None;
+        self.socket = None;
         self.hold = None;
         self.saved = None;
         self.path = None;
@@ -1242,6 +1250,7 @@ impl Shell {
         self.library_saved = 0;
         let unclean = hold.unclean();
         self.hold = Some(hold);
+        self.open_socket();
         self.waiting_imports.clear();
         let recent = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
         self.settings.note_recent(&recent);

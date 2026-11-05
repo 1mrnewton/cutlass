@@ -53,6 +53,9 @@ pub fn run() -> eframe::Result {
             shell.start_thumbnails(move || ctx.request_repaint());
             let ctx = creation.egui_ctx.clone();
             shell.start_waveforms(move || ctx.request_repaint());
+            // Other hosts, such as `cutlass mcp`, reach the open project here.
+            let ctx = creation.egui_ctx.clone();
+            shell.listen(std::sync::Arc::new(move || ctx.request_repaint()));
             Ok(Box::new(DesktopWindow {
                 shell,
                 view: ViewState::new(),

@@ -10,9 +10,9 @@ use std::io::{BufRead, Write};
 use std::path::Path;
 
 use cutlass_agent::{
-    ApprovalAction, Approver, Catalog, DraftTools, Export, McpClient, McpError, McpServer,
+    ApprovalAction, Approver, Catalog, DraftTools, Export, Forward, McpClient, McpError, McpServer,
     McpTransport, Media, MediaInfo, Packages, Player, Registry, Sandbox, SandboxError,
-    SettingsTool, Speech,
+    SettingsTool, Speech, ToolSink,
 };
 
 use crate::shell::{Shell, ShellError};
@@ -26,11 +26,7 @@ pub fn run(path: Option<&Path>) -> Result<(), String> {
 
 /// Serve `path`, reading messages from `input` and writing answers to
 /// `output`, a line each.
-pub fn serve(
-    path: Option<&Path>,
-    input: impl BufRead,
-    mut output: impl Write,
-) -> Result<(), String> {
+pub fn serve(path: Option<&Path>, input: impl BufRead, output: impl Write) -> Result<(), String> {
     let Some(path) = path else {
         return Err("name the project folder: cutlass mcp /path/to/project".to_owned());
     };
@@ -38,13 +34,23 @@ pub fn serve(
     let loaded = crate::load_settings_file(&settings_path);
     let (decoders, encoders) = crate::register_codecs_with(&loaded.settings.hardware);
     let mut shell = Shell::new(decoders, encoders, loaded.settings);
-    shell.open_folder(path).map_err(|error| match error {
-        ShellError::Store(cutlass_store::StoreError::Held { .. }) => format!(
-            "{} is open in Cutlass; close it there first, as a second owner is not served yet",
-            path.display()
-        ),
-        other => other.to_string(),
-    })?;
+    match shell.open_folder(path) {
+        Ok(()) => {}
+        Err(ShellError::Store(cutlass_store::StoreError::Held { .. })) => {
+            // The window holds it: send each call there.
+            let Some((address, token)) = cutlass_store::held_address(path) else {
+                return Err(format!(
+                    "{} is open in another Cutlass that does not take calls; close it there first",
+                    path.display()
+                ));
+            };
+            let forward = Forward::connect(&address, &token)?;
+            cutlass_logger::info!("mcp: forwarding {} to {address}", path.display());
+            let mut server = McpServer::new(forward, "cutlass", env!("CARGO_PKG_VERSION"));
+            return pump(&mut server, input, output, |_| Ok(()));
+        }
+        Err(other) => return Err(other.to_string()),
+    }
     let session = shell
         .session()
         .cloned()
@@ -68,12 +74,7 @@ pub fn serve(
     );
     let mut server = McpServer::new(registry, "cutlass", env!("CARGO_PKG_VERSION"));
     cutlass_logger::info!("mcp: serving {}", path.display());
-    for line in input.lines() {
-        let line = line.map_err(|error| error.to_string())?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        let answer = server.handle(&line);
+    pump(&mut server, input, output, |server| {
         let session = server.sink().draft.session();
         if session.revision() != saved {
             saved = session.revision();
@@ -82,6 +83,25 @@ pub fn serve(
                 .and_then(|()| shell.save())
                 .map_err(|error| format!("the project was not saved: {error}"))?;
         }
+        Ok(())
+    })
+}
+
+/// Answer each line of `input` on `output` until it closes, calling
+/// `after` once each message is handled.
+fn pump<S: ToolSink>(
+    server: &mut McpServer<S>,
+    input: impl BufRead,
+    mut output: impl Write,
+    mut after: impl FnMut(&McpServer<S>) -> Result<(), String>,
+) -> Result<(), String> {
+    for line in input.lines() {
+        let line = line.map_err(|error| error.to_string())?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let answer = server.handle(&line);
+        after(server)?;
         if let Some(answer) = answer {
             output
                 .write_all(answer.as_bytes())
@@ -294,8 +314,61 @@ mod tests {
         let project = Project::new("held");
         let _hold = cutlass_store::hold(&project.0).unwrap();
         let error = serve(Some(&project.0), "".as_bytes(), Vec::new()).unwrap_err();
-        assert!(error.contains("is open in Cutlass"), "{error}");
+        assert!(error.contains("does not take calls"), "{error}");
         let error = serve(None, "".as_bytes(), Vec::new()).unwrap_err();
         assert!(error.contains("cutlass mcp /path/to/project"), "{error}");
+    }
+
+    #[test]
+    fn a_project_open_in_the_window_is_served_through_it() {
+        let project = Project::new("forward");
+        let (decoders, encoders) = crate::register_codecs();
+        let mut desktop =
+            crate::shell::Shell::new(decoders, encoders, cutlass_settings::Settings::default());
+        desktop.open_folder(&project.0).unwrap();
+        desktop.listen(std::sync::Arc::new(|| {}));
+        let place = json!({
+            "expected_revision": 0,
+            "requests": [{
+                "op": "place",
+                "track_id": "main",
+                "segment": serde_json::to_value(cutlass_model::Segment::new(
+                    "a",
+                    "media",
+                    cutlass_model::TimeRange::new(0, 1_000_000),
+                ))
+                .unwrap(),
+            }],
+        });
+        let input = lines(&[
+            json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
+            json!({"jsonrpc":"2.0","id":2,"method":"tools/call",
+                "params":{"name":"draft_apply","arguments":place}}),
+        ]);
+        let path = project.0.clone();
+        let client = std::thread::spawn(move || {
+            let mut output = Vec::new();
+            serve(Some(&path), input.as_bytes(), &mut output).map(|()| output)
+        });
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while !client.is_finished() && std::time::Instant::now() < until {
+            desktop.serve_forwarded();
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        let output = client.join().unwrap().unwrap();
+        let answers: Vec<Value> = String::from_utf8(output)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(answers.len(), 2);
+        assert_eq!(
+            answers[1]["result"]["content"][0]["text"],
+            "revision=1 committed=true"
+        );
+        // The window holds the edit, as one undo step.
+        assert_eq!(desktop.draft().unwrap().tracks[0].segments.len(), 1);
+        desktop.undo().unwrap();
+        assert!(desktop.draft().unwrap().tracks[0].segments.is_empty());
     }
 }

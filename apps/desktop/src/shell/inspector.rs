@@ -456,6 +456,26 @@ impl Shell {
         })
     }
 
+    /// Mark word `index` of the selected caption as a keyword, drawn in
+    /// its style's spoken look, or take the mark off. One undo restores it.
+    pub fn set_caption_keyword(&mut self, index: usize, on: bool) -> Result<(), ShellError> {
+        let segment_id = self.text_segment()?;
+        self.refuse_locked(&segment_id)?;
+        self.apply(Request::SetCaptionKeyword {
+            segment_id,
+            word: index,
+            on,
+        })
+    }
+
+    /// Start each letter of the selected caption's words `millis` after
+    /// the one before. One undo restores it.
+    pub fn set_caption_stagger(&mut self, millis: i64) -> Result<(), ShellError> {
+        let segment_id = self.text_segment()?;
+        self.refuse_locked(&segment_id)?;
+        self.apply(Request::SetCaptionStagger { segment_id, millis })
+    }
+
     /// Replace word `index` of the selected caption. The word keeps its
     /// times, and the caption reads the words joined by spaces. One undo
     /// restores the word.
@@ -1096,6 +1116,15 @@ mod tests {
         desktop.set_caption_style("karaoke").unwrap();
         assert_eq!(desktop.inspection().unwrap().caption_style, "karaoke");
         assert!(desktop.set_caption_style("loud").is_err());
+        desktop.set_caption_keyword(2, true).unwrap();
+        desktop.set_caption_stagger(40).unwrap();
+        let marked = desktop.inspection().unwrap();
+        assert_eq!(marked.caption_keywords, [2]);
+        assert_eq!(marked.caption_stagger_ms, 40);
+        assert!(desktop.set_caption_keyword(9, true).is_err());
+        assert!(desktop.set_caption_stagger(5_000).is_err());
+        desktop.undo().unwrap();
+        desktop.undo().unwrap();
         for _ in 0..4 {
             desktop.undo().unwrap();
         }

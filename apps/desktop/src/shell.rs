@@ -333,6 +333,10 @@ pub struct Inspection {
     pub words: WordColumns,
     /// The caption's style key; empty is plain.
     pub caption_style: String,
+    /// The caption's marked words, by index into `words`.
+    pub caption_keywords: Vec<usize>,
+    /// Milliseconds each letter of a caption word starts after the last.
+    pub caption_stagger_ms: i64,
     pub locked: bool,
 }
 
@@ -3724,6 +3728,14 @@ impl Shell {
             caption_style: match draft.materials.get(segment.material_id.as_str()) {
                 Some(MaterialRef::Text(text)) => text.caption_style.clone(),
                 _ => String::new(),
+            },
+            caption_keywords: match draft.materials.get(segment.material_id.as_str()) {
+                Some(MaterialRef::Text(text)) => text.caption_keywords.clone(),
+                _ => Vec::new(),
+            },
+            caption_stagger_ms: match draft.materials.get(segment.material_id.as_str()) {
+                Some(MaterialRef::Text(text)) => text.caption_stagger_ms,
+                _ => 0,
             },
             locked,
         })

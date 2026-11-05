@@ -1350,6 +1350,23 @@ fn text_basic(
     body(ui, |ui| {
         if caption && !inspection.words.text.is_empty() {
             caption_words(shell, ui, state, inspection);
+            #[allow(clippy::cast_precision_loss)]
+            let stored = inspection.caption_stagger_ms as f64;
+            #[allow(clippy::cast_precision_loss)]
+            let most = cutlass_session::MAX_CAPTION_STAGGER_MS as f64;
+            if let Some(value) = slider(
+                ui,
+                state,
+                "caption stagger",
+                "Stagger",
+                stored,
+                0.0..=most,
+                |value| format!("{value:.0} ms"),
+            ) {
+                #[allow(clippy::cast_possible_truncation)]
+                let millis = value.round() as i64;
+                send(shell, |shell| shell.set_caption_stagger(millis));
+            }
         } else {
             words_box(shell, ui, state);
         }
@@ -1457,8 +1474,21 @@ fn caption_words(
         let mut edited = None;
         let mut join = false;
         let mut line = false;
+        let mut mark = None;
         label_row(ui, &format!("{:.2} s", start as f64 / 1000.0), |ui| {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let marked = inspection.caption_keywords.contains(&index);
+                if ui
+                    .add(egui::Button::new(RichText::new("★").size(11.0)).selected(marked))
+                    .on_hover_text(if marked {
+                        "Take the keyword mark off"
+                    } else {
+                        "Mark as a keyword, drawn in the spoken look"
+                    })
+                    .clicked()
+                {
+                    mark = Some(!marked);
+                }
                 let next_is_word = columns
                     .text
                     .get(index + 1)
@@ -1491,7 +1521,9 @@ fn caption_words(
                 }
             });
         });
-        if let Some(value) = edited {
+        if let Some(on) = mark {
+            send(shell, |shell| shell.set_caption_keyword(index, on));
+        } else if let Some(value) = edited {
             send(shell, |shell| shell.set_caption_word(index, &value));
         } else if join {
             send(shell, |shell| shell.join_caption_words(index));

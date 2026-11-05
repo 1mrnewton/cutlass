@@ -48,7 +48,8 @@ fn sad_rows<P: Pixel>(
     limit: u32,
 ) -> u32 {
     let mut sum = 0u32;
-    for (ra, rb) in a.chunks(a_stride).zip(b.chunks(b_stride)).take(h) {
+    for r in 0..h {
+        let (ra, rb) = (&a[r * a_stride..][..w], &b[r * b_stride..][..w]);
         let mut s = 0u32;
         for (&x, &y) in ra[..w].iter().zip(&rb[..w]) {
             s += (x.to_i32() - y.to_i32()).unsigned_abs();
@@ -108,7 +109,8 @@ fn sse_rows<P: Pixel>(
     h: usize,
 ) -> u64 {
     let mut sum = 0u64;
-    for (ra, rb) in a.chunks(a_stride).zip(b.chunks(b_stride)).take(h) {
+    for r in 0..h {
+        let (ra, rb) = (&a[r * a_stride..][..w], &b[r * b_stride..][..w]);
         let mut s = 0u32;
         for (&x, &y) in ra[..w].iter().zip(&rb[..w]) {
             let d = x.to_i32() - y.to_i32();
@@ -129,7 +131,8 @@ fn sse_rows_wide<P: Pixel>(
     h: usize,
 ) -> u64 {
     let mut sum = 0u64;
-    for (ra, rb) in a.chunks(a_stride).zip(b.chunks(b_stride)).take(h) {
+    for r in 0..h {
+        let (ra, rb) = (&a[r * a_stride..][..w], &b[r * b_stride..][..w]);
         for (&x, &y) in ra[..w].iter().zip(&rb[..w]) {
             let d = i64::from(x.to_i32() - y.to_i32());
             sum += (d * d) as u64;
@@ -203,7 +206,8 @@ pub fn energy_i32(a: &[i32]) -> u64 {
 fn sum_rows<P: Pixel>(a: &[P], stride: usize, w: usize, h: usize) -> (u32, u64) {
     let mut sum = 0u32;
     let mut sq = 0u64;
-    for r in a.chunks(stride).take(h) {
+    for r in 0..h {
+        let r = &a[r * stride..][..w];
         let mut s = 0u32;
         let mut q = 0u32;
         for &x in &r[..w] {
@@ -263,7 +267,8 @@ fn diff_rows<P: Pixel>(
 ) -> (i64, u64) {
     let mut sum = 0i64;
     let mut sq = 0u64;
-    for (ra, rb) in a.chunks(a_stride).zip(b.chunks(b_stride)).take(h) {
+    for r in 0..h {
+        let (ra, rb) = (&a[r * a_stride..][..w], &b[r * b_stride..][..w]);
         let mut s = 0i32;
         let mut q = 0u32;
         for (&x, &y) in ra[..w].iter().zip(&rb[..w]) {
@@ -353,8 +358,9 @@ fn hadamard_abs<P: Pixel, const N: usize>(
     b_stride: usize,
 ) -> u32 {
     let mut m = [[0i32; N]; N];
-    for (row, (ra, rb)) in m.iter_mut().zip(a.chunks(a_stride).zip(b.chunks(b_stride))) {
-        for (d, (&x, &y)) in row.iter_mut().zip(ra[..N].iter().zip(&rb[..N])) {
+    for (r, row) in m.iter_mut().enumerate() {
+        let (ra, rb) = (&a[r * a_stride..][..N], &b[r * b_stride..][..N]);
+        for (d, (&x, &y)) in row.iter_mut().zip(ra.iter().zip(rb)) {
             *d = x.to_i32() - y.to_i32();
         }
     }
@@ -600,6 +606,15 @@ pub struct MeScratch<P: Pixel> {
     pub tx_tmp: Vec<i16>,
     /// Horizontal-pass rows the sub-sample search shares.
     cols: ColRows,
+    /// Full-sample positions the pattern search evaluated: `seen[i] ==
+    /// stamp` (one stamp per search).
+    seen: Vec<u32>,
+    stamp: u32,
+    /// The interpolated prediction (stride = block width) of the vector
+    /// the last [`motion_search`] returned, made with [`MeParams::filter`],
+    /// valid (`best_pred_ok`) when it refined to sub-sample positions.
+    pub best_pred: Vec<P>,
+    pub best_pred_ok: bool,
 }
 
 /// One reference column and horizontal phase of the sub-sample search:
@@ -649,6 +664,10 @@ impl<P: Pixel> MeScratch<P> {
             pred_cache: Vec::new(),
             tx_memo: None,
             tx_tmp: vec![0; 64 * 32],
+            seen: Vec::new(),
+            stamp: 0,
+            best_pred: vec![P::default(); MAX_BLOCK * MAX_BLOCK],
+            best_pred_ok: false,
         }
     }
 
@@ -664,6 +683,10 @@ impl<P: Pixel> MeScratch<P> {
             pred_cache: Vec::new(),
             tx_memo: None,
             tx_tmp: Vec::new(),
+            seen: Vec::new(),
+            stamp: 0,
+            best_pred: Vec::new(),
+            best_pred_ok: false,
         }
     }
 }
@@ -1043,8 +1066,13 @@ pub fn motion_search<P: Pixel>(
         edge,
         win,
         cols,
+        seen,
+        stamp,
+        best_pred,
+        best_pred_ok,
         ..
     } = scratch;
+    *best_pred_ok = false;
 
     // Full-sample window (offsets in samples).
     let full_max = MV_MAX >> 3;
@@ -1122,6 +1150,29 @@ pub fn motion_search<P: Pixel>(
         let wc_lo = (best.col - range).max(col_lo);
         let wc_hi = (best.col + range).min(col_hi);
         let in_window = |dy: i32, dx: i32| dy >= wr_lo && dy <= wr_hi && dx >= wc_lo && dx <= wc_hi;
+        // A position evaluated before cannot beat the best cost since (it
+        // did not then, and the best only improves): each is tried once.
+        let ww = (wc_hi - wc_lo + 1).max(1) as usize;
+        let n = ww * (wr_hi - wr_lo + 1).max(1) as usize;
+        if seen.len() < n {
+            seen.resize(n, 0);
+        }
+        *stamp = stamp.wrapping_add(1);
+        if *stamp == 0 {
+            seen.fill(0);
+            *stamp = 1;
+        }
+        let st = *stamp;
+        let seen = &mut seen[..n];
+        let mut first = |dy: i32, dx: i32| {
+            let i = (dy - wr_lo) as usize * ww + (dx - wc_lo) as usize;
+            let new = seen[i] != st;
+            seen[i] = st;
+            new
+        };
+        if in_window(best.row, best.col) {
+            first(best.row, best.col);
+        }
         let mut max_step = 1i32;
         while max_step * 2 <= range.min(params.max_ring) {
             max_step *= 2;
@@ -1135,7 +1186,7 @@ pub fn motion_search<P: Pixel>(
         while ring <= max_step {
             for &(oy, ox) in &SQUARE {
                 let (dy, dx) = (cy + oy * ring, cx + ox * ring);
-                if !in_window(dy, dx) {
+                if !in_window(dy, dx) || !first(dy, dx) {
                     continue;
                 }
                 if let Some((c, d)) = s.eval_full(edge, dy, dx, best.cost) {
@@ -1158,7 +1209,7 @@ pub fn motion_search<P: Pixel>(
                 let mut moved = false;
                 for &(oy, ox) in &SQUARE {
                     let (dy, dx) = (cy + oy * step, cx + ox * step);
-                    if !in_window(dy, dx) {
+                    if !in_window(dy, dx) || !first(dy, dx) {
                         continue;
                     }
                     if let Some((c, d)) = s.eval_full(edge, dy, dx, best.cost) {
@@ -1198,6 +1249,11 @@ pub fn motion_search<P: Pixel>(
             let d = satd(src_blk, src_stride, blk, bs, w, h);
             mv.dist = d;
             mv.cost = d.saturating_add(mv_cost(mv.row, mv.col));
+            // The full-sample prediction is the reference block itself.
+            for (o, r) in best_pred.chunks_exact_mut(w).zip(blk.chunks(bs)).take(h) {
+                o.copy_from_slice(&r[..w]);
+            }
+            *best_pred_ok = true;
         }
         let levels = usize::from(params.subpel.min(3));
         for &st in &[4i32, 2, 1][..levels] {
@@ -1235,6 +1291,7 @@ pub fn motion_search<P: Pixel>(
                         cost,
                         dist: d,
                     };
+                    core::mem::swap(pred, best_pred);
                 }
             }
         }

@@ -869,8 +869,9 @@ struct Params {
 const U0: u32 = 2;
 
 /// Column transforms of length `N`, `L` columns at a time. Writes the first
-/// `th` outputs of every column into `tmp` column-major (`tmp[c * th + k]`),
-/// with the columns flipped for `flip_lr`.
+/// `th` outputs of every column into `tmp` column-major (`tmp[c * th + k]`);
+/// the row pass reads the columns flipped for `flip_lr`, so the column pass
+/// of a block serves the types that differ only in their rows.
 #[inline(never)]
 fn col_pass<const L: usize, const N: usize, const K: u8, const WIDE: bool>(
     p: &Params,
@@ -895,17 +896,11 @@ fn col_pass<const L: usize, const N: usize, const K: u8, const WIDE: bool>(
             }
         }
         if any == 0 {
-            for l in 0..L {
-                let c = c0 + l;
-                let col = if p.flip_lr { w - 1 - c } else { c };
-                tmp[col * th..][..th].fill(0);
-            }
+            tmp[c0 * th..][..L * th].fill(0);
         } else {
             tx1d::<L, N, K, WIDE>(&mut t);
             for l in 0..L {
-                let c = c0 + l;
-                let col = if p.flip_lr { w - 1 - c } else { c };
-                let out = &mut tmp[col * th..][..th];
+                let out = &mut tmp[(c0 + l) * th..][..th];
                 for (k, o) in out.iter_mut().enumerate() {
                     *o = t[k & (N - 1)][l].wrapping_add(rnd) >> p.d1;
                 }
@@ -932,7 +927,8 @@ fn row_pass<const L: usize, const N: usize, const K: u8, const WIDE: bool>(
         let mut t = [[0i32; L]; N];
         let mut any = 0;
         for (j, tj) in t.iter_mut().enumerate() {
-            let s = &tmp[j * th + r0..][..L];
+            let jj = if p.flip_lr { N - 1 - j } else { j };
+            let s = &tmp[jj * th + r0..][..L];
             for l in 0..L {
                 any |= s[l];
                 tj[l] = s[l];
@@ -1049,6 +1045,16 @@ fn run<const TMP: usize, const WIDE: bool>(
     bd: u32,
     split: bool,
 ) {
+    let p = params(tx_size, tx_type, bd, split);
+    let log2w = TX_WIDTH_LOG2[tx_size] as u32;
+    let log2h = TX_HEIGHT_LOG2[tx_size] as u32;
+    let mut tmp = [0i32; TMP];
+    col_dispatch::<WIDE>(log2h, col_kind(tx_type), &p, src, stride, &mut tmp);
+    row_dispatch::<WIDE>(log2w, row_kind(tx_type), &p, &tmp, coefs);
+}
+
+/// The pass constants of a block.
+fn params(tx_size: usize, tx_type: usize, bd: u32, split: bool) -> Params {
     let log2w = TX_WIDTH_LOG2[tx_size] as u32;
     let log2h = TX_HEIGHT_LOG2[tx_size] as u32;
     let rect = log2w.abs_diff(log2h) == 1;
@@ -1065,7 +1071,7 @@ fn run<const TMP: usize, const WIDE: bool>(
     };
     let (flip_ud, flip_lr) = tx_type_flips(tx_type);
     let olim = 1i32 << (7 + bd);
-    let p = Params {
+    Params {
         w: 1 << log2w,
         th: (1usize << log2h).min(32),
         flip_ud,
@@ -1076,10 +1082,7 @@ fn run<const TMP: usize, const WIDE: bool>(
         fshift: 12 + total - d1,
         omin: -olim,
         omax: olim - 1,
-    };
-    let mut tmp = [0i32; TMP];
-    col_dispatch::<WIDE>(log2h, col_kind(tx_type), &p, src, stride, &mut tmp);
-    row_dispatch::<WIDE>(log2w, row_kind(tx_type), &p, &tmp, coefs);
+    }
 }
 
 fn run_sized<const WIDE: bool>(
@@ -1135,6 +1138,63 @@ pub fn fwd_txfm(
         run_sized::<false>(src, src_stride, coefs, tx_size, tx_type, bd, true);
     } else {
         run_sized::<true>(src, src_stride, coefs, tx_size, tx_type, bd, false);
+    }
+}
+
+/// The column passes of one residual block, kept so that the transform
+/// types sharing a vertical transform share them ([`fwd_txfm_cols`]).
+#[derive(Clone, Debug, Default)]
+pub struct FwdCols {
+    tmp: [Vec<i32>; 4],
+    done: [bool; 4],
+}
+
+impl FwdCols {
+    /// Forgets the passes (for a new residual block or transform size).
+    pub fn clear(&mut self) {
+        self.done = [false; 4];
+    }
+}
+
+/// [`fwd_txfm`] of the residual block `cols` was last used with (since its
+/// [`FwdCols::clear`]): equal output, but each vertical transform (DCT,
+/// ADST, flipped ADST, identity) runs over the block only once.
+pub fn fwd_txfm_cols(
+    cols: &mut FwdCols,
+    src: &[i32],
+    src_stride: usize,
+    coefs: &mut [i32],
+    tx_size: usize,
+    tx_type: usize,
+    bd: u32,
+) {
+    let log2w = TX_WIDTH_LOG2[tx_size] as u32;
+    let log2h = TX_HEIGHT_LOG2[tx_size] as u32;
+    let wide = !(bd <= 8 && log2w.max(log2h) < 6);
+    let p = params(tx_size, tx_type, bd, !wide);
+    let kind = col_kind(tx_type);
+    let k = match kind {
+        K_DCT => 0,
+        K_ADST if p.flip_ud => 2,
+        K_ADST => 1,
+        _ => 3,
+    };
+    let tmp = &mut cols.tmp[k];
+    if !cols.done[k] {
+        if tmp.len() < 2048 {
+            tmp.resize(2048, 0);
+        }
+        if wide {
+            col_dispatch::<true>(log2h, kind, &p, src, src_stride, tmp);
+        } else {
+            col_dispatch::<false>(log2h, kind, &p, src, src_stride, tmp);
+        }
+        cols.done[k] = true;
+    }
+    if wide {
+        row_dispatch::<true>(log2w, row_kind(tx_type), &p, tmp, coefs);
+    } else {
+        row_dispatch::<false>(log2w, row_kind(tx_type), &p, tmp, coefs);
     }
 }
 

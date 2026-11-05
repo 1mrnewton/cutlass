@@ -35,7 +35,7 @@ use crate::spec::tables::{
 
 use std::cell::Cell;
 
-use super::fwd_txfm::{fwd_txfm, fwd_wht4x4};
+use super::fwd_txfm::{FwdCols, fwd_txfm_cols, fwd_wht4x4};
 use super::msac_enc::{COST_SHIFT, bool_cost, symbol_cost};
 
 /// Encoder tuning for coefficient decisions.
@@ -311,6 +311,8 @@ pub struct QuantScratch {
     /// Coefficients of each transform type the quick estimate ranked (up
     /// to 16x16, which every type with more than DCT_DCT allows).
     ranked: [i32; 15 * 16 * 16],
+    /// The column passes of the current residual block.
+    cols: FwdCols,
 }
 
 impl QuantScratch {
@@ -324,6 +326,7 @@ impl QuantScratch {
             rec: [Rec::default(); 32 * 32],
             dqbuf: [0; 32 * 32],
             ranked: [0; 15 * 16 * 16],
+            cols: FwdCols::default(),
             dist: Dist {
                 ac: [0; 32 * 32],
                 q2: [0; 32 * 32],
@@ -721,7 +724,9 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
             dqbuf,
             dist,
             ranked,
+            cols,
         } = &mut *qs;
+        cols.clear();
         let sp = &src.planes[plane];
         let cp = &self.cur.planes[plane];
         for i in 0..h {
@@ -798,26 +803,48 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
             let mut est = [(0f64, 0u8, 0usize); 16];
             for (k, &t) in cands[1..nc].iter().enumerate() {
                 let coefs = &mut ranked[k * n..(k + 1) * n];
-                fwd_txfm(&res[..], w, coefs, tx as usize, t as usize, bd);
+                fwd_txfm_cols(cols, &res[..], w, coefs, tx as usize, t as usize, bd);
                 let qi = self.dequant_info(plane, t, tx);
                 let den = i64::from(qi.denom);
-                let (mut d, mut bits) = (0f64, 0f64);
-                for pos in 0..tw * th {
-                    let qv = if pos == 0 { qi.dc } else { qi.ac };
-                    let q2 = i64::from(
-                        match qi.qm {
-                            Some(m) => crate::dsp::round2(qv * i32::from(m[pos]), 5),
-                            None => qv,
+                let dl = qi.denom.trailing_zeros();
+                // Rounded levels and the squared error they leave (integers:
+                // the sum is exact, as the f64 sum of the squares was).
+                // Coefficients are clamped to 2^(7 + bd), so the quotients
+                // have operands below 2^26 and are exact in f64.
+                let level = |a: i64, q2: i64| -> (u32, u64) {
+                    let l = ((a * den + q2 / 2) as f64 / q2 as f64) as i64;
+                    let e = a - ((l * q2) >> dl);
+                    (l as u32, (e * e) as u64)
+                };
+                let mut d2 = 0u64;
+                match qi.qm {
+                    None => {
+                        let (dc, ac) = (i64::from(qi.dc.max(1)), i64::from(qi.ac.max(1)));
+                        let (l, e2) = level(i64::from(coefs[0].unsigned_abs()), dc);
+                        lv[0] = l;
+                        d2 += e2;
+                        for (o, &c) in lv[1..tw * th].iter_mut().zip(&coefs[1..tw * th]) {
+                            let (l, e2) = level(i64::from(c.unsigned_abs()), ac);
+                            *o = l;
+                            d2 += e2;
                         }
-                        .max(1),
-                    );
-                    let a = i64::from(coefs[pos].unsigned_abs());
-                    let l = (a * den + q2 / 2) / q2;
-                    let e = (a - l * q2 / den) as f64;
-                    d += e * e;
-                    lv[pos] = l as u32;
+                    }
+                    Some(m) => {
+                        for pos in 0..tw * th {
+                            let qv = if pos == 0 { qi.dc } else { qi.ac };
+                            let q2 = crate::dsp::round2(qv * i32::from(m[pos]), 5).max(1);
+                            let (l, e2) =
+                                level(i64::from(coefs[pos].unsigned_abs()), i64::from(q2));
+                            lv[pos] = l;
+                            d2 += e2;
+                        }
+                    }
+                }
+                let d = d2 as f64;
+                let mut bits = 0f64;
+                for &l in &lv[..tw * th] {
                     if l > 0 {
-                        bits += 2.0 + 1.5 * (l as f64).log2();
+                        bits += 2.0 + 1.5 * f64::from(l).log2();
                     }
                 }
                 // Zeros before the end of block cost too.
@@ -845,7 +872,15 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
             } else if let Some(k) = done[i] {
                 coefs[..n].copy_from_slice(&ranked[k * n..(k + 1) * n]);
             } else {
-                fwd_txfm(&res[..], w, &mut coefs[..], tx as usize, t as usize, bd);
+                fwd_txfm_cols(
+                    cols,
+                    &res[..],
+                    w,
+                    &mut coefs[..],
+                    tx as usize,
+                    t as usize,
+                    bd,
+                );
             }
             let qi = self.dequant_info(plane, t, tx);
             dist.denom_log2 = qi.denom.trailing_zeros();

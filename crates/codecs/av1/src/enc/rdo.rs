@@ -1730,6 +1730,42 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         if !hp {
             mv_new = Mv::new(me.mv.0 & !1, me.mv.1 & !1);
         }
+        // The search's prediction of the new vector is the one NEWMV makes
+        // (same filter, an unscaled reference): keep it and its SATD.
+        let mut new_dist = None;
+        if params.filter == 0
+            && mv_new == Mv::new(me.mv.0, me.mv.1)
+            && self.refs[rf as usize].as_ref().is_some_and(|rv| {
+                rv.mirror.is_none()
+                    && rv.pic.planes[0].w == rv.upscaled_width
+                    && rv.pic.planes[0].h == rv.frame_height
+                    && rv.upscaled_width == self.hdr.frame_width as usize
+                    && rv.frame_height == self.hdr.frame_height as usize
+            })
+            && self.me_scratch.best_pred_ok
+        {
+            let p = &self.me_scratch.best_pred[..w * h];
+            let key = PredKey {
+                plane: 0,
+                refs: [rf, NONE],
+                mv: [mv_new, Mv::ZERO],
+                filters: [0, 0],
+                area: [x, y, w, h],
+                intrabc: false,
+            };
+            let cache = &mut self.me_scratch.pred_cache;
+            if !cache.iter().any(|e| e.0 == key) {
+                let mut buf = if cache.len() >= PRED_CACHE {
+                    cache.remove(0).1
+                } else {
+                    Vec::new()
+                };
+                buf.clear();
+                buf.extend_from_slice(p);
+                self.me_scratch.pred_cache.push((key, buf));
+            }
+            new_dist = Some(me.dist);
+        }
         let mut options: Vec<(u8, Mv, usize, f64)> = Vec::with_capacity(4);
         let dr = i32::from(mv_new.row) - i32::from(pred0.row);
         let dc = i32::from(mv_new.col) - i32::from(pred0.col);
@@ -1775,14 +1811,17 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
                 continue;
             }
             let sp = &src.planes[0];
-            let d = satd(
-                &sp.data[y * sp.stride + x..],
-                sp.stride,
-                &self.scratch.obmc,
-                w,
-                w,
-                h,
-            );
+            let d = match new_dist {
+                Some(d) if !warped && mode == NEWMV && mv == mv_new => d,
+                _ => satd(
+                    &sp.data[y * sp.stride + x..],
+                    sp.stride,
+                    &self.scratch.obmc,
+                    w,
+                    w,
+                    h,
+                ),
+            };
             let cost = f64::from(d) + lam * rate;
             if best.is_none_or(|b| cost < b.3) {
                 best = Some((mode, mv, idx, cost));

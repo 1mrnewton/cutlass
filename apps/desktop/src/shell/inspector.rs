@@ -291,6 +291,21 @@ impl Shell {
         self.apply_requests(&requests)
     }
 
+    /// Give the selected title the look on the Effects page with `id`, or
+    /// take every part off with `"none"`. One undo restores it.
+    pub fn set_text_effect(&mut self, id: &str) -> Result<(), ShellError> {
+        let effect = std::iter::once(&cutlass_editor::NO_TEXT_EFFECT)
+            .chain(cutlass_editor::TEXT_EFFECTS)
+            .find(|effect| effect.id == id)
+            .ok_or_else(|| ShellError::Unavailable(format!("no text effect is called {id}")))?;
+        let segment_id = self.text_segment()?;
+        self.refuse_locked(&segment_id)?;
+        let glow_id = MaterialId::new(self.fresh("glow"));
+        let face = self.face.name().to_owned();
+        let requests = cutlass_editor::text_effect_requests(effect, &segment_id, glow_id, &face);
+        self.apply_requests(&requests)
+    }
+
     /// Make the selected title glow in `color`. A split clip's halves glow
     /// on their own once one changes. One undo restores it.
     pub fn set_text_glow(
@@ -975,6 +990,20 @@ mod tests {
         desktop.undo().unwrap();
         assert_eq!(desktop.text_look().unwrap().bubble, "thought");
         assert!(desktop.set_text_bubble("cloud").is_err());
+
+        // An effect sets every part in one step and reads back as itself.
+        desktop.set_text_effect("pop").unwrap();
+        let look = desktop.text_look().unwrap();
+        assert_eq!(
+            cutlass_editor::text_effect_of(&look).map(|effect| effect.id),
+            Some("pop")
+        );
+        desktop.undo().unwrap();
+        assert_ne!(
+            cutlass_editor::text_effect_of(&desktop.text_look().unwrap()).map(|effect| effect.id),
+            Some("pop")
+        );
+        assert!(desktop.set_text_effect("sparkle").is_err());
 
         pick(&mut desktop, "main");
         assert_eq!(desktop.text_look(), None);

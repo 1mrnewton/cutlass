@@ -243,7 +243,7 @@ fn text_panel(
                     footer(ui, &["Save as preset"]);
                 }
                 1 => bubble_page(shell, ui),
-                _ => later_tiles(ui, &["None", "Shadow", "Glow", "Outline"]),
+                _ => effect_page(shell, ui),
             }
         }
         1 => animation_tab(shell, ui, state, &["In", "Out", "Loop"], TEXT_MOTIONS),
@@ -2081,6 +2081,39 @@ fn bubble_page(shell: &mut Shell, ui: &mut Ui) {
     });
     if let Some(key) = picked {
         send(shell, |shell| shell.set_text_bubble(key));
+    }
+}
+
+/// The Effects page: None, then each look, the one the title wears
+/// outlined. A pick sets its fill, outline, shadow and glow in one step.
+fn effect_page(shell: &mut Shell, ui: &mut Ui) {
+    let Some(look) = shell.text_look() else {
+        return;
+    };
+    let worn = cutlass_editor::text_effect_of(&look).map(|effect| effect.id);
+    let mut picked = None;
+    ui.add_space(8.0);
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = Vec2::splat(6.0);
+        let effects =
+            std::iter::once(&cutlass_editor::NO_TEXT_EFFECT).chain(cutlass_editor::TEXT_EFFECTS);
+        for effect in effects {
+            let on = worn == Some(effect.id);
+            let stroke = if on {
+                Stroke::new(tokens::SELECTED_EDGE * 2.0, tokens::EXPORT)
+            } else {
+                Stroke::NONE
+            };
+            let tile = egui::Button::new(RichText::new(effect.name).size(11.0))
+                .fill(BOX)
+                .stroke(stroke);
+            if ui.add_sized([64.0, 48.0], tile).clicked() && !on {
+                picked = Some(effect.id);
+            }
+        }
+    });
+    if let Some(id) = picked {
+        send(shell, |shell| shell.set_text_effect(id));
     }
 }
 

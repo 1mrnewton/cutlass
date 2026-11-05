@@ -5,10 +5,10 @@
 //! same id. Probe reads stream parameters and timestamps. It does not decode.
 //! [`Media::decode_at`] seeks a picture. [`Media::audio_from`] seeks a PCM window.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::fs::File;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use cutlass_codec::access::{
@@ -248,6 +248,8 @@ struct Ready {
 pub struct ReaderFactory {
     families: Vec<Family>,
     decoders: DecodeFactory,
+    /// Files [`Self::open`] reads in place of others: a source's proxy.
+    stand_ins: Arc<HashMap<PathBuf, PathBuf>>,
 }
 
 impl ReaderFactory {
@@ -256,7 +258,37 @@ impl ReaderFactory {
         Self {
             families: Vec::new(),
             decoders: DecodeFactory::new(),
+            stand_ins: Arc::default(),
         }
+    }
+
+    /// The same readers, opening each file of `stand_ins` in place of the
+    /// source it is keyed by. A preview opens proxies this way; probing
+    /// still reads the source, and export keeps readers without them.
+    #[must_use]
+    pub fn with_stand_ins(&self, stand_ins: HashMap<PathBuf, PathBuf>) -> Self {
+        Self {
+            stand_ins: Arc::new(stand_ins),
+            ..self.clone()
+        }
+    }
+
+    /// The file [`Self::open`] reads for `path`.
+    fn stand_in<'a>(&'a self, path: &'a Path) -> &'a Path {
+        if self.stand_ins.is_empty() {
+            return path;
+        }
+        let found = match self.stand_ins.get(path) {
+            Some(found) => Some(found),
+            None => path
+                .canonicalize()
+                .ok()
+                .and_then(|canonical| self.stand_ins.get(&canonical)),
+        };
+        // A proxy since removed leaves the source to play.
+        found
+            .filter(|found| found.is_file())
+            .map_or(path, PathBuf::as_path)
     }
 
     pub fn decoders_mut(&mut self) -> &mut DecodeFactory {
@@ -292,6 +324,7 @@ impl ReaderFactory {
 
     /// Opens the container and a decoder for each picture or audio stream.
     pub fn open(&self, path: &Path) -> Result<Media, EngineError> {
+        let path = self.stand_in(path);
         let info = self.probe(path)?;
         let demux = self.open_demux(path)?;
         let (picture, audio) = open_pipes(&self.decoders, demux.as_ref())?;

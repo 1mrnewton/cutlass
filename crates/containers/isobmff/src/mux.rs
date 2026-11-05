@@ -672,7 +672,23 @@ fn tkhd(track: &TrackOut, duration: u64) -> Vec<u8> {
 /// A zero segment duration with a media time does not describe a dwell.
 /// Fragmented files leave that duration unknown. Use the media length so a
 /// player does not treat the edit as empty.
+///
+/// An Opus track without edits gets the one its encapsulation asks for:
+/// play from the pre-skip to the end of the sample durations, whose last
+/// one is already cut to the end trim.
 fn present_edits(track: &TrackOut, media_duration: u64, movie_scale: u32) -> Vec<Edit> {
+    if track.edits.is_empty()
+        && track.params.codec == CodecId::Opus
+        && let Some(pre_skip) = crate::opus::pre_skip(&track.params.extradata)
+        && media_duration > u64::from(pre_skip)
+    {
+        let played = media_duration - u64::from(pre_skip);
+        return vec![Edit {
+            segment_duration: scale_u(played, track.params.timescale.get(), movie_scale).max(1),
+            media_time: Some(i64::from(pre_skip)),
+            media_rate: 0x0001_0000,
+        }];
+    }
     track
         .edits
         .iter()
@@ -890,7 +906,10 @@ fn config_boxes(track: &TrackOut) -> Result<Vec<u8>, Error> {
     } else if matches!(&code, b"vp08" | b"vp09") {
         out.extend(box_bytes(b"vpcC", &track.params.extradata));
     } else if &code == b"Opus" {
-        out.extend(box_bytes(b"dOps", &track.params.extradata));
+        let dops = crate::opus::dops(&track.params.extradata).ok_or(Error::Unsupported {
+            what: "Opus configuration that is neither dOps nor OpusHead",
+        })?;
+        out.extend(box_bytes(b"dOps", &dops));
     } else if &code == b"alac" {
         // Extradata is the bare cookie; the entry holds its config in an
         // `alac` box and its layout in a sibling `chan` box, as Apple writes.

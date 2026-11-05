@@ -16,6 +16,7 @@ use cutlass_flac_container::FlacMux;
 use cutlass_isobmff::{FileBrand, Mp4Mux};
 use cutlass_model::Draft;
 use cutlass_mp3_container::Mp3Mux;
+use cutlass_ogg::OggMux;
 use cutlass_render::Renderer;
 use cutlass_renderer_software::SoftwareDevice;
 use cutlass_riff::WavMux;
@@ -136,8 +137,9 @@ fn write_part(
 }
 
 /// Write only the timeline's sound over `request.range` to `destination`:
-/// AAC or ALAC in an M4A file, PCM in a WAV file, FLAC in a FLAC file, or
-/// MP3 in an MP3 file, as `request.audio` names.
+/// AAC or ALAC in an M4A file, PCM in a WAV file, FLAC in a FLAC file, MP3
+/// in an MP3 file, or Opus in an Ogg (`.opus`) file, as `request.audio`
+/// names.
 /// The file is written beside its destination and moved there when done.
 pub fn write_sound(
     sources: &MovieSources<'_>,
@@ -203,6 +205,18 @@ pub fn write_sound(
                 )?;
                 mux.into_inner()
                     .map_err(|error| ExportError::File(error.to_string()))?
+            }
+            (CodecId::Opus, ContainerId::Ogg) => {
+                let mut mux = OggMux::new(out);
+                export_sound(
+                    sources.draft,
+                    request,
+                    sources.encoders,
+                    &mut mux,
+                    audio,
+                    Some(progress),
+                )?;
+                mux.into_inner()
             }
             _ => return Err(ExportError::Container),
         };
@@ -311,7 +325,12 @@ mod tests {
             audio: Some(AudioExport {
                 codec,
                 bitrate: 128_000,
-                sample_rate: 44_100,
+                // Opus is coded at 48 kHz.
+                sample_rate: if codec == CodecId::Opus {
+                    48_000
+                } else {
+                    44_100
+                },
                 channels: 2,
                 limiter: 0,
             }),
@@ -331,6 +350,7 @@ mod tests {
         cutlass_pcm::register_encoders(&mut encoders);
         cutlass_flac::register_encoders(&mut encoders);
         cutlass_mp3::register_encoders(&mut encoders);
+        cutlass_opus::register_encoders(&mut encoders);
         let draft = Draft::empty("D");
         let readers = ReaderFactory::new();
         let sources = MovieSources {
@@ -410,6 +430,25 @@ mod tests {
         assert_eq!(params.sample_rate(), Some(44_100));
         // The cookie: 24-bit, as the float mix is kept.
         assert_eq!(params.extradata()[5], 24);
+    }
+
+    /// Half a second of Opus in Ogg: the head, the tags, and audio pages
+    /// whose last granule is the pre-skip plus exactly half a second.
+    #[test]
+    fn sound_alone_writes_an_opus_file() {
+        let (_, opus) = written(CodecId::Opus, ContainerId::Ogg, "cut.opus");
+        assert_eq!(&opus[..4], b"OggS");
+        assert_eq!(&opus[28..36], b"OpusHead");
+        let length = opus.len() as u64;
+        let mut demux = cutlass_ogg::OggDemux::open(std::io::Cursor::new(opus), length).unwrap();
+        let stream = cutlass_container::Demux::streams(&demux)[0].clone();
+        let pre_skip = stream.trim().encoder_delay().unwrap();
+        assert_eq!(stream.edits()[0].duration(), 24_000);
+        let mut ticks = 0;
+        while let Some(packet) = cutlass_container::Demux::read_packet(&mut demux).unwrap() {
+            ticks += packet.timestamp().duration().unwrap();
+        }
+        assert_eq!(u64::try_from(ticks).unwrap(), pre_skip + 24_000);
     }
 
     #[test]

@@ -832,6 +832,8 @@ dependencies = [
  "cutlass-model",
  "cutlass-mp3",
  "cutlass-mp3-container",
+ "cutlass-ogg",
+ "cutlass-opus",
  "cutlass-pcm",
  "cutlass-playback",
  "cutlass-render",
@@ -866,6 +868,8 @@ dependencies = [
  "cutlass-model",
  "cutlass-mp3",
  "cutlass-mp3-container",
+ "cutlass-ogg",
+ "cutlass-opus",
  "cutlass-pcm",
  "cutlass-platform-apple",
  "cutlass-playback",
@@ -1046,6 +1050,7 @@ dependencies = [
 name = "cutlass-ogg"
 version = "0.1.0"
 dependencies = [
+ "cutlass-codec",
  "cutlass-container",
 ]
 
@@ -1053,8 +1058,12 @@ dependencies = [
 name = "cutlass-opus"
 version = "0.1.0"
 dependencies = [
+ "cutlass-codec",
+ "cutlass-container",
  "cutlass-decode",
  "cutlass-encode",
+ "cutlass-isobmff",
+ "cutlass-ogg",
 ]
 
 [[package]]
@@ -1155,6 +1164,7 @@ dependencies = [
  "cutlass-jpeg",
  "cutlass-model",
  "cutlass-mp3-container",
+ "cutlass-ogg",
  "cutlass-riff",
  "cutlass-still",
 ]

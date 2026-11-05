@@ -5950,11 +5950,14 @@ fn export_choices(shell: &Shell, ui: &mut Ui, view: &mut ViewState) {
         });
     }
     ui.checkbox(&mut export.sound, "Audio");
-    // PCM goes in a MOV or a WAV, never an MP4. FLAC and MP3 are sound
-    // alone, each in a file of its own.
+    // PCM goes in a MOV or a WAV, never an MP4. FLAC, MP3 and Opus are
+    // sound alone, each in a file of its own (Opus in an Ogg file).
     let pcm_fits = view.export_mov || !export.picture;
     let alone_fits = !export.picture;
-    let alone = matches!(export.audio.codec, CodecId::Flac | CodecId::Mp3);
+    let alone = matches!(
+        export.audio.codec,
+        CodecId::Flac | CodecId::Mp3 | CodecId::Opus
+    );
     if (!pcm_fits && export.audio.codec == CodecId::Pcm) || (!alone_fits && alone) {
         export.audio.codec = CodecId::Aac;
     }
@@ -5985,14 +5988,19 @@ fn export_choices(shell: &Shell, ui: &mut Ui, view: &mut ViewState) {
             if ui.add_enabled(alone_fits, flac).clicked() {
                 audio.codec = CodecId::Flac;
             }
+            let opus = egui::Button::selectable(audio.codec == CodecId::Opus, "Opus");
+            if ui.add_enabled(alone_fits, opus).clicked() {
+                audio.codec = CodecId::Opus;
+                audio.sample_rate = 48_000;
+            }
         });
         choice_row(ui, "Sample rate", |ui| {
             for rate in SoundFormat::SAMPLE_RATES {
                 let name = if rate == 44_100 { "44.1 kHz" } else { "48 kHz" };
-                if ui
-                    .selectable_label(audio.sample_rate == rate, name)
-                    .clicked()
-                {
+                // Opus is coded at 48 kHz only.
+                let fits = rate == 48_000 || audio.codec != CodecId::Opus;
+                let button = egui::Button::selectable(audio.sample_rate == rate, name);
+                if ui.add_enabled(fits, button).clicked() {
                     audio.sample_rate = rate;
                 }
             }

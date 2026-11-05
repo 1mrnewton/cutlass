@@ -5,7 +5,9 @@
 //! track's codec configuration may arrive with its first packet, as encoders
 //! hand it over; it is written in the index at the end. An AAC
 //! configuration wrapped in an MPEG-4 ES descriptor, as Apple's encoder
-//! gives it, is unwrapped to the bare AudioSpecificConfig MP4 stores.
+//! gives it, is unwrapped to the bare AudioSpecificConfig MP4 stores. An
+//! Opus configuration may be an `OpusHead` or a `dOps` body; the file
+//! stores `dOps`, and an edit that starts play after the pre-skip.
 
 use std::io::{Seek, Write};
 
@@ -108,12 +110,12 @@ fn rejected(message: &str) -> MuxError {
 const PRORES_ENTRIES: [[u8; 4]; 4] = [*b"apco", *b"apcs", *b"apcn", *b"apch"];
 
 /// The box writer's parameters for `stream`: H.264, HEVC or ProRes
-/// pictures, or AAC or 16-bit PCM sound. A ProRes track whose extradata is
+/// pictures, or AAC, Opus, or 16-bit PCM sound. A ProRes track whose extradata is
 /// a profile's four-character code is written with that sample entry.
 fn box_params(stream: &NewStream) -> Result<StreamParams, MuxError> {
     let StreamCodec::Known(codec) = stream.params.codec() else {
         return Err(rejected(
-            "mp4 export writes H.264, HEVC, ProRes, AAC, ALAC, and PCM",
+            "mp4 export writes H.264, HEVC, ProRes, AAC, ALAC, Opus, and PCM",
         ));
     };
     let scale = BoxScale(stream.timescale.ticks_per_second());
@@ -130,7 +132,7 @@ fn box_params(stream: &NewStream) -> Result<StreamParams, MuxError> {
             };
             StreamParams::video(codec, scale, size.width(), size.height())
         }
-        Id::Aac | Id::Pcm => {
+        Id::Aac | Id::Opus | Id::Pcm => {
             let rate = stream
                 .params
                 .sample_rate()
@@ -139,10 +141,10 @@ fn box_params(stream: &NewStream) -> Result<StreamParams, MuxError> {
                 .params
                 .channels()
                 .ok_or_else(|| rejected("a sound track needs channels"))?;
-            let codec = if *codec == Id::Aac {
-                CodecId::Aac
-            } else {
-                CodecId::Pcm
+            let codec = match codec {
+                Id::Aac => CodecId::Aac,
+                Id::Opus => CodecId::Opus,
+                _ => CodecId::Pcm,
             };
             StreamParams::audio(codec, scale, rate, channels, 16, SampleFormat::S16Le)
         }
@@ -168,7 +170,7 @@ fn box_params(stream: &NewStream) -> Result<StreamParams, MuxError> {
         }
         _ => {
             return Err(rejected(
-                "mp4 export writes H.264, HEVC, ProRes, AAC, ALAC, and PCM",
+                "mp4 export writes H.264, HEVC, ProRes, AAC, ALAC, Opus, and PCM",
             ));
         }
     };
@@ -355,6 +357,8 @@ impl<W: Write + Seek> Mux for Mp4Mux<W> {
         let index = self.track(track.get()).map_err(|error| self.fail(error))?;
         let stored = match self.tracks[index].codec {
             CodecId::Aac => bare_asc(config).map_err(|error| self.fail(error))?,
+            CodecId::Opus => crate::opus::dops(config)
+                .ok_or_else(|| self.fail(rejected("Opus configuration is not an OpusHead")))?,
             _ => config.to_vec(),
         };
         self.inner
@@ -441,6 +445,62 @@ mod tests {
         assert_eq!(last_end, 2400);
         assert_eq!(sound_bytes.len(), 2400 * 4);
         assert_eq!(sound_bytes[1600 * 4], 7);
+    }
+
+    fn opus_track(mux: &mut Mp4Mux<Cursor<Vec<u8>>>) -> cutlass_container::TrackId {
+        mux.add_stream(NewStream {
+            params: StreamParams::try_audio(StreamCodec::Known(Id::Opus), 48_000, 2, Vec::new())
+                .unwrap(),
+            timescale: Timescale::new(48_000),
+            language: None,
+        })
+        .unwrap()
+    }
+
+    /// An Opus track whose `OpusHead` arrives with the first packet is
+    /// stored as `dOps`, gets an edit that starts after the pre-skip and
+    /// ends with the samples, and reads back as the same `OpusHead`.
+    #[test]
+    fn an_opus_head_is_stored_as_dops_with_a_pre_skip_edit() {
+        let mut head = b"OpusHead".to_vec();
+        head.extend([1, 2, 0x38, 0x01, 0x44, 0xAC, 0, 0, 0, 0, 0]);
+        let mut mux = Mp4Mux::new(Cursor::new(Vec::new()));
+        let sound = opus_track(&mut mux);
+        mux.set_config(sound, &head).unwrap();
+        // 312 samples of pre-skip, then 2000 played: two whole packets and
+        // one cut to 392.
+        for (pts, duration) in [(0, 960), (960, 960), (1920, 392)] {
+            let data = vec![0xFC, 0xFF, 0xFE];
+            mux.write_packet(&packet(sound.get(), data, pts, duration, 48_000))
+                .unwrap();
+        }
+        mux.finish(&[TrackDuration {
+            track: sound,
+            timescale: Timescale::new(48_000),
+            ticks: 2312,
+        }])
+        .unwrap();
+        let bytes = mux.into_writer().unwrap().into_inner();
+        let at = bytes.windows(4).position(|w| w == b"dOps").unwrap();
+        assert_eq!(
+            &bytes[at + 4..at + 15],
+            &[0, 2, 0x01, 0x38, 0, 0, 0xAC, 0x44, 0, 0, 0]
+        );
+
+        let file = crate::IsoBmffFile::open(Cursor::new(bytes)).unwrap();
+        let stream = &cutlass_container::Demux::streams(&file)[0];
+        assert_eq!(stream.params().extradata(), head.as_slice());
+        assert_eq!(stream.trim().encoder_delay(), Some(312));
+        let edit = stream.edits()[0];
+        assert_eq!(edit.media_time(), Some(312));
+        assert_eq!(edit.duration(), 2000);
+    }
+
+    #[test]
+    fn a_bad_opus_configuration_is_refused() {
+        let mut mux = Mp4Mux::new(Cursor::new(Vec::new()));
+        let sound = opus_track(&mut mux);
+        assert!(mux.set_config(sound, b"OpusTags").is_err());
     }
 
     #[test]

@@ -388,7 +388,8 @@ impl Default for ExportRequest {
 }
 
 /// The sound of an export: AAC (in an MP4, a movie or an M4A), 16-bit PCM
-/// (in a movie or a WAV), or 16-bit FLAC (alone, in a FLAC file).
+/// (in a movie or a WAV), 16-bit FLAC (alone, in a FLAC file), MP3 (alone,
+/// in an MP3 file), or Opus (alone, in an Ogg `.opus` file).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SoundFormat {
     pub codec: CodecId,
@@ -417,7 +418,12 @@ impl SoundFormat {
         cutlass_export::AudioExport {
             codec: self.codec,
             bitrate: if self.lossless() { 0 } else { self.bitrate },
-            sample_rate: self.sample_rate,
+            // Opus is coded at 48 kHz whatever rate was picked.
+            sample_rate: if self.codec == CodecId::Opus {
+                48_000
+            } else {
+                self.sample_rate
+            },
             channels: self.channels,
             limiter: 0,
         }
@@ -430,6 +436,7 @@ impl SoundFormat {
             CodecId::Pcm => "wav",
             CodecId::Flac => "flac",
             CodecId::Mp3 => "mp3",
+            CodecId::Opus => "opus",
             _ => "m4a",
         }
     }
@@ -440,6 +447,7 @@ impl SoundFormat {
             CodecId::Pcm => cutlass_codec::ContainerId::Riff,
             CodecId::Flac => cutlass_codec::ContainerId::Flac,
             CodecId::Mp3 => cutlass_codec::ContainerId::Mp3,
+            CodecId::Opus => cutlass_codec::ContainerId::Ogg,
             _ => cutlass_codec::ContainerId::Isobmff,
         }
     }
@@ -5932,6 +5940,11 @@ impl Shell {
         if request.sound && request.audio.codec == CodecId::Mp3 {
             return Err(ShellError::Unavailable(
                 "MP3 sound is written alone, without a picture".to_owned(),
+            ));
+        }
+        if request.sound && request.audio.codec == CodecId::Opus {
+            return Err(ShellError::Unavailable(
+                "Opus sound is written alone, in an Opus file".to_owned(),
             ));
         }
         let bitrate = match request.bitrate {
@@ -12595,6 +12608,45 @@ mod tests {
         assert_eq!(
             mp3_movie.unwrap_err().to_string(),
             "MP3 sound is written alone, without a picture"
+        );
+
+        // Opus alone is an Ogg file the readers open again, at 48 kHz
+        // whatever rate was picked; in a movie it is refused.
+        let opus_sound = super::SoundFormat {
+            codec: CodecId::Opus,
+            sample_rate: 44_100,
+            bitrate: 128_000,
+            ..super::SoundFormat::default()
+        };
+        run(
+            &mut desktop,
+            ExportRequest {
+                path: temp.path.join("sound.mp4"),
+                picture: false,
+                audio: opus_sound,
+                ..ExportRequest::default()
+            },
+        );
+        let opus = temp.path.join("sound.opus");
+        let bytes = std::fs::read(&opus).unwrap();
+        assert_eq!(&bytes[..4], b"OggS");
+        assert_eq!(&bytes[28..36], b"OpusHead");
+        let info = crate::readers::installed_readers().probe(&opus).unwrap();
+        assert!(info.duration.is_some_and(|duration| duration.0 > 0));
+        assert!(
+            info.streams
+                .iter()
+                .any(|stream| stream.sample_rate == Some(48_000))
+        );
+        let opus_movie = desktop.export(ExportRequest {
+            path: temp.path.join("opus.mp4"),
+            short_side: 480,
+            audio: opus_sound,
+            ..ExportRequest::default()
+        });
+        assert_eq!(
+            opus_movie.unwrap_err().to_string(),
+            "Opus sound is written alone, in an Opus file"
         );
 
         // A GIF alone, and then again beside a movie, which finds it taken.

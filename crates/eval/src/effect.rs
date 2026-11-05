@@ -16,8 +16,8 @@
 
 use cutlass_compositor::{ComposeError, Device, Extent, Frame, submit};
 use cutlass_effects::{
-    EffectSource, PackageKind, PackageStore, Step, animation_package_id, bundled_recipe, entry,
-    package_id, plugin_package_id, segment_package_id, video_package_id,
+    Adjust, EffectSource, PackageKind, PackageStore, Step, animation_package_id, bundled_recipe,
+    entry, package_id, plugin_package_id, segment_package_id, video_package_id,
 };
 use cutlass_model::{Draft, MaterialRef, Micros, Segment, SegmentId, TrackAttribute};
 use cutlass_picture::{CpuBytes, Picture, PictureSource, Sample, rgba_len};
@@ -78,6 +78,9 @@ impl PictureSource for Held {
 /// A blend mode the app ships runs on the GPU and does not count.
 pub(crate) fn needs_cpu(draft: &Draft, time: Micros, stack: &[StackLayer<'_>]) -> bool {
     !global_marks(draft, time, stack).is_empty()
+        || stack
+            .iter()
+            .any(|layer| clip_adjust(draft, layer.track_index, layer.segment_index).is_some())
         || stack.iter().any(|layer| {
             match clip_filter(draft, layer.track_index, layer.segment_index) {
                 ClipFilter::None => false,
@@ -101,7 +104,7 @@ pub(crate) fn present<D: Device>(
         !matches!(
             clip_filter(draft, layer.track_index, layer.segment_index),
             ClipFilter::None
-        )
+        ) || clip_adjust(draft, layer.track_index, layer.segment_index).is_some()
     });
     let canvas = project_canvas(
         draft.canvas_config.background.as_deref(),
@@ -187,10 +190,23 @@ fn push_visual<'a, D: Device>(
         batch.push(Slot::Borrowed(layer.source));
         return Ok(());
     };
+    let adjust = clip_adjust(pass.draft, layer.track_index, layer.segment_index);
+    let sample = |time| {
+        let input = sample_cpu(layer.source, time)?;
+        Some(match adjust.as_ref() {
+            Some(adjust) => adjusted(adjust, input, time),
+            None => input,
+        })
+    };
     match filter {
-        ClipFilter::None => batch.push(Slot::Borrowed(layer.source)),
+        ClipFilter::None if adjust.is_none() => batch.push(Slot::Borrowed(layer.source)),
+        ClipFilter::None => {
+            if let Some(input) = sample(pass.time) {
+                batch.push(Slot::Owned(input));
+            }
+        }
         ClipFilter::Unary => {
-            if let Some(input) = sample_cpu(layer.source, pass.time) {
+            if let Some(input) = sample(pass.time) {
                 batch.push(Slot::Owned(apply_unary(
                     pass.store,
                     pass.draft,
@@ -205,7 +221,7 @@ fn push_visual<'a, D: Device>(
             let frame = paint(pass.device, pass.extent, pass.time, base.take(), batch)?;
             batch.clear();
             let backdrop = cpu_of(frame, pass.extent)?;
-            let Some(input) = sample_cpu(layer.source, pass.time) else {
+            let Some(input) = sample(pass.time) else {
                 *base = Some(backdrop);
                 return Ok(());
             };
@@ -393,6 +409,24 @@ fn clip_filter(draft: &Draft, track_index: usize, segment_index: usize) -> ClipF
         Some(PackageKind::Transition(_)) => ClipFilter::None,
         Some(PackageKind::Distort(_) | PackageKind::TextAnim(_)) | None => ClipFilter::Unary,
     }
+}
+
+/// The adjust sliders on a drawn clip, when any is set.
+fn clip_adjust(draft: &Draft, track_index: usize, segment_index: usize) -> Option<Adjust> {
+    let adjust =
+        cutlass_effects::segment_adjust(draft, segment(draft, track_index, segment_index)?);
+    (!adjust.is_identity()).then_some(adjust)
+}
+
+/// `input` with `adjust` run over it. The grain moves once a frame at 30
+/// frames a second.
+fn adjusted(adjust: &Adjust, input: CpuBytes, time: Micros) -> CpuBytes {
+    let (width, height) = (input.width(), input.height());
+    let mut rgba = input.rgba().to_vec();
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let seed = (time.0 / 33_333) as u32;
+    cutlass_effects::adjust_rgba(adjust, &mut rgba, width, height, seed);
+    CpuBytes::new(width, height, rgba).unwrap_or(input)
 }
 
 fn extra_package<'a>(draft: &'a Draft, segment: &Segment) -> Option<&'a str> {

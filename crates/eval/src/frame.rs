@@ -732,6 +732,40 @@ mod tests {
     }
 
     #[test]
+    fn an_adjusted_clip_composes_on_the_cpu_with_its_sliders() {
+        let draft = color_clip("0xFF404040", false);
+        assert_eq!(pixels(&draft, 0), [64, 64, 64, 255].repeat(2));
+        let mut session = cutlass_session::Session::open(draft);
+        session
+            .apply(
+                0,
+                &[cutlass_session::Request::SetAdjust {
+                    segment_id: cutlass_model::SegmentId::new("segment"),
+                    material_id: "bright".into(),
+                    key: "exposure".to_owned(),
+                    value: 0.5,
+                }],
+            )
+            .unwrap();
+        let draft = session.draft().clone();
+        assert_eq!(pixels(&draft, 0), [128, 128, 128, 255].repeat(2));
+        let mut device = SoftwareDevice::new();
+        let mut clips = OpenClips::new();
+        assert!(!matches!(
+            layers_in(
+                &Snapshot::new(&draft),
+                Micros(0),
+                &mut device,
+                &media(),
+                &mut clips,
+                0,
+                None,
+            ),
+            Ok(Composed::Layers(_))
+        ));
+    }
+
+    #[test]
     fn the_project_canvas_color_is_under_every_layer() {
         let mut draft = Draft::empty("draft");
         draft.canvas_config.width = 2;

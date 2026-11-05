@@ -22,3 +22,6 @@ pub use limits::{
 pub use mux::{FIRST_SERIAL, OggMux, VENDOR};
 pub use opus::{OpusHead, OpusTags, packet_samples};
 pub use probe::{OggFamily, probe};
+
+#[cfg(test)]
+mod behavior;

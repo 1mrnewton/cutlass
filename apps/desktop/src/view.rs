@@ -7977,16 +7977,18 @@ mod tests {
         assert!(top_cards(&draft, Shelf::Audio, "").is_empty());
         assert!(top_cards(&draft, Shelf::Media, "nope").is_empty());
         let blends = top_cards(&draft, Shelf::Transitions, "");
+        assert_eq!(blends.len(), 20);
         assert_eq!(
-            blends
+            blends[..3]
                 .iter()
                 .map(|card| card.name.as_str())
                 .collect::<Vec<_>>(),
-            ["Dissolve", "Dip"]
+            ["Dissolve", "Dip to black", "Dip to white"]
         );
         assert_eq!(blends[0].meta, "0.5s");
         assert!(!blends[0].on_timeline);
-        assert_eq!(top_cards(&draft, Shelf::Transitions, "dip").len(), 1);
+        assert_eq!(top_cards(&draft, Shelf::Transitions, "dip").len(), 2);
+        assert_eq!(top_cards(&draft, Shelf::Transitions, "push").len(), 4);
         let layers = top_cards(&draft, Shelf::Adjustments, "");
         assert_eq!(layers.len(), 1);
         assert_eq!(layers[0].id, cutlass_editor::ADJUSTMENT_CARD);

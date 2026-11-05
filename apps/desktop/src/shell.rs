@@ -9336,6 +9336,53 @@ mod tests {
     }
 
     #[test]
+    fn a_dropped_transition_shows_in_the_preview_with_no_package() {
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        draft.canvas_config.width = 2;
+        draft.canvas_config.height = 1;
+        for (id, color) in [("red", "0xFFFF0000"), ("blue", "0xFF0000FF")] {
+            draft.materials.material_colors.push(MaterialColorConfig {
+                id: id.into(),
+                is_color_clip: true,
+                solid_color: color.to_owned(),
+                ..MaterialColorConfig::default()
+            });
+        }
+        draft.tracks[0]
+            .segments
+            .push(Segment::new("left", "red", TimeRange::new(0, 1_000_000)));
+        draft.tracks[0].segments.push(Segment::new(
+            "right",
+            "blue",
+            TimeRange::new(1_000_000, 1_000_000),
+        ));
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.pixel_size = 0.001;
+        let card = super::TRANSITION_OFFERS
+            .iter()
+            .find(|offer| offer.id == "dip-white")
+            .unwrap()
+            .card_id();
+        desktop
+            .drop_transition(
+                &card,
+                lane_time(&desktop, 1_000_000.0),
+                crate::tokens::LANE_HEIGHT / 2.0,
+            )
+            .unwrap();
+        // The dip runs over the last 0.4s of the red clip: white halfway.
+        desktop.seek(Micros(800_000));
+        let rgba = desktop.preview_bytes().unwrap().rgba;
+        assert_eq!(&rgba[..4], &[255, 255, 255, 255]);
+        desktop.seek(Micros(500_000));
+        let rgba = desktop.preview_bytes().unwrap().rgba;
+        assert_eq!(&rgba[..4], &[255, 0, 0, 255]);
+    }
+
+    #[test]
     fn a_transition_lands_on_the_main_cut_and_undo_lifts_it() {
         let temp = Temp::new();
         touching_cut(&temp.path);
@@ -9462,7 +9509,8 @@ mod tests {
             )
             .unwrap();
         let blend = &desktop.draft().unwrap().materials.transitions[0];
-        assert_eq!(blend.name, "Dip");
+        assert_eq!(blend.name, "Dip to black");
+        assert_eq!(blend.effect_id, "cutlass-dip");
         assert_eq!(blend.duration, Micros(100));
         assert!(!blend.is_overlap);
 

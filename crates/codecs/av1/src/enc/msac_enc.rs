@@ -19,7 +19,9 @@ const FLUSH_BITS: u32 = 32;
 pub const COST_SHIFT: u32 = 8;
 
 pub struct MsacEnc {
-    out: Vec<u8>,
+    /// The bytes so far; a carry adds to the last one and ripples back
+    /// when the stream is finished (so an entry may exceed 0xff).
+    out: Vec<u16>,
     low: u64,
     rng: u32,
     pend: u32,
@@ -31,11 +33,25 @@ pub struct MsacEnc {
     marks: Vec<(usize, u32)>,
 }
 
+/// A saved coder state (see [`MsacEnc::checkpoint`]).
+#[derive(Clone, Default)]
+pub struct MsacState {
+    out_from: usize,
+    out_tail: Vec<u16>,
+    log_from: usize,
+    log_tail: Vec<Op>,
+    marks_from: usize,
+    marks_tail: Vec<(usize, u32)>,
+    low: u64,
+    rng: u32,
+    pend: u32,
+}
+
 /// One coded interval: `u` and `v` of [`MsacEnc::encode`] as functions of
 /// the range. Bit 32 set: `u` is the whole range; bit 33 set: `v` is 0.
 /// Otherwise `u` comes from bits 0..16 (probability) and 40..48 (count of
 /// `MIN_PROB`), `v` from bits 16..32 and 48..56.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 struct Op(u64);
 
 impl Op {
@@ -143,21 +159,60 @@ impl MsacEnc {
         }
     }
 
+    /// A point to come back to with [`MsacEnc::restore`]. With `base`, the
+    /// state now, holding what was coded since `base` (to return to after
+    /// going back to `base`); without, the state now on its own.
+    pub fn checkpoint(&self, base: Option<&MsacState>) -> MsacState {
+        // A carry changes the last byte only.
+        let (out_from, log_from, marks_from) = match base {
+            Some(b) => (b.out_from, b.log_from, b.marks_from),
+            None => (
+                self.out.len().saturating_sub(1),
+                self.log.as_ref().map_or(0, Vec::len),
+                self.marks.len(),
+            ),
+        };
+        MsacState {
+            out_from,
+            out_tail: self.out[out_from.min(self.out.len())..].to_vec(),
+            log_from,
+            log_tail: self
+                .log
+                .as_ref()
+                .map_or(Vec::new(), |l| l[log_from.min(l.len())..].to_vec()),
+            marks_from,
+            marks_tail: self.marks[marks_from.min(self.marks.len())..].to_vec(),
+            low: self.low,
+            rng: self.rng,
+            pend: self.pend,
+        }
+    }
+
+    /// Returns to a [`MsacEnc::checkpoint`].
+    pub fn restore(&mut self, s: &MsacState) {
+        self.out.truncate(s.out_from);
+        self.out.extend_from_slice(&s.out_tail);
+        if let Some(l) = &mut self.log {
+            l.truncate(s.log_from);
+            l.extend_from_slice(&s.log_tail);
+        }
+        self.marks.truncate(s.marks_from);
+        self.marks.extend_from_slice(&s.marks_tail);
+        self.low = s.low;
+        self.rng = s.rng;
+        self.pend = s.pend;
+    }
+
     /// Bits the stream holds so far, including the final trailing one bit.
     pub fn tell_bits(&self) -> u64 {
         self.out.len() as u64 * 8 + u64::from(self.pend) + 1
     }
 
-    /// Adds `c` at the last byte of `out`, rippling the carry back.
+    /// Adds `c` at the last byte of `out` (rippled back in `finish`).
     #[inline(always)]
-    fn carry(&mut self, mut c: u64) {
-        for b in self.out.iter_mut().rev() {
-            let t = u64::from(*b) + c;
-            *b = t as u8;
-            c = t >> 8;
-            if c == 0 {
-                return;
-            }
+    fn carry(&mut self, c: u64) {
+        if let Some(b) = self.out.last_mut() {
+            *b += c as u16;
         }
     }
 
@@ -173,7 +228,7 @@ impl MsacEnc {
         let mut shift = top;
         for _ in 0..n {
             shift -= 8;
-            self.out.push((self.low >> shift) as u8);
+            self.out.push(u16::from((self.low >> shift) as u8));
         }
         self.pend &= 7;
         self.low &= (1u64 << (15 + self.pend)) - 1;
@@ -331,9 +386,16 @@ impl MsacEnc {
             } else {
                 e << (-shift)
             };
-            self.out.push(b as u8);
+            self.out.push(u16::from(b as u8));
         }
-        self.out
+        let mut c = 0u16;
+        let mut bytes = vec![0u8; self.out.len()];
+        for (o, &b) in bytes.iter_mut().zip(&self.out).rev() {
+            let t = b + c;
+            *o = t as u8;
+            c = t >> 8;
+        }
+        bytes
     }
 }
 

@@ -72,6 +72,18 @@ impl Coder for MsacEnc {
     fn mark(&mut self, tag: u32) {
         MsacEnc::mark(self, tag);
     }
+    fn checkpoint(
+        &self,
+        base: Option<&super::msac_enc::MsacState>,
+    ) -> Option<super::msac_enc::MsacState> {
+        Some(MsacEnc::checkpoint(self, base))
+    }
+    fn restore(&mut self, s: &super::msac_enc::MsacState) {
+        MsacEnc::restore(self, s);
+    }
+    fn bits_written(&self) -> u64 {
+        self.tell_bits()
+    }
 }
 
 /// How the encoder chooses quantizers.
@@ -1257,6 +1269,7 @@ impl Av1Enc {
             compound_modes: ev("AV1_CMM", 1.0) > 0.0,
             palette_cache: ev("AV1_PCACHE", 1.0) > 0.0,
             est_intra_ratio: ev("AV1_EIP", if speed >= 5 { 2.0 } else { 0.0 }),
+            part_rd: ev("AV1_PRD", if speed <= 6 { 1.0 } else { 0.0 }) > 0.0,
             intra_rd_cands: ev(
                 "AV1_IRD",
                 if speed >= 7 {

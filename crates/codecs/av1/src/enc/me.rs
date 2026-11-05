@@ -584,6 +584,9 @@ pub struct MeScratch<P: Pixel> {
     /// Partition estimates of the current superblock: `[x, y, w, h]`, cost
     /// and motion (kept here for the mode decision, which owns this scratch).
     pub est_memo: Vec<([usize; 4], f64, (i32, i32))>,
+    /// The partition the next `enc_partition` of this node (row, column,
+    /// size) returns.
+    pub force_part: Option<(usize, usize, u8, usize)>,
     /// Edge-emulated reference area of a pattern search that reaches past the plane.
     win: Vec<P>,
     /// The mode search's recent predictions of the current block.
@@ -638,6 +641,7 @@ impl<P: Pixel> MeScratch<P> {
             pred: vec![P::default(); MAX_BLOCK * MAX_BLOCK],
             edge: vec![P::default(); EDGE_SIDE * EDGE_SIDE],
             est_memo: Vec::with_capacity(128),
+            force_part: None,
             win: Vec::new(),
             pred_cache: Vec::new(),
             tx_memo: None,

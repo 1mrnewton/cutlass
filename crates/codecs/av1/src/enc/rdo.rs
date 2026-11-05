@@ -115,6 +115,8 @@ pub struct ModeParams {
     /// only while DC's SATD cost is within this factor of the inter one
     /// (0: always; screen content always tries them).
     pub est_intra_ratio: f64,
+    /// Intra frames: partitions chosen by coding each candidate (closed loop).
+    pub part_rd: bool,
 }
 
 impl Default for ModeParams {
@@ -163,6 +165,7 @@ impl Default for ModeParams {
             compound_modes: true,
             palette_cache: true,
             est_intra_ratio: 0.0,
+            part_rd: false,
         }
     }
 }
@@ -549,6 +552,14 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         has_rows: bool,
         has_cols: bool,
     ) -> usize {
+        if let Some(f) = self.me_scratch.force_part
+            && f.0 == r
+            && f.1 == c
+            && f.2 == bsize
+        {
+            self.me_scratch.force_part = None;
+            return f.3;
+        }
         let p = self.enc_partition_pick(r, c, bsize, has_rows, has_cols);
         // A partition whose blocks have no chroma size in this subsampling is not allowed.
         let sub = PARTITION_SUBSIZE[p][bsize as usize];

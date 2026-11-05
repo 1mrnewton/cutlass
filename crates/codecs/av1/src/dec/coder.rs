@@ -66,6 +66,22 @@ pub trait Coder {
     /// `MsacEnc::mark`).
     #[inline(always)]
     fn mark(&mut self, _tag: u32) {}
+    /// Encoder trials: see `MsacEnc::checkpoint` (`None` when decoding).
+    #[inline(always)]
+    fn checkpoint(
+        &self,
+        _base: Option<&crate::enc::msac_enc::MsacState>,
+    ) -> Option<crate::enc::msac_enc::MsacState> {
+        None
+    }
+    /// Returns to a [`Coder::checkpoint`].
+    #[inline(always)]
+    fn restore(&mut self, _s: &crate::enc::msac_enc::MsacState) {}
+    /// Bits written so far (0 when decoding).
+    #[inline(always)]
+    fn bits_written(&self) -> u64 {
+        0
+    }
     /// Runs `f` on the coder; the decoder runs it on a copy of its state
     /// held in a local, which a loop can keep in registers.
     #[inline(always)]

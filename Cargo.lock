@@ -990,6 +990,7 @@ version = "0.1.0"
 dependencies = [
  "cutlass-decode",
  "cutlass-encode",
+ "cutlass-mp3-container",
 ]
 
 [[package]]

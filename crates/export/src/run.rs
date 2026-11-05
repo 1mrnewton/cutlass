@@ -587,7 +587,10 @@ where
             .frame_rate
             .frame_start(*index)
             .ok_or(ExportError::FrameRate)?;
-        let samples = mix_window(run.draft, settings, run.request, time, audio)?;
+        let mut samples = mix_window(run.draft, settings, run.request, time, audio)?;
+        if settings.codec == cutlass_codec::CodecId::Pcm {
+            samples = to_i16(samples)?;
+        }
         let packets = encoder
             .push(&AudioInput { pcm: samples })
             .map_err(ExportError::Encoder)?;
@@ -1085,7 +1088,7 @@ mod tests {
 
     impl Encoder for CopyAudio {
         fn codec(&self) -> CodecId {
-            CodecId::Pcm
+            CodecId::Flac
         }
 
         fn push(&mut self, input: &AudioInput) -> Result<Vec<Packet>, CodecError> {
@@ -1134,8 +1137,8 @@ mod tests {
     }
 
     fn open_pcm(params: &CodecParams) -> Result<Box<dyn Encoder>, CodecError> {
-        if params.codec != CodecId::Pcm || params.bitrate != 128_000 {
-            return Err(CodecError::Unsupported { what: "pcm" });
+        if params.codec != CodecId::Flac || params.bitrate != 128_000 {
+            return Err(CodecError::Unsupported { what: "flac" });
         }
         Ok(Box::new(CopyAudio {
             pts: 0,
@@ -1152,7 +1155,7 @@ mod tests {
         factory.register(CodecId::Gif, open_rgba);
         factory.register(CodecId::H264, open_rgba);
         factory.register(CodecId::Vp9, open_rgba);
-        factory.register(CodecId::Pcm, open_pcm);
+        factory.register(CodecId::Flac, open_pcm);
         factory.register(CodecId::Mjpeg, decline);
         factory
     }
@@ -1737,7 +1740,7 @@ mod tests {
 
     fn audio_settings() -> AudioExport {
         AudioExport {
-            codec: CodecId::Pcm,
+            codec: CodecId::Flac,
             bitrate: 128_000,
             sample_rate: 4_000,
             channels: 1,
@@ -2191,7 +2194,7 @@ mod tests {
             denominator: 1,
         };
         request.audio = Some(AudioExport {
-            codec: CodecId::Pcm,
+            codec: CodecId::Flac,
             bitrate: 128_000,
             sample_rate: u32::MAX,
             channels: 1,

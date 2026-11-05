@@ -394,7 +394,7 @@ impl Av1Enc {
         let mode = ModeParams {
             lambda_satd: 0.9 * qstep,
             min_block: if speed >= 8 { 16 } else { 8 },
-            max_block: 64,
+            max_block: 32,
             skip_sse_per_px: 0.25 * qstep * qstep,
             inter_frame: !key,
             me_range: if speed >= 8 { 16 } else { 48 },

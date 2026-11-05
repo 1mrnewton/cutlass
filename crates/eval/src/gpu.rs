@@ -10,17 +10,19 @@
 
 use cutlass_compositor::Frame;
 use cutlass_effects::Step;
-use cutlass_gpu::{Affine, Placement};
+use cutlass_gpu::{Affine, Placement, YuvTone};
 use cutlass_picture::CpuBytes;
 
 /// The pixels one layer draws.
 #[derive(Clone, Debug, PartialEq)]
 pub enum GpuSource {
-    /// Packed Y, then U, then V, limited-range BT.709.
+    /// Packed Y, then U, then V, limited-range BT.709, then `tone`, as
+    /// the CPU conversion does.
     Yuv {
         width: u32,
         height: u32,
         bytes: Vec<u8>,
+        tone: YuvTone,
     },
     /// Premultiplied RGBA.
     Rgba(CpuBytes),

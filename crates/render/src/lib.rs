@@ -206,6 +206,7 @@ impl Renderer {
                         views: [view.clone(), view.clone(), view],
                         size: *inner,
                         yuv: false,
+                        tone: cutlass_gpu::YuvTone::NONE,
                     };
                     bound.push(self.layers.bind(device, queue, &uploaded, *placement));
                 }
@@ -226,6 +227,7 @@ impl Renderer {
                         views: [result.clone(), result.clone(), result],
                         size,
                         yuv: false,
+                        tone: cutlass_gpu::YuvTone::NONE,
                     };
                     bound.clear();
                     bound.push(self.layers.bind(
@@ -308,6 +310,7 @@ impl Renderer {
             views: [first.clone(), first.clone(), first],
             size,
             yuv: false,
+            tone: cutlass_gpu::YuvTone::NONE,
         }
     }
 

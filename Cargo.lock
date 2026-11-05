@@ -787,6 +787,7 @@ version = "0.1.0"
 dependencies = [
  "cutlass-captions",
  "cutlass-codec",
+ "cutlass-color",
  "cutlass-compositor",
  "cutlass-container",
  "cutlass-decode",

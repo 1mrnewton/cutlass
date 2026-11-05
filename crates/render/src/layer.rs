@@ -10,12 +10,12 @@
 //! 3. oriented source to the stored texture (a quarter turn).
 //!
 //! Texels are fetched, not filtered. RGBA sources are premultiplied. A 4:2:0
-//! source is converted with limited-range BT.709, the conversion the CPU
-//! path applies, and has an alpha of one. Opacity scales the premultiplied
-//! color.
+//! source is converted with limited-range BT.709 and then its [`YuvTone`],
+//! the conversion the CPU path applies, and has an alpha of one. Opacity
+//! scales the premultiplied color.
 
 use cutlass_effects::Step;
-use cutlass_gpu::{Affine, Placement};
+use cutlass_gpu::{Affine, Placement, ToneCurve, YuvTone};
 
 use crate::{CANVAS_FORMAT, RenderError};
 
@@ -36,11 +36,13 @@ pub struct Plane<'a> {
 }
 
 /// Y, U, and V planes of one 4:2:0 picture. Chroma is half size, rounded down.
+/// `tone` follows the matrix.
 #[derive(Clone, Copy, Debug)]
 pub struct Planes<'a> {
     pub y: Plane<'a>,
     pub u: Plane<'a>,
     pub v: Plane<'a>,
+    pub tone: YuvTone,
 }
 
 impl<'a> Planes<'a> {
@@ -66,7 +68,14 @@ impl<'a> Planes<'a> {
             y: plane(width, height, y),
             u: plane(cw, ch, u),
             v: plane(cw, ch, v),
+            tone: YuvTone::NONE,
         })
+    }
+
+    /// The same planes with `tone` after the matrix.
+    #[must_use]
+    pub fn with_tone(self, tone: YuvTone) -> Self {
+        Self { tone, ..self }
     }
 }
 
@@ -101,6 +110,7 @@ pub(crate) struct Uploaded {
     pub(crate) views: [wgpu::TextureView; 3],
     pub(crate) size: (u32, u32),
     pub(crate) yuv: bool,
+    pub(crate) tone: YuvTone,
 }
 
 const SHADER: &str = r"
@@ -115,6 +125,13 @@ struct Params {
     sizes: vec4<f32>,
     // Texture width and height, opacity, kind: 0 rgba, 1 yuv.
     source: vec4<f32>,
+    // Tone after the matrix: source curve, destination curve (0 Rec.709,
+    // 1 HLG, 2 PQ), PQ reference nits, and 1 when it changes the sample.
+    tone: vec4<f32>,
+    // Linear gamut adaptation rows; w is 1 on the first row when there is one.
+    adapt_r: vec4<f32>,
+    adapt_g: vec4<f32>,
+    adapt_b: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> params: Params;
@@ -139,6 +156,75 @@ fn vs(@builtin(vertex_index) index: u32) -> Out {
 fn map(row_x: vec4<f32>, row_y: vec4<f32>, p: vec2<f32>) -> vec2<f32> {
     let q = vec3<f32>(p, 1.0);
     return vec2<f32>(dot(row_x.xyz, q), dot(row_y.xyz, q));
+}
+
+// The curves in the color crate's transfer module.
+const HLG_A: f32 = 0.17883277;
+const HLG_B: f32 = 0.28466892;
+const HLG_C: f32 = 0.55991073;
+const PQ_C1: f32 = 0.8359375;
+const PQ_C2: f32 = 18.8515625;
+const PQ_C3: f32 = 18.6875;
+const PQ_M1: f32 = 0.1593017578125;
+const PQ_M2: f32 = 78.84375;
+
+fn decode_curve(encoded: vec3<f32>, curve: f32, nits: f32) -> vec3<f32> {
+    let e = clamp(encoded, vec3<f32>(0.0), vec3<f32>(1.0));
+    if (curve < 0.5) {
+        return select(
+            pow((e + 0.099) / 1.099, vec3<f32>(1.0 / 0.45)),
+            e / 4.5,
+            e < vec3<f32>(0.081),
+        );
+    }
+    if (curve < 1.5) {
+        return select(
+            (exp((e - HLG_C) / HLG_A) + HLG_B) / 12.0,
+            e * e / 3.0,
+            e <= vec3<f32>(0.5),
+        );
+    }
+    let raised = pow(e, vec3<f32>(1.0 / PQ_M2));
+    let ratio = max(raised - PQ_C1, vec3<f32>(0.0)) / (PQ_C2 - PQ_C3 * raised);
+    let light = select(10000.0 * pow(ratio, vec3<f32>(1.0 / PQ_M1)), vec3<f32>(0.0), raised <= vec3<f32>(PQ_C1));
+    return clamp(light / nits, vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
+fn encode_curve(linear: vec3<f32>, curve: f32, nits: f32) -> vec3<f32> {
+    let l = clamp(linear, vec3<f32>(0.0), vec3<f32>(1.0));
+    if (curve < 0.5) {
+        return select(1.099 * pow(l, vec3<f32>(0.45)) - 0.099, 4.5 * l, l < vec3<f32>(0.018));
+    }
+    if (curve < 1.5) {
+        return select(
+            HLG_A * log(max(12.0 * l - HLG_B, vec3<f32>(1.0e-6))) + HLG_C,
+            sqrt(3.0 * l),
+            l <= vec3<f32>(1.0 / 12.0),
+        );
+    }
+    let y = clamp(l * nits / 10000.0, vec3<f32>(0.0), vec3<f32>(1.0));
+    let ym = pow(y, vec3<f32>(PQ_M1));
+    let signal = pow((PQ_C1 + PQ_C2 * ym) / (1.0 + PQ_C3 * ym), vec3<f32>(PQ_M2));
+    return select(signal, vec3<f32>(0.0), l * nits <= vec3<f32>(0.0));
+}
+
+fn tone(rgb: vec3<f32>) -> vec3<f32> {
+    if (params.tone.w < 0.5) {
+        return rgb;
+    }
+    var linear = decode_curve(rgb, params.tone.x, params.tone.z);
+    if (params.adapt_r.w > 0.5) {
+        linear = clamp(
+            vec3<f32>(
+                dot(params.adapt_r.xyz, linear),
+                dot(params.adapt_g.xyz, linear),
+                dot(params.adapt_b.xyz, linear),
+            ),
+            vec3<f32>(0.0),
+            vec3<f32>(1.0),
+        );
+    }
+    return encode_curve(linear, params.tone.y, params.tone.z);
 }
 
 fn outside(p: vec2<f32>, size: vec2<f32>) -> bool {
@@ -166,11 +252,15 @@ fn picture_pixel(index: vec2<f32>) -> vec4<f32> {
     let kr = 0.2126;
     let kb = 0.0722;
     let kg = 1.0 - kr - kb;
-    let rgb = vec3<f32>(
-        y + 2.0 * (1.0 - kr) * cr,
-        y - 2.0 * kb * (1.0 - kb) / kg * cb - 2.0 * kr * (1.0 - kr) / kg * cr,
-        y + 2.0 * (1.0 - kb) * cb,
-    );
+    let rgb = tone(clamp(
+        vec3<f32>(
+            y + 2.0 * (1.0 - kr) * cr,
+            y - 2.0 * kb * (1.0 - kb) / kg * cb - 2.0 * kr * (1.0 - kr) / kg * cr,
+            y + 2.0 * (1.0 - kb) * cb,
+        ),
+        vec3<f32>(0.0),
+        vec3<f32>(1.0),
+    ));
     // Each channel is stored as a byte, as the CPU picture holds it.
     return vec4<f32>(round(clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0)) * 255.0) / 255.0, 1.0);
 }
@@ -206,7 +296,7 @@ fn fs(in: Out) -> @location(0) vec4<f32> {
 ";
 
 /// Bytes in [`SHADER`]'s `Params`.
-const PARAMS: u64 = 8 * 16;
+const PARAMS: u64 = 12 * 16;
 
 pub(crate) struct Pipelines {
     pipeline: wgpu::RenderPipeline,
@@ -312,6 +402,7 @@ impl Pipelines {
             views: [view.clone(), view.clone(), view],
             size: (rgba.width, rgba.height),
             yuv: false,
+            tone: YuvTone::NONE,
         })
     }
 
@@ -336,6 +427,7 @@ impl Pipelines {
             views: [plane(&planes.y)?, plane(&planes.u)?, plane(&planes.v)?],
             size: (planes.y.width, planes.y.height),
             yuv: true,
+            tone: planes.tone,
         })
     }
 
@@ -358,7 +450,19 @@ impl Pipelines {
                 0.0,
             ]
         };
-        let values: [[f32; 4]; 8] = [
+        let tone = uploaded.tone;
+        let curve = |curve| match curve {
+            ToneCurve::Rec709 => 0.0,
+            ToneCurve::Hlg => 1.0,
+            ToneCurve::Pq => 2.0,
+        };
+        let adapt = tone.adapt.unwrap_or([[0.0; 3]; 3]);
+        let has_adapt = if tone.adapt.is_some() { 1.0 } else { 0.0 };
+        let adapt_row = |index: usize, flag: f32| {
+            let r = adapt[index];
+            [r[0] as f32, r[1] as f32, r[2] as f32, flag]
+        };
+        let values: [[f32; 4]; 12] = [
             row(placement.to_picture, 0),
             row(placement.to_picture, 1),
             row(placement.to_oriented, 0),
@@ -377,6 +481,19 @@ impl Pipelines {
                 placement.opacity.clamp(0.0, 1.0) as f32,
                 kind,
             ],
+            [
+                curve(tone.source),
+                curve(tone.dest),
+                tone.nits as f32,
+                if uploaded.yuv && !tone.is_none() {
+                    1.0
+                } else {
+                    0.0
+                },
+            ],
+            adapt_row(0, has_adapt),
+            adapt_row(1, 0.0),
+            adapt_row(2, 0.0),
         ];
         let mut bytes = Vec::with_capacity(PARAMS as usize);
         for value in values.iter().flatten() {

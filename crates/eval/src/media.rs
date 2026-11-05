@@ -23,12 +23,13 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use cutlass_codec::access::{ColorPrimaries, PixelFormat};
+use cutlass_codec::access::{ColorPrimaries, PixelFormat, Transfer};
+use cutlass_color::{Matrix, Signal, SignalCurve};
 use cutlass_engine::{
     ClockKind, DecodedFrame, DisplayQuarter, ReaderFactory, VideoSource, decoded_picture,
     open_segment_in,
 };
-use cutlass_gpu::{Affine, Placement};
+use cutlass_gpu::{Affine, Placement, ToneCurve, YuvTone};
 use cutlass_model::{
     Clip, Crop, Draft, DraftId, MaterialCanvas, MaterialRef, Micros, Segment, SegmentId, TimeRange,
     TrackAttribute, UniformScale,
@@ -603,9 +604,9 @@ impl Placed<'_> {
     /// picture with the maps that place it.
     ///
     /// `None` when the GPU path does not reproduce the CPU path: a picture
-    /// that is not 4:2:0 or needs a gamut change, a crop quad that is not a
-    /// parallelogram, or a blur or image backdrop. The caller then uses the
-    /// CPU picture.
+    /// that is not 4:2:0 or whose tags the color crate does not map, a crop
+    /// quad that is not a parallelogram, or a blur or image backdrop. The
+    /// caller then uses the CPU picture.
     pub(crate) fn gpu(&self, time: Micros) -> Option<Vec<GpuLayer>> {
         let (backdrop, blur) = match &self.backdrop {
             Backdrop::None => (None, None),
@@ -620,13 +621,14 @@ impl Placed<'_> {
             width,
             height,
             pixel: PixelFormat::Yuv420p,
-            primaries: ColorPrimaries::Unspecified | ColorPrimaries::Bt709,
+            primaries,
+            transfer,
             bytes,
-            ..
         } = self.source.decoded_at(time).ok()?
         else {
             return None;
         };
+        let tone = yuv_tone(primaries, transfer)?;
         if width % 2 != 0 || height % 2 != 0 {
             return None;
         }
@@ -661,12 +663,31 @@ impl Placed<'_> {
                 width,
                 height,
                 bytes,
+                tone,
             },
             placement,
             backdrop,
         });
         Some(layers)
     }
+}
+
+/// The step the engine's CPU conversion applies after the BT.709 matrix,
+/// for the draft working space it converts to, or `None` when the color
+/// crate does not map these tags.
+fn yuv_tone(primaries: ColorPrimaries, transfer: Transfer) -> Option<YuvTone> {
+    let signal = Signal::for_tags(primaries, transfer, Matrix::Bt709, 0).ok()?;
+    let curve = |curve| match curve {
+        SignalCurve::Rec709 => ToneCurve::Rec709,
+        SignalCurve::Hlg => ToneCurve::Hlg,
+        SignalCurve::Pq => ToneCurve::Pq,
+    };
+    Some(YuvTone {
+        source: curve(signal.source),
+        dest: curve(signal.dest),
+        adapt: signal.adapt,
+        nits: signal.nits,
+    })
 }
 
 /// Oriented-source pixel center to stored pixels, as [`turned_source`].

@@ -851,73 +851,130 @@ fn the_gpu_compositor_matches_the_cpu_frame() {
         }),
     ];
     let readers = crate::readers::installed_readers();
-    for (name, (width, height), edit) in cases {
-        let mut draft = movie_draft(&path, width, height, true).unwrap();
-        edit(&mut draft);
-        let time = Micros(500_000);
-        let mut device = SoftwareDevice::new();
-        let cpu = frame(
-            &Snapshot::with_fonts(&draft, &fonts),
-            time,
-            &mut device,
-            &readers,
-            &mut OpenClips::new(),
-            0,
-        )
-        .unwrap()
-        .rgba;
-        let mut clips = OpenClips::new();
-        let composed = cutlass_eval::layers_in(
-            &Snapshot::with_fonts(&draft, &fonts),
-            time,
-            &mut device,
-            &readers,
-            &mut clips,
-            0,
-            None,
-        )
-        .unwrap();
-        let cutlass_eval::Composed::Layers(layers) = composed else {
-            panic!("{name}: composed on the CPU");
-        };
+    for (name, size, edit) in cases {
+        gpu_matches_cpu(&renderer, &fonts, &readers, &path, name, size, edit);
+    }
+}
+
+/// A BT.2020 HLG movie takes the GPU path, and the shader's transfer and
+/// gamut step lands where the CPU conversion does.
+#[test]
+fn an_hdr_movie_converts_on_the_gpu_like_the_cpu() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../local-files");
+    let path = root.join("15215997_3840_2160_60fps.mp4");
+    if !path.is_file() {
+        eprintln!("skipped: ../local-files/15215997_3840_2160_60fps.mp4 is missing");
+        return;
+    }
+    let Some(renderer) = cutlass_render::Renderer::for_test().expect("a GPU is required") else {
+        eprintln!("skipped: no GPU");
+        return;
+    };
+    let fonts = crate::face::installed();
+    let readers = crate::readers::installed_readers();
+    let cases: [(&str, (u32, u32), Edit); 3] = [
+        ("hdr shrunk to fit", (960, 540), |_| {}),
+        ("hdr moved and faded", (960, 540), |draft| {
+            let clip = &mut draft.tracks[0].segments[1].clip;
+            clip.scale.x = 0.6;
+            clip.scale.y = 0.6;
+            clip.rotation = 20.0;
+            clip.alpha = 0.7;
+        }),
+        ("hdr blur backdrop", (960, 700), |draft| {
+            let canvas = MaterialCanvas {
+                id: "canvas".into(),
+                kind: "canvas_blur".to_owned(),
+                blur: 0.05,
+                ..MaterialCanvas::default()
+            };
+            draft.tracks[0].segments[1]
+                .extra_material_refs
+                .push(canvas.id.clone());
+            draft.materials.canvases.push(canvas);
+        }),
+    ];
+    for (name, size, edit) in cases {
+        gpu_matches_cpu(&renderer, &fonts, &readers, &path, name, size, edit);
+    }
+}
+
+/// The GPU layers for `path` under `edit` match the CPU frame at 0.5 s: at
+/// most one pixel in a thousand differs by more than 2 in any channel.
+fn gpu_matches_cpu(
+    renderer: &cutlass_render::Renderer,
+    fonts: &crate::face::FaceTable,
+    readers: &ReaderFactory,
+    path: &Path,
+    name: &str,
+    (width, height): (u32, u32),
+    edit: Edit,
+) {
+    let mut draft = movie_draft(path, width, height, true).unwrap();
+    edit(&mut draft);
+    let time = Micros(500_000);
+    let mut device = SoftwareDevice::new();
+    let cpu = frame(
+        &Snapshot::with_fonts(&draft, fonts),
+        time,
+        &mut device,
+        readers,
+        &mut OpenClips::new(),
+        0,
+    )
+    .unwrap()
+    .rgba;
+    let mut clips = OpenClips::new();
+    let composed = cutlass_eval::layers_in(
+        &Snapshot::with_fonts(&draft, fonts),
+        time,
+        &mut device,
+        readers,
+        &mut clips,
+        0,
+        None,
+    )
+    .unwrap();
+    let cutlass_eval::Composed::Layers(layers) = composed else {
+        panic!("{name}: composed on the CPU");
+    };
+    assert!(
+        decodes_on_gpu(&layers),
+        "{name}: the movie did not reach the GPU"
+    );
+    if name == "title over video" && !fonts.name().is_empty() {
         assert!(
-            decodes_on_gpu(&layers),
-            "{name}: the movie did not reach the GPU"
-        );
-        if name == "title over video" && !fonts.name().is_empty() {
-            assert!(
-                layers.layers.iter().any(|layer| matches!(
-                    &layer.source,
-                    cutlass_eval::GpuSource::Rgba(raster) if raster.width() > 1
-                )),
-                "the title was not drawn"
-            );
-        }
-        let canvas = renderer.canvas(width, height).unwrap();
-        renderer.draw_frame(&canvas, &layers).unwrap();
-        let gpu = renderer.read(&canvas).unwrap();
-        assert_eq!(gpu.len(), cpu.len(), "{name}");
-        let pixels = cpu.len() / 4;
-        let mut off = 0;
-        let mut worst = 0;
-        for (a, b) in gpu.chunks(4).zip(cpu.chunks(4)) {
-            let diff = a
-                .iter()
-                .zip(b)
-                .map(|(x, y)| x.abs_diff(*y))
-                .max()
-                .unwrap_or(0);
-            worst = worst.max(diff);
-            if diff > 2 {
-                off += 1;
-            }
-        }
-        eprintln!("{name}: {off} of {pixels} pixels differ by more than 2, worst {worst}");
-        assert!(
-            off * 1000 <= pixels,
-            "{name}: {off} of {pixels} pixels differ"
+            layers.layers.iter().any(|layer| matches!(
+                &layer.source,
+                cutlass_eval::GpuSource::Rgba(raster) if raster.width() > 1
+            )),
+            "the title was not drawn"
         );
     }
+    let canvas = renderer.canvas(width, height).unwrap();
+    renderer.draw_frame(&canvas, &layers).unwrap();
+    let gpu = renderer.read(&canvas).unwrap();
+    assert_eq!(gpu.len(), cpu.len(), "{name}");
+    let pixels = cpu.len() / 4;
+    let mut off = 0;
+    let mut worst = 0;
+    for (a, b) in gpu.chunks(4).zip(cpu.chunks(4)) {
+        let diff = a
+            .iter()
+            .zip(b)
+            .map(|(x, y)| x.abs_diff(*y))
+            .max()
+            .unwrap_or(0);
+        worst = worst.max(diff);
+        if diff > 2 {
+            off += 1;
+        }
+    }
+    eprintln!("{name}: {off} of {pixels} pixels differ by more than 2, worst {worst}");
+    assert!(
+        off * 1000 <= pixels,
+        "{name}: {off} of {pixels} pixels differ"
+    );
 }
 
 /// The movie `CUTLASS_MOVIE` names, walked a frame at a time through the

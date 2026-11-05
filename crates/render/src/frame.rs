@@ -39,8 +39,9 @@ fn layers_of(frame: &FrameLayers) -> Result<Vec<Layer<'_>>, RenderError> {
                 width,
                 height,
                 bytes,
+                tone,
             } => {
-                let planes = Planes::packed(*width, *height, bytes)?;
+                let planes = Planes::packed(*width, *height, bytes)?.with_tone(*tone);
                 match layer.backdrop {
                     Some(backdrop) => Layer::YuvOverBlur {
                         planes,

@@ -46,7 +46,11 @@ pub type R<T> = Result<T, CodecError>;
 /// the picture, the reconstruction log (when the tile records one) and the
 /// luma 4x4 rows `r0..r1` of the row.
 pub type RowHook<'h, P> =
-    dyn FnMut(&FrameState, &Picture<P>, Option<&mut ReconLog>, usize, usize) + 'h;
+    dyn FnMut(&FrameState, &Picture<P>, Option<&mut ReconLog>, usize, usize, bool) + 'h;
+
+/// While recording, the superblocks after which the log is handed on
+/// before the end of their row (see [`TileDec::decode_tile_rows`]).
+const LOG_CHUNK_SBS: usize = 4;
 
 /// What reconstruction needs of the blocks a tile decoder parsed while
 /// recording (see [`TileDec::rec`]): the superblocks, blocks and transform
@@ -584,21 +588,28 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
         Ok(())
     }
 
-    /// [`Self::decode_tile`], calling `on_row(fs, cur, r0, r1)` after each
-    /// superblock row (luma 4x4 rows `r0..r1`).
+    /// [`Self::decode_tile`], calling `on_row(fs, cur, log, r0, r1, true)`
+    /// after each superblock row (luma 4x4 rows `r0..r1`). While recording
+    /// it also calls `on_row(.., false)` every few superblocks inside a row,
+    /// so reconstruction can follow closer behind.
     pub fn decode_tile_rows(&mut self, on_row: &mut RowHook<'_, P>) -> R<()> {
         self.begin_tile();
         let sb4 = self.sb_size4;
         let mut r = self.mi_row_start;
         while r < self.mi_row_end {
             self.begin_sb_row();
+            let r1 = (r + sb4).min(self.mi_row_end);
             let mut c = self.mi_col_start;
+            let mut n = 0;
             while c < self.mi_col_end {
                 self.code_superblock(r, c)?;
                 c += sb4;
+                n += 1;
+                if n % LOG_CHUNK_SBS == 0 && c < self.mi_col_end && self.rec.is_some() {
+                    on_row(self.fs, self.cur, self.rec.as_deref_mut(), r, r1, false);
+                }
             }
-            let r1 = (r + sb4).min(self.mi_row_end);
-            on_row(self.fs, self.cur, self.rec.as_deref_mut(), r, r1);
+            on_row(self.fs, self.cur, self.rec.as_deref_mut(), r, r1, true);
             r += sb4;
         }
         Ok(())

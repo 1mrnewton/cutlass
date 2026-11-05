@@ -958,11 +958,38 @@ struct RowMsg<P> {
     mi_row0: usize,
     mi: Vec<MiInfo>,
     uv_modes: Vec<u8>,
+    /// The mode info as the blocks of the rows (in place of `mi`, which is
+    /// then empty): far less to copy than whole rows.
+    blocks: Vec<MiRect>,
     lf_tx: [Vec<u8>; 3],
     cdef_row0: usize,
     cdef: Vec<i8>,
     /// Loop restoration units of every plane (when the frame uses them).
     lr: [Vec<LrUnitParams>; 3],
+}
+
+/// The mode info `mi` of the 4x4s `row..row + h4`, `col..col + w4`.
+#[derive(Clone, Copy)]
+struct MiRect {
+    row: u32,
+    col: u32,
+    w4: u8,
+    h4: u8,
+    mi: MiInfo,
+}
+
+/// Appends the mode info of the blocks of `log` to `out`.
+fn add_mi_blocks(out: &mut Vec<MiRect>, fs: &FrameState, log: &ReconLog) {
+    out.extend(log.blocks.iter().map(|rec| {
+        let b = &rec.b;
+        MiRect {
+            row: b.mi_row as u32,
+            col: b.mi_col as u32,
+            w4: super::types::bw4(b.bsize).min(fs.mi_cols - b.mi_col) as u8,
+            h4: super::types::bh4(b.bsize).min(fs.mi_rows - b.mi_row) as u8,
+            mi: rec.mi,
+        }
+    }));
 }
 
 /// Spare [`RowMsg`]s and [`ReconLog`]s, with their buffers.
@@ -1003,6 +1030,7 @@ impl<P: Pixel> RowMsg<P> {
         self.mi_row0 = r0;
         self.mi.clear();
         self.uv_modes.clear();
+        self.blocks.clear();
         if with_mi {
             self.mi.extend_from_slice(&fs.mi[r0 * st..end]);
             self.uv_modes.extend_from_slice(&fs.uv_modes[r0 * st..end]);
@@ -1031,14 +1059,6 @@ impl<P: Pixel> RowMsg<P> {
         }
     }
 
-    /// Copies the mode info of the rows (after [`Self::fill_meta`]).
-    fn fill_mi(&mut self, fs: &FrameState) {
-        let st = fs.mi_stride;
-        let end = if self.last { fs.mi.len() } else { self.r1 * st };
-        self.mi.clear();
-        self.mi.extend_from_slice(&fs.mi[self.r0 * st..end]);
-    }
-
     /// Copies the samples of the rows (after [`Self::fill_meta`]).
     fn fill_px(&mut self, cur: &Picture<P>, sub_y: bool) {
         for (p, pl) in cur.planes.iter().enumerate().take(3) {
@@ -1062,8 +1082,17 @@ impl<P: Pixel> RowMsg<P> {
             let o = row0 * pl.stride;
             pl.data[o..o + v.len()].copy_from_slice(v);
         }
-        let o = self.mi_row0 * fs.mi_stride;
+        let st = fs.mi_stride;
+        let o = self.mi_row0 * st;
         fs.mi[o..o + self.mi.len()].copy_from_slice(&self.mi);
+        for r in &self.blocks {
+            let (w4, h4) = (usize::from(r.w4), usize::from(r.h4));
+            let o0 = r.row as usize * st + r.col as usize;
+            fs.mi[o0..o0 + w4].fill(r.mi);
+            for y in 1..h4 {
+                fs.mi.copy_within(o0..o0 + w4, o0 + y * st);
+            }
+        }
         for (p, (d, s)) in fs.lf_tx.iter_mut().zip(&self.lf_tx).enumerate() {
             let o = (self.mi_row0 >> usize::from(p > 0 && sub_y)) * fs.mi_stride;
             d[o..o + s.len()].copy_from_slice(s);
@@ -1119,7 +1148,7 @@ fn recon_worker<P: Pixel>(
     cur: &mut Picture<P>,
     refs: &[Option<&Picture<P>>; 8],
     ref_hdr: &[RefHeaderState; 8],
-    rx: std::sync::mpsc::Receiver<(RowMsg<P>, ReconLog)>,
+    rx: std::sync::mpsc::Receiver<(Option<RowMsg<P>>, ReconLog)>,
     fwd: std::sync::mpsc::Sender<RowMsg<P>>,
     log_back: std::sync::mpsc::Sender<ReconLog>,
 ) -> R<()> {
@@ -1175,13 +1204,23 @@ fn recon_worker<P: Pixel>(
         scratch: Scratch::new(),
         rec: None,
     };
-    for (mut m, mut log) in rx {
+    // The mode info of the blocks of the row so far.
+    let mut row_blocks = Vec::new();
+    for (m, mut log) in rx {
         // Replay stores the mode info of each block as parsing did.
         td.replay(&log)?;
-        m.fill_mi(td.fs);
+        add_mi_blocks(&mut row_blocks, td.fs, &log);
+        log.clear();
+        // The log of part of a row goes straight back; a row's message
+        // comes with the last part.
+        let Some(mut m) = m else {
+            let _ = log_back.send(log);
+            continue;
+        };
+        std::mem::swap(&mut m.blocks, &mut row_blocks);
+        row_blocks.clear();
         m.fill_px(td.cur, seq.subsampling_y);
         let _ = fwd.send(m);
-        log.clear();
         let _ = log_back.send(log);
     }
     Ok(())
@@ -1366,7 +1405,7 @@ fn decode_frame<P: Pixel>(
             let sb4 = if seq.use_128x128_superblock { 32 } else { 16 };
             let sub_y = seq.subsampling_y;
             let (res, recon_res) = if let Some(rc_fs) = rc_fs.as_mut() {
-                let (rtx, rrx) = std::sync::mpsc::channel::<(RowMsg<P>, ReconLog)>();
+                let (rtx, rrx) = std::sync::mpsc::channel::<(Option<RowMsg<P>>, ReconLog)>();
                 let (log_tx, log_rx) = std::sync::mpsc::channel::<ReconLog>();
                 let cur = &mut cur;
                 let refs = &refs;
@@ -1394,13 +1433,17 @@ fn decode_frame<P: Pixel>(
                           _: &Picture<P>,
                           log: Option<&mut ReconLog>,
                           r0: usize,
-                          r1: usize| {
-                        let mut m = back_rx
-                            .try_recv()
-                            .ok()
-                            .or_else(|| msg_pool.pop())
-                            .unwrap_or_default();
-                        m.fill_meta(fs, sb4, r0, r1, r1 >= fs.mi_rows, sub_y, false);
+                          r1: usize,
+                          done: bool| {
+                        let m = done.then(|| {
+                            let mut m = back_rx
+                                .try_recv()
+                                .ok()
+                                .or_else(|| msg_pool.pop())
+                                .unwrap_or_default();
+                            m.fill_meta(fs, sb4, r0, r1, r1 >= fs.mi_rows, sub_y, false);
+                            m
+                        });
                         let spare = log_rx
                             .try_recv()
                             .ok()
@@ -1435,7 +1478,8 @@ fn decode_frame<P: Pixel>(
                           cur: &Picture<P>,
                           _: Option<&mut ReconLog>,
                           r0: usize,
-                          r1: usize| {
+                          r1: usize,
+                          _: bool| {
                         let mut m = back_rx
                             .try_recv()
                             .ok()
@@ -1478,7 +1522,12 @@ fn decode_frame<P: Pixel>(
             ref_hdr,
             &mut cur,
             false,
-            &mut |_: &FrameState, _: &Picture<P>, _: Option<&mut ReconLog>, _: usize, _: usize| {},
+            &mut |_: &FrameState,
+                  _: &Picture<P>,
+                  _: Option<&mut ReconLog>,
+                  _: usize,
+                  _: usize,
+                  _: bool| {},
         )?;
         // decode_frame_wrapup: in-loop filters.
         postfilter::loop_filter(seq, hdr, fs, &mut cur, threads);

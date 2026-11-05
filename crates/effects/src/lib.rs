@@ -18,6 +18,7 @@
 pub mod adjust;
 pub mod blend;
 pub mod catalog;
+pub mod chroma;
 pub mod grade;
 pub mod look;
 pub mod lut;
@@ -32,6 +33,7 @@ pub use catalog::{
     INVERT, MULTIPLY, PIXELATE, PIXELATE_BLOCK, PackageKind, SCREEN, SOURCE_OVER, TRANSITION_FADE,
     Transition, entries, entry,
 };
+pub use chroma::{CHROMA, Chroma, parse_hex, segment_chroma};
 pub use grade::{
     COLOR_CURVES, COLOR_WHEELS, Colour, CurveChannel, Grade, HSL, HSL_COLORS, MAX_CURVE_POINTS,
     Wheel, WheelSetting, curve_table, points_json, segment_colour, segment_grade, tidy_points,

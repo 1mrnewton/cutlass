@@ -402,6 +402,9 @@ pub(crate) fn requantize(header: &FrameHeader, parsed: &Parsed, xr: &mut [f32; 5
                 let scale = exponent.exp2() as f32;
                 let from = base + w * width;
                 let to = (from + width).min(end);
+                if from >= to {
+                    break;
+                }
                 dequantize(&parsed.quant[from..to], &mut xr[from..to], pow, scale);
             }
         }

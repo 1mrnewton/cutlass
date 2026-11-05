@@ -51,6 +51,8 @@ pub struct Settings {
     #[serde(default)]
     pub hardware: Hardware,
     #[serde(default)]
+    pub import: Import,
+    #[serde(default)]
     pub model: ModelChoice,
     #[serde(default)]
     pub sandbox: SandboxChoice,
@@ -80,6 +82,7 @@ impl Default for Settings {
             panels: Vec::new(),
             playback: Playback::default(),
             hardware: Hardware::default(),
+            import: Import::default(),
             model: ModelChoice::default(),
             sandbox: SandboxChoice::default(),
             mcp_servers: Vec::new(),
@@ -153,6 +156,22 @@ pub enum SeekDuringPlayback {
 
 /// How the open player behaves. These are not draft fields.
 ///
+/// What an import does with the file.
+///
+/// By default the file is copied into the project, so the project folder
+/// holds everything it plays and can move as one. Linked, the project
+/// points at the file where it is: nothing is copied, and moving or deleting
+/// the file takes it from the project.
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+pub struct Import {
+    /// Point at the file where it is instead of copying it in.
+    #[serde(default)]
+    pub link: bool,
+    /// Keys this record does not name.
+    #[serde(flatten, default)]
+    pub rest: Map<String, Value>,
+}
+
 /// Preview can play audio while the playhead is dragged. That switch is
 /// separate from normal playback. A seek while playing follows
 /// [`Playback::seek_during_playback`].
@@ -370,10 +389,13 @@ mod tests {
         );
         assert!(settings.hardware.decode);
         assert!(settings.hardware.encode);
+        assert!(!settings.import.link, "imports copy by default");
         assert!(settings.mcp_servers.is_empty());
         assert!(settings.skill_folders.is_empty());
         let parsed: Settings = serde_json::from_str("{}").unwrap();
         assert_eq!(parsed, settings);
+        let linked: Settings = serde_json::from_str(r#"{"import":{"link":true}}"#).unwrap();
+        assert!(linked.import.link);
         assert_eq!(parsed.model, ModelChoice::default());
         assert_eq!(parsed.sandbox, SandboxChoice::default());
     }

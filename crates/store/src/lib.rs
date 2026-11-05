@@ -28,7 +28,7 @@ pub use folder::{
 };
 pub use hold::{Hold, hold};
 pub use json::{parse_draft, write_draft};
-pub use projects::{ListedProject, create_project, list_projects};
+pub use projects::{ListedProject, create_project, list_projects, listed_project};
 pub use repair::{RepairNote, repair};
 pub use upgrade::{BUILD, Protocol, upgrade};
 

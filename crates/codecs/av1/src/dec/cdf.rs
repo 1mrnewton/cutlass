@@ -133,8 +133,10 @@ pub struct CdfContext {
     pub eob_extra: [[[[u16; 2]; 9]; 2]; 5],
     pub dc_sign: [[[u16; 2]; 3]; 2],
     pub coeff_base_eob: [[[[u16; 3]; 4]; 2]; 5],
-    pub coeff_base: [[[[u16; 4]; 42]; 2]; 5],
-    pub coeff_br: [[[[u16; 4]; 21]; 2]; 5],
+    /// Packed with [`pack4`] (the coefficient level loop reads each CDF in
+    /// one load).
+    pub coeff_base: [[[u64; 42]; 2]; 5],
+    pub coeff_br: [[[u64; 21]; 2]; 5],
     pub delta_lf_multi: [[u16; 4]; 4],
 }
 
@@ -339,12 +341,12 @@ impl CdfContext {
             }),
             coeff_base: std::array::from_fn(|i0| {
                 std::array::from_fn(|i1| {
-                    std::array::from_fn(|i2| invert(&DEFAULT_COEFF_BASE_CDF[q][i0][i1][i2]))
+                    std::array::from_fn(|i2| pack4(invert(&DEFAULT_COEFF_BASE_CDF[q][i0][i1][i2])))
                 })
             }),
             coeff_br: std::array::from_fn(|i0| {
                 std::array::from_fn(|i1| {
-                    std::array::from_fn(|i2| invert(&DEFAULT_COEFF_BR_CDF[q][i0][i1][i2]))
+                    std::array::from_fn(|i2| pack4(invert(&DEFAULT_COEFF_BR_CDF[q][i0][i1][i2])))
                 })
             }),
             delta_lf_multi: std::array::from_fn(|_| invert(&DEFAULT_DELTA_LF_CDF)),
@@ -696,14 +698,14 @@ impl CdfContext {
         for i0 in 0..5 {
             for i1 in 0..2 {
                 for i2 in 0..42 {
-                    self.coeff_base[i0][i1][i2][3] = 0;
+                    self.coeff_base[i0][i1][i2] &= PACK4_PROBS;
                 }
             }
         }
         for i0 in 0..5 {
             for i1 in 0..2 {
                 for i2 in 0..21 {
-                    self.coeff_br[i0][i1][i2][3] = 0;
+                    self.coeff_br[i0][i1][i2] &= PACK4_PROBS;
                 }
             }
         }
@@ -712,3 +714,19 @@ impl CdfContext {
         }
     }
 }
+
+/// A 4-symbol CDF (three probabilities and the adaptation counter) as
+/// 16-bit lanes of one word, lane `i` holding entry `i`.
+#[inline(always)]
+pub fn pack4(c: [u16; 4]) -> u64 {
+    u64::from(c[0]) | u64::from(c[1]) << 16 | u64::from(c[2]) << 32 | u64::from(c[3]) << 48
+}
+
+/// The CDF [`pack4`] packed.
+#[inline(always)]
+pub fn unpack4(w: u64) -> [u16; 4] {
+    std::array::from_fn(|i| (w >> (16 * i)) as u16)
+}
+
+/// The probability lanes of a [`pack4`] word (all but the counter).
+pub const PACK4_PROBS: u64 = 0x0000_FFFF_FFFF_FFFF;

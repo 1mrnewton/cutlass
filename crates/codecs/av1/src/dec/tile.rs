@@ -4286,19 +4286,28 @@ fn level_entry(l: u32) -> u16 {
 
 /// Reads coeff_br for a coefficient whose base level is 3; returns the level.
 #[inline(always)]
-fn read_br<C: Coder>(msac: &mut C, cdf: &mut [u16; 4], wl: u32) -> u32 {
+fn read_br<C: Coder>(msac: &mut C, cdf: &mut u64, wl: u32) -> u32 {
     let mut level = 3;
     let mut rem = wl.saturating_sub(3);
     for _ in 0..4 {
         let wb = rem.min(3);
         rem -= wb;
-        let br = msac.symbol(cdf, wb as usize) as u32;
+        let br = symbol_packed(msac, cdf, wb as usize);
         level += br;
         if br < 3 {
             break;
         }
     }
     level
+}
+
+/// [`Coder::symbol`] on a [`super::cdf::pack4`] CDF.
+#[inline(always)]
+fn symbol_packed<C: Coder>(msac: &mut C, cdf: &mut u64, want: usize) -> u32 {
+    let mut c = super::cdf::unpack4(*cdf);
+    let s = msac.symbol(&mut c, want) as u32;
+    *cdf = super::cdf::pack4(c);
+    s
 }
 
 /// Length of the padded levels buffer: any index below `LEVELS_MASK + 1`
@@ -4315,8 +4324,8 @@ const LEVELS_MASK: u32 = 0x7FF;
 #[inline(always)]
 fn read_levels<const CLASS: usize, const LS: usize, C: Coder>(
     msac: &mut C,
-    base_cdf: &mut [[u16; 4]; 42],
-    br_cdf: &mut [[u16; 4]; 21],
+    base_cdf: &mut [u64; 42],
+    br_cdf: &mut [u64; 21],
     levels: &mut [u16; LEVELS_LEN],
     nz: &mut [u32; 1024],
     a: &LevelArgs<'_>,
@@ -4371,7 +4380,7 @@ fn read_levels<const CLASS: usize, const LS: usize, C: Coder>(
         let m = (((s5 & 0xFF) + 1) >> 1).min(4);
         let ctx = (m + ((e >> 11) & 0x3F)) as usize;
         let wl = want(c);
-        let mut level = msac.symbol(&mut base_cdf[ctx], wl.min(3) as usize) as u32;
+        let mut level = symbol_packed(msac, &mut base_cdf[ctx], wl.min(3) as usize);
         if level > 2 {
             let mag = (((s3 >> 8) + 1) >> 1).min(6);
             level = read_br(msac, &mut br_cdf[(mag + ((e >> 17) & 0x1F)) as usize], wl);
@@ -4388,7 +4397,7 @@ fn read_levels<const CLASS: usize, const LS: usize, C: Coder>(
         ((((s5 & 0xFF) + 1) >> 1).min(4) + u32::from(COEFF_BASE_POS_CTX_OFFSET[0])) as usize
     };
     let wl = want(0);
-    let mut level = msac.symbol(&mut base_cdf[ctx], wl.min(3) as usize) as u32;
+    let mut level = symbol_packed(msac, &mut base_cdf[ctx], wl.min(3) as usize);
     if level > 2 {
         let mag = (((s3 >> 8) + 1) >> 1).min(6);
         level = read_br(msac, &mut br_cdf[mag as usize], wl);
@@ -4415,8 +4424,8 @@ fn level_offsets<const CLASS: usize, const LS: usize>() -> [usize; 5] {
 #[inline(never)]
 fn read_levels_dec<const CLASS: usize, const LS: usize>(
     m: &mut Msac<'_>,
-    base_cdf: &mut [[u16; 4]; 42],
-    br_cdf: &mut [[u16; 4]; 21],
+    base_cdf: &mut [u64; 42],
+    br_cdf: &mut [u64; 21],
     levels: &mut [u16; LEVELS_LEN],
     nz: &mut [u32; 1024],
     a: &LevelArgs<'_>,
@@ -4564,7 +4573,7 @@ fn signs_dec(
 #[inline(never)]
 fn br_dec<'m, 'a, const CLASS: usize, const LS: usize>(
     mut h: Hot<'m, 'a>,
-    br_cdf: &mut [[u16; 4]; 21],
+    br_cdf: &mut [u64; 21],
     levels: &[u16; LEVELS_LEN],
     li: usize,
     br_off: u32,

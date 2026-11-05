@@ -197,8 +197,8 @@ impl Layout {
 
 /// The CDFs the coefficient symbols of one block use.
 struct Costs<'a> {
-    base: &'a [[u16; 4]; 42],
-    br: &'a [[u16; 4]; 21],
+    base: &'a [u64; 42],
+    br: &'a [u64; 21],
     base_eob: &'a [[u16; 3]; 4],
     /// dc_sign cost for the sign of the DC coefficient of the candidate.
     dc_sign: u32,
@@ -213,8 +213,8 @@ const MEMO_LEN: usize = MEMO_EOB + 4 * 3;
 
 impl<'a> Costs<'a> {
     fn new(
-        base: &'a [[u16; 4]; 42],
-        br: &'a [[u16; 4]; 21],
+        base: &'a [u64; 42],
+        br: &'a [u64; 21],
         base_eob: &'a [[u16; 3]; 4],
         dc_sign: u32,
     ) -> Self {
@@ -243,7 +243,7 @@ impl<'a> Costs<'a> {
     /// Cost of the coeff_br symbols and the Golomb remainder of level `l` (> 2).
     #[inline]
     fn tail(&self, br_ctx: usize, l: u32) -> u32 {
-        let cdf = &self.br[br_ctx];
+        let cdf = &crate::dec::cdf::unpack4(self.br[br_ctx]);
         let mut rem = l - 3;
         let mut cost = 0;
         for _ in 0..4 {
@@ -269,7 +269,11 @@ impl<'a> Costs<'a> {
     #[inline]
     fn level(&self, c: usize, base_ctx: usize, br_ctx: usize, l: u32) -> u32 {
         let s = l.min(3) as usize;
-        let mut cost = self.cached(base_ctx * 4 + s, &self.base[base_ctx], s);
+        let mut cost = self.cached(
+            base_ctx * 4 + s,
+            &crate::dec::cdf::unpack4(self.base[base_ctx]),
+            s,
+        );
         if l > 0 {
             cost += self.sign(c);
         }

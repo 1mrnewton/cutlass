@@ -370,12 +370,10 @@ impl<'m, 'a> Hot<'m, 'a> {
     /// [`Msac::symbol`] for 4 symbols, adapting the CDF whatever
     /// `allow_update` says: a caller checks that once.
     #[inline(always)]
-    pub fn sym4(&mut self, cdf: &mut [u16; 4]) -> u32 {
-        // The whole CDF, counter included, in one load.
-        let w = u64::from(cdf[0])
-            | u64::from(cdf[1]) << 16
-            | u64::from(cdf[2]) << 32
-            | u64::from(cdf[3]) << 48;
+    pub fn sym4(&mut self, cdf: &mut u64) -> u32 {
+        // The whole CDF, counter included, in one load (see
+        // [`super::cdf::pack4`]).
+        let w = *cdf;
         let c = (self.dif >> (WIN - 16)) as u32;
         let r8 = self.rng >> 8;
         let v = |i: usize| {
@@ -404,10 +402,7 @@ impl<'m, 'a> Hot<'m, 'a> {
         let x = w + SYM4_INC[k];
         let down = x - ((x >> rate) & SYM4_KEEP[k]);
         let up = x + (((0x8000_8000_8000u64.wrapping_sub(x)) >> rate) & SYM4_KEEP[k]);
-        let y = down ^ ((up ^ down) & SYM4_BELOW[val as usize & 3]);
-        for (i, v) in cdf.iter_mut().enumerate() {
-            *v = (y >> (16 * i)) as u16;
-        }
+        *cdf = down ^ ((up ^ down) & SYM4_BELOW[val as usize & 3]);
         self.norm(self.dif - (u64::from(vv) << (WIN - 16)), u - vv);
         val
     }

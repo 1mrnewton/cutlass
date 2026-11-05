@@ -14,6 +14,7 @@ mod import;
 mod keyframe;
 mod lane;
 mod linkage;
+mod lut;
 mod magnet;
 mod mark;
 mod mirror;
@@ -148,6 +149,8 @@ pub enum EditError {
     TextEmpty,
     /// The effect is not one the app ships.
     UnknownEffect,
+    /// The `.cube` file is not a 3D table, or the clip has no LUT to change.
+    Lut,
     /// The clip is not an effect, a filter, or an adjustment.
     NotEffect,
     /// An effect binds to a picture clip, and only an effect clip binds.
@@ -420,6 +423,20 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             y,
             luma,
         } => grade::set_wheel(draft, segment_id, material_id, wheel, [*x, *y, *luma]),
+        Request::SetLut {
+            segment_id,
+            material_id,
+            name,
+            cube,
+            strength,
+        } => lut::set_lut(
+            draft,
+            segment_id,
+            material_id,
+            name,
+            cube.as_deref(),
+            *strength,
+        ),
         Request::SetAdjust {
             segment_id,
             material_id,

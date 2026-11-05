@@ -322,6 +322,16 @@ pub enum Request {
         y: f64,
         luma: f64,
     },
+    /// Put a LUT on the clip: `cube` is a `.cube` file's text, kept on the
+    /// clip under `name`. `None` keeps the clip's table and sets its
+    /// `strength`, from 0 to 1; an empty text takes the LUT off.
+    SetLut {
+        segment_id: SegmentId,
+        material_id: MaterialId,
+        name: String,
+        cube: Option<String>,
+        strength: f64,
+    },
     /// Set the adjust slider `key`, its reference name such as
     /// `temperature`, to `value`: -1 to 1, or 0 to 1 for fade, sharpen and
     /// grain. Zero takes it off. `material_id` names a new slider material.

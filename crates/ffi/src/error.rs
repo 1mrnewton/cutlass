@@ -154,6 +154,7 @@ fn edit_cause(error: EditError) -> String {
         EditError::TextStyle => "that outline, shadow, or background is out of range".to_owned(),
         EditError::TextEmpty => "type something to add text".to_owned(),
         EditError::UnknownEffect => "that effect is not in this version".to_owned(),
+        EditError::Lut => "that file is not a 3D .cube table".to_owned(),
         EditError::NotEffect => "a strength belongs on an effect, filter, or adjustment".to_owned(),
         EditError::EffectTarget => "an effect goes on a picture clip".to_owned(),
         EditError::EffectStrength => "the strength must be from zero to one".to_owned(),

@@ -247,12 +247,6 @@ impl CeltDecoder {
         self.last_pitch_index = 0;
     }
 
-    /// The final range of the last decoded frame (the frame's `rng`).
-    #[cfg(test)]
-    pub(crate) fn rng(&self) -> u32 {
-        self.rng
-    }
-
     /// Decodes one frame into `out`: `frame_size / downsample` interleaved
     /// samples per output channel, full scale 1.0, overwriting `out`.
     pub(crate) fn decode(

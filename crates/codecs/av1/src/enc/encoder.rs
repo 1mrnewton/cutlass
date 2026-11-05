@@ -694,7 +694,9 @@ impl Av1Enc {
             render_height: self.cfg.height as u32,
             superres_denom: 8,
             ref_frame_idx: spec.ref_frame_idx,
-            allow_high_precision_mv: !key && q < 128,
+            allow_high_precision_mv: !key
+                && self.cfg.speed < 8
+                && f64::from(q) < ev("AV1_HPQ", 256.0),
             interpolation_filter: if key || self.cfg.speed >= 8 || ev("AV1_SWF", 1.0) == 0.0 {
                 0
             } else {
@@ -826,7 +828,16 @@ impl Av1Enc {
             skip_sse_per_px: ev("AV1_SK", 4.0) * qstep * qstep,
             inter_frame: !key,
             me_range: if speed >= 8 { 16 } else { 48 },
-            subpel: if speed >= 9 { 1 } else { 2 },
+            subpel: ev(
+                "AV1_SUBPEL",
+                if speed >= 9 {
+                    1.0
+                } else if speed >= 8 {
+                    2.0
+                } else {
+                    3.0
+                },
+            ) as u8,
             intra_modes: if speed >= 8 { 10 } else { 13 },
             tx_depth: if speed >= 9 {
                 0

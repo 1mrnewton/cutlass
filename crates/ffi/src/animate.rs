@@ -20,11 +20,12 @@ pub struct PhoneAnimationPreset {
 }
 
 /// The presets, in the panel's order after None. A title's letter
-/// animations are left out until the phone panel tells titles apart.
+/// animations and the loops are left out until the phone panel has them.
 #[must_use]
 pub fn animation_presets() -> Vec<PhoneAnimationPreset> {
     ANIMATION_PRESETS
         .iter()
+        .filter(|preset| matches!(preset.kind, AnimType::In | AnimType::Out))
         .filter(|preset| !matches!(preset.motion, Motion::Letters(_)))
         .map(|preset| PhoneAnimationPreset {
             name: preset.name.to_owned(),

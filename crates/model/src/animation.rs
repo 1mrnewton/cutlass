@@ -29,6 +29,25 @@ pub enum Motion {
     Zoom(f64),
     /// A title's letters or words move one after another; the clip stays.
     Letters(LetterMotion),
+    /// Over and over for as long as the clip shows, once each `duration`.
+    Loop(LoopMotion),
+}
+
+/// How a loop moves the clip through one round.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LoopMotion {
+    /// Grows a little and back.
+    Pulse,
+    /// Dims now and then, like a failing light.
+    Flicker,
+    /// Drifts up and down.
+    Float,
+    /// Jitters side to side.
+    Shake,
+    /// Rocks about its middle.
+    Swing,
+    /// Slowly swells and fades a little, and back.
+    Breathe,
 }
 
 /// How a title's letters arrive one after another, or leave.
@@ -347,6 +366,48 @@ pub const ANIMATION_PRESETS: &[AnimationPreset] = &[
         motion: Motion::Letters(LetterMotion::Rise),
         duration: Micros(1_000_000),
     },
+    AnimationPreset {
+        name: "Pulse",
+        kind: AnimType::Loop,
+        resource_id: "cutlass-anim-loop-pulse",
+        motion: Motion::Loop(LoopMotion::Pulse),
+        duration: Micros(1_000_000),
+    },
+    AnimationPreset {
+        name: "Flicker",
+        kind: AnimType::Loop,
+        resource_id: "cutlass-anim-loop-flicker",
+        motion: Motion::Loop(LoopMotion::Flicker),
+        duration: Micros(1_000_000),
+    },
+    AnimationPreset {
+        name: "Float",
+        kind: AnimType::Loop,
+        resource_id: "cutlass-anim-loop-float",
+        motion: Motion::Loop(LoopMotion::Float),
+        duration: Micros(2_000_000),
+    },
+    AnimationPreset {
+        name: "Shake",
+        kind: AnimType::Loop,
+        resource_id: "cutlass-anim-loop-shake",
+        motion: Motion::Loop(LoopMotion::Shake),
+        duration: Micros(1_000_000),
+    },
+    AnimationPreset {
+        name: "Swing",
+        kind: AnimType::Loop,
+        resource_id: "cutlass-anim-loop-swing",
+        motion: Motion::Loop(LoopMotion::Swing),
+        duration: Micros(1_500_000),
+    },
+    AnimationPreset {
+        name: "Breathe",
+        kind: AnimType::Loop,
+        resource_id: "cutlass-anim-loop-breathe",
+        motion: Motion::Loop(LoopMotion::Breathe),
+        duration: Micros(3_000_000),
+    },
 ];
 
 /// The preset a stored animation names, if it is one of ours.
@@ -406,6 +467,10 @@ fn animate(
     };
     // How far from rest, 1 being all the way away: an in eases out of its
     // far end, an out eases into it.
+    if let Motion::Loop(motion) = preset.motion {
+        swing(clip, uniform, motion, along);
+        return;
+    }
     let away = match preset.kind {
         AnimType::In => (1.0 - along).powi(3),
         AnimType::Out => along.powi(3),
@@ -436,7 +501,7 @@ fn animate(
             clip.transform.x += dx * sign * away;
             clip.transform.y += dy * sign * away;
         }
-        Motion::Letters(_) => {}
+        Motion::Letters(_) | Motion::Loop(_) => {}
         Motion::Zoom(far) => {
             let factor = 1.0 + (far - 1.0) * away;
             if uniform.on {
@@ -450,9 +515,40 @@ fn animate(
     }
 }
 
+/// Move `clip` by a loop `round` of the way through one of its rounds.
+fn swing(clip: &mut Clip, uniform: &mut UniformScale, motion: LoopMotion, round: f64) {
+    let wave = (round * std::f64::consts::TAU).sin();
+    let rise = 0.5 - 0.5 * (round * std::f64::consts::TAU).cos();
+    let grow = |clip: &mut Clip, uniform: &mut UniformScale, factor: f64| {
+        if uniform.on {
+            uniform.value *= factor;
+        } else {
+            clip.scale.x *= factor;
+            clip.scale.y *= factor;
+        }
+    };
+    match motion {
+        LoopMotion::Pulse => grow(clip, uniform, 1.0 + 0.1 * rise),
+        LoopMotion::Flicker => {
+            // Two short dips each round.
+            if (0.10..0.16).contains(&round) || (0.52..0.60).contains(&round) {
+                clip.alpha *= 0.25;
+            }
+        }
+        LoopMotion::Float => clip.transform.y += 0.04 * wave,
+        LoopMotion::Shake => clip.transform.x += 0.02 * (round * std::f64::consts::TAU * 4.0).sin(),
+        LoopMotion::Swing => clip.rotation += 8.0 * wave,
+        LoopMotion::Breathe => {
+            grow(clip, uniform, 1.0 + 0.05 * rise);
+            clip.alpha *= 1.0 - 0.2 * rise;
+        }
+    }
+}
+
 /// How far along one animation is at `offset` from the segment's start,
 /// from 0 to 1. An out animation ends with the segment, `length` long,
-/// whatever its stored `start` says, so a trim keeps it on the end.
+/// whatever its stored `start` says, so a trim keeps it on the end. A loop
+/// starts over each `duration`, so this is how far through its round.
 fn progress(
     preset: &AnimationPreset,
     animation: &StickerAnimation,
@@ -460,6 +556,10 @@ fn progress(
     length: i64,
 ) -> Option<f64> {
     let duration = animation.duration.map(|d| d.0).filter(|d| *d > 0)?;
+    if preset.kind == AnimType::Loop {
+        let into = (offset - animation.start.0).max(0);
+        return Some((into % duration) as f64 / duration as f64);
+    }
     let start = if preset.kind == AnimType::Out {
         length - duration
     } else {
@@ -474,10 +574,10 @@ mod tests {
 
     fn stored(preset: &AnimationPreset, start: i64, duration: i64) -> StickerAnimation {
         StickerAnimation {
-            kind: if preset.kind == AnimType::In {
-                "in"
-            } else {
-                "out"
+            kind: match preset.kind {
+                AnimType::In => "in",
+                AnimType::Out => "out",
+                _ => "loop",
             }
             .into(),
             resource_id: preset.resource_id.into(),
@@ -619,6 +719,31 @@ mod tests {
         let pop = stored(by("Pop", AnimType::In), 0, 1_000);
         animate(&mut clip, &mut uniform, &pop, 0, 10_000);
         assert_eq!(clip, Clip::default());
+    }
+
+    #[test]
+    fn a_loop_comes_round_again_each_duration() {
+        let swing = stored(by("Swing", AnimType::Loop), 0, 1_000);
+        let at = |offset| {
+            let mut clip = Clip::default();
+            let mut uniform = UniformScale::default();
+            animate(&mut clip, &mut uniform, &swing, offset, 10_000);
+            clip.rotation
+        };
+        assert!((at(250) - 8.0).abs() < 1e-9);
+        assert!((at(750) + 8.0).abs() < 1e-9);
+        assert!((at(5_250) - at(250)).abs() < 1e-9);
+        assert!(at(1_000).abs() < 1e-9);
+        let pulse = stored(by("Pulse", AnimType::Loop), 0, 1_000);
+        let mut clip = Clip::default();
+        let mut uniform = UniformScale::default();
+        animate(&mut clip, &mut uniform, &pulse, 500, 10_000);
+        let size = if uniform.on {
+            uniform.value
+        } else {
+            clip.scale.x
+        };
+        assert!((size - 1.1).abs() < 1e-9);
     }
 
     #[test]

@@ -29,8 +29,8 @@ mod time;
 mod track;
 
 pub use animation::{
-    ANIMATION_PRESETS, AnimationPreset, Letter, LetterMotion, LetterPose, LetterStep, Motion,
-    animated_at, animation_preset, letters_at, segment_animations,
+    ANIMATION_PRESETS, AnimationPreset, Letter, LetterMotion, LetterPose, LetterStep, LoopMotion,
+    Motion, animated_at, animation_preset, letters_at, segment_animations,
 };
 pub use bin::{BinFolder, BinLink, BinPath, VirtualStore};
 pub use clip::{Clip, Flip, Point, UniformScale};

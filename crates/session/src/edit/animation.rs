@@ -15,7 +15,8 @@ pub const SHORTEST: Micros = Micros(100_000);
 /// animation. The row is the reference editor's: one `sticker_animation`
 /// in `material_animations` that the segment's `extra_material_refs` name,
 /// dropped when it empties. An out animation starts where it must to end
-/// with the clip. A letter animation goes only on a title.
+/// with the clip. A letter animation goes only on a title. A loop plays
+/// the whole clip, once each `duration`, beside the in and out.
 pub fn set_animation(
     draft: &mut Draft,
     segment_id: &SegmentId,
@@ -23,7 +24,7 @@ pub fn set_animation(
     resource_id: Option<&str>,
     duration: Micros,
 ) -> Result<(), EditError> {
-    if !matches!(kind, AnimType::In | AnimType::Out) {
+    if !matches!(kind, AnimType::In | AnimType::Out | AnimType::Loop) {
         return Err(EditError::Animation);
     }
     let preset = match resource_id {
@@ -56,7 +57,11 @@ pub fn set_animation(
         .iter_mut()
         .find(|row| row.id == row_id)
         .ok_or(EditError::MissingMaterial)?;
-    let name = if kind == AnimType::In { "in" } else { "out" };
+    let name = match kind {
+        AnimType::In => "in",
+        AnimType::Out => "out",
+        _ => "loop",
+    };
     row.animations.retain(|animation| animation.kind != name);
     if let Some(preset) = preset {
         let other: i64 = row
@@ -65,12 +70,17 @@ pub fn set_animation(
             .filter(|animation| matches!(animation.anim_type(), Some(AnimType::In | AnimType::Out)))
             .filter_map(|animation| animation.duration.map(|d| d.0))
             .sum();
-        let room = (length.0 - other).max(SHORTEST.0);
-        let duration = duration.0.clamp(SHORTEST.0, room).min(length.0.max(0));
-        let start = if kind == AnimType::In {
-            0
+        // A loop's length is one round, and it plays the whole clip.
+        let room = if kind == AnimType::Loop {
+            length.0.max(SHORTEST.0)
         } else {
+            (length.0 - other).max(SHORTEST.0)
+        };
+        let duration = duration.0.clamp(SHORTEST.0, room).min(length.0.max(0));
+        let start = if kind == AnimType::Out {
             length.0 - duration
+        } else {
+            0
         };
         row.animations.push(StickerAnimation {
             id: preset.resource_id.to_owned(),
@@ -86,9 +96,13 @@ pub fn set_animation(
             panel: "video".to_owned(),
             ..StickerAnimation::default()
         });
-        // In before out, as the reference editor writes them.
+        // In, out, then loop, as the reference editor writes them.
         row.animations
-            .sort_by_key(|animation| animation.kind != "in");
+            .sort_by_key(|animation| match animation.kind.as_str() {
+                "in" => 0,
+                "out" => 1,
+                _ => 2,
+            });
     }
     if row.animations.is_empty() {
         draft
@@ -267,7 +281,7 @@ mod tests {
             Err(EditError::Animation)
         );
         assert_eq!(
-            session.apply(1, &[set(AnimType::Loop, None, 500_000)]),
+            session.apply(1, &[set(AnimType::Caption, None, 500_000)]),
             Err(EditError::Animation)
         );
         // A letter animation is a title's; "media" is not one.
@@ -281,6 +295,60 @@ mod tests {
                 )]
             ),
             Err(EditError::Animation)
+        );
+    }
+
+    #[test]
+    fn a_loop_plays_beside_the_in_and_out_over_the_whole_clip() {
+        let mut session = open();
+        session
+            .apply(
+                session.revision(),
+                &[set(AnimType::In, Some(FADE_IN), 600_000)],
+            )
+            .unwrap();
+        session
+            .apply(
+                session.revision(),
+                &[set(
+                    AnimType::Loop,
+                    Some("cutlass-anim-loop-pulse"),
+                    400_000,
+                )],
+            )
+            .unwrap();
+        session
+            .apply(
+                session.revision(),
+                &[set(AnimType::Out, Some(FADE_OUT), 400_000)],
+            )
+            .unwrap();
+        let draft = session.draft();
+        let kinds: Vec<_> = draft.materials.material_animations[0]
+            .animations
+            .iter()
+            .map(|animation| (animation.kind.as_str(), animation.duration))
+            .collect();
+        // The loop takes no room from the in and out.
+        assert_eq!(
+            kinds,
+            [
+                ("in", Some(Micros(600_000))),
+                ("out", Some(Micros(400_000))),
+                ("loop", Some(Micros(400_000))),
+            ]
+        );
+        let segment = &draft.tracks[0].segments[0];
+        let (clip, uniform) = animated_at(draft, segment, Micros(200_000)).unwrap();
+        assert!(clip.scale.x > 1.0 || uniform.value > 1.0);
+        session
+            .apply(session.revision(), &[set(AnimType::Loop, None, 0)])
+            .unwrap();
+        assert_eq!(
+            session.draft().materials.material_animations[0]
+                .animations
+                .len(),
+            2
         );
     }
 

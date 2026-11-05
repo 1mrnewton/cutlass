@@ -12,11 +12,13 @@ pub struct ClipAnimation {
     pub duration: Micros,
 }
 
-/// A clip's in and out animations and its length, which they share.
+/// A clip's in and out animations and its length, which they share, and
+/// the loop that plays the whole clip, a round each `duration`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClipAnimations {
     pub enter: Option<ClipAnimation>,
     pub leave: Option<ClipAnimation>,
+    pub looped: Option<ClipAnimation>,
     pub length: Micros,
 }
 
@@ -50,6 +52,7 @@ pub fn clip_animations(
     Some(ClipAnimations {
         enter: side(AnimType::In),
         leave: side(AnimType::Out),
+        looped: side(AnimType::Loop),
         length: segment.target.duration,
     })
 }

@@ -744,6 +744,41 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         true
     }
 
+    /// Encoder: the global-motion warp prediction from `rf` of the luma
+    /// block at (x, y) into `scratch.obmc` (stride w), when GLOBALMV would
+    /// warp there.
+    pub fn predict_global_warp_into_scratch(
+        &mut self,
+        rf: i8,
+        x: usize,
+        y: usize,
+        w: usize,
+        h: usize,
+    ) -> bool {
+        if w < 8
+            || h < 8
+            || self.hdr.force_integer_mv
+            || self.hdr.gm_type[rf.max(0) as usize] <= TRANSLATION
+            || self.is_scaled(rf)
+        {
+            return false;
+        }
+        let mat = self.hdr.gm_params[rf as usize];
+        if mc::setup_shear(&mat).is_none()
+            || self
+                .warp_block(0, rf, &mat, x, y, w, h, &Dst::Frame)
+                .is_err()
+        {
+            return false;
+        }
+        let pl = &self.cur.planes[0];
+        for i in 0..h {
+            self.scratch.obmc[i * w..i * w + w]
+                .copy_from_slice(&pl.data[(y + i) * pl.stride + x..][..w]);
+        }
+        true
+    }
+
     fn warp_estimation(&mut self) {
         let b = &self.b;
         let mut a = [[0i64; 2]; 2];

@@ -1,7 +1,8 @@
 //! Encodes a Y4M file with the Rust AV1 encoder and writes IVF.
 //!
 //! Usage: av1enc <in.y4m> <out.ivf> [--q N | --kbps N] [--speed N] [--keyint N] [--frames N]
-//!        [--tiles COLSLOG2xROWSLOG2] [--recon out.yuv]
+//!        [--tiles COLSLOG2xROWSLOG2] [--recon out.yuv] [--gop N]
+//!        [--global-motion] [--temporal-filter]
 
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
@@ -143,6 +144,12 @@ fn main() -> Result<(), String> {
     }
     if let Some(s) = arg(&args, "--speed") {
         cfg.speed = s.parse().map_err(|_| "speed")?;
+    }
+    if args.iter().any(|a| a == "--global-motion") {
+        cfg.global_motion = true;
+    }
+    if args.iter().any(|a| a == "--temporal-filter") {
+        cfg.temporal_filter = true;
     }
     if let Some(s) = arg(&args, "--gop") {
         cfg.gop = s.parse().map_err(|_| "gop")?;

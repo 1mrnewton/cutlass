@@ -97,6 +97,9 @@ pub struct EncConfig {
     pub gop: u32,
     /// Denoise alt-refs with their neighbours (coded with an overlay frame).
     pub temporal_filter: bool,
+    /// Estimate a global motion model per reference (experimental: it does
+    /// not pay off on the natural test clip yet).
+    pub global_motion: bool,
     pub tile_cols_log2: u32,
     pub tile_rows_log2: u32,
     pub color_primaries: u8,
@@ -119,6 +122,7 @@ impl EncConfig {
             keyint: 120,
             gop: 8,
             temporal_filter: false,
+            global_motion: false,
             tile_cols_log2: 0,
             tile_rows_log2: 0,
             color_primaries: 2,
@@ -152,6 +156,9 @@ pub struct Av1Enc {
     /// Display index of the frame each reference slot holds.
     slot_disp: [Option<u64>; 8],
 }
+
+/// A global motion type and its parameters.
+type GmModel = (u8, [i32; 6]);
 
 /// One temporal unit: the packet and the reconstruction of its shown frame.
 pub struct EncodedUnit {
@@ -717,6 +724,28 @@ impl Av1Enc {
         let key = spec.key;
         let q = spec.q;
         let mut intent = self.frame_header(spec);
+        if !key && self.cfg.global_motion && self.cfg.speed < 7 {
+            // Global motion per distinct reference picture.
+            let mut done: [Option<Option<GmModel>>; 8] = Default::default();
+            for rf in 1..8 {
+                let slot = intent.ref_frame_idx[rf - 1] as usize & 7;
+                if done[slot].is_none() {
+                    let pic = self.core.slot_picture(slot);
+                    let est = pic
+                        .as_deref()
+                        .and_then(|p| P::view(p))
+                        .filter(|r| {
+                            r.planes[0].w == src.planes[0].w && r.planes[0].h == src.planes[0].h
+                        })
+                        .and_then(|r| super::gm::estimate(src, r, self.cfg.bit_depth));
+                    done[slot] = Some(est);
+                }
+                if let Some(Some((ty, p))) = done[slot] {
+                    intent.gm_type[rf] = ty;
+                    intent.gm_params[rf] = p;
+                }
+            }
+        }
         intent.allow_screen_content_tools =
             self.cfg.speed < 10 && is_screen_content(src, self.cfg.bit_depth);
         let refs_hdr = self.core.ref_headers().clone();

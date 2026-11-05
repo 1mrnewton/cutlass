@@ -1250,9 +1250,11 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
             if best.is_some_and(|b| b.1 == mv && b.0 != NEWMV) {
                 continue;
             }
-            if self
-                .predict_into_scratch(0, rf, x, y, w, h, mv, [0, 0])
-                .is_err()
+            let warped = mode == GLOBALMV && self.predict_global_warp_into_scratch(rf, x, y, w, h);
+            if !warped
+                && self
+                    .predict_into_scratch(0, rf, x, y, w, h, mv, [0, 0])
+                    .is_err()
             {
                 continue;
             }

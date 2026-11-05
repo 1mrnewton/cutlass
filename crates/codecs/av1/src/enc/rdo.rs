@@ -1014,10 +1014,11 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
     ) {
         let Some(src) = self.src else { return };
         let sp = &src.planes[0];
-        for i in 0..h {
-            for j in 0..w {
-                out[i * w + j] = sp.data[(y + i) * sp.stride + x + j].to_i32()
-                    - pred[i * pred_stride + j].to_i32();
+        for (i, o) in out.chunks_exact_mut(w).take(h).enumerate() {
+            let s = &sp.data[(y + i) * sp.stride + x..][..w];
+            let p = &pred[i * pred_stride..][..w];
+            for ((o, s), p) in o.iter_mut().zip(s).zip(p) {
+                *o = s.to_i32() - p.to_i32();
             }
         }
     }
@@ -2004,7 +2005,8 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
     /// frame allows it, forward/backward compound pairs.
     /// The best of the inter candidates (sorted by SATD cost) after a
     /// transform-coded RD comparison of the first few on the first
-    /// transform block's area, and its RD cost when it was measured.
+    /// transform block's area (blocks up to 32x32: on larger ones it costs
+    /// more than it finds), and its RD cost when it was measured.
     fn rerank_inter(
         &mut self,
         list: Vec<InterChoice>,
@@ -2019,7 +2021,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         let first = list.first().copied();
         let fw = self.fs.mi_cols * 4;
         let fh = self.fs.mi_rows * 4;
-        if k < 2 || list.len() < 2 || x + w > fw || y + h > fh {
+        if k < 2 || list.len() < 2 || x + w > fw || y + h > fh || w * h > 32 * 32 {
             return (first, None);
         }
         let lam_b = self.enc.lambda;

@@ -626,7 +626,8 @@ impl Av1Enc {
                 if !show && level == 0 && self.use_tf() {
                     // Denoise the alt-ref with its neighbours in the lookahead.
                     let mut others = Vec::new();
-                    for k in idx.saturating_sub(3)..=idx + 3 {
+                    let tn = ev("AV1_TFN", 2.0) as usize;
+                    for k in idx.saturating_sub(tn)..=idx + tn {
                         if k == idx {
                             continue;
                         }

@@ -74,6 +74,8 @@ pub struct ModeParams {
     pub fast_tx_dist: bool,
     /// Also try horizontal and vertical halves in partition search.
     pub rect_partitions: bool,
+    /// Sub-sample motion search tries 5 instead of 8 neighbours per step.
+    pub subpel_pruned: bool,
 }
 
 impl Default for ModeParams {
@@ -106,6 +108,7 @@ impl Default for ModeParams {
             skip_mode_sse: 4.0,
             fast_tx_dist: true,
             rect_partitions: false,
+            subpel_pruned: false,
         }
     }
 }
@@ -1256,6 +1259,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
                 self.mode.subpel.min(2)
             },
             filter: self.mode.me_filter,
+            subpel_pruned: self.mode.subpel_pruned,
             ..MeParams::default()
         };
         let cost_fn = |r: i32, c: i32| -> u32 {

@@ -495,6 +495,9 @@ pub struct MeParams {
     pub border: i32,
     /// Moves allowed per step size of the full-sample pattern search.
     pub max_iters: u32,
+    /// Sub-sample steps try the four axis neighbours and then only the
+    /// diagonal between the better ones (5 predictions instead of 8).
+    pub subpel_pruned: bool,
 }
 
 impl Default for MeParams {
@@ -505,6 +508,7 @@ impl Default for MeParams {
             filter: 0,
             border: 16,
             max_iters: 8,
+            subpel_pruned: false,
         }
     }
 }
@@ -910,7 +914,18 @@ pub fn motion_search<P: Pixel>(
         let levels = usize::from(params.subpel.min(3));
         for &st in &[4i32, 2, 1][..levels] {
             let (cy, cx) = (mv.row, mv.col);
-            for &(oy, ox) in &SQUARE {
+            // Costs of the four axis neighbours (SQUARE starts with them).
+            let mut cross = [u32::MAX; 4];
+            for (i, &(oy, ox)) in SQUARE.iter().enumerate() {
+                if params.subpel_pruned && i >= 4 {
+                    // Only the diagonal between the better vertical and
+                    // the better horizontal neighbour.
+                    let dy = if cross[0] <= cross[3] { -1 } else { 1 };
+                    let dx = if cross[1] <= cross[2] { -1 } else { 1 };
+                    if (oy, ox) != (dy, dx) {
+                        continue;
+                    }
+                }
                 let (r, c) = (cy + oy * st, cx + ox * st);
                 if r < r8_lo || r > r8_hi || c < c8_lo || c > c8_hi {
                     continue;
@@ -922,6 +937,9 @@ pub fn motion_search<P: Pixel>(
                 s.predict(pred, edge, (r, c));
                 let d = satd(src_blk, src_stride, &pred[..], w, w, h);
                 let cost = d.saturating_add(rate);
+                if i < 4 {
+                    cross[i] = cost;
+                }
                 if cost < mv.cost {
                     mv = Best {
                         row: r,

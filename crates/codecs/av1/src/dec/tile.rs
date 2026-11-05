@@ -668,7 +668,13 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
                 first_block: log.blocks.len(),
             });
         }
-        self.clear_block_decoded_flags(r, c);
+        // While recording only luma's flags are read here (see `decoded`).
+        let planes = if self.rec.is_some() {
+            1
+        } else {
+            self.num_planes
+        };
+        self.clear_block_decoded_flags(r, c, planes);
         self.read_lr(r, c, self.sb_size)?;
         self.decode_partition(r, c, self.sb_size)
     }
@@ -683,9 +689,9 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
         }
     }
 
-    fn clear_block_decoded_flags(&mut self, r: usize, c: usize) {
+    fn clear_block_decoded_flags(&mut self, r: usize, c: usize, planes: usize) {
         let sb4 = self.sb_size4;
-        for plane in 0..self.num_planes {
+        for plane in 0..planes {
             let (sx, sy) = self.plane_sub(plane);
             let sbw4 = (self.mi_col_end - c) >> sx;
             let sbh4 = (self.mi_row_end - r) >> sy;
@@ -3421,7 +3427,9 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
         }
         // Also while recording: mode info prediction asks whether the 4x4s
         // above right are decoded yet (see `decoded`).
-        self.tx_mark_decoded(plane, start_x, start_y, tx);
+        if plane == 0 || self.rec.is_none() {
+            self.tx_mark_decoded(plane, start_x, start_y, tx);
+        }
         Ok(())
     }
 
@@ -3525,7 +3533,7 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
                 self.mi_col_start,
                 self.mi_col_end,
             ] = sb.tile;
-            self.clear_block_decoded_flags(sb.r, sb.c);
+            self.clear_block_decoded_flags(sb.r, sb.c, self.num_planes);
             let end = log
                 .sbs
                 .get(si + 1)

@@ -32,6 +32,29 @@ pub enum AnyPicture {
     U16(Picture<u16>),
 }
 
+/// A sample type that can be viewed inside an [`AnyPicture`].
+pub trait PicturePixel: Pixel {
+    fn view(p: &AnyPicture) -> Option<&Picture<Self>>;
+}
+
+impl PicturePixel for u8 {
+    fn view(p: &AnyPicture) -> Option<&Picture<u8>> {
+        match p {
+            AnyPicture::U8(x) => Some(x),
+            AnyPicture::U16(_) => None,
+        }
+    }
+}
+
+impl PicturePixel for u16 {
+    fn view(p: &AnyPicture) -> Option<&Picture<u16>> {
+        match p {
+            AnyPicture::U16(x) => Some(x),
+            AnyPicture::U8(_) => None,
+        }
+    }
+}
+
 /// One shown frame.
 #[derive(Clone)]
 pub struct DecodedFrame {
@@ -103,6 +126,26 @@ impl Av1Core {
         self.seq = seq;
         self.apply_grain = grain;
         self.max_pixels = max;
+    }
+
+    /// The header state of every reference slot.
+    pub fn ref_headers(&self) -> &[RefHeaderState; 8] {
+        &self.ref_hdr
+    }
+
+    /// The picture held by a reference slot.
+    pub fn slot_picture(&self, slot: usize) -> Option<Arc<AnyPicture>> {
+        self.slots.get(slot)?.as_ref().map(|s| s.pic.clone())
+    }
+
+    /// The CDFs saved with a reference slot.
+    pub fn slot_cdf(&self, slot: usize) -> Option<Arc<CdfContext>> {
+        self.slots.get(slot)?.as_ref().map(|s| s.cdf.clone())
+    }
+
+    /// Motion field and segmentation data saved with a reference slot.
+    pub fn slot_data(&self, slot: usize) -> Option<Arc<RefData>> {
+        self.slots.get(slot)?.as_ref().map(|s| s.data.clone())
     }
 
     pub fn sequence(&self) -> Option<&SequenceHeader> {
@@ -716,6 +759,10 @@ fn decode_frame<P: Pixel>(
             b: Default::default(),
             pb: Default::default(),
             plan: Default::default(),
+            src: None,
+            enc: Default::default(),
+            mode: Default::default(),
+            me_scratch: Default::default(),
             plan_q: 0,
             plan_delta_lf: [0; 4],
             color_map_y: std::mem::take(&mut color_map_y),

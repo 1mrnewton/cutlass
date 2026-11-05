@@ -287,6 +287,11 @@ pub struct TileDec<'a, P: Pixel, C: Coder = Msac<'a>> {
     /// The planned block (encoder only); the source of written values.
     pub pb: Block,
     pub plan: EncPlan,
+    /// The source picture being encoded (encoder only).
+    pub src: Option<&'a Picture<P>>,
+    pub enc: crate::enc::quant::QuantParams,
+    pub mode: crate::enc::rdo::ModeParams,
+    pub me_scratch: crate::enc::me::MeScratch<P>,
     pub plan_q: i32,
     pub plan_delta_lf: [i8; 4],
     pub cdf: &'a mut CdfContext,
@@ -474,7 +479,23 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
     // Tile entry point.
 
     pub fn decode_tile(&mut self) -> R<()> {
-        // clear_above_context
+        self.begin_tile();
+        let sb4 = self.sb_size4;
+        let mut r = self.mi_row_start;
+        while r < self.mi_row_end {
+            self.begin_sb_row();
+            let mut c = self.mi_col_start;
+            while c < self.mi_col_end {
+                self.code_superblock(r, c)?;
+                c += sb4;
+            }
+            r += sb4;
+        }
+        Ok(())
+    }
+
+    /// Start of decode_tile(): clears the above context and the per-tile state.
+    pub fn begin_tile(&mut self) {
         let s = self.mi_col_start;
         let e = (self.mi_col_end + 32).min(self.above_seg_pred.len());
         for p in 0..3 {
@@ -489,29 +510,27 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
             *v = 0;
         }
         self.delta_lf = [0; 4];
+        self.current_q_index = i32::from(self.hdr.quant.base_q_idx);
         for p in 0..self.num_planes {
             self.ref_sgr_xqd[p] = [-32, 31];
             self.ref_lr_wiener[p] = [[3, -7, 15]; 2];
         }
-        let sb4 = self.sb_size4;
-        let mut r = self.mi_row_start;
-        while r < self.mi_row_end {
-            // clear_left_context
-            self.left_level = [[0; 32]; 3];
-            self.left_dc = [[0; 32]; 3];
-            self.left_seg_pred = [0; 32];
-            let mut c = self.mi_col_start;
-            while c < self.mi_col_end {
-                self.read_deltas = self.hdr.delta_q_present;
-                self.clear_cdef(r, c);
-                self.clear_block_decoded_flags(r, c);
-                self.read_lr(r, c, self.sb_size)?;
-                self.decode_partition(r, c, self.sb_size)?;
-                c += sb4;
-            }
-            r += sb4;
-        }
-        Ok(())
+    }
+
+    /// clear_left_context() at the start of a superblock row.
+    pub fn begin_sb_row(&mut self) {
+        self.left_level = [[0; 32]; 3];
+        self.left_dc = [[0; 32]; 3];
+        self.left_seg_pred = [0; 32];
+    }
+
+    /// One superblock of decode_tile() (read_lr and decode_partition).
+    pub fn code_superblock(&mut self, r: usize, c: usize) -> R<()> {
+        self.read_deltas = self.hdr.delta_q_present;
+        self.clear_cdef(r, c);
+        self.clear_block_decoded_flags(r, c);
+        self.read_lr(r, c, self.sb_size)?;
+        self.decode_partition(r, c, self.sb_size)
     }
 
     fn clear_cdef(&mut self, r: usize, c: usize) {
@@ -783,8 +802,12 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
             let ctx = self.partition_ctx(r, c, bsize, avail_u, avail_l);
             let bsl = mi_width_log2(bsize);
             let want = if C::WRITE {
-                let depth = (self.sb_size4 / num4x4).trailing_zeros() as usize;
-                self.plan.partition_at(r, c, depth)
+                if self.plan.blocks.is_empty() {
+                    self.enc_partition(r, c, bsize, has_rows, has_cols)
+                } else {
+                    let depth = (self.sb_size4 / num4x4).trailing_zeros() as usize;
+                    self.plan.partition_at(r, c, depth)
+                }
             } else {
                 0
             };
@@ -927,7 +950,9 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
             b.avail_l_chroma = false;
         }
         self.b = b;
-        if C::WRITE {
+        if C::WRITE && self.plan.blocks.is_empty() {
+            self.enc_block();
+        } else if C::WRITE {
             let Some(pbk) = self.plan.block(r, c) else {
                 return Err(malformed("no planned block"));
             };
@@ -3216,6 +3241,14 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
         Ok(())
     }
 
+    pub fn tx_set_for(&self, tx: u8) -> usize {
+        self.get_tx_set(tx)
+    }
+
+    pub fn tx_type_allowed(&self, set: usize, t: u8) -> bool {
+        self.is_tx_type_in_set(set, t)
+    }
+
     fn get_tx_set(&self, tx: u8) -> usize {
         let sqr = TX_SIZE_SQR[tx as usize];
         let sqr_up = TX_SIZE_SQR_UP[tx as usize];
@@ -3405,15 +3438,18 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
         if C::WRITE {
             if let Some(pt) = self.plan.tx(plane, start_x, start_y) {
                 want_type = pt.tx_type;
-                let scan = get_scan(tx, want_type);
                 let want = &mut self.scratch.want;
                 for (i, v) in want.iter_mut().enumerate() {
                     *v = pt.coefs.get(i).copied().unwrap_or(0);
                 }
-                for (c, &p) in scan.iter().enumerate() {
-                    if want[p as usize] != 0 {
-                        want_eob = c + 1;
-                    }
+            } else {
+                // Quantize the source against the prediction now in the frame.
+                want_type = self.enc_quantize(plane, start_x, start_y, tx);
+            }
+            let scan = get_scan(tx, want_type);
+            for (c, &p) in scan.iter().enumerate() {
+                if self.scratch.want[p as usize] != 0 {
+                    want_eob = c + 1;
                 }
             }
         }

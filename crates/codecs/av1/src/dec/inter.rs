@@ -259,6 +259,22 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         Ok(())
     }
 
+    /// Predicts a single-reference block into `scratch.obmc` (stride `w`)
+    /// for mode decision.
+    pub fn predict_into_scratch(
+        &mut self,
+        plane: usize,
+        ref_frame: i8,
+        x: usize,
+        y: usize,
+        w: usize,
+        h: usize,
+        mv: Mv,
+        filters: [u8; 2],
+    ) -> R<()> {
+        self.block_pred(plane, ref_frame, x, y, w, h, mv, filters, &Dst::Obmc)
+    }
+
     fn distance_weights(&self, refs: [i8; 2]) -> (i32, i32) {
         let mut dist = [0i32; 2];
         for l in 0..2 {

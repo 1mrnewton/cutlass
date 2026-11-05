@@ -50,7 +50,7 @@ impl<P: Pixel> Scratch<P> {
             tmp1: vec![0; 128 * 128],
             mask: vec![0; 128 * 128],
             emu: vec![P::default(); (128 * 2 + 16) * (128 * 2 + 16)],
-            obmc: vec![P::default(); 128 * 64],
+            obmc: vec![P::default(); 128 * 128],
         }
     }
 }

@@ -82,6 +82,10 @@ jobs:
         env:
           CUTLASS_REQUIRE_GPU: "1"
         run: cargo test --workspace --all-targets
+      - name: Desktop smoke test
+        run: |
+          cargo build -p cutlass
+          python3 scripts/smoke.py target/debug/cutlass
       - name: Public release logger
         run: |
           cargo clippy -p cutlass-logger --all-targets --features public-release -- -D warnings
@@ -90,3 +94,35 @@ jobs:
           cargo check -p cutlass --features public-release
       - name: Dependency policy
         uses: EmbarkStudios/cargo-deny-action@v2
+
+  desktop:
+    # The Linux job above covers the whole workspace. Here the desktop app
+    # and the platform crate build and test on macOS and Windows, then the
+    # built binary makes a project and edits it through `cutlass mcp`.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            platform: cutlass-platform-apple
+            binary: target/debug/cutlass
+            python: python3
+          - os: windows-latest
+            platform: cutlass-platform-windows
+            binary: target/debug/cutlass.exe
+            python: python
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Clippy
+        run: cargo clippy -p cutlass -p ${{ matrix.platform }} --all-targets -- -D warnings
+      - name: Test
+        run: cargo test -p cutlass -p ${{ matrix.platform }} --all-targets
+      - name: Smoke test
+        run: |
+          cargo build -p cutlass
+          ${{ matrix.python }} scripts/smoke.py ${{ matrix.binary }}

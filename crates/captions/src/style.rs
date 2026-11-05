@@ -192,6 +192,25 @@ fn held(value: f64) -> Channel {
     }
 }
 
+/// How long a sized word takes to grow to its size, in milliseconds.
+pub const GROW_MS: i64 = 120;
+
+/// From its own size to `scale` over [`GROW_MS`], then held.
+fn grow(scale: f64) -> Channel {
+    Channel {
+        keys: vec![
+            Key {
+                millis: 0,
+                value: 1.0,
+            },
+            Key {
+                millis: GROW_MS,
+                value: scale,
+            },
+        ],
+    }
+}
+
 fn curves(look: WordLook, font_size: f64) -> StyleCurves {
     let mut curves = StyleCurves::identity();
     if look.color != PLAIN.color {
@@ -201,8 +220,10 @@ fn curves(look: WordLook, font_size: f64) -> StyleCurves {
         curves.background = look.background.map(held);
     }
     if look.scale != 1.0 {
-        curves.scale_x = held(look.scale);
-        curves.scale_y = held(look.scale);
+        // A sized word grows to its size as it starts.
+        curves.scale_x = grow(look.scale);
+        curves.scale_y = grow(look.scale);
+        curves.from_word_start = true;
     }
     if look.lift != 0.0 {
         curves.position_y = held(-look.lift * font_size);
@@ -231,6 +252,19 @@ mod tests {
             CAPTION_STYLES.map(|style| style.key),
             cutlass_model::CAPTION_STYLE_KEYS
         );
+    }
+
+    #[test]
+    fn a_sized_word_grows_in_from_its_start() {
+        let pop = caption_style("pop").unwrap().styles(64.0);
+        assert!(pop.reading.from_word_start);
+        assert_eq!(pop.reading.sample(-10).unwrap().scale_x, 1.0);
+        let half = pop.reading.sample(GROW_MS / 2).unwrap().scale_x;
+        assert!(half > 1.0 && half < 1.25, "{half}");
+        assert_eq!(pop.reading.sample(GROW_MS).unwrap().scale_x, 1.25);
+        // Held looks keep the caption's clock.
+        let karaoke = caption_style("karaoke").unwrap().styles(64.0);
+        assert!(!karaoke.reading.from_word_start);
     }
 
     #[test]

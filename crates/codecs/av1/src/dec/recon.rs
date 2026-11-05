@@ -16,6 +16,9 @@ use super::types::{
 /// Reusable buffers for one tile.
 pub struct Scratch<P> {
     pub levels: Vec<u16>,
+    /// Scan indices of the nonzero levels of the transform block being read,
+    /// from the end of block back.
+    pub nz_scan: Vec<u16>,
     /// Planned levels of the transform block being written (encoder).
     pub want: Vec<i32>,
     pub coefs: Vec<i32>,
@@ -40,6 +43,7 @@ impl<P: Pixel> Scratch<P> {
     pub fn new() -> Self {
         Self {
             levels: vec![0; 36 * 36],
+            nz_scan: vec![0; 1024],
             want: vec![0; 1024],
             coefs: vec![0; 64 * 64],
             nz_rows: 0,
@@ -65,6 +69,7 @@ impl<P: Pixel> Scratch<P> {
     pub fn empty() -> Self {
         Self {
             levels: Vec::new(),
+            nz_scan: Vec::new(),
             want: Vec::new(),
             coefs: Vec::new(),
             nz_rows: 0,

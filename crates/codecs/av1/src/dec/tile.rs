@@ -3837,17 +3837,33 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
                 first,
                 want,
             };
-            match tx_class {
-                0 => {
-                    read_levels::<0, C>(&mut self.msac, coeff_base_cdf, coeff_br_cdf, levels, &args)
-                }
-                1 => {
-                    read_levels::<1, C>(&mut self.msac, coeff_base_cdf, coeff_br_cdf, levels, &args)
-                }
-                _ => {
-                    read_levels::<2, C>(&mut self.msac, coeff_base_cdf, coeff_br_cdf, levels, &args)
-                }
-            }
+            let nzc = &mut self.scratch.nz_scan;
+            let n_nz = match tx_class {
+                0 => read_levels::<0, C>(
+                    &mut self.msac,
+                    coeff_base_cdf,
+                    coeff_br_cdf,
+                    levels,
+                    nzc,
+                    &args,
+                ),
+                1 => read_levels::<1, C>(
+                    &mut self.msac,
+                    coeff_base_cdf,
+                    coeff_br_cdf,
+                    levels,
+                    nzc,
+                    &args,
+                ),
+                _ => read_levels::<2, C>(
+                    &mut self.msac,
+                    coeff_base_cdf,
+                    coeff_br_cdf,
+                    levels,
+                    nzc,
+                    &args,
+                ),
+            };
             // Signs and Golomb remainder.
             let dq = &mut self.scratch.coefs;
             let mut nz_rows = 0usize;
@@ -3856,12 +3872,11 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
             let lim = 1i64 << (7 + bd);
             let dshift = qinfo.denom.trailing_zeros();
             let cbwl = bwl.min(5);
-            for c in 0..eob {
+            // The nonzero coefficients, in scan order.
+            for k in (0..n_nz).rev() {
+                let c = usize::from(self.scratch.nz_scan[k]);
                 let li = (tab[c] & 0xFFFF) as usize;
                 let mut q = i32::from(self.scratch.levels[li] >> 8);
-                if q == 0 {
-                    continue;
-                }
                 let pos = scan[c] as usize;
                 let sign = if c == 0 {
                     // dc_sign ctx
@@ -3921,10 +3936,10 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
                 nz_rows = nz_rows.max(i + 1);
                 nz_cols = nz_cols.max(j + 1);
             }
-            // Reset the levels read.
+            // Reset the levels read (only nonzero ones were written nonzero).
             let levels = &mut self.scratch.levels;
-            for &e in &tab[..eob] {
-                levels[(e & 0xFFFF) as usize] = 0;
+            for &c in &self.scratch.nz_scan[..n_nz] {
+                levels[(tab[usize::from(c)] & 0xFFFF) as usize] = 0;
             }
             self.scratch.nz_rows = nz_rows.max(1);
             self.scratch.nz_cols = nz_cols.max(1);
@@ -4047,8 +4062,9 @@ fn read_levels<const CLASS: usize, C: Coder>(
     base_cdf: &mut [[u16; 4]; 42],
     br_cdf: &mut [[u16; 4]; 21],
     levels: &mut [u16],
+    nz: &mut [u16],
     a: &LevelArgs<'_>,
-) {
+) -> usize {
     let ls = a.lstride;
     let offs: [usize; 5] = std::array::from_fn(|i| {
         SIG_REF_DIFF_OFFSET[CLASS][i][0] as usize * ls + SIG_REF_DIFF_OFFSET[CLASS][i][1] as usize
@@ -4072,7 +4088,10 @@ fn read_levels<const CLASS: usize, C: Coder>(
     };
     let last = a.eob - 1;
     let tab = &a.tab[..a.eob];
-    // The eob coefficient.
+    let nz = &mut nz[..a.eob];
+    // The eob coefficient (nonzero).
+    nz[0] = last as u16;
+    let mut n = 1;
     {
         let e = tab[last];
         let li = (e & 0xFFFF) as usize;
@@ -4085,7 +4104,7 @@ fn read_levels<const CLASS: usize, C: Coder>(
         levels[li] = level_entry(level);
     }
     if last == 0 {
-        return;
+        return n;
     }
     for c in (1..last).rev() {
         let e = tab[c];
@@ -4100,6 +4119,8 @@ fn read_levels<const CLASS: usize, C: Coder>(
             level = read_br(msac, &mut br_cdf[(mag + (e >> 24)) as usize], wl);
         }
         levels[li] = level_entry(level);
+        nz[n] = c as u16;
+        n += usize::from(level != 0);
     }
     // The DC coefficient.
     let (s3, s5) = sums(levels, 0);
@@ -4115,6 +4136,8 @@ fn read_levels<const CLASS: usize, C: Coder>(
         level = read_br(msac, &mut br_cdf[mag as usize], wl);
     }
     levels[0] = level_entry(level);
+    nz[n] = 0;
+    n + usize::from(level != 0)
 }
 
 fn ceil_log2(x: u32) -> u32 {

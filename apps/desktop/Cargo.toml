@@ -19,6 +19,7 @@ cutlass-export = { path = "../../crates/export", version = "0.1.0" }
 cutlass-effects = { path = "../../crates/effects", version = "0.1.0" }
 cutlass-store = { path = "../../crates/store", version = "0.1.0" }
 cutlass-storage = { path = "../../crates/storage", version = "0.1.0" }
+cutlass-download = { path = "../../crates/download", version = "0.1.0", features = ["http"] }
 cutlass-session = { path = "../../crates/session", version = "0.1.0" }
 cutlass-eval = { path = "../../crates/eval", version = "0.1.0" }
 cutlass-engine = { path = "../../crates/engine", version = "0.1.0" }

@@ -5,7 +5,7 @@
 use cutlass_model::TrackAttribute;
 use cutlass_transcription::{FileSource, HeardClip};
 
-use super::{SPEECH_MODEL, Shell, ShellError, heard_words, load_speech, speech_model_dir};
+use super::{Shell, ShellError, heard_words, load_speech, speech_model};
 
 impl Shell {
     /// Start hearing `[start_us, start_us + duration_us)`: every clip with
@@ -48,7 +48,8 @@ impl Shell {
         }
         self.refuse_busy()?;
         let loaded = self.speech.borrow_mut().take();
-        if loaded.is_none() && !speech_model_dir().join(SPEECH_MODEL).is_file() {
+        if loaded.is_none() && !speech_model::speech_model_here() {
+            self.wants_speech_model = true;
             return Err(ShellError::Unavailable(
                 "the speech model is not on this machine".to_owned(),
             ));
@@ -162,8 +163,15 @@ mod tests {
                 // The file is missing, so the job answers with why.
                 assert!(desktop.hearing(&id).is_err());
             }
-            Err(error) => assert!(error.to_string().contains("speech model"), "{error}"),
+            Err(error) => {
+                assert!(error.to_string().contains("speech model"), "{error}");
+                // The window offers the download, until the user says no.
+                assert!(desktop.wants_speech_model());
+                desktop.decline_speech_model();
+                assert!(!desktop.wants_speech_model());
+            }
         }
+        assert!(!desktop.wants_speech_model() || !super::speech_model::speech_model_here());
     }
 
     /// The assistant hears four seconds of a talk placed one second into the
@@ -173,8 +181,8 @@ mod tests {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../local-files");
         let sound = root.join("Expo - You Don't Need a Mac to Build iOS Apps Anymore.m4a");
         if !sound.is_file()
-            || !super::speech_model_dir()
-                .join(super::SPEECH_MODEL)
+            || !super::speech_model::speech_model_dir()
+                .join(super::speech_model::SPEECH.file)
                 .is_file()
         {
             eprintln!("skipped: the sound or the speech model is missing");

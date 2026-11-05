@@ -53,7 +53,10 @@ mod inspector;
 mod listen;
 mod proxy;
 mod render;
+mod speech_model;
+
 pub use assistant::AgentRun;
+pub use speech_model::SPEECH_MODEL_QUESTION;
 
 pub use inspector::{LetterCase, Panel, SILENT_DB, TextLook, gain_of_db, volume_db};
 
@@ -715,6 +718,8 @@ pub struct Shell {
     /// What each speech job heard, by id, for the assistant's tools.
     heard: std::collections::HashMap<String, Result<String, String>>,
     hearings: u64,
+    /// A transcript or hearing found no speech model; the window offers it.
+    wants_speech_model: bool,
     /// The assistant's speech jobs, carried from one tool call to the next.
     agent_speech_jobs: std::collections::BTreeMap<String, cutlass_agent::SpeechJob>,
     /// Work running off the window thread, and the project it was started in.
@@ -816,6 +821,7 @@ impl Shell {
             speech: RefCell::new(None),
             heard: std::collections::HashMap::new(),
             hearings: 0,
+            wants_speech_model: false,
             agent_speech_jobs: std::collections::BTreeMap::new(),
             job: None,
             exported: None,
@@ -4149,7 +4155,8 @@ impl Shell {
         let clip = self.selected_speech()?;
         self.refuse_busy()?;
         let loaded = self.speech.borrow_mut().take();
-        if loaded.is_none() && !speech_model_dir().join(SPEECH_MODEL).is_file() {
+        if loaded.is_none() && !speech_model::speech_model_here() {
+            self.wants_speech_model = true;
             return Err(ShellError::Unavailable(
                 "the speech model is not on this machine".to_owned(),
             ));
@@ -7049,17 +7056,10 @@ struct RunningJob {
 /// What a finished job does on the window thread.
 pub(crate) type Landing = Box<dyn FnOnce(&mut Shell) -> Result<(), ShellError> + Send>;
 
-/// The speech model's file inside [`speech_model_dir`].
-const SPEECH_MODEL: &str = "parakeet-unified-en-0.6b.nemo";
-
 /// Load the speech model; slow, so a job does it.
 fn load_speech() -> Result<ParakeetUnified, ShellError> {
-    ParakeetUnified::cpu(&speech_model_dir())
+    ParakeetUnified::cpu(&speech_model::speech_model_dir())
         .map_err(|_| ShellError::Unavailable("the speech model could not be loaded".to_owned()))
-}
-
-fn speech_model_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../local-files/parakeet-unified-en-0.6b")
 }
 
 fn heard_words(
@@ -8015,8 +8015,8 @@ mod tests {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../local-files");
         let sound = root.join("Expo - You Don't Need a Mac to Build iOS Apps Anymore.m4a");
         if !sound.is_file()
-            || !super::speech_model_dir()
-                .join(super::SPEECH_MODEL)
+            || !super::speech_model::speech_model_dir()
+                .join(super::speech_model::SPEECH.file)
                 .is_file()
         {
             eprintln!("skipped: the sound or the speech model is missing");

@@ -385,6 +385,9 @@ pub fn show(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Option
     if view.approval.is_some() {
         approval_dialog(shell, ui, view);
     }
+    if shell.wants_speech_model() {
+        speech_model_dialog(shell, ui);
+    }
     dropped_files(shell, ui);
 }
 
@@ -1357,6 +1360,40 @@ fn approval_dialog(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
         }
         Some(false) => view.approval = None,
         None if refused => view.approval = None,
+        None => {}
+    }
+}
+
+/// A transcript or hearing found no speech model: offer to download it.
+fn speech_model_dialog(shell: &mut Shell, ui: &mut Ui) {
+    let mut answer = None;
+    let ((), closed) = widgets::dialog(ui, "Download the speech model?", |ui| {
+        ui.horizontal(|ui| {
+            ui.add_space(16.0);
+            ui.vertical(|ui| {
+                ui.set_max_width(372.0);
+                ui.label(crate::shell::SPEECH_MODEL_QUESTION);
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Download").clicked() {
+                        answer = Some(true);
+                    }
+                    if ui.button("Not now").clicked() {
+                        answer = Some(false);
+                    }
+                });
+            });
+        });
+    });
+    let declined = closed || ui.input(|input| input.key_pressed(egui::Key::Escape));
+    match answer {
+        Some(true) => {
+            if let Err(error) = shell.download_speech_model() {
+                shell.set_notice(error.to_string());
+            }
+        }
+        Some(false) => shell.decline_speech_model(),
+        None if declined => shell.decline_speech_model(),
         None => {}
     }
 }

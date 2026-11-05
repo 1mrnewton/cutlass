@@ -586,6 +586,7 @@ dependencies = [
  "cutlass-color",
  "cutlass-container",
  "cutlass-decode",
+ "cutlass-download",
  "cutlass-editor",
  "cutlass-effects",
  "cutlass-encode",

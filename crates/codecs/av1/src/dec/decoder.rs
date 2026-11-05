@@ -2,7 +2,7 @@
 
 use std::collections::VecDeque;
 use std::sync::mpsc::Receiver;
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use cutlass_decode::CodecError;
 
@@ -187,11 +187,21 @@ pub mod prof {
     pub const RECON: usize = 3;
     /// In-loop filters.
     pub const FILTER: usize = 4;
-    /// Copying final rows for (and into the copies of) references still
-    /// being decoded (part of `filter` and `wait_refs`).
-    pub const COPY: usize = 5;
-    const NAMES: [&str; 6] = ["wait_out", "wait_refs", "parse", "recon", "filter", "copy"];
-    static T: [AtomicU64; 6] = [const { AtomicU64::new(0) }; 6];
+    /// Copying final rows for the frames referencing one still being
+    /// decoded (part of `filter`).
+    pub const PUBLISH: usize = 5;
+    /// Copying them into the copies of the references.
+    pub const MIRROR: usize = 6;
+    const NAMES: [&str; 7] = [
+        "wait_out",
+        "wait_refs",
+        "parse",
+        "recon",
+        "filter",
+        "publish",
+        "mirror",
+    ];
+    static T: [AtomicU64; 7] = [const { AtomicU64::new(0) }; 7];
 
     /// Adds its lifetime to a stage.
     pub struct Span(pub usize, pub std::time::Instant);
@@ -220,16 +230,30 @@ pub mod prof {
     const CPU_NAMES: [&str; 5] = ["main", "task", "backend", "mf", "task_unref"];
     static CPU: [AtomicU64; 5] = [const { AtomicU64::new(0) }; 5];
 
+    /// The processor time of the calling thread so far, in nanoseconds
+    /// (0 without the `prof` feature).
+    pub fn thread_cpu() -> u64 {
+        if !cfg!(feature = "prof") {
+            return 0;
+        }
+        std::fs::read_to_string("/proc/thread-self/schedstat")
+            .ok()
+            .and_then(|s| s.split(' ').next().and_then(|v| v.parse::<u64>().ok()))
+            .unwrap_or(0)
+    }
+
+    /// Adds the processor time of the calling thread since `t0` (a
+    /// [`thread_cpu`]) to kind `k`.
+    pub fn cpu_since(k: usize, t0: u64) {
+        if cfg!(feature = "prof") {
+            CPU[k].fetch_add(thread_cpu().saturating_sub(t0), Ordering::Relaxed);
+        }
+    }
+
     /// Adds the processor time of the calling thread so far to kind `k`
     /// (call it as the thread ends).
     pub fn cpu(k: usize) {
-        if cfg!(feature = "prof") {
-            let ns = std::fs::read_to_string("/proc/thread-self/schedstat")
-                .ok()
-                .and_then(|s| s.split(' ').next().and_then(|v| v.parse::<u64>().ok()))
-                .unwrap_or(0);
-            CPU[k].fetch_add(ns, Ordering::Relaxed);
-        }
+        cpu_since(k, 0);
     }
 
     pub fn report() -> String {
@@ -239,6 +263,13 @@ pub mod prof {
             .zip(&T)
             .map(|(n, v)| format!("{n}={:.3}s ", v.load(Ordering::Relaxed) as f64 * 1e-9))
             .collect();
+        // Minor page faults of the process (field 10 of its stat).
+        if let Ok(st) = std::fs::read_to_string("/proc/self/stat")
+            && let Some(rest) = st.rsplit(')').next()
+            && let Some(f) = rest.split(' ').nth(8)
+        {
+            s.push_str(&format!("faults={f} "));
+        }
         s.push_str("| cpu ");
         for (n, v) in CPU_NAMES.iter().zip(&CPU) {
             s.push_str(&format!(
@@ -272,6 +303,9 @@ struct JobState {
     /// While decoding: the final rows so far, luma rows `0..rows`.
     bands: Vec<Arc<Band>>,
     rows: usize,
+    /// Whether a frame reads the rows as they become final (else they
+    /// are not published).
+    watched: bool,
 }
 
 /// The picture of a frame whose reconstruction and in-loop filters may
@@ -288,6 +322,7 @@ impl FrameJob {
                 result,
                 bands: Vec::new(),
                 rows: 0,
+                watched: false,
             }),
             cv: Condvar::new(),
         })
@@ -325,6 +360,20 @@ impl FrameJob {
             s.bands.push(Arc::new(band));
             self.cv.notify_all();
         }
+    }
+
+    /// Whether the rows are to be published.
+    fn watched(&self) -> bool {
+        lock(&self.state).watched
+    }
+
+    /// The result, or `None` after asking for the rows to be published.
+    fn poll_or_watch(&self) -> Option<R<Arc<AnyPicture>>> {
+        let mut s = lock(&self.state);
+        if s.result.is_none() {
+            s.watched = true;
+        }
+        s.result.clone()
     }
 
     fn poll(&self) -> Option<R<Arc<AnyPicture>>> {
@@ -421,10 +470,15 @@ struct RefFill {
 
 impl RefFill {
     /// Waits until the reference has its luma rows `0..need` final (all
-    /// of it for `usize::MAX`) and copies them into `m`.
-    fn fill<P: PicturePixel>(&mut self, m: &mut Picture<P>, need: usize) -> R<()> {
+    /// of it for `usize::MAX`) and copies them into `m`. Once the reference
+    /// is done, returns its picture instead (to be read in place).
+    fn fill<P: PicturePixel>(
+        &mut self,
+        m: &mut Picture<P>,
+        need: usize,
+    ) -> R<Option<Arc<AnyPicture>>> {
         if self.have >= need {
-            return Ok(());
+            return Ok(None);
         }
         let t = std::time::Instant::now();
         let (bands, fin) = {
@@ -440,56 +494,24 @@ impl RefFill {
             (bands, s.result.clone())
         };
         prof::add(prof::WAIT_REFS, t);
-        let _copy = prof::Span(prof::COPY, std::time::Instant::now());
+        let _copy = prof::Span(prof::MIRROR, std::time::Instant::now());
         for b in &bands {
             if b.y0 != self.have || !copy_band(m, b) {
                 // Not the layout of the copy: take the whole picture.
-                let pic = self.job.wait()?;
-                return self.fill_final(m, &pic);
+                return self.done(self.job.wait());
             }
             self.have = b.y1;
         }
         match fin {
-            Some(r) => self.fill_final(m, &*r?),
-            None => Ok(()),
+            Some(r) => self.done(r),
+            None => Ok(None),
         }
     }
 
-    /// Copies what `m` lacks of the finished picture `pic`.
-    fn fill_final<P: PicturePixel>(&mut self, m: &mut Picture<P>, pic: &AnyPicture) -> R<()> {
-        let Some(src) = P::view(pic) else {
-            return Err(malformed("reference sample size"));
-        };
-        if !copy_rows(m, src, self.have) {
-            *m = src.clone();
-        }
+    fn done(&mut self, r: R<Arc<AnyPicture>>) -> R<Option<Arc<AnyPicture>>> {
         self.have = usize::MAX;
-        Ok(())
+        r.map(Some)
     }
-}
-
-/// Copies the visible samples of the luma rows from `y0` down (chroma
-/// rows scaled) of `src` into `m`; false when the layouts differ.
-fn copy_rows<P: Pixel>(m: &mut Picture<P>, src: &Picture<P>, y0: usize) -> bool {
-    if m.planes.len() != src.planes.len()
-        || m.sub_y != src.sub_y
-        || m.planes
-            .iter()
-            .zip(&src.planes)
-            .any(|(d, s)| d.stride != s.stride || d.data.len() != s.data.len())
-    {
-        return false;
-    }
-    let sub_y = usize::from(m.sub_y);
-    for (p, (d, s)) in m.planes.iter_mut().zip(&src.planes).enumerate() {
-        let sy = if p > 0 { sub_y } else { 0 };
-        let (a, b, w) = visible_rows(s, y0, usize::MAX, sy);
-        for r in a..b {
-            let o = r * s.stride;
-            d.data[o..o + w].copy_from_slice(&s.data[o..o + w]);
-        }
-    }
-    true
 }
 
 /// Copies the rows of `b` into `m`; false when the layouts differ.
@@ -536,6 +558,65 @@ struct Queued {
     rh: RefHeaderState,
     grain: GrainParams,
     tag: u64,
+}
+
+type Job = Box<dyn FnOnce() + Send>;
+
+#[derive(Default)]
+struct WorkQueue {
+    jobs: VecDeque<Job>,
+    idle: usize,
+    closed: bool,
+}
+
+/// The threads frame tasks and their backends run on, kept between frames
+/// (their stacks and allocator caches stay warm). A job goes to an idle
+/// thread, or to a new one when none is idle, so jobs that block waiting
+/// for each other never wait for a thread.
+#[derive(Default)]
+struct Workers {
+    q: Mutex<WorkQueue>,
+    cv: Condvar,
+}
+
+impl Workers {
+    fn run(self: &Arc<Self>, job: Job) {
+        let mut q = lock(&self.q);
+        q.jobs.push_back(job);
+        if q.idle >= q.jobs.len() {
+            self.cv.notify_one();
+            return;
+        }
+        drop(q);
+        let w = self.clone();
+        std::thread::spawn(move || w.serve());
+    }
+
+    fn serve(&self) {
+        loop {
+            let job = {
+                let mut q = lock(&self.q);
+                loop {
+                    if let Some(j) = q.jobs.pop_front() {
+                        break j;
+                    }
+                    if q.closed {
+                        return;
+                    }
+                    q.idle += 1;
+                    q = self.cv.wait(q).unwrap_or_else(PoisonError::into_inner);
+                    q.idle -= 1;
+                }
+            };
+            job();
+        }
+    }
+
+    /// Lets the threads end once the queued jobs are done.
+    fn close(&self) {
+        lock(&self.q).closed = true;
+        self.cv.notify_all();
+    }
 }
 
 /// What finished frame jobs hand back for reuse.
@@ -624,6 +705,13 @@ pub struct Av1Core {
     /// earlier ones as soon as they are done); `None` (the default) keeps
     /// back as many as there are [`Self::threads`].
     pub frame_delay: Option<usize>,
+    workers: Arc<Workers>,
+}
+
+impl Drop for Av1Core {
+    fn drop(&mut self) {
+        self.workers.close();
+    }
 }
 
 struct Pending {
@@ -654,6 +742,7 @@ impl Av1Core {
             max_pixels: 35_651_584,
             threads: std::thread::available_parallelism().map_or(1, usize::from),
             frame_delay: None,
+            workers: Arc::default(),
         }
     }
 
@@ -1088,6 +1177,7 @@ impl Av1Core {
             ref_jobs,
             ref_hdr: self.ref_hdr.clone(),
             threads: self.threads,
+            workers: self.workers.clone(),
             job: job.clone(),
             cdf_out: cdf_out.clone(),
             data_out: data_out.clone(),
@@ -1277,6 +1367,7 @@ struct TaskParts {
     ref_jobs: [Option<Arc<FrameJob>>; 8],
     ref_hdr: [RefHeaderState; 8],
     threads: usize,
+    workers: Arc<Workers>,
     /// The final picture, the CDFs saved for later frames and the motion
     /// field and segmentation data.
     job: Arc<FrameJob>,
@@ -1341,15 +1432,19 @@ fn launch<P: PicturePixel>(px: &mut PixState<P>, t: TaskParts, inline: bool) -> 
         task.run()
     } else {
         let unref = task.t.hdr.refresh_frame_flags == 0;
-        std::thread::spawn(move || {
-            let r = task.run();
-            prof::cpu(if unref {
-                prof::CPU_TASK_UNREF
-            } else {
-                prof::CPU_TASK
-            });
-            r
-        });
+        let workers = task.t.workers.clone();
+        workers.run(Box::new(move || {
+            let t = prof::thread_cpu();
+            let _ = task.run();
+            prof::cpu_since(
+                if unref {
+                    prof::CPU_TASK_UNREF
+                } else {
+                    prof::CPU_TASK
+                },
+                t,
+            );
+        }));
         Ok(())
     }
 }
@@ -1431,6 +1526,7 @@ impl<P: PicturePixel> FrameTask<P> {
             &t.job,
             &rows,
             &spares,
+            &t.workers,
             t.threads,
             mf_plan.as_ref(),
         )?;
@@ -1897,13 +1993,14 @@ fn take_shell(shells: &mut Vec<FrameState>, fs: &FrameState) -> FrameState {
 /// References still being decoded are read from `mirrors` (see
 /// [`RefView::mirror`]), which `fills` bring up to the rows each chunk of
 /// blocks may read before it is reconstructed. Returns the mirrors.
-fn recon_worker<P: PicturePixel>(
+fn recon_worker<'r, P: PicturePixel>(
     seq: &SequenceHeader,
     hdr: &FrameHeader,
     fs: &mut FrameState,
     cur: &mut Picture<P>,
-    refs: [Option<RefView<'_, P>>; 8],
+    refs: [Option<RefView<'r, P>>; 8],
     mirrors: Vec<Picture<P>>,
+    finals: &'r [OnceLock<Arc<AnyPicture>>],
     mut fills: Vec<RefFill>,
     rx: Receiver<(Option<RowMsg>, ReconLog)>,
     filt: &mut InlineFilter<'_, P>,
@@ -2002,7 +2099,23 @@ fn recon_worker<P: PicturePixel>(
                 let need = bottom + (max_down.max(0) as usize).div_ceil(8) + 16;
                 for f in &mut fills {
                     let need = if warp || f.whole { usize::MAX } else { need };
-                    f.fill(&mut td.mirrors[f.mirror], need)?;
+                    let Some(pic) = f.fill(&mut td.mirrors[f.mirror], need)? else {
+                        continue;
+                    };
+                    // The reference is done: read it in place from now on.
+                    let Some(fin) = finals.get(f.mirror) else {
+                        continue;
+                    };
+                    let fin = fin.get_or_init(|| pic);
+                    let Some(view) = P::view(fin) else {
+                        return Err(malformed("reference sample size"));
+                    };
+                    for rv in td.refs.iter_mut().flatten() {
+                        if rv.mirror == Some(f.mirror) {
+                            rv.pic = view;
+                            rv.mirror = None;
+                        }
+                    }
                 }
             }
         }
@@ -2091,12 +2204,12 @@ impl<P: PicturePixel> InlineFilter<'_, P> {
             // none of them, and the loop restoration stripes done end 8
             // rows higher.
             let done = if self.lr_on { 4 * d - 8 } else { 4 * d };
-            if done > self.published {
+            if done > self.published && self.publish.watched() {
                 let tc = std::time::Instant::now();
                 let bufs = lock(self.spares).bands.pop().unwrap_or_default();
                 self.publish
                     .publish(band_of(cur, self.published, done, bufs));
-                prof::add(prof::COPY, tc);
+                prof::add(prof::PUBLISH, tc);
                 self.published = done;
             }
         }
@@ -2163,6 +2276,7 @@ fn decode_frame<P: PicturePixel>(
     job: &Arc<FrameJob>,
     rows: &Arc<Mutex<RowPools>>,
     spares: &Arc<Mutex<Spares<P>>>,
+    workers: &Arc<Workers>,
     threads: usize,
     mf: Option<&MfPlan<'_>>,
 ) -> R<Box<CdfContext>> {
@@ -2184,7 +2298,8 @@ fn decode_frame<P: PicturePixel>(
         && (lf_on || cdef_on || hdr.lr.uses_lr);
     if pipeline {
         return decode_frame_async(
-            seq, hdr, fs, tiles, cdf, ref_jobs, ref_hdr, cur, job, rows, spares, mf, lf_on, cdef_on,
+            seq, hdr, fs, tiles, cdf, ref_jobs, ref_hdr, cur, job, rows, spares, workers, mf,
+            lf_on, cdef_on,
         );
     }
     let mut held: [Option<Arc<AnyPicture>>; 8] = Default::default();
@@ -2248,6 +2363,7 @@ fn decode_frame_async<P: PicturePixel>(
     job: &Arc<FrameJob>,
     rows: &Arc<Mutex<RowPools>>,
     spares: &Arc<Mutex<Spares<P>>>,
+    workers: &Arc<Workers>,
     mf: Option<&MfPlan<'_>>,
     lf_on: bool,
     cdef_on: bool,
@@ -2280,10 +2396,11 @@ fn decode_frame_async<P: PicturePixel>(
         job: job.clone(),
         rx: rrx,
     };
-    std::thread::spawn(move || {
+    workers.run(Box::new(move || {
+        let t = prof::thread_cpu();
         backend.run();
-        prof::cpu(prof::CPU_BACKEND);
-    });
+        prof::cpu_since(prof::CPU_BACKEND, t);
+    }));
     // Parsing reads only the presence and size of the references.
     let empty = || Picture::<P> {
         planes: Vec::new(),
@@ -2407,7 +2524,7 @@ impl<P: PicturePixel> Backend<P> {
             let Some(j) = &ref_jobs[i] else {
                 continue;
             };
-            match j.poll() {
+            match j.poll_or_watch() {
                 Some(Ok(p)) => held[i] = Some(p),
                 Some(Err(e)) => return job.finish(Err(e)),
                 None => {
@@ -2439,6 +2556,9 @@ impl<P: PicturePixel> Backend<P> {
             }
         }
         drop(ref_jobs);
+        // The pictures of the references read through a copy, once done.
+        let finals: Vec<OnceLock<Arc<AnyPicture>>> =
+            fills.iter().map(|_| OnceLock::new()).collect();
         let placeholder = Picture::<P> {
             planes: Vec::new(),
             bd: seq.bit_depth,
@@ -2477,7 +2597,8 @@ impl<P: PicturePixel> Backend<P> {
                 published: 0,
             };
             recon_worker(
-                &seq, &hdr, &mut rc_fs, &mut cur, refs, mirrors, fills, rx, &mut filt, &rows,
+                &seq, &hdr, &mut rc_fs, &mut cur, refs, mirrors, &finals, fills, rx, &mut filt,
+                &rows,
             )
         };
         drop(held);

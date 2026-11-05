@@ -131,30 +131,42 @@ impl<'a> Msac<'a> {
     }
 
     /// Adaptive symbol over an N-entry inverted CDF (N symbols).
+    ///
+    /// Written on 16-bit lanes over the whole array (the counter lane gives
+    /// `v = 0` and never counts), so the compiler can keep it in vector
+    /// registers: `v[i] = ((r * (cdf[i] >> 6)) >> 1) + 4 * (n - i)` is the
+    /// high half of `(rng & 0xff00) * ((cdf[i] >> 6) << 7)`, and the lanes
+    /// with `c < v[i]` are exactly the symbols below the decoded one, which
+    /// adapt upwards.
     #[inline(always)]
     pub fn symbol<const N: usize>(&mut self, cdf: &mut [u16; N]) -> usize {
         let n = N - 1; // number of probability entries
-        let c = (self.dif >> (WIN - 16)) as u32;
-        let r = self.rng >> 8;
-        // v[i] for every entry; the decoded symbol is the number of entries
-        // whose v is above c (v decreases with i).
-        let mut v = [0u32; N];
-        let mut val = 0usize;
-        for i in 0..n {
-            v[i] = ((r * (u32::from(cdf[i]) >> PROB_SHIFT)) >> (7 - PROB_SHIFT))
-                + MIN_PROB * (n - i) as u32;
-            val += usize::from(c < v[i]);
+        let c = (self.dif >> (WIN - 16)) as u16;
+        let r = (self.rng & 0xff00) as u16;
+        let mut v = [0u16; N];
+        let mut below = [0u16; N];
+        for i in 0..N {
+            let p = (cdf[i] >> PROB_SHIFT) << (7 + PROB_SHIFT - 6);
+            let m = ((u32::from(r) * u32::from(p)) >> 16) as u16;
+            v[i] = m.wrapping_add((MIN_PROB as usize * n.saturating_sub(i)) as u16);
+            below[i] = if c < v[i] { 0xFFFF } else { 0 };
         }
-        let u = if val == 0 { self.rng } else { v[val - 1] };
-        let vv = if val >= n { 0 } else { v[val] };
+        let val = below.iter().map(|&b| usize::from(b & 1)).sum::<usize>();
+        let u = if val == 0 {
+            self.rng
+        } else {
+            u32::from(v[val.saturating_sub(1)])
+        };
+        let vv = u32::from(v[val.min(n)]);
         self.norm(self.dif - (u64::from(vv) << (WIN - 16)), u - vv);
         if self.allow_update {
             let count = cdf[n];
             let rate = 4 + (count >> 4) + u16::from(n > 2);
-            for (i, x) in cdf[..n].iter_mut().enumerate() {
-                let up = *x + ((32768 - *x) >> rate);
-                let down = *x - (*x >> rate);
-                *x = if i < val { up } else { down };
+            for i in 0..N {
+                let x = cdf[i];
+                let up = x.wrapping_add(32768u16.wrapping_sub(x) >> rate);
+                let down = x.wrapping_sub(x >> rate);
+                cdf[i] = (up & below[i]) | (down & !below[i]);
             }
             cdf[n] = count + u16::from(count < 32);
         }

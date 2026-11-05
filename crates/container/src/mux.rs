@@ -516,6 +516,15 @@ pub trait Mux {
             message: "this container stores no codec configuration".to_owned(),
         })
     }
+    /// The encoder delay and trailing padding of `track`, in its timescale,
+    /// as an encoder hands them over with its packets. A later call
+    /// replaces an earlier one. A family with a place for them (the MP3
+    /// LAME tag) writes them at finish. The default stores none, and the
+    /// priming stays in the file as decoded samples.
+    fn set_trim(&mut self, track: TrackId, trim: Trim) -> Result<(), MuxError> {
+        let _ = (track, trim);
+        Ok(())
+    }
 }
 
 #[cfg(test)]

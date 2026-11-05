@@ -1270,6 +1270,23 @@ impl Av1Enc {
             palette_cache: ev("AV1_PCACHE", 1.0) > 0.0,
             est_intra_ratio: ev("AV1_EIP", if speed >= 5 { 2.0 } else { 0.0 }),
             part_rd: ev("AV1_PRD", if speed <= 6 { 1.0 } else { 0.0 }) > 0.0,
+            merge_check: match (ev("AV1_PRDF", 0.0) as u32, spec.level == u32::MAX) {
+                (1, true) | (2, false) => 0,
+                _ => ev("AV1_PRDI", 0.0) as usize,
+            },
+            merge_none_first: ev("AV1_PRDN", 0.0) > 0.0,
+            // Flat 16x16 areas are not split, busy 32x32 ones and 64x64
+            // ones are not coded whole (by the estimate per sample).
+            intra_split_skip: [
+                ev("AV1_KS16", 0.3),
+                ev("AV1_KS32", 0.03),
+                ev("AV1_KS64", 0.0),
+            ],
+            intra_none_skip: [
+                ev("AV1_KN16", f64::MAX),
+                ev("AV1_KN32", 1.0),
+                ev("AV1_KN64", 0.0),
+            ],
             intra_rd_cands: ev(
                 "AV1_IRD",
                 if speed >= 7 {

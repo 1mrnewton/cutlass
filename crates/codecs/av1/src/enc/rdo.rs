@@ -117,6 +117,17 @@ pub struct ModeParams {
     pub est_intra_ratio: f64,
     /// Intra frames: partitions chosen by coding each candidate (closed loop).
     pub part_rd: bool,
+    /// Inter frames: largest node whose estimated split is checked closed
+    /// loop against coding it whole (0: none).
+    pub merge_check: usize,
+    /// That check codes the whole block first and keeps it when it codes
+    /// no residual.
+    pub merge_none_first: bool,
+    /// Intra frames, per node size 16, 32 and 64: the split is not tried
+    /// where the estimate of the whole block is below this many bits per
+    /// sample, and the whole block is not tried where it is above this.
+    pub intra_split_skip: [f64; 3],
+    pub intra_none_skip: [f64; 3],
 }
 
 impl Default for ModeParams {
@@ -166,6 +177,10 @@ impl Default for ModeParams {
             palette_cache: true,
             est_intra_ratio: 0.0,
             part_rd: false,
+            merge_check: 0,
+            merge_none_first: false,
+            intra_split_skip: [0.0; 3],
+            intra_none_skip: [f64::MAX; 3],
         }
     }
 }
@@ -514,7 +529,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
     }
 
     /// The partition estimate of an area, computed once per superblock.
-    fn est_block(&mut self, x: usize, y: usize, w: usize, h: usize) -> f64 {
+    pub(crate) fn est_block(&mut self, x: usize, y: usize, w: usize, h: usize) -> f64 {
         let key = [x, y, w, h];
         if let Some(&(_, v, _)) = self.me_scratch.est_memo.iter().find(|e| e.0 == key) {
             return v;
@@ -571,7 +586,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         p
     }
 
-    fn enc_partition_pick(
+    pub(crate) fn enc_partition_pick(
         &mut self,
         r: usize,
         c: usize,

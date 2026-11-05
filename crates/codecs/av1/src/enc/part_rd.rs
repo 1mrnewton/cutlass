@@ -1,6 +1,8 @@
 //! Closed-loop partition choice: a node is coded once with each candidate
 //! partition, and the cheaper coding (squared error of the reconstruction
-//! plus lambda times the bits written) is kept.
+//! plus lambda times the bits written) is kept. Intra frames try NONE and
+//! SPLIT at every node the open-loop estimate does not rule out; inter
+//! frames (optionally) check the splits the estimate chooses.
 
 use crate::dec::cdf::CdfContext;
 use crate::dec::coder::Coder;
@@ -227,28 +229,80 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
             return Ok(false);
         }
         let n = bw4(bsize) * 4;
-        if self.mode.inter_frame || n > self.mode.max_block || n / 2 < self.mode.min_block {
+        if n > self.mode.max_block || n / 2 < self.mode.min_block {
             return Ok(false);
         }
+        if n >= self.sb_size4 * 4 {
+            self.me_scratch.est_memo.clear();
+        }
+        let (x, y) = (c * 4, r * 4);
         let nd = Node {
             r,
             c,
             n4: bw4(bsize),
         };
-        if n >= self.sb_size4 * 4 {
-            self.me_scratch.est_memo.clear();
+        let lvl = (n.trailing_zeros() as usize).saturating_sub(4).min(2);
+        let (mut try_none, mut try_split) = (true, true);
+        let mut none_first = false;
+        if self.mode.inter_frame {
+            // Inter frames: a split the estimate chooses is checked against
+            // coding the node whole.
+            if n > self.mode.merge_check
+                || self.enc_partition_pick(r, c, bsize, true, true) != PARTITION_SPLIT
+            {
+                return Ok(false);
+            }
+            none_first = self.mode.merge_none_first;
+        } else if self.mode.intra_none_skip[lvl] <= 0.0 {
+            try_none = false;
+        } else if self.mode.intra_split_skip[lvl] > 0.0 || self.mode.intra_none_skip[lvl] < f64::MAX
+        {
+            // The estimate per sample (in bits) tells flat areas, where the
+            // whole block wins, from busy ones, where the split does.
+            let bpp = self.est_block(x, y, n, n) / (self.enc.lambda * (n * n) as f64);
+            if bpp < self.mode.intra_split_skip[lvl] {
+                try_split = false;
+            } else if bpp > self.mode.intra_none_skip[lvl] {
+                try_none = false;
+            }
+            none_first = true;
+        }
+        if !try_none {
+            self.node_try(nd, bsize, PARTITION_SPLIT)?;
+            return Ok(true);
+        }
+        if !try_split {
+            self.node_try(nd, bsize, PARTITION_NONE)?;
+            return Ok(true);
         }
         let Some(s0) = self.node_save(nd, None) else {
             return Ok(false);
         };
-        let split = self.node_try(nd, bsize, PARTITION_SPLIT)?;
-        let Some(s_split) = self.node_save(nd, Some(&s0.msac)) else {
-            return Ok(false);
+        let (pa, pb) = if none_first {
+            (PARTITION_NONE, PARTITION_SPLIT)
+        } else {
+            (PARTITION_SPLIT, PARTITION_NONE)
+        };
+        let first = self.node_try(nd, bsize, pa)?;
+        if pa == PARTITION_NONE
+            && self.mode.inter_frame
+            && self.fs.mi[nd.r * self.fs.mi_stride + nd.c].skip
+        {
+            // The whole block codes no residual: keep it.
+            return Ok(true);
+        }
+        let Some(s_first) = self.node_save(nd, Some(&s0.msac)) else {
+            return Ok(true);
         };
         self.node_restore(nd, &s0);
-        let none = self.node_try(nd, bsize, PARTITION_NONE)?;
-        if split < none {
-            self.node_restore(nd, &s_split);
+        let second = self.node_try(nd, bsize, pb)?;
+        let first_wins = if pa == PARTITION_NONE {
+            first <= second
+        } else {
+            first < second
+        };
+        if first_wins {
+            self.node_restore(nd, &s_first);
         }
         Ok(true)
     }

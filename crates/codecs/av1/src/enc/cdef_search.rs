@@ -9,6 +9,7 @@ use crate::dec::frame::{FrameState, Picture};
 use crate::dec::obu::{FrameHeader, SequenceHeader};
 use crate::dec::postfilter::cdef;
 use crate::dsp::Pixel;
+use crate::dsp::cdef::CDEF_PAD_STRIDE;
 
 /// A luma (primary, secondary) strength; chroma follows it.
 pub type Strength = (u8, u8);
@@ -186,7 +187,8 @@ pub fn strength_deltas<P: Pixel>(
     let zero = || (vec![0i64; luma.len()], vec![0i64; chroma.len()]);
     let parts: Vec<(Vec<i64>, Vec<i64>)> = if t <= 1 {
         let mut acc = zero();
-        let mut pads = crate::dec::postfilter::cdef_pads();
+        let mut pads: [Vec<u16>; 3] =
+            core::array::from_fn(|_| vec![0u16; CDEF_PAD_STRIDE * CDEF_PAD_STRIDE]);
         for &i in rows {
             job(i, &mut acc, &mut pads);
         }
@@ -198,7 +200,8 @@ pub fn strength_deltas<P: Pixel>(
                     let (job, rows, zero) = (&job, &rows, &zero);
                     sc.spawn(move || {
                         let mut acc = zero();
-                        let mut pads = crate::dec::postfilter::cdef_pads();
+                        let mut pads: [Vec<u16>; 3] =
+                            core::array::from_fn(|_| vec![0u16; CDEF_PAD_STRIDE * CDEF_PAD_STRIDE]);
                         for &i in rows.iter().skip(k).step_by(t) {
                             job(i, &mut acc, &mut pads);
                         }

@@ -23,6 +23,8 @@ image = { version = "0.25.10", default-features = false, features = ["png", "jpe
 [dev-dependencies]
 cutlass-aac = { path = "../codecs/aac", version = "0.1.0" }
 cutlass-gif = { path = "../codecs/gif", version = "0.1.0" }
+cutlass-webp = { path = "../codecs/webp", version = "0.1.0" }
+cutlass-decode = { path = "../decode", version = "0.1.0" }
 cutlass-pcm = { path = "../codecs/pcm", version = "0.1.0" }
 cutlass-playback = { path = "../playback", version = "0.1.0" }
 cutlass-session = { path = "../session", version = "0.1.0" }

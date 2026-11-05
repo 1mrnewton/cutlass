@@ -211,12 +211,16 @@ impl std::error::Error for ExportError {
 /// Refuses a short side, a frame rate, a range, or an audio layout that export
 /// will not run.
 pub fn validate(request: &ExportRequest) -> Result<(), ExportError> {
-    let steps = if request.codec == CodecId::Gif {
-        GIF_SHORT_SIDES.as_slice()
-    } else {
-        VIDEO_SHORT_SIDES.as_slice()
+    // A WebP is an animation at the GIF sizes or a still at the video ones.
+    let allowed = match request.codec {
+        CodecId::Gif => GIF_SHORT_SIDES.contains(&request.short_side),
+        CodecId::Webp => {
+            GIF_SHORT_SIDES.contains(&request.short_side)
+                || VIDEO_SHORT_SIDES.contains(&request.short_side)
+        }
+        _ => VIDEO_SHORT_SIDES.contains(&request.short_side),
     };
-    if !steps.contains(&request.short_side) {
+    if !allowed {
         return Err(ExportError::Resolution {
             short_side: request.short_side,
         });

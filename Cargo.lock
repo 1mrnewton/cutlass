@@ -817,6 +817,7 @@ dependencies = [
  "cutlass-aac",
  "cutlass-codec",
  "cutlass-container",
+ "cutlass-decode",
  "cutlass-encode",
  "cutlass-eval",
  "cutlass-gif",
@@ -830,6 +831,7 @@ dependencies = [
  "cutlass-riff",
  "cutlass-session",
  "cutlass-still",
+ "cutlass-webp",
  "image",
 ]
 
@@ -864,6 +866,7 @@ dependencies = [
  "cutlass-still",
  "cutlass-storage",
  "cutlass-store",
+ "cutlass-webp",
 ]
 
 [[package]]

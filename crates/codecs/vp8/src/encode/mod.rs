@@ -78,6 +78,13 @@ pub struct Vp8Options {
     /// (`refresh_entropy_probs = 0`), so a lost frame does not corrupt the
     /// probabilities of the frames after it.
     pub error_resilient: bool,
+    /// Loop-filter sharpness 0..7: higher values filter edges less
+    /// (RFC 6386 Section 15.2).
+    pub sharpness: u8,
+    /// Upscaling the decoder should apply on display, horizontal then
+    /// vertical, each 0..3: none, 5/4, 5/3, 2 (RFC 6386 Section 9.2).
+    /// Carried on key frames only; the coded size is unchanged.
+    pub scale: [u8; 2],
 }
 
 impl Default for Vp8Options {
@@ -93,6 +100,8 @@ impl Default for Vp8Options {
             version: 0,
             hidden_altref: false,
             error_resilient: false,
+            sharpness: 0,
+            scale: [0, 0],
         }
     }
 }
@@ -207,6 +216,11 @@ impl Vp8Encoder {
         if opts.version > 3 {
             return Err(CodecError::InvalidApi {
                 what: "vp8 version",
+            });
+        }
+        if opts.sharpness > 7 || opts.scale.iter().any(|&s| s > 3) {
+            return Err(CodecError::InvalidApi {
+                what: "vp8 sharpness or scale",
             });
         }
         if opts.hidden_altref && !(2..=MAX_LOOKAHEAD).contains(&opts.golden_interval) {
@@ -519,6 +533,7 @@ impl Vp8Encoder {
         } else {
             search_filter(&src, &coded, &h, q)
         };
+        h.segmentation.filter = segment_filters(&h.segmentation, h.filter_level);
         if h.filter_level > 0 {
             let filters: Vec<_> = coded
                 .mbs
@@ -679,15 +694,15 @@ impl Vp8Encoder {
                 first_size: 0,
                 width: if key { self.width } else { 0 },
                 height: if key { self.height } else { 0 },
-                hscale: 0,
-                vscale: 0,
+                hscale: if key { self.opts.scale[0] } else { 0 },
+                vscale: if key { self.opts.scale[1] } else { 0 },
             },
             color_space: false,
             clamping: false,
             segmentation: Segmentation::default(),
             filter_simple: self.opts.version != 0,
             filter_level: 0,
-            sharpness: 0,
+            sharpness: self.opts.sharpness,
             deltas: DELTAS,
             partitions: self.opts.partitions,
             quant: QuantIndices {
@@ -704,7 +719,9 @@ impl Vp8Encoder {
             refresh_entropy: plan.show && !self.opts.error_resilient,
             refresh_last: plan.refresh_last,
             probs,
-            skip_enabled: true,
+            // Without a skipped macroblock the per-macroblock flag is
+            // dropped (`mb_no_coeff_skip = 0`).
+            skip_enabled: skips[1] > 0,
             prob_skip: flag_prob(skips[0], skips[1]),
             prob_intra: if key {
                 0
@@ -756,6 +773,19 @@ fn activity_segments(src: &Source) -> Vec<u8> {
         .collect()
 }
 
+/// Each segment's loop-filter offset: the level follows the quantizer
+/// (about 3/8 of the index), so a segment's level moves with its quantizer
+/// offset. The sum stays inside 0..63, where every decoder agrees (FFmpeg
+/// does not clamp it before the reference and mode deltas).
+fn segment_filters(seg: &Segmentation, level: u8) -> [i8; 4] {
+    if !seg.enabled {
+        return [0; 4];
+    }
+    let level = i32::from(level);
+    seg.quant
+        .map(|d| ((i32::from(d) * 3) / 8).clamp(-level, 63 - level) as i8)
+}
+
 /// Picks the loop-filter level whose output is closest to the source.
 fn search_filter(src: &Source, coded: &Coded, h: &FrameHeader, q: u8) -> u8 {
     let mbw = coded.recon.mbw;
@@ -768,6 +798,7 @@ fn search_filter(src: &Source, coded: &Coded, h: &FrameHeader, q: u8) -> u8 {
         }
         let mut hh = h.clone();
         hh.filter_level = level;
+        hh.segmentation.filter = segment_filters(&h.segmentation, level);
         let filters: Vec<_> = coded
             .mbs
             .iter()

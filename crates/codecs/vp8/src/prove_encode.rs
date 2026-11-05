@@ -491,8 +491,8 @@ fn probability_updates_are_sent() {
     );
 }
 
-/// Activity segments: the map on key and golden frames, the quantizer
-/// offsets on every frame, in both quantizer modes.
+/// Activity segments: the map on key and golden frames, the quantizer and
+/// loop-filter offsets on every frame, in both quantizer modes.
 #[test]
 fn segments_decode_identically() {
     for (name, bitrate, quantizer) in [
@@ -510,14 +510,24 @@ fn segments_decode_identically() {
         };
         let (frames, _) = encode_synthetic(176, 144, 10, opts);
         let mut state = crate::header::Persist::default();
-        let mut maps = 0;
+        let (mut maps, mut filters) = (0, 0);
         for frame in &frames {
             let parsed = crate::header::parse(frame, &state).expect("parse");
-            assert!(parsed.header.segmentation.enabled, "{name}");
-            maps += usize::from(parsed.header.segmentation.update_map);
+            let seg = &parsed.header.segmentation;
+            assert!(seg.enabled, "{name}");
+            maps += usize::from(seg.update_map);
+            filters += usize::from(seg.filter != [0; 4]);
+            let level = i32::from(parsed.header.filter_level);
+            assert!(
+                seg.filter
+                    .iter()
+                    .all(|&f| (0..=63).contains(&(level + i32::from(f)))),
+                "{name}: segment filter level outside 0..63"
+            );
             state = parsed.next;
         }
         assert!(maps >= 3, "{name}: {maps} map updates");
+        assert!(filters > 0, "{name}: no segment filter offsets");
         check(name, 176, 144, 10, opts);
     }
 }
@@ -638,4 +648,31 @@ fn error_resilient_streams_decode_identically() {
     let c = crate::prove::coverage(&stream);
     assert_eq!(c.no_entropy_refresh, 8, "{c:?}");
     check("resilient_enc", 160, 96, 8, opts);
+}
+
+/// Sharpness and the display-scale bits reach the header, and a frame
+/// where every macroblock has coefficients drops the skip flag.
+#[test]
+fn header_options_decode_identically() {
+    let opts = Vp8Options {
+        sharpness: 5,
+        scale: [1, 2],
+        quantizer: 0,
+        keyframe_interval: 3,
+        ..Vp8Options::default()
+    };
+    let (packets, _) = encode_synthetic(160, 96, 6, opts);
+    let mut state = crate::header::Persist::default();
+    let (mut no_skip, mut scaled) = (0, 0);
+    for frame in &packets {
+        let parsed = crate::header::parse(frame, &state).expect("parse");
+        let h = &parsed.header;
+        assert_eq!(h.sharpness, 5);
+        no_skip += usize::from(!h.skip_enabled);
+        scaled += usize::from(h.tag.key && h.tag.hscale == 1 && h.tag.vscale == 2);
+        state = parsed.next;
+    }
+    assert!(no_skip > 0, "no frame dropped the skip flag");
+    assert_eq!(scaled, 2, "key frames carry the scale");
+    check("header_options", 160, 96, 6, opts);
 }

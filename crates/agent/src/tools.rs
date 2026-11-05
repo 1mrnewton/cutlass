@@ -152,7 +152,7 @@ pub enum Invocation {
         /// The generation the caller read.
         expected: u64,
         /// The settings to store.
-        settings: Settings,
+        settings: Box<Settings>,
     },
     /// Seek the open player.
     PlayerSeek {
@@ -390,7 +390,7 @@ where
                 .map_err(ToolError::Draft),
             Invocation::SettingsGet => Ok(show_settings(&self.settings)),
             Invocation::SettingsSet { expected, settings } => {
-                set_settings(&mut self.settings, &mut self.approver, expected, settings)
+                set_settings(&mut self.settings, &mut self.approver, expected, *settings)
             }
             Invocation::PlayerSeek { time_us } => host_unit(self.player.seek(time_us)),
             Invocation::PlayerPlay => host_unit(self.player.play()),
@@ -1508,7 +1508,7 @@ mod tests {
         let error = registry
             .invoke(Invocation::SettingsSet {
                 expected: 0,
-                settings,
+                settings: Box::new(settings),
             })
             .unwrap_err();
         assert!(error.to_string().contains("refused"));
@@ -1532,7 +1532,7 @@ mod tests {
         let error = registry
             .invoke(Invocation::SettingsSet {
                 expected: 0,
-                settings,
+                settings: Box::new(settings),
             })
             .unwrap_err();
         assert!(matches!(
@@ -1561,7 +1561,7 @@ mod tests {
         let error = registry
             .invoke(Invocation::SettingsSet {
                 expected: 0,
-                settings,
+                settings: Box::new(settings),
             })
             .unwrap_err();
         assert!(error.to_string().contains("refused"));
@@ -1605,7 +1605,7 @@ mod tests {
         let text = registry
             .invoke(Invocation::SettingsSet {
                 expected: 1,
-                settings: next,
+                settings: Box::new(next),
             })
             .unwrap();
         assert_eq!(text, "generation=2");
@@ -1653,7 +1653,7 @@ mod tests {
         let error = registry
             .invoke(Invocation::SettingsSet {
                 expected: 0,
-                settings,
+                settings: Box::new(settings),
             })
             .unwrap_err();
         assert!(matches!(

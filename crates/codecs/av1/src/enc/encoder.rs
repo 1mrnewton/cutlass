@@ -25,8 +25,8 @@ use crate::spec::tables::{AC_QLOOKUP, DC_QLOOKUP};
 use super::bitwriter::write_obu;
 use super::msac_enc::MsacEnc;
 use super::obu_write::{
-    FrameHeaderWriteOptions, uniform_tile_info, write_frame_header, write_sequence_header,
-    write_tile_group,
+    FrameHeaderWriteOptions, explicit_tile_info, tile_limits, uniform_tile_info,
+    write_frame_header, write_sequence_header, write_tile_group,
 };
 use super::quant::QuantParams;
 use super::rdo::ModeParams;
@@ -175,6 +175,10 @@ pub struct Av1Enc {
     /// The model's block statistics and the display index of each of its
     /// frames, for per-superblock quantizers.
     tpl: Option<TplGroup>,
+    /// The tile count was chosen for the threads: the tile boundaries
+    /// follow `sb_work`, the coding work of the last frame's superblocks.
+    auto_tiles: bool,
+    sb_work: Vec<u32>,
 }
 
 /// log2 of the delta q step of per-superblock quantizers.
@@ -308,6 +312,7 @@ impl Av1Enc {
             ..SequenceHeader::default()
         };
         let mut cfg = cfg;
+        let mut auto_tiles = false;
         if cfg.threads > 1
             && cfg.tile_cols_log2 == 0
             && cfg.tile_rows_log2 == 0
@@ -325,6 +330,7 @@ impl Av1Enc {
                 r += 1;
             }
             cfg.tile_rows_log2 = r;
+            auto_tiles = l + r > 0 && !seq.use_128x128_superblock;
         }
         let threads = cfg.threads.max(1);
         let q0 = match cfg.rc {
@@ -352,6 +358,8 @@ impl Av1Enc {
             slot_disp: [None; 8],
             tpl_imp: Vec::new(),
             tpl: None,
+            auto_tiles,
+            sb_work: Vec::new(),
         })
     }
 
@@ -979,6 +987,20 @@ impl Av1Enc {
                     self.cfg.tile_cols_log2,
                     self.cfg.tile_rows_log2,
                 );
+                let l = tile_limits(&self.seq, mi_cols, mi_rows);
+                if self.auto_tiles
+                    && l.min_log2_tiles == 0
+                    && let Some((w, h)) = super::tiles::balanced_layout(
+                        &self.sb_work,
+                        l.sb_cols as usize,
+                        l.sb_rows as usize,
+                        ti.cols,
+                        ti.rows,
+                        l.max_tile_width_sb as usize,
+                    )
+                {
+                    ti = explicit_tile_info(&self.seq, mi_cols, mi_rows, &w, &h);
+                }
                 if ti.cols * ti.rows > 1 {
                     ti.tile_size_bytes = 4;
                 }
@@ -1362,6 +1384,9 @@ impl Av1Enc {
         }
         let use_wiener_cdf = cdf.use_wiener;
         drop(cdf);
+        if self.auto_tiles {
+            self.sb_work = super::tiles::sb_work(&fs);
+        }
         // Choose the in-loop filter strengths on the reconstruction. Tile
         // syntax does not depend on them (one CDEF strength, no deltas), so
         // only the header is rewritten.

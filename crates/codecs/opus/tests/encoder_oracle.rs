@@ -37,6 +37,7 @@
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use cutlass_codec::{CodecId, Packet, StreamCodec, StreamParams, Timescale, Timestamp};
 use cutlass_container::{Mux, NewStream, TrackDuration};
@@ -58,7 +59,7 @@ const SECONDS: usize = 10;
 const RATE: usize = 48_000;
 
 /// Recordings from `local-files`: name, start second, and a label.
-const RECORDINGS: [(&str, u32, &str); 9] = [
+const RECORDINGS: [(&str, u32, &str); 10] = [
     (
         "Expo - You Don't Need a Mac to Build iOS Apps Anymore.m4a",
         30,
@@ -77,7 +78,8 @@ const RECORDINGS: [(&str, u32, &str); 9] = [
     ("rain_bedroom_night_30min.mp3", 120, "rain-bedroom"),
     ("thunder_distant_10s.mp3", 0, "thunder"),
     ("sfx_A_sin_20260721_231942.mp3", 0, "sfx-a"),
-    ("sfx_Seaml_20260721_231840.mp3", 0, "sfx-seaml"),
+    ("sfx_Seaml_20260721_231840.mp3", 0, "sfx-seaml-a"),
+    ("sfx_Seaml_20260721_231938.mp3", 0, "sfx-seaml-b"),
     (
         "Fireship - 5 open source tools that replaced my $320 mo AI stack.mp4",
         10,
@@ -147,12 +149,15 @@ fn write_raw(path: &Path, pcm: &[f32]) {
     std::fs::write(path, bytes).expect("write raw");
 }
 
-/// Ten seconds of a recording as 48 kHz stereo floats.
+/// Ten seconds of a recording as 48 kHz stereo floats, looped when the
+/// file is shorter (the sound effects last five).
 fn extract(path: &Path, start: u32) -> Option<Vec<f32>> {
     let out = Command::new("ffmpeg")
         .args([
             "-v",
             "error",
+            "-stream_loop",
+            "-1",
             "-ss",
             &start.to_string(),
             "-t",
@@ -163,9 +168,15 @@ fn extract(path: &Path, start: u32) -> Option<Vec<f32>> {
         .args(["-vn", "-ac", "2", "-ar", "48000", "-f", "f32le", "-"])
         .output()
         .ok()?;
-    let pcm = floats(&out.stdout);
-    (out.status.success() && pcm.len() == SECONDS * RATE * 2)
-        .then(|| pcm.into_iter().map(|v| v.clamp(-1.0, 1.0)).collect())
+    let mut pcm = floats(&out.stdout);
+    let want = SECONDS * RATE * 2;
+    // A looped file can come up a few milliseconds short at the seam;
+    // pad that with silence, but refuse anything clearly incomplete.
+    if !out.status.success() || pcm.len() < want * 9 / 10 {
+        return None;
+    }
+    pcm.resize(want, 0.0);
+    Some(pcm.into_iter().map(|v| v.clamp(-1.0, 1.0)).collect())
 }
 
 struct Lcg(u32);
@@ -268,11 +279,19 @@ fn layout(channels: usize) -> ChannelLayout {
     }
 }
 
-/// Our encoder into an Ogg Opus file; returns the payload bytes.
-fn encode_ours(pcm: &[f32], channels: usize, bitrate: u32, cbr: bool, out: &Path) -> Vec<usize> {
+/// Our encoder into an Ogg Opus file; returns the packet sizes and the
+/// time spent in the encoder alone.
+fn encode_ours(
+    pcm: &[f32],
+    channels: usize,
+    bitrate: u32,
+    cbr: bool,
+    out: &Path,
+) -> (Vec<usize>, Duration) {
     let mut params = CodecParams::audio(CodecId::Opus, 48_000, layout(channels));
     params.bitrate = bitrate;
     params.constant_rate = cbr;
+    let started = Instant::now();
     let mut enc = OpusEncoder::open(&params).expect("open");
     let mut packets = Vec::new();
     for chunk in pcm.chunks(4800 * channels) {
@@ -280,6 +299,7 @@ fn encode_ours(pcm: &[f32], channels: usize, bitrate: u32, cbr: bool, out: &Path
         packets.extend(enc.push(&AudioInput { pcm }).expect("push"));
     }
     packets.extend(enc.drain().expect("drain"));
+    let spent = started.elapsed();
     let head = packets[0]
         .side
         .iter()
@@ -325,7 +345,7 @@ fn encode_ours(pcm: &[f32], channels: usize, bitrate: u32, cbr: bool, out: &Path
         }])
         .expect("finish");
     assert!(finished.is_complete());
-    packets.iter().map(|p| p.data.len()).collect()
+    (packets.iter().map(|p| p.data.len()).collect(), spent)
 }
 
 fn encode_libopus(raw: &Path, channels: usize, bitrate: u32, out: &Path) {
@@ -522,11 +542,14 @@ fn encoder_meets_the_interop_rate_and_quality_gates() {
                 item.stereo.clone()
             };
             let file = dir.join(format!("{}-{channels}-{bitrate}.opus", item.name));
-            let sizes = encode_ours(&pcm, channels, bitrate, false, &file);
+            let (sizes, _) = encode_ours(&pcm, channels, bitrate, false, &file);
             let kbps = sizes.iter().sum::<usize>() as f64 * 8.0 / SECONDS as f64 / 1000.0;
             row.push_str(&format!(" {kbps:7.1}"));
             let ratio = kbps * 1000.0 / f64::from(bitrate);
-            if item.kind == Kind::Dense && (ratio - 1.0).abs() > VBR_TOLERANCE {
+            // The mono downmix of an anti-phase item is digital silence,
+            // which the gate counts as sparse.
+            let silent = pcm.iter().all(|&v| v == 0.0);
+            if item.kind == Kind::Dense && !silent && (ratio - 1.0).abs() > VBR_TOLERANCE {
                 failures.push(format!(
                     "rate {} {channels}ch {bitrate}: {kbps:.1}",
                     item.name
@@ -543,7 +566,7 @@ fn encoder_meets_the_interop_rate_and_quality_gates() {
                 }
             }
             let cbr = dir.join(format!("{}-{channels}-{bitrate}-cbr.opus", item.name));
-            let sizes = encode_ours(&pcm, channels, bitrate, true, &cbr);
+            let (sizes, _) = encode_ours(&pcm, channels, bitrate, true, &cbr);
             let want = (bitrate / 400) as usize;
             if sizes.iter().any(|&s| s != want) {
                 failures.push(format!("cbr {} {channels}ch {bitrate}", item.name));
@@ -558,12 +581,14 @@ fn encoder_meets_the_interop_rate_and_quality_gates() {
     eprintln!(
         "quality, stereo VBR: item rate | ours LSD mean p95 segSNR | libopus LSD mean p95 segSNR | ours kb/s"
     );
+    let mut spent = [Duration::ZERO; QUALITY_RATES.len()];
     for item in &items {
         let raw = dir.join(format!("{}.raw", item.name));
         write_raw(&raw, &item.stereo);
-        for bitrate in QUALITY_RATES {
+        for (slot, bitrate) in QUALITY_RATES.into_iter().enumerate() {
             let ours = dir.join(format!("{}-q-{bitrate}.opus", item.name));
-            let sizes = encode_ours(&item.stereo, 2, bitrate, false, &ours);
+            let (sizes, time) = encode_ours(&item.stereo, 2, bitrate, false, &ours);
+            spent[slot] += time;
             let theirs = dir.join(format!("{}-lib-{bitrate}.opus", item.name));
             encode_libopus(&raw, 2, bitrate, &theirs);
             let a = decode(&ours, "libopus", 2);
@@ -589,6 +614,15 @@ fn encoder_meets_the_interop_rate_and_quality_gates() {
                 ));
             }
         }
+    }
+    // Speed, reported only: audio seconds coded per second of encoder time.
+    let audio = (items.len() * SECONDS) as f64;
+    for (bitrate, time) in QUALITY_RATES.into_iter().zip(spent) {
+        let rtf = audio / time.as_secs_f64().max(1e-9);
+        eprintln!(
+            "speed, stereo VBR {:>3}k: {rtf:.0}x real time over {audio:.0} s",
+            bitrate / 1000
+        );
     }
     let _ = std::fs::remove_dir_all(&dir);
     assert!(failures.is_empty(), "{failures:#?}");

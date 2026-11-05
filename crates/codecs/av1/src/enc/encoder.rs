@@ -104,7 +104,7 @@ pub struct EncConfig {
     pub threads: usize,
     /// Denoise alt-refs with their neighbours (coded with an overlay frame).
     pub temporal_filter: bool,
-    /// Doubles the mini-GOP where the content barely changes.
+    /// Doubles or quadruples the mini-GOP where the content barely changes.
     pub adaptive_gop: bool,
     /// Wiener loop restoration per 64x64 unit (experimental: about 1% on
     /// a key frame, but it costs the natural test clips about as much).
@@ -173,6 +173,11 @@ pub struct Av1Enc {
     /// Temporal importance of the frames of the current mini-GOP (display
     /// index, importance), from the TPL model.
     tpl_imp: Vec<(u64, f64)>,
+    /// The current mini-GOP was found static (and the content is not screen
+    /// content): its alt-ref is temporally filtered.
+    static_gop: bool,
+    /// The frame being coded is screen content.
+    screen: bool,
     /// The model's block statistics and the display index of each of its
     /// frames, for per-superblock quantizers.
     tpl: Option<TplGroup>,
@@ -369,6 +374,8 @@ impl Av1Enc {
             next_disp: 0,
             slot_disp: [None; 8],
             tpl_imp: Vec::new(),
+            static_gop: false,
+            screen: false,
             tpl: None,
             auto_tiles,
             sb_work: Vec::new(),
@@ -403,7 +410,7 @@ impl Av1Enc {
     }
 
     fn use_tf(&self) -> bool {
-        self.cfg.gop > 1 && self.cfg.temporal_filter
+        self.cfg.gop > 1 && (self.cfg.temporal_filter || (self.static_gop && self.cfg.speed < 8))
     }
 
     fn is_key_disp(&self, d: u64) -> bool {
@@ -455,7 +462,7 @@ impl Av1Enc {
             let to_key = keyint - d % keyint;
             // Static content takes mini-GOPs two or four times as long.
             let longest = if self.cfg.adaptive_gop && gop >= 4 {
-                gop << ev("AV1_GOPL", 1.0) as u32
+                gop << ev("AV1_GOPL", 2.0) as u32
             } else {
                 gop
             };
@@ -464,10 +471,14 @@ impl Av1Enc {
             }
             let mut n = gop.min(to_key).min(self.lookahead.len() as u64);
             let mut long = longest;
+            self.static_gop = false;
             while long > gop {
                 let ln = long.min(to_key).min(self.lookahead.len() as u64);
                 if ln > gop && self.is_static::<P>(d - 1, ln) {
                     n = ln;
+                    // (Screen content redraws what it changes: filtering
+                    // across frames would blend that.)
+                    self.static_gop = !self.screen;
                     break;
                 }
                 long /= 2;
@@ -619,7 +630,6 @@ impl Av1Enc {
                     let sh = write_sequence_header(&self.seq);
                     write_obu(tu, OBU_SEQUENCE_HEADER, 0, 0, false, &sh);
                 }
-                let spec = self.plan_frame(disp, key, show, level);
                 let idx = (disp - self.next_disp) as usize;
                 let Some(src) = self.lookahead.get(idx).cloned() else {
                     return Err(CodecError::InvalidApi { what: "lookahead" });
@@ -629,12 +639,15 @@ impl Av1Enc {
                         what: "sample size",
                     });
                 };
+                self.screen = self.cfg.speed < 10 && is_screen_content(src, self.cfg.bit_depth);
+                let spec = self.plan_frame(disp, key, show, level);
                 let filtered;
                 let mut src = src;
                 if !show && level == 0 && self.use_tf() {
                     // Denoise the alt-ref with its neighbours in the lookahead.
                     let mut others = Vec::new();
-                    for k in idx.saturating_sub(3)..=idx + 3 {
+                    let tn = ev("AV1_TFN", 2.0) as usize;
+                    for k in idx.saturating_sub(tn)..=idx + tn {
                         if k == idx {
                             continue;
                         }
@@ -824,7 +837,15 @@ impl Av1Enc {
                 } else {
                     ev("AV1_TPLA", 0.9)
                 };
-                let target = step * imp.powf(-alpha).max(ev("AV1_TPLMIN", 0.3));
+                // The model (SATD at half resolution) overstates how much
+                // of screen content's detail later frames take from the
+                // alt-ref (it smooths away what is redrawn every frame).
+                let floor = if self.screen {
+                    ev("AV1_TPLMINS", 0.5)
+                } else {
+                    ev("AV1_TPLMIN", 0.3)
+                };
+                let target = step * imp.powf(-alpha).max(floor);
                 let mut q = qi;
                 while q > 0 && f64::from(AC_QLOOKUP[bdi][q - 1]) >= target {
                     q -= 1;
@@ -1087,8 +1108,7 @@ impl Av1Enc {
                 }
             }
         }
-        intent.allow_screen_content_tools =
-            self.cfg.speed < 10 && is_screen_content(src, self.cfg.bit_depth);
+        intent.allow_screen_content_tools = self.screen;
         let sb_cols = self.cfg.width.div_ceil(64);
         let sb_rows = self.cfg.height.div_ceil(64);
         let sb_q = if ev("AV1_DQ", 0.0) > 0.0 && !seq.use_128x128_superblock {
@@ -1160,7 +1180,7 @@ impl Av1Enc {
         };
         let speed = self.cfg.speed;
         let mode = ModeParams {
-            lambda_satd: ev("AV1_LS", 0.6) * qstep * lscale.sqrt(),
+            lambda_satd: ev("AV1_LS", 0.8) * qstep * lscale.sqrt(),
             min_block: ev("AV1_MINB", if speed >= 8 { 16.0 } else { 8.0 }) as usize,
             max_block: ev("AV1_MAXB", 64.0) as usize,
             skip_sse_per_px: ev("AV1_SK", 4.0) * qstep * qstep * lscale,
@@ -1211,10 +1231,30 @@ impl Av1Enc {
             intra_sweep_ratio: ev("AV1_IRS", if speed >= 5 { 2.0 } else { 0.0 }),
             inter_clear_ratio: ev("AV1_ICR", if speed >= 5 { 1.2 } else { 0.0 }),
             est_skip_ratio: ev("AV1_EST", if speed >= 5 { 2.0 } else { 0.0 }),
+            exact_rates: ev("AV1_XR", 1.0) > 0.0,
+            inter_rd_cands: ev("AV1_IRK", if speed >= 8 { 1.0 } else { 2.0 }) as usize,
+            inter_rd_ratio: ev(
+                "AV1_IRKR",
+                if hdr.allow_screen_content_tools {
+                    1.5
+                } else {
+                    1.1
+                },
+            ),
+            inter_rd_modes: ev("AV1_IRM", 1.0) as usize,
+            intra_split_pred: ev("AV1_ITXP", 1.0) > 0.0,
+            inter_flag_bits: ev("AV1_IIB", 1.0) > 0.0,
+            exact_intra_rates: ev("AV1_XRI", 1.0) > 0.0,
+            screen_est: ev("AV1_SCE", 1.0) > 0.0,
+            compound_modes: ev("AV1_CMM", 1.0) > 0.0,
+            palette_cache: ev("AV1_PCACHE", 1.0) > 0.0,
             intra_rd_cands: ev(
                 "AV1_IRD",
-                if speed >= 6 {
+                if speed >= 7 {
                     1.0
+                } else if speed >= 6 {
+                    // Key frames are few: their modes get the RD check.
+                    if key { 2.0 } else { 1.0 }
                 } else if speed >= 4 {
                     3.0
                 } else {

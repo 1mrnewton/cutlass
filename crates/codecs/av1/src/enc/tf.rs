@@ -3,7 +3,8 @@
 //! A hidden alt-ref frame is predicted from by many frames, so coding a
 //! denoised version of it pays off: each 16x16 luma block (and the matching
 //! chroma) is averaged with the best-matching block of nearby frames,
-//! weighted by how well they match.
+//! weighted by how well the blocks match and, per sample, by how well the
+//! luma around the sample matches.
 
 use crate::dec::frame::Picture;
 use crate::dsp::Pixel;
@@ -48,7 +49,10 @@ pub fn temporal_filter<P: Pixel>(
         (0, 0)
     };
     let mut acc = vec![0f64; BLOCK * BLOCK];
-    let mut wsum = [0f64; 1];
+    let mut wtot = vec![0f64; BLOCK * BLOCK];
+    let mut lw: Vec<[f64; BLOCK * BLOCK]> = Vec::new();
+    let mut d2 = vec![0i32; (BLOCK + 2) * (BLOCK + 2)];
+    let mut hs = vec![0i32; (BLOCK + 2) * BLOCK];
     for br in 0..rows {
         for bc in 0..cols {
             let x0 = bc * BLOCK;
@@ -101,6 +105,38 @@ pub fn temporal_filter<P: Pixel>(
             if matches.is_empty() {
                 continue;
             }
+            // Per-sample luma weights of each match: the block weight, lowered
+            // where the luma around the sample (3x3) does not match.
+            lw.resize(matches.len(), [0.0; BLOCK * BLOCK]);
+            for (m, &(k, ldy, ldx, w)) in matches.iter().enumerate() {
+                let lp = &others[k].0.planes[0];
+                let e = BLOCK + 2;
+                for i in 0..e {
+                    let sy0 = clampi(y0 as i32 + i as i32 - 1, y.h);
+                    let ry = clampi(y0 as i32 + i as i32 - 1 + ldy, lp.alloc_h);
+                    for j in 0..e {
+                        let sx0 = clampi(x0 as i32 + j as i32 - 1, y.w);
+                        let rx = clampi(x0 as i32 + j as i32 - 1 + ldx, lp.stride);
+                        let d = y.data[sy0 * y.stride + sx0].to_i32()
+                            - lp.data[ry * lp.stride + rx].to_i32();
+                        d2[i * e + j] = d * d;
+                    }
+                }
+                // Horizontal then vertical 3-tap sums.
+                for i in 0..e {
+                    for j in 0..BLOCK {
+                        let r = &d2[i * e + j..];
+                        hs[i * BLOCK + j] = r[0] + r[1] + r[2];
+                    }
+                }
+                for i in 0..BLOCK {
+                    for j in 0..BLOCK {
+                        let sum =
+                            hs[i * BLOCK + j] + hs[(i + 1) * BLOCK + j] + hs[(i + 2) * BLOCK + j];
+                        lw[m][i * BLOCK + j] = w * (-(f64::from(sum) / 9.0) / h2).exp();
+                    }
+                }
+            }
             for p in 0..np {
                 let (px, py) = if p == 0 { (0, 0) } else { (sx, sy) };
                 let bw = BLOCK >> px;
@@ -109,31 +145,32 @@ pub fn temporal_filter<P: Pixel>(
                 let ys = y0 >> py;
                 let tp = &target.planes[p];
                 acc[..bw * bh].fill(0.0);
-                wsum[0] = 1.0;
+                wtot[..bw * bh].fill(1.0);
                 for i in 0..bh {
                     for j in 0..bw {
                         acc[i * bw + j] =
                             f64::from(tp.data[(ys + i) * tp.stride + xs + j].to_i32());
                     }
                 }
-                for &(k, dy, dx, w) in &matches {
+                for (m, &(k, ldy, ldx, _)) in matches.iter().enumerate() {
                     let op = &others[k].0.planes[p];
-                    let (dy, dx) = (dy >> py, dx >> px);
+                    let (dy, dx) = (ldy >> py, ldx >> px);
                     for i in 0..bh {
                         let ry = clampi((ys + i) as i32 + dy, op.alloc_h);
                         for j in 0..bw {
                             let rx = clampi((xs + j) as i32 + dx, op.stride);
-                            acc[i * bw + j] += w * f64::from(op.data[ry * op.stride + rx].to_i32());
+                            let wp = lw[m][(i << py) * BLOCK + (j << px)];
+                            acc[i * bw + j] +=
+                                wp * f64::from(op.data[ry * op.stride + rx].to_i32());
+                            wtot[i * bw + j] += wp;
                         }
                     }
-                    wsum[0] += w;
                 }
                 let dst = &mut out.planes[p];
-                let inv = 1.0 / wsum[0];
                 for i in 0..bh {
                     for j in 0..bw {
                         dst.data[(ys + i) * dst.stride + xs + j] =
-                            P::from_i32((acc[i * bw + j] * inv).round() as i32);
+                            P::from_i32((acc[i * bw + j] / wtot[i * bw + j]).round() as i32);
                     }
                 }
             }

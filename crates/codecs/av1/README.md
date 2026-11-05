@@ -70,9 +70,9 @@ the reference frames. Tools used:
   does not depend on the thread count.
 
 Quality and speed against FFmpeg's encoders are in `STATUS.md`. In short:
-on natural video it needs about 12% fewer bits than rav1e `-speed 8` for
-the same PSNR and 5-10% more than libaom `-cpu-used 6`; synthetic content
-is further behind. It runs at about half the speed of libaom at that
+on natural video it needs fewer bits than rav1e `-speed 8` for the same
+PSNR and about as many as libaom `-cpu-used 6` (within a few percent
+either way); key frames and synthetic content are further behind. It runs at about half the speed of libaom at that
 preset (single thread).
 
 ## API

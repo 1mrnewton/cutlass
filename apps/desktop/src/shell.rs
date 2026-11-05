@@ -54,9 +54,11 @@ mod listen;
 mod proxy;
 mod render;
 mod speech_model;
+mod update;
 
 pub use assistant::AgentRun;
 pub use speech_model::SPEECH_MODEL_QUESTION;
+pub use update::RUNNING_VERSION;
 
 pub use inspector::{LetterCase, Panel, SILENT_DB, TextLook, gain_of_db, volume_db};
 
@@ -742,6 +744,8 @@ pub struct Shell {
     hearings: u64,
     /// A transcript or hearing found no speech model; the window offers it.
     wants_speech_model: bool,
+    /// The update check, the offer, and the restart after an install.
+    updates: update::Updates,
     /// The assistant's speech jobs, carried from one tool call to the next.
     agent_speech_jobs: std::collections::BTreeMap<String, cutlass_agent::SpeechJob>,
     /// Work running off the window thread, and the project it was started in.
@@ -844,6 +848,7 @@ impl Shell {
             heard: std::collections::HashMap::new(),
             hearings: 0,
             wants_speech_model: false,
+            updates: update::Updates::default(),
             agent_speech_jobs: std::collections::BTreeMap::new(),
             job: None,
             exported: None,

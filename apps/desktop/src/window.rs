@@ -40,6 +40,8 @@ pub fn run() -> eframe::Result {
             let (decoders, encoders) = crate::register_codecs_with(&loaded.settings.hardware);
             let mut shell = Shell::new(decoders, encoders, loaded.settings);
             shell.keep_settings_file(file, loaded.generation);
+            // At most once a day, and never with the switch off.
+            shell.check_updates_at_launch();
             // A project folder or files named on the command line, as a
             // file association passes them.
             let named: Vec<std::path::PathBuf> = std::env::args_os()

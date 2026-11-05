@@ -313,6 +313,10 @@ pub fn show(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Option
         ui.ctx()
             .request_repaint_after(std::time::Duration::from_millis(100));
     }
+    if shell.poll_update_check() {
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(200));
+    }
     if shell.serve_forwarded() {
         ui.ctx().request_repaint();
     }
@@ -388,6 +392,10 @@ pub fn show(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Option
     if shell.wants_speech_model() {
         speech_model_dialog(shell, ui);
     }
+    if shell.update_offer().is_some() {
+        update_dialog(shell, ui);
+    }
+    restart_for_update(shell, ui);
     dropped_files(shell, ui);
 }
 
@@ -549,7 +557,7 @@ fn projects_home(
                 file_menu(shell, ui, view, parent);
             });
             ui.menu_button(RichText::new("Help").color(tokens::FAINT), |ui| {
-                help_menu(ui, view, parent);
+                help_menu(shell, ui, view, parent);
             });
         });
     });
@@ -943,7 +951,7 @@ fn menus(
                 });
             }
             ui.menu_button(RichText::new("Help").color(tokens::FAINT), |ui| {
-                help_menu(ui, view, parent);
+                help_menu(shell, ui, view, parent);
             });
         });
     });
@@ -1015,7 +1023,9 @@ fn menu_items(
 
 /// Run the menu bar item `id`: a window command, or a shortcut action.
 pub fn run_menu(shell: &mut Shell, view: &mut ViewState, parent: Option<&eframe::Frame>, id: &str) {
-    use crate::menubar::{EXPORT, EXPORT_LOG, IMPORT, LICENSES, OPEN, PROJECTS, SAVE, SETTINGS};
+    use crate::menubar::{
+        CHECK_UPDATES, EXPORT, EXPORT_LOG, IMPORT, LICENSES, OPEN, PROJECTS, SAVE, SETTINGS,
+    };
 
     let open = shell.draft().is_some();
     let done = match id {
@@ -1033,6 +1043,10 @@ pub fn run_menu(shell: &mut Shell, view: &mut ViewState, parent: Option<&eframe:
         }
         EXPORT_LOG => {
             view.dialogs.save_log(parent);
+            Ok(())
+        }
+        CHECK_UPDATES => {
+            shell.check_for_updates();
             Ok(())
         }
         SAVE | IMPORT | EXPORT | PROJECTS if !open => Err(ShellError::NoProject),
@@ -1056,7 +1070,11 @@ pub fn run_menu(shell: &mut Shell, view: &mut ViewState, parent: Option<&eframe:
     }
 }
 
-fn help_menu(ui: &mut Ui, view: &mut ViewState, parent: Option<&eframe::Frame>) {
+fn help_menu(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Option<&eframe::Frame>) {
+    if ui.button("Check for updates…").clicked() {
+        ui.close();
+        shell.check_for_updates();
+    }
     if ui.button("Licenses").clicked() {
         ui.close();
         view.licenses = Some(cutlass_licenses::notices());
@@ -1258,6 +1276,15 @@ fn settings_window(
                             RichText::new("These take effect when Cutlass opens again.")
                                 .color(tokens::FAINT),
                         );
+                        settings_heading(ui, "Updates");
+                        ui.checkbox(&mut settings.updates.check, "Check for updates");
+                        ui.label(
+                            RichText::new(format!(
+                                "Cutlass {} looks for a new release once a day. Off, it never asks.",
+                                crate::shell::RUNNING_VERSION
+                            ))
+                            .color(tokens::FAINT),
+                        );
                     }
                     SettingsTab::Assistant => {
                         assistant_settings(
@@ -1381,6 +1408,68 @@ fn approval_dialog(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
         Some(false) => view.approval = None,
         None if refused => view.approval = None,
         None => {}
+    }
+}
+
+/// A newer release is out: offer to download it and restart.
+fn update_dialog(shell: &mut Shell, ui: &mut Ui) {
+    let Some(offer) = shell.update_offer() else {
+        return;
+    };
+    let title = format!("Cutlass {} is available", offer.version);
+    let notes: Vec<String> = offer.notes_head(6).into_iter().map(str::to_owned).collect();
+    let mut answer = None;
+    let ((), closed) = widgets::dialog(ui, &title, |ui| {
+        ui.horizontal(|ui| {
+            ui.add_space(16.0);
+            ui.vertical(|ui| {
+                ui.set_max_width(372.0);
+                ui.label(format!(
+                    "You have Cutlass {}. The update downloads, replaces this copy and opens again.",
+                    crate::shell::RUNNING_VERSION
+                ));
+                for line in &notes {
+                    ui.label(RichText::new(line).color(tokens::MUTED));
+                }
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Update and restart").clicked() {
+                        answer = Some(true);
+                    }
+                    if ui.button("Later").clicked() {
+                        answer = Some(false);
+                    }
+                });
+            });
+        });
+    });
+    let later = closed || ui.input(|input| input.key_pressed(egui::Key::Escape));
+    match answer {
+        Some(true) => {
+            if let Err(error) = shell.install_update() {
+                shell.set_notice(error.to_string());
+            }
+        }
+        Some(false) => shell.decline_update(),
+        None if later => shell.decline_update(),
+        None => {}
+    }
+}
+
+/// An update is in place: start the new version once this one quits, and
+/// close. The project is saved on the way out.
+fn restart_for_update(shell: &mut Shell, ui: &Ui) {
+    let Some(relaunch) = shell.take_restart() else {
+        return;
+    };
+    match relaunch.spawn() {
+        Ok(()) => {
+            cutlass_logger::info!("update installed; restarting");
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+        Err(error) => shell.set_notice(format!(
+            "The update is installed. Open Cutlass again to use it ({error})."
+        )),
     }
 }
 
@@ -11299,5 +11388,52 @@ mod tests {
                 assert!(!text.contains("eframe"), "{}", cargo.display());
             }
         }
+    }
+
+    #[test]
+    fn an_update_offer_shows_its_notes_and_escape_puts_it_off() {
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        let name = cutlass_update::Platform::current().unwrap().asset_name();
+        let json = format!(
+            r#"{{"tag_name":"v99.0.0","body":"Faster export\n\n- Fixes","assets":[
+                {{"name":"{name}","browser_download_url":"https://example.test/p"}},
+                {{"name":"{name}.sha256","browser_download_url":"https://example.test/s"}}]}}"#
+        );
+        let running = cutlass_update::Version::parse("0.1.0").unwrap();
+        let platform = cutlass_update::Platform::current().unwrap();
+        let offer = cutlass_update::offer(&json, &running, platform)
+            .unwrap()
+            .unwrap();
+        shell.offer_update(offer);
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let run = |shell: &mut Shell, view: &mut ViewState, events: Vec<egui::Event>| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0))),
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, view, None),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        let painted = painted_text(&run(&mut shell, &mut view, Vec::new()));
+        assert!(painted.contains("Cutlass 99.0.0 is available"), "{painted}");
+        assert!(painted.contains("Faster export") && painted.contains("- Fixes"));
+        assert!(painted.contains("Update and restart") && painted.contains("Later"));
+        run(
+            &mut shell,
+            &mut view,
+            vec![key(egui::Key::Escape, egui::Modifiers::NONE)],
+        );
+        assert!(shell.update_offer().is_none());
+        assert!(shell.job().is_none(), "nothing downloads");
+
+        view.settings_open = true;
+        let painted = painted_text(&run(&mut shell, &mut view, Vec::new()));
+        assert!(painted.contains("Check for updates"), "{painted}");
     }
 }

@@ -32,6 +32,7 @@ pub const PROJECTS: &str = "projects";
 pub const SETTINGS: &str = "settings";
 pub const LICENSES: &str = "licenses";
 pub const EXPORT_LOG: &str = "export_log";
+pub const CHECK_UPDATES: &str = "check_updates";
 
 /// The menus, in order. The app menu of macOS (About, Hide, Quit) comes
 /// before them there.
@@ -94,7 +95,12 @@ pub const MENUS: &[Menu] = &[
     },
     Menu {
         title: "Help",
-        items: &[item(LICENSES, "Licenses"), item(EXPORT_LOG, "Export log…")],
+        items: &[
+            item(CHECK_UPDATES, "Check for updates…"),
+            None,
+            item(LICENSES, "Licenses"),
+            item(EXPORT_LOG, "Export log…"),
+        ],
     },
 ];
 
@@ -107,7 +113,15 @@ pub fn items() -> impl Iterator<Item = &'static Item> {
 #[must_use]
 pub fn is_window_command(id: &str) -> bool {
     [
-        OPEN, SAVE, IMPORT, EXPORT, PROJECTS, SETTINGS, LICENSES, EXPORT_LOG,
+        OPEN,
+        SAVE,
+        IMPORT,
+        EXPORT,
+        PROJECTS,
+        SETTINGS,
+        LICENSES,
+        EXPORT_LOG,
+        CHECK_UPDATES,
     ]
     .contains(&id)
 }

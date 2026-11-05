@@ -631,6 +631,7 @@ dependencies = [
  "cutlass-storage",
  "cutlass-store",
  "cutlass-transcription",
+ "cutlass-update",
  "cutlass-vorbis",
  "cutlass-vp8",
  "cutlass-vp9",

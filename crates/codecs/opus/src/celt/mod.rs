@@ -3,6 +3,15 @@
 //! The decoder runs at 48 kHz internally and writes the API rate by
 //! integer decimation in the de-emphasis filter.
 
+mod bands;
+mod coder;
+mod cwrs;
+mod energy;
+mod laplace;
+mod rate;
+mod tables;
+mod vq;
+
 use crate::range::RangeDecoder;
 use cutlass_decode::CodecError;
 

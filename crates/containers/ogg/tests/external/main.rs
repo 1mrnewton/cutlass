@@ -9,6 +9,7 @@
     clippy::unwrap_used
 )]
 
+mod measure;
 mod mux_oracle;
 mod oracle;
 mod support;

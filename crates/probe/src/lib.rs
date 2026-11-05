@@ -70,6 +70,9 @@ pub fn probe(path: &Path) -> Result<Probed, ProbeError> {
     if let Some(probed) = aiff(path, &header)? {
         return Ok(probed);
     }
+    if let Some(probed) = flac(path, &header)? {
+        return Ok(probed);
+    }
     if let Some(probed) = movie(path, &header)? {
         return Ok(probed);
     }
@@ -193,6 +196,41 @@ fn aiff(path: &Path, header: &[u8]) -> Result<Option<Probed>, ProbeError> {
     Ok(Some(Probed::Audio { duration }))
 }
 
+/// The STREAMINFO sample count, or the frames counted when it is unknown.
+fn flac(path: &Path, header: &[u8]) -> Result<Option<Probed>, ProbeError> {
+    if !matches!(
+        cutlass_flac_container::probe(header),
+        cutlass_container::ProbeResult::Accept { .. }
+    ) {
+        return Ok(None);
+    }
+    let file = File::open(path).map_err(|error| io_error(path, error))?;
+    let length = file
+        .metadata()
+        .map_err(|error| io_error(path, error))?
+        .len();
+    let mut demux = cutlass_flac_container::FlacDemux::open(std::io::BufReader::new(file), length)
+        .map_err(|error| ProbeError::new(format!("flac refused the file: {error}")))?;
+    let info = *demux.stream_info();
+    let mut samples = info.total_samples;
+    if samples == 0 {
+        loop {
+            match cutlass_container::Demux::read_packet(&mut demux) {
+                Ok(Some(packet)) => {
+                    let span = packet.timestamp().duration().unwrap_or(0);
+                    samples = samples.saturating_add(u64::try_from(span).unwrap_or(0));
+                }
+                Ok(None) => break,
+                Err(error) => {
+                    return Err(ProbeError::new(format!("flac refused the file: {error}")));
+                }
+            }
+        }
+    }
+    let duration = samples_to_micros(samples, info.sample_rate)?;
+    Ok(Some(Probed::Audio { duration }))
+}
+
 fn movie(path: &Path, header: &[u8]) -> Result<Option<Probed>, ProbeError> {
     if header.get(4..8) != Some(b"ftyp") {
         return Ok(None);
@@ -307,9 +345,6 @@ fn unavailable(header: &[u8]) -> Option<&'static str> {
     }
     if header.starts_with(b"OggS") {
         return Some("ogg is not available");
-    }
-    if header.starts_with(b"fLaC") {
-        return Some("flac is not available");
     }
     if header.starts_with(b"caff") {
         return Some("caf is not available");
@@ -538,6 +573,69 @@ mod tests {
         let temp = Temp::new();
         let path = temp.write("sound.aiff", &aiff_s16(&[0x40, 0x00]));
         assert_eq!(probe(&path).expect("aiff"), Probed::Audio { duration: 125 });
+    }
+
+    #[test]
+    fn a_flac_file_is_audio_with_or_without_a_sample_count() {
+        let temp = Temp::new();
+        let mut bytes = flac_mono(4_000);
+        let path = temp.write("sound.flac", &bytes);
+        assert_eq!(
+            probe(&path).expect("flac"),
+            Probed::Audio { duration: 500_000 }
+        );
+        // Zero the STREAMINFO sample count: the frames are counted instead.
+        bytes[21] &= 0xF0;
+        bytes[22..26].fill(0);
+        let path = temp.write("unknown.flac", &bytes);
+        assert_eq!(
+            probe(&path).expect("flac"),
+            Probed::Audio { duration: 500_000 }
+        );
+    }
+
+    fn flac_mono(samples: usize) -> Vec<u8> {
+        use cutlass_codec::{CodecId, Packet, StreamCodec, StreamParams, Timescale, Timestamp};
+        use cutlass_container::{Mux, NewStream, TrackDuration, TrackId};
+        let source: Vec<i32> = (0..samples).map(|i| (i as i32 % 200) * 50).collect();
+        let settings = cutlass_flac::Settings::level(5).expect("level");
+        let mut encoder = cutlass_flac::FlacEncoder::new(8_000, 1, 16, settings).expect("encoder");
+        let mut frames = encoder.encode(&source).expect("encode");
+        frames.extend(encoder.finish().expect("finish"));
+        let mut mux = cutlass_flac_container::FlacMux::new(std::io::Cursor::new(Vec::new()));
+        let params = StreamParams::try_audio(
+            StreamCodec::Known(CodecId::Flac),
+            8_000,
+            1,
+            encoder.stream_info().to_bytes().to_vec(),
+        )
+        .expect("params");
+        mux.add_stream(NewStream {
+            params,
+            timescale: Timescale::new(8_000),
+            language: None,
+        })
+        .expect("stream");
+        for frame in frames {
+            let pts = i64::try_from(frame.first_sample).expect("pts");
+            let packet = Packet::try_new(
+                0,
+                frame.data,
+                Timestamp::try_new(Some(pts), Some(pts), Some(i64::from(frame.samples)))
+                    .expect("time"),
+                Timescale::new(8_000),
+                true,
+            )
+            .expect("packet");
+            mux.write_packet(&packet).expect("write");
+        }
+        mux.finish(&[TrackDuration {
+            track: TrackId::new(0),
+            timescale: Timescale::new(8_000),
+            ticks: i64::try_from(samples).expect("ticks"),
+        }])
+        .expect("finish");
+        mux.into_inner().into_inner()
     }
 
     fn aiff_s16(frame: &[u8]) -> Vec<u8> {

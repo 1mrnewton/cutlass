@@ -35,6 +35,31 @@ pub enum ApprovalAction {
 }
 
 impl ApprovalAction {
+    /// The question the host shows before it allows the action.
+    #[must_use]
+    pub fn prompt(&self) -> String {
+        match self {
+            Self::ExportReplace { path } => format!("Replace {path}?"),
+            Self::EnableCloudModel => {
+                "Turn on the cloud model? Your messages and the project details the \
+                 assistant reads are sent off this computer."
+                    .to_owned()
+            }
+            Self::EnableOnlineSandbox => "Turn on the online sandbox? Code the assistant \
+                 runs, and its input, are sent off this computer."
+                .to_owned(),
+            Self::EnableRemoteMcp { server } => format!(
+                "Enable the remote server {server}? The arguments of its tools are sent to it."
+            ),
+            Self::DeleteMedia { path } => {
+                format!("Delete {path}? Undo cannot bring the file back.")
+            }
+            Self::AddExternalSkill { path } => {
+                format!("Add the skills in {path}? The assistant will follow what they say.")
+            }
+        }
+    }
+
     fn name(&self) -> &'static str {
         match self {
             Self::ExportReplace { .. } => "export",
@@ -108,6 +133,33 @@ mod tests {
             self.asked.push(action.clone());
             self.allow
         }
+    }
+
+    #[test]
+    fn every_action_asks_a_question_naming_what_it_touches() {
+        let path = "/tmp/a.mp4".to_owned();
+        for action in [
+            ApprovalAction::ExportReplace { path: path.clone() },
+            ApprovalAction::DeleteMedia { path: path.clone() },
+            ApprovalAction::AddExternalSkill { path: path.clone() },
+        ] {
+            assert!(action.prompt().contains(&path), "{action:?}");
+            assert!(action.prompt().ends_with('?') || action.prompt().ends_with('.'));
+        }
+        let remote = ApprovalAction::EnableRemoteMcp {
+            server: "far".to_owned(),
+        };
+        assert!(remote.prompt().contains("far"));
+        assert!(
+            ApprovalAction::EnableCloudModel
+                .prompt()
+                .contains("off this computer")
+        );
+        assert!(
+            ApprovalAction::EnableOnlineSandbox
+                .prompt()
+                .contains("off this computer")
+        );
     }
 
     fn refuse(action: ApprovalAction, name: &str) -> ApprovalError {

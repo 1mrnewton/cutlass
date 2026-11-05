@@ -592,7 +592,12 @@ fn set_settings(
     Ok(format!("generation={generation}"))
 }
 
-fn pending_approvals(current: &Settings, next: &Settings) -> Vec<ApprovalAction> {
+/// The approvals a change from `current` to `next` needs: turning on the
+/// cloud model or the online sandbox, enabling a remote server, or adding a
+/// skill folder. The host asks for each before the change is written,
+/// whoever made it.
+#[must_use]
+pub fn pending_approvals(current: &Settings, next: &Settings) -> Vec<ApprovalAction> {
     let mut actions = Vec::new();
     if !current.model.cloud && next.model.cloud {
         actions.push(ApprovalAction::EnableCloudModel);
@@ -607,6 +612,18 @@ fn pending_approvals(current: &Settings, next: &Settings) -> Vec<ApprovalAction>
         {
             actions.push(ApprovalAction::EnableRemoteMcp {
                 server: server.name.clone(),
+            });
+        }
+    }
+    for folder in &next.skill_folders {
+        if !folder.path.is_empty()
+            && !current
+                .skill_folders
+                .iter()
+                .any(|known| known.path == folder.path)
+        {
+            actions.push(ApprovalAction::AddExternalSkill {
+                path: folder.path.clone(),
             });
         }
     }
@@ -1831,5 +1848,30 @@ mod tests {
         assert!(rejected.is_error);
         assert!(rejected.content.contains("bad arguments"));
         assert_eq!(registry.draft.session().revision(), 0);
+    }
+
+    #[test]
+    fn a_new_skill_folder_needs_approval_and_a_known_one_does_not() {
+        let mut current = Settings::default();
+        current.skill_folders.push(cutlass_settings::SkillFolder {
+            path: "/known".to_owned(),
+            ..Default::default()
+        });
+        let mut next = current.clone();
+        assert!(super::pending_approvals(&current, &next).is_empty());
+        next.skill_folders.push(cutlass_settings::SkillFolder {
+            path: "/new".to_owned(),
+            ..Default::default()
+        });
+        next.model.cloud = true;
+        assert_eq!(
+            super::pending_approvals(&current, &next),
+            vec![
+                ApprovalAction::EnableCloudModel,
+                ApprovalAction::AddExternalSkill {
+                    path: "/new".to_owned()
+                },
+            ]
+        );
     }
 }

@@ -11,7 +11,7 @@ use crate::dsp::fg::{FilmGrainParams, apply_film_grain};
 use crate::dsp::lr::LrScratch;
 
 use super::cdf::CdfContext;
-use super::frame::{FrameState, LrUnitParams, Picture, RefData};
+use super::frame::{FrameState, LrUnitParams, Picture, Plane, RefData};
 use super::msac::Msac;
 use super::mvpred::{MfEntry, MfPlan, motion_field_plan};
 use super::obu::{
@@ -46,6 +46,7 @@ pub trait PicturePixel: Pixel {
     fn wrap(p: Picture<Self>) -> AnyPicture;
     fn view_rows(r: &AnyRows) -> Option<&[Vec<Self>; 3]>;
     fn wrap_rows(r: [Vec<Self>; 3]) -> AnyRows;
+    fn unwrap_rows(r: AnyRows) -> Option<[Vec<Self>; 3]>;
 }
 
 impl PicturePixel for u8 {
@@ -66,6 +67,12 @@ impl PicturePixel for u8 {
     }
     fn wrap_rows(r: [Vec<u8>; 3]) -> AnyRows {
         AnyRows::U8(r)
+    }
+    fn unwrap_rows(r: AnyRows) -> Option<[Vec<u8>; 3]> {
+        match r {
+            AnyRows::U8(x) => Some(x),
+            AnyRows::U16(_) => None,
+        }
     }
 }
 
@@ -88,6 +95,12 @@ impl PicturePixel for u16 {
     fn wrap_rows(r: [Vec<u16>; 3]) -> AnyRows {
         AnyRows::U16(r)
     }
+    fn unwrap_rows(r: AnyRows) -> Option<[Vec<u16>; 3]> {
+        match r {
+            AnyRows::U16(x) => Some(x),
+            AnyRows::U8(_) => None,
+        }
+    }
 }
 
 /// One shown frame.
@@ -108,11 +121,56 @@ pub struct DecodedFrame {
     pub full_range: bool,
 }
 
+/// What a frame's parse leaves for later frames (its CDFs, its motion
+/// field and segmentation data), once that parse gets there.
+struct Promise<T> {
+    v: Mutex<Option<R<T>>>,
+    cv: Condvar,
+}
+
+impl<T: Clone> Promise<T> {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            v: Mutex::new(None),
+            cv: Condvar::new(),
+        })
+    }
+
+    fn ready(r: R<T>) -> Arc<Self> {
+        Arc::new(Self {
+            v: Mutex::new(Some(r)),
+            cv: Condvar::new(),
+        })
+    }
+
+    /// Sets the value (only the first call counts).
+    fn set(&self, r: R<T>) {
+        let mut v = lock(&self.v);
+        if v.is_none() {
+            *v = Some(r);
+            self.cv.notify_all();
+        }
+    }
+
+    fn wait(&self) -> R<T> {
+        let mut v = lock(&self.v);
+        loop {
+            if let Some(r) = &*v {
+                return r.clone();
+            }
+            v = self.cv.wait(v).unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+}
+
+type CdfPromise = Arc<Promise<Arc<CdfContext>>>;
+type DataPromise = Arc<Promise<Arc<RefData>>>;
+
 #[derive(Clone)]
 struct Slot {
     pic: Arc<FrameJob>,
-    data: Arc<RefData>,
-    cdf: Arc<CdfContext>,
+    data: DataPromise,
+    cdf: CdfPromise,
 }
 
 /// Time spent in the stages of the threaded decoder (summed over threads),
@@ -129,8 +187,20 @@ pub mod prof {
     pub const RECON: usize = 3;
     /// In-loop filters.
     pub const FILTER: usize = 4;
-    const NAMES: [&str; 5] = ["wait_out", "wait_refs", "parse", "recon", "filter"];
-    static T: [AtomicU64; 5] = [const { AtomicU64::new(0) }; 5];
+    /// Copying final rows for (and into the copies of) references still
+    /// being decoded (part of `filter` and `wait_refs`).
+    pub const COPY: usize = 5;
+    const NAMES: [&str; 6] = ["wait_out", "wait_refs", "parse", "recon", "filter", "copy"];
+    static T: [AtomicU64; 6] = [const { AtomicU64::new(0) }; 6];
+
+    /// Adds its lifetime to a stage.
+    pub struct Span(pub usize, pub std::time::Instant);
+
+    impl Drop for Span {
+        fn drop(&mut self) {
+            add(self.0, self.1);
+        }
+    }
 
     /// Adds the time since `t` to stage `k`.
     #[inline]
@@ -140,12 +210,43 @@ pub mod prof {
         }
     }
 
+    /// Threads whose processor time [`cpu`] sums.
+    pub const CPU_MAIN: usize = 0;
+    pub const CPU_TASK: usize = 1;
+    pub const CPU_BACKEND: usize = 2;
+    pub const CPU_MF: usize = 3;
+    /// Tasks of frames no later frame references.
+    pub const CPU_TASK_UNREF: usize = 4;
+    const CPU_NAMES: [&str; 5] = ["main", "task", "backend", "mf", "task_unref"];
+    static CPU: [AtomicU64; 5] = [const { AtomicU64::new(0) }; 5];
+
+    /// Adds the processor time of the calling thread so far to kind `k`
+    /// (call it as the thread ends).
+    pub fn cpu(k: usize) {
+        if cfg!(feature = "prof") {
+            let ns = std::fs::read_to_string("/proc/thread-self/schedstat")
+                .ok()
+                .and_then(|s| s.split(' ').next().and_then(|v| v.parse::<u64>().ok()))
+                .unwrap_or(0);
+            CPU[k].fetch_add(ns, Ordering::Relaxed);
+        }
+    }
+
     pub fn report() -> String {
-        NAMES
+        cpu(CPU_MAIN);
+        let mut s: String = NAMES
             .iter()
             .zip(&T)
             .map(|(n, v)| format!("{n}={:.3}s ", v.load(Ordering::Relaxed) as f64 * 1e-9))
-            .collect()
+            .collect();
+        s.push_str("| cpu ");
+        for (n, v) in CPU_NAMES.iter().zip(&CPU) {
+            s.push_str(&format!(
+                "{n}={:.3}s ",
+                v.load(Ordering::Relaxed) as f64 * 1e-9
+            ));
+        }
+        s
     }
 }
 
@@ -161,6 +262,8 @@ pub struct Band {
     y0: usize,
     y1: usize,
     strides: [usize; 3],
+    /// Samples of each row held (the visible width), rows packed.
+    widths: [usize; 3],
     rows: AnyRows,
 }
 
@@ -200,12 +303,18 @@ impl FrameJob {
 
     /// Publishes the result (only the first call counts).
     fn finish(&self, r: R<Arc<AnyPicture>>) {
+        drop(self.finish_take(r));
+    }
+
+    /// [`Self::finish`], returning the bands published before.
+    fn finish_take(&self, r: R<Arc<AnyPicture>>) -> Vec<Arc<Band>> {
         let mut s = lock(&self.state);
         if s.result.is_none() {
             s.result = Some(r);
-            s.bands = Vec::new();
             self.cv.notify_all();
+            return std::mem::take(&mut s.bands);
         }
+        Vec::new()
     }
 
     /// Publishes the next final rows.
@@ -252,29 +361,44 @@ impl FrameJob {
     }
 }
 
-/// Copies rows `y0..y1` (luma rows; to the bottom of the allocation when
-/// `y1` is `usize::MAX`) of every plane of `src` into a [`Band`].
-fn band_of<P: PicturePixel>(src: &Picture<P>, y0: usize, y1: usize) -> Band {
+/// The visible samples (those prediction reads) of luma rows `y0..` of
+/// a plane (chroma rows scaled by `sy`): the range of rows and the width.
+fn visible_rows<P>(pl: &Plane<P>, y0: usize, y1: usize, sy: usize) -> (usize, usize, usize) {
+    let h = pl.h.min(pl.alloc_h);
+    let a = (y0 >> sy).min(h);
+    let b = if y1 == usize::MAX {
+        h
+    } else {
+        (y1 >> sy).min(h)
+    };
+    (a, b.max(a), pl.w.min(pl.stride))
+}
+
+/// Copies the visible samples of luma rows `y0..y1` of every plane of
+/// `src` into a [`Band`], in the buffers `bufs`.
+fn band_of<P: PicturePixel>(src: &Picture<P>, y0: usize, y1: usize, bufs: [Vec<P>; 3]) -> Band {
     let sub_y = usize::from(src.sub_y);
     let mut strides = [0; 3];
-    let rows = std::array::from_fn(|p| {
+    let mut widths = [0; 3];
+    let mut rows = bufs;
+    for (p, v) in rows.iter_mut().enumerate() {
+        v.clear();
         let Some(pl) = src.planes.get(p) else {
-            return Vec::new();
+            continue;
         };
         let sy = if p > 0 { sub_y } else { 0 };
         strides[p] = pl.stride;
-        let a = (y0 >> sy).min(pl.alloc_h);
-        let b = if y1 == usize::MAX {
-            pl.alloc_h
-        } else {
-            (y1 >> sy).min(pl.alloc_h)
-        };
-        pl.data[a * pl.stride..b.max(a) * pl.stride].to_vec()
-    });
+        let (a, b, w) = visible_rows(pl, y0, y1, sy);
+        widths[p] = w;
+        for r in a..b {
+            v.extend_from_slice(&pl.data[r * pl.stride..r * pl.stride + w]);
+        }
+    }
     Band {
         y0,
         y1,
         strides,
+        widths,
         rows: P::wrap_rows(rows),
     }
 }
@@ -316,6 +440,7 @@ impl RefFill {
             (bands, s.result.clone())
         };
         prof::add(prof::WAIT_REFS, t);
+        let _copy = prof::Span(prof::COPY, std::time::Instant::now());
         for b in &bands {
             if b.y0 != self.have || !copy_band(m, b) {
                 // Not the layout of the copy: take the whole picture.
@@ -335,13 +460,36 @@ impl RefFill {
         let Some(src) = P::view(pic) else {
             return Err(malformed("reference sample size"));
         };
-        let b = band_of(src, self.have, usize::MAX);
-        if !copy_band(m, &b) {
+        if !copy_rows(m, src, self.have) {
             *m = src.clone();
         }
         self.have = usize::MAX;
         Ok(())
     }
+}
+
+/// Copies the visible samples of the luma rows from `y0` down (chroma
+/// rows scaled) of `src` into `m`; false when the layouts differ.
+fn copy_rows<P: Pixel>(m: &mut Picture<P>, src: &Picture<P>, y0: usize) -> bool {
+    if m.planes.len() != src.planes.len()
+        || m.sub_y != src.sub_y
+        || m.planes
+            .iter()
+            .zip(&src.planes)
+            .any(|(d, s)| d.stride != s.stride || d.data.len() != s.data.len())
+    {
+        return false;
+    }
+    let sub_y = usize::from(m.sub_y);
+    for (p, (d, s)) in m.planes.iter_mut().zip(&src.planes).enumerate() {
+        let sy = if p > 0 { sub_y } else { 0 };
+        let (a, b, w) = visible_rows(s, y0, usize::MAX, sy);
+        for r in a..b {
+            let o = r * s.stride;
+            d.data[o..o + w].copy_from_slice(&s.data[o..o + w]);
+        }
+    }
+    true
 }
 
 /// Copies the rows of `b` into `m`; false when the layouts differ.
@@ -352,12 +500,23 @@ fn copy_band<P: PicturePixel>(m: &mut Picture<P>, b: &Band) -> bool {
     let sub_y = usize::from(m.sub_y);
     for (p, pl) in m.planes.iter_mut().enumerate() {
         let sy = if p > 0 { sub_y } else { 0 };
-        let o = (b.y0 >> sy).min(pl.alloc_h) * pl.stride;
+        let w = b.widths[p];
         let src = &rows[p];
-        if b.strides[p] != pl.stride || o + src.len() > pl.data.len() {
+        let o = (b.y0 >> sy) * pl.stride;
+        if b.strides[p] != pl.stride || w > pl.stride {
             return false;
         }
-        pl.data[o..o + src.len()].copy_from_slice(src);
+        if w == 0 {
+            continue;
+        }
+        let n = src.len() / w;
+        if o + n * pl.stride > pl.data.len() {
+            return false;
+        }
+        for (r, row) in src.chunks_exact(w).enumerate() {
+            let at = o + r * pl.stride;
+            pl.data[at..at + w].copy_from_slice(row);
+        }
     }
     true
 }
@@ -381,15 +540,22 @@ struct Queued {
 
 /// What finished frame jobs hand back for reuse.
 struct Spares<P> {
+    /// Pictures nothing holds any more (see [`recycle`]).
     pics: Vec<Picture<P>>,
     shells: Vec<FrameState>,
     lr: Vec<LrScratch>,
+    /// Frame states of parsed frames.
+    states: Vec<FrameState>,
+    /// Buffers of [`Band`]s.
+    bands: Vec<[Vec<P>; 3]>,
 }
 
-/// Per sample type: the picture pool, the row message pools of the
-/// threaded pipeline and the spares of finished jobs.
+/// Band buffers kept for reuse, at most.
+const MAX_BANDS: usize = 96;
+
+/// Per sample type: the row message pools of the threaded pipeline and
+/// the spares (among them the picture pool), shared with the threads.
 struct PixState<P> {
-    pool: Vec<Picture<P>>,
     rows: Arc<Mutex<RowPools>>,
     spares: Arc<Mutex<Spares<P>>>,
 }
@@ -397,35 +563,31 @@ struct PixState<P> {
 impl<P> Default for PixState<P> {
     fn default() -> Self {
         Self {
-            pool: Vec::new(),
             rows: Arc::new(Mutex::new(RowPools::default())),
             spares: Arc::new(Mutex::new(Spares {
                 pics: Vec::new(),
                 shells: Vec::new(),
                 lr: Vec::new(),
+                states: Vec::new(),
+                bands: Vec::new(),
             })),
         }
     }
 }
 
 impl<P: Pixel> PixState<P> {
-    /// Moves the spares of finished jobs into the pools.
-    fn collect(&mut self, shells: &mut Vec<FrameState>) {
+    /// Trims the spares.
+    fn collect(&mut self) {
         let mut sp = lock(&self.spares);
-        for p in sp.pics.drain(..) {
-            recycle(&mut self.pool, p);
-        }
-        for f in sp.shells.drain(..) {
-            if shells.len() < 8 {
-                shells.push(f);
-            }
-        }
+        sp.shells.truncate(8);
         sp.lr.truncate(4);
+        sp.states.truncate(8);
     }
 }
 
-/// Frames whose reconstruction may run at once.
-const MAX_IN_FLIGHT: usize = 3;
+/// Frames that may be decoding at once (parsing, reconstruction or
+/// filters), at most.
+const MAX_IN_FLIGHT: usize = 16;
 
 /// The decoder state that persists between temporal units.
 pub struct Av1Core {
@@ -434,11 +596,6 @@ pub struct Av1Core {
     slots: [Option<Slot>; 8],
     /// Frame in progress (header seen, tiles pending).
     pending: Option<Pending>,
-    lr_scratch: LrScratch,
-    /// Copies of the frame state the worker threads use, kept for reuse.
-    shells: Vec<FrameState>,
-    /// The state of the last frame, whose arrays the next one reuses.
-    spare_fs: Option<FrameState>,
     px8: PixState<u8>,
     px16: PixState<u16>,
     /// Apply film grain to shown pictures.
@@ -448,7 +605,7 @@ pub struct Av1Core {
     outstanding: Vec<Arc<FrameJob>>,
     /// Shown frames not returned yet, in output order.
     queue: VecDeque<Queued>,
-    /// Frames whose reconstruction may still be running.
+    /// Frames that may still be decoding.
     in_flight: Vec<Arc<FrameJob>>,
     /// Frames started by the current call.
     unit_jobs: Vec<Arc<FrameJob>>,
@@ -456,13 +613,17 @@ pub struct Av1Core {
     /// The default is the largest picture any AV1 level allows.
     pub max_pixels: u64,
     /// Threads decoding may use; 1 decodes on the calling thread. Defaults
-    /// to `std::thread::available_parallelism()`. With 2 or more, a frame's
-    /// reconstruction and in-loop filters run on threads of their own, and
-    /// with [`Self::decode_delayed`] the next frame is parsed meanwhile.
+    /// to `std::thread::available_parallelism()`. With 2 or more, the
+    /// calling thread only reads the frame headers: each frame is parsed
+    /// on a thread of its own as soon as the frames it depends on are
+    /// parsed far enough, and reconstructed and filtered on another (see
+    /// [`FrameTask`]), so with [`Self::decode_delayed`] several frames
+    /// decode at once.
     pub threads: usize,
     /// Shown frames [`Self::decode_delayed`] may keep back (it returns
-    /// earlier ones as soon as they are done).
-    pub frame_delay: usize,
+    /// earlier ones as soon as they are done); `None` (the default) keeps
+    /// back as many as there are [`Self::threads`].
+    pub frame_delay: Option<usize>,
 }
 
 struct Pending {
@@ -483,9 +644,6 @@ impl Av1Core {
             ref_hdr: Default::default(),
             slots: Default::default(),
             pending: None,
-            lr_scratch: LrScratch::new(),
-            shells: Vec::new(),
-            spare_fs: None,
             px8: PixState::default(),
             px16: PixState::default(),
             apply_grain: true,
@@ -495,7 +653,7 @@ impl Av1Core {
             unit_jobs: Vec::new(),
             max_pixels: 35_651_584,
             threads: std::thread::available_parallelism().map_or(1, usize::from),
-            frame_delay: 2,
+            frame_delay: None,
         }
     }
 
@@ -529,12 +687,12 @@ impl Av1Core {
 
     /// The CDFs saved with a reference slot.
     pub fn slot_cdf(&self, slot: usize) -> Option<Arc<CdfContext>> {
-        self.slots.get(slot)?.as_ref().map(|s| s.cdf.clone())
+        self.slots.get(slot)?.as_ref()?.cdf.wait().ok()
     }
 
     /// Motion field and segmentation data saved with a reference slot.
     pub fn slot_data(&self, slot: usize) -> Option<Arc<RefData>> {
-        self.slots.get(slot)?.as_ref().map(|s| s.data.clone())
+        self.slots.get(slot)?.as_ref()?.data.wait().ok()
     }
 
     pub fn sequence(&self) -> Option<&SequenceHeader> {
@@ -558,18 +716,19 @@ impl Av1Core {
 
     /// Decodes one temporal unit and returns the shown frames that are
     /// ready, oldest first, each with the `tag` of the call that decoded
-    /// it. The reconstruction and in-loop filters of a frame may still run
-    /// when the call returns (with 2 or more [`Self::threads`]), so the next
-    /// unit is parsed meanwhile; at most [`Self::frame_delay`] shown frames
-    /// are kept back. [`Self::drain`] returns the rest.
+    /// it. With 2 or more [`Self::threads`] the call only reads the frame
+    /// headers: the frames are parsed, reconstructed and filtered on other
+    /// threads, beside the next units; at most [`Self::frame_delay`] shown
+    /// frames are kept back. [`Self::drain`] returns the rest.
     ///
-    /// A unit that fails while it is parsed leaves the reference state as
-    /// it was before the call. A failure found later (reconstruction runs
-    /// after the call) is returned in place of the frame's picture, and
-    /// the frames that use it as a reference fail too.
+    /// A unit whose headers fail leaves the reference state as it was
+    /// before the call. A failure found later (in the tile data, when the
+    /// frame is decoded on other threads) is returned in place of the
+    /// frame's picture, and the frames that depend on it fail too.
     pub fn decode_delayed(&mut self, data: &[u8], tag: u64) -> R<Vec<(u64, DecodedFrame)>> {
         self.decode_checked(data, tag, false)?;
-        self.take_outputs(self.frame_delay)
+        let delay = self.frame_delay.unwrap_or(self.threads.max(1));
+        self.take_outputs(delay)
     }
 
     /// Waits for every frame [`Self::decode_delayed`] kept back and returns
@@ -861,23 +1020,16 @@ impl Av1Core {
 
     fn finish_frame(&mut self, seq: &SequenceHeader, p: Pending, tag: u64) -> R<()> {
         let hdr = p.hdr;
-        // Initial CDFs.
-        let mut cdf: Box<CdfContext> = if hdr.primary_ref_frame == PRIMARY_REF_NONE {
-            CdfContext::new(hdr.quant.base_q_idx)
-        } else {
-            let slot_idx = hdr.ref_frame_idx[hdr.primary_ref_frame as usize] as usize;
-            let Some(slot) = &self.slots[slot_idx] else {
-                return Err(malformed("primary reference frame"));
-            };
-            let mut c = Box::new((*slot.cdf).clone());
-            c.clear_counts();
-            c
+        // The CDFs the frame starts from.
+        let primary_slot = (hdr.primary_ref_frame != PRIMARY_REF_NONE)
+            .then(|| hdr.ref_frame_idx[hdr.primary_ref_frame as usize] as usize);
+        let primary_cdf = match primary_slot {
+            None => None,
+            Some(s) => match &self.slots[s] {
+                Some(slot) => Some(slot.cdf.clone()),
+                None => return Err(malformed("primary reference frame")),
+            },
         };
-        if hdr.primary_ref_frame == PRIMARY_REF_NONE {
-            // already initialized with defaults
-        } else {
-            // load_cdfs keeps coefficient CDFs from the reference.
-        }
         if !hdr.frame_is_intra {
             // Every reference must share the sequence format and obey the
             // scaling limits of 7.11.3.3.
@@ -901,21 +1053,19 @@ impl Av1Core {
         }
         self.limit_in_flight();
         self.reclaim_pictures();
-        let refs_data: [Option<Arc<RefData>>; 8] =
-            std::array::from_fn(|i| self.slots[i].as_ref().map(|s| s.data.clone()));
-        let mut fs = FrameState::reuse(self.spare_fs.take(), seq, &hdr);
-        // Motion field estimation runs in decode_frame.
-        let mf_plan = hdr
-            .use_ref_frame_mvs
-            .then(|| motion_field_plan(seq, &hdr, &refs_data));
-        if hdr.primary_ref_frame != PRIMARY_REF_NONE {
-            let slot_idx = hdr.ref_frame_idx[hdr.primary_ref_frame as usize] as usize;
-            if let Some(rd) = &refs_data[slot_idx]
-                && rd.mi_rows == fs.mi_rows
-                && rd.mi_cols == fs.mi_cols
-            {
-                fs.prev_segment_ids = Some(rd.segment_ids.clone());
+        // The parse waits for the motion fields of the references it
+        // projects and the segment ids of the primary reference.
+        let mut deps: [Option<DataPromise>; 8] = Default::default();
+        let mut need = |s: usize| {
+            deps[s] = self.slots[s].as_ref().map(|sl| sl.data.clone());
+        };
+        if hdr.use_ref_frame_mvs {
+            for &s in &hdr.ref_frame_idx[..7] {
+                need(s as usize);
             }
+        }
+        if let Some(s) = primary_slot {
+            need(s);
         }
         // The pictures of the references (by reference frame 1..=7), which
         // may still be decoding.
@@ -926,49 +1076,33 @@ impl Av1Core {
             let slot = hdr.ref_frame_idx[i - 1] as usize;
             self.slots[slot].as_ref().map(|s| s.pic.clone())
         });
-        let (job, saved_cdf) = if seq.bit_depth == 8 {
-            decode_frame::<u8>(
-                seq,
-                &hdr,
-                &mut fs,
-                &p.tiles,
-                &mut cdf,
-                &ref_jobs,
-                &self.ref_hdr,
-                &mut self.lr_scratch,
-                &mut self.shells,
-                &mut self.px8,
-                self.threads,
-                mf_plan.as_ref(),
-            )?
-        } else {
-            decode_frame::<u16>(
-                seq,
-                &hdr,
-                &mut fs,
-                &p.tiles,
-                &mut cdf,
-                &ref_jobs,
-                &self.ref_hdr,
-                &mut self.lr_scratch,
-                &mut self.shells,
-                &mut self.px16,
-                self.threads,
-                mf_plan.as_ref(),
-            )?
+        let job = FrameJob::running();
+        let cdf_out = Promise::new();
+        let data_out = Promise::new();
+        let t = TaskParts {
+            seq: seq.clone(),
+            hdr: hdr.clone(),
+            tiles: p.tiles,
+            primary_cdf,
+            deps,
+            ref_jobs,
+            ref_hdr: self.ref_hdr.clone(),
+            threads: self.threads,
+            job: job.clone(),
+            cdf_out: cdf_out.clone(),
+            data_out: data_out.clone(),
         };
-        drop(ref_jobs);
+        let inline = self.threads <= 1;
+        if seq.bit_depth == 8 {
+            launch(&mut self.px8, t, inline)?;
+        } else {
+            launch(&mut self.px16, t, inline)?;
+        }
         self.unit_jobs.push(job.clone());
         if !job.is_done() {
             self.in_flight.push(job.clone());
         }
-        let final_cdf = if hdr.disable_frame_end_update_cdf {
-            cdf
-        } else {
-            saved_cdf
-        };
-        self.store_frame(seq, &hdr, &fs, job, final_cdf, tag);
-        self.spare_fs = Some(fs);
+        self.store_frame(seq, &hdr, job, cdf_out, data_out, tag);
         Ok(())
     }
 
@@ -996,23 +1130,27 @@ impl Av1Core {
             });
         }
         let job = FrameJob::ready(Ok(Arc::new(pic)));
-        self.store_frame(&seq, hdr, fs, job, cdf, 0);
+        let mut cdf = cdf;
+        cdf.clear_counts();
+        let data = Promise::ready(Ok(Arc::new(ref_data(&seq, hdr, fs))));
+        let cdf = Promise::ready(Ok(Arc::from(cdf)));
+        self.store_frame(&seq, hdr, job, cdf, data, 0);
         let out = self.take_outputs(0)?;
         Ok(out.into_iter().map(|(_, f)| f).collect())
     }
 
     /// Queues a frame for output if shown and runs the reference frame
-    /// update process (7.20) with its picture `job` and CDFs `cdf`.
+    /// update process (7.20) with its picture `job`, CDFs `cdf` and
+    /// motion field and segmentation data `data`.
     fn store_frame(
         &mut self,
         seq: &SequenceHeader,
         hdr: &FrameHeader,
-        fs: &FrameState,
         job: Arc<FrameJob>,
-        mut final_cdf: Box<CdfContext>,
+        cdf: CdfPromise,
+        data: DataPromise,
         tag: u64,
     ) {
-        final_cdf.clear_counts();
         let rh = RefHeaderState {
             valid: true,
             frame_id: hdr.current_frame_id,
@@ -1047,11 +1185,10 @@ impl Av1Core {
             });
         }
         if hdr.refresh_frame_flags != 0 {
-            let data = Arc::new(ref_data(seq, hdr, fs));
             let slot = Slot {
                 pic: job,
                 data,
-                cdf: Arc::from(final_cdf),
+                cdf,
             };
             let mut old = Vec::new();
             for i in 0..8 {
@@ -1094,8 +1231,8 @@ impl Av1Core {
             Err(j) => return keep(self, j),
         };
         match Arc::try_unwrap(p) {
-            Ok(AnyPicture::U8(p)) => recycle(&mut self.px8.pool, p),
-            Ok(AnyPicture::U16(p)) => recycle(&mut self.px16.pool, p),
+            Ok(AnyPicture::U8(p)) => recycle(&mut lock(&self.px8.spares).pics, p),
+            Ok(AnyPicture::U16(p)) => recycle(&mut lock(&self.px16.spares).pics, p),
             Err(p) => keep(self, FrameJob::ready(Ok(p))),
         }
     }
@@ -1113,19 +1250,203 @@ impl Av1Core {
                 i += 1;
             }
         }
-        self.px8.collect(&mut self.shells);
-        self.px16.collect(&mut self.shells);
+        self.px8.collect();
+        self.px16.collect();
     }
 
-    /// Waits until fewer frames are decoding than the threads allow (at
-    /// least 2, so that one parses while the last reconstructs; at most
-    /// [`MAX_IN_FLIGHT`]).
+    /// Waits until fewer frames are decoding than the threads allow (one
+    /// more than the threads, at most [`MAX_IN_FLIGHT`]).
     fn limit_in_flight(&mut self) {
         self.in_flight.retain(|j| !j.is_done());
-        while self.in_flight.len() >= self.threads.clamp(2, MAX_IN_FLIGHT) {
+        while self.in_flight.len() >= (self.threads + 1).clamp(2, MAX_IN_FLIGHT) {
             let j = self.in_flight.remove(0);
             let _ = j.wait();
         }
+    }
+}
+
+/// What the parse of a frame needs besides its picture and the pools.
+struct TaskParts {
+    seq: SequenceHeader,
+    hdr: FrameHeader,
+    tiles: Vec<(usize, Vec<u8>)>,
+    /// The CDFs of the primary reference frame.
+    primary_cdf: Option<CdfPromise>,
+    /// By slot: the data of the references the parse reads.
+    deps: [Option<DataPromise>; 8],
+    ref_jobs: [Option<Arc<FrameJob>>; 8],
+    ref_hdr: [RefHeaderState; 8],
+    threads: usize,
+    /// The final picture, the CDFs saved for later frames and the motion
+    /// field and segmentation data.
+    job: Arc<FrameJob>,
+    cdf_out: CdfPromise,
+    data_out: DataPromise,
+}
+
+/// The decoding of one frame whose header is read: it waits for what its
+/// parse depends on (the CDFs of the primary reference frame, the motion
+/// fields and segment ids of its references, each available once that
+/// frame's parse ends), parses the tiles and hands reconstruction and the
+/// in-loop filters to a [`Backend`] (see [`decode_frame`]). With 2 or more
+/// threads each task runs on a thread of its own, so frames that do not
+/// depend on each other's parse (such as those never referenced) parse at
+/// once.
+struct FrameTask<P> {
+    t: TaskParts,
+    cur: Picture<P>,
+    rows: Arc<Mutex<RowPools>>,
+    spares: Arc<Mutex<Spares<P>>>,
+}
+
+/// Fails what a task did not deliver when it ends without a result (its
+/// thread panicked).
+struct TaskGuard(Option<(Arc<FrameJob>, CdfPromise, DataPromise)>);
+
+impl TaskGuard {
+    fn fail(&mut self, e: CodecError) {
+        if let Some((job, cdf, data)) = self.0.take() {
+            job.finish(Err(e));
+            cdf.set(Err(e));
+            data.set(Err(e));
+        }
+    }
+}
+
+impl Drop for TaskGuard {
+    fn drop(&mut self) {
+        self.fail(malformed("decoding thread"));
+    }
+}
+
+/// Starts the task of a frame: on the calling thread when `inline` (and
+/// returns its result), else on a thread of its own.
+fn launch<P: PicturePixel>(px: &mut PixState<P>, t: TaskParts, inline: bool) -> R<()> {
+    let cur = take_picture::<P>(
+        &mut lock(&px.spares).pics,
+        t.hdr.frame_width as usize,
+        t.hdr.frame_height as usize,
+        t.seq.num_planes(),
+        t.seq.subsampling_x,
+        t.seq.subsampling_y,
+        t.seq.bit_depth,
+    );
+    let task = FrameTask {
+        t,
+        cur,
+        rows: px.rows.clone(),
+        spares: px.spares.clone(),
+    };
+    if inline {
+        task.run()
+    } else {
+        let unref = task.t.hdr.refresh_frame_flags == 0;
+        std::thread::spawn(move || {
+            let r = task.run();
+            prof::cpu(if unref {
+                prof::CPU_TASK_UNREF
+            } else {
+                prof::CPU_TASK
+            });
+            r
+        });
+        Ok(())
+    }
+}
+
+impl<P: PicturePixel> FrameTask<P> {
+    fn run(self) -> R<()> {
+        let mut guard = TaskGuard(Some((
+            self.t.job.clone(),
+            self.t.cdf_out.clone(),
+            self.t.data_out.clone(),
+        )));
+        let r = self.parse();
+        match r {
+            Err(e) => guard.fail(e),
+            // The reconstruction thread finishes the job.
+            Ok(()) => guard.0 = None,
+        }
+        r
+    }
+
+    fn parse(self) -> R<()> {
+        let Self {
+            t,
+            cur,
+            rows,
+            spares,
+        } = self;
+        let (seq, hdr) = (&t.seq, &t.hdr);
+        let mut cdf: Box<CdfContext> = match &t.primary_cdf {
+            None => CdfContext::new(hdr.quant.base_q_idx),
+            Some(p) => {
+                let mut c = Box::new((*p.wait()?).clone());
+                c.clear_counts();
+                c
+            }
+        };
+        if hdr.disable_frame_end_update_cdf {
+            t.cdf_out.set(Ok(Arc::from(cdf.clone())));
+        }
+        let mut refs_data: [Option<Arc<RefData>>; 8] = Default::default();
+        for (d, p) in refs_data.iter_mut().zip(&t.deps) {
+            if let Some(p) = p {
+                *d = Some(p.wait()?);
+            }
+        }
+        let spare = {
+            let mut sp = lock(&spares);
+            let i = sp.states.iter().position(|f| {
+                f.mi_cols == hdr.mi_cols as usize && f.mi_rows == hdr.mi_rows as usize
+            });
+            match i {
+                Some(i) => Some(sp.states.swap_remove(i)),
+                None => sp.states.pop(),
+            }
+        };
+        let mut fs = FrameState::reuse(spare, seq, hdr);
+        // Motion field estimation runs in decode_frame.
+        let mf_plan = hdr
+            .use_ref_frame_mvs
+            .then(|| motion_field_plan(seq, hdr, &refs_data));
+        if hdr.primary_ref_frame != PRIMARY_REF_NONE {
+            let slot_idx = hdr.ref_frame_idx[hdr.primary_ref_frame as usize] as usize;
+            if let Some(rd) = &refs_data[slot_idx]
+                && rd.mi_rows == fs.mi_rows
+                && rd.mi_cols == fs.mi_cols
+            {
+                fs.prev_segment_ids = Some(rd.segment_ids.clone());
+            }
+        }
+        let saved = decode_frame::<P>(
+            seq,
+            hdr,
+            &mut fs,
+            &t.tiles,
+            &mut cdf,
+            &t.ref_jobs,
+            &t.ref_hdr,
+            cur,
+            &t.job,
+            &rows,
+            &spares,
+            t.threads,
+            mf_plan.as_ref(),
+        )?;
+        drop(mf_plan);
+        if !hdr.disable_frame_end_update_cdf {
+            let mut saved = saved;
+            saved.clear_counts();
+            t.cdf_out.set(Ok(Arc::from(saved)));
+        }
+        t.data_out.set(if hdr.refresh_frame_flags != 0 {
+            Ok(Arc::new(ref_data(seq, hdr, &fs)))
+        } else {
+            Err(malformed("frame not referenced"))
+        });
+        lock(&spares).states.push(fs);
+        Ok(())
     }
 }
 
@@ -1315,7 +1636,7 @@ fn take_picture<P: Pixel>(
     Picture::new(w, h, num_planes, sub_x, sub_y, bd)
 }
 
-const POOL_MAX: usize = 12;
+const POOL_MAX: usize = 16;
 
 fn recycle<P: Pixel>(pool: &mut Vec<Picture<P>>, p: Picture<P>) {
     if pool.len() < POOL_MAX {
@@ -1721,6 +2042,8 @@ struct InlineFilter<'a, P> {
     lr_bounds: postfilter::LrBounds<P>,
     lf_on: bool,
     publish: &'a FrameJob,
+    /// Where the buffers of the bands come from.
+    spares: &'a Mutex<Spares<P>>,
     /// Reconstructed luma 4x4 rows waiting for deblocking, and deblocked
     /// ones waiting for CDEF and loop restoration.
     to_deblock: Option<(usize, usize)>,
@@ -1769,7 +2092,11 @@ impl<P: PicturePixel> InlineFilter<'_, P> {
             // rows higher.
             let done = if self.lr_on { 4 * d - 8 } else { 4 * d };
             if done > self.published {
-                self.publish.publish(band_of(cur, self.published, done));
+                let tc = std::time::Instant::now();
+                let bufs = lock(self.spares).bands.pop().unwrap_or_default();
+                self.publish
+                    .publish(band_of(cur, self.published, done, bufs));
+                prof::add(prof::COPY, tc);
                 self.published = done;
             }
         }
@@ -1832,12 +2159,13 @@ fn decode_frame<P: PicturePixel>(
     cdf: &mut CdfContext,
     ref_jobs: &[Option<Arc<FrameJob>>; 8],
     ref_hdr: &[RefHeaderState; 8],
-    lr_scratch: &mut LrScratch,
-    shells: &mut Vec<FrameState>,
-    px: &mut PixState<P>,
+    cur: Picture<P>,
+    job: &Arc<FrameJob>,
+    rows: &Arc<Mutex<RowPools>>,
+    spares: &Arc<Mutex<Spares<P>>>,
     threads: usize,
     mf: Option<&MfPlan<'_>>,
-) -> R<(Arc<FrameJob>, Box<CdfContext>)> {
+) -> R<Box<CdfContext>> {
     let lf_on = hdr.loop_filter.level[0] != 0 || hdr.loop_filter.level[1] != 0;
     let cdef_on = seq.enable_cdef
         && !hdr.coded_lossless
@@ -1856,7 +2184,7 @@ fn decode_frame<P: PicturePixel>(
         && (lf_on || cdef_on || hdr.lr.uses_lr);
     if pipeline {
         return decode_frame_async(
-            seq, hdr, fs, tiles, cdf, ref_jobs, ref_hdr, shells, px, mf, lf_on, cdef_on,
+            seq, hdr, fs, tiles, cdf, ref_jobs, ref_hdr, cur, job, rows, spares, mf, lf_on, cdef_on,
         );
     }
     let mut held: [Option<Arc<AnyPicture>>; 8] = Default::default();
@@ -1867,10 +2195,26 @@ fn decode_frame<P: PicturePixel>(
     }
     let refs: [Option<&Picture<P>>; 8] =
         std::array::from_fn(|i| held[i].as_deref().and_then(P::view));
-    let (pic, saved) = decode_frame_sync(
-        seq, hdr, fs, tiles, cdf, refs, ref_hdr, lr_scratch, px, threads, mf, cdef_on,
-    )?;
-    Ok((FrameJob::ready(Ok(Arc::new(P::wrap(pic)))), saved))
+    let mut lr_scratch = lock(spares).lr.pop().unwrap_or_default();
+    let r = decode_frame_sync(
+        seq,
+        hdr,
+        fs,
+        tiles,
+        cdf,
+        refs,
+        ref_hdr,
+        &mut lr_scratch,
+        cur,
+        spares,
+        threads,
+        mf,
+        cdef_on,
+    );
+    lock(spares).lr.push(lr_scratch);
+    let (pic, saved) = r?;
+    job.finish(Ok(Arc::new(P::wrap(pic))));
+    Ok(saved)
 }
 
 /// Sets the visible size of the planes of a final picture.
@@ -1900,33 +2244,26 @@ fn decode_frame_async<P: PicturePixel>(
     cdf: &mut CdfContext,
     ref_jobs: &[Option<Arc<FrameJob>>; 8],
     ref_hdr: &[RefHeaderState; 8],
-    shells: &mut Vec<FrameState>,
-    px: &mut PixState<P>,
+    cur: Picture<P>,
+    job: &Arc<FrameJob>,
+    rows: &Arc<Mutex<RowPools>>,
+    spares: &Arc<Mutex<Spares<P>>>,
     mf: Option<&MfPlan<'_>>,
     lf_on: bool,
     cdef_on: bool,
-) -> R<(Arc<FrameJob>, Box<CdfContext>)> {
-    let num_planes = seq.num_planes();
-    let mut new_pic = || {
-        take_picture::<P>(
-            &mut px.pool,
-            hdr.frame_width as usize,
-            hdr.frame_height as usize,
-            num_planes,
-            seq.subsampling_x,
-            seq.subsampling_y,
-            seq.bit_depth,
+) -> R<Box<CdfContext>> {
+    let (rc_fs, lr_scratch) = {
+        let mut sp = lock(spares);
+        (
+            take_shell(&mut sp.shells, fs),
+            sp.lr.pop().unwrap_or_default(),
         )
     };
-    let cur = new_pic();
-    let rc_fs = take_shell(shells, fs);
-    let lr_scratch = lock(&px.spares).lr.pop().unwrap_or_default();
     // The motion field is computed band by band on a thread of its own
     // while the tiles are parsed (see MfFeed).
     if let Some(p) = mf {
         fs.motion_field = vec![MfEntry::default(); p.w8 * p.h8];
     }
-    let job = FrameJob::running();
     let (rtx, rrx) = std::sync::mpsc::channel::<(Option<RowMsg>, ReconLog)>();
     let backend = Backend {
         seq: seq.clone(),
@@ -1938,12 +2275,15 @@ fn decode_frame_async<P: PicturePixel>(
         rc_fs,
         lr_scratch,
         lf_on,
-        rows: px.rows.clone(),
-        spares: px.spares.clone(),
+        rows: rows.clone(),
+        spares: spares.clone(),
         job: job.clone(),
         rx: rrx,
     };
-    std::thread::spawn(move || backend.run());
+    std::thread::spawn(move || {
+        backend.run();
+        prof::cpu(prof::CPU_BACKEND);
+    });
     // Parsing reads only the presence and size of the references.
     let empty = || Picture::<P> {
         planes: Vec::new(),
@@ -1958,7 +2298,7 @@ fn decode_frame_async<P: PicturePixel>(
     let t_parse = std::time::Instant::now();
     let sb4 = if seq.use_128x128_superblock { 32 } else { 16 };
     let sub_y = seq.subsampling_y;
-    let rows = &*px.rows;
+    let rows = &**rows;
     let saved = std::thread::scope(|s| {
         let mut feed = mf.filter(|p| p.bands() > 0).map(|plan| {
             let (mtx, rx) = std::sync::mpsc::channel::<(usize, Vec<MfEntry>)>();
@@ -1971,6 +2311,7 @@ fn decode_frame_async<P: PicturePixel>(
                         break;
                     }
                 }
+                prof::cpu(prof::CPU_MF);
             });
             MfFeed { rx, have: 0 }
         });
@@ -2009,9 +2350,14 @@ fn decode_frame_async<P: PicturePixel>(
             },
         )
     });
+    // A failed parse fails the job before reconstruction sees the end of
+    // its input.
+    if let Err(e) = &saved {
+        job.finish(Err(*e));
+    }
     drop(rtx);
     prof::add(prof::PARSE, t_parse);
-    Ok((job, saved?))
+    saved
 }
 
 /// The reconstruction and in-loop filters of one frame, run on threads of
@@ -2125,6 +2471,7 @@ impl<P: PicturePixel> Backend<P> {
                 lr_bounds: postfilter::LrBounds::default(),
                 lf_on,
                 publish: &job,
+                spares: &spares,
                 to_deblock: None,
                 to_filter: None,
                 published: 0,
@@ -2134,7 +2481,12 @@ impl<P: PicturePixel> Backend<P> {
             )
         };
         drop(held);
-        let res = res.map(|mirrors| lock(&spares).pics.extend(mirrors));
+        let res = res.map(|mirrors| {
+            let mut sp = lock(&spares);
+            for m in mirrors {
+                recycle(&mut sp.pics, m);
+            }
+        });
         let mut fin = cur;
         set_visible_size(&seq, &hdr, &mut fin);
         {
@@ -2142,7 +2494,16 @@ impl<P: PicturePixel> Backend<P> {
             sp.shells.push(rc_fs);
             sp.lr.push(lr_scratch);
         }
-        job.finish(res.map(|()| Arc::new(P::wrap(fin))));
+        let bands = job.finish_take(res.map(|()| Arc::new(P::wrap(fin))));
+        // The buffers of the bands no other thread holds go back.
+        let mut sp = lock(&spares);
+        for b in bands {
+            if let Some(rows) = Arc::try_unwrap(b).ok().and_then(|b| P::unwrap_rows(b.rows))
+                && sp.bands.len() < MAX_BANDS
+            {
+                sp.bands.push(rows);
+            }
+        }
     }
 }
 
@@ -2157,21 +2518,12 @@ fn decode_frame_sync<P: PicturePixel>(
     refs: [Option<&Picture<P>>; 8],
     ref_hdr: &[RefHeaderState; 8],
     lr_scratch: &mut LrScratch,
-    px: &mut PixState<P>,
+    mut cur: Picture<P>,
+    spares: &Mutex<Spares<P>>,
     threads: usize,
     mf: Option<&MfPlan<'_>>,
     cdef_on: bool,
 ) -> R<(Picture<P>, Box<CdfContext>)> {
-    let pool = &mut px.pool;
-    let mut cur = take_picture::<P>(
-        pool,
-        hdr.frame_width as usize,
-        hdr.frame_height as usize,
-        seq.num_planes(),
-        seq.subsampling_x,
-        seq.subsampling_y,
-        seq.bit_depth,
-    );
     if let Some(p) = mf {
         fs.motion_field = p.run(threads);
     }
@@ -2210,7 +2562,7 @@ fn decode_frame_sync<P: PicturePixel>(
             postfilter::cdef_in_place(seq, hdr, fs, &mut cur, threads);
         }
         let up = postfilter::superres(seq, hdr, &cur);
-        recycle(pool, cur);
+        recycle(&mut lock(spares).pics, cur);
         up
     } else {
         if lr {

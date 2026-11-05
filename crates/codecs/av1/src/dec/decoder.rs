@@ -1055,10 +1055,12 @@ impl Av1Core {
         self.px16.collect(&mut self.shells);
     }
 
-    /// Waits until fewer than [`MAX_IN_FLIGHT`] frames are decoding.
+    /// Waits until fewer frames are decoding than the threads allow (at
+    /// least 2, so that one parses while the last reconstructs; at most
+    /// [`MAX_IN_FLIGHT`]).
     fn limit_in_flight(&mut self) {
         self.in_flight.retain(|j| !j.is_done());
-        while self.in_flight.len() >= MAX_IN_FLIGHT {
+        while self.in_flight.len() >= self.threads.clamp(2, MAX_IN_FLIGHT) {
             let j = self.in_flight.remove(0);
             let _ = j.wait();
         }

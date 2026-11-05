@@ -60,11 +60,22 @@ including process start, best of 3; same machine and load for both.
 Single threaded the decoder takes about 1.9x the time of libdav1d, which
 uses hand-written assembly for its kernels; this crate relies on
 autovectorization only. With 4 threads the gap is about 1.6x.
-Threading: with 3+ threads parsing and reconstruction run on separate
-threads, and deblocking, CDEF and loop restoration follow behind on a
-third; motion field estimation runs alongside parsing, band by band. Tiles
-are not decoded in parallel yet, and one frame is finished before the next
-starts (about 20% of the 4-thread time is that end-of-frame tail).
+Threading (2+ threads, frames with one tile column): the calling thread
+parses, and each frame gets a thread that reconstructs it a superblock
+row behind and runs deblocking (in place, one row behind) and CDEF and
+loop restoration (two rows behind). Frames overlap: the next frame is
+parsed as soon as the previous one's parsing ends (its CDFs, motion
+vectors and segment ids are then known), and its reconstruction reads a
+reference still being decoded through a copy filled from the rows the
+reference has published as final, waiting per chunk of blocks for the
+rows the chunk's motion may reach (warped blocks and scaled references
+wait for the whole picture). `Av1Core::decode_delayed`/`drain` return
+the shown frames with that delay (`Av1Decoder` uses them);
+`Av1Core::decode` waits for the frames of each unit. Motion field
+estimation runs alongside parsing, band by band. Tiles are not decoded in
+parallel yet. At 4 threads the parsing thread is the critical path (about
+0.36 s of busy time on this file); the `prof` feature prints the stage
+times from `av1bench`.
 The coefficient reader keeps the arithmetic decoder state in registers and
 updates small CDFs as packed lanes; callgrind puts the whole decode at
 6.3G instructions single threaded.

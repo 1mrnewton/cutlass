@@ -34,6 +34,7 @@ pub use cutlass_compositor::{Device, Frame};
 pub use cutlass_engine::{
     ClipPcm, ClockKind, MixResult, ReaderFactory, SceneError, scene_cuts, timeline_for_source,
 };
+pub use cutlass_gpu::{ToneCurve, YuvTone};
 pub use cutlass_model::Micros;
 pub use frame::{
     EvalError, Fonts, NoFonts, Snapshot, frame, frame_in, layers_in, wait_export_frame,

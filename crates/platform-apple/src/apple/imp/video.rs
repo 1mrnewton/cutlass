@@ -1325,6 +1325,12 @@ fn buffer_color(image: *mut std::ffi::c_void) -> (ColorPrimaries, Transfer) {
             Some(tag) if same(&tag, sys::kCVImageBufferTransferFunction_ITU_R_2020) => {
                 Transfer::Bt2020
             }
+            Some(tag) if same(&tag, sys::kCVImageBufferTransferFunction_ITU_R_2100_HLG) => {
+                Transfer::Hlg
+            }
+            Some(tag) if same(&tag, sys::kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ) => {
+                Transfer::Pq
+            }
             _ => Transfer::Unspecified,
         }
     };

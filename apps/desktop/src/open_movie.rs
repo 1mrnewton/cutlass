@@ -925,6 +925,30 @@ fn an_hdr_movie_converts_on_the_gpu_like_the_cpu() {
     for (name, size, edit) in cases {
         gpu_matches_cpu(&renderer, &fonts, &readers, &path, name, size, edit);
     }
+    // The decoder reads the file's HLG tag, so the shader decodes HLG.
+    let draft = movie_draft(&path, 960, 540, false).unwrap();
+    let composed = cutlass_eval::layers_in(
+        &Snapshot::with_fonts(&draft, &fonts),
+        Micros(500_000),
+        &mut SoftwareDevice::new(),
+        &readers,
+        &mut OpenClips::new(),
+        0,
+        None,
+    )
+    .unwrap();
+    let cutlass_eval::Composed::Layers(layers) = composed else {
+        panic!("composed on the CPU");
+    };
+    let tones: Vec<_> = layers
+        .layers
+        .iter()
+        .filter_map(|layer| match &layer.source {
+            cutlass_eval::GpuSource::Yuv { tone, .. } => Some(tone.source),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(tones, [cutlass_eval::ToneCurve::Hlg]);
 }
 
 /// The GPU layers for `path` under `edit` match the CPU frame at 0.5 s: at

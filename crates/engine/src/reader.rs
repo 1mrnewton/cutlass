@@ -18,7 +18,7 @@ use cutlass_codec::{CodecId, ContainerId, FrameSize, StreamCodec, Timescale};
 use cutlass_container::{Demux, DisplayQuarter, OpenError, ProbeResult, ReadError, SeekTo};
 use cutlass_decode::{
     AudioOutput, CodecError, DecodeFactory, Decoder, Output, Packet as AccessPacket, PictureOutput,
-    PictureSamples, StillImage,
+    PictureSamples, StillImage, Surface,
 };
 use cutlass_model::{Micros, TimeRange};
 
@@ -93,13 +93,50 @@ pub enum DecodedFrame {
         /// picture without copying it.
         bytes: Arc<Vec<u8>>,
     },
+    /// A platform GPU buffer that stands for 8-bit 4:2:0. The GPU path
+    /// samples it in place. [`Self::on_cpu`] gives the bytes for every
+    /// other use.
+    Surface {
+        width: u32,
+        height: u32,
+        primaries: ColorPrimaries,
+        transfer: Transfer,
+        surface: Surface,
+    },
 }
 
 impl DecodedFrame {
+    /// This frame with CPU samples: a surface becomes the [`Self::Coded`]
+    /// 4:2:0 it stands for, copied out once and shared after that. Every
+    /// other frame is itself.
+    pub fn on_cpu(&self) -> Result<std::borrow::Cow<'_, Self>, EngineError> {
+        match self {
+            Self::Surface {
+                width,
+                height,
+                primaries,
+                transfer,
+                surface,
+            } => Ok(std::borrow::Cow::Owned(Self::Coded {
+                width: *width,
+                height: *height,
+                pixel: PixelFormat::Yuv420p,
+                primaries: *primaries,
+                transfer: *transfer,
+                bytes: surface.yuv420p()?,
+            })),
+            Self::Platform { .. } | Self::Still(_) | Self::Coded { .. } => {
+                Ok(std::borrow::Cow::Borrowed(self))
+            }
+        }
+    }
+
     #[must_use]
     pub fn width(&self) -> u32 {
         match self {
-            Self::Platform { width, .. } | Self::Coded { width, .. } => *width,
+            Self::Platform { width, .. }
+            | Self::Coded { width, .. }
+            | Self::Surface { width, .. } => *width,
             Self::Still(image) => image.width,
         }
     }
@@ -107,7 +144,9 @@ impl DecodedFrame {
     #[must_use]
     pub fn height(&self) -> u32 {
         match self {
-            Self::Platform { height, .. } | Self::Coded { height, .. } => *height,
+            Self::Platform { height, .. }
+            | Self::Coded { height, .. }
+            | Self::Surface { height, .. } => *height,
             Self::Still(image) => image.height,
         }
     }
@@ -118,7 +157,9 @@ impl DecodedFrame {
     pub fn byte_size(&self) -> usize {
         match self {
             Self::Coded { bytes, .. } => bytes.len(),
-            Self::Platform { width, height, .. } => *width as usize * *height as usize * 3 / 2,
+            Self::Platform { width, height, .. } | Self::Surface { width, height, .. } => {
+                *width as usize * *height as usize * 3 / 2
+            }
             Self::Still(image) => image.samples.len() * 2,
         }
     }
@@ -962,12 +1003,24 @@ fn coded_output(output: Output, timescale: Timescale) -> Option<(DecodedFrame, O
 
 fn frame_from_picture(picture: PictureOutput) -> DecodedFrame {
     let info = picture.info();
-    if let PictureSamples::Platform { token } = picture.samples() {
-        return DecodedFrame::Platform {
-            width: info.width,
-            height: info.height,
-            token,
-        };
+    match picture.samples() {
+        PictureSamples::Platform { token } => {
+            return DecodedFrame::Platform {
+                width: info.width,
+                height: info.height,
+                token,
+            };
+        }
+        PictureSamples::Surface(surface) => {
+            return DecodedFrame::Surface {
+                width: info.width,
+                height: info.height,
+                primaries: info.primaries,
+                transfer: info.transfer,
+                surface: surface.clone(),
+            };
+        }
+        PictureSamples::Cpu(_) => {}
     }
     DecodedFrame::Coded {
         width: info.width,

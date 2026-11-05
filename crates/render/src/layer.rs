@@ -14,6 +14,7 @@
 //! the conversion the CPU path applies, and has an alpha of one. Opacity
 //! scales the premultiplied color.
 
+use cutlass_decode::Surface;
 use cutlass_effects::Step;
 use cutlass_gpu::{Affine, Placement, ToneCurve, YuvTone};
 
@@ -35,13 +36,29 @@ pub struct Plane<'a> {
     pub bytes: &'a [u8],
 }
 
-/// Y, U, and V planes of one 4:2:0 picture. Chroma is half size, rounded down.
-/// `tone` follows the matrix.
+/// Where one 4:2:0 picture's samples are.
+#[derive(Clone, Copy, Debug)]
+pub enum PlaneSource<'a> {
+    /// Y, U, and V planes. Chroma is half size, rounded down.
+    Packed {
+        y: Plane<'a>,
+        u: Plane<'a>,
+        v: Plane<'a>,
+    },
+    /// A platform GPU buffer of `width` by `height`. The renderer's
+    /// [`SurfaceImport`](crate::SurfaceImport) samples it in place; without
+    /// one, the bytes it copies out are drawn.
+    Surface {
+        surface: &'a Surface,
+        width: u32,
+        height: u32,
+    },
+}
+
+/// One 4:2:0 picture. `tone` follows the matrix.
 #[derive(Clone, Copy, Debug)]
 pub struct Planes<'a> {
-    pub y: Plane<'a>,
-    pub u: Plane<'a>,
-    pub v: Plane<'a>,
+    pub source: PlaneSource<'a>,
     pub tone: YuvTone,
 }
 
@@ -65,11 +82,26 @@ impl<'a> Planes<'a> {
             bytes,
         };
         Ok(Self {
-            y: plane(width, height, y),
-            u: plane(cw, ch, u),
-            v: plane(cw, ch, v),
+            source: PlaneSource::Packed {
+                y: plane(width, height, y),
+                u: plane(cw, ch, u),
+                v: plane(cw, ch, v),
+            },
             tone: YuvTone::NONE,
         })
+    }
+
+    /// A platform surface of `width` by `height`.
+    #[must_use]
+    pub fn surface(surface: &'a Surface, width: u32, height: u32) -> Self {
+        Self {
+            source: PlaneSource::Surface {
+                surface,
+                width,
+                height,
+            },
+            tone: YuvTone::NONE,
+        }
     }
 
     /// The same planes with `tone` after the matrix.
@@ -111,6 +143,8 @@ pub(crate) struct Uploaded {
     pub(crate) size: (u32, u32),
     pub(crate) yuv: bool,
     pub(crate) tone: YuvTone,
+    /// Chroma is one two-channel texture, Cb in red and Cr in green.
+    pub(crate) interleaved: bool,
 }
 
 const SHADER: &str = r"
@@ -123,7 +157,8 @@ struct Params {
     texture_y: vec4<f32>,
     // Picture width and height, oriented width and height.
     sizes: vec4<f32>,
-    // Texture width and height, opacity, kind: 0 rgba, 1 yuv.
+    // Texture width and height, opacity, kind: 0 rgba, 1 yuv, 2 yuv with
+    // Cb and Cr interleaved in one texture.
     source: vec4<f32>,
     // Tone after the matrix: source curve, destination curve (0 Rec.709,
     // 1 HLG, 2 PQ), PQ reference nits, and 1 when it changes the sample.
@@ -247,8 +282,12 @@ fn picture_pixel(index: vec2<f32>) -> vec4<f32> {
     let chroma = texel / 2;
     // Limited-range BT.709, as the CPU conversion.
     let y = (textureLoad(tex0, texel, 0).r * 255.0 - 16.0) / 219.0;
-    let cb = (textureLoad(tex1, chroma, 0).r * 255.0 - 128.0) / 224.0;
-    let cr = (textureLoad(tex2, chroma, 0).r * 255.0 - 128.0) / 224.0;
+    var cbcr = vec2<f32>(textureLoad(tex1, chroma, 0).r, textureLoad(tex2, chroma, 0).r);
+    if (params.source.w > 1.5) {
+        cbcr = textureLoad(tex1, chroma, 0).rg;
+    }
+    let cb = (cbcr.x * 255.0 - 128.0) / 224.0;
+    let cr = (cbcr.y * 255.0 - 128.0) / 224.0;
     let kr = 0.2126;
     let kb = 0.0722;
     let kg = 1.0 - kr - kb;
@@ -403,15 +442,47 @@ impl Pipelines {
             size: (rgba.width, rgba.height),
             yuv: false,
             tone: YuvTone::NONE,
+            interleaved: false,
         })
     }
 
-    /// Upload the three planes of a 4:2:0 picture.
+    /// Upload the three planes of a 4:2:0 picture, or import its surface
+    /// through `import`. A surface that does not import is copied out and
+    /// uploaded.
     pub(crate) fn upload_planes(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         planes: &Planes<'_>,
+        import: Option<&crate::SurfaceImport>,
     ) -> Result<Uploaded, RenderError> {
+        let (y, u, v) = match planes.source {
+            PlaneSource::Packed { y, u, v } => (y, u, v),
+            PlaneSource::Surface {
+                surface,
+                width,
+                height,
+            } => {
+                if let Some([luma, chroma]) = import.and_then(|import| import(device, surface)) {
+                    let view = |texture: &wgpu::Texture| {
+                        texture.create_view(&wgpu::TextureViewDescriptor::default())
+                    };
+                    let chroma = view(&chroma);
+                    return Ok(Uploaded {
+                        views: [view(&luma), chroma.clone(), chroma],
+                        size: (width, height),
+                        yuv: true,
+                        tone: planes.tone,
+                        interleaved: true,
+                    });
+                }
+                let bytes = surface.yuv420p().map_err(|_| RenderError::Bytes {
+                    expected: width as usize * height as usize * 3 / 2,
+                    actual: 0,
+                })?;
+                let packed = Planes::packed(width, height, &bytes)?.with_tone(planes.tone);
+                return Self::upload_planes(device, queue, &packed, None);
+            }
+        };
         let plane = |plane: &Plane<'_>| {
             upload(
                 device,
@@ -424,10 +495,11 @@ impl Pipelines {
             )
         };
         Ok(Uploaded {
-            views: [plane(&planes.y)?, plane(&planes.u)?, plane(&planes.v)?],
-            size: (planes.y.width, planes.y.height),
+            views: [plane(&y)?, plane(&u)?, plane(&v)?],
+            size: (y.width, y.height),
             yuv: true,
             tone: planes.tone,
+            interleaved: false,
         })
     }
 
@@ -440,7 +512,11 @@ impl Pipelines {
         placement: Placement,
     ) -> Bound {
         let size = uploaded.size;
-        let kind = if uploaded.yuv { 1.0 } else { 0.0 };
+        let kind = match (uploaded.yuv, uploaded.interleaved) {
+            (false, _) => 0.0,
+            (true, false) => 1.0,
+            (true, true) => 2.0,
+        };
         let row = |affine: Affine, index: usize| {
             let a = affine.0;
             [

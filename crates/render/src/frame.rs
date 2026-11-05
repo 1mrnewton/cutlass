@@ -1,7 +1,7 @@
 //! Eval's frame layers as render layers, so every shell draws a frame the
 //! same way.
 
-use cutlass_eval::{Composed, FrameLayers, GpuSource};
+use cutlass_eval::{Composed, FrameLayers, GpuSource, YuvSamples};
 
 use crate::{Canvas, Layer, Planes, RenderError, Renderer, Rgba};
 
@@ -38,10 +38,14 @@ fn layers_of(frame: &FrameLayers) -> Result<Vec<Layer<'_>>, RenderError> {
             GpuSource::Yuv {
                 width,
                 height,
-                bytes,
+                samples,
                 tone,
             } => {
-                let planes = Planes::packed(*width, *height, bytes)?.with_tone(*tone);
+                let planes = match samples {
+                    YuvSamples::Bytes(bytes) => Planes::packed(*width, *height, bytes)?,
+                    YuvSamples::Surface(surface) => Planes::surface(surface, *width, *height),
+                }
+                .with_tone(*tone);
                 match layer.backdrop {
                     Some(backdrop) => Layer::YuvOverBlur {
                         planes,

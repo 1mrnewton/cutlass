@@ -10,6 +10,15 @@ use cutlass_render::{Canvas, RenderError, Renderer};
 use eframe::{egui_wgpu, wgpu};
 use egui::mutex::RwLock;
 
+/// A renderer that samples this platform's decoded surfaces in place.
+pub(crate) fn platform_renderer(device: wgpu::Device, queue: wgpu::Queue) -> Renderer {
+    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
+    let mut renderer = Renderer::new(device, queue);
+    #[cfg(target_os = "macos")]
+    renderer.set_surface_import(Arc::new(cutlass_platform_apple::import_surface));
+    renderer
+}
+
 /// What the preview canvas last showed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Drawn {
@@ -32,7 +41,7 @@ pub(crate) struct Preview {
 impl Preview {
     pub(crate) fn new(state: &egui_wgpu::RenderState) -> Self {
         Self {
-            renderer: Renderer::new(state.device.clone(), state.queue.clone()),
+            renderer: platform_renderer(state.device.clone(), state.queue.clone()),
             egui: Arc::clone(&state.renderer),
             canvas: None,
             drawn: None,

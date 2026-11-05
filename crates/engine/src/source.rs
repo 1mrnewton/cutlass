@@ -367,7 +367,7 @@ pub fn decoded_picture(frame: &DecodedFrame) -> Result<Picture, EngineError> {
 }
 
 fn to_picture(frame: &DecodedFrame) -> Result<Picture, EngineError> {
-    match frame {
+    match frame.on_cpu()?.as_ref() {
         DecodedFrame::Platform {
             width,
             height,
@@ -388,6 +388,9 @@ fn to_picture(frame: &DecodedFrame) -> Result<Picture, EngineError> {
             transfer,
             bytes,
         } => coded_bytes(*pixel, *width, *height, *primaries, *transfer, bytes),
+        DecodedFrame::Surface { .. } => Err(EngineError::ColorMiss {
+            layout: "surface".to_owned(),
+        }),
     }
 }
 

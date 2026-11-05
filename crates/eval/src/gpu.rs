@@ -11,6 +11,7 @@
 use std::sync::Arc;
 
 use cutlass_compositor::Frame;
+use cutlass_decode::Surface;
 use cutlass_effects::Step;
 use cutlass_gpu::{Affine, Placement, YuvTone};
 use cutlass_picture::CpuBytes;
@@ -18,13 +19,13 @@ use cutlass_picture::CpuBytes;
 /// The pixels one layer draws.
 #[derive(Clone, Debug, PartialEq)]
 pub enum GpuSource {
-    /// Packed Y, then U, then V, limited-range BT.709, then `tone`, as
-    /// the CPU conversion does.
+    /// 8-bit 4:2:0, limited-range BT.709, then `tone`, as the CPU
+    /// conversion does.
     Yuv {
         width: u32,
         height: u32,
         /// The decoded picture, shared with the clip's cache.
-        bytes: Arc<Vec<u8>>,
+        samples: YuvSamples,
         tone: YuvTone,
     },
     /// Premultiplied RGBA.
@@ -34,6 +35,16 @@ pub enum GpuSource {
     /// A recipe effect over every layer before it, with its values at this
     /// frame's time.
     Effect(Vec<Step>),
+}
+
+/// Where a 4:2:0 layer's samples are.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum YuvSamples {
+    /// Packed Y, then U, then V.
+    Bytes(Arc<Vec<u8>>),
+    /// A platform GPU buffer. A renderer that cannot import it draws the
+    /// bytes the surface copies out.
+    Surface(Surface),
 }
 
 /// One layer and where it lands.

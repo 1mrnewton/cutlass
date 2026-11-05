@@ -37,7 +37,7 @@ use cutlass_model::{
 use cutlass_picture::{CpuBytes, Picture, PictureSource, Sample, rgba_len};
 
 use crate::canvas::{Backdrop, cover, image_backdrop, over_backdrop, segment_backdrop};
-use crate::gpu::{GpuBackdrop, GpuLayer, GpuSource};
+use crate::gpu::{GpuBackdrop, GpuLayer, GpuSource, YuvSamples};
 
 /// Pictures each open clip decodes ahead of the time asked for.
 const READ_AHEAD: usize = 8;
@@ -617,17 +617,33 @@ impl Placed<'_> {
             Backdrop::Blur(radius) => (None, Some(*radius)),
             Backdrop::Image(_) => return None,
         };
-        let DecodedFrame::Coded {
-            width,
-            height,
-            pixel: PixelFormat::Yuv420p,
-            primaries,
-            transfer,
-            bytes,
-        } = self.source.decoded_at(time).ok()?
-        else {
-            return None;
-        };
+        let (width, height, primaries, transfer, samples) =
+            match self.source.decoded_at(time).ok()? {
+                DecodedFrame::Coded {
+                    width,
+                    height,
+                    pixel: PixelFormat::Yuv420p,
+                    primaries,
+                    transfer,
+                    bytes,
+                } => (width, height, primaries, transfer, YuvSamples::Bytes(bytes)),
+                DecodedFrame::Surface {
+                    width,
+                    height,
+                    primaries,
+                    transfer,
+                    surface,
+                } => (
+                    width,
+                    height,
+                    primaries,
+                    transfer,
+                    YuvSamples::Surface(surface),
+                ),
+                DecodedFrame::Coded { .. }
+                | DecodedFrame::Platform { .. }
+                | DecodedFrame::Still(_) => return None,
+            };
         let tone = yuv_tone(primaries, transfer)?;
         if width % 2 != 0 || height % 2 != 0 {
             return None;
@@ -662,7 +678,7 @@ impl Placed<'_> {
             source: GpuSource::Yuv {
                 width,
                 height,
-                bytes,
+                samples,
                 tone,
             },
             placement,

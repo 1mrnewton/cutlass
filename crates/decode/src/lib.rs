@@ -29,7 +29,10 @@
 #![forbid(unsafe_code)]
 
 pub mod orient;
+mod surface;
 pub mod video;
+
+pub use surface::{PictureSurface, Surface};
 
 pub use cutlass_codec::CodecId;
 pub use cutlass_codec::access::{
@@ -88,10 +91,11 @@ pub struct PictureInfo {
     pub transfer: Transfer,
 }
 
-/// One decoded picture, either CPU bytes or a platform buffer.
+/// One decoded picture: CPU bytes, a platform buffer, or a GPU surface.
 ///
 /// A platform buffer is a token. This crate does not sample it. The bytes
 /// behind a CPU picture are the coded samples in [`PictureInfo::pixel`] order.
+/// A [`Surface`] stands for 8-bit 4:2:0 and copies those bytes out on request.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PictureOutput {
     info: PictureInfo,
@@ -104,6 +108,7 @@ pub struct PictureOutput {
 enum PictureStorage {
     Cpu(Vec<u8>),
     Platform { token: u64 },
+    Surface(Surface),
 }
 
 /// Borrowed view of a [`PictureOutput`].
@@ -111,6 +116,7 @@ enum PictureStorage {
 pub enum PictureSamples<'a> {
     Cpu(&'a [u8]),
     Platform { token: u64 },
+    Surface(&'a Surface),
 }
 
 /// What one `push` or `drain` completed.
@@ -273,6 +279,27 @@ impl PictureOutput {
         })
     }
 
+    /// A GPU surface that stands for 8-bit 4:2:0 at `info`'s size.
+    pub fn surface(
+        info: PictureInfo,
+        surface: Surface,
+        pts: i64,
+        timescale: u32,
+    ) -> Result<Self, CodecError> {
+        if info.pixel != PixelFormat::Yuv420p {
+            return Err(CodecError::InvalidApi {
+                what: "surface pixel format",
+            });
+        }
+        picture_byte_len(info.width, info.height, info.pixel)?;
+        Ok(Self {
+            info,
+            pts,
+            timescale,
+            storage: PictureStorage::Surface(surface),
+        })
+    }
+
     #[must_use]
     pub fn info(&self) -> PictureInfo {
         self.info
@@ -294,7 +321,7 @@ impl PictureOutput {
     pub fn into_cpu(self) -> Option<Vec<u8>> {
         match self.storage {
             PictureStorage::Cpu(bytes) => Some(bytes),
-            PictureStorage::Platform { .. } => None,
+            PictureStorage::Platform { .. } | PictureStorage::Surface(_) => None,
         }
     }
 
@@ -303,6 +330,7 @@ impl PictureOutput {
         match &self.storage {
             PictureStorage::Cpu(bytes) => PictureSamples::Cpu(bytes),
             PictureStorage::Platform { token } => PictureSamples::Platform { token: *token },
+            PictureStorage::Surface(surface) => PictureSamples::Surface(surface),
         }
     }
 }

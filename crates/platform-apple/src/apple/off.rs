@@ -54,6 +54,11 @@ pub fn register_decoders_with(factory: &mut DecodeFactory, video: bool) {
     }
 }
 
+/// As [`register_decoders_with`]. Off Apple every opener declines.
+pub fn register_surface_decoders_with(factory: &mut DecodeFactory, video: bool) {
+    register_decoders_with(factory, video);
+}
+
 /// Register the Apple encoders. Off Apple every opener declines.
 pub fn register_encoders(factory: &mut EncodeFactory) {
     register_encoders_with(factory, true);

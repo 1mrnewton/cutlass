@@ -4,7 +4,10 @@
 //! [`to_cpu`] copies that buffer to tightly packed RGBA. VideoToolbox itself
 //! is asked for BGRA. A caller that asks for [`PixelFormat::Yuv420p`] gets
 //! CPU 4:2:0 instead: VideoToolbox writes video-range NV12 and the planes are
-//! copied out as packed Y, then U, then V.
+//! copied out as packed Y, then U, then V. A decoder from
+//! [`open_surface_decoder`] keeps that NV12 buffer as a [`Surface`] instead,
+//! which preview samples in place and which copies its planes out only when
+//! asked.
 //!
 //! Decode is asynchronous. A push submits its unit and returns the pictures
 //! that have finished, so the next unit is read while the hardware works.
@@ -25,7 +28,7 @@ use std::sync::{Arc, Mutex};
 
 use cutlass_decode::{
     CodecError, CodecId, CodecParams, ColorPrimaries, Decoder, Output, Packet, PictureInfo,
-    PictureOutput, PictureSamples, PixelFormat, Transfer,
+    PictureOutput, PictureSamples, PixelFormat, Surface, Transfer,
 };
 use cutlass_encode::{AudioInput, CpuFrame, Encoder, FrameInput, FrameTime, PictureInput};
 
@@ -88,6 +91,8 @@ struct FrameMeta {
 /// What the output callback writes into. The session's refcon points here.
 struct Finished {
     planar: bool,
+    /// A planar picture stays an IOSurface-backed [`Surface`].
+    surface: bool,
     /// The session reported it can decode nothing more.
     lost: AtomicBool,
     pictures: Mutex<VecDeque<Result<PictureOutput, CodecError>>>,
@@ -120,10 +125,16 @@ pub struct VideoEncoder {
 unsafe impl Send for VideoEncoder {}
 
 pub fn open_decoder(params: &CodecParams) -> Result<Box<dyn Decoder>, CodecError> {
-    Ok(Box::new(video_decoder(params)?))
+    Ok(Box::new(video_decoder(params, false)?))
 }
 
-fn video_decoder(params: &CodecParams) -> Result<VideoDecoder, CodecError> {
+/// As [`open_decoder`], but a 4:2:0 picture stays in its IOSurface as a
+/// [`Surface`] instead of being copied out.
+pub fn open_surface_decoder(params: &CodecParams) -> Result<Box<dyn Decoder>, CodecError> {
+    Ok(Box::new(video_decoder(params, true)?))
+}
+
+fn video_decoder(params: &CodecParams, surface: bool) -> Result<VideoDecoder, CodecError> {
     let _ = codec_type(params.codec)?;
     let (width, height) = video_size(params.width, params.height)?;
     let mut decoder = VideoDecoder {
@@ -135,6 +146,7 @@ fn video_decoder(params: &CodecParams) -> Result<VideoDecoder, CodecError> {
         session: None,
         finished: Box::new(Finished {
             planar: params.pixel == PixelFormat::Yuv420p,
+            surface,
             lost: AtomicBool::new(false),
             pictures: Mutex::new(VecDeque::new()),
         }),
@@ -884,6 +896,8 @@ unsafe extern "C" fn decode_output(
             at_bit: 0,
             what: "videotoolbox",
         })
+    } else if finished.planar && finished.surface {
+        surface_picture(image, pts.value, timescale)
     } else if finished.planar {
         planar_picture(image, pts.value, timescale)
     } else {
@@ -988,6 +1002,12 @@ pub fn to_cpu(picture: &PictureOutput) -> Result<PictureOutput, CodecError> {
         PictureSamples::Platform { token } => with_pixel_buffer(token, |image| {
             rgba_picture(image, picture.pts(), picture.timescale())
         })?,
+        PictureSamples::Surface(surface) => PictureOutput::cpu(
+            picture.info(),
+            surface.yuv420p()?.as_ref().clone(),
+            picture.pts(),
+            picture.timescale(),
+        ),
     }
 }
 
@@ -1162,14 +1182,9 @@ fn plane(
     Ok(unsafe { std::slice::from_raw_parts(base.cast::<u8>(), len) })
 }
 
-/// Copy a video-range NV12 buffer to packed Y, then U, then V.
-///
-/// An odd edge drops its last column or row, since 4:2:0 needs even edges.
-fn copy_planar(
-    image: *mut std::ffi::c_void,
-    pts: i64,
-    timescale: u32,
-) -> Result<PictureOutput, CodecError> {
+/// The 4:2:0 size of a video-range NV12 buffer. An odd edge drops its last
+/// column or row, since 4:2:0 needs even edges.
+fn nv12_size(image: *mut std::ffi::c_void) -> Result<(u32, u32), CodecError> {
     let format = unsafe { sys::CVPixelBufferGetPixelFormatType(image) };
     if format != sys::NV12 || unsafe { sys::CVPixelBufferGetPlaneCount(image) } != 2 {
         return Err(CodecError::Unsupported {
@@ -1185,13 +1200,21 @@ fn copy_planar(
     };
     let (picture_width, picture_height) = (edge(width)?, edge(height)?);
     limits::picture_ok(picture_width, picture_height)?;
-    let (chroma_width, chroma_height) = (width / 2, height / 2);
-    if unsafe { sys::CVPixelBufferGetWidthOfPlane(image, 1) } < chroma_width {
+    if unsafe { sys::CVPixelBufferGetWidthOfPlane(image, 1) } < width / 2 {
         return Err(CodecError::Malformed {
             at_bit: 0,
             what: "pixel plane",
         });
     }
+    Ok((picture_width, picture_height))
+}
+
+/// Packed Y, then U, then V out of a locked video-range NV12 buffer, at
+/// [`nv12_size`].
+pub(super) fn copy_nv12(image: *mut std::ffi::c_void) -> Result<Vec<u8>, CodecError> {
+    let (width, height) = nv12_size(image)?;
+    let (width, height) = (width as usize, height as usize);
+    let (chroma_width, chroma_height) = (width / 2, height / 2);
     let luma = plane(image, 0, width, height)?;
     let chroma = plane(image, 1, chroma_width * 2, chroma_height)?;
     let luma_stride = unsafe { sys::CVPixelBufferGetBytesPerRowOfPlane(image, 0) };
@@ -1213,16 +1236,60 @@ fn copy_planar(
             v[out + x] = pair[1];
         }
     }
+    Ok(bytes)
+}
+
+/// Copy a video-range NV12 buffer to packed Y, then U, then V.
+fn copy_planar(
+    image: *mut std::ffi::c_void,
+    pts: i64,
+    timescale: u32,
+) -> Result<PictureOutput, CodecError> {
+    let (width, height) = nv12_size(image)?;
+    let bytes = copy_nv12(image)?;
     let (primaries, transfer) = buffer_color(image);
     PictureOutput::cpu(
         PictureInfo {
-            width: picture_width,
-            height: picture_height,
+            width,
+            height,
             pixel: PixelFormat::Yuv420p,
             primaries,
             transfer,
         },
         bytes,
+        pts,
+        timescale,
+    )
+}
+
+/// Keep an IOSurface-backed NV12 buffer as a [`Surface`]. A buffer that is
+/// not one, or has an odd edge, is copied out as [`planar_picture`] does.
+fn surface_picture(
+    image: *mut std::ffi::c_void,
+    pts: i64,
+    timescale: u32,
+) -> Result<PictureOutput, CodecError> {
+    let Ok((width, height)) = nv12_size(image) else {
+        return planar_picture(image, pts, timescale);
+    };
+    let whole = unsafe {
+        sys::CVPixelBufferGetWidth(image) == width as usize
+            && sys::CVPixelBufferGetHeight(image) == height as usize
+    };
+    if !whole || unsafe { sys::CVPixelBufferGetIOSurface(image) }.is_null() {
+        return planar_picture(image, pts, timescale);
+    }
+    let surface = super::surface::VtSurface::retain(image, width, height)?;
+    let (primaries, transfer) = buffer_color(image);
+    PictureOutput::surface(
+        PictureInfo {
+            width,
+            height,
+            pixel: PixelFormat::Yuv420p,
+            primaries,
+            transfer,
+        },
+        Surface::new(Arc::new(surface)),
         pts,
         timescale,
     )
@@ -1374,13 +1441,15 @@ fn bgra_attributes() -> Result<Cf, CodecError> {
 fn pixel_attributes(pixel: u32) -> Result<Cf, CodecError> {
     let format = cf::number_i32(i32::try_from(pixel).unwrap_or(0))?;
     let surface = cf::dictionary(&[], &[])?;
+    let metal = cf::boolean(true);
     let keys = unsafe {
         [
             sys::kCVPixelBufferPixelFormatTypeKey,
             sys::kCVPixelBufferIOSurfacePropertiesKey,
+            sys::kCVPixelBufferMetalCompatibilityKey,
         ]
     };
-    cf::dictionary(&[keys[0], keys[1]], &[format.as_ptr(), surface.as_ptr()])
+    cf::dictionary(&keys, &[format.as_ptr(), surface.as_ptr(), metal])
 }
 
 fn bgra_buffer(width: u32, height: u32, rgba: &[u8]) -> Result<Cf, CodecError> {
@@ -1729,6 +1798,90 @@ mod tests {
         Some((packets, config))
     }
 
+    fn yuv_pictures(
+        open: fn(&CodecParams) -> Result<Box<dyn Decoder>, CodecError>,
+        packets: &[Packet],
+        config: &[u8],
+    ) -> Vec<PictureOutput> {
+        let mut params = CodecParams::with_format(CodecId::H264, 64, 48, PixelFormat::Yuv420p);
+        params.extra = config.to_vec();
+        let mut decoder = open(&params).expect("open");
+        decode_all(decoder.as_mut(), packets)
+            .expect("decode")
+            .into_iter()
+            .filter_map(|output| match output {
+                Output::Picture(picture) => Some(picture),
+                Output::Audio(_) => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_surface_picture_holds_the_samples_the_planar_copy_does() {
+        let Some((packets, config)) = encoded(CodecId::H264, 6) else {
+            return;
+        };
+        let planar = yuv_pictures(open_decoder, &packets, &config);
+        let surfaces = yuv_pictures(open_surface_decoder, &packets, &config);
+        assert_eq!(planar.len(), 6);
+        assert_eq!(surfaces.len(), planar.len());
+        for (cpu, kept) in planar.iter().zip(&surfaces) {
+            assert_eq!(cpu.info(), kept.info());
+            assert_eq!(cpu.pts(), kept.pts());
+            let PictureSamples::Cpu(bytes) = cpu.samples() else {
+                panic!("planar picture is not on the cpu");
+            };
+            let PictureSamples::Surface(surface) = kept.samples() else {
+                panic!("surface picture was copied out");
+            };
+            let copied = surface.yuv420p().expect("copy out");
+            assert_eq!(copied.as_slice(), bytes);
+            assert!(Arc::ptr_eq(&copied, &surface.yuv420p().expect("again")));
+        }
+    }
+
+    #[test]
+    fn a_surface_imports_as_two_metal_planes() {
+        let Some((packets, config)) = encoded(CodecId::H264, 2) else {
+            return;
+        };
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let Ok(adapter) =
+            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+        else {
+            return;
+        };
+        let Ok((device, _queue)) =
+            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))
+        else {
+            return;
+        };
+        let surfaces = yuv_pictures(open_surface_decoder, &packets, &config);
+        let PictureSamples::Surface(surface) = surfaces[0].samples() else {
+            panic!("surface picture was copied out");
+        };
+        let [luma, chroma] = super::super::metal::import_surface(&device, surface).expect("import");
+        assert_eq!((luma.width(), luma.height()), (64, 48));
+        assert_eq!(luma.format(), wgpu::TextureFormat::R8Unorm);
+        assert_eq!((chroma.width(), chroma.height()), (32, 24));
+        assert_eq!(chroma.format(), wgpu::TextureFormat::Rg8Unorm);
+        let cpu = Surface::new(Arc::new(Dummy));
+        assert!(super::super::metal::import_surface(&device, &cpu).is_none());
+    }
+
+    #[derive(Debug)]
+    struct Dummy;
+
+    impl cutlass_decode::PictureSurface for Dummy {
+        fn yuv420p(&self) -> Result<Arc<Vec<u8>>, CodecError> {
+            Ok(Arc::new(Vec::new()))
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
     #[test]
     fn pictures_leave_in_display_order_once_drained() {
         for codec in [CodecId::H264, CodecId::Hevc] {
@@ -1771,7 +1924,7 @@ mod tests {
         let (packets, config) = encoded(CodecId::H264, 6).expect("h264");
         let mut params = CodecParams::with_format(CodecId::H264, 64, 48, PixelFormat::Yuv420p);
         params.extra = config;
-        let mut decoder = video_decoder(&params).expect("decode open");
+        let mut decoder = video_decoder(&params, false).expect("decode open");
         assert_eq!(decode_all(&mut decoder, &packets).expect("decode").len(), 6);
         // What iOS does to a hardware session when the app leaves the foreground.
         let raw = decoder.session.as_ref().expect("session").raw;

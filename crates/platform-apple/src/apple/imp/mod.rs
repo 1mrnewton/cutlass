@@ -3,7 +3,9 @@
 mod audio;
 mod cf;
 mod image;
+mod metal;
 mod queue;
+mod surface;
 mod sys;
 mod thread;
 mod video;
@@ -12,6 +14,7 @@ use cutlass_decode::{CodecId, DecodeFactory};
 use cutlass_encode::EncodeFactory;
 
 pub use image::{decode_file, encode_file};
+pub use metal::import_surface;
 pub use queue::{OutputQueue, QueueError, StreamSink};
 pub use thread::run_at_interface_priority;
 pub use video::{release_buffer, to_cpu, with_pixel_buffer};
@@ -34,6 +37,18 @@ pub fn register_decoders_with(factory: &mut DecodeFactory, video: bool) {
     for id in STILL {
         factory.register(id, image::open_decoder);
     }
+}
+
+/// As [`register_decoders_with`], but a 4:2:0 picture stays in its
+/// IOSurface as a [`cutlass_decode::Surface`], for a renderer that imports
+/// it with [`import_surface`].
+pub fn register_surface_decoders_with(factory: &mut DecodeFactory, video: bool) {
+    if video {
+        for id in VIDEO {
+            factory.register(id, video::open_surface_decoder);
+        }
+    }
+    register_decoders_with(factory, false);
 }
 
 pub fn register_encoders(factory: &mut EncodeFactory) {

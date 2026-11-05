@@ -9,6 +9,7 @@ description = "The wgpu compositor."
 [dependencies]
 cutlass-effects = { path = "../effects", version = "0.1.0" }
 cutlass-eval = { path = "../eval", version = "0.1.0" }
+cutlass-decode = { path = "../decode", version = "0.1.0" }
 cutlass-gpu = { path = "../gpu", version = "0.1.0" }
 wgpu = "30.0.1"
 pollster = "1.0"

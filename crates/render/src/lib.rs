@@ -25,10 +25,11 @@ mod frame;
 mod layer;
 mod target;
 
+pub use cutlass_decode::Surface;
 pub use cutlass_effects::{Block, Recipe, Step};
 pub use cutlass_gpu::{Affine, Placement};
 pub use frame::frame_layers;
-pub use layer::{Layer, Plane, Planes, Rgba};
+pub use layer::{Layer, Plane, PlaneSource, Planes, Rgba};
 pub use target::Canvas;
 pub use wgpu;
 
@@ -77,7 +78,16 @@ pub struct Renderer {
     layers: layer::Pipelines,
     blurs: blur::Blurs,
     effects: effect::Effects,
+    import: Option<SurfaceImport>,
 }
+
+/// Imports a platform surface on `device` as two textures the layer shader
+/// samples in place: luma as [`wgpu::TextureFormat::R8Unorm`] and chroma as
+/// [`wgpu::TextureFormat::Rg8Unorm`], Cb in red and Cr in green, at half
+/// size. `None` when the surface is not one this import knows; the renderer
+/// then draws the bytes the surface copies out.
+pub type SurfaceImport =
+    std::sync::Arc<dyn Fn(&wgpu::Device, &Surface) -> Option<[wgpu::Texture; 2]> + Send + Sync>;
 
 impl Renderer {
     /// A renderer on a device someone else opened, such as eframe's.
@@ -92,7 +102,13 @@ impl Renderer {
             layers,
             blurs,
             effects,
+            import: None,
         }
+    }
+
+    /// Sample platform surfaces in place through `import` from now on.
+    pub fn set_surface_import(&mut self, import: SurfaceImport) {
+        self.import = Some(import);
     }
 
     /// A renderer on its own device, for export and tests.
@@ -169,7 +185,12 @@ impl Renderer {
                     bound.push(self.layers.bind(device, queue, &uploaded, *placement));
                 }
                 Layer::Yuv(planes, placement) => {
-                    let uploaded = layer::Pipelines::upload_planes(device, queue, planes)?;
+                    let uploaded = layer::Pipelines::upload_planes(
+                        device,
+                        queue,
+                        planes,
+                        self.import.as_ref(),
+                    )?;
                     bound.push(self.layers.bind(device, queue, &uploaded, *placement));
                 }
                 Layer::YuvOverBlur {
@@ -178,7 +199,12 @@ impl Renderer {
                     cover,
                     radius,
                 } => {
-                    let uploaded = layer::Pipelines::upload_planes(device, queue, planes)?;
+                    let uploaded = layer::Pipelines::upload_planes(
+                        device,
+                        queue,
+                        planes,
+                        self.import.as_ref(),
+                    )?;
                     let backdrop = self.blurred(encoder, &uploaded, *cover, *radius, size);
                     bound.push(self.layers.bind(
                         device,
@@ -207,6 +233,7 @@ impl Renderer {
                         size: *inner,
                         yuv: false,
                         tone: cutlass_gpu::YuvTone::NONE,
+                        interleaved: false,
                     };
                     bound.push(self.layers.bind(device, queue, &uploaded, *placement));
                 }
@@ -228,6 +255,7 @@ impl Renderer {
                         size,
                         yuv: false,
                         tone: cutlass_gpu::YuvTone::NONE,
+                        interleaved: false,
                     };
                     bound.clear();
                     bound.push(self.layers.bind(
@@ -311,6 +339,7 @@ impl Renderer {
             size,
             yuv: false,
             tone: cutlass_gpu::YuvTone::NONE,
+            interleaved: false,
         }
     }
 

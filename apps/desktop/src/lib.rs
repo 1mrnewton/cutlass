@@ -34,7 +34,8 @@ pub fn register_codecs_with(
     let mut encoders = cutlass_encode::EncodeFactory::new();
     #[cfg(target_os = "macos")]
     {
-        cutlass_platform_apple::register_decoders_with(&mut decoders, hardware.decode);
+        // Pictures stay in their IOSurface; the preview samples them in place.
+        cutlass_platform_apple::register_surface_decoders_with(&mut decoders, hardware.decode);
         cutlass_platform_apple::register_encoders_with(&mut encoders, hardware.encode);
     }
     #[cfg(target_os = "windows")]

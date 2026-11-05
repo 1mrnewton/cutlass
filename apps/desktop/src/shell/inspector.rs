@@ -445,6 +445,17 @@ impl Shell {
         self.set_volume(gain_of_db(db))
     }
 
+    /// Draw the selected caption in the style keyed `style`, or plain with
+    /// an empty key. One undo restores it.
+    pub fn set_caption_style(&mut self, style: &str) -> Result<(), ShellError> {
+        let segment_id = self.text_segment()?;
+        self.refuse_locked(&segment_id)?;
+        self.apply(Request::SetCaptionStyle {
+            segment_id,
+            style: style.to_owned(),
+        })
+    }
+
     /// Replace word `index` of the selected caption. The word keeps its
     /// times, and the caption reads the words joined by spaces. One undo
     /// restores the word.
@@ -457,8 +468,8 @@ impl Shell {
                 "a word needs at least one letter".to_owned(),
             ));
         }
-        let (material_id, mut words) = self.caption_words(&segment_id)?;
-        let Some(slot) = words.text.get_mut(index) else {
+        let (material_id, words) = self.caption_words(&segment_id)?;
+        let Some(slot) = words.text.get(index) else {
             return Err(ShellError::Unavailable(
                 "the caption has no such word".to_owned(),
             ));
@@ -466,7 +477,34 @@ impl Shell {
         if slot == word {
             return Ok(());
         }
-        word.clone_into(slot);
+        // Words typed apart share the word's time.
+        let words = cutlass_editor::retype_word(&words, index, word).ok_or_else(|| {
+            ShellError::Unavailable("a line break is not a word to type over".to_owned())
+        })?;
+        self.apply(Request::SetWords { material_id, words })
+    }
+
+    /// Join word `index` of the selected caption with the next, over both
+    /// their times. One undo step.
+    pub fn join_caption_words(&mut self, index: usize) -> Result<(), ShellError> {
+        let segment_id = self.text_segment()?;
+        self.refuse_locked(&segment_id)?;
+        let (material_id, words) = self.caption_words(&segment_id)?;
+        let words = cutlass_editor::join_words(&words, index).ok_or_else(|| {
+            ShellError::Unavailable("there is no next word on the line to join".to_owned())
+        })?;
+        self.apply(Request::SetWords { material_id, words })
+    }
+
+    /// Start a new caption line at word `index`, or join it back to the
+    /// line before. One undo step.
+    pub fn toggle_caption_break(&mut self, index: usize) -> Result<(), ShellError> {
+        let segment_id = self.text_segment()?;
+        self.refuse_locked(&segment_id)?;
+        let (material_id, words) = self.caption_words(&segment_id)?;
+        let words = cutlass_editor::toggle_line_break(&words, index).ok_or_else(|| {
+            ShellError::Unavailable("the first word already starts a line".to_owned())
+        })?;
         self.apply(Request::SetWords { material_id, words })
     }
 
@@ -1041,6 +1079,26 @@ mod tests {
         desktop.set_caption_word(1, "too").unwrap();
         assert_eq!(desktop.revision(), revision);
         desktop.undo().unwrap();
+        assert_eq!(desktop.draft().unwrap(), &before);
+
+        // A word typed as two splits its time; joined again it is one.
+        desktop.set_caption_word(1, "to far").unwrap();
+        let inspection = desktop.inspection().unwrap();
+        assert_eq!(inspection.words.text, ["one", "to", "far"]);
+        assert_eq!(inspection.words.end_time, [400, 660, 900]);
+        desktop.join_caption_words(1).unwrap();
+        assert_eq!(desktop.inspection().unwrap().words.text, ["one", "to far"]);
+        desktop.toggle_caption_break(1).unwrap();
+        let broken = desktop.inspection().unwrap();
+        assert_eq!(broken.words.text, ["one", "\n", "to far"]);
+        assert_eq!(broken.text.as_deref(), Some("one\nto far"));
+        assert!(desktop.toggle_caption_break(0).is_err());
+        desktop.set_caption_style("karaoke").unwrap();
+        assert_eq!(desktop.inspection().unwrap().caption_style, "karaoke");
+        assert!(desktop.set_caption_style("loud").is_err());
+        for _ in 0..4 {
+            desktop.undo().unwrap();
+        }
         assert_eq!(desktop.draft().unwrap(), &before);
 
         for (index, word) in [(1, ""), (1, "   "), (2, "three")] {

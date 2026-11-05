@@ -545,6 +545,7 @@ dependencies = [
  "cutlass-av1",
  "cutlass-avi",
  "cutlass-caf",
+ "cutlass-captions",
  "cutlass-codec",
  "cutlass-color",
  "cutlass-container",

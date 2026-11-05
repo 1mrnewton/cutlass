@@ -1339,6 +1339,9 @@ fn text_basic(
     inspection: &Inspection,
     caption: bool,
 ) {
+    if caption && !inspection.words.text.is_empty() {
+        caption_styles(shell, ui, inspection);
+    }
     body(ui, |ui| {
         if caption && !inspection.words.text.is_empty() {
             caption_words(shell, ui, state, inspection);
@@ -1437,21 +1440,58 @@ fn caption_words(
     inspection: &Inspection,
 ) {
     let columns = &inspection.words;
+    let count = columns.text.len();
     for (index, word) in columns.text.iter().enumerate() {
+        // A line break shows as a rule between the lines' words.
+        if word == cutlass_editor::LINE_BREAK {
+            ui.separator();
+            continue;
+        }
         let start = columns.start_time.get(index).copied().unwrap_or_default();
         let text = state.fields.entry(format!("word {index}")).or_default();
         let mut edited = None;
+        let mut join = false;
+        let mut line = false;
         label_row(ui, &format!("{:.2} s", start as f64 / 1000.0), |ui| {
-            let response = ui.add(TextEdit::singleline(text).desired_width(f32::INFINITY));
-            if super::commits(ui, &response) && text != word {
-                edited = Some(text.clone());
-            }
-            if !response.has_focus() {
-                word.clone_into(text);
-            }
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let next_is_word = columns
+                    .text
+                    .get(index + 1)
+                    .is_some_and(|next| next != cutlass_editor::LINE_BREAK);
+                join = ui
+                    .add_enabled(
+                        index + 1 < count && next_is_word,
+                        egui::Button::new(RichText::new("+").size(11.0)),
+                    )
+                    .on_hover_text("Join with the next word")
+                    .clicked();
+                let broken = cutlass_editor::breaks_before(columns, index);
+                line = ui
+                    .add_enabled(
+                        index > 0,
+                        egui::Button::new(RichText::new("↵").size(11.0)).selected(broken),
+                    )
+                    .on_hover_text(if broken {
+                        "Join this line to the one before"
+                    } else {
+                        "Start a new line here"
+                    })
+                    .clicked();
+                let response = ui.add(TextEdit::singleline(text).desired_width(f32::INFINITY));
+                if super::commits(ui, &response) && text != word {
+                    edited = Some(text.clone());
+                }
+                if !response.has_focus() {
+                    word.clone_into(text);
+                }
+            });
         });
         if let Some(value) = edited {
             send(shell, |shell| shell.set_caption_word(index, &value));
+        } else if join {
+            send(shell, |shell| shell.join_caption_words(index));
+        } else if line {
+            send(shell, |shell| shell.toggle_caption_break(index));
         }
     }
     ui.add_space(6.0);
@@ -2046,6 +2086,38 @@ fn footer(ui: &mut Ui, labels: &[&str]) {
             .on_disabled_hover_text(LATER);
         }
     });
+}
+
+/// The caption styles: Plain, then each style, the caption's own
+/// outlined. A pick is one undo step.
+fn caption_styles(shell: &mut Shell, ui: &mut Ui, inspection: &Inspection) {
+    let mut picked = None;
+    ui.add_space(8.0);
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = Vec2::splat(6.0);
+        let tiles = std::iter::once(("Plain", "")).chain(
+            cutlass_captions::CAPTION_STYLES
+                .iter()
+                .map(|style| (style.name, style.key)),
+        );
+        for (name, key) in tiles {
+            let on = inspection.caption_style == key;
+            let stroke = if on {
+                Stroke::new(tokens::SELECTED_EDGE * 2.0, tokens::EXPORT)
+            } else {
+                Stroke::NONE
+            };
+            let tile = egui::Button::new(RichText::new(name).size(11.0))
+                .fill(BOX)
+                .stroke(stroke);
+            if ui.add_sized([64.0, 40.0], tile).clicked() && !on {
+                picked = Some(key);
+            }
+        }
+    });
+    if let Some(key) = picked {
+        send(shell, |shell| shell.set_caption_style(key));
+    }
 }
 
 /// The Bubble page: None, then each bubble, the title's own outlined. A

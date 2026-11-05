@@ -330,6 +330,8 @@ pub struct Inspection {
     pub material: String,
     pub text: Option<String>,
     pub words: WordColumns,
+    /// The caption's style key; empty is plain.
+    pub caption_style: String,
     pub locked: bool,
 }
 
@@ -3504,6 +3506,10 @@ impl Shell {
             material,
             text,
             words,
+            caption_style: match draft.materials.get(segment.material_id.as_str()) {
+                Some(MaterialRef::Text(text)) => text.caption_style.clone(),
+                _ => String::new(),
+            },
             locked,
         })
     }

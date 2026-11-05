@@ -13,6 +13,7 @@ public-release = ["cutlass-logger/public-release"]
 cutlass-decode = { path = "../../crates/decode", version = "0.1.0" }
 cutlass-encode = { path = "../../crates/encode", version = "0.1.0" }
 cutlass-editor = { path = "../../crates/editor", version = "0.1.0" }
+cutlass-captions = { path = "../../crates/captions", version = "0.1.0" }
 cutlass-playback = { path = "../../crates/playback", version = "0.1.0" }
 cutlass-export = { path = "../../crates/export", version = "0.1.0" }
 cutlass-effects = { path = "../../crates/effects", version = "0.1.0" }

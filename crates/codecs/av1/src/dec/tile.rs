@@ -1051,40 +1051,44 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
     // Block (5.11.5).
 
     fn decode_block(&mut self, r: usize, c: usize, bsize: u8) -> R<()> {
-        let mut b = std::mem::take(&mut self.b);
-        b.mi_row = r;
-        b.mi_col = c;
-        b.bsize = bsize;
+        // The other fields keep the previous block's values until the
+        // syntax below sets them.
         let w4 = bw4(bsize);
         let h4 = bh4(bsize);
-        b.has_chroma =
+        let has_chroma =
             if (h4 == 1 && self.sub_y && (r & 1) == 0) || (w4 == 1 && self.sub_x && (c & 1) == 0) {
                 false
             } else {
                 self.num_planes > 1
             };
-        if b.has_chroma
-            && plane_residual_size(bsize, self.sub_x, self.sub_y) == super::types::BLOCK_INVALID
-        {
-            self.b = b;
-            return Err(malformed("block size for this subsampling"));
-        }
-        b.avail_u = self.is_inside(r as isize - 1, c as isize);
-        b.avail_l = self.is_inside(r as isize, c as isize - 1);
-        b.avail_u_chroma = b.avail_u;
-        b.avail_l_chroma = b.avail_l;
-        if b.has_chroma {
+        let avail_u = self.is_inside(r as isize - 1, c as isize);
+        let avail_l = self.is_inside(r as isize, c as isize - 1);
+        let (mut avail_u_chroma, mut avail_l_chroma) = (avail_u, avail_l);
+        if has_chroma {
             if self.sub_y && h4 == 1 {
-                b.avail_u_chroma = self.is_inside(r as isize - 2, c as isize);
+                avail_u_chroma = self.is_inside(r as isize - 2, c as isize);
             }
             if self.sub_x && w4 == 1 {
-                b.avail_l_chroma = self.is_inside(r as isize, c as isize - 2);
+                avail_l_chroma = self.is_inside(r as isize, c as isize - 2);
             }
         } else {
-            b.avail_u_chroma = false;
-            b.avail_l_chroma = false;
+            avail_u_chroma = false;
+            avail_l_chroma = false;
         }
-        self.b = b;
+        let b = &mut self.b;
+        b.mi_row = r;
+        b.mi_col = c;
+        b.bsize = bsize;
+        b.has_chroma = has_chroma;
+        if has_chroma
+            && plane_residual_size(bsize, self.sub_x, self.sub_y) == super::types::BLOCK_INVALID
+        {
+            return Err(malformed("block size for this subsampling"));
+        }
+        b.avail_u = avail_u;
+        b.avail_l = avail_l;
+        b.avail_u_chroma = avail_u_chroma;
+        b.avail_l_chroma = avail_l_chroma;
         if C::WRITE && self.plan.blocks.is_empty() {
             self.enc_block();
         } else if C::WRITE {
@@ -3218,7 +3222,25 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
     // Residual (5.11.34 onward).
 
     fn residual(&mut self) -> R<()> {
-        let b = self.b.clone();
+        // The fields used below (the whole block is large to copy).
+        struct B {
+            bsize: u8,
+            mi_row: usize,
+            mi_col: usize,
+            has_chroma: bool,
+            lossless: bool,
+            is_inter: bool,
+            tx_size: u8,
+        }
+        let b = B {
+            bsize: self.b.bsize,
+            mi_row: self.b.mi_row,
+            mi_col: self.b.mi_col,
+            has_chroma: self.b.has_chroma,
+            lossless: self.b.lossless,
+            is_inter: self.b.is_inter,
+            tx_size: self.b.tx_size,
+        };
         let bw = block_width(b.bsize);
         let bh = block_height(b.bsize);
         let width_chunks = (bw >> 6).max(1);

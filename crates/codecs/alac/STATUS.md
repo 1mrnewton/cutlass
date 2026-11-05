@@ -55,7 +55,7 @@ All "Verified" rows ran on this machine on 2026-11-05: Apple M5 Pro, macOS 27.0.
 | Seeded campaigns (cargo-fuzz cannot build here: `libfuzzer-sys` needs `cc`, which `deny.toml` bans) | Decoder mutation and cookie campaigns | Random shapes and signals must round-trip | `decoder_campaign`, `cookie_campaign`, `round_trip_campaign` | Verified, 1800 s each in release, no findings |
 | Factory registration | Registered | Registered | `the_registered_*` tests; desktop `alac_opens_for_import_and_export` | Verified |
 | Export | n/a | Sound-only M4A, 24-bit from the float mix, clipped to full scale | export `sound_alone_writes_a_lossless_m4a` | Verified on an empty timeline only |
-| Desktop import | Rust decoder behind AudioToolbox on macOS, alone elsewhere | Export dialog offers ALAC, no bitrate | desktop `alac_opens_for_import_and_export`, `the_export_dialog_names_its_file_by_what_it_writes_and_reads_a_typed_bitrate` | Verified at the factory and dialog level. Playing an ALAC file in the running app: not run |
+| Desktop import | Rust decoder ahead of AudioToolbox on macOS, alone elsewhere; the phone's decoders put it ahead of AudioToolbox too | Export dialog offers ALAC, no bitrate | desktop `alac_opens_for_import_and_export`, `the_export_dialog_names_its_file_by_what_it_writes_and_reads_a_typed_bitrate` | Verified at the factory and dialog level. Playing an ALAC file in the running app: not run |
 | Linux | Lint | Lint | `cargo clippy --workspace --exclude cutlass --all-targets --target x86_64-unknown-linux-gnu -- -D warnings` | Lint passed. Tests not run on Linux |
 | Windows | Not run | Not run | none | Not run |
 

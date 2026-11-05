@@ -1,6 +1,6 @@
 # MP3 container
 
-Demux and mux for an MPEG audio Layer III file. The packet is one frame, including its header. Times are samples at the frame's sample rate. This crate does not decode samples. The `mp3` codec crate is still empty.
+Demux and mux for an MPEG audio Layer III file. The packet is one frame, including its header. Times are samples at the frame's sample rate. This crate does not decode samples; `crates/codecs/mp3` does.
 
 Checkout `mp3-container` at `6dfa2b6`, parent `109d16f`. Both directions were requested.
 
@@ -45,8 +45,8 @@ Layer I and Layer II are `Unsupported { what: "layer" }` when two headers confir
 | ID3v2, ID3v1, APEv2 | Skip, bounded | Not packets | `iTunSMPB` ID3v2.3 only | ID3 and APE tests; hostile ID3 is `Limit`; `the_shared_contract_writes_the_frames_and_the_trim_set_last` | Verified |
 | Layer I and II | No | `Unsupported` when confirmed | `Unsupported` | Layer II fixture | Unsupported |
 | ID3 text and pictures | No | Skipped with the tag | No field to write | By scope | Unsupported |
-| Sample decode | No | Outside this crate | Outside this crate | `crates/codecs/mp3` is empty | Outside scope |
-| Engine and export | Integration | Traits only | Traits only | Scaffolds are empty | Not run |
+| Sample decode | No | Outside this crate | Outside this crate | `crates/codecs/mp3` | Outside scope |
+| Engine and export | Integration | Desktop and phone readers open `.mp3` | Sound-only export writes `.mp3` | desktop `the_installed_readers_open_an_mp3`, export `sound_alone_writes_an_m4a_a_wav_a_flac_or_an_mp3` | Verified at test level |
 
 ## Limits
 

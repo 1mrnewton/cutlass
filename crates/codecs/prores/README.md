@@ -6,7 +6,7 @@ Native safe Rust Apple ProRes decoder and encoder in `cutlass-prores`, per SMPTE
 
 `ProresDecoder` takes one ProRes frame and returns its picture at 10 or 12 bits with any alpha plane. `ProresEncoder` takes a planar picture or an RGBA picture and returns one ProRes frame at Apple's target rate for the profile. One packet is one frame; every ProRes frame is a key frame.
 
-`register_decoders`, `register_video_decoders`, `register_encoders` and `register_video_encoders` register `CodecId::Prores`. The desktop app and `cutlass-ffi` register them after the platform codecs, so on a Mac VideoToolbox is asked first and this crate is the fallback, and elsewhere this crate is the only ProRes codec.
+`register_decoders`, `register_video_decoders`, `register_encoders` and `register_video_encoders` register `CodecId::Prores`. The desktop app and `cutlass-ffi` register `register_decoders` and `register_encoders` after the platform codecs; neither registers the video variants yet, so the 4444 alpha path is not reached from the app. Registered after the platform, so on a Mac VideoToolbox is asked first and this crate is the fallback, and elsewhere this crate is the only ProRes codec.
 
 ## Specification
 

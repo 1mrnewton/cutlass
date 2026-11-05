@@ -23,8 +23,9 @@ pub mod widgets;
 pub mod window;
 
 /// Platform openers go first. A codec they decline falls through to the
-/// software opener registered after them. MP3 is the exception: its Rust
-/// codec goes ahead of the platform. Hardware decode and encode are on.
+/// software opener registered after them. The Rust FLAC, ALAC, MP3, Opus
+/// and WebP codecs are the exception: they go ahead of the platform.
+/// Hardware decode and encode are on.
 pub fn register_codecs() -> (cutlass_decode::DecodeFactory, cutlass_encode::EncodeFactory) {
     register_codecs_with(&cutlass_settings::Hardware::default())
 }

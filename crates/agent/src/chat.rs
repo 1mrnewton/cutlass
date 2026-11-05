@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
-use crate::mcp_server::{input_schema, registry_name};
+use crate::mcp_server::{input_schema, registry_name, takes_object};
 use crate::model::{Completion, CompletionRequest, Message, Model, ModelError, ToolCall};
 
 /// Sends one request body and returns the reply body.
@@ -194,7 +194,7 @@ pub fn parse_reply(reply: &str) -> Result<Completion, ModelError> {
 
 /// The arguments a tool call carries on the wire, as a JSON string.
 fn wire_arguments(tool: &str, arguments: &str) -> String {
-    if tool == "draft.apply" {
+    if takes_object(tool) {
         return arguments.to_owned();
     }
     if arguments.is_empty() {
@@ -210,7 +210,7 @@ fn registry_arguments(tool: &str, arguments: &Value) -> String {
         Value::String(text) => serde_json::from_str(text).unwrap_or(Value::String(text.clone())),
         other => other.clone(),
     };
-    if tool == "draft.apply" {
+    if takes_object(tool) {
         return match object {
             Value::String(text) => text,
             other => other.to_string(),

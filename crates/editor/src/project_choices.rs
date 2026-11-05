@@ -126,6 +126,8 @@ pub struct ProjectSettings {
     /// Only kept for 29.97 and 59.94.
     pub drop_frame: bool,
     pub color_space: i32,
+    /// Picture clips stack by their own layer, set by Arrange.
+    pub free_layer: bool,
 }
 
 /// The settings `draft` has now. A short side that is one of
@@ -143,6 +145,7 @@ pub fn project_settings(draft: &Draft) -> ProjectSettings {
         rate: draft.frame_rate().unwrap_or(FrameRate::FPS_30),
         drop_frame: draft.is_drop_frame_timecode,
         color_space: draft.color_space,
+        free_layer: draft.config.free_layer,
     }
 }
 
@@ -213,6 +216,11 @@ pub fn project_requests(
             space: settings.color_space,
         });
     }
+    if settings.free_layer != draft.config.free_layer {
+        requests.push(Request::SetFreeLayer {
+            on: settings.free_layer,
+        });
+    }
     Ok(requests)
 }
 
@@ -232,6 +240,7 @@ mod tests {
             rate: FrameRate::FPS_29_97,
             drop_frame: true,
             color_space: 67,
+            free_layer: true,
         };
         let requests = project_requests(&draft, &settings).unwrap();
         assert_eq!(
@@ -250,6 +259,7 @@ mod tests {
                     drop_frame: true
                 },
                 Request::SetColorSpace { space: 67 },
+                Request::SetFreeLayer { on: true },
             ]
         );
         // Drop frame is dropped for a rate that has none.

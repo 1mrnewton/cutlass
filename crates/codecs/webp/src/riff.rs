@@ -10,7 +10,7 @@
 
 use cutlass_decode::CodecError;
 
-use crate::limits::{MAX_CHUNKS_PER_PACKET, MAX_FRAMES_PER_PACKET, MAX_ICC_BYTES};
+use crate::limits::{MAX_CHUNKS_PER_PACKET, MAX_FRAMES_PER_PACKET, MAX_ICC_BYTES, canvas_ok};
 use crate::lossless::decode::header;
 
 /// The coded picture of a still or of one frame.
@@ -246,6 +246,9 @@ fn extended<'a>(chunks: &[Chunk<'a>]) -> Result<Layout<'a>, CodecError> {
     }
     let width = u24(&vp8x.data[4..7]) + 1;
     let height = u24(&vp8x.data[7..10]) + 1;
+    // Refused before the chunks after it are read: a canvas past the pixel
+    // cap is a limit, whatever else the file holds.
+    canvas_ok(width, height)?;
     let icc = chunks
         .iter()
         .find(|chunk| &chunk.fourcc == b"ICCP")
@@ -472,6 +475,7 @@ pub(crate) fn push_bitstream<'a>(
 #[cfg(test)]
 mod tests {
     use super::{Bitstream, Layout, Still, file, parse, put_chunk, vp8x};
+    use cutlass_decode::CodecError;
 
     fn still_of(data: &[u8]) -> Still<'_> {
         match parse(data).unwrap() {
@@ -486,6 +490,17 @@ mod tests {
         let still = still_of(&data);
         assert!(matches!(still.bitstream, Bitstream::Lossless(bytes) if bytes.len() == 5));
         assert!(still.canvas.is_none());
+    }
+
+    #[test]
+    fn a_canvas_past_the_pixel_cap_is_a_limit_before_its_frames_are_read() {
+        for flags in [0x02, 0x10, 0x00] {
+            let data = file(&[(b"VP8X", &vp8x(flags, 16_384, 16_384))]);
+            assert!(
+                matches!(parse(&data), Err(CodecError::Limit { .. })),
+                "flags {flags:#x}"
+            );
+        }
     }
 
     #[test]

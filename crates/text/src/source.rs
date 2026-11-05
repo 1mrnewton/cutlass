@@ -52,6 +52,63 @@ impl Look {
     }
 }
 
+/// How one glyph looks at a moment, as a caption's style samples it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GlyphLook {
+    /// Its place, size and opacity.
+    pub pose: LetterPose,
+    /// Its own ink, straight RGBA, over its run's.
+    pub ink: Option<[u8; 4]>,
+    /// The color of a round box behind it, straight RGBA; clear is none.
+    pub back: [u8; 4],
+}
+
+impl GlyphLook {
+    /// At rest, with its run's ink and no box.
+    pub const REST: Self = Self {
+        pose: LetterPose::REST,
+        ink: None,
+        back: [0, 0, 0, 0],
+    };
+}
+
+/// The bounds a set of rectangles reach.
+struct Reach {
+    any: bool,
+    left: f32,
+    top: f32,
+    right: f32,
+    bottom: f32,
+}
+
+impl Default for Reach {
+    fn default() -> Self {
+        Self {
+            any: false,
+            left: f32::MAX,
+            top: f32::MAX,
+            right: f32::MIN,
+            bottom: f32::MIN,
+        }
+    }
+}
+
+impl Reach {
+    fn hold(&mut self, left: f32, top: f32, right: f32, bottom: f32) {
+        if ![left, top, right, bottom]
+            .iter()
+            .all(|value| value.is_finite())
+        {
+            return;
+        }
+        self.any = true;
+        self.left = self.left.min(left);
+        self.top = self.top.min(top);
+        self.right = self.right.max(right);
+        self.bottom = self.bottom.max(bottom);
+    }
+}
+
 /// A text segment that can be sampled at a timeline microsecond.
 pub struct TextSource {
     range: TimeRange,
@@ -67,6 +124,10 @@ pub struct TextSource {
     letters: Vec<Letter>,
     /// How each glyph is posed by a letter animation; empty is at rest.
     poses: Vec<LetterPose>,
+    /// Each glyph's own ink, straight, over its run's; empty keeps them.
+    inks: Vec<Option<[u8; 4]>>,
+    /// Round boxes behind runs of posed glyphs, in picture pixels.
+    boxes: Vec<crate::paint::WordBox>,
     font_size: f32,
     /// The box behind the letters, in picture pixels.
     background: Option<Area>,
@@ -194,6 +255,8 @@ impl TextSource {
             looks,
             letters,
             poses: Vec::new(),
+            inks: Vec::new(),
+            boxes: Vec::new(),
             font_size: laid.font_size,
             background,
             origin_x,
@@ -234,6 +297,86 @@ impl TextSource {
     /// sample; an empty list draws every letter at rest.
     pub fn set_poses(&mut self, poses: Vec<LetterPose>) {
         self.poses = poses;
+    }
+
+    /// Give each glyph, in the order of [`Self::records`], a look for the
+    /// next sample: its pose, its own ink, and a box behind it. Glyphs in a
+    /// row on one line with the same box color share one round box. The
+    /// picture grows evenly about its middle to hold glyphs moved or boxed
+    /// past its edges, so a placement about its centre keeps the text
+    /// where it rests.
+    pub fn set_looks(&mut self, looks: &[GlyphLook]) {
+        self.poses = looks.iter().map(|look| look.pose).collect();
+        self.inks = looks.iter().map(|look| look.ink).collect();
+        let mut boxes: Vec<crate::paint::WordBox> = Vec::new();
+        let mut last: Option<([u8; 4], u32)> = None;
+        let mut reach = Reach::default();
+        for (at, (record, look)) in self.mesh.glyphs.iter().zip(looks).enumerate() {
+            let Some((posed, _)) = self.posed(at, record) else {
+                continue;
+            };
+            if posed.width <= 0.0 || posed.height <= 0.0 {
+                continue;
+            }
+            reach.hold(
+                posed.x,
+                posed.y,
+                posed.x + posed.width,
+                posed.y + posed.height,
+            );
+            if look.back[3] == 0 {
+                last = None;
+                continue;
+            }
+            let around = crate::paint::WordBox::round(&posed, look.back, self.font_size);
+            reach.hold(around.left, around.top, around.right, around.bottom);
+            match boxes.last_mut() {
+                Some(open) if last == Some((look.back, record.line)) => open.join(&around),
+                _ => boxes.push(around),
+            }
+            last = Some((look.back, record.line));
+        }
+        self.boxes = boxes;
+        self.grow_to(&reach);
+    }
+
+    /// Grow the picture evenly about its middle until it holds `reach`,
+    /// with room for an outline and a shadow.
+    fn grow_to(&mut self, reach: &Reach) {
+        if !reach.any {
+            return;
+        }
+        let room = self.font_size * 0.25;
+        let (left, top) = (self.origin_x, self.origin_y);
+        #[allow(clippy::cast_precision_loss)]
+        let (right, bottom) = (left + self.width as f32, top + self.height as f32);
+        let more_x = (left - (reach.left - room))
+            .max((reach.right + room) - right)
+            .max(0.0)
+            .ceil();
+        let more_y = (top - (reach.top - room))
+            .max((reach.bottom + room) - bottom)
+            .max(0.0)
+            .ceil();
+        if !more_x.is_finite() || !more_y.is_finite() || more_x > 4_096.0 || more_y > 4_096.0 {
+            return;
+        }
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let (grow_x, grow_y) = (more_x as u32, more_y as u32);
+        let (width, height) = (self.width + 2 * grow_x, self.height + 2 * grow_y);
+        if rgba_len(width, height).is_none() {
+            return;
+        }
+        self.origin_x -= more_x;
+        self.origin_y -= more_y;
+        self.width = width;
+        self.height = height;
+        if let Some(area) = self.background.as_mut() {
+            area.left += more_x;
+            area.right += more_x;
+            area.top += more_y;
+            area.bottom += more_y;
+        }
     }
 
     /// A glyph's place and opacity under its pose: `None` when it is not
@@ -311,7 +454,8 @@ impl TextSource {
             if image.kind == GlyphKind::Color {
                 continue;
             }
-            let ink = look.ink.map_or(base, premultiply);
+            let own = self.inks.get(at).copied().flatten();
+            let ink = own.or(look.ink).map_or(base, premultiply);
             draw.each(0.0, |index, cover| {
                 if cover > fill[index] {
                     fill[index] = cover;
@@ -338,6 +482,8 @@ impl TextSource {
                 shadows: &shadows,
                 shape: &shape,
                 background: self.background,
+                boxes: &self.boxes,
+                origin: (self.origin_x, self.origin_y),
                 width: self.width as usize,
                 height: self.height as usize,
             },
@@ -1302,6 +1448,55 @@ mod tests {
         assert_ne!(up, rest);
         source.set_poses(Vec::new());
         assert_eq!(cpu(source.sample(Micros(1_000))), rest);
+    }
+
+    #[test]
+    fn a_look_colors_boxes_and_sizes_a_word_and_the_picture_grows_evenly() {
+        let mut text = material("AB AB");
+        text.background_color = String::new();
+        let mut source = TextSource::open(TTF, None, &text, &segment()).unwrap();
+        let (width, height) = source.size();
+        let rest = cpu(source.sample(Micros(1_000)));
+        assert!(!has_color(&rest, [255, 0, 0, 255]));
+        let looks: Vec<super::GlyphLook> = source
+            .letters()
+            .iter()
+            .map(|letter| {
+                if letter.word == 1 {
+                    super::GlyphLook {
+                        pose: LetterPose {
+                            scale: 1.5,
+                            ..LetterPose::REST
+                        },
+                        ink: Some([255, 0, 0, 255]),
+                        back: [0, 0, 255, 255],
+                    }
+                } else {
+                    super::GlyphLook::REST
+                }
+            })
+            .collect();
+        source.set_looks(&looks);
+        let (grown_w, grown_h) = source.size();
+        assert!(grown_w > width && grown_h > height, "a sized word fits");
+        assert_eq!((grown_w - width) % 2, 0, "grown on both sides alike");
+        assert_eq!((grown_h - height) % 2, 0);
+        let drawn = cpu(source.sample(Micros(1_000)));
+        assert!(has_color(&drawn, [255, 0, 0, 255]), "the word's own ink");
+        let blue_left = drawn
+            .chunks(4)
+            .enumerate()
+            .any(|(at, pixel)| pixel == [0, 0, 255, 255] && (at as u32 % grown_w) < grown_w / 4);
+        assert!(has_color(&drawn, [0, 0, 255, 255]), "the word's box");
+        assert!(!blue_left, "the box is behind the second word only");
+        assert!(
+            halves(grown_w, &drawn, [255, 255, 255, 255]).0,
+            "the first word keeps the run's ink"
+        );
+    }
+
+    fn has_color(rgba: &[u8], color: [u8; 4]) -> bool {
+        rgba.chunks(4).any(|pixel| pixel == color)
     }
 
     #[test]

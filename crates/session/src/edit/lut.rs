@@ -24,7 +24,7 @@ pub fn set_lut(
         Some("") | None => None,
         Some(text) => Some(Lut::parse_cube(text).map_err(|_| EditError::Lut)?),
     };
-    let (track_index, segment_index) = super::speed::locate(draft, segment_id)?;
+    let (track_index, segment_index) = super::locate(draft, segment_id)?;
     let track = &draft.tracks[track_index];
     ensure_unlocked(track.attribute)?;
     if matches!(track.kind, TrackType::Audio | TrackType::Effect) {

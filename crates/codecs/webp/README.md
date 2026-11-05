@@ -28,7 +28,7 @@ RFC 9649 (WebP Image Format, 2024): the RIFF container, `VP8X`, `ICCP`, `ANIM`, 
 
 Decoded pictures are `StillImage` values with 8-bit samples stored as `u16`: `ColorType::Rgb`, or `ColorType::Rgba` when the file carries alpha. Animations are always `Rgba`. An `ICCP` profile is passed through on `icc_profile` and not applied. Frames are composed with libwebp's blending and disposal.
 
-`push` (audio) is `InvalidApi` on both sides. An empty packet is `InvalidApi`. `drain` of the decoder is empty. `reset` forgets the animation canvas, or the frames waiting in the encoder. The encoder's cancel flag makes the next call return `Cancelled`.
+The decoder's `push` hands over each picture of `decode_picture` as straight RGBA, opaque where the file has no alpha. The encoder's audio `push` is `InvalidApi`. An empty packet is `InvalidApi`. `drain` of the decoder is empty. `reset` forgets the animation canvas, or the frames waiting in the encoder. The encoder's cancel flag makes the next call return `Cancelled`.
 
 ## Support
 

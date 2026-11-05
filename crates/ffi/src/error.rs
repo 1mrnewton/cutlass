@@ -152,6 +152,9 @@ fn edit_cause(error: EditError) -> String {
         EditError::LineWidth => "the line width must be from zero through 8192".to_owned(),
         EditError::TextFont => "the face is not a file name".to_owned(),
         EditError::TextStyle => "that outline, shadow, or background is out of range".to_owned(),
+        EditError::FreeLayer => {
+            "arranging needs a picture clip and Free layer on in the project settings".to_owned()
+        }
         EditError::TextEmpty => "type something to add text".to_owned(),
         EditError::UnknownEffect => "that effect is not in this version".to_owned(),
         EditError::Lut => "that file is not a 3D .cube table".to_owned(),

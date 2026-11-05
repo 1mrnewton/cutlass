@@ -54,7 +54,7 @@ fn set_listed(
     if mask.is_some_and(|mask| !mask.is_valid()) {
         return Err(EditError::Mask);
     }
-    let (track_index, segment_index) = super::speed::locate(draft, segment_id)?;
+    let (track_index, segment_index) = super::locate(draft, segment_id)?;
     let track = &draft.tracks[track_index];
     ensure_unlocked(track.attribute)?;
     if !tracks.contains(&track.kind) {

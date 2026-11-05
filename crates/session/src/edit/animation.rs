@@ -3,7 +3,7 @@ use cutlass_model::{
     Motion, SegmentId, StickerAnimation,
 };
 
-use super::speed::locate;
+use super::locate;
 use super::{EditError, ensure_unlocked};
 
 /// The shortest animation the duration slider reaches.

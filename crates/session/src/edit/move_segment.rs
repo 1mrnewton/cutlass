@@ -1,6 +1,7 @@
 use cutlass_model::{Draft, Micros, SegmentId, TrackId};
 
 use super::{EditError, ensure_unlocked};
+use super::{locate, overlaps_except};
 
 pub fn move_segment(
     draft: &mut Draft,
@@ -45,37 +46,4 @@ pub fn move_segment(
     );
     draft.tracks[dest_index].segments.insert(index, moved);
     Ok(())
-}
-
-fn locate(draft: &Draft, segment_id: &SegmentId) -> Result<(usize, usize), EditError> {
-    for (track_index, track) in draft.tracks.iter().enumerate() {
-        if let Some(segment_index) = track
-            .segments
-            .iter()
-            .position(|segment| &segment.id == segment_id)
-        {
-            return Ok((track_index, segment_index));
-        }
-    }
-    Err(EditError::MissingSegment)
-}
-
-fn overlaps_except(
-    track: &cutlass_model::Track,
-    candidate: &cutlass_model::Segment,
-    ignore: &SegmentId,
-) -> Result<bool, EditError> {
-    for segment in &track.segments {
-        if &segment.id == ignore {
-            continue;
-        }
-        if candidate
-            .target
-            .overlaps(&segment.target)
-            .map_err(EditError::Range)?
-        {
-            return Ok(true);
-        }
-    }
-    Ok(false)
 }

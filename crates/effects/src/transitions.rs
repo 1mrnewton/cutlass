@@ -4,8 +4,9 @@
 //! A transition material names one with `effect_id` `cutlass-<key>`. A
 //! material from before that, with no package id, is known by its name:
 //! "Dissolve", and "Dip" for dip to black. [`mix`] draws one moment of a
-//! transition on the CPU from two same-size RGBA pictures; the preview and
-//! the export both show that picture.
+//! transition on the CPU from two same-size RGBA pictures, and
+//! [`TRANSITION_WGSL`] is the same arithmetic for a GPU pass, so the preview
+//! and the export show the same picture either way.
 
 use cutlass_model::MaterialTransition;
 
@@ -146,6 +147,14 @@ impl TransitionKind {
         }
     }
 
+    /// The number [`TRANSITION_WGSL`]'s `transition` takes for this kind:
+    /// its place in [`Self::ALL`].
+    #[must_use]
+    pub fn code(self) -> u32 {
+        let place = Self::ALL.iter().position(|kind| *kind == self).unwrap_or(0);
+        u32::try_from(place).unwrap_or(0)
+    }
+
     fn way(self) -> Way {
         match self {
             Self::WipeRight | Self::SlideRight | Self::PushRight => Way::Right,
@@ -218,12 +227,34 @@ impl Picture<'_> {
     }
 }
 
-/// A box blur of `radius` pixels, across then down.
+/// How far [`TransitionKind::Blur`] blurs both pictures at `t`, in pixels:
+/// none at either end, most in the middle.
+#[must_use]
+pub fn blur_radius(width: u32, height: u32, t: f32) -> u32 {
+    let t = if t.is_finite() {
+        t.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let strength = 1.0 - (2.0 * t - 1.0).abs();
+    #[allow(clippy::cast_precision_loss)]
+    let longest = width.max(height) as f32;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let radius = (strength * longest / 30.0).round() as u32;
+    radius
+}
+
+/// A box blur of `radius` pixels, across then down. Each output is the
+/// window of `2r + 1` samples around it, an edge sample repeated past the
+/// edge, summed and divided with the remainder dropped, as the GPU box
+/// blur does.
 fn blurred(picture: &Picture<'_>, radius: usize) -> Vec<u8> {
     let (width, height) = (picture.width, picture.height);
     if radius == 0 {
         return picture.rgba.to_vec();
     }
+    #[allow(clippy::cast_possible_truncation)]
+    let window = (2 * radius + 1) as u32;
     let pass = |source: &[u8], across: bool| {
         let mut out = vec![0; source.len()];
         let (lines, length) = if across {
@@ -240,22 +271,19 @@ fn blurred(picture: &Picture<'_>, radius: usize) -> Vec<u8> {
                 }
             };
             for at in 0..length {
-                let low = at.saturating_sub(radius);
-                let high = (at + radius).min(length - 1);
                 let mut sum = [0_u32; 4];
-                for near in low..=high {
+                for offset in 0..=2 * radius {
+                    let near = (at + offset).saturating_sub(radius).min(length - 1);
                     let pixel = index(near);
                     for channel in 0..4 {
                         sum[channel] += u32::from(source[pixel + channel]);
                     }
                 }
-                #[allow(clippy::cast_possible_truncation)]
-                let count = (high - low + 1) as u32;
                 let pixel = index(at);
                 for channel in 0..4 {
                     #[allow(clippy::cast_possible_truncation)]
                     {
-                        out[pixel + channel] = ((sum[channel] + count / 2) / count) as u8;
+                        out[pixel + channel] = (sum[channel] / window) as u8;
                     }
                 }
             }
@@ -314,9 +342,7 @@ pub fn mix(
     let moved = ease(t);
     let mut out = vec![0; size];
     let blur = (kind == TransitionKind::Blur).then(|| {
-        let strength = 1.0 - (2.0 * t - 1.0).abs();
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let radius = (strength * fw.max(fh) / 30.0).round() as usize;
+        let radius = usize::try_from(blur_radius(width, height, t)).unwrap_or(0);
         (blurred(&from, radius), blurred(&to, radius))
     });
     for y in 0..h {
@@ -457,6 +483,151 @@ pub fn mix(
     }
     Some(out)
 }
+
+/// [`mix`] as WGSL: `transition(kind, t, texel, size)` is the pixel at
+/// `texel` of a `size` canvas, with `kind` from [`TransitionKind::code`].
+/// The shader that includes it defines `tr_load(which, texel)`, the
+/// outgoing picture's pixel for `which` 0 and the incoming one's for 1, as
+/// 0 to 1 floats. For [`TransitionKind::Blur`] both pictures are already
+/// blurred by [`blur_radius`].
+pub const TRANSITION_WGSL: &str = r"
+fn tr_ease(t: f32) -> f32 {
+    return t * t * (3.0 - 2.0 * t);
+}
+
+fn tr_sample(which: u32, p: vec2<f32>, size: vec2<f32>) -> vec4<f32> {
+    if (p.x < 0.0 || p.y < 0.0 || p.x >= size.x || p.y >= size.y) {
+        return vec4<f32>(0.0);
+    }
+    return tr_load(which, vec2<i32>(floor(p)));
+}
+
+fn tr_turned(which: u32, p: vec2<f32>, size: vec2<f32>, scale: f32, angle: f32) -> vec4<f32> {
+    if (scale <= 0.0) {
+        return vec4<f32>(0.0);
+    }
+    let middle = size / 2.0;
+    let d = (p - middle) / scale;
+    let s = sin(-angle);
+    let c = cos(-angle);
+    return tr_sample(which, vec2<f32>(middle.x + d.x * c - d.y * s, middle.y + d.x * s + d.y * c), size);
+}
+
+fn tr_noise(seed: u32) -> f32 {
+    var value = (seed * 0x9E3779B9u) ^ 0x85EBCA6Bu;
+    value = value ^ (value >> 15u);
+    value = value * 0x2C1B3C6Du;
+    value = value ^ (value >> 12u);
+    return f32(value & 0xFFFFu) / 65535.0;
+}
+
+// The way a wipe, slide or push moves: 0 left, 1 right, 2 up, 3 down.
+fn tr_way(kind: u32) -> u32 {
+    if (kind >= 3u && kind <= 6u) {
+        return kind - 3u;
+    }
+    return (kind - 7u) % 4u;
+}
+
+fn transition(kind: u32, t_in: f32, texel: vec2<i32>, size: vec2<f32>) -> vec4<f32> {
+    var t = clamp(t_in, 0.0, 1.0);
+    if (t_in != t_in) {
+        t = 0.0;
+    }
+    let p = vec2<f32>(texel) + 0.5;
+    let moved = tr_ease(t);
+    let outgoing = tr_load(0u, texel);
+    let incoming = tr_load(1u, texel);
+    if (kind == 0u) {
+        return mix(outgoing, incoming, t);
+    }
+    if (kind == 1u || kind == 2u) {
+        var shade = vec4<f32>(1.0);
+        if (kind == 1u) {
+            shade = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+        }
+        if (t < 0.5) {
+            return mix(outgoing, shade, t * 2.0);
+        }
+        return mix(shade, incoming, t * 2.0 - 1.0);
+    }
+    if (kind >= 3u && kind <= 6u) {
+        let way = tr_way(kind);
+        var along = 1.0 - p.x / size.x;
+        if (way == 1u) {
+            along = p.x / size.x;
+        } else if (way == 2u) {
+            along = 1.0 - p.y / size.y;
+        } else if (way == 3u) {
+            along = p.y / size.y;
+        }
+        let edge = 0.02;
+        let reach = t * (1.0 + edge);
+        return mix(outgoing, incoming, clamp((reach - along) / edge, 0.0, 1.0));
+    }
+    if (kind >= 7u && kind <= 14u) {
+        let way = tr_way(kind);
+        let rest = 1.0 - moved;
+        var offset = vec2<f32>(rest * size.x, 0.0);
+        var ahead = vec2<f32>(offset.x - size.x, 0.0);
+        if (way == 1u) {
+            offset = vec2<f32>(-rest * size.x, 0.0);
+            ahead = vec2<f32>(offset.x + size.x, 0.0);
+        } else if (way == 2u) {
+            offset = vec2<f32>(0.0, rest * size.y);
+            ahead = vec2<f32>(0.0, offset.y - size.y);
+        } else if (way == 3u) {
+            offset = vec2<f32>(0.0, -rest * size.y);
+            ahead = vec2<f32>(0.0, offset.y + size.y);
+        }
+        let q = p - offset;
+        if (q.x >= 0.0 && q.x < size.x && q.y >= 0.0 && q.y < size.y) {
+            return tr_sample(1u, q, size);
+        }
+        if (kind >= 11u) {
+            return tr_sample(0u, p - ahead, size);
+        }
+        return outgoing;
+    }
+    if (kind == 15u) {
+        return mix(tr_turned(0u, p, size, 1.0 + moved, 0.0), incoming, t);
+    }
+    if (kind == 16u) {
+        return mix(outgoing, tr_turned(1u, p, size, 2.0 - moved, 0.0), t);
+    }
+    if (kind == 17u) {
+        let turn = 3.14159265358979;
+        if (t < 0.5) {
+            let part = tr_ease(t * 2.0);
+            return tr_turned(0u, p, size, 1.0 - part, part * turn);
+        }
+        let part = tr_ease(t * 2.0 - 1.0);
+        return tr_turned(1u, p, size, part, (part - 1.0) * turn);
+    }
+    if (kind == 18u) {
+        return mix(outgoing, incoming, tr_ease(clamp((t - 0.3) / 0.4, 0.0, 1.0)));
+    }
+    // Glitch.
+    let strength = 1.0 - abs(2.0 * t - 1.0);
+    let band = u32(texel.y) * 16u / u32(size.y);
+    let beat = u32(t * 12.0);
+    let jitter = (tr_noise(band * 31u + beat) - 0.5) * strength * size.x * 0.2;
+    var which = 0u;
+    if (tr_noise(band * 7u + beat * 13u) < t) {
+        which = 1u;
+    }
+    let split = strength * size.x * 0.02;
+    let red = tr_sample(which, vec2<f32>(p.x - jitter - split, p.y), size).r;
+    var pixel = tr_sample(which, vec2<f32>(p.x - jitter, p.y), size);
+    let blue = tr_sample(which, vec2<f32>(p.x - jitter + split, p.y), size).b;
+    if (pixel.a * 255.0 < 0.5) {
+        return tr_load(which, texel);
+    }
+    pixel.r = red;
+    pixel.b = blue;
+    return pixel;
+}
+";
 
 #[cfg(test)]
 mod tests {

@@ -1460,3 +1460,36 @@ fn smallest_wav(root: &Path) -> Option<PathBuf> {
     }
     best.map(|(_, path)| path)
 }
+
+#[test]
+fn a_stand_in_opens_in_place_of_its_source_and_probing_still_reads_the_source() {
+    let factory = factory();
+    let source = fixture("pattern.png");
+    let proxy = fixture("pattern.jpg");
+    let readers = factory.with_stand_ins(std::collections::HashMap::from([(
+        source.canonicalize().expect("source"),
+        proxy,
+    )]));
+    assert_eq!(
+        readers.open(&source).expect("open").info().streams[0].codec,
+        "Jpeg"
+    );
+    assert_eq!(
+        readers.probe(&source).expect("probe").streams[0].codec,
+        "Png"
+    );
+    // The readers it came from, as export keeps them, open the source.
+    assert_eq!(
+        factory.open(&source).expect("open").info().streams[0].codec,
+        "Png"
+    );
+    // A stand-in no longer on disk leaves the source to open.
+    let gone = factory.with_stand_ins(std::collections::HashMap::from([(
+        source.clone(),
+        fixture("no-such-proxy.mp4"),
+    )]));
+    assert_eq!(
+        gone.open(&source).expect("open").info().streams[0].codec,
+        "Png"
+    );
+}

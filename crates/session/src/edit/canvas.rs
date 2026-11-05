@@ -1,6 +1,6 @@
 use cutlass_model::{CanvasRatio, Draft, MaterialCanvas, MaterialId, MaterialRef, SegmentId};
 
-use super::speed::locate;
+use super::locate;
 use super::{EditError, ensure_unlocked};
 use crate::request::Request;
 

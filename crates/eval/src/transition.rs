@@ -47,7 +47,7 @@ impl Cut {
     }
 
     pub(crate) fn partner(&self) -> (usize, usize, Micros) {
-        if self.cover_segment == self.outgoing_segment {
+        if self.covers_outgoing() {
             (
                 self.incoming_track,
                 self.incoming_segment,
@@ -62,16 +62,10 @@ impl Cut {
         }
     }
 
-    pub(crate) fn ordered<'a>(
-        &self,
-        covering: &'a [u8],
-        partner: &'a [u8],
-    ) -> (&'a [u8], &'a [u8]) {
-        if self.cover_segment == self.outgoing_segment {
-            (covering, partner)
-        } else {
-            (partner, covering)
-        }
+    /// The clip that covers the time is the outgoing one, so the time is
+    /// before the cut.
+    pub(crate) fn covers_outgoing(&self) -> bool {
+        self.cover_segment == self.outgoing_segment
     }
 }
 
@@ -130,26 +124,47 @@ pub(crate) fn prepare<D: Device>(
     Ok(Prepared { cuts, pictures })
 }
 
-/// The mixed picture for a cut's transition, or nothing when it names no
+/// One moment of the transition on a cut: what it draws and how far along
+/// it is.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Moment {
+    pub(crate) kind: TransitionKind,
+    numer: u64,
+    denom: u64,
+}
+
+impl Moment {
+    /// How far along, 0 to 1.
+    pub(crate) fn t(self) -> f32 {
+        #[allow(clippy::cast_precision_loss)]
+        let t = (self.numer as f64 / self.denom as f64) as f32;
+        t
+    }
+
+    /// The mixed picture on the CPU.
+    pub(crate) fn mix(
+        self,
+        outgoing: &[u8],
+        incoming: &[u8],
+        width: u32,
+        height: u32,
+    ) -> Option<CpuBytes> {
+        let rgba = match self.kind {
+            TransitionKind::Dissolve => crossfade(outgoing, incoming, self.numer, self.denom)?,
+            kind => mix_transition(kind, outgoing, incoming, width, height, self.t())?,
+        };
+        CpuBytes::new(width, height, rgba).ok()
+    }
+}
+
+/// The moment of a cut's transition, or nothing when it names no
 /// transition Cutlass draws.
-pub(crate) fn fade(
-    store: &dyn PackageStore,
-    draft: &Draft,
-    cut: &Cut,
-    outgoing: &[u8],
-    incoming: &[u8],
-    width: u32,
-    height: u32,
-) -> Option<CpuBytes> {
-    let rgba = match kind_of(store, draft, cut)? {
-        TransitionKind::Dissolve => crossfade(outgoing, incoming, cut.numer, cut.denom)?,
-        kind => {
-            #[allow(clippy::cast_precision_loss)]
-            let t = (cut.numer as f64 / cut.denom as f64) as f32;
-            mix_transition(kind, outgoing, incoming, width, height, t)?
-        }
-    };
-    CpuBytes::new(width, height, rgba).ok()
+pub(crate) fn moment(store: &dyn PackageStore, draft: &Draft, cut: &Cut) -> Option<Moment> {
+    Some(Moment {
+        kind: kind_of(store, draft, cut)?,
+        numer: cut.numer,
+        denom: cut.denom,
+    })
 }
 
 /// The transition on a cut: a built-in one by its material, or the fade
@@ -558,6 +573,66 @@ mod tests {
         let store = publish("transition-fade");
         assert_eq!(draw(&draft, &media, Some(&store), 95), mixed(&still));
         assert_eq!(draft, before);
+    }
+
+    #[test]
+    fn a_built_in_transition_reaches_the_gpu_as_its_two_pictures() {
+        let mut draft = two_colors(100, 100, 40, true);
+        draft.canvas_config.width = 8;
+        draft.canvas_config.height = 4;
+        draft.materials.transitions[0].effect_id =
+            cutlass_effects::TransitionKind::WipeLeft.effect_id();
+        let media = ReaderFactory::new();
+        let mut device = SoftwareDevice::new();
+        let composed = crate::frame::layers_in(
+            &Snapshot::new(&draft),
+            Micros(90),
+            &mut device,
+            &media,
+            &mut OpenClips::new(),
+            0,
+            None,
+        )
+        .expect("layers");
+        let crate::Composed::Layers(frame_layers) = composed else {
+            panic!("composed on the CPU");
+        };
+        let moments: Vec<_> = frame_layers
+            .layers
+            .iter()
+            .filter_map(|layer| match &layer.source {
+                crate::GpuSource::Transition {
+                    kind,
+                    t,
+                    outgoing,
+                    incoming,
+                } => Some((
+                    *kind,
+                    *t,
+                    outgoing.rgba()[..4].to_vec(),
+                    incoming.rgba()[..4].to_vec(),
+                )),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(moments.len(), 1, "{moments:?}");
+        let (kind, t, outgoing, incoming) = &moments[0];
+        assert_eq!(*kind, cutlass_effects::TransitionKind::WipeLeft);
+        assert!((t - 0.25).abs() < 1e-6, "{t}");
+        assert_eq!(outgoing, &[255, 0, 0, 255]);
+        assert_eq!(incoming, &[0, 0, 255, 255]);
+        // The CPU frame mixes the same moment.
+        let cpu = draw(&draft, &media, None, 90);
+        let expected = cutlass_effects::mix_transition(
+            cutlass_effects::TransitionKind::WipeLeft,
+            &[255, 0, 0, 255].repeat(32),
+            &[0, 0, 255, 255].repeat(32),
+            8,
+            4,
+            0.25,
+        )
+        .expect("mix");
+        assert_eq!(cpu, expected);
     }
 
     fn mixed(still: &[u8]) -> Vec<u8> {

@@ -1,5 +1,6 @@
 //! The user's settings: shortcuts, panels, playback preferences, hardware
-//! codecs, model choice, sandbox choice, MCP servers, and skill folders.
+//! codecs, model choice, sandbox choice, MCP servers, skill folders, and
+//! the update check.
 //!
 //! Hardware decode and hardware encode are on.
 //! The local model switch is on. The cloud model switch is off. The local
@@ -51,6 +52,8 @@ pub struct Settings {
     #[serde(default)]
     pub hardware: Hardware,
     #[serde(default)]
+    pub import: Import,
+    #[serde(default)]
     pub model: ModelChoice,
     #[serde(default)]
     pub sandbox: SandboxChoice,
@@ -68,6 +71,8 @@ pub struct Settings {
     /// [`RECENT_LIMIT`].
     #[serde(default)]
     pub recent_projects: Vec<std::path::PathBuf>,
+    #[serde(default)]
+    pub updates: Updates,
     /// Keys this file does not name.
     #[serde(flatten, default)]
     pub rest: Map<String, Value>,
@@ -80,6 +85,7 @@ impl Default for Settings {
             panels: Vec::new(),
             playback: Playback::default(),
             hardware: Hardware::default(),
+            import: Import::default(),
             model: ModelChoice::default(),
             sandbox: SandboxChoice::default(),
             mcp_servers: Vec::new(),
@@ -87,6 +93,33 @@ impl Default for Settings {
             step_cap: DEFAULT_STEP_CAP,
             memory: true,
             recent_projects: Vec::new(),
+            updates: Updates::default(),
+            rest: Map::new(),
+        }
+    }
+}
+
+/// Whether Cutlass looks for a newer release, and when it last looked.
+///
+/// Off, nothing asks the release feed.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Updates {
+    /// Look for a newer release at launch, at most once a day.
+    #[serde(default = "default_on")]
+    pub check: bool,
+    /// When the last check started, in seconds since 1970; 0 is never.
+    #[serde(default)]
+    pub last_check: u64,
+    /// Keys this record does not name.
+    #[serde(flatten, default)]
+    pub rest: Map<String, Value>,
+}
+
+impl Default for Updates {
+    fn default() -> Self {
+        Self {
+            check: true,
+            last_check: 0,
             rest: Map::new(),
         }
     }
@@ -153,10 +186,26 @@ pub enum SeekDuringPlayback {
 
 /// How the open player behaves. These are not draft fields.
 ///
+/// What an import does with the file.
+///
+/// By default the file is copied into the project, so the project folder
+/// holds everything it plays and can move as one. Linked, the project
+/// points at the file where it is: nothing is copied, and moving or deleting
+/// the file takes it from the project.
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+pub struct Import {
+    /// Point at the file where it is instead of copying it in.
+    #[serde(default)]
+    pub link: bool,
+    /// Keys this record does not name.
+    #[serde(flatten, default)]
+    pub rest: Map<String, Value>,
+}
+
 /// Preview can play audio while the playhead is dragged. That switch is
 /// separate from normal playback. A seek while playing follows
 /// [`Playback::seek_during_playback`].
-#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Playback {
     /// Start again at the beginning when playback reaches the end.
     #[serde(default)]
@@ -167,9 +216,25 @@ pub struct Playback {
     /// Keep playing or pause when the playhead is seeked during playback.
     #[serde(default)]
     pub seek_during_playback: SeekDuringPlayback,
+    /// Play a clip's proxy in the preview when it has one. Export always
+    /// reads the source.
+    #[serde(default = "default_on")]
+    pub proxies: bool,
     /// Keys this record does not name.
     #[serde(flatten, default)]
     pub rest: Map<String, Value>,
+}
+
+impl Default for Playback {
+    fn default() -> Self {
+        Self {
+            loop_playback: false,
+            scrub_audio: false,
+            seek_during_playback: SeekDuringPlayback::default(),
+            proxies: true,
+            rest: Map::new(),
+        }
+    }
 }
 
 /// Whether the platform codecs may run.
@@ -368,12 +433,21 @@ mod tests {
             settings.playback.seek_during_playback,
             SeekDuringPlayback::KeepPlaying
         );
+        assert!(settings.playback.proxies, "proxies play by default");
         assert!(settings.hardware.decode);
         assert!(settings.hardware.encode);
+        assert!(!settings.import.link, "imports copy by default");
         assert!(settings.mcp_servers.is_empty());
         assert!(settings.skill_folders.is_empty());
+        assert!(settings.updates.check, "updates are checked by default");
+        assert_eq!(settings.updates.last_check, 0);
         let parsed: Settings = serde_json::from_str("{}").unwrap();
         assert_eq!(parsed, settings);
+        let linked: Settings = serde_json::from_str(r#"{"import":{"link":true}}"#).unwrap();
+        assert!(linked.import.link);
+        let without: Settings =
+            serde_json::from_str(r#"{"playback":{"loop_playback":true}}"#).unwrap();
+        assert!(without.playback.proxies && without.playback.loop_playback);
         assert_eq!(parsed.model, ModelChoice::default());
         assert_eq!(parsed.sandbox, SandboxChoice::default());
     }
@@ -502,6 +576,23 @@ mod tests {
         assert!(server.url.is_empty());
         assert_eq!(McpServer::default().kind, McpServer::STDIO);
         assert!(!McpServer::default().enabled);
+    }
+
+    #[test]
+    fn the_update_switch_and_last_check_are_stored() {
+        let settings: Settings =
+            serde_json::from_str(r#"{"updates":{"check":false,"future_update":1}}"#).unwrap();
+        assert!(!settings.updates.check);
+        assert_eq!(settings.updates.last_check, 0);
+        let mut settings = settings;
+        settings.updates.last_check = 1_800_000_000;
+        let written = serde_json::to_value(&settings).unwrap();
+        assert_eq!(written["updates"]["check"], false);
+        assert_eq!(written["updates"]["last_check"], 1_800_000_000u64);
+        assert_eq!(written["updates"]["future_update"], 1);
+        let read: Settings = serde_json::from_value(written).unwrap();
+        assert_eq!(read, settings);
+        assert!(serde_json::from_str::<Settings>(r#"{"updates":{"last_check":-1}}"#).is_err());
     }
 
     #[test]

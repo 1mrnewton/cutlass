@@ -220,7 +220,7 @@ fn pool_mut<'a>(draft: &'a mut Draft, kind: &str) -> &'a mut Vec<RawMaterial> {
 /// The clip, when it takes a grade: a picture, an adjustment layer, or a
 /// filter, on an unlocked row.
 fn colour_target(draft: &Draft, segment_id: &SegmentId) -> Result<(usize, usize), EditError> {
-    let (track_index, segment_index) = super::speed::locate(draft, segment_id)?;
+    let (track_index, segment_index) = super::locate(draft, segment_id)?;
     let track = &draft.tracks[track_index];
     ensure_unlocked(track.attribute)?;
     if matches!(track.kind, TrackType::Audio | TrackType::Effect) {

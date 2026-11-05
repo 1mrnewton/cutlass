@@ -25,6 +25,20 @@ pub enum TrimEdge {
     End,
 }
 
+/// Where Arrange moves a clip among the picture clips it overlaps.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Arrange {
+    /// Above the next clip over it.
+    Forward,
+    /// Below the next clip under it.
+    Backward,
+    /// Above every clip it overlaps.
+    Front,
+    /// Below every clip it overlaps.
+    Back,
+}
+
 /// One change. A combo is a slice of these.
 ///
 /// As JSON a request names its kind in `op`, in snake case, beside its
@@ -251,6 +265,16 @@ pub enum Request {
         segment_id: SegmentId,
         style: String,
     },
+    /// Mark word `word` of the caption as a keyword, drawn in the style's
+    /// spoken look while it shows, or take the mark off.
+    SetCaptionKeyword {
+        segment_id: SegmentId,
+        word: usize,
+        on: bool,
+    },
+    /// Start each letter of a caption word `millis` after the one before
+    /// it, from 0 to [`crate::MAX_CAPTION_STAGGER_MS`].
+    SetCaptionStagger { segment_id: SegmentId, millis: i64 },
     /// Place a new text clip saying `content` in `face`, from `start` for
     /// `duration`. `track_id` is created as a text row when it is missing.
     AddText {
@@ -519,6 +543,15 @@ pub enum Request {
     SetColorSpace { space: i32 },
     /// Store the project name. Surrounding whitespace is dropped.
     SetProjectName { name: String },
+    /// Stack picture clips by their own layer (on) or by their tracks
+    /// (off, which puts every clip back on its track's layer).
+    SetFreeLayer { on: bool },
+    /// Move a picture clip up or down among those it overlaps. Needs
+    /// Free layer on.
+    Arrange {
+        segment_id: SegmentId,
+        step: Arrange,
+    },
 }
 
 #[cfg(test)]

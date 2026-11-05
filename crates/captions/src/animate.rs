@@ -57,6 +57,9 @@ pub struct StyleCurves {
     pub rotation: Channel,
     pub scale_x: Channel,
     pub scale_y: Channel,
+    /// The keys count from the start of each word's range rather than
+    /// from the caption's clock, so a look can grow in as a word starts.
+    pub from_word_start: bool,
 }
 
 /// Curves for unread, reading, read, and keyword text.
@@ -150,6 +153,7 @@ impl StyleCurves {
             rotation: empty_channel(),
             scale_x: empty_channel(),
             scale_y: empty_channel(),
+            from_word_start: false,
         }
     }
 
@@ -449,6 +453,13 @@ fn batch_for(
 ) -> Result<Option<GlyphBatch>, CaptionError> {
     let Some((start, end)) = byte_span(letters, range)? else {
         return Ok(None);
+    };
+    let millis = if curves.from_word_start {
+        millis
+            .checked_sub(range.start)
+            .ok_or(CaptionError::Overflow)?
+    } else {
+        millis
     };
     let glyphs = place_glyphs(letters, curves, start, end, millis, stagger_shift_ms)?;
     if glyphs.is_empty() {

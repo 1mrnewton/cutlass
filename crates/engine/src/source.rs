@@ -46,6 +46,9 @@ pub struct VideoSource {
     patient: Cell<bool>,
     /// A read returned an earlier picture than the one asked for.
     stale: Cell<bool>,
+    /// An animated GIF or WebP plays round and round for as long as its
+    /// clip lasts: the length of one round.
+    round: Option<i64>,
 }
 
 impl VideoSource {
@@ -96,9 +99,19 @@ impl VideoSource {
         self.clock.borrow_mut().advance_audio(frames, rate)
     }
 
+    /// The picture's own time at timeline `time`, wrapped into one round
+    /// for an animated still.
+    fn source_at(&self, time: Micros) -> Result<Micros, map::MapError> {
+        let source = map::map_timeline(&self.map, time)?;
+        Ok(match self.round {
+            Some(round) => Micros(source.0.rem_euclid(round)),
+            None => source,
+        })
+    }
+
     /// Decode into the window unless playback is already past `time`.
     pub fn fill(&self, time: Micros) -> Result<Sample, EngineError> {
-        let source = map::map_timeline(&self.map, time)?;
+        let source = self.source_at(time)?;
         let held = self.decode(source)?;
         let clock = self.clock.borrow();
         let late = clock.kind() == ClockKind::Playback && clock.audio_time().0 > time.0;
@@ -134,7 +147,7 @@ impl VideoSource {
     /// waiting. A clip without a thread, or a time outside the clip, is left
     /// alone.
     pub fn prefetch(&self, time: Micros) {
-        if let (Some(ahead), Ok(source)) = (&self.ahead, map::map_timeline(&self.map, time)) {
+        if let (Some(ahead), Ok(source)) = (&self.ahead, self.source_at(time)) {
             ahead.prefetch(source);
         }
     }
@@ -150,7 +163,7 @@ impl VideoSource {
     /// thread has not decoded it yet returns the stored picture nearest it
     /// and marks itself stale. A clip with nothing stored waits.
     fn frame_at(&self, time: Micros) -> Result<DecodedFrame, EngineError> {
-        let source = map::map_timeline(&self.map, time)?;
+        let source = self.source_at(time)?;
         let cached = self.cache.borrow().get(source.0).cloned();
         if let Some(frame) = cached {
             return Ok(frame);
@@ -188,7 +201,7 @@ impl VideoSource {
     /// A miss is [`EngineError::NotReady`] and does not decode. A time outside
     /// the segment is [`EngineError::Outside`].
     pub fn strip_at(&self, time: Micros) -> Result<StripCell, EngineError> {
-        let source = map::map_timeline(&self.map, time)?;
+        let source = self.source_at(time)?;
         self.preload.borrow().strip(source)
     }
 
@@ -198,7 +211,7 @@ impl VideoSource {
     /// [`EngineError::NotReady`] and is not stored. This does not wait on the
     /// audio clock and does not fill the playback window.
     pub fn fill_strip(&self, time: Micros) -> Result<(), EngineError> {
-        let source = map::map_timeline(&self.map, time)?;
+        let source = self.source_at(time)?;
         let held = self.decode(source)?;
         let picture = decoded_picture(&held.frame)?;
         let Picture::Cpu(bytes) = picture else {
@@ -295,6 +308,11 @@ pub fn open_segment_in(
     })?;
     let media = factory.open(&path)?;
     let display = media.info().display;
+    let round = (media.info().family == cutlass_codec::ContainerId::Still)
+        .then_some(media.info().duration)
+        .flatten()
+        .map(|duration| duration.0)
+        .filter(|duration| *duration > 0);
     let map = map::placement_of(draft, segment)?;
     Ok(VideoSource {
         path,
@@ -308,6 +326,7 @@ pub fn open_segment_in(
         ahead: None,
         patient: Cell::new(true),
         stale: Cell::new(false),
+        round,
     })
 }
 
@@ -403,6 +422,21 @@ fn coded_bytes(
     bytes: &[u8],
 ) -> Result<Picture, EngineError> {
     let layout = pixel_layout(pixel);
+    if pixel == PixelFormat::Rgba8 {
+        // Straight sRGB RGBA, such as each frame of a GIF: premultiply it.
+        let mut rgba = bytes.to_vec();
+        for pixel in rgba.as_chunks_mut::<4>().0 {
+            let alpha = pixel[3];
+            for channel in &mut pixel[..3] {
+                *channel = premultiply(*channel, alpha);
+            }
+        }
+        return CpuBytes::new(width, height, rgba)
+            .map(Picture::Cpu)
+            .map_err(|_| EngineError::ColorMiss {
+                layout: layout.to_owned(),
+            });
+    }
     if pixel != PixelFormat::Yuv420p {
         return Err(EngineError::ColorMiss {
             layout: layout.to_owned(),

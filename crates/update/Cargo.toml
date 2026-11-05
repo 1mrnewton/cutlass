@@ -1,0 +1,19 @@
+[package]
+name = "cutlass-update"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "The release feed, the package for this platform, and putting it in place."
+
+[dependencies]
+cutlass-download = { path = "../download", version = "0.1.0" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+
+[dev-dependencies]
+# The loopback tests use the real transport.
+cutlass-download = { path = "../download", version = "0.1.0", features = ["http"] }
+
+[lints]
+workspace = true

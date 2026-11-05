@@ -10,6 +10,7 @@ use cutlass_picture::{CpuBytes, Picture, Sample};
 use crate::canvas::canvas_rgba;
 use crate::effect::{RecipeMark, StackLayer, needs_cpu, present, recipe_marks};
 use crate::gpu::{Composed, FrameLayers, GpuLayer};
+use crate::lottie::{LottieLayer, PlacedLottie, lottie_layers};
 use crate::media::{OpenClips, Placed, video_layers};
 use crate::nest::{NestPass, NestedLayer, NestedPicture, nest_layers};
 use crate::sources::{SolidLayer, solid_layers};
@@ -267,7 +268,13 @@ fn gpu_layers(
             },
             Paint::Nest(nested) => nested.gpu(),
             Paint::Text(text) => text.gpu(),
-            Paint::Mixed(_) => None,
+            Paint::Lottie(lottie) => lottie.gpu(),
+            Paint::Mixed(mixed) => Some(vec![GpuLayer::transition(
+                mixed.moment.kind,
+                mixed.moment.t(),
+                mixed.outgoing.clone(),
+                mixed.incoming.clone(),
+            )]),
         };
         let mut drawn = match gpu {
             Some(gpu) => gpu,
@@ -389,6 +396,7 @@ fn with_layers<D: Device, T>(
         extent.height,
         &mut pass,
     )?;
+    let lotties = lottie_layers(draft, extent.width, extent.height, pass.time, pass.clips);
     let mut layers = ordered(
         solid_layers(draft, extent.width, extent.height),
         text_layers(
@@ -409,6 +417,8 @@ fn with_layers<D: Device, T>(
         ),
         nests,
     );
+    // Lottie stickers join in their place among the other clips.
+    add_lotties(&mut layers, lotties);
     apply_transitions(
         draft,
         snapshot.packages(),
@@ -432,15 +442,29 @@ enum Paint<'a> {
     Solid(SolidColor),
     Text(crate::text::PlacedText),
     Video(Placed<'a>),
+    Lottie(PlacedLottie),
     Nest(NestedPicture),
     Mixed(Mixed),
 }
 
-struct Mixed(CpuBytes);
+/// A clip in a transition: both pictures and the moment, mixed on the GPU
+/// when the frame is drawn there and on the CPU when it is composed.
+struct Mixed {
+    moment: crate::transition::Moment,
+    outgoing: CpuBytes,
+    incoming: CpuBytes,
+}
 
 impl PictureSource for Mixed {
     fn sample(&self, _time: Micros) -> Sample {
-        Sample::Ready(Picture::Cpu(self.0.clone()))
+        let (width, height) = (self.outgoing.width(), self.outgoing.height());
+        match self
+            .moment
+            .mix(self.outgoing.rgba(), self.incoming.rgba(), width, height)
+        {
+            Some(mixed) => Sample::Ready(Picture::Cpu(mixed)),
+            None => Sample::Miss,
+        }
     }
 }
 
@@ -455,6 +479,7 @@ impl Ordered<'_> {
             Paint::Solid(solid) => solid,
             Paint::Text(text) => text,
             Paint::Video(video) => video,
+            Paint::Lottie(lottie) => lottie,
             Paint::Nest(nested) => nested,
             Paint::Mixed(mixed) => mixed,
         }
@@ -491,13 +516,25 @@ fn apply_transitions(
         ) else {
             continue;
         };
-        let (outgoing, incoming) = cut.ordered(covering.rgba(), partner.rgba());
-        let Some(mixed) =
-            crate::transition::fade(store, draft, cut, outgoing, incoming, width, height)
-        else {
+        let Some(moment) = crate::transition::moment(store, draft, cut) else {
             continue;
         };
-        layers[index].paint = Paint::Mixed(Mixed(mixed));
+        let size = (width, height);
+        if (covering.width(), covering.height()) != size
+            || (partner.width(), partner.height()) != size
+        {
+            continue;
+        }
+        let (outgoing, incoming) = if cut.covers_outgoing() {
+            (covering, partner)
+        } else {
+            (partner, covering)
+        };
+        layers[index].paint = Paint::Mixed(Mixed {
+            moment,
+            outgoing,
+            incoming,
+        });
     }
 }
 
@@ -516,6 +553,7 @@ fn partner_picture(
         .find(|layer| layer.key.1 == track && layer.key.2 == segment)?;
     match &layer.paint {
         Paint::Solid(solid) => cpu_at(solid, time),
+        Paint::Lottie(lottie) => cpu_at(lottie, time),
         Paint::Text(_) | Paint::Video(_) | Paint::Nest(_) | Paint::Mixed(_) => None,
     }
 }
@@ -564,6 +602,23 @@ fn ordered<'a>(
     }
     layers.sort_by_key(|layer| layer.key);
     layers
+}
+
+fn add_lotties(layers: &mut Vec<Ordered<'_>>, lotties: Vec<LottieLayer>) {
+    if lotties.is_empty() {
+        return;
+    }
+    for lottie in lotties {
+        layers.push(Ordered {
+            key: (
+                lottie.render_index,
+                lottie.track_index,
+                lottie.segment_index,
+            ),
+            paint: Paint::Lottie(lottie.placed),
+        });
+    }
+    layers.sort_by_key(|layer| layer.key);
 }
 
 /// Keeps `frame` for export. A late arrival is still the picture.

@@ -14,6 +14,7 @@ mod grade;
 mod import;
 mod keyframe;
 mod lane;
+mod layer;
 mod linkage;
 mod lut;
 mod magnet;
@@ -46,7 +47,7 @@ use crate::request::Request;
 pub use canvas::{CANVAS_SHAPES, CanvasShape, canvas_for, follow_first_picture, ratio_request};
 pub use move_segment::move_segment;
 pub use place::place;
-pub use text::NEW_TEXT_SIZE;
+pub use text::{MAX_CAPTION_STAGGER_MS, NEW_TEXT_SIZE};
 pub use trim::trim;
 pub use words::set_words;
 
@@ -172,6 +173,8 @@ pub enum EditError {
     CanvasSize,
     /// The canvas ratio is not one of the project shapes.
     CanvasRatio,
+    /// Arrange moves picture clips, and only with Free layer on.
+    FreeLayer,
     /// A letterbox color belongs on a video or a composition.
     Letterbox,
     /// A letterbox blur is not a fraction from 0 through 1.
@@ -332,6 +335,14 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             alpha,
             round,
         } => text::set_text_background(draft, segment_id, color, *alpha, *round),
+        Request::SetCaptionKeyword {
+            segment_id,
+            word,
+            on,
+        } => text::set_caption_keyword(draft, segment_id, *word, *on),
+        Request::SetCaptionStagger { segment_id, millis } => {
+            text::set_caption_stagger(draft, segment_id, *millis)
+        }
         Request::SetCaptionStyle { segment_id, style } => {
             text::set_caption_style(draft, segment_id, style)
         }
@@ -579,6 +590,11 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             name::set_project_name(draft, name);
             Ok(())
         }
+        Request::SetFreeLayer { on } => {
+            layer::set_free_layer(draft, *on);
+            Ok(())
+        }
+        Request::Arrange { segment_id, step } => layer::arrange(draft, segment_id, *step),
     }
 }
 
@@ -614,4 +630,43 @@ pub fn ensure_unlocked(attribute: TrackAttribute) -> Result<(), EditError> {
     } else {
         Ok(())
     }
+}
+
+/// Where segment `segment_id` is: its track and its place on that track.
+pub(super) fn locate(
+    draft: &Draft,
+    segment_id: &cutlass_model::SegmentId,
+) -> Result<(usize, usize), EditError> {
+    for (track_index, track) in draft.tracks.iter().enumerate() {
+        if let Some(segment_index) = track
+            .segments
+            .iter()
+            .position(|segment| &segment.id == segment_id)
+        {
+            return Ok((track_index, segment_index));
+        }
+    }
+    Err(EditError::MissingSegment)
+}
+
+/// `candidate` overlaps a segment on `track` other than `ignore`. Touching
+/// is not overlapping.
+pub(super) fn overlaps_except(
+    track: &cutlass_model::Track,
+    candidate: &cutlass_model::Segment,
+    ignore: &cutlass_model::SegmentId,
+) -> Result<bool, EditError> {
+    for segment in &track.segments {
+        if &segment.id == ignore {
+            continue;
+        }
+        if candidate
+            .target
+            .overlaps(&segment.target)
+            .map_err(EditError::Range)?
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }

@@ -1,6 +1,6 @@
 use cutlass_model::{Draft, FreezeInfo, MaterialVideo, SegmentId};
 
-use super::speed::locate;
+use super::locate;
 use super::{EditError, ensure_unlocked};
 
 /// Store a freeze mapping on the video material. This does not seek.

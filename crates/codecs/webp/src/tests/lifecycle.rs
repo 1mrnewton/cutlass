@@ -52,10 +52,36 @@ fn the_decoder_answers_stills_alike_and_refuses_what_it_cannot_take() {
         .clone();
     let mut decoder = decoder();
     assert!(WebpDecoder::open(&CodecParams::video(CodecId::Png, 0, 0)).is_err());
-    assert!(matches!(
-        decoder.push(&still_packet(file.clone())),
-        Err(CodecError::InvalidApi { .. })
-    ));
+    // `push` hands over the same picture as RGBA, opaque where the file
+    // has no alpha.
+    let pushed = decoder.push(&still_packet(file.clone())).expect("push");
+    let still = decoder
+        .decode_picture(&still_packet(file.clone()))
+        .expect("still");
+    let [cutlass_decode::Output::Picture(picture)] = pushed.as_slice() else {
+        panic!("one picture");
+    };
+    assert_eq!((picture.info().width, picture.info().height), (9, 7));
+    assert_eq!(picture.info().pixel, PixelFormat::Rgba8);
+    let cutlass_decode::PictureSamples::Cpu(bytes) = picture.samples() else {
+        panic!("cpu");
+    };
+    let channels = if still[0].image.color == ColorType::Rgba {
+        4
+    } else {
+        3
+    };
+    let expected: Vec<u8> = still[0]
+        .image
+        .samples
+        .chunks_exact(channels)
+        .flat_map(|pixel| {
+            let mut rgba: Vec<u8> = pixel.iter().map(|&v| v as u8).collect();
+            rgba.resize(4, u8::MAX);
+            rgba
+        })
+        .collect();
+    assert_eq!(bytes, &expected[..]);
     assert!(matches!(
         decoder.decode_picture(&still_packet(Vec::new())),
         Err(CodecError::InvalidApi { .. })

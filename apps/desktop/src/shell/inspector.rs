@@ -456,6 +456,39 @@ impl Shell {
         })
     }
 
+    /// Move the selected picture clip up or down among the clips it
+    /// overlaps. Needs Free layer on. One undo restores it.
+    pub fn arrange(&mut self, step: cutlass_session::Arrange) -> Result<(), ShellError> {
+        let segment_id = self.selected_or_refuse()?;
+        self.refuse_locked(&segment_id)?;
+        if !self.draft().is_some_and(|draft| draft.config.free_layer) {
+            return Err(ShellError::Unavailable(
+                "turn on Free layer in the project settings to arrange clips".to_owned(),
+            ));
+        }
+        self.apply(Request::Arrange { segment_id, step })
+    }
+
+    /// Mark word `index` of the selected caption as a keyword, drawn in
+    /// its style's spoken look, or take the mark off. One undo restores it.
+    pub fn set_caption_keyword(&mut self, index: usize, on: bool) -> Result<(), ShellError> {
+        let segment_id = self.text_segment()?;
+        self.refuse_locked(&segment_id)?;
+        self.apply(Request::SetCaptionKeyword {
+            segment_id,
+            word: index,
+            on,
+        })
+    }
+
+    /// Start each letter of the selected caption's words `millis` after
+    /// the one before. One undo restores it.
+    pub fn set_caption_stagger(&mut self, millis: i64) -> Result<(), ShellError> {
+        let segment_id = self.text_segment()?;
+        self.refuse_locked(&segment_id)?;
+        self.apply(Request::SetCaptionStagger { segment_id, millis })
+    }
+
     /// Replace word `index` of the selected caption. The word keeps its
     /// times, and the caption reads the words joined by spaces. One undo
     /// restores the word.
@@ -684,6 +717,47 @@ mod tests {
 
     fn pick(desktop: &mut Shell, id: &str) {
         desktop.select(Some(SegmentId::new(id)));
+    }
+
+    /// The video clips in drawing order, bottom first.
+    fn stack(desktop: &Shell) -> Vec<String> {
+        let draft = desktop.draft().unwrap();
+        let mut keys = Vec::new();
+        for (track, row) in draft.tracks.iter().enumerate() {
+            if !matches!(row.kind, TrackType::Video) {
+                continue;
+            }
+            for (at, segment) in row.segments.iter().enumerate() {
+                keys.push(((segment.render_index, track, at), segment.id.to_string()));
+            }
+        }
+        keys.sort();
+        keys.into_iter().map(|(_, id)| id).collect()
+    }
+
+    #[test]
+    fn arrange_needs_free_layer_and_moves_a_clip_in_one_step() {
+        let temp = Temp::new();
+        let mut desktop = every_kind(&temp);
+        assert_eq!(stack(&desktop), ["main", "overlay", "still", "solid"]);
+        pick(&mut desktop, "overlay");
+        assert!(
+            desktop.arrange(cutlass_session::Arrange::Front).is_err(),
+            "off, the tracks give the order"
+        );
+        let mut settings = desktop.project_settings().unwrap();
+        settings.free_layer = true;
+        desktop.save_project_settings(&settings).unwrap();
+        desktop.arrange(cutlass_session::Arrange::Front).unwrap();
+        assert_eq!(stack(&desktop), ["main", "still", "solid", "overlay"]);
+        pick(&mut desktop, "main");
+        desktop.arrange(cutlass_session::Arrange::Forward).unwrap();
+        assert_eq!(stack(&desktop), ["still", "main", "solid", "overlay"]);
+        desktop.undo().unwrap();
+        assert_eq!(stack(&desktop), ["main", "still", "solid", "overlay"]);
+        settings.free_layer = false;
+        desktop.save_project_settings(&settings).unwrap();
+        assert_eq!(stack(&desktop), ["main", "overlay", "still", "solid"]);
     }
 
     fn lock(desktop: &mut Shell, track: &str) {
@@ -1096,6 +1170,15 @@ mod tests {
         desktop.set_caption_style("karaoke").unwrap();
         assert_eq!(desktop.inspection().unwrap().caption_style, "karaoke");
         assert!(desktop.set_caption_style("loud").is_err());
+        desktop.set_caption_keyword(2, true).unwrap();
+        desktop.set_caption_stagger(40).unwrap();
+        let marked = desktop.inspection().unwrap();
+        assert_eq!(marked.caption_keywords, [2]);
+        assert_eq!(marked.caption_stagger_ms, 40);
+        assert!(desktop.set_caption_keyword(9, true).is_err());
+        assert!(desktop.set_caption_stagger(5_000).is_err());
+        desktop.undo().unwrap();
+        desktop.undo().unwrap();
         for _ in 0..4 {
             desktop.undo().unwrap();
         }

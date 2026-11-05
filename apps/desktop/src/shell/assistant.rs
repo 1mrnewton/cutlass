@@ -5,13 +5,13 @@
 
 use cutlass_agent::{
     ApprovalAction, Approver, DraftTools, Export, McpClient, McpError, McpTransport, Player,
-    Registry, SettingsTool, ToolCall, ToolOutcome, ToolSink,
+    Registry, SettingsTool, Speech, ToolCall, ToolOutcome, ToolSink,
 };
 use cutlass_codec::CodecId;
 use cutlass_model::Micros;
 
 use super::{ExportRequest, Shell};
-use crate::mcp::{NoSandbox, Probe, Unbuilt};
+use crate::mcp::{Bundled, Probe, Unbuilt};
 
 /// Where the tools this window does not hand the assistant yet are.
 const IN_THE_WINDOW: &str = "not open to the assistant yet; use the window for it";
@@ -57,6 +57,25 @@ impl Approver for Asked<'_> {
         }
         self.wanted.get_or_insert_with(|| action.clone());
         false
+    }
+}
+
+/// Transcription as a window job; an earlier call's job is polled here.
+struct Hearing<'a> {
+    shell: &'a mut Shell,
+}
+
+impl Speech for Hearing<'_> {
+    fn start(&mut self, start_us: i64, duration_us: i64) -> Result<String, String> {
+        self.shell
+            .start_hearing(start_us, duration_us)
+            .map_err(|error| error.to_string())
+    }
+
+    fn poll(&mut self, job_id: &str) -> Result<Option<String>, String> {
+        self.shell
+            .hearing(job_id)
+            .map_err(|error| error.to_string())
     }
 }
 
@@ -118,17 +137,20 @@ impl Shell {
             .clone()
             .unwrap_or_else(|| (Shell::settings_path(), 0));
         let settings = SettingsTool::held(path, generation, self.settings.clone());
+        let jobs = std::mem::take(&mut self.agent_speech_jobs);
+        let sandbox =
+            crate::sandbox::local_sandbox(crate::sandbox::this_program(), self.project_folder());
         let mut registry = Registry::new(
             DraftTools::new(session),
             settings,
             Moves::default(),
             Probe,
-            Unbuilt(IN_THE_WINDOW),
-            Unbuilt(IN_THE_WINDOW),
+            Hearing { shell: self },
+            Bundled,
             (
                 Unbuilt(IN_THE_WINDOW),
                 Exports::default(),
-                NoSandbox,
+                sandbox,
                 Asked {
                     allowed,
                     wanted: None,
@@ -136,22 +158,28 @@ impl Shell {
                 McpClient::new(NoServers),
             ),
         );
+        registry.set_speech_jobs(jobs);
         let mut outcome = registry.run_tool(call);
         let wants = registry.approver.wanted.take();
-        let session = registry.draft.session();
+        let session = registry.draft.session().clone();
+        let moves = std::mem::take(&mut registry.player);
+        let exported = registry.export.path.take();
+        let jobs = registry.take_speech_jobs();
+        drop(registry);
+        self.agent_speech_jobs = jobs;
         if session.revision() != before {
-            self.session = Some(session.clone());
+            self.session = Some(session);
             self.lanes_cache.replace(None);
         }
-        if let Some(time) = registry.player.seek {
+        if let Some(time) = moves.seek {
             self.seek(Micros(time));
         }
-        match registry.player.play {
+        match moves.play {
             Some(true) => self.play(),
             Some(false) => self.pause(),
             None => {}
         }
-        if let Some(path) = registry.export.path.take() {
+        if let Some(path) = exported {
             let replace = call.arguments.trim_start().starts_with("replace");
             let codec = if path.to_ascii_lowercase().ends_with(".png") {
                 CodecId::Png

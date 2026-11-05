@@ -84,8 +84,21 @@ pub struct DraftConfig {
     pub hdr_vivid: bool,
     #[serde(default)]
     pub material_save_mode: i32,
+    /// Free layer: picture clips are stacked by their own layer, set by
+    /// Arrange, rather than by their tracks. The app's own.
+    #[serde(
+        default,
+        rename = "cutlass_free_layer",
+        skip_serializing_if = "is_false"
+    )]
+    pub free_layer: bool,
     #[serde(flatten, default)]
     pub rest: Map<String, Value>,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+const fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// One cut. `draft_info.json` is this object.

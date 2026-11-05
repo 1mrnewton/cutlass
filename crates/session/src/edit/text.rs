@@ -3,7 +3,7 @@ use cutlass_model::{
     TrackType, segment_bloom,
 };
 
-use super::speed::locate;
+use super::locate;
 use super::{EditError, ensure_unlocked};
 
 /// Replace the text material's words. A rich title keeps its styled
@@ -323,6 +323,50 @@ pub fn set_caption_style(
     }
     let index = own_text(draft, segment_id)?;
     style.clone_into(&mut draft.materials.texts[index].caption_style);
+    Ok(())
+}
+
+/// The longest a caption's letters wait one after another.
+pub const MAX_CAPTION_STAGGER_MS: i64 = 500;
+
+/// Mark word `word` of the caption as a keyword, or take the mark off. A
+/// word the caption does not have is refused.
+pub fn set_caption_keyword(
+    draft: &mut Draft,
+    segment_id: &SegmentId,
+    word: usize,
+    on: bool,
+) -> Result<(), EditError> {
+    let index = own_text(draft, segment_id)?;
+    let text = &mut draft.materials.texts[index];
+    let columns = if text.current_words.text.is_empty() {
+        &text.words
+    } else {
+        &text.current_words
+    };
+    if word >= columns.text.len() {
+        return Err(EditError::TextStyle);
+    }
+    let marked = &mut text.caption_keywords;
+    marked.retain(|kept| *kept != word);
+    if on {
+        marked.push(word);
+        marked.sort_unstable();
+    }
+    Ok(())
+}
+
+/// Start each letter of the caption's words `millis` after the one before.
+pub fn set_caption_stagger(
+    draft: &mut Draft,
+    segment_id: &SegmentId,
+    millis: i64,
+) -> Result<(), EditError> {
+    if !(0..=MAX_CAPTION_STAGGER_MS).contains(&millis) {
+        return Err(EditError::TextStyle);
+    }
+    let index = own_text(draft, segment_id)?;
+    draft.materials.texts[index].caption_stagger_ms = millis;
     Ok(())
 }
 
@@ -648,6 +692,41 @@ mod tests {
         let revision = session.revision();
         session.apply(revision, &[caption("")]).unwrap();
         assert!(session.draft().materials.texts[0].caption_style.is_empty());
+
+        // Keywords and stagger are kept on the material, one undo each.
+        let keyword = |word: usize, on: bool| Request::SetCaptionKeyword {
+            segment_id: "a".into(),
+            word,
+            on,
+        };
+        let revision = session.revision();
+        session
+            .apply(revision, &[keyword(0, true), keyword(0, true)])
+            .unwrap();
+        assert_eq!(session.draft().materials.texts[0].caption_keywords, [0]);
+        let revision = session.revision();
+        session.apply(revision, &[keyword(0, false)]).unwrap();
+        assert!(
+            session.draft().materials.texts[0]
+                .caption_keywords
+                .is_empty()
+        );
+        let stagger = |millis: i64| Request::SetCaptionStagger {
+            segment_id: "a".into(),
+            millis,
+        };
+        let revision = session.revision();
+        session.apply(revision, &[stagger(40)]).unwrap();
+        assert_eq!(session.draft().materials.texts[0].caption_stagger_ms, 40);
+        session.undo().unwrap();
+        assert_eq!(session.draft().materials.texts[0].caption_stagger_ms, 0);
+        for refused in [keyword(1, true), stagger(-1), stagger(501)] {
+            let revision = session.revision();
+            assert_eq!(
+                session.apply(revision, &[refused]),
+                Err(EditError::TextStyle)
+            );
+        }
 
         for (request, error) in [
             (caption("loud"), EditError::TextStyle),

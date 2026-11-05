@@ -88,7 +88,7 @@ PSNR is over RGB where alpha is not zero. SSIM is over BT.601 luma in 8×8 windo
 
 ## Lifecycle
 
-`tests/lifecycle.rs`. One still packet is one picture. A failed packet leaves the decoder usable. A later animation packet with no first packet before it is refused, and a failed frame leaves the canvas as it was. `reset` forgets the canvas. The encoder buffers frames until `drain`; a second `drain` is empty; frames after a drain start a new file; `reset` drops waiting frames; a still in the middle of an animation is its own file. A raised cancel flag makes `push_frame`, `push_picture` and `drain` return `Cancelled`. Audio `push` is `InvalidApi` on both sides.
+`tests/lifecycle.rs`. One still packet is one picture. A failed packet leaves the decoder usable. A later animation packet with no first packet before it is refused, and a failed frame leaves the canvas as it was. `reset` forgets the canvas. The encoder buffers frames until `drain`; a second `drain` is empty; frames after a drain start a new file; `reset` drops waiting frames; a still in the middle of an animation is its own file. A raised cancel flag makes `push_frame`, `push_picture` and `drain` return `Cancelled`. The decoder's `push` hands over each picture as straight RGBA, opaque where the file has no alpha; audio `push` on the encoder is `InvalidApi`.
 
 ## Lossless size against `cwebp`
 

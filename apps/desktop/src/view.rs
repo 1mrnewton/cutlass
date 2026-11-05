@@ -105,7 +105,7 @@ impl Shelf {
             Self::Media => "No media yet. Use File → Import.",
             Self::Audio => "No audio yet. Use File → Import.",
             Self::Text => "No title matches the search.",
-            Self::Stickers => "No stickers in this project.",
+            Self::Stickers => "No stickers.",
             Self::Effects => "No effect matches the search.",
             Self::Transitions => "No transitions in this project.",
             Self::Filters => "No filters in this project.",
@@ -313,6 +313,13 @@ pub fn show(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Option
         ui.ctx()
             .request_repaint_after(std::time::Duration::from_millis(100));
     }
+    if shell.poll_update_check() {
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(200));
+    }
+    if shell.serve_forwarded() {
+        ui.ctx().request_repaint();
+    }
     show_imported(shell, view);
     if view.assistant.poll(shell) {
         ui.ctx()
@@ -382,6 +389,13 @@ pub fn show(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Option
     if view.approval.is_some() {
         approval_dialog(shell, ui, view);
     }
+    if shell.wants_speech_model() {
+        speech_model_dialog(shell, ui);
+    }
+    if shell.update_offer().is_some() {
+        update_dialog(shell, ui);
+    }
+    restart_for_update(shell, ui);
     dropped_files(shell, ui);
 }
 
@@ -543,7 +557,7 @@ fn projects_home(
                 file_menu(shell, ui, view, parent);
             });
             ui.menu_button(RichText::new("Help").color(tokens::FAINT), |ui| {
-                help_menu(ui, view, parent);
+                help_menu(shell, ui, view, parent);
             });
         });
     });
@@ -914,7 +928,7 @@ fn menus(
 ) {
     let menu = Rect::from_min_size(
         bar.min + Vec2::new(78.0, 0.0),
-        Vec2::new(280.0, bar.height()),
+        Vec2::new(400.0, bar.height()),
     );
     ui.scope_builder(egui::UiBuilder::new().max_rect(menu), |ui| {
         ui.horizontal_centered(|ui| {
@@ -929,9 +943,15 @@ fn menus(
             });
             ui.menu_button(RichText::new("Edit").color(tokens::FAINT), |ui| {
                 edit_menu(shell, ui);
+                menu_items(shell, ui, view, parent, "Edit", &["undo", "redo"]);
             });
+            for title in ["Clip", "Playback"] {
+                ui.menu_button(RichText::new(title).color(tokens::FAINT), |ui| {
+                    menu_items(shell, ui, view, parent, title, &[]);
+                });
+            }
             ui.menu_button(RichText::new("Help").color(tokens::FAINT), |ui| {
-                help_menu(ui, view, parent);
+                help_menu(shell, ui, view, parent);
             });
         });
     });
@@ -961,7 +981,100 @@ fn file_menu(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Optio
     }
 }
 
-fn help_menu(ui: &mut Ui, view: &mut ViewState, parent: Option<&eframe::Frame>) {
+/// The items of the menu bar's `title` menu, but those in `skip`, each
+/// running its command. A separator stays between groups.
+fn menu_items(
+    shell: &mut Shell,
+    ui: &mut Ui,
+    view: &mut ViewState,
+    parent: Option<&eframe::Frame>,
+    title: &str,
+    skip: &[&str],
+) {
+    let Some(menu) = crate::menubar::MENUS
+        .iter()
+        .find(|menu| menu.title == title)
+    else {
+        return;
+    };
+    let mut chosen = None;
+    let mut drawn = false;
+    for entry in menu.items {
+        match entry {
+            Some(item) if skip.contains(&item.id) => {}
+            Some(item) => {
+                drawn = true;
+                if ui.button(item.label).clicked() {
+                    ui.close();
+                    chosen = Some(item.id);
+                }
+            }
+            None if drawn => {
+                ui.separator();
+                drawn = false;
+            }
+            None => {}
+        }
+    }
+    if let Some(id) = chosen {
+        run_menu(shell, view, parent, id);
+    }
+}
+
+/// Run the menu bar item `id`: a window command, or a shortcut action.
+pub fn run_menu(shell: &mut Shell, view: &mut ViewState, parent: Option<&eframe::Frame>, id: &str) {
+    use crate::menubar::{
+        CHECK_UPDATES, EXPORT, EXPORT_LOG, IMPORT, LICENSES, OPEN, PROJECTS, SAVE, SETTINGS,
+    };
+
+    let open = shell.draft().is_some();
+    let done = match id {
+        OPEN => {
+            view.dialogs.open_project(parent);
+            Ok(())
+        }
+        SETTINGS => {
+            view.settings_open = true;
+            Ok(())
+        }
+        LICENSES => {
+            view.licenses = Some(cutlass_licenses::notices());
+            Ok(())
+        }
+        EXPORT_LOG => {
+            view.dialogs.save_log(parent);
+            Ok(())
+        }
+        CHECK_UPDATES => {
+            shell.check_for_updates();
+            Ok(())
+        }
+        SAVE | IMPORT | EXPORT | PROJECTS if !open => Err(ShellError::NoProject),
+        SAVE => shell.save(),
+        IMPORT => {
+            view.dialogs.import(parent);
+            Ok(())
+        }
+        EXPORT => {
+            view.export_open = true;
+            Ok(())
+        }
+        PROJECTS => {
+            return_to_projects(shell, view);
+            Ok(())
+        }
+        action => shell.run_action(action),
+    };
+    if let Err(error) = done {
+        shell.set_notice(error.to_string());
+    }
+}
+
+fn help_menu(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Option<&eframe::Frame>) {
+    if ui.button("Check for updates…").clicked() {
+        ui.close();
+        shell.check_for_updates();
+    }
     if ui.button("Licenses").clicked() {
         ui.close();
         view.licenses = Some(cutlass_licenses::notices());
@@ -992,6 +1105,8 @@ fn licenses_window(ui: &mut Ui, view: &mut ViewState) {
                     .color(tokens::MUTED),
                 );
                 ui.add_space(8.0);
+                sticker_credits(ui);
+                ui.add_space(8.0);
                 for krate in &notices.crates {
                     egui::CollapsingHeader::new(format!("{} {}", krate.name, krate.version))
                         .id_salt(("license", &krate.name, &krate.version))
@@ -1011,6 +1126,24 @@ fn licenses_window(ui: &mut Ui, view: &mut ViewState) {
     });
     if closed || ui.input(|input| input.key_pressed(egui::Key::Escape)) {
         view.licenses = None;
+    }
+}
+
+/// The open sticker sets the app ships: each set, who made it, its license
+/// and its home, and the license text under it.
+fn sticker_credits(ui: &mut Ui) {
+    ui.label(RichText::new("Stickers").strong());
+    for credit in cutlass_stickers::CREDITS {
+        ui.label(format!(
+            "{} by {}, licensed {}.",
+            credit.set, credit.author, credit.license
+        ));
+        ui.label(RichText::new(credit.link).color(tokens::FAINT));
+        egui::CollapsingHeader::new(format!("{} license", credit.set))
+            .id_salt(("sticker license", credit.set))
+            .show(ui, |ui| {
+                ui.label(RichText::new(credit.text).monospace().size(10.0));
+            });
     }
 }
 
@@ -1091,6 +1224,10 @@ fn settings_window(
                             &mut settings.playback.scrub_audio,
                             "Play sound while the playhead is dragged",
                         );
+                        ui.checkbox(
+                            &mut settings.playback.proxies,
+                            "Play proxies of 4K and long clips in the viewer",
+                        );
                         choice_row(ui, "A seek", |ui| {
                             let seek = &mut settings.playback.seek_during_playback;
                             for (value, name) in [
@@ -1114,6 +1251,18 @@ fn settings_window(
                                 settings.set_panel_open(id, open);
                             }
                         }
+                        settings_heading(ui, "Import");
+                        let mut copy = !settings.import.link;
+                        if ui
+                            .checkbox(&mut copy, "Copy imported files into the project")
+                            .changed()
+                        {
+                            settings.import.link = !copy;
+                        }
+                        ui.label(
+                            RichText::new("Off, the project points at each file where it is.")
+                                .color(tokens::FAINT),
+                        );
                         settings_heading(ui, "Hardware codecs");
                         ui.checkbox(
                             &mut settings.hardware.decode,
@@ -1126,6 +1275,15 @@ fn settings_window(
                         ui.label(
                             RichText::new("These take effect when Cutlass opens again.")
                                 .color(tokens::FAINT),
+                        );
+                        settings_heading(ui, "Updates");
+                        ui.checkbox(&mut settings.updates.check, "Check for updates");
+                        ui.label(
+                            RichText::new(format!(
+                                "Cutlass {} looks for a new release once a day. Off, it never asks.",
+                                crate::shell::RUNNING_VERSION
+                            ))
+                            .color(tokens::FAINT),
                         );
                     }
                     SettingsTab::Assistant => {
@@ -1249,6 +1407,102 @@ fn approval_dialog(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
         }
         Some(false) => view.approval = None,
         None if refused => view.approval = None,
+        None => {}
+    }
+}
+
+/// A newer release is out: offer to download it and restart.
+fn update_dialog(shell: &mut Shell, ui: &mut Ui) {
+    let Some(offer) = shell.update_offer() else {
+        return;
+    };
+    let title = format!("Cutlass {} is available", offer.version);
+    let notes: Vec<String> = offer.notes_head(6).into_iter().map(str::to_owned).collect();
+    let mut answer = None;
+    let ((), closed) = widgets::dialog(ui, &title, |ui| {
+        ui.horizontal(|ui| {
+            ui.add_space(16.0);
+            ui.vertical(|ui| {
+                ui.set_max_width(372.0);
+                ui.label(format!(
+                    "You have Cutlass {}. The update downloads, replaces this copy and opens again.",
+                    crate::shell::RUNNING_VERSION
+                ));
+                for line in &notes {
+                    ui.label(RichText::new(line).color(tokens::MUTED));
+                }
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Update and restart").clicked() {
+                        answer = Some(true);
+                    }
+                    if ui.button("Later").clicked() {
+                        answer = Some(false);
+                    }
+                });
+            });
+        });
+    });
+    let later = closed || ui.input(|input| input.key_pressed(egui::Key::Escape));
+    match answer {
+        Some(true) => {
+            if let Err(error) = shell.install_update() {
+                shell.set_notice(error.to_string());
+            }
+        }
+        Some(false) => shell.decline_update(),
+        None if later => shell.decline_update(),
+        None => {}
+    }
+}
+
+/// An update is in place: start the new version once this one quits, and
+/// close. The project is saved on the way out.
+fn restart_for_update(shell: &mut Shell, ui: &Ui) {
+    let Some(relaunch) = shell.take_restart() else {
+        return;
+    };
+    match relaunch.spawn() {
+        Ok(()) => {
+            cutlass_logger::info!("update installed; restarting");
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+        Err(error) => shell.set_notice(format!(
+            "The update is installed. Open Cutlass again to use it ({error})."
+        )),
+    }
+}
+
+/// A transcript or hearing found no speech model: offer to download it.
+fn speech_model_dialog(shell: &mut Shell, ui: &mut Ui) {
+    let mut answer = None;
+    let ((), closed) = widgets::dialog(ui, "Download the speech model?", |ui| {
+        ui.horizontal(|ui| {
+            ui.add_space(16.0);
+            ui.vertical(|ui| {
+                ui.set_max_width(372.0);
+                ui.label(crate::shell::SPEECH_MODEL_QUESTION);
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Download").clicked() {
+                        answer = Some(true);
+                    }
+                    if ui.button("Not now").clicked() {
+                        answer = Some(false);
+                    }
+                });
+            });
+        });
+    });
+    let declined = closed || ui.input(|input| input.key_pressed(egui::Key::Escape));
+    match answer {
+        Some(true) => {
+            if let Err(error) = shell.download_speech_model() {
+                shell.set_notice(error.to_string());
+            }
+        }
+        Some(false) => shell.decline_speech_model(),
+        None if declined => shell.decline_speech_model(),
         None => {}
     }
 }
@@ -1589,6 +1843,10 @@ fn asset_column(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect
                     shell.add_adjustment()
                 } else if id.starts_with(cutlass_editor::FILTER_CARD_PREFIX) {
                     shell.add_filter(&id)
+                } else if id.starts_with(crate::shell::STICKER_CARD_PREFIX) {
+                    shell.add_sticker(&id)
+                } else if id.starts_with(cutlass_editor::TEMPLATE_CARD_PREFIX) {
+                    shell.add_template(&id)
                 } else {
                     shell.add_medium(&id)
                 };
@@ -2063,6 +2321,35 @@ fn fill_looks(shell: &mut Shell, ctx: &egui::Context, cards: &mut [BinCard]) {
                     };
                     card.look = CardLook::Picture(Some((texture, [width, height])));
                 }
+                CardLook::Picture(_) if card.id.starts_with(crate::shell::STICKER_CARD_PREFIX) => {
+                    let Some(sticker) = card
+                        .id
+                        .strip_prefix(crate::shell::STICKER_CARD_PREFIX)
+                        .and_then(cutlass_stickers::sticker)
+                    else {
+                        continue;
+                    };
+                    let key = cutlass_engine::ThumbKey {
+                        path: card.id.clone().into(),
+                        time: Micros(0),
+                    };
+                    let (width, height) = (96, 64);
+                    let texture = if let Some(entry) = textures.shown.get_mut(&key) {
+                        entry.1 = textures.frame;
+                        entry.0.id()
+                    } else {
+                        let Ok(rgba) = sticker_poster(sticker, width, height) else {
+                            continue;
+                        };
+                        let thumb = cutlass_engine::Thumb {
+                            width,
+                            height,
+                            rgba,
+                        };
+                        film_texture(ctx, textures, key, &thumb)
+                    };
+                    card.look = CardLook::Picture(Some((texture, [width, height])));
+                }
                 CardLook::Picture(_) => {
                     if let Some((key, Some(thumb))) = shell.poster(&card.id) {
                         let texture = film_texture(ctx, textures, key, &thumb);
@@ -2261,6 +2548,13 @@ fn bin_cards(
                 }
                 cards.push(title_card(style));
             }
+            // The title templates follow the single styles.
+            for template in cutlass_editor::TITLE_TEMPLATES {
+                if !query.is_empty() && !template.name.to_lowercase().contains(&query) {
+                    continue;
+                }
+                cards.push(template_card(template));
+            }
         }
         Shelf::Effects => {
             for effect in cutlass_editor::effect_cards() {
@@ -2295,9 +2589,37 @@ fn bin_cards(
                 });
             }
         }
-        Shelf::Stickers | Shelf::Templates => {}
+        Shelf::Stickers => {
+            for sticker in cutlass_stickers::search(&query) {
+                cards.push(BinCard {
+                    id: format!("{}{}", crate::shell::STICKER_CARD_PREFIX, sticker.id),
+                    name: sticker.name.to_owned(),
+                    meta: card_meta(crate::shell::sticker_length(sticker).0),
+                    on_timeline: false,
+                    look: CardLook::Picture(None),
+                });
+            }
+        }
+        Shelf::Templates => {
+            for template in cutlass_editor::TITLE_TEMPLATES {
+                if !query.is_empty() && !template.name.to_lowercase().contains(&query) {
+                    continue;
+                }
+                cards.push(template_card(template));
+            }
+        }
     }
     cards
+}
+
+fn template_card(template: &cutlass_editor::TitleTemplate) -> BinCard {
+    BinCard {
+        id: template.card_id(),
+        name: template.name.to_owned(),
+        meta: template.meta.to_owned(),
+        on_timeline: false,
+        look: CardLook::Title(Color32::from_hex(template.color()).unwrap_or(Color32::WHITE)),
+    }
 }
 
 fn effect_card(effect: cutlass_editor::EffectCard) -> BinCard {
@@ -2308,6 +2630,27 @@ fn effect_card(effect: cutlass_editor::EffectCard) -> BinCard {
         on_timeline: false,
         look: CardLook::Swatch,
     }
+}
+
+/// A sticker on a clear card `width` by `height`, as tall as the card and
+/// in the middle, so the card's cover crop keeps all of it.
+fn sticker_poster(
+    sticker: &cutlass_stickers::Sticker,
+    width: u32,
+    height: u32,
+) -> Result<Vec<u8>, String> {
+    let side = height.min(width);
+    let drawn = sticker.rgba(side)?;
+    let mut rgba = vec![0_u8; (width * height * 4) as usize];
+    let left = (width - side) / 2;
+    let top = (height - side) / 2;
+    for row in 0..side {
+        let from = (row * side * 4) as usize;
+        let to = (((top + row) * width + left) * 4) as usize;
+        let span = (side * 4) as usize;
+        rgba[to..to + span].copy_from_slice(&drawn[from..from + span]);
+    }
+    Ok(rgba)
 }
 
 fn title_card(style: &cutlass_editor::TitleStyle) -> BinCard {
@@ -3552,6 +3895,11 @@ fn paint_clip_menu(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
             "compound" => shell.create_compound(),
             "render-preview" => shell.render_selected(false),
             "render-full" => shell.render_selected(true),
+            "make-proxies" => shell.make_proxies(),
+            "arrange-forward" => shell.arrange(cutlass_session::Arrange::Forward),
+            "arrange-backward" => shell.arrange(cutlass_session::Arrange::Backward),
+            "arrange-front" => shell.arrange(cutlass_session::Arrange::Front),
+            "arrange-back" => shell.arrange(cutlass_session::Arrange::Back),
             "variable-speed" => {
                 shell.toggle_speed_curves();
                 Ok(())
@@ -3996,6 +4344,10 @@ fn release_library_drop(
         shell.drop_adjustment(x, y)
     } else if material_id.starts_with(cutlass_editor::FILTER_CARD_PREFIX) {
         shell.drop_filter(&material_id, x, y)
+    } else if material_id.starts_with(crate::shell::STICKER_CARD_PREFIX) {
+        shell.drop_sticker(&material_id, x, y)
+    } else if material_id.starts_with(cutlass_editor::TEMPLATE_CARD_PREFIX) {
+        shell.drop_template(&material_id, x, y)
     } else {
         shell.drop_medium(&material_id, x, y)
     };
@@ -6164,6 +6516,10 @@ fn project_dialog(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
                         }
                     }
                 });
+                ui.checkbox(
+                    &mut settings.free_layer,
+                    "Free layer: stack clips with Arrange, not by their tracks",
+                );
                 ui.add_space(8.0);
                 save = ui.button("Save").clicked();
             });
@@ -6699,8 +7055,8 @@ mod tests {
             ),
             (
                 "sticker",
-                &["Sticker", "Animation", "Opacity"],
-                &["Position & Size", "Volume"],
+                &["Sticker", "Animation", "Position & Size", "Opacity"],
+                &["Volume", "Speed"],
             ),
         ] {
             shell.select(Some(SegmentId::new(id)));
@@ -7301,6 +7657,63 @@ mod tests {
             assert!(lines.iter().any(|line| line == label), "{label}: {lines:?}");
         }
         assert!(view.assistant.draft.is_empty());
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn a_menu_bar_item_runs_its_command() {
+        use cutlass_model::{Segment, SegmentId, TimeRange};
+
+        let temp = std::env::temp_dir().join(format!("cutlass-menubar-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let mut draft = cutlass_model::Draft::empty("draft");
+        draft
+            .materials
+            .material_colors
+            .push(cutlass_model::MaterialColorConfig {
+                id: "color".into(),
+                is_color_clip: true,
+                solid_color: "0xFF336699".to_owned(),
+                ..cutlass_model::MaterialColorConfig::default()
+            });
+        draft.tracks[0]
+            .segments
+            .push(Segment::new("one", "color", TimeRange::new(0, 2_000_000)));
+        draft.duration = Micros(2_000_000);
+        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        let mut view = ViewState::new();
+        // With no project, a project command says so and nothing runs.
+        run_menu(&mut shell, &mut view, None, crate::menubar::EXPORT);
+        assert!(!view.export_open);
+        shell.open_folder(&temp).unwrap();
+        shell.select(Some(SegmentId::new("one")));
+        shell.seek(Micros(1_000_000));
+        run_menu(&mut shell, &mut view, None, "split");
+        assert_eq!(shell.draft().unwrap().tracks[0].segments.len(), 2);
+        run_menu(&mut shell, &mut view, None, "undo");
+        assert_eq!(shell.draft().unwrap().tracks[0].segments.len(), 1);
+        run_menu(&mut shell, &mut view, None, crate::menubar::EXPORT);
+        assert!(view.export_open);
+        run_menu(&mut shell, &mut view, None, crate::menubar::SETTINGS);
+        assert!(view.settings_open);
+        run_menu(&mut shell, &mut view, None, crate::menubar::LICENSES);
+        assert!(view.licenses.is_some());
+        // Every item runs without a panic.
+        for item in crate::menubar::items() {
+            if [
+                crate::menubar::OPEN,
+                crate::menubar::IMPORT,
+                crate::menubar::EXPORT_LOG,
+            ]
+            .contains(&item.id)
+            {
+                continue; // These open the system's file dialog.
+            }
+            run_menu(&mut shell, &mut view, None, item.id);
+        }
+        drop(shell);
         let _ = std::fs::remove_dir_all(&temp);
     }
 
@@ -8521,6 +8934,20 @@ mod tests {
             "{painted}"
         );
         assert!(painted.contains("accesskit "), "{painted}");
+        // The open sticker sets are credited, CC BY ones by name and link.
+        assert!(painted.contains("Stickers"), "{painted}");
+        assert!(
+            painted.contains("Noto Emoji by Google, licensed Apache-2.0."),
+            "{painted}"
+        );
+        assert!(
+            painted.contains("Noto Animated Emoji by Google, licensed CC-BY-4.0."),
+            "{painted}"
+        );
+        assert!(
+            painted.contains("https://googlefonts.github.io/noto-emoji-animation/"),
+            "{painted}"
+        );
         run(
             &mut shell,
             &mut view,
@@ -10498,7 +10925,8 @@ mod tests {
             shell.notice()
         );
         assert_eq!(shell.job().map(|job| job.label), Some("Export".to_owned()));
-        let until = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        // A debug Rust encoder on a small CI runner takes well over a minute.
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(300);
         while shell.job().is_some() && std::time::Instant::now() < until {
             frame(&mut shell, &mut view, Vec::new());
             std::thread::sleep(std::time::Duration::from_millis(5));
@@ -11002,5 +11430,106 @@ mod tests {
                 assert!(!text.contains("eframe"), "{}", cargo.display());
             }
         }
+    }
+
+    #[test]
+    fn an_update_offer_shows_its_notes_and_escape_puts_it_off() {
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        let name = cutlass_update::Platform::current().unwrap().asset_name();
+        let json = format!(
+            r#"{{"tag_name":"v99.0.0","body":"Faster export\n\n- Fixes","assets":[
+                {{"name":"{name}","browser_download_url":"https://example.test/p"}},
+                {{"name":"{name}.sha256","browser_download_url":"https://example.test/s"}}]}}"#
+        );
+        let running = cutlass_update::Version::parse("0.1.0").unwrap();
+        let platform = cutlass_update::Platform::current().unwrap();
+        let offer = cutlass_update::offer(&json, &running, platform)
+            .unwrap()
+            .unwrap();
+        shell.offer_update(offer);
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let run = |shell: &mut Shell, view: &mut ViewState, events: Vec<egui::Event>| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0))),
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, view, None),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        let painted = painted_text(&run(&mut shell, &mut view, Vec::new()));
+        assert!(painted.contains("Cutlass 99.0.0 is available"), "{painted}");
+        assert!(painted.contains("Faster export") && painted.contains("- Fixes"));
+        assert!(painted.contains("Update and restart") && painted.contains("Later"));
+        run(
+            &mut shell,
+            &mut view,
+            vec![key(egui::Key::Escape, egui::Modifiers::NONE)],
+        );
+        assert!(shell.update_offer().is_none());
+        assert!(shell.job().is_none(), "nothing downloads");
+
+        view.settings_open = true;
+        let painted = painted_text(&run(&mut shell, &mut view, Vec::new()));
+        assert!(painted.contains("Check for updates"), "{painted}");
+    }
+
+    /// The stickers shelf and the Licenses window painted by the real
+    /// renderer, as the window shows them. With `CUTLASS_RENDER_DIR` set
+    /// the pictures are kept there to look at.
+    #[test]
+    fn the_stickers_shelf_and_the_licenses_window_paint() {
+        let temp = std::env::temp_dir().join(format!("cutlass-render-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        std::fs::create_dir_all(&temp).unwrap();
+        cutlass_store::Folder::new(cutlass_model::Draft::empty("draft"))
+            .save(&temp)
+            .unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        let mut view = ViewState::new();
+        view.library_shelf = Shelf::Stickers;
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(Vec2::new(1280.0, 800.0))
+            .wgpu()
+            .build_ui_state(
+                |ui, (shell, view): &mut (Shell, ViewState)| show(shell, ui, view, None),
+                (shell, view),
+            );
+        // Stickers load and animate, so step frames rather than settle.
+        harness.run_steps(8);
+        let keep = std::env::var_os("CUTLASS_RENDER_DIR").map(std::path::PathBuf::from);
+        let picture = |harness: &mut egui_kittest::Harness<'_, (Shell, ViewState)>, name: &str| {
+            let image = harness.render().expect("the renderer draws the window");
+            // Not one flat colour: something was drawn.
+            let first = image.get_pixel(0, 0);
+            assert!(
+                image.pixels().any(|pixel| pixel != first),
+                "{name} is blank"
+            );
+            if let Some(dir) = &keep {
+                std::fs::create_dir_all(dir).unwrap();
+                image.save(dir.join(format!("{name}.png"))).unwrap();
+            }
+        };
+        picture(&mut harness, "stickers");
+        // A Noto picture and a Noto Lottie that plays.
+        for (query, name) in [("face", "stickers-noto"), ("animated", "stickers-animated")] {
+            query.clone_into(&mut harness.state_mut().1.library_query);
+            harness.run_steps(8);
+            picture(&mut harness, name);
+        }
+        harness.state_mut().1.library_query.clear();
+        harness.state_mut().1.licenses = Some(cutlass_licenses::notices());
+        harness.run_steps(4);
+        picture(&mut harness, "licenses");
+        drop(harness);
+        let _ = std::fs::remove_dir_all(&temp);
     }
 }

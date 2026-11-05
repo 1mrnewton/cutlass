@@ -1,10 +1,11 @@
 //! The containers and codecs a phone opens.
 //!
 //! Rust audio decoders (FLAC, ALAC, MP3 and Opus) go first, so a file
-//! decodes the same on every platform, and a lossless file bit-exactly. WebP goes first too,
-//! because an animated file's later packets are bare frames that only its
-//! Rust decoder composes. The Apple decoders come next on an Apple phone; a
-//! codec they decline falls through to the Rust decoder of the same id.
+//! decodes the same on every platform, and a lossless file bit-exactly.
+//! WebP goes first too: ImageIO gives one picture per packet and does not
+//! keep an animation's canvas. The Apple decoders come next on an Apple
+//! phone; a codec they decline falls through to the Rust decoder of the
+//! same id.
 
 use std::fs::File;
 use std::path::Path;
@@ -32,14 +33,15 @@ pub fn readers() -> ReaderFactory {
     readers
 }
 
-/// FLAC, ALAC, MP3, Opus and WebP, the platform decoders for this OS, then PNG,
-/// JPEG, AAC, H.264, PCM and ProRes.
+/// FLAC, ALAC, MP3, Opus and WebP, the platform decoders for this OS, then
+/// PNG, GIF, JPEG, AAC, H.264, HEVC, PCM and ProRes.
 #[must_use]
 pub fn decoders() -> DecodeFactory {
     let mut decoders = DecodeFactory::new();
     // Rust audio codecs go ahead of the platform ones, so FLAC, ALAC, MP3
-    // and Opus decode the same on the phone as on the desktop; WebP follows
-    // the same rule.
+    // and Opus decode the same on the phone as on the desktop. WebP goes
+    // ahead too: ImageIO gives one picture per packet and does not keep an
+    // animation's canvas.
     cutlass_flac::register_decoders(&mut decoders);
     cutlass_alac::register_decoders(&mut decoders);
     cutlass_mp3::register_decoders(&mut decoders);
@@ -48,9 +50,12 @@ pub fn decoders() -> DecodeFactory {
     #[cfg(target_vendor = "apple")]
     cutlass_platform_apple::register_decoders(&mut decoders);
     cutlass_png::register_decoders(&mut decoders);
+    cutlass_gif::register_decoders(&mut decoders);
     cutlass_jpeg::register_decoders(&mut decoders);
     cutlass_aac::register_decoders(&mut decoders);
     cutlass_h264::register_decoders(&mut decoders);
+    // HEVC in Rust, after the platform decoders.
+    cutlass_hevc::register_decoders(&mut decoders);
     cutlass_pcm::register_decoders(&mut decoders);
     cutlass_prores::register_decoders(&mut decoders);
     decoders
@@ -425,5 +430,42 @@ mod tests {
         let packet = cutlass_decode::Packet::video(RED.to_vec(), 0, 0, 0, true);
         let pictures = decoder.decode_picture(&packet).expect("decode");
         assert_eq!(pictures[0].image.samples[..3], [255, 0, 0]);
+    }
+
+    /// A phone decodes WebP with the Rust decoder even where ImageIO is
+    /// registered: the canvas an animation's first packet starts is kept
+    /// for the frames in the next packet.
+    #[test]
+    fn a_phone_decodes_webp_in_rust_ahead_of_the_platform() {
+        let file = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../codecs/webp/tests/fixtures/anim-mux.webp"),
+        )
+        .expect("fixture");
+        let second = file
+            .windows(4)
+            .enumerate()
+            .filter(|(_, word)| *word == b"ANMF")
+            .nth(1)
+            .map(|(at, _)| at)
+            .expect("two frames");
+        let params = CodecParams::with_format(CodecId::Webp, 40, 30, cutlass_decode::PixelFormat::Rgba8);
+        let mut decoder = super::decoders().open(&params).expect("webp");
+        assert_eq!(Decoder::codec(decoder.as_ref()), CodecId::Webp);
+        let mut frames = 0;
+        for data in [&file[..second], &file[second..]] {
+            for output in decoder
+                .push(&cutlass_decode::Packet::audio(data.to_vec(), 0, 0, 1000))
+                .expect("packet")
+            {
+                let Output::Picture(picture) = output else {
+                    panic!("picture");
+                };
+                assert!(matches!(picture.samples(), cutlass_decode::PictureSamples::Cpu(_)));
+                assert_eq!((picture.info().width, picture.info().height), (40, 30));
+                frames += 1;
+            }
+        }
+        assert_eq!(frames, 6);
     }
 }

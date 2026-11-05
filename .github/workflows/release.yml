@@ -1,0 +1,140 @@
+name: release
+
+# A tag `v<version>` builds the three packages, writes `<package>.sha256`
+# beside each, and publishes them as a GitHub release. The desktop's update
+# check reads that release from the API's `releases/latest`, so a tag with a
+# `-` (such as v1.0.0-rc.1) is published as a pre-release, which the check
+# ignores.
+#
+# The packages are built as in ci.yml, with `--features public-release`.
+# They are signed ad hoc on macOS and unsigned on Windows until the
+# certificates are set up (see scripts/macos_bundle.py and
+# scripts/windows_installer.py for the variables).
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  version:
+    # The tag names the version the packages carry, or the update check
+    # would offer the same release again and again.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: The tag matches the workspace version
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "the tag $GITHUB_REF_NAME is not v$version from Cargo.toml" >&2
+            exit 1
+          fi
+
+  macos:
+    needs: version
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build
+        run: cargo build --release -p cutlass --features public-release
+      - name: Bundle
+        run: python3 scripts/macos_bundle.py target/release/cutlass dist
+      - name: Smoke test the bundle
+        run: python3 scripts/smoke.py dist/Cutlass.app/Contents/MacOS/cutlass
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: dist/Cutlass.dmg
+          if-no-files-found: error
+
+  windows:
+    needs: version
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build
+        run: cargo build --release -p cutlass --features public-release
+      - name: NSIS
+        shell: bash
+        run: |
+          command -v makensis || choco install nsis -y --no-progress
+          echo "C:/Program Files (x86)/NSIS" >> "$GITHUB_PATH"
+      - name: Package
+        run: python scripts/windows_installer.py target/release/cutlass.exe dist/Cutlass-setup.exe
+      - name: Install and smoke test
+        shell: pwsh
+        run: |
+          $dir = "$env:RUNNER_TEMP\CutlassInstall"
+          Start-Process -Wait -FilePath dist\Cutlass-setup.exe -ArgumentList "/S", "/D=$dir"
+          python scripts/smoke.py "$dir\cutlass.exe"
+          if ($LASTEXITCODE -ne 0) { throw "the smoke test failed" }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/Cutlass-setup.exe
+          if-no-files-found: error
+
+  appimage:
+    needs: version
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: GTK and ALSA headers
+        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libasound2-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build
+        run: cargo build --release -p cutlass --features public-release
+      - name: appimagetool 1.9.1
+        run: |
+          curl -sSL -o "$RUNNER_TEMP/appimagetool" https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage
+          echo "ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0  $RUNNER_TEMP/appimagetool" | sha256sum -c -
+          chmod +x "$RUNNER_TEMP/appimagetool"
+      - name: Package
+        run: APPIMAGETOOL="$RUNNER_TEMP/appimagetool" python3 scripts/appimage.py target/release/cutlass dist/Cutlass-x86_64.AppImage
+      - name: Smoke test the AppImage
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+        run: python3 scripts/smoke.py dist/Cutlass-x86_64.AppImage
+      - uses: actions/upload-artifact@v4
+        with:
+          name: appimage
+          path: dist/Cutlass-x86_64.AppImage
+          if-no-files-found: error
+
+  publish:
+    needs: [macos, windows, appimage]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        # `sha256sum` writes "<hex>  <name>"; the update check reads the
+        # first token.
+        working-directory: dist
+        run: |
+          for package in Cutlass.dmg Cutlass-setup.exe Cutlass-x86_64.AppImage; do
+            test -s "$package"
+            sha256sum "$package" > "$package.sha256"
+          done
+          cat ./*.sha256
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          flags=""
+          case "$GITHUB_REF_NAME" in *-*) flags="--prerelease" ;; esac
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Cutlass ${GITHUB_REF_NAME#v}" \
+            --generate-notes \
+            --verify-tag \
+            $flags

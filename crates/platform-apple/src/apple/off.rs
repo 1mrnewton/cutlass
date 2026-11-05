@@ -33,6 +33,11 @@ const AUDIO: [CodecId; 8] = [
 
 const STILL: [CodecId; 4] = [CodecId::Jpeg, CodecId::Png, CodecId::Webp, CodecId::Gif];
 
+/// The stills ImageIO decodes. A GIF is left to `cutlass-gif`, which keeps
+/// the screen from frame to frame so an animated one plays; ImageIO gives
+/// only the picture inside each packet.
+const STILL_DECODE: [CodecId; 3] = [CodecId::Jpeg, CodecId::Png, CodecId::Webp];
+
 /// Register the Apple decoders. Off Apple every opener declines.
 pub fn register_decoders(factory: &mut DecodeFactory) {
     register_decoders_with(factory, true);
@@ -49,7 +54,7 @@ pub fn register_decoders_with(factory: &mut DecodeFactory, video: bool) {
     for id in AUDIO {
         factory.register(id, open_audio_decoder);
     }
-    for id in STILL {
+    for id in STILL_DECODE {
         factory.register(id, open_still_decoder);
     }
 }

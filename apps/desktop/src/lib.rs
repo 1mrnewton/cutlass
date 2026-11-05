@@ -10,7 +10,9 @@ pub mod icons;
 pub mod jobs;
 pub mod mcp;
 mod menu;
+pub mod menubar;
 mod readers;
+pub mod sandbox;
 
 #[cfg(test)]
 mod open_movie;
@@ -69,6 +71,7 @@ pub fn register_codecs_with(
     let _ = hardware;
     cutlass_png::register_decoders(&mut decoders);
     cutlass_png::register_encoders(&mut encoders);
+    cutlass_gif::register_decoders(&mut decoders);
     cutlass_jpeg::register_decoders(&mut decoders);
     cutlass_jpeg::register_encoders(&mut encoders);
     cutlass_aac::register_decoders(&mut decoders);
@@ -81,6 +84,9 @@ pub fn register_codecs_with(
     cutlass_h264::register_encoders(&mut encoders);
     cutlass_prores::register_decoders(&mut decoders);
     cutlass_prores::register_encoders(&mut encoders);
+    // After the platform decoders: the Rust HEVC decoder serves Linux, and
+    // the other platforms when hardware decode is off.
+    cutlass_hevc::register_decoders(&mut decoders);
     (decoders, encoders)
 }
 
@@ -190,7 +196,25 @@ mod tests {
             ..Hardware::default()
         };
         let (decoders, encoders) = super::register_codecs_with(&off);
-        assert!(decoders.open(&hevc).is_err(), "hevc has no rust decoder");
+        // The HEVC decoder left is the Rust one: it decodes an Annex B frame
+        // with no extradata into CPU samples, which VideoToolbox would not.
+        let frame = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../crates/codecs/hevc/tests/fixtures/testsrc-64x48.hevc"),
+        )
+        .expect("fixture");
+        let mut rust = decoders.open(&hevc).expect("rust hevc");
+        let mut outputs = rust
+            .push(&cutlass_decode::Packet::audio(frame, 0, 0, 1))
+            .expect("decode");
+        outputs.extend(rust.drain().expect("drain"));
+        let [cutlass_decode::Output::Picture(decoded)] = outputs.as_slice() else {
+            panic!("one picture, got {}", outputs.len());
+        };
+        assert!(matches!(
+            decoded.samples(),
+            cutlass_decode::PictureSamples::Cpu(_)
+        ));
         let h264 = CodecParams::with_format(CodecId::H264, 64, 48, PixelFormat::Yuv420p);
         decoders.open(&h264).expect("rust h264");
         encoders
@@ -330,6 +354,54 @@ mod tests {
         encoders
             .open(&picture(CodecId::Jpeg, 8, 8))
             .expect("jpeg encoder");
+    }
+
+    /// The app's WebP decoder is the Rust one, ahead of ImageIO: an
+    /// animation's later packets paint onto the canvas the first packet
+    /// started, which only `cutlass-webp` keeps.
+    #[test]
+    fn the_desktop_decodes_webp_in_rust_ahead_of_the_platform() {
+        use cutlass_decode::{Decoder, Output, Packet, PictureSamples};
+
+        let file = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../crates/codecs/webp/tests/fixtures/anim-mux.webp"),
+        )
+        .unwrap();
+        // The first frame's packet ends where the second `ANMF` starts.
+        let second = file
+            .windows(4)
+            .enumerate()
+            .filter(|(_, word)| *word == b"ANMF")
+            .nth(1)
+            .unwrap()
+            .0;
+        let packets = [file[..second].to_vec(), file[second..].to_vec()];
+        let samples = |decoder: &mut dyn Decoder| -> Vec<Vec<u8>> {
+            let mut out = Vec::new();
+            for data in &packets {
+                for output in decoder
+                    .push(&Packet::audio(data.clone(), 0, 0, 1000))
+                    .unwrap()
+                {
+                    let Output::Picture(picture) = output else {
+                        panic!("picture");
+                    };
+                    let PictureSamples::Cpu(bytes) = picture.samples() else {
+                        panic!("the platform decoder answered");
+                    };
+                    out.push(bytes.to_vec());
+                }
+            }
+            out
+        };
+        let (decoders, _) = super::register_codecs();
+        let mut app = decoders.open(&picture(CodecId::Webp, 40, 30)).unwrap();
+        assert_eq!(Decoder::codec(app.as_ref()), CodecId::Webp);
+        let mut rust = cutlass_webp::WebpDecoder::open(&picture(CodecId::Webp, 40, 30)).unwrap();
+        let from_app = samples(app.as_mut());
+        assert_eq!(from_app.len(), 6);
+        assert_eq!(from_app, samples(&mut rust));
     }
 
     #[test]

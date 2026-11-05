@@ -4,6 +4,7 @@ use crate::request::TrimEdge;
 
 use super::speed::map_timeline_to_source;
 use super::{EditError, ensure_unlocked};
+use super::{locate, overlaps_except};
 
 pub fn trim(
     draft: &mut Draft,
@@ -123,39 +124,6 @@ fn shift_source_start(source: &mut TimeRange, delta: i64, duration: i64) -> Resu
     source.start = Micros(start);
     source.duration = Micros(duration);
     Ok(())
-}
-
-fn locate(draft: &Draft, segment_id: &SegmentId) -> Result<(usize, usize), EditError> {
-    for (track_index, track) in draft.tracks.iter().enumerate() {
-        if let Some(segment_index) = track
-            .segments
-            .iter()
-            .position(|segment| &segment.id == segment_id)
-        {
-            return Ok((track_index, segment_index));
-        }
-    }
-    Err(EditError::MissingSegment)
-}
-
-fn overlaps_except(
-    track: &cutlass_model::Track,
-    candidate: &Segment,
-    ignore: &SegmentId,
-) -> Result<bool, EditError> {
-    for segment in &track.segments {
-        if &segment.id == ignore {
-            continue;
-        }
-        if candidate
-            .target
-            .overlaps(&segment.target)
-            .map_err(EditError::Range)?
-        {
-            return Ok(true);
-        }
-    }
-    Ok(false)
 }
 
 #[cfg(test)]

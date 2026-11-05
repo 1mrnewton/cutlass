@@ -96,7 +96,9 @@ pub const SHADOW_ANGLE: f64 = -45.0;
 #[must_use]
 pub fn panel_of(draft: &Draft, track: &Track, segment: &Segment) -> Panel {
     let picture = |still: bool| {
-        if track.is_main() {
+        if track.kind == TrackType::Sticker {
+            Panel::Sticker
+        } else if track.is_main() {
             Panel::Main { still }
         } else {
             Panel::Overlay { still }
@@ -316,6 +318,23 @@ mod tests {
         assert_eq!(canvas_pixels((0.5, 0.5), (1920, 1080)), (480.0, -270.0));
         assert_eq!(stored_position((480.0, -270.0), (1920, 1080)), (0.5, 0.5));
         assert_eq!(canvas_pixels((1.0, 0.0), (0, 0)), (960.0, 0.0));
+    }
+
+    #[test]
+    fn a_picture_on_a_sticker_row_opens_the_sticker_panel() {
+        let mut draft = Draft::empty("D");
+        let mut heart = cutlass_model::MaterialVideo::new("heart");
+        heart.kind = "sticker".to_owned();
+        draft.materials.videos.push(heart);
+        let segment = Segment::new("a", "heart", cutlass_model::TimeRange::new(0, 1));
+        let mut row = Track::main("stickers");
+        row.kind = TrackType::Sticker;
+        assert_eq!(panel_of(&draft, &row, &segment), Panel::Sticker);
+        row.kind = TrackType::Video;
+        assert_eq!(
+            panel_of(&draft, &row, &segment),
+            Panel::Main { still: false }
+        );
     }
 
     #[test]

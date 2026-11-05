@@ -1,6 +1,6 @@
 use cutlass_model::{Crop, Draft, MaterialVideo, SegmentId};
 
-use super::speed::locate;
+use super::locate;
 use super::{EditError, ensure_unlocked};
 
 /// Store the crop quad. Ratio and scale stay as they were.

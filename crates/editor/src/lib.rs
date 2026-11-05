@@ -9,6 +9,7 @@ mod act;
 mod animation;
 mod append;
 mod caption_words;
+mod catalog;
 mod clip_rules;
 mod clipboard;
 mod controls;
@@ -29,6 +30,7 @@ mod ripple;
 mod ruler;
 mod snap;
 mod stage;
+mod template;
 mod text_effect;
 mod title;
 mod tools;
@@ -41,6 +43,7 @@ pub use act::{can_cut_at, clip_under, delete_side, frame_margin};
 pub use animation::{ClipAnimation, ClipAnimations, clip_animations};
 pub use append::{Append, AppendLane, append_placement, free_row, material_span};
 pub use caption_words::{LINE_BREAK, breaks_before, join_words, retype_word, toggle_line_break};
+pub use catalog::{catalog_entries, catalog_search};
 pub use clip_rules::{can_turn, magnet_request};
 pub use clipboard::{ClipboardMiss, CopiedClip, copy_clips, paste_requests};
 pub use controls::{MAX_VOLUME, SPEED_MARKS, speed_at, speed_position, volume_at, volume_position};
@@ -86,6 +89,10 @@ pub use stage::{
     MAX_SCALE, MIN_SCALE, NoText, Pose, SCALE_REACH, SNAP_REACH, StageAlign, StageBox,
     StageGesture, StageGuides, StageStep, TURN_REACH, TextSizes, canvas_size, keyed_pose,
     stage_align, stage_box, stage_gesture, stage_pick,
+};
+pub use template::{
+    TEMPLATE_CARD_PREFIX, TITLE_TEMPLATES, TemplatePlace, TitleTemplate, Widget, template_requests,
+    title_template,
 };
 pub use text_effect::{
     NO_TEXT_EFFECT, TEXT_EFFECTS, TextEffect, text_effect_of, text_effect_requests,

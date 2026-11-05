@@ -1,8 +1,8 @@
 //! Decoder trait for WebP packets.
 
 use cutlass_decode::{
-    BitDepth, CodecError, CodecId, CodecParams, ColorType, Decoder, Output, Packet, StillImage,
-    StillOutput,
+    BitDepth, CodecError, CodecId, CodecParams, ColorPrimaries, ColorType, Decoder, Output, Packet,
+    PictureInfo, PictureOutput, PixelFormat, StillImage, StillOutput, Transfer,
 };
 
 use crate::animation::{Canvas, Decoded};
@@ -47,10 +47,14 @@ impl Decoder for WebpDecoder {
         CodecId::Webp
     }
 
-    fn push(&mut self, _packet: &Packet) -> Result<Vec<Output>, CodecError> {
-        Err(CodecError::InvalidApi {
-            what: "webp produces a picture",
-        })
+    /// The pictures of [`Decoder::decode_picture`] as straight sRGB RGBA
+    /// frames, opaque where the file has no alpha, for callers that take
+    /// pictures rather than stills.
+    fn push(&mut self, packet: &Packet) -> Result<Vec<Output>, CodecError> {
+        self.decode_picture(packet)?
+            .into_iter()
+            .map(rgba_picture)
+            .collect()
     }
 
     fn drain(&mut self) -> Result<Vec<Output>, CodecError> {
@@ -211,4 +215,41 @@ pub(crate) fn still_image(picture: &Picture) -> StillImage {
         BitDepth::Eight,
         samples,
     )
+}
+
+/// One decoded still as an RGBA picture output. The samples are 8-bit RGB
+/// or RGBA; RGB gets an opaque alpha.
+fn rgba_picture(still: StillOutput) -> Result<Output, CodecError> {
+    let image = still.image;
+    let channels = match image.color {
+        ColorType::Rgb => 3,
+        ColorType::Rgba => 4,
+        _ => {
+            return Err(CodecError::InvalidApi {
+                what: "webp picture color",
+            });
+        }
+    };
+    let mut rgba = Vec::with_capacity(image.samples.len() / channels * 4);
+    for pixel in image.samples.chunks_exact(channels) {
+        for &sample in pixel {
+            rgba.push(u8::try_from(sample).unwrap_or(u8::MAX));
+        }
+        if channels == 3 {
+            rgba.push(u8::MAX);
+        }
+    }
+    let info = PictureInfo {
+        width: image.width,
+        height: image.height,
+        pixel: PixelFormat::Rgba8,
+        primaries: ColorPrimaries::Bt709,
+        transfer: Transfer::Srgb,
+    };
+    Ok(Output::Picture(PictureOutput::cpu(
+        info,
+        rgba,
+        still.pts,
+        still.timescale,
+    )?))
 }

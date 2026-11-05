@@ -414,7 +414,14 @@ fn b_pictures_come_back_in_display_order() {
     super::video::TEST_B_PICTURES.with(|count| count.set(2));
     let encoder = open_encoder_on(&codec_params(CodecId::Hevc, 320, 240), true);
     super::video::TEST_B_PICTURES.with(|count| count.set(0));
-    let mut encoder = encoder.expect("encoder");
+    let mut encoder = match encoder {
+        Ok(encoder) => encoder,
+        Err(CodecError::Unsupported { what }) => {
+            eprintln!("skipped: {what} cannot encode HEVC here");
+            return;
+        }
+        Err(error) => panic!("encoder: {error:?}"),
+    };
     if !encoder.hardware() {
         eprintln!("skipped: no hardware encoder to make B pictures");
         return;

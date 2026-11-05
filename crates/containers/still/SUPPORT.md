@@ -2,7 +2,7 @@
 
 Demux and mux for a JPEG, PNG, WebP, or GIF file that is not inside a movie. The crate identifies the file, splits it into packets, and writes those packets back. It does not decode pixels. Huffman, inflate, and LZW are not implemented here.
 
-`crates/engine` and `crates/export` are empty. Playback and export were not exercised. Tests call `Demux` and `Mux` directly. Timestamps stay in the file timescale and are not converted to microseconds. `crates/codecs/jpeg`, `crates/codecs/webp`, and `crates/codecs/gif` are empty scaffolds. `crates/codecs/png` accepts one PNG datastream in the packet bytes. This crate does not depend on that decoder. A still packet's bytes are that datastream, and extradata is empty.
+`crates/engine` and `crates/export` are empty. Playback and export were not exercised. Tests call `Demux` and `Mux` directly. Timestamps stay in the file timescale and are not converted to microseconds. When this file was written, `crates/codecs/jpeg`, `crates/codecs/webp`, and `crates/codecs/gif` were empty scaffolds; all three now decode these packets (`cutlass-webp` paints each `ANMF` packet onto the canvas the first one starts). `crates/codecs/png` accepts one PNG datastream in the packet bytes. This crate does not depend on that decoder. A still packet's bytes are that datastream, and extradata is empty.
 
 ## Scope
 
@@ -15,7 +15,7 @@ Normative layout:
 
 Read before implementation: FFmpeg 8.1.1 `libavformat/gifdec.c` and `libavcodec/gif_parser.c`; the WebP container specification for `VP8X`, `ANIM`, and `ANMF`; the PNG chunk layout; ITU-T T.81 marker structure. FFmpeg 8.1.1 has no animated-WebP demuxer (`image data not found` from ffprobe). Those trees were not copied into this repo.
 
-Packet choice, recorded because the JPEG, WebP, and GIF codec crates are scaffolds:
+Packet choice, recorded before the JPEG, WebP, and GIF codec crates existed:
 
 - One JPEG, one PNG, or one still WebP (including a VP8X file whose animation flag is clear, and a lossless `VP8L` file) is one packet. The packet is the file bytes. There is no timescale and no duration. Trailing bytes after EOI or IEND stay in that packet.
 - GIF is one packet per image, in file order. The first packet starts at byte 0, so it carries the header and the global color table. Each later packet starts where the previous image ended. The trailer stays on the last packet. Concatenating the packets is the file. Disposal is the graphic-control packed field inside the packet. Extradata is empty.

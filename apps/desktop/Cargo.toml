@@ -19,13 +19,14 @@ cutlass-export = { path = "../../crates/export", version = "0.1.0" }
 cutlass-effects = { path = "../../crates/effects", version = "0.1.0" }
 cutlass-store = { path = "../../crates/store", version = "0.1.0" }
 cutlass-storage = { path = "../../crates/storage", version = "0.1.0" }
+cutlass-download = { path = "../../crates/download", version = "0.1.0", features = ["http"] }
 cutlass-session = { path = "../../crates/session", version = "0.1.0" }
 cutlass-eval = { path = "../../crates/eval", version = "0.1.0" }
 cutlass-engine = { path = "../../crates/engine", version = "0.1.0" }
 cutlass-transcription = { path = "../../crates/transcription", version = "0.1.0" }
 cutlass-font = { path = "../../crates/font", version = "0.1.0" }
 cutlass-icons = { path = "../../crates/icons", version = "0.1.0" }
-cutlass-agent = { path = "../../crates/agent", version = "0.1.0" }
+cutlass-agent = { path = "../../crates/agent", version = "0.1.0", features = ["script"] }
 cutlass-settings = { path = "../../crates/settings", version = "0.1.0" }
 cutlass-logger = { path = "../../crates/logger", version = "0.1.0" }
 cutlass-licenses = { path = "../../crates/licenses", version = "0.1.0" }
@@ -65,6 +66,8 @@ cutlass-jpeg = { path = "../../crates/codecs/jpeg", version = "0.1.0" }
 cutlass-png = { path = "../../crates/codecs/png", version = "0.1.0" }
 cutlass-webp = { path = "../../crates/codecs/webp", version = "0.1.0" }
 cutlass-gif = { path = "../../crates/codecs/gif", version = "0.1.0" }
+cutlass-stickers = { path = "../../crates/stickers", version = "0.1.0" }
+cutlass-update = { path = "../../crates/update", version = "0.1.0" }
 # Wayland and the portal dialog build with the banned `cc` crate.
 # Linux uses X11 for the window and GTK for the file dialog.
 eframe = { version = "0.37", default-features = false, features = [
@@ -80,6 +83,7 @@ cutlass-codec = { path = "../../crates/codec", version = "0.1.0" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 cutlass-platform-apple = { path = "../../crates/platform-apple", version = "0.1.0" }
+muda = { version = "0.21.2", default-features = false }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 cutlass-platform-windows = { path = "../../crates/platform-windows", version = "0.1.0" }
@@ -89,6 +93,7 @@ workspace = true
 
 [dev-dependencies]
 pollster = "1.0"
+egui_kittest = { version = "=0.37.0", features = ["wgpu"] }
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 cutlass-color = { path = "../../crates/color", version = "0.1.0" }
 serde_json = "1.0.154"

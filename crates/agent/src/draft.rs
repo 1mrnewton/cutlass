@@ -479,6 +479,8 @@ pub fn request_name(request: &Request) -> &'static str {
         Request::SetTextBackground { .. } => "set_text_background",
         Request::SetTextBubble { .. } => "set_text_bubble",
         Request::SetCaptionStyle { .. } => "set_caption_style",
+        Request::SetCaptionKeyword { .. } => "set_caption_keyword",
+        Request::SetCaptionStagger { .. } => "set_caption_stagger",
         Request::SetTextGlow { .. } => "set_text_glow",
         Request::AddText { .. } => "add_text",
         Request::AddEffect { .. } => "add_effect",
@@ -522,6 +524,8 @@ pub fn request_name(request: &Request) -> &'static str {
         Request::SetDropFrame { .. } => "set_drop_frame",
         Request::SetColorSpace { .. } => "set_color_space",
         Request::SetProjectName { .. } => "set_project_name",
+        Request::SetFreeLayer { .. } => "set_free_layer",
+        Request::Arrange { .. } => "arrange",
     }
 }
 

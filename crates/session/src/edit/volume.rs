@@ -1,6 +1,6 @@
 use cutlass_model::{Draft, SegmentId};
 
-use super::speed::locate;
+use super::locate;
 use super::{EditError, ensure_unlocked};
 
 /// Set the segment gain. Mute and solo are track bits, not this number. A

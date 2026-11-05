@@ -3,7 +3,7 @@ use cutlass_model::{
     segment_time_mark, set_time_mark_items, time_mark_items,
 };
 
-use super::speed::locate;
+use super::locate;
 use super::{EditError, ensure_unlocked};
 
 /// Store a marker. `None` is the ruler. `Some` is a clip, and the time is
@@ -405,6 +405,84 @@ mod tests {
             .unwrap();
         assert_eq!(session.draft().materials.time_marks.len(), 1);
         assert!(session.draft().tracks[0].segments.is_empty());
+    }
+
+    #[test]
+    fn removing_a_mark_drops_it_and_its_empty_material_in_one_undo_step() {
+        let mut draft = Draft::empty("D");
+        draft.config.maintrack_adsorb = false;
+        let mut session = Session::open(draft);
+        session.apply(0, &[place_clip()]).unwrap();
+        session
+            .apply(
+                1,
+                &[
+                    mark(None, 250_000, "ruler"),
+                    mark(None, 500_000, "ruler"),
+                    mark(Some("clip"), 400_000, "clip-mark"),
+                ],
+            )
+            .unwrap();
+        let remove = |segment_id: Option<&str>, start: i64| Request::RemoveTimeMark {
+            segment_id: segment_id.map(SegmentId::new),
+            start: Micros(start),
+        };
+        // A ruler mark that is not there, or a clip with no marks, refuses.
+        let revision = session.revision();
+        assert_eq!(
+            session.apply(revision, &[remove(None, 300_000)]),
+            Err(EditError::MissingMaterial)
+        );
+        assert_eq!(
+            session.apply(revision, &[remove(Some("clip"), 100_000)]),
+            Err(EditError::MissingMaterial)
+        );
+        assert_eq!(
+            session.apply(revision, &[remove(Some("nowhere"), 400_000)]),
+            Err(EditError::MissingSegment)
+        );
+        // One of two ruler marks goes; the material stays for the other.
+        session.apply(revision, &[remove(None, 250_000)]).unwrap();
+        let marks = cutlass_model::visible_marks(session.draft());
+        let ruler: Vec<i64> = marks
+            .iter()
+            .filter(|item| item.segment_id.is_none())
+            .map(|item| item.time.0)
+            .collect();
+        assert_eq!(ruler, [500_000]);
+        // The last mark on the clip takes its material and its reference.
+        session
+            .apply(session.revision(), &[remove(Some("clip"), 400_000)])
+            .unwrap();
+        let draft = session.draft();
+        assert!(draft.tracks[0].segments[0].extra_material_refs.is_empty());
+        assert_eq!(draft.materials.time_marks.len(), 1);
+        // The last ruler mark takes its material too.
+        session
+            .apply(session.revision(), &[remove(None, 500_000)])
+            .unwrap();
+        assert!(session.draft().materials.time_marks.is_empty());
+        // Each removal is one undo step.
+        session.undo().unwrap();
+        assert_eq!(cutlass_model::visible_marks(session.draft()).len(), 1);
+        session.undo().unwrap();
+        assert_eq!(cutlass_model::visible_marks(session.draft()).len(), 2);
+        // A locked clip keeps its marks.
+        let locked = session.draft().tracks[0].id.clone();
+        session
+            .apply(
+                session.revision(),
+                &[Request::SetTrackAttribute {
+                    track_id: locked,
+                    bit: TrackAttribute::LOCK,
+                    on: true,
+                }],
+            )
+            .unwrap();
+        assert_eq!(
+            session.apply(session.revision(), &[remove(Some("clip"), 400_000)]),
+            Err(EditError::LockedTrack)
+        );
     }
 
     #[test]

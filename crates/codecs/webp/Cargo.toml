@@ -12,3 +12,6 @@ cutlass-encode = { path = "../../encode", version = "0.1.0" }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+cutlass-png = { path = "../png", version = "0.1.0" }

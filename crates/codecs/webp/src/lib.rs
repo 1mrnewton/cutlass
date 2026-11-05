@@ -1,1 +1,33 @@
+//! WebP decoder and encoder.
+//!
+//! A still is one packet and one picture. An animation is one packet per
+//! frame, as the `still` container splits it, and each frame decodes to the
+//! composed canvas. Pictures come out as straight 8-bit RGB, or RGBA when
+//! the file carries alpha. An `ICCP` profile is passed through on the
+//! picture and not applied.
+//!
+//! The support record is `STATUS.md` next to this crate.
+
 #![forbid(unsafe_code)]
+
+mod decoder;
+mod limits;
+mod lossless;
+mod picture;
+mod riff;
+
+#[cfg(test)]
+mod tests;
+
+pub use decoder::WebpDecoder;
+
+use cutlass_decode::{CodecError, CodecId, CodecParams, DecodeFactory, Decoder};
+
+/// Register this crate as the software WebP decoder.
+pub fn register_decoders(factory: &mut DecodeFactory) {
+    factory.register(CodecId::Webp, open_decoder);
+}
+
+fn open_decoder(params: &CodecParams) -> Result<Box<dyn Decoder>, CodecError> {
+    Ok(Box::new(WebpDecoder::open(params)?))
+}

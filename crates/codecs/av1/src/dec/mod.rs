@@ -44,6 +44,15 @@ pub mod stats {
     pub static BSIZE: [AtomicU64; 22] = [const { AtomicU64::new(0) }; 22];
     pub static YMODE: [AtomicU64; 32] = [const { AtomicU64::new(0) }; 32];
     pub static TXSIZE: [AtomicU64; 19] = [const { AtomicU64::new(0) }; 19];
+    /// Luma area with each transform type (coded blocks only).
+    pub static TXTYPE: [AtomicU64; 16] = [const { AtomicU64::new(0) }; 16];
+    /// One line per coded frame: order hint, q index and size.
+    pub static FRAMES: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+    pub fn frame(s: String) {
+        if let Ok(mut v) = FRAMES.lock() {
+            v.push(s);
+        }
+    }
     pub static SKIP: AtomicU64 = AtomicU64::new(0);
     pub static QIDX: AtomicU64 = AtomicU64::new(0);
     pub fn add(a: &[AtomicU64], i: usize, v: u64) {
@@ -71,6 +80,11 @@ pub mod stats {
         s.push_str(&hist("bsize", &BSIZE));
         s.push_str(&hist("ymode", &YMODE));
         s.push_str(&hist("txsize", &TXSIZE));
+        s.push_str(&hist("txtype", &TXTYPE));
+        if let Ok(v) = FRAMES.lock() {
+            s.push_str("\nframes: ");
+            s.push_str(&v.join(" "));
+        }
         s.push_str(&format!(
             "\nskip_area={} last_qidx={}\n",
             SKIP.load(Ordering::Relaxed),

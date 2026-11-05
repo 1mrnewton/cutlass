@@ -99,6 +99,8 @@ pub struct EncConfig {
     pub threads: usize,
     /// Denoise alt-refs with their neighbours (coded with an overlay frame).
     pub temporal_filter: bool,
+    /// Doubles the mini-GOP where the content barely changes.
+    pub adaptive_gop: bool,
     /// Estimate a global motion model per reference (experimental: it does
     /// not pay off on the natural test clip yet).
     pub global_motion: bool,
@@ -123,6 +125,7 @@ impl EncConfig {
             rc: RateControl::Qindex(120),
             keyint: 120,
             gop: 8,
+            adaptive_gop: true,
             temporal_filter: false,
             threads: 1,
             global_motion: false,
@@ -158,6 +161,9 @@ pub struct Av1Enc {
     next_disp: u64,
     /// Display index of the frame each reference slot holds.
     slot_disp: [Option<u64>; 8],
+    /// Temporal importance of the frames of the current mini-GOP (display
+    /// index, importance), from the TPL model.
+    tpl_imp: Vec<(u64, f64)>,
 }
 
 /// A global motion type and its parameters.
@@ -324,6 +330,7 @@ impl Av1Enc {
             lookahead: std::collections::VecDeque::new(),
             next_disp: 0,
             slot_disp: [None; 8],
+            tpl_imp: Vec::new(),
         })
     }
 
@@ -367,6 +374,25 @@ impl Av1Enc {
         while !self.lookahead.is_empty() {
             let d = self.next_disp;
             if self.is_key_disp(d) {
+                // The key frame's quantizer follows how much of the next
+                // mini-GOP is predicted from it.
+                let keyint = u64::from(self.cfg.keyint.max(1));
+                // (A single-frame GOP codes every picture without delay.)
+                let want = if self.cfg.gop > 1 {
+                    u64::from(self.cfg.gop).min(keyint - 1) + 1
+                } else {
+                    1
+                };
+                if (self.lookahead.len() as u64) < want && !flush {
+                    break;
+                }
+                let n = (want - 1).min(self.lookahead.len() as u64 - 1);
+                self.tpl_imp = if n > 0 && ev("AV1_TPLK", 1.0) > 0.0 {
+                    let steps = self.gop_steps(d, n);
+                    self.run_tpl::<P>(d, &steps, true)
+                } else {
+                    Vec::new()
+                };
                 let mut tu = Vec::new();
                 let shown = self.code_step::<P>(
                     &mut tu,
@@ -386,14 +412,88 @@ impl Av1Enc {
             let gop = u64::from(self.cfg.gop.max(1));
             let keyint = u64::from(self.cfg.keyint.max(1));
             let to_key = keyint - d % keyint;
-            let n = gop.min(to_key).min(self.lookahead.len() as u64);
-            if n < gop.min(to_key) && !flush {
+            // Static content takes a mini-GOP twice as long.
+            let long = if self.cfg.adaptive_gop && gop >= 4 {
+                2 * gop
+            } else {
+                gop
+            };
+            if (self.lookahead.len() as u64) < long.min(to_key) && !flush {
                 break;
+            }
+            let mut n = gop.min(to_key).min(self.lookahead.len() as u64);
+            let ln = long.min(to_key).min(self.lookahead.len() as u64);
+            if ln > gop && self.is_static::<P>(d - 1, ln) {
+                n = ln;
             }
             // Frames d .. d + n - 1 follow the anchor d - 1.
             let lo = d - 1;
-            let hi = lo + n;
-            let mut steps = Vec::new();
+            let steps = self.gop_steps(lo, n);
+            self.tpl_imp = if ev("AV1_TPL", 1.0) > 0.0 {
+                self.run_tpl::<P>(lo, &steps, false)
+            } else {
+                Vec::new()
+            };
+            let mut tu = Vec::new();
+            let first_unit = units.len();
+            for step in steps {
+                if let Some(shown) = self.code_step::<P>(&mut tu, step)? {
+                    let disp = match step {
+                        GopStep::Code { disp, .. } | GopStep::ShowExisting { disp } => disp,
+                    };
+                    units.push(self.finish_unit(std::mem::take(&mut tu), Some(shown), false, disp));
+                }
+            }
+            let gop_bits: u64 = units[first_unit..]
+                .iter()
+                .map(|u| u.data.len() as u64 * 8)
+                .sum();
+            self.update_rate_control(gop_bits, n, false);
+            for _ in 0..n {
+                self.lookahead.pop_front();
+            }
+            self.next_disp += n;
+        }
+        Ok(units)
+    }
+
+    /// True when frame `lo + len` is predicted well from the anchor `lo`.
+    fn is_static<P: PicturePixel>(&self, lo: u64, len: u64) -> bool {
+        let anchor = self
+            .slot_disp
+            .iter()
+            .position(|s| *s == Some(lo))
+            .and_then(|slot| self.core.slot_picture(slot));
+        let (Some(anchor), Some(target)) = (anchor, self.lookahead.get(len as usize - 1)) else {
+            return false;
+        };
+        let (Some(a), Some(t)) = (P::view(&anchor), P::view(target)) else {
+            return false;
+        };
+        let frames = [
+            super::tpl::TplFrame {
+                pic: a,
+                disp: 0,
+                refs: Vec::new(),
+                analyze: false,
+            },
+            super::tpl::TplFrame {
+                pic: t,
+                disp: len as i64,
+                refs: vec![0],
+                analyze: true,
+            },
+        ];
+        let stats = super::tpl::analyze(&frames, &[1], self.cfg.bit_depth);
+        let r = stats.inter_ratio(1);
+        r < ev("AV1_GOPT", 0.5)
+    }
+
+    /// Coding order of the `n` frames that follow the anchor `lo`.
+    fn gop_steps(&self, lo: u64, n: u64) -> Vec<GopStep> {
+        let hi = lo + n;
+        let mut steps = Vec::new();
+        {
             if n == 1 {
                 steps.push(GopStep::Code {
                     disp: hi,
@@ -423,27 +523,8 @@ impl Av1Enc {
                     }
                 }
             }
-            let mut tu = Vec::new();
-            let first_unit = units.len();
-            for step in steps {
-                if let Some(shown) = self.code_step::<P>(&mut tu, step)? {
-                    let disp = match step {
-                        GopStep::Code { disp, .. } | GopStep::ShowExisting { disp } => disp,
-                    };
-                    units.push(self.finish_unit(std::mem::take(&mut tu), Some(shown), false, disp));
-                }
-            }
-            let gop_bits: u64 = units[first_unit..]
-                .iter()
-                .map(|u| u.data.len() as u64 * 8)
-                .sum();
-            self.update_rate_control(gop_bits, n, false);
-            for _ in 0..n {
-                self.lookahead.pop_front();
-            }
-            self.next_disp += n;
         }
-        Ok(units)
+        steps
     }
 
     fn finish_unit(
@@ -534,6 +615,80 @@ impl Av1Enc {
         Ok(shown.into_iter().last().map(|f| f.picture))
     }
 
+    /// Runs the temporal dependency model over the mini-GOP `steps` that
+    /// follows the anchor `lo` (the key frame still to be coded when `key`);
+    /// returns the importance of each frame analyzed, in coding order.
+    fn run_tpl<P: PicturePixel>(&self, lo: u64, steps: &[GopStep], key: bool) -> Vec<(u64, f64)> {
+        let anchor = if key {
+            self.lookahead.front().cloned()
+        } else {
+            self.slot_disp
+                .iter()
+                .position(|s| *s == Some(lo))
+                .and_then(|slot| self.core.slot_picture(slot))
+        };
+        let Some(anchor) = anchor else {
+            return Vec::new();
+        };
+        let Some(apic) = P::view(&anchor) else {
+            return Vec::new();
+        };
+        let mut frames = vec![super::tpl::TplFrame {
+            pic: apic,
+            disp: lo as i64,
+            refs: Vec::new(),
+            analyze: key,
+        }];
+        let mut order = Vec::new();
+        if key {
+            order.push(0);
+        }
+        for st in steps {
+            let GopStep::Code { disp, .. } = *st else {
+                continue;
+            };
+            if frames.iter().any(|f| f.disp == disp as i64) {
+                continue;
+            }
+            let idx = (disp - self.next_disp) as usize;
+            let Some(pic) = self.lookahead.get(idx).and_then(|a| P::view(a)) else {
+                return Vec::new();
+            };
+            // Nearest past and nearest future frame coded so far.
+            let d = disp as i64;
+            let past = frames
+                .iter()
+                .enumerate()
+                .filter(|(_, f)| f.disp < d)
+                .max_by_key(|(_, f)| f.disp)
+                .map(|(i, _)| i);
+            let near = frames
+                .iter()
+                .enumerate()
+                .filter(|(_, f)| f.disp > d)
+                .min_by_key(|(_, f)| f.disp)
+                .map(|(i, _)| i);
+            let mut refs: Vec<usize> = Vec::new();
+            for r in [past, near].into_iter().flatten() {
+                if !refs.contains(&r) {
+                    refs.push(r);
+                }
+            }
+            order.push(frames.len());
+            frames.push(super::tpl::TplFrame {
+                pic,
+                disp: d,
+                refs,
+                analyze: true,
+            });
+        }
+        let stats = super::tpl::analyze(&frames, &order, self.cfg.bit_depth);
+        order
+            .iter()
+            .map(|&f| (frames[f].disp as u64, stats.frame_importance(f)))
+            .collect()
+    }
+
     /// Chooses q, references and the slot to refresh for a frame.
     fn plan_frame(&self, disp: u64, key: bool, show: bool, level: u32) -> FrameSpec {
         let base = self.rc_q;
@@ -550,6 +705,32 @@ impl Av1Enc {
                 2 => ev("AV1_Q2", 0.12),
                 _ => ev("AV1_Q3", 0.05),
             }
+        };
+        // The alt-ref's offset follows its temporal importance; the layers
+        // under it keep their share of that offset.
+        let frac = match self.tpl_imp.first() {
+            Some(&(d0, imp)) if level != u32::MAX && (!key || d0 == disp) => {
+                let bdi = ((self.cfg.bit_depth - 8) >> 1) as usize;
+                let qi = base.round().clamp(1.0, 255.0) as usize;
+                let step = f64::from(AC_QLOOKUP[bdi][qi]);
+                let alpha = if key {
+                    ev("AV1_TPLKA", 0.8)
+                } else {
+                    ev("AV1_TPLA", 0.9)
+                };
+                let target = step * imp.powf(-alpha).max(ev("AV1_TPLMIN", 0.3));
+                let mut q = qi;
+                while q > 0 && f64::from(AC_QLOOKUP[bdi][q - 1]) >= target {
+                    q -= 1;
+                }
+                let arf = 1.0 - q as f64 / qi as f64;
+                if key {
+                    arf
+                } else {
+                    arf * frac / ev("AV1_Q0", 0.33)
+                }
+            }
+            _ => frac,
         };
         let q = if self.cfg.gop > 1 || key {
             base * (1.0 - frac)
@@ -895,7 +1076,12 @@ impl Av1Enc {
             lambda: ev("AV1_QL", 0.07) * qstep * qstep,
             round_intra: ev("AV1_RI", 56.0) as i32,
             round_inter: ev("AV1_RN", 44.0) as i32,
-            tx_type_search: u8::from(speed < 9),
+            tx_type_search: if speed >= 9 {
+                0
+            } else {
+                ev("AV1_TXS", if speed >= 7 { 1.0 } else { 3.0 }) as u8
+            },
+            tx_type_keep: ev("AV1_TXK", 4.0) as u8,
             rdoq: if speed >= 9 {
                 0
             } else if speed >= 7 {

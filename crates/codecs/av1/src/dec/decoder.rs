@@ -672,6 +672,16 @@ impl Av1Core {
                         spatial_id: obu.spatial_id,
                     };
                     let hdr = parse_frame_header(obu.payload, &ctx)?;
+                    #[cfg(feature = "stats")]
+                    if !hdr.show_existing_frame {
+                        super::stats::frame(format!(
+                            "{}{}:q{}:{}b",
+                            hdr.order_hint,
+                            if hdr.show_frame { "" } else { "h" },
+                            hdr.quant.base_q_idx,
+                            obu.payload.len()
+                        ));
+                    }
                     if hdr.show_existing_frame {
                         self.show_existing(&seq, &hdr, tag)?;
                         continue;

@@ -3832,6 +3832,14 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
             }
             let tx_type = self.compute_tx_type(plane, tx, x4, y4);
             self.scratch.tx_type = tx_type;
+            #[cfg(feature = "stats")]
+            if plane == 0 {
+                super::stats::add(
+                    &super::stats::TXTYPE,
+                    tx_type as usize,
+                    (tx_w(tx) * tx_h(tx) / 16) as u64,
+                );
+            }
             let scan = get_scan(tx, tx_type);
             let qinfo = self.dequant_info(plane, tx_type, tx);
             let tx_class = get_tx_class(tx_type);

@@ -10,3 +10,4 @@ pub mod obu_write;
 pub mod quant;
 pub mod rdo;
 pub mod tf;
+pub mod tpl;

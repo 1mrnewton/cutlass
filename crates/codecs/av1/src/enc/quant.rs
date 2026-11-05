@@ -46,8 +46,12 @@ pub struct QuantParams {
     /// blocks (dead-zone quantization when RDOQ is off).
     pub round_intra: i32,
     pub round_inter: i32,
-    /// Try more than DCT_DCT for luma.
+    /// Luma transform types tried besides DCT_DCT: 0 none, 1 the ADST
+    /// combinations and IDTX, 2 also V_DCT and H_DCT, 3 every type.
     pub tx_type_search: u8,
+    /// With more transform types than this, a quick estimate picks DCT_DCT
+    /// and the best others up to this many for the full search (0: all).
+    pub tx_type_keep: u8,
     /// Rate-distortion optimized quantization: 0 off (dead-zone rounding),
     /// 1 one greedy pass plus end-of-block search, 2 a second greedy pass
     /// after the end of block moved.
@@ -61,6 +65,7 @@ impl Default for QuantParams {
             round_intra: 48,
             round_inter: 36,
             tx_type_search: 1,
+            tx_type_keep: 0,
             rdoq: 2,
         }
     }
@@ -70,6 +75,8 @@ const ADST_ADST: u8 = 3;
 const ADST_DCT: u8 = 1;
 const DCT_ADST: u8 = 2;
 const IDTX: u8 = 9;
+const V_DCT: u8 = 10;
+const H_DCT: u8 = 11;
 
 /// Largest level the bitstream carries (`coeffs()` masks with 0xFFFFF).
 const MAX_LEVEL: u32 = (1 << 20) - 1;
@@ -680,13 +687,18 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         let x4 = x >> 2;
         let y4 = y >> 2;
         // Candidate transform types.
-        let mut cands = [0u8; 5];
+        let mut cands = [0u8; 16];
         let mut nc = 1;
         if plane == 0 && !lossless {
             let set = self.tx_set_for(tx);
             let q_nonzero = i32::from(self.hdr.quant.base_q_idx) > 0;
             if set > 0 && q_nonzero && self.enc.tx_type_search > 0 {
-                for t in [ADST_DCT, DCT_ADST, ADST_ADST, IDTX] {
+                let list: &[u8] = match self.enc.tx_type_search {
+                    1 => &[ADST_DCT, DCT_ADST, ADST_ADST, IDTX],
+                    2 => &[ADST_DCT, DCT_ADST, ADST_ADST, IDTX, V_DCT, H_DCT],
+                    _ => &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+                };
+                for &t in list {
                     if self.tx_type_allowed(set, t) {
                         cands[nc] = t;
                         nc += 1;
@@ -726,6 +738,52 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         dist.denom_log2 = 0;
         dist.lim = 1i64 << (7 + bd);
         dist.g2 = g2;
+        let keep = self.enc.tx_type_keep as usize;
+        if keep > 0 && nc > keep && !lossless {
+            // Rank the other types by a quick estimate (rounded levels, a
+            // rate proxy) and run the full search on the best few only.
+            let mut est = [(0f64, 0u8); 16];
+            for (k, &t) in cands[1..nc].iter().enumerate() {
+                fwd_txfm(&res[..], w, &mut coefs[..], tx as usize, t as usize, bd);
+                let qi = self.dequant_info(plane, t, tx);
+                let den = i64::from(qi.denom);
+                let (mut d, mut bits) = (0f64, 0f64);
+                for pos in 0..tw * th {
+                    let qv = if pos == 0 { qi.dc } else { qi.ac };
+                    let q2 = i64::from(
+                        match qi.qm {
+                            Some(m) => crate::dsp::round2(qv * i32::from(m[pos]), 5),
+                            None => qv,
+                        }
+                        .max(1),
+                    );
+                    let a = i64::from(coefs[pos].unsigned_abs());
+                    let l = (a * den + q2 / 2) / q2;
+                    let e = (a - l * q2 / den) as f64;
+                    d += e * e;
+                    lv[pos] = l as u32;
+                    if l > 0 {
+                        bits += 2.0 + 1.5 * (l as f64).log2();
+                    }
+                }
+                // Zeros before the end of block cost too.
+                let lay = Layout::new(tx, t);
+                let eob = lay
+                    .scan
+                    .iter()
+                    .rposition(|&p| lv[p as usize] != 0)
+                    .map_or(0, |e| e + 1);
+                bits += 0.5 * eob as f64;
+                let rate = bits * f64::from(BIT) + f64::from(self.tx_type_cost(tx, t));
+                est[k] = (d * g2 + lam * rate, t);
+            }
+            let est = &mut est[..nc - 1];
+            est.sort_by(|a, b| a.0.total_cmp(&b.0));
+            for k in 0..keep - 1 {
+                cands[1 + k] = est[k].1;
+            }
+            nc = keep;
+        }
         for &t in &cands[..nc] {
             if lossless {
                 fwd_wht4x4(&res[..], w, &mut coefs[..]);

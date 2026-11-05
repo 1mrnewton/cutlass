@@ -25,13 +25,14 @@ pub fn readers() -> ReaderFactory {
     readers
 }
 
-/// The platform decoders for this OS, then PNG, JPEG, AAC, H.264, and PCM.
+/// The platform decoders for this OS, then PNG, GIF, JPEG, AAC, H.264, and PCM.
 #[must_use]
 pub fn decoders() -> DecodeFactory {
     let mut decoders = DecodeFactory::new();
     #[cfg(target_vendor = "apple")]
     cutlass_platform_apple::register_decoders(&mut decoders);
     cutlass_png::register_decoders(&mut decoders);
+    cutlass_gif::register_decoders(&mut decoders);
     cutlass_jpeg::register_decoders(&mut decoders);
     cutlass_aac::register_decoders(&mut decoders);
     cutlass_h264::register_decoders(&mut decoders);

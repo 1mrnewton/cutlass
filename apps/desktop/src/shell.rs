@@ -8681,6 +8681,60 @@ mod tests {
     }
 
     #[test]
+    fn an_imported_gif_plays_its_frames_in_turn() {
+        use cutlass_encode::{CpuFrame, FrameInput, FrameTime};
+        let temp = Temp::new();
+        empty_project(&temp.path);
+        // Three 1/10 s frames: red, green, blue.
+        let mut encoder =
+            cutlass_gif::GifEncoder::open(&CodecParams::video(CodecId::Gif, 16, 16)).unwrap();
+        let mut packets = Vec::new();
+        for (n, color) in [[220_u8, 20, 20], [20, 220, 20], [20, 20, 220]]
+            .into_iter()
+            .enumerate()
+        {
+            let bytes = [color[0], color[1], color[2], 255].repeat(16 * 16);
+            let time = FrameTime::new(i64::try_from(n).unwrap(), 1, 10).unwrap();
+            let frame = CpuFrame::new(16, 16, PixelFormat::Rgba8, bytes, time).unwrap();
+            packets.extend(
+                cutlass_encode::Encoder::push_frame(&mut encoder, &FrameInput::Cpu(frame)).unwrap(),
+            );
+        }
+        packets.extend(cutlass_encode::Encoder::drain(&mut encoder).unwrap());
+        let gif = temp.path.join("lights.gif");
+        let file: Vec<u8> = packets.into_iter().flat_map(|packet| packet.data).collect();
+        std::fs::write(&gif, file).unwrap();
+
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.import_file(&gif).unwrap();
+        let material = &desktop.draft().unwrap().materials.videos[0];
+        assert_eq!(material.kind, "gif");
+        let id = material.id.as_str().to_owned();
+        desktop.pixel_size = 0.001;
+        desktop
+            .drop_medium(&id, 0.0, crate::tokens::LANE_HEIGHT / 2.0)
+            .unwrap();
+        let mut middles = Vec::new();
+        // It plays round again for as long as the clip lasts.
+        for time in [50_000, 150_000, 250_000, 350_000, 1_160_000] {
+            desktop.seek(Micros(time));
+            let picture = desktop.preview_bytes().unwrap();
+            let at = ((picture.height / 2) * picture.width + picture.width / 2) as usize * 4;
+            middles.push([picture.rgba[at], picture.rgba[at + 1], picture.rgba[at + 2]]);
+        }
+        let strongest = |rgb: [u8; 3]| (0..3).max_by_key(|channel| rgb[*channel]).unwrap();
+        assert_eq!(
+            middles
+                .iter()
+                .map(|rgb| strongest(*rgb))
+                .collect::<Vec<_>>(),
+            [0, 1, 2, 0, 2],
+            "{middles:?}"
+        );
+    }
+
+    #[test]
     fn align_puts_the_pictures_edge_on_the_canvas_edge() {
         use cutlass_editor::{NoText, StageAlign, stage_box};
         let temp = Temp::new();

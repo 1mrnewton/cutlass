@@ -849,6 +849,7 @@ dependencies = [
  "cutlass-encode",
  "cutlass-eval",
  "cutlass-export",
+ "cutlass-gif",
  "cutlass-h264",
  "cutlass-isobmff",
  "cutlass-jpeg",

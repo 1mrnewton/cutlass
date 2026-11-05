@@ -49,6 +49,7 @@ pub fn register_codecs_with(
     let _ = hardware;
     cutlass_png::register_decoders(&mut decoders);
     cutlass_png::register_encoders(&mut encoders);
+    cutlass_gif::register_decoders(&mut decoders);
     cutlass_jpeg::register_decoders(&mut decoders);
     cutlass_jpeg::register_encoders(&mut encoders);
     cutlass_aac::register_decoders(&mut decoders);

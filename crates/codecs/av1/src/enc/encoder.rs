@@ -1,9 +1,10 @@
 //! Frame-level encoding: headers, tiles, packets and references.
 //!
 //! Every frame is coded by the decoder's own tile code running with a writing
-//! [`Coder`]. The finished temporal unit is then decoded by an internal
-//! [`Av1Core`], which produces the reference frames (with the in-loop filters)
-//! exactly as any decoder will and checks every packet.
+//! [`Coder`], so its reconstruction is the decoder's. The in-loop filters of
+//! the final header are applied to it and the result is installed as the
+//! reference in an internal [`Av1Core`] (which decodes the other headers),
+//! exactly as any decoder will make it.
 
 use std::sync::Arc;
 
@@ -1440,12 +1441,38 @@ impl Av1Enc {
                 .map(|f| (f64::from(base_lvl) * f).round().clamp(0.0, 63.0) as u8)
                 .collect();
             levels.dedup();
-            for l in levels {
+            let try_level = |l: u8, t: usize| -> (u64, Picture<P>) {
                 let mut h2 = hdr.clone();
                 h2.loop_filter.level = [l, l, l, l];
                 let mut pic = cur.clone();
-                crate::dec::postfilter::loop_filter(&seq, &h2, &fs, &mut pic, threads);
-                let e = picture_sse(&pic, src);
+                crate::dec::postfilter::loop_filter(&seq, &h2, &fs, &mut pic, t);
+                (picture_sse(&pic, src), pic)
+            };
+            // The levels are tried side by side, sharing the threads.
+            let n = levels.len();
+            let tried: Vec<(u64, Picture<P>)> = if threads > 1 && n > 1 {
+                std::thread::scope(|sc| {
+                    let hs: Vec<_> = levels
+                        .iter()
+                        .enumerate()
+                        .map(|(i, &l)| {
+                            let t = (threads / n + usize::from(i < threads % n)).max(1);
+                            let try_level = &try_level;
+                            sc.spawn(move || try_level(l, t))
+                        })
+                        .collect();
+                    hs.into_iter()
+                        .map(|h| {
+                            h.join().map_err(|_| CodecError::InvalidApi {
+                                what: "loop filter thread",
+                            })
+                        })
+                        .collect::<R<Vec<_>>>()
+                })?
+            } else {
+                levels.iter().map(|&l| try_level(l, threads)).collect()
+            };
+            for (l, (e, pic)) in levels.into_iter().zip(tried) {
                 if best_lf.as_ref().is_none_or(|b| e < b.0) {
                     best_h.loop_filter.level = [l, l, l, l];
                     best_lf = Some((e, pic));

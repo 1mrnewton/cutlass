@@ -26,6 +26,7 @@ mod heard;
 mod media;
 mod nest;
 mod sample;
+mod scenes;
 mod sources;
 mod text;
 mod transition;
@@ -44,6 +45,7 @@ pub use freeze::{FreezeMiss, freeze_toggle};
 pub use gpu::{Composed, FrameLayers, GpuBackdrop, GpuLayer, GpuSource, YuvSamples};
 pub use heard::{ClipAsk, Heard};
 pub use media::OpenClips;
+pub use scenes::{blend_blocks, kept_cuts, scene_split_times};
 pub use text::text_size;
 
 /// The source timestamp Freeze stores so the clip keeps showing `time`.

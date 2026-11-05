@@ -18,6 +18,7 @@
 pub mod adjust;
 pub mod blend;
 pub mod catalog;
+pub mod grade;
 pub mod look;
 pub mod package;
 pub mod recipe;
@@ -29,6 +30,10 @@ pub use catalog::{
     ADD, ANIM_IN, ANIM_LOOP, ANIM_OUT, BlendMode, CONTRAST, CatalogEntry, DIFFERENCE, Distort,
     INVERT, MULTIPLY, PIXELATE, PIXELATE_BLOCK, PackageKind, SCREEN, SOURCE_OVER, TRANSITION_FADE,
     Transition, entries, entry,
+};
+pub use grade::{
+    COLOR_CURVES, COLOR_WHEELS, Colour, CurveChannel, Grade, HSL, HSL_COLORS, MAX_CURVE_POINTS,
+    Wheel, WheelSetting, points_json, segment_colour, segment_grade, tidy_points, wheel_json,
 };
 pub use look::{FILTER, LOOK_PREFIX, LOOKS, Look, bundled_look, look_poster, segment_look};
 pub use package::{

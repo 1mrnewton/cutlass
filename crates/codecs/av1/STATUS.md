@@ -52,33 +52,54 @@ including process start, best of 3; same machine and load for both.
 
 | Threads | cutlass-av1 | libdav1d (FFmpeg) |
 | --- | --- | --- |
-| 1 | 0.71 s | 0.42 s |
-| 2 | 0.48 s | 0.32 s |
-| 3 | 0.48 s | 0.31 s |
-| 4 | 0.49 s | 0.33 s |
+| 1 | 0.71 s | 0.41 s |
+| 2 | 0.64 s | 0.37 s |
+| 3 | 0.66 s | 0.34 s |
+| 4 | 0.62 s | 0.37 s |
 
 (Best of 8, interleaved, measured while other jobs kept the machine's
-load average at 5-8, which makes the threaded times noisy.) Single
+load average at about 8 on its 4 processors, so the threaded times mostly
+show how much processor time each decoder needs; in the same runs the
+previous design, which parsed every frame on the calling thread, took
+0.85 s, 0.71 s and 0.85 s at 2, 3 and 4 threads. With the load average
+at 4-6 this decoder took 0.36-0.39 s at 4 threads.) Single
 threaded the decoder takes about 1.7x the time of libdav1d, which uses
 hand-written assembly for its kernels; this crate relies on
 autovectorization only (baseline x86-64: SSE2). With 2-4 threads the gap
-is about 1.5x, set by the parsing thread.
-Threading (2+ threads, frames with one tile column): the calling thread
-parses, and each frame gets a thread that reconstructs it a superblock
-row behind and runs deblocking (in place, one row behind) and CDEF and
-loop restoration (two rows behind). Frames overlap: the next frame is
-parsed as soon as the previous one's parsing ends (its CDFs, motion
-vectors and segment ids are then known), and its reconstruction reads a
-reference still being decoded through a copy filled from the rows the
-reference has published as final, waiting per chunk of blocks for the
-rows the chunk's motion may reach (warped blocks and scaled references
-wait for the whole picture). `Av1Core::decode_delayed`/`drain` return
-the shown frames with that delay (`Av1Decoder` uses them);
+is set by the processor time (see below).
+Threading (2+ threads): the calling thread only reads the frame headers.
+Each frame is a task on a thread of its own (the decoder keeps a pool of
+them) that waits for what its parse depends on, and nothing else: the
+CDFs of its primary reference frame (known when that frame's parse ends,
+or at its start when the frame end CDF update is disabled) and the motion
+fields and segment ids of the references it reads (when their parses
+end). Frames no later frame depends on (half of bench1080) are parsed
+beside the chain of referenced ones. With one tile column, a frame's
+task hands each chunk of parsed blocks to a backend thread that
+reconstructs it a superblock row behind and runs deblocking (in place,
+one row behind) and CDEF and loop restoration (two rows behind). A
+reconstruction that reads a reference still being decoded copies the
+rows that reference publishes as final (only frames something waits for
+publish them), waiting per chunk of blocks for the rows the chunk's
+motion may reach (warped blocks and scaled references wait for the whole
+picture), and reads the finished picture in place once it is done.
+Multi-tile and super-resolved frames are decoded whole by their task
+once the references are done. Up to as many frames as threads decode at
+once; `Av1Core::decode_delayed`/`drain` return the shown frames with a
+delay of as many frames (`Av1Decoder` uses them), and a tile data error
+found later fails the frame's picture and the frames depending on it;
 `Av1Core::decode` waits for the frames of each unit. Motion field
 estimation runs alongside parsing, band by band. Tiles are not decoded in
-parallel yet. At 4 threads the parsing thread is the critical path (about
-0.36 s of busy time on this file); the `prof` feature prints the stage
-times from `av1bench`.
+parallel yet. The parse is no longer the critical path: on this file the
+referenced frames' parses take about 0.2 s of processor time, the others
+0.13 s, reconstruction and filters 0.55 s. Threaded decoding costs about
+1.3x the processor time of single-threaded decoding (the parse records
+blocks that reconstruction replays, page faults of the larger working
+set: about 50k against 15k), so on a loaded machine the threaded times
+suffer more than libdav1d's (0.57 s of processor time at 4 threads,
+against 0.9-1.0 s). The `prof` feature prints the stage times, the
+processor time of each kind of thread and the page faults from
+`av1bench`.
 The coefficient reader keeps the arithmetic decoder state in registers and
 updates small CDFs as packed lanes; callgrind puts the whole decode at
 5.07G instructions single threaded, and the parsing thread at 2.14G with

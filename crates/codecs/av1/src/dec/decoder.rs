@@ -718,8 +718,8 @@ pub struct Av1Core {
     /// to `std::thread::available_parallelism()`. With 2 or more, the
     /// calling thread only reads the frame headers: each frame is parsed
     /// on a thread of its own as soon as the frames it depends on are
-    /// parsed far enough, and reconstructed and filtered on another (see
-    /// [`FrameTask`]), so with [`Self::decode_delayed`] several frames
+    /// parsed far enough, and reconstructed and filtered on another, so
+    /// with [`Self::decode_delayed`] up to as many frames as threads
     /// decode at once.
     pub threads: usize,
     /// Shown frames [`Self::decode_delayed`] may keep back (it returns
@@ -1365,11 +1365,11 @@ impl Av1Core {
         self.px16.collect();
     }
 
-    /// Waits until fewer frames are decoding than the threads allow (one
-    /// more than the threads, at most [`MAX_IN_FLIGHT`]).
+    /// Waits until fewer frames are decoding than the threads allow (as
+    /// many as the threads, at least 2, at most [`MAX_IN_FLIGHT`]).
     fn limit_in_flight(&mut self) {
         self.in_flight.retain(|j| !j.is_done());
-        while self.in_flight.len() >= (self.threads + 1).clamp(2, MAX_IN_FLIGHT) {
+        while self.in_flight.len() >= self.threads.clamp(2, MAX_IN_FLIGHT) {
             let j = self.in_flight.remove(0);
             let _ = j.wait();
         }

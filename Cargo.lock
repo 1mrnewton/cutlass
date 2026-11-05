@@ -1139,6 +1139,7 @@ version = "0.1.0"
 dependencies = [
  "cutlass-decode",
  "cutlass-encode",
+ "cutlass-pool",
 ]
 
 [[package]]

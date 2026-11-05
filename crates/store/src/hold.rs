@@ -104,11 +104,13 @@ pub fn hold(path: &Path) -> Result<Hold, StoreError> {
     {
         use std::os::windows::fs::OpenOptionsExt;
         // A Windows lock is mandatory: a second host could not read the
-        // address out of a locked `.locked`. Shared for reading only, the
-        // open file keeps every other writer out instead, and the system
-        // lets go of it when the process ends, as it does a lock.
+        // address out of a locked `.locked`. Shared for reading and
+        // deleting but not writing, the open file keeps every other writer
+        // out instead, and the system lets go of it when the process ends,
+        // as it does a lock. The folder can still be deleted while held.
         const FILE_SHARE_READ: u32 = 1;
-        options.share_mode(FILE_SHARE_READ);
+        const FILE_SHARE_DELETE: u32 = 4;
+        options.share_mode(FILE_SHARE_READ | FILE_SHARE_DELETE);
     }
     let mut file = match options.open(&lock_path) {
         Ok(file) => file,

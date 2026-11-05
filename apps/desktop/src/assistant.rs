@@ -11,8 +11,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 
 use cutlass_agent::{
-    ChatModel, Completion, CompletionRequest, LoopbackHttp, Message, Model, ModelError, ToolCall,
-    ToolOutcome, ToolSink, run_after, tool_definitions,
+    ApprovalAction, ChatModel, Completion, CompletionRequest, LoopbackHttp, Message, Model,
+    ModelError, ToolCall, ToolOutcome, ToolSink, run_after, tool_definitions,
 };
 use cutlass_settings::Settings;
 
@@ -34,6 +34,20 @@ pub enum Entry {
     },
     /// The turn stopped or failed, and why.
     Notice(String),
+    /// A call waits for the user's allow: the question, then the answer
+    /// once given.
+    Ask {
+        question: String,
+        allowed: Option<bool>,
+    },
+}
+
+/// A tool call waiting for the user's allow.
+struct Pending {
+    call: ToolCall,
+    action: ApprovalAction,
+    refused: ToolOutcome,
+    answer: Sender<ToolOutcome>,
 }
 
 /// From the model's thread to the window's.
@@ -62,6 +76,7 @@ pub struct Assistant {
     pub open: bool,
     history: Vec<Message>,
     running: Option<Running>,
+    pending: Option<Pending>,
 }
 
 impl Assistant {
@@ -69,6 +84,45 @@ impl Assistant {
     #[must_use]
     pub fn busy(&self) -> bool {
         self.running.is_some()
+    }
+
+    /// A call waits for the user to allow it or not.
+    #[must_use]
+    pub fn asking(&self) -> bool {
+        self.pending.is_some()
+    }
+
+    /// Answer the call waiting for an allow. Allowed, it runs; refused, the
+    /// model hears that the user said no.
+    pub fn decide(&mut self, shell: &mut Shell, allow: bool) {
+        let Some(pending) = self.pending.take() else {
+            return;
+        };
+        if let Some(Entry::Ask { allowed, .. }) = self
+            .entries
+            .iter_mut()
+            .rev()
+            .find(|entry| matches!(entry, Entry::Ask { allowed: None, .. }))
+        {
+            *allowed = Some(allow);
+        }
+        let outcome = if allow {
+            shell
+                .run_agent_tool(&pending.call, &[pending.action])
+                .outcome
+        } else {
+            ToolOutcome {
+                content: format!("the user said no: {}", pending.refused.content),
+                is_error: true,
+            }
+        };
+        self.entries.push(Entry::Step {
+            tool: pending.call.name.clone(),
+            input: pending.call.arguments.clone(),
+            result: Some(outcome.content.clone()),
+            failed: outcome.is_error,
+        });
+        let _ = pending.answer.send(outcome);
     }
 
     /// Send the words in the box with the model `settings` choose.
@@ -138,6 +192,16 @@ impl Assistant {
     /// Stop the turn running now. What it already changed stays, each
     /// change its own undo step.
     pub fn stop(&mut self) {
+        self.pending = None;
+        for entry in &mut self.entries {
+            if let Entry::Ask {
+                allowed: allowed @ None,
+                ..
+            } = entry
+            {
+                *allowed = Some(false);
+            }
+        }
         if let Some(running) = self.running.take() {
             running.stop.store(true, Ordering::Relaxed);
             for entry in &mut self.entries {
@@ -169,6 +233,9 @@ impl Assistant {
             let Some(running) = self.running.as_ref() else {
                 return false;
             };
+            if self.pending.is_some() {
+                return true;
+            }
             let event = match running.events.try_recv() {
                 Ok(event) => event,
                 Err(mpsc::TryRecvError::Empty) => return true,
@@ -183,7 +250,21 @@ impl Assistant {
             match event {
                 Event::Said(text) => self.entries.push(Entry::Said(text)),
                 Event::Tool { call, answer } => {
-                    let outcome = shell.run_agent_tool(&call);
+                    let run = shell.run_agent_tool(&call, &[]);
+                    if let Some(action) = run.wants {
+                        self.entries.push(Entry::Ask {
+                            question: action.prompt(),
+                            allowed: None,
+                        });
+                        self.pending = Some(Pending {
+                            call,
+                            action,
+                            refused: run.outcome,
+                            answer,
+                        });
+                        return true;
+                    }
+                    let outcome = run.outcome;
                     self.entries.push(Entry::Step {
                         tool: call.name.clone(),
                         input: call.arguments.clone(),
@@ -345,6 +426,68 @@ mod tests {
             assistant.entries.last(),
             Some(&Entry::Said("Still here.".to_owned()))
         );
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
+    #[test]
+    fn a_call_that_needs_an_allow_waits_for_the_users_answer() {
+        let (mut shell, path) = shell_with_project("ask");
+        let taken = path.join("taken.png");
+        std::fs::write(&taken, b"old").unwrap();
+        let replace = || {
+            completion(
+                "",
+                vec![ToolCall {
+                    id: "1".to_owned(),
+                    name: "export.start".to_owned(),
+                    arguments: format!("replace {}", taken.display()),
+                }],
+            )
+        };
+        let mut assistant = Assistant::default();
+        let model = LocalModel::scripted(vec![replace(), completion("Left it.", Vec::new())]);
+        assistant.start(model, 8, "export over it");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !assistant.asking() {
+            assert!(assistant.poll(&mut shell), "the turn ended without asking");
+            assert!(Instant::now() < deadline, "no question came");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        // While it waits, nothing more runs.
+        assert!(assistant.poll(&mut shell));
+        assert!(matches!(
+            assistant.entries.last(),
+            Some(Entry::Ask { question, allowed: None }) if question.contains("Replace")
+        ));
+        assistant.decide(&mut shell, false);
+        finish(&mut assistant, &mut shell);
+        assert_eq!(std::fs::read(&taken).unwrap(), b"old");
+        assert!(assistant.entries.iter().any(|entry| matches!(
+            entry,
+            Entry::Step { failed: true, result: Some(text), .. } if text.contains("the user said no")
+        )));
+        assert_eq!(
+            assistant.entries.last(),
+            Some(&Entry::Said("Left it.".to_owned()))
+        );
+
+        // Allowed, it runs.
+        let model = LocalModel::scripted(vec![replace(), completion("Replaced.", Vec::new())]);
+        assistant.start(model, 8, "now do");
+        while !assistant.asking() {
+            assert!(assistant.poll(&mut shell), "the turn ended without asking");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assistant.decide(&mut shell, true);
+        finish(&mut assistant, &mut shell);
+        assert_ne!(std::fs::read(&taken).unwrap(), b"old");
+        assert!(assistant.entries.iter().any(|entry| matches!(
+            entry,
+            Entry::Ask {
+                allowed: Some(true),
+                ..
+            }
+        )));
         let _ = std::fs::remove_dir_all(&path);
     }
 

@@ -75,11 +75,17 @@ pub fn panel(shell: &mut Shell, ui: &mut Ui, assistant: &mut Assistant, rect: Re
                     .color(tokens::MUTED),
                 );
             }
+            let mut decided = None;
             for (index, entry) in assistant.entries.iter().enumerate() {
-                entry_row(ui, index, entry);
+                if let Some(allow) = entry_row(ui, index, entry) {
+                    decided = Some(allow);
+                }
                 ui.add_space(6.0);
             }
-            if assistant.busy() {
+            if let Some(allow) = decided {
+                assistant.decide(shell, allow);
+            }
+            if assistant.busy() && !assistant.asking() {
                 ui.horizontal(|ui| {
                     ui.spinner();
                     ui.label(RichText::new("Working…").size(12.0).color(tokens::MUTED));
@@ -90,8 +96,39 @@ pub fn panel(shell: &mut Shell, ui: &mut Ui, assistant: &mut Assistant, rect: Re
     command_box(shell, ui, assistant);
 }
 
-fn entry_row(ui: &mut Ui, index: usize, entry: &Entry) {
+/// One line of the conversation; an open question's answer, when clicked.
+fn entry_row(ui: &mut Ui, index: usize, entry: &Entry) -> Option<bool> {
+    let mut decided = None;
     match entry {
+        Entry::Ask { question, allowed } => {
+            Frame::new()
+                .stroke(Stroke::new(1.0, DONE))
+                .corner_radius(CornerRadius::same(10))
+                .inner_margin(Margin::same(10))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.label(RichText::new(question).size(13.0).color(tokens::TEXT));
+                    ui.add_space(4.0);
+                    match allowed {
+                        None => {
+                            ui.horizontal(|ui| {
+                                if ui.button(RichText::new("Allow").size(12.0)).clicked() {
+                                    decided = Some(true);
+                                }
+                                if ui.button(RichText::new("Don't allow").size(12.0)).clicked() {
+                                    decided = Some(false);
+                                }
+                            });
+                        }
+                        Some(true) => {
+                            ui.label(RichText::new("Allowed").size(11.0).color(DONE));
+                        }
+                        Some(false) => {
+                            ui.label(RichText::new("Not allowed").size(11.0).color(FAILED));
+                        }
+                    }
+                });
+        }
         Entry::Asked(text) => {
             ui.with_layout(Layout::top_down(Align::Max), |ui| {
                 Frame::new()
@@ -148,6 +185,7 @@ fn entry_row(ui: &mut Ui, index: usize, entry: &Entry) {
                 });
         }
     }
+    decided
 }
 
 fn command_box(shell: &Shell, ui: &mut Ui, assistant: &mut Assistant) {

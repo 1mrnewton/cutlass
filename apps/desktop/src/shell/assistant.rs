@@ -4,12 +4,13 @@
 //! the window's playhead.
 
 use cutlass_agent::{
-    ApprovalAction, Approver, DraftTools, McpClient, McpError, McpTransport, Player, Registry,
-    SettingsTool, ToolCall, ToolOutcome, ToolSink,
+    ApprovalAction, Approver, DraftTools, Export, McpClient, McpError, McpTransport, Player,
+    Registry, SettingsTool, ToolCall, ToolOutcome, ToolSink,
 };
+use cutlass_codec::CodecId;
 use cutlass_model::Micros;
 
-use super::Shell;
+use super::{ExportRequest, Shell};
 use crate::mcp::{NoSandbox, Probe, Unbuilt};
 
 /// Where the tools this window does not hand the assistant yet are.
@@ -42,14 +43,36 @@ impl Player for Moves {
     }
 }
 
-/// The assistant does not ask for approvals yet, so anything that needs
-/// one is refused, and the model sees why.
-struct Unasked;
+/// Allows what the user already allowed for this call; anything else is
+/// kept, so the window can ask, and refused for now.
+struct Asked<'a> {
+    allowed: &'a [ApprovalAction],
+    wanted: Option<ApprovalAction>,
+}
 
-impl Approver for Unasked {
+impl Approver for Asked<'_> {
     fn decide(&mut self, action: &ApprovalAction) -> bool {
-        cutlass_logger::info!("assistant: refused {action:?}; approvals are made in Settings");
+        if self.allowed.contains(action) {
+            return true;
+        }
+        self.wanted.get_or_insert_with(|| action.clone());
         false
+    }
+}
+
+/// An export the window starts once the call is done.
+#[derive(Default)]
+struct Exports {
+    path: Option<String>,
+}
+
+impl Export for Exports {
+    fn start(&mut self, path: &str) -> Result<String, String> {
+        if path.trim().is_empty() {
+            return Err("name the file to export to".to_owned());
+        }
+        self.path = Some(path.to_owned());
+        Ok("export".to_owned())
     }
 }
 
@@ -68,13 +91,25 @@ impl McpTransport for NoServers {
     }
 }
 
+/// What one assistant tool call did, and the approval it waits for when
+/// it needs one the user has not given.
+pub struct AgentRun {
+    pub outcome: ToolOutcome,
+    pub wants: Option<ApprovalAction>,
+}
+
 impl Shell {
-    /// Run one tool call from the assistant on the open project.
-    pub fn run_agent_tool(&mut self, call: &ToolCall) -> ToolOutcome {
+    /// Run one tool call from the assistant on the open project. `allowed`
+    /// is what the user allowed for this call; a call that needs anything
+    /// else does nothing and says what it wants.
+    pub fn run_agent_tool(&mut self, call: &ToolCall, allowed: &[ApprovalAction]) -> AgentRun {
         let Some(session) = self.session.clone() else {
-            return ToolOutcome {
-                content: "no project is open".to_owned(),
-                is_error: true,
+            return AgentRun {
+                outcome: ToolOutcome {
+                    content: "no project is open".to_owned(),
+                    is_error: true,
+                },
+                wants: None,
             };
         };
         let before = session.revision();
@@ -92,13 +127,17 @@ impl Shell {
             Unbuilt(IN_THE_WINDOW),
             (
                 Unbuilt(IN_THE_WINDOW),
-                Unbuilt(IN_THE_WINDOW),
+                Exports::default(),
                 NoSandbox,
-                Unasked,
+                Asked {
+                    allowed,
+                    wanted: None,
+                },
                 McpClient::new(NoServers),
             ),
         );
-        let outcome = registry.run_tool(call);
+        let mut outcome = registry.run_tool(call);
+        let wants = registry.approver.wanted.take();
         let session = registry.draft.session();
         if session.revision() != before {
             self.session = Some(session.clone());
@@ -112,7 +151,27 @@ impl Shell {
             Some(false) => self.pause(),
             None => {}
         }
-        outcome
+        if let Some(path) = registry.export.path.take() {
+            let replace = call.arguments.trim_start().starts_with("replace");
+            let codec = if path.to_ascii_lowercase().ends_with(".png") {
+                CodecId::Png
+            } else {
+                CodecId::H264
+            };
+            let started = self.export(ExportRequest {
+                path: path.into(),
+                codec,
+                replace,
+                ..ExportRequest::default()
+            });
+            if let Err(error) = started {
+                outcome = ToolOutcome {
+                    content: error.to_string(),
+                    is_error: true,
+                };
+            }
+        }
+        AgentRun { outcome, wants }
     }
 }
 
@@ -143,11 +202,15 @@ mod tests {
             .push(Segment::new("a", "missing", TimeRange::new(0, 2_000_000)));
         Folder::new(draft).save(&temp.path).unwrap();
         let mut desktop = shell();
-        let none = desktop.run_agent_tool(&call("draft.query", "project"));
+        let none = desktop
+            .run_agent_tool(&call("draft.query", "project"), &[])
+            .outcome;
         assert!(none.is_error);
         desktop.open_folder(&temp.path).unwrap();
 
-        let read = desktop.run_agent_tool(&call("draft.query", "project"));
+        let read = desktop
+            .run_agent_tool(&call("draft.query", "project"), &[])
+            .outcome;
         assert!(!read.is_error, "{}", read.content);
         let revision: u64 = read
             .content
@@ -165,7 +228,9 @@ mod tests {
                 "right_id": "b",
             }],
         });
-        let applied = desktop.run_agent_tool(&call("draft.apply", &split.to_string()));
+        let applied = desktop
+            .run_agent_tool(&call("draft.apply", &split.to_string()), &[])
+            .outcome;
         assert!(!applied.is_error, "{}", applied.content);
         let count =
             |desktop: &crate::shell::Shell| desktop.draft().unwrap().tracks[0].segments.len();
@@ -174,21 +239,47 @@ mod tests {
         desktop.undo().unwrap();
         assert_eq!(count(&desktop), 1);
 
-        let stale = desktop.run_agent_tool(&call("draft.apply", &split.to_string()));
+        let stale = desktop
+            .run_agent_tool(&call("draft.apply", &split.to_string()), &[])
+            .outcome;
         assert!(stale.is_error, "a stale revision is refused");
 
-        let seek = desktop.run_agent_tool(&call("player.seek", "1000000"));
+        let seek = desktop
+            .run_agent_tool(&call("player.seek", "1000000"), &[])
+            .outcome;
         assert!(!seek.is_error, "{}", seek.content);
         assert_eq!(desktop.playhead(), Micros(1_000_000));
 
-        let export = desktop.run_agent_tool(&call("export.start", "new /tmp/x.mp4"));
-        assert!(export.is_error);
-        assert!(
-            export.content.contains("not open to the assistant"),
-            "{}",
-            export.content
+        // Replacing a file waits for the user's allow, and touches nothing
+        // before it.
+        let taken = temp.path.join("taken.png");
+        std::fs::write(&taken, b"old").unwrap();
+        let replace = call("export.start", &format!("replace {}", taken.display()));
+        let asked = desktop.run_agent_tool(&replace, &[]);
+        assert!(asked.outcome.is_error);
+        let wanted = cutlass_agent::ApprovalAction::ExportReplace {
+            path: taken.display().to_string(),
+        };
+        assert_eq!(asked.wants, Some(wanted.clone()));
+        assert_eq!(std::fs::read(&taken).unwrap(), b"old");
+        let allowed = desktop.run_agent_tool(&replace, &[wanted]);
+        assert!(allowed.wants.is_none());
+        assert!(!allowed.outcome.is_error, "{}", allowed.outcome.content);
+        assert_ne!(
+            std::fs::read(&taken).unwrap(),
+            b"old",
+            "the still was written"
         );
-        let settings = desktop.run_agent_tool(&call("settings.get", ""));
+        // A new file that is taken is refused without asking.
+        let new = desktop.run_agent_tool(
+            &call("export.start", &format!("new {}", taken.display())),
+            &[],
+        );
+        assert!(new.wants.is_none());
+        assert!(new.outcome.is_error);
+        let settings = desktop
+            .run_agent_tool(&call("settings.get", ""), &[])
+            .outcome;
         assert!(!settings.is_error, "{}", settings.content);
     }
 }

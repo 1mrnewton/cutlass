@@ -48,6 +48,7 @@ use cutlass_transcription::{
 
 mod assistant;
 mod inspector;
+pub use assistant::AgentRun;
 
 pub use inspector::{LetterCase, Panel, SILENT_DB, TextLook, gain_of_db, volume_db};
 

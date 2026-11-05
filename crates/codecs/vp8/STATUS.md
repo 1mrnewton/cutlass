@@ -72,11 +72,11 @@ All numbers are from this machine (Apple M5 Pro), release builds, one thread, ff
 | Decode libvpx streams | Identical to ffmpeg `vp8` and `libvpx` | 27 libvpx encodes, every pixel identical in both oracles | `libvpx_*_match_both_decoders` | Pass |
 | Decode the 1080p WebM | Identical to ffmpeg `vp8` | 901 frames identical | `independent_webm_matches_ffmpeg` | Pass |
 | Our packets in other decoders | Identical to our reconstruction | Every encoder test stream identical in ffmpeg `vp8`, `libvpx`, and our decoder | `prove_encode::*`, `an_mp4_vp08_track_round_trips` | Pass |
-| PSNR-Y within 2.0 dB of libvpx good cpu-used 4, 640×360, 1 Mb/s, 150 frames | ≥ libvpx − 2.0 dB | 16929689: 41.37 dB against 40.54 (+0.83). 7688387224072670472: 43.87 against 44.00 (−0.13; libvpx spent 7% more bytes). IMG_8144: 47.81 against 46.54 (+1.27). testsrc2: 44.60 against 44.24 (+0.36) | `gate_quality_and_rate_against_libvpx` (ignored; run with `cargo test --release -p cutlass-vp8 -- --ignored gate`), `cargo bench -p cutlass-vp8` | Pass |
-| Rate at 1 Mb/s | 0.85×–1.15× of target | 1.003×, 1.006×, 1.008× of 625,000 bytes | same | Pass |
-| Decode 1080p, one thread | ≥ 60 fps | BENCH_DECODE | `cargo bench -p cutlass-vp8` | Pass |
-| Encode 640×360, default preset | ≥ 30 fps | BENCH_ENCODE | `cargo bench -p cutlass-vp8`, gate test | Pass |
-| Decoder fuzz | ≥ 30 min, findings 0 | FUZZ_SUMMARY | `decoder_fuzz_does_not_panic` | FUZZ_RESULT |
+| PSNR-Y within 2.0 dB of libvpx good cpu-used 4, 640×360, 1 Mb/s, 150 frames | ≥ libvpx − 2.0 dB | 16929689: 41.37 dB against 40.54 (+0.83). 7688387224072670472: 43.87 against 44.00 (−0.13; libvpx spent 7% more bytes). IMG_8144: 47.81 against 46.54 (+1.27). testsrc2: 45.16 against 44.24 (+0.92) | `gate_quality_and_rate_against_libvpx` (ignored; run with `cargo test --release -p cutlass-vp8 -- --ignored gate`), `cargo bench -p cutlass-vp8` | Pass |
+| Rate at 1 Mb/s | 0.85×–1.15× of target | 1.004×, 1.006×, 1.008× of 625,000 bytes | same | Pass |
+| Decode 1080p, one thread | ≥ 60 fps | testsrc2 254.5 fps; the 901-frame WebM 289.6 fps. ffmpeg `vp8` 508.5 and 828.1 fps, `libvpx` 438.0 and 853.2 fps, so 0.35×–0.58× of ffmpeg | `cargo bench -p cutlass-vp8` | Pass |
+| Encode 640×360, default preset | ≥ 30 fps | testsrc2 66.9 fps; the three natural clips 53.9–56.7 fps. libvpx good cpu-used 4: 852 fps | `cargo bench -p cutlass-vp8`, gate test | Pass |
+| Decoder fuzz | ≥ 30 min, findings 0 | 1800 s, 5,922,430 inputs, findings 0 | `decoder_fuzz_does_not_panic` | Verified |
 | `cargo fmt --all -- --check` | Clean | Clean for this crate. `crates/codecs/gif/src/quant.rs` differs on `development` already (not touched here) | | Pass for VP8 |
 | `cargo lint` | Clean | Clean, also `--target x86_64-unknown-linux-gnu` for this crate | | Pass |
 | `cargo test -p cutlass-vp8` | Pass | 51 unit and oracle tests and 1 integration test pass in debug and release | | Pass |
@@ -86,10 +86,21 @@ All numbers are from this machine (Apple M5 Pro), release builds, one thread, ff
 `cargo bench -p cutlass-vp8`, with nothing else running:
 
 ```
-BENCH_OUTPUT
+VP8, one thread. ffmpeg rows are its -benchmark real time.
+decode 1920x1080 testsrc2, 120 frames, 3002 kB; pixels 373248000 bytes, 0 mismatches against ffmpeg vp8
+cutlass           0.472 s      254.5 fps
+ffmpeg vp8        0.236 s      508.5 fps
+ffmpeg libvpx     0.274 s      438.0 fps
+decode local 1080p WebM, 901 frames, 3645 kB; 0 mismatches against ffmpeg vp8
+cutlass           3.111 s      289.6 fps
+ffmpeg vp8        1.088 s      828.1 fps
+ffmpeg libvpx     1.056 s      853.2 fps
+encode 640x360 testsrc2, 150 frames at 1000 kb/s; libvpx decodes ours with 0 mismatches
+cutlass     2.242 s       66.9 fps    627595 B  PSNR-Y 45.16 dB
+libvpx      0.176 s      852.3 fps    624936 B  PSNR-Y 44.24 dB
 ```
 
-libvpx and ffmpeg's decoder use hand-written SIMD; this crate is scalar safe Rust. Decoding runs at roughly a quarter of their speed and encoding at a small fraction of libvpx's, while both stay well above the gates.
+libvpx and ffmpeg's decoder use hand-written SIMD; this crate is safe Rust, with the loop filter and interpolation written so the compiler vectorizes them. Decoding runs at a third to a half of their speed. Encoding is about a thirteenth of libvpx's speed, because every macroblock is decided by rate and distortion over more candidates; it reaches higher PSNR at the same rate on three of the four sources.
 
 ## Capability matrix
 
@@ -110,7 +121,7 @@ libvpx and ffmpeg's decoder use hand-written SIMD; this crate is scalar safe Rus
 | MP4 `vp08` with `vpcC` | Read through `cutlass-isobmff` | `vpcC` on the first packet as `SideData::Config` | `an_mp4_vp08_track_round_trips` (ffmpeg `vp8` and `libvpx` decode the MP4 to our pictures) | Verified |
 | Lifecycle, malformed input, cancel | Specified | Specified | `decoder_contract`, `encoder_contract`, `reset_drops_references`, `failed_frames_leave_the_decoder_as_it_was`, `malformed_headers_are_rejected` | Verified |
 | Untrusted size | `Decoder::with_max_pixels` refuses larger key frames with `Limit` | n/a | `malformed_headers_are_rejected` | Verified |
-| Fuzz | Required | n/a | `decoder_fuzz_does_not_panic` | FUZZ_RESULT |
+| Fuzz | Required | n/a | `decoder_fuzz_does_not_panic` | Verified |
 | Benchmarks against ffmpeg | Required | Required | `cargo bench -p cutlass-vp8` | Verified |
 
 ## Fuzz
@@ -119,7 +130,12 @@ Debug build (overflow checks on), seed `0x56503800f22d`, `VP8_FUZZ_SECS=1800`. T
 
 Recorded line:
 
-`FUZZ_LINE`
+```text
+vp8 fuzz seed 0x56503800f22d seconds 1800 inputs 5922430 pictures 3861230 errors 2053099 findings 0
+test result: ok. 1 passed; 0 failed
+```
+
+Run on commit `d4414acf` (the final decoder, including the vectorized loop filter). An earlier 30-minute run on the scalar loop filter also found nothing: 6,935,804 inputs, 4,540,010 pictures, 2,386,334 errors, findings 0.
 
 ## Not done
 

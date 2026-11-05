@@ -16,7 +16,7 @@
 
 use cutlass_compositor::{ComposeError, Device, Extent, Frame, submit};
 use cutlass_effects::{
-    ADJUSTMENT, Adjust, EffectSource, PackageKind, PackageStore, Step, animation_package_id,
+    ADJUSTMENT, Colour, EffectSource, PackageKind, PackageStore, Step, animation_package_id,
     bundled_recipe, entry, package_id, plugin_package_id, segment_package_id, video_package_id,
 };
 use cutlass_model::{Draft, MaterialRef, Micros, Segment, SegmentId, TrackAttribute};
@@ -54,7 +54,7 @@ struct Mark<'a> {
     segment_index: usize,
     segment: &'a Segment,
     /// An adjustment layer's sliders; otherwise the segment's package runs.
-    adjust: Option<Adjust>,
+    adjust: Option<Colour>,
 }
 
 enum ClipFilter {
@@ -302,8 +302,11 @@ fn global_marks<'a>(draft: &'a Draft, time: Micros, stack: &[StackLayer<'_>]) ->
         })
         .filter_map(|(track_index, segment_index, segment, _)| {
             // A bundled filter is a look: adjust sliders, not a package.
-            let adjust = cutlass_effects::segment_look(draft, segment);
-            if adjust.is_some_and(|adjust| adjust.is_identity()) {
+            let adjust = cutlass_effects::segment_look(draft, segment).map(|adjust| Colour {
+                grade: cutlass_effects::segment_grade(draft, segment),
+                adjust,
+            });
+            if adjust.as_ref().is_some_and(Colour::is_identity) {
                 return None;
             }
             Some(Mark {
@@ -352,7 +355,7 @@ fn adjustment_layers<'a>(
                 )
         })
         .filter_map(move |(track_index, segment_index, segment)| {
-            let adjust = cutlass_effects::segment_adjust(draft, segment);
+            let adjust = cutlass_effects::segment_colour(draft, segment);
             (!adjust.is_identity()).then_some(Mark {
                 render_index: segment.render_index,
                 track_index,
@@ -468,21 +471,21 @@ fn clip_filter(draft: &Draft, track_index: usize, segment_index: usize) -> ClipF
     }
 }
 
-/// The adjust sliders on a drawn clip, when any is set.
-fn clip_adjust(draft: &Draft, track_index: usize, segment_index: usize) -> Option<Adjust> {
-    let adjust =
-        cutlass_effects::segment_adjust(draft, segment(draft, track_index, segment_index)?);
-    (!adjust.is_identity()).then_some(adjust)
+/// The colour work on a drawn clip, when any is set.
+fn clip_adjust(draft: &Draft, track_index: usize, segment_index: usize) -> Option<Colour> {
+    let colour =
+        cutlass_effects::segment_colour(draft, segment(draft, track_index, segment_index)?);
+    (!colour.is_identity()).then_some(colour)
 }
 
 /// `input` with `adjust` run over it. The grain moves once a frame at 30
 /// frames a second.
-fn adjusted(adjust: &Adjust, input: CpuBytes, time: Micros) -> CpuBytes {
+fn adjusted(colour: &Colour, input: CpuBytes, time: Micros) -> CpuBytes {
     let (width, height) = (input.width(), input.height());
     let mut rgba = input.rgba().to_vec();
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let seed = (time.0 / 33_333) as u32;
-    cutlass_effects::adjust_rgba(adjust, &mut rgba, width, height, seed);
+    colour.apply(&mut rgba, width, height, seed);
     CpuBytes::new(width, height, rgba).unwrap_or(input)
 }
 

@@ -835,6 +835,24 @@ mod tests {
     }
 
     #[test]
+    fn a_graded_clip_runs_its_curve() {
+        let draft = color_clip("0xFF404040", false);
+        let mut session = cutlass_session::Session::open(draft);
+        session
+            .apply(
+                0,
+                &[cutlass_session::Request::SetCurve {
+                    segment_id: cutlass_model::SegmentId::new("segment"),
+                    material_id: "curve".into(),
+                    channel: "rgb".to_owned(),
+                    points: vec![[0.0, 1.0], [1.0, 0.0]],
+                }],
+            )
+            .unwrap();
+        assert_eq!(pixels(session.draft(), 0), [191, 191, 191, 255].repeat(2));
+    }
+
+    #[test]
     fn the_project_canvas_color_is_under_every_layer() {
         let mut draft = Draft::empty("draft");
         draft.canvas_config.width = 2;

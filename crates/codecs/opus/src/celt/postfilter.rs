@@ -14,7 +14,8 @@ const GAINS: [[f32; 3]; 3] = [
     [26208.0 / 32768.0, 3280.0 / 32768.0, 0.0],
 ];
 
-/// Shortest and longest comb filter periods.
+/// Shortest comb filter period, and the history the filter needs (the
+/// longest coded period is `MAX_PERIOD - 2`).
 pub(crate) const MIN_PERIOD: usize = 15;
 pub(crate) const MAX_PERIOD: usize = 1024;
 
@@ -37,11 +38,11 @@ pub(crate) fn comb_filter_inplace(
     to: Comb,
     overlap: usize,
 ) {
-    if at < MAX_PERIOD + 2 || at + len > buf.len() {
+    if at < MAX_PERIOD || at + len > buf.len() {
         return;
     }
-    let t0 = from.period.clamp(MIN_PERIOD, MAX_PERIOD);
-    let t1 = to.period.clamp(MIN_PERIOD, MAX_PERIOD);
+    let t0 = from.period.clamp(MIN_PERIOD, MAX_PERIOD - 2);
+    let t1 = to.period.clamp(MIN_PERIOD, MAX_PERIOD - 2);
     let tap0 = GAINS[from.tapset.min(2)];
     let tap1 = GAINS[to.tapset.min(2)];
     let (g00, g01, g02) = (
@@ -91,11 +92,11 @@ pub(crate) fn comb_filter_fir(
     to: Comb,
     overlap: usize,
 ) {
-    if at < MAX_PERIOD + 2 || at + len > x.len() || y.len() < len {
+    if at < MAX_PERIOD || at + len > x.len() || y.len() < len {
         return;
     }
-    let t0 = from.period.clamp(MIN_PERIOD, MAX_PERIOD);
-    let t1 = to.period.clamp(MIN_PERIOD, MAX_PERIOD);
+    let t0 = from.period.clamp(MIN_PERIOD, MAX_PERIOD - 2);
+    let t1 = to.period.clamp(MIN_PERIOD, MAX_PERIOD - 2);
     let tap0 = GAINS[from.tapset.min(2)];
     let tap1 = GAINS[to.tapset.min(2)];
     let (g00, g01, g02) = (

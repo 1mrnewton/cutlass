@@ -12,6 +12,7 @@
 mod bands;
 mod coder;
 mod cwrs;
+mod encoder;
 mod energy;
 mod laplace;
 mod mdct;

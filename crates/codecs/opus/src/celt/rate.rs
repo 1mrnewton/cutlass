@@ -324,13 +324,19 @@ fn interp_bits2pulses(
         let band_width = width_from(j, coded_bands);
         let mut band_bits = bits[j] + percoeff * band_width + rem;
         if band_bits >= p.thresh[j].max(alloc_floor + (1 << BITRES)) {
-            let skip = if coder.encoding() {
-                let factor = if j < p.prev { 7 } else { 9 };
-                band_bits > ((factor * band_width) << lm << BITRES) >> 4
+            // The encoder keeps the band (codes a 1) unless it is thin
+            // enough to fold, with hysteresis against the previous frame.
+            let keep = if coder.encoding() {
+                let depth = match (coded_bands > 17, j < p.prev) {
+                    (false, _) => 0,
+                    (true, true) => 7,
+                    (true, false) => 9,
+                };
+                coded_bands <= start + 2 || band_bits > ((depth * band_width) << lm << BITRES) >> 4
             } else {
                 false
             };
-            if coder.bit_logp(skip, 1) {
+            if coder.bit_logp(keep, 1) {
                 break;
             }
             psum += 1 << BITRES;

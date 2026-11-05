@@ -8,16 +8,19 @@
 //! segment is a hard cut.
 //!
 //! Before the cut, the incoming picture is sampled from the incoming head.
-//! After the cut, the outgoing picture holds its last frame. The fade package
-//! mixes those two pictures. A missing package, an unreadable package, or any
-//! other package stays the hard cut: the segment that covers the time, alone.
+//! After the cut, the outgoing picture holds its last frame. A built-in
+//! transition (`cutlass_effects::TransitionKind`), or the fade package as a
+//! dissolve, mixes those two pictures. A missing package, an unreadable
+//! package, or any other package stays the hard cut: the segment that covers the time, alone.
 //! A text segment on the side that does not cover the time also stays a hard
 //! cut. The draft is not written.
 
 use std::collections::HashMap;
 
 use cutlass_compositor::{Device, crossfade};
-use cutlass_effects::{PackageKind, PackageStore, Transition, entry, load_transition};
+use cutlass_effects::{
+    PackageKind, PackageStore, Transition, TransitionKind, entry, load_transition, mix_transition,
+};
 use cutlass_model::{Draft, MaterialRef, MaterialTransition, Micros, Segment, TrackAttribute};
 use cutlass_picture::CpuBytes;
 
@@ -127,7 +130,8 @@ pub(crate) fn prepare<D: Device>(
     Ok(Prepared { cuts, pictures })
 }
 
-/// The fade stand-in, or nothing when the package is not that stand-in.
+/// The mixed picture for a cut's transition, or nothing when it names no
+/// transition Cutlass draws.
 pub(crate) fn fade(
     store: &dyn PackageStore,
     draft: &Draft,
@@ -137,21 +141,31 @@ pub(crate) fn fade(
     width: u32,
     height: u32,
 ) -> Option<CpuBytes> {
-    if !is_fade(store, draft, cut) {
-        return None;
-    }
-    let rgba = crossfade(outgoing, incoming, cut.numer, cut.denom)?;
+    let rgba = match kind_of(store, draft, cut)? {
+        TransitionKind::Dissolve => crossfade(outgoing, incoming, cut.numer, cut.denom)?,
+        kind => {
+            #[allow(clippy::cast_precision_loss)]
+            let t = (cut.numer as f64 / cut.denom as f64) as f32;
+            mix_transition(kind, outgoing, incoming, width, height, t)?
+        }
+    };
     CpuBytes::new(width, height, rgba).ok()
 }
 
+/// The transition on a cut: a built-in one by its material, or the fade
+/// package as a dissolve.
+fn kind_of(store: &dyn PackageStore, draft: &Draft, cut: &Cut) -> Option<TransitionKind> {
+    let transition = transition_on(draft, cut.outgoing_track, cut.outgoing_segment)?;
+    if let Some(kind) = TransitionKind::of(transition) {
+        return Some(kind);
+    }
+    let package = load_transition(store, transition).ok()?;
+    (entry(package.id()).map(|row| row.kind) == Some(PackageKind::Transition(Transition::Fade)))
+        .then_some(TransitionKind::Dissolve)
+}
+
 fn is_fade(store: &dyn PackageStore, draft: &Draft, cut: &Cut) -> bool {
-    let Some(transition) = transition_on(draft, cut.outgoing_track, cut.outgoing_segment) else {
-        return false;
-    };
-    let Ok(package) = load_transition(store, transition) else {
-        return false;
-    };
-    entry(package.id()).map(|row| row.kind) == Some(PackageKind::Transition(Transition::Fade))
+    kind_of(store, draft, cut).is_some()
 }
 
 fn cuts_at(draft: &Draft, time: Micros) -> Vec<Cut> {
@@ -408,6 +422,21 @@ mod tests {
         let late = &cuts_at(&draft, Micros(99))[0];
         assert_eq!(late.incoming_time, Micros(129));
         assert!(cuts_at(&draft, Micros(69)).is_empty());
+    }
+
+    #[test]
+    fn a_built_in_transition_mixes_with_no_package_store() {
+        let mut draft = palette(100, 100, 10, false);
+        draft.materials.transitions[0].effect_id = "cutlass-dip-white".to_owned();
+        assert_eq!(pixels(&draft, None, 95), [255, 255, 255, 255]);
+        assert_eq!(pixels(&draft, None, 89), [255, 0, 0, 255]);
+        // A dip stored before the catalog had ids is known by its name.
+        draft.materials.transitions[0].effect_id = String::new();
+        draft.materials.transitions[0].name = "Dip".to_owned();
+        assert_eq!(pixels(&draft, None, 95), [0, 0, 0, 255]);
+        draft.materials.transitions[0].name = "Dissolve".to_owned();
+        let middle = pixels(&draft, None, 95);
+        assert!(middle[0] > 100 && middle[2] > 100, "{middle:?}");
     }
 
     #[test]

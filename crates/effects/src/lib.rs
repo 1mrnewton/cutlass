@@ -26,6 +26,7 @@ pub mod mask;
 pub mod package;
 pub mod recipe;
 pub mod source;
+pub mod transitions;
 
 pub use adjust::{
     ADJUSTMENT, AUTO_KEYS, Adjust, AdjustKey, PictureStats, adjust_rgba, auto_adjust, match_adjust,
@@ -56,3 +57,4 @@ pub use recipe::{
     RecipeError, Step, bundled, bundled_recipe,
 };
 pub use source::{AnimSpan, EffectSource, Progress, progress};
+pub use transitions::{BUILT_IN_PREFIX, TransitionKind, mix as mix_transition};

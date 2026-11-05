@@ -1,6 +1,7 @@
 //! The transitions shelf: the blends the app offers, and dropping one on a
 //! cut between two touching main-track clips.
 
+use cutlass_effects::TransitionKind;
 use cutlass_model::{Draft, MaterialId, MaterialTransition, Micros, SegmentId, TrackAttribute};
 use cutlass_session::Request;
 
@@ -15,6 +16,8 @@ pub struct TransitionOffer {
     pub duration: i64,
     /// `true` splits the window across the cut. `false` keeps it on the outgoing clip.
     pub overlap: bool,
+    /// What it draws.
+    pub kind: TransitionKind,
 }
 
 impl TransitionOffer {
@@ -24,20 +27,43 @@ impl TransitionOffer {
     }
 }
 
-/// Dissolve crosses the cut. Dip stays on the outgoing clip.
+const fn offer(kind: TransitionKind, id: &'static str, name: &'static str) -> TransitionOffer {
+    let dip = matches!(
+        kind,
+        TransitionKind::DipToBlack | TransitionKind::DipToWhite
+    );
+    TransitionOffer {
+        id,
+        name,
+        duration: if dip { 400_000 } else { 500_000 },
+        overlap: !dip,
+        kind,
+    }
+}
+
+/// The twenty built-in transitions. Dips stay on the outgoing clip; the
+/// rest cross the cut.
 pub const TRANSITION_OFFERS: &[TransitionOffer] = &[
-    TransitionOffer {
-        id: "dissolve",
-        name: "Dissolve",
-        duration: 500_000,
-        overlap: true,
-    },
-    TransitionOffer {
-        id: "dip",
-        name: "Dip",
-        duration: 400_000,
-        overlap: false,
-    },
+    offer(TransitionKind::Dissolve, "dissolve", "Dissolve"),
+    offer(TransitionKind::DipToBlack, "dip", "Dip to black"),
+    offer(TransitionKind::DipToWhite, "dip-white", "Dip to white"),
+    offer(TransitionKind::WipeLeft, "wipe-left", "Wipe left"),
+    offer(TransitionKind::WipeRight, "wipe-right", "Wipe right"),
+    offer(TransitionKind::WipeUp, "wipe-up", "Wipe up"),
+    offer(TransitionKind::WipeDown, "wipe-down", "Wipe down"),
+    offer(TransitionKind::SlideLeft, "slide-left", "Slide left"),
+    offer(TransitionKind::SlideRight, "slide-right", "Slide right"),
+    offer(TransitionKind::SlideUp, "slide-up", "Slide up"),
+    offer(TransitionKind::SlideDown, "slide-down", "Slide down"),
+    offer(TransitionKind::PushLeft, "push-left", "Push left"),
+    offer(TransitionKind::PushRight, "push-right", "Push right"),
+    offer(TransitionKind::PushUp, "push-up", "Push up"),
+    offer(TransitionKind::PushDown, "push-down", "Push down"),
+    offer(TransitionKind::ZoomIn, "zoom-in", "Zoom in"),
+    offer(TransitionKind::ZoomOut, "zoom-out", "Zoom out"),
+    offer(TransitionKind::Spin, "spin", "Spin"),
+    offer(TransitionKind::Blur, "blur", "Blur"),
+    offer(TransitionKind::Glitch, "glitch", "Glitch"),
 ];
 
 /// The offer a shelf card names.
@@ -165,6 +191,7 @@ pub fn transition_request(
             id: material_id,
             kind: "transition".to_owned(),
             name: offer.name.to_owned(),
+            effect_id: offer.kind.effect_id(),
             duration: Micros(fitted),
             is_overlap: offer.overlap,
             ..Default::default()
@@ -256,5 +283,15 @@ mod tests {
             Some(TRANSITION_OFFERS[1])
         );
         assert_eq!(transition_of_card("transition:none"), None);
+    }
+
+    #[test]
+    fn the_shelf_offers_every_built_in_transition_by_its_own_key() {
+        assert_eq!(TRANSITION_OFFERS.len(), TransitionKind::ALL.len());
+        for (offer, kind) in TRANSITION_OFFERS.iter().zip(TransitionKind::ALL) {
+            assert_eq!(offer.kind, kind);
+            assert_eq!(offer.id, kind.key());
+            assert_eq!(offer.name, kind.label());
+        }
     }
 }

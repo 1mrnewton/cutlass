@@ -11436,4 +11436,58 @@ mod tests {
         let painted = painted_text(&run(&mut shell, &mut view, Vec::new()));
         assert!(painted.contains("Check for updates"), "{painted}");
     }
+
+    /// The stickers shelf and the Licenses window painted by the real
+    /// renderer, as the window shows them. With `CUTLASS_RENDER_DIR` set
+    /// the pictures are kept there to look at.
+    #[test]
+    fn the_stickers_shelf_and_the_licenses_window_paint() {
+        let temp = std::env::temp_dir().join(format!("cutlass-render-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        std::fs::create_dir_all(&temp).unwrap();
+        cutlass_store::Folder::new(cutlass_model::Draft::empty("draft"))
+            .save(&temp)
+            .unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        let mut view = ViewState::new();
+        view.library_shelf = Shelf::Stickers;
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(Vec2::new(1280.0, 800.0))
+            .wgpu()
+            .build_ui_state(
+                |ui, (shell, view): &mut (Shell, ViewState)| show(shell, ui, view, None),
+                (shell, view),
+            );
+        // Stickers load and animate, so step frames rather than settle.
+        harness.run_steps(8);
+        let keep = std::env::var_os("CUTLASS_RENDER_DIR").map(std::path::PathBuf::from);
+        let picture = |harness: &mut egui_kittest::Harness<'_, (Shell, ViewState)>, name: &str| {
+            let image = harness.render().expect("the renderer draws the window");
+            // Not one flat colour: something was drawn.
+            let first = image.get_pixel(0, 0);
+            assert!(
+                image.pixels().any(|pixel| pixel != first),
+                "{name} is blank"
+            );
+            if let Some(dir) = &keep {
+                std::fs::create_dir_all(dir).unwrap();
+                image.save(dir.join(format!("{name}.png"))).unwrap();
+            }
+        };
+        picture(&mut harness, "stickers");
+        // A Noto picture and a Noto Lottie that plays.
+        for (query, name) in [("face", "stickers-noto"), ("animated", "stickers-animated")] {
+            query.clone_into(&mut harness.state_mut().1.library_query);
+            harness.run_steps(8);
+            picture(&mut harness, name);
+        }
+        harness.state_mut().1.library_query.clear();
+        harness.state_mut().1.licenses = Some(cutlass_licenses::notices());
+        harness.run_steps(4);
+        picture(&mut harness, "licenses");
+        drop(harness);
+        let _ = std::fs::remove_dir_all(&temp);
+    }
 }

@@ -441,15 +441,24 @@ fn blend(
     }
     body(ui, |ui| {
         if mode {
-            ui.add_enabled_ui(false, |ui| {
-                label_row(ui, "Mode", |ui| {
-                    egui::ComboBox::from_id_salt("blend-mode")
-                        .selected_text("Normal")
-                        .show_ui(ui, |_| {});
-                });
-            })
-            .response
-            .on_disabled_hover_text(LATER);
+            let mut picked = None;
+            label_row(ui, "Mode", |ui| {
+                egui::ComboBox::from_id_salt("blend-mode")
+                    .selected_text(inspection.blend.label())
+                    .show_ui(ui, |ui| {
+                        for choice in cutlass_effects::BlendMode::ALL {
+                            if ui
+                                .selectable_label(inspection.blend == choice, choice.label())
+                                .clicked()
+                            {
+                                picked = Some(choice);
+                            }
+                        }
+                    });
+            });
+            if let Some(choice) = picked.filter(|choice| *choice != inspection.blend) {
+                send(shell, |shell| shell.set_blend(choice));
+            }
         }
         opacity_slider(shell, ui, state, inspection);
     });

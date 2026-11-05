@@ -291,6 +291,8 @@ pub struct Inspection {
     pub line_width: f64,
     pub font: String,
     pub letterbox: String,
+    /// How the clip mixes with the picture below it.
+    pub blend: cutlass_effects::BlendMode,
     /// Fade-in duration, microseconds.
     pub fade_in: i64,
     /// Fade-out duration, microseconds.
@@ -3272,6 +3274,8 @@ impl Shell {
             line_width,
             font,
             letterbox: letterbox_color(draft, segment),
+            blend: cutlass_effects::segment_blend(draft, segment)
+                .unwrap_or(cutlass_effects::BlendMode::SourceOver),
             fade_in: fade_durations(draft, segment).0,
             fade_out: fade_durations(draft, segment).1,
             material,
@@ -4259,6 +4263,23 @@ impl Shell {
 
     /// Set how solid the selected picture is. `1` is solid and `0` is clear.
     /// One undo restores the previous opacity.
+    /// Mix the selected picture with what is below it by `mode`. Normal
+    /// takes the blend off. One undo step.
+    pub fn set_blend(&mut self, mode: cutlass_effects::BlendMode) -> Result<(), ShellError> {
+        let segment_id = self.picture_segment("a blend belongs on a picture")?;
+        self.refuse_locked(&segment_id)?;
+        let material_id = if mode == cutlass_effects::BlendMode::SourceOver {
+            MaterialId::new("")
+        } else {
+            MaterialId::new(self.fresh("mix"))
+        };
+        self.apply(Request::SetBlend {
+            segment_id,
+            material_id,
+            mode: mode.package_id().to_owned(),
+        })
+    }
+
     pub fn set_opacity(&mut self, opacity: f64) -> Result<(), ShellError> {
         let segment_id = self.picture_segment("an opacity belongs on a picture")?;
         self.refuse_locked(&segment_id)?;
@@ -10233,6 +10254,43 @@ mod tests {
         desktop.set_opacity(0.25).unwrap();
         desktop.undo().unwrap();
         assert_eq!(desktop.inspection().unwrap().opacity, 0.5);
+    }
+
+    #[test]
+    fn a_blend_mode_is_set_shown_saved_and_undone() {
+        use cutlass_effects::BlendMode;
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        let mut video = MaterialVideo::new("picture");
+        video.path = "clip.mp4".to_owned();
+        draft.materials.videos.push(video);
+        draft.tracks[0].segments.push(Segment::new(
+            "picture",
+            "picture",
+            TimeRange::new(0, 1_000_000),
+        ));
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.select(Some(SegmentId::new("picture")));
+        assert_eq!(desktop.inspection().unwrap().blend, BlendMode::SourceOver);
+        desktop.set_blend(BlendMode::Screen).unwrap();
+        assert_eq!(desktop.inspection().unwrap().blend, BlendMode::Screen);
+        desktop.set_blend(BlendMode::Multiply).unwrap();
+        assert_eq!(desktop.inspection().unwrap().blend, BlendMode::Multiply);
+        desktop.save().unwrap();
+        let saved = Folder::read(&temp.path).unwrap();
+        let segment = &saved.draft.tracks[0].segments[0];
+        assert_eq!(
+            cutlass_effects::segment_blend(&saved.draft, segment),
+            Some(BlendMode::Multiply)
+        );
+        desktop.set_blend(BlendMode::SourceOver).unwrap();
+        assert_eq!(desktop.inspection().unwrap().blend, BlendMode::SourceOver);
+        desktop.undo().unwrap();
+        assert_eq!(desktop.inspection().unwrap().blend, BlendMode::Multiply);
+        desktop.undo().unwrap();
+        assert_eq!(desktop.inspection().unwrap().blend, BlendMode::Screen);
     }
 
     #[test]

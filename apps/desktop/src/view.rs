@@ -1521,6 +1521,8 @@ fn asset_column(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect
                     shell.add_effect(&id)
                 } else if id == cutlass_editor::ADJUSTMENT_CARD {
                     shell.add_adjustment()
+                } else if id.starts_with(cutlass_editor::FILTER_CARD_PREFIX) {
+                    shell.add_filter(&id)
                 } else {
                     shell.add_medium(&id)
                 };
@@ -1973,6 +1975,28 @@ fn fill_looks(shell: &mut Shell, ctx: &egui::Context, cards: &mut [BinCard]) {
     with_film_textures(ctx, |textures| {
         for card in cards.iter_mut() {
             match card.look {
+                CardLook::Picture(_) if card.id.starts_with(cutlass_editor::FILTER_CARD_PREFIX) => {
+                    let Some(look) = cutlass_editor::filter_of_card(&card.id) else {
+                        continue;
+                    };
+                    let key = cutlass_engine::ThumbKey {
+                        path: card.id.clone().into(),
+                        time: Micros(0),
+                    };
+                    let (width, height) = (96, 64);
+                    let texture = if let Some(entry) = textures.shown.get_mut(&key) {
+                        entry.1 = textures.frame;
+                        entry.0.id()
+                    } else {
+                        let thumb = cutlass_engine::Thumb {
+                            width,
+                            height,
+                            rgba: cutlass_effects::look_poster(look, width, height),
+                        };
+                        film_texture(ctx, textures, key, &thumb)
+                    };
+                    card.look = CardLook::Picture(Some((texture, [width, height])));
+                }
                 CardLook::Picture(_) => {
                     if let Some((key, Some(thumb))) = shell.poster(&card.id) {
                         let texture = film_texture(ctx, textures, key, &thumb);
@@ -2191,7 +2215,21 @@ fn bin_cards(
                 });
             }
         }
-        Shelf::Stickers | Shelf::Filters | Shelf::Templates => {}
+        Shelf::Filters => {
+            for (id, name) in cutlass_editor::filter_cards() {
+                if !query.is_empty() && !name.to_lowercase().contains(&query) {
+                    continue;
+                }
+                cards.push(BinCard {
+                    id,
+                    name: name.to_owned(),
+                    meta: card_meta(cutlass_editor::EFFECT_LENGTH.0),
+                    on_timeline: false,
+                    look: CardLook::Picture(None),
+                });
+            }
+        }
+        Shelf::Stickers | Shelf::Templates => {}
     }
     cards
 }
@@ -3860,6 +3898,8 @@ fn release_library_drop(
         shell.drop_effect(&material_id, x, y)
     } else if material_id == cutlass_editor::ADJUSTMENT_CARD {
         shell.drop_adjustment(x, y)
+    } else if material_id.starts_with(cutlass_editor::FILTER_CARD_PREFIX) {
+        shell.drop_filter(&material_id, x, y)
     } else {
         shell.drop_medium(&material_id, x, y)
     };
@@ -7238,6 +7278,11 @@ mod tests {
         assert_eq!(layers[0].name, "Adjustment");
         assert!(top_cards(&draft, Shelf::Adjustments, "adj").len() == 1);
         assert!(top_cards(&draft, Shelf::Adjustments, "nope").is_empty());
+        let filters = top_cards(&draft, Shelf::Filters, "");
+        assert_eq!(filters.len(), 20);
+        assert_eq!(filters[0].name, "Warm");
+        assert_eq!(filters[0].look, CardLook::Picture(None));
+        assert_eq!(top_cards(&draft, Shelf::Filters, "noir").len(), 1);
     }
 
     #[test]

@@ -2700,12 +2700,65 @@ impl Shell {
         self.place_adjustment(track_id, start)
     }
 
+    /// Add the filters shelf's `card_id` at the playhead, on the first
+    /// filter row with room, else on a new one.
+    pub fn add_filter(&mut self, card_id: &str) -> Result<(), ShellError> {
+        let start = self.playhead;
+        let track_id = free_row(
+            self.session_draft()?,
+            TrackType::Filter,
+            start,
+            EFFECT_LENGTH,
+        )
+        .unwrap_or_else(|| TrackId::new(self.fresh("track")));
+        self.place_filter(card_id, track_id, start)
+    }
+
+    /// Place the filters shelf's `card_id` where it was dropped on the lanes.
+    pub fn drop_filter(&mut self, card_id: &str, x: f64, y: f64) -> Result<(), ShellError> {
+        let (track_id, start) = self.layer_drop(TrackType::Filter, x, y)?;
+        self.place_filter(card_id, track_id, start)
+    }
+
+    fn place_filter(
+        &mut self,
+        card_id: &str,
+        track_id: TrackId,
+        start: Micros,
+    ) -> Result<(), ShellError> {
+        let look = cutlass_editor::filter_of_card(card_id)
+            .ok_or(ShellError::Edit(EditError::UnknownEffect))?;
+        let segment_id = SegmentId::new(self.fresh("seg"));
+        let material_id = MaterialId::new(self.fresh("filter"));
+        self.apply(Request::AddFilter {
+            track_id,
+            segment_id: segment_id.clone(),
+            material_id,
+            start,
+            duration: EFFECT_LENGTH,
+            filter_id: look.effect_id(),
+        })?;
+        self.select(Some(segment_id));
+        Ok(())
+    }
+
     /// Place an adjustment layer where the card was dropped on the lanes.
     pub fn drop_adjustment(&mut self, x: f64, y: f64) -> Result<(), ShellError> {
+        let (track_id, start) = self.layer_drop(TrackType::Adjust, x, y)?;
+        self.place_adjustment(track_id, start)
+    }
+
+    /// The row and time a card of `kind` lands on, dropped at `x`, `y`.
+    fn layer_drop(
+        &mut self,
+        kind: TrackType,
+        x: f64,
+        y: f64,
+    ) -> Result<(TrackId, Micros), ShellError> {
         let x = self.time_zero_x(x);
         let outcome = {
             let gesture = DropGesture {
-                kind: TrackType::Adjust,
+                kind,
                 duration: EFFECT_LENGTH,
                 pointer: Pointer { x, y },
                 scale: self.scale(),
@@ -2725,7 +2778,7 @@ impl Shell {
             DropOutcome::Place { track_id, start } => (track_id, start),
             DropOutcome::NewLane { start, .. } => (TrackId::new(self.fresh("track")), start),
         };
-        self.place_adjustment(track_id, start)
+        Ok((track_id, start))
     }
 
     fn place_adjustment(&mut self, track_id: TrackId, start: Micros) -> Result<(), ShellError> {
@@ -4460,11 +4513,12 @@ impl Shell {
         Ok(segment_id)
     }
 
-    /// The selected picture or adjustment layer, the clips that take adjust
-    /// sliders.
+    /// The selected picture, adjustment layer, or filter: the clips that
+    /// take adjust sliders.
     fn adjust_segment(&self) -> Result<SegmentId, ShellError> {
         if let Some(segment_id) = self.selected()
-            && let Some((_, TrackType::Adjust)) = placed(self.session_draft()?, segment_id)
+            && let Some((_, TrackType::Adjust | TrackType::Filter)) =
+                placed(self.session_draft()?, segment_id)
         {
             return Ok(segment_id.clone());
         }
@@ -10510,6 +10564,58 @@ mod tests {
                 .tracks
                 .iter()
                 .any(|track| track.kind == TrackType::Adjust)
+        );
+    }
+
+    #[test]
+    fn a_filter_is_added_from_its_card_with_strength_and_temperature() {
+        use cutlass_effects::AdjustKey;
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        let mut video = MaterialVideo::new("picture");
+        video.path = "clip.mp4".to_owned();
+        draft.materials.videos.push(video);
+        draft.tracks[0].segments.push(Segment::new(
+            "picture",
+            "picture",
+            TimeRange::new(0, 5_000_000),
+        ));
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        assert!(desktop.add_filter("filter:look/none").is_err());
+        let (card, _) = cutlass_editor::filter_cards()[5].clone();
+        desktop.add_filter(&card).unwrap();
+        let clip = desktop.selected().cloned().unwrap();
+        let draft = desktop.draft().unwrap();
+        let (segment, kind) = super::placed(draft, &clip).unwrap();
+        assert_eq!(*kind, TrackType::Filter);
+        assert!(cutlass_effects::segment_look(draft, segment).is_some());
+        assert_eq!(desktop.panel(), Some(cutlass_editor::Panel::Filter));
+        assert_eq!(desktop.effect_name().as_deref(), Some("Noir"));
+        desktop.set_effect_strength(0.4).unwrap();
+        assert!((desktop.effect_strength().unwrap() - 0.4).abs() < 1e-9);
+        desktop.set_adjust(AdjustKey::Temperature, 0.2).unwrap();
+        assert!(
+            (desktop
+                .inspection()
+                .unwrap()
+                .adjust
+                .get(AdjustKey::Temperature)
+                - 0.2)
+                .abs()
+                < 1e-6
+        );
+        desktop.undo().unwrap();
+        desktop.undo().unwrap();
+        desktop.undo().unwrap();
+        assert!(
+            desktop
+                .draft()
+                .unwrap()
+                .tracks
+                .iter()
+                .all(|track| track.kind != TrackType::Filter)
         );
     }
 

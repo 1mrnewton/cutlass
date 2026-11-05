@@ -106,8 +106,8 @@ pub(super) fn clip_panel(
         }
         Panel::Audio => audio_panel(shell, ui, state, inspection),
         Panel::Sticker => sticker_panel(shell, ui, state, inspection),
-        Panel::Effect => effect_panel(shell, ui, state, "Effect", false),
-        Panel::Filter => effect_panel(shell, ui, state, "Filter", true),
+        Panel::Effect => effect_panel(shell, ui, state, inspection, "Effect", false),
+        Panel::Filter => effect_panel(shell, ui, state, inspection, "Filter", true),
         Panel::Adjust => adjust_panel(shell, ui, state, inspection),
         Panel::Other => {
             tabs(ui, &["Clip"], &mut 0);
@@ -292,6 +292,7 @@ fn effect_panel(
     shell: &mut Shell,
     ui: &mut Ui,
     state: &mut InspectorState,
+    inspection: &Inspection,
     title: &str,
     filter: bool,
 ) {
@@ -309,7 +310,13 @@ fn effect_panel(
             later_slider(ui, "Amount", 0.0, "0");
         }
         if filter {
-            later_slider(ui, "Temp", 0.0, "0");
+            let key = cutlass_effects::AdjustKey::Temperature;
+            let stored = (f64::from(inspection.adjust.get(key)) * 100.0).round();
+            if let Some(value) = slider(ui, state, "temp", "Temp", stored, -100.0..=100.0, |v| {
+                format!("{v:.0}")
+            }) {
+                send(shell, |shell| shell.set_adjust(key, value / 100.0));
+            }
         }
     });
 }

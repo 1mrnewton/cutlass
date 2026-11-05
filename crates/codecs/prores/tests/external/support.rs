@@ -215,15 +215,53 @@ impl std::fmt::Display for Diff {
 /// Frames per second the tests code at: 30000/1001.
 pub const RATE: (u32, u32) = (30_000, 1_001);
 
-/// Writes ProRes frames into a QuickTime movie with this repository's muxer.
+/// One coded picture and its time.
+#[derive(Clone, Debug)]
+pub struct Timed {
+    pub data: Vec<u8>,
+    pub pts: i64,
+    pub duration: i64,
+}
+
+/// A picture track read back: its sample-entry extradata, timescale, size and packets.
+pub struct Track {
+    pub extra: Vec<u8>,
+    pub timescale: u32,
+    pub width: u32,
+    pub height: u32,
+    pub packets: Vec<Timed>,
+}
+
+/// Writes ProRes frames at 30000/1001 into a QuickTime movie with this repository's muxer.
 pub fn mux_mov(frames: &[Vec<u8>], fourcc: &[u8; 4], width: u32, height: u32) -> Vec<u8> {
+    let step = i64::from(RATE.1);
+    let timed: Vec<Timed> = frames
+        .iter()
+        .enumerate()
+        .map(|(index, data)| Timed {
+            data: data.clone(),
+            pts: index as i64 * step,
+            duration: step,
+        })
+        .collect();
+    mux_track(&timed, RATE.0, fourcc, width, height)
+}
+
+/// Writes timed ProRes frames into a QuickTime movie.
+pub fn mux_track(
+    packets: &[Timed],
+    timescale: u32,
+    fourcc: &[u8],
+    width: u32,
+    height: u32,
+) -> Vec<u8> {
     use cutlass_codec::{
         CodecId, FrameSize, Packet, StreamCodec, StreamParams, Timescale, Timestamp,
     };
     use cutlass_container::{Mux, NewStream, TrackDuration};
     use cutlass_isobmff::{FileBrand, Mp4Mux};
     let mut mux = Mp4Mux::with_brand(std::io::Cursor::new(Vec::new()), FileBrand::Mov);
-    let scale = Timescale::new(RATE.0);
+    let scale = Timescale::new(timescale);
     let track = mux
         .add_stream(NewStream {
             params: StreamParams::video(
@@ -235,21 +273,56 @@ pub fn mux_mov(frames: &[Vec<u8>], fourcc: &[u8; 4], width: u32, height: u32) ->
             language: None,
         })
         .expect("stream");
-    let step = i64::from(RATE.1);
-    for (index, frame) in frames.iter().enumerate() {
-        let pts = index as i64 * step;
-        let time = Timestamp::try_new(Some(pts), Some(pts), Some(step)).expect("time");
-        let packet =
-            Packet::try_new(track.get(), frame.clone(), time, scale, true).expect("packet");
-        mux.write_packet(&packet).expect("write");
+    let mut end = 0;
+    for packet in packets {
+        let time = Timestamp::try_new(Some(packet.pts), Some(packet.pts), Some(packet.duration))
+            .expect("time");
+        let coded =
+            Packet::try_new(track.get(), packet.data.clone(), time, scale, true).expect("packet");
+        mux.write_packet(&coded).expect("write");
+        end = packet.pts + packet.duration;
     }
     mux.finish(&[TrackDuration {
         track,
         timescale: scale,
-        ticks: frames.len() as i64 * step,
+        ticks: end,
     }])
     .expect("finish");
     mux.into_writer().expect("writer").into_inner()
+}
+
+/// The first picture track of a movie, read with this repository's demuxer.
+pub fn demux_mov(bytes: Vec<u8>) -> Track {
+    use cutlass_container::Demux;
+    let mut file = cutlass_isobmff::IsoBmffFile::open(std::io::Cursor::new(bytes)).expect("open");
+    let stream = file
+        .streams()
+        .iter()
+        .find(|s| s.params().size().is_some())
+        .expect("picture track")
+        .clone();
+    let size = stream.params().size().expect("size");
+    let id = stream.id().get();
+    let mut track = Track {
+        extra: stream.params().extradata().to_vec(),
+        timescale: 0,
+        width: size.width(),
+        height: size.height(),
+        packets: Vec::new(),
+    };
+    while let Some(packet) = file.read_packet().expect("packet") {
+        if packet.stream() != id {
+            continue;
+        }
+        let time = packet.timestamp();
+        track.timescale = packet.timescale().ticks_per_second();
+        track.packets.push(Timed {
+            data: packet.bytes().to_vec(),
+            pts: time.presentation_or_decode().expect("pts"),
+            duration: time.duration().expect("duration"),
+        });
+    }
+    track
 }
 
 /// ffmpeg's SSIM of a movie against raw planes: (Y, all).

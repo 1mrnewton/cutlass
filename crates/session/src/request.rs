@@ -332,6 +332,15 @@ pub enum Request {
         cube: Option<String>,
         strength: f64,
     },
+    /// Key `color` (`#rrggbb`) out of the clip with `strength` and
+    /// `shadow`, each 0 to 1. An empty colour takes the key off.
+    SetChroma {
+        segment_id: SegmentId,
+        material_id: MaterialId,
+        color: String,
+        strength: f64,
+        shadow: f64,
+    },
     /// Set the adjust slider `key`, its reference name such as
     /// `temperature`, to `value`: -1 to 1, or 0 to 1 for fade, sharpen and
     /// grain. Zero takes it off. `material_id` names a new slider material.

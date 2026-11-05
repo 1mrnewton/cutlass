@@ -3,6 +3,7 @@ mod animation;
 mod beat;
 mod blend;
 mod canvas;
+mod chroma;
 mod color;
 mod crop;
 mod effect;
@@ -437,6 +438,13 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             cube.as_deref(),
             *strength,
         ),
+        Request::SetChroma {
+            segment_id,
+            material_id,
+            color,
+            strength,
+            shadow,
+        } => chroma::set_chroma(draft, segment_id, material_id, color, *strength, *shadow),
         Request::SetAdjust {
             segment_id,
             material_id,

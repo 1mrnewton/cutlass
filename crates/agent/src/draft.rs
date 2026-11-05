@@ -469,6 +469,7 @@ pub fn request_name(request: &Request) -> &'static str {
         Request::SetCurve { .. } => "set_curve",
         Request::SetWheel { .. } => "set_wheel",
         Request::SetLut { .. } => "set_lut",
+        Request::SetChroma { .. } => "set_chroma",
         Request::SetEffectStrength { .. } => "set_effect_strength",
         Request::SetKeyframes { .. } => "set_keyframes",
         Request::AddKeyframe { .. } => "add_keyframe",

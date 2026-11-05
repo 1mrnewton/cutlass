@@ -1,9 +1,12 @@
 //! The SILK layer (RFC 6716 section 4.2), with the resampler that brings
 //! its 8, 12, or 16 kHz output to the API rate.
 
+mod channel;
+mod cng;
 mod fixed;
 mod indices;
 mod nlsf;
+mod plc;
 mod pulses;
 mod resampler;
 mod stereo;

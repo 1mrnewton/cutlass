@@ -8,6 +8,8 @@
 //! composed on the CPU as before, and its recipe effects still run on the
 //! GPU over that picture.
 
+use std::sync::Arc;
+
 use cutlass_compositor::Frame;
 use cutlass_effects::Step;
 use cutlass_gpu::{Affine, Placement, YuvTone};
@@ -21,7 +23,8 @@ pub enum GpuSource {
     Yuv {
         width: u32,
         height: u32,
-        bytes: Vec<u8>,
+        /// The decoded picture, shared with the clip's cache.
+        bytes: Arc<Vec<u8>>,
         tone: YuvTone,
     },
     /// Premultiplied RGBA.

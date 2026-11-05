@@ -9,6 +9,7 @@ use std::collections::VecDeque;
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
+use std::sync::Arc;
 
 use cutlass_codec::access::{
     ChannelLayout, CodecParams, ColorPrimaries, PixelFormat, SampleFormat, Transfer,
@@ -88,7 +89,9 @@ pub enum DecodedFrame {
         pixel: PixelFormat,
         primaries: ColorPrimaries,
         transfer: Transfer,
-        bytes: Vec<u8>,
+        /// Shared, so a cache, the read-ahead, and a GPU layer hold one
+        /// picture without copying it.
+        bytes: Arc<Vec<u8>>,
     },
 }
 
@@ -959,20 +962,20 @@ fn coded_output(output: Output, timescale: Timescale) -> Option<(DecodedFrame, O
 
 fn frame_from_picture(picture: PictureOutput) -> DecodedFrame {
     let info = picture.info();
-    match picture.samples() {
-        PictureSamples::Platform { token } => DecodedFrame::Platform {
+    if let PictureSamples::Platform { token } = picture.samples() {
+        return DecodedFrame::Platform {
             width: info.width,
             height: info.height,
             token,
-        },
-        PictureSamples::Cpu(bytes) => DecodedFrame::Coded {
-            width: info.width,
-            height: info.height,
-            pixel: info.pixel,
-            primaries: info.primaries,
-            transfer: info.transfer,
-            bytes: bytes.to_vec(),
-        },
+        };
+    }
+    DecodedFrame::Coded {
+        width: info.width,
+        height: info.height,
+        pixel: info.pixel,
+        primaries: info.primaries,
+        transfer: info.transfer,
+        bytes: Arc::new(picture.into_cpu().unwrap_or_default()),
     }
 }
 
@@ -1396,7 +1399,7 @@ mod tests {
             pixel: PixelFormat::Yuv420p,
             primaries: ColorPrimaries::Bt709,
             transfer: Transfer::Bt709,
-            bytes: vec![0; 12],
+            bytes: vec![0; 12].into(),
         };
         assert_eq!(coded.byte_size(), 12);
         let platform = DecodedFrame::Platform {

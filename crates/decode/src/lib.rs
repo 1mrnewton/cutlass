@@ -288,6 +288,16 @@ impl PictureOutput {
         self.timescale
     }
 
+    /// The CPU bytes, moved out without a copy, or `None` for a platform
+    /// buffer.
+    #[must_use]
+    pub fn into_cpu(self) -> Option<Vec<u8>> {
+        match self.storage {
+            PictureStorage::Cpu(bytes) => Some(bytes),
+            PictureStorage::Platform { .. } => None,
+        }
+    }
+
     #[must_use]
     pub fn samples(&self) -> PictureSamples<'_> {
         match &self.storage {

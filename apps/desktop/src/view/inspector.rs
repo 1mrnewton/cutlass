@@ -348,15 +348,9 @@ fn position_size(
     if !header.open {
         return;
     }
-    let (half_width, half_height) = shell
-        .draft()
-        .map(|draft| {
-            (
-                f64::from(draft.canvas_config.width) / 2.0,
-                f64::from(draft.canvas_config.height) / 2.0,
-            )
-        })
-        .unwrap_or((960.0, 540.0));
+    let canvas = shell.draft().map_or((0, 0), |draft| {
+        (draft.canvas_config.width, draft.canvas_config.height)
+    });
     let keys = shell.keys();
     let playhead = shell.playhead();
     let mut step = None;
@@ -372,20 +366,25 @@ fn position_size(
         }
         switch_row(ui, "Uniform scale", true, false).on_disabled_hover_text(LATER);
         // The prototype counts canvas pixels from the middle, with Y down.
-        let x = (inspection.transform_x * half_width).round();
-        let y = (-inspection.transform_y * half_height).round();
+        let (x, y) =
+            cutlass_editor::canvas_pixels((inspection.transform_x, inspection.transform_y), canvas);
         let (new_x, new_y) = keyed_row(ui, keys.as_ref(), playhead, &mut step, |ui| {
             pair_row(ui, state, "Position", ("X", x), ("Y", y))
         });
-        if let Some(value) = new_x {
-            send(shell, |shell| {
-                shell.set_position(value / half_width, inspection.transform_y)
-            });
-        }
-        if let Some(value) = new_y {
-            send(shell, |shell| {
-                shell.set_position(inspection.transform_x, -value / half_height)
-            });
+        if new_x.is_some() || new_y.is_some() {
+            let (stored_x, stored_y) =
+                cutlass_editor::stored_position((new_x.unwrap_or(x), new_y.unwrap_or(y)), canvas);
+            let stored_x = if new_x.is_some() {
+                stored_x
+            } else {
+                inspection.transform_x
+            };
+            let stored_y = if new_y.is_some() {
+                stored_y
+            } else {
+                inspection.transform_y
+            };
+            send(shell, |shell| shell.set_position(stored_x, stored_y));
         }
         let rotation = inspection.rotation;
         let turned = keyed_row(ui, keys.as_ref(), playhead, &mut step, |ui| {
@@ -1103,24 +1102,7 @@ fn alignment_row(shell: &mut Shell, ui: &mut Ui, inspection: &Inspection) {
 }
 
 /// The preset tiles: a letter color on a plate. Picking one sets the color.
-const PRESETS: [(&str, &str, &str); 16] = [
-    ("None", "", ""),
-    ("Plain", "#FFFFFF", "#3A3A3A"),
-    ("Yellow", "#FFE14A", "#3A3A3A"),
-    ("Red", "#FF4D4D", "#3A3A3A"),
-    ("Orange", "#FF9A3C", "#3A3A3A"),
-    ("Blue", "#5AA7FF", "#3A3A3A"),
-    ("Green", "#3DDC6A", "#1C1C1C"),
-    ("Gray", "#D0D0D0", "#2A2A2A"),
-    ("Ink", "#1A1A1A", "#F3F3F3"),
-    ("Gold", "#F2C14E", "#2A2418"),
-    ("Violet", "#FFFFFF", "#7A3CFF"),
-    ("Paper", "#7A3CFF", "#FFFFFF"),
-    ("Night", "#FFFFFF", "#111111"),
-    ("Lime", "#D6FF4A", "#111111"),
-    ("Rose", "#FF6A9A", "#2A1218"),
-    ("Cyan", "#3DE0FF", "#102028"),
-];
+use cutlass_editor::TEXT_PRESETS as PRESETS;
 
 fn preset_styles(shell: &mut Shell, ui: &mut Ui) {
     ui.add_space(6.0);

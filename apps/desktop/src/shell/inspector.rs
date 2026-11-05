@@ -1,243 +1,16 @@
-//! Which panel the inspector opens for the selected clip, what that panel
-//! reads, and the edits only the inspector makes. Each edit is one session
-//! request, so each is one undo step.
+//! The inspector's edits on the selected clip. The model each shell shares
+//! (panels, text look, decibels, letter case) is in `cutlass_editor`. Each
+//! edit is one session request, so each is one undo step.
 
-use cutlass_model::{
-    Draft, MaterialEffect, MaterialId, MaterialRef, MaterialText, Micros, Segment, SegmentId,
-    Track, TrackFlag, TrackType, WordColumns, segment_bloom,
+use cutlass_editor::{
+    BACKGROUND_ALPHA_START, BACKGROUND_ROUND_START, GLOW_RANGE_START, GLOW_STRENGTH_START,
+    OUTLINE_START, SHADOW_BLUR_START, SHADOW_DISTANCE_START, panel_of, starting, text_look,
 };
+pub use cutlass_editor::{LetterCase, Panel, SILENT_DB, TextLook, gain_of_db, volume_db};
+use cutlass_model::{MaterialEffect, MaterialId, MaterialRef, Micros, SegmentId, WordColumns};
 use cutlass_session::Request;
 
 use super::{Shell, ShellError};
-
-/// The panel a clip opens in the inspector, from its material and its row.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Panel {
-    /// A picture on the main track. `still` is a photo or a color clip.
-    Main {
-        still: bool,
-    },
-    /// A picture on an overlay row.
-    Overlay {
-        still: bool,
-    },
-    Audio,
-    Text,
-    /// A text clip with recognized words, or one on a caption or lyric row.
-    Caption,
-    Effect,
-    Filter,
-    Adjust,
-    Sticker,
-    /// A clip this build has no panel for.
-    Other,
-}
-
-impl Panel {
-    #[must_use]
-    pub fn title(self) -> &'static str {
-        match self {
-            Self::Main { still: false } => "Video",
-            Self::Main { still: true } => "Photo",
-            Self::Overlay { still: false } => "Overlay video",
-            Self::Overlay { still: true } => "Overlay photo",
-            Self::Audio => "Audio",
-            Self::Text => "Text",
-            Self::Caption => "Caption",
-            Self::Effect => "Effect",
-            Self::Filter => "Filter",
-            Self::Adjust => "Adjustment",
-            Self::Sticker => "Sticker",
-            Self::Other => "Clip",
-        }
-    }
-}
-
-/// How a title's outline, shadow, box, and glow look. A part with an empty
-/// color is off; its numbers are what it returns with.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct TextLook {
-    pub outline_color: String,
-    /// Ems.
-    pub outline_width: f64,
-    pub shadow_color: String,
-    /// Hundredths of an em.
-    pub shadow_distance: f64,
-    /// 0 to 1.
-    pub shadow_blur: f64,
-    /// Degrees. A title with no shadow reads the angle a first one takes.
-    pub shadow_angle: f64,
-    pub background_color: String,
-    /// 0 to 1.
-    pub background_alpha: f64,
-    /// 0 square to 1 round.
-    pub background_round: f64,
-    pub glow_color: String,
-    /// 0 to 1.
-    pub glow_strength: f64,
-    /// 0 to 1.
-    pub glow_range: f64,
-}
-
-/// What a part takes when its color is first picked and its numbers are
-/// still zero. These are the phone's Styles starting values.
-pub const OUTLINE_START: f64 = 0.06;
-pub const SHADOW_DISTANCE_START: f64 = 8.0;
-pub const SHADOW_BLUR_START: f64 = 0.3;
-pub const BACKGROUND_ALPHA_START: f64 = 1.0;
-pub const BACKGROUND_ROUND_START: f64 = 0.3;
-pub const GLOW_STRENGTH_START: f64 = 0.6;
-pub const GLOW_RANGE_START: f64 = 0.5;
-/// Where a new shadow falls: down and to the right.
-pub const SHADOW_ANGLE: f64 = -45.0;
-
-/// The panel for `segment` on `track`. The material decides first; the row
-/// decides for materials that only say what they are through their row.
-#[must_use]
-pub fn panel_of(draft: &Draft, track: &Track, segment: &Segment) -> Panel {
-    let picture = |still: bool| {
-        if track.is_main() {
-            Panel::Main { still }
-        } else {
-            Panel::Overlay { still }
-        }
-    };
-    match draft.materials.get(segment.material_id.as_str()) {
-        Some(MaterialRef::Video(video)) => picture(video.kind == "photo"),
-        Some(MaterialRef::Draft(_)) => picture(false),
-        Some(MaterialRef::Color(_)) => picture(true),
-        Some(MaterialRef::Audio(_)) => Panel::Audio,
-        Some(MaterialRef::Text(text)) if caption(track, text) => Panel::Caption,
-        Some(MaterialRef::Text(_)) => Panel::Text,
-        Some(MaterialRef::VideoEffect(_) | MaterialRef::Plugin(_)) => Panel::Effect,
-        _ => match track.kind {
-            TrackType::Audio | TrackType::TextToVideoTextAudio => Panel::Audio,
-            TrackType::Text | TrackType::TextToVideoText => Panel::Text,
-            TrackType::Sticker => Panel::Sticker,
-            TrackType::Effect | TrackType::PluginEffect => Panel::Effect,
-            TrackType::Filter => Panel::Filter,
-            TrackType::Adjust => Panel::Adjust,
-            _ if draft
-                .materials
-                .stickers
-                .iter()
-                .any(|item| item.id == segment.material_id) =>
-            {
-                Panel::Sticker
-            }
-            _ => Panel::Other,
-        },
-    }
-}
-
-fn caption(track: &Track, text: &MaterialText) -> bool {
-    matches!(
-        track.flag,
-        TrackFlag::TextSubtitle
-            | TrackFlag::TextLyric
-            | TrackFlag::VideoSubtitle
-            | TrackFlag::AudioSubtitle
-            | TrackFlag::AiScriptSubtitle
-    ) || matches!(text.kind.as_str(), "subtitle" | "lyrics")
-        || !text.words.text.is_empty()
-}
-
-fn text_look(draft: &Draft, segment: &Segment) -> Option<TextLook> {
-    let Some(MaterialRef::Text(text)) = draft.materials.get(segment.material_id.as_str()) else {
-        return None;
-    };
-    let on = |on: bool, color: &str| if on { color.to_owned() } else { String::new() };
-    // No glow reads as no amounts, so a first glow color takes the starts.
-    let (glow_color, glow_strength, glow_range) = segment_bloom(&draft.materials, segment)
-        .and_then(MaterialEffect::bloom)
-        .map_or((String::new(), 0.0, 0.0), |glow| {
-            (glow.color, glow.strength, glow.range)
-        });
-    Some(TextLook {
-        outline_color: text.border_color.clone(),
-        outline_width: text.border_width,
-        shadow_color: on(text.has_shadow, &text.shadow_color),
-        shadow_distance: text.shadow_distance,
-        shadow_blur: text.shadow_smoothing,
-        shadow_angle: if text.has_shadow && text.shadow_angle.is_finite() {
-            text.shadow_angle
-        } else {
-            SHADOW_ANGLE
-        },
-        background_color: on(text.background_style != 0, &text.background_color),
-        background_alpha: text.background_alpha,
-        background_round: text.background_round_radius,
-        glow_color,
-        glow_strength,
-        glow_range,
-    })
-}
-
-/// The quietest level the volume slider shows; it and below are silence.
-pub const SILENT_DB: f64 = -60.0;
-
-/// A gain in decibels, [`SILENT_DB`] for silence.
-#[must_use]
-pub fn volume_db(gain: f64) -> f64 {
-    if gain <= 0.0 || !gain.is_finite() {
-        return SILENT_DB;
-    }
-    (20.0 * gain.log10()).max(SILENT_DB)
-}
-
-/// The gain for `db` decibels; [`SILENT_DB`] and below is zero.
-#[must_use]
-pub fn gain_of_db(db: f64) -> f64 {
-    if db <= SILENT_DB {
-        0.0
-    } else {
-        10f64.powf(db / 20.0)
-    }
-}
-
-/// How the Case buttons rewrite a title's words.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum LetterCase {
-    Upper,
-    Lower,
-    /// The first letter of each word up, the rest down.
-    Title,
-}
-
-impl LetterCase {
-    #[must_use]
-    pub fn apply(self, words: &str) -> String {
-        match self {
-            Self::Upper => words.to_uppercase(),
-            Self::Lower => words.to_lowercase(),
-            Self::Title => {
-                let mut out = String::with_capacity(words.len());
-                let mut start = true;
-                for letter in words.chars() {
-                    if letter.is_whitespace() {
-                        start = true;
-                        out.push(letter);
-                    } else if start {
-                        start = false;
-                        out.extend(letter.to_uppercase());
-                    } else {
-                        out.extend(letter.to_lowercase());
-                    }
-                }
-                out
-            }
-        }
-    }
-}
-
-/// `value`, or `start` when a part is being turned on with nothing set.
-fn starting(color: &str, value: f64, start: f64) -> f64 {
-    if !color.is_empty() && value == 0.0 {
-        start
-    } else {
-        value
-    }
-}
 
 impl Shell {
     /// The panel the selected clip opens.
@@ -1117,14 +890,14 @@ mod tests {
             desktop.text_look(),
             Some(TextLook {
                 background_alpha: 1.0,
-                shadow_angle: super::SHADOW_ANGLE,
+                shadow_angle: cutlass_editor::SHADOW_ANGLE,
                 ..TextLook::default()
             })
         );
 
         desktop.set_text_outline("#FF0000", 0.0).unwrap();
         desktop
-            .set_text_shadow("#000000", 0.0, super::SHADOW_ANGLE, 0.0)
+            .set_text_shadow("#000000", 0.0, cutlass_editor::SHADOW_ANGLE, 0.0)
             .unwrap();
         desktop.set_text_background("#FFFFFF", 0.0, 0.0).unwrap();
         desktop.set_text_glow("#00FF00", 0.0, 0.0).unwrap();

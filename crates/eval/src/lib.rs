@@ -20,6 +20,7 @@ mod audio;
 mod canvas;
 mod effect;
 mod frame;
+mod freeze;
 mod gpu;
 mod heard;
 mod media;
@@ -39,6 +40,7 @@ pub use cutlass_model::Micros;
 pub use frame::{
     EvalError, Fonts, NoFonts, Snapshot, frame, frame_in, layers_in, wait_export_frame,
 };
+pub use freeze::{FreezeMiss, freeze_toggle};
 pub use gpu::{Composed, FrameLayers, GpuBackdrop, GpuLayer, GpuSource, YuvSamples};
 pub use heard::{ClipAsk, Heard};
 pub use media::OpenClips;

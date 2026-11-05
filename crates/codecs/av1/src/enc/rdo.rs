@@ -736,7 +736,6 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         let mut d = 0f64;
         let mut bits = 0f64;
         let mid = P::from_i32(1 << (bd - 1));
-        let mut blk = take_buf(&mut self.scratch.enc_i32[0], 64 * 64, 0);
         let mut coefs = take_buf(&mut self.scratch.enc_i32[1], 64 * 64, 0);
         let mut rec = take_buf(&mut self.scratch.enc_px[0], 64 * 64, mid);
         let fast = self.mode.fast_tx_dist;
@@ -747,55 +746,51 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
             - i32::from(crate::spec::tables::TRANSFORM_ROW_SHIFT[tx as usize])
             - 4;
         let g2 = 2f64.powi(2 * gain_log2);
-        let round = 48i64;
+        let qdc = qi.dc.max(1);
+        let qac = qi.ac.max(1);
+        let dlog = qi.denom.trailing_zeros();
         let mut y0 = 0;
         while y0 < h {
             let mut x0 = 0;
             while x0 < w {
-                for i in 0..th {
-                    blk[i * tw..i * tw + tw]
-                        .copy_from_slice(&res[(y0 + i) * w + x0..(y0 + i) * w + x0 + tw]);
-                }
-                fwd_txfm(&blk, tw, &mut coefs, tx as usize, 0, bd);
-                let mut nz = (0, 0);
+                let rb = &res[y0 * w + x0..];
+                fwd_txfm(rb, w, &mut coefs, tx as usize, 0, bd);
                 let cw = tw.min(32);
                 let ch = th.min(32);
-                let mut kept = 0f64;
-                let mut qerr = 0f64;
-                for i in 0..ch {
-                    for j in 0..cw {
-                        let pos = i * cw + j;
-                        let q = i64::from(if pos == 0 { qi.dc } else { qi.ac }).max(1);
-                        let c = coefs[pos];
-                        let a = i64::from(c.unsigned_abs()) * i64::from(qi.denom);
-                        let l = ((a + q * round / 128) / q).min(1 << 15);
-                        if l != 0 {
-                            bits += 2.0 + 2.0 * f64::from(64 - (l as u64).leading_zeros());
-                            nz = (nz.0.max(i + 1), nz.1.max(j + 1));
-                        }
-                        let v = l * q / i64::from(qi.denom);
-                        if fast {
-                            let cf = f64::from(c.unsigned_abs());
-                            kept += cf * cf;
-                            qerr += (cf - v as f64) * (cf - v as f64);
-                        }
-                        coefs[pos] = if c < 0 { -v as i32 } else { v as i32 };
-                    }
-                }
-                bits += 1.0;
                 if fast {
+                    let dc = quant_est(&coefs[..1], qdc, dlog);
+                    let ac = quant_est(&coefs[1..cw * ch], qac, dlog);
+                    bits += f64::from(dc.bits + ac.bits) + 1.0;
                     // Transform-domain distortion; what a 64-point transform
                     // drops is the residual energy it does not keep.
-                    let mut e = 0f64;
+                    let mut e = 0u64;
                     for i in 0..th {
-                        for &r in &res[(y0 + i) * w + x0..(y0 + i) * w + x0 + tw] {
-                            e += f64::from(r * r);
+                        for &r in &rb[i * w..i * w + tw] {
+                            e += u64::from(r.unsigned_abs() * r.unsigned_abs());
                         }
                     }
-                    d += qerr * g2 + (e - kept * g2).max(0.0);
+                    let kept = (dc.kept + ac.kept) as f64;
+                    let qerr = (dc.qerr + ac.qerr) as f64;
+                    d += qerr * g2 + (e as f64 - kept * g2).max(0.0);
                     x0 += tw;
                     continue;
                 }
+                let mut nz = (0, 0);
+                for i in 0..ch {
+                    for j in 0..cw {
+                        let pos = i * cw + j;
+                        let q = if pos == 0 { qdc } else { qac };
+                        let c = coefs[pos];
+                        let l = quant_level(c, q, dlog);
+                        if l != 0 {
+                            bits += 2.0 + 2.0 * f64::from(32 - l.leading_zeros());
+                            nz = (nz.0.max(i + 1), nz.1.max(j + 1));
+                        }
+                        let v = ((l * q as u32) >> dlog) as i32;
+                        coefs[pos] = if c < 0 { -v } else { v };
+                    }
+                }
+                bits += 1.0;
                 for v in rec[..tw * th].iter_mut() {
                     *v = mid;
                 }
@@ -827,7 +822,6 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
             }
             y0 += th;
         }
-        self.scratch.enc_i32[0] = blk;
         self.scratch.enc_i32[1] = coefs;
         self.scratch.enc_px[0] = rec;
         d + lam * bits
@@ -1780,6 +1774,41 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         }
         true
     }
+}
+
+/// Dead-zone quantizer level of a transform coefficient for `tx_cost`:
+/// `(|c| * denom + q * 48 / 128) / q`, at most `1 << 15` (`denom = 1 << dlog`).
+/// The quotient of these small integers is exact in `f64`, which vectorises.
+#[inline(always)]
+fn quant_level(c: i32, q: i32, dlog: u32) -> u32 {
+    let a = (c.unsigned_abs() << dlog) + (q * 48 / 128) as u32;
+    ((f64::from(a) / f64::from(q)) as u32).min(1 << 15)
+}
+
+/// Rate and distortion statistics of quantizing coefficients with one step.
+#[derive(Default)]
+struct QuantEst {
+    /// Sum of `2 + 2 * bit_length(level)` over the non-zero levels.
+    bits: u32,
+    /// Sum of squared coefficients.
+    kept: u64,
+    /// Sum of squared quantization errors.
+    qerr: u64,
+}
+
+fn quant_est(coefs: &[i32], q: i32, dlog: u32) -> QuantEst {
+    let mut s = QuantEst::default();
+    for &c in coefs {
+        let l = quant_level(c, q, dlog);
+        let a = u64::from(c.unsigned_abs());
+        let v = u64::from((l * q as u32) >> dlog);
+        s.kept += a * a;
+        s.qerr += a.abs_diff(v) * a.abs_diff(v);
+        if l != 0 {
+            s.bits += 2 + 2 * (32 - l.leading_zeros());
+        }
+    }
+    s
 }
 
 /// Takes a work buffer out of the scratch, sized to at least `n` (it is

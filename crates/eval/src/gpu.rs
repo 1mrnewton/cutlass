@@ -4,7 +4,8 @@
 //! place it, so the GPU converts and places it. Every other layer, and a
 //! clip the GPU path does not cover, is premultiplied RGBA from the CPU
 //! path. A recipe effect is a layer of its own that the GPU runs over the
-//! layers before it. A frame with any other effect mark or a clip filter is
+//! layers before it, and a clip with a blend mode is drawn alone and then
+//! mixed with the layers before it. A frame with any other effect mark or a clip filter is
 //! composed on the CPU as before, and its recipe effects still run on the
 //! GPU over that picture.
 
@@ -12,7 +13,7 @@ use std::sync::Arc;
 
 use cutlass_compositor::Frame;
 use cutlass_decode::Surface;
-use cutlass_effects::Step;
+use cutlass_effects::{BlendMode, Step};
 use cutlass_gpu::{Affine, Placement, YuvTone};
 use cutlass_picture::CpuBytes;
 
@@ -35,6 +36,12 @@ pub enum GpuSource {
     /// A recipe effect over every layer before it, with its values at this
     /// frame's time.
     Effect(Vec<Step>),
+    /// A clip drawn on a canvas of its own, then mixed with every layer
+    /// before it by `mode`.
+    Blend {
+        mode: BlendMode,
+        layers: Box<FrameLayers>,
+    },
 }
 
 /// Where a 4:2:0 layer's samples are.
@@ -90,6 +97,20 @@ impl GpuLayer {
         let placement = Placement::canvas(child.width, child.height);
         Self {
             source: GpuSource::Nested(Box::new(child)),
+            placement,
+            backdrop: None,
+        }
+    }
+
+    /// `child`, a clip on a canvas of its own, mixed by `mode` with what is
+    /// below.
+    pub(crate) fn blend(mode: BlendMode, child: FrameLayers) -> Self {
+        let placement = Placement::canvas(child.width, child.height);
+        Self {
+            source: GpuSource::Blend {
+                mode,
+                layers: Box::new(child),
+            },
             placement,
             backdrop: None,
         }

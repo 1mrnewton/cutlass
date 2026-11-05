@@ -75,13 +75,16 @@ impl PictureSource for Held {
 }
 
 /// The frame has an effect mark or a clip filter, so it composes on the CPU.
+/// A blend mode the app ships runs on the GPU and does not count.
 pub(crate) fn needs_cpu(draft: &Draft, time: Micros, stack: &[StackLayer<'_>]) -> bool {
     !global_marks(draft, time, stack).is_empty()
         || stack.iter().any(|layer| {
-            !matches!(
-                clip_filter(draft, layer.track_index, layer.segment_index),
-                ClipFilter::None
-            )
+            match clip_filter(draft, layer.track_index, layer.segment_index) {
+                ClipFilter::None => false,
+                ClipFilter::Blend => segment(draft, layer.track_index, layer.segment_index)
+                    .is_none_or(|segment| cutlass_effects::segment_blend(draft, segment).is_none()),
+                ClipFilter::Unary => true,
+            }
         })
 }
 
@@ -456,6 +459,22 @@ fn try_blend(
     extent: Extent,
     time: Micros,
 ) -> Option<CpuBytes> {
+    // A blend mode the app ships needs no package.
+    if let Some(mode) = cutlass_effects::segment_blend(draft, segment) {
+        if !canvas_bytes(input, extent) || !canvas_bytes(backdrop, extent) {
+            return None;
+        }
+        let mut rgba = backdrop.rgba().to_vec();
+        for (out, source) in rgba
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
+            .zip(input.rgba().as_chunks::<4>().0)
+        {
+            *out = cutlass_effects::blend_pixel(mode, *source, *out);
+        }
+        return CpuBytes::new(extent.width, extent.height, rgba).ok();
+    }
     let input = Picture::Cpu(input.clone());
     let backdrop = Picture::Cpu(backdrop.clone());
     let source =

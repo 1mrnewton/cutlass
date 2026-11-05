@@ -804,6 +804,7 @@ dependencies = [
  "cutlass-png",
  "cutlass-renderer-software",
  "cutlass-riff",
+ "cutlass-session",
  "cutlass-still",
  "cutlass-storage",
  "cutlass-text",

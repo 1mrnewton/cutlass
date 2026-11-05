@@ -70,6 +70,18 @@ fn layers_of(frame: &FrameLayers) -> Result<Vec<Layer<'_>>, RenderError> {
                 placement: layer.placement,
             },
             GpuSource::Effect(steps) => Layer::Effect(steps),
+            GpuSource::Blend { mode, layers } => {
+                if (layers.width, layers.height) != (frame.width, frame.height) {
+                    return Err(RenderError::Size {
+                        width: layers.width,
+                        height: layers.height,
+                    });
+                }
+                Layer::Blend {
+                    mode: *mode,
+                    layers: layers_of(layers)?,
+                }
+            }
         });
     }
     Ok(layers)

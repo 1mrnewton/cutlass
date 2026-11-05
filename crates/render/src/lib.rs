@@ -23,6 +23,7 @@ mod blur;
 mod effect;
 mod frame;
 mod layer;
+mod mix;
 mod target;
 
 pub use cutlass_decode::Surface;
@@ -78,6 +79,7 @@ pub struct Renderer {
     layers: layer::Pipelines,
     blurs: blur::Blurs,
     effects: effect::Effects,
+    mix: mix::Mix,
     import: Option<SurfaceImport>,
 }
 
@@ -96,12 +98,14 @@ impl Renderer {
         let layers = layer::Pipelines::new(&device);
         let blurs = blur::Blurs::new(&device);
         let effects = effect::Effects::new(&device);
+        let mix = mix::Mix::new(&device);
         Self {
             device,
             queue,
             layers,
             blurs,
             effects,
+            mix,
             import: None,
         }
     }
@@ -236,6 +240,34 @@ impl Renderer {
                         interleaved: false,
                     };
                     bound.push(self.layers.bind(device, queue, &uploaded, *placement));
+                }
+                Layer::Blend {
+                    mode,
+                    layers: inner,
+                } => {
+                    // The clip alone, what is below it, then the two mixed;
+                    // the mix is the bottom layer from here on.
+                    let top = blur::scratch(device, size);
+                    self.draw_into(encoder, &top, size, inner)?;
+                    let below = blur::scratch(device, size);
+                    Self::paint(&self.layers, encoder, &below, &bound);
+                    let mixed = blur::scratch(device, size);
+                    self.mix
+                        .run(device, queue, encoder, &top, &below, &mixed, *mode);
+                    let uploaded = layer::Uploaded {
+                        views: [mixed.clone(), mixed.clone(), mixed],
+                        size,
+                        yuv: false,
+                        tone: cutlass_gpu::YuvTone::NONE,
+                        interleaved: false,
+                    };
+                    bound.clear();
+                    bound.push(self.layers.bind(
+                        device,
+                        queue,
+                        &uploaded,
+                        Placement::canvas(size.0, size.1),
+                    ));
                 }
                 Layer::Effect(steps) => {
                     if steps.is_empty() {

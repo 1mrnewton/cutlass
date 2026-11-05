@@ -134,6 +134,12 @@ pub enum Layer<'a> {
     },
     /// An effect over everything drawn before it in the same list.
     Effect(&'a [Step]),
+    /// `layers` drawn on a canvas the size of this one, then mixed by
+    /// `mode` with everything drawn before it in the same list.
+    Blend {
+        mode: cutlass_effects::BlendMode,
+        layers: Vec<Layer<'a>>,
+    },
 }
 
 /// A layer's textures once uploaded: three views (the same one three times

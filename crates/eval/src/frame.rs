@@ -286,7 +286,26 @@ fn gpu_layers(
                 })
             })
             .collect();
-        if own.is_empty() || drawn.is_empty() {
+        let mode = draft
+            .tracks
+            .get(layer.key.1)
+            .and_then(|track| track.segments.get(layer.key.2))
+            .and_then(|segment| cutlass_effects::segment_blend(draft, segment));
+        if drawn.is_empty() {
+            // Nothing of this clip shows at this time.
+        } else if let Some(mode) = mode {
+            // The clip and its own effects on a canvas of their own, mixed
+            // with everything below.
+            drawn.extend(own);
+            out.push(GpuLayer::blend(
+                mode,
+                FrameLayers {
+                    width: extent.width,
+                    height: extent.height,
+                    layers: drawn,
+                },
+            ));
+        } else if own.is_empty() {
             out.extend(drawn);
         } else {
             // The clip is drawn on a canvas of its own, its effects run over
@@ -665,6 +684,51 @@ mod tests {
         let before_invisible = invisible.clone();
         assert_eq!(pixels(&invisible, 10), vec![0, 0, 0, 0, 0, 0, 0, 0]);
         assert_eq!(invisible, before_invisible);
+    }
+
+    #[test]
+    fn a_blended_clip_mixes_with_the_canvas_on_both_paths() {
+        let mut draft = color_clip("0xFF000000", false);
+        draft.canvas_config.background = Some("#808080".to_owned());
+        // Black over grey hides it; screened, black leaves the grey.
+        assert_eq!(pixels(&draft, 0), [0, 0, 0, 255].repeat(2));
+        let segment = cutlass_model::SegmentId::new("segment");
+        let mut session = cutlass_session::Session::open(draft);
+        session
+            .apply(
+                0,
+                &[cutlass_session::Request::SetBlend {
+                    segment_id: segment,
+                    material_id: "mix".into(),
+                    mode: "blend-screen".to_owned(),
+                }],
+            )
+            .unwrap();
+        let draft = session.draft().clone();
+        assert_eq!(pixels(&draft, 0), [128, 128, 128, 255].repeat(2));
+        let mut device = SoftwareDevice::new();
+        let mut clips = OpenClips::new();
+        let Ok(Composed::Layers(frame)) = layers_in(
+            &Snapshot::new(&draft),
+            Micros(0),
+            &mut device,
+            &media(),
+            &mut clips,
+            0,
+            None,
+        ) else {
+            panic!("a blend stays on the GPU path");
+        };
+        assert!(
+            frame.layers.iter().any(|layer| matches!(
+                layer.source,
+                crate::GpuSource::Blend {
+                    mode: cutlass_effects::BlendMode::Screen,
+                    ..
+                }
+            )),
+            "{frame:?}"
+        );
     }
 
     #[test]

@@ -109,41 +109,50 @@ fn cdf_arrays(c: &mut CdfContext) -> (Vec<&mut [u16]>, Vec<&mut [u64]>) {
         coeff_base, coeff_br)
 }
 
-/// Where each CDF array lies inside a [`CdfContext`]: `(byte offset, length,
-/// array index)` sorted by offset, for the 16-bit and the packed arrays.
+/// Where each CDF array lies inside a [`CdfContext`]: for every 16-bit
+/// unit of the context, the index of the array holding it in
+/// [`cdf_arrays`] (the 16-bit arrays, then the packed ones; `u8::MAX` for
+/// padding), and each array's byte offset and length.
 #[derive(Clone, Debug, Default)]
 pub struct CdfLayout {
-    short: Vec<(usize, usize, u8)>,
-    packed: Vec<(usize, usize, u8)>,
+    unit: Vec<u8>,
+    arrays: Vec<(usize, usize)>,
+    n_short: usize,
 }
 
 impl CdfLayout {
     pub fn new(c: &mut CdfContext) -> Self {
         let base = std::ptr::from_mut(c) as usize;
         let (s, p) = cdf_arrays(c);
-        let mut short: Vec<(usize, usize, u8)> = s
+        let n_short = s.len();
+        let arrays: Vec<(usize, usize)> = s
             .iter()
-            .enumerate()
-            .map(|(i, a)| (a.as_ptr() as usize - base, a.len(), i as u8))
+            .map(|a| (a.as_ptr() as usize - base, a.len() * 2))
+            .chain(p.iter().map(|a| (a.as_ptr() as usize - base, a.len() * 8)))
             .collect();
-        let mut packed: Vec<(usize, usize, u8)> = p
-            .iter()
-            .enumerate()
-            .map(|(i, a)| (a.as_ptr() as usize - base, a.len(), i as u8))
-            .collect();
-        short.sort_unstable();
-        packed.sort_unstable();
-        Self { short, packed }
+        let mut unit = vec![u8::MAX; size_of::<CdfContext>() / 2];
+        for (i, &(o, bytes)) in arrays.iter().enumerate() {
+            for u in &mut unit[o / 2..(o + bytes) / 2] {
+                *u = i as u8;
+            }
+        }
+        Self {
+            unit,
+            arrays,
+            n_short,
+        }
     }
 
-    /// The array and element at byte offset `off` of an array of `n`
-    /// elements of `size` bytes.
-    fn find(t: &[(usize, usize, u8)], off: usize, n: usize, size: usize) -> Option<(u8, u16)> {
-        let i = t.partition_point(|e| e.0 <= off).checked_sub(1)?;
-        let (o, len, a) = t[i];
+    /// The array (index among its kind) and element at byte offset `off`
+    /// of `n` elements of `size` bytes.
+    #[inline(always)]
+    fn find(&self, off: usize, n: usize, size: usize, packed: bool) -> Option<(u8, u16)> {
+        let a = usize::from(*self.unit.get(off / 2)?);
+        let &(o, bytes) = self.arrays.get(a)?;
         let d = off - o;
-        let at = d / size;
-        (d.is_multiple_of(size) && at + n <= len).then_some((a, at as u16))
+        let ok = (a >= self.n_short) == packed && d.is_multiple_of(size) && d + n * size <= bytes;
+        let a = if packed { a - self.n_short } else { a };
+        ok.then_some((a as u8, (d / size) as u16))
     }
 }
 
@@ -221,12 +230,7 @@ impl<'l> SymLog<'l> {
     #[inline(always)]
     fn locate<E>(&mut self, p: *const E, n: usize, packed: bool) -> (u8, u16) {
         let off = (p as usize).wrapping_sub(self.base);
-        let t = if packed {
-            &self.layout.packed
-        } else {
-            &self.layout.short
-        };
-        match CdfLayout::find(t, off, n, size_of::<E>()) {
+        match self.layout.find(off, n, size_of::<E>(), packed) {
             Some(x) => x,
             None => {
                 self.bad = true;
@@ -1104,6 +1108,6 @@ mod tests {
         assert!(bytes <= size && size - bytes < 8, "{bytes} of {size}");
         drop((short, packed));
         let l = CdfLayout::new(&mut c);
-        assert_eq!(l.short.len() + l.packed.len(), 97);
+        assert_eq!(l.arrays.len(), 97);
     }
 }

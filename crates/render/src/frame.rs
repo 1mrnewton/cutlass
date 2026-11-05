@@ -82,6 +82,25 @@ fn layers_of(frame: &FrameLayers) -> Result<Vec<Layer<'_>>, RenderError> {
                     layers: layers_of(layers)?,
                 }
             }
+            GpuSource::Transition {
+                kind,
+                t,
+                outgoing,
+                incoming,
+            } => Layer::Transition {
+                kind: *kind,
+                t: *t,
+                outgoing: Rgba {
+                    width: outgoing.width(),
+                    height: outgoing.height(),
+                    bytes: outgoing.rgba(),
+                },
+                incoming: Rgba {
+                    width: incoming.width(),
+                    height: incoming.height(),
+                    bytes: incoming.rgba(),
+                },
+            },
         });
     }
     Ok(layers)

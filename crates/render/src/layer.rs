@@ -140,6 +140,15 @@ pub enum Layer<'a> {
         mode: cutlass_effects::BlendMode,
         layers: Vec<Layer<'a>>,
     },
+    /// Moment `t` of a built-in transition from `outgoing` to `incoming`,
+    /// both the size of the canvas, drawn as a picture over the whole
+    /// canvas.
+    Transition {
+        kind: cutlass_effects::TransitionKind,
+        t: f32,
+        outgoing: Rgba<'a>,
+        incoming: Rgba<'a>,
+    },
 }
 
 /// A layer's textures once uploaded: three views (the same one three times

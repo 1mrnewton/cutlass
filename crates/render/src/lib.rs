@@ -25,6 +25,7 @@ mod frame;
 mod layer;
 mod mix;
 mod target;
+mod transition;
 
 pub use cutlass_decode::Surface;
 pub use cutlass_effects::{Block, Recipe, Step};
@@ -80,6 +81,7 @@ pub struct Renderer {
     blurs: blur::Blurs,
     effects: effect::Effects,
     mix: mix::Mix,
+    transition: transition::Transition,
     import: Option<SurfaceImport>,
 }
 
@@ -99,6 +101,7 @@ impl Renderer {
         let blurs = blur::Blurs::new(&device);
         let effects = effect::Effects::new(&device);
         let mix = mix::Mix::new(&device);
+        let transition = transition::Transition::new(&device);
         Self {
             device,
             queue,
@@ -106,6 +109,7 @@ impl Renderer {
             blurs,
             effects,
             mix,
+            transition,
             import: None,
         }
     }
@@ -268,6 +272,47 @@ impl Renderer {
                         &uploaded,
                         Placement::canvas(size.0, size.1),
                     ));
+                }
+                Layer::Transition {
+                    kind,
+                    t,
+                    outgoing,
+                    incoming,
+                } => {
+                    for side in [outgoing, incoming] {
+                        if (side.width, side.height) != size {
+                            return Err(RenderError::Size {
+                                width: side.width,
+                                height: side.height,
+                            });
+                        }
+                    }
+                    let canvas = Placement::canvas(size.0, size.1);
+                    let mut outgoing = layer::Pipelines::upload_rgba(device, queue, outgoing)?;
+                    let mut incoming = layer::Pipelines::upload_rgba(device, queue, incoming)?;
+                    let radius = cutlass_effects::transition_blur_radius(size.0, size.1, *t);
+                    if *kind == cutlass_effects::TransitionKind::Blur && radius > 0 {
+                        outgoing = self.blurred(encoder, &outgoing, canvas, radius, size);
+                        incoming = self.blurred(encoder, &incoming, canvas, radius, size);
+                    }
+                    let mixed = blur::scratch(device, size);
+                    self.transition.run(
+                        device,
+                        queue,
+                        encoder,
+                        &outgoing.views[0],
+                        &incoming.views[0],
+                        &mixed,
+                        (*kind, *t, size),
+                    );
+                    let uploaded = layer::Uploaded {
+                        views: [mixed.clone(), mixed.clone(), mixed],
+                        size,
+                        yuv: false,
+                        tone: cutlass_gpu::YuvTone::NONE,
+                        interleaved: false,
+                    };
+                    bound.push(self.layers.bind(device, queue, &uploaded, canvas));
                 }
                 Layer::Effect(steps) => {
                     if steps.is_empty() {

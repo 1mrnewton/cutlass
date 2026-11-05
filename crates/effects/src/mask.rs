@@ -7,6 +7,10 @@
 //! `y` from -1 to 1 across the clip (y up), `width` and `height` as parts
 //! of the clip's size, `rotation` in degrees, `feather` from 0 to 1,
 //! `round` (a rectangle's corners) from 0 to 1, and `invert`.
+//!
+//! A `color_mask` record has the same fields but cuts nothing: it limits
+//! where the clip's colour work (adjust, curves, wheels, HSL, LUT) shows,
+//! and on an adjustment layer where on the canvas the layer acts.
 
 use cutlass_model::{Draft, MaterialRef, Segment};
 use serde::{Deserialize, Serialize};
@@ -14,6 +18,9 @@ use serde_json::{Map, Value, json};
 
 /// The material `type` of a mask.
 pub const MASK: &str = "mask";
+
+/// The material `type` of a mask on a clip's colour work.
+pub const COLOR_MASK: &str = "color_mask";
 
 /// A mask's shape.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -247,14 +254,67 @@ impl Mask {
     }
 }
 
+impl Mask {
+    /// Keep `after` where the mask keeps, and `before` where it does not,
+    /// mixed across the feather. Both are premultiplied RGBA of one size.
+    pub fn limit(
+        &self,
+        before: &[u8],
+        after: &mut [u8],
+        width: u32,
+        to_clip: impl Fn(f32, f32) -> Option<(f32, f32)>,
+    ) {
+        let width = width as usize;
+        if width == 0 || before.len() != after.len() {
+            return;
+        }
+        let pairs = after
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
+            .zip(before.as_chunks::<4>().0);
+        for (index, (pixel, old)) in pairs.enumerate() {
+            if pixel == old {
+                continue;
+            }
+            #[allow(clippy::cast_precision_loss)]
+            let (x, y) = ((index % width) as f32 + 0.5, (index / width) as f32 + 0.5);
+            let keep = to_clip(x, y)
+                .map_or(0.0, |(u, v)| self.coverage(u, v))
+                .clamp(0.0, 1.0);
+            if keep >= 1.0 {
+                continue;
+            }
+            for (channel, old) in pixel.iter_mut().zip(old) {
+                let mixed = f32::from(*old) + (f32::from(*channel) - f32::from(*old)) * keep;
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                let value = mixed.round().clamp(0.0, 255.0) as u8;
+                *channel = value;
+            }
+        }
+    }
+}
+
 /// The mask `segment` lists, when it has one.
 #[must_use]
 pub fn segment_mask(draft: &Draft, segment: &Segment) -> Option<Mask> {
+    listed_mask(draft, segment, MASK)
+}
+
+/// The mask on `segment`'s colour work, when it has one.
+#[must_use]
+pub fn segment_color_mask(draft: &Draft, segment: &Segment) -> Option<Mask> {
+    listed_mask(draft, segment, COLOR_MASK)
+}
+
+/// The first mask of `kind` that `segment` lists.
+#[must_use]
+pub fn listed_mask(draft: &Draft, segment: &Segment, kind: &str) -> Option<Mask> {
     segment.extra_material_refs.iter().find_map(|id| {
         let Some(MaterialRef::Other(raw)) = draft.materials.get(id.as_str()) else {
             return None;
         };
-        (raw.kind == MASK).then(|| Mask::from_fields(&raw.fields))?
+        (raw.kind == kind).then(|| Mask::from_fields(&raw.fields))?
     })
 }
 
@@ -272,7 +332,7 @@ fn smoothstep(low: f32, high: f32, value: f32) -> f32 {
 mod tests {
     use cutlass_model::{Draft, MaterialId, RawMaterial, Segment, TimeRange};
 
-    use super::{MASK, Mask, MaskShape, segment_mask};
+    use super::{COLOR_MASK, MASK, Mask, MaskShape, segment_color_mask, segment_mask};
 
     #[test]
     fn each_shape_keeps_its_middle_and_drops_its_corner() {
@@ -359,5 +419,21 @@ mod tests {
             }
             .is_valid()
         );
+        assert_eq!(segment_color_mask(&draft, &segment), None);
+        draft.materials.common_mask[0].kind = COLOR_MASK.to_owned();
+        assert_eq!(segment_mask(&draft, &segment), None);
+        assert_eq!(segment_color_mask(&draft, &segment), Some(stored));
+    }
+
+    #[test]
+    fn limit_keeps_the_change_inside_and_the_old_pixel_outside() {
+        let mask = Mask::new(MaskShape::Rectangle);
+        let before = [100, 100, 100, 255].repeat(2);
+        let mut after = [200, 50, 0, 255].repeat(2);
+        mask.limit(&before, &mut after, 2, |x, _| {
+            Some((if x < 1.0 { 0.0 } else { 0.9 }, 0.0))
+        });
+        assert_eq!(&after[..4], &[200, 50, 0, 255]);
+        assert_eq!(&after[4..], &[100, 100, 100, 255]);
     }
 }

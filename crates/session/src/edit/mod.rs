@@ -453,6 +453,11 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             material_id,
             mask,
         } => mask::set_mask(draft, segment_id, material_id, mask.as_ref()),
+        Request::SetColorMask {
+            segment_id,
+            material_id,
+            mask,
+        } => mask::set_color_mask(draft, segment_id, material_id, mask.as_ref()),
         Request::SetAdjust {
             segment_id,
             material_id,

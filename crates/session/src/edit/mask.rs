@@ -1,6 +1,6 @@
 //! A clip's mask (see `cutlass_effects::mask`).
 
-use cutlass_effects::{MASK, Mask};
+use cutlass_effects::{COLOR_MASK, MASK, Mask};
 use cutlass_model::{Draft, MaterialId, MaterialRef, RawMaterial, SegmentId, TrackType};
 
 use super::{EditError, ensure_unlocked};
@@ -14,13 +14,50 @@ pub fn set_mask(
     material_id: &MaterialId,
     mask: Option<&Mask>,
 ) -> Result<(), EditError> {
+    set_listed(
+        draft,
+        segment_id,
+        material_id,
+        mask,
+        MASK,
+        &[TrackType::Video, TrackType::Sticker],
+    )
+}
+
+/// Limit `segment_id`'s colour work to `mask`, or take that limit off with
+/// `None`. On an adjustment layer the mask is where on the canvas the
+/// layer acts.
+pub fn set_color_mask(
+    draft: &mut Draft,
+    segment_id: &SegmentId,
+    material_id: &MaterialId,
+    mask: Option<&Mask>,
+) -> Result<(), EditError> {
+    set_listed(
+        draft,
+        segment_id,
+        material_id,
+        mask,
+        COLOR_MASK,
+        &[TrackType::Video, TrackType::Sticker, TrackType::Adjust],
+    )
+}
+
+fn set_listed(
+    draft: &mut Draft,
+    segment_id: &SegmentId,
+    material_id: &MaterialId,
+    mask: Option<&Mask>,
+    kind: &str,
+    tracks: &[TrackType],
+) -> Result<(), EditError> {
     if mask.is_some_and(|mask| !mask.is_valid()) {
         return Err(EditError::Mask);
     }
     let (track_index, segment_index) = super::speed::locate(draft, segment_id)?;
     let track = &draft.tracks[track_index];
     ensure_unlocked(track.attribute)?;
-    if !matches!(track.kind, TrackType::Video | TrackType::Sticker) {
+    if !tracks.contains(&track.kind) {
         return Err(EditError::EffectTarget);
     }
     let current = draft.tracks[track_index].segments[segment_index]
@@ -29,7 +66,7 @@ pub fn set_mask(
         .find(|id| {
             matches!(
                 draft.materials.get(id.as_str()),
-                Some(MaterialRef::Other(raw)) if raw.kind == MASK
+                Some(MaterialRef::Other(raw)) if raw.kind == kind
             )
         })
         .cloned();
@@ -74,7 +111,7 @@ pub fn set_mask(
     }
     draft.materials.common_mask.push(RawMaterial {
         id: material_id.clone(),
-        kind: MASK.to_owned(),
+        kind: kind.to_owned(),
         fields: mask.to_fields(),
     });
     draft.tracks[track_index].segments[segment_index]
@@ -85,10 +122,10 @@ pub fn set_mask(
 
 #[cfg(test)]
 mod tests {
-    use cutlass_effects::{Mask, MaskShape, segment_mask};
+    use cutlass_effects::{Mask, MaskShape, segment_color_mask, segment_mask};
     use cutlass_model::{Draft, MaterialId, Segment, SegmentId, TimeRange};
 
-    use super::set_mask;
+    use super::{set_color_mask, set_mask};
     use crate::edit::EditError;
 
     #[test]
@@ -122,7 +159,14 @@ mod tests {
             set_mask(&mut draft, &a, &MaterialId::new("k3"), Some(&bad)),
             Err(EditError::Mask)
         );
+        // A colour mask sits beside the clip's mask and goes on its own.
+        set_color_mask(&mut draft, &a, &MaterialId::new("c"), Some(&circle)).unwrap();
+        let segment = &draft.tracks[0].segments[0];
+        assert_eq!(segment_color_mask(&draft, segment), Some(circle));
+        assert_eq!(segment_mask(&draft, segment), Some(star));
         set_mask(&mut draft, &a, &MaterialId::new("k3"), None).unwrap();
+        assert_eq!(draft.materials.common_mask.len(), 1);
+        set_color_mask(&mut draft, &a, &MaterialId::new("c2"), None).unwrap();
         assert!(draft.materials.common_mask.is_empty());
         assert!(draft.tracks[0].segments[0].extra_material_refs.is_empty());
     }

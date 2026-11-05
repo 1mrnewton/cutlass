@@ -348,6 +348,13 @@ pub enum Request {
         material_id: MaterialId,
         mask: Option<cutlass_effects::Mask>,
     },
+    /// Limit the clip's colour work, or an adjustment layer, to `mask`, or
+    /// take that limit off with `None`.
+    SetColorMask {
+        segment_id: SegmentId,
+        material_id: MaterialId,
+        mask: Option<cutlass_effects::Mask>,
+    },
     /// Set the adjust slider `key`, its reference name such as
     /// `temperature`, to `value`: -1 to 1, or 0 to 1 for fade, sharpen and
     /// grain. Zero takes it off. `material_id` names a new slider material.

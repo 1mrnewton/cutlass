@@ -14,6 +14,7 @@
 
 #![forbid(unsafe_code)]
 
+mod captions;
 mod features;
 mod file;
 mod job;
@@ -25,6 +26,9 @@ mod timestamp;
 mod unified;
 mod words;
 
+pub use captions::{
+    HeardClip, HeardMiss, caption_request, caption_row, heard_clip, words_on_timeline,
+};
 pub use file::FileSource;
 pub use job::{Job, JobError};
 pub use model::{AcousticModel, AcousticWeights, LocalRecognizer, ModelError};

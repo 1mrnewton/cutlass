@@ -4,6 +4,8 @@ mod audio;
 mod cf;
 mod image;
 mod metal;
+#[cfg(target_os = "macos")]
+mod open;
 mod queue;
 mod surface;
 mod sys;
@@ -15,6 +17,8 @@ use cutlass_encode::EncodeFactory;
 
 pub use image::{decode_file, encode_file};
 pub use metal::import_surface;
+#[cfg(target_os = "macos")]
+pub use open::{listen_for_opened_files, take_opened_files, wake_on_opened_files};
 pub use queue::{OutputQueue, QueueError, StreamSink};
 pub use thread::run_at_interface_priority;
 pub use video::{release_buffer, to_cpu, with_pixel_buffer};

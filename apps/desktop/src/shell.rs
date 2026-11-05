@@ -156,6 +156,7 @@ impl std::fmt::Display for ShellError {
             Self::Edit(EditError::UnknownEffect) => {
                 formatter.write_str("that effect is not in this version")
             }
+            Self::Edit(EditError::Lut) => formatter.write_str("that file is not a 3D .cube table"),
             Self::Edit(EditError::NotEffect) => {
                 formatter.write_str("a strength belongs on an effect, filter, or adjustment")
             }
@@ -297,6 +298,8 @@ pub struct Inspection {
     pub adjust: cutlass_effects::Adjust,
     /// The clip's curves, wheels and HSL.
     pub grade: cutlass_effects::Grade,
+    /// The clip's LUT: its name and strength.
+    pub lut: Option<(String, f32)>,
     /// Fade-in duration, microseconds.
     pub fade_in: i64,
     /// Fade-out duration, microseconds.
@@ -3391,6 +3394,7 @@ impl Shell {
                 .unwrap_or(cutlass_effects::BlendMode::SourceOver),
             adjust: cutlass_effects::segment_adjust(draft, segment),
             grade: cutlass_effects::segment_grade(draft, segment),
+            lut: cutlass_effects::segment_lut(draft, segment).map(|lut| (lut.name, lut.strength)),
             fade_in: fade_durations(draft, segment).0,
             fade_out: fade_durations(draft, segment).1,
             material,
@@ -4446,6 +4450,64 @@ impl Shell {
                 .iter()
                 .map(|(x, y)| [f64::from(*x), f64::from(*y)])
                 .collect(),
+        })
+    }
+
+    /// Put the `.cube` file at `path` on the selected picture at full
+    /// strength, named after the file.
+    pub fn load_lut(&mut self, path: &Path) -> Result<(), ShellError> {
+        const LARGEST: u64 = 16 * 1024 * 1024;
+        let segment_id = self.adjust_segment()?;
+        self.refuse_locked(&segment_id)?;
+        let unreadable = |reason: String| {
+            ShellError::Unavailable(format!("the LUT could not be read: {reason}"))
+        };
+        let size = std::fs::metadata(path)
+            .map_err(|error| unreadable(error.to_string()))?
+            .len();
+        if size > LARGEST {
+            return Err(unreadable("it is larger than 16 MB".to_owned()));
+        }
+        let text = std::fs::read_to_string(path).map_err(|error| unreadable(error.to_string()))?;
+        cutlass_effects::Lut::parse_cube(&text).map_err(|error| unreadable(error.to_string()))?;
+        let name = path.file_stem().map_or_else(
+            || "LUT".to_owned(),
+            |stem| stem.to_string_lossy().into_owned(),
+        );
+        let material_id = MaterialId::new(self.fresh("lut"));
+        self.apply(Request::SetLut {
+            segment_id,
+            material_id,
+            name,
+            cube: Some(text),
+            strength: 1.0,
+        })
+    }
+
+    /// Set the strength of the selected picture's LUT, from 0 to 1.
+    pub fn set_lut_strength(&mut self, strength: f64) -> Result<(), ShellError> {
+        let segment_id = self.adjust_segment()?;
+        self.refuse_locked(&segment_id)?;
+        let material_id = MaterialId::new(self.fresh("lut"));
+        self.apply(Request::SetLut {
+            segment_id,
+            material_id,
+            name: String::new(),
+            cube: None,
+            strength,
+        })
+    }
+
+    /// Take the LUT off the selected picture.
+    pub fn remove_lut(&mut self) -> Result<(), ShellError> {
+        let segment_id = self.adjust_segment()?;
+        self.refuse_locked(&segment_id)?;
+        self.apply(Request::SetLut {
+            segment_id,
+            material_id: MaterialId::new(""),
+            name: String::new(),
+            cube: Some(String::new()),
+            strength: 1.0,
         })
     }
 
@@ -10715,6 +10777,56 @@ mod tests {
         desktop.undo().unwrap();
         desktop.undo().unwrap();
         assert!(desktop.inspection().unwrap().grade.is_identity());
+    }
+
+    #[test]
+    fn a_lut_file_is_loaded_weakened_and_taken_off() {
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        let mut video = MaterialVideo::new("picture");
+        video.path = "clip.mp4".to_owned();
+        draft.materials.videos.push(video);
+        draft.tracks[0].segments.push(Segment::new(
+            "picture",
+            "picture",
+            TimeRange::new(0, 1_000_000),
+        ));
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.select(Some(SegmentId::new("picture")));
+        let bad = temp.path.join("bad.cube");
+        std::fs::write(&bad, "LUT_3D_SIZE 3\n0 0 0\n").unwrap();
+        let refused = desktop.load_lut(&bad).unwrap_err().to_string();
+        assert!(refused.contains("not 27"), "{refused}");
+        assert!(desktop.set_lut_strength(0.5).is_err());
+        let good = temp.path.join("Warm film.cube");
+        std::fs::write(
+            &good,
+            "LUT_3D_SIZE 2\n0 0 0\n1 0 0\n0 1 0\n1 1 0\n0 0 1\n1 0 1\n0 1 1\n1 1 1\n",
+        )
+        .unwrap();
+        desktop.load_lut(&good).unwrap();
+        assert_eq!(
+            desktop.inspection().unwrap().lut,
+            Some(("Warm film".to_owned(), 1.0))
+        );
+        desktop.set_lut_strength(0.5).unwrap();
+        assert_eq!(
+            desktop.inspection().unwrap().lut,
+            Some(("Warm film".to_owned(), 0.5))
+        );
+        desktop.remove_lut().unwrap();
+        assert_eq!(desktop.inspection().unwrap().lut, None);
+        desktop.undo().unwrap();
+        assert_eq!(
+            desktop
+                .inspection()
+                .unwrap()
+                .lut
+                .map(|(_, strength)| strength),
+            Some(0.5)
+        );
     }
 
     #[test]

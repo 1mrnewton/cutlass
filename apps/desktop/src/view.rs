@@ -292,6 +292,9 @@ pub fn show(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Option
     if let Some(finished) = view.dialogs.poll(ui.ctx()) {
         apply_dialog(shell, view, finished);
     }
+    if std::mem::take(&mut view.inspector.wants_lut) {
+        view.dialogs.lut(parent);
+    }
     style(ui);
     shell.hold_edits(ui.input(|input| input.pointer.any_down()));
     shell.chrome = crate::shell::Chrome::default();
@@ -5998,6 +6001,7 @@ fn apply_dialog(shell: &mut Shell, view: &mut ViewState, finished: Finished) {
             propose_settings(shell, view, settings);
             Ok(())
         }
+        Picker::Lut => shell.load_lut(&path),
         Picker::SaveLog => Shell::export_log(&path).map(|()| {
             shell.set_notice(format!("Saved the log to {}", path.display()));
         }),
@@ -6566,6 +6570,29 @@ mod tests {
         shell.undo().unwrap();
         assert!(shell.inspection().unwrap().grade.is_identity());
         assert_eq!(shell.inspection().unwrap().grade.wheel(Wheel::Lift).x, 0.0);
+        // A .cube picked in the LUT dialog lands on the clip, and the Basic
+        // page shows it with its strength.
+        let cube = temp.join("Teal punch.cube");
+        std::fs::write(
+            &cube,
+            "LUT_3D_SIZE 2\n0 0 0\n0 1 0\n1 0 0\n1 1 0\n0 0 1\n0 1 1\n1 0 1\n1 1 1\n",
+        )
+        .unwrap();
+        view.dialogs.finish_for_test(Picker::Lut, Some(cube));
+        view.inspector.focus(inspector::Focus {
+            tab: 4,
+            page: 0,
+            section: Some("lut"),
+        });
+        let _ = frame(&mut shell, &mut view, Vec::new());
+        let lines = galleys(&frame(&mut shell, &mut view, Vec::new()));
+        assert_eq!(
+            shell.inspection().unwrap().lut,
+            Some(("Teal punch".to_owned(), 1.0))
+        );
+        for label in ["LUT", "Teal punch", "Strength", "100"] {
+            assert!(lines.iter().any(|line| line == label), "{label}: {lines:?}");
+        }
         let _ = std::fs::remove_dir_all(&temp);
     }
 

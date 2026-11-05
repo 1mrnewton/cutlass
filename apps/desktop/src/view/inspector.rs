@@ -54,6 +54,8 @@ pub(super) struct InspectorState {
     pub(super) curve_channel: usize,
     /// A curve point being dragged, and the points as they are now.
     pub(super) curve_drag: Option<(usize, Vec<(f32, f32)>)>,
+    /// The LUT file picker was asked for; the view opens it.
+    pub(super) wants_lut: bool,
 }
 
 /// Where a clip menu row sends the inspector.
@@ -895,9 +897,10 @@ fn adjust_tab(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState, inspec
     if colour_page(shell, ui, state, inspection) {
         return;
     }
-    for label in ["Auto adjust", "Color match", "Color correction", "LUT"] {
+    for label in ["Auto adjust", "Color match", "Color correction"] {
         later_row(ui, label);
     }
+    lut_section(shell, ui, state, inspection);
     adjust_sliders(shell, ui, state, inspection);
     footer(ui, &["Apply to all", "Save as preset"]);
 }
@@ -918,6 +921,60 @@ fn colour_page(
         _ => later_note(ui, "Mask"),
     }
     true
+}
+
+/// The LUT section: the switch takes the LUT off or asks for a file; the
+/// body names the table, picks another, and sets its strength.
+fn lut_section(
+    shell: &mut Shell,
+    ui: &mut Ui,
+    state: &mut InspectorState,
+    inspection: &Inspection,
+) {
+    let on = inspection.lut.is_some();
+    let header = section(ui, state, "lut", "LUT", Some((on, true)), false);
+    if header.toggled {
+        if on {
+            send(shell, Shell::remove_lut);
+        } else {
+            state.wants_lut = true;
+            state.open.insert("lut".to_owned());
+        }
+    }
+    if !header.open && !state.open.contains("lut") {
+        return;
+    }
+    body(ui, |ui| {
+        ui.horizontal(|ui| {
+            row_label(ui, "File");
+            let name = inspection
+                .lut
+                .as_ref()
+                .map_or("None", |(name, _)| name.as_str());
+            ui.label(RichText::new(name).size(12.0).color(Color32::WHITE));
+            if ui
+                .button(RichText::new("Choose .cube…").size(12.0))
+                .clicked()
+            {
+                state.wants_lut = true;
+            }
+        });
+        ui.add_space(4.0);
+        if let Some((_, strength)) = &inspection.lut {
+            let stored = (f64::from(*strength) * 100.0).round();
+            if let Some(value) = slider(
+                ui,
+                state,
+                "lut-strength",
+                "Strength",
+                stored,
+                0.0..=100.0,
+                |v| format!("{v:.0}"),
+            ) {
+                send(shell, |shell| shell.set_lut_strength(value / 100.0));
+            }
+        }
+    });
 }
 
 /// The Adjust section: a switch that resets every slider, and the sliders.

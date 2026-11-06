@@ -1710,20 +1710,18 @@ fn library_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rec
 }
 
 fn shelf_rail(ui: &mut Ui, view: &mut ViewState, rect: Rect) {
-    let inner = Rect::from_min_max(
-        Pos2::new(rect.left() + 8.0, rect.top()),
-        Pos2::new(rect.right() - 8.0, rect.bottom()),
-    );
-    let mut column = ui.new_child(egui::UiBuilder::new().max_rect(inner));
-    ui::Scroll::vertical("library-rail").show(&mut column, |ui| {
-        ui.add_space(8.0);
-        ui.spacing_mut().item_spacing.y = 2.0;
-        for shelf in Shelf::ALL {
-            if shelf_button(ui, shelf, view.library_shelf == shelf).clicked() {
-                view.library_shelf = shelf;
+    let mut column = ui.new_child(egui::UiBuilder::new().max_rect(rect));
+    ui::Scroll::vertical("library-rail")
+        .content_margin(egui::Margin::symmetric(8, 0))
+        .show(&mut column, |ui| {
+            ui.add_space(8.0);
+            ui.spacing_mut().item_spacing.y = 2.0;
+            for shelf in Shelf::ALL {
+                if shelf_button(ui, shelf, view.library_shelf == shelf).clicked() {
+                    view.library_shelf = shelf;
+                }
             }
-        }
-    });
+        });
 }
 
 fn shelf_button(ui: &mut Ui, shelf: Shelf, active: bool) -> egui::Response {
@@ -1785,10 +1783,18 @@ fn asset_column(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect
             target: LibraryTarget::Empty,
         });
     }
-    let mut grid_ui = column.new_child(egui::UiBuilder::new().max_rect(grid));
+    // The column is inset 12 from the panel. The cards' scroll view reaches
+    // back out to the panel's edge so its bar sits there, and pads the cards
+    // by the same 12.
+    let scroll = grid.with_max_x(grid.max.x + 12.0);
+    let mut grid_ui = column.new_child(egui::UiBuilder::new().max_rect(scroll));
     let query = view.library_query.clone();
     ui::Scroll::vertical("library-cards")
         .auto_shrink([false, false])
+        .content_margin(egui::Margin {
+            right: 12,
+            ..egui::Margin::ZERO
+        })
         .show(&mut grid_ui, |ui| {
             if stock {
                 ui.add_space(8.0);
@@ -3200,20 +3206,21 @@ fn inspector_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
         .unwrap_or_default();
     ui.ctx()
         .data_mut(|data| data.insert_temp(egui::Id::unique(INSPECTED), inspected));
-    let padded = rect.shrink2(Vec2::new(16.0, 0.0));
-    let mut details = ui.new_child(egui::UiBuilder::new().max_rect(padded));
-    details.set_clip_rect(padded);
-    let content_width = padded.width();
-    ui::Scroll::vertical("inspector").show(&mut details, |ui| {
-        ui.set_width(content_width);
-        ui.add_space(14.0);
-        if let Some(inspection) = shell.inspection() {
-            inspector::clip_panel(shell, ui, view, &inspection, content_width);
-        } else {
-            section_title(ui, "Details");
-            project_facts(shell, ui, view, content_width);
-        }
-    });
+    let content_width = rect.width() - 32.0;
+    let mut details = ui.new_child(egui::UiBuilder::new().max_rect(rect));
+    details.set_clip_rect(rect);
+    ui::Scroll::vertical("inspector")
+        .content_margin(egui::Margin::symmetric(16, 0))
+        .show(&mut details, |ui| {
+            ui.set_width(content_width);
+            ui.add_space(14.0);
+            if let Some(inspection) = shell.inspection() {
+                inspector::clip_panel(shell, ui, view, &inspection, content_width);
+            } else {
+                section_title(ui, "Details");
+                project_facts(shell, ui, view, content_width);
+            }
+        });
 }
 
 fn section_title(ui: &mut Ui, title: &str) {

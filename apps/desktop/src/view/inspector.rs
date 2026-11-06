@@ -2098,9 +2098,8 @@ pub(super) fn send(shell: &mut Shell, edit: impl FnOnce(&mut Shell) -> Result<()
 /// fit scroll sideways, as the prototype's do.
 fn tabs(ui: &mut Ui, labels: &[&str], current: &mut usize) {
     ui.add_space(12.0);
-    egui::ScrollArea::horizontal()
-        .id_salt(("inspector-tabs", labels.len()))
-        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+    crate::ui::Scroll::horizontal(("inspector-tabs", labels.len()))
+        .without_bar()
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 16.0;

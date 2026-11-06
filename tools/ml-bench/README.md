@@ -52,6 +52,7 @@ Cargo features:
 | `metal` | candle on Metal, and burn on wgpu over Metal (Apple devices) |
 | `vulkan` | burn on wgpu over Vulkan (Android, Windows, Linux). It needs Vulkan 1.2 features. candle has no Vulkan backend, so it stays on the CPU |
 | `wgpu` | burn on wgpu's portable path (WGSL), for GPUs the `vulkan` path refuses. This build stores the model's shape numbers as 32-bit integers, because many phone GPUs can't run 64-bit ones |
+| `ios` | candle on Metal, and burn on wgpu's portable path with the Metal API pinned (iPhone, iPad) |
 | `cache` | burn saves its compiled GPU kernels to disk, so later launches skip most of the warm-up. **It builds C code**; see the findings |
 
 To check the masks against onnxruntime, make a reference file, then pass it
@@ -97,6 +98,27 @@ adb shell "cd /data/local/tmp && ./ml-bench --gpu --engine burn --image frame.pn
 
 burn's weights are built into the binary. candle reads its weights from
 `models/`.
+
+### On an iPhone
+
+You need Xcode, `xcodegen`, and the Rust `aarch64-apple-ios` target. Build
+the library, then the app:
+
+```bash
+cargo build --release --target aarch64-apple-ios --features ios --lib
+```
+
+```bash
+cd ios && xcodegen && xcodebuild -project MLBench.xcodeproj -scheme MLBench -configuration Release -destination 'generic/platform=iOS' -derivedDataPath build -allowProvisioningUpdates build
+```
+
+The app copies the candle weights and the two reference files from `models/`
+into its bundle; make the references first with `scripts/reference.py`, named
+`reference_landscape.safetensors` and `reference_portrait.safetensors`. On
+launch it runs both engines on the GPU, then on the CPU, prints each report to
+the console, writes them to the app's `Documents/`, and shows "Done." Set
+`ML_BENCH_ONLY` (for example `gpu_landscape`) and `ML_BENCH_ENGINE` in the
+launch environment to run one part.
 
 ### On Windows
 
@@ -192,6 +214,34 @@ What this shows:
    this was not tested.
 4. candle has no Android GPU backend at all, so on Android it is CPU only
    either way.
+
+## Findings on an iPhone 16 Pro Max (A18 Pro, iOS)
+
+The same landscape frame and click as on the Mac. Times are the median of 10
+encodes and 30 clicks.
+
+| Engine | Encode a frame | One click | Masks |
+| --- | --- | --- | --- |
+| candle, CPU | 1,653 ms | 70 ms | correct |
+| burn, CPU (flex) | 2,547 ms | 106 ms | correct |
+| candle, Metal | 2,021 ms | 100 ms | correct |
+| burn, wgpu (WGSL) on Metal | **878 ms** | **35 ms** | **wrong** |
+
+What this shows:
+
+1. **The CPU works for both**, at about 1.7 to 2.5 s a frame. candle is
+   faster here, as on the Mac.
+2. **candle's Metal backend is slower than its own CPU** on this phone.
+3. **burn's GPU path is fast but gives wrong masks.** burn's Metal compiler
+   only runs on macOS, and its automatic mode looks for Vulkan on iOS, so the
+   `ios` feature uses the portable WGSL compiler with the Metal API pinned.
+   On that path the frame encoding matches onnxruntime (to 0.000003), but the
+   decoder's masks overlap onnxruntime's by under 6%, and its scores are
+   about 0.35 where they should be about 0.98. Keeping the shape integers in
+   32 bits did not fix it. The bug is in burn's WGSL kernels for something
+   in the decoder; it was not narrowed further.
+4. **burn's warm-up is about 28 s for the first encode and 13 to 29 s for the
+   first click**, on every launch, without `cache`.
 
 ## Licenses
 

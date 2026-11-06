@@ -61,6 +61,7 @@ mod speech_model;
 mod update;
 
 pub use assistant::AgentRun;
+pub(crate) use assistant::log_tool_call;
 pub use speech_model::SPEECH_MODEL_QUESTION;
 pub use update::RUNNING_VERSION;
 

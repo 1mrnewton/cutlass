@@ -80,10 +80,10 @@ pub fn serve(path: Option<&Path>, input: impl BufRead, output: impl Write) -> Re
             Headless(Rc::clone(&shell)),
         ),
     );
-    let mut server = McpServer::new(registry, "cutlass", env!("CARGO_PKG_VERSION"));
+    let mut server = McpServer::new(Logged(registry), "cutlass", env!("CARGO_PKG_VERSION"));
     cutlass_logger::info!("mcp: serving {}", path.display());
     pump(&mut server, input, output, |server| {
-        let session = server.sink().draft.session();
+        let session = server.sink().0.draft.session();
         if session.revision() != saved {
             saved = session.revision();
             let mut shell = shell.borrow_mut();
@@ -121,6 +121,18 @@ fn pump<S: ToolSink>(
     }
     cutlass_logger::info!("mcp: the client closed stdin");
     Ok(())
+}
+
+/// A tool sink that logs each call it runs, by name and outcome.
+struct Logged<S>(S);
+
+impl<S: ToolSink> ToolSink for Logged<S> {
+    fn run_tool(&mut self, call: &cutlass_agent::ToolCall) -> cutlass_agent::ToolOutcome {
+        let started = std::time::Instant::now();
+        let outcome = self.0.run_tool(call);
+        crate::shell::log_tool_call("mcp", call, &outcome, started.elapsed());
+        outcome
+    }
 }
 
 const NOT_HERE: &str = "not available from cutlass mcp; open the project in the Cutlass window";

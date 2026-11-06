@@ -148,11 +148,70 @@ pub struct AgentRun {
     pub wants: Option<ApprovalAction>,
 }
 
+/// Error text kept in the log for a failed tool call. The rest may be a
+/// script's output.
+const TOOL_ERROR_LOGGED: usize = 300;
+
+/// Log one finished tool call from `source`: its name and id, how long it
+/// took, and the start of its error. The arguments stay out, as
+/// `settings.set` can carry a key and `draft.apply` the user's words.
+pub(crate) fn log_tool_call(
+    source: &str,
+    call: &ToolCall,
+    outcome: &ToolOutcome,
+    took: std::time::Duration,
+) {
+    if outcome.is_error {
+        let mut error = outcome.content.as_str();
+        if error.len() > TOOL_ERROR_LOGGED {
+            let mut end = TOOL_ERROR_LOGGED;
+            while !error.is_char_boundary(end) {
+                end -= 1;
+            }
+            error = &error[..end];
+        }
+        cutlass_logger::warn!(
+            "{source} tool {}{} failed after {took:.1?}: {error}",
+            call.name,
+            call_id(call)
+        );
+    } else {
+        cutlass_logger::info!(
+            "{source} tool {}{} ran in {took:.1?}",
+            call.name,
+            call_id(call)
+        );
+    }
+}
+
+/// ` (id)`, or nothing for a call that came without one.
+fn call_id(call: &ToolCall) -> String {
+    if call.id.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", call.id)
+    }
+}
+
 impl Shell {
     /// Run one tool call from the assistant on the open project. `allowed`
     /// is what the user allowed for this call; a call that needs anything
     /// else does nothing and says what it wants.
     pub fn run_agent_tool(&mut self, call: &ToolCall, allowed: &[ApprovalAction]) -> AgentRun {
+        let started = std::time::Instant::now();
+        let run = self.run_agent_tool_in(call, allowed);
+        match &run.wants {
+            Some(action) => cutlass_logger::info!(
+                "assistant tool {}{} waits for the user's allow: {action:?}",
+                call.name,
+                call_id(call)
+            ),
+            None => log_tool_call("assistant", call, &run.outcome, started.elapsed()),
+        }
+        run
+    }
+
+    fn run_agent_tool_in(&mut self, call: &ToolCall, allowed: &[ApprovalAction]) -> AgentRun {
         let Some(session) = self.session.clone() else {
             return AgentRun {
                 outcome: ToolOutcome {
@@ -275,6 +334,66 @@ mod tests {
             name: name.to_owned(),
             arguments: arguments.to_owned(),
         }
+    }
+
+    #[test]
+    fn a_tool_call_is_logged_by_name_and_outcome_without_its_arguments() {
+        crate::test_log::path();
+        let ok = ToolCall {
+            id: "log-call-ok".to_owned(),
+            name: "draft.query".to_owned(),
+            arguments: "args-stay-out".to_owned(),
+        };
+        let done = cutlass_agent::ToolOutcome {
+            content: "the project".to_owned(),
+            is_error: false,
+        };
+        super::log_tool_call("assistant", &ok, &done, std::time::Duration::from_millis(3));
+        let failed = ToolCall {
+            id: "log-call-failed".to_owned(),
+            ..ok.clone()
+        };
+        let long = cutlass_agent::ToolOutcome {
+            content: format!("bad-start{}", "é".repeat(400)),
+            is_error: true,
+        };
+        super::log_tool_call("mcp", &failed, &long, std::time::Duration::from_millis(3));
+        let log = crate::test_log::text();
+        let line = |id: &str| {
+            log.lines()
+                .find(|line| line.contains(id))
+                .unwrap_or_default()
+                .to_owned()
+        };
+        let ran = line("log-call-ok");
+        assert!(ran.contains(" INFO "), "{log}");
+        assert!(
+            ran.contains("assistant tool draft.query (log-call-ok) ran in"),
+            "{log}"
+        );
+        let refused = line("log-call-failed");
+        assert!(refused.contains(" WARN "), "{log}");
+        assert!(
+            refused.contains("mcp tool draft.query (log-call-failed) failed"),
+            "{log}"
+        );
+        assert!(refused.contains("bad-start"), "{log}");
+        assert!(refused.len() < 600, "the error is cut: {refused}");
+        assert!(!log.contains("args-stay-out"), "{log}");
+        let mut desktop = shell();
+        let none = desktop.run_agent_tool(
+            &ToolCall {
+                id: "log-call-no-project".to_owned(),
+                ..ok
+            },
+            &[],
+        );
+        assert!(none.outcome.is_error);
+        let log = crate::test_log::text();
+        assert!(
+            log.contains("assistant tool draft.query (log-call-no-project) failed"),
+            "{log}"
+        );
     }
 
     #[test]

@@ -27,8 +27,9 @@ pub enum GestureOutcome {
     /// The pointer is outside every lane.
     Miss,
     /// The lane under the pointer and the upper lane of this type are taken.
-    /// This crate does not insert the track.
-    NewLane { kind: TrackType },
+    /// `start` is the target start, after snap, on the new lane. This crate
+    /// does not insert the track.
+    NewLane { kind: TrackType, start: Micros },
 }
 
 /// Where a segment can land. The draft's tracks are not changed.
@@ -116,7 +117,7 @@ pub fn move_gesture(draft: &Draft, gesture: &MoveGesture) -> Result<GestureOutco
             track_id,
             start,
         }),
-        Placement::NewLane { kind } => GestureOutcome::NewLane { kind },
+        Placement::NewLane { kind } => GestureOutcome::NewLane { kind, start },
     })
 }
 
@@ -727,7 +728,8 @@ mod tests {
         assert_eq!(
             outcome,
             GestureOutcome::NewLane {
-                kind: TrackType::Video
+                kind: TrackType::Video,
+                start: Micros(0),
             }
         );
         assert_eq!(draft, before);

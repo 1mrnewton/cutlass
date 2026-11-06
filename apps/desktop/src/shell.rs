@@ -2445,7 +2445,8 @@ impl Shell {
         x: f64,
         y: f64,
     ) -> Result<(), ShellError> {
-        let moves = self.plan_move(segment_id, x, y)?;
+        let new_track = TrackId::new(self.fresh("track"));
+        let moves = self.plan_move(segment_id, x, y, new_track)?;
         self.pending_moves.clear();
         let requests = move_requests(self.session_draft()?, &moves);
         if requests.is_empty() {
@@ -2527,7 +2528,11 @@ impl Shell {
     /// clip keeps its gap and follows by the same amount.
     pub fn preview_move(&mut self, segment_id: SegmentId, x: f64, y: f64) {
         self.pending_trim = None;
-        self.pending_moves = self.plan_move(segment_id, x, y).unwrap_or_default();
+        // The preview's new lane is not on the draft, so its id is only a name.
+        let new_track = TrackId::new("new-lane");
+        self.pending_moves = self
+            .plan_move(segment_id, x, y, new_track)
+            .unwrap_or_default();
     }
 
     /// The dragged clip's copy. A group drag still reports that clip here.
@@ -2666,16 +2671,18 @@ impl Shell {
 
     /// The body drag lands on the pointer time, pulled to a snap within twelve
     /// pixels. Selected clips travel with the dragged one, which comes first.
-    /// The draft is not written here.
+    /// A clip with no room on the lane under the pointer or the one above opens
+    /// a lane of its kind named `new_track`. The draft is not written here.
     fn plan_move(
         &self,
         segment_id: SegmentId,
         x: f64,
         y: f64,
+        new_track: TrackId,
     ) -> Result<Vec<ClipMove>, ShellError> {
         self.refuse_locked(&segment_id)?;
         let gesture = MoveGesture {
-            segment_id,
+            segment_id: segment_id.clone(),
             pointer: Pointer {
                 x: self.time_zero_x(x),
                 y,
@@ -2687,13 +2694,10 @@ impl Shell {
         };
         let draft = self.session_draft()?;
         match plan_move(draft, &gesture, &self.selection) {
-            Ok(MovePlan::Moves(moves)) => Ok(moves),
             Ok(MovePlan::Miss) => Err(ShellError::Unavailable(
                 "the drag missed the lanes".to_owned(),
             )),
-            Ok(MovePlan::NewLane { .. }) => Err(ShellError::Unavailable(
-                "a new lane is not available".to_owned(),
-            )),
+            Ok(plan) => Ok(plan.into_moves(&segment_id, new_track)),
             Err(GestureError::UnknownSegment) => Err(ShellError::Unavailable(
                 "the clip is not on the timeline".to_owned(),
             )),
@@ -14128,6 +14132,42 @@ mod tests {
     fn lane_time(desktop: &Shell, time: f64) -> f64 {
         let origin = desktop.view_origin().0 as f64;
         (time - origin) * desktop.pixel_size()
+    }
+
+    #[test]
+    fn dragging_a_clip_onto_a_taken_spot_opens_a_lane_in_one_undo_step() {
+        let temp = Temp::new();
+        trim_project(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        let before = desktop.draft().unwrap().tracks.clone();
+        let next = SegmentId::new("next");
+        let y = crate::tokens::LANE_HEIGHT / 2.0;
+        let x = lane_time(&desktop, 400_000.0);
+        let revision = desktop.revision();
+
+        desktop.preview_move(next.clone(), x, y);
+        let preview = desktop.move_preview().expect("the drag is showing");
+        assert_eq!(preview.track_id.as_str(), "new-lane");
+        assert_eq!(desktop.revision(), revision);
+        assert_eq!(desktop.draft().unwrap().tracks, before);
+
+        desktop.drag_segment(next.clone(), x, y).unwrap();
+        let draft = desktop.draft().unwrap();
+        assert_eq!(draft.tracks.len(), before.len() + 1);
+        let opened = draft
+            .tracks
+            .iter()
+            .find(|track| track.segments.iter().any(|segment| segment.id == next))
+            .unwrap();
+        assert!(!before.iter().any(|track| track.id == opened.id));
+        assert_eq!(opened.kind, TrackType::Video);
+        assert_eq!(opened.segments.len(), 1);
+        let main = draft.tracks.iter().find(|track| track.is_main()).unwrap();
+        assert_eq!(main.segments.len(), 1);
+
+        desktop.undo().unwrap();
+        assert_eq!(desktop.draft().unwrap().tracks, before);
     }
 
     #[test]

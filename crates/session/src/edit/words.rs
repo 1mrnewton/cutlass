@@ -191,6 +191,46 @@ pub fn add_subtitles(
     Ok(())
 }
 
+/// Place `cue` on the lane of caption `like`, with `like`'s text look and
+/// canvas place. See [`crate::Request::InsertCaption`].
+pub fn insert_caption(
+    draft: &mut Draft,
+    like: &SegmentId,
+    cue: &SubtitleCue,
+) -> Result<(), EditError> {
+    if cue.words.text.is_empty() {
+        return Err(EditError::WordShape);
+    }
+    let (track_index, segment_index) = super::locate(draft, like)?;
+    let track = &draft.tracks[track_index];
+    if !matches!(track.kind, TrackType::Text | TrackType::TextToVideoText) {
+        return Err(EditError::TrackKind);
+    }
+    super::ensure_unlocked(track.attribute)?;
+    let track_id = track.id.clone();
+    let model = &track.segments[segment_index];
+    let Some(MaterialRef::Text(look)) = draft.materials.get(model.material_id.as_str()) else {
+        return Err(EditError::TrackKind);
+    };
+    if draft.materials.get(cue.material_id.as_str()).is_some() {
+        return Err(EditError::DuplicateMaterial);
+    }
+    let mut text = look.clone();
+    text.id = cue.material_id.clone();
+    text.caption_keywords.clear();
+    let mut segment = Segment::new(
+        cue.segment_id.clone(),
+        cue.material_id.clone(),
+        cue.target.clone(),
+    );
+    segment.clip = model.clip.clone();
+    segment.uniform_scale = model.uniform_scale.clone();
+    segment.render_index = model.render_index;
+    draft.materials.texts.push(text);
+    super::place::place(draft, &track_id, segment)?;
+    set_words(draft, &cue.material_id, cue.words.clone())
+}
+
 #[cfg(test)]
 mod tests {
     use cutlass_model::MaterialText;
@@ -598,5 +638,101 @@ mod tests {
             EditError::TrackKind
         );
         assert_eq!(session.draft(), &before);
+    }
+
+    #[test]
+    fn an_inserted_caption_looks_like_its_neighbour_and_takes_its_words() {
+        use crate::request::Request;
+        use crate::session::Session;
+
+        let mut session = Session::open(Draft::empty("D"));
+        session
+            .apply(
+                0,
+                &[Request::AddSubtitles {
+                    track_id: TrackId::new("subs"),
+                    cues: vec![
+                        cue("one", 0, 1_000_000, "hello"),
+                        cue("three", 3_000_000, 1_000_000, "bye"),
+                    ],
+                }],
+            )
+            .unwrap();
+        let mut draft = session.draft().clone();
+        let one = draft
+            .materials
+            .texts
+            .iter_mut()
+            .find(|t| t.id.as_str() == "one")
+            .unwrap();
+        one.font_size = 42.0;
+        one.caption_keywords = vec![0];
+        draft
+            .tracks
+            .iter_mut()
+            .find(|t| t.id.as_str() == "subs")
+            .unwrap()
+            .segments[0]
+            .clip
+            .transform
+            .y = -0.8;
+        let mut session = Session::open(draft);
+        let before = session.draft().clone();
+        session
+            .apply(
+                0,
+                &[Request::InsertCaption {
+                    like: SegmentId::new("one"),
+                    cue: cue("two", 1_000_000, 2_000_000, "middle words"),
+                }],
+            )
+            .unwrap();
+        let draft = session.draft();
+        let lane = draft
+            .tracks
+            .iter()
+            .find(|t| t.id.as_str() == "subs")
+            .unwrap();
+        let ids: Vec<_> = lane.segments.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, ["one", "two", "three"]);
+        assert_eq!(lane.segments[1].clip.transform.y, -0.8);
+        let two = draft
+            .materials
+            .texts
+            .iter()
+            .find(|t| t.id.as_str() == "two")
+            .unwrap();
+        assert_eq!(two.font_size, 42.0);
+        assert_eq!(two.kind, CAPTION_KIND);
+        assert_eq!(two.content, "middle words");
+        assert!(two.caption_keywords.is_empty());
+
+        // No room, an unknown neighbour, or no words leave the draft.
+        let mut session = Session::open(before.clone());
+        for (like, cue) in [
+            ("one", cue("x", 500_000, 1_000_000, "x")),
+            ("nobody", cue("x", 1_000_000, 500_000, "x")),
+            (
+                "one",
+                SubtitleCue {
+                    words: WordColumns::default(),
+                    ..cue("x", 1_000_000, 500_000, "x")
+                },
+            ),
+            ("one", cue("three", 1_000_000, 500_000, "x")),
+        ] {
+            assert!(
+                session
+                    .apply(
+                        0,
+                        &[Request::InsertCaption {
+                            like: SegmentId::new(like),
+                            cue
+                        }]
+                    )
+                    .is_err()
+            );
+            assert_eq!(session.draft(), &before);
+        }
     }
 }

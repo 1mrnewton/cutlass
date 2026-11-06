@@ -103,6 +103,12 @@ pub enum Request {
         track_id: TrackId,
         cues: Vec<SubtitleCue>,
     },
+    /// Place one caption on the lane of caption `like`, looking like it.
+    ///
+    /// The new caption copies `like`'s text look and its place on the
+    /// canvas, then takes `cue`'s words. `like` must be a caption on an
+    /// unlocked text lane, and the cue must fit beside the lane's clips.
+    InsertCaption { like: SegmentId, cue: SubtitleCue },
     /// Place the picture's sound on an audio clip linked to `source_id`.
     ///
     /// `track_id` is created when it is missing. The picture stays where it is.

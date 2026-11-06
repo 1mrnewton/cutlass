@@ -221,6 +221,7 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             words.clone(),
         ),
         Request::AddSubtitles { track_id, cues } => words::add_subtitles(draft, track_id, cues),
+        Request::InsertCaption { like, cue } => words::insert_caption(draft, like, cue),
         Request::ExtractAudio {
             source_id,
             track_id,

@@ -138,3 +138,16 @@ opt-level = 3
 opt-level = 3
 [profile.dev.package.cutlass-vorbis]
 opt-level = 3
+
+# A debug build still plays and exports VP8 at 1080p, and the export test
+# encodes 960x480 through the desktop shell; unoptimised, that test takes
+# 90 s on an M5 and risks the CI runner's job limit. Overflow checks and
+# debug assertions stay on.
+[profile.dev.package.cutlass-vp8]
+opt-level = 3
+
+# Off Apple, H.264 export runs the Rust encoder. Unoptimised, the desktop
+# export test's 480p encode sometimes passes its 60 s limit on a CI runner.
+# Overflow checks and debug assertions stay on.
+[profile.dev.package.cutlass-h264]
+opt-level = 3

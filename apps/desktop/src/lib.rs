@@ -85,6 +85,8 @@ pub fn register_codecs_with(
     cutlass_h264::register_encoders(&mut encoders);
     cutlass_prores::register_decoders(&mut decoders);
     cutlass_prores::register_encoders(&mut encoders);
+    cutlass_vp8::register_engine_decoders(&mut decoders);
+    cutlass_vp8::register_engine_encoders(&mut encoders);
     // After the platform decoders: the Rust HEVC decoder serves Linux, and
     // the other platforms when hardware decode is off.
     cutlass_hevc::register_decoders(&mut decoders);

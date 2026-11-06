@@ -41,6 +41,8 @@ mux.finish()?;
 
 `MuxOptions` selects `FileBrand` (`Mp4`, `Mov`, `M4a`, `M4v`, `ThreeGp`), whether `moov` is last, and whether output is fragmented. Decode times on a track start at 0 and then equal the previous decode time plus that sample's duration. `set_edits` writes the edit list. `finish` writes the index. Dropping the muxer before `finish` leaves the index unwritten.
 
+`Mp4Mux`, the export muxer behind `cutlass_container::Mux`, writes H.264, HEVC, ProRes, and VP8 pictures and AAC, ALAC, Opus, or 16-bit PCM sound. A VP8 track is a `vp08` sample entry whose `vpcC` box holds the configuration set on the track.
+
 `FileSource` and `SliceSource` implement `Source`.
 
 ## Support
@@ -63,7 +65,7 @@ Fragmented output forces major `iso5` and compatible `iso5`, `iso6`, `mp41`. The
 
 An edit list is stored on `Stream.edits`. An empty edit has `media_time: None`. Packet `dts` and `pts` stay on the sample table; the edit is not applied to them. `set_edits` writes `elst` version 0.
 
-Tracks are video, audio, or data. The sample-description walker maps `avc1` / `avc3` to H.264, `hvc1` / `hev1` / `dvh1` / `dvhe` to HEVC, `av01` to AV1, `vp08` and `vp09` to VP8 and VP9, `mp4v` to MPEG-4 visual, `mp2v` to MPEG-2, `jpeg` / `mjpa` / `mjpb` to Motion JPEG, and the ProRes fourccs `apch`, `apcn`, `apcs`, `apco`, `ap4h`, `ap4x`. Audio maps `mp4a` to AAC (or MP3 / AC-3 from the object type), `.mp3` to MP3, `Opus`, `fLaC`, `alac`, `ac-3` / `sac3` / `ec-3`, and PCM fourccs `sowt`, `twos`, `raw `, `in24`, `in32`, `fl32`, `fl64`, `lpcm`, `NONE`. Configuration records (`avcC`, `hvcC`, `av1C`, `esds`, and the matching audio boxes) are kept as extradata. This crate does not parse the codec bitstream inside a sample. An unknown fourcc is `CodecId::Unknown` and the samples are still returned. The muxer rejects Vorbis, JPEG, PNG, WebP, and GIF.
+Tracks are video, audio, or data. The sample-description walker maps `avc1` / `avc3` to H.264, `hvc1` / `hev1` / `dvh1` / `dvhe` to HEVC, `av01` to AV1, `vp08` and `vp09` to VP8 and VP9, `mp4v` to MPEG-4 visual, `mp2v` to MPEG-2, `jpeg` / `mjpa` / `mjpb` to Motion JPEG, and the ProRes fourccs `apch`, `apcn`, `apcs`, `apco`, `ap4h`, `ap4x`. Audio maps `mp4a` to AAC (or MP3 / AC-3 from the object type), `.mp3` to MP3, `Opus`, `fLaC`, `alac`, `ac-3` / `sac3` / `ec-3`, and PCM fourccs `sowt`, `twos`, `raw `, `in24`, `in32`, `fl32`, `fl64`, `lpcm`, `NONE`. Configuration records (`avcC`, `hvcC`, `av1C`, `vpcC`, `esds`, and the matching audio boxes) are kept as extradata. This crate does not parse the codec bitstream inside a sample. An unknown fourcc is `CodecId::Unknown` and the samples are still returned. The muxer rejects Vorbis, JPEG, PNG, WebP, and GIF.
 
 HEIC and AVIF items are packets at timescale 1, one packet per item, including a grid item's own payload. The still image is not assembled. Construction methods 0 and 1 are read. Any other construction method is rejected. A `moov` in the same file wins, and the items are ignored. The muxer does not write HEIF items.
 

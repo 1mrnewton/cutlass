@@ -1392,8 +1392,11 @@ dependencies = [
 name = "cutlass-vp8"
 version = "0.1.0"
 dependencies = [
+ "cutlass-codec",
+ "cutlass-container",
  "cutlass-decode",
  "cutlass-encode",
+ "cutlass-isobmff",
 ]
 
 [[package]]

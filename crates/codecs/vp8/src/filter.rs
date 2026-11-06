@@ -1,331 +1,363 @@
-//! The loop filter of RFC 6386 section 15.
-//!
-//! It runs over the whole reconstructed frame, macroblock by macroblock in
-//! raster order. For each: the left macroblock edge, the inner vertical
-//! edges, the top macroblock edge, then the inner horizontal edges. Every
-//! edge is filtered one line of pixels across it at a time.
+//! The loop filter (RFC 6386 Section 15).
 
-/// The filter strength of one macroblock.
+/// What the loop filter needs to know about one macroblock.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct Strength {
-    /// The filter level, 0 to 63. Zero leaves the macroblock alone.
+pub struct MbFilter {
+    /// Filter level after segment and delta adjustments, 0..63.
     pub level: u8,
+    /// Interior limit, at least 1.
     pub interior: u8,
-    pub hev_threshold: u8,
-    /// Filter the edges inside the macroblock too.
+    /// High-edge-variance threshold.
+    pub hev: u8,
+    /// Whether the edges inside the macroblock are filtered.
     pub inner: bool,
 }
 
-/// Interior limit and high-edge-variance threshold for a key frame
-/// macroblock at `level` (section 15.2).
-pub(crate) fn strength(level: u8, sharpness: u8, inner: bool) -> Strength {
-    let mut interior = level;
+/// Interior limit for a level and sharpness (Section 15.2).
+#[must_use]
+pub fn interior_limit(level: u8, sharpness: u8) -> u8 {
+    let mut limit = level;
     if sharpness > 0 {
-        interior >>= if sharpness > 4 { 2 } else { 1 };
-        interior = interior.min(9 - sharpness.min(9));
+        limit >>= if sharpness > 4 { 2 } else { 1 };
+        limit = limit.min(9 - sharpness.min(8));
     }
-    let hev_threshold = if level >= 40 {
-        2
-    } else {
-        u8::from(level >= 15)
-    };
-    Strength {
-        level,
-        interior: interior.max(1),
-        hev_threshold,
-        inner,
-    }
+    limit.max(1)
 }
 
-/// A plane and where its edge pixels sit: `at` is `q0`, `across` steps
-/// from `p0` to `q0`.
-struct Line<'a> {
-    plane: &'a mut [u8],
-    at: usize,
-    across: usize,
+/// High-edge-variance threshold (Section 15.2).
+#[must_use]
+pub fn hev_threshold(level: u8, key: bool) -> u8 {
+    let mut hev = u8::from(level >= 15);
+    if level >= 40 {
+        hev += 1;
+    }
+    if level >= 20 && !key {
+        hev += 1;
+    }
+    hev
 }
 
-impl Line<'_> {
-    /// Pixel `offset` steps across the edge from `q0` (`-1` is `p0`).
-    fn get(&self, offset: isize) -> i32 {
-        self.index(offset)
-            .and_then(|index| self.plane.get(index))
-            .map_or(0, |&v| i32::from(v))
-    }
-
-    fn set(&mut self, offset: isize, value: i32) {
-        if let Some(index) = self.index(offset)
-            && let Some(pixel) = self.plane.get_mut(index)
-        {
-            *pixel = u8::try_from(value.clamp(0, 255)).unwrap_or(u8::MAX);
-        }
-    }
-
-    fn index(&self, offset: isize) -> Option<usize> {
-        let step = self.across.checked_mul(offset.unsigned_abs())?;
-        if offset < 0 {
-            self.at.checked_sub(step)
-        } else {
-            self.at.checked_add(step)
-        }
-    }
+#[inline]
+fn s8(x: i32) -> i32 {
+    x.clamp(-128, 127)
 }
 
-fn s8(value: i32) -> i32 {
-    value.clamp(-128, 127)
+#[inline]
+fn u8c(x: i32) -> u8 {
+    x.clamp(0, 255) as u8
 }
 
-fn simple_ok(line: &Line<'_>, limit: i32) -> bool {
-    let (p1, p0, q0, q1) = (line.get(-2), line.get(-1), line.get(0), line.get(1));
+/// Pixels across one edge: `p[0..4]` are p3..p0, `q[0..4]` are q0..q3.
+/// `at` is q0 and `step` the distance between taps.
+#[inline]
+fn px(buf: &[u8], at: usize, step: usize, k: isize) -> i32 {
+    i32::from(buf[(at as isize + k * step as isize) as usize])
+}
+
+#[inline]
+fn simple_ok(buf: &[u8], at: usize, step: usize, limit: i32) -> bool {
+    let p1 = px(buf, at, step, -2);
+    let p0 = px(buf, at, step, -1);
+    let q0 = px(buf, at, step, 0);
+    let q1 = px(buf, at, step, 1);
     (p0 - q0).abs() * 2 + ((p1 - q1).abs() >> 1) <= limit
 }
 
-fn normal_ok(line: &Line<'_>, edge: i32, interior: i32) -> bool {
-    if !simple_ok(line, edge) {
-        return false;
-    }
-    let px: [i32; 8] = [-4, -3, -2, -1, 0, 1, 2, 3].map(|o| line.get(o));
-    // p3-p2, p2-p1, p1-p0, then q1-q0, q2-q1, q3-q2.
-    [(0, 1), (1, 2), (2, 3), (5, 4), (6, 5), (7, 6)]
-        .iter()
-        .all(|&(a, b)| (px[a] - px[b]).abs() <= interior)
-}
-
-fn high_variance(line: &Line<'_>, threshold: i32) -> bool {
-    (line.get(-2) - line.get(-1)).abs() > threshold || (line.get(1) - line.get(0)).abs() > threshold
-}
-
-/// The common adjustment: `p0` and `q0` move toward each other; without
-/// the outer taps, `p1` and `q1` follow by half as much.
-fn common(line: &mut Line<'_>, outer_taps: bool) {
-    let (p1, p0, q0, q1) = (line.get(-2), line.get(-1), line.get(0), line.get(1));
+#[inline]
+fn common(buf: &mut [u8], at: usize, step: usize, outer: bool) {
+    let p1 = px(buf, at, step, -2);
+    let p0 = px(buf, at, step, -1);
+    let q0 = px(buf, at, step, 0);
+    let q1 = px(buf, at, step, 1);
     let mut a = 3 * (q0 - p0);
-    if outer_taps {
+    if outer {
         a += s8(p1 - q1);
     }
     let a = s8(a);
-    let f1 = s8(a + 4) >> 3;
-    let f2 = s8(a + 3) >> 3;
-    line.set(-1, p0 + f2);
-    line.set(0, q0 - f1);
-    if !outer_taps {
-        let half = (f1 + 1) >> 1;
-        line.set(-2, p1 + half);
-        line.set(1, q1 - half);
+    let f1 = (a + 4).min(127) >> 3;
+    let f2 = (a + 3).min(127) >> 3;
+    buf[at - step] = u8c(p0 + f2);
+    buf[at] = u8c(q0 - f1);
+    if !outer {
+        let a = (f1 + 1) >> 1;
+        buf[at - 2 * step] = u8c(p1 + a);
+        buf[at + step] = u8c(q1 - a);
     }
 }
 
-/// The wider macroblock-edge adjustment over three pixels each side.
-fn macroblock(line: &mut Line<'_>) {
-    let px: [i32; 6] = [-3, -2, -1, 0, 1, 2].map(|o| line.get(o));
-    let w = s8(s8(px[1] - px[4]) + 3 * (px[3] - px[2]));
-    for (weight, offset) in [(27, 1_isize), (18, 2), (9, 3)] {
-        let a = s8((weight * w + 63) >> 7);
-        let p = px[3 - offset.unsigned_abs()];
-        let q = px[2 + offset.unsigned_abs()];
-        line.set(-offset, p + a);
-        line.set(offset - 1, q - a);
+/// Filters 16 positions across a normal edge at once. Row `k` of `r`
+/// holds tap `k` (p3, p2, p1, p0, q0, q1, q2, q3) of every position
+/// (Sections 15.3 and 15.4). Every lane takes the same steps and a
+/// select, so the loop vectorizes.
+#[inline]
+#[expect(
+    clippy::needless_range_loop,
+    reason = "one lane index walks all eight tap rows in step"
+)]
+fn normal_lanes(r: &mut [[u8; 16]; 8], edge: i16, interior: i16, hev_t: i16, macroblock: bool) {
+    let s8 = |x: i16| x.clamp(-128, 127);
+    let u8c = |x: i16| x.clamp(0, 255) as u8;
+    for i in 0..16 {
+        let p3 = i16::from(r[0][i]);
+        let p2 = i16::from(r[1][i]);
+        let p1 = i16::from(r[2][i]);
+        let p0 = i16::from(r[3][i]);
+        let q0 = i16::from(r[4][i]);
+        let q1 = i16::from(r[5][i]);
+        let q2 = i16::from(r[6][i]);
+        let q3 = i16::from(r[7][i]);
+        let on = ((p0 - q0).abs() * 2 + ((p1 - q1).abs() >> 1) <= edge)
+            & ((p3 - p2).abs() <= interior)
+            & ((p2 - p1).abs() <= interior)
+            & ((p1 - p0).abs() <= interior)
+            & ((q3 - q2).abs() <= interior)
+            & ((q2 - q1).abs() <= interior)
+            & ((q1 - q0).abs() <= interior);
+        let high = ((p1 - p0).abs() > hev_t) | ((q1 - q0).abs() > hev_t);
+        let w = s8(s8(p1 - q1) + 3 * (q0 - p0));
+        // The whole-macroblock filter, for a low-variance macroblock edge.
+        let wide = macroblock & !high;
+        let a27 = (27 * w + 63) >> 7;
+        let a18 = (18 * w + 63) >> 7;
+        let a9 = (9 * w + 63) >> 7;
+        // The common filter: with p1 - q1 on a high-variance edge, and
+        // moving p1 and q1 as well on a low-variance inner edge.
+        let a = if high { w } else { s8(3 * (q0 - p0)) };
+        let f1 = (a + 4).min(127) >> 3;
+        let f2 = (a + 3).min(127) >> 3;
+        let f3 = (f1 + 1) >> 1;
+        // Selects, not branches, and unconditional stores.
+        let d1 = if wide { a9 } else { 0 };
+        let d2 = if wide {
+            a18
+        } else if high {
+            0
+        } else {
+            f3
+        };
+        let dp0 = if wide { a27 } else { f2 };
+        let dq0 = if wide { a27 } else { f1 };
+        let (d1, d2, dp0, dq0) = if on { (d1, d2, dp0, dq0) } else { (0, 0, 0, 0) };
+        r[1][i] = u8c(p2 + d1);
+        r[2][i] = u8c(p1 + d2);
+        r[3][i] = u8c(p0 + dp0);
+        r[4][i] = u8c(q0 - dq0);
+        r[5][i] = u8c(q1 - d2);
+        r[6][i] = u8c(q2 - d1);
     }
 }
 
-/// Which kind of edge, for the normal filter.
-#[derive(Clone, Copy)]
-enum Edge {
-    Macroblock,
-    Inner,
-}
-
-/// Filter `count` lines across one edge. `at` is the first `q0`, `across`
-/// steps over the edge, `along` steps to the next line.
+/// Filters `count` (at most 16) positions along an edge. `at` is the
+/// first q0 pixel, `step` crosses the edge, and `along` walks it.
+#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::needless_range_loop,
+    reason = "a vertical edge transposes rows into lanes by index"
+)]
 fn normal_edge(
-    plane: &mut [u8],
+    buf: &mut [u8],
     at: usize,
-    across: usize,
+    step: usize,
     along: usize,
     count: usize,
-    edge: Edge,
-    strength: Strength,
+    edge: i32,
+    interior: i32,
+    hev_t: i32,
+    macroblock: bool,
 ) {
-    let level = i32::from(strength.level);
-    let interior = i32::from(strength.interior);
-    let hev = i32::from(strength.hev_threshold);
-    let limit = match edge {
-        Edge::Macroblock => (level + 2) * 2 + interior,
-        Edge::Inner => level * 2 + interior,
-    };
-    for n in 0..count {
-        let mut line = Line {
-            plane: &mut *plane,
-            at: at + n * along,
-            across,
-        };
-        if !normal_ok(&line, limit, interior) {
-            continue;
+    let count = count.min(16);
+    let (edge, interior, hev_t) = (edge as i16, interior as i16, hev_t as i16);
+    let mut r = [[0u8; 16]; 8];
+    if step == 1 {
+        // A vertical edge: each position is eight bytes of one row,
+        // transposed into lanes and back.
+        for k in 0..count {
+            let start = at + k * along - 4;
+            for (j, &v) in buf[start..start + 8].iter().enumerate() {
+                r[j][k] = v;
+            }
         }
-        let high = high_variance(&line, hev);
-        match edge {
-            Edge::Macroblock if !high => macroblock(&mut line),
-            Edge::Macroblock => common(&mut line, true),
-            Edge::Inner => common(&mut line, high),
+        normal_lanes(&mut r, edge, interior, hev_t, macroblock);
+        for k in 0..count {
+            let start = at + k * along - 4;
+            for (j, v) in buf[start + 1..start + 7].iter_mut().enumerate() {
+                *v = r[j + 1][k];
+            }
         }
+        return;
+    }
+    // A horizontal edge: each tap is a run of one row.
+    let base = at - 4 * step;
+    for (k, row) in r.iter_mut().enumerate() {
+        let from = base + k * step;
+        row[..count].copy_from_slice(&buf[from..from + count]);
+    }
+    normal_lanes(&mut r, edge, interior, hev_t, macroblock);
+    for (k, row) in r.iter().enumerate().skip(1).take(6) {
+        let to = base + k * step;
+        buf[to..to + count].copy_from_slice(&row[..count]);
     }
 }
 
-fn simple_edge(plane: &mut [u8], at: usize, across: usize, along: usize, limit: i32) {
-    for n in 0..16 {
-        let mut line = Line {
-            plane: &mut *plane,
-            at: at + n * along,
-            across,
-        };
-        if simple_ok(&line, limit) {
-            common(&mut line, true);
+fn simple_edge(buf: &mut [u8], mut at: usize, step: usize, along: usize, limit: i32) {
+    for _ in 0..16 {
+        if simple_ok(buf, at, step, limit) {
+            common(buf, at, step, true);
         }
+        at += along;
     }
 }
 
-/// The planes of one frame, macroblock-aligned.
-pub(crate) struct Planes<'a> {
+/// Planes of a frame being filtered.
+pub struct Planes<'a> {
     pub y: &'a mut [u8],
     pub u: &'a mut [u8],
     pub v: &'a mut [u8],
-    pub mb_cols: usize,
-    pub mb_rows: usize,
+    pub mbw: usize,
+    pub mbh: usize,
 }
 
-/// Run the loop filter over the whole frame. `strengths` holds one entry
-/// per macroblock in raster order.
-pub(crate) fn filter_frame(planes: &mut Planes<'_>, strengths: &[Strength], simple: bool) {
-    let y_stride = planes.mb_cols * 16;
-    let uv_stride = planes.mb_cols * 8;
-    for row in 0..planes.mb_rows {
-        for col in 0..planes.mb_cols {
-            let Some(&strength) = strengths.get(row * planes.mb_cols + col) else {
-                continue;
-            };
-            if strength.level == 0 {
+/// Filters a whole frame in raster order. `mbs` holds one entry per
+/// macroblock.
+pub fn filter_frame(planes: &mut Planes<'_>, mbs: &[MbFilter], simple: bool) {
+    let ys = planes.mbw * 16;
+    let cs = planes.mbw * 8;
+    for my in 0..planes.mbh {
+        for mx in 0..planes.mbw {
+            let mb = mbs[my * planes.mbw + mx];
+            if mb.level == 0 {
                 continue;
             }
-            let y = row * 16 * y_stride + col * 16;
+            let level = i32::from(mb.level);
+            let interior = i32::from(mb.interior);
+            let hev_t = i32::from(mb.hev);
+            let mb_limit = (level + 2) * 2 + interior;
+            let sub_limit = level * 2 + interior;
+            let y0 = my * 16 * ys + mx * 16;
+            let c0 = my * 8 * cs + mx * 8;
             if simple {
-                filter_simple(planes.y, y, y_stride, row, col, strength);
+                if mx > 0 {
+                    simple_edge(planes.y, y0, 1, ys, mb_limit);
+                }
+                if mb.inner {
+                    for x in [4, 8, 12] {
+                        simple_edge(planes.y, y0 + x, 1, ys, sub_limit);
+                    }
+                }
+                if my > 0 {
+                    simple_edge(planes.y, y0, ys, 1, mb_limit);
+                }
+                if mb.inner {
+                    for r in [4, 8, 12] {
+                        simple_edge(planes.y, y0 + r * ys, ys, 1, sub_limit);
+                    }
+                }
                 continue;
             }
-            let uv = row * 8 * uv_stride + col * 8;
-            for (plane, at, stride, size) in [
-                (&mut *planes.y, y, y_stride, 16),
-                (&mut *planes.u, uv, uv_stride, 8),
-                (&mut *planes.v, uv, uv_stride, 8),
-            ] {
-                if col > 0 {
-                    normal_edge(plane, at, 1, stride, size, Edge::Macroblock, strength);
-                }
-                if strength.inner {
-                    for x in (4..size).step_by(4) {
-                        normal_edge(plane, at + x, 1, stride, size, Edge::Inner, strength);
-                    }
-                }
-                if row > 0 {
-                    normal_edge(plane, at, stride, 1, size, Edge::Macroblock, strength);
-                }
-                if strength.inner {
-                    for y in (4..size).step_by(4) {
-                        normal_edge(
-                            plane,
-                            at + y * stride,
-                            stride,
-                            1,
-                            size,
-                            Edge::Inner,
-                            strength,
-                        );
-                    }
-                }
+            if mx > 0 {
+                normal_edge(planes.y, y0, 1, ys, 16, mb_limit, interior, hev_t, true);
+                normal_edge(planes.u, c0, 1, cs, 8, mb_limit, interior, hev_t, true);
+                normal_edge(planes.v, c0, 1, cs, 8, mb_limit, interior, hev_t, true);
             }
-        }
-    }
-}
-
-fn filter_simple(
-    plane: &mut [u8],
-    at: usize,
-    stride: usize,
-    row: usize,
-    col: usize,
-    strength: Strength,
-) {
-    let level = i32::from(strength.level);
-    let interior = i32::from(strength.interior);
-    let edge_limit = (level + 2) * 2 + interior;
-    let inner_limit = level * 2 + interior;
-    if col > 0 {
-        simple_edge(plane, at, 1, stride, edge_limit);
-    }
-    if strength.inner {
-        for x in [4, 8, 12] {
-            simple_edge(plane, at + x, 1, stride, inner_limit);
-        }
-    }
-    if row > 0 {
-        simple_edge(plane, at, stride, 1, edge_limit);
-    }
-    if strength.inner {
-        for y in [4, 8, 12] {
-            simple_edge(plane, at + y * stride, stride, 1, inner_limit);
+            if mb.inner {
+                for x in [4, 8, 12] {
+                    normal_edge(
+                        planes.y,
+                        y0 + x,
+                        1,
+                        ys,
+                        16,
+                        sub_limit,
+                        interior,
+                        hev_t,
+                        false,
+                    );
+                }
+                normal_edge(
+                    planes.u,
+                    c0 + 4,
+                    1,
+                    cs,
+                    8,
+                    sub_limit,
+                    interior,
+                    hev_t,
+                    false,
+                );
+                normal_edge(
+                    planes.v,
+                    c0 + 4,
+                    1,
+                    cs,
+                    8,
+                    sub_limit,
+                    interior,
+                    hev_t,
+                    false,
+                );
+            }
+            if my > 0 {
+                normal_edge(planes.y, y0, ys, 1, 16, mb_limit, interior, hev_t, true);
+                normal_edge(planes.u, c0, cs, 1, 8, mb_limit, interior, hev_t, true);
+                normal_edge(planes.v, c0, cs, 1, 8, mb_limit, interior, hev_t, true);
+            }
+            if mb.inner {
+                for r in [4, 8, 12] {
+                    normal_edge(
+                        planes.y,
+                        y0 + r * ys,
+                        ys,
+                        1,
+                        16,
+                        sub_limit,
+                        interior,
+                        hev_t,
+                        false,
+                    );
+                }
+                normal_edge(
+                    planes.u,
+                    c0 + 4 * cs,
+                    cs,
+                    1,
+                    8,
+                    sub_limit,
+                    interior,
+                    hev_t,
+                    false,
+                );
+                normal_edge(
+                    planes.v,
+                    c0 + 4 * cs,
+                    cs,
+                    1,
+                    8,
+                    sub_limit,
+                    interior,
+                    hev_t,
+                    false,
+                );
+            }
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{hev_threshold, interior_limit};
 
     #[test]
-    fn strength_follows_level_and_sharpness() {
-        assert_eq!(strength(10, 0, true).interior, 10);
-        assert_eq!(strength(10, 0, true).hev_threshold, 0);
-        assert_eq!(strength(15, 0, true).hev_threshold, 1);
-        assert_eq!(strength(40, 0, true).hev_threshold, 2);
-        // Sharpness 3 halves and caps at 6; sharpness 6 quarters and caps at 3.
-        assert_eq!(strength(30, 3, true).interior, 6);
-        assert_eq!(strength(30, 6, true).interior, 3);
-        assert_eq!(strength(1, 7, true).interior, 1);
-    }
-
-    #[test]
-    fn a_small_step_is_smoothed_and_a_real_edge_is_kept() {
-        // One row of a 16-wide plane with a step of 6 at the inner edge x = 8.
-        let mut plane = [100_u8; 16 * 16];
-        for row in plane.as_chunks_mut::<16>().0 {
-            row[8..].fill(106);
-        }
-        let s = strength(20, 0, true);
-        normal_edge(&mut plane, 8, 1, 16, 16, Edge::Inner, s);
-        let row = &plane[..16];
-        assert!(row[7] > 100 && row[8] < 106, "{row:?}");
-        assert!(row.windows(2).all(|w| w[0] <= w[1]), "{row:?}");
-        // A step far above the limit is a picture edge: untouched.
-        let mut sharp = [0_u8; 16 * 16];
-        for row in sharp.as_chunks_mut::<16>().0 {
-            row[8..].fill(200);
-        }
-        let before = sharp;
-        normal_edge(&mut sharp, 8, 1, 16, 16, Edge::Macroblock, s);
-        assert_eq!(sharp, before);
-    }
-
-    #[test]
-    fn the_macroblock_filter_spreads_over_three_pixels() {
-        let mut plane = [0_u8; 8];
-        plane[..4].fill(100);
-        plane[4..].fill(104);
-        let mut line = Line {
-            plane: &mut plane,
-            at: 4,
-            across: 1,
-        };
-        macroblock(&mut line);
-        // w = (p1 - q1) + 3 * (q0 - p0) = 8: a = 2, then 1, then 1.
-        assert_eq!(plane, [100, 101, 101, 102, 102, 103, 103, 104]);
+    fn limits_follow_section_15() {
+        assert_eq!(interior_limit(0, 0), 1);
+        assert_eq!(interior_limit(63, 0), 63);
+        assert_eq!(interior_limit(63, 1), 8);
+        assert_eq!(interior_limit(20, 4), 5);
+        assert_eq!(interior_limit(20, 5), 4);
+        assert_eq!(interior_limit(63, 7), 2);
+        assert_eq!(hev_threshold(14, true), 0);
+        assert_eq!(hev_threshold(15, true), 1);
+        assert_eq!(hev_threshold(20, false), 2);
+        assert_eq!(hev_threshold(40, true), 2);
+        assert_eq!(hev_threshold(40, false), 3);
     }
 }

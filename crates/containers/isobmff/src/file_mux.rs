@@ -134,18 +134,19 @@ fn prores_color(frame: &[u8]) -> Option<ColorTags> {
 /// 422, HQ, 4444 and 4444 XQ, by their sample entry.
 const PRORES_ENTRIES: [[u8; 4]; 6] = [*b"apco", *b"apcs", *b"apcn", *b"apch", *b"ap4h", *b"ap4x"];
 
-/// The box writer's parameters for `stream`: H.264, HEVC or ProRes
-/// pictures, or AAC, Opus, or 16-bit PCM sound. A ProRes track whose extradata is
+/// The box writer's parameters for `stream`: H.264, HEVC, ProRes or VP8
+/// pictures, or AAC, Opus, or 16-bit PCM sound. A VP8 track's extradata is
+/// its `vpcC` payload. A ProRes track whose extradata is
 /// a profile's four-character code is written with that sample entry.
 fn box_params(stream: &NewStream) -> Result<StreamParams, MuxError> {
     let StreamCodec::Known(codec) = stream.params.codec() else {
         return Err(rejected(
-            "mp4 export writes H.264, HEVC, ProRes, AAC, ALAC, Opus, and PCM",
+            "mp4 export writes H.264, HEVC, ProRes, VP8, AAC, ALAC, Opus, and PCM",
         ));
     };
     let scale = BoxScale(stream.timescale.ticks_per_second());
     let mut params = match codec {
-        Id::H264 | Id::Hevc | Id::Prores => {
+        Id::H264 | Id::Hevc | Id::Prores | Id::Vp8 => {
             let size = stream
                 .params
                 .size()
@@ -153,6 +154,7 @@ fn box_params(stream: &NewStream) -> Result<StreamParams, MuxError> {
             let codec = match codec {
                 Id::H264 => CodecId::H264,
                 Id::Hevc => CodecId::Hevc,
+                Id::Vp8 => CodecId::Vp8,
                 _ => CodecId::ProRes,
             };
             StreamParams::video(codec, scale, size.width(), size.height())
@@ -195,7 +197,7 @@ fn box_params(stream: &NewStream) -> Result<StreamParams, MuxError> {
         }
         _ => {
             return Err(rejected(
-                "mp4 export writes H.264, HEVC, ProRes, AAC, ALAC, Opus, and PCM",
+                "mp4 export writes H.264, HEVC, ProRes, VP8, AAC, ALAC, Opus, and PCM",
             ));
         }
     };
@@ -676,6 +678,52 @@ mod tests {
         // Unknown and unspecified codes write no box.
         let untagged = movie([0, 2, 0]);
         assert!(!untagged.windows(4).any(|w| w == b"colr"));
+    }
+
+    /// A VP8 track is a `vp08` sample entry whose `vpcC` box holds the
+    /// configuration the first packet carries; it reads back as VP8 with
+    /// that configuration and every sample.
+    #[test]
+    fn a_vp8_track_is_vp08_with_its_vpcc() {
+        let vpcc = vec![1, 0, 0, 0, 0, 0, 0x82, 1, 1, 1, 0, 0];
+        let mut mux = Mp4Mux::new(Cursor::new(Vec::new()));
+        let picture = mux
+            .add_stream(NewStream {
+                params: StreamParams::video(
+                    StreamCodec::Known(Id::Vp8),
+                    FrameSize::try_new(64, 32).unwrap(),
+                    Vec::new(),
+                ),
+                timescale: Timescale::new(30),
+                language: None,
+            })
+            .unwrap();
+        mux.set_config(picture, &vpcc).unwrap();
+        for index in 0..3 {
+            mux.write_packet(&packet(picture.get(), vec![index as u8; 40], index, 1, 30))
+                .unwrap();
+        }
+        mux.finish(&[TrackDuration {
+            track: picture,
+            timescale: Timescale::new(30),
+            ticks: 3,
+        }])
+        .unwrap();
+        let bytes = mux.into_writer().unwrap().into_inner();
+        assert!(bytes.windows(4).any(|w| w == b"vp08"));
+        let at = bytes.windows(4).position(|w| w == b"vpcC").unwrap();
+        assert_eq!(&bytes[at + 4..at + 4 + vpcc.len()], vpcc.as_slice());
+
+        let mut file = crate::IsoBmffFile::open(Cursor::new(bytes)).unwrap();
+        let stream = &cutlass_container::Demux::streams(&file)[0];
+        assert_eq!(stream.params().codec(), &StreamCodec::Known(Id::Vp8));
+        assert_eq!(stream.params().extradata(), vpcc.as_slice());
+        let mut samples = 0;
+        while let Some(packet) = cutlass_container::Demux::read_packet(&mut file).unwrap() {
+            assert_eq!(packet.bytes(), vec![samples as u8; 40].as_slice());
+            samples += 1;
+        }
+        assert_eq!(samples, 3);
     }
 
     #[test]

@@ -1,709 +1,757 @@
-//! Key frame decode: header, modes, tokens, reconstruction, loop filter.
-//!
-//! The frame is reconstructed whole before the loop filter runs, so intra
-//! prediction reads unfiltered neighbours as section 12 requires. The
-//! planes are macroblock-aligned while decoding and cropped to the coded
-//! size at the end.
+//! Frame decoding (RFC 6386 Sections 9 to 19) and the decoder contract.
 
-use cutlass_decode::CodecError;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::Vp8Picture;
-use crate::bool_decoder::BoolDecoder;
-use crate::filter::{Planes, Strength, filter_frame, strength};
-use crate::predict::{B_PRED, Edges, implied_subblock_mode, predict_block, predict_subblock};
-use crate::tables::{AC_QUANT, COEFF_UPDATE_PROBS, DC_QUANT, DEFAULT_COEFF_PROBS, KF_BMODE_PROBS};
-use crate::transform::{idct_add, inverse_wht, wrap16};
+use cutlass_decode::video::{VideoDecoder, VideoOutput};
+use cutlass_decode::{
+    CodecError, CodecId, CodecParams, ColorRange, MatrixCoefficients, Packet, Plane, VideoFrame,
+};
+use cutlass_encode::PixelFormat;
 
-/// Section 11.2: B_PRED, then DC, V, H, TM.
-const KF_YMODE_TREE: [i8; 8] = [-4, 2, 4, 6, 0, -1, -2, -3];
-const KF_YMODE_PROBS: [u8; 4] = [145, 156, 163, 128];
-/// Section 11.4.
-const UV_MODE_TREE: [i8; 6] = [0, 2, -1, 4, -2, -3];
-const KF_UV_MODE_PROBS: [u8; 3] = [142, 114, 183];
-/// Section 11.2, in the subblock mode numbering of `predict`.
-const BMODE_TREE: [i8; 18] = [
-    0, 2, -1, 4, -2, 6, 8, 12, -3, 10, -5, -6, -4, 14, -7, 16, -8, -9,
-];
-/// Section 9.3.
-const SEGMENT_TREE: [i8; 6] = [2, 4, 0, -1, -2, -3];
+use crate::bool_coder::BoolDecoder;
+use crate::filter::{self, MbFilter, Planes};
+use crate::header::{self, FrameHeader, Persist};
+use crate::inter::{self, Filter, RefPlane};
+use crate::modes::{
+    self, ALTREF, Bounds, GOLDEN, INTRA, MbInfo, ModeContext, Mv, SPLITMV, SubInfo, ZEROMV,
+};
+use crate::predict::{self, B_PRED, CHROMA_BUF, CHROMA_STRIDE, LUMA_BUF, LUMA_STRIDE};
+use crate::tokens::{self, Context, Dequant, MbCoeffs};
+use crate::transform::{idct_add, idct_dc_add, iwht};
 
-/// Section 13.2: tokens 0 to 4 are their value, 5 to 10 the categories,
-/// 11 the end of the block.
-const DCT_EOB: u8 = 11;
-const COEFF_TREE: [i8; 22] = [
-    -11, 2, 0, 4, -1, 6, 8, 12, -2, 10, -3, -4, 14, 16, -5, -6, 18, 20, -7, -8, -9, -10,
-];
-/// The extra-bit probabilities and base value of categories 1 to 6.
-const CATEGORIES: [(&[u8], i32); 6] = [
-    (&[159], 5),
-    (&[165, 145], 7),
-    (&[173, 148, 140], 11),
-    (&[176, 155, 140, 135], 19),
-    (&[180, 157, 141, 134, 130], 35),
-    (&[254, 254, 243, 230, 196, 177, 153, 140, 133, 130, 129], 67),
-];
-/// Section 13.3.
-const BANDS: [usize; 17] = [0, 1, 2, 3, 6, 4, 5, 6, 6, 6, 6, 6, 6, 6, 6, 7, 0];
-/// Section 13.3: coded order to raster position.
-const ZIGZAG: [usize; 16] = [0, 1, 4, 8, 5, 2, 3, 6, 9, 12, 13, 10, 7, 11, 14, 15];
-
-/// Plane types of the token probability table.
-const TYPE_Y_AFTER_Y2: usize = 0;
-const TYPE_Y2: usize = 1;
-const TYPE_UV: usize = 2;
-const TYPE_Y: usize = 3;
-
-type CoeffProbs = [[[[u8; 11]; 3]; 8]; 4];
-
-/// Width and height from a key frame's uncompressed header.
-pub fn frame_size(data: &[u8]) -> Result<(u32, u32), CodecError> {
-    if data.len() < 10 {
-        return Err(truncated(0, "vp8 frame header"));
-    }
-    if data[0] & 1 != 0 {
-        return Err(CodecError::Unsupported {
-            what: "vp8 inter frame",
-        });
-    }
-    if data[3..6] != [0x9D, 0x01, 0x2A] {
-        return Err(malformed(3, "vp8 start code"));
-    }
-    let width = u32::from(u16::from_le_bytes([data[6], data[7]]) & 0x3FFF);
-    let height = u32::from(u16::from_le_bytes([data[8], data[9]]) & 0x3FFF);
-    if width == 0 || height == 0 {
-        return Err(malformed(6, "vp8 frame size"));
-    }
-    Ok((width, height))
+/// A reconstructed picture at its macroblock-aligned size.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Frame {
+    pub y: Vec<u8>,
+    pub u: Vec<u8>,
+    pub v: Vec<u8>,
+    pub mbw: usize,
+    pub mbh: usize,
 }
 
-#[derive(Default)]
-struct Segmentation {
-    enabled: bool,
-    update_map: bool,
-    absolute: bool,
-    quant: [i32; 4],
-    filter: [i32; 4],
-    probs: [u8; 3],
-}
-
-/// Step sizes for one segment, `(dc, ac)` per block type.
-#[derive(Clone, Copy, Default)]
-struct Steps {
-    y: (i32, i32),
-    y2: (i32, i32),
-    uv: (i32, i32),
-}
-
-struct Header {
-    segmentation: Segmentation,
-    simple_filter: bool,
-    filter_level: i32,
-    sharpness: u8,
-    /// Reference-frame and mode loop filter deltas, when enabled.
-    filter_deltas: Option<([i32; 4], [i32; 4])>,
-    partitions: usize,
-    steps: [Steps; 4],
-    probs: Box<CoeffProbs>,
-    skip_prob: Option<u8>,
-}
-
-fn quant_index(value: i32) -> usize {
-    usize::try_from(value.clamp(0, 127)).unwrap_or(0)
-}
-
-fn read_header(bd: &mut BoolDecoder<'_>) -> Header {
-    // Color space and clamping type: the color space has one defined
-    // value, and clamping is always done here.
-    let _color_space = bd.read_flag();
-    let _clamping = bd.read_flag();
-    let mut segmentation = Segmentation {
-        probs: [255; 3],
-        ..Segmentation::default()
-    };
-    segmentation.enabled = bd.read_flag();
-    if segmentation.enabled {
-        segmentation.update_map = bd.read_flag();
-        let update_data = bd.read_flag();
-        if update_data {
-            segmentation.absolute = bd.read_flag();
-            for value in &mut segmentation.quant {
-                *value = bd.read_optional_signed(7);
-            }
-            for value in &mut segmentation.filter {
-                *value = bd.read_optional_signed(6);
-            }
-        }
-        if segmentation.update_map {
-            for prob in &mut segmentation.probs {
-                *prob = if bd.read_flag() {
-                    u8::try_from(bd.read_literal(8)).unwrap_or(255)
-                } else {
-                    255
-                };
-            }
+impl Frame {
+    #[must_use]
+    pub fn new(mbw: usize, mbh: usize) -> Self {
+        Self {
+            y: vec![0; mbw * mbh * 256],
+            u: vec![0; mbw * mbh * 64],
+            v: vec![0; mbw * mbh * 64],
+            mbw,
+            mbh,
         }
     }
-    let simple_filter = bd.read_flag();
-    let filter_level = i32::try_from(bd.read_literal(6)).unwrap_or(0);
-    let sharpness = u8::try_from(bd.read_literal(3)).unwrap_or(0);
-    let mut filter_deltas = None;
-    if bd.read_flag() {
-        let mut deltas = ([0; 4], [0; 4]);
-        if bd.read_flag() {
-            for value in deltas.0.iter_mut().chain(deltas.1.iter_mut()) {
-                if bd.read_flag() {
-                    *value = bd.read_signed(6);
-                }
-            }
-        }
-        filter_deltas = Some(deltas);
-    }
-    let partitions = 1_usize << bd.read_literal(2);
-    let base = i32::try_from(bd.read_literal(7)).unwrap_or(0);
-    let y_dc = bd.read_optional_signed(4);
-    let y2_dc = bd.read_optional_signed(4);
-    let y2_ac = bd.read_optional_signed(4);
-    let uv_dc = bd.read_optional_signed(4);
-    let uv_ac = bd.read_optional_signed(4);
-    let mut steps = [Steps::default(); 4];
-    for (segment, steps) in steps.iter_mut().enumerate() {
-        let q = if !segmentation.enabled {
-            base
-        } else if segmentation.absolute {
-            segmentation.quant[segment]
-        } else {
-            base + segmentation.quant[segment]
-        }
-        .clamp(0, 127);
-        let dc = |delta: i32| i32::from(DC_QUANT[quant_index(q + delta)]);
-        let ac = |delta: i32| i32::from(AC_QUANT[quant_index(q + delta)]);
-        *steps = Steps {
-            y: (dc(y_dc), ac(0)),
-            y2: (dc(y2_dc) * 2, (ac(y2_ac) * 155 / 100).max(8)),
-            uv: (dc(uv_dc).min(132), ac(uv_ac)),
-        };
-    }
-    // Key frames: refresh_entropy_probs only matters to later frames.
-    let _refresh_entropy = bd.read_flag();
-    let mut probs = Box::new(DEFAULT_COEFF_PROBS);
-    for (plane, updates) in probs.iter_mut().zip(&COEFF_UPDATE_PROBS) {
-        for (band, updates) in plane.iter_mut().zip(updates) {
-            for (context, updates) in band.iter_mut().zip(updates) {
-                for (prob, &update) in context.iter_mut().zip(updates) {
-                    if bd.read_bool(update) {
-                        *prob = u8::try_from(bd.read_literal(8)).unwrap_or(128);
-                    }
-                }
-            }
+
+    #[must_use]
+    pub fn luma(&self) -> RefPlane<'_> {
+        RefPlane {
+            data: &self.y,
+            stride: self.mbw * 16,
+            width: self.mbw * 16,
+            height: self.mbh * 16,
         }
     }
-    let skip_prob = bd
-        .read_flag()
-        .then(|| u8::try_from(bd.read_literal(8)).unwrap_or(0));
-    Header {
-        segmentation,
-        simple_filter,
-        filter_level,
-        sharpness,
-        filter_deltas,
-        partitions,
-        steps,
-        probs,
-        skip_prob,
-    }
-}
 
-/// Split the token partitions that follow the first partition. A size that
-/// runs past the frame is a truncation.
-fn token_partitions(data: &[u8], count: usize) -> Result<Vec<BoolDecoder<'_>>, CodecError> {
-    let sizes_len = 3 * (count - 1);
-    if data.len() < sizes_len {
-        return Err(truncated(0, "vp8 partition sizes"));
-    }
-    let (sizes, mut rest) = data.split_at(sizes_len);
-    let mut decoders = Vec::with_capacity(count);
-    for size in sizes.as_chunks::<3>().0 {
-        let size = usize::from(size[0]) | usize::from(size[1]) << 8 | usize::from(size[2]) << 16;
-        if size > rest.len() {
-            return Err(truncated(0, "vp8 token partition"));
-        }
-        let (part, tail) = rest.split_at(size);
-        decoders.push(BoolDecoder::new(part));
-        rest = tail;
-    }
-    // Both reference decoders refuse an empty last partition: every
-    // partition holds at least the end of its bool-coded data.
-    if rest.is_empty() {
-        return Err(truncated(0, "vp8 last token partition"));
-    }
-    decoders.push(BoolDecoder::new(rest));
-    Ok(decoders)
-}
-
-/// The coefficients of one macroblock, already dequantized.
-struct Residual {
-    y: [[i32; 16]; 16],
-    u: [[i32; 16]; 4],
-    v: [[i32; 16]; 4],
-    /// Any block of the macroblock had a token other than an immediate
-    /// end of block.
-    any: bool,
-}
-
-/// Non-zero flags per macroblock edge: four Y, two U, two V, one Y2.
-type Context = [bool; 9];
-
-/// Read one block's tokens into `out`, at raster positions, multiplied by
-/// `steps`. Returns whether any token came before the end of block.
-fn read_block(
-    bd: &mut BoolDecoder<'_>,
-    probs: &[[[u8; 11]; 3]; 8],
-    first: usize,
-    context: usize,
-    steps: (i32, i32),
-    out: &mut [i32; 16],
-) -> bool {
-    let mut at = first;
-    let mut context = context;
-    let mut start = 0;
-    while at < 16 {
-        let token = bd.read_tree(&COEFF_TREE, &probs[BANDS[at]][context], start);
-        if token == DCT_EOB {
-            break;
-        }
-        let magnitude = match token {
-            0..=4 => i32::from(token),
-            _ => {
-                let (extra, base) = CATEGORIES[usize::from(token - 5).min(5)];
-                let mut value = 0;
-                for &prob in extra {
-                    value = (value << 1) | i32::from(bd.read_bool(prob));
-                }
-                base + value
-            }
-        };
-        let (value, next_context, next_start) = if magnitude == 0 {
-            (0, 0, 2)
-        } else {
-            let signed = if bd.read_flag() {
-                -magnitude
-            } else {
-                magnitude
-            };
-            (signed, if magnitude == 1 { 1 } else { 2 }, 0)
-        };
-        let step = if at == 0 { steps.0 } else { steps.1 };
-        out[ZIGZAG[at]] = wrap16(value * step);
-        context = next_context;
-        start = next_start;
-        at += 1;
-    }
-    at > first
-}
-
-fn read_residual(
-    bd: &mut BoolDecoder<'_>,
-    probs: &CoeffProbs,
-    steps: Steps,
-    has_y2: bool,
-    above: &mut Context,
-    left: &mut Context,
-) -> Residual {
-    let mut residual = Residual {
-        y: [[0; 16]; 16],
-        u: [[0; 16]; 4],
-        v: [[0; 16]; 4],
-        any: false,
-    };
-    let (y_type, y_first) = if has_y2 {
-        let mut y2 = [0; 16];
-        let context = usize::from(above[8]) + usize::from(left[8]);
-        let coded = read_block(bd, &probs[TYPE_Y2], 0, context, steps.y2, &mut y2);
-        above[8] = coded;
-        left[8] = coded;
-        residual.any |= coded;
-        let dcs = inverse_wht(&y2);
-        for (block, dc) in residual.y.iter_mut().zip(dcs) {
-            block[0] = dc;
-        }
-        (TYPE_Y_AFTER_Y2, 1)
-    } else {
-        (TYPE_Y, 0)
-    };
-    for (n, block) in residual.y.iter_mut().enumerate() {
-        let (row, col) = (n / 4, n % 4);
-        let context = usize::from(above[col]) + usize::from(left[row]);
-        let coded = read_block(bd, &probs[y_type], y_first, context, steps.y, block);
-        above[col] = coded;
-        left[row] = coded;
-        residual.any |= coded;
-    }
-    for (plane, offset) in [(&mut residual.u, 4), (&mut residual.v, 6)] {
-        for (n, block) in plane.iter_mut().enumerate() {
-            let (row, col) = (n / 2, n % 2);
-            let context = usize::from(above[offset + col]) + usize::from(left[offset + row]);
-            let coded = read_block(bd, &probs[TYPE_UV], 0, context, steps.uv, block);
-            above[offset + col] = coded;
-            left[offset + row] = coded;
-            residual.any |= coded;
-        }
-    }
-    residual
-}
-
-/// One plane, macroblock-aligned.
-struct Plane {
-    data: Vec<u8>,
-    stride: usize,
-}
-
-impl Plane {
-    fn at(&self, x: usize, y: usize) -> u8 {
-        self.data.get(y * self.stride + x).copied().unwrap_or(0)
-    }
-
-    /// The edges of the `size`-square block at macroblock (`col`, `row`):
-    /// the row above, the column to the left, the corner, and the four
-    /// pixels above and to the right.
-    fn edges(&self, col: usize, row: usize, size: usize, cols: usize) -> BlockEdges {
-        let (x, y) = (col * size, row * size);
-        let mut edges = BlockEdges {
-            above: [127; 16],
-            left: [129; 16],
-            corner: if row == 0 { 127 } else { 129 },
-            above_right: [127; 4],
-        };
-        if row > 0 {
-            for (i, pixel) in edges.above[..size].iter_mut().enumerate() {
-                *pixel = self.at(x + i, y - 1);
-            }
-            if col > 0 {
-                edges.corner = self.at(x - 1, y - 1);
-            }
-            for (i, pixel) in edges.above_right.iter_mut().enumerate() {
-                *pixel = if col + 1 < cols {
-                    self.at(x + size + i, y - 1)
-                } else {
-                    self.at(x + size - 1, y - 1)
-                };
-            }
-        }
-        if col > 0 {
-            for (i, pixel) in edges.left[..size].iter_mut().enumerate() {
-                *pixel = self.at(x - 1, y + i);
-            }
-        }
-        edges
-    }
-
-    fn write(&mut self, col: usize, row: usize, size: usize, block: &[u8]) {
-        let (x, y) = (col * size, row * size);
-        for (r, line) in block.chunks_exact(size).enumerate() {
-            let at = (y + r) * self.stride + x;
-            if let Some(target) = self.data.get_mut(at..at + size) {
-                target.copy_from_slice(line);
-            }
+    #[must_use]
+    pub fn chroma(&self, v: bool) -> RefPlane<'_> {
+        RefPlane {
+            data: if v { &self.v } else { &self.u },
+            stride: self.mbw * 8,
+            width: self.mbw * 8,
+            height: self.mbh * 8,
         }
     }
 }
 
-struct BlockEdges {
-    above: [u8; 16],
-    left: [u8; 16],
-    corner: u8,
-    above_right: [u8; 4],
+/// The three reference pictures.
+#[derive(Clone, Debug)]
+pub struct Refs {
+    pub last: Arc<Frame>,
+    pub golden: Arc<Frame>,
+    pub altref: Arc<Frame>,
 }
 
-/// Workspace stride for B_PRED: the corner, sixteen pixels, and four
-/// above-right pixels.
-const WS: usize = 21;
-
-fn reconstruct_luma(
-    plane: &mut Plane,
-    (col, row, cols): (usize, usize, usize),
-    ymode: u8,
-    bmodes: &[u8; 16],
-    residual: &Residual,
-) {
-    let edges = plane.edges(col, row, 16, cols);
-    if ymode != B_PRED {
-        let mut block = [0_u8; 256];
-        predict_block(
-            ymode,
-            &Edges {
-                above: &edges.above,
-                left: &edges.left,
-                corner: edges.corner,
-                has_above: row > 0,
-                has_left: col > 0,
-            },
-            16,
-            &mut block,
-        );
-        for (n, coeffs) in residual.y.iter().enumerate() {
-            if coeffs.iter().any(|&c| c != 0) {
-                idct_add(coeffs, &mut block, (n / 4) * 64 + (n % 4) * 4, 16);
-            }
-        }
-        plane.write(col, row, 16, &block);
-        return;
-    }
-    let mut ws = [0_u8; WS * 17];
-    ws[0] = edges.corner;
-    ws[1..17].copy_from_slice(&edges.above);
-    ws[17..21].copy_from_slice(&edges.above_right);
-    for (r, &left) in edges.left.iter().enumerate() {
-        ws[(r + 1) * WS] = left;
-    }
-    // Subblocks on the right edge below the top row use the same pixels
-    // above and to the right as subblock 3 (section 12.3).
-    for r in [4, 8, 12] {
-        ws[r * WS + 17..r * WS + 21].copy_from_slice(&edges.above_right);
-    }
-    for (n, &mode) in bmodes.iter().enumerate() {
-        let (by, bx) = (n / 4, n % 4);
-        let top = 4 * by * WS + 4 * bx;
-        let mut above = [0_u8; 9];
-        above.copy_from_slice(&ws[top..top + 9]);
-        let mut left = [0_u8; 4];
-        for (r, pixel) in left.iter_mut().enumerate() {
-            *pixel = ws[(4 * by + 1 + r) * WS + 4 * bx];
-        }
-        let predicted = predict_subblock(mode, &above, &left);
-        let origin = (4 * by + 1) * WS + 4 * bx + 1;
-        for (r, line) in predicted.iter().enumerate() {
-            ws[origin + r * WS..origin + r * WS + 4].copy_from_slice(line);
-        }
-        let coeffs = &residual.y[n];
-        if coeffs.iter().any(|&c| c != 0) {
-            idct_add(coeffs, &mut ws, origin, WS);
+impl Refs {
+    fn get(&self, r: u8) -> &Frame {
+        match r {
+            GOLDEN => &self.golden,
+            ALTREF => &self.altref,
+            _ => &self.last,
         }
     }
-    let mut block = [0_u8; 256];
-    for (r, line) in block.as_chunks_mut::<16>().0.iter_mut().enumerate() {
-        let at = (r + 1) * WS + 1;
-        line.copy_from_slice(&ws[at..at + 16]);
-    }
-    plane.write(col, row, 16, &block);
 }
 
-fn reconstruct_chroma(
-    plane: &mut Plane,
-    (col, row, cols): (usize, usize, usize),
-    mode: u8,
-    blocks: &[[i32; 16]; 4],
-) {
-    let edges = plane.edges(col, row, 8, cols);
-    let mut block = [0_u8; 64];
-    predict_block(
-        mode,
-        &Edges {
-            above: &edges.above,
-            left: &edges.left,
-            corner: edges.corner,
-            has_above: row > 0,
-            has_left: col > 0,
-        },
-        8,
-        &mut block,
-    );
-    for (n, coeffs) in blocks.iter().enumerate() {
-        if coeffs.iter().any(|&c| c != 0) {
-            idct_add(coeffs, &mut block, (n / 2) * 32 + (n % 2) * 4, 8);
-        }
-    }
-    plane.write(col, row, 8, &block);
+/// A decoded picture and how it should be shown.
+#[derive(Clone, Debug)]
+pub struct Picture {
+    pub frame: Arc<Frame>,
+    pub width: u32,
+    pub height: u32,
+    pub hscale: u8,
+    pub vscale: u8,
 }
 
-fn filter_level(header: &Header, segment: usize, ymode: u8) -> u8 {
-    let mut level = header.filter_level;
-    let seg = &header.segmentation;
-    if seg.enabled {
-        level = if seg.absolute {
-            seg.filter[segment]
-        } else {
-            level + seg.filter[segment]
-        }
-        .clamp(0, 63);
-    }
-    if let Some((reference, mode)) = header.filter_deltas {
-        // Every key frame macroblock is intra; B_PRED has its own delta.
-        level += reference[0];
-        if ymode == B_PRED {
-            level += mode[0];
-        }
-    }
-    u8::try_from(level.clamp(0, 63)).unwrap_or(0)
+/// Decoder state between frames.
+#[derive(Clone, Debug, Default)]
+pub struct Decoder {
+    persist: Persist,
+    refs: Option<Refs>,
+    width: u32,
+    height: u32,
+    hscale: u8,
+    vscale: u8,
+    segment_map: Vec<u8>,
+    pool: Vec<Frame>,
+    /// Largest key-frame area accepted; 0 accepts every legal size.
+    max_pixels: u64,
+    /// Macroblocks decoded per luma mode, for tests that check coverage.
+    #[cfg(test)]
+    pub(crate) mode_counts: [u64; 10],
+    /// Macroblocks decoded per reference: intra, last, golden, altref.
+    #[cfg(test)]
+    pub(crate) ref_counts: [u64; 4],
 }
 
-/// Decode one key frame into cropped 4:2:0 planes.
-pub fn decode_frame(data: &[u8], max_pixels: usize) -> Result<Vp8Picture, CodecError> {
-    let (width, height) = frame_size(data)?;
-    let tag = u32::from(data[0]) | u32::from(data[1]) << 8 | u32::from(data[2]) << 16;
-    let version = (tag >> 1) & 7;
-    let shown = (tag >> 4) & 1 == 1;
-    let first_size = usize::try_from(tag >> 5).unwrap_or(usize::MAX);
-    if version > 3 {
-        return Err(CodecError::Unsupported {
-            what: "vp8 version",
-        });
-    }
-    if !shown {
-        return Err(CodecError::Unsupported {
-            what: "vp8 hidden frame",
-        });
-    }
-    let (w, h) = (
-        usize::try_from(width).unwrap_or(usize::MAX),
-        usize::try_from(height).unwrap_or(usize::MAX),
-    );
-    if w.checked_mul(h).is_none_or(|pixels| pixels > max_pixels) {
-        return Err(CodecError::Limit {
-            what: "vp8 frame size",
-        });
-    }
-    let body = &data[10..];
-    if first_size > body.len() {
-        return Err(truncated(10, "vp8 first partition"));
-    }
-    let (first, rest) = body.split_at(first_size);
-    let mut bd = BoolDecoder::new(first);
-    let header = read_header(&mut bd);
-    bd.check("vp8 frame header")?;
-    let mut tokens = token_partitions(rest, header.partitions)?;
+/// Work for one frame, kept apart so a frame's results commit at once.
+struct Work {
+    mbs: Vec<MbInfo>,
+    subs: Vec<SubInfo>,
+    filters: Vec<MbFilter>,
+    segments: Vec<u8>,
+}
 
-    let (cols, rows) = (w.div_ceil(16), h.div_ceil(16));
-    let mut y = Plane {
-        data: vec![0; cols * 16 * rows * 16],
-        stride: cols * 16,
-    };
-    let mut u = Plane {
-        data: vec![0; cols * 8 * rows * 8],
-        stride: cols * 8,
-    };
-    let mut v = Plane {
-        data: vec![0; cols * 8 * rows * 8],
-        stride: cols * 8,
-    };
-    let mut above_modes = vec![0_u8; cols * 4];
-    let mut above_context = vec![[false; 9]; cols];
-    let mut strengths = Vec::with_capacity(cols * rows);
-    for row in 0..rows {
-        let mut left_modes = [0_u8; 4];
-        let mut left_context: Context = [false; 9];
-        let partition = tokens.len().max(1);
-        let Some(token_bd) = tokens.get_mut(row % partition) else {
-            return Err(malformed(0, "vp8 partitions"));
-        };
-        for col in 0..cols {
-            let segment = if header.segmentation.update_map {
-                usize::from(bd.read_tree(&SEGMENT_TREE, &header.segmentation.probs, 0))
-            } else {
-                0
-            };
-            let skip = header.skip_prob.is_some_and(|prob| bd.read_bool(prob));
-            let ymode = bd.read_tree(&KF_YMODE_TREE, &KF_YMODE_PROBS, 0);
-            let mut bmodes = [implied_subblock_mode(ymode); 16];
-            if ymode == B_PRED {
-                for n in 0..16 {
-                    let (by, bx) = (n / 4, n % 4);
-                    let above = if by == 0 {
-                        above_modes[col * 4 + bx]
-                    } else {
-                        bmodes[n - 4]
-                    };
-                    let left = if bx == 0 {
-                        left_modes[by]
-                    } else {
-                        bmodes[n - 1]
-                    };
-                    let probs =
-                        &KF_BMODE_PROBS[usize::from(above).min(9)][usize::from(left).min(9)];
-                    bmodes[n] = bd.read_tree(&BMODE_TREE, probs, 0);
-                }
-            }
-            above_modes[col * 4..col * 4 + 4].copy_from_slice(&bmodes[12..16]);
-            left_modes = [bmodes[3], bmodes[7], bmodes[11], bmodes[15]];
-            let uvmode = bd.read_tree(&UV_MODE_TREE, &KF_UV_MODE_PROBS, 0);
-            let has_y2 = ymode != B_PRED;
-            let above_ctx = &mut above_context[col];
-            let residual = if skip {
-                let keep_y2 = (above_ctx[8], left_context[8]);
-                *above_ctx = [false; 9];
-                left_context = [false; 9];
-                if !has_y2 {
-                    above_ctx[8] = keep_y2.0;
-                    left_context[8] = keep_y2.1;
-                }
-                Residual {
-                    y: [[0; 16]; 16],
-                    u: [[0; 16]; 4],
-                    v: [[0; 16]; 4],
-                    any: false,
-                }
-            } else {
-                read_residual(
-                    token_bd,
-                    &header.probs,
-                    header.steps[segment.min(3)],
-                    has_y2,
-                    above_ctx,
-                    &mut left_context,
-                )
-            };
-            let place = (col, row, cols);
-            reconstruct_luma(&mut y, place, ymode, &bmodes, &residual);
-            reconstruct_chroma(&mut u, place, uvmode, &residual.u);
-            reconstruct_chroma(&mut v, place, uvmode, &residual.v);
-            let level = filter_level(&header, segment.min(3), ymode);
-            strengths.push(if header.filter_level == 0 {
-                Strength::default()
-            } else {
-                strength(level, header.sharpness, ymode == B_PRED || residual.any)
+impl Decoder {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// A decoder that refuses key frames larger than `max_pixels`, as a
+    /// bound on memory and time for untrusted input.
+    #[must_use]
+    pub fn with_max_pixels(max_pixels: u64) -> Self {
+        Self {
+            max_pixels,
+            ..Self::default()
+        }
+    }
+
+    /// Drops the references and probabilities; keeps the size limit.
+    pub fn reset(&mut self) {
+        *self = Self::with_max_pixels(self.max_pixels);
+    }
+
+    /// Display size of the stream so far.
+    #[must_use]
+    pub fn size(&self) -> (u32, u32) {
+        (self.width, self.height)
+    }
+
+    /// Decodes one frame. Returns the picture when the frame is shown.
+    pub fn decode(&mut self, data: &[u8]) -> Result<Option<Picture>, CodecError> {
+        let parsed = header::parse(data, &self.persist)?;
+        let h = parsed.header;
+        let area = u64::from(h.tag.width) * u64::from(h.tag.height);
+        if h.tag.key && self.max_pixels > 0 && area > self.max_pixels {
+            return Err(CodecError::Limit {
+                what: "vp8 picture area",
             });
         }
-        bd.check("vp8 modes")?;
-        token_bd.check("vp8 tokens")?;
+        let (mbw, mbh) = if h.tag.key {
+            (
+                (h.tag.width as usize).div_ceil(16),
+                (h.tag.height as usize).div_ceil(16),
+            )
+        } else {
+            let Some(refs) = &self.refs else {
+                return Err(CodecError::Malformed {
+                    at_bit: 0,
+                    what: "vp8 inter frame before a key frame",
+                });
+            };
+            (refs.last.mbw, refs.last.mbh)
+        };
+        let count = mbw * mbh;
+        let mut segments = if self.segment_map.len() == count {
+            self.segment_map.clone()
+        } else {
+            vec![0; count]
+        };
+        let mut frame = self
+            .pool
+            .iter()
+            .position(|f| f.mbw == mbw && f.mbh == mbh)
+            .map_or_else(|| Frame::new(mbw, mbh), |i| self.pool.swap_remove(i));
+        let mut work = Work {
+            mbs: vec![MbInfo::default(); count],
+            subs: vec![SubInfo::default(); count],
+            filters: vec![MbFilter::default(); count],
+            segments: Vec::new(),
+        };
+        let refs = if h.tag.key { None } else { self.refs.as_ref() };
+        decode_frame(
+            &h,
+            parsed.modes,
+            &parsed.tokens,
+            refs,
+            &mut frame,
+            &mut work,
+            &mut segments,
+        );
+        if h.filter_level > 0 {
+            let mut planes = Planes {
+                y: &mut frame.y,
+                u: &mut frame.u,
+                v: &mut frame.v,
+                mbw,
+                mbh,
+            };
+            filter::filter_frame(&mut planes, &work.filters, h.filter_simple);
+        }
+        work.segments = segments;
+        #[cfg(test)]
+        for mb in &work.mbs {
+            self.mode_counts[usize::from(mb.y_mode).min(9)] += 1;
+            self.ref_counts[usize::from(mb.ref_frame & 3)] += 1;
+        }
+
+        // Commit.
+        self.persist = parsed.next;
+        self.segment_map = work.segments;
+        if h.tag.key {
+            self.width = h.tag.width;
+            self.height = h.tag.height;
+            self.hscale = h.tag.hscale;
+            self.vscale = h.tag.vscale;
+        }
+        let current = Arc::new(frame);
+        let old = self.refs.take();
+        let mut next = match &old {
+            Some(r) if !h.tag.key => r.clone(),
+            _ => Refs {
+                last: Arc::clone(&current),
+                golden: Arc::clone(&current),
+                altref: Arc::clone(&current),
+            },
+        };
+        if !h.tag.key {
+            match h.copy_to_altref {
+                1 => next.altref = Arc::clone(&next.last),
+                2 => next.altref = Arc::clone(&next.golden),
+                _ => {}
+            }
+            match h.copy_to_golden {
+                1 => next.golden = Arc::clone(&next.last),
+                2 => next.golden = Arc::clone(&next.altref),
+                _ => {}
+            }
+            if h.refresh_golden {
+                next.golden = Arc::clone(&current);
+            }
+            if h.refresh_altref {
+                next.altref = Arc::clone(&current);
+            }
+            if h.refresh_last {
+                next.last = Arc::clone(&current);
+            }
+        }
+        self.refs = Some(next);
+        if let Some(old) = old {
+            for frame in [old.last, old.golden, old.altref] {
+                if let Ok(frame) = Arc::try_unwrap(frame)
+                    && self.pool.len() < 4
+                {
+                    self.pool.push(frame);
+                }
+            }
+        }
+        if !h.tag.show {
+            return Ok(None);
+        }
+        Ok(Some(Picture {
+            frame: current,
+            width: self.width,
+            height: self.height,
+            hscale: self.hscale,
+            vscale: self.vscale,
+        }))
     }
-    filter_frame(
-        &mut Planes {
-            y: &mut y.data,
-            u: &mut u.data,
-            v: &mut v.data,
-            mb_cols: cols,
-            mb_rows: rows,
-        },
-        &strengths,
-        header.simple_filter,
-    );
-    let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
-    Ok(Vp8Picture {
-        width,
-        height,
-        y: crop(&y, w, h),
-        u: crop(&u, cw, ch),
-        v: crop(&v, cw, ch),
-    })
 }
 
-fn crop(plane: &Plane, width: usize, height: usize) -> Vec<u8> {
-    let mut out = Vec::with_capacity(width * height);
-    for line in plane.data.chunks_exact(plane.stride).take(height) {
-        out.extend_from_slice(&line[..width]);
+/// Section 9.3 and 9.6: quantizer factors for each segment.
+fn dequant_factors(h: &FrameHeader) -> [Dequant; 4] {
+    let mut out = [Dequant::default(); 4];
+    let base = i32::from(h.quant.y_ac);
+    for (s, dq) in out.iter_mut().enumerate() {
+        let q = if h.segmentation.enabled {
+            let value = i32::from(h.segmentation.quant[s]);
+            if h.segmentation.absolute {
+                value
+            } else {
+                base + value
+            }
+        } else {
+            base
+        };
+        *dq = Dequant::new(q, &h.quant);
     }
     out
 }
 
-fn truncated(at: usize, what: &'static str) -> CodecError {
-    CodecError::Truncated {
-        at_bit: u64::try_from(at).unwrap_or(u64::MAX).saturating_mul(8),
-        what,
+/// Section 15.1 and 9.6: the filter parameters of one macroblock.
+#[must_use]
+pub fn mb_filter(h: &FrameHeader, mb: &MbInfo, inner: bool) -> MbFilter {
+    let mut level = i32::from(h.filter_level);
+    if h.segmentation.enabled {
+        let value = i32::from(h.segmentation.filter[usize::from(mb.segment & 3)]);
+        level = if h.segmentation.absolute {
+            value
+        } else {
+            level + value
+        };
+        level = level.clamp(0, 63);
+    }
+    if h.deltas.enabled {
+        level += i32::from(h.deltas.ref_frame[usize::from(mb.ref_frame & 3)]);
+        let mode = if mb.ref_frame == INTRA {
+            (mb.y_mode == B_PRED).then_some(0)
+        } else if mb.y_mode == ZEROMV {
+            Some(1)
+        } else if mb.y_mode == SPLITMV {
+            Some(3)
+        } else {
+            Some(2)
+        };
+        if let Some(i) = mode {
+            level += i32::from(h.deltas.mode[i]);
+        }
+        level = level.clamp(0, 63);
+    }
+    let level = level.clamp(0, 63) as u8;
+    MbFilter {
+        level,
+        interior: filter::interior_limit(level, h.sharpness),
+        hev: filter::hev_threshold(level, h.tag.key),
+        inner: inner || mb.y_mode == B_PRED || mb.y_mode == SPLITMV,
     }
 }
 
-fn malformed(at: usize, what: &'static str) -> CodecError {
-    CodecError::Malformed {
-        at_bit: u64::try_from(at).unwrap_or(u64::MAX).saturating_mul(8),
-        what,
+fn read_segment(bits: &mut BoolDecoder<'_>, probs: &[u8; 3]) -> u8 {
+    if bits.read(probs[0]) {
+        2 + u8::from(bits.read(probs[2]))
+    } else {
+        u8::from(bits.read(probs[1]))
     }
+}
+
+fn decode_frame(
+    h: &FrameHeader,
+    mut bits: BoolDecoder<'_>,
+    partitions: &[&[u8]],
+    refs: Option<&Refs>,
+    frame: &mut Frame,
+    work: &mut Work,
+    segments: &mut [u8],
+) {
+    let mbw = frame.mbw;
+    let mbh = frame.mbh;
+    let dq = dequant_factors(h);
+    let mut token_bits: Vec<BoolDecoder<'_>> =
+        partitions.iter().map(|p| BoolDecoder::new(p)).collect();
+    let mut above_ctx: Vec<Context> = vec![[0; 9]; mbw];
+    let mut coeffs = MbCoeffs::default();
+    let sign_bias = [false, false, h.sign_bias_golden, h.sign_bias_altref];
+    let filter = if h.tag.version == 0 {
+        Filter::SixTap
+    } else {
+        Filter::Bilinear
+    };
+    let full_pixel = h.tag.version == 3;
+    for mby in 0..mbh {
+        let mut left_ctx: Context = [0; 9];
+        let part = &mut token_bits[mby % partitions.len()];
+        for (mbx, above) in above_ctx.iter_mut().enumerate() {
+            let i = mby * mbw + mbx;
+            let mut mb = MbInfo::default();
+            if h.segmentation.update_map {
+                segments[i] = read_segment(&mut bits, &h.segmentation.tree_probs);
+            } else if h.tag.key {
+                segments[i] = 0;
+            }
+            mb.segment = segments[i];
+            mb.skip = h.skip_enabled && bits.read(h.prob_skip);
+            let mut sub = SubInfo::default();
+            {
+                let above = (mby > 0).then(|| &work.mbs[i - mbw]);
+                let left = (mbx > 0).then(|| &work.mbs[i - 1]);
+                let above_left = (mby > 0 && mbx > 0).then(|| &work.mbs[i - mbw - 1]);
+                let ctx = ModeContext {
+                    key: h.tag.key,
+                    above,
+                    left,
+                    above_left,
+                    above_sub: (mby > 0).then(|| &work.subs[i - mbw]),
+                    left_sub: (mbx > 0).then(|| &work.subs[i - 1]),
+                    bounds: Bounds::new(mbx, mby, mbw, mbh),
+                    sign_bias,
+                    y_probs: &h.probs.y_mode,
+                    uv_probs: &h.probs.uv_mode,
+                    mv_probs: &h.probs.mv,
+                    prob_intra: h.prob_intra,
+                    prob_last: h.prob_last,
+                    prob_golden: h.prob_golden,
+                };
+                modes::read_modes(&mut bits, &ctx, &mut mb, &mut sub);
+            }
+            let has_y2 = mb.y_mode != B_PRED && mb.y_mode != SPLITMV;
+            coeffs.clear();
+            if mb.skip {
+                tokens::skip_mb(&mut left_ctx, above, has_y2);
+            } else {
+                let segment = if h.segmentation.enabled {
+                    usize::from(mb.segment & 3)
+                } else {
+                    0
+                };
+                tokens::read_mb(
+                    part,
+                    &h.probs.coeff,
+                    &mut left_ctx,
+                    above,
+                    has_y2,
+                    &dq[segment],
+                    &mut coeffs,
+                );
+            }
+            if has_y2 && coeffs.shape[24] != 0 {
+                let dc = iwht(&coeffs.blocks[24]);
+                for (b, &value) in dc.iter().enumerate() {
+                    coeffs.blocks[b][0] = value;
+                    if value != 0 && coeffs.shape[b] == 0 {
+                        coeffs.shape[b] = 1;
+                    }
+                }
+            }
+            if mb.ref_frame == INTRA {
+                reconstruct_intra(frame, mbx, mby, &mb, &sub, &coeffs);
+            } else if let Some(refs) = refs {
+                let reference = refs.get(mb.ref_frame);
+                reconstruct_inter(
+                    frame, reference, mbx, mby, &mb, &sub, &coeffs, filter, full_pixel,
+                );
+            }
+            work.filters[i] = mb_filter(h, &mb, coeffs.any);
+            work.mbs[i] = mb;
+            work.subs[i] = sub;
+        }
+    }
+}
+
+/// Adds one block's residual at `at` in a buffer.
+#[inline]
+fn add_block(coeffs: &MbCoeffs, b: usize, buf: &mut [u8], at: usize, stride: usize) {
+    match coeffs.shape[b] {
+        0 => {}
+        1 => idct_dc_add(coeffs.blocks[b][0], buf, at, stride),
+        _ => idct_add(&coeffs.blocks[b], buf, at, stride),
+    }
+}
+
+fn reconstruct_intra(
+    frame: &mut Frame,
+    mbx: usize,
+    mby: usize,
+    mb: &MbInfo,
+    sub: &SubInfo,
+    coeffs: &MbCoeffs,
+) {
+    let ys = frame.mbw * 16;
+    let mut buf = [0u8; LUMA_BUF];
+    predict::load_edges(&mut buf, &frame.y, ys, mbx, mby, 16, 4);
+    if mb.y_mode == B_PRED {
+        predict::copy_above_right(&mut buf);
+        for b in 0..16 {
+            let (r, c) = (b >> 2, b & 3);
+            predict::predict_sub(&mut buf, r, c, sub.b_modes[b]);
+            add_block(
+                coeffs,
+                b,
+                &mut buf,
+                (4 * r + 1) * LUMA_STRIDE + 4 * c + 1,
+                LUMA_STRIDE,
+            );
+        }
+    } else {
+        predict::predict_block(&mut buf, 16, LUMA_STRIDE, mb.y_mode, mby > 0, mbx > 0);
+        for b in 0..16 {
+            let (r, c) = (b >> 2, b & 3);
+            add_block(
+                coeffs,
+                b,
+                &mut buf,
+                (4 * r + 1) * LUMA_STRIDE + 4 * c + 1,
+                LUMA_STRIDE,
+            );
+        }
+    }
+    predict::store(&buf, &mut frame.y, ys, mbx, mby, 16, LUMA_STRIDE);
+    let cs = frame.mbw * 8;
+    for (plane, first) in [(&mut frame.u, 16), (&mut frame.v, 20)] {
+        let mut buf = [0u8; CHROMA_BUF];
+        predict::load_edges(&mut buf, plane, cs, mbx, mby, 8, 0);
+        predict::predict_block(&mut buf, 8, CHROMA_STRIDE, mb.uv_mode, mby > 0, mbx > 0);
+        for k in 0..4 {
+            let (r, c) = (k >> 1, k & 1);
+            add_block(
+                coeffs,
+                first + k,
+                &mut buf,
+                (4 * r + 1) * CHROMA_STRIDE + 4 * c + 1,
+                CHROMA_STRIDE,
+            );
+        }
+        predict::store(&buf, plane, cs, mbx, mby, 8, CHROMA_STRIDE);
+    }
+}
+
+/// Chroma vectors for each 4×4 chroma block, in eighth chroma pixels.
+#[must_use]
+pub fn chroma_mvs(mb: &MbInfo, sub: &SubInfo, full_pixel: bool) -> [Mv; 4] {
+    let fix = |mv: Mv| {
+        if full_pixel {
+            Mv::new(mv.row & !7, mv.col & !7)
+        } else {
+            mv
+        }
+    };
+    if mb.y_mode != SPLITMV {
+        return [fix(mb.mv); 4];
+    }
+    let mut out = [Mv::ZERO; 4];
+    for (k, slot) in out.iter_mut().enumerate() {
+        let b = 8 * (k >> 1) + 2 * (k & 1);
+        let (mut row, mut col) = (0, 0);
+        for o in [0, 1, 4, 5] {
+            row += sub.mvs[b + o].row;
+            col += sub.mvs[b + o].col;
+        }
+        let avg = |s: i32| if s >= 0 { (s + 2) / 4 } else { (s - 2) / 4 };
+        *slot = fix(Mv::new(avg(row), avg(col)));
+    }
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
+fn reconstruct_inter(
+    frame: &mut Frame,
+    reference: &Frame,
+    mbx: usize,
+    mby: usize,
+    mb: &MbInfo,
+    sub: &SubInfo,
+    coeffs: &MbCoeffs,
+    filter: Filter,
+    full_pixel: bool,
+) {
+    let ys = frame.mbw * 16;
+    let x0 = (mbx * 16) as i32;
+    let y0 = (mby * 16) as i32;
+    let base = mby * 16 * ys + mbx * 16;
+    if mb.y_mode == SPLITMV {
+        for b in 0..16 {
+            let (r, c) = (b >> 2, b & 3);
+            let mv = sub.mvs[b];
+            let at = base + 4 * r * ys + 4 * c;
+            inter::predict(
+                reference.luma(),
+                x0 + 4 * c as i32 + (mv.col >> 2),
+                y0 + 4 * r as i32 + (mv.row >> 2),
+                ((mv.col & 3) * 2) as usize,
+                ((mv.row & 3) * 2) as usize,
+                4,
+                4,
+                filter,
+                &mut frame.y[at..],
+                ys,
+            );
+        }
+    } else {
+        let mv = mb.mv;
+        inter::predict(
+            reference.luma(),
+            x0 + (mv.col >> 2),
+            y0 + (mv.row >> 2),
+            ((mv.col & 3) * 2) as usize,
+            ((mv.row & 3) * 2) as usize,
+            16,
+            16,
+            filter,
+            &mut frame.y[base..],
+            ys,
+        );
+    }
+    for b in 0..16 {
+        let (r, c) = (b >> 2, b & 3);
+        add_block(coeffs, b, &mut frame.y, base + 4 * r * ys + 4 * c, ys);
+    }
+    let cs = frame.mbw * 8;
+    let cmv = chroma_mvs(mb, sub, full_pixel);
+    let cx0 = (mbx * 8) as i32;
+    let cy0 = (mby * 8) as i32;
+    let cbase = mby * 8 * cs + mbx * 8;
+    for (v, first) in [(false, 16), (true, 20)] {
+        let src = reference.chroma(v);
+        let plane = if v { &mut frame.v } else { &mut frame.u };
+        if mb.y_mode == SPLITMV {
+            for (k, mv) in cmv.iter().enumerate() {
+                let (r, c) = (k >> 1, k & 1);
+                let at = cbase + 4 * r * cs + 4 * c;
+                inter::predict(
+                    src,
+                    cx0 + 4 * c as i32 + (mv.col >> 3),
+                    cy0 + 4 * r as i32 + (mv.row >> 3),
+                    (mv.col & 7) as usize,
+                    (mv.row & 7) as usize,
+                    4,
+                    4,
+                    filter,
+                    &mut plane[at..],
+                    cs,
+                );
+            }
+        } else {
+            let mv = cmv[0];
+            inter::predict(
+                src,
+                cx0 + (mv.col >> 3),
+                cy0 + (mv.row >> 3),
+                (mv.col & 7) as usize,
+                (mv.row & 7) as usize,
+                8,
+                8,
+                filter,
+                &mut plane[cbase..],
+                cs,
+            );
+        }
+        for k in 0..4 {
+            let (r, c) = (k >> 1, k & 1);
+            add_block(coeffs, first + k, plane, cbase + 4 * r * cs + 4 * c, cs);
+        }
+    }
+}
+
+/// VP8 decoder on the video codec contract.
+///
+/// `push` consumes one frame. A hidden frame (an alt-ref) returns no
+/// picture. `drain` is empty. `reset` drops the reference pictures. A
+/// failed `push` leaves the decoder as it was.
+pub struct Vp8Decoder {
+    inner: Decoder,
+    cancel: Arc<AtomicBool>,
+}
+
+impl Vp8Decoder {
+    pub fn open(params: &CodecParams) -> Result<Self, CodecError> {
+        if params.codec != CodecId::Vp8 {
+            return Err(CodecError::Unsupported {
+                what: "vp8 decoder",
+            });
+        }
+        if params.pixel != PixelFormat::Yuv420p {
+            return Err(CodecError::Unsupported {
+                what: "vp8 pixel format",
+            });
+        }
+        if params.width > header::MAX_EDGE || params.height > header::MAX_EDGE {
+            return Err(CodecError::Limit {
+                what: "vp8 frame edge",
+            });
+        }
+        Ok(Self {
+            inner: Decoder::new(),
+            cancel: Arc::new(AtomicBool::new(false)),
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn mode_counts(&self) -> [u64; 10] {
+        self.inner.mode_counts
+    }
+
+    #[cfg(test)]
+    pub(crate) fn ref_counts(&self) -> [u64; 4] {
+        self.inner.ref_counts
+    }
+
+    /// The horizontal and vertical upscaling the stream asks for
+    /// (Section 9.2), each 0 to 3.
+    #[must_use]
+    pub fn scaling(&self) -> (u8, u8) {
+        (self.inner.hscale, self.inner.vscale)
+    }
+}
+
+impl VideoDecoder for Vp8Decoder {
+    fn codec(&self) -> CodecId {
+        CodecId::Vp8
+    }
+
+    fn push(&mut self, packet: &Packet) -> Result<Vec<VideoOutput>, CodecError> {
+        if self.cancel.load(Ordering::Relaxed) {
+            return Err(CodecError::Cancelled);
+        }
+        if packet.data.is_empty() {
+            // An empty packet is a dropped frame: nothing to show.
+            return Ok(Vec::new());
+        }
+        match self.inner.decode(&packet.data)? {
+            Some(picture) => Ok(vec![VideoOutput {
+                frame: picture_frame(&picture)?,
+                pts: packet.pts,
+                duration: packet.duration,
+                timescale: packet.timescale,
+            }]),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    fn drain(&mut self) -> Result<Vec<VideoOutput>, CodecError> {
+        Ok(Vec::new())
+    }
+
+    fn reset(&mut self) {
+        self.inner.reset();
+    }
+
+    fn cancel_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.cancel)
+    }
+}
+
+/// Crops a picture to its display size.
+pub fn picture_frame(picture: &Picture) -> Result<VideoFrame, CodecError> {
+    let (w, h) = (picture.width as usize, picture.height as usize);
+    let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
+    let f = &picture.frame;
+    let crop = |src: &[u8], stride: usize, width: usize, height: usize| {
+        let mut out = Vec::with_capacity(width * height);
+        for row in src.chunks_exact(stride).take(height) {
+            out.extend_from_slice(&row[..width]);
+        }
+        out
+    };
+    let y = crop(&f.y, f.mbw * 16, w, h);
+    let u = crop(&f.u, f.mbw * 8, cw, ch);
+    let v = crop(&f.v, f.mbw * 8, cw, ch);
+    let mut frame = VideoFrame::yuv420p(
+        picture.width,
+        picture.height,
+        Plane::tight(picture.width, picture.height, y)?,
+        Plane::tight(cw as u32, ch as u32, u)?,
+        Plane::tight(cw as u32, ch as u32, v)?,
+    )?;
+    frame.range = ColorRange::Limited;
+    frame.matrix = MatrixCoefficients::Bt601;
+    Ok(frame)
 }

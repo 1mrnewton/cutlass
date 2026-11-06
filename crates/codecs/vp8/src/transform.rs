@@ -1,170 +1,234 @@
-//! The inverse transforms of RFC 6386 section 14.
+//! The 4×4 transforms of RFC 6386 Section 14, and forward versions for
+//! the encoder.
 //!
-//! Both work in place on sixteen coefficients in raster order. The DCT
-//! adds its result to a 4x4 prediction and clamps to a byte; the WHT
-//! returns the sixteen luma DC values the second-order block carried.
+//! The inverse transforms keep their first pass in 16 bits, as the
+//! reference decoder does, so overflowing input wraps the same way.
 
-/// `sqrt(2) * cos(pi / 8) - 1` and `sqrt(2) * sin(pi / 8)`, in 16-bit fixed
-/// point (section 14.3).
-const COS_MINUS_ONE: i32 = 20_091;
-const SIN: i32 = 35_468;
+const C1: i32 = 20_091; // cos(pi/8) * sqrt(2) - 1, in 1/65536
+const S1: i32 = 35_468; // sin(pi/8) * sqrt(2), in 1/65536
 
-/// Inverse Walsh-Hadamard transform of the Y2 block (section 14.3).
-///
-/// Inputs are 16-bit values, so no stage can overflow.
-pub(crate) fn inverse_wht(input: &[i32; 16]) -> [i32; 16] {
-    let mut mid = [0_i32; 16];
-    for column in 0..4 {
-        let a = input[column] + input[12 + column];
-        let b = input[4 + column] + input[8 + column];
-        let c = input[4 + column] - input[8 + column];
-        let d = input[column] - input[12 + column];
-        mid[column] = a + b;
-        mid[4 + column] = c + d;
-        mid[8 + column] = a - b;
-        mid[12 + column] = d - c;
+#[inline]
+fn wrap(value: i32) -> i16 {
+    value as i16
+}
+
+/// Inverse Walsh-Hadamard transform of the Y2 block (Section 14.3).
+#[must_use]
+pub fn iwht(input: &[i16; 16]) -> [i16; 16] {
+    let mut mid = [0i16; 16];
+    for i in 0..4 {
+        let a1 = i32::from(input[i]) + i32::from(input[12 + i]);
+        let b1 = i32::from(input[4 + i]) + i32::from(input[8 + i]);
+        let c1 = i32::from(input[4 + i]) - i32::from(input[8 + i]);
+        let d1 = i32::from(input[i]) - i32::from(input[12 + i]);
+        mid[i] = wrap(a1 + b1);
+        mid[4 + i] = wrap(c1 + d1);
+        mid[8 + i] = wrap(a1 - b1);
+        mid[12 + i] = wrap(d1 - c1);
     }
-    let mut out = [0_i32; 16];
-    for row in 0..4 {
-        let at = row * 4;
-        let a = mid[at] + mid[at + 3];
-        let b = mid[at + 1] + mid[at + 2];
-        let c = mid[at + 1] - mid[at + 2];
-        let d = mid[at] - mid[at + 3];
-        out[at] = wrap16((a + b + 3) >> 3);
-        out[at + 1] = wrap16((c + d + 3) >> 3);
-        out[at + 2] = wrap16((a - b + 3) >> 3);
-        out[at + 3] = wrap16((d - c + 3) >> 3);
+    let mut out = [0i16; 16];
+    for i in 0..4 {
+        let row = &mid[4 * i..4 * i + 4];
+        let a1 = i32::from(row[0]) + i32::from(row[3]);
+        let b1 = i32::from(row[1]) + i32::from(row[2]);
+        let c1 = i32::from(row[1]) - i32::from(row[2]);
+        let d1 = i32::from(row[0]) - i32::from(row[3]);
+        out[4 * i] = wrap((a1 + b1 + 3) >> 3);
+        out[4 * i + 1] = wrap((c1 + d1 + 3) >> 3);
+        out[4 * i + 2] = wrap((a1 - b1 + 3) >> 3);
+        out[4 * i + 3] = wrap((d1 - c1 + 3) >> 3);
     }
     out
 }
 
-/// One 1-D pass of the inverse DCT over `x0..x3`.
-fn idct_1d(x0: i32, x1: i32, x2: i32, x3: i32) -> [i32; 4] {
-    let a = x0 + x2;
-    let b = x0 - x2;
-    let c = ((x1 * SIN) >> 16) - (x3 + ((x3 * COS_MINUS_ONE) >> 16));
-    let d = (x1 + ((x1 * COS_MINUS_ONE) >> 16)) + ((x3 * SIN) >> 16);
-    [a + d, b + c, b - c, a - d]
+#[inline]
+fn mul_c1(x: i32) -> i32 {
+    x + ((x * C1) >> 16)
 }
 
-/// Inverse DCT of `coeffs`, added to the 4x4 block at `at` of `plane`.
-///
-/// The columns go first, then the rows with `(x + 4) >> 3` rounding.
-pub(crate) fn idct_add(coeffs: &[i32; 16], plane: &mut [u8], at: usize, stride: usize) {
-    let mut mid = [0_i32; 16];
-    for column in 0..4 {
-        let out = idct_1d(
-            coeffs[column],
-            coeffs[4 + column],
-            coeffs[8 + column],
-            coeffs[12 + column],
-        );
-        for (row, value) in out.into_iter().enumerate() {
-            mid[row * 4 + column] = wrap16(value);
-        }
+#[inline]
+fn mul_s1(x: i32) -> i32 {
+    (x * S1) >> 16
+}
+
+/// Inverse DCT of one block, added to the prediction already in `dst`
+/// (Section 14.4).
+pub fn idct_add(coeffs: &[i16; 16], dst: &mut [u8], at: usize, stride: usize) {
+    let mut mid = [0i16; 16];
+    for i in 0..4 {
+        let x0 = i32::from(coeffs[i]);
+        let x1 = i32::from(coeffs[4 + i]);
+        let x2 = i32::from(coeffs[8 + i]);
+        let x3 = i32::from(coeffs[12 + i]);
+        let a1 = x0 + x2;
+        let b1 = x0 - x2;
+        let c1 = mul_s1(x1) - mul_c1(x3);
+        let d1 = mul_c1(x1) + mul_s1(x3);
+        mid[i] = wrap(a1 + d1);
+        mid[12 + i] = wrap(a1 - d1);
+        mid[4 + i] = wrap(b1 + c1);
+        mid[8 + i] = wrap(b1 - c1);
     }
-    for row in 0..4 {
-        let out = idct_1d(
-            mid[row * 4],
-            mid[row * 4 + 1],
-            mid[row * 4 + 2],
-            mid[row * 4 + 3],
-        );
-        let line = at + row * stride;
-        for (column, value) in out.into_iter().enumerate() {
-            if let Some(pixel) = plane.get_mut(line + column) {
-                *pixel = clamp255(i32::from(*pixel) + ((value + 4) >> 3));
+    for i in 0..4 {
+        let x0 = i32::from(mid[4 * i]);
+        let x1 = i32::from(mid[4 * i + 1]);
+        let x2 = i32::from(mid[4 * i + 2]);
+        let x3 = i32::from(mid[4 * i + 3]);
+        let a1 = x0 + x2;
+        let b1 = x0 - x2;
+        let c1 = mul_s1(x1) - mul_c1(x3);
+        let d1 = mul_c1(x1) + mul_s1(x3);
+        let start = at + i * stride;
+        let Some(row) = dst.get_mut(start..start + 4) else {
+            return;
+        };
+        let add = |pixel: &mut u8, delta: i32| {
+            *pixel = (i32::from(*pixel) + delta).clamp(0, 255) as u8;
+        };
+        add(&mut row[0], (a1 + d1 + 4) >> 3);
+        add(&mut row[3], (a1 - d1 + 4) >> 3);
+        add(&mut row[1], (b1 + c1 + 4) >> 3);
+        add(&mut row[2], (b1 - c1 + 4) >> 3);
+    }
+}
+
+/// Adds a block that has only a DC coefficient. Equal to [`idct_add`]
+/// for such a block.
+pub fn idct_dc_add(dc: i16, dst: &mut [u8], at: usize, stride: usize) {
+    let delta = (i32::from(dc) + 4) >> 3;
+    for i in 0..4 {
+        let start = at + i * stride;
+        if let Some(row) = dst.get_mut(start..start + 4) {
+            for pixel in row {
+                *pixel = (i32::from(*pixel) + delta).clamp(0, 255) as u8;
             }
         }
     }
 }
 
-/// Keep the low 16 bits, signed: the reference decoder holds coefficients
-/// and the transform's middle stage in 16-bit storage, so a hostile stream
-/// wraps there instead of overflowing.
-pub(crate) fn wrap16(value: i32) -> i32 {
-    i32::from(value as i16)
+// Forward DCT basis in Q12, scaled so that `idct_add` inverts it:
+// row 0 is cos(pi/4), rows 1..3 are cos((2n+1)k pi/8).
+const FDCT: [[i64; 4]; 4] = [
+    [2896, 2896, 2896, 2896],
+    [3784, 1567, -1567, -3784],
+    [2896, -2896, -2896, 2896],
+    [1567, -3784, 3784, -1567],
+];
+
+/// Forward DCT of a residual block, the inverse of [`idct_add`] up to
+/// rounding.
+#[must_use]
+pub fn fdct(residual: &[i16; 16]) -> [i16; 16] {
+    let mut rows = [0i64; 16];
+    for r in 0..4 {
+        for (k, basis) in FDCT.iter().enumerate() {
+            rows[4 * r + k] = (0..4)
+                .map(|n| basis[n] * i64::from(residual[4 * r + n]))
+                .sum();
+        }
+    }
+    let mut out = [0i16; 16];
+    for c in 0..4 {
+        for (k, basis) in FDCT.iter().enumerate() {
+            let sum: i64 = (0..4).map(|n| basis[n] * rows[4 * n + c]).sum();
+            // Two Q12 passes. The basis already carries the factor of 2
+            // the inverse takes away (each inverse pass gains 2, then /8).
+            let value = (sum + (1 << 23)) >> 24;
+            out[4 * k + c] = value.clamp(-32_768, 32_767) as i16;
+        }
+    }
+    out
 }
 
-pub(crate) fn clamp255(value: i32) -> u8 {
-    u8::try_from(value.clamp(0, 255)).unwrap_or(u8::MAX)
+/// Forward Walsh-Hadamard transform of the 16 luma DC values, the
+/// inverse of [`iwht`] up to rounding.
+#[must_use]
+pub fn fwht(dc: &[i16; 16]) -> [i16; 16] {
+    const H: [[i32; 4]; 4] = [[1, 1, 1, 1], [1, 1, -1, -1], [1, -1, -1, 1], [1, -1, 1, -1]];
+    let mut mid = [0i32; 16];
+    for r in 0..4 {
+        for (k, basis) in H.iter().enumerate() {
+            mid[4 * r + k] = (0..4).map(|n| basis[n] * i32::from(dc[4 * r + n])).sum();
+        }
+    }
+    let mut out = [0i16; 16];
+    for c in 0..4 {
+        for (k, basis) in H.iter().enumerate() {
+            let sum: i32 = (0..4).map(|n| basis[n] * mid[4 * n + c]).sum();
+            let value = if sum >= 0 {
+                (sum + 1) >> 1
+            } else {
+                -((-sum + 1) >> 1)
+            };
+            out[4 * k + c] = value.clamp(-32_768, 32_767) as i16;
+        }
+    }
+    out
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{idct_add, inverse_wht};
+    use super::{fdct, fwht, idct_add, idct_dc_add, iwht};
 
-    #[test]
-    fn a_lone_dc_spreads_evenly() {
-        let mut coeffs = [0; 16];
-        coeffs[0] = 80;
-        let mut block = [100_u8; 16];
-        idct_add(&coeffs, &mut block, 0, 4);
-        // (80 + 4) >> 3 = 10 on every pixel.
-        assert_eq!(block, [110; 16]);
-        let mut wht = [0; 16];
-        wht[0] = 77;
-        // (77 + 3) >> 3 = 10 for each luma block.
-        assert_eq!(inverse_wht(&wht), [10; 16]);
+    struct Lcg(u64);
+    impl Lcg {
+        fn next(&mut self) -> u32 {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
+            (self.0 >> 33) as u32
+        }
     }
 
     #[test]
-    fn the_idct_matches_the_float_transform_within_rounding() {
-        // A first-row AC coefficient: a horizontal cosine.
-        let mut coeffs = [0; 16];
-        coeffs[1] = 64;
-        let mut block = [128_u8; 16];
-        idct_add(&coeffs, &mut block, 0, 4);
-        for row in 0..4 {
-            for column in 0..4 {
-                let angle = std::f64::consts::PI * (2.0 * column as f64 + 1.0) / 8.0;
-                let ideal = 128.0 + 64.0 * std::f64::consts::SQRT_2 * angle.cos() / 8.0;
-                let got = f64::from(block[row * 4 + column]);
-                assert!((got - ideal).abs() <= 1.0, "{row} {column} {got} {ideal}");
-            }
+    fn a_dc_only_block_matches_the_shortcut() {
+        for dc in [-2048i16, -100, -5, -4, -3, 0, 3, 4, 5, 77, 2047] {
+            let mut coeffs = [0i16; 16];
+            coeffs[0] = dc;
+            let mut full = vec![128u8; 16];
+            let mut short = full.clone();
+            idct_add(&coeffs, &mut full, 0, 4);
+            idct_dc_add(dc, &mut short, 0, 4);
+            assert_eq!(full, short, "dc {dc}");
         }
-        // Clamping at both ends.
-        let mut bright = [250_u8; 16];
-        let mut dark = [3_u8; 16];
-        let mut big = [0; 16];
-        big[0] = 800;
-        idct_add(&big, &mut bright, 0, 4);
-        big[0] = -800;
-        idct_add(&big, &mut dark, 0, 4);
-        assert_eq!((bright, dark), ([255; 16], [0; 16]));
     }
 
     #[test]
-    fn the_wht_inverts_the_forward_walsh() {
-        // The forward 4x4 Walsh-Hadamard (unnormalized) of a known block,
-        // scaled by 8 so the inverse's rounding lands exactly.
-        let values: [i32; 16] = [3, -1, 4, 1, -5, 9, -2, 6, 5, -3, 5, 8, -9, 7, 9, -3];
-        let h = |v: [i32; 4]| {
-            [
-                v[0] + v[1] + v[2] + v[3],
-                v[0] + v[1] - v[2] - v[3],
-                v[0] - v[1] - v[2] + v[3],
-                v[0] - v[1] + v[2] - v[3],
-            ]
-        };
-        let mut rows = [0; 16];
-        for r in 0..4 {
-            let out = h([
-                values[r * 4],
-                values[r * 4 + 1],
-                values[r * 4 + 2],
-                values[r * 4 + 3],
-            ]);
-            rows[r * 4..r * 4 + 4].copy_from_slice(&out);
-        }
-        let mut forward = [0; 16];
-        for c in 0..4 {
-            let out = h([rows[c], rows[4 + c], rows[8 + c], rows[12 + c]]);
-            for r in 0..4 {
-                forward[r * 4 + c] = out[r] / 2;
+    fn the_forward_transforms_invert() {
+        let mut rng = Lcg(7);
+        let mut worst = 0;
+        for _ in 0..2000 {
+            let mut residual = [0i16; 16];
+            for value in &mut residual {
+                *value = (rng.next() % 511) as i16 - 255;
+            }
+            let coeffs = fdct(&residual);
+            let mut pixels = vec![128u8; 16];
+            idct_add(&coeffs, &mut pixels, 0, 4);
+            for (pixel, value) in pixels.iter().zip(residual) {
+                let want = (128 + i32::from(value)).clamp(0, 255);
+                worst = worst.max((i32::from(*pixel) - want).abs());
             }
         }
-        assert_eq!(inverse_wht(&forward), values);
+        assert!(worst <= 1, "round trip error {worst}");
+
+        for _ in 0..2000 {
+            let mut dc = [0i16; 16];
+            for value in &mut dc {
+                *value = (rng.next() % 8001) as i16 - 4000;
+            }
+            let back = iwht(&fwht(&dc));
+            for (a, b) in back.iter().zip(dc) {
+                assert!((i32::from(*a) - i32::from(b)).abs() <= 1);
+            }
+        }
+    }
+
+    #[test]
+    fn the_inverse_walsh_spreads_a_dc() {
+        let mut input = [0i16; 16];
+        input[0] = 80;
+        assert_eq!(iwht(&input), [10; 16]);
     }
 }

@@ -536,8 +536,9 @@ pub enum ExportQuality {
 }
 
 impl ExportQuality {
-    /// The bitrate for an H.264 or HEVC picture `short_side` pixels on its
-    /// short side. HEVC gets the same picture from fewer bits.
+    /// The bitrate for an H.264, HEVC, or VP8 picture `short_side` pixels
+    /// on its short side. HEVC gets the same picture from fewer bits; VP8
+    /// spends what H.264 does.
     #[must_use]
     pub fn bitrate(self, short_side: u32, codec: CodecId) -> u32 {
         let base = cutlass_export::video_bitrate(short_side);
@@ -6228,6 +6229,11 @@ impl Shell {
                 "ProRes is written in a MOV".to_owned(),
             ));
         }
+        if request.codec == CodecId::Vp8 && mov {
+            return Err(ShellError::Unavailable(
+                "VP8 is written in an MP4".to_owned(),
+            ));
+        }
         if request.sound && request.audio.codec == CodecId::Pcm && !mov {
             return Err(ShellError::Unavailable(
                 "PCM sound is written in a MOV".to_owned(),
@@ -6272,7 +6278,7 @@ impl Shell {
         }
         if !matches!(
             request.codec,
-            CodecId::H264 | CodecId::Hevc | CodecId::Prores
+            CodecId::H264 | CodecId::Hevc | CodecId::Prores | CodecId::Vp8
         ) {
             return Err(ShellError::ExportUnavailable);
         }
@@ -12939,7 +12945,7 @@ mod tests {
         let declined = desktop.export(ExportRequest {
             path: destination.clone(),
             short_side: 480,
-            codec: CodecId::Vp8,
+            codec: CodecId::Vp9,
             replace: false,
             ..ExportRequest::default()
         });
@@ -13195,6 +13201,70 @@ mod tests {
             frames += 1;
         }
         assert!(frames > 0);
+    }
+
+    /// VP8 exports through the Rust encoder into an MP4 that the desktop's
+    /// own readers open and decode back to the clip's colour; a MOV is
+    /// refused.
+    #[test]
+    fn a_vp8_export_lands_an_mp4_that_plays_back() {
+        let temp = Temp::new();
+        movie_project(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        assert!(desktop.encodes(CodecId::Vp8));
+        let mov = desktop.export(ExportRequest {
+            path: temp.path.join("vp8.mov"),
+            short_side: 480,
+            codec: CodecId::Vp8,
+            ..ExportRequest::default()
+        });
+        assert_eq!(mov.unwrap_err().to_string(), "VP8 is written in an MP4");
+
+        let destination = temp.path.join("vp8.mp4");
+        desktop
+            .export(ExportRequest {
+                path: destination.clone(),
+                short_side: 480,
+                codec: CodecId::Vp8,
+                ..ExportRequest::default()
+            })
+            .unwrap();
+        land_job(&mut desktop);
+        assert_eq!(desktop.notice(), "Exported vp8.mp4");
+        let bytes = std::fs::read(&destination).unwrap();
+        assert!(bytes.windows(4).any(|w| w == b"vp08"));
+        assert!(bytes.windows(4).any(|w| w == b"vpcC"));
+
+        let readers = crate::readers::installed_readers();
+        let mut media = readers.open(&destination).unwrap();
+        assert_eq!(
+            (media.info().width, media.info().height),
+            (Some(960), Some(480))
+        );
+        let held = media
+            .decode_at(Micros(1_500_000), &TimeRange::new(0, 2_000_000))
+            .unwrap();
+        let cutlass_engine::DecodedFrame::Coded {
+            width,
+            height,
+            pixel,
+            primaries,
+            bytes,
+            ..
+        } = held.frame
+        else {
+            panic!("a coded picture");
+        };
+        assert_eq!((width, height), (960, 480));
+        assert_eq!(pixel, PixelFormat::Yuv420p);
+        assert_eq!(primaries, ColorPrimaries::Bt709);
+        // 0x336699 in BT.709 limited range, as export converts it: Y 97,
+        // Cb 156, Cr 104.
+        let (y, chroma) = bytes.split_at(960 * 480);
+        let (u, v) = chroma.split_at(chroma.len() / 2);
+        let near = |plane: &[u8], value: u8| plane.iter().all(|&s| s.abs_diff(value) <= 4);
+        assert!(near(y, 97) && near(u, 156) && near(v, 104));
     }
 
     #[test]

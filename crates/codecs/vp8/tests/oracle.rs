@@ -19,7 +19,7 @@
 // Test-only code, so the helpers may unwrap and panic like the tests.
 #[cfg(test)]
 mod oracle {
-    use cutlass_vp8::{CodecError, decode_frame, frame_size};
+    use cutlass_vp8::{Decoder, Picture};
 
     fn fixture(name: &str) -> Vec<u8> {
         std::fs::read(format!(
@@ -29,16 +29,30 @@ mod oracle {
         .unwrap()
     }
 
+    /// Y, then U, then V, each cropped to the display size.
+    fn joined(picture: &Picture) -> Vec<u8> {
+        let (w, h) = (picture.width as usize, picture.height as usize);
+        let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
+        let frame = &picture.frame;
+        let mut out = Vec::with_capacity(w * h + 2 * cw * ch);
+        let mut crop = |plane: &[u8], stride: usize, width: usize, height: usize| {
+            for row in plane.chunks_exact(stride).take(height) {
+                out.extend_from_slice(&row[..width]);
+            }
+        };
+        crop(&frame.y, frame.mbw * 16, w, h);
+        crop(&frame.u, frame.mbw * 8, cw, ch);
+        crop(&frame.v, frame.mbw * 8, cw, ch);
+        out
+    }
+
     fn planes(name: &str) -> (u32, u32, Vec<u8>) {
-        let picture = decode_frame(&fixture(&format!("{name}.vp8")), 1 << 20).unwrap();
-        let mut joined = picture.y.clone();
-        joined.extend_from_slice(&picture.u);
-        joined.extend_from_slice(&picture.v);
-        assert_eq!(
-            picture.u.len(),
-            picture.chroma_width() * picture.chroma_height()
-        );
-        (picture.width, picture.height, joined)
+        let mut decoder = Decoder::with_max_pixels(1 << 20);
+        let picture = decoder
+            .decode(&fixture(&format!("{name}.vp8")))
+            .unwrap()
+            .unwrap();
+        (picture.width, picture.height, joined(&picture))
     }
 
     #[test]
@@ -63,50 +77,41 @@ mod oracle {
     }
 
     #[test]
-    fn bad_frames_are_errors_not_panics() {
+    fn bad_key_frames_are_errors_not_panics() {
         let frame = fixture("libvpx.vp8");
-        assert_eq!(frame_size(&frame).unwrap(), (61, 45));
+        let decode = |data: &[u8], limit: u64| Decoder::with_max_pixels(limit).decode(data);
         // Every truncation fails cleanly, as it does in libwebp and FFmpeg.
         for cut in 0..frame.len() {
-            let result = decode_frame(&frame[..cut], 1 << 20);
-            assert!(result.is_err(), "cut at {cut} decoded");
+            assert!(
+                decode(&frame[..cut], 1 << 20).is_err(),
+                "cut at {cut} decoded"
+            );
         }
         // Flipped bytes past the header decode or fail, never panic.
         let mut flipped = frame.clone();
         for at in 10..flipped.len() {
             flipped[at] ^= 0xA5;
-            let _ = decode_frame(&flipped, 1 << 20);
+            let _ = decode(&flipped, 1 << 20);
             flipped[at] ^= 0xA5;
         }
-        // An inter frame, a hidden frame, a bad start code, a zero size.
+        // An inter frame with nothing before it, a bad start code, a zero
+        // size.
         let mut inter = frame.clone();
         inter[0] |= 1;
-        assert!(matches!(
-            decode_frame(&inter, 1 << 20),
-            Err(CodecError::Unsupported { .. })
-        ));
-        let mut hidden = frame.clone();
-        hidden[0] &= !0x10;
-        assert!(matches!(
-            decode_frame(&hidden, 1 << 20),
-            Err(CodecError::Unsupported { .. })
-        ));
+        assert!(decode(&inter, 1 << 20).is_err());
         let mut start = frame.clone();
         start[3] = 0;
-        assert!(matches!(
-            decode_frame(&start, 1 << 20),
-            Err(CodecError::Malformed { .. })
-        ));
+        assert!(decode(&start, 1 << 20).is_err());
         let mut empty = frame.clone();
         empty[6..8].fill(0);
-        assert!(decode_frame(&empty, 1 << 20).is_err());
+        assert!(decode(&empty, 1 << 20).is_err());
         // The largest coded size is refused by the pixel limit before any
         // plane is allocated.
         let mut huge = frame;
         huge[6..10].copy_from_slice(&[0xFF, 0x3F, 0xFF, 0x3F]);
         assert!(matches!(
-            decode_frame(&huge, 1 << 24),
-            Err(CodecError::Limit { .. })
+            decode(&huge, 1 << 24),
+            Err(cutlass_decode::CodecError::Limit { .. })
         ));
     }
 }

@@ -3,7 +3,7 @@
 use std::error::Error;
 use std::fmt;
 
-use cutlass_captions::{Cue, SubtitleError, parse_srt};
+use cutlass_captions::{Cue, SubtitleError, parse_lrc, parse_srt};
 use cutlass_model::{MaterialId, SegmentId, TimeRange, TrackId};
 use cutlass_session::{Request, SubtitleCue};
 
@@ -11,11 +11,13 @@ use cutlass_session::{Request, SubtitleCue};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SubtitleFormat {
     Srt,
+    /// Timed lyrics.
+    Lrc,
 }
 
 impl SubtitleFormat {
     /// File extensions the open dialog offers, without the dot.
-    pub const EXTENSIONS: &'static [&'static str] = &["srt"];
+    pub const EXTENSIONS: &'static [&'static str] = &["srt", "lrc"];
 
     /// The format a file name's extension names, ignoring case.
     #[must_use]
@@ -23,6 +25,8 @@ impl SubtitleFormat {
         let (_, extension) = name.rsplit_once('.')?;
         if extension.eq_ignore_ascii_case("srt") {
             Some(Self::Srt)
+        } else if extension.eq_ignore_ascii_case("lrc") {
+            Some(Self::Lrc)
         } else {
             None
         }
@@ -59,6 +63,7 @@ pub fn subtitle_request(
 ) -> Result<Request, SubtitleMiss> {
     let cues = match format {
         SubtitleFormat::Srt => parse_srt(text),
+        SubtitleFormat::Lrc => parse_lrc(text),
     }
     .map_err(SubtitleMiss::File)?;
     let track_id = TrackId::new(fresh("subtitles"));
@@ -130,6 +135,18 @@ mod tests {
     }
 
     #[test]
+    fn a_lyric_file_becomes_captions_too() {
+        let text = "[00:01.00]la la\n[00:03.00]\n";
+        let request = subtitle_request(text, SubtitleFormat::Lrc, &mut counter()).unwrap();
+        let Request::AddSubtitles { cues, .. } = request else {
+            panic!("not subtitles");
+        };
+        assert_eq!(cues.len(), 1);
+        assert_eq!(cues[0].target, TimeRange::new(1_000_000, 2_000_000));
+        assert_eq!(cues[0].words.text, ["la", "la"]);
+    }
+
+    #[test]
     fn a_broken_or_too_late_file_makes_no_request() {
         assert_eq!(
             subtitle_request("nothing here", SubtitleFormat::Srt, &mut counter()),
@@ -147,6 +164,10 @@ mod tests {
         assert_eq!(
             SubtitleFormat::of_file("talk.SRT"),
             Some(SubtitleFormat::Srt)
+        );
+        assert_eq!(
+            SubtitleFormat::of_file("song.lrc"),
+            Some(SubtitleFormat::Lrc)
         );
         assert_eq!(SubtitleFormat::of_file("talk.srt.txt"), None);
         assert_eq!(SubtitleFormat::of_file("srt"), None);

@@ -1184,6 +1184,9 @@ impl Shell {
         if self.session.is_some() {
             self.save()?;
         }
+        if let Some(path) = self.path.as_ref() {
+            cutlass_logger::info!("close project {}", path.display());
+        }
         self.session = None;
         self.waiting_imports.clear();
         self.lanes_cache.replace(None);
@@ -1304,6 +1307,20 @@ impl Shell {
     }
 
     pub fn open_folder(&mut self, path: &Path) -> Result<(), ShellError> {
+        cutlass_logger::info!("open project {}", path.display());
+        let opened = self.open_folder_in(path);
+        match &opened {
+            Ok(()) => cutlass_logger::info!(
+                "opened project {} at revision {}",
+                path.display(),
+                self.session.as_ref().map_or(0, Session::revision)
+            ),
+            Err(error) => cutlass_logger::error!("open project {}: {error}", path.display()),
+        }
+        opened
+    }
+
+    fn open_folder_in(&mut self, path: &Path) -> Result<(), ShellError> {
         if self.unsaved() {
             self.save()?;
         }
@@ -1354,6 +1371,10 @@ impl Shell {
         self.fitted = false;
         self.notice.clear();
         if unclean {
+            cutlass_logger::warn!(
+                "{} was not closed cleanly last time; recovered",
+                path.display()
+            );
             self.set_notice(RECOVERED_NOTICE.to_owned());
         }
         self.transport.forget_files();
@@ -1366,9 +1387,19 @@ impl Shell {
     pub fn save(&mut self) -> Result<(), ShellError> {
         // A write already under way finishes first, so two never overlap.
         self.finish_background_save();
-        let (path, folder, revision) = self.save_snapshot()?;
+        let (path, folder, revision) = match self.save_snapshot() {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                cutlass_logger::error!("save: {error}");
+                return Err(error);
+            }
+        };
         let library = self.library_edits;
-        folder.save(&path).map_err(ShellError::Store)?;
+        if let Err(error) = folder.save(&path) {
+            cutlass_logger::error!("save {}: {error}", path.display());
+            return Err(ShellError::Store(error));
+        }
+        cutlass_logger::info!("saved {} at revision {revision}", path.display());
         self.saved = Some((revision, Instant::now()));
         self.library_saved = library;
         Ok(())
@@ -1434,6 +1465,7 @@ impl Shell {
     ) {
         let error = match written {
             Ok(Ok(())) => {
+                cutlass_logger::debug!("autosaved revision {revision}");
                 self.saved = Some((revision, Instant::now()));
                 return;
             }
@@ -2278,14 +2310,32 @@ impl Shell {
 
     pub fn undo(&mut self) -> Result<(), ShellError> {
         let session = self.session.as_mut().ok_or(ShellError::NoProject)?;
-        session.undo().map_err(ShellError::Edit)?;
-        Ok(())
+        match session.undo() {
+            Ok(revision) => {
+                cutlass_logger::info!("undo: revision {revision}");
+                Ok(())
+            }
+            Err(error) => {
+                let error = ShellError::Edit(error);
+                cutlass_logger::warn!("undo refused: {error}");
+                Err(error)
+            }
+        }
     }
 
     pub fn redo(&mut self) -> Result<(), ShellError> {
         let session = self.session.as_mut().ok_or(ShellError::NoProject)?;
-        session.redo().map_err(ShellError::Edit)?;
-        Ok(())
+        match session.redo() {
+            Ok(revision) => {
+                cutlass_logger::info!("redo: revision {revision}");
+                Ok(())
+            }
+            Err(error) => {
+                let error = ShellError::Edit(error);
+                cutlass_logger::warn!("redo refused: {error}");
+                Err(error)
+            }
+        }
     }
 
     pub fn run_shortcut(&mut self, keys: &str) -> Result<(), ShellError> {
@@ -4217,6 +4267,7 @@ impl Shell {
     /// job stays until its thread ends, so a new one waits for it.
     pub fn cancel_job(&mut self) {
         if let Some(running) = self.job.as_mut() {
+            cutlass_logger::info!("job {} cancel asked", running.job.view().label);
             running.job.cancel();
             running.stopping = true;
         }
@@ -4233,6 +4284,7 @@ impl Shell {
             crate::jobs::Poll::Lost => None,
         };
         let label = running.job.view().label;
+        let elapsed = running.job.elapsed();
         let same_project = running.project == self.path;
         let stopping = running.stopping;
         self.job = None;
@@ -4246,6 +4298,15 @@ impl Shell {
                 "{label} stopped unexpectedly"
             ))),
         };
+        match &result {
+            Ok(()) if stopping => {
+                cutlass_logger::info!("job {label} cancelled after {elapsed:.1?}");
+            }
+            Ok(()) => cutlass_logger::info!("job {label} finished in {elapsed:.1?}"),
+            Err(error) => {
+                cutlass_logger::error!("job {label} failed after {elapsed:.1?}: {error}");
+            }
+        }
         if let Err(error) = result {
             self.notice_error(&error);
         }
@@ -6595,12 +6656,34 @@ impl Shell {
                 .held_edit
                 .as_ref()
                 .is_some_and(|(held, at)| Some(held) == kind.as_ref() && *at == revision);
-        let next = if joins {
+        let applied = if joins {
             session.fold(revision, requests)
         } else {
             session.apply(revision, requests)
+        };
+        let next = match applied {
+            Ok(next) => next,
+            Err(error) => {
+                let error = ShellError::Edit(error);
+                cutlass_logger::warn!(
+                    "edit {} refused at revision {revision}: {error}",
+                    request_names(requests)
+                );
+                return Err(error);
+            }
+        };
+        if joins {
+            // A held slider folds one edit per frame; only DEBUG keeps those.
+            cutlass_logger::debug!(
+                "edit {} folded into revision {next}",
+                request_names(requests)
+            );
+        } else {
+            cutlass_logger::info!(
+                "edit {}: revision {revision} to {next}",
+                request_names(requests)
+            );
         }
-        .map_err(ShellError::Edit)?;
         self.held_edit = if self.holding {
             kind.map(|kind| (kind, next))
         } else {
@@ -7516,6 +7599,28 @@ struct CardWave {
     columns: usize,
     levels: Arc<[f32]>,
 }
+
+/// The kinds in one combo, as `move+trim`. Field values stay out of the
+/// log: a caption's words are the user's text.
+fn request_names(requests: &[Request]) -> String {
+    if requests.is_empty() {
+        return "(none)".to_owned();
+    }
+    let mut names = String::new();
+    for (index, request) in requests.iter().enumerate() {
+        if index == REQUEST_NAMES_LOGGED {
+            names.push_str(&format!("+{} more", requests.len() - index));
+            break;
+        }
+        if index > 0 {
+            names.push('+');
+        }
+        names.push_str(cutlass_agent::request_name(request));
+    }
+    names
+}
+
+const REQUEST_NAMES_LOGGED: usize = 8;
 
 /// The source file a notice came from, from `src/` on.
 fn notice_file(file: &str) -> &str {
@@ -9097,6 +9202,70 @@ mod tests {
         assert!(error.to_string().contains("still"), "{error}");
         assert_eq!(desktop.draft().unwrap(), &before);
         assert!(!temp.path.join("Resources").join("short.png").exists());
+    }
+
+    #[test]
+    fn open_edit_undo_redo_and_save_are_logged() {
+        crate::test_log::path();
+        let temp = Temp::new();
+        empty_project(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.add_track(TrackType::Audio).unwrap();
+        let missing = cutlass_model::TrackId::new("log-test-missing-track");
+        desktop.remove_track(&missing).unwrap_err();
+        desktop.undo().unwrap();
+        desktop.redo().unwrap();
+        desktop.save().unwrap();
+        let missing_folder = temp.path.join("log-test-not-a-project");
+        desktop.open_folder(&missing_folder).unwrap_err();
+        let log = crate::test_log::text();
+        let place = temp.path.display().to_string();
+        let has = |level: &str, words: &str| {
+            log.lines()
+                .any(|line| line.contains(&format!(" {level} ")) && line.contains(words))
+        };
+        assert!(
+            has("INFO", &format!("opened project {place} at revision")),
+            "{log}"
+        );
+        assert!(has("INFO", "edit insert_track: revision"), "{log}");
+        assert!(
+            has("WARN", "edit remove_track refused at revision"),
+            "{log}"
+        );
+        assert!(has("INFO", "undo: revision"), "{log}");
+        assert!(has("INFO", "redo: revision"), "{log}");
+        assert!(has("INFO", &format!("saved {place} at revision")), "{log}");
+        assert!(
+            has(
+                "ERROR",
+                &format!("open project {}: ", missing_folder.display())
+            ),
+            "{log}"
+        );
+    }
+
+    #[test]
+    fn a_combo_logs_its_kinds_and_not_its_words() {
+        use cutlass_session::Request;
+        let words = Request::RenameTrack {
+            track_id: cutlass_model::TrackId::new("t"),
+            name: "secret words".to_owned(),
+        };
+        let insert = Request::InsertTrack {
+            track_id: cutlass_model::TrackId::new("u"),
+            kind: TrackType::Video,
+        };
+        assert_eq!(super::request_names(&[]), "(none)");
+        assert_eq!(
+            super::request_names(&[insert.clone(), words.clone()]),
+            "insert_track+rename_track"
+        );
+        let many = vec![words; 11];
+        let names = super::request_names(&many);
+        assert!(names.ends_with("+3 more"), "{names}");
+        assert!(!names.contains("secret"), "{names}");
     }
 
     #[test]

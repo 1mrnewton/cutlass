@@ -5,7 +5,7 @@
 //! and moves by the same amount. The planner does not write the draft.
 
 use cutlass_model::{Draft, Micros, SegmentId, TrackId, TrackType};
-use cutlass_session::{Request, lane_fits};
+use cutlass_session::{Request, lane_fits, new_lane_index};
 
 use crate::gesture::{GestureError, GestureOutcome, MoveGesture, move_gesture};
 use crate::hit::{BadScale, Pointer, hit_test, time_at};
@@ -16,9 +16,8 @@ use crate::snap::snap_guides;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NewLane {
     pub kind: TrackType,
-    /// Where it opens in the track list, which is the row order. `None`
-    /// leaves the place to the session's rule for the kind.
-    pub index: Option<usize>,
+    /// Where it opens in the track list, which is the row order.
+    pub index: usize,
 }
 
 /// Where one clip of a drag lands.
@@ -145,9 +144,13 @@ pub fn plan_move(
         GestureOutcome::Edit(_) => Err(GestureError::UnknownSegment),
         GestureOutcome::Miss => Ok(MovePlan::Miss),
         GestureOutcome::NewLane { kind, start } => {
-            // The lane opens just above the pointer's row when the kind may sit there.
-            let index = Some(pointer_row.track_index)
-                .filter(|index| lane_fits(&draft.tracks, &kind, *index));
+            // The lane opens just above the pointer's row when the kind may sit
+            // there, else where the session opens a lane of that kind.
+            let index = if lane_fits(&draft.tracks, &kind, pointer_row.track_index) {
+                pointer_row.track_index
+            } else {
+                new_lane_index(&draft.tracks, &kind)
+            };
             Ok(MovePlan::NewLane {
                 lane: NewLane { kind, index },
                 start,
@@ -213,10 +216,7 @@ pub fn plan_move_between(
     .map_or(raw, |target| target.time);
     let start = Micros(start.0.max(0));
     Ok(MovePlan::NewLane {
-        lane: NewLane {
-            kind,
-            index: Some(index),
-        },
+        lane: NewLane { kind, index },
         start,
         duration,
         snapped: start != raw,
@@ -265,16 +265,10 @@ pub fn move_requests(draft: &Draft, moves: &[ClipMove]) -> Vec<Request> {
         ordered.sort_by_key(|plan| plan.start);
     }
     let lanes = moves.iter().filter_map(|plan| {
-        plan.new_lane.as_ref().map(|lane| match lane.index {
-            Some(index) => Request::InsertTrackAt {
-                track_id: plan.track_id.clone(),
-                kind: lane.kind.clone(),
-                index,
-            },
-            None => Request::InsertTrack {
-                track_id: plan.track_id.clone(),
-                kind: lane.kind.clone(),
-            },
+        plan.new_lane.as_ref().map(|lane| Request::InsertTrackAt {
+            track_id: plan.track_id.clone(),
+            kind: lane.kind.clone(),
+            index: lane.index,
         })
     });
     lanes
@@ -427,7 +421,7 @@ mod tests {
             MovePlan::NewLane {
                 lane: NewLane {
                     kind: TrackType::Video,
-                    index: Some(0),
+                    index: 0,
                 },
                 start: Micros(0),
                 duration: Micros(1_000_000),
@@ -501,7 +495,7 @@ mod tests {
             MovePlan::NewLane {
                 lane: NewLane {
                     kind: TrackType::Video,
-                    index: Some(0),
+                    index: 0,
                 },
                 start: Micros(4_000_000),
                 duration: Micros(1_000_000),

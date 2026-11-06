@@ -49,7 +49,7 @@ pub use canvas::{CANVAS_SHAPES, CanvasShape, canvas_for, follow_first_picture, r
 pub use move_segment::move_segment;
 pub use place::place;
 pub use text::{MAX_CAPTION_STAGGER_MS, NEW_TEXT_SIZE};
-pub use track::lane_fits;
+pub use track::{lane_fits, new_lane_index};
 pub use trim::trim;
 pub use words::set_words;
 

@@ -50,7 +50,7 @@ pub fn insert_track(
     kind: &TrackType,
 ) -> Result<(), EditError> {
     let track = new_lane(draft, track_id, kind)?;
-    let index = lane_index(&draft.tracks, kind);
+    let index = new_lane_index(&draft.tracks, kind);
     draft.tracks.insert(index, track);
     Ok(())
 }
@@ -145,7 +145,10 @@ pub fn rename_track(draft: &mut Draft, track_id: &TrackId, name: &str) -> Result
 
 /// Video overlays sit just above the main track. Audio sits just under it.
 /// Other lanes sit above the first video track.
-fn lane_index(tracks: &[Track], kind: &TrackType) -> usize {
+/// Where `InsertTrack` opens a lane of `kind`: an overlay just above the main
+/// track, audio just under it, any other kind above the first video track.
+#[must_use]
+pub fn new_lane_index(tracks: &[Track], kind: &TrackType) -> usize {
     match kind {
         TrackType::Audio => tracks
             .iter()

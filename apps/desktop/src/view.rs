@@ -4438,27 +4438,23 @@ fn release_library_drop(
     if !tracks.contains(pos) {
         return;
     }
-    if let Some(index) = lane_under(boxes, pos)
-        && let Some(row) = boxes.get(index)
-    {
-        ui.painter().rect_stroke(
-            *row,
-            CornerRadius::same(4),
-            egui::Stroke::new(tokens::STROKE, tokens::EXPORT),
-            egui::StrokeKind::Inside,
-        );
+    let x = f64::from((pos.x - lanes_left).max(0.0));
+    let y = lane_under(boxes, pos).map(|index| {
+        let row = u32::try_from(index).unwrap_or(0);
+        f64::from(row) * tokens::LANE_HEIGHT + tokens::LANE_HEIGHT / 2.0
+    });
+    // Mark where the card really goes, which may be another lane or a new one.
+    if let Some(landing) = y.and_then(|y| shell.library_landing(&material_id, x, y)) {
+        paint_library_landing(shell, ui, &landing, boxes, lanes_left);
     }
     if !ui.input(|input| input.pointer.any_released()) {
         return;
     }
     let _ = egui::DragAndDrop::take_payload::<LibraryDrop>(ui.ctx());
-    let Some(index) = lane_under(boxes, pos) else {
+    let Some(y) = y else {
         shell.notice_error(&"the drag missed the lanes");
         return;
     };
-    let x = f64::from((pos.x - lanes_left).max(0.0));
-    let row = u32::try_from(index).unwrap_or(0);
-    let y = f64::from(row) * tokens::LANE_HEIGHT + tokens::LANE_HEIGHT / 2.0;
     let landed = if material_id.starts_with("transition:") {
         shell.drop_transition(&material_id, x, y)
     } else if material_id.starts_with(cutlass_editor::TITLE_CARD_PREFIX) {
@@ -4478,6 +4474,81 @@ fn release_library_drop(
     };
     if let Err(error) = landed {
         shell.notice_error(&error);
+    }
+}
+
+/// Outline the lane a library card lands on and the span it takes there, or
+/// draw the line where a new lane opens for it.
+fn paint_library_landing(
+    shell: &Shell,
+    ui: &Ui,
+    landing: &crate::shell::LibraryLanding,
+    boxes: &[Rect],
+    lanes_left: f32,
+) {
+    use crate::shell::LibraryLanding;
+    match landing {
+        LibraryLanding::Row {
+            track_id,
+            start,
+            duration,
+        } => {
+            let rows = shell.lanes();
+            let Some((lane, row)) = rows
+                .iter()
+                .zip(boxes)
+                .find(|(lane, _)| &lane.track_id == track_id)
+            else {
+                return;
+            };
+            ui.painter().rect_stroke(
+                *row,
+                CornerRadius::same(4),
+                egui::Stroke::new(tokens::STROKE, tokens::EXPORT),
+                egui::StrokeKind::Inside,
+            );
+            if duration.0 > 0 {
+                let spot = clip_bounds(
+                    shell,
+                    tall_lane(lane),
+                    is_audio(lane),
+                    *start,
+                    *duration,
+                    *row,
+                    lanes_left,
+                );
+                ui.painter().with_clip_rect(*row).rect_stroke(
+                    spot,
+                    CornerRadius::same(7),
+                    egui::Stroke::new(2.0, tokens::SELECTED),
+                    egui::StrokeKind::Inside,
+                );
+            }
+        }
+        LibraryLanding::NewLane { row, .. } => {
+            if let Some(y) = gap_y(boxes, *row) {
+                let right = boxes.first().map_or(lanes_left, Rect::right);
+                ui.painter().hline(
+                    lanes_left..=right,
+                    y,
+                    egui::Stroke::new(2.0, tokens::SELECTED),
+                );
+            }
+        }
+    }
+}
+
+/// The middle of the gap above view row `row`, or just past the first or
+/// last row.
+fn gap_y(boxes: &[Rect], row: usize) -> Option<f32> {
+    match (
+        row.checked_sub(1).and_then(|above| boxes.get(above)),
+        boxes.get(row),
+    ) {
+        (Some(above), Some(below)) => Some((above.bottom() + below.top()) / 2.0),
+        (None, Some(below)) => Some(below.top() - 4.0),
+        (Some(above), None) => Some(above.bottom() + 4.0),
+        (None, None) => None,
     }
 }
 
@@ -6081,14 +6152,8 @@ fn paint_new_lane(shell: &Shell, ui: &Ui, boxes: &[Rect], lanes_left: f32) {
     let Some((row, _)) = shell.new_lane_preview() else {
         return;
     };
-    let y = match (
-        row.checked_sub(1).and_then(|above| boxes.get(above)),
-        boxes.get(row),
-    ) {
-        (Some(above), Some(below)) => (above.bottom() + below.top()) / 2.0,
-        (None, Some(below)) => below.top() - 4.0,
-        (Some(above), None) => above.bottom() + 4.0,
-        (None, None) => return,
+    let Some(y) = gap_y(boxes, row) else {
+        return;
     };
     let Some(right) = boxes.first().map(Rect::right) else {
         return;

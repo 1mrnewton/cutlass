@@ -287,6 +287,26 @@ pub struct LaneView {
     pub clips: Vec<ClipSpan>,
 }
 
+/// Where a library card dragged over the lanes would land if let go now.
+#[derive(Clone, Debug, PartialEq)]
+pub enum LibraryLanding {
+    /// On this lane, over `start..start + duration`. A transition lands on
+    /// a cut of main and has no span: its duration is zero.
+    Row {
+        track_id: TrackId,
+        start: Micros,
+        duration: Micros,
+    },
+    /// On a new lane opened above view row `row` (the row count is under
+    /// the last).
+    NewLane {
+        row: usize,
+        kind: TrackType,
+        start: Micros,
+        duration: Micros,
+    },
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ClipSpan {
     pub id: SegmentId,
@@ -2664,19 +2684,7 @@ impl Shell {
     #[must_use]
     pub fn new_lane_preview(&self) -> Option<(usize, TrackType)> {
         let lane = self.pending_moves.first()?.new_lane.as_ref()?;
-        let draft = self.draft()?;
-        let row = self
-            .lanes()
-            .iter()
-            .position(|row| {
-                draft
-                    .tracks
-                    .iter()
-                    .position(|track| track.id == row.track_id)
-                    .is_some_and(|index| index >= lane.index)
-            })
-            .unwrap_or(self.lanes().len());
-        Some((row, lane.kind.clone()))
+        Some((self.row_above_track(lane.index), lane.kind.clone()))
     }
 
     /// The dragged clip's copy. A group drag still reports that clip here.
@@ -2896,6 +2904,112 @@ impl Shell {
                 "the drag could not be read".to_owned(),
             )),
         }
+    }
+
+    /// Where library card `material_id` would land dropped at `x`, `y`,
+    /// on the drop rules the `drop_*` calls use, so the lanes can mark the
+    /// spot it really goes to, not just the row under the pointer. `None`
+    /// when it would miss or the card is unknown.
+    #[must_use]
+    pub fn library_landing(&self, material_id: &str, x: f64, y: f64) -> Option<LibraryLanding> {
+        let draft = self.draft()?;
+        let pointer = Pointer {
+            x: self.time_zero_x(x),
+            y,
+        };
+        if material_id.starts_with("transition:") {
+            let main = draft.tracks.iter().find(|track| track.is_main())?;
+            return Some(LibraryLanding::Row {
+                track_id: main.id.clone(),
+                start: Micros(0),
+                duration: Micros(0),
+            });
+        }
+        let (kind, duration) = if material_id.starts_with(cutlass_editor::EFFECT_CARD_PREFIX) {
+            let on_clip = hit_test(draft, self.scale(), pointer)
+                .ok()
+                .flatten()
+                .and_then(|hit| hit.segment_id)
+                .and_then(|clip| {
+                    let (start, duration) = effect_target(draft, &clip)?;
+                    Some((clip, start, duration))
+                });
+            if let Some((clip, start, duration)) = on_clip {
+                return Some(match effect_row_for(draft, &clip) {
+                    Some(track_id) => LibraryLanding::Row {
+                        track_id,
+                        start,
+                        duration,
+                    },
+                    None => self.new_lane_landing(TrackType::Effect, start, duration),
+                });
+            }
+            (TrackType::Effect, EFFECT_LENGTH)
+        } else if material_id.starts_with(cutlass_editor::TITLE_CARD_PREFIX) {
+            (TrackType::Text, TITLE_LENGTH)
+        } else if material_id.starts_with(cutlass_editor::TEMPLATE_CARD_PREFIX) {
+            let length = cutlass_editor::title_template(material_id)
+                .map_or(TITLE_LENGTH, cutlass_editor::TitleTemplate::length);
+            (TrackType::Text, length)
+        } else if material_id == cutlass_editor::ADJUSTMENT_CARD {
+            (TrackType::Adjust, EFFECT_LENGTH)
+        } else if material_id.starts_with(cutlass_editor::FILTER_CARD_PREFIX) {
+            (TrackType::Filter, EFFECT_LENGTH)
+        } else if material_id.starts_with(STICKER_CARD_PREFIX) {
+            let sticker = shelf_sticker(material_id).ok()?;
+            (TrackType::Sticker, sticker_length(sticker))
+        } else {
+            material_span(draft, material_id)?
+        };
+        let gesture = DropGesture {
+            kind,
+            duration,
+            pointer,
+            scale: self.scale(),
+            playhead: self.playhead,
+            snap_threshold: self.snap_threshold(),
+        };
+        match drop_gesture(draft, &gesture).ok()? {
+            DropOutcome::Miss => None,
+            DropOutcome::Place { track_id, start } => Some(LibraryLanding::Row {
+                track_id,
+                start,
+                duration,
+            }),
+            DropOutcome::NewLane { kind, start } => {
+                Some(self.new_lane_landing(kind, start, duration))
+            }
+        }
+    }
+
+    /// A new lane of `kind` opens where the session puts one.
+    fn new_lane_landing(&self, kind: TrackType, start: Micros, duration: Micros) -> LibraryLanding {
+        let index = self.draft().map_or(0, |draft| {
+            cutlass_session::new_lane_index(&draft.tracks, &kind)
+        });
+        LibraryLanding::NewLane {
+            row: self.row_above_track(index),
+            kind,
+            start,
+            duration,
+        }
+    }
+
+    /// The view row a lane opened at track index `index` would sit above.
+    fn row_above_track(&self, index: usize) -> usize {
+        let Some(draft) = self.draft() else {
+            return 0;
+        };
+        let rows = self.lanes();
+        rows.iter()
+            .position(|row| {
+                draft
+                    .tracks
+                    .iter()
+                    .position(|track| track.id == row.track_id)
+                    .is_some_and(|at| at >= index)
+            })
+            .unwrap_or(rows.len())
     }
 
     /// Place one library material at the timeline point.
@@ -14484,6 +14598,59 @@ mod tests {
 
         desktop.undo().unwrap();
         assert_eq!(desktop.draft().unwrap().tracks, before);
+    }
+
+    #[test]
+    fn a_text_card_over_an_overlay_marks_the_new_lane_it_really_opens() {
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        draft.config.maintrack_adsorb = false;
+        draft.canvas_config.width = 2;
+        draft.canvas_config.height = 1;
+        draft.tracks[0]
+            .segments
+            .push(Segment::new("low", "color", TimeRange::new(0, 2_000_000)));
+        let mut overlay = Track::main(cutlass_model::TrackId::new("overlay"));
+        overlay.flag = cutlass_model::TrackFlag::SubVideo;
+        overlay
+            .segments
+            .push(Segment::new("high", "color", TimeRange::new(0, 2_000_000)));
+        draft.tracks.insert(0, overlay);
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        let card = cutlass_editor::title_style("title:end-card")
+            .unwrap()
+            .card_id();
+        let overlay_row = crate::tokens::LANE_HEIGHT / 2.0;
+        let x = lane_time(&desktop, 500_000.0);
+
+        // Text never sits on a video lane: the mark is a new lane, not the overlay.
+        let landing = desktop.library_landing(&card, x, overlay_row).unwrap();
+        let super::LibraryLanding::NewLane { row, kind, .. } = landing else {
+            panic!("a text card marks the overlay it cannot go on: {landing:?}");
+        };
+        assert_eq!(kind, TrackType::Text);
+        assert_eq!(row, 0, "the text lane opens above the overlay");
+
+        desktop.drop_title(&card, x, overlay_row).unwrap();
+        let draft = desktop.draft().unwrap();
+        assert_eq!(
+            draft.tracks[0].kind,
+            TrackType::Text,
+            "it landed where marked"
+        );
+
+        // Over its own lane now, it marks that lane and the span it takes.
+        let landing = desktop
+            .library_landing(&card, lane_time(&desktop, 4_000_000.0), overlay_row)
+            .unwrap();
+        let text_lane = draft.tracks[0].id.clone();
+        assert!(matches!(
+            landing,
+            super::LibraryLanding::Row { ref track_id, duration, .. }
+                if *track_id == text_lane && duration == cutlass_editor::TITLE_LENGTH
+        ));
     }
 
     #[test]

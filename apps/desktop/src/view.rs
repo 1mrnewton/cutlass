@@ -3216,7 +3216,39 @@ fn inspector_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
         .unwrap_or_default();
     ui.ctx()
         .data_mut(|data| data.insert_temp(egui::Id::unique(INSPECTED), inspected));
-    let padded = rect.shrink2(Vec2::new(16.0, 0.0));
+    let project = shell.inspection().is_none();
+    // The project's details keep Modify in a band at the foot.
+    let body = if project && shell.draft().is_some() {
+        let (body, foot) = rect.split_top_bottom_at_y(rect.bottom() - PROJECT_FOOT);
+        ui.painter()
+            .rect_filled(foot, CornerRadius::ZERO, tokens::PROJECT_BAR);
+        let button = Rect::from_min_size(
+            foot.right_center() - Vec2::new(16.0 + 76.0, 15.0),
+            Vec2::new(76.0, 30.0),
+        );
+        let mut foot_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .id_salt("project-foot")
+                .max_rect(foot),
+        );
+        let response = foot_ui.place(
+            button,
+            egui::Button::new(
+                RichText::new("Modify")
+                    .size(tokens::TYPE_SIZE + 1.0)
+                    .color(tokens::TEXT),
+            )
+            .fill(tokens::MENU_HOVER)
+            .corner_radius(CornerRadius::same(tokens::EXPORT_RADIUS)),
+        );
+        if response.on_hover_text("Change the project settings").clicked() {
+            view.project_dialog = shell.project_settings();
+        }
+        body
+    } else {
+        rect
+    };
+    let padded = body.shrink2(Vec2::new(16.0, 0.0));
     let mut details = ui.new_child(egui::UiBuilder::new().max_rect(padded));
     details.set_clip_rect(padded);
     let content_width = padded.width();
@@ -3244,93 +3276,77 @@ fn section_title(ui: &mut Ui, title: &str) {
     ui.add_space(14.0);
 }
 
+/// The band at the foot of the project's details that holds Modify.
+const PROJECT_FOOT: f32 = 56.0;
+
+/// The project's settings as a list; Modify opens the dialog that changes
+/// them. Name and background stay editable here.
 fn project_facts(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, width: f32) {
-    if ui.button("Modify").clicked() {
-        view.project_dialog = shell.project_settings();
-    }
-    if let Some(stored) = shell.draft().map(|draft| draft.name.clone()) {
-        if let Some(name) = name_field(ui, &mut view.name_buffer, &stored)
-            && let Err(error) = shell.set_project_name(&name)
-        {
-            shell.notice_error(&error);
-        }
-    } else {
+    let Some(settings) = shell.project_settings() else {
         fact(ui, "Name", &shell.project_name(), width);
+        return;
+    };
+    let stored = settings.name.clone();
+    if let Some(name) = name_field(ui, &mut view.name_buffer, &stored)
+        && let Err(error) = shell.set_project_name(&name)
+    {
+        shell.notice_error(&error);
     }
     let saved = shell
         .project_folder()
-        .map(|path| path.display().to_string())
-        .unwrap_or_else(|| "No project".to_owned());
+        .map_or_else(|| "Not saved".to_owned(), short_folder);
     fact(ui, "Saved", &saved, width);
-    let Some((ratio, canvas_width, canvas_height, background)) = shell.draft().map(|draft| {
-        (
-            ratio_label(&draft.canvas_config.ratio),
-            draft.canvas_config.width,
-            draft.canvas_config.height,
-            draft.canvas_config.background.clone().unwrap_or_default(),
-        )
-    }) else {
-        return;
-    };
-    let space = shell.color_space_label();
-    let color_space = widgets::toolbar_button(ui, &space).on_hover_text("Project color space");
-    if color_space.clicked()
-        && let Err(error) = shell.cycle_color_space()
-    {
-        shell.notice_error(&error);
-    }
-    ui.add_space(8.0);
-    let span = ui.available_rect_before_wrap().x_range();
-    let y = ui.cursor().min.y;
-    ui.painter().hline(
-        span,
-        y,
-        egui::Stroke::new(1.0, Color32::from_white_alpha(20)),
-    );
-    ui.add_space(16.0);
-    let shape = widgets::toolbar_button(ui, &ratio).on_hover_text("Canvas shape");
-    if shape.clicked()
-        && let Err(error) = shell.cycle_canvas()
-    {
-        shell.notice_error(&error);
-    }
     fact(
         ui,
-        "Resolution",
-        &format!("{canvas_width}×{canvas_height}"),
+        "Color space",
+        &cutlass_editor::color_space_name(settings.color_space),
         width,
     );
-    let rate_label = shell.frame_rate_label();
-    let drop_shown = shell.drop_frame_available();
-    let drop_label = if shell.drop_frame_enabled() {
-        "Drop frame"
-    } else {
-        "Non-drop"
+    fact(ui, "Free layer", turned(settings.free_layer), width);
+    ui.add_space(6.0);
+    let span = ui.available_rect_before_wrap().x_range();
+    let y = ui.cursor().min.y;
+    ui.painter()
+        .hline(span, y, egui::Stroke::new(1.0, tokens::LANE_LINE));
+    ui.add_space(12.0);
+    let ratio = cutlass_editor::PROJECT_RATIOS
+        .iter()
+        .find(|(ratio, _)| *ratio == settings.ratio)
+        .map_or_else(|| ratio_label(&settings.ratio), |(_, name)| (*name).to_owned());
+    fact(ui, "Ratio", &ratio, width);
+    let resolution = cutlass_editor::PROJECT_RESOLUTIONS
+        .iter()
+        .find(|(side, _)| *side == settings.short_side)
+        .map_or("Adapted", |(_, name)| name);
+    let canvas = shell
+        .draft()
+        .map(|draft| (draft.canvas_config.width, draft.canvas_config.height));
+    let resolution = match canvas {
+        Some((w, h)) => format!("{resolution} · {w}×{h}"),
+        None => resolution.to_owned(),
     };
-    let rate = widgets::toolbar_button(ui, &rate_label).on_hover_text("Frames per second");
-    if rate.clicked()
-        && let Err(error) = shell.cycle_frame_rate()
-    {
-        shell.notice_error(&error);
+    fact(ui, "Resolution", &resolution, width);
+    fact(ui, "Frame rate", &cutlass_editor::rate_label(settings.rate), width);
+    if shell.drop_frame_available() {
+        fact(ui, "Drop frame", turned(shell.drop_frame_enabled()), width);
     }
-    if drop_shown {
-        let drop = widgets::toolbar_button(ui, drop_label).on_hover_text("Timecode labels");
-        if drop.clicked()
-            && let Err(error) = shell.toggle_drop_frame()
-        {
-            shell.notice_error(&error);
-        }
-    }
+    let background = shell
+        .draft()
+        .and_then(|draft| draft.canvas_config.background.clone())
+        .unwrap_or_default();
     if let Some(color) = color_field(
         ui,
         "Background",
         &mut view.background_buffer,
         &background,
-        "Hex color. Empty is clear",
     ) && let Err(error) = shell.set_canvas_background(&color)
     {
         shell.notice_error(&error);
     }
+}
+
+fn turned(on: bool) -> &'static str {
+    if on { "Turned on" } else { "Turned off" }
 }
 
 /// Where the inspector keeps the id of the clip it is showing this frame.
@@ -3358,15 +3374,38 @@ fn commits(ui: &Ui, response: &egui::Response) -> bool {
     !escaped && typed_for.is_none_or(|typed_for| typed_for == clip)
 }
 
-fn name_field(ui: &mut Ui, text: &mut String, stored: &str) -> Option<String> {
+/// The label column of the project's details.
+const FACT_LABEL: f32 = 120.0;
+/// One row of the project's details.
+const FACT_ROW: f32 = 30.0;
+const FACT_SIZE: f32 = 14.0;
+
+fn fact_label(ui: &mut Ui, label: &str) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(FACT_LABEL, FACT_ROW), Sense::hover());
+    ui.painter().text(
+        rect.left_center(),
+        Align2::LEFT_CENTER,
+        label,
+        FontId::proportional(FACT_SIZE),
+        tokens::MUTED,
+    );
+}
+
+/// A detail typed in place: plain text until it is clicked.
+fn fact_field(ui: &mut Ui, label: &str, text: &mut String, stored: &str, hint: &str) -> Option<String> {
     let mut edited = None;
     ui.horizontal(|ui| {
-        ui.set_min_width(ui.available_width());
-        ui.add_sized(
-            [108.0, 18.0],
-            egui::Label::new(RichText::new("Name").size(13.0).color(tokens::MUTED)),
+        ui.spacing_mut().item_spacing.x = 12.0;
+        fact_label(ui, label);
+        let response = ui.add(
+            egui::TextEdit::singleline(text)
+                .frame(egui::Frame::NONE)
+                .margin(egui::Margin::symmetric(0, 7))
+                .hint_text(RichText::new(hint).color(tokens::FAINT))
+                .text_color(tokens::TEXT)
+                .font(FontId::proportional(FACT_SIZE))
+                .desired_width(ui.available_width()),
         );
-        let response = widgets::field(ui, text).on_hover_text("Empty shows Untitled");
         if commits(ui, &response) {
             edited = Some(text.clone());
         }
@@ -3374,28 +3413,29 @@ fn name_field(ui: &mut Ui, text: &mut String, stored: &str) -> Option<String> {
             *text = stored.to_owned();
         }
     });
-    ui.add_space(4.0);
     edited
 }
 
+fn name_field(ui: &mut Ui, text: &mut String, stored: &str) -> Option<String> {
+    fact_field(ui, "Name", text, stored, "Untitled")
+}
+
 fn fact(ui: &mut Ui, label: &str, value: &str, row_width: f32) {
-    let value_width = (row_width - 120.0).max(40.0);
+    let value_width = (row_width - FACT_LABEL - 12.0).max(40.0);
     ui.horizontal(|ui| {
         ui.set_max_width(row_width);
         ui.spacing_mut().item_spacing.x = 12.0;
-        ui.add_sized(
-            [108.0, 18.0],
-            egui::Label::new(RichText::new(label).size(13.0).color(tokens::MUTED)),
-        );
+        fact_label(ui, label);
         let mut job = egui::text::LayoutJob::simple(
             value.to_owned(),
-            FontId::proportional(13.0),
+            FontId::proportional(FACT_SIZE),
             tokens::TEXT,
             value_width,
         );
         job.wrap = egui::text::TextWrapping::truncate_at_width(value_width);
         let galley = ui.fonts_mut(|fonts| fonts.layout_job(job));
-        let (rect, response) = ui.allocate_exact_size(Vec2::new(value_width, 18.0), Sense::hover());
+        let (rect, response) =
+            ui.allocate_exact_size(Vec2::new(value_width, FACT_ROW), Sense::hover());
         ui.painter().galley(
             rect.left_center() + Vec2::new(0.0, -galley.size().y / 2.0),
             galley,
@@ -3403,7 +3443,6 @@ fn fact(ui: &mut Ui, label: &str, value: &str, row_width: f32) {
         );
         response.on_hover_text(value);
     });
-    ui.add_space(4.0);
 }
 
 fn ratio_label(ratio: &str) -> String {
@@ -3414,31 +3453,9 @@ fn ratio_label(ratio: &str) -> String {
     }
 }
 
-fn color_field(
-    ui: &mut Ui,
-    label: &str,
-    text: &mut String,
-    stored: &str,
-    hover: &str,
-) -> Option<String> {
-    let mut edited = None;
-    ui.horizontal(|ui| {
-        ui.set_min_width(ui.available_width());
-        ui.add_sized(
-            [108.0, 18.0],
-            egui::Label::new(RichText::new(label).size(13.0).color(tokens::MUTED)),
-        );
-        let response = widgets::field(ui, text);
-        if commits(ui, &response) {
-            edited = Some(text.clone());
-        }
-        if !response.has_focus() {
-            *text = stored.to_owned();
-        }
-        response.on_hover_text(hover);
-    });
-    ui.add_space(4.0);
-    edited.filter(|value| value != stored)
+/// A hex color typed in place; empty is clear.
+fn color_field(ui: &mut Ui, label: &str, text: &mut String, stored: &str) -> Option<String> {
+    fact_field(ui, label, text, stored, "Clear").filter(|value| value != stored)
 }
 
 fn timeline_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect) {

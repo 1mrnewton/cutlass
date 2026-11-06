@@ -897,7 +897,8 @@ mod tests {
                 }],
             )
             .unwrap();
-        assert!(session.draft().tracks[1].segments.is_empty());
+        // The dependent's row, now empty, goes with it.
+        assert_eq!(session.draft().tracks.len(), 1);
         assert!(session.draft().relationships[0].id_to_id.is_empty());
 
         let (mut session, main, over) = open();
@@ -922,8 +923,9 @@ mod tests {
                 }],
             )
             .unwrap();
+        // Main stays empty; the dependent's emptied row goes.
+        assert_eq!(session.draft().tracks.len(), 1);
         assert!(session.draft().tracks[0].segments.is_empty());
-        assert!(session.draft().tracks[1].segments.is_empty());
         assert!(session.draft().relationships[0].id_to_id.is_empty());
     }
 

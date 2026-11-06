@@ -639,14 +639,30 @@ pub fn apply_all(
     requests: &[Request],
     linkage: &LinkageSettings,
 ) -> Result<(), EditError> {
+    let held: Vec<cutlass_model::TrackId> = draft
+        .tracks
+        .iter()
+        .filter(|track| !track.segments.is_empty())
+        .map(|track| track.id.clone())
+        .collect();
     for request in requests {
         let before = draft.clone();
         apply_request(draft, request)?;
         linkage::after_request(draft, &before, linkage)?;
         magnet::pack(draft, linkage)?;
     }
+    drop_emptied_lanes(draft, &held);
     sync_duration(draft);
     Ok(())
+}
+
+/// A lane other than main that held clips before the edit and holds none
+/// after it goes, in the same step. A lane that was already empty, such as
+/// one just added, stays.
+fn drop_emptied_lanes(draft: &mut Draft, held: &[cutlass_model::TrackId]) {
+    draft
+        .tracks
+        .retain(|track| track.is_main() || !track.segments.is_empty() || !held.contains(&track.id));
 }
 
 /// Stored duration becomes the latest target end. Playback reads that field.

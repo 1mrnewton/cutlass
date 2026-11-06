@@ -489,7 +489,8 @@ mod tests {
                 ("c".into(), 5_000_000, 1_000_000)
             ]
         );
-        assert!(draft.tracks[1].segments.is_empty());
+        // The sound row the compound emptied goes in the same step.
+        assert_eq!(draft.tracks.len(), 1);
         let Some(MaterialRef::Draft(material)) = draft.materials.get("inside") else {
             panic!("no compound material");
         };
@@ -576,9 +577,10 @@ mod tests {
                 }],
             )
             .unwrap();
-        // A new clip named b goes on another row, and the sound row goes.
+        // A new clip named b goes on another row. The sound row the compound
+        // emptied is already gone.
         let mut draft = session.draft().clone();
-        draft.tracks.remove(1);
+        assert_eq!(draft.tracks.len(), 1);
         let mut other = Track::main("top");
         other.flag = cutlass_model::TrackFlag::default();
         other.segments = vec![clip("b", "v1", 9_000_000, 1_000_000)];

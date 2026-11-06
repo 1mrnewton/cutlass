@@ -324,6 +324,64 @@ mod tests {
     }
 
     #[test]
+    fn an_edit_that_empties_a_lane_takes_it_and_an_added_empty_lane_stays() {
+        let (mut session, main) = open();
+        session
+            .apply(
+                0,
+                &[
+                    Request::InsertTrack {
+                        track_id: TrackId::new("over"),
+                        kind: TrackType::Video,
+                    },
+                    Request::Place {
+                        track_id: TrackId::new("over"),
+                        segment: Box::new(Segment::new("o", "pic", TimeRange::new(0, 1_000_000))),
+                    },
+                    Request::InsertTrack {
+                        track_id: TrackId::new("spare"),
+                        kind: TrackType::Text,
+                    },
+                    Request::Place {
+                        track_id: main.clone(),
+                        segment: Box::new(Segment::new("m", "pic", TimeRange::new(0, 1_000_000))),
+                    },
+                ],
+            )
+            .unwrap();
+        let before = session.draft().clone();
+        session
+            .apply(
+                1,
+                &[Request::Remove {
+                    segment_id: "o".into(),
+                }],
+            )
+            .unwrap();
+        let ids: Vec<&str> = session
+            .draft()
+            .tracks
+            .iter()
+            .map(|track| track.id.as_str())
+            .collect();
+        assert_eq!(ids, ["spare", main.as_str()]);
+        session.undo().unwrap();
+        assert_eq!(session.draft(), &before);
+
+        // Main stays when its last clip goes.
+        let revision = session.revision();
+        session
+            .apply(
+                revision,
+                &[Request::Remove {
+                    segment_id: "m".into(),
+                }],
+            )
+            .unwrap();
+        assert!(session.draft().tracks.iter().any(|track| track.id == main));
+    }
+
+    #[test]
     fn a_repeated_track_id_leaves_the_draft() {
         let (mut session, _) = open();
         let error = session

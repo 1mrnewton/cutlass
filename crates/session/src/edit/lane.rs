@@ -1,7 +1,8 @@
 //! Which lanes take which clips, and where a clip may start.
 //!
 //! A still picture (a sticker, a GIF, a photo or an image) may also sit on a
-//! sticker lane.
+//! sticker lane. A compound clip may also sit on a lane of the kind it was
+//! made on, so one made of text keeps to text lanes.
 
 use cutlass_model::{Draft, MaterialRef, Micros, Segment, Track, TrackType};
 
@@ -25,8 +26,13 @@ pub(super) fn check(
                 || (track.kind == TrackType::Sticker
                     && matches!(video.kind.as_str(), "sticker" | "gif" | "photo" | "image"))
         }
-        Some(MaterialRef::Draft(_)) => {
+        Some(MaterialRef::Draft(nest)) => {
             matches!(track.kind, TrackType::Video | TrackType::Composition)
+                || nest
+                    .draft
+                    .as_ref()
+                    .and_then(|inside| inside.tracks.first())
+                    .is_some_and(|host| host.kind == track.kind)
         }
         Some(MaterialRef::Audio(_)) => track.kind == TrackType::Audio,
         Some(MaterialRef::Text(_)) => matches!(
@@ -81,6 +87,60 @@ mod tests {
             session.apply(session.revision(), &[place("movie", 2_000_000)]),
             Err(EditError::LaneKind)
         );
+    }
+
+    #[test]
+    fn a_compound_made_of_text_moves_on_text_lanes_and_into_a_new_one() {
+        use cutlass_model::{MaterialDraft, MaterialText, TrackId};
+
+        let mut draft = Draft::empty("D");
+        draft.config.maintrack_adsorb = false;
+        let mut words = Track::main("words");
+        words.kind = TrackType::Text;
+        let mut inside = Draft::empty("inside");
+        inside.tracks = vec![words.clone()];
+        words
+            .segments
+            .push(Segment::new("nest", "nest", TimeRange::new(0, 1_000_000)));
+        draft.tracks.push(words);
+        draft.materials.texts.push(MaterialText {
+            id: "unused".into(),
+            ..MaterialText::default()
+        });
+        draft.materials.drafts.push(MaterialDraft {
+            id: "nest".into(),
+            draft: Some(Box::new(inside)),
+            ..MaterialDraft::default()
+        });
+        let mut session = Session::open(draft);
+        session
+            .apply(
+                0,
+                &[Request::Move {
+                    segment_id: "nest".into(),
+                    track_id: "words".into(),
+                    start: Micros(2_000_000),
+                }],
+            )
+            .unwrap();
+        let index = crate::new_lane_index(&session.draft().tracks, &TrackType::Text);
+        session
+            .apply(
+                session.revision(),
+                &[
+                    Request::InsertTrackAt {
+                        track_id: TrackId::new("more"),
+                        kind: TrackType::Text,
+                        index,
+                    },
+                    Request::Move {
+                        segment_id: "nest".into(),
+                        track_id: "more".into(),
+                        start: Micros(0),
+                    },
+                ],
+            )
+            .unwrap();
     }
 
     #[test]

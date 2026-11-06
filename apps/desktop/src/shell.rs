@@ -1988,8 +1988,38 @@ impl Shell {
                 "the ruler click missed the timeline".to_owned(),
             ));
         };
-        self.seek(hit.time);
-        Ok(hit.time)
+        // The playhead lands on the frame nearest the pointer, never between
+        // two of the ruler's frames.
+        let time = self.nearest_frame(hit.time);
+        self.seek(time);
+        Ok(time)
+    }
+
+    fn project_rate(&self) -> FrameRate {
+        self.draft()
+            .and_then(Draft::frame_rate)
+            .unwrap_or(FrameRate::FPS_30)
+    }
+
+    /// The start of the project frame nearest `time`.
+    fn nearest_frame(&self, time: Micros) -> Micros {
+        let rate = self.project_rate();
+        let Some(index) = rate.frame_index(Micros(time.0.max(0))) else {
+            return time;
+        };
+        let (Some(start), Some(next)) = (rate.frame_start(index), rate.frame_start(index + 1))
+        else {
+            return time;
+        };
+        if time.0 - start.0 < next.0 - time.0 { start } else { next }
+    }
+
+    /// The start of the project frame `time` falls in.
+    fn frame_floor(&self, time: Micros) -> Micros {
+        let rate = self.project_rate();
+        rate.frame_index(time)
+            .and_then(|index| rate.frame_start(index))
+            .unwrap_or(time)
     }
 
     pub fn seek(&mut self, time: Micros) {
@@ -2023,10 +2053,12 @@ impl Shell {
         self.reveal_playhead();
     }
 
+    /// Stop on the frame being shown: the playhead lands on its start.
     pub fn pause(&mut self) {
         self.playing = false;
         self.shuttle = 0;
         self.silence();
+        self.playhead = self.frame_floor(self.playhead);
     }
 
     /// The shuttle rate: 0 when stopped, 1 for real time, negative backward.
@@ -2134,10 +2166,7 @@ impl Shell {
 
     /// Move to another frame. A positive count goes forward.
     pub fn step_frame(&mut self, frames: i64) -> Result<(), ShellError> {
-        let rate = self
-            .draft()
-            .and_then(Draft::frame_rate)
-            .unwrap_or(FrameRate::FPS_30);
+        let rate = self.project_rate();
         let index = rate.frame_index(self.playhead).unwrap_or(0);
         let next = index.saturating_add(frames).max(0);
         let time = rate.frame_start(next).ok_or(ShellError::Zoom)?;
@@ -11405,10 +11434,21 @@ mod tests {
         let mut desktop = shell();
         desktop.open_folder(&temp.path).unwrap();
         let revision = desktop.revision();
-        let time = desktop.seek_ruler(1_000.0 * desktop.pixel_size()).unwrap();
-        assert_eq!(time, Micros(1_000));
-        assert_eq!(desktop.playhead(), Micros(1_000));
+        // 40 ms lands on frame 1 at 30 fps, not between frames 1 and 2.
+        let time = desktop.seek_ruler(40_000.0 * desktop.pixel_size()).unwrap();
+        assert_eq!(time, Micros(33_334));
+        assert_eq!(desktop.playhead(), Micros(33_334));
         assert_eq!(desktop.revision(), revision);
+        // 20 ms is nearer frame 1 than frame 0.
+        assert_eq!(
+            desktop.seek_ruler(20_000.0 * desktop.pixel_size()).unwrap(),
+            Micros(33_334)
+        );
+        // A pause between frames lands on the start of the shown one.
+        desktop.seek(Micros(80_000));
+        desktop.play();
+        desktop.pause();
+        assert_eq!(desktop.playhead(), Micros(66_667));
 
         desktop.play();
         desktop.set_seek_during_playback(SeekDuringPlayback::Pause);
@@ -11687,7 +11727,8 @@ mod tests {
         );
         let at_left = desktop.seek_ruler(0.0).unwrap();
         assert!(at_left.0 > 0, "{at_left:?}");
-        assert!(at_left.0 <= desktop.view_origin().0.saturating_add(1));
+        // The frame nearest the lane's left edge: at most one frame past it.
+        assert!(at_left.0 <= desktop.view_origin().0.saturating_add(33_334));
         desktop.seek(Micros(0));
         assert_eq!(desktop.view_origin(), Micros(0));
         desktop.zoom_fit().unwrap();

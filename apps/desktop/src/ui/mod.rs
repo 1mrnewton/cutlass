@@ -5,5 +5,7 @@
 //! instead of painting their own chrome.
 
 mod scroll;
+mod surface;
 
 pub use scroll::Scroll;
+pub use surface::Surface;

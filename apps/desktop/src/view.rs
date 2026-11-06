@@ -183,6 +183,8 @@ pub struct ViewState {
     preview_scale: f64,
     /// Where the canvas was last drawn.
     preview_canvas: Option<Rect>,
+    /// Where a tracking box drag started on the canvas, in canvas pixels.
+    track_drag: Option<(f64, f64)>,
     /// The action-safe and title-safe frames are drawn over the canvas.
     preview_guides: bool,
     /// The preview fills the screen.
@@ -260,6 +262,7 @@ impl Default for ViewState {
             preview_pan: Vec2::ZERO,
             preview_scale: 1.0,
             preview_canvas: None,
+            track_drag: None,
             preview_guides: false,
             preview_full: false,
             lane_heights: std::collections::HashMap::new(),
@@ -2792,6 +2795,7 @@ fn preview_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rec
     }
     if let (Some(placed), Some(size)) = (view.preview_canvas, canvas) {
         pick_layer(shell, ui, frame, placed, size);
+        track_layer(shell, ui, view, frame, placed, size);
     }
     transport_bar(shell, ui, view, transport);
 }
@@ -2828,6 +2832,78 @@ fn pick_layer(shell: &mut Shell, ui: &mut Ui, frame: Rect, placed: Rect, size: V
             tokens::CLOSE
         };
         painter.circle(at, 5.0, colour, egui::Stroke::new(1.5, Color32::WHITE));
+    }
+}
+
+/// The selected clip's tracked path: the target's middle frame by frame
+/// and its box at the playhead. While a track is set up, a drag on the
+/// canvas draws its box.
+fn track_layer(
+    shell: &mut Shell,
+    ui: &mut Ui,
+    view: &mut ViewState,
+    frame: Rect,
+    placed: Rect,
+    size: Vec2,
+) {
+    let painter = ui.painter().with_clip_rect(frame.intersect(ui.clip_rect()));
+    let screen = |p: (f64, f64)| screen_point(placed, size, p);
+    let outline = |corners: [(f64, f64); 4], stroke: egui::Stroke| {
+        let mut points: Vec<Pos2> = corners.iter().map(|&p| screen(p)).collect();
+        if let Some(&first) = points.first() {
+            points.push(first);
+        }
+        painter.add(egui::Shape::line(points, stroke));
+    };
+    if let Some(path) = shell.tracked_path() {
+        let middles: Vec<Pos2> = path
+            .frames
+            .iter()
+            .map(|(_, c)| {
+                let sum = c.iter().fold((0.0, 0.0), |s, p| (s.0 + p.0, s.1 + p.1));
+                screen((sum.0 / 4.0, sum.1 / 4.0))
+            })
+            .collect();
+        painter.add(egui::Shape::line(
+            middles,
+            egui::Stroke::new(1.5, tokens::EXPORT.gamma_multiply(0.6)),
+        ));
+        if let Some(corners) = path.at(shell.playhead()) {
+            outline(corners, egui::Stroke::new(1.5, tokens::EXPORT));
+        }
+    }
+    let Some(tracking) = shell.tracking().cloned() else {
+        view.track_drag = None;
+        return;
+    };
+    let area = placed.intersect(frame);
+    let response = ui
+        .interact(area, ui.scope_id().with("preview-track"), Sense::drag())
+        .on_hover_cursor(egui::CursorIcon::Crosshair);
+    let pointer = response
+        .interact_pointer_pos()
+        .map(|pos| canvas_pixel(placed, size, pos));
+    if response.drag_started() {
+        view.track_drag = pointer;
+    }
+    let dragged = view.track_drag.zip(pointer);
+    if response.drag_stopped() {
+        if let Some((start, end)) = dragged
+            && let Err(error) = shell.set_track_box(start, end)
+        {
+            shell.set_notice(error.to_string());
+        }
+        view.track_drag = None;
+    }
+    let shown = match (view.track_drag.zip(pointer), tracking.canvas_box) {
+        (Some((a, b)), _) | (None, Some((a, b))) => Some((a, b)),
+        (None, None) => None,
+    };
+    if let Some((a, b)) = shown {
+        outline(
+            [(a.0, a.1), (b.0, a.1), (b.0, b.1), (a.0, b.1)],
+            egui::Stroke::new(2.0, Color32::WHITE),
+        );
     }
 }
 
@@ -10285,6 +10361,58 @@ mod tests {
         );
         output.textures_delta.clear();
         assert!(shell.horizontal_guides().is_empty());
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn a_drag_on_the_preview_draws_the_tracking_box_in_canvas_pixels() {
+        let temp = std::env::temp_dir().join(format!("cutlass-track-box-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let mut draft = cutlass_model::Draft::empty("draft");
+        draft.canvas_config.width = 1920;
+        draft.canvas_config.height = 1080;
+        draft.duration = Micros(2_000_000);
+        draft.materials.videos.push(cutlass_model::MaterialVideo {
+            id: "m".into(),
+            width: 1920,
+            height: 1080,
+            path: "missing.mp4".into(),
+            ..cutlass_model::MaterialVideo::default()
+        });
+        draft.tracks[0].segments.push(cutlass_model::Segment::new(
+            "v",
+            "m",
+            cutlass_model::TimeRange::new(0, 2_000_000),
+        ));
+        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        shell.select(Some("v".into()));
+        shell.seek(Micros(500_000));
+        shell.start_tracking().unwrap();
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: screen,
+                ..Default::default()
+            },
+            |ui| show(&mut shell, ui, &mut view, None),
+        );
+        output.textures_delta.clear();
+        let placed = view.preview_canvas.expect("the canvas");
+        let size = Vec2::new(1920.0, 1080.0);
+        let from = screen_point(placed, size, (200.0, 100.0));
+        let to = screen_point(placed, size, (600.0, 500.0));
+        drag(&ctx, from, to, &mut shell, &mut view);
+        let ((x0, y0), (x1, y1)) = shell.tracking().unwrap().canvas_box.expect("a box");
+        let px = 1920.0 / f64::from(placed.width());
+        for (got, want) in [(x0, 200.0), (y0, 100.0), (x1, 600.0), (y1, 500.0)] {
+            assert!((got - want).abs() <= px, "{got} vs {want}");
+        }
+        assert_eq!(shell.tracking().unwrap().time, Micros(500_000));
         let _ = std::fs::remove_dir_all(&temp);
     }
 

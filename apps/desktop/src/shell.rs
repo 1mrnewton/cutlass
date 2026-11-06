@@ -783,6 +783,8 @@ pub struct Shell {
     vision: Option<select::VisionModel>,
     /// The object click-to-select is picking, while the preview takes clicks.
     picking: Option<select::Picking>,
+    /// A track being set up on the selected clip.
+    tracking: Option<follow::Tracking>,
     /// What each speech job heard, by id, for the assistant's tools.
     heard: std::collections::HashMap<String, Result<String, String>>,
     hearings: u64,
@@ -891,6 +893,7 @@ impl Shell {
             speech: RefCell::new(None),
             vision: None,
             picking: None,
+            tracking: None,
             heard: std::collections::HashMap::new(),
             hearings: 0,
             wants_speech_model: false,
@@ -7851,6 +7854,8 @@ mod tests {
         let started = std::time::Instant::now();
         desktop
             .track_object(
+                id.clone(),
+                Micros(1_000_000),
                 corners,
                 cutlass_model::TrackMode::Object,
                 vec!["follower".into()],

@@ -168,6 +168,9 @@ fn video_panel(
             }
             position_size(shell, ui, state, inspection, "Rotate");
             blend(shell, ui, state, inspection, true);
+            if !still {
+                tracking(shell, ui, state);
+            }
             for label in [
                 "Stabilize",
                 "Enhance quality",
@@ -1051,6 +1054,103 @@ fn cutout_page(
                 shell.set_chroma(&hex, strength, value / 100.0)
             });
         }
+    });
+}
+
+/// Tracking: draw a box around the target on the preview, choose Object or
+/// Plane and the clips that follow it, then Track runs as a job.
+fn tracking(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState) {
+    let setting_up = shell.tracking().is_some();
+    let header = section(ui, state, "tracking", "Tracking", None, false);
+    if !header.open && !setting_up {
+        return;
+    }
+    body(ui, |ui| {
+        let Some(tracking) = shell.tracking().cloned() else {
+            note(
+                ui,
+                "Follow something in this clip with a sticker, text or another clip.",
+            );
+            ui.horizontal(|ui| {
+                row_label(ui, "");
+                if ui
+                    .add_enabled(
+                        shell.track_enabled(),
+                        egui::Button::new(RichText::new("Track").size(12.0)),
+                    )
+                    .on_disabled_hover_text("Put the playhead on an unlocked video clip.")
+                    .clicked()
+                {
+                    state.open.insert("tracking".to_owned());
+                    send(shell, Shell::start_tracking);
+                }
+            });
+            return;
+        };
+        ui.horizontal(|ui| {
+            row_label(ui, "Follow");
+            for (name, mode) in [
+                ("Object", cutlass_model::TrackMode::Object),
+                ("Plane", cutlass_model::TrackMode::Plane),
+            ] {
+                let on = tracking.mode == mode;
+                let text =
+                    RichText::new(name)
+                        .size(12.0)
+                        .color(if on { ACCENT } else { tokens::TEXT });
+                if ui.selectable_label(on, text).clicked() {
+                    shell.set_track_mode(mode);
+                }
+            }
+        });
+        note(
+            ui,
+            if tracking.canvas_box.is_some() {
+                "Drag on the preview again to redraw the box."
+            } else {
+                "Drag on the preview to draw a box around what to follow."
+            },
+        );
+        ui.label(
+            RichText::new("Clips that follow it")
+                .size(12.0)
+                .color(tokens::MUTED),
+        );
+        let choices = shell.follower_choices();
+        if choices.is_empty() {
+            note(ui, "Put a sticker, text or clip over this one first.");
+        }
+        for choice in choices {
+            let on = tracking.followers.contains(&choice.segment_id);
+            let row = ui.horizontal(|ui| {
+                let check = check_box(ui, on);
+                let name = ui.add(
+                    egui::Label::new(RichText::new(&choice.name).size(12.0).color(tokens::TEXT))
+                        .truncate()
+                        .sense(Sense::click()),
+                );
+                check.clicked() || name.clicked()
+            });
+            if row.inner {
+                shell.toggle_follower(&choice.segment_id);
+            }
+        }
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(
+                    shell.track_ready(),
+                    egui::Button::new(RichText::new("Track").size(12.0)),
+                )
+                .on_disabled_hover_text("Draw a box and choose a clip to follow it.")
+                .clicked()
+            {
+                send(shell, Shell::run_tracking);
+            }
+            if ui.button(RichText::new("Cancel").size(12.0)).clicked() {
+                shell.stop_tracking();
+            }
+        });
     });
 }
 

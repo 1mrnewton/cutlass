@@ -42,6 +42,12 @@ pub const MINIMIZE: Color32 = Color32::from_rgb(0xfe, 0xbc, 0x2e);
 pub const MAXIMIZE: Color32 = Color32::from_rgb(0x28, 0xc8, 0x40);
 /// The scrim behind a dialog.
 pub const SCRIM: Color32 = Color32::from_black_alpha(140);
+/// A scroll thumb at rest.
+pub const SCROLL_THUMB: Color32 = Color32::from_rgb(0x46, 0x46, 0x46);
+/// A scroll thumb under the pointer.
+pub const SCROLL_THUMB_HOVER: Color32 = Color32::from_rgb(0x5e, 0x5e, 0x5e);
+/// A scroll thumb being dragged.
+pub const SCROLL_THUMB_DRAG: Color32 = Color32::from_rgb(0x7a, 0x7a, 0x7a);
 /// The ruler's band between the in and out marks.
 pub const MARKED: Color32 = Color32::from_rgba_premultiplied(0x00, 0x32, 0x36, 0x40);
 
@@ -54,6 +60,13 @@ pub const DIALOG_RADIUS: u8 = 12;
 pub const ICON_RADIUS: u8 = 6;
 pub const SELECTED_EDGE: f32 = 1.0;
 pub const STROKE: f32 = 1.5;
+
+/// A scroll bar is this wide and stays this wide; hover changes only its color.
+pub const SCROLL_BAR: f32 = 6.0;
+/// The gap between a scroll bar and the edge of its area.
+pub const SCROLL_INSET: f32 = 2.0;
+/// The shortest a scroll thumb gets on long content.
+pub const SCROLL_MIN_THUMB: f32 = 24.0;
 
 pub const HEAD_HEIGHT: f32 = 38.0;
 pub const SPLIT: f32 = 6.0;

@@ -513,9 +513,15 @@ mod tests {
         let mut session = open();
         for (request, error) in [
             (values(0, &[("KFTypeBrightness", 0.5)]), EditError::KeyValue),
-            (values(0, &[("KFTypeVolume", f64::NAN)]), EditError::KeyValue),
+            (
+                values(0, &[("KFTypeVolume", f64::NAN)]),
+                EditError::KeyValue,
+            ),
             (values(0, &[]), EditError::KeyValue),
-            (values(2_000_000, &[("KFTypeVolume", 1.0)]), EditError::KeyTime),
+            (
+                values(2_000_000, &[("KFTypeVolume", 1.0)]),
+                EditError::KeyTime,
+            ),
             (
                 Request::UnkeyValues {
                     segment_id: "a".into(),
@@ -525,10 +531,7 @@ mod tests {
                 EditError::NoKey,
             ),
         ] {
-            assert_eq!(
-                session.apply(1, &[request]),
-                Err(error)
-            );
+            assert_eq!(session.apply(1, &[request]), Err(error));
         }
     }
 }

@@ -49,7 +49,9 @@ pub fn value_keys(
     time: Micros,
     names: &[&str],
 ) -> Option<ClipKeys> {
-    ClipKeys::of_where(draft, segment_id, time, &|property| names.contains(&property))
+    ClipKeys::of_where(draft, segment_id, time, &|property| {
+        names.contains(&property)
+    })
 }
 
 impl ClipKeys {

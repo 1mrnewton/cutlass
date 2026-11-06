@@ -17,6 +17,7 @@ image = { version = "0.25.10", default-features = false }
 [target.'cfg(target_os = "macos")'.dependencies]
 burn = { version = "=0.22.1", default-features = false, features = ["metal", "persistence"] }
 cubecl-environment = { version = "=0.11.3", features = ["persistence"] }
+cubecl-runtime = "=0.11.3"
 
 [dev-dependencies]
 safetensors = "0.8.0"

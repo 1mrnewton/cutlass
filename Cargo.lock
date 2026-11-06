@@ -3189,6 +3189,7 @@ dependencies = [
  "burn",
  "burn-store",
  "cubecl-environment",
+ "cubecl-runtime",
  "image",
  "safetensors 0.8.0",
 ]

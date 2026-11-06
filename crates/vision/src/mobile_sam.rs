@@ -383,4 +383,27 @@ mod tests {
     fn the_mac_gpu_matches_onnxruntime() {
         matches_onnxruntime(Compute::Gpu);
     }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "needs a Metal GPU; run alone, because the kernel folder is set for the whole process"]
+    fn compiled_kernels_land_in_the_folder_given() {
+        let Some(reference) = reference("landscape") else {
+            return;
+        };
+        let dir = scratch("kernels");
+        crate::keep_kernels_in(&dir).unwrap();
+        let mut sam = MobileSam::load(&local_models(), Compute::Gpu).unwrap();
+        let size = (reference.resized.width, reference.resized.height);
+        let [x, y] = reference.click;
+        sam.encode_resized(reference.resized, size).unwrap();
+        sam.select(&[Click { x, y, keep: true }]).unwrap();
+        let databases = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path().extension().is_some_and(|e| e == "db"))
+            .count();
+        assert!(databases > 0, "no kernel database in {}", dir.display());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

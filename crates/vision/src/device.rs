@@ -61,8 +61,26 @@ pub fn keep_kernels_in(dir: &Path) -> Result<(), VisionError> {
         message: error.to_string(),
     })?;
     #[cfg(target_os = "macos")]
-    cubecl_environment::environment::set_root(dir);
+    gpu_cache_root(dir);
     Ok(())
+}
+
+/// burn's GPU runtime reads its settings once, from a `cubecl.toml` in the
+/// working folder or its defaults, and that read sets the cache folder. The
+/// settings are handed over first, so neither a stray file nor the default
+/// (`target/` beside a Cargo project) decides where kernels go. If the
+/// runtime already started, the folder is switched in place.
+#[cfg(target_os = "macos")]
+fn gpu_cache_root(dir: &Path) {
+    use cubecl_environment::config::RuntimeConfig;
+    use cubecl_environment::persistence::CacheConfig;
+    use cubecl_runtime::config::CubeClRuntimeConfig;
+
+    let mut config = CubeClRuntimeConfig::default();
+    config.environment.path = CacheConfig::Directory(dir.to_path_buf());
+    if !CubeClRuntimeConfig::try_set(config.override_from_env()) {
+        cubecl_environment::environment::set_root(dir);
+    }
 }
 
 #[cfg(test)]

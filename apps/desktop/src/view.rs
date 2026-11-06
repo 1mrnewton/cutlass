@@ -3708,16 +3708,30 @@ fn paint_notice(shell: &mut Shell, ui: &Ui, center_x: f32, top: f32) {
     });
     let size = galley.size() + Vec2::new(24.0, 12.0);
     let rect = Rect::from_min_size(Pos2::new(center_x - size.x / 2.0, top), size);
-    ui.painter().rect_filled(
+    let painter = notice_painter(ui.ctx());
+    painter.rect_filled(
         rect,
         CornerRadius::same(99),
         Color32::WHITE.gamma_multiply(alpha),
     );
-    ui.painter().galley(
+    painter.galley(
         rect.left_center() + Vec2::new(12.0, -galley.size().y / 2.0),
         galley,
         ink,
     );
+}
+
+/// The toast's own layer, above every panel, ruler, menu and drag: the
+/// tooltip order, moved to the top of it each frame, with the whole window as
+/// its clip so nothing painted later covers it.
+fn notice_painter(ctx: &egui::Context) -> egui::Painter {
+    let layer = notice_layer();
+    ctx.move_to_top(layer);
+    ctx.layer_painter(layer).with_clip_rect(ctx.content_rect())
+}
+
+fn notice_layer() -> egui::LayerId {
+    egui::LayerId::new(egui::Order::Tooltip, egui::Id::unique("notice-toast"))
 }
 
 /// How opaque a notice is `age` after it was set: a quick fade in, a hold,
@@ -10831,6 +10845,28 @@ mod tests {
         assert_eq!(shell.draft().unwrap().tracks, before);
         assert_eq!(shell.revision(), revision);
         let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn the_toast_paints_on_the_top_layer() {
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.set_notice("the edit was refused");
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            paint_notice(&mut shell, ui, 100.0, 40.0);
+            // A floating layer raised after the toast, as a drag or menu is.
+            let late = egui::LayerId::new(egui::Order::Foreground, egui::Id::unique("late"));
+            ui.ctx().move_to_top(late);
+            ui.ctx().layer_painter(late).rect_filled(
+                Rect::from_min_size(Pos2::ZERO, Vec2::splat(400.0)),
+                0.0,
+                Color32::RED,
+            );
+        });
+        output.textures_delta.clear();
+        let top = ctx.memory(|memory| memory.layer_ids().last());
+        assert_eq!(top, Some(notice_layer()));
     }
 
     #[test]

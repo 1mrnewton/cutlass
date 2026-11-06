@@ -18,6 +18,7 @@ pub mod sandbox;
 mod open_movie;
 pub mod shell;
 pub mod tokens;
+pub mod ui;
 pub mod view;
 pub mod widgets;
 pub mod window;

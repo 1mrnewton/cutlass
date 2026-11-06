@@ -225,8 +225,8 @@ pub struct ViewState {
     /// How far the lanes above main are scrolled toward the top one, in
     /// points. Zero shows the lanes next to main.
     lanes_up: f32,
-    /// How far the lanes under main are scrolled toward the bottom one, in
-    /// points. Zero shows the lanes next to main.
+    /// How far the whole stack, main with it, is scrolled up to bring the
+    /// lanes under main into view, in points.
     lanes_down: f32,
     /// The assistant's conversation, and whether its panel is open.
     pub assistant: crate::assistant::Assistant,
@@ -3793,13 +3793,15 @@ fn ruler_and_lanes(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
         if shell.clip_dragging()
             && let Some(pos) = ui.input(|input| input.pointer.interact_pos())
         {
-            // Each band scrolls while the pointer is in it or past the panel's
-            // edge on its side, not while it is over main or the other band.
-            if pos.y <= still.upper.bottom() {
-                view.lanes_up += drag_scroll_step(still.upper, pos.y);
-            }
-            if pos.y >= still.lower.top() {
-                view.lanes_down -= drag_scroll_step(still.lower, pos.y);
+            // Near the panel's top or bottom the drag scrolls as the wheel
+            // does; just above main it brings the lanes above main back down.
+            let edge = drag_scroll_step(lane_area, pos.y);
+            if edge != 0.0 {
+                let (up, down) = chain_scroll(&still, view.lanes_up, view.lanes_down, edge);
+                view.lanes_up = up;
+                view.lanes_down = down;
+            } else if pos.y <= still.upper.bottom() {
+                view.lanes_up += drag_scroll_step(still.upper, pos.y).min(0.0);
             }
         }
     }
@@ -3956,7 +3958,12 @@ impl LaneLayout {
                 if cut.height() > 0.0 {
                     cut
                 } else {
-                    let y = row.center().y.clamp(band.top(), band.bottom());
+                    // A band scrolled out of the sheet may be empty.
+                    let y = row
+                        .center()
+                        .y
+                        .max(band.top())
+                        .min(band.bottom().max(band.top()));
                     Rect::from_x_y_ranges(row.x_range(), y..=y)
                 }
             })
@@ -3968,11 +3975,12 @@ impl LaneLayout {
 ///
 /// While everything fits with a lane of room past the top and the bottom,
 /// main sits in the middle, as far as that room allows, and nothing
-/// scrolls. Once it does not fit, main stays put just above the lanes under
-/// it, which show whole while they take no more than half the space; the
-/// lanes above main fill the rest from main up. Each band then scrolls on
-/// its own: `up` toward the top lane, `down` toward the bottom one, each
-/// clamped to what its band holds.
+/// scrolls. Once it does not fit, main rests just above the lanes under it,
+/// which show whole while they take no more than half the space; the lanes
+/// above main fill the rest from main up. `up` scrolls only the lanes above
+/// main toward the top one, main staying put; `down` scrolls the whole
+/// stack up, main with it, toward the bottom lane. Each is clamped to what
+/// it can reach.
 fn lane_layout(kinds: &[(bool, f32)], area: Rect, up: f32, down: f32) -> LaneLayout {
     const GAP: f32 = 8.0;
     let room = lane_room();
@@ -4027,25 +4035,28 @@ fn lane_layout(kinds: &[(bool, f32)], area: Rect, up: f32, down: f32) -> LaneLay
     let down_max = (want_down - (area.bottom() - main_bottom)).max(0.0);
     let up = up.clamp(0.0, up_max);
     let down = down.clamp(0.0, down_max);
+    // Scrolling down carries main, and everything around it, up.
+    let main_top = main_top - down;
+    let main_bottom = main_bottom - down;
     let upper = Rect::from_x_y_ranges(
         area.x_range(),
         area.top()..=(main_top - GAP / 2.0).max(area.top()),
     );
     let lower = Rect::from_x_y_ranges(
         area.x_range(),
-        (main_bottom + GAP / 2.0).min(area.bottom())..=area.bottom(),
+        (main_bottom + GAP / 2.0).clamp(area.top(), area.bottom())..=area.bottom(),
     );
     let mut rows = vec![Rect::NOTHING; kinds.len()];
     let mut bands = vec![upper; kinds.len()];
     rows[main] = row(main_top, main_height);
-    bands[main] = rows[main];
+    bands[main] = rows[main].intersect(area);
     let mut bottom = main_top - GAP + up;
     for index in (0..main).rev() {
         let height = kinds[index].1;
         rows[index] = row(bottom - height, height);
         bottom -= height + GAP;
     }
-    let mut top = main_bottom + GAP - down;
+    let mut top = main_bottom + GAP;
     for index in main + 1..kinds.len() {
         let height = kinds[index].1;
         rows[index] = row(top, height);
@@ -4062,9 +4073,10 @@ fn lane_layout(kinds: &[(bool, f32)], area: Rect, up: f32, down: f32) -> LaneLay
     }
 }
 
-/// Run one wheel step through the two bands. Scrolling up (`delta` above
-/// zero) first brings the lanes under main back up to it, then scrolls the
-/// lanes above main toward the top one; scrolling down does the reverse.
+/// Run one wheel step through the two scrolls. Scrolling down (`delta`
+/// below zero) first brings the lanes above main back down to it, then
+/// carries the whole stack up toward the lanes under main; scrolling up
+/// first brings the stack back, then scrolls the lanes above main.
 fn chain_scroll(layout: &LaneLayout, up: f32, down: f32, delta: f32) -> (f32, f32) {
     let up = up.clamp(0.0, layout.up_max);
     let down = down.clamp(0.0, layout.down_max);
@@ -11235,7 +11247,7 @@ mod tests {
     }
 
     #[test]
-    fn one_wheel_runs_through_the_lanes_above_main_then_the_lanes_under_it() {
+    fn one_wheel_runs_through_the_lanes_above_main_then_the_whole_stack() {
         let area = Rect::from_min_size(Pos2::new(0.0, 100.0), Vec2::new(800.0, 400.0));
         let layout = lane_layout(&crowded(8), area, 0.0, 0.0);
         assert!(layout.up_max > 0.0 && layout.down_max > 0.0);
@@ -11248,12 +11260,23 @@ mod tests {
         // Scrolling up undoes it in the same order.
         let (up, down) = chain_scroll(&layout, 0.0, 40.0, 60.0);
         assert_eq!((up, down), (20.0, 0.0));
+        // Scrolling the lanes above main leaves main where it is.
+        let lifted = lane_layout(&crowded(8), area, 30.0, 0.0);
+        assert_eq!(lifted.rows[10], layout.rows[10]);
 
-        // At the bottom, the last lane shows with a lane of room under it.
+        // Scrolled to the bottom, the whole stack went up together: main and
+        // the lanes above it moved as far as the last lane did, which shows
+        // with a lane of room under it.
         let bottom = lane_layout(&crowded(8), area, 0.0, f32::MAX);
         let last = bottom.rows.last().unwrap();
         assert!((last.bottom() - (area.bottom() - lane_room())).abs() < 0.5);
-        assert_eq!(bottom.rows[10], layout.rows[10], "main stays put");
+        let lift = layout.rows[10].top() - bottom.rows[10].top();
+        assert!(
+            (lift - layout.down_max).abs() < 0.5,
+            "main went up with the stack"
+        );
+        assert!((layout.rows[9].top() - bottom.rows[9].top() - lift).abs() < 0.5);
+        assert!((layout.rows[11].top() - bottom.rows[11].top() - lift).abs() < 0.5);
     }
 
     #[test]

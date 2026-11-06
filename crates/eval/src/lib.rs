@@ -80,11 +80,27 @@ pub fn source_on_timeline(
     timeline_for_source(&map, source)
 }
 
+/// The point of `segment`'s own picture under canvas pixel `x`, `y` at
+/// `time`, on a `canvas` sized canvas: -1 to 1 across the picture, y up, as
+/// masks and selections read it. `None` when the clip is not drawn at
+/// `time`. A point off the picture lies outside -1 to 1.
+#[must_use]
+pub fn clip_point(
+    draft: &cutlass_model::Draft,
+    segment: &cutlass_model::Segment,
+    time: Micros,
+    canvas: (u32, u32),
+    x: f64,
+    y: f64,
+) -> Option<(f64, f64)> {
+    Some(media::clip_frame(draft, segment, time, canvas)?.apply(x, y))
+}
+
 #[cfg(test)]
 mod tests {
     use cutlass_model::{Draft, Micros, Segment, TimeRange};
 
-    use super::freeze_timestamp;
+    use super::{clip_point, freeze_timestamp};
 
     #[test]
     fn a_freeze_timestamp_follows_speed_and_stays_before_reverse() {
@@ -110,5 +126,28 @@ mod tests {
             freeze_timestamp(&draft, &segment, Micros(250)),
             Some(Micros(250))
         );
+    }
+
+    #[test]
+    fn a_canvas_point_maps_into_the_clip_and_follows_its_move() {
+        let mut draft = Draft::empty("D");
+        draft.canvas_config.width = 1920;
+        draft.canvas_config.height = 1080;
+        let mut video = cutlass_model::MaterialVideo::new("v");
+        video.width = 1920;
+        video.height = 1080;
+        draft.materials.videos.push(video);
+        let mut segment = Segment::new("a", "v", TimeRange::new(0, 1_000_000));
+        let at = |segment: &Segment, x: f64, y: f64| {
+            let (u, v) = clip_point(&draft, segment, Micros(0), (1920, 1080), x, y).unwrap();
+            ((u * 1000.0).round() / 1000.0, (v * 1000.0).round() / 1000.0)
+        };
+        assert_eq!(at(&segment, 960.0, 540.0), (0.0, 0.0));
+        assert_eq!(at(&segment, 0.0, 0.0), (-1.0, 1.0));
+        assert_eq!(at(&segment, 1920.0, 1080.0), (1.0, -1.0));
+        // Moved right by half the canvas, the clip's centre is under 1440.
+        segment.clip.transform.x = 0.5;
+        assert_eq!(at(&segment, 1440.0, 540.0), (0.0, 0.0));
+        assert!(at(&segment, 100.0, 540.0).0 < -1.0);
     }
 }

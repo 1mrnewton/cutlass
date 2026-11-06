@@ -109,7 +109,7 @@ pub fn panel_of(draft: &Draft, track: &Track, segment: &Segment) -> Panel {
         Some(MaterialRef::Draft(_)) => picture(false),
         Some(MaterialRef::Color(_)) => picture(true),
         Some(MaterialRef::Audio(_)) => Panel::Audio,
-        Some(MaterialRef::Text(text)) if caption(track, text) => Panel::Caption,
+        Some(MaterialRef::Text(text)) if is_caption(track, text) => Panel::Caption,
         Some(MaterialRef::Text(_)) => Panel::Text,
         Some(MaterialRef::VideoEffect(_) | MaterialRef::Plugin(_)) => Panel::Effect,
         _ => match track.kind {
@@ -132,7 +132,10 @@ pub fn panel_of(draft: &Draft, track: &Track, segment: &Segment) -> Panel {
     }
 }
 
-fn caption(track: &Track, text: &MaterialText) -> bool {
+/// True when `text` on `track` is a caption: its row is a caption or
+/// lyric row, its kind says so, or it has recognized words.
+#[must_use]
+pub fn is_caption(track: &Track, text: &MaterialText) -> bool {
     matches!(
         track.flag,
         TrackFlag::TextSubtitle

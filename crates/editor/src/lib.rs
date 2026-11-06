@@ -8,6 +8,7 @@
 mod act;
 mod animation;
 mod append;
+mod caption_list;
 mod caption_words;
 mod catalog;
 mod clip_rules;
@@ -43,6 +44,11 @@ mod zoom;
 pub use act::{can_cut_at, clip_under, delete_side, frame_margin};
 pub use animation::{ClipAnimation, ClipAnimations, clip_animations};
 pub use append::{Append, AppendLane, append_placement, free_row, material_span};
+pub use caption_list::{
+    CaptionListMiss, CaptionRow, NEW_CAPTION_GAP, NEW_CAPTION_LENGTH, NEW_CAPTION_TEXT,
+    add_after_requests, caption_rows, caption_text_request, for_every_caption, main_caption_lane,
+    rematched, remove_caption_request, row_at, rows_matching, words_over,
+};
 pub use caption_words::{LINE_BREAK, breaks_before, join_words, retype_word, toggle_line_break};
 pub use catalog::{catalog_entries, catalog_search};
 pub use clip_rules::{can_turn, magnet_request};
@@ -66,7 +72,7 @@ pub use hit::{BadScale, Hit, Pointer, TimelineScale, hit_test};
 pub use inspector::{
     BACKGROUND_ALPHA_START, BACKGROUND_ROUND_START, GLOW_RANGE_START, GLOW_STRENGTH_START,
     LetterCase, OUTLINE_START, Panel, SHADOW_ANGLE, SHADOW_BLUR_START, SHADOW_DISTANCE_START,
-    SILENT_DB, TEXT_PRESETS, TextLook, canvas_pixels, gain_of_db, panel_of, starting,
+    SILENT_DB, TEXT_PRESETS, TextLook, canvas_pixels, gain_of_db, is_caption, panel_of, starting,
     stored_position, text_look, volume_db,
 };
 pub use keys::{ClipKeys, KeyGraph, clip_keys, key_graphs, move_key, value_keys};

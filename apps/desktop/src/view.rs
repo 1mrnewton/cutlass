@@ -3812,6 +3812,7 @@ fn ruler_and_lanes(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
     // pointer finds.
     let drawn = laid.rows.clone();
     let boxes = laid.shown();
+    let main_index = rows.iter().position(|lane| lane.main);
     ui.data_mut(|data| data.insert_temp(lane_sheet_id(), ui.clip_rect().intersect(tracks)));
     let marquee = ui.interact(
         lane_area,
@@ -3829,7 +3830,8 @@ fn ruler_and_lanes(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
             continue;
         };
         let cut = clip.intersect(tracks).intersect(*band);
-        if cut.height() <= 0.0 {
+        let folded = laid.peek && main_index.is_some_and(|main| index > main);
+        if cut.height() <= 0.0 || folded {
             continue;
         }
         ui.set_clip_rect(cut);
@@ -3845,6 +3847,11 @@ fn ruler_and_lanes(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
         );
     }
     ui.set_clip_rect(clip.intersect(tracks));
+    if laid.peek
+        && let Some(main) = main_index
+    {
+        paint_folded_lanes(shell, ui, &rows[main + 1..], laid.lower, lanes_left);
+    }
     paint_new_lane(shell, ui, &boxes, lanes_left);
     ui.set_clip_rect(clip);
     shell.send_timeline_asks();
@@ -3944,7 +3951,13 @@ struct LaneLayout {
     /// How far each band may scroll.
     up_max: f32,
     down_max: f32,
+    /// Main has sunk to the sheet's foot and the lanes under it are folded
+    /// to a strip, drawn as one thin line per clip.
+    peek: bool,
 }
+
+/// The strip left under main once it has sunk to the sheet's foot.
+const PEEK: f32 = 20.0;
 
 impl LaneLayout {
     /// The part of each row that shows in its band. A row scrolled out of
@@ -3954,8 +3967,10 @@ impl LaneLayout {
             .iter()
             .zip(&self.bands)
             .map(|(row, band)| {
+                // Folded lanes are only a line: nothing there to click or drop on.
+                let folded = self.peek && *band == self.lower;
                 let cut = row.intersect(*band);
-                if cut.height() > 0.0 {
+                if cut.height() > 0.0 && !folded {
                     cut
                 } else {
                     // A band scrolled out of the sheet may be empty.
@@ -4011,6 +4026,7 @@ fn lane_layout(kinds: &[(bool, f32)], area: Rect, up: f32, down: f32) -> LaneLay
             lower: area,
             up_max: 0.0,
             down_max,
+            peek: false,
         };
     };
     let main_height = kinds[main].1;
@@ -4035,9 +4051,14 @@ fn lane_layout(kinds: &[(bool, f32)], area: Rect, up: f32, down: f32) -> LaneLay
     let down_max = (want_down - (area.bottom() - main_bottom)).max(0.0);
     let up = up.clamp(0.0, up_max);
     let down = down.clamp(0.0, down_max);
+    // Scrolling the lanes above main first carries main down with them to
+    // the sheet's foot, folding the lanes under it to a strip; past that,
+    // main stays and they slide under it.
+    let sink = up.min((area.bottom() - PEEK - main_bottom).max(0.0));
+    let rest_top = main_top;
     // Scrolling down carries main, and everything around it, up.
-    let main_top = main_top - down;
-    let main_bottom = main_bottom - down;
+    let main_top = main_top + sink - down;
+    let main_bottom = main_bottom + sink - down;
     let upper = Rect::from_x_y_ranges(
         area.x_range(),
         area.top()..=(main_top - GAP / 2.0).max(area.top()),
@@ -4050,7 +4071,7 @@ fn lane_layout(kinds: &[(bool, f32)], area: Rect, up: f32, down: f32) -> LaneLay
     let mut bands = vec![upper; kinds.len()];
     rows[main] = row(main_top, main_height);
     bands[main] = rows[main].intersect(area);
-    let mut bottom = main_top - GAP + up;
+    let mut bottom = rest_top - down - GAP + up;
     for index in (0..main).rev() {
         let height = kinds[index].1;
         rows[index] = row(bottom - height, height);
@@ -4063,6 +4084,7 @@ fn lane_layout(kinds: &[(bool, f32)], area: Rect, up: f32, down: f32) -> LaneLay
         bands[index] = lower;
         top += height + GAP;
     }
+    let peek = main + 1 < kinds.len() && sink > 0.0 && lower.height() < kinds[main + 1].1;
     LaneLayout {
         rows,
         bands,
@@ -4070,6 +4092,42 @@ fn lane_layout(kinds: &[(bool, f32)], area: Rect, up: f32, down: f32) -> LaneLay
         lower,
         up_max,
         down_max,
+        peek,
+    }
+}
+
+fn folded_color(kind: &cutlass_model::TrackType) -> Color32 {
+    if matches!(kind, cutlass_model::TrackType::Audio) {
+        tokens::CLIP_AUDIO_BAR
+    } else {
+        lane_color(kind)
+    }
+}
+
+/// The lanes under main folded to a strip: one thin line, in the lane's
+/// colour, along each clip's time, so it shows there is more below.
+fn paint_folded_lanes(
+    shell: &Shell,
+    ui: &Ui,
+    lanes: &[crate::shell::LaneView],
+    strip: Rect,
+    lanes_left: f32,
+) {
+    let y = strip.center().y;
+    for lane in lanes {
+        for clip in &lane.clips {
+            let left = lane_x(
+                lanes_left,
+                shell.pixel_size(),
+                shell.view_origin().0,
+                clip.start.0,
+            );
+            let width = (clip.duration.0 as f32 * shell.pixel_size() as f32).max(2.0);
+            ui.painter().line_segment(
+                [Pos2::new(left, y), Pos2::new(left + width, y)],
+                egui::Stroke::new(2.0, folded_color(&lane.kind)),
+            );
+        }
     }
 }
 
@@ -11294,7 +11352,7 @@ mod tests {
     }
 
     #[test]
-    fn main_stays_put_and_the_lanes_above_it_scroll_from_main_up() {
+    fn scrolling_the_lanes_above_main_sinks_main_then_slides_them_under_it() {
         let area = Rect::from_min_size(Pos2::new(0.0, 100.0), Vec2::new(800.0, 400.0));
         let kinds = crowded(1);
         let rest = lane_layout(&kinds, area, 0.0, 0.0);
@@ -11307,15 +11365,27 @@ mod tests {
         assert!(rest.rows[0].top() < area.top());
         assert!(rest.up_max > 0.0);
 
-        // Scrolled all the way up, main has not moved and the top lane shows
-        // with a lane of room above it.
+        assert!(!rest.peek);
+
+        // A little up, main goes down with the lanes above it.
+        let some = lane_layout(&kinds, area, 10.0, 0.0);
+        assert_eq!(some.rows[10].top(), main.top() + 10.0);
+        assert_eq!(some.rows[10].top() - some.rows[9].bottom(), 8.0);
+
+        // Scrolled all the way up, main sits at the sheet's foot over a strip,
+        // the audio lane is folded to it, and the top lane shows with a lane
+        // of room above it.
         let top = lane_layout(&kinds, area, f32::MAX, 0.0);
-        assert_eq!(top.rows[10], main);
+        let sunk = top.rows[10];
+        assert!((sunk.bottom() - (area.bottom() - PEEK)).abs() < 0.5);
+        assert_eq!(sunk.height(), main.height());
+        assert!(top.peek);
+        assert_eq!(top.shown()[11].height(), 0.0, "a folded lane takes no drop");
         assert!((top.rows[0].top() - (area.top() + lane_room())).abs() < 0.5);
         // The lanes next to main slid under it: what shows of them stays in
         // the band above main and never over main.
         for shown in &top.shown()[..10] {
-            assert!(shown.bottom() <= main.top());
+            assert!(shown.bottom() <= sunk.top());
         }
     }
 
@@ -11333,9 +11403,9 @@ mod tests {
         // Scrolling up undoes it in the same order.
         let (up, down) = chain_scroll(&layout, 0.0, 40.0, 60.0);
         assert_eq!((up, down), (20.0, 0.0));
-        // Scrolling the lanes above main leaves main where it is.
+        // Scrolling the lanes above main carries main down with them.
         let lifted = lane_layout(&crowded(8), area, 30.0, 0.0);
-        assert_eq!(lifted.rows[10], layout.rows[10]);
+        assert_eq!(lifted.rows[10].top(), layout.rows[10].top() + 30.0);
 
         // Scrolled to the bottom, the whole stack went up together: main and
         // the lanes above it moved as far as the last lane did, which shows

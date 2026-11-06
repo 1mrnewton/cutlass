@@ -333,8 +333,7 @@ pub fn show(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Option
         view.dialogs.save_still(parent, &name);
     }
     let full = ui.max_rect();
-    ui.painter()
-        .rect_filled(full, CornerRadius::ZERO, tokens::GAP);
+    ui::Surface::gap().paint(ui.painter(), full);
     if view.preview_full && shell.draft().is_none() {
         set_full_screen(ui, view, false);
     }
@@ -423,7 +422,7 @@ fn dropped_files(shell: &mut Shell, ui: &Ui) {
             egui::Order::Foreground,
             egui::Id::unique("drop-scrim"),
         ));
-        painter.rect_filled(rect, CornerRadius::ZERO, tokens::SCRIM);
+        ui::Surface::scrim().paint(&painter, rect);
         let words = if shell.project_folder().is_some() {
             "Drop to import"
         } else {
@@ -544,8 +543,7 @@ fn projects_home(
     parent: Option<&eframe::Frame>,
 ) {
     let bar = Rect::from_min_size(full.min, Vec2::new(full.width(), tokens::HEAD_HEIGHT));
-    ui.painter()
-        .rect_filled(bar, CornerRadius::ZERO, tokens::PROJECT_BAR);
+    ui::Surface::bar().paint(ui.painter(), bar);
     shell.chrome.project_bar = true;
     shell.chrome.projects = true;
     #[cfg(not(target_os = "macos"))]
@@ -848,8 +846,7 @@ fn project_bar(
     parent: Option<&eframe::Frame>,
 ) {
     let bar = Rect::from_min_size(full.min, Vec2::new(full.width(), height));
-    ui.painter()
-        .rect_filled(bar, CornerRadius::ZERO, tokens::PROJECT_BAR);
+    ui::Surface::bar().paint(ui.painter(), bar);
     shell.chrome.project_bar = true;
     #[cfg(not(target_os = "macos"))]
     window_buttons(shell, ui, bar);
@@ -4112,7 +4109,7 @@ fn paint_gap_menu(shell: &mut Shell, ui: &mut Ui) {
 /// channel has clipped.
 fn paint_meter(ui: &Ui, rect: Rect, channels: [cutlass_playback::ChannelReading; 2]) {
     let painter = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
-    painter.rect_filled(rect, CornerRadius::ZERO, tokens::PANEL);
+    ui::Surface::panel().paint(&painter, rect);
     painter.vline(
         rect.left(),
         rect.y_range(),
@@ -6851,8 +6848,7 @@ fn key_name(key: egui::Key) -> Option<String> {
 }
 
 fn panel(ui: &mut Ui, rect: Rect) {
-    ui.painter()
-        .rect_filled(rect, CornerRadius::ZERO, tokens::PANEL);
+    ui::Surface::panel().paint(ui.painter(), rect);
 }
 
 fn drag_gap(ui: &mut Ui, rect: Rect, mut on_drag: impl FnMut(Vec2)) {

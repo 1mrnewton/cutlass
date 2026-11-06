@@ -3959,6 +3959,13 @@ fn ruler_and_lanes(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
             );
         }
     }
+    // The ruler first, so the playhead's head, on top of it, takes its own
+    // hover and drag.
+    let ruler_hit = ui.interact(
+        lane_ruler(ruler, lanes_left),
+        ui.scope_id().with("ruler"),
+        Sense::click_and_drag(),
+    );
     let mut scrubbing = false;
     if (lanes_left..=tracks.right()).contains(&playhead_x) {
         let mark = Rect::from_min_size(
@@ -4006,11 +4013,6 @@ fn ruler_and_lanes(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
         );
         response.on_hover_text("Playhead");
     }
-    let ruler_hit = ui.interact(
-        lane_ruler(ruler, lanes_left),
-        ui.scope_id().with("ruler"),
-        Sense::click_and_drag(),
-    );
     shell.set_scrubbing(scrubbing || ruler_hit.dragged());
     if ruler_hit.dragged()
         && let Some(pointer) = ruler_hit.interact_pointer_pos()
@@ -5024,6 +5026,9 @@ fn paint_marks(ui: &Ui, shell: &Shell, ruler: Rect, lanes_left: f32) {
     }
 }
 
+/// The widest ruler label, a drop-frame timecode, with its gap.
+const RULER_LABEL_LEAD: f32 = 80.0;
+
 /// The ruler's ticks and labels across the lanes. Past the end of the cut,
 /// the ticks keep going.
 fn paint_ticks(
@@ -5043,7 +5048,15 @@ fn paint_ticks(
     if !span.is_finite() || span > i64::MAX as f64 {
         return;
     }
-    let from = Micros(origin.max(0));
+    // Start a label's width before the view, so a label whose tick has
+    // just scrolled off the left shows its tail instead of vanishing.
+    let lead = (f64::from(RULER_LABEL_LEAD) / pixel_size).ceil();
+    let lead = if lead.is_finite() && lead < i64::MAX as f64 {
+        lead as i64
+    } else {
+        0
+    };
+    let from = Micros(origin.saturating_sub(lead).max(0));
     let to = Micros(origin.saturating_add(span as i64));
     let painter = ui.painter().with_clip_rect(Rect::from_min_max(
         Pos2::new(lanes_left, ruler.top()),
@@ -6327,7 +6340,8 @@ fn paint_ruler_markers(shell: &mut Shell, ui: &mut Ui, lanes_left: f32, ruler: R
             shell.view_origin().0,
             mark.time.0,
         );
-        let flag = marker_flag(x, ruler.bottom() - 16.0);
+        // At the ruler's foot, under the labels.
+        let flag = marker_flag(x, ruler.bottom() - 12.0);
         if !ruler.intersects(flag) {
             continue;
         }
@@ -10757,6 +10771,26 @@ mod tests {
             (rect, scale),
             (Rect::from_min_size(Pos2::ZERO, frame.size()), 2.0)
         );
+    }
+
+    #[test]
+    fn a_label_whose_tick_just_left_the_view_still_shows_its_tail() {
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(900.0, 100.0))),
+                ..Default::default()
+            },
+            |ui| {
+                let ruler = Rect::from_min_size(Pos2::ZERO, Vec2::new(900.0, tokens::RULER_HEIGHT));
+                // 300 px a second; the 00:01 tick sits 30 px left of the lanes.
+                paint_ticks(ui, ruler, 100.0, 3e-4, 1_100_000, FrameRate::FPS_30, false);
+            },
+        );
+        output.textures_delta.clear();
+        let text = painted_text(&output);
+        assert!(text.contains("00:01"), "{text}");
+        assert!(text.contains("00:02"), "{text}");
     }
 
     /// The x of the white playhead line painted nearest `guess`.

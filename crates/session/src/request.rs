@@ -519,6 +519,14 @@ pub enum Request {
     /// Add an empty lane. Video and mixed lanes are overlays above the main track.
     /// Audio is inserted under the main track. This does not place a segment.
     InsertTrack { track_id: TrackId, kind: TrackType },
+    /// Add an empty lane at `index` in the track list, which is the row order.
+    /// Audio goes under the main track and every other kind above it; an
+    /// index outside the kind's block, or past the end, is refused.
+    InsertTrackAt {
+        track_id: TrackId,
+        kind: TrackType,
+        index: usize,
+    },
     /// Take a lane and its clips off the draft. The main track and a locked
     /// track stay. Each clip leaves as a delete would take it.
     RemoveTrack { track_id: TrackId },

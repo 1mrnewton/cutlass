@@ -49,6 +49,7 @@ pub use canvas::{CANVAS_SHAPES, CanvasShape, canvas_for, follow_first_picture, r
 pub use move_segment::move_segment;
 pub use place::place;
 pub use text::{MAX_CAPTION_STAGGER_MS, NEW_TEXT_SIZE};
+pub use track::lane_fits;
 pub use trim::trim;
 pub use words::set_words;
 
@@ -579,6 +580,11 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             material_id,
         } => replace::replace_media(draft, segment_id, material_id),
         Request::InsertTrack { track_id, kind } => track::insert_track(draft, track_id, kind),
+        Request::InsertTrackAt {
+            track_id,
+            kind,
+            index,
+        } => track::insert_track_at(draft, track_id, kind, *index),
         Request::RemoveTrack { track_id } => track::remove_track(draft, track_id),
         Request::RenameTrack { track_id, name } => track::rename_track(draft, track_id, name),
         Request::AddTimeMark {

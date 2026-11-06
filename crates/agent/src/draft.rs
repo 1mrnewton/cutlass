@@ -513,6 +513,7 @@ pub fn request_name(request: &Request) -> &'static str {
         Request::Ungroup { .. } => "ungroup",
         Request::SetInside { .. } => "set_inside",
         Request::InsertTrack { .. } => "insert_track",
+        Request::InsertTrackAt { .. } => "insert_track_at",
         Request::RemoveTrack { .. } => "remove_track",
         Request::RenameTrack { .. } => "rename_track",
         Request::AddTimeMark { .. } => "add_time_mark",

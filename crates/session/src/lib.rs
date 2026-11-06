@@ -15,7 +15,7 @@ pub use cutlass_model::{
 };
 pub use edit::{
     CANVAS_SHAPES, CanvasShape, EditError, MAX_CAPTION_STAGGER_MS, NEW_TEXT_SIZE, canvas_for,
-    follow_first_picture, ratio_request,
+    follow_first_picture, lane_fits, ratio_request,
 };
 pub use history::UNDO_LIMIT;
 pub use request::{Arrange, ImportedMedium, Request, TrimEdge};

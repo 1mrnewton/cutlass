@@ -4,8 +4,7 @@
 //! With no project open, the window lists the saved projects and can create one.
 
 use egui::{
-    Align, Align2, Color32, CornerRadius, FontId, Layout, Pos2, Rect, RichText, ScrollArea, Sense,
-    Ui, Vec2,
+    Align, Align2, Color32, CornerRadius, FontId, Layout, Pos2, Rect, RichText, Sense, Ui, Vec2,
 };
 
 use cutlass_editor::ruler_ticks;
@@ -16,6 +15,7 @@ use crate::dialogs::{Dialogs, Finished, Picker};
 use crate::icons;
 use crate::shell::{ExportRequest, ListedProject, MovePreview, Shell, ShellError};
 use crate::tokens;
+use crate::ui;
 use crate::widgets;
 
 mod assistant;
@@ -578,8 +578,7 @@ fn projects_home(
     let root = projects_root(view);
     let projects = listed_projects(view);
     let mut body_ui = ui.new_child(egui::UiBuilder::new().max_rect(body));
-    ScrollArea::vertical()
-        .id_salt("projects")
+    ui::Scroll::vertical("projects")
         .auto_shrink([false, false])
         .show(&mut body_ui, |ui| {
             if new_project_button(ui) {
@@ -1711,17 +1710,15 @@ fn shelf_rail(ui: &mut Ui, view: &mut ViewState, rect: Rect) {
         Pos2::new(rect.right() - 8.0, rect.bottom()),
     );
     let mut column = ui.new_child(egui::UiBuilder::new().max_rect(inner));
-    ScrollArea::vertical()
-        .id_salt("library-rail")
-        .show(&mut column, |ui| {
-            ui.add_space(8.0);
-            ui.spacing_mut().item_spacing.y = 2.0;
-            for shelf in Shelf::ALL {
-                if shelf_button(ui, shelf, view.library_shelf == shelf).clicked() {
-                    view.library_shelf = shelf;
-                }
+    ui::Scroll::vertical("library-rail").show(&mut column, |ui| {
+        ui.add_space(8.0);
+        ui.spacing_mut().item_spacing.y = 2.0;
+        for shelf in Shelf::ALL {
+            if shelf_button(ui, shelf, view.library_shelf == shelf).clicked() {
+                view.library_shelf = shelf;
             }
-        });
+        }
+    });
 }
 
 fn shelf_button(ui: &mut Ui, shelf: Shelf, active: bool) -> egui::Response {
@@ -1794,8 +1791,7 @@ fn asset_column(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect
     }
     let mut grid_ui = column.new_child(egui::UiBuilder::new().max_rect(grid));
     let query = view.library_query.clone();
-    ScrollArea::vertical()
-        .id_salt("library-cards")
+    ui::Scroll::vertical("library-cards")
         .auto_shrink([false, false])
         .show(&mut grid_ui, |ui| {
             if stock {
@@ -3212,18 +3208,16 @@ fn inspector_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
     let mut details = ui.new_child(egui::UiBuilder::new().max_rect(padded));
     details.set_clip_rect(padded);
     let content_width = padded.width();
-    ScrollArea::vertical()
-        .id_salt("inspector")
-        .show(&mut details, |ui| {
-            ui.set_width(content_width);
-            ui.add_space(14.0);
-            if let Some(inspection) = shell.inspection() {
-                inspector::clip_panel(shell, ui, view, &inspection, content_width);
-            } else {
-                section_title(ui, "Details");
-                project_facts(shell, ui, view, content_width);
-            }
-        });
+    ui::Scroll::vertical("inspector").show(&mut details, |ui| {
+        ui.set_width(content_width);
+        ui.add_space(14.0);
+        if let Some(inspection) = shell.inspection() {
+            inspector::clip_panel(shell, ui, view, &inspection, content_width);
+        } else {
+            section_title(ui, "Details");
+            project_facts(shell, ui, view, content_width);
+        }
+    });
 }
 
 fn section_title(ui: &mut Ui, title: &str) {
@@ -3476,8 +3470,7 @@ fn paint_toolbar(shell: &mut Shell, ui: &mut Ui, rect: Rect) {
             .max_rect(rect.shrink2(Vec2::new(10.0, 4.0)))
             .layout(Layout::left_to_right(Align::Center)),
     );
-    ScrollArea::horizontal()
-        .id_salt("timeline-toolbar")
+    ui::Scroll::horizontal("timeline-toolbar")
         .auto_shrink([false, true])
         .show(&mut bar, |ui| {
             ui.horizontal(|ui| {

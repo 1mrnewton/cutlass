@@ -241,7 +241,8 @@ fn row_middle(lane_height: f64, row: usize) -> f64 {
 ///
 /// A new lane a move names is inserted first. When the group heads right the
 /// later clips move first, so a clip does not land on a selected clip that
-/// has not moved yet. Empty when every clip is already where it would land.
+/// has not moved yet. A lane other than main that the drag leaves empty is
+/// removed last. Empty when every clip is already where it would land.
 #[must_use]
 pub fn move_requests(draft: &Draft, moves: &[ClipMove]) -> Vec<Request> {
     let current = |plan: &ClipMove| {
@@ -271,8 +272,20 @@ pub fn move_requests(draft: &Draft, moves: &[ClipMove]) -> Vec<Request> {
             index: lane.index,
         })
     });
+    let emptied = draft.tracks.iter().filter(|track| {
+        !track.is_main()
+            && !track.segments.is_empty()
+            && !moves.iter().any(|plan| plan.track_id == track.id)
+            && track
+                .segments
+                .iter()
+                .all(|segment| moves.iter().any(|plan| plan.segment_id == segment.id))
+    });
     lanes
         .chain(ordered.into_iter().map(ClipMove::request))
+        .chain(emptied.map(|track| Request::RemoveTrack {
+            track_id: track.id.clone(),
+        }))
         .collect()
 }
 
@@ -571,6 +584,82 @@ mod tests {
             moves
                 .iter()
                 .all(|plan| plan.new_lane.is_none() && plan.track_id == TrackId::new("main"))
+        );
+    }
+
+    #[test]
+    fn a_drag_that_empties_a_lane_takes_the_lane_in_the_same_step() {
+        let mut session = session(&[("a", 0, 1_000_000)]);
+        with_sound(&mut session);
+        let revision = session.revision();
+        session
+            .apply(
+                revision,
+                &[
+                    Request::InsertTrack {
+                        track_id: TrackId::new("more"),
+                        kind: TrackType::Audio,
+                    },
+                    Request::Place {
+                        track_id: TrackId::new("more"),
+                        segment: Box::new(Segment::new("t", "song", TimeRange::new(0, 500_000))),
+                    },
+                ],
+            )
+            .unwrap();
+        let before = session.draft().tracks.clone();
+        let onto_sound = ClipMove {
+            segment_id: SegmentId::new("t"),
+            track_id: TrackId::new("sound"),
+            start: Micros(2_000_000),
+            duration: Micros(500_000),
+            snapped: false,
+            new_lane: None,
+        };
+        let requests = move_requests(session.draft(), &[onto_sound]);
+        assert_eq!(
+            requests.last(),
+            Some(&Request::RemoveTrack {
+                track_id: TrackId::new("more"),
+            })
+        );
+        let revision = session.revision();
+        session.apply(revision, &requests).unwrap();
+        let ids: Vec<&str> = session
+            .draft()
+            .tracks
+            .iter()
+            .map(|track| track.id.as_str())
+            .collect();
+        assert_eq!(ids, ["main", "sound"]);
+        session.undo().unwrap();
+        assert_eq!(session.draft().tracks, before);
+
+        // A move along its own lane, and a move off main, keep every lane.
+        let along = ClipMove {
+            segment_id: SegmentId::new("t"),
+            track_id: TrackId::new("more"),
+            start: Micros(3_000_000),
+            duration: Micros(500_000),
+            snapped: false,
+            new_lane: None,
+        };
+        assert_eq!(move_requests(session.draft(), &[along]).len(), 1);
+        let off_main = ClipMove {
+            segment_id: SegmentId::new("a"),
+            track_id: TrackId::new("lane"),
+            start: Micros(0),
+            duration: Micros(1_000_000),
+            snapped: false,
+            new_lane: Some(NewLane {
+                kind: TrackType::Video,
+                index: 0,
+            }),
+        };
+        assert!(
+            !move_requests(session.draft(), &[off_main])
+                .iter()
+                .any(|request| matches!(request, Request::RemoveTrack { .. }))
         );
     }
 

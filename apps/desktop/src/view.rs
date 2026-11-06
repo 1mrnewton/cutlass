@@ -1777,7 +1777,13 @@ fn asset_column(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect
             .desired_width(f32::INFINITY)
             .text_color(tokens::TEXT)
             .background_color(tokens::PROJECT_BAR)
-            .margin(egui::Margin::symmetric(8, 6)),
+            .font(FontId::proportional(tokens::TYPE_SIZE + 1.0))
+            .frame(
+                egui::Frame::new()
+                    .fill(tokens::PROJECT_BAR)
+                    .corner_radius(CornerRadius::same(10))
+                    .inner_margin(egui::Margin::symmetric(12, 9)),
+            ),
     );
     if shelf == Shelf::Media {
         column.add_space(8.0);
@@ -1789,8 +1795,10 @@ fn asset_column(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect
         if cutlass_editor::folder_trail(shell.library_store(), &view.library_folder).is_empty() {
             view.library_folder.clear();
         }
-        column.add_space(8.0);
-        path_bar(shell, &mut column, view);
+        if !view.library_folder.is_empty() {
+            column.add_space(8.0);
+            path_bar(shell, &mut column, view);
+        }
     }
     column.add_space(12.0);
     let grid = column.available_rect_before_wrap();
@@ -1880,33 +1888,54 @@ fn asset_column(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect
 }
 
 /// Project or Free stock, over the media shelf.
+/// Project and Free stock as one segmented control across the column.
 fn source_switch(ui: &mut Ui, view: &mut ViewState) {
-    ui.horizontal(|ui| {
-        for (label, stock) in [("Project", false), ("Free stock", true)] {
-            let on = view.library_stock == stock;
-            let button =
-                egui::Button::new(RichText::new(label).size(tokens::TYPE_SIZE).color(if on {
-                    tokens::TEXT
-                } else {
-                    tokens::FAINT
-                }))
-                .fill(if on {
-                    tokens::ACTIVE
-                } else {
-                    tokens::PROJECT_BAR
-                })
-                .corner_radius(CornerRadius::same(tokens::ICON_RADIUS));
-            if ui.add(button).clicked() && !on {
-                view.library_stock = stock;
-                view.library_picked.clear();
-                view.library_anchor = None;
-            }
+    let (track, _) =
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), 34.0), Sense::hover());
+    ui.painter()
+        .rect_filled(track, CornerRadius::same(10), tokens::PROJECT_BAR);
+    let half = (track.width() - 6.0) / 2.0;
+    for (index, (label, stock)) in [("Project", false), ("Free stock", true)]
+        .into_iter()
+        .enumerate()
+    {
+        let segment = Rect::from_min_size(
+            track.min + Vec2::new(3.0 + half * index as f32, 3.0),
+            Vec2::new(half, track.height() - 6.0),
+        );
+        let response = ui.interact(
+            segment,
+            ui.scope_id().with(("library-source", index)),
+            Sense::click(),
+        );
+        let on = view.library_stock == stock;
+        if on {
+            ui.painter()
+                .rect_filled(segment, CornerRadius::same(8), tokens::ACTIVE);
         }
-    });
+        let color = if on || response.hovered() {
+            tokens::TEXT
+        } else {
+            tokens::FAINT
+        };
+        ui.painter().text(
+            segment.center(),
+            Align2::CENTER_CENTER,
+            label,
+            FontId::proportional(tokens::TYPE_SIZE),
+            color,
+        );
+        if response.clicked() && !on {
+            view.library_stock = stock;
+            view.library_picked.clear();
+            view.library_anchor = None;
+        }
+    }
 }
 
-/// "All", then each folder down to the one shown. A click goes there; a
-/// card dropped on one moves into it.
+/// Inside a folder: "All", then each folder down to the one shown. A click
+/// goes there; a card dropped on one moves into it. At the top it is not
+/// shown.
 fn path_bar(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
     let trail: Vec<(String, String)> = std::iter::once((String::new(), "All".to_owned()))
         .chain(
@@ -9767,7 +9796,8 @@ mod tests {
             vec![egui::Event::PointerMoved(pos), event(true), event(false)]
         };
         let output = frame(&mut shell, &mut view, Vec::new());
-        assert!(text_pos(&output, "All").is_some());
+        // At the top there is no path bar.
+        assert!(text_pos(&output, "All").is_none());
         assert!(text_pos(&output, "Free stock").is_some());
         let card = text_pos(&output, "pattern.png").expect("library card");
         // Right-click below the cards for the empty-space menu.
@@ -9823,6 +9853,7 @@ mod tests {
         let output = frame(&mut shell, &mut view, Vec::new());
         assert!(view.library_folder.is_empty());
         assert!(text_pos(&output, "pattern.png").is_some());
+        assert!(text_pos(&output, "All").is_none());
         let _ = std::fs::remove_dir_all(&temp);
     }
 
@@ -12819,6 +12850,14 @@ mod tests {
             harness.run_steps(8);
             picture(&mut harness, name);
         }
+        harness.state_mut().1.library_query.clear();
+        // A search with no match: the empty shelf's line has a glyph the
+        // test fonts lack.
+        harness.state_mut().1.library_shelf = Shelf::Media;
+        "zz".clone_into(&mut harness.state_mut().1.library_query);
+        harness.run_steps(4);
+        picture(&mut harness, "media");
+        harness.state_mut().1.library_shelf = Shelf::Stickers;
         harness.state_mut().1.library_query.clear();
         harness.state_mut().1.licenses = Some(cutlass_licenses::notices());
         harness.run_steps(4);

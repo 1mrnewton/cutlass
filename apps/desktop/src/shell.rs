@@ -790,6 +790,9 @@ pub struct Shell {
     escaped_drag: Option<SegmentId>,
     pending_trim: Option<PendingTrim>,
     pending_moves: Vec<ClipMove>,
+    /// A lane a library drop opens in a gap, sent first in the drop's own
+    /// undo step. Set only around one place call.
+    gap_lane: Option<Request>,
     notice: String,
     /// When the notice was set; it fades out [`NOTICE_SHOWN`] later.
     notice_since: Instant,
@@ -905,6 +908,7 @@ impl Shell {
             escaped_drag: None,
             pending_trim: None,
             pending_moves: Vec::new(),
+            gap_lane: None,
             notice: String::new(),
             notice_since: Instant::now(),
             preview_black: true,
@@ -2907,11 +2911,19 @@ impl Shell {
     }
 
     /// Where library card `material_id` would land dropped at `x`, `y`,
-    /// on the drop rules the `drop_*` calls use, so the lanes can mark the
-    /// spot it really goes to, not just the row under the pointer. `None`
-    /// when it would miss or the card is unknown.
+    /// on the drop rules [`Self::drop_library`] uses, so the lanes can mark
+    /// the spot it really goes to, not just the row under the pointer. `gap`
+    /// is the view row the pointer is in the gap above, if any: a card whose
+    /// kind may sit there opens its own lane there. `None` when it would miss
+    /// or the card is unknown.
     #[must_use]
-    pub fn library_landing(&self, material_id: &str, x: f64, y: f64) -> Option<LibraryLanding> {
+    pub fn library_landing(
+        &self,
+        material_id: &str,
+        x: f64,
+        y: f64,
+        gap: Option<usize>,
+    ) -> Option<LibraryLanding> {
         let draft = self.draft()?;
         let pointer = Pointer {
             x: self.time_zero_x(x),
@@ -2925,7 +2937,31 @@ impl Shell {
                 duration: Micros(0),
             });
         }
-        let (kind, duration) = if material_id.starts_with(cutlass_editor::EFFECT_CARD_PREFIX) {
+        let (kind, duration) = self.library_kind(material_id)?;
+        let gesture = DropGesture {
+            kind: kind.clone(),
+            duration,
+            pointer,
+            scale: self.scale(),
+            playhead: self.playhead,
+            snap_threshold: self.snap_threshold(),
+        };
+        let outcome = drop_gesture(draft, &gesture).ok()?;
+        if let Some(boundary) = gap
+            && self.gap_lane_index(&kind, boundary).is_some()
+        {
+            let start = match &outcome {
+                DropOutcome::Place { start, .. } | DropOutcome::NewLane { start, .. } => *start,
+                DropOutcome::Miss => return None,
+            };
+            return Some(LibraryLanding::NewLane {
+                row: boundary,
+                kind,
+                start,
+                duration,
+            });
+        }
+        if material_id.starts_with(cutlass_editor::EFFECT_CARD_PREFIX) {
             let on_clip = hit_test(draft, self.scale(), pointer)
                 .ok()
                 .flatten()
@@ -2944,32 +2980,8 @@ impl Shell {
                     None => self.new_lane_landing(TrackType::Effect, start, duration),
                 });
             }
-            (TrackType::Effect, EFFECT_LENGTH)
-        } else if material_id.starts_with(cutlass_editor::TITLE_CARD_PREFIX) {
-            (TrackType::Text, TITLE_LENGTH)
-        } else if material_id.starts_with(cutlass_editor::TEMPLATE_CARD_PREFIX) {
-            let length = cutlass_editor::title_template(material_id)
-                .map_or(TITLE_LENGTH, cutlass_editor::TitleTemplate::length);
-            (TrackType::Text, length)
-        } else if material_id == cutlass_editor::ADJUSTMENT_CARD {
-            (TrackType::Adjust, EFFECT_LENGTH)
-        } else if material_id.starts_with(cutlass_editor::FILTER_CARD_PREFIX) {
-            (TrackType::Filter, EFFECT_LENGTH)
-        } else if material_id.starts_with(STICKER_CARD_PREFIX) {
-            let sticker = shelf_sticker(material_id).ok()?;
-            (TrackType::Sticker, sticker_length(sticker))
-        } else {
-            material_span(draft, material_id)?
-        };
-        let gesture = DropGesture {
-            kind,
-            duration,
-            pointer,
-            scale: self.scale(),
-            playhead: self.playhead,
-            snap_threshold: self.snap_threshold(),
-        };
-        match drop_gesture(draft, &gesture).ok()? {
+        }
+        match outcome {
             DropOutcome::Miss => None,
             DropOutcome::Place { track_id, start } => Some(LibraryLanding::Row {
                 track_id,
@@ -2979,6 +2991,137 @@ impl Shell {
             DropOutcome::NewLane { kind, start } => {
                 Some(self.new_lane_landing(kind, start, duration))
             }
+        }
+    }
+
+    /// The lane kind and length a library card (not a transition) places.
+    fn library_kind(&self, material_id: &str) -> Option<(TrackType, Micros)> {
+        Some(
+            if material_id.starts_with(cutlass_editor::EFFECT_CARD_PREFIX) {
+                (TrackType::Effect, EFFECT_LENGTH)
+            } else if material_id.starts_with(cutlass_editor::TITLE_CARD_PREFIX) {
+                (TrackType::Text, TITLE_LENGTH)
+            } else if material_id.starts_with(cutlass_editor::TEMPLATE_CARD_PREFIX) {
+                let length = cutlass_editor::title_template(material_id)
+                    .map_or(TITLE_LENGTH, cutlass_editor::TitleTemplate::length);
+                (TrackType::Text, length)
+            } else if material_id == cutlass_editor::ADJUSTMENT_CARD {
+                (TrackType::Adjust, EFFECT_LENGTH)
+            } else if material_id.starts_with(cutlass_editor::FILTER_CARD_PREFIX) {
+                (TrackType::Filter, EFFECT_LENGTH)
+            } else if material_id.starts_with(STICKER_CARD_PREFIX) {
+                let sticker = shelf_sticker(material_id).ok()?;
+                (TrackType::Sticker, sticker_length(sticker))
+            } else {
+                material_span(self.draft()?, material_id)?
+            },
+        )
+    }
+
+    /// The track index a lane of `kind` opened in the gap above view row
+    /// `boundary` takes, when that kind may sit there.
+    fn gap_lane_index(&self, kind: &TrackType, boundary: usize) -> Option<usize> {
+        let draft = self.draft()?;
+        let rows = self.lanes();
+        let index_of = |row: &LaneView| {
+            draft
+                .tracks
+                .iter()
+                .position(|track| track.id == row.track_id)
+        };
+        let index = match rows.get(boundary) {
+            Some(row) => index_of(row)?,
+            None => rows
+                .last()
+                .and_then(index_of)
+                .map_or(draft.tracks.len(), |at| at.saturating_add(1)),
+        };
+        cutlass_session::lane_fits(&draft.tracks, kind, index).then_some(index)
+    }
+
+    /// Drop library card `material_id` at `x`, `y`. In the gap above view row
+    /// `gap`, a card whose kind may sit there opens its own lane there, in the
+    /// same undo step; otherwise it lands by the card's own drop rules.
+    pub fn drop_library(
+        &mut self,
+        material_id: &str,
+        x: f64,
+        y: f64,
+        gap: Option<usize>,
+    ) -> Result<(), ShellError> {
+        let opened = gap.and_then(|boundary| {
+            let (kind, _) = self.library_kind(material_id)?;
+            let index = self.gap_lane_index(&kind, boundary)?;
+            Some((kind, index))
+        });
+        if !material_id.starts_with("transition:")
+            && let Some((kind, index)) = opened
+        {
+            let Some(LibraryLanding::NewLane {
+                start, duration, ..
+            }) = self.library_landing(material_id, x, y, gap)
+            else {
+                return Err(ShellError::Unavailable(
+                    "the drag missed the lanes".to_owned(),
+                ));
+            };
+            let track_id = TrackId::new(self.fresh("track"));
+            self.gap_lane = Some(Request::InsertTrackAt {
+                track_id: track_id.clone(),
+                kind,
+                index,
+            });
+            let placed = self.place_library(material_id, track_id, start, duration);
+            self.gap_lane = None;
+            return placed;
+        }
+        if material_id.starts_with("transition:") {
+            self.drop_transition(material_id, x, y)
+        } else if material_id.starts_with(cutlass_editor::TITLE_CARD_PREFIX) {
+            self.drop_title(material_id, x, y)
+        } else if material_id.starts_with(cutlass_editor::EFFECT_CARD_PREFIX) {
+            self.drop_effect(material_id, x, y)
+        } else if material_id == cutlass_editor::ADJUSTMENT_CARD {
+            self.drop_adjustment(x, y)
+        } else if material_id.starts_with(cutlass_editor::FILTER_CARD_PREFIX) {
+            self.drop_filter(material_id, x, y)
+        } else if material_id.starts_with(STICKER_CARD_PREFIX) {
+            self.drop_sticker(material_id, x, y)
+        } else if material_id.starts_with(cutlass_editor::TEMPLATE_CARD_PREFIX) {
+            self.drop_template(material_id, x, y)
+        } else {
+            self.drop_medium(material_id, x, y)
+        }
+    }
+
+    /// Place library card `material_id` on `track_id` at `start`.
+    fn place_library(
+        &mut self,
+        material_id: &str,
+        track_id: TrackId,
+        start: Micros,
+        duration: Micros,
+    ) -> Result<(), ShellError> {
+        if material_id.starts_with(cutlass_editor::TITLE_CARD_PREFIX) {
+            self.place_title(material_id, track_id, start)
+        } else if material_id.starts_with(cutlass_editor::EFFECT_CARD_PREFIX) {
+            self.place_effect(material_id, track_id, start, EFFECT_LENGTH, None)
+        } else if material_id == cutlass_editor::ADJUSTMENT_CARD {
+            self.place_adjustment(track_id, start)
+        } else if material_id.starts_with(cutlass_editor::FILTER_CARD_PREFIX) {
+            self.place_filter(material_id, track_id, start)
+        } else if material_id.starts_with(STICKER_CARD_PREFIX) {
+            let sticker = shelf_sticker(material_id)?;
+            self.place_sticker(sticker, duration, Some(track_id), start)
+        } else if material_id.starts_with(cutlass_editor::TEMPLATE_CARD_PREFIX) {
+            self.place_template(material_id, track_id, start)
+        } else {
+            let first_clip = self
+                .session_draft()?
+                .tracks
+                .iter()
+                .all(|track| track.segments.is_empty());
+            self.place_medium(material_id, track_id, start, duration, None, first_clip)
         }
     }
 
@@ -6852,6 +6995,12 @@ impl Shell {
     }
 
     fn apply_requests(&mut self, requests: &[Request]) -> Result<(), ShellError> {
+        if let Some(lane) = self.gap_lane.take() {
+            let mut all = Vec::with_capacity(requests.len() + 1);
+            all.push(lane);
+            all.extend_from_slice(requests);
+            return self.apply_requests(&all);
+        }
         let kind = requests
             .first()
             .map(|request| (std::mem::discriminant(request), self.selected().cloned()));
@@ -14626,7 +14775,9 @@ mod tests {
         let x = lane_time(&desktop, 500_000.0);
 
         // Text never sits on a video lane: the mark is a new lane, not the overlay.
-        let landing = desktop.library_landing(&card, x, overlay_row).unwrap();
+        let landing = desktop
+            .library_landing(&card, x, overlay_row, None)
+            .unwrap();
         let super::LibraryLanding::NewLane { row, kind, .. } = landing else {
             panic!("a text card marks the overlay it cannot go on: {landing:?}");
         };
@@ -14643,7 +14794,7 @@ mod tests {
 
         // Over its own lane now, it marks that lane and the span it takes.
         let landing = desktop
-            .library_landing(&card, lane_time(&desktop, 4_000_000.0), overlay_row)
+            .library_landing(&card, lane_time(&desktop, 4_000_000.0), overlay_row, None)
             .unwrap();
         let text_lane = draft.tracks[0].id.clone();
         assert!(matches!(
@@ -14651,6 +14802,92 @@ mod tests {
             super::LibraryLanding::Row { ref track_id, duration, .. }
                 if *track_id == text_lane && duration == cutlass_editor::TITLE_LENGTH
         ));
+    }
+
+    #[test]
+    fn a_library_card_dropped_in_a_gap_opens_its_own_lane_there() {
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        draft.config.maintrack_adsorb = false;
+        draft.canvas_config.width = 2;
+        draft.canvas_config.height = 1;
+        draft.tracks[0]
+            .segments
+            .push(Segment::new("low", "color", TimeRange::new(0, 2_000_000)));
+        let mut words = Track::main(cutlass_model::TrackId::new("words"));
+        words.kind = TrackType::Text;
+        words.flag = cutlass_model::TrackFlag::None;
+        words
+            .segments
+            .push(Segment::new("hello", "text", TimeRange::new(0, 1_000_000)));
+        draft.tracks.insert(0, words);
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        let card = cutlass_editor::title_style("title:end-card")
+            .unwrap()
+            .card_id();
+        let x = lane_time(&desktop, 4_000_000.0);
+        let top_row = crate::tokens::LANE_HEIGHT / 2.0;
+        let before = desktop.draft().unwrap().tracks.clone();
+
+        // The text lane has room at four seconds, but the drop is above it.
+        let landing = desktop.library_landing(&card, x, top_row, Some(0));
+        assert!(
+            matches!(landing, Some(super::LibraryLanding::NewLane { row: 0, .. })),
+            "{landing:?}"
+        );
+        desktop.drop_library(&card, x, top_row, Some(0)).unwrap();
+        let tracks = &desktop.draft().unwrap().tracks;
+        assert_eq!(tracks.len(), before.len() + 1);
+        assert_eq!(tracks[0].kind, TrackType::Text);
+        assert_ne!(
+            tracks[0].id.as_str(),
+            "words",
+            "a lane opened above the text lane"
+        );
+        assert_eq!(tracks[0].segments.len(), 1);
+        assert_eq!(tracks[1].id.as_str(), "words");
+        assert_eq!(tracks[1].segments.len(), 1);
+        desktop.undo().unwrap();
+        assert_eq!(desktop.draft().unwrap().tracks, before, "one undo step");
+
+        // Text may not sit under main: that gap falls back to the drop rules,
+        // which put it on the text lane with room.
+        let under_main = desktop.lanes().len();
+        desktop
+            .drop_library(&card, x, top_row, Some(under_main))
+            .unwrap();
+        let tracks = &desktop.draft().unwrap().tracks;
+        assert_eq!(tracks.len(), before.len());
+        assert_eq!(tracks[0].segments.len(), 2);
+    }
+
+    #[test]
+    fn a_picture_dropped_above_main_opens_an_overlay() {
+        let temp = Temp::new();
+        empty_project(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        let picture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../crates/engine/fixtures/pattern.png");
+        desktop.import_file(&picture).unwrap();
+        let id = desktop.draft().unwrap().materials.videos[0]
+            .id
+            .as_str()
+            .to_owned();
+        let y = crate::tokens::LANE_HEIGHT / 2.0;
+        desktop.drop_library(&id, 0.0, y, None).unwrap();
+        assert_eq!(desktop.draft().unwrap().tracks.len(), 1);
+
+        // Main has room after the first clip, but the drop is above main.
+        desktop.drop_library(&id, 0.0, y, Some(0)).unwrap();
+        let tracks = &desktop.draft().unwrap().tracks;
+        assert_eq!(tracks.len(), 2);
+        assert!(!tracks[0].is_main());
+        assert_eq!(tracks[0].flag, cutlass_model::TrackFlag::SubVideo);
+        assert_eq!(tracks[0].segments.len(), 1);
+        assert_eq!(tracks[1].segments.len(), 1);
     }
 
     #[test]

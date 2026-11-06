@@ -4443,8 +4443,13 @@ fn release_library_drop(
         let row = u32::try_from(index).unwrap_or(0);
         f64::from(row) * tokens::LANE_HEIGHT + tokens::LANE_HEIGHT / 2.0
     });
+    // In a gap, or past the top or bottom lane, a card may open its own lane.
+    let gap = match lane_spot(boxes, pos) {
+        Some(LaneSpot::Between(row)) => Some(row),
+        _ => None,
+    };
     // Mark where the card really goes, which may be another lane or a new one.
-    if let Some(landing) = y.and_then(|y| shell.library_landing(&material_id, x, y)) {
+    if let Some(landing) = y.and_then(|y| shell.library_landing(&material_id, x, y, gap)) {
         paint_library_landing(shell, ui, &landing, boxes, lanes_left);
     }
     if !ui.input(|input| input.pointer.any_released()) {
@@ -4455,23 +4460,7 @@ fn release_library_drop(
         shell.notice_error(&"the drag missed the lanes");
         return;
     };
-    let landed = if material_id.starts_with("transition:") {
-        shell.drop_transition(&material_id, x, y)
-    } else if material_id.starts_with(cutlass_editor::TITLE_CARD_PREFIX) {
-        shell.drop_title(&material_id, x, y)
-    } else if material_id.starts_with(cutlass_editor::EFFECT_CARD_PREFIX) {
-        shell.drop_effect(&material_id, x, y)
-    } else if material_id == cutlass_editor::ADJUSTMENT_CARD {
-        shell.drop_adjustment(x, y)
-    } else if material_id.starts_with(cutlass_editor::FILTER_CARD_PREFIX) {
-        shell.drop_filter(&material_id, x, y)
-    } else if material_id.starts_with(crate::shell::STICKER_CARD_PREFIX) {
-        shell.drop_sticker(&material_id, x, y)
-    } else if material_id.starts_with(cutlass_editor::TEMPLATE_CARD_PREFIX) {
-        shell.drop_template(&material_id, x, y)
-    } else {
-        shell.drop_medium(&material_id, x, y)
-    };
+    let landed = shell.drop_library(&material_id, x, y, gap);
     if let Err(error) = landed {
         shell.notice_error(&error);
     }

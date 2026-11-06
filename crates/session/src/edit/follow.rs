@@ -21,12 +21,13 @@ pub const MAX_TRACK_SAMPLES: usize = 216_000;
 /// The farthest a corner may be from the canvas middle, in canvas halves.
 const MAX_REACH: f64 = 1_000.0;
 
-/// How far a thinned key path may stray from the frame-by-frame one: a
-/// thousandth of the canvas for place, a fifth of a degree, a thousandth
-/// of scale.
-const PLACE_TOLERANCE: f64 = 0.002;
-const TURN_TOLERANCE: f64 = 0.2;
-const SCALE_TOLERANCE: f64 = 0.001;
+/// How far a thinned key path may stray from the frame-by-frame one:
+/// 0.004 canvas halves for place (about two pixels on a 1080p canvas),
+/// half a degree, half a percent of scale. A real track jitters by about
+/// that much from frame to frame, so a tighter path keys every frame.
+const PLACE_TOLERANCE: f64 = 0.004;
+const TURN_TOLERANCE: f64 = 0.5;
+const SCALE_TOLERANCE: f64 = 0.005;
 
 /// Make `followers` follow `target` along `path`, each keeping its offset
 /// from the target at `anchor`, and keep the path as the `video_tracking`

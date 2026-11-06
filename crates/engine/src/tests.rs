@@ -683,6 +683,40 @@ fn a_steered_decode_moves_to_a_later_time_or_stops_where_it_got_to() {
     assert_eq!(seen, [tick(0), tick(1), tick(2), tick(3)]);
 }
 
+#[test]
+fn a_steered_decode_seeks_to_a_target_moved_far_ahead() {
+    let mut readers = ReaderFactory::new();
+    readers.register_container(probe_script, open_two_hundred);
+    readers
+        .decoders_mut()
+        .register(CodecId::Jpeg, open_one_picture);
+    let mut media = readers.open(&fixture("pattern.jpg")).expect("open");
+    let tick = |ticks: i64| ticks_to_micros(ticks, Timescale::new(30)).expect("time");
+    let cover = TimeRange::new(0, 10_000_000);
+    let mut seen = Vec::new();
+    let landed = media
+        .decode_steered(Micros(tick(2).0 + 10), &cover, &mut |held| {
+            seen.push(held.start);
+            if held.start == tick(2) {
+                // Five seconds on: past the reach decoding forward covers.
+                Steer::Retarget(Micros(tick(150).0 + 10))
+            } else {
+                Steer::Go
+            }
+        })
+        .expect("landed");
+    assert_eq!(landed.start, tick(150), "{seen:?}");
+    // Every picture here is a keyframe, so the seek lands on the asked one
+    // and none of the pictures between were decoded.
+    assert_eq!(seen, [tick(2), tick(150)]);
+}
+
+fn open_two_hundred(_path: &Path) -> Result<Box<dyn Demux>, OpenError> {
+    let mut movie = scripted(0, 200);
+    movie.lands = true;
+    Ok(Box::new(movie))
+}
+
 fn open_eight(_path: &Path) -> Result<Box<dyn Demux>, OpenError> {
     Ok(Box::new(scripted(0, 8)))
 }
@@ -852,6 +886,8 @@ struct Scripted {
     packets: Vec<FilePacket>,
     cursor: usize,
     cancelled: bool,
+    /// Seek to the asked picture, every one a keyframe, instead of the start.
+    lands: bool,
 }
 
 fn scripted(foreign: usize, pictures: usize) -> Scripted {
@@ -885,6 +921,7 @@ fn scripted(foreign: usize, pictures: usize) -> Scripted {
         packets,
         cursor: 0,
         cancelled: false,
+        lands: false,
     }
 }
 
@@ -929,15 +966,31 @@ impl Demux for Scripted {
         Ok(Some(packet.clone()))
     }
 
-    fn seek(&mut self, _to: SeekTo) -> Result<SeekLanding, ReadError> {
+    fn seek(&mut self, to: SeekTo) -> Result<SeekLanding, ReadError> {
         if self.cancelled {
             return Err(ReadError::Cancelled);
         }
-        self.cursor = 0;
+        let time = if self.lands {
+            self.cursor = self
+                .packets
+                .iter()
+                .rposition(|packet| {
+                    packet.stream() == to.track
+                        && packet
+                            .timestamp()
+                            .presentation()
+                            .is_some_and(|pts| pts <= to.time)
+                })
+                .unwrap_or(0);
+            to.time
+        } else {
+            self.cursor = 0;
+            0
+        };
         Ok(SeekLanding {
             landing: Landing::Packet {
-                ordinal: 0,
-                time: 0,
+                ordinal: u32::try_from(self.cursor).unwrap_or(0),
+                time,
                 keyframe: true,
                 preroll: 0,
                 byte_position: 0,

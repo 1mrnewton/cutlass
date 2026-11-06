@@ -970,6 +970,14 @@ impl Editor {
             .map_err(EditorError::from)
     }
 
+    /// Bring in a subtitle file (SRT or LRC, by the extension of
+    /// `file_name`) whose `text` the phone read, as captions on a new
+    /// subtitle lane: one undo step.
+    pub fn import_subtitles(&self, file_name: String, text: String) -> Result<(), EditorError> {
+        self.run(move |host| host.import_subtitles(&file_name, &text))?
+            .map_err(EditorError::from)
+    }
+
     /// Change what a text clip says, as one undo step.
     pub fn set_text(&self, clip_id: String, content: String) -> Result<(), EditorError> {
         self.run(move |host| host.set_text(&SegmentId::new(clip_id), &content))?

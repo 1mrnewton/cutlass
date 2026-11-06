@@ -104,9 +104,20 @@ fn mark(ui: &mut Ui, label: &str, on: bool) -> bool {
     .clicked()
 }
 
-pub fn dialog<R>(ui: &mut Ui, title: &str, add: impl FnOnce(&mut Ui) -> R) -> (R, bool) {
+/// Dim the window and take the pointer, so nothing under a dialog reacts.
+fn scrim(ui: &mut Ui, title: &str) {
+    let screen = ui.max_rect();
     ui.painter()
-        .rect_filled(ui.max_rect(), CornerRadius::ZERO, tokens::SCRIM);
+        .rect_filled(screen, CornerRadius::ZERO, tokens::SCRIM);
+    let _ = ui.interact(
+        screen,
+        egui::Id::unique(("scrim", title)),
+        Sense::click_and_drag(),
+    );
+}
+
+pub fn dialog<R>(ui: &mut Ui, title: &str, add: impl FnOnce(&mut Ui) -> R) -> (R, bool) {
+    scrim(ui, title);
     let screen = ui.max_rect();
     let width = 420.0;
     let top = (screen.center().y - 180.0).max(screen.top() + 16.0);
@@ -188,8 +199,7 @@ pub fn sheet<R>(
     add: impl FnOnce(&mut Ui) -> R,
 ) -> (R, SheetEnd) {
     let screen = ui.max_rect();
-    ui.painter()
-        .rect_filled(screen, CornerRadius::ZERO, tokens::SCRIM);
+    scrim(ui, title);
     // The height the sheet took last frame centers it; the first frame
     // guesses.
     let id = egui::Id::unique(("sheet", title));

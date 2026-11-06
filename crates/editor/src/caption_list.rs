@@ -2,7 +2,7 @@
 //! timeline order, the one under the playhead, a search, and the requests
 //! that edit a line, add one after it, and style every caption at once.
 
-use cutlass_captions::rematch;
+use cutlass_captions::{PageLimits, caption_style, paginate, rematch, words as word_spans};
 use cutlass_model::{
     Draft, MaterialId, MaterialRef, Micros, SegmentId, TimeRange, Track, TrackFlag, TrackId,
     WordColumns,
@@ -280,6 +280,174 @@ pub fn add_after_requests(
             },
         },
     ])
+}
+
+/// One paragraph of a caption: a page as its style shows it, or a line
+/// when the caption shows as one page.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Paragraph {
+    /// The words it holds, by index into the caption's words; line breaks
+    /// inside it are in the range.
+    pub words: std::ops::Range<usize>,
+    /// Its words joined by spaces.
+    pub text: String,
+}
+
+/// The paragraphs of `words`, paged as caption style `style` pages them.
+#[must_use]
+pub fn paragraphs(words: &WordColumns, style: &str) -> Vec<Paragraph> {
+    let Ok(spans) = word_spans(words) else {
+        return Vec::new();
+    };
+    let limits = caption_style(style).map_or(
+        PageLimits {
+            words_per_line: 0,
+            lines_per_page: 0,
+        },
+        |style| style.limits,
+    );
+    let pages = paginate(&spans, limits);
+    let groups: Vec<Vec<usize>> = if pages.pages.len() > 1 {
+        pages
+            .pages
+            .iter()
+            .map(|page| {
+                pages.lines[page.lines.clone()]
+                    .iter()
+                    .flat_map(|line| line.words.iter().copied())
+                    .collect()
+            })
+            .collect()
+    } else {
+        pages.lines.iter().map(|line| line.words.clone()).collect()
+    };
+    groups
+        .into_iter()
+        .filter_map(|group| {
+            let first = *group.first()?;
+            let last = *group.last()?;
+            let text = group
+                .iter()
+                .filter_map(|index| words.text.get(*index))
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(" ");
+            Some(Paragraph {
+                words: first..last + 1,
+                text,
+            })
+        })
+        .collect()
+}
+
+/// The paragraphs of caption `segment_id`. Empty when it is not a caption.
+#[must_use]
+pub fn caption_paragraphs(draft: &Draft, segment_id: &SegmentId) -> Vec<Paragraph> {
+    let Ok((material_id, words, _)) = caption_words(draft, segment_id) else {
+        return Vec::new();
+    };
+    let style = draft
+        .materials
+        .texts
+        .iter()
+        .find(|text| text.id == material_id)
+        .map_or("", |text| text.caption_style.as_str());
+    paragraphs(&words, style)
+}
+
+/// The request that makes paragraph `index` of caption `segment_id` say
+/// `text`. Its words are rematched over the paragraph's own words, so the
+/// ones that stay keep their times; the other paragraphs are untouched.
+/// A blank paragraph drops its words, unless they are the caption's last.
+/// `None` when nothing changes.
+pub fn paragraph_request(
+    draft: &Draft,
+    segment_id: &SegmentId,
+    index: usize,
+    text: &str,
+) -> Result<Option<Request>, CaptionListMiss> {
+    let (material_id, words, _) = caption_words(draft, segment_id)?;
+    let style = draft
+        .materials
+        .texts
+        .iter()
+        .find(|item| item.id == material_id)
+        .map_or("", |item| item.caption_style.as_str());
+    let paragraph = paragraphs(&words, style)
+        .into_iter()
+        .nth(index)
+        .ok_or(CaptionListMiss::NotCaption)?;
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if text == paragraph.text {
+        return Ok(None);
+    }
+    let mut own = WordColumns::default();
+    for at in paragraph.words.clone() {
+        if words.text[at] == crate::LINE_BREAK {
+            continue;
+        }
+        own.start_time.push(words.start_time[at]);
+        own.end_time.push(words.end_time[at]);
+        own.text.push(words.text[at].clone());
+    }
+    let replaced = if text.is_empty() {
+        WordColumns::default()
+    } else {
+        rematch(&own, &text).map_err(|_| CaptionListMiss::TooLong)?
+    };
+    let mut next = WordColumns {
+        rest: words.rest.clone(),
+        ..WordColumns::default()
+    };
+    let splice = |next: &mut WordColumns, range: std::ops::Range<usize>, from: &WordColumns| {
+        next.start_time
+            .extend_from_slice(&from.start_time[range.clone()]);
+        next.end_time
+            .extend_from_slice(&from.end_time[range.clone()]);
+        next.text.extend_from_slice(&from.text[range]);
+    };
+    splice(&mut next, 0..paragraph.words.start, &words);
+    splice(&mut next, 0..replaced.text.len(), &replaced);
+    splice(&mut next, paragraph.words.end..words.text.len(), &words);
+    let next = without_stray_breaks(next);
+    if next.text.is_empty() {
+        return Err(CaptionListMiss::Empty);
+    }
+    Ok(Some(Request::SetWords {
+        material_id,
+        words: next,
+    }))
+}
+
+/// `words` with no line break first, last, or right after another.
+fn without_stray_breaks(words: WordColumns) -> WordColumns {
+    let mut kept = WordColumns {
+        rest: words.rest,
+        ..WordColumns::default()
+    };
+    for index in 0..words.text.len() {
+        let text = &words.text[index];
+        let after_break = kept
+            .text
+            .last()
+            .is_none_or(|last| last == crate::LINE_BREAK);
+        if text == crate::LINE_BREAK && after_break {
+            continue;
+        }
+        kept.start_time.push(words.start_time[index]);
+        kept.end_time.push(words.end_time[index]);
+        kept.text.push(text.clone());
+    }
+    while kept
+        .text
+        .last()
+        .is_some_and(|last| last == crate::LINE_BREAK)
+    {
+        kept.start_time.pop();
+        kept.end_time.pop();
+        kept.text.pop();
+    }
+    kept
 }
 
 /// The request that takes caption `segment_id` off the timeline.
@@ -585,5 +753,105 @@ mod tests {
         fn texts_words(&self, segment_id: &SegmentId) -> WordColumns {
             caption_words(self, segment_id).unwrap().1
         }
+    }
+
+    fn columns(words: &[(&str, i64, i64)]) -> WordColumns {
+        WordColumns {
+            start_time: words.iter().map(|w| w.1).collect(),
+            end_time: words.iter().map(|w| w.2).collect(),
+            text: words.iter().map(|w| w.0.to_owned()).collect(),
+            rest: Default::default(),
+        }
+    }
+
+    #[test]
+    fn paragraphs_follow_the_lines_or_the_styles_pages() {
+        let words = columns(&[
+            ("but", 0, 100),
+            ("I", 100, 200),
+            ("\n", 200, 200),
+            ("wanna", 200, 400),
+            ("give", 400, 500),
+        ]);
+        let plain = paragraphs(&words, "");
+        assert_eq!(
+            plain,
+            [
+                Paragraph {
+                    words: 0..2,
+                    text: "but I".to_owned()
+                },
+                Paragraph {
+                    words: 3..5,
+                    text: "wanna give".to_owned()
+                },
+            ]
+        );
+        // A style with one word to a page makes each word a paragraph.
+        let paged = paragraphs(&words, "one-word");
+        assert_eq!(
+            paged.iter().map(|p| p.text.as_str()).collect::<Vec<_>>(),
+            ["but", "I", "wanna", "give"]
+        );
+        assert!(paragraphs(&WordColumns::default(), "").is_empty());
+        let mut ragged = words.clone();
+        ragged.end_time.pop();
+        assert!(paragraphs(&ragged, "").is_empty());
+    }
+
+    #[test]
+    fn a_paragraph_edit_rematches_its_own_words_and_leaves_the_rest() {
+        let mut session = session();
+        let id = first(&session);
+        let material = caption_rows(session.draft(), &id)[0].material_id.clone();
+        let words = columns(&[
+            ("one", 0, 300),
+            ("two", 300, 500),
+            ("\n", 500, 500),
+            ("six", 500, 900),
+        ]);
+        session
+            .apply(
+                1,
+                &[Request::SetWords {
+                    material_id: material.clone(),
+                    words,
+                }],
+            )
+            .unwrap();
+        assert_eq!(
+            caption_paragraphs(session.draft(), &id)
+                .iter()
+                .map(|p| p.text.as_str())
+                .collect::<Vec<_>>(),
+            ["one two", "six"]
+        );
+        let request = paragraph_request(session.draft(), &id, 0, " one  three ")
+            .unwrap()
+            .unwrap();
+        session.apply(2, &[request]).unwrap();
+        let after = session.draft().texts_words(&id);
+        assert_eq!(after.text, ["one", "three", "\n", "six"]);
+        assert_eq!((after.start_time[0], after.end_time[0]), (0, 300));
+        assert_eq!(after.start_time[3], 500);
+        assert_eq!(
+            paragraph_request(session.draft(), &id, 0, "one three"),
+            Ok(None)
+        );
+
+        // A blank paragraph drops its words; the last words stay.
+        let request = paragraph_request(session.draft(), &id, 1, "")
+            .unwrap()
+            .unwrap();
+        session.apply(3, &[request]).unwrap();
+        assert_eq!(session.draft().texts_words(&id).text, ["one", "three"]);
+        assert_eq!(
+            paragraph_request(session.draft(), &id, 0, " "),
+            Err(CaptionListMiss::Empty)
+        );
+        assert_eq!(
+            paragraph_request(session.draft(), &id, 9, "x"),
+            Err(CaptionListMiss::NotCaption)
+        );
     }
 }

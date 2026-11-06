@@ -45,9 +45,10 @@ pub use act::{can_cut_at, clip_under, delete_side, frame_margin};
 pub use animation::{ClipAnimation, ClipAnimations, clip_animations};
 pub use append::{Append, AppendLane, append_placement, free_row, material_span};
 pub use caption_list::{
-    CaptionListMiss, CaptionRow, NEW_CAPTION_GAP, NEW_CAPTION_LENGTH, NEW_CAPTION_TEXT,
-    add_after_requests, caption_rows, caption_text_request, for_every_caption, main_caption_lane,
-    rematched, remove_caption_request, row_at, rows_matching, words_over,
+    CaptionListMiss, CaptionRow, NEW_CAPTION_GAP, NEW_CAPTION_LENGTH, NEW_CAPTION_TEXT, Paragraph,
+    add_after_requests, caption_paragraphs, caption_rows, caption_text_request, for_every_caption,
+    main_caption_lane, paragraph_request, paragraphs, rematched, remove_caption_request, row_at,
+    rows_matching, words_over,
 };
 pub use caption_words::{LINE_BREAK, breaks_before, join_words, retype_word, toggle_line_break};
 pub use catalog::{catalog_entries, catalog_search};

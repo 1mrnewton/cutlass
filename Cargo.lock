@@ -3190,6 +3190,9 @@ dependencies = [
  "burn-store",
  "cubecl-environment",
  "cubecl-runtime",
+ "cutlass-effects",
+ "cutlass-model",
+ "cutlass-session",
  "image",
  "safetensors 0.8.0",
 ]

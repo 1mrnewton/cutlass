@@ -7,6 +7,9 @@ license.workspace = true
 description = "On-device image models: click-to-select with MobileSAM on burn."
 
 [dependencies]
+cutlass-effects = { path = "../effects", version = "0.1.0" }
+cutlass-model = { path = "../model", version = "0.1.0" }
+cutlass-session = { path = "../session", version = "0.1.0" }
 # The CPU backend everywhere. `fusion` and `autotune` only change GPU work.
 burn = { version = "=0.22.1", default-features = false, features = ["std", "flex", "fusion", "autotune"] }
 burn-store = "=0.22.1"

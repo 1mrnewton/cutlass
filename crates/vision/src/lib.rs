@@ -14,6 +14,7 @@
 mod device;
 mod frame;
 mod generated;
+mod job;
 mod mask;
 mod mobile_sam;
 
@@ -22,6 +23,7 @@ use std::path::PathBuf;
 
 pub use device::{Compute, gpu_available, keep_kernels_in};
 pub use frame::MAX_SIDE;
+pub use job::{JobError, SelectJob};
 pub use mask::Mask;
 pub use mobile_sam::{DECODER_WEIGHTS, ENCODER_WEIGHTS, MobileSam};
 

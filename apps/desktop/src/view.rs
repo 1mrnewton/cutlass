@@ -7182,7 +7182,11 @@ mod tests {
                 ],
                 &["Volume", "Rotate", "Mode"],
             ),
-            ("said", &["Text", "1.50 s", "Font size"], &["Volume"]),
+            (
+                "said",
+                &["Captions", "Text", "Search", "1", "+"],
+                &["Volume", "Tracking", "Font size"],
+            ),
             (
                 "look",
                 &["Filter", "Warm", "Amount", "Temp"],

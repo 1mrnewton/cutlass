@@ -140,6 +140,15 @@ mod tests {
         fn poll(&mut self, _job_id: &str) -> Result<Option<cutlass_model::TrackPath>, String> {
             Ok(None)
         }
+
+        fn clip_path(
+            &self,
+            _draft: &Draft,
+            _clip: &cutlass_model::SegmentId,
+            _path: &cutlass_model::TrackPath,
+        ) -> Option<cutlass_model::TrackPath> {
+            None
+        }
     }
 
     impl Catalog for Host {

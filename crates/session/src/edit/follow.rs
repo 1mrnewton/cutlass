@@ -232,7 +232,10 @@ fn follow_mask(
     }
     // The mask's middle in the box's own turned, unit frame at the anchor.
     let (sin0, cos0) = at.turn.to_radians().sin_cos();
-    let (dx, dy) = (f64::from(base.x) - at.middle.0, f64::from(base.y) - at.middle.1);
+    let (dx, dy) = (
+        f64::from(base.x) - at.middle.0,
+        f64::from(base.y) - at.middle.1,
+    );
     let local = (
         (cos0 * dx + sin0 * dy) / at.half.0,
         (-sin0 * dx + cos0 * dy) / at.half.1,

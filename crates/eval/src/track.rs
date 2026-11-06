@@ -256,8 +256,8 @@ pub(crate) fn track_frames(
 
 /// `path`, in canvas units (1 is half the canvas, y up), in clip
 /// `segment`'s own frame at each sample's time: -1 to 1 across and up, the
-/// frame its mask is drawn in. `None` when the clip is not on the canvas
-/// at some sample.
+/// frame its mask is drawn in, over the clip's span only. `None` when the
+/// clip is not on the canvas at some sample or the path misses the clip.
 #[must_use]
 pub fn path_in_clip(draft: &Draft, segment: &Segment, path: &TrackPath) -> Option<TrackPath> {
     let canvas = (
@@ -266,7 +266,8 @@ pub fn path_in_clip(draft: &Draft, segment: &Segment, path: &TrackPath) -> Optio
     );
     let (hw, hh) = (f64::from(canvas.0) / 2.0, f64::from(canvas.1) / 2.0);
     let mut samples = Vec::with_capacity(path.samples.len());
-    for sample in &path.samples {
+    let span = segment.target.start.0..segment.target.end().0;
+    for sample in path.samples.iter().filter(|s| span.contains(&s.time.0)) {
         let [a, b, c, d, e, f] = crate::media::clip_frame(draft, segment, sample.time, canvas)?.0;
         let corners = sample.corners.map(|(x, y)| {
             let (px, py) = (hw + x * hw, hh - y * hh);
@@ -280,7 +281,7 @@ pub fn path_in_clip(draft: &Draft, segment: &Segment, path: &TrackPath) -> Optio
             corners,
         });
     }
-    Some(TrackPath {
+    (!samples.is_empty()).then_some(TrackPath {
         mode: path.mode,
         samples,
     })

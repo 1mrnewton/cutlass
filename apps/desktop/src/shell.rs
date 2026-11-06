@@ -49,6 +49,7 @@ use cutlass_transcription::{
 mod assistant;
 mod compound;
 mod follow;
+pub(crate) use follow::clip_path;
 mod hear;
 mod inspector;
 mod listen;
@@ -7919,6 +7920,7 @@ mod tests {
                 corners,
                 cutlass_model::TrackMode::Object,
                 vec!["follower".into()],
+                vec![id.clone()],
             )
             .unwrap();
         let until = started + std::time::Duration::from_secs(600);
@@ -7950,6 +7952,22 @@ mod tests {
         assert!((start.2 - 0.25).abs() < 0.01);
         assert!(later.2 < start.2 * 0.9, "{later:?}");
         assert!(later.1 < start.1, "{later:?}");
+        // The movie's own mask is a box on the shirt that shrinks with it.
+        let mask_at = |draft: &Draft, t: i64| {
+            let clip = &draft.tracks[0].segments[0];
+            cutlass_effects::segment_mask(draft, clip).map(|mask| {
+                let mask = mask.at(clip, &draft.keyframe_graph_list, Micros(t));
+                (mask.x, mask.y, mask.width, mask.height)
+            })
+        };
+        let (mask_start, mask_later) = (
+            mask_at(draft, 1_000_000).unwrap(),
+            mask_at(draft, 3_900_000).unwrap(),
+        );
+        eprintln!("mask at 1s {mask_start:?}, at 3.9s {mask_later:?}");
+        assert!((mask_start.0 - 0.039).abs() < 0.01 && (mask_start.1 - 0.041).abs() < 0.01);
+        assert!((mask_start.2 - 0.086).abs() < 0.005 && (mask_start.3 - 0.153).abs() < 0.005);
+        assert!(mask_later.2 < mask_start.2 * 0.9, "{mask_later:?}");
 
         // Fix the frame at 2.5 s with the box tracked there: the path is
         // redone after it, kept before it, and the follower keeps its pose
@@ -8002,16 +8020,17 @@ mod tests {
         assert!((clip.transform.x - start.0).abs() < 1e-9);
         assert!((clip.transform.y - start.1).abs() < 1e-9);
         assert!((uniform.value - start.2).abs() < 1e-9);
-        desktop.undo().unwrap();
-        desktop.undo().unwrap();
+        let mask_fixed = mask_at(draft, 1_000_000).unwrap();
         assert!(
-            desktop
-                .draft()
-                .unwrap()
-                .materials
-                .video_trackings
-                .is_empty()
+            (mask_fixed.0 - mask_start.0).abs() < 1e-5
+                && (mask_fixed.2 - mask_start.2).abs() < 1e-5,
+            "the mask keeps its place at the anchor: {mask_fixed:?}"
         );
+        desktop.undo().unwrap();
+        desktop.undo().unwrap();
+        let draft = desktop.draft().unwrap();
+        assert!(draft.materials.video_trackings.is_empty());
+        assert!(mask_at(draft, 1_000_000).is_none(), "the box mask goes too");
     }
 
     #[test]

@@ -193,10 +193,16 @@ pub(crate) fn input_schema(tool: &str) -> Value {
                 "followers": {
                     "type": "array",
                     "items": { "type": "string" },
-                    "description": "The video, sticker or text clips that follow it.",
+                    "description": "The video, sticker or text clips that move with it.",
+                },
+                "masks": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "The video or sticker clips whose mask moves with it \
+                        instead; a clip with no mask gets a box. The target may be one.",
                 },
             },
-            "required": ["target", "at_us", "box", "followers"],
+            "required": ["target", "at_us", "box"],
         });
     }
     if tool == "draft.apply" {

@@ -185,6 +185,15 @@ impl Tracking for Headless {
             .agent_track(job_id)
             .map_err(|error| error.to_string())
     }
+
+    fn clip_path(
+        &self,
+        draft: &cutlass_model::Draft,
+        clip: &cutlass_model::SegmentId,
+        path: &cutlass_model::TrackPath,
+    ) -> Option<cutlass_model::TrackPath> {
+        crate::shell::clip_path(draft, clip, path)
+    }
 }
 
 impl Export for Headless {

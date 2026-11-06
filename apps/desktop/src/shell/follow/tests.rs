@@ -79,6 +79,23 @@ fn a_track_is_set_up_on_a_video_clip_with_a_box_and_a_follower() {
     assert!(shell.track_ready());
     shell.toggle_follower(&"s".into());
     assert!(!shell.track_ready());
+    let masks = shell.mask_choices();
+    assert_eq!(
+        masks
+            .iter()
+            .map(|c| c.segment_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["v", "s"],
+        "the target's own mask first, not a locked row"
+    );
+    shell.toggle_follower(&"s".into());
+    shell.toggle_mask_follower(&"s".into());
+    let tracking = shell.tracking().unwrap();
+    assert!(tracking.followers.is_empty(), "a pose or a mask, not both");
+    assert_eq!(tracking.masks, vec![SegmentId::from("s")]);
+    assert!(shell.track_ready(), "a mask is enough");
+    shell.toggle_mask_follower(&"s".into());
+    assert!(!shell.track_ready());
     shell.set_track_mode(TrackMode::Plane);
     assert_eq!(shell.tracking().unwrap().mode, TrackMode::Plane);
     shell.stop_tracking();
@@ -235,5 +252,43 @@ fn fixing_a_frame_starts_from_the_tracks_mode_followers_and_box() {
         !shell.fix_enabled(),
         "a follower's track is fixed on its target"
     );
+    let _ = std::fs::remove_dir_all(&temp);
+}
+
+#[test]
+fn a_mask_follower_lands_keyed_and_is_kept_when_fixing() {
+    let (mut shell, temp) = open("mask");
+    let path = TrackPath {
+        mode: TrackMode::Object,
+        samples: (0..10)
+            .map(|i| sample(500_000 + i * 33_333, 0.01 * i as f64))
+            .collect(),
+    };
+    let draft = shell.session_draft().unwrap();
+    let own = clip_path(draft, &"v".into(), &path).unwrap();
+    // The clip fills the canvas, so its frame is the canvas.
+    assert!((own.samples[3].corners[1].0 - path.samples[3].corners[1].0).abs() < 1e-9);
+    shell
+        .apply(Request::Track {
+            target: "v".into(),
+            followers: Vec::new(),
+            tracking_id: "t".into(),
+            anchor: Micros(500_000),
+            path,
+            masks: vec![("v".into(), own)],
+        })
+        .unwrap();
+    let draft = shell.session_draft().unwrap();
+    let clip = &draft.tracks[0].segments[0];
+    assert!(
+        cutlass_effects::segment_mask(draft, clip).is_some(),
+        "a box mask"
+    );
+    shell.select(Some("v".into()));
+    shell.seek(Micros(700_000));
+    shell.start_fixing().unwrap();
+    let tracking = shell.tracking().unwrap();
+    assert_eq!(tracking.masks, vec![SegmentId::from("v")]);
+    assert!(tracking.followers.is_empty());
     let _ = std::fs::remove_dir_all(&temp);
 }

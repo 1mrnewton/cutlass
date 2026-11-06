@@ -1168,6 +1168,32 @@ fn tracking(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState) {
                 shell.toggle_follower(&choice.segment_id);
             }
         }
+        ui.add_space(4.0);
+        ui.label(
+            RichText::new("Masks that follow it")
+                .size(12.0)
+                .color(tokens::MUTED),
+        );
+        note(
+            ui,
+            "The clip's mask moves with the box; a clip with no mask gets one the \
+             size of the box. Blur a copy of the clip to hide a face or a plate.",
+        );
+        for choice in shell.mask_choices() {
+            let on = tracking.masks.contains(&choice.segment_id);
+            let row = ui.horizontal(|ui| {
+                let check = check_box(ui, on);
+                let name = ui.add(
+                    egui::Label::new(RichText::new(&choice.name).size(12.0).color(tokens::TEXT))
+                        .truncate()
+                        .sense(Sense::click()),
+                );
+                check.clicked() || name.clicked()
+            });
+            if row.inner {
+                shell.toggle_mask_follower(&choice.segment_id);
+            }
+        }
         ui.add_space(6.0);
         ui.horizontal(|ui| {
             if ui
@@ -1177,7 +1203,7 @@ fn tracking(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState) {
                         RichText::new(if fixing { "Track from here" } else { "Track" }).size(12.0),
                     ),
                 )
-                .on_disabled_hover_text("Draw a box and choose a clip to follow it.")
+                .on_disabled_hover_text("Draw a box and choose a clip or a mask to follow it.")
                 .clicked()
             {
                 send(shell, Shell::run_tracking);

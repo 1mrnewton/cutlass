@@ -296,7 +296,10 @@ fn clip_path(frames: usize, at: impl Fn(f64) -> ((f64, f64), (f64, f64), f64)) -
                 let corners = [(-1.0, 1.0), (1.0, 1.0), (1.0, -1.0), (-1.0, -1.0)].map(
                     |(x, y): (f64, f64)| {
                         let (px, py) = (x * half.0, y * half.1);
-                        (middle.0 + cos * px - sin * py, middle.1 + sin * px + cos * py)
+                        (
+                            middle.0 + cos * px - sin * py,
+                            middle.1 + sin * px + cos * py,
+                        )
                     },
                 );
                 TrackSample {
@@ -310,9 +313,11 @@ fn clip_path(frames: usize, at: impl Fn(f64) -> ((f64, f64), (f64, f64), f64)) -
 
 fn mask_at(draft: &Draft, time: i64) -> Mask {
     let segment = &draft.tracks[0].segments[0];
-    cutlass_effects::segment_mask(draft, segment)
-        .unwrap()
-        .at(segment, &draft.keyframe_graph_list, Micros(time))
+    cutlass_effects::segment_mask(draft, segment).unwrap().at(
+        segment,
+        &draft.keyframe_graph_list,
+        Micros(time),
+    )
 }
 
 fn close(a: f32, b: f64) -> bool {
@@ -385,7 +390,12 @@ fn a_mask_keeps_its_place_size_and_turn_against_the_box() {
     let end = mask_at(&draft, 1_000_000);
     assert_eq!(end.shape, MaskShape::Circle);
     // Two box halves to the right, turned a quarter, is two halves up.
-    assert!(close(end.x, 0.0) && close(end.y, 0.4), "{} {}", end.x, end.y);
+    assert!(
+        close(end.x, 0.0) && close(end.y, 0.4),
+        "{} {}",
+        end.x,
+        end.y
+    );
     assert!(close(end.width, 0.1) && close(end.height, 0.2));
     assert!(close(end.rotation, 100.0), "{}", end.rotation);
     assert!(close(end.feather, 0.3), "feather stays");
@@ -406,7 +416,15 @@ fn a_clip_follows_by_pose_or_by_mask_not_both() {
         &canvas,
     );
     assert!(both.is_err());
-    let none = track(&mut draft, &"v".into(), &[], &[], &"t1".into(), Micros(0), &canvas);
+    let none = track(
+        &mut draft,
+        &"v".into(),
+        &[],
+        &[],
+        &"t1".into(),
+        Micros(0),
+        &canvas,
+    );
     assert!(none.is_err());
     let twice = track(
         &mut draft,

@@ -99,6 +99,15 @@ impl Tracking for Tracks {
     fn poll(&mut self, job_id: &str) -> Result<Option<cutlass_model::TrackPath>, String> {
         self.now.path(job_id)
     }
+
+    fn clip_path(
+        &self,
+        draft: &cutlass_model::Draft,
+        clip: &cutlass_model::SegmentId,
+        path: &cutlass_model::TrackPath,
+    ) -> Option<cutlass_model::TrackPath> {
+        super::clip_path(draft, clip, path)
+    }
 }
 
 /// An export the window starts once the call is done.

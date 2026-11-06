@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::path::Path;
 
-use cutlass_model::{MaterialId, Micros, SegmentId, TrackId, TrackMode, TrackPath};
+use cutlass_model::{Draft, MaterialId, Micros, SegmentId, TrackId, TrackMode, TrackPath};
 use cutlass_session::Request;
 use cutlass_settings::{McpServer, Settings};
 
@@ -144,6 +144,8 @@ pub struct TrackJob {
     pub target: SegmentId,
     pub at_us: i64,
     pub followers: Vec<SegmentId>,
+    /// The clips whose mask follows instead.
+    pub masks: Vec<SegmentId>,
 }
 
 /// Follows a box through a clip. The host reads the frames; the registry
@@ -154,6 +156,10 @@ pub trait Tracking {
     /// Returns the path for `job_id`, `None` while the host is still
     /// tracking, or an error string from the host.
     fn poll(&mut self, job_id: &str) -> Result<Option<TrackPath>, String>;
+    /// Returns `path`, in canvas units, in clip `clip`'s own frame (-1 to
+    /// 1, y up) over the clip's span, where its mask is drawn; `None` when
+    /// the clip is not on the canvas.
+    fn clip_path(&self, draft: &Draft, clip: &SegmentId, path: &TrackPath) -> Option<TrackPath>;
 }
 
 /// Searches bundled effect and animation ids.
@@ -226,6 +232,8 @@ pub enum Invocation {
         ask: TrackAsk,
         /// The clips that will follow it.
         followers: Vec<SegmentId>,
+        /// The clips whose mask will follow it.
+        masks: Vec<SegmentId>,
     },
     /// Poll a tracking job, and write its path when it is in.
     TrackPoll {
@@ -509,7 +517,11 @@ where
             Invocation::SpeechPoll { job_id } => {
                 poll_speech(&self.draft, &mut self.speech, &self.speech_jobs, &job_id)
             }
-            Invocation::TrackStart { ask, followers } => {
+            Invocation::TrackStart {
+                ask,
+                followers,
+                masks,
+            } => {
                 let id = self.tracking.start(&ask).map_err(ToolError::Host)?;
                 let revision = self.draft.session().revision();
                 self.track_jobs.insert(
@@ -520,6 +532,7 @@ where
                         target: ask.target,
                         at_us: ask.at_us,
                         followers,
+                        masks,
                     },
                 );
                 Ok(format!("job={id} revision={revision}"))
@@ -641,6 +654,13 @@ where
             .map(MaterialId::new)
             .unwrap_or_default();
         let frames = path.samples.len();
+        let mut masks = Vec::with_capacity(job.masks.len());
+        for id in &job.masks {
+            let clip_path = self.tracking.clip_path(draft, id, &path).ok_or_else(|| {
+                ToolError::Host(format!("clip {id} is not on the canvas along the track"))
+            })?;
+            masks.push((id.clone(), clip_path));
+        }
         let result = self
             .draft
             .apply(ApplyInput {
@@ -652,7 +672,7 @@ where
                     tracking_id,
                     anchor: Micros(job.at_us),
                     path,
-                    masks: Vec::new(),
+                    masks,
                 }],
                 mode: ApplyMode::Commit,
             })
@@ -719,9 +739,12 @@ fn description(name: &str) -> &'static str {
         "track.start" => {
             "Follow a box on a video clip through it, then make clips follow it. JSON: \
              {\"target\":\"<video clip id>\", \"at_us\":N, \"box\":[x0,y0,x1,y1], \
-             \"mode\":\"object\"|\"plane\", \"followers\":[\"<clip id>\"]}. The box is two \
-             opposite corners in canvas units (0 the middle, 1 half the canvas, y up) on the \
-             frame at at_us. Followers are video, sticker or text clips."
+             \"mode\":\"object\"|\"plane\", \"followers\":[\"<clip id>\"], \
+             \"masks\":[\"<clip id>\"]}. The box is two opposite corners in canvas units (0 the \
+             middle, 1 half the canvas, y up) on the frame at at_us. Followers are video, sticker \
+             or text clips that move with it. Masks are video or sticker clips whose mask moves \
+             with it instead (a clip with no mask gets a box), such as a blurred copy that hides \
+             a number plate; the target itself may be one. Give followers, masks or both."
         }
         "track.poll" => {
             "Read a tracking job: pending, stale when the draft moved, or the revision after \
@@ -1057,7 +1080,10 @@ fn parse_track(arguments: &str) -> Result<Invocation, ToolError> {
         corners: [f64; 4],
         #[serde(default)]
         mode: Option<String>,
+        #[serde(default)]
         followers: Vec<String>,
+        #[serde(default)]
+        masks: Vec<String>,
     }
     let track: Track = serde_json::from_str(arguments)
         .map_err(|error| ToolError::BadArguments(format!("track.start needs JSON: {error}")))?;
@@ -1077,9 +1103,14 @@ fn parse_track(arguments: &str) -> Result<Invocation, ToolError> {
             "track.start box needs two opposite corners apart on both sides".to_owned(),
         ));
     }
-    if track.followers.is_empty() {
+    if track.followers.is_empty() && track.masks.is_empty() {
         return Err(ToolError::BadArguments(
-            "track.start needs a clip to follow the box".to_owned(),
+            "track.start needs a clip or a mask to follow the box".to_owned(),
+        ));
+    }
+    if track.masks.iter().any(|id| track.followers.contains(id)) {
+        return Err(ToolError::BadArguments(
+            "track.start: a clip follows by its pose or by its mask, not both".to_owned(),
         ));
     }
     Ok(Invocation::TrackStart {
@@ -1090,6 +1121,7 @@ fn parse_track(arguments: &str) -> Result<Invocation, ToolError> {
             mode,
         },
         followers: track.followers.into_iter().map(SegmentId::new).collect(),
+        masks: track.masks.into_iter().map(SegmentId::new).collect(),
     })
 }
 
@@ -1470,6 +1502,16 @@ mod tests {
 
         fn poll(&mut self, _job_id: &str) -> Result<Option<TrackPath>, String> {
             Ok(self.path.clone())
+        }
+
+        /// The test clips fill the canvas, so their frame is the canvas.
+        fn clip_path(
+            &self,
+            _draft: &Draft,
+            _clip: &SegmentId,
+            path: &TrackPath,
+        ) -> Option<TrackPath> {
+            Some(path.clone())
         }
     }
 
@@ -2310,7 +2352,12 @@ mod tests {
                 r#"{"target":"v","at_us":500000,"box":[0.2,-0.1,-0.2,0.3],"followers":["s"]}"#,
             )
             .unwrap();
-        let Invocation::TrackStart { ask, followers } = call else {
+        let Invocation::TrackStart {
+            ask,
+            followers,
+            masks,
+        } = call
+        else {
             panic!("{call:?}");
         };
         assert_eq!(ask.target, SegmentId::new("v"));
@@ -2322,9 +2369,11 @@ mod tests {
             "top left first, y up"
         );
         assert_eq!(followers, vec![SegmentId::new("s")]);
+        assert!(masks.is_empty());
         for bad in [
             r#"{"target":"v","at_us":0,"box":[0,0,0,0.3],"followers":["s"]}"#,
             r#"{"target":"v","at_us":0,"box":[0,0,0.2,0.3],"followers":[]}"#,
+            r#"{"target":"v","at_us":0,"box":[0,0,0.2,0.3],"followers":["s"],"masks":["s"]}"#,
             r#"{"target":"v","at_us":0,"box":[0,0,0.2,0.3],"mode":"blob","followers":["s"]}"#,
             "v 0",
         ] {
@@ -2387,6 +2436,35 @@ mod tests {
                 .video_trackings
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn a_mask_can_follow_a_tracked_box() {
+        let temp = Temp::new();
+        let mut registry = open_draft(&temp, Gate::refuse(), tracked_draft());
+        registry
+            .invoke(
+                registry
+                    .parse(
+                        "track.start",
+                        r#"{"target":"v","at_us":0,"box":[-0.5,0.1,-0.3,-0.1],"masks":["v"]}"#,
+                    )
+                    .unwrap(),
+            )
+            .unwrap();
+        registry.tracking.path = Some(slide());
+        let poll = registry.invoke(Invocation::TrackPoll {
+            job_id: "track-1".to_owned(),
+        });
+        assert_eq!(poll.unwrap(), "revision=1 frames=30");
+        let draft = registry.draft.session().draft();
+        let clip = &draft.tracks[0].segments[0];
+        assert!(
+            clip.common_keyframes
+                .iter()
+                .any(|group| group.property_type == cutlass_model::MASK_KEYS[0])
+        );
+        assert!(draft.tracks[1].segments[0].common_keyframes.is_empty());
     }
 
     #[test]

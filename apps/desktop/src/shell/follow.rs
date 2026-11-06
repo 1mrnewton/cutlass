@@ -1,6 +1,7 @@
 //! Tracking on the selected clip: draw a box on the preview, choose what
 //! follows it, follow the box through the clip as a job, then make the
-//! followers follow it in one undo step. A tracked frame is fixed by
+//! followers follow it in one undo step. A clip's mask can follow instead,
+//! to hide or pick out what moves. A tracked frame is fixed by
 //! drawing the box again on it: the clip is tracked away from the track's
 //! anchor from there, and the new path replaces the old one on that side.
 
@@ -27,6 +28,8 @@ pub struct Tracking {
     /// The box's top left and bottom right in canvas pixels.
     pub canvas_box: Option<((f64, f64), (f64, f64))>,
     pub followers: Vec<SegmentId>,
+    /// The clips whose mask follows it instead.
+    pub masks: Vec<SegmentId>,
     /// The track being fixed, when this one fixes a frame of it.
     pub fixing: Option<Fixing>,
 }
@@ -114,6 +117,7 @@ impl Shell {
             mode: TrackMode::Object,
             canvas_box: None,
             followers: Vec::new(),
+            masks: Vec::new(),
             fixing: None,
         });
         Ok(())
@@ -159,11 +163,22 @@ impl Shell {
                 || path.samples.first().map_or(Micros(0), |s| s.time),
                 Micros,
             );
+        let masks: Vec<SegmentId> = record
+            .fields
+            .get("masks")
+            .and_then(|v| v.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|v| v.as_str())
+            .map(SegmentId::new)
+            .collect();
         let followers = draft
             .tracks
             .iter()
             .flat_map(|track| &track.segments)
-            .filter(|segment| segment.extra_material_refs.contains(&record.id))
+            .filter(|segment| {
+                segment.extra_material_refs.contains(&record.id) && !masks.contains(&segment.id)
+            })
             .map(|segment| segment.id.clone())
             .collect();
         let time = self.playhead();
@@ -182,6 +197,7 @@ impl Shell {
             mode: path.mode,
             canvas_box,
             followers,
+            masks,
             fixing: Some(Fixing { anchor, path }),
         })
     }
@@ -231,15 +247,38 @@ impl Shell {
         Ok(())
     }
 
-    /// Add `id` to the followers, or take it off.
+    /// Add `id` to the followers, or take it off. A clip follows by its
+    /// pose or by its mask, so it leaves the masks.
     pub fn toggle_follower(&mut self, id: &SegmentId) {
         if let Some(tracking) = self.tracking.as_mut() {
+            tracking.masks.retain(|m| m != id);
             if let Some(at) = tracking.followers.iter().position(|f| f == id) {
                 tracking.followers.remove(at);
             } else {
                 tracking.followers.push(id.clone());
             }
         }
+    }
+
+    /// Have `id`'s mask follow, or stop it; it leaves the followers.
+    pub fn toggle_mask_follower(&mut self, id: &SegmentId) {
+        if let Some(tracking) = self.tracking.as_mut() {
+            tracking.followers.retain(|f| f != id);
+            if let Some(at) = tracking.masks.iter().position(|m| m == id) {
+                tracking.masks.remove(at);
+            } else {
+                tracking.masks.push(id.clone());
+            }
+        }
+    }
+
+    /// The clips whose mask can follow the target: video and sticker clips
+    /// on unlocked rows that overlap it, the target first.
+    pub fn mask_choices(&self) -> Vec<FollowerChoice> {
+        let (Some(tracking), Ok(draft)) = (self.tracking.as_ref(), self.session_draft()) else {
+            return Vec::new();
+        };
+        mask_choices(draft, &tracking.segment_id)
     }
 
     /// The clips that can follow the track's target: video, sticker and
@@ -251,11 +290,11 @@ impl Shell {
         follower_choices(draft, &tracking.segment_id)
     }
 
-    /// Whether the track is ready to run: a box and a follower.
+    /// Whether the track is ready to run: a box and a follower or a mask.
     pub fn track_ready(&self) -> bool {
-        self.tracking
-            .as_ref()
-            .is_some_and(|t| t.canvas_box.is_some() && !t.followers.is_empty())
+        self.tracking.as_ref().is_some_and(|t| {
+            t.canvas_box.is_some() && !(t.followers.is_empty() && t.masks.is_empty())
+        })
     }
 
     /// Run the track set up so far as a job.
@@ -300,8 +339,16 @@ impl Shell {
         let fps = draft.fps;
         let target = tracking.segment_id;
         let followers = tracking.followers;
+        let masks = tracking.masks;
         match tracking.fixing {
-            None => self.track_object(target, tracking.time, corners, tracking.mode, followers)?,
+            None => self.track_object(
+                target,
+                tracking.time,
+                corners,
+                tracking.mode,
+                followers,
+                masks,
+            )?,
             Some(fixing) => {
                 let span = fix_span(tracking.time, fixing.anchor, fps);
                 self.track_job(
@@ -313,6 +360,7 @@ impl Shell {
                         span,
                     },
                     followers,
+                    masks,
                     Some(fixing),
                 )?;
             }
@@ -338,7 +386,7 @@ impl Shell {
 
     /// Track `corners`, a box in `target`'s own frame (-1 to 1, y up) at
     /// timeline time `at`, through the clip, and make `followers` follow
-    /// it. The job shows its progress and can be cancelled; the result
+    /// it and the masks of `masks`. The job shows its progress and can be cancelled; the result
     /// lands as one `Track` request, and is dropped if the project changed
     /// meanwhile.
     pub fn track_object(
@@ -348,6 +396,7 @@ impl Shell {
         corners: [(f64, f64); 4],
         mode: TrackMode,
         followers: Vec<SegmentId>,
+        masks: Vec<SegmentId>,
     ) -> Result<(), ShellError> {
         let ask = TrackAsk {
             segment_id: target,
@@ -356,7 +405,7 @@ impl Shell {
             mode,
             span: TrackSpan::Both,
         };
-        self.track_job(ask, followers, None)
+        self.track_job(ask, followers, masks, None)
     }
 
     /// Run `ask` as a job and land it as one `Track` request; when it
@@ -365,16 +414,17 @@ impl Shell {
         &mut self,
         ask: TrackAsk,
         followers: Vec<SegmentId>,
+        masks: Vec<SegmentId>,
         fixing: Option<Fixing>,
     ) -> Result<(), ShellError> {
         let target = ask.segment_id.clone();
-        if followers.is_empty() {
+        if followers.is_empty() && masks.is_empty() {
             return Err(ShellError::Unavailable(
-                "choose a clip to follow the target".to_owned(),
+                "choose a clip or a mask to follow the target".to_owned(),
             ));
         }
         self.refuse_locked(&target)?;
-        for id in &followers {
+        for id in followers.iter().chain(&masks) {
             self.refuse_locked(id)?;
         }
         let session = self.session.as_ref().ok_or(ShellError::NoProject)?;
@@ -406,13 +456,27 @@ impl Shell {
                     }
                     _ => (ask.at, path),
                 };
+                let draft = shell.session_draft()?;
+                let masks = masks
+                    .into_iter()
+                    .map(|id| {
+                        clip_path(draft, &id, &path)
+                            .map(|own| (id, own))
+                            .ok_or_else(|| {
+                                ShellError::Unavailable(
+                                    "a clip whose mask follows is not drawn along the track"
+                                        .to_owned(),
+                                )
+                            })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
                 shell.apply(Request::Track {
                     target,
                     followers,
                     tracking_id,
                     anchor,
                     path,
-                    masks: Vec::new(),
+                    masks,
                 })
             });
             landing
@@ -640,6 +704,40 @@ fn canvas_size(draft: &Draft) -> (f64, f64) {
         f64::from(draft.canvas_config.width.max(1)),
         f64::from(draft.canvas_config.height.max(1)),
     )
+}
+
+/// `path`, in canvas units, in clip `id`'s own frame over its span: where
+/// its mask is drawn.
+pub fn clip_path(draft: &Draft, id: &SegmentId, path: &TrackPath) -> Option<TrackPath> {
+    let (segment, _) = super::placed(draft, id)?;
+    cutlass_eval::path_in_clip(draft, segment, path)
+}
+
+/// The clips in `draft` whose mask can follow `target`: the target first.
+fn mask_choices(draft: &Draft, target: &SegmentId) -> Vec<FollowerChoice> {
+    let Some((target_segment, _)) = super::placed(draft, target) else {
+        return Vec::new();
+    };
+    let (start, end) = (target_segment.target.start.0, target_segment.target.end().0);
+    let mut choices: Vec<FollowerChoice> = draft
+        .tracks
+        .iter()
+        .filter(|track| {
+            matches!(track.kind, TrackType::Video | TrackType::Sticker)
+                && track.attribute.0 & TrackAttribute::LOCK == 0
+        })
+        .flat_map(|track| &track.segments)
+        .filter(|segment| segment.target.start.0 < end && segment.target.end().0 > start)
+        .map(|segment| FollowerChoice {
+            segment_id: segment.id.clone(),
+            name: super::clip_name(draft, segment),
+        })
+        .collect();
+    if let Some(at) = choices.iter().position(|c| &c.segment_id == target) {
+        let own = choices.remove(at);
+        choices.insert(0, own);
+    }
+    choices
 }
 
 /// The clips in `draft` that can follow `target`.

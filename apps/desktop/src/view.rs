@@ -149,6 +149,8 @@ struct Approval {
 }
 
 pub struct ViewState {
+    /// The system's menu bar is up, so the window draws no menus of its own.
+    pub system_menus: bool,
     preview: Option<egui::TextureHandle>,
     /// The clip menu asked for a file to replace the clip's media with.
     wants_replace: bool,
@@ -245,6 +247,7 @@ struct TrackMenu {
 impl Default for ViewState {
     fn default() -> Self {
         Self {
+            system_menus: false,
             preview: None,
             wants_replace: false,
             export_open: false,
@@ -855,7 +858,11 @@ fn project_bar(
     shell.chrome.project_bar = true;
     #[cfg(not(target_os = "macos"))]
     window_buttons(shell, ui, bar);
-    menus(shell, ui, view, bar, parent);
+    // On macOS the menus live in the system's menu bar; the window's own
+    // are the fallback when that could not be built, and elsewhere.
+    if !view.system_menus {
+        menus(shell, ui, view, bar, parent);
+    }
     ui.painter().text(
         bar.center(),
         Align2::CENTER_CENTER,
@@ -10771,6 +10778,34 @@ mod tests {
             (rect, scale),
             (Rect::from_min_size(Pos2::ZERO, frame.size()), 2.0)
         );
+    }
+
+    #[test]
+    fn the_window_draws_no_menus_while_the_system_menu_bar_is_up() {
+        let (mut shell, _temp) = open_span("menus", 1_000_000);
+        let ctx = egui::Context::default();
+        let mut painted = |view: &mut ViewState| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0))),
+                    ..Default::default()
+                },
+                |ui| show(&mut shell, ui, view, None),
+            );
+            output.textures_delta.clear();
+            painted_text(&output)
+        };
+        let mut view = ViewState::new();
+        let text = painted(&mut view);
+        for title in ["File", "Edit", "Clip", "Playback", "Help"] {
+            assert!(text.lines().any(|line| line == title), "no {title} menu: {text}");
+        }
+        view.system_menus = true;
+        let text = painted(&mut view);
+        for title in ["File", "Edit", "Clip", "Playback", "Help"] {
+            assert!(!text.lines().any(|line| line == title), "a {title} menu: {text}");
+        }
+        assert!(text.lines().any(|line| line == "Export"), "{text}");
     }
 
     #[test]

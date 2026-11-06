@@ -165,6 +165,10 @@ impl eframe::App for DesktopWindow {
             }
         }
         #[cfg(target_os = "macos")]
+        {
+            self.view.system_menus = self.menu_bar.is_some();
+        }
+        #[cfg(target_os = "macos")]
         if let Some(bar) = self.menu_bar.as_ref() {
             for id in bar.take() {
                 crate::view::run_menu(&mut self.shell, &mut self.view, Some(frame), &id);

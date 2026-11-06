@@ -3810,7 +3810,13 @@ fn notice_alpha(age: std::time::Duration) -> f32 {
     rising.min(falling)
 }
 
+/// Where this frame's key diamonds keep their hit rects.
+fn key_hits_id() -> egui::Id {
+    egui::Id::unique("clip-key-hits")
+}
+
 fn ruler_and_lanes(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect) {
+    ui.data_mut(|data| data.remove::<Vec<Rect>>(key_hits_id()));
     let ruler = Rect::from_min_size(rect.min, Vec2::new(rect.width(), tokens::RULER_HEIGHT));
     let tracks = Rect::from_min_max(ruler.left_bottom(), rect.max);
     let lanes_left = tracks.left() + tokens::TRACK_HEAD + tokens::COVER_WIDTH;
@@ -3960,13 +3966,35 @@ fn ruler_and_lanes(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
             Vec2::new(11.0, 14.0),
         );
         let response = ui.interact(mark, ui.scope_id().with("playhead"), Sense::drag());
-        scrubbing |= response.dragged();
-        if response.dragged()
-            && let Some(pointer) = response.interact_pointer_pos()
-        {
-            let x = f64::from(pointer.x - lanes_left).max(0.0);
-            if let Err(error) = shell.seek_ruler(x) {
-                shell.notice_error(&error);
+        // The line drags too, over the lanes and the clips on them.
+        let line = Rect::from_min_max(
+            Pos2::new(playhead_x - PLAYHEAD_GRAB, mark.bottom()),
+            Pos2::new(playhead_x + PLAYHEAD_GRAB, tracks.bottom()),
+        );
+        // A key diamond under the pointer keeps its own click and drag; the
+        // line yields there unless it is already being dragged.
+        let body_id = ui.scope_id().with("playhead-line");
+        let keys: Vec<Rect> = ui.data(|data| data.get_temp(key_hits_id())).unwrap_or_default();
+        let on_key = ui
+            .input(|input| input.pointer.hover_pos())
+            .is_some_and(|pos| keys.iter().any(|key| key.contains(pos)));
+        let body = if on_key && !ui.ctx().is_being_dragged(body_id) {
+            None
+        } else {
+            Some(ui.interact(line, body_id, Sense::drag()))
+        };
+        for grab in std::iter::once(&response).chain(body.as_ref()) {
+            if grab.hovered() || grab.dragged() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+            }
+            scrubbing |= grab.dragged();
+            if grab.dragged()
+                && let Some(pointer) = grab.interact_pointer_pos()
+            {
+                let x = f64::from(pointer.x - lanes_left).max(0.0);
+                if let Err(error) = shell.seek_ruler(x) {
+                    shell.notice_error(&error);
+                }
             }
         }
         ui.painter()
@@ -4038,6 +4066,8 @@ struct LaneLayout {
 /// The strip left under main once it has sunk to the sheet's foot. The
 /// folded lanes' line is drawn in main's own row, under its clip.
 const PEEK: f32 = 4.0;
+/// How far either side of the playhead line a drag picks it up.
+const PLAYHEAD_GRAB: f32 = 4.0;
 
 impl LaneLayout {
     /// The part of each row that shows in its band. A row scrolled out of
@@ -6160,6 +6190,10 @@ fn paint_clip_keys(
             ui.scope_id().with(("key", clip.id.as_str(), time.0)),
             Sense::click_and_drag(),
         );
+        ui.data_mut(|data| {
+            data.get_temp_mut_or_default::<Vec<Rect>>(key_hits_id())
+                .push(hit);
+        });
         let dragged_to = response
             .dragged()
             .then(|| ui.input(|input| input.pointer.interact_pos()))
@@ -10725,6 +10759,29 @@ mod tests {
         );
     }
 
+    /// The x of the white playhead line painted nearest `guess`.
+    fn shell_playhead_x(output: &egui::FullOutput, guess: f32) -> f32 {
+        fn lines(shape: &egui::Shape, found: &mut Vec<f32>) {
+            match shape {
+                egui::Shape::LineSegment { points, stroke }
+                    if stroke.color == tokens::PLAYHEAD && points[0].x == points[1].x =>
+                {
+                    found.push(points[0].x);
+                }
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| lines(shape, found)),
+                _ => {}
+            }
+        }
+        let mut found = Vec::new();
+        for clipped in &output.shapes {
+            lines(&clipped.shape, &mut found);
+        }
+        found
+            .into_iter()
+            .min_by(|a, b| (a - guess).abs().total_cmp(&(b - guess).abs()))
+            .expect("a playhead line")
+    }
+
     #[test]
     fn dragging_the_ruler_moves_the_playhead() {
         let temp = std::env::temp_dir().join(format!("cutlass-scrub-{}", std::process::id()));
@@ -10785,6 +10842,44 @@ mod tests {
             "the ruler drag did not seek, playhead {}",
             shell.playhead().0
         );
+        let on_frame = |time: Micros| {
+            let rate = FrameRate::FPS_30;
+            rate.frame_start(rate.frame_index(time).unwrap()) == Some(time)
+        };
+        assert!(on_frame(shell.playhead()), "{:?} is between frames", shell.playhead());
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: screen,
+                events: vec![press(end, false)],
+                ..Default::default()
+            },
+            |ui| show(&mut shell, ui, &mut view, None),
+        );
+        output.textures_delta.clear();
+        // The playhead's line, down in the lanes, drags it on.
+        let before = shell.playhead();
+        let line = Pos2::new(shell_playhead_x(&output, end.x) + 2.0, end.y + 160.0);
+        for events in [
+            vec![egui::Event::PointerMoved(line), press(line, true)],
+            vec![egui::Event::PointerMoved(line + Vec2::new(30.0, 0.0))],
+            vec![egui::Event::PointerMoved(line + Vec2::new(90.0, 0.0))],
+            vec![press(line + Vec2::new(90.0, 0.0), false)],
+        ] {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: screen,
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(&mut shell, ui, &mut view, None),
+            );
+            output.textures_delta.clear();
+        }
+        assert!(
+            shell.playhead() > before,
+            "the line drag did not move the playhead from {before:?}"
+        );
+        assert!(on_frame(shell.playhead()), "{:?} is between frames", shell.playhead());
         let _ = std::fs::remove_dir_all(&temp);
     }
 

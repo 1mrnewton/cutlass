@@ -4001,7 +4001,7 @@ impl LaneLayout {
 /// stack up, main with it, toward the bottom lane. Each is clamped to what
 /// it can reach.
 fn lane_layout(kinds: &[(bool, f32)], area: Rect, up: f32, down: f32) -> LaneLayout {
-    const GAP: f32 = 8.0;
+    const GAP: f32 = LANE_GAP;
     let room = lane_room();
     let row = |top: f32, height: f32| {
         Rect::from_min_size(
@@ -4152,10 +4152,13 @@ fn chain_scroll(layout: &LaneLayout, up: f32, down: f32, delta: f32) -> (f32, f3
     }
 }
 
+/// Rows sit this far apart: a hairline of the panel shows between them.
+const LANE_GAP: f32 = 1.0;
+
 /// The space kept past the top lane and the bottom one: a regular lane and
 /// the gap beside it.
 fn lane_room() -> f32 {
-    row_height(false, false) + 8.0
+    row_height(false, false) + LANE_GAP
 }
 
 /// This frame's wheel, whether the zoom modifier is held, and the pointer.
@@ -5016,12 +5019,17 @@ fn paint_lane(
     index: usize,
     boxes: &[Rect],
 ) {
-    let fill = if lane.main {
-        tokens::LANE
-    } else {
-        tokens::PANEL
-    };
-    ui.painter().rect_filled(row, CornerRadius::ZERO, fill);
+    // Every row, its head too, takes the lane fill; the hairline between
+    // rows is the panel showing through the gap.
+    let whole = Rect::from_min_max(Pos2::new(head_rect(row).left(), row.top()), row.max);
+    ui.painter()
+        .rect_filled(whole, CornerRadius::ZERO, tokens::LANE);
+    // The head's buttons and the lanes are parted by a line.
+    ui.painter().vline(
+        head_rect(row).right(),
+        row.y_range(),
+        egui::Stroke::new(1.0, tokens::PANEL),
+    );
     if lane.main && lane.clips.is_empty() {
         ui.painter().rect_stroke(
             row,
@@ -8865,7 +8873,7 @@ mod tests {
         let heights: Vec<f32> = rows.iter().map(Rect::height).collect();
         assert_eq!(heights, [40.0, 90.0, 58.0]);
         assert_eq!(rows[1].center().y, 200.0);
-        assert_eq!(rows[2].top() - rows[1].bottom(), 8.0);
+        assert_eq!(rows[2].top() - rows[1].bottom(), LANE_GAP);
     }
 
     #[test]
@@ -8873,7 +8881,7 @@ mod tests {
         let area = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 400.0));
         let rows = lane_rects(vec![(false, 100.0), (true, 90.0), (false, 30.0)], area);
         assert_eq!(rows[0].height(), 100.0);
-        assert_eq!(rows[1].top() - rows[0].bottom(), 8.0);
+        assert_eq!(rows[1].top() - rows[0].bottom(), LANE_GAP);
         assert_eq!(rows[2].height(), 30.0);
         let tall = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 100.0));
         let usual = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, row_height(false, false)));
@@ -11414,7 +11422,7 @@ mod tests {
         assert!(rest.rows[11].bottom() + lane_room() <= area.bottom() + 0.5);
         assert_eq!(rest.down_max, 0.0);
         // The lanes above fill up from main; the top ones are past the edge.
-        assert_eq!(main.top() - rest.rows[9].bottom(), 8.0);
+        assert_eq!(main.top() - rest.rows[9].bottom(), LANE_GAP);
         assert!(rest.rows[0].top() < area.top());
         assert!(rest.up_max > 0.0);
 
@@ -11423,7 +11431,7 @@ mod tests {
         // A little up, main goes down with the lanes above it.
         let some = lane_layout(&kinds, area, 10.0, 0.0);
         assert_eq!(some.rows[10].top(), main.top() + 10.0);
-        assert_eq!(some.rows[10].top() - some.rows[9].bottom(), 8.0);
+        assert_eq!(some.rows[10].top() - some.rows[9].bottom(), LANE_GAP);
 
         // Scrolled all the way up, main sits at the sheet's foot over a strip,
         // the audio lane is folded to it, and the top lane shows with a lane

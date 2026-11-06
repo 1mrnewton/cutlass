@@ -160,3 +160,12 @@ opt-level = 3
 opt-level = 3
 [profile.dev.package.cutlass-prores]
 opt-level = 3
+
+# The AV1 and HEVC tests decode whole real files, up to 2160p, and compare
+# every frame with dav1d and FFmpeg. Unoptimised, two AV1 file checks ran
+# past 13 minutes without finishing. Overflow checks and debug assertions
+# stay on.
+[profile.dev.package.cutlass-av1]
+opt-level = 3
+[profile.dev.package.cutlass-hevc]
+opt-level = 3

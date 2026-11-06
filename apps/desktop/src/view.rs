@@ -3764,6 +3764,9 @@ fn ruler_and_lanes(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
     let scrolls = low < high;
     if scrolls {
         view.lane_scroll += lane_wheel(ui, tracks);
+        if shell.clip_dragging() {
+            view.lane_scroll += drag_lane_scroll(ui, tracks);
+        }
     }
     view.lane_scroll = view.lane_scroll.clamp(low, high);
     let boxes: Vec<Rect> = laid
@@ -3904,6 +3907,30 @@ fn wheel(ui: &Ui) -> (Vec2, bool, Option<Pos2>) {
 }
 
 /// The up-and-down wheel over the track area, in points to move the lanes.
+/// How far to scroll the lanes while a clip drag is held near the top or
+/// bottom of the track sheet, so a lane out of view can be reached. Faster
+/// the closer the pointer is to the edge.
+fn drag_lane_scroll(ui: &Ui, tracks: Rect) -> f32 {
+    let Some(pos) = ui.input(|input| input.pointer.interact_pos()) else {
+        return 0.0;
+    };
+    drag_scroll_step(tracks, pos.y)
+}
+
+fn drag_scroll_step(tracks: Rect, y: f32) -> f32 {
+    const ZONE: f32 = 32.0;
+    const FASTEST: f32 = 12.0;
+    let from_top = y - tracks.top();
+    let from_bottom = tracks.bottom() - y;
+    if from_top < ZONE {
+        FASTEST * (1.0 - from_top.max(0.0) / ZONE)
+    } else if from_bottom < ZONE {
+        -FASTEST * (1.0 - from_bottom.max(0.0) / ZONE)
+    } else {
+        0.0
+    }
+}
+
 fn lane_wheel(ui: &Ui, tracks: Rect) -> f32 {
     let (delta, command, pos) = wheel(ui);
     let over = pos.is_some_and(|pos| tracks.contains(pos) && !over_menu(ui, pos));
@@ -10804,6 +10831,16 @@ mod tests {
         assert_eq!(shell.draft().unwrap().tracks, before);
         assert_eq!(shell.revision(), revision);
         let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn a_drag_near_the_sheet_edge_scrolls_the_lanes_toward_it() {
+        let tracks = Rect::from_min_max(Pos2::new(0.0, 100.0), Pos2::new(800.0, 400.0));
+        assert!(drag_scroll_step(tracks, 101.0) > drag_scroll_step(tracks, 120.0));
+        assert!(drag_scroll_step(tracks, 120.0) > 0.0);
+        assert!(drag_scroll_step(tracks, 390.0) < 0.0);
+        assert_eq!(drag_scroll_step(tracks, 250.0), 0.0);
+        assert_eq!(drag_scroll_step(tracks, 60.0), 12.0);
     }
 
     #[test]

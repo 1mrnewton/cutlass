@@ -290,6 +290,11 @@ fn follow(
             keep[i] = true;
         }
     }
+    // A key at the anchor keeps the follower's own pose there exactly, so
+    // tracking again from the same anchor finds the same offset.
+    if let Some(i) = rows.iter().position(|row| row.0 == anchor_time - start.0) {
+        keep[i] = true;
+    }
     let (from, to) = (
         rows.first().map_or(0, |row| row.0),
         rows.last().map_or(0, |row| row.0),

@@ -257,3 +257,23 @@ fn thinning_keeps_the_ends_and_the_bends() {
     assert!(thin(&[], 1.0).is_empty());
     assert_eq!(thin(&[(0.0, 1.0)], 1.0), vec![0]);
 }
+
+#[test]
+fn a_key_at_the_anchor_keeps_the_followers_own_pose_there() {
+    let mut draft = draft();
+    let slide = path(60, |t| ((-0.5 + 0.01 * t, 0.0), 0.1, 0.0));
+    let anchor = Micros(20 * 1_000_000 / 30);
+    track(
+        &mut draft,
+        &"v".into(),
+        &["s".into()],
+        &"t1".into(),
+        anchor,
+        &slide,
+    )
+    .unwrap();
+    let segment = sticker(&draft);
+    assert_eq!(key_offsets(segment).len(), 3, "the ends and the anchor");
+    let (clip, _) = clip_at(segment, &draft.keyframe_graph_list, anchor).unwrap();
+    assert_eq!((clip.transform.x, clip.transform.y), (0.5, 0.25));
+}

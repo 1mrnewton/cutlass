@@ -1657,6 +1657,18 @@ fn text_basic(
     inspection: &Inspection,
     caption: bool,
 ) {
+    if caption && shell.on_main_captions() {
+        ui.add_space(8.0);
+        let mut all = shell.all_captions();
+        if ui
+            .checkbox(&mut all, "Apply to all main captions")
+            .on_hover_text("A change to the look or place styles every caption on this row")
+            .changed()
+        {
+            shell.set_all_captions(all);
+        }
+        ui.separator();
+    }
     if caption && !inspection.words.text.is_empty() {
         caption_styles(shell, ui, inspection);
     }

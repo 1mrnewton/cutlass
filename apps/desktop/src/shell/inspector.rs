@@ -1430,6 +1430,77 @@ mod tests {
         assert!(desktop.caption_rows().is_empty());
     }
 
+    /// Two captions on a subtitle row and a title on a plain text row.
+    fn subtitle_row(temp: &Temp) -> Shell {
+        let mut draft = Draft::empty("D");
+        for (id, words) in [("first", "one"), ("second", "two"), ("title", "hi")] {
+            let mut text = MaterialText::new(id);
+            text.kind = if id == "title" { "text" } else { "subtitle" }.to_owned();
+            text.content = words.to_owned();
+            text.font_size = 15.0;
+            draft.materials.texts.push(text);
+        }
+        let mut subs = row(
+            "subs",
+            TrackType::Text,
+            TrackFlag::TextSubtitle,
+            "first",
+            "first",
+        );
+        subs.segments.push(Segment::new(
+            "second",
+            "second",
+            TimeRange::new(2_000_000, 1_000_000),
+        ));
+        draft.tracks.push(subs);
+        draft
+            .tracks
+            .push(row("t", TrackType::Text, TrackFlag::None, "title", "title"));
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop
+    }
+
+    fn sizes(desktop: &Shell) -> Vec<f64> {
+        let draft = desktop.draft().unwrap();
+        ["first", "second", "title"]
+            .iter()
+            .map(|id| {
+                draft
+                    .materials
+                    .texts
+                    .iter()
+                    .find(|text| text.id.as_str() == *id)
+                    .unwrap()
+                    .font_size
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_main_caption_style_change_reaches_its_row_only_while_apply_to_all_is_on() {
+        let temp = Temp::new();
+        let mut desktop = subtitle_row(&temp);
+        pick(&mut desktop, "first");
+        assert!(desktop.all_captions());
+        assert!(desktop.on_main_captions());
+        desktop.set_text_size(40.0).unwrap();
+        assert_eq!(sizes(&desktop), [40.0, 40.0, 15.0]);
+        desktop.undo().unwrap();
+        assert_eq!(sizes(&desktop), [15.0, 15.0, 15.0]);
+
+        desktop.set_all_captions(false);
+        desktop.set_text_size(30.0).unwrap();
+        assert_eq!(sizes(&desktop), [30.0, 15.0, 15.0]);
+
+        desktop.set_all_captions(true);
+        pick(&mut desktop, "title");
+        assert!(!desktop.on_main_captions());
+        desktop.set_text_size(20.0).unwrap();
+        assert_eq!(sizes(&desktop), [30.0, 15.0, 20.0]);
+    }
+
     #[test]
     fn a_caption_word_keeps_its_time_and_is_one_step() {
         let temp = Temp::new();

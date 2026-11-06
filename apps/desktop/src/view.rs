@@ -2759,6 +2759,10 @@ fn preview_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rec
         Err(Some(error)) => Some(Err(error)),
         Err(None) => Some(shell.preview_bytes()),
     };
+    shell.note_preview(match &fallback {
+        Some(Err(error)) if shell.draft().is_some() => Some(error),
+        _ => None,
+    });
     match fallback {
         None => {}
         Some(Ok(picture)) => {

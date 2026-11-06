@@ -821,6 +821,9 @@ pub struct Shell {
     gpu: Option<crate::gpu::Preview>,
     /// The canvas shows a clip's earlier picture while the asked one decodes.
     preview_stale: bool,
+    /// The preview error last logged, so a frame that fails every repaint
+    /// is logged once.
+    preview_error: Option<String>,
     pub chrome: Chrome,
 }
 
@@ -906,6 +909,7 @@ impl Shell {
             face: Arc::new(crate::face::installed()),
             gpu: None,
             preview_stale: false,
+            preview_error: None,
             chrome: Chrome::default(),
         }
     }
@@ -1809,6 +1813,7 @@ impl Shell {
     }
 
     fn import_file_in(&mut self, path: &Path) -> Result<(), ShellError> {
+        cutlass_logger::info!("import {}", path.display());
         let probed = probe::probe(path).map_err(|error| ShellError::Probe(error.to_string()))?;
         let project = self.path.clone().ok_or(ShellError::NoProject)?;
         let link = self.settings.import.link;
@@ -1827,6 +1832,7 @@ impl Shell {
     /// job; the new media joins the library and the clip takes it in one
     /// undo step.
     pub fn start_replace(&mut self, path: &Path) -> Result<(), ShellError> {
+        cutlass_logger::info!("replace the selected clip's media with {}", path.display());
         let project = self.path.clone().ok_or(ShellError::NoProject)?;
         let segment_id = self.selected().cloned().ok_or(ShellError::NoProject)?;
         self.refuse_locked(&segment_id)?;
@@ -1877,6 +1883,7 @@ impl Shell {
     /// progress bar, then add it to the library when the job lands. A
     /// cancelled import leaves no copy behind.
     pub fn start_import(&mut self, path: &Path) -> Result<(), ShellError> {
+        cutlass_logger::info!("import {}", path.display());
         let project = self.path.clone().ok_or(ShellError::NoProject)?;
         self.refuse_busy()?;
         let source = path.to_path_buf();
@@ -2262,6 +2269,25 @@ impl Shell {
         }
         self.preview_stale = stale;
         Ok(Some(shown))
+    }
+
+    /// Log the preview's error once when it starts or changes, and once
+    /// when the preview draws again. The window calls this every repaint.
+    pub fn note_preview(&mut self, error: Option<&ShellError>) {
+        match error {
+            None => {
+                if let Some(last) = self.preview_error.take() {
+                    cutlass_logger::info!("preview draws again after: {last}");
+                }
+            }
+            Some(error) => {
+                let text = error.to_string();
+                if self.preview_error.as_deref() != Some(text.as_str()) {
+                    cutlass_logger::warn!("preview at {} us: {text}", self.sample_time().0);
+                    self.preview_error = Some(text);
+                }
+            }
+        }
     }
 
     /// The preview shows a clip's earlier picture while the one asked for
@@ -9302,6 +9328,29 @@ mod tests {
         let log = crate::test_log::text();
         assert!(log.contains("settings changed: step_cap"), "{log}");
         assert!(!log.contains("sk-do-not-log"), "{log}");
+    }
+
+    #[test]
+    fn a_preview_error_is_logged_once_until_it_changes_or_clears() {
+        crate::test_log::path();
+        let mut desktop = shell();
+        let failing = ShellError::Eval("preview-log-token one".to_owned());
+        for _ in 0..50 {
+            desktop.note_preview(Some(&failing));
+        }
+        desktop.note_preview(Some(&ShellError::Eval("preview-log-token two".to_owned())));
+        for _ in 0..50 {
+            desktop.note_preview(None);
+        }
+        let log = crate::test_log::text();
+        let count = |words: &str| log.lines().filter(|line| line.contains(words)).count();
+        assert_eq!(count("preview-log-token one"), 1, "{log}");
+        assert_eq!(
+            count("draws again after: preview-log-token two"),
+            1,
+            "{log}"
+        );
+        assert_eq!(count("preview-log-token two"), 2, "{log}");
     }
 
     #[test]

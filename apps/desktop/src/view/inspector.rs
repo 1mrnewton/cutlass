@@ -15,7 +15,7 @@ use egui::{
 };
 
 use crate::shell::{
-    Inspection, LetterCase, Panel, SILENT_DB, Shell, ShellError, TextLook, volume_db,
+    Inspection, KeyedSetting, LetterCase, Panel, SILENT_DB, Shell, ShellError, TextLook, volume_db,
 };
 use crate::{icons, tokens};
 use cutlass_model::{ANIMATION_PRESETS, AnimType, Micros, Motion};
@@ -561,11 +561,18 @@ fn sound_sliders(
     inspection: &Inspection,
 ) {
     let db = (volume_db(inspection.volume) * 10.0).round() / 10.0;
-    if let Some(value) = slider(ui, state, "volume", "Volume", db, SILENT_DB..=12.0, |v| {
-        format!("{v:.1}dB")
-    }) {
+    let keys = shell.setting_keys(KeyedSetting::Volume);
+    let playhead = shell.playhead();
+    let mut step = None;
+    let changed = keyed_row(ui, keys.as_ref(), playhead, &mut step, |ui| {
+        slider(ui, state, "volume", "Volume", db, SILENT_DB..=12.0, |v| {
+            format!("{v:.1}dB")
+        })
+    });
+    if let Some(value) = changed {
         send(shell, |shell| shell.set_volume_db(value));
     }
+    setting_step(shell, KeyedSetting::Volume, step);
     if !shell.fade_enabled() {
         return;
     }
@@ -672,6 +679,16 @@ fn animation_tab(
     names.extend_from_slice(motions.get(state.page).copied().unwrap_or_default());
     later_tiles(ui, &names);
     later_slider(ui, "Duration", 2.0, "2.0s");
+}
+
+/// Act on a press of `setting`'s keyframe buttons.
+fn setting_step(shell: &mut Shell, setting: KeyedSetting, step: Option<KeyStep>) {
+    match step {
+        Some(KeyStep::Back) => shell.step_setting_key(setting, false),
+        Some(KeyStep::Toggle) => send(shell, |shell| shell.toggle_setting_key(setting)),
+        Some(KeyStep::Forward) => shell.step_setting_key(setting, true),
+        None => {}
+    }
 }
 
 /// A press on a row's keyframe buttons.
@@ -1261,6 +1278,19 @@ fn mask_page(
                 send(shell, |shell| set(shell, Some(next)));
             }
             _ => {}
+        }
+        if !colour && mask.is_some() {
+            let keys = shell.setting_keys(KeyedSetting::Mask);
+            let playhead = shell.playhead();
+            let mut step = None;
+            keyed_row(ui, keys.as_ref(), playhead, &mut step, |ui| {
+                ui.label(
+                    RichText::new("Keyframe the mask")
+                        .size(12.0)
+                        .color(tokens::MUTED),
+                );
+            });
+            setting_step(shell, KeyedSetting::Mask, step);
         }
         let Some(mask) = mask else {
             ui.add_space(6.0);

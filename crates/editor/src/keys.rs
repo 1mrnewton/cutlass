@@ -40,15 +40,36 @@ pub fn clip_keys(
     ClipKeys::of(draft, segment_id, time)
 }
 
+/// The keys clip `segment_id` has on the settings `names`, such as the
+/// mask's or the volume's, and the one within a frame of `time`.
+#[must_use]
+pub fn value_keys(
+    draft: &Draft,
+    segment_id: &SegmentId,
+    time: Micros,
+    names: &[&str],
+) -> Option<ClipKeys> {
+    ClipKeys::of_where(draft, segment_id, time, &|property| names.contains(&property))
+}
+
 impl ClipKeys {
     fn of(draft: &Draft, segment_id: &SegmentId, time: Micros) -> Option<Self> {
+        Self::of_where(draft, segment_id, time, &is_pose_key)
+    }
+
+    fn of_where(
+        draft: &Draft,
+        segment_id: &SegmentId,
+        time: Micros,
+        keep: &dyn Fn(&str) -> bool,
+    ) -> Option<Self> {
         let segment = draft
             .tracks
             .iter()
             .flat_map(|track| &track.segments)
             .find(|segment| segment.id == *segment_id)?;
         let start = segment.target.start;
-        let times: Vec<Micros> = key_offsets_where(segment, is_pose_key)
+        let times: Vec<Micros> = key_offsets_where(segment, keep)
             .into_iter()
             .map(|offset| Micros(start.0.saturating_add(offset.0)))
             .collect();
@@ -69,7 +90,7 @@ impl ClipKeys {
             segment
                 .common_keyframes
                 .iter()
-                .filter(|group| is_pose_key(&group.property_type))
+                .filter(|group| keep(&group.property_type))
                 .flat_map(|group| &group.keyframe_list)
                 .filter(|key| key.time_offset == offset && !key.graph_id.is_empty())
                 .find_map(|key| {
@@ -120,6 +141,19 @@ impl ClipKeys {
 }
 
 impl ClipKeys {
+    /// The offset from the clip's start of the key under the playhead, or
+    /// where a key at `time` would go when it is on the clip.
+    #[must_use]
+    pub fn offset_at(&self, time: Micros) -> Option<Micros> {
+        if let Some(here) = self.here {
+            return Some(Micros(here.0 - self.start.0));
+        }
+        let offset = time.0.checked_sub(self.start.0)?;
+        (0..=self.duration.0)
+            .contains(&offset)
+            .then_some(Micros(offset))
+    }
+
     /// The last key more than a frame before `time`, for the ◀ button.
     #[must_use]
     pub fn before(&self, time: Micros) -> Option<Micros> {

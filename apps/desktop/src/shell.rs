@@ -62,7 +62,7 @@ pub use assistant::AgentRun;
 pub use speech_model::SPEECH_MODEL_QUESTION;
 pub use update::RUNNING_VERSION;
 
-pub use inspector::{LetterCase, Panel, SILENT_DB, TextLook, gain_of_db, volume_db};
+pub use inspector::{KeyedSetting, LetterCase, Panel, SILENT_DB, TextLook, gain_of_db, volume_db};
 
 use crate::face::FaceTable;
 use crate::tokens;
@@ -3808,7 +3808,15 @@ impl Shell {
             start: segment.target.start,
             duration: segment.target.duration,
             speed: segment.speed,
-            volume: segment.volume,
+            // A keyed setting shows its value where the playhead is.
+            volume: cutlass_model::sample(
+                &segment.common_keyframes,
+                &draft.keyframe_graph_list,
+                &[cutlass_model::VOLUME_KEY, "volume"],
+                self.playhead.0.saturating_sub(segment.target.start.0),
+            )
+            .flatten()
+            .unwrap_or(segment.volume),
             scale_x,
             scale_y,
             rotation: keyed.map_or(segment.clip.rotation, |pose| pose.rotation),
@@ -3829,7 +3837,8 @@ impl Shell {
             grade: cutlass_effects::segment_grade(draft, segment),
             lut: cutlass_effects::segment_lut(draft, segment).map(|lut| (lut.name, lut.strength)),
             chroma: cutlass_effects::segment_chroma(draft, segment),
-            mask: cutlass_effects::segment_mask(draft, segment),
+            mask: cutlass_effects::segment_mask(draft, segment)
+                .map(|mask| mask.at(segment, &draft.keyframe_graph_list, self.playhead)),
             selected: cutlass_effects::segment_has_selection(draft, segment),
             color_mask: cutlass_effects::segment_color_mask(draft, segment),
             speed_curve: speed_curve(draft, segment),
@@ -3855,9 +3864,17 @@ impl Shell {
         })
     }
 
+    /// Set the selected clip's volume; with volume keys, key it at the
+    /// playhead instead.
     pub fn set_volume(&mut self, volume: f64) -> Result<(), ShellError> {
         let segment_id = self.selected().cloned().ok_or(ShellError::NoProject)?;
         self.refuse_locked(&segment_id)?;
+        if volume.is_finite()
+            && volume >= 0.0
+            && let Some(key) = self.key_setting_here(KeyedSetting::Volume, vec![volume])
+        {
+            return self.apply(key);
+        }
         self.apply(Request::SetVolume { segment_id, volume })
     }
 
@@ -4977,15 +4994,52 @@ impl Shell {
 
     /// Put `mask` on the selected picture, in its own frame, or take its
     /// mask off.
+    /// With mask keys, the mask is keyed at the playhead too, and taking
+    /// the mask off takes its keys off.
     pub fn set_mask(&mut self, mask: Option<cutlass_effects::Mask>) -> Result<(), ShellError> {
         let segment_id = self.picture_segment("a mask belongs on a picture")?;
         self.refuse_locked(&segment_id)?;
         let material_id = MaterialId::new(self.fresh("mask"));
-        self.apply(Request::SetMask {
-            segment_id,
+        let mut requests = vec![Request::SetMask {
+            segment_id: segment_id.clone(),
             material_id,
             mask,
-        })
+        }];
+        match mask {
+            Some(mask) => {
+                let values = [
+                    mask.x,
+                    mask.y,
+                    mask.width,
+                    mask.height,
+                    mask.rotation,
+                    mask.feather,
+                    mask.round,
+                ]
+                .map(f64::from)
+                .to_vec();
+                requests.extend(self.key_setting_here(KeyedSetting::Mask, values));
+            }
+            None if self.setting_keyed(KeyedSetting::Mask) => {
+                let draft = self.session_draft()?;
+                if let Some((segment, _)) = placed(draft, &segment_id) {
+                    let keyframes = segment
+                        .common_keyframes
+                        .iter()
+                        .filter(|group| {
+                            !cutlass_model::MASK_KEYS.contains(&group.property_type.as_str())
+                        })
+                        .cloned()
+                        .collect();
+                    requests.push(Request::SetKeyframes {
+                        segment_id,
+                        keyframes,
+                    });
+                }
+            }
+            None => {}
+        }
+        self.apply_requests(&requests)
     }
 
     /// Keep the selected picture's colour work, or the selected adjustment

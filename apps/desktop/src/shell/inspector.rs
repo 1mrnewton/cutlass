@@ -12,6 +12,24 @@ use cutlass_session::Request;
 
 use super::{Shell, ShellError};
 
+/// A setting keyed apart from the clip's pose.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeyedSetting {
+    Mask,
+    Volume,
+}
+
+impl KeyedSetting {
+    /// The key names the setting is stored under.
+    #[must_use]
+    pub fn names(self) -> &'static [&'static str] {
+        match self {
+            Self::Mask => &cutlass_model::MASK_KEYS,
+            Self::Volume => &[cutlass_model::VOLUME_KEY],
+        }
+    }
+}
+
 impl Shell {
     /// The panel the selected clip opens.
     #[must_use]
@@ -171,6 +189,122 @@ impl Shell {
             fonts: &*self.face,
         };
         cutlass_editor::clip_keys(draft, segment_id, self.playhead, &sizes)
+    }
+
+    /// The selected clip's keys on `setting`, and the one under the
+    /// playhead.
+    pub fn setting_keys(&self, setting: KeyedSetting) -> Option<cutlass_editor::ClipKeys> {
+        let segment_id = self.selected()?;
+        let draft = self.draft()?;
+        cutlass_editor::value_keys(draft, segment_id, self.playhead, setting.names())
+    }
+
+    /// Whether the selected clip has keys on `setting`.
+    pub fn setting_keyed(&self, setting: KeyedSetting) -> bool {
+        self.setting_keys(setting)
+            .is_some_and(|keys| !keys.times.is_empty())
+    }
+
+    /// Remove the selected clip's `setting` key under the playhead, or key
+    /// `setting` there as it is now. One undo step.
+    pub fn toggle_setting_key(&mut self, setting: KeyedSetting) -> Result<(), ShellError> {
+        let segment_id = self.selected().cloned().ok_or(ShellError::NoProject)?;
+        self.refuse_locked(&segment_id)?;
+        let keys = self.setting_keys(setting).ok_or(ShellError::NoProject)?;
+        let offset = keys.offset_at(self.playhead).ok_or_else(|| {
+            ShellError::Unavailable("move the playhead onto the clip to key it".to_owned())
+        })?;
+        if keys.here.is_some() {
+            return self.apply(Request::UnkeyValues {
+                segment_id,
+                offset,
+                properties: setting
+                    .names()
+                    .iter()
+                    .map(|&name| name.to_owned())
+                    .collect(),
+            });
+        }
+        let values = self.setting_values(setting).ok_or_else(|| {
+            ShellError::Unavailable(match setting {
+                KeyedSetting::Mask => "pick a mask shape first".to_owned(),
+                KeyedSetting::Volume => "the clip has no sound to key".to_owned(),
+            })
+        })?;
+        self.apply(Request::KeyValues {
+            segment_id,
+            offset,
+            values,
+        })
+    }
+
+    /// Move the playhead to the selected clip's `setting` key before it,
+    /// or after it when `forward`.
+    pub fn step_setting_key(&mut self, setting: KeyedSetting, forward: bool) {
+        let target = self.setting_keys(setting).and_then(|keys| {
+            if forward {
+                keys.after(self.playhead)
+            } else {
+                keys.before(self.playhead)
+            }
+        });
+        if let Some(time) = target {
+            self.seek(time);
+        }
+    }
+
+    /// The selected clip's `setting` as it is at the playhead, as key
+    /// values.
+    fn setting_values(&self, setting: KeyedSetting) -> Option<Vec<(String, f64)>> {
+        let inspection = self.inspection()?;
+        let values: Vec<f64> = match setting {
+            KeyedSetting::Mask => {
+                let mask = inspection.mask?;
+                [
+                    mask.x,
+                    mask.y,
+                    mask.width,
+                    mask.height,
+                    mask.rotation,
+                    mask.feather,
+                    mask.round,
+                ]
+                .map(f64::from)
+                .to_vec()
+            }
+            KeyedSetting::Volume => vec![inspection.volume],
+        };
+        Some(
+            setting
+                .names()
+                .iter()
+                .map(|&name| name.to_owned())
+                .zip(values)
+                .collect(),
+        )
+    }
+
+    /// The request that keys `setting` at the playhead as `values`, when
+    /// the selected clip has keys on it and the playhead is on the clip.
+    pub(super) fn key_setting_here(
+        &self,
+        setting: KeyedSetting,
+        values: Vec<f64>,
+    ) -> Option<Request> {
+        let keys = self
+            .setting_keys(setting)
+            .filter(|keys| !keys.times.is_empty())?;
+        let offset = keys.offset_at(self.playhead)?;
+        Some(Request::KeyValues {
+            segment_id: self.selected()?.clone(),
+            offset,
+            values: setting
+                .names()
+                .iter()
+                .map(|&name| name.to_owned())
+                .zip(values)
+                .collect(),
+        })
     }
 
     /// Remove the selected clip's key under the playhead, or key its pose
@@ -872,6 +1006,68 @@ mod tests {
         assert!((desktop.inspection().unwrap().volume - 1.9953).abs() < 1e-3);
         desktop.undo().unwrap();
         assert_eq!(desktop.inspection().unwrap().volume, 0.0);
+    }
+
+    #[test]
+    fn a_keyed_volume_is_set_where_the_playhead_is() {
+        let temp = Temp::new();
+        let mut desktop = every_kind(&temp);
+        pick(&mut desktop, "sound");
+        assert!(!desktop.setting_keyed(super::KeyedSetting::Volume));
+        desktop.seek(cutlass_model::Micros(1_000_000));
+        desktop
+            .toggle_setting_key(super::KeyedSetting::Volume)
+            .unwrap();
+        desktop.seek(cutlass_model::Micros(3_000_000));
+        // With keys, a change keys the volume at the playhead.
+        desktop.set_volume(0.5).unwrap();
+        let keys = desktop.setting_keys(super::KeyedSetting::Volume).unwrap();
+        assert_eq!(
+            keys.times,
+            [
+                cutlass_model::Micros(1_000_000),
+                cutlass_model::Micros(3_000_000)
+            ]
+        );
+        desktop.seek(cutlass_model::Micros(2_000_000));
+        assert!((desktop.inspection().unwrap().volume - 0.75).abs() < 1e-9);
+        // The pose's keys are apart.
+        assert!(desktop.keys().is_none_or(|keys| keys.times.is_empty()));
+        desktop.seek(cutlass_model::Micros(3_000_000));
+        desktop
+            .toggle_setting_key(super::KeyedSetting::Volume)
+            .unwrap();
+        let keys = desktop.setting_keys(super::KeyedSetting::Volume).unwrap();
+        assert_eq!(keys.times, [cutlass_model::Micros(1_000_000)]);
+        desktop.step_setting_key(super::KeyedSetting::Volume, false);
+        assert_eq!(desktop.playhead(), cutlass_model::Micros(1_000_000));
+    }
+
+    #[test]
+    fn a_keyed_mask_moves_and_goes_with_its_keys() {
+        let temp = Temp::new();
+        let mut desktop = every_kind(&temp);
+        pick(&mut desktop, "main");
+        let circle = cutlass_effects::Mask::new(cutlass_effects::MaskShape::Circle);
+        desktop.set_mask(Some(circle)).unwrap();
+        desktop.seek(cutlass_model::Micros(0));
+        desktop
+            .toggle_setting_key(super::KeyedSetting::Mask)
+            .unwrap();
+        desktop.seek(cutlass_model::Micros(2_000_000));
+        desktop
+            .set_mask(Some(cutlass_effects::Mask { x: 0.5, ..circle }))
+            .unwrap();
+        desktop.seek(cutlass_model::Micros(1_000_000));
+        let mask = desktop.inspection().unwrap().mask.unwrap();
+        assert!((mask.x - 0.25).abs() < 1e-6, "{mask:?}");
+        // One undo step takes the last key off, and the mask is back.
+        desktop.undo().unwrap();
+        let mask = desktop.inspection().unwrap().mask.unwrap();
+        assert!(mask.x.abs() < 1e-6, "{mask:?}");
+        desktop.set_mask(None).unwrap();
+        assert!(!desktop.setting_keyed(super::KeyedSetting::Mask));
+        assert!(desktop.inspection().unwrap().mask.is_none());
     }
 
     #[test]

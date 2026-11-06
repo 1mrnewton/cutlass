@@ -68,7 +68,7 @@ pub use inspector::{
     SILENT_DB, TEXT_PRESETS, TextLook, canvas_pixels, gain_of_db, panel_of, starting,
     stored_position, text_look, volume_db,
 };
-pub use keys::{ClipKeys, KeyGraph, clip_keys, key_graphs, move_key};
+pub use keys::{ClipKeys, KeyGraph, clip_keys, key_graphs, move_key, value_keys};
 pub use lane::{Lane, lane_category, lanes, lanes_for};
 pub use library::{
     LIBRARY_TOP, LibraryFile, LibraryShelf, LibrarySort, NEW_FOLDER_NAME, add_folder,

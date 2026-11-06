@@ -3788,7 +3788,7 @@ fn ruler_and_lanes(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
         let Some(row) = boxes.get(index).copied() else {
             continue;
         };
-        paint_lane(shell, ui, lane, row, lanes_left, index);
+        paint_lane(shell, ui, lane, row, lanes_left, index, &boxes);
         lane_head(shell, ui, view, lane, row, index);
         resize_lane(
             ui,
@@ -4780,6 +4780,7 @@ fn paint_lane(
     row: Rect,
     lanes_left: f32,
     index: usize,
+    boxes: &[Rect],
 ) {
     let fill = if lane.main {
         tokens::LANE
@@ -4836,7 +4837,7 @@ fn paint_lane(
         .filter(|preview| preview.track_id == lane.track_id)
         .collect();
     for clip in &lane.clips {
-        paint_clip(shell, ui, lane, clip, row, lanes_left, index);
+        paint_clip(shell, ui, lane, clip, lanes_left, index, boxes);
     }
     // A right-click on the row but off its clips may be over a gap.
     if let Some(pos) = secondary_click(ui)
@@ -5510,10 +5511,14 @@ fn paint_clip(
     ui: &mut Ui,
     lane: &crate::shell::LaneView,
     clip: &crate::shell::ClipSpan,
-    row: Rect,
     lanes_left: f32,
     index: usize,
+    boxes: &[Rect],
 ) {
+    // `boxes[index]` is this clip's own row. A body drag reads the row under the pointer.
+    let Some(row) = boxes.get(index).copied() else {
+        return;
+    };
     let (start, duration) = preview_bounds(shell, clip);
     let clip_rect = clip_bounds(
         shell,
@@ -5727,7 +5732,8 @@ fn paint_clip(
         {
             let x = f64::from(pos.x - lanes_left).max(0.0);
             scroll_with_drag(shell, ui, x);
-            shell.preview_move(clip.id.clone(), x, editor_lane_y(index));
+            let under = lane_under(boxes, pos).unwrap_or(index);
+            shell.preview_move(clip.id.clone(), x, editor_lane_y(under));
         }
         if response.drag_stopped() && !moved {
             if ui.input(|input| input.modifiers.shift) {
@@ -5737,7 +5743,8 @@ fn paint_clip(
             }
             shell.cancel_clip_drag();
         } else {
-            finish_clip_pointer(shell, ui, &response, &clip.id, lanes_left, index, None);
+            let under = pos.and_then(|pos| lane_under(boxes, pos)).unwrap_or(index);
+            finish_clip_pointer(shell, ui, &response, &clip.id, lanes_left, under, None);
         }
     }
     drag_clip_edge(
@@ -10625,6 +10632,75 @@ mod tests {
             .collect();
         assert_eq!(starts, [0, 1_000_000]);
         assert!(shell.gap_menu().is_none());
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn dragging_a_clip_onto_another_lane_moves_it_to_that_lane() {
+        let temp = std::env::temp_dir().join(format!("cutlass-cross-lane-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let mut draft = cutlass_model::Draft::empty("draft");
+        draft.config.maintrack_adsorb = false;
+        draft.canvas_config.width = 2;
+        draft.canvas_config.height = 1;
+        draft.tracks[0].segments.push(cutlass_model::Segment::new(
+            "low",
+            "color",
+            cutlass_model::TimeRange::new(0, 2_000_000),
+        ));
+        let mut overlay = cutlass_model::Track::main(TrackId::new("overlay"));
+        overlay.flag = cutlass_model::TrackFlag::SubVideo;
+        overlay.segments.push(cutlass_model::Segment::new(
+            "high",
+            "color",
+            cutlass_model::TimeRange::new(8_000_000, 2_000_000),
+        ));
+        draft.tracks.insert(0, overlay);
+        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: screen,
+                ..Default::default()
+            },
+            |ui| show(&mut shell, ui, &mut view, None),
+        );
+        let low = text_pos(&output, "low").expect("the main clip");
+        let high = text_pos(&output, "high").expect("the overlay clip");
+        output.textures_delta.clear();
+        assert!(high.y < low.y, "the overlay row sits above main");
+
+        let to = Pos2::new(low.x + 20.0, high.y);
+        drag(&ctx, low, to, &mut shell, &mut view);
+
+        let draft = shell.draft().unwrap();
+        let overlay = draft
+            .tracks
+            .iter()
+            .find(|track| track.id.as_str() == "overlay")
+            .unwrap();
+        assert!(
+            overlay
+                .segments
+                .iter()
+                .any(|segment| segment.id.as_str() == "low"),
+            "the clip stayed on its own lane"
+        );
+        assert!(
+            draft
+                .tracks
+                .iter()
+                .filter(|track| track.id.as_str() != "overlay")
+                .all(|track| track
+                    .segments
+                    .iter()
+                    .all(|segment| segment.id.as_str() != "low"))
+        );
         let _ = std::fs::remove_dir_all(&temp);
     }
 

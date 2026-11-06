@@ -30,6 +30,7 @@ mod ripple;
 mod ruler;
 mod snap;
 mod stage;
+mod subtitles;
 mod template;
 mod text_effect;
 mod title;
@@ -90,6 +91,7 @@ pub use stage::{
     StageGesture, StageGuides, StageStep, TURN_REACH, TextSizes, canvas_size, keyed_pose,
     stage_align, stage_box, stage_gesture, stage_pick,
 };
+pub use subtitles::{SubtitleFormat, SubtitleMiss, subtitle_request};
 pub use template::{
     TEMPLATE_CARD_PREFIX, TITLE_TEMPLATES, TemplatePlace, TitleTemplate, Widget, template_requests,
     title_template,

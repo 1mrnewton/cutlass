@@ -960,7 +960,7 @@ mod tests {
         );
         // Near the window's foot, the menu runs down past it, onto the monitor.
         let at = window.min + Vec2::new(400.0, 380.0);
-        let menu = place(monitor.shrink(EDGE), at, Vec2::new(248.0, 600.0));
+        let menu = place(monitor.shrink(EDGE), at, Vec2::new(248.0, 300.0));
         assert_eq!(menu.min, at);
         assert!(menu.bottom() > window.bottom());
         // A window on another monitor sets no limit rather than a wrong one.

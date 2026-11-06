@@ -677,20 +677,12 @@ fn open_created(shell: &mut Shell, root: &std::path::Path) {
 }
 
 fn new_project_button(ui: &mut Ui) -> bool {
-    let (rect, response) = ui.allocate_exact_size(Vec2::new(148.0, 36.0), Sense::click());
-    ui.painter().rect_filled(
-        rect,
-        CornerRadius::same(tokens::EXPORT_RADIUS),
-        tokens::EXPORT,
-    );
-    ui.painter().text(
-        rect.center(),
-        Align2::CENTER_CENTER,
-        "New project",
-        FontId::proportional(14.0),
-        tokens::EXPORT_INK,
-    );
-    response.clicked()
+    ui.add(
+        ui::Button::primary("New project")
+            .text_size(14.0)
+            .min_size(Vec2::new(148.0, 36.0)),
+    )
+    .clicked()
 }
 
 fn project_card(ui: &mut Ui, project: &ListedProject) -> bool {
@@ -1722,24 +1714,15 @@ fn shelf_rail(ui: &mut Ui, view: &mut ViewState, rect: Rect) {
 }
 
 fn shelf_button(ui: &mut Ui, shelf: Shelf, active: bool) -> egui::Response {
-    let (rect, response) =
-        ui.allocate_exact_size(Vec2::new(ui.available_width(), 44.0), Sense::click());
-    if active {
-        ui.painter()
-            .rect_filled(rect, CornerRadius::same(10), tokens::ACTIVE);
-    }
-    let color = if active { tokens::TEXT } else { tokens::FAINT };
-    let mark = Rect::from_center_size(rect.center(), Vec2::splat(20.0));
-    if let Err(error) = icons::paint(ui.painter(), mark, shelf.icon(), color) {
-        ui.painter().text(
-            rect.center(),
-            Align2::CENTER_CENTER,
-            error.to_string(),
-            FontId::proportional(9.0),
-            tokens::FAINT,
-        );
-    }
-    response.on_hover_text(shelf.label())
+    ui.add(
+        ui::Button::icon(shelf.icon())
+            .on(active)
+            .full_width()
+            .min_size(Vec2::new(0.0, 44.0))
+            .icon_size(20.0)
+            .radius(tokens::RADIUS_LG)
+            .tip(shelf.label()),
+    )
 }
 
 fn asset_column(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect) {
@@ -3553,30 +3536,13 @@ fn toolbar_button(
     enabled: bool,
     active: bool,
 ) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(Vec2::new(28.0, 28.0), Sense::click());
-    if active {
-        ui.painter().rect_filled(
-            rect,
-            CornerRadius::same(tokens::ICON_RADIUS),
-            tokens::ICON_BUTTON,
-        );
-    }
-    let color = if enabled || active {
-        tokens::MUTED
-    } else {
-        tokens::FAINT
-    };
-    let mark = Rect::from_center_size(rect.center(), Vec2::splat(16.0));
-    if let Err(error) = icons::paint(ui.painter(), mark, name, color) {
-        ui.painter().text(
-            rect.center(),
-            Align2::CENTER_CENTER,
-            error.to_string(),
-            FontId::proportional(8.0),
-            tokens::FAINT,
-        );
-    }
-    response.on_hover_text(tip)
+    ui.add_enabled(
+        enabled || active,
+        ui::Button::icon(name)
+            .on(active)
+            .min_size(Vec2::splat(28.0))
+            .tip(tip),
+    )
 }
 
 fn tool_enabled(shell: &Shell, name: &str) -> bool {

@@ -4158,7 +4158,7 @@ const LANE_GAP: f32 = 1.0;
 /// The space kept past the top lane and the bottom one: a regular lane and
 /// the gap beside it.
 fn lane_room() -> f32 {
-    row_height(false, false) + LANE_GAP
+    row_height(RowSize::Thin) + LANE_GAP
 }
 
 /// This frame's wheel, whether the zoom modifier is held, and the pointer.
@@ -4575,7 +4575,7 @@ fn lane_height(view: &ViewState, lane: &crate::shell::LaneView) -> f32 {
     view.lane_heights
         .get(&lane.track_id)
         .copied()
-        .unwrap_or_else(|| row_height(tall_lane(lane), is_audio(lane)))
+        .unwrap_or_else(|| row_height(lane_size(lane)))
 }
 
 /// Drag a row's outer edge to make it taller or shorter: the top edge for
@@ -4756,15 +4756,7 @@ fn paint_library_landing(
                 egui::StrokeKind::Inside,
             );
             if duration.0 > 0 {
-                let spot = clip_bounds(
-                    shell,
-                    tall_lane(lane),
-                    is_audio(lane),
-                    *start,
-                    *duration,
-                    *row,
-                    lanes_left,
-                );
+                let spot = clip_bounds(shell, lane_size(lane), *start, *duration, *row, lanes_left);
                 ui.painter().with_clip_rect(*row).rect_stroke(
                     spot,
                     CornerRadius::same(7),
@@ -4987,7 +4979,7 @@ fn ruler_rate(shell: &Shell) -> (FrameRate, bool) {
 }
 
 fn paint_empty_main(ui: &Ui, area: Rect) {
-    let height = row_height(true, false);
+    let height = row_height(RowSize::Main);
     let lane = Rect::from_min_size(
         Pos2::new(area.left(), area.center().y - height / 2.0),
         Vec2::new(area.width(), height),
@@ -5234,15 +5226,7 @@ fn clips_touching(
     for (lane, row) in rows.iter().zip(boxes.iter().copied()) {
         for clip in &lane.clips {
             let (start, duration) = preview_bounds(shell, clip);
-            let bounds = clip_bounds(
-                shell,
-                tall_lane(lane),
-                is_audio(lane),
-                start,
-                duration,
-                row,
-                lanes_left,
-            );
+            let bounds = clip_bounds(shell, lane_size(lane), start, duration, row, lanes_left);
             if bounds.intersects(rect) {
                 ids.push(clip.id.clone());
             }
@@ -5253,17 +5237,16 @@ fn clips_touching(
 
 fn clip_bounds(
     shell: &Shell,
-    main: bool,
-    audio: bool,
+    size: RowSize,
     start: Micros,
     duration: Micros,
     row: Rect,
     lanes_left: f32,
 ) -> Rect {
     // A row dragged taller or shorter takes its clips with it.
-    let inset = clip_inset(main);
-    let height = if (row.height() - row_height(main, audio)).abs() < f32::EPSILON {
-        clip_height(main, audio)
+    let inset = clip_inset(size);
+    let height = if (row.height() - row_height(size)).abs() < f32::EPSILON {
+        clip_height(size)
     } else {
         (row.height() - 2.0 * inset).max(tokens::MIN_CLIP_HEIGHT)
     };
@@ -5279,13 +5262,34 @@ fn clip_bounds(
 
 /// A clip's height: the main track is tallest, audio holds its waveform
 /// under a header, the rest are a single row.
-fn clip_height(main: bool, audio: bool) -> f32 {
-    if main {
-        tokens::MAIN_CLIP_HEIGHT
-    } else if audio {
-        tokens::AUDIO_CLIP_HEIGHT
+fn clip_height(size: RowSize) -> f32 {
+    match size {
+        RowSize::Main => tokens::MAIN_CLIP_HEIGHT,
+        RowSize::Picture => tokens::PICTURE_CLIP_HEIGHT,
+        RowSize::Audio => tokens::AUDIO_CLIP_HEIGHT,
+        RowSize::Thin => tokens::CLIP_HEIGHT,
+    }
+}
+
+/// How tall a lane's row is: main, an overlay picture lane, an audio lane,
+/// or a thin one (text, stickers, effects and the like).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RowSize {
+    Main,
+    Picture,
+    Audio,
+    Thin,
+}
+
+fn lane_size(lane: &crate::shell::LaneView) -> RowSize {
+    if lane.main {
+        RowSize::Main
+    } else if tall_lane(lane) {
+        RowSize::Picture
+    } else if is_audio(lane) {
+        RowSize::Audio
     } else {
-        tokens::CLIP_HEIGHT
+        RowSize::Thin
     }
 }
 
@@ -5304,17 +5308,17 @@ fn tall_lane(lane: &crate::shell::LaneView) -> bool {
         )
 }
 
-fn clip_inset(main: bool) -> f32 {
-    if main {
-        tokens::MAIN_CLIP_INSET
-    } else {
-        tokens::CLIP_INSET
+fn clip_inset(size: RowSize) -> f32 {
+    match size {
+        RowSize::Main => tokens::MAIN_CLIP_INSET,
+        RowSize::Picture => tokens::PICTURE_CLIP_INSET,
+        RowSize::Audio | RowSize::Thin => tokens::CLIP_INSET,
     }
 }
 
 /// A lane row: its clips and the gap above and below them.
-fn row_height(main: bool, audio: bool) -> f32 {
-    clip_height(main, audio) + 2.0 * clip_inset(main)
+fn row_height(size: RowSize) -> f32 {
+    clip_height(size) + 2.0 * clip_inset(size)
 }
 
 fn paint_transitions(
@@ -5676,7 +5680,10 @@ fn clip_parts(clip_rect: Rect, main: bool, audio: bool, sound: bool) -> ClipPart
             band: None,
         };
     }
-    let split = clip_rect.top() + tokens::CLIP_HEADER.min(clip_rect.height());
+    // A short overlay clip keeps a third for its name, so the pictures and
+    // the sound still show under it.
+    let header_height = tokens::CLIP_HEADER.min((clip_rect.height() / 3.0).max(13.0));
+    let split = clip_rect.top() + header_height.min(clip_rect.height());
     let header = Some(Rect::from_min_max(
         clip_rect.min,
         Pos2::new(clip_rect.right(), split),
@@ -5797,15 +5804,7 @@ fn paint_clip(
     // The whole row, so a clip keeps its height while its row is part hidden.
     let RowAt { index, row, boxes } = at;
     let (start, duration) = preview_bounds(shell, clip);
-    let clip_rect = clip_bounds(
-        shell,
-        tall_lane(lane),
-        is_audio(lane),
-        start,
-        duration,
-        row,
-        lanes_left,
-    );
+    let clip_rect = clip_bounds(shell, lane_size(lane), start, duration, row, lanes_left);
     let visible = clip_rect.intersect(row);
     if visible.width() <= 0.0 || visible.height() <= 0.0 {
         return;
@@ -6505,8 +6504,7 @@ fn paint_move_follower(
 ) {
     let clip_rect = clip_bounds(
         shell,
-        tall_lane(lane),
-        is_audio(lane),
+        lane_size(lane),
         preview.start,
         preview.duration,
         row,
@@ -8864,14 +8862,14 @@ mod tests {
         let area = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 400.0));
         let rows = lane_rects(
             vec![
-                (false, row_height(false, false)),
-                (true, row_height(true, false)),
-                (false, row_height(false, true)),
+                (false, row_height(RowSize::Thin)),
+                (true, row_height(RowSize::Main)),
+                (false, row_height(RowSize::Audio)),
             ],
             area,
         );
         let heights: Vec<f32> = rows.iter().map(Rect::height).collect();
-        assert_eq!(heights, [40.0, 90.0, 58.0]);
+        assert_eq!(heights, [40.0, 76.0, 58.0]);
         assert_eq!(rows[1].center().y, 200.0);
         assert_eq!(rows[2].top() - rows[1].bottom(), LANE_GAP);
     }
@@ -8884,12 +8882,12 @@ mod tests {
         assert_eq!(rows[1].top() - rows[0].bottom(), LANE_GAP);
         assert_eq!(rows[2].height(), 30.0);
         let tall = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 100.0));
-        let usual = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, row_height(false, false)));
+        let usual = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, row_height(RowSize::Thin)));
         let (decoders, encoders) = crate::register_codecs();
         let shell = Shell::new(decoders, encoders, Settings::default());
-        let grown = clip_bounds(&shell, false, false, Micros(0), Micros(1), tall, 0.0);
+        let grown = clip_bounds(&shell, RowSize::Thin, Micros(0), Micros(1), tall, 0.0);
         assert_eq!(grown.height(), 100.0 - 2.0 * tokens::CLIP_INSET);
-        let kept = clip_bounds(&shell, false, false, Micros(0), Micros(1), usual, 0.0);
+        let kept = clip_bounds(&shell, RowSize::Thin, Micros(0), Micros(1), usual, 0.0);
         assert_eq!(kept.height(), tokens::CLIP_HEIGHT);
     }
 
@@ -10972,7 +10970,12 @@ mod tests {
         output.textures_delta.clear();
         assert!(high.y < low.y, "the overlay row sits above main");
 
-        let to = Pos2::new(low.x + 20.0, high.y);
+        // The overlay row's middle: the name sits near its top edge, where a
+        // drop opens a lane instead.
+        let to = Pos2::new(
+            low.x + 20.0,
+            high.y + row_height(RowSize::Picture) / 2.0 - 4.0,
+        );
         drag(&ctx, low, to, &mut shell, &mut view);
 
         let draft = shell.draft().unwrap();
@@ -11050,7 +11053,12 @@ mod tests {
         let output = frame(Vec::new(), &mut shell, &mut view);
         let low = text_pos(&output, "low").expect("the main clip");
         let high = text_pos(&output, "high").expect("the overlay clip");
-        let to = Pos2::new(low.x + 20.0, high.y);
+        // The overlay row's middle: the name sits near its top edge, where a
+        // drop opens a lane instead.
+        let to = Pos2::new(
+            low.x + 20.0,
+            high.y + row_height(RowSize::Picture) / 2.0 - 4.0,
+        );
         frame(
             vec![egui::Event::PointerMoved(low), press(low, true)],
             &mut shell,
@@ -11507,7 +11515,7 @@ mod tests {
     }
 
     #[test]
-    fn an_overlay_video_row_is_as_tall_as_main_and_a_text_row_stays_thin() {
+    fn an_overlay_video_row_is_about_half_main_and_no_thinner_than_text() {
         let lane = |kind: cutlass_model::TrackType, main: bool| crate::shell::LaneView {
             track_id: TrackId::new("t"),
             kind,
@@ -11524,8 +11532,13 @@ mod tests {
         let main = lane_height(&view, &lane(cutlass_model::TrackType::Video, true));
         let overlay = lane_height(&view, &lane(cutlass_model::TrackType::Video, false));
         let text = lane_height(&view, &lane(cutlass_model::TrackType::Text, false));
-        assert_eq!(overlay, main);
-        assert!(text < main);
+        assert!(overlay < main);
+        assert!(
+            (overlay - main / 2.0).abs() < 8.0,
+            "{overlay} against {main}"
+        );
+        assert!(text <= overlay);
+        assert_eq!(main, 76.0);
     }
 
     #[test]

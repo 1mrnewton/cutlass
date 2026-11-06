@@ -108,15 +108,20 @@ pub const WAVE_RATIO: f32 = 0.3;
 pub const WAVE_LOUD: Color32 = Color32::from_rgb(226, 143, 72);
 pub const WAVE_CLIPPED: Color32 = Color32::from_rgb(215, 68, 50);
 
-/// A main-track clip, the 76 track height less its border: a header
-/// row, then the filmstrip over the sound band.
-pub const MAIN_CLIP_HEIGHT: f32 = 74.0;
+/// A main-track clip, its 76 row less the inset: a header row, then the
+/// filmstrip over the sound band.
+pub const MAIN_CLIP_HEIGHT: f32 = 56.0;
+/// A clip on an overlay picture lane: the same parts, about half main's
+/// row.
+pub const PICTURE_CLIP_HEIGHT: f32 = 36.0;
 /// An audio clip: a header row over its waveform.
 pub const AUDIO_CLIP_HEIGHT: f32 = 46.0;
 /// Any other clip.
 pub const CLIP_HEIGHT: f32 = 28.0;
 /// The gap above and below a main-track clip inside its lane row.
-pub const MAIN_CLIP_INSET: f32 = 8.0;
+pub const MAIN_CLIP_INSET: f32 = 10.0;
+/// The gap above and below an overlay picture clip.
+pub const PICTURE_CLIP_INSET: f32 = 3.0;
 /// The gap above and below any other clip.
 pub const CLIP_INSET: f32 = 6.0;
 /// The level meter's column at the timeline's right edge.

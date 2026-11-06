@@ -7002,87 +7002,130 @@ fn export_extension(view: &ViewState) -> &'static str {
 
 /// Name, canvas, frame rate and color space, saved together.
 fn project_dialog(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
+    let folder = shell.project_folder().map(short_folder);
     let Some(settings) = view.project_dialog.as_mut() else {
         return;
     };
-    let mut save = false;
-    let ((), closed) = widgets::dialog(ui, "Project", |ui| {
-        ui.horizontal(|ui| {
-            ui.add_space(16.0);
-            ui.vertical(|ui| {
-                choice_row(ui, "Name", |ui| {
-                    ui.add(egui::TextEdit::singleline(&mut settings.name).desired_width(220.0));
-                });
-                choice_row(ui, "Ratio", |ui| {
-                    for (ratio, name) in cutlass_editor::PROJECT_RATIOS {
-                        if ui.selectable_label(settings.ratio == ratio, name).clicked() {
-                            settings.ratio = ratio.to_owned();
-                        }
-                    }
-                });
-                choice_row(ui, "Resolution", |ui| {
-                    for (side, name) in cutlass_editor::PROJECT_RESOLUTIONS {
-                        if ui
-                            .selectable_label(settings.short_side == side, name)
-                            .clicked()
-                        {
-                            settings.short_side = side;
-                        }
-                    }
-                });
-                choice_row(ui, "Frame rate", |ui| {
-                    ui.horizontal_wrapped(|ui| {
-                        for rate in cutlass_editor::PROJECT_RATES {
-                            let label = cutlass_editor::rate_label(rate);
-                            let name = label.trim_end_matches(" fps");
-                            if ui.selectable_label(settings.rate == rate, name).clicked() {
-                                settings.rate = rate;
-                            }
-                        }
-                    });
-                });
-                let drop = cutlass_editor::is_drop_rate(settings.rate);
-                choice_row(ui, "Drop frame", |ui| {
-                    let mut on = settings.drop_frame && drop;
-                    if ui
-                        .add_enabled(drop, egui::Checkbox::without_text(&mut on))
-                        .changed()
-                    {
-                        settings.drop_frame = on;
-                    }
-                });
-                choice_row(ui, "Color space", |ui| {
-                    for (space, name) in cutlass_editor::COLOR_SPACES {
-                        if space < 0 {
-                            continue;
-                        }
-                        if ui
-                            .selectable_label(settings.color_space == space, name)
-                            .clicked()
-                        {
-                            settings.color_space = space;
-                        }
-                    }
-                });
-                ui.checkbox(
-                    &mut settings.free_layer,
-                    "Free layer: stack clips with Arrange, not by their tracks",
-                );
-                ui.add_space(8.0);
-                save = ui.button("Save").clicked();
-            });
+    let ((), end) = widgets::sheet(ui, "Project settings", 560.0, "Save", |ui| {
+        widgets::form_section(ui, "Details");
+        widgets::form_row(ui, "Name", |ui| {
+            widgets::text_box(ui, &mut settings.name);
         });
-    });
-    if save && let Some(settings) = view.project_dialog.take() {
-        if let Err(error) = shell.save_project_settings(&settings) {
-            shell.notice_error(&error);
-            view.project_dialog = Some(settings);
-        } else {
-            view.name_buffer.clear();
+        if let Some(folder) = &folder {
+            widgets::form_row(ui, "Save to", |ui| {
+                ui.add_space(8.0);
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(folder)
+                            .size(tokens::TYPE_SIZE + 1.0)
+                            .color(tokens::TEXT),
+                    )
+                    .truncate(),
+                );
+            });
         }
-    } else if closed {
-        view.project_dialog = None;
+        let spaces: Vec<_> = cutlass_editor::COLOR_SPACES
+            .iter()
+            .filter(|(space, _)| *space >= 0)
+            .collect();
+        let names: Vec<&str> = spaces.iter().map(|(_, name)| *name).collect();
+        let current = cutlass_editor::color_space_name(settings.color_space);
+        widgets::form_row(ui, "Color space", |ui| {
+            if let Some(index) = widgets::select(ui, "project-color-space", &current, &names) {
+                settings.color_space = spaces[index].0;
+            }
+        });
+        widgets::form_row(ui, "Free layer", |ui| {
+            widgets::switch(ui, &mut settings.free_layer, true);
+        });
+        widgets::form_hint(
+            ui,
+            "Picture clips stack by the order Arrange gives them, not by their tracks.",
+        );
+
+        ui.add_space(8.0);
+        widgets::form_section(ui, "Timeline");
+        let ratio = cutlass_editor::PROJECT_RATIOS
+            .iter()
+            .find(|(ratio, _)| *ratio == settings.ratio)
+            .map_or(settings.ratio.as_str(), |(_, name)| name)
+            .to_owned();
+        let names: Vec<&str> = cutlass_editor::PROJECT_RATIOS
+            .iter()
+            .map(|(_, name)| *name)
+            .collect();
+        widgets::form_row(ui, "Ratio", |ui| {
+            if let Some(index) = widgets::select(ui, "project-ratio", &ratio, &names) {
+                settings.ratio = cutlass_editor::PROJECT_RATIOS[index].0.to_owned();
+            }
+        });
+        let size = cutlass_editor::PROJECT_RESOLUTIONS
+            .iter()
+            .find(|(side, _)| *side == settings.short_side)
+            .map_or("Adapted", |(_, name)| name);
+        let names: Vec<&str> = cutlass_editor::PROJECT_RESOLUTIONS
+            .iter()
+            .map(|(_, name)| *name)
+            .collect();
+        widgets::form_row(ui, "Resolution", |ui| {
+            if let Some(index) = widgets::select(ui, "project-resolution", size, &names) {
+                settings.short_side = cutlass_editor::PROJECT_RESOLUTIONS[index].0;
+            }
+        });
+        let labels: Vec<String> = cutlass_editor::PROJECT_RATES
+            .iter()
+            .map(|rate| cutlass_editor::rate_label(*rate))
+            .collect();
+        let names: Vec<&str> = labels.iter().map(String::as_str).collect();
+        let current = cutlass_editor::rate_label(settings.rate);
+        widgets::form_row(ui, "Frame rate", |ui| {
+            if let Some(index) = widgets::select(ui, "project-rate", &current, &names) {
+                settings.rate = cutlass_editor::PROJECT_RATES[index];
+                settings.drop_frame = cutlass_editor::is_drop_rate(settings.rate);
+            }
+        });
+        let drop = cutlass_editor::is_drop_rate(settings.rate);
+        widgets::form_row(ui, "Drop frame", |ui| {
+            let mut on = settings.drop_frame && drop;
+            if widgets::switch(ui, &mut on, drop).changed() {
+                settings.drop_frame = on;
+            }
+        });
+        widgets::form_hint(
+            ui,
+            if drop {
+                "29.97 drops 2 frame numbers a minute, 59.94 drops 4. Every tenth minute keeps them."
+            } else {
+                "Only 29.97 and 59.94 fps can drop frame numbers."
+            },
+        );
+    });
+    match end {
+        widgets::SheetEnd::Open => {}
+        widgets::SheetEnd::Cancel => view.project_dialog = None,
+        widgets::SheetEnd::Confirm => {
+            if let Some(settings) = view.project_dialog.take() {
+                if let Err(error) = shell.save_project_settings(&settings) {
+                    shell.notice_error(&error);
+                    view.project_dialog = Some(settings);
+                } else {
+                    view.name_buffer.clear();
+                }
+            }
+        }
     }
+}
+
+/// The project's folder and the one holding it: `Projects/Amina & Jules`.
+fn short_folder(path: &std::path::Path) -> String {
+    let mut parts: Vec<_> = path
+        .components()
+        .rev()
+        .take(2)
+        .map(|part| part.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    parts.reverse();
+    parts.join("/")
 }
 
 /// A dim label and its choices on one line.
@@ -12021,7 +12064,17 @@ mod tests {
         ] {
             assert!(text.contains(label), "the dialog has no {label}");
         }
-        for name in ["9:16", "720p", "29.97", "HLG"] {
+        for (row, name) in [
+            ("Ratio", "9:16"),
+            ("Resolution", "720p"),
+            ("Frame rate", "29.97 fps"),
+            ("Color space", "HLG"),
+        ] {
+            let output = frame(&mut shell, &mut view, Vec::new());
+            let picker = last_text_pos(&output, row).expect(row) + Vec2::new(240.0, 0.0);
+            for events in click(picker) {
+                frame(&mut shell, &mut view, events);
+            }
             let output = frame(&mut shell, &mut view, Vec::new());
             let at = last_text_pos(&output, name).expect(name);
             for events in click(at) {
@@ -12689,11 +12742,11 @@ mod tests {
         assert!(painted.contains("Check for updates"), "{painted}");
     }
 
-    /// The stickers shelf and the Licenses window painted by the real
+    /// The stickers shelf, the Licenses window and the project settings painted by the real
     /// renderer, as the window shows them. With `CUTLASS_RENDER_DIR` set
     /// the pictures are kept there to look at.
     #[test]
-    fn the_stickers_shelf_and_the_licenses_window_paint() {
+    fn the_stickers_shelf_licenses_and_project_settings_paint() {
         let temp = std::env::temp_dir().join(format!("cutlass-render-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&temp);
         std::fs::create_dir_all(&temp).unwrap();
@@ -12739,6 +12792,12 @@ mod tests {
         harness.state_mut().1.licenses = Some(cutlass_licenses::notices());
         harness.run_steps(4);
         picture(&mut harness, "licenses");
+        harness.state_mut().1.licenses = None;
+        let settings = harness.state().0.project_settings();
+        assert!(settings.is_some(), "an open project has settings");
+        harness.state_mut().1.project_dialog = settings;
+        harness.run_steps(4);
+        picture(&mut harness, "project-settings");
         drop(harness);
         let _ = std::fs::remove_dir_all(&temp);
     }

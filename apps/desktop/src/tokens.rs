@@ -36,6 +36,12 @@ pub const LANE_LINE: Color32 = Color32::from_rgb(0x2e, 0x2e, 0x2e);
 pub const SELECTED: Color32 = Color32::WHITE;
 /// The dialog title row.
 pub const DIALOG_HEAD: Color32 = Color32::from_rgb(0x32, 0x32, 0x32);
+/// A text box, picker or switch track inside a dialog.
+pub const FIELD: Color32 = Color32::from_rgb(0x1e, 0x1e, 0x1e);
+/// A switch track that is off.
+pub const SWITCH_OFF: Color32 = Color32::from_rgb(0x1a, 0x1a, 0x1a);
+/// A section heading in a dialog.
+pub const SECTION: Color32 = Color32::from_rgb(0x80, 0x80, 0x80);
 /// Close, minimize, and zoom, in that order.
 pub const CLOSE: Color32 = Color32::from_rgb(0xff, 0x5f, 0x57);
 pub const MINIMIZE: Color32 = Color32::from_rgb(0xfe, 0xbc, 0x2e);

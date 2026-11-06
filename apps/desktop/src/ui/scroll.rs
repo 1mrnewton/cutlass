@@ -42,6 +42,7 @@ pub struct Scroll {
     max_height: Option<f32>,
     stick_to_bottom: bool,
     bar: bool,
+    margin: egui::Margin,
 }
 
 impl Scroll {
@@ -63,6 +64,7 @@ impl Scroll {
             max_height: None,
             stick_to_bottom: false,
             bar: true,
+            margin: egui::Margin::ZERO,
         }
     }
 
@@ -83,6 +85,13 @@ impl Scroll {
         self
     }
 
+    /// Pad the content inside the scroll view. The bar stays on the outer
+    /// edge, so a padded panel gives the view its whole rect and pads here.
+    pub fn content_margin(mut self, margin: impl Into<egui::Margin>) -> Self {
+        self.margin = margin.into();
+        self
+    }
+
     /// Scroll without drawing a bar, for a strip like tabs.
     pub fn without_bar(mut self) -> Self {
         self.bar = false;
@@ -99,6 +108,7 @@ impl Scroll {
         .id_salt(self.salt)
         .auto_shrink(self.auto_shrink)
         .stick_to_bottom(self.stick_to_bottom)
+        .content_margin(self.margin)
         .scroll_bar_visibility(scroll_area::ScrollBarVisibility::AlwaysHidden);
         if let Some(height) = self.max_height {
             area = area.max_height(height);
@@ -148,7 +158,7 @@ impl Bar {
         let mut max = view.max;
         min[a] += tokens::SCROLL_INSET;
         max[a] -= tokens::SCROLL_INSET;
-        max[c] -= tokens::SCROLL_INSET;
+        max[c] -= tokens::SCROLL_EDGE;
         min[c] = max[c] - tokens::SCROLL_BAR;
         let track = Rect::from_min_max(min, max);
         let span = track.size()[a];
@@ -291,11 +301,11 @@ mod tests {
         let bar = Bar::place(Axis::Vertical, view(), 400.0, 0.0).unwrap();
         assert_eq!(bar.track.width(), tokens::SCROLL_BAR);
         assert_eq!(bar.thumb.width(), tokens::SCROLL_BAR);
-        assert_eq!(bar.track.right(), 200.0 - tokens::SCROLL_INSET);
+        assert_eq!(bar.track.right(), 200.0 - tokens::SCROLL_EDGE);
 
         let bar = Bar::place(Axis::Horizontal, view(), 800.0, 0.0).unwrap();
         assert_eq!(bar.track.height(), tokens::SCROLL_BAR);
-        assert_eq!(bar.track.bottom(), 100.0 - tokens::SCROLL_INSET);
+        assert_eq!(bar.track.bottom(), 100.0 - tokens::SCROLL_EDGE);
     }
 
     #[test]
@@ -406,7 +416,7 @@ mod tests {
         let rest = thumb_width(&inside, tokens::SCROLL_THUMB).expect("a shown thumb");
         assert_eq!(rest, tokens::SCROLL_BAR);
 
-        let over = Pos2::new(400.0 - tokens::SCROLL_INSET - 2.0, 20.0);
+        let over = Pos2::new(400.0 - tokens::SCROLL_EDGE - 2.0, 20.0);
         let hovered = settle(&ctx, vec![egui::Event::PointerMoved(over)]);
         assert_eq!(
             thumb_width(&hovered, tokens::SCROLL_THUMB_HOVER),
@@ -415,10 +425,43 @@ mod tests {
     }
 
     #[test]
+    fn a_margin_pads_the_content_and_leaves_the_bar_on_the_edge() {
+        let ctx = egui::Context::default();
+        let mut first = Rect::NOTHING;
+        let mut view = Rect::NOTHING;
+        for _ in 0..2 {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(400.0, 300.0))),
+                    ..Default::default()
+                },
+                |ui| {
+                    view = ui.max_rect();
+                    Scroll::vertical("padded")
+                        .auto_shrink([false, false])
+                        .content_margin(16)
+                        .show(ui, |ui| {
+                            for row in 0..100 {
+                                let label = ui.label(format!("row {row}"));
+                                if row == 0 {
+                                    first = label.rect;
+                                }
+                            }
+                        });
+                },
+            );
+            output.textures_delta.clear();
+        }
+        assert_eq!(first.left(), view.left() + 16.0);
+        let bar = Bar::place(Axis::Vertical, view, 2000.0, 0.0).unwrap();
+        assert_eq!(bar.track.right(), view.right() - tokens::SCROLL_EDGE);
+    }
+
+    #[test]
     fn dragging_the_thumb_scrolls() {
         let ctx = egui::Context::default();
         frame(&ctx, vec![]);
-        let x = 400.0 - tokens::SCROLL_INSET - 2.0;
+        let x = 400.0 - tokens::SCROLL_EDGE - 2.0;
         let press = |down, at: Pos2| egui::Event::PointerButton {
             pos: at,
             button: egui::PointerButton::Primary,

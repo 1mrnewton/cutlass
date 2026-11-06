@@ -75,8 +75,11 @@ pub const STROKE: f32 = 1.5;
 
 /// A scroll bar is this wide and stays this wide; hover changes only its color.
 pub const SCROLL_BAR: f32 = 6.0;
-/// The gap between a scroll bar and the edge of its area.
+/// The gap between a scroll bar's ends and the ends of its area.
 pub const SCROLL_INSET: f32 = 2.0;
+/// The gap between a scroll bar and the side of its area: none, so the bar
+/// sits on the panel's edge.
+pub const SCROLL_EDGE: f32 = 0.0;
 /// Seconds a scroll bar takes to fade in or out. Only its opacity changes.
 pub const SCROLL_FADE: f32 = 0.15;
 /// Seconds a scroll bar stays after the content last moved.

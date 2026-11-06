@@ -3851,10 +3851,22 @@ fn ruler_and_lanes(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
         );
     }
     ui.set_clip_rect(clip.intersect(tracks));
-    if laid.peek
-        && let Some(main) = main_index
+    if let Some(main) = main_index
+        && let Some(row) = drawn.get(main).copied()
     {
-        paint_folded_lanes(shell, ui, &rows[main + 1..], laid.lower, lanes_left);
+        // One line across the sheet, the head too, where the lanes above
+        // main end and main's row begins.
+        if main > 0 {
+            ui.painter().hline(
+                tracks.x_range(),
+                row.top() - LANE_GAP / 2.0,
+                egui::Stroke::new(1.0, tokens::LANE_LINE),
+            );
+        }
+        if laid.peek {
+            let y = row.bottom() - tokens::MAIN_CLIP_INSET / 2.0;
+            paint_folded_lanes(shell, ui, &rows[main + 1..], y, lanes_left);
+        }
     }
     paint_new_lane(shell, ui, &boxes, lanes_left);
     ui.set_clip_rect(clip);
@@ -3960,8 +3972,9 @@ struct LaneLayout {
     peek: bool,
 }
 
-/// The strip left under main once it has sunk to the sheet's foot.
-const PEEK: f32 = 20.0;
+/// The strip left under main once it has sunk to the sheet's foot. The
+/// folded lanes' line is drawn in main's own row, under its clip.
+const PEEK: f32 = 4.0;
 
 impl LaneLayout {
     /// The part of each row that shows in its band. A row scrolled out of
@@ -4114,10 +4127,9 @@ fn paint_folded_lanes(
     shell: &Shell,
     ui: &Ui,
     lanes: &[crate::shell::LaneView],
-    strip: Rect,
+    y: f32,
     lanes_left: f32,
 ) {
-    let y = strip.center().y;
     for lane in lanes {
         for clip in &lane.clips {
             let left = lane_x(

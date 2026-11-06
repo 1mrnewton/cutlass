@@ -77,6 +77,10 @@ pub const STROKE: f32 = 1.5;
 pub const SCROLL_BAR: f32 = 6.0;
 /// The gap between a scroll bar and the edge of its area.
 pub const SCROLL_INSET: f32 = 2.0;
+/// Seconds a scroll bar takes to fade in or out. Only its opacity changes.
+pub const SCROLL_FADE: f32 = 0.15;
+/// Seconds a scroll bar stays after the content last moved.
+pub const SCROLL_LINGER: f64 = 0.8;
 /// The shortest a scroll thumb gets on long content.
 pub const SCROLL_MIN_THUMB: f32 = 24.0;
 

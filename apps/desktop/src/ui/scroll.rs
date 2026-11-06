@@ -229,6 +229,33 @@ fn bar(ui: &Ui, key: Id, axis: Axis, view: Rect, content: f32, offset: f32) {
         ui.ctx().request_repaint();
     }
 
+    // At rest the bar is hidden. It fades in while the pointer is over the
+    // area or the content has just moved, and only its opacity changes.
+    let now = ui.input(|input| input.time);
+    let moved_at = ui.data_mut(|data| {
+        let last = data.get_temp::<(f32, f64)>(key.with("moved"));
+        let at = match last {
+            Some((was, at)) if (was - offset).abs() < 0.5 => at,
+            Some(_) => now,
+            None => f64::NEG_INFINITY,
+        };
+        data.insert_temp(key.with("moved"), (offset, at));
+        at
+    });
+    let lingering = now - moved_at < tokens::SCROLL_LINGER;
+    if lingering {
+        ui.ctx()
+            .request_repaint_after_secs((tokens::SCROLL_LINGER - (now - moved_at)) as f32);
+    }
+    let shown =
+        lingering || response.hovered() || response.dragged() || ui.rect_contains_pointer(view);
+    let opacity = ui
+        .ctx()
+        .animate_bool_with_time(key.with("fade"), shown, tokens::SCROLL_FADE);
+    if opacity <= 0.0 {
+        return;
+    }
+
     let color = if response.dragged() {
         tokens::SCROLL_THUMB_DRAG
     } else if response.hovered() {
@@ -237,8 +264,11 @@ fn bar(ui: &Ui, key: Id, axis: Axis, view: Rect, content: f32, offset: f32) {
         tokens::SCROLL_THUMB
     };
     let radius = (tokens::SCROLL_BAR / 2.0) as u8;
-    ui.painter()
-        .rect_filled(bar.thumb, CornerRadius::same(radius), color);
+    ui.painter().rect_filled(
+        bar.thumb,
+        CornerRadius::same(radius),
+        color.gamma_multiply(opacity),
+    );
 }
 
 #[cfg(test)]
@@ -326,16 +356,58 @@ mod tests {
             })
     }
 
+    /// Frames enough for a fade to finish.
+    fn settle(ctx: &egui::Context, events: Vec<egui::Event>) -> egui::FullOutput {
+        frame(ctx, events);
+        let mut last = frame(ctx, vec![]);
+        for _ in 0..30 {
+            last = frame(ctx, vec![]);
+        }
+        last
+    }
+
+    fn any_thumb(output: &egui::FullOutput) -> bool {
+        output.shapes.iter().any(|clipped| match &clipped.shape {
+            egui::Shape::Rect(rect) => [
+                tokens::SCROLL_THUMB,
+                tokens::SCROLL_THUMB_HOVER,
+                tokens::SCROLL_THUMB_DRAG,
+            ]
+            .iter()
+            .any(|thumb| thumb.to_opaque() == rect.fill.to_opaque() && rect.fill.a() > 0),
+            _ => false,
+        })
+    }
+
+    #[test]
+    fn the_bar_hides_at_rest_and_shows_over_the_area() {
+        let ctx = egui::Context::default();
+        let rest = settle(&ctx, vec![]);
+        assert!(!any_thumb(&rest), "no bar while nothing happens");
+
+        let inside = Pos2::new(100.0, 100.0);
+        let over_area = settle(&ctx, vec![egui::Event::PointerMoved(inside)]);
+        assert_eq!(
+            thumb_width(&over_area, tokens::SCROLL_THUMB),
+            Some(tokens::SCROLL_BAR)
+        );
+
+        let gone = settle(&ctx, vec![egui::Event::PointerGone]);
+        assert!(!any_thumb(&gone), "the bar fades once the pointer leaves");
+    }
+
     #[test]
     fn hover_changes_the_color_not_the_width() {
         let ctx = egui::Context::default();
-        let rest = frame(&ctx, vec![]);
-        let width = thumb_width(&rest, tokens::SCROLL_THUMB).expect("a thumb at rest");
-        assert_eq!(width, tokens::SCROLL_BAR);
+        let inside = settle(
+            &ctx,
+            vec![egui::Event::PointerMoved(Pos2::new(100.0, 100.0))],
+        );
+        let rest = thumb_width(&inside, tokens::SCROLL_THUMB).expect("a shown thumb");
+        assert_eq!(rest, tokens::SCROLL_BAR);
 
         let over = Pos2::new(400.0 - tokens::SCROLL_INSET - 2.0, 20.0);
-        frame(&ctx, vec![egui::Event::PointerMoved(over)]);
-        let hovered = frame(&ctx, vec![]);
+        let hovered = settle(&ctx, vec![egui::Event::PointerMoved(over)]);
         assert_eq!(
             thumb_width(&hovered, tokens::SCROLL_THUMB_HOVER),
             Some(tokens::SCROLL_BAR)

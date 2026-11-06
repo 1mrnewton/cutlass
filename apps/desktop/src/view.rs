@@ -4984,7 +4984,8 @@ fn paint_lane(
         .filter(|preview| preview.track_id == lane.track_id)
         .collect();
     for clip in &lane.clips {
-        paint_clip(shell, ui, lane, clip, lanes_left, index, boxes);
+        let at = RowAt { index, row, boxes };
+        paint_clip(shell, ui, lane, clip, lanes_left, at);
     }
     // A right-click on the row but off its clips may be over a gap.
     if let Some(pos) = secondary_click(ui)
@@ -5664,19 +5665,26 @@ fn paint_speed_curve(ui: &Ui, area: Rect, visible: Rect, curve: &[(f64, f64)]) {
     ));
 }
 
+/// A clip's lane: its index, its whole row (part of it may be scrolled out
+/// of its band), and the part of every row that shows, which a body drag
+/// reads for the row under the pointer.
+#[derive(Clone, Copy)]
+struct RowAt<'a> {
+    index: usize,
+    row: Rect,
+    boxes: &'a [Rect],
+}
+
 fn paint_clip(
     shell: &mut Shell,
     ui: &mut Ui,
     lane: &crate::shell::LaneView,
     clip: &crate::shell::ClipSpan,
     lanes_left: f32,
-    index: usize,
-    boxes: &[Rect],
+    at: RowAt<'_>,
 ) {
-    // `boxes[index]` is this clip's own row. A body drag reads the row under the pointer.
-    let Some(row) = boxes.get(index).copied() else {
-        return;
-    };
+    // The whole row, so a clip keeps its height while its row is part hidden.
+    let RowAt { index, row, boxes } = at;
     let (start, duration) = preview_bounds(shell, clip);
     let clip_rect = clip_bounds(
         shell,
@@ -11137,6 +11145,67 @@ mod tests {
         kinds.push((true, 90.0));
         kinds.extend(std::iter::repeat_n((false, 58.0), audio));
         kinds
+    }
+
+    #[test]
+    fn a_lane_part_scrolled_out_keeps_its_clips_at_full_height() {
+        let temp = std::env::temp_dir().join(format!("cutlass-crowded-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let mut draft = cutlass_model::Draft::empty("draft");
+        draft.canvas_config.width = 2;
+        draft.canvas_config.height = 1;
+        draft.tracks[0].segments.push(cutlass_model::Segment::new(
+            "low",
+            "color",
+            cutlass_model::TimeRange::new(0, 2_000_000),
+        ));
+        for index in 0..14 {
+            let mut track = cutlass_model::Track::main(format!("words-{index}"));
+            track.kind = cutlass_model::TrackType::Text;
+            track.flag = cutlass_model::TrackFlag::None;
+            track.segments.push(cutlass_model::Segment::new(
+                format!("line-{index}"),
+                "text",
+                cutlass_model::TimeRange::new(0, 1_000_000),
+            ));
+            draft.tracks.insert(0, track);
+        }
+        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let words = lane_color(&cutlass_model::TrackType::Text);
+        let mut heights = |view: &mut ViewState| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: screen,
+                    ..Default::default()
+                },
+                |ui| show(&mut shell, ui, view, None),
+            );
+            output.textures_delta.clear();
+            output
+                .shapes
+                .iter()
+                .filter_map(|clipped| match &clipped.shape {
+                    egui::Shape::Rect(rect) if rect.fill == words => Some(rect.rect.height()),
+                    _ => None,
+                })
+                .collect::<Vec<f32>>()
+        };
+        assert!(!heights(&mut view).is_empty());
+        // Part of the lane next to main slides under main.
+        view.lanes_up = 20.0;
+        let scrolled = heights(&mut view);
+        assert!(!scrolled.is_empty());
+        assert!(
+            scrolled.iter().all(|height| *height == tokens::CLIP_HEIGHT),
+            "{scrolled:?}"
+        );
+        let _ = std::fs::remove_dir_all(&temp);
     }
 
     #[test]

@@ -7810,6 +7810,63 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "runs the selection model on a real movie; slow in a debug build"]
+    fn a_click_on_a_real_movie_cuts_the_clip_down_to_the_object() {
+        let movie = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../local-files/16929689_1920_1080_30fps.mp4");
+        if !movie.is_file() || !super::select::vision_model_here() {
+            eprintln!("skipped: the movie or the selection model is missing");
+            return;
+        }
+        let temp = Temp::new();
+        let mut draft = crate::open_movie::movie_draft(&movie, 1920, 1080, false).unwrap();
+        draft.tracks[0].segments[0].target = TimeRange::new(0, 5_000_000);
+        draft.tracks[0].segments[0].source_range = Some(TimeRange::new(0, 5_000_000));
+        draft.materials.videos[0].duration = Micros(5_000_000);
+        draft.duration = Micros(5_000_000);
+        let id = draft.tracks[0].segments[0].id.clone();
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.select(Some(id.clone()));
+        desktop.seek(Micros(1_000_000));
+        assert!(desktop.pick_enabled(), "{:?}", desktop.start_picking());
+        desktop.start_picking().unwrap();
+        let started = std::time::Instant::now();
+        desktop.pick_at(960.0, 540.0, true).unwrap();
+        let until = started + std::time::Duration::from_secs(300);
+        while desktop.poll_job() && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        eprintln!("first click: {:.1}s", started.elapsed().as_secs_f64());
+        eprintln!("notice: {:?}", desktop.notice());
+        let draft = desktop.draft().unwrap();
+        let (segment, _) = super::placed(draft, &id).unwrap();
+        let selection = cutlass_effects::segment_selection(draft, segment).expect("a selection");
+        let alpha = selection.alpha().unwrap();
+        let kept = alpha.iter().filter(|&&a| a > 127).count();
+        eprintln!(
+            "kept {kept} of {} mask pixels ({}x{})",
+            alpha.len(),
+            selection.width,
+            selection.height
+        );
+        assert!(kept > 0 && kept < alpha.len());
+        assert_eq!(desktop.picking().map(|p| p.clicks.len()), Some(1));
+
+        // A second click reuses the frame the model read.
+        let again = std::time::Instant::now();
+        desktop.pick_at(200.0, 200.0, false).unwrap();
+        while desktop.poll_job() && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        eprintln!("second click: {:.1}s", again.elapsed().as_secs_f64());
+        assert_eq!(desktop.picking().map(|p| p.clicks.len()), Some(2));
+        desktop.stop_picking();
+        assert!(desktop.picking().is_none());
+    }
+
+    #[test]
     fn a_far_jump_shows_the_last_picture_until_the_asked_one_decodes() {
         let movie = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../../local-files/12471039-uhd_3840_2160_24fps.mp4");

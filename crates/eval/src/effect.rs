@@ -216,7 +216,10 @@ fn push_visual<'a, D: Device>(
             None => input,
         };
         let input = match mask.as_ref() {
-            Some(mask) => masked(mask, draft, segment, input, time),
+            Some(mask) => {
+                let keyed = mask.at(segment, &draft.keyframe_graph_list, time);
+                masked(&keyed, draft, segment, input, time)
+            }
             None => input,
         };
         Some(match selection.as_ref() {

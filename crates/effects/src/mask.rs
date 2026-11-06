@@ -12,7 +12,7 @@
 //! where the clip's colour work (adjust, curves, wheels, HSL, LUT) shows,
 //! and on an adjustment layer where on the canvas the layer acts.
 
-use cutlass_model::{Draft, MaterialRef, Segment};
+use cutlass_model::{Draft, KeyframeGraph, MASK_KEYS, MaterialRef, Micros, Segment, sample};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
@@ -171,6 +171,43 @@ impl Mask {
             }
         };
         if self.invert { 1.0 - keep } else { keep }
+    }
+
+    /// This mask as `segment`'s mask keys move it at timeline `time`: each
+    /// keyed number takes its key's value there, and the shape and invert
+    /// stay. A key that does not read leaves its number as set.
+    #[must_use]
+    pub fn at(&self, segment: &Segment, graphs: &[KeyframeGraph], time: Micros) -> Self {
+        let groups = &segment.common_keyframes;
+        if !groups
+            .iter()
+            .any(|group| MASK_KEYS.contains(&group.property_type.as_str()))
+        {
+            return *self;
+        }
+        let offset = time.0.saturating_sub(segment.target.start.0);
+        let mut mask = *self;
+        let fields = [
+            &mut mask.x,
+            &mut mask.y,
+            &mut mask.width,
+            &mut mask.height,
+            &mut mask.rotation,
+            &mut mask.feather,
+            &mut mask.round,
+        ];
+        for (name, field) in MASK_KEYS.iter().zip(fields) {
+            if let Some(Some(value)) = sample(groups, graphs, &[name], offset) {
+                #[allow(clippy::cast_possible_truncation)]
+                let value = value as f32;
+                *field = value;
+            }
+        }
+        mask.feather = mask.feather.clamp(0.0, 1.0);
+        mask.round = mask.round.clamp(0.0, 1.0);
+        mask.width = mask.width.max(0.0);
+        mask.height = mask.height.max(0.0);
+        mask
     }
 
     /// The mask as the record's fields.

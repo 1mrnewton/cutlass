@@ -1063,6 +1063,50 @@ mod tests {
     }
 
     #[test]
+    fn a_keyed_mask_moves_from_key_to_key() {
+        let mut draft = color_clip("0xFFFF0000", false);
+        draft.canvas_config.width = 8;
+        draft.canvas_config.height = 8;
+        draft.canvas_config.background = Some("#808080".to_owned());
+        let duration = draft.tracks[0].segments[0].target.duration.0;
+        let mut session = cutlass_session::Session::open(draft);
+        let x = cutlass_model::MASK_KEYS[0];
+        let small = cutlass_effects::Mask {
+            width: 0.2,
+            height: 0.2,
+            ..cutlass_effects::Mask::new(cutlass_effects::MaskShape::Rectangle)
+        };
+        let key = |offset: i64, value: f64| cutlass_session::Request::KeyValues {
+            segment_id: cutlass_model::SegmentId::new("segment"),
+            offset: cutlass_model::Micros(offset),
+            values: vec![(x.to_owned(), value)],
+        };
+        session
+            .apply(
+                0,
+                &[
+                    cutlass_session::Request::SetMask {
+                        segment_id: cutlass_model::SegmentId::new("segment"),
+                        material_id: "mask".into(),
+                        mask: Some(small),
+                    },
+                    key(0, -0.5),
+                    key(duration, 0.5),
+                ],
+            )
+            .unwrap();
+        let red = |frame: &[u8], x: usize| frame[(4 * 8 + x) * 4] == 255;
+        // A small square a quarter of the canvas left at the start, in the
+        // middle half way, a quarter right at the end.
+        let start = pixels(session.draft(), 0);
+        assert!(red(&start, 2) && !red(&start, 4) && !red(&start, 6));
+        let middle = pixels(session.draft(), duration / 2);
+        assert!(!red(&middle, 2) && red(&middle, 4) && !red(&middle, 6));
+        let end = pixels(session.draft(), duration - 1);
+        assert!(!red(&end, 2) && !red(&end, 4) && red(&end, 6));
+    }
+
+    #[test]
     fn a_selected_clip_keeps_the_object_and_shows_the_canvas_around_it() {
         let mut draft = color_clip("0xFFFF0000", false);
         draft.canvas_config.width = 8;

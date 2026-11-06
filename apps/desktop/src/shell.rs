@@ -48,6 +48,7 @@ use cutlass_transcription::{
 
 mod assistant;
 mod compound;
+mod follow;
 mod hear;
 mod inspector;
 mod listen;
@@ -7810,6 +7811,89 @@ mod tests {
             worst.as_secs_f64() * 1000.0,
         );
         assert_eq!(stale, 0, "{stale} of {paints} paints showed a late picture");
+    }
+
+    #[test]
+    #[ignore = "decodes seconds of a real movie; slow in a debug build"]
+    fn a_sticker_follows_a_tracked_shirt_on_a_real_movie() {
+        let movie = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../local-files/16929689_1920_1080_30fps.mp4");
+        if !movie.is_file() {
+            eprintln!("skipped: the movie is missing");
+            return;
+        }
+        let temp = Temp::new();
+        let mut draft = crate::open_movie::movie_draft(&movie, 1920, 1080, false).unwrap();
+        draft.tracks[0].segments[0].target = TimeRange::new(0, 4_000_000);
+        draft.tracks[0].segments[0].source_range = Some(TimeRange::new(0, 4_000_000));
+        draft.materials.videos[0].duration = Micros(4_000_000);
+        draft.duration = Micros(4_000_000);
+        let id = draft.tracks[0].segments[0].id.clone();
+        let material = draft.tracks[0].segments[0].material_id.clone();
+        // A clip on a sticker row stands in for the sticker: above the
+        // shirt, a quarter of its size.
+        let mut sticker = Segment::new("follower", material.as_str(), TimeRange::new(0, 4_000_000));
+        sticker.clip.transform.y = 0.3;
+        sticker.uniform_scale.value = 0.25;
+        let mut lane = Track::main("stickers");
+        lane.kind = TrackType::Sticker;
+        lane.segments.push(sticker);
+        draft.tracks.push(lane);
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.select(Some(id.clone()));
+        desktop.seek(Micros(1_000_000));
+        // The shirt at one second, in pixels, then in the clip's own frame.
+        let (x0, y0, x1, y1) = (915.0, 435.0, 1080.0, 600.0);
+        let unit = |x: f64, y: f64| (2.0 * x / 1920.0 - 1.0, 1.0 - 2.0 * y / 1080.0);
+        let corners = [unit(x0, y0), unit(x1, y0), unit(x1, y1), unit(x0, y1)];
+        let started = std::time::Instant::now();
+        desktop
+            .track_object(
+                corners,
+                cutlass_model::TrackMode::Object,
+                vec!["follower".into()],
+            )
+            .unwrap();
+        let until = started + std::time::Duration::from_secs(600);
+        while desktop.poll_job() && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        eprintln!(
+            "tracked in {:.1}s; notice {:?}",
+            started.elapsed().as_secs_f64(),
+            desktop.notice()
+        );
+        let draft = desktop.draft().unwrap();
+        let record = &draft.materials.video_trackings[0];
+        let samples = record.fields["path"].as_array().map_or(0, Vec::len);
+        let follower = &draft.tracks[1].segments[0];
+        let keys = cutlass_model::key_offsets(follower);
+        eprintln!("{samples} frames tracked, {} keys", keys.len());
+        assert!(samples > 60, "{samples} frames");
+        assert!(keys.len() >= 2 && keys.len() < samples / 2);
+        let pose = |t: i64| {
+            let (clip, uniform) =
+                cutlass_model::clip_at(follower, &draft.keyframe_graph_list, Micros(t)).unwrap();
+            (clip.transform.x, clip.transform.y, uniform.value)
+        };
+        let (start, later) = (pose(1_000_000), pose(3_900_000));
+        eprintln!("at 1s {start:?}, at 3.9s {later:?}");
+        // The man walks away: the shirt shrinks, so the follower does too
+        // and moves toward the shirt.
+        assert!((start.2 - 0.25).abs() < 0.01);
+        assert!(later.2 < start.2 * 0.9, "{later:?}");
+        assert!(later.1 < start.1, "{later:?}");
+        desktop.undo().unwrap();
+        assert!(
+            desktop
+                .draft()
+                .unwrap()
+                .materials
+                .video_trackings
+                .is_empty()
+        );
     }
 
     #[test]

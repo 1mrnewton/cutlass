@@ -33,8 +33,8 @@ pub const BEHIND_BYTES: usize = 384 << 20;
 const TOUCHING: i64 = 1_000;
 /// How often a waiting caller checks that the worker is still running.
 const CHECK: Duration = Duration::from_millis(100);
-/// How often a long decode stores a picture on its way, so a caller that
-/// does not wait sees it move.
+/// How often a decode that follows a drag stores a picture on its way, so a
+/// caller that does not wait sees it move.
 const PUBLISH: Duration = Duration::from_millis(50);
 
 /// One clip's decode thread and the pictures it has ready.
@@ -361,9 +361,12 @@ fn run(shared: &Shared, mut media: Media, cover: &TimeRange, ahead: usize) {
 /// Decode toward `target`, following the newest asked time while it is still
 /// ahead, so dragging the playhead never waits on a time it has left.
 ///
-/// A time behind the decode stops it; the next job seeks for it. On a long
-/// decode a picture is stored every [`PUBLISH`], so the caller can show
-/// progress toward the asked time instead of holding one picture.
+/// A time behind the decode stops it; the next job seeks for it. Once the
+/// asked time has moved during the decode, as it does under a drag, a
+/// picture is stored every [`PUBLISH`], so the caller can show progress
+/// toward the asked time instead of holding one picture. A single jump
+/// stores nothing on the way: the caller keeps the picture it had until the
+/// asked one is ready, instead of showing every picture between them.
 fn answer(
     shared: &Shared,
     media: &mut Media,
@@ -372,6 +375,7 @@ fn answer(
     target: &mut Micros,
 ) -> Result<HeldFrame, EngineError> {
     let mut published = Instant::now();
+    let mut followed = false;
     let start = *target;
     media.decode_steered(start, cover, &mut |held| {
         let mut state = lock(&shared.state);
@@ -379,7 +383,7 @@ fn answer(
             return Steer::Stop;
         }
         // Moving back, every picture on the way is one a later step wants.
-        if state.backward || published.elapsed() >= PUBLISH {
+        if state.backward || (followed && published.elapsed() >= PUBLISH) {
             published = Instant::now();
             store(&mut state, held.clone(), ahead);
             shared.wake.notify_all();
@@ -388,6 +392,7 @@ fn answer(
             Some(want) if want == *target => Steer::Go,
             Some(want) => {
                 *target = want;
+                followed = true;
                 Steer::Retarget(want)
             }
             None => Steer::Go,

@@ -7890,6 +7890,59 @@ mod tests {
         assert!((start.2 - 0.25).abs() < 0.01);
         assert!(later.2 < start.2 * 0.9, "{later:?}");
         assert!(later.1 < start.1, "{later:?}");
+
+        // Fix the frame at 2.5 s with the box tracked there: the path is
+        // redone after it, kept before it, and the follower keeps its pose
+        // at the anchor.
+        let old_path = record.fields["path"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        desktop.select(Some(id.clone()));
+        desktop.seek(Micros(2_500_000));
+        desktop.start_fixing().unwrap();
+        let fixing = desktop.tracking().unwrap().clone();
+        let ((a, b), (c, d)) = fixing.canvas_box.unwrap();
+        desktop.set_track_box((a, b), (c, d)).unwrap();
+        let started = std::time::Instant::now();
+        desktop.run_tracking().unwrap();
+        let until = started + std::time::Duration::from_secs(600);
+        while desktop.poll_job() && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        eprintln!(
+            "fixed in {:.1}s; notice {:?}",
+            started.elapsed().as_secs_f64(),
+            desktop.notice()
+        );
+        let draft = desktop.draft().unwrap();
+        assert_eq!(
+            draft.materials.video_trackings.len(),
+            1,
+            "the old record goes"
+        );
+        let record = &draft.materials.video_trackings[0];
+        assert_eq!(record.fields["anchor"].as_i64(), Some(1_000_000));
+        let new_path = record.fields["path"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let before = |rows: &[serde_json::Value]| {
+            rows.iter()
+                .filter(|row| row[0].as_i64().is_some_and(|t| t < 2_500_000))
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(before(&new_path), before(&old_path));
+        assert!(new_path.len() > 60, "{} frames", new_path.len());
+        let follower = &draft.tracks[1].segments[0];
+        let (clip, uniform) =
+            cutlass_model::clip_at(follower, &draft.keyframe_graph_list, Micros(1_000_000))
+                .unwrap();
+        assert!((clip.transform.x - start.0).abs() < 1e-9);
+        assert!((clip.transform.y - start.1).abs() < 1e-9);
+        assert!((uniform.value - start.2).abs() < 1e-9);
+        desktop.undo().unwrap();
         desktop.undo().unwrap();
         assert!(
             desktop

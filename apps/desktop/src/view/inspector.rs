@@ -1084,9 +1084,22 @@ fn tracking(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState) {
                     state.open.insert("tracking".to_owned());
                     send(shell, Shell::start_tracking);
                 }
+                if shell.fix_enabled()
+                    && ui
+                        .button(RichText::new("Fix frame").size(12.0))
+                        .on_hover_text(
+                            "Redraw the box on a frame where the track went wrong, \
+                             and track again from there.",
+                        )
+                        .clicked()
+                {
+                    state.open.insert("tracking".to_owned());
+                    send(shell, Shell::start_fixing);
+                }
             });
             return;
         };
+        let fixing = tracking.fixing.is_some();
         ui.horizontal(|ui| {
             row_label(ui, "Follow");
             for (name, mode) in [
@@ -1105,7 +1118,10 @@ fn tracking(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState) {
         });
         note(
             ui,
-            if tracking.canvas_box.is_some() {
+            if fixing {
+                "Drag on the preview to redraw the box on this frame. The track is \
+                 redone from here, away from where it was first drawn."
+            } else if tracking.canvas_box.is_some() {
                 "Drag on the preview again to redraw the box."
             } else {
                 "Drag on the preview to draw a box around what to follow."
@@ -1140,7 +1156,9 @@ fn tracking(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState) {
             if ui
                 .add_enabled(
                     shell.track_ready(),
-                    egui::Button::new(RichText::new("Track").size(12.0)),
+                    egui::Button::new(
+                        RichText::new(if fixing { "Track from here" } else { "Track" }).size(12.0),
+                    ),
                 )
                 .on_disabled_hover_text("Draw a box and choose a clip to follow it.")
                 .clicked()

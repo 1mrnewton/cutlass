@@ -1,11 +1,13 @@
 //! Tracking on the selected clip: draw a box on the preview, choose what
 //! follows it, follow the box through the clip as a job, then make the
-//! followers follow it in one undo step.
+//! followers follow it in one undo step. A tracked frame is fixed by
+//! drawing the box again on it: the clip is tracked away from the track's
+//! anchor from there, and the new path replaces the old one on that side.
 
 use cutlass_eval::{TrackAsk, TrackError, TrackSpan, track_clip};
 use cutlass_model::{
-    Draft, MaterialId, MaterialRef, Micros, SegmentId, TrackAttribute, TrackMode, TrackType,
-    VIDEO_TRACKING,
+    Draft, MaterialId, MaterialRef, Micros, RawMaterial, SegmentId, TrackAttribute, TrackMode,
+    TrackPath, TrackSample, TrackType, VIDEO_TRACKING,
 };
 use cutlass_session::Request;
 
@@ -25,6 +27,15 @@ pub struct Tracking {
     /// The box's top left and bottom right in canvas pixels.
     pub canvas_box: Option<((f64, f64), (f64, f64))>,
     pub followers: Vec<SegmentId>,
+    /// The track being fixed, when this one fixes a frame of it.
+    pub fixing: Option<Fixing>,
+}
+
+/// A track a new box fixes: its anchor and its path in canvas units.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Fixing {
+    pub anchor: Micros,
+    pub path: TrackPath,
 }
 
 /// A clip that can follow the target, and its name.
@@ -77,8 +88,76 @@ impl Shell {
             mode: TrackMode::Object,
             canvas_box: None,
             followers: Vec::new(),
+            fixing: None,
         });
         Ok(())
+    }
+
+    /// Whether the selected clip's track can be fixed at the playhead: it
+    /// was tracked, and the playhead is on the clip.
+    pub fn fix_enabled(&self) -> bool {
+        self.fix_setup().is_ok()
+    }
+
+    /// Start fixing the selected clip's track at the playhead: the mode
+    /// and the followers are the track's, and the box is the tracked one
+    /// at the playhead, ready to be drawn again.
+    pub fn start_fixing(&mut self) -> Result<(), ShellError> {
+        let tracking = self.fix_setup()?;
+        self.picking = None;
+        self.tracking = Some(tracking);
+        Ok(())
+    }
+
+    /// The selected clip's track, set up to be fixed at the playhead.
+    fn fix_setup(&self) -> Result<Tracking, ShellError> {
+        let unavailable = || ShellError::Unavailable("the clip has no track to fix".to_owned());
+        let segment_id = self.track_target()?;
+        let draft = self.session_draft()?;
+        let record = draft
+            .materials
+            .video_trackings
+            .iter()
+            .find(|raw| {
+                raw.kind == VIDEO_TRACKING
+                    && raw.fields.get("segment_id").and_then(|v| v.as_str())
+                        == Some(segment_id.as_str())
+            })
+            .ok_or_else(unavailable)?;
+        let path = record_path(record).ok_or_else(unavailable)?;
+        let anchor = record
+            .fields
+            .get("anchor")
+            .and_then(|v| v.as_i64())
+            .map_or_else(
+                || path.samples.first().map_or(Micros(0), |s| s.time),
+                Micros,
+            );
+        let followers = draft
+            .tracks
+            .iter()
+            .flat_map(|track| &track.segments)
+            .filter(|segment| segment.extra_material_refs.contains(&record.id))
+            .map(|segment| segment.id.clone())
+            .collect();
+        let time = self.playhead();
+        let canvas = canvas_size(draft);
+        let canvas_box = pixels(&path, canvas).at(time).map(|corners| {
+            let (mut low, mut high) = (corners[0], corners[0]);
+            for (x, y) in corners {
+                low = (low.0.min(x), low.1.min(y));
+                high = (high.0.max(x), high.1.max(y));
+            }
+            (low, high)
+        });
+        Ok(Tracking {
+            segment_id,
+            time,
+            mode: path.mode,
+            canvas_box,
+            followers,
+            fixing: Some(Fixing { anchor, path }),
+        })
     }
 
     pub fn stop_tracking(&mut self) {
@@ -192,13 +271,26 @@ impl Shell {
                 "draw the box on the clip".to_owned(),
             ));
         }
-        self.track_object(
-            tracking.segment_id,
-            tracking.time,
-            corners,
-            tracking.mode,
-            tracking.followers,
-        )?;
+        let fps = draft.fps;
+        let target = tracking.segment_id;
+        let followers = tracking.followers;
+        match tracking.fixing {
+            None => self.track_object(target, tracking.time, corners, tracking.mode, followers)?,
+            Some(fixing) => {
+                let span = fix_span(tracking.time, fixing.anchor, fps);
+                self.track_job(
+                    TrackAsk {
+                        segment_id: target,
+                        at: tracking.time,
+                        corners,
+                        mode: tracking.mode,
+                        span,
+                    },
+                    followers,
+                    Some(fixing),
+                )?;
+            }
+        }
         self.tracking = None;
         Ok(())
     }
@@ -214,28 +306,8 @@ impl Shell {
                 && (raw.fields.get("segment_id").and_then(|v| v.as_str()) == Some(id.as_str())
                     || segment.extra_material_refs.contains(&raw.id))
         })?;
-        let (w, h) = (
-            f64::from(draft.canvas_config.width.max(1)),
-            f64::from(draft.canvas_config.height.max(1)),
-        );
-        let frames = record
-            .fields
-            .get("path")?
-            .as_array()?
-            .iter()
-            .filter_map(|row| {
-                let row = row.as_array()?;
-                let time = Micros(row.first()?.as_i64()?);
-                let mut corners = [(0.0, 0.0); 4];
-                for (i, corner) in corners.iter_mut().enumerate() {
-                    let x = row.get(1 + 2 * i)?.as_f64()?;
-                    let y = row.get(2 + 2 * i)?.as_f64()?;
-                    *corner = ((x + 1.0) / 2.0 * w, (1.0 - y) / 2.0 * h);
-                }
-                Some((time, corners))
-            })
-            .collect::<Vec<_>>();
-        (!frames.is_empty()).then_some(TrackedPath { frames })
+        let path = record_path(record)?;
+        Some(pixels(&path, canvas_size(draft)))
     }
 
     /// Track `corners`, a box in `target`'s own frame (-1 to 1, y up) at
@@ -251,6 +323,25 @@ impl Shell {
         mode: TrackMode,
         followers: Vec<SegmentId>,
     ) -> Result<(), ShellError> {
+        let ask = TrackAsk {
+            segment_id: target,
+            at,
+            corners,
+            mode,
+            span: TrackSpan::Both,
+        };
+        self.track_job(ask, followers, None)
+    }
+
+    /// Run `ask` as a job and land it as one `Track` request; when it
+    /// fixes a track, join the new path to the old one first.
+    fn track_job(
+        &mut self,
+        ask: TrackAsk,
+        followers: Vec<SegmentId>,
+        fixing: Option<Fixing>,
+    ) -> Result<(), ShellError> {
+        let target = ask.segment_id.clone();
         if followers.is_empty() {
             return Err(ShellError::Unavailable(
                 "choose a clip to follow the target".to_owned(),
@@ -266,13 +357,6 @@ impl Shell {
         let readers = self.readers.clone();
         let root = self.path.clone();
         let tracking_id = MaterialId::new(self.fresh("tracking"));
-        let ask = TrackAsk {
-            segment_id: target.clone(),
-            at,
-            corners,
-            mode,
-            span: TrackSpan::Both,
-        };
         self.start_job("Track", move |progress| {
             progress.stage("Tracking");
             let path = track_clip(&readers, &draft, root.as_deref(), &ask, &mut |done| {
@@ -290,11 +374,17 @@ impl Shell {
                         "the project changed while the clip was tracked".to_owned(),
                     ));
                 }
+                let (anchor, path) = match fixing {
+                    Some(fixing) if ask.span != TrackSpan::Both => {
+                        (fixing.anchor, joined(&fixing.path, path, ask.at, ask.span))
+                    }
+                    _ => (ask.at, path),
+                };
                 shell.apply(Request::Track {
                     target,
                     followers,
                     tracking_id,
-                    anchor: ask.at,
+                    anchor,
                     path,
                 })
             });
@@ -330,6 +420,93 @@ impl Shell {
         }
         Ok(segment_id)
     }
+}
+
+/// Which way to track a fix at `time` of a track anchored at `anchor`:
+/// away from the anchor, or both ways on the anchor's own frame.
+fn fix_span(time: Micros, anchor: Micros, fps: f64) -> TrackSpan {
+    let fps = if fps.is_finite() && fps >= 1.0 {
+        fps
+    } else {
+        30.0
+    };
+    let half_frame = (500_000.0 / fps).round() as i64;
+    if time.0.abs_diff(anchor.0) as i64 <= half_frame {
+        TrackSpan::Both
+    } else if time.0 > anchor.0 {
+        TrackSpan::After
+    } else {
+        TrackSpan::Before
+    }
+}
+
+/// `old` with `new` in place of its samples on `span`'s side of `at`, the
+/// fixed frame. `new` runs from `at` that way.
+fn joined(old: &TrackPath, new: TrackPath, at: Micros, span: TrackSpan) -> TrackPath {
+    let keep = |sample: &&TrackSample| match span {
+        TrackSpan::After => sample.time.0 < at.0,
+        TrackSpan::Before => sample.time.0 > at.0,
+        TrackSpan::Both => false,
+    };
+    let kept = old.samples.iter().filter(keep).copied();
+    let samples = match span {
+        TrackSpan::Before => new.samples.into_iter().chain(kept).collect(),
+        TrackSpan::After | TrackSpan::Both => kept.chain(new.samples).collect(),
+    };
+    TrackPath {
+        mode: new.mode,
+        samples,
+    }
+}
+
+/// A `video_tracking` record's path, in canvas units.
+fn record_path(record: &RawMaterial) -> Option<TrackPath> {
+    let mode = match record.fields.get("tracker_type").and_then(|v| v.as_i64()) {
+        Some(1) => TrackMode::Plane,
+        _ => TrackMode::Object,
+    };
+    let samples = record
+        .fields
+        .get("path")?
+        .as_array()?
+        .iter()
+        .filter_map(|row| {
+            let row = row.as_array()?;
+            let time = Micros(row.first()?.as_i64()?);
+            let mut corners = [(0.0, 0.0); 4];
+            for (i, corner) in corners.iter_mut().enumerate() {
+                *corner = (row.get(1 + 2 * i)?.as_f64()?, row.get(2 + 2 * i)?.as_f64()?);
+            }
+            Some(TrackSample { time, corners })
+        })
+        .collect::<Vec<_>>();
+    (!samples.is_empty()).then_some(TrackPath { mode, samples })
+}
+
+/// `path` in canvas pixels on a `canvas`-sized canvas.
+fn pixels(path: &TrackPath, canvas: (f64, f64)) -> TrackedPath {
+    let (w, h) = canvas;
+    TrackedPath {
+        frames: path
+            .samples
+            .iter()
+            .map(|sample| {
+                (
+                    sample.time,
+                    sample
+                        .corners
+                        .map(|(x, y)| ((x + 1.0) / 2.0 * w, (1.0 - y) / 2.0 * h)),
+                )
+            })
+            .collect(),
+    }
+}
+
+fn canvas_size(draft: &Draft) -> (f64, f64) {
+    (
+        f64::from(draft.canvas_config.width.max(1)),
+        f64::from(draft.canvas_config.height.max(1)),
+    )
 }
 
 /// The clips in `draft` that can follow `target`.

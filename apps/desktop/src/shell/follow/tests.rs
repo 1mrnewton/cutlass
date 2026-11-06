@@ -129,3 +129,109 @@ fn a_tracked_path_is_read_back_in_canvas_pixels_for_both_clips() {
     assert!(shell.tracked_path().is_none());
     let _ = std::fs::remove_dir_all(&temp);
 }
+
+fn sample(time: i64, x: f64) -> TrackSample {
+    TrackSample {
+        time: Micros(time),
+        corners: [(x, 0.0), (x + 0.1, 0.0), (x + 0.1, -0.1), (x, -0.1)],
+    }
+}
+
+#[test]
+fn a_fix_tracks_away_from_the_anchor_and_both_ways_on_it() {
+    let anchor = Micros(1_000_000);
+    assert_eq!(fix_span(Micros(1_500_000), anchor, 30.0), TrackSpan::After);
+    assert_eq!(fix_span(Micros(400_000), anchor, 30.0), TrackSpan::Before);
+    assert_eq!(fix_span(Micros(1_010_000), anchor, 30.0), TrackSpan::Both);
+    assert_eq!(fix_span(Micros(990_000), anchor, f64::NAN), TrackSpan::Both);
+}
+
+#[test]
+fn a_fixed_path_keeps_the_old_one_on_the_anchors_side() {
+    let old = TrackPath {
+        mode: TrackMode::Object,
+        samples: (0..10).map(|k| sample(k * 100, 0.0)).collect(),
+    };
+    let after = TrackPath {
+        mode: TrackMode::Object,
+        samples: (6..12).map(|k| sample(k * 100, 0.5)).collect(),
+    };
+    let joined_after = joined(&old, after, Micros(600), TrackSpan::After);
+    let times: Vec<i64> = joined_after.samples.iter().map(|s| s.time.0).collect();
+    assert_eq!(times, (0..12).map(|k| k * 100).collect::<Vec<_>>());
+    assert!(
+        joined_after.samples[..6]
+            .iter()
+            .all(|s| s.corners[0].0 == 0.0)
+    );
+    assert!(
+        joined_after.samples[6..]
+            .iter()
+            .all(|s| s.corners[0].0 == 0.5)
+    );
+
+    let before = TrackPath {
+        mode: TrackMode::Object,
+        samples: (0..=3).map(|k| sample(k * 100, 0.5)).collect(),
+    };
+    let joined_before = joined(&old, before, Micros(300), TrackSpan::Before);
+    let times: Vec<i64> = joined_before.samples.iter().map(|s| s.time.0).collect();
+    assert_eq!(times, (0..10).map(|k| k * 100).collect::<Vec<_>>());
+    assert!(
+        joined_before.samples[..4]
+            .iter()
+            .all(|s| s.corners[0].0 == 0.5)
+    );
+    assert!(
+        joined_before.samples[4..]
+            .iter()
+            .all(|s| s.corners[0].0 == 0.0)
+    );
+}
+
+#[test]
+fn fixing_a_frame_starts_from_the_tracks_mode_followers_and_box() {
+    let (mut shell, temp) = open("fix");
+    shell.select(Some("v".into()));
+    shell.seek(Micros(700_000));
+    assert!(!shell.fix_enabled(), "nothing tracked yet");
+    let path = TrackPath {
+        mode: TrackMode::Plane,
+        samples: (0..10)
+            .map(|i| sample(500_000 + i * 33_333, 0.01 * i as f64))
+            .collect(),
+    };
+    shell
+        .apply(Request::Track {
+            target: "v".into(),
+            followers: vec!["s".into()],
+            tracking_id: "t".into(),
+            anchor: Micros(500_000),
+            path: path.clone(),
+        })
+        .unwrap();
+    shell.select(Some("v".into()));
+    shell.seek(Micros(700_000));
+    assert!(shell.fix_enabled());
+    shell.start_fixing().unwrap();
+    let tracking = shell.tracking().unwrap().clone();
+    assert_eq!(tracking.mode, TrackMode::Plane);
+    assert_eq!(tracking.followers, vec![SegmentId::from("s")]);
+    assert_eq!(tracking.time, Micros(700_000));
+    let fixing = tracking.fixing.unwrap();
+    assert_eq!(fixing.anchor, Micros(500_000));
+    assert_eq!(fixing.path.samples.len(), 10);
+    // The box at 700 ms is the sample at 699,994 µs: x from 0.06 to 0.16
+    // canvas halves, y from 0 down to -0.1.
+    let ((x0, y0), (x1, y1)) = tracking.canvas_box.unwrap();
+    assert!((x0 - 1.06 * 960.0).abs() < 1e-6 && (x1 - 1.16 * 960.0).abs() < 1e-6);
+    assert!((y0 - 540.0).abs() < 1e-6 && (y1 - 1.1 * 540.0).abs() < 1e-6);
+    assert!(shell.track_ready());
+    shell.stop_tracking();
+    shell.select(Some("s".into()));
+    assert!(
+        !shell.fix_enabled(),
+        "a follower's track is fixed on its target"
+    );
+    let _ = std::fs::remove_dir_all(&temp);
+}

@@ -816,6 +816,19 @@ fn install_style(style: &mut egui::Style) {
     // egui's own bars (popups, menus) keep one width too: no grow on hover.
     style.spacing.scroll.bar_width = tokens::SCROLL_BAR;
     style.spacing.scroll.floating_width = tokens::SCROLL_BAR;
+    // egui's own buttons match ui::Button's secondary kind until they move
+    // over: the same fills, no hover edge, and the same corners.
+    let radius = CornerRadius::same(tokens::ICON_RADIUS);
+    let widgets = &mut style.visuals.widgets;
+    for (state, fill) in [
+        (&mut widgets.inactive, tokens::RAISED),
+        (&mut widgets.hovered, tokens::ACTIVE),
+        (&mut widgets.active, tokens::PRESSED),
+    ] {
+        state.weak_bg_fill = fill;
+        state.bg_stroke = egui::Stroke::NONE;
+        state.corner_radius = radius;
+    }
     style.text_styles.insert(
         egui::TextStyle::Body,
         FontId::proportional(tokens::TYPE_SIZE),

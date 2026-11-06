@@ -222,9 +222,12 @@ pub struct ViewState {
     listed_checked: Option<std::time::Instant>,
     marquee_press: Option<Pos2>,
     marquee: Option<Rect>,
-    /// How far the lanes are moved down from where they center on the main
-    /// lane, in points; negative shows lanes further down.
-    lane_scroll: f32,
+    /// How far the lanes above main are scrolled toward the top one, in
+    /// points. Zero shows the lanes next to main.
+    lanes_up: f32,
+    /// How far the lanes under main are scrolled toward the bottom one, in
+    /// points. Zero shows the lanes next to main.
+    lanes_down: f32,
     /// The assistant's conversation, and whether its panel is open.
     pub assistant: crate::assistant::Assistant,
 }
@@ -287,7 +290,8 @@ impl Default for ViewState {
             listed_checked: None,
             marquee_press: None,
             marquee: None,
-            lane_scroll: 0.0,
+            lanes_up: 0.0,
+            lanes_down: 0.0,
             assistant: crate::assistant::Assistant::default(),
         }
     }
@@ -3773,20 +3777,40 @@ fn ruler_and_lanes(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
         .iter()
         .map(|lane| (lane.main, lane_height(view, lane)))
         .collect();
-    let laid = lane_rects(kinds, lane_area);
-    let (low, high) = lane_scroll_range(&laid, lane_area);
-    let scrolls = low < high;
+    // Main stays put. The lanes above it and the lanes under it each scroll
+    // in their own band, and one wheel runs through the two in turn.
+    let still = lane_layout(&kinds, lane_area, view.lanes_up, view.lanes_down);
+    let scrolls = still.up_max > 0.0 || still.down_max > 0.0;
     if scrolls {
-        view.lane_scroll += lane_wheel(ui, tracks);
-        if shell.clip_dragging() {
-            view.lane_scroll += drag_lane_scroll(ui, tracks);
+        let (up, down) = chain_scroll(
+            &still,
+            view.lanes_up,
+            view.lanes_down,
+            lane_wheel(ui, tracks),
+        );
+        view.lanes_up = up;
+        view.lanes_down = down;
+        if shell.clip_dragging()
+            && let Some(pos) = ui.input(|input| input.pointer.interact_pos())
+        {
+            // Each band scrolls while the pointer is in it or past the panel's
+            // edge on its side, not while it is over main or the other band.
+            if pos.y <= still.upper.bottom() {
+                view.lanes_up += drag_scroll_step(still.upper, pos.y);
+            }
+            if pos.y >= still.lower.top() {
+                view.lanes_down -= drag_scroll_step(still.lower, pos.y);
+            }
         }
     }
-    view.lane_scroll = view.lane_scroll.clamp(low, high);
-    let boxes: Vec<Rect> = laid
-        .iter()
-        .map(|rect| rect.translate(Vec2::new(0.0, view.lane_scroll)))
-        .collect();
+    view.lanes_up = view.lanes_up.clamp(0.0, still.up_max);
+    view.lanes_down = view.lanes_down.clamp(0.0, still.down_max);
+    let laid = lane_layout(&kinds, lane_area, view.lanes_up, view.lanes_down);
+    // Rows drawn whole, cut to their band; the parts that show are what the
+    // pointer finds.
+    let drawn = laid.rows.clone();
+    let boxes = laid.shown();
+    ui.data_mut(|data| data.insert_temp(lane_sheet_id(), ui.clip_rect().intersect(tracks)));
     let marquee = ui.interact(
         lane_area,
         ui.scope_id().with("marquee"),
@@ -3799,9 +3823,14 @@ fn ruler_and_lanes(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
     let clip = ui.clip_rect();
     ui.set_clip_rect(clip.intersect(tracks));
     for (index, lane) in rows.iter().enumerate() {
-        let Some(row) = boxes.get(index).copied() else {
+        let (Some(row), Some(band)) = (drawn.get(index).copied(), laid.bands.get(index)) else {
             continue;
         };
+        let cut = clip.intersect(tracks).intersect(*band);
+        if cut.height() <= 0.0 {
+            continue;
+        }
+        ui.set_clip_rect(cut);
         paint_lane(shell, ui, lane, row, lanes_left, index, &boxes);
         lane_head(shell, ui, view, lane, row, index);
         resize_lane(
@@ -3813,6 +3842,7 @@ fn ruler_and_lanes(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
             rows.iter().position(|lane| lane.main),
         );
     }
+    ui.set_clip_rect(clip.intersect(tracks));
     paint_new_lane(shell, ui, &boxes, lanes_left);
     ui.set_clip_rect(clip);
     shell.send_timeline_asks();
@@ -3893,21 +3923,159 @@ fn ruler_and_lanes(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
     zoom_timeline(shell, ui, lane_area);
 }
 
-/// How far the lanes may move: none while they fit with a lane's height to
-/// spare above and below, else far enough to bring that room into view past
-/// the top lane or the bottom one, so there is always space to drop a clip
-/// or a library card that opens a new lane there.
-fn lane_scroll_range(boxes: &[Rect], area: Rect) -> (f32, f32) {
+/// Where this frame's track sheet is kept, for painters inside one band.
+fn lane_sheet_id() -> egui::Id {
+    egui::Id::unique("lane-sheet")
+}
+
+/// The lanes laid out around a main lane that stays put.
+#[derive(Clone, Debug, PartialEq)]
+struct LaneLayout {
+    /// Each lane's whole row, scrolled.
+    rows: Vec<Rect>,
+    /// The band each row shows in: the one above main, main's own row, or
+    /// the one under main.
+    bands: Vec<Rect>,
+    /// The band above main and the band under it.
+    upper: Rect,
+    lower: Rect,
+    /// How far each band may scroll.
+    up_max: f32,
+    down_max: f32,
+}
+
+impl LaneLayout {
+    /// The part of each row that shows in its band. A row scrolled out of
+    /// sight keeps its order as a flat rect on its band's edge.
+    fn shown(&self) -> Vec<Rect> {
+        self.rows
+            .iter()
+            .zip(&self.bands)
+            .map(|(row, band)| {
+                let cut = row.intersect(*band);
+                if cut.height() > 0.0 {
+                    cut
+                } else {
+                    let y = row.center().y.clamp(band.top(), band.bottom());
+                    Rect::from_x_y_ranges(row.x_range(), y..=y)
+                }
+            })
+            .collect()
+    }
+}
+
+/// Lay the lanes out for rows given as (main, height).
+///
+/// While everything fits with a lane of room past the top and the bottom,
+/// main sits in the middle, as far as that room allows, and nothing
+/// scrolls. Once it does not fit, main stays put just above the lanes under
+/// it, which show whole while they take no more than half the space; the
+/// lanes above main fill the rest from main up. Each band then scrolls on
+/// its own: `up` toward the top lane, `down` toward the bottom one, each
+/// clamped to what its band holds.
+fn lane_layout(kinds: &[(bool, f32)], area: Rect, up: f32, down: f32) -> LaneLayout {
+    const GAP: f32 = 8.0;
     let room = lane_room();
-    let (Some(top), Some(bottom)) = (
-        boxes.iter().map(|rect| rect.top()).reduce(f32::min),
-        boxes.iter().map(|rect| rect.bottom()).reduce(f32::max),
-    ) else {
-        return (0.0, 0.0);
+    let row = |top: f32, height: f32| {
+        Rect::from_min_size(
+            Pos2::new(area.left(), top),
+            Vec2::new(area.width().max(0.0), height),
+        )
     };
-    let low = (area.bottom() - room - bottom).min(0.0);
-    let high = (area.top() + room - top).max(0.0);
-    (low, high)
+    let Some(main) = kinds.iter().position(|(main, _)| *main) else {
+        // No main lane: the rows stack from the top and scroll as one band.
+        let total: f32 = kinds.iter().map(|(_, height)| height + GAP).sum();
+        let down_max = (total + room - area.height()).max(0.0);
+        let down = down.clamp(0.0, down_max);
+        let mut top = area.top() - down;
+        let rows = kinds
+            .iter()
+            .map(|(_, height)| {
+                let rect = row(top, *height);
+                top += height + GAP;
+                rect
+            })
+            .collect::<Vec<_>>();
+        return LaneLayout {
+            bands: vec![area; rows.len()],
+            rows,
+            upper: Rect::from_x_y_ranges(area.x_range(), area.top()..=area.top()),
+            lower: area,
+            up_max: 0.0,
+            down_max,
+        };
+    };
+    let main_height = kinds[main].1;
+    let above: f32 = kinds[..main].iter().map(|(_, height)| height + GAP).sum();
+    let under: f32 = kinds[main + 1..]
+        .iter()
+        .map(|(_, height)| height + GAP)
+        .sum();
+    let want_up = above + room;
+    let want_down = under + room;
+    let lowest = area.top() + want_up;
+    let highest = area.bottom() - main_height - want_down;
+    let main_top = if lowest <= highest {
+        (area.center().y - main_height / 2.0).clamp(lowest, highest)
+    } else {
+        let spare = (area.height() - main_height).max(0.0);
+        let down_band = want_down.min((spare - want_up).max(spare / 2.0)).max(0.0);
+        area.top() + (spare - down_band)
+    };
+    let main_bottom = main_top + main_height;
+    let up_max = (want_up - (main_top - area.top())).max(0.0);
+    let down_max = (want_down - (area.bottom() - main_bottom)).max(0.0);
+    let up = up.clamp(0.0, up_max);
+    let down = down.clamp(0.0, down_max);
+    let upper = Rect::from_x_y_ranges(
+        area.x_range(),
+        area.top()..=(main_top - GAP / 2.0).max(area.top()),
+    );
+    let lower = Rect::from_x_y_ranges(
+        area.x_range(),
+        (main_bottom + GAP / 2.0).min(area.bottom())..=area.bottom(),
+    );
+    let mut rows = vec![Rect::NOTHING; kinds.len()];
+    let mut bands = vec![upper; kinds.len()];
+    rows[main] = row(main_top, main_height);
+    bands[main] = rows[main];
+    let mut bottom = main_top - GAP + up;
+    for index in (0..main).rev() {
+        let height = kinds[index].1;
+        rows[index] = row(bottom - height, height);
+        bottom -= height + GAP;
+    }
+    let mut top = main_bottom + GAP - down;
+    for index in main + 1..kinds.len() {
+        let height = kinds[index].1;
+        rows[index] = row(top, height);
+        bands[index] = lower;
+        top += height + GAP;
+    }
+    LaneLayout {
+        rows,
+        bands,
+        upper,
+        lower,
+        up_max,
+        down_max,
+    }
+}
+
+/// Run one wheel step through the two bands. Scrolling up (`delta` above
+/// zero) first brings the lanes under main back up to it, then scrolls the
+/// lanes above main toward the top one; scrolling down does the reverse.
+fn chain_scroll(layout: &LaneLayout, up: f32, down: f32, delta: f32) -> (f32, f32) {
+    let up = up.clamp(0.0, layout.up_max);
+    let down = down.clamp(0.0, layout.down_max);
+    if delta > 0.0 {
+        let back = delta.min(down);
+        (up + delta - back, down - back)
+    } else {
+        let step = -delta;
+        let back = step.min(up);
+        (up - back, down + step - back)
+    }
 }
 
 /// The space kept past the top lane and the bottom one: a regular lane and
@@ -3929,16 +4097,9 @@ fn wheel(ui: &Ui) -> (Vec2, bool, Option<Pos2>) {
 }
 
 /// The up-and-down wheel over the track area, in points to move the lanes.
-/// How far to scroll the lanes while a clip drag is held near the top or
-/// bottom of the track sheet, so a lane out of view can be reached. Faster
-/// the closer the pointer is to the edge.
-fn drag_lane_scroll(ui: &Ui, tracks: Rect) -> f32 {
-    let Some(pos) = ui.input(|input| input.pointer.interact_pos()) else {
-        return 0.0;
-    };
-    drag_scroll_step(tracks, pos.y)
-}
-
+/// How far to scroll a band while a clip drag is held near its top (above
+/// zero) or bottom (below zero), so a lane out of view can be reached.
+/// Faster the closer the pointer is to the edge; zero outside the band.
 fn drag_scroll_step(tracks: Rect, y: f32) -> f32 {
     const ZONE: f32 = 32.0;
     const FASTEST: f32 = 12.0;
@@ -6175,9 +6336,14 @@ fn paint_floating_clip(
         egui::Order::Foreground,
         egui::Id::unique("floating-clip"),
     ));
+    // The whole track sheet, not this lane's band: the clip can be carried
+    // into the band above main, onto main, or under it.
+    let sheet = ui
+        .data(|data| data.get_temp::<Rect>(lane_sheet_id()))
+        .unwrap_or_else(|| ui.clip_rect());
     let painter = painter.with_clip_rect(Rect::from_x_y_ranges(
-        lanes_left..=ui.clip_rect().right(),
-        ui.clip_rect().y_range(),
+        lanes_left..=sheet.right(),
+        sheet.y_range(),
     ));
     painter.rect_filled(
         rect,
@@ -6317,50 +6483,11 @@ fn edge_strips(visible: Rect) -> (Rect, Rect) {
     (left, right)
 }
 
-/// Each lane's row, the main lane centered. `kinds` is each lane's main and
-/// audio flags.
-/// Rows for lanes given as (main, height). The main row sits in the middle
-/// of `area`; the rows above it stack up and the rest stack down.
+/// Rows for lanes given as (main, height), none scrolled: main in the
+/// middle of `area` while the lanes fit around it.
+#[cfg(test)]
 fn lane_rects(kinds: Vec<(bool, f32)>, area: Rect) -> Vec<Rect> {
-    let main_flags: Vec<bool> = kinds.iter().map(|(main, _)| *main).collect();
-    let height = |index: usize| kinds[index].1;
-    let Some(main) = main_flags.iter().position(|main| *main) else {
-        let mut top = area.top();
-        return (0..kinds.len())
-            .map(|index| {
-                let rect = Rect::from_min_size(
-                    Pos2::new(area.left(), top),
-                    Vec2::new(area.width(), height(index)),
-                );
-                top += height(index) + 8.0;
-                rect
-            })
-            .collect();
-    };
-    let mut tops = vec![0.0; main_flags.len()];
-    tops[main] = area.center().y - height(main) / 2.0;
-    let mut y = tops[main];
-    for index in (0..main).rev() {
-        y -= 8.0 + height(index);
-        tops[index] = y;
-    }
-    y = tops[main] + height(main);
-    let mut index = main + 1;
-    while index < main_flags.len() {
-        y += 8.0;
-        tops[index] = y;
-        y += height(index);
-        index += 1;
-    }
-    tops.into_iter()
-        .enumerate()
-        .map(|(index, top)| {
-            Rect::from_min_size(
-                Pos2::new(area.left(), top),
-                Vec2::new(area.width().max(0.0), height(index)),
-            )
-        })
-        .collect()
+    lane_layout(&kinds, area, 0.0, 0.0).rows
 }
 
 fn lane_name(kind: &cutlass_model::TrackType, main: bool) -> String {
@@ -11004,32 +11131,73 @@ mod tests {
         assert_eq!(top, Some(notice_layer()));
     }
 
-    #[test]
-    fn the_lanes_scroll_to_leave_a_lane_of_room_past_the_top_and_bottom() {
-        let area = Rect::from_min_size(Pos2::new(0.0, 100.0), Vec2::new(800.0, 300.0));
-        // Ten rows run well past both edges.
-        let boxes: Vec<Rect> = (0..10)
-            .map(|index| {
-                let top = 100.0 - 200.0 + index as f32 * 56.0;
-                Rect::from_min_size(Pos2::new(0.0, top), Vec2::new(800.0, 48.0))
-            })
-            .collect();
-        let (low, high) = lane_scroll_range(&boxes, area);
-        let top = boxes[0].top() + high;
-        assert!(top - area.top() >= lane_room(), "room above the top lane");
-        let bottom = boxes[9].bottom() + low;
-        assert!(
-            area.bottom() - bottom >= lane_room(),
-            "room under the bottom lane"
-        );
+    /// Ten overlay rows, main, and audio rows under it.
+    fn crowded(audio: usize) -> Vec<(bool, f32)> {
+        let mut kinds = vec![(false, 62.0); 10];
+        kinds.push((true, 90.0));
+        kinds.extend(std::iter::repeat_n((false, 58.0), audio));
+        kinds
+    }
 
-        // Rows that fill the sheet without a lane to spare still scroll.
-        let snug = [Rect::from_min_size(
-            Pos2::new(0.0, 104.0),
-            Vec2::new(800.0, 292.0),
-        )];
-        let (low, high) = lane_scroll_range(&snug, area);
-        assert!(low < high);
+    #[test]
+    fn main_stays_put_and_the_lanes_above_it_scroll_from_main_up() {
+        let area = Rect::from_min_size(Pos2::new(0.0, 100.0), Vec2::new(800.0, 400.0));
+        let kinds = crowded(1);
+        let rest = lane_layout(&kinds, area, 0.0, 0.0);
+        let main = rest.rows[10];
+        // The audio lane shows whole under main, with room to drop below it.
+        assert!(rest.rows[11].bottom() + lane_room() <= area.bottom() + 0.5);
+        assert_eq!(rest.down_max, 0.0);
+        // The lanes above fill up from main; the top ones are past the edge.
+        assert_eq!(main.top() - rest.rows[9].bottom(), 8.0);
+        assert!(rest.rows[0].top() < area.top());
+        assert!(rest.up_max > 0.0);
+
+        // Scrolled all the way up, main has not moved and the top lane shows
+        // with a lane of room above it.
+        let top = lane_layout(&kinds, area, f32::MAX, 0.0);
+        assert_eq!(top.rows[10], main);
+        assert!((top.rows[0].top() - (area.top() + lane_room())).abs() < 0.5);
+        // The lanes next to main slid under it: what shows of them stays in
+        // the band above main and never over main.
+        for shown in &top.shown()[..10] {
+            assert!(shown.bottom() <= main.top());
+        }
+    }
+
+    #[test]
+    fn one_wheel_runs_through_the_lanes_above_main_then_the_lanes_under_it() {
+        let area = Rect::from_min_size(Pos2::new(0.0, 100.0), Vec2::new(800.0, 400.0));
+        let layout = lane_layout(&crowded(8), area, 0.0, 0.0);
+        assert!(layout.up_max > 0.0 && layout.down_max > 0.0);
+        // Scrolled up a little, scrolling down first brings those lanes back.
+        let (up, down) = chain_scroll(&layout, 30.0, 0.0, -20.0);
+        assert_eq!((up, down), (10.0, 0.0));
+        // Past them, it goes on into the lanes under main.
+        let (up, down) = chain_scroll(&layout, 10.0, 0.0, -50.0);
+        assert_eq!((up, down), (0.0, 40.0));
+        // Scrolling up undoes it in the same order.
+        let (up, down) = chain_scroll(&layout, 0.0, 40.0, 60.0);
+        assert_eq!((up, down), (20.0, 0.0));
+
+        // At the bottom, the last lane shows with a lane of room under it.
+        let bottom = lane_layout(&crowded(8), area, 0.0, f32::MAX);
+        let last = bottom.rows.last().unwrap();
+        assert!((last.bottom() - (area.bottom() - lane_room())).abs() < 0.5);
+        assert_eq!(bottom.rows[10], layout.rows[10], "main stays put");
+    }
+
+    #[test]
+    fn lanes_that_fit_with_room_to_spare_center_main_and_do_not_scroll() {
+        let area = Rect::from_min_size(Pos2::new(0.0, 100.0), Vec2::new(800.0, 400.0));
+        let layout = lane_layout(
+            &[(false, 40.0), (true, 90.0), (false, 58.0)],
+            area,
+            0.0,
+            0.0,
+        );
+        assert_eq!(layout.rows[1].center().y, area.center().y);
+        assert_eq!((layout.up_max, layout.down_max), (0.0, 0.0));
     }
 
     #[test]
@@ -11801,12 +11969,12 @@ mod tests {
                 );
                 output.textures_delta.clear();
             }
-            (shell.view_origin().0, view.lane_scroll)
+            (shell.view_origin().0, view.lanes_down)
         };
         let (before, _) = spin(Vec2::ZERO, false);
         let (origin, scroll) = spin(Vec2::new(0.0, -120.0), false);
         assert_eq!(origin, before, "the wheel moved time, not the lanes");
-        assert!(scroll < 0.0, "the lanes did not scroll: {scroll}");
+        assert!(scroll > 0.0, "the audio lanes did not scroll: {scroll}");
         let (origin, after) = spin(Vec2::new(0.0, -120.0), true);
         assert!(origin > before, "shift and the wheel did not pan time");
         assert_eq!(after, scroll, "shift and the wheel moved the lanes");

@@ -4418,6 +4418,9 @@ fn track_action(shell: &mut Shell, view: &mut ViewState, track_id: &TrackId, act
             view.lane_heights.remove(track_id);
             shell.remove_track(track_id)
         }
+        ("solo-track", None) => {
+            shell.toggle_attribute(track_id.clone(), cutlass_model::TrackAttribute::SOLO)
+        }
         _ => Ok(()),
     };
     if let Err(error) = result {
@@ -4437,8 +4440,8 @@ fn lane_head(
 ) {
     let head = head_rect(row);
     let label = Rect::from_min_max(
-        Pos2::new(head.left() + 34.0, row.center().y - 11.0),
-        Pos2::new(head.right() - 32.0, row.center().y + 11.0),
+        Pos2::new(head.left() + HEAD_FIRST + 14.0, row.center().y - 11.0),
+        Pos2::new(head.right() - 6.0, row.center().y + 11.0),
     );
     if let Some((track_id, typed)) = view.renaming.as_mut()
         && track_id == &lane.track_id
@@ -4462,12 +4465,22 @@ fn lane_head(
         }
         return;
     }
+    let name = lane
+        .name
+        .clone()
+        .unwrap_or_else(|| lane_name(&lane.kind, lane.main));
+    let kind = paint_lane_head(ui, row, lane_icon(&lane.kind));
     let response = ui
-        .interact(label, ui.scope_id().with(("head", index)), Sense::click())
-        .on_hover_text("Double-click to rename, right-click for more");
+        .interact(
+            kind.expand(3.0),
+            ui.scope_id().with(("head", index)),
+            Sense::click(),
+        )
+        .on_hover_text(format!("{name} · double-click to rename"));
     if response.double_clicked() {
         track_action(shell, view, &lane.track_id, "rename-track");
     }
+    lane_switches(shell, ui, view, lane, row, index);
     if let Some(pos) = secondary_click(ui)
         && head.contains(pos)
     {
@@ -4929,7 +4942,7 @@ fn paint_empty_main(ui: &Ui, area: Rect) {
         FontId::proportional(12.0),
         tokens::MUTED,
     );
-    paint_lane_head(ui, lane, "media", "Main");
+    paint_lane_head(ui, lane, "media");
 }
 
 fn paint_lane(
@@ -4962,34 +4975,6 @@ fn paint_lane(
             tokens::MUTED,
         );
     }
-    let name = lane
-        .name
-        .clone()
-        .unwrap_or_else(|| lane_name(&lane.kind, lane.main));
-    paint_lane_head(ui, row, lane_icon(&lane.kind), &name);
-    let lock = Rect::from_center_size(
-        Pos2::new(row.left() - tokens::COVER_WIDTH - 18.0, row.center().y),
-        Vec2::splat(24.0),
-    );
-    let lock_response = ui.interact(lock, ui.scope_id().with(("lock", index)), Sense::click());
-    if lock_response.clicked()
-        && let Err(error) =
-            shell.toggle_attribute(lane.track_id.clone(), cutlass_model::TrackAttribute::LOCK)
-    {
-        shell.notice_error(&error);
-    }
-    let _ = icons::paint(
-        ui.painter(),
-        Rect::from_center_size(lock.center(), Vec2::splat(14.0)),
-        "lock",
-        if lane.lock {
-            tokens::TEXT
-        } else {
-            tokens::FAINT
-        },
-    );
-    lock_response.on_hover_text(if lane.lock { "Locked" } else { "Lock" });
-    lane_switches(shell, ui, lane, row, index);
     let followers: Vec<_> = shell
         .move_previews()
         .into_iter()
@@ -5016,58 +5001,102 @@ fn paint_lane(
     }
 }
 
-fn paint_lane_head(ui: &Ui, row: Rect, icon: &str, label: &str) {
-    let center = Pos2::new(
-        row.left() - tokens::TRACK_HEAD - tokens::COVER_WIDTH + 22.0,
-        row.center().y,
-    );
-    let _ = icons::paint(
-        ui.painter(),
-        Rect::from_center_size(center, Vec2::splat(16.0)),
-        icon,
-        tokens::MUTED,
-    );
-    ui.painter().text(
-        Pos2::new(center.x + 14.0, center.y),
-        Align2::LEFT_CENTER,
-        label,
-        FontId::proportional(12.0),
-        tokens::MUTED,
-    );
+/// The lane's kind as an icon at the head's left. Its name is not written
+/// out; [`lane_head`] shows it on hover.
+fn paint_lane_head(ui: &Ui, row: Rect, icon: &str) -> Rect {
+    let center = Pos2::new(head_rect(row).left() + HEAD_FIRST, row.center().y);
+    let rect = Rect::from_center_size(center, Vec2::splat(16.0));
+    let _ = icons::paint(ui.painter(), rect, icon, tokens::MUTED);
+    rect
+}
+
+/// Where the head's first icon sits from its left, and the step to each
+/// button after it.
+const HEAD_FIRST: f32 = 20.0;
+const HEAD_STEP: f32 = 25.0;
+
+/// The head's buttons, left to right: lock, show or hide (not on a sound
+/// lane), mute (only on a lane that makes sound), and more, which opens the
+/// track menu.
+fn head_buttons(lane: &crate::shell::LaneView) -> Vec<&'static str> {
+    let sound = lane.main
+        || matches!(
+            lane.kind,
+            cutlass_model::TrackType::Video
+                | cutlass_model::TrackType::Mixed
+                | cutlass_model::TrackType::Audio
+        );
+    let mut buttons = vec!["lock"];
+    if !is_audio(lane) {
+        buttons.push("hide");
+    }
+    if sound {
+        buttons.push("mute");
+    }
+    buttons.push("more");
+    buttons
 }
 
 fn lane_switches(
     shell: &mut Shell,
     ui: &mut Ui,
+    view: &mut ViewState,
     lane: &crate::shell::LaneView,
     row: Rect,
     index: usize,
 ) {
-    let origin = Pos2::new(row.left() - tokens::COVER_WIDTH + 4.0, row.center().y - 8.0);
-    for (offset, label, on, bit) in [
-        (0.0, "M", lane.mute, cutlass_model::TrackAttribute::MUTE),
-        (18.0, "H", lane.hide, cutlass_model::TrackAttribute::HIDE),
-        (36.0, "S", lane.solo, cutlass_model::TrackAttribute::SOLO),
-    ] {
-        let rect = Rect::from_min_size(origin + Vec2::new(offset, 0.0), Vec2::splat(16.0));
-        let response = ui.interact(rect, ui.scope_id().with((label, index)), Sense::click());
-        if response.clicked()
-            && let Err(error) = shell.toggle_attribute(lane.track_id.clone(), bit)
-        {
-            shell.notice_error(&error);
-        }
-        ui.painter().text(
-            rect.center(),
-            Align2::CENTER_CENTER,
-            label,
-            FontId::proportional(10.0),
-            if on { tokens::TEXT } else { tokens::FAINT },
+    let head = head_rect(row);
+    for (at, button) in head_buttons(lane).into_iter().enumerate() {
+        let step = u16::try_from(at + 1).map_or(0.0, f32::from);
+        let center = Pos2::new(head.left() + HEAD_FIRST + HEAD_STEP * step, row.center().y);
+        let rect = Rect::from_center_size(center, Vec2::splat(22.0));
+        let response = ui.interact(rect, ui.scope_id().with((button, index)), Sense::click());
+        let (icon, color, tip) = match button {
+            "lock" if lane.lock => ("lock", tokens::TEXT, "Unlock"),
+            "lock" => ("unlock", tokens::TEXT, "Lock"),
+            "hide" if lane.hide => ("viewOff", tokens::MUTED, "Show"),
+            "hide" => ("view", tokens::TEXT, "Hide"),
+            "mute" if lane.mute => ("volumeOff", tokens::MUTED, "Unmute"),
+            "mute" if lane.mute_by_solo => ("volumeOff", tokens::FAINT, "Muted by solo"),
+            "mute" => ("volume", tokens::TEXT, "Mute"),
+            _ => ("more", tokens::TEXT, "More"),
+        };
+        let color = if response.hovered() {
+            tokens::TEXT
+        } else {
+            color
+        };
+        let _ = icons::paint(
+            ui.painter(),
+            Rect::from_center_size(center, Vec2::splat(15.0)),
+            icon,
+            color,
         );
-        response.on_hover_text(match label {
-            "M" => "Mute",
-            "H" => "Hide",
-            _ => "Solo",
-        });
+        if response.clicked() {
+            let bit = match button {
+                "lock" => Some(cutlass_model::TrackAttribute::LOCK),
+                "hide" => Some(cutlass_model::TrackAttribute::HIDE),
+                "mute" => Some(cutlass_model::TrackAttribute::MUTE),
+                _ => None,
+            };
+            match bit {
+                Some(bit) => {
+                    if let Err(error) = shell.toggle_attribute(lane.track_id.clone(), bit) {
+                        shell.notice_error(&error);
+                    }
+                }
+                None => {
+                    shell.close_gap_menu();
+                    view.track_menu = Some(TrackMenu {
+                        track_id: lane.track_id.clone(),
+                        main: lane.main,
+                        lock: lane.lock,
+                        at: rect.left_bottom(),
+                    });
+                }
+            }
+        }
+        response.on_hover_text(tip);
     }
 }
 
@@ -8187,7 +8216,8 @@ mod tests {
         assert!(!lines.iter().any(|line| line == "00:00:00:00"), "{lines:?}");
         assert!(painted.contains("00:00:00:00  /  "), "{painted}");
         assert!(painted.contains("Details"), "{painted}");
-        assert!(painted.contains("Main"), "{painted}");
+        // A lane head shows icons, not its name.
+        assert!(!lines.iter().any(|line| line == "Main"), "{lines:?}");
         assert!(painted.contains("Untitled"), "{painted}");
         assert!(
             painted.contains("No media yet. Use File → Import."),
@@ -11218,6 +11248,49 @@ mod tests {
             "{scrolled:?}"
         );
         let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn a_lane_head_has_the_buttons_its_kind_uses() {
+        let lane = |kind: cutlass_model::TrackType, main: bool| crate::shell::LaneView {
+            track_id: TrackId::new("lane"),
+            kind,
+            main,
+            name: None,
+            mute: false,
+            hide: false,
+            lock: false,
+            solo: false,
+            mute_by_solo: false,
+            clips: Vec::new(),
+        };
+        use cutlass_model::TrackType::{Audio, Sticker, Text, Video};
+        assert_eq!(
+            head_buttons(&lane(Video, true)),
+            ["lock", "hide", "mute", "more"]
+        );
+        assert_eq!(
+            head_buttons(&lane(Video, false)),
+            ["lock", "hide", "mute", "more"]
+        );
+        assert_eq!(head_buttons(&lane(Audio, false)), ["lock", "mute", "more"]);
+        assert_eq!(head_buttons(&lane(Text, false)), ["lock", "hide", "more"]);
+        assert_eq!(
+            head_buttons(&lane(Sticker, false)),
+            ["lock", "hide", "more"]
+        );
+        // Every icon the head draws is in the set.
+        for name in [
+            "lock",
+            "unlock",
+            "view",
+            "viewOff",
+            "volume",
+            "volumeOff",
+            "more",
+        ] {
+            assert!(icons::require(name).is_ok(), "{name}");
+        }
     }
 
     #[test]

@@ -242,6 +242,105 @@ fn number(digits: &str) -> Option<i64> {
     digits.parse().ok()
 }
 
+/// How long the last line of a lyric file shows when the file gives no
+/// `[length:]`.
+pub const LAST_LYRIC_MS: i64 = 5_000;
+
+/// Read an LRC lyric file.
+///
+/// A line is one or more time tags `[mm:ss.xx]` and its words; each tag
+/// starts a cue with those words. A cue runs until the next tag in time,
+/// and a tag with no words only ends the one before it. The last cue runs
+/// to `[length: mm:ss]` when that is later, or for [`LAST_LYRIC_MS`]; the
+/// length is the song's, so the offset does not move it.
+/// `[offset: ms]` moves every line earlier by that much (later when
+/// negative); a cue moved before zero starts at zero. Other `[key: value]`
+/// tags and untagged lines are skipped. Word time tags `<mm:ss.xx>` are
+/// dropped and the words share the line's time by letters.
+pub fn parse_lrc(text: &str) -> Result<Vec<Cue>, SubtitleError> {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let mut stamps: Vec<(i64, usize, &str)> = Vec::new();
+    let mut offset = 0_i64;
+    let mut length = None;
+    for (index, line) in text.lines().enumerate() {
+        let number = index + 1;
+        let mut rest = line.trim();
+        let mut times = Vec::new();
+        while let Some(inner) = rest.strip_prefix('[') {
+            let Some((tag, after)) = inner.split_once(']') else {
+                break;
+            };
+            rest = after;
+            if tag.starts_with(|ch: char| ch.is_ascii_digit()) {
+                times.push(lrc_stamp(tag).ok_or(SubtitleError::BadTime { line: number })?);
+            } else if let Some((key, value)) = tag.split_once(':') {
+                match key.trim().to_ascii_lowercase().as_str() {
+                    "offset" => {
+                        let value = value.trim();
+                        let value = value.strip_prefix('+').unwrap_or(value);
+                        offset = value
+                            .parse()
+                            .map_err(|_| SubtitleError::BadTime { line: number })?;
+                    }
+                    "length" => {
+                        length = Some(
+                            lrc_stamp(value.trim())
+                                .ok_or(SubtitleError::BadTime { line: number })?,
+                        );
+                    }
+                    _ => {}
+                }
+            }
+        }
+        for time in times {
+            if stamps.len() > MAX_CUES * 2 {
+                return Err(SubtitleError::TooMany);
+            }
+            stamps.push((time, number, rest));
+        }
+    }
+    stamps.sort_by_key(|(time, number, _)| (*time, *number));
+    let shift = |time: i64| time.saturating_sub(offset).max(0);
+    let mut cues = Vec::new();
+    for (index, (time, _, words)) in stamps.iter().enumerate() {
+        let start = shift(*time);
+        let end = match stamps.get(index + 1) {
+            Some((next, _, _)) => shift(*next),
+            None => length
+                .filter(|end| *end > start)
+                .unwrap_or_else(|| start.saturating_add(LAST_LYRIC_MS)),
+        };
+        push_cue(&mut cues, start, end, &[words])?;
+    }
+    finish(cues)
+}
+
+/// `mm:ss`, `mm:ss.x` to `mm:ss.xxx`, or `mm:ss:xx`. Minutes may run past
+/// 59; seconds stay under 60.
+fn lrc_stamp(stamp: &str) -> Option<i64> {
+    let (minutes, rest) = stamp.split_once(':')?;
+    let (seconds, fraction) = match rest.split_once(['.', ':']) {
+        Some((seconds, fraction)) => (seconds, Some(fraction)),
+        None => (rest, None),
+    };
+    let minutes = number(minutes)?;
+    let seconds = number(seconds)?;
+    if seconds >= 60 {
+        return None;
+    }
+    let millis = match fraction {
+        None => 0,
+        Some(digits) if !digits.is_empty() && digits.len() <= 3 => {
+            number(digits)? * 10_i64.pow(3 - u32::try_from(digits.len()).ok()?)
+        }
+        Some(_) => return None,
+    };
+    minutes
+        .checked_mul(60_000)?
+        .checked_add(seconds * 1_000)?
+        .checked_add(millis)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -348,5 +447,60 @@ mod tests {
             cues.windows(2)
                 .all(|pair| pair[0].end_ms <= pair[1].start_ms)
         );
+    }
+
+    #[test]
+    fn each_lyric_line_runs_until_the_next_one() {
+        let text = "[ti:Song]\n[ar:Someone]\n[length: 00:20]\n[00:01.00]First <00:01.50>line\n[00:04.5][00:10.00]Again\nplain text\n[00:06.00]\n[00:12:50]Last\n";
+        let cues = parse_lrc(text).unwrap();
+        let times: Vec<_> = cues.iter().map(|cue| (cue.start_ms, cue.end_ms)).collect();
+        assert_eq!(
+            times,
+            [
+                (1_000, 4_500),
+                (4_500, 6_000),
+                (10_000, 12_500),
+                (12_500, 20_000)
+            ]
+        );
+        assert_eq!(cues[0].words.text, ["First", "line"]);
+        assert_eq!(cues[2].words.text, ["Again"]);
+    }
+
+    #[test]
+    fn an_offset_moves_lines_earlier_and_the_last_line_has_a_default_length() {
+        let cues = parse_lrc("[offset:+500]\n[00:00.20]a\n[00:02.00]b\n").unwrap();
+        let times: Vec<_> = cues.iter().map(|cue| (cue.start_ms, cue.end_ms)).collect();
+        assert_eq!(times, [(0, 1_500), (1_500, 1_500 + LAST_LYRIC_MS)]);
+        let cues = parse_lrc("[offset:-1000]\n[length:00:01]\n[00:00.00]a\n").unwrap();
+        assert_eq!(
+            (cues[0].start_ms, cues[0].end_ms),
+            (1_000, 1_000 + LAST_LYRIC_MS)
+        );
+    }
+
+    #[test]
+    fn broken_lyric_files_are_refused_with_the_line() {
+        assert_eq!(parse_lrc(""), Err(SubtitleError::Empty));
+        assert_eq!(parse_lrc("[ti:x]\nhello\n"), Err(SubtitleError::Empty));
+        assert_eq!(parse_lrc("[00:01.00]\n"), Err(SubtitleError::Empty));
+        assert_eq!(
+            parse_lrc("[ti:x]\n[00:61.00]x\n"),
+            Err(SubtitleError::BadTime { line: 2 })
+        );
+        assert_eq!(
+            parse_lrc("[00:01.0000]x\n"),
+            Err(SubtitleError::BadTime { line: 1 })
+        );
+        assert_eq!(
+            parse_lrc("[offset:soon]\n[00:01.00]x\n"),
+            Err(SubtitleError::BadTime { line: 1 })
+        );
+        assert_eq!(
+            parse_lrc("[999999999999999999:00.00]x\n"),
+            Err(SubtitleError::BadTime { line: 1 })
+        );
+        let many = "[00:00.00]x\n".repeat(MAX_CUES * 2 + 2);
+        assert_eq!(parse_lrc(&many), Err(SubtitleError::TooMany));
     }
 }

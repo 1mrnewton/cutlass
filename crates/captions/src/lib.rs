@@ -33,7 +33,7 @@ pub use select::{
     split_keyword,
 };
 pub use style::{CAPTION_STYLES, CaptionStyle, WordLook, caption_style};
-pub use subtitles::{Cue, MAX_CUES, SubtitleError, parse_srt};
+pub use subtitles::{Cue, LAST_LYRIC_MS, MAX_CUES, SubtitleError, parse_lrc, parse_srt};
 
 /// Why a caption sample could not be produced.
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -50,12 +50,14 @@ pub const RAISED: Color32 = Color32::from_rgb(0x2a, 0x2a, 0x2a);
 pub const INSET: Color32 = Color32::from_rgb(0x26, 0x26, 0x26);
 /// A button held down.
 pub const PRESSED: Color32 = Color32::from_rgb(0x3a, 0x3a, 0x3a);
-/// A scroll thumb at rest.
-pub const SCROLL_THUMB: Color32 = Color32::from_rgb(0x46, 0x46, 0x46);
+/// The faint lane a scroll thumb runs in, shown with the thumb.
+pub const SCROLL_TRACK: Color32 = Color32::from_rgba_premultiplied(10, 10, 10, 10);
+/// A scroll thumb at rest: see-through, so it sits on any panel.
+pub const SCROLL_THUMB: Color32 = Color32::from_rgba_premultiplied(56, 56, 56, 56);
 /// A scroll thumb under the pointer.
-pub const SCROLL_THUMB_HOVER: Color32 = Color32::from_rgb(0x5e, 0x5e, 0x5e);
+pub const SCROLL_THUMB_HOVER: Color32 = Color32::from_rgba_premultiplied(96, 96, 96, 96);
 /// A scroll thumb being dragged.
-pub const SCROLL_THUMB_DRAG: Color32 = Color32::from_rgb(0x7a, 0x7a, 0x7a);
+pub const SCROLL_THUMB_DRAG: Color32 = Color32::from_rgba_premultiplied(136, 136, 136, 136);
 /// The ruler's band between the in and out marks.
 pub const MARKED: Color32 = Color32::from_rgba_premultiplied(0x00, 0x32, 0x36, 0x40);
 
@@ -80,6 +82,8 @@ pub const SCROLL_INSET: f32 = 2.0;
 /// The gap between a scroll bar and the side of its area: none, so the bar
 /// sits on the panel's edge.
 pub const SCROLL_EDGE: f32 = 0.0;
+/// The gap between the thumb and the sides of its track.
+pub const SCROLL_THUMB_INSET: f32 = 1.0;
 /// Seconds a scroll bar takes to fade in or out. Only its opacity changes.
 pub const SCROLL_FADE: f32 = 0.15;
 /// Seconds a scroll bar stays after the content last moved.

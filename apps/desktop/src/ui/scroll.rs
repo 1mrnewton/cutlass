@@ -273,12 +273,17 @@ fn bar(ui: &Ui, key: Id, axis: Axis, view: Rect, content: f32, offset: f32) {
     } else {
         tokens::SCROLL_THUMB
     };
-    let radius = (tokens::SCROLL_BAR / 2.0) as u8;
+    let round = CornerRadius::same((tokens::SCROLL_BAR / 2.0) as u8);
     ui.painter().rect_filled(
-        bar.thumb,
-        CornerRadius::same(radius),
-        color.gamma_multiply(opacity),
+        bar.track,
+        round,
+        tokens::SCROLL_TRACK.gamma_multiply(opacity),
     );
+    let mut thumb = bar.thumb;
+    thumb.min[axis.across()] += tokens::SCROLL_THUMB_INSET;
+    thumb.max[axis.across()] -= tokens::SCROLL_THUMB_INSET;
+    ui.painter()
+        .rect_filled(thumb, round, color.gamma_multiply(opacity));
 }
 
 #[cfg(test)]
@@ -366,6 +371,11 @@ mod tests {
             })
     }
 
+    /// The thumb's painted width: the bar less its inset on both sides.
+    fn painted() -> f32 {
+        tokens::SCROLL_BAR - 2.0 * tokens::SCROLL_THUMB_INSET
+    }
+
     /// Frames enough for a fade to finish.
     fn settle(ctx: &egui::Context, events: Vec<egui::Event>) -> egui::FullOutput {
         frame(ctx, events);
@@ -376,17 +386,12 @@ mod tests {
         last
     }
 
+    /// Whether any part of the bar is painted: the list draws only text.
     fn any_thumb(output: &egui::FullOutput) -> bool {
-        output.shapes.iter().any(|clipped| match &clipped.shape {
-            egui::Shape::Rect(rect) => [
-                tokens::SCROLL_THUMB,
-                tokens::SCROLL_THUMB_HOVER,
-                tokens::SCROLL_THUMB_DRAG,
-            ]
+        output
+            .shapes
             .iter()
-            .any(|thumb| thumb.to_opaque() == rect.fill.to_opaque() && rect.fill.a() > 0),
-            _ => false,
-        })
+            .any(|clipped| matches!(&clipped.shape, egui::Shape::Rect(rect) if rect.fill.a() > 0))
     }
 
     #[test]
@@ -399,6 +404,10 @@ mod tests {
         let over_area = settle(&ctx, vec![egui::Event::PointerMoved(inside)]);
         assert_eq!(
             thumb_width(&over_area, tokens::SCROLL_THUMB),
+            Some(painted())
+        );
+        assert_eq!(
+            thumb_width(&over_area, tokens::SCROLL_TRACK),
             Some(tokens::SCROLL_BAR)
         );
 
@@ -414,13 +423,13 @@ mod tests {
             vec![egui::Event::PointerMoved(Pos2::new(100.0, 100.0))],
         );
         let rest = thumb_width(&inside, tokens::SCROLL_THUMB).expect("a shown thumb");
-        assert_eq!(rest, tokens::SCROLL_BAR);
+        assert_eq!(rest, painted());
 
         let over = Pos2::new(400.0 - tokens::SCROLL_EDGE - 2.0, 20.0);
         let hovered = settle(&ctx, vec![egui::Event::PointerMoved(over)]);
         assert_eq!(
             thumb_width(&hovered, tokens::SCROLL_THUMB_HOVER),
-            Some(tokens::SCROLL_BAR)
+            Some(painted())
         );
     }
 

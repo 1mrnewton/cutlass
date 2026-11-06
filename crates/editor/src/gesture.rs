@@ -6,7 +6,7 @@ use cutlass_session::{Request, TrimEdge};
 
 use crate::hit::{BadScale, Pointer, TimelineScale, hit_test, time_at};
 use crate::lane::{Lane, lanes_for};
-use crate::snap::snap;
+use crate::snap::{snap, snap_span};
 
 /// Why a gesture could not name a request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -86,16 +86,15 @@ pub fn move_gesture(draft: &Draft, gesture: &MoveGesture) -> Result<GestureOutco
         Ok(None) => return Ok(GestureOutcome::Miss),
         Err(BadScale) => return Err(GestureError::BadScale),
     };
-    let start = match snap(
+    let start = snap_span(
         draft,
         hit.time,
+        located.segment.target.duration,
         gesture.playhead,
         gesture.snap_threshold,
         Some(&gesture.segment_id),
-    ) {
-        Some(target) => target.time,
-        None => hit.time,
-    };
+    )
+    .map_or(hit.time, |(start, _)| start);
     let rows = lanes_for(draft, gesture.scale.empty_lanes);
     let placed = placement(
         draft,

@@ -2719,8 +2719,7 @@ impl Shell {
         }
         self.pending_moves
             .first()
-            .filter(|pending| pending.snapped)
-            .map(|pending| pending.start)
+            .and_then(|pending| pending.snap_line)
     }
 
     pub fn cancel_clip_drag(&mut self) {
@@ -14346,6 +14345,32 @@ mod tests {
     fn lane_time(desktop: &Shell, time: f64) -> f64 {
         let origin = desktop.view_origin().0 as f64;
         (time - origin) * desktop.pixel_size()
+    }
+
+    #[test]
+    fn a_dragged_clip_snaps_its_end_and_the_line_marks_the_end() {
+        let temp = Temp::new();
+        trim_project(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.seek(Micros(2_000_000));
+        let next = SegmentId::new("next");
+        let y = crate::tokens::LANE_HEIGHT / 2.0;
+        // "next" is half a second long: a start 1 ms early puts its end 1 ms from the playhead.
+        desktop.preview_move(next.clone(), lane_time(&desktop, 1_499_000.0), y);
+        let preview = desktop.move_preview().expect("the drag is showing");
+        assert_eq!(preview.start, Micros(1_500_000));
+        assert_eq!(desktop.snap_line(), Some(Micros(2_000_000)));
+        desktop
+            .drag_segment(next.clone(), lane_time(&desktop, 1_499_000.0), y)
+            .unwrap();
+        let draft = desktop.draft().unwrap();
+        let moved = draft.tracks[0]
+            .segments
+            .iter()
+            .find(|segment| segment.id == next)
+            .unwrap();
+        assert_eq!(moved.target.start, Micros(1_500_000));
     }
 
     #[test]

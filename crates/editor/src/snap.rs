@@ -63,6 +63,35 @@ pub fn snap(
     })
 }
 
+/// Snap a moving clip by whichever edge lands nearer a target.
+///
+/// `start` is where the clip would start and `duration` its length. Returns
+/// the start after the snap and the time the snapped edge sits on, for the
+/// snap line. An end snap that would put the start before zero is left out.
+#[must_use]
+pub fn snap_span(
+    draft: &Draft,
+    start: Micros,
+    duration: Micros,
+    playhead: Micros,
+    threshold: Micros,
+    ignore: Option<&SegmentId>,
+) -> Option<(Micros, Micros)> {
+    let head = snap(draft, start, playhead, threshold, ignore)
+        .map(|target| (target.time.0.abs_diff(start.0), target.time, target.time));
+    let end = Micros(start.0.saturating_add(duration.0));
+    let tail = snap(draft, end, playhead, threshold, ignore).and_then(|target| {
+        let moved = target.time.0.saturating_sub(duration.0);
+        (moved >= 0).then_some((target.time.0.abs_diff(end.0), Micros(moved), target.time))
+    });
+    match (head, tail) {
+        (Some(head), Some(tail)) if tail.0 < head.0 => Some((tail.1, tail.2)),
+        (Some(head), _) => Some((head.1, head.2)),
+        (None, Some(tail)) => Some((tail.1, tail.2)),
+        (None, None) => None,
+    }
+}
+
 /// The middle of a transition window: `window.start + duration / 2`.
 ///
 /// A duration of zero or less is a hard cut and has no middle. `is_overlap`
@@ -452,6 +481,34 @@ mod tests {
         let beat = snap(&draft, Micros(1_100_000), Micros(0), Micros(0), None).unwrap();
         assert_eq!(beat.time, Micros(1_100_000));
         assert_eq!(beat.kind, SnapKind::Beat);
+    }
+
+    #[test]
+    fn a_moving_clip_snaps_by_its_nearer_edge() {
+        let mut draft = Draft::empty("D");
+        draft.duration = Micros(10_000_000);
+        // The end, at 2.95 s, is 50 ms from the playhead at 3 s; the start is far from all.
+        let (start, line) = snap_span(
+            &draft,
+            Micros(1_950_000),
+            Micros(1_000_000),
+            Micros(3_000_000),
+            Micros(100_000),
+            None,
+        )
+        .unwrap();
+        assert_eq!((start, line), (Micros(2_000_000), Micros(3_000_000)));
+        // With both edges in reach the nearer wins: the start is 20 ms from zero.
+        let (start, line) = snap_span(
+            &draft,
+            Micros(20_000),
+            Micros(2_950_000),
+            Micros(3_000_000),
+            Micros(100_000),
+            None,
+        )
+        .unwrap();
+        assert_eq!((start, line), (Micros(0), Micros(0)));
     }
 
     #[test]

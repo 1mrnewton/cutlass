@@ -10,7 +10,7 @@ use cutlass_session::{Request, lane_fits, new_lane_index};
 use crate::gesture::{GestureError, GestureOutcome, MoveGesture, move_gesture};
 use crate::hit::{BadScale, Pointer, hit_test, time_at};
 use crate::lane::{Lane, lanes_for};
-use crate::snap::snap;
+use crate::snap::snap_span;
 
 /// A lane a drag opens.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -28,8 +28,9 @@ pub struct ClipMove {
     /// The target start after snap, in microseconds.
     pub start: Micros,
     pub duration: Micros,
-    /// A snap target, not the pointer, set `start`. Only the dragged clip snaps.
-    pub snapped: bool,
+    /// Where the snap line sits when a target, not the pointer, set `start`:
+    /// the clip's start or its end. Only the dragged clip snaps.
+    pub snap_line: Option<Micros>,
     /// `track_id` is this new lane. The requests insert it first.
     pub new_lane: Option<NewLane>,
 }
@@ -59,7 +60,7 @@ pub enum MovePlan {
         lane: NewLane,
         start: Micros,
         duration: Micros,
-        snapped: bool,
+        snap_line: Option<Micros>,
     },
 }
 
@@ -75,13 +76,13 @@ impl MovePlan {
                 lane,
                 start,
                 duration,
-                snapped,
+                snap_line,
             } => vec![ClipMove {
                 segment_id: segment_id.clone(),
                 track_id: new_track,
                 start,
                 duration,
-                snapped,
+                snap_line,
                 new_lane: Some(lane),
             }],
         }
@@ -107,22 +108,22 @@ pub fn plan_move(
         Ok(None) => return Ok(MovePlan::Miss),
         Err(BadScale) => return Err(GestureError::BadScale),
     };
+    let snapped = snap_span(
+        draft,
+        raw,
+        duration,
+        gesture.playhead,
+        gesture.snap_threshold,
+        Some(dragged),
+    );
     if selection.contains(dragged) && selection.len() > 1 {
-        let start = snap(
-            draft,
-            raw,
-            gesture.playhead,
-            gesture.snap_threshold,
-            Some(dragged),
-        )
-        .map_or(raw, |target| target.time);
-        let start = Micros(start.0.max(0));
+        let start = Micros(snapped.map_or(raw, |(start, _)| start).0.max(0));
         let lead = ClipMove {
             segment_id: dragged.clone(),
             track_id,
             start,
             duration,
-            snapped: start != raw,
+            snap_line: line_for(snapped, start),
             new_lane: None,
         };
         return Ok(MovePlan::Moves(group(draft, lead, origin, selection)));
@@ -137,7 +138,7 @@ pub fn plan_move(
             track_id,
             start,
             duration,
-            snapped: start != raw,
+            snap_line: line_for(snapped, start),
             new_lane: None,
         }])),
         GestureOutcome::Edit(_) => Err(GestureError::UnknownSegment),
@@ -154,10 +155,17 @@ pub fn plan_move(
                 lane: NewLane { kind, index },
                 start,
                 duration,
-                snapped: start != raw,
+                snap_line: line_for(snapped, start),
             })
         }
     }
+}
+
+/// The snap line, when the planned start is the one the snap chose.
+fn line_for(snapped: Option<(Micros, Micros)>, start: Micros) -> Option<Micros> {
+    snapped
+        .filter(|(snapped_start, _)| *snapped_start == start)
+        .map(|(_, line)| line)
 }
 
 /// Plan a body drag dropped between two rows, or past the first or last.
@@ -206,20 +214,20 @@ pub fn plan_move_between(
         return plan_move(draft, &on_row, selection);
     }
     let raw = time_at(gesture.scale.pixel_size, gesture.pointer.x).ok_or(GestureError::BadScale)?;
-    let start = snap(
+    let snapped = snap_span(
         draft,
         raw,
+        duration,
         gesture.playhead,
         gesture.snap_threshold,
         Some(dragged),
-    )
-    .map_or(raw, |target| target.time);
-    let start = Micros(start.0.max(0));
+    );
+    let start = Micros(snapped.map_or(raw, |(start, _)| start).0.max(0));
     Ok(MovePlan::NewLane {
         lane: NewLane { kind, index },
         start,
         duration,
-        snapped: start != raw,
+        snap_line: line_for(snapped, start),
     })
 }
 
@@ -294,7 +302,7 @@ fn group(draft: &Draft, lead: ClipMove, origin: Micros, selection: &[SegmentId])
                 track_id: track.id.clone(),
                 start: segment.target.start,
                 duration: segment.target.duration,
-                snapped: false,
+                snap_line: None,
                 new_lane: None,
             });
         }
@@ -309,7 +317,7 @@ fn group(draft: &Draft, lead: ClipMove, origin: Micros, selection: &[SegmentId])
     for member in &mut members {
         member.start = Micros(member.start.0.saturating_add(delta));
         if member.segment_id == lead.segment_id {
-            member.snapped = lead.snapped && member.start == lead.start;
+            member.snap_line = lead.snap_line.filter(|_| member.start == lead.start);
         }
     }
     members.sort_by_key(|member| member.segment_id != lead.segment_id);
@@ -405,7 +413,7 @@ mod tests {
                 track_id: TrackId::new("main"),
                 start: Micros(2_000_000),
                 duration: Micros(1_000_000),
-                snapped: false,
+                snap_line: None,
                 new_lane: None,
             }]
         );
@@ -425,7 +433,7 @@ mod tests {
                 },
                 start: Micros(0),
                 duration: Micros(1_000_000),
-                snapped: false,
+                snap_line: Some(Micros(0)),
             }
         );
         let lane = TrackId::new("lane");
@@ -499,7 +507,7 @@ mod tests {
                 },
                 start: Micros(4_000_000),
                 duration: Micros(1_000_000),
-                snapped: false,
+                snap_line: None,
             }
         );
         let moves = plan.into_moves(&SegmentId::new("b"), TrackId::new("lane"));
@@ -535,7 +543,7 @@ mod tests {
                 track_id: TrackId::new("main"),
                 start: Micros(3_000_000),
                 duration: Micros(1_000_000),
-                snapped: false,
+                snap_line: None,
                 new_lane: None,
             }]
         );
@@ -549,7 +557,7 @@ mod tests {
                 track_id: TrackId::new("sound"),
                 start: Micros(3_000_000),
                 duration: Micros(500_000),
-                snapped: false,
+                snap_line: None,
                 new_lane: None,
             }]
         );
@@ -570,7 +578,7 @@ mod tests {
                 },
                 start: Micros(0),
                 duration: Micros(1_000_000),
-                snapped: false,
+                snap_line: Some(Micros(0)),
             }
         );
     }
@@ -620,7 +628,7 @@ mod tests {
             track_id: TrackId::new("sound"),
             start: Micros(2_000_000),
             duration: Micros(500_000),
-            snapped: false,
+            snap_line: None,
             new_lane: None,
         };
         let requests = move_requests(session.draft(), &[onto_sound]);
@@ -691,8 +699,8 @@ mod tests {
         let moves = moves(plan);
         assert_eq!(moves[0].segment_id, SegmentId::new("c"));
         assert_eq!(moves[0].start, Micros(4_000_000));
-        assert!(moves[0].snapped);
-        assert!(moves.iter().skip(1).all(|plan| !plan.snapped));
+        assert!(moves[0].snap_line.is_some());
+        assert!(moves.iter().skip(1).all(|plan| plan.snap_line.is_none()));
     }
 
     #[test]

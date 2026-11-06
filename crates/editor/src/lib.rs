@@ -84,7 +84,7 @@ pub use project_choices::{
 pub use reorder::{place_of, reorder_start};
 pub use ripple::{close_gap, gap_at, ripple_delete};
 pub use ruler::{RulerStep, Tick, clock, ruler_step, ruler_ticks, zoom_ceiling};
-pub use snap::{SnapKind, SnapTarget, snap, transition_middle};
+pub use snap::{SnapKind, SnapTarget, snap, snap_span, transition_middle};
 pub use stage::{
     MAX_SCALE, MIN_SCALE, NoText, Pose, SCALE_REACH, SNAP_REACH, StageAlign, StageBox,
     StageGesture, StageGuides, StageStep, TURN_REACH, TextSizes, canvas_size, keyed_pose,

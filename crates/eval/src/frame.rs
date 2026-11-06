@@ -1063,6 +1063,77 @@ mod tests {
     }
 
     #[test]
+    fn a_selected_clip_keeps_the_object_and_shows_the_canvas_around_it() {
+        let mut draft = color_clip("0xFFFF0000", false);
+        draft.canvas_config.width = 8;
+        draft.canvas_config.height = 8;
+        draft.canvas_config.background = Some("#808080".to_owned());
+        // The object is the left half of an 8 by 8 frame.
+        let alpha: Vec<u8> = (0..64).map(|i| if i % 8 < 4 { 255 } else { 0 }).collect();
+        let selection =
+            cutlass_effects::Selection::from_alpha(8, 8, &alpha, cutlass_model::Micros(0)).unwrap();
+        let mut session = cutlass_session::Session::open(draft);
+        session
+            .apply(
+                0,
+                &[cutlass_session::Request::SetSelection {
+                    segment_id: cutlass_model::SegmentId::new("segment"),
+                    material_id: "selection".into(),
+                    selection: Some(selection.clone()),
+                }],
+            )
+            .unwrap();
+        let at = |frame: &[u8], x: usize, y: usize| {
+            let index = (y * 8 + x) * 4;
+            [
+                frame[index],
+                frame[index + 1],
+                frame[index + 2],
+                frame[index + 3],
+            ]
+        };
+        let frame = pixels(session.draft(), 0);
+        for y in 0..8 {
+            assert_eq!(at(&frame, 1, y), [255, 0, 0, 255], "row {y}");
+            assert_eq!(at(&frame, 6, y), [128, 128, 128, 255], "row {y}");
+        }
+
+        // Inverted, the clip keeps everything but the object.
+        let mut session = cutlass_session::Session::open(session.draft().clone());
+        session
+            .apply(
+                0,
+                &[cutlass_session::Request::SetSelection {
+                    segment_id: cutlass_model::SegmentId::new("segment"),
+                    material_id: "inverted".into(),
+                    selection: Some(cutlass_effects::Selection {
+                        invert: true,
+                        ..selection
+                    }),
+                }],
+            )
+            .unwrap();
+        let frame = pixels(session.draft(), 0);
+        assert_eq!(at(&frame, 1, 4), [128, 128, 128, 255]);
+        assert_eq!(at(&frame, 6, 4), [255, 0, 0, 255]);
+
+        // Taken off, the whole clip shows again.
+        session
+            .apply(
+                session.revision(),
+                &[cutlass_session::Request::SetSelection {
+                    segment_id: cutlass_model::SegmentId::new("segment"),
+                    material_id: "gone".into(),
+                    selection: None,
+                }],
+            )
+            .unwrap();
+        let frame = pixels(session.draft(), 0);
+        assert_eq!(at(&frame, 6, 4), [255, 0, 0, 255]);
+        assert_eq!(at(&frame, 1, 4), [255, 0, 0, 255]);
+    }
+
+    #[test]
     fn a_compound_clip_draws_what_its_clips_drew_and_ungroups_to_the_same() {
         let mut draft = color_clip("0xFFFF0000", false);
         draft.materials.material_colors.push(MaterialColorConfig {

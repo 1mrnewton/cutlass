@@ -1711,15 +1711,15 @@ fn library_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rec
 
 fn shelf_rail(ui: &mut Ui, view: &mut ViewState, rect: Rect) {
     let inner = Rect::from_min_max(
-        Pos2::new(rect.left() + 8.0, rect.top()),
-        Pos2::new(rect.right() - 8.0, rect.bottom()),
+        Pos2::new(rect.left() + 6.0, rect.top()),
+        Pos2::new(rect.right() - 6.0, rect.bottom()),
     );
     let mut column = ui.new_child(egui::UiBuilder::new().max_rect(inner));
     ScrollArea::vertical()
         .id_salt("library-rail")
         .show(&mut column, |ui| {
             ui.add_space(8.0);
-            ui.spacing_mut().item_spacing.y = 2.0;
+            ui.spacing_mut().item_spacing.y = 4.0;
             for shelf in Shelf::ALL {
                 if shelf_button(ui, shelf, view.library_shelf == shelf).clicked() {
                     view.library_shelf = shelf;
@@ -1728,15 +1728,29 @@ fn shelf_rail(ui: &mut Ui, view: &mut ViewState, rect: Rect) {
         });
 }
 
+/// An icon with its name under it; the open shelf sits on a tile.
 fn shelf_button(ui: &mut Ui, shelf: Shelf, active: bool) -> egui::Response {
     let (rect, response) =
-        ui.allocate_exact_size(Vec2::new(ui.available_width(), 44.0), Sense::click());
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), 52.0), Sense::click());
     if active {
         ui.painter()
             .rect_filled(rect, CornerRadius::same(10), tokens::ACTIVE);
     }
-    let color = if active { tokens::TEXT } else { tokens::FAINT };
-    let mark = Rect::from_center_size(rect.center(), Vec2::splat(20.0));
+    let color = if active {
+        tokens::TEXT
+    } else if response.hovered() {
+        tokens::MUTED
+    } else {
+        tokens::FAINT
+    };
+    let mark = Rect::from_center_size(rect.center() - Vec2::new(0.0, 8.0), Vec2::splat(20.0));
+    ui.painter().text(
+        Pos2::new(rect.center().x, rect.bottom() - 6.0),
+        Align2::CENTER_BOTTOM,
+        shelf.label(),
+        FontId::proportional(10.5),
+        color,
+    );
     if let Err(error) = icons::paint(ui.painter(), mark, shelf.icon(), color) {
         ui.painter().text(
             rect.center(),

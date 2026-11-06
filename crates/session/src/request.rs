@@ -388,6 +388,13 @@ pub enum Request {
         material_id: MaterialId,
         mask: Option<cutlass_effects::Mask>,
     },
+    /// Cut the video clip down to `selection`, the object click-to-select
+    /// found, or take its selection off with `None`.
+    SetSelection {
+        segment_id: SegmentId,
+        material_id: MaterialId,
+        selection: Option<cutlass_effects::Selection>,
+    },
     /// Limit the clip's colour work, or an adjustment layer, to `mask`, or
     /// take that limit off with `None`.
     SetColorMask {

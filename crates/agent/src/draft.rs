@@ -495,6 +495,7 @@ pub fn request_name(request: &Request) -> &'static str {
         Request::SetLut { .. } => "set_lut",
         Request::SetChroma { .. } => "set_chroma",
         Request::SetMask { .. } => "set_mask",
+        Request::SetSelection { .. } => "set_selection",
         Request::SetColorMask { .. } => "set_color_mask",
         Request::SetEffectStrength { .. } => "set_effect_strength",
         Request::SetKeyframes { .. } => "set_keyframes",

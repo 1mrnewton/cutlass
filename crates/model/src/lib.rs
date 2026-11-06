@@ -43,8 +43,9 @@ pub use enums::{
 pub use graphs::{GRAPH_PRESETS, GraphPreset};
 pub use id::{DraftId, MaterialId, SegmentId, TrackId};
 pub use keyframe::{
-    ALPHA_KEY, CommonKeyframe, CommonKeyframeGroup, GraphPoint, KeyframeGraph, POSE_KEYS, add_keys,
-    clip_at, key_offsets, put_key, remove_keys, sample, shift_keys,
+    ALPHA_KEY, CommonKeyframe, CommonKeyframeGroup, GraphPoint, KeyframeGraph, MASK_KEYS,
+    POSE_KEYS, VOLUME_KEY, add_keys, clip_at, is_keyable, is_pose_key, key_offsets,
+    key_offsets_where, put_key, remove_keys, remove_keys_where, sample, shift_keys,
 };
 pub use linkage::{KindSwitches, LinkageSettings, linkage_from_biz};
 pub use materials::{

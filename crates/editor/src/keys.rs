@@ -1,7 +1,9 @@
 //! A clip's keyframes as the timeline shows them, the keyframe button and
 //! the steps between keys, and the Graphs panel's curves.
 
-use cutlass_model::{Draft, GRAPH_PRESETS, GraphPreset, KeyframeGraph, key_offsets};
+use cutlass_model::{
+    Draft, GRAPH_PRESETS, GraphPreset, KeyframeGraph, is_pose_key, key_offsets, key_offsets_where,
+};
 use cutlass_session::{Micros, Request, SegmentId};
 
 use crate::stage::{TextSizes, stage_box};
@@ -46,7 +48,7 @@ impl ClipKeys {
             .flat_map(|track| &track.segments)
             .find(|segment| segment.id == *segment_id)?;
         let start = segment.target.start;
-        let times: Vec<Micros> = key_offsets(segment)
+        let times: Vec<Micros> = key_offsets_where(segment, is_pose_key)
             .into_iter()
             .map(|offset| Micros(start.0.saturating_add(offset.0)))
             .collect();
@@ -67,6 +69,7 @@ impl ClipKeys {
             segment
                 .common_keyframes
                 .iter()
+                .filter(|group| is_pose_key(&group.property_type))
                 .flat_map(|group| &group.keyframe_list)
                 .filter(|key| key.time_offset == offset && !key.graph_id.is_empty())
                 .find_map(|key| {

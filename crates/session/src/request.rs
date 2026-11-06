@@ -442,7 +442,21 @@ pub enum Request {
         segment_id: SegmentId,
         offset: Micros,
     },
-    /// Remove every key at `offset` from the clip's start.
+    /// Key each named setting at `offset` from the clip's start: the
+    /// volume (`KFTypeVolume`) or the mask (`KFTypeCommonMask*`), in the
+    /// setting's own units. A key there takes the new value.
+    KeyValues {
+        segment_id: SegmentId,
+        offset: Micros,
+        values: Vec<(String, f64)>,
+    },
+    /// Take the keys on the named settings at `offset` off.
+    UnkeyValues {
+        segment_id: SegmentId,
+        offset: Micros,
+        properties: Vec<String>,
+    },
+    /// Remove the pose keys at `offset` from the clip's start.
     RemoveKeyframe {
         segment_id: SegmentId,
         offset: Micros,

@@ -129,6 +129,9 @@ pub enum EditError {
     KeyTime,
     /// No key is at that time.
     NoKey,
+    /// A keyed value names a setting nothing plays a key on, or is not a
+    /// finite number.
+    KeyValue,
     /// The curve is not one the Graphs panel offers.
     Graph,
     /// The animation is not one the Animations panel offers for that side.
@@ -520,6 +523,16 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
         Request::RemoveKeyframe { segment_id, offset } => {
             keyframe::remove_keyframe(draft, segment_id, *offset)
         }
+        Request::KeyValues {
+            segment_id,
+            offset,
+            values,
+        } => keyframe::key_values(draft, segment_id, *offset, values),
+        Request::UnkeyValues {
+            segment_id,
+            offset,
+            properties,
+        } => keyframe::unkey_values(draft, segment_id, *offset, properties),
         Request::SetKeyframeGraph {
             segment_id,
             offset,

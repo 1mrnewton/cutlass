@@ -13,9 +13,7 @@
 //! is drawn at, which only a host with the faces knows: it answers through
 //! [`TextSizes`].
 
-use cutlass_model::{
-    Crop, Draft, KeyframeGraph, MaterialRef, Segment, TrackAttribute, clip_at, key_offsets,
-};
+use cutlass_model::{Crop, Draft, KeyframeGraph, MaterialRef, Segment, TrackAttribute, clip_at};
 use cutlass_session::{Micros, Request, SegmentId};
 
 /// A centre or an edge snaps within this share of the canvas's short side.
@@ -417,7 +415,8 @@ pub fn keyed_pose(draft: &Draft, segment_id: &SegmentId, time: Micros) -> Option
 fn key_at(segment: &Segment, time: Micros) -> Option<Micros> {
     let offset = time.0.checked_sub(segment.target.start.0)?;
     let on = (0..=segment.target.duration.0).contains(&offset);
-    (on && !key_offsets(segment).is_empty()).then_some(Micros(offset))
+    (on && !cutlass_model::key_offsets_where(segment, cutlass_model::is_pose_key).is_empty())
+        .then_some(Micros(offset))
 }
 
 /// The clip's placement at `time`. Keys that do not read leave the stored one.

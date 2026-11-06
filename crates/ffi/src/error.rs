@@ -141,6 +141,7 @@ fn edit_cause(error: EditError) -> String {
         EditError::Opacity => "the opacity must be from zero to one".to_owned(),
         EditError::KeyTime => "a keyframe must be on its clip".to_owned(),
         EditError::NoKey => "no keyframe is there".to_owned(),
+        EditError::KeyValue => "that setting cannot be keyed to that value".to_owned(),
         EditError::Graph => "that curve is not one the app offers".to_owned(),
         EditError::Animation => "that animation is not one the app offers".to_owned(),
         EditError::NotText => "a text style belongs on text".to_owned(),

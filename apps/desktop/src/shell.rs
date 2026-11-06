@@ -6799,8 +6799,14 @@ impl Shell {
         self.draft().ok_or(ShellError::NoProject)
     }
 
+    /// A new id `prefix-N`, past every `prefix-N` the open draft already
+    /// holds. The counter starts at zero each launch, so a reopened project
+    /// would otherwise get ids it already uses and the edit would be refused.
     fn fresh(&mut self, prefix: &str) -> String {
-        self.next_id = self.next_id.saturating_add(1);
+        let taken = self
+            .draft()
+            .map_or(0, |draft| highest_suffix(draft, prefix));
+        self.next_id = self.next_id.max(taken).saturating_add(1);
         format!("{prefix}-{}", self.next_id)
     }
 
@@ -7169,6 +7175,39 @@ pub const EMPTY_SPAN: Micros = Micros(10_000_000);
 
 /// [`EMPTY_SPAN`] across a third of `lane_width`, no closer than the
 /// finest ruler step.
+/// The largest `N` of any string `prefix-N` in `draft`, or zero.
+fn highest_suffix(draft: &Draft, prefix: &str) -> u64 {
+    fn walk(value: &serde_json::Value, prefix: &str, best: &mut u64) {
+        match value {
+            serde_json::Value::String(text) => {
+                let number = text
+                    .strip_prefix(prefix)
+                    .and_then(|rest| rest.strip_prefix('-'))
+                    .and_then(|digits| digits.parse::<u64>().ok());
+                if let Some(number) = number {
+                    *best = (*best).max(number);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    walk(item, prefix, best);
+                }
+            }
+            serde_json::Value::Object(map) => {
+                for item in map.values() {
+                    walk(item, prefix, best);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut best = 0;
+    if let Ok(value) = serde_json::to_value(draft) {
+        walk(&value, prefix, &mut best);
+    }
+    best
+}
+
 fn empty_pixel_size(lane_width: f64, rate: FrameRate) -> Option<f64> {
     let size = lane_width / 3.0 / EMPTY_SPAN.0 as f64;
     if !size.is_finite() || size <= 0.0 {
@@ -14445,6 +14484,38 @@ mod tests {
 
         desktop.undo().unwrap();
         assert_eq!(desktop.draft().unwrap().tracks, before);
+    }
+
+    #[test]
+    fn a_reopened_project_opens_a_new_lane_without_reusing_a_lane_id() {
+        let temp = Temp::new();
+        trim_project(&temp.path);
+        let next = SegmentId::new("next");
+        let y = crate::tokens::LANE_HEIGHT / 2.0;
+        let mut first = shell();
+        first.open_folder(&temp.path).unwrap();
+        let x = lane_time(&first, 400_000.0);
+        first.drag_segment(next.clone(), x, y).unwrap();
+        first.save().unwrap();
+        let lanes = first.draft().unwrap().tracks.len();
+        drop(first);
+
+        // A new launch counts ids from zero again.
+        let mut again = shell();
+        again.open_folder(&temp.path).unwrap();
+        let main_clip = again
+            .draft()
+            .unwrap()
+            .tracks
+            .iter()
+            .find(|track| track.is_main())
+            .and_then(|track| track.segments.first())
+            .map(|segment| segment.id.clone())
+            .unwrap();
+        // Onto the overlay row, over "next": no room, so a lane opens.
+        let x = lane_time(&again, 400_000.0);
+        again.drag_segment(main_clip, x, y).unwrap();
+        assert_eq!(again.draft().unwrap().tracks.len(), lanes + 1);
     }
 
     #[test]

@@ -23,12 +23,16 @@ mod blur;
 mod effect;
 mod frame;
 mod layer;
+mod mix;
 mod target;
+mod transition;
+mod vector;
 
+pub use cutlass_decode::Surface;
 pub use cutlass_effects::{Block, Recipe, Step};
 pub use cutlass_gpu::{Affine, Placement};
 pub use frame::frame_layers;
-pub use layer::{Layer, Plane, Planes, Rgba};
+pub use layer::{Layer, Plane, PlaneSource, Planes, Rgba};
 pub use target::Canvas;
 pub use wgpu;
 
@@ -77,7 +81,19 @@ pub struct Renderer {
     layers: layer::Pipelines,
     blurs: blur::Blurs,
     effects: effect::Effects,
+    mix: mix::Mix,
+    transition: transition::Transition,
+    vector: vector::Vector,
+    import: Option<SurfaceImport>,
 }
+
+/// Imports a platform surface on `device` as two textures the layer shader
+/// samples in place: luma as [`wgpu::TextureFormat::R8Unorm`] and chroma as
+/// [`wgpu::TextureFormat::Rg8Unorm`], Cb in red and Cr in green, at half
+/// size. `None` when the surface is not one this import knows; the renderer
+/// then draws the bytes the surface copies out.
+pub type SurfaceImport =
+    std::sync::Arc<dyn Fn(&wgpu::Device, &Surface) -> Option<[wgpu::Texture; 2]> + Send + Sync>;
 
 impl Renderer {
     /// A renderer on a device someone else opened, such as eframe's.
@@ -86,13 +102,25 @@ impl Renderer {
         let layers = layer::Pipelines::new(&device);
         let blurs = blur::Blurs::new(&device);
         let effects = effect::Effects::new(&device);
+        let mix = mix::Mix::new(&device);
+        let transition = transition::Transition::new(&device);
+        let vector = vector::Vector::new(&device);
         Self {
             device,
             queue,
             layers,
             blurs,
             effects,
+            mix,
+            transition,
+            vector,
+            import: None,
         }
+    }
+
+    /// Sample platform surfaces in place through `import` from now on.
+    pub fn set_surface_import(&mut self, import: SurfaceImport) {
+        self.import = Some(import);
     }
 
     /// A renderer on its own device, for export and tests.
@@ -169,7 +197,12 @@ impl Renderer {
                     bound.push(self.layers.bind(device, queue, &uploaded, *placement));
                 }
                 Layer::Yuv(planes, placement) => {
-                    let uploaded = layer::Pipelines::upload_planes(device, queue, planes)?;
+                    let uploaded = layer::Pipelines::upload_planes(
+                        device,
+                        queue,
+                        planes,
+                        self.import.as_ref(),
+                    )?;
                     bound.push(self.layers.bind(device, queue, &uploaded, *placement));
                 }
                 Layer::YuvOverBlur {
@@ -178,7 +211,12 @@ impl Renderer {
                     cover,
                     radius,
                 } => {
-                    let uploaded = layer::Pipelines::upload_planes(device, queue, planes)?;
+                    let uploaded = layer::Pipelines::upload_planes(
+                        device,
+                        queue,
+                        planes,
+                        self.import.as_ref(),
+                    )?;
                     let backdrop = self.blurred(encoder, &uploaded, *cover, *radius, size);
                     bound.push(self.layers.bind(
                         device,
@@ -206,6 +244,97 @@ impl Renderer {
                         views: [view.clone(), view.clone(), view],
                         size: *inner,
                         yuv: false,
+                        tone: cutlass_gpu::YuvTone::NONE,
+                        interleaved: false,
+                    };
+                    bound.push(self.layers.bind(device, queue, &uploaded, *placement));
+                }
+                Layer::Blend {
+                    mode,
+                    layers: inner,
+                } => {
+                    // The clip alone, what is below it, then the two mixed;
+                    // the mix is the bottom layer from here on.
+                    let top = blur::scratch(device, size);
+                    self.draw_into(encoder, &top, size, inner)?;
+                    let below = blur::scratch(device, size);
+                    Self::paint(&self.layers, encoder, &below, &bound);
+                    let mixed = blur::scratch(device, size);
+                    self.mix
+                        .run(device, queue, encoder, &top, &below, &mixed, *mode);
+                    let uploaded = layer::Uploaded {
+                        views: [mixed.clone(), mixed.clone(), mixed],
+                        size,
+                        yuv: false,
+                        tone: cutlass_gpu::YuvTone::NONE,
+                        interleaved: false,
+                    };
+                    bound.clear();
+                    bound.push(self.layers.bind(
+                        device,
+                        queue,
+                        &uploaded,
+                        Placement::canvas(size.0, size.1),
+                    ));
+                }
+                Layer::Transition {
+                    kind,
+                    t,
+                    outgoing,
+                    incoming,
+                } => {
+                    for side in [outgoing, incoming] {
+                        if (side.width, side.height) != size {
+                            return Err(RenderError::Size {
+                                width: side.width,
+                                height: side.height,
+                            });
+                        }
+                    }
+                    let canvas = Placement::canvas(size.0, size.1);
+                    let mut outgoing = layer::Pipelines::upload_rgba(device, queue, outgoing)?;
+                    let mut incoming = layer::Pipelines::upload_rgba(device, queue, incoming)?;
+                    let radius = cutlass_effects::transition_blur_radius(size.0, size.1, *t);
+                    if *kind == cutlass_effects::TransitionKind::Blur && radius > 0 {
+                        outgoing = self.blurred(encoder, &outgoing, canvas, radius, size);
+                        incoming = self.blurred(encoder, &incoming, canvas, radius, size);
+                    }
+                    let mixed = blur::scratch(device, size);
+                    self.transition.run(
+                        device,
+                        queue,
+                        encoder,
+                        &outgoing.views[0],
+                        &incoming.views[0],
+                        &mixed,
+                        (*kind, *t, size),
+                    );
+                    let uploaded = layer::Uploaded {
+                        views: [mixed.clone(), mixed.clone(), mixed],
+                        size,
+                        yuv: false,
+                        tone: cutlass_gpu::YuvTone::NONE,
+                        interleaved: false,
+                    };
+                    bound.push(self.layers.bind(device, queue, &uploaded, canvas));
+                }
+                Layer::Vector { scene, placement } => {
+                    let inner = (scene.width, scene.height);
+                    let limit = device.limits().max_texture_dimension_2d;
+                    if inner.0 == 0 || inner.1 == 0 || inner.0 > limit || inner.1 > limit {
+                        return Err(RenderError::Size {
+                            width: inner.0,
+                            height: inner.1,
+                        });
+                    }
+                    let view = blur::scratch(device, inner);
+                    self.vector.draw(device, queue, encoder, scene, &view)?;
+                    let uploaded = layer::Uploaded {
+                        views: [view.clone(), view.clone(), view],
+                        size: inner,
+                        yuv: false,
+                        tone: cutlass_gpu::YuvTone::NONE,
+                        interleaved: false,
                     };
                     bound.push(self.layers.bind(device, queue, &uploaded, *placement));
                 }
@@ -226,6 +355,8 @@ impl Renderer {
                         views: [result.clone(), result.clone(), result],
                         size,
                         yuv: false,
+                        tone: cutlass_gpu::YuvTone::NONE,
+                        interleaved: false,
                     };
                     bound.clear();
                     bound.push(self.layers.bind(
@@ -308,6 +439,8 @@ impl Renderer {
             views: [first.clone(), first.clone(), first],
             size,
             yuv: false,
+            tone: cutlass_gpu::YuvTone::NONE,
+            interleaved: false,
         }
     }
 

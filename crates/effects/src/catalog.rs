@@ -1,6 +1,6 @@
 //! Stable package ids, still posters, and preview URLs.
 //!
-//! Implemented here: five blend stand-ins, three distortion and glitch
+//! Implemented here: the thirteen blend modes, three distortion and glitch
 //! stand-ins with a defined CPU result (invert, contrast, and pixelate),
 //! three text-animation packages whose kinds are in, out, and loop, and one
 //! fade transition. Pixelate's block is [`PIXELATE_BLOCK`] pixels on each
@@ -15,7 +15,7 @@
 //! checksum does not authorize running package bytes. Text-animation kinds
 //! are parameters evaluated elsewhere; this module does not write a draft.
 //!
-//! [`entry`] walks the twelve rows in [`entries`] order. That scan allocates
+//! [`entry`] walks the twenty rows in [`entries`] order. That scan allocates
 //! nothing.
 
 use cutlass_model::AnimType;
@@ -30,6 +30,22 @@ pub const SCREEN: &str = "blend-screen";
 pub const ADD: &str = "blend-add";
 /// Stable id for the difference blend stand-in.
 pub const DIFFERENCE: &str = "blend-difference";
+/// Stable id for the darken blend.
+pub const DARKEN: &str = "blend-darken";
+/// Stable id for the color burn blend.
+pub const COLOR_BURN: &str = "blend-color-burn";
+/// Stable id for the lighten blend.
+pub const LIGHTEN: &str = "blend-lighten";
+/// Stable id for the color dodge blend.
+pub const COLOR_DODGE: &str = "blend-color-dodge";
+/// Stable id for the overlay blend.
+pub const OVERLAY: &str = "blend-overlay";
+/// Stable id for the soft light blend.
+pub const SOFT_LIGHT: &str = "blend-soft-light";
+/// Stable id for the hard light blend.
+pub const HARD_LIGHT: &str = "blend-hard-light";
+/// Stable id for the exclusion blend.
+pub const EXCLUSION: &str = "blend-exclusion";
 /// Stable id for the invert distortion stand-in.
 pub const INVERT: &str = "distort-invert";
 /// Stable id for the contrast distortion stand-in.
@@ -61,6 +77,22 @@ pub enum BlendMode {
     Add,
     /// Difference.
     Difference,
+    /// The darker of the two.
+    Darken,
+    /// Darkens the backdrop by the source.
+    ColorBurn,
+    /// The lighter of the two.
+    Lighten,
+    /// Brightens the backdrop by the source.
+    ColorDodge,
+    /// Multiply or screen, by the backdrop.
+    Overlay,
+    /// A gentle hard light.
+    SoftLight,
+    /// Multiply or screen, by the source.
+    HardLight,
+    /// Like difference, lower in contrast.
+    Exclusion,
 }
 
 /// Distortion stand-in with a defined CPU result.
@@ -110,7 +142,7 @@ pub struct CatalogEntry {
     pub kind: PackageKind,
 }
 
-static ENTRIES: [CatalogEntry; 12] = [
+static ENTRIES: [CatalogEntry; 20] = [
     CatalogEntry {
         id: SOURCE_OVER,
         poster: "posters/blend-source-over.png",
@@ -140,6 +172,54 @@ static ENTRIES: [CatalogEntry; 12] = [
         poster: "posters/blend-difference.png",
         preview_url: "https://assets.invalid/effects/blend-difference.mp4",
         kind: PackageKind::Blend(BlendMode::Difference),
+    },
+    CatalogEntry {
+        id: DARKEN,
+        poster: "posters/blend-darken.png",
+        preview_url: "https://assets.invalid/effects/blend-darken.mp4",
+        kind: PackageKind::Blend(BlendMode::Darken),
+    },
+    CatalogEntry {
+        id: COLOR_BURN,
+        poster: "posters/blend-color-burn.png",
+        preview_url: "https://assets.invalid/effects/blend-color-burn.mp4",
+        kind: PackageKind::Blend(BlendMode::ColorBurn),
+    },
+    CatalogEntry {
+        id: LIGHTEN,
+        poster: "posters/blend-lighten.png",
+        preview_url: "https://assets.invalid/effects/blend-lighten.mp4",
+        kind: PackageKind::Blend(BlendMode::Lighten),
+    },
+    CatalogEntry {
+        id: COLOR_DODGE,
+        poster: "posters/blend-color-dodge.png",
+        preview_url: "https://assets.invalid/effects/blend-color-dodge.mp4",
+        kind: PackageKind::Blend(BlendMode::ColorDodge),
+    },
+    CatalogEntry {
+        id: OVERLAY,
+        poster: "posters/blend-overlay.png",
+        preview_url: "https://assets.invalid/effects/blend-overlay.mp4",
+        kind: PackageKind::Blend(BlendMode::Overlay),
+    },
+    CatalogEntry {
+        id: SOFT_LIGHT,
+        poster: "posters/blend-soft-light.png",
+        preview_url: "https://assets.invalid/effects/blend-soft-light.mp4",
+        kind: PackageKind::Blend(BlendMode::SoftLight),
+    },
+    CatalogEntry {
+        id: HARD_LIGHT,
+        poster: "posters/blend-hard-light.png",
+        preview_url: "https://assets.invalid/effects/blend-hard-light.mp4",
+        kind: PackageKind::Blend(BlendMode::HardLight),
+    },
+    CatalogEntry {
+        id: EXCLUSION,
+        poster: "posters/blend-exclusion.png",
+        preview_url: "https://assets.invalid/effects/blend-exclusion.mp4",
+        kind: PackageKind::Blend(BlendMode::Exclusion),
     },
     CatalogEntry {
         id: INVERT,
@@ -187,14 +267,14 @@ static ENTRIES: [CatalogEntry; 12] = [
 
 /// The row for `id`, or nothing when the id is unknown.
 ///
-/// The walk is the twelve rows from [`entries`], in that order. It allocates
+/// The walk is the twenty rows from [`entries`], in that order. It allocates
 /// nothing.
 #[must_use]
 pub fn entry(id: &str) -> Option<&'static CatalogEntry> {
     entries().iter().find(|row| row.id == id)
 }
 
-/// The twelve catalog rows, in stable order.
+/// The twenty catalog rows, in stable order.
 #[must_use]
 pub fn entries() -> &'static [CatalogEntry] {
     &ENTRIES
@@ -229,13 +309,21 @@ mod tests {
     }
 
     #[test]
-    fn entries_follow_the_twelve_ids() {
+    fn entries_follow_the_twenty_ids() {
         let ids = [
             SOURCE_OVER,
             MULTIPLY,
             SCREEN,
             ADD,
             DIFFERENCE,
+            super::DARKEN,
+            super::COLOR_BURN,
+            super::LIGHTEN,
+            super::COLOR_DODGE,
+            super::OVERLAY,
+            super::SOFT_LIGHT,
+            super::HARD_LIGHT,
+            super::EXCLUSION,
             INVERT,
             CONTRAST,
             PIXELATE,
@@ -244,7 +332,7 @@ mod tests {
             ANIM_LOOP,
             TRANSITION_FADE,
         ];
-        assert_eq!(entries().len(), 12);
+        assert_eq!(entries().len(), 20);
         assert_eq!(entries().len(), ids.len());
         for (row, id) in entries().iter().zip(ids) {
             assert_eq!(row.id, id);

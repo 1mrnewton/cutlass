@@ -1,13 +1,32 @@
 //! Tightly packed 8-bit 4:2:0 used inside this codec.
 //!
 //! Chroma edges are the luma edges rounded up, then halved, so an odd luma
-//! size stays representable. The shared picture output is even 4:2:0 only.
+//! size stays representable. The shared picture output is even 4:2:0, or one
+//! gray plane when the sequence is monochrome.
 //! Conversion happens at the trait boundary.
 
 use cutlass_decode::{
-    CodecError, ColorPrimaries, Output, PictureInfo, PictureOutput, PictureSamples, PixelFormat,
-    Transfer,
+    ChromaSamplePosition, CodecError, ColorMatrix, ColorPrimaries, Output, PictureInfo,
+    PictureOutput, PictureSamples, PixelFormat, Transfer,
 };
+
+/// Colour and display size copied onto a shown picture.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ShownTags {
+    pub bit_depth: u8,
+    pub render_width: u32,
+    pub render_height: u32,
+    pub primaries: u8,
+    pub transfer: u8,
+    pub matrix: u8,
+    pub chroma_position: u8,
+    pub num_units_in_display_tick: u32,
+    pub time_scale: u32,
+    pub equal_picture_interval: bool,
+    pub num_ticks_per_picture_minus_1: Option<u32>,
+    pub num_units_in_decoding_tick: u32,
+    pub seq_level_idx: u8,
+}
 
 /// One tightly packed sample plane. `samples.len()` is `width * height`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -86,6 +105,37 @@ impl Yuv420 {
         }
         Ok(Self { y, u, v })
     }
+
+    /// Chroma edges follow the sequence subsampling flags. Both flags set is 4:2:0.
+    /// Both clear is 4:4:4.
+    pub fn subsampled(
+        y: Plane,
+        u: Plane,
+        v: Plane,
+        sub_x: bool,
+        sub_y: bool,
+    ) -> Result<Self, CodecError> {
+        let chroma_w = if sub_x {
+            y.width().div_ceil(2)
+        } else {
+            y.width()
+        };
+        let chroma_h = if sub_y {
+            y.height().div_ceil(2)
+        } else {
+            y.height()
+        };
+        if u.width() != chroma_w
+            || v.width() != chroma_w
+            || u.height() != chroma_h
+            || v.height() != chroma_h
+        {
+            return Err(CodecError::InvalidApi {
+                what: "chroma size",
+            });
+        }
+        Ok(Self { y, u, v })
+    }
 }
 
 /// One picture presented to this encoder, beside the shared still and frame inputs.
@@ -149,9 +199,97 @@ impl AsView for Output {
     }
 }
 
+/// Pack the luma plane. A monochrome sequence has no chroma samples to publish.
+pub fn gray_output(
+    picture: &Yuv420,
+    tags: &ShownTags,
+    pts: i64,
+    timescale: u32,
+) -> Result<PictureOutput, CodecError> {
+    PictureOutput::cpu(
+        described(
+            picture.y.width(),
+            picture.y.height(),
+            PixelFormat::Gray8,
+            tags,
+        ),
+        picture.y.samples().to_vec(),
+        pts,
+        timescale,
+    )
+}
+
+/// Pack one 10-bit luma plane. A monochrome sequence has no chroma samples.
+pub fn gray_wide(
+    y: &[u16],
+    width: u32,
+    height: u32,
+    tags: &ShownTags,
+    pts: i64,
+    timescale: u32,
+) -> Result<PictureOutput, CodecError> {
+    let mut bytes = Vec::new();
+    pack_le(y, &mut bytes);
+    PictureOutput::cpu(
+        described(width, height, PixelFormat::Gray10, tags),
+        bytes,
+        pts,
+        timescale,
+    )
+}
+
+/// Pack 10-bit or 12-bit planes. Each sample is a little-endian `u16`.
+pub fn wide_output(
+    y: &[u16],
+    u: &[u16],
+    v: &[u16],
+    width: u32,
+    height: u32,
+    tags: &ShownTags,
+    when: (i64, u32),
+) -> Result<PictureOutput, CodecError> {
+    let mut bytes = Vec::new();
+    pack_le(y, &mut bytes);
+    pack_le(u, &mut bytes);
+    pack_le(v, &mut bytes);
+    let luma = usize::try_from(width)
+        .unwrap_or(0)
+        .saturating_mul(usize::try_from(height).unwrap_or(0));
+    let chroma_422 = usize::try_from(width.div_ceil(2))
+        .unwrap_or(0)
+        .saturating_mul(usize::try_from(height).unwrap_or(0));
+    let twelve = tags.bit_depth == 12;
+    let pixel = if u.len() == luma && v.len() == luma {
+        if twelve {
+            PixelFormat::Yuv444p12
+        } else {
+            PixelFormat::Yuv444p10
+        }
+    } else if u.len() == chroma_422 && v.len() == chroma_422 {
+        if twelve {
+            PixelFormat::Yuv422p12
+        } else {
+            PixelFormat::Yuv422p10
+        }
+    } else if twelve {
+        PixelFormat::Yuv420p12
+    } else {
+        PixelFormat::Yuv420p10
+    };
+    PictureOutput::cpu(described(width, height, pixel, tags), bytes, when.0, when.1)
+}
+
+fn pack_le(samples: &[u16], out: &mut Vec<u8>) {
+    out.reserve(samples.len().saturating_mul(2));
+    for sample in samples {
+        out.extend_from_slice(&sample.to_le_bytes());
+    }
+}
+
 /// Pack even 4:2:0 into the shared picture output.
 pub fn picture_output(
     picture: &Yuv420,
+    tags: &ShownTags,
     pts: i64,
     timescale: u32,
 ) -> Result<PictureOutput, CodecError> {
@@ -163,18 +301,73 @@ pub fn picture_output(
     bytes.extend_from_slice(picture.y.samples());
     bytes.extend_from_slice(picture.u.samples());
     bytes.extend_from_slice(picture.v.samples());
-    PictureOutput::cpu(
-        PictureInfo {
-            width,
-            height,
-            pixel: PixelFormat::Yuv420p,
-            primaries: ColorPrimaries::Unspecified,
-            transfer: Transfer::Unspecified,
-        },
-        bytes,
-        pts,
-        timescale,
-    )
+    let pixel = if picture.u.width() == width && picture.u.height() == height {
+        PixelFormat::Yuv444p
+    } else if picture.u.width() == width.div_ceil(2) && picture.u.height() == height {
+        PixelFormat::Yuv422p
+    } else {
+        PixelFormat::Yuv420p
+    };
+    PictureOutput::cpu(described(width, height, pixel, tags), bytes, pts, timescale)
+}
+
+fn described(width: u32, height: u32, pixel: PixelFormat, tags: &ShownTags) -> PictureInfo {
+    PictureInfo {
+        width,
+        height,
+        pixel,
+        primaries: named_primaries(tags.primaries),
+        transfer: named_transfer(tags.transfer),
+        matrix: named_matrix(tags.matrix),
+        chroma_position: named_chroma(tags.chroma_position),
+        render_width: tags.render_width,
+        render_height: tags.render_height,
+        cicp_primaries: tags.primaries,
+        cicp_transfer: tags.transfer,
+        cicp_matrix: tags.matrix,
+        num_units_in_display_tick: tags.num_units_in_display_tick,
+        time_scale: tags.time_scale,
+        equal_picture_interval: tags.equal_picture_interval,
+        num_ticks_per_picture_minus_1: tags.num_ticks_per_picture_minus_1,
+        num_units_in_decoding_tick: tags.num_units_in_decoding_tick,
+        seq_level_idx: tags.seq_level_idx,
+    }
+}
+
+fn named_primaries(value: u8) -> ColorPrimaries {
+    match value {
+        1 => ColorPrimaries::Bt709,
+        6 => ColorPrimaries::Bt601,
+        9 => ColorPrimaries::Bt2020,
+        _ => ColorPrimaries::Unspecified,
+    }
+}
+
+fn named_transfer(value: u8) -> Transfer {
+    match value {
+        1 => Transfer::Bt709,
+        6 => Transfer::Bt601,
+        14 | 15 => Transfer::Bt2020,
+        _ => Transfer::Unspecified,
+    }
+}
+
+fn named_matrix(value: u8) -> ColorMatrix {
+    match value {
+        1 => ColorMatrix::Bt709,
+        6 => ColorMatrix::Bt601,
+        9 => ColorMatrix::Bt2020,
+        _ => ColorMatrix::Unspecified,
+    }
+}
+
+fn named_chroma(value: u8) -> ChromaSamplePosition {
+    match value {
+        1 => ChromaSamplePosition::Vertical,
+        2 => ChromaSamplePosition::Colocated,
+        3 => ChromaSamplePosition::Reserved,
+        _ => ChromaSamplePosition::Unknown,
+    }
 }
 
 #[cfg(test)]

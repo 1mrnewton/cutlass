@@ -102,6 +102,39 @@ pub struct MaterialText {
     pub sub_type: i32,
     #[serde(default)]
     pub recognize_type: i32,
+    /// The [`Bubble`] the background is shaped as, by its key; empty is a
+    /// plain box. The app's own: the reference editor does not read it.
+    #[serde(
+        default,
+        rename = "cutlass_bubble",
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub bubble: String,
+    /// The caption style its words are drawn in, by key; empty is plain.
+    /// The app's own, like `bubble`.
+    #[serde(
+        default,
+        rename = "cutlass_caption_style",
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub caption_style: String,
+    /// Words the caption marks, by index into its word columns: drawn in
+    /// the style's spoken look while they show. The app's own.
+    #[serde(
+        default,
+        rename = "cutlass_caption_keywords",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub caption_keywords: Vec<usize>,
+    /// Milliseconds each letter of a word starts after the one before it,
+    /// so a word's look runs across its letters; 0 changes them together.
+    /// The app's own.
+    #[serde(
+        default,
+        rename = "cutlass_caption_stagger_ms",
+        skip_serializing_if = "is_zero"
+    )]
+    pub caption_stagger_ms: i64,
     #[serde(flatten, default)]
     pub rest: Map<String, Value>,
 }
@@ -119,6 +152,12 @@ impl MaterialText {
             ..Self::default()
         }
     }
+}
+
+/// Serde's skip test for a zero stagger.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+const fn is_zero(value: &i64) -> bool {
+    *value == 0
 }
 
 impl Default for MaterialText {
@@ -170,8 +209,82 @@ impl Default for MaterialText {
             group_id: String::new(),
             sub_type: 0,
             recognize_type: 0,
+            bubble: String::new(),
+            caption_style: String::new(),
+            caption_keywords: Vec::new(),
+            caption_stagger_ms: 0,
             rest: Map::new(),
         }
+    }
+}
+
+/// The keys a caption's style may have, as `cutlass_captions` draws them.
+pub const CAPTION_STYLE_KEYS: [&str; 10] = [
+    "classic",
+    "karaoke",
+    "highlight",
+    "pop",
+    "word-by-word",
+    "one-word",
+    "neon",
+    "bold-box",
+    "fade",
+    "rise",
+];
+
+/// A shape a title's background takes instead of a plain box.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Bubble {
+    /// A box with fully round ends.
+    Pill,
+    /// A round box with a tail down to the left, as someone speaks.
+    Speech,
+    /// A cloud with two small puffs trailing down to the left.
+    Thought,
+    /// A spiky star around the letters.
+    Burst,
+    /// A strip with notched ends.
+    Banner,
+}
+
+impl Bubble {
+    /// Every bubble, in the order the panel shows them.
+    pub const ALL: [Self; 5] = [
+        Self::Pill,
+        Self::Speech,
+        Self::Thought,
+        Self::Burst,
+        Self::Banner,
+    ];
+
+    /// The key a title stores it by.
+    #[must_use]
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::Pill => "pill",
+            Self::Speech => "speech",
+            Self::Thought => "thought",
+            Self::Burst => "burst",
+            Self::Banner => "banner",
+        }
+    }
+
+    /// The name the panel shows.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Pill => "Pill",
+            Self::Speech => "Speech",
+            Self::Thought => "Thought",
+            Self::Burst => "Burst",
+            Self::Banner => "Banner",
+        }
+    }
+
+    /// The bubble stored as `key`, if it is one.
+    #[must_use]
+    pub fn of(key: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|bubble| bubble.key() == key)
     }
 }
 
@@ -195,5 +308,18 @@ mod tests {
         );
         assert_ne!(text.border_alpha, MaterialText::MAPPING_BORDER_ALPHA);
         assert_ne!(text.global_alpha, MaterialText::MAPPING_GLOBAL_ALPHA);
+    }
+
+    #[test]
+    fn a_bubble_is_kept_by_its_key_and_left_out_when_there_is_none() {
+        let mut text = MaterialText::new("t");
+        assert!(!serde_json::to_string(&text).unwrap().contains("bubble"));
+        text.bubble = Bubble::Speech.key().to_owned();
+        let json = serde_json::to_string(&text).unwrap();
+        assert!(json.contains(r#""cutlass_bubble":"speech""#));
+        let back: MaterialText = serde_json::from_str(&json).unwrap();
+        assert_eq!(Bubble::of(&back.bubble), Some(Bubble::Speech));
+        assert!(back.rest.is_empty());
+        assert_eq!(Bubble::of("cloud"), None);
     }
 }

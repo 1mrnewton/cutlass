@@ -8,10 +8,11 @@ use std::fmt;
 use std::path::Path;
 
 use cutlass_model::{Micros, SegmentId, TrackId};
+use cutlass_session::Request;
 use cutlass_settings::{McpServer, Settings};
 
 use crate::approval::{ApprovalAction, Approver, authorize, authorize_then};
-use crate::draft::{ApplyInput, DraftQuery, DraftTools};
+use crate::draft::{ApplyInput, ApplyMode, DraftQuery, DraftTools};
 use crate::r#loop::{ToolOutcome, ToolSink};
 use crate::mcp::{McpClient, McpError, McpTransport};
 use crate::model::{ToolCall, ToolDefinition};
@@ -112,8 +113,9 @@ pub enum SpeechPoll {
 pub trait Speech {
     /// Starts a job for `[start_us, start_us + duration_us)` and returns its id.
     fn start(&mut self, start_us: i64, duration_us: i64) -> Result<String, String>;
-    /// Returns the words for `job_id`, or an error string from the host.
-    fn poll(&mut self, job_id: &str) -> Result<String, String>;
+    /// Returns the words for `job_id`, `None` while the host is still
+    /// listening, or an error string from the host.
+    fn poll(&mut self, job_id: &str) -> Result<Option<String>, String>;
 }
 
 /// Searches bundled effect and animation ids.
@@ -152,7 +154,7 @@ pub enum Invocation {
         /// The generation the caller read.
         expected: u64,
         /// The settings to store.
-        settings: Settings,
+        settings: Box<Settings>,
     },
     /// Seek the open player.
     PlayerSeek {
@@ -360,6 +362,18 @@ where
         }
     }
 
+    /// The transcription jobs this registry started, so a host that builds
+    /// a registry for each call can hand them to the next one.
+    #[must_use]
+    pub fn take_speech_jobs(&mut self) -> BTreeMap<String, SpeechJob> {
+        std::mem::take(&mut self.speech_jobs)
+    }
+
+    /// Carry on the jobs an earlier registry started.
+    pub fn set_speech_jobs(&mut self, jobs: BTreeMap<String, SpeechJob>) {
+        self.speech_jobs = jobs;
+    }
+
     /// Runs one call and returns its text.
     pub fn invoke(&mut self, call: Invocation) -> Result<String, ToolError> {
         match call {
@@ -390,7 +404,7 @@ where
                 .map_err(ToolError::Draft),
             Invocation::SettingsGet => Ok(show_settings(&self.settings)),
             Invocation::SettingsSet { expected, settings } => {
-                set_settings(&mut self.settings, &mut self.approver, expected, settings)
+                set_settings(&mut self.settings, &mut self.approver, expected, *settings)
             }
             Invocation::PlayerSeek { time_us } => host_unit(self.player.seek(time_us)),
             Invocation::PlayerPlay => host_unit(self.player.play()),
@@ -453,12 +467,13 @@ where
         }
     }
 
-    /// Parses a model tool call. `draft.apply` and `settings.set` are rejected.
+    /// Parses a model tool call. `draft.apply` takes JSON; `settings.set` is
+    /// rejected, as settings change only through the host.
     pub fn parse(&self, name: &str, arguments: &str) -> Result<Invocation, ToolError> {
         let arguments = arguments.trim();
         match name {
             "draft.query" => parse_query(arguments),
-            "draft.apply" => Err(bad("draft.apply")),
+            "draft.apply" => parse_apply(arguments),
             "draft.undo" => bare(arguments, "draft.undo", Invocation::DraftUndo),
             "draft.redo" => bare(arguments, "draft.redo", Invocation::DraftRedo),
             "settings.get" => bare(arguments, "settings.get", Invocation::SettingsGet),
@@ -537,7 +552,10 @@ where
 fn description(name: &str) -> &'static str {
     match name {
         "draft.query" => "Compact view of the open draft plus its revision.",
-        "draft.apply" => "Session requests as one combo, or a dry run.",
+        "draft.apply" => {
+            "Session requests as one combo, or a dry run. JSON: {\"expected_revision\":N, \
+             \"requests\":[{\"op\":\"move\",...}], \"dry_run\":false, \"request_id\":\"...\"}."
+        }
         "draft.undo" => "Restore the draft from before the last committed combo.",
         "draft.redo" => "Reapply the combo that undo removed.",
         "settings.get" => "Read the settings generation and the switches that leave the machine.",
@@ -551,7 +569,11 @@ fn description(name: &str) -> &'static str {
         "catalog.search" => "Search bundled effect and animation ids.",
         "package.ensure" => "Ask the host to make one package available.",
         "export.start" => "Start an export. Replacing a file asks the user.",
-        "sandbox.run" => "Run source in the injected sandbox and return JSON.",
+        "sandbox.run" => {
+            "Run a Rhai script on the machine and return its last value as JSON. \
+            The script sees `input`, has no files or network, and cannot edit the project: \
+            apply what it computes with draft.apply."
+        }
         "skill.load" => "Return the one skill whose description matches the ask.",
         "mcp.call" => "Call a tool on a server the user enabled.",
         _ => "",
@@ -592,7 +614,12 @@ fn set_settings(
     Ok(format!("generation={generation}"))
 }
 
-fn pending_approvals(current: &Settings, next: &Settings) -> Vec<ApprovalAction> {
+/// The approvals a change from `current` to `next` needs: turning on the
+/// cloud model or the online sandbox, enabling a remote server, or adding a
+/// skill folder. The host asks for each before the change is written,
+/// whoever made it.
+#[must_use]
+pub fn pending_approvals(current: &Settings, next: &Settings) -> Vec<ApprovalAction> {
     let mut actions = Vec::new();
     if !current.model.cloud && next.model.cloud {
         actions.push(ApprovalAction::EnableCloudModel);
@@ -607,6 +634,18 @@ fn pending_approvals(current: &Settings, next: &Settings) -> Vec<ApprovalAction>
         {
             actions.push(ApprovalAction::EnableRemoteMcp {
                 server: server.name.clone(),
+            });
+        }
+    }
+    for folder in &next.skill_folders {
+        if !folder.path.is_empty()
+            && !current
+                .skill_folders
+                .iter()
+                .any(|known| known.path == folder.path)
+        {
+            actions.push(ApprovalAction::AddExternalSkill {
+                path: folder.path.clone(),
             });
         }
     }
@@ -669,8 +708,10 @@ fn poll_speech(
     if draft.session().revision() != stored {
         return Ok(format_poll(SpeechPoll::Stale));
     }
-    let words = polled.map_err(ToolError::Host)?;
-    Ok(format_poll(SpeechPoll::Ready { words }))
+    Ok(format_poll(match polled.map_err(ToolError::Host)? {
+        Some(words) => SpeechPoll::Ready { words },
+        None => SpeechPoll::Pending,
+    }))
 }
 
 fn format_poll(poll: SpeechPoll) -> String {
@@ -747,6 +788,8 @@ fn parse_query(arguments: &str) -> Result<Invocation, ToolError> {
         return Ok(Invocation::DraftQuery(DraftQuery::Full));
     }
     if let Some(id) = headed(arguments, "track") {
+        // An older project's main track has no id; it is written `""`.
+        let id = if id == "\"\"" { "" } else { id };
         return Ok(Invocation::DraftQuery(DraftQuery::Track {
             track_id: TrackId::new(id),
         }));
@@ -766,6 +809,37 @@ fn parse_query(arguments: &str) -> Result<Invocation, ToolError> {
     Err(bad("draft.query"))
 }
 
+/// `draft.apply` as JSON. The revision is required, so a combo built on an
+/// old read is refused rather than applied over newer edits.
+fn parse_apply(arguments: &str) -> Result<Invocation, ToolError> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Apply {
+        expected_revision: u64,
+        requests: Vec<Request>,
+        #[serde(default)]
+        dry_run: bool,
+        #[serde(default)]
+        request_id: Option<String>,
+    }
+    let apply: Apply = serde_json::from_str(arguments).map_err(|error| {
+        ToolError::BadArguments(format!("bad arguments for draft.apply: {error}"))
+    })?;
+    if apply.requests.is_empty() {
+        return Err(bad("draft.apply"));
+    }
+    Ok(Invocation::DraftApply(ApplyInput {
+        request_id: apply.request_id.filter(|id| !id.is_empty()),
+        expected_revision: apply.expected_revision,
+        requests: apply.requests,
+        mode: if apply.dry_run {
+            ApplyMode::DryRun
+        } else {
+            ApplyMode::Commit
+        },
+    }))
+}
+
 fn parse_export(arguments: &str) -> Result<Invocation, ToolError> {
     if let Some(path) = headed(arguments, "replace") {
         return Ok(Invocation::ExportStart {
@@ -783,6 +857,24 @@ fn parse_export(arguments: &str) -> Result<Invocation, ToolError> {
 }
 
 fn parse_sandbox(arguments: &str) -> Invocation {
+    // The object form: `{"source": "...", "input": <any JSON>}`.
+    if let Ok(serde_json::Value::Object(map)) = serde_json::from_str(arguments)
+        && let Some(source) = map.get("source").and_then(serde_json::Value::as_str)
+    {
+        let input_json = match map.get("input") {
+            None | Some(serde_json::Value::Null) => "{}".to_owned(),
+            Some(serde_json::Value::String(text))
+                if serde_json::from_str::<serde_json::Value>(text).is_ok() =>
+            {
+                text.clone()
+            }
+            Some(other) => other.to_string(),
+        };
+        return Invocation::SandboxRun {
+            source: source.to_owned(),
+            input_json,
+        };
+    }
     match arguments.split_once('\n') {
         Some((source, input_json)) => Invocation::SandboxRun {
             source: source.to_owned(),
@@ -1007,10 +1099,11 @@ mod tests {
             Ok(self.job_id.clone())
         }
 
-        fn poll(&mut self, job_id: &str) -> Result<String, String> {
+        fn poll(&mut self, job_id: &str) -> Result<Option<String>, String> {
             self.polls += 1;
             self.polled_id = job_id.to_owned();
-            Ok(self.words.clone())
+            // An empty answer stands for a job still listening.
+            Ok((!self.words.is_empty()).then(|| self.words.clone()))
         }
     }
 
@@ -1246,6 +1339,21 @@ mod tests {
     }
 
     #[test]
+    fn an_older_projects_unnamed_track_is_written_and_read_as_two_quotes() {
+        let temp = Temp::new();
+        let mut registry = open(&temp, Gate::refuse());
+        let mut draft = Draft::empty("D");
+        draft.tracks[0].id = TrackId::new("");
+        registry.draft = DraftTools::new(Session::open(draft));
+        let project = registry.parse("draft.query", "project").unwrap();
+        let text = registry.invoke(project).unwrap();
+        assert!(text.contains(r#" tracks="":video:0"#), "{text}");
+        let track = registry.parse("draft.query", r#"track """#).unwrap();
+        let text = registry.invoke(track).unwrap();
+        assert!(text.contains("kind=video"), "{text}");
+    }
+
+    #[test]
     fn draft_query_and_apply_round_trip() {
         let temp = Temp::new();
         let mut registry = open(&temp, Gate::refuse());
@@ -1285,7 +1393,11 @@ mod tests {
         let track = registry
             .invoke(registry.parse("draft.query", "track main").unwrap())
             .unwrap();
-        assert!(track.split_whitespace().any(|word| word == "a"));
+        assert!(
+            track
+                .split_whitespace()
+                .any(|word| word.starts_with("a@0+"))
+        );
         assert!(track.contains("track=main"));
         let segment = registry
             .invoke(registry.parse("draft.query", "segment a").unwrap())
@@ -1315,6 +1427,52 @@ mod tests {
             "revision=3"
         );
         assert_eq!(registry.draft.session().draft().tracks[0].segments.len(), 1);
+    }
+
+    #[test]
+    fn draft_apply_reads_json_and_refuses_a_stale_revision() {
+        let temp = Temp::new();
+        let mut registry = open(&temp, Gate::refuse());
+        let place = serde_json::to_string(&place()).unwrap();
+        let dry = registry
+            .parse(
+                "draft.apply",
+                &format!(r#"{{"expected_revision":0,"requests":[{place}],"dry_run":true}}"#),
+            )
+            .unwrap();
+        assert!(matches!(
+            &dry,
+            Invocation::DraftApply(input) if input.mode == ApplyMode::DryRun
+        ));
+        assert_eq!(registry.invoke(dry).unwrap(), "revision=1 committed=false");
+        assert_eq!(registry.draft.session().revision(), 0);
+        let commit = format!(r#"{{"expected_revision":0,"requests":[{place}],"request_id":"x"}}"#);
+        let applied = registry
+            .invoke(registry.parse("draft.apply", &commit).unwrap())
+            .unwrap();
+        assert_eq!(applied, "revision=1 committed=true");
+        // The same request id repeats its first answer.
+        let again = registry
+            .invoke(registry.parse("draft.apply", &commit).unwrap())
+            .unwrap();
+        assert_eq!(again, applied);
+        let moved = r#"{"expected_revision":0,"requests":[{"op":"move","segment_id":"a","track_id":"main","start":5}]}"#;
+        assert!(
+            registry
+                .invoke(registry.parse("draft.apply", moved).unwrap())
+                .is_err()
+        );
+        assert_eq!(registry.draft.session().revision(), 1);
+        for bad in [
+            r#"{"expected_revision":1,"requests":[]}"#,
+            r#"{"requests":[]}"#,
+            r#"{"expected_revision":1,"requests":[],"approved":true}"#,
+        ] {
+            assert!(matches!(
+                registry.parse("draft.apply", bad),
+                Err(ToolError::BadArguments(_))
+            ));
+        }
     }
 
     #[test]
@@ -1391,6 +1549,19 @@ mod tests {
             })
             .unwrap();
         assert_eq!(ready, "words=hello from speech");
+        // A job still listening is pending, and its jobs carry on into the
+        // next registry a host builds.
+        registry.speech.words.clear();
+        let pending = registry
+            .invoke(Invocation::SpeechPoll {
+                job_id: "job-1".to_owned(),
+            })
+            .unwrap();
+        assert_eq!(pending, "pending");
+        "hello from speech".clone_into(&mut registry.speech.words);
+        let jobs = registry.take_speech_jobs();
+        assert_eq!(jobs.len(), 1);
+        registry.set_speech_jobs(jobs);
         registry
             .invoke(Invocation::DraftApply(ApplyInput {
                 request_id: None,
@@ -1407,7 +1578,7 @@ mod tests {
             .unwrap();
         assert_eq!(stale, "stale");
         assert!(!stale.contains("hello"));
-        assert_eq!(registry.speech.polls, 2);
+        assert_eq!(registry.speech.polls, 3);
         assert_eq!(registry.speech.polled_id, "job-1");
     }
 
@@ -1508,7 +1679,7 @@ mod tests {
         let error = registry
             .invoke(Invocation::SettingsSet {
                 expected: 0,
-                settings,
+                settings: Box::new(settings),
             })
             .unwrap_err();
         assert!(error.to_string().contains("refused"));
@@ -1532,7 +1703,7 @@ mod tests {
         let error = registry
             .invoke(Invocation::SettingsSet {
                 expected: 0,
-                settings,
+                settings: Box::new(settings),
             })
             .unwrap_err();
         assert!(matches!(
@@ -1561,7 +1732,7 @@ mod tests {
         let error = registry
             .invoke(Invocation::SettingsSet {
                 expected: 0,
-                settings,
+                settings: Box::new(settings),
             })
             .unwrap_err();
         assert!(error.to_string().contains("refused"));
@@ -1605,7 +1776,7 @@ mod tests {
         let text = registry
             .invoke(Invocation::SettingsSet {
                 expected: 1,
-                settings: next,
+                settings: Box::new(next),
             })
             .unwrap();
         assert_eq!(text, "generation=2");
@@ -1653,7 +1824,7 @@ mod tests {
         let error = registry
             .invoke(Invocation::SettingsSet {
                 expected: 0,
-                settings,
+                settings: Box::new(settings),
             })
             .unwrap_err();
         assert!(matches!(
@@ -1831,5 +2002,30 @@ mod tests {
         assert!(rejected.is_error);
         assert!(rejected.content.contains("bad arguments"));
         assert_eq!(registry.draft.session().revision(), 0);
+    }
+
+    #[test]
+    fn a_new_skill_folder_needs_approval_and_a_known_one_does_not() {
+        let mut current = Settings::default();
+        current.skill_folders.push(cutlass_settings::SkillFolder {
+            path: "/known".to_owned(),
+            ..Default::default()
+        });
+        let mut next = current.clone();
+        assert!(super::pending_approvals(&current, &next).is_empty());
+        next.skill_folders.push(cutlass_settings::SkillFolder {
+            path: "/new".to_owned(),
+            ..Default::default()
+        });
+        next.model.cloud = true;
+        assert_eq!(
+            super::pending_approvals(&current, &next),
+            vec![
+                ApprovalAction::EnableCloudModel,
+                ApprovalAction::AddExternalSkill {
+                    path: "/new".to_owned()
+                },
+            ]
+        );
     }
 }

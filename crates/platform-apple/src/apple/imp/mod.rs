@@ -3,7 +3,11 @@
 mod audio;
 mod cf;
 mod image;
+mod metal;
+#[cfg(target_os = "macos")]
+mod open;
 mod queue;
+mod surface;
 mod sys;
 mod thread;
 mod video;
@@ -12,6 +16,9 @@ use cutlass_decode::{CodecId, DecodeFactory};
 use cutlass_encode::EncodeFactory;
 
 pub use image::{decode_file, encode_file};
+pub use metal::import_surface;
+#[cfg(target_os = "macos")]
+pub use open::{listen_for_opened_files, take_opened_files, wake_on_opened_files};
 pub use queue::{OutputQueue, QueueError, StreamSink};
 pub use thread::run_at_interface_priority;
 pub use video::{release_buffer, to_cpu, with_pixel_buffer};
@@ -31,9 +38,21 @@ pub fn register_decoders_with(factory: &mut DecodeFactory, video: bool) {
     for id in AUDIO {
         factory.register(id, audio::open_decoder);
     }
-    for id in STILL {
+    for id in STILL_DECODE {
         factory.register(id, image::open_decoder);
     }
+}
+
+/// As [`register_decoders_with`], but a 4:2:0 picture stays in its
+/// IOSurface as a [`cutlass_decode::Surface`], for a renderer that imports
+/// it with [`import_surface`].
+pub fn register_surface_decoders_with(factory: &mut DecodeFactory, video: bool) {
+    if video {
+        for id in VIDEO {
+            factory.register(id, video::open_surface_decoder);
+        }
+    }
+    register_decoders_with(factory, false);
 }
 
 pub fn register_encoders(factory: &mut EncodeFactory) {
@@ -80,3 +99,8 @@ const AUDIO: [CodecId; 8] = [
 ];
 
 const STILL: [CodecId; 4] = [CodecId::Jpeg, CodecId::Png, CodecId::Webp, CodecId::Gif];
+
+/// The stills ImageIO decodes. A GIF is left to `cutlass-gif`, which keeps
+/// the screen from frame to frame so an animated one plays; ImageIO gives
+/// only the picture inside each packet.
+const STILL_DECODE: [CodecId; 3] = [CodecId::Jpeg, CodecId::Png, CodecId::Webp];

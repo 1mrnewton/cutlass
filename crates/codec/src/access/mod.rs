@@ -14,15 +14,16 @@ mod still;
 
 pub use error::CodecError;
 pub use frame::{
-    FrameError, Plane, VideoFrame, Yuv420High, Yuv420p, Yuv420p10, Yuv422High, Yuv422p, Yuv444High,
-    Yuv444p,
+    Alpha, FrameError, Plane, VideoFrame, Yuv420High, Yuv420p, Yuv420p10, Yuv422High, Yuv422p,
+    Yuv444High, Yuv444p,
 };
 pub use packet::{Packet, SideData};
 pub use params::CodecParams;
 pub use pixel::{
-    ColorMatrix, ColorPrimaries, ColorRange, MatrixCoefficients, PixelFormat, Transfer,
+    ChromaSamplePosition, ColorMatrix, ColorPrimaries, ColorRange, MatrixCoefficients, PixelFormat,
+    Transfer,
 };
-pub use sample::{Channel, ChannelLayout, Pcm, SampleFormat};
+pub use sample::{Channel, ChannelLayout, LayoutError, Pcm, SampleFormat, StandardLayout};
 pub use still::{
     BitDepth, ColorType, ImageError, PhysicalPixel, Rgb8, StillImage, TextItem, Transparency,
 };

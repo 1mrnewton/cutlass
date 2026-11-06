@@ -20,6 +20,29 @@ pub struct ListedProject {
     pub modified: SystemTime,
 }
 
+/// The card for one project folder, or `None` when it holds no draft.
+#[must_use]
+pub fn listed_project(path: &Path) -> Option<ListedProject> {
+    if !path.is_dir() {
+        return None;
+    }
+    let folder = Folder::read(path).ok()?;
+    let modified = fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .unwrap_or(UNIX_EPOCH);
+    let name = if folder.draft.name.is_empty() {
+        path.file_name()?.to_string_lossy().into_owned()
+    } else {
+        folder.draft.name
+    };
+    Some(ListedProject {
+        path: path.to_path_buf(),
+        name,
+        duration: folder.draft.duration,
+        modified,
+    })
+}
+
 /// Projects under `root`, newest first. A folder without a readable draft
 /// is skipped, and a missing root lists nothing.
 #[must_use]
@@ -29,28 +52,9 @@ pub fn list_projects(root: &Path) -> Vec<ListedProject> {
     };
     let mut projects = Vec::new();
     for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
+        if let Some(project) = listed_project(&entry.path()) {
+            projects.push(project);
         }
-        let Ok(folder) = Folder::read(&path) else {
-            continue;
-        };
-        let modified = entry
-            .metadata()
-            .and_then(|metadata| metadata.modified())
-            .unwrap_or(UNIX_EPOCH);
-        let name = if folder.draft.name.is_empty() {
-            entry.file_name().to_string_lossy().into_owned()
-        } else {
-            folder.draft.name
-        };
-        projects.push(ListedProject {
-            path,
-            name,
-            duration: folder.draft.duration,
-            modified,
-        });
     }
     projects.sort_by(|left, right| {
         right

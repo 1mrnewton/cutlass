@@ -10,6 +10,15 @@ description = "VideoToolbox, AudioToolbox, and ImageIO."
 cutlass-decode = { path = "../decode", version = "0.1.0" }
 cutlass-encode = { path = "../encode", version = "0.1.0" }
 
+[dev-dependencies]
+pollster = "1.0"
+
+# The preview imports a decoded IOSurface into the renderer's Metal device.
+[target.'cfg(target_vendor = "apple")'.dependencies]
+wgpu = "30.0.1"
+objc2 = "0.6"
+objc2-metal = { version = "0.3.2", default-features = false, features = ["std", "MTLAllocation", "MTLDevice", "MTLPixelFormat", "MTLResource", "MTLTexture"] }
+
 # Cargo cannot mix `workspace = true` with one overridden lint, and `forbid`
 # cannot be allowed in a module. These are the workspace lints with
 # `unsafe_code` lowered to `deny` so the framework module can allow it.

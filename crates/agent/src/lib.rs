@@ -9,37 +9,47 @@
 #![forbid(unsafe_code)]
 
 mod approval;
+mod chat;
 mod draft;
+mod forward;
 mod r#loop;
 mod mcp;
+mod mcp_server;
 mod model;
 mod sandbox;
+#[cfg(feature = "script")]
+mod script;
 mod settings_tool;
 mod skill;
 mod subagent;
 mod tools;
 
 pub use approval::{ApprovalAction, ApprovalError, Approver, authorize, authorize_then};
+pub use chat::{ChatModel, ChatTransport, LoopbackHttp, SYSTEM_PROMPT, parse_reply};
 pub use draft::{
     ApplyInput, ApplyMode, ApplyResult, DraftError, DraftQuery, DraftTools, FullSnapshot,
     ProjectSnapshot, QueryView, RangeSnapshot, SegmentSnapshot, TrackSnapshot, request_name,
 };
-pub use r#loop::{LoopError, ToolOutcome, ToolSink, Turn, cap_from_settings, run};
+pub use forward::{Forward, Forwarded, ProjectSocket, Wake};
+pub use r#loop::{LoopError, ToolOutcome, ToolSink, Turn, cap_from_settings, run, run_after};
 pub use mcp::{McpClient, McpError, McpTransport};
+pub use mcp_server::{MCP_PROTOCOL_VERSION, McpServer};
 pub use model::{
     CloudModel, Completion, CompletionRequest, LocalModel, Message, Model, ModelError, ToolCall,
     ToolDefinition,
 };
 pub use sandbox::{
-    LocalSandbox, OnlineSandbox, Sandbox, SandboxError, SandboxExecutor, SandboxPolicy,
-    SandboxRoute, route_for,
+    LocalSandbox, OnlineSandbox, ProcessExecutor, Sandbox, SandboxError, SandboxExecutor,
+    SandboxPolicy, SandboxRoute, route_for,
 };
+#[cfg(feature = "script")]
+pub use script::{run_script, serve_script};
 pub use settings_tool::{SettingsTool, SettingsToolError, SettingsView};
 pub use skill::{Skill, SkillError, SkillLibrary, SkillPlan, parse_skill_md};
 pub use subagent::{Subagent, SubagentError, SubagentResult, allowed_tools, parent_apply};
 pub use tools::{
     Catalog, Export, Invocation, Media, MediaInfo, Packages, Player, Registry, Speech, SpeechJob,
-    SpeechPoll, TOOL_NAMES, ToolError, tool_definitions,
+    SpeechPoll, TOOL_NAMES, ToolError, pending_approvals, tool_definitions,
 };
 
 #[cfg(test)]
@@ -115,8 +125,8 @@ mod tests {
             Ok("job".to_owned())
         }
 
-        fn poll(&mut self, _job_id: &str) -> Result<String, String> {
-            Ok(String::new())
+        fn poll(&mut self, _job_id: &str) -> Result<Option<String>, String> {
+            Ok(Some(String::new()))
         }
     }
 

@@ -1,0 +1,23 @@
+Stickers from other sets, shipped inside Cutlass
+
+noto-emoji/
+  Noto Emoji, by Google.
+  https://github.com/googlefonts/noto-emoji
+  The 512 pixel PNGs from png/512/ at commit
+  41e31b110b4eb929dffb410264694a06205b7ad7 (15 February 2024), when the
+  repository's images were under the Apache License, Version 2.0. The
+  license text from that commit is noto-emoji/LICENSE. The files are
+  unchanged.
+
+noto-emoji-animation/
+  Noto Animated Emoji, by Google.
+  https://googlefonts.github.io/noto-emoji-animation/
+  Licensed under Creative Commons Attribution 4.0 International
+  (CC BY 4.0), https://creativecommons.org/licenses/by/4.0/
+  The full license is noto-emoji-animation/LICENSE.
+  Each file is lottie.json from
+  https://fonts.gstatic.com/s/e/notoemoji/latest/<codepoint>/lottie.json,
+  fetched on 5 November 2026 and saved as emoji_u<codepoint>.json. The
+  files are unchanged.
+
+Cutlass credits both sets in its Licenses window.

@@ -16,38 +16,49 @@ use std::time::{Duration, Instant};
 
 use cutlass_decode::{CodecId, CodecParams, DecodeFactory};
 use cutlass_editor::{
-    Append, AppendLane, DropGesture, DropOutcome, EFFECT_LENGTH, EffectPlace, GestureError,
-    GestureOutcome, MoveGesture, Pointer, TITLE_LENGTH, TimelineScale, TitlePlace, TrimGesture,
-    TrimPlan, Zoom, ZoomBounds, append_placement, drop_gesture, effect_of_card, effect_requests,
+    Append, AppendLane, ClipMove, ClipboardMiss, CopiedClip, DropGesture, DropOutcome,
+    EFFECT_LENGTH, EffectPlace, GestureError, MediaPlace, MoveGesture, MovePlan, Pointer,
+    TITLE_LENGTH, TimelineScale, TitlePlace, TransitionMiss, TrimGesture, TrimPlan, Zoom,
+    ZoomBounds, append_placement, copy_clips, drop_gesture, effect_of_card, effect_requests,
     effect_row_for, effect_target, fit_pixel_size, free_row, hit_test, last_accuracy_step,
-    material_span, minimum_pixel_size, move_gesture, snap_guides, title_requests, title_style,
-    trim_gesture,
+    material_span, media_requests, minimum_pixel_size, move_requests, paste_requests, plan_move,
+    title_requests, title_style, transition_of_card, transition_request, trim_gesture,
 };
 use cutlass_encode::EncodeFactory;
 use cutlass_engine::{Thumb, ThumbKey, Thumbnails, Waveforms};
-use cutlass_eval::{ReaderFactory, SceneError, scene_cuts, source_on_timeline};
+use cutlass_eval::{ReaderFactory, SceneError, scene_cuts};
+use cutlass_export::{ProresProfile, SidecarKind};
 use cutlass_model::{
-    Crop, Draft, FrameRate, FreezeInfo, MaterialAudio, MaterialId, MaterialRef, MaterialTransition,
-    MaterialVideo, MetaType, Micros, Segment, SegmentId, TimeMarkItem, TimeRange, TimecodeLabel,
-    TrackAttribute, TrackId, TrackType, WordColumns, beat_timeline_time, blend_window,
-    linkage_from_biz, segment_beats, segment_time_mark, source_time_at, time_mark_items,
-    track_holds_beats, user_beats, visible_beats, visible_marks,
+    Crop, Draft, FrameRate, MaterialAudio, MaterialId, MaterialRef, MaterialVideo, MetaType,
+    Micros, Segment, SegmentId, TimeRange, TimecodeLabel, TrackAttribute, TrackId, TrackType,
+    WordColumns, linkage_from_biz, source_time_at, track_holds_beats, visible_beats, visible_marks,
 };
 use cutlass_playback::{
     AudioHost, FilmCell, FrameCache, PLAY_FRAMES, Program, Transport, film_cells, media_file,
 };
 use cutlass_renderer_software::SoftwareDevice;
-use cutlass_session::{
-    CANVAS_SHAPES, CanvasShape, EditError, ImportedMedium, Request, Session, TrimEdge,
-};
-use cutlass_settings::{SeekDuringPlayback, Settings, Shortcut};
+use cutlass_session::{EditError, ImportedMedium, Request, Session, TrimEdge};
+use cutlass_settings::{SeekDuringPlayback, Settings};
 use cutlass_storage::Home;
 use cutlass_store::{Folder, Hold, StoreError};
 use cutlass_transcription::{
-    FileSource, ParakeetUnified, PcmSource, PrepareError, RecognizeError, Recognizer, columns, fit,
+    FileSource, HeardClip, HeardMiss, ParakeetUnified, PcmSource, PrepareError, RecognizeError,
+    Recognizer, caption_request, columns, fit, words_on_timeline,
 };
 
+mod assistant;
+mod compound;
+mod hear;
 mod inspector;
+mod listen;
+mod proxy;
+mod render;
+mod speech_model;
+mod update;
+
+pub use assistant::AgentRun;
+pub use speech_model::SPEECH_MODEL_QUESTION;
+pub use update::RUNNING_VERSION;
 
 pub use inspector::{LetterCase, Panel, SILENT_DB, TextLook, gain_of_db, volume_db};
 
@@ -58,23 +69,7 @@ use cutlass_probe::{self as probe, Probed};
 /// Long-side steps the export dialog offers.
 pub const SHORT_SIDES: [i32; 6] = [480, 720, 1080, 1440, 2160, 4320];
 
-/// A blend the Transitions shelf can drop onto a main-track cut.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct TransitionOffer {
-    pub id: &'static str,
-    pub name: &'static str,
-    /// Preset length in microseconds. A short clip stores a shorter blend.
-    pub duration: i64,
-    /// `true` splits the window across the cut. `false` keeps it on the outgoing clip.
-    pub overlap: bool,
-}
-
-impl TransitionOffer {
-    #[must_use]
-    pub fn card_id(self) -> String {
-        format!("transition:{}", self.id)
-    }
-}
+pub use cutlass_editor::{TRANSITION_OFFERS, TransitionOffer};
 
 /// How long a notice shows, its fade in and out included.
 pub const NOTICE_SHOWN: Duration = Duration::from_millis(2_160);
@@ -89,22 +84,6 @@ pub use cutlass_playback::ClipWave;
 
 /// The color stored on a marker dropped from the timeline.
 pub const MARKER_COLOR: &str = "#E8B931";
-
-/// Dissolve crosses the cut. Dip stays on the outgoing clip.
-pub const TRANSITION_OFFERS: &[TransitionOffer] = &[
-    TransitionOffer {
-        id: "dissolve",
-        name: "Dissolve",
-        duration: 500_000,
-        overlap: true,
-    },
-    TransitionOffer {
-        id: "dip",
-        name: "Dip",
-        duration: 400_000,
-        overlap: false,
-    },
-];
 
 #[derive(Debug)]
 pub enum ShellError {
@@ -127,6 +106,9 @@ impl std::fmt::Display for ShellError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NoProject => formatter.write_str("no project is open"),
+            Self::Store(StoreError::Held { .. }) => formatter.write_str(
+                "this project is open in another Cutlass window, or another app is holding it",
+            ),
             Self::Store(error) => write!(formatter, "{error}"),
             Self::Edit(EditError::EmptyUndo) => formatter.write_str("the undo stack is empty"),
             Self::Edit(EditError::EmptyRedo) => formatter.write_str("the redo stack is empty"),
@@ -185,6 +167,11 @@ impl std::fmt::Display for ShellError {
             Self::Edit(EditError::TextEmpty) => formatter.write_str("type something to add text"),
             Self::Edit(EditError::UnknownEffect) => {
                 formatter.write_str("that effect is not in this version")
+            }
+            Self::Edit(EditError::Lut) => formatter.write_str("that file is not a 3D .cube table"),
+            Self::Edit(EditError::Mask) => formatter.write_str("a mask number is out of its range"),
+            Self::Edit(EditError::Compound) => {
+                formatter.write_str("that is not a compound clip played at its own speed")
             }
             Self::Edit(EditError::NotEffect) => {
                 formatter.write_str("a strength belongs on an effect, filter, or adjustment")
@@ -256,6 +243,8 @@ fn build_lanes(draft: &Draft) -> Vec<LaneView> {
                     start: segment.target.start,
                     duration: segment.target.duration,
                     active: segment.visible,
+                    speed_curve: speed_curve(draft, segment)
+                        .map(|points| points.iter().map(|point| (point.x, point.y)).collect()),
                 })
                 .collect();
             Some(LaneView {
@@ -290,7 +279,7 @@ pub struct LaneView {
     pub clips: Vec<ClipSpan>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ClipSpan {
     pub id: SegmentId,
     pub name: String,
@@ -298,6 +287,9 @@ pub struct ClipSpan {
     pub duration: Micros,
     /// Drawn and heard; a deactivated clip is dimmed on its row.
     pub active: bool,
+    /// The speed curve the clip runs on: `x` the share of the clip, `y`
+    /// the speed there.
+    pub speed_curve: Option<Vec<(f64, f64)>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -321,6 +313,24 @@ pub struct Inspection {
     pub line_width: f64,
     pub font: String,
     pub letterbox: String,
+    /// How the clip mixes with the picture below it.
+    pub blend: cutlass_effects::BlendMode,
+    /// The clip's adjust sliders.
+    pub adjust: cutlass_effects::Adjust,
+    /// The clip's curves, wheels and HSL.
+    pub grade: cutlass_effects::Grade,
+    /// The clip's LUT: its name and strength.
+    pub lut: Option<(String, f32)>,
+    /// The clip's chroma key.
+    pub chroma: Option<cutlass_effects::Chroma>,
+    /// The clip's mask.
+    pub mask: Option<cutlass_effects::Mask>,
+    /// Where the clip's colour work, or the adjustment layer, shows.
+    pub color_mask: Option<cutlass_effects::Mask>,
+    /// The speed curve in force, when the clip runs on one.
+    pub speed_curve: Option<Vec<cutlass_model::SpeedPoint>>,
+    /// The pitch follows the speed.
+    pub change_pitch: bool,
     /// Fade-in duration, microseconds.
     pub fade_in: i64,
     /// Fade-out duration, microseconds.
@@ -328,22 +338,43 @@ pub struct Inspection {
     pub material: String,
     pub text: Option<String>,
     pub words: WordColumns,
+    /// The caption's style key; empty is plain.
+    pub caption_style: String,
+    /// The caption's marked words, by index into `words`.
+    pub caption_keywords: Vec<usize>,
+    /// Milliseconds each letter of a caption word starts after the last.
+    pub caption_stagger_ms: i64,
     pub locked: bool,
 }
 
 #[derive(Clone, Debug)]
 pub struct ExportRequest {
+    /// The main file: a movie (`.mp4`, `.mov`), the sound alone (`.m4a`,
+    /// `.wav`), or a GIF when only the GIF is asked for. A GIF or a caption
+    /// file asked for beside it takes the same name and folder.
     pub path: PathBuf,
     pub short_side: i32,
-    /// PNG writes the frame at the playhead; H.264 or HEVC a movie.
+    /// PNG writes the frame at the playhead; H.264, HEVC or ProRes a movie.
     pub codec: CodecId,
     pub replace: bool,
     pub span: ExportSpan,
     /// `None` keeps the project's rate.
     pub frame_rate: Option<FrameRate>,
     pub quality: ExportQuality,
-    /// The movie carries the timeline's sound.
+    /// Typed bits a second. `None` takes the rate from `quality`.
+    pub bitrate: Option<u32>,
+    /// Hold the bitrate over each second instead of on average.
+    pub constant_rate: bool,
+    pub prores: ProresProfile,
+    /// The file has pictures. Off with `sound` on writes the sound alone.
+    pub picture: bool,
+    /// The file carries the timeline's sound.
     pub sound: bool,
+    pub audio: SoundFormat,
+    /// Also write an animated GIF.
+    pub gif: Option<GifExport>,
+    /// Also write the captions as a file.
+    pub captions: Option<SidecarKind>,
 }
 
 impl Default for ExportRequest {
@@ -356,10 +387,133 @@ impl Default for ExportRequest {
             span: ExportSpan::Whole,
             frame_rate: None,
             quality: ExportQuality::Recommended,
+            bitrate: None,
+            constant_rate: false,
+            prores: ProresProfile::Standard,
+            picture: true,
             sound: true,
+            audio: SoundFormat::default(),
+            gif: None,
+            captions: None,
         }
     }
 }
+
+/// The sound of an export: AAC (in an MP4, a movie or an M4A), 16-bit PCM
+/// (in a movie or a WAV), 16-bit FLAC (alone, in a FLAC file), MP3 (alone,
+/// in an MP3 file), or Opus (alone, in an Ogg `.opus` file).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SoundFormat {
+    pub codec: CodecId,
+    pub sample_rate: u32,
+    pub channels: u16,
+    /// Bits a second; the lossless codecs (PCM, FLAC and ALAC) ignore it.
+    pub bitrate: u32,
+}
+
+impl Default for SoundFormat {
+    fn default() -> Self {
+        Self {
+            codec: CodecId::Aac,
+            sample_rate: 48_000,
+            channels: 2,
+            bitrate: 192_000,
+        }
+    }
+}
+
+impl SoundFormat {
+    pub const SAMPLE_RATES: [u32; 2] = [44_100, 48_000];
+    pub const BITRATES: [u32; 3] = [128_000, 192_000, 320_000];
+
+    fn export(self) -> cutlass_export::AudioExport {
+        cutlass_export::AudioExport {
+            codec: self.codec,
+            bitrate: if self.lossless() { 0 } else { self.bitrate },
+            // Opus is coded at 48 kHz whatever rate was picked.
+            sample_rate: if self.codec == CodecId::Opus {
+                48_000
+            } else {
+                self.sample_rate
+            },
+            channels: self.channels,
+            limiter: 0,
+        }
+    }
+
+    /// The extension of a file of this sound alone.
+    #[must_use]
+    pub fn extension(self) -> &'static str {
+        match self.codec {
+            CodecId::Pcm => "wav",
+            CodecId::Flac => "flac",
+            CodecId::Mp3 => "mp3",
+            CodecId::Opus => "opus",
+            _ => "m4a",
+        }
+    }
+
+    /// The container of a file of this sound alone.
+    fn container(self) -> cutlass_codec::ContainerId {
+        match self.codec {
+            CodecId::Pcm => cutlass_codec::ContainerId::Riff,
+            CodecId::Flac => cutlass_codec::ContainerId::Flac,
+            CodecId::Mp3 => cutlass_codec::ContainerId::Mp3,
+            CodecId::Opus => cutlass_codec::ContainerId::Ogg,
+            _ => cutlass_codec::ContainerId::Isobmff,
+        }
+    }
+
+    /// PCM, FLAC and ALAC keep every sample; a bitrate means nothing to them.
+    #[must_use]
+    pub fn lossless(self) -> bool {
+        matches!(self.codec, CodecId::Pcm | CodecId::Flac | CodecId::Alac)
+    }
+}
+
+/// An animated GIF, or WebP, beside the export.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GifExport {
+    /// One of [`cutlass_export::GIF_SHORT_SIDES`].
+    pub short_side: u32,
+    pub frame_rate: FrameRate,
+    /// Plays over and over; otherwise once.
+    pub looped: bool,
+    /// An animated WebP instead of a GIF: full colour and alpha.
+    pub webp: bool,
+}
+
+impl GifExport {
+    /// The animation's file extension, without the dot.
+    #[must_use]
+    pub fn extension(&self) -> &'static str {
+        if self.webp { "webp" } else { "gif" }
+    }
+}
+
+impl Default for GifExport {
+    fn default() -> Self {
+        Self {
+            short_side: 320,
+            frame_rate: FrameRate {
+                numerator: 15,
+                denominator: 1,
+            },
+            looped: true,
+            webp: false,
+        }
+    }
+}
+
+/// GIF frame rates the dialog offers.
+pub const GIF_RATES: [u32; 3] = [10, 15, 24];
+
+/// The fastest typed bitrate an export takes, in bits a second.
+pub const MAX_BITRATE: u32 = 400_000_000;
+
+/// Said when a project opens that the last app holding it did not close.
+pub const RECOVERED_NOTICE: &str =
+    "Cutlass did not close last time; this is the project as it was last saved";
 
 /// How much of the timeline a movie holds.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -382,8 +536,9 @@ pub enum ExportQuality {
 }
 
 impl ExportQuality {
-    /// The bitrate for an H.264 or HEVC picture `short_side` pixels on its
-    /// short side. HEVC gets the same picture from fewer bits.
+    /// The bitrate for an H.264, HEVC, or VP8 picture `short_side` pixels
+    /// on its short side. HEVC gets the same picture from fewer bits; VP8
+    /// spends what H.264 does.
     #[must_use]
     pub fn bitrate(self, short_side: u32, codec: CodecId) -> u32 {
         let base = cutlass_export::video_bitrate(short_side);
@@ -429,27 +584,7 @@ struct PendingTrim {
     snapped: bool,
 }
 
-struct PendingMove {
-    id: SegmentId,
-    name: String,
-    start: Micros,
-    duration: Micros,
-    track_id: TrackId,
-    snapped: bool,
-}
-
 /// A clip kept for paste. `offset` is its start relative to the earliest copied clip.
-#[derive(Clone)]
-struct CopiedClip {
-    track_id: TrackId,
-    offset: i64,
-    segment: Segment,
-    /// Offsets from the clip start. The paste stores them on a new material.
-    marks: Vec<TimeMarkItem>,
-    /// Source times. The paste stores them on a new material.
-    beats: Vec<i64>,
-}
-
 /// A beat the timeline draws. `source` is the stored source time.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BeatView {
@@ -518,22 +653,66 @@ pub struct MovePreview {
 
 /// How far ahead playback opens clips and decodes their first pictures.
 const PREROLL: Micros = Micros(1_000_000);
+/// Card ids on the sticker shelf: this prefix, then the sticker's id.
+pub const STICKER_CARD_PREFIX: &str = "sticker:";
+
+/// How long a sticker lasts when it is placed.
+const STICKER_LENGTH: Micros = Micros(3_000_000);
+
+/// The sticker shelf's `card_id`.
+fn shelf_sticker(card_id: &str) -> Result<&'static cutlass_stickers::Sticker, ShellError> {
+    card_id
+        .strip_prefix(STICKER_CARD_PREFIX)
+        .and_then(cutlass_stickers::sticker)
+        .ok_or_else(|| {
+            ShellError::Unavailable("the sticker is not on the sticker shelf".to_owned())
+        })
+}
+
+/// How long `sticker` lasts when it is placed: an animation plays as many
+/// whole rounds as fit in [`STICKER_LENGTH`], at least one, so its clip
+/// ends where a round ends; a still lasts [`STICKER_LENGTH`].
+pub fn sticker_length(sticker: &cutlass_stickers::Sticker) -> Micros {
+    let Some(seconds) = sticker.seconds().filter(|seconds| *seconds > 0.0) else {
+        return STICKER_LENGTH;
+    };
+    let round = (seconds * 1_000_000.0).round();
+    let rounds = (STICKER_LENGTH.0 as f64 / round).floor().max(1.0);
+    Micros((round * rounds) as i64)
+}
+
+/// A placed sticker's size against the canvas it would fill.
+const STICKER_SCALE: f64 = 0.4;
+
 pub struct Shell {
     decoders: DecodeFactory,
     encoders: EncodeFactory,
     readers: ReaderFactory,
     transport: Transport,
     preview_cache: RefCell<FrameCache>,
+    /// Stretches of the timeline drawn ahead, which the preview plays.
+    renders: render::Renders,
+    proxies: proxy::Proxies,
     /// The lanes as last built, with the revision they were built at.
     lanes_cache: RefCell<Option<(u64, Arc<[LaneView]>)>>,
     settings: Settings,
+    /// Where the settings are saved, and the generation on disk.
+    settings_file: Option<(PathBuf, u64)>,
+    /// Files dropped on the window, imported one job after another.
+    waiting_imports: std::collections::VecDeque<PathBuf>,
     session: Option<Session>,
+    /// The levels above an open compound clip, the project first.
+    outer: Vec<compound::Outer>,
     folder: Option<Folder>,
     /// Library folder edits made, and how many the folder on disk holds.
     /// They are not undo steps, so they count apart from the session.
     library_edits: u64,
     library_saved: u64,
     hold: Option<Hold>,
+    /// The loopback socket other hosts reach the held project on.
+    socket: Option<cutlass_agent::ProjectSocket>,
+    /// Asks the window for a frame; set once the window listens.
+    wake: Option<cutlass_agent::Wake>,
     /// The session revision the project folder holds, and when it was written.
     saved: Option<(u64, Instant)>,
     path: Option<PathBuf>,
@@ -574,6 +753,8 @@ pub struct Shell {
     snapping: bool,
     /// The split tool cuts a clip at the pointer instead of moving it.
     blade: bool,
+    /// Clips on a speed curve draw it on their bar.
+    speed_curves: bool,
     /// The marker tool drops a mark on the ruler or on a clip.
     marking: bool,
     selected_marker: Option<MarkerPick>,
@@ -582,7 +763,7 @@ pub struct Shell {
     selected_beat: Option<BeatPick>,
     clip_drag: Option<ClipDrag>,
     pending_trim: Option<PendingTrim>,
-    pending_moves: Vec<PendingMove>,
+    pending_moves: Vec<ClipMove>,
     notice: String,
     /// When the notice was set; it fades out [`NOTICE_SHOWN`] later.
     notice_since: Instant,
@@ -591,6 +772,15 @@ pub struct Shell {
     next_id: u64,
     /// The local speech model, loaded on the first transcript that can hear a clip.
     speech: RefCell<Option<ParakeetUnified>>,
+    /// What each speech job heard, by id, for the assistant's tools.
+    heard: std::collections::HashMap<String, Result<String, String>>,
+    hearings: u64,
+    /// A transcript or hearing found no speech model; the window offers it.
+    wants_speech_model: bool,
+    /// The update check, the offer, and the restart after an install.
+    updates: update::Updates,
+    /// The assistant's speech jobs, carried from one tool call to the next.
+    agent_speech_jobs: std::collections::BTreeMap<String, cutlass_agent::SpeechJob>,
     /// Work running off the window thread, and the project it was started in.
     job: Option<RunningJob>,
     /// The movie the last export wrote.
@@ -625,38 +815,7 @@ pub struct Shell {
 
 impl Shell {
     pub fn new(decoders: DecodeFactory, encoders: EncodeFactory, mut settings: Settings) -> Self {
-        ensure_shortcut(&mut settings, "undo", "primary+z");
-        ensure_shortcut(&mut settings, "redo", "primary+shift+z");
-        ensure_shortcut(&mut settings, "play", "space");
-        ensure_shortcut(&mut settings, "frame_back", "left");
-        ensure_shortcut(&mut settings, "frame_forward", "right");
-        ensure_shortcut(&mut settings, "delete", "delete");
-        ensure_shortcut(&mut settings, "split", "s");
-        ensure_shortcut(&mut settings, "copy", "primary+c");
-        ensure_shortcut(&mut settings, "cut", "primary+x");
-        ensure_shortcut(&mut settings, "paste", "primary+v");
-        ensure_shortcut(&mut settings, "extract_audio", "primary+shift+s");
-        ensure_shortcut(&mut settings, "ripple_delete", "shift+delete");
-        ensure_shortcut(&mut settings, "shuttle_back", "j");
-        ensure_shortcut(&mut settings, "shuttle_stop", "k");
-        ensure_shortcut(&mut settings, "shuttle_forward", "l");
-        ensure_shortcut(&mut settings, "mark_in", "i");
-        ensure_shortcut(&mut settings, "mark_out", "o");
-        ensure_shortcut(&mut settings, "clear_marks", "alt+x");
-        // Control-Y is the second redo. On Windows and Linux Control is the primary key.
-        ensure_shortcut(
-            &mut settings,
-            "redo_y",
-            if cfg!(target_os = "macos") {
-                "ctrl+y"
-            } else {
-                "primary+y"
-            },
-        );
-        ensure_shortcut(&mut settings, "select_all", "primary+a");
-        ensure_shortcut(&mut settings, "delete_left", "q");
-        ensure_shortcut(&mut settings, "delete_right", "w");
-        ensure_shortcut(&mut settings, "deactivate", "v");
+        settings.ensure_default_shortcuts();
         Self {
             decoders,
             encoders,
@@ -665,13 +824,20 @@ impl Shell {
             ),
             transport: Transport::new(),
             preview_cache: RefCell::new(FrameCache::new()),
+            renders: render::Renders::new(Self::home().renders()),
+            proxies: proxy::Proxies::new(Self::home().proxies()),
             lanes_cache: RefCell::new(None),
             settings,
+            settings_file: None,
+            waiting_imports: std::collections::VecDeque::new(),
             session: None,
+            outer: Vec::new(),
             folder: None,
             library_edits: 0,
             library_saved: 0,
             hold: None,
+            socket: None,
+            wake: None,
             path: None,
             playhead: Micros(0),
             playing: false,
@@ -698,6 +864,7 @@ impl Shell {
             guides_locked: false,
             snapping: true,
             blade: false,
+            speed_curves: false,
             marking: false,
             selected_marker: None,
             beating: false,
@@ -711,6 +878,11 @@ impl Shell {
             saved: None,
             next_id: 0,
             speech: RefCell::new(None),
+            heard: std::collections::HashMap::new(),
+            hearings: 0,
+            wants_speech_model: false,
+            updates: update::Updates::default(),
+            agent_speech_jobs: std::collections::BTreeMap::new(),
             job: None,
             exported: None,
             imported: None,
@@ -868,7 +1040,7 @@ impl Shell {
         {
             return Some(Arc::clone(&kept.levels));
         }
-        let levels: Arc<[f32]> = spread_peaks(&peaks, duration, columns).into();
+        let levels: Arc<[f32]> = peaks.spread(duration, columns).into();
         self.card_waves.insert(
             id.to_owned(),
             CardWave {
@@ -903,12 +1075,54 @@ impl Shell {
         &self.settings
     }
 
+    /// Save the settings to `path` from now on. `generation` is what the
+    /// file held when it was read.
+    pub fn keep_settings_file(&mut self, path: PathBuf, generation: u64) {
+        self.settings_file = Some((path, generation));
+    }
+
+    /// Write the settings, when they have a file. Another window's write
+    /// since the read is taken as the base, and ours is written over it.
+    fn save_settings(&mut self) {
+        let Some((path, generation)) = self.settings_file.clone() else {
+            return;
+        };
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let mut written = cutlass_settings::save(&path, generation, &self.settings);
+        if let Err(cutlass_settings::SettingsError::GenerationMismatch { actual, .. }) = written {
+            written = cutlass_settings::save(&path, actual, &self.settings);
+        }
+        match written {
+            Ok(next) => self.settings_file = Some((path, next)),
+            Err(error) => cutlass_logger::warn!("settings: {error}"),
+        }
+    }
+
+    /// Recent projects that are still there, newest first, leaving out those
+    /// under `root`, which the launch list already shows.
+    pub fn recent_projects(&self, root: &Path) -> Vec<ListedProject> {
+        let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        self.settings
+            .recent_projects
+            .iter()
+            .filter(|path| {
+                !path
+                    .canonicalize()
+                    .unwrap_or_else(|_| path.to_path_buf())
+                    .starts_with(&root)
+            })
+            .filter_map(|path| cutlass_store::listed_project(path))
+            .collect()
+    }
+
     pub fn set_seek_during_playback(&mut self, value: SeekDuringPlayback) {
-        self.settings.playback.seek_during_playback = value;
+        self.update_settings(|settings| settings.playback.seek_during_playback = value);
     }
 
     pub fn set_scrub_audio(&mut self, value: bool) {
-        self.settings.playback.scrub_audio = value;
+        self.update_settings(|settings| settings.playback.scrub_audio = value);
     }
 
     pub fn project_folder(&self) -> Option<&Path> {
@@ -963,9 +1177,11 @@ impl Shell {
             self.save()?;
         }
         self.session = None;
+        self.waiting_imports.clear();
         self.lanes_cache.replace(None);
         self.card_waves.clear();
         self.folder = None;
+        self.socket = None;
         self.hold = None;
         self.saved = None;
         self.path = None;
@@ -1044,6 +1260,22 @@ impl Shell {
         self.session.as_ref().map(Session::revision)
     }
 
+    /// The open session, for a host that edits it elsewhere.
+    pub fn session(&self) -> Option<&Session> {
+        self.session.as_ref()
+    }
+
+    /// Take `session` as the open one, keeping its linkage. A headless host
+    /// edits a copy and hands it back before it saves.
+    pub fn adopt_session(&mut self, session: Session) -> Result<(), ShellError> {
+        if self.session.is_none() {
+            return Err(ShellError::NoProject);
+        }
+        self.session = Some(session);
+        self.lanes_cache.replace(None);
+        Ok(())
+    }
+
     pub fn draft(&self) -> Option<&Draft> {
         self.session.as_ref().map(Session::draft)
     }
@@ -1084,13 +1316,20 @@ impl Shell {
         );
         let mut session = Session::open(opened.folder.draft.clone());
         session.set_linkage(linkage);
+        self.outer.clear();
         self.saved = Some((session.revision(), Instant::now()));
         self.session = Some(session);
         self.lanes_cache.replace(None);
         self.folder = Some(opened.folder);
         self.library_edits = 0;
         self.library_saved = 0;
+        let unclean = hold.unclean();
         self.hold = Some(hold);
+        self.open_socket();
+        self.waiting_imports.clear();
+        let recent = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        self.settings.note_recent(&recent);
+        self.save_settings();
         self.playhead = Micros(0);
         self.playing = false;
         self.marks.clear();
@@ -1108,8 +1347,13 @@ impl Shell {
         self.pixel_size = opening_pixel_size(rate);
         self.fitted = false;
         self.notice.clear();
+        if unclean {
+            self.set_notice(RECOVERED_NOTICE.to_owned());
+        }
         self.transport.forget_files();
         self.silence();
+        self.find_renders();
+        self.find_proxies();
         Ok(())
     }
 
@@ -1134,7 +1378,7 @@ impl Shell {
         let session = self.session.as_ref().ok_or(ShellError::NoProject)?;
         let enabled = session.linkage().enabled;
         let revision = session.revision();
-        let draft = session.draft().clone();
+        let draft = self.root_draft().ok_or(ShellError::NoProject)?;
         let folder = self.folder.as_mut().ok_or(ShellError::NoProject)?;
         let main = folder.project.main_timeline_id.clone();
         let name = draft.name.clone();
@@ -1528,7 +1772,8 @@ impl Shell {
     fn import_file_in(&mut self, path: &Path) -> Result<(), ShellError> {
         let probed = probe::probe(path).map_err(|error| ShellError::Probe(error.to_string()))?;
         let project = self.path.clone().ok_or(ShellError::NoProject)?;
-        let (stored, copied) = place_in_project(&project, path, None)?;
+        let link = self.settings.import.link;
+        let (stored, copied) = place_in_project(&project, path, None, link)?;
         let imported = self.import_medium(probed, stored);
         if imported.is_err()
             && let Some(copied) = copied
@@ -1536,6 +1781,57 @@ impl Shell {
             let _ = std::fs::remove_file(copied);
         }
         imported
+    }
+
+    /// Play the file at `path` in the selected clip in place of its media,
+    /// keeping the clip's edits. Like an import it is read and copied as a
+    /// job; the new media joins the library and the clip takes it in one
+    /// undo step.
+    pub fn start_replace(&mut self, path: &Path) -> Result<(), ShellError> {
+        let project = self.path.clone().ok_or(ShellError::NoProject)?;
+        let segment_id = self.selected().cloned().ok_or(ShellError::NoProject)?;
+        self.refuse_locked(&segment_id)?;
+        self.refuse_busy()?;
+        let source = path.to_path_buf();
+        let name = source
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .ok_or_else(|| ShellError::Io("the file has no name".to_owned()))?;
+        let link = self.settings.import.link;
+        self.start_job("Replace", move |progress| {
+            progress.stage(&format!("Reading {name}"));
+            let placed = probe::probe(&source)
+                .map_err(|error| ShellError::Probe(error.to_string()))
+                .and_then(|probed| {
+                    progress.stage(&format!("Copying {name}"));
+                    let (stored, copied) =
+                        place_in_project(&project, &source, Some(progress), link)?;
+                    Ok((probed, stored, CopyGuard(copied)))
+                });
+            Box::new(move |shell: &mut Shell| {
+                let (probed, stored, mut copy) = placed?;
+                let import = shell.medium_request(probed, stored);
+                let material_id = match &import {
+                    Request::Import {
+                        medium: ImportedMedium::Video(video),
+                    } => video.id.clone(),
+                    Request::Import {
+                        medium: ImportedMedium::Audio(audio),
+                    } => audio.id.clone(),
+                    _ => return Err(ShellError::NoProject),
+                };
+                shell.apply_requests(&[
+                    import,
+                    Request::ReplaceMedia {
+                        segment_id,
+                        material_id,
+                    },
+                ])?;
+                copy.keep();
+                shell.set_notice(format!("Replaced with {name}"));
+                Ok(())
+            })
+        })
     }
 
     /// Import `path` as a job: read it, copy it into the project with a
@@ -1549,13 +1845,15 @@ impl Shell {
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .ok_or_else(|| ShellError::Io("the file has no name".to_owned()))?;
+        let link = self.settings.import.link;
         self.start_job("Import", move |progress| {
             progress.stage(&format!("Reading {name}"));
             let placed = probe::probe(&source)
                 .map_err(|error| ShellError::Probe(error.to_string()))
                 .and_then(|probed| {
                     progress.stage(&format!("Copying {name}"));
-                    let (stored, copied) = place_in_project(&project, &source, Some(progress))?;
+                    let (stored, copied) =
+                        place_in_project(&project, &source, Some(progress), link)?;
                     Ok((probed, stored, CopyGuard(copied)))
                 });
             Box::new(move |shell: &mut Shell| {
@@ -1713,7 +2011,7 @@ impl Shell {
         if let Some(session) = self.session.as_ref() {
             self.preview_cache.borrow_mut().preroll(
                 session,
-                &self.readers,
+                self.preview_readers(),
                 self.path.as_deref(),
                 self.playhead,
                 PREROLL,
@@ -1847,6 +2145,7 @@ impl Shell {
     pub(crate) fn set_readers(&mut self, readers: ReaderFactory) {
         self.transport.forget_mixer();
         self.readers = readers;
+        self.find_proxies();
         self.preview_cache.borrow_mut().clear();
         self.transport.forget_files();
     }
@@ -1877,7 +2176,17 @@ impl Shell {
     /// [`Self::attach_gpu`]. A frame already on the canvas is not drawn again.
     pub fn preview_texture(&mut self) -> Result<Option<(egui::TextureId, [u32; 2])>, ShellError> {
         let time = self.sample_time().0;
-        let session = self.session.as_ref().ok_or(ShellError::NoProject)?;
+        let main = self.session.as_ref().ok_or(ShellError::NoProject)?;
+        // A render standing for this stretch plays in its place.
+        let key = self.render_key_if_any();
+        let (session, preview_cache) = match key.and_then(|key| self.renders.at(key, Micros(time)))
+        {
+            Some(render) => (&render.session, &self.renders.cache),
+            None => (main, &self.preview_cache),
+        };
+        let readers = self
+            .proxies
+            .preview(&self.readers, self.settings.playback.proxies);
         let Some(gpu) = self.gpu.as_mut() else {
             return Ok(None);
         };
@@ -1890,14 +2199,14 @@ impl Shell {
             return Ok(Some(shown));
         }
         let mut device = SoftwareDevice::new();
-        let mut cache = self.preview_cache.borrow_mut();
+        let mut cache = preview_cache.borrow_mut();
         cache.set_patient(false);
         let composed = cache
             .layers(
                 session,
                 &mut device,
                 Micros(time),
-                &self.readers,
+                readers,
                 self.path.as_deref(),
                 &*self.face,
             )
@@ -1907,7 +2216,7 @@ impl Shell {
         let layers = cutlass_render::frame_layers(composed)
             .map_err(|error| ShellError::Eval(error.to_string()))?;
         let shown = gpu
-            .show(&layers, key)
+            .show(layers, key)
             .map_err(|error| ShellError::Eval(error.to_string()))?;
         if stale {
             gpu.forget();
@@ -1924,18 +2233,22 @@ impl Shell {
     }
 
     pub fn preview_bytes(&self) -> Result<Picture, ShellError> {
-        let session = self.session.as_ref().ok_or(ShellError::NoProject)?;
+        let main = self.session.as_ref().ok_or(ShellError::NoProject)?;
         let time = self.sample_time();
+        let (session, cache) = match self.rendered_at(time) {
+            Some(render) => (&render.session, &self.renders.cache),
+            None => (main, &self.preview_cache),
+        };
         let mut device = SoftwareDevice::new();
         let root = self.path.clone();
-        let mut cache = self.preview_cache.borrow_mut();
+        let mut cache = cache.borrow_mut();
         cache.set_patient(true);
         let picture = cache
             .frame(
                 session,
                 &mut device,
                 time,
-                &self.readers,
+                self.preview_readers(),
                 root.as_deref(),
                 &*self.face,
             )
@@ -1970,13 +2283,17 @@ impl Shell {
     }
 
     pub fn run_shortcut(&mut self, keys: &str) -> Result<(), ShellError> {
-        let action = self
-            .settings
-            .shortcuts
-            .iter()
-            .find(|shortcut| shortcut.keys == keys)
-            .map(|shortcut| shortcut.action.clone());
-        match action.as_deref() {
+        let action = self.settings.action_for(keys).map(str::to_owned);
+        match action {
+            Some(action) => self.run_action(&action),
+            None => Err(ShellError::Unavailable(format!("{keys} is not available"))),
+        }
+    }
+
+    /// Run the shortcut action named `action`, as its keys or its menu
+    /// item do.
+    pub fn run_action(&mut self, action: &str) -> Result<(), ShellError> {
+        match Some(action) {
             Some("undo") => self.undo(),
             Some("redo" | "redo_y") => self.redo(),
             Some("play") => {
@@ -1996,6 +2313,11 @@ impl Shell {
             Some("delete_right") => self.delete_side(TrimEdge::End),
             Some("ripple_delete") => self.ripple_delete(),
             Some("deactivate") => self.toggle_active(),
+            Some("compound") => self.create_compound(),
+            Some("speed_curves") => {
+                self.toggle_speed_curves();
+                Ok(())
+            }
             Some("shuttle_back") => {
                 self.shuttle(cutlass_editor::Shuttle::Back);
                 Ok(())
@@ -2020,18 +2342,29 @@ impl Shell {
                 self.clear_marks();
                 Ok(())
             }
-            _ => Err(ShellError::Unavailable(format!("{keys} is not available"))),
+            _ => Err(ShellError::Unavailable(format!(
+                "{action} is not available"
+            ))),
         }
     }
 
-    pub fn set_shortcut(&mut self, action: &str, keys: &str) {
-        if let Some(shortcut) = self
-            .settings
-            .shortcuts
-            .iter_mut()
-            .find(|shortcut| shortcut.action == action)
-        {
-            shortcut.keys = keys.to_owned();
+    /// Bind `keys` to `action` and save. Another action that held the
+    /// keys loses them; its name comes back.
+    pub fn set_shortcut(&mut self, action: &str, keys: &str) -> Option<String> {
+        let displaced = self.settings.bind(action, keys);
+        self.save_settings();
+        displaced
+    }
+
+    /// Change the settings and save them.
+    pub fn update_settings(&mut self, change: impl FnOnce(&mut Settings)) {
+        let before = self.settings.clone();
+        change(&mut self.settings);
+        if self.settings.playback.proxies != before.playback.proxies {
+            self.preview_cache.borrow_mut().clear();
+        }
+        if self.settings != before {
+            self.save_settings();
         }
     }
 
@@ -2089,23 +2422,15 @@ impl Shell {
         x: f64,
         y: f64,
     ) -> Result<(), ShellError> {
-        let plan = self.plan_move(segment_id, x, y)?;
+        let moves = self.plan_move(segment_id, x, y)?;
         self.pending_moves.clear();
-        let plans = self.ordered_moves(self.group_plans(plan));
-        if plans.iter().all(|plan| self.move_is_current(plan)) {
+        let requests = move_requests(self.session_draft()?, &moves);
+        if requests.is_empty() {
             return Ok(());
         }
-        for plan in &plans {
-            self.refuse_locked(&plan.id)?;
+        for plan in &moves {
+            self.refuse_locked(&plan.segment_id)?;
         }
-        let requests: Vec<Request> = plans
-            .into_iter()
-            .map(|plan| Request::Move {
-                segment_id: plan.id,
-                track_id: plan.track_id,
-                start: plan.start,
-            })
-            .collect();
         self.apply_requests(&requests)?;
         self.reveal_playhead();
         Ok(())
@@ -2179,22 +2504,15 @@ impl Shell {
     /// clip keeps its gap and follows by the same amount.
     pub fn preview_move(&mut self, segment_id: SegmentId, x: f64, y: f64) {
         self.pending_trim = None;
-        self.pending_moves = match self.plan_move(segment_id, x, y) {
-            Ok(plan) => self.group_plans(plan),
-            Err(_) => Vec::new(),
-        };
+        self.pending_moves = self.plan_move(segment_id, x, y).unwrap_or_default();
     }
 
     /// The dragged clip's copy. A group drag still reports that clip here.
     #[must_use]
     pub fn move_preview(&self) -> Option<MovePreview> {
-        self.pending_moves.first().map(|pending| MovePreview {
-            id: pending.id.clone(),
-            name: pending.name.clone(),
-            start: pending.start,
-            duration: pending.duration,
-            track_id: pending.track_id.clone(),
-        })
+        self.pending_moves
+            .first()
+            .map(|pending| self.move_preview_of(pending))
     }
 
     /// Every copy following the pointer, including the dragged clip.
@@ -2202,20 +2520,32 @@ impl Shell {
     pub fn move_previews(&self) -> Vec<MovePreview> {
         self.pending_moves
             .iter()
-            .map(|pending| MovePreview {
-                id: pending.id.clone(),
-                name: pending.name.clone(),
-                start: pending.start,
-                duration: pending.duration,
-                track_id: pending.track_id.clone(),
-            })
+            .map(|pending| self.move_preview_of(pending))
             .collect()
+    }
+
+    fn move_preview_of(&self, pending: &ClipMove) -> MovePreview {
+        let name = self
+            .draft()
+            .and_then(|draft| {
+                locate(draft, &pending.segment_id).map(|(segment, _)| clip_name(draft, segment))
+            })
+            .unwrap_or_else(|| pending.segment_id.as_str().to_owned());
+        MovePreview {
+            id: pending.segment_id.clone(),
+            name,
+            start: pending.start,
+            duration: pending.duration,
+            track_id: pending.track_id.clone(),
+        }
     }
 
     /// The original clip is one of the clips being dragged.
     #[must_use]
     pub fn moving(&self, id: &SegmentId) -> bool {
-        self.pending_moves.iter().any(|pending| &pending.id == id)
+        self.pending_moves
+            .iter()
+            .any(|pending| &pending.segment_id == id)
     }
 
     /// A snap target the trim or move preview is holding.
@@ -2311,192 +2641,43 @@ impl Shell {
         })
     }
 
-    /// The body drag lands on the pointer time, pulled to a snap within twelve pixels.
-    ///
-    /// A start that matches the clip does not push an undo step. The draft is
-    /// not written here.
-    fn plan_move(&self, segment_id: SegmentId, x: f64, y: f64) -> Result<PendingMove, ShellError> {
+    /// The body drag lands on the pointer time, pulled to a snap within twelve
+    /// pixels. Selected clips travel with the dragged one, which comes first.
+    /// The draft is not written here.
+    fn plan_move(
+        &self,
+        segment_id: SegmentId,
+        x: f64,
+        y: f64,
+    ) -> Result<Vec<ClipMove>, ShellError> {
         self.refuse_locked(&segment_id)?;
-        let x = self.time_zero_x(x);
-        let scale = self.scale();
-        let pointer = Pointer { x, y };
-        let guides = self.guide_times();
         let gesture = MoveGesture {
-            segment_id: segment_id.clone(),
-            pointer,
-            scale,
+            segment_id,
+            pointer: Pointer {
+                x: self.time_zero_x(x),
+                y,
+            },
+            scale: self.scale(),
             playhead: self.playhead,
             snap_threshold: self.snap_threshold(),
-            guides: guides.clone(),
+            guides: self.guide_times(),
         };
         let draft = self.session_draft()?;
-        let raw = match hit_test(draft, scale, pointer) {
-            Ok(Some(hit)) => hit.time,
-            Ok(None) => {
-                return Err(ShellError::Unavailable(
-                    "the drag missed the lanes".to_owned(),
-                ));
-            }
-            Err(_) => {
-                return Err(ShellError::Unavailable(
-                    "the drag could not be read".to_owned(),
-                ));
-            }
-        };
-        if self.is_selected(&segment_id) && self.selection.len() > 1 {
-            let snapped = snap_guides(
-                draft,
-                raw,
-                self.playhead,
-                self.snap_threshold(),
-                Some(&segment_id),
-                &guides,
-            );
-            let start = snapped.map(|target| target.time).unwrap_or(raw);
-            let start = Micros(start.0.max(0));
-            let (name, duration, track_id) = draft
-                .tracks
-                .iter()
-                .find_map(|track| {
-                    track.segments.iter().find_map(|segment| {
-                        (segment.id == segment_id).then(|| {
-                            (
-                                clip_name(draft, segment),
-                                segment.target.duration,
-                                track.id.clone(),
-                            )
-                        })
-                    })
-                })
-                .ok_or_else(|| {
-                    ShellError::Unavailable("the clip is not on the timeline".to_owned())
-                })?;
-            return Ok(PendingMove {
-                id: segment_id,
-                name,
-                start,
-                duration,
-                track_id,
-                snapped: start != raw,
-            });
+        match plan_move(draft, &gesture, &self.selection) {
+            Ok(MovePlan::Moves(moves)) => Ok(moves),
+            Ok(MovePlan::Miss) => Err(ShellError::Unavailable(
+                "the drag missed the lanes".to_owned(),
+            )),
+            Ok(MovePlan::NewLane { .. }) => Err(ShellError::Unavailable(
+                "a new lane is not available".to_owned(),
+            )),
+            Err(GestureError::UnknownSegment) => Err(ShellError::Unavailable(
+                "the clip is not on the timeline".to_owned(),
+            )),
+            Err(_) => Err(ShellError::Unavailable(
+                "the drag could not be read".to_owned(),
+            )),
         }
-        let outcome = move_gesture(draft, &gesture)
-            .map_err(|_| ShellError::Unavailable("the drag could not be read".to_owned()))?;
-        let (segment_id, track_id, start) = match outcome {
-            GestureOutcome::Edit(Request::Move {
-                segment_id,
-                track_id,
-                start,
-            }) => (segment_id, track_id, start),
-            GestureOutcome::Edit(_) => {
-                return Err(ShellError::Unavailable(
-                    "the drag could not be read".to_owned(),
-                ));
-            }
-            GestureOutcome::Miss => {
-                return Err(ShellError::Unavailable(
-                    "the drag missed the lanes".to_owned(),
-                ));
-            }
-            GestureOutcome::NewLane { .. } => {
-                return Err(ShellError::Unavailable(
-                    "a new lane is not available".to_owned(),
-                ));
-            }
-        };
-        let (name, duration) = locate(draft, &segment_id)
-            .map(|(segment, _)| (clip_name(draft, segment), segment.target.duration))
-            .ok_or_else(|| ShellError::Unavailable("the clip is not on the timeline".to_owned()))?;
-        Ok(PendingMove {
-            id: segment_id,
-            name,
-            start,
-            duration,
-            track_id,
-            snapped: start != raw,
-        })
-    }
-
-    /// Selected clips travel with the dragged one. A clip already at the left
-    /// edge stops the whole group there, so the gaps stay.
-    fn group_plans(&self, dragged: PendingMove) -> Vec<PendingMove> {
-        let Some(draft) = self.draft() else {
-            return vec![dragged];
-        };
-        let Some((segment, _)) = locate(draft, &dragged.id) else {
-            return vec![dragged];
-        };
-        if !self.is_selected(&dragged.id) || self.selection.len() < 2 {
-            return vec![dragged];
-        }
-        let origin = segment.target.start.0;
-        let mut members = Vec::new();
-        let mut min_start = origin;
-        for track in &draft.tracks {
-            for segment in &track.segments {
-                if !self.is_selected(&segment.id) {
-                    continue;
-                }
-                min_start = min_start.min(segment.target.start.0);
-                members.push(PendingMove {
-                    id: segment.id.clone(),
-                    name: clip_name(draft, segment),
-                    start: segment.target.start,
-                    duration: segment.target.duration,
-                    track_id: track.id.clone(),
-                    snapped: false,
-                });
-            }
-        }
-        if members.len() < 2 {
-            return vec![dragged];
-        }
-        let mut delta = dragged.start.0.saturating_sub(origin);
-        if min_start.saturating_add(delta) < 0 {
-            delta = min_start.saturating_neg();
-        }
-        let dragged_id = dragged.id.clone();
-        let snapped_at = dragged.start;
-        let was_snapped = dragged.snapped;
-        for member in &mut members {
-            member.start = Micros(member.start.0.saturating_add(delta));
-            if member.id == dragged_id {
-                member.snapped = was_snapped && member.start == snapped_at;
-            }
-        }
-        let dragged_first = |member: &PendingMove| member.id != dragged_id;
-        members.sort_by_key(dragged_first);
-        members
-    }
-
-    /// Later clips move first when the group is heading right, so a clip does
-    /// not land on a selected clip that has not moved yet.
-    fn ordered_moves(&self, mut plans: Vec<PendingMove>) -> Vec<PendingMove> {
-        let later = self.draft().is_some_and(|draft| {
-            plans.iter().any(|plan| {
-                locate(draft, &plan.id)
-                    .is_some_and(|(segment, _)| plan.start.0 > segment.target.start.0)
-            })
-        });
-        if later {
-            plans.sort_by_key(|plan| std::cmp::Reverse(plan.start.0));
-        } else {
-            plans.sort_by_key(|plan| plan.start.0);
-        }
-        plans
-    }
-
-    fn move_is_current(&self, plan: &PendingMove) -> bool {
-        let Some(draft) = self.draft() else {
-            return false;
-        };
-        draft.tracks.iter().any(|track| {
-            track.id == plan.track_id
-                && track
-                    .segments
-                    .iter()
-                    .any(|segment| segment.id == plan.id && segment.target.start == plan.start)
-        })
     }
 
     /// Place one library material at the timeline point.
@@ -2600,44 +2781,16 @@ impl Shell {
         lane: Option<TrackType>,
         first_clip: bool,
     ) -> Result<(), ShellError> {
-        let segment_id = SegmentId::new(self.fresh("seg"));
-        let mut requests = Vec::new();
-        if let Some(kind) = lane {
-            requests.push(Request::InsertTrack {
-                track_id: track_id.clone(),
-                kind,
-            });
-        }
-        let mut segment = Segment::new(
-            segment_id.clone(),
-            material_id,
-            TimeRange::new(start.0, duration.0),
-        );
-        segment.source_range = Some(TimeRange::new(0, duration.0));
-        let link_owner = if self.linkage_enabled() {
-            let draft = self.session_draft()?;
-            let on_main = draft
-                .tracks
-                .iter()
-                .any(|track| track.id == track_id && track.is_main());
-            if on_main {
-                None
-            } else {
-                exclusive_main_owner(draft, start, duration)
-            }
-        } else {
-            None
-        };
-        requests.push(Request::Place {
+        let place = MediaPlace {
             track_id,
-            segment: Box::new(segment),
-        });
-        if let Some(owner) = link_owner {
-            requests.push(Request::Link {
-                owner,
-                dependent: segment_id.clone(),
-            });
-        }
+            segment_id: SegmentId::new(self.fresh("seg")),
+            material_id: material_id.to_owned(),
+            start,
+            duration,
+            new_lane: lane,
+        };
+        let requests = media_requests(self.session_draft()?, &place, self.linkage_enabled());
+        let segment_id = place.segment_id;
         self.apply_requests(&requests)?;
         self.select(Some(segment_id));
         if first_clip {
@@ -2704,6 +2857,192 @@ impl Shell {
         Ok(())
     }
 
+    /// Add the templates shelf's `card_id` at the playhead, on the first
+    /// text row with room, else on a new one. The template is picked.
+    pub fn add_template(&mut self, card_id: &str) -> Result<(), ShellError> {
+        let length = cutlass_editor::title_template(card_id)
+            .map_or(TITLE_LENGTH, cutlass_editor::TitleTemplate::length);
+        let start = self.playhead;
+        let track_id = free_row(self.session_draft()?, TrackType::Text, start, length)
+            .unwrap_or_else(|| TrackId::new(self.fresh("track")));
+        self.place_template(card_id, track_id, start)
+    }
+
+    /// Place the templates shelf's `card_id` where it was dropped.
+    pub fn drop_template(&mut self, card_id: &str, x: f64, y: f64) -> Result<(), ShellError> {
+        let length = cutlass_editor::title_template(card_id)
+            .map_or(TITLE_LENGTH, cutlass_editor::TitleTemplate::length);
+        let x = self.time_zero_x(x);
+        let outcome = {
+            let gesture = DropGesture {
+                kind: TrackType::Text,
+                duration: length,
+                pointer: Pointer { x, y },
+                scale: self.scale(),
+                playhead: self.playhead,
+                snap_threshold: self.snap_threshold(),
+                guides: self.guide_times(),
+            };
+            drop_gesture(self.session_draft()?, &gesture)
+                .map_err(|_| ShellError::Unavailable("the drag could not be read".to_owned()))?
+        };
+        let (track_id, start) = match outcome {
+            DropOutcome::Miss => {
+                return Err(ShellError::Unavailable(
+                    "the drag missed the lanes".to_owned(),
+                ));
+            }
+            DropOutcome::Place { track_id, start } => (track_id, start),
+            DropOutcome::NewLane { start, .. } => (TrackId::new(self.fresh("track")), start),
+        };
+        self.place_template(card_id, track_id, start)
+    }
+
+    fn place_template(
+        &mut self,
+        card_id: &str,
+        track_id: TrackId,
+        start: Micros,
+    ) -> Result<(), ShellError> {
+        let template = cutlass_editor::title_template(card_id).ok_or_else(|| {
+            ShellError::Unavailable("the template is not on the templates shelf".to_owned())
+        })?;
+        let widgets = template
+            .widgets
+            .iter()
+            .map(|_| {
+                (
+                    TrackId::new(self.fresh("track")),
+                    SegmentId::new(self.fresh("seg")),
+                    MaterialId::new(self.fresh("text")),
+                )
+            })
+            .collect();
+        let place = cutlass_editor::TemplatePlace {
+            track_id,
+            start,
+            face: self.face.name().to_owned(),
+            segment_id: SegmentId::new(self.fresh("seg")),
+            material_id: MaterialId::new(self.fresh("mat")),
+            widgets,
+        };
+        self.apply_requests(&cutlass_editor::template_requests(template, &place))?;
+        self.select(Some(place.segment_id));
+        Ok(())
+    }
+
+    /// Add the sticker shelf's `card_id` at the playhead, on the first
+    /// sticker row with room, else on a new one. The new sticker is picked.
+    pub fn add_sticker(&mut self, card_id: &str) -> Result<(), ShellError> {
+        let sticker = shelf_sticker(card_id)?;
+        let length = sticker_length(sticker);
+        let start = self.playhead;
+        let track_id = free_row(self.session_draft()?, TrackType::Sticker, start, length);
+        self.place_sticker(sticker, length, track_id, start)
+    }
+
+    /// Place the sticker shelf's `card_id` where it was dropped on the lanes.
+    pub fn drop_sticker(&mut self, card_id: &str, x: f64, y: f64) -> Result<(), ShellError> {
+        let sticker = shelf_sticker(card_id)?;
+        let length = sticker_length(sticker);
+        let x = self.time_zero_x(x);
+        let outcome = {
+            let gesture = DropGesture {
+                kind: TrackType::Sticker,
+                duration: length,
+                pointer: Pointer { x, y },
+                scale: self.scale(),
+                playhead: self.playhead,
+                snap_threshold: self.snap_threshold(),
+                guides: self.guide_times(),
+            };
+            drop_gesture(self.session_draft()?, &gesture)
+                .map_err(|_| ShellError::Unavailable("the drag could not be read".to_owned()))?
+        };
+        match outcome {
+            DropOutcome::Miss => Err(ShellError::Unavailable(
+                "the drag missed the lanes".to_owned(),
+            )),
+            DropOutcome::Place { track_id, start } => {
+                self.place_sticker(sticker, length, Some(track_id), start)
+            }
+            DropOutcome::NewLane { start, .. } => self.place_sticker(sticker, length, None, start),
+        }
+    }
+
+    /// Place a sticker `length` long on `track_id`, or on a new sticker row.
+    /// Its file (a picture, or a Lottie animation) is written into the
+    /// project the first time and its library item is shared after that;
+    /// adding it, the row, the clip and its size are one undo step.
+    fn place_sticker(
+        &mut self,
+        sticker: &cutlass_stickers::Sticker,
+        length: Micros,
+        track_id: Option<TrackId>,
+        start: Micros,
+    ) -> Result<(), ShellError> {
+        let project = self.path.clone().ok_or(ShellError::NoProject)?;
+        let stored = format!("Resources/{}", sticker.file_name());
+        let mut requests = Vec::new();
+        let known = self
+            .session_draft()?
+            .materials
+            .videos
+            .iter()
+            .find(|video| video.path == stored)
+            .map(|video| video.id.as_str().to_owned());
+        let material_id = match known {
+            Some(id) => id,
+            None => {
+                let file = project.join(&stored);
+                if !file.is_file() {
+                    let bytes = sticker.bytes().map_err(ShellError::Io)?;
+                    if let Some(folder) = file.parent() {
+                        std::fs::create_dir_all(folder)
+                            .map_err(|error| ShellError::Io(error.to_string()))?;
+                    }
+                    std::fs::write(&file, bytes)
+                        .map_err(|error| ShellError::Io(error.to_string()))?;
+                }
+                let material_id = self.fresh("mat");
+                let mut material = MaterialVideo::new(material_id.as_str());
+                material.kind = MetaType::Sticker.as_str().to_owned();
+                material.path = stored;
+                // A picture has no length of its own; an animation plays
+                // round for as long as its clip lasts.
+                material.duration = MaterialVideo::MAPPING_DURATION.max(length);
+                let (width, height) = sticker.size().map_err(ShellError::Io)?;
+                material.width = i32::try_from(width).unwrap_or(0);
+                material.height = i32::try_from(height).unwrap_or(0);
+                requests.push(Request::Import {
+                    medium: ImportedMedium::Video(Box::new(material)),
+                });
+                material_id
+            }
+        };
+        let new_lane = track_id.is_none().then_some(TrackType::Sticker);
+        let place = MediaPlace {
+            track_id: track_id.unwrap_or_else(|| TrackId::new(self.fresh("track"))),
+            segment_id: SegmentId::new(self.fresh("seg")),
+            material_id,
+            start,
+            duration: length,
+            new_lane,
+        };
+        requests.extend(media_requests(
+            self.session_draft()?,
+            &place,
+            self.linkage_enabled(),
+        ));
+        requests.push(Request::SetScale {
+            segment_id: place.segment_id.clone(),
+            scale: STICKER_SCALE,
+        });
+        self.apply_requests(&requests)?;
+        self.select(Some(place.segment_id));
+        Ok(())
+    }
+
     /// Add the effects shelf's `card_id` at the playhead, on the first effect
     /// row with room, else on a new one. It runs over every picture below.
     pub fn add_effect(&mut self, card_id: &str) -> Result<(), ShellError> {
@@ -2763,6 +3102,115 @@ impl Shell {
         self.place_effect(card_id, track_id, start, EFFECT_LENGTH, None)
     }
 
+    /// Add an adjustment layer at the playhead, on the first adjust row
+    /// with room, else on a new one. It runs over every picture below.
+    pub fn add_adjustment(&mut self) -> Result<(), ShellError> {
+        let start = self.playhead;
+        let track_id = free_row(
+            self.session_draft()?,
+            TrackType::Adjust,
+            start,
+            EFFECT_LENGTH,
+        )
+        .unwrap_or_else(|| TrackId::new(self.fresh("track")));
+        self.place_adjustment(track_id, start)
+    }
+
+    /// Add the filters shelf's `card_id` at the playhead, on the first
+    /// filter row with room, else on a new one.
+    pub fn add_filter(&mut self, card_id: &str) -> Result<(), ShellError> {
+        let start = self.playhead;
+        let track_id = free_row(
+            self.session_draft()?,
+            TrackType::Filter,
+            start,
+            EFFECT_LENGTH,
+        )
+        .unwrap_or_else(|| TrackId::new(self.fresh("track")));
+        self.place_filter(card_id, track_id, start)
+    }
+
+    /// Place the filters shelf's `card_id` where it was dropped on the lanes.
+    pub fn drop_filter(&mut self, card_id: &str, x: f64, y: f64) -> Result<(), ShellError> {
+        let (track_id, start) = self.layer_drop(TrackType::Filter, x, y)?;
+        self.place_filter(card_id, track_id, start)
+    }
+
+    fn place_filter(
+        &mut self,
+        card_id: &str,
+        track_id: TrackId,
+        start: Micros,
+    ) -> Result<(), ShellError> {
+        let look = cutlass_editor::filter_of_card(card_id)
+            .ok_or(ShellError::Edit(EditError::UnknownEffect))?;
+        let segment_id = SegmentId::new(self.fresh("seg"));
+        let material_id = MaterialId::new(self.fresh("filter"));
+        self.apply(Request::AddFilter {
+            track_id,
+            segment_id: segment_id.clone(),
+            material_id,
+            start,
+            duration: EFFECT_LENGTH,
+            filter_id: look.effect_id(),
+        })?;
+        self.select(Some(segment_id));
+        Ok(())
+    }
+
+    /// Place an adjustment layer where the card was dropped on the lanes.
+    pub fn drop_adjustment(&mut self, x: f64, y: f64) -> Result<(), ShellError> {
+        let (track_id, start) = self.layer_drop(TrackType::Adjust, x, y)?;
+        self.place_adjustment(track_id, start)
+    }
+
+    /// The row and time a card of `kind` lands on, dropped at `x`, `y`.
+    fn layer_drop(
+        &mut self,
+        kind: TrackType,
+        x: f64,
+        y: f64,
+    ) -> Result<(TrackId, Micros), ShellError> {
+        let x = self.time_zero_x(x);
+        let outcome = {
+            let gesture = DropGesture {
+                kind,
+                duration: EFFECT_LENGTH,
+                pointer: Pointer { x, y },
+                scale: self.scale(),
+                playhead: self.playhead,
+                snap_threshold: self.snap_threshold(),
+                guides: self.guide_times(),
+            };
+            drop_gesture(self.session_draft()?, &gesture)
+                .map_err(|_| ShellError::Unavailable("the drag could not be read".to_owned()))?
+        };
+        let (track_id, start) = match outcome {
+            DropOutcome::Miss => {
+                return Err(ShellError::Unavailable(
+                    "the drag missed the lanes".to_owned(),
+                ));
+            }
+            DropOutcome::Place { track_id, start } => (track_id, start),
+            DropOutcome::NewLane { start, .. } => (TrackId::new(self.fresh("track")), start),
+        };
+        Ok((track_id, start))
+    }
+
+    fn place_adjustment(&mut self, track_id: TrackId, start: Micros) -> Result<(), ShellError> {
+        let segment_id = SegmentId::new(self.fresh("seg"));
+        let material_id = MaterialId::new(self.fresh("adjustment"));
+        self.apply(Request::AddAdjustment {
+            track_id,
+            segment_id: segment_id.clone(),
+            material_id,
+            start,
+            duration: EFFECT_LENGTH,
+        })?;
+        self.select(Some(segment_id));
+        Ok(())
+    }
+
     fn place_effect(
         &mut self,
         card_id: &str,
@@ -2792,47 +3240,39 @@ impl Shell {
     /// The two clips must touch. The blend does not open a lane and does not
     /// move either clip. A preset longer than the clips is shortened to fit.
     pub fn drop_transition(&mut self, card_id: &str, x: f64, y: f64) -> Result<(), ShellError> {
-        let offer = TRANSITION_OFFERS
-            .iter()
-            .find(|offer| offer.card_id() == card_id)
-            .copied()
-            .ok_or_else(|| {
-                ShellError::Unavailable("the transition is not in the library".to_owned())
-            })?;
-        let x = self.time_zero_x(x);
-        let scale = self.scale();
-        let threshold = snap_window(self.pixel_size);
-        let (segment_id, fitted) = {
-            let draft = self.session_draft()?;
-            let hit = hit_test(draft, scale, Pointer { x, y })
-                .map_err(|_| ShellError::Unavailable("the drag could not be read".to_owned()))?;
-            let Some(hit) = hit else {
-                return Err(ShellError::Unavailable(
-                    "the drag missed the lanes".to_owned(),
-                ));
-            };
-            if !hit.lane.main {
-                return Err(ShellError::Unavailable(
-                    "a transition sits on the main track".to_owned(),
-                ));
+        let offer = transition_of_card(card_id).ok_or_else(|| {
+            ShellError::Unavailable("the transition is not in the library".to_owned())
+        })?;
+        let pointer = Pointer {
+            x: self.time_zero_x(x),
+            y,
+        };
+        let material_id = MaterialId::new(self.fresh("transition"));
+        let request = transition_request(
+            self.session_draft()?,
+            offer,
+            pointer,
+            self.scale(),
+            snap_window(self.pixel_size),
+            material_id,
+        )
+        .map_err(|miss| match miss {
+            TransitionMiss::Locked => ShellError::Locked,
+            TransitionMiss::BadScale => {
+                ShellError::Unavailable("the drag could not be read".to_owned())
             }
-            let (segment_id, outgoing, incoming) = main_cut(draft, hit.time, threshold)?;
-            let fitted = fit_transition(offer.duration, outgoing, incoming, offer.overlap)
-                .ok_or_else(|| ShellError::Unavailable("the clips are too short".to_owned()))?;
-            (segment_id, fitted)
-        };
-        let transition = MaterialTransition {
-            id: MaterialId::new(self.fresh("transition")),
-            kind: "transition".to_owned(),
-            name: offer.name.to_owned(),
-            duration: Micros(fitted),
-            is_overlap: offer.overlap,
-            ..Default::default()
-        };
-        self.apply(Request::SetTransition {
-            segment_id,
-            transition: Box::new(transition),
-        })
+            TransitionMiss::OffLanes => {
+                ShellError::Unavailable("the drag missed the lanes".to_owned())
+            }
+            TransitionMiss::NotMain => {
+                ShellError::Unavailable("a transition sits on the main track".to_owned())
+            }
+            TransitionMiss::NoCut => ShellError::Unavailable("the drop missed the cut".to_owned()),
+            TransitionMiss::TooShort => {
+                ShellError::Unavailable("the clips are too short".to_owned())
+            }
+        })?;
+        self.apply(request)
     }
 
     pub fn zoom_in(&mut self) -> Result<(), ShellError> {
@@ -3043,20 +3483,9 @@ impl Shell {
     ///
     /// A locked main lane refuses the switch. One undo restores the clips and the switch.
     pub fn toggle_magnet(&mut self) -> Result<(), ShellError> {
-        let Some(session) = self.session.as_ref() else {
-            return Err(ShellError::NoProject);
-        };
-        if session
-            .draft()
-            .main_track()
-            .is_some_and(|track| track.attribute.contains(TrackAttribute::LOCK))
-        {
-            return Err(ShellError::Unavailable(
-                "the main track is locked".to_owned(),
-            ));
-        }
-        let on = !session.draft().config.maintrack_adsorb;
-        self.apply(Request::SetMagnet { on })
+        let request = cutlass_editor::magnet_request(self.session_draft()?)
+            .ok_or_else(|| ShellError::Unavailable("the main track is locked".to_owned()))?;
+        self.apply(request)
     }
 
     /// Store the color under every layer. An empty string clears it.
@@ -3073,14 +3502,14 @@ impl Shell {
             .draft()
             .and_then(Draft::frame_rate)
             .unwrap_or(FrameRate::FPS_30);
-        rate_label(rate)
+        cutlass_editor::rate_label(rate)
     }
 
     /// Drop frame is a timecode label for 29.97 and 59.94.
     pub fn drop_frame_available(&self) -> bool {
         self.draft()
             .and_then(Draft::frame_rate)
-            .is_some_and(drop_rate)
+            .is_some_and(cutlass_editor::is_drop_rate)
     }
 
     /// Whether timecode labels use the drop-frame separator.
@@ -3093,10 +3522,10 @@ impl Shell {
     /// Every other rate turns it off. One undo restores the rate and the label.
     pub fn cycle_frame_rate(&mut self) -> Result<(), ShellError> {
         let current = self.session_draft()?.frame_rate();
-        let next = next_rate(current);
-        let drop_frame = drop_rate(next);
+        let next = cutlass_editor::next_rate(current);
+        let drop_frame = cutlass_editor::is_drop_rate(next);
         self.apply(Request::SetFrameRate {
-            fps: stored_fps(next),
+            fps: cutlass_editor::rate_fps(next),
             drop_frame,
         })
     }
@@ -3110,7 +3539,7 @@ impl Shell {
             let canvas = &self.session_draft()?.canvas_config;
             (canvas.width, canvas.height)
         };
-        let next = next_canvas(width, height);
+        let next = cutlass_editor::next_canvas(width, height);
         self.apply(Request::SetCanvasSize {
             width: next.width,
             height: next.height,
@@ -3122,7 +3551,7 @@ impl Shell {
     /// spaces is shown as that int.
     pub fn color_space_label(&self) -> String {
         let space = self.draft().map(|draft| draft.color_space).unwrap_or(0);
-        color_space_name(space)
+        cutlass_editor::color_space_name(space)
     }
 
     /// Store the project name. Surrounding whitespace is dropped. An empty
@@ -3144,8 +3573,27 @@ impl Shell {
     pub fn cycle_color_space(&mut self) -> Result<(), ShellError> {
         let current = self.session_draft()?.color_space;
         self.apply(Request::SetColorSpace {
-            space: next_color_space(current),
+            space: cutlass_editor::next_color_space(current),
         })
+    }
+
+    /// The settings the project dialog opens with.
+    pub fn project_settings(&self) -> Option<cutlass_editor::ProjectSettings> {
+        self.draft().map(cutlass_editor::project_settings)
+    }
+
+    /// Save the project dialog: what changed is one undo step, and nothing
+    /// changed is no step.
+    pub fn save_project_settings(
+        &mut self,
+        settings: &cutlass_editor::ProjectSettings,
+    ) -> Result<(), ShellError> {
+        let requests = cutlass_editor::project_requests(self.session_draft()?, settings)
+            .map_err(ShellError::Edit)?;
+        if requests.is_empty() {
+            return Ok(());
+        }
+        self.apply_requests(&requests)
     }
 
     /// Turn the drop-frame timecode label on or off. The frame rate stays.
@@ -3353,11 +3801,33 @@ impl Shell {
             line_width,
             font,
             letterbox: letterbox_color(draft, segment),
+            blend: cutlass_effects::segment_blend(draft, segment)
+                .unwrap_or(cutlass_effects::BlendMode::SourceOver),
+            adjust: cutlass_effects::segment_adjust(draft, segment),
+            grade: cutlass_effects::segment_grade(draft, segment),
+            lut: cutlass_effects::segment_lut(draft, segment).map(|lut| (lut.name, lut.strength)),
+            chroma: cutlass_effects::segment_chroma(draft, segment),
+            mask: cutlass_effects::segment_mask(draft, segment),
+            color_mask: cutlass_effects::segment_color_mask(draft, segment),
+            speed_curve: speed_curve(draft, segment),
+            change_pitch: segment.is_tone_modify,
             fade_in: fade_durations(draft, segment).0,
             fade_out: fade_durations(draft, segment).1,
             material,
             text,
             words,
+            caption_style: match draft.materials.get(segment.material_id.as_str()) {
+                Some(MaterialRef::Text(text)) => text.caption_style.clone(),
+                _ => String::new(),
+            },
+            caption_keywords: match draft.materials.get(segment.material_id.as_str()) {
+                Some(MaterialRef::Text(text)) => text.caption_keywords.clone(),
+                _ => Vec::new(),
+            },
+            caption_stagger_ms: match draft.materials.get(segment.material_id.as_str()) {
+                Some(MaterialRef::Text(text)) => text.caption_stagger_ms,
+                _ => 0,
+            },
             locked,
         })
     }
@@ -3372,6 +3842,29 @@ impl Shell {
         let segment_id = self.selected().cloned().ok_or(ShellError::NoProject)?;
         self.refuse_locked(&segment_id)?;
         self.apply(Request::SetConstantSpeed { segment_id, speed })
+    }
+
+    /// Run the selected clip on the speed curve `points`, `x` the share of
+    /// the source and `y` the speed there. Its length follows the curve.
+    pub fn set_speed_curve(
+        &mut self,
+        points: &[cutlass_model::SpeedPoint],
+    ) -> Result<(), ShellError> {
+        let segment_id = self.selected().cloned().ok_or(ShellError::NoProject)?;
+        self.refuse_locked(&segment_id)?;
+        let speed_id = MaterialId::new(self.fresh("speed"));
+        self.apply(Request::SetCurveSpeed {
+            segment_id,
+            speed_id,
+            points: points.to_vec(),
+        })
+    }
+
+    /// Let the selected clip's pitch follow its speed, or keep it.
+    pub fn set_change_pitch(&mut self, on: bool) -> Result<(), ShellError> {
+        let segment_id = self.selected().cloned().ok_or(ShellError::NoProject)?;
+        self.refuse_locked(&segment_id)?;
+        self.apply(Request::SetChangePitch { segment_id, on })
     }
 
     fn selected_video(&self) -> Option<&MaterialVideo> {
@@ -3410,31 +3903,19 @@ impl Shell {
                 ShellError::Unavailable("nothing is selected".to_owned())
             });
         };
-        let playhead = self.playhead;
-        let freeze = {
-            let draft = self.session_draft()?;
-            let (segment, _) = locate(draft, &segment_id).ok_or_else(|| {
-                ShellError::Unavailable("the clip is not on the timeline".to_owned())
+        let freeze = cutlass_eval::freeze_toggle(self.session_draft()?, &segment_id, self.playhead)
+            .map_err(|miss| {
+                ShellError::Unavailable(
+                    match miss {
+                        cutlass_eval::FreezeMiss::UnknownSegment => {
+                            "the clip is not on the timeline"
+                        }
+                        cutlass_eval::FreezeMiss::NotVideo => "a freeze belongs on video",
+                        cutlass_eval::FreezeMiss::NoFrame => "the clip has no frame to hold",
+                    }
+                    .to_owned(),
+                )
             })?;
-            let Some(MaterialRef::Video(video)) = draft.materials.get(segment.material_id.as_str())
-            else {
-                return Err(ShellError::Unavailable(
-                    "a freeze belongs on video".to_owned(),
-                ));
-            };
-            if video.freeze.is_some() {
-                None
-            } else {
-                let timestamp = held_frame(draft, segment, playhead)?;
-                Some(FreezeInfo {
-                    source_material_id: video.id.as_str().to_owned(),
-                    source_material_path: video.path.clone(),
-                    reverse_material_path: video.reverse_path.clone(),
-                    timestamp,
-                    rest: Default::default(),
-                })
-            }
-        };
         self.refuse_locked(&segment_id)?;
         self.apply(Request::SetFreeze { segment_id, freeze })
     }
@@ -3529,7 +4010,7 @@ impl Shell {
                     "the clip is not on the timeline".to_owned(),
                 ));
             };
-            if !can_turn(draft, segment, kind) {
+            if !cutlass_editor::can_turn(draft, segment, kind) {
                 return Err(ShellError::Unavailable(
                     "a mirror belongs on a picture".to_owned(),
                 ));
@@ -3599,7 +4080,7 @@ impl Shell {
                     "the clip is not on the timeline".to_owned(),
                 ));
             };
-            if !can_turn(draft, segment, kind) {
+            if !cutlass_editor::can_turn(draft, segment, kind) {
                 return Err(ShellError::Unavailable(
                     "a rotate belongs on a picture".to_owned(),
                 ));
@@ -3730,7 +4211,8 @@ impl Shell {
         let clip = self.selected_speech()?;
         self.refuse_busy()?;
         let loaded = self.speech.borrow_mut().take();
-        if loaded.is_none() && !speech_model_dir().join(SPEECH_MODEL).is_file() {
+        if loaded.is_none() && !speech_model::speech_model_here() {
+            self.wants_speech_model = true;
             return Err(ShellError::Unavailable(
                 "the speech model is not on this machine".to_owned(),
             ));
@@ -3857,7 +4339,53 @@ impl Shell {
         if let Err(error) = result {
             self.set_notice(error.to_string());
         }
+        if stopping {
+            self.waiting_imports.clear();
+        } else if let Some(next) = self.waiting_imports.pop_front() {
+            if let Err(error) = self.start_import(&next) {
+                self.waiting_imports.clear();
+                self.set_notice(error.to_string());
+            }
+            return self.job.is_some();
+        }
         false
+    }
+
+    /// What files dropped on the window do: a project folder opens, and
+    /// files go into the open project one import after another.
+    pub fn drop_files(&mut self, paths: &[PathBuf]) -> Result<(), ShellError> {
+        let Some(first) = paths.first() else {
+            return Ok(());
+        };
+        if first.is_dir() && cutlass_store::listed_project(first).is_some() {
+            return self.open_folder(first);
+        }
+        if self.path.is_none() {
+            return Err(ShellError::Unavailable(
+                "open a project to import into first".to_owned(),
+            ));
+        }
+        let files: Vec<PathBuf> = paths
+            .iter()
+            .filter(|path| path.is_file())
+            .cloned()
+            .collect();
+        if files.is_empty() {
+            return Err(ShellError::Unavailable(
+                "only files and project folders can be dropped".to_owned(),
+            ));
+        }
+        self.waiting_imports.extend(files);
+        if self.job.is_none()
+            && let Some(next) = self.waiting_imports.pop_front()
+        {
+            let started = self.start_import(&next);
+            if started.is_err() {
+                self.waiting_imports.clear();
+            }
+            return started;
+        }
+        Ok(())
     }
 
     /// Hear `source` with `recognizer` and place the caption. Tests pass a
@@ -3887,65 +4415,19 @@ impl Shell {
 
     /// The sound of clip `segment_id`, and how it maps onto the timeline.
     fn heard_clip(&self, segment_id: &SegmentId) -> Result<HeardClip, ShellError> {
-        let segment_id = segment_id.clone();
-        let draft = self.session_draft()?;
-        let Some((segment, _)) = locate(draft, &segment_id) else {
-            return Err(ShellError::Unavailable(
-                "the clip is not on the timeline".to_owned(),
-            ));
-        };
-        let path = match draft.materials.get(segment.material_id.as_str()) {
-            Some(MaterialRef::Video(video)) => video.path.clone(),
-            Some(MaterialRef::Audio(audio)) => audio.path.clone(),
-            _ => {
-                return Err(ShellError::Unavailable(
-                    "a transcript belongs on a picture or a sound".to_owned(),
-                ));
-            }
-        };
-        if path.is_empty() {
-            return Err(ShellError::Unavailable("the clip has no sound".to_owned()));
-        }
-        let range = segment
-            .source_range
-            .clone()
-            .filter(|range| range.duration.0 > 0 && range.start.0 >= 0)
-            .unwrap_or_else(|| TimeRange::new(0, segment.target.duration.0));
-        if range.duration.0 <= 0 || segment.target.duration.0 <= 0 {
-            return Err(ShellError::Unavailable("the clip has no sound".to_owned()));
-        }
-        let source_us = range.duration.0;
-        let target_us = segment.target.duration.0;
-        Ok(HeardClip {
-            source_id: segment_id,
-            path,
-            range,
-            source_us,
-            target_us,
-            reverse: segment.reverse,
-            speed_holds: segment.speed.is_finite() && segment.speed > 0.0,
-            target: segment.target.clone(),
-        })
+        cutlass_transcription::heard_clip(self.session_draft()?, segment_id).map_err(heard_error)
     }
 
     fn write_caption(&mut self, clip: &HeardClip, words: WordColumns) -> Result<(), ShellError> {
-        if words.text.is_empty() {
-            return Err(ShellError::Unavailable("nothing was heard".to_owned()));
-        }
-        let existing = {
-            let draft = self.session_draft()?;
-            caption_track(draft, &clip.target)
+        let mut next_id = self.next_id;
+        let mut fresh = |prefix: &str| {
+            next_id = next_id.saturating_add(1);
+            format!("{prefix}-{next_id}")
         };
-        let track_id = existing.unwrap_or_else(|| TrackId::new(self.fresh("captions")));
-        let segment_id = SegmentId::new(self.fresh("caption"));
-        let material_id = MaterialId::new(self.fresh("caption"));
-        self.apply(Request::AddCaption {
-            source_id: clip.source_id.clone(),
-            track_id,
-            segment_id,
-            material_id,
-            words,
-        })
+        let request =
+            caption_request(self.session_draft()?, clip, words, &mut fresh).map_err(heard_error);
+        self.next_id = next_id;
+        self.apply(request?)
     }
 
     /// The selected clip is a video, so its sound can be placed on its own clip.
@@ -4038,34 +4520,16 @@ impl Shell {
     }
 
     fn place_extracted(&mut self, source_id: &SegmentId) -> Result<(), ShellError> {
-        let existing = {
-            let draft = self.session_draft()?;
-            let (segment, _) = locate(draft, source_id).ok_or_else(|| {
-                ShellError::Unavailable("the clip is not on the timeline".to_owned())
-            })?;
-            let target = segment.target.clone();
-            draft
-                .tracks
-                .iter()
-                .find(|track| {
-                    track.kind == TrackType::Audio
-                        && !track.attribute.contains(TrackAttribute::LOCK)
-                        && track
-                            .segments
-                            .iter()
-                            .all(|other| other.target.overlaps(&target).ok() == Some(false))
-                })
-                .map(|track| track.id.clone())
+        let mut next_id = self.next_id;
+        let mut fresh = |prefix: &str| {
+            next_id = next_id.saturating_add(1);
+            format!("{prefix}-{next_id}")
         };
-        let track_id = existing.unwrap_or_else(|| TrackId::new(self.fresh("sound")));
-        let segment_id = SegmentId::new(self.fresh("sound"));
-        let material_id = MaterialId::new(self.fresh("sound"));
-        self.apply(Request::ExtractAudio {
-            source_id: source_id.clone(),
-            track_id,
-            segment_id,
-            material_id,
-        })
+        let request = cutlass_editor::extract_request(self.session_draft()?, source_id, &mut fresh);
+        self.next_id = next_id;
+        let request = request
+            .ok_or_else(|| ShellError::Unavailable("the clip is not on the timeline".to_owned()))?;
+        self.apply(request)
     }
 
     /// The selected clip is a video, so Split scenes can cut it.
@@ -4130,7 +4594,7 @@ impl Shell {
                             "the clip changed while its scenes were found".to_owned(),
                         ));
                     }
-                    timeline_cuts(draft, &segment_id, &range, &cuts)
+                    cutlass_eval::scene_split_times(draft, &segment_id, &range, &cuts)
                 };
                 shell.split_at_times(&segment_id, &times)
             })
@@ -4200,7 +4664,7 @@ impl Shell {
             let (segment, _) = locate(draft, segment_id).ok_or_else(|| {
                 ShellError::Unavailable("the clip is not on the timeline".to_owned())
             })?;
-            kept_cuts(draft, segment, times)
+            cutlass_eval::kept_cuts(draft, segment, times)
         };
         if kept.is_empty() {
             return Err(ShellError::Unavailable(
@@ -4230,7 +4694,7 @@ impl Shell {
         let Some((segment, kind)) = placed(draft, id) else {
             return false;
         };
-        can_turn(draft, segment, kind)
+        cutlass_editor::can_turn(draft, segment, kind)
     }
 
     fn selected_segment(&self) -> Option<&Segment> {
@@ -4304,12 +4768,13 @@ impl Shell {
         cutlass_editor::clip_animations(draft, segment_id, &sizes)
     }
 
-    /// Give the selected clip the in (`enter`) or out animation
-    /// `resource_id`, `duration` long, or clear that side with `None`. The
-    /// session keeps the two inside the clip. One undo step.
+    /// Give the selected clip the in, out or loop animation `resource_id`,
+    /// `duration` long, or clear that one with `None`. The session keeps the
+    /// in and out inside the clip; a loop's duration is one round. One undo
+    /// step.
     pub fn set_animation(
         &mut self,
-        enter: bool,
+        kind: cutlass_model::AnimType,
         resource_id: Option<String>,
         duration: Micros,
     ) -> Result<(), ShellError> {
@@ -4326,11 +4791,6 @@ impl Shell {
             ));
         }
         self.refuse_locked(&segment_id)?;
-        let kind = if enter {
-            cutlass_model::AnimType::In
-        } else {
-            cutlass_model::AnimType::Out
-        };
         self.apply(Request::SetAnimation {
             segment_id,
             kind,
@@ -4370,6 +4830,385 @@ impl Shell {
 
     /// Set how solid the selected picture is. `1` is solid and `0` is clear.
     /// One undo restores the previous opacity.
+    /// Mix the selected picture with what is below it by `mode`. Normal
+    /// takes the blend off. One undo step.
+    pub fn set_blend(&mut self, mode: cutlass_effects::BlendMode) -> Result<(), ShellError> {
+        let segment_id = self.picture_segment("a blend belongs on a picture")?;
+        self.refuse_locked(&segment_id)?;
+        let material_id = if mode == cutlass_effects::BlendMode::SourceOver {
+            MaterialId::new("")
+        } else {
+            MaterialId::new(self.fresh("mix"))
+        };
+        self.apply(Request::SetBlend {
+            segment_id,
+            material_id,
+            mode: mode.package_id().to_owned(),
+        })
+    }
+
+    /// Set one adjust slider on the selected picture; zero takes it off.
+    pub fn set_adjust(
+        &mut self,
+        key: cutlass_effects::AdjustKey,
+        value: f64,
+    ) -> Result<(), ShellError> {
+        let segment_id = self.adjust_segment()?;
+        self.refuse_locked(&segment_id)?;
+        let material_id = MaterialId::new(self.fresh("adjust"));
+        self.apply(Request::SetAdjust {
+            segment_id,
+            material_id,
+            key: key.kind().to_owned(),
+            value,
+        })
+    }
+
+    /// Set HSL colour `color` (0 red to 7 magenta) on the selected picture:
+    /// hue, saturation and lightness from -1 to 1.
+    pub fn set_hsl(&mut self, color: u8, values: [f64; 3]) -> Result<(), ShellError> {
+        let segment_id = self.adjust_segment()?;
+        self.refuse_locked(&segment_id)?;
+        let material_id = MaterialId::new(self.fresh("hsl"));
+        let [hue, saturation, lightness] = values;
+        self.apply(Request::SetHsl {
+            segment_id,
+            material_id,
+            color,
+            hue,
+            saturation,
+            lightness,
+        })
+    }
+
+    /// Set one curve on the selected picture; no points is the straight line.
+    pub fn set_curve(
+        &mut self,
+        channel: cutlass_effects::CurveChannel,
+        points: &[(f32, f32)],
+    ) -> Result<(), ShellError> {
+        let segment_id = self.adjust_segment()?;
+        self.refuse_locked(&segment_id)?;
+        let material_id = MaterialId::new(self.fresh("curves"));
+        self.apply(Request::SetCurve {
+            segment_id,
+            material_id,
+            channel: channel.key().to_owned(),
+            points: points
+                .iter()
+                .map(|(x, y)| [f64::from(*x), f64::from(*y)])
+                .collect(),
+        })
+    }
+
+    /// Put the `.cube` file at `path` on the selected picture at full
+    /// strength, named after the file.
+    pub fn load_lut(&mut self, path: &Path) -> Result<(), ShellError> {
+        const LARGEST: u64 = 16 * 1024 * 1024;
+        let segment_id = self.adjust_segment()?;
+        self.refuse_locked(&segment_id)?;
+        let unreadable = |reason: String| {
+            ShellError::Unavailable(format!("the LUT could not be read: {reason}"))
+        };
+        let size = std::fs::metadata(path)
+            .map_err(|error| unreadable(error.to_string()))?
+            .len();
+        if size > LARGEST {
+            return Err(unreadable("it is larger than 16 MB".to_owned()));
+        }
+        let text = std::fs::read_to_string(path).map_err(|error| unreadable(error.to_string()))?;
+        cutlass_effects::Lut::parse_cube(&text).map_err(|error| unreadable(error.to_string()))?;
+        let name = path.file_stem().map_or_else(
+            || "LUT".to_owned(),
+            |stem| stem.to_string_lossy().into_owned(),
+        );
+        let material_id = MaterialId::new(self.fresh("lut"));
+        self.apply(Request::SetLut {
+            segment_id,
+            material_id,
+            name,
+            cube: Some(text),
+            strength: 1.0,
+        })
+    }
+
+    /// Key `color` (`#rrggbb`) out of the selected picture with `strength`
+    /// and `shadow`, 0 to 1; an empty colour takes the key off.
+    pub fn set_chroma(
+        &mut self,
+        color: &str,
+        strength: f64,
+        shadow: f64,
+    ) -> Result<(), ShellError> {
+        let segment_id = self.picture_segment("a chroma key belongs on a picture")?;
+        self.refuse_locked(&segment_id)?;
+        let material_id = MaterialId::new(self.fresh("chroma"));
+        self.apply(Request::SetChroma {
+            segment_id,
+            material_id,
+            color: color.to_owned(),
+            strength,
+            shadow,
+        })
+    }
+
+    /// Put `mask` on the selected picture, in its own frame, or take its
+    /// mask off.
+    pub fn set_mask(&mut self, mask: Option<cutlass_effects::Mask>) -> Result<(), ShellError> {
+        let segment_id = self.picture_segment("a mask belongs on a picture")?;
+        self.refuse_locked(&segment_id)?;
+        let material_id = MaterialId::new(self.fresh("mask"));
+        self.apply(Request::SetMask {
+            segment_id,
+            material_id,
+            mask,
+        })
+    }
+
+    /// Keep the selected picture's colour work, or the selected adjustment
+    /// layer, inside `mask`, or take that limit off.
+    pub fn set_color_mask(
+        &mut self,
+        mask: Option<cutlass_effects::Mask>,
+    ) -> Result<(), ShellError> {
+        let segment_id = self.adjust_segment()?;
+        self.refuse_locked(&segment_id)?;
+        let material_id = MaterialId::new(self.fresh("color-mask"));
+        self.apply(Request::SetColorMask {
+            segment_id,
+            material_id,
+            mask,
+        })
+    }
+
+    /// Set the strength of the selected picture's LUT, from 0 to 1.
+    pub fn set_lut_strength(&mut self, strength: f64) -> Result<(), ShellError> {
+        let segment_id = self.adjust_segment()?;
+        self.refuse_locked(&segment_id)?;
+        let material_id = MaterialId::new(self.fresh("lut"));
+        self.apply(Request::SetLut {
+            segment_id,
+            material_id,
+            name: String::new(),
+            cube: None,
+            strength,
+        })
+    }
+
+    /// Take the LUT off the selected picture.
+    pub fn remove_lut(&mut self) -> Result<(), ShellError> {
+        let segment_id = self.adjust_segment()?;
+        self.refuse_locked(&segment_id)?;
+        self.apply(Request::SetLut {
+            segment_id,
+            material_id: MaterialId::new(""),
+            name: String::new(),
+            cube: Some(String::new()),
+            strength: 1.0,
+        })
+    }
+
+    /// Set one colour wheel on the selected picture.
+    pub fn set_wheel(
+        &mut self,
+        wheel: cutlass_effects::Wheel,
+        setting: cutlass_effects::WheelSetting,
+    ) -> Result<(), ShellError> {
+        let segment_id = self.adjust_segment()?;
+        self.refuse_locked(&segment_id)?;
+        let material_id = MaterialId::new(self.fresh("wheels"));
+        let setting = setting.held();
+        self.apply(Request::SetWheel {
+            segment_id,
+            material_id,
+            wheel: wheel.key().to_owned(),
+            x: f64::from(setting.x),
+            y: f64::from(setting.y),
+            luma: f64::from(setting.luma),
+        })
+    }
+
+    /// Put every adjust slider on the selected picture back to zero, as one
+    /// undo step. Nothing set is nothing done.
+    pub fn reset_adjust(&mut self) -> Result<(), ShellError> {
+        let segment_id = self.adjust_segment()?;
+        self.refuse_locked(&segment_id)?;
+        let Some(adjust) = self.inspection().map(|inspection| inspection.adjust) else {
+            return Ok(());
+        };
+        let requests: Vec<Request> = cutlass_effects::AdjustKey::ALL
+            .into_iter()
+            .filter(|key| adjust.get(*key) != 0.0)
+            .map(|key| Request::SetAdjust {
+                segment_id: segment_id.clone(),
+                material_id: MaterialId::new(""),
+                key: key.kind().to_owned(),
+                value: 0.0,
+            })
+            .collect();
+        if requests.is_empty() {
+            return Ok(());
+        }
+        self.apply_requests(&requests)
+    }
+
+    /// Look at the selected picture at the playhead, drawn alone and
+    /// without its colour work, and set exposure, contrast, temperature,
+    /// tint and saturation to even it out. One undo step.
+    pub fn auto_adjust(&mut self) -> Result<(), ShellError> {
+        let segment_id = self.picture_segment("auto adjust looks at a picture")?;
+        self.refuse_locked(&segment_id)?;
+        let own = self.drawn_alone(&segment_id)?;
+        let adjust = cutlass_effects::auto_adjust(&own);
+        self.set_auto_keys(&segment_id, &adjust)
+    }
+
+    /// Bring the selected picture's look toward `reference`'s, each drawn
+    /// alone and without its colour work at the playhead. One undo step.
+    pub fn match_colour(&mut self, reference: &SegmentId) -> Result<(), ShellError> {
+        let segment_id = self.picture_segment("colour match looks at a picture")?;
+        self.refuse_locked(&segment_id)?;
+        if *reference == segment_id {
+            return Err(ShellError::Unavailable(
+                "pick another clip to match".to_owned(),
+            ));
+        }
+        let own = self.drawn_alone(&segment_id)?;
+        let goal = self.drawn_alone(reference)?;
+        let adjust = cutlass_effects::match_adjust(&own, &goal);
+        self.set_auto_keys(&segment_id, &adjust)
+    }
+
+    /// The other picture clips the selected one can match, by name, in
+    /// timeline order.
+    pub fn match_choices(&self) -> Vec<(SegmentId, String)> {
+        let Some(selected) = self.selected().cloned() else {
+            return Vec::new();
+        };
+        let Ok(draft) = self.session_draft() else {
+            return Vec::new();
+        };
+        let mut choices: Vec<(i64, SegmentId, String)> = draft
+            .tracks
+            .iter()
+            .flat_map(|track| {
+                track
+                    .segments
+                    .iter()
+                    .map(move |segment| (&track.kind, segment))
+            })
+            .filter(|(_, segment)| segment.id != selected)
+            .filter(|(kind, segment)| cutlass_editor::can_turn(draft, segment, kind))
+            .filter(|(_, segment)| {
+                matches!(
+                    draft.materials.get(segment.material_id.as_str()),
+                    Some(MaterialRef::Video(_))
+                )
+            })
+            .map(|(_, segment)| {
+                (
+                    segment.target.start.0,
+                    segment.id.clone(),
+                    clip_name(draft, segment),
+                )
+            })
+            .collect();
+        choices.sort_by_key(|(start, _, _)| *start);
+        choices
+            .into_iter()
+            .map(|(_, id, name)| (id, name))
+            .collect()
+    }
+
+    /// Set the sliders auto adjust and colour match set to `adjust`'s, in
+    /// one undo step; the ones already there are left.
+    fn set_auto_keys(
+        &mut self,
+        segment_id: &SegmentId,
+        adjust: &cutlass_effects::Adjust,
+    ) -> Result<(), ShellError> {
+        let current = {
+            let draft = self.session_draft()?;
+            placed(draft, segment_id)
+                .map(|(segment, _)| cutlass_effects::segment_adjust(draft, segment))
+                .unwrap_or_default()
+        };
+        let mut requests = Vec::new();
+        for key in cutlass_effects::AUTO_KEYS {
+            let value = adjust.get(key);
+            if value == current.get(key) {
+                continue;
+            }
+            let material_id = MaterialId::new(self.fresh("adjust"));
+            requests.push(Request::SetAdjust {
+                segment_id: segment_id.clone(),
+                material_id,
+                key: key.kind().to_owned(),
+                value: f64::from(value),
+            });
+        }
+        if requests.is_empty() {
+            return Ok(());
+        }
+        self.apply_requests(&requests)
+    }
+
+    /// `segment_id` drawn alone, without its colour work, on a clear
+    /// canvas, at the playhead or the nearest frame of the clip.
+    fn drawn_alone(&self, segment_id: &SegmentId) -> Result<Vec<u8>, ShellError> {
+        let mut draft = self.session_draft()?.clone();
+        let mut span = None;
+        for track in &mut draft.tracks {
+            track.segments.retain(|segment| segment.id == *segment_id);
+            if let Some(segment) = track.segments.first() {
+                span = Some(segment.target.clone());
+            }
+        }
+        let Some(span) = span else {
+            return Err(ShellError::Unavailable(
+                "the clip is not on the timeline".to_owned(),
+            ));
+        };
+        let colour: Vec<MaterialId> = draft
+            .tracks
+            .iter()
+            .flat_map(|track| &track.segments)
+            .flat_map(|segment| &segment.extra_material_refs)
+            .filter(|id| {
+                draft
+                    .materials
+                    .get(id.as_str())
+                    .is_some_and(cutlass_effects::is_colour_work)
+            })
+            .cloned()
+            .collect();
+        for segment in draft
+            .tracks
+            .iter_mut()
+            .flat_map(|track| &mut track.segments)
+        {
+            segment
+                .extra_material_refs
+                .retain(|id| !colour.contains(id));
+        }
+        draft.canvas_config.background = None;
+        let end = span.start.0.saturating_add(span.duration.0.max(1) - 1);
+        let time = Micros(self.sample_time().0.clamp(span.start.0, end));
+        let alone = Session::open(draft);
+        let root = self.path.clone();
+        let picture = FrameCache::new()
+            .frame(
+                &alone,
+                &mut SoftwareDevice::new(),
+                time,
+                &self.readers,
+                root.as_deref(),
+                &*self.face,
+            )
+            .map_err(|error| ShellError::Eval(error.to_string()))?;
+        Ok(picture.rgba)
+    }
+
     pub fn set_opacity(&mut self, opacity: f64) -> Result<(), ShellError> {
         let segment_id = self.picture_segment("an opacity belongs on a picture")?;
         self.refuse_locked(&segment_id)?;
@@ -4450,6 +5289,18 @@ impl Shell {
         Ok(segment_id)
     }
 
+    /// The selected picture, adjustment layer, or filter: the clips that
+    /// take adjust sliders.
+    fn adjust_segment(&self) -> Result<SegmentId, ShellError> {
+        if let Some(segment_id) = self.selected()
+            && let Some((_, TrackType::Adjust | TrackType::Filter)) =
+                placed(self.session_draft()?, segment_id)
+        {
+            return Ok(segment_id.clone());
+        }
+        self.picture_segment("adjustments belong on a picture")
+    }
+
     fn picture_segment(&self, refusal: &str) -> Result<SegmentId, ShellError> {
         let Some(segment_id) = self.selected().cloned() else {
             return Err(if self.session.is_none() {
@@ -4464,7 +5315,7 @@ impl Shell {
                 "the clip is not on the timeline".to_owned(),
             ));
         };
-        if !can_turn(draft, segment, kind) {
+        if !cutlass_editor::can_turn(draft, segment, kind) {
             return Err(ShellError::Unavailable(refusal.to_owned()));
         }
         Ok(segment_id)
@@ -4723,51 +5574,11 @@ impl Shell {
         if self.selection.is_empty() {
             return Err(ShellError::Unavailable("nothing is selected".to_owned()));
         }
-        let draft = self.session_draft()?;
-        let mut copies = Vec::new();
-        for track in &draft.tracks {
-            for segment in &track.segments {
-                if !self.is_selected(&segment.id) {
-                    continue;
-                }
-                if bit(track.attribute, TrackAttribute::LOCK) {
-                    return Err(ShellError::Locked);
-                }
-                let owned = segment_time_mark(&draft.materials, segment).map(|raw| raw.id.clone());
-                let marks = segment_time_mark(&draft.materials, segment)
-                    .map(time_mark_items)
-                    .unwrap_or_default();
-                let beat_owned = segment_beats(&draft.materials, segment).map(|raw| raw.id.clone());
-                let beats = if track_holds_beats(&track.kind) {
-                    segment_beats(&draft.materials, segment)
-                        .map(user_beats)
-                        .unwrap_or_default()
-                } else {
-                    Vec::new()
-                };
-                let mut segment = segment.clone();
-                if let Some(id) = owned {
-                    segment.extra_material_refs.retain(|ref_id| ref_id != &id);
-                }
-                if let Some(id) = beat_owned {
-                    segment.extra_material_refs.retain(|ref_id| ref_id != &id);
-                }
-                copies.push(CopiedClip {
-                    track_id: track.id.clone(),
-                    offset: segment.target.start.0,
-                    segment,
-                    marks,
-                    beats,
-                });
-            }
-        }
-        if copies.is_empty() {
-            return Err(ShellError::Unavailable("nothing is selected".to_owned()));
-        }
-        let earliest = copies.iter().map(|item| item.offset).min().unwrap_or(0);
-        for item in &mut copies {
-            item.offset = item.offset.saturating_sub(earliest);
-        }
+        let copies =
+            copy_clips(self.session_draft()?, &self.selection).map_err(|miss| match miss {
+                ClipboardMiss::Locked => ShellError::Locked,
+                _ => ShellError::Unavailable("nothing is selected".to_owned()),
+            })?;
         self.clipboard = copies;
         Ok(())
     }
@@ -4782,71 +5593,18 @@ impl Shell {
 
     /// Place the copied clips at the playhead, keeping the gaps between them.
     pub fn paste(&mut self) -> Result<(), ShellError> {
-        if self.clipboard.is_empty() {
-            return Err(ShellError::Unavailable("nothing to paste".to_owned()));
-        }
-        {
-            let draft = self.session_draft()?;
-            for item in &self.clipboard {
-                let Some(track) = draft.tracks.iter().find(|track| track.id == item.track_id)
-                else {
-                    return Err(ShellError::Unavailable("the lane is gone".to_owned()));
-                };
-                if bit(track.attribute, TrackAttribute::LOCK) {
-                    return Err(ShellError::Locked);
-                }
-            }
-        }
-        let playhead = self.playhead.0.max(0);
-        let copies = self.clipboard.clone();
-        let mut requests = Vec::new();
-        let mut ids = Vec::new();
-        let mut marks = Vec::new();
-        let mut beats = Vec::new();
-        for item in copies {
-            let mut segment = item.segment.clone();
-            let id = SegmentId::new(self.fresh("seg"));
-            segment.id = id.clone();
-            let start = playhead.saturating_add(item.offset);
-            segment.target = TimeRange::new(start, segment.target.duration.0);
-            let duration = segment.target.duration.0;
-            let beat_sources: Vec<i64> = item
-                .beats
-                .iter()
-                .copied()
-                .filter(|source| beat_timeline_time(&segment, *source).is_some())
-                .collect();
-            requests.push(Request::Place {
-                track_id: item.track_id.clone(),
-                segment: Box::new(segment),
-            });
-            for mark in item.marks {
-                if mark.start.0 < 0 || mark.start.0 >= duration {
-                    continue;
-                }
-                let at = start.saturating_add(mark.start.0);
-                marks.push((id.clone(), at, mark.color));
-            }
-            for source in beat_sources {
-                beats.push((id.clone(), source));
-            }
-            ids.push(id);
-        }
-        for (segment_id, at, color) in marks {
-            requests.push(Request::AddTimeMark {
-                segment_id: Some(segment_id),
-                at: Micros(at),
-                color,
-                material_id: MaterialId::new(self.fresh("time-mark")),
-            });
-        }
-        for (segment_id, source) in beats {
-            requests.push(Request::AddBeat {
-                segment_id,
-                source: Micros(source),
-                material_id: MaterialId::new(self.fresh("beats")),
-            });
-        }
+        let playhead = self.playhead;
+        let copies = std::mem::take(&mut self.clipboard);
+        let mut next_id = self.next_id;
+        let mut fresh = |prefix: &str| {
+            next_id = next_id.saturating_add(1);
+            format!("{prefix}-{next_id}")
+        };
+        let planned = paste_requests(self.session_draft()?, &copies, playhead, &mut fresh)
+            .map_err(clipboard_error);
+        self.next_id = next_id;
+        self.clipboard = copies;
+        let (requests, ids) = planned?;
         self.apply_requests(&requests)?;
         self.selection = ids;
         self.clip_menu = None;
@@ -4886,6 +5644,15 @@ impl Shell {
     #[must_use]
     pub fn blade(&self) -> bool {
         self.blade
+    }
+
+    /// Clips on a speed curve draw it on their bar.
+    pub fn speed_curves_shown(&self) -> bool {
+        self.speed_curves
+    }
+
+    pub fn toggle_speed_curves(&mut self) {
+        self.speed_curves = !self.speed_curves;
     }
 
     pub fn toggle_blade(&mut self) {
@@ -5172,22 +5939,16 @@ impl Shell {
     /// clip's new start, so the frame under it stays the same with the magnet on.
     pub fn delete_side(&mut self, edge: TrimEdge) -> Result<(), ShellError> {
         let at = self.playhead;
-        let refused = || ShellError::Unavailable("delete is not available".to_owned());
-        let segment_id = self.clip_under(at).ok_or_else(refused)?;
+        let request = cutlass_editor::delete_side(self.session_draft()?, &self.selection, at, edge)
+            .ok_or_else(|| ShellError::Unavailable("delete is not available".to_owned()))?;
+        let Request::Trim { segment_id, .. } = &request else {
+            return Err(ShellError::Unavailable(
+                "delete is not available".to_owned(),
+            ));
+        };
+        let segment_id = segment_id.clone();
         self.refuse_locked(&segment_id)?;
-        let draft = self.session_draft()?;
-        let (segment, _) = locate(draft, &segment_id).ok_or_else(refused)?;
-        let start = segment.target.start.0;
-        let end = start.saturating_add(segment.target.duration.0);
-        let margin = split_margin(draft);
-        if at.0 < start.saturating_add(margin) || at.0 > end.saturating_sub(margin) {
-            return Err(refused());
-        }
-        self.apply(Request::Trim {
-            segment_id: segment_id.clone(),
-            edge,
-            time: at,
-        })?;
+        self.apply(request)?;
         if edge == TrimEdge::Start
             && let Some((segment, _)) = self.draft().and_then(|draft| locate(draft, &segment_id))
         {
@@ -5217,37 +5978,19 @@ impl Shell {
     }
 
     fn clip_under(&self, time: Micros) -> Option<SegmentId> {
-        let draft = self.draft()?;
-        if let Some(id) = self
-            .selection
-            .iter()
-            .rev()
-            .find(|id| locate(draft, id).is_some_and(|(segment, _)| covers(segment, time)))
-        {
-            return Some(id.clone());
-        }
-        if let Some(id) = draft
-            .main_track()
-            .and_then(|track| clip_on_track(track, time))
-        {
-            return Some(id);
-        }
-        draft
-            .tracks
-            .iter()
-            .find_map(|track| clip_on_track(track, time))
+        cutlass_editor::clip_under(self.draft()?, &self.selection, time)
     }
 
     /// Cut one clip. Each piece must keep at least one frame. The original id stays selected.
     pub fn split_clip(&mut self, segment_id: SegmentId, at: Micros) -> Result<(), ShellError> {
         self.refuse_locked(&segment_id)?;
         let draft = self.session_draft()?;
-        let (segment, _) = locate(draft, &segment_id)
-            .ok_or_else(|| ShellError::Unavailable("the clip is not on the timeline".to_owned()))?;
-        let start = segment.target.start.0;
-        let end = start.saturating_add(segment.target.duration.0);
-        let margin = split_margin(draft);
-        if at.0 < start.saturating_add(margin) || at.0 > end.saturating_sub(margin) {
+        if locate(draft, &segment_id).is_none() {
+            return Err(ShellError::Unavailable(
+                "the clip is not on the timeline".to_owned(),
+            ));
+        }
+        if !cutlass_editor::can_cut_at(draft, &segment_id, at) {
             return Err(ShellError::Unavailable("split is not available".to_owned()));
         }
         let right_id = SegmentId::new(self.fresh("seg"));
@@ -5281,13 +6024,27 @@ impl Shell {
         }
     }
 
-    /// Writes a PNG of the frame at the playhead.
+    /// Writes the export `request` names.
     ///
-    /// The short side is one of [`SHORT_SIDES`]. A PNG is one picture, so the
-    /// export range is that frame. The software encoder writes it, and the
-    /// still mux checks the file before it replaces `request.path`. A codec
-    /// this shell cannot mux is refused after the encoder probe.
+    /// PNG writes the frame at the playhead at once. Anything else runs as a
+    /// job: a movie, or the sound alone when the pictures are off, then a
+    /// GIF and a caption file beside it when asked. The window shows the
+    /// job's progress; Cancel leaves no file. A codec this machine cannot
+    /// encode is refused before anything is written.
     pub fn export(&mut self, request: ExportRequest) -> Result<(), ShellError> {
+        if request.codec == CodecId::Png {
+            return self.export_png(request);
+        }
+        let plan = self.export_plan(&request)?;
+        if !request.replace
+            && let Some(taken) = plan.paths().into_iter().find(|path| path.exists())
+        {
+            return Err(ShellError::Overwrite(taken));
+        }
+        self.run_export(plan)
+    }
+
+    fn export_png(&mut self, request: ExportRequest) -> Result<(), ShellError> {
         if !SHORT_SIDES.contains(&request.short_side) {
             return Err(ShellError::Unavailable(
                 "the short side is not one of the steps".to_owned(),
@@ -5302,12 +6059,6 @@ impl Shell {
         let params = CodecParams::video(request.codec, width, height);
         if let Err(error) = self.encoders.open(&params) {
             return Err(ShellError::CodecDeclined(error.to_string()));
-        }
-        if matches!(request.codec, CodecId::H264 | CodecId::Hevc) {
-            return self.export_movie(request);
-        }
-        if request.codec != CodecId::Png {
-            return Err(ShellError::ExportUnavailable);
         }
         let Ok(short_side) = u32::try_from(request.short_side) else {
             return Err(ShellError::Unavailable(
@@ -5326,6 +6077,8 @@ impl Shell {
             audio: None,
             sidecar: None,
             late_by: 0,
+            constant_rate: false,
+            prores: ProresProfile::Standard,
         };
         let mut encoders = EncodeFactory::new();
         cutlass_png::register_encoders(&mut encoders);
@@ -5357,41 +6110,196 @@ impl Shell {
         write_replaced(&request.path, bytes)
     }
 
-    /// Write the movie as a job. The window shows its progress; Cancel
-    /// leaves no file. When it lands, [`Self::exported`] names the file.
-    fn export_movie(&mut self, request: ExportRequest) -> Result<(), ShellError> {
-        self.refuse_busy()?;
+    /// What a job export writes, checked before it starts.
+    fn export_plan(&mut self, request: &ExportRequest) -> Result<ExportPlan, ShellError> {
+        if !request.picture && !request.sound && request.gif.is_none() {
+            return Err(ShellError::Unavailable(
+                "turn on the video, the audio or the GIF".to_owned(),
+            ));
+        }
+        if request.path.is_dir() {
+            return Err(ShellError::Io("the export path is a folder".to_owned()));
+        }
+        if request.path.file_stem().is_none_or(|stem| stem.is_empty())
+            || cutlass_export::part_path(&request.path).is_none()
+        {
+            return Err(ShellError::Io("the export has no file name".to_owned()));
+        }
         let draft = self.session_draft()?.clone();
         let range = self.export_range(&draft, request.span)?;
+        let frame_rate = request
+            .frame_rate
+            .or_else(|| draft.frame_rate())
+            .unwrap_or(FrameRate::FPS_30);
+        let base = cutlass_export::ExportRequest {
+            range: range.clone(),
+            short_side: 0,
+            codec: request.codec,
+            bitrate: 0,
+            frame_rate,
+            container: cutlass_codec::ContainerId::Isobmff,
+            audio: None,
+            sidecar: None,
+            late_by: 0,
+            constant_rate: request.constant_rate,
+            prores: request.prores,
+        };
+        let captions = request.captions.map(|kind| cutlass_export::SidecarRequest {
+            kind,
+            name: request
+                .path
+                .file_stem()
+                .map(|stem| stem.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+        });
+        let mut main = None;
+        if request.picture {
+            main = Some(self.movie_output(request, &base, captions.clone())?);
+        } else if request.sound {
+            let audio = request.audio.export();
+            let container = request.audio.container();
+            main = Some(ExportOutput::Sound {
+                path: request.path.with_extension(request.audio.extension()),
+                request: cutlass_export::ExportRequest {
+                    audio: Some(audio),
+                    container,
+                    ..base.clone()
+                },
+            });
+        }
+        let gif = request.gif.map(|gif| ExportOutput::Gif {
+            path: request.path.with_extension(gif.extension()),
+            looped: gif.looped,
+            request: cutlass_export::ExportRequest {
+                short_side: gif.short_side,
+                codec: if gif.webp {
+                    CodecId::Webp
+                } else {
+                    CodecId::Gif
+                },
+                frame_rate: gif.frame_rate,
+                container: cutlass_codec::ContainerId::Still,
+                ..base.clone()
+            },
+        });
+        if let Some(ExportOutput::Gif { request, .. }) = &gif {
+            cutlass_export::validate(request).map_err(export_failure)?;
+        }
+        // Without a movie to carry them, the captions are written alone.
+        let captions = match (&main, captions) {
+            (Some(ExportOutput::Movie { .. }), _) | (_, None) => None,
+            (_, Some(sidecar)) => {
+                let body = cutlass_export::sidecar_text(&draft, &range, sidecar.kind)
+                    .map_err(export_failure)?;
+                Some((sidecar, body))
+            }
+        };
+        Ok(ExportPlan {
+            draft,
+            outputs: main.into_iter().chain(gif).collect(),
+            captions,
+            folder: request
+                .path
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_default(),
+        })
+    }
+
+    /// The movie a request names, with its encoder probed on this machine.
+    fn movie_output(
+        &self,
+        request: &ExportRequest,
+        base: &cutlass_export::ExportRequest,
+        captions: Option<cutlass_export::SidecarRequest>,
+    ) -> Result<ExportOutput, ShellError> {
         let Ok(short_side) = u32::try_from(request.short_side) else {
             return Err(ShellError::Unavailable(
                 "the short side is not one of the steps".to_owned(),
             ));
         };
-        let name = request
-            .path
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .filter(|_| cutlass_export::part_path(&request.path).is_some())
-            .ok_or_else(|| ShellError::Io("the export has no file name".to_owned()))?;
-        if request.path.is_dir() {
-            return Err(ShellError::Io("the export path is a folder".to_owned()));
+        if !SHORT_SIDES.contains(&request.short_side) {
+            return Err(ShellError::Unavailable(
+                "the short side is not one of the steps".to_owned(),
+            ));
+        }
+        let mov = is_mov(&request.path);
+        if request.codec == CodecId::Prores && !mov {
+            return Err(ShellError::Unavailable(
+                "ProRes is written in a MOV".to_owned(),
+            ));
+        }
+        if request.codec == CodecId::Vp8 && mov {
+            return Err(ShellError::Unavailable(
+                "VP8 is written in an MP4".to_owned(),
+            ));
+        }
+        if request.sound && request.audio.codec == CodecId::Pcm && !mov {
+            return Err(ShellError::Unavailable(
+                "PCM sound is written in a MOV".to_owned(),
+            ));
+        }
+        if request.sound && request.audio.codec == CodecId::Flac {
+            return Err(ShellError::Unavailable(
+                "FLAC sound is written alone, in a FLAC file".to_owned(),
+            ));
+        }
+        if request.sound && request.audio.codec == CodecId::Mp3 {
+            return Err(ShellError::Unavailable(
+                "MP3 sound is written alone, without a picture".to_owned(),
+            ));
+        }
+        if request.sound && request.audio.codec == CodecId::Opus {
+            return Err(ShellError::Unavailable(
+                "Opus sound is written alone, in an Opus file".to_owned(),
+            ));
+        }
+        let bitrate = match request.bitrate {
+            Some(0) => {
+                return Err(ShellError::Unavailable(
+                    "the bitrate is not a number of bits a second".to_owned(),
+                ));
+            }
+            Some(rate) => rate.min(MAX_BITRATE),
+            None => request.quality.bitrate(short_side, request.codec),
+        };
+        let (width, height) = self.scaled_canvas(request.short_side)?;
+        let mut params = CodecParams::with_format(
+            request.codec,
+            width,
+            height,
+            cutlass_decode::PixelFormat::Rgba8,
+        );
+        if request.codec == CodecId::Prores {
+            params.extra = request.prores.code().to_vec();
+        }
+        if let Err(error) = self.encoders.open(&params) {
+            return Err(ShellError::CodecDeclined(error.to_string()));
+        }
+        if !matches!(
+            request.codec,
+            CodecId::H264 | CodecId::Hevc | CodecId::Prores | CodecId::Vp8
+        ) {
+            return Err(ShellError::ExportUnavailable);
         }
         let movie = cutlass_export::ExportRequest {
-            range,
             short_side,
-            codec: request.codec,
-            bitrate: request.quality.bitrate(short_side, request.codec),
-            frame_rate: request
-                .frame_rate
-                .or_else(|| draft.frame_rate())
-                .unwrap_or(FrameRate::FPS_30),
-            container: cutlass_codec::ContainerId::Isobmff,
-            audio: request.sound.then_some(cutlass_export::MOVIE_SOUND),
-            sidecar: None,
-            late_by: 0,
+            bitrate,
+            audio: request.sound.then(|| request.audio.export()),
+            sidecar: captions,
+            ..base.clone()
         };
         cutlass_export::validate(&movie).map_err(export_failure)?;
+        Ok(ExportOutput::Movie {
+            path: request.path.clone(),
+            request: movie,
+        })
+    }
+
+    /// Write `plan` as a job. When it lands, [`Self::exported`] names the
+    /// main file.
+    fn run_export(&mut self, plan: ExportPlan) -> Result<(), ShellError> {
+        self.refuse_busy()?;
         let root = self.path.clone();
         let readers = self.readers.clone();
         let encoders = self.encoders.clone();
@@ -5401,34 +6309,87 @@ impl Shell {
             let renderer = preview.renderer();
             (renderer.device().clone(), renderer.queue().clone())
         });
-        let destination = request.path;
+        let first = plan.paths().into_iter().next().unwrap_or_default();
+        let name = first
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
         self.exported = None;
         self.start_job("Export", move |progress| {
-            progress.stage(&format!("Writing {name}"));
             let renderer = gpu.map(|(device, queue)| cutlass_render::Renderer::new(device, queue));
-            let mut report = |done: u64, total: u64| {
-                if total > 0 {
-                    progress.fraction(done as f32 / total as f32);
-                }
-                !progress.cancelled()
-            };
-            let written = cutlass_export::write_movie(
-                &cutlass_export::MovieSources {
-                    draft: &draft,
+            // GIF and WebP pictures come from the Rust encoders, whose
+            // packets the animation is built from.
+            let mut gifs = EncodeFactory::new();
+            cutlass_gif::register_encoders(&mut gifs);
+            cutlass_webp::register_encoders(&mut gifs);
+            let steps = plan.outputs.len().max(1);
+            let mut written = Ok(());
+            for (step, output) in plan.outputs.iter().enumerate() {
+                let path = output.path();
+                let file = path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                progress.stage(&format!("Writing {file}"));
+                let mut report = |done: u64, total: u64| {
+                    if total > 0 {
+                        let part = done as f32 / total as f32;
+                        progress.fraction((step as f32 + part) / steps as f32);
+                    }
+                    !progress.cancelled()
+                };
+                let sources = cutlass_export::MovieSources {
+                    draft: &plan.draft,
                     root: root.as_deref(),
                     readers: &readers,
                     fonts: &*fonts,
                     renderer: renderer.as_ref(),
                     encoders: &encoders,
-                },
-                &movie,
-                &destination,
-                &mut report,
-            );
+                };
+                written = match output {
+                    ExportOutput::Movie { request, .. } => {
+                        cutlass_export::write_movie(&sources, request, path, &mut report)
+                            .map(|_| ())
+                    }
+                    ExportOutput::Sound { request, .. } => {
+                        cutlass_export::write_sound(&sources, request, path, &mut report)
+                    }
+                    ExportOutput::Gif {
+                        request, looped, ..
+                    } => cutlass_export::write_animation(
+                        &cutlass_export::MovieSources {
+                            encoders: &gifs,
+                            ..sources
+                        },
+                        request,
+                        *looped,
+                        path,
+                        &mut report,
+                    )
+                    .map(|_| ()),
+                };
+                if written.is_err() {
+                    break;
+                }
+            }
+            if written.is_ok()
+                && let Some((sidecar, body)) = &plan.captions
+            {
+                let extension = match sidecar.kind {
+                    SidecarKind::Plain => "txt",
+                    _ => "srt",
+                };
+                written = cutlass_export::write_sidecar(
+                    &plan.folder,
+                    &format!("{}.{extension}", sidecar.name),
+                    body,
+                )
+                .map(|_| ());
+            }
             Box::new(move |shell: &mut Shell| {
                 written.map_err(export_failure)?;
                 shell.set_notice(format!("Exported {name}"));
-                shell.exported = Some(destination);
+                shell.exported = Some(first);
                 Ok(())
             })
         })
@@ -5475,8 +6436,14 @@ impl Shell {
 
     /// An encoder for `codec` opens on this machine.
     pub fn encodes(&self, codec: CodecId) -> bool {
+        // Export hands the encoder RGBA pictures, so ask for those.
         self.encoders
-            .open(&CodecParams::video(codec, 1280, 720))
+            .open(&CodecParams::with_format(
+                codec,
+                1280,
+                720,
+                cutlass_decode::PixelFormat::Rgba8,
+            ))
             .is_ok()
     }
 
@@ -5486,16 +6453,31 @@ impl Shell {
     }
 
     /// Save the picture at the playhead to `path` at the canvas size, as
-    /// JPEG for a `.jpg` or `.jpeg` name and PNG otherwise. It runs as a
+    /// JPEG for a `.jpg` or `.jpeg` name, WebP for `.webp`, and PNG
+    /// otherwise. It runs as a
     /// job; when it lands it is offered like a finished export.
+    /// Write a copy of the log, the previous file then the current one, to
+    /// `path`. Before the log opened, it is the Cutlass root's logs folder.
+    pub fn export_log(path: &Path) -> Result<(), ShellError> {
+        if path.is_dir() {
+            return Err(ShellError::Io("the log path is a folder".to_owned()));
+        }
+        let directory = cutlass_logger::directory().unwrap_or_else(|| Self::home().logs());
+        cutlass_logger::export(&directory, path)
+            .map_err(|error| ShellError::Io(format!("the log was not saved: {error}")))
+    }
+
     pub fn export_still(&mut self, path: &Path) -> Result<(), ShellError> {
         self.refuse_busy()?;
         let draft = self.session_draft()?.clone();
-        let jpeg = path.extension().is_some_and(|typed| {
-            typed.eq_ignore_ascii_case("jpg") || typed.eq_ignore_ascii_case("jpeg")
-        });
-        let format = if jpeg {
+        let typed = |names: &[&str]| {
+            path.extension()
+                .is_some_and(|typed| names.iter().any(|name| typed.eq_ignore_ascii_case(name)))
+        };
+        let format = if typed(&["jpg", "jpeg"]) {
             cutlass_export::StillFormat::Jpeg
+        } else if typed(&["webp"]) {
+            cutlass_export::StillFormat::Webp
         } else {
             cutlass_export::StillFormat::Png
         };
@@ -5584,6 +6566,12 @@ impl Shell {
     }
 
     fn import_medium(&mut self, probed: Probed, stored: String) -> Result<(), ShellError> {
+        let request = self.medium_request(probed, stored);
+        self.apply(request)
+    }
+
+    /// The request that adds `probed`, stored at `stored`, to the library.
+    fn medium_request(&mut self, probed: Probed, stored: String) -> Request {
         match probed {
             Probed::Video {
                 meta,
@@ -5598,9 +6586,9 @@ impl Shell {
                 material.duration = Micros(duration);
                 material.width = width;
                 material.height = height;
-                self.apply(Request::Import {
+                Request::Import {
                     medium: ImportedMedium::Video(Box::new(material)),
-                })
+                }
             }
             Probed::Audio { duration } => {
                 let material_id = self.fresh("mat");
@@ -5611,9 +6599,9 @@ impl Shell {
                     duration: Micros(duration),
                     ..MaterialAudio::default()
                 };
-                self.apply(Request::Import {
+                Request::Import {
                     medium: ImportedMedium::Audio(Box::new(material)),
-                })
+                }
             }
         }
     }
@@ -5897,6 +6885,73 @@ impl Shell {
     }
 }
 
+/// What one export job writes.
+struct ExportPlan {
+    draft: Draft,
+    /// The main file first, then a GIF beside it.
+    outputs: Vec<ExportOutput>,
+    /// A caption file written alone, when there is no movie to carry it.
+    captions: Option<(cutlass_export::SidecarRequest, String)>,
+    folder: PathBuf,
+}
+
+impl ExportPlan {
+    fn paths(&self) -> Vec<PathBuf> {
+        let mut paths: Vec<PathBuf> = self
+            .outputs
+            .iter()
+            .map(|output| output.path().to_path_buf())
+            .collect();
+        let captions = self
+            .outputs
+            .iter()
+            .find_map(|output| match output {
+                ExportOutput::Movie { request, .. } => request.sidecar.as_ref(),
+                _ => None,
+            })
+            .or(self.captions.as_ref().map(|(sidecar, _)| sidecar));
+        if let Some(sidecar) = captions {
+            let extension = match sidecar.kind {
+                SidecarKind::Plain => "txt",
+                _ => "srt",
+            };
+            paths.push(self.folder.join(format!("{}.{extension}", sidecar.name)));
+        }
+        paths
+    }
+}
+
+enum ExportOutput {
+    Movie {
+        path: PathBuf,
+        request: cutlass_export::ExportRequest,
+    },
+    Sound {
+        path: PathBuf,
+        request: cutlass_export::ExportRequest,
+    },
+    Gif {
+        path: PathBuf,
+        looped: bool,
+        request: cutlass_export::ExportRequest,
+    },
+}
+
+impl ExportOutput {
+    fn path(&self) -> &Path {
+        match self {
+            Self::Movie { path, .. } | Self::Sound { path, .. } | Self::Gif { path, .. } => path,
+        }
+    }
+}
+
+/// A `.mov` name writes a QuickTime movie.
+fn is_mov(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("mov"))
+}
+
 fn playhead_frame(rate: FrameRate, playhead: Micros) -> Result<TimeRange, ShellError> {
     let index = rate
         .frame_index(Micros(playhead.0.max(0)))
@@ -5973,122 +7028,29 @@ fn empty_pixel_size(lane_width: f64, rate: FrameRate) -> Option<f64> {
     Some(size.min(last_accuracy_step(rate)?))
 }
 
-fn ensure_shortcut(settings: &mut Settings, action: &str, keys: &str) {
-    if settings
-        .shortcuts
-        .iter()
-        .any(|shortcut| shortcut.action == action)
-    {
-        return;
-    }
-    settings.shortcuts.push(Shortcut {
-        action: action.to_owned(),
-        keys: keys.to_owned(),
-        ..Shortcut::default()
-    });
-}
-
 fn bit(attribute: TrackAttribute, flag: i32) -> bool {
     attribute.0 & flag != 0
 }
 
-/// The outgoing clip of the touching main-track cut nearest `time`.
-///
-/// A gap is not a cut. The last two numbers are the outgoing and incoming
-/// durations.
-fn main_cut(
-    draft: &Draft,
-    time: Micros,
-    threshold: Micros,
-) -> Result<(SegmentId, i64, i64), ShellError> {
-    let track = draft
-        .tracks
-        .iter()
-        .find(|track| track.is_main())
-        .ok_or_else(|| ShellError::Unavailable("the drop missed the cut".to_owned()))?;
-    if track.attribute.contains(TrackAttribute::LOCK) {
-        return Err(ShellError::Locked);
-    }
-    let mut ordered: Vec<_> = track.segments.iter().collect();
-    ordered.sort_by_key(|segment| segment.target.start.0);
-    let mut best: Option<(i64, SegmentId, i64, i64)> = None;
-    for pair in ordered.windows(2) {
-        let left = pair[0];
-        let right = pair[1];
-        if left.target.duration.0 <= 0 || right.target.duration.0 <= 0 {
-            continue;
+fn heard_error(miss: HeardMiss) -> ShellError {
+    ShellError::Unavailable(
+        match miss {
+            HeardMiss::UnknownSegment => "the clip is not on the timeline",
+            HeardMiss::NotHeard => "a transcript belongs on a picture or a sound",
+            HeardMiss::NoSound => "the clip has no sound",
+            HeardMiss::NothingHeard => "nothing was heard",
+            HeardMiss::BadClock => "a word clock does not fit the clip",
         }
-        let cut = left.target.end().0;
-        if right.target.start.0 != cut {
-            continue;
-        }
-        let distance = (time.0 - cut).saturating_abs();
-        if distance > threshold.0 {
-            continue;
-        }
-        let closer = best
-            .as_ref()
-            .is_none_or(|(best_distance, _, _, _)| distance < *best_distance);
-        if closer {
-            best = Some((
-                distance,
-                left.id.clone(),
-                left.target.duration.0,
-                right.target.duration.0,
-            ));
-        }
-    }
-    best.map(|(_, id, outgoing, incoming)| (id, outgoing, incoming))
-        .ok_or_else(|| ShellError::Unavailable("the drop missed the cut".to_owned()))
+        .to_owned(),
+    )
 }
 
-/// Shorten `preset` so the blend window stays inside both clips.
-fn fit_transition(preset: i64, outgoing: i64, incoming: i64, overlap: bool) -> Option<i64> {
-    if preset <= 0 || outgoing <= 0 || incoming <= 0 {
-        return None;
+fn clipboard_error(miss: ClipboardMiss) -> ShellError {
+    match miss {
+        ClipboardMiss::Empty => ShellError::Unavailable("nothing to paste".to_owned()),
+        ClipboardMiss::Locked => ShellError::Locked,
+        ClipboardMiss::LaneGone => ShellError::Unavailable("the lane is gone".to_owned()),
     }
-    let fitted = if overlap {
-        let even = outgoing.min(incoming).saturating_mul(2);
-        let odd = outgoing
-            .min(incoming.saturating_sub(1))
-            .saturating_mul(2)
-            .saturating_add(1);
-        even.max(odd).min(preset)
-    } else {
-        preset.min(outgoing)
-    };
-    if fitted <= 0 { None } else { Some(fitted) }
-}
-
-/// The one main-track clip `span` sits on, when it sits on no other.
-/// A locked main lane is not an owner. Touching at an endpoint is not an overlap.
-fn exclusive_main_owner(draft: &Draft, start: Micros, duration: Micros) -> Option<SegmentId> {
-    let end = start.0.checked_add(duration.0)?;
-    if duration.0 <= 0 {
-        return None;
-    }
-    let mut owner = None;
-    for track in &draft.tracks {
-        if !track.is_main() || track.attribute.contains(TrackAttribute::LOCK) {
-            continue;
-        }
-        for segment in &track.segments {
-            let segment_end = segment
-                .target
-                .start
-                .0
-                .checked_add(segment.target.duration.0)?;
-            let overlaps = start.0 < segment_end && segment.target.start.0 < end;
-            if !overlaps {
-                continue;
-            }
-            if owner.is_some() {
-                return None;
-            }
-            owner = Some(segment.id.clone());
-        }
-    }
-    owner
 }
 
 fn draft_has_linkage(draft: &Draft) -> bool {
@@ -6096,18 +7058,6 @@ fn draft_has_linkage(draft: &Draft) -> bool {
         .relationships
         .iter()
         .any(|item| item.kind == "linkage" && !item.id_to_id.is_empty())
-}
-
-fn held_frame(draft: &Draft, segment: &Segment, playhead: Micros) -> Result<Micros, ShellError> {
-    let start = segment.target.start;
-    let end = segment.target.end().0;
-    let time = if playhead.0 >= start.0 && playhead.0 < end {
-        playhead
-    } else {
-        start
-    };
-    cutlass_eval::freeze_timestamp(draft, segment, time)
-        .ok_or_else(|| ShellError::Unavailable("the clip has no frame to hold".to_owned()))
 }
 
 /// Twelve pixels, in microseconds. A bad pixel size snaps to nothing.
@@ -6136,121 +7086,12 @@ fn trim_is_current(draft: &Draft, plan: &TrimPlan) -> bool {
     }
 }
 
-fn split_margin(draft: &Draft) -> i64 {
-    draft
-        .frame_rate()
-        .and_then(|rate| rate.frame_start(1))
-        .map(|time| time.0.max(1))
-        .unwrap_or(1)
-}
-
 fn scene_message(error: SceneError) -> ShellError {
     let message = match error {
         SceneError::Missing | SceneError::NoPicture => "the clip has no picture",
         SceneError::Decode => "the clip's picture could not be read",
     };
     ShellError::Unavailable(message.to_owned())
-}
-
-fn timeline_cuts(draft: &Draft, id: &SegmentId, range: &TimeRange, cuts: &[Micros]) -> Vec<Micros> {
-    let Some((segment, _)) = locate(draft, id) else {
-        return Vec::new();
-    };
-    let mut times = Vec::new();
-    for cut in cuts {
-        let time = source_on_timeline(draft, segment, *cut)
-            .or_else(|| proportional(&segment.target, range, cut.0).map(Micros));
-        if let Some(time) = time {
-            times.push(time);
-        }
-    }
-    times
-}
-
-fn proportional(target: &TimeRange, range: &TimeRange, source: i64) -> Option<i64> {
-    let into = source.checked_sub(range.start.0)?;
-    if range.duration.0 <= 0 || into < 0 || into >= range.duration.0 {
-        return None;
-    }
-    let scaled =
-        i128::from(into).checked_mul(i128::from(target.duration.0))? / i128::from(range.duration.0);
-    target.start.0.checked_add(i64::try_from(scaled).ok()?)
-}
-
-fn kept_cuts(draft: &Draft, segment: &Segment, times: &[Micros]) -> Vec<Micros> {
-    let start = segment.target.start.0;
-    let end = start.saturating_add(segment.target.duration.0);
-    let margin = split_margin(draft);
-    let mut ordered: Vec<i64> = times.iter().map(|time| time.0).collect();
-    ordered.sort_unstable();
-    ordered.dedup();
-    let mut kept = Vec::new();
-    let mut last = start;
-    for time in ordered {
-        if time < start.saturating_add(margin) || time > end.saturating_sub(margin) {
-            continue;
-        }
-        if time < last.saturating_add(margin) {
-            continue;
-        }
-        if blend_blocks(draft, &segment.id, time) {
-            continue;
-        }
-        kept.push(Micros(time));
-        last = time;
-    }
-    kept
-}
-
-fn blend_blocks(draft: &Draft, segment_id: &SegmentId, at: i64) -> bool {
-    let Some(track) = draft.tracks.iter().find(|track| {
-        track
-            .segments
-            .iter()
-            .any(|segment| &segment.id == segment_id)
-    }) else {
-        return false;
-    };
-    for segment in &track.segments {
-        let Some(cut) = segment
-            .target
-            .start
-            .0
-            .checked_add(segment.target.duration.0)
-        else {
-            continue;
-        };
-        for material_id in &segment.extra_material_refs {
-            let Some(MaterialRef::Transition(transition)) =
-                draft.materials.get(material_id.as_str())
-            else {
-                continue;
-            };
-            let Some((window_start, window_end)) =
-                blend_window(Micros(cut), transition.duration, transition.is_overlap)
-            else {
-                continue;
-            };
-            if at >= window_start.0 && at < window_end.0 {
-                return true;
-            }
-        }
-    }
-    false
-}
-
-fn covers(segment: &Segment, time: Micros) -> bool {
-    let start = segment.target.start.0;
-    let end = start.saturating_add(segment.target.duration.0);
-    time.0 >= start && time.0 < end
-}
-
-fn clip_on_track(track: &cutlass_model::Track, time: Micros) -> Option<SegmentId> {
-    track
-        .segments
-        .iter()
-        .find(|segment| covers(segment, time))
-        .map(|segment| segment.id.clone())
 }
 
 /// What the button that opens a file's folder says on this system.
@@ -6296,28 +7137,10 @@ struct RunningJob {
 /// What a finished job does on the window thread.
 pub(crate) type Landing = Box<dyn FnOnce(&mut Shell) -> Result<(), ShellError> + Send>;
 
-struct HeardClip {
-    source_id: SegmentId,
-    path: String,
-    range: TimeRange,
-    source_us: i64,
-    target_us: i64,
-    reverse: bool,
-    speed_holds: bool,
-    target: TimeRange,
-}
-
-/// The speech model's file inside [`speech_model_dir`].
-const SPEECH_MODEL: &str = "parakeet-unified-en-0.6b.nemo";
-
 /// Load the speech model; slow, so a job does it.
 fn load_speech() -> Result<ParakeetUnified, ShellError> {
-    ParakeetUnified::cpu(&speech_model_dir())
+    ParakeetUnified::cpu(&speech_model::speech_model_dir())
         .map_err(|_| ShellError::Unavailable("the speech model could not be loaded".to_owned()))
-}
-
-fn speech_model_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../local-files/parakeet-unified-en-0.6b")
 }
 
 fn heard_words(
@@ -6330,89 +7153,7 @@ fn heard_words(
     let utterances = recognizer.recognize(&pcm).map_err(recognize_message)?;
     let words = columns(&utterances)
         .map_err(|_| ShellError::Unavailable("a word clock does not fit the clip".to_owned()))?;
-    map_words(words, clip)
-}
-
-fn map_words(words: WordColumns, clip: &HeardClip) -> Result<WordColumns, ShellError> {
-    if words.text.is_empty() {
-        return Err(ShellError::Unavailable("nothing was heard".to_owned()));
-    }
-    let mut start_time = Vec::with_capacity(words.text.len());
-    let mut end_time = Vec::with_capacity(words.text.len());
-    for (start_ms, end_ms) in words.start_time.iter().zip(&words.end_time) {
-        let (start, end) = timeline_millis(*start_ms, *end_ms, clip)?;
-        start_time.push(start);
-        end_time.push(end);
-    }
-    Ok(WordColumns {
-        start_time,
-        end_time,
-        text: words.text,
-        rest: words.rest,
-    })
-}
-
-fn timeline_millis(start_ms: i64, end_ms: i64, clip: &HeardClip) -> Result<(i64, i64), ShellError> {
-    let start_us = millis_to_us(start_ms)?;
-    let end_us = millis_to_us(end_ms)?;
-    let (start_us, end_us) = if clip.reverse {
-        let flipped_start = clip.source_us.checked_sub(end_us).ok_or_else(|| {
-            ShellError::Unavailable("a word clock does not fit the clip".to_owned())
-        })?;
-        let flipped_end = clip.source_us.checked_sub(start_us).ok_or_else(|| {
-            ShellError::Unavailable("a word clock does not fit the clip".to_owned())
-        })?;
-        (flipped_start, flipped_end)
-    } else {
-        (start_us, end_us)
-    };
-    let (start_us, end_us) = if clip.speed_holds {
-        (
-            scale_us(start_us, clip.source_us, clip.target_us)?,
-            scale_us(end_us, clip.source_us, clip.target_us)?,
-        )
-    } else {
-        (start_us, end_us)
-    };
-    let start_ms = start_us / 1_000;
-    let end_ms = (end_us / 1_000).max(start_ms);
-    Ok((start_ms, end_ms))
-}
-
-fn millis_to_us(millis: i64) -> Result<i64, ShellError> {
-    millis
-        .checked_mul(1_000)
-        .ok_or_else(|| ShellError::Unavailable("a word clock does not fit the clip".to_owned()))
-}
-
-fn scale_us(value: i64, source_us: i64, target_us: i64) -> Result<i64, ShellError> {
-    if source_us <= 0 {
-        return Err(ShellError::Unavailable(
-            "a word clock does not fit the clip".to_owned(),
-        ));
-    }
-    let scaled = i128::from(value)
-        .checked_mul(i128::from(target_us))
-        .ok_or_else(|| ShellError::Unavailable("a word clock does not fit the clip".to_owned()))?;
-    i64::try_from(scaled / i128::from(source_us))
-        .map_err(|_| ShellError::Unavailable("a word clock does not fit the clip".to_owned()))
-}
-
-fn caption_track(draft: &Draft, range: &TimeRange) -> Option<TrackId> {
-    draft
-        .tracks
-        .iter()
-        .find(|track| {
-            matches!(track.kind, TrackType::Text | TrackType::TextToVideoText)
-                && !bit(track.attribute, TrackAttribute::LOCK)
-                && track.segments.iter().all(|segment| {
-                    segment
-                        .target
-                        .overlaps(range)
-                        .is_ok_and(|overlaps| !overlaps)
-                })
-        })
-        .map(|track| track.id.clone())
+    words_on_timeline(words, clip).map_err(heard_error)
 }
 
 fn prepare_message(error: PrepareError) -> ShellError {
@@ -6505,6 +7246,20 @@ fn next_face(names: &[String], current: &str) -> Option<String> {
     Some(names[index % names.len()].clone())
 }
 
+/// The speed curve `segment` runs on: its curve material's points, when it
+/// has two or more.
+fn speed_curve(draft: &Draft, segment: &Segment) -> Option<Vec<cutlass_model::SpeedPoint>> {
+    segment.extra_material_refs.iter().find_map(|material_id| {
+        let speed = draft
+            .materials
+            .speeds
+            .iter()
+            .find(|speed| &speed.id == material_id)?;
+        let points = &speed.curve_speed.as_ref()?.speed_points;
+        (speed.mode == cutlass_model::SpeedMode::Curve && points.len() >= 2).then(|| points.clone())
+    })
+}
+
 fn letterbox_color(draft: &Draft, segment: &Segment) -> String {
     segment
         .extra_material_refs
@@ -6536,29 +7291,6 @@ fn fade_micros(seconds: f64) -> Result<Micros, ShellError> {
         return Err(ShellError::Unavailable("a fade is too long".to_owned()));
     }
     Ok(Micros(microseconds as i64))
-}
-
-fn can_turn(draft: &Draft, segment: &Segment, kind: &TrackType) -> bool {
-    match draft.materials.get(segment.material_id.as_str()) {
-        Some(MaterialRef::Video(_) | MaterialRef::Text(_) | MaterialRef::Draft(_)) => true,
-        Some(MaterialRef::Other(_))
-            if draft
-                .materials
-                .stickers
-                .iter()
-                .any(|item| item.id == segment.material_id) =>
-        {
-            true
-        }
-        Some(_) => false,
-        None => matches!(
-            kind,
-            TrackType::Text
-                | TrackType::TextToVideoText
-                | TrackType::Sticker
-                | TrackType::Composition
-        ),
-    }
 }
 
 /// One clockwise quarter turn. The preview's positive angle is the other way.
@@ -6603,6 +7335,7 @@ fn clip_name(draft: &Draft, segment: &Segment) -> String {
         Some(MaterialRef::Video(video)) if !video.path.is_empty() => file_name(&video.path),
         Some(MaterialRef::Audio(audio)) if !audio.path.is_empty() => file_name(&audio.path),
         Some(MaterialRef::Text(text)) if !text.content.is_empty() => text.content.clone(),
+        Some(MaterialRef::Draft(compound)) if !compound.name.is_empty() => compound.name.clone(),
         _ => segment.id.as_str().to_owned(),
     }
 }
@@ -6626,84 +7359,6 @@ fn file_name(path: &str) -> String {
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.to_owned())
-}
-
-/// The shape after the one this frame matches. A new project is 1920×1080,
-/// so the next shape is 9:16.
-fn next_canvas(width: i32, height: i32) -> CanvasShape {
-    let index = CANVAS_SHAPES
-        .iter()
-        .position(|shape| shape.width == width && shape.height == height)
-        .map(|index| index.saturating_add(1))
-        .unwrap_or(0);
-    CANVAS_SHAPES[index % CANVAS_SHAPES.len()]
-}
-
-const COLOR_SPACES: [(i32, &str); 5] = [
-    (-1, "Unknown"),
-    (0, "None"),
-    (2, "SDR 2020"),
-    (67, "HLG"),
-    (2084, "PQ"),
-];
-
-fn color_space_name(space: i32) -> String {
-    COLOR_SPACES
-        .iter()
-        .find(|item| item.0 == space)
-        .map(|item| item.1.to_owned())
-        .unwrap_or_else(|| space.to_string())
-}
-
-fn next_color_space(current: i32) -> i32 {
-    let index = COLOR_SPACES
-        .iter()
-        .position(|item| item.0 == current)
-        .map(|index| index.saturating_add(1))
-        .unwrap_or(0);
-    COLOR_SPACES[index % COLOR_SPACES.len()].0
-}
-
-const PROJECT_RATES: [FrameRate; 9] = [
-    FrameRate::FPS_23_976,
-    FrameRate::FPS_24,
-    FrameRate::FPS_25,
-    FrameRate::FPS_29_97,
-    FrameRate::FPS_30,
-    FrameRate::FPS_50,
-    FrameRate::FPS_59_94,
-    FrameRate::FPS_60,
-    FrameRate::FPS_120,
-];
-
-fn next_rate(current: Option<FrameRate>) -> FrameRate {
-    let index = current
-        .and_then(|rate| PROJECT_RATES.iter().position(|item| *item == rate))
-        .map(|index| index.saturating_add(1))
-        .unwrap_or(0);
-    PROJECT_RATES[index % PROJECT_RATES.len()]
-}
-
-fn drop_rate(rate: FrameRate) -> bool {
-    matches!(
-        (rate.numerator, rate.denominator),
-        (30_000, 1001) | (60_000, 1001)
-    )
-}
-
-fn stored_fps(rate: FrameRate) -> f64 {
-    f64::from(rate.numerator) / f64::from(rate.denominator)
-}
-
-fn rate_label(rate: FrameRate) -> String {
-    let name = match (rate.numerator, rate.denominator) {
-        (24_000, 1001) => "23.976",
-        (30_000, 1001) => "29.97",
-        (60_000, 1001) => "59.94",
-        (numerator, 1) => return format!("{numerator} fps"),
-        _ => "Frame rate",
-    };
-    format!("{name} fps")
 }
 
 fn format_timecode(label: TimecodeLabel) -> String {
@@ -6801,10 +7456,15 @@ fn copy_reporting(
     copied
 }
 
+/// Where an imported file is kept, as the path the project stores, and the
+/// copy made, if any. A file already in the project is kept where it is. A
+/// file outside it is copied into `Resources`, or, when `link` is on,
+/// stored by its full path and not copied.
 fn place_in_project(
     project: &Path,
     source: &Path,
     progress: Option<&crate::jobs::Progress>,
+    link: bool,
 ) -> Result<(String, Option<PathBuf>), ShellError> {
     let project = project
         .canonicalize()
@@ -6817,6 +7477,9 @@ fn place_in_project(
             .strip_prefix(&project)
             .map_err(|error| ShellError::Io(error.to_string()))?;
         return Ok((portable(relative), None));
+    }
+    if link {
+        return Ok((source_path.to_string_lossy().into_owned(), None));
     }
     let resources = project.join("Resources");
     std::fs::create_dir_all(&resources).map_err(|error| ShellError::Io(error.to_string()))?;
@@ -6881,22 +7544,6 @@ struct CardWave {
     levels: Arc<[f32]>,
 }
 
-fn spread_peaks(peaks: &cutlass_engine::Peaks, duration: i64, columns: usize) -> Vec<f32> {
-    let length = if duration > 0 {
-        duration
-    } else {
-        peaks.levels.len() as i64 * 1_000_000 / i64::from(cutlass_engine::BUCKETS_PER_SECOND)
-    };
-    let count = columns.max(1) as i64;
-    (0..count)
-        .map(|column| {
-            let from = Micros(length * column / count);
-            let to = Micros((length * (column + 1) / count - 1).max(from.0));
-            peaks.level(from, to)
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::{ExportRequest, SHORT_SIDES, Shell, ShellError};
@@ -6913,6 +7560,7 @@ mod tests {
         PictureOutput, PixelFormat, Transfer,
     };
     use cutlass_eval::ReaderFactory;
+    use cutlass_export::{ProresProfile, SidecarKind};
     use cutlass_model::{
         Crop, Draft, FrameRate, FreezeInfo, MaterialAudio, MaterialColorConfig, MaterialDraft,
         MaterialId, MaterialText, MaterialTransition, MaterialVideo, Micros, RawMaterial, Segment,
@@ -7048,13 +7696,13 @@ mod tests {
             bytes.push(128);
             bytes.push(128);
             let picture = PictureOutput::cpu(
-                PictureInfo {
-                    width: 2,
-                    height: 2,
-                    pixel: PixelFormat::Yuv420p,
-                    primaries: ColorPrimaries::Bt709,
-                    transfer: Transfer::Bt709,
-                },
+                PictureInfo::new(
+                    2,
+                    2,
+                    PixelFormat::Yuv420p,
+                    ColorPrimaries::Bt709,
+                    Transfer::Bt709,
+                ),
                 bytes,
                 packet.pts,
                 packet.timescale,
@@ -7085,6 +7733,70 @@ mod tests {
     pub(super) fn shell() -> Shell {
         let (decoders, encoders) = crate::register_codecs();
         Shell::new(decoders, encoders, Settings::default())
+    }
+
+    /// Four seconds of a 3840x2160 60 fps BT.2020 HLG movie, repainted at
+    /// about 120 Hz as the window does: no repaint waits on a late picture.
+    /// Run with `--release --ignored --nocapture` for the timing.
+    #[test]
+    #[ignore = "plays a 4K60 HDR movie in real time"]
+    fn a_4k60_hdr_movie_plays_without_late_pictures() {
+        let movie = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../local-files/15215997_3840_2160_60fps.mp4");
+        if !movie.is_file() {
+            eprintln!("skipped: the 4K60 HDR movie is missing");
+            return;
+        }
+        let instance = eframe::wgpu::Instance::new(
+            eframe::wgpu::InstanceDescriptor::new_without_display_handle(),
+        );
+        let Ok(state) = pollster::block_on(eframe::egui_wgpu::RenderState::create(
+            &eframe::egui_wgpu::WgpuConfiguration::default(),
+            &instance,
+            None,
+            eframe::egui_wgpu::RendererOptions::default(),
+        )) else {
+            eprintln!("skipped: no GPU");
+            return;
+        };
+        let temp = Temp::new();
+        let mut draft = crate::open_movie::movie_draft(&movie, 1920, 1080, false).unwrap();
+        draft.tracks[0].segments[0].target = TimeRange::new(0, 20_000_000);
+        draft.tracks[0].segments[0].source_range = Some(TimeRange::new(0, 20_000_000));
+        draft.materials.videos[0].duration = Micros(20_000_000);
+        draft.duration = Micros(20_000_000);
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.attach_gpu(&state);
+        desktop.preview_texture().unwrap().expect("first frame");
+        desktop.play();
+        let start = std::time::Instant::now();
+        let mut last = start;
+        let (mut paints, mut stale, mut busy) = (0_u32, 0_u32, std::time::Duration::ZERO);
+        let mut worst = std::time::Duration::ZERO;
+        while start.elapsed() < std::time::Duration::from_secs(4) {
+            let now = std::time::Instant::now();
+            desktop.advance(i64::try_from((now - last).as_micros()).unwrap());
+            last = now;
+            let t = std::time::Instant::now();
+            desktop.preview_texture().unwrap();
+            let spent = t.elapsed();
+            busy += spent;
+            worst = worst.max(spent);
+            paints += 1;
+            if desktop.preview_pending() {
+                stale += 1;
+            }
+            std::thread::sleep(std::time::Duration::from_micros(8_333).saturating_sub(spent));
+        }
+        eprintln!(
+            "playhead {} ms after 4000 ms, {paints} paints, {stale} late, preview {:.2} ms a paint, worst {:.2} ms",
+            desktop.playhead.0 / 1000,
+            busy.as_secs_f64() * 1000.0 / f64::from(paints),
+            worst.as_secs_f64() * 1000.0,
+        );
+        assert_eq!(stale, 0, "{stale} of {paints} paints showed a late picture");
     }
 
     #[test]
@@ -7384,10 +8096,11 @@ mod tests {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../local-files");
         let sound = root.join("Expo - You Don't Need a Mac to Build iOS Apps Anymore.m4a");
         if !sound.is_file()
-            || !super::speech_model_dir()
-                .join(super::SPEECH_MODEL)
+            || !super::speech_model::speech_model_dir()
+                .join(super::speech_model::SPEECH.file)
                 .is_file()
         {
+            cutlass_transcription::weights_missing("the sound or the speech model");
             eprintln!("skipped: the sound or the speech model is missing");
             return;
         }
@@ -7545,8 +8258,44 @@ mod tests {
         assert!(temp.path.join(".locked").is_file());
         let mut second = shell();
         let error = second.open_folder(&temp.path).unwrap_err();
-        assert!(error.to_string().contains("already held"), "{error}");
+        assert!(
+            error.to_string().contains("open in another Cutlass window"),
+            "{error}"
+        );
         assert!(second.draft().is_none());
+    }
+
+    #[test]
+    fn opening_a_project_notes_it_as_recent_and_says_when_the_last_app_did_not_close() {
+        let temp = Temp::new();
+        let elsewhere = temp.path.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        draft_only(&elsewhere);
+        let settings_file = temp.path.join("settings").join("settings.json");
+        let mut desktop = shell();
+        desktop.keep_settings_file(settings_file.clone(), 0);
+        desktop.open_folder(&elsewhere).unwrap();
+        assert!(desktop.notice().is_empty(), "{}", desktop.notice());
+        let saved = cutlass_settings::load(&settings_file).unwrap();
+        let canonical = elsewhere.canonicalize().unwrap();
+        assert_eq!(saved.settings.recent_projects, vec![canonical.clone()]);
+        let projects_root = temp.path.join("projects");
+        let recent = desktop.recent_projects(&projects_root);
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].path, canonical);
+        // A project under the projects folder is already on the launch list.
+        assert!(desktop.recent_projects(&temp.path).is_empty());
+        desktop.close_project().unwrap();
+
+        // A shell that stopped without closing leaves the folder saying it
+        // is open; the next open says so.
+        std::fs::write(
+            elsewhere.join(".locked"),
+            b"{\"address\":null,\"open\":true}\n",
+        )
+        .unwrap();
+        desktop.open_folder(&elsewhere).unwrap();
+        assert_eq!(desktop.notice(), super::RECOVERED_NOTICE);
     }
 
     #[test]
@@ -7580,6 +8329,9 @@ mod tests {
         assert_eq!(reopened.folder.draft.tracks[0].segments[0].volume, 0.5);
     }
 
+    // Windows does not move a folder while a file in it is open, and the
+    // held `.locked` is.
+    #[cfg(not(windows))]
     #[test]
     fn a_missing_folder_is_named_and_the_session_stays() {
         let temp = Temp::new();
@@ -7772,18 +8524,6 @@ mod tests {
         let again = desktop.material_wave("song", 64).unwrap();
         assert!(std::sync::Arc::ptr_eq(&card, &again));
         assert_eq!(desktop.material_wave("song", 32).unwrap().len(), 32);
-    }
-
-    #[test]
-    fn a_library_waveform_takes_the_loudest_level_in_each_column() {
-        let peaks = cutlass_engine::Peaks {
-            levels: vec![0.1, 0.9, 0.2, 0.3, 0.0, 0.5],
-            complete: true,
-        };
-        // 60 ms of sound across three columns, 20 ms each.
-        assert_eq!(super::spread_peaks(&peaks, 60_000, 3), [0.9, 0.3, 0.5]);
-        // Without a stored length, the peaks say how long the file is.
-        assert_eq!(super::spread_peaks(&peaks, 0, 2), [0.9, 0.5]);
     }
 
     #[test]
@@ -8027,6 +8767,43 @@ mod tests {
     }
 
     #[test]
+    fn dropped_files_import_one_after_another_and_a_dropped_project_opens() {
+        let temp = Temp::new();
+        let project = temp.path.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        empty_project(&project);
+        let picture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../crates/engine/fixtures/pattern.png");
+        let second = temp.path.join("second.png");
+        std::fs::copy(&picture, &second).unwrap();
+
+        let mut desktop = shell();
+        let refused = desktop.drop_files(std::slice::from_ref(&picture));
+        assert_eq!(
+            refused.unwrap_err().to_string(),
+            "open a project to import into first"
+        );
+        desktop.drop_files(std::slice::from_ref(&project)).unwrap();
+        assert_eq!(desktop.project_folder(), Some(project.as_path()));
+
+        desktop
+            .drop_files(&[picture.clone(), second.clone()])
+            .unwrap();
+        assert_eq!(
+            desktop.job().map(|job| job.label),
+            Some("Import".to_owned())
+        );
+        land_job(&mut desktop);
+        let videos = &desktop.draft().unwrap().materials.videos;
+        assert_eq!(videos.len(), 2, "{}", desktop.notice());
+        assert!(
+            desktop
+                .drop_files(&[temp.path.join("missing.png")])
+                .is_err()
+        );
+    }
+
+    #[test]
     fn an_autosave_writes_on_its_own_thread_and_a_save_waits_for_it() {
         let temp = Temp::new();
         empty_project(&temp.path);
@@ -8250,6 +9027,139 @@ mod tests {
         assert!(desktop.lanes().iter().all(|lane| lane.clips.is_empty()));
         desktop.redo().unwrap();
         assert_eq!(desktop.lanes()[0].clips.len(), 1);
+    }
+
+    #[test]
+    fn a_linked_import_points_at_the_file_and_copies_nothing() {
+        let temp = Temp::new();
+        empty_project(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.update_settings(|settings| settings.import.link = true);
+        let picture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../crates/engine/fixtures/pattern.png");
+        desktop.import_file(&picture).unwrap();
+        let stored = desktop.draft().unwrap().materials.videos[0].path.clone();
+        assert_eq!(
+            PathBuf::from(&stored),
+            picture.canonicalize().unwrap(),
+            "the project keeps the file's own path"
+        );
+        let copies = |path: &Path| {
+            std::fs::read_dir(path.join("Resources"))
+                .map(|entries| {
+                    entries
+                        .flatten()
+                        .filter(|entry| entry.file_name().to_string_lossy().contains("pattern"))
+                        .count()
+                })
+                .unwrap_or(0)
+        };
+        assert_eq!(copies(&temp.path), 0, "nothing was copied");
+        // It plays from where it is.
+        let id = desktop.draft().unwrap().materials.videos[0]
+            .id
+            .as_str()
+            .to_owned();
+        desktop.pixel_size = 0.001;
+        let clear = desktop.preview_bytes().unwrap();
+        desktop
+            .drop_medium(&id, 0.0, crate::tokens::LANE_HEIGHT / 2.0)
+            .unwrap();
+        assert_ne!(
+            digest(&clear.rgba),
+            digest(&desktop.preview_bytes().unwrap().rgba)
+        );
+        // Copying again puts the next import in the project.
+        desktop.update_settings(|settings| settings.import.link = false);
+        desktop.import_file(&picture).unwrap();
+        assert_eq!(copies(&temp.path), 1);
+    }
+
+    #[test]
+    fn an_imported_gif_plays_its_frames_in_turn() {
+        use cutlass_encode::{CpuFrame, FrameInput, FrameTime};
+        let temp = Temp::new();
+        empty_project(&temp.path);
+        // Three 1/10 s frames: red, green, blue.
+        let mut encoder =
+            cutlass_gif::GifEncoder::open(&CodecParams::video(CodecId::Gif, 16, 16)).unwrap();
+        let mut packets = Vec::new();
+        for (n, color) in [[220_u8, 20, 20], [20, 220, 20], [20, 20, 220]]
+            .into_iter()
+            .enumerate()
+        {
+            let bytes = [color[0], color[1], color[2], 255].repeat(16 * 16);
+            let time = FrameTime::new(i64::try_from(n).unwrap(), 1, 10).unwrap();
+            let frame = CpuFrame::new(16, 16, PixelFormat::Rgba8, bytes, time).unwrap();
+            packets.extend(
+                cutlass_encode::Encoder::push_frame(&mut encoder, &FrameInput::Cpu(frame)).unwrap(),
+            );
+        }
+        packets.extend(cutlass_encode::Encoder::drain(&mut encoder).unwrap());
+        let gif = temp.path.join("lights.gif");
+        let file: Vec<u8> = packets.into_iter().flat_map(|packet| packet.data).collect();
+        std::fs::write(&gif, file).unwrap();
+
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.import_file(&gif).unwrap();
+        let material = &desktop.draft().unwrap().materials.videos[0];
+        assert_eq!(material.kind, "gif");
+        let id = material.id.as_str().to_owned();
+        desktop.pixel_size = 0.001;
+        desktop
+            .drop_medium(&id, 0.0, crate::tokens::LANE_HEIGHT / 2.0)
+            .unwrap();
+        let mut middles = Vec::new();
+        // It plays round again for as long as the clip lasts.
+        for time in [50_000, 150_000, 250_000, 350_000, 1_160_000] {
+            desktop.seek(Micros(time));
+            let picture = desktop.preview_bytes().unwrap();
+            let at = ((picture.height / 2) * picture.width + picture.width / 2) as usize * 4;
+            middles.push([picture.rgba[at], picture.rgba[at + 1], picture.rgba[at + 2]]);
+        }
+        let strongest = |rgb: [u8; 3]| (0..3).max_by_key(|channel| rgb[*channel]).unwrap();
+        assert_eq!(
+            middles
+                .iter()
+                .map(|rgb| strongest(*rgb))
+                .collect::<Vec<_>>(),
+            [0, 1, 2, 0, 2],
+            "{middles:?}"
+        );
+    }
+
+    #[test]
+    fn an_imported_animated_webp_plays_its_frames_and_loops() {
+        let temp = Temp::new();
+        empty_project(&temp.path);
+        // Six frames: 100, 70, 90, 60, 50, and 40 ms; lossy and lossless,
+        // blended and not, disposed and not.
+        let webp = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../crates/codecs/webp/tests/fixtures/anim-mux.webp");
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.import_file(&webp).unwrap();
+        let id = desktop.draft().unwrap().materials.videos[0]
+            .id
+            .as_str()
+            .to_owned();
+        desktop.pixel_size = 0.001;
+        desktop
+            .drop_medium(&id, 0.0, crate::tokens::LANE_HEIGHT / 2.0)
+            .unwrap();
+        let mut seen = |time: i64| {
+            desktop.seek(Micros(time));
+            digest(&desktop.preview_bytes().unwrap().rgba)
+        };
+        let first = seen(50_000);
+        let third = seen(200_000);
+        let last = seen(390_000);
+        assert_ne!(first, third, "the third frame differs from the first");
+        assert_ne!(third, last);
+        // One round is 410 ms; 460 ms is the first frame again.
+        assert_eq!(seen(460_000), first);
     }
 
     #[test]
@@ -8870,6 +9780,297 @@ mod tests {
     }
 
     #[test]
+    fn a_sticker_is_written_once_placed_small_and_undoes_in_one_step() {
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        draft.canvas_config.width = 64;
+        draft.canvas_config.height = 64;
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.pixel_size = 0.001;
+        let rows = |desktop: &Shell| {
+            desktop
+                .draft()
+                .unwrap()
+                .tracks
+                .iter()
+                .filter(|track| track.kind == TrackType::Sticker)
+                .map(|track| track.segments.len())
+                .collect::<Vec<_>>()
+        };
+        let middle = |desktop: &Shell| {
+            let picture = desktop.preview_bytes().unwrap();
+            let at = ((picture.height / 2) * picture.width + picture.width / 2) as usize * 4;
+            [picture.rgba[at], picture.rgba[at + 1], picture.rgba[at + 2]]
+        };
+        let clear = middle(&desktop);
+
+        desktop.add_sticker("sticker:heart").unwrap();
+        assert_eq!(rows(&desktop), [1]);
+        assert!(temp.path.join("Resources/sticker-heart.png").is_file());
+        let draft = desktop.draft().unwrap();
+        assert_eq!(draft.materials.videos[0].kind, "sticker");
+        let picked = desktop.selected().cloned().unwrap();
+        let segment = draft
+            .tracks
+            .iter()
+            .flat_map(|track| &track.segments)
+            .find(|segment| segment.id == picked)
+            .unwrap();
+        assert_eq!(segment.target, TimeRange::new(0, 3_000_000));
+        assert!((segment.clip.scale.x - 0.4).abs() < 1e-9);
+        // The heart's red is in the middle of the canvas.
+        let red = middle(&desktop);
+        assert_ne!(red, clear);
+        assert!(red[0] > 200 && red[1] < 120, "{red:?}");
+
+        // A second sticker over the first opens a second row.
+        desktop.add_sticker("sticker:star").unwrap();
+        assert_eq!(rows(&desktop), [1, 1]);
+        // The same sticker again shares its picture.
+        desktop.seek(Micros(4_000_000));
+        desktop.add_sticker("sticker:heart").unwrap();
+        assert_eq!(rows(&desktop), [2, 1]);
+        assert_eq!(desktop.draft().unwrap().materials.videos.len(), 2);
+
+        desktop.undo().unwrap();
+        assert_eq!(rows(&desktop), [1, 1]);
+        desktop.undo().unwrap();
+        assert_eq!(rows(&desktop), [1]);
+        assert_eq!(desktop.draft().unwrap().materials.videos.len(), 1);
+
+        let sticker_row = crate::tokens::LANE_HEIGHT / 2.0;
+        desktop
+            .drop_sticker(
+                "sticker:bolt",
+                lane_time(&desktop, 5_000_000.0),
+                sticker_row,
+            )
+            .unwrap();
+        assert_eq!(rows(&desktop), [2], "the drop lands after the heart");
+        assert!(desktop.add_sticker("sticker:nope").is_err());
+        assert!(
+            desktop
+                .drop_sticker("title:nope", 0.0, sticker_row)
+                .is_err()
+        );
+    }
+
+    /// A 64 by 64 project, open, with nothing on it.
+    fn sticker_project(temp: &Temp) -> Shell {
+        let mut draft = Draft::empty("draft");
+        draft.canvas_config.width = 64;
+        draft.canvas_config.height = 64;
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.pixel_size = 0.001;
+        desktop
+    }
+
+    fn picked_segment(desktop: &Shell) -> Segment {
+        let picked = desktop.selected().cloned().unwrap();
+        desktop
+            .draft()
+            .unwrap()
+            .tracks
+            .iter()
+            .flat_map(|track| &track.segments)
+            .find(|segment| segment.id == picked)
+            .cloned()
+            .unwrap()
+    }
+
+    #[test]
+    fn a_bundled_picture_sticker_is_written_as_shipped_and_placed() {
+        let temp = Temp::new();
+        let mut desktop = sticker_project(&temp);
+        let clear = digest(&desktop.preview_bytes().unwrap().rgba);
+        desktop.add_sticker("sticker:noto-1f525").unwrap();
+        let file = temp.path.join("Resources/sticker-noto-1f525.png");
+        let shipped = cutlass_stickers::sticker("noto-1f525")
+            .unwrap()
+            .bytes()
+            .unwrap();
+        assert_eq!(std::fs::read(&file).unwrap(), shipped);
+        let draft = desktop.draft().unwrap();
+        let material = &draft.materials.videos[0];
+        assert_eq!(material.kind, "sticker");
+        assert_eq!((material.width, material.height), (512, 512));
+        let segment = picked_segment(&desktop);
+        assert_eq!(segment.target, TimeRange::new(0, 3_000_000));
+        assert_eq!(
+            draft
+                .tracks
+                .iter()
+                .find(|track| track.segments.contains(&segment))
+                .unwrap()
+                .kind,
+            TrackType::Sticker
+        );
+        let picture = desktop.preview_bytes().unwrap();
+        assert_ne!(digest(&picture.rgba), clear);
+        // The flame's orange is in the middle of the canvas.
+        let at = ((picture.height / 2) * picture.width + picture.width / 2) as usize * 4;
+        let middle = &picture.rgba[at..at + 3];
+        assert!(middle[0] > 200 && middle[2] < 150, "{middle:?}");
+        // Dropped later on, it shares the file and its library item.
+        desktop
+            .drop_sticker(
+                "sticker:noto-1f525",
+                lane_time(&desktop, 4_000_000.0),
+                crate::tokens::LANE_HEIGHT / 2.0,
+            )
+            .unwrap();
+        assert_eq!(desktop.draft().unwrap().materials.videos.len(), 1);
+    }
+
+    #[test]
+    fn a_bundled_lottie_sticker_plays_whole_rounds_and_loops() {
+        let temp = Temp::new();
+        let mut desktop = sticker_project(&temp);
+        let sticker = cutlass_stickers::sticker("noto-anim-1f525").unwrap();
+        let clear = digest(&desktop.preview_bytes().unwrap().rgba);
+        desktop.add_sticker("sticker:noto-anim-1f525").unwrap();
+        let file = temp.path.join("Resources/sticker-noto-anim-1f525.json");
+        assert_eq!(std::fs::read(&file).unwrap(), sticker.bytes().unwrap());
+        let material = desktop.draft().unwrap().materials.videos[0].clone();
+        assert_eq!((material.width, material.height), (1024, 1024));
+        // One round is 65 frames at 60 a second; two whole rounds fit in
+        // three seconds.
+        let round = 65.0 / 60.0;
+        assert!((sticker.seconds().unwrap() - round).abs() < 1e-9);
+        let segment = picked_segment(&desktop);
+        let length = (round * 1_000_000.0).round() as i64 * 2;
+        assert_eq!(segment.target, TimeRange::new(0, length));
+        assert!(material.duration.0 >= length);
+
+        let mut seen = |time: i64| {
+            desktop.seek(Micros(time));
+            desktop.preview_bytes().unwrap().rgba
+        };
+        let early = seen(100_000);
+        let later = seen(500_000);
+        assert_ne!(digest(&early), digest(&later), "the flame moves");
+        assert_ne!(digest(&early), clear);
+        // A round later it is the same picture again.
+        let again = seen(100_000 + (round * 1_000_000.0).round() as i64);
+        let off = early
+            .iter()
+            .zip(&again)
+            .map(|(a, b)| a.abs_diff(*b))
+            .max()
+            .unwrap();
+        assert!(off <= 2, "{off}");
+        // After the clip, nothing.
+        assert_eq!(digest(&seen(length + 10_000)), clear);
+    }
+
+    #[test]
+    fn a_sticker_lasts_whole_rounds_of_its_animation() {
+        use super::{STICKER_LENGTH, sticker_length};
+        let fire = cutlass_stickers::sticker("noto-anim-1f525").unwrap();
+        assert_eq!(sticker_length(fire), Micros(2_166_666));
+        // 2.25 s: one round, the most that fits.
+        let hundred = cutlass_stickers::sticker("noto-anim-1f4af").unwrap();
+        assert_eq!(sticker_length(hundred), Micros(2_250_000));
+        let still = cutlass_stickers::sticker("noto-1f525").unwrap();
+        assert_eq!(sticker_length(still), STICKER_LENGTH);
+        assert_eq!(
+            sticker_length(&cutlass_stickers::STICKERS[0]),
+            STICKER_LENGTH
+        );
+    }
+
+    #[test]
+    fn a_sticker_opens_its_panel_and_slides_in_and_pulses() {
+        use cutlass_model::AnimType;
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        draft.canvas_config.width = 64;
+        draft.canvas_config.height = 64;
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.add_sticker("sticker:heart").unwrap();
+        assert_eq!(desktop.panel(), Some(cutlass_editor::Panel::Sticker));
+        let middle = |desktop: &mut Shell, time: i64| {
+            desktop.seek(Micros(time));
+            let picture = desktop.preview_bytes().unwrap();
+            let at = ((picture.height / 2) * picture.width + picture.width / 2) as usize * 4;
+            [picture.rgba[at], picture.rgba[at + 1], picture.rgba[at + 2]]
+        };
+        let red = middle(&mut desktop, 0);
+        desktop
+            .set_animation(
+                AnimType::In,
+                Some("cutlass-anim-in-slide-left".to_owned()),
+                Micros(500_000),
+            )
+            .unwrap();
+        desktop
+            .set_animation(
+                AnimType::Loop,
+                Some("cutlass-anim-loop-pulse".to_owned()),
+                Micros(1_000_000),
+            )
+            .unwrap();
+        let animations = desktop.animations().unwrap();
+        assert!(animations.enter.is_some() && animations.looped.is_some());
+        // At its first frame the heart is still off to the side.
+        assert_ne!(middle(&mut desktop, 0), red);
+        // Once in, it is back in the middle.
+        let landed = middle(&mut desktop, 1_000_000);
+        assert!(landed[0] > 200 && landed[1] < 120, "{landed:?}");
+    }
+
+    #[test]
+    fn a_template_lands_as_one_clip_that_draws_its_widgets_in_turn() {
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        draft.canvas_config.width = 320;
+        draft.canvas_config.height = 180;
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.pixel_size = 0.001;
+        let lit = |desktop: &mut Shell, time: i64| {
+            desktop.seek(Micros(time));
+            let picture = desktop.preview_bytes().unwrap();
+            picture
+                .rgba
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .filter(|pixel| pixel[0] > 128 || pixel[1] > 128)
+                .count()
+        };
+        let before = desktop.draft().unwrap().clone();
+        let card = cutlass_editor::title_template("template:countdown")
+            .unwrap()
+            .card_id();
+        desktop.add_template(&card).unwrap();
+        let draft = desktop.draft().unwrap();
+        let clips: Vec<_> = draft
+            .tracks
+            .iter()
+            .flat_map(|track| &track.segments)
+            .collect();
+        assert_eq!(clips.len(), 1, "one compound clip");
+        assert_eq!(clips[0].target, TimeRange::new(0, 3_000_000));
+        assert_eq!(desktop.selected(), Some(&clips[0].id));
+        // Each number is drawn in its second, and nothing after.
+        assert!(lit(&mut desktop, 500_000) > 0);
+        assert!(lit(&mut desktop, 1_500_000) > 0);
+        assert!(lit(&mut desktop, 2_500_000) > 0);
+        assert_eq!(lit(&mut desktop, 3_500_000), 0);
+        desktop.undo().unwrap();
+        assert_eq!(desktop.draft().unwrap(), &before);
+        assert!(desktop.add_template("template:nope").is_err());
+    }
+
+    #[test]
     fn a_title_card_lands_at_the_playhead_styled_and_undoes_in_one_step() {
         let temp = Temp::new();
         touching_cut(&temp.path);
@@ -8923,6 +10124,53 @@ mod tests {
             .unwrap();
         assert_eq!(dropped.text_color, "#F0E2C4");
         assert!(desktop.drop_title("title:nope", 0.0, text_row).is_err());
+    }
+
+    #[test]
+    fn a_dropped_transition_shows_in_the_preview_with_no_package() {
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        draft.canvas_config.width = 2;
+        draft.canvas_config.height = 1;
+        for (id, color) in [("red", "0xFFFF0000"), ("blue", "0xFF0000FF")] {
+            draft.materials.material_colors.push(MaterialColorConfig {
+                id: id.into(),
+                is_color_clip: true,
+                solid_color: color.to_owned(),
+                ..MaterialColorConfig::default()
+            });
+        }
+        draft.tracks[0]
+            .segments
+            .push(Segment::new("left", "red", TimeRange::new(0, 1_000_000)));
+        draft.tracks[0].segments.push(Segment::new(
+            "right",
+            "blue",
+            TimeRange::new(1_000_000, 1_000_000),
+        ));
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.pixel_size = 0.001;
+        let card = super::TRANSITION_OFFERS
+            .iter()
+            .find(|offer| offer.id == "dip-white")
+            .unwrap()
+            .card_id();
+        desktop
+            .drop_transition(
+                &card,
+                lane_time(&desktop, 1_000_000.0),
+                crate::tokens::LANE_HEIGHT / 2.0,
+            )
+            .unwrap();
+        // The dip runs over the last 0.4s of the red clip: white halfway.
+        desktop.seek(Micros(800_000));
+        let rgba = desktop.preview_bytes().unwrap().rgba;
+        assert_eq!(&rgba[..4], &[255, 255, 255, 255]);
+        desktop.seek(Micros(500_000));
+        let rgba = desktop.preview_bytes().unwrap().rgba;
+        assert_eq!(&rgba[..4], &[255, 0, 0, 255]);
     }
 
     #[test]
@@ -9052,7 +10300,8 @@ mod tests {
             )
             .unwrap();
         let blend = &desktop.draft().unwrap().materials.transitions[0];
-        assert_eq!(blend.name, "Dip");
+        assert_eq!(blend.name, "Dip to black");
+        assert_eq!(blend.effect_id, "cutlass-dip");
         assert_eq!(blend.duration, Micros(100));
         assert!(!blend.is_overlap);
 
@@ -9629,7 +10878,7 @@ mod tests {
     }
 
     #[test]
-    fn play_queues_the_mixed_tone_and_a_mute_or_linux_host_stays_silent() {
+    fn play_queues_the_mixed_tone_and_a_mute_or_a_host_with_no_device_stays_silent() {
         let temp = Temp::new();
         write_tone(&temp.path.join("tone.wav"));
         tone_project(&temp.path, "tone.wav");
@@ -9664,7 +10913,7 @@ mod tests {
         desktop.play();
         assert!(desktop.queued_preview().is_empty());
 
-        desktop.open_preview_audio(AudioHost::Linux);
+        desktop.open_preview_audio(AudioHost::Unnamed);
         assert!(!desktop.audio_output_open());
         desktop.play();
         assert!(desktop.queued_preview().is_empty());
@@ -10321,13 +11570,27 @@ mod tests {
         assert_eq!(desktop.animations(), None);
         assert_eq!(
             desktop
-                .set_animation(true, Some("cutlass-anim-in-slide-up".to_owned()), Micros(1))
+                .set_animation(
+                    cutlass_model::AnimType::In,
+                    Some("cutlass-anim-in-slide-up".to_owned()),
+                    Micros(1)
+                )
                 .unwrap_err()
                 .to_string(),
             "only a picture or title takes animations"
         );
 
         desktop.select(Some(SegmentId::new("picture")));
+        // A title's letter animation does not go on a picture.
+        assert!(
+            desktop
+                .set_animation(
+                    cutlass_model::AnimType::In,
+                    Some("cutlass-anim-in-typewriter".to_owned()),
+                    Micros(500_000)
+                )
+                .is_err()
+        );
         let none = desktop.animations().unwrap();
         assert_eq!(
             (none.enter, none.leave, none.length),
@@ -10335,14 +11598,14 @@ mod tests {
         );
         desktop
             .set_animation(
-                true,
+                cutlass_model::AnimType::In,
                 Some("cutlass-anim-in-slide-up".to_owned()),
                 Micros(700_000),
             )
             .unwrap();
         desktop
             .set_animation(
-                false,
+                cutlass_model::AnimType::Out,
                 Some("cutlass-anim-out-zoom-out".to_owned()),
                 Micros(700_000),
             )
@@ -10354,10 +11617,24 @@ mod tests {
         assert_eq!(enter.duration, Micros(700_000));
         // The two share the clip, so the out side gets what is left.
         assert_eq!(leave.duration, Micros(300_000));
+        // A loop plays the whole clip beside them, a round each duration.
+        desktop
+            .set_animation(
+                cutlass_model::AnimType::Loop,
+                Some("cutlass-anim-loop-swing".to_owned()),
+                Micros(400_000),
+            )
+            .unwrap();
+        let looped = desktop.animations().unwrap().looped.unwrap();
+        assert_eq!(looped.duration, Micros(400_000));
+        desktop.undo().unwrap();
+        assert_eq!(desktop.animations().unwrap().looped, None);
 
         desktop.undo().unwrap();
         assert_eq!(desktop.animations().unwrap().leave, None);
-        desktop.set_animation(true, None, Micros(0)).unwrap();
+        desktop
+            .set_animation(cutlass_model::AnimType::In, None, Micros(0))
+            .unwrap();
         assert_eq!(desktop.animations().unwrap().enter, None);
     }
 
@@ -10478,6 +11755,372 @@ mod tests {
         desktop.set_opacity(0.25).unwrap();
         desktop.undo().unwrap();
         assert_eq!(desktop.inspection().unwrap().opacity, 0.5);
+    }
+
+    #[test]
+    fn a_blend_mode_is_set_shown_saved_and_undone() {
+        use cutlass_effects::BlendMode;
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        let mut video = MaterialVideo::new("picture");
+        video.path = "clip.mp4".to_owned();
+        draft.materials.videos.push(video);
+        draft.tracks[0].segments.push(Segment::new(
+            "picture",
+            "picture",
+            TimeRange::new(0, 1_000_000),
+        ));
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.select(Some(SegmentId::new("picture")));
+        assert_eq!(desktop.inspection().unwrap().blend, BlendMode::SourceOver);
+        desktop.set_blend(BlendMode::Screen).unwrap();
+        assert_eq!(desktop.inspection().unwrap().blend, BlendMode::Screen);
+        desktop.set_blend(BlendMode::Multiply).unwrap();
+        assert_eq!(desktop.inspection().unwrap().blend, BlendMode::Multiply);
+        desktop.save().unwrap();
+        let saved = Folder::read(&temp.path).unwrap();
+        let segment = &saved.draft.tracks[0].segments[0];
+        assert_eq!(
+            cutlass_effects::segment_blend(&saved.draft, segment),
+            Some(BlendMode::Multiply)
+        );
+        desktop.set_blend(BlendMode::SourceOver).unwrap();
+        assert_eq!(desktop.inspection().unwrap().blend, BlendMode::SourceOver);
+        desktop.undo().unwrap();
+        assert_eq!(desktop.inspection().unwrap().blend, BlendMode::Multiply);
+        desktop.undo().unwrap();
+        assert_eq!(desktop.inspection().unwrap().blend, BlendMode::Screen);
+    }
+
+    #[test]
+    fn adjust_sliders_are_set_and_reset_in_one_undo_step() {
+        use cutlass_effects::AdjustKey;
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        let mut video = MaterialVideo::new("picture");
+        video.path = "clip.mp4".to_owned();
+        draft.materials.videos.push(video);
+        draft.tracks[0].segments.push(Segment::new(
+            "picture",
+            "picture",
+            TimeRange::new(0, 1_000_000),
+        ));
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.select(Some(SegmentId::new("picture")));
+        assert!(desktop.inspection().unwrap().adjust.is_identity());
+        desktop.reset_adjust().unwrap();
+        assert!(!desktop.can_undo());
+        desktop.set_adjust(AdjustKey::Temperature, 0.4).unwrap();
+        desktop.set_adjust(AdjustKey::Contrast, -0.2).unwrap();
+        let adjust = desktop.inspection().unwrap().adjust;
+        assert!((adjust.get(AdjustKey::Temperature) - 0.4).abs() < 1e-6);
+        assert!((adjust.get(AdjustKey::Contrast) + 0.2).abs() < 1e-6);
+        assert!(desktop.set_adjust(AdjustKey::Grain, -0.5).is_err());
+        desktop.reset_adjust().unwrap();
+        assert!(desktop.inspection().unwrap().adjust.is_identity());
+        desktop.undo().unwrap();
+        assert!(
+            (desktop
+                .inspection()
+                .unwrap()
+                .adjust
+                .get(AdjustKey::Contrast)
+                + 0.2)
+                .abs()
+                < 1e-6
+        );
+        assert!(
+            (desktop
+                .inspection()
+                .unwrap()
+                .adjust
+                .get(AdjustKey::Temperature)
+                - 0.4)
+                .abs()
+                < 1e-6
+        );
+    }
+
+    #[test]
+    fn auto_adjust_and_colour_match_set_the_sliders_in_one_undo_step() {
+        use cutlass_effects::AdjustKey;
+        let temp = Temp::new();
+        let png = temp.path.join("dark.png");
+        image::RgbaImage::from_fn(8, 4, |x, _| {
+            let lift = u8::try_from(x * 4).unwrap();
+            image::Rgba([0x20 + lift, 0x30 + lift, 0x60 + lift, 0xFF])
+        })
+        .save(&png)
+        .unwrap();
+        let mut draft = Draft::empty("draft");
+        draft.canvas_config.width = 8;
+        draft.canvas_config.height = 4;
+        draft.canvas_config.background = Some("#ffffff".to_owned());
+        let mut photo = MaterialVideo::new("photo");
+        photo.kind = "photo".to_owned();
+        photo.path = png.display().to_string();
+        photo.width = 8;
+        photo.height = 4;
+        draft.materials.videos.push(photo);
+        let mut segment = Segment::new("color", "photo", TimeRange::new(0, 1_000_000));
+        segment.source_range = Some(TimeRange::new(0, 1_000_000));
+        draft.tracks[0].segments.push(segment);
+        let warm_png = temp.path.join("warm.png");
+        image::RgbaImage::from_fn(8, 4, |x, _| {
+            let lift = u8::try_from(x * 8).unwrap();
+            image::Rgba([0xB0 + lift, 0x80 + lift, 0x40 + lift, 0xFF])
+        })
+        .save(&warm_png)
+        .unwrap();
+        let mut warm = MaterialVideo::new("warm");
+        warm.kind = "photo".to_owned();
+        warm.path = warm_png.display().to_string();
+        warm.width = 8;
+        warm.height = 4;
+        draft.materials.videos.push(warm);
+        let mut segment = Segment::new("warm", "warm", TimeRange::new(1_000_000, 1_000_000));
+        segment.source_range = Some(TimeRange::new(0, 1_000_000));
+        draft.tracks[0].segments.push(segment);
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.select(Some(SegmentId::new("color")));
+        // The clip's own colour work is not what auto adjust looks at.
+        desktop.set_adjust(AdjustKey::Exposure, -0.8).unwrap();
+        desktop.auto_adjust().unwrap();
+        let adjust = desktop.inspection().unwrap().adjust;
+        assert!(adjust.get(AdjustKey::Exposure) > 0.3, "{adjust:?}");
+        assert!(adjust.get(AdjustKey::Temperature) > 0.2, "{adjust:?}");
+        // Again, it lands on the same values and adds no step.
+        desktop.auto_adjust().unwrap();
+        assert_eq!(desktop.inspection().unwrap().adjust, adjust);
+        desktop.undo().unwrap();
+        let adjust = desktop.inspection().unwrap().adjust;
+        assert!((adjust.get(AdjustKey::Exposure) + 0.8).abs() < 1e-6);
+        assert_eq!(adjust.get(AdjustKey::Temperature), 0.0);
+        // Colour match warms the blue picture toward the warm one.
+        let choices = desktop.match_choices();
+        assert_eq!(choices.len(), 1, "{choices:?}");
+        assert_eq!(choices[0].0, SegmentId::new("warm"));
+        desktop.match_colour(&SegmentId::new("warm")).unwrap();
+        let matched = desktop.inspection().unwrap().adjust;
+        assert!(matched.get(AdjustKey::Temperature) > 0.5, "{matched:?}");
+        assert!(matched.get(AdjustKey::Exposure) > 0.5, "{matched:?}");
+        assert!(desktop.match_colour(&SegmentId::new("color")).is_err());
+        desktop.undo().unwrap();
+        assert_eq!(
+            desktop
+                .inspection()
+                .unwrap()
+                .adjust
+                .get(AdjustKey::Temperature),
+            0.0
+        );
+        desktop.select(None);
+        assert!(desktop.auto_adjust().is_err());
+        assert!(desktop.match_choices().is_empty());
+    }
+
+    #[test]
+    fn an_adjustment_layer_is_added_at_the_playhead_and_adjusted() {
+        use cutlass_effects::AdjustKey;
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        let mut video = MaterialVideo::new("picture");
+        video.path = "clip.mp4".to_owned();
+        draft.materials.videos.push(video);
+        draft.tracks[0].segments.push(Segment::new(
+            "picture",
+            "picture",
+            TimeRange::new(0, 5_000_000),
+        ));
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.seek(Micros(1_000_000));
+        desktop.add_adjustment().unwrap();
+        let layer = desktop.selected().cloned().unwrap();
+        let draft = desktop.draft().unwrap();
+        let (segment, kind) = super::placed(draft, &layer).unwrap();
+        assert_eq!(*kind, TrackType::Adjust);
+        assert_eq!(segment.target.start, Micros(1_000_000));
+        assert_eq!(desktop.panel(), Some(cutlass_editor::Panel::Adjust));
+        desktop.set_adjust(AdjustKey::Exposure, 0.3).unwrap();
+        assert!(
+            (desktop
+                .inspection()
+                .unwrap()
+                .adjust
+                .get(AdjustKey::Exposure)
+                - 0.3)
+                .abs()
+                < 1e-6
+        );
+        // A second layer at the same time takes a row of its own.
+        desktop.add_adjustment().unwrap();
+        let rows = desktop
+            .draft()
+            .unwrap()
+            .tracks
+            .iter()
+            .filter(|track| track.kind == TrackType::Adjust)
+            .count();
+        assert_eq!(rows, 2);
+        desktop.undo().unwrap();
+        desktop.undo().unwrap();
+        desktop.undo().unwrap();
+        assert!(
+            !desktop
+                .draft()
+                .unwrap()
+                .tracks
+                .iter()
+                .any(|track| track.kind == TrackType::Adjust)
+        );
+    }
+
+    #[test]
+    fn a_filter_is_added_from_its_card_with_strength_and_temperature() {
+        use cutlass_effects::AdjustKey;
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        let mut video = MaterialVideo::new("picture");
+        video.path = "clip.mp4".to_owned();
+        draft.materials.videos.push(video);
+        draft.tracks[0].segments.push(Segment::new(
+            "picture",
+            "picture",
+            TimeRange::new(0, 5_000_000),
+        ));
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        assert!(desktop.add_filter("filter:look/none").is_err());
+        let (card, _) = cutlass_editor::filter_cards()[5].clone();
+        desktop.add_filter(&card).unwrap();
+        let clip = desktop.selected().cloned().unwrap();
+        let draft = desktop.draft().unwrap();
+        let (segment, kind) = super::placed(draft, &clip).unwrap();
+        assert_eq!(*kind, TrackType::Filter);
+        assert!(cutlass_effects::segment_look(draft, segment).is_some());
+        assert_eq!(desktop.panel(), Some(cutlass_editor::Panel::Filter));
+        assert_eq!(desktop.effect_name().as_deref(), Some("Noir"));
+        desktop.set_effect_strength(0.4).unwrap();
+        assert!((desktop.effect_strength().unwrap() - 0.4).abs() < 1e-9);
+        desktop.set_adjust(AdjustKey::Temperature, 0.2).unwrap();
+        assert!(
+            (desktop
+                .inspection()
+                .unwrap()
+                .adjust
+                .get(AdjustKey::Temperature)
+                - 0.2)
+                .abs()
+                < 1e-6
+        );
+        desktop.undo().unwrap();
+        desktop.undo().unwrap();
+        desktop.undo().unwrap();
+        assert!(
+            desktop
+                .draft()
+                .unwrap()
+                .tracks
+                .iter()
+                .all(|track| track.kind != TrackType::Filter)
+        );
+    }
+
+    #[test]
+    fn hsl_and_wheels_are_set_on_a_picture() {
+        use cutlass_effects::{Wheel, WheelSetting};
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        let mut video = MaterialVideo::new("picture");
+        video.path = "clip.mp4".to_owned();
+        draft.materials.videos.push(video);
+        draft.tracks[0].segments.push(Segment::new(
+            "picture",
+            "picture",
+            TimeRange::new(0, 1_000_000),
+        ));
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.select(Some(SegmentId::new("picture")));
+        desktop.set_hsl(4, [0.2, -0.5, 0.0]).unwrap();
+        desktop
+            .set_wheel(
+                Wheel::Gain,
+                WheelSetting {
+                    x: 3.0,
+                    y: 4.0,
+                    luma: 0.1,
+                },
+            )
+            .unwrap();
+        let grade = desktop.inspection().unwrap().grade;
+        assert_eq!(grade.hsl[4], [0.2, -0.5, 0.0]);
+        let gain = grade.wheel(Wheel::Gain);
+        assert!((gain.x - 0.6).abs() < 1e-6 && (gain.y - 0.8).abs() < 1e-6);
+        assert!(desktop.set_hsl(9, [0.1, 0.0, 0.0]).is_err());
+        desktop.undo().unwrap();
+        desktop.undo().unwrap();
+        assert!(desktop.inspection().unwrap().grade.is_identity());
+    }
+
+    #[test]
+    fn a_lut_file_is_loaded_weakened_and_taken_off() {
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        let mut video = MaterialVideo::new("picture");
+        video.path = "clip.mp4".to_owned();
+        draft.materials.videos.push(video);
+        draft.tracks[0].segments.push(Segment::new(
+            "picture",
+            "picture",
+            TimeRange::new(0, 1_000_000),
+        ));
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.select(Some(SegmentId::new("picture")));
+        let bad = temp.path.join("bad.cube");
+        std::fs::write(&bad, "LUT_3D_SIZE 3\n0 0 0\n").unwrap();
+        let refused = desktop.load_lut(&bad).unwrap_err().to_string();
+        assert!(refused.contains("not 27"), "{refused}");
+        assert!(desktop.set_lut_strength(0.5).is_err());
+        let good = temp.path.join("Warm film.cube");
+        std::fs::write(
+            &good,
+            "LUT_3D_SIZE 2\n0 0 0\n1 0 0\n0 1 0\n1 1 0\n0 0 1\n1 0 1\n0 1 1\n1 1 1\n",
+        )
+        .unwrap();
+        desktop.load_lut(&good).unwrap();
+        assert_eq!(
+            desktop.inspection().unwrap().lut,
+            Some(("Warm film".to_owned(), 1.0))
+        );
+        desktop.set_lut_strength(0.5).unwrap();
+        assert_eq!(
+            desktop.inspection().unwrap().lut,
+            Some(("Warm film".to_owned(), 0.5))
+        );
+        desktop.remove_lut().unwrap();
+        assert_eq!(desktop.inspection().unwrap().lut, None);
+        desktop.undo().unwrap();
+        assert_eq!(
+            desktop
+                .inspection()
+                .unwrap()
+                .lut
+                .map(|(_, strength)| strength),
+            Some(0.5)
+        );
     }
 
     #[test]
@@ -11302,7 +12945,7 @@ mod tests {
         let declined = desktop.export(ExportRequest {
             path: destination.clone(),
             short_side: 480,
-            codec: CodecId::Vp8,
+            codec: CodecId::Vp9,
             replace: false,
             ..ExportRequest::default()
         });
@@ -11368,7 +13011,7 @@ mod tests {
     }
 
     /// A two-second color project, 64 by 32, at 30 frames a second.
-    fn movie_project(dir: &Path) {
+    pub(super) fn movie_project(dir: &Path) {
         let mut draft = Draft::empty("draft");
         draft.canvas_config.width = 64;
         draft.canvas_config.height = 32;
@@ -11390,7 +13033,7 @@ mod tests {
         Folder::new(draft).save(dir).unwrap();
     }
 
-    fn land_job(desktop: &mut Shell) {
+    pub(crate) fn land_job(desktop: &mut Shell) {
         // A debug Rust encoder on a small CI runner takes well over a minute.
         let until = std::time::Instant::now() + std::time::Duration::from_secs(300);
         while desktop.poll_job() && std::time::Instant::now() < until {
@@ -11510,6 +13153,410 @@ mod tests {
         }
     }
 
+    /// With the platform encoder off, ProRes export runs the Rust encoder,
+    /// and the movie it writes reads back through the Rust decoder.
+    #[test]
+    fn a_prores_export_without_the_platform_reads_back() {
+        let temp = Temp::new();
+        movie_project(&temp.path);
+        let off = cutlass_settings::Hardware {
+            decode: false,
+            encode: false,
+            ..cutlass_settings::Hardware::default()
+        };
+        let (decoders, encoders) = crate::register_codecs_with(&off);
+        let mut desktop = Shell::new(decoders, encoders, Settings::default());
+        desktop.open_folder(&temp.path).unwrap();
+        assert!(desktop.encodes(CodecId::Prores));
+        let path = temp.path.join("proxy.mov");
+        desktop
+            .export(ExportRequest {
+                path: path.clone(),
+                short_side: 480,
+                codec: CodecId::Prores,
+                prores: ProresProfile::Proxy,
+                sound: false,
+                ..ExportRequest::default()
+            })
+            .unwrap();
+        land_job(&mut desktop);
+        assert!(
+            desktop.notice().starts_with("Exported"),
+            "{}",
+            desktop.notice()
+        );
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(bytes.windows(4).any(|w| w == b"apco"));
+        let mut file = cutlass_isobmff::IsoBmffFile::open(std::io::Cursor::new(bytes)).unwrap();
+        let stream = file.streams()[0].clone();
+        assert_eq!(stream.params().extradata(), b"apco");
+        let mut params = CodecParams::with_format(CodecId::Prores, 0, 0, PixelFormat::Yuv420p);
+        params.extra = stream.params().extradata().to_vec();
+        let mut decoder = cutlass_prores::ProresDecoder::open(&params).unwrap();
+        let mut frames = 0;
+        while let Some(packet) = file.read_packet().unwrap() {
+            let decoded = decoder.decode(packet.bytes()).unwrap();
+            assert_eq!(decoded.header.encoder, *b"ctls");
+            assert_eq!(decoded.frame.height, 480);
+            frames += 1;
+        }
+        assert!(frames > 0);
+    }
+
+    /// VP8 exports through the Rust encoder into an MP4 that the desktop's
+    /// own readers open and decode back to the clip's colour; a MOV is
+    /// refused.
+    #[test]
+    fn a_vp8_export_lands_an_mp4_that_plays_back() {
+        let temp = Temp::new();
+        movie_project(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        assert!(desktop.encodes(CodecId::Vp8));
+        let mov = desktop.export(ExportRequest {
+            path: temp.path.join("vp8.mov"),
+            short_side: 480,
+            codec: CodecId::Vp8,
+            ..ExportRequest::default()
+        });
+        assert_eq!(mov.unwrap_err().to_string(), "VP8 is written in an MP4");
+
+        let destination = temp.path.join("vp8.mp4");
+        desktop
+            .export(ExportRequest {
+                path: destination.clone(),
+                short_side: 480,
+                codec: CodecId::Vp8,
+                ..ExportRequest::default()
+            })
+            .unwrap();
+        land_job(&mut desktop);
+        assert_eq!(desktop.notice(), "Exported vp8.mp4");
+        let bytes = std::fs::read(&destination).unwrap();
+        assert!(bytes.windows(4).any(|w| w == b"vp08"));
+        assert!(bytes.windows(4).any(|w| w == b"vpcC"));
+
+        let readers = crate::readers::installed_readers();
+        let mut media = readers.open(&destination).unwrap();
+        assert_eq!(
+            (media.info().width, media.info().height),
+            (Some(960), Some(480))
+        );
+        let held = media
+            .decode_at(Micros(1_500_000), &TimeRange::new(0, 2_000_000))
+            .unwrap();
+        let cutlass_engine::DecodedFrame::Coded {
+            width,
+            height,
+            pixel,
+            primaries,
+            bytes,
+            ..
+        } = held.frame
+        else {
+            panic!("a coded picture");
+        };
+        assert_eq!((width, height), (960, 480));
+        assert_eq!(pixel, PixelFormat::Yuv420p);
+        assert_eq!(primaries, ColorPrimaries::Bt709);
+        // 0x336699 in BT.709 limited range, as export converts it: Y 97,
+        // Cb 156, Cr 104.
+        let (y, chroma) = bytes.split_at(960 * 480);
+        let (u, v) = chroma.split_at(chroma.len() / 2);
+        let near = |plane: &[u8], value: u8| plane.iter().all(|&s| s.abs_diff(value) <= 4);
+        assert!(near(y, 97) && near(u, 156) && near(v, 104));
+    }
+
+    #[test]
+    fn an_export_writes_a_mov_the_sound_alone_a_gif_and_a_caption_file() {
+        let temp = Temp::new();
+        movie_project(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        let run = |desktop: &mut Shell, request: ExportRequest| {
+            desktop.export(request).unwrap();
+            land_job(desktop);
+            assert!(
+                desktop.notice().starts_with("Exported"),
+                "{}",
+                desktop.notice()
+            );
+        };
+
+        // A QuickTime movie with PCM sound, a typed bitrate held each
+        // second, and its captions beside it.
+        let mov = temp.path.join("cut.mov");
+        run(
+            &mut desktop,
+            ExportRequest {
+                path: mov.clone(),
+                short_side: 480,
+                bitrate: Some(3_000_000),
+                constant_rate: true,
+                audio: super::SoundFormat {
+                    codec: CodecId::Pcm,
+                    ..super::SoundFormat::default()
+                },
+                captions: Some(SidecarKind::Srt),
+                ..ExportRequest::default()
+            },
+        );
+        let bytes = std::fs::read(&mov).unwrap();
+        assert_eq!(&bytes[4..12], b"ftypqt  ");
+        assert!(bytes.windows(4).any(|w| w == b"sowt"));
+        assert!(temp.path.join("cut.srt").is_file());
+
+        // PCM and ProRes are refused in an MP4.
+        let pcm_mp4 = desktop.export(ExportRequest {
+            path: temp.path.join("pcm.mp4"),
+            short_side: 480,
+            audio: super::SoundFormat {
+                codec: CodecId::Pcm,
+                ..super::SoundFormat::default()
+            },
+            ..ExportRequest::default()
+        });
+        assert_eq!(
+            pcm_mp4.unwrap_err().to_string(),
+            "PCM sound is written in a MOV"
+        );
+        let prores_mp4 = desktop.export(ExportRequest {
+            path: temp.path.join("prores.mp4"),
+            short_side: 480,
+            codec: CodecId::Prores,
+            ..ExportRequest::default()
+        });
+        assert_eq!(
+            prores_mp4.unwrap_err().to_string(),
+            "ProRes is written in a MOV"
+        );
+        if desktop.encodes(CodecId::Prores) {
+            let prores = temp.path.join("prores.mov");
+            run(
+                &mut desktop,
+                ExportRequest {
+                    path: prores.clone(),
+                    short_side: 480,
+                    codec: CodecId::Prores,
+                    prores: ProresProfile::High,
+                    ..ExportRequest::default()
+                },
+            );
+            assert!(
+                std::fs::read(&prores)
+                    .unwrap()
+                    .windows(4)
+                    .any(|w| w == b"apch")
+            );
+        }
+
+        // With the pictures off, the sound alone: an M4A for AAC, a WAV for
+        // PCM, whatever extension the name had.
+        run(
+            &mut desktop,
+            ExportRequest {
+                path: temp.path.join("sound.mp4"),
+                picture: false,
+                ..ExportRequest::default()
+            },
+        );
+        let m4a = std::fs::read(temp.path.join("sound.m4a")).unwrap();
+        assert_eq!(&m4a[4..12], b"ftypM4A ");
+        assert_eq!(
+            desktop.exported(),
+            Some(temp.path.join("sound.m4a").as_path())
+        );
+        run(
+            &mut desktop,
+            ExportRequest {
+                path: temp.path.join("sound.wav"),
+                picture: false,
+                audio: super::SoundFormat {
+                    codec: CodecId::Pcm,
+                    sample_rate: 44_100,
+                    channels: 1,
+                    bitrate: 0,
+                },
+                ..ExportRequest::default()
+            },
+        );
+        assert_eq!(
+            &std::fs::read(temp.path.join("sound.wav")).unwrap()[..4],
+            b"RIFF"
+        );
+
+        // FLAC alone is a FLAC file the readers open again; in a movie it
+        // is refused.
+        let flac_sound = super::SoundFormat {
+            codec: CodecId::Flac,
+            ..super::SoundFormat::default()
+        };
+        run(
+            &mut desktop,
+            ExportRequest {
+                path: temp.path.join("sound.mp4"),
+                picture: false,
+                audio: flac_sound,
+                ..ExportRequest::default()
+            },
+        );
+        let flac = temp.path.join("sound.flac");
+        assert_eq!(&std::fs::read(&flac).unwrap()[..4], b"fLaC");
+        let info = crate::readers::installed_readers().probe(&flac).unwrap();
+        assert!(info.duration.is_some_and(|duration| duration.0 > 0));
+        let flac_movie = desktop.export(ExportRequest {
+            path: temp.path.join("flac.mov"),
+            short_side: 480,
+            audio: flac_sound,
+            ..ExportRequest::default()
+        });
+        assert_eq!(
+            flac_movie.unwrap_err().to_string(),
+            "FLAC sound is written alone, in a FLAC file"
+        );
+
+        // MP3 is sound alone: the same samples as the WAV once the LAME
+        // tag's delay and padding are trimmed, and refused beside a picture.
+        run(
+            &mut desktop,
+            ExportRequest {
+                path: temp.path.join("sound.mp4"),
+                picture: false,
+                audio: super::SoundFormat {
+                    codec: CodecId::Mp3,
+                    sample_rate: 44_100,
+                    channels: 1,
+                    bitrate: 128_000,
+                },
+                ..ExportRequest::default()
+            },
+        );
+        {
+            use cutlass_mp3_container::Mp3Demux;
+            let wav = std::fs::read(temp.path.join("sound.wav")).unwrap();
+            let data = wav.windows(4).position(|w| w == b"data").unwrap();
+            let wav_samples = (wav.len() - data - 8) as i64 / 2;
+            let mp3 = std::fs::File::open(temp.path.join("sound.mp3")).unwrap();
+            let mut demux = Mp3Demux::open(std::io::BufReader::new(mp3)).unwrap();
+            let trim = cutlass_mp3_container::Demux::streams(&demux)[0]
+                .trim
+                .unwrap();
+            assert_eq!(trim.encoder_delay, cutlass_mp3::ENCODER_DELAY);
+            let mut coded = 0;
+            while let Some(packet) = cutlass_mp3_container::Demux::next_packet(&mut demux).unwrap()
+            {
+                assert!(matches!(packet.data.len(), 417 | 418));
+                coded += packet.duration;
+            }
+            let trimmed = coded - i64::from(trim.encoder_delay) - i64::from(trim.trailing_padding);
+            assert_eq!(trimmed, wav_samples);
+        }
+        let mp3_movie = desktop.export(ExportRequest {
+            path: temp.path.join("mp3.mp4"),
+            short_side: 480,
+            audio: super::SoundFormat {
+                codec: CodecId::Mp3,
+                ..super::SoundFormat::default()
+            },
+            ..ExportRequest::default()
+        });
+        assert_eq!(
+            mp3_movie.unwrap_err().to_string(),
+            "MP3 sound is written alone, without a picture"
+        );
+
+        // Opus alone is an Ogg file the readers open again, at 48 kHz
+        // whatever rate was picked; in a movie it is refused.
+        let opus_sound = super::SoundFormat {
+            codec: CodecId::Opus,
+            sample_rate: 44_100,
+            bitrate: 128_000,
+            ..super::SoundFormat::default()
+        };
+        run(
+            &mut desktop,
+            ExportRequest {
+                path: temp.path.join("sound.mp4"),
+                picture: false,
+                audio: opus_sound,
+                ..ExportRequest::default()
+            },
+        );
+        let opus = temp.path.join("sound.opus");
+        let bytes = std::fs::read(&opus).unwrap();
+        assert_eq!(&bytes[..4], b"OggS");
+        assert_eq!(&bytes[28..36], b"OpusHead");
+        let info = crate::readers::installed_readers().probe(&opus).unwrap();
+        assert!(info.duration.is_some_and(|duration| duration.0 > 0));
+        assert!(
+            info.streams
+                .iter()
+                .any(|stream| stream.sample_rate == Some(48_000))
+        );
+        let opus_movie = desktop.export(ExportRequest {
+            path: temp.path.join("opus.mp4"),
+            short_side: 480,
+            audio: opus_sound,
+            ..ExportRequest::default()
+        });
+        assert_eq!(
+            opus_movie.unwrap_err().to_string(),
+            "Opus sound is written alone, in an Opus file"
+        );
+
+        // A GIF alone, and then again beside a movie, which finds it taken.
+        let gif = super::GifExport {
+            short_side: 240,
+            ..super::GifExport::default()
+        };
+        run(
+            &mut desktop,
+            ExportRequest {
+                path: temp.path.join("loop.gif"),
+                picture: false,
+                sound: false,
+                gif: Some(gif),
+                ..ExportRequest::default()
+            },
+        );
+        let bytes = std::fs::read(temp.path.join("loop.gif")).unwrap();
+        assert_eq!(&bytes[..6], b"GIF89a");
+        assert!(bytes.windows(11).any(|w| w == b"NETSCAPE2.0"));
+        let taken = desktop.export(ExportRequest {
+            path: temp.path.join("loop.mp4"),
+            short_side: 480,
+            gif: Some(gif),
+            ..ExportRequest::default()
+        });
+        assert!(matches!(taken, Err(ShellError::Overwrite(path)) if path.ends_with("loop.gif")));
+
+        // The same animation as a WebP.
+        run(
+            &mut desktop,
+            ExportRequest {
+                path: temp.path.join("loop.webp"),
+                picture: false,
+                sound: false,
+                gif: Some(super::GifExport { webp: true, ..gif }),
+                ..ExportRequest::default()
+            },
+        );
+        let bytes = std::fs::read(temp.path.join("loop.webp")).unwrap();
+        assert_eq!(
+            (&bytes[..4], &bytes[8..16]),
+            (&b"RIFF"[..], &b"WEBPVP8X"[..])
+        );
+        assert!(bytes.windows(4).any(|w| w == b"ANMF"));
+        let nothing = desktop.export(ExportRequest {
+            path: temp.path.join("none.mp4"),
+            picture: false,
+            sound: false,
+            ..ExportRequest::default()
+        });
+        assert!(nothing.is_err());
+        assert!(!temp.path.join("loop.mp4").exists());
+    }
+
     #[test]
     fn a_still_lands_the_canvas_at_the_playhead_as_png_or_jpeg() {
         let temp = Temp::new();
@@ -11539,6 +13586,26 @@ mod tests {
         land_job(&mut desktop);
         let bytes = std::fs::read(&jpeg).unwrap();
         assert_eq!(&bytes[..2], &[0xff, 0xd8]);
+
+        let webp = temp.path.join("frame.webp");
+        desktop.export_still(&webp).unwrap();
+        land_job(&mut desktop);
+        let bytes = std::fs::read(&webp).unwrap();
+        assert_eq!((&bytes[..4], &bytes[8..12]), (&b"RIFF"[..], &b"WEBP"[..]));
+        let params = CodecParams::video(CodecId::Webp, 64, 32);
+        let mut decoder = cutlass_webp::WebpDecoder::open(&params).unwrap();
+        let packet = Packet::video(bytes, 0, 0, 0, true);
+        let pictures = decoder.decode_picture(&packet).unwrap();
+        let image = &pictures[0].image;
+        assert_eq!((image.width, image.height), (64, 32));
+        let channels = image.samples.len() / (64 * 32);
+        let at = (16 * 64 + 32) * channels;
+        let near = |got: u16, want: u16| got.abs_diff(want) <= 8;
+        let pixel = &image.samples[at..at + 3];
+        assert!(
+            near(pixel[0], 0x33) && near(pixel[1], 0x66) && near(pixel[2], 0x99),
+            "{pixel:?}"
+        );
 
         assert_eq!(
             desktop.export_still(&temp.path).unwrap_err().to_string(),

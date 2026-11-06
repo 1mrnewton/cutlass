@@ -1,7 +1,10 @@
 //! Horizontal upscaling used when a frame is coded smaller than it is shown.
 //!
 //! The phase and the eight taps are the specification's upscaling filter.
-//! A constant input stays constant because every phase sums to 128.
+//! A constant input stays constant because every phase sums to 128. The result
+//! is clipped to `(1 << bit_depth) - 1`.
+
+use crate::sample::{Pix, clip_sample};
 
 const SCALE_BITS: i64 = 14;
 const EXTRA_BITS: i64 = 8;
@@ -87,15 +90,16 @@ pub fn coded_width(upscaled: u32, denom: u32) -> u32 {
 /// Upscale one plane from `down_w` samples to `up_w` samples.
 ///
 /// `max_x` is the last sample the mi grid can address, including padding.
-pub fn upscale(
-    src: &[u8],
+pub fn upscale<S: Pix>(
+    src: &[S],
     stride: usize,
     down_w: usize,
     up_w: usize,
     height: usize,
     max_x: usize,
-) -> Vec<u8> {
-    let mut out = vec![0u8; up_w.saturating_mul(height)];
+    bit_depth: u8,
+) -> Vec<S> {
+    let mut out = vec![S::default(); up_w.saturating_mul(height)];
     if up_w == 0 || height == 0 || stride == 0 || down_w == 0 {
         return out;
     }
@@ -127,11 +131,15 @@ pub fn upscale(
             let mut sum = 0i32;
             for (k, tap) in FILTER[phase.min(63)].iter().enumerate() {
                 let sample_x = (base + k as i64 - 3).clamp(0, last) as usize;
-                let sample = i32::from(*src.get(y * stride + sample_x).unwrap_or(&0));
+                let sample = src
+                    .get(y * stride + sample_x)
+                    .copied()
+                    .unwrap_or(S::default())
+                    .to_i32();
                 sum += sample * i32::from(*tap);
             }
             let rounded = (sum + (1 << (FILTER_BITS - 1))) >> FILTER_BITS;
-            out[y * up_w + x] = u8::try_from(rounded.clamp(0, 255)).unwrap_or(0);
+            out[y * up_w + x] = S::from_i32(clip_sample(rounded, bit_depth));
         }
     }
     out
@@ -160,8 +168,16 @@ mod tests {
     #[test]
     fn a_constant_plane_stays_constant() {
         let src = vec![40u8; 16 * 4];
-        let out = upscale(&src, 16, 8, 12, 4, 15);
+        let out = upscale(&src, 16, 8, 12, 4, 15, 8);
         assert_eq!(out.len(), 12 * 4);
         assert!(out.iter().all(|sample| *sample == 40));
+    }
+
+    #[test]
+    fn a_ten_bit_constant_stays_above_eight_bits() {
+        let src = vec![400u16; 16 * 4];
+        let out = upscale(&src, 16, 8, 12, 4, 15, 10);
+        assert_eq!(out.len(), 12 * 4);
+        assert!(out.iter().all(|sample| *sample == 400));
     }
 }

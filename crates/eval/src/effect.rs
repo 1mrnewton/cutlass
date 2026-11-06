@@ -16,14 +16,15 @@
 
 use cutlass_compositor::{ComposeError, Device, Extent, Frame, submit};
 use cutlass_effects::{
-    EffectSource, PackageKind, PackageStore, Step, animation_package_id, bundled_recipe, entry,
-    package_id, plugin_package_id, segment_package_id, video_package_id,
+    ADJUSTMENT, Colour, EffectSource, Mask, PackageKind, PackageStore, Step, animation_package_id,
+    bundled_recipe, entry, package_id, plugin_package_id, segment_package_id, video_package_id,
 };
 use cutlass_model::{Draft, MaterialRef, Micros, Segment, SegmentId, TrackAttribute};
 use cutlass_picture::{CpuBytes, Picture, PictureSource, Sample, rgba_len};
 
 use crate::EvalError;
 use crate::canvas::project_canvas;
+use crate::media::clip_frame;
 
 pub(crate) struct StackLayer<'a> {
     pub(crate) render_index: i32,
@@ -53,6 +54,8 @@ struct Mark<'a> {
     track_index: usize,
     segment_index: usize,
     segment: &'a Segment,
+    /// An adjustment layer's sliders; otherwise the segment's package runs.
+    adjust: Option<Colour>,
 }
 
 enum ClipFilter {
@@ -75,13 +78,22 @@ impl PictureSource for Held {
 }
 
 /// The frame has an effect mark or a clip filter, so it composes on the CPU.
+/// A blend mode the app ships runs on the GPU and does not count.
 pub(crate) fn needs_cpu(draft: &Draft, time: Micros, stack: &[StackLayer<'_>]) -> bool {
     !global_marks(draft, time, stack).is_empty()
+        || stack
+            .iter()
+            .any(|layer| clip_adjust(draft, layer.track_index, layer.segment_index).is_some())
+        || stack
+            .iter()
+            .any(|layer| clip_mask(draft, layer.track_index, layer.segment_index).is_some())
         || stack.iter().any(|layer| {
-            !matches!(
-                clip_filter(draft, layer.track_index, layer.segment_index),
-                ClipFilter::None
-            )
+            match clip_filter(draft, layer.track_index, layer.segment_index) {
+                ClipFilter::None => false,
+                ClipFilter::Blend => segment(draft, layer.track_index, layer.segment_index)
+                    .is_none_or(|segment| cutlass_effects::segment_blend(draft, segment).is_none()),
+                ClipFilter::Unary => true,
+            }
         })
 }
 
@@ -98,7 +110,8 @@ pub(crate) fn present<D: Device>(
         !matches!(
             clip_filter(draft, layer.track_index, layer.segment_index),
             ClipFilter::None
-        )
+        ) || clip_adjust(draft, layer.track_index, layer.segment_index).is_some()
+            || clip_mask(draft, layer.track_index, layer.segment_index).is_some()
     });
     let canvas = project_canvas(
         draft.canvas_config.background.as_deref(),
@@ -152,14 +165,17 @@ pub(crate) fn present<D: Device>(
             let frame = paint(pass.device, pass.extent, pass.time, base.take(), &batch)?;
             batch.clear();
             let bytes = cpu_of(frame, pass.extent)?;
-            base = Some(apply_unary(
-                pass.store,
-                pass.draft,
-                mark.segment,
-                bytes,
-                pass.extent,
-                pass.time,
-            ));
+            base = Some(match mark.adjust.as_ref() {
+                Some(adjust) => adjusted_in(adjust, bytes, pass.time, pass.draft, mark.segment),
+                None => apply_unary(
+                    pass.store,
+                    pass.draft,
+                    mark.segment,
+                    bytes,
+                    pass.extent,
+                    pass.time,
+                ),
+            });
         }
     }
     paint(pass.device, pass.extent, pass.time, base, &batch)
@@ -184,10 +200,31 @@ fn push_visual<'a, D: Device>(
         batch.push(Slot::Borrowed(layer.source));
         return Ok(());
     };
+    let adjust = clip_adjust(pass.draft, layer.track_index, layer.segment_index);
+    let mask = clip_mask(pass.draft, layer.track_index, layer.segment_index);
+    let draft = pass.draft;
+    let sample = |time| {
+        let input = sample_cpu(layer.source, time)?;
+        let input = match adjust.as_ref() {
+            Some(adjust) => adjusted_in(adjust, input, time, draft, segment),
+            None => input,
+        };
+        Some(match mask.as_ref() {
+            Some(mask) => masked(mask, draft, segment, input, time),
+            None => input,
+        })
+    };
     match filter {
-        ClipFilter::None => batch.push(Slot::Borrowed(layer.source)),
+        ClipFilter::None if adjust.is_none() && mask.is_none() => {
+            batch.push(Slot::Borrowed(layer.source));
+        }
+        ClipFilter::None => {
+            if let Some(input) = sample(pass.time) {
+                batch.push(Slot::Owned(input));
+            }
+        }
         ClipFilter::Unary => {
-            if let Some(input) = sample_cpu(layer.source, pass.time) {
+            if let Some(input) = sample(pass.time) {
                 batch.push(Slot::Owned(apply_unary(
                     pass.store,
                     pass.draft,
@@ -202,7 +239,7 @@ fn push_visual<'a, D: Device>(
             let frame = paint(pass.device, pass.extent, pass.time, base.take(), batch)?;
             batch.clear();
             let backdrop = cpu_of(frame, pass.extent)?;
-            let Some(input) = sample_cpu(layer.source, pass.time) else {
+            let Some(input) = sample(pass.time) else {
                 *base = Some(backdrop);
                 return Ok(());
             };
@@ -276,15 +313,70 @@ fn global_marks<'a>(draft: &'a Draft, time: Micros, stack: &[StackLayer<'_>]) ->
         .filter(|(_, _, _, id)| {
             !matches!(entry(id).map(|row| row.kind), Some(PackageKind::Blend(_)))
         })
-        .map(|(track_index, segment_index, segment, _)| Mark {
-            render_index: segment.render_index,
-            track_index,
-            segment_index,
-            segment,
+        .filter_map(|(track_index, segment_index, segment, _)| {
+            // A bundled filter is a look: adjust sliders, not a package.
+            let adjust = cutlass_effects::segment_look(draft, segment).map(|adjust| Colour {
+                adjust,
+                ..cutlass_effects::segment_colour(draft, segment)
+            });
+            if adjust.as_ref().is_some_and(Colour::is_identity) {
+                return None;
+            }
+            Some(Mark {
+                render_index: segment.render_index,
+                track_index,
+                segment_index,
+                segment,
+                adjust,
+            })
         })
+        .chain(adjustment_layers(draft, time, stack))
         .collect();
     marks.sort_by_key(|mark| (mark.render_index, mark.track_index, mark.segment_index));
     marks
+}
+
+/// Adjustment layers covering `time` with a slider set, on visible rows.
+fn adjustment_layers<'a>(
+    draft: &'a Draft,
+    time: Micros,
+    stack: &[StackLayer<'_>],
+) -> impl Iterator<Item = Mark<'a>> {
+    let drawn_now: Vec<(usize, usize)> = stack
+        .iter()
+        .map(|layer| (layer.track_index, layer.segment_index))
+        .collect();
+    draft
+        .tracks
+        .iter()
+        .enumerate()
+        .filter(|(_, track)| !track.attribute.contains(TrackAttribute::HIDE))
+        .flat_map(|(track_index, track)| {
+            track
+                .segments
+                .iter()
+                .enumerate()
+                .map(move |(segment_index, segment)| (track_index, segment_index, segment))
+        })
+        .filter(move |(track_index, segment_index, segment)| {
+            segment.visible
+                && !drawn_now.contains(&(*track_index, *segment_index))
+                && covers(segment.target.start.0, segment.target.duration.0, time.0)
+                && matches!(
+                    draft.materials.get(segment.material_id.as_str()),
+                    Some(MaterialRef::Effect(effect)) if effect.kind == ADJUSTMENT
+                )
+        })
+        .filter_map(move |(track_index, segment_index, segment)| {
+            let adjust = cutlass_effects::segment_colour(draft, segment);
+            (!adjust.is_identity()).then_some(Mark {
+                render_index: segment.render_index,
+                track_index,
+                segment_index,
+                segment,
+                adjust: Some(adjust),
+            })
+        })
 }
 
 /// A recipe effect at one frame: where it sits among the layers, its steps
@@ -392,6 +484,80 @@ fn clip_filter(draft: &Draft, track_index: usize, segment_index: usize) -> ClipF
     }
 }
 
+/// The colour work on a drawn clip, when any is set.
+fn clip_adjust(draft: &Draft, track_index: usize, segment_index: usize) -> Option<Colour> {
+    let colour =
+        cutlass_effects::segment_colour(draft, segment(draft, track_index, segment_index)?);
+    (!colour.is_identity()).then_some(colour)
+}
+
+fn clip_mask(draft: &Draft, track_index: usize, segment_index: usize) -> Option<Mask> {
+    cutlass_effects::segment_mask(draft, segment(draft, track_index, segment_index)?)
+}
+
+/// `input`, a canvas-sized picture of `segment`, with `mask` cut in the
+/// clip's own frame at `time`.
+fn masked(
+    mask: &Mask,
+    draft: &Draft,
+    segment: &Segment,
+    input: CpuBytes,
+    time: Micros,
+) -> CpuBytes {
+    let (width, height) = (input.width(), input.height());
+    let Some(frame) = clip_frame(draft, segment, time, (width, height)) else {
+        return input;
+    };
+    let mut rgba = input.rgba().to_vec();
+    #[allow(clippy::cast_possible_truncation)]
+    mask.apply(&mut rgba, width, |x, y| {
+        let (u, v) = frame.apply(f64::from(x), f64::from(y));
+        Some((u as f32, v as f32))
+    });
+    CpuBytes::new(width, height, rgba).unwrap_or(input)
+}
+
+/// `input` with `colour` run over it where `segment`'s colour mask keeps,
+/// in the segment's frame at `time`; all over without one.
+fn adjusted_in(
+    colour: &Colour,
+    input: CpuBytes,
+    time: Micros,
+    draft: &Draft,
+    segment: &Segment,
+) -> CpuBytes {
+    let (width, height) = (input.width(), input.height());
+    let limit = cutlass_effects::segment_color_mask(draft, segment).zip(clip_frame(
+        draft,
+        segment,
+        time,
+        (width, height),
+    ));
+    let Some((mask, frame)) = limit else {
+        return adjusted(colour, input, time);
+    };
+    let before = input.rgba().to_vec();
+    let after = adjusted(colour, input, time);
+    let mut rgba = after.rgba().to_vec();
+    #[allow(clippy::cast_possible_truncation)]
+    mask.limit(&before, &mut rgba, width, |x, y| {
+        let (u, v) = frame.apply(f64::from(x), f64::from(y));
+        Some((u as f32, v as f32))
+    });
+    CpuBytes::new(width, height, rgba).unwrap_or(after)
+}
+
+/// `input` with `adjust` run over it. The grain moves once a frame at 30
+/// frames a second.
+fn adjusted(colour: &Colour, input: CpuBytes, time: Micros) -> CpuBytes {
+    let (width, height) = (input.width(), input.height());
+    let mut rgba = input.rgba().to_vec();
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let seed = (time.0 / 33_333) as u32;
+    colour.apply(&mut rgba, width, height, seed);
+    CpuBytes::new(width, height, rgba).unwrap_or(input)
+}
+
 fn extra_package<'a>(draft: &'a Draft, segment: &Segment) -> Option<&'a str> {
     segment
         .extra_material_refs
@@ -456,6 +622,22 @@ fn try_blend(
     extent: Extent,
     time: Micros,
 ) -> Option<CpuBytes> {
+    // A blend mode the app ships needs no package.
+    if let Some(mode) = cutlass_effects::segment_blend(draft, segment) {
+        if !canvas_bytes(input, extent) || !canvas_bytes(backdrop, extent) {
+            return None;
+        }
+        let mut rgba = backdrop.rgba().to_vec();
+        for (out, source) in rgba
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
+            .zip(input.rgba().as_chunks::<4>().0)
+        {
+            *out = cutlass_effects::blend_pixel(mode, *source, *out);
+        }
+        return CpuBytes::new(extent.width, extent.height, rgba).ok();
+    }
     let input = Picture::Cpu(input.clone());
     let backdrop = Picture::Cpu(backdrop.clone());
     let source =

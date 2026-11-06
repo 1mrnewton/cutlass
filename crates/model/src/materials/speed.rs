@@ -307,6 +307,137 @@ impl Default for MaterialSpeed {
     }
 }
 
+impl SpeedPoint {
+    /// A point at `x`, the share of the source, running at `y` times speed.
+    #[must_use]
+    pub fn new(x: f64, y: f64) -> Self {
+        Self {
+            x,
+            y,
+            rest: Map::new(),
+        }
+    }
+}
+
+/// A ready-made speed curve. Each is a list of points: `x` the share of the
+/// source, `y` the speed there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SpeedPreset {
+    /// Fast, slow, fast, slow: cuts a long shot into beats.
+    Montage,
+    /// Quick in, a long slow middle, quick out.
+    Hero,
+    /// Fast, a near stop in the middle, fast again.
+    Bullet,
+    /// Normal, a sudden burst, normal.
+    JumpCut,
+    /// Starts fast and settles to normal.
+    FlashIn,
+    /// Starts normal and ends fast.
+    FlashOut,
+}
+
+impl SpeedPreset {
+    pub const ALL: [Self; 6] = [
+        Self::Montage,
+        Self::Hero,
+        Self::Bullet,
+        Self::JumpCut,
+        Self::FlashIn,
+        Self::FlashOut,
+    ];
+
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Montage => "Montage",
+            Self::Hero => "Hero",
+            Self::Bullet => "Bullet",
+            Self::JumpCut => "Jump cut",
+            Self::FlashIn => "Flash in",
+            Self::FlashOut => "Flash out",
+        }
+    }
+
+    /// The preset's points, from `x` 0 to 1.
+    #[must_use]
+    pub fn points(self) -> Vec<SpeedPoint> {
+        let pairs: &[(f64, f64)] = match self {
+            Self::Montage => &[
+                (0.0, 1.0),
+                (0.15, 2.5),
+                (0.35, 0.6),
+                (0.55, 2.5),
+                (0.8, 0.6),
+                (1.0, 1.0),
+            ],
+            Self::Hero => &[
+                (0.0, 1.0),
+                (0.2, 2.0),
+                (0.4, 0.4),
+                (0.6, 0.4),
+                (0.8, 2.0),
+                (1.0, 1.0),
+            ],
+            Self::Bullet => &[
+                (0.0, 2.0),
+                (0.35, 2.0),
+                (0.45, 0.2),
+                (0.55, 0.2),
+                (0.65, 2.0),
+                (1.0, 2.0),
+            ],
+            Self::JumpCut => &[
+                (0.0, 1.0),
+                (0.4, 1.0),
+                (0.45, 5.0),
+                (0.55, 5.0),
+                (0.6, 1.0),
+                (1.0, 1.0),
+            ],
+            Self::FlashIn => &[(0.0, 5.0), (0.3, 3.0), (0.5, 1.0), (1.0, 1.0)],
+            Self::FlashOut => &[(0.0, 1.0), (0.5, 1.0), (0.7, 3.0), (1.0, 5.0)],
+        };
+        pairs.iter().map(|&(x, y)| SpeedPoint::new(x, y)).collect()
+    }
+
+    /// The preset `points` are, when they are one unchanged.
+    #[must_use]
+    pub fn of(points: &[SpeedPoint]) -> Option<Self> {
+        Self::ALL.into_iter().find(|preset| {
+            let own = preset.points();
+            own.len() == points.len()
+                && own
+                    .iter()
+                    .zip(points)
+                    .all(|(a, b)| (a.x - b.x).abs() < 1e-6 && (a.y - b.y).abs() < 1e-6)
+        })
+    }
+}
+
+/// The speed a curve runs at `x`, the share of the source: linear between
+/// points and held past either end. One at no points.
+#[must_use]
+pub fn curve_speed_at(points: &[SpeedPoint], x: f64) -> f64 {
+    let Some(first) = points.first() else {
+        return 1.0;
+    };
+    if x <= first.x {
+        return first.y;
+    }
+    for pair in points.windows(2) {
+        let (left, right) = (&pair[0], &pair[1]);
+        if x <= right.x {
+            let width = right.x - left.x;
+            if width <= 0.0 {
+                return right.y;
+            }
+            return left.y + (right.y - left.y) * (x - left.x) / width;
+        }
+    }
+    points.last().map_or(1.0, |last| last.y)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -443,5 +574,26 @@ mod tests {
             curve_target_duration(Micros(1_000_000), &crossing),
             Ok(Micros(523_050))
         );
+    }
+
+    #[test]
+    fn each_preset_is_a_curve_that_changes_the_length_and_is_known_again() {
+        for preset in SpeedPreset::ALL {
+            let points = preset.points();
+            let factor = curve_speed_factor(&points).unwrap();
+            assert!(
+                factor > 0.0 && (factor - 1.0).abs() > 0.01,
+                "{preset:?} {factor}"
+            );
+            assert_eq!(SpeedPreset::of(&points), Some(preset));
+            assert!((curve_speed_at(&points, 0.0) - points[0].y).abs() < 1e-9);
+        }
+        // Flash in plays its fast start in less time than a normal one.
+        assert!(curve_speed_factor(&SpeedPreset::FlashIn.points()).unwrap() < 1.0);
+        let mut moved = SpeedPreset::Hero.points();
+        moved[2].y = 0.5;
+        assert_eq!(SpeedPreset::of(&moved), None);
+        assert!((curve_speed_at(&moved, 0.3) - 1.25).abs() < 1e-9);
+        assert!((curve_speed_at(&[], 0.5) - 1.0).abs() < 1e-9);
     }
 }

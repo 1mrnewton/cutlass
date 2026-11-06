@@ -6,20 +6,20 @@
 //! placed with the segment clip, including its line keyframes.
 //!
 //! Word columns replace `content`. Those glyphs are the caption sample.
-//! An identity style keeps the material color. A sampled color replaces it.
-//! Style position is a pixel shift. Scale and rotation are not applied.
+//! The caption's style pages the words and sets each word's color, box,
+//! size and lift; rotation is not applied.
 
-use cutlass_captions::{CaptionQuery, PageLimits, RangeStyles, Rgba, sample_caption};
+use cutlass_captions::{CaptionQuery, KeywordRange, PageLimits, RangeStyles, Rgba, sample_caption};
 use cutlass_engine::DisplayQuarter;
 use std::collections::HashMap;
 
 use cutlass_gpu::{Affine, Placement};
 use cutlass_model::{
-    BloomParams, Clip, Draft, MaterialEffect, MaterialRef, MaterialText, Micros, Segment,
-    SegmentId, TrackAttribute, UniformScale, WordColumns, segment_bloom,
+    BloomParams, Clip, Draft, LetterPose, LetterStep, MaterialEffect, MaterialRef, MaterialText,
+    Micros, Segment, SegmentId, TrackAttribute, UniformScale, WordColumns, segment_bloom,
 };
 use cutlass_picture::{CpuBytes, Picture, PictureSource, Sample};
-use cutlass_text::{DrawnGlyph, Layout, PlacedGlyph, TextSource, paint_glyphs, text_fill};
+use cutlass_text::{GlyphLook, TextSource, text_fill};
 
 use crate::Fonts;
 use crate::gpu::{GpuLayer, GpuSource};
@@ -126,17 +126,26 @@ pub(crate) fn text_layers(
                 continue;
             }
             let (raster, transform) = if words_present(material) {
-                let Some(bytes) = caption_picture(face, material, segment.target.start, time)
-                else {
+                let wanted = density(&clip, &uniform, material.font_size);
+                let Some((drawn, bytes)) = caption_picture(
+                    Faces { fonts, face },
+                    material,
+                    glow(draft, segment).as_ref(),
+                    segment,
+                    time,
+                    wanted,
+                ) else {
                     continue;
                 };
-                (bytes, transform)
+                (bytes, transform.dense(drawn))
             } else {
                 let wanted = density(&clip, &uniform, material.font_size);
                 let glow = glow(draft, segment);
+                // Letters on the move are drawn for each frame and not kept.
+                let steps = cutlass_model::letters_at(draft, segment, time);
                 let kept = rasters
                     .get(&segment.id)
-                    .filter(|(drawn, _)| *drawn == wanted)
+                    .filter(|(drawn, _)| *drawn == wanted && steps.is_empty())
                     .cloned();
                 let Some((drawn, bytes)) = kept.or_else(|| {
                     title_picture(
@@ -146,11 +155,14 @@ pub(crate) fn text_layers(
                         segment,
                         time,
                         wanted,
+                        &steps,
                     )
                 }) else {
                     continue;
                 };
-                rasters.insert(segment.id.clone(), (drawn, bytes.clone()));
+                if steps.is_empty() {
+                    rasters.insert(segment.id.clone(), (drawn, bytes.clone()));
+                }
                 (bytes, transform.dense(drawn))
             };
             layers.push(TextLayer {
@@ -170,7 +182,8 @@ pub(crate) fn text_layers(
 }
 
 /// A title drawn with `density` pixels to each shown pixel, and that
-/// density; at 1 when it cannot be drawn larger.
+/// density; at 1 when it cannot be drawn larger. Its letters are posed by
+/// the letter animations at `time`, `steps`.
 fn title_picture(
     faces: Faces<'_>,
     material: &MaterialText,
@@ -178,16 +191,31 @@ fn title_picture(
     segment: &Segment,
     time: Micros,
     density: f64,
+    steps: &[LetterStep],
 ) -> Option<(f64, CpuBytes)> {
     let draw = |density: f64| {
         let mut larger = material.clone();
         larger.font_size *= density;
         larger.line_max_width *= density;
-        let source =
+        let mut source = logged(
+            "title",
+            segment,
             TextSource::open_with_faces(faces.face, None, &larger, glow, segment, &|path| {
                 faces.named(path)
-            })
-            .ok()?;
+            }),
+        )?;
+        if !steps.is_empty() {
+            let poses = source
+                .letters()
+                .iter()
+                .map(|letter| {
+                    steps
+                        .iter()
+                        .fold(LetterPose::REST, |pose, step| pose.then(step.pose(*letter)))
+                })
+                .collect();
+            source.set_poses(poses);
+        }
         match source.sample(time) {
             Sample::Ready(Picture::Cpu(bytes)) => Some((density, bytes)),
             _ => None,
@@ -235,12 +263,43 @@ pub fn text_size(draft: &Draft, fonts: &dyn Fonts, segment: &Segment) -> Option<
     let face = fonts.face(&material.font_path)?;
     let glow = glow(draft, segment);
     let faces = Faces { fonts, face };
-    let source =
+    let source = logged(
+        "title",
+        segment,
         TextSource::open_with_faces(face, None, material, glow.as_ref(), segment, &|path| {
             faces.named(path)
-        })
-        .ok()?;
+        }),
+    )?;
     Some(source.size())
+}
+
+/// How many draw failures are logged before the rest are only counted, so
+/// a title that fails on every frame does not fill the log.
+const LOGGED_FAILURES: usize = 64;
+
+/// `result`'s value, or nothing with the failure logged the first time a
+/// clip hits it: a title or caption that cannot draw says why.
+fn logged<T, E: std::fmt::Display>(
+    what: &str,
+    segment: &Segment,
+    result: Result<T, E>,
+) -> Option<T> {
+    use std::sync::Mutex;
+    static SEEN: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    match result {
+        Ok(value) => Some(value),
+        Err(error) => {
+            let line = format!("{what} {} did not draw: {error}", segment.id);
+            if let Ok(mut seen) = SEEN.lock()
+                && seen.len() < LOGGED_FAILURES
+                && !seen.contains(&line)
+            {
+                cutlass_logger::warn!("{line}");
+                seen.push(line);
+            }
+            None
+        }
+    }
 }
 
 /// A title's own face, and the shell's fonts for its ranges.
@@ -275,86 +334,173 @@ fn columns_present(columns: &WordColumns) -> bool {
     !columns.start_time.is_empty() || !columns.end_time.is_empty() || !columns.text.is_empty()
 }
 
-/// Word columns replace `content`. An empty style keeps the material color.
-/// A sampled color that is not opaque white replaces it. Position is a pixel
-/// shift, right and down. Scale and rotation on the style are not applied.
+/// Word columns replace `content`. The caption's style, when it names one,
+/// pages the words and gives the curves; otherwise every word is drawn
+/// plain. The page is drawn as a title is, so the material's outline,
+/// shadow, glow and box hold for it, at `density` pixels to each shown
+/// pixel. An empty style keeps the material color; a sampled color that is
+/// not opaque white replaces it. Position is a pixel shift, right and down;
+/// scale sizes a word about its middle, and a background is a round box
+/// behind the word. Rotation on the style is not applied.
 fn caption_picture(
-    face: &[u8],
+    faces: Faces<'_>,
     material: &MaterialText,
-    placed_at: Micros,
+    glow: Option<&BloomParams>,
+    segment: &Segment,
     time: Micros,
-) -> Option<CpuBytes> {
-    let styles = RangeStyles::identity();
-    let frame = sample_caption(&CaptionQuery {
-        material,
-        font: face,
-        timeline: time,
-        placed_at,
-        limits: PageLimits {
+    density: f64,
+) -> Option<(f64, CpuBytes)> {
+    let style = cutlass_captions::caption_style(&material.caption_style);
+    let styles = style.map_or_else(RangeStyles::identity, |style| {
+        style.styles(material.font_size)
+    });
+    let limits = style.map_or(
+        PageLimits {
             words_per_line: 0,
             lines_per_page: 0,
         },
-        keywords: &[],
+        |style| style.limits,
+    );
+    let frame = sample_caption(&CaptionQuery {
+        material,
+        font: faces.face,
+        timeline: time,
+        placed_at: segment.target.start,
+        limits,
+        keywords: &caption_keywords(material),
         styles: &styles,
-        stagger_shift_ms: 0,
-    })
-    .ok()?;
-    let base = text_fill(material).ok()?;
-    let mut drawn = Vec::new();
-    for batch in &frame.batches {
-        for sample in &batch.glyphs {
-            let Some(baseline) = baseline_of(&frame.letters.layout, &sample.glyph) else {
-                continue;
-            };
-            let Some(shift_x) = shift_px(sample.style.position_x) else {
-                continue;
-            };
-            let Some(shift_y) = shift_px(sample.style.position_y) else {
-                continue;
-            };
-            let Some(fill) = ink_color(base, sample.style.color) else {
-                continue;
-            };
-            drawn.push(HeldGlyph {
-                placed: sample.glyph.clone(),
-                baseline,
-                fill,
-                shift_x,
-                shift_y,
-            });
+        stagger_shift_ms: material.caption_stagger_ms.max(0),
+    });
+    let frame = logged("caption", segment, frame)?;
+    let looks = caption_looks(&frame, logged("caption", segment, text_fill(material))?)?;
+    let hidden = GlyphLook {
+        pose: LetterPose {
+            alpha: 0.0,
+            ..LetterPose::REST
+        },
+        ..GlyphLook::REST
+    };
+    let draw = |density: f64| {
+        let mut page = material.clone();
+        page.content.clone_from(&frame.letters.text);
+        page.is_rich_text = false;
+        page.font_size *= density;
+        page.line_max_width *= density;
+        let mut source = logged(
+            "caption",
+            segment,
+            TextSource::open_with_faces(faces.face, None, &page, glow, segment, &|path| {
+                faces.named(path)
+            }),
+        )?;
+        let each: Vec<GlyphLook> = source
+            .records()
+            .iter()
+            .map(|record| looks.get(&record.source).copied().unwrap_or(hidden))
+            .collect();
+        source.set_looks(&each);
+        match source.sample(time) {
+            Sample::Ready(Picture::Cpu(bytes)) => Some((density, bytes)),
+            _ => None,
+        }
+    };
+    if density > 1.0
+        && let Some(drawn) = draw(density)
+    {
+        return Some(drawn);
+    }
+    draw(1.0)
+}
+
+/// The caption's marked words, each whole. A mark past its words is left
+/// out.
+fn caption_keywords(material: &MaterialText) -> Vec<KeywordRange> {
+    let columns = if columns_present(&material.current_words) {
+        &material.current_words
+    } else {
+        &material.words
+    };
+    material
+        .caption_keywords
+        .iter()
+        .filter_map(|word| {
+            let text = columns.text.get(*word)?;
+            Some(KeywordRange {
+                word: *word,
+                char_start: 0,
+                char_end: text.chars().count(),
+            })
+        })
+        .collect()
+}
+
+/// How each glyph of the caption's page looks, by its place in the page's
+/// text. A glyph the style does not draw has none.
+fn caption_looks(
+    frame: &cutlass_captions::CaptionFrame,
+    base: [u8; 4],
+) -> Option<HashMap<usize, GlyphLook>> {
+    let font_size = frame.letters.layout.font_size;
+    if !font_size.is_finite() || font_size <= 0.0 {
+        return None;
+    }
+    // Each word's middle, so a word sized up grows about it.
+    let mut spans: HashMap<usize, (f32, f32)> = HashMap::new();
+    let mut words: HashMap<usize, usize> = HashMap::new();
+    for letter in &frame.letters.letters {
+        if let Some(word) = letter.word {
+            let span = spans.entry(word).or_insert((f32::MAX, f32::MIN));
+            span.0 = span.0.min(letter.glyph.x);
+            span.1 = span.1.max(letter.glyph.x);
+            words.insert(letter.source, word);
         }
     }
-    let borrowed: Vec<DrawnGlyph<'_>> = drawn
-        .iter()
-        .map(|glyph| DrawnGlyph {
-            placed: &glyph.placed,
-            baseline: glyph.baseline,
-            fill: glyph.fill,
-            shift_x: glyph.shift_x,
-            shift_y: glyph.shift_y,
-        })
-        .collect();
-    match paint_glyphs(face, frame.letters.layout.font_size, &borrowed) {
-        Ok(Picture::Cpu(bytes)) => Some(bytes),
-        Ok(Picture::Platform(_)) | Err(_) => None,
+    let mut looks = HashMap::new();
+    for sample in frame.batches.iter().flat_map(|batch| &batch.glyphs) {
+        let look = (|| {
+            let shift_x = shift_px(sample.style.position_x)?;
+            let shift_y = shift_px(sample.style.position_y)?;
+            let fill = ink_color(base, sample.style.color)?;
+            let back = back_color(sample.style.background)?;
+            #[allow(clippy::cast_possible_truncation)]
+            let scale = sample.style.scale_x as f32;
+            if !scale.is_finite() || scale <= 0.0 {
+                return None;
+            }
+            let middle = words
+                .get(&sample.glyph.source)
+                .and_then(|word| spans.get(word))
+                .map_or(sample.glyph.x, |(left, right)| (left + right) / 2.0);
+            let dx = shift_x + (sample.glyph.x - middle) * (scale - 1.0);
+            Some(GlyphLook {
+                pose: LetterPose {
+                    alpha: 1.0,
+                    dx: f64::from(dx / font_size),
+                    dy: f64::from(shift_y / font_size),
+                    scale: f64::from(scale),
+                },
+                ink: (fill != base).then_some(fill),
+                back,
+            })
+        })();
+        if let Some(look) = look {
+            looks.insert(sample.glyph.source, look);
+        }
     }
+    Some(looks)
 }
 
-struct HeldGlyph {
-    placed: PlacedGlyph,
-    baseline: f32,
-    fill: [u8; 4],
-    shift_x: f32,
-    shift_y: f32,
-}
-
-fn baseline_of(layout: &Layout, glyph: &PlacedGlyph) -> Option<f32> {
-    layout.lines.iter().find_map(|line| {
-        let found = line.glyphs.iter().any(|item| {
-            item.source == glyph.source && item.glyph_id == glyph.glyph_id && item.x == glyph.x
-        });
-        found.then_some(line.baseline)
-    })
+/// A box color from a sampled background: clear when it has no opacity.
+fn back_color(color: Rgba) -> Option<[u8; 4]> {
+    if color.alpha <= 0.0 {
+        return Some([0, 0, 0, 0]);
+    }
+    Some([
+        unit_byte(color.red)?,
+        unit_byte(color.green)?,
+        unit_byte(color.blue)?,
+        unit_byte(color.alpha)?,
+    ])
 }
 
 fn shift_px(value: f64) -> Option<f32> {
@@ -500,6 +646,37 @@ mod tests {
         let (width, height) = inked_span(&pixels(&small, 0), 256);
         assert!(width < 128 && height < 128, "{width}x{height}");
         assert_eq!(inked_span(&pixels(&large, 0), 512), (width, height));
+    }
+
+    #[test]
+    fn a_typewriter_title_shows_its_letters_one_by_one() {
+        let mut draft = text_segment("AAAA", false);
+        draft
+            .materials
+            .material_animations
+            .push(cutlass_model::MaterialAnimations {
+                id: MaterialId::new("moves"),
+                kind: "sticker_animation".to_owned(),
+                animations: vec![cutlass_model::StickerAnimation {
+                    kind: "in".to_owned(),
+                    resource_id: "cutlass-anim-in-typewriter".to_owned(),
+                    start: Micros(0),
+                    duration: Some(Micros(800_000)),
+                    ..cutlass_model::StickerAnimation::default()
+                }],
+                ..cutlass_model::MaterialAnimations::default()
+            });
+        draft.tracks[0].segments[0]
+            .extra_material_refs
+            .push(MaterialId::new("moves"));
+        assert!(!ink(&pixels(&draft, 0)));
+        let (one, _) = inked_span(&pixels(&draft, 250_000), 256);
+        let (three, _) = inked_span(&pixels(&draft, 650_000), 256);
+        let (all, _) = inked_span(&pixels(&draft, 900_000), 256);
+        assert!(one < three && three < all, "{one} {three} {all}");
+        // At rest it is the title without an animation.
+        let still = text_segment("AAAA", false);
+        assert_eq!(pixels(&draft, 900_000), pixels(&still, 900_000));
     }
 
     /// Pixels drawn part covered, at the letters' edges.
@@ -740,5 +917,153 @@ mod tests {
                 .chunks(4)
                 .any(|pixel| pixel == [255, 0, 0, 255])
         );
+    }
+
+    #[test]
+    fn a_caption_style_pages_colors_sizes_and_boxes_the_spoken_word() {
+        let mut draft = text_segment("", false);
+        draft.materials.texts[0].font_size = 32.0;
+        // Milliseconds: AB, then BA, then AA, then BB.
+        draft.materials.texts[0].words = words(&[
+            ("AB", 0, 200),
+            ("BA", 200, 400),
+            ("AA", 400, 600),
+            ("BB", 600, 800),
+        ]);
+        let plain = pixels(&draft, 100_000);
+        let width = 256;
+        let wide = |rgba: &[u8]| inked_span(rgba, width).0;
+        let yellow = |rgba: &[u8]| {
+            rgba.chunks(4)
+                .filter(|pixel| {
+                    pixel[0] > 200 && pixel[1] > 180 && pixel[2] < 120 && pixel[3] == 255
+                })
+                .count()
+        };
+        // One word a page shows the spoken word alone.
+        draft.materials.texts[0].caption_style = "one-word".to_owned();
+        let one = pixels(&draft, 100_000);
+        assert!(
+            wide(&one) < wide(&plain) / 2,
+            "{} {}",
+            wide(&one),
+            wide(&plain)
+        );
+        // Karaoke turns the spoken and read words yellow, the rest stay.
+        draft.materials.texts[0].caption_style = "karaoke".to_owned();
+        let early = pixels(&draft, 100_000);
+        let later = pixels(&draft, 500_000);
+        assert!(yellow(&early) > 0 && yellow(&later) > yellow(&early));
+        assert!(ink(&early));
+        // Highlight puts a yellow box behind the spoken word.
+        draft.materials.texts[0].caption_style = "highlight".to_owned();
+        let boxed = pixels(&draft, 100_000);
+        // A box is one unbroken run of yellow across the word; inked
+        // letters alone are broken up by the gaps between their strokes.
+        let run = |rgba: &[u8]| {
+            rgba.chunks(width * 4)
+                .map(|row| {
+                    row.chunks(4)
+                        .fold((0, 0), |(best, now), pixel| {
+                            let on = pixel[0] > 200 && pixel[1] > 180 && pixel[2] < 120;
+                            let now = if on && pixel[3] == 255 { now + 1 } else { 0 };
+                            (best.max(now), now)
+                        })
+                        .0
+                })
+                .max()
+                .unwrap_or(0)
+        };
+        assert!(
+            run(&boxed) > run(&early) * 2,
+            "{} {}",
+            run(&boxed),
+            run(&early)
+        );
+        // Word by word hides the words not yet spoken.
+        draft.materials.texts[0].caption_style = "word-by-word".to_owned();
+        let first = pixels(&draft, 100_000);
+        let all = pixels(&draft, 700_000);
+        assert!(wide(&first) < wide(&all));
+        // Pop grows the spoken word.
+        draft.materials.texts[0].caption_style = "classic".to_owned();
+        let classic = pixels(&draft, 100_000);
+        draft.materials.texts[0].caption_style = "pop".to_owned();
+        let pop = pixels(&draft, 100_000);
+        assert_ne!(pop, classic);
+        // An unknown style draws the words plain.
+        draft.materials.texts[0].caption_style = "loud".to_owned();
+        assert_eq!(pixels(&draft, 100_000), plain);
+    }
+
+    #[test]
+    fn a_caption_takes_its_material_outline_shadow_and_box_like_a_title() {
+        let mut draft = text_segment("", false);
+        draft.materials.texts[0].words = words(&[("AB", 0, 500), ("BA", 500, 1_000)]);
+        let has = |rgba: &[u8], color: [u8; 4]| rgba.chunks(4).any(|pixel| pixel == color);
+        let plain = pixels(&draft, 100_000);
+        assert!(ink(&plain));
+        assert!(!has(&plain, [255, 0, 0, 255]));
+        let text = &mut draft.materials.texts[0];
+        text.border_color = "#FF0000".to_owned();
+        text.border_alpha = 1.0;
+        text.border_width = 0.08;
+        let outlined = pixels(&draft, 100_000);
+        assert!(has(&outlined, [255, 0, 0, 255]), "a red outline");
+        assert!(ink(&outlined), "white letters inside it");
+        let text = &mut draft.materials.texts[0];
+        text.border_color = String::new();
+        text.background_style = 1;
+        text.background_color = "#0000FF".to_owned();
+        text.background_alpha = 1.0;
+        let boxed = pixels(&draft, 100_000);
+        assert!(has(&boxed, [0, 0, 255, 255]), "a blue box behind the page");
+        let text = &mut draft.materials.texts[0];
+        text.background_style = 0;
+        text.has_shadow = true;
+        text.shadow_color = "#00FF00".to_owned();
+        text.shadow_alpha = 1.0;
+        text.shadow_distance = 8.0;
+        let shaded = pixels(&draft, 100_000);
+        assert!(
+            shaded
+                .chunks(4)
+                .any(|pixel| pixel[1] > 100 && pixel[0] < 50 && pixel[3] > 100),
+            "a green shadow"
+        );
+    }
+
+    #[test]
+    fn a_keyword_takes_the_spoken_look_and_a_stagger_runs_across_its_letters() {
+        let mut draft = text_segment("", false);
+        draft.materials.texts[0].font_size = 32.0;
+        draft.materials.texts[0].caption_style = "karaoke".to_owned();
+        draft.materials.texts[0].words = words(&[("AB", 0, 200), ("BA", 200, 400)]);
+        let yellow = |rgba: &[u8]| {
+            rgba.chunks(4)
+                .filter(|pixel| {
+                    pixel[0] > 200 && pixel[1] > 180 && pixel[2] < 120 && pixel[3] == 255
+                })
+                .count()
+        };
+        // Before either word is spoken nothing is yellow, unless it is marked.
+        let unmarked = pixels(&draft, 0);
+        draft.materials.texts[0].caption_keywords = vec![1];
+        let marked = pixels(&draft, 0);
+        assert!(
+            yellow(&marked) > yellow(&unmarked),
+            "the keyword is drawn yellow"
+        );
+        // A mark past the words is left out.
+        draft.materials.texts[0].caption_keywords = vec![9];
+        assert_eq!(pixels(&draft, 0), unmarked);
+
+        // Pop grows the spoken word; with a stagger its letters grow in turn.
+        draft.materials.texts[0].caption_keywords.clear();
+        draft.materials.texts[0].caption_style = "pop".to_owned();
+        let together = pixels(&draft, 210_000);
+        draft.materials.texts[0].caption_stagger_ms = 150;
+        let staggered = pixels(&draft, 210_000);
+        assert_ne!(together, staggered);
     }
 }

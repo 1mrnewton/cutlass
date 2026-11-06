@@ -1,0 +1,13 @@
+[package]
+name = "cutlass-lottie"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "Lottie animations: parse, evaluate one frame as vector geometry, and draw it."
+
+[dependencies]
+serde_json = "1.0.154"
+
+[lints]
+workspace = true

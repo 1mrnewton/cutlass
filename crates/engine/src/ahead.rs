@@ -520,7 +520,7 @@ mod tests {
                 pixel: cutlass_decode::PixelFormat::Yuv420p,
                 primaries: cutlass_decode::ColorPrimaries::Bt709,
                 transfer: cutlass_decode::Transfer::Bt709,
-                bytes: vec![0; bytes],
+                bytes: vec![0; bytes].into(),
             },
         }
     }

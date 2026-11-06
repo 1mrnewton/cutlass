@@ -1,6 +1,7 @@
 //! Sample descriptions. Configuration records stay bytes: `avcC`, `hvcC`,
 //! `av1C`, and the decoder-specific info inside `esds`. Nothing here decodes them.
 
+use crate::alac;
 use crate::legacy::{AudioParams, CodecId, ColorTags, Error, MediaKind, SampleFormat, VideoParams};
 use crate::limits::MAX_STSD;
 use crate::parse::{self, Reader};
@@ -100,11 +101,19 @@ fn parse_visual(
     let height = u32::from(read_u16(&payload[26..28]));
     let children = payload.get(78..).unwrap_or(&[]);
     let configured = configuration(children, budget, depth)?;
+    let codec = map_codec(fourcc, configured.object_type);
+    // A ProRes entry has no configuration box. Its code names the profile,
+    // which sets the decoder's output depth, so it rides as the extradata.
+    let extradata = if codec == CodecId::ProRes && configured.extradata.is_empty() {
+        fourcc.to_vec()
+    } else {
+        configured.extradata
+    };
     Ok(SampleDesc {
-        codec: map_codec(fourcc, configured.object_type),
+        codec,
         fourcc,
         kind: MediaKind::Video(VideoParams { width, height }),
-        extradata: configured.extradata,
+        extradata,
         color: configured.color,
         data_reference,
     })
@@ -173,7 +182,7 @@ fn parse_audio(
             needed: u64::try_from(child_at).unwrap_or(u64::MAX),
         });
     }
-    let configured = configuration(&payload[child_at..], budget, depth)?;
+    let mut configured = configuration(&payload[child_at..], budget, depth)?;
     let codec = map_codec(fourcc, configured.object_type);
     if codec == CodecId::Pcm && format == SampleFormat::Unknown {
         format = pcm_format(fourcc, bits);
@@ -181,11 +190,25 @@ fn parse_audio(
     if !matches!(codec, CodecId::Pcm) {
         format = SampleFormat::Unknown;
     }
+    let mut rate = u32::from(sample_rate);
+    if codec == CodecId::Alac
+        && let Some(cookie) = alac::join(&configured.extradata, configured.chan.as_deref())
+        && let Some(facts) = alac::facts(&cookie)
+    {
+        // The cookie is the stream's own description. Writers leave two
+        // channels in the entry for more, and the entry's rate stops at 65535.
+        channels = facts.channels;
+        bits = facts.bits;
+        if facts.rate != 0 {
+            rate = facts.rate;
+        }
+        configured.extradata = cookie;
+    }
     Ok(SampleDesc {
         fourcc,
         codec,
         kind: MediaKind::Audio(AudioParams {
-            sample_rate: u32::from(sample_rate),
+            sample_rate: rate,
             channels,
             bits_per_sample: bits,
             format,
@@ -198,6 +221,8 @@ fn parse_audio(
 
 struct Configured {
     extradata: Vec<u8>,
+    /// A `chan` box beside the configuration: the ALAC channel layout.
+    chan: Option<Vec<u8>>,
     color: Option<ColorTags>,
     object_type: Option<u8>,
 }
@@ -206,6 +231,7 @@ fn configuration(data: &[u8], budget: &mut u32, depth: u32) -> Result<Configured
     let mut extradata = Vec::new();
     let mut color = None;
     let mut object_type = None;
+    let mut chan = None;
     let boxes = parse::atoms(data, 0, budget)?;
     for atom in boxes {
         match &atom.kind {
@@ -230,13 +256,16 @@ fn configuration(data: &[u8], budget: &mut u32, depth: u32) -> Result<Configured
                 }
                 color = color.or(nested.color);
                 object_type = object_type.or(nested.object_type);
+                chan = chan.or(nested.chan);
             }
             b"colr" => color = color.or(parse_colr(atom.payload)),
+            b"chan" => chan = Some(atom.payload.to_vec()),
             _ => {}
         }
     }
     Ok(Configured {
         extradata,
+        chan,
         color,
         object_type,
     })

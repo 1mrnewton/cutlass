@@ -1,7 +1,7 @@
 //! Eval's frame layers as render layers, so every shell draws a frame the
 //! same way.
 
-use cutlass_eval::{Composed, FrameLayers, GpuSource};
+use cutlass_eval::{Composed, FrameLayers, GpuSource, YuvSamples};
 
 use crate::{Canvas, Layer, Planes, RenderError, Renderer, Rgba};
 
@@ -38,9 +38,14 @@ fn layers_of(frame: &FrameLayers) -> Result<Vec<Layer<'_>>, RenderError> {
             GpuSource::Yuv {
                 width,
                 height,
-                bytes,
+                samples,
+                tone,
             } => {
-                let planes = Planes::packed(*width, *height, bytes)?;
+                let planes = match samples {
+                    YuvSamples::Bytes(bytes) => Planes::packed(*width, *height, bytes)?,
+                    YuvSamples::Surface(surface) => Planes::surface(surface, *width, *height),
+                }
+                .with_tone(*tone);
                 match layer.backdrop {
                     Some(backdrop) => Layer::YuvOverBlur {
                         planes,
@@ -65,6 +70,41 @@ fn layers_of(frame: &FrameLayers) -> Result<Vec<Layer<'_>>, RenderError> {
                 placement: layer.placement,
             },
             GpuSource::Effect(steps) => Layer::Effect(steps),
+            GpuSource::Vector(scene) => Layer::Vector {
+                scene,
+                placement: layer.placement,
+            },
+            GpuSource::Blend { mode, layers } => {
+                if (layers.width, layers.height) != (frame.width, frame.height) {
+                    return Err(RenderError::Size {
+                        width: layers.width,
+                        height: layers.height,
+                    });
+                }
+                Layer::Blend {
+                    mode: *mode,
+                    layers: layers_of(layers)?,
+                }
+            }
+            GpuSource::Transition {
+                kind,
+                t,
+                outgoing,
+                incoming,
+            } => Layer::Transition {
+                kind: *kind,
+                t: *t,
+                outgoing: Rgba {
+                    width: outgoing.width(),
+                    height: outgoing.height(),
+                    bytes: outgoing.rgba(),
+                },
+                incoming: Rgba {
+                    width: incoming.width(),
+                    height: incoming.height(),
+                    bytes: incoming.rgba(),
+                },
+            },
         });
     }
     Ok(layers)

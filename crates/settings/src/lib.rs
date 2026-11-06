@@ -1,5 +1,6 @@
 //! The user's settings: shortcuts, panels, playback preferences, hardware
-//! codecs, model choice, sandbox choice, MCP servers, and skill folders.
+//! codecs, model choice, sandbox choice, MCP servers, skill folders, and
+//! the update check.
 //!
 //! Hardware decode and hardware encode are on.
 //! The local model switch is on. The cloud model switch is off. The local
@@ -16,7 +17,7 @@ mod file;
 mod shortcuts;
 
 pub use file::{Loaded, SettingsError, load, save};
-pub use shortcuts::Shortcut;
+pub use shortcuts::{ACTIONS, Shortcut, action_label, default_keys, keys_label};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -51,6 +52,8 @@ pub struct Settings {
     #[serde(default)]
     pub hardware: Hardware,
     #[serde(default)]
+    pub import: Import,
+    #[serde(default)]
     pub model: ModelChoice,
     #[serde(default)]
     pub sandbox: SandboxChoice,
@@ -64,6 +67,12 @@ pub struct Settings {
     /// Local notes. They leave the machine only while the cloud model is on.
     #[serde(default = "default_on")]
     pub memory: bool,
+    /// Project folders opened lately, newest first, at most
+    /// [`RECENT_LIMIT`].
+    #[serde(default)]
+    pub recent_projects: Vec<std::path::PathBuf>,
+    #[serde(default)]
+    pub updates: Updates,
     /// Keys this file does not name.
     #[serde(flatten, default)]
     pub rest: Map<String, Value>,
@@ -76,14 +85,77 @@ impl Default for Settings {
             panels: Vec::new(),
             playback: Playback::default(),
             hardware: Hardware::default(),
+            import: Import::default(),
             model: ModelChoice::default(),
             sandbox: SandboxChoice::default(),
             mcp_servers: Vec::new(),
             skill_folders: Vec::new(),
             step_cap: DEFAULT_STEP_CAP,
             memory: true,
+            recent_projects: Vec::new(),
+            updates: Updates::default(),
             rest: Map::new(),
         }
+    }
+}
+
+/// Whether Cutlass looks for a newer release, and when it last looked.
+///
+/// Off, nothing asks the release feed.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Updates {
+    /// Look for a newer release at launch, at most once a day.
+    #[serde(default = "default_on")]
+    pub check: bool,
+    /// When the last check started, in seconds since 1970; 0 is never.
+    #[serde(default)]
+    pub last_check: u64,
+    /// Keys this record does not name.
+    #[serde(flatten, default)]
+    pub rest: Map<String, Value>,
+}
+
+impl Default for Updates {
+    fn default() -> Self {
+        Self {
+            check: true,
+            last_check: 0,
+            rest: Map::new(),
+        }
+    }
+}
+
+/// How many recent projects the settings keep.
+pub const RECENT_LIMIT: usize = 10;
+
+impl Settings {
+    /// Whether the panel `id` shows. A panel the file does not name shows.
+    #[must_use]
+    pub fn panel_open(&self, id: &str) -> bool {
+        self.panels
+            .iter()
+            .find(|panel| panel.id == id)
+            .is_none_or(|panel| panel.open)
+    }
+
+    /// Show or hide the panel `id`.
+    pub fn set_panel_open(&mut self, id: &str, open: bool) {
+        match self.panels.iter_mut().find(|panel| panel.id == id) {
+            Some(panel) => panel.open = open,
+            None => self.panels.push(Panel {
+                id: id.to_owned(),
+                open,
+                ..Panel::default()
+            }),
+        }
+    }
+
+    /// Put `path` first among the recent projects, once, and drop the
+    /// oldest past [`RECENT_LIMIT`].
+    pub fn note_recent(&mut self, path: &std::path::Path) {
+        self.recent_projects.retain(|recent| recent != path);
+        self.recent_projects.insert(0, path.to_path_buf());
+        self.recent_projects.truncate(RECENT_LIMIT);
     }
 }
 
@@ -114,10 +186,26 @@ pub enum SeekDuringPlayback {
 
 /// How the open player behaves. These are not draft fields.
 ///
+/// What an import does with the file.
+///
+/// By default the file is copied into the project, so the project folder
+/// holds everything it plays and can move as one. Linked, the project
+/// points at the file where it is: nothing is copied, and moving or deleting
+/// the file takes it from the project.
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+pub struct Import {
+    /// Point at the file where it is instead of copying it in.
+    #[serde(default)]
+    pub link: bool,
+    /// Keys this record does not name.
+    #[serde(flatten, default)]
+    pub rest: Map<String, Value>,
+}
+
 /// Preview can play audio while the playhead is dragged. That switch is
 /// separate from normal playback. A seek while playing follows
 /// [`Playback::seek_during_playback`].
-#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Playback {
     /// Start again at the beginning when playback reaches the end.
     #[serde(default)]
@@ -128,9 +216,25 @@ pub struct Playback {
     /// Keep playing or pause when the playhead is seeked during playback.
     #[serde(default)]
     pub seek_during_playback: SeekDuringPlayback,
+    /// Play a clip's proxy in the preview when it has one. Export always
+    /// reads the source.
+    #[serde(default = "default_on")]
+    pub proxies: bool,
     /// Keys this record does not name.
     #[serde(flatten, default)]
     pub rest: Map<String, Value>,
+}
+
+impl Default for Playback {
+    fn default() -> Self {
+        Self {
+            loop_playback: false,
+            scrub_audio: false,
+            seek_during_playback: SeekDuringPlayback::default(),
+            proxies: true,
+            rest: Map::new(),
+        }
+    }
 }
 
 /// Whether the platform codecs may run.
@@ -173,9 +277,29 @@ pub struct ModelChoice {
     /// Off until an account exists and the user enables it.
     #[serde(default)]
     pub cloud: bool,
+    /// Where the local runner answers chat completions, on this machine.
+    #[serde(default = "default_local_url")]
+    pub local_url: String,
+    /// The model the local runner loads, by its name there.
+    #[serde(default = "default_local_name")]
+    pub local_name: String,
     /// Keys this record does not name.
     #[serde(flatten, default)]
     pub rest: Map<String, Value>,
+}
+
+/// Ollama's chat completions address.
+pub const DEFAULT_LOCAL_URL: &str = "http://127.0.0.1:11434/v1/chat/completions";
+
+/// A small model that calls tools.
+pub const DEFAULT_LOCAL_NAME: &str = "qwen2.5:7b";
+
+fn default_local_url() -> String {
+    DEFAULT_LOCAL_URL.to_owned()
+}
+
+fn default_local_name() -> String {
+    DEFAULT_LOCAL_NAME.to_owned()
 }
 
 impl Default for ModelChoice {
@@ -183,6 +307,8 @@ impl Default for ModelChoice {
         Self {
             local: true,
             cloud: false,
+            local_url: default_local_url(),
+            local_name: default_local_name(),
             rest: Map::new(),
         }
     }
@@ -278,6 +404,17 @@ mod tests {
     };
 
     #[test]
+    fn a_panel_shows_until_it_is_hidden() {
+        let mut settings = Settings::default();
+        assert!(settings.panel_open("library"));
+        settings.set_panel_open("library", false);
+        assert!(!settings.panel_open("library"));
+        settings.set_panel_open("library", true);
+        assert!(settings.panel_open("library"));
+        assert_eq!(settings.panels.len(), 1);
+    }
+
+    #[test]
     fn defaults_match_an_empty_object() {
         let settings = Settings::default();
         assert!(settings.model.local);
@@ -296,12 +433,21 @@ mod tests {
             settings.playback.seek_during_playback,
             SeekDuringPlayback::KeepPlaying
         );
+        assert!(settings.playback.proxies, "proxies play by default");
         assert!(settings.hardware.decode);
         assert!(settings.hardware.encode);
+        assert!(!settings.import.link, "imports copy by default");
         assert!(settings.mcp_servers.is_empty());
         assert!(settings.skill_folders.is_empty());
+        assert!(settings.updates.check, "updates are checked by default");
+        assert_eq!(settings.updates.last_check, 0);
         let parsed: Settings = serde_json::from_str("{}").unwrap();
         assert_eq!(parsed, settings);
+        let linked: Settings = serde_json::from_str(r#"{"import":{"link":true}}"#).unwrap();
+        assert!(linked.import.link);
+        let without: Settings =
+            serde_json::from_str(r#"{"playback":{"loop_playback":true}}"#).unwrap();
+        assert!(without.playback.proxies && without.playback.loop_playback);
         assert_eq!(parsed.model, ModelChoice::default());
         assert_eq!(parsed.sandbox, SandboxChoice::default());
     }
@@ -371,6 +517,8 @@ mod tests {
             serde_json::from_str(r#"{"model":{"cloud":true},"sandbox":{"online":true}}"#).unwrap();
         assert!(settings.model.local);
         assert!(settings.model.cloud);
+        assert_eq!(settings.model.local_url, super::DEFAULT_LOCAL_URL);
+        assert_eq!(settings.model.local_name, super::DEFAULT_LOCAL_NAME);
         assert!(settings.sandbox.local);
         assert!(settings.sandbox.online);
     }
@@ -431,6 +579,23 @@ mod tests {
     }
 
     #[test]
+    fn the_update_switch_and_last_check_are_stored() {
+        let settings: Settings =
+            serde_json::from_str(r#"{"updates":{"check":false,"future_update":1}}"#).unwrap();
+        assert!(!settings.updates.check);
+        assert_eq!(settings.updates.last_check, 0);
+        let mut settings = settings;
+        settings.updates.last_check = 1_800_000_000;
+        let written = serde_json::to_value(&settings).unwrap();
+        assert_eq!(written["updates"]["check"], false);
+        assert_eq!(written["updates"]["last_check"], 1_800_000_000u64);
+        assert_eq!(written["updates"]["future_update"], 1);
+        let read: Settings = serde_json::from_value(written).unwrap();
+        assert_eq!(read, settings);
+        assert!(serde_json::from_str::<Settings>(r#"{"updates":{"last_check":-1}}"#).is_err());
+    }
+
+    #[test]
     fn a_null_switch_is_refused() {
         let error = serde_json::from_str::<Settings>(r#"{"model":{"local":null}}"#);
         assert!(error.is_err());
@@ -438,5 +603,26 @@ mod tests {
         assert!(error.is_err());
         let error = serde_json::from_str::<Settings>("[]");
         assert!(error.is_err());
+    }
+
+    #[test]
+    fn a_recent_project_moves_to_the_front_once_and_the_list_is_capped() {
+        let mut settings = Settings::default();
+        for n in 0..12 {
+            settings.note_recent(std::path::Path::new(&format!("/p/{n}")));
+        }
+        assert_eq!(settings.recent_projects.len(), super::RECENT_LIMIT);
+        assert_eq!(settings.recent_projects[0], std::path::Path::new("/p/11"));
+        settings.note_recent(std::path::Path::new("/p/5"));
+        assert_eq!(settings.recent_projects[0], std::path::Path::new("/p/5"));
+        assert_eq!(settings.recent_projects.len(), super::RECENT_LIMIT);
+        assert_eq!(
+            settings
+                .recent_projects
+                .iter()
+                .filter(|path| path.ends_with("5"))
+                .count(),
+            1
+        );
     }
 }

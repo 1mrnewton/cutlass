@@ -21,6 +21,9 @@ cutlass-platform-apple = { path = "../platform-apple", version = "0.1.0" }
 [target.'cfg(target_os = "windows")'.dependencies]
 cutlass-platform-windows = { path = "../platform-windows", version = "0.1.0" }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+cutlass-platform-linux = { path = "../platform-linux", version = "0.1.0" }
+
 [target.'cfg(target_os = "android")'.dependencies]
 cutlass-platform-android = { path = "../platform-android", version = "0.1.0" }
 

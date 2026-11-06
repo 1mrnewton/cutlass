@@ -135,13 +135,13 @@ impl Decoder for Planar {
         bytes.push(128);
         bytes.push(128);
         let picture = PictureOutput::cpu(
-            PictureInfo {
-                width: 2,
-                height: 2,
-                pixel: PixelFormat::Yuv420p,
-                primaries: ColorPrimaries::Bt709,
-                transfer: Transfer::Bt709,
-            },
+            PictureInfo::new(
+                2,
+                2,
+                PixelFormat::Yuv420p,
+                ColorPrimaries::Bt709,
+                Transfer::Bt709,
+            ),
             bytes,
             packet.pts,
             packet.timescale,
@@ -174,13 +174,13 @@ impl Decoder for Token {
 
     fn push(&mut self, packet: &Packet) -> Result<Vec<Output>, CodecError> {
         let picture = PictureOutput::platform(
-            PictureInfo {
-                width: 1,
-                height: 1,
-                pixel: PixelFormat::Rgba8,
-                primaries: ColorPrimaries::Bt709,
-                transfer: Transfer::Bt709,
-            },
+            PictureInfo::new(
+                1,
+                1,
+                PixelFormat::Rgba8,
+                ColorPrimaries::Bt709,
+                Transfer::Bt709,
+            ),
             7,
             packet.pts,
             packet.timescale,
@@ -726,13 +726,13 @@ impl Decoder for Held {
         let mut outputs = Vec::new();
         for (pts, timescale) in self.0.drain(..) {
             let picture = PictureOutput::cpu(
-                PictureInfo {
-                    width: 2,
-                    height: 2,
-                    pixel: PixelFormat::Yuv420p,
-                    primaries: ColorPrimaries::Bt709,
-                    transfer: Transfer::Bt709,
-                },
+                PictureInfo::new(
+                    2,
+                    2,
+                    PixelFormat::Yuv420p,
+                    ColorPrimaries::Bt709,
+                    Transfer::Bt709,
+                ),
                 vec![16, 16, 16, 16, 128, 128],
                 pts,
                 timescale,
@@ -808,13 +808,13 @@ impl Decoder for OnePicture {
         bytes.push(128);
         bytes.push(128);
         let picture = PictureOutput::cpu(
-            PictureInfo {
-                width: 2,
-                height: 2,
-                pixel: PixelFormat::Yuv420p,
-                primaries: ColorPrimaries::Bt709,
-                transfer: Transfer::Bt709,
-            },
+            PictureInfo::new(
+                2,
+                2,
+                PixelFormat::Yuv420p,
+                ColorPrimaries::Bt709,
+                Transfer::Bt709,
+            ),
             bytes,
             packet.pts,
             packet.timescale,
@@ -1048,6 +1048,83 @@ fn audio_windows_join_without_a_seam_and_a_seek_lands_on_the_sample() {
     assert_eq!(landed.as_f32().expect("f32"), &expected(6_000, 96)[..]);
     let back = fresh.audio_from(Micros(20_000), 48).expect("seek back");
     assert_eq!(back.as_f32().expect("f32"), &expected(960, 48)[..]);
+    std::fs::remove_file(&path).expect("remove");
+}
+
+/// A 16-bit WAVEFORMATEXTENSIBLE file with `channels` interleaved channels
+/// and `mask` as its `dwChannelMask`.
+fn write_extensible_wav(path: &Path, channels: u16, mask: u32, samples: &[i16]) {
+    let data_bytes = u32::try_from(samples.len() * 2).expect("wav size");
+    let align = channels * 2;
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"RIFF");
+    bytes.extend_from_slice(&(60 + data_bytes).to_le_bytes());
+    bytes.extend_from_slice(b"WAVEfmt ");
+    bytes.extend_from_slice(&40_u32.to_le_bytes());
+    bytes.extend_from_slice(&0xFFFE_u16.to_le_bytes());
+    bytes.extend_from_slice(&channels.to_le_bytes());
+    bytes.extend_from_slice(&48_000_u32.to_le_bytes());
+    bytes.extend_from_slice(&(48_000 * u32::from(align)).to_le_bytes());
+    bytes.extend_from_slice(&align.to_le_bytes());
+    bytes.extend_from_slice(&16_u16.to_le_bytes());
+    bytes.extend_from_slice(&22_u16.to_le_bytes());
+    bytes.extend_from_slice(&16_u16.to_le_bytes());
+    bytes.extend_from_slice(&mask.to_le_bytes());
+    // KSDATAFORMAT_SUBTYPE_PCM.
+    bytes.extend_from_slice(&[
+        0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B,
+        0x71,
+    ]);
+    bytes.extend_from_slice(b"data");
+    bytes.extend_from_slice(&data_bytes.to_le_bytes());
+    for sample in samples {
+        bytes.extend_from_slice(&sample.to_le_bytes());
+    }
+    std::fs::write(path, bytes).expect("wav");
+}
+
+#[test]
+fn a_seven_one_wav_reads_in_its_mask_order_and_its_waveform_sees_every_channel() {
+    use cutlass_codec::access::{ChannelLayout, StandardLayout};
+    let path = std::env::temp_dir().join(format!("cutlass-seven-one-{}", std::process::id()));
+    // Sound on the last channel, side right, only.
+    let mut samples = Vec::new();
+    for frame in 0_i16..64 {
+        samples.extend_from_slice(&[
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            if frame % 2 == 0 { 16_384 } else { -16_384 },
+        ]);
+    }
+    write_extensible_wav(&path, 8, 0x63F, &samples);
+    let readers = audio_readers();
+    let mut media = readers.open(&path).expect("7.1 opens");
+    let pcm = media.audio_from(Micros(0), 64).expect("pcm");
+    assert_eq!(
+        pcm.layout,
+        ChannelLayout::standard(StandardLayout::SevenOne)
+    );
+    let floats = pcm.as_f32().expect("f32");
+    assert_eq!(floats.len(), 64 * 8);
+    assert!((floats[7] - 16_384.0 / 32_767.0).abs() < 1e-6);
+
+    let mut media = readers.open(&path).expect("7.1 opens");
+    let wave = peaks_from(&mut media, 64).expect("waveform");
+    assert_eq!(wave.frames(), 64);
+    let loudest = wave
+        .peaks()
+        .iter()
+        .fold(0.0_f32, |top, peak| top.max(peak.max));
+    assert!((loudest - 16_384.0 / 32_767.0).abs() < 1e-3, "{loudest}");
+
+    // A mask naming two speakers for eight channels is not opened as sound.
+    write_extensible_wav(&path, 8, 0x3, &samples);
+    assert_eq!(readers.open(&path).err(), Some(EngineError::Layout));
     std::fs::remove_file(&path).expect("remove");
 }
 
@@ -1382,4 +1459,37 @@ fn smallest_wav(root: &Path) -> Option<PathBuf> {
         }
     }
     best.map(|(_, path)| path)
+}
+
+#[test]
+fn a_stand_in_opens_in_place_of_its_source_and_probing_still_reads_the_source() {
+    let factory = factory();
+    let source = fixture("pattern.png");
+    let proxy = fixture("pattern.jpg");
+    let readers = factory.with_stand_ins(std::collections::HashMap::from([(
+        source.canonicalize().expect("source"),
+        proxy,
+    )]));
+    assert_eq!(
+        readers.open(&source).expect("open").info().streams[0].codec,
+        "Jpeg"
+    );
+    assert_eq!(
+        readers.probe(&source).expect("probe").streams[0].codec,
+        "Png"
+    );
+    // The readers it came from, as export keeps them, open the source.
+    assert_eq!(
+        factory.open(&source).expect("open").info().streams[0].codec,
+        "Png"
+    );
+    // A stand-in no longer on disk leaves the source to open.
+    let gone = factory.with_stand_ins(std::collections::HashMap::from([(
+        source.clone(),
+        fixture("no-such-proxy.mp4"),
+    )]));
+    assert_eq!(
+        gone.open(&source).expect("open").info().streams[0].codec,
+        "Png"
+    );
 }

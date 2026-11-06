@@ -6,6 +6,7 @@
 
 #![forbid(unsafe_code)]
 
+mod alac;
 mod brand;
 mod demux;
 mod file_mux;
@@ -16,6 +17,7 @@ mod legacy;
 mod limits;
 mod movie;
 mod mux;
+mod opus;
 mod parse;
 mod shared;
 mod stsd;

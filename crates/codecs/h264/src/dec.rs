@@ -598,13 +598,13 @@ fn picture_output(frame: VideoOutput) -> Result<Output, CodecError> {
     bytes.extend_from_slice(frame.picture.u());
     bytes.extend_from_slice(frame.picture.v());
     let picture = PictureOutput::cpu(
-        PictureInfo {
-            width: frame.picture.width(),
-            height: frame.picture.height(),
-            pixel: PixelFormat::Yuv420p,
-            primaries: frame.primaries,
-            transfer: frame.transfer,
-        },
+        PictureInfo::new(
+            frame.picture.width(),
+            frame.picture.height(),
+            PixelFormat::Yuv420p,
+            frame.primaries,
+            frame.transfer,
+        ),
         bytes,
         frame.pts,
         frame.timescale,
@@ -4636,6 +4636,123 @@ mod tests {
         }
     }
 
+    /// The x264 conformance set: Baseline, Main and High, 1, 4 and 16
+    /// references, weighted P off and on, and B-frames with and without a
+    /// pyramid. Every picture of each stream matches ffmpeg's decode
+    /// exactly, in output order.
+    #[test]
+    fn x264_streams_across_profiles_references_weights_and_pyramids_match_ffmpeg() {
+        let Some(ff) = ffmpeg() else {
+            eprintln!("skipped: no ffmpeg");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("cutlass-h264-set-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (width, height, frames) = (96usize, 64usize, 14usize);
+        let mut cases: Vec<(String, String, &str)> = vec![(
+            "baseline".to_owned(),
+            "cabac=0:bframes=0:ref=4:keyint=30:scenecut=0".to_owned(),
+            "baseline",
+        )];
+        for (profile, tools) in [("main", "cabac=1:8x8dct=0"), ("high", "cabac=1:8x8dct=1")] {
+            for refs in [1, 4, 16] {
+                for weightp in [0, 2] {
+                    for pyramid in ["none", "normal"] {
+                        cases.push((
+                            format!("{profile} ref={refs} weightp={weightp} pyramid={pyramid}"),
+                            format!(
+                                "{tools}:ref={refs}:weightp={weightp}:bframes=3:b-pyramid={pyramid}:keyint=30:scenecut=0"
+                            ),
+                            profile,
+                        ));
+                    }
+                }
+            }
+        }
+        // CAVLC High with 8x8 transforms, and an interlace-free MBAFF-free
+        // stream with many slices.
+        cases.push((
+            "high cavlc".to_owned(),
+            "cabac=0:8x8dct=1:bframes=2:ref=3:keyint=30:scenecut=0".to_owned(),
+            "high",
+        ));
+
+        cases.push((
+            "main slices".to_owned(),
+            "cabac=1:slices=4:bframes=2:ref=2:keyint=30:scenecut=0".to_owned(),
+            "main",
+        ));
+        for (index, (name, params, profile)) in cases.iter().enumerate() {
+            let h264 = dir.join(format!("{index}.h264"));
+            let yuv = dir.join(format!("{index}.yuv"));
+            let encoded = Command::new(&ff)
+                .args(["-y", "-loglevel", "error", "-f", "lavfi", "-i"])
+                .arg(format!("testsrc2=size={width}x{height}:rate=30"))
+                .args([
+                    "-frames:v",
+                    &frames.to_string(),
+                    "-c:v",
+                    "libx264",
+                    "-profile:v",
+                ])
+                .arg(profile)
+                .args(["-pix_fmt", "yuv420p", "-x264-params"])
+                .arg(params)
+                .args(["-f", "h264"])
+                .arg(&h264)
+                .status();
+            if !encoded.is_ok_and(|status| status.success()) {
+                eprintln!("skipped: ffmpeg has no libx264");
+                return;
+            }
+            let decoded = Command::new(&ff)
+                .args(["-y", "-loglevel", "error", "-i"])
+                .arg(&h264)
+                .args(["-f", "rawvideo", "-pix_fmt", "yuv420p"])
+                .arg(&yuv)
+                .status()
+                .expect("ffmpeg decode");
+            assert!(decoded.success(), "{name}: ffmpeg did not decode");
+            let bytes = std::fs::read(&h264).expect("annex b");
+            let reference = std::fs::read(&yuv).expect("yuv");
+            let mut codec = CodecParams::video(CodecId::H264, width as u32, height as u32);
+            codec.nal_length_size = 0;
+            let mut decoder = H264Decoder::open(&codec).expect("open");
+            let mut got = Vec::new();
+            for (n, unit) in access_units(&bytes).iter().enumerate() {
+                let pictures = decoder
+                    .push(&Packet::video(unit.clone(), n as i64, 1, 30, n == 0))
+                    .unwrap_or_else(|error| panic!("{name}: {error}"));
+                got.extend(pictures);
+            }
+            got.extend(decoder.drain().expect("drain"));
+            let frame = width * height * 3 / 2;
+            assert_eq!(
+                reference.len() / frame,
+                frames,
+                "{name}: ffmpeg picture count"
+            );
+            assert_eq!(got.len(), frames, "{name}: picture count");
+            let (y_len, c_len) = (width * height, width * height / 4);
+            for (at, picture) in got.iter().enumerate() {
+                let start = at * frame;
+                let planes = [
+                    ("y", picture.picture.y(), start, y_len),
+                    ("u", picture.picture.u(), start + y_len, c_len),
+                    ("v", picture.picture.v(), start + y_len + c_len, c_len),
+                ];
+                for (plane, samples, offset, length) in planes {
+                    assert!(
+                        samples == &reference[offset..offset + length],
+                        "{name}: picture {at} plane {plane} differs from ffmpeg"
+                    );
+                }
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn one_and_two_byte_lengths_match_annex_b() {
         let mut params = CodecParams::video(CodecId::H264, 16, 16);
@@ -4736,7 +4853,10 @@ mod tests {
                 .unwrap_or(data.len());
             let kind = data[body] & 31;
             let vcl = kind == 1 || kind == 5;
-            if (kind == 9 || (vcl && saw_vcl)) && !current.is_empty() {
+            // A slice whose first macroblock is 0 (`ue(v)` 0 is a single 1
+            // bit) begins a new picture; later slices join this one.
+            let first_slice = data.get(body + 1).is_some_and(|byte| byte & 0x80 != 0);
+            if (kind == 9 || (vcl && saw_vcl && first_slice)) && !current.is_empty() {
                 units.push(std::mem::take(&mut current));
                 saw_vcl = false;
             }

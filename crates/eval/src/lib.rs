@@ -20,11 +20,14 @@ mod audio;
 mod canvas;
 mod effect;
 mod frame;
+mod freeze;
 mod gpu;
 mod heard;
+mod lottie;
 mod media;
 mod nest;
 mod sample;
+mod scenes;
 mod sources;
 mod text;
 mod transition;
@@ -34,13 +37,16 @@ pub use cutlass_compositor::{Device, Frame};
 pub use cutlass_engine::{
     ClipPcm, ClockKind, MixResult, ReaderFactory, SceneError, scene_cuts, timeline_for_source,
 };
+pub use cutlass_gpu::{ToneCurve, YuvTone};
 pub use cutlass_model::Micros;
 pub use frame::{
     EvalError, Fonts, NoFonts, Snapshot, frame, frame_in, layers_in, wait_export_frame,
 };
-pub use gpu::{Composed, FrameLayers, GpuBackdrop, GpuLayer, GpuSource};
+pub use freeze::{FreezeMiss, freeze_toggle};
+pub use gpu::{Composed, FrameLayers, GpuBackdrop, GpuLayer, GpuSource, YuvSamples};
 pub use heard::{ClipAsk, Heard};
 pub use media::OpenClips;
+pub use scenes::{blend_blocks, kept_cuts, scene_split_times};
 pub use text::text_size;
 
 /// The source timestamp Freeze stores so the clip keeps showing `time`.

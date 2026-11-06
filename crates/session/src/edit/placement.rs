@@ -1,6 +1,6 @@
 use cutlass_model::{Draft, SegmentId};
 
-use super::speed::locate;
+use super::locate;
 use super::{EditError, ensure_unlocked};
 
 /// Store the picture's position. `x` and `y` are fractions of half the canvas.

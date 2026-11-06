@@ -27,12 +27,13 @@ Build a file with `Mp3Mux::new`. The writer must implement `Write + Seek`. The v
 
 - `add_stream` accepts one `CodecParams` whose codec is `CodecId::Mp3`.
 - `write_packet` stores the frame bytes unchanged. `pts` must be the next sample on that stream, and `duration` must be the header's samples per frame.
-- `finish` fills the leading Xing or Info frame with the frame count, byte count, and seek table.
+- `set_trim(encoder_delay, trailing_padding)` sets the gapless trim, each at most 4095. Set before the first packet, it also writes an ID3v2.3 tag ahead of the Xing or Info frame with an `iTunSMPB` comment, which Apple's decoders read for the trim. The values may change until `finish`.
+- `finish` fills the leading Xing or Info frame with the frame count, byte count, seek table, and the trim in the LAME slot, and fills the `iTunSMPB` text.
 - `into_inner` returns the writer after `finish`.
 
 `probe` classifies a prefix as `Probe::Matched`, `Probe::NeedMore`, or `Probe::Reject`. Public bounds are `MAX_FRAME_BYTES`, `MAX_ID3_BYTES`, `MAX_RESYNC_BYTES`, and `SEEK_WINDOW_BYTES`.
 
-`Mp3Mux` implements this crate's `Mux` trait. It does not implement `cutlass_container::Mux`.
+`Mp3Mux` implements this crate's `Mux` trait and `cutlass_container::Mux`. Through the shared trait, `set_trim` takes the `Trim` an encoder hands over in `SideData::Gapless`, and a packet is written as soon as it arrives.
 
 ## Support
 
@@ -45,7 +46,7 @@ Build a file with `Mp3Mux::new`. The writer must implement `Write + Seek`. The v
 | Xing, Info, VBRI | Index only, not a packet | Leading Xing or Info frame |
 | Free format | Stride taken from the next sync | Packets written as given |
 | Encoder delay and padding | `Trim` on the stream | LAME slot when both values are at most 4095 |
-| ID3v2, ID3v1, APEv2 | Skipped | Not written |
+| ID3v2, ID3v1, APEv2 | Skipped | ID3v2.3 with only an `iTunSMPB` comment, when a trim is set before the first packet |
 | Layer I and Layer II | `Unsupported` | `Unsupported` |
 
 A positive seek with no Xing, VBRI, or constant schedule returns `SeekUnavailable` and leaves the read cursor where it was.
@@ -119,8 +120,8 @@ last_pts: 8064
 
 ## Gaps
 
-Layer I and Layer II are refused. ID3 text and pictures are not exposed, and the muxer writes no ID3 tag. Encoder delay and trailing padding stay on `Trim`. They are not subtracted from `pts`, and no samples are dropped. A lone free-format frame, with no second header inside the resync window, is `Unsupported`.
+Layer I and Layer II are refused. ID3 text and pictures are not exposed, and the only ID3 tag the muxer writes is the `iTunSMPB` comment. Encoder delay and trailing padding stay on `Trim`. They are not subtracted from `pts`, and no samples are dropped. A lone free-format frame, with no second header inside the resync window, is `Unsupported`.
 
-`Mp3Mux` does not implement `cutlass_container::Mux`. The desktop package lists this crate as a dependency. `engine`, `export`, and the desktop source do not open an MP3 through it. Sample decode stays in `cutlass-mp3`.
+The desktop app and the phone open MP3 files through `Mp3Demux`, and export writes sound-alone MP3 through `Mp3Mux`. Sample decode and encode stay in `cutlass-mp3`.
 
 The timed result above is one two-second file. It is not a seek measurement and not a long-file measurement. The earlier seek budget and the fuzz campaign are recorded in `SUPPORT.md`.

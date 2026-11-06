@@ -308,6 +308,8 @@ fn shrink(frame: &DecodedFrame, display: DisplayQuarter) -> Result<Thumb, Engine
     let (up_w, up_h) = upright(coded_w, coded_h, display);
     let (out_w, out_h) = thumb_size(up_w, up_h).ok_or(EngineError::Window)?;
     let size = upright(out_w, out_h, display);
+    let frame = frame.on_cpu()?;
+    let frame = frame.as_ref();
     if let DecodedFrame::Coded {
         width,
         height,

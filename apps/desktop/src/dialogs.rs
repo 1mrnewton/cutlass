@@ -17,6 +17,10 @@ pub(crate) enum Picker {
     Import,
     SaveExport,
     SaveStill,
+    SaveLog,
+    SkillFolder,
+    Lut,
+    Replace,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -44,6 +48,36 @@ impl Dialogs {
         self.start(Picker::OpenProject, async move {
             dialog
                 .pick_folder()
+                .await
+                .map(|file| file.path().to_path_buf())
+        });
+    }
+
+    pub(crate) fn skill_folder(&mut self, parent: Option<&eframe::Frame>) {
+        let dialog = dialog(parent);
+        self.start(Picker::SkillFolder, async move {
+            dialog
+                .pick_folder()
+                .await
+                .map(|file| file.path().to_path_buf())
+        });
+    }
+
+    pub(crate) fn lut(&mut self, parent: Option<&eframe::Frame>) {
+        let dialog = dialog(parent).add_filter("LUT", &["cube", "CUBE"]);
+        self.start(Picker::Lut, async move {
+            dialog
+                .pick_file()
+                .await
+                .map(|file| file.path().to_path_buf())
+        });
+    }
+
+    pub(crate) fn replace(&mut self, parent: Option<&eframe::Frame>) {
+        let dialog = dialog(parent);
+        self.start(Picker::Replace, async move {
+            dialog
+                .pick_file()
                 .await
                 .map(|file| file.path().to_path_buf())
         });
@@ -84,8 +118,8 @@ impl Dialogs {
         });
     }
 
-    /// Ask where to save a still, as PNG or JPEG. A name with neither
-    /// ending is saved as PNG.
+    /// Ask where to save a still, as PNG, JPEG or WebP. A name with none
+    /// of those endings is saved as PNG.
     pub(crate) fn save_still(&mut self, parent: Option<&eframe::Frame>, name: &str) {
         let stem = if name.trim().is_empty() {
             "Still"
@@ -95,12 +129,13 @@ impl Dialogs {
         let dialog = dialog(parent)
             .set_file_name(format!("{stem}.png"))
             .add_filter("PNG", &["png"])
-            .add_filter("JPEG", &["jpg", "jpeg"]);
+            .add_filter("JPEG", &["jpg", "jpeg"])
+            .add_filter("WebP", &["webp"]);
         self.start(Picker::SaveStill, async move {
             dialog.save_file().await.map(|file| {
                 let path = file.path();
                 let known = path.extension().is_some_and(|typed| {
-                    ["png", "jpg", "jpeg"]
+                    ["png", "jpg", "jpeg", "webp"]
                         .iter()
                         .any(|known| typed.eq_ignore_ascii_case(known))
                 });
@@ -110,6 +145,19 @@ impl Dialogs {
                     with_extension(path, "png")
                 }
             })
+        });
+    }
+
+    /// Ask where to write a copy of the log, as text.
+    pub(crate) fn save_log(&mut self, parent: Option<&eframe::Frame>) {
+        let dialog = dialog(parent)
+            .set_file_name("Cutlass log.txt")
+            .add_filter("Text", &["txt", "log"]);
+        self.start(Picker::SaveLog, async move {
+            dialog
+                .save_file()
+                .await
+                .map(|file| file.path().to_path_buf())
         });
     }
 

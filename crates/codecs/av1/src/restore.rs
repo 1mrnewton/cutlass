@@ -6,6 +6,7 @@
 use cutlass_decode::CodecError;
 
 use crate::header::{FrameInfo, RESTORE_NONE, RESTORE_SGRPROJ, RESTORE_SWITCHABLE, RESTORE_WIENER};
+use crate::sample::{Pix, clip_sample};
 use crate::symbol::SymbolDecoder;
 
 const SGR_PARAMS: [[i32; 4]; 16] = [
@@ -59,11 +60,19 @@ pub struct Grid {
     units: Vec<Unit>,
     reference: [[i32; 2]; 3],
     wiener_ref: [[[i32; 3]; 2]; 3],
+    bit_depth: u8,
+    sub_x: bool,
+    sub_y: bool,
     active: bool,
 }
 
 impl Grid {
-    pub fn new(frame: &FrameInfo) -> Result<Self, CodecError> {
+    pub fn new(
+        frame: &FrameInfo,
+        bit_depth: u8,
+        sub_x: bool,
+        sub_y: bool,
+    ) -> Result<Self, CodecError> {
         let mut cols = [0usize; 3];
         let mut rows = [0usize; 3];
         let mut unit_size = [0usize; 3];
@@ -78,9 +87,10 @@ impl Grid {
                     what: "loop restoration",
                 });
             }
-            let sub = usize::from(plane > 0);
-            let width = (frame.upscaled_width as usize).div_ceil(1 << sub);
-            let height = (frame.height as usize).div_ceil(1 << sub);
+            let shift_x = usize::from(plane > 0 && sub_x);
+            let shift_y = usize::from(plane > 0 && sub_y);
+            let width = (frame.upscaled_width as usize).div_ceil(1usize << shift_x);
+            let height = (frame.height as usize).div_ceil(1usize << shift_y);
             let size = usize::from(frame.restoration.unit[plane]).max(1);
             cols[plane] = count_units(size, width);
             rows[plane] = count_units(size, height);
@@ -102,12 +112,20 @@ impl Grid {
             ],
             reference: [XQD_REF; 3],
             wiener_ref: [[WIENER_MID; 2]; 3],
+            bit_depth,
+            sub_x,
+            sub_y,
             active: count > 0,
         })
     }
 
     pub fn active(&self) -> bool {
         self.active
+    }
+
+    /// Sequence bit depth. Wiener rounding is 5 then 9 at 12-bit, and 3 then 11 otherwise.
+    pub(crate) fn bit_depth(&self) -> u8 {
+        self.bit_depth
     }
 
     fn index(&self, plane: usize, row: usize, col: usize) -> Option<usize> {
@@ -126,10 +144,18 @@ fn count_units(unit: usize, frame: usize) -> usize {
     (frame.saturating_add(unit >> 1) / unit.max(1)).max(1)
 }
 
+/// Restoration-type CDFs from the frame context. Later units in the tile see the update.
+pub(crate) struct RestoreCdf<'a> {
+    pub(crate) update: bool,
+    pub(crate) wiener: &'a mut [u16],
+    pub(crate) sgrproj: &'a mut [u16],
+    pub(crate) kind: &'a mut [u16],
+}
+
 /// Read the restoration units covered by one superblock.
 pub fn read_superblock(
     symbols: &mut SymbolDecoder<'_>,
-    update: bool,
+    cdf: &mut RestoreCdf<'_>,
     frame: &FrameInfo,
     grid: &mut Grid,
     row: usize,
@@ -144,25 +170,33 @@ pub fn read_superblock(
         if kind != RESTORE_SGRPROJ && kind != RESTORE_WIENER && kind != RESTORE_SWITCHABLE {
             continue;
         }
-        let sub = usize::from(plane > 0);
+        let shift_x = usize::from(plane > 0 && grid.sub_x);
+        let shift_y = usize::from(plane > 0 && grid.sub_y);
         let unit = grid.unit_size[plane].max(1);
-        let row_start = (row * (4 >> sub)).div_ceil(unit);
-        let row_end = grid.rows[plane].min(((row + blocks) * (4 >> sub)).div_ceil(unit));
-        let col_start = (col * (4 >> sub)).div_ceil(unit);
-        let col_end = grid.cols[plane].min(((col + blocks) * (4 >> sub)).div_ceil(unit));
+        let row_start = (row * (4 >> shift_y)).div_ceil(unit);
+        let row_end = grid.rows[plane].min(((row + blocks) * (4 >> shift_y)).div_ceil(unit));
+        let col_start = (col * (4 >> shift_x)).div_ceil(unit);
+        let col_end = grid.cols[plane].min(((col + blocks) * (4 >> shift_x)).div_ceil(unit));
         for unit_row in row_start..row_end {
             for unit_col in col_start..col_end {
                 let decoded = match kind {
-                    RESTORE_WIENER => {
-                        read_wiener_unit(symbols, update, plane > 0, &mut grid.wiener_ref[plane])?
+                    RESTORE_WIENER => read_wiener_unit(
+                        symbols,
+                        cdf.update,
+                        plane > 0,
+                        &mut grid.wiener_ref[plane],
+                        cdf.wiener,
+                    )?,
+                    RESTORE_SGRPROJ => {
+                        read_sgr_unit(symbols, cdf.update, &mut grid.reference[plane], cdf.sgrproj)?
                     }
-                    RESTORE_SGRPROJ => read_sgr_unit(symbols, update, &mut grid.reference[plane])?,
                     _ => read_switchable_unit(
                         symbols,
-                        update,
+                        cdf.update,
                         plane > 0,
                         &mut grid.wiener_ref[plane],
                         &mut grid.reference[plane],
+                        cdf.kind,
                     )?,
                 };
                 if let Some(slot) = grid.index(plane, unit_row, unit_col) {
@@ -179,9 +213,9 @@ fn read_wiener_unit(
     update: bool,
     chroma: bool,
     reference: &mut [[i32; 3]; 2],
+    cdf: &mut [u16],
 ) -> Result<Unit, CodecError> {
-    let mut cdf = [11570u16, 32768, 0];
-    if symbols.read(&mut cdf, update)? == 0 {
+    if symbols.read(cdf, update)? == 0 {
         return Ok(empty_unit());
     }
     read_wiener_coeffs(symbols, chroma, reference)
@@ -193,9 +227,9 @@ fn read_switchable_unit(
     chroma: bool,
     wiener: &mut [[i32; 3]; 2],
     sgr: &mut [i32; 2],
+    cdf: &mut [u16],
 ) -> Result<Unit, CodecError> {
-    let mut cdf = [9413u16, 22581, 32768, 0];
-    match symbols.read(&mut cdf, update)? {
+    match symbols.read(cdf, update)? {
         1 => read_wiener_coeffs(symbols, chroma, wiener),
         2 => read_sgr_coeffs(symbols, sgr),
         _ => Ok(empty_unit()),
@@ -243,9 +277,9 @@ fn read_sgr_unit(
     symbols: &mut SymbolDecoder<'_>,
     update: bool,
     reference: &mut [i32; 2],
+    cdf: &mut [u16],
 ) -> Result<Unit, CodecError> {
-    let mut cdf = [16855u16, 32768, 0];
-    if symbols.read(&mut cdf, update)? == 0 {
+    if symbols.read(cdf, update)? == 0 {
         return Ok(empty_unit());
     }
     read_sgr_coeffs(symbols, reference)
@@ -366,6 +400,28 @@ fn inverse_recenter(reference: i32, value: i32) -> i32 {
     }
 }
 
+/// Section 7.17.1. The unit row is measured from the luma sample eight
+/// rows above the block, then shifted into this plane.
+fn restoration_unit_row(grid: &Grid, plane: usize, y: usize) -> usize {
+    let sub_y = usize::from(plane > 0 && grid.sub_y);
+    let size = grid.unit_size[plane].max(1);
+    ((y + (8 >> sub_y)) / size).min(grid.rows[plane].saturating_sub(1))
+}
+
+/// Section 7.17.1. A stripe is 64 luma samples, offset up by 8, then shifted
+/// into this plane. Chroma with vertical subsampling is 32 samples tall.
+fn stripe_bounds(grid: &Grid, plane: usize, y: usize) -> (i32, i32) {
+    let sub_y = i32::from(plane > 0 && grid.sub_y);
+    let Ok(plane_y) = i32::try_from(y) else {
+        return (0, -1);
+    };
+    let luma_y = plane_y << sub_y;
+    let stripe = (luma_y + 8) / 64;
+    let start = ((stripe * 64) - 8) >> sub_y;
+    let end = start + (64 >> sub_y) - 1;
+    (start, end)
+}
+
 fn clip3(min: i32, max: i32, value: i32) -> i32 {
     if value < min {
         min
@@ -378,23 +434,22 @@ fn clip3(min: i32, max: i32, value: i32) -> i32 {
 
 /// Filter one plane. `cdef` is the picture after CDEF. `before` is the picture
 /// before CDEF, used for the two rows outside a restoration stripe.
-pub fn apply_sgr(
-    cdef: &[u8],
-    before: &[u8],
+pub fn apply_sgr<S: Pix>(
+    cdef: &[S],
+    before: &[S],
     width: usize,
     height: usize,
     grid: &Grid,
     plane: usize,
-) -> Vec<u8> {
+    bit_depth: u8,
+) -> Vec<S> {
     let mut out = cdef.to_vec();
     if width == 0 || height == 0 || plane >= 3 || grid.rows[plane] == 0 {
         return out;
     }
     let mut y = 0usize;
     while y < height {
-        let stripe = (y + 8) / 64;
-        let start = stripe as i32 * 64 - 8;
-        let end = start + 63;
+        let (start, end) = stripe_bounds(grid, plane, y);
         let last = (end.max(0) as usize).min(height - 1);
         if last < y {
             break;
@@ -407,6 +462,7 @@ pub fn apply_sgr(
                 width,
                 grid,
                 plane,
+                bit_depth,
             },
             Span {
                 y0: y,
@@ -420,13 +476,14 @@ pub fn apply_sgr(
     out
 }
 
-struct Rows<'a> {
-    out: &'a mut [u8],
-    cdef: &'a [u8],
-    before: &'a [u8],
+struct Rows<'a, S: Pix> {
+    out: &'a mut [S],
+    cdef: &'a [S],
+    before: &'a [S],
     width: usize,
     grid: &'a Grid,
     plane: usize,
+    bit_depth: u8,
 }
 
 struct Span {
@@ -436,7 +493,7 @@ struct Span {
     stripe_end: i32,
 }
 
-fn filter_rows(rows: &mut Rows<'_>, span: Span) {
+fn filter_rows<S: Pix>(rows: &mut Rows<'_, S>, span: Span) {
     let width = rows.width;
     let mut x = 0usize;
     while x < width {
@@ -451,8 +508,7 @@ fn filter_rows(rows: &mut Rows<'_>, span: Span) {
             }
             x1 += 1;
         }
-        let unit_row =
-            (span.y0 / rows.grid.unit_size[rows.plane].max(1)).min(rows.grid.rows[rows.plane] - 1);
+        let unit_row = restoration_unit_row(rows.grid, rows.plane, span.y0);
         let Some(slot) = rows.grid.index(rows.plane, unit_row, unit_col) else {
             x = x1;
             continue;
@@ -466,6 +522,7 @@ fn filter_rows(rows: &mut Rows<'_>, span: Span) {
                 height: rows.cdef.len() / width.max(1),
                 stripe_start: span.stripe_start,
                 stripe_end: span.stripe_end,
+                bit_depth: rows.bit_depth,
             };
             let block = Block {
                 x,
@@ -483,16 +540,17 @@ fn filter_rows(rows: &mut Rows<'_>, span: Span) {
     }
 }
 
-struct Source<'a> {
-    cdef: &'a [u8],
-    before: &'a [u8],
+struct Source<'a, S: Pix> {
+    cdef: &'a [S],
+    before: &'a [S],
     width: usize,
     height: usize,
     stripe_start: i32,
     stripe_end: i32,
+    bit_depth: u8,
 }
 
-impl Source<'_> {
+impl<S: Pix> Source<'_, S> {
     fn sample(&self, x: i32, y: i32) -> i32 {
         let last_x = self.width.saturating_sub(1) as i32;
         let last_y = self.height.saturating_sub(1) as i32;
@@ -509,7 +567,11 @@ impl Source<'_> {
         };
         let y = y.clamp(0, last_y) as usize;
         let x = x as usize;
-        i32::from(*plane.get(y * self.width + x).unwrap_or(&0))
+        plane
+            .get(y * self.width + x)
+            .copied()
+            .unwrap_or(S::default())
+            .to_i32()
     }
 }
 
@@ -520,7 +582,7 @@ struct Block {
     h: usize,
 }
 
-fn project(out: &mut [u8], source: &Source<'_>, block: Block, set: u8, xqd: [i32; 2]) {
+fn project<S: Pix>(out: &mut [S], source: &Source<'_, S>, block: Block, set: u8, xqd: [i32; 2]) {
     let params = SGR_PARAMS[usize::from(set.min(15))];
     let w0 = xqd[0];
     let w1 = xqd[1];
@@ -560,14 +622,14 @@ fn project(out: &mut [u8], source: &Source<'_>, block: Block, set: u8, xqd: [i32
             }
             let rounded = round2(v, RST_BITS + PRJ_BITS);
             if let Some(slot) = out.get_mut((block.y + row) * source.width + block.x + col) {
-                *slot = u8::try_from(rounded.clamp(0, 255)).unwrap_or(0);
+                *slot = S::from_i32(clip_sample(i32_from_i64(rounded), source.bit_depth));
             }
         }
     }
 }
 
-fn box_value(
-    source: &Source<'_>,
+fn box_value<S: Pix>(
+    source: &Source<'_, S>,
     frame_x: usize,
     frame_y: usize,
     row: usize,
@@ -625,8 +687,8 @@ fn neighbor_weight(pass: i32, row: i32, dy: i32, dx: i32) -> i32 {
     }
 }
 
-fn box_ab(
-    source: &Source<'_>,
+fn box_ab<S: Pix>(
+    source: &Source<'_, S>,
     x: i32,
     y: i32,
     radius: i32,
@@ -643,7 +705,11 @@ fn box_ab(
             b += sample;
         }
     }
-    let d = b;
+    // Section 7.17. The sums are reduced by `2 * (BitDepth - 8)` and `BitDepth - 8`.
+    // Both shifts are zero at 8-bit, so that path is unchanged.
+    let shift = i32::from(source.bit_depth.saturating_sub(8));
+    let a = round2(a, 2 * shift);
+    let d = round2(b, shift);
     let p = (a * i64::from(n) - d * d).max(0);
     let z = round2(p * s, MTABLE_BITS);
     let a2 = if z >= 255 {
@@ -662,23 +728,22 @@ fn box_ab(
 /// `cdef` is the picture after CDEF. `before` is the deblocked picture, used
 /// for the two rows outside a restoration stripe. Pass 0 of `coeff` is the
 /// vertical filter. Pass 1 is the horizontal filter, and it runs first.
-pub fn apply_wiener(
-    cdef: &[u8],
-    before: &[u8],
+pub fn apply_wiener<S: Pix>(
+    cdef: &[S],
+    before: &[S],
     width: usize,
     height: usize,
     grid: &Grid,
     plane: usize,
-) -> Vec<u8> {
+    bit_depth: u8,
+) -> Vec<S> {
     let mut out = cdef.to_vec();
     if width == 0 || height == 0 || plane >= 3 || grid.rows[plane] == 0 {
         return out;
     }
     let mut y = 0usize;
     while y < height {
-        let stripe = (y + 8) / 64;
-        let start = stripe as i32 * 64 - 8;
-        let end = start + 63;
+        let (start, end) = stripe_bounds(grid, plane, y);
         let last = (end.max(0) as usize).min(height - 1);
         if last < y {
             break;
@@ -691,7 +756,7 @@ pub fn apply_wiener(
             while x1 < width && (x1 / size).min(grid.cols[plane] - 1) == unit_col {
                 x1 += 1;
             }
-            let unit_row = (y / size).min(grid.rows[plane] - 1);
+            let unit_row = restoration_unit_row(grid, plane, y);
             if let Some(slot) = grid.index(plane, unit_row, unit_col) {
                 let unit = grid.units[slot];
                 if unit.kind == RESTORE_WIENER {
@@ -702,6 +767,7 @@ pub fn apply_wiener(
                         height: cdef.len() / width.max(1),
                         stripe_start: start,
                         stripe_end: end,
+                        bit_depth,
                     };
                     wiener_block(
                         &mut out,
@@ -724,15 +790,16 @@ pub fn apply_wiener(
     out
 }
 
-fn wiener_block(
-    out: &mut [u8],
-    source: &Source<'_>,
+fn wiener_block<S: Pix>(
+    out: &mut [S],
+    source: &Source<'_, S>,
     block: Block,
     vertical: [i32; 3],
     horizontal: [i32; 3],
 ) {
     let hfilter = wiener_taps(horizontal);
     let vfilter = wiener_taps(vertical);
+    let (round0, round1) = wiener_rounds(source.bit_depth);
     let rows = block.h + 6;
     let mut intermediate = vec![0i32; rows.saturating_mul(block.w)];
     for row in 0..rows {
@@ -745,9 +812,10 @@ fn wiener_block(
                 );
                 sum += *tap * sample;
             }
-            let rounded = round2(i64::from(sum), 3) as i32;
+            let rounded = round2(i64::from(sum), round0) as i32;
             if let Some(slot) = intermediate.get_mut(row * block.w + col) {
-                *slot = clip3(-2048, 6143, rounded);
+                let (low, high) = wiener_intermediate(source.bit_depth);
+                *slot = clip3(low, high, rounded);
             }
         }
     }
@@ -761,12 +829,31 @@ fn wiener_block(
                     .unwrap_or(0);
                 sum += *tap * above;
             }
-            let rounded = round2(i64::from(sum), 11);
+            let rounded = round2(i64::from(sum), round1);
             if let Some(slot) = out.get_mut((block.y + row) * source.width + block.x + col) {
-                *slot = u8::try_from(rounded.clamp(0, 255)).unwrap_or(0);
+                *slot = S::from_i32(clip_sample(i32_from_i64(rounded), source.bit_depth));
             }
         }
     }
+}
+
+/// Section 7.16. Horizontal then vertical Wiener rounding.
+/// Eight-bit and ten-bit stay `(3, 11)`. Twelve-bit is `(5, 9)`.
+fn wiener_rounds(bit_depth: u8) -> (i32, i32) {
+    if bit_depth == 12 { (5, 9) } else { (3, 11) }
+}
+
+/// Horizontal Wiener intermediate range. At 8-bit this is `-2048..=6143`.
+/// Ten-bit uses the same rounding and a wider range. Twelve-bit changes the rounding.
+fn wiener_intermediate(bit_depth: u8) -> (i32, i32) {
+    let depth = i32::from(bit_depth);
+    let offset = 1i32 << (depth + 3);
+    let limit = (1i32 << (depth + 5)) - 1;
+    (-offset, limit - offset)
+}
+
+fn i32_from_i64(value: i64) -> i32 {
+    i32::try_from(value).unwrap_or(if value < 0 { i32::MIN } else { i32::MAX })
 }
 
 fn round2(value: i64, bits: i32) -> i64 {
@@ -807,9 +894,12 @@ mod tests {
             }],
             reference: [XQD_REF; 3],
             wiener_ref: [[WIENER_MID; 2]; 3],
+            bit_depth: 8,
+            sub_x: true,
+            sub_y: true,
             active: true,
         };
-        let out = apply_sgr(&samples, &samples, width, height, &grid, 0);
+        let out = apply_sgr(&samples, &samples, width, height, &grid, 0, 8);
         assert!(out.iter().all(|sample| *sample == 40));
     }
 
@@ -839,9 +929,38 @@ mod tests {
             }],
             reference: [XQD_REF; 3],
             wiener_ref: [[WIENER_MID; 2]; 3],
+            bit_depth: 8,
+            sub_x: true,
+            sub_y: true,
             active: true,
         };
-        let out = apply_wiener(&samples, &samples, width, height, &grid, 0);
+        let out = apply_wiener(&samples, &samples, width, height, &grid, 0, 8);
         assert!(out.iter().all(|sample| *sample == 40));
+    }
+
+    #[test]
+    fn a_ten_bit_constant_keeps_its_wiener_range() {
+        let width = 16usize;
+        let height = 8usize;
+        let samples = vec![400u16; width * height];
+        let grid = Grid {
+            cols: [1, 0, 0],
+            rows: [1, 0, 0],
+            unit_size: [256, 0, 0],
+            units: vec![Unit {
+                kind: RESTORE_WIENER,
+                set: 0,
+                xqd: [0; 2],
+                coeff: [[0, 0, 0], [0, 0, 0]],
+            }],
+            reference: [XQD_REF; 3],
+            wiener_ref: [[WIENER_MID; 2]; 3],
+            bit_depth: 10,
+            sub_x: true,
+            sub_y: true,
+            active: true,
+        };
+        let out = apply_wiener(&samples, &samples, width, height, &grid, 0, 10);
+        assert!(out.iter().all(|sample| *sample == 400));
     }
 }

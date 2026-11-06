@@ -3,6 +3,7 @@ use cutlass_model::{
     SpeedMode, SpeedPoint,
 };
 
+use super::locate;
 use super::{EditError, ensure_unlocked};
 
 /// Timeline microseconds become source microseconds at `speed`.
@@ -206,19 +207,20 @@ pub fn set_constant_speed(
     Ok(())
 }
 
-pub(super) fn locate(draft: &Draft, segment_id: &SegmentId) -> Result<(usize, usize), EditError> {
-    for (track_index, track) in draft.tracks.iter().enumerate() {
-        if let Some(segment_index) = track
-            .segments
-            .iter()
-            .position(|segment| &segment.id == segment_id)
-        {
-            return Ok((track_index, segment_index));
-        }
-    }
-    Err(EditError::MissingSegment)
+/// Let the clip's pitch follow its speed, or keep it.
+pub fn set_change_pitch(
+    draft: &mut Draft,
+    segment_id: &SegmentId,
+    on: bool,
+) -> Result<(), EditError> {
+    let (track_index, segment_index) = locate(draft, segment_id)?;
+    ensure_unlocked(draft.tracks[track_index].attribute)?;
+    draft.tracks[track_index].segments[segment_index].is_tone_modify = on;
+    Ok(())
 }
 
+/// [`super::overlaps_except`] for a span a speed change made, which must
+/// still have a length.
 fn overlaps_except(
     track: &cutlass_model::Track,
     candidate: &Segment,
@@ -229,17 +231,5 @@ fn overlaps_except(
             cutlass_model::RangeError::NonPositiveDuration,
         ));
     }
-    for segment in &track.segments {
-        if &segment.id == ignore {
-            continue;
-        }
-        if candidate
-            .target
-            .overlaps(&segment.target)
-            .map_err(EditError::Range)?
-        {
-            return Ok(true);
-        }
-    }
-    Ok(false)
+    super::overlaps_except(track, candidate, ignore)
 }

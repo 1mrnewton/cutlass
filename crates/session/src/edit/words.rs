@@ -7,13 +7,22 @@ use super::EditError;
 /// Join word text with single spaces. Empty pieces are skipped.
 fn caption_text(words: &[String]) -> String {
     let mut text = String::new();
+    let mut broken = false;
     for word in words {
         if word.is_empty() {
             continue;
         }
-        if !text.is_empty() {
+        // A line or page break marker breaks the line instead of a space.
+        if word.trim_matches('\n').is_empty() {
+            broken = !text.is_empty();
+            continue;
+        }
+        if broken {
+            text.push('\n');
+        } else if !text.is_empty() {
             text.push(' ');
         }
+        broken = false;
         text.push_str(word);
     }
     text
@@ -40,6 +49,25 @@ pub fn set_words(
         .iter_mut()
         .find(|text| &text.id == material_id)
         .ok_or(EditError::MissingMaterial)?;
+    // A marked word stays marked where its start now falls.
+    let marked_at: Vec<i64> = text
+        .caption_keywords
+        .iter()
+        .filter_map(|word| text.words.start_time.get(*word).copied())
+        .collect();
+    let mut keywords: Vec<usize> = marked_at
+        .iter()
+        .filter_map(|at| {
+            (0..words.text.len()).find(|index| {
+                words.start_time[*index] <= *at
+                    && *at < words.end_time[*index].max(words.start_time[*index] + 1)
+                    && words.text[*index] != "\n"
+            })
+        })
+        .collect();
+    keywords.sort_unstable();
+    keywords.dedup();
+    text.caption_keywords = keywords;
     text.words = words.clone();
     text.current_words = words;
     text.content.clone_from(&content);
@@ -62,7 +90,7 @@ pub fn add_caption(
     if words.text.is_empty() {
         return Err(EditError::WordShape);
     }
-    let (source_track, source_index) = super::speed::locate(draft, source_id)?;
+    let (source_track, source_index) = super::locate(draft, source_id)?;
     super::ensure_unlocked(draft.tracks[source_track].attribute)?;
     let target = draft.tracks[source_track].segments[source_index]
         .target
@@ -119,6 +147,31 @@ mod tests {
             text: vec![text.to_owned()],
             rest: Default::default(),
         }
+    }
+
+    #[test]
+    fn a_marked_word_stays_marked_when_words_are_joined_or_split() {
+        let (mut draft, id) = draft_with_text();
+        let three = WordColumns {
+            start_time: vec![0, 100, 200],
+            end_time: vec![100, 200, 300],
+            text: vec!["a".to_owned(), "b".to_owned(), "c".to_owned()],
+            rest: Default::default(),
+        };
+        set_words(&mut draft, &id, three).unwrap();
+        draft.materials.texts[0].caption_keywords = vec![2];
+        // Joining the first two moves the third word to index 1.
+        let joined = WordColumns {
+            start_time: vec![0, 200],
+            end_time: vec![200, 300],
+            text: vec!["a b".to_owned(), "c".to_owned()],
+            rest: Default::default(),
+        };
+        set_words(&mut draft, &id, joined).unwrap();
+        assert_eq!(draft.materials.texts[0].caption_keywords, [1]);
+        // A word whose time is gone loses its mark.
+        set_words(&mut draft, &id, columns(0, 100, "a")).unwrap();
+        assert!(draft.materials.texts[0].caption_keywords.is_empty());
     }
 
     #[test]

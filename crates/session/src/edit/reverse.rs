@@ -1,6 +1,6 @@
 use cutlass_model::{Draft, MaterialVideo, SegmentId};
 
-use super::speed::locate;
+use super::locate;
 use super::{EditError, ensure_unlocked};
 
 /// Store the reverse flag and, when the video material is there, its path.

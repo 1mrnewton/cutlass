@@ -76,6 +76,7 @@ const CUT: Entry = done("cut", "Cut", "⌘X");
 const DELETE: Entry = done("delete", "Delete", "⌫");
 const DEACTIVATE: Entry = done("deactivate", "Deactivate", "");
 const REPLACE: Entry = todo("replace", "Replace", "");
+const REPLACE_SOUND: Entry = done("replace", "Replace", "");
 
 const VIDEO: &[Entry] = &[
     COPY,
@@ -105,7 +106,8 @@ const VIDEO: &[Entry] = &[
     done("extract-audio", "Extract audio", "⇧⌘S"),
     done("sync", "Sync video and audio", ""),
     SEP,
-    todo("compound", "Create compound clip", "⌥G"),
+    done("compound", "Create compound clip", "⌥G"),
+    done("open-compound", "Open compound clip", ""),
     done("multicam", "Create multi-camera clip", ""),
     done("group", "Group", ""),
     done("ungroup", "Ungroup", ""),
@@ -113,12 +115,14 @@ const VIDEO: &[Entry] = &[
     done("export", "Export selected clips", ""),
     done("deactivate", "Deactivate clip", "V"),
     done("trim", "Trim clip", ""),
-    todo("replace", "Replace clip", ""),
+    done("replace", "Replace clip", ""),
     done("link-media", "Link to media", ""),
     done("open-file", "Open file location", ""),
+    done("make-proxies", "Make proxy", ""),
+    ARRANGE,
     SEP,
     done("edit-effects", "Edit effects", ""),
-    todo("variable-speed", "Show variable speed animation", "⌥K"),
+    done("variable-speed", "Show variable speed animation", "⌥K"),
     sub(
         "range",
         "Range",
@@ -131,8 +135,8 @@ const VIDEO: &[Entry] = &[
         "render",
         "Render",
         &[
-            todo("render-preview", "Preview", ""),
-            todo("render-full", "Full", ""),
+            done("render-preview", "Preview", ""),
+            done("render-full", "Full", ""),
         ],
     ),
 ];
@@ -148,8 +152,21 @@ const AUDIO: &[Entry] = &[
     done("beat", "Beat", ""),
     SEP,
     DEACTIVATE,
-    REPLACE,
+    REPLACE_SOUND,
 ];
+
+/// Stack a picture clip above or below the clips it overlaps, with Free
+/// layer on in the project settings.
+const ARRANGE: Entry = sub(
+    "arrange",
+    "Arrange",
+    &[
+        done("arrange-forward", "Bring forward", ""),
+        done("arrange-backward", "Send backward", ""),
+        done("arrange-front", "Bring to front", ""),
+        done("arrange-back", "Send to back", ""),
+    ],
+);
 
 const TEXT: &[Entry] = &[
     COPY,
@@ -158,6 +175,7 @@ const TEXT: &[Entry] = &[
     SEP,
     done("edit-text", "Edit text", ""),
     done("style", "Style", ""),
+    ARRANGE,
     SEP,
     DEACTIVATE,
     REPLACE,
@@ -169,6 +187,7 @@ const STICKER: &[Entry] = &[
     DELETE,
     SEP,
     done("flip", "Flip", ""),
+    ARRANGE,
     SEP,
     DEACTIVATE,
     REPLACE,
@@ -212,7 +231,7 @@ const COMPOSITION: &[Entry] = &[
     CUT,
     DELETE,
     SEP,
-    todo("render-preview", "Render", ""),
+    done("render-preview", "Render", ""),
     SEP,
     DEACTIVATE,
     REPLACE,
@@ -241,7 +260,6 @@ pub const CLIP_OFF: &[&str] = &[
     "sync",
     "multicam",
     "group",
-    "ungroup",
     "trim",
     "link-media",
     "edit-effects",
@@ -648,6 +666,7 @@ mod tests {
                 "extract-audio",
                 "sync",
                 "compound",
+                "open-compound",
                 "multicam",
                 "group",
                 "ungroup",
@@ -657,6 +676,8 @@ mod tests {
                 "replace",
                 "link-media",
                 "open-file",
+                "make-proxies",
+                "arrange",
                 "edit-effects",
                 "variable-speed",
                 "range",
@@ -676,7 +697,7 @@ mod tests {
         assert_eq!(built("edit"), Some(true));
         assert_eq!(built("copy"), Some(true));
         assert_eq!(built("range"), Some(true));
-        assert_eq!(built("render"), Some(false));
+        assert_eq!(built("render"), Some(true));
         assert_eq!(built("isolate-voice"), Some(false));
     }
 
@@ -775,11 +796,16 @@ mod tests {
     fn a_click_on_a_todo_row_picks_it_as_not_built() {
         let ctx = Context::default();
         let (_, output) = frame(&ctx, 1000.0, Vec::new());
+        let isolate = label_at(&output, "Isolate voice").expect("the Isolate voice row")
+            + Vec2::new(4.0, 6.0);
+        frame(&ctx, 1000.0, vec![egui::Event::PointerMoved(isolate)]);
+        let (_, output) = frame(&ctx, 1000.0, vec![egui::Event::PointerMoved(isolate)]);
         let row =
-            label_at(&output, "Replace clip").expect("the Replace clip row") + Vec2::new(4.0, 6.0);
+            label_at(&output, "Keep voice").expect("the Keep voice row") + Vec2::new(4.0, 6.0);
+        frame(&ctx, 1000.0, vec![egui::Event::PointerMoved(row)]);
         let (shown, _) = frame(&ctx, 1000.0, click(row));
         let picked = shown.picked.expect("a pick");
-        assert_eq!((picked.id, picked.built), ("replace", false));
+        assert_eq!((picked.id, picked.built), ("isolate-keep-voice", false));
     }
 
     #[test]

@@ -10,6 +10,15 @@ use cutlass_render::{Canvas, RenderError, Renderer};
 use eframe::{egui_wgpu, wgpu};
 use egui::mutex::RwLock;
 
+/// A renderer that samples this platform's decoded surfaces in place.
+pub(crate) fn platform_renderer(device: wgpu::Device, queue: wgpu::Queue) -> Renderer {
+    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
+    let mut renderer = Renderer::new(device, queue);
+    #[cfg(target_os = "macos")]
+    renderer.set_surface_import(Arc::new(cutlass_platform_apple::import_surface));
+    renderer
+}
+
 /// What the preview canvas last showed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Drawn {
@@ -24,15 +33,19 @@ pub(crate) struct Preview {
     egui: Arc<RwLock<egui_wgpu::Renderer>>,
     canvas: Option<(Canvas, egui::TextureId)>,
     drawn: Option<Drawn>,
+    /// The layers on the canvas. Their pictures are shared with the clip
+    /// caches, so a frame that brings the same ones is not drawn again.
+    frame: Option<FrameLayers>,
 }
 
 impl Preview {
     pub(crate) fn new(state: &egui_wgpu::RenderState) -> Self {
         Self {
-            renderer: Renderer::new(state.device.clone(), state.queue.clone()),
+            renderer: platform_renderer(state.device.clone(), state.queue.clone()),
             egui: Arc::clone(&state.renderer),
             canvas: None,
             drawn: None,
+            frame: None,
         }
     }
 
@@ -64,10 +77,12 @@ impl Preview {
         self.renderer.read(canvas).ok()
     }
 
-    /// Draw `frame` and remember it as `key`.
+    /// Draw `frame` and remember it as `key`. A frame equal to the one on
+    /// the canvas is not drawn again: a repaint between two source pictures
+    /// only takes the new key.
     pub(crate) fn show(
         &mut self,
-        frame: &FrameLayers,
+        frame: FrameLayers,
         key: Drawn,
     ) -> Result<(egui::TextureId, [u32; 2]), RenderError> {
         let size = (frame.width, frame.height);
@@ -95,6 +110,7 @@ impl Preview {
                 ),
             };
             self.canvas = Some((canvas, id));
+            self.frame = None;
         }
         self.drawn = None;
         let Some((canvas, id)) = self.canvas.as_ref() else {
@@ -103,7 +119,11 @@ impl Preview {
                 height: size.1,
             });
         };
-        self.renderer.draw_frame(canvas, frame)?;
+        if self.frame.as_ref() != Some(&frame) {
+            self.frame = None;
+            self.renderer.draw_frame(canvas, &frame)?;
+            self.frame = Some(frame);
+        }
         self.drawn = Some(key);
         Ok((*id, [size.0, size.1]))
     }

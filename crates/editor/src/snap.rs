@@ -1,7 +1,7 @@
 use cutlass_model::{
     Draft, MaterialRef, MaterialTransition, Micros, Segment, SegmentId, TimeRange,
-    beat_timeline_time, clip_mark_time, referenced_time_marks, segment_beats, segment_time_mark,
-    time_mark_items, user_beats,
+    beat_timeline_time, blend_window, clip_mark_time, referenced_time_marks, segment_beats,
+    segment_time_mark, time_mark_items, user_beats,
 };
 
 /// What a drag lined up with. The time is on the timeline, in microseconds.
@@ -88,16 +88,8 @@ pub fn snap_guides(
 /// that side `duration / 2`, rounded toward zero.
 #[must_use]
 pub fn transition_middle(cut: Micros, transition: &MaterialTransition) -> Option<Micros> {
-    let duration = transition.duration.0;
-    if duration <= 0 {
-        return None;
-    }
-    let window_start = if transition.is_overlap {
-        cut.0.checked_sub(duration / 2)?
-    } else {
-        cut.0.checked_sub(duration)?
-    };
-    window_start.checked_add(duration / 2).map(Micros)
+    let (start, _) = blend_window(cut, transition.duration, transition.is_overlap)?;
+    start.0.checked_add(transition.duration.0 / 2).map(Micros)
 }
 
 struct Best {

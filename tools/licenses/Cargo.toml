@@ -1,0 +1,20 @@
+# Writes `crates/licenses/third_party.json`: every crate the desktop app
+# ships, with its license and the license files from its source. Run it
+# after changing dependencies:
+#
+#     cargo run -p licenses
+#
+# It reads `cargo metadata`, so the sources must already be downloaded.
+[package]
+name = "licenses"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "Writes the third-party notices the Licenses window shows."
+
+[dependencies]
+serde_json = "1.0.154"
+
+[lints]
+workspace = true

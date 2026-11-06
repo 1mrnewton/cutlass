@@ -151,7 +151,11 @@ fn tag_path(picture: &Picture<'_>, draft: i32) -> Result<Path, Error> {
 }
 
 fn picture_primaries(picture: &Picture<'_>) -> Primaries {
-    match picture.primaries {
+    primaries_of(picture.primaries, picture.matrix)
+}
+
+fn primaries_of(primaries: ColorPrimaries, matrix: crate::Matrix) -> Primaries {
+    match primaries {
         ColorPrimaries::Bt709 => Primaries::Bt709,
         ColorPrimaries::Bt2020 => Primaries::Bt2020,
         // SMPTE 240M uses the SMPTE 170M chromaticities.
@@ -163,7 +167,7 @@ fn picture_primaries(picture: &Picture<'_>) -> Primaries {
         | ColorPrimaries::Smpte428
         | ColorPrimaries::Smpte431
         | ColorPrimaries::Smpte432
-        | ColorPrimaries::Ebu3213 => match picture.matrix {
+        | ColorPrimaries::Ebu3213 => match matrix {
             crate::Matrix::Bt601 => Primaries::Smpte170,
             crate::Matrix::Bt2020 => Primaries::Bt2020,
             crate::Matrix::Bt709 => Primaries::Bt709,
@@ -262,6 +266,70 @@ fn adaptation(source: Primaries, dest: Primaries) -> Result<Option<[[f64; 3]; 3]
     }
     let to_dest = inverse(rgb_to_xyz(dest)?)?;
     Ok(Some(mul_matrix(to_dest, rgb_to_xyz(source)?)))
+}
+
+/// One end of a [`Signal`]: how encoded RGB relates to linear light.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SignalCurve {
+    /// The Rec.709 OETF. Rec.601 and untagged curves are this one.
+    Rec709,
+    Hlg,
+    Pq,
+}
+
+/// What [`convert`](crate::convert) does to each encoded RGB sample after
+/// the matrix, with segment HDR off, as data a shader can repeat.
+///
+/// When [`Self::same_signal`] holds the sample is left as it is. Otherwise
+/// it is decoded with `source`, multiplied by `adapt` and clamped to 0..1
+/// when there is one, and encoded with `dest`. A PQ end divides or
+/// multiplies linear light by `nits`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Signal {
+    pub source: SignalCurve,
+    pub dest: SignalCurve,
+    /// Linear source RGB to linear destination RGB, row by row.
+    pub adapt: Option<[[f64; 3]; 3]>,
+    pub nits: f64,
+}
+
+impl Signal {
+    /// The signal [`convert`](crate::convert) applies to a 4:2:0 picture with
+    /// these tags and `matrix`, for the draft code `draft` and segment HDR off.
+    pub fn for_tags(
+        primaries: ColorPrimaries,
+        transfer: Transfer,
+        matrix: crate::Matrix,
+        draft: i32,
+    ) -> Result<Self, Error> {
+        let (dest, dest_primaries) = draft_destination(draft)?;
+        let mapper = Mapper::build(
+            Path {
+                source: Curve::from_codec(transfer),
+                source_primaries: primaries_of(primaries, matrix),
+                dest,
+                dest_primaries,
+            },
+            reference_nits(0.0),
+        )?;
+        let family = |family| match family {
+            Family::Rec709 => SignalCurve::Rec709,
+            Family::Hlg => SignalCurve::Hlg,
+            Family::Pq => SignalCurve::Pq,
+        };
+        Ok(Self {
+            source: family(mapper.source),
+            dest: family(mapper.dest),
+            adapt: mapper.adapt,
+            nits: mapper.nits,
+        })
+    }
+
+    /// The sample comes out as it went in.
+    #[must_use]
+    pub fn same_signal(&self) -> bool {
+        self.adapt.is_none() && self.source == self.dest
+    }
 }
 
 fn decode(encoded: [f64; 3], family: Family, nits: f64) -> [f64; 3] {

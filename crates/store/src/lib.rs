@@ -26,9 +26,9 @@ pub use folder::{
     DockItem, DraftMeta, Folder, IdMap, IdPair, MaterialBin, Opened, ProjectIndex, TimelineEntry,
     TimelineLayout, open,
 };
-pub use hold::{Hold, hold};
+pub use hold::{Hold, held_address, hold};
 pub use json::{parse_draft, write_draft};
-pub use projects::{ListedProject, create_project, list_projects};
+pub use projects::{ListedProject, create_project, list_projects, listed_project};
 pub use repair::{RepairNote, repair};
 pub use upgrade::{BUILD, Protocol, upgrade};
 

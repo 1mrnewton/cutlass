@@ -1,10 +1,13 @@
+use serde::{Deserialize, Serialize};
+
 use cutlass_model::{
     AnimType, CommonKeyframeGroup, Crop, FreezeInfo, MaterialAudio, MaterialId, MaterialTransition,
     MaterialVideo, Micros, Segment, SegmentId, SpeedPoint, TrackId, TrackType, WordColumns,
 };
 
 /// A media record stored in the library. A segment places it later.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ImportedMedium {
     /// A picture, including a still stored as a video material.
     Video(Box<MaterialVideo>),
@@ -13,7 +16,8 @@ pub enum ImportedMedium {
 }
 
 /// Which edge of a segment a trim moves.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum TrimEdge {
     /// The timeline start. The end stays put.
     Start,
@@ -21,8 +25,26 @@ pub enum TrimEdge {
     End,
 }
 
+/// Where Arrange moves a clip among the picture clips it overlaps.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Arrange {
+    /// Above the next clip over it.
+    Forward,
+    /// Below the next clip under it.
+    Backward,
+    /// Above every clip it overlaps.
+    Front,
+    /// Below every clip it overlaps.
+    Back,
+}
+
 /// One change. A combo is a slice of these.
-#[derive(Clone, Debug, PartialEq)]
+///
+/// As JSON a request names its kind in `op`, in snake case, beside its
+/// fields: `{"op":"move","segment_id":"a","track_id":"t","start":0}`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
 pub enum Request {
     /// Insert `segment` on `track_id`, ordered by its target start.
     Place {
@@ -83,6 +105,9 @@ pub enum Request {
         speed_id: MaterialId,
         points: Vec<SpeedPoint>,
     },
+    /// Let the clip's pitch follow its speed (`on`), or keep the pitch as
+    /// the speed changes.
+    SetChangePitch { segment_id: SegmentId, on: bool },
     /// Store a blend on the outgoing segment. Target ranges still only touch.
     SetTransition {
         segment_id: SegmentId,
@@ -227,6 +252,29 @@ pub enum Request {
         alpha: f64,
         round: f64,
     },
+    /// Shape the title's background as the [`cutlass_model::Bubble`] keyed
+    /// `bubble`, or a plain box again when it is empty. A title with no
+    /// background yet gets a white one, and white letters turn black.
+    SetTextBubble {
+        segment_id: SegmentId,
+        bubble: String,
+    },
+    /// Draw the caption in the style keyed `style` (one of
+    /// [`cutlass_model::CAPTION_STYLE_KEYS`]), or plain when it is empty.
+    SetCaptionStyle {
+        segment_id: SegmentId,
+        style: String,
+    },
+    /// Mark word `word` of the caption as a keyword, drawn in the style's
+    /// spoken look while it shows, or take the mark off.
+    SetCaptionKeyword {
+        segment_id: SegmentId,
+        word: usize,
+        on: bool,
+    },
+    /// Start each letter of a caption word `millis` after the one before
+    /// it, from 0 to [`crate::MAX_CAPTION_STAGGER_MS`].
+    SetCaptionStagger { segment_id: SegmentId, millis: i64 },
     /// Place a new text clip saying `content` in `face`, from `start` for
     /// `duration`. `track_id` is created as a text row when it is missing.
     AddText {
@@ -254,6 +302,107 @@ pub enum Request {
     BindEffect {
         segment_id: SegmentId,
         clip: Option<SegmentId>,
+    },
+    /// Blend the clip with the picture below by `mode`, a blend package id
+    /// such as `blend-multiply`. Normal or empty takes the blend off.
+    /// `material_id` names the new `mix_mode` material.
+    SetBlend {
+        segment_id: SegmentId,
+        material_id: MaterialId,
+        mode: String,
+    },
+    /// Put an adjustment layer from `start` for `duration` on `track_id`,
+    /// an adjust row made when it is missing. Its sliders, set with
+    /// [`Request::SetAdjust`], run over every picture below it.
+    AddAdjustment {
+        track_id: TrackId,
+        segment_id: SegmentId,
+        material_id: MaterialId,
+        start: Micros,
+        duration: Micros,
+    },
+    /// Put the bundled filter `filter_id`, such as `look/warm`, from `start`
+    /// for `duration` on `track_id`, a filter row made when it is missing.
+    /// It runs over every picture below it; its strength is set with
+    /// [`Request::SetEffectStrength`].
+    AddFilter {
+        track_id: TrackId,
+        segment_id: SegmentId,
+        material_id: MaterialId,
+        start: Micros,
+        duration: Micros,
+        filter_id: String,
+    },
+    /// Set HSL colour `color`, 0 red to 7 magenta, on the clip: `hue`,
+    /// `saturation` and `lightness` from -1 to 1. All zero takes it off.
+    SetHsl {
+        segment_id: SegmentId,
+        material_id: MaterialId,
+        color: u8,
+        hue: f64,
+        saturation: f64,
+        lightness: f64,
+    },
+    /// Set the clip's curve `channel` (`rgb`, `red`, `green` or `blue`) to
+    /// `points`, each `[x, y]` from 0 to 1. None, or the diagonal, is the
+    /// straight line.
+    SetCurve {
+        segment_id: SegmentId,
+        material_id: MaterialId,
+        channel: String,
+        points: Vec<[f64; 2]>,
+    },
+    /// Set the clip's colour wheel `wheel` (`lift`, `gamma` or `gain`): the
+    /// puck at `x`, `y` inside the unit circle, the ring at `luma`.
+    SetWheel {
+        segment_id: SegmentId,
+        material_id: MaterialId,
+        wheel: String,
+        x: f64,
+        y: f64,
+        luma: f64,
+    },
+    /// Put a LUT on the clip: `cube` is a `.cube` file's text, kept on the
+    /// clip under `name`. `None` keeps the clip's table and sets its
+    /// `strength`, from 0 to 1; an empty text takes the LUT off.
+    SetLut {
+        segment_id: SegmentId,
+        material_id: MaterialId,
+        name: String,
+        cube: Option<String>,
+        strength: f64,
+    },
+    /// Key `color` (`#rrggbb`) out of the clip with `strength` and
+    /// `shadow`, each 0 to 1. An empty colour takes the key off.
+    SetChroma {
+        segment_id: SegmentId,
+        material_id: MaterialId,
+        color: String,
+        strength: f64,
+        shadow: f64,
+    },
+    /// Mask the clip with `mask`, in the clip's own frame, or take its mask
+    /// off with `None`.
+    SetMask {
+        segment_id: SegmentId,
+        material_id: MaterialId,
+        mask: Option<cutlass_effects::Mask>,
+    },
+    /// Limit the clip's colour work, or an adjustment layer, to `mask`, or
+    /// take that limit off with `None`.
+    SetColorMask {
+        segment_id: SegmentId,
+        material_id: MaterialId,
+        mask: Option<cutlass_effects::Mask>,
+    },
+    /// Set the adjust slider `key`, its reference name such as
+    /// `temperature`, to `value`: -1 to 1, or 0 to 1 for fade, sharpen and
+    /// grain. Zero takes it off. `material_id` names a new slider material.
+    SetAdjust {
+        segment_id: SegmentId,
+        material_id: MaterialId,
+        key: String,
+        value: f64,
     },
     /// Store `value`, from 0 to 1, as the strength of the effect, filter,
     /// or adjustment the clip uses. When another clip uses that material too,
@@ -307,6 +456,28 @@ pub enum Request {
     },
     /// Add a material to the library. This does not place a segment.
     Import { medium: ImportedMedium },
+    /// Make the clips `segment_ids` one compound clip `segment_id` playing
+    /// a draft of their own, stored as the material `material_id`.
+    CreateCompound {
+        segment_ids: Vec<SegmentId>,
+        segment_id: SegmentId,
+        material_id: MaterialId,
+    },
+    /// Put the clips the compound clip `segment_id` shows back on the
+    /// timeline in its place.
+    Ungroup { segment_id: SegmentId },
+    /// Store `inside` as the draft the compound material `material_id`
+    /// plays. A compound clip that showed all of it follows its length.
+    SetInside {
+        material_id: MaterialId,
+        inside: Box<cutlass_model::Draft>,
+    },
+    /// Play `material_id` in `segment_id` in place of its media, keeping
+    /// the clip's edits. A picture takes a picture, a sound a sound.
+    ReplaceMedia {
+        segment_id: SegmentId,
+        material_id: MaterialId,
+    },
     /// Add an empty lane. Video and mixed lanes are overlays above the main track.
     /// Audio is inserted under the main track. This does not place a segment.
     InsertTrack { track_id: TrackId, kind: TrackType },
@@ -372,4 +543,59 @@ pub enum Request {
     SetColorSpace { space: i32 },
     /// Store the project name. Surrounding whitespace is dropped.
     SetProjectName { name: String },
+    /// Stack picture clips by their own layer (on) or by their tracks
+    /// (off, which puts every clip back on its track's layer).
+    SetFreeLayer { on: bool },
+    /// Move a picture clip up or down among those it overlaps. Needs
+    /// Free layer on.
+    Arrange {
+        segment_id: SegmentId,
+        step: Arrange,
+    },
+}
+
+#[cfg(test)]
+mod tests {
+    use cutlass_model::{Micros, Segment, SegmentId, TimeRange, TrackId};
+
+    use super::{Request, TrimEdge};
+
+    #[test]
+    fn a_request_reads_from_json_with_its_op() {
+        let requests: Vec<Request> = serde_json::from_str(
+            r#"[
+                {"op":"move","segment_id":"a","track_id":"t","start":250000},
+                {"op":"trim","segment_id":"a","edge":"end","time":900000}
+            ]"#,
+        )
+        .unwrap();
+        assert_eq!(
+            requests,
+            [
+                Request::Move {
+                    segment_id: SegmentId::new("a"),
+                    track_id: TrackId::new("t"),
+                    start: Micros(250_000),
+                },
+                Request::Trim {
+                    segment_id: SegmentId::new("a"),
+                    edge: TrimEdge::End,
+                    time: Micros(900_000),
+                },
+            ]
+        );
+        assert!(serde_json::from_str::<Request>(r#"{"op":"fly"}"#).is_err());
+        assert!(serde_json::from_str::<Request>(r#"{"op":"move","segment_id":"a"}"#).is_err());
+    }
+
+    #[test]
+    fn a_placed_segment_survives_a_round_trip() {
+        let request = Request::Place {
+            track_id: TrackId::new("main"),
+            segment: Box::new(Segment::new("s", "m", TimeRange::new(0, 1_000_000))),
+        };
+        let text = serde_json::to_string(&request).unwrap();
+        assert!(text.starts_with(r#"{"op":"place""#), "{text}");
+        assert_eq!(serde_json::from_str::<Request>(&text).unwrap(), request);
+    }
 }

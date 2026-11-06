@@ -227,6 +227,7 @@ fn params(quality: Option<u8>) -> CodecParams {
         layout: None,
         sample_format: None,
         bitrate: 0,
+        constant_rate: false,
         width: 0,
         height: 0,
         pixel: PixelFormat::None,

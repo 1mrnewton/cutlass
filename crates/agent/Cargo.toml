@@ -10,6 +10,16 @@ description = "The tool loop, skills, and the sandbox trait."
 cutlass-model = { path = "../model", version = "0.1.0" }
 cutlass-session = { path = "../session", version = "0.1.0" }
 cutlass-settings = { path = "../settings", version = "0.1.0" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+rhai = { version = "=1.27.0", default-features = false, features = ["std", "serde", "no_module"], optional = true }
+
+[features]
+# The local sandbox's language: Rhai, run by `run_script` and `serve_script`.
+script = ["dep:rhai"]
+
+[dev-dependencies]
+cutlass-agent = { path = ".", features = ["script"] }
 
 [lints]
 workspace = true

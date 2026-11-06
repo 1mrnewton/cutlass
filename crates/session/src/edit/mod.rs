@@ -1,25 +1,34 @@
+mod adjust;
 mod animation;
 mod beat;
+mod blend;
 mod canvas;
+mod chroma;
 mod color;
 mod crop;
 mod effect;
 mod extract;
 mod fade;
 mod freeze;
+mod grade;
 mod import;
 mod keyframe;
 mod lane;
+mod layer;
 mod linkage;
+mod lut;
 mod magnet;
 mod mark;
+mod mask;
 mod mirror;
 mod move_segment;
 mod name;
+mod nest;
 mod own;
 mod place;
 mod placement;
 mod rate;
+mod replace;
 mod reverse;
 mod rotate;
 mod speed;
@@ -38,7 +47,7 @@ use crate::request::Request;
 pub use canvas::{CANVAS_SHAPES, CanvasShape, canvas_for, follow_first_picture, ratio_request};
 pub use move_segment::move_segment;
 pub use place::place;
-pub use text::NEW_TEXT_SIZE;
+pub use text::{MAX_CAPTION_STAGGER_MS, NEW_TEXT_SIZE};
 pub use trim::trim;
 pub use words::set_words;
 
@@ -145,6 +154,13 @@ pub enum EditError {
     TextEmpty,
     /// The effect is not one the app ships.
     UnknownEffect,
+    /// The `.cube` file is not a 3D table, or the clip has no LUT to change.
+    Lut,
+    /// A mask number is out of its range.
+    Mask,
+    /// The clip is not a compound clip, or it plays its inside at another
+    /// speed, or a cut inside would split a speed curve.
+    Compound,
     /// The clip is not an effect, a filter, or an adjustment.
     NotEffect,
     /// An effect binds to a picture clip, and only an effect clip binds.
@@ -157,6 +173,8 @@ pub enum EditError {
     CanvasSize,
     /// The canvas ratio is not one of the project shapes.
     CanvasRatio,
+    /// Arrange moves picture clips, and only with Free layer on.
+    FreeLayer,
     /// A letterbox color belongs on a video or a composition.
     Letterbox,
     /// A letterbox blur is not a fraction from 0 through 1.
@@ -212,6 +230,9 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             speed_id,
             points,
         } => speed::set_curve_speed(draft, segment_id, speed_id, points),
+        Request::SetChangePitch { segment_id, on } => {
+            speed::set_change_pitch(draft, segment_id, *on)
+        }
         Request::SetTransition {
             segment_id,
             transition,
@@ -314,6 +335,20 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             alpha,
             round,
         } => text::set_text_background(draft, segment_id, color, *alpha, *round),
+        Request::SetCaptionKeyword {
+            segment_id,
+            word,
+            on,
+        } => text::set_caption_keyword(draft, segment_id, *word, *on),
+        Request::SetCaptionStagger { segment_id, millis } => {
+            text::set_caption_stagger(draft, segment_id, *millis)
+        }
+        Request::SetCaptionStyle { segment_id, style } => {
+            text::set_caption_style(draft, segment_id, style)
+        }
+        Request::SetTextBubble { segment_id, bubble } => {
+            text::set_text_bubble(draft, segment_id, bubble)
+        }
         Request::SetTextGlow {
             segment_id,
             glow_id,
@@ -356,6 +391,104 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
         Request::BindEffect { segment_id, clip } => {
             effect::bind_effect(draft, segment_id, clip.as_ref())
         }
+        Request::SetBlend {
+            segment_id,
+            material_id,
+            mode,
+        } => blend::set_blend(draft, segment_id, material_id, mode),
+        Request::AddAdjustment {
+            track_id,
+            segment_id,
+            material_id,
+            start,
+            duration,
+        } => adjust::add_adjustment(
+            draft,
+            track_id,
+            segment_id,
+            material_id,
+            TimeRange::new(start.0, duration.0),
+        ),
+        Request::AddFilter {
+            track_id,
+            segment_id,
+            material_id,
+            start,
+            duration,
+            filter_id,
+        } => adjust::add_filter(
+            draft,
+            track_id,
+            segment_id,
+            material_id,
+            TimeRange::new(start.0, duration.0),
+            filter_id,
+        ),
+        Request::SetHsl {
+            segment_id,
+            material_id,
+            color,
+            hue,
+            saturation,
+            lightness,
+        } => grade::set_hsl(
+            draft,
+            segment_id,
+            material_id,
+            *color,
+            [*hue, *saturation, *lightness],
+        ),
+        Request::SetCurve {
+            segment_id,
+            material_id,
+            channel,
+            points,
+        } => grade::set_curve(draft, segment_id, material_id, channel, points),
+        Request::SetWheel {
+            segment_id,
+            material_id,
+            wheel,
+            x,
+            y,
+            luma,
+        } => grade::set_wheel(draft, segment_id, material_id, wheel, [*x, *y, *luma]),
+        Request::SetLut {
+            segment_id,
+            material_id,
+            name,
+            cube,
+            strength,
+        } => lut::set_lut(
+            draft,
+            segment_id,
+            material_id,
+            name,
+            cube.as_deref(),
+            *strength,
+        ),
+        Request::SetChroma {
+            segment_id,
+            material_id,
+            color,
+            strength,
+            shadow,
+        } => chroma::set_chroma(draft, segment_id, material_id, color, *strength, *shadow),
+        Request::SetMask {
+            segment_id,
+            material_id,
+            mask,
+        } => mask::set_mask(draft, segment_id, material_id, mask.as_ref()),
+        Request::SetColorMask {
+            segment_id,
+            material_id,
+            mask,
+        } => mask::set_color_mask(draft, segment_id, material_id, mask.as_ref()),
+        Request::SetAdjust {
+            segment_id,
+            material_id,
+            key,
+            value,
+        } => adjust::set_adjust(draft, segment_id, material_id, key, *value),
         Request::SetEffectStrength {
             segment_id,
             material_id,
@@ -401,6 +534,20 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             },
         ),
         Request::Import { medium } => import::import(draft, medium.clone()),
+        Request::CreateCompound {
+            segment_ids,
+            segment_id,
+            material_id,
+        } => nest::create_compound(draft, segment_ids, segment_id, material_id),
+        Request::Ungroup { segment_id } => nest::ungroup(draft, segment_id),
+        Request::SetInside {
+            material_id,
+            inside,
+        } => nest::set_inside(draft, material_id, inside),
+        Request::ReplaceMedia {
+            segment_id,
+            material_id,
+        } => replace::replace_media(draft, segment_id, material_id),
         Request::InsertTrack { track_id, kind } => track::insert_track(draft, track_id, kind),
         Request::RemoveTrack { track_id } => track::remove_track(draft, track_id),
         Request::RenameTrack { track_id, name } => track::rename_track(draft, track_id, name),
@@ -443,6 +590,11 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             name::set_project_name(draft, name);
             Ok(())
         }
+        Request::SetFreeLayer { on } => {
+            layer::set_free_layer(draft, *on);
+            Ok(())
+        }
+        Request::Arrange { segment_id, step } => layer::arrange(draft, segment_id, *step),
     }
 }
 
@@ -478,4 +630,43 @@ pub fn ensure_unlocked(attribute: TrackAttribute) -> Result<(), EditError> {
     } else {
         Ok(())
     }
+}
+
+/// Where segment `segment_id` is: its track and its place on that track.
+pub(super) fn locate(
+    draft: &Draft,
+    segment_id: &cutlass_model::SegmentId,
+) -> Result<(usize, usize), EditError> {
+    for (track_index, track) in draft.tracks.iter().enumerate() {
+        if let Some(segment_index) = track
+            .segments
+            .iter()
+            .position(|segment| &segment.id == segment_id)
+        {
+            return Ok((track_index, segment_index));
+        }
+    }
+    Err(EditError::MissingSegment)
+}
+
+/// `candidate` overlaps a segment on `track` other than `ignore`. Touching
+/// is not overlapping.
+pub(super) fn overlaps_except(
+    track: &cutlass_model::Track,
+    candidate: &cutlass_model::Segment,
+    ignore: &cutlass_model::SegmentId,
+) -> Result<bool, EditError> {
+    for segment in &track.segments {
+        if &segment.id == ignore {
+            continue;
+        }
+        if candidate
+            .target
+            .overlaps(&segment.target)
+            .map_err(EditError::Range)?
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }

@@ -70,6 +70,15 @@ pub const TITLE_STYLES: &[TitleStyle] = &[
         y: 0.0,
         enter: Some("Fade In"),
     },
+    TitleStyle {
+        id: "kinetic",
+        name: "Kinetic line",
+        meta: "Types on",
+        size: 72.0,
+        color: "#FFFFFF",
+        y: 0.0,
+        enter: Some("Typewriter"),
+    },
 ];
 
 impl TitleStyle {

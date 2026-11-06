@@ -39,10 +39,11 @@ pub use rich::{
 };
 pub use shape::MaterialShape;
 pub use speed::{
-    ConstantSpeedError, CurveSpeed, MaterialSpeed, SpeedPoint, constant_target_duration,
-    curve_speed_factor, curve_target_duration, split_curve,
+    ConstantSpeedError, CurveSpeed, MaterialSpeed, SpeedPoint, SpeedPreset,
+    constant_target_duration, curve_speed_at, curve_speed_factor, curve_target_duration,
+    split_curve,
 };
-pub use text::MaterialText;
+pub use text::{Bubble, CAPTION_STYLE_KEYS, MaterialText};
 pub use transition::{MaterialTransition, blend_extents, blend_window};
 pub use video::{Crop, FreezeInfo, MaterialVideo};
 pub use words::WordColumns;
@@ -310,6 +311,51 @@ impl Materials {
                 .filter(|path| !path.is_empty())
         };
         path(a).is_some_and(|left| path(b) == Some(left))
+    }
+
+    /// Keep only the materials whose id `keep` answers true for.
+    pub fn retain(&mut self, keep: impl Fn(&str) -> bool) {
+        macro_rules! keep_in {
+            ($($field:ident, $wrap:path);* $(;)?) => {
+                $(
+                    self.$field.retain(|item| keep(item.id.as_str()));
+                )*
+            };
+        }
+        each_pool!(keep_in);
+        for pool in self.extra_pools.values_mut() {
+            if let Some(items) = pool.as_array_mut() {
+                items.retain(|item| item.get("id").and_then(Value::as_str).is_none_or(&keep));
+            }
+        }
+    }
+
+    /// Move every material of `other` into these pools, after the ones here.
+    pub fn absorb(&mut self, other: Materials) {
+        let mut other = other;
+        macro_rules! move_in {
+            ($($field:ident, $wrap:path);* $(;)?) => {
+                $(
+                    self.$field.append(&mut other.$field);
+                )*
+            };
+        }
+        each_pool!(move_in);
+        for (name, pool) in other.extra_pools {
+            let Value::Array(mut items) = pool else {
+                continue;
+            };
+            match self
+                .extra_pools
+                .get_mut(&name)
+                .and_then(Value::as_array_mut)
+            {
+                Some(here) => here.append(&mut items),
+                None => {
+                    self.extra_pools.insert(name, Value::Array(items));
+                }
+            }
+        }
     }
 
     /// Take the material `id` out of whichever pool holds it. Whether one did.

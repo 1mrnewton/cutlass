@@ -1,6 +1,6 @@
 # MP3 container
 
-Demux and mux for an MPEG audio Layer III file. The packet is one frame, including its header. Times are samples at the frame's sample rate. This crate does not decode samples. The `mp3` codec crate is still empty.
+Demux and mux for an MPEG audio Layer III file. The packet is one frame, including its header. Times are samples at the frame's sample rate. This crate does not decode samples; `crates/codecs/mp3` does.
 
 Checkout `mp3-container` at `6dfa2b6`, parent `109d16f`. Both directions were requested.
 
@@ -17,7 +17,7 @@ Normative layout:
 
 Read before implementation: FFmpeg 8.1.1 `libavformat/mp3dec.c`, `mp3enc.c`, `id3v2.c`, `id3v1.c`, and `libavcodec/mpegaudiodecheader.c` with `mpegaudiotabs.h`; GStreamer `gstmpegaudioparse.c`; LAME `VbrTag.c`; mpg123 `parse.c`; the Symphonia MP3 demuxer. Those trees were not copied into this repo.
 
-`crates/engine` and `crates/export` are empty. Playback and export were not exercised. Tests call `Demux` and `Mux` directly. Timestamps are not converted to microseconds.
+The desktop app and the phone open MP3 files through `Mp3Demux`, and export writes sound-alone MP3 through `Mp3Mux` and the shared `cutlass_container::Mux` contract; `cutlass-mp3` and the export and desktop crates test those paths. Timestamps are not converted to microseconds here.
 
 ## Free format
 
@@ -27,7 +27,7 @@ Free format (bitrate index 0) is supported when a second compatible free-format 
 
 A Xing, Info, or VBRI frame is an index. It is not returned. Encoder delay and trailing padding are `Trim` on the stream and the same fields on `CodecParams`. They are the 12-bit values in the LAME extension. This crate does not add the decoder filterbank delay and does not drop samples.
 
-ID3v2 at the start (up to four tags) and ID3v1 or APEv2 at the end are skipped. Title, artist, and pictures are not exposed. The muxer does not write an ID3 tag.
+ID3v2 at the start (up to four tags) and ID3v1 or APEv2 at the end are skipped. Title, artist, and pictures are not exposed. When a trim is set before the first packet, the muxer writes one ID3v2.3 tag holding a `COMM` frame described `iTunSMPB`: `" 00000000 DDDDDDDD PPPPPPPP SSSSSSSSSSSSSSSS"` and eight zero words, delay, padding and the trimmed sample count in hex. Apple's decoders (afinfo, afconvert) take the trim from it; they, like ffmpeg, read the LAME slot's delay only when the encoder name starts with `LAME`, and this crate's encoder signs its tag `Cutlass`.
 
 Layer I and Layer II are `Unsupported { what: "layer" }` when two headers confirm the layer. They are not resynchronized into silence.
 
@@ -42,11 +42,11 @@ Layer I and Layer II are `Unsupported { what: "layer" }` when two headers confir
 | VBR without an index | Yes | Sequential read works | n/a | `SeekUnavailable` on a positive seek | Verified |
 | Free format | Yes, decision recorded above | Stride from the next sync | Opaque packets, file marked Xing | Free-format unit tests | Verified |
 | Gapless delay and padding | Yes as metadata | `Trim` only | LAME slot, delay and padding ≤ 4095 | Round trip 576/100, frame kept | Verified |
-| ID3v2, ID3v1, APEv2 | Skip, bounded | Not packets | Not written | ID3 and APE tests; hostile ID3 is `Limit` | Verified |
+| ID3v2, ID3v1, APEv2 | Skip, bounded | Not packets | `iTunSMPB` ID3v2.3 only | ID3 and APE tests; hostile ID3 is `Limit`; `the_shared_contract_writes_the_frames_and_the_trim_set_last` | Verified |
 | Layer I and II | No | `Unsupported` when confirmed | `Unsupported` | Layer II fixture | Unsupported |
 | ID3 text and pictures | No | Skipped with the tag | No field to write | By scope | Unsupported |
-| Sample decode | No | Outside this crate | Outside this crate | `crates/codecs/mp3` is empty | Outside scope |
-| Engine and export | Integration | Traits only | Traits only | Scaffolds are empty | Not run |
+| Sample decode | No | Outside this crate | Outside this crate | `crates/codecs/mp3` | Outside scope |
+| Engine and export | Integration | Desktop and phone readers open `.mp3` | Sound-only export writes `.mp3` | desktop `the_installed_readers_open_an_mp3`, export `sound_alone_writes_an_m4a_a_wav_a_flac_or_an_mp3` | Verified at test level |
 
 ## Limits
 
@@ -131,4 +131,4 @@ Exit status 0.
 
 ## Conclusion
 
-Demux and mux of an unqualified Layer III file are complete for the checks in this file. Layer I, Layer II, ID3 metadata, and sample coding stay unsupported. Engine and export integration was not run because those crates are empty. GStreamer was not an oracle because its plugin scanner does not finish on this machine.
+Demux and mux of an unqualified Layer III file are complete for the checks in this file. Layer I, Layer II, ID3 metadata, and sample coding stay unsupported. Export through the shared mux contract and the gapless trim are checked in `cutlass-export` and `cutlass-mp3`. GStreamer was not an oracle because its plugin scanner does not finish on this machine.

@@ -129,7 +129,11 @@ fn open_one(path: &Path) -> Result<(), String> {
         pixel,
         bytes,
         ..
-    } = held.frame
+    } = held
+        .frame
+        .on_cpu()
+        .map_err(|error| format!("copy out {error}"))?
+        .into_owned()
     else {
         return Err("picture came from the platform decoder".to_owned());
     };
@@ -501,7 +505,11 @@ fn evaluated_frame(path: &Path) -> Result<(), String> {
         primaries,
         transfer,
         ..
-    } = held.frame
+    } = held
+        .frame
+        .on_cpu()
+        .map_err(|error| format!("copy out {error}"))?
+        .into_owned()
     else {
         return Err("picture came from the platform decoder".to_owned());
     };
@@ -734,9 +742,37 @@ type Edit = fn(&mut Draft);
 fn decodes_on_gpu(frame: &cutlass_eval::FrameLayers) -> bool {
     frame.layers.iter().any(|layer| match &layer.source {
         cutlass_eval::GpuSource::Yuv { .. } => true,
-        cutlass_eval::GpuSource::Nested(child) => decodes_on_gpu(child),
-        cutlass_eval::GpuSource::Rgba(_) | cutlass_eval::GpuSource::Effect(_) => false,
+        cutlass_eval::GpuSource::Nested(child)
+        | cutlass_eval::GpuSource::Blend { layers: child, .. } => decodes_on_gpu(child),
+        cutlass_eval::GpuSource::Rgba(_)
+        | cutlass_eval::GpuSource::Effect(_)
+        | cutlass_eval::GpuSource::Vector(_)
+        | cutlass_eval::GpuSource::Transition { .. } => false,
     })
+}
+
+/// A decoded picture layer, or a compound's, is a platform surface rather
+/// than CPU bytes: the decoder handed the picture over without a copy.
+fn decodes_in_place(frame: &cutlass_eval::FrameLayers) -> bool {
+    frame.layers.iter().any(|layer| match &layer.source {
+        cutlass_eval::GpuSource::Yuv { samples, .. } => {
+            matches!(samples, cutlass_eval::YuvSamples::Surface(_))
+        }
+        cutlass_eval::GpuSource::Nested(child)
+        | cutlass_eval::GpuSource::Blend { layers: child, .. } => decodes_in_place(child),
+        cutlass_eval::GpuSource::Rgba(_)
+        | cutlass_eval::GpuSource::Effect(_)
+        | cutlass_eval::GpuSource::Vector(_)
+        | cutlass_eval::GpuSource::Transition { .. } => false,
+    })
+}
+
+/// The test renderer with this platform's surface import, as the preview
+/// draws with.
+fn importing_renderer() -> Option<cutlass_render::Renderer> {
+    let renderer = cutlass_render::Renderer::for_test().expect("a GPU is required")?;
+    let (device, queue) = (renderer.device().clone(), renderer.queue().clone());
+    Some(crate::gpu::platform_renderer(device, queue))
 }
 
 #[test]
@@ -747,7 +783,7 @@ fn the_gpu_compositor_matches_the_cpu_frame() {
         eprintln!("skipped: ../local-files/IMG_8143.MP4 is missing");
         return;
     }
-    let Some(renderer) = cutlass_render::Renderer::for_test().expect("a GPU is required") else {
+    let Some(renderer) = importing_renderer() else {
         eprintln!("skipped: no GPU");
         return;
     };
@@ -851,73 +887,160 @@ fn the_gpu_compositor_matches_the_cpu_frame() {
         }),
     ];
     let readers = crate::readers::installed_readers();
-    for (name, (width, height), edit) in cases {
-        let mut draft = movie_draft(&path, width, height, true).unwrap();
-        edit(&mut draft);
-        let time = Micros(500_000);
-        let mut device = SoftwareDevice::new();
-        let cpu = frame(
-            &Snapshot::with_fonts(&draft, &fonts),
-            time,
-            &mut device,
-            &readers,
-            &mut OpenClips::new(),
-            0,
-        )
-        .unwrap()
-        .rgba;
-        let mut clips = OpenClips::new();
-        let composed = cutlass_eval::layers_in(
-            &Snapshot::with_fonts(&draft, &fonts),
-            time,
-            &mut device,
-            &readers,
-            &mut clips,
-            0,
-            None,
-        )
-        .unwrap();
-        let cutlass_eval::Composed::Layers(layers) = composed else {
-            panic!("{name}: composed on the CPU");
-        };
+    for (name, size, edit) in cases {
+        gpu_matches_cpu(&renderer, &fonts, &readers, &path, name, size, edit);
+    }
+}
+
+/// A BT.2020 HLG movie takes the GPU path, and the shader's transfer and
+/// gamut step lands where the CPU conversion does.
+#[test]
+fn an_hdr_movie_converts_on_the_gpu_like_the_cpu() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../local-files");
+    let path = root.join("15215997_3840_2160_60fps.mp4");
+    if !path.is_file() {
+        eprintln!("skipped: ../local-files/15215997_3840_2160_60fps.mp4 is missing");
+        return;
+    }
+    let Some(renderer) = importing_renderer() else {
+        eprintln!("skipped: no GPU");
+        return;
+    };
+    let fonts = crate::face::installed();
+    let readers = crate::readers::installed_readers();
+    let cases: [(&str, (u32, u32), Edit); 3] = [
+        ("hdr shrunk to fit", (960, 540), |_| {}),
+        ("hdr moved and faded", (960, 540), |draft| {
+            let clip = &mut draft.tracks[0].segments[1].clip;
+            clip.scale.x = 0.6;
+            clip.scale.y = 0.6;
+            clip.rotation = 20.0;
+            clip.alpha = 0.7;
+        }),
+        ("hdr blur backdrop", (960, 700), |draft| {
+            let canvas = MaterialCanvas {
+                id: "canvas".into(),
+                kind: "canvas_blur".to_owned(),
+                blur: 0.05,
+                ..MaterialCanvas::default()
+            };
+            draft.tracks[0].segments[1]
+                .extra_material_refs
+                .push(canvas.id.clone());
+            draft.materials.canvases.push(canvas);
+        }),
+    ];
+    for (name, size, edit) in cases {
+        gpu_matches_cpu(&renderer, &fonts, &readers, &path, name, size, edit);
+    }
+    // The decoder reads the file's HLG tag, so the shader decodes HLG.
+    let draft = movie_draft(&path, 960, 540, false).unwrap();
+    let composed = cutlass_eval::layers_in(
+        &Snapshot::with_fonts(&draft, &fonts),
+        Micros(500_000),
+        &mut SoftwareDevice::new(),
+        &readers,
+        &mut OpenClips::new(),
+        0,
+        None,
+    )
+    .unwrap();
+    let cutlass_eval::Composed::Layers(layers) = composed else {
+        panic!("composed on the CPU");
+    };
+    let tones: Vec<_> = layers
+        .layers
+        .iter()
+        .filter_map(|layer| match &layer.source {
+            cutlass_eval::GpuSource::Yuv { tone, .. } => Some(tone.source),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(tones, [cutlass_eval::ToneCurve::Hlg]);
+}
+
+/// The GPU layers for `path` under `edit` match the CPU frame at 0.5 s: at
+/// most one pixel in a thousand differs by more than 2 in any channel.
+fn gpu_matches_cpu(
+    renderer: &cutlass_render::Renderer,
+    fonts: &crate::face::FaceTable,
+    readers: &ReaderFactory,
+    path: &Path,
+    name: &str,
+    (width, height): (u32, u32),
+    edit: Edit,
+) {
+    let mut draft = movie_draft(path, width, height, true).unwrap();
+    edit(&mut draft);
+    let time = Micros(500_000);
+    let mut device = SoftwareDevice::new();
+    let cpu = frame(
+        &Snapshot::with_fonts(&draft, fonts),
+        time,
+        &mut device,
+        readers,
+        &mut OpenClips::new(),
+        0,
+    )
+    .unwrap()
+    .rgba;
+    let mut clips = OpenClips::new();
+    let composed = cutlass_eval::layers_in(
+        &Snapshot::with_fonts(&draft, fonts),
+        time,
+        &mut device,
+        readers,
+        &mut clips,
+        0,
+        None,
+    )
+    .unwrap();
+    let cutlass_eval::Composed::Layers(layers) = composed else {
+        panic!("{name}: composed on the CPU");
+    };
+    assert!(
+        decodes_on_gpu(&layers),
+        "{name}: the movie did not reach the GPU"
+    );
+    if cfg!(target_os = "macos") {
         assert!(
-            decodes_on_gpu(&layers),
-            "{name}: the movie did not reach the GPU"
-        );
-        if name == "title over video" && !fonts.name().is_empty() {
-            assert!(
-                layers.layers.iter().any(|layer| matches!(
-                    &layer.source,
-                    cutlass_eval::GpuSource::Rgba(raster) if raster.width() > 1
-                )),
-                "the title was not drawn"
-            );
-        }
-        let canvas = renderer.canvas(width, height).unwrap();
-        renderer.draw_frame(&canvas, &layers).unwrap();
-        let gpu = renderer.read(&canvas).unwrap();
-        assert_eq!(gpu.len(), cpu.len(), "{name}");
-        let pixels = cpu.len() / 4;
-        let mut off = 0;
-        let mut worst = 0;
-        for (a, b) in gpu.chunks(4).zip(cpu.chunks(4)) {
-            let diff = a
-                .iter()
-                .zip(b)
-                .map(|(x, y)| x.abs_diff(*y))
-                .max()
-                .unwrap_or(0);
-            worst = worst.max(diff);
-            if diff > 2 {
-                off += 1;
-            }
-        }
-        eprintln!("{name}: {off} of {pixels} pixels differ by more than 2, worst {worst}");
-        assert!(
-            off * 1000 <= pixels,
-            "{name}: {off} of {pixels} pixels differ"
+            decodes_in_place(&layers),
+            "{name}: the movie was copied off the GPU"
         );
     }
+    if name == "title over video" && !fonts.name().is_empty() {
+        assert!(
+            layers.layers.iter().any(|layer| matches!(
+                &layer.source,
+                cutlass_eval::GpuSource::Rgba(raster) if raster.width() > 1
+            )),
+            "the title was not drawn"
+        );
+    }
+    let canvas = renderer.canvas(width, height).unwrap();
+    renderer.draw_frame(&canvas, &layers).unwrap();
+    let gpu = renderer.read(&canvas).unwrap();
+    assert_eq!(gpu.len(), cpu.len(), "{name}");
+    let pixels = cpu.len() / 4;
+    let mut off = 0;
+    let mut worst = 0;
+    for (a, b) in gpu.chunks(4).zip(cpu.chunks(4)) {
+        let diff = a
+            .iter()
+            .zip(b)
+            .map(|(x, y)| x.abs_diff(*y))
+            .max()
+            .unwrap_or(0);
+        worst = worst.max(diff);
+        if diff > 2 {
+            off += 1;
+        }
+    }
+    eprintln!("{name}: {off} of {pixels} pixels differ by more than 2, worst {worst}");
+    assert!(
+        off * 1000 <= pixels,
+        "{name}: {off} of {pixels} pixels differ"
+    );
 }
 
 /// The movie `CUTLASS_MOVIE` names, walked a frame at a time through the
@@ -970,7 +1093,7 @@ fn a_named_movie_decodes_in_display_order_on_the_platform() {
                     let (Some(a), Some(b)) = (luma(&held.frame), luma(&other.frame)) else {
                         panic!("at {time}: a picture that is not CPU 4:2:0");
                     };
-                    let psnr = psnr(a, b);
+                    let psnr = psnr(&a, &b);
                     assert!(psnr > 35.0, "at {time}: {psnr:.1} dB against Rust");
                     matched += 1;
                     // A debug Rust decode of a 4K picture is slow; a few
@@ -988,15 +1111,17 @@ fn a_named_movie_decodes_in_display_order_on_the_platform() {
     assert!(walked > 10);
 }
 
-fn luma(frame: &DecodedFrame) -> Option<&[u8]> {
-    match frame {
+fn luma(frame: &DecodedFrame) -> Option<Vec<u8>> {
+    match frame.on_cpu().ok()?.as_ref() {
         DecodedFrame::Coded {
             width,
             height,
             pixel: PixelFormat::Yuv420p,
             bytes,
             ..
-        } => bytes.get(..(*width as usize) * (*height as usize)),
+        } => bytes
+            .get(..(*width as usize) * (*height as usize))
+            .map(<[u8]>::to_vec),
         _ => None,
     }
 }

@@ -10,7 +10,10 @@
 //! offset. Edit durations use `MuxOptions::movie_timescale` when the caller
 //! sets it, and the least common multiple of the track timescales otherwise.
 
-use crate::legacy::{CodecId, Edit, Error, MediaKind, Mux, Packet, SampleFormat, StreamParams};
+use crate::alac;
+use crate::legacy::{
+    CodecId, ColorTags, Edit, Error, MediaKind, Mux, Packet, SampleFormat, StreamParams,
+};
 use crate::limits::{
     DEFAULT_SAMPLES_PER_FRAGMENT, MAX_BUFFERED_MUX_BYTES, MAX_PACKET_BYTES, MAX_TRACKS,
 };
@@ -146,6 +149,23 @@ impl<W: Write + Seek> IsoBmffMux<W> {
             return Err(Error::Missing { what: "track" });
         };
         track.params.extradata = extradata;
+        Ok(())
+    }
+
+    /// Sets a track's color code points, written as a `colr` box in its
+    /// sample description at finish.
+    pub fn set_color(&mut self, track_id: u32, color: ColorTags) -> Result<(), Error> {
+        if self.finished {
+            return Err(Error::Incomplete);
+        }
+        let Some(track) = self
+            .tracks
+            .iter_mut()
+            .find(|track| track.params.track_id == track_id)
+        else {
+            return Err(Error::Missing { what: "track" });
+        };
+        track.params.color = Some(color);
         Ok(())
     }
 
@@ -671,7 +691,23 @@ fn tkhd(track: &TrackOut, duration: u64) -> Vec<u8> {
 /// A zero segment duration with a media time does not describe a dwell.
 /// Fragmented files leave that duration unknown. Use the media length so a
 /// player does not treat the edit as empty.
+///
+/// An Opus track without edits gets the one its encapsulation asks for:
+/// play from the pre-skip to the end of the sample durations, whose last
+/// one is already cut to the end trim.
 fn present_edits(track: &TrackOut, media_duration: u64, movie_scale: u32) -> Vec<Edit> {
+    if track.edits.is_empty()
+        && track.params.codec == CodecId::Opus
+        && let Some(pre_skip) = crate::opus::pre_skip(&track.params.extradata)
+        && media_duration > u64::from(pre_skip)
+    {
+        let played = media_duration - u64::from(pre_skip);
+        return vec![Edit {
+            segment_duration: scale_u(played, track.params.timescale.get(), movie_scale).max(1),
+            media_time: Some(i64::from(pre_skip)),
+            media_rate: 0x0001_0000,
+        }];
+    }
     track
         .edits
         .iter()
@@ -757,6 +793,10 @@ fn stbl(
 ) -> Result<Vec<u8>, Error> {
     let mut body = Vec::new();
     body.extend(stsd(track)?);
+    if let Some(frame) = pcm_frame_bytes(track) {
+        body.extend(pcm_tables(samples, frame, map_offset));
+        return Ok(box_bytes(b"stbl", &body));
+    }
     body.extend(stts(samples));
     if samples.iter().any(|sample| sample.pts != sample.dts) {
         body.extend(ctts(samples)?);
@@ -767,6 +807,63 @@ fn stbl(
         body.extend(stss(samples));
     }
     Ok(box_bytes(b"stbl", &body))
+}
+
+/// The bytes of one audio frame of a raw PCM track, or `None` for any
+/// other track.
+fn pcm_frame_bytes(track: &TrackOut) -> Option<u32> {
+    if track.params.codec != CodecId::Pcm {
+        return None;
+    }
+    let MediaKind::Audio(audio) = track.params.kind else {
+        return None;
+    };
+    let bytes = u32::from(audio.channels) * u32::from(audio.bits_per_sample / 8);
+    (bytes > 0).then_some(bytes)
+}
+
+/// Sample tables for raw PCM, as QuickTime reads them: each audio frame is
+/// one sample of one tick, and each written packet is one chunk.
+fn pcm_tables(samples: &[&Held], frame: u32, map_offset: &impl Fn(u64) -> u64) -> Vec<u8> {
+    let frames: Vec<u32> = samples.iter().map(|sample| sample.size / frame).collect();
+    let total: u32 = frames
+        .iter()
+        .fold(0, |sum, count| sum.saturating_add(*count));
+    let mut stts = vec![0, 0, 0, 0];
+    if total == 0 {
+        stts.extend_from_slice(&0u32.to_be_bytes());
+    } else {
+        stts.extend_from_slice(&1u32.to_be_bytes());
+        stts.extend_from_slice(&total.to_be_bytes());
+        stts.extend_from_slice(&1u32.to_be_bytes());
+    }
+    let mut runs: Vec<(u32, u32)> = Vec::new();
+    for (index, count) in frames.iter().enumerate() {
+        if runs.last().is_some_and(|(_, last)| last == count) {
+            continue;
+        }
+        runs.push((u32::try_from(index + 1).unwrap_or(u32::MAX), *count));
+    }
+    let mut stsc = vec![0, 0, 0, 0];
+    stsc.extend_from_slice(&u32::try_from(runs.len()).unwrap_or(0).to_be_bytes());
+    for (first, count) in runs {
+        stsc.extend_from_slice(&first.to_be_bytes());
+        stsc.extend_from_slice(&count.to_be_bytes());
+        stsc.extend_from_slice(&1u32.to_be_bytes());
+    }
+    let mut co64 = vec![0, 0, 0, 0];
+    co64.extend_from_slice(&u32::try_from(samples.len()).unwrap_or(0).to_be_bytes());
+    for sample in samples {
+        co64.extend_from_slice(&map_offset(sample.offset).to_be_bytes());
+    }
+    let mut stsz = vec![0, 0, 0, 0];
+    stsz.extend_from_slice(&frame.to_be_bytes());
+    stsz.extend_from_slice(&total.to_be_bytes());
+    let mut out = box_bytes(b"stts", &stts);
+    out.extend(box_bytes(b"stsc", &stsc));
+    out.extend(box_bytes(b"co64", &co64));
+    out.extend(box_bytes(b"stsz", &stsz));
+    out
 }
 
 fn stsd(track: &TrackOut) -> Result<Vec<u8>, Error> {
@@ -790,7 +887,13 @@ fn stsd(track: &TrackOut) -> Result<Vec<u8>, Error> {
             entry.extend_from_slice(&(-1i16).to_be_bytes());
             entry.extend(config_boxes(track)?);
         }
-        MediaKind::Audio(audio) => {
+        MediaKind::Audio(mut audio) => {
+            if &code == b"alac"
+                && let Some(facts) = alac::facts(&track.params.extradata)
+            {
+                audio.channels = facts.channels;
+                audio.bits_per_sample = facts.bits;
+            }
             entry.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 1]);
             entry.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0]);
             entry.extend_from_slice(&audio.channels.to_be_bytes());
@@ -822,9 +925,20 @@ fn config_boxes(track: &TrackOut) -> Result<Vec<u8>, Error> {
     } else if matches!(&code, b"vp08" | b"vp09") {
         out.extend(box_bytes(b"vpcC", &track.params.extradata));
     } else if &code == b"Opus" {
-        out.extend(box_bytes(b"dOps", &track.params.extradata));
+        let dops = crate::opus::dops(&track.params.extradata).ok_or(Error::Unsupported {
+            what: "Opus configuration that is neither dOps nor OpusHead",
+        })?;
+        out.extend(box_bytes(b"dOps", &dops));
     } else if &code == b"alac" {
-        out.extend(box_bytes(b"alac", &track.params.extradata));
+        // Extradata is the bare cookie; the entry holds its config in an
+        // `alac` box and its layout in a sibling `chan` box, as Apple writes.
+        let (config, chan) = alac::split(&track.params.extradata).ok_or(Error::Missing {
+            what: "alac cookie",
+        })?;
+        out.extend(box_bytes(b"alac", &config));
+        if let Some(chan) = chan {
+            out.extend(box_bytes(b"chan", &chan));
+        }
     } else if matches!(&code, b"ac-3" | b"sac3") {
         out.extend(box_bytes(b"dac3", &track.params.extradata));
     } else if &code == b"ec-3" {

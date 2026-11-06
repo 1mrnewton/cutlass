@@ -1,243 +1,16 @@
-//! Which panel the inspector opens for the selected clip, what that panel
-//! reads, and the edits only the inspector makes. Each edit is one session
-//! request, so each is one undo step.
+//! The inspector's edits on the selected clip. The model each shell shares
+//! (panels, text look, decibels, letter case) is in `cutlass_editor`. Each
+//! edit is one session request, so each is one undo step.
 
-use cutlass_model::{
-    Draft, MaterialEffect, MaterialId, MaterialRef, MaterialText, Micros, Segment, SegmentId,
-    Track, TrackFlag, TrackType, WordColumns, segment_bloom,
+use cutlass_editor::{
+    BACKGROUND_ALPHA_START, BACKGROUND_ROUND_START, GLOW_RANGE_START, GLOW_STRENGTH_START,
+    OUTLINE_START, SHADOW_BLUR_START, SHADOW_DISTANCE_START, panel_of, starting, text_look,
 };
+pub use cutlass_editor::{LetterCase, Panel, SILENT_DB, TextLook, gain_of_db, volume_db};
+use cutlass_model::{MaterialEffect, MaterialId, MaterialRef, Micros, SegmentId, WordColumns};
 use cutlass_session::Request;
 
 use super::{Shell, ShellError};
-
-/// The panel a clip opens in the inspector, from its material and its row.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Panel {
-    /// A picture on the main track. `still` is a photo or a color clip.
-    Main {
-        still: bool,
-    },
-    /// A picture on an overlay row.
-    Overlay {
-        still: bool,
-    },
-    Audio,
-    Text,
-    /// A text clip with recognized words, or one on a caption or lyric row.
-    Caption,
-    Effect,
-    Filter,
-    Adjust,
-    Sticker,
-    /// A clip this build has no panel for.
-    Other,
-}
-
-impl Panel {
-    #[must_use]
-    pub fn title(self) -> &'static str {
-        match self {
-            Self::Main { still: false } => "Video",
-            Self::Main { still: true } => "Photo",
-            Self::Overlay { still: false } => "Overlay video",
-            Self::Overlay { still: true } => "Overlay photo",
-            Self::Audio => "Audio",
-            Self::Text => "Text",
-            Self::Caption => "Caption",
-            Self::Effect => "Effect",
-            Self::Filter => "Filter",
-            Self::Adjust => "Adjustment",
-            Self::Sticker => "Sticker",
-            Self::Other => "Clip",
-        }
-    }
-}
-
-/// How a title's outline, shadow, box, and glow look. A part with an empty
-/// color is off; its numbers are what it returns with.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct TextLook {
-    pub outline_color: String,
-    /// Ems.
-    pub outline_width: f64,
-    pub shadow_color: String,
-    /// Hundredths of an em.
-    pub shadow_distance: f64,
-    /// 0 to 1.
-    pub shadow_blur: f64,
-    /// Degrees. A title with no shadow reads the angle a first one takes.
-    pub shadow_angle: f64,
-    pub background_color: String,
-    /// 0 to 1.
-    pub background_alpha: f64,
-    /// 0 square to 1 round.
-    pub background_round: f64,
-    pub glow_color: String,
-    /// 0 to 1.
-    pub glow_strength: f64,
-    /// 0 to 1.
-    pub glow_range: f64,
-}
-
-/// What a part takes when its color is first picked and its numbers are
-/// still zero. These are the phone's Styles starting values.
-pub const OUTLINE_START: f64 = 0.06;
-pub const SHADOW_DISTANCE_START: f64 = 8.0;
-pub const SHADOW_BLUR_START: f64 = 0.3;
-pub const BACKGROUND_ALPHA_START: f64 = 1.0;
-pub const BACKGROUND_ROUND_START: f64 = 0.3;
-pub const GLOW_STRENGTH_START: f64 = 0.6;
-pub const GLOW_RANGE_START: f64 = 0.5;
-/// Where a new shadow falls: down and to the right.
-pub const SHADOW_ANGLE: f64 = -45.0;
-
-/// The panel for `segment` on `track`. The material decides first; the row
-/// decides for materials that only say what they are through their row.
-#[must_use]
-pub fn panel_of(draft: &Draft, track: &Track, segment: &Segment) -> Panel {
-    let picture = |still: bool| {
-        if track.is_main() {
-            Panel::Main { still }
-        } else {
-            Panel::Overlay { still }
-        }
-    };
-    match draft.materials.get(segment.material_id.as_str()) {
-        Some(MaterialRef::Video(video)) => picture(video.kind == "photo"),
-        Some(MaterialRef::Draft(_)) => picture(false),
-        Some(MaterialRef::Color(_)) => picture(true),
-        Some(MaterialRef::Audio(_)) => Panel::Audio,
-        Some(MaterialRef::Text(text)) if caption(track, text) => Panel::Caption,
-        Some(MaterialRef::Text(_)) => Panel::Text,
-        Some(MaterialRef::VideoEffect(_) | MaterialRef::Plugin(_)) => Panel::Effect,
-        _ => match track.kind {
-            TrackType::Audio | TrackType::TextToVideoTextAudio => Panel::Audio,
-            TrackType::Text | TrackType::TextToVideoText => Panel::Text,
-            TrackType::Sticker => Panel::Sticker,
-            TrackType::Effect | TrackType::PluginEffect => Panel::Effect,
-            TrackType::Filter => Panel::Filter,
-            TrackType::Adjust => Panel::Adjust,
-            _ if draft
-                .materials
-                .stickers
-                .iter()
-                .any(|item| item.id == segment.material_id) =>
-            {
-                Panel::Sticker
-            }
-            _ => Panel::Other,
-        },
-    }
-}
-
-fn caption(track: &Track, text: &MaterialText) -> bool {
-    matches!(
-        track.flag,
-        TrackFlag::TextSubtitle
-            | TrackFlag::TextLyric
-            | TrackFlag::VideoSubtitle
-            | TrackFlag::AudioSubtitle
-            | TrackFlag::AiScriptSubtitle
-    ) || matches!(text.kind.as_str(), "subtitle" | "lyrics")
-        || !text.words.text.is_empty()
-}
-
-fn text_look(draft: &Draft, segment: &Segment) -> Option<TextLook> {
-    let Some(MaterialRef::Text(text)) = draft.materials.get(segment.material_id.as_str()) else {
-        return None;
-    };
-    let on = |on: bool, color: &str| if on { color.to_owned() } else { String::new() };
-    // No glow reads as no amounts, so a first glow color takes the starts.
-    let (glow_color, glow_strength, glow_range) = segment_bloom(&draft.materials, segment)
-        .and_then(MaterialEffect::bloom)
-        .map_or((String::new(), 0.0, 0.0), |glow| {
-            (glow.color, glow.strength, glow.range)
-        });
-    Some(TextLook {
-        outline_color: text.border_color.clone(),
-        outline_width: text.border_width,
-        shadow_color: on(text.has_shadow, &text.shadow_color),
-        shadow_distance: text.shadow_distance,
-        shadow_blur: text.shadow_smoothing,
-        shadow_angle: if text.has_shadow && text.shadow_angle.is_finite() {
-            text.shadow_angle
-        } else {
-            SHADOW_ANGLE
-        },
-        background_color: on(text.background_style != 0, &text.background_color),
-        background_alpha: text.background_alpha,
-        background_round: text.background_round_radius,
-        glow_color,
-        glow_strength,
-        glow_range,
-    })
-}
-
-/// The quietest level the volume slider shows; it and below are silence.
-pub const SILENT_DB: f64 = -60.0;
-
-/// A gain in decibels, [`SILENT_DB`] for silence.
-#[must_use]
-pub fn volume_db(gain: f64) -> f64 {
-    if gain <= 0.0 || !gain.is_finite() {
-        return SILENT_DB;
-    }
-    (20.0 * gain.log10()).max(SILENT_DB)
-}
-
-/// The gain for `db` decibels; [`SILENT_DB`] and below is zero.
-#[must_use]
-pub fn gain_of_db(db: f64) -> f64 {
-    if db <= SILENT_DB {
-        0.0
-    } else {
-        10f64.powf(db / 20.0)
-    }
-}
-
-/// How the Case buttons rewrite a title's words.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum LetterCase {
-    Upper,
-    Lower,
-    /// The first letter of each word up, the rest down.
-    Title,
-}
-
-impl LetterCase {
-    #[must_use]
-    pub fn apply(self, words: &str) -> String {
-        match self {
-            Self::Upper => words.to_uppercase(),
-            Self::Lower => words.to_lowercase(),
-            Self::Title => {
-                let mut out = String::with_capacity(words.len());
-                let mut start = true;
-                for letter in words.chars() {
-                    if letter.is_whitespace() {
-                        start = true;
-                        out.push(letter);
-                    } else if start {
-                        start = false;
-                        out.extend(letter.to_uppercase());
-                    } else {
-                        out.extend(letter.to_lowercase());
-                    }
-                }
-                out
-            }
-        }
-    }
-}
-
-/// `value`, or `start` when a part is being turned on with nothing set.
-fn starting(color: &str, value: f64, start: f64) -> f64 {
-    if !color.is_empty() && value == 0.0 {
-        start
-    } else {
-        value
-    }
-}
 
 impl Shell {
     /// The panel the selected clip opens.
@@ -497,6 +270,42 @@ impl Shell {
         })
     }
 
+    /// Shape the selected title's background as the bubble keyed `bubble`.
+    /// An empty key takes the bubble off with the background it stands
+    /// on. One undo restores it.
+    pub fn set_text_bubble(&mut self, bubble: &str) -> Result<(), ShellError> {
+        let segment_id = self.text_segment()?;
+        self.refuse_locked(&segment_id)?;
+        let mut requests = vec![Request::SetTextBubble {
+            segment_id: segment_id.clone(),
+            bubble: bubble.to_owned(),
+        }];
+        if bubble.is_empty() {
+            requests.push(Request::SetTextBackground {
+                segment_id,
+                color: String::new(),
+                alpha: 1.0,
+                round: 0.0,
+            });
+        }
+        self.apply_requests(&requests)
+    }
+
+    /// Give the selected title the look on the Effects page with `id`, or
+    /// take every part off with `"none"`. One undo restores it.
+    pub fn set_text_effect(&mut self, id: &str) -> Result<(), ShellError> {
+        let effect = std::iter::once(&cutlass_editor::NO_TEXT_EFFECT)
+            .chain(cutlass_editor::TEXT_EFFECTS)
+            .find(|effect| effect.id == id)
+            .ok_or_else(|| ShellError::Unavailable(format!("no text effect is called {id}")))?;
+        let segment_id = self.text_segment()?;
+        self.refuse_locked(&segment_id)?;
+        let glow_id = MaterialId::new(self.fresh("glow"));
+        let face = self.face.name().to_owned();
+        let requests = cutlass_editor::text_effect_requests(effect, &segment_id, glow_id, &face);
+        self.apply_requests(&requests)
+    }
+
     /// Make the selected title glow in `color`. A split clip's halves glow
     /// on their own once one changes. One undo restores it.
     pub fn set_text_glow(
@@ -636,6 +445,50 @@ impl Shell {
         self.set_volume(gain_of_db(db))
     }
 
+    /// Draw the selected caption in the style keyed `style`, or plain with
+    /// an empty key. One undo restores it.
+    pub fn set_caption_style(&mut self, style: &str) -> Result<(), ShellError> {
+        let segment_id = self.text_segment()?;
+        self.refuse_locked(&segment_id)?;
+        self.apply(Request::SetCaptionStyle {
+            segment_id,
+            style: style.to_owned(),
+        })
+    }
+
+    /// Move the selected picture clip up or down among the clips it
+    /// overlaps. Needs Free layer on. One undo restores it.
+    pub fn arrange(&mut self, step: cutlass_session::Arrange) -> Result<(), ShellError> {
+        let segment_id = self.selected_or_refuse()?;
+        self.refuse_locked(&segment_id)?;
+        if !self.draft().is_some_and(|draft| draft.config.free_layer) {
+            return Err(ShellError::Unavailable(
+                "turn on Free layer in the project settings to arrange clips".to_owned(),
+            ));
+        }
+        self.apply(Request::Arrange { segment_id, step })
+    }
+
+    /// Mark word `index` of the selected caption as a keyword, drawn in
+    /// its style's spoken look, or take the mark off. One undo restores it.
+    pub fn set_caption_keyword(&mut self, index: usize, on: bool) -> Result<(), ShellError> {
+        let segment_id = self.text_segment()?;
+        self.refuse_locked(&segment_id)?;
+        self.apply(Request::SetCaptionKeyword {
+            segment_id,
+            word: index,
+            on,
+        })
+    }
+
+    /// Start each letter of the selected caption's words `millis` after
+    /// the one before. One undo restores it.
+    pub fn set_caption_stagger(&mut self, millis: i64) -> Result<(), ShellError> {
+        let segment_id = self.text_segment()?;
+        self.refuse_locked(&segment_id)?;
+        self.apply(Request::SetCaptionStagger { segment_id, millis })
+    }
+
     /// Replace word `index` of the selected caption. The word keeps its
     /// times, and the caption reads the words joined by spaces. One undo
     /// restores the word.
@@ -648,8 +501,8 @@ impl Shell {
                 "a word needs at least one letter".to_owned(),
             ));
         }
-        let (material_id, mut words) = self.caption_words(&segment_id)?;
-        let Some(slot) = words.text.get_mut(index) else {
+        let (material_id, words) = self.caption_words(&segment_id)?;
+        let Some(slot) = words.text.get(index) else {
             return Err(ShellError::Unavailable(
                 "the caption has no such word".to_owned(),
             ));
@@ -657,7 +510,34 @@ impl Shell {
         if slot == word {
             return Ok(());
         }
-        word.clone_into(slot);
+        // Words typed apart share the word's time.
+        let words = cutlass_editor::retype_word(&words, index, word).ok_or_else(|| {
+            ShellError::Unavailable("a line break is not a word to type over".to_owned())
+        })?;
+        self.apply(Request::SetWords { material_id, words })
+    }
+
+    /// Join word `index` of the selected caption with the next, over both
+    /// their times. One undo step.
+    pub fn join_caption_words(&mut self, index: usize) -> Result<(), ShellError> {
+        let segment_id = self.text_segment()?;
+        self.refuse_locked(&segment_id)?;
+        let (material_id, words) = self.caption_words(&segment_id)?;
+        let words = cutlass_editor::join_words(&words, index).ok_or_else(|| {
+            ShellError::Unavailable("there is no next word on the line to join".to_owned())
+        })?;
+        self.apply(Request::SetWords { material_id, words })
+    }
+
+    /// Start a new caption line at word `index`, or join it back to the
+    /// line before. One undo step.
+    pub fn toggle_caption_break(&mut self, index: usize) -> Result<(), ShellError> {
+        let segment_id = self.text_segment()?;
+        self.refuse_locked(&segment_id)?;
+        let (material_id, words) = self.caption_words(&segment_id)?;
+        let words = cutlass_editor::toggle_line_break(&words, index).ok_or_else(|| {
+            ShellError::Unavailable("the first word already starts a line".to_owned())
+        })?;
         self.apply(Request::SetWords { material_id, words })
     }
 
@@ -837,6 +717,47 @@ mod tests {
 
     fn pick(desktop: &mut Shell, id: &str) {
         desktop.select(Some(SegmentId::new(id)));
+    }
+
+    /// The video clips in drawing order, bottom first.
+    fn stack(desktop: &Shell) -> Vec<String> {
+        let draft = desktop.draft().unwrap();
+        let mut keys = Vec::new();
+        for (track, row) in draft.tracks.iter().enumerate() {
+            if !matches!(row.kind, TrackType::Video) {
+                continue;
+            }
+            for (at, segment) in row.segments.iter().enumerate() {
+                keys.push(((segment.render_index, track, at), segment.id.to_string()));
+            }
+        }
+        keys.sort();
+        keys.into_iter().map(|(_, id)| id).collect()
+    }
+
+    #[test]
+    fn arrange_needs_free_layer_and_moves_a_clip_in_one_step() {
+        let temp = Temp::new();
+        let mut desktop = every_kind(&temp);
+        assert_eq!(stack(&desktop), ["main", "overlay", "still", "solid"]);
+        pick(&mut desktop, "overlay");
+        assert!(
+            desktop.arrange(cutlass_session::Arrange::Front).is_err(),
+            "off, the tracks give the order"
+        );
+        let mut settings = desktop.project_settings().unwrap();
+        settings.free_layer = true;
+        desktop.save_project_settings(&settings).unwrap();
+        desktop.arrange(cutlass_session::Arrange::Front).unwrap();
+        assert_eq!(stack(&desktop), ["main", "still", "solid", "overlay"]);
+        pick(&mut desktop, "main");
+        desktop.arrange(cutlass_session::Arrange::Forward).unwrap();
+        assert_eq!(stack(&desktop), ["still", "main", "solid", "overlay"]);
+        desktop.undo().unwrap();
+        assert_eq!(stack(&desktop), ["main", "still", "solid", "overlay"]);
+        settings.free_layer = false;
+        desktop.save_project_settings(&settings).unwrap();
+        assert_eq!(stack(&desktop), ["main", "overlay", "still", "solid"]);
     }
 
     fn lock(desktop: &mut Shell, track: &str) {
@@ -1117,14 +1038,14 @@ mod tests {
             desktop.text_look(),
             Some(TextLook {
                 background_alpha: 1.0,
-                shadow_angle: super::SHADOW_ANGLE,
+                shadow_angle: cutlass_editor::SHADOW_ANGLE,
                 ..TextLook::default()
             })
         );
 
         desktop.set_text_outline("#FF0000", 0.0).unwrap();
         desktop
-            .set_text_shadow("#000000", 0.0, super::SHADOW_ANGLE, 0.0)
+            .set_text_shadow("#000000", 0.0, cutlass_editor::SHADOW_ANGLE, 0.0)
             .unwrap();
         desktop.set_text_background("#FFFFFF", 0.0, 0.0).unwrap();
         desktop.set_text_glow("#00FF00", 0.0, 0.0).unwrap();
@@ -1164,6 +1085,38 @@ mod tests {
         assert!(desktop.set_text_background("nope", 1.0, 0.0).is_err());
         assert_eq!(desktop.draft().unwrap(), &before);
 
+        // A bubble shapes a background it brings; None takes both off in
+        // one step.
+        desktop.set_text_bubble("thought").unwrap();
+        let look = desktop.text_look().unwrap();
+        assert_eq!(
+            (look.bubble.as_str(), look.background_color.as_str()),
+            ("thought", "#FFFFFF")
+        );
+        desktop.set_text_bubble("").unwrap();
+        let look = desktop.text_look().unwrap();
+        assert_eq!(
+            (look.bubble.as_str(), look.background_color.as_str()),
+            ("", "")
+        );
+        desktop.undo().unwrap();
+        assert_eq!(desktop.text_look().unwrap().bubble, "thought");
+        assert!(desktop.set_text_bubble("cloud").is_err());
+
+        // An effect sets every part in one step and reads back as itself.
+        desktop.set_text_effect("pop").unwrap();
+        let look = desktop.text_look().unwrap();
+        assert_eq!(
+            cutlass_editor::text_effect_of(&look).map(|effect| effect.id),
+            Some("pop")
+        );
+        desktop.undo().unwrap();
+        assert_ne!(
+            cutlass_editor::text_effect_of(&desktop.text_look().unwrap()).map(|effect| effect.id),
+            Some("pop")
+        );
+        assert!(desktop.set_text_effect("sparkle").is_err());
+
         pick(&mut desktop, "main");
         assert_eq!(desktop.text_look(), None);
         assert_eq!(
@@ -1200,6 +1153,35 @@ mod tests {
         desktop.set_caption_word(1, "too").unwrap();
         assert_eq!(desktop.revision(), revision);
         desktop.undo().unwrap();
+        assert_eq!(desktop.draft().unwrap(), &before);
+
+        // A word typed as two splits its time; joined again it is one.
+        desktop.set_caption_word(1, "to far").unwrap();
+        let inspection = desktop.inspection().unwrap();
+        assert_eq!(inspection.words.text, ["one", "to", "far"]);
+        assert_eq!(inspection.words.end_time, [400, 660, 900]);
+        desktop.join_caption_words(1).unwrap();
+        assert_eq!(desktop.inspection().unwrap().words.text, ["one", "to far"]);
+        desktop.toggle_caption_break(1).unwrap();
+        let broken = desktop.inspection().unwrap();
+        assert_eq!(broken.words.text, ["one", "\n", "to far"]);
+        assert_eq!(broken.text.as_deref(), Some("one\nto far"));
+        assert!(desktop.toggle_caption_break(0).is_err());
+        desktop.set_caption_style("karaoke").unwrap();
+        assert_eq!(desktop.inspection().unwrap().caption_style, "karaoke");
+        assert!(desktop.set_caption_style("loud").is_err());
+        desktop.set_caption_keyword(2, true).unwrap();
+        desktop.set_caption_stagger(40).unwrap();
+        let marked = desktop.inspection().unwrap();
+        assert_eq!(marked.caption_keywords, [2]);
+        assert_eq!(marked.caption_stagger_ms, 40);
+        assert!(desktop.set_caption_keyword(9, true).is_err());
+        assert!(desktop.set_caption_stagger(5_000).is_err());
+        desktop.undo().unwrap();
+        desktop.undo().unwrap();
+        for _ in 0..4 {
+            desktop.undo().unwrap();
+        }
         assert_eq!(desktop.draft().unwrap(), &before);
 
         for (index, word) in [(1, ""), (1, "   "), (2, "three")] {

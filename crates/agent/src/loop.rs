@@ -83,9 +83,23 @@ pub fn run<M: Model, S: ToolSink>(
     ask: &str,
     definitions: &[ToolDefinition],
 ) -> Result<Turn, LoopError> {
-    let mut messages = vec![Message::User {
+    run_after(model, tools, cap, Vec::new(), ask, definitions)
+}
+
+/// [`run`], with the model seeing `history`, the earlier turns of the same
+/// conversation, before `ask`. The turn's messages start with `history`.
+pub fn run_after<M: Model, S: ToolSink>(
+    model: &mut M,
+    tools: &mut S,
+    cap: u32,
+    history: Vec<Message>,
+    ask: &str,
+    definitions: &[ToolDefinition],
+) -> Result<Turn, LoopError> {
+    let mut messages = history;
+    messages.push(Message::User {
         text: ask.to_owned(),
-    }];
+    });
     let mut rounds: u32 = 0;
     loop {
         if rounds >= cap {
@@ -126,7 +140,7 @@ mod tests {
     use cutlass_session::Request;
     use cutlass_settings::{DEFAULT_STEP_CAP, Settings};
 
-    use super::{LoopError, ToolOutcome, ToolSink, cap_from_settings, run};
+    use super::{LoopError, ToolOutcome, ToolSink, cap_from_settings, run, run_after};
     use crate::model::{Completion, LocalModel, Message, ToolCall, ToolDefinition};
 
     struct RecordingSink {
@@ -420,5 +434,18 @@ mod tests {
         assert!(error.to_string().contains("host unreachable"));
         let wrapped = LoopError::Model(crate::model::ModelError::CloudDisabled);
         assert!(wrapped.to_string().contains("cloud"));
+    }
+
+    #[test]
+    fn a_later_turn_sees_the_earlier_ones() {
+        let mut model = LocalModel::scripted(vec![done("first"), done("second")]);
+        let mut sink = RecordingSink::scripted(Vec::new());
+        let first = run(&mut model, &mut sink, 4, "one", &[]).unwrap();
+        let second =
+            run_after(&mut model, &mut sink, 4, first.messages.clone(), "two", &[]).unwrap();
+        assert_eq!(second.messages.len(), 4);
+        assert_eq!(second.messages[..2], first.messages[..]);
+        assert_eq!(model.seen()[1].messages.len(), 3);
+        assert_eq!(second.completion.text, "second");
     }
 }

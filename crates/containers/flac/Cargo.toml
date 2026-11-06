@@ -7,7 +7,17 @@ license.workspace = true
 description = "Demux and mux for flac."
 
 [dependencies]
+cutlass-codec = { path = "../../codec", version = "0.1.0" }
 cutlass-container = { path = "../../container", version = "0.1.0" }
+
+[dev-dependencies]
+cutlass-decode = { path = "../../decode", version = "0.1.0" }
+cutlass-encode = { path = "../../encode", version = "0.1.0" }
+cutlass-flac = { path = "../../codecs/flac", version = "0.1.0" }
+
+[[test]]
+name = "external"
+path = "tests/external/main.rs"
 
 [lints]
 workspace = true

@@ -1,18 +1,84 @@
 //! Public AV1 decoder. One access unit is one temporal unit.
 
-use cutlass_decode::{CodecError, CodecId, CodecParams, Decoder, Output, Packet, PixelFormat};
+use cutlass_decode::{
+    CodecError, CodecId, CodecParams, Decoder, Output, Packet, PictureOutput, PixelFormat,
+};
 
-use crate::yuv::{Plane, Yuv420, picture_output};
+use crate::yuv::{Plane, ShownTags, Yuv420, gray_output, gray_wide, picture_output, wide_output};
 
-use crate::header::{FrameInfo, Sequence, header_is_addressable, parse_unit};
-use crate::inter::RefView;
-use crate::tile::{DecodedPicture, decode_tile, decode_with_refs};
+use crate::header::{
+    FrameInfo, Inherited, SavedLoopFilter, Segmentation, Sequence, TilePart, annex_b_obus,
+    header_is_addressable, obu_payload, parse_with_motion, sequence_obu, tile_list, tile_span,
+    unit_obus,
+};
+use crate::inter::{RefView, SavedMotion};
+use crate::tile::{Cdfs, DecodedPicture, Reconstructed, decode_tile_parts, decode_with_refs};
+
+use std::sync::Arc;
+
+struct WidePlanes {
+    y: Vec<u16>,
+    u: Vec<u16>,
+    v: Vec<u16>,
+    width: usize,
+    height: usize,
+}
+
+struct Reference {
+    picture: Yuv420,
+    /// Native samples when the sequence is 10-bit. Eight-bit slots leave this empty.
+    wide: Option<Arc<WidePlanes>>,
+    render_width: u32,
+    render_height: u32,
+    cdfs: Arc<Cdfs>,
+    gm: [[i32; 6]; 8],
+    field: Arc<SavedMotion>,
+    lf: SavedLoopFilter,
+    segmentation: Segmentation,
+    segments: Arc<Vec<u8>>,
+    grain: crate::grain::Grain,
+    mi_cols: u32,
+    mi_rows: u32,
+}
+
+struct Held {
+    picture: Yuv420,
+    wide: Option<Arc<WidePlanes>>,
+    cdfs: Arc<Cdfs>,
+    motion: Arc<SavedMotion>,
+    segmentation: Segmentation,
+    segments: Arc<Vec<u8>>,
+    mi_cols: u32,
+    mi_rows: u32,
+}
+
+/// A frame header waiting for its tile groups. Nothing is stored until the groups cover every tile.
+struct PendingTiles {
+    sequence: Sequence,
+    frame: FrameInfo,
+    next: usize,
+    count: usize,
+    parts: Vec<TilePart>,
+}
+
+struct KeptSlot {
+    slot: usize,
+    reference: Option<Reference>,
+    hint: u32,
+}
+
+struct FrameUndo {
+    stored: Vec<KeptSlot>,
+    stale: [Option<Reference>; 8],
+}
 
 /// Rust AV1 decoder. Reference slots stay inside this type.
 pub struct Av1Decoder {
     sequence: Option<Sequence>,
-    refs: [Option<Yuv420>; 8],
+    refs: [Option<Reference>; 8],
     order_hints: [u32; 8],
+    /// `choose_operating_point`. Point 0 is the first point in the sequence.
+    operating_point: u8,
 }
 
 impl Av1Decoder {
@@ -20,7 +86,19 @@ impl Av1Decoder {
         if params.codec != CodecId::Av1 {
             return Err(CodecError::Unsupported { what: "codec" });
         }
-        if params.pixel != PixelFormat::None && params.pixel != PixelFormat::Yuv420p {
+        if params.pixel != PixelFormat::None
+            && params.pixel != PixelFormat::Yuv420p
+            && params.pixel != PixelFormat::Yuv420p10
+            && params.pixel != PixelFormat::Yuv420p12
+            && params.pixel != PixelFormat::Yuv422p
+            && params.pixel != PixelFormat::Yuv422p10
+            && params.pixel != PixelFormat::Yuv422p12
+            && params.pixel != PixelFormat::Yuv444p
+            && params.pixel != PixelFormat::Yuv444p10
+            && params.pixel != PixelFormat::Yuv444p12
+            && params.pixel != PixelFormat::Gray8
+            && params.pixel != PixelFormat::Gray10
+        {
             return Err(CodecError::Unsupported {
                 what: "pixel format",
             });
@@ -39,7 +117,28 @@ impl Av1Decoder {
             sequence: None,
             refs: std::array::from_fn(|_| None),
             order_hints: [0; 8],
+            operating_point: 0,
         })
+    }
+
+    /// Select the operating point from section 6.4.1. The default is point 0.
+    ///
+    /// An index past the sequence's last point is refused once that sequence is known.
+    pub fn select_operating_point(&mut self, index: u8) -> Result<(), CodecError> {
+        if index > 31 {
+            return Err(CodecError::Unsupported {
+                what: "operating point",
+            });
+        }
+        if let Some(sequence) = &self.sequence
+            && usize::from(index) > usize::from(sequence.operating_points)
+        {
+            return Err(CodecError::Unsupported {
+                what: "operating point",
+            });
+        }
+        self.operating_point = index;
+        Ok(())
     }
 }
 
@@ -54,27 +153,16 @@ impl Decoder for Av1Decoder {
                 what: "empty packet",
             });
         }
-        let (sequence, frame) = parse_unit(&packet.data, self.sequence.as_ref())?;
-        header_is_addressable(&sequence, &frame)?;
-        let saved = self.take_stale_refs(&frame);
-        let picture = match self.picture_before_grain(&sequence, &frame) {
-            Ok(picture) => picture,
+        let sequence_before = self.sequence.clone();
+        let mut undo = Vec::new();
+        match self.decode_unit(packet, &mut undo) {
+            Ok(shown) => Ok(shown),
             Err(error) => {
-                self.restore_refs(saved);
-                return Err(error);
+                self.undo_frames(undo);
+                self.sequence = sequence_before;
+                Err(error)
             }
-        };
-        self.store(&frame, &picture);
-        self.sequence = Some(sequence);
-        if !frame.show_frame {
-            return Ok(Vec::new());
         }
-        let picture = shown(&picture, &frame)?;
-        Ok(vec![Output::Picture(picture_output(
-            &picture,
-            packet.pts,
-            packet.timescale,
-        )?)])
     }
 
     fn drain(&mut self) -> Result<Vec<Output>, CodecError> {
@@ -88,37 +176,453 @@ impl Decoder for Av1Decoder {
 }
 
 impl Av1Decoder {
+    /// Every frame OBU in the temporal unit, hidden frames first.
+    fn decode_unit(
+        &mut self,
+        packet: &Packet,
+        undo: &mut Vec<FrameUndo>,
+    ) -> Result<Vec<Output>, CodecError> {
+        let annex = annex_b_obus(&packet.data)?;
+        let low;
+        let obus = match &annex {
+            Some(obus) => obus.as_slice(),
+            None => {
+                low = unit_obus(&packet.data)?;
+                low.as_slice()
+            }
+        };
+        let mut prefix = Vec::new();
+        let mut shown = Vec::new();
+        let mut saw_frame = false;
+        let mut dropped = false;
+        let mut pending: Option<PendingTiles> = None;
+        for obu in obus {
+            if obu.kind != 1 && obu.kind != 2 && !self.keeps_layer(obu.bytes)? {
+                dropped = true;
+                continue;
+            }
+            match obu.kind {
+                // Padding, metadata, and a reserved type carry no frame.
+                // A reserved payload is not inspected.
+                0 | 5 | 9..=14 | 15 => {}
+                2 => {
+                    if pending.is_some() {
+                        return Err(unfinished_tiles());
+                    }
+                }
+                1 => {
+                    if pending.is_some() {
+                        return Err(unfinished_tiles());
+                    }
+                    let sequence = sequence_obu(obu.bytes)?;
+                    if usize::from(self.operating_point) > usize::from(sequence.operating_points) {
+                        return Err(CodecError::Unsupported {
+                            what: "operating point",
+                        });
+                    }
+                    self.sequence = Some(sequence);
+                    prefix.extend_from_slice(obu.bytes);
+                }
+                6 => {
+                    if pending.is_some() {
+                        return Err(unfinished_tiles());
+                    }
+                    saw_frame = true;
+                    let mut bytes = std::mem::take(&mut prefix);
+                    bytes.extend_from_slice(obu.bytes);
+                    record(&mut shown, undo, self.decode_frame(&bytes, packet)?);
+                }
+                3 => {
+                    if pending.is_some() {
+                        return Err(unfinished_tiles());
+                    }
+                    saw_frame = true;
+                    let mut bytes = std::mem::take(&mut prefix);
+                    bytes.extend_from_slice(obu.bytes);
+                    let (sequence, frame) = self.read_header(&bytes, None)?;
+                    if frame.show_existing {
+                        record(
+                            &mut shown,
+                            undo,
+                            self.commit_frame(packet, sequence, frame, None)?,
+                        );
+                    } else {
+                        let count =
+                            (frame.tile_cols as usize).saturating_mul(frame.tile_rows as usize);
+                        if count == 0 {
+                            return Err(CodecError::Malformed {
+                                at_bit: 0,
+                                what: "tile grid",
+                            });
+                        }
+                        pending = Some(PendingTiles {
+                            sequence,
+                            frame,
+                            next: 0,
+                            count,
+                            parts: Vec::new(),
+                        });
+                    }
+                }
+                7 => {
+                    let Some(open) = pending.as_ref() else {
+                        return Err(CodecError::Malformed {
+                            at_bit: 0,
+                            what: "redundant frame header",
+                        });
+                    };
+                    // A redundant header repeats the open frame. It adds no tiles.
+                    self.read_header(obu.bytes, Some(&open.sequence))?;
+                }
+                4 => {
+                    let payload = obu_payload(obu.bytes)?;
+                    let done = {
+                        let Some(open) = pending.as_mut() else {
+                            return Err(CodecError::Unsupported {
+                                what: "tile group outside a frame",
+                            });
+                        };
+                        let span = tile_span(&open.frame, payload)?;
+                        let covered = span.end.saturating_sub(span.start).saturating_add(1);
+                        if span.start != open.next
+                            || span.end >= open.count
+                            || span.parts.len() != covered
+                        {
+                            return Err(unfinished_tiles());
+                        }
+                        open.next = span.end + 1;
+                        open.parts.extend(span.parts);
+                        open.next == open.count
+                    };
+                    if done {
+                        let Some(open) = pending.take() else {
+                            return Err(unfinished_tiles());
+                        };
+                        record(
+                            &mut shown,
+                            undo,
+                            self.commit_frame(
+                                packet,
+                                open.sequence,
+                                open.frame,
+                                Some(&open.parts),
+                            )?,
+                        );
+                    }
+                }
+                8 => {
+                    let Some(open) = pending.take() else {
+                        return Err(tile_list_error());
+                    };
+                    if open.next != 0 {
+                        return Err(tile_list_error());
+                    }
+                    let payload = obu_payload(obu.bytes)?;
+                    record(
+                        &mut shown,
+                        undo,
+                        self.show_tile_list(packet, open.sequence, open.frame, payload)?,
+                    );
+                }
+                _ => {
+                    return Err(CodecError::Unsupported {
+                        what: "reserved obu",
+                    });
+                }
+            }
+        }
+        if pending.is_some() {
+            return Err(unfinished_tiles());
+        }
+        if !saw_frame {
+            if dropped {
+                return Ok(shown);
+            }
+            return Err(CodecError::InvalidApi {
+                what: "missing frame",
+            });
+        }
+        Ok(shown)
+    }
+
+    /// Section 5.3.1. A sequence header and a temporal delimiter stay.
+    /// Any other OBU is dropped when its layer is outside the selected point.
+    fn keeps_layer(&self, obu: &[u8]) -> Result<bool, CodecError> {
+        let Some(sequence) = &self.sequence else {
+            return Ok(true);
+        };
+        let idc = sequence
+            .operating_idc
+            .get(usize::from(self.operating_point))
+            .copied()
+            .ok_or(CodecError::Unsupported {
+                what: "operating point",
+            })?;
+        if idc == 0 {
+            return Ok(true);
+        }
+        let (extension, temporal, spatial) = Self::obu_layer(obu)?;
+        if !extension {
+            return Ok(true);
+        }
+        let in_temporal = (idc >> u16::from(temporal)) & 1 == 1;
+        let in_spatial = (idc >> (u16::from(spatial) + 8)) & 1 == 1;
+        Ok(in_temporal && in_spatial)
+    }
+
+    /// `temporal_id` and `spatial_id` from an OBU extension header.
+    fn obu_layer(bytes: &[u8]) -> Result<(bool, u8, u8), CodecError> {
+        let header = bytes.first().copied().ok_or(CodecError::Truncated {
+            at_bit: 0,
+            what: "obu",
+        })?;
+        if header & 0x04 == 0 {
+            return Ok((false, 0, 0));
+        }
+        let extension = bytes.get(1).copied().ok_or(CodecError::Truncated {
+            at_bit: 8,
+            what: "obu",
+        })?;
+        Ok((true, extension >> 5, (extension >> 3) & 0x3))
+    }
+
+    /// Decode one frame OBU. A hidden frame updates reference slots and shows nothing.
+    fn decode_frame(
+        &mut self,
+        bytes: &[u8],
+        packet: &Packet,
+    ) -> Result<(Option<PictureOutput>, FrameUndo), CodecError> {
+        let (sequence, frame) = self.read_header(bytes, None)?;
+        self.commit_frame(packet, sequence, frame, None)
+    }
+
+    fn read_header(
+        &self,
+        bytes: &[u8],
+        stored: Option<&Sequence>,
+    ) -> Result<(Sequence, FrameInfo), CodecError> {
+        let saved_motion =
+            std::array::from_fn(|slot| self.refs[slot].as_ref().map(|reference| reference.gm));
+        let ref_sizes = std::array::from_fn(|slot| {
+            self.refs[slot].as_ref().map(|reference| {
+                let (width, height) = reference.coded_size();
+                (
+                    width,
+                    height,
+                    reference.render_width,
+                    reference.render_height,
+                )
+            })
+        });
+        let inherited = std::array::from_fn(|slot| {
+            self.refs[slot]
+                .as_ref()
+                .map(|reference| Inherited {
+                    lf: reference.lf,
+                    seg: reference.segmentation,
+                })
+                .unwrap_or_else(Inherited::defaults)
+        });
+        let (sequence, mut frame) = parse_with_motion(
+            bytes,
+            stored.or(self.sequence.as_ref()),
+            &saved_motion,
+            &self.order_hints,
+            &ref_sizes,
+            &inherited,
+        )?;
+        self.attach_prev_segments(&mut frame);
+        self.resolve_grain(&mut frame)?;
+        header_is_addressable(&sequence, &frame)?;
+        Ok((sequence, frame))
+    }
+
+    fn commit_frame(
+        &mut self,
+        packet: &Packet,
+        sequence: Sequence,
+        mut frame: FrameInfo,
+        parts: Option<&[TilePart]>,
+    ) -> Result<(Option<PictureOutput>, FrameUndo), CodecError> {
+        let stale = self.take_stale_refs(&frame);
+        let held = match self.picture_before_grain(&sequence, &frame, parts) {
+            Ok(decoded) => decoded,
+            Err(error) => {
+                self.restore_refs(stale);
+                return Err(error);
+            }
+        };
+        if let Some(reference) = self.refs[usize::from(frame.frame_to_show)].as_ref()
+            && frame.show_existing
+        {
+            frame.render_width = reference.render_width;
+            frame.render_height = reference.render_height;
+        }
+        let stored = self.store(&frame, &held);
+        let tags = shown_tags(&sequence, &frame, self.operating_point);
+        let monochrome = sequence.monochrome;
+        self.sequence = Some(sequence);
+        if !frame.show_frame {
+            return Ok((None, FrameUndo { stored, stale }));
+        }
+        let picture = match publish_held(
+            &held,
+            &frame,
+            monochrome,
+            &tags,
+            packet.pts,
+            packet.timescale,
+        ) {
+            Ok(picture) => picture,
+            Err(error) => {
+                self.undo_store(stored);
+                self.restore_refs(stale);
+                return Err(error);
+            }
+        };
+        Ok((Some(picture), FrameUndo { stored, stale }))
+    }
+
     fn decode_picture(
         &self,
         sequence: &Sequence,
         frame: &FrameInfo,
-    ) -> Result<DecodedPicture, CodecError> {
+        parts: Option<&[TilePart]>,
+    ) -> Result<Reconstructed, CodecError> {
+        let carried = self.carried_cdf(frame)?;
         let views = self.ref_views();
-        if frame.intra || views.iter().all(Option::is_none) {
-            decode_tile(sequence, frame)
-        } else {
-            decode_with_refs(sequence, frame, &views)
+        match parts {
+            Some(parts) => {
+                decode_tile_parts(sequence, frame, &views, carried.as_deref(), parts, true)
+            }
+            None => decode_with_refs(sequence, frame, &views, carried.as_deref()),
         }
+    }
+
+    /// `load_cdfs(ref_frame_idx[primary_ref_frame])` when the frame names a primary reference.
+    /// An intra frame initializes its CDFs instead.
+    fn carried_cdf(&self, frame: &FrameInfo) -> Result<Option<Arc<Cdfs>>, CodecError> {
+        if frame.intra || frame.primary_ref >= 7 {
+            return Ok(None);
+        }
+        let index = usize::from(frame.primary_ref);
+        let slot = usize::from(frame.ref_frames[index]);
+        let Some(reference) = &self.refs[slot] else {
+            return Err(CodecError::Malformed {
+                at_bit: 0,
+                what: "missing reference",
+            });
+        };
+        Ok(Some(Arc::clone(&reference.cdfs)))
     }
 
     fn ref_views(&self) -> [Option<RefView<'_>>; 8] {
         std::array::from_fn(|slot| {
-            self.refs[slot].as_ref().map(|picture| RefView {
-                y: picture.y.samples(),
-                u: picture.u.samples(),
-                v: picture.v.samples(),
-                width: picture.y.width() as usize,
-                height: picture.y.height() as usize,
+            self.refs[slot].as_ref().map(|reference| RefView {
+                y: reference.picture.y.samples(),
+                u: reference.picture.u.samples(),
+                v: reference.picture.v.samples(),
+                width: reference.picture.y.width() as usize,
+                height: reference.picture.y.height() as usize,
+                frame_type: reference.field.frame_type,
+                mi_cols: reference.field.mi_cols,
+                mi_rows: reference.field.mi_rows,
+                saved_hints: reference.field.saved_hints,
+                mf_refs: &reference.field.refs,
+                mf_mvs: &reference.field.mvs,
             })
         })
     }
 
-    fn store(&mut self, frame: &FrameInfo, picture: &Yuv420) {
+    /// `load_grain_params`. Every parameter comes from the named slot except `grain_seed`.
+    fn resolve_grain(&self, frame: &mut FrameInfo) -> Result<(), CodecError> {
+        let Some(slot) = frame.grain.copy_from else {
+            return Ok(());
+        };
+        let slot = usize::from(slot);
+        let named = u8::try_from(slot).unwrap_or(255);
+        if slot >= 8 || !frame.ref_frames.contains(&named) {
+            return Err(CodecError::Malformed {
+                at_bit: 0,
+                what: "film grain",
+            });
+        }
+        let Some(reference) = self.refs[slot].as_ref() else {
+            return Err(CodecError::Malformed {
+                at_bit: 0,
+                what: "missing reference",
+            });
+        };
+        let seed = frame.grain.seed;
+        frame.grain = reference.grain;
+        frame.grain.seed = seed;
+        frame.grain.copy_from = None;
+        Ok(())
+    }
+
+    fn attach_prev_segments(&self, frame: &mut FrameInfo) {
+        if !frame.segmentation.enabled || frame.primary_ref >= 7 {
+            return;
+        }
+        let Some(slot) = frame
+            .ref_frames
+            .get(usize::from(frame.primary_ref))
+            .copied()
+        else {
+            return;
+        };
+        let Some(reference) = self.refs[usize::from(slot)].as_ref() else {
+            return;
+        };
+        if reference.mi_cols == frame.mi_cols && reference.mi_rows == frame.mi_rows {
+            frame.prev_segment_ids = (*reference.segments).clone();
+        }
+    }
+
+    fn store(&mut self, frame: &FrameInfo, held: &Held) -> Vec<KeptSlot> {
+        let mut kept = Vec::new();
         for slot in 0..8 {
             if frame.refresh_flags & (1 << slot) != 0 {
-                self.refs[slot] = Some(picture.clone());
+                kept.push(KeptSlot {
+                    slot,
+                    reference: self.refs[slot].take(),
+                    hint: self.order_hints[slot],
+                });
+                self.refs[slot] = Some(Reference {
+                    picture: held.picture.clone(),
+                    wide: held.wide.clone(),
+                    render_width: frame.render_width,
+                    render_height: frame.render_height,
+                    cdfs: Arc::clone(&held.cdfs),
+                    gm: frame.gm_params,
+                    field: Arc::clone(&held.motion),
+                    lf: SavedLoopFilter {
+                        ref_deltas: frame.lf_ref_deltas,
+                        mode_deltas: frame.lf_mode_deltas,
+                    },
+                    segmentation: held.segmentation,
+                    segments: Arc::clone(&held.segments),
+                    grain: frame.grain,
+                    mi_cols: held.mi_cols,
+                    mi_rows: held.mi_rows,
+                });
                 self.order_hints[slot] = frame.order_hint;
             }
+        }
+        kept
+    }
+
+    fn undo_store(&mut self, kept: Vec<KeptSlot>) {
+        for slot in kept.into_iter().rev() {
+            self.order_hints[slot.slot] = slot.hint;
+            self.refs[slot.slot] = slot.reference;
+        }
+    }
+
+    fn undo_frames(&mut self, frames: Vec<FrameUndo>) {
+        for frame in frames.into_iter().rev() {
+            self.undo_store(frame.stored);
+            self.restore_refs(frame.stale);
         }
     }
 
@@ -126,20 +630,139 @@ impl Av1Decoder {
         &self,
         sequence: &Sequence,
         frame: &FrameInfo,
-    ) -> Result<Yuv420, CodecError> {
+        parts: Option<&[TilePart]>,
+    ) -> Result<Held, CodecError> {
+        if sequence.bit_depth != 8 {
+            if sequence.bit_depth != 10 && sequence.bit_depth != 12 {
+                return Err(CodecError::Unsupported { what: "bit depth" });
+            }
+            return self.hold_wide(sequence, frame, parts);
+        }
         if frame.show_existing {
-            let Some(stored) = self.refs[usize::from(frame.frame_to_show)].clone() else {
+            let Some(stored) = self.refs[usize::from(frame.frame_to_show)].as_ref() else {
                 return Err(CodecError::Malformed {
                     at_bit: 0,
                     what: "missing reference",
                 });
             };
-            return Ok(stored);
+            return Ok(Held {
+                picture: stored.picture.clone(),
+                wide: None,
+                cdfs: Arc::clone(&stored.cdfs),
+                motion: Arc::clone(&stored.field),
+                segmentation: stored.segmentation,
+                segments: Arc::clone(&stored.segments),
+                mi_cols: stored.mi_cols,
+                mi_rows: stored.mi_rows,
+            });
         }
-        owned(self.decode_picture(sequence, frame)?)
+        let reconstructed = self.decode_picture(sequence, frame, parts)?;
+        Ok(Held {
+            picture: owned(
+                reconstructed.picture,
+                sequence.subsampling_x,
+                sequence.subsampling_y,
+            )?,
+            wide: None,
+            cdfs: Arc::new(reconstructed.cdfs),
+            motion: Arc::new(reconstructed.motion),
+            segmentation: frame.segmentation,
+            segments: Arc::new(reconstructed.segments),
+            mi_cols: frame.mi_cols,
+            mi_rows: frame.mi_rows,
+        })
     }
 
-    fn take_stale_refs(&mut self, frame: &FrameInfo) -> [Option<Yuv420>; 8] {
+    /// Profile 0 `high_bitdepth`. Samples stay in `u16`. A monochrome sequence
+    /// publishes the luma plane. Film grain is added only to the shown picture.
+    fn hold_wide(
+        &self,
+        sequence: &Sequence,
+        frame: &FrameInfo,
+        parts: Option<&[TilePart]>,
+    ) -> Result<Held, CodecError> {
+        if frame.show_existing {
+            let Some(stored) = self.refs[usize::from(frame.frame_to_show)].as_ref() else {
+                return Err(CodecError::Malformed {
+                    at_bit: 0,
+                    what: "missing reference",
+                });
+            };
+            let Some(wide) = stored.wide.clone() else {
+                return Err(CodecError::Malformed {
+                    at_bit: 0,
+                    what: "missing reference",
+                });
+            };
+            return Ok(Held {
+                picture: stored.picture.clone(),
+                wide: Some(wide),
+                cdfs: Arc::clone(&stored.cdfs),
+                motion: Arc::clone(&stored.field),
+                segmentation: stored.segmentation,
+                segments: Arc::clone(&stored.segments),
+                mi_cols: stored.mi_cols,
+                mi_rows: stored.mi_rows,
+            });
+        }
+        let carried = self.carried_cdf(frame)?;
+        let views = self.wide_views();
+        let reconstructed = match parts {
+            Some(parts) => {
+                decode_tile_parts(sequence, frame, &views, carried.as_deref(), parts, true)
+            }
+            None => {
+                let generated = crate::header::tile_parts(frame)?;
+                decode_tile_parts(
+                    sequence,
+                    frame,
+                    &views,
+                    carried.as_deref(),
+                    &generated,
+                    true,
+                )
+            }
+        }?;
+        let picture = reconstructed.picture;
+        Ok(Held {
+            picture: placeholder_picture()?,
+            wide: Some(Arc::new(WidePlanes {
+                width: picture.width,
+                height: picture.height,
+                y: picture.y,
+                u: picture.u,
+                v: picture.v,
+            })),
+            cdfs: Arc::new(reconstructed.cdfs),
+            motion: Arc::new(reconstructed.motion),
+            segmentation: frame.segmentation,
+            segments: Arc::new(reconstructed.segments),
+            mi_cols: frame.mi_cols,
+            mi_rows: frame.mi_rows,
+        })
+    }
+
+    fn wide_views(&self) -> [Option<RefView<'_, u16>>; 8] {
+        std::array::from_fn(|slot| {
+            let reference = self.refs[slot].as_ref()?;
+            let wide = reference.wide.as_ref()?;
+            Some(RefView {
+                y: wide.y.as_slice(),
+                u: wide.u.as_slice(),
+                v: wide.v.as_slice(),
+                width: wide.width,
+                height: wide.height,
+                frame_type: reference.field.frame_type,
+                mi_cols: reference.field.mi_cols,
+                mi_rows: reference.field.mi_rows,
+                saved_hints: reference.field.saved_hints,
+                mf_refs: &reference.field.refs,
+                mf_mvs: &reference.field.mvs,
+            })
+        })
+    }
+
+    fn take_stale_refs(&mut self, frame: &FrameInfo) -> [Option<Reference>; 8] {
         let mut saved = std::array::from_fn(|_| None);
         let Some(hints) = frame.signaled_order_hints else {
             return saved;
@@ -152,12 +775,463 @@ impl Av1Decoder {
         saved
     }
 
-    fn restore_refs(&mut self, saved: [Option<Yuv420>; 8]) {
-        for (slot, picture) in saved.into_iter().enumerate() {
-            if let Some(picture) = picture {
-                self.refs[slot] = Some(picture);
+    fn restore_refs(&mut self, saved: [Option<Reference>; 8]) {
+        for (slot, reference) in saved.into_iter().enumerate() {
+            if let Some(reference) = reference {
+                self.refs[slot] = Some(reference);
             }
         }
+    }
+
+    /// Section 7.3. Each listed tile is decoded from one stored reference and copied
+    /// into the output mosaic. The list does not refresh reference slots, and it does
+    /// not run the loop filter, CDEF, super resolution, or restoration.
+    ///
+    /// Anchor frames are the eight reference slots. The specification allows 128
+    /// external anchors; this decoder does not keep that extra buffer.
+    fn show_tile_list(
+        &mut self,
+        packet: &Packet,
+        sequence: Sequence,
+        frame: FrameInfo,
+        payload: &[u8],
+    ) -> Result<(Option<PictureOutput>, FrameUndo), CodecError> {
+        if frame.show_existing || frame.intra || frame.upscaled_width != frame.width {
+            return Err(tile_list_error());
+        }
+        if !sequence.subsampling_x || !sequence.subsampling_y {
+            return Err(CodecError::Unsupported { what: "chroma" });
+        }
+        let list = tile_list(payload)?;
+        let (tile_w, tile_h) = uniform_tile_size(&frame)?;
+        let out_w = list
+            .tiles_wide
+            .checked_mul(tile_w)
+            .ok_or(CodecError::Limit { what: "frame size" })?;
+        let out_h = list
+            .tiles_high
+            .checked_mul(tile_h)
+            .ok_or(CodecError::Limit { what: "frame size" })?;
+        if out_w == 0 || out_h == 0 || out_w > 4096 || out_h > 4096 {
+            return Err(CodecError::Limit { what: "frame size" });
+        }
+        let chroma_w = out_w / 2;
+        let chroma_h = out_h / 2;
+        let y_len = out_w
+            .checked_mul(out_h)
+            .ok_or(CodecError::Limit { what: "frame size" })?;
+        let c_len = chroma_w
+            .checked_mul(chroma_h)
+            .ok_or(CodecError::Limit { what: "frame size" })?;
+        let mut y = vec![0u8; y_len];
+        let mut u = vec![128u8; c_len];
+        let mut v = vec![128u8; c_len];
+        let carried = self.carried_cdf(&frame)?;
+        for (index, entry) in list.entries.into_iter().enumerate() {
+            if usize::from(entry.anchor) >= self.refs.len()
+                || entry.row >= frame.tile_rows as usize
+                || entry.col >= frame.tile_cols as usize
+            {
+                return Err(tile_list_error());
+            }
+            let Some(&row_start) = frame.mi_row_starts.get(entry.row) else {
+                return Err(tile_list_error());
+            };
+            let Some(&row_end) = frame.mi_row_starts.get(entry.row + 1) else {
+                return Err(tile_list_error());
+            };
+            let Some(&col_start) = frame.mi_col_starts.get(entry.col) else {
+                return Err(tile_list_error());
+            };
+            let Some(&col_end) = frame.mi_col_starts.get(entry.col + 1) else {
+                return Err(tile_list_error());
+            };
+            let views = self.views_for_anchor(&frame, usize::from(entry.anchor))?;
+            let part = TilePart {
+                row: row_start as usize,
+                row_end: row_end as usize,
+                col: col_start as usize,
+                col_end: col_end as usize,
+                data: entry.data,
+            };
+            let picture = decode_tile_parts(
+                &sequence,
+                &frame,
+                &views,
+                carried.as_deref(),
+                &[part],
+                false,
+            )?
+            .picture;
+            let dx = (index % list.tiles_wide).saturating_mul(tile_w);
+            let dy = (index / list.tiles_wide).saturating_mul(tile_h);
+            let sx = col_start as usize * 4;
+            let sy = row_start as usize * 4;
+            copy_rect(PlaneCopy {
+                dst: &mut y,
+                dst_stride: out_w,
+                src: &picture.y,
+                src_stride: picture.width,
+                dx,
+                dy,
+                sx,
+                sy,
+                width: tile_w,
+                height: tile_h,
+            })?;
+            let src_c = picture.width.div_ceil(2);
+            copy_rect(PlaneCopy {
+                dst: &mut u,
+                dst_stride: chroma_w,
+                src: &picture.u,
+                src_stride: src_c,
+                dx: dx / 2,
+                dy: dy / 2,
+                sx: sx / 2,
+                sy: sy / 2,
+                width: tile_w / 2,
+                height: tile_h / 2,
+            })?;
+            copy_rect(PlaneCopy {
+                dst: &mut v,
+                dst_stride: chroma_w,
+                src: &picture.v,
+                src_stride: src_c,
+                dx: dx / 2,
+                dy: dy / 2,
+                sx: sx / 2,
+                sy: sy / 2,
+                width: tile_w / 2,
+                height: tile_h / 2,
+            })?;
+        }
+        let picture = owned(
+            DecodedPicture {
+                y,
+                u,
+                v,
+                width: out_w,
+                height: out_h,
+            },
+            true,
+            true,
+        )?;
+        let tags = shown_tags(&sequence, &frame, self.operating_point);
+        let shown = if frame.show_frame {
+            Some(publish(
+                &picture,
+                sequence.monochrome,
+                &tags,
+                packet.pts,
+                packet.timescale,
+            )?)
+        } else {
+            None
+        };
+        self.sequence = Some(sequence);
+        Ok((
+            shown,
+            FrameUndo {
+                stored: Vec::new(),
+                stale: std::array::from_fn(|_| None),
+            },
+        ))
+    }
+
+    /// The camera-tile process replaces `FrameStore[ref_frame_idx[0]]` with the anchor.
+    fn views_for_anchor(
+        &self,
+        frame: &FrameInfo,
+        anchor: usize,
+    ) -> Result<[Option<RefView<'_>>; 8], CodecError> {
+        let Some(slot) = frame.ref_frames.first().copied() else {
+            return Err(tile_list_error());
+        };
+        let slot = usize::from(slot);
+        if slot >= 8 || anchor >= 8 {
+            return Err(tile_list_error());
+        }
+        if self.refs[anchor].is_none() {
+            return Err(CodecError::Malformed {
+                at_bit: 0,
+                what: "missing reference",
+            });
+        }
+        Ok(std::array::from_fn(|index| {
+            let source = if index == slot { anchor } else { index };
+            self.refs[source].as_ref().map(|reference| RefView {
+                y: reference.picture.y.samples(),
+                u: reference.picture.u.samples(),
+                v: reference.picture.v.samples(),
+                width: reference.picture.y.width() as usize,
+                height: reference.picture.y.height() as usize,
+                frame_type: reference.field.frame_type,
+                mi_cols: reference.field.mi_cols,
+                mi_rows: reference.field.mi_rows,
+                saved_hints: reference.field.saved_hints,
+                mf_refs: &reference.field.refs,
+                mf_mvs: &reference.field.mvs,
+            })
+        }))
+    }
+}
+
+fn unfinished_tiles() -> CodecError {
+    CodecError::Malformed {
+        at_bit: 0,
+        what: "tile group",
+    }
+}
+
+fn tile_list_error() -> CodecError {
+    CodecError::Malformed {
+        at_bit: 0,
+        what: "tile list",
+    }
+}
+
+/// The camera-tile output uses one tile width and one tile height.
+fn uniform_tile_size(frame: &FrameInfo) -> Result<(usize, usize), CodecError> {
+    let cols = frame.mi_col_starts.len().saturating_sub(1);
+    let rows = frame.mi_row_starts.len().saturating_sub(1);
+    if cols == 0
+        || rows == 0
+        || cols != frame.tile_cols as usize
+        || rows != frame.tile_rows as usize
+    {
+        return Err(tile_list_error());
+    }
+    let width = frame.mi_col_starts[1].saturating_sub(frame.mi_col_starts[0]);
+    let height = frame.mi_row_starts[1].saturating_sub(frame.mi_row_starts[0]);
+    if width == 0 || height == 0 {
+        return Err(tile_list_error());
+    }
+    for col in 1..cols {
+        let start = frame.mi_col_starts[col];
+        let end = frame.mi_col_starts[col + 1];
+        if end.saturating_sub(start) != width {
+            return Err(tile_list_error());
+        }
+    }
+    for row in 1..rows {
+        let start = frame.mi_row_starts[row];
+        let end = frame.mi_row_starts[row + 1];
+        if end.saturating_sub(start) != height {
+            return Err(tile_list_error());
+        }
+    }
+    let px_w = usize::try_from(width).unwrap_or(0).saturating_mul(4);
+    let px_h = usize::try_from(height).unwrap_or(0).saturating_mul(4);
+    if px_w == 0 || px_h == 0 || !px_w.is_multiple_of(2) || !px_h.is_multiple_of(2) {
+        return Err(tile_list_error());
+    }
+    Ok((px_w, px_h))
+}
+
+struct PlaneCopy<'a> {
+    dst: &'a mut [u8],
+    dst_stride: usize,
+    src: &'a [u8],
+    src_stride: usize,
+    dx: usize,
+    dy: usize,
+    sx: usize,
+    sy: usize,
+    width: usize,
+    height: usize,
+}
+
+fn copy_rect(plane: PlaneCopy<'_>) -> Result<(), CodecError> {
+    if plane.width == 0 || plane.height == 0 || plane.dst_stride == 0 || plane.src_stride == 0 {
+        return Err(tile_list_error());
+    }
+    for row in 0..plane.height {
+        let Some(from) = (plane.sy + row)
+            .checked_mul(plane.src_stride)
+            .and_then(|off| off.checked_add(plane.sx))
+        else {
+            return Err(tile_list_error());
+        };
+        let Some(to) = (plane.dy + row)
+            .checked_mul(plane.dst_stride)
+            .and_then(|off| off.checked_add(plane.dx))
+        else {
+            return Err(tile_list_error());
+        };
+        let Some(src_row) = plane.src.get(from..from + plane.width) else {
+            return Err(tile_list_error());
+        };
+        let Some(dst_row) = plane.dst.get_mut(to..to + plane.width) else {
+            return Err(tile_list_error());
+        };
+        dst_row.copy_from_slice(src_row);
+    }
+    Ok(())
+}
+
+fn record(
+    shown: &mut Vec<Output>,
+    undo: &mut Vec<FrameUndo>,
+    decoded: (Option<PictureOutput>, FrameUndo),
+) {
+    let (picture, frame_undo) = decoded;
+    undo.push(frame_undo);
+    if let Some(picture) = picture {
+        shown.push(Output::Picture(picture));
+    }
+}
+
+impl Reference {
+    fn coded_size(&self) -> (u32, u32) {
+        if let Some(wide) = &self.wide {
+            (
+                u32::try_from(wide.width).unwrap_or(0),
+                u32::try_from(wide.height).unwrap_or(0),
+            )
+        } else {
+            (self.picture.y.width(), self.picture.y.height())
+        }
+    }
+}
+
+fn placeholder_picture() -> Result<Yuv420, CodecError> {
+    Yuv420::new(
+        Plane::new(2, 2, vec![0; 4])?,
+        Plane::new(1, 1, vec![128])?,
+        Plane::new(1, 1, vec![128])?,
+    )
+}
+
+fn shown_tags(sequence: &Sequence, frame: &FrameInfo, operating_point: u8) -> ShownTags {
+    let (
+        num_units_in_display_tick,
+        time_scale,
+        equal_picture_interval,
+        num_ticks_per_picture_minus_1,
+    ) = match sequence.timing {
+        Some(timing) => (
+            timing.num_units_in_display_tick,
+            timing.time_scale,
+            timing.equal_picture_interval,
+            timing.num_ticks_per_picture_minus_1,
+        ),
+        None => (0, 0, false, None),
+    };
+    let num_units_in_decoding_tick = sequence
+        .decoder_model
+        .map(|model| model.num_units_in_decoding_tick)
+        .unwrap_or(0);
+    let seq_level_idx = sequence.seq_level_idx[usize::from(operating_point)];
+    ShownTags {
+        bit_depth: sequence.bit_depth,
+        render_width: frame.render_width,
+        render_height: frame.render_height,
+        primaries: sequence.color_primaries,
+        transfer: sequence.transfer_characteristics,
+        matrix: sequence.matrix_coefficients,
+        chroma_position: sequence.chroma_sample_position,
+        num_units_in_display_tick,
+        time_scale,
+        equal_picture_interval,
+        num_ticks_per_picture_minus_1,
+        num_units_in_decoding_tick,
+        seq_level_idx,
+    }
+}
+
+fn publish_held(
+    held: &Held,
+    frame: &FrameInfo,
+    monochrome: bool,
+    tags: &ShownTags,
+    pts: i64,
+    timescale: u32,
+) -> Result<PictureOutput, CodecError> {
+    let Some(wide) = &held.wide else {
+        let picture = shown(&held.picture, frame)?;
+        return publish(&picture, monochrome, tags, pts, timescale);
+    };
+    let width = u32::try_from(wide.width).map_err(|_| CodecError::Limit { what: "frame size" })?;
+    let height =
+        u32::try_from(wide.height).map_err(|_| CodecError::Limit { what: "frame size" })?;
+    if monochrome {
+        if tags.bit_depth != 10 {
+            return Err(CodecError::Unsupported { what: "bit depth" });
+        }
+        if !frame.grain.apply {
+            return gray_wide(&wide.y, width, height, tags, pts, timescale);
+        }
+        let Some((y, _, _)) = crate::grain::overlay(
+            &wide.y,
+            &wide.u,
+            &wide.v,
+            wide.width,
+            wide.height,
+            &frame.grain,
+            10,
+        ) else {
+            return Err(CodecError::Malformed {
+                at_bit: 0,
+                what: "film grain",
+            });
+        };
+        return gray_wide(&y, width, height, tags, pts, timescale);
+    }
+    if frame.grain.apply && tags.bit_depth != 10 {
+        return Err(CodecError::Unsupported { what: "film grain" });
+    }
+    if !frame.grain.apply {
+        return wide_output(
+            &wide.y,
+            &wide.u,
+            &wide.v,
+            width,
+            height,
+            tags,
+            (pts, timescale),
+        );
+    }
+    let chroma_w = if frame.grain.sub_x {
+        wide.width.div_ceil(2)
+    } else {
+        wide.width
+    };
+    let chroma_h = if frame.grain.sub_y {
+        wide.height.div_ceil(2)
+    } else {
+        wide.height
+    };
+    if wide.u.len() != chroma_w.saturating_mul(chroma_h) {
+        return Err(CodecError::Unsupported { what: "film grain" });
+    }
+    let Some((y, u, v)) = crate::grain::overlay(
+        &wide.y,
+        &wide.u,
+        &wide.v,
+        wide.width,
+        wide.height,
+        &frame.grain,
+        10,
+    ) else {
+        return Err(CodecError::Malformed {
+            at_bit: 0,
+            what: "film grain",
+        });
+    };
+    wide_output(&y, &u, &v, width, height, tags, (pts, timescale))
+}
+
+fn publish(
+    picture: &Yuv420,
+    monochrome: bool,
+    tags: &ShownTags,
+    pts: i64,
+    timescale: u32,
+) -> Result<PictureOutput, CodecError> {
+    if monochrome {
+        gray_output(picture, tags, pts, timescale)
+    } else {
+        picture_output(picture, tags, pts, timescale)
     }
 }
 
@@ -167,6 +1241,19 @@ fn shown(picture: &Yuv420, frame: &FrameInfo) -> Result<Yuv420, CodecError> {
     }
     let width = picture.y.width() as usize;
     let height = picture.y.height() as usize;
+    let chroma_w = if frame.grain.sub_x {
+        picture.y.width().div_ceil(2)
+    } else {
+        picture.y.width()
+    };
+    let chroma_h = if frame.grain.sub_y {
+        picture.y.height().div_ceil(2)
+    } else {
+        picture.y.height()
+    };
+    if picture.u.width() != chroma_w || picture.u.height() != chroma_h {
+        return Err(CodecError::Unsupported { what: "film grain" });
+    }
     let Some((y, u, v)) = crate::grain::overlay(
         picture.y.samples(),
         picture.u.samples(),
@@ -174,30 +1261,39 @@ fn shown(picture: &Yuv420, frame: &FrameInfo) -> Result<Yuv420, CodecError> {
         width,
         height,
         &frame.grain,
+        8,
     ) else {
         return Err(CodecError::Malformed {
             at_bit: 0,
             what: "film grain",
         });
     };
-    owned(DecodedPicture {
-        y,
-        u,
-        v,
-        width,
-        height,
-    })
+    owned(
+        DecodedPicture {
+            y,
+            u,
+            v,
+            width,
+            height,
+        },
+        frame.grain.sub_x,
+        frame.grain.sub_y,
+    )
 }
 
-fn owned(picture: DecodedPicture) -> Result<Yuv420, CodecError> {
+fn owned(picture: DecodedPicture, sub_x: bool, sub_y: bool) -> Result<Yuv420, CodecError> {
     let width =
         u32::try_from(picture.width).map_err(|_| CodecError::Limit { what: "frame size" })?;
     let height =
         u32::try_from(picture.height).map_err(|_| CodecError::Limit { what: "frame size" })?;
-    Yuv420::new(
+    let chroma_w = if sub_x { width.div_ceil(2) } else { width };
+    let chroma_h = if sub_y { height.div_ceil(2) } else { height };
+    Yuv420::subsampled(
         Plane::new(width, height, picture.y)?,
-        Plane::new(width.div_ceil(2), height.div_ceil(2), picture.u)?,
-        Plane::new(width.div_ceil(2), height.div_ceil(2), picture.v)?,
+        Plane::new(chroma_w, chroma_h, picture.u)?,
+        Plane::new(chroma_w, chroma_h, picture.v)?,
+        sub_x,
+        sub_y,
     )
 }
 
@@ -367,7 +1463,9 @@ mod tests {
                 keyframe: false,
                 side: Vec::new(),
             };
-            assert!(decoder.push(&packet).is_err());
+            // A buffer with no size field may be a legal show-existing frame.
+            // Either way the stored reference has to survive.
+            let _ = decoder.push(&packet);
         }
         let again = decoder.push(&repeat[0]).expect("reference still there");
         assert_eq!(
@@ -383,6 +1481,73 @@ mod tests {
             hash = hash.wrapping_mul(0x100_0000_01b3);
         }
         hash
+    }
+
+    fn leb128(mut value: usize) -> Vec<u8> {
+        let mut out = Vec::new();
+        loop {
+            let mut byte = (value & 0x7f) as u8;
+            value >>= 7;
+            if value == 0 {
+                out.push(byte);
+                return out;
+            }
+            byte |= 0x80;
+            out.push(byte);
+        }
+    }
+
+    fn leb_read(bytes: &[u8]) -> (usize, usize) {
+        let mut value = 0usize;
+        for (index, byte) in bytes.iter().take(8).enumerate() {
+            value |= usize::from(byte & 0x7f) << (index * 7);
+            if byte & 0x80 == 0 {
+                return (value, index + 1);
+            }
+        }
+        panic!("leb128");
+    }
+
+    fn frame_unit(obus: &[&[u8]]) -> Vec<u8> {
+        let mut unit = Vec::new();
+        for obu in obus {
+            unit.extend(leb128(obu.len()));
+            unit.extend_from_slice(obu);
+        }
+        let mut out = Vec::new();
+        out.extend(leb128(unit.len()));
+        out.extend(unit);
+        out
+    }
+
+    fn annex_b_temporal(units: &[Vec<u8>]) -> Vec<u8> {
+        let mut body = Vec::new();
+        for unit in units {
+            body.extend_from_slice(unit);
+        }
+        let mut out = Vec::new();
+        out.extend(leb128(body.len()));
+        out.extend(body);
+        out
+    }
+
+    fn annex_b_packet(obus: &[crate::header::UnitObu<'_>]) -> Vec<u8> {
+        let bytes: Vec<&[u8]> = obus.iter().map(|obu| obu.bytes).collect();
+        annex_b_temporal(&[frame_unit(&bytes)])
+    }
+
+    fn push_error(decoder: &mut Av1Decoder, data: &[u8], pts: i64) -> cutlass_decode::CodecError {
+        decoder
+            .push(&cutlass_decode::Packet {
+                stream: 0,
+                data: data.to_vec(),
+                pts,
+                duration: 1,
+                timescale: 30,
+                keyframe: pts == 0,
+                side: Vec::new(),
+            })
+            .expect_err("packet")
     }
 
     fn push_frame(decoder: &mut Av1Decoder, data: &[u8], pts: i64) -> Vec<u8> {
@@ -402,6 +1567,147 @@ mod tests {
         packed.extend_from_slice(picture.u.samples());
         packed.extend_from_slice(picture.v.samples());
         packed
+    }
+
+    #[test]
+    fn chroma_restoration_stripes_match_dav1d() {
+        // aomenc, 256×128 4:2:0. CDEF is on, and every plane selects self-guided
+        // restoration with 256-sample units. A chroma stripe is 32 samples
+        // tall. The digest is `ffmpeg -c:v libdav1d -threads 1`.
+        let frames = ivf_payloads(include_bytes!("../fixtures/restore-420.ivf"));
+        assert_eq!(frames.len(), 1);
+        let (sequence, frame) = crate::header::parse_unit(frames[0], None).expect("sequence");
+        assert!(sequence.subsampling_x && sequence.subsampling_y);
+        assert!(sequence.enable_cdef);
+        assert_eq!(frame.width, 256);
+        assert_eq!(frame.height, 128);
+        assert_eq!(frame.restoration.plane, [crate::header::RESTORE_SGRPROJ; 3]);
+        assert_eq!(frame.restoration.unit, [256; 3]);
+        let params = CodecParams::video(CodecId::Av1, 256, 128);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        let packed = push_frame(&mut decoder, frames[0], 0);
+        assert_eq!(packed.len(), 256 * 128 * 3 / 2);
+        assert_eq!(frame_digest(&packed), 0x0102_7216_ee37_1c58);
+        assert!(decoder.drain().expect("drain").is_empty());
+    }
+
+    #[test]
+    fn restoration_on_444_and_422_matches_dav1d() {
+        // aomenc --enable-restoration=1 --enable-cdef=0, one frame, cq 40.
+        // Profile 1 is 512×128 4:4:4. Chroma is full size, so each chroma plane
+        // has two 256-wide restoration units. Profile 2 is 256×512 4:2:2.
+        // Chroma keeps the full height, so each chroma plane has two 256-tall
+        // units, and the unit row follows the luma sample eight rows above
+        // the block. Both frames select self-guided restoration on every plane.
+        // Digests are `ffmpeg -c:v libdav1d -threads 1`.
+        let cases = [
+            (
+                include_bytes!("../fixtures/restore-444.ivf").as_slice(),
+                1u8,
+                false,
+                false,
+                512u32,
+                128u32,
+                cutlass_decode::PixelFormat::Yuv444p,
+                512 * 128 * 3,
+                0x390e_7514_ad62_fb6d,
+            ),
+            (
+                include_bytes!("../fixtures/restore-422.ivf").as_slice(),
+                2,
+                true,
+                false,
+                256,
+                512,
+                cutlass_decode::PixelFormat::Yuv422p,
+                256 * 512 + 128 * 512 * 2,
+                0xd3c2_410f_120e_df46,
+            ),
+        ];
+        for (file, profile, sub_x, sub_y, width, height, pixel, length, digest) in cases {
+            let frames = ivf_payloads(file);
+            assert_eq!(frames.len(), 1, "profile {profile}");
+            let (sequence, key) = crate::header::parse_unit(frames[0], None).expect("sequence");
+            assert_eq!(sequence.profile, profile);
+            assert_eq!(sequence.subsampling_x, sub_x);
+            assert_eq!(sequence.subsampling_y, sub_y);
+            assert_eq!(key.width, width);
+            assert_eq!(key.height, height);
+            assert_eq!(
+                key.restoration.plane,
+                [crate::header::RESTORE_SGRPROJ; 3],
+                "profile {profile}"
+            );
+            assert_eq!(key.restoration.unit, [256; 3], "profile {profile}");
+            let params = CodecParams::video(CodecId::Av1, width, height);
+            let mut decoder = Av1Decoder::open(&params).expect("open");
+            let shown = decoder
+                .push(&cutlass_decode::Packet {
+                    stream: 0,
+                    data: frames[0].to_vec(),
+                    pts: 0,
+                    duration: 1,
+                    timescale: 30,
+                    keyframe: true,
+                    side: Vec::new(),
+                })
+                .unwrap_or_else(|error| panic!("profile {profile}: {error:?}"));
+            assert_eq!(shown.len(), 1, "profile {profile}");
+            let cutlass_decode::Output::Picture(picture) = &shown[0] else {
+                panic!("picture");
+            };
+            let info = picture.info();
+            assert_eq!(info.pixel, pixel, "profile {profile}");
+            let cutlass_decode::PictureSamples::Cpu(bytes) = picture.samples() else {
+                panic!("cpu");
+            };
+            assert_eq!(bytes.len(), length, "profile {profile}");
+            assert_eq!(frame_digest(bytes), digest, "profile {profile}");
+            assert!(decoder.drain().expect("drain").is_empty());
+        }
+    }
+
+    #[test]
+    fn cdef_index_covers_a_block_wider_than_64() {
+        // aomenc --sb-size=128 --min-partition-size=128 --max-partition-size=128.
+        // The 128×128 block reads one CDEF index and that index covers all four
+        // 64×64 units. The digest is `ffmpeg -c:v libdav1d -threads 1`.
+        let frames = ivf_payloads(include_bytes!("../fixtures/cdef-wide.ivf"));
+        assert_eq!(frames.len(), 1);
+        let (sequence, frame) = crate::header::parse_unit(frames[0], None).expect("sequence");
+        assert!(sequence.use_128);
+        assert!(sequence.enable_cdef);
+        assert_eq!(frame.width, 128);
+        assert_eq!(frame.height, 128);
+        assert_ne!(frame.cdef.y_pri[0], 0);
+        let params = CodecParams::video(CodecId::Av1, 128, 128);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        let packed = push_frame(&mut decoder, frames[0], 0);
+        assert_eq!(packed.len(), 128 * 128 * 3 / 2);
+        assert_eq!(frame_digest(&packed), 0xc184_d76c_fa98_bc01);
+        assert!(decoder.drain().expect("drain").is_empty());
+    }
+
+    #[test]
+    fn restoration_units_keep_the_updated_cdf() {
+        // 512×128 noise. Luma is self-guided with 128×128 units, four of them.
+        // CDF update is on, so each unit after the first reads the adapted
+        // probability. Chroma selects no restoration. The digest is
+        // `ffmpeg -c:v libdav1d -threads 1`.
+        let frames = ivf_payloads(include_bytes!("../fixtures/restore-cdf.ivf"));
+        assert_eq!(frames.len(), 1);
+        let (_, frame) = crate::header::parse_unit(frames[0], None).expect("sequence");
+        assert!(!frame.disable_cdf_update);
+        assert_eq!(frame.restoration.plane[0], crate::header::RESTORE_SGRPROJ);
+        assert_eq!(frame.restoration.plane[1], crate::header::RESTORE_NONE);
+        assert_eq!(frame.restoration.plane[2], crate::header::RESTORE_NONE);
+        assert_eq!(frame.restoration.unit[0], 128);
+        let params = CodecParams::video(CodecId::Av1, 512, 128);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        let packed = push_frame(&mut decoder, frames[0], 0);
+        assert_eq!(packed.len(), 512 * 128 * 3 / 2);
+        assert_eq!(frame_digest(&packed), 0x9517_c294_09ce_d34f);
+        assert!(decoder.drain().expect("drain").is_empty());
     }
 
     #[test]
@@ -458,32 +1764,243 @@ mod tests {
     }
 
     #[test]
-    fn a_lossless_frame_is_refused() {
-        let payload = [
-            0x12, 0x00, 0x0a, 0x06, 0x18, 0x15, 0x7f, 0xfc, 0x80, 0x08, 0x32, 0x40, 0x90, 0x00,
-            0x00, 0xdd, 0x2b, 0x2e, 0x3d, 0x05, 0xe2, 0xd5, 0xaa, 0xec, 0x96, 0xd6, 0x6a, 0x7b,
-            0x02, 0x3d, 0xec, 0x3f, 0x86, 0x48, 0x12, 0xb7, 0x37, 0xc5, 0x8c, 0xba, 0x47, 0x66,
-            0x06, 0x1b, 0x6c, 0x58, 0x2f, 0x02, 0xf0, 0x14, 0xb2, 0x66, 0x28, 0xe1, 0xf4, 0xbd,
-            0xab, 0x63, 0x00, 0xb7, 0x06, 0x39, 0x68, 0xf1, 0x5c, 0xdb, 0x64, 0x04, 0x8d, 0xe6,
-            0xdd, 0xc7, 0x2b, 0xa4, 0x87, 0x4f,
+    fn a_primary_reference_cdf_matches_dav1d() {
+        // aomenc 64×64. The keyframe adapts its CDFs. Each inter frame loads the
+        // primary reference and keeps adapting. Digests are
+        // `ffmpeg -c:v libdav1d -threads 1` of those three frames.
+        let frames: [&[u8]; 3] = [
+            &[
+                0x12, 0x00, 0x0a, 0x09, 0x00, 0x00, 0x00, 0x02, 0xaf, 0xff, 0x88, 0x30, 0x01, 0x32,
+                0x14, 0x10, 0x48, 0x00, 0x00, 0x01, 0x00, 0xb4, 0x5a, 0xcc, 0xa6, 0x0b, 0xe2, 0xb6,
+                0x29, 0x06, 0x56, 0x79, 0xa1, 0xd0, 0xe0,
+            ],
+            &[
+                0x12, 0x00, 0x32, 0x2c, 0x30, 0xc0, 0x40, 0x00, 0x00, 0x41, 0x51, 0x00, 0x41, 0x00,
+                0x00, 0x40, 0x00, 0xd1, 0x1f, 0xd1, 0x7c, 0xfb, 0xef, 0xec, 0x11, 0xcb, 0x95, 0x22,
+                0xc9, 0x7d, 0x61, 0x78, 0xc2, 0x2f, 0x74, 0x36, 0x15, 0x06, 0x7f, 0xd0, 0xdc, 0x8d,
+                0xb2, 0xb5, 0x4f, 0x96, 0xd5, 0xf6,
+            ],
+            &[
+                0x12, 0x00, 0x32, 0x14, 0x30, 0x60, 0x80, 0x02, 0x00, 0x41, 0x50, 0x00, 0x41, 0x00,
+                0x00, 0x40, 0x00, 0xcd, 0xb9, 0x61, 0x4d, 0x7b, 0xb7, 0xa0,
+            ],
         ];
+        let expected = [
+            0x95c8_589e_9dee_2325,
+            0xa64d_3fcf_0838_ab25,
+            0x1377_4ca4_510c_0b25,
+        ];
+        let mut sequence = None;
+        for (index, payload) in frames.iter().enumerate() {
+            let (seq, frame) =
+                crate::header::parse_unit(payload, sequence.as_ref()).expect("parse");
+            if index > 0 {
+                assert!(!frame.error_resilient, "frame {index}");
+                assert!(frame.primary_ref < 7, "frame {index}");
+                assert!(!frame.disable_cdf_update, "frame {index}");
+            }
+            sequence = Some(seq);
+        }
         let params = CodecParams::video(CodecId::Av1, 64, 64);
         let mut decoder = Av1Decoder::open(&params).expect("open");
-        let error = decoder
-            .push(&cutlass_decode::Packet {
-                stream: 0,
-                data: payload.to_vec(),
-                pts: 0,
-                duration: 1,
-                timescale: 30,
-                keyframe: true,
-                side: Vec::new(),
-            })
-            .expect_err("lossless");
-        assert_eq!(
-            error,
-            cutlass_decode::CodecError::Unsupported { what: "lossless" }
+        for (index, payload) in frames.iter().enumerate() {
+            let packed = push_frame(&mut decoder, payload, index as i64);
+            assert_eq!(packed.len(), 64 * 64 * 3 / 2);
+            assert_eq!(frame_digest(&packed), expected[index], "frame {index}");
+        }
+    }
+
+    #[test]
+    fn an_inter_frame_selects_its_transform_size() {
+        // aomenc 64×64. Both frames select the transform size. The inter frame
+        // is not error resilient and splits one inter transform. Digests are
+        // `ffmpeg -c:v libdav1d -threads 1` of those two frames.
+        let frames: [&[u8]; 2] = [
+            &[
+                0x12, 0x00, 0x0a, 0x09, 0x00, 0x00, 0x00, 0x02, 0xaf, 0xff, 0x88, 0xb0, 0x01, 0x32,
+                0x3e, 0x10, 0x40, 0xc0, 0x00, 0x01, 0x40, 0xce, 0xfc, 0x66, 0x8e, 0x0f, 0x23, 0x32,
+                0x2f, 0x8e, 0xdc, 0x0f, 0x18, 0x3c, 0x6b, 0xfc, 0xcb, 0x29, 0x71, 0x05, 0x28, 0xf5,
+                0x67, 0x21, 0x81, 0x5f, 0xe4, 0xac, 0x02, 0xd0, 0x3c, 0x01, 0x07, 0xe7, 0xf1, 0x21,
+                0xdc, 0x34, 0x07, 0x2d, 0xeb, 0x4e, 0x0e, 0xdf, 0xe7, 0xa1, 0x36, 0x48, 0xee, 0xd0,
+                0x46, 0xc7, 0x83, 0xcb, 0x04, 0x26, 0xec,
+            ],
+            &[
+                0x12, 0x00, 0x32, 0xb2, 0x01, 0x30, 0xc0, 0x40, 0x00, 0x00, 0x41, 0x0e, 0x00, 0x00,
+                0x05, 0x00, 0x00, 0xb6, 0x98, 0x70, 0xeb, 0x68, 0xe6, 0x88, 0x1a, 0x6a, 0x0b, 0x3e,
+                0x47, 0xbb, 0x0e, 0xf0, 0x67, 0xd1, 0x28, 0xfe, 0xc5, 0x0c, 0xdc, 0x53, 0xdd, 0xbc,
+                0x6a, 0xaf, 0xbd, 0xf1, 0x0c, 0x0f, 0x0e, 0x9d, 0x2c, 0xb5, 0x08, 0x99, 0x22, 0x4c,
+                0xb8, 0x0d, 0x76, 0x50, 0x3d, 0xda, 0x37, 0x08, 0xe2, 0xa9, 0x3c, 0xc3, 0x52, 0xe2,
+                0x2a, 0x38, 0xe5, 0x6b, 0xf8, 0x89, 0x35, 0x75, 0xb0, 0x14, 0x8d, 0xf2, 0xa6, 0xec,
+                0xc5, 0xbe, 0xbe, 0xe8, 0xe0, 0x2f, 0x24, 0xee, 0xeb, 0xb0, 0xe0, 0x60, 0x78, 0x48,
+                0xad, 0x94, 0x56, 0x6a, 0xe5, 0xa5, 0x00, 0x20, 0x37, 0x70, 0x3a, 0x33, 0x52, 0x63,
+                0xde, 0x3f, 0x35, 0x8b, 0x67, 0xd6, 0x46, 0xc3, 0x84, 0x4b, 0x89, 0x1e, 0x69, 0x0e,
+                0x59, 0x5e, 0x14, 0xb3, 0xa4, 0x20, 0x3a, 0x86, 0x03, 0xa0, 0xbd, 0x7a, 0x0d, 0xc0,
+                0x7f, 0x0d, 0x89, 0xac, 0xf9, 0xcf, 0xe4, 0x79, 0xce, 0xe2, 0x64, 0x0b, 0x85, 0x2f,
+                0x95, 0x33, 0x56, 0xc8, 0xb9, 0x82, 0x05, 0x58, 0xdf, 0xc9, 0x8e, 0xe6, 0xf1, 0xc0,
+                0x01, 0x5e, 0x02, 0x7c, 0xa7, 0x44, 0x2a, 0xf3, 0x3c, 0xe4, 0x57, 0xa1, 0x67, 0xc5,
+                0x80,
+            ],
+        ];
+        let expected = [0x216f_5038_1f9a_4325, 0x7515_42f8_12fe_45cb];
+        let mut sequence = None;
+        for (index, payload) in frames.iter().enumerate() {
+            let (seq, frame) =
+                crate::header::parse_unit(payload, sequence.as_ref()).expect("parse");
+            assert!(frame.tx_select, "frame {index}");
+            if index == 1 {
+                assert!(!frame.error_resilient);
+                assert!(frame.primary_ref < 7);
+            }
+            sequence = Some(seq);
+        }
+        let params = CodecParams::video(CodecId::Av1, 64, 64);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let packed = push_frame(&mut decoder, payload, index as i64);
+            assert_eq!(packed.len(), 64 * 64 * 3 / 2);
+            assert_eq!(frame_digest(&packed), expected[index], "frame {index}");
+        }
+    }
+
+    #[test]
+    fn superblock_128_matches_dav1d() {
+        // aomenc --sb-size=128. Digests are dav1d 1.5.3 with in-loop filters.
+        expect_superblock_128(
+            &[include_bytes!("../fixtures/sb128_flat_0.obu")],
+            &[0xf206_7a5e_2040_2325],
         );
+        expect_superblock_128(
+            &[
+                include_bytes!("../fixtures/sb128_0.obu"),
+                include_bytes!("../fixtures/sb128_1.obu"),
+            ],
+            &[0x4d41_30d9_78c5_115f, 0xcdad_99ad_6d88_94d9],
+        );
+        expect_superblock_128(
+            &[
+                include_bytes!("../fixtures/sb128_cdef_0.obu"),
+                include_bytes!("../fixtures/sb128_cdef_1.obu"),
+            ],
+            &[0x1fef_bc5c_9457_b890, 0xfb94_9310_8fde_56d6],
+        );
+        expect_superblock_128(
+            &[
+                include_bytes!("../fixtures/sb128_delta_0.obu"),
+                include_bytes!("../fixtures/sb128_delta_1.obu"),
+            ],
+            &[0x6aa5_395a_d395_4f83, 0xdd97_7f4a_be1b_1ff2],
+        );
+    }
+
+    fn expect_superblock_128(frames: &[&[u8]], expected: &[u64]) {
+        let (sequence, _) = crate::header::parse_unit(frames[0], None).expect("parse");
+        assert!(sequence.use_128);
+        let params = CodecParams::video(CodecId::Av1, 256, 256);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let packed = push_frame(&mut decoder, payload, index as i64);
+            assert_eq!(packed.len(), 256 * 256 * 3 / 2);
+            assert_eq!(frame_digest(&packed), expected[index], "frame {index}");
+        }
+    }
+
+    #[test]
+    fn palette_screen_matches_dav1d() {
+        // aomenc --tune-content=screen, from a scaled screen recording.
+        // The keyframe uses palette colors. Digests are dav1d 1.5.3.
+        let frames: [&[u8]; 4] = [
+            include_bytes!("../fixtures/sc_0.obu"),
+            include_bytes!("../fixtures/sc_1.obu"),
+            include_bytes!("../fixtures/sc_2.obu"),
+            include_bytes!("../fixtures/sc_3.obu"),
+        ];
+        let expected = [
+            0x7ea0_91e8_4fa7_1841,
+            0xe747_2a4c_3197_44ed,
+            0x9228_c426_43d5_ed6e,
+            0x8903_d6d5_9e45_fe3e,
+        ];
+        let params = CodecParams::video(CodecId::Av1, 128, 128);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let packed = push_frame(&mut decoder, payload, index as i64);
+            assert_eq!(packed.len(), 128 * 128 * 3 / 2);
+            assert_eq!(frame_digest(&packed), expected[index], "frame {index}");
+        }
+    }
+
+    #[test]
+    fn intrabc_and_integer_motion_match_dav1d() {
+        // aomenc --tune-content=screen on a 256×256 graphic, then the same
+        // picture again. The keyframe copies a block inside the frame. The
+        // inter frame forces integer motion vectors. Digests are dav1d 1.5.3.
+        let frames: [&[u8]; 2] = [
+            include_bytes!("../fixtures/ibc_0.obu"),
+            include_bytes!("../fixtures/ibc_1.obu"),
+        ];
+        let mut sequence = None;
+        for (index, payload) in frames.iter().enumerate() {
+            let (seq, frame) =
+                crate::header::parse_unit(payload, sequence.as_ref()).expect("parse");
+            if index == 0 {
+                assert!(frame.allow_intrabc, "frame {index}");
+            } else {
+                assert!(frame.force_integer_mv, "frame {index}");
+            }
+            sequence = Some(seq);
+        }
+        let expected = [0x8734_a364_5973_d327, 0x8734_a364_5973_d327];
+        let params = CodecParams::video(CodecId::Av1, 256, 256);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let packed = push_frame(&mut decoder, payload, index as i64);
+            assert_eq!(packed.len(), 256 * 256 * 3 / 2);
+            assert_eq!(frame_digest(&packed), expected[index], "frame {index}");
+        }
+    }
+
+    #[test]
+    fn lossless_walsh_hadamard_matches_dav1d() {
+        // aomenc --lossless=1, from a scaled photographic frame. base_q_idx is 0,
+        // so every block is a 4×4 Walsh-Hadamard transform and the frame header
+        // omits the loop-filter levels and the CDEF strengths. Digests are dav1d 1.5.3.
+        let frames: [&[u8]; 4] = [
+            include_bytes!("../fixtures/ll_0.obu"),
+            include_bytes!("../fixtures/ll_1.obu"),
+            include_bytes!("../fixtures/ll_2.obu"),
+            include_bytes!("../fixtures/ll_3.obu"),
+        ];
+        let expected = [
+            0xf5c7_fad9_a756_c601,
+            0xb764_46d4_5d8d_96ea,
+            0x863c_b381_802e_9309,
+            0xe4a4_2ebe_186b_d4e6,
+        ];
+        let mut sequence = None;
+        for (index, payload) in frames.iter().enumerate() {
+            let (seq, frame) =
+                crate::header::parse_unit(payload, sequence.as_ref()).expect("parse");
+            assert!(!frame.show_existing, "frame {index}");
+            assert!(frame.lossless, "frame {index}");
+            assert_eq!(frame.base_q, 0, "frame {index}");
+            assert!(!frame.tx_select, "frame {index}");
+            assert_eq!(frame.lf_level, [0, 0, 0, 0], "frame {index}");
+            assert_eq!(frame.cdef.bits, 0, "frame {index}");
+            assert!(!frame.restoration.uses, "frame {index}");
+            if index == 0 {
+                assert_eq!(frame.frame_type, crate::header::KEY_FRAME);
+            } else {
+                assert_eq!(frame.frame_type, crate::header::INTER_FRAME);
+            }
+            sequence = Some(seq);
+        }
+        let params = CodecParams::video(CodecId::Av1, 128, 128);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let packed = push_frame(&mut decoder, payload, index as i64);
+            assert_eq!(packed.len(), 128 * 128 * 3 / 2, "frame {index}");
+            assert_eq!(frame_digest(&packed), expected[index], "frame {index}");
+        }
     }
 
     #[test]
@@ -1327,6 +2844,64 @@ mod tests {
         assert_eq!(packed[64 * 64], 153);
         assert_eq!(frame_digest(&packed), 0xae59_b5fc_69f0_dd0e);
     }
+
+    #[test]
+    fn film_grain_copied_from_a_reference_matches_dav1d() {
+        // Three 64×64 frames. The inter frames name reference slot 0 for every
+        // grain parameter and carry their own seed. The shown pictures match
+        // dav1d. A show-existing frame shows the stored picture, which is the
+        // reconstruction from before grain.
+        let frames: [&[u8]; 3] = [
+            include_bytes!("../fixtures/fgref_0.obu"),
+            include_bytes!("../fixtures/fgref_1.obu"),
+            include_bytes!("../fixtures/fgref_2.obu"),
+        ];
+        let expected = [
+            0xe40f_dc7b_d200_6040,
+            0x2ef9_787f_853b_6707,
+            0xfedc_eacb_858d_ccf5,
+        ];
+        let (sequence, key) = crate::header::parse_unit(frames[0], None).expect("key");
+        assert!(key.grain.apply);
+        assert!(key.grain.copy_from.is_none());
+        assert!(!sequence.frame_id_present);
+        for frame in &frames[1..] {
+            let (_sequence, info) =
+                crate::header::parse_unit(frame, Some(&sequence)).expect("inter");
+            assert_eq!(info.grain.copy_from, Some(0));
+            assert!(info.ref_frames.contains(&0));
+        }
+        let params = CodecParams::video(CodecId::Av1, 64, 64);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        let packed = push_frame(&mut decoder, frames[0], 0);
+        assert_eq!(frame_digest(&packed), expected[0]);
+        decoder.reset();
+        let missing = push_error(&mut decoder, frames[1], 1);
+        assert!(matches!(
+            missing,
+            cutlass_decode::CodecError::Malformed {
+                what: "missing reference",
+                ..
+            }
+        ));
+        let packed = push_frame(&mut decoder, frames[0], 0);
+        assert_eq!(packed.len(), 64 * 64 * 3 / 2);
+        assert_eq!(frame_digest(&packed), expected[0]);
+        // Frame-header OBU. show_existing_frame, slot 0, then the trailing bit.
+        let again = push_frame(&mut decoder, &[0x12, 0x00, 0x1a, 0x01, 0x88], 1);
+        assert_eq!(frame_digest(&again), 0x09b9_a1c6_19d6_bbb2);
+        assert_ne!(frame_digest(&again), expected[0]);
+        for (index, payload) in frames[1..].iter().enumerate() {
+            let packed = push_frame(&mut decoder, payload, (index + 2) as i64);
+            assert_eq!(
+                frame_digest(&packed),
+                expected[index + 1],
+                "frame {}",
+                index + 1
+            );
+        }
+    }
+
     #[test]
     fn order_hint_frames_match_dav1d() {
         // Error-resilient single-reference frames. Order hint is on, and each
@@ -1410,6 +2985,476 @@ mod tests {
         let packed = push_frame(&mut decoder, frames[1], 1);
         assert_eq!(frame_digest(&packed), digests[1]);
     }
+
+    #[test]
+    fn tile_groups_match_dav1d() {
+        // 128×128, four tiles. The frame header is its own OBU and each tile is
+        // its own group. The second frame is inter and has no sequence header.
+        let frames: [&[u8]; 2] = [
+            include_bytes!("../fixtures/tg_0.obu"),
+            include_bytes!("../fixtures/tg_1.obu"),
+        ];
+        let expected = [0xb1a2_c0fe_a403_1499, 0xc653_6a11_a972_4b1c];
+        let first = crate::header::unit_obus(frames[0]).expect("obus");
+        let second = crate::header::unit_obus(frames[1]).expect("obus");
+        assert_eq!(
+            first.iter().map(|obu| obu.kind).collect::<Vec<_>>(),
+            vec![2, 1, 3, 4, 4, 4, 4]
+        );
+        assert_eq!(
+            second.iter().map(|obu| obu.kind).collect::<Vec<_>>(),
+            vec![2, 3, 4, 4, 4, 4]
+        );
+        let mut header = Vec::new();
+        for obu in first.iter().filter(|obu| obu.kind == 1 || obu.kind == 3) {
+            header.extend_from_slice(obu.bytes);
+        }
+        let (_sequence, frame) = crate::header::parse_unit(&header, None).expect("header");
+        assert_eq!(frame.tile_cols, 2);
+        assert_eq!(frame.tile_rows, 2);
+        assert!(frame.tile.is_empty());
+
+        let params = CodecParams::video(CodecId::Av1, 128, 128);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        let mut groups = Vec::new();
+        for obu in first.iter().filter(|obu| obu.kind == 4) {
+            groups.extend_from_slice(obu.bytes);
+        }
+        let missing = push_error(&mut decoder, &groups, 0);
+        assert!(matches!(
+            missing,
+            cutlass_decode::CodecError::Unsupported {
+                what: "tile group outside a frame",
+            }
+        ));
+        let mut short = Vec::new();
+        for obu in first.iter().take(first.len() - 1) {
+            short.extend_from_slice(obu.bytes);
+        }
+        let short = push_error(&mut decoder, &short, 0);
+        assert!(matches!(
+            short,
+            cutlass_decode::CodecError::Malformed {
+                what: "tile group",
+                ..
+            }
+        ));
+        let mut gap = Vec::new();
+        let mut skipped = false;
+        for obu in &first {
+            if obu.kind == 4 && !skipped {
+                skipped = true;
+                continue;
+            }
+            gap.extend_from_slice(obu.bytes);
+        }
+        let gap = push_error(&mut decoder, &gap, 0);
+        assert!(matches!(
+            gap,
+            cutlass_decode::CodecError::Malformed {
+                what: "tile group",
+                ..
+            }
+        ));
+
+        let packed = push_frame(&mut decoder, frames[0], 0);
+        assert_eq!(packed.len(), 128 * 128 * 3 / 2);
+        assert_eq!(frame_digest(&packed), expected[0]);
+        let again = push_error(&mut decoder, &groups, 1);
+        assert!(matches!(
+            again,
+            cutlass_decode::CodecError::Unsupported {
+                what: "tile group outside a frame",
+            }
+        ));
+        let packed = push_frame(&mut decoder, frames[1], 1);
+        assert_eq!(packed.len(), 128 * 128 * 3 / 2);
+        assert_eq!(frame_digest(&packed), expected[1]);
+    }
+
+    #[test]
+    fn annex_b_lengths_match_dav1d() {
+        // The same 128×128 frames, each wrapped as one Annex B temporal unit.
+        // Lengths sit in front of the temporal unit, the frame unit, and every OBU.
+        let frames: [&[u8]; 2] = [
+            include_bytes!("../fixtures/tg_0.obu"),
+            include_bytes!("../fixtures/tg_1.obu"),
+        ];
+        let expected = [0xb1a2_c0fe_a403_1499, 0xc653_6a11_a972_4b1c];
+        let params = CodecParams::video(CodecId::Av1, 128, 128);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        let first = crate::header::unit_obus(frames[0]).expect("obus");
+        let wrapped = annex_b_packet(&first);
+        let packed = push_frame(&mut decoder, &wrapped, 0);
+        assert_eq!(packed.len(), 128 * 128 * 3 / 2);
+        assert_eq!(frame_digest(&packed), expected[0]);
+
+        let (size, used) = leb_read(&wrapped);
+        assert_eq!(size, wrapped.len() - used);
+        let mut inconsistent = wrapped.clone();
+        let (_, frame_at) = leb_read(&inconsistent[used..]);
+        let (_, obu_at) = leb_read(&inconsistent[used + frame_at..]);
+        let size_at = used + frame_at + obu_at + 1;
+        assert_eq!(inconsistent[size_at - 1], 0x12);
+        assert_eq!(inconsistent[size_at], 0x00);
+        inconsistent[size_at] = 0x01;
+        let error = push_error(&mut decoder, &inconsistent, 1);
+        assert!(matches!(
+            error,
+            cutlass_decode::CodecError::Malformed {
+                what: "obu length",
+                ..
+            }
+        ));
+        let mut body = wrapped[used..].to_vec();
+        body.pop();
+        let mut short = leb128(body.len());
+        short.extend_from_slice(&body);
+        let error = push_error(&mut decoder, &short, 1);
+        assert!(matches!(
+            error,
+            cutlass_decode::CodecError::Truncated {
+                what: "annex b",
+                ..
+            }
+        ));
+
+        let second = crate::header::unit_obus(frames[1]).expect("obus");
+        let packed = push_frame(&mut decoder, &annex_b_packet(&second), 1);
+        assert_eq!(packed.len(), 128 * 128 * 3 / 2);
+        assert_eq!(frame_digest(&packed), expected[1]);
+
+        // One temporal unit, two frame units. The second unit has no delimiter.
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        let first_bytes: Vec<&[u8]> = first.iter().map(|obu| obu.bytes).collect();
+        let second_bytes: Vec<&[u8]> = second.iter().skip(1).map(|obu| obu.bytes).collect();
+        assert_eq!((second[0].bytes[0] >> 3) & 0xf, 2);
+        let both = annex_b_temporal(&[frame_unit(&first_bytes), frame_unit(&second_bytes)]);
+        let shown = decoder
+            .push(&cutlass_decode::Packet {
+                stream: 0,
+                data: both,
+                pts: 0,
+                duration: 1,
+                timescale: 30,
+                keyframe: true,
+                side: Vec::new(),
+            })
+            .expect("two frame units");
+        assert_eq!(shown.len(), 2);
+        for (index, output) in shown.iter().enumerate() {
+            let picture = &output.as_video().expect("video").picture;
+            let mut packed = picture.y.samples().to_vec();
+            packed.extend_from_slice(picture.u.samples());
+            packed.extend_from_slice(picture.v.samples());
+            assert_eq!(frame_digest(&packed), expected[index], "frame {index}");
+        }
+    }
+
+    #[test]
+    fn large_scale_tile_list_matches_dav1d() {
+        // 128×128 keyframe and one inter frame. CDF update, CDEF, restoration,
+        // the loop filter, and order hint are off, and the grid is four 64×64
+        // tiles. dav1d decodes those frame OBUs. The tile-list packet below is
+        // the inter frame's header plus those same tile bytes. dav1d does not
+        // decode a tile-list OBU; the mosaic is compared to dav1d's inter frame.
+        let frames: [&[u8]; 2] = [
+            include_bytes!("../fixtures/lst_0.obu"),
+            include_bytes!("../fixtures/lst_1.obu"),
+        ];
+        let expected = [0x6103_2e26_fc9f_2ab5, 0x909f_ce3d_18f4_c300];
+        let params = CodecParams::video(CodecId::Av1, 128, 128);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        let key = push_frame(&mut decoder, frames[0], 0);
+        assert_eq!(key.len(), 128 * 128 * 3 / 2);
+        assert_eq!(frame_digest(&key), expected[0]);
+        let inter = push_frame(&mut decoder, frames[1], 1);
+        assert_eq!(inter.len(), key.len());
+        assert_eq!(frame_digest(&inter), expected[1]);
+
+        let key_obus = crate::header::unit_obus(frames[0]).expect("key obus");
+        let inter_obus = crate::header::unit_obus(frames[1]).expect("inter obus");
+        let sequence = key_obus
+            .iter()
+            .find(|obu| obu.kind == 1)
+            .expect("sequence")
+            .bytes;
+        let frame_obu = inter_obus
+            .iter()
+            .find(|obu| obu.kind == 6)
+            .expect("frame")
+            .bytes;
+        let mut parsed = sequence.to_vec();
+        parsed.extend_from_slice(frame_obu);
+        let (_sequence, info) = crate::header::parse_unit(&parsed, None).expect("inter header");
+        assert!(!info.intra);
+        assert!(!info.show_existing);
+        assert!(info.disable_cdf_update);
+        assert_eq!(info.lf_level, [0, 0, 0, 0]);
+        assert_eq!((info.tile_cols, info.tile_rows), (2, 2));
+        assert_eq!(info.upscaled_width, info.width);
+        assert!(!info.grain.apply);
+        assert_eq!(info.ref_frames[0], 0);
+        let payload = crate::header::obu_payload(frame_obu).expect("frame payload");
+        assert!(payload.ends_with(&info.tile));
+        let raw_header = &payload[..payload.len() - info.tile.len()];
+        let mut headers = Vec::new();
+        for pad in 0..8 {
+            let candidate = header_with_trailing(raw_header, pad);
+            let mut probe = sequence.to_vec();
+            probe.extend(obu_with_size(3, &candidate));
+            let Ok((_sequence, parsed)) = crate::header::parse_unit(&probe, None) else {
+                continue;
+            };
+            if parsed.frame_type == info.frame_type
+                && parsed.width == info.width
+                && parsed.height == info.height
+                && parsed.base_q == info.base_q
+                && parsed.disable_cdf_update == info.disable_cdf_update
+                && parsed.ref_frames == info.ref_frames
+                && parsed.lf_level == info.lf_level
+                && parsed.mi_col_starts == info.mi_col_starts
+                && parsed.mi_row_starts == info.mi_row_starts
+                && parsed.refresh_flags == info.refresh_flags
+                && parsed.primary_ref == info.primary_ref
+                && parsed.reference_select == info.reference_select
+            {
+                headers.push(candidate);
+            }
+        }
+        assert_eq!(headers.len(), 1, "frame header trailing bit");
+        let header = &headers[0];
+        let parts = crate::header::tile_parts(&info).expect("tiles");
+        assert_eq!(parts.len(), 4);
+        let mut listed = Vec::new();
+        for part in &parts {
+            let row = info
+                .mi_row_starts
+                .iter()
+                .position(|start| *start as usize == part.row)
+                .expect("tile row") as u8;
+            let col = info
+                .mi_col_starts
+                .iter()
+                .position(|start| *start as usize == part.col)
+                .expect("tile col") as u8;
+            listed.push((0u8, row, col, part.data.as_slice()));
+        }
+        assert_eq!(
+            listed
+                .iter()
+                .map(|(_, row, col, _)| (*row, *col))
+                .collect::<Vec<_>>(),
+            vec![(0, 0), (0, 1), (1, 0), (1, 1)]
+        );
+
+        let mut mosaic = Av1Decoder::open(&params).expect("open");
+        push_frame(&mut mosaic, frames[0], 0);
+        let listed_packet = list_packet(sequence, header, &listed, 2, 2);
+        let picture = push_frame(&mut mosaic, &listed_packet, 1);
+        assert_eq!(frame_digest(&picture), expected[1]);
+        let again = push_frame(&mut mosaic, frames[1], 2);
+        assert_eq!(frame_digest(&again), expected[1]);
+
+        let swapped = vec![listed[1], listed[0], listed[3], listed[2]];
+        let swapped = list_packet(sequence, header, &swapped, 2, 2);
+        let mut reorder = Av1Decoder::open(&params).expect("open");
+        push_frame(&mut reorder, frames[0], 0);
+        let picture = push_frame(&mut reorder, &swapped, 1);
+        assert_eq!(frame_digest(&picture), frame_digest(&swap_columns(&inter)));
+
+        let one = list_packet(sequence, header, &listed[3..], 1, 1);
+        let mut single = Av1Decoder::open(&params).expect("open");
+        push_frame(&mut single, frames[0], 0);
+        let picture = push_frame(&mut single, &one, 1);
+        assert_eq!(picture.len(), 64 * 64 * 3 / 2);
+        assert_eq!(
+            frame_digest(&picture),
+            frame_digest(&crop_tile(&inter, 1, 1))
+        );
+
+        let corner = list_packet(sequence, header, &listed[..1], 2, 2);
+        let mut partial = Av1Decoder::open(&params).expect("open");
+        push_frame(&mut partial, frames[0], 0);
+        let picture = push_frame(&mut partial, &corner, 1);
+        assert_eq!(picture[64], 0);
+        assert_eq!(picture[128 * 128 + 32], 128);
+        assert_eq!(
+            frame_digest(&crop_tile(&picture, 0, 0)),
+            frame_digest(&crop_tile(&inter, 0, 0))
+        );
+
+        let mut fresh = Av1Decoder::open(&params).expect("open");
+        let missing = push_error(&mut fresh, &listed_packet, 0);
+        assert!(matches!(
+            missing,
+            cutlass_decode::CodecError::Malformed {
+                what: "missing reference",
+                ..
+            }
+        ));
+        let listed_obus = crate::header::unit_obus(&listed_packet).expect("list obus");
+        let list_obu = listed_obus
+            .iter()
+            .find(|obu| obu.kind == 8)
+            .expect("tile list obu");
+        let orphan = push_error(&mut fresh, list_obu.bytes, 0);
+        assert!(matches!(
+            orphan,
+            cutlass_decode::CodecError::Malformed {
+                what: "tile list",
+                ..
+            }
+        ));
+        push_frame(&mut fresh, frames[0], 0);
+        let mut anchored = listed.clone();
+        anchored[0].0 = 8;
+        let high = list_packet(sequence, header, &anchored, 2, 2);
+        let high = push_error(&mut fresh, &high, 1);
+        assert!(matches!(
+            high,
+            cutlass_decode::CodecError::Malformed {
+                what: "tile list",
+                ..
+            }
+        ));
+        let mut overrun = listed_packet.clone();
+        let list_at = overrun
+            .windows(list_obu.bytes.len())
+            .position(|window| window == list_obu.bytes)
+            .expect("list obu");
+        let list_payload = crate::header::obu_payload(list_obu.bytes).expect("list payload");
+        let size_at = list_at + (list_obu.bytes.len() - list_payload.len()) + 7;
+        overrun[size_at] = 0xff;
+        overrun[size_at + 1] = 0xff;
+        let overrun = push_error(&mut fresh, &overrun, 1);
+        assert!(matches!(
+            overrun,
+            cutlass_decode::CodecError::Truncated {
+                what: "tile list",
+                ..
+            }
+        ));
+        let inter = push_frame(&mut fresh, frames[1], 2);
+        assert_eq!(frame_digest(&inter), expected[1]);
+    }
+
+    fn header_with_trailing(header: &[u8], pad: usize) -> Vec<u8> {
+        if pad == 0 {
+            let mut out = header.to_vec();
+            out.push(0x80);
+            return out;
+        }
+        let mut out = header.to_vec();
+        let last = out.last_mut().expect("header byte");
+        let keep = !((1u8 << pad) - 1);
+        let trail = 1u8 << (pad - 1);
+        *last = (*last & keep) | trail;
+        out
+    }
+
+    fn obu_with_size(kind: u8, payload: &[u8]) -> Vec<u8> {
+        let mut out = vec![(kind << 3) | 0x02];
+        out.extend(leb128(payload.len()));
+        out.extend_from_slice(payload);
+        out
+    }
+
+    fn list_packet(
+        sequence: &[u8],
+        header: &[u8],
+        entries: &[(u8, u8, u8, &[u8])],
+        wide: u8,
+        high: u8,
+    ) -> Vec<u8> {
+        let mut payload = vec![wide - 1, high - 1];
+        let count = u16::try_from(entries.len()).expect("count") - 1;
+        payload.extend(count.to_be_bytes());
+        for (anchor, row, col, data) in entries {
+            payload.push(*anchor);
+            payload.push(*row);
+            payload.push(*col);
+            let size = u16::try_from(data.len()).expect("tile size") - 1;
+            payload.extend(size.to_be_bytes());
+            payload.extend_from_slice(data);
+        }
+        let mut packet = vec![0x12, 0x00];
+        packet.extend_from_slice(sequence);
+        packet.extend(obu_with_size(3, header));
+        packet.extend(obu_with_size(8, &payload));
+        packet
+    }
+
+    fn crop_tile(packed: &[u8], col: usize, row: usize) -> Vec<u8> {
+        let mut out = Vec::with_capacity(64 * 64 * 3 / 2);
+        for line in 0..64 {
+            let start = (row * 64 + line) * 128 + col * 64;
+            out.extend_from_slice(&packed[start..start + 64]);
+        }
+        for plane in 0..2 {
+            let chroma = &packed[128 * 128 + plane * 64 * 64..];
+            for line in 0..32 {
+                let start = (row * 32 + line) * 64 + col * 32;
+                out.extend_from_slice(&chroma[start..start + 32]);
+            }
+        }
+        out
+    }
+
+    fn swap_columns(packed: &[u8]) -> Vec<u8> {
+        let mut out = vec![0u8; packed.len()];
+        let order = [(1usize, 0usize), (0, 0), (1, 1), (0, 1)];
+        for (index, (sx, sy)) in order.iter().enumerate() {
+            let dx = index % 2;
+            let dy = index / 2;
+            for line in 0..64 {
+                let from = (sy * 64 + line) * 128 + sx * 64;
+                let to = (dy * 64 + line) * 128 + dx * 64;
+                out[to..to + 64].copy_from_slice(&packed[from..from + 64]);
+            }
+        }
+        for plane in 0..2 {
+            let base = 128 * 128 + plane * 64 * 64;
+            for (index, (sx, sy)) in order.iter().enumerate() {
+                let dx = index % 2;
+                let dy = index / 2;
+                for line in 0..32 {
+                    let from = base + (sy * 32 + line) * 64 + sx * 32;
+                    let to = base + (dy * 32 + line) * 64 + dx * 32;
+                    out[to..to + 32].copy_from_slice(&packed[from..from + 32]);
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn nonuniform_tiles_match_dav1d() {
+        // 320×192 keyframes. Superblocks are 64 pixels, so the grid is five by
+        // three. The signaled widths are 2, 2, 1 and the heights are 2, 1.
+        // A 4-row chroma block just inside the shorter row must not read the
+        // tile above: that neighbor is two luma rows back, outside this tile.
+        let frames: [&[u8]; 2] = [
+            include_bytes!("../fixtures/nu_0.obu"),
+            include_bytes!("../fixtures/nu_1.obu"),
+        ];
+        let expected = [0xf2df_1c82_2f33_5300, 0x6878_5ee4_efd0_358f];
+        let (_sequence, frame) = crate::header::parse_unit(frames[0], None).expect("header");
+        assert_eq!(frame.width, 320);
+        assert_eq!(frame.height, 192);
+        assert_eq!(frame.tile_cols, 3);
+        assert_eq!(frame.tile_rows, 2);
+        assert_eq!(frame.mi_col_starts, vec![0, 32, 64, 80]);
+        assert_eq!(frame.mi_row_starts, vec![0, 32, 48]);
+        let params = CodecParams::video(CodecId::Av1, 320, 192);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let packed = push_frame(&mut decoder, payload, index as i64);
+            assert_eq!(packed.len(), 320 * 192 * 3 / 2);
+            assert_eq!(frame_digest(&packed), expected[index], "frame {index}");
+        }
+    }
+
     #[test]
     fn four_uniform_tiles_match_dav1d() {
         // 128×128 keyframe split into a 2×2 uniform grid. Each tile has its own
@@ -1734,6 +3779,44 @@ mod tests {
         assert_eq!(frame_digest(&packed), 0x9c5f_415c_3c06_47ed);
     }
     #[test]
+    fn a_filter_intra_mode_picture_matches_dav1d() {
+        // aomenc, 64×64 vertical gradient, max partition 16, other intra modes
+        // off. Twenty-five blocks select filter intra. CDEF, restoration, and
+        // super resolution are off. Digests are
+        // `ffmpeg -c:v libdav1d -threads 1 -pix_fmt yuv420p`.
+        let file = include_bytes!("../fixtures/filter-intra.ivf");
+        let frames = ivf_payloads(file);
+        let (sequence, _) = crate::header::parse_unit(frames[0], None).expect("sequence");
+        assert!(sequence.enable_filter_intra);
+        let expected = [0x6ab9_1134_1ed1_2065, 0x9dcc_ede2_e005_dee5];
+        let params = CodecParams::video(CodecId::Av1, 64, 64);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let shown = decoder
+                .push(&cutlass_decode::Packet {
+                    stream: 0,
+                    data: payload.to_vec(),
+                    pts: index as i64,
+                    duration: 1,
+                    timescale: 30,
+                    keyframe: index == 0,
+                    side: Vec::new(),
+                })
+                .unwrap_or_else(|error| panic!("frame {index}: {error:?}"));
+            assert_eq!(shown.len(), 1, "frame {index}");
+            let cutlass_decode::Output::Picture(picture) = &shown[0] else {
+                panic!("picture");
+            };
+            let cutlass_decode::PictureSamples::Cpu(bytes) = picture.samples() else {
+                panic!("cpu");
+            };
+            assert_eq!(bytes.len(), 64 * 64 * 3 / 2);
+            assert_eq!(frame_digest(bytes), expected[index], "frame {index}");
+        }
+        assert!(decoder.drain().expect("drain").is_empty());
+    }
+
+    #[test]
     fn filter_intra_matches_dav1d() {
         // 64×64 keyframe. Two luma blocks use the recursive intra filter
         // (horizontal and Paeth). The shown picture matches dav1d.
@@ -1844,5 +3927,3164 @@ mod tests {
         assert_eq!(packed.len(), 64 * 64 * 3 / 2);
         assert_eq!(packed[0], 51);
         assert_eq!(frame_digest(&packed), 0x5e0f_45d9_39c1_a370);
+    }
+
+    #[test]
+    fn rotzoom_global_motion_matches_dav1d() {
+        // aomenc 128×128. The inter frame uses a rotation-zoom model, high
+        // precision motion vectors, and switchable filters in both directions.
+        // Some blocks use a different horizontal filter from the vertical one.
+        // Digests are `ffmpeg -c:v libdav1d -threads 1` of those three frames.
+        let frames: [&[u8]; 3] = [
+            include_bytes!("../fixtures/rotzoom_0.obu"),
+            include_bytes!("../fixtures/rotzoom_1.obu"),
+            include_bytes!("../fixtures/rotzoom_2.obu"),
+        ];
+        let expected = [
+            0x453f_7daf_99a0_ebd2,
+            0xd04f_763d_2dee_d1f2,
+            0xb89c_65a9_84a2_b011,
+        ];
+        let mut sequence = None;
+        for (index, payload) in frames.iter().enumerate() {
+            let (seq, frame) =
+                crate::header::parse_unit(payload, sequence.as_ref()).expect("parse");
+            assert!(seq.enable_dual_filter);
+            if index == 1 {
+                assert!(frame.allow_high_precision_mv);
+                assert!(frame.filter_switchable);
+                assert_eq!(frame.gm_type[1], 2);
+                assert_eq!(
+                    frame.gm_params[1],
+                    [613_376, 46_080, 66_148, 1_216, -1_216, 66_148]
+                );
+            }
+            sequence = Some(seq);
+        }
+        let params = CodecParams::video(CodecId::Av1, 128, 128);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let packed = push_frame(&mut decoder, payload, index as i64);
+            assert_eq!(packed.len(), 128 * 128 * 3 / 2);
+            assert_eq!(frame_digest(&packed), expected[index], "frame {index}");
+        }
+    }
+
+    #[test]
+    fn a_short_reference_picture_matches_dav1d() {
+        // aomenc 64×64, six frames, constant quality 10. CDEF, restoration, and
+        // super resolution are off. The last frame's header is rewritten so it
+        // signals only LAST and GOLDEN. The other five names are filled from
+        // the order hints stored in the eight slots. Blocks in that frame
+        // predict from LAST2, which is slot 2. Digests are
+        // `ffmpeg -c:v libdav1d -threads 1 -pix_fmt yuv420p`.
+        let file = include_bytes!("../fixtures/short-refs.ivf");
+        let frames = ivf_payloads(file);
+        assert_eq!(frames.len(), 6);
+        let mut sequence = None;
+        let mut hints = [0u32; 8];
+        let mut sizes = [None; 8];
+        let mut last = None;
+        for payload in &frames {
+            let (seq, frame) = crate::header::parse_with_motion(
+                payload,
+                sequence.as_ref(),
+                &[None; 8],
+                &hints,
+                &sizes,
+                &[crate::header::Inherited::defaults(); 8],
+            )
+            .expect("parse");
+            let size = Some((
+                frame.upscaled_width,
+                frame.height,
+                frame.render_width,
+                frame.render_height,
+            ));
+            for slot in 0..8 {
+                if frame.refresh_flags & (1u8 << slot) != 0 {
+                    hints[slot] = frame.order_hint;
+                    sizes[slot] = size;
+                }
+            }
+            last = Some(frame);
+            sequence = Some(seq);
+        }
+        let frame = last.expect("frame");
+        assert!(!frame.intra);
+        assert_eq!(frame.order_hint, 5);
+        assert_eq!(frame.ref_frames, [3, 2, 1, 4, 7, 6, 5]);
+        let expected = [
+            (64 * 64 * 3 / 2, 0xe485_041a_9516_0325),
+            (64 * 64 * 3 / 2, 0x99f9_f1e8_464b_d462),
+            (64 * 64 * 3 / 2, 0x63e8_8322_e74e_6325),
+            (64 * 64 * 3 / 2, 0x256a_1da7_2db1_44af),
+            (64 * 64 * 3 / 2, 0xd421_caac_351f_1c9c),
+            (64 * 64 * 3 / 2, 0x63e8_8322_e74e_6325),
+        ];
+        let params = CodecParams::video(CodecId::Av1, 64, 64);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let packed = push_frame(&mut decoder, payload, index as i64);
+            assert_eq!(packed.len(), expected[index].0, "frame {index}");
+            assert_eq!(frame_digest(&packed), expected[index].1, "frame {index}");
+        }
+        assert!(decoder.drain().expect("drain").is_empty());
+    }
+
+    #[test]
+    fn ten_bit_restoration_on_444_and_422_matches_dav1d() {
+        // aomenc --enable-restoration=1 --bit-depth=10, one frame, cq 40.
+        // Profile 1 is 512×128 4:4:4. Luma is self-guided. Each chroma plane
+        // is switchable, in 64-sample units, and the frame updates those CDFs.
+        // Profile 2 is 256×512 4:2:2. Luma restoration is off. Each chroma
+        // plane is self-guided, in 256-sample units, so the full-height chroma
+        // has two rows. Digests are `ffmpeg -c:v libdav1d -threads 1`.
+        let cases = [
+            (
+                include_bytes!("../fixtures/restore-444-10.ivf").as_slice(),
+                1u8,
+                false,
+                false,
+                512u32,
+                128u32,
+                [
+                    crate::header::RESTORE_SGRPROJ,
+                    crate::header::RESTORE_SWITCHABLE,
+                    crate::header::RESTORE_SWITCHABLE,
+                ],
+                [64u16, 64, 64],
+                cutlass_decode::PixelFormat::Yuv444p10,
+                512 * 128 * 6,
+                0x362f_dff0_9fd5_194d,
+            ),
+            (
+                include_bytes!("../fixtures/restore-422-10.ivf").as_slice(),
+                2,
+                true,
+                false,
+                256,
+                512,
+                [
+                    crate::header::RESTORE_NONE,
+                    crate::header::RESTORE_SGRPROJ,
+                    crate::header::RESTORE_SGRPROJ,
+                ],
+                [256, 256, 256],
+                cutlass_decode::PixelFormat::Yuv422p10,
+                256 * 512 * 4,
+                0xf32e_8649_9a71_9522,
+            ),
+        ];
+        for (file, profile, sub_x, sub_y, width, height, planes, units, pixel, length, digest) in
+            cases
+        {
+            let frames = ivf_payloads(file);
+            assert_eq!(frames.len(), 1, "profile {profile}");
+            let (sequence, key) = crate::header::parse_unit(frames[0], None).expect("sequence");
+            assert_eq!(sequence.profile, profile);
+            assert_eq!(sequence.bit_depth, 10);
+            assert_eq!(sequence.subsampling_x, sub_x);
+            assert_eq!(sequence.subsampling_y, sub_y);
+            assert!(!key.disable_cdf_update, "profile {profile}");
+            assert_eq!(key.width, width);
+            assert_eq!(key.height, height);
+            assert_eq!(key.restoration.plane, planes, "profile {profile}");
+            assert_eq!(key.restoration.unit, units, "profile {profile}");
+            let params = CodecParams::video(CodecId::Av1, width, height);
+            let mut decoder = Av1Decoder::open(&params).expect("open");
+            let shown = decoder
+                .push(&cutlass_decode::Packet {
+                    stream: 0,
+                    data: frames[0].to_vec(),
+                    pts: 0,
+                    duration: 1,
+                    timescale: 30,
+                    keyframe: true,
+                    side: Vec::new(),
+                })
+                .unwrap_or_else(|error| panic!("profile {profile}: {error:?}"));
+            assert_eq!(shown.len(), 1, "profile {profile}");
+            let cutlass_decode::Output::Picture(picture) = &shown[0] else {
+                panic!("picture");
+            };
+            let info = picture.info();
+            assert_eq!(info.pixel, pixel, "profile {profile}");
+            let cutlass_decode::PictureSamples::Cpu(bytes) = picture.samples() else {
+                panic!("cpu");
+            };
+            assert_eq!(bytes.len(), length, "profile {profile}");
+            assert_eq!(frame_digest(bytes), digest, "profile {profile}");
+            assert!(decoder.drain().expect("drain").is_empty());
+        }
+    }
+
+    #[test]
+    fn ten_bit_film_grain_on_444_and_422_matches_dav1d() {
+        // aomenc --film-grain-test=1 --bit-depth=10, 64×64, two frames. CDEF
+        // and restoration are off. One stream is profile 1 4:4:4 and one is
+        // profile 2 4:2:2. Samples stay in the low 10 bits. Digests are
+        // `ffmpeg -c:v libdav1d -threads 1`.
+        let cases = [
+            (
+                include_bytes!("../fixtures/grain-444-10.ivf").as_slice(),
+                1u8,
+                false,
+                false,
+                cutlass_decode::PixelFormat::Yuv444p10,
+                64 * 64 * 6,
+                [0x97e3_411c_470e_6d86, 0xb0de_0a05_8938_67be],
+            ),
+            (
+                include_bytes!("../fixtures/grain-422-10.ivf").as_slice(),
+                2,
+                true,
+                false,
+                cutlass_decode::PixelFormat::Yuv422p10,
+                64 * 64 * 4,
+                [0x8104_4273_3a51_f53a, 0x00ea_ecc5_a61d_0d78],
+            ),
+        ];
+        for (file, profile, sub_x, sub_y, pixel, length, expected) in cases {
+            let frames = ivf_payloads(file);
+            assert_eq!(frames.len(), 2, "profile {profile}");
+            let (sequence, key) = crate::header::parse_unit(frames[0], None).expect("sequence");
+            assert_eq!(sequence.profile, profile);
+            assert_eq!(sequence.bit_depth, 10);
+            assert_eq!(sequence.subsampling_x, sub_x);
+            assert_eq!(sequence.subsampling_y, sub_y);
+            assert!(key.grain.apply);
+            assert_eq!(key.grain.sub_x, sub_x);
+            assert_eq!(key.grain.sub_y, sub_y);
+            let (_, inter) = crate::header::parse_unit(frames[1], Some(&sequence)).expect("inter");
+            assert!(!inter.intra);
+            assert!(inter.grain.apply);
+            let params = CodecParams::video(CodecId::Av1, 64, 64);
+            let mut decoder = Av1Decoder::open(&params).expect("open");
+            for (index, payload) in frames.iter().enumerate() {
+                let shown = decoder
+                    .push(&cutlass_decode::Packet {
+                        stream: 0,
+                        data: payload.to_vec(),
+                        pts: index as i64,
+                        duration: 1,
+                        timescale: 30,
+                        keyframe: index == 0,
+                        side: Vec::new(),
+                    })
+                    .unwrap_or_else(|error| panic!("profile {profile} frame {index}: {error:?}"));
+                assert_eq!(shown.len(), 1, "profile {profile} frame {index}");
+                let cutlass_decode::Output::Picture(picture) = &shown[0] else {
+                    panic!("picture");
+                };
+                let info = picture.info();
+                assert_eq!(info.pixel, pixel, "profile {profile} frame {index}");
+                let cutlass_decode::PictureSamples::Cpu(bytes) = picture.samples() else {
+                    panic!("cpu");
+                };
+                assert_eq!(bytes.len(), length, "profile {profile} frame {index}");
+                assert_eq!(
+                    frame_digest(bytes),
+                    expected[index],
+                    "profile {profile} frame {index}"
+                );
+            }
+            assert!(decoder.drain().expect("drain").is_empty());
+        }
+    }
+
+    #[test]
+    fn film_grain_on_444_and_422_matches_dav1d() {
+        // aomenc --film-grain-test=1, 64×64, two frames. CDEF and restoration
+        // are off. One stream is profile 1 4:4:4 and one is profile 2 4:2:2.
+        // Chroma grain uses the full template when that axis is not subsampled.
+        // Digests are `ffmpeg -c:v libdav1d -threads 1`.
+        let cases = [
+            (
+                include_bytes!("../fixtures/grain-444.ivf").as_slice(),
+                1u8,
+                false,
+                false,
+                cutlass_decode::PixelFormat::Yuv444p,
+                64 * 64 * 3,
+                [0xc834_7b7a_6690_9501, 0x098c_8ff0_695d_0b65],
+            ),
+            (
+                include_bytes!("../fixtures/grain-422.ivf").as_slice(),
+                2,
+                true,
+                false,
+                cutlass_decode::PixelFormat::Yuv422p,
+                64 * 64 + 32 * 64 * 2,
+                [0xed8a_94d1_ac1f_64af, 0x32a1_2ff4_b5fe_4ad3],
+            ),
+        ];
+        for (file, profile, sub_x, sub_y, pixel, length, expected) in cases {
+            let frames = ivf_payloads(file);
+            assert_eq!(frames.len(), 2);
+            let (sequence, key) = crate::header::parse_unit(frames[0], None).expect("sequence");
+            assert_eq!(sequence.profile, profile);
+            assert_eq!(sequence.subsampling_x, sub_x);
+            assert_eq!(sequence.subsampling_y, sub_y);
+            assert!(key.grain.apply);
+            assert_eq!(key.grain.sub_x, sub_x);
+            assert_eq!(key.grain.sub_y, sub_y);
+            let (_, inter) = crate::header::parse_unit(frames[1], Some(&sequence)).expect("inter");
+            assert!(!inter.intra);
+            assert!(inter.grain.apply);
+            let params = CodecParams::video(CodecId::Av1, 64, 64);
+            let mut decoder = Av1Decoder::open(&params).expect("open");
+            for (index, payload) in frames.iter().enumerate() {
+                let shown = decoder
+                    .push(&cutlass_decode::Packet {
+                        stream: 0,
+                        data: payload.to_vec(),
+                        pts: index as i64,
+                        duration: 1,
+                        timescale: 30,
+                        keyframe: index == 0,
+                        side: Vec::new(),
+                    })
+                    .unwrap_or_else(|error| panic!("profile {profile} frame {index}: {error:?}"));
+                assert_eq!(shown.len(), 1, "profile {profile} frame {index}");
+                let cutlass_decode::Output::Picture(picture) = &shown[0] else {
+                    panic!("picture");
+                };
+                let info = picture.info();
+                assert_eq!(info.pixel, pixel, "profile {profile} frame {index}");
+                let cutlass_decode::PictureSamples::Cpu(bytes) = picture.samples() else {
+                    panic!("cpu");
+                };
+                assert_eq!(bytes.len(), length, "profile {profile} frame {index}");
+                assert_eq!(
+                    frame_digest(bytes),
+                    expected[index],
+                    "profile {profile} frame {index}"
+                );
+            }
+            assert!(decoder.drain().expect("drain").is_empty());
+        }
+    }
+
+    #[test]
+    fn a_lossless_segment_picture_matches_dav1d() {
+        // aomenc --lossless=1, 64×64, two frames. CDEF, restoration, and super
+        // resolution are off. The inter frame header is rewritten so base_q_idx
+        // is 8, segmentation is on, the map is not updated, and segment 0's
+        // quantizer delta is -8. The other segments stay at 8, so the frame is
+        // not coded lossless. Every block keeps segment 0 from the key and is a
+        // 4×4 Walsh-Hadamard transform. The tile bytes are the original lossless
+        // inter frame. Digests are `ffmpeg -c:v libdav1d -threads 1 -pix_fmt yuv420p`.
+        let file = include_bytes!("../fixtures/lossless-segment.ivf");
+        let frames = ivf_payloads(file);
+        assert_eq!(frames.len(), 2);
+        let mut sequence = None;
+        let mut headers = Vec::new();
+        for payload in &frames {
+            let (seq, frame) =
+                crate::header::parse_unit(payload, sequence.as_ref()).expect("parse");
+            headers.push(frame);
+            sequence = Some(seq);
+        }
+        assert!(headers[0].lossless);
+        assert_eq!(headers[0].base_q, 0);
+        assert!(!headers[0].segmentation.enabled);
+        assert_eq!(headers[0].width, 64);
+        assert_eq!(headers[0].height, 64);
+        assert!(!headers[1].lossless);
+        assert_eq!(headers[1].base_q, 8);
+        assert!(headers[1].segmentation.enabled);
+        assert!(!headers[1].segmentation.update_map);
+        assert!(headers[1].segmentation.active(0, crate::header::SEG_ALT_Q));
+        assert_eq!(
+            i32::from(headers[1].base_q)
+                + headers[1].segmentation.value(0, crate::header::SEG_ALT_Q),
+            0
+        );
+        assert!(!headers[1].segmentation.active(1, crate::header::SEG_ALT_Q));
+        let expected = [
+            (64 * 64 * 3 / 2, 0xd4e1_7006_4dfa_ae30),
+            (64 * 64 * 3 / 2, 0xc473_19cf_f33e_95bf),
+        ];
+        let params = CodecParams::video(CodecId::Av1, 64, 64);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let packed = push_frame(&mut decoder, payload, index as i64);
+            assert_eq!(packed.len(), expected[index].0, "frame {index}");
+            assert_eq!(frame_digest(&packed), expected[index].1, "frame {index}");
+        }
+        assert!(decoder.drain().expect("drain").is_empty());
+    }
+
+    #[test]
+    fn a_scaled_reference_global_motion_picture_matches_dav1d() {
+        // aomenc, error resilient, 64×64 superblocks. The key is 64×64 and the
+        // inter frames are 128×128, so the reference is scaled. The first inter
+        // frame's global model is rotation-zoom. Those blocks sample the
+        // projected vector through the scaled motion filter. Local warp,
+        // restoration, CDEF, and super resolution are off. Digests are
+        // `ffmpeg -c:v libdav1d -threads 1 -pix_fmt yuv420p`.
+        let file = include_bytes!("../fixtures/scaled-warp.ivf");
+        let frames = ivf_payloads(file);
+        assert_eq!(frames.len(), 3);
+        let mut sequence = None;
+        let mut sizes = Vec::new();
+        for payload in &frames {
+            let (seq, frame) =
+                crate::header::parse_unit(payload, sequence.as_ref()).expect("parse");
+            sizes.push((frame.width, frame.height, frame.gm_type));
+            sequence = Some(seq);
+        }
+        assert_eq!(sizes[0].0, 64);
+        assert_eq!(sizes[0].1, 64);
+        assert_eq!(sizes[1].0, 128);
+        assert_eq!(sizes[1].1, 128);
+        assert_eq!(sizes[1].2[1], 2);
+        let expected = [
+            (64 * 64 * 3 / 2, 0x8419_0e04_1574_0ec3),
+            (128 * 128 * 3 / 2, 0xf311_8759_99f9_2b97),
+            (128 * 128 * 3 / 2, 0xd8ec_38de_6d66_7c35),
+        ];
+        let params = CodecParams::video(CodecId::Av1, 128, 128);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let packed = push_frame(&mut decoder, payload, index as i64);
+            assert_eq!(packed.len(), expected[index].0, "frame {index}");
+            assert_eq!(frame_digest(&packed), expected[index].1, "frame {index}");
+        }
+        assert!(decoder.drain().expect("drain").is_empty());
+    }
+
+    #[test]
+    fn an_interintra_wedge_picture_matches_dav1d() {
+        // aomenc 64×64. Six blocks on the inter frame blend one reference with
+        // intra through a luma wedge. The wedge sign is 0. Restoration, CDEF,
+        // and super resolution are off. Digests are
+        // `ffmpeg -c:v libdav1d -threads 1 -pix_fmt yuv420p`.
+        let file = include_bytes!("../fixtures/interintra-wedge.ivf");
+        let frames = ivf_payloads(file);
+        let (sequence, _) = crate::header::parse_unit(frames[0], None).expect("sequence");
+        assert!(sequence.enable_interintra);
+        let expected = [0x79f7_4b34_bf00_4135, 0xf0cd_13c5_915c_11ca];
+        let params = CodecParams::video(CodecId::Av1, 64, 64);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let shown = decoder
+                .push(&cutlass_decode::Packet {
+                    stream: 0,
+                    data: payload.to_vec(),
+                    pts: index as i64,
+                    duration: 1,
+                    timescale: 30,
+                    keyframe: index == 0,
+                    side: Vec::new(),
+                })
+                .unwrap_or_else(|error| panic!("frame {index}: {error:?}"));
+            assert_eq!(shown.len(), 1, "frame {index}");
+            let cutlass_decode::Output::Picture(picture) = &shown[0] else {
+                panic!("picture");
+            };
+            let cutlass_decode::PictureSamples::Cpu(bytes) = picture.samples() else {
+                panic!("cpu");
+            };
+            assert_eq!(bytes.len(), 64 * 64 * 3 / 2);
+            assert_eq!(frame_digest(bytes), expected[index], "frame {index}");
+        }
+        assert!(decoder.drain().expect("drain").is_empty());
+    }
+
+    #[test]
+    fn smooth_interintra_matches_dav1d() {
+        // aomenc 64×64. The inter frame blends one 16×16 block with DC intra.
+        // The wedge symbol is 0. Digests are `ffmpeg -c:v libdav1d -threads 1`.
+        let frames: [&[u8]; 2] = [
+            include_bytes!("../fixtures/interintra_0.obu"),
+            include_bytes!("../fixtures/interintra_1.obu"),
+        ];
+        let expected = [0xe08b_dc0c_5a92_ee12, 0xf8fe_56b7_21e1_855d];
+        let mut sequence = None;
+        for (index, payload) in frames.iter().enumerate() {
+            let (seq, frame) =
+                crate::header::parse_unit(payload, sequence.as_ref()).expect("parse");
+            assert!(seq.enable_interintra);
+            if index == 1 {
+                assert!(frame.allow_high_precision_mv);
+                assert!(!frame.reference_select);
+            }
+            sequence = Some(seq);
+        }
+        let params = CodecParams::video(CodecId::Av1, 64, 64);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let packed = push_frame(&mut decoder, payload, index as i64);
+            assert_eq!(packed.len(), 64 * 64 * 3 / 2);
+            assert_eq!(frame_digest(&packed), expected[index], "frame {index}");
+        }
+    }
+
+    #[test]
+    fn average_compound_matches_dav1d() {
+        // aomenc 64×64. Later frames set reference_select and average two
+        // references. Masked compound and distance weights are off, so the
+        // predictors stay at the compound filter precision and the average
+        // rounds the sum. Digests are `ffmpeg -c:v libdav1d -threads 1`.
+        let frames: [&[u8]; 5] = [
+            include_bytes!("../fixtures/compound_0.obu"),
+            include_bytes!("../fixtures/compound_1.obu"),
+            include_bytes!("../fixtures/compound_2.obu"),
+            include_bytes!("../fixtures/compound_3.obu"),
+            include_bytes!("../fixtures/compound_4.obu"),
+        ];
+        let expected = [
+            0xfe5f_9b89_ae87_0b0f,
+            0x2872_93cd_3351_db0a,
+            0x7e37_e459_41b5_7851,
+            0x5bfb_a649_6f7b_8281,
+            0xd519_f6d7_94f4_2cdf,
+        ];
+        let mut sequence = None;
+        for (index, payload) in frames.iter().enumerate() {
+            let (seq, frame) =
+                crate::header::parse_unit(payload, sequence.as_ref()).expect("parse");
+            assert!(!seq.enable_order_hint);
+            assert!(!seq.enable_masked);
+            assert!(!seq.enable_jnt);
+            if index >= 2 {
+                assert!(frame.reference_select);
+            }
+            sequence = Some(seq);
+        }
+        let params = CodecParams::video(CodecId::Av1, 64, 64);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let packed = push_frame(&mut decoder, payload, index as i64);
+            assert_eq!(packed.len(), 64 * 64 * 3 / 2);
+            assert_eq!(frame_digest(&packed), expected[index], "frame {index}");
+        }
+    }
+
+    #[test]
+    fn distance_compound_matches_dav1d() {
+        // aomenc 64×64 with order hint. Later frames set reference_select and
+        // may weight the two predictors by order-hint distance. Masked
+        // compound is off. The frame does not signal skip mode. Digests are
+        // `ffmpeg -c:v libdav1d -threads 1`.
+        let frames: [&[u8]; 5] = [
+            include_bytes!("../fixtures/distance_0.obu"),
+            include_bytes!("../fixtures/distance_1.obu"),
+            include_bytes!("../fixtures/distance_2.obu"),
+            include_bytes!("../fixtures/distance_3.obu"),
+            include_bytes!("../fixtures/distance_4.obu"),
+        ];
+        let expected = [
+            0xfe5f_9b89_ae87_0b0f,
+            0x2872_93cd_3351_db0a,
+            0x6ee4_5945_eef4_d3ef,
+            0xf558_739c_be0b_97d8,
+            0xd8f8_2c4e_99cf_d80b,
+        ];
+        let mut sequence = None;
+        for (index, payload) in frames.iter().enumerate() {
+            let (seq, frame) =
+                crate::header::parse_unit(payload, sequence.as_ref()).expect("parse");
+            assert!(seq.enable_order_hint);
+            assert!(seq.enable_jnt);
+            assert!(!seq.enable_masked);
+            if index >= 2 {
+                assert!(frame.reference_select);
+            }
+            sequence = Some(seq);
+        }
+        let params = CodecParams::video(CodecId::Av1, 64, 64);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let packed = push_frame(&mut decoder, payload, index as i64);
+            assert_eq!(packed.len(), 64 * 64 * 3 / 2);
+            assert_eq!(frame_digest(&packed), expected[index], "frame {index}");
+        }
+    }
+
+    #[test]
+    fn masked_compound_matches_dav1d() {
+        // aomenc 64×64 with masked compound and order hint off, so skip mode
+        // is not signaled. Later frames set reference_select. A compound block
+        // blends with a wedge or a difference mask. Digests are
+        // `ffmpeg -c:v libdav1d -threads 1`.
+        let frames: [&[u8]; 5] = [
+            include_bytes!("../fixtures/masked_0.obu"),
+            include_bytes!("../fixtures/masked_1.obu"),
+            include_bytes!("../fixtures/masked_2.obu"),
+            include_bytes!("../fixtures/masked_3.obu"),
+            include_bytes!("../fixtures/masked_4.obu"),
+        ];
+        let expected = [
+            0xfe5f_9b89_ae87_0b0f,
+            0x2872_93cd_3351_db0a,
+            0xba4a_27af_1e96_b104,
+            0xbf61_2dcf_b440_08ab,
+            0x197e_b9c0_0513_3b51,
+        ];
+        let mut sequence = None;
+        for (index, payload) in frames.iter().enumerate() {
+            let (seq, frame) =
+                crate::header::parse_unit(payload, sequence.as_ref()).expect("parse");
+            assert!(seq.enable_masked);
+            assert!(!seq.enable_order_hint);
+            if index >= 2 {
+                assert!(frame.reference_select);
+            }
+            sequence = Some(seq);
+        }
+        let params = CodecParams::video(CodecId::Av1, 64, 64);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let packed = push_frame(&mut decoder, payload, index as i64);
+            assert_eq!(packed.len(), 64 * 64 * 3 / 2);
+            assert_eq!(frame_digest(&packed), expected[index], "frame {index}");
+        }
+    }
+
+    #[test]
+    fn difference_compound_matches_dav1d() {
+        // Same source as the wedge stream, with wedge compound turned off.
+        // A compound block that asks for a mask uses the difference weight.
+        let frames: [&[u8]; 5] = [
+            include_bytes!("../fixtures/diffwtd_0.obu"),
+            include_bytes!("../fixtures/diffwtd_1.obu"),
+            include_bytes!("../fixtures/diffwtd_2.obu"),
+            include_bytes!("../fixtures/diffwtd_3.obu"),
+            include_bytes!("../fixtures/diffwtd_4.obu"),
+        ];
+        let expected = [
+            0xfe5f_9b89_ae87_0b0f,
+            0x2872_93cd_3351_db0a,
+            0xd4f2_2750_7b89_37d7,
+            0xd0a6_f70e_63ff_6f91,
+            0xb942_e0b9_20d6_ba82,
+        ];
+        let mut sequence = None;
+        for (index, payload) in frames.iter().enumerate() {
+            let (seq, frame) =
+                crate::header::parse_unit(payload, sequence.as_ref()).expect("parse");
+            assert!(seq.enable_masked);
+            assert!(!seq.enable_order_hint);
+            if index >= 2 {
+                assert!(frame.reference_select);
+            }
+            sequence = Some(seq);
+        }
+        let params = CodecParams::video(CodecId::Av1, 64, 64);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let packed = push_frame(&mut decoder, payload, index as i64);
+            assert_eq!(packed.len(), 64 * 64 * 3 / 2);
+            assert_eq!(frame_digest(&packed), expected[index], "frame {index}");
+        }
+    }
+
+    #[test]
+    fn skip_mode_matches_dav1d() {
+        // aomenc 64×64 luma ramp with a short golden-frame pyramid. Some
+        // temporal units hold a hidden reference before the shown frame.
+        // A skip-mode block predicts the nearest compound pair and writes
+        // no residual. Digests are dav1d 1.5.3.
+        let frames: [&[u8]; 16] = [
+            include_bytes!("../fixtures/skip_0.obu"),
+            include_bytes!("../fixtures/skip_1.obu"),
+            include_bytes!("../fixtures/skip_2.obu"),
+            include_bytes!("../fixtures/skip_3.obu"),
+            include_bytes!("../fixtures/skip_4.obu"),
+            include_bytes!("../fixtures/skip_5.obu"),
+            include_bytes!("../fixtures/skip_6.obu"),
+            include_bytes!("../fixtures/skip_7.obu"),
+            include_bytes!("../fixtures/skip_8.obu"),
+            include_bytes!("../fixtures/skip_9.obu"),
+            include_bytes!("../fixtures/skip_10.obu"),
+            include_bytes!("../fixtures/skip_11.obu"),
+            include_bytes!("../fixtures/skip_12.obu"),
+            include_bytes!("../fixtures/skip_13.obu"),
+            include_bytes!("../fixtures/skip_14.obu"),
+            include_bytes!("../fixtures/skip_15.obu"),
+        ];
+        let expected = [
+            0x7c7f_f1cc_caf8_0325,
+            0x7d47_ecca_8864_0325,
+            0x8ddf_9224_2738_0325,
+            0x2067_6a1f_17e4_0325,
+            0x8945_a93f_11e8_0325,
+            0x1bcd_813a_0294_0325,
+            0xfa5b_03a5_62e8_0325,
+            0xb570_a2bd_73b4_0325,
+            0x7067_64bc_2198_0325,
+            0xb6e1_bb9f_8ba4_0325,
+            0x11b7_8b2f_4238_0325,
+            0xf7fe_688f_8e04_0325,
+            0x692a_5500_50e8_0325,
+            0xa7f3_2795_e674_0325,
+            0xc6cf_71aa_fe48_0325,
+            0xbc4c_a205_d3b4_0325,
+        ];
+        let params = CodecParams::video(CodecId::Av1, 64, 64);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let packed = push_frame(&mut decoder, payload, index as i64);
+            assert_eq!(packed.len(), 64 * 64 * 3 / 2);
+            assert_eq!(frame_digest(&packed), expected[index], "frame {index}");
+        }
+    }
+
+    #[test]
+    fn local_warp_matches_dav1d() {
+        // aomenc 64×64 rotating ramp. Local warp is on, overlapped motion and
+        // global motion are off. A block that selects local warp predicts
+        // through the neighbor fit. Digests are dav1d 1.5.3.
+        let frames: [&[u8]; 8] = [
+            include_bytes!("../fixtures/warp_0.obu"),
+            include_bytes!("../fixtures/warp_1.obu"),
+            include_bytes!("../fixtures/warp_2.obu"),
+            include_bytes!("../fixtures/warp_3.obu"),
+            include_bytes!("../fixtures/warp_4.obu"),
+            include_bytes!("../fixtures/warp_5.obu"),
+            include_bytes!("../fixtures/warp_6.obu"),
+            include_bytes!("../fixtures/warp_7.obu"),
+        ];
+        let expected = [
+            0xe7c3_cd2d_808b_176a,
+            0xc8a7_97da_0d6c_3034,
+            0xdf9e_2073_3cbd_7890,
+            0xf27b_d8a3_2653_7ead,
+            0x99d0_9e09_77f8_133c,
+            0xb181_1245_9630_1235,
+            0x7e61_2c3b_fe43_2419,
+            0xfc90_db15_e81e_065e,
+        ];
+        let mut sequence = None;
+        for (index, payload) in frames.iter().enumerate() {
+            let (seq, frame) =
+                crate::header::parse_unit(payload, sequence.as_ref()).expect("parse");
+            if index == 0 {
+                assert!(seq.enable_warped);
+            }
+            if index > 0 {
+                assert!(frame.allow_warped);
+                assert!(frame.motion_mode_switchable);
+            }
+            sequence = Some(seq);
+        }
+        let params = CodecParams::video(CodecId::Av1, 64, 64);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let packed = push_frame(&mut decoder, payload, index as i64);
+            assert_eq!(packed.len(), 64 * 64 * 3 / 2);
+            assert_eq!(frame_digest(&packed), expected[index], "frame {index}");
+        }
+    }
+
+    #[test]
+    fn overlapped_motion_matches_dav1d() {
+        // Same rotating ramp, with overlapped motion on and local warp off.
+        // A block blends the predictors of the neighboring motion vectors.
+        // Digests are dav1d 1.5.3.
+        let frames: [&[u8]; 8] = [
+            include_bytes!("../fixtures/obmc_0.obu"),
+            include_bytes!("../fixtures/obmc_1.obu"),
+            include_bytes!("../fixtures/obmc_2.obu"),
+            include_bytes!("../fixtures/obmc_3.obu"),
+            include_bytes!("../fixtures/obmc_4.obu"),
+            include_bytes!("../fixtures/obmc_5.obu"),
+            include_bytes!("../fixtures/obmc_6.obu"),
+            include_bytes!("../fixtures/obmc_7.obu"),
+        ];
+        let expected = [
+            0xe7c3_cd2d_808b_176a,
+            0xcca6_568f_5899_0985,
+            0x245f_f039_e396_5c23,
+            0xdda6_2c5f_deb6_0bd0,
+            0xf8f5_8219_6e8f_1906,
+            0x1541_be60_1543_2419,
+            0x954e_f037_d8c8_5719,
+            0xd6de_133c_3aa1_697f,
+        ];
+        let mut sequence = None;
+        for (index, payload) in frames.iter().enumerate() {
+            let (seq, frame) =
+                crate::header::parse_unit(payload, sequence.as_ref()).expect("parse");
+            if index == 0 {
+                assert!(!seq.enable_warped);
+            }
+            if index > 0 {
+                assert!(!frame.allow_warped);
+                assert!(frame.motion_mode_switchable);
+            }
+            sequence = Some(seq);
+        }
+        let params = CodecParams::video(CodecId::Av1, 64, 64);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let packed = push_frame(&mut decoder, payload, index as i64);
+            assert_eq!(packed.len(), 64 * 64 * 3 / 2);
+            assert_eq!(frame_digest(&packed), expected[index], "frame {index}");
+        }
+    }
+
+    #[test]
+    fn reference_motion_matches_dav1d() {
+        // aomenc 64×64 translating ramp. Order hint and reference motion
+        // vectors are on. A block's candidate stack includes the field
+        // projected from an earlier frame. Digests are dav1d 1.5.3.
+        let frames: [&[u8]; 8] = [
+            include_bytes!("../fixtures/refmv_0.obu"),
+            include_bytes!("../fixtures/refmv_1.obu"),
+            include_bytes!("../fixtures/refmv_2.obu"),
+            include_bytes!("../fixtures/refmv_3.obu"),
+            include_bytes!("../fixtures/refmv_4.obu"),
+            include_bytes!("../fixtures/refmv_5.obu"),
+            include_bytes!("../fixtures/refmv_6.obu"),
+            include_bytes!("../fixtures/refmv_7.obu"),
+        ];
+        let expected = [
+            0xcfef_e949_6c51_7954,
+            0x9fdf_f457_5e9a_9914,
+            0x6b24_2ef4_2f4e_c08a,
+            0x50b8_1bd4_5032_17d8,
+            0xd2b7_389b_37ea_96d2,
+            0xf9e7_ceb6_a08d_c10b,
+            0x0554_021b_7090_f238,
+            0x145b_519c_22cd_e7ac,
+        ];
+        let mut sequence = None;
+        for (index, payload) in frames.iter().enumerate() {
+            let (seq, frame) =
+                crate::header::parse_unit(payload, sequence.as_ref()).expect("parse");
+            if index == 0 {
+                assert!(seq.enable_ref_mvs);
+                assert!(seq.enable_order_hint);
+            }
+            if index > 0 {
+                assert!(frame.use_ref_frame_mvs);
+            }
+            sequence = Some(seq);
+        }
+        let params = CodecParams::video(CodecId::Av1, 64, 64);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let packed = push_frame(&mut decoder, payload, index as i64);
+            assert_eq!(packed.len(), 64 * 64 * 3 / 2);
+            assert_eq!(frame_digest(&packed), expected[index], "frame {index}");
+        }
+    }
+
+    #[test]
+    fn inter_superres_matches_dav1d() {
+        // aomenc 64×64 shown, coded narrower. The inter frames sample the
+        // upscaled reference through the scaled motion filter. Digests are
+        // dav1d 1.5.3.
+        let frames: [&[u8]; 4] = [
+            include_bytes!("../fixtures/super_0.obu"),
+            include_bytes!("../fixtures/super_1.obu"),
+            include_bytes!("../fixtures/super_2.obu"),
+            include_bytes!("../fixtures/super_3.obu"),
+        ];
+        let expected = [
+            0x2eba_7fac_4977_792a,
+            0xd1d6_7332_739c_ae46,
+            0x1ac4_0e41_5928_5a78,
+            0xdc78_a476_9c66_1bc2,
+        ];
+        let mut sequence = None;
+        for payload in frames {
+            let (seq, frame) =
+                crate::header::parse_unit(payload, sequence.as_ref()).expect("parse");
+            assert!(seq.enable_superres);
+            assert!(frame.upscaled_width > frame.width);
+            sequence = Some(seq);
+        }
+        let params = CodecParams::video(CodecId::Av1, 64, 64);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let packed = push_frame(&mut decoder, payload, index as i64);
+            assert_eq!(packed.len(), 64 * 64 * 3 / 2);
+            assert_eq!(frame_digest(&packed), expected[index], "frame {index}");
+        }
+    }
+
+    #[test]
+    fn frame_size_from_a_reference_matches_dav1d() {
+        // The sequence is 64×64. Every frame is shown at 32×32, so the size
+        // is not the sequence size. A later frame copies that size from a
+        // reference instead of coding it again. Digests are dav1d 1.5.3.
+        let frames: [&[u8]; 4] = [
+            include_bytes!("../fixtures/size_0.obu"),
+            include_bytes!("../fixtures/size_1.obu"),
+            include_bytes!("../fixtures/size_2.obu"),
+            include_bytes!("../fixtures/size_3.obu"),
+        ];
+        let expected = [
+            0x66fd_0ea1_018d_ba92,
+            0x49ba_3638_8cd8_c716,
+            0xaf94_1afd_3c5d_08f4,
+            0xe8bb_81a2_b771_96f8,
+        ];
+        // A later frame copies its size from a reference. A parse that has
+        // not stored that reference cannot read the size bits, because they
+        // are not there.
+        let mut sequence = None;
+        let mut copied = false;
+        for (index, payload) in frames.iter().enumerate() {
+            match crate::header::parse_unit(payload, sequence.as_ref()) {
+                Ok((seq, frame)) => {
+                    assert_eq!(frame.width, 32, "frame {index}");
+                    assert_eq!(frame.height, 32, "frame {index}");
+                    sequence = Some(seq);
+                }
+                Err(cutlass_decode::CodecError::Malformed {
+                    what: "missing reference",
+                    ..
+                }) => {
+                    assert!(index > 0);
+                    copied = true;
+                }
+                Err(err) => panic!("frame {index}: {err}"),
+            }
+        }
+        assert!(copied);
+        let params = CodecParams::video(CodecId::Av1, 32, 32);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let packed = push_frame(&mut decoder, payload, index as i64);
+            assert_eq!(packed.len(), 32 * 32 * 3 / 2);
+            assert_eq!(frame_digest(&packed), expected[index], "frame {index}");
+        }
+    }
+
+    #[test]
+    fn scaled_reference_matches_dav1d() {
+        // The key is 32×32. The next frame is 64×64 and samples that smaller
+        // reference with the eight-tap smooth filter. Treating that filter as
+        // eight-tap regular changes the picture. The frame after it uses the
+        // eight-tap sharp filter, and treating that as regular changes the
+        // picture too. Digests are `ffmpeg -c:v libdav1d -threads 1 -noautoscale`.
+        let frames: [&[u8]; 4] = [
+            include_bytes!("../fixtures/scale_0.obu"),
+            include_bytes!("../fixtures/scale_1.obu"),
+            include_bytes!("../fixtures/scale_2.obu"),
+            include_bytes!("../fixtures/scale_3.obu"),
+        ];
+        let expected = [
+            0x66fd_0ea1_018d_ba92,
+            0xfe7a_b0ac_d0a7_15fd,
+            0xfb97_91fc_340c_7254,
+            0x0571_778f_0ca8_1061,
+        ];
+        let lengths = [
+            32 * 32 * 3 / 2,
+            64 * 64 * 3 / 2,
+            64 * 64 * 3 / 2,
+            64 * 64 * 3 / 2,
+        ];
+        let params = CodecParams::video(CodecId::Av1, 64, 64);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        let mut sequence = None;
+        for (index, payload) in frames.iter().enumerate() {
+            let (seq, frame) =
+                crate::header::parse_unit(payload, sequence.as_ref()).expect("parse");
+            if index == 1 {
+                assert!(!frame.intra);
+                assert!(!frame.filter_switchable);
+                assert_eq!(frame.interpolation, 1);
+            }
+            if index == 2 {
+                assert!(!frame.intra);
+                assert!(!frame.filter_switchable);
+                assert_eq!(frame.interpolation, 2);
+            }
+            sequence = Some(seq);
+            let packed = push_frame(&mut decoder, payload, index as i64);
+            assert_eq!(packed.len(), lengths[index], "frame {index}");
+            assert_eq!(frame_digest(&packed), expected[index], "frame {index}");
+        }
+    }
+
+    #[test]
+    fn loop_filter_delta_update_matches_dav1d() {
+        // The keyframe replaces the intra filter delta. Later frames keep that
+        // value when they do not write a new one. Digests are dav1d 1.5.3.
+        let frames: [&[u8]; 4] = [
+            include_bytes!("../fixtures/lfdelta_0.obu"),
+            include_bytes!("../fixtures/lfdelta_1.obu"),
+            include_bytes!("../fixtures/lfdelta_2.obu"),
+            include_bytes!("../fixtures/lfdelta_3.obu"),
+        ];
+        let expected = [
+            0x00ec_51b0_a70a_febb,
+            0x3e9b_4d41_a410_05e5,
+            0x9ec7_fa19_6d23_3a89,
+            0x9674_3f13_bccc_56b5,
+        ];
+        let mut sequence = None;
+        for (index, payload) in frames.iter().enumerate() {
+            let (seq, frame) =
+                crate::header::parse_unit(payload, sequence.as_ref()).expect("parse");
+            if index == 0 {
+                assert!(frame.lf_delta_enabled);
+                assert_eq!(frame.lf_ref_deltas[0], -16);
+            } else {
+                assert_ne!(frame.primary_ref, 7, "frame {index}");
+            }
+            sequence = Some(seq);
+        }
+        let params = CodecParams::video(CodecId::Av1, 64, 64);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let packed = push_frame(&mut decoder, payload, index as i64);
+            assert_eq!(packed.len(), 64 * 64 * 3 / 2);
+            assert_eq!(frame_digest(&packed), expected[index], "frame {index}");
+        }
+    }
+
+    #[test]
+    fn superblock_loop_filter_delta_matches_dav1d() {
+        // aomenc keyframes with a quantizer delta and one loop-filter delta
+        // per superblock. The luma filter levels are non-zero, so that delta
+        // changes samples. Digests are dav1d 1.5.3.
+        let frames: [&[u8]; 2] = [
+            include_bytes!("../fixtures/lfblock_0.obu"),
+            include_bytes!("../fixtures/lfblock_1.obu"),
+        ];
+        let expected = [0xf892_381c_0e3d_8319, 0xf892_381c_0e3d_8319];
+        let mut sequence = None;
+        for (index, payload) in frames.iter().enumerate() {
+            let (seq, frame) =
+                crate::header::parse_unit(payload, sequence.as_ref()).expect("parse");
+            assert!(frame.delta_q_present, "frame {index}");
+            assert!(frame.delta_lf_present, "frame {index}");
+            assert!(!frame.delta_lf_multi, "frame {index}");
+            assert_ne!(frame.lf_level[0], 0, "frame {index}");
+            sequence = Some(seq);
+        }
+        let params = CodecParams::video(CodecId::Av1, 128, 128);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let packed = push_frame(&mut decoder, payload, index as i64);
+            assert_eq!(packed.len(), 128 * 128 * 3 / 2);
+            assert_eq!(frame_digest(&packed), expected[index], "frame {index}");
+        }
+    }
+
+    #[test]
+    fn segmentation_quantizer_matches_dav1d() {
+        // aomenc variance adaptive quantization. The keyframe assigns a
+        // quantizer delta to each segment. A later frame keeps the previous
+        // map and does not rewrite the feature values. Digests are dav1d 1.5.3.
+        let frames: [&[u8]; 4] = [
+            include_bytes!("../fixtures/seg_0.obu"),
+            include_bytes!("../fixtures/seg_1.obu"),
+            include_bytes!("../fixtures/seg_2.obu"),
+            include_bytes!("../fixtures/seg_3.obu"),
+        ];
+        let expected = [
+            0xdcbd_5a56_a7f2_81f8,
+            0x6e04_7338_a20a_5d6f,
+            0x6e04_7338_a20a_5d6f,
+            0x6e04_7338_a20a_5d6f,
+        ];
+        let mut sequence = None;
+        for (index, payload) in frames.iter().enumerate() {
+            let (seq, frame) =
+                crate::header::parse_unit(payload, sequence.as_ref()).expect("parse");
+            assert!(frame.segmentation.enabled, "frame {index}");
+            if index == 0 {
+                assert!(frame.segmentation.update_data);
+                assert!(frame.segmentation.update_map);
+                assert!(!frame.segmentation.preskip);
+                assert_eq!(frame.segmentation.data[0][0], -50);
+                assert_eq!(frame.segmentation.data[7][0], 25);
+            }
+            if index == 3 {
+                assert!(!frame.segmentation.update_map);
+                assert!(!frame.segmentation.update_data);
+            }
+            sequence = Some(seq);
+        }
+        let params = CodecParams::video(CodecId::Av1, 128, 128);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let packed = push_frame(&mut decoder, payload, index as i64);
+            assert_eq!(packed.len(), 128 * 128 * 3 / 2);
+            assert_eq!(frame_digest(&packed), expected[index], "frame {index}");
+        }
+    }
+
+    #[test]
+    fn switch_frame_matches_dav1d() {
+        // SVT-AV1 low delay, with a switch frame at index 3. That frame is
+        // predicted as an inter frame, is error resilient, and refreshes every
+        // reference slot. The frames after it use those slots. Digests are
+        // dav1d 1.5.3 with in-loop filters.
+        let frames: [&[u8]; 6] = [
+            include_bytes!("../fixtures/sw_0.obu"),
+            include_bytes!("../fixtures/sw_1.obu"),
+            include_bytes!("../fixtures/sw_2.obu"),
+            include_bytes!("../fixtures/sw_3.obu"),
+            include_bytes!("../fixtures/sw_4.obu"),
+            include_bytes!("../fixtures/sw_5.obu"),
+        ];
+        let expected = [
+            0x832d_5f10_e25b_b379,
+            0xe711_b7e7_2938_348c,
+            0x148f_178d_d2f4_1d6c,
+            0x82c3_51a8_c80f_9fbe,
+            0x4814_1f75_474a_da47,
+            0x7c8f_46f6_4e71_07c6,
+        ];
+        let sizes = [Some((128, 128, 128, 128)); 8];
+        let saved = [None; 8];
+        let hints = [0; 8];
+        let inherited = [crate::header::Inherited::defaults(); 8];
+        let mut sequence = None;
+        for (index, payload) in frames.iter().enumerate() {
+            let (seq, frame) = crate::header::parse_with_motion(
+                payload,
+                sequence.as_ref(),
+                &saved,
+                &hints,
+                &sizes,
+                &inherited,
+            )
+            .unwrap_or_else(|error| panic!("frame {index}: {error:?}"));
+            if index == 3 {
+                assert_eq!(frame.frame_type, crate::header::SWITCH_FRAME);
+                assert!(!frame.intra);
+                assert!(frame.error_resilient);
+                assert_eq!(frame.refresh_flags, 0xff);
+                assert!(frame.primary_ref >= 7);
+            }
+            sequence = Some(seq);
+        }
+        let params = CodecParams::video(CodecId::Av1, 128, 128);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let packed = push_frame(&mut decoder, payload, index as i64);
+            assert_eq!(packed.len(), 128 * 128 * 3 / 2);
+            assert_eq!(frame_digest(&packed), expected[index], "frame {index}");
+        }
+    }
+
+    #[test]
+    fn a_reserved_obu_is_skipped() {
+        // The picture is the flat 128 superblock keyframe. A reserved OBU
+        // sits between the sequence and the frame. Digests are dav1d 1.5.3.
+        let frame = include_bytes!("../fixtures/sb128_flat_0.obu");
+        let expected = 0xf206_7a5e_2040_2325;
+        let params = CodecParams::video(CodecId::Av1, 256, 256);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        let plain = push_frame(&mut decoder, frame, 0);
+        assert_eq!(frame_digest(&plain), expected);
+
+        let mut with_reserved = Vec::new();
+        with_reserved.extend_from_slice(&frame[..11]);
+        with_reserved.extend_from_slice(&reserved_obu(9, &[0xff, 0x01]));
+        with_reserved.extend_from_slice(&frame[11..]);
+        with_reserved.splice(0..0, reserved_obu(0, &[0x80]));
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        let packed = push_frame(&mut decoder, &with_reserved, 0);
+        assert_eq!(frame_digest(&packed), expected);
+
+        let mut overrun = reserved_obu(14, &[0x80]);
+        overrun[1] = 50;
+        overrun.extend_from_slice(frame);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        assert!(
+            decoder
+                .push(&cutlass_decode::Packet {
+                    stream: 0,
+                    data: overrun,
+                    pts: 0,
+                    duration: 1,
+                    timescale: 30,
+                    keyframe: true,
+                    side: Vec::new(),
+                })
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn an_obu_without_a_size_uses_the_packet_end() {
+        // The last OBU of the flat 128 superblock keyframe drops its size
+        // field. The packet length is the size. A missing trailing byte fails.
+        // The digest is dav1d 1.5.3.
+        let frame = include_bytes!("../fixtures/sb128_flat_0.obu");
+        let expected = 0xf206_7a5e_2040_2325;
+        let open = without_last_size(frame);
+        let params = CodecParams::video(CodecId::Av1, 256, 256);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        let packed = push_frame(&mut decoder, &open, 0);
+        assert_eq!(packed.len(), 256 * 256 * 3 / 2);
+        assert_eq!(frame_digest(&packed), expected);
+
+        let mut short = open;
+        short.pop();
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        assert!(
+            decoder
+                .push(&cutlass_decode::Packet {
+                    stream: 0,
+                    data: short,
+                    pts: 0,
+                    duration: 1,
+                    timescale: 30,
+                    keyframe: true,
+                    side: Vec::new(),
+                })
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn a_monochrome_picture_matches_dav1d() {
+        // aomenc --monochrome, 128×128, three frames. Filter intra and an
+        // interintra wedge are off. Digests are
+        // `ffmpeg -c:v libdav1d -threads 1 -pix_fmt gray`.
+        let file = include_bytes!("../fixtures/mono.ivf");
+        let frames = ivf_payloads(file);
+        let expected = [
+            0x1df5_4802_6a88_f184,
+            0xe533_b05b_9f50_a964,
+            0x4d6f_93f9_0895_ca96,
+        ];
+        let (sequence, _) = crate::header::parse_unit(frames[0], None).expect("sequence");
+        assert!(sequence.monochrome);
+        assert_eq!(sequence.bit_depth, 8);
+        let gray =
+            CodecParams::with_format(CodecId::Av1, 128, 128, cutlass_decode::PixelFormat::Gray8);
+        assert!(Av1Decoder::open(&gray).is_ok());
+        let params = CodecParams::video(CodecId::Av1, 128, 128);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let shown = decoder
+                .push(&cutlass_decode::Packet {
+                    stream: 0,
+                    data: payload.to_vec(),
+                    pts: index as i64,
+                    duration: 1,
+                    timescale: 30,
+                    keyframe: index == 0,
+                    side: Vec::new(),
+                })
+                .unwrap_or_else(|error| panic!("frame {index}: {error:?}"));
+            assert_eq!(shown.len(), 1, "frame {index}");
+            assert!(shown[0].as_video().is_none(), "frame {index}");
+            let cutlass_decode::Output::Picture(picture) = &shown[0] else {
+                panic!("picture");
+            };
+            let info = picture.info();
+            assert_eq!(info.pixel, cutlass_decode::PixelFormat::Gray8);
+            assert_eq!((info.width, info.height), (128, 128));
+            let cutlass_decode::PictureSamples::Cpu(bytes) = picture.samples() else {
+                panic!("cpu");
+            };
+            assert_eq!(bytes.len(), 128 * 128, "frame {index}");
+            assert_eq!(frame_digest(bytes), expected[index], "frame {index}");
+        }
+        assert!(decoder.drain().expect("drain").is_empty());
+    }
+
+    #[test]
+    fn a_ten_bit_monochrome_picture_matches_dav1d() {
+        // aomenc --monochrome --bit-depth=10, 128×128, one keyframe and one
+        // inter frame. Filter intra, an interintra wedge, restoration, and
+        // super resolution are off. Digests are
+        // `ffmpeg -c:v libdav1d -threads 1 -pix_fmt gray10le`.
+        let file = include_bytes!("../fixtures/mono10.ivf");
+        let frames = ivf_payloads(file);
+        let expected = [0x86ae_d48a_6970_1217, 0x15dc_062f_948b_bdbe];
+        let (sequence, _) = crate::header::parse_unit(frames[0], None).expect("sequence");
+        assert!(sequence.monochrome);
+        assert_eq!(sequence.bit_depth, 10);
+        let (_, inter) = crate::header::parse_unit(frames[1], Some(&sequence)).expect("inter");
+        assert!(!inter.intra);
+        let gray =
+            CodecParams::with_format(CodecId::Av1, 128, 128, cutlass_decode::PixelFormat::Gray10);
+        assert!(Av1Decoder::open(&gray).is_ok());
+        let params = CodecParams::video(CodecId::Av1, 128, 128);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let shown = decoder
+                .push(&cutlass_decode::Packet {
+                    stream: 0,
+                    data: payload.to_vec(),
+                    pts: index as i64,
+                    duration: 1,
+                    timescale: 30,
+                    keyframe: index == 0,
+                    side: Vec::new(),
+                })
+                .unwrap_or_else(|error| panic!("frame {index}: {error:?}"));
+            assert_eq!(shown.len(), 1, "frame {index}");
+            assert!(shown[0].as_video().is_none(), "frame {index}");
+            let cutlass_decode::Output::Picture(picture) = &shown[0] else {
+                panic!("picture");
+            };
+            let info = picture.info();
+            assert_eq!(info.pixel, cutlass_decode::PixelFormat::Gray10);
+            assert_eq!((info.width, info.height), (128, 128));
+            let cutlass_decode::PictureSamples::Cpu(bytes) = picture.samples() else {
+                panic!("cpu");
+            };
+            assert_eq!(bytes.len(), 128 * 128 * 2, "frame {index}");
+            assert_eq!(frame_digest(bytes), expected[index], "frame {index}");
+        }
+        assert!(decoder.drain().expect("drain").is_empty());
+    }
+
+    #[test]
+    fn an_operating_point_keeps_its_temporal_layer() {
+        // Two operating points. Point 0 is temporal layer 0. Point 1 also
+        // includes temporal layer 1, a second copy of the keyframe. Digests are
+        // `ffmpeg -c:v libdav1d -threads 1` and the same command with `-oppoint 1`.
+        let file = include_bytes!("../fixtures/operating-point.ivf");
+        let frames = ivf_payloads(file);
+        assert_eq!(frames.len(), 3);
+        let (sequence, _) = crate::header::parse_unit(frames[0], None).expect("sequence");
+        assert_eq!(sequence.operating_points, 1);
+        assert_eq!(sequence.operating_idc[0], 0x101);
+        assert_eq!(sequence.operating_idc[1], 0x103);
+        let base = [0xf021_b9cb_b654_3518, 0x21e9_8a09_7459_161c];
+        let params = CodecParams::video(CodecId::Av1, 64, 64);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let shown = decoder
+                .push(&cutlass_decode::Packet {
+                    stream: 0,
+                    data: payload.to_vec(),
+                    pts: index as i64,
+                    duration: 1,
+                    timescale: 30,
+                    keyframe: index == 0,
+                    side: Vec::new(),
+                })
+                .unwrap_or_else(|error| panic!("point 0 frame {index}: {error:?}"));
+            if index == 2 {
+                assert!(shown.is_empty(), "temporal layer");
+                continue;
+            }
+            assert_eq!(shown.len(), 1, "point 0 frame {index}");
+            let cutlass_decode::Output::Picture(picture) = &shown[0] else {
+                panic!("picture");
+            };
+            let cutlass_decode::PictureSamples::Cpu(bytes) = picture.samples() else {
+                panic!("cpu");
+            };
+            assert_eq!(frame_digest(bytes), base[index], "point 0 frame {index}");
+        }
+        let mut layered = Av1Decoder::open(&params).expect("open");
+        layered.select_operating_point(1).expect("point 1");
+        let layered_digest = [base[0], base[1], base[0]];
+        for (index, payload) in frames.iter().enumerate() {
+            let shown = layered
+                .push(&cutlass_decode::Packet {
+                    stream: 0,
+                    data: payload.to_vec(),
+                    pts: index as i64,
+                    duration: 1,
+                    timescale: 30,
+                    keyframe: index != 1,
+                    side: Vec::new(),
+                })
+                .unwrap_or_else(|error| panic!("point 1 frame {index}: {error:?}"));
+            assert_eq!(shown.len(), 1, "point 1 frame {index}");
+            let cutlass_decode::Output::Picture(picture) = &shown[0] else {
+                panic!("picture");
+            };
+            let cutlass_decode::PictureSamples::Cpu(bytes) = picture.samples() else {
+                panic!("cpu");
+            };
+            assert_eq!(
+                frame_digest(bytes),
+                layered_digest[index],
+                "point 1 frame {index}"
+            );
+        }
+        let mut refused = Av1Decoder::open(&params).expect("open");
+        refused.select_operating_point(2).expect("stored");
+        let error = refused
+            .push(&cutlass_decode::Packet {
+                stream: 0,
+                data: frames[0].to_vec(),
+                pts: 0,
+                duration: 1,
+                timescale: 30,
+                keyframe: true,
+                side: Vec::new(),
+            })
+            .expect_err("past the last point");
+        assert_eq!(
+            error,
+            cutlass_decode::CodecError::Unsupported {
+                what: "operating point",
+            }
+        );
+    }
+
+    #[test]
+    fn colour_timing_and_render_size_stay_on_the_picture() {
+        // aomenc 64×64, one keyframe and one inter frame, with BT.709 colour,
+        // colocated chroma, and a constant 30 Hz timing_info. The keyframe's
+        // display size is 80×40. The sample picture stays 64×64. Digests are
+        // `ffmpeg -c:v libdav1d -threads 1 -pix_fmt yuv420p`.
+        let file = include_bytes!("../fixtures/color.ivf");
+        let frames = ivf_payloads(file);
+        let (sequence, frame) = crate::header::parse_unit(frames[0], None).expect("sequence");
+        assert_eq!(sequence.color_primaries, 1);
+        assert_eq!(sequence.transfer_characteristics, 1);
+        assert_eq!(sequence.matrix_coefficients, 1);
+        assert_eq!(sequence.chroma_sample_position, 2);
+        let timing = sequence.timing.expect("timing");
+        assert_eq!(timing.num_units_in_display_tick, 1);
+        assert_eq!(timing.time_scale, 30);
+        assert!(timing.equal_picture_interval);
+        assert_eq!(timing.num_ticks_per_picture_minus_1, Some(0));
+        assert_eq!((frame.render_width, frame.render_height), (80, 40));
+        let (_, inter) = crate::header::parse_unit(frames[1], Some(&sequence)).expect("inter");
+        assert_eq!((inter.render_width, inter.render_height), (64, 64));
+        let expected = [0x1b33_c4d2_4867_47f8, 0x7963_d39f_992f_c21f];
+        let renders = [(80, 40), (64, 64)];
+        let params = CodecParams::video(CodecId::Av1, 64, 64);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let shown = decoder
+                .push(&cutlass_decode::Packet {
+                    stream: 0,
+                    data: payload.to_vec(),
+                    pts: index as i64,
+                    duration: 1,
+                    timescale: 30,
+                    keyframe: index == 0,
+                    side: Vec::new(),
+                })
+                .unwrap_or_else(|error| panic!("frame {index}: {error:?}"));
+            assert_eq!(shown.len(), 1, "frame {index}");
+            let cutlass_decode::Output::Picture(picture) = &shown[0] else {
+                panic!("picture");
+            };
+            let info = picture.info();
+            assert_eq!(info.pixel, cutlass_decode::PixelFormat::Yuv420p);
+            assert_eq!((info.width, info.height), (64, 64));
+            assert_eq!((info.render_width, info.render_height), renders[index]);
+            assert_eq!(info.primaries, cutlass_decode::ColorPrimaries::Bt709);
+            assert_eq!(info.transfer, cutlass_decode::Transfer::Bt709);
+            assert_eq!(info.matrix, cutlass_decode::ColorMatrix::Bt709);
+            assert_eq!(
+                info.chroma_position,
+                cutlass_decode::ChromaSamplePosition::Colocated
+            );
+            assert_eq!(
+                (info.cicp_primaries, info.cicp_transfer, info.cicp_matrix),
+                (1, 1, 1)
+            );
+            assert_eq!(info.num_units_in_display_tick, 1);
+            assert_eq!(info.time_scale, 30);
+            assert!(info.equal_picture_interval);
+            assert_eq!(info.num_ticks_per_picture_minus_1, Some(0));
+            let cutlass_decode::PictureSamples::Cpu(bytes) = picture.samples() else {
+                panic!("cpu");
+            };
+            assert_eq!(bytes.len(), 64 * 64 * 3 / 2, "frame {index}");
+            assert_eq!(frame_digest(bytes), expected[index], "frame {index}");
+        }
+        assert!(decoder.drain().expect("drain").is_empty());
+    }
+
+    #[test]
+    fn decoder_model_info_is_parsed_and_the_picture_matches_dav1d() {
+        // aomenc --timing-info=model, 64×64, one keyframe and one inter frame.
+        // Restoration, super resolution, filter intra, and an interintra wedge
+        // are off. The model is parsed and not scheduled. Digests are
+        // `ffmpeg -c:v libdav1d -threads 1 -pix_fmt yuv420p`.
+        let file = include_bytes!("../fixtures/model.ivf");
+        let frames = ivf_payloads(file);
+        let (sequence, _) = crate::header::parse_unit(frames[0], None).expect("sequence");
+        let model = sequence.decoder_model.expect("decoder model");
+        assert_eq!(model.buffer_delay_length_minus_1, 15);
+        assert_eq!(model.num_units_in_decoding_tick, 1);
+        assert_eq!(model.buffer_removal_time_length_minus_1, 9);
+        assert_eq!(model.frame_presentation_time_length_minus_1, 9);
+        assert!(model.present[0]);
+        assert!(!model.present[1]);
+        let timing = sequence.timing.expect("timing");
+        assert_eq!(timing.num_units_in_display_tick, 1);
+        assert_eq!(timing.time_scale, 30);
+        assert!(!timing.equal_picture_interval);
+        assert_eq!(timing.num_ticks_per_picture_minus_1, None);
+        let expected = [0x1b33_c4d2_4867_47f8, 0x7963_d39f_992f_c21f];
+        let params = CodecParams::video(CodecId::Av1, 64, 64);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let shown = decoder
+                .push(&cutlass_decode::Packet {
+                    stream: 0,
+                    data: payload.to_vec(),
+                    pts: index as i64,
+                    duration: 1,
+                    timescale: 30,
+                    keyframe: index == 0,
+                    side: Vec::new(),
+                })
+                .unwrap_or_else(|error| panic!("frame {index}: {error:?}"));
+            assert_eq!(shown.len(), 1, "frame {index}");
+            let cutlass_decode::Output::Picture(picture) = &shown[0] else {
+                panic!("picture");
+            };
+            let cutlass_decode::PictureSamples::Cpu(bytes) = picture.samples() else {
+                panic!("cpu");
+            };
+            assert_eq!(frame_digest(bytes), expected[index], "frame {index}");
+            assert_eq!(picture.info().num_units_in_decoding_tick, 1);
+        }
+        assert!(decoder.drain().expect("drain").is_empty());
+    }
+
+    #[test]
+    fn a_level_three_picture_wider_than_4096_matches_dav1d() {
+        // aomenc --target-seq-level-idx=4, 4352×64, one keyframe and one inter
+        // frame. Level 3.0 allows this edge. Restoration, super resolution,
+        // filter intra, and an interintra wedge are off. Digests are
+        // `ffmpeg -c:v libdav1d -threads 1 -pix_fmt yuv420p`.
+        let file = include_bytes!("../fixtures/level.ivf");
+        let frames = ivf_payloads(file);
+        let (sequence, _) = crate::header::parse_unit(frames[0], None).expect("sequence");
+        assert_eq!(sequence.seq_level_idx[0], 4);
+        let expected = [0x419d_ca99_d7ff_bfd7, 0x47af_41d4_871f_de86];
+        let params = CodecParams::video(CodecId::Av1, 4352, 64);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let shown = decoder
+                .push(&cutlass_decode::Packet {
+                    stream: 0,
+                    data: payload.to_vec(),
+                    pts: index as i64,
+                    duration: 1,
+                    timescale: 30,
+                    keyframe: index == 0,
+                    side: Vec::new(),
+                })
+                .unwrap_or_else(|error| panic!("frame {index}: {error:?}"));
+            assert_eq!(shown.len(), 1, "frame {index}");
+            let cutlass_decode::Output::Picture(picture) = &shown[0] else {
+                panic!("picture");
+            };
+            let info = picture.info();
+            assert_eq!((info.width, info.height), (4352, 64));
+            assert_eq!(info.seq_level_idx, 4);
+            let cutlass_decode::PictureSamples::Cpu(bytes) = picture.samples() else {
+                panic!("cpu");
+            };
+            assert_eq!(bytes.len(), 4352 * 64 * 3 / 2);
+            assert_eq!(frame_digest(bytes), expected[index], "frame {index}");
+        }
+        assert!(decoder.drain().expect("drain").is_empty());
+    }
+
+    #[test]
+    fn a_picture_past_every_defined_level_is_refused() {
+        // 16448×64 is wider than level 6.3. dav1d decodes it. The check runs
+        // before the frame buffer is allocated.
+        let file = include_bytes!("../fixtures/wide.ivf");
+        let frames = ivf_payloads(file);
+        let params = CodecParams::video(CodecId::Av1, 64, 64);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        let error = decoder
+            .push(&cutlass_decode::Packet {
+                stream: 0,
+                data: frames[0].to_vec(),
+                pts: 0,
+                duration: 1,
+                timescale: 30,
+                keyframe: true,
+                side: Vec::new(),
+            })
+            .expect_err("past every defined level");
+        assert!(
+            matches!(
+                error,
+                cutlass_decode::CodecError::Limit { what: "frame size" }
+            ),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn a_twelve_bit_profile_two_444_picture_matches_dav1d() {
+        // aomenc --i444 --bit-depth=12, 64×64, one keyframe and one inter frame.
+        // The encoder selects profile 2. Restoration, super resolution, filter
+        // intra, and an interintra wedge are off. Film grain is off. Digests are
+        // `ffmpeg -c:v libdav1d -threads 1 -pix_fmt yuv444p12le`.
+        let file = include_bytes!("../fixtures/yuv444-12.ivf");
+        let frames = ivf_payloads(file);
+        let expected = [0x9ba7_f873_40f0_da67, 0x1c37_dcc4_bbdb_ffdc];
+        let (sequence, _) = crate::header::parse_unit(frames[0], None).expect("sequence");
+        assert_eq!(sequence.profile, 2);
+        assert_eq!(sequence.bit_depth, 12);
+        assert!(!sequence.subsampling_x);
+        assert!(!sequence.subsampling_y);
+        let (_, inter) = crate::header::parse_unit(frames[1], Some(&sequence)).expect("inter");
+        assert!(!inter.intra);
+        let wide =
+            CodecParams::with_format(CodecId::Av1, 64, 64, cutlass_decode::PixelFormat::Yuv444p12);
+        assert!(Av1Decoder::open(&wide).is_ok());
+        let params = CodecParams::video(CodecId::Av1, 64, 64);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let shown = decoder
+                .push(&cutlass_decode::Packet {
+                    stream: 0,
+                    data: payload.to_vec(),
+                    pts: index as i64,
+                    duration: 1,
+                    timescale: 30,
+                    keyframe: index == 0,
+                    side: Vec::new(),
+                })
+                .unwrap_or_else(|error| panic!("frame {index}: {error:?}"));
+            assert_eq!(shown.len(), 1, "frame {index}");
+            assert!(shown[0].as_video().is_none(), "frame {index}");
+            let cutlass_decode::Output::Picture(picture) = &shown[0] else {
+                panic!("picture");
+            };
+            let info = picture.info();
+            assert_eq!(info.pixel, cutlass_decode::PixelFormat::Yuv444p12);
+            assert_eq!((info.width, info.height), (64, 64));
+            let cutlass_decode::PictureSamples::Cpu(bytes) = picture.samples() else {
+                panic!("cpu");
+            };
+            assert_eq!(bytes.len(), 64 * 64 * 6, "frame {index}");
+            assert_eq!(frame_digest(bytes), expected[index], "frame {index}");
+        }
+        assert!(decoder.drain().expect("drain").is_empty());
+    }
+
+    #[test]
+    fn a_twelve_bit_profile_two_422_picture_matches_dav1d() {
+        // aomenc --i422 --bit-depth=12, 64×64, one keyframe and one inter frame.
+        // The encoder selects profile 2. Restoration, super resolution, filter
+        // intra, and an interintra wedge are off. Film grain is off. Digests are
+        // `ffmpeg -c:v libdav1d -threads 1 -pix_fmt yuv422p12le`.
+        let file = include_bytes!("../fixtures/yuv422-12.ivf");
+        let frames = ivf_payloads(file);
+        let expected = [0x9cc4_cc09_c07e_dab1, 0xa7dc_8376_997d_f350];
+        let (sequence, _) = crate::header::parse_unit(frames[0], None).expect("sequence");
+        assert_eq!(sequence.profile, 2);
+        assert_eq!(sequence.bit_depth, 12);
+        assert!(sequence.subsampling_x);
+        assert!(!sequence.subsampling_y);
+        let (_, inter) = crate::header::parse_unit(frames[1], Some(&sequence)).expect("inter");
+        assert!(!inter.intra);
+        let wide =
+            CodecParams::with_format(CodecId::Av1, 64, 64, cutlass_decode::PixelFormat::Yuv422p12);
+        assert!(Av1Decoder::open(&wide).is_ok());
+        let params = CodecParams::video(CodecId::Av1, 64, 64);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let shown = decoder
+                .push(&cutlass_decode::Packet {
+                    stream: 0,
+                    data: payload.to_vec(),
+                    pts: index as i64,
+                    duration: 1,
+                    timescale: 30,
+                    keyframe: index == 0,
+                    side: Vec::new(),
+                })
+                .unwrap_or_else(|error| panic!("frame {index}: {error:?}"));
+            assert_eq!(shown.len(), 1, "frame {index}");
+            assert!(shown[0].as_video().is_none(), "frame {index}");
+            let cutlass_decode::Output::Picture(picture) = &shown[0] else {
+                panic!("picture");
+            };
+            let info = picture.info();
+            assert_eq!(info.pixel, cutlass_decode::PixelFormat::Yuv422p12);
+            assert_eq!((info.width, info.height), (64, 64));
+            let cutlass_decode::PictureSamples::Cpu(bytes) = picture.samples() else {
+                panic!("cpu");
+            };
+            assert_eq!(bytes.len(), 64 * 64 * 4, "frame {index}");
+            assert_eq!(frame_digest(bytes), expected[index], "frame {index}");
+        }
+        assert!(decoder.drain().expect("drain").is_empty());
+    }
+
+    #[test]
+    fn grain_scaling_shift_matches_dav1d() {
+        // aomenc --film-grain-test=9, 128×128. The grain scaling shift is 10
+        // (`grain_scaling_minus_8` is 2). Treating it as 11 changes the picture.
+        // The digest is `ffmpeg -c:v libdav1d -threads 1`.
+        let frames = ivf_payloads(include_bytes!("../fixtures/grain-scale.ivf"));
+        assert_eq!(frames.len(), 1);
+        let (sequence, frame) = crate::header::parse_unit(frames[0], None).expect("sequence");
+        assert!(sequence.film_grain);
+        assert!(frame.grain.apply);
+        assert_eq!(frame.grain.scaling_minus_8, 2);
+        assert_eq!(frame.grain.ar_lag, 2);
+        assert_eq!(frame.grain.grain_scale_shift, 0);
+        assert_eq!(frame.width, 128);
+        assert_eq!(frame.height, 128);
+        let params = CodecParams::video(CodecId::Av1, 128, 128);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        let packed = push_frame(&mut decoder, frames[0], 0);
+        assert_eq!(packed.len(), 128 * 128 * 3 / 2);
+        assert_eq!(frame_digest(&packed), 0xe6ca_50e2_19b7_855b);
+        assert!(decoder.drain().expect("drain").is_empty());
+    }
+
+    #[test]
+    fn sharp_interpolation_matches_dav1d() {
+        // The first two frames of a 3840×2160 recording. The inter frame's
+        // interpolation filter is eight-tap sharp. Treating it as eight-tap
+        // regular changes the picture. Digests are `ffmpeg -c:v libdav1d -threads 1`.
+        let frames = ivf_payloads(include_bytes!("../fixtures/sharp-interp.ivf"));
+        assert_eq!(frames.len(), 2);
+        let (sequence, key) = crate::header::parse_unit(frames[0], None).expect("sequence");
+        let (_, inter) = crate::header::parse_unit(frames[1], Some(&sequence)).expect("inter");
+        assert!(key.intra);
+        assert!(!inter.intra);
+        assert!(!inter.filter_switchable);
+        assert_eq!(inter.interpolation, 2);
+        assert_eq!(inter.width, 3840);
+        assert_eq!(inter.height, 2160);
+        let params = CodecParams::video(CodecId::Av1, 3840, 2160);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        let key_pic = push_frame(&mut decoder, frames[0], 0);
+        let inter_pic = push_frame(&mut decoder, frames[1], 1);
+        assert_eq!(key_pic.len(), 3840 * 2160 * 3 / 2);
+        assert_eq!(inter_pic.len(), key_pic.len());
+        assert_eq!(frame_digest(&key_pic), 0x5ae5_a87a_c4cf_025b);
+        assert_eq!(frame_digest(&inter_pic), 0x7f8d_02fb_2db4_6dad);
+        assert!(decoder.drain().expect("drain").is_empty());
+    }
+
+    #[test]
+    fn vertical_chroma_position_matches_dav1d() {
+        // aomenc --chroma-sample-position=vertical, 128×128. The published chroma
+        // position is vertical. The digest is `ffmpeg -c:v libdav1d -threads 1`.
+        let frames = ivf_payloads(include_bytes!("../fixtures/chroma-vert.ivf"));
+        assert_eq!(frames.len(), 1);
+        let (sequence, frame) = crate::header::parse_unit(frames[0], None).expect("sequence");
+        assert!(sequence.subsampling_x && sequence.subsampling_y);
+        assert_eq!(sequence.chroma_sample_position, 1);
+        assert_eq!(frame.width, 128);
+        assert_eq!(frame.height, 128);
+        let params = CodecParams::video(CodecId::Av1, 128, 128);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        let shown = decoder
+            .push(&cutlass_decode::Packet {
+                stream: 0,
+                data: frames[0].to_vec(),
+                pts: 0,
+                duration: 1,
+                timescale: 30,
+                keyframe: true,
+                side: Vec::new(),
+            })
+            .expect("push");
+        assert_eq!(shown.len(), 1);
+        let cutlass_decode::Output::Picture(picture) = &shown[0] else {
+            panic!("picture");
+        };
+        let info = picture.info();
+        assert_eq!(
+            info.chroma_position,
+            cutlass_decode::ChromaSamplePosition::Vertical
+        );
+        let cutlass_decode::PictureSamples::Cpu(bytes) = picture.samples() else {
+            panic!("cpu");
+        };
+        assert_eq!(bytes.len(), 128 * 128 * 3 / 2);
+        assert_eq!(frame_digest(bytes), 0xee51_8a06_f71e_a2a3);
+        assert!(decoder.drain().expect("drain").is_empty());
+    }
+
+    #[test]
+    fn reference_motion_off_matches_dav1d() {
+        // aomenc --enable-ref-frame-mvs=0, 128×128, four frames. Order hint
+        // stays on, so the sequence still carries the reference-motion bit,
+        // and that bit is off. Treating it as on desynchronizes the inter
+        // frames. Digests are `ffmpeg -c:v libdav1d -threads 1`.
+        let frames = ivf_payloads(include_bytes!("../fixtures/ref-mvs-off.ivf"));
+        assert_eq!(frames.len(), 4);
+        let expected = [
+            0x3d7e_585c_ce95_455d,
+            0x68b4_88cc_c368_159c,
+            0x4939_5fa6_15a9_9864,
+            0x2b44_f78e_5285_725b,
+        ];
+        let mut sequence = None;
+        let params = CodecParams::video(CodecId::Av1, 128, 128);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let (seq, frame) =
+                crate::header::parse_unit(payload, sequence.as_ref()).expect("parse");
+            assert!(seq.enable_order_hint);
+            assert!(!seq.enable_ref_mvs);
+            if index > 0 {
+                assert!(!frame.intra);
+            }
+            sequence = Some(seq);
+            let packed = push_frame(&mut decoder, payload, index as i64);
+            assert_eq!(packed.len(), 128 * 128 * 3 / 2);
+            assert_eq!(frame_digest(&packed), expected[index], "frame {index}");
+        }
+        assert!(decoder.drain().expect("drain").is_empty());
+    }
+
+    #[test]
+    fn intra_edge_filter_off_matches_dav1d() {
+        // aomenc --enable-intra-edge-filter=0 --usage=2, 128×128. Directional
+        // prediction does not filter the edge. Turning that filter on changes
+        // the picture. The digest is `ffmpeg -c:v libdav1d -threads 1`.
+        let frames = ivf_payloads(include_bytes!("../fixtures/edge-off.ivf"));
+        assert_eq!(frames.len(), 1);
+        let (sequence, frame) = crate::header::parse_unit(frames[0], None).expect("sequence");
+        assert!(!sequence.enable_intra_edge);
+        assert!(frame.intra);
+        assert_eq!(frame.width, 128);
+        assert_eq!(frame.height, 128);
+        let params = CodecParams::video(CodecId::Av1, 128, 128);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        let packed = push_frame(&mut decoder, frames[0], 0);
+        assert_eq!(packed.len(), 128 * 128 * 3 / 2);
+        assert_eq!(frame_digest(&packed), 0xece9_bcc0_6b4d_536d);
+        assert!(decoder.drain().expect("drain").is_empty());
+    }
+
+    #[test]
+    fn identity_matrix_grain_clip_matches_dav1d() {
+        // aomenc --i444 --matrix-coefficients=identity --film-grain-test=1, 128×128.
+        // The matrix is identity and grain clips to the restricted range, so chroma
+        // uses the luma limit. Using the studio chroma limit changes the picture.
+        // The digest is `ffmpeg -c:v libdav1d -threads 1 -pix_fmt gbrp`.
+        let frames = ivf_payloads(include_bytes!("../fixtures/grain-identity.ivf"));
+        assert_eq!(frames.len(), 1);
+        let (sequence, frame) = crate::header::parse_unit(frames[0], None).expect("sequence");
+        assert_eq!(sequence.profile, 1);
+        assert_eq!(sequence.matrix_coefficients, 0);
+        assert!(!sequence.color_range_full);
+        assert!(!sequence.subsampling_x && !sequence.subsampling_y);
+        assert!(sequence.film_grain);
+        assert!(frame.grain.apply);
+        assert!(frame.grain.clip_restricted);
+        assert!(frame.grain.identity_matrix);
+        let params = CodecParams::video(CodecId::Av1, 128, 128);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        let shown = decoder
+            .push(&cutlass_decode::Packet {
+                stream: 0,
+                data: frames[0].to_vec(),
+                pts: 0,
+                duration: 1,
+                timescale: 30,
+                keyframe: true,
+                side: Vec::new(),
+            })
+            .expect("push");
+        assert_eq!(shown.len(), 1);
+        let cutlass_decode::Output::Picture(picture) = &shown[0] else {
+            panic!("picture");
+        };
+        let info = picture.info();
+        assert_eq!(info.pixel, cutlass_decode::PixelFormat::Yuv444p);
+        assert_eq!(
+            (info.cicp_primaries, info.cicp_transfer, info.cicp_matrix),
+            (1, 1, 0)
+        );
+        let cutlass_decode::PictureSamples::Cpu(bytes) = picture.samples() else {
+            panic!("cpu");
+        };
+        assert_eq!(bytes.len(), 128 * 128 * 3);
+        assert_eq!(frame_digest(bytes), 0xb4c1_cb35_9263_7630);
+        assert!(decoder.drain().expect("drain").is_empty());
+    }
+
+    #[test]
+    fn cdef_damping_matches_dav1d() {
+        // aomenc --cq-level=63 --enable-cdef=1, 128×128. The CDEF damping is 6
+        // and the luma primary strength is 14. Treating the damping as 3 changes
+        // the picture. The digest is `ffmpeg -c:v libdav1d -threads 1`.
+        let frames = ivf_payloads(include_bytes!("../fixtures/cdef-damp.ivf"));
+        assert_eq!(frames.len(), 1);
+        let (sequence, frame) = crate::header::parse_unit(frames[0], None).expect("sequence");
+        assert!(sequence.enable_cdef);
+        assert_eq!(frame.cdef.damping, 6);
+        assert_eq!(frame.cdef.y_pri[0], 14);
+        assert_eq!(frame.width, 128);
+        assert_eq!(frame.height, 128);
+        let params = CodecParams::video(CodecId::Av1, 128, 128);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        let packed = push_frame(&mut decoder, frames[0], 0);
+        assert_eq!(packed.len(), 128 * 128 * 3 / 2);
+        assert_eq!(frame_digest(&packed), 0x6a6b_de20_9fce_d99b);
+        assert!(decoder.drain().expect("drain").is_empty());
+    }
+
+    #[test]
+    fn lag3_film_grain_matches_dav1d() {
+        // aomenc --film-grain-test=2, 128×128. The grain filter lag is 3, overlap
+        // is on, and samples are not clipped to the restricted range. Treating
+        // the lag as 2 changes the picture, and so does restricted clipping.
+        // The digest is `ffmpeg -c:v libdav1d -threads 1`.
+        let frames = ivf_payloads(include_bytes!("../fixtures/grain-lag3.ivf"));
+        assert_eq!(frames.len(), 1);
+        let (sequence, frame) = crate::header::parse_unit(frames[0], None).expect("sequence");
+        assert!(sequence.film_grain);
+        assert!(frame.grain.apply);
+        assert_eq!(frame.grain.ar_lag, 3);
+        assert!(frame.grain.overlap);
+        assert!(!frame.grain.clip_restricted);
+        assert_eq!(frame.grain.grain_scale_shift, 0);
+        assert_eq!(frame.width, 128);
+        assert_eq!(frame.height, 128);
+        let params = CodecParams::video(CodecId::Av1, 128, 128);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        let packed = push_frame(&mut decoder, frames[0], 0);
+        assert_eq!(packed.len(), 128 * 128 * 3 / 2);
+        assert_eq!(frame_digest(&packed), 0x9041_c406_f2e9_8581);
+        assert!(decoder.drain().expect("drain").is_empty());
+    }
+
+    #[test]
+    fn grain_sample_shift_matches_dav1d() {
+        // aomenc --film-grain-test=3, 128×128. The grain sample shift is 1.
+        // The filter lag is 3 and clipping is restricted. Ignoring the shift
+        // changes the picture. The digest is `ffmpeg -c:v libdav1d -threads 1`.
+        let frames = ivf_payloads(include_bytes!("../fixtures/grain-shift.ivf"));
+        assert_eq!(frames.len(), 1);
+        let (sequence, frame) = crate::header::parse_unit(frames[0], None).expect("sequence");
+        assert!(sequence.film_grain);
+        assert!(frame.grain.apply);
+        assert_eq!(frame.grain.grain_scale_shift, 1);
+        assert_eq!(frame.grain.ar_lag, 3);
+        assert!(frame.grain.clip_restricted);
+        assert_eq!(frame.width, 128);
+        assert_eq!(frame.height, 128);
+        let params = CodecParams::video(CodecId::Av1, 128, 128);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        let packed = push_frame(&mut decoder, frames[0], 0);
+        assert_eq!(packed.len(), 128 * 128 * 3 / 2);
+        assert_eq!(frame_digest(&packed), 0xa9a5_24f8_4c39_a52b);
+        assert!(decoder.drain().expect("drain").is_empty());
+    }
+
+    #[test]
+    fn full_still_picture_header_matches_dav1d() {
+        // aomenc --limit=1 --full-still-picture-hdr, 128×128. The sequence is a
+        // still picture and uses the full header, not the reduced one. Rejecting
+        // that combination fails before a picture is produced. The digest is
+        // `ffmpeg -c:v libdav1d -threads 1`.
+        let frames = ivf_payloads(include_bytes!("../fixtures/still-full.ivf"));
+        assert_eq!(frames.len(), 1);
+        let (sequence, frame) = crate::header::parse_unit(frames[0], None).expect("sequence");
+        assert!(sequence.still);
+        assert!(!sequence.reduced);
+        assert!(frame.intra);
+        assert_eq!(frame.width, 128);
+        assert_eq!(frame.height, 128);
+        let params = CodecParams::video(CodecId::Av1, 128, 128);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        let packed = push_frame(&mut decoder, frames[0], 0);
+        assert_eq!(packed.len(), 128 * 128 * 3 / 2);
+        assert_eq!(frame_digest(&packed), 0xefec_d6e6_78fd_c52a);
+        assert!(decoder.drain().expect("drain").is_empty());
+    }
+
+    #[test]
+    fn reduced_still_picture_header_matches_dav1d() {
+        // aomenc --limit=1, 128×128. The sequence is a still picture and uses
+        // the reduced header. That header has one level, no timing, no frame
+        // ids, and no inter-tool bits. Reading those bits desynchronizes the
+        // frame. The digest is `ffmpeg -c:v libdav1d -threads 1`.
+        let frames = ivf_payloads(include_bytes!("../fixtures/still-reduced.ivf"));
+        assert_eq!(frames.len(), 1);
+        let (sequence, frame) = crate::header::parse_unit(frames[0], None).expect("sequence");
+        assert!(sequence.still);
+        assert!(sequence.reduced);
+        assert!(!sequence.enable_order_hint);
+        assert!(!sequence.frame_id_present);
+        assert!(!sequence.enable_interintra);
+        assert!(!sequence.enable_warped);
+        assert!(frame.intra);
+        assert_eq!(frame.width, 128);
+        assert_eq!(frame.height, 128);
+        let params = CodecParams::video(CodecId::Av1, 128, 128);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        let packed = push_frame(&mut decoder, frames[0], 0);
+        assert_eq!(packed.len(), 128 * 128 * 3 / 2);
+        assert_eq!(frame_digest(&packed), 0x7e4f_ad64_6443_12cc);
+        assert!(decoder.drain().expect("drain").is_empty());
+    }
+
+    #[test]
+    fn chroma_quantizer_delta_matches_dav1d() {
+        // aomenc --enable-chroma-deltaq=1, 128×128, two frames. Both headers
+        // add 2 to the chroma DC and AC quantizers and leave the luma DC delta
+        // at 0. U and V share that offset. No quantizer matrix. Ignoring the
+        // chroma offsets changes both pictures. Digests are
+        // `ffmpeg -c:v libdav1d -threads 1`.
+        let frames = ivf_payloads(include_bytes!("../fixtures/chroma-delta.ivf"));
+        assert_eq!(frames.len(), 2);
+        let mut sequence = None;
+        for (index, payload) in frames.iter().enumerate() {
+            let (parsed, frame) =
+                crate::header::parse_unit(payload, sequence.as_ref()).expect("frame");
+            assert!(!parsed.separate_uv_delta_q);
+            assert!(!frame.using_qmatrix, "frame {index}");
+            assert_eq!(frame.delta_y_dc, 0, "frame {index}");
+            assert_eq!(frame.delta_u_dc, 2, "frame {index}");
+            assert_eq!(frame.delta_u_ac, 2, "frame {index}");
+            assert_eq!(frame.delta_v_dc, 2, "frame {index}");
+            assert_eq!(frame.delta_v_ac, 2, "frame {index}");
+            assert_eq!(frame.width, 128);
+            assert_eq!(frame.height, 128);
+            if index == 1 {
+                assert!(!frame.intra);
+            }
+            sequence = Some(parsed);
+        }
+        let expected = [0x7855_dec8_88da_0fbd, 0xc5a0_e4b9_172b_f474];
+        let params = CodecParams::video(CodecId::Av1, 128, 128);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let packed = push_frame(&mut decoder, payload, index as i64);
+            assert_eq!(packed.len(), 128 * 128 * 3 / 2, "frame {index}");
+            assert_eq!(frame_digest(&packed), expected[index], "frame {index}");
+        }
+        assert!(decoder.drain().expect("drain").is_empty());
+    }
+
+    #[test]
+    fn reduced_transform_set_matches_dav1d() {
+        // aomenc --reduced-tx-type-set=1, 256×256, two frames. Both headers
+        // select the transform size and the reduced set. Reading the full set
+        // desyncs the keyframe. Digests are `ffmpeg -c:v libdav1d -threads 1`.
+        let frames = ivf_payloads(include_bytes!("../fixtures/reduced-tx.ivf"));
+        assert_eq!(frames.len(), 2);
+        let mut sequence = None;
+        for (index, payload) in frames.iter().enumerate() {
+            let (parsed, frame) =
+                crate::header::parse_unit(payload, sequence.as_ref()).expect("frame");
+            assert!(frame.reduced_tx, "frame {index}");
+            assert!(frame.tx_select, "frame {index}");
+            assert_eq!(frame.width, 256);
+            assert_eq!(frame.height, 256);
+            if index == 1 {
+                assert!(!frame.intra);
+            }
+            sequence = Some(parsed);
+        }
+        let expected = [0x9b2e_a288_67f4_9030, 0x4b47_c93f_209b_1e03];
+        let params = CodecParams::video(CodecId::Av1, 256, 256);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let packed = push_frame(&mut decoder, payload, index as i64);
+            assert_eq!(packed.len(), 256 * 256 * 3 / 2, "frame {index}");
+            assert_eq!(frame_digest(&packed), expected[index], "frame {index}");
+        }
+        assert!(decoder.drain().expect("drain").is_empty());
+    }
+
+    #[test]
+    fn loop_filter_sharpness_matches_dav1d() {
+        // aomenc --usage=2 --sharpness=7, 128×128. The frame header sets
+        // sharpness to 7 and keeps non-zero luma and chroma filter levels.
+        // CDEF is off. Treating the sharpness as 0 changes the picture.
+        // The digest is `ffmpeg -c:v libdav1d -threads 1`.
+        let frames = ivf_payloads(include_bytes!("../fixtures/lf-sharp.ivf"));
+        assert_eq!(frames.len(), 1);
+        let (sequence, frame) = crate::header::parse_unit(frames[0], None).expect("sequence");
+        assert!(!sequence.enable_cdef);
+        assert_eq!(frame.width, 128);
+        assert_eq!(frame.height, 128);
+        assert_eq!(frame.lf_sharpness, 7);
+        assert_eq!(frame.lf_level, [12, 7, 7, 7]);
+        let params = CodecParams::video(CodecId::Av1, 128, 128);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        let packed = push_frame(&mut decoder, frames[0], 0);
+        assert_eq!(packed.len(), 128 * 128 * 3 / 2);
+        assert_eq!(frame_digest(&packed), 0x7960_ae29_f909_5a8f);
+        assert!(decoder.drain().expect("drain").is_empty());
+    }
+
+    #[test]
+    fn ten_bit_switchable_luma_matches_dav1d() {
+        // aomenc --bit-depth=10 --cpu-used=0 --cq-level=28, 512×64. Luma is
+        // switchable, in 256-sample units, so the plane has two units and the
+        // frame updates that CDF. Chroma restoration is off. Samples stay in
+        // the low 10 bits. The digest is
+        // `ffmpeg -c:v libdav1d -threads 1 -pix_fmt yuv420p10le`.
+        let frames = ivf_payloads(include_bytes!("../fixtures/restore-switch-10.ivf"));
+        assert_eq!(frames.len(), 1);
+        let (sequence, frame) = crate::header::parse_unit(frames[0], None).expect("sequence");
+        assert_eq!(sequence.profile, 0);
+        assert_eq!(sequence.bit_depth, 10);
+        assert!(sequence.subsampling_x && sequence.subsampling_y);
+        assert!(!sequence.enable_cdef);
+        assert!(!frame.disable_cdf_update);
+        assert_eq!(frame.width, 512);
+        assert_eq!(frame.height, 64);
+        assert_eq!(
+            frame.restoration.plane,
+            [
+                crate::header::RESTORE_SWITCHABLE,
+                crate::header::RESTORE_NONE,
+                crate::header::RESTORE_NONE,
+            ]
+        );
+        assert_eq!(frame.restoration.unit, [256; 3]);
+        let params = CodecParams::video(CodecId::Av1, 512, 64);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        let shown = decoder
+            .push(&cutlass_decode::Packet {
+                stream: 0,
+                data: frames[0].to_vec(),
+                pts: 0,
+                duration: 1,
+                timescale: 30,
+                keyframe: true,
+                side: Vec::new(),
+            })
+            .expect("frame");
+        assert_eq!(shown.len(), 1);
+        let cutlass_decode::Output::Picture(picture) = &shown[0] else {
+            panic!("picture");
+        };
+        assert_eq!(picture.info().pixel, cutlass_decode::PixelFormat::Yuv420p10);
+        let cutlass_decode::PictureSamples::Cpu(bytes) = picture.samples() else {
+            panic!("cpu");
+        };
+        assert_eq!(bytes.len(), 512 * 64 * 3);
+        assert_eq!(frame_digest(bytes), 0x27f0_0717_c048_041c);
+        assert!(decoder.drain().expect("drain").is_empty());
+    }
+
+    #[test]
+    fn twelve_bit_wiener_on_444_and_422_matches_dav1d() {
+        // aomenc --bit-depth=12 --sharpness=5 --cq-level=32. Both frames are
+        // Wiener on every plane, in 256-sample units, and the frame updates
+        // that CDF. 4:4:4 is 512×128, so each plane has two units across.
+        // 4:2:2 is 256×512. Chroma is full height, so each chroma plane has
+        // two unit rows. Digests are `ffmpeg -c:v libdav1d -threads 1`.
+        let cases = [
+            (
+                include_bytes!("../fixtures/restore-wiener-444-12.ivf").as_slice(),
+                false,
+                false,
+                512u32,
+                128u32,
+                cutlass_decode::PixelFormat::Yuv444p12,
+                512 * 128 * 6,
+                0xb10d_17f1_9bc2_8df3,
+            ),
+            (
+                include_bytes!("../fixtures/restore-wiener-422-12.ivf").as_slice(),
+                true,
+                false,
+                256,
+                512,
+                cutlass_decode::PixelFormat::Yuv422p12,
+                256 * 512 * 4,
+                0x03a3_63f6_1bf7_e7bc,
+            ),
+        ];
+        for (file, sub_x, sub_y, width, height, pixel, length, digest) in cases {
+            let frames = ivf_payloads(file);
+            assert_eq!(frames.len(), 1, "{pixel:?}");
+            let (sequence, frame) = crate::header::parse_unit(frames[0], None).expect("sequence");
+            assert_eq!(sequence.profile, 2, "{pixel:?}");
+            assert_eq!(sequence.bit_depth, 12, "{pixel:?}");
+            assert_eq!(sequence.subsampling_x, sub_x, "{pixel:?}");
+            assert_eq!(sequence.subsampling_y, sub_y, "{pixel:?}");
+            assert!(sequence.enable_cdef, "{pixel:?}");
+            assert!(!frame.disable_cdf_update, "{pixel:?}");
+            assert_eq!(frame.width, width, "{pixel:?}");
+            assert_eq!(frame.height, height, "{pixel:?}");
+            assert_eq!(
+                frame.restoration.plane,
+                [crate::header::RESTORE_WIENER; 3],
+                "{pixel:?}"
+            );
+            assert_eq!(frame.restoration.unit, [256; 3], "{pixel:?}");
+            let params = CodecParams::video(CodecId::Av1, width, height);
+            let mut decoder = Av1Decoder::open(&params).expect("open");
+            let shown = decoder
+                .push(&cutlass_decode::Packet {
+                    stream: 0,
+                    data: frames[0].to_vec(),
+                    pts: 0,
+                    duration: 1,
+                    timescale: 30,
+                    keyframe: true,
+                    side: Vec::new(),
+                })
+                .unwrap_or_else(|error| panic!("{pixel:?}: {error:?}"));
+            assert_eq!(shown.len(), 1, "{pixel:?}");
+            let cutlass_decode::Output::Picture(picture) = &shown[0] else {
+                panic!("picture");
+            };
+            assert_eq!(picture.info().pixel, pixel, "{pixel:?}");
+            let cutlass_decode::PictureSamples::Cpu(bytes) = picture.samples() else {
+                panic!("cpu");
+            };
+            assert_eq!(bytes.len(), length, "{pixel:?}");
+            assert_eq!(frame_digest(bytes), digest, "{pixel:?}");
+            assert!(decoder.drain().expect("drain").is_empty());
+        }
+    }
+
+    #[test]
+    fn restoration_cdf_is_kept_for_the_next_frame() {
+        // aomenc --cpu-used=0 --sharpness=5 --cq-level=32, 512×128, two frames.
+        // The key is Wiener on every plane, with 128-sample units, and it
+        // stores the adapted CDF. The inter frame loads that table: its chroma
+        // planes are Wiener. Replacing the stored restoration CDFs with the
+        // defaults makes that frame fail. Digests are
+        // `ffmpeg -c:v libdav1d -threads 1`.
+        let frames = ivf_payloads(include_bytes!("../fixtures/restore-carry.ivf"));
+        assert_eq!(frames.len(), 2);
+        let (sequence, key) = crate::header::parse_unit(frames[0], None).expect("sequence");
+        assert!(sequence.subsampling_x && sequence.subsampling_y);
+        assert!(sequence.enable_cdef);
+        assert!(key.intra);
+        assert!(!key.disable_cdf_update);
+        assert!(!key.disable_frame_end_update);
+        assert_eq!(key.width, 512);
+        assert_eq!(key.height, 128);
+        assert_eq!(key.restoration.plane, [crate::header::RESTORE_WIENER; 3]);
+        assert_eq!(key.restoration.unit, [128; 3]);
+        let (_, inter) = crate::header::parse_unit(frames[1], Some(&sequence)).expect("inter");
+        assert!(!inter.intra);
+        assert!(inter.primary_ref < 7);
+        assert!(!inter.disable_cdf_update);
+        assert_eq!(
+            inter.restoration.plane,
+            [
+                crate::header::RESTORE_SGRPROJ,
+                crate::header::RESTORE_WIENER,
+                crate::header::RESTORE_WIENER,
+            ]
+        );
+        assert_eq!(inter.restoration.unit, [256; 3]);
+        let params = CodecParams::video(CodecId::Av1, 512, 128);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        let expected = [0x6fdf_19a7_01f0_8e3f, 0x76ee_a177_f801_d985];
+        for (index, payload) in frames.iter().enumerate() {
+            let packed = push_frame(&mut decoder, payload, index as i64);
+            assert_eq!(packed.len(), 512 * 128 * 3 / 2, "frame {index}");
+            assert_eq!(frame_digest(&packed), expected[index], "frame {index}");
+        }
+        assert!(decoder.drain().expect("drain").is_empty());
+    }
+
+    #[test]
+    fn twelve_bit_wiener_matches_dav1d() {
+        // aomenc --profile=2 --bit-depth=12 --sharpness=5 --cq-level=32, 512×128
+        // 4:2:0. Every plane is Wiener with 256-sample units. Luma has two
+        // units. Chroma is half resolution, so each chroma plane has one unit
+        // and the 12-bit Wiener filter still runs. The digest is
+        // `ffmpeg -c:v libdav1d -threads 1 -pix_fmt yuv420p12le`.
+        let frames = ivf_payloads(include_bytes!("../fixtures/restore-wiener-12.ivf"));
+        assert_eq!(frames.len(), 1);
+        let (sequence, frame) = crate::header::parse_unit(frames[0], None).expect("sequence");
+        assert_eq!(sequence.profile, 2);
+        assert_eq!(sequence.bit_depth, 12);
+        assert!(sequence.subsampling_x && sequence.subsampling_y);
+        assert!(sequence.enable_cdef);
+        assert!(!frame.disable_cdf_update);
+        assert_eq!(frame.width, 512);
+        assert_eq!(frame.height, 128);
+        assert_eq!(frame.restoration.plane, [crate::header::RESTORE_WIENER; 3]);
+        assert_eq!(frame.restoration.unit, [256; 3]);
+        let params = CodecParams::video(CodecId::Av1, 512, 128);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        let shown = decoder
+            .push(&cutlass_decode::Packet {
+                stream: 0,
+                data: frames[0].to_vec(),
+                pts: 0,
+                duration: 1,
+                timescale: 30,
+                keyframe: true,
+                side: Vec::new(),
+            })
+            .expect("frame");
+        assert_eq!(shown.len(), 1);
+        let cutlass_decode::Output::Picture(picture) = &shown[0] else {
+            panic!("picture");
+        };
+        let info = picture.info();
+        assert_eq!(info.pixel, cutlass_decode::PixelFormat::Yuv420p12);
+        let cutlass_decode::PictureSamples::Cpu(bytes) = picture.samples() else {
+            panic!("cpu");
+        };
+        assert_eq!(bytes.len(), 512 * 128 * 3);
+        assert_eq!(frame_digest(bytes), 0x2622_3364_b08f_a147);
+        assert!(decoder.drain().expect("drain").is_empty());
+    }
+
+    #[test]
+    fn wiener_units_keep_the_updated_cdf() {
+        // aomenc --sharpness=5 --cq-level=32, 512×128. Every plane is Wiener
+        // with 128-sample units. Luma has four units and the frame updates
+        // that CDF. Chroma is 4:2:0, so each chroma plane has two units and a
+        // stripe is 32 samples. The digest is `ffmpeg -c:v libdav1d -threads 1`.
+        let frames = ivf_payloads(include_bytes!("../fixtures/restore-wiener.ivf"));
+        assert_eq!(frames.len(), 1);
+        let (sequence, frame) = crate::header::parse_unit(frames[0], None).expect("sequence");
+        assert!(sequence.subsampling_x && sequence.subsampling_y);
+        assert!(sequence.enable_cdef);
+        assert!(!frame.disable_cdf_update);
+        assert_eq!(frame.width, 512);
+        assert_eq!(frame.height, 128);
+        assert_eq!(frame.restoration.plane, [crate::header::RESTORE_WIENER; 3]);
+        assert_eq!(frame.restoration.unit, [128; 3]);
+        let params = CodecParams::video(CodecId::Av1, 512, 128);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        let packed = push_frame(&mut decoder, frames[0], 0);
+        assert_eq!(packed.len(), 512 * 128 * 3 / 2);
+        assert_eq!(frame_digest(&packed), 0xdf63_3cd9_dfae_14d3);
+        assert!(decoder.drain().expect("drain").is_empty());
+    }
+
+    #[test]
+    fn twelve_bit_restoration_matches_dav1d() {
+        // aomenc --bit-depth=12, 256×128 4:2:0. Luma is self-guided. Chroma
+        // restoration is off. CDEF is off. Samples stay in the low 12 bits.
+        // The digest is `ffmpeg -c:v libdav1d -threads 1 -pix_fmt yuv420p12le`.
+        let frames = ivf_payloads(include_bytes!("../fixtures/restore-12.ivf"));
+        assert_eq!(frames.len(), 1);
+        let (sequence, frame) = crate::header::parse_unit(frames[0], None).expect("sequence");
+        assert_eq!(sequence.profile, 2);
+        assert_eq!(sequence.bit_depth, 12);
+        assert!(sequence.subsampling_x && sequence.subsampling_y);
+        assert_eq!(frame.width, 256);
+        assert_eq!(frame.height, 128);
+        assert_eq!(
+            frame.restoration.plane,
+            [
+                crate::header::RESTORE_SGRPROJ,
+                crate::header::RESTORE_NONE,
+                crate::header::RESTORE_NONE,
+            ]
+        );
+        assert_eq!(frame.restoration.unit, [256, 256, 256]);
+        let params = CodecParams::video(CodecId::Av1, 256, 128);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        let shown = decoder
+            .push(&cutlass_decode::Packet {
+                stream: 0,
+                data: frames[0].to_vec(),
+                pts: 0,
+                duration: 1,
+                timescale: 30,
+                keyframe: true,
+                side: Vec::new(),
+            })
+            .expect("frame");
+        assert_eq!(shown.len(), 1);
+        let cutlass_decode::Output::Picture(picture) = &shown[0] else {
+            panic!("picture");
+        };
+        let info = picture.info();
+        assert_eq!(info.pixel, cutlass_decode::PixelFormat::Yuv420p12);
+        let cutlass_decode::PictureSamples::Cpu(bytes) = picture.samples() else {
+            panic!("cpu");
+        };
+        assert_eq!(bytes.len(), 256 * 128 * 3);
+        assert_eq!(frame_digest(bytes), 0x4969_32d8_3fe2_20c9);
+        assert!(decoder.drain().expect("drain").is_empty());
+    }
+
+    #[test]
+    fn a_twelve_bit_profile_two_picture_matches_dav1d() {
+        // aomenc --profile=2 --i420 --bit-depth=12, 64×64, one keyframe and one
+        // inter frame. Restoration, super resolution, filter intra, and an
+        // interintra wedge are off. Film grain is off. Digests are
+        // `ffmpeg -c:v libdav1d -threads 1 -pix_fmt yuv420p12le`.
+        let file = include_bytes!("../fixtures/yuv420-12.ivf");
+        let frames = ivf_payloads(file);
+        let expected = [0xa23a_10c6_2e39_0ed4, 0xfc00_e897_7397_b338];
+        let (sequence, _) = crate::header::parse_unit(frames[0], None).expect("sequence");
+        assert_eq!(sequence.profile, 2);
+        assert_eq!(sequence.bit_depth, 12);
+        assert!(sequence.subsampling_x);
+        assert!(sequence.subsampling_y);
+        let (_, inter) = crate::header::parse_unit(frames[1], Some(&sequence)).expect("inter");
+        assert!(!inter.intra);
+        let wide =
+            CodecParams::with_format(CodecId::Av1, 64, 64, cutlass_decode::PixelFormat::Yuv420p12);
+        assert!(Av1Decoder::open(&wide).is_ok());
+        let params = CodecParams::video(CodecId::Av1, 64, 64);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let shown = decoder
+                .push(&cutlass_decode::Packet {
+                    stream: 0,
+                    data: payload.to_vec(),
+                    pts: index as i64,
+                    duration: 1,
+                    timescale: 30,
+                    keyframe: index == 0,
+                    side: Vec::new(),
+                })
+                .unwrap_or_else(|error| panic!("frame {index}: {error:?}"));
+            assert_eq!(shown.len(), 1, "frame {index}");
+            assert!(shown[0].as_video().is_none(), "frame {index}");
+            let cutlass_decode::Output::Picture(picture) = &shown[0] else {
+                panic!("picture");
+            };
+            let info = picture.info();
+            assert_eq!(info.pixel, cutlass_decode::PixelFormat::Yuv420p12);
+            assert_eq!((info.width, info.height), (64, 64));
+            let cutlass_decode::PictureSamples::Cpu(bytes) = picture.samples() else {
+                panic!("cpu");
+            };
+            assert_eq!(bytes.len(), 64 * 64 * 3, "frame {index}");
+            assert_eq!(frame_digest(bytes), expected[index], "frame {index}");
+        }
+        assert!(decoder.drain().expect("drain").is_empty());
+    }
+
+    #[test]
+    fn a_ten_bit_profile_two_picture_matches_dav1d() {
+        // aomenc --profile=2 --i422 --bit-depth=10, 64×64, one keyframe and one
+        // inter frame. Restoration, super resolution, filter intra, and an
+        // interintra wedge are off. Film grain is off. Digests are
+        // `ffmpeg -c:v libdav1d -threads 1 -pix_fmt yuv422p10le`.
+        let file = include_bytes!("../fixtures/yuv422-10.ivf");
+        let frames = ivf_payloads(file);
+        let expected = [0x001b_2070_d9b7_c298, 0x8d13_4376_1d14_82e1];
+        let (sequence, _) = crate::header::parse_unit(frames[0], None).expect("sequence");
+        assert_eq!(sequence.profile, 2);
+        assert_eq!(sequence.bit_depth, 10);
+        assert!(sequence.subsampling_x);
+        assert!(!sequence.subsampling_y);
+        let (_, inter) = crate::header::parse_unit(frames[1], Some(&sequence)).expect("inter");
+        assert!(!inter.intra);
+        let wide =
+            CodecParams::with_format(CodecId::Av1, 64, 64, cutlass_decode::PixelFormat::Yuv422p10);
+        assert!(Av1Decoder::open(&wide).is_ok());
+        let params = CodecParams::video(CodecId::Av1, 64, 64);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let shown = decoder
+                .push(&cutlass_decode::Packet {
+                    stream: 0,
+                    data: payload.to_vec(),
+                    pts: index as i64,
+                    duration: 1,
+                    timescale: 30,
+                    keyframe: index == 0,
+                    side: Vec::new(),
+                })
+                .unwrap_or_else(|error| panic!("frame {index}: {error:?}"));
+            assert_eq!(shown.len(), 1, "frame {index}");
+            assert!(shown[0].as_video().is_none(), "frame {index}");
+            let cutlass_decode::Output::Picture(picture) = &shown[0] else {
+                panic!("picture");
+            };
+            let info = picture.info();
+            assert_eq!(info.pixel, cutlass_decode::PixelFormat::Yuv422p10);
+            assert_eq!((info.width, info.height), (64, 64));
+            let cutlass_decode::PictureSamples::Cpu(bytes) = picture.samples() else {
+                panic!("cpu");
+            };
+            assert_eq!(bytes.len(), 64 * 64 * 4, "frame {index}");
+            assert_eq!(frame_digest(bytes), expected[index], "frame {index}");
+        }
+        assert!(decoder.drain().expect("drain").is_empty());
+    }
+
+    #[test]
+    fn a_profile_two_picture_matches_dav1d() {
+        // aomenc --profile=2 --i422, 64×64, one keyframe and one inter frame.
+        // Restoration, super resolution, filter intra, and an interintra wedge
+        // are off. Film grain is off. Digests are
+        // `ffmpeg -c:v libdav1d -threads 1 -pix_fmt yuv422p`.
+        let file = include_bytes!("../fixtures/yuv422.ivf");
+        let frames = ivf_payloads(file);
+        let expected = [0xce61_9143_3646_31bb, 0x5e03_15f4_b833_cd90];
+        let (sequence, _) = crate::header::parse_unit(frames[0], None).expect("sequence");
+        assert_eq!(sequence.profile, 2);
+        assert_eq!(sequence.bit_depth, 8);
+        assert!(sequence.subsampling_x);
+        assert!(!sequence.subsampling_y);
+        let (_, inter) = crate::header::parse_unit(frames[1], Some(&sequence)).expect("inter");
+        assert!(!inter.intra);
+        let wide =
+            CodecParams::with_format(CodecId::Av1, 64, 64, cutlass_decode::PixelFormat::Yuv422p);
+        assert!(Av1Decoder::open(&wide).is_ok());
+        let params = CodecParams::video(CodecId::Av1, 64, 64);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let shown = decoder
+                .push(&cutlass_decode::Packet {
+                    stream: 0,
+                    data: payload.to_vec(),
+                    pts: index as i64,
+                    duration: 1,
+                    timescale: 30,
+                    keyframe: index == 0,
+                    side: Vec::new(),
+                })
+                .unwrap_or_else(|error| panic!("frame {index}: {error:?}"));
+            assert_eq!(shown.len(), 1, "frame {index}");
+            assert!(shown[0].as_video().is_none(), "frame {index}");
+            let cutlass_decode::Output::Picture(picture) = &shown[0] else {
+                panic!("picture");
+            };
+            let info = picture.info();
+            assert_eq!(info.pixel, cutlass_decode::PixelFormat::Yuv422p);
+            assert_eq!((info.width, info.height), (64, 64));
+            let cutlass_decode::PictureSamples::Cpu(bytes) = picture.samples() else {
+                panic!("cpu");
+            };
+            assert_eq!(bytes.len(), 64 * 64 * 2, "frame {index}");
+            assert_eq!(frame_digest(bytes), expected[index], "frame {index}");
+        }
+        assert!(decoder.drain().expect("drain").is_empty());
+    }
+
+    #[test]
+    fn a_profile_one_picture_matches_dav1d() {
+        // aomenc --profile=1 --i444, 64×64, one keyframe and one inter frame.
+        // Restoration, super resolution, filter intra, and an interintra wedge
+        // are off. Film grain is off. Digests are
+        // `ffmpeg -c:v libdav1d -threads 1 -pix_fmt yuv444p`.
+        let file = include_bytes!("../fixtures/yuv444.ivf");
+        let frames = ivf_payloads(file);
+        let expected = [0x8205_072f_5468_587b, 0xf644_9906_e40d_6902];
+        let (sequence, _) = crate::header::parse_unit(frames[0], None).expect("sequence");
+        assert_eq!(sequence.profile, 1);
+        assert_eq!(sequence.bit_depth, 8);
+        assert!(!sequence.subsampling_x);
+        assert!(!sequence.subsampling_y);
+        let (_, inter) = crate::header::parse_unit(frames[1], Some(&sequence)).expect("inter");
+        assert!(!inter.intra);
+        let wide =
+            CodecParams::with_format(CodecId::Av1, 64, 64, cutlass_decode::PixelFormat::Yuv444p);
+        assert!(Av1Decoder::open(&wide).is_ok());
+        let params = CodecParams::video(CodecId::Av1, 64, 64);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let shown = decoder
+                .push(&cutlass_decode::Packet {
+                    stream: 0,
+                    data: payload.to_vec(),
+                    pts: index as i64,
+                    duration: 1,
+                    timescale: 30,
+                    keyframe: index == 0,
+                    side: Vec::new(),
+                })
+                .unwrap_or_else(|error| panic!("frame {index}: {error:?}"));
+            assert_eq!(shown.len(), 1, "frame {index}");
+            assert!(shown[0].as_video().is_none(), "frame {index}");
+            let cutlass_decode::Output::Picture(picture) = &shown[0] else {
+                panic!("picture");
+            };
+            let info = picture.info();
+            assert_eq!(info.pixel, cutlass_decode::PixelFormat::Yuv444p);
+            assert_eq!((info.width, info.height), (64, 64));
+            let cutlass_decode::PictureSamples::Cpu(bytes) = picture.samples() else {
+                panic!("cpu");
+            };
+            assert_eq!(bytes.len(), 64 * 64 * 3, "frame {index}");
+            assert_eq!(frame_digest(bytes), expected[index], "frame {index}");
+        }
+        assert!(decoder.drain().expect("drain").is_empty());
+    }
+
+    #[test]
+    fn a_ten_bit_profile_one_picture_matches_dav1d() {
+        // aomenc --profile=1 --i444 --bit-depth=10, 64×64, one keyframe and one
+        // inter frame. Restoration, super resolution, filter intra, and an
+        // interintra wedge are off. Film grain is off. Digests are
+        // `ffmpeg -c:v libdav1d -threads 1 -pix_fmt yuv444p10le`.
+        let file = include_bytes!("../fixtures/yuv444-10.ivf");
+        let frames = ivf_payloads(file);
+        let expected = [0x581e_f035_c698_6f47, 0xdff1_b576_fb7f_aa2c];
+        let (sequence, _) = crate::header::parse_unit(frames[0], None).expect("sequence");
+        assert_eq!(sequence.profile, 1);
+        assert_eq!(sequence.bit_depth, 10);
+        assert!(!sequence.subsampling_x);
+        assert!(!sequence.subsampling_y);
+        let (_, inter) = crate::header::parse_unit(frames[1], Some(&sequence)).expect("inter");
+        assert!(!inter.intra);
+        let wide =
+            CodecParams::with_format(CodecId::Av1, 64, 64, cutlass_decode::PixelFormat::Yuv444p10);
+        assert!(Av1Decoder::open(&wide).is_ok());
+        let params = CodecParams::video(CodecId::Av1, 64, 64);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let shown = decoder
+                .push(&cutlass_decode::Packet {
+                    stream: 0,
+                    data: payload.to_vec(),
+                    pts: index as i64,
+                    duration: 1,
+                    timescale: 30,
+                    keyframe: index == 0,
+                    side: Vec::new(),
+                })
+                .unwrap_or_else(|error| panic!("frame {index}: {error:?}"));
+            assert_eq!(shown.len(), 1, "frame {index}");
+            assert!(shown[0].as_video().is_none(), "frame {index}");
+            let cutlass_decode::Output::Picture(picture) = &shown[0] else {
+                panic!("picture");
+            };
+            let info = picture.info();
+            assert_eq!(info.pixel, cutlass_decode::PixelFormat::Yuv444p10);
+            assert_eq!((info.width, info.height), (64, 64));
+            let cutlass_decode::PictureSamples::Cpu(bytes) = picture.samples() else {
+                panic!("cpu");
+            };
+            assert_eq!(bytes.len(), 64 * 64 * 6, "frame {index}");
+            assert_eq!(frame_digest(bytes), expected[index], "frame {index}");
+        }
+        assert!(decoder.drain().expect("drain").is_empty());
+    }
+
+    #[test]
+    fn a_ten_bit_picture_matches_dav1d() {
+        // aomenc profile 0, 10-bit, 64×64, one keyframe and one inter frame.
+        // Restoration, super resolution, film grain, filter intra, and an
+        // interintra wedge are off. Digests are
+        // `ffmpeg -c:v libdav1d -threads 1 -pix_fmt yuv420p10le`.
+        let file = include_bytes!("../fixtures/ten.ivf");
+        let frames = ivf_payloads(file);
+        let expected = [0x20d1_bb0c_7997_8616, 0xb811_99a4_24e0_cf92];
+        let (sequence, _) = crate::header::parse_unit(frames[0], None).expect("sequence");
+        assert_eq!(sequence.bit_depth, 10);
+        assert!(!sequence.monochrome);
+        let wide =
+            CodecParams::with_format(CodecId::Av1, 64, 64, cutlass_decode::PixelFormat::Yuv420p10);
+        assert!(Av1Decoder::open(&wide).is_ok());
+        let params = CodecParams::video(CodecId::Av1, 64, 64);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let shown = decoder
+                .push(&cutlass_decode::Packet {
+                    stream: 0,
+                    data: payload.to_vec(),
+                    pts: index as i64,
+                    duration: 1,
+                    timescale: 30,
+                    keyframe: index == 0,
+                    side: Vec::new(),
+                })
+                .unwrap_or_else(|error| panic!("frame {index}: {error:?}"));
+            assert_eq!(shown.len(), 1, "frame {index}");
+            assert!(shown[0].as_video().is_none(), "frame {index}");
+            let cutlass_decode::Output::Picture(picture) = &shown[0] else {
+                panic!("picture");
+            };
+            let info = picture.info();
+            assert_eq!(info.pixel, cutlass_decode::PixelFormat::Yuv420p10);
+            assert_eq!((info.width, info.height), (64, 64));
+            let cutlass_decode::PictureSamples::Cpu(bytes) = picture.samples() else {
+                panic!("cpu");
+            };
+            assert_eq!(bytes.len(), 64 * 64 * 3, "frame {index}");
+            assert_eq!(frame_digest(bytes), expected[index], "frame {index}");
+        }
+        assert!(decoder.drain().expect("drain").is_empty());
+    }
+
+    #[test]
+    fn a_ten_bit_restoration_picture_matches_dav1d() {
+        // aomenc profile 0, 10-bit, 64×64 keyframes. One luma plane uses the
+        // Wiener filter and one uses self-guided restoration. Chroma selects
+        // none. CDEF, the loop filter, and super resolution are off. Digests
+        // are `ffmpeg -c:v libdav1d -threads 1 -pix_fmt yuv420p10le`.
+        let cases = [
+            (
+                include_bytes!("../fixtures/ten-wiener.ivf").as_slice(),
+                1u8,
+                0x940b_250a_982f_0c81u64,
+            ),
+            (
+                include_bytes!("../fixtures/ten-sgr.ivf").as_slice(),
+                2u8,
+                0xd51c_3ef3_fbd2_f5c1u64,
+            ),
+        ];
+        for (file, luma, expected) in cases {
+            let frames = ivf_payloads(file);
+            let (sequence, frame) = crate::header::parse_unit(frames[0], None).expect("sequence");
+            assert_eq!(sequence.bit_depth, 10);
+            assert!(sequence.enable_restoration);
+            assert_eq!(frame.restoration.plane[0], luma);
+            assert!(frame.restoration.uses);
+            let params = CodecParams::video(CodecId::Av1, 64, 64);
+            let mut decoder = Av1Decoder::open(&params).expect("open");
+            let shown = decoder
+                .push(&cutlass_decode::Packet {
+                    stream: 0,
+                    data: frames[0].to_vec(),
+                    pts: 0,
+                    duration: 1,
+                    timescale: 30,
+                    keyframe: true,
+                    side: Vec::new(),
+                })
+                .unwrap_or_else(|error| panic!("luma {luma}: {error:?}"));
+            assert_eq!(shown.len(), 1);
+            let cutlass_decode::Output::Picture(picture) = &shown[0] else {
+                panic!("picture");
+            };
+            let info = picture.info();
+            assert_eq!(info.pixel, cutlass_decode::PixelFormat::Yuv420p10);
+            assert_eq!((info.width, info.height), (64, 64));
+            let cutlass_decode::PictureSamples::Cpu(bytes) = picture.samples() else {
+                panic!("cpu");
+            };
+            assert_eq!(bytes.len(), 64 * 64 * 3);
+            assert_eq!(frame_digest(bytes), expected, "luma {luma}");
+        }
+    }
+
+    #[test]
+    fn a_ten_bit_grain_picture_matches_dav1d() {
+        // aomenc profile 0, 10-bit, 64×64, one keyframe and one inter frame.
+        // Film grain test vector 1 is on. Restoration and super resolution are
+        // off. The shown pictures include the grain. Digests are
+        // `ffmpeg -c:v libdav1d -threads 1 -pix_fmt yuv420p10le`.
+        let file = include_bytes!("../fixtures/ten-grain.ivf");
+        let frames = ivf_payloads(file);
+        let expected = [0xf5d3_1373_87c4_71e3, 0x5686_4b37_12f3_6d66];
+        let (sequence, frame) = crate::header::parse_unit(frames[0], None).expect("sequence");
+        assert_eq!(sequence.bit_depth, 10);
+        assert!(frame.grain.apply);
+        let (_, inter) = crate::header::parse_unit(frames[1], Some(&sequence)).expect("inter");
+        assert!(!inter.intra);
+        let params = CodecParams::video(CodecId::Av1, 64, 64);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let shown = decoder
+                .push(&cutlass_decode::Packet {
+                    stream: 0,
+                    data: payload.to_vec(),
+                    pts: index as i64,
+                    duration: 1,
+                    timescale: 30,
+                    keyframe: index == 0,
+                    side: Vec::new(),
+                })
+                .unwrap_or_else(|error| panic!("frame {index}: {error:?}"));
+            assert_eq!(shown.len(), 1, "frame {index}");
+            let cutlass_decode::Output::Picture(picture) = &shown[0] else {
+                panic!("picture");
+            };
+            let info = picture.info();
+            assert_eq!(info.pixel, cutlass_decode::PixelFormat::Yuv420p10);
+            assert_eq!((info.width, info.height), (64, 64));
+            let cutlass_decode::PictureSamples::Cpu(bytes) = picture.samples() else {
+                panic!("cpu");
+            };
+            assert_eq!(bytes.len(), 64 * 64 * 3, "frame {index}");
+            assert_eq!(frame_digest(bytes), expected[index], "frame {index}");
+        }
+        assert!(decoder.drain().expect("drain").is_empty());
+    }
+
+    #[test]
+    fn a_ten_bit_superres_picture_matches_dav1d() {
+        // aomenc profile 0, 10-bit, shown 64×64, coded narrower. The inter
+        // frame samples the upscaled reference. Restoration and film grain
+        // are off. Digests are `ffmpeg -c:v libdav1d -threads 1 -pix_fmt yuv420p10le`.
+        let file = include_bytes!("../fixtures/ten-sr.ivf");
+        let frames = ivf_payloads(file);
+        let expected = [0x5b6c_62a7_42d3_8e10, 0x4eb2_aa07_fece_99cb];
+        let (sequence, frame) = crate::header::parse_unit(frames[0], None).expect("sequence");
+        assert_eq!(sequence.bit_depth, 10);
+        assert!(sequence.enable_superres);
+        assert!(frame.upscaled_width > frame.width);
+        let params = CodecParams::video(CodecId::Av1, 64, 64);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let shown = decoder
+                .push(&cutlass_decode::Packet {
+                    stream: 0,
+                    data: payload.to_vec(),
+                    pts: index as i64,
+                    duration: 1,
+                    timescale: 30,
+                    keyframe: index == 0,
+                    side: Vec::new(),
+                })
+                .unwrap_or_else(|error| panic!("frame {index}: {error:?}"));
+            assert_eq!(shown.len(), 1, "frame {index}");
+            let cutlass_decode::Output::Picture(picture) = &shown[0] else {
+                panic!("picture");
+            };
+            let info = picture.info();
+            assert_eq!(info.pixel, cutlass_decode::PixelFormat::Yuv420p10);
+            assert_eq!((info.width, info.height), (64, 64));
+            let cutlass_decode::PictureSamples::Cpu(bytes) = picture.samples() else {
+                panic!("cpu");
+            };
+            assert_eq!(bytes.len(), 64 * 64 * 3, "frame {index}");
+            assert_eq!(frame_digest(bytes), expected[index], "frame {index}");
+        }
+        assert!(decoder.drain().expect("drain").is_empty());
+    }
+
+    #[test]
+    fn every_shown_frame_of_a_real_file_matches_dav1d() {
+        // The file stays in ../local-files. CI skips when that folder is
+        // absent. A present file must match every shown picture from
+        // `ffmpeg -c:v libdav1d -threads 1`, including frames after the key.
+        let Some(input) = real_av1_file() else {
+            return;
+        };
+        if !ffmpeg_installed() {
+            return;
+        }
+        let (shown, _, _) = match_every_shown_frame(&input, "av1");
+        assert!(shown > 1, "only the first shown frame was compared");
+    }
+
+    #[test]
+    fn every_shown_frame_of_a_second_2160p_file_matches_dav1d() {
+        // A second 3840×2160 file in ../local-files. Its name does not contain
+        // "av1", so the other real-file test does not open it. CI skips when
+        // the folder or the file is absent.
+        let Some(input) = real_remux_file() else {
+            return;
+        };
+        if !ffmpeg_installed() {
+            return;
+        }
+        let (shown, width, height) = match_every_shown_frame(&input, "second");
+        assert_eq!((width, height), (3840, 2160));
+        assert_eq!(shown, 5326);
+    }
+
+    /// Shown pictures of one file, compared with `ffmpeg -c:v libdav1d -threads 1`.
+    fn match_every_shown_frame(input: &std::path::Path, label: &str) -> (usize, u32, u32) {
+        let ivf_path = std::env::temp_dir().join(format!(
+            "cutlass-av1-real-{label}-{}.ivf",
+            std::process::id()
+        ));
+        let extracted = std::process::Command::new("ffmpeg")
+            .args(["-y", "-hide_banner", "-loglevel", "error", "-i"])
+            .arg(input)
+            .args(["-map", "0:v:0", "-c:v", "copy", "-f", "ivf"])
+            .arg(&ivf_path)
+            .output()
+            .expect("ffmpeg");
+        assert!(
+            extracted.status.success(),
+            "{}",
+            String::from_utf8_lossy(&extracted.stderr)
+        );
+        let _remove_ivf = TempFile(ivf_path.clone());
+        let file = std::fs::read(&ivf_path).expect("ivf");
+        let frames = ivf_payloads(&file);
+
+        let mut child = std::process::Command::new("ffmpeg")
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-c:v",
+                "libdav1d",
+                "-threads",
+                "1",
+                "-i",
+            ])
+            .arg(&ivf_path)
+            .args([
+                "-map", "0:v:0", "-f", "rawvideo", "-pix_fmt", "yuv420p", "pipe:1",
+            ])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("libdav1d");
+        let mut stdout = child.stdout.take().expect("stdout");
+        let mut stderr = child.stderr.take().expect("stderr");
+        let mut logged = Some(std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = std::io::Read::read_to_end(&mut stderr, &mut bytes);
+            bytes
+        }));
+
+        let params = CodecParams::video(CodecId::Av1, 64, 64);
+        let mut decoder = Av1Decoder::open(&params).expect("decoder");
+        let mut oracle = Vec::new();
+        let mut shown = 0usize;
+        let mut size = (0u32, 0u32);
+        for (index, payload) in frames.iter().enumerate() {
+            let packet = cutlass_decode::Packet {
+                stream: 0,
+                data: payload.to_vec(),
+                pts: i64::try_from(index).unwrap_or(i64::MAX),
+                duration: 1,
+                timescale: 30,
+                keyframe: index == 0,
+                side: Vec::new(),
+            };
+            let pictures = decoder
+                .push(&packet)
+                .unwrap_or_else(|error| panic!("packet {index} failed: {error:?}"));
+            for picture in &pictures {
+                let cutlass_decode::Output::Picture(picture) = picture else {
+                    panic!("shown {shown} is not a picture");
+                };
+                let cutlass_decode::PictureSamples::Cpu(bytes) = picture.samples() else {
+                    panic!("shown {shown} is not cpu samples");
+                };
+                if shown == 0 {
+                    size = (picture.info().width, picture.info().height);
+                }
+                if oracle.len() != bytes.len() {
+                    oracle.resize(bytes.len(), 0);
+                }
+                if let Err(error) =
+                    std::io::Read::read_exact(&mut stdout, &mut oracle[..bytes.len()])
+                {
+                    panic!(
+                        "shown {shown} from packet {index}: {error}: {}",
+                        oracle_note(&mut logged)
+                    );
+                }
+                if let Some(at) = bytes
+                    .iter()
+                    .zip(oracle.iter())
+                    .position(|(left, right)| left != right)
+                {
+                    panic!(
+                        "shown {shown} from packet {index} differs at byte {at}: {:02x} vs {:02x} ({}x{})",
+                        bytes[at],
+                        oracle[at],
+                        picture.info().width,
+                        picture.info().height
+                    );
+                }
+                shown += 1;
+            }
+        }
+        let drained = decoder.drain().expect("drain");
+        assert!(drained.is_empty(), "drain returned {}", drained.len());
+        let mut extra = [0u8; 1];
+        let trailing = std::io::Read::read(&mut stdout, &mut extra).expect("trailing");
+        assert_eq!(trailing, 0, "dav1d returned another frame");
+        let status = child.wait().expect("wait");
+        assert!(status.success(), "{}", oracle_note(&mut logged));
+        (shown, size.0, size.1)
+    }
+
+    struct TempFile(std::path::PathBuf);
+
+    impl Drop for TempFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    fn oracle_note(logged: &mut Option<std::thread::JoinHandle<Vec<u8>>>) -> String {
+        let Some(handle) = logged.take() else {
+            return String::new();
+        };
+        let bytes = handle.join().unwrap_or_default();
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    fn real_av1_file() -> Option<std::path::PathBuf> {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../../local-files");
+        if !root.is_dir() {
+            return None;
+        }
+        let mut found = Vec::new();
+        let entries = std::fs::read_dir(root).ok()?;
+        for entry in entries {
+            let Ok(entry) = entry else {
+                continue;
+            };
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            let name = name.to_ascii_lowercase();
+            let video = name.ends_with(".mp4") || name.ends_with(".webm") || name.ends_with(".mov");
+            if video && name.contains("av1") {
+                found.push(path);
+            }
+        }
+        found.sort();
+        found.into_iter().next()
+    }
+
+    fn real_remux_file() -> Option<std::path::PathBuf> {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../../local-files");
+        if !root.is_dir() {
+            return None;
+        }
+        let mut found = Vec::new();
+        let entries = std::fs::read_dir(root).ok()?;
+        for entry in entries {
+            let Ok(entry) = entry else {
+                continue;
+            };
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            let name = name.to_ascii_lowercase();
+            if name.starts_with("remux_") && name.ends_with(".mp4") {
+                found.push(path);
+            }
+        }
+        found.sort();
+        found.into_iter().next()
+    }
+
+    fn ffmpeg_installed() -> bool {
+        std::process::Command::new("ffmpeg")
+            .arg("-version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+
+    fn ivf_payloads(file: &[u8]) -> Vec<&[u8]> {
+        assert!(file.len() >= 32 && &file[..4] == b"DKIF", "ivf header");
+        let header = usize::from(u16::from_le_bytes([file[6], file[7]]));
+        assert!(header >= 32 && file.len() >= header, "ivf header length");
+        let mut offset = header;
+        let mut frames = Vec::new();
+        while offset + 12 <= file.len() {
+            let size = usize::try_from(u32::from_le_bytes([
+                file[offset],
+                file[offset + 1],
+                file[offset + 2],
+                file[offset + 3],
+            ]))
+            .expect("frame size");
+            offset += 12;
+            assert!(offset + size <= file.len(), "ivf frame ends past the file");
+            frames.push(&file[offset..offset + size]);
+            offset += size;
+        }
+        assert_eq!(offset, file.len(), "bytes after the last ivf frame");
+        frames
+    }
+
+    fn without_last_size(packet: &[u8]) -> Vec<u8> {
+        let mut index = 0;
+        let mut last = 0;
+        while index < packet.len() {
+            last = index;
+            let header = packet[index];
+            assert_eq!(header & 0x04, 0, "extension");
+            assert_ne!(header & 0x02, 0, "size");
+            index += 1;
+            let size = usize::from(packet[index]);
+            assert!(packet[index] < 128, "leb128");
+            index += 1 + size;
+        }
+        assert_eq!(index, packet.len());
+        let mut out = packet[..last].to_vec();
+        out.push(packet[last] & !0x02);
+        out.extend_from_slice(&packet[last + 2..]);
+        out
+    }
+
+    #[test]
+    fn tiled_128_inter_matches_dav1d() {
+        // 3840×2160, 128×128 superblocks, an 8×4 uniform tile grid. A skipped
+        // 64×64 inside a 128×128 superblock still reads the quantizer delta.
+        // Skipping that symbol desynchronizes the tile. Motion candidates and
+        // warp samples from the next tile are unavailable. Counting either one
+        // changes a later symbol and the shown picture. Digests are
+        // `ffmpeg -c:v libdav1d -threads 1`.
+        let frames = ivf_payloads(include_bytes!("../fixtures/sb128-tiles.ivf"));
+        assert_eq!(frames.len(), 3);
+        let expected = [
+            0x8200_f621_e97e_d218,
+            0x0575_05f3_8604_582f,
+            0x4976_250c_815a_0b21,
+        ];
+        let params = CodecParams::video(CodecId::Av1, 3840, 2160);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        let mut sequence = None;
+        for (index, payload) in frames.iter().enumerate() {
+            let (seq, frame) =
+                crate::header::parse_unit(payload, sequence.as_ref()).expect("parse");
+            assert!(seq.use_128);
+            assert_eq!(frame.tile_cols, 8);
+            assert_eq!(frame.tile_rows, 4);
+            if index == 2 {
+                assert!(!frame.intra);
+                assert!(frame.allow_warped);
+            }
+            sequence = Some(seq);
+            let packed = push_frame(&mut decoder, payload, index as i64);
+            assert_eq!(packed.len(), 3840 * 2160 * 3 / 2, "frame {index}");
+            assert_eq!(frame_digest(&packed), expected[index], "frame {index}");
+        }
+        assert!(decoder.drain().expect("drain").is_empty());
+    }
+
+    #[test]
+    fn segmentation_reference_matches_dav1d() {
+        // Realtime ROI map, 128×128. The right half is segment 1, and that
+        // segment forces LAST. The reference symbol is not in the bitstream.
+        // Reading it desynchronizes the tile. Digests are
+        // `ffmpeg -c:v libdav1d -threads 1`.
+        let frames = ivf_payloads(include_bytes!("../fixtures/seg-ref.ivf"));
+        assert_eq!(frames.len(), 4);
+        let expected = [
+            0x029d_a659_a7b9_4134,
+            0x5c36_2d07_d8de_49d1,
+            0x5144_7d1a_3910_d111,
+            0xd42d_6b4e_7765_b9c0,
+        ];
+        let params = CodecParams::video(CodecId::Av1, 128, 128);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        let mut sequence = None;
+        for (index, payload) in frames.iter().enumerate() {
+            let (seq, frame) =
+                crate::header::parse_unit(payload, sequence.as_ref()).expect("parse");
+            if index == 0 {
+                assert!(frame.intra);
+                assert!(!frame.segmentation.enabled);
+            } else {
+                assert!(!frame.intra);
+                assert!(frame.segmentation.enabled);
+                assert!(frame.segmentation.update_map);
+                assert!(frame.segmentation.update_data);
+                assert!(frame.segmentation.preskip);
+                assert!(frame.segmentation.active(1, crate::header::SEG_REF_FRAME));
+                assert_eq!(
+                    frame.segmentation.value(1, crate::header::SEG_REF_FRAME),
+                    i32::from(crate::inter::LAST_FRAME)
+                );
+                assert!(!frame.segmentation.active(1, crate::header::SEG_SKIP));
+            }
+            sequence = Some(seq);
+            let packed = push_frame(&mut decoder, payload, index as i64);
+            assert_eq!(packed.len(), 128 * 128 * 3 / 2, "frame {index}");
+            assert_eq!(frame_digest(&packed), expected[index], "frame {index}");
+        }
+        assert!(decoder.drain().expect("drain").is_empty());
+    }
+
+    fn reserved_obu(kind: u8, payload: &[u8]) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(2 + payload.len());
+        bytes.push((kind << 3) | 0x02);
+        bytes.push(u8::try_from(payload.len()).expect("size"));
+        bytes.extend_from_slice(payload);
+        bytes
     }
 }

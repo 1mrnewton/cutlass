@@ -107,19 +107,20 @@ fn mark(ui: &mut Ui, label: &str, on: bool) -> bool {
 pub fn dialog<R>(ui: &mut Ui, title: &str, add: impl FnOnce(&mut Ui) -> R) -> (R, bool) {
     ui.painter()
         .rect_filled(ui.max_rect(), CornerRadius::ZERO, tokens::SCRIM);
+    let screen = ui.max_rect();
     let width = 420.0;
-    let origin = ui.max_rect().center() - Vec2::new(width * 0.5, 180.0);
+    let top = (screen.center().y - 180.0).max(screen.top() + 16.0);
+    let origin = egui::pos2(screen.center().x - width * 0.5, top);
+    // The body grows with what it holds, to the window's foot, and scrolls
+    // past that.
+    let room = (screen.bottom() - 16.0 - top).max(160.0);
+    let body = ui.painter().add(egui::Shape::Noop);
     let mut closed = false;
     let inner = ui
         .scope_builder(
-            egui::UiBuilder::new().max_rect(Rect::from_min_size(origin, Vec2::new(width, 360.0))),
+            egui::UiBuilder::new().max_rect(Rect::from_min_size(origin, Vec2::new(width, room))),
             |ui| {
                 let rect = ui.max_rect();
-                ui.painter().rect_filled(
-                    rect,
-                    CornerRadius::same(tokens::DIALOG_RADIUS),
-                    tokens::PROJECT_BAR,
-                );
                 let head = Rect::from_min_size(rect.min, Vec2::new(rect.width(), 40.0));
                 ui.painter().rect_filled(
                     head,
@@ -142,7 +143,23 @@ pub fn dialog<R>(ui: &mut Ui, title: &str, add: impl FnOnce(&mut Ui) -> R) -> (R
                 let close_response = ui.allocate_rect(close, Sense::click());
                 closed = close_response.clicked();
                 ui.add_space(48.0);
-                add(ui)
+                let inner = egui::ScrollArea::vertical()
+                    .id_salt(("dialog", title))
+                    .max_height(room - 64.0)
+                    .auto_shrink([false, true])
+                    .show(ui, add)
+                    .inner;
+                ui.add_space(16.0);
+                let height = ui.min_rect().height().clamp(360.0_f32.min(room), room);
+                ui.painter().set(
+                    body,
+                    egui::Shape::rect_filled(
+                        Rect::from_min_size(rect.min, Vec2::new(width, height)),
+                        CornerRadius::same(tokens::DIALOG_RADIUS),
+                        tokens::PROJECT_BAR,
+                    ),
+                );
+                inner
             },
         )
         .inner;

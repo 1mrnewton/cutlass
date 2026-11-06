@@ -5,7 +5,7 @@ use cutlass_model::{
     TimeRange,
 };
 
-use super::speed::locate;
+use super::locate;
 use super::{EditError, ensure_unlocked};
 
 /// Record a pair. The request names the owner. A dependent has one owner.
@@ -550,7 +550,7 @@ fn drop_pair(draft: &mut Draft, owner: &SegmentId, dependent: &SegmentId) {
     });
 }
 
-fn drop_pairs_where(draft: &mut Draft, mut drop_this: impl FnMut(&LinkPair) -> bool) {
+pub(super) fn drop_pairs_where(draft: &mut Draft, mut drop_this: impl FnMut(&LinkPair) -> bool) {
     for relationship in &mut draft.relationships {
         if relationship.kind == "linkage" {
             relationship.id_to_id.retain(|pair| !drop_this(pair));

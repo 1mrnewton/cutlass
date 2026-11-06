@@ -964,6 +964,7 @@ fn predict_dc(plane: &mut [u8], stride: usize, rows: usize, at: DcAt) -> Result<
         filter: None,
         max_x: stride.saturating_sub(1),
         max_y: rows.saturating_sub(1),
+        bit_depth: 8,
     };
     let mut scratch = crate::predict::PredictScratch::new();
     predict_intra(plane, stride, &block, &mut scratch)
@@ -1102,7 +1103,7 @@ fn build_basis(n: usize, tx: usize) -> Basis {
     for k in 0..count {
         let mut coeff = vec![0i32; count];
         coeff[k] = scale;
-        let response = inverse_2d(&coeff, n, n, DCT_DCT, TRANSFORM_ROW_SHIFT[tx]);
+        let response = inverse_2d(&coeff, n, n, DCT_DCT, TRANSFORM_ROW_SHIFT[tx], 8);
         let mut norm = 0i64;
         for (i, sample) in response.iter().enumerate().take(count) {
             vectors[k * count + i] = *sample;
@@ -1207,7 +1208,7 @@ fn inverse_levels(levels: &[i32], n: usize, tx: usize, dc_q: i32, ac_q: i32) -> 
             coeff[row * n + col] = i32::try_from(value.clamp(-32768, 32767)).unwrap_or(0);
         }
     }
-    inverse_2d(&coeff, n, n, DCT_DCT, TRANSFORM_ROW_SHIFT[tx])
+    inverse_2d(&coeff, n, n, DCT_DCT, TRANSFORM_ROW_SHIFT[tx], 8)
 }
 
 fn sse(left: &[i32], right: &[i32]) -> i64 {
@@ -1402,7 +1403,7 @@ mod tests {
         assert_eq!(frame.width, 64);
         assert!(frame.intra);
         assert_eq!(frame.base_q, 40);
-        let picture = decode_tile(&sequence, &frame).expect("decode");
+        let picture = decode_tile(&sequence, &frame).expect("decode").picture;
         assert!(
             picture.y.iter().all(|sample| *sample == 128),
             "luma {}",
@@ -1416,7 +1417,7 @@ mod tests {
     fn a_step_at_quality_40_keeps_luma_detail() {
         let bytes = encode(64, 64, 40, |col, _| if col < 32 { 40 } else { 180 });
         let (sequence, frame) = parse_unit(&bytes, None).expect("parse");
-        let picture = decode_tile(&sequence, &frame).expect("decode");
+        let picture = decode_tile(&sequence, &frame).expect("decode").picture;
         let mut sse = 0u64;
         for row in 0..64 {
             for col in 0..64 {
@@ -1522,7 +1523,7 @@ mod tests {
         let decoded = std::fs::read(&yuv_path).expect("yuv");
         let _ = std::fs::remove_file(&yuv_path);
         let (sequence, frame) = parse_unit(&bytes, None).expect("parse");
-        let picture = decode_tile(&sequence, &frame).expect("decode");
+        let picture = decode_tile(&sequence, &frame).expect("decode").picture;
         let mut ours = picture.y.clone();
         ours.extend_from_slice(&picture.u);
         ours.extend_from_slice(&picture.v);

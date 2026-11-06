@@ -537,6 +537,31 @@ mod tests {
     }
 
     #[test]
+    fn undo_keeps_only_the_newest_steps_up_to_the_limit() {
+        let (mut session, track) = session();
+        let steps = crate::UNDO_LIMIT + 5;
+        for i in 0..steps {
+            let start = i64::try_from(i).unwrap() * 10;
+            session
+                .apply(
+                    session.revision(),
+                    &[place(&track, &format!("s{i}"), start, 10)],
+                )
+                .unwrap();
+        }
+        for _ in 0..crate::UNDO_LIMIT {
+            session.undo().unwrap();
+        }
+        // The five oldest steps were dropped, so undo stops at five clips.
+        assert!(matches!(session.undo(), Err(EditError::EmptyUndo)));
+        assert_eq!(session.draft().tracks[0].segments.len(), 5);
+        for _ in 0..crate::UNDO_LIMIT {
+            session.redo().unwrap();
+        }
+        assert_eq!(session.draft().tracks[0].segments.len(), steps);
+    }
+
+    #[test]
     fn a_split_curve_clip_gives_each_half_its_stretch_of_the_curve() {
         let (mut session, track) = session();
         let mut segment = Segment::new("a", "media", TimeRange::new(0, 4_000_000));
@@ -602,6 +627,55 @@ mod tests {
             left_source + right.source_range.clone().unwrap().duration.0,
             4_000_000
         );
+    }
+
+    #[test]
+    fn change_pitch_turns_on_and_off_and_a_preset_curve_sets_the_length() {
+        let (mut session, track) = session();
+        let mut segment = Segment::new("a", "media", TimeRange::new(0, 2_000_000));
+        segment.source_range = Some(TimeRange::new(0, 2_000_000));
+        session
+            .apply(
+                0,
+                &[Request::Place {
+                    track_id: track.clone(),
+                    segment: Box::new(segment),
+                }],
+            )
+            .unwrap();
+        let points = cutlass_model::SpeedPreset::FlashIn.points();
+        session
+            .apply(
+                1,
+                &[
+                    Request::SetChangePitch {
+                        segment_id: "a".into(),
+                        on: true,
+                    },
+                    Request::SetCurveSpeed {
+                        segment_id: "a".into(),
+                        speed_id: MaterialId::new("curve"),
+                        points: points.clone(),
+                    },
+                ],
+            )
+            .unwrap();
+        let segment = &session.draft().tracks[0].segments[0];
+        assert!(segment.is_tone_modify);
+        let factor = cutlass_model::curve_speed_factor(&points).unwrap();
+        #[allow(clippy::cast_possible_truncation)]
+        let length = (2_000_000.0 * factor).round() as i64;
+        assert_eq!(segment.target.duration, Micros(length));
+        session
+            .apply(
+                2,
+                &[Request::SetChangePitch {
+                    segment_id: "a".into(),
+                    on: false,
+                }],
+            )
+            .unwrap();
+        assert!(!session.draft().tracks[0].segments[0].is_tone_modify);
     }
 
     #[test]

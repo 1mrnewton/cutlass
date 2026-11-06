@@ -831,6 +831,8 @@ mod tests {
         let model = root.join("parakeet-unified-en-0.6b");
         let wav = root.join("GOOGLE IS BACK! (Gemini 3.8 Flash).wav");
         if !model.join(ARCHIVE).is_file() || !wav.is_file() {
+            crate::weights_missing("the unified weights or the Gemini sound");
+            eprintln!("skipped: the weights or the sound are missing");
             return;
         }
         let recognizer = ParakeetUnified::cpu(&model).unwrap();

@@ -9453,15 +9453,31 @@ fn edge_strength<S: Sample>(
     out
 }
 
+/// The coefficients the 4×4 luma block at `(x, y)` counts for the
+/// deblocking strength. With the 8×8 transform it is the whole 8×8 block
+/// that holds coefficients or not (8.7.2.1); CAVLC still counts each 4×4
+/// part on its own for its coefficient context, so the four are summed.
+fn luma_coded(mb: &Mb, x: usize, y: usize) -> u8 {
+    if !mb.transform8 {
+        return mb.nnz_y[y * 4 + x];
+    }
+    let (left, top) = (x & !1, y & !1);
+    let mut sum = 0u8;
+    for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+        sum = sum.saturating_add(mb.nnz_y[(top + dy) * 4 + left + dx]);
+    }
+    sum
+}
+
 fn inter_strength(q: &Mb, neighbor: Option<&Mb>, edge: usize, line: usize, vertical: bool) -> u8 {
     let (qx, qy) = if vertical { (edge, line) } else { (line, edge) };
-    let q_nnz = q.nnz_y[qy * 4 + qx];
+    let q_nnz = luma_coded(q, qx, qy);
     let q_pred = preds_at(q, qx, qy);
     let (p_nnz, p_pred) = if edge == 0 {
         let (ox, oy) = if vertical { (3, line) } else { (line, 3) };
         match neighbor {
             Some(p) => {
-                let nnz = if p.pcm { 16 } else { p.nnz_y[oy * 4 + ox] };
+                let nnz = if p.pcm { 16 } else { luma_coded(p, ox, oy) };
                 (nnz, preds_at(p, ox, oy))
             }
             None => (0, [(-1, [0, 0]), (-1, [0, 0])]),
@@ -9472,7 +9488,7 @@ fn inter_strength(q: &Mb, neighbor: Option<&Mb>, edge: usize, line: usize, verti
         } else {
             (line, edge - 1)
         };
-        (q.nnz_y[oy * 4 + ox], preds_at(q, ox, oy))
+        (luma_coded(q, ox, oy), preds_at(q, ox, oy))
     };
     if p_nnz > 0 || q_nnz > 0 {
         return 2;

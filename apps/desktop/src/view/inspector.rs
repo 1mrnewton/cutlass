@@ -18,7 +18,7 @@ use crate::shell::{
     Inspection, LetterCase, Panel, SILENT_DB, Shell, ShellError, TextLook, volume_db,
 };
 use crate::{icons, tokens};
-use cutlass_model::{ANIMATION_PRESETS, AnimType, Micros};
+use cutlass_model::{ANIMATION_PRESETS, AnimType, Micros, Motion};
 
 use super::ViewState;
 
@@ -38,7 +38,7 @@ const LATER: &str = "Later: Cutlass has no edit for this yet";
 pub(super) struct InspectorState {
     clip: String,
     tab: usize,
-    page: usize,
+    pub(super) page: usize,
     open: HashSet<String>,
     /// Typed text in a number or word field while it has focus.
     fields: HashMap<String, String>,
@@ -48,6 +48,16 @@ pub(super) struct InspectorState {
     /// A tab, page, and section a menu row asked for, opened on the next
     /// frame the panel draws.
     pending: Option<Focus>,
+    /// The HSL colour shown, 0 red to 7 magenta.
+    pub(super) hsl_color: usize,
+    /// The curve shown: RGB, red, green, blue.
+    pub(super) curve_channel: usize,
+    /// A curve point being dragged, and the points as they are now.
+    pub(super) curve_drag: Option<(usize, Vec<(f32, f32)>)>,
+    /// A speed curve point being dragged, and the points as they are now.
+    pub(super) speed_drag: Option<(usize, Vec<(f64, f64)>)>,
+    /// The LUT file picker was asked for; the view opens it.
+    pub(super) wants_lut: bool,
 }
 
 /// Where a clip menu row sends the inspector.
@@ -106,9 +116,9 @@ pub(super) fn clip_panel(
         }
         Panel::Audio => audio_panel(shell, ui, state, inspection),
         Panel::Sticker => sticker_panel(shell, ui, state, inspection),
-        Panel::Effect => effect_panel(shell, ui, state, "Effect", false),
-        Panel::Filter => effect_panel(shell, ui, state, "Filter", true),
-        Panel::Adjust => adjust_panel(ui, state),
+        Panel::Effect => effect_panel(shell, ui, state, inspection, "Effect", false),
+        Panel::Filter => effect_panel(shell, ui, state, inspection, "Filter", true),
+        Panel::Adjust => adjust_panel(shell, ui, state, inspection),
         Panel::Other => {
             tabs(ui, &["Clip"], &mut 0);
             note(ui, &inspection.material);
@@ -144,6 +154,14 @@ fn video_panel(
     match state.tab {
         0 => {
             pages(ui, &["Basic", "Cutout", "Mask", "Enhance"], &mut state.page);
+            if state.page == 1 {
+                cutout_page(shell, ui, state, inspection);
+                return;
+            }
+            if state.page == 2 {
+                mask_page(shell, ui, state, inspection.mask, false);
+                return;
+            }
             if state.page != 0 {
                 later_note(ui, ["", "Cutout", "Mask", "Enhance"][state.page]);
                 return;
@@ -193,9 +211,9 @@ fn video_panel(
             }
         }
         2 if still => note(ui, "A photo has no speed."),
-        2 => speed_row(shell, ui, state, inspection),
+        2 => super::speed::speed_tab(shell, ui, state, inspection),
         3 => animation_tab(shell, ui, state, &["In", "Out", "Combo"], VIDEO_MOTIONS),
-        4 => adjust_tab(ui, state),
+        4 => adjust_tab(shell, ui, state, inspection),
         _ => later_note(ui, "AI stylize"),
     }
 }
@@ -224,8 +242,8 @@ fn text_panel(
                     text_basic(shell, ui, state, inspection, caption);
                     footer(ui, &["Save as preset"]);
                 }
-                1 => later_tiles(ui, &["None", "Round", "Box", "Thought"]),
-                _ => later_tiles(ui, &["None", "Shadow", "Glow", "Outline"]),
+                1 => bubble_page(shell, ui),
+                _ => effect_page(shell, ui),
             }
         }
         1 => animation_tab(shell, ui, state, &["In", "Out", "Loop"], TEXT_MOTIONS),
@@ -252,9 +270,13 @@ fn audio_panel(
     state: &mut InspectorState,
     inspection: &Inspection,
 ) {
+    let tab = state.tab;
     tabs(ui, &["Audio", "Speed"], &mut state.tab);
+    if tab != state.tab {
+        state.page = 0;
+    }
     if state.tab == 1 {
-        speed_row(shell, ui, state, inspection);
+        super::speed::speed_tab(shell, ui, state, inspection);
         return;
     }
     body(ui, |ui| {
@@ -270,7 +292,11 @@ fn sticker_panel(
     state: &mut InspectorState,
     inspection: &Inspection,
 ) {
+    let tab = state.tab;
     tabs(ui, &["Sticker", "Animation"], &mut state.tab);
+    if tab != state.tab {
+        state.page = 0;
+    }
     if state.tab == 1 {
         animation_tab(
             shell,
@@ -285,6 +311,7 @@ fn sticker_panel(
         );
         return;
     }
+    position_size(shell, ui, state, inspection, "Rotate");
     body(ui, |ui| opacity_slider(shell, ui, state, inspection));
 }
 
@@ -292,6 +319,7 @@ fn effect_panel(
     shell: &mut Shell,
     ui: &mut Ui,
     state: &mut InspectorState,
+    inspection: &Inspection,
     title: &str,
     filter: bool,
 ) {
@@ -309,27 +337,34 @@ fn effect_panel(
             later_slider(ui, "Amount", 0.0, "0");
         }
         if filter {
-            later_slider(ui, "Temp", 0.0, "0");
+            let key = cutlass_effects::AdjustKey::Temperature;
+            let stored = (f64::from(inspection.adjust.get(key)) * 100.0).round();
+            if let Some(value) = slider(ui, state, "temp", "Temp", stored, -100.0..=100.0, |v| {
+                format!("{v:.0}")
+            }) {
+                send(shell, |shell| shell.set_adjust(key, value / 100.0));
+            }
         }
     });
 }
 
-fn adjust_panel(ui: &mut Ui, state: &mut InspectorState) {
+fn adjust_panel(
+    shell: &mut Shell,
+    ui: &mut Ui,
+    state: &mut InspectorState,
+    inspection: &Inspection,
+) {
     tabs(ui, &["Adjust"], &mut 0);
     pages(
         ui,
         &["Basic", "HSL", "Curves", "Color wheel", "Mask"],
         &mut state.page,
     );
-    if state.page != 0 {
-        later_note(ui, ["", "HSL", "Curves", "Color wheel", "Mask"][state.page]);
+    if colour_page(shell, ui, state, inspection) {
         return;
     }
-    body(ui, |ui| {
-        for label in ["Temp", "Exposure", "Contrast"] {
-            later_slider(ui, label, 0.0, "0");
-        }
-    });
+    state.open.insert("adjust".to_owned());
+    adjust_sliders(shell, ui, state, inspection);
 }
 
 // Sections shared by panels.
@@ -348,15 +383,9 @@ fn position_size(
     if !header.open {
         return;
     }
-    let (half_width, half_height) = shell
-        .draft()
-        .map(|draft| {
-            (
-                f64::from(draft.canvas_config.width) / 2.0,
-                f64::from(draft.canvas_config.height) / 2.0,
-            )
-        })
-        .unwrap_or((960.0, 540.0));
+    let canvas = shell.draft().map_or((0, 0), |draft| {
+        (draft.canvas_config.width, draft.canvas_config.height)
+    });
     let keys = shell.keys();
     let playhead = shell.playhead();
     let mut step = None;
@@ -372,20 +401,25 @@ fn position_size(
         }
         switch_row(ui, "Uniform scale", true, false).on_disabled_hover_text(LATER);
         // The prototype counts canvas pixels from the middle, with Y down.
-        let x = (inspection.transform_x * half_width).round();
-        let y = (-inspection.transform_y * half_height).round();
+        let (x, y) =
+            cutlass_editor::canvas_pixels((inspection.transform_x, inspection.transform_y), canvas);
         let (new_x, new_y) = keyed_row(ui, keys.as_ref(), playhead, &mut step, |ui| {
             pair_row(ui, state, "Position", ("X", x), ("Y", y))
         });
-        if let Some(value) = new_x {
-            send(shell, |shell| {
-                shell.set_position(value / half_width, inspection.transform_y)
-            });
-        }
-        if let Some(value) = new_y {
-            send(shell, |shell| {
-                shell.set_position(inspection.transform_x, -value / half_height)
-            });
+        if new_x.is_some() || new_y.is_some() {
+            let (stored_x, stored_y) =
+                cutlass_editor::stored_position((new_x.unwrap_or(x), new_y.unwrap_or(y)), canvas);
+            let stored_x = if new_x.is_some() {
+                stored_x
+            } else {
+                inspection.transform_x
+            };
+            let stored_y = if new_y.is_some() {
+                stored_y
+            } else {
+                inspection.transform_y
+            };
+            send(shell, |shell| shell.set_position(stored_x, stored_y));
         }
         let rotation = inspection.rotation;
         let turned = keyed_row(ui, keys.as_ref(), playhead, &mut step, |ui| {
@@ -442,15 +476,24 @@ fn blend(
     }
     body(ui, |ui| {
         if mode {
-            ui.add_enabled_ui(false, |ui| {
-                label_row(ui, "Mode", |ui| {
-                    egui::ComboBox::from_id_salt("blend-mode")
-                        .selected_text("Normal")
-                        .show_ui(ui, |_| {});
-                });
-            })
-            .response
-            .on_disabled_hover_text(LATER);
+            let mut picked = None;
+            label_row(ui, "Mode", |ui| {
+                egui::ComboBox::from_id_salt("blend-mode")
+                    .selected_text(inspection.blend.label())
+                    .show_ui(ui, |ui| {
+                        for choice in cutlass_effects::BlendMode::ALL {
+                            if ui
+                                .selectable_label(inspection.blend == choice, choice.label())
+                                .clicked()
+                            {
+                                picked = Some(choice);
+                            }
+                        }
+                    });
+            });
+            if let Some(choice) = picked.filter(|choice| *choice != inspection.blend) {
+                send(shell, |shell| shell.set_blend(choice));
+            }
         }
         opacity_slider(shell, ui, state, inspection);
     });
@@ -544,17 +587,6 @@ fn sound_sliders(
     }
 }
 
-fn speed_row(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState, inspection: &Inspection) {
-    body(ui, |ui| {
-        let speed = (inspection.speed * 10.0).round() / 10.0;
-        if let Some(value) = slider(ui, state, "speed", "Speed", speed, 0.1..=4.0, |v| {
-            format!("{v:.1}×")
-        }) {
-            send(shell, |shell| shell.set_speed(value));
-        }
-    });
-}
-
 const VIDEO_MOTIONS: &[&[&str]] = &[
     &[
         "Fade in",
@@ -600,8 +632,9 @@ const TEXT_MOTIONS: &[&[&str]] = &[
 ];
 
 /// The In, Out, and Combo or Loop slots, each a grid of animations that
-/// starts with None. In and Out store the shared presets on a picture or
-/// title, with a length; the rest are still to come.
+/// starts with None. In, Out and Loop store the shared presets on a
+/// picture or title, with a length (a loop's is one round); Combo is still
+/// to come.
 fn animation_tab(
     shell: &mut Shell,
     ui: &mut Ui,
@@ -610,10 +643,17 @@ fn animation_tab(
     motions: &[&[&str]],
 ) {
     pages(ui, slots, &mut state.page);
-    if state.page < 2
+    let kind = match (state.page, slots.get(2)) {
+        (0, _) => Some(AnimType::In),
+        (1, _) => Some(AnimType::Out),
+        (2, Some(&"Loop")) => Some(AnimType::Loop),
+        _ => None,
+    };
+    if let Some(kind) = kind
         && let Some(animations) = shell.animations()
     {
-        animation_side(shell, ui, state, &animations, state.page == 0);
+        let letters = std::ptr::eq(motions, TEXT_MOTIONS);
+        animation_side(shell, ui, state, &animations, kind, letters);
         return;
     }
     later_note(ui, "Animations");
@@ -797,20 +837,20 @@ fn graph_row(ui: &mut Ui, keys: &cutlass_editor::ClipKeys) -> Option<Option<Stri
     picked
 }
 
-/// One side's grid: None, then each preset of that side, the chosen one
-/// outlined; then the chosen one's length, which previews as it drags.
+/// One side's grid: None, then each preset of that side (a title's letter
+/// animations only with `letters`), the chosen one outlined; then the chosen one's length, which previews as it drags.
 fn animation_side(
     shell: &mut Shell,
     ui: &mut Ui,
     state: &mut InspectorState,
     animations: &cutlass_editor::ClipAnimations,
-    enter: bool,
+    kind: AnimType,
+    letters: bool,
 ) {
-    let kind = if enter { AnimType::In } else { AnimType::Out };
-    let chosen = if enter {
-        &animations.enter
-    } else {
-        &animations.leave
+    let chosen = match kind {
+        AnimType::In => &animations.enter,
+        AnimType::Out => &animations.leave,
+        _ => &animations.looped,
     };
     let chosen_id = chosen.as_ref().map(|side| side.resource_id.as_str());
     let mut picked = None;
@@ -819,7 +859,8 @@ fn animation_side(
         ui.spacing_mut().item_spacing = Vec2::splat(6.0);
         let presets = ANIMATION_PRESETS
             .iter()
-            .filter(|preset| preset.kind == kind);
+            .filter(|preset| preset.kind == kind)
+            .filter(|preset| letters || !matches!(preset.motion, Motion::Letters(_)));
         let tiles = std::iter::once(("None", None)).chain(
             presets.map(|preset| (preset.name, Some((preset.resource_id, preset.duration)))),
         );
@@ -842,7 +883,7 @@ fn animation_side(
         let (id, duration) = preset.map_or((None, Micros(0)), |(id, duration)| {
             (Some(id.to_owned()), duration)
         });
-        send(shell, |shell| shell.set_animation(enter, id, duration));
+        send(shell, |shell| shell.set_animation(kind, id, duration));
         return;
     }
     let Some(side) = chosen else {
@@ -851,39 +892,447 @@ fn animation_side(
     ui.add_space(8.0);
     let seconds = side.duration.0 as f64 / 1e6;
     let longest = (animations.length.0 as f64 / 1e6).max(0.1);
-    let key = if enter { "anim-in" } else { "anim-out" };
-    if let Some(value) = slider(ui, state, key, "Duration", seconds, 0.1..=longest, |v| {
+    let (key, label) = match kind {
+        AnimType::In => ("anim-in", "Duration"),
+        AnimType::Out => ("anim-out", "Duration"),
+        _ => ("anim-loop", "Speed"),
+    };
+    if let Some(value) = slider(ui, state, key, label, seconds, 0.1..=longest, |v| {
         format!("{v:.1}s")
     }) {
         let id = side.resource_id.clone();
         let duration = Micros((value * 1e6).round() as i64);
-        send(shell, |shell| {
-            shell.set_animation(enter, Some(id), duration)
-        });
+        send(shell, |shell| shell.set_animation(kind, Some(id), duration));
     }
 }
 
 /// The Adjust tab of a picture: the color rows, each to come.
-fn adjust_tab(ui: &mut Ui, state: &mut InspectorState) {
+fn adjust_tab(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState, inspection: &Inspection) {
     pages(
         ui,
         &["Basic", "HSL", "Curves", "Color wheel", "Mask"],
         &mut state.page,
     );
-    if state.page != 0 {
-        later_note(ui, ["", "HSL", "Curves", "Color wheel", "Mask"][state.page]);
+    if colour_page(shell, ui, state, inspection) {
         return;
     }
-    for label in [
-        "Auto adjust",
-        "Color match",
-        "Color correction",
-        "LUT",
-        "Adjust",
-    ] {
+    ui.horizontal(|ui| {
+        ui.set_min_height(40.0);
+        ui.label(RichText::new("Auto adjust").size(13.0).color(tokens::TEXT));
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if ui
+                .button(RichText::new("Apply").size(12.0))
+                .on_hover_text("Even out exposure, contrast and colour cast")
+                .clicked()
+            {
+                send(shell, Shell::auto_adjust);
+            }
+        });
+    });
+    divider(ui);
+    let choices = shell.match_choices();
+    let mut matched = None;
+    ui.horizontal(|ui| {
+        ui.set_min_height(40.0);
+        ui.label(RichText::new("Color match").size(13.0).color(tokens::TEXT));
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.add_enabled_ui(!choices.is_empty(), |ui| {
+                egui::ComboBox::from_id_salt("color-match")
+                    .selected_text(RichText::new("Match to…").size(12.0))
+                    .show_ui(ui, |ui| {
+                        for (id, name) in &choices {
+                            if ui.selectable_label(false, name).clicked() {
+                                matched = Some(id.clone());
+                            }
+                        }
+                    })
+                    .response
+                    .on_disabled_hover_text("Add another picture clip to match");
+            });
+        });
+    });
+    if let Some(reference) = matched {
+        send(shell, |shell| shell.match_colour(&reference));
+    }
+    divider(ui);
+    later_row(ui, "Color correction");
+    lut_section(shell, ui, state, inspection);
+    adjust_sliders(shell, ui, state, inspection);
+    footer(ui, &["Apply to all", "Save as preset"]);
+}
+
+/// The HSL, Curves, Color wheel or Mask page, when one is picked; false on
+/// the Basic page.
+fn colour_page(
+    shell: &mut Shell,
+    ui: &mut Ui,
+    state: &mut InspectorState,
+    inspection: &Inspection,
+) -> bool {
+    match state.page {
+        0 => return false,
+        1 => super::grade::hsl_page(shell, ui, state, inspection),
+        2 => super::grade::curves_page(shell, ui, state, inspection),
+        3 => super::grade::wheels_page(shell, ui, state, inspection),
+        _ => mask_page(shell, ui, state, inspection.color_mask, true),
+    }
+    true
+}
+
+/// The Cutout page: chroma key, with the cutouts that need a model marked
+/// for later.
+fn cutout_page(
+    shell: &mut Shell,
+    ui: &mut Ui,
+    state: &mut InspectorState,
+    inspection: &Inspection,
+) {
+    for label in ["Remove background", "Custom cutout"] {
         later_row(ui, label);
     }
-    footer(ui, &["Apply to all", "Save as preset"]);
+    let key = inspection.chroma;
+    let header = section(
+        ui,
+        state,
+        "chroma",
+        "Chroma key",
+        Some((key.is_some(), true)),
+        false,
+    );
+    if header.toggled {
+        if key.is_some() {
+            send(shell, |shell| shell.set_chroma("", 0.0, 0.0));
+        } else {
+            state.open.insert("chroma".to_owned());
+            send(shell, |shell| shell.set_chroma("#00ff00", 0.4, 0.0));
+        }
+    }
+    let Some(key) = key else {
+        return;
+    };
+    if !header.open && !state.open.contains("chroma") {
+        return;
+    }
+    body(ui, |ui| {
+        let (strength, shadow) = (f64::from(key.strength), f64::from(key.shadow));
+        if let Some(color) = color_row(ui, state, "chroma-color", "Color", &key.hex()) {
+            send(shell, |shell| shell.set_chroma(&color, strength, shadow));
+        }
+        ui.horizontal(|ui| {
+            row_label(ui, "");
+            for (name, hex) in [("Green", "#00ff00"), ("Blue", "#0000ff")] {
+                if ui.button(RichText::new(name).size(12.0)).clicked() {
+                    send(shell, |shell| shell.set_chroma(hex, strength, shadow));
+                }
+            }
+        });
+        ui.add_space(4.0);
+        let hex = key.hex();
+        if let Some(value) = slider(
+            ui,
+            state,
+            "chroma-strength",
+            "Strength",
+            (strength * 100.0).round(),
+            0.0..=100.0,
+            |v| format!("{v:.0}"),
+        ) {
+            send(shell, |shell| shell.set_chroma(&hex, value / 100.0, shadow));
+        }
+        if let Some(value) = slider(
+            ui,
+            state,
+            "chroma-shadow",
+            "Shadow",
+            (shadow * 100.0).round(),
+            0.0..=100.0,
+            |v| format!("{v:.0}"),
+        ) {
+            send(shell, |shell| {
+                shell.set_chroma(&hex, strength, value / 100.0)
+            });
+        }
+    });
+}
+
+/// The Mask page: a shape cuts the clip in its own frame, or with `colour`
+/// limits where its colour work shows. None takes the mask off; the
+/// sliders place, size, turn and soften it.
+fn mask_page(
+    shell: &mut Shell,
+    ui: &mut Ui,
+    state: &mut InspectorState,
+    mask: Option<cutlass_effects::Mask>,
+    colour: bool,
+) {
+    use cutlass_effects::{Mask, MaskShape};
+    let set: fn(&mut Shell, Option<Mask>) -> Result<(), ShellError> = if colour {
+        Shell::set_color_mask
+    } else {
+        Shell::set_mask
+    };
+    let prefix = if colour { "color-" } else { "" };
+    body(ui, |ui| {
+        let mut picked: Option<Option<MaskShape>> = None;
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .selectable_label(mask.is_none(), RichText::new("None").size(12.0))
+                .clicked()
+            {
+                picked = Some(None);
+            }
+            for shape in MaskShape::ALL {
+                let on = mask.is_some_and(|mask| mask.shape == shape);
+                if ui
+                    .selectable_label(on, RichText::new(shape.label()).size(12.0))
+                    .clicked()
+                {
+                    picked = Some(Some(shape));
+                }
+            }
+        });
+        match picked {
+            Some(None) if mask.is_some() => send(shell, |shell| set(shell, None)),
+            Some(Some(shape)) if mask.is_none_or(|mask| mask.shape != shape) => {
+                let next = mask.map_or_else(|| Mask::new(shape), |mask| Mask { shape, ..mask });
+                send(shell, |shell| set(shell, Some(next)));
+            }
+            _ => {}
+        }
+        let Some(mask) = mask else {
+            ui.add_space(6.0);
+            ui.label(
+                RichText::new(if colour {
+                    "Pick a shape to keep the colour work inside it."
+                } else {
+                    "Pick a shape to mask the clip."
+                })
+                .size(11.0)
+                .color(tokens::MUTED),
+            );
+            return;
+        };
+        ui.add_space(6.0);
+        let percent = |v: f64| format!("{v:.0}%");
+        let mut changed = None;
+        let mut field = |ui: &mut Ui,
+                         state: &mut InspectorState,
+                         key: &str,
+                         label: &str,
+                         stored: f32,
+                         scale: f64,
+                         range: std::ops::RangeInclusive<f64>,
+                         show: &dyn Fn(f64) -> String,
+                         put: fn(&mut Mask, f32)| {
+            if let Some(value) = slider(
+                ui,
+                state,
+                &format!("{prefix}{key}"),
+                label,
+                (f64::from(stored) * scale).round(),
+                range,
+                show,
+            ) {
+                let mut next = mask;
+                #[allow(clippy::cast_possible_truncation)]
+                put(&mut next, (value / scale) as f32);
+                changed = Some(next);
+            }
+        };
+        field(
+            ui,
+            state,
+            "mask-x",
+            "X",
+            mask.x,
+            100.0,
+            -200.0..=200.0,
+            &percent,
+            |m, v| m.x = v,
+        );
+        field(
+            ui,
+            state,
+            "mask-y",
+            "Y",
+            mask.y,
+            100.0,
+            -200.0..=200.0,
+            &percent,
+            |m, v| m.y = v,
+        );
+        match mask.shape {
+            MaskShape::Linear => {}
+            MaskShape::Mirror => {
+                field(
+                    ui,
+                    state,
+                    "mask-height",
+                    "Band",
+                    mask.height,
+                    100.0,
+                    0.0..=400.0,
+                    &percent,
+                    |m, v| m.height = v,
+                );
+            }
+            _ => {
+                field(
+                    ui,
+                    state,
+                    "mask-width",
+                    "Width",
+                    mask.width,
+                    100.0,
+                    0.0..=400.0,
+                    &percent,
+                    |m, v| m.width = v,
+                );
+                field(
+                    ui,
+                    state,
+                    "mask-height",
+                    "Height",
+                    mask.height,
+                    100.0,
+                    0.0..=400.0,
+                    &percent,
+                    |m, v| m.height = v,
+                );
+            }
+        }
+        field(
+            ui,
+            state,
+            "mask-rotation",
+            "Rotate",
+            mask.rotation,
+            1.0,
+            -180.0..=180.0,
+            &|v| format!("{v:.0}°"),
+            |m, v| m.rotation = v,
+        );
+        field(
+            ui,
+            state,
+            "mask-feather",
+            "Feather",
+            mask.feather,
+            100.0,
+            0.0..=100.0,
+            &|v| format!("{v:.0}"),
+            |m, v| m.feather = v,
+        );
+        if mask.shape == MaskShape::Rectangle {
+            field(
+                ui,
+                state,
+                "mask-round",
+                "Round corners",
+                mask.round,
+                100.0,
+                0.0..=100.0,
+                &|v| format!("{v:.0}"),
+                |m, v| m.round = v,
+            );
+        }
+        if switch_row(ui, "Invert", mask.invert, true).clicked() {
+            changed = Some(Mask {
+                invert: !mask.invert,
+                ..mask
+            });
+        }
+        if let Some(next) = changed {
+            send(shell, |shell| set(shell, Some(next)));
+        }
+    });
+}
+
+/// The LUT section: the switch takes the LUT off or asks for a file; the
+/// body names the table, picks another, and sets its strength.
+fn lut_section(
+    shell: &mut Shell,
+    ui: &mut Ui,
+    state: &mut InspectorState,
+    inspection: &Inspection,
+) {
+    let on = inspection.lut.is_some();
+    let header = section(ui, state, "lut", "LUT", Some((on, true)), false);
+    if header.toggled {
+        if on {
+            send(shell, Shell::remove_lut);
+        } else {
+            state.wants_lut = true;
+            state.open.insert("lut".to_owned());
+        }
+    }
+    if !header.open && !state.open.contains("lut") {
+        return;
+    }
+    body(ui, |ui| {
+        ui.horizontal(|ui| {
+            row_label(ui, "File");
+            let name = inspection
+                .lut
+                .as_ref()
+                .map_or("None", |(name, _)| name.as_str());
+            ui.label(RichText::new(name).size(12.0).color(Color32::WHITE));
+            if ui
+                .button(RichText::new("Choose .cube…").size(12.0))
+                .clicked()
+            {
+                state.wants_lut = true;
+            }
+        });
+        ui.add_space(4.0);
+        if let Some((_, strength)) = &inspection.lut {
+            let stored = (f64::from(*strength) * 100.0).round();
+            if let Some(value) = slider(
+                ui,
+                state,
+                "lut-strength",
+                "Strength",
+                stored,
+                0.0..=100.0,
+                |v| format!("{v:.0}"),
+            ) {
+                send(shell, |shell| shell.set_lut_strength(value / 100.0));
+            }
+        }
+    });
+}
+
+/// The Adjust section: a switch that resets every slider, and the sliders.
+fn adjust_sliders(
+    shell: &mut Shell,
+    ui: &mut Ui,
+    state: &mut InspectorState,
+    inspection: &Inspection,
+) {
+    let on = !inspection.adjust.is_identity();
+    let header = section(ui, state, "adjust", "Adjust", Some((on, true)), false);
+    if header.toggled {
+        if on {
+            send(shell, Shell::reset_adjust);
+        } else {
+            state.open.insert("adjust".to_owned());
+        }
+    }
+    if !header.open && !state.open.contains("adjust") {
+        return;
+    }
+    body(ui, |ui| {
+        for key in cutlass_effects::AdjustKey::ALL {
+            let stored = (f64::from(inspection.adjust.get(key)) * 100.0).round();
+            let low = f64::from(key.min()) * 100.0;
+            let id = format!("adjust-{}", key.kind());
+            if let Some(value) = slider(ui, state, &id, key.label(), stored, low..=100.0, |v| {
+                format!("{v:.0}")
+            }) {
+                send(shell, |shell| shell.set_adjust(key, value / 100.0));
+            }
+        }
+    });
 }
 
 // The text panel's Basic page.
@@ -895,9 +1344,29 @@ fn text_basic(
     inspection: &Inspection,
     caption: bool,
 ) {
+    if caption && !inspection.words.text.is_empty() {
+        caption_styles(shell, ui, inspection);
+    }
     body(ui, |ui| {
         if caption && !inspection.words.text.is_empty() {
             caption_words(shell, ui, state, inspection);
+            #[allow(clippy::cast_precision_loss)]
+            let stored = inspection.caption_stagger_ms as f64;
+            #[allow(clippy::cast_precision_loss)]
+            let most = cutlass_session::MAX_CAPTION_STAGGER_MS as f64;
+            if let Some(value) = slider(
+                ui,
+                state,
+                "caption stagger",
+                "Stagger",
+                stored,
+                0.0..=most,
+                |value| format!("{value:.0} ms"),
+            ) {
+                #[allow(clippy::cast_possible_truncation)]
+                let millis = value.round() as i64;
+                send(shell, |shell| shell.set_caption_stagger(millis));
+            }
         } else {
             words_box(shell, ui, state);
         }
@@ -993,21 +1462,73 @@ fn caption_words(
     inspection: &Inspection,
 ) {
     let columns = &inspection.words;
+    let count = columns.text.len();
     for (index, word) in columns.text.iter().enumerate() {
+        // A line break shows as a rule between the lines' words.
+        if word == cutlass_editor::LINE_BREAK {
+            ui.separator();
+            continue;
+        }
         let start = columns.start_time.get(index).copied().unwrap_or_default();
         let text = state.fields.entry(format!("word {index}")).or_default();
         let mut edited = None;
+        let mut join = false;
+        let mut line = false;
+        let mut mark = None;
         label_row(ui, &format!("{:.2} s", start as f64 / 1000.0), |ui| {
-            let response = ui.add(TextEdit::singleline(text).desired_width(f32::INFINITY));
-            if super::commits(ui, &response) && text != word {
-                edited = Some(text.clone());
-            }
-            if !response.has_focus() {
-                word.clone_into(text);
-            }
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let marked = inspection.caption_keywords.contains(&index);
+                if ui
+                    .add(egui::Button::new(RichText::new("★").size(11.0)).selected(marked))
+                    .on_hover_text(if marked {
+                        "Take the keyword mark off"
+                    } else {
+                        "Mark as a keyword, drawn in the spoken look"
+                    })
+                    .clicked()
+                {
+                    mark = Some(!marked);
+                }
+                let next_is_word = columns
+                    .text
+                    .get(index + 1)
+                    .is_some_and(|next| next != cutlass_editor::LINE_BREAK);
+                join = ui
+                    .add_enabled(
+                        index + 1 < count && next_is_word,
+                        egui::Button::new(RichText::new("+").size(11.0)),
+                    )
+                    .on_hover_text("Join with the next word")
+                    .clicked();
+                let broken = cutlass_editor::breaks_before(columns, index);
+                line = ui
+                    .add_enabled(
+                        index > 0,
+                        egui::Button::new(RichText::new("↵").size(11.0)).selected(broken),
+                    )
+                    .on_hover_text(if broken {
+                        "Join this line to the one before"
+                    } else {
+                        "Start a new line here"
+                    })
+                    .clicked();
+                let response = ui.add(TextEdit::singleline(text).desired_width(f32::INFINITY));
+                if super::commits(ui, &response) && text != word {
+                    edited = Some(text.clone());
+                }
+                if !response.has_focus() {
+                    word.clone_into(text);
+                }
+            });
         });
-        if let Some(value) = edited {
+        if let Some(on) = mark {
+            send(shell, |shell| shell.set_caption_keyword(index, on));
+        } else if let Some(value) = edited {
             send(shell, |shell| shell.set_caption_word(index, &value));
+        } else if join {
+            send(shell, |shell| shell.join_caption_words(index));
+        } else if line {
+            send(shell, |shell| shell.toggle_caption_break(index));
         }
     }
     ui.add_space(6.0);
@@ -1103,24 +1624,7 @@ fn alignment_row(shell: &mut Shell, ui: &mut Ui, inspection: &Inspection) {
 }
 
 /// The preset tiles: a letter color on a plate. Picking one sets the color.
-const PRESETS: [(&str, &str, &str); 16] = [
-    ("None", "", ""),
-    ("Plain", "#FFFFFF", "#3A3A3A"),
-    ("Yellow", "#FFE14A", "#3A3A3A"),
-    ("Red", "#FF4D4D", "#3A3A3A"),
-    ("Orange", "#FF9A3C", "#3A3A3A"),
-    ("Blue", "#5AA7FF", "#3A3A3A"),
-    ("Green", "#3DDC6A", "#1C1C1C"),
-    ("Gray", "#D0D0D0", "#2A2A2A"),
-    ("Ink", "#1A1A1A", "#F3F3F3"),
-    ("Gold", "#F2C14E", "#2A2418"),
-    ("Violet", "#FFFFFF", "#7A3CFF"),
-    ("Paper", "#7A3CFF", "#FFFFFF"),
-    ("Night", "#FFFFFF", "#111111"),
-    ("Lime", "#D6FF4A", "#111111"),
-    ("Rose", "#FF6A9A", "#2A1218"),
-    ("Cyan", "#3DE0FF", "#102028"),
-];
+use cutlass_editor::TEXT_PRESETS as PRESETS;
 
 fn preset_styles(shell: &mut Shell, ui: &mut Ui) {
     ui.add_space(6.0);
@@ -1365,7 +1869,7 @@ fn text_parts(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState, look: 
 // Controls.
 
 /// Send one edit and show its refusal.
-fn send(shell: &mut Shell, edit: impl FnOnce(&mut Shell) -> Result<(), ShellError>) {
+pub(super) fn send(shell: &mut Shell, edit: impl FnOnce(&mut Shell) -> Result<(), ShellError>) {
     if let Err(error) = edit(shell) {
         shell.set_notice(error.to_string());
     }
@@ -1406,7 +1910,7 @@ fn tabs(ui: &mut Ui, labels: &[&str], current: &mut usize) {
 }
 
 /// The rounded page switch under the tabs.
-fn pages(ui: &mut Ui, labels: &[&str], current: &mut usize) {
+pub(super) fn pages(ui: &mut Ui, labels: &[&str], current: &mut usize) {
     ui.add_space(12.0);
     let width = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(Vec2::new(width, 30.0), Sense::hover());
@@ -1593,7 +2097,7 @@ fn later_note(ui: &mut Ui, what: &str) {
     );
 }
 
-fn note(ui: &mut Ui, text: &str) {
+pub(super) fn note(ui: &mut Ui, text: &str) {
     ui.add_space(8.0);
     ui.label(RichText::new(text).size(12.0).color(tokens::MUTED));
     ui.add_space(4.0);
@@ -1621,6 +2125,107 @@ fn footer(ui: &mut Ui, labels: &[&str]) {
     });
 }
 
+/// The caption styles: Plain, then each style, the caption's own
+/// outlined. A pick is one undo step.
+fn caption_styles(shell: &mut Shell, ui: &mut Ui, inspection: &Inspection) {
+    let mut picked = None;
+    ui.add_space(8.0);
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = Vec2::splat(6.0);
+        let tiles = std::iter::once(("Plain", "")).chain(
+            cutlass_captions::CAPTION_STYLES
+                .iter()
+                .map(|style| (style.name, style.key)),
+        );
+        for (name, key) in tiles {
+            let on = inspection.caption_style == key;
+            let stroke = if on {
+                Stroke::new(tokens::SELECTED_EDGE * 2.0, tokens::EXPORT)
+            } else {
+                Stroke::NONE
+            };
+            let tile = egui::Button::new(RichText::new(name).size(11.0))
+                .fill(BOX)
+                .stroke(stroke);
+            if ui.add_sized([64.0, 40.0], tile).clicked() && !on {
+                picked = Some(key);
+            }
+        }
+    });
+    if let Some(key) = picked {
+        send(shell, |shell| shell.set_caption_style(key));
+    }
+}
+
+/// The Bubble page: None, then each bubble, the title's own outlined. A
+/// pick shapes its background; None takes the bubble and its background
+/// off.
+fn bubble_page(shell: &mut Shell, ui: &mut Ui) {
+    let Some(look) = shell.text_look() else {
+        return;
+    };
+    let mut picked = None;
+    ui.add_space(8.0);
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = Vec2::splat(6.0);
+        let tiles = std::iter::once(("None", "")).chain(
+            cutlass_model::Bubble::ALL
+                .iter()
+                .map(|bubble| (bubble.label(), bubble.key())),
+        );
+        for (name, key) in tiles {
+            let on = look.bubble == key;
+            let stroke = if on {
+                Stroke::new(tokens::SELECTED_EDGE * 2.0, tokens::EXPORT)
+            } else {
+                Stroke::NONE
+            };
+            let tile = egui::Button::new(RichText::new(name).size(11.0))
+                .fill(BOX)
+                .stroke(stroke);
+            if ui.add_sized([64.0, 48.0], tile).clicked() && !on {
+                picked = Some(key);
+            }
+        }
+    });
+    if let Some(key) = picked {
+        send(shell, |shell| shell.set_text_bubble(key));
+    }
+}
+
+/// The Effects page: None, then each look, the one the title wears
+/// outlined. A pick sets its fill, outline, shadow and glow in one step.
+fn effect_page(shell: &mut Shell, ui: &mut Ui) {
+    let Some(look) = shell.text_look() else {
+        return;
+    };
+    let worn = cutlass_editor::text_effect_of(&look).map(|effect| effect.id);
+    let mut picked = None;
+    ui.add_space(8.0);
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = Vec2::splat(6.0);
+        let effects =
+            std::iter::once(&cutlass_editor::NO_TEXT_EFFECT).chain(cutlass_editor::TEXT_EFFECTS);
+        for effect in effects {
+            let on = worn == Some(effect.id);
+            let stroke = if on {
+                Stroke::new(tokens::SELECTED_EDGE * 2.0, tokens::EXPORT)
+            } else {
+                Stroke::NONE
+            };
+            let tile = egui::Button::new(RichText::new(effect.name).size(11.0))
+                .fill(BOX)
+                .stroke(stroke);
+            if ui.add_sized([64.0, 48.0], tile).clicked() && !on {
+                picked = Some(effect.id);
+            }
+        }
+    });
+    if let Some(id) = picked {
+        send(shell, |shell| shell.set_text_effect(id));
+    }
+}
+
 fn later_tiles(ui: &mut Ui, names: &[&str]) {
     ui.add_space(8.0);
     ui.add_enabled_ui(false, |ui| {
@@ -1639,7 +2244,7 @@ fn later_tiles(ui: &mut Ui, names: &[&str]) {
 }
 
 /// The indented body under a section.
-fn body(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
+pub(super) fn body(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
     ui.add_space(4.0);
     ui.vertical(add);
     ui.add_space(4.0);
@@ -1672,7 +2277,7 @@ fn label_row(ui: &mut Ui, label: &str, add: impl FnOnce(&mut Ui)) {
 /// A slider row: name, track, value box. Each new value is sent as the
 /// track moves, so the preview follows; the shell joins a held drag into
 /// one undo step.
-fn slider(
+pub(super) fn slider(
     ui: &mut Ui,
     state: &mut InspectorState,
     key: &str,
@@ -1854,7 +2459,7 @@ fn parse_hex(text: &str) -> Option<Color32> {
     Some(Color32::from_rgb(r, g, b))
 }
 
-fn switch_row(ui: &mut Ui, label: &str, on: bool, editable: bool) -> egui::Response {
+pub(super) fn switch_row(ui: &mut Ui, label: &str, on: bool, editable: bool) -> egui::Response {
     let response = ui
         .horizontal(|ui| {
             ui.label(RichText::new(label).size(12.0).color(tokens::TEXT));

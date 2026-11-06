@@ -90,7 +90,7 @@ mod tests {
 
     fn place(id: &str, start: i64, duration: i64) -> Request {
         Request::Place {
-            track_id: TrackId::new(""),
+            track_id: TrackId::new("main"),
             segment: Box::new(Segment::new(id, "media", TimeRange::new(start, duration))),
         }
     }
@@ -165,7 +165,7 @@ mod tests {
                 2,
                 &[Request::Move {
                     segment_id: SegmentId::new("b"),
-                    track_id: TrackId::new(""),
+                    track_id: TrackId::new("main"),
                     start: Micros(0),
                 }],
             )
@@ -198,7 +198,7 @@ mod tests {
             .apply(
                 0,
                 &[Request::SetTrackAttribute {
-                    track_id: TrackId::new(""),
+                    track_id: TrackId::new("main"),
                     bit: TrackAttribute::LOCK,
                     on: true,
                 }],
@@ -250,7 +250,7 @@ mod tests {
                 5,
                 &[Request::Move {
                     segment_id: SegmentId::new("main"),
-                    track_id: TrackId::new(""),
+                    track_id: TrackId::new("main"),
                     start: Micros(300_000),
                 }],
             )

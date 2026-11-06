@@ -159,6 +159,7 @@ fn edit_cause(error: EditError) -> String {
         EditError::UnknownEffect => "that effect is not in this version".to_owned(),
         EditError::Lut => "that file is not a 3D .cube table".to_owned(),
         EditError::Mask => "a mask number is out of its range".to_owned(),
+        EditError::Track => "the track or its followers do not fit the clip".to_owned(),
         EditError::Compound => "that is not a compound clip played at its own speed".to_owned(),
         EditError::NotEffect => "a strength belongs on an effect, filter, or adjustment".to_owned(),
         EditError::EffectTarget => "an effect goes on a picture clip".to_owned(),

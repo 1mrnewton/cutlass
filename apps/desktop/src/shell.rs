@@ -171,6 +171,9 @@ impl std::fmt::Display for ShellError {
             }
             Self::Edit(EditError::Lut) => formatter.write_str("that file is not a 3D .cube table"),
             Self::Edit(EditError::Mask) => formatter.write_str("a mask number is out of its range"),
+            Self::Edit(EditError::Track) => {
+                formatter.write_str("the track or its followers do not fit the clip")
+            }
             Self::Edit(EditError::Compound) => {
                 formatter.write_str("that is not a compound clip played at its own speed")
             }

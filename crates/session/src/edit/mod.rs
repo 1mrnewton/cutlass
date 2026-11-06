@@ -9,6 +9,7 @@ mod crop;
 mod effect;
 mod extract;
 mod fade;
+mod follow;
 mod freeze;
 mod grade;
 mod import;
@@ -158,6 +159,9 @@ pub enum EditError {
     Lut,
     /// A mask number is out of its range.
     Mask,
+    /// A track's path is empty, out of order, not numbers, or outside its
+    /// clip, or a follower is not a picture clip on the path.
+    Track,
     /// The clip is not a compound clip, or it plays its inside at another
     /// speed, or a cut inside would split a speed curve.
     Compound,
@@ -483,6 +487,13 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             material_id,
             selection,
         } => mask::set_selection(draft, segment_id, material_id, selection.as_ref()),
+        Request::Track {
+            target,
+            followers,
+            tracking_id,
+            anchor,
+            path,
+        } => follow::track(draft, target, followers, tracking_id, *anchor, path),
         Request::SetColorMask {
             segment_id,
             material_id,

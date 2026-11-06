@@ -27,6 +27,7 @@ mod segment;
 mod serde_util;
 mod time;
 mod track;
+mod tracking;
 
 pub use animation::{
     ANIMATION_PRESETS, AnimationPreset, Letter, LetterMotion, LetterPose, LetterStep, LoopMotion,
@@ -64,3 +65,4 @@ pub use relationship::{LinkPair, Relationship};
 pub use segment::{APPLY_ONE_CLIP, HdrSettings, ResponsiveLayout, Segment};
 pub use time::{FrameError, FrameRate, Micros, RangeError, TimeRange, TimecodeLabel};
 pub use track::Track;
+pub use tracking::{TrackMode, TrackPath, TrackSample, VIDEO_TRACKING};

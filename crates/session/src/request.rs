@@ -395,6 +395,18 @@ pub enum Request {
         material_id: MaterialId,
         selection: Option<cutlass_effects::Selection>,
     },
+    /// Make `followers` (video, sticker or text clips) follow the video clip
+    /// `target` along `path`, the target's corners on the canvas frame by
+    /// frame. Each follower keeps its offset from the target at `anchor`,
+    /// the time the box was drawn at. The path is kept as the
+    /// `video_tracking` record `tracking_id`.
+    Track {
+        target: SegmentId,
+        followers: Vec<SegmentId>,
+        tracking_id: MaterialId,
+        anchor: Micros,
+        path: cutlass_model::TrackPath,
+    },
     /// Limit the clip's colour work, or an adjustment layer, to `mask`, or
     /// take that limit off with `None`.
     SetColorMask {

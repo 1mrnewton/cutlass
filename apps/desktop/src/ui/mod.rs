@@ -4,8 +4,10 @@
 //! app state, and hands back what the user did. Panels build from these
 //! instead of painting their own chrome.
 
+mod button;
 mod scroll;
 mod surface;
 
+pub use button::{Button, ButtonKind};
 pub use scroll::Scroll;
 pub use surface::Surface;

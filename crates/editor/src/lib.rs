@@ -60,7 +60,7 @@ pub use gesture::{
     DropGesture, DropOutcome, GestureError, GestureOutcome, MoveGesture, Placement, TrimGesture,
     TrimPlan, drop_gesture, move_gesture, placement, trim_gesture,
 };
-pub use group_move::{ClipMove, MovePlan, move_requests, plan_move};
+pub use group_move::{ClipMove, MovePlan, NewLane, move_requests, plan_move, plan_move_between};
 pub use hit::{BadScale, Hit, Pointer, TimelineScale, hit_test};
 pub use inspector::{
     BACKGROUND_ALPHA_START, BACKGROUND_ROUND_START, GLOW_RANGE_START, GLOW_STRENGTH_START,

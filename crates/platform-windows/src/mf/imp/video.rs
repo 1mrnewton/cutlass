@@ -527,17 +527,17 @@ impl VideoDecoder {
         })
         .map_err(|_| malformed())??;
         let pts = com::sample_time(sample).map_or(0, |time| from_hns(time, self.timescale));
-        let info = PictureInfo {
-            width: slot.width & !1,
-            height: slot.height & !1,
-            pixel: if planar {
+        let info = PictureInfo::new(
+            slot.width & !1,
+            slot.height & !1,
+            if planar {
                 PixelFormat::Yuv420p
             } else {
                 PixelFormat::Rgba8
             },
-            primaries: ColorPrimaries::Bt709,
-            transfer: Transfer::Bt709,
-        };
+            ColorPrimaries::Bt709,
+            Transfer::Bt709,
+        );
         PictureOutput::cpu(info, bytes, pts, self.timescale)
     }
 }

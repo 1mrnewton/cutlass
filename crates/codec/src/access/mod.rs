@@ -20,7 +20,8 @@ pub use frame::{
 pub use packet::{Packet, SideData};
 pub use params::CodecParams;
 pub use pixel::{
-    ColorMatrix, ColorPrimaries, ColorRange, MatrixCoefficients, PixelFormat, Transfer,
+    ChromaSamplePosition, ColorMatrix, ColorPrimaries, ColorRange, MatrixCoefficients, PixelFormat,
+    Transfer,
 };
 pub use sample::{Channel, ChannelLayout, LayoutError, Pcm, SampleFormat, StandardLayout};
 pub use still::{

@@ -56,6 +56,7 @@ pub const PARTITION_HORZ_4: u32 = 8;
 pub const PARTITION_VERT_4: u32 = 9;
 
 pub const BLOCK_8X8: usize = 3;
+pub const BLOCK_64X64: usize = 12;
 pub const BLOCK_128X128: usize = 15;
 
 pub const MI_WIDTH_LOG2: [usize; 22] = [
@@ -181,7 +182,7 @@ pub fn subsampled_size(bsize: usize, sub_x: bool, sub_y: bool) -> usize {
         [13, 12, 0, 10],
         [14, 0, 12, 11],
         [15, 14, 13, 12],
-        [16, 4, 0, 4],
+        [16, 1, 0, 1],
         [17, 0, 2, 2],
         [18, 4, 0, 16],
         [19, 0, 5, 17],

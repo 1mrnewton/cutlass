@@ -7696,13 +7696,13 @@ mod tests {
             bytes.push(128);
             bytes.push(128);
             let picture = PictureOutput::cpu(
-                PictureInfo {
-                    width: 2,
-                    height: 2,
-                    pixel: PixelFormat::Yuv420p,
-                    primaries: ColorPrimaries::Bt709,
-                    transfer: Transfer::Bt709,
-                },
+                PictureInfo::new(
+                    2,
+                    2,
+                    PixelFormat::Yuv420p,
+                    ColorPrimaries::Bt709,
+                    Transfer::Bt709,
+                ),
                 bytes,
                 packet.pts,
                 packet.timescale,

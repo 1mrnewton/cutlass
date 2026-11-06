@@ -1070,13 +1070,13 @@ fn gpu_picture(
     limits::picture_ok(width, height)?;
     let token = publish_buffer(image)?;
     match PictureOutput::platform(
-        PictureInfo {
+        PictureInfo::new(
             width,
             height,
-            pixel: PixelFormat::Rgba8,
-            primaries: ColorPrimaries::Bt709,
-            transfer: Transfer::Unspecified,
-        },
+            PixelFormat::Rgba8,
+            ColorPrimaries::Bt709,
+            Transfer::Unspecified,
+        ),
         token,
         pts,
         timescale,
@@ -1161,13 +1161,13 @@ fn copy_rgba(
         }
     }
     PictureOutput::cpu(
-        PictureInfo {
+        PictureInfo::new(
             width,
             height,
-            pixel: PixelFormat::Rgba8,
-            primaries: ColorPrimaries::Bt709,
-            transfer: Transfer::Unspecified,
-        },
+            PixelFormat::Rgba8,
+            ColorPrimaries::Bt709,
+            Transfer::Unspecified,
+        ),
         rgba,
         pts,
         timescale,
@@ -1284,13 +1284,7 @@ fn copy_planar(
     let bytes = copy_nv12(image)?;
     let (primaries, transfer) = buffer_color(image);
     PictureOutput::cpu(
-        PictureInfo {
-            width,
-            height,
-            pixel: PixelFormat::Yuv420p,
-            primaries,
-            transfer,
-        },
+        PictureInfo::new(width, height, PixelFormat::Yuv420p, primaries, transfer),
         bytes,
         pts,
         timescale,
@@ -1317,13 +1311,7 @@ fn surface_picture(
     let surface = super::surface::VtSurface::retain(image, width, height)?;
     let (primaries, transfer) = buffer_color(image);
     PictureOutput::surface(
-        PictureInfo {
-            width,
-            height,
-            pixel: PixelFormat::Yuv420p,
-            primaries,
-            transfer,
-        },
+        PictureInfo::new(width, height, PixelFormat::Yuv420p, primaries, transfer),
         Surface::new(Arc::new(surface)),
         pts,
         timescale,

@@ -110,13 +110,13 @@ impl Decoder for EngineDecoder {
         let width = (picture.width & !1).max(2);
         let height = (picture.height & !1).max(2);
         let bytes = packed_even(&picture, width, height);
-        let info = PictureInfo {
+        let info = PictureInfo::new(
             width,
             height,
-            pixel: PixelFormat::Yuv420p,
-            primaries: self.primaries,
-            transfer: self.transfer,
-        };
+            PixelFormat::Yuv420p,
+            self.primaries,
+            self.transfer,
+        );
         Ok(vec![Output::Picture(PictureOutput::cpu(
             info,
             bytes,

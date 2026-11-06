@@ -152,13 +152,13 @@ impl Decoder for ProresPictureDecoder {
     fn push(&mut self, packet: &Packet) -> Result<Vec<Output>, CodecError> {
         let decoded = self.inner.decode(&packet.data)?;
         let (width, height, bytes) = to_yuv420p(&decoded.frame)?;
-        let info = PictureInfo {
+        let info = PictureInfo::new(
             width,
             height,
-            pixel: PixelFormat::Yuv420p,
-            primaries: decoded.frame.primaries,
-            transfer: decoded.frame.transfer,
-        };
+            PixelFormat::Yuv420p,
+            decoded.frame.primaries,
+            decoded.frame.transfer,
+        );
         Ok(vec![Output::Picture(PictureOutput::cpu(
             info,
             bytes,

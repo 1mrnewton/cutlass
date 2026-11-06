@@ -924,13 +924,13 @@ fn picture_output(frame: VideoOutput) -> Result<Output, CodecError> {
     bytes.extend_from_slice(picture.u());
     bytes.extend_from_slice(picture.v());
     let picture = PictureOutput::cpu(
-        PictureInfo {
-            width: picture.width(),
-            height: picture.height(),
-            pixel: PixelFormat::Yuv420p,
-            primaries: frame.primaries,
-            transfer: frame.transfer,
-        },
+        PictureInfo::new(
+            picture.width(),
+            picture.height(),
+            PixelFormat::Yuv420p,
+            frame.primaries,
+            frame.transfer,
+        ),
         bytes,
         frame.pts,
         frame.timescale,

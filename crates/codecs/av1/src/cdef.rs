@@ -5,6 +5,7 @@
 
 use crate::bits::floor_log2;
 use crate::header::CdefParams;
+use crate::sample::{Pix, clip_sample, depth_shift};
 
 const DIV_TABLE: [i64; 9] = [0, 840, 420, 280, 210, 168, 140, 120, 105];
 const PRI_TAPS: [[i32; 2]; 2] = [[4, 2], [3, 3]];
@@ -24,10 +25,10 @@ const UV_DIR: [[[u8; 8]; 2]; 2] = [
     [[7, 0, 2, 4, 5, 6, 6, 6], [0, 1, 2, 3, 4, 5, 6, 7]],
 ];
 
-pub struct CdefInput<'a> {
-    pub y: &'a mut [u8],
-    pub u: &'a mut [u8],
-    pub v: &'a mut [u8],
+pub struct CdefInput<'a, S> {
+    pub y: &'a mut [S],
+    pub u: &'a mut [S],
+    pub v: &'a mut [S],
     pub y_stride: usize,
     pub c_stride: usize,
     pub mi_cols: usize,
@@ -35,9 +36,12 @@ pub struct CdefInput<'a> {
     pub skips: &'a [u8],
     pub index: &'a [i8],
     pub params: CdefParams,
+    pub bit_depth: u8,
+    pub sub_x: bool,
+    pub sub_y: bool,
 }
 
-pub fn apply(frame: &mut CdefInput<'_>) {
+pub fn apply<S: Pix>(frame: &mut CdefInput<'_, S>) {
     // A strength pair of zero is the identity. The whole frame is left as the
     // loop filter wrote it, including the copies this pass would otherwise make.
     if idle(&frame.params) {
@@ -64,7 +68,7 @@ pub fn apply(frame: &mut CdefInput<'_>) {
                     let (dir, var) = if y_pri == 0 && uv_pri == 0 {
                         (0, 0)
                     } else {
-                        direction(&src_y, frame.y_stride, col * 4, row * 4)
+                        direction(&src_y, frame.y_stride, col * 4, row * 4, frame.bit_depth)
                     };
                     if y_pri != 0 || y_sec != 0 {
                         filter_luma(frame, &src_y, row, col, idx, dir, var);
@@ -103,17 +107,18 @@ fn skipped(skips: &[u8], mi_cols: usize, mi_rows: usize, row: usize, col: usize)
     true
 }
 
-fn filter_luma(
-    frame: &mut CdefInput<'_>,
-    src: &[u8],
+fn filter_luma<S: Pix>(
+    frame: &mut CdefInput<'_, S>,
+    src: &[S],
     row: usize,
     col: usize,
     idx: usize,
     dir: usize,
     var: u32,
 ) {
-    let mut pri = i32::from(frame.params.y_pri.get(idx).copied().unwrap_or(0));
-    let sec = i32::from(frame.params.y_sec.get(idx).copied().unwrap_or(0));
+    let shift = i32::try_from(depth_shift(frame.bit_depth)).unwrap_or(0);
+    let mut pri = i32::from(frame.params.y_pri.get(idx).copied().unwrap_or(0)) << shift;
+    let sec = i32::from(frame.params.y_sec.get(idx).copied().unwrap_or(0)) << shift;
     let use_dir = if pri == 0 { 0 } else { dir };
     pri = adjust(pri, var);
     filter_rect(Rect {
@@ -127,70 +132,82 @@ fn filter_luma(
         dir: use_dir,
         pri,
         sec,
-        damping: i32::from(frame.params.damping),
+        damping: i32::from(frame.params.damping) + shift,
         sub_x: false,
         sub_y: false,
         mi_cols: frame.mi_cols,
         mi_rows: frame.mi_rows,
+        bit_depth: frame.bit_depth,
     });
 }
 
-fn filter_chroma(
-    frame: &mut CdefInput<'_>,
-    src_u: &[u8],
-    src_v: &[u8],
+fn filter_chroma<S: Pix>(
+    frame: &mut CdefInput<'_, S>,
+    src_u: &[S],
+    src_v: &[S],
     row: usize,
     col: usize,
     idx: usize,
     y_dir: usize,
 ) {
-    let pri = i32::from(frame.params.uv_pri.get(idx).copied().unwrap_or(0));
-    let sec = i32::from(frame.params.uv_sec.get(idx).copied().unwrap_or(0));
+    let shift = i32::try_from(depth_shift(frame.bit_depth)).unwrap_or(0);
+    let pri = i32::from(frame.params.uv_pri.get(idx).copied().unwrap_or(0)) << shift;
+    let sec = i32::from(frame.params.uv_sec.get(idx).copied().unwrap_or(0)) << shift;
+    let damping = (i32::from(frame.params.damping) + shift).saturating_sub(1);
+    let sub_x = frame.sub_x;
+    let sub_y = frame.sub_y;
+    let shift_x = usize::from(sub_x);
+    let shift_y = usize::from(sub_y);
+    let x0 = (col * 4) >> shift_x;
+    let y0 = (row * 4) >> shift_y;
+    let width = 8 >> shift_x;
+    let height = 8 >> shift_y;
     let dir = if pri == 0 {
         0
     } else {
-        usize::from(UV_DIR[1][1][y_dir])
+        usize::from(UV_DIR[shift_x][shift_y][y_dir])
     };
-    let damping = i32::from(frame.params.damping).saturating_sub(1);
     filter_rect(Rect {
         src: src_u,
         dst: frame.u,
         stride: frame.c_stride,
-        x0: col * 2,
-        y0: row * 2,
-        width: 4,
-        height: 4,
+        x0,
+        y0,
+        width,
+        height,
         dir,
         pri,
         sec,
         damping,
-        sub_x: true,
-        sub_y: true,
+        sub_x,
+        sub_y,
         mi_cols: frame.mi_cols,
         mi_rows: frame.mi_rows,
+        bit_depth: frame.bit_depth,
     });
     filter_rect(Rect {
         src: src_v,
         dst: frame.v,
         stride: frame.c_stride,
-        x0: col * 2,
-        y0: row * 2,
-        width: 4,
-        height: 4,
+        x0,
+        y0,
+        width,
+        height,
         dir,
         pri,
         sec,
         damping,
-        sub_x: true,
-        sub_y: true,
+        sub_x,
+        sub_y,
         mi_cols: frame.mi_cols,
         mi_rows: frame.mi_rows,
+        bit_depth: frame.bit_depth,
     });
 }
 
-struct Rect<'a> {
-    src: &'a [u8],
-    dst: &'a mut [u8],
+struct Rect<'a, S> {
+    src: &'a [S],
+    dst: &'a mut [S],
     stride: usize,
     x0: usize,
     y0: usize,
@@ -204,6 +221,7 @@ struct Rect<'a> {
     sub_y: bool,
     mi_cols: usize,
     mi_rows: usize,
+    bit_depth: u8,
 }
 
 fn adjust(pri: i32, var: u32) -> i32 {
@@ -218,11 +236,18 @@ fn adjust(pri: i32, var: u32) -> i32 {
     (pri * (4 + var_str) + 8) >> 4
 }
 
-fn direction(src: &[u8], stride: usize, x0: usize, y0: usize) -> (usize, u32) {
+fn direction<S: Pix>(
+    src: &[S],
+    stride: usize,
+    x0: usize,
+    y0: usize,
+    bit_depth: u8,
+) -> (usize, u32) {
     let mut partial = [[0i64; 15]; 8];
+    let shift = depth_shift(bit_depth);
     for i in 0..8 {
         for j in 0..8 {
-            let sample = i64::from(at(src, stride, x0 + j, y0 + i)) - 128;
+            let sample = i64::from(at(src, stride, x0 + j, y0 + i).to_i32() >> shift) - 128;
             partial[0][i + j] += sample;
             partial[1][i + j / 2] += sample;
             partial[2][i] += sample;
@@ -272,11 +297,13 @@ fn direction(src: &[u8], stride: usize, x0: usize, y0: usize) -> (usize, u32) {
     (dir, u32::try_from(var).unwrap_or(0))
 }
 
-fn filter_rect(block: Rect<'_>) {
-    let tap = usize::try_from(block.pri & 1).unwrap_or(0);
+fn filter_rect<S: Pix>(block: Rect<'_, S>) {
+    // The tap set follows the unshifted strength. The threshold itself is already shifted.
+    let shift = depth_shift(block.bit_depth);
+    let tap = usize::try_from((block.pri >> shift) & 1).unwrap_or(0);
     for i in 0..block.height {
         for j in 0..block.width {
-            let x = i32::from(at(block.src, block.stride, block.x0 + j, block.y0 + i));
+            let x = at(block.src, block.stride, block.x0 + j, block.y0 + i).to_i32();
             let mut sum = 0i32;
             let mut max = x;
             let mut min = x;
@@ -320,7 +347,14 @@ fn filter_rect(block: Rect<'_>) {
             }
             let rounded = (8 + sum - i32::from(sum < 0)) >> 4;
             let value = (x + rounded).clamp(min, max);
-            put(block.dst, block.stride, block.x0 + j, block.y0 + i, value);
+            put(
+                block.dst,
+                block.stride,
+                block.x0 + j,
+                block.y0 + i,
+                value,
+                block.bit_depth,
+            );
         }
     }
 }
@@ -339,7 +373,14 @@ struct Tap {
     tap: usize,
 }
 
-fn accumulate(block: &Rect<'_>, i: usize, j: usize, x: i32, tap: Tap, running: &mut Running) {
+fn accumulate<S: Pix>(
+    block: &Rect<'_, S>,
+    i: usize,
+    j: usize,
+    x: i32,
+    tap: Tap,
+    running: &mut Running,
+) {
     let Some(sample) = neighbor(block, i, j, tap.dir, tap.k, tap.sign) else {
         return;
     };
@@ -354,7 +395,14 @@ fn accumulate(block: &Rect<'_>, i: usize, j: usize, x: i32, tap: Tap, running: &
     running.min = running.min.min(sample);
 }
 
-fn neighbor(block: &Rect<'_>, i: usize, j: usize, dir: usize, k: usize, sign: i32) -> Option<i32> {
+fn neighbor<S: Pix>(
+    block: &Rect<'_, S>,
+    i: usize,
+    j: usize,
+    dir: usize,
+    k: usize,
+    sign: i32,
+) -> Option<i32> {
     let dy = sign * DIRECTIONS[dir][k][0];
     let dx = sign * DIRECTIONS[dir][k][1];
     let y = block.y0 as i32 + i as i32 + dy;
@@ -370,12 +418,7 @@ fn neighbor(block: &Rect<'_>, i: usize, j: usize, dir: usize, k: usize, sign: i3
     {
         return None;
     }
-    Some(i32::from(at(
-        block.src,
-        block.stride,
-        x as usize,
-        y as usize,
-    )))
+    Some(at(block.src, block.stride, x as usize, y as usize).to_i32())
 }
 
 fn constrain(diff: i32, threshold: i32, damping: i32) -> i32 {
@@ -388,13 +431,13 @@ fn constrain(diff: i32, threshold: i32, damping: i32) -> i32 {
     sign * abs.min(threshold - (abs >> shift)).max(0)
 }
 
-fn at(src: &[u8], stride: usize, x: usize, y: usize) -> u8 {
-    src.get(y * stride + x).copied().unwrap_or(0)
+fn at<S: Pix>(src: &[S], stride: usize, x: usize, y: usize) -> S {
+    src.get(y * stride + x).copied().unwrap_or(S::default())
 }
 
-fn put(dst: &mut [u8], stride: usize, x: usize, y: usize, value: i32) {
+fn put<S: Pix>(dst: &mut [S], stride: usize, x: usize, y: usize, value: i32, bit_depth: u8) {
     if let Some(slot) = dst.get_mut(y * stride + x) {
-        *slot = u8::try_from(value).unwrap_or(0);
+        *slot = S::from_i32(clip_sample(value, bit_depth));
     }
 }
 
@@ -404,9 +447,9 @@ mod tests {
 
     #[test]
     fn zero_strength_leaves_the_picture() {
-        let mut y = vec![10, 20, 30, 40, 50, 60, 70, 80];
-        let mut u = vec![11, 22, 33, 44];
-        let mut v = vec![55, 66, 77, 88];
+        let mut y: Vec<u8> = vec![10, 20, 30, 40, 50, 60, 70, 80];
+        let mut u: Vec<u8> = vec![11, 22, 33, 44];
+        let mut v: Vec<u8> = vec![55, 66, 77, 88];
         let before_y = y.clone();
         let before_u = u.clone();
         let before_v = v.clone();
@@ -420,6 +463,9 @@ mod tests {
             mi_rows: 2,
             skips: &[0, 0, 0, 0],
             index: &[0, -1, -1, -1],
+            bit_depth: 8,
+            sub_x: true,
+            sub_y: true,
             params: CdefParams {
                 damping: 3,
                 bits: 0,

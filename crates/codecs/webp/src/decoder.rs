@@ -239,13 +239,13 @@ fn rgba_picture(still: StillOutput) -> Result<Output, CodecError> {
             rgba.push(u8::MAX);
         }
     }
-    let info = PictureInfo {
-        width: image.width,
-        height: image.height,
-        pixel: PixelFormat::Rgba8,
-        primaries: ColorPrimaries::Bt709,
-        transfer: Transfer::Srgb,
-    };
+    let info = PictureInfo::new(
+        image.width,
+        image.height,
+        PixelFormat::Rgba8,
+        ColorPrimaries::Bt709,
+        Transfer::Srgb,
+    );
     Ok(Output::Picture(PictureOutput::cpu(
         info,
         rgba,

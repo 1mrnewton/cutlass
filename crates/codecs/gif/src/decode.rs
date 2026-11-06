@@ -63,13 +63,13 @@ impl GifDecoder {
 
     fn picture(&self, screen: &Screen, packet: &Packet) -> Result<Output, CodecError> {
         let _ = self;
-        let info = PictureInfo {
-            width: u32::try_from(screen.width).map_err(|_| limit("gif width"))?,
-            height: u32::try_from(screen.height).map_err(|_| limit("gif height"))?,
-            pixel: PixelFormat::Rgba8,
-            primaries: ColorPrimaries::Bt709,
-            transfer: Transfer::Srgb,
-        };
+        let info = PictureInfo::new(
+            u32::try_from(screen.width).map_err(|_| limit("gif width"))?,
+            u32::try_from(screen.height).map_err(|_| limit("gif height"))?,
+            PixelFormat::Rgba8,
+            ColorPrimaries::Bt709,
+            Transfer::Srgb,
+        );
         Ok(Output::Picture(PictureOutput::cpu(
             info,
             screen.canvas.clone(),

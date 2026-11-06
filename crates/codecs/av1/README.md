@@ -12,11 +12,11 @@ A frame the decoder does not implement returns `CodecError` before a picture is 
 
 The normative document is the AOMedia AV1 Bitstream & Decoding Process Specification, version 1.0.0 with Errata 1, 8 January 2019, tag `v1.0.0-errata1`. Syntax, the decoding process, the parsing process, and the default CDF, scan, quantizer, and block-size tables in that document are the rules this crate implements. Annex A names Main profile and levels. Annex B is the length-delimited temporal-unit format.
 
-This crate reads low-overhead OBUs with `obu_has_size_field = 1`. That is the payload an IVF frame or an ISOBMFF sample carries after the container removes its own length. AV1 in ISOBMFF (`av1C`) and AV1 in Matroska stay in the container crates.
+This crate reads low-overhead OBUs with `obu_has_size_field = 1`. That is the payload an IVF frame or an ISOBMFF sample carries after the container removes its own length. A packet may instead be one Annex B temporal unit, with a leb128 length on the unit, on each frame unit, and on each OBU. AV1 in ISOBMFF (`av1C`) and AV1 in Matroska stay in the container crates.
 
 Film grain synthesis is part of the output process in that specification. When a frame sends its own grain parameters, the noise is added to the shown picture. The reference keeps the picture from before that step.
 
-Main profile allows 10-bit 4:2:0 and monochrome. This crate rejects both, so it is not a Main-profile-compliant decoder.
+Main profile allows 10-bit 4:2:0 and monochrome. Profile 1 is 4:4:4 at 8-bit and at 10-bit. Profile 2 is 4:2:2 at 8-bit and at 10-bit. 12-bit 4:2:0, 4:2:2, and 4:4:4 match dav1d. Film grain at 12-bit is refused, and so is 12-bit monochrome. 8-bit self-guided restoration matches on 4:4:4 and on 4:2:2. 10-bit restoration matches on 4:4:4 and on 4:2:2. 12-bit luma self-guided restoration matches on a 256×128 4:2:0 frame. A 512×128 12-bit 4:2:0 frame is Wiener on every plane, and luma has two units. A 512×128 12-bit 4:4:4 frame and a 256×512 12-bit 4:2:2 frame are Wiener on every plane. An 8-bit or 10-bit monochrome picture is one gray plane. The 10-bit monochrome pair leaves film grain off. A 10-bit 4:2:0 picture keeps native samples, including a frame shown wider than it was coded, a keyframe restored by Wiener or self-guided filtering, and film grain on the shown picture. This is not yet a Main-profile-compliant decoder.
 
 ## API
 
@@ -44,21 +44,21 @@ fn shown_size(bytes: &[u8]) -> Result<(u32, u32), CodecError> {
 
 ## Support
 
-The decoder's scope is progressive 8-bit 4:2:0, `seq_profile` 0, one operating point, and dimensions up to 4096×2304. An edge above 4096 is `Limit`.
+The decoder's scope is progressive 8-bit 4:2:0, 8-bit monochrome, and 10-bit 4:2:0, `seq_profile` 0, the selected operating point, and a picture inside the largest defined level. That level is 6.3: width 16384, height 8704, and at most 35,651,584 luma samples. A picture past every defined level is `Limit`. Monochrome output is one gray plane. 10-bit output is little-endian 4:2:0.
 
 Implemented for that scope, and matched against dav1d on the keyframe fixtures named in `STATUS.md`:
 
-- Sequence headers, frame headers, temporal delimiters, frame OBUs, padding, and metadata OBUs that are skipped.
+- Sequence headers, frame headers, tile groups that follow a frame header, large-scale tile lists anchored at the eight reference slots, temporal delimiters, frame OBUs, padding, and metadata OBUs that are skipped. An Annex B temporal unit is accepted as one packet.
 - Eight reference slots, `show_existing_frame`, and a hidden frame (`show_frame = 0` returns no picture).
-- Intra prediction, including the recursive filter on DC luma, chroma-from-luma, and directional modes.
-- Inverse DCT through 64 points, identity and 1D transforms, and an extended intra transform set on a keyframe. A keyframe may select its transform size.
-- Deblocking when the luma loop-filter levels are non-zero. A frame whose two luma levels are zero stays unfiltered.
-- CDEF, uniform tiles, a quantizer matrix, and a superblock quantizer delta.
+- Intra prediction, including the recursive filter on DC luma, chroma-from-luma, and directional modes. A 128×128 frame leaves the intra edge filter off.
+- Inverse DCT through 64 points, identity and 1D transforms, and an extended intra transform set on a keyframe. A keyframe or an inter frame may select its transform size.
+- Deblocking when the luma loop-filter levels are non-zero. A frame whose two luma levels are zero stays unfiltered. A frame with sharpness 7 matches dav1d.
+- CDEF, including one index copied across every 64×64 unit of a 128×128 block. A 128×128 frame uses damping 6. Uniform and non-uniform tiles, a quantizer matrix, and a superblock quantizer delta. A 128×128 keyframe and inter frame add 2 to the chroma DC and AC quantizers. A still picture may use the full sequence header or the reduced header.
 - Super resolution on a keyframe: reconstruction uses the coded width, and the shown picture is the upscaled width.
-- Wiener, self-guided, and switchable loop restoration on a keyframe.
-- Film grain on the shown picture: luma, chroma, overlap, and chroma grain scaled from luma. The reference is stored before grain.
+- Wiener, self-guided, and switchable loop restoration on a keyframe. Self-guided restoration also matches on 8-bit 4:4:4 and 4:2:2 when a chroma plane has more than one unit. A 4:2:0 chroma stripe is 32 samples tall. 10-bit restoration matches on 4:4:4, including switchable chroma, and on 4:2:2. A 512×64 10-bit frame has a switchable luma plane. 12-bit self-guided luma restoration matches on 4:2:0. A 512×128 12-bit 4:2:0 frame, a 512×128 12-bit 4:4:4 frame, and a 256×512 12-bit 4:2:2 frame are Wiener on every plane. A 512×128 frame is Wiener on every plane, and the Wiener CDF is updated between units. The next frame loads that saved Wiener CDF.
+- Film grain on the shown picture: luma, chroma, overlap, chroma grain scaled from luma, and parameters copied from a reference. The reference is stored before grain. A 128×128 frame uses a lag-3 filter and does not clip to the restricted range. Another 128×128 frame uses a grain sample shift of 1. Another 128×128 frame uses a grain scaling shift of 10. A 128×128 4:4:4 frame with an identity matrix clips restricted grain chroma to the luma limit.
 
-Within-frame CDF adaptation is implemented. The encoder leaves CDEF, restoration, super resolution, and film grain off. The decoder applies those tools when a supported keyframe sends them.
+Within-frame CDF adaptation is implemented, including the restoration type read for each unit. The encoder leaves CDEF, restoration, super resolution, and film grain off. The decoder applies those tools when a supported keyframe sends them.
 
 The encoder emits keyframes only. Its quality and rate tests passed in `cargo test -p cutlass-av1` on this machine. It does not emit inter frames.
 
@@ -66,9 +66,9 @@ The encoder emits keyframes only. Its quality and rate tests passed in `cargo te
 
 `cargo test -p cutlass-av1` on this machine passed 61 tests. The embedded keyframe fixtures in that suite match dav1d byte for byte on the tools listed above, including CDEF, film grain, uniform tiles, a quantizer matrix, a superblock quantizer delta, super resolution, Wiener, self-guided, and switchable restoration, the recursive intra filter, and selectable transform sizes.
 
-`a_production_av1_keyframe_matches_dav1d_when_present` passed. The bench below also printed `pixels: match` for that same 3840×2160 keyframe, compared with FFmpeg's libdav1d before either time was taken.
+`a_production_av1_keyframe_matches_dav1d_when_present` passed. `a_monochrome_picture_matches_dav1d` matches a 128×128 three-frame monochrome stream as one gray plane. `a_ten_bit_picture_matches_dav1d` matches a 64×64 10-bit keyframe and inter frame as little-endian samples. `a_ten_bit_superres_picture_matches_dav1d` matches a 10-bit pair that is coded narrower than the 64×64 picture it shows. `a_ten_bit_restoration_picture_matches_dav1d` matches a 10-bit Wiener keyframe and a 10-bit self-guided keyframe. `a_ten_bit_grain_picture_matches_dav1d` matches a 10-bit keyframe and inter frame with film grain on the shown pictures. The bench below also printed `pixels: match` for that same 3840×2160 keyframe, compared with FFmpeg's libdav1d before either time was taken. `every_shown_frame_of_a_real_file_matches_dav1d` compares every shown frame of that file with `ffmpeg -c:v libdav1d -threads 1`. Both sides show 2797 frames. One release run on this machine spent 466.1 s in `Av1Decoder::push` and 481.9 s of wall time. The debug workspace run of that compare finished in 17787.6 s. `every_shown_frame_of_a_second_2160p_file_matches_dav1d` compares a second 3840×2160 file. Both sides show 5326 frames. One release run finished in 361.0 s. The debug run was not repeated.
 
-`single_reference_frames_match_dav1d` matches dav1d on error-resilient frames that keep the largest transform and leave compound, warped, overlapped, reference-motion, order hint, CDEF, restoration, and film grain off. `order_hint_frames_match_dav1d` matches with order hint on, each frame repeating the eight reference hints. `film_grain_stays_off_the_reference` predicts a second frame from the picture stored before grain. A later frame of the 2160p file is outside these checks.
+`single_reference_frames_match_dav1d` matches dav1d on error-resilient frames that keep the largest transform and leave compound, warped, overlapped, reference-motion, order hint, CDEF, restoration, and film grain off. `rotzoom_global_motion_matches_dav1d` matches a rotation-zoom model with high-precision motion vectors and two filter directions. `sharp_interpolation_matches_dav1d` matches a 3840×2160 inter frame whose filter is eight-tap sharp. `tiled_128_inter_matches_dav1d` matches a 3840×2160 inter frame on 128×128 superblocks and an 8×4 tile grid. A skipped block smaller than the superblock still reads the quantizer delta, and a motion candidate or a warp sample in another tile is unavailable. `scaled_reference_matches_dav1d` matches a 64×64 frame that samples a 32×32 reference with the eight-tap smooth filter, and the next frame uses eight-tap sharp. `reference_motion_off_matches_dav1d` matches a 128×128 inter frame that leaves reference motion vectors off while order hint stays on. `smooth_interintra_matches_dav1d` matches a DC interintra blend. `average_compound_matches_dav1d` matches frames that average two references. `distance_compound_matches_dav1d` matches frames that weight two references by order-hint distance. `masked_compound_matches_dav1d` matches a wedge blend. `difference_compound_matches_dav1d` matches a difference-weight blend. `skip_mode_matches_dav1d` matches a pyramid where a skip-mode block uses the nearest compound pair. `local_warp_matches_dav1d` matches a block that warps from its neighbors. `overlapped_motion_matches_dav1d` matches a block that blends the neighboring predictors. The other compound streams do not signal skip mode. `order_hint_frames_match_dav1d` matches with order hint on, each frame repeating the eight reference hints. `switch_frame_matches_dav1d` matches a switch frame and the frames that follow it. `film_grain_stays_off_the_reference` predicts a second frame from the picture stored before grain.
 
 Hostile packets in the suite return an error and leave a stored reference usable. The 30-minute fuzz campaign was not run.
 
@@ -116,19 +116,11 @@ If ffmpeg is missing, the example prints `skip: ffmpeg is not installed` and exi
 
 Refused with a typed error before a picture is published:
 
-- 10-bit, 12-bit, monochrome, 4:2:2, and 4:4:4.
-- A profile other than 0, a second operating point, and the decoder model.
-- 128×128 superblocks, large-scale tile lists, a tile group outside a frame, and non-uniform tile spacing.
-- An OBU without a size field, and a reserved OBU type.
-- A render size that differs from the coded size.
-- Screen-content tools, palette, and intra block copy.
-- Lossless (`base_q_idx` 0).
-- Segmentation, a per-superblock loop-filter delta, and a loop-filter delta update.
-- Film grain copied from another frame. A show-existing frame does not re-apply grain.
-- Compound prediction, warped motion, overlapped motion, reference-frame motion vectors, short reference signaling, and global motion.
-- CDF state carried from another frame, an inter frame that selects its transform size, a scaled reference, and interintra on an inter frame.
+- Film grain at 12-bit, and 12-bit monochrome. 12-bit 4:2:0, 4:2:2, and 4:4:4 match. 8-bit and 10-bit 4:2:2 match. 8-bit and 10-bit 4:4:4 match. 8-bit and 10-bit film grain on 4:4:4 and on 4:2:2 matches dav1d. Monochrome 8-bit and 10-bit are one gray plane. The 10-bit monochrome pair leaves film grain off. 10-bit 4:2:0 is little-endian samples, including super resolution, Wiener or self-guided restoration, and film grain.
+- A tile group that does not follow a frame header. A large-scale tile anchor of 8 or more, or an empty reference slot.
+- A show-existing frame shows the stored picture and does not re-apply grain.
 
-Super resolution on an inter frame is not proven.
+Colour primaries, transfer, matrix, and chroma sample position are published on the picture. A 128×128 frame publishes a vertical chroma position. A display size that differs from the frame size is published too, and the sample buffer stays the frame size. Timing info is kept. Decoder-model info is parsed and the samples still decode. The schedule is not run. `seq_level_idx` is stored. A 4352×64 level 3.0 picture matches dav1d. A picture past every defined level is `Limit` before the frame is allocated. A 64×64 keyframe and inter frame that select filter intra match dav1d. A 64×64 inter frame that selects an interintra wedge matches dav1d. A 64×64 key whose inter frames are 128×128 uses a rotation-zoom model on that scaled reference and matches dav1d. A lossy inter frame whose segment 0 has quantizer index 0 uses a 4×4 Walsh-Hadamard transform on that segment and matches dav1d. A 128×128 inter frame forces LAST on the right-half segment and matches dav1d. A 256×256 keyframe and inter frame that use the reduced transform set match dav1d. An inter frame may signal LAST and GOLDEN and derive the other five reference slots from the stored order hints. That 64×64 six-frame picture matches dav1d. 8-bit and 10-bit film grain on a 64×64 4:4:4 pair and a 64×64 4:2:2 pair matches dav1d.
 
 The encoder does not emit inter frames, CDEF, restoration, super resolution, or film grain. Its blocks stay DC-predicted 4×4 and 8×8.
 

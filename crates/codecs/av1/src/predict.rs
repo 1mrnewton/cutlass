@@ -3,6 +3,7 @@
 use cutlass_decode::CodecError;
 
 use crate::dims::{D67_PRED, DC_PRED, PAETH_PRED, SMOOTH_PRED, V_PRED};
+use crate::sample::{Pix, clip_sample, sample_mid};
 use crate::tables::{
     DR_INTRA_DERIVATIVE, INTRA_EDGE_KERNEL, MODE_TO_ANGLE, SM_WEIGHTS_TX_4X4, SM_WEIGHTS_TX_8X8,
     SM_WEIGHTS_TX_16X16, SM_WEIGHTS_TX_32X32, SM_WEIGHTS_TX_64X64,
@@ -27,13 +28,15 @@ pub struct IntraPred {
     pub max_y: usize,
     /// Recursive intra filter. `None` uses the ordinary intra mode.
     pub filter: Option<u8>,
+    /// 8 or 10. Edge fill and the final clamp use this depth.
+    pub bit_depth: u8,
 }
 
 /// Luma samples and the chroma block they correct.
-pub struct ChromaFromLuma<'a> {
-    pub luma: &'a [u8],
+pub struct ChromaFromLuma<'a, S> {
+    pub luma: &'a [S],
     pub luma_stride: usize,
-    pub chroma: &'a mut [u8],
+    pub chroma: &'a mut [S],
     pub chroma_stride: usize,
     pub x: usize,
     pub y: usize,
@@ -44,11 +47,12 @@ pub struct ChromaFromLuma<'a> {
     pub alpha: i32,
     pub max_luma_w: usize,
     pub max_luma_h: usize,
+    pub bit_depth: u8,
 }
 
 /// Buffers reused across intra blocks. A fresh buffer per block dominated decode time.
 pub struct PredictScratch {
-    pred: Vec<u8>,
+    pred: Vec<i32>,
     above: Vec<i32>,
     left: Vec<i32>,
     ac: Vec<i32>,
@@ -80,7 +84,10 @@ impl Default for PredictScratch {
 }
 
 /// Add the luma high-frequency residual to a DC chroma prediction.
-pub fn chroma_from_luma(job: ChromaFromLuma<'_>, ac: &mut Vec<i32>) -> Result<(), CodecError> {
+pub fn chroma_from_luma<S: Pix>(
+    job: ChromaFromLuma<'_, S>,
+    ac: &mut Vec<i32>,
+) -> Result<(), CodecError> {
     let ChromaFromLuma {
         luma,
         luma_stride,
@@ -95,6 +102,7 @@ pub fn chroma_from_luma(job: ChromaFromLuma<'_>, ac: &mut Vec<i32>) -> Result<()
         alpha,
         max_luma_w,
         max_luma_h,
+        bit_depth,
     } = job;
     let sx = usize::from(sub_x);
     let sy = usize::from(sub_y);
@@ -119,7 +127,7 @@ pub fn chroma_from_luma(job: ChromaFromLuma<'_>, ac: &mut Vec<i32>) -> Result<()
                             what: "chroma from luma",
                         });
                     };
-                    total += i32::from(*sample);
+                    total += sample.to_i32();
                 }
             }
             let value = total << shift;
@@ -145,14 +153,14 @@ pub fn chroma_from_luma(job: ChromaFromLuma<'_>, ac: &mut Vec<i32>) -> Result<()
                     what: "chroma from luma",
                 });
             };
-            *slot = clip1(i32::from(dc) + scaled);
+            *slot = S::from_i32(clip_sample(dc.to_i32() + scaled, bit_depth));
         }
     }
     Ok(())
 }
 
-pub fn predict_intra(
-    plane: &mut [u8],
+pub fn predict_intra<S: Pix>(
+    plane: &mut [S],
     stride: usize,
     block: &IntraPred,
     scratch: &mut PredictScratch,
@@ -162,7 +170,7 @@ pub fn predict_intra(
     let pred_len = block.w.saturating_mul(block.h);
     grow_i32(&mut scratch.above, edge_len);
     grow_i32(&mut scratch.left, edge_len);
-    grow_u8(&mut scratch.pred, pred_len);
+    grow_i32(&mut scratch.pred, pred_len);
     scratch.above[..edge_len].fill(0);
     scratch.left[..edge_len].fill(0);
     let PredictScratch {
@@ -227,19 +235,13 @@ pub fn predict_intra(
             let Some(slot) = plane.get_mut(at) else {
                 continue;
             };
-            *slot = pred[row * block.w + col];
+            *slot = S::from_i32(pred[row * block.w + col]);
         }
     }
     Ok(())
 }
 
 fn grow_i32(buf: &mut Vec<i32>, n: usize) {
-    if buf.len() < n {
-        buf.resize(n, 0);
-    }
-}
-
-fn grow_u8(buf: &mut Vec<u8>, n: usize) {
     if buf.len() < n {
         buf.resize(n, 0);
     }
@@ -304,7 +306,7 @@ fn filter_intra_pred(
     left: &[i32],
     block: &IntraPred,
     mode: u8,
-    pred: &mut [u8],
+    pred: &mut [i32],
 ) -> Result<(), CodecError> {
     let Some(taps) = FILTER_TAPS.get(usize::from(mode)) else {
         return Err(CodecError::Malformed {
@@ -324,12 +326,12 @@ fn filter_intra_pred(
                     } else if j4 == 0 && i == 0 {
                         left[index((i2 << 1) as i32 - 1)]
                     } else {
-                        i32::from(pred[((i2 << 1) - 1) * block.w + (j4 << 2) + i - 1])
+                        pred[((i2 << 1) - 1) * block.w + (j4 << 2) + i - 1]
                     }
                 } else if j4 == 0 {
                     left[index((i2 << 1) as i32 + i as i32 - 5)]
                 } else {
-                    i32::from(pred[((i2 << 1) + i - 5) * block.w + (j4 << 2) - 1])
+                    pred[((i2 << 1) + i - 5) * block.w + (j4 << 2) - 1]
                 };
             }
             for i1 in 0..2 {
@@ -340,7 +342,7 @@ fn filter_intra_pred(
                         sum += i32::from(*weight) * sample;
                     }
                     pred[((i2 << 1) + i1) * block.w + (j4 << 2) + j1] =
-                        clip1(round2_signed(sum, 4));
+                        clip1(round2_signed(sum, 4), block.bit_depth);
                 }
             }
         }
@@ -352,14 +354,21 @@ fn directional(mode: u8) -> bool {
     (V_PRED..=D67_PRED).contains(&mode)
 }
 
-fn fill_edges(plane: &[u8], stride: usize, block: &IntraPred, above: &mut [i32], left: &mut [i32]) {
+fn fill_edges<S: Pix>(
+    plane: &[S],
+    stride: usize,
+    block: &IntraPred,
+    above: &mut [i32],
+    left: &mut [i32],
+) {
     let x = block.x as i32;
     let y = block.y as i32;
+    let mid = sample_mid(block.bit_depth);
     if !block.have_above && block.have_left {
-        let sample = i32::from(at(plane, stride, x - 1, y));
+        let sample = at(plane, stride, x - 1, y);
         fill(above, 0, block.w + block.h, sample);
     } else if !block.have_above {
-        fill(above, 0, block.w + block.h, 127);
+        fill(above, 0, block.w + block.h, mid - 1);
     } else {
         let limit = block.max_x.min(
             block.x
@@ -371,15 +380,14 @@ fn fill_edges(plane: &[u8], stride: usize, block: &IntraPred, above: &mut [i32],
                 - 1,
         );
         for i in 0..(block.w + block.h) {
-            above[index(i as i32)] =
-                i32::from(at(plane, stride, (block.x + i).min(limit) as i32, y - 1));
+            above[index(i as i32)] = at(plane, stride, (block.x + i).min(limit) as i32, y - 1);
         }
     }
     if !block.have_left && block.have_above {
-        let sample = i32::from(at(plane, stride, x, y - 1));
+        let sample = at(plane, stride, x, y - 1);
         fill(left, 0, block.w + block.h, sample);
     } else if !block.have_left {
-        fill(left, 0, block.w + block.h, 129);
+        fill(left, 0, block.w + block.h, mid + 1);
     } else {
         let limit = block.max_y.min(
             block.y
@@ -391,25 +399,24 @@ fn fill_edges(plane: &[u8], stride: usize, block: &IntraPred, above: &mut [i32],
                 - 1,
         );
         for i in 0..(block.w + block.h) {
-            left[index(i as i32)] =
-                i32::from(at(plane, stride, x - 1, (block.y + i).min(limit) as i32));
+            left[index(i as i32)] = at(plane, stride, x - 1, (block.y + i).min(limit) as i32);
         }
     }
     let corner = if block.have_above && block.have_left {
-        i32::from(at(plane, stride, x - 1, y - 1))
+        at(plane, stride, x - 1, y - 1)
     } else if block.have_above {
-        i32::from(at(plane, stride, x, y - 1))
+        at(plane, stride, x, y - 1)
     } else if block.have_left {
-        i32::from(at(plane, stride, x - 1, y))
+        at(plane, stride, x - 1, y)
     } else {
-        128
+        mid
     };
     above[index(-1)] = corner;
     left[index(-1)] = corner;
 }
 
-fn at(plane: &[u8], stride: usize, x: i32, y: i32) -> u8 {
-    plane[(y as usize) * stride + x as usize]
+fn at<S: Pix>(plane: &[S], stride: usize, x: i32, y: i32) -> i32 {
+    plane[(y as usize) * stride + x as usize].to_i32()
 }
 
 fn index(i: i32) -> usize {
@@ -422,7 +429,7 @@ fn fill(buf: &mut [i32], from: i32, count: usize, sample: i32) {
     }
 }
 
-fn dc_pred(above: &[i32], left: &[i32], block: &IntraPred, pred: &mut [u8]) {
+fn dc_pred(above: &[i32], left: &[i32], block: &IntraPred, pred: &mut [i32]) {
     let avg = if block.have_left && block.have_above {
         let mut sum = 0i32;
         for k in 0..block.h {
@@ -446,12 +453,12 @@ fn dc_pred(above: &[i32], left: &[i32], block: &IntraPred, pred: &mut [u8]) {
         }
         (sum + ((block.w >> 1) as i32)) >> block.w.trailing_zeros()
     } else {
-        128
+        sample_mid(block.bit_depth)
     };
-    pred.fill(clip1(avg));
+    pred.fill(clip1(avg, block.bit_depth));
 }
 
-fn smooth_pred(above: &[i32], left: &[i32], block: &IntraPred, pred: &mut [u8]) {
+fn smooth_pred(above: &[i32], left: &[i32], block: &IntraPred, pred: &mut [i32]) {
     let weights_x = weights(block.w);
     let weights_y = weights(block.h);
     for row in 0..block.h {
@@ -477,7 +484,7 @@ fn smooth_pred(above: &[i32], left: &[i32], block: &IntraPred, pred: &mut [u8]) 
                     8,
                 )
             };
-            pred[row * block.w + col] = clip1(value);
+            pred[row * block.w + col] = clip1(value, block.bit_depth);
         }
     }
 }
@@ -492,7 +499,7 @@ fn weights(size: usize) -> &'static [u16] {
     }
 }
 
-fn paeth_pred(above: &[i32], left: &[i32], block: &IntraPred, pred: &mut [u8]) {
+fn paeth_pred(above: &[i32], left: &[i32], block: &IntraPred, pred: &mut [i32]) {
     for row in 0..block.h {
         for col in 0..block.w {
             let top = above[index(col as i32)];
@@ -509,7 +516,7 @@ fn paeth_pred(above: &[i32], left: &[i32], block: &IntraPred, pred: &mut [u8]) {
             } else {
                 corner
             };
-            pred[row * block.w + col] = clip1(sample);
+            pred[row * block.w + col] = clip1(sample, block.bit_depth);
         }
     }
 }
@@ -518,7 +525,7 @@ fn directional_pred(
     above: &mut [i32],
     left: &mut [i32],
     block: &IntraPred,
-    pred: &mut [u8],
+    pred: &mut [i32],
     dup: &mut Vec<i32>,
     edge: &mut Vec<i32>,
 ) -> Result<(), CodecError> {
@@ -589,7 +596,7 @@ struct DirSample<'a> {
     col: usize,
 }
 
-fn directional_sample(sample: DirSample<'_>) -> u8 {
+fn directional_sample(sample: DirSample<'_>) -> i32 {
     let DirSample {
         above,
         left,
@@ -608,43 +615,55 @@ fn directional_sample(sample: DirSample<'_>) -> u8 {
         let shift = ((idx << upsample_above) >> 1) & 0x1f;
         let max_base = ((block.w + block.h - 1) as i32) << upsample_above;
         if base < max_base {
-            clip1(round2_i32(
-                above[index(base)] * (32 - shift) + above[index(base + 1)] * shift,
-                5,
-            ))
+            clip1(
+                round2_i32(
+                    above[index(base)] * (32 - shift) + above[index(base + 1)] * shift,
+                    5,
+                ),
+                block.bit_depth,
+            )
         } else {
-            clip1(above[index(max_base)])
+            clip1(above[index(max_base)], block.bit_depth)
         }
     } else if (91..180).contains(&angle) {
         let idx = ((col as i32) << 6) - (row as i32 + 1) * dx;
         let base = idx >> (6 - upsample_above);
         if base >= -(1 << upsample_above) {
             let shift = ((idx << upsample_above) >> 1) & 0x1f;
-            clip1(round2_i32(
-                above[index(base)] * (32 - shift) + above[index(base + 1)] * shift,
-                5,
-            ))
+            clip1(
+                round2_i32(
+                    above[index(base)] * (32 - shift) + above[index(base + 1)] * shift,
+                    5,
+                ),
+                block.bit_depth,
+            )
         } else {
             let idx = ((row as i32) << 6) - (col as i32 + 1) * dy;
             let base = idx >> (6 - upsample_left);
             let shift = ((idx << upsample_left) >> 1) & 0x1f;
-            clip1(round2_i32(
-                left[index(base)] * (32 - shift) + left[index(base + 1)] * shift,
-                5,
-            ))
+            clip1(
+                round2_i32(
+                    left[index(base)] * (32 - shift) + left[index(base + 1)] * shift,
+                    5,
+                ),
+                block.bit_depth,
+            )
         }
     } else if angle > 180 {
         let idx = (col as i32 + 1) * dy;
         let base = (idx >> (6 - upsample_left)) + ((row as i32) << upsample_left);
         let shift = ((idx << upsample_left) >> 1) & 0x1f;
-        clip1(round2_i32(
-            left[index(base)] * (32 - shift) + left[index(base + 1)] * shift,
-            5,
-        ))
+        clip1(
+            round2_i32(
+                left[index(base)] * (32 - shift) + left[index(base + 1)] * shift,
+                5,
+            ),
+            block.bit_depth,
+        )
     } else if angle == 90 {
-        clip1(above[index(col as i32)])
+        clip1(above[index(col as i32)], block.bit_depth)
     } else {
-        clip1(left[index(row as i32)])
+        clip1(left[index(row as i32)], block.bit_depth)
     }
 }
 
@@ -703,7 +722,7 @@ fn upsample_edge(
     buf[index(-2)] = dup[0];
     for i in 0..num {
         let s = -dup[i] + 9 * dup[i + 1] + 9 * dup[i + 2] - dup[i + 3];
-        buf[index(2 * i as i32 - 1)] = i32::from(clip1(round2_i32(s, 4)));
+        buf[index(2 * i as i32 - 1)] = clip1(round2_i32(s, 4), block.bit_depth);
         buf[index(2 * i as i32)] = dup[i + 2];
     }
     1
@@ -785,6 +804,6 @@ fn round2_i32(x: i32, n: u32) -> i32 {
     if n == 0 { x } else { (x + (1 << (n - 1))) >> n }
 }
 
-fn clip1(value: i32) -> u8 {
-    value.clamp(0, 255) as u8
+fn clip1(value: i32, depth: u8) -> i32 {
+    clip_sample(value, depth)
 }

@@ -3749,6 +3749,10 @@ fn ruler_and_lanes(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
         rate,
         drop_frame,
     );
+    // Escape calls off a clip drag: the clip goes back and the release does nothing.
+    if shell.clip_dragging() && ui.input(|input| input.key_pressed(egui::Key::Escape)) {
+        shell.escape_clip_drag();
+    }
     let snap_at = shell.snap_line();
     let rows = shell.lanes();
     let kinds: Vec<(bool, f32)> = rows
@@ -5625,7 +5629,9 @@ fn paint_clip(
             }
             let floating =
                 Rect::from_min_size(Pos2::new(pos.x - grab_x, pos.y - grab_y), clip_rect.size());
-            paint_floating_clip(shell, ui, lane, clip, floating, lanes_left);
+            if !shell.drag_escaped(&clip.id) {
+                paint_floating_clip(shell, ui, lane, clip, floating, lanes_left);
+            }
         }
         if response.drag_stopped() && !moved {
             if ui.input(|input| input.modifiers.shift) {
@@ -5974,7 +5980,7 @@ fn finish_clip_pointer(
     };
     let (grab_x, _) = shell.clip_grab(id);
     let x = f64::from(pos.x - grab_x - lanes_left).max(0.0);
-    if edge.is_some() && shell.clip_edge(id).is_none() {
+    if edge.is_some() && shell.clip_edge(id).is_none() && !shell.drag_escaped(id) {
         shell.begin_clip_drag(id.clone(), edge, (pos.x, pos.y), (0.0, 0.0));
     }
     let landed = match spot {
@@ -10736,6 +10742,67 @@ mod tests {
             (moved - 80.0).abs() < 3.0,
             "the clip moved {moved} points for an 80 point drag"
         );
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn escape_during_a_clip_drag_puts_the_clip_back() {
+        let (mut shell, temp) = open_span("escape", 2_000_000);
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let press = |pos: Pos2, pressed: bool| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        let escape = egui::Event::Key {
+            key: egui::Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::default(),
+        };
+        let frame = |events: Vec<egui::Event>, shell: &mut Shell, view: &mut ViewState| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: screen,
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, view, None),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        let output = frame(Vec::new(), &mut shell, &mut view);
+        let from = text_pos(&output, "segment").expect("clip") + Vec2::new(60.0, 0.0);
+        let to = from + Vec2::new(150.0, 0.0);
+        let before = shell.draft().unwrap().tracks.clone();
+        let revision = shell.revision();
+        frame(
+            vec![egui::Event::PointerMoved(from), press(from, true)],
+            &mut shell,
+            &mut view,
+        );
+        frame(vec![egui::Event::PointerMoved(to)], &mut shell, &mut view);
+        assert!(shell.move_preview().is_some());
+        frame(vec![escape], &mut shell, &mut view);
+        assert!(shell.move_preview().is_none());
+        frame(
+            vec![egui::Event::PointerMoved(to + Vec2::new(10.0, 0.0))],
+            &mut shell,
+            &mut view,
+        );
+        assert!(shell.move_preview().is_none());
+        frame(
+            vec![egui::Event::PointerMoved(to), press(to, false)],
+            &mut shell,
+            &mut view,
+        );
+        assert_eq!(shell.draft().unwrap().tracks, before);
+        assert_eq!(shell.revision(), revision);
         let _ = std::fs::remove_dir_all(&temp);
     }
 

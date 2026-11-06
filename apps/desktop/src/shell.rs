@@ -766,6 +766,8 @@ pub struct Shell {
     beating: bool,
     selected_beat: Option<BeatPick>,
     clip_drag: Option<ClipDrag>,
+    /// A clip whose drag Escape called off; its release does nothing.
+    escaped_drag: Option<SegmentId>,
     pending_trim: Option<PendingTrim>,
     pending_moves: Vec<ClipMove>,
     notice: String,
@@ -880,6 +882,7 @@ impl Shell {
             beating: false,
             selected_beat: None,
             clip_drag: None,
+            escaped_drag: None,
             pending_trim: None,
             pending_moves: Vec::new(),
             notice: String::new(),
@@ -2558,6 +2561,7 @@ impl Shell {
     ) {
         self.pending_trim = None;
         self.pending_moves.clear();
+        self.escaped_drag = None;
         if edge.is_some() {
             self.select(Some(id.clone()));
         }
@@ -2604,6 +2608,9 @@ impl Shell {
     /// Follow the pointer without writing the draft. The next paint uses this edge.
     pub fn preview_edge(&mut self, segment_id: SegmentId, edge: TrimEdge, x: f64) {
         self.pending_moves.clear();
+        if self.drag_escaped(&segment_id) {
+            return;
+        }
         match self.plan_trim(segment_id, edge, x) {
             Ok(plan) => {
                 self.pending_trim = Some(PendingTrim {
@@ -2641,6 +2648,10 @@ impl Shell {
 
     fn preview_over(&mut self, segment_id: SegmentId, x: f64, over: Over) {
         self.pending_trim = None;
+        if self.drag_escaped(&segment_id) {
+            self.pending_moves.clear();
+            return;
+        }
         // The preview's new lane is not on the draft, so its id is only a name.
         let new_track = TrackId::new("new-lane");
         self.pending_moves = self
@@ -2728,6 +2739,26 @@ impl Shell {
         self.pending_moves.clear();
     }
 
+    /// A clip drag is held.
+    #[must_use]
+    pub fn clip_dragging(&self) -> bool {
+        self.clip_drag.is_some()
+    }
+
+    /// Escape during a drag: the clip goes back and the release that follows
+    /// does nothing. The draft is not written.
+    pub fn escape_clip_drag(&mut self) {
+        self.escaped_drag = self.clip_drag.take().map(|drag| drag.id);
+        self.pending_trim = None;
+        self.pending_moves.clear();
+    }
+
+    /// Escape called off this clip's drag, which has not been let go yet.
+    #[must_use]
+    pub fn drag_escaped(&self, id: &SegmentId) -> bool {
+        self.escaped_drag.as_ref() == Some(id)
+    }
+
     /// Finish the drag that `begin_clip_drag` started. An edge trims. The body moves.
     pub fn finish_clip_drag(
         &mut self,
@@ -2749,6 +2780,12 @@ impl Shell {
     }
 
     fn finish_over(&mut self, segment_id: SegmentId, x: f64, over: Over) -> Result<(), ShellError> {
+        if self.escaped_drag.take().is_some_and(|id| id == segment_id) {
+            self.clip_drag = None;
+            self.pending_trim = None;
+            self.pending_moves.clear();
+            return Ok(());
+        }
         let edge = self
             .clip_drag
             .take()

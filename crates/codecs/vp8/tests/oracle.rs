@@ -80,8 +80,12 @@ mod oracle {
     fn bad_key_frames_are_errors_not_panics() {
         let frame = fixture("libvpx.vp8");
         let decode = |data: &[u8], limit: u64| Decoder::with_max_pixels(limit).decode(data);
-        // Every truncation fails cleanly, as it does in libwebp and FFmpeg.
-        for cut in 0..frame.len() {
+        // Bytes past the end of the last partition read as zero, as libvpx
+        // and FFmpeg read them, so losing only the final byte still
+        // decodes. Every shorter cut fails cleanly.
+        let last = frame.len() - 1;
+        assert!(decode(&frame[..last], 1 << 20).unwrap().is_some());
+        for cut in 0..last {
             assert!(
                 decode(&frame[..cut], 1 << 20).is_err(),
                 "cut at {cut} decoded"

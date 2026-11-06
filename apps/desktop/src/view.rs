@@ -2790,7 +2790,59 @@ fn preview_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rec
     {
         paint_safe_areas(ui, frame, canvas);
     }
+    if let (Some(placed), Some(size)) = (view.preview_canvas, canvas) {
+        pick_layer(shell, ui, frame, placed, size);
+    }
     transport_bar(shell, ui, view, transport);
+}
+
+/// While an object is being picked: a click on the canvas adds a point
+/// (shift takes a part out), and each point so far is marked.
+fn pick_layer(shell: &mut Shell, ui: &mut Ui, frame: Rect, placed: Rect, size: Vec2) {
+    if shell.picking().is_none() {
+        return;
+    }
+    let area = placed.intersect(frame);
+    let response = ui
+        .interact(area, ui.scope_id().with("preview-pick"), Sense::click())
+        .on_hover_cursor(egui::CursorIcon::Crosshair);
+    if response.clicked()
+        && let Some(pos) = response.interact_pointer_pos()
+    {
+        let (x, y) = canvas_pixel(placed, size, pos);
+        let keep = !ui.input(|input| input.modifiers.shift);
+        if let Err(error) = shell.pick_at(x, y, keep) {
+            shell.set_notice(error.to_string());
+        }
+    }
+    let painter = ui.painter().with_clip_rect(frame.intersect(ui.clip_rect()));
+    for click in shell
+        .picking()
+        .map(|p| p.clicks.as_slice())
+        .unwrap_or_default()
+    {
+        let at = screen_point(placed, size, click.canvas);
+        let colour = if click.keep {
+            tokens::EXPORT
+        } else {
+            tokens::CLOSE
+        };
+        painter.circle(at, 5.0, colour, egui::Stroke::new(1.5, Color32::WHITE));
+    }
+}
+
+/// Where screen point `pos` falls on a canvas of `size` pixels drawn at
+/// `placed`.
+fn canvas_pixel(placed: Rect, size: Vec2, pos: Pos2) -> (f64, f64) {
+    let at = (pos - placed.min) / placed.size() * size;
+    (f64::from(at.x), f64::from(at.y))
+}
+
+/// Where canvas pixel `point` is on screen, for a canvas of `size` drawn at
+/// `placed`.
+fn screen_point(placed: Rect, size: Vec2, point: (f64, f64)) -> Pos2 {
+    let at = Vec2::new(point.0 as f32, point.1 as f32) / size * placed.size();
+    placed.min + at
 }
 
 /// The action-safe and title-safe frames over the canvas at `canvas`,
@@ -7786,6 +7838,21 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn a_click_on_the_preview_lands_on_the_canvas_pixel_under_it() {
+        let placed = Rect::from_min_size(Pos2::new(100.0, 50.0), Vec2::new(480.0, 270.0));
+        let size = Vec2::new(1920.0, 1080.0);
+        assert_eq!(
+            canvas_pixel(placed, size, Pos2::new(100.0, 50.0)),
+            (0.0, 0.0)
+        );
+        assert_eq!(
+            canvas_pixel(placed, size, Pos2::new(340.0, 185.0)),
+            (960.0, 540.0)
+        );
+        assert_eq!(screen_point(placed, size, (1920.0, 1080.0)), placed.max);
     }
 
     #[test]

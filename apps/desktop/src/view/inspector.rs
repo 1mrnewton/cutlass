@@ -987,9 +987,8 @@ fn cutout_page(
     state: &mut InspectorState,
     inspection: &Inspection,
 ) {
-    for label in ["Remove background", "Custom cutout"] {
-        later_row(ui, label);
-    }
+    later_row(ui, "Remove background");
+    select_object(shell, ui, inspection);
     let key = inspection.chroma;
     let header = section(
         ui,
@@ -1053,6 +1052,52 @@ fn cutout_page(
             });
         }
     });
+}
+
+/// Select object: click the object on the preview and the clip is cut down
+/// to it. Clear takes the selection off.
+fn select_object(shell: &mut Shell, ui: &mut Ui, inspection: &Inspection) {
+    ui.add_space(8.0);
+    ui.label(
+        RichText::new("Select object")
+            .size(13.0)
+            .color(tokens::TEXT),
+    );
+    let picking = shell.picking().is_some();
+    if picking {
+        note(
+            ui,
+            "Click the object on the preview. Shift-click to take a part out.",
+        );
+    } else if !shell.vision_model_ready() {
+        note(ui, "The selection model is not on this machine yet.");
+    }
+    ui.horizontal(|ui| {
+        if picking {
+            if ui.button(RichText::new("Done").size(12.0)).clicked() {
+                shell.stop_picking();
+            }
+        } else if ui
+            .add_enabled(
+                shell.pick_enabled(),
+                egui::Button::new(RichText::new("Select object").size(12.0)),
+            )
+            .on_disabled_hover_text("Put the playhead on an unlocked video clip.")
+            .clicked()
+        {
+            send(shell, Shell::start_picking);
+        }
+        if ui
+            .add_enabled(
+                inspection.selected,
+                egui::Button::new(RichText::new("Clear").size(12.0)),
+            )
+            .clicked()
+        {
+            send(shell, Shell::clear_selection);
+        }
+    });
+    divider(ui);
 }
 
 /// The Mask page: a shape cuts the clip in its own frame, or with `colour`

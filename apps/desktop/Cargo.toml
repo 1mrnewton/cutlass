@@ -23,7 +23,9 @@ cutlass-download = { path = "../../crates/download", version = "0.1.0", features
 cutlass-session = { path = "../../crates/session", version = "0.1.0" }
 cutlass-eval = { path = "../../crates/eval", version = "0.1.0" }
 cutlass-engine = { path = "../../crates/engine", version = "0.1.0" }
+cutlass-picture = { path = "../../crates/picture", version = "0.1.0" }
 cutlass-transcription = { path = "../../crates/transcription", version = "0.1.0" }
+cutlass-vision = { path = "../../crates/vision", version = "0.1.0" }
 cutlass-font = { path = "../../crates/font", version = "0.1.0" }
 cutlass-icons = { path = "../../crates/icons", version = "0.1.0" }
 cutlass-agent = { path = "../../crates/agent", version = "0.1.0", features = ["script"] }

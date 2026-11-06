@@ -53,6 +53,7 @@ mod inspector;
 mod listen;
 mod proxy;
 mod render;
+mod select;
 mod speech_model;
 mod update;
 
@@ -325,6 +326,8 @@ pub struct Inspection {
     pub chroma: Option<cutlass_effects::Chroma>,
     /// The clip's mask.
     pub mask: Option<cutlass_effects::Mask>,
+    /// Whether a click-to-select selection cuts the clip.
+    pub selected: bool,
     /// Where the clip's colour work, or the adjustment layer, shows.
     pub color_mask: Option<cutlass_effects::Mask>,
     /// The speed curve in force, when the clip runs on one.
@@ -772,6 +775,10 @@ pub struct Shell {
     next_id: u64,
     /// The local speech model, loaded on the first transcript that can hear a clip.
     speech: RefCell<Option<ParakeetUnified>>,
+    /// The selection model, loaded on the first click-to-select.
+    vision: Option<select::VisionModel>,
+    /// The object click-to-select is picking, while the preview takes clicks.
+    picking: Option<select::Picking>,
     /// What each speech job heard, by id, for the assistant's tools.
     heard: std::collections::HashMap<String, Result<String, String>>,
     hearings: u64,
@@ -878,6 +885,8 @@ impl Shell {
             saved: None,
             next_id: 0,
             speech: RefCell::new(None),
+            vision: None,
+            picking: None,
             heard: std::collections::HashMap::new(),
             hearings: 0,
             wants_speech_model: false,
@@ -3808,6 +3817,7 @@ impl Shell {
             lut: cutlass_effects::segment_lut(draft, segment).map(|lut| (lut.name, lut.strength)),
             chroma: cutlass_effects::segment_chroma(draft, segment),
             mask: cutlass_effects::segment_mask(draft, segment),
+            selected: cutlass_effects::segment_has_selection(draft, segment),
             color_mask: cutlass_effects::segment_color_mask(draft, segment),
             speed_curve: speed_curve(draft, segment),
             change_pitch: segment.is_tone_modify,

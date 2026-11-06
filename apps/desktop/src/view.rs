@@ -830,7 +830,18 @@ fn install_style(style: &mut egui::Style) {
     style.visuals.window_fill = tokens::PANEL;
     style.visuals.extreme_bg_color = tokens::GAP;
     style.visuals.faint_bg_color = tokens::PROJECT_BAR;
-    style.visuals.widgets.noninteractive.bg_stroke = egui::Stroke::NONE;
+    // No outline on any widget, in any state: buttons and fields show by
+    // their fill alone.
+    let widgets = &mut style.visuals.widgets;
+    for state in [
+        &mut widgets.noninteractive,
+        &mut widgets.inactive,
+        &mut widgets.hovered,
+        &mut widgets.active,
+        &mut widgets.open,
+    ] {
+        state.bg_stroke = egui::Stroke::NONE;
+    }
     style.text_styles.insert(
         egui::TextStyle::Body,
         FontId::proportional(tokens::TYPE_SIZE),

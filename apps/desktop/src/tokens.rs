@@ -14,6 +14,8 @@ pub const PROJECT_BAR: Color32 = Color32::from_rgb(0x26, 0x26, 0x26);
 pub const EXPORT: Color32 = Color32::from_rgb(0x00, 0xc8, 0xd7);
 /// Ink on the export control.
 pub const EXPORT_INK: Color32 = Color32::from_rgb(0x06, 0x22, 0x26);
+/// The export control under the pointer.
+pub const EXPORT_HOVER: Color32 = Color32::from_rgb(0x2a, 0xd4, 0xe0);
 /// Primary text.
 pub const TEXT: Color32 = Color32::from_rgb(0xf3, 0xf3, 0xf3);
 /// Secondary text.
@@ -46,6 +48,8 @@ pub const SCRIM: Color32 = Color32::from_black_alpha(140);
 pub const RAISED: Color32 = Color32::from_rgb(0x2a, 0x2a, 0x2a);
 /// A well sunk into a panel, such as the inspector's page bar.
 pub const INSET: Color32 = Color32::from_rgb(0x26, 0x26, 0x26);
+/// A button held down.
+pub const PRESSED: Color32 = Color32::from_rgb(0x3a, 0x3a, 0x3a);
 /// A scroll thumb at rest.
 pub const SCROLL_THUMB: Color32 = Color32::from_rgb(0x46, 0x46, 0x46);
 /// A scroll thumb under the pointer.
@@ -75,6 +79,13 @@ pub const SCROLL_BAR: f32 = 6.0;
 pub const SCROLL_INSET: f32 = 2.0;
 /// The shortest a scroll thumb gets on long content.
 pub const SCROLL_MIN_THUMB: f32 = 24.0;
+
+/// A text button's padding, and the least height of any button.
+pub const BUTTON_PAD_X: f32 = 10.0;
+pub const BUTTON_PAD_Y: f32 = 4.0;
+pub const BUTTON_HEIGHT: f32 = 24.0;
+/// The gap between a button's icon and its label.
+pub const BUTTON_GAP: f32 = 6.0;
 
 pub const HEAD_HEIGHT: f32 = 38.0;
 pub const SPLIT: f32 = 6.0;

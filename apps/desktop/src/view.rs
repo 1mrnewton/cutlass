@@ -3893,19 +3893,27 @@ fn ruler_and_lanes(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
     zoom_timeline(shell, ui, lane_area);
 }
 
-/// How far the lanes may move: none while they fit, else far enough to
-/// bring the top lane or the bottom lane in with a little room.
+/// How far the lanes may move: none while they fit with a lane's height to
+/// spare above and below, else far enough to bring that room into view past
+/// the top lane or the bottom one, so there is always space to drop a clip
+/// or a library card that opens a new lane there.
 fn lane_scroll_range(boxes: &[Rect], area: Rect) -> (f32, f32) {
-    const ROOM: f32 = 8.0;
+    let room = lane_room();
     let (Some(top), Some(bottom)) = (
         boxes.iter().map(|rect| rect.top()).reduce(f32::min),
         boxes.iter().map(|rect| rect.bottom()).reduce(f32::max),
     ) else {
         return (0.0, 0.0);
     };
-    let low = (area.bottom() - ROOM - bottom).min(0.0);
-    let high = (area.top() + ROOM - top).max(0.0);
+    let low = (area.bottom() - room - bottom).min(0.0);
+    let high = (area.top() + room - top).max(0.0);
     (low, high)
+}
+
+/// The space kept past the top lane and the bottom one: a regular lane and
+/// the gap beside it.
+fn lane_room() -> f32 {
+    row_height(false, false) + 8.0
 }
 
 /// This frame's wheel, whether the zoom modifier is held, and the pointer.
@@ -10994,6 +11002,34 @@ mod tests {
         output.textures_delta.clear();
         let top = ctx.memory(|memory| memory.layer_ids().last());
         assert_eq!(top, Some(notice_layer()));
+    }
+
+    #[test]
+    fn the_lanes_scroll_to_leave_a_lane_of_room_past_the_top_and_bottom() {
+        let area = Rect::from_min_size(Pos2::new(0.0, 100.0), Vec2::new(800.0, 300.0));
+        // Ten rows run well past both edges.
+        let boxes: Vec<Rect> = (0..10)
+            .map(|index| {
+                let top = 100.0 - 200.0 + index as f32 * 56.0;
+                Rect::from_min_size(Pos2::new(0.0, top), Vec2::new(800.0, 48.0))
+            })
+            .collect();
+        let (low, high) = lane_scroll_range(&boxes, area);
+        let top = boxes[0].top() + high;
+        assert!(top - area.top() >= lane_room(), "room above the top lane");
+        let bottom = boxes[9].bottom() + low;
+        assert!(
+            area.bottom() - bottom >= lane_room(),
+            "room under the bottom lane"
+        );
+
+        // Rows that fill the sheet without a lane to spare still scroll.
+        let snug = [Rect::from_min_size(
+            Pos2::new(0.0, 104.0),
+            Vec2::new(800.0, 292.0),
+        )];
+        let (low, high) = lane_scroll_range(&snug, area);
+        assert!(low < high);
     }
 
     #[test]

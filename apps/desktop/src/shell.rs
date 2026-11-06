@@ -6070,6 +6070,7 @@ impl Shell {
     /// job's progress; Cancel leaves no file. A codec this machine cannot
     /// encode is refused before anything is written.
     pub fn export(&mut self, request: ExportRequest) -> Result<(), ShellError> {
+        cutlass_logger::info!("export asked: {request:?}");
         if request.codec == CodecId::Png {
             return self.export_png(request);
         }
@@ -6406,7 +6407,8 @@ impl Shell {
                     )
                     .map(|_| ()),
                 };
-                if written.is_err() {
+                if let Err(error) = &written {
+                    cutlass_logger::error!("export {}: {error}", path.display());
                     break;
                 }
             }

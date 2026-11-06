@@ -38,6 +38,43 @@ impl Model {
 }
 
 impl Model {
+    /// No move: a similarity, or for `plane` a homography.
+    pub(crate) fn identity(plane: bool) -> Self {
+        if plane {
+            Self::Homography([1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0])
+        } else {
+            Self::Similarity {
+                a: 1.0,
+                b: 0.0,
+                tx: 0.0,
+                ty: 0.0,
+            }
+        }
+    }
+
+    /// This move, then a slide of `dx`, `dy`.
+    pub(crate) fn shifted(&self, dx: f64, dy: f64) -> Self {
+        match *self {
+            Self::Similarity { a, b, tx, ty } => Self::Similarity {
+                a,
+                b,
+                tx: tx + dx,
+                ty: ty + dy,
+            },
+            Self::Homography(h) => Self::Homography([
+                h[0] + dx * h[6],
+                h[1] + dx * h[7],
+                h[2] + dx * h[8],
+                h[3] + dy * h[6],
+                h[4] + dy * h[7],
+                h[5] + dy * h[8],
+                h[6],
+                h[7],
+                h[8],
+            ]),
+        }
+    }
+
     /// The move back, or `None` when this one squashes the plane flat.
     pub(crate) fn inverse(&self) -> Option<Self> {
         match *self {

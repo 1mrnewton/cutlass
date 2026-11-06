@@ -7,7 +7,9 @@
 //! Lucas-Kanade and a forward-backward check, then a RANSAC fit finds the
 //! target's move: [`Mode::Object`] fits move, scale and turn,
 //! [`Mode::Plane`] fits a homography so all four corners follow a tilt.
-//! Each step answers the new corners and a confidence, or [`Step::Lost`].
+//! Each step answers the new corners and a confidence, [`Step::Hidden`]
+//! while the target is out of sight and looked for again by correlation,
+//! or [`Step::Lost`] once it stayed away too long.
 //! Pure Rust; no model, no file.
 
 mod fit;
@@ -15,6 +17,7 @@ mod flow;
 mod gray;
 mod points;
 mod quad;
+mod search;
 
 use fit::{Model, Random, ransac};
 use gray::Pyramid;
@@ -71,7 +74,10 @@ pub enum Step {
     /// The target's corners in this frame, and how sure the fit is, 0 to 1.
     Tracked { quad: Quad, confidence: f32 },
     /// Too few points agree, the target jumped, folded or left the frame.
-    /// Every later step answers this too.
+    /// The tracker looks for it in the next frames.
+    Hidden,
+    /// The target stayed hidden for [`MAX_HIDDEN`] frames. Every later
+    /// step answers this too.
     Lost,
 }
 
@@ -118,6 +124,13 @@ const MAX_GROWTH: f64 = 1.6;
 /// Fresh points are picked when fewer than this share of the first remain.
 const RESEED: f64 = 0.6;
 
+/// The most frames a target may stay hidden and still be found again:
+/// about two seconds.
+pub const MAX_HIDDEN: usize = 60;
+
+/// A frame tracked at least this surely keeps the target's picture.
+const KEEP_PICTURE: f32 = 0.6;
+
 /// The fixed seed of RANSAC's picks.
 const SEED: u64 = 0x5eed_c0de_cafe_f00d;
 
@@ -142,6 +155,12 @@ pub struct Tracker {
     points: Vec<Point>,
     first: usize,
     random: Random,
+    /// The move from the first frame to the last tracked one.
+    model: Model,
+    /// The target's picture, to find it again when hidden.
+    template: Option<search::Template>,
+    /// Frames the target has been hidden for.
+    hidden: usize,
     lost: bool,
 }
 
@@ -176,6 +195,7 @@ impl Tracker {
         if points.len() < min_points(mode) {
             return Err(MotionError::Featureless);
         }
+        let template = search::capture(&prev, &corners);
         Ok(Self {
             mode,
             width,
@@ -186,6 +206,9 @@ impl Tracker {
             first: points.len(),
             points,
             random: Random::new(SEED),
+            model: Model::identity(mode == Mode::Plane),
+            template,
+            hidden: 0,
             lost: false,
         })
     }
@@ -203,26 +226,80 @@ impl Tracker {
         }
         let next = Pyramid::new(next);
         let Some((model, corners, points, confidence)) = self.follow(&next) else {
-            self.lost = true;
-            return Ok(Step::Lost);
+            let step = self.look_for(&next);
+            self.prev = next;
+            return Ok(step);
         };
+        self.hidden = 0;
+        self.model = model;
         self.corners = corners;
         self.points = points;
-        if (self.points.len() as f64) < self.first as f64 * RESEED
-            && let Some(back) = model.inverse()
+        if (self.points.len() as f64) < self.first as f64 * RESEED {
+            self.reseed(&next);
+        }
+        if confidence >= KEEP_PICTURE
+            && let Some(template) = search::capture(&next, &corners)
         {
-            let taken: Vec<(f32, f32)> = self.points.iter().map(|p| p.at).collect();
-            let fresh = points::pick(next.base(), &corners, &taken, points::MAX_POINTS);
-            self.points.extend(fresh.into_iter().filter_map(|at| {
-                let origin = back.apply((f64::from(at.0), f64::from(at.1)))?;
-                Some(Point { at, origin })
-            }));
+            self.template = Some(template);
         }
         self.prev = next;
         Ok(Step::Tracked {
             quad: Quad::from_pixels(corners, self.width, self.height),
             confidence,
         })
+    }
+
+    /// Pick fresh points inside the target, placed in the first frame
+    /// through the current move.
+    fn reseed(&mut self, frame: &Pyramid) {
+        let Some(back) = self.model.inverse() else {
+            return;
+        };
+        let taken: Vec<(f32, f32)> = self.points.iter().map(|p| p.at).collect();
+        let fresh = points::pick(frame.base(), &self.corners, &taken, points::MAX_POINTS);
+        self.points.extend(fresh.into_iter().filter_map(|at| {
+            let origin = back.apply((f64::from(at.0), f64::from(at.1)))?;
+            Some(Point { at, origin })
+        }));
+    }
+
+    /// With the target hidden, look for its picture in `frame`. Found, the
+    /// track goes on from there; not found for too long, it is lost.
+    fn look_for(&mut self, frame: &Pyramid) -> Step {
+        self.hidden += 1;
+        if self.hidden > MAX_HIDDEN {
+            self.lost = true;
+            return Step::Lost;
+        }
+        let Some(((dx, dy), score)) = self
+            .template
+            .as_ref()
+            .and_then(|template| search::find(frame, template))
+        else {
+            self.points.clear();
+            return Step::Hidden;
+        };
+        let model = self.model.shifted(dx, dy);
+        let corners = Corners(self.corners.0.map(|(x, y)| (x + dx, y + dy)));
+        if !corners.is_convex() || !inside(corners.middle(), self.width, self.height) {
+            return Step::Hidden;
+        }
+        let (saved_model, saved_corners) = (self.model, self.corners);
+        self.model = model;
+        self.corners = corners;
+        self.points.clear();
+        self.reseed(frame);
+        if self.points.len() < min_points(self.mode) {
+            self.model = saved_model;
+            self.corners = saved_corners;
+            self.points.clear();
+            return Step::Hidden;
+        }
+        self.hidden = 0;
+        Step::Tracked {
+            quad: Quad::from_pixels(corners, self.width, self.height),
+            confidence: score,
+        }
     }
 
     /// The target's corners in the last frame.

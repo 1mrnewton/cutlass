@@ -101,6 +101,7 @@ fn error(a: Quad, b: Quad) -> f64 {
 fn tracked(step: Step) -> (Quad, f32) {
     match step {
         Step::Tracked { quad, confidence } => (quad, confidence),
+        Step::Hidden => panic!("the target hid"),
         Step::Lost => panic!("lost the target"),
     }
 }
@@ -190,20 +191,77 @@ fn a_tilting_plane_keeps_all_four_corners_in_plane_mode() {
     );
 }
 
+/// A frame of only background, unlike the object's.
+fn elsewhere() -> Gray {
+    let blank: Vec<f32> = (0..(W * H) as usize)
+        .map(|i| noise((i % W as usize) as f64, (i / W as usize) as f64, 9, 5.0))
+        .collect();
+    Gray::new(W, H, blank).unwrap()
+}
+
 #[test]
-fn a_target_that_vanishes_is_lost_and_stays_lost() {
+fn a_target_that_stays_away_is_hidden_then_lost_for_good() {
     let mut tracker = Tracker::start(&object_frame(0), object_quad(0, 0.0), Mode::Object).unwrap();
     tracked(tracker.step(&object_frame(1)).unwrap());
-    let elsewhere = frame((0.0, 0.0), |_, _| None);
-    let blank: Vec<f32> = elsewhere
-        .data()
-        .iter()
-        .enumerate()
-        .map(|(i, _)| noise((i % W as usize) as f64, (i / W as usize) as f64, 9, 5.0))
-        .collect();
-    let other = Gray::new(W, H, blank).unwrap();
+    let other = elsewhere();
+    for _ in 0..MAX_HIDDEN {
+        assert_eq!(tracker.step(&other).unwrap(), Step::Hidden);
+    }
     assert_eq!(tracker.step(&other).unwrap(), Step::Lost);
     assert_eq!(tracker.step(&object_frame(2)).unwrap(), Step::Lost);
+}
+
+/// The object slid to `x`, `y` with no turn or scale, over the
+/// background; `None` hides it behind the background.
+fn slid_frame(at: Option<(f64, f64)>) -> Gray {
+    frame(OBJECT, |x, y| at.map(|(ax, ay)| (x - ax, y - ay)))
+}
+
+fn slid_quad(at: (f64, f64)) -> Quad {
+    Quad::from_box(
+        at.0 / f64::from(W),
+        at.1 / f64::from(H),
+        OBJECT.0 / f64::from(W),
+        OBJECT.1 / f64::from(H),
+    )
+}
+
+#[test]
+fn a_target_hidden_for_a_while_is_found_again_where_it_came_out() {
+    let at = |t: usize| (40.0 + 3.0 * t as f64, 50.0 + 1.5 * t as f64);
+    let mut tracker =
+        Tracker::start(&slid_frame(Some(at(0))), slid_quad(at(0)), Mode::Object).unwrap();
+    for t in 1..=3 {
+        tracked(tracker.step(&slid_frame(Some(at(t)))).unwrap());
+    }
+    // Hidden behind the background for eight frames, still moving.
+    for _ in 4..12 {
+        assert_eq!(tracker.step(&slid_frame(None)).unwrap(), Step::Hidden);
+    }
+    // Found again about as close as tracking alone keeps it here.
+    for t in 12..=18 {
+        let (quad, confidence) = tracked(tracker.step(&slid_frame(Some(at(t)))).unwrap());
+        let off = error(quad, slid_quad(at(t)));
+        assert!(off < 3.0, "frame {t}: {off:.2} pixels off");
+        assert!(confidence > 0.5, "frame {t}: confidence {confidence}");
+    }
+}
+
+#[test]
+fn a_turning_target_found_again_stays_close() {
+    let mut tracker = Tracker::start(&object_frame(0), object_quad(0, 0.0), Mode::Object).unwrap();
+    for t in 1..=3 {
+        tracked(tracker.step(&object_frame(t)).unwrap());
+    }
+    let other = elsewhere();
+    for _ in 0..4 {
+        assert_eq!(tracker.step(&other).unwrap(), Step::Hidden);
+    }
+    for t in 8..=14 {
+        let (quad, _) = tracked(tracker.step(&object_frame(t)).unwrap());
+        let off = error(quad, object_quad(t, 0.0));
+        assert!(off < 5.0, "frame {t}: {off:.2} pixels off");
+    }
 }
 
 #[test]

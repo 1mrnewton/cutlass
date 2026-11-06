@@ -650,14 +650,6 @@ pub struct GapMenu {
     pub time: Micros,
 }
 
-/// The guide Delete will remove. A time is a vertical line. A row is a
-/// horizontal line, in thousandths of the track-sheet height.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum GuideMark {
-    Time(i64),
-    Row(i32),
-}
-
 /// Where a clip drag is showing, before the draft is written.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MovePreview {
@@ -757,15 +749,6 @@ pub struct Shell {
     clip_menu: Option<ClipMenu>,
     /// The Close gap menu, open over a gap on a row.
     gap_menu: Option<GapMenu>,
-    /// Vertical guides for this session. They are not stored in the draft.
-    guides: Vec<Micros>,
-    guide_preview: Option<Micros>,
-    /// Horizontal guides, in thousandths of the track-sheet height.
-    horizontal: Vec<i32>,
-    horizontal_preview: Option<i32>,
-    selected_mark: Option<GuideMark>,
-    guides_shown: bool,
-    guides_locked: bool,
     /// Auto snap. A new window starts on. The draft does not store it.
     snapping: bool,
     /// The split tool cuts a clip at the pointer instead of moving it.
@@ -882,13 +865,6 @@ impl Shell {
             clipboard: Vec::new(),
             clip_menu: None,
             gap_menu: None,
-            guides: Vec::new(),
-            guide_preview: None,
-            horizontal: Vec::new(),
-            horizontal_preview: None,
-            selected_mark: None,
-            guides_shown: true,
-            guides_locked: false,
             snapping: true,
             blade: false,
             speed_curves: false,
@@ -1224,7 +1200,6 @@ impl Shell {
         self.selection.clear();
         self.clipboard.clear();
         self.clip_menu = None;
-        self.clear_guides();
         self.blade = false;
         self.marking = false;
         self.selected_marker = None;
@@ -1369,7 +1344,6 @@ impl Shell {
         self.selection.clear();
         self.clipboard.clear();
         self.clip_menu = None;
-        self.clear_guides();
         self.blade = false;
         self.marking = false;
         self.selected_marker = None;
@@ -2724,7 +2698,7 @@ impl Shell {
             scale: self.scale(),
             playhead: self.playhead,
             snap_threshold: self.snap_threshold(),
-            guides: self.guide_times(),
+            guides: Vec::new(),
         };
         let draft = self.session_draft()?;
         trim_gesture(draft, &gesture).map_err(|error| match error {
@@ -2762,7 +2736,7 @@ impl Shell {
             scale: self.scale(),
             playhead: self.playhead,
             snap_threshold: self.snap_threshold(),
-            guides: self.guide_times(),
+            guides: Vec::new(),
         };
         let draft = self.session_draft()?;
         let plan = match over {
@@ -2817,7 +2791,7 @@ impl Shell {
                 scale: self.scale(),
                 playhead: self.playhead,
                 snap_threshold: self.snap_threshold(),
-                guides: self.guide_times(),
+                guides: Vec::new(),
             };
             let draft = self.session_draft()?;
             drop_gesture(draft, &gesture)
@@ -2924,7 +2898,7 @@ impl Shell {
                 scale: self.scale(),
                 playhead: self.playhead,
                 snap_threshold: self.snap_threshold(),
-                guides: self.guide_times(),
+                guides: Vec::new(),
             };
             drop_gesture(self.session_draft()?, &gesture)
                 .map_err(|_| ShellError::Unavailable("the drag could not be read".to_owned()))?
@@ -2986,7 +2960,7 @@ impl Shell {
                 scale: self.scale(),
                 playhead: self.playhead,
                 snap_threshold: self.snap_threshold(),
-                guides: self.guide_times(),
+                guides: Vec::new(),
             };
             drop_gesture(self.session_draft()?, &gesture)
                 .map_err(|_| ShellError::Unavailable("the drag could not be read".to_owned()))?
@@ -3059,7 +3033,7 @@ impl Shell {
                 scale: self.scale(),
                 playhead: self.playhead,
                 snap_threshold: self.snap_threshold(),
-                guides: self.guide_times(),
+                guides: Vec::new(),
             };
             drop_gesture(self.session_draft()?, &gesture)
                 .map_err(|_| ShellError::Unavailable("the drag could not be read".to_owned()))?
@@ -3190,7 +3164,7 @@ impl Shell {
                 scale: self.scale(),
                 playhead: self.playhead,
                 snap_threshold: self.snap_threshold(),
-                guides: self.guide_times(),
+                guides: Vec::new(),
             };
             drop_gesture(self.session_draft()?, &gesture)
                 .map_err(|_| ShellError::Unavailable("the drag could not be read".to_owned()))?
@@ -3285,7 +3259,7 @@ impl Shell {
                 scale: self.scale(),
                 playhead: self.playhead,
                 snap_threshold: self.snap_threshold(),
-                guides: self.guide_times(),
+                guides: Vec::new(),
             };
             drop_gesture(self.session_draft()?, &gesture)
                 .map_err(|_| ShellError::Unavailable("the drag could not be read".to_owned()))?
@@ -3441,7 +3415,6 @@ impl Shell {
     }
 
     pub fn select(&mut self, id: Option<SegmentId>) {
-        self.selected_mark = None;
         self.selected_marker = None;
         self.selected_beat = None;
         self.selection.clear();
@@ -3452,7 +3425,6 @@ impl Shell {
 
     /// Add `id` to the selection, or drop it when it is already there.
     pub fn toggle_selected(&mut self, id: SegmentId) {
-        self.selected_mark = None;
         self.selected_marker = None;
         self.selected_beat = None;
         if let Some(index) = self.selection.iter().position(|item| item == &id) {
@@ -3464,7 +3436,6 @@ impl Shell {
 
     /// Replace the selection with `ids`. `keep` adds them to the clips already selected.
     pub fn select_box(&mut self, ids: impl IntoIterator<Item = SegmentId>, keep: bool) {
-        self.selected_mark = None;
         self.selected_marker = None;
         self.selected_beat = None;
         if !keep {
@@ -3502,12 +3473,9 @@ impl Shell {
         self.selection.iter().any(|item| item == id)
     }
 
-    /// Remove the selected clips, or the selected guide when no clip is selected.
+    /// Remove the selected clips, or the selected marker or beat when no clip is selected.
     pub fn delete_target(&mut self) -> Result<(), ShellError> {
         if self.selection.is_empty() {
-            if self.selected_mark.is_some() {
-                return self.remove_selected_guide();
-            }
             if self.selected_marker.is_some() {
                 return self.remove_selected_marker();
             }
@@ -3517,27 +3485,6 @@ impl Shell {
             return Ok(());
         }
         self.remove_selected()
-    }
-
-    /// Guides currently drawn. A hidden list is empty here and is not a snap target.
-    #[must_use]
-    pub fn guides(&self) -> &[Micros] {
-        if self.guides_shown { &self.guides } else { &[] }
-    }
-
-    #[must_use]
-    pub fn guide_preview(&self) -> Option<Micros> {
-        self.guide_preview
-    }
-
-    #[must_use]
-    pub fn guides_shown(&self) -> bool {
-        self.guides_shown
-    }
-
-    #[must_use]
-    pub fn guides_locked(&self) -> bool {
-        self.guides_locked
     }
 
     /// Auto snap. A new window starts on. The choice lasts until the window closes.
@@ -3557,14 +3504,6 @@ impl Shell {
         } else {
             Micros(-1)
         }
-    }
-
-    pub fn toggle_guides(&mut self) {
-        self.guides_shown = !self.guides_shown;
-    }
-
-    pub fn toggle_guide_lock(&mut self) {
-        self.guides_locked = !self.guides_locked;
     }
 
     /// The linkage switch. A new project starts on. A folder with no stored
@@ -3717,132 +3656,6 @@ impl Shell {
         Ok(())
     }
 
-    pub fn preview_guide(&mut self, time: Micros) {
-        self.guide_preview = Some(Micros(time.0.max(0)));
-    }
-
-    pub fn clear_guide_preview(&mut self) {
-        self.guide_preview = None;
-    }
-
-    pub fn take_guide_preview(&mut self) -> Option<Micros> {
-        self.guide_preview.take()
-    }
-
-    /// Leave a vertical guide. A time already present is selected again.
-    pub fn add_guide(&mut self, time: Micros) -> Result<(), ShellError> {
-        if self.session.is_none() {
-            return Err(ShellError::NoProject);
-        }
-        if self.guides_locked {
-            return Err(ShellError::Unavailable("the guides are locked".to_owned()));
-        }
-        let time = Micros(time.0.max(0));
-        if !self.guides.iter().any(|guide| guide.0 == time.0) {
-            self.guides.push(time);
-            self.guides.sort_by_key(|guide| guide.0);
-        }
-        self.selected_marker = None;
-        self.selected_beat = None;
-        self.selected_mark = Some(GuideMark::Time(time.0));
-        Ok(())
-    }
-
-    pub fn select_guide(&mut self, time: Micros) {
-        if self.guides.iter().any(|guide| guide.0 == time.0) {
-            self.selected_mark = Some(GuideMark::Time(time.0));
-            self.selected_marker = None;
-            self.selected_beat = None;
-            self.selection.clear();
-        }
-    }
-
-    #[must_use]
-    pub fn selected_guide(&self) -> Option<Micros> {
-        match self.selected_mark {
-            Some(GuideMark::Time(time)) => Some(Micros(time)),
-            _ => None,
-        }
-    }
-
-    /// Leave a horizontal guide. `row` is thousandths of the track-sheet height.
-    /// A row already present is selected again.
-    pub fn add_horizontal(&mut self, row: i32) -> Result<(), ShellError> {
-        if self.session.is_none() {
-            return Err(ShellError::NoProject);
-        }
-        if self.guides_locked {
-            return Err(ShellError::Unavailable("the guides are locked".to_owned()));
-        }
-        let row = row.clamp(0, 1_000);
-        if !self.horizontal.contains(&row) {
-            self.horizontal.push(row);
-            self.horizontal.sort_unstable();
-        }
-        self.selected_marker = None;
-        self.selected_beat = None;
-        self.selected_mark = Some(GuideMark::Row(row));
-        Ok(())
-    }
-
-    pub fn preview_horizontal(&mut self, row: i32) {
-        self.horizontal_preview = Some(row.clamp(0, 1_000));
-    }
-
-    pub fn clear_horizontal_preview(&mut self) {
-        self.horizontal_preview = None;
-    }
-
-    pub fn take_horizontal_preview(&mut self) -> Option<i32> {
-        self.horizontal_preview.take()
-    }
-
-    #[must_use]
-    pub fn horizontal_preview(&self) -> Option<i32> {
-        self.horizontal_preview
-    }
-
-    /// Horizontal guides currently drawn, in thousandths of the track-sheet height.
-    /// A hidden list is empty here.
-    #[must_use]
-    pub fn horizontal_guides(&self) -> &[i32] {
-        if self.guides_shown {
-            &self.horizontal
-        } else {
-            &[]
-        }
-    }
-
-    pub fn select_horizontal(&mut self, row: i32) {
-        if self.horizontal.contains(&row) {
-            self.selected_mark = Some(GuideMark::Row(row));
-            self.selected_marker = None;
-            self.selected_beat = None;
-            self.selection.clear();
-        }
-    }
-
-    #[must_use]
-    pub fn selected_horizontal(&self) -> Option<i32> {
-        match self.selected_mark {
-            Some(GuideMark::Row(row)) => Some(row),
-            _ => None,
-        }
-    }
-
-    pub fn remove_selected_guide(&mut self) -> Result<(), ShellError> {
-        if self.guides_locked {
-            return Err(ShellError::Unavailable("the guides are locked".to_owned()));
-        }
-        match self.selected_mark {
-            Some(GuideMark::Time(time)) => self.guides.retain(|guide| guide.0 != time),
-            Some(GuideMark::Row(row)) => self.horizontal.retain(|guide| *guide != row),
-            None => return Ok(()),
-        }
-        self.selected_mark = None;
-        Ok(())
-    }
-
     /// Timeline time for a pixel measured from the left of the lanes.
     #[must_use]
     pub fn lane_time_at(&self, x_in_view: f64) -> Option<Micros> {
@@ -3855,24 +3668,6 @@ impl Shell {
             return None;
         }
         Some(Micros(micros as i64))
-    }
-
-    fn guide_times(&self) -> Vec<Micros> {
-        if self.guides_shown {
-            self.guides.clone()
-        } else {
-            Vec::new()
-        }
-    }
-
-    fn clear_guides(&mut self) {
-        self.guides.clear();
-        self.guide_preview = None;
-        self.horizontal.clear();
-        self.horizontal_preview = None;
-        self.selected_mark = None;
-        self.guides_shown = true;
-        self.guides_locked = false;
     }
 
     pub fn inspection(&self) -> Option<Inspection> {
@@ -5885,7 +5680,6 @@ impl Shell {
             stored_start,
         });
         self.selected_beat = None;
-        self.selected_mark = None;
         self.selection.clear();
     }
 
@@ -6006,7 +5800,6 @@ impl Shell {
         }
         self.selected_beat = Some(BeatPick { segment_id, source });
         self.selected_marker = None;
-        self.selected_mark = None;
         self.selection.clear();
     }
 
@@ -14247,107 +14040,6 @@ mod tests {
 
         desktop.undo().unwrap();
         assert_eq!(desktop.draft().unwrap().tracks, before);
-    }
-
-    #[test]
-    fn a_guide_pulls_a_move_and_delete_removes_it() {
-        let temp = Temp::new();
-        trim_project(&temp.path);
-        let mut desktop = shell();
-        desktop.open_folder(&temp.path).unwrap();
-        desktop.add_guide(Micros(1_500_000)).unwrap();
-        let id = desktop.draft().unwrap().tracks[0].segments[0].id.clone();
-        desktop.preview_move(id.clone(), lane_time(&desktop, 1_501_000.0), 24.0);
-        let preview = desktop.move_preview().expect("preview");
-        assert_eq!(preview.start, Micros(1_500_000));
-        desktop
-            .trim_edge(id.clone(), TrimEdge::End, lane_time(&desktop, 1_501_000.0))
-            .unwrap();
-        assert_eq!(
-            desktop.draft().unwrap().tracks[0].segments[0]
-                .target
-                .duration,
-            Micros(1_500_000)
-        );
-        desktop.undo().unwrap();
-        desktop.select(Some(id));
-        desktop.select_guide(Micros(1_500_000));
-        assert!(desktop.selection().is_empty());
-        desktop.run_shortcut("delete").unwrap();
-        assert!(desktop.guides().is_empty());
-        desktop.add_guide(Micros(2_000_000)).unwrap();
-        desktop.toggle_guide_lock();
-        let locked = desktop.add_guide(Micros(2_100_000)).unwrap_err();
-        assert_eq!(locked.to_string(), "the guides are locked");
-        assert_eq!(desktop.guides(), &[Micros(2_000_000)]);
-        desktop.toggle_guide_lock();
-        desktop.toggle_guides();
-        assert!(desktop.guides().is_empty());
-        desktop
-            .trim_edge(
-                desktop.draft().unwrap().tracks[0].segments[0].id.clone(),
-                TrimEdge::End,
-                lane_time(&desktop, 2_001_000.0),
-            )
-            .unwrap();
-        assert_eq!(
-            desktop.draft().unwrap().tracks[0].segments[0]
-                .target
-                .duration,
-            Micros(2_001_000)
-        );
-        desktop.toggle_guides();
-        desktop
-            .trim_edge(
-                desktop.draft().unwrap().tracks[0].segments[0].id.clone(),
-                TrimEdge::End,
-                lane_time(&desktop, 2_000_500.0),
-            )
-            .unwrap();
-        assert_eq!(
-            desktop.draft().unwrap().tracks[0].segments[0]
-                .target
-                .duration,
-            Micros(2_000_000)
-        );
-        desktop.close_project().unwrap();
-        desktop.open_folder(&temp.path).unwrap();
-        assert!(desktop.guides().is_empty());
-    }
-
-    #[test]
-    fn a_horizontal_guide_stays_until_delete() {
-        let temp = Temp::new();
-        trim_project(&temp.path);
-        let mut desktop = shell();
-        desktop.open_folder(&temp.path).unwrap();
-        desktop.add_horizontal(400).unwrap();
-        desktop.add_horizontal(400).unwrap();
-        assert_eq!(desktop.horizontal_guides(), &[400]);
-        desktop.add_guide(Micros(1_000_000)).unwrap();
-        assert!(desktop.selected_horizontal().is_none());
-        desktop.select_horizontal(400);
-        assert!(desktop.selected_guide().is_none());
-        let id = desktop.draft().unwrap().tracks[0].segments[0].id.clone();
-        desktop.select(Some(id));
-        desktop.select_horizontal(400);
-        assert!(desktop.selection().is_empty());
-        desktop.run_shortcut("delete").unwrap();
-        assert!(desktop.horizontal_guides().is_empty());
-        assert_eq!(desktop.guides(), &[Micros(1_000_000)]);
-        desktop.add_horizontal(250).unwrap();
-        desktop.toggle_guide_lock();
-        let locked = desktop.add_horizontal(500).unwrap_err();
-        assert_eq!(locked.to_string(), "the guides are locked");
-        desktop.toggle_guide_lock();
-        desktop.toggle_guides();
-        assert!(desktop.horizontal_guides().is_empty());
-        desktop.toggle_guides();
-        assert_eq!(desktop.horizontal_guides(), &[250]);
-        desktop.close_project().unwrap();
-        desktop.open_folder(&temp.path).unwrap();
-        assert!(desktop.horizontal_guides().is_empty());
-        assert!(desktop.guides().is_empty());
     }
 
     #[test]

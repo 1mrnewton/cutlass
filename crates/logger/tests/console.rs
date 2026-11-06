@@ -99,3 +99,49 @@ fn an_unknown_env_level_keeps_info_and_says_so() -> io::Result<()> {
     assert!(!text.contains("child-debug"), "{text}");
     Ok(())
 }
+
+#[test]
+fn a_panic_is_logged_before_the_process_dies() -> io::Result<()> {
+    let dir = Temp::try_new()?;
+    let output = Command::new(env!("CARGO_BIN_EXE_emit"))
+        .arg(&dir.path)
+        .arg("panic")
+        .env_remove(LEVEL_ENV)
+        .output()?;
+    assert!(!output.status.success(), "{output:?}");
+    assert!(output.stdout.is_empty());
+    let text = fs::read_to_string(dir.path.join(FILE_NAME))?;
+    let line = text
+        .lines()
+        .find(|line| line.contains("index out of bounds"))
+        .unwrap_or_default();
+    assert!(line.contains(" ERROR "), "{text}");
+    assert!(line.contains(" panic "), "{text}");
+    assert!(line.contains("thread main panicked at"), "{text}");
+    assert!(line.contains("emit.rs:"), "{text}");
+    assert!(line.contains("backtrace:"), "{text}");
+    // The hook set before still runs, so the panic still reaches stderr.
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("panicked at"), "{stderr}");
+    Ok(())
+}
+
+#[test]
+fn a_panic_on_a_named_thread_is_logged_and_the_process_goes_on() -> io::Result<()> {
+    let dir = Temp::try_new()?;
+    let output = Command::new(env!("CARGO_BIN_EXE_emit"))
+        .arg(&dir.path)
+        .arg("thread-panic")
+        .env_remove(LEVEL_ENV)
+        .output()?;
+    assert!(output.status.success(), "{output:?}");
+    let text = fs::read_to_string(dir.path.join(FILE_NAME))?;
+    assert!(
+        text.contains("thread worker panicked at") && text.contains("the index is 7"),
+        "{text}"
+    );
+    let panic_at = text.find("the index is 7").unwrap_or(usize::MAX);
+    let after_at = text.find(" after").unwrap_or(0);
+    assert!(panic_at < after_at, "{text}");
+    Ok(())
+}

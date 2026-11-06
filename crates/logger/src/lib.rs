@@ -270,14 +270,7 @@ pub fn record(level: Level, target: &str, message: &str) {
         return;
     }
     let line = format_line(level, target, message);
-    let mut guard = lock();
-    let Some(logger) = guard.as_mut() else {
-        return;
-    };
-    if let Some(file) = logger.file.as_mut() {
-        let _ = write_file(file, &line);
-    }
-    write_console(&mut logger.console, &line);
+    write_line(&mut lock(), &line);
 }
 
 /// Record an error.
@@ -333,6 +326,73 @@ macro_rules! trace {
             $crate::record($crate::Level::Trace, ::std::module_path!(), &message);
         }
     }};
+}
+
+/// Record every panic at ERROR, with its thread, place, message and a
+/// backtrace, before the hook that was set before runs. Call once at
+/// process start, after [`init`].
+///
+/// A panic inside the logger itself, with the log held on that thread,
+/// gives up on the record after a short wait rather than deadlocking.
+pub fn install_panic_hook() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        record_panic(info);
+        previous(info);
+    }));
+}
+
+fn record_panic(info: &std::panic::PanicHookInfo<'_>) {
+    let payload = info.payload();
+    let message = payload
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("(a payload that is not text)");
+    let place = info.location().map_or_else(
+        || "an unknown place".to_owned(),
+        |location| {
+            format!(
+                "{}:{}:{}",
+                location.file(),
+                location.line(),
+                location.column()
+            )
+        },
+    );
+    let current = thread::current();
+    let name = current.name().unwrap_or("unnamed");
+    let backtrace = std::backtrace::Backtrace::force_capture();
+    let line = format_line(
+        Level::Error,
+        "panic",
+        &format!("thread {name} panicked at {place}: {message}\nbacktrace:\n{backtrace}"),
+    );
+    // The log may already be held on this thread, if the panic came from
+    // inside a write. Waiting for it then would never end.
+    for _ in 0..PANIC_LOCK_TRIES {
+        match STATE.try_lock() {
+            Ok(mut guard) => return write_line(&mut guard, &line),
+            Err(std::sync::TryLockError::Poisoned(error)) => {
+                return write_line(&mut error.into_inner(), &line);
+            }
+            Err(std::sync::TryLockError::WouldBlock) => {
+                thread::sleep(std::time::Duration::from_millis(1));
+            }
+        }
+    }
+}
+
+const PANIC_LOCK_TRIES: u32 = 200;
+
+fn write_line(guard: &mut Option<Logger>, line: &str) {
+    let Some(logger) = guard.as_mut() else {
+        return;
+    };
+    if let Some(file) = logger.file.as_mut() {
+        let _ = write_file(file, line);
+    }
+    write_console(&mut logger.console, line);
 }
 
 struct Logger {

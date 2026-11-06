@@ -718,6 +718,32 @@ impl Shell {
         self.apply_requests(&requests)
     }
 
+    /// The selected caption's paragraphs: its pages, or its lines.
+    #[must_use]
+    pub fn caption_paragraphs(&self) -> Vec<cutlass_editor::Paragraph> {
+        match (self.draft(), self.selected()) {
+            (Some(draft), Some(segment_id)) => {
+                cutlass_editor::caption_paragraphs(draft, segment_id)
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// Make paragraph `index` of the selected caption say `text`, its own
+    /// words rematched so the ones that stay keep their times. One undo
+    /// restores it.
+    pub fn set_caption_paragraph(&mut self, index: usize, text: &str) -> Result<(), ShellError> {
+        let segment_id = self.text_segment()?;
+        self.refuse_locked(&segment_id)?;
+        let draft = self.session_draft()?;
+        match cutlass_editor::paragraph_request(draft, &segment_id, index, text)
+            .map_err(caption_miss)?
+        {
+            Some(request) => self.apply(request),
+            None => Ok(()),
+        }
+    }
+
     /// Take caption `segment_id` off the timeline. One undo restores it.
     pub fn remove_caption(&mut self, segment_id: &SegmentId) -> Result<(), ShellError> {
         self.refuse_locked(segment_id)?;
@@ -1428,6 +1454,23 @@ mod tests {
 
         pick(&mut desktop, "main");
         assert!(desktop.caption_rows().is_empty());
+    }
+
+    #[test]
+    fn a_caption_paragraph_edit_keeps_its_word_times() {
+        let temp = Temp::new();
+        let mut desktop = every_kind(&temp);
+        pick(&mut desktop, "subtitle");
+        let paragraphs = desktop.caption_paragraphs();
+        assert_eq!(paragraphs.len(), 1);
+        assert_eq!(paragraphs[0].text, "one two");
+        desktop.set_caption_paragraph(0, "one too").unwrap();
+        let inspection = desktop.inspection().unwrap();
+        assert_eq!(inspection.words.text, ["one", "too"]);
+        assert_eq!(inspection.words.start_time, [0, 500]);
+        assert!(desktop.set_caption_paragraph(4, "x").is_err());
+        desktop.undo().unwrap();
+        assert_eq!(desktop.caption_paragraphs()[0].text, "one two");
     }
 
     /// Two captions on a subtitle row and a title on a plain text row.

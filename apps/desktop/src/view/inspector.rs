@@ -1674,7 +1674,10 @@ fn text_basic(
     }
     body(ui, |ui| {
         if caption && !inspection.words.text.is_empty() {
-            caption_words(shell, ui, state, inspection);
+            caption_paragraphs(shell, ui, state);
+            egui::CollapsingHeader::new(RichText::new("Words").size(12.0))
+                .id_salt("caption words")
+                .show(ui, |ui| caption_words(shell, ui, state, inspection));
             #[allow(clippy::cast_precision_loss)]
             let stored = inspection.caption_stagger_ms as f64;
             #[allow(clippy::cast_precision_loss)]
@@ -1776,6 +1779,40 @@ fn words_box(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState) {
         stored.clone_into(text);
     }
     ui.add_space(6.0);
+}
+
+/// One field per paragraph, "The N paragraph", each a page or line of the
+/// caption as it shows. Typing over one rematches only its words.
+fn caption_paragraphs(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState) {
+    let paragraphs = shell.caption_paragraphs();
+    let mut edited = None;
+    for (index, paragraph) in paragraphs.iter().enumerate() {
+        ui.add_space(6.0);
+        ui.label(
+            RichText::new(format!("The {} paragraph", index + 1))
+                .size(12.0)
+                .strong()
+                .color(tokens::TEXT),
+        );
+        let text = state
+            .fields
+            .entry(format!("paragraph {index}"))
+            .or_default();
+        let response = ui.add(
+            TextEdit::singleline(text)
+                .desired_width(f32::INFINITY)
+                .text_color(tokens::TEXT),
+        );
+        if super::commits(ui, &response) && *text != paragraph.text {
+            edited = Some((index, text.clone()));
+        } else if !response.has_focus() {
+            paragraph.text.clone_into(text);
+        }
+    }
+    ui.add_space(6.0);
+    if let Some((index, text)) = edited {
+        send(shell, |shell| shell.set_caption_paragraph(index, &text));
+    }
 }
 
 /// One row per recognized word: its time and its letters. A word keeps

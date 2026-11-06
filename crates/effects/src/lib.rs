@@ -25,6 +25,7 @@ pub mod lut;
 pub mod mask;
 pub mod package;
 pub mod recipe;
+pub mod selection;
 pub mod source;
 pub mod transitions;
 
@@ -55,6 +56,9 @@ pub use package::{
 pub use recipe::{
     Block, Curve, MAX_PASSES, MAX_VALUES, Param, Pass, RECIPE_PREFIX, RECIPE_VERSION, Recipe,
     RecipeError, Step, bundled, bundled_recipe,
+};
+pub use selection::{
+    MAX_SELECTION_SIDE, SELECTION, Selection, segment_has_selection, segment_selection,
 };
 pub use source::{AnimSpan, EffectSource, Progress, progress};
 pub use transitions::{

@@ -64,6 +64,13 @@ impl Preview {
         Some((*id, [width, height]))
     }
 
+    /// The texture and size of what the canvas shows now, whatever its key.
+    pub(crate) fn current(&self) -> Option<(egui::TextureId, [u32; 2])> {
+        let (canvas, id) = self.canvas.as_ref()?;
+        let (width, height) = canvas.size();
+        Some((*id, [width, height]))
+    }
+
     /// Draw the next frame even when its key matches, because what is on
     /// the canvas is not the picture that key asks for yet.
     pub(crate) fn forget(&mut self) {

@@ -3893,12 +3893,14 @@ fn ruler_and_lanes(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
             );
         }
     }
+    let mut scrubbing = false;
     if (lanes_left..=tracks.right()).contains(&playhead_x) {
         let mark = Rect::from_center_size(
             Pos2::new(playhead_x, ruler.bottom() - 6.0),
             Vec2::new(11.0, 12.0),
         );
         let response = ui.interact(mark, ui.scope_id().with("playhead"), Sense::drag());
+        scrubbing |= response.dragged();
         if response.dragged()
             && let Some(pointer) = response.interact_pointer_pos()
         {
@@ -3921,6 +3923,7 @@ fn ruler_and_lanes(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
         ui.scope_id().with("ruler"),
         Sense::click_and_drag(),
     );
+    shell.set_scrubbing(scrubbing || ruler_hit.dragged());
     if ruler_hit.dragged()
         && let Some(pointer) = ruler_hit.interact_pointer_pos()
     {

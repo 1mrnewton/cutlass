@@ -849,6 +849,9 @@ pub struct Shell {
     gpu: Option<crate::gpu::Preview>,
     /// The canvas shows a clip's earlier picture while the asked one decodes.
     preview_stale: bool,
+    /// The playhead is being dragged, so the preview shows a clip's picture
+    /// on its way to the asked one.
+    scrubbing: bool,
     /// The preview error last logged, so a frame that fails every repaint
     /// is logged once.
     preview_error: Option<String>,
@@ -939,6 +942,7 @@ impl Shell {
             face: Arc::new(crate::face::installed()),
             gpu: None,
             preview_stale: false,
+            scrubbing: false,
             preview_error: None,
             chrome: Chrome::default(),
         }
@@ -2289,6 +2293,17 @@ impl Shell {
             .map_err(|error| ShellError::Eval(error.to_string()))?;
         let stale = cache.take_stale();
         drop(cache);
+        // A seek keeps the whole frame that was on the canvas until every
+        // clip has the asked picture, so no clip shows a picture from
+        // another time on the way. Playing and dragging show it moving.
+        if stale
+            && !self.playing
+            && !self.scrubbing
+            && let Some(held) = gpu.current()
+        {
+            self.preview_stale = true;
+            return Ok(Some(held));
+        }
         let layers = cutlass_render::frame_layers(composed)
             .map_err(|error| ShellError::Eval(error.to_string()))?;
         let shown = gpu
@@ -2320,7 +2335,13 @@ impl Shell {
         }
     }
 
-    /// The preview shows a clip's earlier picture while the one asked for
+    /// Whether the playhead is being dragged. While it is, the preview shows
+    /// pictures on the way to the asked time instead of holding the frame.
+    pub fn set_scrubbing(&mut self, scrubbing: bool) {
+        self.scrubbing = scrubbing;
+    }
+
+    /// The preview shows an earlier picture while the one asked for
     /// decodes. The window draws again until this is false.
     #[must_use]
     pub fn preview_pending(&self) -> bool {
@@ -8519,6 +8540,81 @@ mod tests {
         assert_eq!(desktop.picking().map(|p| p.clicks.len()), Some(2));
         desktop.stop_picking();
         assert!(desktop.picking().is_none());
+    }
+
+    #[test]
+    fn a_seek_keeps_the_whole_last_frame_until_the_asked_one_is_ready() {
+        let movie = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../local-files/12471039-uhd_3840_2160_24fps.mp4");
+        if !movie.is_file() {
+            eprintln!("skipped: the 4K movie is missing");
+            return;
+        }
+        let instance = eframe::wgpu::Instance::new(
+            eframe::wgpu::InstanceDescriptor::new_without_display_handle(),
+        );
+        let Ok(state) = pollster::block_on(eframe::egui_wgpu::RenderState::create(
+            &eframe::egui_wgpu::WgpuConfiguration::default(),
+            &instance,
+            None,
+            eframe::egui_wgpu::RendererOptions::default(),
+        )) else {
+            eprintln!("skipped: no GPU");
+            return;
+        };
+        let temp = Temp::new();
+        let mut draft = crate::open_movie::movie_draft(&movie, 3840, 2160, false).unwrap();
+        draft.tracks[0].segments[0].target = TimeRange::new(0, 9_000_000);
+        draft.tracks[0].segments[0].source_range = Some(TimeRange::new(0, 9_000_000));
+        draft.materials.videos[0].duration = Micros(9_000_000);
+        draft.duration = Micros(9_000_000);
+        // Two clips of the movie, so a seek can go back into a clip seen
+        // earlier.
+        let mut second = draft.tracks[0].segments[0].clone();
+        second.id = SegmentId::new("second");
+        second.target = TimeRange::new(4_500_000, 4_500_000);
+        second.source_range = Some(TimeRange::new(4_500_000, 4_500_000));
+        draft.tracks[0].segments[0].target = TimeRange::new(0, 4_500_000);
+        draft.tracks[0].segments[0].source_range = Some(TimeRange::new(0, 4_500_000));
+        draft.tracks[0].segments.push(second);
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.attach_gpu(&state);
+        let canvas = |desktop: &Shell| {
+            desktop
+                .gpu
+                .as_ref()
+                .and_then(crate::gpu::Preview::read)
+                .unwrap()
+        };
+        desktop.seek(Micros(1_000_000));
+        desktop.preview_texture().unwrap().expect("first frame");
+        // Into the second clip, back into the first one away from where it
+        // was seen, then far in each: each paint before the asked frame is
+        // ready shows the frame that was there.
+        for to in [6_000_000, 3_100_000, 8_200_000, 400_000, 5_000_000] {
+            let before = canvas(&desktop);
+            desktop.seek(Micros(to));
+            let mut paints = 0;
+            loop {
+                desktop.preview_texture().unwrap().expect("frame");
+                if !desktop.preview_pending() {
+                    break;
+                }
+                assert!(
+                    canvas(&desktop) == before,
+                    "paint {paints} after seeking to {to} showed another frame"
+                );
+                assert!(paints < 2_000, "the asked frame never arrived");
+                std::thread::sleep(std::time::Duration::from_millis(2));
+                paints += 1;
+            }
+            assert!(
+                canvas(&desktop) != before,
+                "the seek to {to} showed its frame"
+            );
+        }
     }
 
     #[test]

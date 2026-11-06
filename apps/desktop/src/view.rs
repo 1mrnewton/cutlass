@@ -6031,6 +6031,9 @@ fn finish_clip_pointer(
     if let Err(error) = landed {
         shell.notice_error(&error);
     }
+    // The lanes above were painted from the draft before the drop, so this
+    // frame would show the clip back where it was for a moment. Paint it again.
+    ui.ctx().request_discard("a clip was dropped");
 }
 
 /// Where a body drag is over: a row, or the gap above row `n` (the row count
@@ -10685,6 +10688,76 @@ mod tests {
                     .segments
                     .iter()
                     .all(|segment| segment.id.as_str() != "low"))
+        );
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn the_frame_a_clip_is_dropped_shows_it_where_it_landed() {
+        let temp = std::env::temp_dir().join(format!("cutlass-drop-frame-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let mut draft = cutlass_model::Draft::empty("draft");
+        draft.config.maintrack_adsorb = false;
+        draft.canvas_config.width = 2;
+        draft.canvas_config.height = 1;
+        draft.tracks[0].segments.push(cutlass_model::Segment::new(
+            "low",
+            "color",
+            cutlass_model::TimeRange::new(0, 2_000_000),
+        ));
+        let mut overlay = cutlass_model::Track::main(TrackId::new("overlay"));
+        overlay.flag = cutlass_model::TrackFlag::SubVideo;
+        overlay.segments.push(cutlass_model::Segment::new(
+            "high",
+            "color",
+            cutlass_model::TimeRange::new(8_000_000, 2_000_000),
+        ));
+        draft.tracks.insert(0, overlay);
+        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let frame = |events: Vec<egui::Event>, shell: &mut Shell, view: &mut ViewState| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: screen,
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, view, None),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        let press = |pos: Pos2, pressed: bool| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        let output = frame(Vec::new(), &mut shell, &mut view);
+        let low = text_pos(&output, "low").expect("the main clip");
+        let high = text_pos(&output, "high").expect("the overlay clip");
+        let to = Pos2::new(low.x + 20.0, high.y);
+        frame(
+            vec![egui::Event::PointerMoved(low), press(low, true)],
+            &mut shell,
+            &mut view,
+        );
+        frame(vec![egui::Event::PointerMoved(to)], &mut shell, &mut view);
+        let dropped = frame(
+            vec![egui::Event::PointerMoved(to), press(to, false)],
+            &mut shell,
+            &mut view,
+        );
+
+        let shown = text_pos(&dropped, "low").expect("the dropped clip is drawn");
+        assert!(
+            (shown.y - high.y).abs() < 1.0,
+            "the drop frame shows the clip on the overlay row, not back on main"
         );
         let _ = std::fs::remove_dir_all(&temp);
     }

@@ -7,7 +7,8 @@
 //! client sees the refusal as a tool error.
 //!
 //! With no window there is no screen to play on: seek moves the playhead a
-//! `.png` export draws, and an export runs to the end before it answers.
+//! `.png` export draws, and an export or a track runs to the end before it
+//! answers.
 
 use std::cell::RefCell;
 use std::io::{BufRead, Write};
@@ -17,6 +18,7 @@ use std::rc::Rc;
 use cutlass_agent::{
     ApprovalAction, Approver, Catalog, DraftTools, Export, Forward, McpClient, McpError, McpServer,
     McpTransport, Media, MediaInfo, Packages, Player, Registry, SettingsTool, Speech, ToolSink,
+    TrackAsk, Tracking,
 };
 
 use crate::shell::{ExportRequest, Shell, ShellError};
@@ -75,6 +77,7 @@ pub fn serve(path: Option<&Path>, input: impl BufRead, output: impl Write) -> Re
             crate::sandbox::local_sandbox(crate::sandbox::this_program(), Some(path)),
             Refuse,
             McpClient::new(NoServers),
+            Headless(Rc::clone(&shell)),
         ),
     );
     let mut server = McpServer::new(registry, "cutlass", env!("CARGO_PKG_VERSION"));
@@ -157,6 +160,29 @@ impl Speech for Headless {
         self.0
             .borrow_mut()
             .hearing(job_id)
+            .map_err(|error| error.to_string())
+    }
+}
+
+impl Tracking for Headless {
+    /// Tracks to the end before it answers, as an export does, so the
+    /// next `track.poll` has the path.
+    fn start(&mut self, ask: &TrackAsk) -> Result<String, String> {
+        let mut shell = self.0.borrow_mut();
+        let id = shell.agent_tracks_next_id();
+        shell
+            .start_agent_track(id.clone(), ask)
+            .map_err(|error| error.to_string())?;
+        while shell.poll_job() {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        Ok(id)
+    }
+
+    fn poll(&mut self, job_id: &str) -> Result<Option<cutlass_model::TrackPath>, String> {
+        self.0
+            .borrow_mut()
+            .agent_track(job_id)
             .map_err(|error| error.to_string())
     }
 }
@@ -500,5 +526,63 @@ mod tests {
         assert_eq!(desktop.draft().unwrap().tracks[0].segments.len(), 1);
         desktop.undo().unwrap();
         assert!(desktop.draft().unwrap().tracks[0].segments.is_empty());
+    }
+
+    #[test]
+    #[ignore = "decodes seconds of a real movie; slow in a debug build"]
+    fn with_no_window_a_track_runs_to_the_end_and_is_saved() {
+        let movie = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../local-files/16929689_1920_1080_30fps.mp4");
+        if !movie.is_file() {
+            eprintln!("skipped: the movie is missing");
+            return;
+        }
+        let project = Project::new("track");
+        let mut draft = crate::open_movie::movie_draft(&movie, 1920, 1080, false).unwrap();
+        draft.tracks[0].segments[0].target = cutlass_model::TimeRange::new(0, 4_000_000);
+        draft.tracks[0].segments[0].source_range =
+            Some(cutlass_model::TimeRange::new(0, 4_000_000));
+        draft.materials.videos[0].duration = cutlass_model::Micros(4_000_000);
+        draft.duration = cutlass_model::Micros(4_000_000);
+        let target = draft.tracks[0].segments[0].id.clone();
+        let material = draft.tracks[0].segments[0].material_id.clone();
+        let mut sticker = cutlass_model::Segment::new(
+            "follower",
+            material.as_str(),
+            cutlass_model::TimeRange::new(0, 4_000_000),
+        );
+        sticker.clip.transform.y = 0.3;
+        sticker.uniform_scale.value = 0.25;
+        let mut lane = cutlass_model::Track::main("stickers");
+        lane.kind = cutlass_model::TrackType::Sticker;
+        lane.segments.push(sticker);
+        draft.tracks.push(lane);
+        let _ = std::fs::remove_dir_all(&project.0);
+        cutlass_store::Folder::new(draft).save(&project.0).unwrap();
+        // The shirt at one second, in canvas units.
+        let unit = |x: f64, y: f64| (2.0 * x / 1920.0 - 1.0, 1.0 - 2.0 * y / 1080.0);
+        let (a, b) = (unit(915.0, 435.0), unit(1080.0, 600.0));
+        let input = lines(&[
+            json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
+            json!({"jsonrpc":"2.0","id":2,"method":"tools/call",
+                "params":{"name":"track_start","arguments":{
+                    "target": target.as_str(), "at_us": 1_000_000,
+                    "box": [a.0, a.1, b.0, b.1], "followers": ["follower"]}}}),
+            json!({"jsonrpc":"2.0","id":3,"method":"tools/call",
+                "params":{"name":"track_poll","arguments":{"input":"track-1"}}}),
+        ]);
+        let mut output = Vec::new();
+        serve(Some(&project.0), input.as_bytes(), &mut output).unwrap();
+        let answers = answers(output);
+        let started = answers[1]["result"]["content"][0]["text"].as_str().unwrap();
+        assert_eq!(started, "job=track-1 revision=0");
+        let polled = answers[2]["result"]["content"][0]["text"].as_str().unwrap();
+        eprintln!("{polled}");
+        assert!(polled.starts_with("revision=1 frames="), "{polled}");
+        let opened = cutlass_store::open(&project.0).unwrap();
+        let draft = &opened.folder.draft;
+        assert_eq!(draft.materials.video_trackings.len(), 1);
+        let follower = &draft.tracks[1].segments[0];
+        assert!(cutlass_model::key_offsets(follower).len() > 2);
     }
 }

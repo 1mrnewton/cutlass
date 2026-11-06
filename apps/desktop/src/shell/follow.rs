@@ -38,6 +38,32 @@ pub struct Fixing {
     pub path: TrackPath,
 }
 
+/// The assistant's tracking jobs: each one's path by id, `None` while it
+/// runs.
+#[derive(Clone, Debug, Default)]
+pub struct AgentTracks {
+    started: u64,
+    paths: std::collections::BTreeMap<String, Option<Result<TrackPath, String>>>,
+}
+
+impl AgentTracks {
+    /// A fresh job id.
+    pub fn next_id(&mut self) -> String {
+        self.started = self.started.saturating_add(1);
+        format!("track-{}", self.started)
+    }
+
+    /// Job `id`'s path: `None` while it runs.
+    pub fn path(&self, id: &str) -> Result<Option<TrackPath>, String> {
+        match self.paths.get(id) {
+            Some(None) => Ok(None),
+            Some(Some(Ok(path))) => Ok(Some(path.clone())),
+            Some(Some(Err(error))) => Err(error.clone()),
+            None => Err(format!("no tracking job {id}")),
+        }
+    }
+}
+
 /// A clip that can follow the target, and its name.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FollowerChoice {
@@ -390,6 +416,112 @@ impl Shell {
             });
             landing
         })
+    }
+
+    /// Start the assistant's tracking job `id` on `ask`: the box in canvas
+    /// units is turned into the clip's own frame, and the path is kept for
+    /// [`Self::agent_track`]. The draft is not written here; the
+    /// assistant's registry writes the path.
+    pub fn start_agent_track(
+        &mut self,
+        id: String,
+        ask: &cutlass_agent::TrackAsk,
+    ) -> Result<(), ShellError> {
+        let at = Micros(ask.at_us);
+        let draft = self.session_draft()?;
+        let Some((segment, kind)) = super::placed(draft, &ask.target) else {
+            return Err(ShellError::Unavailable(format!(
+                "no clip {} on the timeline",
+                ask.target.as_str()
+            )));
+        };
+        if *kind != TrackType::Video
+            || !matches!(
+                draft.materials.get(segment.material_id.as_str()),
+                Some(MaterialRef::Video(video)) if video.kind != "photo"
+            )
+        {
+            return Err(ShellError::Unavailable(
+                "tracking belongs on a video clip".to_owned(),
+            ));
+        }
+        if !(segment.target.start.0..segment.target.end().0).contains(&at.0) {
+            return Err(ShellError::Unavailable(
+                "at_us is not on the clip".to_owned(),
+            ));
+        }
+        let (w, h) = canvas_size(draft);
+        let mut corners = [(0.0, 0.0); 4];
+        for (corner, &(x, y)) in corners.iter_mut().zip(&ask.corners) {
+            let (px, py) = ((x + 1.0) / 2.0 * w, (1.0 - y) / 2.0 * h);
+            *corner = cutlass_eval::clip_point(draft, segment, at, (w as u32, h as u32), px, py)
+                .ok_or_else(|| ShellError::Unavailable("the clip is not drawn there".to_owned()))?;
+        }
+        let (u, v) = corners
+            .iter()
+            .fold((0.0, 0.0), |s, p| (s.0 + p.0 / 4.0, s.1 + p.1 / 4.0));
+        if !((-1.0..=1.0).contains(&u) && (-1.0..=1.0).contains(&v)) {
+            return Err(ShellError::Unavailable(
+                "the box is not on the clip".to_owned(),
+            ));
+        }
+        self.refuse_locked(&ask.target)?;
+        let job_ask = TrackAsk {
+            segment_id: ask.target.clone(),
+            at,
+            corners,
+            mode: ask.mode,
+            span: TrackSpan::Both,
+        };
+        let draft = draft.clone();
+        let readers = self.readers.clone();
+        let root = self.path.clone();
+        let landed = id.clone();
+        self.start_job("Track", move |progress| {
+            progress.stage("Tracking");
+            let path = track_clip(&readers, &draft, root.as_deref(), &job_ask, &mut |done| {
+                progress.fraction(done);
+                !progress.cancelled()
+            })
+            .map_err(|error| error.to_string());
+            let landing: Landing = Box::new(move |shell: &mut Shell| {
+                shell.agent_tracks.paths.insert(landed, Some(path));
+                Ok(())
+            });
+            landing
+        })?;
+        self.agent_tracks.paths.insert(id, None);
+        Ok(())
+    }
+
+    /// The assistant's tracking job `id`: its path, or `None` while it
+    /// runs.
+    pub fn agent_track(&mut self, id: &str) -> Result<Option<TrackPath>, ShellError> {
+        self.agent_tracks_now()
+            .path(id)
+            .map_err(ShellError::Unavailable)
+    }
+
+    /// The assistant's tracking jobs as they stand: a job that is no
+    /// longer running and left no path was stopped.
+    pub fn agent_tracks_now(&mut self) -> AgentTracks {
+        self.poll_job();
+        if !self.job().is_some_and(|job| job.label == "Track") {
+            for path in self.agent_tracks.paths.values_mut() {
+                path.get_or_insert_with(|| Err("the tracking job was stopped".to_owned()));
+            }
+        }
+        self.agent_tracks.clone()
+    }
+
+    /// A fresh id for an assistant tracking job.
+    pub fn agent_tracks_next_id(&mut self) -> String {
+        self.agent_tracks.next_id()
+    }
+
+    /// Take the job ids `tracks` handed out, so the next ones are fresh.
+    pub fn keep_track_ids(&mut self, tracks: &AgentTracks) {
+        self.agent_tracks.started = self.agent_tracks.started.max(tracks.started);
     }
 
     /// The selected clip as a track target at the playhead.

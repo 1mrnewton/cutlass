@@ -49,7 +49,8 @@ pub use skill::{Skill, SkillError, SkillLibrary, SkillPlan, parse_skill_md};
 pub use subagent::{Subagent, SubagentError, SubagentResult, allowed_tools, parent_apply};
 pub use tools::{
     Catalog, Export, Invocation, Media, MediaInfo, Packages, Player, Registry, Speech, SpeechJob,
-    SpeechPoll, TOOL_NAMES, ToolError, pending_approvals, tool_definitions,
+    SpeechPoll, TOOL_NAMES, ToolError, TrackAsk, TrackJob, Tracking, pending_approvals,
+    tool_definitions,
 };
 
 #[cfg(test)]
@@ -69,7 +70,8 @@ mod tests {
     use crate::sandbox::{Sandbox, SandboxError};
     use crate::settings_tool::SettingsTool;
     use crate::tools::{
-        Catalog, Export, Media, MediaInfo, Packages, Player, Registry, Speech, tool_definitions,
+        Catalog, Export, Media, MediaInfo, Packages, Player, Registry, Speech, TrackAsk, Tracking,
+        tool_definitions,
     };
 
     struct Temp {
@@ -130,6 +132,16 @@ mod tests {
         }
     }
 
+    impl Tracking for Host {
+        fn start(&mut self, _ask: &TrackAsk) -> Result<String, String> {
+            Ok("track".to_owned())
+        }
+
+        fn poll(&mut self, _job_id: &str) -> Result<Option<cutlass_model::TrackPath>, String> {
+            Ok(None)
+        }
+    }
+
     impl Catalog for Host {
         fn search(&mut self, _query: &str) -> Result<Vec<String>, String> {
             Ok(Vec::new())
@@ -182,7 +194,7 @@ mod tests {
             Host,
             Host,
             Host,
-            (Host, Host, Host, Host, McpClient::new(Host)),
+            (Host, Host, Host, Host, McpClient::new(Host), Host),
         );
         let mut model = LocalModel::scripted(vec![
             Completion {

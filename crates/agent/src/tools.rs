@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::path::Path;
 
-use cutlass_model::{Micros, SegmentId, TrackId};
+use cutlass_model::{MaterialId, Micros, SegmentId, TrackId, TrackMode, TrackPath};
 use cutlass_session::Request;
 use cutlass_settings::{McpServer, Settings};
 
@@ -37,6 +37,8 @@ pub const TOOL_NAMES: &[&str] = &[
     "media.probe",
     "speech.start",
     "speech.poll",
+    "track.start",
+    "track.poll",
     "catalog.search",
     "package.ensure",
     "export.start",
@@ -118,6 +120,42 @@ pub trait Speech {
     fn poll(&mut self, job_id: &str) -> Result<Option<String>, String>;
 }
 
+/// A box to follow on a video clip, as the host's tracking job takes it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TrackAsk {
+    /// The video clip the box is on.
+    pub target: SegmentId,
+    /// The timeline time the box is on, in microseconds.
+    pub at_us: i64,
+    /// The box's corners in canvas units (0 is the middle, 1 is half the
+    /// canvas, y up): top left, top right, bottom right, bottom left.
+    pub corners: [(f64, f64); 4],
+    pub mode: TrackMode,
+}
+
+/// A tracking job, the draft revision it started on, and what it will do
+/// when its path is in.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TrackJob {
+    /// The id the host assigned.
+    pub id: String,
+    /// `draft.session().revision()` when the job started.
+    pub revision: u64,
+    pub target: SegmentId,
+    pub at_us: i64,
+    pub followers: Vec<SegmentId>,
+}
+
+/// Follows a box through a clip. The host reads the frames; the registry
+/// writes the path with a `Track` request.
+pub trait Tracking {
+    /// Starts a job for `ask` and returns its id.
+    fn start(&mut self, ask: &TrackAsk) -> Result<String, String>;
+    /// Returns the path for `job_id`, `None` while the host is still
+    /// tracking, or an error string from the host.
+    fn poll(&mut self, job_id: &str) -> Result<Option<TrackPath>, String>;
+}
+
 /// Searches bundled effect and animation ids.
 pub trait Catalog {
     /// Returns ids that match `query`.
@@ -179,6 +217,18 @@ pub enum Invocation {
     },
     /// Poll a transcription job.
     SpeechPoll {
+        /// The id returned by start.
+        job_id: String,
+    },
+    /// Start a tracking job.
+    TrackStart {
+        /// The box to follow.
+        ask: TrackAsk,
+        /// The clips that will follow it.
+        followers: Vec<SegmentId>,
+    },
+    /// Poll a tracking job, and write its path when it is in.
+    TrackPoll {
         /// The id returned by start.
         job_id: String,
     },
@@ -253,6 +303,11 @@ pub enum ToolError {
         /// The id that was asked for.
         job_id: String,
     },
+    /// `track.poll` named a job this registry did not start.
+    TrackUnknown {
+        /// The id that was asked for.
+        job_id: String,
+    },
     /// The argument text is not the grammar for that tool.
     BadArguments(String),
 }
@@ -270,6 +325,7 @@ impl fmt::Display for ToolError {
             Self::Host(message) => write!(formatter, "{message}"),
             Self::SkillNotFound => write!(formatter, "skill not found"),
             Self::SpeechUnknown { job_id } => write!(formatter, "unknown speech job {job_id}"),
+            Self::TrackUnknown { job_id } => write!(formatter, "unknown tracking job {job_id}"),
             Self::BadArguments(message) => write!(formatter, "{message}"),
         }
     }
@@ -288,13 +344,14 @@ impl std::error::Error for ToolError {
             | Self::Host(_)
             | Self::SkillNotFound
             | Self::SpeechUnknown { .. }
+            | Self::TrackUnknown { .. }
             | Self::BadArguments(_) => None,
         }
     }
 }
 
 /// Draft, settings, skills, and the host services the registry calls.
-pub struct Registry<P, Med, Sp, Cat, Pkg, Exp, Sand, Appr, Tr> {
+pub struct Registry<P, Med, Sp, Cat, Pkg, Exp, Sand, Appr, Tr, Trk> {
     /// Draft queries and combos.
     pub draft: DraftTools,
     /// The settings file and its generation.
@@ -319,10 +376,14 @@ pub struct Registry<P, Med, Sp, Cat, Pkg, Exp, Sand, Appr, Tr> {
     pub approver: Appr,
     /// MCP calls.
     pub mcp: McpClient<Tr>,
+    /// Tracking.
+    pub tracking: Trk,
     speech_jobs: BTreeMap<String, SpeechJob>,
+    track_jobs: BTreeMap<String, TrackJob>,
 }
 
-impl<P, Med, Sp, Cat, Pkg, Exp, Sand, Appr, Tr> Registry<P, Med, Sp, Cat, Pkg, Exp, Sand, Appr, Tr>
+impl<P, Med, Sp, Cat, Pkg, Exp, Sand, Appr, Tr, Trk>
+    Registry<P, Med, Sp, Cat, Pkg, Exp, Sand, Appr, Tr, Trk>
 where
     P: Player,
     Med: Media,
@@ -333,8 +394,9 @@ where
     Sand: Sandbox,
     Appr: Approver,
     Tr: McpTransport,
+    Trk: Tracking,
 {
-    /// Builds a registry from the draft, settings, player, media, speech, catalog, and `(packages, export, sandbox, approver, mcp)`.
+    /// Builds a registry from the draft, settings, player, media, speech, catalog, and `(packages, export, sandbox, approver, mcp, tracking)`.
     #[must_use]
     pub fn new(
         draft: DraftTools,
@@ -343,7 +405,14 @@ where
         media: Med,
         speech: Sp,
         catalog: Cat,
-        (packages, export, sandbox, approver, mcp): (Pkg, Exp, Sand, Appr, McpClient<Tr>),
+        (packages, export, sandbox, approver, mcp, tracking): (
+            Pkg,
+            Exp,
+            Sand,
+            Appr,
+            McpClient<Tr>,
+            Trk,
+        ),
     ) -> Self {
         Self {
             draft,
@@ -358,7 +427,9 @@ where
             sandbox,
             approver,
             mcp,
+            tracking,
             speech_jobs: BTreeMap::new(),
+            track_jobs: BTreeMap::new(),
         }
     }
 
@@ -372,6 +443,17 @@ where
     /// Carry on the jobs an earlier registry started.
     pub fn set_speech_jobs(&mut self, jobs: BTreeMap<String, SpeechJob>) {
         self.speech_jobs = jobs;
+    }
+
+    /// The tracking jobs this registry started, for the next registry.
+    #[must_use]
+    pub fn take_track_jobs(&mut self) -> BTreeMap<String, TrackJob> {
+        std::mem::take(&mut self.track_jobs)
+    }
+
+    /// Carry on the tracking jobs an earlier registry started.
+    pub fn set_track_jobs(&mut self, jobs: BTreeMap<String, TrackJob>) {
+        self.track_jobs = jobs;
     }
 
     /// Runs one call and returns its text.
@@ -427,6 +509,22 @@ where
             Invocation::SpeechPoll { job_id } => {
                 poll_speech(&self.draft, &mut self.speech, &self.speech_jobs, &job_id)
             }
+            Invocation::TrackStart { ask, followers } => {
+                let id = self.tracking.start(&ask).map_err(ToolError::Host)?;
+                let revision = self.draft.session().revision();
+                self.track_jobs.insert(
+                    id.clone(),
+                    TrackJob {
+                        id: id.clone(),
+                        revision,
+                        target: ask.target,
+                        at_us: ask.at_us,
+                        followers,
+                    },
+                );
+                Ok(format!("job={id} revision={revision}"))
+            }
+            Invocation::TrackPoll { job_id } => self.poll_track(&job_id),
             Invocation::CatalogSearch { query } => self
                 .catalog
                 .search(&query)
@@ -496,6 +594,10 @@ where
             "speech.poll" => {
                 text_arg(arguments, "speech.poll").map(|job_id| Invocation::SpeechPoll { job_id })
             }
+            "track.start" => parse_track(arguments),
+            "track.poll" => {
+                text_arg(arguments, "track.poll").map(|job_id| Invocation::TrackPoll { job_id })
+            }
             "catalog.search" => Ok(Invocation::CatalogSearch {
                 query: arguments.to_owned(),
             }),
@@ -511,14 +613,60 @@ where
         }
     }
 
+    /// Poll `job_id`; once its path is in and the draft has not moved,
+    /// write it as one `Track` request.
+    fn poll_track(&mut self, job_id: &str) -> Result<String, ToolError> {
+        let Some(job) = self.track_jobs.get(job_id).cloned() else {
+            return Err(ToolError::TrackUnknown {
+                job_id: job_id.to_owned(),
+            });
+        };
+        let polled = self.tracking.poll(job_id);
+        if self.draft.session().revision() != job.revision {
+            self.track_jobs.remove(job_id);
+            return Ok("stale".to_owned());
+        }
+        let Some(path) = polled.map_err(|error| {
+            self.track_jobs.remove(job_id);
+            ToolError::Host(error)
+        })?
+        else {
+            return Ok("pending".to_owned());
+        };
+        self.track_jobs.remove(job_id);
+        let draft = self.draft.session().draft();
+        let tracking_id = (1_u32..)
+            .map(|n| format!("tracking-{n}"))
+            .find(|id| draft.materials.get(id).is_none())
+            .map(MaterialId::new)
+            .unwrap_or_default();
+        let frames = path.samples.len();
+        let result = self
+            .draft
+            .apply(ApplyInput {
+                request_id: None,
+                expected_revision: job.revision,
+                requests: vec![Request::Track {
+                    target: job.target,
+                    followers: job.followers,
+                    tracking_id,
+                    anchor: Micros(job.at_us),
+                    path,
+                }],
+                mode: ApplyMode::Commit,
+            })
+            .map_err(ToolError::Draft)?;
+        Ok(format!("revision={} frames={frames}", result.revision))
+    }
+
     /// Adds a skill from outside the app after the host approves it.
     pub fn add_skill_outside(&mut self, path: &Path) -> Result<(), ToolError> {
         add_skill(&mut self.skills, &mut self.approver, path)
     }
 }
 
-impl<P, Med, Sp, Cat, Pkg, Exp, Sand, Appr, Tr> ToolSink
-    for Registry<P, Med, Sp, Cat, Pkg, Exp, Sand, Appr, Tr>
+impl<P, Med, Sp, Cat, Pkg, Exp, Sand, Appr, Tr, Trk> ToolSink
+    for Registry<P, Med, Sp, Cat, Pkg, Exp, Sand, Appr, Tr, Trk>
 where
     P: Player,
     Med: Media,
@@ -529,6 +677,7 @@ where
     Sand: Sandbox,
     Appr: Approver,
     Tr: McpTransport,
+    Trk: Tracking,
 {
     fn run_tool(&mut self, call: &ToolCall) -> ToolOutcome {
         let parsed = self.parse(&call.name, &call.arguments);
@@ -566,6 +715,17 @@ fn description(name: &str) -> &'static str {
         "media.probe" => "Duration, size, and streams reported by the host for one path.",
         "speech.start" => "Start a transcription job and record the draft revision.",
         "speech.poll" => "Read a transcription job, ignoring it when the revision moved.",
+        "track.start" => {
+            "Follow a box on a video clip through it, then make clips follow it. JSON: \
+             {\"target\":\"<video clip id>\", \"at_us\":N, \"box\":[x0,y0,x1,y1], \
+             \"mode\":\"object\"|\"plane\", \"followers\":[\"<clip id>\"]}. The box is two \
+             opposite corners in canvas units (0 the middle, 1 half the canvas, y up) on the \
+             frame at at_us. Followers are video, sticker or text clips."
+        }
+        "track.poll" => {
+            "Read a tracking job: pending, stale when the draft moved, or the revision after \
+             the followers were made to follow the path, as one undo step."
+        }
         "catalog.search" => "Search bundled effect and animation ids.",
         "package.ensure" => "Ask the host to make one package available.",
         "export.start" => "Start an export. Replacing a file asks the user.",
@@ -887,6 +1047,51 @@ fn parse_sandbox(arguments: &str) -> Invocation {
     }
 }
 
+fn parse_track(arguments: &str) -> Result<Invocation, ToolError> {
+    #[derive(serde::Deserialize)]
+    struct Track {
+        target: String,
+        at_us: i64,
+        #[serde(rename = "box")]
+        corners: [f64; 4],
+        #[serde(default)]
+        mode: Option<String>,
+        followers: Vec<String>,
+    }
+    let track: Track = serde_json::from_str(arguments)
+        .map_err(|error| ToolError::BadArguments(format!("track.start needs JSON: {error}")))?;
+    let mode = match track.mode.as_deref() {
+        None | Some("object") => TrackMode::Object,
+        Some("plane") => TrackMode::Plane,
+        Some(other) => {
+            return Err(ToolError::BadArguments(format!(
+                "track.start mode is object or plane, not {other}"
+            )));
+        }
+    };
+    let [x0, y0, x1, y1] = track.corners;
+    let (left, right, top, bottom) = (x0.min(x1), x0.max(x1), y0.max(y1), y0.min(y1));
+    if !track.corners.iter().all(|v| v.is_finite()) || right <= left || top <= bottom {
+        return Err(ToolError::BadArguments(
+            "track.start box needs two opposite corners apart on both sides".to_owned(),
+        ));
+    }
+    if track.followers.is_empty() {
+        return Err(ToolError::BadArguments(
+            "track.start needs a clip to follow the box".to_owned(),
+        ));
+    }
+    Ok(Invocation::TrackStart {
+        ask: TrackAsk {
+            target: SegmentId::new(track.target),
+            at_us: track.at_us,
+            corners: [(left, top), (right, top), (right, bottom), (left, bottom)],
+            mode,
+        },
+        followers: track.followers.into_iter().map(SegmentId::new).collect(),
+    })
+}
+
 fn parse_mcp(arguments: &str) -> Result<Invocation, ToolError> {
     let Some((server, rest)) = arguments.split_once('\n') else {
         return Err(bad("mcp.call"));
@@ -969,7 +1174,9 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    use cutlass_model::{Draft, Segment, TimeRange, TrackId};
+    use cutlass_model::{
+        Draft, Micros, Segment, SegmentId, TimeRange, TrackId, TrackMode, TrackPath,
+    };
     use cutlass_session::{Request, Session};
     use cutlass_settings::{McpServer, Settings, Shortcut};
 
@@ -984,7 +1191,7 @@ mod tests {
 
     use super::{
         Catalog, Export, Invocation, Media, MediaInfo, Packages, Player, Registry, Speech,
-        TOOL_NAMES, ToolError, tool_definitions,
+        TOOL_NAMES, ToolError, TrackAsk, Tracking, tool_definitions,
     };
 
     struct Temp {
@@ -1247,12 +1454,34 @@ mod tests {
         }
     }
 
+    /// Tracking that hands back `path` once it is set.
+    #[derive(Default)]
+    struct Follow {
+        asks: Vec<TrackAsk>,
+        path: Option<TrackPath>,
+    }
+
+    impl Tracking for Follow {
+        fn start(&mut self, ask: &TrackAsk) -> Result<String, String> {
+            self.asks.push(ask.clone());
+            Ok(format!("track-{}", self.asks.len()))
+        }
+
+        fn poll(&mut self, _job_id: &str) -> Result<Option<TrackPath>, String> {
+            Ok(self.path.clone())
+        }
+    }
+
     type TestRegistry =
-        Registry<CountPlayer, Probe, Talk, Search, Pack, Exporter, Runner, Gate, CountMcp>;
+        Registry<CountPlayer, Probe, Talk, Search, Pack, Exporter, Runner, Gate, CountMcp, Follow>;
 
     fn open(temp: &Temp, approver: Gate) -> TestRegistry {
         let mut draft = Draft::empty("D");
         draft.tracks[0].id = TrackId::new("main");
+        open_draft(temp, approver, draft)
+    }
+
+    fn open_draft(temp: &Temp, approver: Gate, draft: Draft) -> TestRegistry {
         Registry::new(
             DraftTools::new(Session::open(draft)),
             SettingsTool::open(temp.file()).unwrap(),
@@ -1266,6 +1495,7 @@ mod tests {
                 Runner::json(),
                 approver,
                 McpClient::new(CountMcp::ready()),
+                Follow::default(),
             ),
         )
     }
@@ -1314,6 +1544,8 @@ mod tests {
                 "media.probe",
                 "speech.start",
                 "speech.poll",
+                "track.start",
+                "track.poll",
                 "catalog.search",
                 "package.ensure",
                 "export.start",
@@ -1322,7 +1554,7 @@ mod tests {
                 "mcp.call",
             ]
         );
-        assert_eq!(TOOL_NAMES.len(), 18);
+        assert_eq!(TOOL_NAMES.len(), 20);
     }
 
     #[test]
@@ -2026,6 +2258,180 @@ mod tests {
                     path: "/new".to_owned()
                 },
             ]
+        );
+    }
+
+    /// A 1920 by 1080 canvas with a video clip `v` and a sticker `s` over
+    /// it, both two seconds long.
+    fn tracked_draft() -> Draft {
+        let mut draft = Draft::empty("D");
+        draft.canvas_config.width = 1920;
+        draft.canvas_config.height = 1080;
+        draft.materials.videos.push(cutlass_model::MaterialVideo {
+            id: "m".into(),
+            width: 1920,
+            height: 1080,
+            ..cutlass_model::MaterialVideo::default()
+        });
+        draft.tracks[0]
+            .segments
+            .push(Segment::new("v", "m", TimeRange::new(0, 2_000_000)));
+        let mut lane = cutlass_model::Track::main("stickers");
+        lane.kind = cutlass_model::TrackType::Sticker;
+        lane.segments
+            .push(Segment::new("s", "art", TimeRange::new(0, 2_000_000)));
+        draft.tracks.push(lane);
+        draft
+    }
+
+    fn slide() -> TrackPath {
+        TrackPath {
+            mode: TrackMode::Object,
+            samples: (0..30)
+                .map(|i| {
+                    let x = -0.5 + 0.01 * f64::from(i);
+                    cutlass_model::TrackSample {
+                        time: Micros(i64::from(i) * 1_000_000 / 30),
+                        corners: [(x, 0.1), (x + 0.2, 0.1), (x + 0.2, -0.1), (x, -0.1)],
+                    }
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn track_start_reads_a_box_in_canvas_units() {
+        let temp = Temp::new();
+        let registry = open(&temp, Gate::refuse());
+        let call = registry
+            .parse(
+                "track.start",
+                r#"{"target":"v","at_us":500000,"box":[0.2,-0.1,-0.2,0.3],"followers":["s"]}"#,
+            )
+            .unwrap();
+        let Invocation::TrackStart { ask, followers } = call else {
+            panic!("{call:?}");
+        };
+        assert_eq!(ask.target, SegmentId::new("v"));
+        assert_eq!(ask.at_us, 500_000);
+        assert_eq!(ask.mode, TrackMode::Object);
+        assert_eq!(
+            ask.corners,
+            [(-0.2, 0.3), (0.2, 0.3), (0.2, -0.1), (-0.2, -0.1)],
+            "top left first, y up"
+        );
+        assert_eq!(followers, vec![SegmentId::new("s")]);
+        for bad in [
+            r#"{"target":"v","at_us":0,"box":[0,0,0,0.3],"followers":["s"]}"#,
+            r#"{"target":"v","at_us":0,"box":[0,0,0.2,0.3],"followers":[]}"#,
+            r#"{"target":"v","at_us":0,"box":[0,0,0.2,0.3],"mode":"blob","followers":["s"]}"#,
+            "v 0",
+        ] {
+            assert!(
+                matches!(
+                    registry.parse("track.start", bad),
+                    Err(ToolError::BadArguments(_))
+                ),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_tracked_path_is_written_once_it_is_in_as_one_undo_step() {
+        let temp = Temp::new();
+        let mut registry = open_draft(&temp, Gate::refuse(), tracked_draft());
+        assert!(matches!(
+            registry.invoke(Invocation::TrackPoll {
+                job_id: "missing".to_owned()
+            }),
+            Err(ToolError::TrackUnknown { .. })
+        ));
+        let started = registry
+            .invoke(
+                registry
+                    .parse(
+                        "track.start",
+                        r#"{"target":"v","at_us":0,"box":[-0.5,0.1,-0.3,-0.1],"followers":["s"]}"#,
+                    )
+                    .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(started, "job=track-1 revision=0");
+        let poll = |registry: &mut TestRegistry| {
+            registry.invoke(Invocation::TrackPoll {
+                job_id: "track-1".to_owned(),
+            })
+        };
+        assert_eq!(poll(&mut registry).unwrap(), "pending");
+        // The jobs carry on into the next registry a host builds.
+        let jobs = registry.take_track_jobs();
+        registry.set_track_jobs(jobs);
+        registry.tracking.path = Some(slide());
+        assert_eq!(poll(&mut registry).unwrap(), "revision=1 frames=30");
+        let draft = registry.draft.session().draft();
+        assert_eq!(draft.materials.video_trackings.len(), 1);
+        assert_eq!(draft.materials.video_trackings[0].id.as_str(), "tracking-1");
+        assert!(
+            matches!(poll(&mut registry), Err(ToolError::TrackUnknown { .. })),
+            "a written job is done"
+        );
+        registry.draft.undo().unwrap();
+        assert!(
+            registry
+                .draft
+                .session()
+                .draft()
+                .materials
+                .video_trackings
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_track_whose_draft_moved_is_stale() {
+        let temp = Temp::new();
+        let mut registry = open_draft(&temp, Gate::refuse(), tracked_draft());
+        registry
+            .invoke(
+                registry
+                    .parse(
+                        "track.start",
+                        r#"{"target":"v","at_us":0,"box":[-0.5,0.1,-0.3,-0.1],"followers":["s"]}"#,
+                    )
+                    .unwrap(),
+            )
+            .unwrap();
+        registry
+            .invoke(Invocation::DraftApply(ApplyInput {
+                request_id: None,
+                expected_revision: 0,
+                requests: vec![Request::Place {
+                    track_id: TrackId::new("stickers"),
+                    segment: Box::new(Segment::new(
+                        "t",
+                        "art",
+                        TimeRange::new(3_000_000, 1_000_000),
+                    )),
+                }],
+                mode: ApplyMode::Commit,
+            }))
+            .unwrap();
+        registry.tracking.path = Some(slide());
+        let poll = registry
+            .invoke(Invocation::TrackPoll {
+                job_id: "track-1".to_owned(),
+            })
+            .unwrap();
+        assert_eq!(poll, "stale");
+        assert!(
+            registry
+                .draft
+                .session()
+                .draft()
+                .materials
+                .video_trackings
+                .is_empty()
         );
     }
 }

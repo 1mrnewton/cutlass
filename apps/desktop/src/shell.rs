@@ -794,6 +794,10 @@ pub struct Shell {
     updates: update::Updates,
     /// The assistant's speech jobs, carried from one tool call to the next.
     agent_speech_jobs: std::collections::BTreeMap<String, cutlass_agent::SpeechJob>,
+    /// The assistant's tracking jobs, carried from one tool call to the next.
+    agent_track_jobs: std::collections::BTreeMap<String, cutlass_agent::TrackJob>,
+    /// Each assistant tracking job's path by id: `None` while it runs.
+    agent_tracks: follow::AgentTracks,
     /// Work running off the window thread, and the project it was started in.
     job: Option<RunningJob>,
     /// The movie the last export wrote.
@@ -899,6 +903,8 @@ impl Shell {
             wants_speech_model: false,
             updates: update::Updates::default(),
             agent_speech_jobs: std::collections::BTreeMap::new(),
+            agent_track_jobs: std::collections::BTreeMap::new(),
+            agent_tracks: follow::AgentTracks::default(),
             job: None,
             exported: None,
             imported: None,

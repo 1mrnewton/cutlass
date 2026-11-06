@@ -1,0 +1,25 @@
+[package]
+name = "cutlass-vision"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "On-device image models: click-to-select with MobileSAM on burn."
+
+[dependencies]
+# The CPU backend everywhere. `fusion` and `autotune` only change GPU work.
+burn = { version = "=0.22.1", default-features = false, features = ["std", "flex", "fusion", "autotune"] }
+burn-store = "=0.22.1"
+image = { version = "0.25.10", default-features = false }
+
+# The Mac is the one GPU path proven to give correct masks. `persistence`
+# keeps compiled kernels on disk; it builds C through turso (see deny.toml).
+[target.'cfg(target_os = "macos")'.dependencies]
+burn = { version = "=0.22.1", default-features = false, features = ["metal", "persistence"] }
+cubecl-environment = { version = "=0.11.3", features = ["persistence"] }
+
+[dev-dependencies]
+safetensors = "0.8.0"
+
+[lints]
+workspace = true

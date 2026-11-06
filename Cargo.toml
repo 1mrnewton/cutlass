@@ -78,6 +78,7 @@ members = [
     "crates/text",
     "crates/transcription",
     "crates/update",
+    "crates/vision",
     "tools/icongen",
     "tools/licenses",
 ]
@@ -169,3 +170,4 @@ opt-level = 3
 opt-level = 3
 [profile.dev.package.cutlass-hevc]
 opt-level = 3
+

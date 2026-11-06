@@ -107,6 +107,11 @@ const THRESHOLD: f64 = 1.5;
 /// The share of followed points that must agree with the fit.
 const MIN_AGREEMENT: f64 = 0.3;
 
+/// The share of the points carried into a frame that must agree with the
+/// fit. When the target vanishes, a few stray points can still agree on
+/// standing still; this keeps them from passing for the target.
+const MIN_KEPT: f64 = 0.25;
+
 /// The most the target's area may grow or shrink in one frame.
 const MAX_GROWTH: f64 = 1.6;
 
@@ -251,7 +256,8 @@ impl Tracker {
             &mut self.random,
         )?;
         let agreement = fit.count as f64 / pairs.len() as f64;
-        if fit.count < need || agreement < MIN_AGREEMENT {
+        let kept = fit.count as f64 / self.points.len().max(1) as f64;
+        if fit.count < need || agreement < MIN_AGREEMENT || kept < MIN_KEPT {
             return None;
         }
         let moved = self.origin.0.map(|p| fit.model.apply(p));

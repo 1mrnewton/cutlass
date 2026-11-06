@@ -143,12 +143,10 @@ pub fn dialog<R>(ui: &mut Ui, title: &str, add: impl FnOnce(&mut Ui) -> R) -> (R
                 let close_response = ui.allocate_rect(close, Sense::click());
                 closed = close_response.clicked();
                 ui.add_space(48.0);
-                let inner = egui::ScrollArea::vertical()
-                    .id_salt(("dialog", title))
+                let inner = crate::ui::Scroll::vertical(("dialog", title))
                     .max_height(room - 64.0)
                     .auto_shrink([false, true])
-                    .show(ui, add)
-                    .inner;
+                    .show(ui, add);
                 ui.add_space(16.0);
                 let height = ui.min_rect().height().clamp(360.0_f32.min(room), room);
                 ui.painter().set(

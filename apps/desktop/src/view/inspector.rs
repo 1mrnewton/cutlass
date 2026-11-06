@@ -24,9 +24,9 @@ use super::ViewState;
 
 /// The active tab color, and an on switch.
 const ACCENT: Color32 = Color32::from_rgb(0x2a, 0xd4, 0xe0);
-const PAGES: Color32 = Color32::from_rgb(0x26, 0x26, 0x26);
+const PAGES: Color32 = tokens::INSET;
 const PAGE_ON: Color32 = Color32::from_rgb(0x3a, 0x3a, 0x3a);
-const BOX: Color32 = Color32::from_rgb(0x2a, 0x2a, 0x2a);
+const BOX: Color32 = tokens::RAISED;
 const LABEL_WIDTH: f32 = 72.0;
 const VALUE_WIDTH: f32 = 56.0;
 const PAIR_BOX: f32 = 84.0;
@@ -2590,10 +2590,9 @@ fn number_box(
     let stored = stored + 0.0;
     let text = state.fields.entry(key.to_owned()).or_default();
     let mut edited = None;
-    egui::Frame::new()
-        .fill(BOX)
-        .corner_radius(CornerRadius::same(8))
-        .inner_margin(egui::Margin::symmetric(8, 4))
+    crate::ui::Surface::raised()
+        .radius(tokens::RADIUS_MD)
+        .padding(egui::Margin::symmetric(8, 4))
         .show(ui, |ui| {
             ui.set_width(width - 16.0);
             ui.horizontal(|ui| {
@@ -2746,23 +2745,19 @@ fn icon_toggle(ui: &mut Ui, name: &str, tip: &str, on: bool) -> egui::Response {
 /// A row of icon buttons on a dark bar. Returns the value of the one clicked.
 fn icon_bar<T: Copy>(ui: &mut Ui, items: &[(&str, &str, Option<T>)]) -> Option<T> {
     let mut picked = None;
-    egui::Frame::new()
-        .fill(PAGES)
-        .corner_radius(CornerRadius::same(10))
-        .inner_margin(egui::Margin::same(4))
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                let gap = ((ui.available_width() - 24.0 * items.len() as f32)
-                    / (items.len().max(2) - 1) as f32)
-                    .max(2.0);
-                ui.spacing_mut().item_spacing.x = gap;
-                for (icon, tip, value) in items {
-                    if icon_toggle(ui, icon, tip, false).clicked() {
-                        picked = *value;
-                    }
+    crate::ui::Surface::inset().show(ui, |ui| {
+        ui.horizontal(|ui| {
+            let gap = ((ui.available_width() - 24.0 * items.len() as f32)
+                / (items.len().max(2) - 1) as f32)
+                .max(2.0);
+            ui.spacing_mut().item_spacing.x = gap;
+            for (icon, tip, value) in items {
+                if icon_toggle(ui, icon, tip, false).clicked() {
+                    picked = *value;
                 }
-            });
+            }
         });
+    });
     ui.add_space(4.0);
     picked
 }

@@ -98,7 +98,8 @@ pub(super) fn clip_panel(
         };
     }
     if let Some(focus) = pending {
-        state.tab = focus.tab;
+        // A caption's Captions tab comes before the text tabs a menu names.
+        state.tab = focus.tab + usize::from(panel == Panel::Caption);
         state.page = focus.page;
         if let Some(section) = focus.section {
             state.open.insert(section.to_owned());
@@ -228,17 +229,20 @@ fn text_panel(
     inspection: &Inspection,
     caption: bool,
 ) {
+    // A caption's tabs lead with its list; it has no tracking.
+    let labels: &[&str] = if caption {
+        &["Captions", "Text", "Animation", "Text to speech"]
+    } else {
+        &["Text", "Animation", "Tracking", "Text to speech"]
+    };
     let tab = state.tab;
-    tabs(
-        ui,
-        &["Text", "Animation", "Tracking", "Text to speech"],
-        &mut state.tab,
-    );
+    tabs(ui, labels, &mut state.tab);
     if tab != state.tab {
         state.page = 0;
     }
-    match state.tab {
-        0 => {
+    match labels.get(state.tab).copied().unwrap_or_default() {
+        "Captions" => caption_list(shell, ui, state),
+        "Text" => {
             pages(ui, &["Basic", "Bubble", "Effects"], &mut state.page);
             match state.page {
                 0 => {
@@ -249,8 +253,8 @@ fn text_panel(
                 _ => effect_page(shell, ui),
             }
         }
-        1 => animation_tab(shell, ui, state, &["In", "Out", "Loop"], TEXT_MOTIONS),
-        2 => {
+        "Animation" => animation_tab(shell, ui, state, &["In", "Out", "Loop"], TEXT_MOTIONS),
+        "Tracking" => {
             later_tiles(ui, &["Face", "Body", "Hand", "Custom"]);
             later_button(ui, "Start tracking");
         }
@@ -264,6 +268,96 @@ fn text_panel(
                 ],
             );
         }
+    }
+}
+
+/// The Captions tab: every caption on the lane, numbered in timeline order,
+/// the one under the playhead in the accent color. A line is typed over in
+/// place, and its words keep their times; + adds a caption after it, and
+/// the bin takes it off.
+fn caption_list(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState) {
+    let rows = shell.caption_rows();
+    let current = cutlass_editor::row_at(&rows, shell.playhead());
+    ui.add_space(8.0);
+    ui.horizontal(|ui| {
+        let query = state.fields.entry("caption search".to_owned()).or_default();
+        ui.add(
+            TextEdit::singleline(query)
+                .hint_text("Search")
+                .desired_width(ui.available_width() - 150.0),
+        );
+        later_button(ui, "Translate");
+        later_button(ui, "Find and replace");
+    });
+    let query = state
+        .fields
+        .get("caption search")
+        .cloned()
+        .unwrap_or_default();
+    let shown = cutlass_editor::rows_matching(&rows, &query);
+    if rows.is_empty() {
+        note(ui, "This clip is not on a caption row.");
+        return;
+    }
+    if shown.is_empty() {
+        note(ui, "No caption says that.");
+        return;
+    }
+    let mut edit = None;
+    let mut add = None;
+    let mut remove = None;
+    for index in shown {
+        let row = &rows[index];
+        let on = current == Some(index);
+        let color = if on { ACCENT } else { tokens::TEXT };
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.add_sized(
+                [28.0, 24.0],
+                egui::Label::new(
+                    RichText::new(format!("{}", index + 1))
+                        .size(12.0)
+                        .color(if on { ACCENT } else { tokens::MUTED }),
+                ),
+            );
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if ui
+                    .add(egui::Button::new(RichText::new("🗑").size(12.0)).fill(BOX))
+                    .on_hover_text("Delete this caption")
+                    .clicked()
+                {
+                    remove = Some(row.segment_id.clone());
+                }
+                if ui
+                    .add(egui::Button::new(RichText::new("+").size(12.0)).fill(BOX))
+                    .on_hover_text("Add a caption after this one")
+                    .clicked()
+                {
+                    add = Some(row.segment_id.clone());
+                }
+                let key = format!("caption line {}", row.segment_id.as_str());
+                let text = state.fields.entry(key).or_default();
+                let response = ui.add(
+                    TextEdit::singleline(text)
+                        .frame(egui::Frame::NONE)
+                        .text_color(color)
+                        .desired_width(f32::INFINITY),
+                );
+                if super::commits(ui, &response) && *text != row.text {
+                    edit = Some((row.segment_id.clone(), text.clone()));
+                } else if !response.has_focus() {
+                    row.text.clone_into(text);
+                }
+            });
+        });
+    }
+    ui.separator();
+    if let Some((segment_id, text)) = edit {
+        send(shell, |shell| shell.set_caption_line(&segment_id, &text));
+    } else if let Some(segment_id) = add {
+        send(shell, |shell| shell.add_caption_after(&segment_id));
+    } else if let Some(segment_id) = remove {
+        send(shell, |shell| shell.remove_caption(&segment_id));
     }
 }
 

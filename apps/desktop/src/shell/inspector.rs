@@ -675,6 +675,55 @@ impl Shell {
         self.apply(Request::SetWords { material_id, words })
     }
 
+    /// Every caption on the selected caption's lane, in timeline order.
+    #[must_use]
+    pub fn caption_rows(&self) -> Vec<cutlass_editor::CaptionRow> {
+        match (self.draft(), self.selected()) {
+            (Some(draft), Some(segment_id)) => cutlass_editor::caption_rows(draft, segment_id),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Make caption `segment_id` say `text`. Its words are rematched, so
+    /// the ones that stay keep their times. One undo restores it.
+    pub fn set_caption_line(
+        &mut self,
+        segment_id: &SegmentId,
+        text: &str,
+    ) -> Result<(), ShellError> {
+        self.refuse_locked(segment_id)?;
+        let draft = self.session_draft()?;
+        let request = cutlass_editor::caption_text_request(draft, segment_id, text.trim())
+            .map_err(caption_miss)?;
+        match request {
+            Some(request) => self.apply(request),
+            None => Ok(()),
+        }
+    }
+
+    /// Add a caption after `segment_id`, looking like it: in the gap after
+    /// it, or in the second half of its time. One undo step.
+    pub fn add_caption_after(&mut self, segment_id: &SegmentId) -> Result<(), ShellError> {
+        self.refuse_locked(segment_id)?;
+        let mut ids = Vec::new();
+        for prefix in ["caption", "caption"] {
+            ids.push(self.fresh(prefix));
+        }
+        let mut ids = ids.into_iter();
+        let draft = self.session_draft()?;
+        let requests = cutlass_editor::add_after_requests(draft, segment_id, &mut |prefix| {
+            ids.next().unwrap_or_else(|| prefix.to_owned())
+        })
+        .map_err(caption_miss)?;
+        self.apply_requests(&requests)
+    }
+
+    /// Take caption `segment_id` off the timeline. One undo restores it.
+    pub fn remove_caption(&mut self, segment_id: &SegmentId) -> Result<(), ShellError> {
+        self.refuse_locked(segment_id)?;
+        self.apply(cutlass_editor::remove_caption_request(segment_id))
+    }
+
     fn caption_words(
         &self,
         segment_id: &SegmentId,
@@ -698,6 +747,19 @@ impl Shell {
             }
         })
     }
+}
+
+fn caption_miss(miss: cutlass_editor::CaptionListMiss) -> ShellError {
+    use cutlass_editor::CaptionListMiss as Miss;
+    ShellError::Unavailable(
+        match miss {
+            Miss::NotCaption => "that clip is not a caption",
+            Miss::Empty => "a caption needs a word; delete it instead",
+            Miss::TooLong => "that line is too long to match its words",
+            Miss::NoRoom => "there is no room after this caption",
+        }
+        .to_owned(),
+    )
 }
 
 #[cfg(test)]
@@ -1331,6 +1393,41 @@ mod tests {
                 .to_string(),
             "the track is locked"
         );
+    }
+
+    #[test]
+    fn the_caption_list_edits_adds_and_deletes_lines_one_step_each() {
+        let temp = Temp::new();
+        let mut desktop = every_kind(&temp);
+        pick(&mut desktop, "subtitle");
+        let before = desktop.draft().unwrap().clone();
+        let rows = desktop.caption_rows();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].text, "one two");
+        let id = rows[0].segment_id.clone();
+
+        desktop.set_caption_line(&id, " one three ").unwrap();
+        let inspection = desktop.inspection().unwrap();
+        assert_eq!(inspection.words.text, ["one", "three"]);
+        assert_eq!(inspection.words.start_time[0], 0);
+        assert_eq!(inspection.words.end_time[1], 900);
+        assert!(desktop.set_caption_line(&id, "   ").is_err());
+
+        desktop.add_caption_after(&id).unwrap();
+        let rows = desktop.caption_rows();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[1].text, cutlass_editor::NEW_CAPTION_TEXT);
+        let added = rows[1].segment_id.clone();
+        desktop.remove_caption(&added).unwrap();
+        assert_eq!(desktop.caption_rows().len(), 1);
+
+        for _ in 0..3 {
+            desktop.undo().unwrap();
+        }
+        assert_eq!(desktop.draft().unwrap(), &before);
+
+        pick(&mut desktop, "main");
+        assert!(desktop.caption_rows().is_empty());
     }
 
     #[test]

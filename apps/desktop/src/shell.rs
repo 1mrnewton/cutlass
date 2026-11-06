@@ -2420,6 +2420,10 @@ impl Shell {
             self.preview_cache.borrow_mut().clear();
         }
         if self.settings != before {
+            cutlass_logger::info!(
+                "settings changed: {}",
+                changed_settings(&before, &self.settings).join(", ")
+            );
             self.save_settings();
         }
     }
@@ -7600,6 +7604,37 @@ struct CardWave {
     levels: Arc<[f32]>,
 }
 
+/// The names of the settings that differ, as `playback.proxies`, one level
+/// deep. Values stay out of the log: an MCP server's entry may carry a key.
+fn changed_settings(before: &Settings, after: &Settings) -> Vec<String> {
+    let (Ok(serde_json::Value::Object(before)), Ok(serde_json::Value::Object(after))) =
+        (serde_json::to_value(before), serde_json::to_value(after))
+    else {
+        return vec!["(unreadable)".to_owned()];
+    };
+    let mut names = Vec::new();
+    let keys: std::collections::BTreeSet<&String> = before.keys().chain(after.keys()).collect();
+    for key in keys {
+        let (old, new) = (before.get(key), after.get(key));
+        if old == new {
+            continue;
+        }
+        match (old, new) {
+            (Some(serde_json::Value::Object(old)), Some(serde_json::Value::Object(new))) => {
+                let inner: std::collections::BTreeSet<&String> =
+                    old.keys().chain(new.keys()).collect();
+                for name in inner {
+                    if old.get(name) != new.get(name) {
+                        names.push(format!("{key}.{name}"));
+                    }
+                }
+            }
+            _ => names.push(key.clone()),
+        }
+    }
+    names
+}
+
 /// The kinds in one combo, as `move+trim`. Field values stay out of the
 /// log: a caption's words are the user's text.
 fn request_names(requests: &[Request]) -> String {
@@ -9244,6 +9279,26 @@ mod tests {
             ),
             "{log}"
         );
+    }
+
+    #[test]
+    fn a_settings_change_logs_its_names_and_not_its_values() {
+        let before = Settings::default();
+        let mut after = before.clone();
+        after.playback.proxies = !after.playback.proxies;
+        after.memory = !after.memory;
+        after
+            .rest
+            .insert("secret_key".to_owned(), serde_json::json!("sk-do-not-log"));
+        let names = super::changed_settings(&before, &after);
+        assert_eq!(names, ["memory", "playback.proxies", "secret_key"]);
+        assert!(super::changed_settings(&before, &before).is_empty());
+        crate::test_log::path();
+        let mut desktop = shell();
+        desktop.update_settings(|settings| settings.step_cap += 1);
+        let log = crate::test_log::text();
+        assert!(log.contains("settings changed: step_cap"), "{log}");
+        assert!(!log.contains("sk-do-not-log"), "{log}");
     }
 
     #[test]

@@ -16,6 +16,7 @@ fn main() {
         return;
     }
     cutlass_logger::install_panic_hook();
+    cutlass_logger::install_panic_hook();
     cutlass_logger::error!("child");
     cutlass_logger::debug!("child-debug");
     match args.next().as_deref() {

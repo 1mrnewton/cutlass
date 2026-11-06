@@ -336,8 +336,14 @@ macro_rules! trace {
 /// process start, after [`init`].
 ///
 /// A panic inside the logger itself, with the log held on that thread,
-/// gives up on the record after a short wait rather than deadlocking.
+/// gives up on the record after a short wait rather than deadlocking. A
+/// second call changes nothing, so a panic is never recorded twice.
 pub fn install_panic_hook() {
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    INSTALLED.call_once(chain_panic_hook);
+}
+
+fn chain_panic_hook() {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         record_panic(info);

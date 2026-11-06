@@ -120,6 +120,8 @@ fn a_panic_is_logged_before_the_process_dies() -> io::Result<()> {
     assert!(line.contains("thread main panicked at"), "{text}");
     assert!(line.contains("emit.rs:"), "{text}");
     assert!(line.contains("backtrace:"), "{text}");
+    // The child installs the hook twice; the panic is still one record.
+    assert_eq!(text.matches("index out of bounds").count(), 1, "{text}");
     // The hook set before still runs, so the panic still reaches stderr.
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("panicked at"), "{stderr}");

@@ -50,7 +50,8 @@ Cargo features:
 | Feature | What it turns on |
 | --- | --- |
 | `metal` | candle on Metal, and burn on wgpu over Metal (Apple devices) |
-| `vulkan` | burn on wgpu over Vulkan (Android, Windows, Linux). candle has no Vulkan backend, so it stays on the CPU |
+| `vulkan` | burn on wgpu over Vulkan (Android, Windows, Linux). It needs Vulkan 1.2 features. candle has no Vulkan backend, so it stays on the CPU |
+| `wgpu` | burn on wgpu's portable path (WGSL), for GPUs the `vulkan` path refuses. This build stores the model's shape numbers as 32-bit integers, because many phone GPUs can't run 64-bit ones |
 | `cache` | burn saves its compiled GPU kernels to disk, so later launches skip most of the warm-up. **It builds C code**; see the findings |
 
 To check the masks against onnxruntime, make a reference file, then pass it
@@ -87,7 +88,8 @@ On the CPU, both engines:
 adb shell "cd /data/local/tmp && ./ml-bench --image frame.png --click 500,900 --runs 5 --clicks 20"
 ```
 
-On the GPU (burn only):
+On the GPU (burn only). Build with `--features wgpu` instead if the
+phone's driver lacks Vulkan 1.2:
 
 ```bash
 adb shell "cd /data/local/tmp && ./ml-bench --gpu --engine burn --image frame.png --click 500,900 --runs 5 --clicks 20"
@@ -148,10 +150,48 @@ What this shows:
    here; in an app it would be pointed at Cutlass's `Cache/` folder.
 5. **burn's generated code `unwrap`s and `panic!`s** on bad weights and on
    shapes it does not expect. The editor's own crates may not do that.
-6. Not measured yet: an Android phone, and a Windows laptop with integrated
-   graphics. The Android build with `vulkan` compiles. The Windows build
-   compiles from a Mac without `cache`. With `cache`, its build script needs
-   a Windows resource compiler.
+6. Not measured yet: a Windows laptop with integrated graphics. The Windows
+   build compiles from a Mac without `cache`. With `cache`, its build script
+   needs a Windows resource compiler.
+
+## Findings on a Galaxy Note10+ (Snapdragon 855, Adreno 640, Android 12)
+
+A 2019 flagship, about as fast as a mid-range phone today. The same two
+frames and clicks as on the Mac. Times are the median of 3 to 5 encodes and
+10 to 20 clicks.
+
+| Engine | Encode a frame | One click |
+| --- | --- | --- |
+| candle, CPU | 15.5 s to 24.8 s (it varied between runs) | 0.80 to 0.85 s |
+| burn, CPU (flex) | **11.3 s** (steady) | **0.52 s** |
+| burn, GPU | did not run | did not run |
+
+Both engines' masks matched onnxruntime here as well. burn's matched
+exactly, and candle's overlapped by 99.7% or more and picked the same best
+mask.
+
+What this shows:
+
+1. **On this phone's CPU, burn beats candle**: about 1.4 to 2.2 times faster
+   to encode, and 1.6 times faster per click. That is the reverse of the Mac.
+2. **Neither is fast enough on the CPU** for a click-to-mask preview: about
+   11 seconds per frame before the first mask.
+3. **burn could not use this phone's GPU.** It hit three failures:
+   - The `vulkan` path aborts the process. The driver lacks
+     `buffer_device_address`, a Vulkan 1.2 feature, and burn panics inside a
+     function that cannot unwind instead of returning an error.
+   - The `wgpu` path then refused the generated code's 64-bit shape integers
+     (no `SHADER_INT64`). The `wgpu` build narrows them to 32 bits to get past
+     this.
+   - Even then, Qualcomm's shader compiler failed on one of burn's kernels
+     (`AdrenoVK: Failed to link shaders`, an internal assertion), and the
+     device was lost.
+
+   The last failure is a driver bug, so this phone has no GPU route for burn
+   without changes inside burn. Newer Adreno drivers may behave differently;
+   this was not tested.
+4. candle has no Android GPU backend at all, so on Android it is CPU only
+   either way.
 
 ## Licenses
 

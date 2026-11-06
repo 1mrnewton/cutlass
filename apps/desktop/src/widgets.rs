@@ -105,8 +105,7 @@ fn mark(ui: &mut Ui, label: &str, on: bool) -> bool {
 }
 
 pub fn dialog<R>(ui: &mut Ui, title: &str, add: impl FnOnce(&mut Ui) -> R) -> (R, bool) {
-    ui.painter()
-        .rect_filled(ui.max_rect(), CornerRadius::ZERO, tokens::SCRIM);
+    crate::ui::Surface::scrim().paint(ui.painter(), ui.max_rect());
     let screen = ui.max_rect();
     let width = 420.0;
     let top = (screen.center().y - 180.0).max(screen.top() + 16.0);
@@ -151,11 +150,8 @@ pub fn dialog<R>(ui: &mut Ui, title: &str, add: impl FnOnce(&mut Ui) -> R) -> (R
                 let height = ui.min_rect().height().clamp(360.0_f32.min(room), room);
                 ui.painter().set(
                     body,
-                    egui::Shape::rect_filled(
-                        Rect::from_min_size(rect.min, Vec2::new(width, height)),
-                        CornerRadius::same(tokens::DIALOG_RADIUS),
-                        tokens::PROJECT_BAR,
-                    ),
+                    crate::ui::Surface::dialog()
+                        .shape(Rect::from_min_size(rect.min, Vec2::new(width, height))),
                 );
                 inner
             },

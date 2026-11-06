@@ -96,10 +96,21 @@ fn gpu_device() -> Result<(Device, &'static str), BenchError> {
     ))
 }
 
-#[cfg(not(any(feature = "metal", feature = "vulkan")))]
+#[cfg(all(feature = "wgpu", not(any(feature = "metal", feature = "vulkan"))))]
+fn gpu_device() -> Result<(Device, &'static str), BenchError> {
+    // Many phone GPUs cannot run 64-bit integers in WGSL, and burn keeps integer
+    // tensors in 64 bits unless told otherwise.
+    let mut device = Device::wgpu(burn::tensor::DeviceKind::DefaultDevice);
+    device
+        .configure(burn::tensor::IntDType::I32)
+        .map_err(|error| BenchError::Usage(format!("burn wgpu device: {error:?}")))?;
+    Ok((device, "wgpu-wgsl"))
+}
+
+#[cfg(not(any(feature = "metal", feature = "vulkan", feature = "wgpu")))]
 fn gpu_device() -> Result<(Device, &'static str), BenchError> {
     Err(BenchError::Usage(
-        "burn has no GPU in this build: build with --features metal or --features vulkan".into(),
+        "burn has no GPU in this build: build with --features metal, vulkan or wgpu".into(),
     ))
 }
 

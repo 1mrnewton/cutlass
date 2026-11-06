@@ -2,7 +2,7 @@
 //!
 //! `scripts/fetch.sh` downloads them into `models/`.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use burn_onnx::{LoadStrategy, ModelGen};
 
@@ -23,5 +23,26 @@ fn main() {
             .out_dir("model/")
             .load_strategy(LoadStrategy::Embedded)
             .run_from_script();
+        if std::env::var_os("CARGO_FEATURE_WGPU").is_some() {
+            narrow_shape_ints(name);
+        }
+    }
+}
+
+/// ONNX keeps shapes as 64-bit integers, and burn-onnx puts those on the
+/// device as `I64` tensors. Many phone GPUs cannot run 64-bit integers in
+/// WGSL, so the portable build keeps them in 32 bits. Shapes here are far
+/// below 2^31.
+fn narrow_shape_ints(name: &str) {
+    let Some(out) = std::env::var_os("OUT_DIR") else {
+        println!("cargo::error=OUT_DIR is not set");
+        return;
+    };
+    let file: PathBuf = Path::new(&out).join("model").join(format!("{name}.rs"));
+    let narrowed = std::fs::read_to_string(&file)
+        .map(|code| code.replace("burn::tensor::DType::I64", "burn::tensor::DType::I32"))
+        .and_then(|code| std::fs::write(&file, code));
+    if let Err(error) = narrowed {
+        println!("cargo::error={}: {error}", file.display());
     }
 }

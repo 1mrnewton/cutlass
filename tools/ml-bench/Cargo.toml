@@ -16,6 +16,9 @@ default = []
 metal = ["candle-core/metal", "candle-nn/metal", "candle-transformers/metal", "burn/metal"]
 # The GPU on Android, Windows and Linux: burn's wgpu on Vulkan. candle has no Vulkan backend.
 vulkan = ["burn/vulkan"]
+# Any GPU through wgpu's portable path (WGSL). Older Android drivers lack the Vulkan
+# 1.2 features the `vulkan` path needs.
+wgpu = ["burn/wgpu"]
 # Keeps burn's kernel tuning results on disk, so only the first launch pays for them.
 cache = ["burn/persistence"]
 

@@ -25,6 +25,7 @@ use cutlass_picture::{Picture, PictureSource, Sample, rgba_len};
 use cutlass_png::PngDecoder;
 use cutlass_still::{StillDemux, StillProbe, still_limits};
 
+use crate::ahead::ReadAhead;
 use crate::clock::ClockKind;
 use crate::error::EngineError;
 use crate::map::ticks_to_micros;
@@ -711,6 +712,84 @@ fn a_steered_decode_seeks_to_a_target_moved_far_ahead() {
     assert_eq!(seen, [tick(2), tick(150)]);
 }
 
+#[test]
+fn a_seek_back_shows_the_old_picture_until_the_asked_one_is_ready() {
+    let mut readers = ReaderFactory::new();
+    readers.register_container(probe_script, open_sparse_keyframes);
+    readers
+        .decoders_mut()
+        .register(CodecId::Jpeg, |_params| Ok(Box::new(SlowPicture)));
+    let media = readers.open(&fixture("pattern.jpg")).expect("open");
+    let tick = |ticks: i64| ticks_to_micros(ticks, Timescale::new(30)).expect("time");
+    let ahead = ReadAhead::start(media, TimeRange::new(0, 10_000_000), 2).expect("thread");
+    let first = ahead.picture(Micros(tick(150).0 + 10)).expect("first");
+    assert_eq!(first.start, tick(150));
+    // The keyframe before 119 is 90, so the decode passes 29 pictures first.
+    let back = Micros(tick(119).0 + 10);
+    let mut shown = Vec::new();
+    loop {
+        if let Some(held) = ahead.try_picture(back).expect("decodes") {
+            assert_eq!(held.start, tick(119));
+            break;
+        }
+        if let Some(near) = ahead.nearest(back) {
+            shown.push(near.start);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    assert!(!shown.is_empty());
+    assert!(shown.iter().all(|start| *start == tick(150)), "{shown:?}");
+}
+
+/// [`OnePicture`], three milliseconds a picture, so a test sees a decode on
+/// its way.
+struct SlowPicture;
+
+impl Decoder for SlowPicture {
+    fn codec(&self) -> CodecId {
+        CodecId::Jpeg
+    }
+
+    fn push(&mut self, packet: &Packet) -> Result<Vec<Output>, CodecError> {
+        std::thread::sleep(std::time::Duration::from_millis(3));
+        OnePicture.push(packet)
+    }
+
+    fn drain(&mut self) -> Result<Vec<Output>, CodecError> {
+        Ok(Vec::new())
+    }
+
+    fn reset(&mut self) {}
+
+    fn decode_picture(
+        &mut self,
+        packet: &Packet,
+    ) -> Result<Vec<cutlass_decode::StillOutput>, CodecError> {
+        OnePicture.decode_picture(packet)
+    }
+}
+
+/// Two hundred pictures with a keyframe every thirty, seeking to the
+/// keyframe at or before the asked time.
+fn open_sparse_keyframes(_path: &Path) -> Result<Box<dyn Demux>, OpenError> {
+    let mut movie = scripted(0, 200);
+    movie.lands = true;
+    movie.packets = (0..200)
+        .map(|index| {
+            let packet = file_packet(1, index);
+            FilePacket::try_new(
+                1,
+                packet.bytes().to_vec(),
+                packet.timestamp(),
+                packet.timescale(),
+                index % 30 == 0,
+            )
+            .expect("packet")
+        })
+        .collect();
+    Ok(Box::new(movie))
+}
+
 fn open_two_hundred(_path: &Path) -> Result<Box<dyn Demux>, OpenError> {
     let mut movie = scripted(0, 200);
     movie.lands = true;
@@ -976,6 +1055,7 @@ impl Demux for Scripted {
                 .iter()
                 .rposition(|packet| {
                     packet.stream() == to.track
+                        && packet.keyframe()
                         && packet
                             .timestamp()
                             .presentation()

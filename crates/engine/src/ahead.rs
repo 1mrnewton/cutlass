@@ -66,6 +66,11 @@ struct State {
     /// A fill behind this picture start found nothing earlier: the start of
     /// the stream, or a run that would not decode.
     floor: Option<Micros>,
+    /// The picture last handed to a caller, shown while a jump decodes.
+    shown: Option<HeldFrame>,
+    /// The decode under way follows an asked time that moved, as under a
+    /// drag, so pictures on its way may be shown.
+    following: bool,
     stop: bool,
 }
 
@@ -81,6 +86,8 @@ impl ReadAhead {
                 ended: false,
                 backward: false,
                 floor: None,
+                shown: None,
+                following: false,
                 stop: false,
             }),
             wake: Condvar::new(),
@@ -108,6 +115,7 @@ impl ReadAhead {
                 aim(&mut state, source);
                 self.shared.wake.notify_all();
             }
+            state.shown = Some(held.clone());
             return Ok(Some(held));
         }
         if let Some((at, error)) = &state.failed
@@ -124,10 +132,18 @@ impl ReadAhead {
         Ok(None)
     }
 
-    /// The stored picture nearest `source`, covering it or not, for a caller
-    /// that shows something while the asked picture decodes.
+    /// A picture for a caller that shows something while the asked one
+    /// decodes. A jump keeps the picture last handed out, so the pictures
+    /// the decode passes on its way are not shown. A decode following a drag
+    /// shows the stored picture nearest `source`, so the drag sees it move.
     pub(crate) fn nearest(&self, source: Micros) -> Option<HeldFrame> {
-        lock(&self.shared.state)
+        let state = lock(&self.shared.state);
+        if !state.following
+            && let Some(shown) = &state.shown
+        {
+            return Some(shown.clone());
+        }
+        state
             .frames
             .iter()
             .min_by_key(|held| held.start.0.abs_diff(source.0))
@@ -159,6 +175,7 @@ impl ReadAhead {
                 aim(&mut state, source);
                 self.shared.wake.notify_all();
             }
+            state.shown = Some(held.clone());
             return Ok(held);
         }
         aim(&mut state, source);
@@ -175,7 +192,9 @@ impl ReadAhead {
                 })
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some(held) = find(&state, source) {
-                return Ok(held.clone());
+                let held = held.clone();
+                state.shown = Some(held.clone());
+                return Ok(held);
             }
             if state.failed.as_ref().is_some_and(|(at, _)| *at == source) {
                 break;
@@ -376,6 +395,7 @@ fn answer(
 ) -> Result<HeldFrame, EngineError> {
     let mut published = Instant::now();
     let mut followed = false;
+    lock(&shared.state).following = false;
     let start = *target;
     media.decode_steered(start, cover, &mut |held| {
         let mut state = lock(&shared.state);
@@ -393,6 +413,7 @@ fn answer(
             Some(want) => {
                 *target = want;
                 followed = true;
+                state.following = true;
                 Steer::Retarget(want)
             }
             None => Steer::Go,
@@ -500,6 +521,8 @@ mod tests {
             ended: false,
             backward: false,
             floor: None,
+            shown: None,
+            following: false,
             stop: false,
         }
     }

@@ -22,7 +22,8 @@ use cutlass_editor::{
     ZoomBounds, append_placement, copy_clips, drop_gesture, effect_of_card, effect_requests,
     effect_row_for, effect_target, fit_pixel_size, free_row, hit_test, last_accuracy_step,
     material_span, media_requests, minimum_pixel_size, move_requests, paste_requests, plan_move,
-    title_requests, title_style, transition_of_card, transition_request, trim_gesture,
+    plan_move_between, title_requests, title_style, transition_of_card, transition_request,
+    trim_gesture,
 };
 use cutlass_encode::EncodeFactory;
 use cutlass_engine::{Thumb, ThumbKey, Thumbnails, Waveforms};
@@ -577,6 +578,14 @@ pub struct Chrome {
 }
 
 pub use cutlass_store::ListedProject;
+
+/// Where a body drag is over: `y` pixels from the top lane, on the editor's
+/// lane scale, or the gap above row `n` (the row count is under the last).
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Over {
+    Y(f64),
+    Between(usize),
+}
 
 struct ClipDrag {
     id: SegmentId,
@@ -2445,8 +2454,24 @@ impl Shell {
         x: f64,
         y: f64,
     ) -> Result<(), ShellError> {
+        self.drag_over(segment_id, x, Over::Y(y))
+    }
+
+    /// Drop a body drag in the gap above row `boundary`, or past the last
+    /// row. A clip whose kind may sit there opens a lane there, in the same
+    /// undo step; otherwise it lands on the nearest row.
+    pub fn drag_segment_between(
+        &mut self,
+        segment_id: SegmentId,
+        x: f64,
+        boundary: usize,
+    ) -> Result<(), ShellError> {
+        self.drag_over(segment_id, x, Over::Between(boundary))
+    }
+
+    fn drag_over(&mut self, segment_id: SegmentId, x: f64, over: Over) -> Result<(), ShellError> {
         let new_track = TrackId::new(self.fresh("track"));
-        let moves = self.plan_move(segment_id, x, y, new_track)?;
+        let moves = self.plan_move(segment_id, x, over, new_track)?;
         self.pending_moves.clear();
         let requests = move_requests(self.session_draft()?, &moves);
         if requests.is_empty() {
@@ -2527,12 +2552,41 @@ impl Shell {
     /// When the dragged clip is one of several selected clips, each selected
     /// clip keeps its gap and follows by the same amount.
     pub fn preview_move(&mut self, segment_id: SegmentId, x: f64, y: f64) {
+        self.preview_over(segment_id, x, Over::Y(y));
+    }
+
+    /// Follow a body drag held in the gap above row `boundary`.
+    pub fn preview_move_between(&mut self, segment_id: SegmentId, x: f64, boundary: usize) {
+        self.preview_over(segment_id, x, Over::Between(boundary));
+    }
+
+    fn preview_over(&mut self, segment_id: SegmentId, x: f64, over: Over) {
         self.pending_trim = None;
         // The preview's new lane is not on the draft, so its id is only a name.
         let new_track = TrackId::new("new-lane");
         self.pending_moves = self
-            .plan_move(segment_id, x, y, new_track)
+            .plan_move(segment_id, x, over, new_track)
             .unwrap_or_default();
+    }
+
+    /// The lane a held body drag would open: the row it opens above (the row
+    /// count is under the last) and its kind.
+    #[must_use]
+    pub fn new_lane_preview(&self) -> Option<(usize, TrackType)> {
+        let lane = self.pending_moves.first()?.new_lane.as_ref()?;
+        let draft = self.draft()?;
+        let row = self
+            .lanes()
+            .iter()
+            .position(|row| {
+                draft
+                    .tracks
+                    .iter()
+                    .position(|track| track.id == row.track_id)
+                    .is_some_and(|index| index >= lane.index)
+            })
+            .unwrap_or(self.lanes().len());
+        Some((row, lane.kind.clone()))
     }
 
     /// The dragged clip's copy. A group drag still reports that clip here.
@@ -2603,6 +2657,20 @@ impl Shell {
         x: f64,
         y: f64,
     ) -> Result<(), ShellError> {
+        self.finish_over(segment_id, x, Over::Y(y))
+    }
+
+    /// Finish a drag released in the gap above row `boundary`. An edge still trims.
+    pub fn finish_clip_drag_between(
+        &mut self,
+        segment_id: SegmentId,
+        x: f64,
+        boundary: usize,
+    ) -> Result<(), ShellError> {
+        self.finish_over(segment_id, x, Over::Between(boundary))
+    }
+
+    fn finish_over(&mut self, segment_id: SegmentId, x: f64, over: Over) -> Result<(), ShellError> {
         let edge = self
             .clip_drag
             .take()
@@ -2612,7 +2680,7 @@ impl Shell {
         self.pending_moves.clear();
         match edge {
             Some(edge) => self.trim_edge(segment_id, edge, x),
-            None => self.drag_segment(segment_id, x, y),
+            None => self.drag_over(segment_id, x, over),
         }
     }
 
@@ -2677,10 +2745,14 @@ impl Shell {
         &self,
         segment_id: SegmentId,
         x: f64,
-        y: f64,
+        over: Over,
         new_track: TrackId,
     ) -> Result<Vec<ClipMove>, ShellError> {
         self.refuse_locked(&segment_id)?;
+        let y = match over {
+            Over::Y(y) => y,
+            Over::Between(_) => 0.0,
+        };
         let gesture = MoveGesture {
             segment_id: segment_id.clone(),
             pointer: Pointer {
@@ -2693,7 +2765,13 @@ impl Shell {
             guides: self.guide_times(),
         };
         let draft = self.session_draft()?;
-        match plan_move(draft, &gesture, &self.selection) {
+        let plan = match over {
+            Over::Y(_) => plan_move(draft, &gesture, &self.selection),
+            Over::Between(boundary) => {
+                plan_move_between(draft, &gesture, boundary, &self.selection)
+            }
+        };
+        match plan {
             Ok(MovePlan::Miss) => Err(ShellError::Unavailable(
                 "the drag missed the lanes".to_owned(),
             )),
@@ -14149,6 +14227,7 @@ mod tests {
         desktop.preview_move(next.clone(), x, y);
         let preview = desktop.move_preview().expect("the drag is showing");
         assert_eq!(preview.track_id.as_str(), "new-lane");
+        assert_eq!(desktop.new_lane_preview(), Some((0, TrackType::Video)));
         assert_eq!(desktop.revision(), revision);
         assert_eq!(desktop.draft().unwrap().tracks, before);
 

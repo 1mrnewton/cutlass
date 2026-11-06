@@ -3799,6 +3799,7 @@ fn ruler_and_lanes(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
             rows.iter().position(|lane| lane.main),
         );
     }
+    paint_new_lane(shell, ui, &boxes, lanes_left);
     ui.set_clip_rect(clip);
     shell.send_timeline_asks();
     track_marquee(shell, ui, view, &marquee, lanes_left, &rows, &boxes);
@@ -5732,8 +5733,10 @@ fn paint_clip(
         {
             let x = f64::from(pos.x - lanes_left).max(0.0);
             scroll_with_drag(shell, ui, x);
-            let under = lane_under(boxes, pos).unwrap_or(index);
-            shell.preview_move(clip.id.clone(), x, editor_lane_y(under));
+            match lane_spot(boxes, pos).unwrap_or(LaneSpot::On(index)) {
+                LaneSpot::On(row) => shell.preview_move(clip.id.clone(), x, editor_lane_y(row)),
+                LaneSpot::Between(row) => shell.preview_move_between(clip.id.clone(), x, row),
+            }
         }
         if response.drag_stopped() && !moved {
             if ui.input(|input| input.modifiers.shift) {
@@ -5743,8 +5746,10 @@ fn paint_clip(
             }
             shell.cancel_clip_drag();
         } else {
-            let under = pos.and_then(|pos| lane_under(boxes, pos)).unwrap_or(index);
-            finish_clip_pointer(shell, ui, &response, &clip.id, lanes_left, under, None);
+            let spot = pos
+                .and_then(|pos| lane_spot(boxes, pos))
+                .unwrap_or(LaneSpot::On(index));
+            finish_clip_pointer(shell, ui, &response, &clip.id, lanes_left, spot, None);
         }
     }
     drag_clip_edge(
@@ -5873,7 +5878,7 @@ fn drag_clip_edge(
         &response,
         &clip.id,
         lanes_left,
-        index,
+        LaneSpot::On(index),
         Some(edge),
     );
 }
@@ -6057,7 +6062,7 @@ fn finish_clip_pointer(
     response: &egui::Response,
     id: &SegmentId,
     lanes_left: f32,
-    index: usize,
+    spot: LaneSpot,
     edge: Option<TrimEdge>,
 ) {
     if !response.drag_stopped() {
@@ -6068,13 +6073,113 @@ fn finish_clip_pointer(
         return;
     };
     let x = f64::from(pos.x - lanes_left).max(0.0);
-    let y = editor_lane_y(index);
     if edge.is_some() && shell.clip_edge(id).is_none() {
         shell.begin_clip_drag(id.clone(), edge, (pos.x, pos.y));
     }
-    if let Err(error) = shell.finish_clip_drag(id.clone(), x, y) {
+    let landed = match spot {
+        LaneSpot::On(row) => shell.finish_clip_drag(id.clone(), x, editor_lane_y(row)),
+        LaneSpot::Between(row) => shell.finish_clip_drag_between(id.clone(), x, row),
+    };
+    if let Err(error) = landed {
         shell.set_notice(error.to_string());
     }
+}
+
+/// Where a body drag is over: a row, or the gap above row `n` (the row count
+/// is under the last).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LaneSpot {
+    On(usize),
+    Between(usize),
+}
+
+/// How far into a row, from its top or bottom, a drop still opens a lane.
+const LANE_EDGE: f32 = 6.0;
+
+/// A row's middle is that row. Its top and bottom edges, the gaps between
+/// rows, and the space above the first or under the last are between rows.
+fn lane_spot(boxes: &[Rect], pos: Pos2) -> Option<LaneSpot> {
+    let first = boxes.first()?;
+    let last = boxes.last()?;
+    if pos.y < first.top() + LANE_EDGE {
+        return Some(LaneSpot::Between(0));
+    }
+    if pos.y > last.bottom() - LANE_EDGE {
+        return Some(LaneSpot::Between(boxes.len()));
+    }
+    for (index, row) in boxes.iter().enumerate() {
+        if pos.y < row.top() {
+            return Some(LaneSpot::Between(index));
+        }
+        if pos.y <= row.bottom() {
+            return Some(if pos.y < row.top() + LANE_EDGE {
+                LaneSpot::Between(index)
+            } else if pos.y > row.bottom() - LANE_EDGE {
+                LaneSpot::Between(index + 1)
+            } else {
+                LaneSpot::On(index)
+            });
+        }
+    }
+    Some(LaneSpot::Between(boxes.len()))
+}
+
+/// The lane a held drag would open: a line in the gap where it opens, and
+/// the dragged clip on that line.
+fn paint_new_lane(shell: &Shell, ui: &Ui, boxes: &[Rect], lanes_left: f32) {
+    let (Some((row, kind)), Some(preview)) = (shell.new_lane_preview(), shell.move_preview())
+    else {
+        return;
+    };
+    let y = match (
+        row.checked_sub(1).and_then(|above| boxes.get(above)),
+        boxes.get(row),
+    ) {
+        (Some(above), Some(below)) => (above.bottom() + below.top()) / 2.0,
+        (None, Some(below)) => below.top() - 4.0,
+        (Some(above), None) => above.bottom() + 4.0,
+        (None, None) => return,
+    };
+    let Some(right) = boxes.first().map(Rect::right) else {
+        return;
+    };
+    ui.painter().hline(
+        lanes_left..=right,
+        y,
+        egui::Stroke::new(2.0, tokens::SELECTED),
+    );
+    let left = lane_x(
+        lanes_left,
+        shell.pixel_size(),
+        shell.view_origin().0,
+        preview.start.0,
+    );
+    let end = lane_x(
+        lanes_left,
+        shell.pixel_size(),
+        shell.view_origin().0,
+        preview.start.0.saturating_add(preview.duration.0),
+    );
+    let ghost = Rect::from_min_max(
+        Pos2::new(left, y - 10.0),
+        Pos2::new(end.max(left + 8.0), y + 10.0),
+    );
+    let lanes = Rect::from_x_y_ranges(lanes_left..=right, ui.clip_rect().y_range());
+    let painter = ui.painter().with_clip_rect(ui.clip_rect().intersect(lanes));
+    painter.rect_filled(
+        ghost,
+        CornerRadius::same(5),
+        lane_color(&kind).gamma_multiply(0.8),
+    );
+    painter
+        .with_clip_rect(ghost.shrink(4.0).intersect(painter.clip_rect()))
+        .text(
+            ghost.left_center() + Vec2::new(8.0, 0.0),
+            Align2::LEFT_CENTER,
+            &preview.name,
+            FontId::proportional(11.0),
+            Color32::WHITE,
+        );
 }
 
 fn editor_lane_y(index: usize) -> f64 {
@@ -10701,6 +10806,105 @@ mod tests {
                     .iter()
                     .all(|segment| segment.id.as_str() != "low"))
         );
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn a_row_middle_is_the_row_and_its_edges_and_gaps_are_between() {
+        let boxes = [
+            Rect::from_min_size(Pos2::new(0.0, 100.0), Vec2::new(500.0, 48.0)),
+            Rect::from_min_size(Pos2::new(0.0, 156.0), Vec2::new(500.0, 48.0)),
+        ];
+        let at = |y: f32| lane_spot(&boxes, Pos2::new(50.0, y));
+        assert_eq!(at(20.0), Some(LaneSpot::Between(0)));
+        assert_eq!(at(103.0), Some(LaneSpot::Between(0)));
+        assert_eq!(at(124.0), Some(LaneSpot::On(0)));
+        assert_eq!(at(146.0), Some(LaneSpot::Between(1)));
+        assert_eq!(at(152.0), Some(LaneSpot::Between(1)));
+        assert_eq!(at(158.0), Some(LaneSpot::Between(1)));
+        assert_eq!(at(180.0), Some(LaneSpot::On(1)));
+        assert_eq!(at(202.0), Some(LaneSpot::Between(2)));
+        assert_eq!(at(400.0), Some(LaneSpot::Between(2)));
+        assert_eq!(lane_spot(&[], Pos2::new(50.0, 20.0)), None);
+    }
+
+    #[test]
+    fn dragging_a_clip_above_the_top_lane_opens_a_lane_there() {
+        let temp = std::env::temp_dir().join(format!("cutlass-new-lane-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let mut draft = cutlass_model::Draft::empty("draft");
+        draft.config.maintrack_adsorb = false;
+        draft.canvas_config.width = 2;
+        draft.canvas_config.height = 1;
+        draft.tracks[0].segments.push(cutlass_model::Segment::new(
+            "low",
+            "color",
+            cutlass_model::TimeRange::new(0, 2_000_000),
+        ));
+        let mut overlay = cutlass_model::Track::main(TrackId::new("overlay"));
+        overlay.flag = cutlass_model::TrackFlag::SubVideo;
+        overlay.segments.push(cutlass_model::Segment::new(
+            "high",
+            "color",
+            cutlass_model::TimeRange::new(8_000_000, 2_000_000),
+        ));
+        draft.tracks.insert(0, overlay);
+        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        let before = shell.draft().unwrap().tracks.clone();
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let press = |pos: Pos2, pressed: bool| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        let frame = |events: Vec<egui::Event>, shell: &mut Shell, view: &mut ViewState| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: screen,
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, view, None),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        let output = frame(Vec::new(), &mut shell, &mut view);
+        let low = text_pos(&output, "low").expect("the main clip");
+        let high = text_pos(&output, "high").expect("the overlay clip");
+        let to = Pos2::new(low.x + 20.0, high.y - 40.0);
+
+        frame(
+            vec![egui::Event::PointerMoved(low), press(low, true)],
+            &mut shell,
+            &mut view,
+        );
+        frame(vec![egui::Event::PointerMoved(to)], &mut shell, &mut view);
+        assert_eq!(
+            shell.new_lane_preview(),
+            Some((0, cutlass_model::TrackType::Video))
+        );
+        assert_eq!(shell.draft().unwrap().tracks, before);
+        frame(
+            vec![egui::Event::PointerMoved(to), press(to, false)],
+            &mut shell,
+            &mut view,
+        );
+
+        let tracks = &shell.draft().unwrap().tracks;
+        assert_eq!(tracks.len(), 3);
+        assert!(tracks[0].is_sub_video());
+        assert_eq!(tracks[0].segments[0].id.as_str(), "low");
+        assert_eq!(tracks[1].id.as_str(), "overlay");
+        assert!(shell.new_lane_preview().is_none());
+        shell.undo().unwrap();
+        assert_eq!(shell.draft().unwrap().tracks, before);
         let _ = std::fs::remove_dir_all(&temp);
     }
 

@@ -8,7 +8,7 @@ Playback, export, and a WebM container are outside this crate. `cutlass-matroska
 
 The codec-shipping skill (recovered from closed pull request 38, commit `d8b85f6a542c7ed75d56ebb18ca6a7618a9d44a5`) was followed: capability matrix before the codec, native safe Rust, independent decoder and encoder evidence, lifecycle, malformed input, a recorded fuzz campaign, and release measurements.
 
-These paths are named by the ISOBMFF scope note and are not in this checkout, because `.cursor/` is gitignored and they are not in git history: `container-shipping`, `commit-often`, `perf`, `source-of-truth`, `no-capcut-names`, `local-media`, `rust-standards`, `platforms`, and `tests`. They were not invented.
+These paths are named by the ISOBMFF scope note and are not in this checkout, because `.cursor/` is gitignored and they are not in git history: `container-shipping`, `commit-often`, `perf`, `source-of-truth`, the naming rule, `local-media`, `rust-standards`, `platforms`, and `tests`. They were not invented.
 
 Oracles on this machine: ffmpeg 6.1.1 (`/usr/bin/ffmpeg`). `ffprobe` lists native `vp9` and `libvpx-vp9`. GStreamer 1.24.2 `vp9dec` (gst-plugins-good, libvpx) is installed. Native ffmpeg `vp9` is an independent algorithm. `libvpx-vp9` and `vp9dec` are both libvpx. System libvpx is 1.14.0. It is not linked into this crate.
 

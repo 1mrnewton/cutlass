@@ -42,6 +42,10 @@ pub const MINIMIZE: Color32 = Color32::from_rgb(0xfe, 0xbc, 0x2e);
 pub const MAXIMIZE: Color32 = Color32::from_rgb(0x28, 0xc8, 0x40);
 /// The scrim behind a dialog.
 pub const SCRIM: Color32 = Color32::from_black_alpha(140);
+/// A card, bubble, or field that sits on a panel.
+pub const RAISED: Color32 = Color32::from_rgb(0x2a, 0x2a, 0x2a);
+/// A well sunk into a panel, such as the inspector's page bar.
+pub const INSET: Color32 = Color32::from_rgb(0x26, 0x26, 0x26);
 /// A scroll thumb at rest.
 pub const SCROLL_THUMB: Color32 = Color32::from_rgb(0x46, 0x46, 0x46);
 /// A scroll thumb under the pointer.
@@ -56,6 +60,10 @@ pub const TIMECODE_SIZE: f32 = 12.0;
 pub const EXPORT_RADIUS: u8 = 8;
 pub const EXPORT_PAD_X: i8 = 12;
 pub const EXPORT_PAD_Y: i8 = 5;
+/// Corner radii, smallest first. A dialog uses `DIALOG_RADIUS`.
+pub const RADIUS_SM: u8 = 6;
+pub const RADIUS_MD: u8 = 8;
+pub const RADIUS_LG: u8 = 10;
 pub const DIALOG_RADIUS: u8 = 12;
 pub const ICON_RADIUS: u8 = 6;
 pub const SELECTED_EDGE: f32 = 1.0;

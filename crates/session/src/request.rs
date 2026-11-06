@@ -2,7 +2,8 @@ use serde::{Deserialize, Serialize};
 
 use cutlass_model::{
     AnimType, CommonKeyframeGroup, Crop, FreezeInfo, MaterialAudio, MaterialId, MaterialTransition,
-    MaterialVideo, Micros, Segment, SegmentId, SpeedPoint, TrackId, TrackType, WordColumns,
+    MaterialVideo, Micros, Segment, SegmentId, SpeedPoint, TimeRange, TrackId, TrackType,
+    WordColumns,
 };
 
 /// A media record stored in the library. A segment places it later.
@@ -13,6 +14,17 @@ pub enum ImportedMedium {
     Video(Box<MaterialVideo>),
     /// A sound. Its track type is supplied by the import, not by lane category.
     Audio(Box<MaterialAudio>),
+}
+
+/// One timed caption a subtitle file brings in.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SubtitleCue {
+    pub segment_id: SegmentId,
+    pub material_id: MaterialId,
+    /// Where the caption sits on the timeline, in microseconds.
+    pub target: TimeRange,
+    /// Word times are milliseconds from the start of `target`.
+    pub words: WordColumns,
 }
 
 /// Which edge of a segment a trim moves.
@@ -81,6 +93,15 @@ pub enum Request {
         segment_id: SegmentId,
         material_id: MaterialId,
         words: WordColumns,
+    },
+    /// Place subtitle cues as captions on a new text lane `track_id`.
+    ///
+    /// The lane is flagged as subtitles and each cue becomes a caption clip
+    /// with its own words. An existing `track_id`, no cues, or cues that
+    /// overlap are refused, and the draft stays as it was.
+    AddSubtitles {
+        track_id: TrackId,
+        cues: Vec<SubtitleCue>,
     },
     /// Place the picture's sound on an audio clip linked to `source_id`.
     ///

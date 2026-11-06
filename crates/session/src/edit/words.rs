@@ -4,6 +4,7 @@ use cutlass_model::{
 };
 
 use super::EditError;
+use crate::request::SubtitleCue;
 
 /// Join word text with single spaces. Empty pieces are skipped.
 fn caption_text(words: &[String]) -> String {
@@ -149,6 +150,45 @@ pub fn add_caption(
         Ok(()) | Err(EditError::AlreadyLinked) => Ok(()),
         Err(error) => Err(error),
     }
+}
+
+/// Place `cues` as captions on a new subtitle lane `track_id`.
+///
+/// Each cue becomes a `subtitle` text clip at its target with its words.
+/// An existing lane, no cues, a cue with no words, and cues that overlap are
+/// refused; the session drops the partly changed draft.
+pub fn add_subtitles(
+    draft: &mut Draft,
+    track_id: &TrackId,
+    cues: &[SubtitleCue],
+) -> Result<(), EditError> {
+    if cues.is_empty() || cues.iter().any(|cue| cue.words.text.is_empty()) {
+        return Err(EditError::WordShape);
+    }
+    if draft.tracks.iter().any(|track| &track.id == track_id) {
+        return Err(EditError::TrackKind);
+    }
+    super::track::insert_track(draft, track_id, &TrackType::Text)?;
+    if let Some(track) = draft.tracks.iter_mut().find(|track| &track.id == track_id) {
+        track.flag = TrackFlag::TextSubtitle;
+    }
+    for cue in cues {
+        if draft.materials.get(cue.material_id.as_str()).is_some() {
+            return Err(EditError::DuplicateMaterial);
+        }
+        let mut text = MaterialText::new(cue.material_id.clone());
+        text.kind = CAPTION_KIND.to_owned();
+        draft.materials.texts.push(text);
+        let mut segment = Segment::new(
+            cue.segment_id.clone(),
+            cue.material_id.clone(),
+            cue.target.clone(),
+        );
+        segment.render_index = TrackType::Text.render_floor().unwrap_or(0);
+        super::place::place(draft, track_id, segment)?;
+        set_words(draft, &cue.material_id, cue.words.clone())?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -454,5 +494,109 @@ mod tests {
             .find(|track| track.id.as_str() == id)
             .expect("lane")
             .flag
+    }
+
+    fn cue(id: &str, start: i64, duration: i64, text: &str) -> SubtitleCue {
+        SubtitleCue {
+            segment_id: SegmentId::new(id),
+            material_id: MaterialId::new(id),
+            target: cutlass_model::TimeRange::new(start, duration),
+            words: columns(0, duration / 1_000, text),
+        }
+    }
+
+    #[test]
+    fn subtitle_cues_land_as_captions_on_a_new_subtitle_lane_in_one_step() {
+        use crate::request::Request;
+        use crate::session::Session;
+
+        let mut session = Session::open(Draft::empty("D"));
+        let before = session.draft().clone();
+        let cues = vec![
+            cue("one", 0, 1_000_000, "hello"),
+            cue("two", 1_500_000, 500_000, "there"),
+        ];
+        session
+            .apply(
+                0,
+                &[Request::AddSubtitles {
+                    track_id: TrackId::new("subs"),
+                    cues: cues.clone(),
+                }],
+            )
+            .unwrap();
+        let draft = session.draft();
+        let lane = draft
+            .tracks
+            .iter()
+            .find(|track| track.id.as_str() == "subs")
+            .expect("lane");
+        assert_eq!(lane.kind, TrackType::Text);
+        assert_eq!(lane.flag, TrackFlag::TextSubtitle);
+        assert_eq!(lane.segments.len(), 2);
+        assert_eq!(lane.segments[1].target, cues[1].target);
+        assert_eq!(lane.segments[1].render_index, 14_000);
+        let two = draft
+            .materials
+            .texts
+            .iter()
+            .find(|text| text.id.as_str() == "two")
+            .expect("two");
+        assert_eq!(two.kind, CAPTION_KIND);
+        assert_eq!(two.content, "there");
+        assert_eq!(two.words, cues[1].words);
+        assert_eq!(two.current_words, cues[1].words);
+
+        session.undo().unwrap();
+        assert_eq!(session.draft(), &before);
+    }
+
+    #[test]
+    fn overlapping_empty_or_clashing_subtitles_leave_the_draft() {
+        use crate::request::Request;
+        use crate::session::Session;
+
+        let mut session = Session::open(Draft::empty("D"));
+        let before = session.draft().clone();
+        let refused = |session: &mut Session, track: &str, cues: Vec<SubtitleCue>| {
+            session
+                .apply(
+                    0,
+                    &[Request::AddSubtitles {
+                        track_id: TrackId::new(track),
+                        cues,
+                    }],
+                )
+                .unwrap_err()
+        };
+        let overlap = vec![
+            cue("one", 0, 1_000_000, "a"),
+            cue("two", 500_000, 1_000_000, "b"),
+        ];
+        assert_eq!(refused(&mut session, "subs", overlap), EditError::Overlap);
+        assert_eq!(
+            refused(&mut session, "subs", Vec::new()),
+            EditError::WordShape
+        );
+        let mut silent = cue("one", 0, 1_000_000, "a");
+        silent.words = WordColumns::default();
+        assert_eq!(
+            refused(&mut session, "subs", vec![silent]),
+            EditError::WordShape
+        );
+        let twice = vec![
+            cue("one", 0, 100_000, "a"),
+            cue("one", 200_000, 100_000, "b"),
+        ];
+        assert_eq!(
+            refused(&mut session, "subs", twice),
+            EditError::DuplicateMaterial
+        );
+        let main = session.draft().tracks[0].id.as_str().to_owned();
+        assert_eq!(
+            refused(&mut session, &main, vec![cue("one", 0, 100_000, "a")]),
+            EditError::TrackKind
+        );
+        assert_eq!(session.draft(), &before);
     }
 }

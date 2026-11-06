@@ -18,5 +18,5 @@ pub use edit::{
     canvas_for, follow_first_picture, ratio_request,
 };
 pub use history::UNDO_LIMIT;
-pub use request::{Arrange, ImportedMedium, Request, TrimEdge};
+pub use request::{Arrange, ImportedMedium, Request, SubtitleCue, TrimEdge};
 pub use session::Session;

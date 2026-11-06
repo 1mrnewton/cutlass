@@ -65,8 +65,9 @@ pub const HEAD_HEIGHT: f32 = 38.0;
 pub const SPLIT: f32 = 6.0;
 pub const HAIRLINE: f32 = 1.0;
 pub const TOOLBAR_HEIGHT: f32 = 36.0;
-pub const RULER_HEIGHT: f32 = 44.0;
-/// A major ruler tick. A minor tick is half as tall.
+pub const RULER_HEIGHT: f32 = 26.0;
+/// A major ruler tick, hung from the ruler's top. A minor tick is under
+/// half as tall.
 pub const MAJOR_TICK: f32 = 12.0;
 pub const RAIL_WIDTH: f32 = 76.0;
 pub const COVER_WIDTH: f32 = 72.0;

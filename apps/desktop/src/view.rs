@@ -3955,9 +3955,9 @@ fn ruler_and_lanes(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
     }
     let mut scrubbing = false;
     if (lanes_left..=tracks.right()).contains(&playhead_x) {
-        let mark = Rect::from_center_size(
-            Pos2::new(playhead_x, ruler.bottom() - 6.0),
-            Vec2::new(11.0, 12.0),
+        let mark = Rect::from_min_size(
+            Pos2::new(playhead_x - 5.5, ruler.top() + 2.0),
+            Vec2::new(11.0, 14.0),
         );
         let response = ui.interact(mark, ui.scope_id().with("playhead"), Sense::drag());
         scrubbing |= response.dragged();
@@ -3970,10 +3970,10 @@ fn ruler_and_lanes(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
             }
         }
         ui.painter()
-            .rect_filled(mark, CornerRadius::same(2), tokens::PLAYHEAD);
+            .rect_filled(mark, CornerRadius::same(3), tokens::PLAYHEAD);
         ui.painter().vline(
             playhead_x,
-            tracks.y_range(),
+            mark.bottom()..=tracks.bottom(),
             egui::Stroke::new(1.0, tokens::PLAYHEAD),
         );
         response.on_hover_text("Playhead");
@@ -5021,22 +5021,24 @@ fn paint_ticks(
     ));
     for tick in ruler_ticks(rate, drop_frame, pixel_size, from, to) {
         let x = lane_x(lanes_left, pixel_size, origin, tick.time.0);
+        // Ticks hang from the top, and a label sits beside its major tick.
+        let top = ruler.top() + 3.0;
         let height = if tick.major {
             tokens::MAJOR_TICK
         } else {
-            tokens::MAJOR_TICK / 2.0
+            tokens::MAJOR_TICK * 0.4
         };
         painter.vline(
             x,
-            (ruler.bottom() - height)..=ruler.bottom(),
+            top..=top + height,
             egui::Stroke::new(1.0, tokens::RULER_TICK),
         );
         if let Some(label) = tick.label {
             painter.text(
-                Pos2::new(x + 4.0, ruler.bottom() - tokens::MAJOR_TICK - 2.0),
-                Align2::LEFT_BOTTOM,
+                Pos2::new(x + 4.0, top + tokens::MAJOR_TICK / 2.0),
+                Align2::LEFT_CENTER,
                 label,
-                FontId::monospace(11.0),
+                FontId::proportional(11.0),
                 tokens::MUTED,
             );
         }

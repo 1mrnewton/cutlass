@@ -2090,7 +2090,7 @@ fn text_parts(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState, look: 
 /// Send one edit and show its refusal.
 pub(super) fn send(shell: &mut Shell, edit: impl FnOnce(&mut Shell) -> Result<(), ShellError>) {
     if let Err(error) = edit(shell) {
-        shell.set_notice(error.to_string());
+        shell.notice_error(&error);
     }
 }
 

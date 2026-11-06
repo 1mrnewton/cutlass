@@ -4247,14 +4247,14 @@ impl Shell {
             ))),
         };
         if let Err(error) = result {
-            self.set_notice(error.to_string());
+            self.notice_error(&error);
         }
         if stopping {
             self.waiting_imports.clear();
         } else if let Some(next) = self.waiting_imports.pop_front() {
             if let Err(error) = self.start_import(&next) {
                 self.waiting_imports.clear();
-                self.set_notice(error.to_string());
+                self.notice_error(&error);
             }
             return self.job.is_some();
         }
@@ -5948,8 +5948,36 @@ impl Shell {
         Ok(())
     }
 
+    /// Show `message` under the timeline, and record it at INFO with the
+    /// place that raised it.
+    #[track_caller]
     pub fn set_notice(&mut self, message: impl Into<String>) {
-        self.notice = message.into();
+        let message = message.into();
+        let place = std::panic::Location::caller();
+        cutlass_logger::info!(
+            "notice ({}:{}): {message}",
+            notice_file(place.file()),
+            place.line()
+        );
+        self.show_notice(message);
+    }
+
+    /// Show a refusal or failure under the timeline, and record it at WARN
+    /// with the place that raised it, so the log keeps the cause.
+    #[track_caller]
+    pub fn notice_error(&mut self, error: &dyn std::fmt::Display) {
+        let message = error.to_string();
+        let place = std::panic::Location::caller();
+        cutlass_logger::warn!(
+            "notice ({}:{}): {message}",
+            notice_file(place.file()),
+            place.line()
+        );
+        self.show_notice(message);
+    }
+
+    fn show_notice(&mut self, message: String) {
+        self.notice = message;
         self.notice_since = Instant::now();
     }
 
@@ -7487,6 +7515,11 @@ struct CardWave {
     duration: i64,
     columns: usize,
     levels: Arc<[f32]>,
+}
+
+/// The source file a notice came from, from `src/` on.
+fn notice_file(file: &str) -> &str {
+    file.find("src/").map_or(file, |at| &file[at..])
 }
 
 #[cfg(test)]
@@ -9064,6 +9097,29 @@ mod tests {
         assert!(error.to_string().contains("still"), "{error}");
         assert_eq!(desktop.draft().unwrap(), &before);
         assert!(!temp.path.join("Resources").join("short.png").exists());
+    }
+
+    #[test]
+    fn a_notice_is_logged_with_its_level_and_place() {
+        crate::test_log::path();
+        let mut desktop = shell();
+        desktop.set_notice("notice-info-token");
+        desktop.notice_error(&ShellError::NoProject);
+        let refusal = ShellError::NoProject.to_string();
+        assert_eq!(desktop.notice, refusal);
+        let log = crate::test_log::text();
+        let info = log
+            .lines()
+            .find(|line| line.contains("notice-info-token"))
+            .unwrap_or_default();
+        assert!(info.contains(" INFO "), "{log}");
+        assert!(info.contains("notice (src/shell.rs:"), "{log}");
+        assert!(
+            log.lines().any(|line| line.contains(" WARN ")
+                && line.contains("notice (src/shell.rs:")
+                && line.contains(&refusal)),
+            "{log}"
+        );
     }
 
     #[test]

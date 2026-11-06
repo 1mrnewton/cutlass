@@ -440,7 +440,7 @@ fn dropped_files(shell: &mut Shell, ui: &Ui) {
     if !dropped.is_empty()
         && let Err(error) = shell.drop_files(&dropped)
     {
-        shell.set_notice(error.to_string());
+        shell.notice_error(&error);
     }
 }
 
@@ -520,7 +520,7 @@ fn exported_strip(shell: &mut Shell, ui: &Ui, full: Rect, width: f32) {
                         }
                         if ui.button(crate::shell::REVEAL_LABEL).clicked() {
                             if let Err(error) = crate::shell::reveal(&path) {
-                                shell.set_notice(error.to_string());
+                                shell.notice_error(&error);
                             }
                             shell.forget_export();
                         }
@@ -600,7 +600,7 @@ fn projects_home(
                         if project_card(ui, project)
                             && let Err(error) = shell.open_folder(&project.path)
                         {
-                            shell.set_notice(error.to_string());
+                            shell.notice_error(&error);
                         }
                     }
                 });
@@ -619,7 +619,7 @@ fn projects_home(
                     if project_card(ui, project)
                         && let Err(error) = shell.open_folder(&project.path)
                     {
-                        shell.set_notice(error.to_string());
+                        shell.notice_error(&error);
                     }
                 }
             });
@@ -672,10 +672,10 @@ fn open_created(shell: &mut Shell, root: &std::path::Path) {
     match Shell::create_project(root) {
         Ok(path) => {
             if let Err(error) = shell.open_folder(&path) {
-                shell.set_notice(error.to_string());
+                shell.notice_error(&error);
             }
         }
-        Err(error) => shell.set_notice(error.to_string()),
+        Err(error) => shell.notice_error(&error),
     }
 }
 
@@ -756,7 +756,7 @@ fn utc_date(seconds: u64) -> String {
 
 fn return_to_projects(shell: &mut Shell, view: &mut ViewState) {
     if let Err(error) = shell.close_project() {
-        shell.set_notice(error.to_string());
+        shell.notice_error(&error);
         return;
     }
     view.preview = None;
@@ -975,7 +975,7 @@ fn file_menu(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Optio
     if ui.button("Save").clicked() {
         ui.close();
         if let Err(error) = shell.save() {
-            shell.set_notice(error.to_string());
+            shell.notice_error(&error);
         }
     }
     if ui.button("Import…").clicked() {
@@ -1069,7 +1069,7 @@ pub fn run_menu(shell: &mut Shell, view: &mut ViewState, parent: Option<&eframe:
         action => shell.run_action(action),
     };
     if let Err(error) = done {
-        shell.set_notice(error.to_string());
+        shell.notice_error(&error);
     }
 }
 
@@ -1450,7 +1450,7 @@ fn update_dialog(shell: &mut Shell, ui: &mut Ui) {
     match answer {
         Some(true) => {
             if let Err(error) = shell.install_update() {
-                shell.set_notice(error.to_string());
+                shell.notice_error(&error);
             }
         }
         Some(false) => shell.decline_update(),
@@ -1470,7 +1470,7 @@ fn restart_for_update(shell: &mut Shell, ui: &Ui) {
             cutlass_logger::info!("update installed; restarting");
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
         }
-        Err(error) => shell.set_notice(format!(
+        Err(error) => shell.notice_error(&format!(
             "The update is installed. Open Cutlass again to use it ({error})."
         )),
     }
@@ -1501,7 +1501,7 @@ fn speech_model_dialog(shell: &mut Shell, ui: &mut Ui) {
     match answer {
         Some(true) => {
             if let Err(error) = shell.download_speech_model() {
-                shell.set_notice(error.to_string());
+                shell.notice_error(&error);
             }
         }
         Some(false) => shell.decline_speech_model(),
@@ -1637,13 +1637,13 @@ fn edit_menu(shell: &mut Shell, ui: &mut Ui) {
     if ui.add_enabled(undo, egui::Button::new("Undo")).clicked() {
         ui.close();
         if let Err(error) = shell.undo() {
-            shell.set_notice(error.to_string());
+            shell.notice_error(&error);
         }
     }
     if ui.add_enabled(redo, egui::Button::new("Redo")).clicked() {
         ui.close();
         if let Err(error) = shell.redo() {
-            shell.set_notice(error.to_string());
+            shell.notice_error(&error);
         }
     }
 }
@@ -1854,7 +1854,7 @@ fn asset_column(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect
                     shell.add_medium(&id)
                 };
                 if let Err(error) = added {
-                    shell.set_notice(error.to_string());
+                    shell.notice_error(&error);
                 }
             }
         });
@@ -1933,7 +1933,7 @@ fn drop_into_folder(shell: &mut Shell, response: &egui::Response, folder: &str) 
         && drop.material_id != folder
         && let Err(error) = shell.move_library_item(&drop.material_id, folder)
     {
-        shell.set_notice(error.to_string());
+        shell.notice_error(&error);
     }
 }
 
@@ -2034,7 +2034,7 @@ fn library_action(
         }
     };
     if let Err(error) = result {
-        shell.set_notice(error.to_string());
+        shell.notice_error(&error);
     }
 }
 
@@ -2201,7 +2201,7 @@ fn folder_name_field(
         let id = id.clone();
         view.library_renaming = None;
         if !cancel && let Err(error) = shell.rename_library_folder(&id, &typed) {
-            shell.set_notice(error.to_string());
+            shell.notice_error(&error);
         }
     }
     true
@@ -2816,7 +2816,7 @@ fn pick_layer(shell: &mut Shell, ui: &mut Ui, frame: Rect, placed: Rect, size: V
         let (x, y) = canvas_pixel(placed, size, pos);
         let keep = !ui.input(|input| input.modifiers.shift);
         if let Err(error) = shell.pick_at(x, y, keep) {
-            shell.set_notice(error.to_string());
+            shell.notice_error(&error);
         }
     }
     let painter = ui.painter().with_clip_rect(frame.intersect(ui.clip_rect()));
@@ -2891,7 +2891,7 @@ fn track_layer(
         if let Some((start, end)) = dragged
             && let Err(error) = shell.set_track_box(start, end)
         {
-            shell.set_notice(error.to_string());
+            shell.notice_error(&error);
         }
         view.track_drag = None;
     }
@@ -3244,7 +3244,7 @@ fn project_facts(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, width: f3
         if let Some(name) = name_field(ui, &mut view.name_buffer, &stored)
             && let Err(error) = shell.set_project_name(&name)
         {
-            shell.set_notice(error.to_string());
+            shell.notice_error(&error);
         }
     } else {
         fact(ui, "Name", &shell.project_name(), width);
@@ -3269,7 +3269,7 @@ fn project_facts(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, width: f3
     if color_space.clicked()
         && let Err(error) = shell.cycle_color_space()
     {
-        shell.set_notice(error.to_string());
+        shell.notice_error(&error);
     }
     ui.add_space(8.0);
     let span = ui.available_rect_before_wrap().x_range();
@@ -3284,7 +3284,7 @@ fn project_facts(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, width: f3
     if shape.clicked()
         && let Err(error) = shell.cycle_canvas()
     {
-        shell.set_notice(error.to_string());
+        shell.notice_error(&error);
     }
     fact(
         ui,
@@ -3303,14 +3303,14 @@ fn project_facts(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, width: f3
     if rate.clicked()
         && let Err(error) = shell.cycle_frame_rate()
     {
-        shell.set_notice(error.to_string());
+        shell.notice_error(&error);
     }
     if drop_shown {
         let drop = widgets::toolbar_button(ui, drop_label).on_hover_text("Timecode labels");
         if drop.clicked()
             && let Err(error) = shell.toggle_drop_frame()
         {
-            shell.set_notice(error.to_string());
+            shell.notice_error(&error);
         }
     }
     if let Some(color) = color_field(
@@ -3321,7 +3321,7 @@ fn project_facts(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, width: f3
         "Hex color. Empty is clear",
     ) && let Err(error) = shell.set_canvas_background(&color)
     {
-        shell.set_notice(error.to_string());
+        shell.notice_error(&error);
     }
 }
 
@@ -3489,7 +3489,7 @@ fn paint_toolbar(shell: &mut Shell, ui: &mut Ui, rect: Rect) {
                         .clicked()
                         && let Err(error) = shell.close_compound()
                     {
-                        shell.set_notice(error.to_string());
+                        shell.notice_error(&error);
                     }
                     ui.label(RichText::new(COMPOUND_TITLE).size(12.0).color(tokens::TEXT));
                     toolbar_separator(ui);
@@ -3648,7 +3648,7 @@ fn tool_clicked(shell: &mut Shell, name: &str) {
         _ => Ok(()),
     };
     if let Err(error) = result {
-        shell.set_notice(error.to_string());
+        shell.notice_error(&error);
     }
 }
 
@@ -3824,7 +3824,7 @@ fn ruler_and_lanes(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
         {
             let x = f64::from(pointer.x - lanes_left).max(0.0);
             if let Err(error) = shell.seek_ruler(x) {
-                shell.set_notice(error.to_string());
+                shell.notice_error(&error);
             }
         }
         ui.painter()
@@ -3846,7 +3846,7 @@ fn ruler_and_lanes(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
     {
         let x = f64::from(pointer.x - lanes_left).max(0.0);
         if let Err(error) = shell.seek_ruler(x) {
-            shell.set_notice(error.to_string());
+            shell.notice_error(&error);
         }
     }
     paint_rendered_spans(shell, ui, lanes_left, ruler);
@@ -3857,10 +3857,10 @@ fn ruler_and_lanes(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
         let x = f64::from(pointer.x - lanes_left).max(0.0);
         if shell.marking() && !marker_clicked {
             if let Err(error) = shell.drop_marker(None, x, 0.0) {
-                shell.set_notice(error.to_string());
+                shell.notice_error(&error);
             }
         } else if !marker_clicked && let Err(error) = shell.seek_ruler(x) {
-            shell.set_notice(error.to_string());
+            shell.notice_error(&error);
         }
     }
     release_library_drop(shell, ui, tracks, lanes_left, &boxes);
@@ -4003,7 +4003,7 @@ fn paint_clip_menu(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
             }
         };
         if let Err(error) = result {
-            shell.set_notice(error.to_string());
+            shell.notice_error(&error);
         }
     } else if shown.dismissed {
         shell.close_clip_menu();
@@ -4052,7 +4052,7 @@ fn paint_gap_menu(shell: &mut Shell, ui: &mut Ui) {
     if shown.picked.is_some() {
         shell.close_gap_menu();
         if let Err(error) = shell.close_gap(&menu.track_id, menu.time) {
-            shell.set_notice(error.to_string());
+            shell.notice_error(&error);
         }
     } else if shown.dismissed {
         shell.close_gap_menu();
@@ -4191,7 +4191,7 @@ fn track_action(shell: &mut Shell, view: &mut ViewState, track_id: &TrackId, act
         _ => Ok(()),
     };
     if let Err(error) = result {
-        shell.set_notice(error.to_string());
+        shell.notice_error(&error);
     }
 }
 
@@ -4227,7 +4227,7 @@ fn lane_head(
             let typed = typed.clone();
             view.renaming = None;
             if !cancel && let Err(error) = shell.rename_track(&lane.track_id, &typed) {
-                shell.set_notice(error.to_string());
+                shell.notice_error(&error);
             }
         }
         return;
@@ -4367,7 +4367,7 @@ fn zoom_timeline(shell: &mut Shell, ui: &Ui, lane_area: Rect) {
     }
     let x = f64::from(pos.x - lane_area.left()).max(0.0);
     if let Err(error) = shell.zoom_at(f64::from(factor), x) {
-        shell.set_notice(error.to_string());
+        shell.notice_error(&error);
     }
 }
 
@@ -4404,7 +4404,7 @@ fn release_library_drop(
     }
     let _ = egui::DragAndDrop::take_payload::<LibraryDrop>(ui.ctx());
     let Some(index) = lane_under(boxes, pos) else {
-        shell.set_notice("the drag missed the lanes".to_owned());
+        shell.notice_error(&"the drag missed the lanes");
         return;
     };
     let x = f64::from((pos.x - lanes_left).max(0.0));
@@ -4428,7 +4428,7 @@ fn release_library_drop(
         shell.drop_medium(&material_id, x, y)
     };
     if let Err(error) = landed {
-        shell.set_notice(error.to_string());
+        shell.notice_error(&error);
     }
 }
 
@@ -4686,7 +4686,7 @@ fn paint_lane(
         && let Err(error) =
             shell.toggle_attribute(lane.track_id.clone(), cutlass_model::TrackAttribute::LOCK)
     {
-        shell.set_notice(error.to_string());
+        shell.notice_error(&error);
     }
     let _ = icons::paint(
         ui.painter(),
@@ -4763,7 +4763,7 @@ fn lane_switches(
         if response.clicked()
             && let Err(error) = shell.toggle_attribute(lane.track_id.clone(), bit)
         {
-            shell.set_notice(error.to_string());
+            shell.notice_error(&error);
         }
         ui.painter().text(
             rect.center(),
@@ -5522,7 +5522,7 @@ fn paint_clip(
         {
             let x = f64::from(pos.x - lanes_left).max(0.0);
             if let Err(error) = shell.split_pointer(clip.id.clone(), x, editor_lane_y(index)) {
-                shell.set_notice(error.to_string());
+                shell.notice_error(&error);
             }
         }
     } else if body.width() > 0.0 && shell.marking() {
@@ -5540,7 +5540,7 @@ fn paint_clip(
         {
             let x = f64::from(pos.x - lanes_left).max(0.0);
             if let Err(error) = shell.drop_marker(Some(clip.id.clone()), x, editor_lane_y(index)) {
-                shell.set_notice(error.to_string());
+                shell.notice_error(&error);
             }
         }
     } else if body.width() > 0.0 && shell.beating() {
@@ -5558,7 +5558,7 @@ fn paint_clip(
         {
             let x = f64::from(pos.x - lanes_left).max(0.0);
             if let Err(error) = shell.drop_beat(clip.id.clone(), x, editor_lane_y(index)) {
-                shell.set_notice(error.to_string());
+                shell.notice_error(&error);
             }
         }
     } else if body.width() > 0.0 {
@@ -5579,7 +5579,7 @@ fn paint_clip(
             shell.select(Some(clip.id.clone()));
             if shell.compound_selected() {
                 if let Err(error) = shell.open_compound() {
-                    shell.set_notice(error.to_string());
+                    shell.notice_error(&error);
                 }
                 return;
             }
@@ -5697,7 +5697,7 @@ fn paint_clip_keys(
             let to = clip.start.0
                 + (f64::from(x - clip_rect.left()) / shell.pixel_size()).round() as i64;
             if let Err(error) = shell.move_clip_key(&clip.id, time, Micros(to)) {
-                shell.set_notice(error.to_string());
+                shell.notice_error(&error);
             }
         } else if response.clicked() {
             shell.seek(time);
@@ -5949,7 +5949,7 @@ fn finish_clip_pointer(
         LaneSpot::Between(row) => shell.finish_clip_drag_between(id.clone(), x, row),
     };
     if let Err(error) = landed {
-        shell.set_notice(error.to_string());
+        shell.notice_error(&error);
     }
 }
 
@@ -6265,7 +6265,7 @@ fn export_dialog(
                         match write_export(shell, view) {
                             Ok(()) => view.export_open = false,
                             Err(ShellError::Overwrite(_)) => view.replace_prompt = true,
-                            Err(error) => shell.set_notice(error.to_string()),
+                            Err(error) => shell.notice_error(&error),
                         }
                     }
                 }
@@ -6642,7 +6642,7 @@ fn project_dialog(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
     });
     if save && let Some(settings) = view.project_dialog.take() {
         if let Err(error) = shell.save_project_settings(&settings) {
-            shell.set_notice(error.to_string());
+            shell.notice_error(&error);
             view.project_dialog = Some(settings);
         } else {
             view.name_buffer.clear();
@@ -6707,7 +6707,7 @@ fn apply_dialog(shell: &mut Shell, view: &mut ViewState, finished: Finished) {
         Err(ShellError::Overwrite(_)) if finished.picker == Picker::SaveExport => {
             view.replace_prompt = true;
         }
-        Err(error) => shell.set_notice(error.to_string()),
+        Err(error) => shell.notice_error(&error),
     }
 }
 
@@ -6763,7 +6763,7 @@ fn shortcuts(shell: &mut Shell, ui: &Ui, view: &mut ViewState) {
         && let Err(error) = shell.run_shortcut(&chord)
         && !error.to_string().contains("not available")
     {
-        shell.set_notice(error.to_string());
+        shell.notice_error(&error);
     }
 }
 

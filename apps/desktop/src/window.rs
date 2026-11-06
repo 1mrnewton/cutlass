@@ -49,7 +49,7 @@ pub fn run() -> eframe::Result {
                 .map(std::path::PathBuf::from)
                 .collect();
             if let Err(error) = shell.drop_files(&named) {
-                shell.set_notice(error.to_string());
+                shell.notice_error(&error);
             }
             if let Some(state) = creation.wgpu_render_state.as_ref() {
                 shell.attach_gpu(state);
@@ -151,7 +151,7 @@ impl eframe::App for DesktopWindow {
             if !opened.is_empty() {
                 cutlass_logger::info!("finder opened {} item(s)", opened.len());
                 if let Err(error) = self.shell.drop_files(&opened) {
-                    self.shell.set_notice(error.to_string());
+                    self.shell.notice_error(&error);
                 }
             }
         }

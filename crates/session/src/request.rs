@@ -399,13 +399,18 @@ pub enum Request {
     /// `target` along `path`, the target's corners on the canvas frame by
     /// frame. Each follower keeps its offset from the target at `anchor`,
     /// the time the box was drawn at. The path is kept as the
-    /// `video_tracking` record `tracking_id`.
+    /// `video_tracking` record `tracking_id`. A clip in `masks` has its
+    /// mask follow instead.
     Track {
         target: SegmentId,
         followers: Vec<SegmentId>,
         tracking_id: MaterialId,
         anchor: Micros,
         path: cutlass_model::TrackPath,
+        /// Clips whose mask follows instead, each with the path in its own
+        /// frame (-1 to 1, y up).
+        #[serde(default)]
+        masks: Vec<(SegmentId, cutlass_model::TrackPath)>,
     },
     /// Limit the clip's colour work, or an adjustment layer, to `mask`, or
     /// take that limit off with `None`.

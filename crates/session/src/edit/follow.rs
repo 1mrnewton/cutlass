@@ -5,11 +5,13 @@
 //! anchor time: its place turns and scales about the target's middle as the
 //! target turns and grows, and its own turn and scale change by the same
 //! amounts. The poses are thinned to a few keys, and the path is kept as a
-//! `video_tracking` record that each follower lists.
+//! `video_tracking` record that each follower lists. A clip's mask can
+//! follow instead, from the path in that clip's own frame.
 
+use cutlass_effects::{Mask, MaskShape};
 use cutlass_model::{
-    Draft, MaterialId, MaterialRef, Micros, POSE_KEYS, RawMaterial, Segment, SegmentId, TrackPath,
-    TrackType, VIDEO_TRACKING, clip_at, put_key,
+    Draft, MASK_KEYS, MaterialId, MaterialRef, Micros, POSE_KEYS, RawMaterial, Segment, SegmentId,
+    TrackPath, TrackType, VIDEO_TRACKING, clip_at, put_key,
 };
 use serde_json::{Map, Value, json};
 
@@ -31,16 +33,21 @@ const SCALE_TOLERANCE: f64 = 0.005;
 
 /// Make `followers` follow `target` along `path`, each keeping its offset
 /// from the target at `anchor`, and keep the path as the `video_tracking`
-/// record `tracking_id`.
+/// record `tracking_id`. Each of `masks` is a clip whose mask follows
+/// instead, and the path in that clip's own frame.
 pub fn track(
     draft: &mut Draft,
     target: &SegmentId,
     followers: &[SegmentId],
+    masks: &[(SegmentId, TrackPath)],
     tracking_id: &MaterialId,
     anchor: Micros,
     path: &TrackPath,
 ) -> Result<(), EditError> {
     check_path(path)?;
+    for (_, clip_path) in masks {
+        check_path(clip_path)?;
+    }
     let (track_index, segment_index) = locate(draft, target)?;
     let target_segment = &draft.tracks[track_index].segments[segment_index];
     if draft.tracks[track_index].kind != TrackType::Video
@@ -92,7 +99,22 @@ pub fn track(
         }
         placed.push((t, s));
     }
-    if placed.is_empty() {
+    for (i, (id, _)) in masks.iter().enumerate() {
+        if followers.contains(id) || masks[..i].iter().any(|(other, _)| other == id) {
+            return Err(EditError::Track);
+        }
+        let (t, s) = locate(draft, id)?;
+        let track = &draft.tracks[t];
+        ensure_unlocked(track.attribute)?;
+        if !matches!(track.kind, TrackType::Video | TrackType::Sticker) {
+            return Err(EditError::Track);
+        }
+        let range = track.segments[s].target.clone();
+        if range.end().0 <= first.0 || range.start.0 > last.0 {
+            return Err(EditError::Track);
+        }
+    }
+    if placed.is_empty() && masks.is_empty() {
         return Err(EditError::Track);
     }
 
@@ -100,25 +122,20 @@ pub fn track(
     for &(t, s) in &placed {
         let segment = &mut draft.tracks[t].segments[s];
         follow(segment, &graphs, path, &poses, anchor_index, canvas)?;
-        let stale: Vec<MaterialId> = segment
-            .extra_material_refs
-            .iter()
-            .filter(|id| {
-                draft
-                    .materials
-                    .video_trackings
-                    .iter()
-                    .any(|raw| &raw.id == *id)
-            })
-            .cloned()
-            .collect();
-        segment.extra_material_refs.retain(|id| !stale.contains(id));
-        segment.extra_material_refs.push(tracking_id.clone());
+        list_record(segment, &draft.materials.video_trackings, tracking_id);
     }
+    for (index, (id, clip_path)) in masks.iter().enumerate() {
+        let mask_id = MaterialId::new(format!("{}-mask-{index}", tracking_id.as_str()));
+        follow_mask(draft, id, clip_path, anchor, &mask_id)?;
+        let (t, s) = locate(draft, id)?;
+        let segment = &mut draft.tracks[t].segments[s];
+        list_record(segment, &draft.materials.video_trackings, tracking_id);
+    }
+    let mask_ids: Vec<&SegmentId> = masks.iter().map(|(id, _)| id).collect();
     draft
         .materials
         .video_trackings
-        .push(record(tracking_id, target, anchor, path));
+        .push(record(tracking_id, target, anchor, path, &mask_ids));
     // A record no clip lists any more goes.
     let listed: Vec<MaterialId> = draft
         .tracks
@@ -130,6 +147,175 @@ pub fn track(
         .materials
         .video_trackings
         .retain(|raw| listed.contains(&raw.id));
+    Ok(())
+}
+
+/// List `tracking_id` on `segment`, in place of any tracking it listed.
+fn list_record(segment: &mut Segment, trackings: &[RawMaterial], tracking_id: &MaterialId) {
+    segment
+        .extra_material_refs
+        .retain(|id| !trackings.iter().any(|raw| &raw.id == id));
+    segment.extra_material_refs.push(tracking_id.clone());
+}
+
+/// The target's box in one frame of a clip's own frame: its middle, its
+/// turn in degrees (unwrapped), and half its width and height.
+#[derive(Clone, Copy, Debug)]
+struct BoxPose {
+    middle: (f64, f64),
+    turn: f64,
+    half: (f64, f64),
+}
+
+fn box_poses(path: &TrackPath) -> Option<Vec<BoxPose>> {
+    let mut poses: Vec<BoxPose> = Vec::with_capacity(path.samples.len());
+    let length = |a: (f64, f64), b: (f64, f64)| (b.0 - a.0).hypot(b.1 - a.1);
+    for sample in &path.samples {
+        let c = sample.corners;
+        let middle = (
+            c.iter().map(|p| p.0).sum::<f64>() / 4.0,
+            c.iter().map(|p| p.1).sum::<f64>() / 4.0,
+        );
+        let across = (
+            (c[1].0 - c[0].0) + (c[2].0 - c[3].0),
+            (c[1].1 - c[0].1) + (c[2].1 - c[3].1),
+        );
+        let half = (
+            (length(c[0], c[1]) + length(c[3], c[2])) / 4.0,
+            (length(c[0], c[3]) + length(c[1], c[2])) / 4.0,
+        );
+        if !(half.0 > 0.0 && half.1 > 0.0 && half.0.is_finite() && half.1.is_finite()) {
+            return None;
+        }
+        let mut turn = across.1.atan2(across.0).to_degrees();
+        if let Some(before) = poses.last() {
+            turn = before.turn + (turn - before.turn + 180.0).rem_euclid(360.0) - 180.0;
+        }
+        poses.push(BoxPose { middle, turn, half });
+    }
+    Some(poses)
+}
+
+/// Key clip `id`'s mask along `clip_path`, the target's box in the clip's
+/// own frame, keeping the mask's place, size and turn relative to the box
+/// at `anchor`. A clip with no mask gets a rectangle the size of the box,
+/// stored as `mask_id`.
+fn follow_mask(
+    draft: &mut Draft,
+    id: &SegmentId,
+    clip_path: &TrackPath,
+    anchor: Micros,
+    mask_id: &MaterialId,
+) -> Result<(), EditError> {
+    let poses = box_poses(clip_path).ok_or(EditError::Track)?;
+    let at = poses[nearest(clip_path, anchor)];
+    let (t, s) = locate(draft, id)?;
+    let segment = &draft.tracks[t].segments[s];
+    let (start, end) = (segment.target.start, segment.target.end());
+    let anchor_time = anchor
+        .0
+        .clamp(start.0, end.0.saturating_sub(1).max(start.0));
+    let graphs = draft.keyframe_graph_list.clone();
+    let existing = cutlass_effects::segment_mask(draft, segment)
+        .map(|mask| mask.at(segment, &graphs, Micros(anchor_time)));
+    #[allow(clippy::cast_possible_truncation)]
+    let base = existing.unwrap_or(Mask {
+        x: at.middle.0 as f32,
+        y: at.middle.1 as f32,
+        width: at.half.0 as f32,
+        height: at.half.1 as f32,
+        rotation: at.turn as f32,
+        ..Mask::new(MaskShape::Rectangle)
+    });
+    if existing.is_none() {
+        super::mask::set_mask(draft, id, mask_id, Some(&base))?;
+    }
+    // The mask's middle in the box's own turned, unit frame at the anchor.
+    let (sin0, cos0) = at.turn.to_radians().sin_cos();
+    let (dx, dy) = (f64::from(base.x) - at.middle.0, f64::from(base.y) - at.middle.1);
+    let local = (
+        (cos0 * dx + sin0 * dy) / at.half.0,
+        (-sin0 * dx + cos0 * dy) / at.half.1,
+    );
+    let segment = &mut draft.tracks[t].segments[s];
+    let mut rows: Vec<(i64, [f64; 5])> = Vec::new();
+    for (sample, pose) in clip_path.samples.iter().zip(&poses) {
+        if sample.time.0 < start.0 || sample.time.0 >= end.0 {
+            continue;
+        }
+        let (sin, cos) = pose.turn.to_radians().sin_cos();
+        let (u, v) = (local.0 * pose.half.0, local.1 * pose.half.1);
+        rows.push((
+            sample.time.0 - start.0,
+            [
+                pose.middle.0 + cos * u - sin * v,
+                pose.middle.1 + sin * u + cos * v,
+                f64::from(base.width) * pose.half.0 / at.half.0,
+                f64::from(base.height) * pose.half.1 / at.half.1,
+                f64::from(base.rotation) + pose.turn - at.turn,
+            ],
+        ));
+    }
+    let names = &MASK_KEYS[..5];
+    let tolerances = [
+        PLACE_TOLERANCE,
+        PLACE_TOLERANCE,
+        PLACE_TOLERANCE,
+        PLACE_TOLERANCE,
+        TURN_TOLERANCE,
+    ];
+    key_rows(segment, &rows, names, &tolerances, anchor_time - start.0)
+}
+
+/// Key `rows` (offset and values) on `names`, thinned per value within
+/// `tolerances` and always keyed at `anchor`, replacing those keys inside
+/// the rows' span.
+fn key_rows(
+    segment: &mut Segment,
+    rows: &[(i64, [f64; 5])],
+    names: &[&str],
+    tolerances: &[f64; 5],
+    anchor: i64,
+) -> Result<(), EditError> {
+    if rows.is_empty()
+        || rows
+            .iter()
+            .any(|(_, values)| values.iter().any(|v| !v.is_finite()))
+    {
+        return Err(EditError::Track);
+    }
+    let mut keep = vec![false; rows.len()];
+    for (channel, tolerance) in tolerances.iter().enumerate() {
+        let points: Vec<(f64, f64)> = rows
+            .iter()
+            .map(|(time, values)| (*time as f64, values[channel]))
+            .collect();
+        for i in thin(&points, *tolerance) {
+            keep[i] = true;
+        }
+    }
+    if let Some(i) = rows.iter().position(|row| row.0 == anchor) {
+        keep[i] = true;
+    }
+    let (from, to) = (
+        rows.first().map_or(0, |row| row.0),
+        rows.last().map_or(0, |row| row.0),
+    );
+    for group in &mut segment.common_keyframes {
+        if names.contains(&group.property_type.as_str()) {
+            group
+                .keyframe_list
+                .retain(|key| key.time_offset.0 < from || key.time_offset.0 > to);
+        }
+    }
+    segment
+        .common_keyframes
+        .retain(|group| !group.keyframe_list.is_empty());
+    for ((time, values), _) in rows.iter().zip(&keep).filter(|(_, keep)| **keep) {
+        for (property, value) in names.iter().zip(values) {
+            put_key(segment, property, Micros(*time), *value);
+        }
+    }
     Ok(())
 }
 
@@ -360,7 +546,13 @@ fn thin(points: &[(f64, f64)], tolerance: f64) -> Vec<usize> {
 
 /// The `video_tracking` record: the reference editor's fields, the target,
 /// and the path inline.
-fn record(id: &MaterialId, target: &SegmentId, anchor: Micros, path: &TrackPath) -> RawMaterial {
+fn record(
+    id: &MaterialId,
+    target: &SegmentId,
+    anchor: Micros,
+    path: &TrackPath,
+    masks: &[&SegmentId],
+) -> RawMaterial {
     let (first, last) = span(path);
     let points: Vec<Value> = path
         .samples
@@ -385,6 +577,10 @@ fn record(id: &MaterialId, target: &SegmentId, anchor: Micros, path: &TrackPath)
     );
     fields.insert("segment_id".into(), json!(target.as_str()));
     fields.insert("anchor".into(), json!(anchor.0));
+    if !masks.is_empty() {
+        let ids: Vec<&str> = masks.iter().map(|id| id.as_str()).collect();
+        fields.insert("masks".into(), json!(ids));
+    }
     fields.insert("path".into(), Value::Array(points));
     RawMaterial {
         id: id.clone(),

@@ -3,6 +3,8 @@ use cutlass_model::{
     TrackSample, TrackType, VIDEO_TRACKING, clip_at, key_offsets,
 };
 
+use cutlass_effects::{Mask, MaskShape};
+
 use super::*;
 
 /// A 1920 by 1080 canvas with a video clip `v` over two seconds and a
@@ -65,6 +67,7 @@ fn run(draft: &mut Draft, path: &TrackPath) -> Result<(), EditError> {
         draft,
         &"v".into(),
         &["s".into()],
+        &[],
         &"t1".into(),
         Micros(0),
         path,
@@ -152,6 +155,7 @@ fn the_path_is_kept_once_and_a_new_track_takes_its_place() {
         &mut draft,
         &"v".into(),
         &["s".into()],
+        &[],
         &"t2".into(),
         Micros(0),
         &slide,
@@ -200,6 +204,7 @@ fn a_bad_path_or_follower_is_refused() {
                 draft,
                 &"v".into(),
                 &followers,
+                &[],
                 &id.into(),
                 Micros(anchor),
                 path,
@@ -267,6 +272,7 @@ fn a_key_at_the_anchor_keeps_the_followers_own_pose_there() {
         &mut draft,
         &"v".into(),
         &["s".into()],
+        &[],
         &"t1".into(),
         anchor,
         &slide,
@@ -276,4 +282,140 @@ fn a_key_at_the_anchor_keeps_the_followers_own_pose_there() {
     assert_eq!(key_offsets(segment).len(), 3, "the ends and the anchor");
     let (clip, _) = clip_at(segment, &draft.keyframe_graph_list, anchor).unwrap();
     assert_eq!((clip.transform.x, clip.transform.y), (0.5, 0.25));
+}
+
+/// A box in a clip's own frame: `half` across and up from `middle`, turned
+/// `degrees` counterclockwise, over `frames` frames at 30 a second.
+fn clip_path(frames: usize, at: impl Fn(f64) -> ((f64, f64), (f64, f64), f64)) -> TrackPath {
+    TrackPath {
+        mode: TrackMode::Object,
+        samples: (0..frames)
+            .map(|i| {
+                let (middle, half, turn) = at(i as f64);
+                let (sin, cos) = turn.to_radians().sin_cos();
+                let corners = [(-1.0, 1.0), (1.0, 1.0), (1.0, -1.0), (-1.0, -1.0)].map(
+                    |(x, y): (f64, f64)| {
+                        let (px, py) = (x * half.0, y * half.1);
+                        (middle.0 + cos * px - sin * py, middle.1 + sin * px + cos * py)
+                    },
+                );
+                TrackSample {
+                    time: Micros(i as i64 * 1_000_000 / 30),
+                    corners,
+                }
+            })
+            .collect(),
+    }
+}
+
+fn mask_at(draft: &Draft, time: i64) -> Mask {
+    let segment = &draft.tracks[0].segments[0];
+    cutlass_effects::segment_mask(draft, segment)
+        .unwrap()
+        .at(segment, &draft.keyframe_graph_list, Micros(time))
+}
+
+fn close(a: f32, b: f64) -> bool {
+    (f64::from(a) - b).abs() < 1e-3
+}
+
+#[test]
+fn a_clip_with_no_mask_gets_a_box_that_follows_the_target() {
+    let mut draft = draft();
+    let canvas = path(30, |t| ((-0.5 + 0.02 * t, 0.0), 0.1, 0.0));
+    let own = clip_path(30, |t| ((-0.5 + 0.02 * t, 0.0), (0.1, 0.2), 0.0));
+    track(
+        &mut draft,
+        &"v".into(),
+        &[],
+        &[("v".into(), own)],
+        &"t1".into(),
+        Micros(0),
+        &canvas,
+    )
+    .unwrap();
+    let start = mask_at(&draft, 0);
+    assert_eq!(start.shape, MaskShape::Rectangle);
+    assert!(close(start.x, -0.5) && close(start.y, 0.0));
+    assert!(close(start.width, 0.1) && close(start.height, 0.2));
+    let later = mask_at(&draft, 20 * 1_000_000 / 30);
+    assert!(close(later.x, -0.1), "{}", later.x);
+    let segment = &draft.tracks[0].segments[0];
+    assert_eq!(key_offsets(segment).len(), 2, "a slide thins to its ends");
+    assert!(
+        segment
+            .extra_material_refs
+            .iter()
+            .any(|id| id.as_str() == "t1")
+    );
+    let record = &draft.materials.video_trackings[0];
+    assert_eq!(record.fields["masks"], serde_json::json!(["v"]));
+}
+
+#[test]
+fn a_mask_keeps_its_place_size_and_turn_against_the_box() {
+    let mut draft = draft();
+    let mask = Mask {
+        x: 0.2,
+        y: 0.0,
+        width: 0.05,
+        height: 0.1,
+        rotation: 10.0,
+        feather: 0.3,
+        ..Mask::new(MaskShape::Circle)
+    };
+    crate::edit::mask::set_mask(&mut draft, &"v".into(), &"mask".into(), Some(&mask)).unwrap();
+    // The box sits at the middle, half 0.1 by 0.1, and turns 90 degrees
+    // while it grows to twice its size.
+    let canvas = path(31, |t| ((0.0, 0.0), 0.1, 3.0 * t));
+    let own = clip_path(31, |t| {
+        let grow = 1.0 + t / 30.0;
+        ((0.0, 0.0), (0.1 * grow, 0.1 * grow), 3.0 * t)
+    });
+    track(
+        &mut draft,
+        &"v".into(),
+        &[],
+        &[("v".into(), own)],
+        &"t1".into(),
+        Micros(0),
+        &canvas,
+    )
+    .unwrap();
+    let end = mask_at(&draft, 1_000_000);
+    assert_eq!(end.shape, MaskShape::Circle);
+    // Two box halves to the right, turned a quarter, is two halves up.
+    assert!(close(end.x, 0.0) && close(end.y, 0.4), "{} {}", end.x, end.y);
+    assert!(close(end.width, 0.1) && close(end.height, 0.2));
+    assert!(close(end.rotation, 100.0), "{}", end.rotation);
+    assert!(close(end.feather, 0.3), "feather stays");
+}
+
+#[test]
+fn a_clip_follows_by_pose_or_by_mask_not_both() {
+    let mut draft = draft();
+    let canvas = path(10, |t| ((0.01 * t, 0.0), 0.1, 0.0));
+    let own = clip_path(10, |t| ((0.01 * t, 0.0), (0.1, 0.2), 0.0));
+    let both = track(
+        &mut draft,
+        &"v".into(),
+        &["s".into()],
+        &[("s".into(), own.clone())],
+        &"t1".into(),
+        Micros(0),
+        &canvas,
+    );
+    assert!(both.is_err());
+    let none = track(&mut draft, &"v".into(), &[], &[], &"t1".into(), Micros(0), &canvas);
+    assert!(none.is_err());
+    let twice = track(
+        &mut draft,
+        &"v".into(),
+        &[],
+        &[("v".into(), own.clone()), ("v".into(), own)],
+        &"t1".into(),
+        Micros(0),
+        &canvas,
+    );
+    assert!(twice.is_err());
 }

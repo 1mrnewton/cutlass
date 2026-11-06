@@ -113,6 +113,7 @@ fn a_tracked_path_is_read_back_in_canvas_pixels_for_both_clips() {
             tracking_id: "t".into(),
             anchor: Micros(500_000),
             path,
+            masks: Vec::new(),
         })
         .unwrap();
     shell.select(Some("v".into()));
@@ -208,6 +209,7 @@ fn fixing_a_frame_starts_from_the_tracks_mode_followers_and_box() {
             tracking_id: "t".into(),
             anchor: Micros(500_000),
             path: path.clone(),
+            masks: Vec::new(),
         })
         .unwrap();
     shell.select(Some("v".into()));

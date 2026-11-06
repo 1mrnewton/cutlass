@@ -412,6 +412,7 @@ impl Shell {
                     tracking_id,
                     anchor,
                     path,
+                    masks: Vec::new(),
                 })
             });
             landing

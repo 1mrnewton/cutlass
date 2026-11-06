@@ -252,3 +252,33 @@ fn a_turned_file_is_read_upright() {
     assert_eq!(turned.data()[19], 9.0);
     assert_eq!(upright(gray.clone(), DisplayQuarter::Zero).unwrap(), gray);
 }
+
+#[test]
+fn a_path_reads_in_the_clips_own_frame() {
+    let mut draft = Draft::empty("D");
+    draft.canvas_config.width = 1920;
+    draft.canvas_config.height = 1080;
+    draft.materials.videos.push(MaterialVideo {
+        id: "m".into(),
+        width: 1920,
+        height: 1080,
+        ..MaterialVideo::default()
+    });
+    let mut segment = Segment::new("v", "m", TimeRange::new(0, 1_000_000));
+    // Half size, its middle half way to the right edge.
+    segment.uniform_scale.value = 0.5;
+    segment.clip.transform.x = 0.5;
+    draft.tracks[0].segments.push(segment.clone());
+    let path = TrackPath {
+        mode: TrackMode::Object,
+        samples: vec![TrackSample {
+            time: Micros(0),
+            corners: [(0.25, 0.5), (0.75, 0.5), (0.75, 0.0), (0.25, 0.0)],
+        }],
+    };
+    let own = path_in_clip(&draft, &segment, &path).unwrap();
+    let corners = own.samples[0].corners;
+    let near = |a: (f64, f64), b: (f64, f64)| (a.0 - b.0).abs() < 1e-3 && (a.1 - b.1).abs() < 1e-3;
+    assert!(near(corners[0], (-0.5, 1.0)), "{corners:?}");
+    assert!(near(corners[2], (0.5, 0.0)), "{corners:?}");
+}

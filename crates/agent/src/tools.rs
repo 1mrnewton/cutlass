@@ -652,6 +652,7 @@ where
                     tracking_id,
                     anchor: Micros(job.at_us),
                     path,
+                    masks: Vec::new(),
                 }],
                 mode: ApplyMode::Commit,
             })

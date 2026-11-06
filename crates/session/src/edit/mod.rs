@@ -496,7 +496,8 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             tracking_id,
             anchor,
             path,
-        } => follow::track(draft, target, followers, tracking_id, *anchor, path),
+            masks,
+        } => follow::track(draft, target, followers, masks, tracking_id, *anchor, path),
         Request::SetColorMask {
             segment_id,
             material_id,

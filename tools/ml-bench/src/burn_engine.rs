@@ -80,7 +80,19 @@ impl BurnEngine {
     }
 }
 
-#[cfg(feature = "metal")]
+// On an iPhone, burn's Metal compiler is macOS-only, and its automatic mode
+// looks for Vulkan. The `ios` build uses the portable (WGSL) compiler and
+// pins the Metal API itself.
+#[cfg(feature = "ios")]
+fn gpu_device() -> Result<(Device, &'static str), BenchError> {
+    let device = Device::wgpu_options()
+        .graphics_api(burn::tensor::wgpu::WgpuBackend::Metal)
+        .init()
+        .map_err(|error| BenchError::Usage(format!("burn wgpu on Metal: {error}")))?;
+    Ok((device, "wgpu-wgsl-metal"))
+}
+
+#[cfg(all(feature = "metal", not(feature = "ios")))]
 fn gpu_device() -> Result<(Device, &'static str), BenchError> {
     Ok((
         Device::metal(burn::tensor::DeviceKind::DefaultDevice),
@@ -88,7 +100,7 @@ fn gpu_device() -> Result<(Device, &'static str), BenchError> {
     ))
 }
 
-#[cfg(all(feature = "vulkan", not(feature = "metal")))]
+#[cfg(all(feature = "vulkan", not(any(feature = "metal", feature = "ios"))))]
 fn gpu_device() -> Result<(Device, &'static str), BenchError> {
     Ok((
         Device::vulkan(burn::tensor::DeviceKind::DefaultDevice),
@@ -96,7 +108,10 @@ fn gpu_device() -> Result<(Device, &'static str), BenchError> {
     ))
 }
 
-#[cfg(all(feature = "wgpu", not(any(feature = "metal", feature = "vulkan"))))]
+#[cfg(all(
+    feature = "wgpu",
+    not(any(feature = "metal", feature = "vulkan", feature = "ios"))
+))]
 fn gpu_device() -> Result<(Device, &'static str), BenchError> {
     // Many phone GPUs cannot run 64-bit integers in WGSL, and burn keeps integer
     // tensors in 64 bits unless told otherwise.
@@ -107,7 +122,12 @@ fn gpu_device() -> Result<(Device, &'static str), BenchError> {
     Ok((device, "wgpu-wgsl"))
 }
 
-#[cfg(not(any(feature = "metal", feature = "vulkan", feature = "wgpu")))]
+#[cfg(not(any(
+    feature = "metal",
+    feature = "vulkan",
+    feature = "wgpu",
+    feature = "ios"
+)))]
 fn gpu_device() -> Result<(Device, &'static str), BenchError> {
     Err(BenchError::Usage(
         "burn has no GPU in this build: build with --features metal, vulkan or wgpu".into(),

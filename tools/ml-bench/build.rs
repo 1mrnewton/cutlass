@@ -23,7 +23,9 @@ fn main() {
             .out_dir("model/")
             .load_strategy(LoadStrategy::Embedded)
             .run_from_script();
-        if std::env::var_os("CARGO_FEATURE_WGPU").is_some() {
+        if std::env::var_os("CARGO_FEATURE_WGPU").is_some()
+            && std::env::var_os("CARGO_FEATURE_IOS").is_none()
+        {
             narrow_shape_ints(name);
         }
     }

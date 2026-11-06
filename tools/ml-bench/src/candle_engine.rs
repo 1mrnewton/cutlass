@@ -40,12 +40,12 @@ impl CandleEngine {
     }
 }
 
-#[cfg(feature = "metal")]
+#[cfg(any(feature = "metal", feature = "ios"))]
 fn gpu_device() -> Result<(Device, &'static str), BenchError> {
     Ok((Device::new_metal(0)?, "metal"))
 }
 
-#[cfg(not(feature = "metal"))]
+#[cfg(not(any(feature = "metal", feature = "ios")))]
 fn gpu_device() -> Result<(Device, &'static str), BenchError> {
     Err(BenchError::Usage(
         "candle has no GPU in this build: it runs on Metal (build with --features metal) or CUDA, \

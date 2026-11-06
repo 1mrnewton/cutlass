@@ -10,6 +10,10 @@ description = "Times the same segmentation model on candle and on burn."
 # `cargo test --workspace`, and the editor's lockfile.
 [workspace]
 
+[lib]
+# `staticlib` is the library the iPhone app links.
+crate-type = ["rlib", "staticlib"]
+
 [features]
 default = []
 # The GPU on Apple machines: candle's Metal backend and burn's wgpu on Metal.
@@ -19,6 +23,9 @@ vulkan = ["burn/vulkan"]
 # Any GPU through wgpu's portable path (WGSL). Older Android drivers lack the Vulkan
 # 1.2 features the `vulkan` path needs.
 wgpu = ["burn/wgpu"]
+# iPhone: candle on Metal, and burn on wgpu's portable compiler pinned to Metal.
+# burn's own Metal compiler only runs on macOS.
+ios = ["candle-core/metal", "candle-nn/metal", "candle-transformers/metal", "burn/wgpu"]
 # Keeps burn's kernel tuning results on disk, so only the first launch pays for them.
 cache = ["burn/persistence"]
 
@@ -40,7 +47,8 @@ burn-onnx = "=0.22.0"
 debug = false
 
 [lints.rust]
-unsafe_code = "forbid"
+# `deny`, not `forbid`: the iPhone entry point exports one C symbol.
+unsafe_code = "deny"
 future_incompatible = { level = "deny", priority = -1 }
 nonstandard_style = { level = "deny", priority = -1 }
 rust_2018_idioms = { level = "deny", priority = -1 }

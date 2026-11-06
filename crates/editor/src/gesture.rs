@@ -6,7 +6,7 @@ use cutlass_session::{Request, TrimEdge};
 
 use crate::hit::{BadScale, Pointer, TimelineScale, hit_test, time_at};
 use crate::lane::{Lane, lanes_for};
-use crate::snap::snap_guides;
+use crate::snap::snap;
 
 /// Why a gesture could not name a request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -61,8 +61,6 @@ pub struct DropGesture {
     pub playhead: Micros,
     /// How far, in microseconds, a snap target may sit from the pointer time.
     pub snap_threshold: Micros,
-    /// Vertical guides. Hidden guides are left out by the caller.
-    pub guides: Vec<Micros>,
 }
 
 /// A drag of a segment that is already on the draft.
@@ -74,8 +72,6 @@ pub struct MoveGesture {
     pub playhead: Micros,
     /// How far, in microseconds, a snap target may sit from the pointer time.
     pub snap_threshold: Micros,
-    /// Vertical guides. Hidden guides are left out by the caller.
-    pub guides: Vec<Micros>,
 }
 
 /// Turn the drag into one session request.
@@ -90,13 +86,12 @@ pub fn move_gesture(draft: &Draft, gesture: &MoveGesture) -> Result<GestureOutco
         Ok(None) => return Ok(GestureOutcome::Miss),
         Err(BadScale) => return Err(GestureError::BadScale),
     };
-    let start = match snap_guides(
+    let start = match snap(
         draft,
         hit.time,
         gesture.playhead,
         gesture.snap_threshold,
         Some(&gesture.segment_id),
-        &gesture.guides,
     ) {
         Some(target) => target.time,
         None => hit.time,
@@ -136,13 +131,12 @@ pub fn drop_gesture(draft: &Draft, gesture: &DropGesture) -> Result<DropOutcome,
         Ok(None) => return Ok(DropOutcome::Miss),
         Err(BadScale) => return Err(GestureError::BadScale),
     };
-    let snapped = snap_guides(
+    let snapped = snap(
         draft,
         hit.time,
         gesture.playhead,
         gesture.snap_threshold,
         None,
-        &gesture.guides,
     )
     .map(|target| target.time)
     .unwrap_or(hit.time);
@@ -172,8 +166,6 @@ pub struct TrimGesture {
     pub scale: TimelineScale,
     pub playhead: Micros,
     pub snap_threshold: Micros,
-    /// Vertical guides. Hidden guides are left out by the caller.
-    pub guides: Vec<Micros>,
 }
 
 /// The trim a gesture would apply. The draft is unchanged.
@@ -207,13 +199,12 @@ pub fn trim_gesture(draft: &Draft, gesture: &TrimGesture) -> Result<TrimPlan, Ge
     let located = locate(draft, &gesture.segment_id).ok_or(GestureError::UnknownSegment)?;
     let pointer_time =
         time_at(gesture.scale.pixel_size, gesture.pointer.x).ok_or(GestureError::BadScale)?;
-    let snapped_to = snap_guides(
+    let snapped_to = snap(
         draft,
         pointer_time,
         gesture.playhead,
         gesture.snap_threshold,
         Some(&gesture.segment_id),
-        &gesture.guides,
     )
     .map(|target| target.time);
     let chosen = snapped_to.unwrap_or(pointer_time);
@@ -534,7 +525,6 @@ mod tests {
             scale: scale(),
             playhead: Micros(9_000_000),
             snap_threshold: Micros(threshold),
-            guides: Vec::new(),
         }
     }
 
@@ -831,7 +821,6 @@ mod tests {
             scale: scale(),
             playhead: Micros(playhead),
             snap_threshold: Micros(threshold),
-            guides: Vec::new(),
         }
     }
 
@@ -980,7 +969,6 @@ mod tests {
             scale: scale(),
             playhead: Micros(9_000_000),
             snap_threshold: Micros(threshold),
-            guides: Vec::new(),
         }
     }
 

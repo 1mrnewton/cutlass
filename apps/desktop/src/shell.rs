@@ -2698,7 +2698,6 @@ impl Shell {
             scale: self.scale(),
             playhead: self.playhead,
             snap_threshold: self.snap_threshold(),
-            guides: Vec::new(),
         };
         let draft = self.session_draft()?;
         trim_gesture(draft, &gesture).map_err(|error| match error {
@@ -2736,7 +2735,6 @@ impl Shell {
             scale: self.scale(),
             playhead: self.playhead,
             snap_threshold: self.snap_threshold(),
-            guides: Vec::new(),
         };
         let draft = self.session_draft()?;
         let plan = match over {
@@ -2791,7 +2789,6 @@ impl Shell {
                 scale: self.scale(),
                 playhead: self.playhead,
                 snap_threshold: self.snap_threshold(),
-                guides: Vec::new(),
             };
             let draft = self.session_draft()?;
             drop_gesture(draft, &gesture)
@@ -2898,7 +2895,6 @@ impl Shell {
                 scale: self.scale(),
                 playhead: self.playhead,
                 snap_threshold: self.snap_threshold(),
-                guides: Vec::new(),
             };
             drop_gesture(self.session_draft()?, &gesture)
                 .map_err(|_| ShellError::Unavailable("the drag could not be read".to_owned()))?
@@ -2960,7 +2956,6 @@ impl Shell {
                 scale: self.scale(),
                 playhead: self.playhead,
                 snap_threshold: self.snap_threshold(),
-                guides: Vec::new(),
             };
             drop_gesture(self.session_draft()?, &gesture)
                 .map_err(|_| ShellError::Unavailable("the drag could not be read".to_owned()))?
@@ -3033,7 +3028,6 @@ impl Shell {
                 scale: self.scale(),
                 playhead: self.playhead,
                 snap_threshold: self.snap_threshold(),
-                guides: Vec::new(),
             };
             drop_gesture(self.session_draft()?, &gesture)
                 .map_err(|_| ShellError::Unavailable("the drag could not be read".to_owned()))?
@@ -3164,7 +3158,6 @@ impl Shell {
                 scale: self.scale(),
                 playhead: self.playhead,
                 snap_threshold: self.snap_threshold(),
-                guides: Vec::new(),
             };
             drop_gesture(self.session_draft()?, &gesture)
                 .map_err(|_| ShellError::Unavailable("the drag could not be read".to_owned()))?
@@ -3259,7 +3252,6 @@ impl Shell {
                 scale: self.scale(),
                 playhead: self.playhead,
                 snap_threshold: self.snap_threshold(),
-                guides: Vec::new(),
             };
             drop_gesture(self.session_draft()?, &gesture)
                 .map_err(|_| ShellError::Unavailable("the drag could not be read".to_owned()))?

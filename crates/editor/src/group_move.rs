@@ -10,7 +10,7 @@ use cutlass_session::{Request, lane_fits, new_lane_index};
 use crate::gesture::{GestureError, GestureOutcome, MoveGesture, move_gesture};
 use crate::hit::{BadScale, Pointer, hit_test, time_at};
 use crate::lane::{Lane, lanes_for};
-use crate::snap::snap_guides;
+use crate::snap::snap;
 
 /// A lane a drag opens.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -108,13 +108,12 @@ pub fn plan_move(
         Err(BadScale) => return Err(GestureError::BadScale),
     };
     if selection.contains(dragged) && selection.len() > 1 {
-        let start = snap_guides(
+        let start = snap(
             draft,
             raw,
             gesture.playhead,
             gesture.snap_threshold,
             Some(dragged),
-            &gesture.guides,
         )
         .map_or(raw, |target| target.time);
         let start = Micros(start.0.max(0));
@@ -205,13 +204,12 @@ pub fn plan_move_between(
         return plan_move(draft, &on_row, selection);
     }
     let raw = time_at(gesture.scale.pixel_size, gesture.pointer.x).ok_or(GestureError::BadScale)?;
-    let start = snap_guides(
+    let start = snap(
         draft,
         raw,
         gesture.playhead,
         gesture.snap_threshold,
         Some(dragged),
-        &gesture.guides,
     )
     .map_or(raw, |target| target.time);
     let start = Micros(start.0.max(0));
@@ -363,7 +361,6 @@ mod tests {
             },
             playhead: Micros(50_000_000),
             snap_threshold: Micros(threshold),
-            guides: Vec::new(),
         }
     }
 

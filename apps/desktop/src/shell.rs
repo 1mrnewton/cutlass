@@ -593,6 +593,9 @@ struct ClipDrag {
     edge: Option<TrimEdge>,
     press_x: f32,
     press_y: f32,
+    /// Where the pointer took hold, from the clip's top-left (or the edge), in points.
+    grab_x: f32,
+    grab_y: f32,
 }
 
 struct PendingTrim {
@@ -2543,7 +2546,16 @@ impl Shell {
     /// Remember which edge a clip drag started on. A body drag clears a trim preview.
     ///
     /// `press` is the pointer where the drag began, in points.
-    pub fn begin_clip_drag(&mut self, id: SegmentId, edge: Option<TrimEdge>, press: (f32, f32)) {
+    /// `grab` is where the pointer took hold, from the clip's top-left for a
+    /// body drag or from the edge for a trim, so the clip keeps that offset
+    /// instead of jumping to the pointer.
+    pub fn begin_clip_drag(
+        &mut self,
+        id: SegmentId,
+        edge: Option<TrimEdge>,
+        press: (f32, f32),
+        grab: (f32, f32),
+    ) {
         self.pending_trim = None;
         self.pending_moves.clear();
         if edge.is_some() {
@@ -2554,7 +2566,19 @@ impl Shell {
             edge,
             press_x: press.0,
             press_y: press.1,
+            grab_x: grab.0,
+            grab_y: grab.1,
         });
+    }
+
+    /// Where the pointer holds the clip being dragged, from its top-left (or
+    /// the trimmed edge), in points. Zero for a clip that is not dragged.
+    #[must_use]
+    pub fn clip_grab(&self, id: &SegmentId) -> (f32, f32) {
+        self.clip_drag
+            .as_ref()
+            .filter(|drag| &drag.id == id)
+            .map_or((0.0, 0.0), |drag| (drag.grab_x, drag.grab_y))
     }
 
     /// A body drag that stayed on the press is a click, not a move.

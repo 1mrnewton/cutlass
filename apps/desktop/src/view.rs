@@ -4271,7 +4271,7 @@ fn lane_height(view: &ViewState, lane: &crate::shell::LaneView) -> f32 {
     view.lane_heights
         .get(&lane.track_id)
         .copied()
-        .unwrap_or_else(|| row_height(lane.main, is_audio(lane)))
+        .unwrap_or_else(|| row_height(tall_lane(lane), is_audio(lane)))
 }
 
 /// Drag a row's outer edge to make it taller or shorter: the top edge for
@@ -4850,7 +4850,7 @@ fn clips_touching(
             let (start, duration) = preview_bounds(shell, clip);
             let bounds = clip_bounds(
                 shell,
-                lane.main,
+                tall_lane(lane),
                 is_audio(lane),
                 start,
                 duration,
@@ -4905,6 +4905,17 @@ fn clip_height(main: bool, audio: bool) -> f32 {
 
 fn is_audio(lane: &crate::shell::LaneView) -> bool {
     lane.kind == cutlass_model::TrackType::Audio
+}
+
+/// Main and overlay video rows share the tall picture height, so a clip
+/// keeps its size when it moves between them. Text, sticker and effect rows
+/// stay thin.
+fn tall_lane(lane: &crate::shell::LaneView) -> bool {
+    lane.main
+        || matches!(
+            lane.kind,
+            cutlass_model::TrackType::Video | cutlass_model::TrackType::Mixed
+        )
 }
 
 fn clip_inset(main: bool) -> f32 {
@@ -5395,7 +5406,7 @@ fn paint_clip(
     let (start, duration) = preview_bounds(shell, clip);
     let clip_rect = clip_bounds(
         shell,
-        lane.main,
+        tall_lane(lane),
         is_audio(lane),
         start,
         duration,
@@ -5431,7 +5442,7 @@ fn paint_clip(
     } else {
         shell.wave(&clip.id, f64::from(clip_rect.width()), span)
     };
-    let parts = clip_parts(clip_rect, lane.main, audio, wave.is_some());
+    let parts = clip_parts(clip_rect, tall_lane(lane), audio, wave.is_some());
     if !ghost {
         if let Some(film) = parts.film {
             paint_film(shell, ui, &clip.id, clip_rect, film, visible);
@@ -5591,7 +5602,8 @@ fn paint_clip(
         if response.drag_started()
             && let Some(pos) = pointer_pos(ui, &response)
         {
-            shell.begin_clip_drag(clip.id.clone(), None, (pos.x, pos.y));
+            let grab = (pos.x - clip_rect.left(), pos.y - clip_rect.top());
+            shell.begin_clip_drag(clip.id.clone(), None, (pos.x, pos.y), grab);
             if !ui.input(|input| input.modifiers.shift) && !shell.is_selected(&clip.id) {
                 shell.select(Some(clip.id.clone()));
             }
@@ -5603,12 +5615,17 @@ fn paint_clip(
             && shell.clip_edge(&clip.id).is_none()
             && let Some(pos) = pos
         {
-            let x = f64::from(pos.x - lanes_left).max(0.0);
-            scroll_with_drag(shell, ui, x);
+            scroll_with_drag(shell, ui, f64::from(pos.x - lanes_left).max(0.0));
+            // The clip keeps the spot it was taken by, so it does not jump to the pointer.
+            let (grab_x, grab_y) = shell.clip_grab(&clip.id);
+            let x = f64::from(pos.x - grab_x - lanes_left).max(0.0);
             match lane_spot(boxes, pos).unwrap_or(LaneSpot::On(index)) {
                 LaneSpot::On(row) => shell.preview_move(clip.id.clone(), x, editor_lane_y(row)),
                 LaneSpot::Between(row) => shell.preview_move_between(clip.id.clone(), x, row),
             }
+            let floating =
+                Rect::from_min_size(Pos2::new(pos.x - grab_x, pos.y - grab_y), clip_rect.size());
+            paint_floating_clip(shell, ui, lane, clip, floating, lanes_left);
         }
         if response.drag_stopped() && !moved {
             if ui.input(|input| input.modifiers.shift) {
@@ -5735,13 +5752,24 @@ fn drag_clip_edge(
     if response.drag_started()
         && let Some(pos) = pointer_pos(ui, &response)
     {
-        shell.begin_clip_drag(clip.id.clone(), Some(edge), (pos.x, pos.y));
+        let time = match edge {
+            TrimEdge::Start => clip.start.0,
+            TrimEdge::End => clip.start.0.saturating_add(clip.duration.0),
+        };
+        let edge_x = lane_x(lanes_left, shell.pixel_size(), shell.view_origin().0, time);
+        shell.begin_clip_drag(
+            clip.id.clone(),
+            Some(edge),
+            (pos.x, pos.y),
+            (pos.x - edge_x, 0.0),
+        );
     }
     if response.dragged()
         && let Some(pos) = pointer_pos(ui, &response)
     {
-        let x = f64::from(pos.x - lanes_left).max(0.0);
-        scroll_with_drag(shell, ui, x);
+        scroll_with_drag(shell, ui, f64::from(pos.x - lanes_left).max(0.0));
+        let (grab_x, _) = shell.clip_grab(&clip.id);
+        let x = f64::from(pos.x - grab_x - lanes_left).max(0.0);
         shell.preview_edge(clip.id.clone(), edge, x);
     }
     finish_clip_pointer(
@@ -5944,9 +5972,10 @@ fn finish_clip_pointer(
         shell.cancel_clip_drag();
         return;
     };
-    let x = f64::from(pos.x - lanes_left).max(0.0);
+    let (grab_x, _) = shell.clip_grab(id);
+    let x = f64::from(pos.x - grab_x - lanes_left).max(0.0);
     if edge.is_some() && shell.clip_edge(id).is_none() {
-        shell.begin_clip_drag(id.clone(), edge, (pos.x, pos.y));
+        shell.begin_clip_drag(id.clone(), edge, (pos.x, pos.y), (0.0, 0.0));
     }
     let landed = match spot {
         LaneSpot::On(row) => shell.finish_clip_drag(id.clone(), x, editor_lane_y(row)),
@@ -5999,8 +6028,7 @@ fn lane_spot(boxes: &[Rect], pos: Pos2) -> Option<LaneSpot> {
 /// The lane a held drag would open: a line in the gap where it opens, and
 /// the dragged clip on that line.
 fn paint_new_lane(shell: &Shell, ui: &Ui, boxes: &[Rect], lanes_left: f32) {
-    let (Some((row, kind)), Some(preview)) = (shell.new_lane_preview(), shell.move_preview())
-    else {
+    let Some((row, _)) = shell.new_lane_preview() else {
         return;
     };
     let y = match (
@@ -6020,35 +6048,47 @@ fn paint_new_lane(shell: &Shell, ui: &Ui, boxes: &[Rect], lanes_left: f32) {
         y,
         egui::Stroke::new(2.0, tokens::SELECTED),
     );
-    let left = lane_x(
-        lanes_left,
-        shell.pixel_size(),
-        shell.view_origin().0,
-        preview.start.0,
-    );
-    let end = lane_x(
-        lanes_left,
-        shell.pixel_size(),
-        shell.view_origin().0,
-        preview.start.0.saturating_add(preview.duration.0),
-    );
-    let ghost = Rect::from_min_max(
-        Pos2::new(left, y - 10.0),
-        Pos2::new(end.max(left + 8.0), y + 10.0),
-    );
-    let lanes = Rect::from_x_y_ranges(lanes_left..=right, ui.clip_rect().y_range());
-    let painter = ui.painter().with_clip_rect(ui.clip_rect().intersect(lanes));
+}
+
+/// The dragged clip at its own size, under the pointer, above everything.
+fn paint_floating_clip(
+    shell: &Shell,
+    ui: &Ui,
+    lane: &crate::shell::LaneView,
+    clip: &crate::shell::ClipSpan,
+    rect: Rect,
+    lanes_left: f32,
+) {
+    let painter = ui.ctx().layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::unique("floating-clip"),
+    ));
+    let painter = painter.with_clip_rect(Rect::from_x_y_ranges(
+        lanes_left..=ui.clip_rect().right(),
+        ui.clip_rect().y_range(),
+    ));
     painter.rect_filled(
-        ghost,
-        CornerRadius::same(5),
-        lane_color(&kind).gamma_multiply(0.8),
+        rect,
+        CornerRadius::same(7),
+        lane_color(&lane.kind).gamma_multiply(0.9),
+    );
+    let stroke = if shell.is_selected(&clip.id) {
+        tokens::SELECTED
+    } else {
+        Color32::WHITE.gamma_multiply(0.6)
+    };
+    painter.rect_stroke(
+        rect,
+        CornerRadius::same(7),
+        egui::Stroke::new(1.5, stroke),
+        egui::StrokeKind::Inside,
     );
     painter
-        .with_clip_rect(ghost.shrink(4.0).intersect(painter.clip_rect()))
+        .with_clip_rect(rect.shrink(6.0).intersect(painter.clip_rect()))
         .text(
-            ghost.left_center() + Vec2::new(8.0, 0.0),
-            Align2::LEFT_CENTER,
-            &preview.name,
+            rect.left_top() + Vec2::new(8.0, 6.0),
+            Align2::LEFT_TOP,
+            &clip.name,
             FontId::proportional(11.0),
             Color32::WHITE,
         );
@@ -6068,7 +6108,7 @@ fn paint_move_follower(
 ) {
     let clip_rect = clip_bounds(
         shell,
-        lane.main,
+        tall_lane(lane),
         is_audio(lane),
         preview.start,
         preview.duration,
@@ -6080,6 +6120,24 @@ fn paint_move_follower(
         return;
     }
     let painter = ui.painter().with_clip_rect(row);
+    // The dragged clip floats under the pointer; its landing spot is an outline.
+    if shell
+        .move_preview()
+        .is_some_and(|lead| lead.id == preview.id)
+    {
+        painter.rect_filled(
+            clip_rect,
+            CornerRadius::same(7),
+            lane_color(&lane.kind).gamma_multiply(0.25),
+        );
+        painter.rect_stroke(
+            clip_rect,
+            CornerRadius::same(7),
+            egui::Stroke::new(1.5, tokens::SELECTED),
+            egui::StrokeKind::Inside,
+        );
+        return;
+    }
     painter.rect_filled(clip_rect, CornerRadius::same(7), lane_color(&lane.kind));
     if shell.is_selected(&preview.id) {
         painter.rect_stroke(
@@ -10646,6 +10704,61 @@ mod tests {
         assert_eq!(tracks[0].segments[0].id.as_str(), "only");
         assert!(tracks[1].is_main() && tracks[1].segments.is_empty());
         let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn a_dragged_clip_keeps_where_it_was_taken_and_does_not_jump() {
+        let (mut shell, temp) = open_span("grab", 2_000_000);
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: screen,
+                ..Default::default()
+            },
+            |ui| show(&mut shell, ui, &mut view, None),
+        );
+        let text = text_pos(&output, "segment").expect("clip");
+        output.textures_delta.clear();
+        // Take the clip well inside its body, then move it 80 points right.
+        let press = text + Vec2::new(120.0, 0.0);
+        drag(
+            &ctx,
+            press,
+            press + Vec2::new(80.0, 0.0),
+            &mut shell,
+            &mut view,
+        );
+        let start = shell.draft().unwrap().tracks[0].segments[0].target.start.0 as f64;
+        let moved = start * shell.pixel_size();
+        assert!(
+            (moved - 80.0).abs() < 3.0,
+            "the clip moved {moved} points for an 80 point drag"
+        );
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn an_overlay_video_row_is_as_tall_as_main_and_a_text_row_stays_thin() {
+        let lane = |kind: cutlass_model::TrackType, main: bool| crate::shell::LaneView {
+            track_id: TrackId::new("t"),
+            kind,
+            main,
+            name: None,
+            mute: false,
+            hide: false,
+            lock: false,
+            solo: false,
+            mute_by_solo: false,
+            clips: Vec::new(),
+        };
+        let view = ViewState::new();
+        let main = lane_height(&view, &lane(cutlass_model::TrackType::Video, true));
+        let overlay = lane_height(&view, &lane(cutlass_model::TrackType::Video, false));
+        let text = lane_height(&view, &lane(cutlass_model::TrackType::Text, false));
+        assert_eq!(overlay, main);
+        assert!(text < main);
     }
 
     #[test]

@@ -243,12 +243,15 @@ fn text_panel(
     match labels.get(state.tab).copied().unwrap_or_default() {
         "Captions" => caption_list(shell, ui, state),
         "Text" => {
-            pages(ui, &["Basic", "Bubble", "Effects"], &mut state.page);
+            // A caption's middle page is its templates; a title's is its bubble.
+            let middle = if caption { "Templates" } else { "Bubble" };
+            pages(ui, &["Basic", middle, "Effects"], &mut state.page);
             match state.page {
                 0 => {
                     text_basic(shell, ui, state, inspection, caption);
                     footer(ui, &["Save as preset"]);
                 }
+                1 if caption => later_note(ui, "Caption templates"),
                 1 => bubble_page(shell, ui),
                 _ => effect_page(shell, ui),
             }
@@ -473,7 +476,31 @@ fn position_size(
     inspection: &Inspection,
     rotate_label: &str,
 ) {
-    let header = section(ui, state, "position", "Position & Size", None, true);
+    placement(
+        shell,
+        ui,
+        state,
+        inspection,
+        "Position & Size",
+        Some(rotate_label),
+    );
+}
+
+/// A caption's Transform: scale, uniform scale and position, each with its
+/// keyframe controls, as the video panel keys them.
+fn transform(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState, inspection: &Inspection) {
+    placement(shell, ui, state, inspection, "Transform", None);
+}
+
+fn placement(
+    shell: &mut Shell,
+    ui: &mut Ui,
+    state: &mut InspectorState,
+    inspection: &Inspection,
+    title: &str,
+    rotate_label: Option<&str>,
+) {
+    let header = section(ui, state, "position", title, None, true);
     if header.reset {
         send(shell, Shell::reset_placement);
     }
@@ -519,8 +546,10 @@ fn position_size(
             send(shell, |shell| shell.set_position(stored_x, stored_y));
         }
         let rotation = inspection.rotation;
-        let turned = keyed_row(ui, keys.as_ref(), playhead, &mut step, |ui| {
-            pair_row(ui, state, rotate_label, ("°", rotation), ("", f64::NAN))
+        let turned = rotate_label.map_or((None, None), |label| {
+            keyed_row(ui, keys.as_ref(), playhead, &mut step, |ui| {
+                pair_row(ui, state, label, ("°", rotation), ("", f64::NAN))
+            })
         });
         match step {
             Some(KeyStep::Back) => shell.step_keyframe(false),
@@ -536,7 +565,7 @@ fn position_size(
         {
             send(shell, |shell| shell.ease_keyframes(graph));
         }
-        if rotate_label == "Rotate" {
+        if rotate_label == Some("Rotate") {
             use cutlass_editor::StageAlign;
             let aims = [
                 ("alignLeft", "Align left", Some(StageAlign::Left)),
@@ -1756,7 +1785,11 @@ fn text_basic(
         alignment_row(shell, ui, inspection);
         preset_styles(shell, ui);
     });
-    position_size(shell, ui, state, inspection, "Plane rotation");
+    if caption {
+        transform(shell, ui, state, inspection);
+    } else {
+        position_size(shell, ui, state, inspection, "Plane rotation");
+    }
     blend(shell, ui, state, inspection, false);
     if let Some(look) = shell.text_look() {
         text_parts(shell, ui, state, &look);

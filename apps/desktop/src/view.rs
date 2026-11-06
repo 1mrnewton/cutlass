@@ -7255,6 +7255,42 @@ mod tests {
         ] {
             assert!(lines.iter().any(|line| line == label), "{label}: {lines:?}");
         }
+        // A caption's Text tab: Templates in place of Bubble, its paragraphs,
+        // and Transform in place of Position & Size.
+        shell.select(Some(SegmentId::new("said")));
+        let mut lines = Vec::new();
+        for _ in 0..2 {
+            view.inspector.focus(inspector::Focus {
+                tab: 0,
+                page: 0,
+                section: None,
+            });
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 2400.0))),
+                    ..Default::default()
+                },
+                |ui| show(&mut shell, ui, &mut view, None),
+            );
+            lines = galleys(&output);
+            output.textures_delta.clear();
+        }
+        for label in [
+            "Templates",
+            "The 1 paragraph",
+            "Words",
+            "Transform",
+            "Scale",
+            "Position",
+        ] {
+            assert!(lines.iter().any(|line| line == label), "{label}: {lines:?}");
+        }
+        for label in ["Bubble", "Position & Size", "Plane rotation", "Tracking"] {
+            assert!(
+                !lines.iter().any(|line| line == label),
+                "{label}: {lines:?}"
+            );
+        }
         let _ = std::fs::remove_dir_all(&temp);
     }
 

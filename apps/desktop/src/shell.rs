@@ -9068,11 +9068,7 @@ mod tests {
 
     #[test]
     fn an_import_failure_is_written_to_the_log() {
-        let log_dir =
-            std::env::temp_dir().join(format!("cutlass-import-log-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&log_dir);
-        std::fs::create_dir_all(&log_dir).unwrap();
-        cutlass_logger::init(&log_dir).unwrap();
+        crate::test_log::path();
         let temp = Temp::new();
         empty_project(&temp.path);
         let mut desktop = shell();
@@ -9080,10 +9076,9 @@ mod tests {
         let junk = temp.path.join("notes.txt");
         std::fs::write(&junk, b"hello").unwrap();
         let error = desktop.import_file(&junk).unwrap_err();
-        let log = std::fs::read_to_string(log_dir.join(cutlass_logger::FILE_NAME)).unwrap();
+        let log = crate::test_log::text();
         assert!(log.contains(&error.to_string()), "{log}");
         assert!(log.contains("notes.txt"), "{log}");
-        let _ = std::fs::remove_dir_all(&log_dir);
     }
 
     #[test]

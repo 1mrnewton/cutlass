@@ -67,12 +67,14 @@ use cutlass_playback::{FaceTable, Program};
 use cutlass_session::{Draft, LinkageSettings, Request, Session};
 use cutlass_store::RepairNote;
 
-/// Open the process log in `directory`.
+/// Open the process log in `directory` and record panics in it.
 ///
 /// A phone shell calls this once at start. The public build writes the file
 /// and does not write stderr.
 pub fn start_log(directory: &Path) -> Result<PathBuf, LogError> {
-    cutlass_logger::init(directory)
+    let opened = cutlass_logger::init(directory);
+    cutlass_logger::install_panic_hook();
+    opened
 }
 
 /// Give the calling thread the interface's priority.

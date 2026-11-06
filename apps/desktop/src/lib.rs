@@ -123,15 +123,29 @@ pub fn load_settings_file(path: &Path) -> cutlass_settings::Loaded {
     }
 }
 
-/// Open the process log before the window.
+/// Open the process log before the window, record panics in it, and say
+/// which build started on which system.
 ///
 /// `None` uses the logs folder of the Cutlass root. A public build writes
-/// the file and does not write stderr.
+/// the file and does not write stderr. `CUTLASS_LOG=debug` keeps DEBUG.
 pub fn boot(log_directory: Option<&Path>) -> Result<PathBuf, cutlass_logger::InitError> {
-    match log_directory {
+    let opened = match log_directory {
         Some(directory) => cutlass_logger::init(directory),
         None => cutlass_logger::init(&shell::Shell::home().logs()),
-    }
+    };
+    cutlass_logger::install_panic_hook();
+    cutlass_logger::info!(
+        "Cutlass {} ({} build) on {} {}",
+        env!("CARGO_PKG_VERSION"),
+        if cfg!(debug_assertions) {
+            "debug"
+        } else {
+            "release"
+        },
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+    );
+    opened
 }
 
 /// Record a failure from process start. The public build keeps it in the file.
@@ -569,15 +583,40 @@ mod tests {
 
     #[test]
     fn boot_writes_the_log_and_an_error() {
-        let path = std::env::temp_dir().join(format!("cutlass-desktop-log-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&path);
-        std::fs::create_dir_all(&path).unwrap();
-        let log = super::boot(Some(&path)).unwrap();
+        super::test_log::text();
         super::report_error("window failed");
-        let text = std::fs::read_to_string(&log).unwrap();
+        let text = super::test_log::text();
         assert!(text.contains("log file"), "{text}");
-        assert!(text.contains("window failed"), "{text}");
+        assert!(
+            text.contains(&format!("Cutlass {}", env!("CARGO_PKG_VERSION"))),
+            "{text}"
+        );
+        assert!(text.contains(std::env::consts::OS), "{text}");
         assert!(text.contains("ERROR"), "{text}");
-        let _ = std::fs::remove_dir_all(&path);
+        assert!(text.contains("window failed"), "{text}");
+    }
+}
+
+/// One log for the whole test process. The logger is global, so tests that
+/// read it share this folder and look for their own words.
+#[cfg(test)]
+pub(crate) mod test_log {
+    use std::path::PathBuf;
+    use std::sync::OnceLock;
+
+    /// The live log file, opened through [`super::boot`] on first use.
+    pub(crate) fn path() -> &'static PathBuf {
+        static PATH: OnceLock<PathBuf> = OnceLock::new();
+        PATH.get_or_init(|| {
+            let directory =
+                std::env::temp_dir().join(format!("cutlass-desktop-log-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&directory);
+            super::boot(Some(&directory)).unwrap()
+        })
+    }
+
+    /// Everything logged so far.
+    pub(crate) fn text() -> String {
+        std::fs::read_to_string(path()).unwrap_or_default()
     }
 }

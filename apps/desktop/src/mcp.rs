@@ -576,7 +576,8 @@ mod tests {
             json!({"jsonrpc":"2.0","id":2,"method":"tools/call",
                 "params":{"name":"track_start","arguments":{
                     "target": target.as_str(), "at_us": 1_000_000,
-                    "box": [a.0, a.1, b.0, b.1], "followers": ["follower"]}}}),
+                    "box": [a.0, a.1, b.0, b.1], "followers": ["follower"],
+                    "masks": [target.as_str()]}}}),
             json!({"jsonrpc":"2.0","id":3,"method":"tools/call",
                 "params":{"name":"track_poll","arguments":{"input":"track-1"}}}),
         ]);
@@ -593,5 +594,13 @@ mod tests {
         assert_eq!(draft.materials.video_trackings.len(), 1);
         let follower = &draft.tracks[1].segments[0];
         assert!(cutlass_model::key_offsets(follower).len() > 2);
+        // The movie's own mask is a box on the shirt that shrinks with it.
+        let movie = &draft.tracks[0].segments[0];
+        let mask = cutlass_effects::segment_mask(draft, movie).unwrap();
+        let size = |t: i64| {
+            mask.at(movie, &draft.keyframe_graph_list, cutlass_model::Micros(t))
+                .width
+        };
+        assert!(size(3_500_000) < size(1_000_000) * 0.9);
     }
 }

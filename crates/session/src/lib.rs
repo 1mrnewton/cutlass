@@ -19,4 +19,4 @@ pub use edit::{
 };
 pub use history::UNDO_LIMIT;
 pub use request::{Arrange, ImportedMedium, Request, TrimEdge};
-pub use session::Session;
+pub use session::{Session, drop_empty_lanes};

@@ -25,6 +25,17 @@ impl Session {
         }
     }
 
+    /// Open a project read from disk: `open`, after dropping every lane other
+    /// than main that holds no clips. Edits already drop a lane they empty;
+    /// this clears the ones a project saved before that rule still holds. It
+    /// is a load repair, not an edit: the revision is 0 and there is nothing
+    /// to undo.
+    #[must_use]
+    pub fn open_project(mut draft: Draft) -> Self {
+        drop_empty_lanes(&mut draft);
+        Self::open(draft)
+    }
+
     /// Follow and cut switches. A new draft starts with all of them on.
     #[must_use]
     pub fn linkage(&self) -> LinkageSettings {
@@ -171,6 +182,13 @@ impl Session {
     }
 }
 
+/// Take every lane other than main that holds no clips.
+pub fn drop_empty_lanes(draft: &mut Draft) {
+    draft
+        .tracks
+        .retain(|track| track.is_main() || !track.segments.is_empty());
+}
+
 #[cfg(test)]
 mod tests {
     use cutlass_model::{
@@ -189,6 +207,43 @@ mod tests {
         let track_id = TrackId::new("main");
         draft.tracks[0].id = track_id.clone();
         (Session::open(draft), track_id)
+    }
+
+    #[test]
+    fn a_project_opens_without_its_empty_lanes_but_keeps_main_and_full_ones() {
+        let mut draft = Draft::empty("D");
+        draft.tracks[0].segments.clear();
+        let mut sound = Track::main(TrackId::new("sound"));
+        sound.kind = cutlass_model::TrackType::Audio;
+        sound.flag = cutlass_model::TrackFlag::None;
+        sound.attribute = TrackAttribute(TrackAttribute::MUTE);
+        let mut words = Track::main(TrackId::new("words"));
+        words.kind = cutlass_model::TrackType::Text;
+        words.flag = cutlass_model::TrackFlag::None;
+        words
+            .segments
+            .push(Segment::new("hello", "text", TimeRange::new(0, 1_000_000)));
+        draft.tracks.insert(0, words);
+        draft.tracks.push(sound.clone());
+        sound.id = TrackId::new("sound-2");
+        draft.tracks.push(sound);
+
+        let session = Session::open_project(draft);
+        let ids: Vec<&str> = session
+            .draft()
+            .tracks
+            .iter()
+            .map(|track| track.id.as_str())
+            .collect();
+        assert_eq!(
+            ids.len(),
+            2,
+            "the empty main stays and the text lane stays: {ids:?}"
+        );
+        assert_eq!(ids[0], "words");
+        assert!(session.draft().tracks[1].is_main());
+        assert_eq!(session.revision(), 0);
+        assert!(!session.can_undo());
     }
 
     fn place(track_id: &TrackId, id: &str, start: i64, duration: i64) -> Request {

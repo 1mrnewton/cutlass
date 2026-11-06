@@ -1369,7 +1369,7 @@ impl Shell {
             opened.folder.draft.id.as_str(),
             has_pairs,
         );
-        let mut session = Session::open(opened.folder.draft.clone());
+        let mut session = Session::open_project(opened.folder.draft.clone());
         session.set_linkage(linkage);
         self.outer.clear();
         self.saved = Some((session.revision(), Instant::now()));

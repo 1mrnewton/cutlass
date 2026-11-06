@@ -31,16 +31,16 @@ fn square_at(k: i64) -> (f64, f64) {
     (60.0 + 1.5 * k as f64, 50.0 + 0.5 * k as f64)
 }
 
-/// Frame `k`: the textured square over a still background. From `gone`
-/// on, the square is gone and the background is new.
-fn frame(k: i64, gone: i64) -> Gray {
+/// Frame `k`: the textured square over a still background. In `gone`,
+/// the square is behind the background.
+fn frame(k: i64, gone: &std::ops::Range<i64>) -> Gray {
     let (sx, sy) = square_at(k);
     let mut data = Vec::with_capacity((W * H) as usize);
     for y in 0..H {
         for x in 0..W {
             let (px, py) = (f64::from(x), f64::from(y));
-            let value = if k >= gone {
-                noise(px, py, 77)
+            let value = if gone.contains(&k) {
+                noise(px, py, 1)
             } else if (sx..sx + 40.0).contains(&px) && (sy..sy + 40.0).contains(&py) {
                 noise(px - sx, py - sy, 2)
             } else {
@@ -84,11 +84,11 @@ fn same(_: Micros, quad: Quad) -> Option<[(f64, f64); 4]> {
     Some(quad.0.map(|(x, y)| (2.0 * x - 1.0, 1.0 - 2.0 * y)))
 }
 
-fn run(gone: i64, stop_after: usize) -> Result<TrackPath, TrackError> {
+fn run(gone: std::ops::Range<i64>, stop_after: usize) -> Result<TrackPath, TrackError> {
     let mut calls = 0;
     track_frames(
         &times(),
-        &mut |time| Ok(frame(index(time), gone)),
+        &mut |time| Ok(frame(index(time), &gone)),
         &same,
         box_at(10),
         TrackMode::Object,
@@ -101,7 +101,7 @@ fn run(gone: i64, stop_after: usize) -> Result<TrackPath, TrackError> {
 
 #[test]
 fn a_box_is_followed_both_ways_from_the_frame_it_was_drawn_on() {
-    let path = run(i64::MAX, usize::MAX).unwrap();
+    let path = run(0..0, usize::MAX).unwrap();
     assert_eq!(path.samples.len(), 31);
     for (k, sample) in path.samples.iter().enumerate() {
         let k = k as i64;
@@ -117,9 +117,42 @@ fn a_box_is_followed_both_ways_from_the_frame_it_was_drawn_on() {
     }
 }
 
+fn pixels_off(got: [(f64, f64); 4], want: [(f64, f64); 4]) -> f64 {
+    got.iter()
+        .zip(want)
+        .map(|(got, want)| {
+            ((got.0 - want.0) * f64::from(W) / 2.0).hypot((got.1 - want.1) * f64::from(H) / 2.0)
+        })
+        .fold(0.0, f64::max)
+}
+
+#[test]
+fn frames_where_the_target_hides_leave_a_gap_and_it_is_found_after() {
+    let path = run(14..18, usize::MAX).unwrap();
+    let frames: Vec<i64> = path.samples.iter().map(|s| index(s.time)).collect();
+    assert!(frames.iter().all(|k| !(14..18).contains(k)), "{frames:?}");
+    assert_eq!(frames.first(), Some(&0));
+    assert_eq!(frames.last(), Some(&30));
+    for sample in &path.samples {
+        let k = index(sample.time);
+        let off = pixels_off(sample.corners, box_at(k));
+        assert!(off < 3.0, "frame {k}: {off:.2} pixels off");
+    }
+}
+
+#[test]
+fn a_span_keeps_one_side_of_the_drawn_frame() {
+    let only = |span| times().only(span);
+    assert_eq!(only(TrackSpan::After).before, Vec::new());
+    assert_eq!(only(TrackSpan::After).after.len(), 20);
+    assert_eq!(only(TrackSpan::Before).after, Vec::new());
+    assert_eq!(only(TrackSpan::Before).before.len(), 10);
+    assert_eq!(only(TrackSpan::Both).before.len(), 10);
+}
+
 #[test]
 fn the_path_ends_where_the_target_is_lost() {
-    let path = run(20, usize::MAX).unwrap();
+    let path = run(20..i64::MAX, usize::MAX).unwrap();
     let last = path.samples.last().map(|sample| index(sample.time));
     assert_eq!(last, Some(19));
     assert_eq!(
@@ -130,7 +163,7 @@ fn the_path_ends_where_the_target_is_lost() {
 
 #[test]
 fn the_callback_stops_the_job() {
-    assert_eq!(run(i64::MAX, 4), Err(TrackError::Stopped));
+    assert_eq!(run(0..0, 4), Err(TrackError::Stopped));
 }
 
 #[test]
@@ -138,7 +171,7 @@ fn a_bad_box_or_frame_is_an_error() {
     let flat = [(0.0, 0.0), (0.0, 0.0), (0.0, 0.0), (0.0, 0.0)];
     let result = track_frames(
         &times(),
-        &mut |time| Ok(frame(index(time), i64::MAX)),
+        &mut |time| Ok(frame(index(time), &(0..0))),
         &same,
         flat,
         TrackMode::Plane,

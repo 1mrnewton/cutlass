@@ -44,6 +44,18 @@ impl std::fmt::Display for TrackError {
 
 impl std::error::Error for TrackError {}
 
+/// Which way from the drawn frame to track.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TrackSpan {
+    /// To the clip's end and back to its start.
+    #[default]
+    Both,
+    /// Only to the clip's end.
+    After,
+    /// Only back to the clip's start.
+    Before,
+}
+
 /// What to track: a box in a clip's own frame at one timeline time.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TrackAsk {
@@ -53,12 +65,13 @@ pub struct TrackAsk {
     /// The box's corners in the clip's own frame: -1 to 1, y up.
     pub corners: [(f64, f64); 4],
     pub mode: TrackMode,
+    pub span: TrackSpan,
 }
 
 /// Follow `ask`'s box through its clip. `progress` hears the share of the
 /// clip's frames read so far after each one, and stops the job by
-/// answering `false`. The path ends where the target was lost, on each
-/// side.
+/// answering `false`. Frames where the target is hidden have no sample;
+/// the path ends where the target was lost, on each side.
 pub fn track_clip(
     readers: &ReaderFactory,
     draft: &Draft,
@@ -71,6 +84,7 @@ pub fn track_clip(
         at,
         corners,
         mode,
+        span,
     } = ask;
     let (at, corners, mode) = (*at, *corners, *mode);
     let segment = draft
@@ -107,7 +121,7 @@ pub fn track_clip(
     );
     let place = |time: Micros, quad: Quad| on_canvas(draft, segment, time, canvas, quad);
     track_frames(
-        &frame_times(draft, segment, at)?,
+        &frame_times(draft, segment, at)?.only(*span),
         &mut frame_at,
         &place,
         corners,
@@ -122,6 +136,18 @@ pub(crate) struct FrameTimes {
     pub(crate) before: Vec<Micros>,
     pub(crate) at: Micros,
     pub(crate) after: Vec<Micros>,
+}
+
+impl FrameTimes {
+    /// These times on `span`'s side of `at`.
+    fn only(mut self, span: TrackSpan) -> Self {
+        match span {
+            TrackSpan::Both => {}
+            TrackSpan::After => self.before.clear(),
+            TrackSpan::Before => self.after.clear(),
+        }
+        self
+    }
 }
 
 fn frame_times(draft: &Draft, segment: &Segment, at: Micros) -> Result<FrameTimes, TrackError> {
@@ -179,13 +205,14 @@ pub(crate) fn track_frames(
     for &time in &times.after {
         let frame = frame_at(time)?;
         read += 1;
-        let Step::Tracked { quad, .. } = forward.step(&frame).map_err(TrackError::Motion)? else {
-            break;
-        };
-        after.push(TrackSample {
-            time,
-            corners: place(time, quad).ok_or_else(unplaced)?,
-        });
+        match forward.step(&frame).map_err(TrackError::Motion)? {
+            Step::Tracked { quad, .. } => after.push(TrackSample {
+                time,
+                corners: place(time, quad).ok_or_else(unplaced)?,
+            }),
+            Step::Hidden => {}
+            Step::Lost => break,
+        }
         if !tell(read) {
             return Err(TrackError::Stopped);
         }
@@ -202,14 +229,14 @@ pub(crate) fn track_frames(
         }
         for (time, frame) in frames.into_iter().rev() {
             read += 1;
-            let Step::Tracked { quad, .. } = backward.step(&frame).map_err(TrackError::Motion)?
-            else {
-                break 'back;
-            };
-            before.push(TrackSample {
-                time,
-                corners: place(time, quad).ok_or_else(unplaced)?,
-            });
+            match backward.step(&frame).map_err(TrackError::Motion)? {
+                Step::Tracked { quad, .. } => before.push(TrackSample {
+                    time,
+                    corners: place(time, quad).ok_or_else(unplaced)?,
+                }),
+                Step::Hidden => {}
+                Step::Lost => break 'back,
+            }
             if !tell(read) {
                 return Err(TrackError::Stopped);
             }

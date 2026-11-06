@@ -49,7 +49,7 @@ pub use heard::{ClipAsk, Heard};
 pub use media::OpenClips;
 pub use scenes::{blend_blocks, kept_cuts, scene_split_times};
 pub use text::text_size;
-pub use track::{TrackAsk, TrackError, track_clip};
+pub use track::{TrackAsk, TrackError, TrackSpan, track_clip};
 
 /// The source timestamp Freeze stores so the clip keeps showing `time`.
 ///

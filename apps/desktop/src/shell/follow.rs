@@ -2,7 +2,7 @@
 //! follows it, follow the box through the clip as a job, then make the
 //! followers follow it in one undo step.
 
-use cutlass_eval::{TrackAsk, TrackError, track_clip};
+use cutlass_eval::{TrackAsk, TrackError, TrackSpan, track_clip};
 use cutlass_model::{
     Draft, MaterialId, MaterialRef, Micros, SegmentId, TrackAttribute, TrackMode, TrackType,
     VIDEO_TRACKING,
@@ -271,6 +271,7 @@ impl Shell {
             at,
             corners,
             mode,
+            span: TrackSpan::Both,
         };
         self.start_job("Track", move |progress| {
             progress.stage("Tracking");

@@ -171,3 +171,17 @@ opt-level = 3
 [profile.dev.package.cutlass-hevc]
 opt-level = 3
 
+# The vision tests run MobileSAM on the CPU. Unoptimised, one frame takes
+# minutes; burn's CPU backend and its matrix kernels build optimised.
+[profile.dev.package.burn-flex]
+opt-level = 3
+[profile.dev.package.burn-backend]
+opt-level = 3
+[profile.dev.package.burn-std]
+opt-level = 3
+[profile.dev.package.gemm]
+opt-level = 3
+[profile.dev.package.gemm-common]
+opt-level = 3
+[profile.dev.package.gemm-f32]
+opt-level = 3

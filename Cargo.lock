@@ -2886,6 +2886,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "cutlass-motion"
+version = "0.1.0"
+
+[[package]]
 name = "cutlass-mp3"
 version = "0.1.0"
 dependencies = [

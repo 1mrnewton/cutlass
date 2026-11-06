@@ -79,6 +79,7 @@ members = [
     "crates/transcription",
     "crates/update",
     "crates/vision",
+    "crates/motion",
     "tools/icongen",
     "tools/licenses",
 ]

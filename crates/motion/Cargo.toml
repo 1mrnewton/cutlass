@@ -1,0 +1,10 @@
+[package]
+name = "cutlass-motion"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "Follows a target through frames: pyramidal Lucas-Kanade and a RANSAC fit, pure Rust."
+
+[lints]
+workspace = true

@@ -3829,7 +3829,11 @@ fn ruler_and_lanes(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
         let (Some(row), Some(band)) = (drawn.get(index).copied(), laid.bands.get(index)) else {
             continue;
         };
-        let cut = clip.intersect(tracks).intersect(*band);
+        // A band cuts its rows top and bottom only: the head on the left
+        // is part of the row.
+        let cut = clip
+            .intersect(tracks)
+            .intersect(Rect::from_x_y_ranges(tracks.x_range(), band.y_range()));
         let folded = laid.peek && main_index.is_some_and(|main| index > main);
         if cut.height() <= 0.0 || folded {
             continue;
@@ -11305,6 +11309,55 @@ mod tests {
             scrolled.iter().all(|height| *height == tokens::CLIP_HEIGHT),
             "{scrolled:?}"
         );
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn every_lane_head_shows_its_icons() {
+        let temp = std::env::temp_dir().join(format!("cutlass-heads-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let mut draft = cutlass_model::Draft::empty("draft");
+        draft.canvas_config.width = 2;
+        draft.canvas_config.height = 1;
+        draft.tracks[0].segments.push(cutlass_model::Segment::new(
+            "low",
+            "color",
+            cutlass_model::TimeRange::new(0, 2_000_000),
+        ));
+        let mut overlay = cutlass_model::Track::main(TrackId::new("overlay"));
+        overlay.flag = cutlass_model::TrackFlag::SubVideo;
+        overlay.segments.push(cutlass_model::Segment::new(
+            "high",
+            "color",
+            cutlass_model::TimeRange::new(0, 2_000_000),
+        ));
+        draft.tracks.insert(0, overlay);
+        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0))),
+                ..Default::default()
+            },
+            |ui| show(&mut shell, ui, &mut view, None),
+        );
+        output.textures_delta.clear();
+        for name in ["low", "high"] {
+            let at = text_pos(&output, name).expect("the clip");
+            // Something drawn, and not cut away, in the head left of the clip.
+            let head = output.shapes.iter().any(|clipped| {
+                let bounds = clipped.shape.visual_bounding_rect();
+                bounds.right() < at.x - tokens::COVER_WIDTH
+                    && bounds.left() > at.x - tokens::COVER_WIDTH - tokens::TRACK_HEAD - 20.0
+                    && (bounds.center().y - at.y).abs() < 40.0
+                    && clipped.clip_rect.intersect(bounds).area() > 0.0
+            });
+            assert!(head, "the {name} lane has no head showing");
+        }
         let _ = std::fs::remove_dir_all(&temp);
     }
 

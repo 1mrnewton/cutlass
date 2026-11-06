@@ -11,6 +11,10 @@ autobins = false
 # A public release passes this. `cargo run --release` does not, so it still logs.
 public-release = []
 
+[dependencies]
+# Other crates (wgpu, eframe, burn) report through the `log` facade.
+log = { version = "0.4.34", features = ["std"] }
+
 [[bin]]
 name = "emit"
 path = "src/bin/emit.rs"

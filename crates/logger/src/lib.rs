@@ -6,6 +6,8 @@
 //! `cargo run --release` also write those lines to stderr. A public build
 //! passes the `public-release` feature and does not write the console.
 //! Stdout is never written, because `cutlass mcp` speaks on stdout.
+//! Crates that report through the `log` facade (wgpu, eframe, burn) land
+//! here too, at WARN and above only.
 //!
 //! A call formats one line, writes it, and flushes before it returns. A
 //! record below the level is dropped before its message is formatted.
@@ -187,6 +189,7 @@ pub const fn console_enabled() -> bool {
 pub fn init(directory: &Path) -> Result<PathBuf, InitError> {
     let chosen = level_from_env(std::env::var(LEVEL_ENV).ok().as_deref());
     set_level(*chosen.as_ref().unwrap_or(&DEFAULT_LEVEL));
+    install_bridge();
     let result = install(directory, process_console(), MAX_FILE_BYTES);
     report_open(&result);
     if let Err(error) = chosen {
@@ -393,6 +396,53 @@ fn write_line(guard: &mut Option<Logger>, line: &str) {
         let _ = write_file(file, line);
     }
     write_console(&mut logger.console, line);
+}
+
+/// The most detail kept from crates that report through the `log` facade
+/// (wgpu, eframe, burn). Their INFO and below runs every frame.
+pub const OTHER_CRATES_LEVEL: Level = Level::Warn;
+
+struct Bridge;
+
+static BRIDGE: Bridge = Bridge;
+
+impl Bridge {
+    fn level(level: log::Level) -> Level {
+        match level {
+            log::Level::Error => Level::Error,
+            log::Level::Warn => Level::Warn,
+            log::Level::Info => Level::Info,
+            log::Level::Debug => Level::Debug,
+            log::Level::Trace => Level::Trace,
+        }
+    }
+}
+
+impl log::Log for Bridge {
+    fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+        let level = Self::level(metadata.level());
+        level <= OTHER_CRATES_LEVEL && enabled(level)
+    }
+
+    fn log(&self, entry: &log::Record<'_>) {
+        if log::Log::enabled(self, entry.metadata()) {
+            record(
+                Self::level(entry.level()),
+                entry.target(),
+                &entry.args().to_string(),
+            );
+        }
+    }
+
+    fn flush(&self) {}
+}
+
+/// Send `log` facade records at WARN and above into this log. A second
+/// call, or a process that set another `log` logger first, changes nothing.
+fn install_bridge() {
+    if log::set_logger(&BRIDGE).is_ok() {
+        log::set_max_level(log::LevelFilter::Warn);
+    }
 }
 
 struct Logger {
@@ -904,6 +954,27 @@ mod tests {
         assert_eq!(calls.get(), 0);
         info!("{}", Counted(&calls));
         assert_eq!(calls.get(), 1);
+    }
+
+    #[test]
+    fn other_crates_reach_the_file_at_warn_and_above_only() {
+        let env = Env::new();
+        let path = init_capture(&env.temp.path, MAX_FILE_BYTES).unwrap();
+        super::install_bridge();
+        set_level(Level::Trace);
+        log::error!(target: "wgpu_core::device", "bridged-error");
+        log::warn!(target: "eframe", "bridged-warn");
+        log::info!(target: "wgpu_core::device", "bridged-info");
+        log::debug!(target: "eframe", "bridged-debug");
+        set_level(Level::Error);
+        log::warn!(target: "eframe", "bridged-quiet-warn");
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains(" ERROR "), "{text}");
+        assert!(text.contains(" wgpu_core::device bridged-error"), "{text}");
+        assert!(text.contains(" eframe bridged-warn"), "{text}");
+        for token in ["bridged-info", "bridged-debug", "bridged-quiet-warn"] {
+            assert!(!text.contains(token), "{token} kept in {text}");
+        }
     }
 
     #[test]

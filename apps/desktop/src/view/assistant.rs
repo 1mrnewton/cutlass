@@ -2,8 +2,8 @@
 //! command box, and Stop. It takes the inspector's place while open.
 
 use egui::{
-    Align, Color32, CornerRadius, FontId, Frame, Key, Layout, Margin, Rect, RichText, ScrollArea,
-    Stroke, TextEdit, Ui, Vec2,
+    Align, Color32, CornerRadius, FontId, Frame, Key, Layout, Margin, Rect, RichText, Stroke,
+    TextEdit, Ui, Vec2,
 };
 
 use crate::assistant::{Assistant, Entry};
@@ -59,8 +59,7 @@ pub fn panel(shell: &mut Shell, ui: &mut Ui, assistant: &mut Assistant, rect: Re
 
     let box_height = 92.0;
     let list_height = (ui.available_height() - box_height).max(60.0);
-    ScrollArea::vertical()
-        .id_salt("assistant-entries")
+    crate::ui::Scroll::vertical("assistant-entries")
         .max_height(list_height)
         .auto_shrink([false, false])
         .stick_to_bottom(true)

@@ -2325,20 +2325,16 @@ fn later_button(ui: &mut Ui, label: &str) {
     ui.add_space(6.0);
     ui.add_enabled(
         false,
-        egui::Button::new(RichText::new(label).size(12.0)).fill(BOX),
-    )
-    .on_disabled_hover_text(LATER);
+        crate::ui::Button::new(label).text_size(12.0).tip(LATER),
+    );
 }
 
 fn footer(ui: &mut Ui, labels: &[&str]) {
     ui.add_space(8.0);
     ui.horizontal(|ui| {
         for label in labels {
-            ui.add_enabled(
-                false,
-                egui::Button::new(RichText::new(*label).size(12.0)).fill(BOX),
-            )
-            .on_disabled_hover_text(LATER);
+            ui.add_enabled(false, crate::ui::Button::new(*label).text_size(12.0))
+                .on_disabled_hover_text(LATER);
         }
     });
 }
@@ -2728,18 +2724,12 @@ fn check_box(ui: &mut Ui, on: bool) -> egui::Response {
 }
 
 fn icon_toggle(ui: &mut Ui, name: &str, tip: &str, on: bool) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(Vec2::splat(24.0), Sense::click());
-    if on {
-        ui.painter()
-            .rect_filled(rect, CornerRadius::same(6), PAGE_ON);
-    }
-    let color = if ui.is_enabled() {
-        tokens::TEXT
-    } else {
-        tokens::FAINT
-    };
-    paint_icon(ui, rect, name, color);
-    response.on_hover_text(tip)
+    ui.add(
+        crate::ui::Button::icon(name)
+            .on(on)
+            .min_size(Vec2::splat(24.0))
+            .tip(tip),
+    )
 }
 
 /// A row of icon buttons on a dark bar. Returns the value of the one clicked.

@@ -2,15 +2,13 @@
 //! command box, and Stop. It takes the inspector's place while open.
 
 use egui::{
-    Align, Color32, CornerRadius, FontId, Frame, Key, Layout, Margin, Rect, RichText, Stroke,
-    TextEdit, Ui, Vec2,
+    Align, Color32, FontId, Frame, Key, Layout, Margin, Rect, RichText, TextEdit, Ui, Vec2,
 };
 
 use crate::assistant::{Assistant, Entry};
 use crate::shell::Shell;
 use crate::tokens;
 
-const BUBBLE: Color32 = Color32::from_rgb(0x2a, 0x2a, 0x2a);
 const FAILED: Color32 = Color32::from_rgb(0xff, 0x7a, 0x70);
 const DONE: Color32 = Color32::from_rgb(0x2a, 0xd4, 0xe0);
 
@@ -100,40 +98,34 @@ fn entry_row(ui: &mut Ui, index: usize, entry: &Entry) -> Option<bool> {
     let mut decided = None;
     match entry {
         Entry::Ask { question, allowed } => {
-            Frame::new()
-                .stroke(Stroke::new(1.0, DONE))
-                .corner_radius(CornerRadius::same(10))
-                .inner_margin(Margin::same(10))
-                .show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    ui.label(RichText::new(question).size(13.0).color(tokens::TEXT));
-                    ui.add_space(4.0);
-                    match allowed {
-                        None => {
-                            ui.horizontal(|ui| {
-                                if ui.button(RichText::new("Allow").size(12.0)).clicked() {
-                                    decided = Some(true);
-                                }
-                                if ui.button(RichText::new("Don't allow").size(12.0)).clicked() {
-                                    decided = Some(false);
-                                }
-                            });
-                        }
-                        Some(true) => {
-                            ui.label(RichText::new("Allowed").size(11.0).color(DONE));
-                        }
-                        Some(false) => {
-                            ui.label(RichText::new("Not allowed").size(11.0).color(FAILED));
-                        }
+            crate::ui::Surface::outline(DONE).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.label(RichText::new(question).size(13.0).color(tokens::TEXT));
+                ui.add_space(4.0);
+                match allowed {
+                    None => {
+                        ui.horizontal(|ui| {
+                            if ui.button(RichText::new("Allow").size(12.0)).clicked() {
+                                decided = Some(true);
+                            }
+                            if ui.button(RichText::new("Don't allow").size(12.0)).clicked() {
+                                decided = Some(false);
+                            }
+                        });
                     }
-                });
+                    Some(true) => {
+                        ui.label(RichText::new("Allowed").size(11.0).color(DONE));
+                    }
+                    Some(false) => {
+                        ui.label(RichText::new("Not allowed").size(11.0).color(FAILED));
+                    }
+                }
+            });
         }
         Entry::Asked(text) => {
             ui.with_layout(Layout::top_down(Align::Max), |ui| {
-                Frame::new()
-                    .fill(BUBBLE)
-                    .corner_radius(CornerRadius::same(10))
-                    .inner_margin(Margin::symmetric(10, 6))
+                crate::ui::Surface::raised()
+                    .padding(Margin::symmetric(10, 6))
                     .show(ui, |ui| {
                         ui.set_max_width(ui.available_width() * 0.85);
                         ui.label(RichText::new(text).size(13.0).color(tokens::TEXT));
@@ -188,11 +180,9 @@ fn entry_row(ui: &mut Ui, index: usize, entry: &Entry) -> Option<bool> {
 }
 
 fn command_box(shell: &Shell, ui: &mut Ui, assistant: &mut Assistant) {
-    Frame::new()
-        .fill(BUBBLE)
-        .stroke(Stroke::new(1.0, tokens::LANE_LINE))
-        .corner_radius(CornerRadius::same(10))
-        .inner_margin(Margin::same(8))
+    crate::ui::Surface::raised()
+        .stroke(tokens::LANE_LINE)
+        .padding(8)
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             let response = ui.add(

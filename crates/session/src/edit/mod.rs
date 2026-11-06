@@ -50,7 +50,7 @@ pub use move_segment::move_segment;
 pub use place::place;
 pub use text::{MAX_CAPTION_STAGGER_MS, NEW_TEXT_SIZE};
 pub use trim::trim;
-pub use words::set_words;
+pub use words::{CAPTION_KIND, set_words};
 
 /// Why one request did not change the draft.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

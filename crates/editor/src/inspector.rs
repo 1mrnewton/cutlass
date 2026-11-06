@@ -338,6 +338,25 @@ mod tests {
     }
 
     #[test]
+    fn a_caption_without_words_still_opens_the_caption_panel() {
+        let mut draft = Draft::empty("D");
+        let mut line = MaterialText::new("line");
+        line.kind = "subtitle".to_owned();
+        draft.materials.texts.push(line);
+        let mut title = MaterialText::new("title");
+        title.kind = "text".to_owned();
+        draft.materials.texts.push(title);
+        let mut row = Track::main("captions");
+        row.kind = TrackType::Text;
+        let caption = Segment::new("a", "line", cutlass_model::TimeRange::new(0, 1));
+        let plain = Segment::new("b", "title", cutlass_model::TimeRange::new(0, 1));
+        assert_eq!(panel_of(&draft, &row, &caption), Panel::Caption);
+        assert_eq!(panel_of(&draft, &row, &plain), Panel::Text);
+        row.flag = TrackFlag::TextSubtitle;
+        assert_eq!(panel_of(&draft, &row, &plain), Panel::Caption);
+    }
+
+    #[test]
     fn a_starting_value_fills_in_only_when_turning_on() {
         assert_eq!(starting("#fff", 0.0, 0.3), 0.3);
         assert_eq!(starting("", 0.0, 0.3), 0.0);

@@ -10604,6 +10604,51 @@ mod tests {
     }
 
     #[test]
+    fn the_only_main_clip_dragged_up_becomes_an_overlay() {
+        let temp =
+            std::env::temp_dir().join(format!("cutlass-main-to-overlay-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let mut draft = cutlass_model::Draft::empty("draft");
+        draft.config.maintrack_adsorb = true;
+        draft.canvas_config.width = 2;
+        draft.canvas_config.height = 1;
+        draft.tracks[0].segments.push(cutlass_model::Segment::new(
+            "only",
+            "color",
+            cutlass_model::TimeRange::new(0, 2_000_000),
+        ));
+        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: screen,
+                ..Default::default()
+            },
+            |ui| show(&mut shell, ui, &mut view, None),
+        );
+        let only = text_pos(&output, "only").expect("the main clip");
+        output.textures_delta.clear();
+        drag(
+            &ctx,
+            only,
+            only - Vec2::new(0.0, 60.0),
+            &mut shell,
+            &mut view,
+        );
+        let tracks = &shell.draft().unwrap().tracks;
+        assert_eq!(tracks.len(), 2, "no overlay lane opened");
+        assert!(tracks[0].is_sub_video());
+        assert_eq!(tracks[0].segments[0].id.as_str(), "only");
+        assert!(tracks[1].is_main() && tracks[1].segments.is_empty());
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
     fn dragging_a_clip_above_the_top_lane_opens_a_lane_there() {
         let temp = std::env::temp_dir().join(format!("cutlass-new-lane-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&temp);

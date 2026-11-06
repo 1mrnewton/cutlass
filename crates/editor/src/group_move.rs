@@ -166,7 +166,7 @@ pub fn plan_move(
 /// the row count is under the bottom one. When the dragged clip's kind may
 /// sit there, it opens a lane at that spot and lands at the pointer time,
 /// pulled to a snap. A selected group keeps its rows. A clip alone on a lane
-/// next to the spot stays on its lane, and a spot outside its kind's block
+/// other than main next to the spot stays on its lane, and a spot outside its kind's block
 /// falls back to the nearest row; both plan as `plan_move` would there.
 pub fn plan_move_between(
     draft: &Draft,
@@ -195,8 +195,10 @@ pub fn plan_move_between(
         .find(|track| track.id == track_id)
         .map(|track| track.kind.clone())
         .ok_or(GestureError::UnknownSegment)?;
+    // Main stays when empty, so a clip leaving it for a new lane is a real move.
     let alone_beside = draft.tracks.iter().enumerate().any(|(at, track)| {
         track.id == track_id
+            && !track.is_main()
             && track.segments.len() == 1
             && (at == index || at.saturating_add(1) == index)
     });
@@ -562,6 +564,26 @@ mod tests {
                 snapped: false,
                 new_lane: None,
             }]
+        );
+    }
+
+    #[test]
+    fn the_only_main_clip_dropped_above_main_opens_an_overlay() {
+        let session = session(&[("a", 0, 1_000_000)]);
+        let mut draft = session.draft().clone();
+        draft.config.maintrack_adsorb = true;
+        let plan = plan_move_between(&draft, &gesture("a", 0.0, 0), 0, &[]).unwrap();
+        assert_eq!(
+            plan,
+            MovePlan::NewLane {
+                lane: NewLane {
+                    kind: TrackType::Video,
+                    index: 0,
+                },
+                start: Micros(0),
+                duration: Micros(1_000_000),
+                snapped: false,
+            }
         );
     }
 

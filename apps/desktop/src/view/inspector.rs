@@ -486,7 +486,10 @@ fn blend(
                     .show_ui(ui, |ui| {
                         for choice in cutlass_effects::BlendMode::ALL {
                             if ui
-                                .selectable_label(inspection.blend == choice, choice.label())
+                                .add(
+                                    ui::Choice::new(inspection.blend == choice, choice.label())
+                                        .wide(),
+                                )
                                 .clicked()
                             {
                                 picked = Some(choice);
@@ -961,7 +964,7 @@ fn adjust_tab(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState, inspec
                     .selected_text(RichText::new("Match to…").size(12.0))
                     .show_ui(ui, |ui| {
                         for (id, name) in &choices {
-                            if ui.selectable_label(false, name).clicked() {
+                            if ui.add(ui::Choice::new(false, name).wide()).clicked() {
                                 matched = Some(id.clone());
                             }
                         }
@@ -1119,19 +1122,19 @@ fn tracking(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState) {
         let fixing = tracking.fixing.is_some();
         ui.horizontal(|ui| {
             row_label(ui, "Follow");
-            for (name, mode) in [
-                ("Object", cutlass_model::TrackMode::Object),
-                ("Plane", cutlass_model::TrackMode::Plane),
-            ] {
-                let on = tracking.mode == mode;
-                let text =
-                    RichText::new(name)
-                        .size(12.0)
-                        .color(if on { ACCENT } else { tokens::TEXT });
-                if ui.selectable_label(on, text).clicked() {
-                    shell.set_track_mode(mode);
+            ui::Segmented::show(ui, |ui| {
+                for (name, mode) in [
+                    ("Object", cutlass_model::TrackMode::Object),
+                    ("Plane", cutlass_model::TrackMode::Plane),
+                ] {
+                    if ui
+                        .add(ui::Choice::new(tracking.mode == mode, name))
+                        .clicked()
+                    {
+                        shell.set_track_mode(mode);
+                    }
                 }
-            }
+            });
         });
         note(
             ui,
@@ -1282,7 +1285,10 @@ fn mask_page(
         let mut picked: Option<Option<MaskShape>> = None;
         ui.horizontal_wrapped(|ui| {
             if ui
-                .selectable_label(mask.is_none(), RichText::new("None").size(12.0))
+                .add(ui::Choice::new(
+                    mask.is_none(),
+                    RichText::new("None").size(12.0),
+                ))
                 .clicked()
             {
                 picked = Some(None);
@@ -1290,7 +1296,7 @@ fn mask_page(
             for shape in MaskShape::ALL {
                 let on = mask.is_some_and(|mask| mask.shape == shape);
                 if ui
-                    .selectable_label(on, RichText::new(shape.label()).size(12.0))
+                    .add(ui::Choice::new(on, RichText::new(shape.label()).size(12.0)))
                     .clicked()
                 {
                     picked = Some(Some(shape));
@@ -1763,7 +1769,7 @@ fn font_row(shell: &mut Shell, ui: &mut Ui, inspection: &Inspection) {
             .show_ui(ui, |ui| {
                 for face in &faces {
                     if ui
-                        .selectable_label(*face == inspection.font, face_label(face))
+                        .add(ui::Choice::new(*face == inspection.font, face_label(face)).wide())
                         .clicked()
                     {
                         picked = Some(face.clone());

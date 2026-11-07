@@ -10,7 +10,7 @@ use egui::{Color32, CornerRadius, Pos2, Rect, RichText, Sense, Shape, Stroke, Ui
 use cutlass_model::{SpeedPoint, SpeedPreset, curve_speed_at};
 
 use crate::shell::{Inspection, Shell};
-use crate::tokens;
+use crate::{tokens, ui};
 
 use super::inspector::{InspectorState, body, note, pages, send, slider, switch_row};
 
@@ -98,7 +98,10 @@ fn curve_page(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState, inspec
                     Pick::Custom => "Custom",
                 };
                 if ui
-                    .selectable_label(now == pick, RichText::new(label).size(12.0))
+                    .add(ui::Choice::new(
+                        now == pick,
+                        RichText::new(label).size(12.0),
+                    ))
                     .clicked()
                 {
                     chosen = Some(pick);

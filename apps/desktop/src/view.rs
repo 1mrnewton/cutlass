@@ -1213,14 +1213,14 @@ fn settings_window(
             ui.add_space(16.0);
             ui.vertical(|ui| {
                 ui.set_max_width(372.0);
-                ui.horizontal(|ui| {
+                ui::Segmented::show(ui, |ui| {
                     for (tab, name) in [
                         (SettingsTab::General, "General"),
                         (SettingsTab::Assistant, "Assistant"),
                         (SettingsTab::Shortcuts, "Shortcuts"),
                     ] {
                         if ui
-                            .selectable_label(view.settings_tab == tab, name)
+                            .add(ui::Choice::new(view.settings_tab == tab, name))
                             .clicked()
                         {
                             view.settings_tab = tab;
@@ -1239,7 +1239,7 @@ fn settings_window(
                             &mut settings.playback.proxies,
                             "Play proxies of 4K and long clips in the viewer",
                         );
-                        choice_row(ui, "A seek", |ui| {
+                        choices_row(ui, "A seek", |ui| {
                             let seek = &mut settings.playback.seek_during_playback;
                             for (value, name) in [
                                 (
@@ -1248,7 +1248,7 @@ fn settings_window(
                                 ),
                                 (cutlass_settings::SeekDuringPlayback::Pause, "pauses"),
                             ] {
-                                if ui.selectable_label(*seek == value, name).clicked() {
+                                if ui.add(ui::Choice::new(*seek == value, name)).clicked() {
                                     *seek = value;
                                 }
                             }
@@ -1568,11 +1568,14 @@ fn assistant_settings(
                     .hint("Name")
                     .width(120.0)
                     .show(ui);
-                for (kind, name) in [(McpServer::STDIO, "Program"), (McpServer::REMOTE, "URL")] {
-                    if ui.selectable_label(server.kind == kind, name).clicked() {
-                        kind.clone_into(&mut server.kind);
+                ui::Segmented::show(ui, |ui| {
+                    for (kind, name) in [(McpServer::STDIO, "Program"), (McpServer::REMOTE, "URL")]
+                    {
+                        if ui.add(ui::Choice::new(server.kind == kind, name)).clicked() {
+                            kind.clone_into(&mut server.kind);
+                        }
                     }
-                }
+                });
                 if ui.small_button("Remove").clicked() {
                     remove = Some(index);
                 }
@@ -6274,7 +6277,7 @@ fn export_choices(shell: &Shell, ui: &mut Ui, view: &mut ViewState) {
     use cutlass_decode::CodecId;
     use cutlass_export::{GIF_SHORT_SIDES, ProresProfile, SidecarKind};
     let export = &mut view.export;
-    choice_row(ui, "Range", |ui| {
+    choices_row(ui, "Range", |ui| {
         let picked = !shell.selection().is_empty();
         let marked = shell.marked_span().is_some();
         let offered = |span| match span {
@@ -6290,7 +6293,7 @@ fn export_choices(shell: &Shell, ui: &mut Ui, view: &mut ViewState) {
             (ExportSpan::Marked, "In to out"),
             (ExportSpan::Selected, "Selected clips"),
         ] {
-            let label = egui::Button::selectable(export.span == span, name);
+            let label = ui::Choice::new(export.span == span, name);
             if ui.add_enabled(offered(span), label).clicked() {
                 export.span = span;
             }
@@ -6298,11 +6301,11 @@ fn export_choices(shell: &Shell, ui: &mut Ui, view: &mut ViewState) {
     });
     ui.checkbox(&mut export.picture, "Video");
     if export.picture {
-        choice_row(ui, "Format", |ui| {
-            if ui.selectable_label(!view.export_mov, "MP4").clicked() {
+        choices_row(ui, "Format", |ui| {
+            if ui.add(ui::Choice::new(!view.export_mov, "MP4")).clicked() {
                 view.export_mov = false;
             }
-            if ui.selectable_label(view.export_mov, "MOV").clicked() {
+            if ui.add(ui::Choice::new(view.export_mov, "MOV")).clicked() {
                 view.export_mov = true;
             }
         });
@@ -6315,7 +6318,7 @@ fn export_choices(shell: &Shell, ui: &mut Ui, view: &mut ViewState) {
         if !fits(export.codec) {
             export.codec = CodecId::H264;
         }
-        choice_row(ui, "Codec", |ui| {
+        choices_row(ui, "Codec", |ui| {
             for (codec, name) in [
                 (CodecId::H264, "H.264"),
                 (CodecId::Hevc, "HEVC"),
@@ -6325,17 +6328,17 @@ fn export_choices(shell: &Shell, ui: &mut Ui, view: &mut ViewState) {
                 if !fits(codec) {
                     continue;
                 }
-                let label = egui::Button::selectable(export.codec == codec, name);
+                let label = ui::Choice::new(export.codec == codec, name);
                 if ui.add_enabled(shell.encodes(codec), label).clicked() {
                     export.codec = codec;
                 }
             }
         });
         if export.codec == CodecId::Prores {
-            choice_row(ui, "Profile", |ui| {
+            choices_row(ui, "Profile", |ui| {
                 for profile in ProresProfile::ALL {
                     if ui
-                        .selectable_label(export.prores == profile, profile.label())
+                        .add(ui::Choice::new(export.prores == profile, profile.label()))
                         .clicked()
                     {
                         export.prores = profile;
@@ -6344,41 +6347,49 @@ fn export_choices(shell: &Shell, ui: &mut Ui, view: &mut ViewState) {
             });
         } else {
             choice_row(ui, "Quality", |ui| {
-                for (quality, name) in [
-                    (ExportQuality::Lower, "Lower"),
-                    (ExportQuality::Recommended, "Recommended"),
-                    (ExportQuality::Higher, "Higher"),
-                ] {
-                    let on = view.export_mbps.is_none() && export.quality == quality;
-                    if ui.selectable_label(on, name).clicked() {
-                        export.quality = quality;
-                        view.export_mbps = None;
+                ui::Segmented::show(ui, |ui| {
+                    for (quality, name) in [
+                        (ExportQuality::Lower, "Lower"),
+                        (ExportQuality::Recommended, "Recommended"),
+                        (ExportQuality::Higher, "Higher"),
+                    ] {
+                        let on = view.export_mbps.is_none() && export.quality == quality;
+                        if ui.add(ui::Choice::new(on, name)).clicked() {
+                            export.quality = quality;
+                            view.export_mbps = None;
+                        }
                     }
-                }
-                if ui
-                    .selectable_label(view.export_mbps.is_some(), "Custom")
-                    .clicked()
-                    && view.export_mbps.is_none()
-                {
-                    let side = u32::try_from(export.short_side).unwrap_or(1080);
-                    let rate = export.quality.bitrate(side, export.codec);
-                    view.export_mbps = Some(format!("{}", rate / 1_000_000));
-                }
+                    if ui
+                        .add(ui::Choice::new(view.export_mbps.is_some(), "Custom"))
+                        .clicked()
+                        && view.export_mbps.is_none()
+                    {
+                        let side = u32::try_from(export.short_side).unwrap_or(1080);
+                        let rate = export.quality.bitrate(side, export.codec);
+                        view.export_mbps = Some(format!("{}", rate / 1_000_000));
+                    }
+                });
                 if let Some(text) = &mut view.export_mbps {
                     ui::Field::new(text).width(48.0).show(ui);
                     ui.label("Mbps");
                 }
             });
-            choice_row(ui, "Rate", |ui| {
-                if ui.selectable_label(!export.constant_rate, "VBR").clicked() {
+            choices_row(ui, "Rate", |ui| {
+                if ui
+                    .add(ui::Choice::new(!export.constant_rate, "VBR"))
+                    .clicked()
+                {
                     export.constant_rate = false;
                 }
-                if ui.selectable_label(export.constant_rate, "CBR").clicked() {
+                if ui
+                    .add(ui::Choice::new(export.constant_rate, "CBR"))
+                    .clicked()
+                {
                     export.constant_rate = true;
                 }
             });
         }
-        choice_row(ui, "Frame rate", |ui| {
+        choices_row(ui, "Frame rate", |ui| {
             for (rate, name) in [
                 (None, "Project"),
                 (Some(FrameRate::FPS_24), "24"),
@@ -6388,17 +6399,17 @@ fn export_choices(shell: &Shell, ui: &mut Ui, view: &mut ViewState) {
                 (Some(FrameRate::FPS_60), "60"),
             ] {
                 if ui
-                    .selectable_label(export.frame_rate == rate, name)
+                    .add(ui::Choice::new(export.frame_rate == rate, name))
                     .clicked()
                 {
                     export.frame_rate = rate;
                 }
             }
         });
-        choice_row(ui, "Short side", |ui| {
+        choices_row(ui, "Short side", |ui| {
             for side in crate::shell::SHORT_SIDES {
                 if ui
-                    .selectable_label(export.short_side == side, side.to_string())
+                    .add(ui::Choice::new(export.short_side == side, side.to_string()))
                     .clicked()
                 {
                     export.short_side = side;
@@ -6420,52 +6431,52 @@ fn export_choices(shell: &Shell, ui: &mut Ui, view: &mut ViewState) {
     }
     if export.sound {
         let audio = &mut export.audio;
-        choice_row(ui, "Codec", |ui| {
+        choices_row(ui, "Codec", |ui| {
             if ui
-                .selectable_label(audio.codec == CodecId::Aac, "AAC")
+                .add(ui::Choice::new(audio.codec == CodecId::Aac, "AAC"))
                 .clicked()
             {
                 audio.codec = CodecId::Aac;
             }
-            let mp3 = egui::Button::selectable(audio.codec == CodecId::Mp3, "MP3");
+            let mp3 = ui::Choice::new(audio.codec == CodecId::Mp3, "MP3");
             if ui.add_enabled(alone_fits, mp3).clicked() {
                 audio.codec = CodecId::Mp3;
             }
             if ui
-                .selectable_label(audio.codec == CodecId::Alac, "ALAC")
+                .add(ui::Choice::new(audio.codec == CodecId::Alac, "ALAC"))
                 .clicked()
             {
                 audio.codec = CodecId::Alac;
             }
-            let pcm = egui::Button::selectable(audio.codec == CodecId::Pcm, "PCM");
+            let pcm = ui::Choice::new(audio.codec == CodecId::Pcm, "PCM");
             if ui.add_enabled(pcm_fits, pcm).clicked() {
                 audio.codec = CodecId::Pcm;
             }
-            let flac = egui::Button::selectable(audio.codec == CodecId::Flac, "FLAC");
+            let flac = ui::Choice::new(audio.codec == CodecId::Flac, "FLAC");
             if ui.add_enabled(alone_fits, flac).clicked() {
                 audio.codec = CodecId::Flac;
             }
-            let opus = egui::Button::selectable(audio.codec == CodecId::Opus, "Opus");
+            let opus = ui::Choice::new(audio.codec == CodecId::Opus, "Opus");
             if ui.add_enabled(alone_fits, opus).clicked() {
                 audio.codec = CodecId::Opus;
                 audio.sample_rate = 48_000;
             }
         });
-        choice_row(ui, "Sample rate", |ui| {
+        choices_row(ui, "Sample rate", |ui| {
             for rate in SoundFormat::SAMPLE_RATES {
                 let name = if rate == 44_100 { "44.1 kHz" } else { "48 kHz" };
                 // Opus is coded at 48 kHz only.
                 let fits = rate == 48_000 || audio.codec != CodecId::Opus;
-                let button = egui::Button::selectable(audio.sample_rate == rate, name);
+                let button = ui::Choice::new(audio.sample_rate == rate, name);
                 if ui.add_enabled(fits, button).clicked() {
                     audio.sample_rate = rate;
                 }
             }
         });
-        choice_row(ui, "Channels", |ui| {
+        choices_row(ui, "Channels", |ui| {
             for (channels, name) in [(2, "Stereo"), (1, "Mono")] {
                 if ui
-                    .selectable_label(audio.channels == channels, name)
+                    .add(ui::Choice::new(audio.channels == channels, name))
                     .clicked()
                 {
                     audio.channels = channels;
@@ -6474,10 +6485,13 @@ fn export_choices(shell: &Shell, ui: &mut Ui, view: &mut ViewState) {
         });
         // Lossless sound has no bitrate to choose.
         if !audio.lossless() {
-            choice_row(ui, "Bitrate", |ui| {
+            choices_row(ui, "Bitrate", |ui| {
                 for rate in SoundFormat::BITRATES {
                     if ui
-                        .selectable_label(audio.bitrate == rate, format!("{} kbps", rate / 1000))
+                        .add(ui::Choice::new(
+                            audio.bitrate == rate,
+                            format!("{} kbps", rate / 1000),
+                        ))
                         .clicked()
                     {
                         audio.bitrate = rate;
@@ -6491,28 +6505,31 @@ fn export_choices(shell: &Shell, ui: &mut Ui, view: &mut ViewState) {
         export.gif = gif_on.then(GifExport::default);
     }
     if let Some(gif) = &mut export.gif {
-        choice_row(ui, "Format", |ui| {
-            if ui.selectable_label(!gif.webp, "GIF").clicked() {
+        choices_row(ui, "Format", |ui| {
+            if ui.add(ui::Choice::new(!gif.webp, "GIF")).clicked() {
                 gif.webp = false;
             }
-            if ui.selectable_label(gif.webp, "WebP").clicked() {
+            if ui.add(ui::Choice::new(gif.webp, "WebP")).clicked() {
                 gif.webp = true;
             }
         });
-        choice_row(ui, "Size", |ui| {
+        choices_row(ui, "Size", |ui| {
             for side in GIF_SHORT_SIDES {
                 if ui
-                    .selectable_label(gif.short_side == side, side.to_string())
+                    .add(ui::Choice::new(gif.short_side == side, side.to_string()))
                     .clicked()
                 {
                     gif.short_side = side;
                 }
             }
         });
-        choice_row(ui, "Frame rate", |ui| {
+        choices_row(ui, "Frame rate", |ui| {
             for rate in GIF_RATES {
                 if ui
-                    .selectable_label(gif.frame_rate.numerator == rate, rate.to_string())
+                    .add(ui::Choice::new(
+                        gif.frame_rate.numerator == rate,
+                        rate.to_string(),
+                    ))
                     .clicked()
                 {
                     gif.frame_rate = FrameRate {
@@ -6522,11 +6539,11 @@ fn export_choices(shell: &Shell, ui: &mut Ui, view: &mut ViewState) {
                 }
             }
         });
-        choice_row(ui, "Loop", |ui| {
-            if ui.selectable_label(!gif.looped, "Once").clicked() {
+        choices_row(ui, "Loop", |ui| {
+            if ui.add(ui::Choice::new(!gif.looped, "Once")).clicked() {
                 gif.looped = false;
             }
-            if ui.selectable_label(gif.looped, "Loop").clicked() {
+            if ui.add(ui::Choice::new(gif.looped, "Loop")).clicked() {
                 gif.looped = true;
             }
         });
@@ -6536,9 +6553,9 @@ fn export_choices(shell: &Shell, ui: &mut Ui, view: &mut ViewState) {
         export.captions = captions_on.then_some(SidecarKind::Srt);
     }
     if let Some(kind) = &mut export.captions {
-        choice_row(ui, "File", |ui| {
+        choices_row(ui, "File", |ui| {
             for (choice, name) in [(SidecarKind::Srt, "SRT"), (SidecarKind::Plain, "TXT")] {
-                if ui.selectable_label(*kind == choice, name).clicked() {
+                if ui.add(ui::Choice::new(*kind == choice, name)).clicked() {
                     *kind = choice;
                 }
             }
@@ -6570,29 +6587,35 @@ fn project_dialog(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
                 choice_row(ui, "Name", |ui| {
                     ui::Field::new(&mut settings.name).width(220.0).show(ui);
                 });
-                choice_row(ui, "Ratio", |ui| {
+                choices_row(ui, "Ratio", |ui| {
                     for (ratio, name) in cutlass_editor::PROJECT_RATIOS {
-                        if ui.selectable_label(settings.ratio == ratio, name).clicked() {
+                        if ui
+                            .add(ui::Choice::new(settings.ratio == ratio, name))
+                            .clicked()
+                        {
                             settings.ratio = ratio.to_owned();
                         }
                     }
                 });
-                choice_row(ui, "Resolution", |ui| {
+                choices_row(ui, "Resolution", |ui| {
                     for (side, name) in cutlass_editor::PROJECT_RESOLUTIONS {
                         if ui
-                            .selectable_label(settings.short_side == side, name)
+                            .add(ui::Choice::new(settings.short_side == side, name))
                             .clicked()
                         {
                             settings.short_side = side;
                         }
                     }
                 });
-                choice_row(ui, "Frame rate", |ui| {
+                choices_row(ui, "Frame rate", |ui| {
                     ui.horizontal_wrapped(|ui| {
                         for rate in cutlass_editor::PROJECT_RATES {
                             let label = cutlass_editor::rate_label(rate);
                             let name = label.trim_end_matches(" fps");
-                            if ui.selectable_label(settings.rate == rate, name).clicked() {
+                            if ui
+                                .add(ui::Choice::new(settings.rate == rate, name))
+                                .clicked()
+                            {
                                 settings.rate = rate;
                             }
                         }
@@ -6608,13 +6631,13 @@ fn project_dialog(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
                         settings.drop_frame = on;
                     }
                 });
-                choice_row(ui, "Color space", |ui| {
+                choices_row(ui, "Color space", |ui| {
                     for (space, name) in cutlass_editor::COLOR_SPACES {
                         if space < 0 {
                             continue;
                         }
                         if ui
-                            .selectable_label(settings.color_space == space, name)
+                            .add(ui::Choice::new(settings.color_space == space, name))
                             .clicked()
                         {
                             settings.color_space = space;
@@ -6643,6 +6666,13 @@ fn project_dialog(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
 }
 
 /// A dim label and its choices on one line.
+/// A choice row whose options sit in one well.
+fn choices_row(ui: &mut Ui, label: &str, add: impl FnOnce(&mut Ui)) {
+    choice_row(ui, label, |ui| {
+        ui::Segmented::show(ui, add);
+    });
+}
+
 fn choice_row(ui: &mut Ui, label: &str, add: impl FnOnce(&mut Ui)) {
     ui.horizontal(|ui| {
         let (rect, _) = ui.allocate_exact_size(Vec2::new(84.0, 20.0), Sense::hover());

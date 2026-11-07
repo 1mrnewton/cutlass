@@ -33,8 +33,8 @@ pub const BEHIND_BYTES: usize = 384 << 20;
 const TOUCHING: i64 = 1_000;
 /// How often a waiting caller checks that the worker is still running.
 const CHECK: Duration = Duration::from_millis(100);
-/// How often a long decode stores a picture on its way, so a caller that
-/// does not wait sees it move.
+/// How often a decode that follows a drag stores a picture on its way, so a
+/// caller that does not wait sees it move.
 const PUBLISH: Duration = Duration::from_millis(50);
 
 /// One clip's decode thread and the pictures it has ready.
@@ -66,6 +66,11 @@ struct State {
     /// A fill behind this picture start found nothing earlier: the start of
     /// the stream, or a run that would not decode.
     floor: Option<Micros>,
+    /// The picture last handed to a caller, shown while a jump decodes.
+    shown: Option<HeldFrame>,
+    /// The decode under way follows an asked time that moved, as under a
+    /// drag, so pictures on its way may be shown.
+    following: bool,
     stop: bool,
 }
 
@@ -81,6 +86,8 @@ impl ReadAhead {
                 ended: false,
                 backward: false,
                 floor: None,
+                shown: None,
+                following: false,
                 stop: false,
             }),
             wake: Condvar::new(),
@@ -108,6 +115,7 @@ impl ReadAhead {
                 aim(&mut state, source);
                 self.shared.wake.notify_all();
             }
+            state.shown = Some(held.clone());
             return Ok(Some(held));
         }
         if let Some((at, error)) = &state.failed
@@ -124,10 +132,18 @@ impl ReadAhead {
         Ok(None)
     }
 
-    /// The stored picture nearest `source`, covering it or not, for a caller
-    /// that shows something while the asked picture decodes.
+    /// A picture for a caller that shows something while the asked one
+    /// decodes. A jump keeps the picture last handed out, so the pictures
+    /// the decode passes on its way are not shown. A decode following a drag
+    /// shows the stored picture nearest `source`, so the drag sees it move.
     pub(crate) fn nearest(&self, source: Micros) -> Option<HeldFrame> {
-        lock(&self.shared.state)
+        let state = lock(&self.shared.state);
+        if !state.following
+            && let Some(shown) = &state.shown
+        {
+            return Some(shown.clone());
+        }
+        state
             .frames
             .iter()
             .min_by_key(|held| held.start.0.abs_diff(source.0))
@@ -159,6 +175,7 @@ impl ReadAhead {
                 aim(&mut state, source);
                 self.shared.wake.notify_all();
             }
+            state.shown = Some(held.clone());
             return Ok(held);
         }
         aim(&mut state, source);
@@ -175,7 +192,9 @@ impl ReadAhead {
                 })
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some(held) = find(&state, source) {
-                return Ok(held.clone());
+                let held = held.clone();
+                state.shown = Some(held.clone());
+                return Ok(held);
             }
             if state.failed.as_ref().is_some_and(|(at, _)| *at == source) {
                 break;
@@ -361,9 +380,12 @@ fn run(shared: &Shared, mut media: Media, cover: &TimeRange, ahead: usize) {
 /// Decode toward `target`, following the newest asked time while it is still
 /// ahead, so dragging the playhead never waits on a time it has left.
 ///
-/// A time behind the decode stops it; the next job seeks for it. On a long
-/// decode a picture is stored every [`PUBLISH`], so the caller can show
-/// progress toward the asked time instead of holding one picture.
+/// A time behind the decode stops it; the next job seeks for it. Once the
+/// asked time has moved during the decode, as it does under a drag, a
+/// picture is stored every [`PUBLISH`], so the caller can show progress
+/// toward the asked time instead of holding one picture. A single jump
+/// stores nothing on the way: the caller keeps the picture it had until the
+/// asked one is ready, instead of showing every picture between them.
 fn answer(
     shared: &Shared,
     media: &mut Media,
@@ -372,6 +394,8 @@ fn answer(
     target: &mut Micros,
 ) -> Result<HeldFrame, EngineError> {
     let mut published = Instant::now();
+    let mut followed = false;
+    lock(&shared.state).following = false;
     let start = *target;
     media.decode_steered(start, cover, &mut |held| {
         let mut state = lock(&shared.state);
@@ -379,7 +403,7 @@ fn answer(
             return Steer::Stop;
         }
         // Moving back, every picture on the way is one a later step wants.
-        if state.backward || published.elapsed() >= PUBLISH {
+        if state.backward || (followed && published.elapsed() >= PUBLISH) {
             published = Instant::now();
             store(&mut state, held.clone(), ahead);
             shared.wake.notify_all();
@@ -388,6 +412,8 @@ fn answer(
             Some(want) if want == *target => Steer::Go,
             Some(want) => {
                 *target = want;
+                followed = true;
+                state.following = true;
                 Steer::Retarget(want)
             }
             None => Steer::Go,
@@ -495,6 +521,8 @@ mod tests {
             ended: false,
             backward: false,
             floor: None,
+            shown: None,
+            following: false,
             stop: false,
         }
     }

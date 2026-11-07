@@ -38,6 +38,12 @@ pub const LANE_LINE: Color32 = Color32::from_rgb(0x2e, 0x2e, 0x2e);
 pub const SELECTED: Color32 = Color32::WHITE;
 /// The dialog title row.
 pub const DIALOG_HEAD: Color32 = Color32::from_rgb(0x32, 0x32, 0x32);
+/// A text box, picker or switch track inside a dialog.
+pub const FIELD: Color32 = Color32::from_rgb(0x1e, 0x1e, 0x1e);
+/// A switch track that is off.
+pub const SWITCH_OFF: Color32 = Color32::from_rgb(0x1a, 0x1a, 0x1a);
+/// A section heading in a dialog.
+pub const SECTION: Color32 = Color32::from_rgb(0x80, 0x80, 0x80);
 /// Close, minimize, and zoom, in that order.
 pub const CLOSE: Color32 = Color32::from_rgb(0xff, 0x5f, 0x57);
 pub const MINIMIZE: Color32 = Color32::from_rgb(0xfe, 0xbc, 0x2e);
@@ -58,9 +64,8 @@ pub const SCROLL_THUMB: Color32 = Color32::from_rgba_premultiplied(56, 56, 56, 5
 pub const SCROLL_THUMB_HOVER: Color32 = Color32::from_rgba_premultiplied(96, 96, 96, 96);
 /// A scroll thumb being dragged.
 pub const SCROLL_THUMB_DRAG: Color32 = Color32::from_rgba_premultiplied(136, 136, 136, 136);
-/// The ruler's band between the in and out marks.
 /// A text field's fill, and its edge when hovered and when typing in it.
-pub const FIELD: Color32 = RAISED;
+pub const FIELD_FILL: Color32 = RAISED;
 pub const FIELD_EDGE_HOVER: Color32 = Color32::from_rgb(0x3a, 0x3a, 0x3a);
 pub const FIELD_EDGE_FOCUS: Color32 = Color32::from_rgb(0x6a, 0x6a, 0x6a);
 /// Selected text in a field: the accent, see-through.
@@ -72,10 +77,11 @@ pub const SEGMENT_WELL: Color32 = Color32::from_rgba_premultiplied(0, 0, 0, 72);
 pub const CHOICE_ON: Color32 = Color32::from_rgb(0x3a, 0x3a, 0x3a);
 pub const CHOICE_HOVER: Color32 = Color32::from_rgb(0x30, 0x30, 0x30);
 /// A switch's track when off, and when off and hovered.
-pub const SWITCH_OFF: Color32 = Color32::from_rgb(0x3a, 0x3a, 0x3a);
-pub const SWITCH_OFF_HOVER: Color32 = Color32::from_rgb(0x48, 0x48, 0x48);
+pub const SWITCH_TRACK: Color32 = Color32::from_rgb(0x44, 0x44, 0x44);
+pub const SWITCH_TRACK_HOVER: Color32 = Color32::from_rgb(0x50, 0x50, 0x50);
 /// A slider's rail behind the filled part.
 pub const SLIDER_TRACK: Color32 = Color32::from_rgb(0x3a, 0x3a, 0x3a);
+/// The ruler's band between the in and out marks.
 pub const MARKED: Color32 = Color32::from_rgba_premultiplied(0x00, 0x32, 0x36, 0x40);
 
 pub const TYPE_SIZE: f32 = 13.0;
@@ -131,9 +137,9 @@ pub const CHECK_SIZE: f32 = 16.0;
 pub const CHECK_RADIUS: u8 = 4;
 pub const TOGGLE_GAP: f32 = 8.0;
 pub const TOGGLE_ROW: f32 = 22.0;
-pub const SWITCH_WIDTH: f32 = 32.0;
-pub const SWITCH_HEIGHT: f32 = 18.0;
-pub const SWITCH_KNOB_INSET: f32 = 2.0;
+pub const SWITCH_WIDTH: f32 = 34.0;
+pub const SWITCH_HEIGHT: f32 = 20.0;
+pub const SWITCH_KNOB_INSET: f32 = 2.5;
 /// Seconds for a switch's knob to slide across.
 pub const SWITCH_SLIDE: f32 = 0.12;
 /// A slider's row height, rail thickness, and knob radius.
@@ -144,8 +150,9 @@ pub const HEAD_HEIGHT: f32 = 38.0;
 pub const SPLIT: f32 = 6.0;
 pub const HAIRLINE: f32 = 1.0;
 pub const TOOLBAR_HEIGHT: f32 = 36.0;
-pub const RULER_HEIGHT: f32 = 44.0;
-/// A major ruler tick. A minor tick is half as tall.
+pub const RULER_HEIGHT: f32 = 26.0;
+/// A major ruler tick, hung from the ruler's top. A minor tick is under
+/// half as tall.
 pub const MAJOR_TICK: f32 = 12.0;
 pub const RAIL_WIDTH: f32 = 76.0;
 pub const COVER_WIDTH: f32 = 72.0;
@@ -154,11 +161,13 @@ pub const TRANSPORT_HEIGHT: f32 = 52.0;
 pub const ICON_BUTTON_SIZE: f32 = 28.0;
 pub const WINDOW_BUTTON: f32 = 12.0;
 
-pub const LIBRARY_WIDTH: f32 = 368.0;
-pub const INSPECTOR_WIDTH: f32 = 300.0;
+pub const LIBRARY_WIDTH: f32 = 380.0;
+pub const INSPECTOR_WIDTH: f32 = 380.0;
 pub const TIMELINE_HEIGHT: f32 = 420.0;
-pub const LIBRARY_MIN: f32 = 260.0;
-pub const INSPECTOR_MIN: f32 = 240.0;
+/// The narrowest the side panels go: the library keeps two media cards a
+/// row, and the inspector keeps a label, a slider track and a value box.
+pub const LIBRARY_MIN: f32 = 320.0;
+pub const INSPECTOR_MIN: f32 = 340.0;
 pub const TIMELINE_MIN: f32 = 160.0;
 pub const PREVIEW_MIN_WIDTH: f32 = 320.0;
 pub const PREVIEW_MIN_HEIGHT: f32 = 268.0;
@@ -193,15 +202,20 @@ pub const WAVE_RATIO: f32 = 0.3;
 pub const WAVE_LOUD: Color32 = Color32::from_rgb(226, 143, 72);
 pub const WAVE_CLIPPED: Color32 = Color32::from_rgb(215, 68, 50);
 
-/// A main-track clip, the 76 track height less its border: a header
-/// row, then the filmstrip over the sound band.
-pub const MAIN_CLIP_HEIGHT: f32 = 74.0;
+/// A main-track clip, its 76 row less the inset: a header row, then the
+/// filmstrip over the sound band.
+pub const MAIN_CLIP_HEIGHT: f32 = 56.0;
+/// A clip on an overlay picture lane: the same parts, about half main's
+/// row.
+pub const PICTURE_CLIP_HEIGHT: f32 = 36.0;
 /// An audio clip: a header row over its waveform.
 pub const AUDIO_CLIP_HEIGHT: f32 = 46.0;
 /// Any other clip.
 pub const CLIP_HEIGHT: f32 = 28.0;
 /// The gap above and below a main-track clip inside its lane row.
-pub const MAIN_CLIP_INSET: f32 = 8.0;
+pub const MAIN_CLIP_INSET: f32 = 10.0;
+/// The gap above and below an overlay picture clip.
+pub const PICTURE_CLIP_INSET: f32 = 3.0;
 /// The gap above and below any other clip.
 pub const CLIP_INSET: f32 = 6.0;
 /// The level meter's column at the timeline's right edge.

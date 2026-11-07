@@ -101,6 +101,12 @@ export         Upload04Icon
 close          Cancel01Icon
 saved          CheckmarkCircle02Icon
 share          Share08Icon
+unlock         SquareUnlock01Icon
+view           ViewIcon
+viewOff        ViewOffSlashIcon
+volumeOff      VolumeOffIcon
+more           MoreHorizontalIcon
+solo           HeadphonesIcon
 
 # Custom marks.
 blade          custom

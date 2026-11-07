@@ -2,7 +2,8 @@ use serde::{Deserialize, Serialize};
 
 use cutlass_model::{
     AnimType, CommonKeyframeGroup, Crop, FreezeInfo, MaterialAudio, MaterialId, MaterialTransition,
-    MaterialVideo, Micros, Segment, SegmentId, SpeedPoint, TrackId, TrackType, WordColumns,
+    MaterialVideo, Micros, Segment, SegmentId, SpeedPoint, TimeRange, TrackId, TrackType,
+    WordColumns,
 };
 
 /// A media record stored in the library. A segment places it later.
@@ -13,6 +14,17 @@ pub enum ImportedMedium {
     Video(Box<MaterialVideo>),
     /// A sound. Its track type is supplied by the import, not by lane category.
     Audio(Box<MaterialAudio>),
+}
+
+/// One timed caption a subtitle file brings in.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SubtitleCue {
+    pub segment_id: SegmentId,
+    pub material_id: MaterialId,
+    /// Where the caption sits on the timeline, in microseconds.
+    pub target: TimeRange,
+    /// Word times are milliseconds from the start of `target`.
+    pub words: WordColumns,
 }
 
 /// Which edge of a segment a trim moves.
@@ -73,14 +85,52 @@ pub enum Request {
     },
     /// Place one caption for `source_id` and store its words.
     ///
-    /// The caption uses the source clip's timeline range. `track_id` is created
-    /// when it is missing. Word times are milliseconds on that range.
+    /// The caption uses the source clip's timeline range, or `span` inside
+    /// it, so one transcript can be placed as a caption per line. `track_id`
+    /// is created when it is missing. Word times are milliseconds on the
+    /// caption's own range.
     AddCaption {
         source_id: SegmentId,
         track_id: TrackId,
         segment_id: SegmentId,
         material_id: MaterialId,
         words: WordColumns,
+        /// Boxed, so a request stays small.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        span: Option<Box<TimeRange>>,
+        /// The font file the caption is set in, as `AddText`'s `face`.
+        #[serde(default)]
+        face: String,
+    },
+    /// Place subtitle cues as captions on a new text lane `track_id`.
+    ///
+    /// The lane is flagged as subtitles and each cue becomes a caption clip
+    /// with its own words. An existing `track_id`, no cues, or cues that
+    /// overlap are refused, and the draft stays as it was.
+    AddSubtitles {
+        track_id: TrackId,
+        cues: Vec<SubtitleCue>,
+        /// The font file the captions are set in, as `AddText`'s `face`.
+        #[serde(default)]
+        face: String,
+    },
+    /// Place one caption on the lane of caption `like`, looking like it.
+    ///
+    /// The new caption copies `like`'s text look and its place on the
+    /// canvas, then takes `cue`'s words. `like` must be a caption on an
+    /// unlocked text lane, and the cue must fit beside the lane's clips.
+    InsertCaption { like: SegmentId, cue: SubtitleCue },
+    /// Give the clip `source_id` was heard from new caption lines: every
+    /// caption linked to it on `like`'s lane comes off, and each line is
+    /// placed there looking like `like`, linked to `source_id`. `like` must
+    /// be one of those captions.
+    RecaptionClip {
+        source_id: SegmentId,
+        like: SegmentId,
+        lines: Vec<SubtitleCue>,
+        /// The font file a line takes when `like` has none.
+        #[serde(default)]
+        face: String,
     },
     /// Place the picture's sound on an audio clip linked to `source_id`.
     ///
@@ -264,6 +314,14 @@ pub enum Request {
     SetCaptionStyle {
         segment_id: SegmentId,
         style: String,
+    },
+    /// Record the caption template the caption is styled with, by its id
+    /// and name, or take the record off when `resource_id` is empty. Its
+    /// look is set by the requests that go with it.
+    SetCaptionTemplate {
+        segment_id: SegmentId,
+        resource_id: String,
+        name: String,
     },
     /// Mark word `word` of the caption as a keyword, drawn in the style's
     /// spoken look while it shows, or take the mark off.
@@ -519,6 +577,14 @@ pub enum Request {
     /// Add an empty lane. Video and mixed lanes are overlays above the main track.
     /// Audio is inserted under the main track. This does not place a segment.
     InsertTrack { track_id: TrackId, kind: TrackType },
+    /// Add an empty lane at `index` in the track list, which is the row order.
+    /// Audio goes under the main track and every other kind above it; an
+    /// index outside the kind's block, or past the end, is refused.
+    InsertTrackAt {
+        track_id: TrackId,
+        kind: TrackType,
+        index: usize,
+    },
     /// Take a lane and its clips off the draft. The main track and a locked
     /// track stay. Each clip leaves as a delete would take it.
     RemoveTrack { track_id: TrackId },

@@ -12,10 +12,10 @@ pub struct Commands {
 }
 
 impl Commands {
-    /// `Session::open`, then `set_linkage`. Does not write a folder.
+    /// `Session::open_project`, then `set_linkage`. Does not write a folder.
     #[must_use]
     pub fn open(draft: Draft, linkage: LinkageSettings) -> Self {
-        let mut session = Session::open(draft);
+        let mut session = Session::open_project(draft);
         session.set_linkage(linkage);
         Self { session }
     }

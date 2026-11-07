@@ -8,6 +8,9 @@
 mod act;
 mod animation;
 mod append;
+mod caption_list;
+mod caption_replace;
+mod caption_templates;
 mod caption_words;
 mod catalog;
 mod clip_rules;
@@ -30,6 +33,7 @@ mod ripple;
 mod ruler;
 mod snap;
 mod stage;
+mod subtitles;
 mod template;
 mod text_effect;
 mod title;
@@ -42,6 +46,17 @@ mod zoom;
 pub use act::{can_cut_at, clip_under, delete_side, frame_margin};
 pub use animation::{ClipAnimation, ClipAnimations, clip_animations};
 pub use append::{Append, AppendLane, append_placement, free_row, material_span};
+pub use caption_list::{
+    CaptionListMiss, CaptionRow, NEW_CAPTION_GAP, NEW_CAPTION_LENGTH, NEW_CAPTION_TEXT, Paragraph,
+    add_after_requests, caption_paragraphs, caption_rows, caption_text_request, fill_caption_faces,
+    for_every_caption, main_caption_lane, paragraph_request, paragraphs, rematched,
+    remove_caption_request, row_at, rows_matching, words_over,
+};
+pub use caption_replace::{Replaced, replace_ignoring_case, replace_in_captions};
+pub use caption_templates::{
+    CAPTION_TEMPLATES, CaptionTemplate, caption_template, caption_template_of,
+    caption_template_requests,
+};
 pub use caption_words::{LINE_BREAK, breaks_before, join_words, retype_word, toggle_line_break};
 pub use catalog::{catalog_entries, catalog_search};
 pub use clip_rules::{can_turn, magnet_request};
@@ -60,12 +75,12 @@ pub use gesture::{
     DropGesture, DropOutcome, GestureError, GestureOutcome, MoveGesture, Placement, TrimGesture,
     TrimPlan, drop_gesture, move_gesture, placement, trim_gesture,
 };
-pub use group_move::{ClipMove, MovePlan, move_requests, plan_move};
+pub use group_move::{ClipMove, MovePlan, NewLane, move_requests, plan_move, plan_move_between};
 pub use hit::{BadScale, Hit, Pointer, TimelineScale, hit_test};
 pub use inspector::{
     BACKGROUND_ALPHA_START, BACKGROUND_ROUND_START, GLOW_RANGE_START, GLOW_STRENGTH_START,
     LetterCase, OUTLINE_START, Panel, SHADOW_ANGLE, SHADOW_BLUR_START, SHADOW_DISTANCE_START,
-    SILENT_DB, TEXT_PRESETS, TextLook, canvas_pixels, gain_of_db, panel_of, starting,
+    SILENT_DB, TEXT_PRESETS, TextLook, canvas_pixels, gain_of_db, is_caption, panel_of, starting,
     stored_position, text_look, volume_db,
 };
 pub use keys::{ClipKeys, KeyGraph, clip_keys, key_graphs, move_key, value_keys};
@@ -84,12 +99,13 @@ pub use project_choices::{
 pub use reorder::{place_of, reorder_start};
 pub use ripple::{close_gap, gap_at, ripple_delete};
 pub use ruler::{RulerStep, Tick, clock, ruler_step, ruler_ticks, zoom_ceiling};
-pub use snap::{SnapKind, SnapTarget, snap, snap_guides, transition_middle};
+pub use snap::{SnapKind, SnapTarget, snap, snap_span, transition_middle};
 pub use stage::{
     MAX_SCALE, MIN_SCALE, NoText, Pose, SCALE_REACH, SNAP_REACH, StageAlign, StageBox,
     StageGesture, StageGuides, StageStep, TURN_REACH, TextSizes, canvas_size, keyed_pose,
     stage_align, stage_box, stage_gesture, stage_pick,
 };
+pub use subtitles::{SubtitleFormat, SubtitleMiss, subtitle_request};
 pub use template::{
     TEMPLATE_CARD_PREFIX, TITLE_TEMPLATES, TemplatePlace, TitleTemplate, Widget, template_requests,
     title_template,

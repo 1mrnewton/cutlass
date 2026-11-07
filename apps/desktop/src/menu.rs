@@ -276,6 +276,7 @@ pub const TRACK_HEAD: &[Entry] = &[
     done("add-text", "Add text track", ""),
     SEP,
     done("rename-track", "Rename track", ""),
+    done("solo-track", "Solo track", ""),
     done("delete-track", "Delete track", ""),
 ];
 

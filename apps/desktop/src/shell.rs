@@ -22,7 +22,8 @@ use cutlass_editor::{
     ZoomBounds, append_placement, copy_clips, drop_gesture, effect_of_card, effect_requests,
     effect_row_for, effect_target, fit_pixel_size, free_row, hit_test, last_accuracy_step,
     material_span, media_requests, minimum_pixel_size, move_requests, paste_requests, plan_move,
-    title_requests, title_style, transition_of_card, transition_request, trim_gesture,
+    plan_move_between, title_requests, title_style, transition_of_card, transition_request,
+    trim_gesture,
 };
 use cutlass_encode::EncodeFactory;
 use cutlass_engine::{Thumb, ThumbKey, Thumbnails, Waveforms};
@@ -43,7 +44,7 @@ use cutlass_storage::Home;
 use cutlass_store::{Folder, Hold, StoreError};
 use cutlass_transcription::{
     FileSource, HeardClip, HeardMiss, ParakeetUnified, PcmSource, PrepareError, RecognizeError,
-    Recognizer, caption_request, columns, fit, words_on_timeline,
+    Recognizer, caption_requests, columns, fit, words_on_timeline,
 };
 
 mod assistant;
@@ -60,6 +61,7 @@ mod speech_model;
 mod update;
 
 pub use assistant::AgentRun;
+pub(crate) use assistant::log_tool_call;
 pub use speech_model::SPEECH_MODEL_QUESTION;
 pub use update::RUNNING_VERSION;
 
@@ -283,6 +285,26 @@ pub struct LaneView {
     pub solo: bool,
     pub mute_by_solo: bool,
     pub clips: Vec<ClipSpan>,
+}
+
+/// Where a library card dragged over the lanes would land if let go now.
+#[derive(Clone, Debug, PartialEq)]
+pub enum LibraryLanding {
+    /// On this lane, over `start..start + duration`. A transition lands on
+    /// a cut of main and has no span: its duration is zero.
+    Row {
+        track_id: TrackId,
+        start: Micros,
+        duration: Micros,
+    },
+    /// On a new lane opened above view row `row` (the row count is under
+    /// the last).
+    NewLane {
+        row: usize,
+        kind: TrackType,
+        start: Micros,
+        duration: Micros,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -578,11 +600,22 @@ pub struct Chrome {
 
 pub use cutlass_store::ListedProject;
 
+/// Where a body drag is over: `y` pixels from the top lane, on the editor's
+/// lane scale, or the gap above row `n` (the row count is under the last).
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Over {
+    Y(f64),
+    Between(usize),
+}
+
 struct ClipDrag {
     id: SegmentId,
     edge: Option<TrimEdge>,
     press_x: f32,
     press_y: f32,
+    /// Where the pointer took hold, from the clip's top-left (or the edge), in points.
+    grab_x: f32,
+    grab_y: f32,
 }
 
 struct PendingTrim {
@@ -639,14 +672,6 @@ pub struct GapMenu {
     pub y: f32,
     pub track_id: TrackId,
     pub time: Micros,
-}
-
-/// The guide Delete will remove. A time is a vertical line. A row is a
-/// horizontal line, in thousandths of the track-sheet height.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum GuideMark {
-    Time(i64),
-    Row(i32),
 }
 
 /// Where a clip drag is showing, before the draft is written.
@@ -748,15 +773,6 @@ pub struct Shell {
     clip_menu: Option<ClipMenu>,
     /// The Close gap menu, open over a gap on a row.
     gap_menu: Option<GapMenu>,
-    /// Vertical guides for this session. They are not stored in the draft.
-    guides: Vec<Micros>,
-    guide_preview: Option<Micros>,
-    /// Horizontal guides, in thousandths of the track-sheet height.
-    horizontal: Vec<i32>,
-    horizontal_preview: Option<i32>,
-    selected_mark: Option<GuideMark>,
-    guides_shown: bool,
-    guides_locked: bool,
     /// Auto snap. A new window starts on. The draft does not store it.
     snapping: bool,
     /// The split tool cuts a clip at the pointer instead of moving it.
@@ -770,13 +786,21 @@ pub struct Shell {
     beating: bool,
     selected_beat: Option<BeatPick>,
     clip_drag: Option<ClipDrag>,
+    /// A clip whose drag Escape called off; its release does nothing.
+    escaped_drag: Option<SegmentId>,
     pending_trim: Option<PendingTrim>,
     pending_moves: Vec<ClipMove>,
+    /// A lane a library drop opens in a gap, sent first in the drop's own
+    /// undo step. Set only around one place call.
+    gap_lane: Option<Request>,
     notice: String,
     /// When the notice was set; it fades out [`NOTICE_SHOWN`] later.
     notice_since: Instant,
     /// The preview canvas shows black under the picture, or nothing.
     preview_black: bool,
+    /// A look or place change on a caption on a subtitle row styles every
+    /// caption on that row, as "Apply to all main captions" says.
+    all_captions: bool,
     next_id: u64,
     /// The local speech model, loaded on the first transcript that can hear a clip.
     speech: RefCell<Option<ParakeetUnified>>,
@@ -828,6 +852,12 @@ pub struct Shell {
     gpu: Option<crate::gpu::Preview>,
     /// The canvas shows a clip's earlier picture while the asked one decodes.
     preview_stale: bool,
+    /// The playhead is being dragged, so the preview shows a clip's picture
+    /// on its way to the asked one.
+    scrubbing: bool,
+    /// The preview error last logged, so a frame that fails every repaint
+    /// is logged once.
+    preview_error: Option<String>,
     pub chrome: Chrome,
 }
 
@@ -873,13 +903,6 @@ impl Shell {
             clipboard: Vec::new(),
             clip_menu: None,
             gap_menu: None,
-            guides: Vec::new(),
-            guide_preview: None,
-            horizontal: Vec::new(),
-            horizontal_preview: None,
-            selected_mark: None,
-            guides_shown: true,
-            guides_locked: false,
             snapping: true,
             blade: false,
             speed_curves: false,
@@ -888,12 +911,15 @@ impl Shell {
             beating: false,
             selected_beat: None,
             clip_drag: None,
+            escaped_drag: None,
             pending_trim: None,
             pending_moves: Vec::new(),
+            gap_lane: None,
             notice: String::new(),
             notice_since: Instant::now(),
             preview_black: true,
             saved: None,
+            all_captions: true,
             next_id: 0,
             speech: RefCell::new(None),
             vision: None,
@@ -920,6 +946,8 @@ impl Shell {
             face: Arc::new(crate::face::installed()),
             gpu: None,
             preview_stale: false,
+            scrubbing: false,
+            preview_error: None,
             chrome: Chrome::default(),
         }
     }
@@ -1199,6 +1227,9 @@ impl Shell {
         if self.session.is_some() {
             self.save()?;
         }
+        if let Some(path) = self.path.as_ref() {
+            cutlass_logger::info!("close project {}", path.display());
+        }
         self.session = None;
         self.waiting_imports.clear();
         self.lanes_cache.replace(None);
@@ -1215,7 +1246,6 @@ impl Shell {
         self.selection.clear();
         self.clipboard.clear();
         self.clip_menu = None;
-        self.clear_guides();
         self.blade = false;
         self.marking = false;
         self.selected_marker = None;
@@ -1320,6 +1350,20 @@ impl Shell {
     }
 
     pub fn open_folder(&mut self, path: &Path) -> Result<(), ShellError> {
+        cutlass_logger::info!("open project {}", path.display());
+        let opened = self.open_folder_in(path);
+        match &opened {
+            Ok(()) => cutlass_logger::info!(
+                "opened project {} at revision {}",
+                path.display(),
+                self.session.as_ref().map_or(0, Session::revision)
+            ),
+            Err(error) => cutlass_logger::error!("open project {}: {error}", path.display()),
+        }
+        opened
+    }
+
+    fn open_folder_in(&mut self, path: &Path) -> Result<(), ShellError> {
         if self.unsaved() {
             self.save()?;
         }
@@ -1337,7 +1381,16 @@ impl Shell {
             opened.folder.draft.id.as_str(),
             has_pairs,
         );
-        let mut session = Session::open(opened.folder.draft.clone());
+        let mut draft = opened.folder.draft.clone();
+        // Captions an earlier build made with no font file drew nothing.
+        let filled = cutlass_editor::fill_caption_faces(&mut draft, self.face.name());
+        if filled > 0 {
+            cutlass_logger::info!(
+                "{filled} captions had no font file; set in {}",
+                self.face.name()
+            );
+        }
+        let mut session = Session::open_project(draft);
         session.set_linkage(linkage);
         self.outer.clear();
         self.saved = Some((session.revision(), Instant::now()));
@@ -1360,7 +1413,6 @@ impl Shell {
         self.selection.clear();
         self.clipboard.clear();
         self.clip_menu = None;
-        self.clear_guides();
         self.blade = false;
         self.marking = false;
         self.selected_marker = None;
@@ -1371,6 +1423,10 @@ impl Shell {
         self.fitted = false;
         self.notice.clear();
         if unclean {
+            cutlass_logger::warn!(
+                "{} was not closed cleanly last time; recovered",
+                path.display()
+            );
             self.set_notice(RECOVERED_NOTICE.to_owned());
         }
         self.transport.forget_files();
@@ -1383,9 +1439,19 @@ impl Shell {
     pub fn save(&mut self) -> Result<(), ShellError> {
         // A write already under way finishes first, so two never overlap.
         self.finish_background_save();
-        let (path, folder, revision) = self.save_snapshot()?;
+        let (path, folder, revision) = match self.save_snapshot() {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                cutlass_logger::error!("save: {error}");
+                return Err(error);
+            }
+        };
         let library = self.library_edits;
-        folder.save(&path).map_err(ShellError::Store)?;
+        if let Err(error) = folder.save(&path) {
+            cutlass_logger::error!("save {}: {error}", path.display());
+            return Err(ShellError::Store(error));
+        }
+        cutlass_logger::info!("saved {} at revision {revision}", path.display());
         self.saved = Some((revision, Instant::now()));
         self.library_saved = library;
         Ok(())
@@ -1451,6 +1517,7 @@ impl Shell {
     ) {
         let error = match written {
             Ok(Ok(())) => {
+                cutlass_logger::debug!("autosaved revision {revision}");
                 self.saved = Some((revision, Instant::now()));
                 return;
             }
@@ -1793,6 +1860,7 @@ impl Shell {
     }
 
     fn import_file_in(&mut self, path: &Path) -> Result<(), ShellError> {
+        cutlass_logger::info!("import {}", path.display());
         let probed = probe::probe(path).map_err(|error| ShellError::Probe(error.to_string()))?;
         let project = self.path.clone().ok_or(ShellError::NoProject)?;
         let link = self.settings.import.link;
@@ -1811,6 +1879,7 @@ impl Shell {
     /// job; the new media joins the library and the clip takes it in one
     /// undo step.
     pub fn start_replace(&mut self, path: &Path) -> Result<(), ShellError> {
+        cutlass_logger::info!("replace the selected clip's media with {}", path.display());
         let project = self.path.clone().ok_or(ShellError::NoProject)?;
         let segment_id = self.selected().cloned().ok_or(ShellError::NoProject)?;
         self.refuse_locked(&segment_id)?;
@@ -1861,6 +1930,7 @@ impl Shell {
     /// progress bar, then add it to the library when the job lands. A
     /// cancelled import leaves no copy behind.
     pub fn start_import(&mut self, path: &Path) -> Result<(), ShellError> {
+        cutlass_logger::info!("import {}", path.display());
         let project = self.path.clone().ok_or(ShellError::NoProject)?;
         self.refuse_busy()?;
         let source = path.to_path_buf();
@@ -1931,8 +2001,42 @@ impl Shell {
                 "the ruler click missed the timeline".to_owned(),
             ));
         };
-        self.seek(hit.time);
-        Ok(hit.time)
+        // The playhead lands on the frame nearest the pointer, never between
+        // two of the ruler's frames.
+        let time = self.nearest_frame(hit.time);
+        self.seek(time);
+        Ok(time)
+    }
+
+    fn project_rate(&self) -> FrameRate {
+        self.draft()
+            .and_then(Draft::frame_rate)
+            .unwrap_or(FrameRate::FPS_30)
+    }
+
+    /// The start of the project frame nearest `time`.
+    fn nearest_frame(&self, time: Micros) -> Micros {
+        let rate = self.project_rate();
+        let Some(index) = rate.frame_index(Micros(time.0.max(0))) else {
+            return time;
+        };
+        let (Some(start), Some(next)) = (rate.frame_start(index), rate.frame_start(index + 1))
+        else {
+            return time;
+        };
+        if time.0 - start.0 < next.0 - time.0 {
+            start
+        } else {
+            next
+        }
+    }
+
+    /// The start of the project frame `time` falls in.
+    fn frame_floor(&self, time: Micros) -> Micros {
+        let rate = self.project_rate();
+        rate.frame_index(time)
+            .and_then(|index| rate.frame_start(index))
+            .unwrap_or(time)
     }
 
     pub fn seek(&mut self, time: Micros) {
@@ -1966,10 +2070,12 @@ impl Shell {
         self.reveal_playhead();
     }
 
+    /// Stop on the frame being shown: the playhead lands on its start.
     pub fn pause(&mut self) {
         self.playing = false;
         self.shuttle = 0;
         self.silence();
+        self.playhead = self.frame_floor(self.playhead);
     }
 
     /// The shuttle rate: 0 when stopped, 1 for real time, negative backward.
@@ -2077,10 +2183,7 @@ impl Shell {
 
     /// Move to another frame. A positive count goes forward.
     pub fn step_frame(&mut self, frames: i64) -> Result<(), ShellError> {
-        let rate = self
-            .draft()
-            .and_then(Draft::frame_rate)
-            .unwrap_or(FrameRate::FPS_30);
+        let rate = self.project_rate();
         let index = rate.frame_index(self.playhead).unwrap_or(0);
         let next = index.saturating_add(frames).max(0);
         let time = rate.frame_start(next).ok_or(ShellError::Zoom)?;
@@ -2236,6 +2339,17 @@ impl Shell {
             .map_err(|error| ShellError::Eval(error.to_string()))?;
         let stale = cache.take_stale();
         drop(cache);
+        // A seek keeps the whole frame that was on the canvas until every
+        // clip has the asked picture, so no clip shows a picture from
+        // another time on the way. Playing and dragging show it moving.
+        if stale
+            && !self.playing
+            && !self.scrubbing
+            && let Some(held) = gpu.current()
+        {
+            self.preview_stale = true;
+            return Ok(Some(held));
+        }
         let layers = cutlass_render::frame_layers(composed)
             .map_err(|error| ShellError::Eval(error.to_string()))?;
         let shown = gpu
@@ -2248,7 +2362,32 @@ impl Shell {
         Ok(Some(shown))
     }
 
-    /// The preview shows a clip's earlier picture while the one asked for
+    /// Log the preview's error once when it starts or changes, and once
+    /// when the preview draws again. The window calls this every repaint.
+    pub fn note_preview(&mut self, error: Option<&ShellError>) {
+        match error {
+            None => {
+                if let Some(last) = self.preview_error.take() {
+                    cutlass_logger::info!("preview draws again after: {last}");
+                }
+            }
+            Some(error) => {
+                let text = error.to_string();
+                if self.preview_error.as_deref() != Some(text.as_str()) {
+                    cutlass_logger::warn!("preview at {} us: {text}", self.sample_time().0);
+                    self.preview_error = Some(text);
+                }
+            }
+        }
+    }
+
+    /// Whether the playhead is being dragged. While it is, the preview shows
+    /// pictures on the way to the asked time instead of holding the frame.
+    pub fn set_scrubbing(&mut self, scrubbing: bool) {
+        self.scrubbing = scrubbing;
+    }
+
+    /// The preview shows an earlier picture while the one asked for
     /// decodes. The window draws again until this is false.
     #[must_use]
     pub fn preview_pending(&self) -> bool {
@@ -2295,14 +2434,32 @@ impl Shell {
 
     pub fn undo(&mut self) -> Result<(), ShellError> {
         let session = self.session.as_mut().ok_or(ShellError::NoProject)?;
-        session.undo().map_err(ShellError::Edit)?;
-        Ok(())
+        match session.undo() {
+            Ok(revision) => {
+                cutlass_logger::info!("undo: revision {revision}");
+                Ok(())
+            }
+            Err(error) => {
+                let error = ShellError::Edit(error);
+                cutlass_logger::warn!("undo refused: {error}");
+                Err(error)
+            }
+        }
     }
 
     pub fn redo(&mut self) -> Result<(), ShellError> {
         let session = self.session.as_mut().ok_or(ShellError::NoProject)?;
-        session.redo().map_err(ShellError::Edit)?;
-        Ok(())
+        match session.redo() {
+            Ok(revision) => {
+                cutlass_logger::info!("redo: revision {revision}");
+                Ok(())
+            }
+            Err(error) => {
+                let error = ShellError::Edit(error);
+                cutlass_logger::warn!("redo refused: {error}");
+                Err(error)
+            }
+        }
     }
 
     pub fn run_shortcut(&mut self, keys: &str) -> Result<(), ShellError> {
@@ -2387,6 +2544,10 @@ impl Shell {
             self.preview_cache.borrow_mut().clear();
         }
         if self.settings != before {
+            cutlass_logger::info!(
+                "settings changed: {}",
+                changed_settings(&before, &self.settings).join(", ")
+            );
             self.save_settings();
         }
     }
@@ -2445,8 +2606,24 @@ impl Shell {
         x: f64,
         y: f64,
     ) -> Result<(), ShellError> {
+        self.drag_over(segment_id, x, Over::Y(y))
+    }
+
+    /// Drop a body drag in the gap above row `boundary`, or past the last
+    /// row. A clip whose kind may sit there opens a lane there, in the same
+    /// undo step; otherwise it lands on the nearest row.
+    pub fn drag_segment_between(
+        &mut self,
+        segment_id: SegmentId,
+        x: f64,
+        boundary: usize,
+    ) -> Result<(), ShellError> {
+        self.drag_over(segment_id, x, Over::Between(boundary))
+    }
+
+    fn drag_over(&mut self, segment_id: SegmentId, x: f64, over: Over) -> Result<(), ShellError> {
         let new_track = TrackId::new(self.fresh("track"));
-        let moves = self.plan_move(segment_id, x, y, new_track)?;
+        let moves = self.plan_move(segment_id, x, over, new_track)?;
         self.pending_moves.clear();
         let requests = move_requests(self.session_draft()?, &moves);
         if requests.is_empty() {
@@ -2463,9 +2640,19 @@ impl Shell {
     /// Remember which edge a clip drag started on. A body drag clears a trim preview.
     ///
     /// `press` is the pointer where the drag began, in points.
-    pub fn begin_clip_drag(&mut self, id: SegmentId, edge: Option<TrimEdge>, press: (f32, f32)) {
+    /// `grab` is where the pointer took hold, from the clip's top-left for a
+    /// body drag or from the edge for a trim, so the clip keeps that offset
+    /// instead of jumping to the pointer.
+    pub fn begin_clip_drag(
+        &mut self,
+        id: SegmentId,
+        edge: Option<TrimEdge>,
+        press: (f32, f32),
+        grab: (f32, f32),
+    ) {
         self.pending_trim = None;
         self.pending_moves.clear();
+        self.escaped_drag = None;
         if edge.is_some() {
             self.select(Some(id.clone()));
         }
@@ -2474,7 +2661,19 @@ impl Shell {
             edge,
             press_x: press.0,
             press_y: press.1,
+            grab_x: grab.0,
+            grab_y: grab.1,
         });
+    }
+
+    /// Where the pointer holds the clip being dragged, from its top-left (or
+    /// the trimmed edge), in points. Zero for a clip that is not dragged.
+    #[must_use]
+    pub fn clip_grab(&self, id: &SegmentId) -> (f32, f32) {
+        self.clip_drag
+            .as_ref()
+            .filter(|drag| &drag.id == id)
+            .map_or((0.0, 0.0), |drag| (drag.grab_x, drag.grab_y))
     }
 
     /// A body drag that stayed on the press is a click, not a move.
@@ -2500,6 +2699,9 @@ impl Shell {
     /// Follow the pointer without writing the draft. The next paint uses this edge.
     pub fn preview_edge(&mut self, segment_id: SegmentId, edge: TrimEdge, x: f64) {
         self.pending_moves.clear();
+        if self.drag_escaped(&segment_id) {
+            return;
+        }
         match self.plan_trim(segment_id, edge, x) {
             Ok(plan) => {
                 self.pending_trim = Some(PendingTrim {
@@ -2527,12 +2729,33 @@ impl Shell {
     /// When the dragged clip is one of several selected clips, each selected
     /// clip keeps its gap and follows by the same amount.
     pub fn preview_move(&mut self, segment_id: SegmentId, x: f64, y: f64) {
+        self.preview_over(segment_id, x, Over::Y(y));
+    }
+
+    /// Follow a body drag held in the gap above row `boundary`.
+    pub fn preview_move_between(&mut self, segment_id: SegmentId, x: f64, boundary: usize) {
+        self.preview_over(segment_id, x, Over::Between(boundary));
+    }
+
+    fn preview_over(&mut self, segment_id: SegmentId, x: f64, over: Over) {
         self.pending_trim = None;
+        if self.drag_escaped(&segment_id) {
+            self.pending_moves.clear();
+            return;
+        }
         // The preview's new lane is not on the draft, so its id is only a name.
         let new_track = TrackId::new("new-lane");
         self.pending_moves = self
-            .plan_move(segment_id, x, y, new_track)
+            .plan_move(segment_id, x, over, new_track)
             .unwrap_or_default();
+    }
+
+    /// The lane a held body drag would open: the row it opens above (the row
+    /// count is under the last) and its kind.
+    #[must_use]
+    pub fn new_lane_preview(&self) -> Option<(usize, TrackType)> {
+        let lane = self.pending_moves.first()?.new_lane.as_ref()?;
+        Some((self.row_above_track(lane.index), lane.kind.clone()))
     }
 
     /// The dragged clip's copy. A group drag still reports that clip here.
@@ -2586,14 +2809,33 @@ impl Shell {
         }
         self.pending_moves
             .first()
-            .filter(|pending| pending.snapped)
-            .map(|pending| pending.start)
+            .and_then(|pending| pending.snap_line)
     }
 
     pub fn cancel_clip_drag(&mut self) {
         self.clip_drag = None;
         self.pending_trim = None;
         self.pending_moves.clear();
+    }
+
+    /// A clip drag is held.
+    #[must_use]
+    pub fn clip_dragging(&self) -> bool {
+        self.clip_drag.is_some()
+    }
+
+    /// Escape during a drag: the clip goes back and the release that follows
+    /// does nothing. The draft is not written.
+    pub fn escape_clip_drag(&mut self) {
+        self.escaped_drag = self.clip_drag.take().map(|drag| drag.id);
+        self.pending_trim = None;
+        self.pending_moves.clear();
+    }
+
+    /// Escape called off this clip's drag, which has not been let go yet.
+    #[must_use]
+    pub fn drag_escaped(&self, id: &SegmentId) -> bool {
+        self.escaped_drag.as_ref() == Some(id)
     }
 
     /// Finish the drag that `begin_clip_drag` started. An edge trims. The body moves.
@@ -2603,6 +2845,26 @@ impl Shell {
         x: f64,
         y: f64,
     ) -> Result<(), ShellError> {
+        self.finish_over(segment_id, x, Over::Y(y))
+    }
+
+    /// Finish a drag released in the gap above row `boundary`. An edge still trims.
+    pub fn finish_clip_drag_between(
+        &mut self,
+        segment_id: SegmentId,
+        x: f64,
+        boundary: usize,
+    ) -> Result<(), ShellError> {
+        self.finish_over(segment_id, x, Over::Between(boundary))
+    }
+
+    fn finish_over(&mut self, segment_id: SegmentId, x: f64, over: Over) -> Result<(), ShellError> {
+        if self.escaped_drag.take().is_some_and(|id| id == segment_id) {
+            self.clip_drag = None;
+            self.pending_trim = None;
+            self.pending_moves.clear();
+            return Ok(());
+        }
         let edge = self
             .clip_drag
             .take()
@@ -2612,7 +2874,7 @@ impl Shell {
         self.pending_moves.clear();
         match edge {
             Some(edge) => self.trim_edge(segment_id, edge, x),
-            None => self.drag_segment(segment_id, x, y),
+            None => self.drag_over(segment_id, x, over),
         }
     }
 
@@ -2656,7 +2918,6 @@ impl Shell {
             scale: self.scale(),
             playhead: self.playhead,
             snap_threshold: self.snap_threshold(),
-            guides: self.guide_times(),
         };
         let draft = self.session_draft()?;
         trim_gesture(draft, &gesture).map_err(|error| match error {
@@ -2677,10 +2938,14 @@ impl Shell {
         &self,
         segment_id: SegmentId,
         x: f64,
-        y: f64,
+        over: Over,
         new_track: TrackId,
     ) -> Result<Vec<ClipMove>, ShellError> {
         self.refuse_locked(&segment_id)?;
+        let y = match over {
+            Over::Y(y) => y,
+            Over::Between(_) => 0.0,
+        };
         let gesture = MoveGesture {
             segment_id: segment_id.clone(),
             pointer: Pointer {
@@ -2690,10 +2955,15 @@ impl Shell {
             scale: self.scale(),
             playhead: self.playhead,
             snap_threshold: self.snap_threshold(),
-            guides: self.guide_times(),
         };
         let draft = self.session_draft()?;
-        match plan_move(draft, &gesture, &self.selection) {
+        let plan = match over {
+            Over::Y(_) => plan_move(draft, &gesture, &self.selection),
+            Over::Between(boundary) => {
+                plan_move_between(draft, &gesture, boundary, &self.selection)
+            }
+        };
+        match plan {
             Ok(MovePlan::Miss) => Err(ShellError::Unavailable(
                 "the drag missed the lanes".to_owned(),
             )),
@@ -2705,6 +2975,251 @@ impl Shell {
                 "the drag could not be read".to_owned(),
             )),
         }
+    }
+
+    /// Where library card `material_id` would land dropped at `x`, `y`,
+    /// on the drop rules [`Self::drop_library`] uses, so the lanes can mark
+    /// the spot it really goes to, not just the row under the pointer. `gap`
+    /// is the view row the pointer is in the gap above, if any: a card whose
+    /// kind may sit there opens its own lane there. `None` when it would miss
+    /// or the card is unknown.
+    #[must_use]
+    pub fn library_landing(
+        &self,
+        material_id: &str,
+        x: f64,
+        y: f64,
+        gap: Option<usize>,
+    ) -> Option<LibraryLanding> {
+        let draft = self.draft()?;
+        let pointer = Pointer {
+            x: self.time_zero_x(x),
+            y,
+        };
+        if material_id.starts_with("transition:") {
+            let main = draft.tracks.iter().find(|track| track.is_main())?;
+            return Some(LibraryLanding::Row {
+                track_id: main.id.clone(),
+                start: Micros(0),
+                duration: Micros(0),
+            });
+        }
+        let (kind, duration) = self.library_kind(material_id)?;
+        let gesture = DropGesture {
+            kind: kind.clone(),
+            duration,
+            pointer,
+            scale: self.scale(),
+            playhead: self.playhead,
+            snap_threshold: self.snap_threshold(),
+        };
+        let outcome = drop_gesture(draft, &gesture).ok()?;
+        if let Some(boundary) = gap
+            && self.gap_lane_index(&kind, boundary).is_some()
+        {
+            let start = match &outcome {
+                DropOutcome::Place { start, .. } | DropOutcome::NewLane { start, .. } => *start,
+                DropOutcome::Miss => return None,
+            };
+            return Some(LibraryLanding::NewLane {
+                row: boundary,
+                kind,
+                start,
+                duration,
+            });
+        }
+        if material_id.starts_with(cutlass_editor::EFFECT_CARD_PREFIX) {
+            let on_clip = hit_test(draft, self.scale(), pointer)
+                .ok()
+                .flatten()
+                .and_then(|hit| hit.segment_id)
+                .and_then(|clip| {
+                    let (start, duration) = effect_target(draft, &clip)?;
+                    Some((clip, start, duration))
+                });
+            if let Some((clip, start, duration)) = on_clip {
+                return Some(match effect_row_for(draft, &clip) {
+                    Some(track_id) => LibraryLanding::Row {
+                        track_id,
+                        start,
+                        duration,
+                    },
+                    None => self.new_lane_landing(TrackType::Effect, start, duration),
+                });
+            }
+        }
+        match outcome {
+            DropOutcome::Miss => None,
+            DropOutcome::Place { track_id, start } => Some(LibraryLanding::Row {
+                track_id,
+                start,
+                duration,
+            }),
+            DropOutcome::NewLane { kind, start } => {
+                Some(self.new_lane_landing(kind, start, duration))
+            }
+        }
+    }
+
+    /// The lane kind and length a library card (not a transition) places.
+    fn library_kind(&self, material_id: &str) -> Option<(TrackType, Micros)> {
+        Some(
+            if material_id.starts_with(cutlass_editor::EFFECT_CARD_PREFIX) {
+                (TrackType::Effect, EFFECT_LENGTH)
+            } else if material_id.starts_with(cutlass_editor::TITLE_CARD_PREFIX) {
+                (TrackType::Text, TITLE_LENGTH)
+            } else if material_id.starts_with(cutlass_editor::TEMPLATE_CARD_PREFIX) {
+                let length = cutlass_editor::title_template(material_id)
+                    .map_or(TITLE_LENGTH, cutlass_editor::TitleTemplate::length);
+                (TrackType::Text, length)
+            } else if material_id == cutlass_editor::ADJUSTMENT_CARD {
+                (TrackType::Adjust, EFFECT_LENGTH)
+            } else if material_id.starts_with(cutlass_editor::FILTER_CARD_PREFIX) {
+                (TrackType::Filter, EFFECT_LENGTH)
+            } else if material_id.starts_with(STICKER_CARD_PREFIX) {
+                let sticker = shelf_sticker(material_id).ok()?;
+                (TrackType::Sticker, sticker_length(sticker))
+            } else {
+                material_span(self.draft()?, material_id)?
+            },
+        )
+    }
+
+    /// The track index a lane of `kind` opened in the gap above view row
+    /// `boundary` takes, when that kind may sit there.
+    fn gap_lane_index(&self, kind: &TrackType, boundary: usize) -> Option<usize> {
+        let draft = self.draft()?;
+        let rows = self.lanes();
+        let index_of = |row: &LaneView| {
+            draft
+                .tracks
+                .iter()
+                .position(|track| track.id == row.track_id)
+        };
+        let index = match rows.get(boundary) {
+            Some(row) => index_of(row)?,
+            None => rows
+                .last()
+                .and_then(index_of)
+                .map_or(draft.tracks.len(), |at| at.saturating_add(1)),
+        };
+        cutlass_session::lane_fits(&draft.tracks, kind, index).then_some(index)
+    }
+
+    /// Drop library card `material_id` at `x`, `y`. In the gap above view row
+    /// `gap`, a card whose kind may sit there opens its own lane there, in the
+    /// same undo step; otherwise it lands by the card's own drop rules.
+    pub fn drop_library(
+        &mut self,
+        material_id: &str,
+        x: f64,
+        y: f64,
+        gap: Option<usize>,
+    ) -> Result<(), ShellError> {
+        let opened = gap.and_then(|boundary| {
+            let (kind, _) = self.library_kind(material_id)?;
+            let index = self.gap_lane_index(&kind, boundary)?;
+            Some((kind, index))
+        });
+        if !material_id.starts_with("transition:")
+            && let Some((kind, index)) = opened
+        {
+            let Some(LibraryLanding::NewLane {
+                start, duration, ..
+            }) = self.library_landing(material_id, x, y, gap)
+            else {
+                return Err(ShellError::Unavailable(
+                    "the drag missed the lanes".to_owned(),
+                ));
+            };
+            let track_id = TrackId::new(self.fresh("track"));
+            self.gap_lane = Some(Request::InsertTrackAt {
+                track_id: track_id.clone(),
+                kind,
+                index,
+            });
+            let placed = self.place_library(material_id, track_id, start, duration);
+            self.gap_lane = None;
+            return placed;
+        }
+        if material_id.starts_with("transition:") {
+            self.drop_transition(material_id, x, y)
+        } else if material_id.starts_with(cutlass_editor::TITLE_CARD_PREFIX) {
+            self.drop_title(material_id, x, y)
+        } else if material_id.starts_with(cutlass_editor::EFFECT_CARD_PREFIX) {
+            self.drop_effect(material_id, x, y)
+        } else if material_id == cutlass_editor::ADJUSTMENT_CARD {
+            self.drop_adjustment(x, y)
+        } else if material_id.starts_with(cutlass_editor::FILTER_CARD_PREFIX) {
+            self.drop_filter(material_id, x, y)
+        } else if material_id.starts_with(STICKER_CARD_PREFIX) {
+            self.drop_sticker(material_id, x, y)
+        } else if material_id.starts_with(cutlass_editor::TEMPLATE_CARD_PREFIX) {
+            self.drop_template(material_id, x, y)
+        } else {
+            self.drop_medium(material_id, x, y)
+        }
+    }
+
+    /// Place library card `material_id` on `track_id` at `start`.
+    fn place_library(
+        &mut self,
+        material_id: &str,
+        track_id: TrackId,
+        start: Micros,
+        duration: Micros,
+    ) -> Result<(), ShellError> {
+        if material_id.starts_with(cutlass_editor::TITLE_CARD_PREFIX) {
+            self.place_title(material_id, track_id, start)
+        } else if material_id.starts_with(cutlass_editor::EFFECT_CARD_PREFIX) {
+            self.place_effect(material_id, track_id, start, EFFECT_LENGTH, None)
+        } else if material_id == cutlass_editor::ADJUSTMENT_CARD {
+            self.place_adjustment(track_id, start)
+        } else if material_id.starts_with(cutlass_editor::FILTER_CARD_PREFIX) {
+            self.place_filter(material_id, track_id, start)
+        } else if material_id.starts_with(STICKER_CARD_PREFIX) {
+            let sticker = shelf_sticker(material_id)?;
+            self.place_sticker(sticker, duration, Some(track_id), start)
+        } else if material_id.starts_with(cutlass_editor::TEMPLATE_CARD_PREFIX) {
+            self.place_template(material_id, track_id, start)
+        } else {
+            let first_clip = self
+                .session_draft()?
+                .tracks
+                .iter()
+                .all(|track| track.segments.is_empty());
+            self.place_medium(material_id, track_id, start, duration, None, first_clip)
+        }
+    }
+
+    /// A new lane of `kind` opens where the session puts one.
+    fn new_lane_landing(&self, kind: TrackType, start: Micros, duration: Micros) -> LibraryLanding {
+        let index = self.draft().map_or(0, |draft| {
+            cutlass_session::new_lane_index(&draft.tracks, &kind)
+        });
+        LibraryLanding::NewLane {
+            row: self.row_above_track(index),
+            kind,
+            start,
+            duration,
+        }
+    }
+
+    /// The view row a lane opened at track index `index` would sit above.
+    fn row_above_track(&self, index: usize) -> usize {
+        let Some(draft) = self.draft() else {
+            return 0;
+        };
+        let rows = self.lanes();
+        rows.iter()
+            .position(|row| {
+                draft
+                    .tracks
+                    .iter()
+                    .position(|track| track.id == row.track_id)
+                    .is_some_and(|at| at >= index)
+            })
+            .unwrap_or(rows.len())
     }
 
     /// Place one library material at the timeline point.
@@ -2739,7 +3254,6 @@ impl Shell {
                 scale: self.scale(),
                 playhead: self.playhead,
                 snap_threshold: self.snap_threshold(),
-                guides: self.guide_times(),
             };
             let draft = self.session_draft()?;
             drop_gesture(draft, &gesture)
@@ -2846,7 +3360,6 @@ impl Shell {
                 scale: self.scale(),
                 playhead: self.playhead,
                 snap_threshold: self.snap_threshold(),
-                guides: self.guide_times(),
             };
             drop_gesture(self.session_draft()?, &gesture)
                 .map_err(|_| ShellError::Unavailable("the drag could not be read".to_owned()))?
@@ -2908,7 +3421,6 @@ impl Shell {
                 scale: self.scale(),
                 playhead: self.playhead,
                 snap_threshold: self.snap_threshold(),
-                guides: self.guide_times(),
             };
             drop_gesture(self.session_draft()?, &gesture)
                 .map_err(|_| ShellError::Unavailable("the drag could not be read".to_owned()))?
@@ -2981,7 +3493,6 @@ impl Shell {
                 scale: self.scale(),
                 playhead: self.playhead,
                 snap_threshold: self.snap_threshold(),
-                guides: self.guide_times(),
             };
             drop_gesture(self.session_draft()?, &gesture)
                 .map_err(|_| ShellError::Unavailable("the drag could not be read".to_owned()))?
@@ -3112,7 +3623,6 @@ impl Shell {
                 scale: self.scale(),
                 playhead: self.playhead,
                 snap_threshold: self.snap_threshold(),
-                guides: self.guide_times(),
             };
             drop_gesture(self.session_draft()?, &gesture)
                 .map_err(|_| ShellError::Unavailable("the drag could not be read".to_owned()))?
@@ -3207,7 +3717,6 @@ impl Shell {
                 scale: self.scale(),
                 playhead: self.playhead,
                 snap_threshold: self.snap_threshold(),
-                guides: self.guide_times(),
             };
             drop_gesture(self.session_draft()?, &gesture)
                 .map_err(|_| ShellError::Unavailable("the drag could not be read".to_owned()))?
@@ -3363,7 +3872,6 @@ impl Shell {
     }
 
     pub fn select(&mut self, id: Option<SegmentId>) {
-        self.selected_mark = None;
         self.selected_marker = None;
         self.selected_beat = None;
         self.selection.clear();
@@ -3374,7 +3882,6 @@ impl Shell {
 
     /// Add `id` to the selection, or drop it when it is already there.
     pub fn toggle_selected(&mut self, id: SegmentId) {
-        self.selected_mark = None;
         self.selected_marker = None;
         self.selected_beat = None;
         if let Some(index) = self.selection.iter().position(|item| item == &id) {
@@ -3386,7 +3893,6 @@ impl Shell {
 
     /// Replace the selection with `ids`. `keep` adds them to the clips already selected.
     pub fn select_box(&mut self, ids: impl IntoIterator<Item = SegmentId>, keep: bool) {
-        self.selected_mark = None;
         self.selected_marker = None;
         self.selected_beat = None;
         if !keep {
@@ -3424,12 +3930,9 @@ impl Shell {
         self.selection.iter().any(|item| item == id)
     }
 
-    /// Remove the selected clips, or the selected guide when no clip is selected.
+    /// Remove the selected clips, or the selected marker or beat when no clip is selected.
     pub fn delete_target(&mut self) -> Result<(), ShellError> {
         if self.selection.is_empty() {
-            if self.selected_mark.is_some() {
-                return self.remove_selected_guide();
-            }
             if self.selected_marker.is_some() {
                 return self.remove_selected_marker();
             }
@@ -3439,27 +3942,6 @@ impl Shell {
             return Ok(());
         }
         self.remove_selected()
-    }
-
-    /// Guides currently drawn. A hidden list is empty here and is not a snap target.
-    #[must_use]
-    pub fn guides(&self) -> &[Micros] {
-        if self.guides_shown { &self.guides } else { &[] }
-    }
-
-    #[must_use]
-    pub fn guide_preview(&self) -> Option<Micros> {
-        self.guide_preview
-    }
-
-    #[must_use]
-    pub fn guides_shown(&self) -> bool {
-        self.guides_shown
-    }
-
-    #[must_use]
-    pub fn guides_locked(&self) -> bool {
-        self.guides_locked
     }
 
     /// Auto snap. A new window starts on. The choice lasts until the window closes.
@@ -3479,14 +3961,6 @@ impl Shell {
         } else {
             Micros(-1)
         }
-    }
-
-    pub fn toggle_guides(&mut self) {
-        self.guides_shown = !self.guides_shown;
-    }
-
-    pub fn toggle_guide_lock(&mut self) {
-        self.guides_locked = !self.guides_locked;
     }
 
     /// The linkage switch. A new project starts on. A folder with no stored
@@ -3639,132 +4113,6 @@ impl Shell {
         Ok(())
     }
 
-    pub fn preview_guide(&mut self, time: Micros) {
-        self.guide_preview = Some(Micros(time.0.max(0)));
-    }
-
-    pub fn clear_guide_preview(&mut self) {
-        self.guide_preview = None;
-    }
-
-    pub fn take_guide_preview(&mut self) -> Option<Micros> {
-        self.guide_preview.take()
-    }
-
-    /// Leave a vertical guide. A time already present is selected again.
-    pub fn add_guide(&mut self, time: Micros) -> Result<(), ShellError> {
-        if self.session.is_none() {
-            return Err(ShellError::NoProject);
-        }
-        if self.guides_locked {
-            return Err(ShellError::Unavailable("the guides are locked".to_owned()));
-        }
-        let time = Micros(time.0.max(0));
-        if !self.guides.iter().any(|guide| guide.0 == time.0) {
-            self.guides.push(time);
-            self.guides.sort_by_key(|guide| guide.0);
-        }
-        self.selected_marker = None;
-        self.selected_beat = None;
-        self.selected_mark = Some(GuideMark::Time(time.0));
-        Ok(())
-    }
-
-    pub fn select_guide(&mut self, time: Micros) {
-        if self.guides.iter().any(|guide| guide.0 == time.0) {
-            self.selected_mark = Some(GuideMark::Time(time.0));
-            self.selected_marker = None;
-            self.selected_beat = None;
-            self.selection.clear();
-        }
-    }
-
-    #[must_use]
-    pub fn selected_guide(&self) -> Option<Micros> {
-        match self.selected_mark {
-            Some(GuideMark::Time(time)) => Some(Micros(time)),
-            _ => None,
-        }
-    }
-
-    /// Leave a horizontal guide. `row` is thousandths of the track-sheet height.
-    /// A row already present is selected again.
-    pub fn add_horizontal(&mut self, row: i32) -> Result<(), ShellError> {
-        if self.session.is_none() {
-            return Err(ShellError::NoProject);
-        }
-        if self.guides_locked {
-            return Err(ShellError::Unavailable("the guides are locked".to_owned()));
-        }
-        let row = row.clamp(0, 1_000);
-        if !self.horizontal.contains(&row) {
-            self.horizontal.push(row);
-            self.horizontal.sort_unstable();
-        }
-        self.selected_marker = None;
-        self.selected_beat = None;
-        self.selected_mark = Some(GuideMark::Row(row));
-        Ok(())
-    }
-
-    pub fn preview_horizontal(&mut self, row: i32) {
-        self.horizontal_preview = Some(row.clamp(0, 1_000));
-    }
-
-    pub fn clear_horizontal_preview(&mut self) {
-        self.horizontal_preview = None;
-    }
-
-    pub fn take_horizontal_preview(&mut self) -> Option<i32> {
-        self.horizontal_preview.take()
-    }
-
-    #[must_use]
-    pub fn horizontal_preview(&self) -> Option<i32> {
-        self.horizontal_preview
-    }
-
-    /// Horizontal guides currently drawn, in thousandths of the track-sheet height.
-    /// A hidden list is empty here.
-    #[must_use]
-    pub fn horizontal_guides(&self) -> &[i32] {
-        if self.guides_shown {
-            &self.horizontal
-        } else {
-            &[]
-        }
-    }
-
-    pub fn select_horizontal(&mut self, row: i32) {
-        if self.horizontal.contains(&row) {
-            self.selected_mark = Some(GuideMark::Row(row));
-            self.selected_marker = None;
-            self.selected_beat = None;
-            self.selection.clear();
-        }
-    }
-
-    #[must_use]
-    pub fn selected_horizontal(&self) -> Option<i32> {
-        match self.selected_mark {
-            Some(GuideMark::Row(row)) => Some(row),
-            _ => None,
-        }
-    }
-
-    pub fn remove_selected_guide(&mut self) -> Result<(), ShellError> {
-        if self.guides_locked {
-            return Err(ShellError::Unavailable("the guides are locked".to_owned()));
-        }
-        match self.selected_mark {
-            Some(GuideMark::Time(time)) => self.guides.retain(|guide| guide.0 != time),
-            Some(GuideMark::Row(row)) => self.horizontal.retain(|guide| *guide != row),
-            None => return Ok(()),
-        }
-        self.selected_mark = None;
-        Ok(())
-    }
-
     /// Timeline time for a pixel measured from the left of the lanes.
     #[must_use]
     pub fn lane_time_at(&self, x_in_view: f64) -> Option<Micros> {
@@ -3777,24 +4125,6 @@ impl Shell {
             return None;
         }
         Some(Micros(micros as i64))
-    }
-
-    fn guide_times(&self) -> Vec<Micros> {
-        if self.guides_shown {
-            self.guides.clone()
-        } else {
-            Vec::new()
-        }
-    }
-
-    fn clear_guides(&mut self) {
-        self.guides.clear();
-        self.guide_preview = None;
-        self.horizontal.clear();
-        self.horizontal_preview = None;
-        self.selected_mark = None;
-        self.guides_shown = true;
-        self.guides_locked = false;
     }
 
     pub fn inspection(&self) -> Option<Inspection> {
@@ -4254,6 +4584,40 @@ impl Shell {
     /// changed meanwhile.
     pub fn transcribe(&mut self) -> Result<(), ShellError> {
         let clip = self.selected_speech()?;
+        self.hear_job("Transcribe", clip, |shell, clip, words| {
+            shell.write_caption(clip, words)
+        })
+    }
+
+    /// The selected caption was heard from a clip still on the timeline, so
+    /// Re-run captions can hear it again.
+    #[must_use]
+    pub fn rerun_caption_enabled(&self) -> bool {
+        self.rerun_target().is_ok()
+    }
+
+    /// Hear the clip the selected caption was heard from again and give the
+    /// caption the new words, keeping its look. One undo restores the old
+    /// words. The local speech model runs as a job.
+    pub fn rerun_caption(&mut self) -> Result<(), ShellError> {
+        let (caption, clip) = self.rerun_target()?;
+        self.hear_job("Re-run captions", clip, move |shell, clip, words| {
+            shell.write_rerun(&caption, clip, &words)
+        })
+    }
+
+    /// Hear `clip` with the local speech model as a job, then `land` the
+    /// words, unless the clip changed meanwhile.
+    fn hear_job(
+        &mut self,
+        label: &str,
+        clip: HeardClip,
+        land: impl FnOnce(&mut Shell, &HeardClip, WordColumns) -> Result<(), ShellError>
+        + Send
+        + 'static,
+    ) -> Result<(), ShellError> {
+        // The draft keeps a copied file's path inside the project folder.
+        let file = self.sound_file(&clip.path)?;
         self.refuse_busy()?;
         let loaded = self.speech.borrow_mut().take();
         if loaded.is_none() && !speech_model::speech_model_here() {
@@ -4262,7 +4626,7 @@ impl Shell {
                 "the speech model is not on this machine".to_owned(),
             ));
         }
-        self.start_job("Transcribe", move |progress| {
+        self.start_job(label, move |progress| {
             let recognizer = match loaded {
                 Some(recognizer) => Ok(recognizer),
                 None => {
@@ -4273,7 +4637,7 @@ impl Shell {
             let (recognizer, words) = match recognizer {
                 Ok(recognizer) => {
                     progress.stage("Listening");
-                    let words = heard_words(&recognizer, &mut FileSource::new(&clip.path), &clip);
+                    let words = heard_words(&recognizer, &mut FileSource::new(&file), &clip);
                     (Some(recognizer), words)
                 }
                 Err(error) => (None, Err(error)),
@@ -4284,9 +4648,64 @@ impl Shell {
                 }
                 let words = words?;
                 shell.still_heard(&clip)?;
-                shell.write_caption(&clip, words)
+                land(shell, &clip, words)
             })
         })
+    }
+
+    /// The selected caption and the clip it was heard from.
+    fn rerun_target(&self) -> Result<(SegmentId, HeardClip), ShellError> {
+        let caption = self.text_segment()?;
+        self.refuse_locked(&caption)?;
+        let draft = self.session_draft()?;
+        let source = cutlass_transcription::caption_source(draft, &caption).map_err(heard_error)?;
+        Ok((caption, self.heard_clip(&source)?))
+    }
+
+    fn write_rerun(
+        &mut self,
+        caption: &SegmentId,
+        clip: &HeardClip,
+        words: &WordColumns,
+    ) -> Result<(), ShellError> {
+        let face = self.face.name().to_owned();
+        let mut next_id = self.next_id;
+        let mut fresh = |prefix: &str| {
+            next_id = next_id.saturating_add(1);
+            format!("{prefix}-{next_id}")
+        };
+        let requests = cutlass_transcription::rerun_requests(
+            self.session_draft()?,
+            caption,
+            clip,
+            words,
+            &face,
+            &mut fresh,
+        )
+        .map_err(heard_error);
+        self.next_id = next_id;
+        let requests = requests?;
+        // The re-run lines replace the selected caption: the one now under
+        // its start is selected.
+        let start = self
+            .session_draft()
+            .ok()
+            .and_then(|draft| placed(draft, caption).map(|(segment, _)| segment.target.start));
+        self.apply_requests(&requests)?;
+        let lines = match requests.first() {
+            Some(Request::RecaptionClip { lines, .. }) => lines.clone(),
+            _ => Vec::new(),
+        };
+        let picked = lines
+            .iter()
+            .rev()
+            .find(|line| start.is_some_and(|start| line.target.start <= start))
+            .or_else(|| lines.first())
+            .map(|line| line.segment_id.clone());
+        if picked.is_some() {
+            self.select(picked);
+        }
+        Ok(())
     }
 
     /// The clip a transcript was heard from is still the same length and
@@ -4352,6 +4771,7 @@ impl Shell {
     /// job stays until its thread ends, so a new one waits for it.
     pub fn cancel_job(&mut self) {
         if let Some(running) = self.job.as_mut() {
+            cutlass_logger::info!("job {} cancel asked", running.job.view().label);
             running.job.cancel();
             running.stopping = true;
         }
@@ -4368,6 +4788,7 @@ impl Shell {
             crate::jobs::Poll::Lost => None,
         };
         let label = running.job.view().label;
+        let elapsed = running.job.elapsed();
         let same_project = running.project == self.path;
         let stopping = running.stopping;
         self.job = None;
@@ -4381,15 +4802,24 @@ impl Shell {
                 "{label} stopped unexpectedly"
             ))),
         };
+        match &result {
+            Ok(()) if stopping => {
+                cutlass_logger::info!("job {label} cancelled after {elapsed:.1?}");
+            }
+            Ok(()) => cutlass_logger::info!("job {label} finished in {elapsed:.1?}"),
+            Err(error) => {
+                cutlass_logger::error!("job {label} failed after {elapsed:.1?}: {error}");
+            }
+        }
         if let Err(error) = result {
-            self.set_notice(error.to_string());
+            self.notice_error(&error);
         }
         if stopping {
             self.waiting_imports.clear();
         } else if let Some(next) = self.waiting_imports.pop_front() {
             if let Err(error) = self.start_import(&next) {
                 self.waiting_imports.clear();
-                self.set_notice(error.to_string());
+                self.notice_error(&error);
             }
             return self.job.is_some();
         }
@@ -4446,6 +4876,19 @@ impl Shell {
         self.write_caption(&clip, words)
     }
 
+    /// Hear the selected caption's clip again with `recognizer`. Tests pass
+    /// a stand-in so they do not load the speech model.
+    #[cfg(test)]
+    fn rerun_caption_with(
+        &mut self,
+        recognizer: &dyn Recognizer,
+        source: &mut dyn PcmSource,
+    ) -> Result<(), ShellError> {
+        let (caption, clip) = self.rerun_target()?;
+        let words = heard_words(recognizer, source, &clip)?;
+        self.write_rerun(&caption, &clip, &words)
+    }
+
     fn selected_speech(&self) -> Result<HeardClip, ShellError> {
         let Some(segment_id) = self.selected().cloned() else {
             return Err(if self.session.is_none() {
@@ -4469,10 +4912,13 @@ impl Shell {
             next_id = next_id.saturating_add(1);
             format!("{prefix}-{next_id}")
         };
-        let request =
-            caption_request(self.session_draft()?, clip, words, &mut fresh).map_err(heard_error);
+        // One caption clip per line, back to back, as one undo step.
+        // Captions are set in the shell's face, as a new title is.
+        let face = self.face.name().to_owned();
+        let requests = caption_requests(self.session_draft()?, clip, words, &face, &mut fresh)
+            .map_err(heard_error);
         self.next_id = next_id;
-        self.apply(request?)
+        self.apply_requests(&requests?)
     }
 
     /// The selected clip is a video, so its sound can be placed on its own clip.
@@ -4548,15 +4994,18 @@ impl Shell {
 
     fn sound_file(&self, stored: &str) -> Result<PathBuf, ShellError> {
         let path = Path::new(stored);
-        if stored.is_empty()
-            || path
-                .components()
-                .any(|component| matches!(component, std::path::Component::ParentDir))
-        {
+        if stored.is_empty() {
             return Err(ShellError::Unavailable("the clip has no sound".to_owned()));
         }
         if path.is_absolute() {
             return Ok(path.to_path_buf());
+        }
+        // A relative path stays inside the project folder.
+        if path
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+        {
+            return Err(ShellError::Unavailable("the clip has no sound".to_owned()));
         }
         Ok(match &self.path {
             Some(root) => root.join(path),
@@ -5807,7 +6256,6 @@ impl Shell {
             stored_start,
         });
         self.selected_beat = None;
-        self.selected_mark = None;
         self.selection.clear();
     }
 
@@ -5928,7 +6376,6 @@ impl Shell {
         }
         self.selected_beat = Some(BeatPick { segment_id, source });
         self.selected_marker = None;
-        self.selected_mark = None;
         self.selection.clear();
     }
 
@@ -6085,8 +6532,36 @@ impl Shell {
         Ok(())
     }
 
+    /// Show `message` under the timeline, and record it at INFO with the
+    /// place that raised it.
+    #[track_caller]
     pub fn set_notice(&mut self, message: impl Into<String>) {
-        self.notice = message.into();
+        let message = message.into();
+        let place = std::panic::Location::caller();
+        cutlass_logger::info!(
+            "notice ({}:{}): {message}",
+            notice_file(place.file()),
+            place.line()
+        );
+        self.show_notice(message);
+    }
+
+    /// Show a refusal or failure under the timeline, and record it at WARN
+    /// with the place that raised it, so the log keeps the cause.
+    #[track_caller]
+    pub fn notice_error(&mut self, error: &dyn std::fmt::Display) {
+        let message = error.to_string();
+        let place = std::panic::Location::caller();
+        cutlass_logger::warn!(
+            "notice ({}:{}): {message}",
+            notice_file(place.file()),
+            place.line()
+        );
+        self.show_notice(message);
+    }
+
+    fn show_notice(&mut self, message: String) {
+        self.notice = message;
         self.notice_since = Instant::now();
     }
 
@@ -6114,6 +6589,7 @@ impl Shell {
     /// job's progress; Cancel leaves no file. A codec this machine cannot
     /// encode is refused before anything is written.
     pub fn export(&mut self, request: ExportRequest) -> Result<(), ShellError> {
+        cutlass_logger::info!("export asked: {request:?}");
         if request.codec == CodecId::Png {
             return self.export_png(request);
         }
@@ -6450,7 +6926,8 @@ impl Shell {
                     )
                     .map(|_| ()),
                 };
-                if written.is_err() {
+                if let Err(error) = &written {
+                    cutlass_logger::error!("export {}: {error}", path.display());
                     break;
                 }
             }
@@ -6689,10 +7166,46 @@ impl Shell {
     }
 
     fn apply(&mut self, request: Request) -> Result<(), ShellError> {
+        if self.all_captions
+            && let Some(draft) = self.draft()
+        {
+            let every = cutlass_editor::for_every_caption(draft, &request);
+            return self.apply_requests(&every);
+        }
         self.apply_requests(std::slice::from_ref(&request))
     }
 
+    /// Whether a caption's look and place changes style every caption on
+    /// its subtitle row. On at first.
+    #[must_use]
+    pub fn all_captions(&self) -> bool {
+        self.all_captions
+    }
+
+    /// Style every caption on a subtitle row together, or one at a time.
+    pub fn set_all_captions(&mut self, on: bool) {
+        self.all_captions = on;
+    }
+
+    /// The selected clip is a caption on a subtitle row, where "Apply to
+    /// all main captions" reaches.
+    #[must_use]
+    pub fn on_main_captions(&self) -> bool {
+        match (self.draft(), self.selected()) {
+            (Some(draft), Some(segment_id)) => {
+                cutlass_editor::main_caption_lane(draft, segment_id).is_some()
+            }
+            _ => false,
+        }
+    }
+
     fn apply_requests(&mut self, requests: &[Request]) -> Result<(), ShellError> {
+        if let Some(lane) = self.gap_lane.take() {
+            let mut all = Vec::with_capacity(requests.len() + 1);
+            all.push(lane);
+            all.extend_from_slice(requests);
+            return self.apply_requests(&all);
+        }
         let kind = requests
             .first()
             .map(|request| (std::mem::discriminant(request), self.selected().cloned()));
@@ -6704,12 +7217,34 @@ impl Shell {
                 .held_edit
                 .as_ref()
                 .is_some_and(|(held, at)| Some(held) == kind.as_ref() && *at == revision);
-        let next = if joins {
+        let applied = if joins {
             session.fold(revision, requests)
         } else {
             session.apply(revision, requests)
+        };
+        let next = match applied {
+            Ok(next) => next,
+            Err(error) => {
+                let error = ShellError::Edit(error);
+                cutlass_logger::warn!(
+                    "edit {} refused at revision {revision}: {error}",
+                    request_names(requests)
+                );
+                return Err(error);
+            }
+        };
+        if joins {
+            // A held slider folds one edit per frame; only DEBUG keeps those.
+            cutlass_logger::debug!(
+                "edit {} folded into revision {next}",
+                request_names(requests)
+            );
+        } else {
+            cutlass_logger::info!(
+                "edit {}: revision {revision} to {next}",
+                request_names(requests)
+            );
         }
-        .map_err(ShellError::Edit)?;
         self.held_edit = if self.holding {
             kind.map(|kind| (kind, next))
         } else {
@@ -6732,8 +7267,14 @@ impl Shell {
         self.draft().ok_or(ShellError::NoProject)
     }
 
+    /// A new id `prefix-N`, past every `prefix-N` the open draft already
+    /// holds. The counter starts at zero each launch, so a reopened project
+    /// would otherwise get ids it already uses and the edit would be refused.
     fn fresh(&mut self, prefix: &str) -> String {
-        self.next_id = self.next_id.saturating_add(1);
+        let taken = self
+            .draft()
+            .map_or(0, |draft| highest_suffix(draft, prefix));
+        self.next_id = self.next_id.max(taken).saturating_add(1);
         format!("{prefix}-{}", self.next_id)
     }
 
@@ -7102,6 +7643,39 @@ pub const EMPTY_SPAN: Micros = Micros(10_000_000);
 
 /// [`EMPTY_SPAN`] across a third of `lane_width`, no closer than the
 /// finest ruler step.
+/// The largest `N` of any string `prefix-N` in `draft`, or zero.
+fn highest_suffix(draft: &Draft, prefix: &str) -> u64 {
+    fn walk(value: &serde_json::Value, prefix: &str, best: &mut u64) {
+        match value {
+            serde_json::Value::String(text) => {
+                let number = text
+                    .strip_prefix(prefix)
+                    .and_then(|rest| rest.strip_prefix('-'))
+                    .and_then(|digits| digits.parse::<u64>().ok());
+                if let Some(number) = number {
+                    *best = (*best).max(number);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    walk(item, prefix, best);
+                }
+            }
+            serde_json::Value::Object(map) => {
+                for item in map.values() {
+                    walk(item, prefix, best);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut best = 0;
+    if let Ok(value) = serde_json::to_value(draft) {
+        walk(&value, prefix, &mut best);
+    }
+    best
+}
+
 fn empty_pixel_size(lane_width: f64, rate: FrameRate) -> Option<f64> {
     let size = lane_width / 3.0 / EMPTY_SPAN.0 as f64;
     if !size.is_finite() || size <= 0.0 {
@@ -7122,6 +7696,8 @@ fn heard_error(miss: HeardMiss) -> ShellError {
             HeardMiss::NoSound => "the clip has no sound",
             HeardMiss::NothingHeard => "nothing was heard",
             HeardMiss::BadClock => "a word clock does not fit the clip",
+            HeardMiss::NoSource => "this caption was not heard from a clip on the timeline",
+            HeardMiss::NotCaption => "that clip is not a caption",
         }
         .to_owned(),
     )
@@ -7626,6 +8202,64 @@ struct CardWave {
     levels: Arc<[f32]>,
 }
 
+/// The names of the settings that differ, as `playback.proxies`, one level
+/// deep. Values stay out of the log: an MCP server's entry may carry a key.
+fn changed_settings(before: &Settings, after: &Settings) -> Vec<String> {
+    let (Ok(serde_json::Value::Object(before)), Ok(serde_json::Value::Object(after))) =
+        (serde_json::to_value(before), serde_json::to_value(after))
+    else {
+        return vec!["(unreadable)".to_owned()];
+    };
+    let mut names = Vec::new();
+    let keys: std::collections::BTreeSet<&String> = before.keys().chain(after.keys()).collect();
+    for key in keys {
+        let (old, new) = (before.get(key), after.get(key));
+        if old == new {
+            continue;
+        }
+        match (old, new) {
+            (Some(serde_json::Value::Object(old)), Some(serde_json::Value::Object(new))) => {
+                let inner: std::collections::BTreeSet<&String> =
+                    old.keys().chain(new.keys()).collect();
+                for name in inner {
+                    if old.get(name) != new.get(name) {
+                        names.push(format!("{key}.{name}"));
+                    }
+                }
+            }
+            _ => names.push(key.clone()),
+        }
+    }
+    names
+}
+
+/// The kinds in one combo, as `move+trim`. Field values stay out of the
+/// log: a caption's words are the user's text.
+fn request_names(requests: &[Request]) -> String {
+    if requests.is_empty() {
+        return "(none)".to_owned();
+    }
+    let mut names = String::new();
+    for (index, request) in requests.iter().enumerate() {
+        if index == REQUEST_NAMES_LOGGED {
+            names.push_str(&format!("+{} more", requests.len() - index));
+            break;
+        }
+        if index > 0 {
+            names.push('+');
+        }
+        names.push_str(cutlass_agent::request_name(request));
+    }
+    names
+}
+
+const REQUEST_NAMES_LOGGED: usize = 8;
+
+/// The source file a notice came from, from `src/` on.
+fn notice_file(file: &str) -> &str {
+    file.find("src/").map_or(file, |at| &file[at..])
+}
+
 #[cfg(test)]
 mod tests {
     use super::{ExportRequest, SHORT_SIDES, Shell, ShellError};
@@ -7815,6 +8449,32 @@ mod tests {
     pub(super) fn shell() -> Shell {
         let (decoders, encoders) = crate::register_codecs();
         Shell::new(decoders, encoders, Settings::default())
+    }
+
+    #[test]
+    fn the_side_panels_stop_at_their_minimum_widths() {
+        use crate::tokens;
+        let mut desktop = shell();
+        let window = 1440.0;
+        desktop.drag_library(-2000.0, window);
+        desktop.drag_inspector(2000.0, window);
+        assert_eq!(desktop.library_width(), tokens::LIBRARY_MIN);
+        assert_eq!(desktop.inspector_width(), tokens::INSPECTOR_MIN);
+        // Wide drags stop where the preview keeps its minimum.
+        desktop.drag_library(2000.0, window);
+        desktop.drag_inspector(-2000.0, window);
+        assert!(desktop.preview_width(window) >= tokens::PREVIEW_MIN_WIDTH - 0.5);
+        // The narrowest window fits both panels at their minimum and the
+        // preview, and the defaults sit at or above the minimums.
+        let narrowest = tokens::LIBRARY_MIN
+            + tokens::INSPECTOR_MIN
+            + tokens::SPLIT * 2.0
+            + tokens::PREVIEW_MIN_WIDTH;
+        assert!(narrowest <= tokens::MIN_WINDOW_WIDTH);
+        const { assert!(tokens::LIBRARY_WIDTH >= tokens::LIBRARY_MIN) };
+        const { assert!(tokens::INSPECTOR_WIDTH >= tokens::INSPECTOR_MIN) };
+        let fresh = shell();
+        assert!(fresh.preview_width(tokens::MIN_WINDOW_WIDTH) >= tokens::PREVIEW_MIN_WIDTH);
     }
 
     /// Four seconds of a 3840x2160 60 fps BT.2020 HLG movie, repainted at
@@ -8092,6 +8752,81 @@ mod tests {
         assert_eq!(desktop.picking().map(|p| p.clicks.len()), Some(2));
         desktop.stop_picking();
         assert!(desktop.picking().is_none());
+    }
+
+    #[test]
+    fn a_seek_keeps_the_whole_last_frame_until_the_asked_one_is_ready() {
+        let movie = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../local-files/12471039-uhd_3840_2160_24fps.mp4");
+        if !movie.is_file() {
+            eprintln!("skipped: the 4K movie is missing");
+            return;
+        }
+        let instance = eframe::wgpu::Instance::new(
+            eframe::wgpu::InstanceDescriptor::new_without_display_handle(),
+        );
+        let Ok(state) = pollster::block_on(eframe::egui_wgpu::RenderState::create(
+            &eframe::egui_wgpu::WgpuConfiguration::default(),
+            &instance,
+            None,
+            eframe::egui_wgpu::RendererOptions::default(),
+        )) else {
+            eprintln!("skipped: no GPU");
+            return;
+        };
+        let temp = Temp::new();
+        let mut draft = crate::open_movie::movie_draft(&movie, 3840, 2160, false).unwrap();
+        draft.tracks[0].segments[0].target = TimeRange::new(0, 9_000_000);
+        draft.tracks[0].segments[0].source_range = Some(TimeRange::new(0, 9_000_000));
+        draft.materials.videos[0].duration = Micros(9_000_000);
+        draft.duration = Micros(9_000_000);
+        // Two clips of the movie, so a seek can go back into a clip seen
+        // earlier.
+        let mut second = draft.tracks[0].segments[0].clone();
+        second.id = SegmentId::new("second");
+        second.target = TimeRange::new(4_500_000, 4_500_000);
+        second.source_range = Some(TimeRange::new(4_500_000, 4_500_000));
+        draft.tracks[0].segments[0].target = TimeRange::new(0, 4_500_000);
+        draft.tracks[0].segments[0].source_range = Some(TimeRange::new(0, 4_500_000));
+        draft.tracks[0].segments.push(second);
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.attach_gpu(&state);
+        let canvas = |desktop: &Shell| {
+            desktop
+                .gpu
+                .as_ref()
+                .and_then(crate::gpu::Preview::read)
+                .unwrap()
+        };
+        desktop.seek(Micros(1_000_000));
+        desktop.preview_texture().unwrap().expect("first frame");
+        // Into the second clip, back into the first one away from where it
+        // was seen, then far in each: each paint before the asked frame is
+        // ready shows the frame that was there.
+        for to in [6_000_000, 3_100_000, 8_200_000, 400_000, 5_000_000] {
+            let before = canvas(&desktop);
+            desktop.seek(Micros(to));
+            let mut paints = 0;
+            loop {
+                desktop.preview_texture().unwrap().expect("frame");
+                if !desktop.preview_pending() {
+                    break;
+                }
+                assert!(
+                    canvas(&desktop) == before,
+                    "paint {paints} after seeking to {to} showed another frame"
+                );
+                assert!(paints < 2_000, "the asked frame never arrived");
+                std::thread::sleep(std::time::Duration::from_millis(2));
+                paints += 1;
+            }
+            assert!(
+                canvas(&desktop) != before,
+                "the seek to {to} showed its frame"
+            );
+        }
     }
 
     #[test]
@@ -8400,10 +9135,13 @@ mod tests {
             return;
         }
         let temp = Temp::new();
+        // An import copies the file in and keeps its path inside the project.
+        std::fs::create_dir_all(temp.path.join("Resources")).unwrap();
+        std::fs::copy(&sound, temp.path.join("Resources/talk.m4a")).unwrap();
         let mut draft = Draft::empty("draft");
         draft.materials.audios.push(MaterialAudio {
             id: MaterialId::new("talk"),
-            path: sound.display().to_string(),
+            path: "Resources/talk.m4a".to_owned(),
             duration: Micros(6_000_000),
             ..MaterialAudio::default()
         });
@@ -8441,6 +9179,95 @@ mod tests {
         );
         // The model stays loaded for the next transcript.
         assert!(desktop.speech.borrow().is_some());
+
+        // Re-run hears the same project-relative file again.
+        let caption = draft
+            .tracks
+            .iter()
+            .find(|track| track.kind == TrackType::Text)
+            .and_then(|track| track.segments.first())
+            .map(|segment| segment.id.clone())
+            .unwrap();
+        desktop.select(Some(caption));
+        assert!(desktop.rerun_caption_enabled());
+        desktop.set_caption_style("pop").unwrap();
+        let revision = desktop.revision();
+        desktop.rerun_caption().unwrap();
+        assert_eq!(
+            desktop.job().map(|job| job.label),
+            Some("Re-run captions".to_owned())
+        );
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(300);
+        while desktop.poll_job() && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(desktop.job().is_none(), "the re-run took too long");
+        assert_eq!(desktop.notice(), "", "{}", desktop.notice());
+        assert_eq!(
+            desktop.revision(),
+            revision.map(|r| r + 1),
+            "the re-run is one step"
+        );
+        let draft = desktop.draft().unwrap();
+        let text = draft
+            .materials
+            .texts
+            .iter()
+            .find(|text| !text.words.text.is_empty())
+            .expect("the caption keeps words");
+        assert_eq!(text.caption_style, "pop");
+    }
+
+    #[test]
+    fn a_rerun_opens_the_heard_file_through_the_project_folder() {
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        draft.materials.audios.push(MaterialAudio {
+            id: MaterialId::new("talk"),
+            // A relative path may not step out of the project.
+            path: "../outside.m4a".to_owned(),
+            duration: Micros(2_000_000),
+            ..MaterialAudio::default()
+        });
+        let mut track = Track::main("sound");
+        track.kind = TrackType::Audio;
+        track
+            .segments
+            .push(Segment::new("talk", "talk", TimeRange::new(0, 2_000_000)));
+        draft.tracks.push(track);
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.select(Some(SegmentId::new("talk")));
+        assert_eq!(
+            desktop.transcribe().unwrap_err().to_string(),
+            "the clip has no sound"
+        );
+        let heard = CaptionStandIn {
+            words: vec![RecognizedWord {
+                text: "hi".to_owned(),
+                start_ms: 0,
+                end_ms: 400,
+            }],
+        };
+        desktop.transcribe_with(&heard, &mut CaptionTone).unwrap();
+        let caption = desktop
+            .draft()
+            .unwrap()
+            .tracks
+            .iter()
+            .find(|track| track.kind == TrackType::Text)
+            .map(|track| track.segments[0].id.clone())
+            .unwrap();
+        desktop.select(Some(caption));
+        assert!(desktop.rerun_caption_enabled());
+        let revision = desktop.revision();
+        assert_eq!(
+            desktop.rerun_caption().unwrap_err().to_string(),
+            "the clip has no sound"
+        );
+        assert!(desktop.job().is_none());
+        assert_eq!(desktop.revision(), revision);
     }
 
     #[test]
@@ -9204,12 +10031,138 @@ mod tests {
     }
 
     #[test]
+    fn open_edit_undo_redo_and_save_are_logged() {
+        crate::test_log::path();
+        let temp = Temp::new();
+        empty_project(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.add_track(TrackType::Audio).unwrap();
+        let missing = cutlass_model::TrackId::new("log-test-missing-track");
+        desktop.remove_track(&missing).unwrap_err();
+        desktop.undo().unwrap();
+        desktop.redo().unwrap();
+        desktop.save().unwrap();
+        let missing_folder = temp.path.join("log-test-not-a-project");
+        desktop.open_folder(&missing_folder).unwrap_err();
+        let log = crate::test_log::text();
+        let place = temp.path.display().to_string();
+        let has = |level: &str, words: &str| {
+            log.lines()
+                .any(|line| line.contains(&format!(" {level} ")) && line.contains(words))
+        };
+        assert!(
+            has("INFO", &format!("opened project {place} at revision")),
+            "{log}"
+        );
+        assert!(has("INFO", "edit insert_track: revision"), "{log}");
+        assert!(
+            has("WARN", "edit remove_track refused at revision"),
+            "{log}"
+        );
+        assert!(has("INFO", "undo: revision"), "{log}");
+        assert!(has("INFO", "redo: revision"), "{log}");
+        assert!(has("INFO", &format!("saved {place} at revision")), "{log}");
+        assert!(
+            has(
+                "ERROR",
+                &format!("open project {}: ", missing_folder.display())
+            ),
+            "{log}"
+        );
+    }
+
+    #[test]
+    fn a_settings_change_logs_its_names_and_not_its_values() {
+        let before = Settings::default();
+        let mut after = before.clone();
+        after.playback.proxies = !after.playback.proxies;
+        after.memory = !after.memory;
+        after
+            .rest
+            .insert("secret_key".to_owned(), serde_json::json!("sk-do-not-log"));
+        let names = super::changed_settings(&before, &after);
+        assert_eq!(names, ["memory", "playback.proxies", "secret_key"]);
+        assert!(super::changed_settings(&before, &before).is_empty());
+        crate::test_log::path();
+        let mut desktop = shell();
+        desktop.update_settings(|settings| settings.step_cap += 1);
+        let log = crate::test_log::text();
+        assert!(log.contains("settings changed: step_cap"), "{log}");
+        assert!(!log.contains("sk-do-not-log"), "{log}");
+    }
+
+    #[test]
+    fn a_preview_error_is_logged_once_until_it_changes_or_clears() {
+        crate::test_log::path();
+        let mut desktop = shell();
+        let failing = ShellError::Eval("preview-log-token one".to_owned());
+        for _ in 0..50 {
+            desktop.note_preview(Some(&failing));
+        }
+        desktop.note_preview(Some(&ShellError::Eval("preview-log-token two".to_owned())));
+        for _ in 0..50 {
+            desktop.note_preview(None);
+        }
+        let log = crate::test_log::text();
+        let count = |words: &str| log.lines().filter(|line| line.contains(words)).count();
+        assert_eq!(count("preview-log-token one"), 1, "{log}");
+        assert_eq!(
+            count("draws again after: preview-log-token two"),
+            1,
+            "{log}"
+        );
+        assert_eq!(count("preview-log-token two"), 2, "{log}");
+    }
+
+    #[test]
+    fn a_combo_logs_its_kinds_and_not_its_words() {
+        use cutlass_session::Request;
+        let words = Request::RenameTrack {
+            track_id: cutlass_model::TrackId::new("t"),
+            name: "secret words".to_owned(),
+        };
+        let insert = Request::InsertTrack {
+            track_id: cutlass_model::TrackId::new("u"),
+            kind: TrackType::Video,
+        };
+        assert_eq!(super::request_names(&[]), "(none)");
+        assert_eq!(
+            super::request_names(&[insert.clone(), words.clone()]),
+            "insert_track+rename_track"
+        );
+        let many = vec![words; 11];
+        let names = super::request_names(&many);
+        assert!(names.ends_with("+3 more"), "{names}");
+        assert!(!names.contains("secret"), "{names}");
+    }
+
+    #[test]
+    fn a_notice_is_logged_with_its_level_and_place() {
+        crate::test_log::path();
+        let mut desktop = shell();
+        desktop.set_notice("notice-info-token");
+        desktop.notice_error(&ShellError::NoProject);
+        let refusal = ShellError::NoProject.to_string();
+        assert_eq!(desktop.notice, refusal);
+        let log = crate::test_log::text();
+        let info = log
+            .lines()
+            .find(|line| line.contains("notice-info-token"))
+            .unwrap_or_default();
+        assert!(info.contains(" INFO "), "{log}");
+        assert!(info.contains("notice (src/shell.rs:"), "{log}");
+        assert!(
+            log.lines().any(|line| line.contains(" WARN ")
+                && line.contains("notice (src/shell.rs:")
+                && line.contains(&refusal)),
+            "{log}"
+        );
+    }
+
+    #[test]
     fn an_import_failure_is_written_to_the_log() {
-        let log_dir =
-            std::env::temp_dir().join(format!("cutlass-import-log-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&log_dir);
-        std::fs::create_dir_all(&log_dir).unwrap();
-        cutlass_logger::init(&log_dir).unwrap();
+        crate::test_log::path();
         let temp = Temp::new();
         empty_project(&temp.path);
         let mut desktop = shell();
@@ -9217,10 +10170,9 @@ mod tests {
         let junk = temp.path.join("notes.txt");
         std::fs::write(&junk, b"hello").unwrap();
         let error = desktop.import_file(&junk).unwrap_err();
-        let log = std::fs::read_to_string(log_dir.join(cutlass_logger::FILE_NAME)).unwrap();
+        let log = crate::test_log::text();
         assert!(log.contains(&error.to_string()), "{log}");
         assert!(log.contains("notes.txt"), "{log}");
-        let _ = std::fs::remove_dir_all(&log_dir);
     }
 
     #[test]
@@ -10757,10 +11709,21 @@ mod tests {
         let mut desktop = shell();
         desktop.open_folder(&temp.path).unwrap();
         let revision = desktop.revision();
-        let time = desktop.seek_ruler(1_000.0 * desktop.pixel_size()).unwrap();
-        assert_eq!(time, Micros(1_000));
-        assert_eq!(desktop.playhead(), Micros(1_000));
+        // 40 ms lands on frame 1 at 30 fps, not between frames 1 and 2.
+        let time = desktop.seek_ruler(40_000.0 * desktop.pixel_size()).unwrap();
+        assert_eq!(time, Micros(33_334));
+        assert_eq!(desktop.playhead(), Micros(33_334));
         assert_eq!(desktop.revision(), revision);
+        // 20 ms is nearer frame 1 than frame 0.
+        assert_eq!(
+            desktop.seek_ruler(20_000.0 * desktop.pixel_size()).unwrap(),
+            Micros(33_334)
+        );
+        // A pause between frames lands on the start of the shown one.
+        desktop.seek(Micros(80_000));
+        desktop.play();
+        desktop.pause();
+        assert_eq!(desktop.playhead(), Micros(66_667));
 
         desktop.play();
         desktop.set_seek_during_playback(SeekDuringPlayback::Pause);
@@ -11039,7 +12002,8 @@ mod tests {
         );
         let at_left = desktop.seek_ruler(0.0).unwrap();
         assert!(at_left.0 > 0, "{at_left:?}");
-        assert!(at_left.0 <= desktop.view_origin().0.saturating_add(1));
+        // The frame nearest the lane's left edge: at most one frame past it.
+        assert!(at_left.0 <= desktop.view_origin().0.saturating_add(33_334));
         desktop.seek(Micros(0));
         assert_eq!(desktop.view_origin(), Micros(0));
         desktop.zoom_fit().unwrap();
@@ -12639,8 +13603,9 @@ mod tests {
         Folder::new(draft).save(&temp.path).unwrap();
 
         let mut desktop = shell();
-        desktop.open_folder(&temp.path).unwrap();
+        // The face comes first: opening sets a caption with no font file in it.
         desktop.use_face("sample.ttf", SAMPLE_TTF.to_vec());
+        desktop.open_folder(&temp.path).unwrap();
         desktop.select(None);
         assert_eq!(
             desktop.set_text_color("#FFFFFF").unwrap_err().to_string(),
@@ -14135,6 +15100,32 @@ mod tests {
     }
 
     #[test]
+    fn a_dragged_clip_snaps_its_end_and_the_line_marks_the_end() {
+        let temp = Temp::new();
+        trim_project(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.seek(Micros(2_000_000));
+        let next = SegmentId::new("next");
+        let y = crate::tokens::LANE_HEIGHT / 2.0;
+        // "next" is half a second long: a start 1 ms early puts its end 1 ms from the playhead.
+        desktop.preview_move(next.clone(), lane_time(&desktop, 1_499_000.0), y);
+        let preview = desktop.move_preview().expect("the drag is showing");
+        assert_eq!(preview.start, Micros(1_500_000));
+        assert_eq!(desktop.snap_line(), Some(Micros(2_000_000)));
+        desktop
+            .drag_segment(next.clone(), lane_time(&desktop, 1_499_000.0), y)
+            .unwrap();
+        let draft = desktop.draft().unwrap();
+        let moved = draft.tracks[0]
+            .segments
+            .iter()
+            .find(|segment| segment.id == next)
+            .unwrap();
+        assert_eq!(moved.target.start, Micros(1_500_000));
+    }
+
+    #[test]
     fn dragging_a_clip_onto_a_taken_spot_opens_a_lane_in_one_undo_step() {
         let temp = Temp::new();
         trim_project(&temp.path);
@@ -14149,6 +15140,7 @@ mod tests {
         desktop.preview_move(next.clone(), x, y);
         let preview = desktop.move_preview().expect("the drag is showing");
         assert_eq!(preview.track_id.as_str(), "new-lane");
+        assert_eq!(desktop.new_lane_preview(), Some((0, TrackType::Video)));
         assert_eq!(desktop.revision(), revision);
         assert_eq!(desktop.draft().unwrap().tracks, before);
 
@@ -14171,104 +15163,176 @@ mod tests {
     }
 
     #[test]
-    fn a_guide_pulls_a_move_and_delete_removes_it() {
+    fn a_text_card_over_an_overlay_marks_the_new_lane_it_really_opens() {
         let temp = Temp::new();
-        trim_project(&temp.path);
+        let mut draft = Draft::empty("draft");
+        draft.config.maintrack_adsorb = false;
+        draft.canvas_config.width = 2;
+        draft.canvas_config.height = 1;
+        draft.tracks[0]
+            .segments
+            .push(Segment::new("low", "color", TimeRange::new(0, 2_000_000)));
+        let mut overlay = Track::main(cutlass_model::TrackId::new("overlay"));
+        overlay.flag = cutlass_model::TrackFlag::SubVideo;
+        overlay
+            .segments
+            .push(Segment::new("high", "color", TimeRange::new(0, 2_000_000)));
+        draft.tracks.insert(0, overlay);
+        Folder::new(draft).save(&temp.path).unwrap();
         let mut desktop = shell();
         desktop.open_folder(&temp.path).unwrap();
-        desktop.add_guide(Micros(1_500_000)).unwrap();
-        let id = desktop.draft().unwrap().tracks[0].segments[0].id.clone();
-        desktop.preview_move(id.clone(), lane_time(&desktop, 1_501_000.0), 24.0);
-        let preview = desktop.move_preview().expect("preview");
-        assert_eq!(preview.start, Micros(1_500_000));
-        desktop
-            .trim_edge(id.clone(), TrimEdge::End, lane_time(&desktop, 1_501_000.0))
+        let card = cutlass_editor::title_style("title:end-card")
+            .unwrap()
+            .card_id();
+        let overlay_row = crate::tokens::LANE_HEIGHT / 2.0;
+        let x = lane_time(&desktop, 500_000.0);
+
+        // Text never sits on a video lane: the mark is a new lane, not the overlay.
+        let landing = desktop
+            .library_landing(&card, x, overlay_row, None)
             .unwrap();
+        let super::LibraryLanding::NewLane { row, kind, .. } = landing else {
+            panic!("a text card marks the overlay it cannot go on: {landing:?}");
+        };
+        assert_eq!(kind, TrackType::Text);
+        assert_eq!(row, 0, "the text lane opens above the overlay");
+
+        desktop.drop_title(&card, x, overlay_row).unwrap();
+        let draft = desktop.draft().unwrap();
         assert_eq!(
-            desktop.draft().unwrap().tracks[0].segments[0]
-                .target
-                .duration,
-            Micros(1_500_000)
+            draft.tracks[0].kind,
+            TrackType::Text,
+            "it landed where marked"
         );
-        desktop.undo().unwrap();
-        desktop.select(Some(id));
-        desktop.select_guide(Micros(1_500_000));
-        assert!(desktop.selection().is_empty());
-        desktop.run_shortcut("delete").unwrap();
-        assert!(desktop.guides().is_empty());
-        desktop.add_guide(Micros(2_000_000)).unwrap();
-        desktop.toggle_guide_lock();
-        let locked = desktop.add_guide(Micros(2_100_000)).unwrap_err();
-        assert_eq!(locked.to_string(), "the guides are locked");
-        assert_eq!(desktop.guides(), &[Micros(2_000_000)]);
-        desktop.toggle_guide_lock();
-        desktop.toggle_guides();
-        assert!(desktop.guides().is_empty());
-        desktop
-            .trim_edge(
-                desktop.draft().unwrap().tracks[0].segments[0].id.clone(),
-                TrimEdge::End,
-                lane_time(&desktop, 2_001_000.0),
-            )
+
+        // Over its own lane now, it marks that lane and the span it takes.
+        let landing = desktop
+            .library_landing(&card, lane_time(&desktop, 4_000_000.0), overlay_row, None)
             .unwrap();
-        assert_eq!(
-            desktop.draft().unwrap().tracks[0].segments[0]
-                .target
-                .duration,
-            Micros(2_001_000)
-        );
-        desktop.toggle_guides();
-        desktop
-            .trim_edge(
-                desktop.draft().unwrap().tracks[0].segments[0].id.clone(),
-                TrimEdge::End,
-                lane_time(&desktop, 2_000_500.0),
-            )
-            .unwrap();
-        assert_eq!(
-            desktop.draft().unwrap().tracks[0].segments[0]
-                .target
-                .duration,
-            Micros(2_000_000)
-        );
-        desktop.close_project().unwrap();
-        desktop.open_folder(&temp.path).unwrap();
-        assert!(desktop.guides().is_empty());
+        let text_lane = draft.tracks[0].id.clone();
+        assert!(matches!(
+            landing,
+            super::LibraryLanding::Row { ref track_id, duration, .. }
+                if *track_id == text_lane && duration == cutlass_editor::TITLE_LENGTH
+        ));
     }
 
     #[test]
-    fn a_horizontal_guide_stays_until_delete() {
+    fn a_library_card_dropped_in_a_gap_opens_its_own_lane_there() {
         let temp = Temp::new();
-        trim_project(&temp.path);
+        let mut draft = Draft::empty("draft");
+        draft.config.maintrack_adsorb = false;
+        draft.canvas_config.width = 2;
+        draft.canvas_config.height = 1;
+        draft.tracks[0]
+            .segments
+            .push(Segment::new("low", "color", TimeRange::new(0, 2_000_000)));
+        let mut words = Track::main(cutlass_model::TrackId::new("words"));
+        words.kind = TrackType::Text;
+        words.flag = cutlass_model::TrackFlag::None;
+        words
+            .segments
+            .push(Segment::new("hello", "text", TimeRange::new(0, 1_000_000)));
+        draft.tracks.insert(0, words);
+        Folder::new(draft).save(&temp.path).unwrap();
         let mut desktop = shell();
         desktop.open_folder(&temp.path).unwrap();
-        desktop.add_horizontal(400).unwrap();
-        desktop.add_horizontal(400).unwrap();
-        assert_eq!(desktop.horizontal_guides(), &[400]);
-        desktop.add_guide(Micros(1_000_000)).unwrap();
-        assert!(desktop.selected_horizontal().is_none());
-        desktop.select_horizontal(400);
-        assert!(desktop.selected_guide().is_none());
-        let id = desktop.draft().unwrap().tracks[0].segments[0].id.clone();
-        desktop.select(Some(id));
-        desktop.select_horizontal(400);
-        assert!(desktop.selection().is_empty());
-        desktop.run_shortcut("delete").unwrap();
-        assert!(desktop.horizontal_guides().is_empty());
-        assert_eq!(desktop.guides(), &[Micros(1_000_000)]);
-        desktop.add_horizontal(250).unwrap();
-        desktop.toggle_guide_lock();
-        let locked = desktop.add_horizontal(500).unwrap_err();
-        assert_eq!(locked.to_string(), "the guides are locked");
-        desktop.toggle_guide_lock();
-        desktop.toggle_guides();
-        assert!(desktop.horizontal_guides().is_empty());
-        desktop.toggle_guides();
-        assert_eq!(desktop.horizontal_guides(), &[250]);
-        desktop.close_project().unwrap();
+        let card = cutlass_editor::title_style("title:end-card")
+            .unwrap()
+            .card_id();
+        let x = lane_time(&desktop, 4_000_000.0);
+        let top_row = crate::tokens::LANE_HEIGHT / 2.0;
+        let before = desktop.draft().unwrap().tracks.clone();
+
+        // The text lane has room at four seconds, but the drop is above it.
+        let landing = desktop.library_landing(&card, x, top_row, Some(0));
+        assert!(
+            matches!(landing, Some(super::LibraryLanding::NewLane { row: 0, .. })),
+            "{landing:?}"
+        );
+        desktop.drop_library(&card, x, top_row, Some(0)).unwrap();
+        let tracks = &desktop.draft().unwrap().tracks;
+        assert_eq!(tracks.len(), before.len() + 1);
+        assert_eq!(tracks[0].kind, TrackType::Text);
+        assert_ne!(
+            tracks[0].id.as_str(),
+            "words",
+            "a lane opened above the text lane"
+        );
+        assert_eq!(tracks[0].segments.len(), 1);
+        assert_eq!(tracks[1].id.as_str(), "words");
+        assert_eq!(tracks[1].segments.len(), 1);
+        desktop.undo().unwrap();
+        assert_eq!(desktop.draft().unwrap().tracks, before, "one undo step");
+
+        // Text may not sit under main: that gap falls back to the drop rules,
+        // which put it on the text lane with room.
+        let under_main = desktop.lanes().len();
+        desktop
+            .drop_library(&card, x, top_row, Some(under_main))
+            .unwrap();
+        let tracks = &desktop.draft().unwrap().tracks;
+        assert_eq!(tracks.len(), before.len());
+        assert_eq!(tracks[0].segments.len(), 2);
+    }
+
+    #[test]
+    fn a_picture_dropped_above_main_opens_an_overlay() {
+        let temp = Temp::new();
+        empty_project(&temp.path);
+        let mut desktop = shell();
         desktop.open_folder(&temp.path).unwrap();
-        assert!(desktop.horizontal_guides().is_empty());
-        assert!(desktop.guides().is_empty());
+        let picture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../crates/engine/fixtures/pattern.png");
+        desktop.import_file(&picture).unwrap();
+        let id = desktop.draft().unwrap().materials.videos[0]
+            .id
+            .as_str()
+            .to_owned();
+        let y = crate::tokens::LANE_HEIGHT / 2.0;
+        desktop.drop_library(&id, 0.0, y, None).unwrap();
+        assert_eq!(desktop.draft().unwrap().tracks.len(), 1);
+
+        // Main has room after the first clip, but the drop is above main.
+        desktop.drop_library(&id, 0.0, y, Some(0)).unwrap();
+        let tracks = &desktop.draft().unwrap().tracks;
+        assert_eq!(tracks.len(), 2);
+        assert!(!tracks[0].is_main());
+        assert_eq!(tracks[0].flag, cutlass_model::TrackFlag::SubVideo);
+        assert_eq!(tracks[0].segments.len(), 1);
+        assert_eq!(tracks[1].segments.len(), 1);
+    }
+
+    #[test]
+    fn a_reopened_project_opens_a_new_lane_without_reusing_a_lane_id() {
+        let temp = Temp::new();
+        trim_project(&temp.path);
+        let next = SegmentId::new("next");
+        let y = crate::tokens::LANE_HEIGHT / 2.0;
+        let mut first = shell();
+        first.open_folder(&temp.path).unwrap();
+        let x = lane_time(&first, 400_000.0);
+        first.drag_segment(next.clone(), x, y).unwrap();
+        first.save().unwrap();
+        let lanes = first.draft().unwrap().tracks.len();
+        drop(first);
+
+        // A new launch counts ids from zero again.
+        let mut again = shell();
+        again.open_folder(&temp.path).unwrap();
+        let main_clip = again
+            .draft()
+            .unwrap()
+            .tracks
+            .iter()
+            .find(|track| track.is_main())
+            .and_then(|track| track.segments.first())
+            .map(|segment| segment.id.clone())
+            .unwrap();
+        // Onto the overlay row, over "next": no room, so a lane opens.
+        let x = lane_time(&again, 400_000.0);
+        again.drag_segment(main_clip, x, y).unwrap();
+        assert_eq!(again.draft().unwrap().tracks.len(), lanes + 1);
     }
 
     #[test]
@@ -14974,6 +16038,90 @@ mod tests {
     }
 
     #[test]
+    fn a_fresh_transcript_draws_with_no_edit() {
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        draft.canvas_config.width = 320;
+        draft.canvas_config.height = 180;
+        draft.materials.audios.push(MaterialAudio {
+            id: MaterialId::new("talk"),
+            path: "/talk.wav".to_owned(),
+            duration: Micros(2_000_000),
+            ..MaterialAudio::default()
+        });
+        let mut track = Track::main("sound");
+        track.kind = TrackType::Audio;
+        track
+            .segments
+            .push(Segment::new("talk", "talk", TimeRange::new(0, 2_000_000)));
+        draft.tracks.push(track);
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        if desktop.face.name().is_empty() {
+            eprintln!("skipped: no font is installed");
+            return;
+        }
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.select(Some(SegmentId::new("talk")));
+        let heard = CaptionStandIn {
+            words: vec![
+                RecognizedWord {
+                    text: "Hello".to_owned(),
+                    start_ms: 0,
+                    end_ms: 500,
+                },
+                RecognizedWord {
+                    text: "there.".to_owned(),
+                    start_ms: 500,
+                    end_ms: 1_000,
+                },
+            ],
+        };
+        desktop.transcribe_with(&heard, &mut CaptionTone).unwrap();
+        let draft = desktop.draft().unwrap().clone();
+        let caption = draft
+            .materials
+            .texts
+            .iter()
+            .find(|text| text.content == "Hello there.")
+            .expect("caption");
+        assert_eq!(caption.font_path, desktop.face.name());
+        // Drawn straight away, before any look edit.
+        let rgba = cutlass_eval::frame(
+            &cutlass_eval::Snapshot::with_fonts(&draft, &*desktop.face),
+            Micros(250_000),
+            &mut cutlass_renderer_software::SoftwareDevice::new(),
+            &ReaderFactory::new(),
+            &mut cutlass_eval::OpenClips::new(),
+            0,
+        )
+        .unwrap()
+        .rgba;
+        assert!(
+            rgba.chunks(4).any(|pixel| pixel[3] > 0 && pixel[0] > 200),
+            "the caption drew nothing"
+        );
+
+        // A project an earlier build saved with no font file on its
+        // captions opens with them set in the face.
+        let mut old = draft;
+        for text in &mut old.materials.texts {
+            text.font_path.clear();
+        }
+        let earlier = Temp::new();
+        Folder::new(old).save(&earlier.path).unwrap();
+        desktop.open_folder(&earlier.path).unwrap();
+        let reopened = desktop.draft().unwrap();
+        assert!(
+            reopened
+                .materials
+                .texts
+                .iter()
+                .all(|text| text.font_path == desktop.face.name())
+        );
+    }
+
+    #[test]
     fn transcribe_places_words_on_a_text_track() {
         let mut bare = shell();
         assert!(!bare.transcribe_enabled());
@@ -15138,10 +16286,8 @@ mod tests {
                     && track.segments.len() == 1
             })
             .expect("caption track");
-        assert_eq!(
-            caption_track.segments[0].target,
-            TimeRange::new(0, 2_000_000)
-        );
+        // A caption line ends with its last word, not with the clip.
+        assert_eq!(caption_track.segments[0].target, TimeRange::new(0, 900_000));
         let material = draft
             .materials
             .texts
@@ -15162,6 +16308,58 @@ mod tests {
             .expect("pair");
         assert_eq!(pair.dependent, caption_track.segments[0].id);
 
+        // Re-run captions hears the clip again and keeps the caption's look.
+        let heard_caption = caption_track.segments[0].id.clone();
+        desktop.select(Some(heard_caption.clone()));
+        assert!(desktop.rerun_caption_enabled());
+        desktop.set_caption_style("pop").unwrap();
+        let again = CaptionStandIn {
+            words: vec![RecognizedWord {
+                text: "hello".to_owned(),
+                start_ms: 100,
+                end_ms: 700,
+            }],
+        };
+        desktop.rerun_caption_with(&again, &mut tone).unwrap();
+        let rerun = |desktop: &Shell, content: &str| {
+            desktop
+                .draft()
+                .unwrap()
+                .materials
+                .texts
+                .iter()
+                .find(|text| text.content == content)
+                .map(|text| (text.caption_style.clone(), text.words.start_time.clone()))
+        };
+        assert_eq!(
+            rerun(&desktop, "hello"),
+            Some(("pop".to_owned(), vec![0])),
+            "the line starts with its word"
+        );
+        // The re-run line under the caption's start is selected.
+        assert_ne!(desktop.selected(), Some(&heard_caption));
+        desktop.undo().unwrap();
+        desktop.select(Some(heard_caption));
+        assert_eq!(
+            rerun(&desktop, "hi there"),
+            Some(("pop".to_owned(), vec![0, 400]))
+        );
+        assert_eq!(
+            desktop
+                .rerun_caption_with(&quiet, &mut tone)
+                .unwrap_err()
+                .to_string(),
+            "nothing was heard"
+        );
+        desktop.select(Some(SegmentId::new("caption")));
+        assert!(!desktop.rerun_caption_enabled());
+        assert_eq!(
+            desktop.rerun_caption().unwrap_err().to_string(),
+            "this caption was not heard from a clip on the timeline"
+        );
+        // Take the style back off, so the steps below undo as before.
+        desktop.undo().unwrap();
+
         let fast_words = CaptionStandIn {
             words: vec![RecognizedWord {
                 text: "quick".to_owned(),
@@ -15180,7 +16378,7 @@ mod tests {
                     && track
                         .segments
                         .iter()
-                        .any(|segment| segment.target == TimeRange::new(3_000_000, 1_000_000))
+                        .any(|segment| segment.target == TimeRange::new(3_000_000, 600_000))
             })
             .expect("reused");
         assert_eq!(reused.segments.len(), 2);
@@ -15250,8 +16448,10 @@ mod tests {
             .find(|text| text.content == "back")
             .expect("back")
             .clone();
-        assert_eq!(back.words.start_time, [1_000]);
-        assert_eq!(back.words.end_time, [2_000]);
+        // The reversed clip hears the word in its second half; the line
+        // starts there, so the word starts its own clock.
+        assert_eq!(back.words.start_time, [0]);
+        assert_eq!(back.words.end_time, [1_000]);
 
         let odd_words = CaptionStandIn {
             words: vec![RecognizedWord {
@@ -15298,7 +16498,8 @@ mod tests {
             .flat_map(|track| track.segments.iter())
             .find(|segment| segment.material_id == sound_text.id)
             .expect("sound clip");
-        assert_eq!(sound_segment.target, TimeRange::new(14_000_000, 1_000_000));
+        // A one-word line stays up long enough to read.
+        assert_eq!(sound_segment.target, TimeRange::new(14_000_000, 600_000));
         desktop.undo().unwrap();
         assert!(
             desktop

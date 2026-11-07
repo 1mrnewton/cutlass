@@ -326,6 +326,32 @@ pub fn set_caption_style(
     Ok(())
 }
 
+/// Record caption template `resource_id` named `name` on the caption, or
+/// take the record off when the id is empty. Keys the record already has
+/// beyond the id and name stay.
+pub fn set_caption_template(
+    draft: &mut Draft,
+    segment_id: &SegmentId,
+    resource_id: &str,
+    name: &str,
+) -> Result<(), EditError> {
+    let index = own_text(draft, segment_id)?;
+    let text = &mut draft.materials.texts[index];
+    if resource_id.is_empty() {
+        text.caption_template_info = cutlass_model::Kept::Absent;
+        return Ok(());
+    }
+    let mut info = text
+        .caption_template_info
+        .get()
+        .cloned()
+        .unwrap_or_default();
+    resource_id.clone_into(&mut info.resource_id);
+    name.clone_into(&mut info.resource_name);
+    text.caption_template_info = cutlass_model::Kept::Set(info);
+    Ok(())
+}
+
 /// The longest a caption's letters wait one after another.
 pub const MAX_CAPTION_STAGGER_MS: i64 = 500;
 
@@ -503,6 +529,19 @@ fn style_color(color: &str) -> Result<&str, EditError> {
     } else {
         Err(EditError::TextColor)
     }
+}
+
+/// The font file a new caption is set in: `face` trimmed, or none when it
+/// is empty. A name that is not a file name is refused.
+pub(super) fn caption_face(face: &str) -> Result<String, EditError> {
+    let face = face.trim();
+    if face.is_empty() {
+        return Ok(String::new());
+    }
+    if !face_file(face) {
+        return Err(EditError::TextFont);
+    }
+    Ok(face.to_owned())
 }
 
 fn face_file(face: &str) -> bool {
@@ -1304,5 +1343,37 @@ mod tests {
             EditError::Overlap
         );
         assert_eq!(session.draft(), &after);
+    }
+
+    #[test]
+    fn a_caption_template_is_recorded_and_taken_off() {
+        use cutlass_model::{MaterialText, Segment, TimeRange};
+
+        let mut draft = Draft::empty("D");
+        draft.materials.texts.push(MaterialText::new("words"));
+        draft.tracks[0]
+            .segments
+            .push(Segment::new("a", "words", TimeRange::new(0, 1_000_000)));
+        crate::edit::text::set_caption_template(
+            &mut draft,
+            &"a".into(),
+            "cutlass-caption-pop",
+            "Pop up",
+        )
+        .unwrap();
+        let info = draft.materials.texts[0]
+            .caption_template_info
+            .get()
+            .unwrap();
+        assert_eq!(
+            (info.resource_id.as_str(), info.resource_name.as_str()),
+            ("cutlass-caption-pop", "Pop up")
+        );
+        crate::edit::text::set_caption_template(&mut draft, &"a".into(), "", "").unwrap();
+        assert!(draft.materials.texts[0].caption_template_info.is_absent());
+        assert!(
+            crate::edit::text::set_caption_template(&mut draft, &"nobody".into(), "x", "x")
+                .is_err()
+        );
     }
 }

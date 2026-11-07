@@ -32,6 +32,7 @@ pub struct Field<'t> {
     hint: Option<String>,
     name: Option<String>,
     width: Option<f32>,
+    height: Option<f32>,
     lead: Option<Lead>,
     text_size: f32,
     ink: Color32,
@@ -65,10 +66,11 @@ impl<'t> Field<'t> {
             hint: None,
             name: None,
             width: None,
+            height: None,
             lead: None,
             text_size: tokens::TYPE_SIZE,
             ink: tokens::TEXT,
-            fill: tokens::FIELD,
+            fill: tokens::FIELD_FILL,
             focus: false,
             scrub: false,
             salt: None,
@@ -100,6 +102,13 @@ impl<'t> Field<'t> {
     /// A fixed width. Without one the field fills the row.
     pub fn width(mut self, width: f32) -> Self {
         self.width = Some(width);
+        self
+    }
+
+    /// A one-line field this tall instead of the standard height, to match
+    /// a row of other controls.
+    pub fn height(mut self, height: f32) -> Self {
+        self.height = Some(height);
         self
     }
 
@@ -160,7 +169,10 @@ impl<'t> Field<'t> {
         };
         let pad = vec2(tokens::FIELD_PAD_X, tokens::FIELD_PAD_Y);
         let row = ui.fonts_mut(|fonts| fonts.row_height(&FontId::proportional(self.text_size)));
-        let line = tokens::FIELD_HEIGHT.max(row + 2.0 * pad.y);
+        let line = self
+            .height
+            .unwrap_or(tokens::FIELD_HEIGHT)
+            .max(row + 2.0 * pad.y);
         let height = match self.rows {
             None => line,
             Some(rows) => {
@@ -455,7 +467,7 @@ mod tests {
             .shapes
             .iter()
             .find_map(|clipped| match &clipped.shape {
-                Shape::Rect(rect) if rect.fill == tokens::FIELD => Some(rect.clone()),
+                Shape::Rect(rect) if rect.fill == tokens::FIELD_FILL => Some(rect.clone()),
                 _ => None,
             })
             .expect("the field's box")

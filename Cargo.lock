@@ -2603,6 +2603,7 @@ dependencies = [
 name = "cutlass-editor"
 version = "0.1.0"
 dependencies = [
+ "cutlass-captions",
  "cutlass-effects",
  "cutlass-model",
  "cutlass-session",
@@ -2855,6 +2856,9 @@ dependencies = [
 [[package]]
 name = "cutlass-logger"
 version = "0.1.0"
+dependencies = [
+ "log",
+]
 
 [[package]]
 name = "cutlass-lottie"

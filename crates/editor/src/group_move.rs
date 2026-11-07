@@ -5,11 +5,20 @@
 //! and moves by the same amount. The planner does not write the draft.
 
 use cutlass_model::{Draft, Micros, SegmentId, TrackId, TrackType};
-use cutlass_session::Request;
+use cutlass_session::{Request, lane_fits, new_lane_index};
 
 use crate::gesture::{GestureError, GestureOutcome, MoveGesture, move_gesture};
-use crate::hit::{BadScale, hit_test};
-use crate::snap::snap_guides;
+use crate::hit::{BadScale, Pointer, hit_test, time_at};
+use crate::lane::{Lane, lanes_for};
+use crate::snap::snap_span;
+
+/// A lane a drag opens.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NewLane {
+    pub kind: TrackType,
+    /// Where it opens in the track list, which is the row order.
+    pub index: usize,
+}
 
 /// Where one clip of a drag lands.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -19,10 +28,11 @@ pub struct ClipMove {
     /// The target start after snap, in microseconds.
     pub start: Micros,
     pub duration: Micros,
-    /// A snap target, not the pointer, set `start`. Only the dragged clip snaps.
-    pub snapped: bool,
-    /// `track_id` is a new lane of this kind. The requests insert it first.
-    pub new_lane: Option<TrackType>,
+    /// Where the snap line sits when a target, not the pointer, set `start`:
+    /// the clip's start or its end. Only the dragged clip snaps.
+    pub snap_line: Option<Micros>,
+    /// `track_id` is this new lane. The requests insert it first.
+    pub new_lane: Option<NewLane>,
 }
 
 impl ClipMove {
@@ -43,13 +53,14 @@ pub enum MovePlan {
     Moves(Vec<ClipMove>),
     /// The pointer is outside every lane.
     Miss,
-    /// The lane under the pointer and the upper lane of this type are taken.
-    /// The dragged clip would open a lane of `kind` and land at `start`.
+    /// The dragged clip opens `lane` and lands at `start`: the drop was
+    /// between lanes, or the lane under the pointer and the upper lane of
+    /// its type are taken.
     NewLane {
-        kind: TrackType,
+        lane: NewLane,
         start: Micros,
         duration: Micros,
-        snapped: bool,
+        snap_line: Option<Micros>,
     },
 }
 
@@ -62,17 +73,17 @@ impl MovePlan {
             Self::Moves(moves) => moves,
             Self::Miss => Vec::new(),
             Self::NewLane {
-                kind,
+                lane,
                 start,
                 duration,
-                snapped,
+                snap_line,
             } => vec![ClipMove {
                 segment_id: segment_id.clone(),
                 track_id: new_track,
                 start,
                 duration,
-                snapped,
-                new_lane: Some(kind),
+                snap_line,
+                new_lane: Some(lane),
             }],
         }
     }
@@ -92,28 +103,27 @@ pub fn plan_move(
 ) -> Result<MovePlan, GestureError> {
     let dragged = &gesture.segment_id;
     let (track_id, origin, duration) = clip(draft, dragged).ok_or(GestureError::UnknownSegment)?;
-    let raw = match hit_test(draft, gesture.scale, gesture.pointer) {
-        Ok(Some(hit)) => hit.time,
+    let (raw, pointer_row) = match hit_test(draft, gesture.scale, gesture.pointer) {
+        Ok(Some(hit)) => (hit.time, hit.lane),
         Ok(None) => return Ok(MovePlan::Miss),
         Err(BadScale) => return Err(GestureError::BadScale),
     };
+    let snapped = snap_span(
+        draft,
+        raw,
+        duration,
+        gesture.playhead,
+        gesture.snap_threshold,
+        Some(dragged),
+    );
     if selection.contains(dragged) && selection.len() > 1 {
-        let start = snap_guides(
-            draft,
-            raw,
-            gesture.playhead,
-            gesture.snap_threshold,
-            Some(dragged),
-            &gesture.guides,
-        )
-        .map_or(raw, |target| target.time);
-        let start = Micros(start.0.max(0));
+        let start = Micros(snapped.map_or(raw, |(start, _)| start).0.max(0));
         let lead = ClipMove {
             segment_id: dragged.clone(),
             track_id,
             start,
             duration,
-            snapped: start != raw,
+            snap_line: line_for(snapped, start),
             new_lane: None,
         };
         return Ok(MovePlan::Moves(group(draft, lead, origin, selection)));
@@ -128,25 +138,119 @@ pub fn plan_move(
             track_id,
             start,
             duration,
-            snapped: start != raw,
+            snap_line: line_for(snapped, start),
             new_lane: None,
         }])),
         GestureOutcome::Edit(_) => Err(GestureError::UnknownSegment),
         GestureOutcome::Miss => Ok(MovePlan::Miss),
-        GestureOutcome::NewLane { kind, start } => Ok(MovePlan::NewLane {
-            kind,
-            start,
-            duration,
-            snapped: start != raw,
-        }),
+        GestureOutcome::NewLane { kind, start } => {
+            // The lane opens just above the pointer's row when the kind may sit
+            // there, else where the session opens a lane of that kind.
+            let index = if lane_fits(&draft.tracks, &kind, pointer_row.track_index) {
+                pointer_row.track_index
+            } else {
+                new_lane_index(&draft.tracks, &kind)
+            };
+            Ok(MovePlan::NewLane {
+                lane: NewLane { kind, index },
+                start,
+                duration,
+                snap_line: line_for(snapped, start),
+            })
+        }
     }
+}
+
+/// The snap line, when the planned start is the one the snap chose.
+fn line_for(snapped: Option<(Micros, Micros)>, start: Micros) -> Option<Micros> {
+    snapped
+        .filter(|(snapped_start, _)| *snapped_start == start)
+        .map(|(_, line)| line)
+}
+
+/// Plan a body drag dropped between two rows, or past the first or last.
+///
+/// `boundary` counts the rows above the drop: zero is above the top row and
+/// the row count is under the bottom one. When the dragged clip's kind may
+/// sit there, it opens a lane at that spot and lands at the pointer time,
+/// pulled to a snap. A selected group keeps its rows. A clip alone on a lane
+/// other than main next to the spot stays on its lane, and a spot outside its kind's block
+/// falls back to the nearest row; both plan as `plan_move` would there.
+pub fn plan_move_between(
+    draft: &Draft,
+    gesture: &MoveGesture,
+    boundary: usize,
+    selection: &[SegmentId],
+) -> Result<MovePlan, GestureError> {
+    let dragged = &gesture.segment_id;
+    let (track_id, _, duration) = clip(draft, dragged).ok_or(GestureError::UnknownSegment)?;
+    let rows = lanes_for(draft, gesture.scale.empty_lanes);
+    let group = selection.contains(dragged) && selection.len() > 1;
+    let nearest = boundary
+        .min(rows.len())
+        .saturating_sub(usize::from(boundary >= rows.len()));
+    let on_row = MoveGesture {
+        pointer: Pointer {
+            x: gesture.pointer.x,
+            y: row_middle(gesture.scale.lane_height, nearest),
+        },
+        ..gesture.clone()
+    };
+    let index = slot_index(draft, &rows, boundary);
+    let kind = draft
+        .tracks
+        .iter()
+        .find(|track| track.id == track_id)
+        .map(|track| track.kind.clone())
+        .ok_or(GestureError::UnknownSegment)?;
+    // Main stays when empty, so a clip leaving it for a new lane is a real move.
+    let alone_beside = draft.tracks.iter().enumerate().any(|(at, track)| {
+        track.id == track_id
+            && !track.is_main()
+            && track.segments.len() == 1
+            && (at == index || at.saturating_add(1) == index)
+    });
+    if group || rows.is_empty() || alone_beside || !lane_fits(&draft.tracks, &kind, index) {
+        return plan_move(draft, &on_row, selection);
+    }
+    let raw = time_at(gesture.scale.pixel_size, gesture.pointer.x).ok_or(GestureError::BadScale)?;
+    let snapped = snap_span(
+        draft,
+        raw,
+        duration,
+        gesture.playhead,
+        gesture.snap_threshold,
+        Some(dragged),
+    );
+    let start = Micros(snapped.map_or(raw, |(start, _)| start).0.max(0));
+    Ok(MovePlan::NewLane {
+        lane: NewLane { kind, index },
+        start,
+        duration,
+        snap_line: line_for(snapped, start),
+    })
+}
+
+/// The track index a lane opened at `boundary` takes.
+fn slot_index(draft: &Draft, rows: &[Lane], boundary: usize) -> usize {
+    match rows.get(boundary) {
+        Some(row) => row.track_index,
+        None => rows
+            .last()
+            .map_or(draft.tracks.len(), |row| row.track_index.saturating_add(1)),
+    }
+}
+
+fn row_middle(lane_height: f64, row: usize) -> f64 {
+    f64::from(u32::try_from(row).unwrap_or(u32::MAX)) * lane_height + lane_height / 2.0
 }
 
 /// The requests for a planned drag, as one undo step.
 ///
 /// A new lane a move names is inserted first. When the group heads right the
 /// later clips move first, so a clip does not land on a selected clip that
-/// has not moved yet. Empty when every clip is already where it would land.
+/// has not moved yet. The session takes a lane the drag leaves empty. Empty
+/// when every clip is already where it would land.
 #[must_use]
 pub fn move_requests(draft: &Draft, moves: &[ClipMove]) -> Vec<Request> {
     let current = |plan: &ClipMove| {
@@ -170,9 +274,10 @@ pub fn move_requests(draft: &Draft, moves: &[ClipMove]) -> Vec<Request> {
         ordered.sort_by_key(|plan| plan.start);
     }
     let lanes = moves.iter().filter_map(|plan| {
-        plan.new_lane.as_ref().map(|kind| Request::InsertTrack {
+        plan.new_lane.as_ref().map(|lane| Request::InsertTrackAt {
             track_id: plan.track_id.clone(),
-            kind: kind.clone(),
+            kind: lane.kind.clone(),
+            index: lane.index,
         })
     });
     lanes
@@ -197,7 +302,7 @@ fn group(draft: &Draft, lead: ClipMove, origin: Micros, selection: &[SegmentId])
                 track_id: track.id.clone(),
                 start: segment.target.start,
                 duration: segment.target.duration,
-                snapped: false,
+                snap_line: None,
                 new_lane: None,
             });
         }
@@ -212,7 +317,7 @@ fn group(draft: &Draft, lead: ClipMove, origin: Micros, selection: &[SegmentId])
     for member in &mut members {
         member.start = Micros(member.start.0.saturating_add(delta));
         if member.segment_id == lead.segment_id {
-            member.snapped = lead.snapped && member.start == lead.start;
+            member.snap_line = lead.snap_line.filter(|_| member.start == lead.start);
         }
     }
     members.sort_by_key(|member| member.segment_id != lead.segment_id);
@@ -254,7 +359,6 @@ mod tests {
             },
             playhead: Micros(50_000_000),
             snap_threshold: Micros(threshold),
-            guides: Vec::new(),
         }
     }
 
@@ -309,7 +413,7 @@ mod tests {
                 track_id: TrackId::new("main"),
                 start: Micros(2_000_000),
                 duration: Micros(1_000_000),
-                snapped: false,
+                snap_line: None,
                 new_lane: None,
             }]
         );
@@ -323,10 +427,13 @@ mod tests {
         assert_eq!(
             plan,
             MovePlan::NewLane {
-                kind: TrackType::Video,
+                lane: NewLane {
+                    kind: TrackType::Video,
+                    index: 0,
+                },
                 start: Micros(0),
                 duration: Micros(1_000_000),
-                snapped: false,
+                snap_line: Some(Micros(0)),
             }
         );
         let lane = TrackId::new("lane");
@@ -335,9 +442,10 @@ mod tests {
         assert_eq!(
             requests,
             vec![
-                Request::InsertTrack {
+                Request::InsertTrackAt {
                     track_id: lane.clone(),
                     kind: TrackType::Video,
+                    index: 0,
                 },
                 Request::Move {
                     segment_id: SegmentId::new("b"),
@@ -363,6 +471,178 @@ mod tests {
 
         session.undo().unwrap();
         assert_eq!(session.draft().tracks, before.tracks);
+    }
+
+    fn with_sound(session: &mut Session) {
+        let revision = session.revision();
+        session
+            .apply(
+                revision,
+                &[
+                    Request::InsertTrack {
+                        track_id: TrackId::new("sound"),
+                        kind: TrackType::Audio,
+                    },
+                    Request::Place {
+                        track_id: TrackId::new("sound"),
+                        segment: Box::new(Segment::new("s", "song", TimeRange::new(0, 500_000))),
+                    },
+                ],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn a_drop_between_lanes_opens_a_lane_there() {
+        let mut session = session(&[("a", 0, 1_000_000), ("b", 2_000_000, 1_000_000)]);
+        with_sound(&mut session);
+        let plan =
+            plan_move_between(session.draft(), &gesture("b", 4_000_000.0, 0), 0, &[]).unwrap();
+        assert_eq!(
+            plan,
+            MovePlan::NewLane {
+                lane: NewLane {
+                    kind: TrackType::Video,
+                    index: 0,
+                },
+                start: Micros(4_000_000),
+                duration: Micros(1_000_000),
+                snap_line: None,
+            }
+        );
+        let moves = plan.into_moves(&SegmentId::new("b"), TrackId::new("lane"));
+        let revision = session.revision();
+        session
+            .apply(revision, &move_requests(session.draft(), &moves))
+            .unwrap();
+        let ids: Vec<&str> = session
+            .draft()
+            .tracks
+            .iter()
+            .map(|track| track.id.as_str())
+            .collect();
+        assert_eq!(ids, ["lane", "main", "sound"]);
+        assert_eq!(
+            session.draft().tracks[0].segments[0].id,
+            SegmentId::new("b")
+        );
+    }
+
+    #[test]
+    fn a_drop_between_lanes_keeps_to_the_kinds_block() {
+        let mut session = session(&[("a", 0, 1_000_000)]);
+        with_sound(&mut session);
+        // Under the sound lane: a picture may not sit under main, so it plans on
+        // the sound row, which sends it up to the main lane it has room on.
+        let plan =
+            plan_move_between(session.draft(), &gesture("a", 3_000_000.0, 0), 2, &[]).unwrap();
+        assert_eq!(
+            moves(plan),
+            vec![ClipMove {
+                segment_id: SegmentId::new("a"),
+                track_id: TrackId::new("main"),
+                start: Micros(3_000_000),
+                duration: Micros(1_000_000),
+                snap_line: None,
+                new_lane: None,
+            }]
+        );
+        // A sound alone on its lane, dropped just under it, stays on that lane.
+        let plan =
+            plan_move_between(session.draft(), &gesture("s", 3_000_000.0, 0), 2, &[]).unwrap();
+        assert_eq!(
+            moves(plan),
+            vec![ClipMove {
+                segment_id: SegmentId::new("s"),
+                track_id: TrackId::new("sound"),
+                start: Micros(3_000_000),
+                duration: Micros(500_000),
+                snap_line: None,
+                new_lane: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn the_only_main_clip_dropped_above_main_opens_an_overlay() {
+        let session = session(&[("a", 0, 1_000_000)]);
+        let mut draft = session.draft().clone();
+        draft.config.maintrack_adsorb = true;
+        let plan = plan_move_between(&draft, &gesture("a", 0.0, 0), 0, &[]).unwrap();
+        assert_eq!(
+            plan,
+            MovePlan::NewLane {
+                lane: NewLane {
+                    kind: TrackType::Video,
+                    index: 0,
+                },
+                start: Micros(0),
+                duration: Micros(1_000_000),
+                snap_line: Some(Micros(0)),
+            }
+        );
+    }
+
+    #[test]
+    fn a_selected_group_dropped_between_lanes_keeps_its_rows() {
+        let session = session(&[("a", 0, 1_000_000), ("b", 2_000_000, 1_000_000)]);
+        let plan = plan_move_between(
+            session.draft(),
+            &gesture("a", 500_000.0, 0),
+            0,
+            &ids(&["a", "b"]),
+        )
+        .unwrap();
+        let moves = moves(plan);
+        assert_eq!(moves.len(), 2);
+        assert!(
+            moves
+                .iter()
+                .all(|plan| plan.new_lane.is_none() && plan.track_id == TrackId::new("main"))
+        );
+    }
+
+    #[test]
+    fn a_drag_that_empties_a_lane_takes_the_lane_in_the_same_step() {
+        let mut session = session(&[("a", 0, 1_000_000)]);
+        with_sound(&mut session);
+        let revision = session.revision();
+        session
+            .apply(
+                revision,
+                &[
+                    Request::InsertTrack {
+                        track_id: TrackId::new("more"),
+                        kind: TrackType::Audio,
+                    },
+                    Request::Place {
+                        track_id: TrackId::new("more"),
+                        segment: Box::new(Segment::new("t", "song", TimeRange::new(0, 500_000))),
+                    },
+                ],
+            )
+            .unwrap();
+        let before = session.draft().tracks.clone();
+        let onto_sound = ClipMove {
+            segment_id: SegmentId::new("t"),
+            track_id: TrackId::new("sound"),
+            start: Micros(2_000_000),
+            duration: Micros(500_000),
+            snap_line: None,
+            new_lane: None,
+        };
+        let requests = move_requests(session.draft(), &[onto_sound]);
+        let revision = session.revision();
+        session.apply(revision, &requests).unwrap();
+        let ids: Vec<&str> = session
+            .draft()
+            .tracks
+            .iter()
+            .map(|track| track.id.as_str())
+            .collect();
+        assert_eq!(ids, ["main", "sound"]);
+        session.undo().unwrap();
+        assert_eq!(session.draft().tracks, before);
     }
 
     #[test]
@@ -419,8 +699,8 @@ mod tests {
         let moves = moves(plan);
         assert_eq!(moves[0].segment_id, SegmentId::new("c"));
         assert_eq!(moves[0].start, Micros(4_000_000));
-        assert!(moves[0].snapped);
-        assert!(moves.iter().skip(1).all(|plan| !plan.snapped));
+        assert!(moves[0].snap_line.is_some());
+        assert!(moves.iter().skip(1).all(|plan| plan.snap_line.is_none()));
     }
 
     #[test]

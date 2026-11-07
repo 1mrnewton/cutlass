@@ -149,6 +149,8 @@ struct Approval {
 }
 
 pub struct ViewState {
+    /// The system's menu bar is up, so the window draws no menus of its own.
+    pub system_menus: bool,
     preview: Option<egui::TextureHandle>,
     /// The clip menu asked for a file to replace the clip's media with.
     wants_replace: bool,
@@ -222,9 +224,12 @@ pub struct ViewState {
     listed_checked: Option<std::time::Instant>,
     marquee_press: Option<Pos2>,
     marquee: Option<Rect>,
-    /// How far the lanes are moved down from where they center on the main
-    /// lane, in points; negative shows lanes further down.
-    lane_scroll: f32,
+    /// How far the lanes above main are scrolled toward the top one, in
+    /// points. Zero shows the lanes next to main.
+    lanes_up: f32,
+    /// How far the whole stack, main with it, is scrolled up to bring the
+    /// lanes under main into view, in points.
+    lanes_down: f32,
     /// The assistant's conversation, and whether its panel is open.
     pub assistant: crate::assistant::Assistant,
 }
@@ -242,6 +247,7 @@ struct TrackMenu {
 impl Default for ViewState {
     fn default() -> Self {
         Self {
+            system_menus: false,
             preview: None,
             wants_replace: false,
             export_open: false,
@@ -287,7 +293,8 @@ impl Default for ViewState {
             listed_checked: None,
             marquee_press: None,
             marquee: None,
-            lane_scroll: 0.0,
+            lanes_up: 0.0,
+            lanes_down: 0.0,
             assistant: crate::assistant::Assistant::default(),
         }
     }
@@ -439,7 +446,7 @@ fn dropped_files(shell: &mut Shell, ui: &Ui) {
     if !dropped.is_empty()
         && let Err(error) = shell.drop_files(&dropped)
     {
-        shell.set_notice(error.to_string());
+        shell.notice_error(&error);
     }
 }
 
@@ -522,7 +529,7 @@ fn exported_strip(shell: &mut Shell, ui: &Ui, full: Rect, width: f32) {
                             .clicked()
                         {
                             if let Err(error) = crate::shell::reveal(&path) {
-                                shell.set_notice(error.to_string());
+                                shell.notice_error(&error);
                             }
                             shell.forget_export();
                         }
@@ -600,7 +607,7 @@ fn projects_home(
                         if project_card(ui, project)
                             && let Err(error) = shell.open_folder(&project.path)
                         {
-                            shell.set_notice(error.to_string());
+                            shell.notice_error(&error);
                         }
                     }
                 });
@@ -619,7 +626,7 @@ fn projects_home(
                     if project_card(ui, project)
                         && let Err(error) = shell.open_folder(&project.path)
                     {
-                        shell.set_notice(error.to_string());
+                        shell.notice_error(&error);
                     }
                 }
             });
@@ -672,10 +679,10 @@ fn open_created(shell: &mut Shell, root: &std::path::Path) {
     match Shell::create_project(root) {
         Ok(path) => {
             if let Err(error) = shell.open_folder(&path) {
-                shell.set_notice(error.to_string());
+                shell.notice_error(&error);
             }
         }
-        Err(error) => shell.set_notice(error.to_string()),
+        Err(error) => shell.notice_error(&error),
     }
 }
 
@@ -748,7 +755,7 @@ fn utc_date(seconds: u64) -> String {
 
 fn return_to_projects(shell: &mut Shell, view: &mut ViewState) {
     if let Err(error) = shell.close_project() {
-        shell.set_notice(error.to_string());
+        shell.notice_error(&error);
         return;
     }
     view.preview = None;
@@ -821,7 +828,6 @@ fn install_style(style: &mut egui::Style) {
     style.spacing.menu_margin = egui::Margin::same(tokens::MENU_PAD);
     style.visuals.extreme_bg_color = tokens::GAP;
     style.visuals.faint_bg_color = tokens::PROJECT_BAR;
-    style.visuals.widgets.noninteractive.bg_stroke = egui::Stroke::NONE;
     // Every text field's caret and selection, ui::Field's included.
     style.visuals.selection.bg_fill = tokens::TEXT_SELECTION;
     style.visuals.selection.stroke = egui::Stroke::new(1.0, tokens::TEXT);
@@ -829,10 +835,14 @@ fn install_style(style: &mut egui::Style) {
     // egui's own bars (popups, menus) keep one width too: no grow on hover.
     style.spacing.scroll.bar_width = tokens::SCROLL_BAR;
     style.spacing.scroll.floating_width = tokens::SCROLL_BAR;
-    // egui's own buttons match ui::Button's secondary kind until they move
-    // over: the same fills, no hover edge, and the same corners.
+    // No outline on any widget, in any state: buttons and fields show by
+    // their fill alone. egui's own buttons match ui::Button's secondary kind:
+    // the same fills and the same corners.
     let radius = CornerRadius::same(tokens::ICON_RADIUS);
     let widgets = &mut style.visuals.widgets;
+    for state in [&mut widgets.noninteractive, &mut widgets.open] {
+        state.bg_stroke = egui::Stroke::NONE;
+    }
     for (state, fill) in [
         (&mut widgets.inactive, tokens::RAISED),
         (&mut widgets.hovered, tokens::ACTIVE),
@@ -868,7 +878,11 @@ fn project_bar(
     shell.chrome.project_bar = true;
     #[cfg(not(target_os = "macos"))]
     window_buttons(shell, ui, bar);
-    menus(shell, ui, view, bar, parent);
+    // On macOS the menus live in the system's menu bar; the window's own
+    // are the fallback when that could not be built, and elsewhere.
+    if !view.system_menus {
+        menus(shell, ui, view, bar, parent);
+    }
     ui.painter().text(
         bar.center(),
         Align2::CENTER_CENTER,
@@ -986,7 +1000,7 @@ fn file_menu(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Optio
     if ui.button("Save").clicked() {
         ui.close();
         if let Err(error) = shell.save() {
-            shell.set_notice(error.to_string());
+            shell.notice_error(&error);
         }
     }
     if ui.button("Import…").clicked() {
@@ -1080,7 +1094,7 @@ pub fn run_menu(shell: &mut Shell, view: &mut ViewState, parent: Option<&eframe:
         action => shell.run_action(action),
     };
     if let Err(error) = done {
-        shell.set_notice(error.to_string());
+        shell.notice_error(&error);
     }
 }
 
@@ -1461,7 +1475,7 @@ fn update_dialog(shell: &mut Shell, ui: &mut Ui) {
     match answer {
         Some(true) => {
             if let Err(error) = shell.install_update() {
-                shell.set_notice(error.to_string());
+                shell.notice_error(&error);
             }
         }
         Some(false) => shell.decline_update(),
@@ -1481,7 +1495,7 @@ fn restart_for_update(shell: &mut Shell, ui: &Ui) {
             cutlass_logger::info!("update installed; restarting");
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
         }
-        Err(error) => shell.set_notice(format!(
+        Err(error) => shell.notice_error(&format!(
             "The update is installed. Open Cutlass again to use it ({error})."
         )),
     }
@@ -1512,7 +1526,7 @@ fn speech_model_dialog(shell: &mut Shell, ui: &mut Ui) {
     match answer {
         Some(true) => {
             if let Err(error) = shell.download_speech_model() {
-                shell.set_notice(error.to_string());
+                shell.notice_error(&error);
             }
         }
         Some(false) => shell.decline_speech_model(),
@@ -1654,13 +1668,13 @@ fn edit_menu(shell: &mut Shell, ui: &mut Ui) {
     if ui.add_enabled(undo, ui::Button::new("Undo")).clicked() {
         ui.close();
         if let Err(error) = shell.undo() {
-            shell.set_notice(error.to_string());
+            shell.notice_error(&error);
         }
     }
     if ui.add_enabled(redo, ui::Button::new("Redo")).clicked() {
         ui.close();
         if let Err(error) = shell.redo() {
-            shell.set_notice(error.to_string());
+            shell.notice_error(&error);
         }
     }
 }
@@ -1723,12 +1737,14 @@ fn library_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rec
 }
 
 fn shelf_rail(ui: &mut Ui, view: &mut ViewState, rect: Rect) {
+    // The whole rect scrolls, so the bar sits on the panel edge; the
+    // buttons keep 6 points in from each side.
     let mut column = ui.new_child(egui::UiBuilder::new().max_rect(rect));
     ui::Scroll::vertical("library-rail")
-        .content_margin(egui::Margin::symmetric(8, 0))
+        .content_margin(egui::Margin::symmetric(6, 0))
         .show(&mut column, |ui| {
             ui.add_space(8.0);
-            ui.spacing_mut().item_spacing.y = 2.0;
+            ui.spacing_mut().item_spacing.y = 4.0;
             for shelf in Shelf::ALL {
                 if shelf_button(ui, shelf, view.library_shelf == shelf).clicked() {
                     view.library_shelf = shelf;
@@ -1737,16 +1753,39 @@ fn shelf_rail(ui: &mut Ui, view: &mut ViewState, rect: Rect) {
         });
 }
 
+/// An icon with its name under it; the open shelf sits on a tile.
 fn shelf_button(ui: &mut Ui, shelf: Shelf, active: bool) -> egui::Response {
-    ui.add(
-        ui::Button::icon(shelf.icon())
-            .on(active)
-            .full_width()
-            .min_size(Vec2::new(0.0, 44.0))
-            .icon_size(20.0)
-            .radius(tokens::RADIUS_LG)
-            .tip(shelf.label()),
-    )
+    let (rect, response) =
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), 52.0), Sense::click());
+    if active {
+        ui.painter()
+            .rect_filled(rect, CornerRadius::same(10), tokens::ACTIVE);
+    }
+    let color = if active {
+        tokens::TEXT
+    } else if response.hovered() {
+        tokens::MUTED
+    } else {
+        tokens::FAINT
+    };
+    let mark = Rect::from_center_size(rect.center() - Vec2::new(0.0, 8.0), Vec2::splat(20.0));
+    ui.painter().text(
+        Pos2::new(rect.center().x, rect.bottom() - 6.0),
+        Align2::CENTER_BOTTOM,
+        shelf.label(),
+        FontId::proportional(10.5),
+        color,
+    );
+    if let Err(error) = icons::paint(ui.painter(), mark, shelf.icon(), color) {
+        ui.painter().text(
+            rect.center(),
+            Align2::CENTER_CENTER,
+            error.to_string(),
+            FontId::proportional(9.0),
+            tokens::FAINT,
+        );
+    }
+    response.on_hover_text(shelf.label())
 }
 
 fn asset_column(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect) {
@@ -1760,6 +1799,9 @@ fn asset_column(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect
             shelf.hint()
         })
         .icon("search")
+        .fill(tokens::PROJECT_BAR)
+        .text_size(tokens::TYPE_SIZE + 1.0)
+        .height(36.0)
         .show(&mut column);
     if shelf == Shelf::Media {
         column.add_space(8.0);
@@ -1771,8 +1813,10 @@ fn asset_column(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect
         if cutlass_editor::folder_trail(shell.library_store(), &view.library_folder).is_empty() {
             view.library_folder.clear();
         }
-        column.add_space(8.0);
-        path_bar(shell, &mut column, view);
+        if !view.library_folder.is_empty() {
+            column.add_space(8.0);
+            path_bar(shell, &mut column, view);
+        }
     }
     column.add_space(12.0);
     let grid = column.available_rect_before_wrap();
@@ -1861,7 +1905,7 @@ fn asset_column(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect
                     shell.add_medium(&id)
                 };
                 if let Err(error) = added {
-                    shell.set_notice(error.to_string());
+                    shell.notice_error(&error);
                 }
             }
         });
@@ -1869,21 +1913,53 @@ fn asset_column(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect
 }
 
 /// Project or Free stock, over the media shelf.
+/// Project and Free stock as one segmented control across the column.
 fn source_switch(ui: &mut Ui, view: &mut ViewState) {
-    ui::Segmented::show(ui, |ui| {
-        for (label, stock) in [("Project", false), ("Free stock", true)] {
-            let on = view.library_stock == stock;
-            if ui.add(ui::Choice::new(on, label)).clicked() && !on {
-                view.library_stock = stock;
-                view.library_picked.clear();
-                view.library_anchor = None;
-            }
+    let (track, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 34.0), Sense::hover());
+    ui.painter()
+        .rect_filled(track, CornerRadius::same(10), tokens::PROJECT_BAR);
+    let half = (track.width() - 6.0) / 2.0;
+    for (index, (label, stock)) in [("Project", false), ("Free stock", true)]
+        .into_iter()
+        .enumerate()
+    {
+        let segment = Rect::from_min_size(
+            track.min + Vec2::new(3.0 + half * index as f32, 3.0),
+            Vec2::new(half, track.height() - 6.0),
+        );
+        let response = ui.interact(
+            segment,
+            ui.scope_id().with(("library-source", index)),
+            Sense::click(),
+        );
+        let on = view.library_stock == stock;
+        if on {
+            ui.painter()
+                .rect_filled(segment, CornerRadius::same(8), tokens::ACTIVE);
         }
-    });
+        let color = if on || response.hovered() {
+            tokens::TEXT
+        } else {
+            tokens::FAINT
+        };
+        ui.painter().text(
+            segment.center(),
+            Align2::CENTER_CENTER,
+            label,
+            FontId::proportional(tokens::TYPE_SIZE),
+            color,
+        );
+        if response.clicked() && !on {
+            view.library_stock = stock;
+            view.library_picked.clear();
+            view.library_anchor = None;
+        }
+    }
 }
 
-/// "All", then each folder down to the one shown. A click goes there; a
-/// card dropped on one moves into it.
+/// Inside a folder: "All", then each folder down to the one shown. A click
+/// goes there; a card dropped on one moves into it. At the top it is not
+/// shown.
 fn path_bar(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
     let trail: Vec<(String, String)> = std::iter::once((String::new(), "All".to_owned()))
         .chain(
@@ -1928,7 +2004,7 @@ fn drop_into_folder(shell: &mut Shell, response: &egui::Response, folder: &str) 
         && drop.material_id != folder
         && let Err(error) = shell.move_library_item(&drop.material_id, folder)
     {
-        shell.set_notice(error.to_string());
+        shell.notice_error(&error);
     }
 }
 
@@ -2029,7 +2105,7 @@ fn library_action(
         }
     };
     if let Err(error) = result {
-        shell.set_notice(error.to_string());
+        shell.notice_error(&error);
     }
 }
 
@@ -2191,7 +2267,7 @@ fn folder_name_field(
         let id = id.clone();
         view.library_renaming = None;
         if !cancel && let Err(error) = shell.rename_library_folder(&id, &typed) {
-            shell.set_notice(error.to_string());
+            shell.notice_error(&error);
         }
     }
     true
@@ -2749,6 +2825,10 @@ fn preview_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rec
         Err(Some(error)) => Some(Err(error)),
         Err(None) => Some(shell.preview_bytes()),
     };
+    shell.note_preview(match &fallback {
+        Some(Err(error)) if shell.draft().is_some() => Some(error),
+        _ => None,
+    });
     match fallback {
         None => {}
         Some(Ok(picture)) => {
@@ -2806,7 +2886,7 @@ fn pick_layer(shell: &mut Shell, ui: &mut Ui, frame: Rect, placed: Rect, size: V
         let (x, y) = canvas_pixel(placed, size, pos);
         let keep = !ui.input(|input| input.modifiers.shift);
         if let Err(error) = shell.pick_at(x, y, keep) {
-            shell.set_notice(error.to_string());
+            shell.notice_error(&error);
         }
     }
     let painter = ui.painter().with_clip_rect(frame.intersect(ui.clip_rect()));
@@ -2881,7 +2961,7 @@ fn track_layer(
         if let Some((start, end)) = dragged
             && let Err(error) = shell.set_track_box(start, end)
         {
-            shell.set_notice(error.to_string());
+            shell.notice_error(&error);
         }
         view.track_drag = None;
     }
@@ -2976,14 +3056,29 @@ fn paint_canvas(ui: &Ui, frame: Rect, texture: egui::TextureId, rect: Rect, blac
 fn transport_bar(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect) {
     let live = shell.draft().is_some();
     let ink = if live { tokens::TEXT } else { tokens::MUTED };
+    // A narrow preview drops what it has no room for: the guides button
+    // first, then the zoom buttons, and the timecode keeps the playhead
+    // alone.
+    let room = transport_room(rect.width(), live);
+    let font = FontId::monospace(tokens::TIMECODE_SIZE);
+    let both = format!("{}  /  {}", shell.timecode(), duration_label(shell));
+    let fits = ui
+        .painter()
+        .layout_no_wrap(both.clone(), font.clone(), ink)
+        .size()
+        .x
+        + TRANSPORT_EDGE
+        + TRANSPORT_GAP
+        <= rect.width() / 2.0 - PLAY_RADIUS;
+    let timecode = if fits { both } else { shell.timecode() };
     ui.painter().text(
-        Pos2::new(rect.left() + 16.0, rect.center().y),
+        Pos2::new(rect.left() + TRANSPORT_EDGE, rect.center().y),
         Align2::LEFT_CENTER,
-        format!("{}  /  {}", shell.timecode(), duration_label(shell)),
-        FontId::monospace(tokens::TIMECODE_SIZE),
+        timecode,
+        font,
         ink,
     );
-    let play = Rect::from_center_size(rect.center(), Vec2::splat(36.0));
+    let play = Rect::from_center_size(rect.center(), Vec2::splat(PLAY_RADIUS * 2.0));
     let play_response = ui.interact(play, ui.scope_id().with("play"), Sense::click());
     if play_response.clicked() {
         if shell.playing() {
@@ -3003,8 +3098,12 @@ fn transport_bar(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rec
         Color32::from_rgb(0x12, 0x13, 0x0f),
     );
     play_response.on_hover_text(if shell.playing() { "Pause" } else { "Play" });
-    if live {
-        zoom_buttons(ui, view, Pos2::new(play.right() + 20.0, rect.center().y));
+    if room.zoom {
+        zoom_buttons(
+            ui,
+            view,
+            Pos2::new(play.right() + ZOOM_GAP, rect.center().y),
+        );
     }
 
     let still = Rect::from_center_size(
@@ -3012,8 +3111,10 @@ fn transport_bar(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rec
         Vec2::splat(32.0),
     );
     background_toggle(shell, ui, still.translate(Vec2::new(-40.0, 0.0)));
-    if live {
-        let guides = still.translate(Vec2::new(-80.0, 0.0));
+    let mut next = -80.0;
+    if room.guides {
+        let guides = still.translate(Vec2::new(next, 0.0));
+        next -= 40.0;
         let tip = if view.preview_guides {
             "Hide safe-area guides"
         } else {
@@ -3032,7 +3133,9 @@ fn transport_bar(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rec
                 egui::StrokeKind::Middle,
             );
         }
-        let screen = still.translate(Vec2::new(-120.0, 0.0));
+    }
+    if live {
+        let screen = still.translate(Vec2::new(next, 0.0));
         let full = view.preview_full;
         let tip = if full {
             "Leave full screen"
@@ -3058,6 +3161,35 @@ fn transport_bar(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rec
     let _ = icons::paint(ui.painter(), camera, "camera", tokens::MUTED);
     still_response.on_hover_text("Export still frame");
     shell.chrome.transport = true;
+}
+
+/// The transport's side gap, the gap kept between its parts, and the play
+/// button's radius.
+const TRANSPORT_EDGE: f32 = 16.0;
+const TRANSPORT_GAP: f32 = 8.0;
+const PLAY_RADIUS: f32 = 18.0;
+/// The zoom buttons' gap from play and their width, and how far one round
+/// button at the right reaches in from the edge, with each further one
+/// 40 px more.
+const ZOOM_GAP: f32 = 12.0;
+const ZOOM_WIDTH: f32 = ZOOM_GAP + 22.0 + 2.0 + 44.0 + 2.0 + 22.0;
+const ROUND_REACH: f32 = 44.0;
+
+/// Which optional transport parts fit a preview `width` wide.
+#[derive(Debug, PartialEq, Eq)]
+struct TransportRoom {
+    zoom: bool,
+    guides: bool,
+}
+
+fn transport_room(width: f32, live: bool) -> TransportRoom {
+    let half = width / 2.0 - PLAY_RADIUS - TRANSPORT_GAP;
+    // Still and background always; full screen and guides when live.
+    let reach = |buttons: f32| ROUND_REACH + 40.0 * (buttons - 1.0);
+    // Zoom has no other way in, so it outlasts the guides button.
+    let zoom = live && half >= reach(3.0) + ZOOM_WIDTH;
+    let guides = live && half >= reach(4.0) + if zoom { ZOOM_WIDTH } else { 0.0 };
+    TransportRoom { zoom, guides }
 }
 
 /// A round transport button at `rect`, lit when `on`.
@@ -3105,9 +3237,9 @@ fn zoom_buttons(ui: &Ui, view: &mut ViewState, left: Pos2) {
         Some(zoom) => format!("{:.0}%", zoom * 100.0),
     };
     let buttons = [
-        ("−", 24.0, "Zoom out"),
-        (label.as_str(), 48.0, "Fit the canvas"),
-        ("+", 24.0, "Zoom in"),
+        ("−", 22.0, "Zoom out"),
+        (label.as_str(), 44.0, "Fit the canvas"),
+        ("+", 22.0, "Zoom in"),
     ];
     let mut x = left.x;
     for (index, (text, width, tip)) in buttons.into_iter().enumerate() {
@@ -3198,17 +3330,55 @@ fn inspector_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
         .unwrap_or_default();
     ui.ctx()
         .data_mut(|data| data.insert_temp(egui::Id::unique(INSPECTED), inspected));
-    let content_width = rect.width() - 32.0;
-    let mut details = ui.new_child(egui::UiBuilder::new().max_rect(rect));
-    details.set_clip_rect(rect);
+    let project = shell.inspection().is_none();
+    // The project's details keep Modify in a band at the foot.
+    let body = if project && shell.draft().is_some() {
+        let (body, foot) = rect.split_top_bottom_at_y(rect.bottom() - PROJECT_FOOT);
+        ui.painter()
+            .rect_filled(foot, CornerRadius::ZERO, tokens::PROJECT_BAR);
+        let button = Rect::from_min_size(
+            foot.right_center() - Vec2::new(16.0 + 76.0, 15.0),
+            Vec2::new(76.0, 30.0),
+        );
+        let mut foot_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .id_salt("project-foot")
+                .max_rect(foot),
+        );
+        let response = foot_ui.place(
+            button,
+            egui::Button::new(
+                RichText::new("Modify")
+                    .size(tokens::TYPE_SIZE + 1.0)
+                    .color(tokens::TEXT),
+            )
+            .fill(tokens::MENU_HOVER)
+            .corner_radius(CornerRadius::same(tokens::EXPORT_RADIUS)),
+        );
+        if response
+            .on_hover_text("Change the project settings")
+            .clicked()
+        {
+            view.project_dialog = shell.project_settings();
+        }
+        body
+    } else {
+        rect
+    };
+    // The whole body scrolls, so the bar sits on the panel edge; the
+    // content keeps 16 points in from each side.
+    let content_width = body.width() - 32.0;
+    let mut details = ui.new_child(egui::UiBuilder::new().max_rect(body));
+    details.set_clip_rect(body);
     ui::Scroll::vertical("inspector")
         .content_margin(egui::Margin::symmetric(16, 0))
         .show(&mut details, |ui| {
             ui.set_width(content_width);
-            ui.add_space(14.0);
             if let Some(inspection) = shell.inspection() {
+                ui.add_space(6.0);
                 inspector::clip_panel(shell, ui, view, &inspection, content_width);
             } else {
+                ui.add_space(14.0);
                 section_title(ui, "Details");
                 project_facts(shell, ui, view, content_width);
             }
@@ -3225,93 +3395,81 @@ fn section_title(ui: &mut Ui, title: &str) {
     ui.add_space(14.0);
 }
 
+/// The band at the foot of the project's details that holds Modify.
+const PROJECT_FOOT: f32 = 56.0;
+
+/// The project's settings as a list; Modify opens the dialog that changes
+/// them. Name and background stay editable here.
 fn project_facts(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, width: f32) {
-    if ui.add(ui::Button::new("Modify")).clicked() {
-        view.project_dialog = shell.project_settings();
-    }
-    if let Some(stored) = shell.draft().map(|draft| draft.name.clone()) {
-        if let Some(name) = name_field(ui, &mut view.name_buffer, &stored)
-            && let Err(error) = shell.set_project_name(&name)
-        {
-            shell.set_notice(error.to_string());
-        }
-    } else {
+    let Some(settings) = shell.project_settings() else {
         fact(ui, "Name", &shell.project_name(), width);
+        return;
+    };
+    let stored = settings.name.clone();
+    if let Some(name) = name_field(ui, &mut view.name_buffer, &stored)
+        && let Err(error) = shell.set_project_name(&name)
+    {
+        shell.notice_error(&error);
     }
     let saved = shell
         .project_folder()
-        .map(|path| path.display().to_string())
-        .unwrap_or_else(|| "No project".to_owned());
+        .map_or_else(|| "Not saved".to_owned(), short_folder);
     fact(ui, "Saved", &saved, width);
-    let Some((ratio, canvas_width, canvas_height, background)) = shell.draft().map(|draft| {
-        (
-            ratio_label(&draft.canvas_config.ratio),
-            draft.canvas_config.width,
-            draft.canvas_config.height,
-            draft.canvas_config.background.clone().unwrap_or_default(),
-        )
-    }) else {
-        return;
-    };
-    let space = shell.color_space_label();
-    let color_space = widgets::toolbar_button(ui, &space).on_hover_text("Project color space");
-    if color_space.clicked()
-        && let Err(error) = shell.cycle_color_space()
-    {
-        shell.set_notice(error.to_string());
-    }
-    ui.add_space(8.0);
-    let span = ui.available_rect_before_wrap().x_range();
-    let y = ui.cursor().min.y;
-    ui.painter().hline(
-        span,
-        y,
-        egui::Stroke::new(1.0, Color32::from_white_alpha(20)),
-    );
-    ui.add_space(16.0);
-    let shape = widgets::toolbar_button(ui, &ratio).on_hover_text("Canvas shape");
-    if shape.clicked()
-        && let Err(error) = shell.cycle_canvas()
-    {
-        shell.set_notice(error.to_string());
-    }
     fact(
         ui,
-        "Resolution",
-        &format!("{canvas_width}×{canvas_height}"),
+        "Color space",
+        &cutlass_editor::color_space_name(settings.color_space),
         width,
     );
-    let rate_label = shell.frame_rate_label();
-    let drop_shown = shell.drop_frame_available();
-    let drop_label = if shell.drop_frame_enabled() {
-        "Drop frame"
-    } else {
-        "Non-drop"
+    fact(ui, "Free layer", turned(settings.free_layer), width);
+    ui.add_space(6.0);
+    let span = ui.available_rect_before_wrap().x_range();
+    let y = ui.cursor().min.y;
+    ui.painter()
+        .hline(span, y, egui::Stroke::new(1.0, tokens::LANE_LINE));
+    ui.add_space(12.0);
+    let ratio = cutlass_editor::PROJECT_RATIOS
+        .iter()
+        .find(|(ratio, _)| *ratio == settings.ratio)
+        .map_or_else(
+            || ratio_label(&settings.ratio),
+            |(_, name)| (*name).to_owned(),
+        );
+    fact(ui, "Ratio", &ratio, width);
+    let resolution = cutlass_editor::PROJECT_RESOLUTIONS
+        .iter()
+        .find(|(side, _)| *side == settings.short_side)
+        .map_or("Adapted", |(_, name)| name);
+    let canvas = shell
+        .draft()
+        .map(|draft| (draft.canvas_config.width, draft.canvas_config.height));
+    let resolution = match canvas {
+        Some((w, h)) => format!("{resolution} · {w}×{h}"),
+        None => resolution.to_owned(),
     };
-    let rate = widgets::toolbar_button(ui, &rate_label).on_hover_text("Frames per second");
-    if rate.clicked()
-        && let Err(error) = shell.cycle_frame_rate()
-    {
-        shell.set_notice(error.to_string());
-    }
-    if drop_shown {
-        let drop = widgets::toolbar_button(ui, drop_label).on_hover_text("Timecode labels");
-        if drop.clicked()
-            && let Err(error) = shell.toggle_drop_frame()
-        {
-            shell.set_notice(error.to_string());
-        }
-    }
-    if let Some(color) = color_field(
+    fact(ui, "Resolution", &resolution, width);
+    fact(
         ui,
-        "Background",
-        &mut view.background_buffer,
-        &background,
-        "Hex color. Empty is clear",
-    ) && let Err(error) = shell.set_canvas_background(&color)
-    {
-        shell.set_notice(error.to_string());
+        "Frame rate",
+        &cutlass_editor::rate_label(settings.rate),
+        width,
+    );
+    if shell.drop_frame_available() {
+        fact(ui, "Drop frame", turned(shell.drop_frame_enabled()), width);
     }
+    let background = shell
+        .draft()
+        .and_then(|draft| draft.canvas_config.background.clone())
+        .unwrap_or_default();
+    if let Some(color) = color_field(ui, "Background", &mut view.background_buffer, &background)
+        && let Err(error) = shell.set_canvas_background(&color)
+    {
+        shell.notice_error(&error);
+    }
+}
+
+fn turned(on: bool) -> &'static str {
+    if on { "Turned on" } else { "Turned off" }
 }
 
 /// Where the inspector keeps the id of the clip it is showing this frame.
@@ -3339,15 +3497,44 @@ fn commits(ui: &Ui, response: &egui::Response) -> bool {
     !escaped && typed_for.is_none_or(|typed_for| typed_for == clip)
 }
 
-fn name_field(ui: &mut Ui, text: &mut String, stored: &str) -> Option<String> {
+/// The label column of the project's details.
+const FACT_LABEL: f32 = 120.0;
+/// One row of the project's details.
+const FACT_ROW: f32 = 30.0;
+const FACT_SIZE: f32 = 14.0;
+
+fn fact_label(ui: &mut Ui, label: &str) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(FACT_LABEL, FACT_ROW), Sense::hover());
+    ui.painter().text(
+        rect.left_center(),
+        Align2::LEFT_CENTER,
+        label,
+        FontId::proportional(FACT_SIZE),
+        tokens::MUTED,
+    );
+}
+
+/// A detail typed in place: plain text until it is clicked.
+fn fact_field(
+    ui: &mut Ui,
+    label: &str,
+    text: &mut String,
+    stored: &str,
+    hint: &str,
+) -> Option<String> {
     let mut edited = None;
     ui.horizontal(|ui| {
-        ui.set_min_width(ui.available_width());
-        ui.add_sized(
-            [108.0, 18.0],
-            egui::Label::new(RichText::new("Name").size(13.0).color(tokens::MUTED)),
+        ui.spacing_mut().item_spacing.x = 12.0;
+        fact_label(ui, label);
+        let response = ui.add(
+            egui::TextEdit::singleline(text)
+                .frame(egui::Frame::NONE)
+                .margin(egui::Margin::symmetric(0, 7))
+                .hint_text(RichText::new(hint).color(tokens::FAINT))
+                .text_color(tokens::TEXT)
+                .font(FontId::proportional(FACT_SIZE))
+                .desired_width(ui.available_width()),
         );
-        let response = widgets::field(ui, text).on_hover_text("Empty shows Untitled");
         if commits(ui, &response) {
             edited = Some(text.clone());
         }
@@ -3355,28 +3542,29 @@ fn name_field(ui: &mut Ui, text: &mut String, stored: &str) -> Option<String> {
             *text = stored.to_owned();
         }
     });
-    ui.add_space(4.0);
     edited
 }
 
+fn name_field(ui: &mut Ui, text: &mut String, stored: &str) -> Option<String> {
+    fact_field(ui, "Name", text, stored, "Untitled")
+}
+
 fn fact(ui: &mut Ui, label: &str, value: &str, row_width: f32) {
-    let value_width = (row_width - 120.0).max(40.0);
+    let value_width = (row_width - FACT_LABEL - 12.0).max(40.0);
     ui.horizontal(|ui| {
         ui.set_max_width(row_width);
         ui.spacing_mut().item_spacing.x = 12.0;
-        ui.add_sized(
-            [108.0, 18.0],
-            egui::Label::new(RichText::new(label).size(13.0).color(tokens::MUTED)),
-        );
+        fact_label(ui, label);
         let mut job = egui::text::LayoutJob::simple(
             value.to_owned(),
-            FontId::proportional(13.0),
+            FontId::proportional(FACT_SIZE),
             tokens::TEXT,
             value_width,
         );
         job.wrap = egui::text::TextWrapping::truncate_at_width(value_width);
         let galley = ui.fonts_mut(|fonts| fonts.layout_job(job));
-        let (rect, response) = ui.allocate_exact_size(Vec2::new(value_width, 18.0), Sense::hover());
+        let (rect, response) =
+            ui.allocate_exact_size(Vec2::new(value_width, FACT_ROW), Sense::hover());
         ui.painter().galley(
             rect.left_center() + Vec2::new(0.0, -galley.size().y / 2.0),
             galley,
@@ -3384,7 +3572,6 @@ fn fact(ui: &mut Ui, label: &str, value: &str, row_width: f32) {
         );
         response.on_hover_text(value);
     });
-    ui.add_space(4.0);
 }
 
 fn ratio_label(ratio: &str) -> String {
@@ -3395,31 +3582,9 @@ fn ratio_label(ratio: &str) -> String {
     }
 }
 
-fn color_field(
-    ui: &mut Ui,
-    label: &str,
-    text: &mut String,
-    stored: &str,
-    hover: &str,
-) -> Option<String> {
-    let mut edited = None;
-    ui.horizontal(|ui| {
-        ui.set_min_width(ui.available_width());
-        ui.add_sized(
-            [108.0, 18.0],
-            egui::Label::new(RichText::new(label).size(13.0).color(tokens::MUTED)),
-        );
-        let response = widgets::field(ui, text);
-        if commits(ui, &response) {
-            edited = Some(text.clone());
-        }
-        if !response.has_focus() {
-            *text = stored.to_owned();
-        }
-        response.on_hover_text(hover);
-    });
-    ui.add_space(4.0);
-    edited.filter(|value| value != stored)
+/// A hex color typed in place; empty is clear.
+fn color_field(ui: &mut Ui, label: &str, text: &mut String, stored: &str) -> Option<String> {
+    fact_field(ui, label, text, stored, "Clear").filter(|value| value != stored)
 }
 
 fn timeline_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect) {
@@ -3477,7 +3642,7 @@ fn paint_toolbar(shell: &mut Shell, ui: &mut Ui, rect: Rect) {
                         .clicked()
                         && let Err(error) = shell.close_compound()
                     {
-                        shell.set_notice(error.to_string());
+                        shell.notice_error(&error);
                     }
                     ui.label(RichText::new(COMPOUND_TITLE).size(12.0).color(tokens::TEXT));
                     toolbar_separator(ui);
@@ -3491,8 +3656,6 @@ fn paint_toolbar(shell: &mut Shell, ui: &mut Ui, rect: Rect) {
                                 "split" => shell.blade(),
                                 "marker" => shell.marking(),
                                 "beat" => shell.beating(),
-                                "guides" => shell.guides_shown(),
-                                "lock" => shell.guides_locked(),
                                 "linkage" => shell.linkage_enabled(),
                                 "magnet" => shell.magnet_enabled(),
                                 "snap" => shell.snap_enabled(),
@@ -3561,8 +3724,9 @@ fn tool_enabled(shell: &Shell, name: &str) -> bool {
     match name {
         "undo" => shell.can_undo(),
         "redo" => shell.can_redo(),
-        "select" | "delete" | "zoomIn" | "zoomOut" | "zoomFit" | "guides" | "lock" | "linkage"
-        | "magnet" | "snap" => true,
+        "select" | "delete" | "zoomIn" | "zoomOut" | "zoomFit" | "linkage" | "magnet" | "snap" => {
+            true
+        }
         "split" | "marker" | "beat" => shell.has_clip(),
         "freeze" => shell.freeze_enabled(),
         "reverse" => shell.reverse_enabled(),
@@ -3604,14 +3768,6 @@ fn tool_clicked(shell: &mut Shell, name: &str) {
             shell.toggle_beat();
             Ok(())
         }
-        "guides" => {
-            shell.toggle_guides();
-            Ok(())
-        }
-        "lock" => {
-            shell.toggle_guide_lock();
-            Ok(())
-        }
         "linkage" => shell.toggle_linkage(),
         "magnet" => shell.toggle_magnet(),
         "snap" => {
@@ -3628,7 +3784,7 @@ fn tool_clicked(shell: &mut Shell, name: &str) {
         _ => Ok(()),
     };
     if let Err(error) = result {
-        shell.set_notice(error.to_string());
+        shell.notice_error(&error);
     }
 }
 
@@ -3657,8 +3813,6 @@ const TOOLS: &[Option<(&str, &str)>] = &[
     Some(("snap", "Snap")),
     Some(("magnet", "Magnet")),
     Some(("linkage", "Linkage")),
-    Some(("guides", "Guides")),
-    Some(("lock", "Lock")),
     None,
     Some(("zoomFit", "Zoom to fit")),
     Some(("zoomOut", "Zoom out")),
@@ -3686,16 +3840,30 @@ fn paint_notice(shell: &mut Shell, ui: &Ui, center_x: f32, top: f32) {
     });
     let size = galley.size() + Vec2::new(24.0, 12.0);
     let rect = Rect::from_min_size(Pos2::new(center_x - size.x / 2.0, top), size);
-    ui.painter().rect_filled(
+    let painter = notice_painter(ui.ctx());
+    painter.rect_filled(
         rect,
         CornerRadius::same(99),
         Color32::WHITE.gamma_multiply(alpha),
     );
-    ui.painter().galley(
+    painter.galley(
         rect.left_center() + Vec2::new(12.0, -galley.size().y / 2.0),
         galley,
         ink,
     );
+}
+
+/// The toast's own layer, above every panel, ruler, menu and drag: the
+/// tooltip order, moved to the top of it each frame, with the whole window as
+/// its clip so nothing painted later covers it.
+fn notice_painter(ctx: &egui::Context) -> egui::Painter {
+    let layer = notice_layer();
+    ctx.move_to_top(layer);
+    ctx.layer_painter(layer).with_clip_rect(ctx.content_rect())
+}
+
+fn notice_layer() -> egui::LayerId {
+    egui::LayerId::new(egui::Order::Tooltip, egui::Id::unique("notice-toast"))
 }
 
 /// How opaque a notice is `age` after it was set: a quick fade in, a hold,
@@ -3710,7 +3878,13 @@ fn notice_alpha(age: std::time::Duration) -> f32 {
     rising.min(falling)
 }
 
+/// Where this frame's key diamonds keep their hit rects.
+fn key_hits_id() -> egui::Id {
+    egui::Id::unique("clip-key-hits")
+}
+
 fn ruler_and_lanes(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect) {
+    ui.data_mut(|data| data.remove::<Vec<Rect>>(key_hits_id()));
     let ruler = Rect::from_min_size(rect.min, Vec2::new(rect.width(), tokens::RULER_HEIGHT));
     let tracks = Rect::from_min_max(ruler.left_bottom(), rect.max);
     let lanes_left = tracks.left() + tokens::TRACK_HEAD + tokens::COVER_WIDTH;
@@ -3727,23 +3901,53 @@ fn ruler_and_lanes(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
         rate,
         drop_frame,
     );
+    // Escape calls off a clip drag: the clip goes back and the release does nothing.
+    if shell.clip_dragging() && ui.input(|input| input.key_pressed(egui::Key::Escape)) {
+        shell.escape_clip_drag();
+    }
     let snap_at = shell.snap_line();
     let rows = shell.lanes();
     let kinds: Vec<(bool, f32)> = rows
         .iter()
         .map(|lane| (lane.main, lane_height(view, lane)))
         .collect();
-    let laid = lane_rects(kinds, lane_area);
-    let (low, high) = lane_scroll_range(&laid, lane_area);
-    let scrolls = low < high;
+    // Main stays put. The lanes above it and the lanes under it each scroll
+    // in their own band, and one wheel runs through the two in turn.
+    let still = lane_layout(&kinds, lane_area, view.lanes_up, view.lanes_down);
+    let scrolls = still.up_max > 0.0 || still.down_max > 0.0;
     if scrolls {
-        view.lane_scroll += lane_wheel(ui, tracks);
+        let (up, down) = chain_scroll(
+            &still,
+            view.lanes_up,
+            view.lanes_down,
+            lane_wheel(ui, tracks),
+        );
+        view.lanes_up = up;
+        view.lanes_down = down;
+        if shell.clip_dragging()
+            && let Some(pos) = ui.input(|input| input.pointer.interact_pos())
+        {
+            // Near the panel's top or bottom the drag scrolls as the wheel
+            // does; just above main it brings the lanes above main back down.
+            let edge = drag_scroll_step(lane_area, pos.y);
+            if edge != 0.0 {
+                let (up, down) = chain_scroll(&still, view.lanes_up, view.lanes_down, edge);
+                view.lanes_up = up;
+                view.lanes_down = down;
+            } else if pos.y <= still.upper.bottom() {
+                view.lanes_up += drag_scroll_step(still.upper, pos.y).min(0.0);
+            }
+        }
     }
-    view.lane_scroll = view.lane_scroll.clamp(low, high);
-    let boxes: Vec<Rect> = laid
-        .iter()
-        .map(|rect| rect.translate(Vec2::new(0.0, view.lane_scroll)))
-        .collect();
+    view.lanes_up = view.lanes_up.clamp(0.0, still.up_max);
+    view.lanes_down = view.lanes_down.clamp(0.0, still.down_max);
+    let laid = lane_layout(&kinds, lane_area, view.lanes_up, view.lanes_down);
+    // Rows drawn whole, cut to their band; the parts that show are what the
+    // pointer finds.
+    let drawn = laid.rows.clone();
+    let boxes = laid.shown();
+    let main_index = rows.iter().position(|lane| lane.main);
+    ui.data_mut(|data| data.insert_temp(lane_sheet_id(), ui.clip_rect().intersect(tracks)));
     let marquee = ui.interact(
         lane_area,
         ui.scope_id().with("marquee"),
@@ -3756,9 +3960,19 @@ fn ruler_and_lanes(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
     let clip = ui.clip_rect();
     ui.set_clip_rect(clip.intersect(tracks));
     for (index, lane) in rows.iter().enumerate() {
-        let Some(row) = boxes.get(index).copied() else {
+        let (Some(row), Some(band)) = (drawn.get(index).copied(), laid.bands.get(index)) else {
             continue;
         };
+        // A band cuts its rows top and bottom only: the head on the left
+        // is part of the row.
+        let cut = clip
+            .intersect(tracks)
+            .intersect(Rect::from_x_y_ranges(tracks.x_range(), band.y_range()));
+        let folded = laid.peek && main_index.is_some_and(|main| index > main);
+        if cut.height() <= 0.0 || folded {
+            continue;
+        }
+        ui.set_clip_rect(cut);
         paint_lane(shell, ui, lane, row, lanes_left, index, &boxes);
         lane_head(shell, ui, view, lane, row, index);
         resize_lane(
@@ -3770,6 +3984,25 @@ fn ruler_and_lanes(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
             rows.iter().position(|lane| lane.main),
         );
     }
+    ui.set_clip_rect(clip.intersect(tracks));
+    if let Some(main) = main_index
+        && let Some(row) = drawn.get(main).copied()
+    {
+        // One line across the sheet, the head too, where the lanes above
+        // main end and main's row begins.
+        if main > 0 {
+            ui.painter().hline(
+                tracks.x_range(),
+                row.top() - LANE_GAP / 2.0,
+                egui::Stroke::new(1.0, tokens::LANE_LINE),
+            );
+        }
+        if laid.peek {
+            let y = row.bottom() - tokens::MAIN_CLIP_INSET / 2.0;
+            paint_folded_lanes(shell, ui, &rows[main + 1..], y, lanes_left);
+        }
+    }
+    paint_new_lane(shell, ui, &boxes, lanes_left);
     ui.set_clip_rect(clip);
     shell.send_timeline_asks();
     track_marquee(shell, ui, view, &marquee, lanes_left, &rows, &boxes);
@@ -3794,57 +4027,70 @@ fn ruler_and_lanes(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
             );
         }
     }
-    if (lanes_left..=tracks.right()).contains(&playhead_x) {
-        let mark = Rect::from_center_size(
-            Pos2::new(playhead_x, ruler.bottom() - 6.0),
-            Vec2::new(11.0, 12.0),
-        );
-        let response = ui.interact(mark, ui.scope_id().with("playhead"), Sense::drag());
-        if response.dragged()
-            && let Some(pointer) = response.interact_pointer_pos()
-        {
-            let x = f64::from(pointer.x - lanes_left).max(0.0);
-            if let Err(error) = shell.seek_ruler(x) {
-                shell.set_notice(error.to_string());
-            }
-        }
-        ui.painter()
-            .rect_filled(mark, CornerRadius::same(2), tokens::PLAYHEAD);
-        ui.painter().vline(
-            playhead_x,
-            tracks.y_range(),
-            egui::Stroke::new(1.0, tokens::PLAYHEAD),
-        );
-        response.on_hover_text("Playhead");
-    }
-    paint_guides(shell, ui, lanes_left, tracks);
-    paint_horizontal_guides(shell, ui, tracks);
+    // The ruler first, so the playhead's head, on top of it, takes its own
+    // hover and drag.
     let ruler_hit = ui.interact(
         lane_ruler(ruler, lanes_left),
         ui.scope_id().with("ruler"),
         Sense::click_and_drag(),
     );
-    let below_ruler = ruler.bottom() + 8.0;
+    let mut scrubbing = false;
+    if (lanes_left..=tracks.right()).contains(&playhead_x) {
+        let mark = Rect::from_min_size(
+            Pos2::new(playhead_x - 5.5, ruler.top() + 2.0),
+            Vec2::new(11.0, 14.0),
+        );
+        let response = ui.interact(mark, ui.scope_id().with("playhead"), Sense::drag());
+        // The line drags too, over the lanes and the clips on them.
+        let line = Rect::from_min_max(
+            Pos2::new(playhead_x - PLAYHEAD_GRAB, mark.bottom()),
+            Pos2::new(playhead_x + PLAYHEAD_GRAB, tracks.bottom()),
+        );
+        // A key diamond under the pointer keeps its own click and drag; the
+        // line yields there unless it is already being dragged.
+        let body_id = ui.scope_id().with("playhead-line");
+        let keys: Vec<Rect> = ui
+            .data(|data| data.get_temp(key_hits_id()))
+            .unwrap_or_default();
+        let on_key = ui
+            .input(|input| input.pointer.hover_pos())
+            .is_some_and(|pos| keys.iter().any(|key| key.contains(pos)));
+        let body = if on_key && !ui.ctx().is_being_dragged(body_id) {
+            None
+        } else {
+            Some(ui.interact(line, body_id, Sense::drag()))
+        };
+        for grab in std::iter::once(&response).chain(body.as_ref()) {
+            if grab.hovered() || grab.dragged() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+            }
+            scrubbing |= grab.dragged();
+            if grab.dragged()
+                && let Some(pointer) = grab.interact_pointer_pos()
+            {
+                let x = f64::from(pointer.x - lanes_left).max(0.0);
+                if let Err(error) = shell.seek_ruler(x) {
+                    shell.notice_error(&error);
+                }
+            }
+        }
+        ui.painter()
+            .rect_filled(mark, CornerRadius::same(3), tokens::PLAYHEAD);
+        ui.painter().vline(
+            playhead_x,
+            mark.bottom()..=tracks.bottom(),
+            egui::Stroke::new(1.0, tokens::PLAYHEAD),
+        );
+        response.on_hover_text("Playhead");
+    }
+    shell.set_scrubbing(scrubbing || ruler_hit.dragged());
     if ruler_hit.dragged()
         && let Some(pointer) = ruler_hit.interact_pointer_pos()
     {
         let x = f64::from(pointer.x - lanes_left).max(0.0);
-        if pointer.y > below_ruler {
-            if let Some(time) = shell.lane_time_at(x) {
-                shell.preview_guide(time);
-            }
-        } else {
-            shell.clear_guide_preview();
-            if let Err(error) = shell.seek_ruler(x) {
-                shell.set_notice(error.to_string());
-            }
+        if let Err(error) = shell.seek_ruler(x) {
+            shell.notice_error(&error);
         }
-    }
-    if ruler_hit.drag_stopped()
-        && let Some(time) = shell.take_guide_preview()
-        && let Err(error) = shell.add_guide(time)
-    {
-        shell.set_notice(error.to_string());
     }
     paint_rendered_spans(shell, ui, lanes_left, ruler);
     let marker_clicked = paint_ruler_markers(shell, ui, lanes_left, ruler);
@@ -3854,56 +4100,242 @@ fn ruler_and_lanes(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
         let x = f64::from(pointer.x - lanes_left).max(0.0);
         if shell.marking() && !marker_clicked {
             if let Err(error) = shell.drop_marker(None, x, 0.0) {
-                shell.set_notice(error.to_string());
+                shell.notice_error(&error);
             }
         } else if !marker_clicked && let Err(error) = shell.seek_ruler(x) {
-            shell.set_notice(error.to_string());
+            shell.notice_error(&error);
         }
-    }
-    let corner = Rect::from_min_max(
-        Pos2::new(tracks.left(), ruler.top()),
-        Pos2::new((lanes_left - 1.0).max(tracks.left()), ruler.bottom()),
-    );
-    let corner_hit = ui.interact(
-        corner,
-        ui.scope_id().with("guide-corner"),
-        Sense::click_and_drag(),
-    );
-    if corner_hit.dragged()
-        && let Some(pointer) = corner_hit.interact_pointer_pos()
-    {
-        if pointer.y > below_ruler {
-            if let Some(row) = sheet_row(tracks, pointer.y) {
-                shell.preview_horizontal(row);
-            }
-        } else {
-            shell.clear_horizontal_preview();
-        }
-    }
-    if corner_hit.drag_stopped()
-        && let Some(row) = shell.take_horizontal_preview()
-        && let Err(error) = shell.add_horizontal(row)
-    {
-        shell.set_notice(error.to_string());
     }
     release_library_drop(shell, ui, tracks, lanes_left, &boxes);
     pan_timeline(shell, ui, lane_area, scrolls);
     zoom_timeline(shell, ui, lane_area);
 }
 
-/// How far the lanes may move: none while they fit, else far enough to
-/// bring the top lane or the bottom lane in with a little room.
-fn lane_scroll_range(boxes: &[Rect], area: Rect) -> (f32, f32) {
-    const ROOM: f32 = 8.0;
-    let (Some(top), Some(bottom)) = (
-        boxes.iter().map(|rect| rect.top()).reduce(f32::min),
-        boxes.iter().map(|rect| rect.bottom()).reduce(f32::max),
-    ) else {
-        return (0.0, 0.0);
+/// Where this frame's track sheet is kept, for painters inside one band.
+fn lane_sheet_id() -> egui::Id {
+    egui::Id::unique("lane-sheet")
+}
+
+/// The lanes laid out around a main lane that stays put.
+#[derive(Clone, Debug, PartialEq)]
+struct LaneLayout {
+    /// Each lane's whole row, scrolled.
+    rows: Vec<Rect>,
+    /// The band each row shows in: the one above main, main's own row, or
+    /// the one under main.
+    bands: Vec<Rect>,
+    /// The band above main and the band under it.
+    upper: Rect,
+    lower: Rect,
+    /// How far each band may scroll.
+    up_max: f32,
+    down_max: f32,
+    /// Main has sunk to the sheet's foot and the lanes under it are folded
+    /// to a strip, drawn as one thin line per clip.
+    peek: bool,
+}
+
+/// The strip left under main once it has sunk to the sheet's foot. The
+/// folded lanes' line is drawn in main's own row, under its clip.
+const PEEK: f32 = 4.0;
+/// How far either side of the playhead line a drag picks it up.
+const PLAYHEAD_GRAB: f32 = 4.0;
+
+impl LaneLayout {
+    /// The part of each row that shows in its band. A row scrolled out of
+    /// sight keeps its order as a flat rect on its band's edge.
+    fn shown(&self) -> Vec<Rect> {
+        self.rows
+            .iter()
+            .zip(&self.bands)
+            .map(|(row, band)| {
+                // Folded lanes are only a line: nothing there to click or drop on.
+                let folded = self.peek && *band == self.lower;
+                let cut = row.intersect(*band);
+                if cut.height() > 0.0 && !folded {
+                    cut
+                } else {
+                    // A band scrolled out of the sheet may be empty.
+                    let y = row
+                        .center()
+                        .y
+                        .max(band.top())
+                        .min(band.bottom().max(band.top()));
+                    Rect::from_x_y_ranges(row.x_range(), y..=y)
+                }
+            })
+            .collect()
+    }
+}
+
+/// Lay the lanes out for rows given as (main, height).
+///
+/// While everything fits with a lane of room past the top and the bottom,
+/// main sits in the middle, as far as that room allows, and nothing
+/// scrolls. Once it does not fit, main rests just above the lanes under it,
+/// which show whole while they take no more than half the space; the lanes
+/// above main fill the rest from main up. `up` scrolls only the lanes above
+/// main toward the top one, main staying put; `down` scrolls the whole
+/// stack up, main with it, toward the bottom lane. Each is clamped to what
+/// it can reach.
+fn lane_layout(kinds: &[(bool, f32)], area: Rect, up: f32, down: f32) -> LaneLayout {
+    const GAP: f32 = LANE_GAP;
+    let room = lane_room();
+    let row = |top: f32, height: f32| {
+        Rect::from_min_size(
+            Pos2::new(area.left(), top),
+            Vec2::new(area.width().max(0.0), height),
+        )
     };
-    let low = (area.bottom() - ROOM - bottom).min(0.0);
-    let high = (area.top() + ROOM - top).max(0.0);
-    (low, high)
+    let Some(main) = kinds.iter().position(|(main, _)| *main) else {
+        // No main lane: the rows stack from the top and scroll as one band.
+        let total: f32 = kinds.iter().map(|(_, height)| height + GAP).sum();
+        let down_max = (total + room - area.height()).max(0.0);
+        let down = down.clamp(0.0, down_max);
+        let mut top = area.top() - down;
+        let rows = kinds
+            .iter()
+            .map(|(_, height)| {
+                let rect = row(top, *height);
+                top += height + GAP;
+                rect
+            })
+            .collect::<Vec<_>>();
+        return LaneLayout {
+            bands: vec![area; rows.len()],
+            rows,
+            upper: Rect::from_x_y_ranges(area.x_range(), area.top()..=area.top()),
+            lower: area,
+            up_max: 0.0,
+            down_max,
+            peek: false,
+        };
+    };
+    let main_height = kinds[main].1;
+    let above: f32 = kinds[..main].iter().map(|(_, height)| height + GAP).sum();
+    let under: f32 = kinds[main + 1..]
+        .iter()
+        .map(|(_, height)| height + GAP)
+        .sum();
+    let want_up = above + room;
+    let want_down = under + room;
+    let lowest = area.top() + want_up;
+    let highest = area.bottom() - main_height - want_down;
+    let main_top = if lowest <= highest {
+        (area.center().y - main_height / 2.0).clamp(lowest, highest)
+    } else {
+        let spare = (area.height() - main_height).max(0.0);
+        let down_band = want_down.min((spare - want_up).max(spare / 2.0)).max(0.0);
+        area.top() + (spare - down_band)
+    };
+    let main_bottom = main_top + main_height;
+    let up_max = (want_up - (main_top - area.top())).max(0.0);
+    let down_max = (want_down - (area.bottom() - main_bottom)).max(0.0);
+    let up = up.clamp(0.0, up_max);
+    let down = down.clamp(0.0, down_max);
+    // Scrolling the lanes above main first carries main down with them to
+    // the sheet's foot, folding the lanes under it to a strip; past that,
+    // main stays and they slide under it.
+    let sink = up.min((area.bottom() - PEEK - main_bottom).max(0.0));
+    let rest_top = main_top;
+    // Scrolling down carries main, and everything around it, up.
+    let main_top = main_top + sink - down;
+    let main_bottom = main_bottom + sink - down;
+    let upper = Rect::from_x_y_ranges(
+        area.x_range(),
+        area.top()..=(main_top - GAP / 2.0).max(area.top()),
+    );
+    let lower = Rect::from_x_y_ranges(
+        area.x_range(),
+        (main_bottom + GAP / 2.0).clamp(area.top(), area.bottom())..=area.bottom(),
+    );
+    let mut rows = vec![Rect::NOTHING; kinds.len()];
+    let mut bands = vec![upper; kinds.len()];
+    rows[main] = row(main_top, main_height);
+    bands[main] = rows[main].intersect(area);
+    let mut bottom = rest_top - down - GAP + up;
+    for index in (0..main).rev() {
+        let height = kinds[index].1;
+        rows[index] = row(bottom - height, height);
+        bottom -= height + GAP;
+    }
+    let mut top = main_bottom + GAP;
+    for index in main + 1..kinds.len() {
+        let height = kinds[index].1;
+        rows[index] = row(top, height);
+        bands[index] = lower;
+        top += height + GAP;
+    }
+    let peek = main + 1 < kinds.len() && sink > 0.0 && lower.height() < kinds[main + 1].1;
+    LaneLayout {
+        rows,
+        bands,
+        upper,
+        lower,
+        up_max,
+        down_max,
+        peek,
+    }
+}
+
+fn folded_color(kind: &cutlass_model::TrackType) -> Color32 {
+    if matches!(kind, cutlass_model::TrackType::Audio) {
+        tokens::CLIP_AUDIO_BAR
+    } else {
+        lane_color(kind)
+    }
+}
+
+/// The lanes under main folded to a strip: one thin line, in the lane's
+/// colour, along each clip's time, so it shows there is more below.
+fn paint_folded_lanes(
+    shell: &Shell,
+    ui: &Ui,
+    lanes: &[crate::shell::LaneView],
+    y: f32,
+    lanes_left: f32,
+) {
+    for lane in lanes {
+        for clip in &lane.clips {
+            let left = lane_x(
+                lanes_left,
+                shell.pixel_size(),
+                shell.view_origin().0,
+                clip.start.0,
+            );
+            let width = (clip.duration.0 as f32 * shell.pixel_size() as f32).max(2.0);
+            ui.painter().line_segment(
+                [Pos2::new(left, y), Pos2::new(left + width, y)],
+                egui::Stroke::new(2.0, folded_color(&lane.kind)),
+            );
+        }
+    }
+}
+
+/// Run one wheel step through the two scrolls. Scrolling down (`delta`
+/// below zero) first brings the lanes above main back down to it, then
+/// carries the whole stack up toward the lanes under main; scrolling up
+/// first brings the stack back, then scrolls the lanes above main.
+fn chain_scroll(layout: &LaneLayout, up: f32, down: f32, delta: f32) -> (f32, f32) {
+    let up = up.clamp(0.0, layout.up_max);
+    let down = down.clamp(0.0, layout.down_max);
+    if delta > 0.0 {
+        let back = delta.min(down);
+        (up + delta - back, down - back)
+    } else {
+        let step = -delta;
+        let back = step.min(up);
+        (up - back, down + step - back)
+    }
+}
+
+/// Rows sit this far apart: a hairline of the panel shows between them.
+const LANE_GAP: f32 = 1.0;
+
+/// The space kept past the top lane and the bottom one: a regular lane and
+/// the gap beside it.
+fn lane_room() -> f32 {
+    row_height(RowSize::Thin) + LANE_GAP
 }
 
 /// This frame's wheel, whether the zoom modifier is held, and the pointer.
@@ -3919,6 +4351,23 @@ fn wheel(ui: &Ui) -> (Vec2, bool, Option<Pos2>) {
 }
 
 /// The up-and-down wheel over the track area, in points to move the lanes.
+/// How far to scroll a band while a clip drag is held near its top (above
+/// zero) or bottom (below zero), so a lane out of view can be reached.
+/// Faster the closer the pointer is to the edge; zero outside the band.
+fn drag_scroll_step(tracks: Rect, y: f32) -> f32 {
+    const ZONE: f32 = 32.0;
+    const FASTEST: f32 = 12.0;
+    let from_top = y - tracks.top();
+    let from_bottom = tracks.bottom() - y;
+    if from_top < ZONE {
+        FASTEST * (1.0 - from_top.max(0.0) / ZONE)
+    } else if from_bottom < ZONE {
+        -FASTEST * (1.0 - from_bottom.max(0.0) / ZONE)
+    } else {
+        0.0
+    }
+}
+
 fn lane_wheel(ui: &Ui, tracks: Rect) -> f32 {
     let (delta, command, pos) = wheel(ui);
     let over = pos.is_some_and(|pos| tracks.contains(pos) && !over_menu(ui, pos));
@@ -4026,7 +4475,7 @@ fn paint_clip_menu(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
             }
         };
         if let Err(error) = result {
-            shell.set_notice(error.to_string());
+            shell.notice_error(&error);
         }
     } else if shown.dismissed {
         shell.close_clip_menu();
@@ -4075,7 +4524,7 @@ fn paint_gap_menu(shell: &mut Shell, ui: &mut Ui) {
     if shown.picked.is_some() {
         shell.close_gap_menu();
         if let Err(error) = shell.close_gap(&menu.track_id, menu.time) {
-            shell.set_notice(error.to_string());
+            shell.notice_error(&error);
         }
     } else if shown.dismissed {
         shell.close_gap_menu();
@@ -4211,10 +4660,13 @@ fn track_action(shell: &mut Shell, view: &mut ViewState, track_id: &TrackId, act
             view.lane_heights.remove(track_id);
             shell.remove_track(track_id)
         }
+        ("solo-track", None) => {
+            shell.toggle_attribute(track_id.clone(), cutlass_model::TrackAttribute::SOLO)
+        }
         _ => Ok(()),
     };
     if let Err(error) = result {
-        shell.set_notice(error.to_string());
+        shell.notice_error(&error);
     }
 }
 
@@ -4230,8 +4682,8 @@ fn lane_head(
 ) {
     let head = head_rect(row);
     let label = Rect::from_min_max(
-        Pos2::new(head.left() + 34.0, row.center().y - 11.0),
-        Pos2::new(head.right() - 32.0, row.center().y + 11.0),
+        Pos2::new(head.left() + HEAD_FIRST + 14.0, row.center().y - 11.0),
+        Pos2::new(head.right() - 6.0, row.center().y + 11.0),
     );
     if let Some((track_id, typed)) = view.renaming.as_mut()
         && track_id == &lane.track_id
@@ -4245,17 +4697,27 @@ fn lane_head(
             let typed = typed.clone();
             view.renaming = None;
             if !cancel && let Err(error) = shell.rename_track(&lane.track_id, &typed) {
-                shell.set_notice(error.to_string());
+                shell.notice_error(&error);
             }
         }
         return;
     }
+    let name = lane
+        .name
+        .clone()
+        .unwrap_or_else(|| lane_name(&lane.kind, lane.main));
+    let kind = paint_lane_head(ui, row, lane_icon(&lane.kind));
     let response = ui
-        .interact(label, ui.scope_id().with(("head", index)), Sense::click())
-        .on_hover_text("Double-click to rename, right-click for more");
+        .interact(
+            kind.expand(3.0),
+            ui.scope_id().with(("head", index)),
+            Sense::click(),
+        )
+        .on_hover_text(format!("{name} · double-click to rename"));
     if response.double_clicked() {
         track_action(shell, view, &lane.track_id, "rename-track");
     }
+    lane_switches(shell, ui, view, lane, row, index);
     if let Some(pos) = secondary_click(ui)
         && head.contains(pos)
     {
@@ -4285,7 +4747,7 @@ fn lane_height(view: &ViewState, lane: &crate::shell::LaneView) -> f32 {
     view.lane_heights
         .get(&lane.track_id)
         .copied()
-        .unwrap_or_else(|| row_height(lane.main, is_audio(lane)))
+        .unwrap_or_else(|| row_height(lane_size(lane)))
 }
 
 /// Drag a row's outer edge to make it taller or shorter: the top edge for
@@ -4385,7 +4847,7 @@ fn zoom_timeline(shell: &mut Shell, ui: &Ui, lane_area: Rect) {
     }
     let x = f64::from(pos.x - lane_area.left()).max(0.0);
     if let Err(error) = shell.zoom_at(f64::from(factor), x) {
-        shell.set_notice(error.to_string());
+        shell.notice_error(&error);
     }
 }
 
@@ -4407,46 +4869,98 @@ fn release_library_drop(
     if !tracks.contains(pos) {
         return;
     }
-    if let Some(index) = lane_under(boxes, pos)
-        && let Some(row) = boxes.get(index)
-    {
-        ui.painter().rect_stroke(
-            *row,
-            CornerRadius::same(4),
-            egui::Stroke::new(tokens::STROKE, tokens::EXPORT),
-            egui::StrokeKind::Inside,
-        );
+    let x = f64::from((pos.x - lanes_left).max(0.0));
+    let y = lane_under(boxes, pos).map(|index| {
+        let row = u32::try_from(index).unwrap_or(0);
+        f64::from(row) * tokens::LANE_HEIGHT + tokens::LANE_HEIGHT / 2.0
+    });
+    // In a gap, or past the top or bottom lane, a card may open its own lane.
+    let gap = match lane_spot(boxes, pos) {
+        Some(LaneSpot::Between(row)) => Some(row),
+        _ => None,
+    };
+    // Mark where the card really goes, which may be another lane or a new one.
+    if let Some(landing) = y.and_then(|y| shell.library_landing(&material_id, x, y, gap)) {
+        paint_library_landing(shell, ui, &landing, boxes, lanes_left);
     }
     if !ui.input(|input| input.pointer.any_released()) {
         return;
     }
     let _ = egui::DragAndDrop::take_payload::<LibraryDrop>(ui.ctx());
-    let Some(index) = lane_under(boxes, pos) else {
-        shell.set_notice("the drag missed the lanes".to_owned());
+    let Some(y) = y else {
+        shell.notice_error(&"the drag missed the lanes");
         return;
     };
-    let x = f64::from((pos.x - lanes_left).max(0.0));
-    let row = u32::try_from(index).unwrap_or(0);
-    let y = f64::from(row) * tokens::LANE_HEIGHT + tokens::LANE_HEIGHT / 2.0;
-    let landed = if material_id.starts_with("transition:") {
-        shell.drop_transition(&material_id, x, y)
-    } else if material_id.starts_with(cutlass_editor::TITLE_CARD_PREFIX) {
-        shell.drop_title(&material_id, x, y)
-    } else if material_id.starts_with(cutlass_editor::EFFECT_CARD_PREFIX) {
-        shell.drop_effect(&material_id, x, y)
-    } else if material_id == cutlass_editor::ADJUSTMENT_CARD {
-        shell.drop_adjustment(x, y)
-    } else if material_id.starts_with(cutlass_editor::FILTER_CARD_PREFIX) {
-        shell.drop_filter(&material_id, x, y)
-    } else if material_id.starts_with(crate::shell::STICKER_CARD_PREFIX) {
-        shell.drop_sticker(&material_id, x, y)
-    } else if material_id.starts_with(cutlass_editor::TEMPLATE_CARD_PREFIX) {
-        shell.drop_template(&material_id, x, y)
-    } else {
-        shell.drop_medium(&material_id, x, y)
-    };
+    let landed = shell.drop_library(&material_id, x, y, gap);
     if let Err(error) = landed {
-        shell.set_notice(error.to_string());
+        shell.notice_error(&error);
+    }
+}
+
+/// Outline the lane a library card lands on and the span it takes there, or
+/// draw the line where a new lane opens for it.
+fn paint_library_landing(
+    shell: &Shell,
+    ui: &Ui,
+    landing: &crate::shell::LibraryLanding,
+    boxes: &[Rect],
+    lanes_left: f32,
+) {
+    use crate::shell::LibraryLanding;
+    match landing {
+        LibraryLanding::Row {
+            track_id,
+            start,
+            duration,
+        } => {
+            let rows = shell.lanes();
+            let Some((lane, row)) = rows
+                .iter()
+                .zip(boxes)
+                .find(|(lane, _)| &lane.track_id == track_id)
+            else {
+                return;
+            };
+            ui.painter().rect_stroke(
+                *row,
+                CornerRadius::same(4),
+                egui::Stroke::new(tokens::STROKE, tokens::EXPORT),
+                egui::StrokeKind::Inside,
+            );
+            if duration.0 > 0 {
+                let spot = clip_bounds(shell, lane_size(lane), *start, *duration, *row, lanes_left);
+                ui.painter().with_clip_rect(*row).rect_stroke(
+                    spot,
+                    CornerRadius::same(7),
+                    egui::Stroke::new(2.0, tokens::SELECTED),
+                    egui::StrokeKind::Inside,
+                );
+            }
+        }
+        LibraryLanding::NewLane { row, .. } => {
+            if let Some(y) = gap_y(boxes, *row) {
+                let right = boxes.first().map_or(lanes_left, Rect::right);
+                ui.painter().hline(
+                    lanes_left..=right,
+                    y,
+                    egui::Stroke::new(2.0, tokens::SELECTED),
+                );
+            }
+        }
+    }
+}
+
+/// The middle of the gap above view row `row`, or just past the first or
+/// last row.
+fn gap_y(boxes: &[Rect], row: usize) -> Option<f32> {
+    match (
+        row.checked_sub(1).and_then(|above| boxes.get(above)),
+        boxes.get(row),
+    ) {
+        (Some(above), Some(below)) => Some((above.bottom() + below.top()) / 2.0),
+        (None, Some(below)) => Some(below.top() - 4.0),
+        (Some(above), None) => Some(above.bottom() + 4.0),
+        (None, None) => None,
     }
 }
 
@@ -4538,85 +5052,6 @@ fn ghost_card(shell: &Shell, material_id: &str) -> Option<BinCard> {
     })
 }
 
-fn paint_guides(shell: &mut Shell, ui: &mut Ui, lanes_left: f32, tracks: Rect) {
-    let pixel_size = shell.pixel_size();
-    let origin = shell.view_origin().0;
-    let selected = shell.selected_guide().map(|time| time.0);
-    let times: Vec<i64> = shell.guides().iter().map(|time| time.0).collect();
-    for time in times {
-        let x = lane_x(lanes_left, pixel_size, origin, time);
-        if x < lanes_left - 4.0 || x > tracks.right() + 4.0 {
-            continue;
-        }
-        let hit = Rect::from_center_size(
-            Pos2::new(x, tracks.center().y),
-            Vec2::new(8.0, tracks.height()),
-        );
-        let response = ui.interact(hit, ui.scope_id().with(("guide", time)), Sense::click());
-        if response.clicked() {
-            shell.select_guide(Micros(time));
-        }
-        let color = if selected == Some(time) {
-            tokens::SELECTED
-        } else {
-            tokens::EXPORT
-        };
-        ui.painter()
-            .vline(x, tracks.y_range(), egui::Stroke::new(1.0, color));
-    }
-    if let Some(preview) = shell.guide_preview() {
-        let x = lane_x(lanes_left, pixel_size, origin, preview.0);
-        if (lanes_left..=tracks.right()).contains(&x) {
-            ui.painter().vline(
-                x,
-                tracks.y_range(),
-                egui::Stroke::new(1.0, tokens::EXPORT.gamma_multiply(0.55)),
-            );
-        }
-    }
-}
-
-fn paint_horizontal_guides(shell: &mut Shell, ui: &mut Ui, tracks: Rect) {
-    let selected = shell.selected_horizontal();
-    let rows: Vec<i32> = shell.horizontal_guides().to_vec();
-    let height = tracks.height().max(1.0);
-    for row in rows {
-        let y = tracks.top() + row as f32 / 1000.0 * height;
-        let hit = Rect::from_center_size(
-            Pos2::new(tracks.center().x, y),
-            Vec2::new(tracks.width(), 8.0),
-        );
-        let response = ui.interact(hit, ui.scope_id().with(("hguide", row)), Sense::click());
-        if response.clicked() {
-            shell.select_horizontal(row);
-        }
-        let color = if selected == Some(row) {
-            tokens::SELECTED
-        } else {
-            tokens::EXPORT
-        };
-        ui.painter()
-            .hline(tracks.x_range(), y, egui::Stroke::new(1.0, color));
-    }
-    if let Some(row) = shell.horizontal_preview() {
-        let y = tracks.top() + row as f32 / 1000.0 * height;
-        ui.painter().hline(
-            tracks.x_range(),
-            y,
-            egui::Stroke::new(1.0, tokens::EXPORT.gamma_multiply(0.55)),
-        );
-    }
-}
-
-fn sheet_row(tracks: Rect, y: f32) -> Option<i32> {
-    let height = tracks.height();
-    if height <= 0.0 || !y.is_finite() {
-        return None;
-    }
-    let fraction = ((y - tracks.top()) / height).clamp(0.0, 1.0);
-    Some((fraction * 1000.0).round() as i32)
-}
-
 fn lane_ruler(ruler: Rect, lanes_left: f32) -> Rect {
     Rect::from_min_max(Pos2::new(lanes_left, ruler.top()), ruler.max)
 }
@@ -4656,6 +5091,9 @@ fn paint_marks(ui: &Ui, shell: &Shell, ruler: Rect, lanes_left: f32) {
     }
 }
 
+/// The widest ruler label, a drop-frame timecode, with its gap.
+const RULER_LABEL_LEAD: f32 = 80.0;
+
 /// The ruler's ticks and labels across the lanes. Past the end of the cut,
 /// the ticks keep going.
 fn paint_ticks(
@@ -4675,7 +5113,15 @@ fn paint_ticks(
     if !span.is_finite() || span > i64::MAX as f64 {
         return;
     }
-    let from = Micros(origin.max(0));
+    // Start a label's width before the view, so a label whose tick has
+    // just scrolled off the left shows its tail instead of vanishing.
+    let lead = (f64::from(RULER_LABEL_LEAD) / pixel_size).ceil();
+    let lead = if lead.is_finite() && lead < i64::MAX as f64 {
+        lead as i64
+    } else {
+        0
+    };
+    let from = Micros(origin.saturating_sub(lead).max(0));
     let to = Micros(origin.saturating_add(span as i64));
     let painter = ui.painter().with_clip_rect(Rect::from_min_max(
         Pos2::new(lanes_left, ruler.top()),
@@ -4683,22 +5129,24 @@ fn paint_ticks(
     ));
     for tick in ruler_ticks(rate, drop_frame, pixel_size, from, to) {
         let x = lane_x(lanes_left, pixel_size, origin, tick.time.0);
+        // Ticks hang from the top, and a label sits beside its major tick.
+        let top = ruler.top() + 3.0;
         let height = if tick.major {
             tokens::MAJOR_TICK
         } else {
-            tokens::MAJOR_TICK / 2.0
+            tokens::MAJOR_TICK * 0.4
         };
         painter.vline(
             x,
-            (ruler.bottom() - height)..=ruler.bottom(),
+            top..=top + height,
             egui::Stroke::new(1.0, tokens::RULER_TICK),
         );
         if let Some(label) = tick.label {
             painter.text(
-                Pos2::new(x + 4.0, ruler.bottom() - tokens::MAJOR_TICK - 2.0),
-                Align2::LEFT_BOTTOM,
+                Pos2::new(x + 4.0, top + tokens::MAJOR_TICK / 2.0),
+                Align2::LEFT_CENTER,
                 label,
-                FontId::monospace(11.0),
+                FontId::proportional(11.0),
                 tokens::MUTED,
             );
         }
@@ -4716,7 +5164,7 @@ fn ruler_rate(shell: &Shell) -> (FrameRate, bool) {
 }
 
 fn paint_empty_main(ui: &Ui, area: Rect) {
-    let height = row_height(true, false);
+    let height = row_height(RowSize::Main);
     let lane = Rect::from_min_size(
         Pos2::new(area.left(), area.center().y - height / 2.0),
         Vec2::new(area.width(), height),
@@ -4736,7 +5184,7 @@ fn paint_empty_main(ui: &Ui, area: Rect) {
         FontId::proportional(12.0),
         tokens::MUTED,
     );
-    paint_lane_head(ui, lane, "media", "Main");
+    paint_lane_head(ui, lane, "media");
 }
 
 fn paint_lane(
@@ -4748,12 +5196,17 @@ fn paint_lane(
     index: usize,
     boxes: &[Rect],
 ) {
-    let fill = if lane.main {
-        tokens::LANE
-    } else {
-        tokens::PANEL
-    };
-    ui.painter().rect_filled(row, CornerRadius::ZERO, fill);
+    // Every row, its head too, takes the lane fill; the hairline between
+    // rows is the panel showing through the gap.
+    let whole = Rect::from_min_max(Pos2::new(head_rect(row).left(), row.top()), row.max);
+    ui.painter()
+        .rect_filled(whole, CornerRadius::ZERO, tokens::LANE);
+    // The head's buttons and the lanes are parted by a line.
+    ui.painter().vline(
+        head_rect(row).right(),
+        row.y_range(),
+        egui::Stroke::new(1.0, tokens::PANEL),
+    );
     if lane.main && lane.clips.is_empty() {
         ui.painter().rect_stroke(
             row,
@@ -4769,41 +5222,14 @@ fn paint_lane(
             tokens::MUTED,
         );
     }
-    let name = lane
-        .name
-        .clone()
-        .unwrap_or_else(|| lane_name(&lane.kind, lane.main));
-    paint_lane_head(ui, row, lane_icon(&lane.kind), &name);
-    let lock = Rect::from_center_size(
-        Pos2::new(row.left() - tokens::COVER_WIDTH - 18.0, row.center().y),
-        Vec2::splat(24.0),
-    );
-    let lock_response = ui.interact(lock, ui.scope_id().with(("lock", index)), Sense::click());
-    if lock_response.clicked()
-        && let Err(error) =
-            shell.toggle_attribute(lane.track_id.clone(), cutlass_model::TrackAttribute::LOCK)
-    {
-        shell.set_notice(error.to_string());
-    }
-    let _ = icons::paint(
-        ui.painter(),
-        Rect::from_center_size(lock.center(), Vec2::splat(14.0)),
-        "lock",
-        if lane.lock {
-            tokens::TEXT
-        } else {
-            tokens::FAINT
-        },
-    );
-    lock_response.on_hover_text(if lane.lock { "Locked" } else { "Lock" });
-    lane_switches(shell, ui, lane, row, index);
     let followers: Vec<_> = shell
         .move_previews()
         .into_iter()
         .filter(|preview| preview.track_id == lane.track_id)
         .collect();
     for clip in &lane.clips {
-        paint_clip(shell, ui, lane, clip, lanes_left, index, boxes);
+        let at = RowAt { index, row, boxes };
+        paint_clip(shell, ui, lane, clip, lanes_left, at);
     }
     // A right-click on the row but off its clips may be over a gap.
     if let Some(pos) = secondary_click(ui)
@@ -4822,58 +5248,102 @@ fn paint_lane(
     }
 }
 
-fn paint_lane_head(ui: &Ui, row: Rect, icon: &str, label: &str) {
-    let center = Pos2::new(
-        row.left() - tokens::TRACK_HEAD - tokens::COVER_WIDTH + 22.0,
-        row.center().y,
-    );
-    let _ = icons::paint(
-        ui.painter(),
-        Rect::from_center_size(center, Vec2::splat(16.0)),
-        icon,
-        tokens::MUTED,
-    );
-    ui.painter().text(
-        Pos2::new(center.x + 14.0, center.y),
-        Align2::LEFT_CENTER,
-        label,
-        FontId::proportional(12.0),
-        tokens::MUTED,
-    );
+/// The lane's kind as an icon at the head's left. Its name is not written
+/// out; [`lane_head`] shows it on hover.
+fn paint_lane_head(ui: &Ui, row: Rect, icon: &str) -> Rect {
+    let center = Pos2::new(head_rect(row).left() + HEAD_FIRST, row.center().y);
+    let rect = Rect::from_center_size(center, Vec2::splat(16.0));
+    let _ = icons::paint(ui.painter(), rect, icon, tokens::MUTED);
+    rect
+}
+
+/// Where the head's first icon sits from its left, and the step to each
+/// button after it.
+const HEAD_FIRST: f32 = 20.0;
+const HEAD_STEP: f32 = 25.0;
+
+/// The head's buttons, left to right: lock, show or hide (not on a sound
+/// lane), mute (only on a lane that makes sound), and more, which opens the
+/// track menu.
+fn head_buttons(lane: &crate::shell::LaneView) -> Vec<&'static str> {
+    let sound = lane.main
+        || matches!(
+            lane.kind,
+            cutlass_model::TrackType::Video
+                | cutlass_model::TrackType::Mixed
+                | cutlass_model::TrackType::Audio
+        );
+    let mut buttons = vec!["lock"];
+    if !is_audio(lane) {
+        buttons.push("hide");
+    }
+    if sound {
+        buttons.push("mute");
+    }
+    buttons.push("more");
+    buttons
 }
 
 fn lane_switches(
     shell: &mut Shell,
     ui: &mut Ui,
+    view: &mut ViewState,
     lane: &crate::shell::LaneView,
     row: Rect,
     index: usize,
 ) {
-    let origin = Pos2::new(row.left() - tokens::COVER_WIDTH + 4.0, row.center().y - 8.0);
-    for (offset, label, on, bit) in [
-        (0.0, "M", lane.mute, cutlass_model::TrackAttribute::MUTE),
-        (18.0, "H", lane.hide, cutlass_model::TrackAttribute::HIDE),
-        (36.0, "S", lane.solo, cutlass_model::TrackAttribute::SOLO),
-    ] {
-        let rect = Rect::from_min_size(origin + Vec2::new(offset, 0.0), Vec2::splat(16.0));
-        let response = ui.interact(rect, ui.scope_id().with((label, index)), Sense::click());
-        if response.clicked()
-            && let Err(error) = shell.toggle_attribute(lane.track_id.clone(), bit)
-        {
-            shell.set_notice(error.to_string());
-        }
-        ui.painter().text(
-            rect.center(),
-            Align2::CENTER_CENTER,
-            label,
-            FontId::proportional(10.0),
-            if on { tokens::TEXT } else { tokens::FAINT },
+    let head = head_rect(row);
+    for (at, button) in head_buttons(lane).into_iter().enumerate() {
+        let step = u16::try_from(at + 1).map_or(0.0, f32::from);
+        let center = Pos2::new(head.left() + HEAD_FIRST + HEAD_STEP * step, row.center().y);
+        let rect = Rect::from_center_size(center, Vec2::splat(22.0));
+        let response = ui.interact(rect, ui.scope_id().with((button, index)), Sense::click());
+        let (icon, color, tip) = match button {
+            "lock" if lane.lock => ("lock", tokens::TEXT, "Unlock"),
+            "lock" => ("unlock", tokens::TEXT, "Lock"),
+            "hide" if lane.hide => ("viewOff", tokens::MUTED, "Show"),
+            "hide" => ("view", tokens::TEXT, "Hide"),
+            "mute" if lane.mute => ("volumeOff", tokens::MUTED, "Unmute"),
+            "mute" if lane.mute_by_solo => ("volumeOff", tokens::FAINT, "Muted by solo"),
+            "mute" => ("volume", tokens::TEXT, "Mute"),
+            _ => ("more", tokens::TEXT, "More"),
+        };
+        let color = if response.hovered() {
+            tokens::TEXT
+        } else {
+            color
+        };
+        let _ = icons::paint(
+            ui.painter(),
+            Rect::from_center_size(center, Vec2::splat(15.0)),
+            icon,
+            color,
         );
-        response.on_hover_text(match label {
-            "M" => "Mute",
-            "H" => "Hide",
-            _ => "Solo",
-        });
+        if response.clicked() {
+            let bit = match button {
+                "lock" => Some(cutlass_model::TrackAttribute::LOCK),
+                "hide" => Some(cutlass_model::TrackAttribute::HIDE),
+                "mute" => Some(cutlass_model::TrackAttribute::MUTE),
+                _ => None,
+            };
+            match bit {
+                Some(bit) => {
+                    if let Err(error) = shell.toggle_attribute(lane.track_id.clone(), bit) {
+                        shell.notice_error(&error);
+                    }
+                }
+                None => {
+                    shell.close_gap_menu();
+                    view.track_menu = Some(TrackMenu {
+                        track_id: lane.track_id.clone(),
+                        main: lane.main,
+                        lock: lane.lock,
+                        at: rect.left_bottom(),
+                    });
+                }
+            }
+        }
+        response.on_hover_text(tip);
     }
 }
 
@@ -4941,15 +5411,7 @@ fn clips_touching(
     for (lane, row) in rows.iter().zip(boxes.iter().copied()) {
         for clip in &lane.clips {
             let (start, duration) = preview_bounds(shell, clip);
-            let bounds = clip_bounds(
-                shell,
-                lane.main,
-                is_audio(lane),
-                start,
-                duration,
-                row,
-                lanes_left,
-            );
+            let bounds = clip_bounds(shell, lane_size(lane), start, duration, row, lanes_left);
             if bounds.intersects(rect) {
                 ids.push(clip.id.clone());
             }
@@ -4960,17 +5422,16 @@ fn clips_touching(
 
 fn clip_bounds(
     shell: &Shell,
-    main: bool,
-    audio: bool,
+    size: RowSize,
     start: Micros,
     duration: Micros,
     row: Rect,
     lanes_left: f32,
 ) -> Rect {
     // A row dragged taller or shorter takes its clips with it.
-    let inset = clip_inset(main);
-    let height = if (row.height() - row_height(main, audio)).abs() < f32::EPSILON {
-        clip_height(main, audio)
+    let inset = clip_inset(size);
+    let height = if (row.height() - row_height(size)).abs() < f32::EPSILON {
+        clip_height(size)
     } else {
         (row.height() - 2.0 * inset).max(tokens::MIN_CLIP_HEIGHT)
     };
@@ -4986,13 +5447,34 @@ fn clip_bounds(
 
 /// A clip's height: the main track is tallest, audio holds its waveform
 /// under a header, the rest are a single row.
-fn clip_height(main: bool, audio: bool) -> f32 {
-    if main {
-        tokens::MAIN_CLIP_HEIGHT
-    } else if audio {
-        tokens::AUDIO_CLIP_HEIGHT
+fn clip_height(size: RowSize) -> f32 {
+    match size {
+        RowSize::Main => tokens::MAIN_CLIP_HEIGHT,
+        RowSize::Picture => tokens::PICTURE_CLIP_HEIGHT,
+        RowSize::Audio => tokens::AUDIO_CLIP_HEIGHT,
+        RowSize::Thin => tokens::CLIP_HEIGHT,
+    }
+}
+
+/// How tall a lane's row is: main, an overlay picture lane, an audio lane,
+/// or a thin one (text, stickers, effects and the like).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RowSize {
+    Main,
+    Picture,
+    Audio,
+    Thin,
+}
+
+fn lane_size(lane: &crate::shell::LaneView) -> RowSize {
+    if lane.main {
+        RowSize::Main
+    } else if tall_lane(lane) {
+        RowSize::Picture
+    } else if is_audio(lane) {
+        RowSize::Audio
     } else {
-        tokens::CLIP_HEIGHT
+        RowSize::Thin
     }
 }
 
@@ -5000,17 +5482,28 @@ fn is_audio(lane: &crate::shell::LaneView) -> bool {
     lane.kind == cutlass_model::TrackType::Audio
 }
 
-fn clip_inset(main: bool) -> f32 {
-    if main {
-        tokens::MAIN_CLIP_INSET
-    } else {
-        tokens::CLIP_INSET
+/// Main and overlay video rows share the tall picture height, so a clip
+/// keeps its size when it moves between them. Text, sticker and effect rows
+/// stay thin.
+fn tall_lane(lane: &crate::shell::LaneView) -> bool {
+    lane.main
+        || matches!(
+            lane.kind,
+            cutlass_model::TrackType::Video | cutlass_model::TrackType::Mixed
+        )
+}
+
+fn clip_inset(size: RowSize) -> f32 {
+    match size {
+        RowSize::Main => tokens::MAIN_CLIP_INSET,
+        RowSize::Picture => tokens::PICTURE_CLIP_INSET,
+        RowSize::Audio | RowSize::Thin => tokens::CLIP_INSET,
     }
 }
 
 /// A lane row: its clips and the gap above and below them.
-fn row_height(main: bool, audio: bool) -> f32 {
-    clip_height(main, audio) + 2.0 * clip_inset(main)
+fn row_height(size: RowSize) -> f32 {
+    clip_height(size) + 2.0 * clip_inset(size)
 }
 
 fn paint_transitions(
@@ -5372,7 +5865,10 @@ fn clip_parts(clip_rect: Rect, main: bool, audio: bool, sound: bool) -> ClipPart
             band: None,
         };
     }
-    let split = clip_rect.top() + tokens::CLIP_HEADER.min(clip_rect.height());
+    // A short overlay clip keeps a third for its name, so the pictures and
+    // the sound still show under it.
+    let header_height = tokens::CLIP_HEADER.min((clip_rect.height() / 3.0).max(13.0));
+    let split = clip_rect.top() + header_height.min(clip_rect.height());
     let header = Some(Rect::from_min_max(
         clip_rect.min,
         Pos2::new(clip_rect.right(), split),
@@ -5472,29 +5968,28 @@ fn paint_speed_curve(ui: &Ui, area: Rect, visible: Rect, curve: &[(f64, f64)]) {
     ));
 }
 
+/// A clip's lane: its index, its whole row (part of it may be scrolled out
+/// of its band), and the part of every row that shows, which a body drag
+/// reads for the row under the pointer.
+#[derive(Clone, Copy)]
+struct RowAt<'a> {
+    index: usize,
+    row: Rect,
+    boxes: &'a [Rect],
+}
+
 fn paint_clip(
     shell: &mut Shell,
     ui: &mut Ui,
     lane: &crate::shell::LaneView,
     clip: &crate::shell::ClipSpan,
     lanes_left: f32,
-    index: usize,
-    boxes: &[Rect],
+    at: RowAt<'_>,
 ) {
-    // `boxes[index]` is this clip's own row. A body drag reads the row under the pointer.
-    let Some(row) = boxes.get(index).copied() else {
-        return;
-    };
+    // The whole row, so a clip keeps its height while its row is part hidden.
+    let RowAt { index, row, boxes } = at;
     let (start, duration) = preview_bounds(shell, clip);
-    let clip_rect = clip_bounds(
-        shell,
-        lane.main,
-        is_audio(lane),
-        start,
-        duration,
-        row,
-        lanes_left,
-    );
+    let clip_rect = clip_bounds(shell, lane_size(lane), start, duration, row, lanes_left);
     let visible = clip_rect.intersect(row);
     if visible.width() <= 0.0 || visible.height() <= 0.0 {
         return;
@@ -5524,7 +6019,7 @@ fn paint_clip(
     } else {
         shell.wave(&clip.id, f64::from(clip_rect.width()), span)
     };
-    let parts = clip_parts(clip_rect, lane.main, audio, wave.is_some());
+    let parts = clip_parts(clip_rect, tall_lane(lane), audio, wave.is_some());
     if !ghost {
         if let Some(film) = parts.film {
             paint_film(shell, ui, &clip.id, clip_rect, film, visible);
@@ -5619,7 +6114,7 @@ fn paint_clip(
         {
             let x = f64::from(pos.x - lanes_left).max(0.0);
             if let Err(error) = shell.split_pointer(clip.id.clone(), x, editor_lane_y(index)) {
-                shell.set_notice(error.to_string());
+                shell.notice_error(&error);
             }
         }
     } else if body.width() > 0.0 && shell.marking() {
@@ -5637,7 +6132,7 @@ fn paint_clip(
         {
             let x = f64::from(pos.x - lanes_left).max(0.0);
             if let Err(error) = shell.drop_marker(Some(clip.id.clone()), x, editor_lane_y(index)) {
-                shell.set_notice(error.to_string());
+                shell.notice_error(&error);
             }
         }
     } else if body.width() > 0.0 && shell.beating() {
@@ -5655,7 +6150,7 @@ fn paint_clip(
         {
             let x = f64::from(pos.x - lanes_left).max(0.0);
             if let Err(error) = shell.drop_beat(clip.id.clone(), x, editor_lane_y(index)) {
-                shell.set_notice(error.to_string());
+                shell.notice_error(&error);
             }
         }
     } else if body.width() > 0.0 {
@@ -5676,7 +6171,7 @@ fn paint_clip(
             shell.select(Some(clip.id.clone()));
             if shell.compound_selected() {
                 if let Err(error) = shell.open_compound() {
-                    shell.set_notice(error.to_string());
+                    shell.notice_error(&error);
                 }
                 return;
             }
@@ -5684,7 +6179,8 @@ fn paint_clip(
         if response.drag_started()
             && let Some(pos) = pointer_pos(ui, &response)
         {
-            shell.begin_clip_drag(clip.id.clone(), None, (pos.x, pos.y));
+            let grab = (pos.x - clip_rect.left(), pos.y - clip_rect.top());
+            shell.begin_clip_drag(clip.id.clone(), None, (pos.x, pos.y), grab);
             if !ui.input(|input| input.modifiers.shift) && !shell.is_selected(&clip.id) {
                 shell.select(Some(clip.id.clone()));
             }
@@ -5696,10 +6192,19 @@ fn paint_clip(
             && shell.clip_edge(&clip.id).is_none()
             && let Some(pos) = pos
         {
-            let x = f64::from(pos.x - lanes_left).max(0.0);
-            scroll_with_drag(shell, ui, x);
-            let under = lane_under(boxes, pos).unwrap_or(index);
-            shell.preview_move(clip.id.clone(), x, editor_lane_y(under));
+            scroll_with_drag(shell, ui, f64::from(pos.x - lanes_left).max(0.0));
+            // The clip keeps the spot it was taken by, so it does not jump to the pointer.
+            let (grab_x, grab_y) = shell.clip_grab(&clip.id);
+            let x = f64::from(pos.x - grab_x - lanes_left).max(0.0);
+            match lane_spot(boxes, pos).unwrap_or(LaneSpot::On(index)) {
+                LaneSpot::On(row) => shell.preview_move(clip.id.clone(), x, editor_lane_y(row)),
+                LaneSpot::Between(row) => shell.preview_move_between(clip.id.clone(), x, row),
+            }
+            let floating =
+                Rect::from_min_size(Pos2::new(pos.x - grab_x, pos.y - grab_y), clip_rect.size());
+            if !shell.drag_escaped(&clip.id) {
+                paint_floating_clip(shell, ui, lane, clip, floating, lanes_left);
+            }
         }
         if response.drag_stopped() && !moved {
             if ui.input(|input| input.modifiers.shift) {
@@ -5709,8 +6214,10 @@ fn paint_clip(
             }
             shell.cancel_clip_drag();
         } else {
-            let under = pos.and_then(|pos| lane_under(boxes, pos)).unwrap_or(index);
-            finish_clip_pointer(shell, ui, &response, &clip.id, lanes_left, under, None);
+            let spot = pos
+                .and_then(|pos| lane_spot(boxes, pos))
+                .unwrap_or(LaneSpot::On(index));
+            finish_clip_pointer(shell, ui, &response, &clip.id, lanes_left, spot, None);
         }
     }
     drag_clip_edge(
@@ -5761,6 +6268,10 @@ fn paint_clip_keys(
             ui.scope_id().with(("key", clip.id.as_str(), time.0)),
             Sense::click_and_drag(),
         );
+        ui.data_mut(|data| {
+            data.get_temp_mut_or_default::<Vec<Rect>>(key_hits_id())
+                .push(hit);
+        });
         let dragged_to = response
             .dragged()
             .then(|| ui.input(|input| input.pointer.interact_pos()))
@@ -5790,7 +6301,7 @@ fn paint_clip_keys(
             let to = clip.start.0
                 + (f64::from(x - clip_rect.left()) / shell.pixel_size()).round() as i64;
             if let Err(error) = shell.move_clip_key(&clip.id, time, Micros(to)) {
-                shell.set_notice(error.to_string());
+                shell.notice_error(&error);
             }
         } else if response.clicked() {
             shell.seek(time);
@@ -5824,13 +6335,24 @@ fn drag_clip_edge(
     if response.drag_started()
         && let Some(pos) = pointer_pos(ui, &response)
     {
-        shell.begin_clip_drag(clip.id.clone(), Some(edge), (pos.x, pos.y));
+        let time = match edge {
+            TrimEdge::Start => clip.start.0,
+            TrimEdge::End => clip.start.0.saturating_add(clip.duration.0),
+        };
+        let edge_x = lane_x(lanes_left, shell.pixel_size(), shell.view_origin().0, time);
+        shell.begin_clip_drag(
+            clip.id.clone(),
+            Some(edge),
+            (pos.x, pos.y),
+            (pos.x - edge_x, 0.0),
+        );
     }
     if response.dragged()
         && let Some(pos) = pointer_pos(ui, &response)
     {
-        let x = f64::from(pos.x - lanes_left).max(0.0);
-        scroll_with_drag(shell, ui, x);
+        scroll_with_drag(shell, ui, f64::from(pos.x - lanes_left).max(0.0));
+        let (grab_x, _) = shell.clip_grab(&clip.id);
+        let x = f64::from(pos.x - grab_x - lanes_left).max(0.0);
         shell.preview_edge(clip.id.clone(), edge, x);
     }
     finish_clip_pointer(
@@ -5839,7 +6361,7 @@ fn drag_clip_edge(
         &response,
         &clip.id,
         lanes_left,
-        index,
+        LaneSpot::On(index),
         Some(edge),
     );
 }
@@ -5883,7 +6405,8 @@ fn paint_ruler_markers(shell: &mut Shell, ui: &mut Ui, lanes_left: f32, ruler: R
             shell.view_origin().0,
             mark.time.0,
         );
-        let flag = marker_flag(x, ruler.bottom() - 16.0);
+        // At the ruler's foot, under the labels.
+        let flag = marker_flag(x, ruler.bottom() - 12.0);
         if !ruler.intersects(flag) {
             continue;
         }
@@ -6023,7 +6546,7 @@ fn finish_clip_pointer(
     response: &egui::Response,
     id: &SegmentId,
     lanes_left: f32,
-    index: usize,
+    spot: LaneSpot,
     edge: Option<TrimEdge>,
 ) {
     if !response.drag_stopped() {
@@ -6033,14 +6556,128 @@ fn finish_clip_pointer(
         shell.cancel_clip_drag();
         return;
     };
-    let x = f64::from(pos.x - lanes_left).max(0.0);
-    let y = editor_lane_y(index);
-    if edge.is_some() && shell.clip_edge(id).is_none() {
-        shell.begin_clip_drag(id.clone(), edge, (pos.x, pos.y));
+    let (grab_x, _) = shell.clip_grab(id);
+    let x = f64::from(pos.x - grab_x - lanes_left).max(0.0);
+    if edge.is_some() && shell.clip_edge(id).is_none() && !shell.drag_escaped(id) {
+        shell.begin_clip_drag(id.clone(), edge, (pos.x, pos.y), (0.0, 0.0));
     }
-    if let Err(error) = shell.finish_clip_drag(id.clone(), x, y) {
-        shell.set_notice(error.to_string());
+    let landed = match spot {
+        LaneSpot::On(row) => shell.finish_clip_drag(id.clone(), x, editor_lane_y(row)),
+        LaneSpot::Between(row) => shell.finish_clip_drag_between(id.clone(), x, row),
+    };
+    if let Err(error) = landed {
+        shell.notice_error(&error);
     }
+    // The lanes above were painted from the draft before the drop, so this
+    // frame would show the clip back where it was for a moment. Paint it again.
+    ui.ctx().request_discard("a clip was dropped");
+}
+
+/// Where a body drag is over: a row, or the gap above row `n` (the row count
+/// is under the last).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LaneSpot {
+    On(usize),
+    Between(usize),
+}
+
+/// How far into a row, from its top or bottom, a drop still opens a lane.
+const LANE_EDGE: f32 = 6.0;
+
+/// A row's middle is that row. Its top and bottom edges, the gaps between
+/// rows, and the space above the first or under the last are between rows.
+fn lane_spot(boxes: &[Rect], pos: Pos2) -> Option<LaneSpot> {
+    let first = boxes.first()?;
+    let last = boxes.last()?;
+    if pos.y < first.top() + LANE_EDGE {
+        return Some(LaneSpot::Between(0));
+    }
+    if pos.y > last.bottom() - LANE_EDGE {
+        return Some(LaneSpot::Between(boxes.len()));
+    }
+    for (index, row) in boxes.iter().enumerate() {
+        if pos.y < row.top() {
+            return Some(LaneSpot::Between(index));
+        }
+        if pos.y <= row.bottom() {
+            return Some(if pos.y < row.top() + LANE_EDGE {
+                LaneSpot::Between(index)
+            } else if pos.y > row.bottom() - LANE_EDGE {
+                LaneSpot::Between(index + 1)
+            } else {
+                LaneSpot::On(index)
+            });
+        }
+    }
+    Some(LaneSpot::Between(boxes.len()))
+}
+
+/// The lane a held drag would open: a line in the gap where it opens, and
+/// the dragged clip on that line.
+fn paint_new_lane(shell: &Shell, ui: &Ui, boxes: &[Rect], lanes_left: f32) {
+    let Some((row, _)) = shell.new_lane_preview() else {
+        return;
+    };
+    let Some(y) = gap_y(boxes, row) else {
+        return;
+    };
+    let Some(right) = boxes.first().map(Rect::right) else {
+        return;
+    };
+    ui.painter().hline(
+        lanes_left..=right,
+        y,
+        egui::Stroke::new(2.0, tokens::SELECTED),
+    );
+}
+
+/// The dragged clip at its own size, under the pointer, above everything.
+fn paint_floating_clip(
+    shell: &Shell,
+    ui: &Ui,
+    lane: &crate::shell::LaneView,
+    clip: &crate::shell::ClipSpan,
+    rect: Rect,
+    lanes_left: f32,
+) {
+    let painter = ui.ctx().layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::unique("floating-clip"),
+    ));
+    // The whole track sheet, not this lane's band: the clip can be carried
+    // into the band above main, onto main, or under it.
+    let sheet = ui
+        .data(|data| data.get_temp::<Rect>(lane_sheet_id()))
+        .unwrap_or_else(|| ui.clip_rect());
+    let painter = painter.with_clip_rect(Rect::from_x_y_ranges(
+        lanes_left..=sheet.right(),
+        sheet.y_range(),
+    ));
+    painter.rect_filled(
+        rect,
+        CornerRadius::same(7),
+        lane_color(&lane.kind).gamma_multiply(0.9),
+    );
+    let stroke = if shell.is_selected(&clip.id) {
+        tokens::SELECTED
+    } else {
+        Color32::WHITE.gamma_multiply(0.6)
+    };
+    painter.rect_stroke(
+        rect,
+        CornerRadius::same(7),
+        egui::Stroke::new(1.5, stroke),
+        egui::StrokeKind::Inside,
+    );
+    painter
+        .with_clip_rect(rect.shrink(6.0).intersect(painter.clip_rect()))
+        .text(
+            rect.left_top() + Vec2::new(8.0, 6.0),
+            Align2::LEFT_TOP,
+            &clip.name,
+            FontId::proportional(11.0),
+            Color32::WHITE,
+        );
 }
 
 fn editor_lane_y(index: usize) -> f64 {
@@ -6057,8 +6694,7 @@ fn paint_move_follower(
 ) {
     let clip_rect = clip_bounds(
         shell,
-        lane.main,
-        is_audio(lane),
+        lane_size(lane),
         preview.start,
         preview.duration,
         row,
@@ -6069,6 +6705,24 @@ fn paint_move_follower(
         return;
     }
     let painter = ui.painter().with_clip_rect(row);
+    // The dragged clip floats under the pointer; its landing spot is an outline.
+    if shell
+        .move_preview()
+        .is_some_and(|lead| lead.id == preview.id)
+    {
+        painter.rect_filled(
+            clip_rect,
+            CornerRadius::same(7),
+            lane_color(&lane.kind).gamma_multiply(0.25),
+        );
+        painter.rect_stroke(
+            clip_rect,
+            CornerRadius::same(7),
+            egui::Stroke::new(1.5, tokens::SELECTED),
+            egui::StrokeKind::Inside,
+        );
+        return;
+    }
     painter.rect_filled(clip_rect, CornerRadius::same(7), lane_color(&lane.kind));
     if shell.is_selected(&preview.id) {
         painter.rect_stroke(
@@ -6136,50 +6790,11 @@ fn edge_strips(visible: Rect) -> (Rect, Rect) {
     (left, right)
 }
 
-/// Each lane's row, the main lane centered. `kinds` is each lane's main and
-/// audio flags.
-/// Rows for lanes given as (main, height). The main row sits in the middle
-/// of `area`; the rows above it stack up and the rest stack down.
+/// Rows for lanes given as (main, height), none scrolled: main in the
+/// middle of `area` while the lanes fit around it.
+#[cfg(test)]
 fn lane_rects(kinds: Vec<(bool, f32)>, area: Rect) -> Vec<Rect> {
-    let main_flags: Vec<bool> = kinds.iter().map(|(main, _)| *main).collect();
-    let height = |index: usize| kinds[index].1;
-    let Some(main) = main_flags.iter().position(|main| *main) else {
-        let mut top = area.top();
-        return (0..kinds.len())
-            .map(|index| {
-                let rect = Rect::from_min_size(
-                    Pos2::new(area.left(), top),
-                    Vec2::new(area.width(), height(index)),
-                );
-                top += height(index) + 8.0;
-                rect
-            })
-            .collect();
-    };
-    let mut tops = vec![0.0; main_flags.len()];
-    tops[main] = area.center().y - height(main) / 2.0;
-    let mut y = tops[main];
-    for index in (0..main).rev() {
-        y -= 8.0 + height(index);
-        tops[index] = y;
-    }
-    y = tops[main] + height(main);
-    let mut index = main + 1;
-    while index < main_flags.len() {
-        y += 8.0;
-        tops[index] = y;
-        y += height(index);
-        index += 1;
-    }
-    tops.into_iter()
-        .enumerate()
-        .map(|(index, top)| {
-            Rect::from_min_size(
-                Pos2::new(area.left(), top),
-                Vec2::new(area.width().max(0.0), height(index)),
-            )
-        })
-        .collect()
+    lane_layout(&kinds, area, 0.0, 0.0).rows
 }
 
 fn lane_name(kind: &cutlass_model::TrackType, main: bool) -> String {
@@ -6261,7 +6876,7 @@ fn export_dialog(
                         match write_export(shell, view) {
                             Ok(()) => view.export_open = false,
                             Err(ShellError::Overwrite(_)) => view.replace_prompt = true,
-                            Err(error) => shell.set_notice(error.to_string()),
+                            Err(error) => shell.notice_error(&error),
                         }
                     }
                 }
@@ -6582,93 +7197,130 @@ fn export_extension(view: &ViewState) -> &'static str {
 
 /// Name, canvas, frame rate and color space, saved together.
 fn project_dialog(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
+    let folder = shell.project_folder().map(short_folder);
     let Some(settings) = view.project_dialog.as_mut() else {
         return;
     };
-    let mut save = false;
-    let ((), closed) = widgets::dialog(ui, "Project", |ui| {
-        ui.horizontal(|ui| {
-            ui.add_space(16.0);
-            ui.vertical(|ui| {
-                choice_row(ui, "Name", |ui| {
-                    ui::Field::new(&mut settings.name).width(220.0).show(ui);
-                });
-                choices_row(ui, "Ratio", |ui| {
-                    for (ratio, name) in cutlass_editor::PROJECT_RATIOS {
-                        if ui
-                            .add(ui::Choice::new(settings.ratio == ratio, name))
-                            .clicked()
-                        {
-                            settings.ratio = ratio.to_owned();
-                        }
-                    }
-                });
-                choices_row(ui, "Resolution", |ui| {
-                    for (side, name) in cutlass_editor::PROJECT_RESOLUTIONS {
-                        if ui
-                            .add(ui::Choice::new(settings.short_side == side, name))
-                            .clicked()
-                        {
-                            settings.short_side = side;
-                        }
-                    }
-                });
-                choices_row(ui, "Frame rate", |ui| {
-                    ui.horizontal_wrapped(|ui| {
-                        for rate in cutlass_editor::PROJECT_RATES {
-                            let label = cutlass_editor::rate_label(rate);
-                            let name = label.trim_end_matches(" fps");
-                            if ui
-                                .add(ui::Choice::new(settings.rate == rate, name))
-                                .clicked()
-                            {
-                                settings.rate = rate;
-                            }
-                        }
-                    });
-                });
-                let drop = cutlass_editor::is_drop_rate(settings.rate);
-                choice_row(ui, "Drop frame", |ui| {
-                    let mut on = settings.drop_frame && drop;
-                    if ui
-                        .add_enabled(drop, egui::Checkbox::without_text(&mut on))
-                        .changed()
-                    {
-                        settings.drop_frame = on;
-                    }
-                });
-                choices_row(ui, "Color space", |ui| {
-                    for (space, name) in cutlass_editor::COLOR_SPACES {
-                        if space < 0 {
-                            continue;
-                        }
-                        if ui
-                            .add(ui::Choice::new(settings.color_space == space, name))
-                            .clicked()
-                        {
-                            settings.color_space = space;
-                        }
-                    }
-                });
-                ui.add(ui::Check::new(
-                    &mut settings.free_layer,
-                    "Free layer: stack clips with Arrange, not by their tracks",
-                ));
-                ui.add_space(8.0);
-                save = ui.add(ui::Button::primary("Save")).clicked();
-            });
+    let ((), end) = widgets::sheet(ui, "Project settings", 560.0, "Save", |ui| {
+        widgets::form_section(ui, "Details");
+        widgets::form_row(ui, "Name", |ui| {
+            widgets::text_box(ui, &mut settings.name);
         });
-    });
-    if save && let Some(settings) = view.project_dialog.take() {
-        if let Err(error) = shell.save_project_settings(&settings) {
-            shell.set_notice(error.to_string());
-            view.project_dialog = Some(settings);
-        } else {
-            view.name_buffer.clear();
+        if let Some(folder) = &folder {
+            widgets::form_row(ui, "Save to", |ui| {
+                ui.add_space(8.0);
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(folder)
+                            .size(tokens::TYPE_SIZE + 1.0)
+                            .color(tokens::TEXT),
+                    )
+                    .truncate(),
+                );
+            });
         }
-    } else if closed {
-        view.project_dialog = None;
+        let spaces: Vec<_> = cutlass_editor::COLOR_SPACES
+            .iter()
+            .filter(|(space, _)| *space >= 0)
+            .collect();
+        let names: Vec<&str> = spaces.iter().map(|(_, name)| *name).collect();
+        let current = cutlass_editor::color_space_name(settings.color_space);
+        widgets::form_row(ui, "Color space", |ui| {
+            if let Some(index) = widgets::select(ui, "project-color-space", &current, &names) {
+                settings.color_space = spaces[index].0;
+            }
+        });
+        widgets::form_row(ui, "Free layer", |ui| {
+            widgets::switch(ui, &mut settings.free_layer, true);
+        });
+        widgets::form_hint(
+            ui,
+            "Picture clips stack by the order Arrange gives them, not by their tracks.",
+        );
+
+        ui.add_space(8.0);
+        widgets::form_section(ui, "Timeline");
+        let ratio = cutlass_editor::PROJECT_RATIOS
+            .iter()
+            .find(|(ratio, _)| *ratio == settings.ratio)
+            .map_or(settings.ratio.as_str(), |(_, name)| name)
+            .to_owned();
+        let names: Vec<&str> = cutlass_editor::PROJECT_RATIOS
+            .iter()
+            .map(|(_, name)| *name)
+            .collect();
+        widgets::form_row(ui, "Ratio", |ui| {
+            if let Some(index) = widgets::select(ui, "project-ratio", &ratio, &names) {
+                settings.ratio = cutlass_editor::PROJECT_RATIOS[index].0.to_owned();
+            }
+        });
+        let size = cutlass_editor::PROJECT_RESOLUTIONS
+            .iter()
+            .find(|(side, _)| *side == settings.short_side)
+            .map_or("Adapted", |(_, name)| name);
+        let names: Vec<&str> = cutlass_editor::PROJECT_RESOLUTIONS
+            .iter()
+            .map(|(_, name)| *name)
+            .collect();
+        widgets::form_row(ui, "Resolution", |ui| {
+            if let Some(index) = widgets::select(ui, "project-resolution", size, &names) {
+                settings.short_side = cutlass_editor::PROJECT_RESOLUTIONS[index].0;
+            }
+        });
+        let labels: Vec<String> = cutlass_editor::PROJECT_RATES
+            .iter()
+            .map(|rate| cutlass_editor::rate_label(*rate))
+            .collect();
+        let names: Vec<&str> = labels.iter().map(String::as_str).collect();
+        let current = cutlass_editor::rate_label(settings.rate);
+        widgets::form_row(ui, "Frame rate", |ui| {
+            if let Some(index) = widgets::select(ui, "project-rate", &current, &names) {
+                settings.rate = cutlass_editor::PROJECT_RATES[index];
+                settings.drop_frame = cutlass_editor::is_drop_rate(settings.rate);
+            }
+        });
+        let drop = cutlass_editor::is_drop_rate(settings.rate);
+        widgets::form_row(ui, "Drop frame", |ui| {
+            let mut on = settings.drop_frame && drop;
+            if widgets::switch(ui, &mut on, drop).changed() {
+                settings.drop_frame = on;
+            }
+        });
+        widgets::form_hint(
+            ui,
+            if drop {
+                "29.97 drops 2 frame numbers a minute, 59.94 drops 4. Every tenth minute keeps them."
+            } else {
+                "Only 29.97 and 59.94 fps can drop frame numbers."
+            },
+        );
+    });
+    match end {
+        widgets::SheetEnd::Open => {}
+        widgets::SheetEnd::Cancel => view.project_dialog = None,
+        widgets::SheetEnd::Confirm => {
+            if let Some(settings) = view.project_dialog.take() {
+                if let Err(error) = shell.save_project_settings(&settings) {
+                    shell.notice_error(&error);
+                    view.project_dialog = Some(settings);
+                } else {
+                    view.name_buffer.clear();
+                }
+            }
+        }
     }
+}
+
+/// The project's folder and the one holding it: `Projects/Amina & Jules`.
+fn short_folder(path: &std::path::Path) -> String {
+    let mut parts: Vec<_> = path
+        .components()
+        .rev()
+        .take(2)
+        .map(|part| part.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    parts.reverse();
+    parts.join("/")
 }
 
 /// A dim label and its choices on one line.
@@ -6735,7 +7387,7 @@ fn apply_dialog(shell: &mut Shell, view: &mut ViewState, finished: Finished) {
         Err(ShellError::Overwrite(_)) if finished.picker == Picker::SaveExport => {
             view.replace_prompt = true;
         }
-        Err(error) => shell.set_notice(error.to_string()),
+        Err(error) => shell.notice_error(&error),
     }
 }
 
@@ -6791,7 +7443,7 @@ fn shortcuts(shell: &mut Shell, ui: &Ui, view: &mut ViewState) {
         && let Err(error) = shell.run_shortcut(&chord)
         && !error.to_string().contains("not available")
     {
-        shell.set_notice(error.to_string());
+        shell.notice_error(&error);
     }
 }
 
@@ -7189,7 +7841,13 @@ mod tests {
                 ],
                 &["Volume", "Rotate", "Mode"],
             ),
-            ("said", &["Text", "1.50 s", "Font size"], &["Volume"]),
+            (
+                "said",
+                &[
+                    "Captions", "Text", "Search", "Replace", "Re-run", "?", "1", "+",
+                ],
+                &["Volume", "Tracking", "Font size"],
+            ),
             (
                 "look",
                 &["Filter", "Warm", "Amount", "Temp"],
@@ -7257,6 +7915,42 @@ mod tests {
             "Adjust", "Exposure", "Temp", "Tint", "Clarity", "Grain", "40",
         ] {
             assert!(lines.iter().any(|line| line == label), "{label}: {lines:?}");
+        }
+        // A caption's Text tab: Templates in place of Bubble, its paragraphs,
+        // and Transform in place of Position & Size.
+        shell.select(Some(SegmentId::new("said")));
+        let mut lines = Vec::new();
+        for _ in 0..2 {
+            view.inspector.focus(inspector::Focus {
+                tab: 0,
+                page: 0,
+                section: None,
+            });
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 2400.0))),
+                    ..Default::default()
+                },
+                |ui| show(&mut shell, ui, &mut view, None),
+            );
+            lines = galleys(&output);
+            output.textures_delta.clear();
+        }
+        for label in [
+            "Templates",
+            "The 1 paragraph",
+            "Words",
+            "Transform",
+            "Scale",
+            "Position",
+        ] {
+            assert!(lines.iter().any(|line| line == label), "{label}: {lines:?}");
+        }
+        for label in ["Bubble", "Position & Size", "Plane rotation", "Tracking"] {
+            assert!(
+                !lines.iter().any(|line| line == label),
+                "{label}: {lines:?}"
+            );
         }
         let _ = std::fs::remove_dir_all(&temp);
     }
@@ -7893,7 +8587,8 @@ mod tests {
         assert!(!lines.iter().any(|line| line == "00:00:00:00"), "{lines:?}");
         assert!(painted.contains("00:00:00:00  /  "), "{painted}");
         assert!(painted.contains("Details"), "{painted}");
-        assert!(painted.contains("Main"), "{painted}");
+        // A lane head shows icons, not its name.
+        assert!(!lines.iter().any(|line| line == "Main"), "{lines:?}");
         assert!(painted.contains("Untitled"), "{painted}");
         assert!(
             painted.contains("No media yet. Use File → Import."),
@@ -7966,7 +8661,8 @@ mod tests {
         shell.open_folder(&temp).unwrap();
         let mut view = ViewState::new();
         let ctx = egui::Context::default();
-        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        // Wide enough that the transport shows all four round buttons.
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1440.0, 800.0)));
         let frame = |shell: &mut Shell, view: &mut ViewState, events: Vec<egui::Event>| {
             let mut output = ctx.run_ui(
                 egui::RawInput {
@@ -8470,16 +9166,16 @@ mod tests {
         let area = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 400.0));
         let rows = lane_rects(
             vec![
-                (false, row_height(false, false)),
-                (true, row_height(true, false)),
-                (false, row_height(false, true)),
+                (false, row_height(RowSize::Thin)),
+                (true, row_height(RowSize::Main)),
+                (false, row_height(RowSize::Audio)),
             ],
             area,
         );
         let heights: Vec<f32> = rows.iter().map(Rect::height).collect();
-        assert_eq!(heights, [40.0, 90.0, 58.0]);
+        assert_eq!(heights, [40.0, 76.0, 58.0]);
         assert_eq!(rows[1].center().y, 200.0);
-        assert_eq!(rows[2].top() - rows[1].bottom(), 8.0);
+        assert_eq!(rows[2].top() - rows[1].bottom(), LANE_GAP);
     }
 
     #[test]
@@ -8487,15 +9183,15 @@ mod tests {
         let area = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 400.0));
         let rows = lane_rects(vec![(false, 100.0), (true, 90.0), (false, 30.0)], area);
         assert_eq!(rows[0].height(), 100.0);
-        assert_eq!(rows[1].top() - rows[0].bottom(), 8.0);
+        assert_eq!(rows[1].top() - rows[0].bottom(), LANE_GAP);
         assert_eq!(rows[2].height(), 30.0);
         let tall = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 100.0));
-        let usual = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, row_height(false, false)));
+        let usual = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, row_height(RowSize::Thin)));
         let (decoders, encoders) = crate::register_codecs();
         let shell = Shell::new(decoders, encoders, Settings::default());
-        let grown = clip_bounds(&shell, false, false, Micros(0), Micros(1), tall, 0.0);
+        let grown = clip_bounds(&shell, RowSize::Thin, Micros(0), Micros(1), tall, 0.0);
         assert_eq!(grown.height(), 100.0 - 2.0 * tokens::CLIP_INSET);
-        let kept = clip_bounds(&shell, false, false, Micros(0), Micros(1), usual, 0.0);
+        let kept = clip_bounds(&shell, RowSize::Thin, Micros(0), Micros(1), usual, 0.0);
         assert_eq!(kept.height(), tokens::CLIP_HEIGHT);
     }
 
@@ -9286,7 +9982,8 @@ mod tests {
             vec![egui::Event::PointerMoved(pos), event(true), event(false)]
         };
         let output = frame(&mut shell, &mut view, Vec::new());
-        assert!(text_pos(&output, "All").is_some());
+        // At the top there is no path bar.
+        assert!(text_pos(&output, "All").is_none());
         assert!(text_pos(&output, "Free stock").is_some());
         let card = text_pos(&output, "pattern.png").expect("library card");
         // Right-click below the cards for the empty-space menu.
@@ -9342,6 +10039,7 @@ mod tests {
         let output = frame(&mut shell, &mut view, Vec::new());
         assert!(view.library_folder.is_empty());
         assert!(text_pos(&output, "pattern.png").is_some());
+        assert!(text_pos(&output, "All").is_none());
         let _ = std::fs::remove_dir_all(&temp);
     }
 
@@ -9652,7 +10350,11 @@ mod tests {
             |ui| show(&mut shell, ui, &mut view, None),
         );
         output.textures_delta.clear();
-        let play = Pos2::new(674.0, 348.0);
+        // Play sits in the middle of the preview, between the side panels.
+        let play = Pos2::new(
+            (tokens::LIBRARY_WIDTH + 1280.0 - tokens::INSPECTOR_WIDTH) / 2.0,
+            348.0,
+        );
         let pointer = |pressed: bool| egui::Event::PointerButton {
             pos: play,
             button: egui::PointerButton::Primary,
@@ -9876,7 +10578,7 @@ mod tests {
         let output = frame(&mut shell, Vec::new());
         let label = text_pos(&output, "Scale").expect("the scale row");
         // The track starts just past the row's name.
-        let start = label + Vec2::new(90.0, 6.0);
+        let start = label + Vec2::new(110.0, 6.0);
         let press = |pos: Pos2, pressed: bool| egui::Event::PointerButton {
             pos,
             button: egui::PointerButton::Primary,
@@ -10202,7 +10904,8 @@ mod tests {
         shell.cycle_canvas().unwrap();
         let mut view = ViewState::new();
         let ctx = egui::Context::default();
-        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        // Wide enough that the transport shows all four round buttons.
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1440.0, 800.0)));
         let frame = |shell: &mut Shell, view: &mut ViewState, events: Vec<egui::Event>| {
             let mut output = ctx.run_ui(
                 egui::RawInput {
@@ -10279,6 +10982,83 @@ mod tests {
     }
 
     #[test]
+    fn the_window_draws_no_menus_while_the_system_menu_bar_is_up() {
+        let (mut shell, _temp) = open_span("menus", 1_000_000);
+        let ctx = egui::Context::default();
+        let mut painted = |view: &mut ViewState| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0))),
+                    ..Default::default()
+                },
+                |ui| show(&mut shell, ui, view, None),
+            );
+            output.textures_delta.clear();
+            painted_text(&output)
+        };
+        let mut view = ViewState::new();
+        let text = painted(&mut view);
+        for title in ["File", "Edit", "Clip", "Playback", "Help"] {
+            assert!(
+                text.lines().any(|line| line == title),
+                "no {title} menu: {text}"
+            );
+        }
+        view.system_menus = true;
+        let text = painted(&mut view);
+        for title in ["File", "Edit", "Clip", "Playback", "Help"] {
+            assert!(
+                !text.lines().any(|line| line == title),
+                "a {title} menu: {text}"
+            );
+        }
+        assert!(text.lines().any(|line| line == "Export"), "{text}");
+    }
+
+    #[test]
+    fn a_label_whose_tick_just_left_the_view_still_shows_its_tail() {
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(900.0, 100.0))),
+                ..Default::default()
+            },
+            |ui| {
+                let ruler = Rect::from_min_size(Pos2::ZERO, Vec2::new(900.0, tokens::RULER_HEIGHT));
+                // 300 px a second; the 00:01 tick sits 30 px left of the lanes.
+                paint_ticks(ui, ruler, 100.0, 3e-4, 1_100_000, FrameRate::FPS_30, false);
+            },
+        );
+        output.textures_delta.clear();
+        let text = painted_text(&output);
+        assert!(text.contains("00:01"), "{text}");
+        assert!(text.contains("00:02"), "{text}");
+    }
+
+    /// The x of the white playhead line painted nearest `guess`.
+    fn shell_playhead_x(output: &egui::FullOutput, guess: f32) -> f32 {
+        fn lines(shape: &egui::Shape, found: &mut Vec<f32>) {
+            match shape {
+                egui::Shape::LineSegment { points, stroke }
+                    if stroke.color == tokens::PLAYHEAD && points[0].x == points[1].x =>
+                {
+                    found.push(points[0].x);
+                }
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| lines(shape, found)),
+                _ => {}
+            }
+        }
+        let mut found = Vec::new();
+        for clipped in &output.shapes {
+            lines(&clipped.shape, &mut found);
+        }
+        found
+            .into_iter()
+            .min_by(|a, b| (a - guess).abs().total_cmp(&(b - guess).abs()))
+            .expect("a playhead line")
+    }
+
+    #[test]
     fn dragging_the_ruler_moves_the_playhead() {
         let temp = std::env::temp_dir().join(format!("cutlass-scrub-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&temp);
@@ -10338,103 +11118,52 @@ mod tests {
             "the ruler drag did not seek, playhead {}",
             shell.playhead().0
         );
-        assert!(shell.guides().is_empty());
-        let _ = std::fs::remove_dir_all(&temp);
-    }
-
-    #[test]
-    fn a_drag_down_from_the_ruler_leaves_a_guide() {
-        let (mut shell, temp) = open_span("guide", 2_000_000);
-        let mut view = ViewState::new();
-        let ctx = egui::Context::default();
-        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
-        let mut output = ctx.run_ui(
-            egui::RawInput {
-                screen_rect: screen,
-                ..Default::default()
-            },
-            |ui| show(&mut shell, ui, &mut view, None),
-        );
-        let start = text_pos(&output, "00:00:00")
-            .or_else(|| text_pos(&output, "00:00"))
-            .expect("ruler");
-        output.textures_delta.clear();
-        drag(
-            &ctx,
-            start,
-            start + Vec2::new(40.0, 90.0),
-            &mut shell,
-            &mut view,
-        );
-        assert_eq!(shell.guides().len(), 1);
-        assert!(shell.selected_guide().is_some());
-        assert_eq!(shell.playhead(), Micros(0));
-        let key = |pressed: bool| egui::Event::Key {
-            key: egui::Key::Delete,
-            physical_key: None,
-            pressed,
-            repeat: false,
-            modifiers: egui::Modifiers::default(),
+        let on_frame = |time: Micros| {
+            let rate = FrameRate::FPS_30;
+            rate.frame_start(rate.frame_index(time).unwrap()) == Some(time)
         };
+        assert!(
+            on_frame(shell.playhead()),
+            "{:?} is between frames",
+            shell.playhead()
+        );
         let mut output = ctx.run_ui(
             egui::RawInput {
                 screen_rect: screen,
-                events: vec![key(true)],
+                events: vec![press(end, false)],
                 ..Default::default()
             },
             |ui| show(&mut shell, ui, &mut view, None),
         );
         output.textures_delta.clear();
-        assert!(shell.guides().is_empty());
-        let _ = std::fs::remove_dir_all(&temp);
-    }
-
-    #[test]
-    fn a_drag_down_from_the_names_leaves_a_horizontal_guide() {
-        let (mut shell, temp) = open_span("row", 2_000_000);
-        let mut view = ViewState::new();
-        let ctx = egui::Context::default();
-        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
-        let mut output = ctx.run_ui(
-            egui::RawInput {
-                screen_rect: screen,
-                ..Default::default()
-            },
-            |ui| show(&mut shell, ui, &mut view, None),
+        // The playhead's line, down in the lanes, drags it on.
+        let before = shell.playhead();
+        let line = Pos2::new(shell_playhead_x(&output, end.x) + 2.0, end.y + 160.0);
+        for events in [
+            vec![egui::Event::PointerMoved(line), press(line, true)],
+            vec![egui::Event::PointerMoved(line + Vec2::new(30.0, 0.0))],
+            vec![egui::Event::PointerMoved(line + Vec2::new(90.0, 0.0))],
+            vec![press(line + Vec2::new(90.0, 0.0), false)],
+        ] {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: screen,
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(&mut shell, ui, &mut view, None),
+            );
+            output.textures_delta.clear();
+        }
+        assert!(
+            shell.playhead() > before,
+            "the line drag did not move the playhead from {before:?}"
         );
-        let names = text_pos(&output, "Main").expect("track names");
-        let ruler = text_pos(&output, "00:00:00")
-            .or_else(|| text_pos(&output, "00:00"))
-            .expect("ruler");
-        output.textures_delta.clear();
-        let corner = Pos2::new(names.x, ruler.y);
-        drag(
-            &ctx,
-            corner,
-            corner + Vec2::new(0.0, 90.0),
-            &mut shell,
-            &mut view,
+        assert!(
+            on_frame(shell.playhead()),
+            "{:?} is between frames",
+            shell.playhead()
         );
-        assert_eq!(shell.horizontal_guides().len(), 1);
-        assert!(shell.selected_horizontal().is_some());
-        assert!(shell.guides().is_empty());
-        let key = |pressed: bool| egui::Event::Key {
-            key: egui::Key::Delete,
-            physical_key: None,
-            pressed,
-            repeat: false,
-            modifiers: egui::Modifiers::default(),
-        };
-        let mut output = ctx.run_ui(
-            egui::RawInput {
-                screen_rect: screen,
-                events: vec![key(true)],
-                ..Default::default()
-            },
-            |ui| show(&mut shell, ui, &mut view, None),
-        );
-        output.textures_delta.clear();
-        assert!(shell.horizontal_guides().is_empty());
         let _ = std::fs::remove_dir_all(&temp);
     }
 
@@ -10742,7 +11471,12 @@ mod tests {
         output.textures_delta.clear();
         assert!(high.y < low.y, "the overlay row sits above main");
 
-        let to = Pos2::new(low.x + 20.0, high.y);
+        // The overlay row's middle: the name sits near its top edge, where a
+        // drop opens a lane instead.
+        let to = Pos2::new(
+            low.x + 20.0,
+            high.y + row_height(RowSize::Picture) / 2.0 - 4.0,
+        );
         drag(&ctx, low, to, &mut shell, &mut view);
 
         let draft = shell.draft().unwrap();
@@ -10768,6 +11502,623 @@ mod tests {
                     .iter()
                     .all(|segment| segment.id.as_str() != "low"))
         );
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn the_frame_a_clip_is_dropped_shows_it_where_it_landed() {
+        let temp = std::env::temp_dir().join(format!("cutlass-drop-frame-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let mut draft = cutlass_model::Draft::empty("draft");
+        draft.config.maintrack_adsorb = false;
+        draft.canvas_config.width = 2;
+        draft.canvas_config.height = 1;
+        draft.tracks[0].segments.push(cutlass_model::Segment::new(
+            "low",
+            "color",
+            cutlass_model::TimeRange::new(0, 2_000_000),
+        ));
+        let mut overlay = cutlass_model::Track::main(TrackId::new("overlay"));
+        overlay.flag = cutlass_model::TrackFlag::SubVideo;
+        overlay.segments.push(cutlass_model::Segment::new(
+            "high",
+            "color",
+            cutlass_model::TimeRange::new(8_000_000, 2_000_000),
+        ));
+        draft.tracks.insert(0, overlay);
+        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let frame = |events: Vec<egui::Event>, shell: &mut Shell, view: &mut ViewState| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: screen,
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, view, None),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        let press = |pos: Pos2, pressed: bool| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        let output = frame(Vec::new(), &mut shell, &mut view);
+        let low = text_pos(&output, "low").expect("the main clip");
+        let high = text_pos(&output, "high").expect("the overlay clip");
+        // The overlay row's middle: the name sits near its top edge, where a
+        // drop opens a lane instead.
+        let to = Pos2::new(
+            low.x + 20.0,
+            high.y + row_height(RowSize::Picture) / 2.0 - 4.0,
+        );
+        frame(
+            vec![egui::Event::PointerMoved(low), press(low, true)],
+            &mut shell,
+            &mut view,
+        );
+        frame(vec![egui::Event::PointerMoved(to)], &mut shell, &mut view);
+        let dropped = frame(
+            vec![egui::Event::PointerMoved(to), press(to, false)],
+            &mut shell,
+            &mut view,
+        );
+
+        let shown = text_pos(&dropped, "low").expect("the dropped clip is drawn");
+        assert!(
+            (shown.y - high.y).abs() < 1.0,
+            "the drop frame shows the clip on the overlay row, not back on main"
+        );
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn a_row_middle_is_the_row_and_its_edges_and_gaps_are_between() {
+        let boxes = [
+            Rect::from_min_size(Pos2::new(0.0, 100.0), Vec2::new(500.0, 48.0)),
+            Rect::from_min_size(Pos2::new(0.0, 156.0), Vec2::new(500.0, 48.0)),
+        ];
+        let at = |y: f32| lane_spot(&boxes, Pos2::new(50.0, y));
+        assert_eq!(at(20.0), Some(LaneSpot::Between(0)));
+        assert_eq!(at(103.0), Some(LaneSpot::Between(0)));
+        assert_eq!(at(124.0), Some(LaneSpot::On(0)));
+        assert_eq!(at(146.0), Some(LaneSpot::Between(1)));
+        assert_eq!(at(152.0), Some(LaneSpot::Between(1)));
+        assert_eq!(at(158.0), Some(LaneSpot::Between(1)));
+        assert_eq!(at(180.0), Some(LaneSpot::On(1)));
+        assert_eq!(at(202.0), Some(LaneSpot::Between(2)));
+        assert_eq!(at(400.0), Some(LaneSpot::Between(2)));
+        assert_eq!(lane_spot(&[], Pos2::new(50.0, 20.0)), None);
+    }
+
+    #[test]
+    fn the_only_main_clip_dragged_up_becomes_an_overlay() {
+        let temp =
+            std::env::temp_dir().join(format!("cutlass-main-to-overlay-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let mut draft = cutlass_model::Draft::empty("draft");
+        draft.config.maintrack_adsorb = true;
+        draft.canvas_config.width = 2;
+        draft.canvas_config.height = 1;
+        draft.tracks[0].segments.push(cutlass_model::Segment::new(
+            "only",
+            "color",
+            cutlass_model::TimeRange::new(0, 2_000_000),
+        ));
+        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: screen,
+                ..Default::default()
+            },
+            |ui| show(&mut shell, ui, &mut view, None),
+        );
+        let only = text_pos(&output, "only").expect("the main clip");
+        output.textures_delta.clear();
+        drag(
+            &ctx,
+            only,
+            only - Vec2::new(0.0, 60.0),
+            &mut shell,
+            &mut view,
+        );
+        let tracks = &shell.draft().unwrap().tracks;
+        assert_eq!(tracks.len(), 2, "no overlay lane opened");
+        assert!(tracks[0].is_sub_video());
+        assert_eq!(tracks[0].segments[0].id.as_str(), "only");
+        assert!(tracks[1].is_main() && tracks[1].segments.is_empty());
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn a_dragged_clip_keeps_where_it_was_taken_and_does_not_jump() {
+        let (mut shell, temp) = open_span("grab", 2_000_000);
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: screen,
+                ..Default::default()
+            },
+            |ui| show(&mut shell, ui, &mut view, None),
+        );
+        let text = text_pos(&output, "segment").expect("clip");
+        output.textures_delta.clear();
+        // Take the clip well inside its body, then move it 80 points right.
+        let press = text + Vec2::new(120.0, 0.0);
+        drag(
+            &ctx,
+            press,
+            press + Vec2::new(80.0, 0.0),
+            &mut shell,
+            &mut view,
+        );
+        let start = shell.draft().unwrap().tracks[0].segments[0].target.start.0 as f64;
+        let moved = start * shell.pixel_size();
+        assert!(
+            (moved - 80.0).abs() < 3.0,
+            "the clip moved {moved} points for an 80 point drag"
+        );
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn escape_during_a_clip_drag_puts_the_clip_back() {
+        let (mut shell, temp) = open_span("escape", 2_000_000);
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let press = |pos: Pos2, pressed: bool| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        let escape = egui::Event::Key {
+            key: egui::Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::default(),
+        };
+        let frame = |events: Vec<egui::Event>, shell: &mut Shell, view: &mut ViewState| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: screen,
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, view, None),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        let output = frame(Vec::new(), &mut shell, &mut view);
+        let from = text_pos(&output, "segment").expect("clip") + Vec2::new(60.0, 0.0);
+        let to = from + Vec2::new(150.0, 0.0);
+        let before = shell.draft().unwrap().tracks.clone();
+        let revision = shell.revision();
+        frame(
+            vec![egui::Event::PointerMoved(from), press(from, true)],
+            &mut shell,
+            &mut view,
+        );
+        frame(vec![egui::Event::PointerMoved(to)], &mut shell, &mut view);
+        assert!(shell.move_preview().is_some());
+        frame(vec![escape], &mut shell, &mut view);
+        assert!(shell.move_preview().is_none());
+        frame(
+            vec![egui::Event::PointerMoved(to + Vec2::new(10.0, 0.0))],
+            &mut shell,
+            &mut view,
+        );
+        assert!(shell.move_preview().is_none());
+        frame(
+            vec![egui::Event::PointerMoved(to), press(to, false)],
+            &mut shell,
+            &mut view,
+        );
+        assert_eq!(shell.draft().unwrap().tracks, before);
+        assert_eq!(shell.revision(), revision);
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn the_toast_paints_on_the_top_layer() {
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.set_notice("the edit was refused");
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            paint_notice(&mut shell, ui, 100.0, 40.0);
+            // A floating layer raised after the toast, as a drag or menu is.
+            let late = egui::LayerId::new(egui::Order::Foreground, egui::Id::unique("late"));
+            ui.ctx().move_to_top(late);
+            ui.ctx().layer_painter(late).rect_filled(
+                Rect::from_min_size(Pos2::ZERO, Vec2::splat(400.0)),
+                0.0,
+                Color32::RED,
+            );
+        });
+        output.textures_delta.clear();
+        let top = ctx.memory(|memory| memory.layer_ids().last());
+        assert_eq!(top, Some(notice_layer()));
+    }
+
+    /// Ten overlay rows, main, and audio rows under it.
+    fn crowded(audio: usize) -> Vec<(bool, f32)> {
+        let mut kinds = vec![(false, 62.0); 10];
+        kinds.push((true, 90.0));
+        kinds.extend(std::iter::repeat_n((false, 58.0), audio));
+        kinds
+    }
+
+    #[test]
+    fn a_lane_part_scrolled_out_keeps_its_clips_at_full_height() {
+        let temp = std::env::temp_dir().join(format!("cutlass-crowded-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let mut draft = cutlass_model::Draft::empty("draft");
+        draft.canvas_config.width = 2;
+        draft.canvas_config.height = 1;
+        draft.tracks[0].segments.push(cutlass_model::Segment::new(
+            "low",
+            "color",
+            cutlass_model::TimeRange::new(0, 2_000_000),
+        ));
+        for index in 0..14 {
+            let mut track = cutlass_model::Track::main(format!("words-{index}"));
+            track.kind = cutlass_model::TrackType::Text;
+            track.flag = cutlass_model::TrackFlag::None;
+            track.segments.push(cutlass_model::Segment::new(
+                format!("line-{index}"),
+                "text",
+                cutlass_model::TimeRange::new(0, 1_000_000),
+            ));
+            draft.tracks.insert(0, track);
+        }
+        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let words = lane_color(&cutlass_model::TrackType::Text);
+        let mut heights = |view: &mut ViewState| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: screen,
+                    ..Default::default()
+                },
+                |ui| show(&mut shell, ui, view, None),
+            );
+            output.textures_delta.clear();
+            output
+                .shapes
+                .iter()
+                .filter_map(|clipped| match &clipped.shape {
+                    egui::Shape::Rect(rect) if rect.fill == words => Some(rect.rect.height()),
+                    _ => None,
+                })
+                .collect::<Vec<f32>>()
+        };
+        assert!(!heights(&mut view).is_empty());
+        // Part of the lane next to main slides under main.
+        view.lanes_up = 20.0;
+        let scrolled = heights(&mut view);
+        assert!(!scrolled.is_empty());
+        assert!(
+            scrolled.iter().all(|height| *height == tokens::CLIP_HEIGHT),
+            "{scrolled:?}"
+        );
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn every_lane_head_shows_its_icons() {
+        let temp = std::env::temp_dir().join(format!("cutlass-heads-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let mut draft = cutlass_model::Draft::empty("draft");
+        draft.canvas_config.width = 2;
+        draft.canvas_config.height = 1;
+        draft.tracks[0].segments.push(cutlass_model::Segment::new(
+            "low",
+            "color",
+            cutlass_model::TimeRange::new(0, 2_000_000),
+        ));
+        let mut overlay = cutlass_model::Track::main(TrackId::new("overlay"));
+        overlay.flag = cutlass_model::TrackFlag::SubVideo;
+        overlay.segments.push(cutlass_model::Segment::new(
+            "high",
+            "color",
+            cutlass_model::TimeRange::new(0, 2_000_000),
+        ));
+        draft.tracks.insert(0, overlay);
+        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0))),
+                ..Default::default()
+            },
+            |ui| show(&mut shell, ui, &mut view, None),
+        );
+        output.textures_delta.clear();
+        for name in ["low", "high"] {
+            let at = text_pos(&output, name).expect("the clip");
+            // Something drawn, and not cut away, in the head left of the clip.
+            let head = output.shapes.iter().any(|clipped| {
+                let bounds = clipped.shape.visual_bounding_rect();
+                bounds.right() < at.x - tokens::COVER_WIDTH
+                    && bounds.left() > at.x - tokens::COVER_WIDTH - tokens::TRACK_HEAD - 20.0
+                    && (bounds.center().y - at.y).abs() < 40.0
+                    && clipped.clip_rect.intersect(bounds).area() > 0.0
+            });
+            assert!(head, "the {name} lane has no head showing");
+        }
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn a_lane_head_has_the_buttons_its_kind_uses() {
+        let lane = |kind: cutlass_model::TrackType, main: bool| crate::shell::LaneView {
+            track_id: TrackId::new("lane"),
+            kind,
+            main,
+            name: None,
+            mute: false,
+            hide: false,
+            lock: false,
+            solo: false,
+            mute_by_solo: false,
+            clips: Vec::new(),
+        };
+        use cutlass_model::TrackType::{Audio, Sticker, Text, Video};
+        assert_eq!(
+            head_buttons(&lane(Video, true)),
+            ["lock", "hide", "mute", "more"]
+        );
+        assert_eq!(
+            head_buttons(&lane(Video, false)),
+            ["lock", "hide", "mute", "more"]
+        );
+        assert_eq!(head_buttons(&lane(Audio, false)), ["lock", "mute", "more"]);
+        assert_eq!(head_buttons(&lane(Text, false)), ["lock", "hide", "more"]);
+        assert_eq!(
+            head_buttons(&lane(Sticker, false)),
+            ["lock", "hide", "more"]
+        );
+        // Every icon the head draws is in the set.
+        for name in [
+            "lock",
+            "unlock",
+            "view",
+            "viewOff",
+            "volume",
+            "volumeOff",
+            "more",
+        ] {
+            assert!(icons::require(name).is_ok(), "{name}");
+        }
+    }
+
+    #[test]
+    fn scrolling_the_lanes_above_main_sinks_main_then_slides_them_under_it() {
+        let area = Rect::from_min_size(Pos2::new(0.0, 100.0), Vec2::new(800.0, 400.0));
+        let kinds = crowded(1);
+        let rest = lane_layout(&kinds, area, 0.0, 0.0);
+        let main = rest.rows[10];
+        // The audio lane shows whole under main, with room to drop below it.
+        assert!(rest.rows[11].bottom() + lane_room() <= area.bottom() + 0.5);
+        assert_eq!(rest.down_max, 0.0);
+        // The lanes above fill up from main; the top ones are past the edge.
+        assert_eq!(main.top() - rest.rows[9].bottom(), LANE_GAP);
+        assert!(rest.rows[0].top() < area.top());
+        assert!(rest.up_max > 0.0);
+
+        assert!(!rest.peek);
+
+        // A little up, main goes down with the lanes above it.
+        let some = lane_layout(&kinds, area, 10.0, 0.0);
+        assert_eq!(some.rows[10].top(), main.top() + 10.0);
+        assert_eq!(some.rows[10].top() - some.rows[9].bottom(), LANE_GAP);
+
+        // Scrolled all the way up, main sits at the sheet's foot over a strip,
+        // the audio lane is folded to it, and the top lane shows with a lane
+        // of room above it.
+        let top = lane_layout(&kinds, area, f32::MAX, 0.0);
+        let sunk = top.rows[10];
+        assert!((sunk.bottom() - (area.bottom() - PEEK)).abs() < 0.5);
+        assert_eq!(sunk.height(), main.height());
+        assert!(top.peek);
+        assert_eq!(top.shown()[11].height(), 0.0, "a folded lane takes no drop");
+        assert!((top.rows[0].top() - (area.top() + lane_room())).abs() < 0.5);
+        // The lanes next to main slid under it: what shows of them stays in
+        // the band above main and never over main.
+        for shown in &top.shown()[..10] {
+            assert!(shown.bottom() <= sunk.top());
+        }
+    }
+
+    #[test]
+    fn one_wheel_runs_through_the_lanes_above_main_then_the_whole_stack() {
+        let area = Rect::from_min_size(Pos2::new(0.0, 100.0), Vec2::new(800.0, 400.0));
+        let layout = lane_layout(&crowded(8), area, 0.0, 0.0);
+        assert!(layout.up_max > 0.0 && layout.down_max > 0.0);
+        // Scrolled up a little, scrolling down first brings those lanes back.
+        let (up, down) = chain_scroll(&layout, 30.0, 0.0, -20.0);
+        assert_eq!((up, down), (10.0, 0.0));
+        // Past them, it goes on into the lanes under main.
+        let (up, down) = chain_scroll(&layout, 10.0, 0.0, -50.0);
+        assert_eq!((up, down), (0.0, 40.0));
+        // Scrolling up undoes it in the same order.
+        let (up, down) = chain_scroll(&layout, 0.0, 40.0, 60.0);
+        assert_eq!((up, down), (20.0, 0.0));
+        // Scrolling the lanes above main carries main down with them.
+        let lifted = lane_layout(&crowded(8), area, 30.0, 0.0);
+        assert_eq!(lifted.rows[10].top(), layout.rows[10].top() + 30.0);
+
+        // Scrolled to the bottom, the whole stack went up together: main and
+        // the lanes above it moved as far as the last lane did, which shows
+        // with a lane of room under it.
+        let bottom = lane_layout(&crowded(8), area, 0.0, f32::MAX);
+        let last = bottom.rows.last().unwrap();
+        assert!((last.bottom() - (area.bottom() - lane_room())).abs() < 0.5);
+        let lift = layout.rows[10].top() - bottom.rows[10].top();
+        assert!(
+            (lift - layout.down_max).abs() < 0.5,
+            "main went up with the stack"
+        );
+        assert!((layout.rows[9].top() - bottom.rows[9].top() - lift).abs() < 0.5);
+        assert!((layout.rows[11].top() - bottom.rows[11].top() - lift).abs() < 0.5);
+    }
+
+    #[test]
+    fn lanes_that_fit_with_room_to_spare_center_main_and_do_not_scroll() {
+        let area = Rect::from_min_size(Pos2::new(0.0, 100.0), Vec2::new(800.0, 400.0));
+        let layout = lane_layout(
+            &[(false, 40.0), (true, 90.0), (false, 58.0)],
+            area,
+            0.0,
+            0.0,
+        );
+        assert_eq!(layout.rows[1].center().y, area.center().y);
+        assert_eq!((layout.up_max, layout.down_max), (0.0, 0.0));
+    }
+
+    #[test]
+    fn a_drag_near_the_sheet_edge_scrolls_the_lanes_toward_it() {
+        let tracks = Rect::from_min_max(Pos2::new(0.0, 100.0), Pos2::new(800.0, 400.0));
+        assert!(drag_scroll_step(tracks, 101.0) > drag_scroll_step(tracks, 120.0));
+        assert!(drag_scroll_step(tracks, 120.0) > 0.0);
+        assert!(drag_scroll_step(tracks, 390.0) < 0.0);
+        assert_eq!(drag_scroll_step(tracks, 250.0), 0.0);
+        assert_eq!(drag_scroll_step(tracks, 60.0), 12.0);
+    }
+
+    #[test]
+    fn an_overlay_video_row_is_about_half_main_and_no_thinner_than_text() {
+        let lane = |kind: cutlass_model::TrackType, main: bool| crate::shell::LaneView {
+            track_id: TrackId::new("t"),
+            kind,
+            main,
+            name: None,
+            mute: false,
+            hide: false,
+            lock: false,
+            solo: false,
+            mute_by_solo: false,
+            clips: Vec::new(),
+        };
+        let view = ViewState::new();
+        let main = lane_height(&view, &lane(cutlass_model::TrackType::Video, true));
+        let overlay = lane_height(&view, &lane(cutlass_model::TrackType::Video, false));
+        let text = lane_height(&view, &lane(cutlass_model::TrackType::Text, false));
+        assert!(overlay < main);
+        assert!(
+            (overlay - main / 2.0).abs() < 8.0,
+            "{overlay} against {main}"
+        );
+        assert!(text <= overlay);
+        assert_eq!(main, 76.0);
+    }
+
+    #[test]
+    fn dragging_a_clip_above_the_top_lane_opens_a_lane_there() {
+        let temp = std::env::temp_dir().join(format!("cutlass-new-lane-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let mut draft = cutlass_model::Draft::empty("draft");
+        draft.config.maintrack_adsorb = false;
+        draft.canvas_config.width = 2;
+        draft.canvas_config.height = 1;
+        draft.tracks[0].segments.push(cutlass_model::Segment::new(
+            "low",
+            "color",
+            cutlass_model::TimeRange::new(0, 2_000_000),
+        ));
+        let mut overlay = cutlass_model::Track::main(TrackId::new("overlay"));
+        overlay.flag = cutlass_model::TrackFlag::SubVideo;
+        overlay.segments.push(cutlass_model::Segment::new(
+            "high",
+            "color",
+            cutlass_model::TimeRange::new(8_000_000, 2_000_000),
+        ));
+        draft.tracks.insert(0, overlay);
+        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        let before = shell.draft().unwrap().tracks.clone();
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let press = |pos: Pos2, pressed: bool| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        let frame = |events: Vec<egui::Event>, shell: &mut Shell, view: &mut ViewState| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: screen,
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, view, None),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        let output = frame(Vec::new(), &mut shell, &mut view);
+        let low = text_pos(&output, "low").expect("the main clip");
+        let high = text_pos(&output, "high").expect("the overlay clip");
+        let to = Pos2::new(low.x + 20.0, high.y - 40.0);
+
+        frame(
+            vec![egui::Event::PointerMoved(low), press(low, true)],
+            &mut shell,
+            &mut view,
+        );
+        frame(vec![egui::Event::PointerMoved(to)], &mut shell, &mut view);
+        assert_eq!(
+            shell.new_lane_preview(),
+            Some((0, cutlass_model::TrackType::Video))
+        );
+        assert_eq!(shell.draft().unwrap().tracks, before);
+        frame(
+            vec![egui::Event::PointerMoved(to), press(to, false)],
+            &mut shell,
+            &mut view,
+        );
+
+        let tracks = &shell.draft().unwrap().tracks;
+        assert_eq!(tracks.len(), 3);
+        assert!(tracks[0].is_sub_video());
+        assert_eq!(tracks[0].segments[0].id.as_str(), "low");
+        assert_eq!(tracks[1].id.as_str(), "overlay");
+        assert!(shell.new_lane_preview().is_none());
+        shell.undo().unwrap();
+        assert_eq!(shell.draft().unwrap().tracks, before);
         let _ = std::fs::remove_dir_all(&temp);
     }
 
@@ -11156,7 +12507,17 @@ mod tests {
         ] {
             assert!(text.contains(label), "the dialog has no {label}");
         }
-        for name in ["9:16", "720p", "29.97", "HLG"] {
+        for (row, name) in [
+            ("Ratio", "9:16"),
+            ("Resolution", "720p"),
+            ("Frame rate", "29.97 fps"),
+            ("Color space", "HLG"),
+        ] {
+            let output = frame(&mut shell, &mut view, Vec::new());
+            let picker = last_text_pos(&output, row).expect(row) + Vec2::new(240.0, 0.0);
+            for events in click(picker) {
+                frame(&mut shell, &mut view, events);
+            }
             let output = frame(&mut shell, &mut view, Vec::new());
             let at = last_text_pos(&output, name).expect(name);
             for events in click(at) {
@@ -11428,12 +12789,12 @@ mod tests {
                 );
                 output.textures_delta.clear();
             }
-            (shell.view_origin().0, view.lane_scroll)
+            (shell.view_origin().0, view.lanes_down)
         };
         let (before, _) = spin(Vec2::ZERO, false);
         let (origin, scroll) = spin(Vec2::new(0.0, -120.0), false);
         assert_eq!(origin, before, "the wheel moved time, not the lanes");
-        assert!(scroll < 0.0, "the lanes did not scroll: {scroll}");
+        assert!(scroll > 0.0, "the audio lanes did not scroll: {scroll}");
         let (origin, after) = spin(Vec2::new(0.0, -120.0), true);
         assert!(origin > before, "shift and the wheel did not pan time");
         assert_eq!(after, scroll, "shift and the wheel moved the lanes");
@@ -11824,11 +13185,11 @@ mod tests {
         assert!(painted.contains("Check for updates"), "{painted}");
     }
 
-    /// The stickers shelf and the Licenses window painted by the real
+    /// The stickers shelf, the Licenses window and the project settings painted by the real
     /// renderer, as the window shows them. With `CUTLASS_RENDER_DIR` set
     /// the pictures are kept there to look at.
     #[test]
-    fn the_stickers_shelf_and_the_licenses_window_paint() {
+    fn the_stickers_shelf_licenses_and_project_settings_paint() {
         let temp = std::env::temp_dir().join(format!("cutlass-render-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&temp);
         std::fs::create_dir_all(&temp).unwrap();
@@ -11871,10 +13232,47 @@ mod tests {
             picture(&mut harness, name);
         }
         harness.state_mut().1.library_query.clear();
+        // A search with no match: the empty shelf's line has a glyph the
+        // test fonts lack.
+        harness.state_mut().1.library_shelf = Shelf::Media;
+        "zz".clone_into(&mut harness.state_mut().1.library_query);
+        harness.run_steps(4);
+        picture(&mut harness, "media");
+        harness.state_mut().1.library_shelf = Shelf::Stickers;
+        harness.state_mut().1.library_query.clear();
         harness.state_mut().1.licenses = Some(cutlass_licenses::notices());
         harness.run_steps(4);
         picture(&mut harness, "licenses");
+        harness.state_mut().1.licenses = None;
+        let settings = harness.state().0.project_settings();
+        assert!(settings.is_some(), "an open project has settings");
+        harness.state_mut().1.project_dialog = settings;
+        harness.run_steps(4);
+        picture(&mut harness, "project-settings");
         drop(harness);
         let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn a_narrow_transport_drops_guides_then_zoom() {
+        let room = |width| {
+            let room = transport_room(width, true);
+            (room.zoom, room.guides)
+        };
+        assert_eq!(room(700.0), (true, true));
+        assert_eq!(room(560.0), (true, false));
+        assert_eq!(room(450.0), (false, true));
+        assert_eq!(room(tokens::PREVIEW_MIN_WIDTH), (false, false));
+        // The default panels in a 1280 window leave room to zoom.
+        let preview =
+            1280.0 - tokens::LIBRARY_WIDTH - tokens::INSPECTOR_WIDTH - tokens::SPLIT * 2.0;
+        assert!(transport_room(preview, true).zoom, "no zoom at {preview}");
+        // With no project the transport has neither.
+        let idle = transport_room(900.0, false);
+        assert!(!idle.zoom && !idle.guides);
+        // The narrowest preview still keeps play clear of the three round
+        // buttons it shows.
+        let half = tokens::PREVIEW_MIN_WIDTH / 2.0;
+        assert!(half - PLAY_RADIUS - TRANSPORT_GAP >= ROUND_REACH + 80.0);
     }
 }

@@ -152,7 +152,6 @@ pub(crate) fn move_request(
             scale: UNIT,
             playhead: drag.playhead,
             snap_threshold: drag.snap,
-            guides: Vec::new(),
         },
     )
     .map_err(gesture_refused)?;
@@ -196,7 +195,6 @@ pub(crate) fn trim_request(
             scale: UNIT,
             playhead: drag.playhead,
             snap_threshold: drag.snap,
-            guides: Vec::new(),
         },
     )
     .map_err(gesture_refused)?;

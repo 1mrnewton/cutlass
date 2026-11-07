@@ -49,6 +49,48 @@ pub fn insert_track(
     track_id: &TrackId,
     kind: &TrackType,
 ) -> Result<(), EditError> {
+    let track = new_lane(draft, track_id, kind)?;
+    let index = new_lane_index(&draft.tracks, kind);
+    draft.tracks.insert(index, track);
+    Ok(())
+}
+
+/// Add an empty lane at `index`. The index must sit inside the kind's block
+/// (`lane_fits`). The other refusals are `insert_track`'s.
+pub fn insert_track_at(
+    draft: &mut Draft,
+    track_id: &TrackId,
+    kind: &TrackType,
+    index: usize,
+) -> Result<(), EditError> {
+    let track = new_lane(draft, track_id, kind)?;
+    if !lane_fits(&draft.tracks, kind, index) {
+        return Err(EditError::TrackKind);
+    }
+    draft.tracks.insert(index, track);
+    Ok(())
+}
+
+/// A new lane of `kind` may open at `index` in `tracks`.
+///
+/// Audio sits under the main track and every other kind above it. With no
+/// main track any index up to the end fits. An index past the end does not.
+#[must_use]
+pub fn lane_fits(tracks: &[Track], kind: &TrackType, index: usize) -> bool {
+    if index > tracks.len() || matches!(kind, TrackType::None) {
+        return false;
+    }
+    let Some(main) = tracks.iter().position(Track::is_main) else {
+        return true;
+    };
+    if matches!(kind, TrackType::Audio) {
+        index > main
+    } else {
+        index <= main
+    }
+}
+
+fn new_lane(draft: &Draft, track_id: &TrackId, kind: &TrackType) -> Result<Track, EditError> {
     if track_id.as_str().is_empty() || matches!(kind, TrackType::None) {
         return Err(EditError::TrackKind);
     }
@@ -62,9 +104,7 @@ pub fn insert_track(
     } else {
         TrackFlag::None
     };
-    let index = lane_index(&draft.tracks, kind);
-    draft.tracks.insert(index, track);
-    Ok(())
+    Ok(track)
 }
 
 /// Take a lane off the draft with its clips.
@@ -105,7 +145,10 @@ pub fn rename_track(draft: &mut Draft, track_id: &TrackId, name: &str) -> Result
 
 /// Video overlays sit just above the main track. Audio sits just under it.
 /// Other lanes sit above the first video track.
-fn lane_index(tracks: &[Track], kind: &TrackType) -> usize {
+/// Where `InsertTrack` opens a lane of `kind`: an overlay just above the main
+/// track, audio just under it, any other kind above the first video track.
+#[must_use]
+pub fn new_lane_index(tracks: &[Track], kind: &TrackType) -> usize {
     match kind {
         TrackType::Audio => tracks
             .iter()
@@ -145,7 +188,7 @@ fn apply_solo(draft: &mut Draft) {
 mod tests {
     use cutlass_model::{Micros, Segment, TimeRange, TrackId, TrackType};
 
-    use super::{EditError, insert_track};
+    use super::{EditError, insert_track, lane_fits};
     use crate::Session;
     use crate::request::Request;
     use cutlass_model::TrackAttribute;
@@ -210,6 +253,132 @@ mod tests {
         assert_eq!(session.draft().tracks.len(), 1);
         assert!(session.draft().tracks[0].segments.is_empty());
         assert_eq!(session.draft().duration, Micros(0));
+    }
+
+    #[test]
+    fn a_lane_opens_at_its_index_inside_its_kinds_block() {
+        let (mut session, main) = open();
+        session
+            .apply(
+                0,
+                &[
+                    Request::InsertTrackAt {
+                        track_id: TrackId::new("words"),
+                        kind: TrackType::Text,
+                        index: 0,
+                    },
+                    Request::InsertTrackAt {
+                        track_id: TrackId::new("over"),
+                        kind: TrackType::Video,
+                        index: 0,
+                    },
+                    Request::InsertTrackAt {
+                        track_id: TrackId::new("sound"),
+                        kind: TrackType::Audio,
+                        index: 3,
+                    },
+                ],
+            )
+            .unwrap();
+        let ids: Vec<&str> = session
+            .draft()
+            .tracks
+            .iter()
+            .map(|track| track.id.as_str())
+            .collect();
+        assert_eq!(ids, ["over", "words", main.as_str(), "sound"]);
+        assert!(session.draft().tracks[0].is_sub_video());
+        session.undo().unwrap();
+        assert_eq!(session.draft().tracks.len(), 1);
+    }
+
+    #[test]
+    fn a_lane_outside_its_block_or_past_the_end_is_refused() {
+        let (mut session, _) = open();
+        for (kind, index) in [
+            (TrackType::Audio, 0),
+            (TrackType::Video, 1),
+            (TrackType::Text, 1),
+            (TrackType::Audio, 2),
+            (TrackType::None, 0),
+        ] {
+            let error = session
+                .apply(
+                    0,
+                    &[Request::InsertTrackAt {
+                        track_id: TrackId::new("lane"),
+                        kind,
+                        index,
+                    }],
+                )
+                .unwrap_err();
+            assert_eq!(error, EditError::TrackKind);
+        }
+        assert_eq!(session.draft().tracks.len(), 1);
+        assert_eq!(session.revision(), 0);
+        let tracks = &session.draft().tracks;
+        assert!(lane_fits(tracks, &TrackType::Audio, 1));
+        assert!(lane_fits(tracks, &TrackType::Sticker, 0));
+        assert!(lane_fits(&[], &TrackType::Audio, 0));
+        assert!(!lane_fits(&[], &TrackType::Audio, 1));
+    }
+
+    #[test]
+    fn an_edit_that_empties_a_lane_takes_it_and_an_added_empty_lane_stays() {
+        let (mut session, main) = open();
+        session
+            .apply(
+                0,
+                &[
+                    Request::InsertTrack {
+                        track_id: TrackId::new("over"),
+                        kind: TrackType::Video,
+                    },
+                    Request::Place {
+                        track_id: TrackId::new("over"),
+                        segment: Box::new(Segment::new("o", "pic", TimeRange::new(0, 1_000_000))),
+                    },
+                    Request::InsertTrack {
+                        track_id: TrackId::new("spare"),
+                        kind: TrackType::Text,
+                    },
+                    Request::Place {
+                        track_id: main.clone(),
+                        segment: Box::new(Segment::new("m", "pic", TimeRange::new(0, 1_000_000))),
+                    },
+                ],
+            )
+            .unwrap();
+        let before = session.draft().clone();
+        session
+            .apply(
+                1,
+                &[Request::Remove {
+                    segment_id: "o".into(),
+                }],
+            )
+            .unwrap();
+        let ids: Vec<&str> = session
+            .draft()
+            .tracks
+            .iter()
+            .map(|track| track.id.as_str())
+            .collect();
+        assert_eq!(ids, ["spare", main.as_str()]);
+        session.undo().unwrap();
+        assert_eq!(session.draft(), &before);
+
+        // Main stays when its last clip goes.
+        let revision = session.revision();
+        session
+            .apply(
+                revision,
+                &[Request::Remove {
+                    segment_id: "m".into(),
+                }],
+            )
+            .unwrap();
+        assert!(session.draft().tracks.iter().any(|track| track.id == main));
     }
 
     #[test]

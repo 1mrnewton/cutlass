@@ -16,7 +16,10 @@ pub const SHORTEST: Micros = Micros(100_000);
 /// in `material_animations` that the segment's `extra_material_refs` name,
 /// dropped when it empties. An out animation starts where it must to end
 /// with the clip. A letter animation goes only on a title. A loop plays
-/// the whole clip, once each `duration`, beside the in and out.
+/// the whole clip, once each `duration`, beside the in and out. A caption
+/// animation goes only on text: it names a loop preset, plays the whole
+/// clip in the loop slot, and while it is there playback skips the in, out
+/// and loop rows.
 pub fn set_animation(
     draft: &mut Draft,
     segment_id: &SegmentId,
@@ -24,21 +27,31 @@ pub fn set_animation(
     resource_id: Option<&str>,
     duration: Micros,
 ) -> Result<(), EditError> {
-    if !matches!(kind, AnimType::In | AnimType::Out | AnimType::Loop) {
+    if !matches!(
+        kind,
+        AnimType::In | AnimType::Out | AnimType::Loop | AnimType::Caption
+    ) {
         return Err(EditError::Animation);
     }
+    // A caption plays in the loop slot, so it names a loop preset.
+    let slot = if kind == AnimType::Caption {
+        AnimType::Loop
+    } else {
+        kind
+    };
     let preset = match resource_id {
         Some(id) => Some(
             ANIMATION_PRESETS
                 .iter()
-                .find(|preset| preset.resource_id == id && preset.kind == kind)
+                .find(|preset| preset.resource_id == id && preset.kind == slot)
                 .ok_or(EditError::Animation)?,
         ),
         None => None,
     };
     let (track_index, segment_index) = locate(draft, segment_id)?;
     ensure_unlocked(draft.tracks[track_index].attribute)?;
-    if preset.is_some_and(|preset| matches!(preset.motion, Motion::Letters(_))) {
+    let letters = preset.is_some_and(|preset| matches!(preset.motion, Motion::Letters(_)));
+    if letters || kind == AnimType::Caption {
         let material_id = &draft.tracks[track_index].segments[segment_index].material_id;
         if !matches!(
             draft.materials.get(material_id.as_str()),
@@ -60,6 +73,7 @@ pub fn set_animation(
     let name = match kind {
         AnimType::In => "in",
         AnimType::Out => "out",
+        AnimType::Caption => "caption",
         _ => "loop",
     };
     row.animations.retain(|animation| animation.kind != name);
@@ -71,7 +85,7 @@ pub fn set_animation(
             .filter_map(|animation| animation.duration.map(|d| d.0))
             .sum();
         // A loop's length is one round, and it plays the whole clip.
-        let room = if kind == AnimType::Loop {
+        let room = if slot == AnimType::Loop {
             length.0.max(SHORTEST.0)
         } else {
             (length.0 - other).max(SHORTEST.0)
@@ -96,11 +110,12 @@ pub fn set_animation(
             panel: "video".to_owned(),
             ..StickerAnimation::default()
         });
-        // In, out, then loop, as the reference editor writes them.
+        // In, out, loop, then caption, as the reference editor writes them.
         row.animations
             .sort_by_key(|animation| match animation.kind.as_str() {
                 "in" => 0,
                 "out" => 1,
+                "caption" => 3,
                 _ => 2,
             });
     }
@@ -271,6 +286,54 @@ mod tests {
         assert!(draft.tracks[0].segments[0].extra_material_refs.is_empty());
         session.undo().unwrap();
         assert_eq!(session.draft().materials.material_animations.len(), 1);
+    }
+
+    #[test]
+    fn a_caption_animation_goes_on_text_in_the_loop_slot_and_plays_alone() {
+        let mut draft = Draft::empty("D");
+        draft.tracks[0].id = "main".into();
+        draft
+            .materials
+            .texts
+            .push(cutlass_model::MaterialText::new("words"));
+        draft.tracks[0]
+            .segments
+            .push(Segment::new("a", "words", TimeRange::new(0, 4_000_000)));
+        let mut session = Session::open(draft);
+        let pulse = "cutlass-anim-loop-pulse";
+        session
+            .apply(
+                0,
+                &[
+                    set(AnimType::In, Some(FADE_IN), 400_000),
+                    set(AnimType::Caption, Some(pulse), 1_000_000),
+                ],
+            )
+            .unwrap();
+        let draft = session.draft();
+        let row = &draft.materials.material_animations[0];
+        let kinds: Vec<_> = row.animations.iter().map(|a| a.kind.as_str()).collect();
+        assert_eq!(kinds, ["in", "caption"]);
+        assert_eq!(row.animations[1].resource_id, pulse);
+        assert_eq!(row.animations[1].start, Micros(0));
+        assert_eq!(row.animations[1].duration, Some(Micros(1_000_000)));
+        // The caption plays alone: the fade in no longer hides the start.
+        assert_eq!(alpha(&session, 0), 1.0);
+
+        // A caption names a loop preset; an in preset is refused.
+        assert_eq!(
+            session.apply(1, &[set(AnimType::Caption, Some(FADE_IN), 500_000)]),
+            Err(EditError::Animation)
+        );
+        session
+            .apply(1, &[set(AnimType::Caption, None, 0)])
+            .unwrap();
+        let kinds: Vec<_> = session.draft().materials.material_animations[0]
+            .animations
+            .iter()
+            .map(|a| a.kind.clone())
+            .collect();
+        assert_eq!(kinds, ["in"]);
     }
 
     #[test]

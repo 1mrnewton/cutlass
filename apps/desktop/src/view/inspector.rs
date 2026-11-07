@@ -26,9 +26,15 @@ const ACCENT: Color32 = Color32::from_rgb(0x2a, 0xd4, 0xe0);
 const PAGES: Color32 = tokens::INSET;
 const PAGE_ON: Color32 = Color32::from_rgb(0x3a, 0x3a, 0x3a);
 const BOX: Color32 = tokens::RAISED;
-const LABEL_WIDTH: f32 = 72.0;
-const VALUE_WIDTH: f32 = 56.0;
+const LABEL_WIDTH: f32 = 92.0;
+const VALUE_WIDTH: f32 = 60.0;
 const PAIR_BOX: f32 = 84.0;
+/// The height of a control row, and the gap under it.
+const ROW_HEIGHT: f32 = 28.0;
+const ROW_GAP: f32 = 6.0;
+/// The widest and narrowest gap between the inspector's tabs.
+const TAB_GAP: f32 = 18.0;
+const TAB_GAP_MIN: f32 = 8.0;
 const LATER: &str = "Later: Cutlass has no edit for this yet";
 
 /// Which tab, page, and sections are open. They reset when another clip
@@ -97,7 +103,8 @@ pub(super) fn clip_panel(
         };
     }
     if let Some(focus) = pending {
-        state.tab = focus.tab;
+        // A caption's Captions tab comes before the text tabs a menu names.
+        state.tab = focus.tab + usize::from(panel == Panel::Caption);
         state.page = focus.page;
         if let Some(section) = focus.section {
             state.open.insert(section.to_owned());
@@ -227,29 +234,35 @@ fn text_panel(
     inspection: &Inspection,
     caption: bool,
 ) {
+    // A caption's tabs lead with its list; it has no tracking.
+    let labels: &[&str] = if caption {
+        &["Captions", "Text", "Animation", "Text to speech"]
+    } else {
+        &["Text", "Animation", "Tracking", "Text to speech"]
+    };
     let tab = state.tab;
-    tabs(
-        ui,
-        &["Text", "Animation", "Tracking", "Text to speech"],
-        &mut state.tab,
-    );
+    tabs(ui, labels, &mut state.tab);
     if tab != state.tab {
         state.page = 0;
     }
-    match state.tab {
-        0 => {
-            pages(ui, &["Basic", "Bubble", "Effects"], &mut state.page);
+    match labels.get(state.tab).copied().unwrap_or_default() {
+        "Captions" => caption_list(shell, ui, state),
+        "Text" => {
+            // A caption's middle page is its templates; a title's is its bubble.
+            let middle = if caption { "Templates" } else { "Bubble" };
+            pages(ui, &["Basic", middle, "Effects"], &mut state.page);
             match state.page {
                 0 => {
                     text_basic(shell, ui, state, inspection, caption);
                     footer(ui, &["Save as preset"]);
                 }
+                1 if caption => caption_templates(shell, ui),
                 1 => bubble_page(shell, ui),
                 _ => effect_page(shell, ui),
             }
         }
-        1 => animation_tab(shell, ui, state, &["In", "Out", "Loop"], TEXT_MOTIONS),
-        2 => {
+        "Animation" => animation_tab(shell, ui, state, &["In", "Out", "Loop"], TEXT_MOTIONS),
+        "Tracking" => {
             later_tiles(ui, &["Face", "Body", "Hand", "Custom"]);
             later_button(ui, "Start tracking");
         }
@@ -263,6 +276,172 @@ fn text_panel(
                 ],
             );
         }
+    }
+}
+
+/// The Captions tab: every caption on the lane, numbered in timeline order,
+/// the one under the playhead in the accent color. A line is typed over in
+/// place, and its words keep their times; + adds a caption after it, and
+/// the bin takes it off.
+fn caption_list(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState) {
+    let rows = shell.caption_rows();
+    let current = cutlass_editor::row_at(&rows, shell.playhead());
+    ui.add_space(8.0);
+    let mut rerun = false;
+    ui.horizontal(|ui| {
+        // The tools sit at the right; the search takes what is left.
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.add(ui::Button::new("?").text_size(12.0))
+                .on_hover_text(CAPTION_LIST_HELP);
+            let open = state.open.contains(REPLACE_ROW);
+            let toggle = ui::Button::new("Replace").text_size(12.0).on(open);
+            if ui
+                .add(toggle)
+                .on_hover_text("Find and replace across every caption")
+                .clicked()
+                && !state.open.remove(REPLACE_ROW)
+            {
+                state.open.insert(REPLACE_ROW.to_owned());
+            }
+            rerun = ui
+                .add_enabled(
+                    shell.rerun_caption_enabled(),
+                    ui::Button::new("Re-run").text_size(12.0),
+                )
+                .on_hover_text("Hear this caption's clip again, keeping its look")
+                .on_disabled_hover_text("This caption was not heard from a clip on the timeline")
+                .clicked();
+            later_button(ui, "Translate");
+            let query = state.fields.entry("caption search".to_owned()).or_default();
+            ui::Field::new(query).hint("Search").icon("search").show(ui);
+        });
+    });
+    if rerun {
+        send(shell, Shell::rerun_caption);
+    }
+    if state.open.contains(REPLACE_ROW) {
+        replace_row(shell, ui, state);
+    }
+    let query = state
+        .fields
+        .get("caption search")
+        .cloned()
+        .unwrap_or_default();
+    let shown = cutlass_editor::rows_matching(&rows, &query);
+    if rows.is_empty() {
+        note(ui, "This clip is not on a caption row.");
+        return;
+    }
+    if shown.is_empty() {
+        note(ui, "No caption says that.");
+        return;
+    }
+    let mut edit = None;
+    let mut add = None;
+    let mut remove = None;
+    for index in shown {
+        let row = &rows[index];
+        let on = current == Some(index);
+        let color = if on { ACCENT } else { tokens::TEXT };
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.add_sized(
+                [28.0, 24.0],
+                egui::Label::new(
+                    RichText::new(format!("{}", index + 1))
+                        .size(12.0)
+                        .color(if on { ACCENT } else { tokens::MUTED }),
+                ),
+            );
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if ui
+                    .add(ui::Button::icon("delete"))
+                    .on_hover_text("Delete this caption")
+                    .clicked()
+                {
+                    remove = Some(row.segment_id.clone());
+                }
+                if ui
+                    .add(ui::Button::new("+").text_size(12.0))
+                    .on_hover_text("Add a caption after this one")
+                    .clicked()
+                {
+                    add = Some(row.segment_id.clone());
+                }
+                let key = format!("caption line {}", row.segment_id.as_str());
+                let text = state.fields.entry(key).or_default();
+                let response = ui.add(
+                    egui::TextEdit::singleline(text)
+                        .frame(egui::Frame::NONE)
+                        .text_color(color)
+                        .desired_width(f32::INFINITY),
+                );
+                if super::commits(ui, &response) && *text != row.text {
+                    edit = Some((row.segment_id.clone(), text.clone()));
+                } else if !response.has_focus() {
+                    row.text.clone_into(text);
+                }
+            });
+        });
+    }
+    ui.separator();
+    if let Some((segment_id, text)) = edit {
+        send(shell, |shell| shell.set_caption_line(&segment_id, &text));
+    } else if let Some(segment_id) = add {
+        send(shell, |shell| shell.add_caption_after(&segment_id));
+    } else if let Some(segment_id) = remove {
+        send(shell, |shell| shell.remove_caption(&segment_id));
+    }
+}
+
+/// What the Captions list's "?" says.
+const CAPTION_LIST_HELP: &str = "Search shows the captions that say it. Replace swaps what the \
+search finds in every caption, as one undo step. Re-run hears the clip a caption was heard from \
+again and keeps its look. Click a line to type over it; + adds a caption after it.";
+
+/// The Captions list's replace row opens under the search.
+const REPLACE_ROW: &str = "caption replace";
+
+/// Replace what the search finds, in every caption on the lane, as one
+/// undo step. The list below shows the captions it will reach.
+fn replace_row(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState) {
+    let mut replace = false;
+    ui.horizontal(|ui| {
+        let with = state
+            .fields
+            .entry("caption replace".to_owned())
+            .or_default();
+        let response = ui::Field::new(with)
+            .hint("Replace with")
+            .width(ui.available_width() - 90.0)
+            .show(ui)
+            .response;
+        replace = response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+        replace |= ui
+            .add(ui::Button::new("Replace all").text_size(12.0))
+            .clicked();
+    });
+    if !replace {
+        return;
+    }
+    let find = state
+        .fields
+        .get("caption search")
+        .cloned()
+        .unwrap_or_default();
+    let with = state
+        .fields
+        .get("caption replace")
+        .cloned()
+        .unwrap_or_default();
+    match shell.replace_in_captions(&find, &with) {
+        Ok(count) => {
+            let noun = if count == 1 { "match" } else { "matches" };
+            shell.set_notice(format!("Replaced {count} {noun}"));
+            // The list shows every caption again, the new words in it.
+            state.fields.remove("caption search");
+        }
+        Err(error) => shell.notice_error(&error),
     }
 }
 
@@ -378,7 +557,31 @@ fn position_size(
     inspection: &Inspection,
     rotate_label: &str,
 ) {
-    let header = section(ui, state, "position", "Position & Size", None, true);
+    placement(
+        shell,
+        ui,
+        state,
+        inspection,
+        "Position & Size",
+        Some(rotate_label),
+    );
+}
+
+/// A caption's Transform: scale, uniform scale and position, each with its
+/// keyframe controls, as the video panel keys them.
+fn transform(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState, inspection: &Inspection) {
+    placement(shell, ui, state, inspection, "Transform", None);
+}
+
+fn placement(
+    shell: &mut Shell,
+    ui: &mut Ui,
+    state: &mut InspectorState,
+    inspection: &Inspection,
+    title: &str,
+    rotate_label: Option<&str>,
+) {
+    let header = section(ui, state, "position", title, None, true);
     if header.reset {
         send(shell, Shell::reset_placement);
     }
@@ -424,8 +627,10 @@ fn position_size(
             send(shell, |shell| shell.set_position(stored_x, stored_y));
         }
         let rotation = inspection.rotation;
-        let turned = keyed_row(ui, keys.as_ref(), playhead, &mut step, |ui| {
-            pair_row(ui, state, rotate_label, ("°", rotation), ("", f64::NAN))
+        let turned = rotate_label.map_or((None, None), |label| {
+            keyed_row(ui, keys.as_ref(), playhead, &mut step, |ui| {
+                pair_row(ui, state, label, ("°", rotation), ("", f64::NAN))
+            })
         });
         match step {
             Some(KeyStep::Back) => shell.step_keyframe(false),
@@ -441,7 +646,7 @@ fn position_size(
         {
             send(shell, |shell| shell.ease_keyframes(graph));
         }
-        if rotate_label == "Rotate" {
+        if rotate_label == Some("Rotate") {
             use cutlass_editor::StageAlign;
             let aims = [
                 ("alignLeft", "Align left", Some(StageAlign::Left)),
@@ -811,7 +1016,7 @@ fn key_buttons(ui: &mut Ui, keys: &cutlass_editor::ClipKeys, playhead: Micros) -
 /// press answers the curve to ease along, or `None` inside for none.
 fn graph_row(ui: &mut Ui, keys: &cutlass_editor::ClipKeys) -> Option<Option<String>> {
     let mut picked = None;
-    ui.add_space(4.0);
+    ui.add_space(ROW_GAP);
     row_label(ui, "Graphs");
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = Vec2::splat(6.0);
@@ -855,7 +1060,7 @@ fn graph_row(ui: &mut Ui, keys: &cutlass_editor::ClipKeys) -> Option<Option<Stri
             }
         }
     });
-    ui.add_space(4.0);
+    ui.add_space(ROW_GAP);
     picked
 }
 
@@ -1047,7 +1252,7 @@ fn cutout_page(
                 }
             }
         });
-        ui.add_space(4.0);
+        ui.add_space(ROW_GAP);
         let hex = key.hex();
         if let Some(value) = slider(
             ui,
@@ -1170,7 +1375,7 @@ fn tracking(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState) {
                 shell.toggle_follower(&choice.segment_id);
             }
         }
-        ui.add_space(4.0);
+        ui.add_space(ROW_GAP);
         ui.label(
             RichText::new("Masks that follow it")
                 .size(12.0)
@@ -1507,7 +1712,7 @@ fn lut_section(
                 state.wants_lut = true;
             }
         });
-        ui.add_space(4.0);
+        ui.add_space(ROW_GAP);
         if let Some((_, strength)) = &inspection.lut {
             let stored = (f64::from(*strength) * 100.0).round();
             if let Some(value) = slider(
@@ -1567,12 +1772,27 @@ fn text_basic(
     inspection: &Inspection,
     caption: bool,
 ) {
+    if caption && shell.on_main_captions() {
+        ui.add_space(8.0);
+        let mut all = shell.all_captions();
+        if ui
+            .add(ui::Check::new(&mut all, "Apply to all main captions"))
+            .on_hover_text("A change to the look or place styles every caption on this row")
+            .changed()
+        {
+            shell.set_all_captions(all);
+        }
+        ui.separator();
+    }
     if caption && !inspection.words.text.is_empty() {
         caption_styles(shell, ui, inspection);
     }
     body(ui, |ui| {
         if caption && !inspection.words.text.is_empty() {
-            caption_words(shell, ui, state, inspection);
+            caption_paragraphs(shell, ui, state);
+            egui::CollapsingHeader::new(RichText::new("Words").size(12.0))
+                .id_salt("caption words")
+                .show(ui, |ui| caption_words(shell, ui, state, inspection));
             #[allow(clippy::cast_precision_loss)]
             let stored = inspection.caption_stagger_ms as f64;
             #[allow(clippy::cast_precision_loss)]
@@ -1651,7 +1871,11 @@ fn text_basic(
         alignment_row(shell, ui, inspection);
         preset_styles(shell, ui);
     });
-    position_size(shell, ui, state, inspection, "Plane rotation");
+    if caption {
+        transform(shell, ui, state, inspection);
+    } else {
+        position_size(shell, ui, state, inspection, "Plane rotation");
+    }
     blend(shell, ui, state, inspection, false);
     if let Some(look) = shell.text_look() {
         text_parts(shell, ui, state, &look);
@@ -1669,6 +1893,36 @@ fn words_box(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState) {
         stored.clone_into(text);
     }
     ui.add_space(6.0);
+}
+
+/// One field per paragraph, "The N paragraph", each a page or line of the
+/// caption as it shows. Typing over one rematches only its words.
+fn caption_paragraphs(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState) {
+    let paragraphs = shell.caption_paragraphs();
+    let mut edited = None;
+    for (index, paragraph) in paragraphs.iter().enumerate() {
+        ui.add_space(6.0);
+        ui.label(
+            RichText::new(format!("The {} paragraph", index + 1))
+                .size(12.0)
+                .strong()
+                .color(tokens::TEXT),
+        );
+        let text = state
+            .fields
+            .entry(format!("paragraph {index}"))
+            .or_default();
+        let response = ui::Field::new(text).show(ui).response;
+        if super::commits(ui, &response) && *text != paragraph.text {
+            edited = Some((index, text.clone()));
+        } else if !response.has_focus() {
+            paragraph.text.clone_into(text);
+        }
+    }
+    ui.add_space(6.0);
+    if let Some((index, text)) = edited {
+        send(shell, |shell| shell.set_caption_paragraph(index, &text));
+    }
 }
 
 /// One row per recognized word: its time and its letters. A word keeps
@@ -2086,19 +2340,34 @@ fn text_parts(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState, look: 
 /// Send one edit and show its refusal.
 pub(super) fn send(shell: &mut Shell, edit: impl FnOnce(&mut Shell) -> Result<(), ShellError>) {
     if let Err(error) = edit(shell) {
-        shell.set_notice(error.to_string());
+        shell.notice_error(&error);
     }
 }
 
 /// The text tabs across the top. The active one is cyan. Tabs that do not
 /// fit scroll sideways, as the prototype's do.
 fn tabs(ui: &mut Ui, labels: &[&str], current: &mut usize) {
-    ui.add_space(12.0);
+    ui.add_space(ROW_GAP);
+    // The gap shrinks before the row has to scroll, so a narrow inspector
+    // still shows every tab.
+    let font = FontId::proportional(13.0);
+    let text: f32 = labels
+        .iter()
+        .map(|label| {
+            ui.painter()
+                .layout_no_wrap((*label).to_owned(), font.clone(), Color32::WHITE)
+                .size()
+                .x
+        })
+        .sum();
+    let gaps = labels.len().saturating_sub(1).max(1) as f32;
+    let gap = ((ui.available_width() - text - 1.0) / gaps).clamp(TAB_GAP_MIN, TAB_GAP);
     ui::Scroll::horizontal(("inspector-tabs", labels.len()))
         .without_bar()
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 16.0;
+                ui.set_min_height(ROW_HEIGHT);
+                ui.spacing_mut().item_spacing.x = gap;
                 for (index, label) in labels.iter().enumerate() {
                     let color = if index == *current {
                         ACCENT
@@ -2116,7 +2385,7 @@ fn tabs(ui: &mut Ui, labels: &[&str], current: &mut usize) {
                 }
             });
         });
-    ui.add_space(10.0);
+    ui.add_space(6.0);
     let line = ui.cursor().min.y;
     let span = ui.max_rect().x_range();
     ui.painter()
@@ -2170,7 +2439,7 @@ pub(super) fn pages(ui: &mut Ui, labels: &[&str], current: &mut usize) {
             if on { Color32::WHITE } else { tokens::MUTED },
         );
     }
-    ui.add_space(4.0);
+    ui.add_space(ROW_GAP);
 }
 
 struct Header {
@@ -2316,7 +2585,7 @@ fn later_note(ui: &mut Ui, what: &str) {
 pub(super) fn note(ui: &mut Ui, text: &str) {
     ui.add_space(8.0);
     ui.label(RichText::new(text).size(12.0).color(tokens::MUTED));
-    ui.add_space(4.0);
+    ui.add_space(ROW_GAP);
 }
 
 fn later_button(ui: &mut Ui, label: &str) {
@@ -2363,6 +2632,35 @@ fn caption_styles(shell: &mut Shell, ui: &mut Ui, inspection: &Inspection) {
     });
     if let Some(key) = picked {
         send(shell, |shell| shell.set_caption_style(key));
+    }
+}
+
+/// The Templates page: each caption template, the caption's own outlined.
+/// A pick styles every main caption while "Apply to all main captions" is
+/// on, as one undo step.
+fn caption_templates(shell: &mut Shell, ui: &mut Ui) {
+    let current = shell.caption_template();
+    let mut picked = None;
+    ui.add_space(8.0);
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = Vec2::splat(6.0);
+        for template in &cutlass_editor::CAPTION_TEMPLATES {
+            let on = current.as_deref() == Some(template.id);
+            let stroke = if on {
+                Stroke::new(tokens::SELECTED_EDGE * 2.0, tokens::EXPORT)
+            } else {
+                Stroke::NONE
+            };
+            let tile = egui::Button::new(RichText::new(template.name).size(11.0))
+                .fill(BOX)
+                .stroke(stroke);
+            if ui.add_sized([64.0, 48.0], tile).clicked() && !on {
+                picked = Some(template.id);
+            }
+        }
+    });
+    if let Some(id) = picked {
+        send(shell, |shell| shell.set_caption_template(id));
     }
 }
 
@@ -2451,13 +2749,13 @@ fn later_tiles(ui: &mut Ui, names: &[&str]) {
 
 /// The indented body under a section.
 pub(super) fn body(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
-    ui.add_space(4.0);
+    ui.add_space(ROW_GAP);
     ui.vertical(add);
-    ui.add_space(4.0);
+    ui.add_space(ROW_GAP);
 }
 
 fn row_label(ui: &mut Ui, label: &str) {
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(LABEL_WIDTH, 26.0), Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(LABEL_WIDTH, ROW_HEIGHT), Sense::hover());
     let color = if ui.is_enabled() {
         tokens::TEXT
     } else {
@@ -2477,7 +2775,7 @@ fn label_row(ui: &mut Ui, label: &str, add: impl FnOnce(&mut Ui)) {
         row_label(ui, label);
         add(ui);
     });
-    ui.add_space(4.0);
+    ui.add_space(ROW_GAP);
 }
 
 /// A slider row: name, track, value box. Each new value is sent as the
@@ -2534,7 +2832,7 @@ pub(super) fn slider(
             value_box(ui, &show(value));
         }
     });
-    ui.add_space(4.0);
+    ui.add_space(ROW_GAP);
     // The value shown follows the track while held, then the stored one.
     if !ui.input(|input| input.pointer.any_down()) {
         state.live.remove(key);
@@ -2570,11 +2868,11 @@ fn later_slider(ui: &mut Ui, label: &str, value: f64, shown: &str) {
     })
     .response
     .on_disabled_hover_text(LATER);
-    ui.add_space(4.0);
+    ui.add_space(ROW_GAP);
 }
 
 fn value_box(ui: &mut Ui, text: &str) {
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(VALUE_WIDTH, 26.0), Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(VALUE_WIDTH, ROW_HEIGHT), Sense::hover());
     ui.painter().rect_filled(rect, CornerRadius::same(8), BOX);
     ui.painter().text(
         rect.center(),
@@ -2597,17 +2895,16 @@ fn pair_row(
     let mut out = (None, None);
     ui.horizontal(|ui| {
         row_label(ui, label);
-        let width = if second.1.is_nan() {
-            PAIR_BOX
-        } else {
-            ((ui.available_width() - ui.spacing().item_spacing.x) / 2.0).max(PAIR_BOX - 24.0)
-        };
+        // A lone box is as wide as the first of a pair, so the boxes line
+        // up down the column.
+        let width =
+            ((ui.available_width() - ui.spacing().item_spacing.x) / 2.0).max(PAIR_BOX - 24.0);
         out.0 = number_box(ui, state, &format!("{label} {}", first.0), first, width);
         if !second.1.is_nan() {
             out.1 = number_box(ui, state, &format!("{label} {}", second.0), second, width);
         }
     });
-    ui.add_space(4.0);
+    ui.add_space(ROW_GAP);
     out
 }
 
@@ -2625,6 +2922,7 @@ fn number_box(
     let field = ui::Field::new(text)
         .name(key)
         .width(width)
+        .height(ROW_HEIGHT)
         .ink(Color32::WHITE);
     let field = if unit == "°" {
         field.icon("rotate")
@@ -2727,9 +3025,13 @@ pub(super) fn switch_row(ui: &mut Ui, label: &str, on: bool, editable: bool) -> 
     // The caller flips the stored value on a click; this copy only draws.
     let mut shown = on;
     let response = ui
-        .add_enabled_ui(editable, |ui| ui::switch_row(ui, label, &mut shown))
+        .horizontal(|ui| {
+            ui.set_min_height(ROW_HEIGHT);
+            ui.add_enabled_ui(editable, |ui| ui::switch_row(ui, label, &mut shown))
+                .inner
+        })
         .inner;
-    ui.add_space(4.0);
+    ui.add_space(ROW_GAP);
     response
 }
 
@@ -2764,7 +3066,7 @@ fn icon_bar<T: Copy>(ui: &mut Ui, items: &[(&str, &str, Option<T>)]) -> Option<T
             }
         });
     });
-    ui.add_space(4.0);
+    ui.add_space(ROW_GAP);
     picked
 }
 

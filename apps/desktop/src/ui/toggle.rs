@@ -164,8 +164,8 @@ fn switch_track(on: bool, enabled: bool, hovered: bool) -> Color32 {
         (true, true, true) => tokens::EXPORT_HOVER,
         (true, true, false) => tokens::EXPORT,
         (true, false, _) => tokens::ACTIVE,
-        (false, true, true) => tokens::SWITCH_OFF_HOVER,
-        (false, _, _) => tokens::SWITCH_OFF,
+        (false, true, true) => tokens::SWITCH_TRACK_HOVER,
+        (false, _, _) => tokens::SWITCH_TRACK,
     }
 }
 
@@ -305,7 +305,7 @@ mod tests {
         assert_eq!(check_look(true, true, false).0, tokens::EXPORT);
         assert_eq!(check_look(false, true, true).1, tokens::MUTED);
         assert_eq!(check_look(false, false, true).1, tokens::FAINT);
-        assert_eq!(switch_track(false, true, false), tokens::SWITCH_OFF);
+        assert_eq!(switch_track(false, true, false), tokens::SWITCH_TRACK);
         assert_eq!(switch_track(true, false, false), tokens::ACTIVE);
     }
 }

@@ -441,7 +441,10 @@ impl Media {
 
     /// [`Self::decode_at`], asking `steer` after each picture decoded on the
     /// way. It can move the target to a later time, which the decode then
-    /// stops at, or stop the decode. A stopped decode is
+    /// stops at, or stop the decode. A later time more than
+    /// [`FORWARD_REACH`] past the picture just decoded seeks to the keyframe
+    /// before it instead of decoding every picture on the way. A stopped
+    /// decode is
     /// [`EngineError::Interrupted`], and the stream stays where it got to, so
     /// a later time continues from there without a seek.
     pub fn decode_steered(
@@ -463,16 +466,7 @@ impl Media {
         let (mut ahead, mut previous) = match cursor {
             Some(cursor) => (cursor.ahead, Some(cursor.last)),
             None => {
-                let (track, timescale) = {
-                    let Some(pipe) = self.picture.as_mut() else {
-                        return Err(EngineError::NoDecoder {
-                            codec: "picture".to_owned(),
-                        });
-                    };
-                    pipe.reset();
-                    (pipe.track, pipe.timescale)
-                };
-                self.seek_picture(source, track, timescale)?;
+                self.restart_picture(source)?;
                 (None, None)
             }
         };
@@ -497,6 +491,12 @@ impl Media {
             };
             match steer(&held) {
                 Steer::Go => {}
+                Steer::Retarget(later) if later.0.saturating_sub(held.end.0) > FORWARD_REACH => {
+                    source = later;
+                    self.restart_picture(source)?;
+                    previous = None;
+                    continue;
+                }
                 Steer::Retarget(later) if later.0 >= held.start.0 => source = later,
                 Steer::Retarget(_) | Steer::Stop => {
                     self.keep(held, None);
@@ -519,6 +519,21 @@ impl Media {
             previous = Some(held);
         }
         Err(EngineError::DecodeLimit)
+    }
+
+    /// Drop what the picture decoder holds and seek to the keyframe before
+    /// `source`.
+    fn restart_picture(&mut self, source: Micros) -> Result<(), EngineError> {
+        let (track, timescale) = {
+            let Some(pipe) = self.picture.as_mut() else {
+                return Err(EngineError::NoDecoder {
+                    codec: "picture".to_owned(),
+                });
+            };
+            pipe.reset();
+            (pipe.track, pipe.timescale)
+        };
+        self.seek_picture(source, track, timescale)
     }
 
     /// Remember `last` for the next [`Media::decode_at`] and return it.

@@ -49,8 +49,9 @@ pub use canvas::{CANVAS_SHAPES, CanvasShape, canvas_for, follow_first_picture, r
 pub use move_segment::move_segment;
 pub use place::place;
 pub use text::{MAX_CAPTION_STAGGER_MS, NEW_TEXT_SIZE};
+pub use track::{lane_fits, new_lane_index};
 pub use trim::trim;
-pub use words::set_words;
+pub use words::{CAPTION_KIND, set_words};
 
 /// Why one request did not change the draft.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -212,14 +213,32 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             segment_id,
             material_id,
             words,
+            span,
+            face,
         } => words::add_caption(
             draft,
-            source_id,
-            track_id,
-            segment_id,
-            material_id,
+            &words::NewCaption {
+                source_id,
+                track_id,
+                segment_id,
+                material_id,
+                span: span.as_deref(),
+                face,
+            },
             words.clone(),
         ),
+        Request::AddSubtitles {
+            track_id,
+            cues,
+            face,
+        } => words::add_subtitles(draft, track_id, cues, face),
+        Request::InsertCaption { like, cue } => words::insert_caption(draft, like, cue),
+        Request::RecaptionClip {
+            source_id,
+            like,
+            lines,
+            face,
+        } => words::recaption_clip(draft, source_id, like, lines, face),
         Request::ExtractAudio {
             source_id,
             track_id,
@@ -347,6 +366,11 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             word,
             on,
         } => text::set_caption_keyword(draft, segment_id, *word, *on),
+        Request::SetCaptionTemplate {
+            segment_id,
+            resource_id,
+            name,
+        } => text::set_caption_template(draft, segment_id, resource_id, name),
         Request::SetCaptionStagger { segment_id, millis } => {
             text::set_caption_stagger(draft, segment_id, *millis)
         }
@@ -579,6 +603,11 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             material_id,
         } => replace::replace_media(draft, segment_id, material_id),
         Request::InsertTrack { track_id, kind } => track::insert_track(draft, track_id, kind),
+        Request::InsertTrackAt {
+            track_id,
+            kind,
+            index,
+        } => track::insert_track_at(draft, track_id, kind, *index),
         Request::RemoveTrack { track_id } => track::remove_track(draft, track_id),
         Request::RenameTrack { track_id, name } => track::rename_track(draft, track_id, name),
         Request::AddTimeMark {
@@ -633,14 +662,30 @@ pub fn apply_all(
     requests: &[Request],
     linkage: &LinkageSettings,
 ) -> Result<(), EditError> {
+    let held: Vec<cutlass_model::TrackId> = draft
+        .tracks
+        .iter()
+        .filter(|track| !track.segments.is_empty())
+        .map(|track| track.id.clone())
+        .collect();
     for request in requests {
         let before = draft.clone();
         apply_request(draft, request)?;
         linkage::after_request(draft, &before, linkage)?;
         magnet::pack(draft, linkage)?;
     }
+    drop_emptied_lanes(draft, &held);
     sync_duration(draft);
     Ok(())
+}
+
+/// A lane other than main that held clips before the edit and holds none
+/// after it goes, in the same step. A lane that was already empty, such as
+/// one just added, stays.
+fn drop_emptied_lanes(draft: &mut Draft, held: &[cutlass_model::TrackId]) {
+    draft
+        .tracks
+        .retain(|track| track.is_main() || !track.segments.is_empty() || !held.contains(&track.id));
 }
 
 /// Stored duration becomes the latest target end. Playback reads that field.

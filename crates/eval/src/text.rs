@@ -9,7 +9,7 @@
 //! The caption's style pages the words and sets each word's color, box,
 //! size and lift; rotation is not applied.
 
-use cutlass_captions::{CaptionQuery, KeywordRange, PageLimits, RangeStyles, Rgba, sample_caption};
+use cutlass_captions::{CaptionQuery, KeywordRange, RangeStyles, Rgba, sample_caption};
 use cutlass_engine::DisplayQuarter;
 use std::collections::HashMap;
 
@@ -108,10 +108,13 @@ pub(crate) fn text_layers(
             else {
                 continue;
             };
+            // Text with no face draws nothing; the log says so once.
             if material.font_path.is_empty() {
+                logged::<(), _>("text", segment, Err("it has no font file"));
                 continue;
             }
             let Some(face) = fonts.face(&material.font_path) else {
+                logged::<(), _>("text", segment, Err("its font file is not here"));
                 continue;
             };
             let Some((clip, uniform)) = cutlass_model::animated_at(draft, segment, time) else {
@@ -134,6 +137,7 @@ pub(crate) fn text_layers(
                     segment,
                     time,
                     wanted,
+                    f64::from(width),
                 ) else {
                     continue;
                 };
@@ -342,6 +346,9 @@ fn columns_present(columns: &WordColumns) -> bool {
 /// not opaque white replaces it. Position is a pixel shift, right and down;
 /// scale sizes a word about its middle, and a background is a round box
 /// behind the word. Rotation on the style is not applied.
+/// The share of the canvas width a caption with no line width wraps at.
+const CAPTION_WIDTH: f64 = 0.9;
+
 fn caption_picture(
     faces: Faces<'_>,
     material: &MaterialText,
@@ -349,18 +356,13 @@ fn caption_picture(
     segment: &Segment,
     time: Micros,
     density: f64,
+    canvas_width: f64,
 ) -> Option<(f64, CpuBytes)> {
     let style = cutlass_captions::caption_style(&material.caption_style);
     let styles = style.map_or_else(RangeStyles::identity, |style| {
         style.styles(material.font_size)
     });
-    let limits = style.map_or(
-        PageLimits {
-            words_per_line: 0,
-            lines_per_page: 0,
-        },
-        |style| style.limits,
-    );
+    let limits = cutlass_captions::caption_limits(&material.caption_style);
     let frame = sample_caption(&CaptionQuery {
         material,
         font: faces.face,
@@ -384,6 +386,10 @@ fn caption_picture(
         let mut page = material.clone();
         page.content.clone_from(&frame.letters.text);
         page.is_rich_text = false;
+        // A caption with no line width wraps inside the canvas.
+        if page.line_max_width <= 0.0 {
+            page.line_max_width = canvas_width * CAPTION_WIDTH;
+        }
         page.font_size *= density;
         page.line_max_width *= density;
         let mut source = logged(
@@ -1065,5 +1071,59 @@ mod tests {
         draft.materials.texts[0].caption_stagger_ms = 150;
         let staggered = pixels(&draft, 210_000);
         assert_ne!(together, staggered);
+    }
+
+    #[test]
+    fn a_long_plain_caption_shows_the_page_being_spoken_inside_the_canvas() {
+        let mut draft = text_segment("", false);
+        draft.materials.texts[0].font_size = 24.0;
+        // Thirty words, a tenth of a second each, with no style and no line
+        // width: Plain.
+        let rows: Vec<(String, i64, i64)> = (0..30)
+            .map(|index| {
+                (
+                    match index / 12 {
+                        0 => "AB",
+                        1 => "BA",
+                        _ => "AA",
+                    }
+                    .to_owned(),
+                    index * 30,
+                    index * 30 + 30,
+                )
+            })
+            .collect();
+        let rows: Vec<(&str, i64, i64)> = rows
+            .iter()
+            .map(|(text, start, end)| (text.as_str(), *start, *end))
+            .collect();
+        draft.materials.texts[0].words = words(&rows);
+        assert!(draft.materials.texts[0].caption_style.is_empty());
+        assert_eq!(draft.materials.texts[0].line_max_width, 0.0);
+        let width = 256;
+        let first = pixels(&draft, 0);
+        let later = pixels(&draft, 700_000);
+        assert!(ink(&first) && ink(&later));
+        // The page moves on as the words are spoken.
+        assert_ne!(first, later);
+        // A page is two short lines, not thirty words on one.
+        let (wide, tall) = inked_span(&first, width);
+        assert!(wide <= width * 9 / 10, "{wide}");
+        assert!(tall < 24 * 4, "{tall}");
+        // Six words a line are wider than the canvas at a larger size: the
+        // line wraps inside it.
+        draft.materials.texts[0].font_size = 48.0;
+        let big = pixels(&draft, 0);
+        let (wide, _) = inked_span(&big, width);
+        assert!(ink(&big));
+        assert!(wide <= width * 9 / 10 + 2, "{wide}");
+        assert_eq!(
+            cutlass_captions::caption_limits(""),
+            cutlass_captions::PLAIN_LIMITS
+        );
+        assert_eq!(
+            cutlass_captions::caption_limits("one-word"),
+            cutlass_captions::caption_style("one-word").unwrap().limits
+        );
     }
 }

@@ -835,6 +835,8 @@ pub struct Shell {
     holding: bool,
     /// The kind, clip and revision of the last edit made while holding.
     held_edit: Option<(HeldEdit, u64)>,
+    /// A move, scale or turn on the preview in flight.
+    stage: Option<StageLive>,
     /// Timeline thumbnails, once the window starts them.
     thumbnails: Option<Thumbnails>,
     /// Thumbnails this frame's clips asked for, nearest the view first.
@@ -852,6 +854,9 @@ pub struct Shell {
     gpu: Option<crate::gpu::Preview>,
     /// The canvas shows a clip's earlier picture while the asked one decodes.
     preview_stale: bool,
+    /// The revision of the open draft the picture on the canvas was drawn
+    /// from. `None` while a render plays in its place.
+    shown_revision: std::cell::Cell<Option<u64>>,
     /// The playhead is being dragged, so the preview shows a clip's picture
     /// on its way to the asked one.
     scrubbing: bool,
@@ -938,6 +943,7 @@ impl Shell {
             saving: None,
             holding: false,
             held_edit: None,
+            stage: None,
             thumbnails: None,
             film_asks: Vec::new(),
             waveforms: None,
@@ -946,6 +952,7 @@ impl Shell {
             face: Arc::new(crate::face::installed()),
             gpu: None,
             preview_stale: false,
+            shown_revision: std::cell::Cell::new(None),
             scrubbing: false,
             preview_error: None,
             chrome: Chrome::default(),
@@ -2305,11 +2312,11 @@ impl Shell {
         let main = self.session.as_ref().ok_or(ShellError::NoProject)?;
         // A render standing for this stretch plays in its place.
         let key = self.render_key_if_any();
-        let (session, preview_cache) = match key.and_then(|key| self.renders.at(key, Micros(time)))
-        {
-            Some(render) => (&render.session, &self.renders.cache),
-            None => (main, &self.preview_cache),
-        };
+        let (session, preview_cache, revision) =
+            match key.and_then(|key| self.renders.at(key, Micros(time))) {
+                Some(render) => (&render.session, &self.renders.cache, None),
+                None => (main, &self.preview_cache, Some(main.revision())),
+            };
         let readers = self
             .proxies
             .preview(&self.readers, self.settings.playback.proxies);
@@ -2322,6 +2329,7 @@ impl Shell {
             time,
         };
         if let Some(shown) = gpu.shown(&key) {
+            self.shown_revision.set(revision);
             return Ok(Some(shown));
         }
         let mut device = SoftwareDevice::new();
@@ -2355,11 +2363,20 @@ impl Shell {
         let shown = gpu
             .show(layers, key)
             .map_err(|error| ShellError::Eval(error.to_string()))?;
+        self.shown_revision.set(revision);
         if stale {
             gpu.forget();
         }
         self.preview_stale = stale;
         Ok(Some(shown))
+    }
+
+    /// The revision of the open draft the picture last put on the canvas
+    /// was drawn from, so marks drawn over it can match it. `None` before
+    /// the first picture and while a render plays in the draft's place.
+    #[must_use]
+    pub fn shown_revision(&self) -> Option<u64> {
+        self.shown_revision.get()
     }
 
     /// Log the preview's error once when it starts or changes, and once
@@ -2397,9 +2414,9 @@ impl Shell {
     pub fn preview_bytes(&self) -> Result<Picture, ShellError> {
         let main = self.session.as_ref().ok_or(ShellError::NoProject)?;
         let time = self.sample_time();
-        let (session, cache) = match self.rendered_at(time) {
-            Some(render) => (&render.session, &self.renders.cache),
-            None => (main, &self.preview_cache),
+        let (session, cache, revision) = match self.rendered_at(time) {
+            Some(render) => (&render.session, &self.renders.cache, None),
+            None => (main, &self.preview_cache, Some(main.revision())),
         };
         let mut device = SoftwareDevice::new();
         let root = self.path.clone();
@@ -2415,6 +2432,7 @@ impl Shell {
                 &*self.face,
             )
             .map_err(|error| ShellError::Eval(error.to_string()))?;
+        self.shown_revision.set(revision);
         Ok(Picture {
             width: picture.width,
             height: picture.height,
@@ -5249,6 +5267,113 @@ impl Shell {
         self.apply(request.unwrap_or(Request::SetPosition { segment_id, x, y }))
     }
 
+    /// The topmost picture or title under canvas pixel `(x, y)` at the
+    /// playhead. Hidden and locked rows and clear clips are passed over.
+    #[must_use]
+    pub fn stage_pick(&self, x: f64, y: f64) -> Option<SegmentId> {
+        let draft = self.draft()?;
+        let sizes = FaceSizes {
+            draft,
+            fonts: &*self.face,
+        };
+        cutlass_editor::stage_pick(draft, self.playhead, (x, y), &sizes)
+    }
+
+    /// Where picture or title `segment_id` sits on the canvas at the
+    /// playhead, in canvas pixels with y down. Other clips have none.
+    #[must_use]
+    pub fn stage_box(&self, segment_id: &SegmentId) -> Option<cutlass_editor::StageBox> {
+        let draft = self.draft()?;
+        let sizes = FaceSizes {
+            draft,
+            fonts: &*self.face,
+        };
+        cutlass_editor::stage_box(draft, segment_id, self.playhead, &sizes)
+    }
+
+    /// Start moving, scaling or turning picture or title `segment_id` on the
+    /// preview, and select it. A clip with keys keys its new pose at the
+    /// playhead. A gesture still open is ended first.
+    pub fn stage_begin(&mut self, segment_id: &SegmentId) -> Result<(), ShellError> {
+        self.stage = None;
+        let draft = self.session_draft()?;
+        self.refuse_locked(segment_id)?;
+        let sizes = FaceSizes {
+            draft,
+            fonts: &*self.face,
+        };
+        let gesture = cutlass_editor::stage_gesture(draft, segment_id, self.playhead, &sizes)
+            .ok_or_else(|| {
+                ShellError::Unavailable("only a picture or title moves on the preview".to_owned())
+            })?;
+        if !self.is_selected(segment_id) || self.selection.len() > 1 {
+            self.select(Some(segment_id.clone()));
+        }
+        self.stage = Some(StageLive {
+            last: gesture.start(),
+            gesture,
+            guides: cutlass_editor::StageGuides::default(),
+        });
+        Ok(())
+    }
+
+    /// Place the clip `(shift_x, shift_y)` canvas pixels from where the
+    /// gesture started, `pinch` times its size and turned `turn` degrees
+    /// clockwise, snapping as the shared stage rules say. While the
+    /// pointer is held every step joins one undo step; a step that lands
+    /// on the pose already stored sends nothing.
+    pub fn stage_move(
+        &mut self,
+        shift_x: f64,
+        shift_y: f64,
+        pinch: f64,
+        turn: f64,
+    ) -> Result<cutlass_editor::StageStep, ShellError> {
+        let live = self
+            .stage
+            .as_ref()
+            .ok_or_else(|| ShellError::Unavailable("no preview gesture is open".to_owned()))?;
+        let step = live.gesture.step(shift_x, shift_y, pinch, turn);
+        if step.pose == live.last {
+            if let Some(live) = self.stage.as_mut() {
+                live.guides = step.guides;
+            }
+            return Ok(step);
+        }
+        let mut requests = live.gesture.requests(step.pose);
+        if self.all_captions
+            && let Some(draft) = self.draft()
+        {
+            requests = requests
+                .iter()
+                .flat_map(|request| cutlass_editor::for_every_caption(draft, request))
+                .collect();
+        }
+        self.apply_requests(&requests)?;
+        if let Some(live) = self.stage.as_mut() {
+            live.last = step.pose;
+            live.guides = step.guides;
+        }
+        Ok(step)
+    }
+
+    /// The canvas centre lines the clip in flight is snapped to.
+    #[must_use]
+    pub fn stage_guides(&self) -> Option<cutlass_editor::StageGuides> {
+        self.stage.as_ref().map(|live| live.guides)
+    }
+
+    /// The clip a preview gesture is moving.
+    #[must_use]
+    pub fn stage_moving(&self) -> Option<&SegmentId> {
+        self.stage.as_ref().map(|live| live.gesture.segment_id())
+    }
+
+    /// End the preview gesture. Its edits stay as one undo step.
+    pub fn stage_end(&mut self) {
+        self.stage = None;
+    }
+
     /// The selected clip's in and out animations, when it is a picture or
     /// title on the canvas.
     #[must_use]
@@ -8038,6 +8163,14 @@ struct Saving {
     /// The project it writes; a different one may be open when it lands.
     project: PathBuf,
     handle: std::thread::JoinHandle<Result<(), StoreError>>,
+}
+
+/// A preview gesture in flight: the shared geometry, and the pose and
+/// guides of its last step.
+struct StageLive {
+    gesture: cutlass_editor::StageGesture,
+    last: cutlass_editor::Pose,
+    guides: cutlass_editor::StageGuides,
 }
 
 /// Title sizes from the installed faces, for the shared stage rules.
@@ -17625,5 +17758,211 @@ mod tests {
         let path = Shell::projects_directory();
         assert_eq!(path, Shell::home().projects());
         assert!(path.starts_with(Shell::home().root()));
+    }
+
+    /// A 1920×1080 draft with a full-canvas picture on the main row and a
+    /// half-size overlay picture above it, both a second long.
+    fn stage_project(temp: &Temp) -> Shell {
+        stage_project_with(temp, |_| {})
+    }
+
+    fn stage_project_with(temp: &Temp, edit: impl FnOnce(&mut Draft)) -> Shell {
+        let mut draft = Draft::empty("draft");
+        draft.canvas_config.width = 1920;
+        draft.canvas_config.height = 1080;
+        draft.duration = Micros(1_000_000);
+        for id in ["under", "over"] {
+            draft.materials.videos.push(MaterialVideo {
+                id: id.into(),
+                width: 1920,
+                height: 1080,
+                path: "missing.mp4".into(),
+                ..MaterialVideo::default()
+            });
+        }
+        let mut under = Segment::new("under", "under", TimeRange::new(0, 1_000_000));
+        under.source_range = Some(TimeRange::new(0, 1_000_000));
+        draft.tracks[0].segments.push(under);
+        let mut overlay = Track::main("overlay");
+        overlay.flag = cutlass_model::TrackFlag::SubVideo;
+        let mut over = Segment::new("over", "over", TimeRange::new(0, 1_000_000));
+        over.source_range = Some(TimeRange::new(0, 1_000_000));
+        over.clip.scale = cutlass_model::Point::new(0.5, 0.5);
+        over.uniform_scale.value = 0.5;
+        overlay.segments.push(over);
+        draft.tracks.push(overlay);
+        edit(&mut draft);
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop
+    }
+
+    fn pose(desktop: &Shell, id: &str) -> (f64, f64, f64, f64) {
+        let segment = desktop
+            .draft()
+            .unwrap()
+            .tracks
+            .iter()
+            .flat_map(|track| &track.segments)
+            .find(|segment| segment.id.as_str() == id)
+            .unwrap();
+        (
+            segment.clip.transform.x,
+            segment.clip.transform.y,
+            segment.uniform_scale.value,
+            segment.clip.rotation,
+        )
+    }
+
+    #[test]
+    fn a_click_on_the_preview_picks_the_topmost_picture_under_it() {
+        let temp = Temp::new();
+        let desktop = stage_project(&temp);
+        // The overlay is half the canvas, in the middle.
+        assert_eq!(
+            desktop.stage_pick(960.0, 540.0),
+            Some(SegmentId::new("over"))
+        );
+        // Off the overlay, the main picture is under the pointer.
+        assert_eq!(
+            desktop.stage_pick(100.0, 100.0),
+            Some(SegmentId::new("under"))
+        );
+        assert_eq!(desktop.stage_pick(-5.0, 540.0), None);
+        let stage = desktop.stage_box(&SegmentId::new("over")).unwrap();
+        assert_eq!((stage.width, stage.height), (960.0, 540.0));
+        assert_eq!((stage.center_x, stage.center_y), (960.0, 540.0));
+    }
+
+    #[test]
+    fn a_hidden_or_locked_row_is_passed_over_and_a_locked_clip_does_not_move() {
+        let temp = Temp::new();
+        let hidden = stage_project_with(&temp, |draft| {
+            draft.tracks[1].attribute = TrackAttribute(TrackAttribute::HIDE);
+        });
+        assert_eq!(
+            hidden.stage_pick(960.0, 540.0),
+            Some(SegmentId::new("under"))
+        );
+        drop(hidden);
+        let temp = Temp::new();
+        let mut desktop = stage_project_with(&temp, |draft| {
+            draft.tracks[1].attribute = TrackAttribute(TrackAttribute::LOCK);
+        });
+        assert_eq!(
+            desktop.stage_pick(960.0, 540.0),
+            Some(SegmentId::new("under"))
+        );
+        let revision = desktop.revision();
+        assert!(matches!(
+            desktop.stage_begin(&SegmentId::new("over")),
+            Err(ShellError::Locked)
+        ));
+        assert!(desktop.stage_moving().is_none());
+        assert_eq!(desktop.revision(), revision);
+    }
+
+    #[test]
+    fn a_preview_drag_moves_the_picture_and_undoes_in_one_step() {
+        let temp = Temp::new();
+        let mut desktop = stage_project(&temp);
+        let over = SegmentId::new("over");
+        desktop.select(Some(SegmentId::new("under")));
+        desktop.stage_begin(&over).unwrap();
+        // Starting a gesture selects the clip it moves.
+        assert_eq!(desktop.selection(), std::slice::from_ref(&over));
+        desktop.hold_edits(true);
+        for shift in [40.0, 120.0, 240.0] {
+            desktop.stage_move(shift, -shift / 2.0, 1.0, 0.0).unwrap();
+        }
+        desktop.hold_edits(false);
+        desktop.stage_end();
+        let (x, y, scale, rotation) = pose(&desktop, "over");
+        // 240 px right of 960 is a quarter of half the width; 120 px up is
+        // two ninths of half the height, with y up.
+        assert!((x - 0.25).abs() < 1e-9 && (y - 120.0 / 540.0).abs() < 1e-9);
+        assert_eq!((scale, rotation), (0.5, 0.0));
+        desktop.undo().unwrap();
+        assert_eq!(pose(&desktop, "over"), (0.0, 0.0, 0.5, 0.0));
+    }
+
+    #[test]
+    fn a_preview_pinch_and_turn_store_scale_and_rotation() {
+        let temp = Temp::new();
+        let mut desktop = stage_project(&temp);
+        let over = SegmentId::new("over");
+        desktop.stage_begin(&over).unwrap();
+        desktop.hold_edits(true);
+        desktop.stage_move(0.0, 0.0, 1.5, 0.0).unwrap();
+        // Thirty degrees clockwise on screen is 330 counter-clockwise.
+        let step = desktop.stage_move(0.0, 0.0, 1.5, 30.0).unwrap();
+        desktop.hold_edits(false);
+        desktop.stage_end();
+        assert_eq!(pose(&desktop, "over"), (0.0, 0.0, 0.75, 330.0));
+        assert_eq!(step.stage.turn, 30.0);
+        assert_eq!(desktop.stage_box(&over).unwrap().width, 1440.0);
+        desktop.undo().unwrap();
+        assert_eq!(pose(&desktop, "over"), (0.0, 0.0, 0.5, 0.0));
+    }
+
+    #[test]
+    fn a_preview_drag_snaps_to_the_centre_lines_and_shows_the_guides() {
+        let temp = Temp::new();
+        let mut desktop = stage_project(&temp);
+        desktop.stage_begin(&SegmentId::new("over")).unwrap();
+        desktop.hold_edits(true);
+        desktop.stage_move(300.0, 8.0, 1.0, 0.0).unwrap();
+        let guides = desktop.stage_guides().unwrap();
+        assert!(guides.horizontal && !guides.vertical);
+        // A turn within five degrees of a quarter lands on it.
+        desktop.stage_move(300.0, 8.0, 1.0, 87.0).unwrap();
+        desktop.hold_edits(false);
+        desktop.stage_end();
+        let (_, y, _, rotation) = pose(&desktop, "over");
+        assert_eq!((y, rotation), (0.0, 270.0));
+        assert!(desktop.stage_guides().is_none());
+    }
+
+    #[test]
+    fn a_click_without_a_drag_sends_no_edit() {
+        let temp = Temp::new();
+        let mut desktop = stage_project(&temp);
+        let revision = desktop.revision();
+        desktop.stage_begin(&SegmentId::new("over")).unwrap();
+        desktop.hold_edits(true);
+        desktop.stage_move(0.0, 0.0, 1.0, 0.0).unwrap();
+        // A drag that snaps back onto the start sends nothing either.
+        desktop.stage_move(3.0, 2.0, 1.0, 0.0).unwrap();
+        desktop.hold_edits(false);
+        desktop.stage_end();
+        assert_eq!(desktop.revision(), revision);
+        assert!(desktop.stage_move(10.0, 0.0, 1.0, 0.0).is_err());
+    }
+
+    #[test]
+    fn a_preview_drag_on_a_keyed_clip_keys_the_pose_at_the_playhead() {
+        let temp = Temp::new();
+        let mut desktop = stage_project(&temp);
+        let over = SegmentId::new("over");
+        desktop.select(Some(over.clone()));
+        desktop.seek(Micros(0));
+        desktop.set_position(0.0, 0.0).unwrap();
+        desktop.toggle_keyframe().unwrap();
+        desktop.seek(Micros(500_000));
+        desktop.stage_begin(&over).unwrap();
+        desktop.hold_edits(true);
+        desktop.stage_move(480.0, 0.0, 1.0, 0.0).unwrap();
+        desktop.hold_edits(false);
+        desktop.stage_end();
+        // The key at 0.5 s holds the move; the key at 0 keeps the start.
+        let at = desktop.stage_box(&over).unwrap();
+        assert_eq!(at.center_x, 1440.0);
+        desktop.seek(Micros(0));
+        assert_eq!(desktop.stage_box(&over).unwrap().center_x, 960.0);
+        // One undo takes the new key away.
+        desktop.undo().unwrap();
+        desktop.seek(Micros(500_000));
+        assert_eq!(desktop.stage_box(&over).unwrap().center_x, 960.0);
     }
 }

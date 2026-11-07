@@ -55,7 +55,7 @@ pub use caption_list::{
 };
 pub use caption_replace::{Replaced, replace_ignoring_case, replace_in_captions};
 pub use caption_templates::{
-    CAPTION_TEMPLATES, CaptionTemplate, caption_template, caption_template_of,
+    CAPTION_TEMPLATES, CaptionTemplate, TEMPLATE_CATEGORIES, caption_template, caption_template_of,
     caption_template_requests,
 };
 pub use caption_words::{LINE_BREAK, breaks_before, join_words, retype_word, toggle_line_break};
@@ -113,7 +113,8 @@ pub use template::{
     title_template,
 };
 pub use text_effect::{
-    NO_TEXT_EFFECT, TEXT_EFFECTS, TextEffect, text_effect_of, text_effect_requests,
+    EFFECT_CATEGORIES, NO_TEXT_EFFECT, TEXT_EFFECTS, TextEffect, text_effect_of,
+    text_effect_requests,
 };
 pub use title::{
     TITLE_CARD_PREFIX, TITLE_LENGTH, TITLE_STYLES, TitlePlace, TitleStyle, title_requests,

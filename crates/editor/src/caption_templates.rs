@@ -27,13 +27,32 @@ pub struct CaptionTemplate {
     pub color: &'static str,
     /// The outline color and width in ems; an empty color has none.
     pub outline: (&'static str, f64),
+    /// The groups the Templates page files it under, as
+    /// [`TEMPLATE_CATEGORIES`] names them.
+    pub categories: &'static [&'static str],
 }
 
 const WHITE: &str = "#FFFFFF";
 const INK: &str = "#111111";
+const YELLOW: &str = "#FFD400";
+const PINK: &str = "#FF4FA3";
+const LIME: &str = "#B6FF3B";
+const CYAN: &str = "#3EE6FF";
+const ORANGE: &str = "#FF8A00";
+
+/// The groups the Templates page offers, in its order.
+pub const TEMPLATE_CATEGORIES: &[&str] = &[
+    "Trending",
+    "Classic",
+    "Word",
+    "Highlight",
+    "Glow",
+    "Bold",
+    "Soft",
+];
 
 /// The templates, in the order the Templates page shows them.
-pub const CAPTION_TEMPLATES: [CaptionTemplate; 8] = [
+pub const CAPTION_TEMPLATES: &[CaptionTemplate] = &[
     CaptionTemplate {
         id: "cutlass-caption-clean",
         name: "Clean",
@@ -42,6 +61,7 @@ pub const CAPTION_TEMPLATES: [CaptionTemplate; 8] = [
         stagger_ms: 0,
         color: WHITE,
         outline: (INK, 0.06),
+        categories: &["Trending", "Classic"],
     },
     CaptionTemplate {
         id: "cutlass-caption-karaoke",
@@ -51,6 +71,7 @@ pub const CAPTION_TEMPLATES: [CaptionTemplate; 8] = [
         stagger_ms: 0,
         color: WHITE,
         outline: (INK, 0.08),
+        categories: &["Trending", "Highlight"],
     },
     CaptionTemplate {
         id: "cutlass-caption-marker",
@@ -60,6 +81,7 @@ pub const CAPTION_TEMPLATES: [CaptionTemplate; 8] = [
         stagger_ms: 0,
         color: WHITE,
         outline: ("", 0.0),
+        categories: &["Highlight"],
     },
     CaptionTemplate {
         id: "cutlass-caption-pop",
@@ -69,6 +91,7 @@ pub const CAPTION_TEMPLATES: [CaptionTemplate; 8] = [
         stagger_ms: 30,
         color: WHITE,
         outline: (INK, 0.1),
+        categories: &["Trending", "Bold"],
     },
     CaptionTemplate {
         id: "cutlass-caption-reveal",
@@ -78,6 +101,7 @@ pub const CAPTION_TEMPLATES: [CaptionTemplate; 8] = [
         stagger_ms: 40,
         color: WHITE,
         outline: (INK, 0.06),
+        categories: &["Word"],
     },
     CaptionTemplate {
         id: "cutlass-caption-neon",
@@ -87,6 +111,7 @@ pub const CAPTION_TEMPLATES: [CaptionTemplate; 8] = [
         stagger_ms: 0,
         color: WHITE,
         outline: ("", 0.0),
+        categories: &["Glow"],
     },
     CaptionTemplate {
         id: "cutlass-caption-punch",
@@ -96,6 +121,7 @@ pub const CAPTION_TEMPLATES: [CaptionTemplate; 8] = [
         stagger_ms: 0,
         color: WHITE,
         outline: (INK, 0.08),
+        categories: &["Bold"],
     },
     CaptionTemplate {
         id: "cutlass-caption-glide",
@@ -105,6 +131,167 @@ pub const CAPTION_TEMPLATES: [CaptionTemplate; 8] = [
         stagger_ms: 60,
         color: WHITE,
         outline: (INK, 0.06),
+        categories: &["Soft"],
+    },
+    CaptionTemplate {
+        id: "cutlass-caption-sunny",
+        name: "Sunny",
+        style: "classic",
+        animation: None,
+        stagger_ms: 0,
+        color: YELLOW,
+        outline: (INK, 0.08),
+        categories: &["Trending", "Classic"],
+    },
+    CaptionTemplate {
+        id: "cutlass-caption-subtitle",
+        name: "Subtitle",
+        style: "classic",
+        animation: None,
+        stagger_ms: 0,
+        color: WHITE,
+        outline: ("", 0.0),
+        categories: &["Classic", "Soft"],
+    },
+    CaptionTemplate {
+        id: "cutlass-caption-headline",
+        name: "Headline",
+        style: "one-word",
+        animation: Some("cutlass-anim-loop-pulse"),
+        stagger_ms: 0,
+        color: WHITE,
+        outline: (INK, 0.12),
+        categories: &["Word", "Bold"],
+    },
+    CaptionTemplate {
+        id: "cutlass-caption-spotlight",
+        name: "Spotlight",
+        style: "one-word",
+        animation: None,
+        stagger_ms: 0,
+        color: YELLOW,
+        outline: (INK, 0.1),
+        categories: &["Trending", "Word"],
+    },
+    CaptionTemplate {
+        id: "cutlass-caption-typewriter",
+        name: "Typewriter",
+        style: "word-by-word",
+        animation: None,
+        stagger_ms: 80,
+        color: WHITE,
+        outline: ("", 0.0),
+        categories: &["Word", "Soft"],
+    },
+    CaptionTemplate {
+        id: "cutlass-caption-duet",
+        name: "Duet",
+        style: "karaoke",
+        animation: None,
+        stagger_ms: 0,
+        color: PINK,
+        outline: (INK, 0.08),
+        categories: &["Highlight"],
+    },
+    CaptionTemplate {
+        id: "cutlass-caption-chorus",
+        name: "Chorus",
+        style: "karaoke",
+        animation: Some("cutlass-anim-loop-breathe"),
+        stagger_ms: 0,
+        color: LIME,
+        outline: (INK, 0.08),
+        categories: &["Highlight"],
+    },
+    CaptionTemplate {
+        id: "cutlass-caption-ink-marker",
+        name: "Ink marker",
+        style: "highlight",
+        animation: None,
+        stagger_ms: 0,
+        color: INK,
+        outline: ("", 0.0),
+        categories: &["Highlight", "Classic"],
+    },
+    CaptionTemplate {
+        id: "cutlass-caption-night-glow",
+        name: "Night glow",
+        style: "neon",
+        animation: None,
+        stagger_ms: 0,
+        color: CYAN,
+        outline: ("", 0.0),
+        categories: &["Trending", "Glow"],
+    },
+    CaptionTemplate {
+        id: "cutlass-caption-flicker",
+        name: "Flicker",
+        style: "neon",
+        animation: Some("cutlass-anim-loop-flicker"),
+        stagger_ms: 0,
+        color: PINK,
+        outline: ("", 0.0),
+        categories: &["Glow"],
+    },
+    CaptionTemplate {
+        id: "cutlass-caption-bounce",
+        name: "Bounce",
+        style: "pop",
+        animation: Some("cutlass-anim-loop-float"),
+        stagger_ms: 40,
+        color: YELLOW,
+        outline: (INK, 0.1),
+        categories: &["Bold"],
+    },
+    CaptionTemplate {
+        id: "cutlass-caption-block",
+        name: "Block",
+        style: "bold-box",
+        animation: None,
+        stagger_ms: 0,
+        color: WHITE,
+        outline: (INK, 0.06),
+        categories: &["Bold", "Classic"],
+    },
+    CaptionTemplate {
+        id: "cutlass-caption-drift",
+        name: "Drift",
+        style: "fade",
+        animation: Some("cutlass-anim-loop-float"),
+        stagger_ms: 30,
+        color: WHITE,
+        outline: ("", 0.0),
+        categories: &["Soft"],
+    },
+    CaptionTemplate {
+        id: "cutlass-caption-whisper",
+        name: "Whisper",
+        style: "fade",
+        animation: None,
+        stagger_ms: 0,
+        color: WHITE,
+        outline: (INK, 0.04),
+        categories: &["Soft"],
+    },
+    CaptionTemplate {
+        id: "cutlass-caption-lift",
+        name: "Lift",
+        style: "rise",
+        animation: None,
+        stagger_ms: 40,
+        color: YELLOW,
+        outline: (INK, 0.08),
+        categories: &["Word"],
+    },
+    CaptionTemplate {
+        id: "cutlass-caption-swing",
+        name: "Swing",
+        style: "pop",
+        animation: Some("cutlass-anim-loop-swing"),
+        stagger_ms: 20,
+        color: ORANGE,
+        outline: (INK, 0.1),
+        categories: &["Trending", "Bold"],
     },
 ];
 
@@ -243,7 +430,7 @@ mod tests {
     #[test]
     fn every_template_names_a_style_and_a_loop_preset_once() {
         let mut ids = HashSet::new();
-        for template in &CAPTION_TEMPLATES {
+        for template in CAPTION_TEMPLATES {
             assert!(ids.insert(template.id), "{}", template.id);
             assert!(
                 CAPTION_STYLE_KEYS.contains(&template.style),

@@ -2827,7 +2827,7 @@ fn caption_templates(shell: &mut Shell, ui: &mut Ui) {
     ui.add_space(8.0);
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = Vec2::splat(6.0);
-        for template in &cutlass_editor::CAPTION_TEMPLATES {
+        for template in cutlass_editor::CAPTION_TEMPLATES {
             let on = current.as_deref() == Some(template.id);
             let stroke = if on {
                 Stroke::new(tokens::SELECTED_EDGE * 2.0, tokens::EXPORT)

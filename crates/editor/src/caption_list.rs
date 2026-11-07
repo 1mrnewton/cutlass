@@ -2,7 +2,7 @@
 //! timeline order, the one under the playhead, a search, and the requests
 //! that edit a line, add one after it, and style every caption at once.
 
-use cutlass_captions::{PageLimits, caption_style, paginate, rematch, words as word_spans};
+use cutlass_captions::{paginate, rematch, words as word_spans};
 use cutlass_model::{
     Draft, MaterialId, MaterialRef, Micros, SegmentId, TimeRange, Track, TrackFlag, TrackId,
     WordColumns,
@@ -299,13 +299,7 @@ pub fn paragraphs(words: &WordColumns, style: &str) -> Vec<Paragraph> {
     let Ok(spans) = word_spans(words) else {
         return Vec::new();
     };
-    let limits = caption_style(style).map_or(
-        PageLimits {
-            words_per_line: 0,
-            lines_per_page: 0,
-        },
-        |style| style.limits,
-    );
+    let limits = cutlass_captions::caption_limits(style);
     let pages = paginate(&spans, limits);
     let groups: Vec<Vec<usize>> = if pages.pages.len() > 1 {
         pages

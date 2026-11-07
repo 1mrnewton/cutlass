@@ -531,6 +531,19 @@ fn style_color(color: &str) -> Result<&str, EditError> {
     }
 }
 
+/// The font file a new caption is set in: `face` trimmed, or none when it
+/// is empty. A name that is not a file name is refused.
+pub(super) fn caption_face(face: &str) -> Result<String, EditError> {
+    let face = face.trim();
+    if face.is_empty() {
+        return Ok(String::new());
+    }
+    if !face_file(face) {
+        return Err(EditError::TextFont);
+    }
+    Ok(face.to_owned())
+}
+
 fn face_file(face: &str) -> bool {
     !face.is_empty() && face.len() <= 255 && !face.contains(['/', '\\', '\0'])
 }

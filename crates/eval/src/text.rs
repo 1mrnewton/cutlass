@@ -108,10 +108,13 @@ pub(crate) fn text_layers(
             else {
                 continue;
             };
+            // Text with no face draws nothing; the log says so once.
             if material.font_path.is_empty() {
+                logged::<(), _>("text", segment, Err("it has no font file"));
                 continue;
             }
             let Some(face) = fonts.face(&material.font_path) else {
+                logged::<(), _>("text", segment, Err("its font file is not here"));
                 continue;
             };
             let Some((clip, uniform)) = cutlass_model::animated_at(draft, segment, time) else {

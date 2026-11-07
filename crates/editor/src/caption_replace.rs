@@ -100,10 +100,15 @@ mod tests {
     fn session() -> Session {
         let srt = "00:00:00,000 --> 00:00:02,000\nthe cat sat\n\n00:00:03,000 --> 00:00:05,000\nThe Cat ran\n\n00:00:06,000 --> 00:00:07,000\ndog\n";
         let mut ids = 0;
-        let request = crate::subtitle_request(srt, crate::SubtitleFormat::Srt, &mut |p: &str| {
-            ids += 1;
-            format!("{p}-{ids}")
-        })
+        let request = crate::subtitle_request(
+            srt,
+            crate::SubtitleFormat::Srt,
+            "sample.ttf",
+            &mut |p: &str| {
+                ids += 1;
+                format!("{p}-{ids}")
+            },
+        )
         .unwrap();
         let mut session = Session::open(Draft::empty("D"));
         session.apply(0, &[request]).unwrap();

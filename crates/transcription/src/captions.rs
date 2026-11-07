@@ -117,12 +117,14 @@ pub fn caption_row(draft: &Draft, range: &TimeRange) -> Option<TrackId> {
 
 /// The requests that write `words` (already on the timeline clock) as
 /// captions under `clip`, one clip per line of [`heard_lines`], back to back
-/// on a free text row or a new one, each linked to `clip`. Applied together
+/// on a free text row or a new one, each linked to `clip` and set in
+/// `face`. Applied together
 /// they are one undo step. `fresh` makes an unused id from a prefix.
 pub fn caption_requests(
     draft: &Draft,
     clip: &HeardClip,
     words: WordColumns,
+    face: &str,
     fresh: &mut dyn FnMut(&str) -> String,
 ) -> Result<Vec<Request>, HeardMiss> {
     let lines = lines_on_clip(clip, &words)?;
@@ -137,6 +139,7 @@ pub fn caption_requests(
             material_id: MaterialId::new(fresh("caption")),
             words,
             span: Some(Box::new(span)),
+            face: face.to_owned(),
         })
         .collect())
 }
@@ -195,6 +198,7 @@ pub fn rerun_requests(
     caption_id: &SegmentId,
     clip: &HeardClip,
     words: &WordColumns,
+    face: &str,
     fresh: &mut dyn FnMut(&str) -> String,
 ) -> Result<Vec<Request>, HeardMiss> {
     let segment = draft
@@ -246,6 +250,7 @@ pub fn rerun_requests(
         source_id: clip.source_id.clone(),
         like: caption_id.clone(),
         lines,
+        face: face.to_owned(),
     });
     for id in ids {
         for (kind, animation, duration) in &animations {
@@ -346,7 +351,7 @@ mod tests {
             next += 1;
             format!("{prefix}-{next}")
         };
-        let requests = caption_requests(&draft, &clip, words(), &mut fresh).unwrap();
+        let requests = caption_requests(&draft, &clip, words(), "sample.ttf", &mut fresh).unwrap();
         let Some(Request::AddCaption { track_id, .. }) = requests.first().cloned() else {
             panic!("a caption request");
         };
@@ -411,7 +416,8 @@ mod tests {
             next += 1;
             format!("{prefix}-{next}")
         };
-        let requests = caption_requests(session.draft(), &clip, talk(), &mut fresh).unwrap();
+        let requests =
+            caption_requests(session.draft(), &clip, talk(), "sample.ttf", &mut fresh).unwrap();
         (session, clip, requests)
     }
 
@@ -516,7 +522,15 @@ mod tests {
         };
         let mut again = talk();
         "great.".clone_into(&mut again.text[2]);
-        let requests = rerun_requests(session.draft(), &first, &clip, &again, &mut fresh).unwrap();
+        let requests = rerun_requests(
+            session.draft(),
+            &first,
+            &clip,
+            &again,
+            "sample.ttf",
+            &mut fresh,
+        )
+        .unwrap();
         session.apply(1, &requests).unwrap();
         let draft = session.draft();
         let rows = lane(draft);
@@ -554,15 +568,35 @@ mod tests {
             Err(HeardMiss::NoSource)
         );
         assert_eq!(
-            rerun_requests(&draft, &SegmentId::new("z"), &clip, &words(), &mut fresh),
+            rerun_requests(
+                &draft,
+                &SegmentId::new("z"),
+                &clip,
+                &words(),
+                "sample.ttf",
+                &mut fresh
+            ),
             Err(HeardMiss::UnknownSegment)
         );
         assert_eq!(
-            rerun_requests(&draft, &SegmentId::new("a"), &clip, &words(), &mut fresh),
+            rerun_requests(
+                &draft,
+                &SegmentId::new("a"),
+                &clip,
+                &words(),
+                "sample.ttf",
+                &mut fresh
+            ),
             Err(HeardMiss::NotCaption)
         );
         assert_eq!(
-            caption_requests(&draft, &clip, WordColumns::default(), &mut fresh),
+            caption_requests(
+                &draft,
+                &clip,
+                WordColumns::default(),
+                "sample.ttf",
+                &mut fresh
+            ),
             Err(HeardMiss::NothingHeard)
         );
     }

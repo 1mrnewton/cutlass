@@ -1381,7 +1381,16 @@ impl Shell {
             opened.folder.draft.id.as_str(),
             has_pairs,
         );
-        let mut session = Session::open_project(opened.folder.draft.clone());
+        let mut draft = opened.folder.draft.clone();
+        // Captions an earlier build made with no font file drew nothing.
+        let filled = cutlass_editor::fill_caption_faces(&mut draft, self.face.name());
+        if filled > 0 {
+            cutlass_logger::info!(
+                "{filled} captions had no font file; set in {}",
+                self.face.name()
+            );
+        }
+        let mut session = Session::open_project(draft);
         session.set_linkage(linkage);
         self.outer.clear();
         self.saved = Some((session.revision(), Instant::now()));
@@ -4659,6 +4668,7 @@ impl Shell {
         clip: &HeardClip,
         words: &WordColumns,
     ) -> Result<(), ShellError> {
+        let face = self.face.name().to_owned();
         let mut next_id = self.next_id;
         let mut fresh = |prefix: &str| {
             next_id = next_id.saturating_add(1);
@@ -4669,6 +4679,7 @@ impl Shell {
             caption,
             clip,
             words,
+            &face,
             &mut fresh,
         )
         .map_err(heard_error);
@@ -4902,8 +4913,10 @@ impl Shell {
             format!("{prefix}-{next_id}")
         };
         // One caption clip per line, back to back, as one undo step.
-        let requests =
-            caption_requests(self.session_draft()?, clip, words, &mut fresh).map_err(heard_error);
+        // Captions are set in the shell's face, as a new title is.
+        let face = self.face.name().to_owned();
+        let requests = caption_requests(self.session_draft()?, clip, words, &face, &mut fresh)
+            .map_err(heard_error);
         self.next_id = next_id;
         self.apply_requests(&requests?)
     }
@@ -13590,8 +13603,9 @@ mod tests {
         Folder::new(draft).save(&temp.path).unwrap();
 
         let mut desktop = shell();
-        desktop.open_folder(&temp.path).unwrap();
+        // The face comes first: opening sets a caption with no font file in it.
         desktop.use_face("sample.ttf", SAMPLE_TTF.to_vec());
+        desktop.open_folder(&temp.path).unwrap();
         desktop.select(None);
         assert_eq!(
             desktop.set_text_color("#FFFFFF").unwrap_err().to_string(),
@@ -16021,6 +16035,90 @@ mod tests {
         assert_eq!(desktop.draft().unwrap().materials.audios.len(), 1);
         desktop.extract_sound().unwrap();
         assert_eq!(desktop.draft().unwrap().materials.audios.len(), 2);
+    }
+
+    #[test]
+    fn a_fresh_transcript_draws_with_no_edit() {
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        draft.canvas_config.width = 320;
+        draft.canvas_config.height = 180;
+        draft.materials.audios.push(MaterialAudio {
+            id: MaterialId::new("talk"),
+            path: "/talk.wav".to_owned(),
+            duration: Micros(2_000_000),
+            ..MaterialAudio::default()
+        });
+        let mut track = Track::main("sound");
+        track.kind = TrackType::Audio;
+        track
+            .segments
+            .push(Segment::new("talk", "talk", TimeRange::new(0, 2_000_000)));
+        draft.tracks.push(track);
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        if desktop.face.name().is_empty() {
+            eprintln!("skipped: no font is installed");
+            return;
+        }
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.select(Some(SegmentId::new("talk")));
+        let heard = CaptionStandIn {
+            words: vec![
+                RecognizedWord {
+                    text: "Hello".to_owned(),
+                    start_ms: 0,
+                    end_ms: 500,
+                },
+                RecognizedWord {
+                    text: "there.".to_owned(),
+                    start_ms: 500,
+                    end_ms: 1_000,
+                },
+            ],
+        };
+        desktop.transcribe_with(&heard, &mut CaptionTone).unwrap();
+        let draft = desktop.draft().unwrap().clone();
+        let caption = draft
+            .materials
+            .texts
+            .iter()
+            .find(|text| text.content == "Hello there.")
+            .expect("caption");
+        assert_eq!(caption.font_path, desktop.face.name());
+        // Drawn straight away, before any look edit.
+        let rgba = cutlass_eval::frame(
+            &cutlass_eval::Snapshot::with_fonts(&draft, &*desktop.face),
+            Micros(250_000),
+            &mut cutlass_renderer_software::SoftwareDevice::new(),
+            &ReaderFactory::new(),
+            &mut cutlass_eval::OpenClips::new(),
+            0,
+        )
+        .unwrap()
+        .rgba;
+        assert!(
+            rgba.chunks(4).any(|pixel| pixel[3] > 0 && pixel[0] > 200),
+            "the caption drew nothing"
+        );
+
+        // A project an earlier build saved with no font file on its
+        // captions opens with them set in the face.
+        let mut old = draft;
+        for text in &mut old.materials.texts {
+            text.font_path.clear();
+        }
+        let earlier = Temp::new();
+        Folder::new(old).save(&earlier.path).unwrap();
+        desktop.open_folder(&earlier.path).unwrap();
+        let reopened = desktop.draft().unwrap();
+        assert!(
+            reopened
+                .materials
+                .texts
+                .iter()
+                .all(|text| text.font_path == desktop.face.name())
+        );
     }
 
     #[test]

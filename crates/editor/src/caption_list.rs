@@ -526,6 +526,24 @@ fn with_clip(request: &Request, clip: &SegmentId) -> Request {
     request
 }
 
+/// Set every caption that has words but no font file in `face`, as
+/// Transcribe and subtitle import set new ones. Earlier builds left the
+/// font file empty, so those captions drew nothing. How many were set.
+pub fn fill_caption_faces(draft: &mut Draft, face: &str) -> usize {
+    let face = face.trim();
+    if face.is_empty() {
+        return 0;
+    }
+    let mut filled = 0;
+    for text in &mut draft.materials.texts {
+        if text.font_path.is_empty() && !text.words.text.is_empty() {
+            face.clone_into(&mut text.font_path);
+            filled += 1;
+        }
+    }
+    filled
+}
+
 #[cfg(test)]
 mod tests {
     use cutlass_model::Draft;
@@ -546,10 +564,15 @@ mod tests {
     fn session() -> Session {
         let srt = "00:00:04,000 --> 00:00:05,000\nfour five\n\n00:00:00,000 --> 00:00:01,000\none two\n\n00:00:03,000 --> 00:00:04,000\nthree\n";
         let mut ids = 0;
-        let request = crate::subtitle_request(srt, crate::SubtitleFormat::Srt, &mut |p: &str| {
-            ids += 1;
-            format!("{p}-{ids}")
-        })
+        let request = crate::subtitle_request(
+            srt,
+            crate::SubtitleFormat::Srt,
+            "sample.ttf",
+            &mut |p: &str| {
+                ids += 1;
+                format!("{p}-{ids}")
+            },
+        )
         .unwrap();
         let mut session = Session::open(Draft::empty("D"));
         session.apply(0, &[request]).unwrap();
@@ -652,8 +675,13 @@ mod tests {
     fn session_with_adjacent_pair() -> Session {
         let srt =
             "00:00:00,000 --> 00:00:01,000\nalpha beta\n\n00:00:01,000 --> 00:00:02,000\nnext\n";
-        let request =
-            crate::subtitle_request(srt, crate::SubtitleFormat::Srt, &mut counter()).unwrap();
+        let request = crate::subtitle_request(
+            srt,
+            crate::SubtitleFormat::Srt,
+            "sample.ttf",
+            &mut counter(),
+        )
+        .unwrap();
         let mut session = Session::open(Draft::empty("D"));
         session.apply(0, &[request]).unwrap();
         session
@@ -671,8 +699,13 @@ mod tests {
     #[test]
     fn a_short_row_with_no_room_after_it_adds_nothing() {
         let srt = "00:00:00,000 --> 00:00:00,400\nhi\n\n00:00:00,400 --> 00:00:01,000\nthere\n";
-        let request =
-            crate::subtitle_request(srt, crate::SubtitleFormat::Srt, &mut counter()).unwrap();
+        let request = crate::subtitle_request(
+            srt,
+            crate::SubtitleFormat::Srt,
+            "sample.ttf",
+            &mut counter(),
+        )
+        .unwrap();
         let mut session = Session::open(Draft::empty("D"));
         session.apply(0, &[request]).unwrap();
         let id = first(&session);
@@ -847,5 +880,30 @@ mod tests {
             paragraph_request(session.draft(), &id, 9, "x"),
             Err(CaptionListMiss::NotCaption)
         );
+    }
+
+    #[test]
+    fn a_caption_with_words_and_no_font_file_takes_the_face() {
+        let mut draft = session().draft().clone();
+        let mut title = cutlass_model::MaterialText::new("title");
+        title.content = "hi".to_owned();
+        draft.materials.texts.push(title);
+        draft.materials.texts[0].font_path = "Kept.ttf".to_owned();
+        for text in draft.materials.texts.iter_mut().skip(1) {
+            text.font_path.clear();
+        }
+        assert_eq!(fill_caption_faces(&mut draft, " "), 0);
+        let faces = |draft: &Draft| -> Vec<String> {
+            draft
+                .materials
+                .texts
+                .iter()
+                .map(|text| text.font_path.clone())
+                .collect()
+        };
+        assert_eq!(fill_caption_faces(&mut draft, "Body.ttf"), 2);
+        // A face of its own stays; a title with no words is not a caption.
+        assert_eq!(faces(&draft), ["Kept.ttf", "Body.ttf", "Body.ttf", ""]);
+        assert_eq!(fill_caption_faces(&mut draft, "Body.ttf"), 0);
     }
 }

@@ -90,6 +90,18 @@ fn holds_only_captions(draft: &Draft, track_index: usize) -> bool {
     })
 }
 
+/// Where a new caption goes and what it is set in: the fields of
+/// `Request::AddCaption` other than its words.
+#[derive(Clone, Copy)]
+pub struct NewCaption<'a> {
+    pub source_id: &'a SegmentId,
+    pub track_id: &'a TrackId,
+    pub segment_id: &'a SegmentId,
+    pub material_id: &'a MaterialId,
+    pub span: Option<&'a TimeRange>,
+    pub face: &'a str,
+}
+
 /// Place one caption on `track_id` for the source clip and store `words`.
 ///
 /// A missing track is added as a text lane flagged as subtitles. An unflagged
@@ -99,16 +111,21 @@ fn holds_only_captions(draft: &Draft, track_index: usize) -> bool {
 /// when the source can own one.
 pub fn add_caption(
     draft: &mut Draft,
-    source_id: &SegmentId,
-    track_id: &TrackId,
-    segment_id: &SegmentId,
-    material_id: &MaterialId,
+    caption: &NewCaption<'_>,
     words: WordColumns,
-    span: Option<&TimeRange>,
 ) -> Result<(), EditError> {
+    let NewCaption {
+        source_id,
+        track_id,
+        segment_id,
+        material_id,
+        span,
+        face,
+    } = *caption;
     if words.text.is_empty() {
         return Err(EditError::WordShape);
     }
+    let face = super::text::caption_face(face)?;
     let (source_track, source_index) = super::locate(draft, source_id)?;
     super::ensure_unlocked(draft.tracks[source_track].attribute)?;
     let whole = &draft.tracks[source_track].segments[source_index].target;
@@ -153,6 +170,7 @@ pub fn add_caption(
     let mut text = MaterialText::new(material_id.clone());
     text.kind = CAPTION_KIND.to_owned();
     text.font_size = super::text::NEW_TEXT_SIZE;
+    text.font_path = face;
     draft.materials.texts.push(text);
     let mut segment = Segment::new(segment_id.clone(), material_id.clone(), target);
     segment.render_index = TrackType::Text.render_floor().unwrap_or(0);
@@ -173,10 +191,12 @@ pub fn add_subtitles(
     draft: &mut Draft,
     track_id: &TrackId,
     cues: &[SubtitleCue],
+    face: &str,
 ) -> Result<(), EditError> {
     if cues.is_empty() || cues.iter().any(|cue| cue.words.text.is_empty()) {
         return Err(EditError::WordShape);
     }
+    let face = super::text::caption_face(face)?;
     if draft.tracks.iter().any(|track| &track.id == track_id) {
         return Err(EditError::TrackKind);
     }
@@ -191,6 +211,7 @@ pub fn add_subtitles(
         let mut text = MaterialText::new(cue.material_id.clone());
         text.kind = CAPTION_KIND.to_owned();
         text.font_size = super::text::NEW_TEXT_SIZE;
+        text.font_path.clone_from(&face);
         draft.materials.texts.push(text);
         let mut segment = Segment::new(
             cue.segment_id.clone(),
@@ -251,10 +272,12 @@ pub fn recaption_clip(
     source_id: &SegmentId,
     like: &SegmentId,
     lines: &[SubtitleCue],
+    face: &str,
 ) -> Result<(), EditError> {
     if lines.is_empty() || lines.iter().any(|line| line.words.text.is_empty()) {
         return Err(EditError::WordShape);
     }
+    let face = super::text::caption_face(face)?;
     let (track_index, segment_index) = super::locate(draft, like)?;
     let track = &draft.tracks[track_index];
     if !matches!(track.kind, TrackType::Text | TrackType::TextToVideoText) {
@@ -289,6 +312,9 @@ pub fn recaption_clip(
         let mut text = look.clone();
         text.id = line.material_id.clone();
         text.caption_keywords.clear();
+        if text.font_path.is_empty() {
+            text.font_path.clone_from(&face);
+        }
         let mut segment = Segment::new(
             line.segment_id.clone(),
             line.material_id.clone(),
@@ -427,6 +453,7 @@ mod tests {
                     material_id: "caption".into(),
                     words: words.clone(),
                     span: None,
+                    face: "sample.ttf".to_owned(),
                 }],
             )
             .unwrap();
@@ -494,6 +521,7 @@ mod tests {
                     material_id: "other".into(),
                     words,
                     span: None,
+                    face: "sample.ttf".to_owned(),
                 }],
             )
             .unwrap_err();
@@ -522,6 +550,7 @@ mod tests {
                     material_id: "empty".into(),
                     words: WordColumns::default(),
                     span: None,
+                    face: "sample.ttf".to_owned(),
                 }],
             )
             .unwrap_err();
@@ -532,12 +561,15 @@ mod tests {
     fn caption_on(draft: &mut Draft, track: &str, id: &str) -> Result<(), EditError> {
         add_caption(
             draft,
-            &SegmentId::new("picture"),
-            &TrackId::new(track),
-            &SegmentId::new(id),
-            &MaterialId::new(id),
+            &NewCaption {
+                source_id: &SegmentId::new("picture"),
+                track_id: &TrackId::new(track),
+                segment_id: &SegmentId::new(id),
+                material_id: &MaterialId::new(id),
+                span: None,
+                face: "sample.ttf",
+            },
             columns(0, 400, "hi"),
-            None,
         )
     }
 
@@ -643,6 +675,7 @@ mod tests {
                 &[Request::AddSubtitles {
                     track_id: TrackId::new("subs"),
                     cues: cues.clone(),
+                    face: "sample.ttf".to_owned(),
                 }],
             )
             .unwrap();
@@ -687,6 +720,7 @@ mod tests {
                     &[Request::AddSubtitles {
                         track_id: TrackId::new(track),
                         cues,
+                        face: "sample.ttf".to_owned(),
                     }],
                 )
                 .unwrap_err()
@@ -737,6 +771,7 @@ mod tests {
                         cue("one", 0, 1_000_000, "hello"),
                         cue("three", 3_000_000, 1_000_000, "bye"),
                     ],
+                    face: "sample.ttf".to_owned(),
                 }],
             )
             .unwrap();
@@ -826,6 +861,7 @@ mod tests {
             material_id: id.into(),
             words: columns(0, 300, word),
             span: Some(Box::new(TimeRange::new(start, length))),
+            face: "sample.ttf".to_owned(),
         }
     }
 
@@ -927,6 +963,7 @@ mod tests {
                         cue("b", 500_000, 700_000),
                         cue("c", 1_200_000, 800_000),
                     ],
+                    face: "sample.ttf".to_owned(),
                 }],
             )
             .unwrap();
@@ -964,11 +1001,13 @@ mod tests {
                 source_id: "picture".into(),
                 like: "two".into(),
                 lines: Vec::new(),
+                face: String::new(),
             },
             Request::RecaptionClip {
                 source_id: "other".into(),
                 like: "two".into(),
                 lines: vec![cue("a", 0, 500_000)],
+                face: String::new(),
             },
         ];
         assert_eq!(
@@ -980,5 +1019,76 @@ mod tests {
             Err(EditError::MissingSegment)
         );
         assert_eq!(session.draft(), &before);
+    }
+
+    #[test]
+    fn a_new_caption_is_set_in_the_face_its_request_names() {
+        use crate::Session;
+        let mut session = Session::open(draft_with_picture());
+        let mut caption = line("one", 0, 1_000_000, "one");
+        if let Request::AddCaption { face, .. } = &mut caption {
+            "  Body.ttf ".clone_into(face);
+        }
+        session.apply(0, &[caption]).unwrap();
+        assert_eq!(session.draft().materials.texts[0].font_path, "Body.ttf");
+
+        // Subtitles take the face too.
+        let cue = |id: &str, start: i64| SubtitleCue {
+            segment_id: id.into(),
+            material_id: id.into(),
+            target: TimeRange::new(start, 500_000),
+            words: columns(0, 200, id),
+        };
+        session
+            .apply(
+                1,
+                &[Request::AddSubtitles {
+                    track_id: TrackId::new("subs"),
+                    cues: vec![cue("s1", 0), cue("s2", 600_000)],
+                    face: "Subs.ttf".to_owned(),
+                }],
+            )
+            .unwrap();
+        let faces = |session: &Session| -> Vec<(String, String)> {
+            session
+                .draft()
+                .materials
+                .texts
+                .iter()
+                .map(|text| (text.id.as_str().to_owned(), text.font_path.clone()))
+                .collect()
+        };
+        assert!(faces(&session).contains(&("s2".to_owned(), "Subs.ttf".to_owned())));
+
+        // A re-run line takes the request's face only when its look has none.
+        let mut bare = session.draft().clone();
+        bare.materials.texts[0].font_path.clear();
+        let mut session = Session::open(bare);
+        session
+            .apply(
+                0,
+                &[Request::RecaptionClip {
+                    source_id: "picture".into(),
+                    like: "one".into(),
+                    lines: vec![cue("r1", 0)],
+                    face: "Body.ttf".to_owned(),
+                }],
+            )
+            .unwrap();
+        assert!(faces(&session).contains(&("r1".to_owned(), "Body.ttf".to_owned())));
+
+        // A face that is not a file name is refused; no face leaves none.
+        let revision = session.revision();
+        let mut odd = line("odd", 0, 300_000, "odd");
+        if let Request::AddCaption { face, .. } = &mut odd {
+            "../x.ttf".clone_into(face);
+        }
+        assert_eq!(session.apply(revision, &[odd]), Err(EditError::TextFont));
+        let mut none = line("none", 1_500_000, 300_000, "none");
+        if let Request::AddCaption { face, .. } = &mut none {
+            face.clear();
+        }
+        session.apply(revision, &[none]).unwrap();
+        assert!(faces(&session).contains(&("none".to_owned(), String::new())));
     }
 }

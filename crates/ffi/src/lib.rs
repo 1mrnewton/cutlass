@@ -688,7 +688,9 @@ impl PhoneHost {
                 }
             }
         };
-        let request = cutlass_editor::subtitle_request(text, format, &mut fresh)
+        // Captions are set in the first face, as a new title is.
+        let face = self.faces.name().to_owned();
+        let request = cutlass_editor::subtitle_request(text, format, &face, &mut fresh)
             .map_err(|miss| refused(miss.to_string()))?;
         self.apply(self.revision(), &[request])?;
         Ok(())

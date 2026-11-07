@@ -212,10 +212,15 @@ mod tests {
         let srt =
             "00:00:00,000 --> 00:00:02,000\none two\n\n00:00:03,000 --> 00:00:05,000\nthree\n";
         let mut ids = 0;
-        let request = crate::subtitle_request(srt, crate::SubtitleFormat::Srt, &mut |p: &str| {
-            ids += 1;
-            format!("{p}-{ids}")
-        })
+        let request = crate::subtitle_request(
+            srt,
+            crate::SubtitleFormat::Srt,
+            "sample.ttf",
+            &mut |p: &str| {
+                ids += 1;
+                format!("{p}-{ids}")
+            },
+        )
         .unwrap();
         let mut session = Session::open(Draft::empty("D"));
         session.apply(0, &[request]).unwrap();

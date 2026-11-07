@@ -98,6 +98,9 @@ pub enum Request {
         /// Boxed, so a request stays small.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         span: Option<Box<TimeRange>>,
+        /// The font file the caption is set in, as `AddText`'s `face`.
+        #[serde(default)]
+        face: String,
     },
     /// Place subtitle cues as captions on a new text lane `track_id`.
     ///
@@ -107,6 +110,9 @@ pub enum Request {
     AddSubtitles {
         track_id: TrackId,
         cues: Vec<SubtitleCue>,
+        /// The font file the captions are set in, as `AddText`'s `face`.
+        #[serde(default)]
+        face: String,
     },
     /// Place one caption on the lane of caption `like`, looking like it.
     ///
@@ -122,6 +128,9 @@ pub enum Request {
         source_id: SegmentId,
         like: SegmentId,
         lines: Vec<SubtitleCue>,
+        /// The font file a line takes when `like` has none.
+        #[serde(default)]
+        face: String,
     },
     /// Place the picture's sound on an audio clip linked to `source_id`.
     ///

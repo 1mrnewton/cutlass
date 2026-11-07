@@ -59,6 +59,7 @@ impl Error for SubtitleMiss {}
 pub fn subtitle_request(
     text: &str,
     format: SubtitleFormat,
+    face: &str,
     fresh: &mut dyn FnMut(&str) -> String,
 ) -> Result<Request, SubtitleMiss> {
     let cues = match format {
@@ -71,7 +72,11 @@ pub fn subtitle_request(
         .into_iter()
         .map(|cue| placed(cue, fresh))
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(Request::AddSubtitles { track_id, cues })
+    Ok(Request::AddSubtitles {
+        track_id,
+        cues,
+        face: face.to_owned(),
+    })
 }
 
 fn placed(cue: Cue, fresh: &mut dyn FnMut(&str) -> String) -> Result<SubtitleCue, SubtitleMiss> {
@@ -106,7 +111,8 @@ mod tests {
     #[test]
     fn an_srt_file_becomes_captions_on_a_new_subtitle_lane() {
         let text = "1\n00:00:01,000 --> 00:00:02,500\nHello there\n\n2\n00:00:03,000 --> 00:00:04,000\nBye\n";
-        let request = subtitle_request(text, SubtitleFormat::Srt, &mut counter()).unwrap();
+        let request =
+            subtitle_request(text, SubtitleFormat::Srt, "sample.ttf", &mut counter()).unwrap();
         let mut session = Session::open(Draft::empty("D"));
         session.apply(0, &[request]).unwrap();
         let draft = session.draft();
@@ -137,7 +143,8 @@ mod tests {
     #[test]
     fn a_lyric_file_becomes_captions_too() {
         let text = "[00:01.00]la la\n[00:03.00]\n";
-        let request = subtitle_request(text, SubtitleFormat::Lrc, &mut counter()).unwrap();
+        let request =
+            subtitle_request(text, SubtitleFormat::Lrc, "sample.ttf", &mut counter()).unwrap();
         let Request::AddSubtitles { cues, .. } = request else {
             panic!("not subtitles");
         };
@@ -149,12 +156,17 @@ mod tests {
     #[test]
     fn a_broken_or_too_late_file_makes_no_request() {
         assert_eq!(
-            subtitle_request("nothing here", SubtitleFormat::Srt, &mut counter()),
+            subtitle_request(
+                "nothing here",
+                SubtitleFormat::Srt,
+                "sample.ttf",
+                &mut counter()
+            ),
             Err(SubtitleMiss::File(SubtitleError::BadTime { line: 1 }))
         );
         let late = "9999999999:00:00,000 --> 9999999999:00:01,000\nx\n";
         assert_eq!(
-            subtitle_request(late, SubtitleFormat::Srt, &mut counter()),
+            subtitle_request(late, SubtitleFormat::Srt, "sample.ttf", &mut counter()),
             Err(SubtitleMiss::TooLate)
         );
     }

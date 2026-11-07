@@ -1905,7 +1905,7 @@ fn text_basic(
 fn words_box(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState) {
     let stored = shell.text_words().unwrap_or_default();
     let text = state.fields.entry("words".to_owned()).or_default();
-    let response = ui::Field::multiline(text, 3).show(ui).response;
+    let response = ui::Field::multiline(text, 3).name("Text").show(ui).response;
     if super::commits(ui, &response) && *text != stored {
         let content = text.clone();
         send(shell, |shell| shell.set_text(content));
@@ -2052,6 +2052,7 @@ fn font_row(shell: &mut Shell, ui: &mut Ui, inspection: &Inspection) {
     };
     let mut picked = None;
     label_row(ui, "Font", |ui| {
+        let shown = current.clone();
         egui::ComboBox::from_id_salt("text-font")
             .selected_text(current)
             .width(ui.available_width())
@@ -2064,6 +2065,12 @@ fn font_row(shell: &mut Shell, ui: &mut Ui, inspection: &Inspection) {
                         picked = Some(face.clone());
                     }
                 }
+            })
+            .response
+            .widget_info(|| {
+                let mut info = egui::WidgetInfo::labeled(egui::Role::ComboBox, true, "Font");
+                info.current_text_value = Some(shown.clone());
+                info
             });
     });
     if let Some(face) = picked {
@@ -2451,25 +2458,39 @@ fn tabs(ui: &mut Ui, labels: &[&str], current: &mut usize) {
 
 /// What a paid tab says on hover. Cutlass will offer these later.
 const PAID: &str = "Paid: Cutlass will offer this later";
+/// The width of the diamond after a paid tab's name.
+const GEM: f32 = 8.0;
 
 /// The tab row, with the `paid` tabs faint, marked with a diamond, and not
 /// picked.
 fn paid_tabs(ui: &mut Ui, labels: &[&str], paid: &[&str], current: &mut usize) {
     ui.add_space(ROW_GAP);
-    // The gap shrinks before the row has to scroll, so a narrow inspector
-    // still shows every tab.
-    let font = FontId::proportional(13.0);
-    let text: f32 = labels
-        .iter()
-        .map(|label| {
-            ui.painter()
-                .layout_no_wrap((*label).to_owned(), font.clone(), Color32::WHITE)
-                .size()
-                .x
-        })
-        .sum();
+    // The gap shrinks first, then the names down to 11 points, before the
+    // row has to scroll, so a narrow inspector still shows every tab.
+    let measure = |size: f32| -> f32 {
+        let font = FontId::proportional(size);
+        let names: f32 = labels
+            .iter()
+            .map(|label| {
+                ui.painter()
+                    .layout_no_wrap((*label).to_owned(), font.clone(), Color32::WHITE)
+                    .size()
+                    .x
+            })
+            .sum();
+        names + paid.len() as f32 * (GEM + 3.0)
+    };
     let gaps = labels.len().saturating_sub(1).max(1) as f32;
-    let gap = ((ui.available_width() - text - 1.0) / gaps).clamp(TAB_GAP_MIN, TAB_GAP);
+    let room = ui.available_width() - 1.0;
+    let full = measure(13.0);
+    let size = if full + gaps * TAB_GAP_MIN <= room {
+        13.0
+    } else {
+        (13.0 * (room - gaps * TAB_GAP_MIN) / full).clamp(11.0, 13.0)
+    };
+    let font = FontId::proportional(size);
+    let text = measure(size);
+    let gap = ((room - text) / gaps).clamp(TAB_GAP_MIN, TAB_GAP);
     ui::Scroll::horizontal(("inspector-tabs", labels.len()))
         .without_bar()
         .show(ui, |ui| {
@@ -2478,25 +2499,33 @@ fn paid_tabs(ui: &mut Ui, labels: &[&str], paid: &[&str], current: &mut usize) {
                 ui.spacing_mut().item_spacing.x = gap;
                 for (index, label) in labels.iter().enumerate() {
                     if paid.contains(label) {
-                        let response = ui.add(
-                            egui::Label::new(RichText::new(*label).size(13.0).color(tokens::FAINT))
-                                .selectable(false)
-                                .sense(Sense::hover()),
+                        // The name and a diamond after it, faint, in one
+                        // rect sized to them.
+                        let galley = ui.painter().layout_no_wrap(
+                            (*label).to_owned(),
+                            font.clone(),
+                            tokens::FAINT,
                         );
-                        let gem = response.rect.right_top() + Vec2::new(4.0, 3.0);
+                        let size = Vec2::new(galley.size().x + 3.0 + GEM, galley.size().y);
+                        let (rect, response) = ui.allocate_exact_size(size, Sense::hover());
+                        let top = rect.left_center() - Vec2::new(0.0, galley.size().y / 2.0);
+                        ui.painter().galley(top, galley, tokens::FAINT);
+                        let c = egui::pos2(rect.right() - GEM / 2.0, rect.center().y);
                         let points = vec![
-                            gem + Vec2::new(0.0, 0.0),
-                            gem + Vec2::new(3.0, -3.0),
-                            gem + Vec2::new(6.0, 0.0),
-                            gem + Vec2::new(3.0, 4.0),
+                            c + Vec2::new(-4.0, -1.0),
+                            c + Vec2::new(-2.0, -4.0),
+                            c + Vec2::new(2.0, -4.0),
+                            c + Vec2::new(4.0, -1.0),
+                            c + Vec2::new(0.0, 4.0),
                         ];
                         ui.painter().add(egui::Shape::convex_polygon(
                             points,
                             tokens::FAINT,
                             Stroke::NONE,
                         ));
-                        ui.add_space(6.0);
-                        response.on_hover_text(PAID);
+                        response.on_hover_text(PAID).widget_info(|| {
+                            egui::WidgetInfo::labeled(egui::Role::Label, false, *label)
+                        });
                         continue;
                     }
                     let color = if index == *current {
@@ -2505,7 +2534,7 @@ fn paid_tabs(ui: &mut Ui, labels: &[&str], paid: &[&str], current: &mut usize) {
                         tokens::MUTED
                     };
                     let response = ui.add(
-                        egui::Label::new(RichText::new(*label).size(13.0).color(color))
+                        egui::Label::new(RichText::new(*label).size(size).color(color))
                             .selectable(false)
                             .sense(Sense::click()),
                     );

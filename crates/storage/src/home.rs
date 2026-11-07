@@ -252,7 +252,10 @@ mod tests {
         assert_eq!(home.models(), root.join("Models"));
         assert_eq!(home.logs(), root.join("Logs"));
         assert_eq!(home.settings_file(), root.join("settings.json"));
-        assert_eq!(home.text_presets_file(), root.join("Presets").join("text.json"));
+        assert_eq!(
+            home.text_presets_file(),
+            root.join("Presets").join("text.json")
+        );
     }
 
     #[test]

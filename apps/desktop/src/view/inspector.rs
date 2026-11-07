@@ -254,7 +254,14 @@ fn text_panel(
             match state.page {
                 0 => {
                     text_basic(shell, ui, state, inspection, caption);
-                    footer(ui, &["Save as preset"]);
+                    ui.add_space(8.0);
+                    if ui
+                        .add(ui::Button::new("Save as preset").text_size(12.0))
+                        .on_hover_text("Keep this look in Preset style for every project")
+                        .clicked()
+                    {
+                        send(shell, Shell::save_text_preset);
+                    }
                 }
                 1 if caption => caption_templates(shell, ui),
                 1 => bubble_page(shell, ui),
@@ -2103,6 +2110,15 @@ fn alignment_row(shell: &mut Shell, ui: &mut Ui, inspection: &Inspection) {
 /// and shadow. Picking one gives the text that look in one step.
 use cutlass_editor::TEXT_PRESETS as PRESETS;
 
+/// A press on a preset tile: a built-in look, a saved one, or deleting a
+/// saved one.
+#[derive(Clone, Copy)]
+enum Pick {
+    Built(usize),
+    Saved(usize),
+    Delete(usize),
+}
+
 fn preset_styles(shell: &mut Shell, ui: &mut Ui) {
     ui.add_space(6.0);
     ui.label(
@@ -2119,35 +2135,67 @@ fn preset_styles(shell: &mut Shell, ui: &mut Ui) {
             if index == 0 {
                 paint_icon(ui, rect, "unavailable", tokens::MUTED);
             } else {
-                preset_tile(ui, rect, preset);
+                preset_tile(
+                    ui,
+                    rect,
+                    [preset.color, preset.outline, preset.plate, preset.shadow],
+                );
             }
             if response.on_hover_text(preset.name).clicked() {
-                picked = Some(index);
+                picked = Some(Pick::Built(index));
             }
         }
+        for (index, look) in shell.saved_looks().iter().enumerate() {
+            let (rect, response) = ui.allocate_exact_size(Vec2::splat(36.0), Sense::click());
+            ui.painter().rect_filled(rect, CornerRadius::same(6), BOX);
+            preset_tile(
+                ui,
+                rect,
+                [
+                    &look.color,
+                    &look.outline_color,
+                    &look.background_color,
+                    &look.shadow_color,
+                ],
+            );
+            let response = response.on_hover_text(&look.name);
+            if response.clicked() {
+                picked = Some(Pick::Saved(index));
+            }
+            response.context_menu(|ui| {
+                if ui.button("Delete preset").clicked() {
+                    picked = Some(Pick::Delete(index));
+                    ui.close();
+                }
+            });
+        }
     });
-    if let Some(index) = picked {
-        send(shell, |shell| shell.set_text_preset(index));
+    match picked {
+        Some(Pick::Built(index)) => send(shell, |shell| shell.set_text_preset(index)),
+        Some(Pick::Saved(index)) => send(shell, |shell| shell.set_saved_preset(index)),
+        Some(Pick::Delete(index)) => send(shell, |shell| shell.delete_text_preset(index)),
+        None => {}
     }
     ui.add_space(6.0);
 }
 
-/// "Aa" in one preset's look, in a tile.
-fn preset_tile(ui: &Ui, rect: Rect, preset: &cutlass_editor::TextPreset) {
+/// "Aa" in one preset's look, in a tile: its letters', outline, box and
+/// shadow colors, each left off when empty.
+fn preset_tile(ui: &Ui, rect: Rect, [color, outline, plate, shadow]: [&str; 4]) {
     let painter = ui.painter();
     let font = FontId::proportional(14.0);
     let center = rect.center();
-    if let Some(plate) = parse_hex(preset.plate) {
+    if let Some(plate) = parse_hex(plate) {
         let back = Rect::from_center_size(center, Vec2::new(28.0, 20.0));
         painter.rect_filled(back, CornerRadius::same(4), plate);
     }
     let letters = |at: egui::Pos2, color: Color32| {
         painter.text(at, Align2::CENTER_CENTER, "Aa", font.clone(), color);
     };
-    if let Some(shadow) = parse_hex(preset.shadow) {
+    if let Some(shadow) = parse_hex(shadow) {
         letters(center + Vec2::new(1.5, 1.5), shadow);
     }
-    if let Some(outline) = parse_hex(preset.outline) {
+    if let Some(outline) = parse_hex(outline) {
         for (x, y) in [
             (-1.0, 0.0),
             (1.0, 0.0),
@@ -2161,7 +2209,7 @@ fn preset_tile(ui: &Ui, rect: Rect, preset: &cutlass_editor::TextPreset) {
             letters(center + Vec2::new(x, y), outline);
         }
     }
-    letters(center, parse_hex(preset.color).unwrap_or(Color32::WHITE));
+    letters(center, parse_hex(color).unwrap_or(Color32::WHITE));
 }
 
 /// Stroke, Background, Glow, and Shadow. A part's switch turns it on in

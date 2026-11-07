@@ -733,6 +733,9 @@ pub struct Shell {
     settings: Settings,
     /// Where the settings are saved, and the generation on disk.
     settings_file: Option<(PathBuf, u64)>,
+    /// Where the looks saved with "Save as preset" are kept, and the looks.
+    presets_file: Option<PathBuf>,
+    saved_looks: Vec<cutlass_editor::SavedLook>,
     /// Files dropped on the window, imported one job after another.
     waiting_imports: std::collections::VecDeque<PathBuf>,
     session: Option<Session>,
@@ -884,6 +887,8 @@ impl Shell {
             lanes_cache: RefCell::new(None),
             settings,
             settings_file: None,
+            presets_file: None,
+            saved_looks: Vec::new(),
             waiting_imports: std::collections::VecDeque::new(),
             session: None,
             outer: Vec::new(),
@@ -1139,6 +1144,94 @@ impl Shell {
     /// file held when it was read.
     pub fn keep_settings_file(&mut self, path: PathBuf, generation: u64) {
         self.settings_file = Some((path, generation));
+    }
+
+    /// Read and save the looks kept with "Save as preset" at `path` from
+    /// now on. A file that is not there yet holds none.
+    pub fn keep_presets_file(&mut self, path: PathBuf) {
+        self.saved_looks = std::fs::read(&path)
+            .map(|bytes| cutlass_editor::read_looks(&bytes))
+            .unwrap_or_default();
+        self.presets_file = Some(path);
+    }
+
+    /// The looks saved with "Save as preset", oldest first.
+    #[must_use]
+    pub fn saved_looks(&self) -> &[cutlass_editor::SavedLook] {
+        &self.saved_looks
+    }
+
+    /// Save the selected title's or caption's look as a preset, named
+    /// after how many there are. It is kept for every project.
+    pub fn save_text_preset(&mut self) -> Result<(), ShellError> {
+        let segment_id = self.text_segment()?;
+        let name = format!("Preset {}", self.saved_looks.len() + 1);
+        let look = self
+            .session_draft()
+            .ok()
+            .and_then(|draft| {
+                let (segment, _) = locate(draft, &segment_id)?;
+                cutlass_editor::saved_look(draft, segment, &name)
+            })
+            .ok_or_else(|| ShellError::Unavailable("a preset is saved from text".to_owned()))?;
+        self.saved_looks.push(look);
+        self.write_presets()
+    }
+
+    /// Forget saved preset `index`.
+    pub fn delete_text_preset(&mut self, index: usize) -> Result<(), ShellError> {
+        if index >= self.saved_looks.len() {
+            return Err(ShellError::Unavailable("no such preset".to_owned()));
+        }
+        self.saved_looks.remove(index);
+        self.write_presets()
+    }
+
+    /// Give the selected title or caption saved preset `index`'s look, in
+    /// one undo step; with "Apply to all main captions" on, every caption
+    /// on the row.
+    pub fn set_saved_preset(&mut self, index: usize) -> Result<(), ShellError> {
+        let segment_id = self.text_segment()?;
+        self.refuse_locked(&segment_id)?;
+        let Some(look) = self.saved_looks.get(index) else {
+            return Err(ShellError::Unavailable("no such preset".to_owned()));
+        };
+        let face = self.face.name().to_owned();
+        let line_width = self.draft().map_or(0.0, |draft| {
+            f64::from(if look.alignment >= 3 {
+                draft.canvas_config.height
+            } else {
+                draft.canvas_config.width
+            })
+        });
+        let requests = cutlass_editor::look_requests(&segment_id, look, &face, line_width);
+        self.apply_text_requests(requests)
+    }
+
+    /// Apply `requests` on the selected text as one step, on every main
+    /// caption when "Apply to all main captions" is on.
+    fn apply_text_requests(&mut self, requests: Vec<Request>) -> Result<(), ShellError> {
+        let every = match self.draft() {
+            Some(draft) if self.all_captions => requests
+                .iter()
+                .flat_map(|request| cutlass_editor::for_every_caption(draft, request))
+                .collect(),
+            _ => requests,
+        };
+        self.apply_requests(&every)
+    }
+
+    fn write_presets(&self) -> Result<(), ShellError> {
+        let Some(path) = &self.presets_file else {
+            return Ok(());
+        };
+        let failed = |error: std::io::Error| {
+            ShellError::Unavailable(format!("the presets were not saved: {error}"))
+        };
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(failed)?;
+        }
+        std::fs::write(path, cutlass_editor::write_looks(&self.saved_looks)).map_err(failed)
     }
 
     /// Write the settings, when they have a file. Another window's write
@@ -6073,14 +6166,7 @@ impl Shell {
         };
         let face = self.face.name().to_owned();
         let requests = cutlass_editor::preset_requests(&segment_id, preset, &face);
-        let every = match self.draft() {
-            Some(draft) if self.all_captions => requests
-                .iter()
-                .flat_map(|request| cutlass_editor::for_every_caption(draft, request))
-                .collect(),
-            _ => requests,
-        };
-        self.apply_requests(&every)
+        self.apply_text_requests(requests)
     }
 
     /// Step to the next installed face. One undo restores the previous name.
@@ -13816,6 +13902,55 @@ mod tests {
             desktop.undo().unwrap();
         }
         assert!(!desktop.setting_keyed(color));
+    }
+
+    #[test]
+    fn a_saved_preset_is_kept_for_every_project_and_gives_its_look() {
+        let temp = Temp::new();
+        let file = temp.path.join("home").join("Presets").join("text.json");
+        let mut desktop = one_letter_title(&temp);
+        desktop.keep_presets_file(file.clone());
+        assert!(desktop.saved_looks().is_empty());
+        desktop.set_text_color("#00FF00").unwrap();
+        desktop
+            .set_text_pattern(cutlass_session::TextPattern {
+                bold: true,
+                ..Default::default()
+            })
+            .unwrap();
+        desktop.set_text_align(4).unwrap();
+        desktop.set_text_outline("#000000", 0.1).unwrap();
+        desktop.save_text_preset().unwrap();
+        assert_eq!(desktop.saved_looks()[0].name, "Preset 1");
+        assert!(file.exists());
+        let saved = desktop.draft().unwrap().materials.texts[0].clone();
+
+        // Another window reads it, and a plain title takes the whole look
+        // in one step.
+        let other = Temp::new();
+        let mut plain = one_letter_title(&other);
+        plain.keep_presets_file(file.clone());
+        assert_eq!(plain.saved_looks(), desktop.saved_looks());
+        let before = plain.draft().unwrap().materials.texts[0].clone();
+        plain.set_saved_preset(0).unwrap();
+        let text = &plain.draft().unwrap().materials.texts[0];
+        assert_eq!(text.text_color, saved.text_color);
+        assert_eq!(text.bold_width, saved.bold_width);
+        assert_eq!((text.alignment, text.typesetting), (4, 1));
+        assert_eq!(
+            (text.border_color.as_str(), text.border_width),
+            ("#000000", 0.1)
+        );
+        assert_eq!(text.content, before.content);
+        plain.undo().unwrap();
+        assert_eq!(plain.draft().unwrap().materials.texts[0], before);
+        assert!(plain.set_saved_preset(5).is_err());
+
+        plain.delete_text_preset(0).unwrap();
+        assert!(plain.saved_looks().is_empty());
+        let mut again = shell();
+        again.keep_presets_file(file);
+        assert!(again.saved_looks().is_empty());
     }
 
     #[test]

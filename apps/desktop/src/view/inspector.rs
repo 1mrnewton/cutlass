@@ -10,8 +10,7 @@
 use std::collections::{HashMap, HashSet};
 
 use egui::{
-    Align, Align2, Color32, CornerRadius, FontId, Layout, Rect, RichText, Sense, Slider, Stroke,
-    Ui, Vec2,
+    Align, Align2, Color32, CornerRadius, FontId, Layout, Rect, RichText, Sense, Stroke, Ui, Vec2,
 };
 
 use crate::shell::{
@@ -2500,16 +2499,44 @@ pub(super) fn slider(
 ) -> Option<f64> {
     let mut value = state.live.get(key).copied().unwrap_or(stored);
     let mut moved = None;
+    // The box takes typing only where it shows the value itself, give or
+    // take its suffix; a box that shows a converted value stays read-only.
+    let (low, high) = (*range.start(), *range.end());
+    let near = |at: f64| {
+        leading_number(&show(at))
+            .is_some_and(|shown| (shown - at).abs() <= (high - low).abs() * 0.01)
+    };
+    let typable = near(low) && near(high);
     ui.horizontal(|ui| {
         row_label(ui, label);
         let track = (ui.available_width() - VALUE_WIDTH - 8.0).max(40.0);
-        ui.spacing_mut().slider_width = track;
-        let response = ui.add(Slider::new(&mut value, range).show_value(false));
+        let response = ui.add(ui::Slider::new(&mut value, range).width(track));
         if response.changed() {
             state.live.insert(key.to_owned(), value);
             moved = Some(value).filter(|value| *value != stored);
         }
-        value_box(ui, &show(value));
+        if typable {
+            let text = state.fields.entry(format!("{key} value")).or_default();
+            let salt = ("slider-value", key);
+            // Show the value before the box draws, unless it is being typed in.
+            let id = ui.make_persistent_id(egui::IdSalt::new(salt));
+            if !ui.memory(|memory| memory.has_focus(id)) {
+                *text = show(value);
+            }
+            let field = ui::Field::new(text)
+                .id_salt(salt)
+                .width(VALUE_WIDTH)
+                .text_size(12.0)
+                .show(ui);
+            if super::commits(ui, &field.response)
+                && let Some(typed) = leading_number(text)
+            {
+                let typed = typed.clamp(low, high);
+                moved = Some(typed).filter(|typed| *typed != stored);
+            }
+        } else {
+            value_box(ui, &show(value));
+        }
     });
     ui.add_space(4.0);
     // The value shown follows the track while held, then the stored one.
@@ -2519,14 +2546,29 @@ pub(super) fn slider(
     moved
 }
 
+/// The number a value box's text starts with, such as 90 in `90%`.
+fn leading_number(text: &str) -> Option<f64> {
+    let text = text.trim();
+    let end = text
+        .char_indices()
+        .find(|&(index, c)| {
+            !(c.is_ascii_digit() || c == '.' || (index == 0 && matches!(c, '-' | '+' | '−')))
+        })
+        .map_or(text.len(), |(index, _)| index);
+    text[..end]
+        .replace('−', "-")
+        .parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite())
+}
+
 fn later_slider(ui: &mut Ui, label: &str, value: f64, shown: &str) {
     ui.add_enabled_ui(false, |ui| {
         ui.horizontal(|ui| {
             row_label(ui, label);
             let track = (ui.available_width() - VALUE_WIDTH - 8.0).max(40.0);
-            ui.spacing_mut().slider_width = track;
             let mut value = value;
-            ui.add(Slider::new(&mut value, -1000.0..=1000.0).show_value(false));
+            ui.add(ui::Slider::new(&mut value, -1000.0..=1000.0).width(track));
             value_box(ui, shown);
         });
     })
@@ -2737,5 +2779,20 @@ fn paint_icon(ui: &Ui, rect: Rect, name: &str, color: Color32) {
             FontId::proportional(11.0),
             color,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::leading_number;
+
+    #[test]
+    fn a_value_box_reads_the_number_before_its_suffix() {
+        assert_eq!(leading_number("90%"), Some(90.0));
+        assert_eq!(leading_number(" -12.5 dB"), Some(-12.5));
+        assert_eq!(leading_number("−3"), Some(-3.0));
+        assert_eq!(leading_number("1.0x"), Some(1.0));
+        assert_eq!(leading_number("-inf dB"), None);
+        assert_eq!(leading_number("%"), None);
     }
 }

@@ -131,7 +131,10 @@ pub use transition_shelf::{
     transition_of_card, transition_request,
 };
 pub use transport::{Marks, SHUTTLE_TOP, Shuttle, shuttle_rate};
-pub use view_zoom::{ACTION_SAFE, PREVIEW_ZOOMS, TITLE_SAFE, preview_zoom_step, safe_box};
+pub use view_zoom::{
+    ACTION_SAFE, PREVIEW_ZOOM_RANGE, PREVIEW_ZOOMS, TITLE_SAFE, clamp_preview_pan, preview_zoom_at,
+    preview_zoom_step, safe_box,
+};
 pub use zoom::{
     Zoom, ZoomBounds, fit_pixel_size, last_accuracy_step, minimum_pixel_size, quarter_lane,
 };

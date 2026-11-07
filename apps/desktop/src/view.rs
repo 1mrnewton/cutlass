@@ -13974,6 +13974,10 @@ mod tests {
         for (id, material) in [("words", "title"), ("said", "caption")] {
             let mut track = Track::main(id);
             track.kind = TrackType::Text;
+            // The caption sits on the main captions' row.
+            if id == "said" {
+                track.flag = cutlass_model::TrackFlag::TextSubtitle;
+            }
             track
                 .segments
                 .push(Segment::new(id, material, TimeRange::new(0, 2_000_000)));
@@ -14060,7 +14064,8 @@ mod tests {
     }
 
     /// The text and caption inspector painted by the real renderer: the
-    /// Basic page plain and styled, the caption's tabs and its Bubble page.
+    /// Basic page plain and styled, the caption's tabs, its Templates and its
+    /// Bubble page.
     /// With `CUTLASS_RENDER_DIR` set the pictures are kept there to look at.
     #[test]
     fn the_text_and_caption_inspector_paint() {
@@ -14127,6 +14132,12 @@ mod tests {
             section: None,
         });
         picture(&mut harness, "caption-basic");
+        harness.state_mut().1.inspector.focus(inspector::Focus {
+            tab: 0,
+            page: 1,
+            section: None,
+        });
+        picture(&mut harness, "caption-templates");
         harness.state_mut().1.inspector.focus(inspector::Focus {
             tab: 0,
             page: 2,

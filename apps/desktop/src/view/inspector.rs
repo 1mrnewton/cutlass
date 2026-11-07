@@ -254,6 +254,11 @@ fn text_panel(
             "AI avatars",
         ]
     };
+    // "Apply to all main captions" has its own row over the tabs, the
+    // same on every tab and page.
+    if caption {
+        all_captions_box(shell, ui);
+    }
     let tab = state.tab;
     paid_tabs(ui, labels, &["AI avatars"], &mut state.tab);
     if tab != state.tab {
@@ -281,7 +286,14 @@ fn text_panel(
                         send(shell, Shell::save_text_preset);
                     }
                 }
-                "Templates" => caption_templates(shell, ui),
+                "Templates" => {
+                    caption_templates(shell, ui);
+                    if !inspection.words.text.is_empty() {
+                        ui.add_space(12.0);
+                        ui.label(RichText::new("Word styles").size(12.0).color(tokens::MUTED));
+                        caption_styles(shell, ui, inspection);
+                    }
+                }
                 "Bubble" => bubble_page(shell, ui),
                 _ => effect_page(shell, ui),
             }
@@ -1806,21 +1818,6 @@ fn text_basic(
     inspection: &Inspection,
     caption: bool,
 ) {
-    if caption && shell.on_main_captions() {
-        ui.add_space(8.0);
-        let mut all = shell.all_captions();
-        if ui
-            .add(ui::Check::new(&mut all, "Apply to all main captions"))
-            .on_hover_text("A change to the look or place styles every caption on this row")
-            .changed()
-        {
-            shell.set_all_captions(all);
-        }
-        ui.separator();
-    }
-    if caption && !inspection.words.text.is_empty() {
-        caption_styles(shell, ui, inspection);
-    }
     body(ui, |ui| {
         if caption && !inspection.words.text.is_empty() {
             caption_paragraphs(shell, ui, state);
@@ -2769,6 +2766,22 @@ fn footer(ui: &mut Ui, labels: &[&str]) {
                 .on_disabled_hover_text(LATER);
         }
     });
+}
+
+/// "Apply to all main captions", on a caption of the main row.
+fn all_captions_box(shell: &mut Shell, ui: &mut Ui) {
+    if !shell.on_main_captions() {
+        return;
+    }
+    let mut all = shell.all_captions();
+    if ui
+        .add(ui::Check::new(&mut all, "Apply to all main captions"))
+        .on_hover_text("A change to the look or place styles every caption on this row")
+        .changed()
+    {
+        shell.set_all_captions(all);
+    }
+    ui.add_space(8.0);
 }
 
 /// The caption styles: Plain, then each style, the caption's own

@@ -777,6 +777,32 @@ impl Shell {
         self.apply_requests(&requests)
     }
 
+    /// Replace `find` with `with`, case ignored, in every caption on the
+    /// selected caption's lane. Each changed caption keeps the times of the
+    /// words that stay. One undo step; how many were replaced.
+    pub fn replace_in_captions(&mut self, find: &str, with: &str) -> Result<usize, ShellError> {
+        let segment_id = self.text_segment()?;
+        self.refuse_locked(&segment_id)?;
+        if find.trim().is_empty() {
+            return Err(ShellError::Unavailable("type the words to find".to_owned()));
+        }
+        let draft = self.session_draft()?;
+        let replaced = cutlass_editor::replace_in_captions(draft, &segment_id, find, with.trim())
+            .map_err(|miss| match miss {
+            cutlass_editor::CaptionListMiss::Empty => ShellError::Unavailable(
+                "that would leave a caption with no words; delete it instead".to_owned(),
+            ),
+            miss => caption_miss(miss),
+        })?;
+        if replaced.count == 0 {
+            return Err(ShellError::Unavailable("no caption says that".to_owned()));
+        }
+        if !replaced.requests.is_empty() {
+            self.apply_requests(&replaced.requests)?;
+        }
+        Ok(replaced.count)
+    }
+
     /// Take caption `segment_id` off the timeline. One undo restores it.
     pub fn remove_caption(&mut self, segment_id: &SegmentId) -> Result<(), ShellError> {
         self.refuse_locked(segment_id)?;
@@ -1678,5 +1704,43 @@ mod tests {
         pick(&mut desktop, "title");
         assert!(desktop.set_caption_template("cutlass-caption-pop").is_err());
         assert_eq!(desktop.caption_template(), None);
+    }
+
+    #[test]
+    fn find_and_replace_reaches_every_caption_on_the_row_as_one_step() {
+        let temp = Temp::new();
+        let mut desktop = subtitle_row(&temp);
+        pick(&mut desktop, "first");
+        let before = desktop.draft().unwrap().clone();
+        let lines = |desktop: &Shell| -> Vec<String> {
+            desktop
+                .caption_rows()
+                .into_iter()
+                .map(|row| row.text)
+                .collect()
+        };
+        assert_eq!(desktop.replace_in_captions("O", "1").unwrap(), 2);
+        assert_eq!(lines(&desktop), ["1ne", "tw1"]);
+        let title = desktop
+            .draft()
+            .unwrap()
+            .materials
+            .texts
+            .iter()
+            .find(|t| t.id.as_str() == "title")
+            .unwrap()
+            .content
+            .clone();
+        assert_eq!(title, "hi");
+        desktop.undo().unwrap();
+        assert_eq!(desktop.draft().unwrap(), &before);
+
+        let revision = desktop.revision();
+        assert!(desktop.replace_in_captions("zebra", "x").is_err());
+        assert!(desktop.replace_in_captions(" ", "x").is_err());
+        assert!(desktop.replace_in_captions("one", "").is_err());
+        assert_eq!(desktop.revision(), revision);
+        pick(&mut desktop, "title");
+        assert!(desktop.replace_in_captions("hi", "yo").is_err());
     }
 }

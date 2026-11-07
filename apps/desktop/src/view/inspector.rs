@@ -299,8 +299,22 @@ fn caption_list(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState) {
                 .desired_width(ui.available_width() - 150.0),
         );
         later_button(ui, "Translate");
-        later_button(ui, "Find and replace");
+        let open = state.open.contains(REPLACE_ROW);
+        let toggle = egui::Button::new(RichText::new("Replace").size(12.0))
+            .fill(BOX)
+            .selected(open);
+        if ui
+            .add(toggle)
+            .on_hover_text("Find and replace across every caption")
+            .clicked()
+            && !state.open.remove(REPLACE_ROW)
+        {
+            state.open.insert(REPLACE_ROW.to_owned());
+        }
     });
+    if state.open.contains(REPLACE_ROW) {
+        replace_row(shell, ui, state);
+    }
     let query = state
         .fields
         .get("caption search")
@@ -370,6 +384,52 @@ fn caption_list(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState) {
         send(shell, |shell| shell.add_caption_after(&segment_id));
     } else if let Some(segment_id) = remove {
         send(shell, |shell| shell.remove_caption(&segment_id));
+    }
+}
+
+/// The Captions list's replace row opens under the search.
+const REPLACE_ROW: &str = "caption replace";
+
+/// Replace what the search finds, in every caption on the lane, as one
+/// undo step. The list below shows the captions it will reach.
+fn replace_row(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState) {
+    let mut replace = false;
+    ui.horizontal(|ui| {
+        let with = state
+            .fields
+            .entry("caption replace".to_owned())
+            .or_default();
+        let response = ui.add(
+            TextEdit::singleline(with)
+                .hint_text("Replace with")
+                .desired_width(ui.available_width() - 90.0),
+        );
+        replace = response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+        replace |= ui
+            .add(egui::Button::new(RichText::new("Replace all").size(12.0)).fill(BOX))
+            .clicked();
+    });
+    if !replace {
+        return;
+    }
+    let find = state
+        .fields
+        .get("caption search")
+        .cloned()
+        .unwrap_or_default();
+    let with = state
+        .fields
+        .get("caption replace")
+        .cloned()
+        .unwrap_or_default();
+    match shell.replace_in_captions(&find, &with) {
+        Ok(count) => {
+            let noun = if count == 1 { "match" } else { "matches" };
+            shell.set_notice(format!("Replaced {count} {noun}"));
+            // The list shows every caption again, the new words in it.
+            state.fields.remove("caption search");
+        }
+        Err(error) => shell.notice_error(&error),
     }
 }
 

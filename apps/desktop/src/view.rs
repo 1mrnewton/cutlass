@@ -191,6 +191,10 @@ pub struct ViewState {
     track_drag: Option<(f64, f64)>,
     /// A move, scale or turn of a clip on the preview in flight.
     stage_drag: Option<StageDrag>,
+    /// The selected clips' boxes as each recent revision of the draft
+    /// placed them, newest last, so the box drawn matches the picture on
+    /// the canvas and never runs ahead of it.
+    stage_seen: Vec<(u64, Vec<cutlass_editor::StageBox>)>,
     /// The action-safe and title-safe frames are drawn over the canvas.
     preview_guides: bool,
     /// The preview fills the screen.
@@ -275,6 +279,7 @@ impl Default for ViewState {
             preview_frame: Rect::NOTHING,
             track_drag: None,
             stage_drag: None,
+            stage_seen: Vec::new(),
             preview_guides: false,
             preview_full: false,
             lane_heights: std::collections::HashMap::new(),
@@ -2809,6 +2814,16 @@ fn preview_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rec
     } else {
         view.preview_pan = Vec2::ZERO;
     }
+    // The preview drag lands before the canvas is drawn, on the canvas
+    // where it was last drawn, so this frame's picture already has it.
+    let staging = shell.picking().is_none() && shell.tracking().is_none();
+    let hover = match (view.preview_canvas, canvas) {
+        (Some(placed), Some(size)) if staging => stage_input(shell, ui, view, frame, placed, size),
+        _ => {
+            view.stage_drag = None;
+            None
+        }
+    };
     view.preview_canvas = None;
     view.preview_frame = frame;
     let mut place = |size: Vec2| {
@@ -2871,10 +2886,8 @@ fn preview_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rec
         paint_safe_areas(ui, frame, canvas);
     }
     if let (Some(placed), Some(size)) = (view.preview_canvas, canvas) {
-        if shell.picking().is_none() && shell.tracking().is_none() {
-            stage_layer(shell, ui, view, frame, placed, size);
-        } else {
-            view.stage_drag = None;
+        if staging {
+            stage_paint(shell, ui, view, frame, placed, size, hover);
         }
         pick_layer(shell, ui, frame, placed, size);
         track_layer(shell, ui, view, frame, placed, size);
@@ -2969,18 +2982,21 @@ fn screen_angle(center: (f64, f64), point: (f64, f64)) -> f64 {
     (point.1 - center.1).atan2(point.0 - center.0).to_degrees()
 }
 
-/// Pictures and titles on the preview: a hover outlines the clip under the
-/// pointer, a click selects it, and a drag moves it. The selected clip's
-/// corners scale it and the knob below it turns it. Snaps show the canvas
-/// centre lines. Each drag is one undo step.
-fn stage_layer(
+/// Pictures and titles on the preview: a click selects the clip under the
+/// pointer and a drag moves it. The selected clip's corners scale it and
+/// the knob below it turns it. Each drag is one undo step.
+///
+/// This runs before the canvas is drawn, so the picture drawn this frame
+/// already has the edit and [`stage_paint`]'s box sits on it. Returns where
+/// the pointer hovers when nothing is being dragged.
+fn stage_input(
     shell: &mut Shell,
     ui: &mut Ui,
     view: &mut ViewState,
     frame: Rect,
     placed: Rect,
     size: Vec2,
-) {
+) -> Option<Pos2> {
     let area = placed
         .intersect(frame)
         .expand(STAGE_TURN_OFFSET + STAGE_HANDLE_REACH);
@@ -3093,12 +3109,67 @@ fn stage_layer(
             None => {}
         }
     }
+    response.hover_pos().filter(|_| view.stage_drag.is_none())
+}
 
+/// How many recent revisions' boxes the preview keeps to match a picture
+/// drawn from one of them.
+const STAGE_SEEN: usize = 8;
+
+/// The selected clips' boxes as the picture on the canvas shows them: from
+/// the revision it was drawn from, when that is one of the last few. A clip
+/// selected since then, or a picture from a render, takes the box the draft
+/// gives now.
+fn shown_stage_boxes(shell: &Shell, view: &mut ViewState) -> Vec<cutlass_editor::StageBox> {
+    let mut ids: Vec<SegmentId> = shell.selection().to_vec();
+    if let Some(moving) = shell.stage_moving()
+        && !ids.contains(moving)
+    {
+        ids.push(moving.clone());
+    }
+    let now: Vec<cutlass_editor::StageBox> =
+        ids.iter().filter_map(|id| shell.stage_box(id)).collect();
+    if let Some(revision) = shell.revision() {
+        view.stage_seen.retain(|(seen, _)| *seen != revision);
+        view.stage_seen.push((revision, now.clone()));
+        let extra = view.stage_seen.len().saturating_sub(STAGE_SEEN);
+        view.stage_seen.drain(..extra);
+    }
+    let shown = shell
+        .shown_revision()
+        .and_then(|shown| view.stage_seen.iter().find(|(seen, _)| *seen == shown))
+        .map(|(_, boxes)| boxes.as_slice())
+        .unwrap_or_default();
+    now.into_iter()
+        .map(|stage| {
+            shown
+                .iter()
+                .find(|old| old.segment_id == stage.segment_id)
+                .cloned()
+                .unwrap_or(stage)
+        })
+        .collect()
+}
+
+/// Over the drawn canvas: an outline on the clip under the pointer, the
+/// selected clip's box with its corner handles and turn knob, plain
+/// outlines on the other selected clips, and the centre lines a drag
+/// snapped to.
+fn stage_paint(
+    shell: &Shell,
+    ui: &Ui,
+    view: &mut ViewState,
+    frame: Rect,
+    placed: Rect,
+    size: Vec2,
+    hover: Option<Pos2>,
+) {
+    let boxes = shown_stage_boxes(shell, view);
+    let at_canvas = |pos: Pos2| canvas_pixel(placed, size, pos);
     let painter = ui.painter().with_clip_rect(frame.intersect(ui.clip_rect()));
-    // The selection may have changed above; draw what holds now.
     let selected_id = shell.stage_moving().or(shell.selected()).cloned();
-    let selected = selected_id.as_ref().and_then(|id| shell.stage_box(id));
-    let hover = response.hover_pos().filter(|_| view.stage_drag.is_none());
+    let shown = |id: &SegmentId| boxes.iter().find(|stage| stage.segment_id == *id);
+    let selected = selected_id.as_ref().and_then(shown).cloned();
     if let Some(pos) = hover {
         let grip = stage_grip(selected.as_ref(), placed, size, frame, pos);
         let (x, y) = at_canvas(pos);
@@ -3139,8 +3210,8 @@ fn stage_layer(
         if Some(id) == selected_id.as_ref() {
             continue;
         }
-        if let Some(stage) = shell.stage_box(id) {
-            let (corners, _, _) = stage_handles(&stage, placed, size, frame);
+        if let Some(stage) = shown(id) {
+            let (corners, _, _) = stage_handles(stage, placed, size, frame);
             painter.add(egui::Shape::closed_line(
                 corners.to_vec(),
                 egui::Stroke::new(1.0, tokens::SELECTED),
@@ -11569,6 +11640,9 @@ mod tests {
         shell.open_folder(&temp).unwrap();
         let mut view = ViewState::new();
         let ctx = egui::Context::default();
+        // The first frame places the canvas; the preview's clips take
+        // pointer input from the next one on.
+        frame_once(&ctx, Vec::new(), &mut shell, &mut view);
         frame_once(&ctx, Vec::new(), &mut shell, &mut view);
         (temp, shell, view, ctx)
     }
@@ -11716,6 +11790,76 @@ mod tests {
         assert_eq!(stage_pose(&shell, "over").3, 0.0);
         shell.undo().unwrap();
         assert_eq!(stage_pose(&shell, "over"), (0.0, 0.0, 0.5, 0.0));
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn the_preview_box_waits_for_the_picture_drawn_from_its_draft() {
+        let (temp, mut shell, mut view, _ctx) = stage_window("stage-wait");
+        let over = SegmentId::new("over");
+        shell.select(Some(over.clone()));
+        shell.preview_bytes().unwrap();
+        let before = shell.revision();
+        assert_eq!(shell.shown_revision(), before);
+        assert_eq!(shown_stage_boxes(&shell, &mut view)[0].center_x, 960.0);
+        shell.stage_begin(&over).unwrap();
+        shell.stage_move(240.0, 0.0, 1.0, 0.0).unwrap();
+        assert_ne!(shell.revision(), before);
+        // The canvas still shows the old picture, so the box stays on it.
+        assert_eq!(shell.shown_revision(), before);
+        assert_eq!(shown_stage_boxes(&shell, &mut view)[0].center_x, 960.0);
+        // Once the moved picture is drawn, the box moves with it.
+        shell.preview_bytes().unwrap();
+        assert_eq!(shell.shown_revision(), shell.revision());
+        assert_eq!(shown_stage_boxes(&shell, &mut view)[0].center_x, 1200.0);
+        shell.stage_end();
+        // Only the last few revisions are kept.
+        for step in 0..(STAGE_SEEN as u64 + 4) {
+            view.stage_seen.push((10_000 + step, Vec::new()));
+            shown_stage_boxes(&shell, &mut view);
+        }
+        assert_eq!(view.stage_seen.len(), STAGE_SEEN);
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn the_frame_that_moves_a_clip_draws_the_moved_picture() {
+        let (temp, mut shell, mut view, ctx) = stage_window("stage-same-frame");
+        let placed = view.preview_canvas.expect("the canvas");
+        let size = Vec2::new(1920.0, 1080.0);
+        let from = screen_point(placed, size, (960.0, 540.0));
+        let to = screen_point(placed, size, (1200.0, 540.0));
+        let press = egui::Event::PointerButton {
+            pos: from,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::default(),
+        };
+        frame_once(
+            &ctx,
+            vec![egui::Event::PointerMoved(from), press],
+            &mut shell,
+            &mut view,
+        );
+        frame_once(
+            &ctx,
+            vec![egui::Event::PointerMoved(to)],
+            &mut shell,
+            &mut view,
+        );
+        let before = shell.revision();
+        let on = to + Vec2::new(20.0, 0.0);
+        frame_once(
+            &ctx,
+            vec![egui::Event::PointerMoved(on)],
+            &mut shell,
+            &mut view,
+        );
+        assert!(view.stage_drag.is_some());
+        // Mid-drag: the clip moved this frame, and the picture drawn this
+        // frame is the moved one, not the one before it.
+        assert_ne!(shell.revision(), before);
+        assert_eq!(shell.shown_revision(), shell.revision());
         let _ = std::fs::remove_dir_all(&temp);
     }
 

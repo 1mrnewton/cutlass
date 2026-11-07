@@ -247,6 +247,15 @@ pub enum Request {
         face: String,
         line_width: f64,
     },
+    /// Turn bold, italic and underline on or off over the whole text. An
+    /// empty face path is filled.
+    SetTextPattern {
+        segment_id: SegmentId,
+        bold: bool,
+        italic: bool,
+        underline: bool,
+        face: String,
+    },
     /// Store extra space between letters, as a fraction of the text size.
     SetLetterSpacing {
         segment_id: SegmentId,

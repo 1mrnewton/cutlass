@@ -48,7 +48,9 @@ use crate::request::Request;
 pub use canvas::{CANVAS_SHAPES, CanvasShape, canvas_for, follow_first_picture, ratio_request};
 pub use move_segment::move_segment;
 pub use place::place;
-pub use text::{MAX_CAPTION_STAGGER_MS, NEW_TEXT_SIZE};
+pub use text::{
+    BOLD_WIDTH, ITALIC_DEGREE, MAX_CAPTION_STAGGER_MS, NEW_TEXT_SIZE, Pattern as TextPattern,
+};
 pub use track::{lane_fits, new_lane_index};
 pub use trim::trim;
 pub use words::{CAPTION_KIND, set_words};
@@ -327,6 +329,22 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             face,
             line_width,
         } => text::set_text_align(draft, segment_id, *alignment, face, *line_width),
+        Request::SetTextPattern {
+            segment_id,
+            bold,
+            italic,
+            underline,
+            face,
+        } => text::set_text_pattern(
+            draft,
+            segment_id,
+            text::Pattern {
+                bold: *bold,
+                italic: *italic,
+                underline: *underline,
+            },
+            face,
+        ),
         Request::SetLetterSpacing {
             segment_id,
             spacing,

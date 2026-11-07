@@ -153,6 +153,55 @@ pub fn set_text_align(
     Ok(())
 }
 
+/// How much a bold letter's edge grows, as a share of the text size.
+pub const BOLD_WIDTH: f64 = 0.04;
+/// How many degrees an italic letter leans.
+pub const ITALIC_DEGREE: i32 = 12;
+
+/// Bold, italic and underline over a whole text.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Pattern {
+    pub bold: bool,
+    pub italic: bool,
+    pub underline: bool,
+}
+
+impl Pattern {
+    /// The pattern a text stores: any bold width is bold and any lean is
+    /// italic.
+    #[must_use]
+    pub fn of(text: &MaterialText) -> Self {
+        Self {
+            bold: text.bold_width.is_finite() && text.bold_width > 0.0,
+            italic: text.italic_degree != 0,
+            underline: text.underline,
+        }
+    }
+}
+
+/// Turn bold, italic and underline on or off. Bold stores [`BOLD_WIDTH`]
+/// and italic [`ITALIC_DEGREE`]; a part already on keeps its own value. An
+/// empty `font_path` takes `face`.
+pub fn set_text_pattern(
+    draft: &mut Draft,
+    segment_id: &SegmentId,
+    pattern: Pattern,
+    face: &str,
+) -> Result<(), EditError> {
+    let index = own_text(draft, segment_id)?;
+    let text = &mut draft.materials.texts[index];
+    let stored = Pattern::of(text);
+    if pattern.bold != stored.bold {
+        text.bold_width = if pattern.bold { BOLD_WIDTH } else { 0.0 };
+    }
+    if pattern.italic != stored.italic {
+        text.italic_degree = if pattern.italic { ITALIC_DEGREE } else { 0 };
+    }
+    text.underline = pattern.underline;
+    fill_face(text, face);
+    Ok(())
+}
+
 /// Extra space between letters, as a fraction of the text size.
 /// `-1` removes one size of gap. `0` is the normal gap. `4` is the widest.
 pub fn set_letter_spacing(
@@ -917,6 +966,82 @@ mod tests {
                 .all(|style| style.solid() == Some([1.0, 0.0, 0.0, 1.0]))
         );
         assert_eq!(rich.styles[0].rest.get("bold"), Some(&true.into()));
+    }
+
+    #[test]
+    fn pattern_turns_bold_italic_and_underline_on_and_off_in_one_step() {
+        use super::{BOLD_WIDTH, ITALIC_DEGREE, Pattern};
+        let mut session = open();
+        let pattern = |bold, italic, underline| Request::SetTextPattern {
+            segment_id: "a".into(),
+            bold,
+            italic,
+            underline,
+            face: "face.ttf".to_owned(),
+        };
+        session.apply(0, &[pattern(true, true, true)]).unwrap();
+        let text = &session.draft().materials.texts[0];
+        assert_eq!(text.bold_width, BOLD_WIDTH);
+        assert_eq!(text.italic_degree, ITALIC_DEGREE);
+        assert!(text.underline);
+        assert_eq!(text.font_path, "face.ttf");
+        assert_eq!(
+            Pattern::of(text),
+            Pattern {
+                bold: true,
+                italic: true,
+                underline: true
+            }
+        );
+        session.apply(1, &[pattern(false, true, false)]).unwrap();
+        let text = &session.draft().materials.texts[0];
+        assert_eq!(
+            (text.bold_width, text.italic_degree, text.underline),
+            (0.0, ITALIC_DEGREE, false)
+        );
+        session.undo().unwrap();
+        assert!(session.draft().materials.texts[0].underline);
+    }
+
+    #[test]
+    fn a_pattern_already_on_keeps_its_own_value() {
+        let session = open();
+        let mut draft = session.draft().clone();
+        draft.materials.texts[0].bold_width = 0.008;
+        draft.materials.texts[0].italic_degree = 20;
+        let mut session = Session::open(draft);
+        session
+            .apply(
+                0,
+                &[Request::SetTextPattern {
+                    segment_id: "a".into(),
+                    bold: true,
+                    italic: true,
+                    underline: true,
+                    face: String::new(),
+                }],
+            )
+            .unwrap();
+        let text = &session.draft().materials.texts[0];
+        assert_eq!((text.bold_width, text.italic_degree), (0.008, 20));
+    }
+
+    #[test]
+    fn a_pattern_on_a_missing_clip_leaves_the_draft() {
+        let mut session = open();
+        let before = session.draft().clone();
+        let refused = session.apply(
+            0,
+            &[Request::SetTextPattern {
+                segment_id: "gone".into(),
+                bold: true,
+                italic: false,
+                underline: false,
+                face: String::new(),
+            }],
+        );
+        assert!(refused.is_err());
+        assert_eq!(session.draft(), &before);
     }
 
     #[test]

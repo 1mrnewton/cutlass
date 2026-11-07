@@ -474,6 +474,7 @@ pub fn request_name(request: &Request) -> &'static str {
         Request::SetTextSize { .. } => "set_text_size",
         Request::SetTextColor { .. } => "set_text_color",
         Request::SetTextAlign { .. } => "set_text_align",
+        Request::SetTextPattern { .. } => "set_text_pattern",
         Request::SetLetterSpacing { .. } => "set_letter_spacing",
         Request::SetLineSpacing { .. } => "set_line_spacing",
         Request::SetLineWidth { .. } => "set_line_width",

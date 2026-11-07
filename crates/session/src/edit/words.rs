@@ -1,6 +1,6 @@
 use cutlass_model::{
-    Draft, MaterialId, MaterialRef, MaterialText, Segment, SegmentId, TrackFlag, TrackId,
-    TrackType, WordColumns,
+    Draft, MaterialId, MaterialRef, MaterialText, Segment, SegmentId, TimeRange, TrackFlag,
+    TrackId, TrackType, WordColumns,
 };
 
 use super::EditError;
@@ -104,15 +104,26 @@ pub fn add_caption(
     segment_id: &SegmentId,
     material_id: &MaterialId,
     words: WordColumns,
+    span: Option<&TimeRange>,
 ) -> Result<(), EditError> {
     if words.text.is_empty() {
         return Err(EditError::WordShape);
     }
     let (source_track, source_index) = super::locate(draft, source_id)?;
     super::ensure_unlocked(draft.tracks[source_track].attribute)?;
-    let target = draft.tracks[source_track].segments[source_index]
-        .target
-        .clone();
+    let whole = &draft.tracks[source_track].segments[source_index].target;
+    let target = match span {
+        None => whole.clone(),
+        // A line of the transcript sits inside the clip it was heard from.
+        Some(span)
+            if span.duration.0 > 0
+                && span.start.0 >= whole.start.0
+                && span.start.0 + span.duration.0 <= whole.start.0 + whole.duration.0 =>
+        {
+            TimeRange::new(span.start.0, span.duration.0)
+        }
+        Some(_) => return Err(EditError::SourceBounds),
+    };
     if draft.tracks.iter().any(|track| {
         track
             .segments
@@ -231,11 +242,73 @@ pub fn insert_caption(
     set_words(draft, &cue.material_id, cue.words.clone())
 }
 
+/// Replace the captions linked to `source_id` on `like`'s lane with
+/// `lines`, each looking like `like` and linked to `source_id`.
+pub fn recaption_clip(
+    draft: &mut Draft,
+    source_id: &SegmentId,
+    like: &SegmentId,
+    lines: &[SubtitleCue],
+) -> Result<(), EditError> {
+    if lines.is_empty() || lines.iter().any(|line| line.words.text.is_empty()) {
+        return Err(EditError::WordShape);
+    }
+    let (track_index, segment_index) = super::locate(draft, like)?;
+    let track = &draft.tracks[track_index];
+    if !matches!(track.kind, TrackType::Text | TrackType::TextToVideoText) {
+        return Err(EditError::TrackKind);
+    }
+    super::ensure_unlocked(track.attribute)?;
+    let track_id = track.id.clone();
+    let model = track.segments[segment_index].clone();
+    let Some(MaterialRef::Text(look)) = draft.materials.get(model.material_id.as_str()) else {
+        return Err(EditError::TrackKind);
+    };
+    let look = look.clone();
+    let linked: Vec<SegmentId> = draft
+        .relationships
+        .iter()
+        .filter(|relationship| relationship.kind == "linkage")
+        .flat_map(|relationship| &relationship.id_to_id)
+        .filter(|pair| &pair.owner == source_id)
+        .map(|pair| pair.dependent.clone())
+        .filter(|id| track.segments.iter().any(|segment| &segment.id == id))
+        .collect();
+    if !linked.contains(like) {
+        return Err(EditError::MissingSegment);
+    }
+    for id in &linked {
+        super::linkage::remove(draft, id)?;
+    }
+    for line in lines {
+        if draft.materials.get(line.material_id.as_str()).is_some() {
+            return Err(EditError::DuplicateMaterial);
+        }
+        let mut text = look.clone();
+        text.id = line.material_id.clone();
+        text.caption_keywords.clear();
+        let mut segment = Segment::new(
+            line.segment_id.clone(),
+            line.material_id.clone(),
+            line.target.clone(),
+        );
+        segment.clip = model.clip.clone();
+        segment.uniform_scale = model.uniform_scale.clone();
+        segment.render_index = model.render_index;
+        draft.materials.texts.push(text);
+        super::place::place(draft, &track_id, segment)?;
+        set_words(draft, &line.material_id, line.words.clone())?;
+        super::linkage::link(draft, source_id, &line.segment_id)?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use cutlass_model::MaterialText;
 
     use super::*;
+    use crate::Request;
 
     fn draft_with_text() -> (Draft, MaterialId) {
         let mut draft = Draft::empty("D");
@@ -323,7 +396,7 @@ mod tests {
 
     #[test]
     fn a_caption_lines_up_with_the_clip_and_keeps_its_words() {
-        use cutlass_model::{Segment, TimeRange, TrackAttribute, TrackId};
+        use cutlass_model::{Segment, TrackAttribute, TrackId};
 
         use crate::request::Request;
         use crate::session::Session;
@@ -351,6 +424,7 @@ mod tests {
                     segment_id: "line".into(),
                     material_id: "caption".into(),
                     words: words.clone(),
+                    span: None,
                 }],
             )
             .unwrap();
@@ -417,6 +491,7 @@ mod tests {
                     segment_id: "other".into(),
                     material_id: "other".into(),
                     words,
+                    span: None,
                 }],
             )
             .unwrap_err();
@@ -444,6 +519,7 @@ mod tests {
                     segment_id: "empty".into(),
                     material_id: "empty".into(),
                     words: WordColumns::default(),
+                    span: None,
                 }],
             )
             .unwrap_err();
@@ -459,6 +535,7 @@ mod tests {
             &SegmentId::new(id),
             &MaterialId::new(id),
             columns(0, 400, "hi"),
+            None,
         )
     }
 
@@ -467,7 +544,7 @@ mod tests {
         draft.tracks[0].segments.push(Segment::new(
             "picture",
             "picture",
-            cutlass_model::TimeRange::new(0, 2_000_000),
+            TimeRange::new(0, 2_000_000),
         ));
         draft
     }
@@ -507,7 +584,7 @@ mod tests {
         lane.segments.push(Segment::new(
             "title",
             "title",
-            cutlass_model::TimeRange::new(3_000_000, 1_000_000),
+            TimeRange::new(3_000_000, 1_000_000),
         ));
         caption_on(&mut draft, "titles", "second").unwrap();
         assert_eq!(flag(&draft, "titles"), TrackFlag::None);
@@ -540,7 +617,7 @@ mod tests {
         SubtitleCue {
             segment_id: SegmentId::new(id),
             material_id: MaterialId::new(id),
-            target: cutlass_model::TimeRange::new(start, duration),
+            target: TimeRange::new(start, duration),
             words: columns(0, duration / 1_000, text),
         }
     }
@@ -734,5 +811,169 @@ mod tests {
             );
             assert_eq!(session.draft(), &before);
         }
+    }
+
+    fn line(id: &str, start: i64, length: i64, word: &str) -> Request {
+        Request::AddCaption {
+            source_id: "picture".into(),
+            track_id: "captions".into(),
+            segment_id: id.into(),
+            material_id: id.into(),
+            words: columns(0, 300, word),
+            span: Some(Box::new(TimeRange::new(start, length))),
+        }
+    }
+
+    fn lane(draft: &Draft) -> Vec<(String, TimeRange)> {
+        draft
+            .tracks
+            .iter()
+            .find(|track| track.id.as_str() == "captions")
+            .map(|track| {
+                track
+                    .segments
+                    .iter()
+                    .map(|segment| (segment.id.as_str().to_owned(), segment.target.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn owners(draft: &Draft) -> Vec<(String, String)> {
+        draft
+            .relationships
+            .iter()
+            .flat_map(|relationship| &relationship.id_to_id)
+            .map(|pair| {
+                (
+                    pair.owner.as_str().to_owned(),
+                    pair.dependent.as_str().to_owned(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_transcript_lands_as_a_caption_per_line_and_is_recaptioned_in_one_step() {
+        use crate::Session;
+        let mut session = Session::open(draft_with_picture());
+        session
+            .apply(
+                0,
+                &[
+                    line("one", 0, 1_200_000, "one"),
+                    line("two", 1_200_000, 800_000, "two"),
+                ],
+            )
+            .unwrap();
+        assert_eq!(
+            lane(session.draft()),
+            [
+                ("one".to_owned(), TimeRange::new(0, 1_200_000)),
+                ("two".to_owned(), TimeRange::new(1_200_000, 800_000)),
+            ]
+        );
+        assert_eq!(owners(session.draft()).len(), 2);
+        session.undo().unwrap();
+        assert!(lane(session.draft()).is_empty());
+
+        // A line outside the clip it was heard from is refused.
+        let revision = session.revision();
+        assert_eq!(
+            session.apply(revision, &[line("late", 1_500_000, 1_000_000, "late")]),
+            Err(EditError::SourceBounds)
+        );
+        assert_eq!(
+            session.apply(revision, &[line("none", 0, 0, "none")]),
+            Err(EditError::SourceBounds)
+        );
+
+        session
+            .apply(
+                revision,
+                &[
+                    line("one", 0, 1_200_000, "one"),
+                    line("two", 1_200_000, 800_000, "two"),
+                ],
+            )
+            .unwrap();
+        let mut look = session.draft().clone();
+        look.materials
+            .texts
+            .iter_mut()
+            .find(|text| text.id.as_str() == "two")
+            .unwrap()
+            .caption_style = "pop".to_owned();
+        let mut session = Session::open(look);
+        let cue = |id: &str, start: i64, length: i64| SubtitleCue {
+            segment_id: id.into(),
+            material_id: id.into(),
+            target: TimeRange::new(start, length),
+            words: columns(0, 200, id),
+        };
+        session
+            .apply(
+                0,
+                &[Request::RecaptionClip {
+                    source_id: "picture".into(),
+                    like: "two".into(),
+                    lines: vec![
+                        cue("a", 0, 500_000),
+                        cue("b", 500_000, 700_000),
+                        cue("c", 1_200_000, 800_000),
+                    ],
+                }],
+            )
+            .unwrap();
+        let draft = session.draft();
+        assert_eq!(
+            lane(draft)
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect::<Vec<_>>(),
+            ["a", "b", "c"]
+        );
+        assert_eq!(owners(draft).len(), 3);
+        assert!(owners(draft).iter().all(|(owner, _)| owner == "picture"));
+        assert!(
+            draft
+                .materials
+                .texts
+                .iter()
+                .all(|text| text.caption_style == "pop")
+        );
+        assert_eq!(draft.materials.texts.len(), 3);
+        session.undo().unwrap();
+        assert_eq!(
+            lane(session.draft())
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect::<Vec<_>>(),
+            ["one", "two"]
+        );
+
+        let before = session.draft().clone();
+        let revision = session.revision();
+        let refused = [
+            Request::RecaptionClip {
+                source_id: "picture".into(),
+                like: "two".into(),
+                lines: Vec::new(),
+            },
+            Request::RecaptionClip {
+                source_id: "other".into(),
+                like: "two".into(),
+                lines: vec![cue("a", 0, 500_000)],
+            },
+        ];
+        assert_eq!(
+            session.apply(revision, &refused[..1]),
+            Err(EditError::WordShape)
+        );
+        assert_eq!(
+            session.apply(revision, &refused[1..]),
+            Err(EditError::MissingSegment)
+        );
+        assert_eq!(session.draft(), &before);
     }
 }

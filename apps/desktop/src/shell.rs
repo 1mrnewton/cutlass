@@ -44,7 +44,7 @@ use cutlass_storage::Home;
 use cutlass_store::{Folder, Hold, StoreError};
 use cutlass_transcription::{
     FileSource, HeardClip, HeardMiss, ParakeetUnified, PcmSource, PrepareError, RecognizeError,
-    Recognizer, caption_request, columns, fit, words_on_timeline,
+    Recognizer, caption_requests, columns, fit, words_on_timeline,
 };
 
 mod assistant;
@@ -4659,10 +4659,42 @@ impl Shell {
         clip: &HeardClip,
         words: &WordColumns,
     ) -> Result<(), ShellError> {
-        let request =
-            cutlass_transcription::rerun_request(self.session_draft()?, caption, clip, words)
-                .map_err(heard_error)?;
-        self.apply(request)
+        let mut next_id = self.next_id;
+        let mut fresh = |prefix: &str| {
+            next_id = next_id.saturating_add(1);
+            format!("{prefix}-{next_id}")
+        };
+        let requests = cutlass_transcription::rerun_requests(
+            self.session_draft()?,
+            caption,
+            clip,
+            words,
+            &mut fresh,
+        )
+        .map_err(heard_error);
+        self.next_id = next_id;
+        let requests = requests?;
+        // The re-run lines replace the selected caption: the one now under
+        // its start is selected.
+        let start = self
+            .session_draft()
+            .ok()
+            .and_then(|draft| placed(draft, caption).map(|(segment, _)| segment.target.start));
+        self.apply_requests(&requests)?;
+        let lines = match requests.first() {
+            Some(Request::RecaptionClip { lines, .. }) => lines.clone(),
+            _ => Vec::new(),
+        };
+        let picked = lines
+            .iter()
+            .rev()
+            .find(|line| start.is_some_and(|start| line.target.start <= start))
+            .or_else(|| lines.first())
+            .map(|line| line.segment_id.clone());
+        if picked.is_some() {
+            self.select(picked);
+        }
+        Ok(())
     }
 
     /// The clip a transcript was heard from is still the same length and
@@ -4869,10 +4901,11 @@ impl Shell {
             next_id = next_id.saturating_add(1);
             format!("{prefix}-{next_id}")
         };
-        let request =
-            caption_request(self.session_draft()?, clip, words, &mut fresh).map_err(heard_error);
+        // One caption clip per line, back to back, as one undo step.
+        let requests =
+            caption_requests(self.session_draft()?, clip, words, &mut fresh).map_err(heard_error);
         self.next_id = next_id;
-        self.apply(request?)
+        self.apply_requests(&requests?)
     }
 
     /// The selected clip is a video, so its sound can be placed on its own clip.
@@ -16155,10 +16188,8 @@ mod tests {
                     && track.segments.len() == 1
             })
             .expect("caption track");
-        assert_eq!(
-            caption_track.segments[0].target,
-            TimeRange::new(0, 2_000_000)
-        );
+        // A caption line ends with its last word, not with the clip.
+        assert_eq!(caption_track.segments[0].target, TimeRange::new(0, 900_000));
         let material = draft
             .materials
             .texts
@@ -16181,7 +16212,7 @@ mod tests {
 
         // Re-run captions hears the clip again and keeps the caption's look.
         let heard_caption = caption_track.segments[0].id.clone();
-        desktop.select(Some(heard_caption));
+        desktop.select(Some(heard_caption.clone()));
         assert!(desktop.rerun_caption_enabled());
         desktop.set_caption_style("pop").unwrap();
         let again = CaptionStandIn {
@@ -16204,9 +16235,13 @@ mod tests {
         };
         assert_eq!(
             rerun(&desktop, "hello"),
-            Some(("pop".to_owned(), vec![100]))
+            Some(("pop".to_owned(), vec![0])),
+            "the line starts with its word"
         );
+        // The re-run line under the caption's start is selected.
+        assert_ne!(desktop.selected(), Some(&heard_caption));
         desktop.undo().unwrap();
+        desktop.select(Some(heard_caption));
         assert_eq!(
             rerun(&desktop, "hi there"),
             Some(("pop".to_owned(), vec![0, 400]))
@@ -16245,7 +16280,7 @@ mod tests {
                     && track
                         .segments
                         .iter()
-                        .any(|segment| segment.target == TimeRange::new(3_000_000, 1_000_000))
+                        .any(|segment| segment.target == TimeRange::new(3_000_000, 600_000))
             })
             .expect("reused");
         assert_eq!(reused.segments.len(), 2);
@@ -16315,8 +16350,10 @@ mod tests {
             .find(|text| text.content == "back")
             .expect("back")
             .clone();
-        assert_eq!(back.words.start_time, [1_000]);
-        assert_eq!(back.words.end_time, [2_000]);
+        // The reversed clip hears the word in its second half; the line
+        // starts there, so the word starts its own clock.
+        assert_eq!(back.words.start_time, [0]);
+        assert_eq!(back.words.end_time, [1_000]);
 
         let odd_words = CaptionStandIn {
             words: vec![RecognizedWord {
@@ -16363,7 +16400,8 @@ mod tests {
             .flat_map(|track| track.segments.iter())
             .find(|segment| segment.material_id == sound_text.id)
             .expect("sound clip");
-        assert_eq!(sound_segment.target, TimeRange::new(14_000_000, 1_000_000));
+        // A one-word line stays up long enough to read.
+        assert_eq!(sound_segment.target, TimeRange::new(14_000_000, 600_000));
         desktop.undo().unwrap();
         assert!(
             desktop

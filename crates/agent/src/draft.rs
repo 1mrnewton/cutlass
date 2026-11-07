@@ -445,6 +445,7 @@ pub fn request_name(request: &Request) -> &'static str {
         Request::Trim { .. } => "trim",
         Request::SetWords { .. } => "set_words",
         Request::AddCaption { .. } => "add_caption",
+        Request::RecaptionClip { .. } => "recaption_clip",
         Request::AddSubtitles { .. } => "add_subtitles",
         Request::InsertCaption { .. } => "insert_caption",
         Request::SetCaptionTemplate { .. } => "set_caption_template",

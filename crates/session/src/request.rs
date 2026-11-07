@@ -85,14 +85,19 @@ pub enum Request {
     },
     /// Place one caption for `source_id` and store its words.
     ///
-    /// The caption uses the source clip's timeline range. `track_id` is created
-    /// when it is missing. Word times are milliseconds on that range.
+    /// The caption uses the source clip's timeline range, or `span` inside
+    /// it, so one transcript can be placed as a caption per line. `track_id`
+    /// is created when it is missing. Word times are milliseconds on the
+    /// caption's own range.
     AddCaption {
         source_id: SegmentId,
         track_id: TrackId,
         segment_id: SegmentId,
         material_id: MaterialId,
         words: WordColumns,
+        /// Boxed, so a request stays small.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        span: Option<Box<TimeRange>>,
     },
     /// Place subtitle cues as captions on a new text lane `track_id`.
     ///
@@ -109,6 +114,15 @@ pub enum Request {
     /// canvas, then takes `cue`'s words. `like` must be a caption on an
     /// unlocked text lane, and the cue must fit beside the lane's clips.
     InsertCaption { like: SegmentId, cue: SubtitleCue },
+    /// Give the clip `source_id` was heard from new caption lines: every
+    /// caption linked to it on `like`'s lane comes off, and each line is
+    /// placed there looking like `like`, linked to `source_id`. `like` must
+    /// be one of those captions.
+    RecaptionClip {
+        source_id: SegmentId,
+        like: SegmentId,
+        lines: Vec<SubtitleCue>,
+    },
     /// Place the picture's sound on an audio clip linked to `source_id`.
     ///
     /// `track_id` is created when it is missing. The picture stays where it is.

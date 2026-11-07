@@ -18,6 +18,7 @@ mod captions;
 mod features;
 mod file;
 mod job;
+mod lines;
 mod model;
 mod parakeet;
 mod prepare;
@@ -44,11 +45,14 @@ pub fn weights_missing(what: &str) {
 mod words;
 
 pub use captions::{
-    HeardClip, HeardMiss, caption_request, caption_row, caption_source, heard_clip, rerun_request,
-    words_on_timeline,
+    HeardClip, HeardMiss, caption_requests, caption_row, caption_source, heard_clip,
+    rerun_requests, words_on_timeline,
 };
 pub use file::FileSource;
 pub use job::{Job, JobError};
+pub use lines::{
+    HeardLine, LINE_LETTERS, LINE_PAUSE_MS, LINE_SHORTEST_MS, LINE_WORDS, heard_lines,
+};
 pub use model::{AcousticModel, AcousticWeights, LocalRecognizer, ModelError};
 pub use parakeet::Parakeet;
 pub use prepare::{Pcm, PcmSource, PrepareError, fit};

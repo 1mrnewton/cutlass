@@ -2,10 +2,12 @@
 //! how its word times land on the timeline, and the caption row.
 
 use cutlass_model::{
-    Draft, MaterialId, MaterialRef, SegmentId, TimeRange, TrackAttribute, TrackId, TrackType,
-    WordColumns,
+    AnimType, Draft, MaterialId, MaterialRef, Micros, SegmentId, TimeRange, TrackAttribute,
+    TrackId, TrackType, WordColumns, segment_animations,
 };
-use cutlass_session::Request;
+use cutlass_session::{Request, SubtitleCue};
+
+use crate::lines::heard_lines;
 
 /// The sound a clip plays, and how it maps onto the timeline.
 #[derive(Clone, Debug, PartialEq)]
@@ -113,27 +115,60 @@ pub fn caption_row(draft: &Draft, range: &TimeRange) -> Option<TrackId> {
         .map(|track| track.id.clone())
 }
 
-/// The request that writes `words` (already on the timeline clock) as a
-/// caption under `clip`, on a free text row or a new one. `fresh` makes an
-/// unused id from a prefix.
-pub fn caption_request(
+/// The requests that write `words` (already on the timeline clock) as
+/// captions under `clip`, one clip per line of [`heard_lines`], back to back
+/// on a free text row or a new one, each linked to `clip`. Applied together
+/// they are one undo step. `fresh` makes an unused id from a prefix.
+pub fn caption_requests(
     draft: &Draft,
     clip: &HeardClip,
     words: WordColumns,
     fresh: &mut dyn FnMut(&str) -> String,
-) -> Result<Request, HeardMiss> {
+) -> Result<Vec<Request>, HeardMiss> {
+    let lines = lines_on_clip(clip, &words)?;
+    let track_id =
+        caption_row(draft, &clip.target).unwrap_or_else(|| TrackId::new(fresh("captions")));
+    Ok(lines
+        .into_iter()
+        .map(|(span, words)| Request::AddCaption {
+            source_id: clip.source_id.clone(),
+            track_id: track_id.clone(),
+            segment_id: SegmentId::new(fresh("caption")),
+            material_id: MaterialId::new(fresh("caption")),
+            words,
+            span: Some(Box::new(span)),
+        })
+        .collect())
+}
+
+/// `words` split into lines, each with its place on the timeline.
+fn lines_on_clip(
+    clip: &HeardClip,
+    words: &WordColumns,
+) -> Result<Vec<(TimeRange, WordColumns)>, HeardMiss> {
     if words.text.is_empty() {
         return Err(HeardMiss::NothingHeard);
     }
-    let track_id =
-        caption_row(draft, &clip.target).unwrap_or_else(|| TrackId::new(fresh("captions")));
-    Ok(Request::AddCaption {
-        source_id: clip.source_id.clone(),
-        track_id,
-        segment_id: SegmentId::new(fresh("caption")),
-        material_id: MaterialId::new(fresh("caption")),
-        words,
-    })
+    let start = clip.target.start.0;
+    let length_us = clip.target.duration.0;
+    let lines = heard_lines(words, length_us / 1_000);
+    if lines.is_empty() {
+        return Err(HeardMiss::NoSound);
+    }
+    Ok(lines
+        .into_iter()
+        .map(|line| {
+            let from = line.start_ms * 1_000;
+            // A line that reaches the clip's end ends with it, to the
+            // microsecond.
+            let to = if line.end_ms * 1_000 >= length_us {
+                length_us
+            } else {
+                line.end_ms * 1_000
+            };
+            (TimeRange::new(start + from, to - from), line.words)
+        })
+        .collect())
 }
 
 /// The clip caption `caption_id` was heard from: the owner it was linked
@@ -150,51 +185,79 @@ pub fn caption_source(draft: &Draft, caption_id: &SegmentId) -> Result<SegmentId
         .ok_or(HeardMiss::NoSource)
 }
 
-/// The request that gives caption `caption_id` the words heard again from
-/// `clip`, already on the clip's timeline clock. The words are moved to the
-/// caption's own clock, and only those it spans are kept, so a caption that
-/// was trimmed or split keeps its own stretch. Its look stays.
-pub fn rerun_request(
+/// The requests that give the clip caption `caption_id` was heard from new
+/// captions from `words` heard again, split into lines as Transcribe splits
+/// them. Every caption linked to the clip on that lane comes off; the lines
+/// take `caption_id`'s look and its animations. One undo step. `fresh`
+/// makes an unused id from a prefix.
+pub fn rerun_requests(
     draft: &Draft,
     caption_id: &SegmentId,
     clip: &HeardClip,
     words: &WordColumns,
-) -> Result<Request, HeardMiss> {
+    fresh: &mut dyn FnMut(&str) -> String,
+) -> Result<Vec<Request>, HeardMiss> {
     let segment = draft
         .tracks
         .iter()
         .flat_map(|track| &track.segments)
         .find(|segment| &segment.id == caption_id)
         .ok_or(HeardMiss::UnknownSegment)?;
-    let Some(MaterialRef::Text(text)) = draft.materials.get(segment.material_id.as_str()) else {
+    if !matches!(
+        draft.materials.get(segment.material_id.as_str()),
+        Some(MaterialRef::Text(_))
+    ) {
         return Err(HeardMiss::NotCaption);
-    };
-    let offset = (clip.target.start.0 - segment.target.start.0) / 1_000;
-    let length = segment.target.duration.0 / 1_000;
-    let mut kept = WordColumns::default();
-    for ((word, start), end) in words
-        .text
-        .iter()
-        .zip(&words.start_time)
-        .zip(&words.end_time)
-    {
-        let start = start.checked_add(offset).ok_or(HeardMiss::BadClock)?;
-        let end = end.checked_add(offset).ok_or(HeardMiss::BadClock)?;
-        if end <= 0 || start >= length {
-            continue;
+    }
+    let lines: Vec<SubtitleCue> = lines_on_clip(clip, words)?
+        .into_iter()
+        .map(|(target, words)| SubtitleCue {
+            segment_id: SegmentId::new(fresh("caption")),
+            material_id: MaterialId::new(fresh("caption")),
+            target,
+            words,
+        })
+        .collect();
+    let animations: Vec<(AnimType, String, Micros)> = segment_animations(draft, segment)
+        .map(|group| {
+            group
+                .animations
+                .iter()
+                .filter_map(|row| {
+                    let kind = match row.kind.as_str() {
+                        "in" => AnimType::In,
+                        "out" => AnimType::Out,
+                        "loop" => AnimType::Loop,
+                        "caption" => AnimType::Caption,
+                        _ => return None,
+                    };
+                    Some((
+                        kind,
+                        row.resource_id.clone(),
+                        row.duration.unwrap_or(Micros(0)),
+                    ))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut requests = Vec::with_capacity(1 + lines.len() * animations.len());
+    let ids: Vec<SegmentId> = lines.iter().map(|line| line.segment_id.clone()).collect();
+    requests.push(Request::RecaptionClip {
+        source_id: clip.source_id.clone(),
+        like: caption_id.clone(),
+        lines,
+    });
+    for id in ids {
+        for (kind, animation, duration) in &animations {
+            requests.push(Request::SetAnimation {
+                segment_id: id.clone(),
+                kind: *kind,
+                animation: Some(animation.clone()),
+                duration: *duration,
+            });
         }
-        let start = start.clamp(0, length);
-        kept.start_time.push(start);
-        kept.end_time.push(end.clamp(start, length));
-        kept.text.push(word.clone());
     }
-    if kept.text.is_empty() {
-        return Err(HeardMiss::NothingHeard);
-    }
-    Ok(Request::SetWords {
-        material_id: text.id.clone(),
-        words: kept,
-    })
+    Ok(requests)
 }
 
 fn timeline_millis(start_ms: i64, end_ms: i64, clip: &HeardClip) -> Result<(i64, i64), HeardMiss> {
@@ -283,9 +346,8 @@ mod tests {
             next += 1;
             format!("{prefix}-{next}")
         };
-        let Request::AddCaption { track_id, .. } =
-            caption_request(&draft, &clip, words(), &mut fresh).unwrap()
-        else {
+        let requests = caption_requests(&draft, &clip, words(), &mut fresh).unwrap();
+        let Some(Request::AddCaption { track_id, .. }) = requests.first().cloned() else {
             panic!("a caption request");
         };
         assert_eq!(track_id, TrackId::new("captions-1"));
@@ -313,76 +375,195 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_rerun_finds_the_heard_clip_and_keeps_the_captions_own_stretch() {
-        let mut session = cutlass_session::Session::open(draft(1.0, false));
+    /// A long talk heard on a 20 s clip: three sentences, a pause, and a
+    /// run-on that needs a length break. Each word lasts 250 ms.
+    fn talk() -> WordColumns {
+        let script = "This is good. And it's actually good so I'm gonna show you the \
+                      benchmarks in a second. Then we will look at what it costs";
+        let mut words = WordColumns::default();
+        let mut at = 0;
+        for (index, word) in script.split_whitespace().enumerate() {
+            if index == 17 {
+                at += 1_000;
+            }
+            words.start_time.push(at);
+            words.end_time.push(at + 250);
+            words.text.push(word.to_owned());
+            at += 300;
+        }
+        words
+    }
+
+    fn talk_session() -> (cutlass_session::Session, HeardClip, Vec<Request>) {
+        let mut draft = Draft::empty("D");
+        draft.materials.audios.push(MaterialAudio {
+            id: MaterialId::new("m"),
+            path: "/talk.wav".to_owned(),
+            ..Default::default()
+        });
+        draft.tracks[0]
+            .segments
+            .push(Segment::new("a", "m", TimeRange::new(0, 20_000_000)));
+        let session = cutlass_session::Session::open(draft);
         let clip = heard_clip(session.draft(), &SegmentId::new("a")).unwrap();
         let mut next = 0;
         let mut fresh = |prefix: &str| {
             next += 1;
             format!("{prefix}-{next}")
         };
-        let request = caption_request(session.draft(), &clip, words(), &mut fresh).unwrap();
-        session.apply(0, &[request]).unwrap();
-        // The main row closed its gap, so the clip is heard where it is now.
-        let clip = heard_clip(session.draft(), &SegmentId::new("a")).unwrap();
-        assert_eq!(clip.target.start.0, 0);
-        let caption = SegmentId::new("caption-2");
+        let requests = caption_requests(session.draft(), &clip, talk(), &mut fresh).unwrap();
+        (session, clip, requests)
+    }
+
+    fn lane(draft: &Draft) -> Vec<(String, TimeRange, WordColumns)> {
+        let track = draft
+            .tracks
+            .iter()
+            .find(|track| track.flag == cutlass_model::TrackFlag::TextSubtitle)
+            .unwrap();
+        track
+            .segments
+            .iter()
+            .map(|segment| {
+                let Some(MaterialRef::Text(text)) =
+                    draft.materials.get(segment.material_id.as_str())
+                else {
+                    panic!("text");
+                };
+                (
+                    text.content.clone(),
+                    segment.target.clone(),
+                    text.words.clone(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_long_talk_lands_as_a_caption_per_line_back_to_back_in_one_step() {
+        let (mut session, _, requests) = talk_session();
+        assert_eq!(requests.len(), 4);
+        session.apply(0, &requests).unwrap();
+        let rows = lane(session.draft());
+        let texts: Vec<&str> = rows.iter().map(|row| row.0.as_str()).collect();
         assert_eq!(
-            caption_source(session.draft(), &caption),
+            texts,
+            [
+                "This is good.",
+                "And it's actually good so I'm gonna show you the",
+                "benchmarks in a second.",
+                "Then we will look at what it costs",
+            ]
+        );
+        // Back to back, but the pause before "Then" stays open.
+        assert_eq!(rows[0].1, TimeRange::new(0, 900_000));
+        assert_eq!(rows[1].1, TimeRange::new(900_000, 3_000_000));
+        assert_eq!(rows[2].1, TimeRange::new(3_900_000, 1_150_000));
+        assert_eq!(rows[3].1, TimeRange::new(6_100_000, 2_350_000));
+        // Each caption's words are on its own clock.
+        assert_eq!(rows[1].2.start_time[0], 0);
+        assert_eq!(rows[1].2.start_time[1], 300);
+        assert_eq!(rows[3].2.end_time.last(), Some(&2_350));
+        let draft = session.draft();
+        let pairs: Vec<_> = draft
+            .relationships
+            .iter()
+            .flat_map(|relationship| &relationship.id_to_id)
+            .collect();
+        assert_eq!(pairs.len(), 4);
+        assert!(pairs.iter().all(|pair| pair.owner.as_str() == "a"));
+        session.undo().unwrap();
+        assert!(session.draft().materials.texts.is_empty());
+    }
+
+    #[test]
+    fn a_rerun_splits_the_new_words_the_same_way_and_keeps_the_look() {
+        let (mut session, clip, requests) = talk_session();
+        session.apply(0, &requests).unwrap();
+        let first = session
+            .draft()
+            .tracks
+            .iter()
+            .find(|track| track.flag == cutlass_model::TrackFlag::TextSubtitle)
+            .unwrap()
+            .segments[0]
+            .id
+            .clone();
+        assert_eq!(
+            caption_source(session.draft(), &first),
             Ok(SegmentId::new("a"))
         );
-
-        let heard = WordColumns {
-            start_time: vec![0, 900, 1_500],
-            end_time: vec![800, 1_400, 1_900],
-            text: vec!["hello".to_owned(), "out".to_owned(), "there".to_owned()],
-            rest: Default::default(),
-        };
-        let request = rerun_request(session.draft(), &caption, &clip, &heard).unwrap();
-        let Request::SetWords { words, .. } = &request else {
-            panic!("set words");
-        };
-        assert_eq!(words, &heard);
-
-        // A caption that starts a second later keeps the words it spans,
-        // on its own clock.
-        let mut moved = session.draft().clone();
-        let segment = moved
-            .tracks
-            .iter_mut()
-            .flat_map(|track| &mut track.segments)
-            .find(|segment| segment.id == caption)
+        let mut styled = session.draft().clone();
+        for text in &mut styled.materials.texts {
+            "pop".clone_into(&mut text.caption_style);
+        }
+        let mut session = cutlass_session::Session::open(styled);
+        session
+            .apply(
+                0,
+                &[Request::SetAnimation {
+                    segment_id: first.clone(),
+                    kind: AnimType::Caption,
+                    animation: Some("cutlass-anim-loop-pulse".to_owned()),
+                    duration: Micros(0),
+                }],
+            )
             .unwrap();
-        segment.target = TimeRange::new(1_000_000, 1_000_000);
-        let Request::SetWords { words, .. } =
-            rerun_request(&moved, &caption, &clip, &heard).unwrap()
-        else {
-            panic!("set words");
+        let mut next = 100;
+        let mut fresh = |prefix: &str| {
+            next += 1;
+            format!("{prefix}-{next}")
         };
-        assert_eq!(words.text, ["out", "there"]);
-        assert_eq!(words.start_time, [0, 500]);
-        assert_eq!(words.end_time, [400, 900]);
-
-        session.apply(1, &[request]).unwrap();
+        let mut again = talk();
+        "great.".clone_into(&mut again.text[2]);
+        let requests = rerun_requests(session.draft(), &first, &clip, &again, &mut fresh).unwrap();
+        session.apply(1, &requests).unwrap();
+        let draft = session.draft();
+        let rows = lane(draft);
+        assert_eq!(rows.len(), 4);
+        assert_eq!(rows[0].0, "This is great.");
+        assert_eq!(rows[1].1, TimeRange::new(900_000, 3_000_000));
+        assert_eq!(draft.materials.texts.len(), 4);
+        assert!(
+            draft
+                .materials
+                .texts
+                .iter()
+                .all(|text| text.caption_style == "pop")
+        );
+        let subtitles = draft
+            .tracks
+            .iter()
+            .find(|track| track.flag == cutlass_model::TrackFlag::TextSubtitle)
+            .unwrap();
+        for segment in &subtitles.segments {
+            let row = segment_animations(draft, segment).expect("animation");
+            assert_eq!(row.animations[0].kind, "caption");
+        }
         session.undo().unwrap();
+        assert_eq!(lane(session.draft())[0].0, "This is good.");
     }
 
     #[test]
     fn a_rerun_refuses_a_caption_with_no_heard_clip_or_no_words_in_it() {
         let draft = draft(1.0, false);
         let clip = heard_clip(&draft, &SegmentId::new("a")).unwrap();
+        let mut fresh = |prefix: &str| prefix.to_owned();
         assert_eq!(
             caption_source(&draft, &SegmentId::new("a")),
             Err(HeardMiss::NoSource)
         );
         assert_eq!(
-            rerun_request(&draft, &SegmentId::new("z"), &clip, &words()),
+            rerun_requests(&draft, &SegmentId::new("z"), &clip, &words(), &mut fresh),
             Err(HeardMiss::UnknownSegment)
         );
         assert_eq!(
-            rerun_request(&draft, &SegmentId::new("a"), &clip, &words()),
+            rerun_requests(&draft, &SegmentId::new("a"), &clip, &words(), &mut fresh),
             Err(HeardMiss::NotCaption)
+        );
+        assert_eq!(
+            caption_requests(&draft, &clip, WordColumns::default(), &mut fresh),
+            Err(HeardMiss::NothingHeard)
         );
     }
 }

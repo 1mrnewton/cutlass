@@ -213,6 +213,7 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             segment_id,
             material_id,
             words,
+            span,
         } => words::add_caption(
             draft,
             source_id,
@@ -220,9 +221,15 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             segment_id,
             material_id,
             words.clone(),
+            span.as_deref(),
         ),
         Request::AddSubtitles { track_id, cues } => words::add_subtitles(draft, track_id, cues),
         Request::InsertCaption { like, cue } => words::insert_caption(draft, like, cue),
+        Request::RecaptionClip {
+            source_id,
+            like,
+            lines,
+        } => words::recaption_clip(draft, source_id, like, lines),
         Request::ExtractAudio {
             source_id,
             track_id,

@@ -744,6 +744,65 @@ impl Shell {
         }
     }
 
+    /// The template the selected caption was styled with, by its id.
+    #[must_use]
+    pub fn caption_template(&self) -> Option<String> {
+        match (self.draft(), self.selected()) {
+            (Some(draft), Some(segment_id)) => {
+                cutlass_editor::caption_template_of(draft, segment_id)
+            }
+            _ => None,
+        }
+    }
+
+    /// Style the selected caption as template `id`: its style, caption
+    /// animation, stagger and look. While "Apply to all main captions" is
+    /// on, every caption on its subtitle row takes it. One undo step.
+    pub fn set_caption_template(&mut self, id: &str) -> Result<(), ShellError> {
+        let segment_id = self.text_segment()?;
+        self.refuse_locked(&segment_id)?;
+        let template = cutlass_editor::caption_template(id).ok_or_else(|| {
+            ShellError::Unavailable("there is no such caption template".to_owned())
+        })?;
+        let draft = self.session_draft()?;
+        if cutlass_editor::caption_rows(draft, &segment_id).is_empty() {
+            return Err(caption_miss(cutlass_editor::CaptionListMiss::NotCaption));
+        }
+        let requests = cutlass_editor::caption_template_requests(
+            draft,
+            &segment_id,
+            template,
+            self.all_captions(),
+        );
+        self.apply_requests(&requests)
+    }
+
+    /// Replace `find` with `with`, case ignored, in every caption on the
+    /// selected caption's lane. Each changed caption keeps the times of the
+    /// words that stay. One undo step; how many were replaced.
+    pub fn replace_in_captions(&mut self, find: &str, with: &str) -> Result<usize, ShellError> {
+        let segment_id = self.text_segment()?;
+        self.refuse_locked(&segment_id)?;
+        if find.trim().is_empty() {
+            return Err(ShellError::Unavailable("type the words to find".to_owned()));
+        }
+        let draft = self.session_draft()?;
+        let replaced = cutlass_editor::replace_in_captions(draft, &segment_id, find, with.trim())
+            .map_err(|miss| match miss {
+            cutlass_editor::CaptionListMiss::Empty => ShellError::Unavailable(
+                "that would leave a caption with no words; delete it instead".to_owned(),
+            ),
+            miss => caption_miss(miss),
+        })?;
+        if replaced.count == 0 {
+            return Err(ShellError::Unavailable("no caption says that".to_owned()));
+        }
+        if !replaced.requests.is_empty() {
+            self.apply_requests(&replaced.requests)?;
+        }
+        Ok(replaced.count)
+    }
+
     /// Take caption `segment_id` off the timeline. One undo restores it.
     pub fn remove_caption(&mut self, segment_id: &SegmentId) -> Result<(), ShellError> {
         self.refuse_locked(segment_id)?;
@@ -1603,5 +1662,85 @@ mod tests {
             desktop.set_caption_word(0, "won").unwrap_err().to_string(),
             "the track is locked"
         );
+    }
+
+    #[test]
+    fn a_caption_template_styles_the_row_while_apply_to_all_is_on() {
+        let temp = Temp::new();
+        let mut desktop = subtitle_row(&temp);
+        pick(&mut desktop, "first");
+        let before = desktop.draft().unwrap().clone();
+        desktop.set_caption_template("cutlass-caption-pop").unwrap();
+        assert_eq!(
+            desktop.caption_template().as_deref(),
+            Some("cutlass-caption-pop")
+        );
+        let styles = |desktop: &Shell| -> Vec<String> {
+            ["first", "second", "title"]
+                .iter()
+                .map(|id| {
+                    let draft = desktop.draft().unwrap();
+                    let text = draft
+                        .materials
+                        .texts
+                        .iter()
+                        .find(|t| t.id.as_str() == *id)
+                        .unwrap();
+                    text.caption_style.clone()
+                })
+                .collect()
+        };
+        assert_eq!(styles(&desktop), ["pop", "pop", ""]);
+        desktop.undo().unwrap();
+        assert_eq!(desktop.draft().unwrap(), &before);
+
+        desktop.set_all_captions(false);
+        desktop
+            .set_caption_template("cutlass-caption-neon")
+            .unwrap();
+        assert_eq!(styles(&desktop), ["neon", "", ""]);
+
+        assert!(desktop.set_caption_template("nope").is_err());
+        pick(&mut desktop, "title");
+        assert!(desktop.set_caption_template("cutlass-caption-pop").is_err());
+        assert_eq!(desktop.caption_template(), None);
+    }
+
+    #[test]
+    fn find_and_replace_reaches_every_caption_on_the_row_as_one_step() {
+        let temp = Temp::new();
+        let mut desktop = subtitle_row(&temp);
+        pick(&mut desktop, "first");
+        let before = desktop.draft().unwrap().clone();
+        let lines = |desktop: &Shell| -> Vec<String> {
+            desktop
+                .caption_rows()
+                .into_iter()
+                .map(|row| row.text)
+                .collect()
+        };
+        assert_eq!(desktop.replace_in_captions("O", "1").unwrap(), 2);
+        assert_eq!(lines(&desktop), ["1ne", "tw1"]);
+        let title = desktop
+            .draft()
+            .unwrap()
+            .materials
+            .texts
+            .iter()
+            .find(|t| t.id.as_str() == "title")
+            .unwrap()
+            .content
+            .clone();
+        assert_eq!(title, "hi");
+        desktop.undo().unwrap();
+        assert_eq!(desktop.draft().unwrap(), &before);
+
+        let revision = desktop.revision();
+        assert!(desktop.replace_in_captions("zebra", "x").is_err());
+        assert!(desktop.replace_in_captions(" ", "x").is_err());
+        assert!(desktop.replace_in_captions("one", "").is_err());
+        assert_eq!(desktop.revision(), revision);
+        pick(&mut desktop, "title");
+        assert!(desktop.replace_in_captions("hi", "yo").is_err());
     }
 }

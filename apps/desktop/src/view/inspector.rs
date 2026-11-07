@@ -260,7 +260,7 @@ fn text_panel(
                     text_basic(shell, ui, state, inspection, caption);
                     footer(ui, &["Save as preset"]);
                 }
-                1 if caption => later_note(ui, "Caption templates"),
+                1 if caption => caption_templates(shell, ui),
                 1 => bubble_page(shell, ui),
                 _ => effect_page(shell, ui),
             }
@@ -291,16 +291,47 @@ fn caption_list(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState) {
     let rows = shell.caption_rows();
     let current = cutlass_editor::row_at(&rows, shell.playhead());
     ui.add_space(8.0);
+    let mut rerun = false;
     ui.horizontal(|ui| {
-        let query = state.fields.entry("caption search".to_owned()).or_default();
-        ui.add(
-            TextEdit::singleline(query)
-                .hint_text("Search")
-                .desired_width(ui.available_width() - 150.0),
-        );
-        later_button(ui, "Translate");
-        later_button(ui, "Find and replace");
+        // The tools sit at the right; the search takes what is left.
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.add(egui::Button::new(RichText::new("?").size(12.0)).fill(BOX))
+                .on_hover_text(CAPTION_LIST_HELP);
+            let open = state.open.contains(REPLACE_ROW);
+            let toggle = egui::Button::new(RichText::new("Replace").size(12.0))
+                .fill(BOX)
+                .selected(open);
+            if ui
+                .add(toggle)
+                .on_hover_text("Find and replace across every caption")
+                .clicked()
+                && !state.open.remove(REPLACE_ROW)
+            {
+                state.open.insert(REPLACE_ROW.to_owned());
+            }
+            rerun = ui
+                .add_enabled(
+                    shell.rerun_caption_enabled(),
+                    egui::Button::new(RichText::new("Re-run").size(12.0)).fill(BOX),
+                )
+                .on_hover_text("Hear this caption's clip again, keeping its look")
+                .on_disabled_hover_text("This caption was not heard from a clip on the timeline")
+                .clicked();
+            later_button(ui, "Translate");
+            let query = state.fields.entry("caption search".to_owned()).or_default();
+            ui.add(
+                TextEdit::singleline(query)
+                    .hint_text("Search")
+                    .desired_width(ui.available_width()),
+            );
+        });
     });
+    if rerun {
+        send(shell, Shell::rerun_caption);
+    }
+    if state.open.contains(REPLACE_ROW) {
+        replace_row(shell, ui, state);
+    }
     let query = state
         .fields
         .get("caption search")
@@ -370,6 +401,57 @@ fn caption_list(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState) {
         send(shell, |shell| shell.add_caption_after(&segment_id));
     } else if let Some(segment_id) = remove {
         send(shell, |shell| shell.remove_caption(&segment_id));
+    }
+}
+
+/// What the Captions list's "?" says.
+const CAPTION_LIST_HELP: &str = "Search shows the captions that say it. Replace swaps what the \
+search finds in every caption, as one undo step. Re-run hears the clip a caption was heard from \
+again and keeps its look. Click a line to type over it; + adds a caption after it.";
+
+/// The Captions list's replace row opens under the search.
+const REPLACE_ROW: &str = "caption replace";
+
+/// Replace what the search finds, in every caption on the lane, as one
+/// undo step. The list below shows the captions it will reach.
+fn replace_row(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState) {
+    let mut replace = false;
+    ui.horizontal(|ui| {
+        let with = state
+            .fields
+            .entry("caption replace".to_owned())
+            .or_default();
+        let response = ui.add(
+            TextEdit::singleline(with)
+                .hint_text("Replace with")
+                .desired_width(ui.available_width() - 90.0),
+        );
+        replace = response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+        replace |= ui
+            .add(egui::Button::new(RichText::new("Replace all").size(12.0)).fill(BOX))
+            .clicked();
+    });
+    if !replace {
+        return;
+    }
+    let find = state
+        .fields
+        .get("caption search")
+        .cloned()
+        .unwrap_or_default();
+    let with = state
+        .fields
+        .get("caption replace")
+        .cloned()
+        .unwrap_or_default();
+    match shell.replace_in_captions(&find, &with) {
+        Ok(count) => {
+            let noun = if count == 1 { "match" } else { "matches" };
+            shell.set_notice(format!("Replaced {count} {noun}"));
+            // The list shows every caption again, the new words in it.
+            state.fields.remove("caption search");
+        }
+        Err(error) => shell.notice_error(&error),
     }
 }
 
@@ -2573,6 +2655,35 @@ fn caption_styles(shell: &mut Shell, ui: &mut Ui, inspection: &Inspection) {
     });
     if let Some(key) = picked {
         send(shell, |shell| shell.set_caption_style(key));
+    }
+}
+
+/// The Templates page: each caption template, the caption's own outlined.
+/// A pick styles every main caption while "Apply to all main captions" is
+/// on, as one undo step.
+fn caption_templates(shell: &mut Shell, ui: &mut Ui) {
+    let current = shell.caption_template();
+    let mut picked = None;
+    ui.add_space(8.0);
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = Vec2::splat(6.0);
+        for template in &cutlass_editor::CAPTION_TEMPLATES {
+            let on = current.as_deref() == Some(template.id);
+            let stroke = if on {
+                Stroke::new(tokens::SELECTED_EDGE * 2.0, tokens::EXPORT)
+            } else {
+                Stroke::NONE
+            };
+            let tile = egui::Button::new(RichText::new(template.name).size(11.0))
+                .fill(BOX)
+                .stroke(stroke);
+            if ui.add_sized([64.0, 48.0], tile).clicked() && !on {
+                picked = Some(template.id);
+            }
+        }
+    });
+    if let Some(id) = picked {
+        send(shell, |shell| shell.set_caption_template(id));
     }
 }
 

@@ -85,14 +85,22 @@ pub enum Request {
     },
     /// Place one caption for `source_id` and store its words.
     ///
-    /// The caption uses the source clip's timeline range. `track_id` is created
-    /// when it is missing. Word times are milliseconds on that range.
+    /// The caption uses the source clip's timeline range, or `span` inside
+    /// it, so one transcript can be placed as a caption per line. `track_id`
+    /// is created when it is missing. Word times are milliseconds on the
+    /// caption's own range.
     AddCaption {
         source_id: SegmentId,
         track_id: TrackId,
         segment_id: SegmentId,
         material_id: MaterialId,
         words: WordColumns,
+        /// Boxed, so a request stays small.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        span: Option<Box<TimeRange>>,
+        /// The font file the caption is set in, as `AddText`'s `face`.
+        #[serde(default)]
+        face: String,
     },
     /// Place subtitle cues as captions on a new text lane `track_id`.
     ///
@@ -102,6 +110,9 @@ pub enum Request {
     AddSubtitles {
         track_id: TrackId,
         cues: Vec<SubtitleCue>,
+        /// The font file the captions are set in, as `AddText`'s `face`.
+        #[serde(default)]
+        face: String,
     },
     /// Place one caption on the lane of caption `like`, looking like it.
     ///
@@ -109,6 +120,18 @@ pub enum Request {
     /// canvas, then takes `cue`'s words. `like` must be a caption on an
     /// unlocked text lane, and the cue must fit beside the lane's clips.
     InsertCaption { like: SegmentId, cue: SubtitleCue },
+    /// Give the clip `source_id` was heard from new caption lines: every
+    /// caption linked to it on `like`'s lane comes off, and each line is
+    /// placed there looking like `like`, linked to `source_id`. `like` must
+    /// be one of those captions.
+    RecaptionClip {
+        source_id: SegmentId,
+        like: SegmentId,
+        lines: Vec<SubtitleCue>,
+        /// The font file a line takes when `like` has none.
+        #[serde(default)]
+        face: String,
+    },
     /// Place the picture's sound on an audio clip linked to `source_id`.
     ///
     /// `track_id` is created when it is missing. The picture stays where it is.
@@ -291,6 +314,14 @@ pub enum Request {
     SetCaptionStyle {
         segment_id: SegmentId,
         style: String,
+    },
+    /// Record the caption template the caption is styled with, by its id
+    /// and name, or take the record off when `resource_id` is empty. Its
+    /// look is set by the requests that go with it.
+    SetCaptionTemplate {
+        segment_id: SegmentId,
+        resource_id: String,
+        name: String,
     },
     /// Mark word `word` of the caption as a keyword, drawn in the style's
     /// spoken look while it shows, or take the mark off.

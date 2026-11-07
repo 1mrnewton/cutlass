@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use super::caption::{Kept, SubtitleKeywords, keywords_in_ranges};
+use super::caption::{CaptionTemplateInfo, Kept, SubtitleKeywords, keywords_in_ranges};
 use super::words::WordColumns;
 use crate::id::MaterialId;
 
@@ -120,6 +120,9 @@ pub struct MaterialText {
     /// `caption_keywords`.
     #[serde(default, skip_serializing_if = "Kept::is_absent")]
     pub subtitle_keywords: Kept<SubtitleKeywords>,
+    /// The caption template this caption was styled with.
+    #[serde(default, skip_serializing_if = "Kept::is_absent")]
+    pub caption_template_info: Kept<CaptionTemplateInfo>,
     /// The [`Bubble`] the background is shaped as, by its key; empty is a
     /// plain box. The app's own: the reference editor does not read it.
     #[serde(
@@ -249,6 +252,7 @@ impl Default for MaterialText {
             translate_text: Kept::Absent,
             translate_words: Kept::Absent,
             subtitle_keywords: Kept::Absent,
+            caption_template_info: Kept::Absent,
             bubble: String::new(),
             caption_style: String::new(),
             caption_keywords: Vec::new(),
@@ -374,6 +378,7 @@ mod tests {
             "translate_text": null,
             "translate_words": {"start_time": [0], "end_time": [100], "text": ["tres"], "tag": 1},
             "subtitle_keywords": {"range": [{"location": 3, "length": 4, "source_type": 2}], "x": true},
+            "caption_template_info": {"resource_id": "7", "resource_name": "Bold", "path": "/p", "is_new": false},
             "words": {"start_time": [0, 100, 200], "end_time": [100, 200, 300], "text": ["so", "very", "good"]}
         });
         let text: MaterialText = serde_json::from_value(raw.clone()).unwrap();
@@ -392,6 +397,7 @@ mod tests {
             "translate_text",
             "translate_words",
             "subtitle_keywords",
+            "caption_template_info",
         ] {
             assert!(!text.rest.contains_key(key), "{key}");
         }
@@ -402,6 +408,7 @@ mod tests {
             "translate_text",
             "translate_words",
             "subtitle_keywords",
+            "caption_template_info",
         ] {
             assert_eq!(back[key], raw[key], "{key}");
         }
@@ -414,6 +421,7 @@ mod tests {
             "translate_text",
             "translate_words",
             "subtitle_keywords",
+            "caption_template_info",
         ] {
             assert!(plain.get(key).is_none(), "{key}");
         }

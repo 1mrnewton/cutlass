@@ -58,6 +58,19 @@ pub struct SubtitleKeywords {
     pub rest: Map<String, Value>,
 }
 
+/// The caption template a caption was styled with.
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+pub struct CaptionTemplateInfo {
+    #[serde(default)]
+    pub resource_id: String,
+    #[serde(default)]
+    pub resource_name: String,
+    /// Keys this model does not name: the package path, its category, and
+    /// where it came from.
+    #[serde(flatten, default)]
+    pub rest: Map<String, Value>,
+}
+
 /// A span of text: `location` and `length` count UTF-16 units of the
 /// material's `content`.
 #[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]

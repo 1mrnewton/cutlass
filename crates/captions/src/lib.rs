@@ -32,7 +32,9 @@ pub use select::{
     KeywordRange, REMATCH_LIMIT, RangeKind, Selection, SplitPiece, TextRange, rematch, select,
     split_keyword,
 };
-pub use style::{CAPTION_STYLES, CaptionStyle, WordLook, caption_style};
+pub use style::{
+    CAPTION_STYLES, CaptionStyle, PLAIN_LIMITS, WordLook, caption_limits, caption_style,
+};
 pub use subtitles::{Cue, LAST_LYRIC_MS, MAX_CUES, SubtitleError, parse_lrc, parse_srt};
 
 /// Why a caption sample could not be produced.

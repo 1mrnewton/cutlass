@@ -44,7 +44,7 @@ use cutlass_storage::Home;
 use cutlass_store::{Folder, Hold, StoreError};
 use cutlass_transcription::{
     FileSource, HeardClip, HeardMiss, ParakeetUnified, PcmSource, PrepareError, RecognizeError,
-    Recognizer, caption_request, columns, fit, words_on_timeline,
+    Recognizer, caption_requests, columns, fit, words_on_timeline,
 };
 
 mod assistant;
@@ -1381,7 +1381,16 @@ impl Shell {
             opened.folder.draft.id.as_str(),
             has_pairs,
         );
-        let mut session = Session::open_project(opened.folder.draft.clone());
+        let mut draft = opened.folder.draft.clone();
+        // Captions an earlier build made with no font file drew nothing.
+        let filled = cutlass_editor::fill_caption_faces(&mut draft, self.face.name());
+        if filled > 0 {
+            cutlass_logger::info!(
+                "{filled} captions had no font file; set in {}",
+                self.face.name()
+            );
+        }
+        let mut session = Session::open_project(draft);
         session.set_linkage(linkage);
         self.outer.clear();
         self.saved = Some((session.revision(), Instant::now()));
@@ -4575,6 +4584,38 @@ impl Shell {
     /// changed meanwhile.
     pub fn transcribe(&mut self) -> Result<(), ShellError> {
         let clip = self.selected_speech()?;
+        self.hear_job("Transcribe", clip, |shell, clip, words| {
+            shell.write_caption(clip, words)
+        })
+    }
+
+    /// The selected caption was heard from a clip still on the timeline, so
+    /// Re-run captions can hear it again.
+    #[must_use]
+    pub fn rerun_caption_enabled(&self) -> bool {
+        self.rerun_target().is_ok()
+    }
+
+    /// Hear the clip the selected caption was heard from again and give the
+    /// caption the new words, keeping its look. One undo restores the old
+    /// words. The local speech model runs as a job.
+    pub fn rerun_caption(&mut self) -> Result<(), ShellError> {
+        let (caption, clip) = self.rerun_target()?;
+        self.hear_job("Re-run captions", clip, move |shell, clip, words| {
+            shell.write_rerun(&caption, clip, &words)
+        })
+    }
+
+    /// Hear `clip` with the local speech model as a job, then `land` the
+    /// words, unless the clip changed meanwhile.
+    fn hear_job(
+        &mut self,
+        label: &str,
+        clip: HeardClip,
+        land: impl FnOnce(&mut Shell, &HeardClip, WordColumns) -> Result<(), ShellError>
+        + Send
+        + 'static,
+    ) -> Result<(), ShellError> {
         // The draft keeps a copied file's path inside the project folder.
         let file = self.sound_file(&clip.path)?;
         self.refuse_busy()?;
@@ -4585,7 +4626,7 @@ impl Shell {
                 "the speech model is not on this machine".to_owned(),
             ));
         }
-        self.start_job("Transcribe", move |progress| {
+        self.start_job(label, move |progress| {
             let recognizer = match loaded {
                 Some(recognizer) => Ok(recognizer),
                 None => {
@@ -4607,9 +4648,64 @@ impl Shell {
                 }
                 let words = words?;
                 shell.still_heard(&clip)?;
-                shell.write_caption(&clip, words)
+                land(shell, &clip, words)
             })
         })
+    }
+
+    /// The selected caption and the clip it was heard from.
+    fn rerun_target(&self) -> Result<(SegmentId, HeardClip), ShellError> {
+        let caption = self.text_segment()?;
+        self.refuse_locked(&caption)?;
+        let draft = self.session_draft()?;
+        let source = cutlass_transcription::caption_source(draft, &caption).map_err(heard_error)?;
+        Ok((caption, self.heard_clip(&source)?))
+    }
+
+    fn write_rerun(
+        &mut self,
+        caption: &SegmentId,
+        clip: &HeardClip,
+        words: &WordColumns,
+    ) -> Result<(), ShellError> {
+        let face = self.face.name().to_owned();
+        let mut next_id = self.next_id;
+        let mut fresh = |prefix: &str| {
+            next_id = next_id.saturating_add(1);
+            format!("{prefix}-{next_id}")
+        };
+        let requests = cutlass_transcription::rerun_requests(
+            self.session_draft()?,
+            caption,
+            clip,
+            words,
+            &face,
+            &mut fresh,
+        )
+        .map_err(heard_error);
+        self.next_id = next_id;
+        let requests = requests?;
+        // The re-run lines replace the selected caption: the one now under
+        // its start is selected.
+        let start = self
+            .session_draft()
+            .ok()
+            .and_then(|draft| placed(draft, caption).map(|(segment, _)| segment.target.start));
+        self.apply_requests(&requests)?;
+        let lines = match requests.first() {
+            Some(Request::RecaptionClip { lines, .. }) => lines.clone(),
+            _ => Vec::new(),
+        };
+        let picked = lines
+            .iter()
+            .rev()
+            .find(|line| start.is_some_and(|start| line.target.start <= start))
+            .or_else(|| lines.first())
+            .map(|line| line.segment_id.clone());
+        if picked.is_some() {
+            self.select(picked);
+        }
+        Ok(())
     }
 
     /// The clip a transcript was heard from is still the same length and
@@ -4780,6 +4876,19 @@ impl Shell {
         self.write_caption(&clip, words)
     }
 
+    /// Hear the selected caption's clip again with `recognizer`. Tests pass
+    /// a stand-in so they do not load the speech model.
+    #[cfg(test)]
+    fn rerun_caption_with(
+        &mut self,
+        recognizer: &dyn Recognizer,
+        source: &mut dyn PcmSource,
+    ) -> Result<(), ShellError> {
+        let (caption, clip) = self.rerun_target()?;
+        let words = heard_words(recognizer, source, &clip)?;
+        self.write_rerun(&caption, &clip, &words)
+    }
+
     fn selected_speech(&self) -> Result<HeardClip, ShellError> {
         let Some(segment_id) = self.selected().cloned() else {
             return Err(if self.session.is_none() {
@@ -4803,10 +4912,13 @@ impl Shell {
             next_id = next_id.saturating_add(1);
             format!("{prefix}-{next_id}")
         };
-        let request =
-            caption_request(self.session_draft()?, clip, words, &mut fresh).map_err(heard_error);
+        // One caption clip per line, back to back, as one undo step.
+        // Captions are set in the shell's face, as a new title is.
+        let face = self.face.name().to_owned();
+        let requests = caption_requests(self.session_draft()?, clip, words, &face, &mut fresh)
+            .map_err(heard_error);
         self.next_id = next_id;
-        self.apply(request?)
+        self.apply_requests(&requests?)
     }
 
     /// The selected clip is a video, so its sound can be placed on its own clip.
@@ -7584,6 +7696,8 @@ fn heard_error(miss: HeardMiss) -> ShellError {
             HeardMiss::NoSound => "the clip has no sound",
             HeardMiss::NothingHeard => "nothing was heard",
             HeardMiss::BadClock => "a word clock does not fit the clip",
+            HeardMiss::NoSource => "this caption was not heard from a clip on the timeline",
+            HeardMiss::NotCaption => "that clip is not a caption",
         }
         .to_owned(),
     )
@@ -9065,6 +9179,95 @@ mod tests {
         );
         // The model stays loaded for the next transcript.
         assert!(desktop.speech.borrow().is_some());
+
+        // Re-run hears the same project-relative file again.
+        let caption = draft
+            .tracks
+            .iter()
+            .find(|track| track.kind == TrackType::Text)
+            .and_then(|track| track.segments.first())
+            .map(|segment| segment.id.clone())
+            .unwrap();
+        desktop.select(Some(caption));
+        assert!(desktop.rerun_caption_enabled());
+        desktop.set_caption_style("pop").unwrap();
+        let revision = desktop.revision();
+        desktop.rerun_caption().unwrap();
+        assert_eq!(
+            desktop.job().map(|job| job.label),
+            Some("Re-run captions".to_owned())
+        );
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(300);
+        while desktop.poll_job() && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(desktop.job().is_none(), "the re-run took too long");
+        assert_eq!(desktop.notice(), "", "{}", desktop.notice());
+        assert_eq!(
+            desktop.revision(),
+            revision.map(|r| r + 1),
+            "the re-run is one step"
+        );
+        let draft = desktop.draft().unwrap();
+        let text = draft
+            .materials
+            .texts
+            .iter()
+            .find(|text| !text.words.text.is_empty())
+            .expect("the caption keeps words");
+        assert_eq!(text.caption_style, "pop");
+    }
+
+    #[test]
+    fn a_rerun_opens_the_heard_file_through_the_project_folder() {
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        draft.materials.audios.push(MaterialAudio {
+            id: MaterialId::new("talk"),
+            // A relative path may not step out of the project.
+            path: "../outside.m4a".to_owned(),
+            duration: Micros(2_000_000),
+            ..MaterialAudio::default()
+        });
+        let mut track = Track::main("sound");
+        track.kind = TrackType::Audio;
+        track
+            .segments
+            .push(Segment::new("talk", "talk", TimeRange::new(0, 2_000_000)));
+        draft.tracks.push(track);
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.select(Some(SegmentId::new("talk")));
+        assert_eq!(
+            desktop.transcribe().unwrap_err().to_string(),
+            "the clip has no sound"
+        );
+        let heard = CaptionStandIn {
+            words: vec![RecognizedWord {
+                text: "hi".to_owned(),
+                start_ms: 0,
+                end_ms: 400,
+            }],
+        };
+        desktop.transcribe_with(&heard, &mut CaptionTone).unwrap();
+        let caption = desktop
+            .draft()
+            .unwrap()
+            .tracks
+            .iter()
+            .find(|track| track.kind == TrackType::Text)
+            .map(|track| track.segments[0].id.clone())
+            .unwrap();
+        desktop.select(Some(caption));
+        assert!(desktop.rerun_caption_enabled());
+        let revision = desktop.revision();
+        assert_eq!(
+            desktop.rerun_caption().unwrap_err().to_string(),
+            "the clip has no sound"
+        );
+        assert!(desktop.job().is_none());
+        assert_eq!(desktop.revision(), revision);
     }
 
     #[test]
@@ -13400,8 +13603,9 @@ mod tests {
         Folder::new(draft).save(&temp.path).unwrap();
 
         let mut desktop = shell();
-        desktop.open_folder(&temp.path).unwrap();
+        // The face comes first: opening sets a caption with no font file in it.
         desktop.use_face("sample.ttf", SAMPLE_TTF.to_vec());
+        desktop.open_folder(&temp.path).unwrap();
         desktop.select(None);
         assert_eq!(
             desktop.set_text_color("#FFFFFF").unwrap_err().to_string(),
@@ -15834,6 +16038,90 @@ mod tests {
     }
 
     #[test]
+    fn a_fresh_transcript_draws_with_no_edit() {
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        draft.canvas_config.width = 320;
+        draft.canvas_config.height = 180;
+        draft.materials.audios.push(MaterialAudio {
+            id: MaterialId::new("talk"),
+            path: "/talk.wav".to_owned(),
+            duration: Micros(2_000_000),
+            ..MaterialAudio::default()
+        });
+        let mut track = Track::main("sound");
+        track.kind = TrackType::Audio;
+        track
+            .segments
+            .push(Segment::new("talk", "talk", TimeRange::new(0, 2_000_000)));
+        draft.tracks.push(track);
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        if desktop.face.name().is_empty() {
+            eprintln!("skipped: no font is installed");
+            return;
+        }
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.select(Some(SegmentId::new("talk")));
+        let heard = CaptionStandIn {
+            words: vec![
+                RecognizedWord {
+                    text: "Hello".to_owned(),
+                    start_ms: 0,
+                    end_ms: 500,
+                },
+                RecognizedWord {
+                    text: "there.".to_owned(),
+                    start_ms: 500,
+                    end_ms: 1_000,
+                },
+            ],
+        };
+        desktop.transcribe_with(&heard, &mut CaptionTone).unwrap();
+        let draft = desktop.draft().unwrap().clone();
+        let caption = draft
+            .materials
+            .texts
+            .iter()
+            .find(|text| text.content == "Hello there.")
+            .expect("caption");
+        assert_eq!(caption.font_path, desktop.face.name());
+        // Drawn straight away, before any look edit.
+        let rgba = cutlass_eval::frame(
+            &cutlass_eval::Snapshot::with_fonts(&draft, &*desktop.face),
+            Micros(250_000),
+            &mut cutlass_renderer_software::SoftwareDevice::new(),
+            &ReaderFactory::new(),
+            &mut cutlass_eval::OpenClips::new(),
+            0,
+        )
+        .unwrap()
+        .rgba;
+        assert!(
+            rgba.chunks(4).any(|pixel| pixel[3] > 0 && pixel[0] > 200),
+            "the caption drew nothing"
+        );
+
+        // A project an earlier build saved with no font file on its
+        // captions opens with them set in the face.
+        let mut old = draft;
+        for text in &mut old.materials.texts {
+            text.font_path.clear();
+        }
+        let earlier = Temp::new();
+        Folder::new(old).save(&earlier.path).unwrap();
+        desktop.open_folder(&earlier.path).unwrap();
+        let reopened = desktop.draft().unwrap();
+        assert!(
+            reopened
+                .materials
+                .texts
+                .iter()
+                .all(|text| text.font_path == desktop.face.name())
+        );
+    }
+
+    #[test]
     fn transcribe_places_words_on_a_text_track() {
         let mut bare = shell();
         assert!(!bare.transcribe_enabled());
@@ -15998,10 +16286,8 @@ mod tests {
                     && track.segments.len() == 1
             })
             .expect("caption track");
-        assert_eq!(
-            caption_track.segments[0].target,
-            TimeRange::new(0, 2_000_000)
-        );
+        // A caption line ends with its last word, not with the clip.
+        assert_eq!(caption_track.segments[0].target, TimeRange::new(0, 900_000));
         let material = draft
             .materials
             .texts
@@ -16022,6 +16308,58 @@ mod tests {
             .expect("pair");
         assert_eq!(pair.dependent, caption_track.segments[0].id);
 
+        // Re-run captions hears the clip again and keeps the caption's look.
+        let heard_caption = caption_track.segments[0].id.clone();
+        desktop.select(Some(heard_caption.clone()));
+        assert!(desktop.rerun_caption_enabled());
+        desktop.set_caption_style("pop").unwrap();
+        let again = CaptionStandIn {
+            words: vec![RecognizedWord {
+                text: "hello".to_owned(),
+                start_ms: 100,
+                end_ms: 700,
+            }],
+        };
+        desktop.rerun_caption_with(&again, &mut tone).unwrap();
+        let rerun = |desktop: &Shell, content: &str| {
+            desktop
+                .draft()
+                .unwrap()
+                .materials
+                .texts
+                .iter()
+                .find(|text| text.content == content)
+                .map(|text| (text.caption_style.clone(), text.words.start_time.clone()))
+        };
+        assert_eq!(
+            rerun(&desktop, "hello"),
+            Some(("pop".to_owned(), vec![0])),
+            "the line starts with its word"
+        );
+        // The re-run line under the caption's start is selected.
+        assert_ne!(desktop.selected(), Some(&heard_caption));
+        desktop.undo().unwrap();
+        desktop.select(Some(heard_caption));
+        assert_eq!(
+            rerun(&desktop, "hi there"),
+            Some(("pop".to_owned(), vec![0, 400]))
+        );
+        assert_eq!(
+            desktop
+                .rerun_caption_with(&quiet, &mut tone)
+                .unwrap_err()
+                .to_string(),
+            "nothing was heard"
+        );
+        desktop.select(Some(SegmentId::new("caption")));
+        assert!(!desktop.rerun_caption_enabled());
+        assert_eq!(
+            desktop.rerun_caption().unwrap_err().to_string(),
+            "this caption was not heard from a clip on the timeline"
+        );
+        // Take the style back off, so the steps below undo as before.
+        desktop.undo().unwrap();
+
         let fast_words = CaptionStandIn {
             words: vec![RecognizedWord {
                 text: "quick".to_owned(),
@@ -16040,7 +16378,7 @@ mod tests {
                     && track
                         .segments
                         .iter()
-                        .any(|segment| segment.target == TimeRange::new(3_000_000, 1_000_000))
+                        .any(|segment| segment.target == TimeRange::new(3_000_000, 600_000))
             })
             .expect("reused");
         assert_eq!(reused.segments.len(), 2);
@@ -16110,8 +16448,10 @@ mod tests {
             .find(|text| text.content == "back")
             .expect("back")
             .clone();
-        assert_eq!(back.words.start_time, [1_000]);
-        assert_eq!(back.words.end_time, [2_000]);
+        // The reversed clip hears the word in its second half; the line
+        // starts there, so the word starts its own clock.
+        assert_eq!(back.words.start_time, [0]);
+        assert_eq!(back.words.end_time, [1_000]);
 
         let odd_words = CaptionStandIn {
             words: vec![RecognizedWord {
@@ -16158,7 +16498,8 @@ mod tests {
             .flat_map(|track| track.segments.iter())
             .find(|segment| segment.material_id == sound_text.id)
             .expect("sound clip");
-        assert_eq!(sound_segment.target, TimeRange::new(14_000_000, 1_000_000));
+        // A one-word line stays up long enough to read.
+        assert_eq!(sound_segment.target, TimeRange::new(14_000_000, 600_000));
         desktop.undo().unwrap();
         assert!(
             desktop

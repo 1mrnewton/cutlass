@@ -213,16 +213,32 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             segment_id,
             material_id,
             words,
+            span,
+            face,
         } => words::add_caption(
             draft,
-            source_id,
-            track_id,
-            segment_id,
-            material_id,
+            &words::NewCaption {
+                source_id,
+                track_id,
+                segment_id,
+                material_id,
+                span: span.as_deref(),
+                face,
+            },
             words.clone(),
         ),
-        Request::AddSubtitles { track_id, cues } => words::add_subtitles(draft, track_id, cues),
+        Request::AddSubtitles {
+            track_id,
+            cues,
+            face,
+        } => words::add_subtitles(draft, track_id, cues, face),
         Request::InsertCaption { like, cue } => words::insert_caption(draft, like, cue),
+        Request::RecaptionClip {
+            source_id,
+            like,
+            lines,
+            face,
+        } => words::recaption_clip(draft, source_id, like, lines, face),
         Request::ExtractAudio {
             source_id,
             track_id,
@@ -350,6 +366,11 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             word,
             on,
         } => text::set_caption_keyword(draft, segment_id, *word, *on),
+        Request::SetCaptionTemplate {
+            segment_id,
+            resource_id,
+            name,
+        } => text::set_caption_template(draft, segment_id, resource_id, name),
         Request::SetCaptionStagger { segment_id, millis } => {
             text::set_caption_stagger(draft, segment_id, *millis)
         }

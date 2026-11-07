@@ -9,6 +9,8 @@ mod act;
 mod animation;
 mod append;
 mod caption_list;
+mod caption_replace;
+mod caption_templates;
 mod caption_words;
 mod catalog;
 mod clip_rules;
@@ -46,9 +48,14 @@ pub use animation::{ClipAnimation, ClipAnimations, clip_animations};
 pub use append::{Append, AppendLane, append_placement, free_row, material_span};
 pub use caption_list::{
     CaptionListMiss, CaptionRow, NEW_CAPTION_GAP, NEW_CAPTION_LENGTH, NEW_CAPTION_TEXT, Paragraph,
-    add_after_requests, caption_paragraphs, caption_rows, caption_text_request, for_every_caption,
-    main_caption_lane, paragraph_request, paragraphs, rematched, remove_caption_request, row_at,
-    rows_matching, words_over,
+    add_after_requests, caption_paragraphs, caption_rows, caption_text_request, fill_caption_faces,
+    for_every_caption, main_caption_lane, paragraph_request, paragraphs, rematched,
+    remove_caption_request, row_at, rows_matching, words_over,
+};
+pub use caption_replace::{Replaced, replace_ignoring_case, replace_in_captions};
+pub use caption_templates::{
+    CAPTION_TEMPLATES, CaptionTemplate, caption_template, caption_template_of,
+    caption_template_requests,
 };
 pub use caption_words::{LINE_BREAK, breaks_before, join_words, retype_word, toggle_line_break};
 pub use catalog::{catalog_entries, catalog_search};

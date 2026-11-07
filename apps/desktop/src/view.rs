@@ -13953,16 +13953,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&temp);
     }
 
-    /// The text and caption inspector painted by the real renderer: the
-    /// Basic page plain and styled, the caption's tabs and its Bubble page.
-    /// With `CUTLASS_RENDER_DIR` set the pictures are kept there to look at.
-    #[test]
-    fn the_text_and_caption_inspector_paint() {
-        use crate::shell::KeyedSetting;
-        use cutlass_model::{MaterialText, Segment, SegmentId, TimeRange, Track, TrackType};
-        let temp = std::env::temp_dir().join(format!("cutlass-text-render-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&temp);
-        std::fs::create_dir_all(&temp).unwrap();
+    /// A project with a title "AA" and a caption "AB BA" in the sample
+    /// face, saved at `temp`, open.
+    fn text_inspector_shell(temp: &std::path::Path) -> Shell {
+        use cutlass_model::{MaterialText, Segment, TimeRange, Track, TrackType};
+        let _ = std::fs::remove_dir_all(temp);
+        std::fs::create_dir_all(temp).unwrap();
         let mut draft = cutlass_model::Draft::empty("draft");
         let mut title = MaterialText::new("title");
         title.content = "AA".to_owned();
@@ -13983,15 +13979,95 @@ mod tests {
                 .push(Segment::new(id, material, TimeRange::new(0, 2_000_000)));
             draft.tracks.push(track);
         }
-        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        cutlass_store::Folder::new(draft).save(temp).unwrap();
         let (decoders, encoders) = crate::register_codecs();
         let mut shell = Shell::new(decoders, encoders, Settings::default());
-        shell.open_folder(&temp).unwrap();
+        shell.open_folder(temp).unwrap();
         shell.use_faces(vec![(
             "sample.ttf",
             include_bytes!("../../../crates/font/fixtures/sample.ttf").to_vec(),
         )]);
         shell.keep_presets_file(temp.join("Presets").join("text.json"));
+        shell
+    }
+
+    /// Nothing in the text or caption inspector draws past its content's
+    /// right edge, 16 points in from the panel, where the scroll bar runs.
+    #[test]
+    fn the_text_inspector_keeps_its_right_margin() {
+        let temp = std::env::temp_dir().join(format!("cutlass-text-margin-{}", std::process::id()));
+        let mut shell = text_inspector_shell(&temp);
+        let mut view = ViewState::new();
+        view.library_shelf = Shelf::Stickers;
+        let ctx = egui::Context::default();
+        let mut over = Vec::new();
+        for id in ["words", "said"] {
+            shell.select(Some(SegmentId::new(id)));
+            // A face gives the text a size, so its pose rows take keys, and
+            // a key shows each keyed row's buttons.
+            shell.set_text_face("sample.ttf").unwrap();
+            shell
+                .toggle_setting_key(crate::shell::KeyedSetting::TextColor)
+                .unwrap();
+            let mut last = Vec::new();
+            for _ in 0..3 {
+                // The Text tab; a caption's list comes before it.
+                view.inspector.focus(inspector::Focus {
+                    tab: 0,
+                    page: 0,
+                    section: None,
+                });
+                let mut output = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(Rect::from_min_size(
+                            Pos2::ZERO,
+                            Vec2::new(1280.0, 2400.0),
+                        )),
+                        ..Default::default()
+                    },
+                    |ui| show(&mut shell, ui, &mut view, None),
+                );
+                output.textures_delta.clear();
+                last.clear();
+                // The inspector's clip: the whole panel, from its left
+                // edge to the window's.
+                let panel = output
+                    .shapes
+                    .iter()
+                    .map(|clipped| clipped.clip_rect)
+                    .filter(|clip| {
+                        clip.min.x > 800.0 && clip.min.y < 100.0 && clip.height() > 400.0
+                    })
+                    .max_by(|a, b| a.width().total_cmp(&b.width()))
+                    .unwrap();
+                // Rows end 16 points in, clear of the scroll bar.
+                let edge = panel.max.x - 16.0 + 0.5;
+                for clipped in &output.shapes {
+                    let clip = clipped.clip_rect;
+                    if clip.min.x < panel.min.x - 0.5 || clip.max.y > panel.max.y + 0.5 {
+                        continue;
+                    }
+                    let shape = clipped.shape.visual_bounding_rect();
+                    if shape.is_positive() && shape.max.x > edge {
+                        last.push(format!("{id}: {shape:?} past {edge}"));
+                    }
+                }
+            }
+            over.extend(last);
+        }
+        let _ = std::fs::remove_dir_all(&temp);
+        assert!(over.is_empty(), "{over:#?}");
+    }
+
+    /// The text and caption inspector painted by the real renderer: the
+    /// Basic page plain and styled, the caption's tabs and its Bubble page.
+    /// With `CUTLASS_RENDER_DIR` set the pictures are kept there to look at.
+    #[test]
+    fn the_text_and_caption_inspector_paint() {
+        use crate::shell::KeyedSetting;
+        use cutlass_model::SegmentId;
+        let temp = std::env::temp_dir().join(format!("cutlass-text-render-{}", std::process::id()));
+        let mut shell = text_inspector_shell(&temp);
         shell.select(Some(SegmentId::new("words")));
         let mut harness = egui_kittest::Harness::builder()
             .with_size(Vec2::new(1280.0, 1600.0))

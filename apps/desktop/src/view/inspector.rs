@@ -931,8 +931,11 @@ enum KeyStep {
     Forward,
 }
 
+/// One ◀ ◆ ▶ button, and the gap between two.
+const KEY_BUTTON: f32 = 20.0;
+const KEY_GAP: f32 = 2.0;
 /// The room the ◀ ◆ ▶ buttons take at a row's end.
-const KEYS_WIDTH: f32 = 66.0;
+const KEYS_WIDTH: f32 = 3.0 * KEY_BUTTON + 2.0 * KEY_GAP;
 
 /// `row` with the clip's keyframe buttons at its end, when the clip takes
 /// keys. The model keys a clip's whole pose at once, so each row's buttons
@@ -948,9 +951,15 @@ fn keyed_row<R>(
         return row(ui);
     };
     ui.horizontal(|ui| {
-        let width = (ui.available_width() - KEYS_WIDTH).max(80.0);
+        // The buttons follow the row after one item gap.
+        let width = (ui.available_width() - KEYS_WIDTH - ui.spacing().item_spacing.x).max(80.0);
         let inner = ui
-            .allocate_ui(Vec2::new(width, 30.0), |ui| ui.vertical(row).inner)
+            .allocate_ui(Vec2::new(width, 30.0), |ui| {
+                // A short row still takes its width, so the buttons line up
+                // at the end of every row.
+                ui.set_min_width(width);
+                ui.vertical(row).inner
+            })
             .inner;
         if let Some(pressed) = key_buttons(ui, keys, playhead) {
             *step = Some(pressed);
@@ -987,10 +996,10 @@ fn key_buttons(ui: &mut Ui, keys: &cutlass_editor::ClipKeys, playhead: Micros) -
             "Next keyframe",
         ),
     ];
-    ui.spacing_mut().item_spacing.x = 2.0;
+    ui.spacing_mut().item_spacing.x = KEY_GAP;
     for (which, live, tip) in buttons {
         let sense = if live { Sense::click() } else { Sense::hover() };
-        let (rect, response) = ui.allocate_exact_size(Vec2::new(20.0, 24.0), sense);
+        let (rect, response) = ui.allocate_exact_size(Vec2::new(KEY_BUTTON, 24.0), sense);
         let color = if !live {
             tokens::FAINT
         } else if response.hovered() {

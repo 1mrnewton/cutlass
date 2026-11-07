@@ -813,6 +813,10 @@ fn install_style(style: &mut egui::Style) {
     style.visuals.extreme_bg_color = tokens::GAP;
     style.visuals.faint_bg_color = tokens::PROJECT_BAR;
     style.visuals.widgets.noninteractive.bg_stroke = egui::Stroke::NONE;
+    // Every text field's caret and selection, ui::Field's included.
+    style.visuals.selection.bg_fill = tokens::TEXT_SELECTION;
+    style.visuals.selection.stroke = egui::Stroke::new(1.0, tokens::TEXT);
+    style.visuals.text_cursor.stroke = egui::Stroke::new(1.5, tokens::TEXT);
     // egui's own bars (popups, menus) keep one width too: no grow on hover.
     style.spacing.scroll.bar_width = tokens::SCROLL_BAR;
     style.spacing.scroll.floating_width = tokens::SCROLL_BAR;

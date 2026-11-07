@@ -59,6 +59,12 @@ pub const SCROLL_THUMB_HOVER: Color32 = Color32::from_rgba_premultiplied(96, 96,
 /// A scroll thumb being dragged.
 pub const SCROLL_THUMB_DRAG: Color32 = Color32::from_rgba_premultiplied(136, 136, 136, 136);
 /// The ruler's band between the in and out marks.
+/// A text field's fill, and its edge when hovered and when typing in it.
+pub const FIELD: Color32 = RAISED;
+pub const FIELD_EDGE_HOVER: Color32 = Color32::from_rgb(0x3a, 0x3a, 0x3a);
+pub const FIELD_EDGE_FOCUS: Color32 = Color32::from_rgb(0x6a, 0x6a, 0x6a);
+/// Selected text in a field: the accent, see-through.
+pub const TEXT_SELECTION: Color32 = Color32::from_rgba_premultiplied(0x00, 0x4a, 0x50, 0x60);
 pub const MARKED: Color32 = Color32::from_rgba_premultiplied(0x00, 0x32, 0x36, 0x40);
 
 pub const TYPE_SIZE: f32 = 13.0;
@@ -98,6 +104,10 @@ pub const BUTTON_HEIGHT: f32 = 24.0;
 /// The gap between a button's icon and its label.
 pub const BUTTON_GAP: f32 = 6.0;
 
+/// A text field's padding and its one-line height.
+pub const FIELD_PAD_X: f32 = 8.0;
+pub const FIELD_PAD_Y: f32 = 5.0;
+pub const FIELD_HEIGHT: f32 = 26.0;
 pub const HEAD_HEIGHT: f32 = 38.0;
 pub const SPLIT: f32 = 6.0;
 pub const HAIRLINE: f32 = 1.0;

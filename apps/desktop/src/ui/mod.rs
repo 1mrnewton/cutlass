@@ -5,9 +5,11 @@
 //! instead of painting their own chrome.
 
 mod button;
+mod field;
 mod scroll;
 mod surface;
 
 pub use button::{Button, ButtonKind};
+pub use field::{Field, FieldResponse};
 pub use scroll::Scroll;
 pub use surface::Surface;

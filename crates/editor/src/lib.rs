@@ -9,6 +9,7 @@ mod act;
 mod animation;
 mod append;
 mod caption_list;
+mod caption_replace;
 mod caption_templates;
 mod caption_words;
 mod catalog;
@@ -51,6 +52,7 @@ pub use caption_list::{
     main_caption_lane, paragraph_request, paragraphs, rematched, remove_caption_request, row_at,
     rows_matching, words_over,
 };
+pub use caption_replace::{Replaced, replace_ignoring_case, replace_in_captions};
 pub use caption_templates::{
     CAPTION_TEMPLATES, CaptionTemplate, caption_template, caption_template_of,
     caption_template_requests,

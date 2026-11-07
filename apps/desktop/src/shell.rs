@@ -336,6 +336,8 @@ pub struct Inspection {
     pub text_size: f64,
     pub text_color: String,
     pub text_align: i32,
+    /// Bold, italic and underline over the whole text.
+    pub text_pattern: cutlass_session::TextPattern,
     pub letter_spacing: f64,
     pub line_spacing: f64,
     pub line_width: f64,
@@ -4179,6 +4181,13 @@ impl Shell {
             text_size,
             text_color,
             text_align,
+            text_pattern: draft
+                .materials
+                .texts
+                .iter()
+                .find(|text| text.id == segment.material_id)
+                .map(cutlass_session::TextPattern::of)
+                .unwrap_or_default(),
             letter_spacing,
             line_spacing,
             line_width,
@@ -13615,6 +13624,58 @@ mod tests {
 
     const SAMPLE_TTF: &[u8] = include_bytes!("../../../crates/font/fixtures/sample.ttf");
     const GRAY_OTF: &[u8] = include_bytes!("../../../crates/font/fixtures/gray-strike.otf");
+
+    #[test]
+    fn bold_underline_and_italic_change_the_drawn_letters() {
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        draft.canvas_config.width = 320;
+        draft.canvas_config.height = 180;
+        draft.materials.texts.push(MaterialText {
+            id: MaterialId::new("title"),
+            content: "A".to_owned(),
+            ..MaterialText::default()
+        });
+        let mut words = Track::main("words");
+        words.kind = TrackType::Text;
+        words
+            .segments
+            .push(Segment::new("title", "title", TimeRange::new(0, 1_000_000)));
+        draft.tracks.push(words);
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.use_faces(vec![("sample.ttf", SAMPLE_TTF.to_vec())]);
+        desktop.select(Some(SegmentId::new("title")));
+        desktop.set_text_size(48.0).unwrap();
+        let plain = digest(&desktop.preview_bytes().unwrap().rgba);
+        let mut seen = vec![plain];
+        for pattern in [
+            cutlass_session::TextPattern {
+                bold: true,
+                ..Default::default()
+            },
+            cutlass_session::TextPattern {
+                bold: true,
+                underline: true,
+                ..Default::default()
+            },
+            cutlass_session::TextPattern {
+                bold: true,
+                underline: true,
+                italic: true,
+            },
+        ] {
+            desktop.set_text_pattern(pattern).unwrap();
+            let now = digest(&desktop.preview_bytes().unwrap().rgba);
+            assert!(!seen.contains(&now), "{pattern:?} draws something new");
+            seen.push(now);
+        }
+        for _ in 0..3 {
+            desktop.undo().unwrap();
+        }
+        assert_eq!(digest(&desktop.preview_bytes().unwrap().rgba), plain);
+    }
 
     #[test]
     fn a_face_changes_the_drawn_letters() {

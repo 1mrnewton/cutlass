@@ -515,6 +515,28 @@ impl Shell {
         })
     }
 
+    /// Turn bold, italic and underline on or off over the selected text.
+    /// One undo step; with "Apply to all main captions" on, every caption on
+    /// the row takes it. The pattern the text already has is not a step.
+    pub fn set_text_pattern(
+        &mut self,
+        pattern: cutlass_session::TextPattern,
+    ) -> Result<(), ShellError> {
+        let segment_id = self.text_segment()?;
+        self.refuse_locked(&segment_id)?;
+        if self.inspection().map(|seen| seen.text_pattern) == Some(pattern) {
+            return Ok(());
+        }
+        let face = self.face.name().to_owned();
+        self.apply(Request::SetTextPattern {
+            segment_id,
+            bold: pattern.bold,
+            italic: pattern.italic,
+            underline: pattern.underline,
+            face,
+        })
+    }
+
     /// Rewrite the selected title's words in `case`. A rich title keeps its
     /// ranges. Words already in that case are not an undo step.
     pub fn set_text_case(&mut self, case: LetterCase) -> Result<(), ShellError> {
@@ -1215,6 +1237,29 @@ mod tests {
         desktop.set_mask(None).unwrap();
         assert!(!desktop.setting_keyed(super::KeyedSetting::Mask));
         assert!(desktop.inspection().unwrap().mask.is_none());
+    }
+
+    #[test]
+    fn a_title_pattern_shows_in_the_inspector_and_undoes_in_one_step() {
+        let temp = Temp::new();
+        let mut desktop = every_kind(&temp);
+        pick(&mut desktop, "words");
+        let off = cutlass_session::TextPattern::default();
+        assert_eq!(desktop.inspection().unwrap().text_pattern, off);
+        let all = cutlass_session::TextPattern {
+            bold: true,
+            italic: true,
+            underline: true,
+        };
+        desktop.set_text_pattern(all).unwrap();
+        assert_eq!(desktop.inspection().unwrap().text_pattern, all);
+        let revision = desktop.revision();
+        desktop.set_text_pattern(all).unwrap();
+        assert_eq!(desktop.revision(), revision);
+        desktop.undo().unwrap();
+        assert_eq!(desktop.inspection().unwrap().text_pattern, off);
+        pick(&mut desktop, "main");
+        assert!(desktop.set_text_pattern(all).is_err());
     }
 
     #[test]

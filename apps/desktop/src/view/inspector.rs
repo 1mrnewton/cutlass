@@ -1826,19 +1826,7 @@ fn text_basic(
         ) {
             send(shell, |shell| shell.set_text_size(value));
         }
-        label_row(ui, "Style", |ui| {
-            ui.add_enabled_ui(false, |ui| {
-                for (icon, tip) in [
-                    ("bold", "Bold"),
-                    ("underline", "Underline"),
-                    ("italic", "Italic"),
-                ] {
-                    icon_toggle(ui, icon, tip, false);
-                }
-            })
-            .response
-            .on_disabled_hover_text(LATER);
-        });
+        pattern_row(shell, ui, inspection);
         label_row(ui, "Case", |ui| {
             for (label, tip, case) in [
                 ("TT", "Upper case", LetterCase::Upper),
@@ -2001,6 +1989,26 @@ fn caption_words(
         }
     }
     ui.add_space(6.0);
+}
+
+/// Bold, underline and italic, each a switch over the whole text.
+fn pattern_row(shell: &mut Shell, ui: &mut Ui, inspection: &Inspection) {
+    let stored = inspection.text_pattern;
+    let mut pattern = stored;
+    label_row(ui, "Pattern", |ui| {
+        if icon_toggle(ui, "bold", "Bold", stored.bold).clicked() {
+            pattern.bold = !stored.bold;
+        }
+        if icon_toggle(ui, "underline", "Underline", stored.underline).clicked() {
+            pattern.underline = !stored.underline;
+        }
+        if icon_toggle(ui, "italic", "Italic", stored.italic).clicked() {
+            pattern.italic = !stored.italic;
+        }
+    });
+    if pattern != stored {
+        send(shell, |shell| shell.set_text_pattern(pattern));
+    }
 }
 
 fn font_row(shell: &mut Shell, ui: &mut Ui, inspection: &Inspection) {

@@ -8207,7 +8207,7 @@ mod tests {
                     "Effects",
                     "Font",
                     "Font size",
-                    "Style",
+                    "Pattern",
                     "Case",
                     "Color",
                     "Character",

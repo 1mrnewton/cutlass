@@ -489,6 +489,7 @@ fn styled_clip(request: &Request) -> Option<&SegmentId> {
         Request::SetTextSize { segment_id, .. }
         | Request::SetTextColor { segment_id, .. }
         | Request::SetTextAlign { segment_id, .. }
+        | Request::SetTextPattern { segment_id, .. }
         | Request::SetLetterSpacing { segment_id, .. }
         | Request::SetLineSpacing { segment_id, .. }
         | Request::SetLineWidth { segment_id, .. }
@@ -510,6 +511,7 @@ fn with_clip(request: &Request, clip: &SegmentId) -> Request {
         Request::SetTextSize { segment_id, .. }
         | Request::SetTextColor { segment_id, .. }
         | Request::SetTextAlign { segment_id, .. }
+        | Request::SetTextPattern { segment_id, .. }
         | Request::SetLetterSpacing { segment_id, .. }
         | Request::SetLineSpacing { segment_id, .. }
         | Request::SetLineWidth { segment_id, .. }

@@ -7579,6 +7579,8 @@ fn heard_error(miss: HeardMiss) -> ShellError {
             HeardMiss::NoSound => "the clip has no sound",
             HeardMiss::NothingHeard => "nothing was heard",
             HeardMiss::BadClock => "a word clock does not fit the clip",
+            HeardMiss::NoSource => "this caption was not heard from a clip on the timeline",
+            HeardMiss::NotCaption => "that clip is not a caption",
         }
         .to_owned(),
     )

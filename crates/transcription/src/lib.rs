@@ -44,7 +44,8 @@ pub fn weights_missing(what: &str) {
 mod words;
 
 pub use captions::{
-    HeardClip, HeardMiss, caption_request, caption_row, heard_clip, words_on_timeline,
+    HeardClip, HeardMiss, caption_request, caption_row, caption_source, heard_clip, rerun_request,
+    words_on_timeline,
 };
 pub use file::FileSource;
 pub use job::{Job, JobError};

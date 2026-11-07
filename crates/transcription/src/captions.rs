@@ -34,6 +34,11 @@ pub enum HeardMiss {
     NothingHeard,
     /// A word time overflows the clip's clock.
     BadClock,
+    /// The caption is not linked to a clip it was heard from, as an
+    /// imported subtitle file is not.
+    NoSource,
+    /// The clip is not a caption.
+    NotCaption,
 }
 
 /// The sound of clip `segment_id`.
@@ -128,6 +133,67 @@ pub fn caption_request(
         segment_id: SegmentId::new(fresh("caption")),
         material_id: MaterialId::new(fresh("caption")),
         words,
+    })
+}
+
+/// The clip caption `caption_id` was heard from: the owner it was linked
+/// to when it was made.
+pub fn caption_source(draft: &Draft, caption_id: &SegmentId) -> Result<SegmentId, HeardMiss> {
+    draft
+        .relationships
+        .iter()
+        .filter(|relationship| relationship.kind == "linkage")
+        .flat_map(|relationship| &relationship.id_to_id)
+        .find(|pair| &pair.dependent == caption_id)
+        .map(|pair| pair.owner.clone())
+        .filter(|owner| heard_clip(draft, owner).is_ok())
+        .ok_or(HeardMiss::NoSource)
+}
+
+/// The request that gives caption `caption_id` the words heard again from
+/// `clip`, already on the clip's timeline clock. The words are moved to the
+/// caption's own clock, and only those it spans are kept, so a caption that
+/// was trimmed or split keeps its own stretch. Its look stays.
+pub fn rerun_request(
+    draft: &Draft,
+    caption_id: &SegmentId,
+    clip: &HeardClip,
+    words: &WordColumns,
+) -> Result<Request, HeardMiss> {
+    let segment = draft
+        .tracks
+        .iter()
+        .flat_map(|track| &track.segments)
+        .find(|segment| &segment.id == caption_id)
+        .ok_or(HeardMiss::UnknownSegment)?;
+    let Some(MaterialRef::Text(text)) = draft.materials.get(segment.material_id.as_str()) else {
+        return Err(HeardMiss::NotCaption);
+    };
+    let offset = (clip.target.start.0 - segment.target.start.0) / 1_000;
+    let length = segment.target.duration.0 / 1_000;
+    let mut kept = WordColumns::default();
+    for ((word, start), end) in words
+        .text
+        .iter()
+        .zip(&words.start_time)
+        .zip(&words.end_time)
+    {
+        let start = start.checked_add(offset).ok_or(HeardMiss::BadClock)?;
+        let end = end.checked_add(offset).ok_or(HeardMiss::BadClock)?;
+        if end <= 0 || start >= length {
+            continue;
+        }
+        let start = start.clamp(0, length);
+        kept.start_time.push(start);
+        kept.end_time.push(end.clamp(start, length));
+        kept.text.push(word.clone());
+    }
+    if kept.text.is_empty() {
+        return Err(HeardMiss::NothingHeard);
+    }
+    Ok(Request::SetWords {
+        material_id: text.id.clone(),
+        words: kept,
     })
 }
 
@@ -244,6 +310,79 @@ mod tests {
         assert_eq!(
             heard_clip(&draft, &SegmentId::new("z")),
             Err(HeardMiss::UnknownSegment)
+        );
+    }
+
+    #[test]
+    fn a_rerun_finds_the_heard_clip_and_keeps_the_captions_own_stretch() {
+        let mut session = cutlass_session::Session::open(draft(1.0, false));
+        let clip = heard_clip(session.draft(), &SegmentId::new("a")).unwrap();
+        let mut next = 0;
+        let mut fresh = |prefix: &str| {
+            next += 1;
+            format!("{prefix}-{next}")
+        };
+        let request = caption_request(session.draft(), &clip, words(), &mut fresh).unwrap();
+        session.apply(0, &[request]).unwrap();
+        // The main row closed its gap, so the clip is heard where it is now.
+        let clip = heard_clip(session.draft(), &SegmentId::new("a")).unwrap();
+        assert_eq!(clip.target.start.0, 0);
+        let caption = SegmentId::new("caption-2");
+        assert_eq!(
+            caption_source(session.draft(), &caption),
+            Ok(SegmentId::new("a"))
+        );
+
+        let heard = WordColumns {
+            start_time: vec![0, 900, 1_500],
+            end_time: vec![800, 1_400, 1_900],
+            text: vec!["hello".to_owned(), "out".to_owned(), "there".to_owned()],
+            rest: Default::default(),
+        };
+        let request = rerun_request(session.draft(), &caption, &clip, &heard).unwrap();
+        let Request::SetWords { words, .. } = &request else {
+            panic!("set words");
+        };
+        assert_eq!(words, &heard);
+
+        // A caption that starts a second later keeps the words it spans,
+        // on its own clock.
+        let mut moved = session.draft().clone();
+        let segment = moved
+            .tracks
+            .iter_mut()
+            .flat_map(|track| &mut track.segments)
+            .find(|segment| segment.id == caption)
+            .unwrap();
+        segment.target = TimeRange::new(1_000_000, 1_000_000);
+        let Request::SetWords { words, .. } =
+            rerun_request(&moved, &caption, &clip, &heard).unwrap()
+        else {
+            panic!("set words");
+        };
+        assert_eq!(words.text, ["out", "there"]);
+        assert_eq!(words.start_time, [0, 500]);
+        assert_eq!(words.end_time, [400, 900]);
+
+        session.apply(1, &[request]).unwrap();
+        session.undo().unwrap();
+    }
+
+    #[test]
+    fn a_rerun_refuses_a_caption_with_no_heard_clip_or_no_words_in_it() {
+        let draft = draft(1.0, false);
+        let clip = heard_clip(&draft, &SegmentId::new("a")).unwrap();
+        assert_eq!(
+            caption_source(&draft, &SegmentId::new("a")),
+            Err(HeardMiss::NoSource)
+        );
+        assert_eq!(
+            rerun_request(&draft, &SegmentId::new("z"), &clip, &words()),
+            Err(HeardMiss::UnknownSegment)
+        );
+        assert_eq!(
+            rerun_request(&draft, &SegmentId::new("a"), &clip, &words()),
+            Err(HeardMiss::NotCaption)
         );
     }
 }

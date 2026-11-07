@@ -875,6 +875,21 @@ impl Shell {
         self.apply_requests(&requests)
     }
 
+    /// Take the selected caption's template off: the plain style, no
+    /// stagger and no caption animation, on every main caption while
+    /// "Apply to all main captions" is on. One undo restores it.
+    pub fn clear_caption_template(&mut self) -> Result<(), ShellError> {
+        let segment_id = self.text_segment()?;
+        self.refuse_locked(&segment_id)?;
+        let draft = self.session_draft()?;
+        if cutlass_editor::caption_rows(draft, &segment_id).is_empty() {
+            return Err(caption_miss(cutlass_editor::CaptionListMiss::NotCaption));
+        }
+        let requests =
+            cutlass_editor::plain_caption_requests(draft, &segment_id, self.all_captions());
+        self.apply_requests(&requests)
+    }
+
     /// Replace `find` with `with`, case ignored, in every caption on the
     /// selected caption's lane. Each changed caption keeps the times of the
     /// words that stay. One undo step; how many were replaced.

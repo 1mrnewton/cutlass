@@ -63,6 +63,9 @@ pub(super) struct InspectorState {
     pub(super) speed_drag: Option<(usize, Vec<(f64, f64)>)>,
     /// The LUT file picker was asked for; the view opens it.
     pub(super) wants_lut: bool,
+    /// The pictures drawn for the Templates, Bubble and Effects tiles, by
+    /// item id. They outlast a pick of another clip.
+    tiles: HashMap<String, egui::TextureHandle>,
 }
 
 /// Where a clip menu row sends the inspector.
@@ -99,6 +102,7 @@ pub(super) fn clip_panel(
                 .chain(matches!(panel, Panel::Text | Panel::Caption).then_some("blend"))
                 .map(str::to_owned)
                 .collect(),
+            tiles: std::mem::take(&mut state.tiles),
             ..InspectorState::default()
         };
     }
@@ -288,15 +292,15 @@ fn text_panel(
                     }
                 }
                 "Templates" => {
-                    caption_templates(shell, ui);
+                    caption_templates(shell, ui, state);
                     if !inspection.words.text.is_empty() {
                         ui.add_space(12.0);
                         ui.label(RichText::new("Word styles").size(12.0).color(tokens::MUTED));
                         caption_styles(shell, ui, inspection);
                     }
                 }
-                "Bubble" => bubble_page(shell, ui),
-                _ => effect_page(shell, ui),
+                "Bubble" => bubble_page(shell, ui, state),
+                _ => effect_page(shell, ui, state),
             }
         }
         "Animation" => animation_tab(shell, ui, state, &["In", "Out", "Loop"], TEXT_MOTIONS),
@@ -2818,101 +2822,310 @@ fn caption_styles(shell: &mut Shell, ui: &mut Ui, inspection: &Inspection) {
     }
 }
 
-/// The Templates page: each caption template, the caption's own outlined.
-/// A pick styles every main caption while "Apply to all main captions" is
-/// on, as one undo step.
-fn caption_templates(shell: &mut Shell, ui: &mut Ui) {
-    let current = shell.caption_template();
-    let mut picked = None;
+/// One item a catalog page offers.
+struct CatalogItem {
+    id: &'static str,
+    name: &'static str,
+    categories: &'static [&'static str],
+    tile: cutlass_editor::CatalogTile<'static>,
+}
+
+/// A catalog page's name, the search box's hint when it has one, and its
+/// categories.
+struct CatalogPage {
+    name: &'static str,
+    search: Option<&'static str>,
+    categories: &'static [&'static str],
+}
+
+/// The side of a catalog tile, and the gap between two.
+const CATALOG_TILE: f32 = 60.0;
+const CATALOG_GAP: f32 = 6.0;
+/// Tile pictures drawn in one frame; the rest follow in the next.
+const TILES_PER_FRAME: usize = 4;
+
+/// A catalog page: a search box when `search` names what it finds, the
+/// category chips, then None and each item the search and chip let
+/// through, as pictures. `worn` is the item the text wears, if any.
+/// Returns the id picked, `""` for None.
+fn catalog_page(
+    shell: &Shell,
+    ui: &mut Ui,
+    state: &mut InspectorState,
+    page: &CatalogPage,
+    items: &[CatalogItem],
+    worn: Option<&str>,
+) -> Option<&'static str> {
+    let query_key = format!("catalog {} search", page.name);
+    let category_key = format!("catalog {} category", page.name);
     ui.add_space(8.0);
+    if let Some(hint) = page.search {
+        let query = state.fields.entry(query_key.clone()).or_default();
+        ui::Field::new(query)
+            .name(hint)
+            .hint(hint)
+            .icon("search")
+            .width(ui.available_width())
+            .show(ui);
+        ui.add_space(8.0);
+    }
+    let query = state.fields.get(&query_key).cloned().unwrap_or_default();
+    let mut category = state.fields.get(&category_key).cloned().unwrap_or_default();
+    ui::Scroll::horizontal(("catalog chips", page.name))
+        .without_bar()
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                for name in std::iter::once("All").chain(page.categories.iter().copied()) {
+                    let value = if name == "All" { "" } else { name };
+                    let chip = ui::Button::new(name)
+                        .on(category == value)
+                        .text_size(12.0)
+                        .radius(12);
+                    if ui.add(chip).clicked() {
+                        value.clone_into(&mut category);
+                    }
+                }
+            });
+        });
+    state.fields.insert(category_key, category.clone());
+    ui.add_space(8.0);
+    let heading = if category.is_empty() {
+        "All"
+    } else {
+        &category
+    };
+    ui.label(RichText::new(heading).size(12.0).color(tokens::MUTED));
+    ui.add_space(4.0);
+    let shown: Vec<&CatalogItem> = items
+        .iter()
+        .filter(|item| cutlass_editor::catalog_shows(item.name, item.categories, &query, &category))
+        .collect();
+    let mut picked = None;
+    let mut budget = TILES_PER_FRAME;
     ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing = Vec2::splat(6.0);
-        for template in cutlass_editor::CAPTION_TEMPLATES {
-            let on = current.as_deref() == Some(template.id);
-            let stroke = if on {
-                Stroke::new(tokens::SELECTED_EDGE * 2.0, tokens::EXPORT)
-            } else {
-                Stroke::NONE
-            };
-            let tile = egui::Button::new(RichText::new(template.name).size(11.0))
-                .fill(BOX)
-                .stroke(stroke);
-            if ui.add_sized([64.0, 48.0], tile).clicked() && !on {
-                picked = Some(template.id);
+        ui.spacing_mut().item_spacing = Vec2::splat(CATALOG_GAP);
+        if none_tile(ui, worn.is_none_or(str::is_empty)).clicked()
+            && worn.is_some_and(|id| !id.is_empty())
+        {
+            picked = Some("");
+        }
+        for item in &shown {
+            let on = worn == Some(item.id);
+            if catalog_tile(shell, ui, state, item, on, &mut budget).clicked() && !on {
+                picked = Some(item.id);
             }
         }
     });
-    if let Some(id) = picked {
-        send(shell, |shell| shell.set_caption_template(id));
+    if shown.is_empty() {
+        ui.add_space(8.0);
+        ui.label(
+            RichText::new("Nothing matches")
+                .size(12.0)
+                .color(tokens::MUTED),
+        );
+    }
+    if budget == 0 {
+        ui.ctx().request_repaint();
+    }
+    picked
+}
+
+/// The None tile: a ring with a slash.
+fn none_tile(ui: &mut Ui, on: bool) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(CATALOG_TILE), Sense::click());
+    let response = response.on_hover_text("None");
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "None"));
+    tile_frame(ui, rect, &response, on);
+    let painter = ui.painter();
+    let stroke = Stroke::new(1.5, tokens::MUTED);
+    painter.circle_stroke(rect.center(), 11.0, stroke);
+    let reach = Vec2::splat(11.0 * std::f32::consts::FRAC_1_SQRT_2);
+    painter.line_segment([rect.center() - reach, rect.center() + reach], stroke);
+    response
+}
+
+/// A tile's box: raised, lighter on hover, outlined when worn.
+fn tile_frame(ui: &Ui, rect: Rect, response: &egui::Response, on: bool) {
+    let painter = ui.painter();
+    let fill = if response.hovered() {
+        tokens::RAISED.gamma_multiply(1.3)
+    } else {
+        BOX
+    };
+    painter.rect_filled(rect, CornerRadius::same(6), fill);
+    if on {
+        painter.rect_stroke(
+            rect,
+            CornerRadius::same(6),
+            Stroke::new(tokens::SELECTED_EDGE * 2.0, tokens::EXPORT),
+            egui::StrokeKind::Inside,
+        );
+    }
+}
+
+/// An item's tile: its picture once drawn, its name until then. At most
+/// `budget` pictures are drawn this frame.
+fn catalog_tile(
+    shell: &Shell,
+    ui: &mut Ui,
+    state: &mut InspectorState,
+    item: &CatalogItem,
+    on: bool,
+    budget: &mut usize,
+) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(CATALOG_TILE), Sense::click());
+    let response = response.on_hover_text(item.name);
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, item.name));
+    if !state.tiles.contains_key(item.id) && *budget > 0 && ui.is_rect_visible(rect) {
+        *budget -= 1;
+        if let Some(picture) = shell.tile_picture(item.tile) {
+            let size = [picture.width as usize, picture.height as usize];
+            let image = egui::ColorImage::from_rgba_unmultiplied(size, &picture.rgba);
+            let texture = ui.ctx().load_texture(
+                format!("catalog tile {}", item.id),
+                image,
+                egui::TextureOptions::LINEAR,
+            );
+            state.tiles.insert(item.id.to_owned(), texture);
+        }
+    }
+    tile_frame(ui, rect, &response, on);
+    let inner = rect.shrink(2.0);
+    if let Some(texture) = state.tiles.get(item.id) {
+        ui.painter().with_clip_rect(inner).image(
+            texture.id(),
+            inner,
+            Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+            Color32::WHITE,
+        );
+    } else {
+        if !state.tiles.contains_key(item.id) {
+            *budget = 0;
+        }
+        ui.painter().with_clip_rect(inner).text(
+            rect.center(),
+            Align2::CENTER_CENTER,
+            item.name,
+            FontId::proportional(10.0),
+            tokens::MUTED,
+        );
+    }
+    response
+}
+
+/// The Templates page: each caption template, the caption's own outlined.
+/// A pick styles every main caption while "Apply to all main captions" is
+/// on, as one undo step.
+fn caption_templates(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState) {
+    let items: Vec<CatalogItem> = cutlass_editor::CAPTION_TEMPLATES
+        .iter()
+        .map(|template| CatalogItem {
+            id: template.id,
+            name: template.name,
+            categories: template.categories,
+            tile: cutlass_editor::CatalogTile::Template(template),
+        })
+        .collect();
+    let worn = shell.caption_template();
+    let picked = catalog_page(
+        shell,
+        ui,
+        state,
+        &CatalogPage {
+            name: "templates",
+            search: Some("Search text templates"),
+            categories: cutlass_editor::TEMPLATE_CATEGORIES,
+        },
+        &items,
+        Some(worn.as_deref().unwrap_or_default()),
+    );
+    match picked {
+        Some("") => send(shell, Shell::clear_caption_template),
+        Some(id) => send(shell, |shell| shell.set_caption_template(id)),
+        None => {}
     }
 }
 
 /// The Bubble page: None, then each bubble, the title's own outlined. A
-/// pick shapes its background; None takes the bubble and its background
-/// off.
-fn bubble_page(shell: &mut Shell, ui: &mut Ui) {
+/// pick shapes its background and colors it and the letters; None takes
+/// the bubble and its background off.
+fn bubble_page(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState) {
     let Some(look) = shell.text_look() else {
         return;
     };
-    let mut picked = None;
-    ui.add_space(8.0);
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing = Vec2::splat(6.0);
-        let tiles = std::iter::once(("None", "")).chain(
-            cutlass_model::Bubble::ALL
-                .iter()
-                .map(|bubble| (bubble.label(), bubble.key())),
-        );
-        for (name, key) in tiles {
-            let on = look.bubble == key;
-            let stroke = if on {
-                Stroke::new(tokens::SELECTED_EDGE * 2.0, tokens::EXPORT)
-            } else {
-                Stroke::NONE
-            };
-            let tile = egui::Button::new(RichText::new(name).size(11.0))
-                .fill(BOX)
-                .stroke(stroke);
-            if ui.add_sized([64.0, 48.0], tile).clicked() && !on {
-                picked = Some(key);
-            }
-        }
-    });
-    if let Some(key) = picked {
-        send(shell, |shell| shell.set_text_bubble(key));
+    let items: Vec<CatalogItem> = cutlass_editor::BUBBLE_LOOKS
+        .iter()
+        .map(|bubble| CatalogItem {
+            id: bubble.id,
+            name: bubble.name,
+            categories: bubble.categories,
+            tile: cutlass_editor::CatalogTile::Bubble(bubble),
+        })
+        .collect();
+    // A bubble of another color still is not None.
+    let worn = cutlass_editor::bubble_look_of(&look)
+        .map(|bubble| bubble.id)
+        .or(look.bubble.is_empty().then_some(""));
+    let picked = catalog_page(
+        shell,
+        ui,
+        state,
+        &CatalogPage {
+            name: "bubbles",
+            search: None,
+            categories: cutlass_editor::BUBBLE_CATEGORIES,
+        },
+        &items,
+        worn,
+    );
+    match picked {
+        Some("") => send(shell, |shell| shell.set_text_bubble("")),
+        Some(id) => send(shell, |shell| shell.set_bubble_look(id)),
+        None => {}
     }
 }
 
-/// The Effects page: None, then each look, the one the title wears
-/// outlined. A pick sets its fill, outline, shadow and glow in one step.
-fn effect_page(shell: &mut Shell, ui: &mut Ui) {
+/// The Effects page: None, then each look, the title's own outlined. A
+/// pick sets its outline, shadow and glow, and for some its letters' color.
+fn effect_page(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState) {
     let Some(look) = shell.text_look() else {
         return;
     };
-    let worn = cutlass_editor::text_effect_of(&look).map(|effect| effect.id);
-    let mut picked = None;
-    ui.add_space(8.0);
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing = Vec2::splat(6.0);
-        let effects =
-            std::iter::once(&cutlass_editor::NO_TEXT_EFFECT).chain(cutlass_editor::TEXT_EFFECTS);
-        for effect in effects {
-            let on = worn == Some(effect.id);
-            let stroke = if on {
-                Stroke::new(tokens::SELECTED_EDGE * 2.0, tokens::EXPORT)
-            } else {
-                Stroke::NONE
-            };
-            let tile = egui::Button::new(RichText::new(effect.name).size(11.0))
-                .fill(BOX)
-                .stroke(stroke);
-            if ui.add_sized([64.0, 48.0], tile).clicked() && !on {
-                picked = Some(effect.id);
-            }
+    let items: Vec<CatalogItem> = cutlass_editor::TEXT_EFFECTS
+        .iter()
+        .map(|effect| CatalogItem {
+            id: effect.id,
+            name: effect.name,
+            categories: effect.categories,
+            tile: cutlass_editor::CatalogTile::Effect(effect),
+        })
+        .collect();
+    let worn = cutlass_editor::text_effect_of(&look).map(|effect| {
+        if effect.id == cutlass_editor::NO_TEXT_EFFECT.id {
+            ""
+        } else {
+            effect.id
         }
     });
-    if let Some(id) = picked {
-        send(shell, |shell| shell.set_text_effect(id));
+    let picked = catalog_page(
+        shell,
+        ui,
+        state,
+        &CatalogPage {
+            name: "effects",
+            search: Some("Search text effects"),
+            categories: cutlass_editor::EFFECT_CATEGORIES,
+        },
+        &items,
+        worn,
+    );
+    match picked {
+        Some("") => send(shell, |shell| {
+            shell.set_text_effect(cutlass_editor::NO_TEXT_EFFECT.id)
+        }),
+        Some(id) => send(shell, |shell| shell.set_text_effect(id)),
+        None => {}
     }
 }
 

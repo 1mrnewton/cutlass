@@ -14090,7 +14090,8 @@ mod tests {
         harness.run_steps(4);
         let keep = std::env::var_os("CUTLASS_RENDER_DIR").map(std::path::PathBuf::from);
         let picture = |harness: &mut egui_kittest::Harness<'_, (Shell, ViewState)>, name: &str| {
-            harness.run_steps(4);
+            // Enough frames for a page's tile pictures.
+            harness.run_steps(16);
             let image = harness.render().expect("the renderer draws the window");
             let first = image.get_pixel(0, 0);
             assert!(
@@ -14144,6 +14145,12 @@ mod tests {
             section: None,
         });
         picture(&mut harness, "caption-bubble");
+        harness.state_mut().1.inspector.focus(inspector::Focus {
+            tab: 0,
+            page: 3,
+            section: None,
+        });
+        picture(&mut harness, "caption-effects");
         drop(harness);
         let _ = std::fs::remove_dir_all(&temp);
     }

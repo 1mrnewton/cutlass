@@ -57,7 +57,7 @@ pub use caption_list::{
 pub use caption_replace::{Replaced, replace_ignoring_case, replace_in_captions};
 pub use caption_templates::{
     CAPTION_TEMPLATES, CaptionTemplate, TEMPLATE_CATEGORIES, caption_template, caption_template_of,
-    caption_template_requests,
+    caption_template_requests, plain_caption_requests,
 };
 pub use caption_words::{LINE_BREAK, breaks_before, join_words, retype_word, toggle_line_break};
 pub use catalog::{catalog_entries, catalog_search};

@@ -249,6 +249,10 @@ pub enum CatalogTile<'a> {
 pub const TILE_SIDE: i32 = 160;
 
 const TILE_CLIP: &str = "tile";
+/// The text sizes that fill most of a tile: a caption's two words, a
+/// title's three letters.
+const TILE_CAPTION_SIZE: f64 = 45.0;
+const TILE_TITLE_SIZE: f64 = 150.0;
 /// A caption's tile is drawn while its second word is said, so a style
 /// that marks the spoken word shows it.
 const TILE_WORDS: [(&str, i64, i64); 2] = [("Say", 0, 500), ("it", 500, 2_000)];
@@ -274,7 +278,7 @@ pub fn tile_session(tile: CatalogTile<'_>, face: &str) -> (Session, Micros) {
             .collect();
         text.words.start_time = TILE_WORDS.iter().map(|(_, start, _)| *start).collect();
         text.words.end_time = TILE_WORDS.iter().map(|(.., end)| *end).collect();
-        text.font_size = 14.0;
+        text.font_size = TILE_CAPTION_SIZE;
     } else {
         text.content = if matches!(tile, CatalogTile::Bubble(_)) {
             "Hi!"
@@ -282,7 +286,7 @@ pub fn tile_session(tile: CatalogTile<'_>, face: &str) -> (Session, Micros) {
             "Abc"
         }
         .to_owned();
-        text.font_size = 16.0;
+        text.font_size = TILE_TITLE_SIZE;
     }
     draft.materials.texts.push(text);
     let mut track = Track::main(TILE_CLIP);

@@ -368,6 +368,48 @@ pub fn caption_template_requests(
         .collect()
 }
 
+/// The requests that take caption `segment_id`'s template off: the plain
+/// style, no stagger and no caption animation. The letters keep their
+/// color and outline. With `all` and the caption on a subtitle lane, every
+/// caption on that lane is plain again.
+#[must_use]
+pub fn plain_caption_requests(draft: &Draft, segment_id: &SegmentId, all: bool) -> Vec<Request> {
+    let clips: Vec<SegmentId> = if all && main_caption_lane(draft, segment_id).is_some() {
+        caption_rows(draft, segment_id)
+            .into_iter()
+            .map(|row| row.segment_id)
+            .collect()
+    } else {
+        vec![segment_id.clone()]
+    };
+    clips
+        .into_iter()
+        .flat_map(|clip| {
+            [
+                Request::SetCaptionStyle {
+                    segment_id: clip.clone(),
+                    style: String::new(),
+                },
+                Request::SetCaptionStagger {
+                    segment_id: clip.clone(),
+                    millis: 0,
+                },
+                Request::SetAnimation {
+                    segment_id: clip.clone(),
+                    kind: AnimType::Caption,
+                    animation: None,
+                    duration: Micros(0),
+                },
+                Request::SetCaptionTemplate {
+                    segment_id: clip,
+                    resource_id: String::new(),
+                    name: String::new(),
+                },
+            ]
+        })
+        .collect()
+}
+
 /// The template caption `segment_id` was styled with, by its id.
 #[must_use]
 pub fn caption_template_of(draft: &Draft, segment_id: &SegmentId) -> Option<String> {
@@ -498,5 +540,42 @@ mod tests {
         );
         assert_eq!(caption_template_of(draft, &ids[1]), None);
         assert!(draft.materials.material_animations.is_empty());
+    }
+
+    #[test]
+    fn none_takes_the_template_off_and_keeps_the_letters() {
+        let mut session = session();
+        let ids = clips(&session);
+        let pop = caption_template("cutlass-caption-pop").unwrap();
+        let revision = session.revision();
+        let requests = caption_template_requests(session.draft(), &ids[0], pop, true);
+        session.apply(revision, &requests).unwrap();
+        let revision = session.revision();
+        let requests = plain_caption_requests(session.draft(), &ids[0], true);
+        session.apply(revision, &requests).unwrap();
+        for id in &ids {
+            assert_eq!(caption_template_of(session.draft(), id), None);
+            let segment = session
+                .draft()
+                .tracks
+                .iter()
+                .flat_map(|track| &track.segments)
+                .find(|segment| &segment.id == id)
+                .unwrap();
+            let text = session
+                .draft()
+                .materials
+                .texts
+                .iter()
+                .find(|text| text.id == segment.material_id)
+                .unwrap();
+            assert!(text.caption_style.is_empty());
+            assert_eq!(text.caption_stagger_ms, 0);
+            assert_eq!(text.text_color, pop.color);
+            assert!(
+                segment_animations(session.draft(), segment)
+                    .is_none_or(|row| row.animations.iter().all(|a| a.kind != "caption"))
+            );
+        }
     }
 }

@@ -6049,6 +6049,28 @@ impl Shell {
         })
     }
 
+    /// Give the selected title or caption the whole look of preset `index`
+    /// from [`cutlass_editor::TEXT_PRESETS`]: color, outline, box and
+    /// shadow, in one undo step. With "Apply to all main captions" on,
+    /// every caption on the row takes it.
+    pub fn set_text_preset(&mut self, index: usize) -> Result<(), ShellError> {
+        let segment_id = self.text_segment()?;
+        self.refuse_locked(&segment_id)?;
+        let Some(preset) = cutlass_editor::TEXT_PRESETS.get(index) else {
+            return Err(ShellError::Unavailable("no such preset".to_owned()));
+        };
+        let face = self.face.name().to_owned();
+        let requests = cutlass_editor::preset_requests(&segment_id, preset, &face);
+        let every = match self.draft() {
+            Some(draft) if self.all_captions => requests
+                .iter()
+                .flat_map(|request| cutlass_editor::for_every_caption(draft, request))
+                .collect(),
+            _ => requests,
+        };
+        self.apply_requests(&every)
+    }
+
     /// Step to the next installed face. One undo restores the previous name.
     /// The words and the size stay. The same face is not an undo step.
     pub fn cycle_text_font(&mut self) -> Result<(), ShellError> {
@@ -13714,6 +13736,40 @@ mod tests {
         assert_eq!(desktop.inspection().unwrap().text_align, 0);
         assert_eq!(desktop.draft().unwrap().materials.texts[0].typesetting, 0);
         assert_eq!(digest(&desktop.preview_bytes().unwrap().rgba), across);
+    }
+
+    #[test]
+    fn a_preset_gives_the_whole_look_in_one_step() {
+        let temp = Temp::new();
+        let mut desktop = one_letter_title(&temp);
+        let plain = desktop.draft().unwrap().materials.texts[0].clone();
+        let shown = digest(&desktop.preview_bytes().unwrap().rgba);
+        let pick = |name: &str| {
+            cutlass_editor::TEXT_PRESETS
+                .iter()
+                .position(|preset| preset.name == name)
+                .unwrap()
+        };
+        desktop.set_text_preset(pick("Pop")).unwrap();
+        let text = &desktop.draft().unwrap().materials.texts[0];
+        assert_eq!(text.text_color, "#FF6A9A");
+        assert_eq!(text.border_color, "#FFFFFF");
+        assert!(text.border_width > 0.0 && text.has_shadow);
+        assert_eq!(text.shadow_color, "#000000");
+        assert_ne!(digest(&desktop.preview_bytes().unwrap().rgba), shown);
+        // A box look takes the outline and shadow off.
+        desktop.set_text_preset(pick("Paper box")).unwrap();
+        let text = &desktop.draft().unwrap().materials.texts[0];
+        assert_eq!(text.background_color, "#FFFFFF");
+        assert!(!text.has_shadow && text.border_color.is_empty());
+        desktop.undo().unwrap();
+        assert_eq!(
+            desktop.draft().unwrap().materials.texts[0].text_color,
+            "#FF6A9A"
+        );
+        desktop.undo().unwrap();
+        assert_eq!(desktop.draft().unwrap().materials.texts[0], plain);
+        assert!(desktop.set_text_preset(99).is_err());
     }
 
     #[test]

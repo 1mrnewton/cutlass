@@ -2092,7 +2092,8 @@ fn alignment_row(shell: &mut Shell, ui: &mut Ui, inspection: &Inspection) {
     }
 }
 
-/// The preset tiles: a letter color on a plate. Picking one sets the color.
+/// The preset tiles, each drawn in its whole look: letters, outline, box
+/// and shadow. Picking one gives the text that look in one step.
 use cutlass_editor::TEXT_PRESETS as PRESETS;
 
 fn preset_styles(shell: &mut Shell, ui: &mut Ui) {
@@ -2105,30 +2106,55 @@ fn preset_styles(shell: &mut Shell, ui: &mut Ui) {
     let mut picked = None;
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = Vec2::splat(6.0);
-        for (name, color, plate) in PRESETS {
+        for (index, preset) in PRESETS.iter().enumerate() {
             let (rect, response) = ui.allocate_exact_size(Vec2::splat(36.0), Sense::click());
-            let fill = parse_hex(plate).unwrap_or(BOX);
-            ui.painter().rect_filled(rect, CornerRadius::same(6), fill);
-            if color.is_empty() {
+            ui.painter().rect_filled(rect, CornerRadius::same(6), BOX);
+            if index == 0 {
                 paint_icon(ui, rect, "unavailable", tokens::MUTED);
             } else {
-                ui.painter().text(
-                    rect.center(),
-                    Align2::CENTER_CENTER,
-                    "Aa",
-                    FontId::proportional(13.0),
-                    parse_hex(color).unwrap_or(Color32::WHITE),
-                );
+                preset_tile(ui, rect, preset);
             }
-            if response.on_hover_text(name).clicked() && !color.is_empty() {
-                picked = Some(color);
+            if response.on_hover_text(preset.name).clicked() {
+                picked = Some(index);
             }
         }
     });
-    if let Some(color) = picked {
-        send(shell, |shell| shell.set_text_color(color));
+    if let Some(index) = picked {
+        send(shell, |shell| shell.set_text_preset(index));
     }
     ui.add_space(6.0);
+}
+
+/// "Aa" in one preset's look, in a tile.
+fn preset_tile(ui: &Ui, rect: Rect, preset: &cutlass_editor::TextPreset) {
+    let painter = ui.painter();
+    let font = FontId::proportional(14.0);
+    let center = rect.center();
+    if let Some(plate) = parse_hex(preset.plate) {
+        let back = Rect::from_center_size(center, Vec2::new(28.0, 20.0));
+        painter.rect_filled(back, CornerRadius::same(4), plate);
+    }
+    let letters = |at: egui::Pos2, color: Color32| {
+        painter.text(at, Align2::CENTER_CENTER, "Aa", font.clone(), color);
+    };
+    if let Some(shadow) = parse_hex(preset.shadow) {
+        letters(center + Vec2::new(1.5, 1.5), shadow);
+    }
+    if let Some(outline) = parse_hex(preset.outline) {
+        for (x, y) in [
+            (-1.0, 0.0),
+            (1.0, 0.0),
+            (0.0, -1.0),
+            (0.0, 1.0),
+            (-1.0, -1.0),
+            (1.0, 1.0),
+            (-1.0, 1.0),
+            (1.0, -1.0),
+        ] {
+            letters(center + Vec2::new(x, y), outline);
+        }
+    }
+    letters(center, parse_hex(preset.color).unwrap_or(Color32::WHITE));
 }
 
 /// Stroke, Background, Glow, and Shadow. A part's switch turns it on in

@@ -4,9 +4,10 @@
 //! style presets.
 
 use cutlass_model::{
-    Draft, MaterialEffect, MaterialRef, MaterialText, Segment, Track, TrackFlag, TrackType,
-    segment_bloom,
+    Draft, MaterialEffect, MaterialRef, MaterialText, Segment, SegmentId, Track, TrackFlag,
+    TrackType, segment_bloom,
 };
+use cutlass_session::Request;
 
 /// The panel a clip opens in the inspector, from its material and its row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -248,25 +249,88 @@ pub fn starting(color: &str, value: f64, start: f64) -> f64 {
     }
 }
 
-/// Title style presets: name, fill color, box color. "None" clears both.
-pub const TEXT_PRESETS: [(&str, &str, &str); 16] = [
-    ("None", "", ""),
-    ("Plain", "#FFFFFF", "#3A3A3A"),
-    ("Yellow", "#FFE14A", "#3A3A3A"),
-    ("Red", "#FF4D4D", "#3A3A3A"),
-    ("Orange", "#FF9A3C", "#3A3A3A"),
-    ("Blue", "#5AA7FF", "#3A3A3A"),
-    ("Green", "#3DDC6A", "#1C1C1C"),
-    ("Gray", "#D0D0D0", "#2A2A2A"),
-    ("Ink", "#1A1A1A", "#F3F3F3"),
-    ("Gold", "#F2C14E", "#2A2418"),
-    ("Violet", "#FFFFFF", "#7A3CFF"),
-    ("Paper", "#7A3CFF", "#FFFFFF"),
-    ("Night", "#FFFFFF", "#111111"),
-    ("Lime", "#D6FF4A", "#111111"),
-    ("Rose", "#FF6A9A", "#2A1218"),
-    ("Cyan", "#3DE0FF", "#102028"),
+/// A preset look for a title or caption: the letters' color and, each
+/// left off when empty, an outline, a box behind them, and a shadow.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TextPreset {
+    pub name: &'static str,
+    pub color: &'static str,
+    pub outline: &'static str,
+    pub plate: &'static str,
+    pub shadow: &'static str,
+}
+
+const fn preset(
+    name: &'static str,
+    color: &'static str,
+    outline: &'static str,
+    plate: &'static str,
+    shadow: &'static str,
+) -> TextPreset {
+    TextPreset {
+        name,
+        color,
+        outline,
+        plate,
+        shadow,
+    }
+}
+
+/// The preset tiles, in the order the inspector shows them. "None" puts
+/// white letters back with every part off.
+pub const TEXT_PRESETS: [TextPreset; 16] = [
+    preset("None", "#FFFFFF", "", "", ""),
+    preset("Outline", "#FFFFFF", "#000000", "", ""),
+    preset("Ink outline", "#000000", "#FFFFFF", "", ""),
+    preset("Yellow outline", "#FFE14A", "#000000", "", ""),
+    preset("Red outline", "#FF4D4D", "#FFFFFF", "", ""),
+    preset("Blue outline", "#5AA7FF", "#FFFFFF", "", ""),
+    preset("Green outline", "#3DDC6A", "#000000", "", ""),
+    preset("Pop", "#FF6A9A", "#FFFFFF", "", "#000000"),
+    preset("Shadow", "#FFFFFF", "", "", "#000000"),
+    preset("Gold shadow", "#F2C14E", "#2A2418", "", "#000000"),
+    preset("Night box", "#FFFFFF", "", "#111111", ""),
+    preset("Paper box", "#111111", "", "#FFFFFF", ""),
+    preset("Yellow box", "#111111", "", "#FFE14A", ""),
+    preset("Red box", "#FFFFFF", "", "#E5383B", ""),
+    preset("Violet box", "#FFFFFF", "", "#7A3CFF", ""),
+    preset("Lime box", "#D6FF4A", "", "#111111", ""),
 ];
+
+/// The requests that give `segment_id` the whole `preset` look, one undo
+/// step when applied together. An empty `font_path` takes `face`.
+#[must_use]
+pub fn preset_requests(segment_id: &SegmentId, preset: &TextPreset, face: &str) -> Vec<Request> {
+    vec![
+        Request::SetTextColor {
+            segment_id: segment_id.clone(),
+            color: preset.color.to_owned(),
+            face: face.to_owned(),
+        },
+        Request::SetTextOutline {
+            segment_id: segment_id.clone(),
+            color: preset.outline.to_owned(),
+            width: if preset.outline.is_empty() {
+                0.0
+            } else {
+                OUTLINE_START
+            },
+        },
+        Request::SetTextBackground {
+            segment_id: segment_id.clone(),
+            color: preset.plate.to_owned(),
+            alpha: BACKGROUND_ALPHA_START,
+            round: BACKGROUND_ROUND_START,
+        },
+        Request::SetTextShadow {
+            segment_id: segment_id.clone(),
+            color: preset.shadow.to_owned(),
+            distance: SHADOW_DISTANCE_START,
+            angle: SHADOW_ANGLE,
+            blur: SHADOW_BLUR_START,
+        },
+    ]
+}
 
 /// A clip's stored position (-1 to 1 each way, Y up) as canvas pixels from
 /// the middle, Y down, rounded, as the position fields show it.

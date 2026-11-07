@@ -809,7 +809,13 @@ fn install_style(style: &mut egui::Style) {
     style.interaction.selectable_labels = false;
     style.visuals.override_text_color = Some(tokens::TEXT);
     style.visuals.panel_fill = tokens::PANEL;
-    style.visuals.window_fill = tokens::PANEL;
+    // egui draws dropdowns, tooltips and the project bar's menus in its
+    // popup frame, which reads these: the same panel as a right-click menu.
+    style.visuals.window_fill = tokens::MENU;
+    style.visuals.window_stroke = egui::Stroke::NONE;
+    style.visuals.menu_corner_radius = CornerRadius::same(tokens::MENU_RADIUS);
+    style.visuals.popup_shadow = tokens::MENU_SHADOW;
+    style.spacing.menu_margin = egui::Margin::same(tokens::MENU_PAD);
     style.visuals.extreme_bg_color = tokens::GAP;
     style.visuals.faint_bg_color = tokens::PROJECT_BAR;
     style.visuals.widgets.noninteractive.bg_stroke = egui::Stroke::NONE;

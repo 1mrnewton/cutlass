@@ -320,12 +320,12 @@ pub const LIBRARY_EMPTY: &[Entry] = &[
     ),
 ];
 
-const PAD: f32 = 6.0;
+const PAD: f32 = tokens::MENU_PAD as f32;
 const ROW: f32 = 32.0;
 const ROW_PAD: f32 = 10.0;
 const GAP: f32 = 16.0;
 const SEPARATOR: f32 = 13.0;
-const RADIUS: u8 = 12;
+const RADIUS: u8 = tokens::MENU_RADIUS;
 const ROW_RADIUS: u8 = 8;
 const LABEL_SIZE: f32 = 13.0;
 const KEY_SIZE: f32 = 12.0;
@@ -623,12 +623,7 @@ fn paint_menu(
         egui::UiBuilder::new().layer_id(layer).max_rect(rect),
     );
     let painter = ui.painter().with_clip_rect(rect);
-    let shadow = egui::Shadow {
-        offset: [0, 16],
-        blur: 40,
-        spread: 0,
-        color: egui::Color32::from_black_alpha(115),
-    };
+    let shadow = tokens::MENU_SHADOW;
     // The shadow spreads past the panel, so it is clipped to the window, not
     // to the panel.
     ctx.layer_painter(layer)

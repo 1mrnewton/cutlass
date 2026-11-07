@@ -232,6 +232,16 @@ pub const MENU_SEPARATOR: Color32 = Color32::from_rgba_premultiplied(20, 20, 20,
 pub const MENU_BADGE: Color32 = Color32::from_rgb(0x6d, 0x5e, 0xfc);
 /// The narrowest a menu is drawn.
 pub const MENU_WIDTH: f32 = 248.0;
+/// A menu's corners and padding, which dropdowns and tooltips share.
+pub const MENU_RADIUS: u8 = 12;
+pub const MENU_PAD: i8 = 6;
+/// The shadow under a menu, a dropdown, or a tooltip.
+pub const MENU_SHADOW: egui::Shadow = egui::Shadow {
+    offset: [0, 16],
+    blur: 40,
+    spread: 0,
+    color: Color32::from_black_alpha(115),
+};
 
 #[cfg(test)]
 mod tests {

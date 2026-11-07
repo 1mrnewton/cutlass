@@ -744,6 +744,39 @@ impl Shell {
         }
     }
 
+    /// The template the selected caption was styled with, by its id.
+    #[must_use]
+    pub fn caption_template(&self) -> Option<String> {
+        match (self.draft(), self.selected()) {
+            (Some(draft), Some(segment_id)) => {
+                cutlass_editor::caption_template_of(draft, segment_id)
+            }
+            _ => None,
+        }
+    }
+
+    /// Style the selected caption as template `id`: its style, caption
+    /// animation, stagger and look. While "Apply to all main captions" is
+    /// on, every caption on its subtitle row takes it. One undo step.
+    pub fn set_caption_template(&mut self, id: &str) -> Result<(), ShellError> {
+        let segment_id = self.text_segment()?;
+        self.refuse_locked(&segment_id)?;
+        let template = cutlass_editor::caption_template(id).ok_or_else(|| {
+            ShellError::Unavailable("there is no such caption template".to_owned())
+        })?;
+        let draft = self.session_draft()?;
+        if cutlass_editor::caption_rows(draft, &segment_id).is_empty() {
+            return Err(caption_miss(cutlass_editor::CaptionListMiss::NotCaption));
+        }
+        let requests = cutlass_editor::caption_template_requests(
+            draft,
+            &segment_id,
+            template,
+            self.all_captions(),
+        );
+        self.apply_requests(&requests)
+    }
+
     /// Take caption `segment_id` off the timeline. One undo restores it.
     pub fn remove_caption(&mut self, segment_id: &SegmentId) -> Result<(), ShellError> {
         self.refuse_locked(segment_id)?;
@@ -1603,5 +1636,47 @@ mod tests {
             desktop.set_caption_word(0, "won").unwrap_err().to_string(),
             "the track is locked"
         );
+    }
+
+    #[test]
+    fn a_caption_template_styles_the_row_while_apply_to_all_is_on() {
+        let temp = Temp::new();
+        let mut desktop = subtitle_row(&temp);
+        pick(&mut desktop, "first");
+        let before = desktop.draft().unwrap().clone();
+        desktop.set_caption_template("cutlass-caption-pop").unwrap();
+        assert_eq!(
+            desktop.caption_template().as_deref(),
+            Some("cutlass-caption-pop")
+        );
+        let styles = |desktop: &Shell| -> Vec<String> {
+            ["first", "second", "title"]
+                .iter()
+                .map(|id| {
+                    let draft = desktop.draft().unwrap();
+                    let text = draft
+                        .materials
+                        .texts
+                        .iter()
+                        .find(|t| t.id.as_str() == *id)
+                        .unwrap();
+                    text.caption_style.clone()
+                })
+                .collect()
+        };
+        assert_eq!(styles(&desktop), ["pop", "pop", ""]);
+        desktop.undo().unwrap();
+        assert_eq!(desktop.draft().unwrap(), &before);
+
+        desktop.set_all_captions(false);
+        desktop
+            .set_caption_template("cutlass-caption-neon")
+            .unwrap();
+        assert_eq!(styles(&desktop), ["neon", "", ""]);
+
+        assert!(desktop.set_caption_template("nope").is_err());
+        pick(&mut desktop, "title");
+        assert!(desktop.set_caption_template("cutlass-caption-pop").is_err());
+        assert_eq!(desktop.caption_template(), None);
     }
 }

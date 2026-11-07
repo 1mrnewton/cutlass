@@ -260,7 +260,7 @@ fn text_panel(
                     text_basic(shell, ui, state, inspection, caption);
                     footer(ui, &["Save as preset"]);
                 }
-                1 if caption => later_note(ui, "Caption templates"),
+                1 if caption => caption_templates(shell, ui),
                 1 => bubble_page(shell, ui),
                 _ => effect_page(shell, ui),
             }
@@ -2573,6 +2573,35 @@ fn caption_styles(shell: &mut Shell, ui: &mut Ui, inspection: &Inspection) {
     });
     if let Some(key) = picked {
         send(shell, |shell| shell.set_caption_style(key));
+    }
+}
+
+/// The Templates page: each caption template, the caption's own outlined.
+/// A pick styles every main caption while "Apply to all main captions" is
+/// on, as one undo step.
+fn caption_templates(shell: &mut Shell, ui: &mut Ui) {
+    let current = shell.caption_template();
+    let mut picked = None;
+    ui.add_space(8.0);
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = Vec2::splat(6.0);
+        for template in &cutlass_editor::CAPTION_TEMPLATES {
+            let on = current.as_deref() == Some(template.id);
+            let stroke = if on {
+                Stroke::new(tokens::SELECTED_EDGE * 2.0, tokens::EXPORT)
+            } else {
+                Stroke::NONE
+            };
+            let tile = egui::Button::new(RichText::new(template.name).size(11.0))
+                .fill(BOX)
+                .stroke(stroke);
+            if ui.add_sized([64.0, 48.0], tile).clicked() && !on {
+                picked = Some(template.id);
+            }
+        }
+    });
+    if let Some(id) = picked {
+        send(shell, |shell| shell.set_caption_template(id));
     }
 }
 

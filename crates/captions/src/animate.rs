@@ -1111,6 +1111,7 @@ mod tests {
             glyph_id,
             missing: false,
             x,
+            y: 16.0,
             advance: 8.0,
             size: 1.0,
             face: 0,

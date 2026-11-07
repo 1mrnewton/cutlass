@@ -192,8 +192,11 @@ pub struct TextSource {
     font_size: f32,
     /// Bold, italic and underline over every letter.
     pattern: Pattern,
-    /// Each line's baseline, in the glyph records' pixels.
+    /// Each glyph record's own baseline, in the glyph records' pixels.
     baselines: Vec<f32>,
+    /// For vertical text, each column's right edge, where its underline
+    /// runs; empty for lines across.
+    columns: Vec<f32>,
     /// The box behind the letters, in picture pixels.
     background: Option<Area>,
     origin_x: f32,
@@ -311,7 +314,20 @@ impl TextSource {
             picture_bounds(&mesh, &style, laid.font_size, &shadows)?;
         let letters = letters_of(&crate::richtext::read(material)?.text, &mesh.glyphs);
         let pattern = Pattern::of(material, laid.font_size);
-        let baselines = laid.lines.iter().map(|line| line.baseline).collect();
+        let baselines = laid.glyphs().map(|placed| placed.y).collect();
+        let columns = if laid.vertical() {
+            laid.lines
+                .iter()
+                .map(|line| {
+                    let widest = line.glyphs.iter().map(|g| g.size).fold(1.0_f32, f32::max);
+                    line.glyphs.first().map_or(0.0, |first| {
+                        first.x + first.advance / 2.0 + laid.font_size * widest / 2.0
+                    })
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         let mut source = Self {
             range: segment.target.clone(),
             material_id: material.id.clone(),
@@ -327,6 +343,7 @@ impl TextSource {
             font_size: laid.font_size,
             pattern,
             baselines,
+            columns,
             background,
             origin_x,
             origin_y,
@@ -337,7 +354,7 @@ impl TextSource {
             let mut reach = Reach::default();
             for (at, record) in source.mesh.glyphs.iter().enumerate() {
                 if let Some((posed, _)) = source.posed(at, record) {
-                    source.hold_pattern(&mut reach, &posed, record);
+                    source.hold_pattern(&mut reach, at, &posed, record);
                 }
             }
             source.grow_to(&reach);
@@ -345,35 +362,57 @@ impl TextSource {
         Ok(source)
     }
 
-    /// The baseline of `record`'s line, moved with it when a pose moved it
-    /// to `posed`.
-    fn baseline(&self, posed: &GlyphRecord, record: &GlyphRecord) -> f32 {
-        let rest = usize::try_from(record.line)
-            .ok()
-            .and_then(|line| self.baselines.get(line).copied())
+    /// The baseline of the glyph at `at`, moved with it when a pose moved
+    /// its `record` to `posed`.
+    fn baseline(&self, at: usize, posed: &GlyphRecord, record: &GlyphRecord) -> f32 {
+        let rest = self
+            .baselines
+            .get(at)
+            .copied()
             .unwrap_or(record.y + record.height);
         rest + (posed.y + posed.height / 2.0) - (record.y + record.height / 2.0)
     }
 
+    /// The piece of underline the glyph at `at` carries, in the records'
+    /// pixels: left, top, right, bottom. Across, it runs under the letter;
+    /// down a column, it runs beside the letter's em on the column's right.
+    fn underline_piece(
+        &self,
+        at: usize,
+        posed: &GlyphRecord,
+        record: &GlyphRecord,
+    ) -> Option<[f32; 4]> {
+        let (thick, below) = self.pattern.underline?;
+        let baseline = self.baseline(at, posed, record);
+        let Some(right) = usize::try_from(record.line)
+            .ok()
+            .and_then(|line| self.columns.get(line).copied())
+        else {
+            let top = baseline + below;
+            return Some([posed.x, top, posed.x + posed.width, top + thick]);
+        };
+        let right = right + (posed.x - record.x);
+        let top = baseline - self.font_size * crate::layout::VERTICAL_BASELINE;
+        Some([right, top, right + thick, top + self.font_size])
+    }
+
     /// Add what the pattern makes `posed` reach, and its line's underline.
-    fn hold_pattern(&self, reach: &mut Reach, posed: &GlyphRecord, record: &GlyphRecord) {
-        let baseline = self.baseline(posed, record);
+    fn hold_pattern(
+        &self,
+        reach: &mut Reach,
+        at: usize,
+        posed: &GlyphRecord,
+        record: &GlyphRecord,
+    ) {
+        let baseline = self.baseline(at, posed, record);
         self.pattern.hold(reach, posed, baseline);
-        if let Some((thick, below)) = self.pattern.underline {
-            reach.hold(
-                posed.x,
-                baseline + below,
-                posed.x + posed.width,
-                baseline + below + thick,
-            );
+        if let Some([left, top, right, bottom]) = self.underline_piece(at, posed, record) {
+            reach.hold(left, top, right, bottom);
         }
     }
 
     /// Each line's underline, in picture pixels: left, top, right, bottom.
     fn underlines(&self) -> Vec<[f32; 4]> {
-        let Some((thick, below)) = self.pattern.underline else {
-            return Vec::new();
-        };
         let mut lines: Vec<(u32, [f32; 4])> = Vec::new();
         for (at, record) in self.mesh.glyphs.iter().enumerate() {
             if record.width <= 0.0 || record.height <= 0.0 {
@@ -382,17 +421,23 @@ impl TextSource {
             let Some((posed, _)) = self.posed(at, record) else {
                 continue;
             };
-            let top = self.baseline(&posed, record) + below - self.origin_y;
-            let (left, right) = (
-                posed.x - self.origin_x,
-                posed.x + posed.width - self.origin_x,
-            );
+            let Some([left, top, right, bottom]) = self.underline_piece(at, &posed, record) else {
+                continue;
+            };
+            let piece = [
+                left - self.origin_x,
+                top - self.origin_y,
+                right - self.origin_x,
+                bottom - self.origin_y,
+            ];
             match lines.iter_mut().find(|(line, _)| *line == record.line) {
                 Some((_, bar)) => {
-                    bar[0] = bar[0].min(left);
-                    bar[2] = bar[2].max(right);
+                    bar[0] = bar[0].min(piece[0]);
+                    bar[1] = bar[1].min(piece[1]);
+                    bar[2] = bar[2].max(piece[2]);
+                    bar[3] = bar[3].max(piece[3]);
                 }
-                None => lines.push((record.line, [left, top, right, top + thick])),
+                None => lines.push((record.line, piece)),
             }
         }
         lines.into_iter().map(|(_, bar)| bar).collect()
@@ -456,7 +501,7 @@ impl TextSource {
                 posed.x + posed.width,
                 posed.y + posed.height,
             );
-            self.hold_pattern(&mut reach, &posed, record);
+            self.hold_pattern(&mut reach, at, &posed, record);
             if look.back[3] == 0 {
                 last = None;
                 continue;
@@ -572,7 +617,7 @@ impl TextSource {
                 origin_y: self.origin_y,
                 alpha,
                 shear: self.pattern.shear,
-                baseline: self.baseline(&record, &self.mesh.glyphs[at]),
+                baseline: self.baseline(at, &record, &self.mesh.glyphs[at]),
             };
             let bold = self.pattern.bold;
             let reach = look.outline.as_ref().map_or(0.0, |outline| outline.width) + bold;
@@ -1439,6 +1484,32 @@ mod tests {
         });
         let row = solid_row.expect("a solid red bar");
         assert!(row > height / 2, "{row} of {height}");
+    }
+
+    #[test]
+    fn vertical_text_stands_tall_and_underlines_down_the_right() {
+        let mut across = material("AA");
+        across.text_color = "#FF0000".to_owned();
+        let mut down = across.clone();
+        down.typesetting = 1;
+        down.alignment = 3;
+        let (wide, low, _) = picture(&across);
+        let (width, height, _) = picture(&down);
+        assert!(height > width && wide > low, "{width}x{height} {wide}x{low}");
+        down.underline = true;
+        let (width, height, rgba) = picture(&down);
+        // Some column on the right is red down most of the letters.
+        let solid = (0..width).rev().find(|&x| {
+            (0..height)
+                .filter(|&y| {
+                    let at = ((y * width + x) * 4) as usize;
+                    rgba[at..at + 4] == [255, 0, 0, 255]
+                })
+                .count()
+                > height as usize / 2
+        });
+        let column = solid.expect("a solid red bar");
+        assert!(column > width / 2, "{column} of {width}");
     }
 
     #[test]

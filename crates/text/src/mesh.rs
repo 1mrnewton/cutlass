@@ -59,7 +59,7 @@ pub(crate) fn build_faces(
             else {
                 return Err(TextError::Limit);
             };
-            glyphs.push(record(placed, line.baseline, layout, image, line_index)?);
+            glyphs.push(record(placed, placed.y, layout, image, line_index)?);
         }
     }
     Ok(TextMesh {

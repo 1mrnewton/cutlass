@@ -103,11 +103,15 @@ pub(crate) fn text_layers(
             if !covers(segment.target.start.0, segment.target.duration.0, time.0) {
                 continue;
             }
-            let Some(MaterialRef::Text(material)) =
-                draft.materials.get(segment.material_id.as_str())
+            let Some(MaterialRef::Text(stored)) = draft.materials.get(segment.material_id.as_str())
             else {
                 continue;
             };
+            // Keyed letters take their color at `time`, and are drawn for
+            // each frame and not kept.
+            let keyed = cutlass_model::text_color_at(segment, &draft.keyframe_graph_list, time);
+            let recolored = keyed.map(|rgb| recolor(stored, rgb));
+            let material = recolored.as_ref().unwrap_or(stored);
             // Text with no face draws nothing; the log says so once.
             if material.font_path.is_empty() {
                 logged::<(), _>("text", segment, Err("it has no font file"));
@@ -149,7 +153,7 @@ pub(crate) fn text_layers(
                 let steps = cutlass_model::letters_at(draft, segment, time);
                 let kept = rasters
                     .get(&segment.id)
-                    .filter(|(drawn, _)| *drawn == wanted && steps.is_empty())
+                    .filter(|(drawn, _)| *drawn == wanted && steps.is_empty() && keyed.is_none())
                     .cloned();
                 let Some((drawn, bytes)) = kept.or_else(|| {
                     title_picture(
@@ -164,7 +168,7 @@ pub(crate) fn text_layers(
                 }) else {
                     continue;
                 };
-                if steps.is_empty() {
+                if steps.is_empty() && keyed.is_none() {
                     rasters.insert(segment.id.clone(), (drawn, bytes.clone()));
                 }
                 (bytes, transform.dense(drawn))
@@ -183,6 +187,24 @@ pub(crate) fn text_layers(
         }
     }
     layers
+}
+
+/// `material` with its letters, and every rich range's, in `rgb`.
+fn recolor(material: &MaterialText, rgb: [f64; 3]) -> MaterialText {
+    let mut text = material.clone();
+    let byte = |unit: f64| {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let byte = (unit.clamp(0.0, 1.0) * 255.0).round() as u8;
+        byte
+    };
+    text.text_color = format!(
+        "#{:02X}{:02X}{:02X}",
+        byte(rgb[0]),
+        byte(rgb[1]),
+        byte(rgb[2])
+    );
+    text.paint_rich(rgb);
+    text
 }
 
 /// A title drawn with `density` pixels to each shown pixel, and that
@@ -981,6 +1003,23 @@ mod tests {
             super::text_size_at(&faceless, &OneFont, &segment, Micros(0)),
             None
         );
+    }
+
+    #[test]
+    fn keyed_letters_change_color_between_their_keys() {
+        let mut draft = text_segment("A", false);
+        let segment = &mut draft.tracks[0].segments[0];
+        for (offset, rgb) in [(0, [1.0, 0.0, 0.0]), (1_000_000, [0.0, 0.0, 1.0])] {
+            for (name, value) in cutlass_model::TEXT_COLOR_KEYS.iter().zip(rgb) {
+                cutlass_model::put_key(segment, name, Micros(offset), value);
+            }
+        }
+        let has =
+            |time: i64, rgba: [u8; 4]| pixels(&draft, time).chunks(4).any(|pixel| pixel == rgba);
+        assert!(has(0, [255, 0, 0, 255]));
+        assert!(!has(0, [255, 255, 255, 255]));
+        assert!(has(500_000, [128, 0, 128, 255]));
+        assert!(has(999_999, [0, 0, 255, 255]));
     }
 
     #[test]

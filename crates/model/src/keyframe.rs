@@ -453,13 +453,35 @@ pub fn is_pose_key(property: &str) -> bool {
         || matches!(property, ALPHA_KEY | "alpha" | "rotation" | "KFTypeScale")
 }
 
-/// Whether a key on `property` is played: the pose, the volume or the
-/// mask.
+/// A text's letter color: red, green and blue, each from 0 to 1, keyed as
+/// three settings. These are Cutlass's own names; the reference editor's
+/// are not known.
+pub const TEXT_COLOR_KEYS: [&str; 3] = ["KFTypeTextColorR", "KFTypeTextColorG", "KFTypeTextColorB"];
+
+/// Whether a key on `property` is played: the pose, the volume, the mask
+/// or a text's color.
 #[must_use]
 pub fn is_keyable(property: &str) -> bool {
     is_pose_key(property)
         || matches!(property, VOLUME_KEY | "volume")
         || MASK_KEYS.contains(&property)
+        || TEXT_COLOR_KEYS.contains(&property)
+}
+
+/// The keyed letter color of `segment` at timeline `time`, red, green and
+/// blue from 0 to 1; `None` when it has no color keys or one does not read.
+#[must_use]
+pub fn text_color_at(
+    segment: &Segment,
+    graphs: &[KeyframeGraph],
+    time: Micros,
+) -> Option<[f64; 3]> {
+    let offset = time.0.saturating_sub(segment.target.start.0);
+    let mut rgb = [0.0; 3];
+    for (channel, name) in rgb.iter_mut().zip(TEXT_COLOR_KEYS) {
+        *channel = sample(&segment.common_keyframes, graphs, &[name], offset)??.clamp(0.0, 1.0);
+    }
+    Some(rgb)
 }
 
 /// The offsets from the segment start that hold a key, earliest first, each

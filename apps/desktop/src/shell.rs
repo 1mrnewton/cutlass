@@ -9133,6 +9133,95 @@ mod tests {
         );
         // The model stays loaded for the next transcript.
         assert!(desktop.speech.borrow().is_some());
+
+        // Re-run hears the same project-relative file again.
+        let caption = draft
+            .tracks
+            .iter()
+            .find(|track| track.kind == TrackType::Text)
+            .and_then(|track| track.segments.first())
+            .map(|segment| segment.id.clone())
+            .unwrap();
+        desktop.select(Some(caption));
+        assert!(desktop.rerun_caption_enabled());
+        desktop.set_caption_style("pop").unwrap();
+        let revision = desktop.revision();
+        desktop.rerun_caption().unwrap();
+        assert_eq!(
+            desktop.job().map(|job| job.label),
+            Some("Re-run captions".to_owned())
+        );
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(300);
+        while desktop.poll_job() && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(desktop.job().is_none(), "the re-run took too long");
+        assert_eq!(desktop.notice(), "", "{}", desktop.notice());
+        assert_eq!(
+            desktop.revision(),
+            revision.map(|r| r + 1),
+            "the re-run is one step"
+        );
+        let draft = desktop.draft().unwrap();
+        let text = draft
+            .materials
+            .texts
+            .iter()
+            .find(|text| !text.words.text.is_empty())
+            .expect("the caption keeps words");
+        assert_eq!(text.caption_style, "pop");
+    }
+
+    #[test]
+    fn a_rerun_opens_the_heard_file_through_the_project_folder() {
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        draft.materials.audios.push(MaterialAudio {
+            id: MaterialId::new("talk"),
+            // A relative path may not step out of the project.
+            path: "../outside.m4a".to_owned(),
+            duration: Micros(2_000_000),
+            ..MaterialAudio::default()
+        });
+        let mut track = Track::main("sound");
+        track.kind = TrackType::Audio;
+        track
+            .segments
+            .push(Segment::new("talk", "talk", TimeRange::new(0, 2_000_000)));
+        draft.tracks.push(track);
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.select(Some(SegmentId::new("talk")));
+        assert_eq!(
+            desktop.transcribe().unwrap_err().to_string(),
+            "the clip has no sound"
+        );
+        let heard = CaptionStandIn {
+            words: vec![RecognizedWord {
+                text: "hi".to_owned(),
+                start_ms: 0,
+                end_ms: 400,
+            }],
+        };
+        desktop.transcribe_with(&heard, &mut CaptionTone).unwrap();
+        let caption = desktop
+            .draft()
+            .unwrap()
+            .tracks
+            .iter()
+            .find(|track| track.kind == TrackType::Text)
+            .map(|track| track.segments[0].id.clone())
+            .unwrap();
+        desktop.select(Some(caption));
+        assert!(desktop.rerun_caption_enabled());
+        let revision = desktop.revision();
+        assert_eq!(
+            desktop.rerun_caption().unwrap_err().to_string(),
+            "the clip has no sound"
+        );
+        assert!(desktop.job().is_none());
+        assert_eq!(desktop.revision(), revision);
     }
 
     #[test]

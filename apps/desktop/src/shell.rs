@@ -8352,8 +8352,8 @@ mod tests {
             + tokens::SPLIT * 2.0
             + tokens::PREVIEW_MIN_WIDTH;
         assert!(narrowest <= tokens::MIN_WINDOW_WIDTH);
-        assert!(tokens::LIBRARY_WIDTH >= tokens::LIBRARY_MIN);
-        assert!(tokens::INSPECTOR_WIDTH >= tokens::INSPECTOR_MIN);
+        const { assert!(tokens::LIBRARY_WIDTH >= tokens::LIBRARY_MIN) };
+        const { assert!(tokens::INSPECTOR_WIDTH >= tokens::INSPECTOR_MIN) };
         let fresh = shell();
         assert!(fresh.preview_width(tokens::MIN_WINDOW_WIDTH) >= tokens::PREVIEW_MIN_WIDTH);
     }

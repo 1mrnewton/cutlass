@@ -25,7 +25,7 @@ pub use beat::{
     VisibleBeat, beat_timeline_time, new_beats, segment_beats, set_user_beats, source_time_at,
     track_holds_beats, user_beats, visible_beats,
 };
-pub use caption::{Kept, SubtitleKeywords, TextRange, keywords_in_ranges};
+pub use caption::{CaptionTemplateInfo, Kept, SubtitleKeywords, TextRange, keywords_in_ranges};
 pub use color::{MaterialCanvas, MaterialColorConfig};
 pub use draft::MaterialDraft;
 pub use effect::{

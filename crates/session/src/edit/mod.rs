@@ -350,6 +350,11 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             word,
             on,
         } => text::set_caption_keyword(draft, segment_id, *word, *on),
+        Request::SetCaptionTemplate {
+            segment_id,
+            resource_id,
+            name,
+        } => text::set_caption_template(draft, segment_id, resource_id, name),
         Request::SetCaptionStagger { segment_id, millis } => {
             text::set_caption_stagger(draft, segment_id, *millis)
         }

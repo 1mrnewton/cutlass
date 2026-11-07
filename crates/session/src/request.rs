@@ -292,6 +292,14 @@ pub enum Request {
         segment_id: SegmentId,
         style: String,
     },
+    /// Record the caption template the caption is styled with, by its id
+    /// and name, or take the record off when `resource_id` is empty. Its
+    /// look is set by the requests that go with it.
+    SetCaptionTemplate {
+        segment_id: SegmentId,
+        resource_id: String,
+        name: String,
+    },
     /// Mark word `word` of the caption as a keyword, drawn in the style's
     /// spoken look while it shows, or take the mark off.
     SetCaptionKeyword {

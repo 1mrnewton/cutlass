@@ -36,6 +36,7 @@ mod snap;
 mod stage;
 mod subtitles;
 mod template;
+mod text_catalog;
 mod text_effect;
 mod title;
 mod tools;
@@ -111,6 +112,10 @@ pub use subtitles::{SubtitleFormat, SubtitleMiss, subtitle_request};
 pub use template::{
     TEMPLATE_CARD_PREFIX, TITLE_TEMPLATES, TemplatePlace, TitleTemplate, Widget, template_requests,
     title_template,
+};
+pub use text_catalog::{
+    BUBBLE_CATEGORIES, BUBBLE_LOOKS, BubbleLook, CatalogTile, TILE_SIDE, bubble_look_of,
+    bubble_look_requests, catalog_shows, tile_session,
 };
 pub use text_effect::{
     EFFECT_CATEGORIES, NO_TEXT_EFFECT, TEXT_EFFECTS, TextEffect, text_effect_of,

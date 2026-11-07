@@ -443,10 +443,69 @@ impl Shell {
             .ok_or_else(|| ShellError::Unavailable(format!("no text effect is called {id}")))?;
         let segment_id = self.text_segment()?;
         self.refuse_locked(&segment_id)?;
-        let glow_id = MaterialId::new(self.fresh("glow"));
+        // With "Apply to all main captions" every caption on the row takes
+        // it, each with a glow of its own.
+        let clips: Vec<SegmentId> = match self.draft() {
+            Some(draft)
+                if self.all_captions
+                    && cutlass_editor::main_caption_lane(draft, &segment_id).is_some() =>
+            {
+                cutlass_editor::caption_rows(draft, &segment_id)
+                    .into_iter()
+                    .map(|row| row.segment_id)
+                    .collect()
+            }
+            _ => vec![segment_id],
+        };
         let face = self.face.name().to_owned();
-        let requests = cutlass_editor::text_effect_requests(effect, &segment_id, glow_id, &face);
+        let mut requests = Vec::new();
+        for clip in &clips {
+            let glow_id = MaterialId::new(self.fresh("glow"));
+            requests.extend(cutlass_editor::text_effect_requests(
+                effect, clip, glow_id, &face,
+            ));
+        }
         self.apply_requests(&requests)
+    }
+
+    /// Give the selected title the bubble on the Bubble page with `id`:
+    /// its shape, box and letters. One undo restores it.
+    pub fn set_bubble_look(&mut self, id: &str) -> Result<(), ShellError> {
+        let look = cutlass_editor::BUBBLE_LOOKS
+            .iter()
+            .find(|look| look.id == id)
+            .ok_or_else(|| ShellError::Unavailable(format!("no bubble is called {id}")))?;
+        let segment_id = self.text_segment()?;
+        self.refuse_locked(&segment_id)?;
+        let face = self.face.name().to_owned();
+        self.apply_text_requests(cutlass_editor::bubble_look_requests(
+            look,
+            &segment_id,
+            &face,
+        ))
+    }
+
+    /// The picture on the tile for `tile`: a short text styled as it, in
+    /// the shell's face. `None` when it does not draw.
+    #[must_use]
+    pub fn tile_picture(&self, tile: cutlass_editor::CatalogTile<'_>) -> Option<super::Picture> {
+        let (session, time) = cutlass_editor::tile_session(tile, self.face.name());
+        let mut device = cutlass_renderer_software::SoftwareDevice::new();
+        let picture = cutlass_playback::FrameCache::new()
+            .frame(
+                &session,
+                &mut device,
+                time,
+                self.preview_readers(),
+                None,
+                &*self.face,
+            )
+            .ok()?;
+        Some(super::Picture {
+            width: picture.width,
+            height: picture.height,
+            rgba: picture.rgba,
+        })
     }
 
     /// Make the selected title glow in `color`. A split clip's halves glow
@@ -1748,6 +1807,102 @@ mod tests {
         );
         desktop.undo().unwrap();
         assert_eq!(field(&desktop, |text| text.bubble.clone()), ["", "", ""]);
+    }
+
+    #[test]
+    fn a_main_caption_takes_an_effect_and_a_bubble_look_with_its_row() {
+        let temp = Temp::new();
+        let mut desktop = subtitle_row(&temp);
+        pick(&mut desktop, "first");
+        // Each clip's look, by its material: the first two are the row's.
+        let looks = |desktop: &Shell| -> Vec<TextLook> {
+            let draft = desktop.draft().unwrap();
+            ["first", "second", "title"]
+                .iter()
+                .map(|id| {
+                    let segment = draft
+                        .tracks
+                        .iter()
+                        .flat_map(|track| &track.segments)
+                        .find(|segment| segment.material_id.as_str() == *id)
+                        .unwrap();
+                    cutlass_editor::text_look(draft, segment).unwrap()
+                })
+                .collect()
+        };
+        desktop.set_text_effect("gold-glow").unwrap();
+        let worn = looks(&desktop);
+        assert_eq!(worn[0].glow_color, "#FFB800");
+        assert_eq!(worn[1].glow_color, "#FFB800");
+        assert!(worn[2].glow_color.is_empty());
+        // Each caption glows with a glow of its own.
+        let draft = desktop.draft().unwrap();
+        let glows: std::collections::HashSet<_> = draft
+            .tracks
+            .iter()
+            .flat_map(|track| &track.segments)
+            .flat_map(|segment| &segment.extra_material_refs)
+            .filter(|id| id.as_str().starts_with("glow"))
+            .collect();
+        assert_eq!(glows.len(), 2);
+        desktop.set_bubble_look("burst-red").unwrap();
+        let worn = looks(&desktop);
+        for look in &worn[..2] {
+            assert_eq!(
+                cutlass_editor::bubble_look_of(look).map(|b| b.id),
+                Some("burst-red")
+            );
+        }
+        assert!(worn[2].bubble.is_empty());
+        desktop.undo().unwrap();
+        desktop.undo().unwrap();
+        assert!(
+            looks(&desktop)
+                .iter()
+                .all(|look| look.glow_color.is_empty())
+        );
+        // With the box off, only the picked caption takes it.
+        desktop.set_all_captions(false);
+        desktop.set_text_effect("neon-blue").unwrap();
+        let worn = looks(&desktop);
+        assert_eq!(worn[0].glow_color, "#00C2FF");
+        assert!(worn[1].glow_color.is_empty());
+    }
+
+    #[test]
+    fn each_catalog_tile_draws_its_own_picture() {
+        let temp = Temp::new();
+        let desktop = subtitle_row(&temp);
+        let mut seen = std::collections::HashSet::new();
+        let tiles = cutlass_editor::CAPTION_TEMPLATES
+            .iter()
+            .take(3)
+            .map(cutlass_editor::CatalogTile::Template)
+            .chain(
+                cutlass_editor::TEXT_EFFECTS
+                    .iter()
+                    .take(3)
+                    .map(cutlass_editor::CatalogTile::Effect),
+            )
+            .chain(
+                cutlass_editor::BUBBLE_LOOKS
+                    .iter()
+                    .take(3)
+                    .map(cutlass_editor::CatalogTile::Bubble),
+            );
+        for tile in tiles {
+            let picture = desktop.tile_picture(tile).unwrap();
+            let side = u32::try_from(cutlass_editor::TILE_SIDE).unwrap();
+            assert_eq!((picture.width, picture.height), (side, side));
+            assert!(
+                picture
+                    .rgba
+                    .chunks(4)
+                    .any(|pixel| pixel[3] > 0 && pixel[..3] != [0, 0, 0]),
+                "{tile:?} draws"
+            );
+            assert!(seen.insert(picture.rgba), "{tile:?} draws its own");
+        }
     }
 
     #[test]

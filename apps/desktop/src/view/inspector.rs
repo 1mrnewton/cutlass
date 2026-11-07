@@ -2074,6 +2074,9 @@ fn alignment_row(shell: &mut Shell, ui: &mut Ui, inspection: &Inspection) {
             ("textLeft", "Align left"),
             ("textCenter", "Align center"),
             ("textRight", "Align right"),
+            ("alignTop", "Vertical text, top"),
+            ("alignMiddle", "Vertical text, middle"),
+            ("alignBottom", "Vertical text, bottom"),
         ]
         .into_iter()
         .enumerate()
@@ -2083,17 +2086,6 @@ fn alignment_row(shell: &mut Shell, ui: &mut Ui, inspection: &Inspection) {
                 picked = Some(alignment);
             }
         }
-        ui.add_enabled_ui(false, |ui| {
-            for (icon, tip) in [
-                ("justifyLeft", "Justify left"),
-                ("justifyCenter", "Justify center"),
-                ("justifyRight", "Justify right"),
-            ] {
-                icon_toggle(ui, icon, tip, false);
-            }
-        })
-        .response
-        .on_disabled_hover_text(LATER);
     });
     if let Some(alignment) = picked.filter(|alignment| *alignment != inspection.text_align) {
         send(shell, |shell| shell.set_text_align(alignment));

@@ -496,14 +496,22 @@ impl Shell {
         })
     }
 
-    /// Align the selected title left (0), center (1), or right (2). A title
-    /// with no line width takes the canvas width. One undo restores it.
+    /// Align the selected title left (0), center (1), or right (2), or stand
+    /// it in vertical columns at the top (3), middle (4), or bottom (5). A
+    /// title with no line width takes the canvas width, and a column the
+    /// canvas height. One undo restores it.
     pub fn set_text_align(&mut self, alignment: i32) -> Result<(), ShellError> {
         let segment_id = self.text_segment()?;
         self.refuse_locked(&segment_id)?;
         let line_width = f64::from(
             self.draft()
-                .map(|draft| draft.canvas_config.width)
+                .map(|draft| {
+                    if alignment >= 3 {
+                        draft.canvas_config.height
+                    } else {
+                        draft.canvas_config.width
+                    }
+                })
                 .unwrap_or(0),
         );
         let face = self.face.name().to_owned();

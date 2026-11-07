@@ -8003,7 +8003,12 @@ fn text_style(
             (
                 text.font_size,
                 text.text_color.clone(),
-                text.alignment,
+                // Vertical text reads 3 to 5 however its file stores it.
+                if text.typesetting == 1 && (0..=2).contains(&text.alignment) {
+                    text.alignment + 3
+                } else {
+                    text.alignment
+                },
                 text.letter_spacing,
                 text.line_spacing,
                 text.line_max_width,
@@ -13625,9 +13630,8 @@ mod tests {
     const SAMPLE_TTF: &[u8] = include_bytes!("../../../crates/font/fixtures/sample.ttf");
     const GRAY_OTF: &[u8] = include_bytes!("../../../crates/font/fixtures/gray-strike.otf");
 
-    #[test]
-    fn bold_underline_and_italic_change_the_drawn_letters() {
-        let temp = Temp::new();
+    /// A project with one title, "AA" in the sample face, picked.
+    fn one_letter_title(temp: &Temp) -> Shell {
         let mut draft = Draft::empty("draft");
         draft.canvas_config.width = 320;
         draft.canvas_config.height = 180;
@@ -13642,12 +13646,20 @@ mod tests {
             .segments
             .push(Segment::new("title", "title", TimeRange::new(0, 1_000_000)));
         draft.tracks.push(words);
+        draft.materials.texts[0].content = "AA".to_owned();
         Folder::new(draft).save(&temp.path).unwrap();
         let mut desktop = shell();
         desktop.open_folder(&temp.path).unwrap();
         desktop.use_faces(vec![("sample.ttf", SAMPLE_TTF.to_vec())]);
         desktop.select(Some(SegmentId::new("title")));
         desktop.set_text_size(48.0).unwrap();
+        desktop
+    }
+
+    #[test]
+    fn bold_underline_and_italic_change_the_drawn_letters() {
+        let temp = Temp::new();
+        let mut desktop = one_letter_title(&temp);
         let plain = digest(&desktop.preview_bytes().unwrap().rgba);
         let mut seen = vec![plain];
         for pattern in [
@@ -13675,6 +13687,33 @@ mod tests {
             desktop.undo().unwrap();
         }
         assert_eq!(digest(&desktop.preview_bytes().unwrap().rgba), plain);
+    }
+
+    #[test]
+    fn the_vertical_alignments_stand_a_title_in_a_column() {
+        let temp = Temp::new();
+        let mut desktop = one_letter_title(&temp);
+        let across = digest(&desktop.preview_bytes().unwrap().rgba);
+        let title = SegmentId::new("title");
+        let wide = desktop.stage_box(&title).unwrap();
+        desktop.set_text_align(3).unwrap();
+        assert_eq!(desktop.inspection().unwrap().text_align, 3);
+        let text = &desktop.draft().unwrap().materials.texts[0];
+        assert_eq!((text.typesetting, text.line_max_width), (1, 180.0));
+        assert_ne!(digest(&desktop.preview_bytes().unwrap().rgba), across);
+        let tall = desktop.stage_box(&title).unwrap();
+        assert!(wide.width > wide.height && tall.height > tall.width);
+        for alignment in [4, 5] {
+            desktop.set_text_align(alignment).unwrap();
+            assert_eq!(desktop.inspection().unwrap().text_align, alignment);
+        }
+        assert!(desktop.set_text_align(6).is_err());
+        for _ in 0..3 {
+            desktop.undo().unwrap();
+        }
+        assert_eq!(desktop.inspection().unwrap().text_align, 0);
+        assert_eq!(desktop.draft().unwrap().materials.texts[0].typesetting, 0);
+        assert_eq!(digest(&desktop.preview_bytes().unwrap().rgba), across);
     }
 
     #[test]

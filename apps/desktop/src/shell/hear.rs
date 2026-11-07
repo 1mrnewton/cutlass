@@ -19,7 +19,7 @@ impl Shell {
         }
         let end = start_us.saturating_add(duration_us);
         let draft = self.session_draft()?;
-        let mut clips: Vec<HeardClip> = Vec::new();
+        let mut clips: Vec<(HeardClip, std::path::PathBuf)> = Vec::new();
         for track in &draft.tracks {
             if track.attribute.contains(TrackAttribute::MUTE) {
                 continue;
@@ -36,8 +36,10 @@ impl Shell {
                 if !segment.visible || to <= start_us || from >= end {
                     continue;
                 }
-                if let Ok(clip) = cutlass_transcription::heard_clip(draft, &segment.id) {
-                    clips.push(clip);
+                if let Ok(clip) = cutlass_transcription::heard_clip(draft, &segment.id)
+                    && let Ok(file) = self.sound_file(&clip.path)
+                {
+                    clips.push((clip, file));
                 }
             }
         }
@@ -69,8 +71,8 @@ impl Shell {
             let mut failed = None;
             if let Ok(recognizer) = &recognizer {
                 progress.stage("Listening");
-                for clip in &clips {
-                    match heard_words(recognizer, &mut FileSource::new(&clip.path), clip) {
+                for (clip, file) in &clips {
+                    match heard_words(recognizer, &mut FileSource::new(file), clip) {
                         Ok(words) => {
                             let base = clip.target.start.0;
                             for ((start, end_ms), text) in

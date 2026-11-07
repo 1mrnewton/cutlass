@@ -65,6 +65,9 @@ pub const FIELD_EDGE_HOVER: Color32 = Color32::from_rgb(0x3a, 0x3a, 0x3a);
 pub const FIELD_EDGE_FOCUS: Color32 = Color32::from_rgb(0x6a, 0x6a, 0x6a);
 /// Selected text in a field: the accent, see-through.
 pub const TEXT_SELECTION: Color32 = Color32::from_rgba_premultiplied(0x00, 0x4a, 0x50, 0x60);
+/// A choice's fill when it is the one picked, and when hovered.
+pub const CHOICE_ON: Color32 = Color32::from_rgb(0x3a, 0x3a, 0x3a);
+pub const CHOICE_HOVER: Color32 = Color32::from_rgb(0x30, 0x30, 0x30);
 pub const MARKED: Color32 = Color32::from_rgba_premultiplied(0x00, 0x32, 0x36, 0x40);
 
 pub const TYPE_SIZE: f32 = 13.0;
@@ -108,6 +111,12 @@ pub const BUTTON_GAP: f32 = 6.0;
 pub const FIELD_PAD_X: f32 = 8.0;
 pub const FIELD_PAD_Y: f32 = 5.0;
 pub const FIELD_HEIGHT: f32 = 26.0;
+/// A choice's size and the well around a row of them.
+pub const CHOICE_HEIGHT: f32 = 22.0;
+pub const CHOICE_PAD_X: f32 = 10.0;
+pub const CHOICE_TEXT: f32 = 12.0;
+pub const SEGMENT_PAD: i8 = 2;
+pub const SEGMENT_GAP: f32 = 2.0;
 pub const HEAD_HEIGHT: f32 = 38.0;
 pub const SPLIT: f32 = 6.0;
 pub const HAIRLINE: f32 = 1.0;

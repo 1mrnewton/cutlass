@@ -20,6 +20,7 @@ use crate::tokens;
 pub struct Check<'a> {
     on: &'a mut bool,
     label: String,
+    name: Option<String>,
 }
 
 impl<'a> Check<'a> {
@@ -28,7 +29,15 @@ impl<'a> Check<'a> {
         Self {
             on,
             label: label.into(),
+            name: None,
         }
+    }
+
+    /// What a screen reader calls a box drawn without its label, whose
+    /// name is beside it.
+    pub fn name(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
+        self
     }
 }
 
@@ -75,6 +84,15 @@ impl Widget for Check<'_> {
             *self.on = !*self.on;
             response.mark_changed();
         }
+        let label = self.name.clone().unwrap_or_else(|| {
+            galley
+                .as_ref()
+                .map(|galley| galley.text().to_owned())
+                .unwrap_or_default()
+        });
+        let (on, enabled) = (*self.on, ui.is_enabled());
+        response
+            .widget_info(|| egui::WidgetInfo::selected(egui::Role::CheckBox, enabled, on, &label));
         if ui.is_rect_visible(rect) {
             let enabled = ui.is_enabled();
             let (fill, edge, mark) = check_look(*self.on, enabled, response.hovered());
@@ -122,11 +140,21 @@ impl Widget for Check<'_> {
 #[must_use = "add the switch with `ui.add`"]
 pub struct Switch<'a> {
     on: &'a mut bool,
+    name: String,
 }
 
 impl<'a> Switch<'a> {
     pub fn new(on: &'a mut bool) -> Self {
-        Self { on }
+        Self {
+            on,
+            name: String::new(),
+        }
+    }
+
+    /// What a screen reader calls the switch.
+    pub fn name(mut self, name: impl Into<String>) -> Self {
+        self.name = name.into();
+        self
     }
 }
 
@@ -149,6 +177,10 @@ impl Widget for Switch<'_> {
             *self.on = !*self.on;
             response.mark_changed();
         }
+        let (on, enabled) = (*self.on, ui.is_enabled());
+        response.widget_info(|| {
+            egui::WidgetInfo::selected(egui::Role::Switch, enabled, on, &self.name)
+        });
         if ui.is_rect_visible(rect) {
             let enabled = ui.is_enabled();
             let along =
@@ -196,7 +228,7 @@ pub fn switch_row(ui: &mut Ui, label: &str, on: &mut bool) -> Response {
             FontId::proportional(12.0),
             ink,
         );
-        ui.add(Switch::new(on))
+        ui.add(Switch::new(on).name(label))
     })
     .inner
 }

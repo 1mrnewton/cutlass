@@ -189,6 +189,11 @@ fn look(kind: ButtonKind, on: bool, enabled: bool, hovered: bool, pressed: bool)
 impl Widget for Button {
     fn ui(self, ui: &mut Ui) -> Response {
         let font = FontId::proportional(self.text_size);
+        let name = self
+            .label
+            .clone()
+            .or_else(|| self.tip.clone())
+            .or_else(|| self.icon.clone());
         let galley = self.label.map(|label| {
             ui.painter()
                 .layout_no_wrap(label, font, Color32::PLACEHOLDER)
@@ -248,6 +253,12 @@ impl Widget for Button {
                 let at = pos2(x, rect.center().y - galley.size().y / 2.0);
                 painter.galley(at, galley, look.ink);
             }
+        }
+        let enabled = ui.is_enabled();
+        if let Some(name) = name {
+            response.widget_info(|| {
+                egui::WidgetInfo::selected(egui::Role::Button, enabled, self.on, &name)
+            });
         }
         match self.tip {
             Some(tip) => response

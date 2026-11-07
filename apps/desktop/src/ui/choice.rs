@@ -91,6 +91,11 @@ impl Widget for Choice {
             size.x = size.x.max(ui.available_width());
         }
         let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+        let text = galley.text().to_owned();
+        let enabled = ui.is_enabled();
+        response.widget_info(|| {
+            egui::WidgetInfo::selected(egui::Role::RadioButton, enabled, self.on, &text)
+        });
         if ui.is_rect_visible(rect) {
             let (fill, ink) = look(
                 self.on,
@@ -127,6 +132,7 @@ impl Segmented {
     /// Lay `add` out in a row inside the well.
     pub fn show<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> InnerResponse<R> {
         crate::ui::Surface::inset()
+            .fill(tokens::SEGMENT_WELL)
             .radius(tokens::RADIUS_MD)
             .padding(tokens::SEGMENT_PAD)
             .show(ui, |ui| {
@@ -193,7 +199,7 @@ mod tests {
             });
         });
         let painted = fills(&output);
-        assert_eq!(painted, vec![tokens::INSET, tokens::CHOICE_ON]);
+        assert_eq!(painted, vec![tokens::SEGMENT_WELL, tokens::CHOICE_ON]);
         assert!(sizes.iter().all(|size| size.y == tokens::CHOICE_HEIGHT));
     }
 }

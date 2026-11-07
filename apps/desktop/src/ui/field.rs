@@ -30,6 +30,7 @@ pub struct Field<'t> {
     text: &'t mut String,
     rows: Option<usize>,
     hint: Option<String>,
+    name: Option<String>,
     width: Option<f32>,
     lead: Option<Lead>,
     text_size: f32,
@@ -62,6 +63,7 @@ impl<'t> Field<'t> {
             text,
             rows: None,
             hint: None,
+            name: None,
             width: None,
             lead: None,
             text_size: tokens::TYPE_SIZE,
@@ -85,6 +87,13 @@ impl<'t> Field<'t> {
     /// Faint text shown while the field is empty.
     pub fn hint(mut self, hint: impl Into<String>) -> Self {
         self.hint = Some(hint.into());
+        self
+    }
+
+    /// What a screen reader calls the field. Without one it reads the
+    /// hint, then the unit.
+    pub fn name(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
         self
     }
 
@@ -276,9 +285,9 @@ impl<'t> Field<'t> {
 
         let font = FontId::proportional(self.text_size);
         let mut edit = if single {
-            TextEdit::singleline(self.text)
+            TextEdit::singleline(&mut *self.text)
         } else {
-            TextEdit::multiline(self.text).desired_rows(self.rows.unwrap_or(1))
+            TextEdit::multiline(&mut *self.text).desired_rows(self.rows.unwrap_or(1))
         };
         edit = edit
             .id(id)
@@ -291,6 +300,23 @@ impl<'t> Field<'t> {
             edit = edit.hint_text(RichText::new(hint).color(tokens::FAINT));
         }
         let response = content.add(edit);
+        let name = self
+            .name
+            .clone()
+            .or_else(|| self.hint.clone())
+            .or_else(|| match &self.lead {
+                Some(Lead::Unit(unit)) => Some(unit.clone()),
+                _ => None,
+            });
+        if let Some(name) = name {
+            let value = self.text.clone();
+            let hint = self.hint.clone().unwrap_or_default();
+            response.widget_info(|| {
+                let mut info = egui::WidgetInfo::text_edit(enabled, &value, &value, &hint);
+                info.label = Some(name.clone());
+                info
+            });
+        }
 
         if let Some(rows) = self.rows {
             let least = rows as f32 * row + 2.0 * pad.y;

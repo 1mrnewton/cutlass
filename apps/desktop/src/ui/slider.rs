@@ -18,6 +18,7 @@ pub struct Slider<'a> {
     value: &'a mut f64,
     range: std::ops::RangeInclusive<f64>,
     width: Option<f32>,
+    name: String,
 }
 
 impl<'a> Slider<'a> {
@@ -26,7 +27,14 @@ impl<'a> Slider<'a> {
             value,
             range,
             width: None,
+            name: String::new(),
         }
+    }
+
+    /// What a screen reader calls the slider.
+    pub fn name(mut self, name: impl Into<String>) -> Self {
+        self.name = name.into();
+        self
     }
 
     /// The rail's width. Without one the slider fills the row.
@@ -82,6 +90,8 @@ impl Widget for Slider<'_> {
             }
         }
 
+        let (value, enabled) = (*self.value, ui.is_enabled());
+        response.widget_info(|| egui::WidgetInfo::slider(enabled, value, &self.name));
         if ui.is_rect_visible(rect) {
             let enabled = ui.is_enabled();
             let lit = enabled && (response.hovered() || response.dragged());

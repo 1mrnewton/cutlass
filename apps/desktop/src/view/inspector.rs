@@ -1158,7 +1158,7 @@ fn tracking(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState) {
         for choice in choices {
             let on = tracking.followers.contains(&choice.segment_id);
             let row = ui.horizontal(|ui| {
-                let check = check_box(ui, on);
+                let check = check_box(ui, on, &choice.name);
                 let name = ui.add(
                     egui::Label::new(RichText::new(&choice.name).size(12.0).color(tokens::TEXT))
                         .truncate()
@@ -1184,7 +1184,7 @@ fn tracking(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState) {
         for choice in shell.mask_choices() {
             let on = tracking.masks.contains(&choice.segment_id);
             let row = ui.horizontal(|ui| {
-                let check = check_box(ui, on);
+                let check = check_box(ui, on, &choice.name);
                 let name = ui.add(
                     egui::Label::new(RichText::new(&choice.name).size(12.0).color(tokens::TEXT))
                         .truncate()
@@ -2198,7 +2198,9 @@ fn section(
     ui.horizontal(|ui| {
         ui.set_min_height(40.0);
         if let Some((on, editable)) = check {
-            let response = ui.add_enabled_ui(editable, |ui| check_box(ui, on)).inner;
+            let response = ui
+                .add_enabled_ui(editable, |ui| check_box(ui, on, label))
+                .inner;
             header.toggled = response.clicked();
         }
         ui.spacing_mut().item_spacing.x = 6.0;
@@ -2282,7 +2284,7 @@ fn later_row(ui: &mut Ui, label: &str) {
     ui.horizontal(|ui| {
         ui.set_min_height(40.0);
         ui.spacing_mut().item_spacing.x = 6.0;
-        ui.add_enabled_ui(false, |ui| check_box(ui, false));
+        ui.add_enabled_ui(false, |ui| check_box(ui, false, label));
         ui.label(RichText::new(label).size(13.0).color(tokens::FAINT));
         chevron(ui, false);
         later_badge(ui);
@@ -2503,7 +2505,7 @@ pub(super) fn slider(
     ui.horizontal(|ui| {
         row_label(ui, label);
         let track = (ui.available_width() - VALUE_WIDTH - 8.0).max(40.0);
-        let response = ui.add(ui::Slider::new(&mut value, range).width(track));
+        let response = ui.add(ui::Slider::new(&mut value, range).name(label).width(track));
         if response.changed() {
             state.live.insert(key.to_owned(), value);
             moved = Some(value).filter(|value| *value != stored);
@@ -2518,6 +2520,7 @@ pub(super) fn slider(
             }
             let field = ui::Field::new(text)
                 .id_salt(salt)
+                .name(label)
                 .width(VALUE_WIDTH)
                 .text_size(12.0)
                 .show(ui);
@@ -2619,7 +2622,10 @@ fn number_box(
     let stored = stored + 0.0;
     let text = state.fields.entry(key.to_owned()).or_default();
     let mut edited = None;
-    let field = ui::Field::new(text).width(width).ink(Color32::WHITE);
+    let field = ui::Field::new(text)
+        .name(key)
+        .width(width)
+        .ink(Color32::WHITE);
     let field = if unit == "°" {
         field.icon("rotate")
     } else {
@@ -2727,10 +2733,10 @@ pub(super) fn switch_row(ui: &mut Ui, label: &str, on: bool, editable: bool) -> 
     response
 }
 
-fn check_box(ui: &mut Ui, on: bool) -> egui::Response {
+fn check_box(ui: &mut Ui, on: bool, name: &str) -> egui::Response {
     // The caller flips the stored value on a click; this copy only draws.
     let mut shown = on;
-    ui.add(ui::Check::new(&mut shown, ""))
+    ui.add(ui::Check::new(&mut shown, "").name(name))
 }
 
 fn icon_toggle(ui: &mut Ui, name: &str, tip: &str, on: bool) -> egui::Response {

@@ -65,6 +65,9 @@ pub const FIELD_EDGE_HOVER: Color32 = Color32::from_rgb(0x3a, 0x3a, 0x3a);
 pub const FIELD_EDGE_FOCUS: Color32 = Color32::from_rgb(0x6a, 0x6a, 0x6a);
 /// Selected text in a field: the accent, see-through.
 pub const TEXT_SELECTION: Color32 = Color32::from_rgba_premultiplied(0x00, 0x4a, 0x50, 0x60);
+/// The well behind a row of choices: a see-through dark, so it sinks into
+/// a panel and a dialog alike.
+pub const SEGMENT_WELL: Color32 = Color32::from_rgba_premultiplied(0, 0, 0, 72);
 /// A choice's fill when it is the one picked, and when hovered.
 pub const CHOICE_ON: Color32 = Color32::from_rgb(0x3a, 0x3a, 0x3a);
 pub const CHOICE_HOVER: Color32 = Color32::from_rgb(0x30, 0x30, 0x30);

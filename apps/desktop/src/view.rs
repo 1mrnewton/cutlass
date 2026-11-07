@@ -6681,7 +6681,9 @@ fn choices_row(ui: &mut Ui, label: &str, add: impl FnOnce(&mut Ui)) {
 
 fn choice_row(ui: &mut Ui, label: &str, add: impl FnOnce(&mut Ui)) {
     ui.horizontal(|ui| {
-        let (rect, _) = ui.allocate_exact_size(Vec2::new(84.0, 20.0), Sense::hover());
+        // As tall as a well of choices, so the name sits on its middle.
+        let tall = tokens::CHOICE_HEIGHT + 2.0 * f32::from(tokens::SEGMENT_PAD);
+        let (rect, _) = ui.allocate_exact_size(Vec2::new(84.0, tall), Sense::hover());
         ui.painter().text(
             rect.left_center(),
             Align2::LEFT_CENTER,

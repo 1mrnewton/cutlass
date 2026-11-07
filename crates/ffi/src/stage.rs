@@ -62,8 +62,8 @@ pub(crate) struct Sizes<'a> {
 }
 
 impl TextSizes for Sizes<'_> {
-    fn text_size(&self, segment: &Segment) -> Option<(f64, f64)> {
-        let (width, height) = cutlass_eval::text_size(self.draft, self.fonts, segment)?;
+    fn text_size(&self, segment: &Segment, time: cutlass_model::Micros) -> Option<(f64, f64)> {
+        let (width, height) = cutlass_eval::text_size_at(self.draft, self.fonts, segment, time)?;
         Some((f64::from(width), f64::from(height)))
     }
 }

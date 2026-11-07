@@ -109,16 +109,18 @@ pub struct StageGesture {
     keyed: Option<Micros>,
 }
 
-/// The size a title's text picture is drawn at, before placement.
+/// The size a title's or caption's text picture is drawn at `time`, before
+/// placement. A caption shows a different page of words as time goes on,
+/// so its size depends on the time.
 pub trait TextSizes {
-    fn text_size(&self, segment: &Segment) -> Option<(f64, f64)>;
+    fn text_size(&self, segment: &Segment, time: Micros) -> Option<(f64, f64)>;
 }
 
 /// No faces: titles have no box.
 pub struct NoText;
 
 impl TextSizes for NoText {
-    fn text_size(&self, _segment: &Segment) -> Option<(f64, f64)> {
+    fn text_size(&self, _segment: &Segment, _time: Micros) -> Option<(f64, f64)> {
         None
     }
 }
@@ -149,7 +151,7 @@ pub fn stage_box(
         .flat_map(|track| &track.segments)
         .find(|segment| segment.id == *segment_id)?;
     let canvas = canvas_size(draft);
-    let fitted = fitted(draft, segment, canvas, sizes)?;
+    let fitted = fitted(draft, segment, canvas, time, sizes)?;
     Some(box_at(
         segment_id,
         canvas,
@@ -275,7 +277,7 @@ pub fn stage_gesture(
     Some(StageGesture {
         segment_id: segment_id.clone(),
         canvas,
-        fitted: fitted(draft, segment, canvas, sizes)?,
+        fitted: fitted(draft, segment, canvas, time, sizes)?,
         start: pose_of(segment, &draft.keyframe_graph_list, time),
         keyed: key_at(segment, time),
     })
@@ -465,6 +467,7 @@ fn fitted(
     draft: &Draft,
     segment: &Segment,
     canvas: (f64, f64),
+    time: Micros,
     sizes: &dyn TextSizes,
 ) -> Option<(f64, f64)> {
     let (width, height, native) = match draft.materials.get(segment.material_id.as_str())? {
@@ -478,7 +481,7 @@ fn fitted(
             (width, height, false)
         }
         MaterialRef::Text(_) => {
-            let (width, height) = sizes.text_size(segment)?;
+            let (width, height) = sizes.text_size(segment, time)?;
             (width, height, true)
         }
         _ => return None,
@@ -627,7 +630,7 @@ mod tests {
     struct Sized(f64, f64);
 
     impl TextSizes for Sized {
-        fn text_size(&self, _segment: &Segment) -> Option<(f64, f64)> {
+        fn text_size(&self, _segment: &Segment, _time: Micros) -> Option<(f64, f64)> {
             Some((self.0, self.1))
         }
     }

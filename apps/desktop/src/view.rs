@@ -3054,14 +3054,29 @@ fn paint_canvas(ui: &Ui, frame: Rect, texture: egui::TextureId, rect: Rect, blac
 fn transport_bar(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect) {
     let live = shell.draft().is_some();
     let ink = if live { tokens::TEXT } else { tokens::MUTED };
+    // A narrow preview drops what it has no room for: the guides button
+    // first, then the zoom buttons, and the timecode keeps the playhead
+    // alone.
+    let room = transport_room(rect.width(), live);
+    let font = FontId::monospace(tokens::TIMECODE_SIZE);
+    let both = format!("{}  /  {}", shell.timecode(), duration_label(shell));
+    let fits = ui
+        .painter()
+        .layout_no_wrap(both.clone(), font.clone(), ink)
+        .size()
+        .x
+        + TRANSPORT_EDGE
+        + TRANSPORT_GAP
+        <= rect.width() / 2.0 - PLAY_RADIUS;
+    let timecode = if fits { both } else { shell.timecode() };
     ui.painter().text(
-        Pos2::new(rect.left() + 16.0, rect.center().y),
+        Pos2::new(rect.left() + TRANSPORT_EDGE, rect.center().y),
         Align2::LEFT_CENTER,
-        format!("{}  /  {}", shell.timecode(), duration_label(shell)),
-        FontId::monospace(tokens::TIMECODE_SIZE),
+        timecode,
+        font,
         ink,
     );
-    let play = Rect::from_center_size(rect.center(), Vec2::splat(36.0));
+    let play = Rect::from_center_size(rect.center(), Vec2::splat(PLAY_RADIUS * 2.0));
     let play_response = ui.interact(play, ui.scope_id().with("play"), Sense::click());
     if play_response.clicked() {
         if shell.playing() {
@@ -3081,8 +3096,12 @@ fn transport_bar(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rec
         Color32::from_rgb(0x12, 0x13, 0x0f),
     );
     play_response.on_hover_text(if shell.playing() { "Pause" } else { "Play" });
-    if live {
-        zoom_buttons(ui, view, Pos2::new(play.right() + 20.0, rect.center().y));
+    if room.zoom {
+        zoom_buttons(
+            ui,
+            view,
+            Pos2::new(play.right() + ZOOM_GAP, rect.center().y),
+        );
     }
 
     let still = Rect::from_center_size(
@@ -3090,8 +3109,10 @@ fn transport_bar(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rec
         Vec2::splat(32.0),
     );
     background_toggle(shell, ui, still.translate(Vec2::new(-40.0, 0.0)));
-    if live {
-        let guides = still.translate(Vec2::new(-80.0, 0.0));
+    let mut next = -80.0;
+    if room.guides {
+        let guides = still.translate(Vec2::new(next, 0.0));
+        next -= 40.0;
         let tip = if view.preview_guides {
             "Hide safe-area guides"
         } else {
@@ -3110,7 +3131,9 @@ fn transport_bar(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rec
                 egui::StrokeKind::Middle,
             );
         }
-        let screen = still.translate(Vec2::new(-120.0, 0.0));
+    }
+    if live {
+        let screen = still.translate(Vec2::new(next, 0.0));
         let full = view.preview_full;
         let tip = if full {
             "Leave full screen"
@@ -3136,6 +3159,35 @@ fn transport_bar(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rec
     let _ = icons::paint(ui.painter(), camera, "camera", tokens::MUTED);
     still_response.on_hover_text("Export still frame");
     shell.chrome.transport = true;
+}
+
+/// The transport's side gap, the gap kept between its parts, and the play
+/// button's radius.
+const TRANSPORT_EDGE: f32 = 16.0;
+const TRANSPORT_GAP: f32 = 8.0;
+const PLAY_RADIUS: f32 = 18.0;
+/// The zoom buttons' gap from play and their width, and how far one round
+/// button at the right reaches in from the edge, with each further one
+/// 40 px more.
+const ZOOM_GAP: f32 = 12.0;
+const ZOOM_WIDTH: f32 = ZOOM_GAP + 22.0 + 2.0 + 44.0 + 2.0 + 22.0;
+const ROUND_REACH: f32 = 44.0;
+
+/// Which optional transport parts fit a preview `width` wide.
+#[derive(Debug, PartialEq, Eq)]
+struct TransportRoom {
+    zoom: bool,
+    guides: bool,
+}
+
+fn transport_room(width: f32, live: bool) -> TransportRoom {
+    let half = width / 2.0 - PLAY_RADIUS - TRANSPORT_GAP;
+    // Still and background always; full screen and guides when live.
+    let reach = |buttons: f32| ROUND_REACH + 40.0 * (buttons - 1.0);
+    // Zoom has no other way in, so it outlasts the guides button.
+    let zoom = live && half >= reach(3.0) + ZOOM_WIDTH;
+    let guides = live && half >= reach(4.0) + if zoom { ZOOM_WIDTH } else { 0.0 };
+    TransportRoom { zoom, guides }
 }
 
 /// A round transport button at `rect`, lit when `on`.
@@ -3183,9 +3235,9 @@ fn zoom_buttons(ui: &Ui, view: &mut ViewState, left: Pos2) {
         Some(zoom) => format!("{:.0}%", zoom * 100.0),
     };
     let buttons = [
-        ("−", 24.0, "Zoom out"),
-        (label.as_str(), 48.0, "Fit the canvas"),
-        ("+", 24.0, "Zoom in"),
+        ("−", 22.0, "Zoom out"),
+        (label.as_str(), 44.0, "Fit the canvas"),
+        ("+", 22.0, "Zoom in"),
     ];
     let mut x = left.x;
     for (index, (text, width, tip)) in buttons.into_iter().enumerate() {
@@ -8559,7 +8611,8 @@ mod tests {
         shell.open_folder(&temp).unwrap();
         let mut view = ViewState::new();
         let ctx = egui::Context::default();
-        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        // Wide enough that the transport shows all four round buttons.
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1440.0, 800.0)));
         let frame = |shell: &mut Shell, view: &mut ViewState, events: Vec<egui::Event>| {
             let mut output = ctx.run_ui(
                 egui::RawInput {
@@ -10247,7 +10300,11 @@ mod tests {
             |ui| show(&mut shell, ui, &mut view, None),
         );
         output.textures_delta.clear();
-        let play = Pos2::new(674.0, 348.0);
+        // Play sits in the middle of the preview, between the side panels.
+        let play = Pos2::new(
+            (tokens::LIBRARY_WIDTH + 1280.0 - tokens::INSPECTOR_WIDTH) / 2.0,
+            348.0,
+        );
         let pointer = |pressed: bool| egui::Event::PointerButton {
             pos: play,
             button: egui::PointerButton::Primary,
@@ -10730,7 +10787,8 @@ mod tests {
         shell.cycle_canvas().unwrap();
         let mut view = ViewState::new();
         let ctx = egui::Context::default();
-        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        // Wide enough that the transport shows all four round buttons.
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1440.0, 800.0)));
         let frame = |shell: &mut Shell, view: &mut ViewState, events: Vec<egui::Event>| {
             let mut output = ctx.run_ui(
                 egui::RawInput {
@@ -13076,5 +13134,28 @@ mod tests {
         picture(&mut harness, "project-settings");
         drop(harness);
         let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn a_narrow_transport_drops_guides_then_zoom() {
+        let room = |width| {
+            let room = transport_room(width, true);
+            (room.zoom, room.guides)
+        };
+        assert_eq!(room(700.0), (true, true));
+        assert_eq!(room(560.0), (true, false));
+        assert_eq!(room(450.0), (false, true));
+        assert_eq!(room(tokens::PREVIEW_MIN_WIDTH), (false, false));
+        // The default panels in a 1280 window leave room to zoom.
+        let preview =
+            1280.0 - tokens::LIBRARY_WIDTH - tokens::INSPECTOR_WIDTH - tokens::SPLIT * 2.0;
+        assert!(transport_room(preview, true).zoom, "no zoom at {preview}");
+        // With no project the transport has neither.
+        let idle = transport_room(900.0, false);
+        assert!(!idle.zoom && !idle.guides);
+        // The narrowest preview still keeps play clear of the three round
+        // buttons it shows.
+        let half = tokens::PREVIEW_MIN_WIDTH / 2.0;
+        assert!(half - PLAY_RADIUS - TRANSPORT_GAP >= ROUND_REACH + 80.0);
     }
 }

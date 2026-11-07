@@ -431,7 +431,7 @@ impl Shell {
                 round: 0.0,
             });
         }
-        self.apply_requests(&requests)
+        self.apply_text_requests(requests)
     }
 
     /// Give the selected title the look on the Effects page with `id`, or
@@ -1699,6 +1699,55 @@ mod tests {
         assert!(!desktop.on_main_captions());
         desktop.set_text_size(20.0).unwrap();
         assert_eq!(sizes(&desktop), [30.0, 15.0, 20.0]);
+    }
+
+    #[test]
+    fn a_main_caption_takes_a_pattern_preset_and_bubble_with_its_row() {
+        let temp = Temp::new();
+        let mut desktop = subtitle_row(&temp);
+        pick(&mut desktop, "first");
+        let field = |desktop: &Shell, read: fn(&MaterialText) -> String| -> Vec<String> {
+            let draft = desktop.draft().unwrap();
+            ["first", "second", "title"]
+                .iter()
+                .map(|id| {
+                    read(
+                        draft
+                            .materials
+                            .texts
+                            .iter()
+                            .find(|text| text.id.as_str() == *id)
+                            .unwrap(),
+                    )
+                })
+                .collect()
+        };
+        desktop
+            .set_text_pattern(cutlass_session::TextPattern {
+                underline: true,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(
+            field(&desktop, |text| text.underline.to_string()),
+            ["true", "true", "false"]
+        );
+        let paper = cutlass_editor::TEXT_PRESETS
+            .iter()
+            .position(|preset| preset.name == "Paper box")
+            .unwrap();
+        desktop.set_text_preset(paper).unwrap();
+        assert_eq!(
+            field(&desktop, |text| text.background_color.clone()),
+            ["#FFFFFF", "#FFFFFF", ""]
+        );
+        desktop.set_text_bubble("speech").unwrap();
+        assert_eq!(
+            field(&desktop, |text| text.bubble.clone()),
+            ["speech", "speech", ""]
+        );
+        desktop.undo().unwrap();
+        assert_eq!(field(&desktop, |text| text.bubble.clone()), ["", "", ""]);
     }
 
     #[test]

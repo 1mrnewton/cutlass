@@ -234,25 +234,43 @@ fn text_panel(
     inspection: &Inspection,
     caption: bool,
 ) {
-    // A caption's tabs lead with its list; it has no tracking.
+    // A caption's tabs lead with its list. AI avatars is paid, and shown
+    // off for now.
     let labels: &[&str] = if caption {
-        &["Captions", "Text", "Animation", "Text to speech"]
+        &[
+            "Captions",
+            "Text",
+            "Animation",
+            "Tracking",
+            "Text to speech",
+            "AI avatars",
+        ]
     } else {
-        &["Text", "Animation", "Tracking", "Text to speech"]
+        &[
+            "Text",
+            "Animation",
+            "Tracking",
+            "Text to speech",
+            "AI avatars",
+        ]
     };
     let tab = state.tab;
-    tabs(ui, labels, &mut state.tab);
+    paid_tabs(ui, labels, &["AI avatars"], &mut state.tab);
     if tab != state.tab {
         state.page = 0;
     }
     match labels.get(state.tab).copied().unwrap_or_default() {
         "Captions" => caption_list(shell, ui, state),
         "Text" => {
-            // A caption's middle page is its templates; a title's is its bubble.
-            let middle = if caption { "Templates" } else { "Bubble" };
-            pages(ui, &["Basic", middle, "Effects"], &mut state.page);
-            match state.page {
-                0 => {
+            // A caption has its templates before its bubble.
+            let names: &[&str] = if caption {
+                &["Basic", "Templates", "Bubble", "Effects"]
+            } else {
+                &["Basic", "Bubble", "Effects"]
+            };
+            pages(ui, names, &mut state.page);
+            match names.get(state.page).copied().unwrap_or_default() {
+                "Basic" => {
                     text_basic(shell, ui, state, inspection, caption);
                     ui.add_space(8.0);
                     if ui
@@ -263,8 +281,8 @@ fn text_panel(
                         send(shell, Shell::save_text_preset);
                     }
                 }
-                1 if caption => caption_templates(shell, ui),
-                1 => bubble_page(shell, ui),
+                "Templates" => caption_templates(shell, ui),
+                "Bubble" => bubble_page(shell, ui),
                 _ => effect_page(shell, ui),
             }
         }
@@ -2428,6 +2446,15 @@ pub(super) fn send(shell: &mut Shell, edit: impl FnOnce(&mut Shell) -> Result<()
 /// The text tabs across the top. The active one is cyan. Tabs that do not
 /// fit scroll sideways, as the prototype's do.
 fn tabs(ui: &mut Ui, labels: &[&str], current: &mut usize) {
+    paid_tabs(ui, labels, &[], current);
+}
+
+/// What a paid tab says on hover. Cutlass will offer these later.
+const PAID: &str = "Paid: Cutlass will offer this later";
+
+/// The tab row, with the `paid` tabs faint, marked with a diamond, and not
+/// picked.
+fn paid_tabs(ui: &mut Ui, labels: &[&str], paid: &[&str], current: &mut usize) {
     ui.add_space(ROW_GAP);
     // The gap shrinks before the row has to scroll, so a narrow inspector
     // still shows every tab.
@@ -2450,6 +2477,28 @@ fn tabs(ui: &mut Ui, labels: &[&str], current: &mut usize) {
                 ui.set_min_height(ROW_HEIGHT);
                 ui.spacing_mut().item_spacing.x = gap;
                 for (index, label) in labels.iter().enumerate() {
+                    if paid.contains(label) {
+                        let response = ui.add(
+                            egui::Label::new(RichText::new(*label).size(13.0).color(tokens::FAINT))
+                                .selectable(false)
+                                .sense(Sense::hover()),
+                        );
+                        let gem = response.rect.right_top() + Vec2::new(4.0, 3.0);
+                        let points = vec![
+                            gem + Vec2::new(0.0, 0.0),
+                            gem + Vec2::new(3.0, -3.0),
+                            gem + Vec2::new(6.0, 0.0),
+                            gem + Vec2::new(3.0, 4.0),
+                        ];
+                        ui.painter().add(egui::Shape::convex_polygon(
+                            points,
+                            tokens::FAINT,
+                            Stroke::NONE,
+                        ));
+                        ui.add_space(6.0);
+                        response.on_hover_text(PAID);
+                        continue;
+                    }
                     let color = if index == *current {
                         ACCENT
                     } else {

@@ -8202,6 +8202,7 @@ mod tests {
                     "Animation",
                     "Tracking",
                     "Text to speech",
+                    "AI avatars",
                     "Basic",
                     "Bubble",
                     "Effects",
@@ -8229,9 +8230,18 @@ mod tests {
             (
                 "said",
                 &[
-                    "Captions", "Text", "Search", "Replace", "Re-run", "?", "1", "+",
+                    "Captions",
+                    "Text",
+                    "Tracking",
+                    "AI avatars",
+                    "Search",
+                    "Replace",
+                    "Re-run",
+                    "?",
+                    "1",
+                    "+",
                 ],
-                &["Volume", "Tracking", "Font size"],
+                &["Volume", "Font size"],
             ),
             (
                 "look",
@@ -8301,8 +8311,8 @@ mod tests {
         ] {
             assert!(lines.iter().any(|line| line == label), "{label}: {lines:?}");
         }
-        // A caption's Text tab: Templates in place of Bubble, its paragraphs,
-        // and Transform in place of Position & Size.
+        // A caption's Text tab: Templates before Bubble, its paragraphs, and
+        // Transform in place of Position & Size.
         shell.select(Some(SegmentId::new("said")));
         let mut lines = Vec::new();
         for _ in 0..2 {
@@ -8323,6 +8333,8 @@ mod tests {
         }
         for label in [
             "Templates",
+            "Bubble",
+            "Tracking",
             "The 1 paragraph",
             "Words",
             "Transform",
@@ -8331,7 +8343,7 @@ mod tests {
         ] {
             assert!(lines.iter().any(|line| line == label), "{label}: {lines:?}");
         }
-        for label in ["Bubble", "Position & Size", "Plane rotation", "Tracking"] {
+        for label in ["Position & Size", "Plane rotation"] {
             assert!(
                 !lines.iter().any(|line| line == label),
                 "{label}: {lines:?}"

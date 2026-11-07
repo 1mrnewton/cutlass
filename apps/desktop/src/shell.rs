@@ -1210,7 +1210,7 @@ impl Shell {
 
     /// Apply `requests` on the selected text as one step, on every main
     /// caption when "Apply to all main captions" is on.
-    fn apply_text_requests(&mut self, requests: Vec<Request>) -> Result<(), ShellError> {
+    pub(super) fn apply_text_requests(&mut self, requests: Vec<Request>) -> Result<(), ShellError> {
         let every = match self.draft() {
             Some(draft) if self.all_captions => requests
                 .iter()

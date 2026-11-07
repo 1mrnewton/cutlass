@@ -194,7 +194,11 @@ impl<'t> Field<'t> {
                 .layout(Layout::left_to_right(Align::Min)),
         );
         let ink = if enabled { self.ink } else { tokens::FAINT };
-        let lead_ink = if enabled { tokens::MUTED } else { tokens::FAINT };
+        let lead_ink = if enabled {
+            tokens::MUTED
+        } else {
+            tokens::FAINT
+        };
         match &self.lead {
             Some(Lead::Icon(name)) => {
                 let size = row.min(14.0);

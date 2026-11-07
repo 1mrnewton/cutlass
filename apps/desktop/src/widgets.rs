@@ -1,6 +1,6 @@
 //! Shared controls. A panel uses these instead of picking a color or drawing an icon.
 
-use egui::{Align2, CornerRadius, FontId, Rect, Sense, TextEdit, Ui, Vec2};
+use egui::{Align2, CornerRadius, FontId, Rect, Sense, Ui, Vec2};
 
 use crate::tokens;
 use crate::ui;
@@ -42,12 +42,7 @@ pub fn export_button(ui: &mut Ui) -> egui::Response {
 }
 
 pub fn field(ui: &mut Ui, text: &mut String) -> egui::Response {
-    ui.add(
-        TextEdit::singleline(text)
-            .text_color(tokens::TEXT)
-            .font(egui::TextStyle::Body)
-            .desired_width(160.0),
-    )
+    ui::Field::new(text).width(160.0).show(ui).response
 }
 
 pub fn lane_header(ui: &mut Ui, flags: HeaderFlags) -> HeaderPress {

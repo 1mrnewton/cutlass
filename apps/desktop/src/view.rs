@@ -1531,18 +1531,16 @@ fn assistant_settings(
     ui.checkbox(&mut settings.model.local, "Local model");
     if settings.model.local {
         choice_row(ui, "Address", |ui| {
-            ui.add(
-                egui::TextEdit::singleline(&mut settings.model.local_url)
-                    .hint_text(cutlass_settings::DEFAULT_LOCAL_URL)
-                    .desired_width(300.0),
-            );
+            ui::Field::new(&mut settings.model.local_url)
+                .hint(cutlass_settings::DEFAULT_LOCAL_URL)
+                .width(300.0)
+                .show(ui);
         });
         choice_row(ui, "Model", |ui| {
-            ui.add(
-                egui::TextEdit::singleline(&mut settings.model.local_name)
-                    .hint_text(cutlass_settings::DEFAULT_LOCAL_NAME)
-                    .desired_width(180.0),
-            );
+            ui::Field::new(&mut settings.model.local_name)
+                .hint(cutlass_settings::DEFAULT_LOCAL_NAME)
+                .width(180.0)
+                .show(ui);
         });
         ui.label(
             RichText::new("A chat server on this computer, such as Ollama or llama.cpp.")
@@ -1566,11 +1564,10 @@ fn assistant_settings(
         ui.push_id(("server", index), |ui| {
             ui.horizontal(|ui| {
                 ui.checkbox(&mut server.enabled, "");
-                ui.add(
-                    egui::TextEdit::singleline(&mut server.name)
-                        .hint_text("Name")
-                        .desired_width(120.0),
-                );
+                ui::Field::new(&mut server.name)
+                    .hint("Name")
+                    .width(120.0)
+                    .show(ui);
                 for (kind, name) in [(McpServer::STDIO, "Program"), (McpServer::REMOTE, "URL")] {
                     if ui.selectable_label(server.kind == kind, name).clicked() {
                         kind.clone_into(&mut server.kind);
@@ -1581,27 +1578,24 @@ fn assistant_settings(
                 }
             });
             if server.kind == McpServer::REMOTE {
-                ui.add(
-                    egui::TextEdit::singleline(&mut server.url)
-                        .hint_text("https://…")
-                        .desired_width(340.0),
-                );
+                ui::Field::new(&mut server.url)
+                    .hint("https://…")
+                    .width(340.0)
+                    .show(ui);
             } else {
                 ui.horizontal(|ui| {
-                    ui.add(
-                        egui::TextEdit::singleline(&mut server.command)
-                            .hint_text("Program")
-                            .desired_width(140.0),
-                    );
+                    ui::Field::new(&mut server.command)
+                        .hint("Program")
+                        .width(140.0)
+                        .show(ui);
                     let args = server_args
                         .entry(index)
                         .or_insert_with(|| server.args.join(" "));
-                    if ui
-                        .add(
-                            egui::TextEdit::singleline(args)
-                                .hint_text("Arguments")
-                                .desired_width(190.0),
-                        )
+                    if ui::Field::new(args)
+                        .hint("Arguments")
+                        .width(190.0)
+                        .show(ui)
+                        .response
                         .changed()
                     {
                         server.args = args.split_whitespace().map(str::to_owned).collect();
@@ -1744,18 +1738,14 @@ fn asset_column(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect
     let mut column = ui.new_child(egui::UiBuilder::new().max_rect(rect));
     let shelf = view.library_shelf;
     let stock = shelf == Shelf::Media && view.library_stock;
-    column.add(
-        egui::TextEdit::singleline(&mut view.library_query)
-            .hint_text(if stock {
-                "Search free stock"
-            } else {
-                shelf.hint()
-            })
-            .desired_width(f32::INFINITY)
-            .text_color(tokens::TEXT)
-            .background_color(tokens::PROJECT_BAR)
-            .margin(egui::Margin::symmetric(8, 6)),
-    );
+    ui::Field::new(&mut view.library_query)
+        .hint(if stock {
+            "Search free stock"
+        } else {
+            shelf.hint()
+        })
+        .icon("search")
+        .show(&mut column);
     if shelf == Shelf::Media {
         column.add_space(8.0);
         source_switch(&mut column, view);
@@ -2188,17 +2178,12 @@ fn folder_name_field(
         Pos2::new(rect.left(), rect.top() + CARD_H + 2.0),
         Vec2::new(rect.width(), CARD_LABEL - 2.0),
     );
-    let field = ui.put(
-        label,
-        egui::TextEdit::singleline(&mut *typed)
-            .font(FontId::proportional(12.0))
-            .text_color(tokens::TEXT),
-    );
-    if !field.has_focus() && !field.lost_focus() {
-        field.request_focus();
-    }
-    if field.lost_focus() {
-        let cancel = ui.input(|input| input.key_pressed(egui::Key::Escape));
+    let field = ui::Field::new(&mut *typed)
+        .text_size(12.0)
+        .focus()
+        .show_in(ui, label);
+    if field.committed || field.cancelled {
+        let cancel = field.cancelled;
         let typed = typed.clone();
         let id = id.clone();
         view.library_renaming = None;
@@ -4248,17 +4233,12 @@ fn lane_head(
     if let Some((track_id, typed)) = view.renaming.as_mut()
         && track_id == &lane.track_id
     {
-        let field = ui.put(
-            label,
-            egui::TextEdit::singleline(&mut *typed)
-                .font(FontId::proportional(12.0))
-                .text_color(tokens::TEXT),
-        );
-        if !field.has_focus() && !field.lost_focus() {
-            field.request_focus();
-        }
-        if field.lost_focus() {
-            let cancel = ui.input(|input| input.key_pressed(egui::Key::Escape));
+        let field = ui::Field::new(&mut *typed)
+            .text_size(12.0)
+            .focus()
+            .show_in(ui, label);
+        if field.committed || field.cancelled {
+            let cancel = field.cancelled;
             let typed = typed.clone();
             view.renaming = None;
             if !cancel && let Err(error) = shell.rename_track(&lane.track_id, &typed) {
@@ -6385,7 +6365,7 @@ fn export_choices(shell: &Shell, ui: &mut Ui, view: &mut ViewState) {
                     view.export_mbps = Some(format!("{}", rate / 1_000_000));
                 }
                 if let Some(text) = &mut view.export_mbps {
-                    ui.add(egui::TextEdit::singleline(text).desired_width(48.0));
+                    ui::Field::new(text).width(48.0).show(ui);
                     ui.label("Mbps");
                 }
             });
@@ -6588,7 +6568,7 @@ fn project_dialog(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
             ui.add_space(16.0);
             ui.vertical(|ui| {
                 choice_row(ui, "Name", |ui| {
-                    ui.add(egui::TextEdit::singleline(&mut settings.name).desired_width(220.0));
+                    ui::Field::new(&mut settings.name).width(220.0).show(ui);
                 });
                 choice_row(ui, "Ratio", |ui| {
                     for (ratio, name) in cutlass_editor::PROJECT_RATIOS {

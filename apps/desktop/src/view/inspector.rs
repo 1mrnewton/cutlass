@@ -11,13 +11,13 @@ use std::collections::{HashMap, HashSet};
 
 use egui::{
     Align, Align2, Color32, CornerRadius, FontId, Layout, Rect, RichText, Sense, Slider, Stroke,
-    TextEdit, Ui, Vec2,
+    Ui, Vec2,
 };
 
 use crate::shell::{
     Inspection, KeyedSetting, LetterCase, Panel, SILENT_DB, Shell, ShellError, TextLook, volume_db,
 };
-use crate::{icons, tokens};
+use crate::{icons, tokens, ui};
 use cutlass_model::{ANIMATION_PRESETS, AnimType, Micros, Motion};
 
 use super::ViewState;
@@ -669,11 +669,11 @@ fn animation_tab(
     later_note(ui, "Animations");
     ui.add_enabled_ui(false, |ui| {
         let mut query = String::new();
-        ui.add(
-            TextEdit::singleline(&mut query)
-                .hint_text("Search animations")
-                .desired_width(ui.available_width() - 28.0),
-        );
+        ui::Field::new(&mut query)
+            .hint("Search animations")
+            .icon("search")
+            .width(ui.available_width() - 28.0)
+            .show(ui);
     });
     let mut names = vec!["None"];
     names.extend_from_slice(motions.get(state.page).copied().unwrap_or_default());
@@ -1657,12 +1657,7 @@ fn text_basic(
 fn words_box(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState) {
     let stored = shell.text_words().unwrap_or_default();
     let text = state.fields.entry("words".to_owned()).or_default();
-    let response = ui.add(
-        TextEdit::multiline(text)
-            .desired_rows(3)
-            .desired_width(f32::INFINITY)
-            .text_color(tokens::TEXT),
-    );
+    let response = ui::Field::multiline(text, 3).show(ui).response;
     if super::commits(ui, &response) && *text != stored {
         let content = text.clone();
         send(shell, |shell| shell.set_text(content));
@@ -1731,7 +1726,7 @@ fn caption_words(
                         "Start a new line here"
                     })
                     .clicked();
-                let response = ui.add(TextEdit::singleline(text).desired_width(f32::INFINITY));
+                let response = ui::Field::new(text).show(ui).response;
                 if super::commits(ui, &response) && text != word {
                     edited = Some(text.clone());
                 }
@@ -2098,7 +2093,7 @@ pub(super) fn send(shell: &mut Shell, edit: impl FnOnce(&mut Shell) -> Result<()
 /// fit scroll sideways, as the prototype's do.
 fn tabs(ui: &mut Ui, labels: &[&str], current: &mut usize) {
     ui.add_space(12.0);
-    crate::ui::Scroll::horizontal(("inspector-tabs", labels.len()))
+    ui::Scroll::horizontal(("inspector-tabs", labels.len()))
         .without_bar()
         .show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -2323,17 +2318,14 @@ pub(super) fn note(ui: &mut Ui, text: &str) {
 
 fn later_button(ui: &mut Ui, label: &str) {
     ui.add_space(6.0);
-    ui.add_enabled(
-        false,
-        crate::ui::Button::new(label).text_size(12.0).tip(LATER),
-    );
+    ui.add_enabled(false, ui::Button::new(label).text_size(12.0).tip(LATER));
 }
 
 fn footer(ui: &mut Ui, labels: &[&str]) {
     ui.add_space(8.0);
     ui.horizontal(|ui| {
         for label in labels {
-            ui.add_enabled(false, crate::ui::Button::new(*label).text_size(12.0))
+            ui.add_enabled(false, ui::Button::new(*label).text_size(12.0))
                 .on_disabled_hover_text(LATER);
         }
     });
@@ -2586,40 +2578,28 @@ fn number_box(
     let stored = stored + 0.0;
     let text = state.fields.entry(key.to_owned()).or_default();
     let mut edited = None;
-    crate::ui::Surface::raised()
-        .radius(tokens::RADIUS_MD)
-        .padding(egui::Margin::symmetric(8, 4))
-        .show(ui, |ui| {
-            ui.set_width(width - 16.0);
-            ui.horizontal(|ui| {
-                if unit == "°" {
-                    paint_inline_icon(ui, "rotate");
-                } else if !unit.is_empty() {
-                    ui.label(RichText::new(unit).size(12.0).color(tokens::MUTED));
-                }
-                let response = ui.add(
-                    TextEdit::singleline(text)
-                        .desired_width(ui.available_width())
-                        .frame(egui::Frame::NONE)
-                        .text_color(Color32::WHITE),
-                );
-                if super::commits(ui, &response) {
-                    edited = text
-                        .trim()
-                        .parse::<f64>()
-                        .ok()
-                        .filter(|value| value.is_finite());
-                }
-                if !response.has_focus() {
-                    let shown = if stored.fract() == 0.0 {
-                        format!("{stored:.0}")
-                    } else {
-                        format!("{stored:.2}")
-                    };
-                    *text = shown;
-                }
-            });
-        });
+    let field = ui::Field::new(text).width(width).ink(Color32::WHITE);
+    let field = if unit == "°" {
+        field.icon("rotate")
+    } else {
+        field.unit(unit)
+    };
+    let response = field.show(ui).response;
+    if super::commits(ui, &response) {
+        edited = text
+            .trim()
+            .parse::<f64>()
+            .ok()
+            .filter(|value| value.is_finite());
+    }
+    if !response.has_focus() {
+        let shown = if stored.fract() == 0.0 {
+            format!("{stored:.0}")
+        } else {
+            format!("{stored:.2}")
+        };
+        *text = shown;
+    }
     edited.filter(|value| *value != stored)
 }
 
@@ -2725,7 +2705,7 @@ fn check_box(ui: &mut Ui, on: bool) -> egui::Response {
 
 fn icon_toggle(ui: &mut Ui, name: &str, tip: &str, on: bool) -> egui::Response {
     ui.add(
-        crate::ui::Button::icon(name)
+        ui::Button::icon(name)
             .on(on)
             .min_size(Vec2::splat(24.0))
             .tip(tip),
@@ -2735,7 +2715,7 @@ fn icon_toggle(ui: &mut Ui, name: &str, tip: &str, on: bool) -> egui::Response {
 /// A row of icon buttons on a dark bar. Returns the value of the one clicked.
 fn icon_bar<T: Copy>(ui: &mut Ui, items: &[(&str, &str, Option<T>)]) -> Option<T> {
     let mut picked = None;
-    crate::ui::Surface::inset().show(ui, |ui| {
+    ui::Surface::inset().show(ui, |ui| {
         ui.horizontal(|ui| {
             let gap = ((ui.available_width() - 24.0 * items.len() as f32)
                 / (items.len().max(2) - 1) as f32)
@@ -2763,9 +2743,4 @@ fn paint_icon(ui: &Ui, rect: Rect, name: &str, color: Color32) {
             color,
         );
     }
-}
-
-fn paint_inline_icon(ui: &mut Ui, name: &str) {
-    let (rect, _) = ui.allocate_exact_size(Vec2::splat(14.0), Sense::hover());
-    paint_icon(ui, rect, name, tokens::MUTED);
 }

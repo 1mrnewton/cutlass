@@ -9,6 +9,7 @@ mod act;
 mod animation;
 mod append;
 mod caption_list;
+mod caption_templates;
 mod caption_words;
 mod catalog;
 mod clip_rules;
@@ -49,6 +50,10 @@ pub use caption_list::{
     add_after_requests, caption_paragraphs, caption_rows, caption_text_request, for_every_caption,
     main_caption_lane, paragraph_request, paragraphs, rematched, remove_caption_request, row_at,
     rows_matching, words_over,
+};
+pub use caption_templates::{
+    CAPTION_TEMPLATES, CaptionTemplate, caption_template, caption_template_of,
+    caption_template_requests,
 };
 pub use caption_words::{LINE_BREAK, breaks_before, join_words, retype_word, toggle_line_break};
 pub use catalog::{catalog_entries, catalog_search};

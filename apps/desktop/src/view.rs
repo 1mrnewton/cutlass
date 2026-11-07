@@ -13953,6 +13953,114 @@ mod tests {
         let _ = std::fs::remove_dir_all(&temp);
     }
 
+    /// The text and caption inspector painted by the real renderer: the
+    /// Basic page plain and styled, the caption's tabs and its Bubble page.
+    /// With `CUTLASS_RENDER_DIR` set the pictures are kept there to look at.
+    #[test]
+    fn the_text_and_caption_inspector_paint() {
+        use crate::shell::KeyedSetting;
+        use cutlass_model::{MaterialText, Segment, SegmentId, TimeRange, Track, TrackType};
+        let temp = std::env::temp_dir().join(format!("cutlass-text-render-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        std::fs::create_dir_all(&temp).unwrap();
+        let mut draft = cutlass_model::Draft::empty("draft");
+        let mut title = MaterialText::new("title");
+        title.content = "AA".to_owned();
+        title.font_size = 160.0;
+        draft.materials.texts.push(title);
+        let mut caption = MaterialText::new("caption");
+        caption.content = "AB BA".to_owned();
+        caption.font_size = 7.0;
+        caption.words.text = vec!["AB".to_owned(), "BA".to_owned()];
+        caption.words.start_time = vec![0, 1_000];
+        caption.words.end_time = vec![1_000, 2_000];
+        draft.materials.texts.push(caption);
+        for (id, material) in [("words", "title"), ("said", "caption")] {
+            let mut track = Track::main(id);
+            track.kind = TrackType::Text;
+            track
+                .segments
+                .push(Segment::new(id, material, TimeRange::new(0, 2_000_000)));
+            draft.tracks.push(track);
+        }
+        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        shell.use_faces(vec![(
+            "sample.ttf",
+            include_bytes!("../../../crates/font/fixtures/sample.ttf").to_vec(),
+        )]);
+        shell.keep_presets_file(temp.join("Presets").join("text.json"));
+        shell.select(Some(SegmentId::new("words")));
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(Vec2::new(1280.0, 1600.0))
+            .wgpu()
+            .build_ui_state(
+                |ui, (shell, view): &mut (Shell, ViewState)| show(shell, ui, view, None),
+                (shell, {
+                    // The empty media shelf's hint has a glyph the test
+                    // fonts lack.
+                    let mut view = ViewState::new();
+                    view.library_shelf = Shelf::Stickers;
+                    view
+                }),
+            );
+        harness.run_steps(4);
+        let keep = std::env::var_os("CUTLASS_RENDER_DIR").map(std::path::PathBuf::from);
+        let picture = |harness: &mut egui_kittest::Harness<'_, (Shell, ViewState)>, name: &str| {
+            harness.run_steps(4);
+            let image = harness.render().expect("the renderer draws the window");
+            let first = image.get_pixel(0, 0);
+            assert!(
+                image.pixels().any(|pixel| pixel != first),
+                "{name} is blank"
+            );
+            if let Some(dir) = &keep {
+                std::fs::create_dir_all(dir).unwrap();
+                image.save(dir.join(format!("{name}.png"))).unwrap();
+            }
+        };
+        picture(&mut harness, "title-basic");
+        {
+            let shell = &mut harness.state_mut().0;
+            shell
+                .set_text_pattern(cutlass_session::TextPattern {
+                    bold: true,
+                    italic: true,
+                    underline: true,
+                })
+                .unwrap();
+            let pop = cutlass_editor::TEXT_PRESETS
+                .iter()
+                .position(|preset| preset.name == "Pop")
+                .unwrap();
+            shell.set_text_preset(pop).unwrap();
+            shell.toggle_setting_key(KeyedSetting::TextColor).unwrap();
+            shell.save_text_preset().unwrap();
+        }
+        picture(&mut harness, "title-styled");
+        harness.state_mut().0.set_text_align(4).unwrap();
+        picture(&mut harness, "title-vertical");
+        harness.state_mut().0.select(Some(SegmentId::new("said")));
+        harness.run_steps(2);
+        // Focus counts the title's tabs; a caption's list comes first.
+        harness.state_mut().1.inspector.focus(inspector::Focus {
+            tab: 0,
+            page: 0,
+            section: None,
+        });
+        picture(&mut harness, "caption-basic");
+        harness.state_mut().1.inspector.focus(inspector::Focus {
+            tab: 0,
+            page: 2,
+            section: None,
+        });
+        picture(&mut harness, "caption-bubble");
+        drop(harness);
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
     #[test]
     fn a_narrow_transport_drops_guides_then_zoom() {
         let room = |width| {

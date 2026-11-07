@@ -4575,6 +4575,38 @@ impl Shell {
     /// changed meanwhile.
     pub fn transcribe(&mut self) -> Result<(), ShellError> {
         let clip = self.selected_speech()?;
+        self.hear_job("Transcribe", clip, |shell, clip, words| {
+            shell.write_caption(clip, words)
+        })
+    }
+
+    /// The selected caption was heard from a clip still on the timeline, so
+    /// Re-run captions can hear it again.
+    #[must_use]
+    pub fn rerun_caption_enabled(&self) -> bool {
+        self.rerun_target().is_ok()
+    }
+
+    /// Hear the clip the selected caption was heard from again and give the
+    /// caption the new words, keeping its look. One undo restores the old
+    /// words. The local speech model runs as a job.
+    pub fn rerun_caption(&mut self) -> Result<(), ShellError> {
+        let (caption, clip) = self.rerun_target()?;
+        self.hear_job("Re-run captions", clip, move |shell, clip, words| {
+            shell.write_rerun(&caption, clip, &words)
+        })
+    }
+
+    /// Hear `clip` with the local speech model as a job, then `land` the
+    /// words, unless the clip changed meanwhile.
+    fn hear_job(
+        &mut self,
+        label: &str,
+        clip: HeardClip,
+        land: impl FnOnce(&mut Shell, &HeardClip, WordColumns) -> Result<(), ShellError>
+        + Send
+        + 'static,
+    ) -> Result<(), ShellError> {
         self.refuse_busy()?;
         let loaded = self.speech.borrow_mut().take();
         if loaded.is_none() && !speech_model::speech_model_here() {
@@ -4583,7 +4615,7 @@ impl Shell {
                 "the speech model is not on this machine".to_owned(),
             ));
         }
-        self.start_job("Transcribe", move |progress| {
+        self.start_job(label, move |progress| {
             let recognizer = match loaded {
                 Some(recognizer) => Ok(recognizer),
                 None => {
@@ -4605,9 +4637,30 @@ impl Shell {
                 }
                 let words = words?;
                 shell.still_heard(&clip)?;
-                shell.write_caption(&clip, words)
+                land(shell, &clip, words)
             })
         })
+    }
+
+    /// The selected caption and the clip it was heard from.
+    fn rerun_target(&self) -> Result<(SegmentId, HeardClip), ShellError> {
+        let caption = self.text_segment()?;
+        self.refuse_locked(&caption)?;
+        let draft = self.session_draft()?;
+        let source = cutlass_transcription::caption_source(draft, &caption).map_err(heard_error)?;
+        Ok((caption, self.heard_clip(&source)?))
+    }
+
+    fn write_rerun(
+        &mut self,
+        caption: &SegmentId,
+        clip: &HeardClip,
+        words: &WordColumns,
+    ) -> Result<(), ShellError> {
+        let request =
+            cutlass_transcription::rerun_request(self.session_draft()?, caption, clip, words)
+                .map_err(heard_error)?;
+        self.apply(request)
     }
 
     /// The clip a transcript was heard from is still the same length and
@@ -4776,6 +4829,19 @@ impl Shell {
         let clip = self.selected_speech()?;
         let words = heard_words(recognizer, source, &clip)?;
         self.write_caption(&clip, words)
+    }
+
+    /// Hear the selected caption's clip again with `recognizer`. Tests pass
+    /// a stand-in so they do not load the speech model.
+    #[cfg(test)]
+    fn rerun_caption_with(
+        &mut self,
+        recognizer: &dyn Recognizer,
+        source: &mut dyn PcmSource,
+    ) -> Result<(), ShellError> {
+        let (caption, clip) = self.rerun_target()?;
+        let words = heard_words(recognizer, source, &clip)?;
+        self.write_rerun(&caption, &clip, &words)
     }
 
     fn selected_speech(&self) -> Result<HeardClip, ShellError> {
@@ -16015,6 +16081,54 @@ mod tests {
             .find(|pair| pair.owner.as_str() == "picture")
             .expect("pair");
         assert_eq!(pair.dependent, caption_track.segments[0].id);
+
+        // Re-run captions hears the clip again and keeps the caption's look.
+        let heard_caption = caption_track.segments[0].id.clone();
+        desktop.select(Some(heard_caption));
+        assert!(desktop.rerun_caption_enabled());
+        desktop.set_caption_style("pop").unwrap();
+        let again = CaptionStandIn {
+            words: vec![RecognizedWord {
+                text: "hello".to_owned(),
+                start_ms: 100,
+                end_ms: 700,
+            }],
+        };
+        desktop.rerun_caption_with(&again, &mut tone).unwrap();
+        let rerun = |desktop: &Shell, content: &str| {
+            desktop
+                .draft()
+                .unwrap()
+                .materials
+                .texts
+                .iter()
+                .find(|text| text.content == content)
+                .map(|text| (text.caption_style.clone(), text.words.start_time.clone()))
+        };
+        assert_eq!(
+            rerun(&desktop, "hello"),
+            Some(("pop".to_owned(), vec![100]))
+        );
+        desktop.undo().unwrap();
+        assert_eq!(
+            rerun(&desktop, "hi there"),
+            Some(("pop".to_owned(), vec![0, 400]))
+        );
+        assert_eq!(
+            desktop
+                .rerun_caption_with(&quiet, &mut tone)
+                .unwrap_err()
+                .to_string(),
+            "nothing was heard"
+        );
+        desktop.select(Some(SegmentId::new("caption")));
+        assert!(!desktop.rerun_caption_enabled());
+        assert_eq!(
+            desktop.rerun_caption().unwrap_err().to_string(),
+            "this caption was not heard from a clip on the timeline"
+        );
+        // Take the style back off, so the steps below undo as before.
+        desktop.undo().unwrap();
 
         let fast_words = CaptionStandIn {
             words: vec![RecognizedWord {

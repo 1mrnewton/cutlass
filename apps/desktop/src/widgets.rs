@@ -241,17 +241,18 @@ pub fn sheet<R>(
                     head.left_center() + Vec2::new(24.0, 0.0),
                     Vec2::splat(18.0),
                 );
-                let close_response = ui.allocate_rect(close, Sense::click()).on_hover_text("Close");
-                ui.painter().circle_filled(close.center(), 7.0, tokens::CLOSE);
+                let close_response = ui
+                    .allocate_rect(close, Sense::click())
+                    .on_hover_text("Close");
+                ui.painter()
+                    .circle_filled(close.center(), 7.0, tokens::CLOSE);
                 if close_response.hovered() {
                     let stroke = egui::Stroke::new(1.3, tokens::EXPORT_INK);
                     let c = close.center();
                     ui.painter()
                         .line_segment([c + Vec2::splat(-2.5), c + Vec2::splat(2.5)], stroke);
-                    ui.painter().line_segment(
-                        [c + Vec2::new(-2.5, 2.5), c + Vec2::new(2.5, -2.5)],
-                        stroke,
-                    );
+                    ui.painter()
+                        .line_segment([c + Vec2::new(-2.5, 2.5), c + Vec2::new(2.5, -2.5)], stroke);
                 }
                 if close_response.clicked() {
                     end = SheetEnd::Cancel;
@@ -424,9 +425,7 @@ pub fn form_row<R>(ui: &mut Ui, label: &str, add: impl FnOnce(&mut Ui) -> R) -> 
 pub fn form_hint(ui: &mut Ui, text: &str) {
     ui.horizontal(|ui| {
         ui.add_space(FORM_LABEL + ui.spacing().item_spacing.x);
-        ui.add(
-            egui::Label::new(RichText::new(text).size(12.0).color(tokens::FAINT)).wrap(),
-        );
+        ui.add(egui::Label::new(RichText::new(text).size(12.0).color(tokens::FAINT)).wrap());
     });
     ui.add_space(10.0);
 }
@@ -452,10 +451,8 @@ pub fn text_box(ui: &mut Ui, text: &mut String) -> egui::Response {
 /// A full-width picker showing `current`, opening `options` below it.
 /// Returns the index picked this frame.
 pub fn select(ui: &mut Ui, id: &str, current: &str, options: &[&str]) -> Option<usize> {
-    let (rect, response) = ui.allocate_exact_size(
-        Vec2::new(ui.available_width(), FORM_FIELD),
-        Sense::click(),
-    );
+    let (rect, response) =
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), FORM_FIELD), Sense::click());
     let fill = if response.hovered() {
         tokens::MENU
     } else {
@@ -472,10 +469,14 @@ pub fn select(ui: &mut Ui, id: &str, current: &str, options: &[&str]) -> Option<
     );
     let mark = rect.right_center() - Vec2::new(18.0, 0.0);
     let stroke = egui::Stroke::new(1.5, tokens::MENU_CHEVRON);
-    ui.painter()
-        .line_segment([mark + Vec2::new(-4.5, -2.0), mark + Vec2::new(0.0, 2.5)], stroke);
-    ui.painter()
-        .line_segment([mark + Vec2::new(0.0, 2.5), mark + Vec2::new(4.5, -2.0)], stroke);
+    ui.painter().line_segment(
+        [mark + Vec2::new(-4.5, -2.0), mark + Vec2::new(0.0, 2.5)],
+        stroke,
+    );
+    ui.painter().line_segment(
+        [mark + Vec2::new(0.0, 2.5), mark + Vec2::new(4.5, -2.0)],
+        stroke,
+    );
     let mut picked = None;
     egui::Popup::menu(&response)
         .id(egui::Id::unique(("select", id)))
@@ -490,10 +491,8 @@ pub fn select(ui: &mut Ui, id: &str, current: &str, options: &[&str]) -> Option<
         .show(|ui| {
             ui.set_width(rect.width() - 8.0);
             for (index, option) in options.iter().enumerate() {
-                let (row, row_response) = ui.allocate_exact_size(
-                    Vec2::new(ui.available_width(), 30.0),
-                    Sense::click(),
-                );
+                let (row, row_response) =
+                    ui.allocate_exact_size(Vec2::new(ui.available_width(), 30.0), Sense::click());
                 if row_response.hovered() {
                     ui.painter()
                         .rect_filled(row, CornerRadius::same(6), tokens::MENU_HOVER);
@@ -520,7 +519,11 @@ pub fn select(ui: &mut Ui, id: &str, current: &str, options: &[&str]) -> Option<
 pub fn switch(ui: &mut Ui, on: &mut bool, enabled: bool) -> egui::Response {
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
         ui.set_min_height(FORM_FIELD);
-        let sense = if enabled { Sense::click() } else { Sense::hover() };
+        let sense = if enabled {
+            Sense::click()
+        } else {
+            Sense::hover()
+        };
         let (rect, mut response) = ui.allocate_exact_size(Vec2::new(44.0, 24.0), sense);
         if response.clicked() {
             *on = !*on;
@@ -533,11 +536,8 @@ pub fn switch(ui: &mut Ui, on: &mut bool, enabled: bool) -> egui::Response {
             tokens::SWITCH_OFF
         };
         let alpha = if enabled { 1.0 } else { 0.4 };
-        ui.painter().rect_filled(
-            rect,
-            CornerRadius::same(12),
-            track.gamma_multiply(alpha),
-        );
+        ui.painter()
+            .rect_filled(rect, CornerRadius::same(12), track.gamma_multiply(alpha));
         let x = egui::lerp(rect.left() + 12.0..=rect.right() - 12.0, shown);
         ui.painter().circle_filled(
             egui::pos2(x, rect.center().y),

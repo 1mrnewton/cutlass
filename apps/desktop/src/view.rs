@@ -1908,8 +1908,7 @@ fn asset_column(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect
 /// Project or Free stock, over the media shelf.
 /// Project and Free stock as one segmented control across the column.
 fn source_switch(ui: &mut Ui, view: &mut ViewState) {
-    let (track, _) =
-        ui.allocate_exact_size(Vec2::new(ui.available_width(), 34.0), Sense::hover());
+    let (track, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 34.0), Sense::hover());
     ui.painter()
         .rect_filled(track, CornerRadius::same(10), tokens::PROJECT_BAR);
     let half = (track.width() - 6.0) / 2.0;
@@ -3302,7 +3301,10 @@ fn inspector_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
             .fill(tokens::MENU_HOVER)
             .corner_radius(CornerRadius::same(tokens::EXPORT_RADIUS)),
         );
-        if response.on_hover_text("Change the project settings").clicked() {
+        if response
+            .on_hover_text("Change the project settings")
+            .clicked()
+        {
             view.project_dialog = shell.project_settings();
         }
         body
@@ -3317,10 +3319,11 @@ fn inspector_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
         .id_salt("inspector")
         .show(&mut details, |ui| {
             ui.set_width(content_width);
-            ui.add_space(14.0);
             if let Some(inspection) = shell.inspection() {
+                ui.add_space(6.0);
                 inspector::clip_panel(shell, ui, view, &inspection, content_width);
             } else {
+                ui.add_space(14.0);
                 section_title(ui, "Details");
                 project_facts(shell, ui, view, content_width);
             }
@@ -3373,7 +3376,10 @@ fn project_facts(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, width: f3
     let ratio = cutlass_editor::PROJECT_RATIOS
         .iter()
         .find(|(ratio, _)| *ratio == settings.ratio)
-        .map_or_else(|| ratio_label(&settings.ratio), |(_, name)| (*name).to_owned());
+        .map_or_else(
+            || ratio_label(&settings.ratio),
+            |(_, name)| (*name).to_owned(),
+        );
     fact(ui, "Ratio", &ratio, width);
     let resolution = cutlass_editor::PROJECT_RESOLUTIONS
         .iter()
@@ -3387,7 +3393,12 @@ fn project_facts(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, width: f3
         None => resolution.to_owned(),
     };
     fact(ui, "Resolution", &resolution, width);
-    fact(ui, "Frame rate", &cutlass_editor::rate_label(settings.rate), width);
+    fact(
+        ui,
+        "Frame rate",
+        &cutlass_editor::rate_label(settings.rate),
+        width,
+    );
     if shell.drop_frame_available() {
         fact(ui, "Drop frame", turned(shell.drop_frame_enabled()), width);
     }
@@ -3395,12 +3406,8 @@ fn project_facts(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, width: f3
         .draft()
         .and_then(|draft| draft.canvas_config.background.clone())
         .unwrap_or_default();
-    if let Some(color) = color_field(
-        ui,
-        "Background",
-        &mut view.background_buffer,
-        &background,
-    ) && let Err(error) = shell.set_canvas_background(&color)
+    if let Some(color) = color_field(ui, "Background", &mut view.background_buffer, &background)
+        && let Err(error) = shell.set_canvas_background(&color)
     {
         shell.notice_error(&error);
     }
@@ -3453,7 +3460,13 @@ fn fact_label(ui: &mut Ui, label: &str) {
 }
 
 /// A detail typed in place: plain text until it is clicked.
-fn fact_field(ui: &mut Ui, label: &str, text: &mut String, stored: &str, hint: &str) -> Option<String> {
+fn fact_field(
+    ui: &mut Ui,
+    label: &str,
+    text: &mut String,
+    stored: &str,
+    hint: &str,
+) -> Option<String> {
     let mut edited = None;
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 12.0;
@@ -3999,7 +4012,9 @@ fn ruler_and_lanes(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
         // A key diamond under the pointer keeps its own click and drag; the
         // line yields there unless it is already being dragged.
         let body_id = ui.scope_id().with("playhead-line");
-        let keys: Vec<Rect> = ui.data(|data| data.get_temp(key_hits_id())).unwrap_or_default();
+        let keys: Vec<Rect> = ui
+            .data(|data| data.get_temp(key_hits_id()))
+            .unwrap_or_default();
         let on_key = ui
             .input(|input| input.pointer.hover_pos())
             .is_some_and(|pos| keys.iter().any(|key| key.contains(pos)));
@@ -10456,7 +10471,7 @@ mod tests {
         let output = frame(&mut shell, Vec::new());
         let label = text_pos(&output, "Scale").expect("the scale row");
         // The track starts just past the row's name.
-        let start = label + Vec2::new(90.0, 6.0);
+        let start = label + Vec2::new(110.0, 6.0);
         let press = |pos: Pos2, pressed: bool| egui::Event::PointerButton {
             pos,
             button: egui::PointerButton::Primary,
@@ -10809,12 +10824,18 @@ mod tests {
         let mut view = ViewState::new();
         let text = painted(&mut view);
         for title in ["File", "Edit", "Clip", "Playback", "Help"] {
-            assert!(text.lines().any(|line| line == title), "no {title} menu: {text}");
+            assert!(
+                text.lines().any(|line| line == title),
+                "no {title} menu: {text}"
+            );
         }
         view.system_menus = true;
         let text = painted(&mut view);
         for title in ["File", "Edit", "Clip", "Playback", "Help"] {
-            assert!(!text.lines().any(|line| line == title), "a {title} menu: {text}");
+            assert!(
+                !text.lines().any(|line| line == title),
+                "a {title} menu: {text}"
+            );
         }
         assert!(text.lines().any(|line| line == "Export"), "{text}");
     }
@@ -10926,7 +10947,11 @@ mod tests {
             let rate = FrameRate::FPS_30;
             rate.frame_start(rate.frame_index(time).unwrap()) == Some(time)
         };
-        assert!(on_frame(shell.playhead()), "{:?} is between frames", shell.playhead());
+        assert!(
+            on_frame(shell.playhead()),
+            "{:?} is between frames",
+            shell.playhead()
+        );
         let mut output = ctx.run_ui(
             egui::RawInput {
                 screen_rect: screen,
@@ -10959,7 +10984,11 @@ mod tests {
             shell.playhead() > before,
             "the line drag did not move the playhead from {before:?}"
         );
-        assert!(on_frame(shell.playhead()), "{:?} is between frames", shell.playhead());
+        assert!(
+            on_frame(shell.playhead()),
+            "{:?} is between frames",
+            shell.playhead()
+        );
         let _ = std::fs::remove_dir_all(&temp);
     }
 

@@ -1230,15 +1230,15 @@ fn settings_window(
                 match view.settings_tab {
                     SettingsTab::General => {
                         settings_heading(ui, "Playback");
-                        ui.checkbox(&mut settings.playback.loop_playback, "Loop at the end");
-                        ui.checkbox(
+                        ui.add(ui::Check::new(&mut settings.playback.loop_playback, "Loop at the end"));
+                        ui.add(ui::Check::new(
                             &mut settings.playback.scrub_audio,
                             "Play sound while the playhead is dragged",
-                        );
-                        ui.checkbox(
+                        ));
+                        ui.add(ui::Check::new(
                             &mut settings.playback.proxies,
                             "Play proxies of 4K and long clips in the viewer",
-                        );
+                        ));
                         choices_row(ui, "A seek", |ui| {
                             let seek = &mut settings.playback.seek_during_playback;
                             for (value, name) in [
@@ -1258,14 +1258,14 @@ fn settings_window(
                             [(PANEL_LIBRARY, "Library"), (PANEL_INSPECTOR, "Inspector")]
                         {
                             let mut open = settings.panel_open(id);
-                            if ui.checkbox(&mut open, name).changed() {
+                            if ui.add(ui::Check::new(&mut open, name)).changed() {
                                 settings.set_panel_open(id, open);
                             }
                         }
                         settings_heading(ui, "Import");
                         let mut copy = !settings.import.link;
                         if ui
-                            .checkbox(&mut copy, "Copy imported files into the project")
+                            .add(ui::Check::new(&mut copy, "Copy imported files into the project"))
                             .changed()
                         {
                             settings.import.link = !copy;
@@ -1275,20 +1275,20 @@ fn settings_window(
                                 .color(tokens::FAINT),
                         );
                         settings_heading(ui, "Hardware codecs");
-                        ui.checkbox(
+                        ui.add(ui::Check::new(
                             &mut settings.hardware.decode,
                             "Decode with the system codecs",
-                        );
-                        ui.checkbox(
+                        ));
+                        ui.add(ui::Check::new(
                             &mut settings.hardware.encode,
                             "Encode with the system codecs",
-                        );
+                        ));
                         ui.label(
                             RichText::new("These take effect when Cutlass opens again.")
                                 .color(tokens::FAINT),
                         );
                         settings_heading(ui, "Updates");
-                        ui.checkbox(&mut settings.updates.check, "Check for updates");
+                        ui.add(ui::Check::new(&mut settings.updates.check, "Check for updates"));
                         ui.label(
                             RichText::new(format!(
                                 "Cutlass {} looks for a new release once a day. Off, it never asks.",
@@ -1528,7 +1528,7 @@ fn assistant_settings(
 ) {
     use cutlass_settings::McpServer;
     settings_heading(ui, "Model");
-    ui.checkbox(&mut settings.model.local, "Local model");
+    ui.add(ui::Check::new(&mut settings.model.local, "Local model"));
     if settings.model.local {
         choice_row(ui, "Address", |ui| {
             ui::Field::new(&mut settings.model.local_url)
@@ -1548,13 +1548,22 @@ fn assistant_settings(
                 .color(tokens::FAINT),
         );
     }
-    ui.checkbox(
+    ui.add(ui::Check::new(
         &mut settings.model.cloud,
         "Cloud model (sends messages off this computer)",
-    );
-    ui.checkbox(&mut settings.sandbox.local, "Run code on this computer");
-    ui.checkbox(&mut settings.sandbox.online, "Run code online");
-    ui.checkbox(&mut settings.memory, "Remember across conversations");
+    ));
+    ui.add(ui::Check::new(
+        &mut settings.sandbox.local,
+        "Run code on this computer",
+    ));
+    ui.add(ui::Check::new(
+        &mut settings.sandbox.online,
+        "Run code online",
+    ));
+    ui.add(ui::Check::new(
+        &mut settings.memory,
+        "Remember across conversations",
+    ));
     choice_row(ui, "Steps a turn", |ui| {
         ui.add(egui::DragValue::new(&mut settings.step_cap).range(1..=1000));
     });
@@ -1563,7 +1572,7 @@ fn assistant_settings(
     for (index, server) in settings.mcp_servers.iter_mut().enumerate() {
         ui.push_id(("server", index), |ui| {
             ui.horizontal(|ui| {
-                ui.checkbox(&mut server.enabled, "");
+                ui.add(ui::Check::new(&mut server.enabled, ""));
                 ui::Field::new(&mut server.name)
                     .hint("Name")
                     .width(120.0)
@@ -6299,7 +6308,7 @@ fn export_choices(shell: &Shell, ui: &mut Ui, view: &mut ViewState) {
             }
         }
     });
-    ui.checkbox(&mut export.picture, "Video");
+    ui.add(ui::Check::new(&mut export.picture, "Video"));
     if export.picture {
         choices_row(ui, "Format", |ui| {
             if ui.add(ui::Choice::new(!view.export_mov, "MP4")).clicked() {
@@ -6417,7 +6426,7 @@ fn export_choices(shell: &Shell, ui: &mut Ui, view: &mut ViewState) {
             }
         });
     }
-    ui.checkbox(&mut export.sound, "Audio");
+    ui.add(ui::Check::new(&mut export.sound, "Audio"));
     // PCM goes in a MOV or a WAV, never an MP4. FLAC, MP3 and Opus are
     // sound alone, each in a file of its own (Opus in an Ogg file).
     let pcm_fits = view.export_mov || !export.picture;
@@ -6501,7 +6510,7 @@ fn export_choices(shell: &Shell, ui: &mut Ui, view: &mut ViewState) {
         }
     }
     let mut gif_on = export.gif.is_some();
-    if ui.checkbox(&mut gif_on, "GIF").changed() {
+    if ui.add(ui::Check::new(&mut gif_on, "GIF")).changed() {
         export.gif = gif_on.then(GifExport::default);
     }
     if let Some(gif) = &mut export.gif {
@@ -6549,7 +6558,10 @@ fn export_choices(shell: &Shell, ui: &mut Ui, view: &mut ViewState) {
         });
     }
     let mut captions_on = export.captions.is_some();
-    if ui.checkbox(&mut captions_on, "Caption file").changed() {
+    if ui
+        .add(ui::Check::new(&mut captions_on, "Caption file"))
+        .changed()
+    {
         export.captions = captions_on.then_some(SidecarKind::Srt);
     }
     if let Some(kind) = &mut export.captions {
@@ -6644,10 +6656,10 @@ fn project_dialog(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
                         }
                     }
                 });
-                ui.checkbox(
+                ui.add(ui::Check::new(
                     &mut settings.free_layer,
                     "Free layer: stack clips with Arrange, not by their tracks",
-                );
+                ));
                 ui.add_space(8.0);
                 save = ui.button("Save").clicked();
             });

@@ -2683,54 +2683,19 @@ fn parse_hex(text: &str) -> Option<Color32> {
 }
 
 pub(super) fn switch_row(ui: &mut Ui, label: &str, on: bool, editable: bool) -> egui::Response {
+    // The caller flips the stored value on a click; this copy only draws.
+    let mut shown = on;
     let response = ui
-        .horizontal(|ui| {
-            ui.label(RichText::new(label).size(12.0).color(tokens::TEXT));
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.add_enabled_ui(editable, |ui| {
-                    let (rect, response) =
-                        ui.allocate_exact_size(Vec2::new(32.0, 18.0), Sense::click());
-                    let fill = if on { tokens::EXPORT } else { tokens::PANEL };
-                    ui.painter().rect_filled(rect, CornerRadius::same(9), fill);
-                    let knob = if on {
-                        rect.right_center() - Vec2::new(9.0, 0.0)
-                    } else {
-                        rect.left_center() + Vec2::new(9.0, 0.0)
-                    };
-                    ui.painter().circle_filled(knob, 7.0, Color32::WHITE);
-                    response
-                })
-                .inner
-            })
-            .inner
-        })
+        .add_enabled_ui(editable, |ui| ui::switch_row(ui, label, &mut shown))
         .inner;
     ui.add_space(4.0);
     response
 }
 
 fn check_box(ui: &mut Ui, on: bool) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::click());
-    let fill = if on { ACCENT } else { Color32::TRANSPARENT };
-    ui.painter().rect(
-        rect,
-        CornerRadius::same(4),
-        fill,
-        Stroke::new(1.0, if on { ACCENT } else { tokens::FAINT }),
-        egui::StrokeKind::Inside,
-    );
-    if on {
-        let c = rect.center();
-        ui.painter().add(egui::Shape::line(
-            vec![
-                c + Vec2::new(-4.0, 0.0),
-                c + Vec2::new(-1.0, 3.0),
-                c + Vec2::new(4.5, -3.0),
-            ],
-            Stroke::new(1.8, tokens::EXPORT_INK),
-        ));
-    }
-    response
+    // The caller flips the stored value on a click; this copy only draws.
+    let mut shown = on;
+    ui.add(ui::Check::new(&mut shown, ""))
 }
 
 fn icon_toggle(ui: &mut Ui, name: &str, tip: &str, on: bool) -> egui::Response {

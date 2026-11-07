@@ -264,6 +264,51 @@ pub fn text_size(draft: &Draft, fonts: &dyn Fonts, segment: &Segment) -> Option<
     if material.font_path.is_empty() || words_present(material) {
         return None;
     }
+    title_size(draft, fonts, segment, material)
+}
+
+/// The size a title's or caption's text picture is drawn at `time`, before
+/// placement, as [`text_layers`] draws it on a canvas of the draft's width.
+/// A caption has the size of the page of words showing then, and none
+/// between pages; a clip whose face is missing has none.
+#[must_use]
+pub fn text_size_at(
+    draft: &Draft,
+    fonts: &dyn Fonts,
+    segment: &Segment,
+    time: Micros,
+) -> Option<(u32, u32)> {
+    let Some(MaterialRef::Text(material)) = draft.materials.get(segment.material_id.as_str())
+    else {
+        return None;
+    };
+    if material.font_path.is_empty() {
+        return None;
+    }
+    if !words_present(material) {
+        return title_size(draft, fonts, segment, material);
+    }
+    let face = fonts.face(&material.font_path)?;
+    let canvas_width = f64::from(draft.canvas_config.width.max(1));
+    let (_, bytes) = caption_picture(
+        Faces { fonts, face },
+        material,
+        glow(draft, segment).as_ref(),
+        segment,
+        time,
+        1.0,
+        canvas_width,
+    )?;
+    let extent = bytes.extent();
+    Some((extent.width, extent.height))
+}
+
+fn title_size(
+    draft: &Draft,
+    fonts: &dyn Fonts,
+    segment: &Segment,
+    material: &MaterialText,
+) -> Option<(u32, u32)> {
     let face = fonts.face(&material.font_path)?;
     let glow = glow(draft, segment);
     let faces = Faces { fonts, face };
@@ -894,6 +939,48 @@ mod tests {
         let before = draft.clone();
         assert!(!ink(&pixels(&draft, 0)));
         assert_eq!(draft, before);
+    }
+
+    #[test]
+    fn a_caption_reports_the_size_of_the_page_showing_at_a_time() {
+        let mut draft = text_segment("", false);
+        draft.materials.texts[0].words = words(&[("A", 0, 400), ("AB", 500, 1_000)]);
+        let segment = draft.tracks[0].segments[0].clone();
+        let at = |time: i64| super::text_size_at(&draft, &OneFont, &segment, Micros(time));
+        let (width, height) = at(0).expect("the first page has a size");
+        // The box is the picture the preview places: the whole page, with
+        // the words still to come drawn clear.
+        let drawn = |time: i64| {
+            let layers = super::text_layers(
+                &draft,
+                &OneFont,
+                256,
+                256,
+                Micros(time),
+                &mut std::collections::HashMap::new(),
+            );
+            let extent = layers[0].placed.raster.extent();
+            (extent.width, extent.height)
+        };
+        assert_eq!((width, height), drawn(0));
+        assert_eq!(at(700_000), Some(drawn(700_000)));
+        // Past its words a caption shows nothing and has no size.
+        assert_eq!(at(1_000_000), None);
+        // The timeless size still has none for a caption.
+        assert_eq!(super::text_size(&draft, &OneFont, &segment), None);
+        // A title measures the same with or without a time.
+        let title = text_segment("A", false);
+        let line = &title.tracks[0].segments[0];
+        assert_eq!(
+            super::text_size_at(&title, &OneFont, line, Micros(0)),
+            super::text_size(&title, &OneFont, line)
+        );
+        let mut faceless = draft.clone();
+        faceless.materials.texts[0].font_path.clear();
+        assert_eq!(
+            super::text_size_at(&faceless, &OneFont, &segment, Micros(0)),
+            None
+        );
     }
 
     #[test]

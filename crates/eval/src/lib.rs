@@ -48,7 +48,7 @@ pub use gpu::{Composed, FrameLayers, GpuBackdrop, GpuLayer, GpuSource, YuvSample
 pub use heard::{ClipAsk, Heard};
 pub use media::OpenClips;
 pub use scenes::{blend_blocks, kept_cuts, scene_split_times};
-pub use text::text_size;
+pub use text::{text_size, text_size_at};
 pub use track::{TrackAsk, TrackError, TrackSpan, path_in_clip, track_clip};
 
 /// The source timestamp Freeze stores so the clip keeps showing `time`.

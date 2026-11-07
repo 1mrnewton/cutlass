@@ -152,6 +152,7 @@ pub fn add_caption(
     }
     let mut text = MaterialText::new(material_id.clone());
     text.kind = CAPTION_KIND.to_owned();
+    text.font_size = super::text::NEW_TEXT_SIZE;
     draft.materials.texts.push(text);
     let mut segment = Segment::new(segment_id.clone(), material_id.clone(), target);
     segment.render_index = TrackType::Text.render_floor().unwrap_or(0);
@@ -189,6 +190,7 @@ pub fn add_subtitles(
         }
         let mut text = MaterialText::new(cue.material_id.clone());
         text.kind = CAPTION_KIND.to_owned();
+        text.font_size = super::text::NEW_TEXT_SIZE;
         draft.materials.texts.push(text);
         let mut segment = Segment::new(
             cue.segment_id.clone(),
@@ -557,6 +559,8 @@ mod tests {
         let text = &draft.materials.texts[0];
         assert!(text.words.text.is_empty());
         assert_eq!(text.kind, CAPTION_KIND);
+        // A size of 0 draws nothing: a caption starts at a new title's size.
+        assert_eq!(text.font_size, super::super::text::NEW_TEXT_SIZE);
         let track = draft
             .tracks
             .iter()
@@ -660,6 +664,7 @@ mod tests {
             .find(|text| text.id.as_str() == "two")
             .expect("two");
         assert_eq!(two.kind, CAPTION_KIND);
+        assert_eq!(two.font_size, super::super::text::NEW_TEXT_SIZE);
         assert_eq!(two.content, "there");
         assert_eq!(two.words, cues[1].words);
         assert_eq!(two.current_words, cues[1].words);

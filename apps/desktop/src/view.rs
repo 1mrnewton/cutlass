@@ -2814,6 +2814,7 @@ fn preview_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rec
     } else {
         view.preview_pan = Vec2::ZERO;
     }
+    preview_wheel(ui, view, frame);
     // The preview drag lands before the canvas is drawn, on the canvas
     // where it was last drawn, so this frame's picture already has it.
     let staging = shell.picking().is_none() && shell.tracking().is_none();
@@ -3402,6 +3403,47 @@ fn set_full_screen(ui: &Ui, view: &mut ViewState, full: bool) {
         .send_viewport_cmd(egui::ViewportCommand::Fullscreen(full));
 }
 
+/// A pinch, or the wheel with Cmd (Ctrl off a Mac), zooms the preview
+/// about the pointer; a plain wheel or two-finger scroll pans a zoomed
+/// canvas. egui has already turned mouse wheel lines into points, and a
+/// Cmd wheel into a zoom; on a Mac a Ctrl wheel is still a scroll, so it
+/// is turned into a zoom here at egui's own rate.
+fn preview_wheel(ui: &Ui, view: &mut ViewState, frame: Rect) {
+    let (pinch, scroll, modifier, pos) = ui.input(|input| {
+        (
+            input.zoom_delta(),
+            input.smooth_scroll_delta,
+            input.modifiers.command || input.modifiers.ctrl,
+            input.pointer.hover_pos(),
+        )
+    });
+    let speed = ui
+        .ctx()
+        .options(|options| options.input_options.scroll_zoom_speed);
+    let Some(pos) = pos.filter(|pos| frame.contains(*pos) && !over_menu(ui, *pos)) else {
+        return;
+    };
+    let mut factor = f64::from(pinch);
+    if modifier {
+        factor *= f64::from(speed * (scroll.x + scroll.y)).exp();
+    } else if view.preview_zoom.is_some() && scroll != Vec2::ZERO {
+        view.preview_pan += scroll;
+    }
+    let anchor = pos - frame.center();
+    let pan = view.preview_pan;
+    if let Some((zoom, (x, y))) = cutlass_editor::preview_zoom_at(
+        view.preview_scale,
+        factor,
+        (f64::from(anchor.x), f64::from(anchor.y)),
+        (f64::from(pan.x), f64::from(pan.y)),
+    ) {
+        view.preview_zoom = Some(zoom);
+        view.preview_pan = Vec2::new(x as f32, y as f32);
+        // The canvas is placed later this frame at this scale.
+        view.preview_scale = zoom;
+    }
+}
+
 /// Where a canvas `size` canvas pixels sits in `frame`: fitted, or at
 /// `zoom` screen pixels per canvas pixel moved by `pan`. A pan is held to
 /// what keeps the canvas over the middle. Answers the rect and its scale.
@@ -3416,8 +3458,12 @@ fn placed_canvas(frame: Rect, size: Vec2, zoom: Option<f64>, pan: &mut Vec2) -> 
         return (fitted, scale);
     };
     let shown = size * zoom as f32;
-    let room = ((shown - frame.size()) / 2.0).max(Vec2::ZERO);
-    *pan = pan.clamp(-room, room);
+    let (x, y) = cutlass_editor::clamp_preview_pan(
+        (f64::from(pan.x), f64::from(pan.y)),
+        (f64::from(shown.x), f64::from(shown.y)),
+        (f64::from(frame.width()), f64::from(frame.height())),
+    );
+    *pan = Vec2::new(x as f32, y as f32);
     (Rect::from_center_size(frame.center() + *pan, shown), zoom)
 }
 
@@ -11275,6 +11321,153 @@ mod tests {
         frame(&mut shell, &mut view, click(shown + Vec2::new(4.0, 4.0)));
         assert_eq!(view.preview_zoom, None);
         assert_eq!(view.preview_pan, Vec2::ZERO);
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn a_pinch_and_a_command_wheel_zoom_about_the_pointer_and_a_scroll_pans() {
+        let (mut shell, temp) = open_span("wheel-zoom", 2_000_000);
+        shell.cycle_canvas().unwrap();
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let mut time = 0.0;
+        let mut frame = |shell: &mut Shell, view: &mut ViewState, events: Vec<egui::Event>| {
+            time += 1.0 / 60.0;
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: screen,
+                    events,
+                    time: Some(time),
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, view, None),
+            );
+            output.textures_delta.clear();
+        };
+        let wheel = |unit, delta: Vec2, source, modifiers| egui::Event::MouseWheel {
+            unit,
+            delta,
+            phase: egui::TouchPhase::Move,
+            source,
+            modifiers,
+        };
+        // The canvas pixel under `pos` as the preview last drew it.
+        let under = |view: &ViewState, pos: Pos2| {
+            let canvas = view.preview_canvas.expect("a canvas");
+            (pos - canvas.center()) / view.preview_scale as f32
+        };
+        frame(&mut shell, &mut view, Vec::new());
+        frame(&mut shell, &mut view, Vec::new());
+        let fitted = view.preview_scale;
+        let pos = view.preview_frame.center() + Vec2::new(60.0, 40.0);
+        frame(&mut shell, &mut view, vec![egui::Event::PointerMoved(pos)]);
+        let spot = under(&view, pos);
+
+        // A trackpad pinch zooms in, and the spot under the pointer stays.
+        frame(&mut shell, &mut view, vec![egui::Event::Zoom(3.0)]);
+        frame(&mut shell, &mut view, Vec::new());
+        let pinched = view.preview_zoom.expect("a pinch zooms");
+        assert!(
+            (pinched - fitted * 3.0).abs() < 1e-6,
+            "{pinched} after {fitted}"
+        );
+        let moved = under(&view, pos) - spot;
+        assert!(moved.length() < 0.5, "the spot moved {moved:?}");
+
+        // Two fingers without a modifier pan the zoomed canvas, not zoom it.
+        let pan = view.preview_pan;
+        let touch = wheel(
+            egui::MouseWheelUnit::Point,
+            Vec2::new(-30.0, 20.0),
+            egui::MouseWheelSource::Trackpad,
+            egui::Modifiers::default(),
+        );
+        frame(&mut shell, &mut view, vec![touch]);
+        for _ in 0..30 {
+            frame(&mut shell, &mut view, Vec::new());
+        }
+        assert_eq!(view.preview_zoom, Some(pinched));
+        assert!(
+            (view.preview_pan - pan - Vec2::new(-30.0, 20.0)).length() < 1.0,
+            "{:?} from {pan:?}",
+            view.preview_pan
+        );
+
+        // Mouse wheel lines with Cmd (Ctrl off a Mac) zoom out, smoothed
+        // over a few frames.
+        let spot = under(&view, pos);
+        let notch = wheel(
+            egui::MouseWheelUnit::Line,
+            Vec2::new(0.0, -1.0),
+            egui::MouseWheelSource::Wheel,
+            egui::Modifiers::COMMAND,
+        );
+        frame(
+            &mut shell,
+            &mut view,
+            vec![
+                egui::Event::ModifiersChanged(egui::Modifiers::COMMAND),
+                notch,
+            ],
+        );
+        for _ in 0..30 {
+            frame(&mut shell, &mut view, Vec::new());
+        }
+        let notched = view.preview_zoom.expect("still zoomed");
+        assert!(
+            notched < pinched && notched > fitted,
+            "{notched} after {pinched}"
+        );
+        let moved = under(&view, pos) - spot;
+        assert!(moved.length() < 0.5, "the spot moved {moved:?}");
+
+        // A Ctrl wheel on a Mac reaches egui as a scroll; it zooms too, and
+        // never pans.
+        let pan = view.preview_pan;
+        let ctrl = wheel(
+            egui::MouseWheelUnit::Point,
+            Vec2::new(0.0, 40.0),
+            egui::MouseWheelSource::Trackpad,
+            egui::Modifiers::CTRL,
+        );
+        frame(
+            &mut shell,
+            &mut view,
+            vec![egui::Event::ModifiersChanged(egui::Modifiers::CTRL), ctrl],
+        );
+        for _ in 0..30 {
+            frame(&mut shell, &mut view, Vec::new());
+        }
+        let ctrl_zoom = view.preview_zoom.expect("still zoomed");
+        assert!(ctrl_zoom > notched, "{ctrl_zoom} after {notched}");
+        let moved = under(&view, pos) - spot;
+        assert!(moved.length() < 0.5, "the spot moved {moved:?}");
+        assert_ne!(view.preview_pan, pan + Vec2::new(0.0, 40.0));
+        frame(
+            &mut shell,
+            &mut view,
+            vec![egui::Event::ModifiersChanged(egui::Modifiers::default())],
+        );
+
+        // A pinch out stops at the smallest zoom.
+        frame(&mut shell, &mut view, vec![egui::Event::Zoom(0.0001)]);
+        assert_eq!(
+            view.preview_zoom,
+            Some(cutlass_editor::PREVIEW_ZOOM_RANGE.0)
+        );
+
+        // Off the preview, a pinch leaves it alone.
+        let off = Pos2::new(4.0, 790.0);
+        frame(
+            &mut shell,
+            &mut view,
+            vec![egui::Event::PointerMoved(off), egui::Event::Zoom(2.0)],
+        );
+        assert_eq!(
+            view.preview_zoom,
+            Some(cutlass_editor::PREVIEW_ZOOM_RANGE.0)
+        );
         let _ = std::fs::remove_dir_all(&temp);
     }
 

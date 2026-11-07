@@ -854,6 +854,9 @@ pub struct Shell {
     gpu: Option<crate::gpu::Preview>,
     /// The canvas shows a clip's earlier picture while the asked one decodes.
     preview_stale: bool,
+    /// The revision of the open draft the picture on the canvas was drawn
+    /// from. `None` while a render plays in its place.
+    shown_revision: std::cell::Cell<Option<u64>>,
     /// The playhead is being dragged, so the preview shows a clip's picture
     /// on its way to the asked one.
     scrubbing: bool,
@@ -949,6 +952,7 @@ impl Shell {
             face: Arc::new(crate::face::installed()),
             gpu: None,
             preview_stale: false,
+            shown_revision: std::cell::Cell::new(None),
             scrubbing: false,
             preview_error: None,
             chrome: Chrome::default(),
@@ -2308,11 +2312,11 @@ impl Shell {
         let main = self.session.as_ref().ok_or(ShellError::NoProject)?;
         // A render standing for this stretch plays in its place.
         let key = self.render_key_if_any();
-        let (session, preview_cache) = match key.and_then(|key| self.renders.at(key, Micros(time)))
-        {
-            Some(render) => (&render.session, &self.renders.cache),
-            None => (main, &self.preview_cache),
-        };
+        let (session, preview_cache, revision) =
+            match key.and_then(|key| self.renders.at(key, Micros(time))) {
+                Some(render) => (&render.session, &self.renders.cache, None),
+                None => (main, &self.preview_cache, Some(main.revision())),
+            };
         let readers = self
             .proxies
             .preview(&self.readers, self.settings.playback.proxies);
@@ -2325,6 +2329,7 @@ impl Shell {
             time,
         };
         if let Some(shown) = gpu.shown(&key) {
+            self.shown_revision.set(revision);
             return Ok(Some(shown));
         }
         let mut device = SoftwareDevice::new();
@@ -2358,11 +2363,20 @@ impl Shell {
         let shown = gpu
             .show(layers, key)
             .map_err(|error| ShellError::Eval(error.to_string()))?;
+        self.shown_revision.set(revision);
         if stale {
             gpu.forget();
         }
         self.preview_stale = stale;
         Ok(Some(shown))
+    }
+
+    /// The revision of the open draft the picture last put on the canvas
+    /// was drawn from, so marks drawn over it can match it. `None` before
+    /// the first picture and while a render plays in the draft's place.
+    #[must_use]
+    pub fn shown_revision(&self) -> Option<u64> {
+        self.shown_revision.get()
     }
 
     /// Log the preview's error once when it starts or changes, and once
@@ -2400,9 +2414,9 @@ impl Shell {
     pub fn preview_bytes(&self) -> Result<Picture, ShellError> {
         let main = self.session.as_ref().ok_or(ShellError::NoProject)?;
         let time = self.sample_time();
-        let (session, cache) = match self.rendered_at(time) {
-            Some(render) => (&render.session, &self.renders.cache),
-            None => (main, &self.preview_cache),
+        let (session, cache, revision) = match self.rendered_at(time) {
+            Some(render) => (&render.session, &self.renders.cache, None),
+            None => (main, &self.preview_cache, Some(main.revision())),
         };
         let mut device = SoftwareDevice::new();
         let root = self.path.clone();
@@ -2418,6 +2432,7 @@ impl Shell {
                 &*self.face,
             )
             .map_err(|error| ShellError::Eval(error.to_string()))?;
+        self.shown_revision.set(revision);
         Ok(Picture {
             width: picture.width,
             height: picture.height,

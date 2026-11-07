@@ -72,7 +72,7 @@ pub fn serve(path: Option<&Path>, input: impl BufRead, output: impl Write) -> Re
         Headless(Rc::clone(&shell)),
         Bundled,
         (
-            Unbuilt(NOT_HERE),
+            Bundled,
             Headless(Rc::clone(&shell)),
             crate::sandbox::local_sandbox(crate::sandbox::this_program(), Some(path)),
             Refuse,
@@ -134,8 +134,6 @@ impl<S: ToolSink> ToolSink for Logged<S> {
         outcome
     }
 }
-
-const NOT_HERE: &str = "not available from cutlass mcp; open the project in the Cutlass window";
 
 /// The player and export on the project this host holds.
 struct Headless(Rc<RefCell<Shell>>);
@@ -270,10 +268,6 @@ impl Media for Probe {
     }
 }
 
-/// Packages, which this host does not run yet; the text says where they
-/// are.
-pub(crate) struct Unbuilt(pub(crate) &'static str);
-
 /// The effects, filters, transitions and animations Cutlass ships.
 pub(crate) struct Bundled;
 
@@ -283,15 +277,18 @@ impl Catalog for Bundled {
     }
 }
 
-impl Packages for Unbuilt {
-    fn ensure(&mut self, _package_id: &str) -> Result<(), String> {
-        Err(format!("packages are {}", self.0))
-    }
-}
-
-impl Export for Unbuilt {
-    fn start(&mut self, _path: &str) -> Result<String, String> {
-        Err(format!("export is {}", self.0))
+/// Every package ships in the app, so one is ready when Cutlass has it,
+/// and there is nothing to fetch when it does not.
+impl Packages for Bundled {
+    fn ensure(&mut self, package_id: &str) -> Result<(), String> {
+        if cutlass_editor::is_bundled(package_id) {
+            Ok(())
+        } else {
+            Err(format!(
+                "Cutlass has no package `{package_id}`; every package ships in the app, \
+                 and catalog.search lists their ids"
+            ))
+        }
     }
 }
 

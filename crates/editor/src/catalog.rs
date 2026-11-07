@@ -45,6 +45,15 @@ pub fn catalog_entries() -> Vec<String> {
     entries
 }
 
+/// Whether `id` names an item Cutlass ships. Every package is bundled in
+/// the first release, so this is the whole answer to `package.ensure`.
+#[must_use]
+pub fn is_bundled(id: &str) -> bool {
+    catalog_entries()
+        .iter()
+        .any(|entry| entry.split(' ').nth(1) == Some(id))
+}
+
 /// The entries every word of `query` is in, ignoring case. A blank query
 /// lists them all.
 #[must_use]
@@ -79,5 +88,17 @@ mod tests {
         let fades = catalog_search("animation fade");
         assert!(fades.iter().any(|entry| entry.contains("Fade In")));
         assert!(catalog_search("no such thing at all").is_empty());
+    }
+
+    #[test]
+    fn a_listed_id_is_bundled_and_a_name_or_kind_is_not() {
+        for entry in catalog_entries() {
+            let id = entry.split(' ').nth(1).unwrap_or_default();
+            assert!(is_bundled(id), "{entry}");
+        }
+        assert!(is_bundled("cutlass-dissolve"));
+        assert!(!is_bundled("Dissolve"));
+        assert!(!is_bundled("transition"));
+        assert!(!is_bundled("recipe/not-a-package"));
     }
 }

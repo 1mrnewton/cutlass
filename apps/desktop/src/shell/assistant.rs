@@ -11,10 +11,7 @@ use cutlass_codec::CodecId;
 use cutlass_model::Micros;
 
 use super::{ExportRequest, Shell};
-use crate::mcp::{Bundled, Probe, Unbuilt};
-
-/// Where the tools this window does not hand the assistant yet are.
-const IN_THE_WINDOW: &str = "not open to the assistant yet; use the window for it";
+use crate::mcp::{Bundled, Probe};
 
 /// Player moves, made on the window once the call is done.
 #[derive(Default)]
@@ -243,7 +240,7 @@ impl Shell {
             Hearing { shell: self },
             Bundled,
             (
-                Unbuilt(IN_THE_WINDOW),
+                Bundled,
                 Exports::default(),
                 sandbox,
                 Asked {

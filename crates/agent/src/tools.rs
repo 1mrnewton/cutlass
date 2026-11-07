@@ -751,7 +751,7 @@ fn description(name: &str) -> &'static str {
              the followers were made to follow the path, as one undo step."
         }
         "catalog.search" => "Search bundled effect and animation ids.",
-        "package.ensure" => "Ask the host to make one package available.",
+        "package.ensure" => "Check that a package id from catalog.search is ready to use.",
         "export.start" => "Start an export. Replacing a file asks the user.",
         "sandbox.run" => {
             "Run a Rhai script on the machine and return its last value as JSON. \

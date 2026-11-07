@@ -70,7 +70,7 @@ pub(super) fn hsl_page(
     if ui
         .add_enabled(
             stored.iter().any(|value| *value != 0.0),
-            egui::Button::new(RichText::new("Reset color").size(12.0)),
+            ui::Button::new("Reset color").text_size(12.0),
         )
         .clicked()
     {
@@ -215,7 +215,7 @@ pub(super) fn curves_page(
     if ui
         .add_enabled(
             !inspection.grade.curve(channel).is_empty(),
-            egui::Button::new(RichText::new("Reset curve").size(12.0)),
+            ui::Button::new("Reset curve").text_size(12.0),
         )
         .clicked()
     {

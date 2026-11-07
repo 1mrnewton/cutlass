@@ -943,7 +943,7 @@ fn adjust_tab(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState, inspec
         ui.label(RichText::new("Auto adjust").size(13.0).color(tokens::TEXT));
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             if ui
-                .button(RichText::new("Apply").size(12.0))
+                .add(ui::Button::new("Apply").text_size(12.0))
                 .on_hover_text("Even out exposure, contrast and colour cast")
                 .clicked()
             {
@@ -1042,7 +1042,7 @@ fn cutout_page(
         ui.horizontal(|ui| {
             row_label(ui, "");
             for (name, hex) in [("Green", "#00ff00"), ("Blue", "#0000ff")] {
-                if ui.button(RichText::new(name).size(12.0)).clicked() {
+                if ui.add(ui::Button::new(name).text_size(12.0)).clicked() {
                     send(shell, |shell| shell.set_chroma(hex, strength, shadow));
                 }
             }
@@ -1095,7 +1095,7 @@ fn tracking(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState) {
                 if ui
                     .add_enabled(
                         shell.track_enabled(),
-                        egui::Button::new(RichText::new("Track").size(12.0)),
+                        ui::Button::new("Track").text_size(12.0),
                     )
                     .on_disabled_hover_text("Put the playhead on an unlocked video clip.")
                     .clicked()
@@ -1105,7 +1105,7 @@ fn tracking(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState) {
                 }
                 if shell.fix_enabled()
                     && ui
-                        .button(RichText::new("Fix frame").size(12.0))
+                        .add(ui::Button::new("Fix frame").text_size(12.0))
                         .on_hover_text(
                             "Redraw the box on a frame where the track went wrong, \
                              and track again from there.",
@@ -1201,16 +1201,15 @@ fn tracking(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState) {
             if ui
                 .add_enabled(
                     shell.track_ready(),
-                    egui::Button::new(
-                        RichText::new(if fixing { "Track from here" } else { "Track" }).size(12.0),
-                    ),
+                    ui::Button::new(if fixing { "Track from here" } else { "Track" })
+                        .text_size(12.0),
                 )
                 .on_disabled_hover_text("Draw a box and choose a clip or a mask to follow it.")
                 .clicked()
             {
                 send(shell, Shell::run_tracking);
             }
-            if ui.button(RichText::new("Cancel").size(12.0)).clicked() {
+            if ui.add(ui::Button::new("Cancel").text_size(12.0)).clicked() {
                 shell.stop_tracking();
             }
         });
@@ -1237,13 +1236,13 @@ fn select_object(shell: &mut Shell, ui: &mut Ui, inspection: &Inspection) {
     }
     ui.horizontal(|ui| {
         if picking {
-            if ui.button(RichText::new("Done").size(12.0)).clicked() {
+            if ui.add(ui::Button::new("Done").text_size(12.0)).clicked() {
                 shell.stop_picking();
             }
         } else if ui
             .add_enabled(
                 shell.pick_enabled(),
-                egui::Button::new(RichText::new("Select object").size(12.0)),
+                ui::Button::new("Select object").text_size(12.0),
             )
             .on_disabled_hover_text("Put the playhead on an unlocked video clip.")
             .clicked()
@@ -1253,7 +1252,7 @@ fn select_object(shell: &mut Shell, ui: &mut Ui, inspection: &Inspection) {
         if ui
             .add_enabled(
                 inspection.selected,
-                egui::Button::new(RichText::new("Clear").size(12.0)),
+                ui::Button::new("Clear").text_size(12.0),
             )
             .clicked()
         {
@@ -1502,7 +1501,7 @@ fn lut_section(
                 .map_or("None", |(name, _)| name.as_str());
             ui.label(RichText::new(name).size(12.0).color(Color32::WHITE));
             if ui
-                .button(RichText::new("Choose .cube…").size(12.0))
+                .add(ui::Button::new("Choose .cube…").text_size(12.0))
                 .clicked()
             {
                 state.wants_lut = true;
@@ -1627,7 +1626,7 @@ fn text_basic(
                 ("Tt", "Title case", LetterCase::Title),
             ] {
                 if ui
-                    .add(egui::Button::new(RichText::new(label).size(12.0)).fill(BOX))
+                    .add(ui::Button::new(label).text_size(12.0))
                     .on_hover_text(tip)
                     .clicked()
                 {
@@ -1698,7 +1697,7 @@ fn caption_words(
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let marked = inspection.caption_keywords.contains(&index);
                 if ui
-                    .add(egui::Button::new(RichText::new("★").size(11.0)).selected(marked))
+                    .add(ui::Button::new("★").text_size(11.0).on(marked))
                     .on_hover_text(if marked {
                         "Take the keyword mark off"
                     } else {
@@ -1715,16 +1714,13 @@ fn caption_words(
                 join = ui
                     .add_enabled(
                         index + 1 < count && next_is_word,
-                        egui::Button::new(RichText::new("+").size(11.0)),
+                        ui::Button::new("+").text_size(11.0),
                     )
                     .on_hover_text("Join with the next word")
                     .clicked();
                 let broken = cutlass_editor::breaks_before(columns, index);
                 line = ui
-                    .add_enabled(
-                        index > 0,
-                        egui::Button::new(RichText::new("↵").size(11.0)).selected(broken),
-                    )
+                    .add_enabled(index > 0, ui::Button::new("↵").text_size(11.0).on(broken))
                     .on_hover_text(if broken {
                         "Join this line to the one before"
                     } else {
@@ -2443,10 +2439,7 @@ fn later_tiles(ui: &mut Ui, names: &[&str]) {
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = Vec2::splat(6.0);
             for name in names {
-                ui.add_sized(
-                    [64.0, 48.0],
-                    egui::Button::new(RichText::new(*name).size(11.0)).fill(BOX),
-                );
+                ui.add_sized([64.0, 48.0], ui::Button::new(*name).text_size(11.0));
             }
         });
     })

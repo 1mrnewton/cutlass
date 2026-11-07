@@ -466,7 +466,7 @@ fn job_strip(shell: &mut Shell, ui: &Ui, full: Rect) {
                     };
                     ui.label(line);
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if ui.button("Cancel").clicked() {
+                        if ui.add(ui::Button::new("Cancel")).clicked() {
                             shell.cancel_job();
                         }
                     });
@@ -514,10 +514,13 @@ fn exported_strip(shell: &mut Shell, ui: &Ui, full: Rect, width: f32) {
                 ui.horizontal(|ui| {
                     ui.label(format!("Exported {name}"));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if ui.button("Close").clicked() {
+                        if ui.add(ui::Button::new("Close")).clicked() {
                             shell.forget_export();
                         }
-                        if ui.button(crate::shell::REVEAL_LABEL).clicked() {
+                        if ui
+                            .add(ui::Button::new(crate::shell::REVEAL_LABEL))
+                            .clicked()
+                        {
                             if let Err(error) = crate::shell::reveal(&path) {
                                 shell.set_notice(error.to_string());
                             }
@@ -894,13 +897,10 @@ fn project_bar(
     let response = ui
         .scope_builder(egui::UiBuilder::new().max_rect(toggle), |ui| {
             ui.add(
-                egui::Button::new(RichText::new("Assistant").size(12.0).color(if open {
-                    tokens::TEXT
-                } else {
-                    tokens::MUTED
-                }))
-                .selected(open)
-                .min_size(toggle.size()),
+                ui::Button::ghost("Assistant")
+                    .text_size(12.0)
+                    .on(open)
+                    .min_size(toggle.size()),
             )
         })
         .inner
@@ -949,10 +949,7 @@ fn menus(
     );
     ui.scope_builder(egui::UiBuilder::new().max_rect(menu), |ui| {
         ui.horizontal_centered(|ui| {
-            if ui
-                .add(egui::Button::new(RichText::new("Projects").color(tokens::FAINT)).frame(false))
-                .clicked()
-            {
+            if ui.add(ui::Button::ghost("Projects")).clicked() {
                 return_to_projects(shell, view);
             }
             ui.menu_button(RichText::new("File").color(tokens::FAINT), |ui| {
@@ -1313,7 +1310,7 @@ fn settings_window(
                     }
                     SettingsTab::Shortcuts => {
                         ui.add_space(8.0);
-                        reset = ui.button("Reset shortcuts").clicked();
+                        reset = ui.add(ui::Button::new("Reset shortcuts")).clicked();
                         ui.add_space(4.0);
                         for (action, label) in cutlass_settings::ACTIONS {
                             ui.horizontal(|ui| {
@@ -1335,13 +1332,13 @@ fn settings_window(
                                     cutlass_settings::keys_label(keys, MAC)
                                 };
                                 if ui
-                                    .add(egui::Button::new(shown).min_size(Vec2::new(110.0, 20.0)))
+                                    .add(ui::Button::new(shown).min_size(Vec2::new(110.0, 20.0)))
                                     .on_hover_text("Click, then press the new keys")
                                     .clicked()
                                 {
                                     record = Some(*action);
                                 }
-                                if !keys.is_empty() && ui.small_button("Clear").clicked() {
+                                if !keys.is_empty() && ui.add(ui::Button::new("Clear").text_size(12.0)).clicked() {
                                     clear = Some(*action);
                                 }
                             });
@@ -1405,10 +1402,10 @@ fn approval_dialog(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
                     ui.add_space(6.0);
                 }
                 ui.horizontal(|ui| {
-                    if ui.button("Allow").clicked() {
+                    if ui.add(ui::Button::new("Allow")).clicked() {
                         answer = Some(true);
                     }
-                    if ui.button("Don't allow").clicked() {
+                    if ui.add(ui::Button::new("Don't allow")).clicked() {
                         answer = Some(false);
                     }
                 });
@@ -1450,10 +1447,10 @@ fn update_dialog(shell: &mut Shell, ui: &mut Ui) {
                 }
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
-                    if ui.button("Update and restart").clicked() {
+                    if ui.add(ui::Button::primary("Update and restart")).clicked() {
                         answer = Some(true);
                     }
-                    if ui.button("Later").clicked() {
+                    if ui.add(ui::Button::new("Later")).clicked() {
                         answer = Some(false);
                     }
                 });
@@ -1501,10 +1498,10 @@ fn speech_model_dialog(shell: &mut Shell, ui: &mut Ui) {
                 ui.label(crate::shell::SPEECH_MODEL_QUESTION);
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
-                    if ui.button("Download").clicked() {
+                    if ui.add(ui::Button::primary("Download")).clicked() {
                         answer = Some(true);
                     }
-                    if ui.button("Not now").clicked() {
+                    if ui.add(ui::Button::new("Not now")).clicked() {
                         answer = Some(false);
                     }
                 });
@@ -1591,7 +1588,7 @@ fn assistant_settings(
                         }
                     }
                 });
-                if ui.small_button("Remove").clicked() {
+                if ui.add(ui::Button::new("Remove").text_size(12.0)).clicked() {
                     remove = Some(index);
                 }
             });
@@ -1627,7 +1624,7 @@ fn assistant_settings(
         settings.mcp_servers.remove(index);
         server_args.clear();
     }
-    if ui.button("Add server").clicked() {
+    if ui.add(ui::Button::new("Add server")).clicked() {
         settings.mcp_servers.push(McpServer::default());
     }
     settings_heading(ui, "Skill folders");
@@ -1635,7 +1632,7 @@ fn assistant_settings(
     for (index, folder) in settings.skill_folders.iter().enumerate() {
         ui.horizontal(|ui| {
             ui.label(RichText::new(&folder.path).color(tokens::MUTED));
-            if ui.small_button("Remove").clicked() {
+            if ui.add(ui::Button::new("Remove").text_size(12.0)).clicked() {
                 remove = Some(index);
             }
         });
@@ -1643,7 +1640,7 @@ fn assistant_settings(
     if let Some(index) = remove {
         settings.skill_folders.remove(index);
     }
-    *add_folder = ui.button("Add folder…").clicked();
+    *add_folder = ui.add(ui::Button::new("Add folder…")).clicked();
 }
 
 fn settings_heading(ui: &mut Ui, text: &str) {
@@ -1654,13 +1651,13 @@ fn settings_heading(ui: &mut Ui, text: &str) {
 
 fn edit_menu(shell: &mut Shell, ui: &mut Ui) {
     let (undo, redo) = (shell.can_undo(), shell.can_redo());
-    if ui.add_enabled(undo, egui::Button::new("Undo")).clicked() {
+    if ui.add_enabled(undo, ui::Button::new("Undo")).clicked() {
         ui.close();
         if let Err(error) = shell.undo() {
             shell.set_notice(error.to_string());
         }
     }
-    if ui.add_enabled(redo, egui::Button::new("Redo")).clicked() {
+    if ui.add_enabled(redo, ui::Button::new("Redo")).clicked() {
         ui.close();
         if let Err(error) = shell.redo() {
             shell.set_notice(error.to_string());
@@ -1873,22 +1870,10 @@ fn asset_column(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect
 
 /// Project or Free stock, over the media shelf.
 fn source_switch(ui: &mut Ui, view: &mut ViewState) {
-    ui.horizontal(|ui| {
+    ui::Segmented::show(ui, |ui| {
         for (label, stock) in [("Project", false), ("Free stock", true)] {
             let on = view.library_stock == stock;
-            let button =
-                egui::Button::new(RichText::new(label).size(tokens::TYPE_SIZE).color(if on {
-                    tokens::TEXT
-                } else {
-                    tokens::FAINT
-                }))
-                .fill(if on {
-                    tokens::ACTIVE
-                } else {
-                    tokens::PROJECT_BAR
-                })
-                .corner_radius(CornerRadius::same(tokens::ICON_RADIUS));
-            if ui.add(button).clicked() && !on {
+            if ui.add(ui::Choice::new(on, label)).clicked() && !on {
                 view.library_stock = stock;
                 view.library_picked.clear();
                 view.library_anchor = None;
@@ -3241,7 +3226,7 @@ fn section_title(ui: &mut Ui, title: &str) {
 }
 
 fn project_facts(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, width: f32) {
-    if ui.button("Modify").clicked() {
+    if ui.add(ui::Button::new("Modify")).clicked() {
         view.project_dialog = shell.project_settings();
     }
     if let Some(stored) = shell.draft().map(|draft| draft.name.clone()) {
@@ -3487,7 +3472,7 @@ fn paint_toolbar(shell: &mut Shell, ui: &mut Ui, rect: Rect) {
                 ui.spacing_mut().item_spacing.x = 4.0;
                 if shell.compound_depth() > 0 {
                     if ui
-                        .button(RichText::new("‹ Back").size(12.0))
+                        .add(ui::Button::new("‹ Back").text_size(12.0))
                         .on_hover_text("Back to the timeline the compound clip is on")
                         .clicked()
                         && let Err(error) = shell.close_compound()
@@ -6262,7 +6247,10 @@ fn export_dialog(
                     ui.label("Replace the existing file?");
                 }
                 let busy = shell.job().is_some();
-                if ui.add_enabled(!busy, egui::Button::new("Export")).clicked() {
+                if ui
+                    .add_enabled(!busy, ui::Button::primary("Export"))
+                    .clicked()
+                {
                     if view.export_path.is_empty() {
                         let name = shell
                             .draft()
@@ -6667,7 +6655,7 @@ fn project_dialog(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
                     "Free layer: stack clips with Arrange, not by their tracks",
                 ));
                 ui.add_space(8.0);
-                save = ui.button("Save").clicked();
+                save = ui.add(ui::Button::primary("Save")).clicked();
             });
         });
     });

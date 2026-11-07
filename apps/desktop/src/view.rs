@@ -9870,6 +9870,73 @@ mod tests {
     }
 
     #[test]
+    fn dragging_a_number_box_unit_scrubs_the_value_and_undoes_in_one_step() {
+        let temp = std::env::temp_dir().join(format!("cutlass-unit-scrub-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let mut draft = cutlass_model::Draft::empty("draft");
+        draft
+            .materials
+            .videos
+            .push(cutlass_model::MaterialVideo::new("movie"));
+        draft.tracks[0].segments.push(cutlass_model::Segment::new(
+            "main",
+            "movie",
+            cutlass_model::TimeRange::new(0, 2_000_000),
+        ));
+        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        shell.select(Some(SegmentId::new("main")));
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let mut frame = |shell: &mut Shell, events: Vec<egui::Event>| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: screen,
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, &mut view, None),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        frame(&mut shell, Vec::new());
+        let output = frame(&mut shell, Vec::new());
+        let before = shell.inspection().unwrap().transform_x;
+        // The unit's text is painted from its left middle.
+        let unit = text_pos(&output, "X").expect("the X unit") + Vec2::new(3.0, 7.0);
+        let press = |pos: Pos2, pressed: bool| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        frame(
+            &mut shell,
+            vec![egui::Event::PointerMoved(unit), press(unit, true)],
+        );
+        let mut seen = Vec::new();
+        for step in 1..=3 {
+            let at = unit + Vec2::new(20.0 * step as f32, 0.0);
+            frame(&mut shell, vec![egui::Event::PointerMoved(at)]);
+            seen.push(shell.inspection().unwrap().transform_x);
+        }
+        frame(&mut shell, vec![press(unit + Vec2::new(60.0, 0.0), false)]);
+        frame(&mut shell, Vec::new());
+        assert!(
+            seen.windows(2).all(|pair| pair[1] > pair[0]) && seen[0] > before,
+            "the value did not follow the drag: {before} {seen:?}"
+        );
+        shell.undo().unwrap();
+        assert_eq!(shell.inspection().unwrap().transform_x, before);
+        assert!(!shell.can_undo());
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
     fn the_animation_tab_stores_a_preset_on_the_picture() {
         let temp = std::env::temp_dir().join(format!("cutlass-animate-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&temp);

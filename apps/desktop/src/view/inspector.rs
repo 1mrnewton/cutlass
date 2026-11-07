@@ -2584,7 +2584,31 @@ fn number_box(
     } else {
         field.unit(unit)
     };
-    let response = field.show(ui).response;
+    let shown = field.scrub().show(ui);
+    let response = shown.response;
+    // A drag on the unit counts from the value at the press, one step a
+    // point. The shell joins a held drag into one undo step.
+    let start_key = format!("{key} scrub start");
+    let step_key = format!("{key} scrub step");
+    if let Some(moved) = shown.scrub {
+        let start = *state.live.entry(start_key).or_insert(stored);
+        let step = *state
+            .live
+            .entry(step_key)
+            .or_insert(if stored.fract() == 0.0 { 1.0 } else { 0.1 });
+        // Shift already makes `moved` a tenth; land on a tenth of a step
+        // then too.
+        let grain = if ui.input(|input| input.modifiers.shift) {
+            step * 0.1
+        } else {
+            step
+        };
+        let value = start + f64::from(moved) * step;
+        edited = Some((value / grain).round() * grain);
+    } else {
+        state.live.remove(&start_key);
+        state.live.remove(&step_key);
+    }
     if super::commits(ui, &response) {
         edited = text
             .trim()

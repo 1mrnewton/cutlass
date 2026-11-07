@@ -36,6 +36,7 @@ pub struct Field<'t> {
     ink: Color32,
     fill: Color32,
     focus: bool,
+    scrub: bool,
     salt: Option<IdSalt>,
 }
 
@@ -48,6 +49,10 @@ pub struct FieldResponse {
     pub committed: bool,
     /// The user left the field with Escape, to throw the edit away.
     pub cancelled: bool,
+    /// While the lead of a [`Field::scrub`] field is dragged: the points
+    /// moved sideways since the press, right positive, a tenth as many with
+    /// Shift held. `None` when it is not being dragged.
+    pub scrub: Option<f32>,
 }
 
 impl<'t> Field<'t> {
@@ -63,6 +68,7 @@ impl<'t> Field<'t> {
             ink: tokens::TEXT,
             fill: tokens::FIELD,
             focus: false,
+            scrub: false,
             salt: None,
         }
     }
@@ -119,6 +125,14 @@ impl<'t> Field<'t> {
     /// Put the caret here when the field shows, as a rename does.
     pub fn focus(mut self) -> Self {
         self.focus = true;
+        self
+    }
+
+    /// Let the icon or unit be dragged sideways to change the value, as a
+    /// number field's label is. The field reports the drag in
+    /// [`FieldResponse::scrub`]; a field with no lead has nothing to drag.
+    pub fn scrub(mut self) -> Self {
+        self.scrub = true;
         self
     }
 
@@ -194,26 +208,70 @@ impl<'t> Field<'t> {
                 .layout(Layout::left_to_right(Align::Min)),
         );
         let ink = if enabled { self.ink } else { tokens::FAINT };
-        let lead_ink = if enabled {
-            tokens::MUTED
-        } else {
-            tokens::FAINT
+        // The lead's width, known before it is drawn, so its drag area and
+        // its color are settled first.
+        let unit_font = FontId::proportional(12.0);
+        let lead_width = match &self.lead {
+            Some(Lead::Icon(_)) => row.min(14.0),
+            Some(Lead::Unit(unit)) => ui.fonts_mut(|fonts| {
+                fonts
+                    .layout_no_wrap(unit.clone(), unit_font.clone(), tokens::MUTED)
+                    .size()
+                    .x
+            }),
+            None => 0.0,
         };
-        match &self.lead {
-            Some(Lead::Icon(name)) => {
-                let size = row.min(14.0);
-                let (mark, _) = content.allocate_exact_size(Vec2::new(size, row), Sense::hover());
-                let mark = Rect::from_center_size(mark.center(), Vec2::splat(size));
-                // A missing icon leaves its gap empty rather than failing
-                // the field.
-                let _ = icons::paint(content.painter(), mark, name, lead_ink);
-                content.add_space(6.0);
+        let lead_gap = 6.0;
+        // Only lead_gap between the lead and the text.
+        content.spacing_mut().item_spacing.x = 0.0;
+        let mut scrub = None;
+        let mut lit = false;
+        if self.scrub && enabled && self.lead.is_some() {
+            // From the box's left edge to halfway into the gap after the
+            // lead, so the padding drags too.
+            let hit = Rect::from_min_max(
+                rect.left_top(),
+                egui::pos2(inner.left() + lead_width + lead_gap * 0.5, rect.bottom()),
+            );
+            let handle = ui
+                .interact(hit, id.with("scrub"), Sense::drag())
+                .on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
+            if handle.dragged() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                let moved = handle.total_drag_delta().map_or(0.0, |delta| delta.x);
+                let fine = ui.input(|input| input.modifiers.shift);
+                scrub = Some(if fine { moved * 0.1 } else { moved });
             }
-            Some(Lead::Unit(unit)) => {
-                content.label(RichText::new(unit).size(12.0).color(lead_ink));
-                content.add_space(2.0);
+            lit = handle.hovered() || handle.dragged();
+        }
+        let lead_ink = if !enabled {
+            tokens::FAINT
+        } else if lit {
+            tokens::TEXT
+        } else {
+            tokens::MUTED
+        };
+        if self.lead.is_some() {
+            let (mark, _) = content.allocate_exact_size(Vec2::new(lead_width, row), Sense::hover());
+            match &self.lead {
+                Some(Lead::Icon(name)) => {
+                    let mark = Rect::from_center_size(mark.center(), Vec2::splat(lead_width));
+                    // A missing icon leaves its gap empty rather than
+                    // failing the field.
+                    let _ = icons::paint(content.painter(), mark, name, lead_ink);
+                }
+                Some(Lead::Unit(unit)) => {
+                    content.painter().text(
+                        mark.left_center(),
+                        egui::Align2::LEFT_CENTER,
+                        unit,
+                        unit_font,
+                        lead_ink,
+                    );
+                }
+                None => {}
             }
-            None => {}
+            content.add_space(lead_gap);
         }
 
         let font = FontId::proportional(self.text_size);
@@ -261,6 +319,7 @@ impl<'t> Field<'t> {
         FieldResponse {
             committed: left && !escaped,
             cancelled: escaped,
+            scrub,
             response,
         }
     }
@@ -438,6 +497,45 @@ mod tests {
         let tall = box_shape(&run.frame(vec![]).output).rect;
         assert!(tall.height() > short.height() + 20.0, "{short:?} {tall:?}");
         assert_eq!(tall.width(), short.width());
+    }
+
+    #[test]
+    fn dragging_the_unit_scrubs_and_clicking_it_does_not_type() {
+        let ctx = egui::Context::default();
+        let mut text = "10".to_owned();
+        let mut frame = |events: Vec<Event>| {
+            let mut scrub = None;
+            let mut rect = Rect::NOTHING;
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(400.0, 300.0))),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    let shown = Field::new(&mut text)
+                        .unit("X")
+                        .scrub()
+                        .width(120.0)
+                        .show(ui);
+                    scrub = shown.scrub;
+                    rect = shown.response.rect;
+                },
+            );
+            output.textures_delta.clear();
+            (scrub, rect)
+        };
+        let (_, text_rect) = frame(vec![]);
+        let unit = pos2(text_rect.left() - 8.0, text_rect.center().y);
+        frame(vec![Event::PointerMoved(unit)]);
+        frame(vec![press(unit, true)]);
+        let (scrub, _) = frame(vec![Event::PointerMoved(unit + vec2(30.0, 0.0))]);
+        assert_eq!(scrub, Some(30.0));
+        let (scrub, _) = frame(vec![Event::PointerMoved(unit + vec2(20.0, 4.0))]);
+        assert_eq!(scrub, Some(20.0));
+        let (scrub, _) = frame(vec![press(unit + vec2(20.0, 4.0), false)]);
+        assert_eq!(scrub, None);
+        assert_eq!(text, "10");
     }
 
     #[test]

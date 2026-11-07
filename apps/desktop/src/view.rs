@@ -7835,7 +7835,9 @@ mod tests {
             ),
             (
                 "said",
-                &["Captions", "Text", "Search", "Replace", "1", "+"],
+                &[
+                    "Captions", "Text", "Search", "Replace", "Re-run", "?", "1", "+",
+                ],
                 &["Volume", "Tracking", "Font size"],
             ),
             (

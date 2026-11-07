@@ -291,27 +291,44 @@ fn caption_list(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState) {
     let rows = shell.caption_rows();
     let current = cutlass_editor::row_at(&rows, shell.playhead());
     ui.add_space(8.0);
+    let mut rerun = false;
     ui.horizontal(|ui| {
-        let query = state.fields.entry("caption search".to_owned()).or_default();
-        ui.add(
-            TextEdit::singleline(query)
-                .hint_text("Search")
-                .desired_width(ui.available_width() - 150.0),
-        );
-        later_button(ui, "Translate");
-        let open = state.open.contains(REPLACE_ROW);
-        let toggle = egui::Button::new(RichText::new("Replace").size(12.0))
-            .fill(BOX)
-            .selected(open);
-        if ui
-            .add(toggle)
-            .on_hover_text("Find and replace across every caption")
-            .clicked()
-            && !state.open.remove(REPLACE_ROW)
-        {
-            state.open.insert(REPLACE_ROW.to_owned());
-        }
+        // The tools sit at the right; the search takes what is left.
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.add(egui::Button::new(RichText::new("?").size(12.0)).fill(BOX))
+                .on_hover_text(CAPTION_LIST_HELP);
+            let open = state.open.contains(REPLACE_ROW);
+            let toggle = egui::Button::new(RichText::new("Replace").size(12.0))
+                .fill(BOX)
+                .selected(open);
+            if ui
+                .add(toggle)
+                .on_hover_text("Find and replace across every caption")
+                .clicked()
+                && !state.open.remove(REPLACE_ROW)
+            {
+                state.open.insert(REPLACE_ROW.to_owned());
+            }
+            rerun = ui
+                .add_enabled(
+                    shell.rerun_caption_enabled(),
+                    egui::Button::new(RichText::new("Re-run").size(12.0)).fill(BOX),
+                )
+                .on_hover_text("Hear this caption's clip again, keeping its look")
+                .on_disabled_hover_text("This caption was not heard from a clip on the timeline")
+                .clicked();
+            later_button(ui, "Translate");
+            let query = state.fields.entry("caption search".to_owned()).or_default();
+            ui.add(
+                TextEdit::singleline(query)
+                    .hint_text("Search")
+                    .desired_width(ui.available_width()),
+            );
+        });
     });
+    if rerun {
+        send(shell, Shell::rerun_caption);
+    }
     if state.open.contains(REPLACE_ROW) {
         replace_row(shell, ui, state);
     }
@@ -386,6 +403,11 @@ fn caption_list(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState) {
         send(shell, |shell| shell.remove_caption(&segment_id));
     }
 }
+
+/// What the Captions list's "?" says.
+const CAPTION_LIST_HELP: &str = "Search shows the captions that say it. Replace swaps what the \
+search finds in every caption, as one undo step. Re-run hears the clip a caption was heard from \
+again and keeps its look. Click a line to type over it; + adds a caption after it.";
 
 /// The Captions list's replace row opens under the search.
 const REPLACE_ROW: &str = "caption replace";

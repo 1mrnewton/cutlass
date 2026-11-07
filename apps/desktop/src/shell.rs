@@ -17999,4 +17999,67 @@ mod tests {
         let moved = desktop.stage_box(&title).unwrap();
         assert!((moved.center_y - (stage.center_y - 100.0)).abs() < 1e-6);
     }
+
+    #[test]
+    fn a_spoken_caption_is_picked_and_moved_on_the_preview() {
+        // The editor's own face, as a title card stores it.
+        let font_path = {
+            let temp = Temp::new();
+            let mut draft = Draft::empty("draft");
+            draft.canvas_config.width = 1920;
+            draft.canvas_config.height = 1080;
+            Folder::new(draft).save(&temp.path).unwrap();
+            let mut desktop = shell();
+            desktop.open_folder(&temp.path).unwrap();
+            desktop.pixel_size = 0.001;
+            let title = cutlass_editor::title_style("title:lower-third").unwrap();
+            desktop.add_title(&title.card_id()).unwrap();
+            desktop.draft().unwrap().materials.texts[0]
+                .font_path
+                .clone()
+        };
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        draft.canvas_config.width = 1920;
+        draft.canvas_config.height = 1080;
+        draft.duration = Micros(2_000_000);
+        let mut text = MaterialText::new("caption");
+        text.font_path = font_path;
+        text.font_size = 64.0;
+        text.text_color = "#FFFFFF".to_owned();
+        for (word, start, end) in [("Hello", 0, 900), ("there", 900, 2_000)] {
+            text.words.text.push(word.to_owned());
+            text.words.start_time.push(start);
+            text.words.end_time.push(end);
+        }
+        draft.materials.texts.push(text);
+        let mut row = Track::main("captions");
+        row.kind = TrackType::Text;
+        row.flag = cutlass_model::TrackFlag::TextSubtitle;
+        let mut caption = Segment::new("caption", "caption", TimeRange::new(0, 2_000_000));
+        caption.render_index = 14_000;
+        caption.clip.transform = cutlass_model::Point::new(0.0, -0.7);
+        row.segments.push(caption);
+        draft.tracks.push(row);
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.seek(Micros(500_000));
+        let id = SegmentId::new("caption");
+        let stage = desktop.stage_box(&id).expect("a spoken caption has a box");
+        assert!(stage.width > 0.0 && stage.height > 0.0);
+        // Low on the canvas, where its place puts it.
+        assert!((stage.center_y - 1080.0 * 0.85).abs() < 1e-6);
+        assert_eq!(
+            desktop.stage_pick(stage.center_x, stage.center_y),
+            Some(id.clone())
+        );
+        desktop.stage_begin(&id).unwrap();
+        desktop.hold_edits(true);
+        desktop.stage_move(0.0, -200.0, 1.0, 0.0).unwrap();
+        desktop.hold_edits(false);
+        desktop.stage_end();
+        let moved = desktop.stage_box(&id).unwrap();
+        assert!((moved.center_y - (stage.center_y - 200.0)).abs() < 1e-6);
+    }
 }

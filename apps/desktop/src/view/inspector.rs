@@ -254,11 +254,6 @@ fn text_panel(
             "AI avatars",
         ]
     };
-    // "Apply to all main captions" has its own row over the tabs, the
-    // same on every tab and page.
-    if caption {
-        all_captions_box(shell, ui);
-    }
     let tab = state.tab;
     paid_tabs(ui, labels, &["AI avatars"], &mut state.tab);
     if tab != state.tab {
@@ -274,6 +269,12 @@ fn text_panel(
                 &["Basic", "Bubble", "Effects"]
             };
             pages(ui, names, &mut state.page);
+            // "Apply to all main captions" has its own row under the pages,
+            // the same on each: a change on any page can style every
+            // caption.
+            if caption {
+                all_captions_box(shell, ui);
+            }
             match names.get(state.page).copied().unwrap_or_default() {
                 "Basic" => {
                     text_basic(shell, ui, state, inspection, caption);
@@ -2773,6 +2774,7 @@ fn all_captions_box(shell: &mut Shell, ui: &mut Ui) {
     if !shell.on_main_captions() {
         return;
     }
+    ui.add_space(8.0);
     let mut all = shell.all_captions();
     if ui
         .add(ui::Check::new(&mut all, "Apply to all main captions"))
@@ -2781,7 +2783,7 @@ fn all_captions_box(shell: &mut Shell, ui: &mut Ui) {
     {
         shell.set_all_captions(all);
     }
-    ui.add_space(8.0);
+    ui.separator();
 }
 
 /// The caption styles: Plain, then each style, the caption's own

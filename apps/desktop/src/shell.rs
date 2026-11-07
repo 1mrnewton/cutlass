@@ -798,6 +798,9 @@ pub struct Shell {
     notice_since: Instant,
     /// The preview canvas shows black under the picture, or nothing.
     preview_black: bool,
+    /// A look or place change on a caption on a subtitle row styles every
+    /// caption on that row, as "Apply to all main captions" says.
+    all_captions: bool,
     next_id: u64,
     /// The local speech model, loaded on the first transcript that can hear a clip.
     speech: RefCell<Option<ParakeetUnified>>,
@@ -916,6 +919,7 @@ impl Shell {
             notice_since: Instant::now(),
             preview_black: true,
             saved: None,
+            all_captions: true,
             next_id: 0,
             speech: RefCell::new(None),
             vision: None,
@@ -7045,7 +7049,37 @@ impl Shell {
     }
 
     fn apply(&mut self, request: Request) -> Result<(), ShellError> {
+        if self.all_captions
+            && let Some(draft) = self.draft()
+        {
+            let every = cutlass_editor::for_every_caption(draft, &request);
+            return self.apply_requests(&every);
+        }
         self.apply_requests(std::slice::from_ref(&request))
+    }
+
+    /// Whether a caption's look and place changes style every caption on
+    /// its subtitle row. On at first.
+    #[must_use]
+    pub fn all_captions(&self) -> bool {
+        self.all_captions
+    }
+
+    /// Style every caption on a subtitle row together, or one at a time.
+    pub fn set_all_captions(&mut self, on: bool) {
+        self.all_captions = on;
+    }
+
+    /// The selected clip is a caption on a subtitle row, where "Apply to
+    /// all main captions" reaches.
+    #[must_use]
+    pub fn on_main_captions(&self) -> bool {
+        match (self.draft(), self.selected()) {
+            (Some(draft), Some(segment_id)) => {
+                cutlass_editor::main_caption_lane(draft, segment_id).is_some()
+            }
+            _ => false,
+        }
     }
 
     fn apply_requests(&mut self, requests: &[Request]) -> Result<(), ShellError> {

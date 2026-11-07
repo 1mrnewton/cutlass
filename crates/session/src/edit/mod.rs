@@ -51,7 +51,7 @@ pub use place::place;
 pub use text::{MAX_CAPTION_STAGGER_MS, NEW_TEXT_SIZE};
 pub use track::{lane_fits, new_lane_index};
 pub use trim::trim;
-pub use words::set_words;
+pub use words::{CAPTION_KIND, set_words};
 
 /// Why one request did not change the draft.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -221,6 +221,8 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             material_id,
             words.clone(),
         ),
+        Request::AddSubtitles { track_id, cues } => words::add_subtitles(draft, track_id, cues),
+        Request::InsertCaption { like, cue } => words::insert_caption(draft, like, cue),
         Request::ExtractAudio {
             source_id,
             track_id,

@@ -669,6 +669,31 @@ impl PhoneHost {
         Ok(segment_id)
     }
 
+    /// Bring in the subtitle file `file_name` (SRT or LRC, by its
+    /// extension), whose text the phone read, as captions on a new subtitle
+    /// lane: one undo step. A file that does not read is refused with why.
+    pub fn import_subtitles(&mut self, file_name: &str, text: &str) -> Result<(), FfiError> {
+        let refused = |reason: String| FfiError::Refused { reason };
+        let format = cutlass_editor::SubtitleFormat::of_file(file_name)
+            .ok_or_else(|| refused(format!("{file_name} is not a subtitle file")))?;
+        let mut taken = media::ids(self.draft());
+        let mut next = std::collections::HashMap::<String, u64>::new();
+        let mut fresh = |prefix: &str| {
+            let n = next.entry(prefix.to_owned()).or_insert(1);
+            loop {
+                let id = format!("{prefix}-{n}");
+                *n += 1;
+                if taken.insert(id.clone()) {
+                    return id;
+                }
+            }
+        };
+        let request = cutlass_editor::subtitle_request(text, format, &mut fresh)
+            .map_err(|miss| refused(miss.to_string()))?;
+        self.apply(self.revision(), &[request])?;
+        Ok(())
+    }
+
     /// Change what `segment_id` says, as one undo step. Blank words are
     /// refused; delete the clip instead.
     pub fn set_text(&mut self, segment_id: &SegmentId, content: &str) -> Result<(), FfiError> {
@@ -1752,6 +1777,39 @@ mod tests {
             assert!(!effect.name.is_empty());
             assert!(folder.join(&effect.preview).is_file(), "{}", effect.preview);
         }
+    }
+
+    #[test]
+    fn a_subtitle_file_lands_as_captions_and_a_bad_one_is_refused() {
+        let temp = Temp::new();
+        let roots = Roots::new(&temp);
+        let mut host = roots.create();
+        let before = host.draft().clone();
+        let error = host.import_subtitles("talk.txt", "").unwrap_err();
+        assert!(matches!(error, FfiError::Refused { .. }), "{error:?}");
+        let error = host.import_subtitles("talk.srt", "1\nhello\n").unwrap_err();
+        let FfiError::Refused { reason } = error else {
+            panic!("not refused");
+        };
+        assert!(reason.contains("line 2"), "{reason}");
+        assert_eq!(host.draft(), &before);
+
+        let srt =
+            "1\n00:00:00,000 --> 00:00:01,000\nHello\n\n2\n00:00:01,000 --> 00:00:02,000\nagain\n";
+        host.import_subtitles("talk.SRT", srt).unwrap();
+        host.import_subtitles("song.lrc", "[00:00.50]la\n").unwrap();
+        let lanes: Vec<_> = host
+            .draft()
+            .tracks
+            .iter()
+            .filter(|track| track.flag == cutlass_model::TrackFlag::TextSubtitle)
+            .map(|track| track.segments.len())
+            .collect();
+        assert_eq!(lanes.len(), 2);
+        assert!(lanes.contains(&2) && lanes.contains(&1));
+        host.undo().unwrap();
+        host.undo().unwrap();
+        assert_eq!(host.draft(), &before);
     }
 
     #[test]

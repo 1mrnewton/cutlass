@@ -2,7 +2,8 @@ use serde::{Deserialize, Serialize};
 
 use cutlass_model::{
     AnimType, CommonKeyframeGroup, Crop, FreezeInfo, MaterialAudio, MaterialId, MaterialTransition,
-    MaterialVideo, Micros, Segment, SegmentId, SpeedPoint, TrackId, TrackType, WordColumns,
+    MaterialVideo, Micros, Segment, SegmentId, SpeedPoint, TimeRange, TrackId, TrackType,
+    WordColumns,
 };
 
 /// A media record stored in the library. A segment places it later.
@@ -13,6 +14,17 @@ pub enum ImportedMedium {
     Video(Box<MaterialVideo>),
     /// A sound. Its track type is supplied by the import, not by lane category.
     Audio(Box<MaterialAudio>),
+}
+
+/// One timed caption a subtitle file brings in.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SubtitleCue {
+    pub segment_id: SegmentId,
+    pub material_id: MaterialId,
+    /// Where the caption sits on the timeline, in microseconds.
+    pub target: TimeRange,
+    /// Word times are milliseconds from the start of `target`.
+    pub words: WordColumns,
 }
 
 /// Which edge of a segment a trim moves.
@@ -82,6 +94,21 @@ pub enum Request {
         material_id: MaterialId,
         words: WordColumns,
     },
+    /// Place subtitle cues as captions on a new text lane `track_id`.
+    ///
+    /// The lane is flagged as subtitles and each cue becomes a caption clip
+    /// with its own words. An existing `track_id`, no cues, or cues that
+    /// overlap are refused, and the draft stays as it was.
+    AddSubtitles {
+        track_id: TrackId,
+        cues: Vec<SubtitleCue>,
+    },
+    /// Place one caption on the lane of caption `like`, looking like it.
+    ///
+    /// The new caption copies `like`'s text look and its place on the
+    /// canvas, then takes `cue`'s words. `like` must be a caption on an
+    /// unlocked text lane, and the cue must fit beside the lane's clips.
+    InsertCaption { like: SegmentId, cue: SubtitleCue },
     /// Place the picture's sound on an audio clip linked to `source_id`.
     ///
     /// `track_id` is created when it is missing. The picture stays where it is.

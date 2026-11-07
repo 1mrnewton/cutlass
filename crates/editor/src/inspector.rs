@@ -109,7 +109,7 @@ pub fn panel_of(draft: &Draft, track: &Track, segment: &Segment) -> Panel {
         Some(MaterialRef::Draft(_)) => picture(false),
         Some(MaterialRef::Color(_)) => picture(true),
         Some(MaterialRef::Audio(_)) => Panel::Audio,
-        Some(MaterialRef::Text(text)) if caption(track, text) => Panel::Caption,
+        Some(MaterialRef::Text(text)) if is_caption(track, text) => Panel::Caption,
         Some(MaterialRef::Text(_)) => Panel::Text,
         Some(MaterialRef::VideoEffect(_) | MaterialRef::Plugin(_)) => Panel::Effect,
         _ => match track.kind {
@@ -132,7 +132,10 @@ pub fn panel_of(draft: &Draft, track: &Track, segment: &Segment) -> Panel {
     }
 }
 
-fn caption(track: &Track, text: &MaterialText) -> bool {
+/// True when `text` on `track` is a caption: its row is a caption or
+/// lyric row, its kind says so, or it has recognized words.
+#[must_use]
+pub fn is_caption(track: &Track, text: &MaterialText) -> bool {
     matches!(
         track.flag,
         TrackFlag::TextSubtitle
@@ -335,6 +338,25 @@ mod tests {
             panel_of(&draft, &row, &segment),
             Panel::Main { still: false }
         );
+    }
+
+    #[test]
+    fn a_caption_without_words_still_opens_the_caption_panel() {
+        let mut draft = Draft::empty("D");
+        let mut line = MaterialText::new("line");
+        line.kind = "subtitle".to_owned();
+        draft.materials.texts.push(line);
+        let mut title = MaterialText::new("title");
+        title.kind = "text".to_owned();
+        draft.materials.texts.push(title);
+        let mut row = Track::main("captions");
+        row.kind = TrackType::Text;
+        let caption = Segment::new("a", "line", cutlass_model::TimeRange::new(0, 1));
+        let plain = Segment::new("b", "title", cutlass_model::TimeRange::new(0, 1));
+        assert_eq!(panel_of(&draft, &row, &caption), Panel::Caption);
+        assert_eq!(panel_of(&draft, &row, &plain), Panel::Text);
+        row.flag = TrackFlag::TextSubtitle;
+        assert_eq!(panel_of(&draft, &row, &plain), Panel::Caption);
     }
 
     #[test]

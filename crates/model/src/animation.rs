@@ -178,11 +178,9 @@ pub fn letters_at(draft: &Draft, segment: &Segment, time: Micros) -> Vec<LetterS
     };
     let offset = time.0.saturating_sub(segment.target.start.0);
     let length = segment.target.duration.0;
-    group
-        .animations
-        .iter()
-        .filter_map(|animation| {
-            let preset = animation_preset(animation)?;
+    played(group)
+        .into_iter()
+        .filter_map(|(animation, preset)| {
             let Motion::Letters(motion) = preset.motion else {
                 return None;
             };
@@ -419,6 +417,37 @@ pub fn animation_preset(animation: &StickerAnimation) -> Option<&'static Animati
         .find(|preset| preset.resource_id == animation.resource_id && preset.kind == kind)
 }
 
+/// True when the row names a package: a path or a resource id.
+fn names_a_package(animation: &StickerAnimation) -> bool {
+    !animation.path.is_empty() || !animation.resource_id.is_empty()
+}
+
+/// The rows that play, each with its preset, in the order stored.
+///
+/// A caption animation that names a package takes the loop slot with its own
+/// start and duration, and clears the in, out, and loop rows. It plays the
+/// loop preset its resource id names; a package that is not one of ours
+/// still clears the others and draws nothing here.
+fn played(group: &MaterialAnimations) -> Vec<(&StickerAnimation, &'static AnimationPreset)> {
+    let caption = group.animations.iter().find(|animation| {
+        animation.anim_type() == Some(AnimType::Caption) && names_a_package(animation)
+    });
+    if let Some(caption) = caption {
+        return ANIMATION_PRESETS
+            .iter()
+            .find(|preset| {
+                preset.kind == AnimType::Loop && preset.resource_id == caption.resource_id
+            })
+            .map(|preset| vec![(caption, preset)])
+            .unwrap_or_default();
+    }
+    group
+        .animations
+        .iter()
+        .filter_map(|animation| Some((animation, animation_preset(animation)?)))
+        .collect()
+}
+
 /// The clip's animation row: the first `material_animations` row its
 /// `extra_material_refs` name.
 #[must_use]
@@ -442,8 +471,8 @@ pub fn animated_at(draft: &Draft, segment: &Segment, time: Micros) -> Option<(Cl
     if let Some(group) = segment_animations(draft, segment) {
         let offset = time.0.saturating_sub(segment.target.start.0);
         let length = segment.target.duration.0;
-        for animation in &group.animations {
-            animate(&mut clip, &mut uniform, animation, offset, length);
+        for (animation, preset) in played(group) {
+            animate(&mut clip, &mut uniform, animation, preset, offset, length);
         }
     }
     Some((clip, uniform))
@@ -456,12 +485,10 @@ fn animate(
     clip: &mut Clip,
     uniform: &mut UniformScale,
     animation: &StickerAnimation,
+    preset: &AnimationPreset,
     offset: i64,
     length: i64,
 ) {
-    let Some(preset) = animation_preset(animation) else {
-        return;
-    };
     let Some(along) = progress(preset, animation, offset, length) else {
         return;
     };
@@ -585,6 +612,123 @@ mod tests {
             duration: Some(Micros(duration)),
             ..StickerAnimation::default()
         }
+    }
+
+    /// One row moved through its own preset.
+    fn animate(
+        clip: &mut Clip,
+        uniform: &mut UniformScale,
+        animation: &StickerAnimation,
+        offset: i64,
+        length: i64,
+    ) {
+        let preset = animation_preset(animation).expect("preset");
+        super::animate(clip, uniform, animation, preset, offset, length);
+    }
+
+    fn caption(resource_id: &str, start: i64, duration: i64) -> StickerAnimation {
+        StickerAnimation {
+            kind: "caption".into(),
+            resource_id: resource_id.into(),
+            start: Micros(start),
+            duration: Some(Micros(duration)),
+            ..StickerAnimation::default()
+        }
+    }
+
+    fn group(animations: Vec<StickerAnimation>) -> MaterialAnimations {
+        MaterialAnimations {
+            animations,
+            ..MaterialAnimations::default()
+        }
+    }
+
+    fn played_ids(group: &MaterialAnimations) -> Vec<(String, AnimType)> {
+        played(group)
+            .into_iter()
+            .map(|(animation, preset)| (animation.kind.clone(), preset.kind))
+            .collect()
+    }
+
+    #[test]
+    fn a_caption_clears_in_out_and_loop_and_plays_in_the_loop_slot() {
+        let pulse = by("Pulse", AnimType::Loop);
+        let rows = group(vec![
+            stored(by("Fade In", AnimType::In), 0, 500),
+            stored(by("Pop", AnimType::Out), 0, 500),
+            stored(by("Swing", AnimType::Loop), 0, 1_000),
+            caption(pulse.resource_id, 0, 2_000),
+        ]);
+        assert_eq!(played_ids(&rows), [("caption".to_owned(), AnimType::Loop)]);
+        // Its own duration sets the round: half of 2000 is the peak.
+        let (row, preset) = played(&rows)[0];
+        let at = |offset| {
+            let mut clip = Clip::default();
+            let mut uniform = UniformScale::default();
+            super::animate(&mut clip, &mut uniform, row, preset, offset, 10_000);
+            if uniform.on {
+                uniform.value
+            } else {
+                clip.scale.x
+            }
+        };
+        assert!((at(1_000) - 1.1).abs() < 1e-9);
+        assert!((at(5_000) - 1.1).abs() < 1e-9);
+        assert!((at(2_000) - 1.0).abs() < 1e-9);
+        // At the clip's start the fade in would have hidden it.
+        let mut clip = Clip::default();
+        let mut uniform = UniformScale::default();
+        super::animate(&mut clip, &mut uniform, row, preset, 0, 10_000);
+        assert_eq!(clip.alpha, 1.0);
+    }
+
+    #[test]
+    fn a_clip_with_a_caption_animation_skips_its_fade_in_at_any_time() {
+        let mut draft = Draft::empty("D");
+        let mut rows = group(vec![
+            stored(by("Fade In", AnimType::In), 0, 1_000_000),
+            caption(by("Float", AnimType::Loop).resource_id, 0, 2_000_000),
+        ]);
+        rows.id = "moves".into();
+        draft.materials.material_animations.push(rows);
+        let mut segment = Segment::new("line", "line", crate::TimeRange::new(0, 4_000_000));
+        segment.extra_material_refs.push("moves".into());
+        let (clip, _) = animated_at(&draft, &segment, Micros(0)).expect("clip");
+        assert_eq!(clip.alpha, 1.0);
+        let (clip, _) = animated_at(&draft, &segment, Micros(500_000)).expect("clip");
+        assert!((clip.transform.y - 0.04).abs() < 1e-9);
+        assert!(letters_at(&draft, &segment, Micros(0)).is_empty());
+    }
+
+    #[test]
+    fn a_caption_package_we_do_not_have_still_clears_the_others() {
+        let rows = group(vec![
+            stored(by("Fade In", AnimType::In), 0, 500),
+            caption("7000000000000000001", 0, 2_000),
+        ]);
+        assert!(played(&rows).is_empty());
+        // A letter animation is an in or out row, so it goes too.
+        let rows = group(vec![
+            stored(by("Pop", AnimType::In), 0, 500),
+            caption("7000000000000000001", 0, 2_000),
+        ]);
+        assert!(played(&rows).is_empty());
+    }
+
+    #[test]
+    fn an_empty_caption_row_leaves_in_and_out_playing() {
+        let rows = group(vec![
+            stored(by("Fade In", AnimType::In), 0, 500),
+            caption("", 0, 2_000),
+            stored(by("Fade Out", AnimType::Out), 0, 500),
+        ]);
+        assert_eq!(
+            played_ids(&rows),
+            [
+                ("in".to_owned(), AnimType::In),
+                ("out".to_owned(), AnimType::Out)
+            ]
+        );
     }
 
     fn by(name: &str, kind: AnimType) -> &'static AnimationPreset {

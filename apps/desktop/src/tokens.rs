@@ -71,6 +71,8 @@ pub const CHOICE_HOVER: Color32 = Color32::from_rgb(0x30, 0x30, 0x30);
 /// A switch's track when off, and when off and hovered.
 pub const SWITCH_OFF: Color32 = Color32::from_rgb(0x3a, 0x3a, 0x3a);
 pub const SWITCH_OFF_HOVER: Color32 = Color32::from_rgb(0x48, 0x48, 0x48);
+/// A slider's rail behind the filled part.
+pub const SLIDER_TRACK: Color32 = Color32::from_rgb(0x3a, 0x3a, 0x3a);
 pub const MARKED: Color32 = Color32::from_rgba_premultiplied(0x00, 0x32, 0x36, 0x40);
 
 pub const TYPE_SIZE: f32 = 13.0;
@@ -131,6 +133,10 @@ pub const SWITCH_HEIGHT: f32 = 18.0;
 pub const SWITCH_KNOB_INSET: f32 = 2.0;
 /// Seconds for a switch's knob to slide across.
 pub const SWITCH_SLIDE: f32 = 0.12;
+/// A slider's row height, rail thickness, and knob radius.
+pub const SLIDER_HEIGHT: f32 = 26.0;
+pub const SLIDER_RAIL: f32 = 4.0;
+pub const SLIDER_KNOB: f32 = 6.0;
 pub const HEAD_HEIGHT: f32 = 38.0;
 pub const SPLIT: f32 = 6.0;
 pub const HAIRLINE: f32 = 1.0;

@@ -2011,7 +2011,11 @@ impl Shell {
         else {
             return time;
         };
-        if time.0 - start.0 < next.0 - time.0 { start } else { next }
+        if time.0 - start.0 < next.0 - time.0 {
+            start
+        } else {
+            next
+        }
     }
 
     /// The start of the project frame `time` falls in.
@@ -8292,6 +8296,32 @@ mod tests {
     pub(super) fn shell() -> Shell {
         let (decoders, encoders) = crate::register_codecs();
         Shell::new(decoders, encoders, Settings::default())
+    }
+
+    #[test]
+    fn the_side_panels_stop_at_their_minimum_widths() {
+        use crate::tokens;
+        let mut desktop = shell();
+        let window = 1440.0;
+        desktop.drag_library(-2000.0, window);
+        desktop.drag_inspector(2000.0, window);
+        assert_eq!(desktop.library_width(), tokens::LIBRARY_MIN);
+        assert_eq!(desktop.inspector_width(), tokens::INSPECTOR_MIN);
+        // Wide drags stop where the preview keeps its minimum.
+        desktop.drag_library(2000.0, window);
+        desktop.drag_inspector(-2000.0, window);
+        assert!(desktop.preview_width(window) >= tokens::PREVIEW_MIN_WIDTH - 0.5);
+        // The narrowest window fits both panels at their minimum and the
+        // preview, and the defaults sit at or above the minimums.
+        let narrowest = tokens::LIBRARY_MIN
+            + tokens::INSPECTOR_MIN
+            + tokens::SPLIT * 2.0
+            + tokens::PREVIEW_MIN_WIDTH;
+        assert!(narrowest <= tokens::MIN_WINDOW_WIDTH);
+        assert!(tokens::LIBRARY_WIDTH >= tokens::LIBRARY_MIN);
+        assert!(tokens::INSPECTOR_WIDTH >= tokens::INSPECTOR_MIN);
+        let fresh = shell();
+        assert!(fresh.preview_width(tokens::MIN_WINDOW_WIDTH) >= tokens::PREVIEW_MIN_WIDTH);
     }
 
     /// Four seconds of a 3840x2160 60 fps BT.2020 HLG movie, repainted at

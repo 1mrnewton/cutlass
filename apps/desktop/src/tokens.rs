@@ -76,11 +76,13 @@ pub const TRANSPORT_HEIGHT: f32 = 52.0;
 pub const ICON_BUTTON_SIZE: f32 = 28.0;
 pub const WINDOW_BUTTON: f32 = 12.0;
 
-pub const LIBRARY_WIDTH: f32 = 368.0;
-pub const INSPECTOR_WIDTH: f32 = 300.0;
+pub const LIBRARY_WIDTH: f32 = 380.0;
+pub const INSPECTOR_WIDTH: f32 = 380.0;
 pub const TIMELINE_HEIGHT: f32 = 420.0;
-pub const LIBRARY_MIN: f32 = 260.0;
-pub const INSPECTOR_MIN: f32 = 240.0;
+/// The narrowest the side panels go: the library keeps two media cards a
+/// row, and the inspector keeps a label, a slider track and a value box.
+pub const LIBRARY_MIN: f32 = 320.0;
+pub const INSPECTOR_MIN: f32 = 340.0;
 pub const TIMELINE_MIN: f32 = 160.0;
 pub const PREVIEW_MIN_WIDTH: f32 = 320.0;
 pub const PREVIEW_MIN_HEIGHT: f32 = 268.0;

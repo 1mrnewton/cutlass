@@ -185,8 +185,12 @@ pub struct ViewState {
     preview_scale: f64,
     /// Where the canvas was last drawn.
     preview_canvas: Option<Rect>,
+    /// The part of the preview the canvas was last drawn inside.
+    preview_frame: Rect,
     /// Where a tracking box drag started on the canvas, in canvas pixels.
     track_drag: Option<(f64, f64)>,
+    /// A move, scale or turn of a clip on the preview in flight.
+    stage_drag: Option<StageDrag>,
     /// The action-safe and title-safe frames are drawn over the canvas.
     preview_guides: bool,
     /// The preview fills the screen.
@@ -268,7 +272,9 @@ impl Default for ViewState {
             preview_pan: Vec2::ZERO,
             preview_scale: 1.0,
             preview_canvas: None,
+            preview_frame: Rect::NOTHING,
             track_drag: None,
+            stage_drag: None,
             preview_guides: false,
             preview_full: false,
             lane_heights: std::collections::HashMap::new(),
@@ -2804,6 +2810,7 @@ fn preview_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rec
         view.preview_pan = Vec2::ZERO;
     }
     view.preview_canvas = None;
+    view.preview_frame = frame;
     let mut place = |size: Vec2| {
         let size = canvas.unwrap_or(size);
         let (rect, scale) = placed_canvas(frame, size, view.preview_zoom, &mut view.preview_pan);
@@ -2864,10 +2871,317 @@ fn preview_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rec
         paint_safe_areas(ui, frame, canvas);
     }
     if let (Some(placed), Some(size)) = (view.preview_canvas, canvas) {
+        if shell.picking().is_none() && shell.tracking().is_none() {
+            stage_layer(shell, ui, view, frame, placed, size);
+        } else {
+            view.stage_drag = None;
+        }
         pick_layer(shell, ui, frame, placed, size);
         track_layer(shell, ui, view, frame, placed, size);
     }
     transport_bar(shell, ui, view, transport);
+}
+
+/// What a drag on the preview grabbed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StageGrip {
+    /// The clip's body: the drag moves it.
+    Move,
+    /// A corner: the drag scales it about its centre.
+    Scale,
+    /// The knob below its bottom edge: the drag turns it about its centre.
+    Turn,
+    /// Nothing under the press: a zoomed canvas pans.
+    Pan,
+}
+
+/// A preview drag: what it grabbed, and where it was pressed and the
+/// clip's centre then, in canvas pixels.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct StageDrag {
+    grip: StageGrip,
+    start: (f64, f64),
+    center: (f64, f64),
+}
+
+/// How near, in screen points, a press has to be to a handle to grab it.
+const STAGE_HANDLE_REACH: f32 = 9.0;
+/// How far past the bottom edge, in screen points, the turn knob sits.
+const STAGE_TURN_OFFSET: f32 = 26.0;
+
+/// The selected clip's box on screen: its four corners after the turn, top
+/// left first, the middle of its bottom edge, and the turn knob below that.
+/// When the knob would fall outside `frame`, as on a clip that fills the
+/// canvas, it sits just inside the bottom edge instead.
+fn stage_handles(
+    stage: &cutlass_editor::StageBox,
+    placed: Rect,
+    size: Vec2,
+    frame: Rect,
+) -> ([Pos2; 4], Pos2, Pos2) {
+    let corners = stage
+        .corners()
+        .map(|corner| screen_point(placed, size, corner));
+    let bottom = corners[3] + (corners[2] - corners[3]) / 2.0;
+    let center = screen_point(placed, size, (stage.center_x, stage.center_y));
+    // Down, in the box's own turned frame.
+    let down = (bottom - center).normalized();
+    let down = if down.is_finite() && down != Vec2::ZERO {
+        down
+    } else {
+        let (sin, cos) = (stage.turn as f32).to_radians().sin_cos();
+        Vec2::new(-sin, cos)
+    };
+    let outside = bottom + down * STAGE_TURN_OFFSET;
+    let knob = if frame.shrink(STAGE_HANDLE_REACH).contains(outside) {
+        outside
+    } else {
+        bottom - down * STAGE_TURN_OFFSET
+    };
+    (corners, bottom, knob)
+}
+
+/// What a press at screen point `at` grabs on the selected clip's box.
+fn stage_grip(
+    stage: Option<&cutlass_editor::StageBox>,
+    placed: Rect,
+    size: Vec2,
+    frame: Rect,
+    at: Pos2,
+) -> Option<StageGrip> {
+    let stage = stage?;
+    let (corners, _, knob) = stage_handles(stage, placed, size, frame);
+    if at.distance(knob) <= STAGE_HANDLE_REACH {
+        return Some(StageGrip::Turn);
+    }
+    if corners
+        .iter()
+        .any(|corner| at.distance(*corner) <= STAGE_HANDLE_REACH)
+    {
+        return Some(StageGrip::Scale);
+    }
+    let (x, y) = canvas_pixel(placed, size, at);
+    stage.contains(x, y).then_some(StageGrip::Move)
+}
+
+/// The angle, in degrees clockwise on screen, of `point` seen from `center`.
+fn screen_angle(center: (f64, f64), point: (f64, f64)) -> f64 {
+    (point.1 - center.1).atan2(point.0 - center.0).to_degrees()
+}
+
+/// Pictures and titles on the preview: a hover outlines the clip under the
+/// pointer, a click selects it, and a drag moves it. The selected clip's
+/// corners scale it and the knob below it turns it. Snaps show the canvas
+/// centre lines. Each drag is one undo step.
+fn stage_layer(
+    shell: &mut Shell,
+    ui: &mut Ui,
+    view: &mut ViewState,
+    frame: Rect,
+    placed: Rect,
+    size: Vec2,
+) {
+    let area = placed
+        .intersect(frame)
+        .expand(STAGE_TURN_OFFSET + STAGE_HANDLE_REACH);
+    let response = ui.interact(
+        area.intersect(frame),
+        ui.scope_id().with("preview-stage"),
+        Sense::click_and_drag(),
+    );
+    let selected = shell
+        .selected()
+        .cloned()
+        .and_then(|id| shell.stage_box(&id));
+    let at_canvas = |pos: Pos2| canvas_pixel(placed, size, pos);
+    if response.drag_started() {
+        let press = ui
+            .input(|input| input.pointer.press_origin())
+            .or(response.interact_pointer_pos());
+        view.stage_drag = press.and_then(|press| {
+            let start = at_canvas(press);
+            let grip = stage_grip(selected.as_ref(), placed, size, frame, press);
+            // A handle of the selected clip wins; then the topmost clip under
+            // the press, which may sit over the selected one.
+            let target = match (grip, selected.as_ref()) {
+                (Some(grip @ (StageGrip::Scale | StageGrip::Turn)), Some(stage)) => {
+                    Some((stage.segment_id.clone(), grip))
+                }
+                (grip, stage) => shell
+                    .stage_pick(start.0, start.1)
+                    .or_else(|| grip.and(stage.map(|stage| stage.segment_id.clone())))
+                    .map(|id| (id, StageGrip::Move)),
+            };
+            let Some((id, grip)) = target else {
+                return Some(StageDrag {
+                    grip: StageGrip::Pan,
+                    start,
+                    center: start,
+                });
+            };
+            if shell.playing() {
+                shell.pause();
+            }
+            match shell.stage_begin(&id) {
+                Ok(()) => {
+                    let stage = shell.stage_box(&id)?;
+                    Some(StageDrag {
+                        grip,
+                        start,
+                        center: (stage.center_x, stage.center_y),
+                    })
+                }
+                Err(error) => {
+                    shell.select(Some(id));
+                    shell.notice_error(&error);
+                    None
+                }
+            }
+        });
+    }
+    if let Some(drag) = view.stage_drag
+        && response.dragged()
+    {
+        if drag.grip == StageGrip::Pan {
+            if view.preview_zoom.is_some() {
+                view.preview_pan += response.drag_delta();
+            }
+        } else if let Some(pos) = response.interact_pointer_pos() {
+            let now = at_canvas(pos);
+            let (shift, pinch, turn) = match drag.grip {
+                StageGrip::Move => ((now.0 - drag.start.0, now.1 - drag.start.1), 1.0, 0.0),
+                StageGrip::Scale => {
+                    let from = (drag.start.0 - drag.center.0).hypot(drag.start.1 - drag.center.1);
+                    let to = (now.0 - drag.center.0).hypot(now.1 - drag.center.1);
+                    let pinch = if from > f64::EPSILON { to / from } else { 1.0 };
+                    ((0.0, 0.0), pinch, 0.0)
+                }
+                StageGrip::Turn => {
+                    let turn =
+                        screen_angle(drag.center, now) - screen_angle(drag.center, drag.start);
+                    ((0.0, 0.0), 1.0, turn)
+                }
+                StageGrip::Pan => ((0.0, 0.0), 1.0, 0.0),
+            };
+            if let Err(error) = shell.stage_move(shift.0, shift.1, pinch, turn) {
+                shell.notice_error(&error);
+                shell.stage_end();
+                view.stage_drag = None;
+            }
+        }
+    }
+    if response.drag_stopped() || (view.stage_drag.is_some() && !response.dragged()) {
+        shell.stage_end();
+        view.stage_drag = None;
+    }
+    if response.clicked()
+        && let Some(pos) = response.interact_pointer_pos()
+    {
+        let (x, y) = at_canvas(pos);
+        let on_handle = matches!(
+            stage_grip(selected.as_ref(), placed, size, frame, pos),
+            Some(StageGrip::Scale | StageGrip::Turn)
+        );
+        let picked = shell.stage_pick(x, y);
+        let shift = ui.input(|input| input.modifiers.shift || input.modifiers.command);
+        match picked {
+            Some(id) if shift => shell.toggle_selected(id),
+            // A click on the selected clip's own handles keeps it.
+            _ if on_handle && !shift => {}
+            Some(id) => shell.select(Some(id)),
+            None if !shift => shell.select(None),
+            None => {}
+        }
+    }
+
+    let painter = ui.painter().with_clip_rect(frame.intersect(ui.clip_rect()));
+    // The selection may have changed above; draw what holds now.
+    let selected_id = shell.stage_moving().or(shell.selected()).cloned();
+    let selected = selected_id.as_ref().and_then(|id| shell.stage_box(id));
+    let hover = response.hover_pos().filter(|_| view.stage_drag.is_none());
+    if let Some(pos) = hover {
+        let grip = stage_grip(selected.as_ref(), placed, size, frame, pos);
+        let (x, y) = at_canvas(pos);
+        let under = match grip {
+            Some(StageGrip::Scale | StageGrip::Turn) => None,
+            _ => shell.stage_pick(x, y),
+        };
+        let cursor = match grip {
+            Some(StageGrip::Turn) => Some(egui::CursorIcon::Alias),
+            Some(StageGrip::Scale) => Some(egui::CursorIcon::Crosshair),
+            Some(StageGrip::Move) => Some(egui::CursorIcon::Move),
+            Some(StageGrip::Pan) | None => under.is_some().then_some(egui::CursorIcon::Move),
+        };
+        if let Some(cursor) = cursor {
+            ui.ctx().set_cursor_icon(cursor);
+        }
+        if let Some(stage) = under
+            .filter(|id| Some(id) != selected_id.as_ref())
+            .and_then(|id| shell.stage_box(&id))
+        {
+            let (corners, _, _) = stage_handles(&stage, placed, size, frame);
+            painter.add(egui::Shape::closed_line(
+                corners.to_vec(),
+                egui::Stroke::new(1.0, Color32::from_white_alpha(150)),
+            ));
+        }
+    } else if let Some(drag) = view.stage_drag {
+        let cursor = match drag.grip {
+            StageGrip::Move => egui::CursorIcon::Grabbing,
+            StageGrip::Scale => egui::CursorIcon::Crosshair,
+            StageGrip::Turn => egui::CursorIcon::Alias,
+            StageGrip::Pan => egui::CursorIcon::Grabbing,
+        };
+        ui.ctx().set_cursor_icon(cursor);
+    }
+    // Every other selected clip gets a plain outline.
+    for id in shell.selection() {
+        if Some(id) == selected_id.as_ref() {
+            continue;
+        }
+        if let Some(stage) = shell.stage_box(id) {
+            let (corners, _, _) = stage_handles(&stage, placed, size, frame);
+            painter.add(egui::Shape::closed_line(
+                corners.to_vec(),
+                egui::Stroke::new(1.0, tokens::SELECTED),
+            ));
+        }
+    }
+    if let Some(guides) = shell.stage_guides() {
+        let stroke = egui::Stroke::new(1.0, tokens::EXPORT);
+        if guides.vertical {
+            let x = placed.center().x;
+            painter.line_segment(
+                [Pos2::new(x, placed.min.y), Pos2::new(x, placed.max.y)],
+                stroke,
+            );
+        }
+        if guides.horizontal {
+            let y = placed.center().y;
+            painter.line_segment(
+                [Pos2::new(placed.min.x, y), Pos2::new(placed.max.x, y)],
+                stroke,
+            );
+        }
+    }
+    let Some(stage) = selected else {
+        return;
+    };
+    let (corners, bottom, knob) = stage_handles(&stage, placed, size, frame);
+    let stroke = egui::Stroke::new(1.5, tokens::SELECTED);
+    painter.add(egui::Shape::closed_line(corners.to_vec(), stroke));
+    painter.line_segment([bottom, knob], stroke);
+    let rest = egui::Stroke::new(1.0, Color32::from_black_alpha(160));
+    for corner in corners {
+        painter.rect(
+            Rect::from_center_size(corner, Vec2::splat(8.0)),
+            1.0,
+            tokens::SELECTED,
+            rest,
+            egui::StrokeKind::Middle,
+        );
+    }
+    painter.circle(knob, 5.5, tokens::SELECTED, rest);
 }
 
 /// While an object is being picked: a click on the canvas adds a point
@@ -11217,6 +11531,236 @@ mod tests {
         }
         assert_eq!(shell.tracking().unwrap().time, Micros(500_000));
         let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    /// A 1920×1080 project with a full-canvas picture under a half-size
+    /// overlay, opened in a shell and drawn once in a 1280×800 window.
+    fn stage_window(name: &str) -> (std::path::PathBuf, Shell, ViewState, egui::Context) {
+        let temp = std::env::temp_dir().join(format!("cutlass-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let mut draft = cutlass_model::Draft::empty("draft");
+        draft.canvas_config.width = 1920;
+        draft.canvas_config.height = 1080;
+        draft.duration = Micros(1_000_000);
+        for id in ["under", "over"] {
+            draft.materials.videos.push(cutlass_model::MaterialVideo {
+                id: id.into(),
+                width: 1920,
+                height: 1080,
+                path: "missing.mp4".into(),
+                ..cutlass_model::MaterialVideo::default()
+            });
+        }
+        let range = cutlass_model::TimeRange::new(0, 1_000_000);
+        let mut under = cutlass_model::Segment::new("under", "under", range.clone());
+        under.source_range = Some(range.clone());
+        draft.tracks[0].segments.push(under);
+        let mut overlay = cutlass_model::Track::main("overlay");
+        overlay.flag = cutlass_model::TrackFlag::SubVideo;
+        let mut over = cutlass_model::Segment::new("over", "over", range.clone());
+        over.source_range = Some(range);
+        over.clip.scale = cutlass_model::Point::new(0.5, 0.5);
+        over.uniform_scale.value = 0.5;
+        overlay.segments.push(over);
+        draft.tracks.push(overlay);
+        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        frame_once(&ctx, Vec::new(), &mut shell, &mut view);
+        (temp, shell, view, ctx)
+    }
+
+    fn frame_once(
+        ctx: &egui::Context,
+        events: Vec<egui::Event>,
+        shell: &mut Shell,
+        view: &mut ViewState,
+    ) {
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: screen,
+                events,
+                ..Default::default()
+            },
+            |ui| show(shell, ui, view, None),
+        );
+        output.textures_delta.clear();
+    }
+
+    fn click(ctx: &egui::Context, at: Pos2, shell: &mut Shell, view: &mut ViewState) {
+        let press = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        frame_once(
+            ctx,
+            vec![egui::Event::PointerMoved(at), press(true)],
+            shell,
+            view,
+        );
+        frame_once(ctx, vec![press(false)], shell, view);
+        frame_once(ctx, Vec::new(), shell, view);
+    }
+
+    fn stage_pose(shell: &Shell, id: &str) -> (f64, f64, f64, f64) {
+        let segment = shell
+            .draft()
+            .unwrap()
+            .tracks
+            .iter()
+            .flat_map(|track| &track.segments)
+            .find(|segment| segment.id.as_str() == id)
+            .unwrap();
+        (
+            segment.clip.transform.x,
+            segment.clip.transform.y,
+            segment.uniform_scale.value,
+            segment.clip.rotation,
+        )
+    }
+
+    #[test]
+    fn a_click_on_the_preview_selects_the_clip_under_it_and_empty_space_clears_it() {
+        let (temp, mut shell, mut view, ctx) = stage_window("stage-click");
+        let placed = view.preview_canvas.expect("the canvas");
+        let size = Vec2::new(1920.0, 1080.0);
+        click(
+            &ctx,
+            screen_point(placed, size, (960.0, 540.0)),
+            &mut shell,
+            &mut view,
+        );
+        assert_eq!(shell.selected().map(|id| id.as_str()), Some("over"));
+        click(
+            &ctx,
+            screen_point(placed, size, (100.0, 100.0)),
+            &mut shell,
+            &mut view,
+        );
+        assert_eq!(shell.selected().map(|id| id.as_str()), Some("under"));
+        // With the full-canvas clip selected, a click on the overlay still
+        // reaches the overlay on top of it.
+        click(
+            &ctx,
+            screen_point(placed, size, (900.0, 500.0)),
+            &mut shell,
+            &mut view,
+        );
+        assert_eq!(shell.selected().map(|id| id.as_str()), Some("over"));
+        // Beside the canvas, in the dark around it, nothing is selected.
+        click(
+            &ctx,
+            placed.left_center() - Vec2::new(4.0, 0.0),
+            &mut shell,
+            &mut view,
+        );
+        assert_eq!(shell.selected(), None);
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn a_preview_drag_moves_the_clip_under_the_pointer_in_one_undo_step() {
+        let (temp, mut shell, mut view, ctx) = stage_window("stage-move");
+        let placed = view.preview_canvas.expect("the canvas");
+        let size = Vec2::new(1920.0, 1080.0);
+        let from = screen_point(placed, size, (960.0, 540.0));
+        let to = screen_point(placed, size, (1200.0, 300.0));
+        drag(&ctx, from, to, &mut shell, &mut view);
+        assert_eq!(shell.selected().map(|id| id.as_str()), Some("over"));
+        let (x, y, scale, rotation) = stage_pose(&shell, "over");
+        let px = 1920.0 / f64::from(placed.width());
+        assert!((x * 960.0 - 240.0).abs() <= px, "{x}");
+        assert!((y * 540.0 - 240.0).abs() <= px, "{y}");
+        assert_eq!((scale, rotation), (0.5, 0.0));
+        assert_eq!(stage_pose(&shell, "under"), (0.0, 0.0, 1.0, 0.0));
+        assert!(view.stage_drag.is_none());
+        shell.undo().unwrap();
+        assert_eq!(stage_pose(&shell, "over"), (0.0, 0.0, 0.5, 0.0));
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn dragging_a_corner_scales_and_the_knob_turns_the_selected_clip() {
+        let (temp, mut shell, mut view, ctx) = stage_window("stage-grips");
+        let placed = view.preview_canvas.expect("the canvas");
+        let size = Vec2::new(1920.0, 1080.0);
+        let over = SegmentId::new("over");
+        shell.select(Some(over.clone()));
+        frame_once(&ctx, Vec::new(), &mut shell, &mut view);
+        // The overlay's bottom right corner is at (1440, 810); dragging it
+        // out to (1680, 945) is half as far again from the centre.
+        let corner = screen_point(placed, size, (1440.0, 810.0));
+        let out = screen_point(placed, size, (1680.0, 945.0));
+        drag(&ctx, corner, out, &mut shell, &mut view);
+        let (x, y, scale, rotation) = stage_pose(&shell, "over");
+        assert_eq!((x, y, rotation), (0.0, 0.0, 0.0));
+        assert!((scale - 0.75).abs() < 0.01, "{scale}");
+        // The knob sits below the middle of the bottom edge. Dragging it
+        // round to the left of the centre is a quarter turn clockwise.
+        let stage = shell.stage_box(&over).unwrap();
+        let (_, _, knob) = stage_handles(&stage, placed, size, view.preview_frame);
+        let center = screen_point(placed, size, (stage.center_x, stage.center_y));
+        let left = center - Vec2::new(knob.y - center.y, 0.0);
+        drag(&ctx, knob, left, &mut shell, &mut view);
+        let (_, _, scale_after, rotation) = stage_pose(&shell, "over");
+        assert_eq!(rotation, 270.0, "a quarter turn clockwise");
+        assert_eq!(scale_after, scale);
+        // Each drag is its own undo step.
+        shell.undo().unwrap();
+        assert_eq!(stage_pose(&shell, "over").3, 0.0);
+        shell.undo().unwrap();
+        assert_eq!(stage_pose(&shell, "over"), (0.0, 0.0, 0.5, 0.0));
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn a_turned_clips_handles_follow_its_turn() {
+        let stage = cutlass_editor::StageBox {
+            segment_id: SegmentId::new("c"),
+            center_x: 960.0,
+            center_y: 540.0,
+            width: 400.0,
+            height: 200.0,
+            turn: 90.0,
+        };
+        let placed = Rect::from_min_size(Pos2::ZERO, Vec2::new(1920.0, 1080.0));
+        let size = Vec2::new(1920.0, 1080.0);
+        let (corners, bottom, knob) = stage_handles(&stage, placed, size, placed);
+        // A quarter turn clockwise puts the bottom edge on the left.
+        assert!((bottom.x - 860.0).abs() < 1e-3 && (bottom.y - 540.0).abs() < 1e-3);
+        assert!((knob.x - (860.0 - STAGE_TURN_OFFSET)).abs() < 1e-3);
+        assert!((corners[0].x - 1060.0).abs() < 1e-3 && (corners[0].y - 340.0).abs() < 1e-3);
+        // A clip that fills the canvas keeps its knob inside the preview.
+        let full = cutlass_editor::StageBox {
+            width: 1920.0,
+            height: 1080.0,
+            turn: 0.0,
+            ..stage.clone()
+        };
+        let (_, bottom, inside) = stage_handles(&full, placed, size, placed);
+        assert_eq!(inside, bottom - Vec2::new(0.0, STAGE_TURN_OFFSET));
+        assert_eq!(
+            stage_grip(Some(&stage), placed, size, placed, knob),
+            Some(StageGrip::Turn)
+        );
+        assert_eq!(
+            stage_grip(Some(&stage), placed, size, placed, corners[2]),
+            Some(StageGrip::Scale)
+        );
+        assert_eq!(
+            stage_grip(Some(&stage), placed, size, placed, Pos2::new(960.0, 540.0)),
+            Some(StageGrip::Move)
+        );
+        assert_eq!(
+            stage_grip(Some(&stage), placed, size, placed, Pos2::new(5.0, 5.0)),
+            None
+        );
     }
 
     fn drag(ctx: &egui::Context, from: Pos2, to: Pos2, shell: &mut Shell, view: &mut ViewState) {

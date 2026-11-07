@@ -1842,9 +1842,16 @@ fn text_basic(
                 }
             }
         });
-        if let Some(color) = color_row(ui, state, "text-color", "Color", &inspection.text_color) {
+        let keys = shell.setting_keys(KeyedSetting::TextColor);
+        let playhead = shell.playhead();
+        let mut step = None;
+        let picked = keyed_row(ui, keys.as_ref(), playhead, &mut step, |ui| {
+            color_row(ui, state, "text-color", "Color", &inspection.text_color)
+        });
+        if let Some(color) = picked {
             send(shell, |shell| shell.set_text_color(&color));
         }
+        setting_step(shell, KeyedSetting::TextColor, step);
         spacing_row(shell, ui, state, inspection);
         let (width, _) = pair_row(
             ui,

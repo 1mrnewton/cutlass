@@ -4179,7 +4179,13 @@ impl Shell {
             transform_y: keyed.map_or(segment.clip.transform.y, |pose| pose.y),
             opacity: segment.clip.alpha,
             text_size,
-            text_color,
+            // Keyed letters show their color where the playhead is.
+            text_color: cutlass_model::text_color_at(
+                segment,
+                &draft.keyframe_graph_list,
+                self.playhead,
+            )
+            .map_or(text_color, inspector::rgb_hex),
             text_align,
             text_pattern: draft
                 .materials
@@ -6041,6 +6047,12 @@ impl Shell {
     pub fn set_text_color(&mut self, color: &str) -> Result<(), ShellError> {
         let segment_id = self.text_segment()?;
         self.refuse_locked(&segment_id)?;
+        // With color keys, the color is keyed at the playhead instead.
+        if let Some(key) = inspector::hex_rgb(color)
+            .and_then(|rgb| self.key_setting_here(KeyedSetting::TextColor, rgb.to_vec()))
+        {
+            return self.apply(key);
+        }
         let face = self.face.name().to_owned();
         self.apply(Request::SetTextColor {
             segment_id,
@@ -13770,6 +13782,40 @@ mod tests {
         desktop.undo().unwrap();
         assert_eq!(desktop.draft().unwrap().materials.texts[0], plain);
         assert!(desktop.set_text_preset(99).is_err());
+    }
+
+    #[test]
+    fn a_keyed_text_color_blends_between_its_keys() {
+        let temp = Temp::new();
+        let mut desktop = one_letter_title(&temp);
+        let color = super::KeyedSetting::TextColor;
+        desktop.set_text_color("#FF0000").unwrap();
+        assert!(!desktop.setting_keyed(color));
+        desktop.toggle_setting_key(color).unwrap();
+        assert!(desktop.setting_keyed(color));
+        desktop.seek(Micros(800_000));
+        // With keys, a new color keys at the playhead and leaves the rest.
+        desktop.set_text_color("#0000FF").unwrap();
+        assert_eq!(
+            desktop.draft().unwrap().materials.texts[0].text_color,
+            "#FF0000"
+        );
+        assert_eq!(desktop.setting_keys(color).unwrap().times.len(), 2);
+        desktop.seek(Micros(400_000));
+        assert_eq!(desktop.inspection().unwrap().text_color, "#800080");
+        let middle = digest(&desktop.preview_bytes().unwrap().rgba);
+        desktop.seek(Micros(0));
+        assert_ne!(digest(&desktop.preview_bytes().unwrap().rgba), middle);
+        desktop.step_setting_key(color, true);
+        assert_eq!(desktop.playhead(), Micros(800_000));
+        assert_eq!(desktop.inspection().unwrap().text_color, "#0000FF");
+        // The diamond takes the key under the playhead off.
+        desktop.toggle_setting_key(color).unwrap();
+        assert_eq!(desktop.setting_keys(color).unwrap().times.len(), 1);
+        for _ in 0..3 {
+            desktop.undo().unwrap();
+        }
+        assert!(!desktop.setting_keyed(color));
     }
 
     #[test]

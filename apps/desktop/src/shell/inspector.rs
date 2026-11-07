@@ -17,6 +17,7 @@ use super::{Shell, ShellError};
 pub enum KeyedSetting {
     Mask,
     Volume,
+    TextColor,
 }
 
 impl KeyedSetting {
@@ -26,6 +27,7 @@ impl KeyedSetting {
         match self {
             Self::Mask => &cutlass_model::MASK_KEYS,
             Self::Volume => &[cutlass_model::VOLUME_KEY],
+            Self::TextColor => &cutlass_model::TEXT_COLOR_KEYS,
         }
     }
 }
@@ -229,6 +231,7 @@ impl Shell {
             ShellError::Unavailable(match setting {
                 KeyedSetting::Mask => "pick a mask shape first".to_owned(),
                 KeyedSetting::Volume => "the clip has no sound to key".to_owned(),
+                KeyedSetting::TextColor => "a color key belongs on text".to_owned(),
             })
         })?;
         self.apply(Request::KeyValues {
@@ -273,6 +276,12 @@ impl Shell {
                 .to_vec()
             }
             KeyedSetting::Volume => vec![inspection.volume],
+            KeyedSetting::TextColor => {
+                if inspection.text_color.is_empty() && self.text_look().is_none() {
+                    return None;
+                }
+                unit_rgb(&inspection.text_color).to_vec()
+            }
         };
         Some(
             setting
@@ -875,6 +884,42 @@ fn caption_miss(miss: cutlass_editor::CaptionListMiss) -> ShellError {
         }
         .to_owned(),
     )
+}
+
+/// The red, green and blue of `#rrggbb`, each from 0 to 1, when it reads.
+pub(super) fn hex_rgb(color: &str) -> Option<[f64; 3]> {
+    let body = color.trim().trim_start_matches('#');
+    if body.len() != 6 || !body.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(unit_rgb(body))
+}
+
+/// `#RRGGBB` for red, green and blue from 0 to 1.
+pub(super) fn rgb_hex(rgb: [f64; 3]) -> String {
+    let byte = |unit: f64| {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let byte = (unit.clamp(0.0, 1.0) * 255.0).round() as u8;
+        byte
+    };
+    format!(
+        "#{:02X}{:02X}{:02X}",
+        byte(rgb[0]),
+        byte(rgb[1]),
+        byte(rgb[2])
+    )
+}
+
+/// The red, green and blue of `#rrggbb`, each from 0 to 1; white when it
+/// does not read.
+fn unit_rgb(color: &str) -> [f64; 3] {
+    let body = color.trim().trim_start_matches('#');
+    let channel = |at: usize| {
+        body.get(at..at + 2)
+            .and_then(|pair| u8::from_str_radix(pair, 16).ok())
+            .map_or(1.0, |byte| f64::from(byte) / 255.0)
+    };
+    [channel(0), channel(2), channel(4)]
 }
 
 #[cfg(test)]

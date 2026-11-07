@@ -8,7 +8,12 @@ pub fn run() -> eframe::Result {
     let mut viewport = egui::ViewportBuilder::default()
         .with_title("Cutlass")
         .with_inner_size([1280.0, 800.0])
-        .with_min_inner_size([tokens::MIN_WINDOW_WIDTH, tokens::MIN_WINDOW_HEIGHT]);
+        .with_min_inner_size([tokens::MIN_WINDOW_WIDTH, tokens::MIN_WINDOW_HEIGHT])
+        // eframe takes one transparency setting from the main window for
+        // every window it opens. Menus need it for their rounded corners and
+        // shadow; the main window still looks solid, since the view paints
+        // its whole area each frame.
+        .with_transparent(true);
     match icon(ICON) {
         Some(icon) => viewport = viewport.with_icon(icon),
         None => cutlass_logger::error!("the window icon did not decode"),
@@ -140,6 +145,12 @@ struct DesktopWindow {
 }
 
 impl eframe::App for DesktopWindow {
+    /// Clear to nothing: the view paints the whole main window, and a menu's
+    /// window shows only its panel and shadow.
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        [0.0; 4]
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let now = ui.input(|input| input.time);
         advance_if_playing(&mut self.shell, &mut self.last_time, now);

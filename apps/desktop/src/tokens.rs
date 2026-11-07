@@ -14,6 +14,8 @@ pub const PROJECT_BAR: Color32 = Color32::from_rgb(0x26, 0x26, 0x26);
 pub const EXPORT: Color32 = Color32::from_rgb(0x00, 0xc8, 0xd7);
 /// Ink on the export control.
 pub const EXPORT_INK: Color32 = Color32::from_rgb(0x06, 0x22, 0x26);
+/// The export control under the pointer.
+pub const EXPORT_HOVER: Color32 = Color32::from_rgb(0x2a, 0xd4, 0xe0);
 /// Primary text.
 pub const TEXT: Color32 = Color32::from_rgb(0xf3, 0xf3, 0xf3);
 /// Secondary text.
@@ -48,6 +50,37 @@ pub const MINIMIZE: Color32 = Color32::from_rgb(0xfe, 0xbc, 0x2e);
 pub const MAXIMIZE: Color32 = Color32::from_rgb(0x28, 0xc8, 0x40);
 /// The scrim behind a dialog.
 pub const SCRIM: Color32 = Color32::from_black_alpha(140);
+/// A card, bubble, or field that sits on a panel.
+pub const RAISED: Color32 = Color32::from_rgb(0x2a, 0x2a, 0x2a);
+/// A well sunk into a panel, such as the inspector's page bar.
+pub const INSET: Color32 = Color32::from_rgb(0x26, 0x26, 0x26);
+/// A button held down.
+pub const PRESSED: Color32 = Color32::from_rgb(0x3a, 0x3a, 0x3a);
+/// The faint lane a scroll thumb runs in, shown with the thumb.
+pub const SCROLL_TRACK: Color32 = Color32::from_rgba_premultiplied(10, 10, 10, 10);
+/// A scroll thumb at rest: see-through, so it sits on any panel.
+pub const SCROLL_THUMB: Color32 = Color32::from_rgba_premultiplied(56, 56, 56, 56);
+/// A scroll thumb under the pointer.
+pub const SCROLL_THUMB_HOVER: Color32 = Color32::from_rgba_premultiplied(96, 96, 96, 96);
+/// A scroll thumb being dragged.
+pub const SCROLL_THUMB_DRAG: Color32 = Color32::from_rgba_premultiplied(136, 136, 136, 136);
+/// A text field's fill, and its edge when hovered and when typing in it.
+pub const FIELD_FILL: Color32 = RAISED;
+pub const FIELD_EDGE_HOVER: Color32 = Color32::from_rgb(0x3a, 0x3a, 0x3a);
+pub const FIELD_EDGE_FOCUS: Color32 = Color32::from_rgb(0x6a, 0x6a, 0x6a);
+/// Selected text in a field: the accent, see-through.
+pub const TEXT_SELECTION: Color32 = Color32::from_rgba_premultiplied(0x00, 0x4a, 0x50, 0x60);
+/// The well behind a row of choices: a see-through dark, so it sinks into
+/// a panel and a dialog alike.
+pub const SEGMENT_WELL: Color32 = Color32::from_rgba_premultiplied(0, 0, 0, 72);
+/// A choice's fill when it is the one picked, and when hovered.
+pub const CHOICE_ON: Color32 = Color32::from_rgb(0x3a, 0x3a, 0x3a);
+pub const CHOICE_HOVER: Color32 = Color32::from_rgb(0x30, 0x30, 0x30);
+/// A switch's track when off, and when off and hovered.
+pub const SWITCH_TRACK: Color32 = Color32::from_rgb(0x44, 0x44, 0x44);
+pub const SWITCH_TRACK_HOVER: Color32 = Color32::from_rgb(0x50, 0x50, 0x50);
+/// A slider's rail behind the filled part.
+pub const SLIDER_TRACK: Color32 = Color32::from_rgb(0x3a, 0x3a, 0x3a);
 /// The ruler's band between the in and out marks.
 pub const MARKED: Color32 = Color32::from_rgba_premultiplied(0x00, 0x32, 0x36, 0x40);
 
@@ -56,11 +89,63 @@ pub const TIMECODE_SIZE: f32 = 12.0;
 pub const EXPORT_RADIUS: u8 = 8;
 pub const EXPORT_PAD_X: i8 = 12;
 pub const EXPORT_PAD_Y: i8 = 5;
+/// Corner radii, smallest first. A dialog uses `DIALOG_RADIUS`.
+pub const RADIUS_SM: u8 = 6;
+pub const RADIUS_MD: u8 = 8;
+pub const RADIUS_LG: u8 = 10;
 pub const DIALOG_RADIUS: u8 = 12;
 pub const ICON_RADIUS: u8 = 6;
 pub const SELECTED_EDGE: f32 = 1.0;
 pub const STROKE: f32 = 1.5;
 
+/// A scroll bar is this wide and stays this wide; hover changes only its color.
+pub const SCROLL_BAR: f32 = 6.0;
+/// The gap between a scroll bar's ends and the ends of its area.
+pub const SCROLL_INSET: f32 = 2.0;
+/// The gap between a scroll bar and the side of its area: none, so the bar
+/// sits on the panel's edge.
+pub const SCROLL_EDGE: f32 = 0.0;
+/// The gap between the thumb and the sides of its track.
+pub const SCROLL_THUMB_INSET: f32 = 1.0;
+/// Seconds a scroll bar takes to fade in or out. Only its opacity changes.
+pub const SCROLL_FADE: f32 = 0.15;
+/// Seconds a scroll bar stays after the content last moved.
+pub const SCROLL_LINGER: f64 = 0.8;
+/// The shortest a scroll thumb gets on long content.
+pub const SCROLL_MIN_THUMB: f32 = 24.0;
+
+/// A text button's padding, and the least height of any button.
+pub const BUTTON_PAD_X: f32 = 10.0;
+pub const BUTTON_PAD_Y: f32 = 4.0;
+pub const BUTTON_HEIGHT: f32 = 24.0;
+/// The gap between a button's icon and its label.
+pub const BUTTON_GAP: f32 = 6.0;
+
+/// A text field's padding and its one-line height.
+pub const FIELD_PAD_X: f32 = 8.0;
+pub const FIELD_PAD_Y: f32 = 5.0;
+pub const FIELD_HEIGHT: f32 = 26.0;
+/// A choice's size and the well around a row of them.
+pub const CHOICE_HEIGHT: f32 = 22.0;
+pub const CHOICE_PAD_X: f32 = 10.0;
+pub const CHOICE_TEXT: f32 = 12.0;
+pub const SEGMENT_PAD: i8 = 2;
+pub const SEGMENT_GAP: f32 = 2.0;
+/// Check boxes and switches: sizes, the gap to a label, and the row they
+/// sit in.
+pub const CHECK_SIZE: f32 = 16.0;
+pub const CHECK_RADIUS: u8 = 4;
+pub const TOGGLE_GAP: f32 = 8.0;
+pub const TOGGLE_ROW: f32 = 22.0;
+pub const SWITCH_WIDTH: f32 = 34.0;
+pub const SWITCH_HEIGHT: f32 = 20.0;
+pub const SWITCH_KNOB_INSET: f32 = 2.5;
+/// Seconds for a switch's knob to slide across.
+pub const SWITCH_SLIDE: f32 = 0.12;
+/// A slider's row height, rail thickness, and knob radius.
+pub const SLIDER_HEIGHT: f32 = 26.0;
+pub const SLIDER_RAIL: f32 = 4.0;
+pub const SLIDER_KNOB: f32 = 6.0;
 pub const HEAD_HEIGHT: f32 = 38.0;
 pub const SPLIT: f32 = 6.0;
 pub const HAIRLINE: f32 = 1.0;
@@ -164,6 +249,16 @@ pub const MENU_SEPARATOR: Color32 = Color32::from_rgba_premultiplied(20, 20, 20,
 pub const MENU_BADGE: Color32 = Color32::from_rgb(0x6d, 0x5e, 0xfc);
 /// The narrowest a menu is drawn.
 pub const MENU_WIDTH: f32 = 248.0;
+/// A menu's corners and padding, which dropdowns and tooltips share.
+pub const MENU_RADIUS: u8 = 12;
+pub const MENU_PAD: i8 = 6;
+/// The shadow under a menu, a dropdown, or a tooltip.
+pub const MENU_SHADOW: egui::Shadow = egui::Shadow {
+    offset: [0, 16],
+    blur: 40,
+    spread: 0,
+    color: Color32::from_black_alpha(115),
+};
 
 #[cfg(test)]
 mod tests {

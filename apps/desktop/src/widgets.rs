@@ -2,8 +2,8 @@
 
 use egui::{Align2, CornerRadius, FontId, Rect, RichText, Sense, TextEdit, Ui, Vec2};
 
-use crate::icons;
 use crate::tokens;
+use crate::ui;
 
 pub struct HeaderFlags {
     pub mute: bool,
@@ -20,67 +20,29 @@ pub struct HeaderPress {
 }
 
 pub fn icon_button(ui: &mut Ui, name: &str, tip: &str) -> egui::Response {
-    let (rect, response) =
-        ui.allocate_exact_size(Vec2::splat(tokens::ICON_BUTTON_SIZE), Sense::click());
-    if ui.is_rect_visible(rect) {
-        ui.painter().rect_filled(
-            rect,
-            CornerRadius::same(tokens::ICON_RADIUS),
-            tokens::ICON_BUTTON,
-        );
-        let mark = Rect::from_center_size(rect.center(), Vec2::splat(18.0));
-        if let Err(error) = icons::paint(ui.painter(), mark, name, tokens::TEXT) {
-            ui.painter().text(
-                rect.center(),
-                Align2::CENTER_CENTER,
-                error.to_string(),
-                FontId::proportional(9.0),
-                tokens::FAINT,
-            );
-        }
-    }
-    response.on_hover_text(tip)
+    ui.add(
+        ui::Button::icon(name)
+            .kind(ui::ButtonKind::Secondary)
+            .min_size(Vec2::splat(tokens::ICON_BUTTON_SIZE))
+            .icon_size(18.0)
+            .tip(tip),
+    )
 }
 
 pub fn toolbar_button(ui: &mut Ui, label: &str) -> egui::Response {
-    let response = ui.add(
-        egui::Button::new(
-            RichText::new(label)
-                .size(tokens::TYPE_SIZE)
-                .color(tokens::TEXT),
-        )
-        .fill(tokens::ICON_BUTTON)
-        .corner_radius(CornerRadius::same(tokens::ICON_RADIUS)),
-    );
-    response.on_hover_text(label)
+    ui.add(ui::Button::new(label).tip(label))
 }
 
 pub fn export_button(ui: &mut Ui) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(Vec2::new(72.0, 26.0), Sense::click());
-    if ui.is_rect_visible(rect) {
-        ui.painter().rect_filled(
-            rect,
-            CornerRadius::same(tokens::EXPORT_RADIUS),
-            tokens::EXPORT,
-        );
-        ui.painter().text(
-            rect.center(),
-            Align2::CENTER_CENTER,
-            "Export",
-            FontId::proportional(tokens::TYPE_SIZE),
-            tokens::EXPORT_INK,
-        );
-    }
-    response.on_hover_text("Export")
+    ui.add(
+        ui::Button::primary("Export")
+            .min_size(Vec2::new(72.0, 26.0))
+            .tip("Export"),
+    )
 }
 
 pub fn field(ui: &mut Ui, text: &mut String) -> egui::Response {
-    ui.add(
-        TextEdit::singleline(text)
-            .text_color(tokens::TEXT)
-            .font(egui::TextStyle::Body)
-            .desired_width(160.0),
-    )
+    ui::Field::new(text).width(160.0).show(ui).response
 }
 
 pub fn lane_header(ui: &mut Ui, flags: HeaderFlags) -> HeaderPress {
@@ -94,21 +56,13 @@ pub fn lane_header(ui: &mut Ui, flags: HeaderFlags) -> HeaderPress {
 }
 
 fn mark(ui: &mut Ui, label: &str, on: bool) -> bool {
-    let color = if on { tokens::TEXT } else { tokens::FAINT };
-    ui.add(
-        egui::Button::new(RichText::new(label).size(tokens::TYPE_SIZE).color(color))
-            .fill(tokens::ICON_BUTTON)
-            .corner_radius(CornerRadius::same(tokens::ICON_RADIUS)),
-    )
-    .on_hover_text(label)
-    .clicked()
+    ui.add(ui::Button::new(label).on(on).tip(label)).clicked()
 }
 
 /// Dim the window and take the pointer, so nothing under a dialog reacts.
 fn scrim(ui: &mut Ui, title: &str) {
     let screen = ui.max_rect();
-    ui.painter()
-        .rect_filled(screen, CornerRadius::ZERO, tokens::SCRIM);
+    ui::Surface::scrim().paint(ui.painter(), screen);
     let _ = ui.interact(
         screen,
         egui::Id::unique(("scrim", title)),
@@ -154,21 +108,16 @@ pub fn dialog<R>(ui: &mut Ui, title: &str, add: impl FnOnce(&mut Ui) -> R) -> (R
                 let close_response = ui.allocate_rect(close, Sense::click());
                 closed = close_response.clicked();
                 ui.add_space(48.0);
-                let inner = egui::ScrollArea::vertical()
-                    .id_salt(("dialog", title))
+                let inner = ui::Scroll::vertical(("dialog", title))
                     .max_height(room - 64.0)
                     .auto_shrink([false, true])
-                    .show(ui, add)
-                    .inner;
+                    .show(ui, add);
                 ui.add_space(16.0);
                 let height = ui.min_rect().height().clamp(360.0_f32.min(room), room);
                 ui.painter().set(
                     body,
-                    egui::Shape::rect_filled(
-                        Rect::from_min_size(rect.min, Vec2::new(width, height)),
-                        CornerRadius::same(tokens::DIALOG_RADIUS),
-                        tokens::PROJECT_BAR,
-                    ),
+                    ui::Surface::dialog()
+                        .shape(Rect::from_min_size(rect.min, Vec2::new(width, height))),
                 );
                 inner
             },
@@ -267,8 +216,7 @@ pub fn sheet<R>(
                     )),
                     |ui| {
                         inner = Some(
-                            egui::ScrollArea::vertical()
-                                .id_salt(("sheet", title))
+                            ui::Scroll::vertical(("sheet", title))
                                 .max_height(scroll_room)
                                 .auto_shrink([false, true])
                                 .show(ui, |ui| {
@@ -284,8 +232,7 @@ pub fn sheet<R>(
                                             add(ui)
                                         })
                                         .inner
-                                })
-                                .inner,
+                                }),
                         );
                     },
                 );

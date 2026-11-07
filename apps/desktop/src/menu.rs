@@ -321,12 +321,12 @@ pub const LIBRARY_EMPTY: &[Entry] = &[
     ),
 ];
 
-const PAD: f32 = 6.0;
+const PAD: f32 = tokens::MENU_PAD as f32;
 const ROW: f32 = 32.0;
 const ROW_PAD: f32 = 10.0;
 const GAP: f32 = 16.0;
 const SEPARATOR: f32 = 13.0;
-const RADIUS: u8 = 12;
+const RADIUS: u8 = tokens::MENU_RADIUS;
 const ROW_RADIUS: u8 = 8;
 const LABEL_SIZE: f32 = 13.0;
 const KEY_SIZE: f32 = 12.0;
@@ -346,9 +346,15 @@ pub struct Shown {
     pub dismissed: bool,
 }
 
-/// Draw the menu `id` with its corner at `at`, kept inside the window. A
-/// menu taller than the window scrolls under the pointer. `enabled` says whether a built row can run now; a TODO row always can,
-/// so a click on it can say it is not built yet.
+/// Room around a menu's own window for its shadow to fall in.
+const SHADOW_ROOM: f32 = 48.0;
+
+/// Draw the menu `id` with its corner at `at`, in the window's coordinates.
+///
+/// On the desktop a menu is its own borderless window above the app, so it
+/// can reach past the app window's edge and keeps its full size however small
+/// the window is; it stays inside the monitor. Where egui draws every
+/// viewport inside one window, as in tests, it is drawn inside the window.
 pub fn show(
     ctx: &Context,
     id: Id,
@@ -356,10 +362,108 @@ pub fn show(
     entries: &'static [Entry],
     enabled: &dyn Fn(&str) -> bool,
 ) -> Shown {
+    let window = ctx.input(|input| input.viewport().inner_rect);
+    let (Some(window), false) = (window, ctx.embed_viewports()) else {
+        return show_in(
+            ctx,
+            id,
+            ctx.content_rect().shrink(EDGE),
+            at,
+            entries,
+            enabled,
+        )
+        .0;
+    };
+    let monitor = ctx.input(|input| input.viewport().monitor_size);
+    let bounds = monitor_bounds(window, monitor).shrink(EDGE);
+    let full = size(ctx, entries);
+    let at = window.min + at.to_vec2();
+    let menu = place(bounds, at, Vec2::new(full.x, full.y.min(bounds.height())));
+    let sub_key = id.with("sub-on-screen");
+    let last_sub: Option<Rect> = ctx.data(|data| data.get_temp(sub_key)).flatten();
+    let canvas = last_sub
+        .map_or(menu, |sub| menu.union(sub))
+        .expand(SHADOW_ROOM);
+
+    // The menu is another window, so a press, a scroll, or Escape in the app
+    // window is outside it.
+    let (pressed, wheel, escape, app_focused) = ctx.input(|input| {
+        (
+            input.pointer.any_pressed(),
+            input.smooth_scroll_delta != Vec2::ZERO,
+            input.key_pressed(egui::Key::Escape),
+            input.viewport().focused,
+        )
+    });
+    let builder = egui::ViewportBuilder::default()
+        .with_title("Cutlass menu")
+        .with_decorations(false)
+        .with_transparent(true)
+        .with_has_shadow(false)
+        .with_resizable(false)
+        .with_taskbar(false)
+        .with_active(false)
+        .with_window_level(egui::WindowLevel::AlwaysOnTop)
+        .with_position(canvas.min)
+        .with_inner_size(canvas.size());
+    let offset = canvas.min.to_vec2();
+    let (mut shown, rects, menu_focused) = ctx.show_viewport_immediate(
+        egui::ViewportId::from_hash_of(id.with("menu-window")),
+        builder,
+        |child, _| {
+            let (shown, rects) = show_in(
+                child,
+                id,
+                bounds.translate(-offset),
+                at - offset,
+                entries,
+                enabled,
+            );
+            let focused = child.input(|input| input.viewport().focused);
+            let rects: Vec<Rect> = rects.iter().map(|rect| rect.translate(offset)).collect();
+            (shown, rects, focused)
+        },
+    );
+    let sub = rects.get(1).copied();
+    if sub != last_sub {
+        ctx.data_mut(|data| data.insert_temp(sub_key, sub));
+        ctx.request_repaint();
+    }
+    // Another app took the focus from both windows.
+    let away = app_focused == Some(false) && menu_focused == Some(false);
+    shown.dismissed |= pressed || wheel || escape || away;
+    if shown.picked.is_some() || shown.dismissed {
+        ctx.data_mut(|data| data.remove::<Option<Rect>>(sub_key));
+    }
+    shown
+}
+
+/// The monitor the window is on, in screen points. egui gives its size, not
+/// its corner, so this takes the main monitor at the origin when the window
+/// is on it, and no limit when it is on another.
+fn monitor_bounds(window: Rect, monitor: Option<Vec2>) -> Rect {
+    monitor
+        .map(|size| Rect::from_min_size(Pos2::ZERO, size))
+        .filter(|monitor| monitor.contains(window.min))
+        .unwrap_or(Rect::EVERYTHING)
+}
+
+/// Draw the menu `id` with its corner at `at`, kept inside `screen`, in
+/// `ctx`'s own coordinates. A menu taller than `screen` scrolls under the
+/// pointer. `enabled` says whether a built row can run now; a TODO row
+/// always can, so a click on it can say it is not built yet. Returns what the
+/// menu did and the panels it painted: the menu, then any open submenu.
+fn show_in(
+    ctx: &Context,
+    id: Id,
+    screen: Rect,
+    at: Pos2,
+    entries: &'static [Entry],
+    enabled: &dyn Fn(&str) -> bool,
+) -> (Shown, Vec<Rect>) {
     let open_key = id.with("open");
     let scroll_key = id.with("scroll");
     let mut open: Option<&'static str> = ctx.data(|data| data.get_temp(open_key)).flatten();
-    let screen = ctx.content_rect().shrink(EDGE);
     let full = size(ctx, entries);
     let rect = place(screen, at, Vec2::new(full.x, full.y.min(screen.height())));
     let (pressed, pointer, escape, wheel) = ctx.input(|input| {
@@ -448,7 +552,7 @@ pub fn show(
             data.remove::<f32>(scroll_key);
         });
     }
-    shown
+    (shown, rects)
 }
 
 /// The menu's size: its widest row and every row's height.
@@ -520,12 +624,7 @@ fn paint_menu(
         egui::UiBuilder::new().layer_id(layer).max_rect(rect),
     );
     let painter = ui.painter().with_clip_rect(rect);
-    let shadow = egui::Shadow {
-        offset: [0, 16],
-        blur: 40,
-        spread: 0,
-        color: egui::Color32::from_black_alpha(115),
-    };
+    let shadow = tokens::MENU_SHADOW;
     // The shadow spreads past the panel, so it is clipped to the window, not
     // to the panel.
     ctx.layer_painter(layer)
@@ -845,6 +944,27 @@ mod tests {
                 .dismissed
         );
         assert!(!frame(&ctx, 1000.0, Vec::new()).0.dismissed);
+    }
+
+    #[test]
+    fn a_menu_window_is_bound_by_the_monitor_not_the_app_window() {
+        let window = Rect::from_min_size(Pos2::new(300.0, 200.0), Vec2::new(800.0, 400.0));
+        let monitor = monitor_bounds(window, Some(Vec2::new(1728.0, 1117.0)));
+        assert_eq!(
+            monitor,
+            Rect::from_min_size(Pos2::ZERO, Vec2::new(1728.0, 1117.0))
+        );
+        // Near the window's foot, the menu runs down past it, onto the monitor.
+        let at = window.min + Vec2::new(400.0, 380.0);
+        let menu = place(monitor.shrink(EDGE), at, Vec2::new(248.0, 300.0));
+        assert_eq!(menu.min, at);
+        assert!(menu.bottom() > window.bottom());
+        // A window on another monitor sets no limit rather than a wrong one.
+        let elsewhere = window.translate(Vec2::new(-2000.0, 0.0));
+        assert_eq!(
+            monitor_bounds(elsewhere, Some(Vec2::new(1728.0, 1117.0))),
+            Rect::EVERYTHING
+        );
     }
 
     #[test]

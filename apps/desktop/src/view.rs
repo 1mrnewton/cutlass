@@ -4,8 +4,7 @@
 //! With no project open, the window lists the saved projects and can create one.
 
 use egui::{
-    Align, Align2, Color32, CornerRadius, FontId, Layout, Pos2, Rect, RichText, ScrollArea, Sense,
-    Ui, Vec2,
+    Align, Align2, Color32, CornerRadius, FontId, Layout, Pos2, Rect, RichText, Sense, Ui, Vec2,
 };
 
 use cutlass_editor::ruler_ticks;
@@ -16,6 +15,7 @@ use crate::dialogs::{Dialogs, Finished, Picker};
 use crate::icons;
 use crate::shell::{ExportRequest, ListedProject, MovePreview, Shell, ShellError};
 use crate::tokens;
+use crate::ui;
 use crate::widgets;
 
 mod assistant;
@@ -340,8 +340,7 @@ pub fn show(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Option
         view.dialogs.save_still(parent, &name);
     }
     let full = ui.max_rect();
-    ui.painter()
-        .rect_filled(full, CornerRadius::ZERO, tokens::GAP);
+    ui::Surface::gap().paint(ui.painter(), full);
     if view.preview_full && shell.draft().is_none() {
         set_full_screen(ui, view, false);
     }
@@ -430,7 +429,7 @@ fn dropped_files(shell: &mut Shell, ui: &Ui) {
             egui::Order::Foreground,
             egui::Id::unique("drop-scrim"),
         ));
-        painter.rect_filled(rect, CornerRadius::ZERO, tokens::SCRIM);
+        ui::Surface::scrim().paint(&painter, rect);
         let words = if shell.project_folder().is_some() {
             "Drop to import"
         } else {
@@ -474,7 +473,7 @@ fn job_strip(shell: &mut Shell, ui: &Ui, full: Rect) {
                     };
                     ui.label(line);
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if ui.button("Cancel").clicked() {
+                        if ui.add(ui::Button::new("Cancel")).clicked() {
                             shell.cancel_job();
                         }
                     });
@@ -522,10 +521,13 @@ fn exported_strip(shell: &mut Shell, ui: &Ui, full: Rect, width: f32) {
                 ui.horizontal(|ui| {
                     ui.label(format!("Exported {name}"));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if ui.button("Close").clicked() {
+                        if ui.add(ui::Button::new("Close")).clicked() {
                             shell.forget_export();
                         }
-                        if ui.button(crate::shell::REVEAL_LABEL).clicked() {
+                        if ui
+                            .add(ui::Button::new(crate::shell::REVEAL_LABEL))
+                            .clicked()
+                        {
                             if let Err(error) = crate::shell::reveal(&path) {
                                 shell.notice_error(&error);
                             }
@@ -551,8 +553,7 @@ fn projects_home(
     parent: Option<&eframe::Frame>,
 ) {
     let bar = Rect::from_min_size(full.min, Vec2::new(full.width(), tokens::HEAD_HEIGHT));
-    ui.painter()
-        .rect_filled(bar, CornerRadius::ZERO, tokens::PROJECT_BAR);
+    ui::Surface::bar().paint(ui.painter(), bar);
     shell.chrome.project_bar = true;
     shell.chrome.projects = true;
     #[cfg(not(target_os = "macos"))]
@@ -585,8 +586,7 @@ fn projects_home(
     let root = projects_root(view);
     let projects = listed_projects(view);
     let mut body_ui = ui.new_child(egui::UiBuilder::new().max_rect(body));
-    ScrollArea::vertical()
-        .id_salt("projects")
+    ui::Scroll::vertical("projects")
         .auto_shrink([false, false])
         .show(&mut body_ui, |ui| {
             if new_project_button(ui) {
@@ -687,20 +687,12 @@ fn open_created(shell: &mut Shell, root: &std::path::Path) {
 }
 
 fn new_project_button(ui: &mut Ui) -> bool {
-    let (rect, response) = ui.allocate_exact_size(Vec2::new(148.0, 36.0), Sense::click());
-    ui.painter().rect_filled(
-        rect,
-        CornerRadius::same(tokens::EXPORT_RADIUS),
-        tokens::EXPORT,
-    );
-    ui.painter().text(
-        rect.center(),
-        Align2::CENTER_CENTER,
-        "New project",
-        FontId::proportional(14.0),
-        tokens::EXPORT_INK,
-    );
-    response.clicked()
+    ui.add(
+        ui::Button::primary("New project")
+            .text_size(14.0)
+            .min_size(Vec2::new(148.0, 36.0)),
+    )
+    .clicked()
 }
 
 fn project_card(ui: &mut Ui, project: &ListedProject) -> bool {
@@ -827,20 +819,38 @@ fn install_style(style: &mut egui::Style) {
     style.interaction.selectable_labels = false;
     style.visuals.override_text_color = Some(tokens::TEXT);
     style.visuals.panel_fill = tokens::PANEL;
-    style.visuals.window_fill = tokens::PANEL;
+    // egui draws dropdowns, tooltips and the project bar's menus in its
+    // popup frame, which reads these: the same panel as a right-click menu.
+    style.visuals.window_fill = tokens::MENU;
+    style.visuals.window_stroke = egui::Stroke::NONE;
+    style.visuals.menu_corner_radius = CornerRadius::same(tokens::MENU_RADIUS);
+    style.visuals.popup_shadow = tokens::MENU_SHADOW;
+    style.spacing.menu_margin = egui::Margin::same(tokens::MENU_PAD);
     style.visuals.extreme_bg_color = tokens::GAP;
     style.visuals.faint_bg_color = tokens::PROJECT_BAR;
+    // Every text field's caret and selection, ui::Field's included.
+    style.visuals.selection.bg_fill = tokens::TEXT_SELECTION;
+    style.visuals.selection.stroke = egui::Stroke::new(1.0, tokens::TEXT);
+    style.visuals.text_cursor.stroke = egui::Stroke::new(1.5, tokens::TEXT);
+    // egui's own bars (popups, menus) keep one width too: no grow on hover.
+    style.spacing.scroll.bar_width = tokens::SCROLL_BAR;
+    style.spacing.scroll.floating_width = tokens::SCROLL_BAR;
     // No outline on any widget, in any state: buttons and fields show by
-    // their fill alone.
+    // their fill alone. egui's own buttons match ui::Button's secondary kind:
+    // the same fills and the same corners.
+    let radius = CornerRadius::same(tokens::ICON_RADIUS);
     let widgets = &mut style.visuals.widgets;
-    for state in [
-        &mut widgets.noninteractive,
-        &mut widgets.inactive,
-        &mut widgets.hovered,
-        &mut widgets.active,
-        &mut widgets.open,
-    ] {
+    for state in [&mut widgets.noninteractive, &mut widgets.open] {
         state.bg_stroke = egui::Stroke::NONE;
+    }
+    for (state, fill) in [
+        (&mut widgets.inactive, tokens::RAISED),
+        (&mut widgets.hovered, tokens::ACTIVE),
+        (&mut widgets.active, tokens::PRESSED),
+    ] {
+        state.weak_bg_fill = fill;
+        state.bg_stroke = egui::Stroke::NONE;
+        state.corner_radius = radius;
     }
     style.text_styles.insert(
         egui::TextStyle::Body,
@@ -864,8 +874,7 @@ fn project_bar(
     parent: Option<&eframe::Frame>,
 ) {
     let bar = Rect::from_min_size(full.min, Vec2::new(full.width(), height));
-    ui.painter()
-        .rect_filled(bar, CornerRadius::ZERO, tokens::PROJECT_BAR);
+    ui::Surface::bar().paint(ui.painter(), bar);
     shell.chrome.project_bar = true;
     #[cfg(not(target_os = "macos"))]
     window_buttons(shell, ui, bar);
@@ -902,13 +911,10 @@ fn project_bar(
     let response = ui
         .scope_builder(egui::UiBuilder::new().max_rect(toggle), |ui| {
             ui.add(
-                egui::Button::new(RichText::new("Assistant").size(12.0).color(if open {
-                    tokens::TEXT
-                } else {
-                    tokens::MUTED
-                }))
-                .selected(open)
-                .min_size(toggle.size()),
+                ui::Button::ghost("Assistant")
+                    .text_size(12.0)
+                    .on(open)
+                    .min_size(toggle.size()),
             )
         })
         .inner
@@ -957,10 +963,7 @@ fn menus(
     );
     ui.scope_builder(egui::UiBuilder::new().max_rect(menu), |ui| {
         ui.horizontal_centered(|ui| {
-            if ui
-                .add(egui::Button::new(RichText::new("Projects").color(tokens::FAINT)).frame(false))
-                .clicked()
-            {
+            if ui.add(ui::Button::ghost("Projects")).clicked() {
                 return_to_projects(shell, view);
             }
             ui.menu_button(RichText::new("File").color(tokens::FAINT), |ui| {
@@ -1227,14 +1230,14 @@ fn settings_window(
             ui.add_space(16.0);
             ui.vertical(|ui| {
                 ui.set_max_width(372.0);
-                ui.horizontal(|ui| {
+                ui::Segmented::show(ui, |ui| {
                     for (tab, name) in [
                         (SettingsTab::General, "General"),
                         (SettingsTab::Assistant, "Assistant"),
                         (SettingsTab::Shortcuts, "Shortcuts"),
                     ] {
                         if ui
-                            .selectable_label(view.settings_tab == tab, name)
+                            .add(ui::Choice::new(view.settings_tab == tab, name))
                             .clicked()
                         {
                             view.settings_tab = tab;
@@ -1244,16 +1247,16 @@ fn settings_window(
                 match view.settings_tab {
                     SettingsTab::General => {
                         settings_heading(ui, "Playback");
-                        ui.checkbox(&mut settings.playback.loop_playback, "Loop at the end");
-                        ui.checkbox(
+                        ui.add(ui::Check::new(&mut settings.playback.loop_playback, "Loop at the end"));
+                        ui.add(ui::Check::new(
                             &mut settings.playback.scrub_audio,
                             "Play sound while the playhead is dragged",
-                        );
-                        ui.checkbox(
+                        ));
+                        ui.add(ui::Check::new(
                             &mut settings.playback.proxies,
                             "Play proxies of 4K and long clips in the viewer",
-                        );
-                        choice_row(ui, "A seek", |ui| {
+                        ));
+                        choices_row(ui, "A seek", |ui| {
                             let seek = &mut settings.playback.seek_during_playback;
                             for (value, name) in [
                                 (
@@ -1262,7 +1265,7 @@ fn settings_window(
                                 ),
                                 (cutlass_settings::SeekDuringPlayback::Pause, "pauses"),
                             ] {
-                                if ui.selectable_label(*seek == value, name).clicked() {
+                                if ui.add(ui::Choice::new(*seek == value, name)).clicked() {
                                     *seek = value;
                                 }
                             }
@@ -1272,14 +1275,14 @@ fn settings_window(
                             [(PANEL_LIBRARY, "Library"), (PANEL_INSPECTOR, "Inspector")]
                         {
                             let mut open = settings.panel_open(id);
-                            if ui.checkbox(&mut open, name).changed() {
+                            if ui.add(ui::Check::new(&mut open, name)).changed() {
                                 settings.set_panel_open(id, open);
                             }
                         }
                         settings_heading(ui, "Import");
                         let mut copy = !settings.import.link;
                         if ui
-                            .checkbox(&mut copy, "Copy imported files into the project")
+                            .add(ui::Check::new(&mut copy, "Copy imported files into the project"))
                             .changed()
                         {
                             settings.import.link = !copy;
@@ -1289,20 +1292,20 @@ fn settings_window(
                                 .color(tokens::FAINT),
                         );
                         settings_heading(ui, "Hardware codecs");
-                        ui.checkbox(
+                        ui.add(ui::Check::new(
                             &mut settings.hardware.decode,
                             "Decode with the system codecs",
-                        );
-                        ui.checkbox(
+                        ));
+                        ui.add(ui::Check::new(
                             &mut settings.hardware.encode,
                             "Encode with the system codecs",
-                        );
+                        ));
                         ui.label(
                             RichText::new("These take effect when Cutlass opens again.")
                                 .color(tokens::FAINT),
                         );
                         settings_heading(ui, "Updates");
-                        ui.checkbox(&mut settings.updates.check, "Check for updates");
+                        ui.add(ui::Check::new(&mut settings.updates.check, "Check for updates"));
                         ui.label(
                             RichText::new(format!(
                                 "Cutlass {} looks for a new release once a day. Off, it never asks.",
@@ -1321,7 +1324,7 @@ fn settings_window(
                     }
                     SettingsTab::Shortcuts => {
                         ui.add_space(8.0);
-                        reset = ui.button("Reset shortcuts").clicked();
+                        reset = ui.add(ui::Button::new("Reset shortcuts")).clicked();
                         ui.add_space(4.0);
                         for (action, label) in cutlass_settings::ACTIONS {
                             ui.horizontal(|ui| {
@@ -1343,13 +1346,13 @@ fn settings_window(
                                     cutlass_settings::keys_label(keys, MAC)
                                 };
                                 if ui
-                                    .add(egui::Button::new(shown).min_size(Vec2::new(110.0, 20.0)))
+                                    .add(ui::Button::new(shown).min_size(Vec2::new(110.0, 20.0)))
                                     .on_hover_text("Click, then press the new keys")
                                     .clicked()
                                 {
                                     record = Some(*action);
                                 }
-                                if !keys.is_empty() && ui.small_button("Clear").clicked() {
+                                if !keys.is_empty() && ui.add(ui::Button::new("Clear").text_size(12.0)).clicked() {
                                     clear = Some(*action);
                                 }
                             });
@@ -1413,10 +1416,10 @@ fn approval_dialog(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
                     ui.add_space(6.0);
                 }
                 ui.horizontal(|ui| {
-                    if ui.button("Allow").clicked() {
+                    if ui.add(ui::Button::new("Allow")).clicked() {
                         answer = Some(true);
                     }
-                    if ui.button("Don't allow").clicked() {
+                    if ui.add(ui::Button::new("Don't allow")).clicked() {
                         answer = Some(false);
                     }
                 });
@@ -1458,10 +1461,10 @@ fn update_dialog(shell: &mut Shell, ui: &mut Ui) {
                 }
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
-                    if ui.button("Update and restart").clicked() {
+                    if ui.add(ui::Button::primary("Update and restart")).clicked() {
                         answer = Some(true);
                     }
-                    if ui.button("Later").clicked() {
+                    if ui.add(ui::Button::new("Later")).clicked() {
                         answer = Some(false);
                     }
                 });
@@ -1509,10 +1512,10 @@ fn speech_model_dialog(shell: &mut Shell, ui: &mut Ui) {
                 ui.label(crate::shell::SPEECH_MODEL_QUESTION);
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
-                    if ui.button("Download").clicked() {
+                    if ui.add(ui::Button::primary("Download")).clicked() {
                         answer = Some(true);
                     }
-                    if ui.button("Not now").clicked() {
+                    if ui.add(ui::Button::new("Not now")).clicked() {
                         answer = Some(false);
                     }
                 });
@@ -1542,21 +1545,19 @@ fn assistant_settings(
 ) {
     use cutlass_settings::McpServer;
     settings_heading(ui, "Model");
-    ui.checkbox(&mut settings.model.local, "Local model");
+    ui.add(ui::Check::new(&mut settings.model.local, "Local model"));
     if settings.model.local {
         choice_row(ui, "Address", |ui| {
-            ui.add(
-                egui::TextEdit::singleline(&mut settings.model.local_url)
-                    .hint_text(cutlass_settings::DEFAULT_LOCAL_URL)
-                    .desired_width(300.0),
-            );
+            ui::Field::new(&mut settings.model.local_url)
+                .hint(cutlass_settings::DEFAULT_LOCAL_URL)
+                .width(300.0)
+                .show(ui);
         });
         choice_row(ui, "Model", |ui| {
-            ui.add(
-                egui::TextEdit::singleline(&mut settings.model.local_name)
-                    .hint_text(cutlass_settings::DEFAULT_LOCAL_NAME)
-                    .desired_width(180.0),
-            );
+            ui::Field::new(&mut settings.model.local_name)
+                .hint(cutlass_settings::DEFAULT_LOCAL_NAME)
+                .width(180.0)
+                .show(ui);
         });
         ui.label(
             RichText::new("A chat server on this computer, such as Ollama or llama.cpp.")
@@ -1564,13 +1565,22 @@ fn assistant_settings(
                 .color(tokens::FAINT),
         );
     }
-    ui.checkbox(
+    ui.add(ui::Check::new(
         &mut settings.model.cloud,
         "Cloud model (sends messages off this computer)",
-    );
-    ui.checkbox(&mut settings.sandbox.local, "Run code on this computer");
-    ui.checkbox(&mut settings.sandbox.online, "Run code online");
-    ui.checkbox(&mut settings.memory, "Remember across conversations");
+    ));
+    ui.add(ui::Check::new(
+        &mut settings.sandbox.local,
+        "Run code on this computer",
+    ));
+    ui.add(ui::Check::new(
+        &mut settings.sandbox.online,
+        "Run code online",
+    ));
+    ui.add(ui::Check::new(
+        &mut settings.memory,
+        "Remember across conversations",
+    ));
     choice_row(ui, "Steps a turn", |ui| {
         ui.add(egui::DragValue::new(&mut settings.step_cap).range(1..=1000));
     });
@@ -1579,43 +1589,42 @@ fn assistant_settings(
     for (index, server) in settings.mcp_servers.iter_mut().enumerate() {
         ui.push_id(("server", index), |ui| {
             ui.horizontal(|ui| {
-                ui.checkbox(&mut server.enabled, "");
-                ui.add(
-                    egui::TextEdit::singleline(&mut server.name)
-                        .hint_text("Name")
-                        .desired_width(120.0),
-                );
-                for (kind, name) in [(McpServer::STDIO, "Program"), (McpServer::REMOTE, "URL")] {
-                    if ui.selectable_label(server.kind == kind, name).clicked() {
-                        kind.clone_into(&mut server.kind);
+                ui.add(ui::Check::new(&mut server.enabled, ""));
+                ui::Field::new(&mut server.name)
+                    .hint("Name")
+                    .width(120.0)
+                    .show(ui);
+                ui::Segmented::show(ui, |ui| {
+                    for (kind, name) in [(McpServer::STDIO, "Program"), (McpServer::REMOTE, "URL")]
+                    {
+                        if ui.add(ui::Choice::new(server.kind == kind, name)).clicked() {
+                            kind.clone_into(&mut server.kind);
+                        }
                     }
-                }
-                if ui.small_button("Remove").clicked() {
+                });
+                if ui.add(ui::Button::new("Remove").text_size(12.0)).clicked() {
                     remove = Some(index);
                 }
             });
             if server.kind == McpServer::REMOTE {
-                ui.add(
-                    egui::TextEdit::singleline(&mut server.url)
-                        .hint_text("https://…")
-                        .desired_width(340.0),
-                );
+                ui::Field::new(&mut server.url)
+                    .hint("https://…")
+                    .width(340.0)
+                    .show(ui);
             } else {
                 ui.horizontal(|ui| {
-                    ui.add(
-                        egui::TextEdit::singleline(&mut server.command)
-                            .hint_text("Program")
-                            .desired_width(140.0),
-                    );
+                    ui::Field::new(&mut server.command)
+                        .hint("Program")
+                        .width(140.0)
+                        .show(ui);
                     let args = server_args
                         .entry(index)
                         .or_insert_with(|| server.args.join(" "));
-                    if ui
-                        .add(
-                            egui::TextEdit::singleline(args)
-                                .hint_text("Arguments")
-                                .desired_width(190.0),
-                        )
+                    if ui::Field::new(args)
+                        .hint("Arguments")
+                        .width(190.0)
+                        .show(ui)
+                        .response
                         .changed()
                     {
                         server.args = args.split_whitespace().map(str::to_owned).collect();
@@ -1629,7 +1638,7 @@ fn assistant_settings(
         settings.mcp_servers.remove(index);
         server_args.clear();
     }
-    if ui.button("Add server").clicked() {
+    if ui.add(ui::Button::new("Add server")).clicked() {
         settings.mcp_servers.push(McpServer::default());
     }
     settings_heading(ui, "Skill folders");
@@ -1637,7 +1646,7 @@ fn assistant_settings(
     for (index, folder) in settings.skill_folders.iter().enumerate() {
         ui.horizontal(|ui| {
             ui.label(RichText::new(&folder.path).color(tokens::MUTED));
-            if ui.small_button("Remove").clicked() {
+            if ui.add(ui::Button::new("Remove").text_size(12.0)).clicked() {
                 remove = Some(index);
             }
         });
@@ -1645,7 +1654,7 @@ fn assistant_settings(
     if let Some(index) = remove {
         settings.skill_folders.remove(index);
     }
-    *add_folder = ui.button("Add folder…").clicked();
+    *add_folder = ui.add(ui::Button::new("Add folder…")).clicked();
 }
 
 fn settings_heading(ui: &mut Ui, text: &str) {
@@ -1656,13 +1665,13 @@ fn settings_heading(ui: &mut Ui, text: &str) {
 
 fn edit_menu(shell: &mut Shell, ui: &mut Ui) {
     let (undo, redo) = (shell.can_undo(), shell.can_redo());
-    if ui.add_enabled(undo, egui::Button::new("Undo")).clicked() {
+    if ui.add_enabled(undo, ui::Button::new("Undo")).clicked() {
         ui.close();
         if let Err(error) = shell.undo() {
             shell.notice_error(&error);
         }
     }
-    if ui.add_enabled(redo, egui::Button::new("Redo")).clicked() {
+    if ui.add_enabled(redo, ui::Button::new("Redo")).clicked() {
         ui.close();
         if let Err(error) = shell.redo() {
             shell.notice_error(&error);
@@ -1728,13 +1737,11 @@ fn library_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rec
 }
 
 fn shelf_rail(ui: &mut Ui, view: &mut ViewState, rect: Rect) {
-    let inner = Rect::from_min_max(
-        Pos2::new(rect.left() + 6.0, rect.top()),
-        Pos2::new(rect.right() - 6.0, rect.bottom()),
-    );
-    let mut column = ui.new_child(egui::UiBuilder::new().max_rect(inner));
-    ScrollArea::vertical()
-        .id_salt("library-rail")
+    // The whole rect scrolls, so the bar sits on the panel edge; the
+    // buttons keep 6 points in from each side.
+    let mut column = ui.new_child(egui::UiBuilder::new().max_rect(rect));
+    ui::Scroll::vertical("library-rail")
+        .content_margin(egui::Margin::symmetric(6, 0))
         .show(&mut column, |ui| {
             ui.add_space(8.0);
             ui.spacing_mut().item_spacing.y = 4.0;
@@ -1785,24 +1792,17 @@ fn asset_column(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect
     let mut column = ui.new_child(egui::UiBuilder::new().max_rect(rect));
     let shelf = view.library_shelf;
     let stock = shelf == Shelf::Media && view.library_stock;
-    column.add(
-        egui::TextEdit::singleline(&mut view.library_query)
-            .hint_text(if stock {
-                "Search free stock"
-            } else {
-                shelf.hint()
-            })
-            .desired_width(f32::INFINITY)
-            .text_color(tokens::TEXT)
-            .background_color(tokens::PROJECT_BAR)
-            .font(FontId::proportional(tokens::TYPE_SIZE + 1.0))
-            .frame(
-                egui::Frame::new()
-                    .fill(tokens::PROJECT_BAR)
-                    .corner_radius(CornerRadius::same(10))
-                    .inner_margin(egui::Margin::symmetric(12, 9)),
-            ),
-    );
+    ui::Field::new(&mut view.library_query)
+        .hint(if stock {
+            "Search free stock"
+        } else {
+            shelf.hint()
+        })
+        .icon("search")
+        .fill(tokens::PROJECT_BAR)
+        .text_size(tokens::TYPE_SIZE + 1.0)
+        .height(36.0)
+        .show(&mut column);
     if shelf == Shelf::Media {
         column.add_space(8.0);
         source_switch(&mut column, view);
@@ -1836,11 +1836,18 @@ fn asset_column(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect
             target: LibraryTarget::Empty,
         });
     }
-    let mut grid_ui = column.new_child(egui::UiBuilder::new().max_rect(grid));
+    // The column is inset 12 from the panel. The cards' scroll view reaches
+    // back out to the panel's edge so its bar sits there, and pads the cards
+    // by the same 12.
+    let scroll = grid.with_max_x(grid.max.x + 12.0);
+    let mut grid_ui = column.new_child(egui::UiBuilder::new().max_rect(scroll));
     let query = view.library_query.clone();
-    ScrollArea::vertical()
-        .id_salt("library-cards")
+    ui::Scroll::vertical("library-cards")
         .auto_shrink([false, false])
+        .content_margin(egui::Margin {
+            right: 12,
+            ..egui::Margin::ZERO
+        })
         .show(&mut grid_ui, |ui| {
             if stock {
                 ui.add_space(8.0);
@@ -2250,17 +2257,12 @@ fn folder_name_field(
         Pos2::new(rect.left(), rect.top() + CARD_H + 2.0),
         Vec2::new(rect.width(), CARD_LABEL - 2.0),
     );
-    let field = ui.put(
-        label,
-        egui::TextEdit::singleline(&mut *typed)
-            .font(FontId::proportional(12.0))
-            .text_color(tokens::TEXT),
-    );
-    if !field.has_focus() && !field.lost_focus() {
-        field.request_focus();
-    }
-    if field.lost_focus() {
-        let cancel = ui.input(|input| input.key_pressed(egui::Key::Escape));
+    let field = ui::Field::new(&mut *typed)
+        .text_size(12.0)
+        .focus()
+        .show_in(ui, label);
+    if field.committed || field.cancelled {
+        let cancel = field.cancelled;
         let typed = typed.clone();
         let id = id.clone();
         view.library_renaming = None;
@@ -3363,12 +3365,13 @@ fn inspector_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
     } else {
         rect
     };
-    let padded = body.shrink2(Vec2::new(16.0, 0.0));
-    let mut details = ui.new_child(egui::UiBuilder::new().max_rect(padded));
-    details.set_clip_rect(padded);
-    let content_width = padded.width();
-    ScrollArea::vertical()
-        .id_salt("inspector")
+    // The whole body scrolls, so the bar sits on the panel edge; the
+    // content keeps 16 points in from each side.
+    let content_width = body.width() - 32.0;
+    let mut details = ui.new_child(egui::UiBuilder::new().max_rect(body));
+    details.set_clip_rect(body);
+    ui::Scroll::vertical("inspector")
+        .content_margin(egui::Margin::symmetric(16, 0))
         .show(&mut details, |ui| {
             ui.set_width(content_width);
             if let Some(inspection) = shell.inspection() {
@@ -3627,15 +3630,14 @@ fn paint_toolbar(shell: &mut Shell, ui: &mut Ui, rect: Rect) {
             .max_rect(rect.shrink2(Vec2::new(10.0, 4.0)))
             .layout(Layout::left_to_right(Align::Center)),
     );
-    ScrollArea::horizontal()
-        .id_salt("timeline-toolbar")
+    ui::Scroll::horizontal("timeline-toolbar")
         .auto_shrink([false, true])
         .show(&mut bar, |ui| {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
                 if shell.compound_depth() > 0 {
                     if ui
-                        .button(RichText::new("‹ Back").size(12.0))
+                        .add(ui::Button::new("‹ Back").text_size(12.0))
                         .on_hover_text("Back to the timeline the compound clip is on")
                         .clicked()
                         && let Err(error) = shell.close_compound()
@@ -3709,30 +3711,13 @@ fn toolbar_button(
     enabled: bool,
     active: bool,
 ) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(Vec2::new(28.0, 28.0), Sense::click());
-    if active {
-        ui.painter().rect_filled(
-            rect,
-            CornerRadius::same(tokens::ICON_RADIUS),
-            tokens::ICON_BUTTON,
-        );
-    }
-    let color = if enabled || active {
-        tokens::MUTED
-    } else {
-        tokens::FAINT
-    };
-    let mark = Rect::from_center_size(rect.center(), Vec2::splat(16.0));
-    if let Err(error) = icons::paint(ui.painter(), mark, name, color) {
-        ui.painter().text(
-            rect.center(),
-            Align2::CENTER_CENTER,
-            error.to_string(),
-            FontId::proportional(8.0),
-            tokens::FAINT,
-        );
-    }
-    response.on_hover_text(tip)
+    ui.add_enabled(
+        enabled || active,
+        ui::Button::icon(name)
+            .on(active)
+            .min_size(Vec2::splat(28.0))
+            .tip(tip),
+    )
 }
 
 fn tool_enabled(shell: &Shell, name: &str) -> bool {
@@ -4551,7 +4536,7 @@ fn paint_gap_menu(shell: &mut Shell, ui: &mut Ui) {
 /// channel has clipped.
 fn paint_meter(ui: &Ui, rect: Rect, channels: [cutlass_playback::ChannelReading; 2]) {
     let painter = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
-    painter.rect_filled(rect, CornerRadius::ZERO, tokens::PANEL);
+    ui::Surface::panel().paint(&painter, rect);
     painter.vline(
         rect.left(),
         rect.y_range(),
@@ -4703,17 +4688,12 @@ fn lane_head(
     if let Some((track_id, typed)) = view.renaming.as_mut()
         && track_id == &lane.track_id
     {
-        let field = ui.put(
-            label,
-            egui::TextEdit::singleline(&mut *typed)
-                .font(FontId::proportional(12.0))
-                .text_color(tokens::TEXT),
-        );
-        if !field.has_focus() && !field.lost_focus() {
-            field.request_focus();
-        }
-        if field.lost_focus() {
-            let cancel = ui.input(|input| input.key_pressed(egui::Key::Escape));
+        let field = ui::Field::new(&mut *typed)
+            .text_size(12.0)
+            .focus()
+            .show_in(ui, label);
+        if field.committed || field.cancelled {
+            let cancel = field.cancelled;
             let typed = typed.clone();
             view.renaming = None;
             if !cancel && let Err(error) = shell.rename_track(&lane.track_id, &typed) {
@@ -6882,7 +6862,10 @@ fn export_dialog(
                     ui.label("Replace the existing file?");
                 }
                 let busy = shell.job().is_some();
-                if ui.add_enabled(!busy, egui::Button::new("Export")).clicked() {
+                if ui
+                    .add_enabled(!busy, ui::Button::primary("Export"))
+                    .clicked()
+                {
                     if view.export_path.is_empty() {
                         let name = shell
                             .draft()
@@ -6912,7 +6895,7 @@ fn export_choices(shell: &Shell, ui: &mut Ui, view: &mut ViewState) {
     use cutlass_decode::CodecId;
     use cutlass_export::{GIF_SHORT_SIDES, ProresProfile, SidecarKind};
     let export = &mut view.export;
-    choice_row(ui, "Range", |ui| {
+    choices_row(ui, "Range", |ui| {
         let picked = !shell.selection().is_empty();
         let marked = shell.marked_span().is_some();
         let offered = |span| match span {
@@ -6928,19 +6911,19 @@ fn export_choices(shell: &Shell, ui: &mut Ui, view: &mut ViewState) {
             (ExportSpan::Marked, "In to out"),
             (ExportSpan::Selected, "Selected clips"),
         ] {
-            let label = egui::Button::selectable(export.span == span, name);
+            let label = ui::Choice::new(export.span == span, name);
             if ui.add_enabled(offered(span), label).clicked() {
                 export.span = span;
             }
         }
     });
-    ui.checkbox(&mut export.picture, "Video");
+    ui.add(ui::Check::new(&mut export.picture, "Video"));
     if export.picture {
-        choice_row(ui, "Format", |ui| {
-            if ui.selectable_label(!view.export_mov, "MP4").clicked() {
+        choices_row(ui, "Format", |ui| {
+            if ui.add(ui::Choice::new(!view.export_mov, "MP4")).clicked() {
                 view.export_mov = false;
             }
-            if ui.selectable_label(view.export_mov, "MOV").clicked() {
+            if ui.add(ui::Choice::new(view.export_mov, "MOV")).clicked() {
                 view.export_mov = true;
             }
         });
@@ -6953,7 +6936,7 @@ fn export_choices(shell: &Shell, ui: &mut Ui, view: &mut ViewState) {
         if !fits(export.codec) {
             export.codec = CodecId::H264;
         }
-        choice_row(ui, "Codec", |ui| {
+        choices_row(ui, "Codec", |ui| {
             for (codec, name) in [
                 (CodecId::H264, "H.264"),
                 (CodecId::Hevc, "HEVC"),
@@ -6963,17 +6946,17 @@ fn export_choices(shell: &Shell, ui: &mut Ui, view: &mut ViewState) {
                 if !fits(codec) {
                     continue;
                 }
-                let label = egui::Button::selectable(export.codec == codec, name);
+                let label = ui::Choice::new(export.codec == codec, name);
                 if ui.add_enabled(shell.encodes(codec), label).clicked() {
                     export.codec = codec;
                 }
             }
         });
         if export.codec == CodecId::Prores {
-            choice_row(ui, "Profile", |ui| {
+            choices_row(ui, "Profile", |ui| {
                 for profile in ProresProfile::ALL {
                     if ui
-                        .selectable_label(export.prores == profile, profile.label())
+                        .add(ui::Choice::new(export.prores == profile, profile.label()))
                         .clicked()
                     {
                         export.prores = profile;
@@ -6982,41 +6965,49 @@ fn export_choices(shell: &Shell, ui: &mut Ui, view: &mut ViewState) {
             });
         } else {
             choice_row(ui, "Quality", |ui| {
-                for (quality, name) in [
-                    (ExportQuality::Lower, "Lower"),
-                    (ExportQuality::Recommended, "Recommended"),
-                    (ExportQuality::Higher, "Higher"),
-                ] {
-                    let on = view.export_mbps.is_none() && export.quality == quality;
-                    if ui.selectable_label(on, name).clicked() {
-                        export.quality = quality;
-                        view.export_mbps = None;
+                ui::Segmented::show(ui, |ui| {
+                    for (quality, name) in [
+                        (ExportQuality::Lower, "Lower"),
+                        (ExportQuality::Recommended, "Recommended"),
+                        (ExportQuality::Higher, "Higher"),
+                    ] {
+                        let on = view.export_mbps.is_none() && export.quality == quality;
+                        if ui.add(ui::Choice::new(on, name)).clicked() {
+                            export.quality = quality;
+                            view.export_mbps = None;
+                        }
                     }
-                }
-                if ui
-                    .selectable_label(view.export_mbps.is_some(), "Custom")
-                    .clicked()
-                    && view.export_mbps.is_none()
-                {
-                    let side = u32::try_from(export.short_side).unwrap_or(1080);
-                    let rate = export.quality.bitrate(side, export.codec);
-                    view.export_mbps = Some(format!("{}", rate / 1_000_000));
-                }
+                    if ui
+                        .add(ui::Choice::new(view.export_mbps.is_some(), "Custom"))
+                        .clicked()
+                        && view.export_mbps.is_none()
+                    {
+                        let side = u32::try_from(export.short_side).unwrap_or(1080);
+                        let rate = export.quality.bitrate(side, export.codec);
+                        view.export_mbps = Some(format!("{}", rate / 1_000_000));
+                    }
+                });
                 if let Some(text) = &mut view.export_mbps {
-                    ui.add(egui::TextEdit::singleline(text).desired_width(48.0));
+                    ui::Field::new(text).width(48.0).show(ui);
                     ui.label("Mbps");
                 }
             });
-            choice_row(ui, "Rate", |ui| {
-                if ui.selectable_label(!export.constant_rate, "VBR").clicked() {
+            choices_row(ui, "Rate", |ui| {
+                if ui
+                    .add(ui::Choice::new(!export.constant_rate, "VBR"))
+                    .clicked()
+                {
                     export.constant_rate = false;
                 }
-                if ui.selectable_label(export.constant_rate, "CBR").clicked() {
+                if ui
+                    .add(ui::Choice::new(export.constant_rate, "CBR"))
+                    .clicked()
+                {
                     export.constant_rate = true;
                 }
             });
         }
-        choice_row(ui, "Frame rate", |ui| {
+        choices_row(ui, "Frame rate", |ui| {
             for (rate, name) in [
                 (None, "Project"),
                 (Some(FrameRate::FPS_24), "24"),
@@ -7026,17 +7017,17 @@ fn export_choices(shell: &Shell, ui: &mut Ui, view: &mut ViewState) {
                 (Some(FrameRate::FPS_60), "60"),
             ] {
                 if ui
-                    .selectable_label(export.frame_rate == rate, name)
+                    .add(ui::Choice::new(export.frame_rate == rate, name))
                     .clicked()
                 {
                     export.frame_rate = rate;
                 }
             }
         });
-        choice_row(ui, "Short side", |ui| {
+        choices_row(ui, "Short side", |ui| {
             for side in crate::shell::SHORT_SIDES {
                 if ui
-                    .selectable_label(export.short_side == side, side.to_string())
+                    .add(ui::Choice::new(export.short_side == side, side.to_string()))
                     .clicked()
                 {
                     export.short_side = side;
@@ -7044,7 +7035,7 @@ fn export_choices(shell: &Shell, ui: &mut Ui, view: &mut ViewState) {
             }
         });
     }
-    ui.checkbox(&mut export.sound, "Audio");
+    ui.add(ui::Check::new(&mut export.sound, "Audio"));
     // PCM goes in a MOV or a WAV, never an MP4. FLAC, MP3 and Opus are
     // sound alone, each in a file of its own (Opus in an Ogg file).
     let pcm_fits = view.export_mov || !export.picture;
@@ -7058,52 +7049,52 @@ fn export_choices(shell: &Shell, ui: &mut Ui, view: &mut ViewState) {
     }
     if export.sound {
         let audio = &mut export.audio;
-        choice_row(ui, "Codec", |ui| {
+        choices_row(ui, "Codec", |ui| {
             if ui
-                .selectable_label(audio.codec == CodecId::Aac, "AAC")
+                .add(ui::Choice::new(audio.codec == CodecId::Aac, "AAC"))
                 .clicked()
             {
                 audio.codec = CodecId::Aac;
             }
-            let mp3 = egui::Button::selectable(audio.codec == CodecId::Mp3, "MP3");
+            let mp3 = ui::Choice::new(audio.codec == CodecId::Mp3, "MP3");
             if ui.add_enabled(alone_fits, mp3).clicked() {
                 audio.codec = CodecId::Mp3;
             }
             if ui
-                .selectable_label(audio.codec == CodecId::Alac, "ALAC")
+                .add(ui::Choice::new(audio.codec == CodecId::Alac, "ALAC"))
                 .clicked()
             {
                 audio.codec = CodecId::Alac;
             }
-            let pcm = egui::Button::selectable(audio.codec == CodecId::Pcm, "PCM");
+            let pcm = ui::Choice::new(audio.codec == CodecId::Pcm, "PCM");
             if ui.add_enabled(pcm_fits, pcm).clicked() {
                 audio.codec = CodecId::Pcm;
             }
-            let flac = egui::Button::selectable(audio.codec == CodecId::Flac, "FLAC");
+            let flac = ui::Choice::new(audio.codec == CodecId::Flac, "FLAC");
             if ui.add_enabled(alone_fits, flac).clicked() {
                 audio.codec = CodecId::Flac;
             }
-            let opus = egui::Button::selectable(audio.codec == CodecId::Opus, "Opus");
+            let opus = ui::Choice::new(audio.codec == CodecId::Opus, "Opus");
             if ui.add_enabled(alone_fits, opus).clicked() {
                 audio.codec = CodecId::Opus;
                 audio.sample_rate = 48_000;
             }
         });
-        choice_row(ui, "Sample rate", |ui| {
+        choices_row(ui, "Sample rate", |ui| {
             for rate in SoundFormat::SAMPLE_RATES {
                 let name = if rate == 44_100 { "44.1 kHz" } else { "48 kHz" };
                 // Opus is coded at 48 kHz only.
                 let fits = rate == 48_000 || audio.codec != CodecId::Opus;
-                let button = egui::Button::selectable(audio.sample_rate == rate, name);
+                let button = ui::Choice::new(audio.sample_rate == rate, name);
                 if ui.add_enabled(fits, button).clicked() {
                     audio.sample_rate = rate;
                 }
             }
         });
-        choice_row(ui, "Channels", |ui| {
+        choices_row(ui, "Channels", |ui| {
             for (channels, name) in [(2, "Stereo"), (1, "Mono")] {
                 if ui
-                    .selectable_label(audio.channels == channels, name)
+                    .add(ui::Choice::new(audio.channels == channels, name))
                     .clicked()
                 {
                     audio.channels = channels;
@@ -7112,10 +7103,13 @@ fn export_choices(shell: &Shell, ui: &mut Ui, view: &mut ViewState) {
         });
         // Lossless sound has no bitrate to choose.
         if !audio.lossless() {
-            choice_row(ui, "Bitrate", |ui| {
+            choices_row(ui, "Bitrate", |ui| {
                 for rate in SoundFormat::BITRATES {
                     if ui
-                        .selectable_label(audio.bitrate == rate, format!("{} kbps", rate / 1000))
+                        .add(ui::Choice::new(
+                            audio.bitrate == rate,
+                            format!("{} kbps", rate / 1000),
+                        ))
                         .clicked()
                     {
                         audio.bitrate = rate;
@@ -7125,32 +7119,35 @@ fn export_choices(shell: &Shell, ui: &mut Ui, view: &mut ViewState) {
         }
     }
     let mut gif_on = export.gif.is_some();
-    if ui.checkbox(&mut gif_on, "GIF").changed() {
+    if ui.add(ui::Check::new(&mut gif_on, "GIF")).changed() {
         export.gif = gif_on.then(GifExport::default);
     }
     if let Some(gif) = &mut export.gif {
-        choice_row(ui, "Format", |ui| {
-            if ui.selectable_label(!gif.webp, "GIF").clicked() {
+        choices_row(ui, "Format", |ui| {
+            if ui.add(ui::Choice::new(!gif.webp, "GIF")).clicked() {
                 gif.webp = false;
             }
-            if ui.selectable_label(gif.webp, "WebP").clicked() {
+            if ui.add(ui::Choice::new(gif.webp, "WebP")).clicked() {
                 gif.webp = true;
             }
         });
-        choice_row(ui, "Size", |ui| {
+        choices_row(ui, "Size", |ui| {
             for side in GIF_SHORT_SIDES {
                 if ui
-                    .selectable_label(gif.short_side == side, side.to_string())
+                    .add(ui::Choice::new(gif.short_side == side, side.to_string()))
                     .clicked()
                 {
                     gif.short_side = side;
                 }
             }
         });
-        choice_row(ui, "Frame rate", |ui| {
+        choices_row(ui, "Frame rate", |ui| {
             for rate in GIF_RATES {
                 if ui
-                    .selectable_label(gif.frame_rate.numerator == rate, rate.to_string())
+                    .add(ui::Choice::new(
+                        gif.frame_rate.numerator == rate,
+                        rate.to_string(),
+                    ))
                     .clicked()
                 {
                     gif.frame_rate = FrameRate {
@@ -7160,23 +7157,26 @@ fn export_choices(shell: &Shell, ui: &mut Ui, view: &mut ViewState) {
                 }
             }
         });
-        choice_row(ui, "Loop", |ui| {
-            if ui.selectable_label(!gif.looped, "Once").clicked() {
+        choices_row(ui, "Loop", |ui| {
+            if ui.add(ui::Choice::new(!gif.looped, "Once")).clicked() {
                 gif.looped = false;
             }
-            if ui.selectable_label(gif.looped, "Loop").clicked() {
+            if ui.add(ui::Choice::new(gif.looped, "Loop")).clicked() {
                 gif.looped = true;
             }
         });
     }
     let mut captions_on = export.captions.is_some();
-    if ui.checkbox(&mut captions_on, "Caption file").changed() {
+    if ui
+        .add(ui::Check::new(&mut captions_on, "Caption file"))
+        .changed()
+    {
         export.captions = captions_on.then_some(SidecarKind::Srt);
     }
     if let Some(kind) = &mut export.captions {
-        choice_row(ui, "File", |ui| {
+        choices_row(ui, "File", |ui| {
             for (choice, name) in [(SidecarKind::Srt, "SRT"), (SidecarKind::Plain, "TXT")] {
-                if ui.selectable_label(*kind == choice, name).clicked() {
+                if ui.add(ui::Choice::new(*kind == choice, name)).clicked() {
                     *kind = choice;
                 }
             }
@@ -7324,9 +7324,18 @@ fn short_folder(path: &std::path::Path) -> String {
 }
 
 /// A dim label and its choices on one line.
+/// A choice row whose options sit in one well.
+fn choices_row(ui: &mut Ui, label: &str, add: impl FnOnce(&mut Ui)) {
+    choice_row(ui, label, |ui| {
+        ui::Segmented::show(ui, add);
+    });
+}
+
 fn choice_row(ui: &mut Ui, label: &str, add: impl FnOnce(&mut Ui)) {
     ui.horizontal(|ui| {
-        let (rect, _) = ui.allocate_exact_size(Vec2::new(84.0, 20.0), Sense::hover());
+        // As tall as a well of choices, so the name sits on its middle.
+        let tall = tokens::CHOICE_HEIGHT + 2.0 * f32::from(tokens::SEGMENT_PAD);
+        let (rect, _) = ui.allocate_exact_size(Vec2::new(84.0, tall), Sense::hover());
         ui.painter().text(
             rect.left_center(),
             Align2::LEFT_CENTER,
@@ -7499,8 +7508,7 @@ fn key_name(key: egui::Key) -> Option<String> {
 }
 
 fn panel(ui: &mut Ui, rect: Rect) {
-    ui.painter()
-        .rect_filled(rect, CornerRadius::ZERO, tokens::PANEL);
+    ui::Surface::panel().paint(ui.painter(), rect);
 }
 
 fn drag_gap(ui: &mut Ui, rect: Rect, mut on_drag: impl FnMut(Vec2)) {
@@ -10597,6 +10605,73 @@ mod tests {
         assert!(shell.inspection().unwrap().scale_x > 1.0);
         shell.undo().unwrap();
         assert_eq!(shell.inspection().unwrap().scale_x, 1.0);
+        assert!(!shell.can_undo());
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn dragging_a_number_box_unit_scrubs_the_value_and_undoes_in_one_step() {
+        let temp = std::env::temp_dir().join(format!("cutlass-unit-scrub-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let mut draft = cutlass_model::Draft::empty("draft");
+        draft
+            .materials
+            .videos
+            .push(cutlass_model::MaterialVideo::new("movie"));
+        draft.tracks[0].segments.push(cutlass_model::Segment::new(
+            "main",
+            "movie",
+            cutlass_model::TimeRange::new(0, 2_000_000),
+        ));
+        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        shell.select(Some(SegmentId::new("main")));
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let mut frame = |shell: &mut Shell, events: Vec<egui::Event>| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: screen,
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, &mut view, None),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        frame(&mut shell, Vec::new());
+        let output = frame(&mut shell, Vec::new());
+        let before = shell.inspection().unwrap().transform_x;
+        // The unit's text is painted from its left middle.
+        let unit = text_pos(&output, "X").expect("the X unit") + Vec2::new(3.0, 7.0);
+        let press = |pos: Pos2, pressed: bool| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        frame(
+            &mut shell,
+            vec![egui::Event::PointerMoved(unit), press(unit, true)],
+        );
+        let mut seen = Vec::new();
+        for step in 1..=3 {
+            let at = unit + Vec2::new(20.0 * step as f32, 0.0);
+            frame(&mut shell, vec![egui::Event::PointerMoved(at)]);
+            seen.push(shell.inspection().unwrap().transform_x);
+        }
+        frame(&mut shell, vec![press(unit + Vec2::new(60.0, 0.0), false)]);
+        frame(&mut shell, Vec::new());
+        assert!(
+            seen.windows(2).all(|pair| pair[1] > pair[0]) && seen[0] > before,
+            "the value did not follow the drag: {before} {seen:?}"
+        );
+        shell.undo().unwrap();
+        assert_eq!(shell.inspection().unwrap().transform_x, before);
         assert!(!shell.can_undo());
         let _ = std::fs::remove_dir_all(&temp);
     }

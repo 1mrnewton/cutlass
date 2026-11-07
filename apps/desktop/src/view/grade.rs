@@ -8,7 +8,7 @@ use egui::{Color32, CornerRadius, Pos2, RichText, Sense, Shape, Stroke, Ui, Vec2
 use cutlass_effects::{CurveChannel, Grade, HSL_COLORS, Wheel, WheelSetting, curve_table};
 
 use crate::shell::{Inspection, Shell};
-use crate::tokens;
+use crate::{tokens, ui};
 
 use super::inspector::{InspectorState, note, send, slider};
 
@@ -70,7 +70,7 @@ pub(super) fn hsl_page(
     if ui
         .add_enabled(
             stored.iter().any(|value| *value != 0.0),
-            egui::Button::new(RichText::new("Reset color").size(12.0)),
+            ui::Button::new("Reset color").text_size(12.0),
         )
         .clicked()
     {
@@ -89,15 +89,10 @@ pub(super) fn curves_page(
     inspection: &Inspection,
 ) {
     ui.add_space(10.0);
-    ui.horizontal(|ui| {
+    ui::Segmented::show(ui, |ui| {
         for (index, channel) in CurveChannel::ALL.into_iter().enumerate() {
             let on = state.curve_channel == index;
-            let text = RichText::new(channel.label()).size(12.0).color(if on {
-                Color32::WHITE
-            } else {
-                tokens::MUTED
-            });
-            if ui.selectable_label(on, text).clicked() {
+            if ui.add(ui::Choice::new(on, channel.label())).clicked() {
                 state.curve_channel = index;
                 state.curve_drag = None;
             }
@@ -220,7 +215,7 @@ pub(super) fn curves_page(
     if ui
         .add_enabled(
             !inspection.grade.curve(channel).is_empty(),
-            egui::Button::new(RichText::new("Reset curve").size(12.0)),
+            ui::Button::new("Reset curve").text_size(12.0),
         )
         .clicked()
     {

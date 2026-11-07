@@ -10,23 +10,22 @@
 use std::collections::{HashMap, HashSet};
 
 use egui::{
-    Align, Align2, Color32, CornerRadius, FontId, Layout, Rect, RichText, Sense, Slider, Stroke,
-    TextEdit, Ui, Vec2,
+    Align, Align2, Color32, CornerRadius, FontId, Layout, Rect, RichText, Sense, Stroke, Ui, Vec2,
 };
 
 use crate::shell::{
     Inspection, KeyedSetting, LetterCase, Panel, SILENT_DB, Shell, ShellError, TextLook, volume_db,
 };
-use crate::{icons, tokens};
+use crate::{icons, tokens, ui};
 use cutlass_model::{ANIMATION_PRESETS, AnimType, Micros, Motion};
 
 use super::ViewState;
 
 /// The active tab color, and an on switch.
 const ACCENT: Color32 = Color32::from_rgb(0x2a, 0xd4, 0xe0);
-const PAGES: Color32 = Color32::from_rgb(0x26, 0x26, 0x26);
+const PAGES: Color32 = tokens::INSET;
 const PAGE_ON: Color32 = Color32::from_rgb(0x3a, 0x3a, 0x3a);
-const BOX: Color32 = Color32::from_rgb(0x2a, 0x2a, 0x2a);
+const BOX: Color32 = tokens::RAISED;
 const LABEL_WIDTH: f32 = 92.0;
 const VALUE_WIDTH: f32 = 60.0;
 const PAIR_BOX: f32 = 84.0;
@@ -36,9 +35,6 @@ const ROW_GAP: f32 = 6.0;
 /// The widest and narrowest gap between the inspector's tabs.
 const TAB_GAP: f32 = 18.0;
 const TAB_GAP_MIN: f32 = 8.0;
-/// A switch: its track, and the track's color when off.
-const SWITCH: Vec2 = Vec2::new(34.0, 20.0);
-const SWITCH_OFF: Color32 = Color32::from_rgb(0x44, 0x44, 0x44);
 const LATER: &str = "Later: Cutlass has no edit for this yet";
 
 /// Which tab, page, and sections are open. They reset when another clip
@@ -295,12 +291,10 @@ fn caption_list(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState) {
     ui.horizontal(|ui| {
         // The tools sit at the right; the search takes what is left.
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            ui.add(egui::Button::new(RichText::new("?").size(12.0)).fill(BOX))
+            ui.add(ui::Button::new("?").text_size(12.0))
                 .on_hover_text(CAPTION_LIST_HELP);
             let open = state.open.contains(REPLACE_ROW);
-            let toggle = egui::Button::new(RichText::new("Replace").size(12.0))
-                .fill(BOX)
-                .selected(open);
+            let toggle = ui::Button::new("Replace").text_size(12.0).on(open);
             if ui
                 .add(toggle)
                 .on_hover_text("Find and replace across every caption")
@@ -312,18 +306,14 @@ fn caption_list(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState) {
             rerun = ui
                 .add_enabled(
                     shell.rerun_caption_enabled(),
-                    egui::Button::new(RichText::new("Re-run").size(12.0)).fill(BOX),
+                    ui::Button::new("Re-run").text_size(12.0),
                 )
                 .on_hover_text("Hear this caption's clip again, keeping its look")
                 .on_disabled_hover_text("This caption was not heard from a clip on the timeline")
                 .clicked();
             later_button(ui, "Translate");
             let query = state.fields.entry("caption search".to_owned()).or_default();
-            ui.add(
-                TextEdit::singleline(query)
-                    .hint_text("Search")
-                    .desired_width(ui.available_width()),
-            );
+            ui::Field::new(query).hint("Search").icon("search").show(ui);
         });
     });
     if rerun {
@@ -365,14 +355,14 @@ fn caption_list(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState) {
             );
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui
-                    .add(egui::Button::new(RichText::new("🗑").size(12.0)).fill(BOX))
+                    .add(ui::Button::icon("delete"))
                     .on_hover_text("Delete this caption")
                     .clicked()
                 {
                     remove = Some(row.segment_id.clone());
                 }
                 if ui
-                    .add(egui::Button::new(RichText::new("+").size(12.0)).fill(BOX))
+                    .add(ui::Button::new("+").text_size(12.0))
                     .on_hover_text("Add a caption after this one")
                     .clicked()
                 {
@@ -381,7 +371,7 @@ fn caption_list(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState) {
                 let key = format!("caption line {}", row.segment_id.as_str());
                 let text = state.fields.entry(key).or_default();
                 let response = ui.add(
-                    TextEdit::singleline(text)
+                    egui::TextEdit::singleline(text)
                         .frame(egui::Frame::NONE)
                         .text_color(color)
                         .desired_width(f32::INFINITY),
@@ -421,14 +411,14 @@ fn replace_row(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState) {
             .fields
             .entry("caption replace".to_owned())
             .or_default();
-        let response = ui.add(
-            TextEdit::singleline(with)
-                .hint_text("Replace with")
-                .desired_width(ui.available_width() - 90.0),
-        );
+        let response = ui::Field::new(with)
+            .hint("Replace with")
+            .width(ui.available_width() - 90.0)
+            .show(ui)
+            .response;
         replace = response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
         replace |= ui
-            .add(egui::Button::new(RichText::new("Replace all").size(12.0)).fill(BOX))
+            .add(ui::Button::new("Replace all").text_size(12.0))
             .clicked();
     });
     if !replace {
@@ -700,7 +690,10 @@ fn blend(
                     .show_ui(ui, |ui| {
                         for choice in cutlass_effects::BlendMode::ALL {
                             if ui
-                                .selectable_label(inspection.blend == choice, choice.label())
+                                .add(
+                                    ui::Choice::new(inspection.blend == choice, choice.label())
+                                        .wide(),
+                                )
                                 .clicked()
                             {
                                 picked = Some(choice);
@@ -883,11 +876,11 @@ fn animation_tab(
     later_note(ui, "Animations");
     ui.add_enabled_ui(false, |ui| {
         let mut query = String::new();
-        ui.add(
-            TextEdit::singleline(&mut query)
-                .hint_text("Search animations")
-                .desired_width(ui.available_width() - 28.0),
-        );
+        ui::Field::new(&mut query)
+            .hint("Search animations")
+            .icon("search")
+            .width(ui.available_width() - 28.0)
+            .show(ui);
     });
     let mut names = vec!["None"];
     names.extend_from_slice(motions.get(state.page).copied().unwrap_or_default());
@@ -1155,7 +1148,7 @@ fn adjust_tab(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState, inspec
         ui.label(RichText::new("Auto adjust").size(13.0).color(tokens::TEXT));
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             if ui
-                .button(RichText::new("Apply").size(12.0))
+                .add(ui::Button::new("Apply").text_size(12.0))
                 .on_hover_text("Even out exposure, contrast and colour cast")
                 .clicked()
             {
@@ -1175,7 +1168,7 @@ fn adjust_tab(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState, inspec
                     .selected_text(RichText::new("Match to…").size(12.0))
                     .show_ui(ui, |ui| {
                         for (id, name) in &choices {
-                            if ui.selectable_label(false, name).clicked() {
+                            if ui.add(ui::Choice::new(false, name).wide()).clicked() {
                                 matched = Some(id.clone());
                             }
                         }
@@ -1254,7 +1247,7 @@ fn cutout_page(
         ui.horizontal(|ui| {
             row_label(ui, "");
             for (name, hex) in [("Green", "#00ff00"), ("Blue", "#0000ff")] {
-                if ui.button(RichText::new(name).size(12.0)).clicked() {
+                if ui.add(ui::Button::new(name).text_size(12.0)).clicked() {
                     send(shell, |shell| shell.set_chroma(hex, strength, shadow));
                 }
             }
@@ -1307,7 +1300,7 @@ fn tracking(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState) {
                 if ui
                     .add_enabled(
                         shell.track_enabled(),
-                        egui::Button::new(RichText::new("Track").size(12.0)),
+                        ui::Button::new("Track").text_size(12.0),
                     )
                     .on_disabled_hover_text("Put the playhead on an unlocked video clip.")
                     .clicked()
@@ -1317,7 +1310,7 @@ fn tracking(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState) {
                 }
                 if shell.fix_enabled()
                     && ui
-                        .button(RichText::new("Fix frame").size(12.0))
+                        .add(ui::Button::new("Fix frame").text_size(12.0))
                         .on_hover_text(
                             "Redraw the box on a frame where the track went wrong, \
                              and track again from there.",
@@ -1333,19 +1326,19 @@ fn tracking(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState) {
         let fixing = tracking.fixing.is_some();
         ui.horizontal(|ui| {
             row_label(ui, "Follow");
-            for (name, mode) in [
-                ("Object", cutlass_model::TrackMode::Object),
-                ("Plane", cutlass_model::TrackMode::Plane),
-            ] {
-                let on = tracking.mode == mode;
-                let text =
-                    RichText::new(name)
-                        .size(12.0)
-                        .color(if on { ACCENT } else { tokens::TEXT });
-                if ui.selectable_label(on, text).clicked() {
-                    shell.set_track_mode(mode);
+            ui::Segmented::show(ui, |ui| {
+                for (name, mode) in [
+                    ("Object", cutlass_model::TrackMode::Object),
+                    ("Plane", cutlass_model::TrackMode::Plane),
+                ] {
+                    if ui
+                        .add(ui::Choice::new(tracking.mode == mode, name))
+                        .clicked()
+                    {
+                        shell.set_track_mode(mode);
+                    }
                 }
-            }
+            });
         });
         note(
             ui,
@@ -1370,7 +1363,7 @@ fn tracking(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState) {
         for choice in choices {
             let on = tracking.followers.contains(&choice.segment_id);
             let row = ui.horizontal(|ui| {
-                let check = check_box(ui, on);
+                let check = check_box(ui, on, &choice.name);
                 let name = ui.add(
                     egui::Label::new(RichText::new(&choice.name).size(12.0).color(tokens::TEXT))
                         .truncate()
@@ -1396,7 +1389,7 @@ fn tracking(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState) {
         for choice in shell.mask_choices() {
             let on = tracking.masks.contains(&choice.segment_id);
             let row = ui.horizontal(|ui| {
-                let check = check_box(ui, on);
+                let check = check_box(ui, on, &choice.name);
                 let name = ui.add(
                     egui::Label::new(RichText::new(&choice.name).size(12.0).color(tokens::TEXT))
                         .truncate()
@@ -1413,16 +1406,15 @@ fn tracking(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState) {
             if ui
                 .add_enabled(
                     shell.track_ready(),
-                    egui::Button::new(
-                        RichText::new(if fixing { "Track from here" } else { "Track" }).size(12.0),
-                    ),
+                    ui::Button::new(if fixing { "Track from here" } else { "Track" })
+                        .text_size(12.0),
                 )
                 .on_disabled_hover_text("Draw a box and choose a clip or a mask to follow it.")
                 .clicked()
             {
                 send(shell, Shell::run_tracking);
             }
-            if ui.button(RichText::new("Cancel").size(12.0)).clicked() {
+            if ui.add(ui::Button::new("Cancel").text_size(12.0)).clicked() {
                 shell.stop_tracking();
             }
         });
@@ -1449,13 +1441,13 @@ fn select_object(shell: &mut Shell, ui: &mut Ui, inspection: &Inspection) {
     }
     ui.horizontal(|ui| {
         if picking {
-            if ui.button(RichText::new("Done").size(12.0)).clicked() {
+            if ui.add(ui::Button::new("Done").text_size(12.0)).clicked() {
                 shell.stop_picking();
             }
         } else if ui
             .add_enabled(
                 shell.pick_enabled(),
-                egui::Button::new(RichText::new("Select object").size(12.0)),
+                ui::Button::new("Select object").text_size(12.0),
             )
             .on_disabled_hover_text("Put the playhead on an unlocked video clip.")
             .clicked()
@@ -1465,7 +1457,7 @@ fn select_object(shell: &mut Shell, ui: &mut Ui, inspection: &Inspection) {
         if ui
             .add_enabled(
                 inspection.selected,
-                egui::Button::new(RichText::new("Clear").size(12.0)),
+                ui::Button::new("Clear").text_size(12.0),
             )
             .clicked()
         {
@@ -1496,7 +1488,10 @@ fn mask_page(
         let mut picked: Option<Option<MaskShape>> = None;
         ui.horizontal_wrapped(|ui| {
             if ui
-                .selectable_label(mask.is_none(), RichText::new("None").size(12.0))
+                .add(ui::Choice::new(
+                    mask.is_none(),
+                    RichText::new("None").size(12.0),
+                ))
                 .clicked()
             {
                 picked = Some(None);
@@ -1504,7 +1499,7 @@ fn mask_page(
             for shape in MaskShape::ALL {
                 let on = mask.is_some_and(|mask| mask.shape == shape);
                 if ui
-                    .selectable_label(on, RichText::new(shape.label()).size(12.0))
+                    .add(ui::Choice::new(on, RichText::new(shape.label()).size(12.0)))
                     .clicked()
                 {
                     picked = Some(Some(shape));
@@ -1711,7 +1706,7 @@ fn lut_section(
                 .map_or("None", |(name, _)| name.as_str());
             ui.label(RichText::new(name).size(12.0).color(Color32::WHITE));
             if ui
-                .button(RichText::new("Choose .cube…").size(12.0))
+                .add(ui::Button::new("Choose .cube…").text_size(12.0))
                 .clicked()
             {
                 state.wants_lut = true;
@@ -1781,7 +1776,7 @@ fn text_basic(
         ui.add_space(8.0);
         let mut all = shell.all_captions();
         if ui
-            .checkbox(&mut all, "Apply to all main captions")
+            .add(ui::Check::new(&mut all, "Apply to all main captions"))
             .on_hover_text("A change to the look or place styles every caption on this row")
             .changed()
         {
@@ -1851,7 +1846,7 @@ fn text_basic(
                 ("Tt", "Title case", LetterCase::Title),
             ] {
                 if ui
-                    .add(egui::Button::new(RichText::new(label).size(12.0)).fill(BOX))
+                    .add(ui::Button::new(label).text_size(12.0))
                     .on_hover_text(tip)
                     .clicked()
                 {
@@ -1890,12 +1885,7 @@ fn text_basic(
 fn words_box(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState) {
     let stored = shell.text_words().unwrap_or_default();
     let text = state.fields.entry("words".to_owned()).or_default();
-    let response = ui.add(
-        TextEdit::multiline(text)
-            .desired_rows(3)
-            .desired_width(f32::INFINITY)
-            .text_color(tokens::TEXT),
-    );
+    let response = ui::Field::multiline(text, 3).show(ui).response;
     if super::commits(ui, &response) && *text != stored {
         let content = text.clone();
         send(shell, |shell| shell.set_text(content));
@@ -1922,11 +1912,7 @@ fn caption_paragraphs(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState
             .fields
             .entry(format!("paragraph {index}"))
             .or_default();
-        let response = ui.add(
-            TextEdit::singleline(text)
-                .desired_width(f32::INFINITY)
-                .text_color(tokens::TEXT),
-        );
+        let response = ui::Field::new(text).show(ui).response;
         if super::commits(ui, &response) && *text != paragraph.text {
             edited = Some((index, text.clone()));
         } else if !response.has_focus() {
@@ -1965,7 +1951,7 @@ fn caption_words(
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let marked = inspection.caption_keywords.contains(&index);
                 if ui
-                    .add(egui::Button::new(RichText::new("★").size(11.0)).selected(marked))
+                    .add(ui::Button::new("★").text_size(11.0).on(marked))
                     .on_hover_text(if marked {
                         "Take the keyword mark off"
                     } else {
@@ -1982,23 +1968,20 @@ fn caption_words(
                 join = ui
                     .add_enabled(
                         index + 1 < count && next_is_word,
-                        egui::Button::new(RichText::new("+").size(11.0)),
+                        ui::Button::new("+").text_size(11.0),
                     )
                     .on_hover_text("Join with the next word")
                     .clicked();
                 let broken = cutlass_editor::breaks_before(columns, index);
                 line = ui
-                    .add_enabled(
-                        index > 0,
-                        egui::Button::new(RichText::new("↵").size(11.0)).selected(broken),
-                    )
+                    .add_enabled(index > 0, ui::Button::new("↵").text_size(11.0).on(broken))
                     .on_hover_text(if broken {
                         "Join this line to the one before"
                     } else {
                         "Start a new line here"
                     })
                     .clicked();
-                let response = ui.add(TextEdit::singleline(text).desired_width(f32::INFINITY));
+                let response = ui::Field::new(text).show(ui).response;
                 if super::commits(ui, &response) && text != word {
                     edited = Some(text.clone());
                 }
@@ -2035,7 +2018,7 @@ fn font_row(shell: &mut Shell, ui: &mut Ui, inspection: &Inspection) {
             .show_ui(ui, |ui| {
                 for face in &faces {
                     if ui
-                        .selectable_label(*face == inspection.font, face_label(face))
+                        .add(ui::Choice::new(*face == inspection.font, face_label(face)).wide())
                         .clicked()
                     {
                         picked = Some(face.clone());
@@ -2379,9 +2362,8 @@ fn tabs(ui: &mut Ui, labels: &[&str], current: &mut usize) {
         .sum();
     let gaps = labels.len().saturating_sub(1).max(1) as f32;
     let gap = ((ui.available_width() - text - 1.0) / gaps).clamp(TAB_GAP_MIN, TAB_GAP);
-    egui::ScrollArea::horizontal()
-        .id_salt(("inspector-tabs", labels.len()))
-        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+    ui::Scroll::horizontal(("inspector-tabs", labels.len()))
+        .without_bar()
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.set_min_height(ROW_HEIGHT);
@@ -2485,7 +2467,9 @@ fn section(
     ui.horizontal(|ui| {
         ui.set_min_height(40.0);
         if let Some((on, editable)) = check {
-            let response = ui.add_enabled_ui(editable, |ui| check_box(ui, on)).inner;
+            let response = ui
+                .add_enabled_ui(editable, |ui| check_box(ui, on, label))
+                .inner;
             header.toggled = response.clicked();
         }
         ui.spacing_mut().item_spacing.x = 6.0;
@@ -2569,7 +2553,7 @@ fn later_row(ui: &mut Ui, label: &str) {
     ui.horizontal(|ui| {
         ui.set_min_height(40.0);
         ui.spacing_mut().item_spacing.x = 6.0;
-        ui.add_enabled_ui(false, |ui| check_box(ui, false));
+        ui.add_enabled_ui(false, |ui| check_box(ui, false, label));
         ui.label(RichText::new(label).size(13.0).color(tokens::FAINT));
         chevron(ui, false);
         later_badge(ui);
@@ -2606,22 +2590,15 @@ pub(super) fn note(ui: &mut Ui, text: &str) {
 
 fn later_button(ui: &mut Ui, label: &str) {
     ui.add_space(6.0);
-    ui.add_enabled(
-        false,
-        egui::Button::new(RichText::new(label).size(12.0)).fill(BOX),
-    )
-    .on_disabled_hover_text(LATER);
+    ui.add_enabled(false, ui::Button::new(label).text_size(12.0).tip(LATER));
 }
 
 fn footer(ui: &mut Ui, labels: &[&str]) {
     ui.add_space(8.0);
     ui.horizontal(|ui| {
         for label in labels {
-            ui.add_enabled(
-                false,
-                egui::Button::new(RichText::new(*label).size(12.0)).fill(BOX),
-            )
-            .on_disabled_hover_text(LATER);
+            ui.add_enabled(false, ui::Button::new(*label).text_size(12.0))
+                .on_disabled_hover_text(LATER);
         }
     });
 }
@@ -2762,10 +2739,7 @@ fn later_tiles(ui: &mut Ui, names: &[&str]) {
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = Vec2::splat(6.0);
             for name in names {
-                ui.add_sized(
-                    [64.0, 48.0],
-                    egui::Button::new(RichText::new(*name).size(11.0)).fill(BOX),
-                );
+                ui.add_sized([64.0, 48.0], ui::Button::new(*name).text_size(11.0));
             }
         });
     })
@@ -2818,16 +2792,45 @@ pub(super) fn slider(
 ) -> Option<f64> {
     let mut value = state.live.get(key).copied().unwrap_or(stored);
     let mut moved = None;
+    // The box takes typing only where it shows the value itself, give or
+    // take its suffix; a box that shows a converted value stays read-only.
+    let (low, high) = (*range.start(), *range.end());
+    let near = |at: f64| {
+        leading_number(&show(at))
+            .is_some_and(|shown| (shown - at).abs() <= (high - low).abs() * 0.01)
+    };
+    let typable = near(low) && near(high);
     ui.horizontal(|ui| {
         row_label(ui, label);
         let track = (ui.available_width() - VALUE_WIDTH - 8.0).max(40.0);
-        ui.spacing_mut().slider_width = track;
-        let response = ui.add(Slider::new(&mut value, range).show_value(false));
+        let response = ui.add(ui::Slider::new(&mut value, range).name(label).width(track));
         if response.changed() {
             state.live.insert(key.to_owned(), value);
             moved = Some(value).filter(|value| *value != stored);
         }
-        value_box(ui, &show(value));
+        if typable {
+            let text = state.fields.entry(format!("{key} value")).or_default();
+            let salt = ("slider-value", key);
+            // Show the value before the box draws, unless it is being typed in.
+            let id = ui.make_persistent_id(egui::IdSalt::new(salt));
+            if !ui.memory(|memory| memory.has_focus(id)) {
+                *text = show(value);
+            }
+            let field = ui::Field::new(text)
+                .id_salt(salt)
+                .name(label)
+                .width(VALUE_WIDTH)
+                .text_size(12.0)
+                .show(ui);
+            if super::commits(ui, &field.response)
+                && let Some(typed) = leading_number(text)
+            {
+                let typed = typed.clamp(low, high);
+                moved = Some(typed).filter(|typed| *typed != stored);
+            }
+        } else {
+            value_box(ui, &show(value));
+        }
     });
     ui.add_space(ROW_GAP);
     // The value shown follows the track while held, then the stored one.
@@ -2837,14 +2840,29 @@ pub(super) fn slider(
     moved
 }
 
+/// The number a value box's text starts with, such as 90 in `90%`.
+fn leading_number(text: &str) -> Option<f64> {
+    let text = text.trim();
+    let end = text
+        .char_indices()
+        .find(|&(index, c)| {
+            !(c.is_ascii_digit() || c == '.' || (index == 0 && matches!(c, '-' | '+' | '−')))
+        })
+        .map_or(text.len(), |(index, _)| index);
+    text[..end]
+        .replace('−', "-")
+        .parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite())
+}
+
 fn later_slider(ui: &mut Ui, label: &str, value: f64, shown: &str) {
     ui.add_enabled_ui(false, |ui| {
         ui.horizontal(|ui| {
             row_label(ui, label);
             let track = (ui.available_width() - VALUE_WIDTH - 8.0).max(40.0);
-            ui.spacing_mut().slider_width = track;
             let mut value = value;
-            ui.add(Slider::new(&mut value, -1000.0..=1000.0).show_value(false));
+            ui.add(ui::Slider::new(&mut value, -1000.0..=1000.0).width(track));
             value_box(ui, shown);
         });
     })
@@ -2901,41 +2919,56 @@ fn number_box(
     let stored = stored + 0.0;
     let text = state.fields.entry(key.to_owned()).or_default();
     let mut edited = None;
-    egui::Frame::new()
-        .fill(BOX)
-        .corner_radius(CornerRadius::same(8))
-        .inner_margin(egui::Margin::symmetric(8, 5))
-        .show(ui, |ui| {
-            ui.set_width(width - 16.0);
-            ui.horizontal(|ui| {
-                if unit == "°" {
-                    paint_inline_icon(ui, "rotate");
-                } else if !unit.is_empty() {
-                    ui.label(RichText::new(unit).size(12.0).color(tokens::MUTED));
-                }
-                let response = ui.add(
-                    TextEdit::singleline(text)
-                        .desired_width(ui.available_width())
-                        .frame(egui::Frame::NONE)
-                        .text_color(Color32::WHITE),
-                );
-                if super::commits(ui, &response) {
-                    edited = text
-                        .trim()
-                        .parse::<f64>()
-                        .ok()
-                        .filter(|value| value.is_finite());
-                }
-                if !response.has_focus() {
-                    let shown = if stored.fract() == 0.0 {
-                        format!("{stored:.0}")
-                    } else {
-                        format!("{stored:.2}")
-                    };
-                    *text = shown;
-                }
-            });
-        });
+    let field = ui::Field::new(text)
+        .name(key)
+        .width(width)
+        .height(ROW_HEIGHT)
+        .ink(Color32::WHITE);
+    let field = if unit == "°" {
+        field.icon("rotate")
+    } else {
+        field.unit(unit)
+    };
+    let shown = field.scrub().show(ui);
+    let response = shown.response;
+    // A drag on the unit counts from the value at the press, one step a
+    // point. The shell joins a held drag into one undo step.
+    let start_key = format!("{key} scrub start");
+    let step_key = format!("{key} scrub step");
+    if let Some(moved) = shown.scrub {
+        let start = *state.live.entry(start_key).or_insert(stored);
+        let step = *state
+            .live
+            .entry(step_key)
+            .or_insert(if stored.fract() == 0.0 { 1.0 } else { 0.1 });
+        // Shift already makes `moved` a tenth; land on a tenth of a step
+        // then too.
+        let grain = if ui.input(|input| input.modifiers.shift) {
+            step * 0.1
+        } else {
+            step
+        };
+        let value = start + f64::from(moved) * step;
+        edited = Some((value / grain).round() * grain);
+    } else {
+        state.live.remove(&start_key);
+        state.live.remove(&step_key);
+    }
+    if super::commits(ui, &response) {
+        edited = text
+            .trim()
+            .parse::<f64>()
+            .ok()
+            .filter(|value| value.is_finite());
+    }
+    if !response.has_focus() {
+        let shown = if stored.fract() == 0.0 {
+            format!("{stored:.0}")
+        } else {
+            format!("{stored:.2}")
+        };
+        *text = shown;
+    }
     edited.filter(|value| *value != stored)
 }
 
@@ -2989,94 +3022,50 @@ fn parse_hex(text: &str) -> Option<Color32> {
 }
 
 pub(super) fn switch_row(ui: &mut Ui, label: &str, on: bool, editable: bool) -> egui::Response {
+    // The caller flips the stored value on a click; this copy only draws.
+    let mut shown = on;
     let response = ui
         .horizontal(|ui| {
             ui.set_min_height(ROW_HEIGHT);
-            ui.label(RichText::new(label).size(12.0).color(tokens::TEXT));
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.add_enabled_ui(editable, |ui| {
-                    let (rect, response) = ui.allocate_exact_size(SWITCH, Sense::click());
-                    let fill = if on { tokens::EXPORT } else { SWITCH_OFF };
-                    let radius = SWITCH.y / 2.0;
-                    ui.painter()
-                        .rect_filled(rect, CornerRadius::same(radius as u8), fill);
-                    let knob = if on {
-                        rect.right_center() - Vec2::new(radius, 0.0)
-                    } else {
-                        rect.left_center() + Vec2::new(radius, 0.0)
-                    };
-                    ui.painter()
-                        .circle_filled(knob, radius - 2.5, Color32::WHITE);
-                    response
-                })
+            ui.add_enabled_ui(editable, |ui| ui::switch_row(ui, label, &mut shown))
                 .inner
-            })
-            .inner
         })
         .inner;
     ui.add_space(ROW_GAP);
     response
 }
 
-fn check_box(ui: &mut Ui, on: bool) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::click());
-    let fill = if on { ACCENT } else { Color32::TRANSPARENT };
-    ui.painter().rect(
-        rect,
-        CornerRadius::same(4),
-        fill,
-        Stroke::new(1.0, if on { ACCENT } else { tokens::FAINT }),
-        egui::StrokeKind::Inside,
-    );
-    if on {
-        let c = rect.center();
-        ui.painter().add(egui::Shape::line(
-            vec![
-                c + Vec2::new(-4.0, 0.0),
-                c + Vec2::new(-1.0, 3.0),
-                c + Vec2::new(4.5, -3.0),
-            ],
-            Stroke::new(1.8, tokens::EXPORT_INK),
-        ));
-    }
-    response
+fn check_box(ui: &mut Ui, on: bool, name: &str) -> egui::Response {
+    // The caller flips the stored value on a click; this copy only draws.
+    let mut shown = on;
+    ui.add(ui::Check::new(&mut shown, "").name(name))
 }
 
 fn icon_toggle(ui: &mut Ui, name: &str, tip: &str, on: bool) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(Vec2::splat(24.0), Sense::click());
-    if on {
-        ui.painter()
-            .rect_filled(rect, CornerRadius::same(6), PAGE_ON);
-    }
-    let color = if ui.is_enabled() {
-        tokens::TEXT
-    } else {
-        tokens::FAINT
-    };
-    paint_icon(ui, rect, name, color);
-    response.on_hover_text(tip)
+    ui.add(
+        ui::Button::icon(name)
+            .on(on)
+            .min_size(Vec2::splat(24.0))
+            .tip(tip),
+    )
 }
 
 /// A row of icon buttons on a dark bar. Returns the value of the one clicked.
 fn icon_bar<T: Copy>(ui: &mut Ui, items: &[(&str, &str, Option<T>)]) -> Option<T> {
     let mut picked = None;
-    egui::Frame::new()
-        .fill(PAGES)
-        .corner_radius(CornerRadius::same(10))
-        .inner_margin(egui::Margin::same(4))
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                let gap = ((ui.available_width() - 24.0 * items.len() as f32)
-                    / (items.len().max(2) - 1) as f32)
-                    .max(2.0);
-                ui.spacing_mut().item_spacing.x = gap;
-                for (icon, tip, value) in items {
-                    if icon_toggle(ui, icon, tip, false).clicked() {
-                        picked = *value;
-                    }
+    ui::Surface::inset().show(ui, |ui| {
+        ui.horizontal(|ui| {
+            let gap = ((ui.available_width() - 24.0 * items.len() as f32)
+                / (items.len().max(2) - 1) as f32)
+                .max(2.0);
+            ui.spacing_mut().item_spacing.x = gap;
+            for (icon, tip, value) in items {
+                if icon_toggle(ui, icon, tip, false).clicked() {
+                    picked = *value;
                 }
-            });
+            }
         });
+    });
     ui.add_space(ROW_GAP);
     picked
 }
@@ -3094,7 +3083,17 @@ fn paint_icon(ui: &Ui, rect: Rect, name: &str, color: Color32) {
     }
 }
 
-fn paint_inline_icon(ui: &mut Ui, name: &str) {
-    let (rect, _) = ui.allocate_exact_size(Vec2::splat(14.0), Sense::hover());
-    paint_icon(ui, rect, name, tokens::MUTED);
+#[cfg(test)]
+mod tests {
+    use super::leading_number;
+
+    #[test]
+    fn a_value_box_reads_the_number_before_its_suffix() {
+        assert_eq!(leading_number("90%"), Some(90.0));
+        assert_eq!(leading_number(" -12.5 dB"), Some(-12.5));
+        assert_eq!(leading_number("−3"), Some(-3.0));
+        assert_eq!(leading_number("1.0x"), Some(1.0));
+        assert_eq!(leading_number("-inf dB"), None);
+        assert_eq!(leading_number("%"), None);
+    }
 }

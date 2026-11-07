@@ -17965,4 +17965,38 @@ mod tests {
         desktop.seek(Micros(500_000));
         assert_eq!(desktop.stage_box(&over).unwrap().center_x, 960.0);
     }
+
+    #[test]
+    fn a_sticker_and_a_title_are_picked_and_moved_on_the_preview() {
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        draft.canvas_config.width = 1920;
+        draft.canvas_config.height = 1080;
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.pixel_size = 0.001;
+        desktop.add_sticker("sticker:heart").unwrap();
+        let sticker = desktop.selected().cloned().unwrap();
+        let stage = desktop.stage_box(&sticker).expect("a sticker has a box");
+        assert_eq!(
+            desktop.stage_pick(stage.center_x, stage.center_y),
+            Some(sticker.clone())
+        );
+        let title = cutlass_editor::title_style("title:lower-third").unwrap();
+        desktop.add_title(&title.card_id()).unwrap();
+        let title = desktop.selected().cloned().unwrap();
+        let stage = desktop.stage_box(&title).expect("a title has a box");
+        assert_eq!(
+            desktop.stage_pick(stage.center_x, stage.center_y),
+            Some(title.clone())
+        );
+        desktop.stage_begin(&title).unwrap();
+        desktop.hold_edits(true);
+        desktop.stage_move(0.0, -100.0, 1.0, 0.0).unwrap();
+        desktop.hold_edits(false);
+        desktop.stage_end();
+        let moved = desktop.stage_box(&title).unwrap();
+        assert!((moved.center_y - (stage.center_y - 100.0)).abs() < 1e-6);
+    }
 }

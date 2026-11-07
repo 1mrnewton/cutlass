@@ -4575,6 +4575,8 @@ impl Shell {
     /// changed meanwhile.
     pub fn transcribe(&mut self) -> Result<(), ShellError> {
         let clip = self.selected_speech()?;
+        // The draft keeps a copied file's path inside the project folder.
+        let file = self.sound_file(&clip.path)?;
         self.refuse_busy()?;
         let loaded = self.speech.borrow_mut().take();
         if loaded.is_none() && !speech_model::speech_model_here() {
@@ -4594,7 +4596,7 @@ impl Shell {
             let (recognizer, words) = match recognizer {
                 Ok(recognizer) => {
                     progress.stage("Listening");
-                    let words = heard_words(&recognizer, &mut FileSource::new(&clip.path), &clip);
+                    let words = heard_words(&recognizer, &mut FileSource::new(&file), &clip);
                     (Some(recognizer), words)
                 }
                 Err(error) => (None, Err(error)),
@@ -4880,15 +4882,18 @@ impl Shell {
 
     fn sound_file(&self, stored: &str) -> Result<PathBuf, ShellError> {
         let path = Path::new(stored);
-        if stored.is_empty()
-            || path
-                .components()
-                .any(|component| matches!(component, std::path::Component::ParentDir))
-        {
+        if stored.is_empty() {
             return Err(ShellError::Unavailable("the clip has no sound".to_owned()));
         }
         if path.is_absolute() {
             return Ok(path.to_path_buf());
+        }
+        // A relative path stays inside the project folder.
+        if path
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+        {
+            return Err(ShellError::Unavailable("the clip has no sound".to_owned()));
         }
         Ok(match &self.path {
             Some(root) => root.join(path),
@@ -9016,10 +9021,13 @@ mod tests {
             return;
         }
         let temp = Temp::new();
+        // An import copies the file in and keeps its path inside the project.
+        std::fs::create_dir_all(temp.path.join("Resources")).unwrap();
+        std::fs::copy(&sound, temp.path.join("Resources/talk.m4a")).unwrap();
         let mut draft = Draft::empty("draft");
         draft.materials.audios.push(MaterialAudio {
             id: MaterialId::new("talk"),
-            path: sound.display().to_string(),
+            path: "Resources/talk.m4a".to_owned(),
             duration: Micros(6_000_000),
             ..MaterialAudio::default()
         });

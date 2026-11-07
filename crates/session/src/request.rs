@@ -240,7 +240,9 @@ pub enum Request {
         color: String,
         face: String,
     },
-    /// Store left, center, or right. An empty line width takes `line_width`.
+    /// Store left, center, or right across, or top, middle, or bottom down a
+    /// vertical column (3 to 5). An empty line width takes `line_width`, and
+    /// so does turning the text vertical or back.
     SetTextAlign {
         segment_id: SegmentId,
         alignment: i32,

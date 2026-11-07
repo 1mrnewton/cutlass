@@ -129,10 +129,14 @@ pub fn set_text_color(
     Ok(())
 }
 
-/// Store left (`0`), center (`1`), or right (`2`).
+/// Store left (`0`), center (`1`), or right (`2`) across a line, or top
+/// (`3`), middle (`4`), or bottom (`5`) down a vertical column.
 ///
 /// An empty line width takes `line_width` when that number is positive, so
-/// center and right have a box to move in. An empty `font_path` takes `face`.
+/// center and right have a box to move in. Turning text vertical or back
+/// across also takes it, since the width then measures the other way: the
+/// caller passes the canvas height for a column. An empty `font_path` takes
+/// `face`.
 pub fn set_text_align(
     draft: &mut Draft,
     segment_id: &SegmentId,
@@ -141,12 +145,15 @@ pub fn set_text_align(
     line_width: f64,
 ) -> Result<(), EditError> {
     let index = own_text(draft, segment_id)?;
-    if !(0..=2).contains(&alignment) {
+    if !(0..=5).contains(&alignment) {
         return Err(EditError::TextAlign);
     }
+    let typesetting = i32::from(alignment >= 3);
     let text = &mut draft.materials.texts[index];
+    let turned = text.typesetting != typesetting;
     text.alignment = alignment;
-    if text.line_max_width == 0.0 && line_width.is_finite() && line_width > 0.0 {
+    text.typesetting = typesetting;
+    if (turned || text.line_max_width == 0.0) && line_width.is_finite() && line_width > 0.0 {
         text.line_max_width = line_width;
     }
     fill_face(text, face);
@@ -1114,8 +1121,33 @@ mod tests {
             )
             .unwrap();
         assert_eq!(session.draft().materials.texts[0].line_max_width, 200.0);
+        // Down a column: the text turns vertical and the width is the
+        // column's height; back across, it is the line's again.
+        for (version, alignment, line_width, typesetting) in
+            [(5, 4, 120.0, 1), (6, 3, 90.0, 1), (7, 0, 300.0, 0)]
+        {
+            session
+                .apply(
+                    version,
+                    &[Request::SetTextAlign {
+                        segment_id: "a".into(),
+                        alignment,
+                        face: "other.ttf".to_owned(),
+                        line_width,
+                    }],
+                )
+                .unwrap();
+            let text = &session.draft().materials.texts[0];
+            assert_eq!((text.alignment, text.typesetting), (alignment, typesetting));
+        }
+        assert_eq!(session.draft().materials.texts[0].line_max_width, 300.0);
+        session.undo().unwrap();
+        session.undo().unwrap();
+        assert_eq!(session.draft().materials.texts[0].line_max_width, 120.0);
+        session.undo().unwrap();
         session.undo().unwrap();
         assert_eq!(session.draft().materials.texts[0].alignment, 1);
+        assert_eq!(session.draft().materials.texts[0].typesetting, 0);
         assert_eq!(session.draft().materials.texts[0].words.text, ["A"]);
     }
 

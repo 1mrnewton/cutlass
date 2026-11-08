@@ -1283,6 +1283,14 @@ fn settings_window(
                             &mut settings.playback.proxies,
                             "Play proxies of 4K and long clips in the viewer",
                         ));
+                        choices_row(ui, "Preview", |ui| {
+                            let quality = &mut settings.playback.preview_quality;
+                            for (value, name, _) in PREVIEW_QUALITIES {
+                                if ui.add(ui::Choice::new(*quality == value, name)).clicked() {
+                                    *quality = value;
+                                }
+                            }
+                        });
                         choices_row(ui, "A seek", |ui| {
                             let seek = &mut settings.playback.seek_during_playback;
                             for (value, name) in [
@@ -3890,6 +3898,10 @@ fn transport_bar(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rec
     }
     if live {
         let screen = still.translate(Vec2::new(next, 0.0));
+        next -= 40.0;
+        if room.quality {
+            quality_button(shell, ui, still.translate(Vec2::new(next, 0.0)));
+        }
         let full = view.preview_full;
         let tip = if full {
             "Leave full screen"
@@ -3933,17 +3945,147 @@ const ROUND_REACH: f32 = 44.0;
 #[derive(Debug, PartialEq, Eq)]
 struct TransportRoom {
     zoom: bool,
+    quality: bool,
     guides: bool,
 }
 
 fn transport_room(width: f32, live: bool) -> TransportRoom {
     let half = width / 2.0 - PLAY_RADIUS - TRANSPORT_GAP;
-    // Still and background always; full screen and guides when live.
+    // Still and background always; full screen, quality and guides when
+    // live.
     let reach = |buttons: f32| ROUND_REACH + 40.0 * (buttons - 1.0);
-    // Zoom has no other way in, so it outlasts the guides button.
+    // Zoom has no other way in, so it outlasts the others; quality is also
+    // in Settings, and goes before guides do.
     let zoom = live && half >= reach(3.0) + ZOOM_WIDTH;
-    let guides = live && half >= reach(4.0) + if zoom { ZOOM_WIDTH } else { 0.0 };
-    TransportRoom { zoom, guides }
+    let zoomed = if zoom { ZOOM_WIDTH } else { 0.0 };
+    let guides = live && half >= reach(4.0) + zoomed;
+    let quality = live && half >= reach(if guides { 5.0 } else { 4.0 }) + zoomed;
+    TransportRoom {
+        zoom,
+        quality,
+        guides,
+    }
+}
+
+/// The preview qualities, with their names and what each does.
+const PREVIEW_QUALITIES: [(cutlass_settings::PreviewQuality, &str, &str); 4] = [
+    (
+        cutlass_settings::PreviewQuality::Full,
+        "Full",
+        "The canvas's own size",
+    ),
+    (
+        cutlass_settings::PreviewQuality::High,
+        "High",
+        "Half size: smooth playback",
+    ),
+    (
+        cutlass_settings::PreviewQuality::Medium,
+        "Medium",
+        "A third: smoother playback",
+    ),
+    (
+        cutlass_settings::PreviewQuality::Low,
+        "Low",
+        "A quarter: smoothest playback",
+    ),
+];
+
+/// The preview quality button: its short name on a round button, and a
+/// menu of the four qualities. Export is drawn at full quality whatever
+/// is picked.
+fn quality_button(shell: &mut Shell, ui: &mut Ui, rect: Rect) {
+    let current = shell.settings().playback.preview_quality;
+    let short = match current {
+        cutlass_settings::PreviewQuality::Full => "Full",
+        cutlass_settings::PreviewQuality::High => "High",
+        cutlass_settings::PreviewQuality::Medium => "Med",
+        cutlass_settings::PreviewQuality::Low => "Low",
+    };
+    let id = egui::Id::unique("preview-quality-menu");
+    let open = egui::Popup::is_id_open(ui.ctx(), id);
+    let response = round_button(ui, rect, "preview-quality", "Preview quality", open);
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Preview quality"));
+    ui.painter().text(
+        rect.center(),
+        Align2::CENTER_CENTER,
+        short,
+        FontId::proportional(10.5),
+        tokens::MUTED,
+    );
+    let mut picked = None;
+    egui::Popup::menu(&response)
+        .id(id)
+        .width(260.0)
+        .gap(6.0)
+        .frame(
+            egui::Frame::new()
+                .fill(tokens::MENU)
+                .corner_radius(CornerRadius::same(tokens::EXPORT_RADIUS))
+                .inner_margin(egui::Margin::same(4)),
+        )
+        .show(|ui| {
+            ui.set_width(252.0);
+            for (value, name, detail) in PREVIEW_QUALITIES {
+                let label = format!("{name} quality");
+                let (row, row_response) =
+                    ui.allocate_exact_size(Vec2::new(ui.available_width(), 44.0), Sense::click());
+                row_response.widget_info(|| {
+                    egui::WidgetInfo::selected(
+                        egui::Role::RadioButton,
+                        true,
+                        value == current,
+                        &label,
+                    )
+                });
+                if row_response.hovered() {
+                    ui.painter()
+                        .rect_filled(row, CornerRadius::same(6), tokens::MENU_HOVER);
+                }
+                if value == current {
+                    let c = Pos2::new(row.left() + 16.0, row.center().y - 8.0);
+                    ui.painter().add(egui::Shape::line(
+                        vec![
+                            c + Vec2::new(-5.0, 0.0),
+                            c + Vec2::new(-1.5, 3.5),
+                            c + Vec2::new(5.0, -4.0),
+                        ],
+                        egui::Stroke::new(2.0, tokens::EXPORT),
+                    ));
+                }
+                ui.painter().text(
+                    Pos2::new(row.left() + 32.0, row.center().y - 8.0),
+                    Align2::LEFT_CENTER,
+                    &label,
+                    FontId::proportional(tokens::TYPE_SIZE),
+                    tokens::TEXT,
+                );
+                ui.painter().text(
+                    Pos2::new(row.left() + 32.0, row.center().y + 9.0),
+                    Align2::LEFT_CENTER,
+                    detail,
+                    FontId::proportional(11.5),
+                    tokens::MUTED,
+                );
+                if row_response.clicked() {
+                    picked = Some(value);
+                    ui.close();
+                }
+            }
+            ui.add_space(2.0);
+            ui.horizontal(|ui| {
+                ui.add_space(10.0);
+                ui.label(
+                    RichText::new("Export is always full quality.")
+                        .size(11.5)
+                        .color(tokens::FAINT),
+                );
+            });
+            ui.add_space(4.0);
+        });
+    if let Some(value) = picked {
+        shell.update_settings(|settings| settings.playback.preview_quality = value);
+    }
 }
 
 /// A round transport button at `rect`, lit when `on`.
@@ -9715,8 +9857,9 @@ mod tests {
         assert_eq!(black.len(), 1, "{black:?}");
         let ratio = black[0].width() / black[0].height();
         assert!((ratio - 16.0 / 9.0).abs() < 0.01, "{:?}", black[0]);
-        assert_eq!(buttons.len(), 4, "{buttons:?}");
-        let toggle = buttons[2];
+        // Quality, full screen, guides, background, still.
+        assert_eq!(buttons.len(), 5, "{buttons:?}");
+        let toggle = buttons[3];
         let press = |pressed: bool| egui::Event::PointerButton {
             pos: toggle,
             button: egui::PointerButton::Primary,
@@ -12399,8 +12542,9 @@ mod tests {
         frame(&mut shell, &mut view, Vec::new());
         let output = frame(&mut shell, &mut view, Vec::new());
         let buttons = round_buttons(&output);
-        assert_eq!(buttons.len(), 4, "{buttons:?}");
-        let (full, guides) = (buttons[0], buttons[1]);
+        // Quality, full screen, guides, background, still.
+        assert_eq!(buttons.len(), 5, "{buttons:?}");
+        let (full, guides) = (buttons[1], buttons[2]);
         let editor_width = view.preview_canvas.expect("the canvas").width();
         frame(&mut shell, &mut view, click(guides));
         assert!(view.preview_guides);
@@ -15277,19 +15421,20 @@ mod tests {
     fn a_narrow_transport_drops_guides_then_zoom() {
         let room = |width| {
             let room = transport_room(width, true);
-            (room.zoom, room.guides)
+            (room.zoom, room.guides, room.quality)
         };
-        assert_eq!(room(700.0), (true, true));
-        assert_eq!(room(560.0), (true, false));
-        assert_eq!(room(450.0), (false, true));
-        assert_eq!(room(tokens::PREVIEW_MIN_WIDTH), (false, false));
+        assert_eq!(room(700.0), (true, true, true));
+        assert_eq!(room(620.0), (true, true, false));
+        assert_eq!(room(560.0), (true, false, false));
+        assert_eq!(room(450.0), (false, true, false));
+        assert_eq!(room(tokens::PREVIEW_MIN_WIDTH), (false, false, false));
         // The default panels in a 1280 window leave room to zoom.
         let preview =
             1280.0 - tokens::LIBRARY_WIDTH - tokens::INSPECTOR_WIDTH - tokens::SPLIT * 2.0;
         assert!(transport_room(preview, true).zoom, "no zoom at {preview}");
         // With no project the transport has neither.
         let idle = transport_room(900.0, false);
-        assert!(!idle.zoom && !idle.guides);
+        assert!(!idle.zoom && !idle.guides && !idle.quality);
         // The narrowest preview still keeps play clear of the three round
         // buttons it shows.
         let half = tokens::PREVIEW_MIN_WIDTH / 2.0;

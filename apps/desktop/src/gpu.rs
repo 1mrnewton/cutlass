@@ -25,6 +25,8 @@ pub(crate) struct Drawn {
     pub(crate) draft: String,
     pub(crate) revision: u64,
     pub(crate) time: i64,
+    /// The preview quality it was drawn at.
+    pub(crate) quality: cutlass_settings::PreviewQuality,
 }
 
 /// The preview canvas on eframe's device, shown in egui as a native texture.
@@ -86,13 +88,14 @@ impl Preview {
 
     /// Draw `frame` and remember it as `key`. A frame equal to the one on
     /// the canvas is not drawn again: a repaint between two source pictures
-    /// only takes the new key.
+    /// only takes the new key. Below full quality the canvas is that part
+    /// of the frame's size each way, and the frame is shrunk onto it.
     pub(crate) fn show(
         &mut self,
         frame: FrameLayers,
         key: Drawn,
     ) -> Result<(egui::TextureId, [u32; 2]), RenderError> {
-        let size = (frame.width, frame.height);
+        let size = cutlass_render::preview_size((frame.width, frame.height), key.quality.scale());
         let resized = self
             .canvas
             .as_ref()
@@ -128,7 +131,7 @@ impl Preview {
         };
         if self.frame.as_ref() != Some(&frame) {
             self.frame = None;
-            self.renderer.draw_frame(canvas, &frame)?;
+            self.renderer.draw_frame_scaled(canvas, &frame)?;
             self.frame = Some(frame);
         }
         self.drawn = Some(key);

@@ -2431,6 +2431,7 @@ impl Shell {
             draft: session.draft().id.to_string(),
             revision: session.revision(),
             time,
+            quality: self.settings.playback.preview_quality,
         };
         if let Some(shown) = gpu.shown(&key) {
             self.shown_revision.set(revision);
@@ -9005,6 +9006,55 @@ mod tests {
         const { assert!(tokens::INSPECTOR_WIDTH >= tokens::INSPECTOR_MIN) };
         let fresh = shell();
         assert!(fresh.preview_width(tokens::MIN_WINDOW_WIDTH) >= tokens::PREVIEW_MIN_WIDTH);
+    }
+
+    #[test]
+    fn a_lower_preview_quality_draws_a_smaller_frame_laid_out_the_same() {
+        let instance = eframe::wgpu::Instance::new(
+            eframe::wgpu::InstanceDescriptor::new_without_display_handle(),
+        );
+        let Ok(state) = pollster::block_on(eframe::egui_wgpu::RenderState::create(
+            &eframe::egui_wgpu::WgpuConfiguration::default(),
+            &instance,
+            None,
+            eframe::egui_wgpu::RendererOptions::default(),
+        )) else {
+            eprintln!("skipped: no GPU");
+            return;
+        };
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        draft.canvas_config.width = 1920;
+        draft.canvas_config.height = 1080;
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.attach_gpu(&state);
+        // A red square left of the middle, a sixth of the canvas wide.
+        desktop.add_shape("shape:Rectangle").unwrap();
+        desktop.set_shape_fill("#ff0000", 1.0).unwrap();
+        desktop.set_position(-0.5, 0.0).unwrap();
+        let red_at = |desktop: &Shell, x: f64, y: f64| {
+            let gpu = desktop.gpu.as_ref().unwrap();
+            let [width, height] = gpu.current().unwrap().1;
+            let rgba = gpu.read().unwrap();
+            let px = (x * f64::from(width)) as usize;
+            let py = (y * f64::from(height)) as usize;
+            let at = (py * width as usize + px) * 4;
+            rgba[at] > 200 && rgba[at + 1] < 50
+        };
+        let (_, full) = desktop.preview_texture().unwrap().expect("a frame");
+        assert_eq!(full, [1920, 1080]);
+        assert!(red_at(&desktop, 0.25, 0.5));
+        assert!(!red_at(&desktop, 0.5, 0.5));
+        desktop.update_settings(|settings| {
+            settings.playback.preview_quality = cutlass_settings::PreviewQuality::Low;
+        });
+        let (_, low) = desktop.preview_texture().unwrap().expect("a frame");
+        assert_eq!(low, [480, 270]);
+        assert!(red_at(&desktop, 0.25, 0.5));
+        assert!(!red_at(&desktop, 0.5, 0.5));
+        assert!(!red_at(&desktop, 0.25, 0.3));
     }
 
     /// Four seconds of a 3840x2160 60 fps BT.2020 HLG movie, repainted at

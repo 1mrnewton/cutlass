@@ -1,17 +1,24 @@
-//! A Simple-profile intra encoder.
+//! A Simple-profile encoder.
 //!
-//! One I-VOP, H.263 quantisation, DC prediction, no AC prediction.
-//! Predicted pictures, quarter-sample motion, B-VOPs and rate control are
-//! not emitted here yet. The coded size is a whole number of macroblocks;
-//! a caller with another size is refused rather than cropped.
+//! An I-VOP, then P-VOPs: H.263 quantisation, one half-sample vector per
+//! macroblock, no AC prediction. Quarter-sample motion, four vectors,
+//! B-VOPs, and rate control are not emitted here yet. The coded size is a
+//! whole number of macroblocks; a caller with another size is refused
+//! rather than cropped. Motion search stays inside ±8 pixels so every
+//! vector fits `fcode` 1.
 
 use std::sync::OnceLock;
 
 use cutlass_decode::CodecError;
 
 use crate::bits::BitWriter;
+use crate::block::{Quant, dequant_inter, dequant_intra};
+use crate::frame::Frame;
+use crate::idct;
+use crate::mc::{self, Pel, Rows};
 use crate::tables::{
-    CBPY, DC_CHROMA, DC_LUMA, MCBPC_INTRA, TCOEF_ESCAPE, dc_scaler_chroma, dc_scaler_luma, tables,
+    CBPY, CoefTable, DC_CHROMA, DC_LUMA, MCBPC_INTER, MCBPC_INTRA, MVD, TCOEF_ESCAPE, ZIGZAG,
+    dc_scaler_chroma, dc_scaler_luma, tables,
 };
 
 const TIME_RESOLUTION: u32 = 25;
@@ -26,7 +33,19 @@ pub fn encode_intra(
     height: u32,
     quant: u8,
 ) -> Result<Vec<u8>, CodecError> {
-    if width == 0
+    encode_pictures(&[(y, u, v)], width, height, quant)
+}
+
+/// An elementary stream of one I-VOP and a following P-VOP for every
+/// later picture. `quant` is `vop_quant`, 1 to 31, and stays constant.
+fn encode_pictures(
+    frames: &[(&[u8], &[u8], &[u8])],
+    width: u32,
+    height: u32,
+    quant: u8,
+) -> Result<Vec<u8>, CodecError> {
+    if frames.is_empty()
+        || width == 0
         || height == 0
         || !width.is_multiple_of(16)
         || !height.is_multiple_of(16)
@@ -39,16 +58,39 @@ pub fn encode_intra(
     }
     let (w, h) = (width as usize, height as usize);
     let chroma = (w / 2) * (h / 2);
-    if y.len() < w * h || u.len() < chroma || v.len() < chroma {
-        return Err(CodecError::InvalidApi {
-            what: "plane length",
-        });
+    for &(y, u, v) in frames {
+        if y.len() < w * h || u.len() < chroma || v.len() < chroma {
+            return Err(CodecError::InvalidApi {
+                what: "plane length",
+            });
+        }
     }
+    let mbw = w / 16;
+    let mbh = h / 16;
+    let mut recon = Frame::new(mbw, mbh);
+    let mut mv = vec![(0i32, 0i32); mbw * 2 * mbh * 2];
     let mut out = BitWriter::new();
+    // A video object before its layer. A raw demuxer uses that start code
+    // to recognise the stream; the pictures do not depend on it.
+    start(&mut out, 0x00);
     start(&mut out, 0x20);
     write_vol(&mut out, width, height);
-    start(&mut out, 0xB6);
-    write_i_vop(&mut out, y, u, v, w, h, i32::from(quant));
+    for (index, &(y, u, v)) in frames.iter().enumerate() {
+        let planes = Planes { y, u, v, stride: w };
+        start(&mut out, 0xB6);
+        if index == 0 {
+            write_i_vop(&mut out, &planes, i32::from(quant), &mut recon, &mut mv);
+        } else {
+            write_p_vop(
+                &mut out,
+                &planes,
+                i32::from(quant),
+                index as u32,
+                &mut recon,
+                &mut mv,
+            );
+        }
+    }
     Ok(out.finish())
 }
 
@@ -90,24 +132,19 @@ fn write_vol(out: &mut BitWriter, width: u32, height: u32) {
 
 fn write_i_vop(
     out: &mut BitWriter,
-    y: &[u8],
-    u: &[u8],
-    v: &[u8],
-    width: usize,
-    height: usize,
+    planes: &Planes<'_>,
     quant: i32,
+    recon: &mut Frame,
+    mv: &mut [(i32, i32)],
 ) {
-    let time_bits = (32 - (TIME_RESOLUTION - 1).leading_zeros()).max(1);
     out.put(2, 0); // I
-    out.put(1, 0); // modulo_time_base
-    out.put(1, 1);
-    out.put(time_bits, 0);
-    out.put(1, 1);
+    write_time(out, 0);
     out.put(1, 1); // coded
     out.put(3, 0); // intra_dc_vlc_thr: DC stays in the DC VLC
     out.put(5, quant as u32);
-    let mbw = width / 16;
-    let mbh = height / 16;
+    let mbw = recon.mbw;
+    let mbh = recon.mbh;
+    mv.fill((0, 0));
     let mut dc = [
         vec![1024i32; mbw * 2 * mbh * 2],
         vec![1024i32; mbw * mbh],
@@ -115,22 +152,27 @@ fn write_i_vop(
     ];
     for mby in 0..mbh {
         for mbx in 0..mbw {
-            write_intra_mb(
-                out,
-                &Planes {
-                    y,
-                    u,
-                    v,
-                    stride: width,
-                },
-                mbx,
-                mby,
-                quant,
-                &mut dc,
-            );
+            let (levels, dcs) = write_intra_mb(out, planes, mbx, mby, quant, &mut dc);
+            for k in 0..6 {
+                paint_intra(recon, mbx, mby, k, &levels[k], dcs[k], quant);
+            }
         }
     }
     out.stuff();
+}
+
+/// `modulo_time_base`, the marker, `vop_time_increment`, and the marker.
+fn write_time(out: &mut BitWriter, frame: u32) {
+    let time_bits = (32 - (TIME_RESOLUTION - 1).leading_zeros()).max(1);
+    let modulo = frame / TIME_RESOLUTION;
+    let increment = frame % TIME_RESOLUTION;
+    for _ in 0..modulo {
+        out.bit(true);
+    }
+    out.bit(false);
+    out.bit(true);
+    out.put(time_bits, increment);
+    out.bit(true);
 }
 
 struct Planes<'a> {
@@ -147,9 +189,10 @@ fn write_intra_mb(
     mby: usize,
     quant: i32,
     dc: &mut [Vec<i32>; 3],
-) {
+) -> ([[i32; 64]; 6], [i32; 6]) {
     let mut coded = [false; 6];
     let mut levels = [[0i32; 64]; 6];
+    let mut reconstructed = [0i32; 6];
     let stride = planes.stride;
     for k in 0..6 {
         let (plane, x, y, step) = if k < 4 {
@@ -179,7 +222,9 @@ fn write_intra_mb(
         let predicted = predict(&dc[plane_of(k)], across, bx, by);
         let qf = div_round(coef[0], scale).clamp(0, 2047 / scale);
         let diff = qf - (predicted + (scale >> 1)) / scale;
-        dc[plane_of(k)][by as usize * across + bx as usize] = qf * scale;
+        let stored = qf * scale;
+        dc[plane_of(k)][by as usize * across + bx as usize] = stored;
+        reconstructed[k] = stored;
         levels[k][0] = diff;
         for i in 1..64 {
             levels[k][i] = quant_ac(coef[i], quant);
@@ -199,9 +244,27 @@ fn write_intra_mb(
     for k in 0..6 {
         write_dc(out, levels[k][0], k >= 4);
         if coded[k] {
-            write_ac(out, &levels[k]);
+            write_levels(out, &levels[k], 1, false);
         }
     }
+    (levels, reconstructed)
+}
+
+/// Replaces one intra block with the same inverse quantiser and transform
+/// the decoder uses, so a later P-VOP predicts from that picture.
+fn paint_intra(
+    frame: &mut Frame,
+    mbx: usize,
+    mby: usize,
+    k: usize,
+    levels: &[i32; 64],
+    dc: i32,
+    quant: i32,
+) {
+    let mut ac = [0i32; 64];
+    ac[1..].copy_from_slice(&levels[1..]);
+    let mut coef = dequant_intra(&ac, dc, quant, Quant::H263);
+    put_block(frame, mbx, mby, k, &mut coef, false);
 }
 
 fn plane_of(k: usize) -> usize {
@@ -257,25 +320,31 @@ fn write_dc(out: &mut BitWriter, diff: i32, chroma: bool) {
     }
 }
 
-fn write_ac(out: &mut BitWriter, levels: &[i32; 64]) {
-    let mut coded = Vec::new();
-    for pos in 1..64 {
-        let level = levels[usize::from(crate::tables::ZIGZAG[pos])];
+fn write_levels(out: &mut BitWriter, levels: &[i32; 64], start: usize, inter: bool) {
+    let table = if inter {
+        &tables().inter
+    } else {
+        &tables().intra
+    };
+    let mut coded = [(0usize, 0i32); 64];
+    let mut count = 0usize;
+    for pos in start..64 {
+        let level = levels[usize::from(ZIGZAG[pos])];
         if level != 0 {
-            coded.push((pos, level));
+            coded[count] = (pos, level);
+            count += 1;
         }
     }
-    let mut cursor = 1usize;
-    for (n, &(pos, level)) in coded.iter().enumerate() {
-        let run = pos - cursor;
-        write_coef(out, n + 1 == coded.len(), run, level);
+    let mut cursor = start;
+    for (n, &(pos, level)) in coded[..count].iter().enumerate() {
+        write_coef(out, table, n + 1 == count, pos - cursor, level);
         cursor = pos + 1;
     }
 }
 
-fn write_coef(out: &mut BitWriter, last: bool, run: usize, level: i32) {
+fn write_coef(out: &mut BitWriter, table: &CoefTable, last: bool, run: usize, level: i32) {
     let mag = level.unsigned_abs();
-    if let Some((len, code)) = tables().intra.code(last, run, mag) {
+    if let Some((len, code)) = table.code(last, run, mag) {
         out.put(u32::from(len), u32::from(code));
         out.bit(level < 0);
         return;
@@ -374,18 +443,417 @@ fn nearest(value: f64) -> i32 {
     }
 }
 
+/// Half-sample search range, in half-sample units: ±8 pixels, which is
+/// inside the `fcode` 1 vector range the decoder wraps with a shift.
+const SEARCH: i32 = 16;
+
+fn write_p_vop(
+    out: &mut BitWriter,
+    planes: &Planes<'_>,
+    quant: i32,
+    frame: u32,
+    recon: &mut Frame,
+    mv: &mut [(i32, i32)],
+) {
+    out.put(2, 1); // P
+    write_time(out, frame);
+    out.bit(true); // coded
+    out.bit(false); // rounding
+    out.put(3, 0); // intra_dc_vlc_thr
+    out.put(5, quant as u32);
+    out.put(3, 1); // fcode_forward
+    let past = recon.clone();
+    let mut next = Frame::new(past.mbw, past.mbh);
+    let mbw = past.mbw;
+    let mbh = past.mbh;
+    {
+        let mut picture = Predicted {
+            y: planes.y,
+            u: planes.u,
+            v: planes.v,
+            width: planes.stride,
+            height: past.mbh * 16,
+            quant,
+            past: &past,
+            next: &mut next,
+            mv,
+        };
+        for mby in 0..mbh {
+            for mbx in 0..mbw {
+                picture.write_mb(out, mbx, mby);
+            }
+        }
+    }
+    *recon = next;
+    out.stuff();
+}
+
+struct Predicted<'a> {
+    y: &'a [u8],
+    u: &'a [u8],
+    v: &'a [u8],
+    width: usize,
+    height: usize,
+    quant: i32,
+    past: &'a Frame,
+    next: &'a mut Frame,
+    mv: &'a mut [(i32, i32)],
+}
+
+impl Predicted<'_> {
+    fn write_mb(&mut self, out: &mut BitWriter, mbx: usize, mby: usize) {
+        let pred = mv_pred(self.mv, self.width / 16, mbx, mby);
+        let vector = self.search(mbx, mby, pred);
+        let (py, pu, pv) = compensate(self.past, mbx, mby, vector);
+        let mut levels = [[0i32; 64]; 6];
+        let mut coded = [false; 6];
+        for k in 0..6 {
+            let pixels = self.residual(mbx, mby, k, &py, &pu, &pv);
+            let coef = forward(&pixels);
+            for i in 0..64 {
+                levels[k][i] = quant_ac(coef[i], self.quant);
+                coded[k] |= levels[k][i] != 0;
+            }
+        }
+        let any = coded.iter().any(|&bit| bit);
+        if vector == (0, 0) && !any {
+            out.bit(true);
+            set_mv(self.mv, self.width / 16, mbx, mby, (0, 0));
+            blit(self.next, mbx, mby, &py, &pu, &pv);
+            return;
+        }
+        out.bit(false);
+        let cbpc = u32::from(coded[4]) << 1 | u32::from(coded[5]);
+        let (len, code) = mcbpc_inter(cbpc);
+        out.put(len, code);
+        let luma = u32::from(coded[0]) << 3
+            | u32::from(coded[1]) << 2
+            | u32::from(coded[2]) << 1
+            | u32::from(coded[3]);
+        let (len, code) = CBPY[(luma ^ 0xF) as usize];
+        out.put(u32::from(len), u32::from(code));
+        write_mv(out, vector.0, pred.0);
+        write_mv(out, vector.1, pred.1);
+        for k in 0..6 {
+            if coded[k] {
+                write_levels(out, &levels[k], 0, true);
+            }
+        }
+        set_mv(self.mv, self.width / 16, mbx, mby, vector);
+        blit(self.next, mbx, mby, &py, &pu, &pv);
+        for k in 0..6 {
+            if coded[k] {
+                add_inter(self.next, mbx, mby, k, &levels[k], self.quant);
+            }
+        }
+    }
+
+    fn residual(
+        &self,
+        mbx: usize,
+        mby: usize,
+        k: usize,
+        y: &[u8; 256],
+        u: &[u8; 64],
+        v: &[u8; 64],
+    ) -> [i32; 64] {
+        if k < 4 {
+            let (px, py) = ((k & 1) * 8, (k >> 1) * 8);
+            diff_block(
+                self.y,
+                self.width,
+                (mbx * 16 + px, mby * 16 + py),
+                y,
+                16,
+                (px, py),
+            )
+        } else {
+            let plane = if k == 4 { self.u } else { self.v };
+            let pred = if k == 4 { u } else { v };
+            diff_block(plane, self.width / 2, (mbx * 8, mby * 8), pred, 8, (0, 0))
+        }
+    }
+
+    fn search(&self, mbx: usize, mby: usize, pred: (i32, i32)) -> (i32, i32) {
+        let mut best = clamp_mv(pred.0, pred.1);
+        let mut best_cost = self.cost(mbx, mby, best, pred);
+        for dy in (-SEARCH..=SEARCH).step_by(2) {
+            for dx in (-SEARCH..=SEARCH).step_by(2) {
+                let mv = clamp_mv(pred.0 + dx, pred.1 + dy);
+                let cost = self.cost(mbx, mby, mv, pred);
+                if cost < best_cost {
+                    best = mv;
+                    best_cost = cost;
+                }
+            }
+        }
+        let center = best;
+        for dy in -1..=1 {
+            for dx in -1..=1 {
+                let mv = clamp_mv(center.0 + dx, center.1 + dy);
+                let cost = self.cost(mbx, mby, mv, pred);
+                if cost < best_cost {
+                    best = mv;
+                    best_cost = cost;
+                }
+            }
+        }
+        let zero = self.cost(mbx, mby, (0, 0), pred);
+        if zero < best_cost { (0, 0) } else { best }
+    }
+
+    fn cost(&self, mbx: usize, mby: usize, mv: (i32, i32), pred: (i32, i32)) -> u32 {
+        let mut predicted = [0u8; 256];
+        let [reference, _, _] = self.past.refs((self.width as u32, self.height as u32));
+        mc::luma_block(
+            &reference,
+            (mbx * 16) as i32,
+            (mby * 16) as i32,
+            16,
+            16,
+            mv.0,
+            mv.1,
+            Pel::Half,
+            Rows::Frame,
+            false,
+            &mut predicted,
+        );
+        let mut sad = 0u32;
+        let x = mbx * 16;
+        let y = mby * 16;
+        for row in 0..16 {
+            for col in 0..16 {
+                let sample = self
+                    .y
+                    .get((y + row) * self.width + x + col)
+                    .copied()
+                    .unwrap_or(0);
+                sad += u32::from(sample.abs_diff(predicted[row * 16 + col]));
+            }
+        }
+        sad.saturating_mul(2) + (mv.0 - pred.0).unsigned_abs() + (mv.1 - pred.1).unsigned_abs()
+    }
+}
+
+fn clamp_mv(x: i32, y: i32) -> (i32, i32) {
+    (x.clamp(-SEARCH, SEARCH), y.clamp(-SEARCH, SEARCH))
+}
+
+fn compensate(
+    past: &Frame,
+    mbx: usize,
+    mby: usize,
+    mv: (i32, i32),
+) -> ([u8; 256], [u8; 64], [u8; 64]) {
+    let mut y = [0u8; 256];
+    let mut u = [0u8; 64];
+    let mut v = [0u8; 64];
+    let [ry, ru, rv] = past.refs(((past.mbw * 16) as u32, (past.mbh * 16) as u32));
+    mc::luma_block(
+        &ry,
+        (mbx * 16) as i32,
+        (mby * 16) as i32,
+        16,
+        16,
+        mv.0,
+        mv.1,
+        Pel::Half,
+        Rows::Frame,
+        false,
+        &mut y,
+    );
+    let (cx, cy) = (mc::chroma_hpel(mv.0), mc::chroma_hpel(mv.1));
+    mc::chroma_block(
+        &ru,
+        (mbx * 8) as i32,
+        (mby * 8) as i32,
+        8,
+        8,
+        cx,
+        cy,
+        Rows::Frame,
+        false,
+        &mut u,
+    );
+    mc::chroma_block(
+        &rv,
+        (mbx * 8) as i32,
+        (mby * 8) as i32,
+        8,
+        8,
+        cx,
+        cy,
+        Rows::Frame,
+        false,
+        &mut v,
+    );
+    (y, u, v)
+}
+
+fn diff_block(
+    src: &[u8],
+    src_stride: usize,
+    at: (usize, usize),
+    pred: &[u8],
+    pred_stride: usize,
+    from: (usize, usize),
+) -> [i32; 64] {
+    let (sx, sy) = at;
+    let (px, py) = from;
+    let mut out = [0i32; 64];
+    for row in 0..8 {
+        for col in 0..8 {
+            let sample = src
+                .get((sy + row) * src_stride + sx + col)
+                .copied()
+                .unwrap_or(0);
+            let predicted = pred
+                .get((py + row) * pred_stride + px + col)
+                .copied()
+                .unwrap_or(0);
+            out[row * 8 + col] = i32::from(sample) - i32::from(predicted);
+        }
+    }
+    out
+}
+
+fn blit(frame: &mut Frame, mbx: usize, mby: usize, y: &[u8; 256], u: &[u8; 64], v: &[u8; 64]) {
+    let ls = frame.luma_stride();
+    let base = mby * 16 * ls + mbx * 16;
+    for row in 0..16 {
+        let start = base + row * ls;
+        if let Some(dst) = frame.y.get_mut(start..start + 16) {
+            dst.copy_from_slice(&y[row * 16..row * 16 + 16]);
+        }
+    }
+    let cs = frame.chroma_stride();
+    let base = mby * 8 * cs + mbx * 8;
+    for row in 0..8 {
+        let start = base + row * cs;
+        if let Some(dst) = frame.u.get_mut(start..start + 8) {
+            dst.copy_from_slice(&u[row * 8..row * 8 + 8]);
+        }
+        if let Some(dst) = frame.v.get_mut(start..start + 8) {
+            dst.copy_from_slice(&v[row * 8..row * 8 + 8]);
+        }
+    }
+}
+
+fn add_inter(frame: &mut Frame, mbx: usize, mby: usize, k: usize, levels: &[i32; 64], quant: i32) {
+    let mut values = [0i32; 64];
+    let mul = 2 * quant;
+    let add = (quant - 1) | 1;
+    for (slot, &level) in values.iter_mut().zip(levels) {
+        *slot = if level > 0 {
+            level * mul + add
+        } else if level < 0 {
+            level * mul - add
+        } else {
+            0
+        };
+    }
+    let mut coef = dequant_inter(&values, quant, Quant::H263);
+    put_block(frame, mbx, mby, k, &mut coef, true);
+}
+
+fn put_block(frame: &mut Frame, mbx: usize, mby: usize, k: usize, coef: &mut [i16; 64], add: bool) {
+    if k < 4 {
+        let stride = frame.luma_stride();
+        let offset = (mby * 16 + (k >> 1) * 8) * stride + mbx * 16 + (k & 1) * 8;
+        if add {
+            idct::add(coef, &mut frame.y, offset, stride);
+        } else {
+            idct::put(coef, &mut frame.y, offset, stride);
+        }
+    } else {
+        let stride = frame.chroma_stride();
+        let offset = mby * 8 * stride + mbx * 8;
+        let plane = if k == 4 { &mut frame.u } else { &mut frame.v };
+        if add {
+            idct::add(coef, plane, offset, stride);
+        } else {
+            idct::put(coef, plane, offset, stride);
+        }
+    }
+}
+
+/// The median predictor of a 16x16 vector (Section 7.6.5, block 0).
+fn mv_pred(mv: &[(i32, i32)], mbw: usize, mbx: usize, mby: usize) -> (i32, i32) {
+    let w = 2 * mbw;
+    let bx = (2 * mbx) as isize;
+    let by = (2 * mby) as isize;
+    let mut valid = [None; 3];
+    for (slot, (dx, dy)) in valid.iter_mut().zip([(-1, 0), (0, -1), (2, -1)]) {
+        let x = bx + dx;
+        let y = by + dy;
+        if x < 0 || y < 0 || x as usize >= w {
+            continue;
+        }
+        *slot = mv.get(y as usize * w + x as usize).copied();
+    }
+    match valid {
+        [Some(a), Some(b), Some(c)] => (median(a.0, b.0, c.0), median(a.1, b.1, c.1)),
+        [Some(a), Some(b), None] | [Some(a), None, Some(b)] | [None, Some(a), Some(b)] => {
+            (median(a.0, b.0, 0), median(a.1, b.1, 0))
+        }
+        [Some(a), None, None] | [None, Some(a), None] | [None, None, Some(a)] => a,
+        [None, None, None] => (0, 0),
+    }
+}
+
+fn median(a: i32, b: i32, c: i32) -> i32 {
+    a.max(b).min(a.min(b).max(c))
+}
+
+fn set_mv(mv: &mut [(i32, i32)], mbw: usize, mbx: usize, mby: usize, vector: (i32, i32)) {
+    let w = 2 * mbw;
+    for k in 0..4 {
+        let i = (2 * mby + (k >> 1)) * w + 2 * mbx + (k & 1);
+        if let Some(slot) = mv.get_mut(i) {
+            *slot = vector;
+        }
+    }
+}
+
+fn mcbpc_inter(cbpc: u32) -> (u32, u32) {
+    for &(symbol, len, code) in &MCBPC_INTER {
+        if u32::from(symbol) == cbpc {
+            return (u32::from(len), u32::from(code));
+        }
+    }
+    (1, 0b1)
+}
+
+fn write_mv(out: &mut BitWriter, value: i32, pred: i32) {
+    let diff = value - pred;
+    if diff == 0 {
+        let (len, code) = MVD[0];
+        out.put(u32::from(len), u32::from(code));
+        return;
+    }
+    let mag = (diff.unsigned_abs() as usize).min(MVD.len() - 1);
+    let (len, code) = MVD[mag];
+    out.put(u32::from(len), u32::from(code));
+    out.bit(diff < 0);
+}
+
 #[cfg(test)]
 mod tests {
-    use super::encode_intra;
+    use super::{encode_intra, encode_pictures};
     use crate::dec::Decoder;
     use cutlass_decode::CodecError;
 
-    fn decode(bytes: &[u8]) -> Vec<u8> {
+    fn decode_all(bytes: &[u8]) -> Vec<Vec<u8>> {
         let mut decoder = Decoder::with_max_pixels(8192 * 8192);
         let mut pictures = decoder.decode(bytes).expect("decode").pictures;
         pictures.extend(decoder.drain());
+        pictures.into_iter().map(|picture| picture.bytes).collect()
+    }
+
+    fn decode(bytes: &[u8]) -> Vec<u8> {
+        let pictures = decode_all(bytes);
         assert_eq!(pictures.len(), 1);
-        pictures.remove(0).bytes
+        pictures.into_iter().next().expect("picture")
     }
 
     fn mae(got: &[u8], want: &[u8]) -> f64 {
@@ -454,13 +922,145 @@ mod tests {
         let u = vec![90u8; 24 * 16];
         let v = vec![150u8; 24 * 16];
         let bytes = encode_intra(&y, &u, &v, 48, 32, 6).expect("encode");
-        let ours = decode(&bytes);
-        let dir = std::env::temp_dir().join(format!("cutlass-mpeg4-intra-{}", std::process::id()));
+        ffmpeg_matches(&ffmpeg, &bytes, &decode(&bytes), "intra");
+    }
+
+    #[test]
+    fn a_repeated_picture_is_skipped() {
+        let y = vec![140u8; 48 * 32];
+        let c = vec![120u8; 24 * 16];
+        let bytes = encode_pictures(&[(y.as_slice(), c.as_slice(), c.as_slice()); 2], 48, 32, 4)
+            .expect("encode");
+        let pictures = decode_all(&bytes);
+        assert_eq!(pictures.len(), 2);
+        assert_eq!(pictures[0], pictures[1]);
+        assert_eq!(vop_kind(&bytes, 1), 1);
+        let Some(ffmpeg) = ffmpeg_bin() else {
+            eprintln!(
+                "ffmpeg is not installed; the repeated picture was not checked independently"
+            );
+            return;
+        };
+        let mut ours = Vec::new();
+        for picture in &pictures {
+            ours.extend_from_slice(picture);
+        }
+        ffmpeg_matches(&ffmpeg, &bytes, &ours, "repeat");
+    }
+
+    #[test]
+    fn a_shifted_picture_is_predicted() {
+        let y0 = pattern(64, 48, 3);
+        let u0 = pattern(32, 24, 9);
+        let v0 = pattern(32, 24, 15);
+        let y1 = shift_right(&y0, 64, 48, 4);
+        let u1 = shift_right(&u0, 32, 24, 2);
+        let v1 = shift_right(&v0, 32, 24, 2);
+        let y2 = shift_right(&y0, 64, 48, 8);
+        let u2 = shift_right(&u0, 32, 24, 4);
+        let v2 = shift_right(&v0, 32, 24, 4);
+        let bytes = encode_pictures(
+            &[
+                (y0.as_slice(), u0.as_slice(), v0.as_slice()),
+                (y1.as_slice(), u1.as_slice(), v1.as_slice()),
+                (y2.as_slice(), u2.as_slice(), v2.as_slice()),
+            ],
+            64,
+            48,
+            5,
+        )
+        .expect("encode");
+        let pictures = decode_all(&bytes);
+        assert_eq!(pictures.len(), 3);
+        assert_eq!(vop_kind(&bytes, 0), 0);
+        assert_eq!(vop_kind(&bytes, 1), 1);
+        assert_eq!(vop_kind(&bytes, 2), 1);
+        let (intra, predicted) = vop_lengths(&bytes);
+        assert!(
+            predicted < intra / 2,
+            "P-VOP {predicted} bytes, I-VOP {intra} bytes"
+        );
+        let luma = 64 * 48;
+        assert!(
+            mae(&pictures[1][..luma], &y1) < 8.0,
+            "{}",
+            mae(&pictures[1][..luma], &y1)
+        );
+        assert!(
+            mae(&pictures[2][..luma], &y2) < 8.0,
+            "{}",
+            mae(&pictures[2][..luma], &y2)
+        );
+        let Some(ffmpeg) = ffmpeg_bin() else {
+            eprintln!(
+                "ffmpeg is not installed; the predicted picture was not checked independently"
+            );
+            return;
+        };
+        let mut ours = Vec::new();
+        for picture in &pictures {
+            ours.extend_from_slice(picture);
+        }
+        ffmpeg_matches(&ffmpeg, &bytes, &ours, "shift");
+    }
+
+    fn pattern(width: usize, height: usize, salt: usize) -> Vec<u8> {
+        let mut plane = vec![0u8; width * height];
+        for row in 0..height {
+            for col in 0..width {
+                plane[row * width + col] =
+                    ((col * 13 + row * 7 + (col ^ row) + salt) % 220 + 16) as u8;
+            }
+        }
+        plane
+    }
+
+    fn shift_right(src: &[u8], width: usize, height: usize, by: usize) -> Vec<u8> {
+        let mut out = vec![0u8; src.len()];
+        for row in 0..height {
+            for col in 0..width {
+                let from = col.saturating_sub(by);
+                out[row * width + col] = src[row * width + from];
+            }
+        }
+        out
+    }
+
+    /// `vop_coding_type` of VOP `index`: 0 intra, 1 predicted.
+    fn vop_kind(bytes: &[u8], index: usize) -> u8 {
+        let mut seen = 0usize;
+        for i in 0..bytes.len().saturating_sub(4) {
+            if bytes[i..i + 4] == [0, 0, 1, 0xB6] {
+                if seen == index {
+                    return bytes[i + 4] >> 6;
+                }
+                seen += 1;
+            }
+        }
+        0xFF
+    }
+
+    fn vop_lengths(bytes: &[u8]) -> (usize, usize) {
+        let mut starts = Vec::new();
+        for i in 0..bytes.len().saturating_sub(3) {
+            if bytes[i..i + 4] == [0, 0, 1, 0xB6] {
+                starts.push(i);
+            }
+        }
+        let intra =
+            starts.get(1).copied().unwrap_or(bytes.len()) - starts.first().copied().unwrap_or(0);
+        let predicted = starts.get(2).copied().unwrap_or(bytes.len())
+            - starts.get(1).copied().unwrap_or(bytes.len());
+        (intra, predicted)
+    }
+
+    fn ffmpeg_matches(ffmpeg: &std::path::Path, bytes: &[u8], ours: &[u8], name: &str) {
+        let dir = std::env::temp_dir().join(format!("cutlass-mpeg4-{name}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("dir");
-        let stream = dir.join("intra.m4v");
-        let yuv = dir.join("intra.yuv");
-        std::fs::write(&stream, &bytes).expect("stream");
-        let status = std::process::Command::new(&ffmpeg)
+        let stream = dir.join("picture.m4v");
+        let yuv = dir.join("picture.yuv");
+        std::fs::write(&stream, bytes).expect("stream");
+        let status = std::process::Command::new(ffmpeg)
             .args([
                 "-y",
                 "-hide_banner",
@@ -474,6 +1074,8 @@ mod tests {
                 "+bitexact",
                 "-idct",
                 "simple",
+                "-f",
+                "m4v",
                 "-i",
             ])
             .arg(&stream)

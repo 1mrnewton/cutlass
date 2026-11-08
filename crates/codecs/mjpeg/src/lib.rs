@@ -19,6 +19,8 @@ mod encoder;
 mod picture;
 
 #[cfg(test)]
+mod oracle;
+#[cfg(test)]
 mod tests;
 
 pub use config::{FieldOrder, Flavour};

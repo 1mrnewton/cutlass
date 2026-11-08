@@ -19,7 +19,7 @@ Playback registers this decoder after the platform decoders. On Apple, VideoTool
 | Shape, static sprites, N-bit, NEWPRED, reduced resolution, studio | Refused. |
 | Scalability | A flag with no enhancement layer is ignored. A real enhancement layer is refused. |
 
-A picture is at most 8192×8192 pixels, and each VOL edge is at most 8191. An odd edge is shown even, dropping the last column or row. Colour primaries, transfer, and matrix are passed through. The picture description has no place for the full-range flag, so that bit is not visible to playback.
+A picture is at most 8192×8192 pixels, and each VOL edge is at most 8191. An odd edge is shown even, dropping the last column or row. Colour primaries, transfer, and matrix are passed through. The picture description has no place for the full-range flag, so that bit is not visible to playback. It has no place for a sample aspect ratio either: `PictureInfo`, which the `Decoder` trait hands playback, carries none, and only the separate `VideoDecoder` output has `sample_aspect`, which nothing in playback reads. So the VOL's `aspect_ratio_info` (and the extended `par_width` and `par_height`) is read past and dropped, and a non-square stream shows with square samples. When the picture description gains a sample aspect, parse it again in `parse_vol` and pass it through.
 
 ## Encoder
 

@@ -39,6 +39,10 @@ pub(crate) struct Frame {
     pub(crate) v: Vec<u8>,
     /// Per macroblock, for direct mode; empty for B-VOPs.
     pub(crate) mbs: Vec<MbRecord>,
+    /// Visible size a four-vector macroblock clips to. Whole macroblocks
+    /// when the picture fills them.
+    pub(crate) clip_width: i32,
+    pub(crate) clip_height: i32,
 }
 
 impl Frame {
@@ -51,6 +55,8 @@ impl Frame {
             u: vec![0; luma / 4],
             v: vec![0; luma / 4],
             mbs: Vec::new(),
+            clip_width: (mbw * 16) as i32,
+            clip_height: (mbh * 16) as i32,
         }
     }
 

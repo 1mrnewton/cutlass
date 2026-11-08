@@ -25,6 +25,40 @@ use crate::vop::clip_block;
 
 const TIME_RESOLUTION: u32 = 25;
 
+/// Seconds already written into the VOP clock. `last` is the base from
+/// before the latest non-B picture, which a B-VOP measures from.
+#[derive(Default)]
+struct TimeBase {
+    seconds: u32,
+    last: u32,
+}
+
+struct When<'a> {
+    ticks: u32,
+    resolution: u32,
+    base: &'a mut TimeBase,
+}
+
+/// What `write_vol` puts in the object layer. The batch encoders keep a
+/// 25 Hz clock so their streams stay bit-identical.
+struct Layer {
+    advanced: bool,
+    quarter: bool,
+    mpeg: bool,
+    low_delay: bool,
+    resolution: u32,
+}
+
+fn simple_layer() -> Layer {
+    Layer {
+        advanced: false,
+        quarter: false,
+        mpeg: false,
+        low_delay: true,
+        resolution: TIME_RESOLUTION,
+    }
+}
+
 /// One picture's quantiser: the scale, and whether levels use the MPEG
 /// matrices instead of the H.263 reconstruction.
 #[derive(Clone, Copy)]
@@ -83,27 +117,25 @@ fn encode_pictures(
     };
     let mut recon = Frame::new(mbw, mbh);
     let mut mv = vec![(0i32, 0i32); mbw * 2 * mbh * 2];
+    let mut clock = TimeBase::default();
     let mut out = BitWriter::new();
     // A video object before its layer. A raw demuxer uses that start code
     // to recognise the stream; the pictures do not depend on it.
     start(&mut out, 0x00);
     start(&mut out, 0x20);
-    write_vol(&mut out, width, height, false, false, false, true);
+    write_vol(&mut out, width, height, simple_layer());
     for (index, &(y, u, v)) in frames.iter().enumerate() {
         let planes = Planes { y, u, v, stride: w };
         start(&mut out, 0xB6);
+        let mut when = When {
+            ticks: index as u32,
+            resolution: TIME_RESOLUTION,
+            base: &mut clock,
+        };
         if index == 0 {
-            write_i_vop(&mut out, &planes, q, &mut recon, &mut mv);
+            write_i_vop(&mut out, &planes, q, &mut recon, &mut mv, &mut when);
         } else {
-            write_p_vop(
-                &mut out,
-                &planes,
-                q,
-                index as u32,
-                &mut recon,
-                &mut mv,
-                false,
-            );
+            write_p_vop(&mut out, &planes, q, &mut when, &mut recon, &mut mv, false);
         }
     }
     Ok(out.finish())
@@ -156,36 +188,65 @@ pub fn encode_advanced(
     let mut reference = Frame::new(mbw, mbh);
     let mut mv = vec![(0i32, 0i32); mbw * 2 * mbh * 2];
     let mut earlier: Option<Frame> = None;
+    let mut clock = TimeBase::default();
     let mut out = BitWriter::new();
     start(&mut out, 0x00);
     start(&mut out, 0x20);
-    write_vol(&mut out, width, height, advanced, quarter, mpeg, !has_b);
+    write_vol(
+        &mut out,
+        width,
+        height,
+        Layer {
+            advanced,
+            quarter,
+            mpeg,
+            low_delay: !has_b,
+            resolution: TIME_RESOLUTION,
+        },
+    );
     for (n, &display) in refs.iter().enumerate() {
         let (y, u, v) = frames[display];
         let planes = Planes { y, u, v, stride: w };
         start(&mut out, 0xB6);
         if n == 0 {
-            write_i_vop(&mut out, &planes, q, &mut reference, &mut mv);
+            let mut when = When {
+                ticks: 0,
+                resolution: TIME_RESOLUTION,
+                base: &mut clock,
+            };
+            write_i_vop(&mut out, &planes, q, &mut reference, &mut mv, &mut when);
         } else {
-            write_p_vop(
-                &mut out,
-                &planes,
-                q,
-                display as u32,
-                &mut reference,
-                &mut mv,
-                quarter,
-            );
+            {
+                let mut when = When {
+                    ticks: display as u32,
+                    resolution: TIME_RESOLUTION,
+                    base: &mut clock,
+                };
+                write_p_vop(
+                    &mut out,
+                    &planes,
+                    q,
+                    &mut when,
+                    &mut reference,
+                    &mut mv,
+                    quarter,
+                );
+            }
             if let Some(past) = earlier.as_ref() {
                 let prev = refs[n - 1];
                 for (step, &(y, u, v)) in frames[prev + 1..display].iter().enumerate() {
                     let between = Planes { y, u, v, stride: w };
                     start(&mut out, 0xB6);
+                    let mut when = When {
+                        ticks: (prev + 1 + step) as u32,
+                        resolution: TIME_RESOLUTION,
+                        base: &mut clock,
+                    };
                     write_b_vop(
                         &mut out,
                         &between,
                         q,
-                        (prev + 1 + step) as u32,
+                        &mut when,
                         &Refs {
                             past,
                             future: &reference,
@@ -226,18 +287,10 @@ fn start(out: &mut BitWriter, code: u8) {
 /// the default MPEG matrices; otherwise the quantiser is H.263. Version 5
 /// is where `quarter_sample` sits. `low_delay` stays set when the stream
 /// has no B-VOP.
-fn write_vol(
-    out: &mut BitWriter,
-    width: u32,
-    height: u32,
-    advanced: bool,
-    quarter: bool,
-    mpeg: bool,
-    low_delay: bool,
-) {
+fn write_vol(out: &mut BitWriter, width: u32, height: u32, layer: Layer) {
     out.put(1, 0); // random_accessible_vol
-    out.put(8, if advanced { 17 } else { 1 });
-    if advanced {
+    out.put(8, if layer.advanced { 17 } else { 1 });
+    if layer.advanced {
         out.put(1, 1); // is_object_layer_identifier
         out.put(4, 5); // verid
         out.put(3, 1); // priority
@@ -247,11 +300,11 @@ fn write_vol(
     out.put(4, 1); // square
     out.put(1, 1); // vol_control_parameters
     out.put(2, 1); // 4:2:0
-    out.put(1, u32::from(low_delay));
+    out.put(1, u32::from(layer.low_delay));
     out.put(1, 0); // no vbv
     out.put(2, 0); // rectangular
     out.put(1, 1);
-    out.put(16, TIME_RESOLUTION);
+    out.put(16, layer.resolution);
     out.put(1, 1);
     out.put(1, 0); // fixed_vop_rate
     out.put(1, 1);
@@ -261,24 +314,24 @@ fn write_vol(
     out.put(1, 1);
     out.put(1, 0); // progressive
     out.put(1, 1); // obmc_disable
-    if advanced {
+    if layer.advanced {
         out.put(2, 0); // no sprite
     } else {
         out.put(1, 0); // no sprite
     }
     out.put(1, 0); // not_8_bit
-    out.put(1, u32::from(mpeg));
-    if mpeg {
+    out.put(1, u32::from(layer.mpeg));
+    if layer.mpeg {
         out.put(1, 0); // default intra matrix
         out.put(1, 0); // default non-intra matrix
     }
-    if advanced {
-        out.put(1, u32::from(quarter));
+    if layer.advanced {
+        out.put(1, u32::from(layer.quarter));
     }
     out.put(1, 1); // complexity_estimation_disable
     out.put(1, 1); // resync_marker_disable
     out.put(1, 0); // data_partitioned
-    if advanced {
+    if layer.advanced {
         out.put(1, 0); // newpred
         out.put(1, 0); // reduced resolution
     }
@@ -292,9 +345,10 @@ fn write_i_vop(
     q: Q,
     recon: &mut Frame,
     mv: &mut [(i32, i32)],
+    when: &mut When<'_>,
 ) {
     out.put(2, 0); // I
-    write_time(out, 0);
+    write_time(out, when, false);
     out.put(1, 1); // coded
     out.put(3, 0); // intra_dc_vlc_thr: DC stays in the DC VLC
     out.put(5, q.scale as u32);
@@ -320,10 +374,21 @@ fn write_i_vop(
 }
 
 /// `modulo_time_base`, the marker, `vop_time_increment`, and the marker.
-fn write_time(out: &mut BitWriter, frame: u32) {
-    let time_bits = (32 - (TIME_RESOLUTION - 1).leading_zeros()).max(1);
-    let modulo = frame / TIME_RESOLUTION;
-    let increment = frame % TIME_RESOLUTION;
+///
+/// The modulo is how many seconds passed since the previous non-B base, or
+/// since the base before that for a B-VOP. An absolute second count would
+/// be added again on the next picture.
+fn write_time(out: &mut BitWriter, when: &mut When<'_>, bidirectional: bool) {
+    let resolution = when.resolution.max(1);
+    let seconds = when.ticks / resolution;
+    let increment = when.ticks % resolution;
+    let origin = if bidirectional {
+        when.base.last
+    } else {
+        when.base.seconds
+    };
+    let modulo = seconds.saturating_sub(origin);
+    let time_bits = (32 - (resolution - 1).leading_zeros()).max(1);
     for _ in 0..modulo {
         out.bit(true);
     }
@@ -331,6 +396,10 @@ fn write_time(out: &mut BitWriter, frame: u32) {
     out.bit(true);
     out.put(time_bits, increment);
     out.bit(true);
+    if !bidirectional {
+        when.base.last = when.base.seconds;
+        when.base.seconds = seconds;
+    }
 }
 
 struct Planes<'a> {
@@ -669,13 +738,13 @@ fn write_p_vop(
     out: &mut BitWriter,
     planes: &Planes<'_>,
     q: Q,
-    frame: u32,
+    when: &mut When<'_>,
     recon: &mut Frame,
     mv: &mut [(i32, i32)],
     quarter: bool,
 ) {
     out.put(2, 1); // P
-    write_time(out, frame);
+    write_time(out, when, false);
     out.bit(true); // coded
     out.bit(false); // rounding
     out.put(3, 0); // intra_dc_vlc_thr
@@ -683,6 +752,8 @@ fn write_p_vop(
     out.put(3, 1); // fcode_forward
     let past = recon.clone();
     let mut next = Frame::new(past.mbw, past.mbh);
+    next.clip_width = past.clip_width;
+    next.clip_height = past.clip_height;
     next.mbs.resize(past.mbw * past.mbh, MbRecord::default());
     let mbw = past.mbw;
     let mbh = past.mbh;
@@ -979,9 +1050,9 @@ fn compensate_four(
     let mut y = [0u8; 256];
     let mut u = [0u8; 64];
     let mut v = [0u8; 64];
-    let width = (past.mbw * 16) as i32;
-    let height = (past.mbh * 16) as i32;
-    let [ry, ru, rv] = past.refs((width as u32, height as u32));
+    let width = past.clip_width;
+    let height = past.clip_height;
+    let [ry, ru, rv] = past.refs(((past.mbw * 16) as u32, (past.mbh * 16) as u32));
     let (x, yy) = ((mbx * 16) as i32, (mby * 16) as i32);
     let (mut sx, mut sy) = (0i32, 0i32);
     let shift = if quarter { 2 } else { 1 };
@@ -1216,9 +1287,15 @@ struct Refs<'a> {
     quarter: bool,
 }
 
-fn write_b_vop(out: &mut BitWriter, planes: &Planes<'_>, q: Q, frame: u32, refs: &Refs<'_>) {
+fn write_b_vop(
+    out: &mut BitWriter,
+    planes: &Planes<'_>,
+    q: Q,
+    when: &mut When<'_>,
+    refs: &Refs<'_>,
+) {
     out.put(2, 2); // B
-    write_time(out, frame);
+    write_time(out, when, true);
     out.bit(true); // coded
     out.put(3, 0); // intra_dc_vlc_thr
     out.put(5, q.scale as u32);

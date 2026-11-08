@@ -537,10 +537,7 @@ mod tests {
     #[test]
     fn a_move_becomes_one_request_and_the_draft_matches() {
         let mut draft = Draft::empty("D");
-        draft
-            .materials
-            .videos
-            .push(MaterialVideo::new("media"));
+        draft.materials.videos.push(MaterialVideo::new("media"));
         draft.config.maintrack_adsorb = false;
         let track = TrackId::new("main");
         draft.tracks[0].id = track.clone();
@@ -575,10 +572,7 @@ mod tests {
     #[test]
     fn a_miss_leaves_the_draft() {
         let mut draft = Draft::empty("D");
-        draft
-            .materials
-            .videos
-            .push(MaterialVideo::new("media"));
+        draft.materials.videos.push(MaterialVideo::new("media"));
         let track = TrackId::new("main");
         draft.tracks[0].id = track.clone();
         let mut session = Session::open(draft);
@@ -595,10 +589,7 @@ mod tests {
     #[test]
     fn a_snap_lands_on_an_edge() {
         let mut draft = Draft::empty("D");
-        draft
-            .materials
-            .videos
-            .push(MaterialVideo::new("media"));
+        draft.materials.videos.push(MaterialVideo::new("media"));
         let track = TrackId::new("main");
         draft.tracks[0].id = track.clone();
         let mut session = Session::open(draft);
@@ -640,10 +631,7 @@ mod tests {
     #[test]
     fn a_locked_lane_refuses_the_gesture_and_leaves_the_draft() {
         let mut draft = Draft::empty("D");
-        draft
-            .materials
-            .videos
-            .push(MaterialVideo::new("media"));
+        draft.materials.videos.push(MaterialVideo::new("media"));
         draft.tracks[0].id = TrackId::new("main");
         draft.tracks[0].attribute = TrackAttribute(TrackAttribute::LOCK);
         draft.tracks[0]
@@ -666,10 +654,7 @@ mod tests {
     #[test]
     fn placement_tries_the_pointer_then_the_upper_lane_then_a_new_lane() {
         let mut draft = Draft::empty("D");
-        draft
-            .materials
-            .videos
-            .push(MaterialVideo::new("media"));
+        draft.materials.videos.push(MaterialVideo::new("media"));
         draft.config.maintrack_adsorb = false;
         draft.tracks[0].id = TrackId::new("main");
         draft.tracks[0]
@@ -748,10 +733,7 @@ mod tests {
     #[test]
     fn an_upper_lane_move_is_one_request() {
         let mut draft = Draft::empty("D");
-        draft
-            .materials
-            .videos
-            .push(MaterialVideo::new("media"));
+        draft.materials.videos.push(MaterialVideo::new("media"));
         draft.config.maintrack_adsorb = false;
         draft.tracks[0].id = TrackId::new("main");
         draft.tracks[0]
@@ -799,10 +781,7 @@ mod tests {
     #[test]
     fn a_segment_does_not_block_its_own_lane() {
         let mut draft = Draft::empty("D");
-        draft
-            .materials
-            .videos
-            .push(MaterialVideo::new("media"));
+        draft.materials.videos.push(MaterialVideo::new("media"));
         draft.tracks[0].id = TrackId::new("main");
         draft.tracks[0]
             .segments
@@ -854,10 +833,7 @@ mod tests {
     #[test]
     fn a_drop_on_the_main_lane_names_that_lane_and_the_snapped_time() {
         let mut draft = Draft::empty("D");
-        draft
-            .materials
-            .videos
-            .push(MaterialVideo::new("media"));
+        draft.materials.videos.push(MaterialVideo::new("media"));
         draft.tracks[0].id = TrackId::new("main");
         let outcome = drop_gesture(
             &draft,
@@ -877,10 +853,7 @@ mod tests {
     #[test]
     fn a_drop_keeps_a_time_outside_the_snap_window() {
         let mut draft = Draft::empty("D");
-        draft
-            .materials
-            .videos
-            .push(MaterialVideo::new("media"));
+        draft.materials.videos.push(MaterialVideo::new("media"));
         draft.tracks[0].id = TrackId::new("main");
         let outcome = drop_gesture(
             &draft,
@@ -934,10 +907,7 @@ mod tests {
     #[test]
     fn a_blocked_video_lane_asks_for_a_new_lane() {
         let mut draft = Draft::empty("D");
-        draft
-            .materials
-            .videos
-            .push(MaterialVideo::new("media"));
+        draft.materials.videos.push(MaterialVideo::new("media"));
         draft.config.maintrack_adsorb = false;
         draft.tracks[0].id = TrackId::new("main");
         draft.tracks[0]
@@ -960,10 +930,7 @@ mod tests {
     #[test]
     fn a_magnet_drop_on_a_taken_main_lane_stays_on_that_lane() {
         let mut draft = Draft::empty("D");
-        draft
-            .materials
-            .videos
-            .push(MaterialVideo::new("media"));
+        draft.materials.videos.push(MaterialVideo::new("media"));
         draft.tracks[0].id = TrackId::new("main");
         draft.tracks[0]
             .segments
@@ -1058,10 +1025,7 @@ mod tests {
     #[test]
     fn trimming_the_start_stays_inside_the_source_and_the_previous_clip() {
         let mut draft = Draft::empty("D");
-        draft
-            .materials
-            .videos
-            .push(MaterialVideo::new("media"));
+        draft.materials.videos.push(MaterialVideo::new("media"));
         draft.config.maintrack_adsorb = false;
         draft.materials.audios.push(MaterialAudio {
             id: "sound".into(),
@@ -1132,10 +1096,7 @@ mod tests {
     #[test]
     fn dragging_past_the_other_edge_keeps_one_microsecond() {
         let mut draft = Draft::empty("D");
-        draft
-            .materials
-            .videos
-            .push(MaterialVideo::new("media"));
+        draft.materials.videos.push(MaterialVideo::new("media"));
         draft.tracks[0].segments.push(Segment::new(
             "a",
             "color",
@@ -1157,10 +1118,7 @@ mod tests {
     #[test]
     fn a_trim_with_a_bad_scale_is_refused() {
         let mut draft = Draft::empty("D");
-        draft
-            .materials
-            .videos
-            .push(MaterialVideo::new("media"));
+        draft.materials.videos.push(MaterialVideo::new("media"));
         draft.tracks[0]
             .segments
             .push(Segment::new("a", "color", TimeRange::new(0, 1_000_000)));

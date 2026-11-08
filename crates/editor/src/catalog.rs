@@ -5,7 +5,7 @@
 use cutlass_model::{ANIMATION_PRESETS, AnimType};
 
 use crate::effect_shelf::{effect_cards, filter_cards};
-use crate::transition_shelf::TRANSITION_OFFERS;
+use crate::transition_shelf::transition_offers;
 
 /// One line per bundled item: its kind, the id a request takes, then its
 /// name. `effect recipe/shake Shake`, `transition cutlass-dissolve Dissolve`.
@@ -21,7 +21,7 @@ pub fn catalog_entries() -> Vec<String> {
             .unwrap_or(&card);
         entries.push(format!("filter {id} {name}"));
     }
-    for offer in TRANSITION_OFFERS {
+    for offer in transition_offers() {
         entries.push(format!(
             "transition {} {}",
             offer.kind.effect_id(),

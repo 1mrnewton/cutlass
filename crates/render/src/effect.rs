@@ -480,6 +480,22 @@ fn focus(uv: vec2<f32>) -> vec4<f32> {
     return sum / 48.0;
 }
 
+fn place(uv: vec2<f32>) -> vec4<f32> {
+    // Pixels from the placed middle, turned back and scaled back.
+    let d = (uv - vec2<f32>(0.5) - fx.a.yz) * fx.size;
+    let turn = radians(-fx.a.w);
+    let r = vec2<f32>(d.x * cos(turn) - d.y * sin(turn), d.x * sin(turn) + d.y * cos(turn));
+    let scale = fx.a.x * fx.b.xy;
+    if (scale.x <= 0.0001 || scale.y <= 0.0001) {
+        return vec4<f32>(0.0);
+    }
+    let back = r / scale / fx.size + vec2<f32>(0.5);
+    if (any(back < vec2<f32>(0.0)) || any(back > vec2<f32>(1.0))) {
+        return vec4<f32>(0.0);
+    }
+    return fetch(back) * fx.b.z;
+}
+
 fn stretch(uv: vec2<f32>) -> vec4<f32> {
     let scale = max(fx.a.xy, vec2<f32>(0.0001));
     let back = (uv - vec2<f32>(0.5)) / scale + vec2<f32>(0.5);
@@ -689,6 +705,7 @@ fn fs(in: Out) -> @location(0) vec4<f32> {
         case 33u: { return blocks(uv); }
         case 34u: { return rays(uv); }
         case 35u: { return focus(uv); }
+        case 36u: { return place(uv); }
         default: { return fetch(uv); }
     }
 }
@@ -975,6 +992,7 @@ mod tests {
             step(Block::Blocks, &[]),
             step(Block::Rays, &[]),
             step(Block::Focus, &[]),
+            step(Block::Place, &[]),
         ];
         close(&draw(&renderer, &ROW, (4, 1), &resting), &ROW);
     }

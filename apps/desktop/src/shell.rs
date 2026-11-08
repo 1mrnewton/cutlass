@@ -77,7 +77,7 @@ use cutlass_probe::{self as probe, Probed};
 /// Long-side steps the export dialog offers.
 pub const SHORT_SIDES: [i32; 6] = [480, 720, 1080, 1440, 2160, 4320];
 
-pub use cutlass_editor::{TRANSITION_OFFERS, TransitionOffer};
+pub use cutlass_editor::{TransitionOffer, transition_offers};
 
 /// How long a notice shows, its fade in and out included.
 pub const NOTICE_SHOWN: Duration = Duration::from_millis(2_160);
@@ -12020,7 +12020,7 @@ mod tests {
         let mut desktop = shell();
         desktop.open_folder(&temp.path).unwrap();
         desktop.pixel_size = 0.001;
-        let card = super::TRANSITION_OFFERS
+        let card = super::transition_offers()
             .iter()
             .find(|offer| offer.id == "dip-white")
             .unwrap()
@@ -12049,7 +12049,7 @@ mod tests {
         desktop.open_folder(&temp.path).unwrap();
         desktop.pixel_size = 0.001;
         let y = crate::tokens::LANE_HEIGHT / 2.0;
-        let card = super::TRANSITION_OFFERS[0].card_id();
+        let card = super::transition_offers()[0].card_id();
         let missed = desktop
             .drop_transition(&card, lane_time(&desktop, 100_000.0), y)
             .unwrap_err();
@@ -12119,7 +12119,7 @@ mod tests {
         let mut desktop = shell();
         desktop.open_folder(&temp.path).unwrap();
         desktop.pixel_size = 0.001;
-        let card = super::TRANSITION_OFFERS[1].card_id();
+        let card = super::transition_offers()[1].card_id();
         let gap = desktop
             .drop_transition(
                 &card,
@@ -12151,7 +12151,7 @@ mod tests {
         desktop.pixel_size = 1.0;
         desktop
             .drop_transition(
-                &super::TRANSITION_OFFERS[0].card_id(),
+                &super::transition_offers()[0].card_id(),
                 lane_time(&desktop, 100.0),
                 crate::tokens::LANE_HEIGHT / 2.0,
             )

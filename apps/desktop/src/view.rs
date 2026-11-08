@@ -2915,7 +2915,7 @@ fn bin_cards(
             }
         }
         Shelf::Transitions => {
-            for offer in crate::shell::TRANSITION_OFFERS {
+            for offer in crate::shell::transition_offers() {
                 if !query.is_empty() && !offer.name.to_lowercase().contains(&query) {
                     continue;
                 }
@@ -6193,7 +6193,7 @@ fn ghost_card(shell: &Shell, material_id: &str) -> Option<BinCard> {
     {
         return Some(effect_card(effect));
     }
-    if let Some(offer) = crate::shell::TRANSITION_OFFERS
+    if let Some(offer) = crate::shell::transition_offers()
         .iter()
         .find(|offer| offer.card_id() == material_id)
     {

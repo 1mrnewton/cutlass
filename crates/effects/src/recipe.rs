@@ -117,6 +117,10 @@ pub enum Block {
     /// Blur by place: all but a sharp band, all but a sharp middle, or
     /// spun around the middle.
     Focus,
+    /// Scale, move, stretch, turn and fade the picture as a card: clear
+    /// where it no longer reaches, so what is behind it shows. A
+    /// transition slides or flips one picture off the other with it.
+    Place,
 }
 
 /// One parameter of a block: its name, its value when a recipe leaves it
@@ -358,6 +362,17 @@ const FOCUS: &[Param] = &[
     param("y", 0.0, -0.5, 0.5),
     param("angle", 10.0, 0.0, 90.0),
 ];
+/// `x` and `y` move the picture right and down, in frames; `stretch_x`
+/// and `stretch_y` scale it across and down on top of `scale`.
+const PLACE: &[Param] = &[
+    param("scale", 1.0, 0.0, 4.0),
+    param("x", 0.0, -2.0, 2.0),
+    param("y", 0.0, -2.0, 2.0),
+    param("rotate", 0.0, -360.0, 360.0),
+    param("stretch_x", 1.0, 0.0, 4.0),
+    param("stretch_y", 1.0, 0.0, 4.0),
+    param("opacity", 1.0, 0.0, 1.0),
+];
 const HALFTONE: &[Param] = &[
     param("size", 0.0, 0.0, 0.1),
     param("amount", 1.0, 0.0, 1.0),
@@ -366,7 +381,7 @@ const HALFTONE: &[Param] = &[
 
 impl Block {
     /// Every block, in the order of their codes.
-    pub const ALL: [Self; 36] = [
+    pub const ALL: [Self; 37] = [
         Self::Transform,
         Self::RgbSplit,
         Self::Slices,
@@ -403,6 +418,7 @@ impl Block {
         Self::Blocks,
         Self::Rays,
         Self::Focus,
+        Self::Place,
     ];
 
     /// The parameters in the order the shader reads them.
@@ -445,6 +461,7 @@ impl Block {
             Self::Blocks => BLOCKS,
             Self::Rays => RAYS,
             Self::Focus => FOCUS,
+            Self::Place => PLACE,
         }
     }
 
@@ -488,6 +505,7 @@ impl Block {
             Self::Blocks => 33,
             Self::Rays => 34,
             Self::Focus => 35,
+            Self::Place => 36,
         }
     }
 }
@@ -751,18 +769,7 @@ impl Recipe {
             return Err(RecipeError::Passes);
         }
         self.check_controls()?;
-        for pass in &self.passes {
-            for (name, curve) in &pass.params {
-                let Some(param) = pass.block.params().iter().find(|p| p.name == name) else {
-                    return Err(RecipeError::UnknownParam {
-                        block: pass.block,
-                        name: name.clone(),
-                    });
-                };
-                check_curve(pass.block, param, curve)?;
-            }
-        }
-        Ok(())
+        check_passes(&self.passes)
     }
 
     fn check_controls(&self) -> Result<(), RecipeError> {
@@ -896,7 +903,7 @@ impl Recipe {
     }
 }
 
-fn check_curve(block: Block, param: &Param, curve: &Curve) -> Result<(), RecipeError> {
+pub(crate) fn check_curve(block: Block, param: &Param, curve: &Curve) -> Result<(), RecipeError> {
     let range = |value: f32| {
         if value.is_finite() && value >= param.min && value <= param.max {
             Ok(())
@@ -948,9 +955,25 @@ fn check_curve(block: Block, param: &Param, curve: &Curve) -> Result<(), RecipeE
     }
 }
 
+/// Every parameter of `passes` is one its block has, inside its range.
+pub(crate) fn check_passes(passes: &[Pass]) -> Result<(), RecipeError> {
+    for pass in passes {
+        for (name, curve) in &pass.params {
+            let Some(param) = pass.block.params().iter().find(|p| p.name == name) else {
+                return Err(RecipeError::UnknownParam {
+                    block: pass.block,
+                    name: name.clone(),
+                });
+            };
+            check_curve(pass.block, param, curve)?;
+        }
+    }
+    Ok(())
+}
+
 impl Curve {
     /// The value at `seconds`, never negative.
-    fn at(&self, seconds: f32) -> f32 {
+    pub(crate) fn at(&self, seconds: f32) -> f32 {
         match self {
             Self::Constant(value) => *value,
             Self::Keys { keys, repeat } => {

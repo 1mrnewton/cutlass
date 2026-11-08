@@ -20,6 +20,7 @@
 #![forbid(unsafe_code)]
 
 mod blur;
+mod cross;
 mod effect;
 mod frame;
 mod keep;
@@ -83,6 +84,7 @@ pub struct Renderer {
     blurs: blur::Blurs,
     effects: effect::Effects,
     keep: keep::Keep,
+    cross: cross::Cross,
     mix: mix::Mix,
     transition: transition::Transition,
     vector: vector::Vector,
@@ -105,6 +107,7 @@ impl Renderer {
         let blurs = blur::Blurs::new(&device);
         let effects = effect::Effects::new(&device);
         let keep = keep::Keep::new(&device);
+        let cross = cross::Cross::new(&device);
         let mix = mix::Mix::new(&device);
         let transition = transition::Transition::new(&device);
         let vector = vector::Vector::new(&device);
@@ -115,6 +118,7 @@ impl Renderer {
             blurs,
             effects,
             keep,
+            cross,
             mix,
             transition,
             vector,
@@ -333,6 +337,38 @@ impl Renderer {
                     let canvas = Placement::canvas(size.0, size.1);
                     let mut outgoing = layer::Pipelines::upload_rgba(device, queue, outgoing)?;
                     let mut incoming = layer::Pipelines::upload_rgba(device, queue, incoming)?;
+                    if let Some(recipe) = kind.recipe() {
+                        // Each picture through its own steps, then the swap.
+                        let crossing = recipe.at(*t);
+                        let mut sides = Vec::with_capacity(2);
+                        for (side, steps) in [
+                            (&outgoing, &crossing.outgoing),
+                            (&incoming, &crossing.incoming),
+                        ] {
+                            let first = blur::scratch(device, size);
+                            let second = blur::scratch(device, size);
+                            let bound = [self.layers.bind(device, queue, side, canvas)];
+                            Self::paint(&self.layers, encoder, &first, &bound);
+                            let result = self
+                                .effects
+                                .run(device, queue, encoder, &first, &second, size, steps)
+                                .clone();
+                            sides.push(result);
+                        }
+                        let mixed = blur::scratch(device, size);
+                        self.cross.run(
+                            device, queue, encoder, &sides[0], &sides[1], &mixed, &crossing, size,
+                        );
+                        let uploaded = layer::Uploaded {
+                            views: [mixed.clone(), mixed.clone(), mixed],
+                            size,
+                            yuv: false,
+                            tone: cutlass_gpu::YuvTone::NONE,
+                            interleaved: false,
+                        };
+                        bound.push(self.layers.bind(device, queue, &uploaded, fit(canvas)));
+                        continue;
+                    }
                     let radius = cutlass_effects::transition_blur_radius(size.0, size.1, *t);
                     if *kind == cutlass_effects::TransitionKind::Blur && radius > 0 {
                         outgoing = self.blurred(encoder, &outgoing, canvas, radius, size);

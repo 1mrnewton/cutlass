@@ -36,6 +36,9 @@ pub enum TransitionKind {
     Spin,
     Blur,
     Glitch,
+    /// The bundled transition recipe at this place in
+    /// [`crate::bundled_transitions`].
+    Recipe(u16),
 }
 
 /// Which way a wipe, slide or push moves.
@@ -95,6 +98,7 @@ impl TransitionKind {
             Self::Spin => "spin",
             Self::Blur => "blur",
             Self::Glitch => "glitch",
+            Self::Recipe(_) => self.recipe().map_or("", |recipe| recipe.id.as_str()),
         }
     }
 
@@ -122,6 +126,49 @@ impl TransitionKind {
             Self::Spin => "Spin",
             Self::Blur => "Blur",
             Self::Glitch => "Glitch",
+            Self::Recipe(_) => self.recipe().map_or("", |recipe| recipe.name.as_str()),
+        }
+    }
+
+    /// The bundled recipe a [`Self::Recipe`] names.
+    #[must_use]
+    pub fn recipe(self) -> Option<&'static crate::TransitionRecipe> {
+        match self {
+            Self::Recipe(index) => crate::bundled_transitions().get(usize::from(index)),
+            _ => None,
+        }
+    }
+
+    /// Every transition the app draws: the built-in ones, then each
+    /// bundled recipe.
+    #[must_use]
+    pub fn every() -> Vec<Self> {
+        let recipes = (0..crate::bundled_transitions().len())
+            .filter_map(|index| u16::try_from(index).ok())
+            .map(Self::Recipe);
+        Self::ALL.into_iter().chain(recipes).collect()
+    }
+
+    /// The shelf category it is listed under, one of
+    /// [`crate::TRANSITION_CATEGORIES`].
+    #[must_use]
+    pub fn category(self) -> &'static str {
+        match self {
+            Self::Dissolve | Self::DipToBlack | Self::DipToWhite => "Basic",
+            Self::WipeLeft | Self::WipeRight | Self::WipeUp | Self::WipeDown => "Wipe",
+            Self::SlideLeft
+            | Self::SlideRight
+            | Self::SlideUp
+            | Self::SlideDown
+            | Self::PushLeft
+            | Self::PushRight
+            | Self::PushUp
+            | Self::PushDown => "Slide",
+            Self::ZoomIn | Self::ZoomOut => "Zoom",
+            Self::Spin => "Spin",
+            Self::Blur => "Blur",
+            Self::Glitch => "Glitch",
+            Self::Recipe(_) => self.recipe().map_or("", |recipe| recipe.category.as_str()),
         }
     }
 
@@ -135,7 +182,7 @@ impl TransitionKind {
     #[must_use]
     pub fn of(material: &MaterialTransition) -> Option<Self> {
         if let Some(key) = material.effect_id.strip_prefix(BUILT_IN_PREFIX) {
-            return Self::ALL.into_iter().find(|kind| kind.key() == key);
+            return Self::every().into_iter().find(|kind| kind.key() == key);
         }
         if !material.effect_id.is_empty() || !material.resource_id.is_empty() {
             return None;
@@ -148,7 +195,8 @@ impl TransitionKind {
     }
 
     /// The number [`TRANSITION_WGSL`]'s `transition` takes for this kind:
-    /// its place in [`Self::ALL`].
+    /// its place in [`Self::ALL`]. A recipe is drawn by passes of its own
+    /// and reads as a dissolve here.
     #[must_use]
     pub fn code(self) -> u32 {
         let place = Self::ALL.iter().position(|kind| *kind == self).unwrap_or(0);
@@ -350,7 +398,10 @@ pub fn mix(
             #[allow(clippy::cast_precision_loss)]
             let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
             let pixel = match kind {
-                TransitionKind::Dissolve => lerp(from.at(x, y), to.at(x, y), t),
+                // The CPU draws a recipe as a dissolve.
+                TransitionKind::Dissolve | TransitionKind::Recipe(_) => {
+                    lerp(from.at(x, y), to.at(x, y), t)
+                }
                 TransitionKind::DipToBlack | TransitionKind::DipToWhite => {
                     let shade = if kind == TransitionKind::DipToBlack {
                         [0, 0, 0, 255]

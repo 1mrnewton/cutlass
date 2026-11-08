@@ -18,6 +18,8 @@ pub struct TransitionOffer {
     pub overlap: bool,
     /// What it draws.
     pub kind: TransitionKind,
+    /// The shelf category, one of [`cutlass_effects::TRANSITION_CATEGORIES`].
+    pub category: &'static str,
 }
 
 impl TransitionOffer {
@@ -38,12 +40,13 @@ const fn offer(kind: TransitionKind, id: &'static str, name: &'static str) -> Tr
         duration: if dip { 400_000 } else { 500_000 },
         overlap: !dip,
         kind,
+        category: "",
     }
 }
 
 /// The twenty built-in transitions. Dips stay on the outgoing clip; the
 /// rest cross the cut.
-pub const TRANSITION_OFFERS: &[TransitionOffer] = &[
+const BUILT_IN_OFFERS: &[TransitionOffer] = &[
     offer(TransitionKind::Dissolve, "dissolve", "Dissolve"),
     offer(TransitionKind::DipToBlack, "dip", "Dip to black"),
     offer(TransitionKind::DipToWhite, "dip-white", "Dip to white"),
@@ -66,10 +69,50 @@ pub const TRANSITION_OFFERS: &[TransitionOffer] = &[
     offer(TransitionKind::Glitch, "glitch", "Glitch"),
 ];
 
+/// Every transition the shelf offers: the built-in ones, then each
+/// bundled recipe, each with its category.
+#[must_use]
+pub fn transition_offers() -> &'static [TransitionOffer] {
+    static OFFERS: std::sync::OnceLock<Vec<TransitionOffer>> = std::sync::OnceLock::new();
+    OFFERS.get_or_init(|| {
+        let built_in = BUILT_IN_OFFERS.iter().map(|offer| TransitionOffer {
+            category: offer.kind.category(),
+            ..*offer
+        });
+        let recipes = TransitionKind::every().into_iter().filter_map(|kind| {
+            let recipe = kind.recipe()?;
+            Some(TransitionOffer {
+                id: recipe.id.as_str(),
+                name: recipe.name.as_str(),
+                duration: recipe.duration().0,
+                overlap: true,
+                kind,
+                category: recipe.category.as_str(),
+            })
+        });
+        built_in.chain(recipes).collect()
+    })
+}
+
+/// The shelf's categories that hold at least one transition, in shelf
+/// order.
+#[must_use]
+pub fn transition_categories() -> Vec<&'static str> {
+    cutlass_effects::TRANSITION_CATEGORIES
+        .iter()
+        .copied()
+        .filter(|category| {
+            transition_offers()
+                .iter()
+                .any(|offer| offer.category == *category)
+        })
+        .collect()
+}
+
 /// The offer a shelf card names.
 #[must_use]
 pub fn transition_of_card(card_id: &str) -> Option<TransitionOffer> {
-    TRANSITION_OFFERS
+    transition_offers()
         .iter()
         .copied()
         .find(|offer| offer.card_id() == card_id)
@@ -261,7 +304,7 @@ mod tests {
         };
         let request = transition_request(
             &draft,
-            TRANSITION_OFFERS[0],
+            transition_offers()[0],
             Pointer { x: 1_000.0, y: 8.0 },
             scale,
             Micros(12_000),
@@ -280,18 +323,25 @@ mod tests {
         assert!(transition.is_overlap);
         assert_eq!(
             transition_of_card("transition:dip"),
-            Some(TRANSITION_OFFERS[1])
+            Some(transition_offers()[1])
         );
         assert_eq!(transition_of_card("transition:none"), None);
     }
 
     #[test]
     fn the_shelf_offers_every_built_in_transition_by_its_own_key() {
-        assert_eq!(TRANSITION_OFFERS.len(), TransitionKind::ALL.len());
-        for (offer, kind) in TRANSITION_OFFERS.iter().zip(TransitionKind::ALL) {
+        let every = TransitionKind::every();
+        assert_eq!(transition_offers().len(), every.len());
+        for (offer, kind) in transition_offers().iter().zip(every) {
             assert_eq!(offer.kind, kind);
             assert_eq!(offer.id, kind.key());
             assert_eq!(offer.name, kind.label());
+            assert!(
+                cutlass_effects::TRANSITION_CATEGORIES.contains(&offer.category),
+                "{}",
+                offer.id
+            );
+            assert_eq!(transition_of_card(&offer.card_id()), Some(*offer));
         }
     }
 }

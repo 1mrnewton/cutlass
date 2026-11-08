@@ -20,6 +20,7 @@ pub mod blend;
 pub mod catalog;
 pub mod chroma;
 pub mod controls;
+pub mod crossing;
 pub mod grade;
 pub mod look;
 pub mod lut;
@@ -43,6 +44,10 @@ pub use catalog::{
 };
 pub use chroma::{CHROMA, Chroma, parse_hex, segment_chroma};
 pub use controls::{store_control, stored_controls};
+pub use crossing::{
+    CROSS, CrossKind, Crossing, DEFAULT_CROSSING_SECONDS, TRANSITION_CATEGORIES, TransitionRecipe,
+    bundled_transitions,
+};
 pub use grade::{
     COLOR_CURVES, COLOR_WHEELS, Colour, CurveChannel, Grade, HSL, HSL_COLORS, MAX_CURVE_POINTS,
     Wheel, WheelSetting, curve_table, is_colour_work, points_json, segment_colour, segment_grade,

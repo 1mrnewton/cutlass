@@ -11,7 +11,8 @@
 //! while the target is out of sight and looked for again by correlation,
 //! or [`Step::Lost`] once it stayed away too long.
 //!
-//! [`plan`] steadies a clip from how the whole picture moved through it.
+//! [`Camera`] measures how the whole picture moved through a clip, for
+//! steadying it, and [`plan`] turns that into a steady clip.
 //!
 //! Pure Rust; no model, no file.
 
@@ -28,7 +29,7 @@ use gray::Pyramid;
 use quad::Corners;
 
 pub use gray::{GRAY_SIDE, Gray, MAX_SIDE};
-pub use stabilize::{Correction, Move, Path, Plan, Strength, plan};
+pub use stabilize::{Camera, Correction, Move, Path, Plan, Strength, plan};
 
 /// What the target's move may be.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -9,7 +9,7 @@ const W: u32 = 240;
 const H: u32 = 180;
 
 /// Smooth value noise, 0 to 255, with cells `cell` pixels wide.
-fn noise(x: f64, y: f64, seed: u64, cell: f64) -> f32 {
+pub(crate) fn noise(x: f64, y: f64, seed: u64, cell: f64) -> f32 {
     let (gx, gy) = (x / cell, y / cell);
     let (ix, iy) = (gx.floor(), gy.floor());
     let (fx, fy) = (gx - ix, gy - iy);

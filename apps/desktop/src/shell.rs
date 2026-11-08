@@ -571,16 +571,16 @@ pub enum ExportQuality {
 }
 
 impl ExportQuality {
-    /// The bitrate for an H.264, HEVC, or VP8 picture `short_side` pixels
-    /// on its short side. HEVC gets the same picture from fewer bits; VP8
-    /// spends what H.264 does.
+    /// The bitrate for an H.264, HEVC, VP8, or MPEG-2 picture `short_side`
+    /// pixels on its short side. HEVC gets the same picture from fewer bits;
+    /// VP8 spends what H.264 does; MPEG-2 needs twice that.
     #[must_use]
     pub fn bitrate(self, short_side: u32, codec: CodecId) -> u32 {
         let base = cutlass_export::video_bitrate(short_side);
-        let base = if codec == CodecId::Hevc {
-            base / 10 * 6
-        } else {
-            base
+        let base = match codec {
+            CodecId::Hevc => base / 10 * 6,
+            CodecId::Mpeg2 => base.saturating_mul(2),
+            _ => base,
         };
         match self {
             Self::Lower => base / 2,
@@ -7296,6 +7296,11 @@ impl Shell {
                 "VP8 is written in an MP4".to_owned(),
             ));
         }
+        if request.codec == CodecId::Mpeg2 && mov {
+            return Err(ShellError::Unavailable(
+                "MPEG-2 is written in an MP4".to_owned(),
+            ));
+        }
         if request.sound && request.audio.codec == CodecId::Pcm && !mov {
             return Err(ShellError::Unavailable(
                 "PCM sound is written in a MOV".to_owned(),
@@ -7340,7 +7345,7 @@ impl Shell {
         }
         if !matches!(
             request.codec,
-            CodecId::H264 | CodecId::Hevc | CodecId::Prores | CodecId::Vp8
+            CodecId::H264 | CodecId::Hevc | CodecId::Prores | CodecId::Vp8 | CodecId::Mpeg2
         ) {
             return Err(ShellError::ExportUnavailable);
         }
@@ -15343,6 +15348,85 @@ mod tests {
         let (u, v) = chroma.split_at(chroma.len() / 2);
         let near = |plane: &[u8], value: u8| plane.iter().all(|&s| s.abs_diff(value) <= 4);
         assert!(near(y, 97) && near(u, 156) && near(v, 104));
+    }
+
+    /// MPEG-2 exports through the Rust encoder at twice H.264's rate into
+    /// an MP4 `mp4v` track, which the desktop's readers decode back to the
+    /// clip's colour with hardware decode on and off; a MOV is refused.
+    #[test]
+    fn an_mpeg2_export_lands_an_mp4_that_plays_back() {
+        assert_eq!(
+            super::ExportQuality::Recommended.bitrate(1080, CodecId::Mpeg2),
+            2 * super::ExportQuality::Recommended.bitrate(1080, CodecId::H264)
+        );
+        let temp = Temp::new();
+        movie_project(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        assert!(desktop.encodes(CodecId::Mpeg2));
+        let mov = desktop.export(ExportRequest {
+            path: temp.path.join("mpeg2.mov"),
+            short_side: 480,
+            codec: CodecId::Mpeg2,
+            ..ExportRequest::default()
+        });
+        assert_eq!(mov.unwrap_err().to_string(), "MPEG-2 is written in an MP4");
+
+        let destination = temp.path.join("mpeg2.mp4");
+        desktop
+            .export(ExportRequest {
+                path: destination.clone(),
+                short_side: 480,
+                codec: CodecId::Mpeg2,
+                ..ExportRequest::default()
+            })
+            .unwrap();
+        land_job(&mut desktop);
+        assert_eq!(desktop.notice(), "Exported mpeg2.mp4");
+        let bytes = std::fs::read(&destination).unwrap();
+        assert!(bytes.windows(4).any(|w| w == b"mp4v"));
+        assert!(bytes.windows(4).any(|w| w == b"esds"));
+
+        let off = cutlass_settings::Hardware {
+            decode: false,
+            encode: false,
+            ..cutlass_settings::Hardware::default()
+        };
+        let mut coded = 0;
+        for readers in [
+            crate::readers::installed_readers(),
+            crate::readers::readers_with(crate::register_codecs_with(&off).0),
+        ] {
+            let mut media = readers.open(&destination).unwrap();
+            assert_eq!(
+                (media.info().width, media.info().height),
+                (Some(960), Some(480))
+            );
+            let held = media
+                .decode_at(Micros(1_500_000), &TimeRange::new(0, 2_000_000))
+                .unwrap();
+            let (width, height, pixel, bytes) = match held.frame {
+                cutlass_engine::DecodedFrame::Coded {
+                    width,
+                    height,
+                    pixel,
+                    bytes,
+                    ..
+                } => (width, height, pixel, bytes),
+                cutlass_engine::DecodedFrame::Surface { .. } => continue,
+                _ => panic!("a coded picture"),
+            };
+            assert_eq!((width, height), (960, 480));
+            assert_eq!(pixel, PixelFormat::Yuv420p);
+            // 0x336699 in BT.709 limited range: Y 97, Cb 156, Cr 104.
+            let (y, chroma) = bytes.split_at(960 * 480);
+            let (u, v) = chroma.split_at(chroma.len() / 2);
+            let near = |plane: &[u8], value: u8| plane.iter().all(|&s| s.abs_diff(value) <= 4);
+            assert!(near(y, 97) && near(u, 156) && near(v, 104));
+            coded += 1;
+        }
+        // Hardware decode may hand back a surface; the Rust decoder may not.
+        assert!(coded >= 1);
     }
 
     #[test]

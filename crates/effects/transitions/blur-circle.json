@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "id": "blur-circle",
+  "name": "Blur Circle",
+  "category": "Blur",
+  "duration": 0.7,
+  "outgoing": [
+    {"block": "blur", "params": {"radius": {"keys": [[0, 0], [0.5, 0.03], [1, 0]]}}}
+  ],
+  "incoming": [
+    {"block": "blur", "params": {"radius": {"keys": [[0, 0], [0.5, 0.03], [1, 0]]}}}
+  ],
+  "cross": {"kind": 1, "soft": 0.3}
+}

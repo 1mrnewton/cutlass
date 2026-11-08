@@ -350,7 +350,7 @@ pub fn transition_preview_t(elapsed: Micros) -> f32 {
 }
 
 /// The transition recipes the app ships, in shelf order.
-const BUNDLED_FILES: [&str; 69] = [
+const BUNDLED_FILES: [&str; 101] = [
     include_str!("../transitions/flash.json"),
     include_str!("../transitions/quick-flash.json"),
     include_str!("../transitions/red-flash.json"),
@@ -420,6 +420,38 @@ const BUNDLED_FILES: [&str; 69] = [
     include_str!("../transitions/pop-out.json"),
     include_str!("../transitions/tunnel-zoom.json"),
     include_str!("../transitions/zoom-out-fade.json"),
+    include_str!("../transitions/spin-in.json"),
+    include_str!("../transitions/spin-out.json"),
+    include_str!("../transitions/spin-left.json"),
+    include_str!("../transitions/spin-right.json"),
+    include_str!("../transitions/roll-left.json"),
+    include_str!("../transitions/roll-right.json"),
+    include_str!("../transitions/twist.json"),
+    include_str!("../transitions/tornado.json"),
+    include_str!("../transitions/vortex.json"),
+    include_str!("../transitions/spin-zoom.json"),
+    include_str!("../transitions/tilt-in.json"),
+    include_str!("../transitions/swing-in.json"),
+    include_str!("../transitions/flip-horizontal.json"),
+    include_str!("../transitions/flip-vertical.json"),
+    include_str!("../transitions/barrel-roll.json"),
+    include_str!("../transitions/spiral-in.json"),
+    include_str!("../transitions/coin-flip.json"),
+    include_str!("../transitions/soft-blur.json"),
+    include_str!("../transitions/heavy-blur.json"),
+    include_str!("../transitions/motion-blur-left.json"),
+    include_str!("../transitions/motion-blur-right.json"),
+    include_str!("../transitions/motion-blur-up.json"),
+    include_str!("../transitions/motion-blur-down.json"),
+    include_str!("../transitions/focus-pull.json"),
+    include_str!("../transitions/tilt-shift.json"),
+    include_str!("../transitions/lens-blur.json"),
+    include_str!("../transitions/radial-blur.json"),
+    include_str!("../transitions/blur-circle.json"),
+    include_str!("../transitions/dream-fade.json"),
+    include_str!("../transitions/frost-fade.json"),
+    include_str!("../transitions/blur-dip.json"),
+    include_str!("../transitions/defocus-zoom.json"),
 ];
 
 /// Every bundled transition recipe, read once.

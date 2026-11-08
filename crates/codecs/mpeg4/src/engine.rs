@@ -19,7 +19,7 @@ use cutlass_decode::{
 };
 use cutlass_encode::{EncodeFactory, VideoEncoder, VideoInput};
 
-use crate::enc::Pictures;
+use crate::enc::{Pictures, Profile};
 
 use crate::dec::{self, Image};
 use crate::header::Colour;
@@ -223,16 +223,22 @@ impl Decoder for EngineDecoder {
     }
 }
 
+/// `CodecParams::extra` that opens the export encoder at Advanced Simple:
+/// B-VOPs and quarter-sample motion. Apple's MPEG-4 decoder refuses those
+/// streams, so export without it writes Simple.
+pub const ADVANCED_SIMPLE: &[u8] = b"Advanced Simple";
+
 /// MPEG-4 Visual for export.
 ///
 /// Pictures are 4:2:0. RGBA in the parameters is accepted because export
-/// converts each frame before [`VideoEncoder::push`]. The stream is
-/// Advanced Simple: an I-VOP, then P-VOPs with the picture before each as
-/// a B-VOP, quarter-sample motion, and the H.263 quantiser. A named bitrate
-/// moves the quantiser. Zero keeps the starting one. GMC, sprites,
-/// interlace, data partitioning, resync and RVLC are not written. A height
-/// or width that is not a multiple of 16 is padded, and the layer keeps
-/// the visible size.
+/// converts each frame before [`VideoEncoder::push`]. The stream is Simple:
+/// an I-VOP, then P-VOPs, half-sample motion, and the H.263 quantiser, which
+/// Apple's decoder and FFmpeg both play. With [`ADVANCED_SIMPLE`] in
+/// `params.extra` it is Advanced Simple: each picture before a P-VOP is a
+/// B-VOP, and motion is quarter-sample. A named bitrate moves the
+/// quantiser. Zero keeps the starting one. GMC, sprites, interlace, data
+/// partitioning, resync and RVLC are not written. A height or width that is
+/// not a multiple of 16 is padded, and the layer keeps the visible size.
 pub struct EngineEncoder {
     inner: Pictures,
     width: u32,
@@ -253,7 +259,17 @@ impl EngineEncoder {
                 what: "pixel format",
             });
         }
+        let profile = if params.extra == ADVANCED_SIMPLE {
+            Profile::AdvancedSimple
+        } else if params.extra.is_empty() {
+            Profile::Simple
+        } else {
+            return Err(CodecError::Unsupported {
+                what: "encoder configuration",
+            });
+        };
         let inner = Pictures::open(
+            profile,
             params.width,
             params.height,
             params.bitrate,
@@ -445,8 +461,26 @@ mod tests {
 
     #[test]
     fn export_packets_come_back_in_display_order() {
+        // Simple: I then P-VOPs, in display order already. Advanced Simple:
+        // a B-VOP after each P-VOP but the last.
+        for (extra, kinds) in [
+            (Vec::new(), [0, 1, 1, 1]),
+            (ADVANCED_SIMPLE.to_vec(), [0, 1, 2, 1]),
+        ] {
+            export_round_trip(extra, kinds);
+        }
+        let mut refused = CodecParams::video(CodecId::Mpeg4, 64, 48);
+        refused.extra = b"Main".to_vec();
+        assert!(matches!(
+            EngineEncoder::open(&refused),
+            Err(CodecError::Unsupported { .. })
+        ));
+    }
+
+    fn export_round_trip(extra: Vec<u8>, kinds: [u8; 4]) {
         let mut params = CodecParams::with_format(CodecId::Mpeg4, 64, 48, PixelFormat::Rgba8);
         params.bitrate = 400_000;
+        params.extra = extra;
         let mut factory = EncodeFactory::new();
         register_engine_encoders(&mut factory);
         let mut encoder = factory.open(&params).expect("open");
@@ -486,7 +520,22 @@ mod tests {
             }),
             "export reads the layer from the first packet"
         );
-        assert!(packets.iter().any(|packet| vop_type(&packet.data) == 2));
+        let coded: Vec<u8> = packets
+            .iter()
+            .map(|packet| vop_type(&packet.data))
+            .collect();
+        assert_eq!(coded, kinds);
+        let config = packets[0]
+            .side
+            .iter()
+            .find_map(|side| match side {
+                SideData::Config(config) => Some(config.clone()),
+                _ => None,
+            })
+            .expect("layer headers");
+        let profile = if kinds.contains(&2) { 0xF0 } else { 0x00 };
+        assert_eq!(config[..4], [0, 0, 1, 0xB0]);
+        assert_eq!(config[4] & 0xF0, profile, "profile_and_level_indication");
         assert!(
             packets
                 .iter()
@@ -525,7 +574,8 @@ mod tests {
 
     #[test]
     fn a_keyframe_flushes_the_held_picture_first() {
-        let params = CodecParams::video(CodecId::Mpeg4, 32, 32);
+        let mut params = CodecParams::video(CodecId::Mpeg4, 32, 32);
+        params.extra = ADVANCED_SIMPLE.to_vec();
         let mut encoder = EngineEncoder::open(&params).expect("open");
         let mut kinds = Vec::new();
         for (n, key) in [(0, false), (1, false), (2, true)] {

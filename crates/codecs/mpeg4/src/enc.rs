@@ -1651,14 +1651,27 @@ pub(crate) struct PictureIn<'a> {
     pub(crate) keyframe: bool,
 }
 
-/// Advanced Simple pictures for export.
+/// The tools an export stream uses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Profile {
+    /// I and P-VOPs, half-sample motion, each picture shown as decoded:
+    /// what Apple's MPEG-4 decoder plays.
+    Simple,
+    /// B-VOPs and quarter-sample motion as well. FFmpeg plays it; Apple's
+    /// decoder refuses it.
+    AdvancedSimple,
+}
+
+/// Export pictures.
 ///
-/// The first picture is an I-VOP. Each later picture is held so the next
-/// one can be a P-VOP and the held one a B-VOP between them. `low_delay`
-/// is clear, so a decoder shows them in presentation order. The quantiser
-/// starts from the bitrate and moves when the bytes spent leave the budget.
-/// Zero bitrate keeps the starting quantiser.
+/// The first picture is an I-VOP. Simple codes each later picture as a
+/// P-VOP. Advanced Simple holds each later picture so the next one can be
+/// a P-VOP and the held one a B-VOP between them, with `low_delay` clear,
+/// so a decoder shows them in presentation order. The quantiser starts from
+/// the bitrate and moves when the bytes spent leave the budget. Zero
+/// bitrate keeps the starting quantiser.
 pub(crate) struct Pictures {
+    profile: Profile,
     width: u32,
     height: u32,
     stride: usize,
@@ -1684,6 +1697,7 @@ pub(crate) struct Pictures {
 impl Pictures {
     /// `bitrate` is bits a second. Zero keeps one quantiser for every picture.
     pub(crate) fn open(
+        profile: Profile,
         width: u32,
         height: u32,
         bitrate: u32,
@@ -1710,6 +1724,7 @@ impl Pictures {
             i32::try_from(height).map_err(|_| CodecError::Limit { what: "frame size" })?;
         let quant = initial_quant(bitrate, width, height);
         Ok(Self {
+            profile,
             width,
             height,
             stride: mbw * 16,
@@ -1753,6 +1768,12 @@ impl Pictures {
         let picture = self.store(input.y, input.u, input.v, input.pts, duration)?;
         if input.keyframe || !self.coded {
             return self.intra(picture);
+        }
+        if self.profile == Profile::Simple {
+            self.time_ok(picture.pts)?;
+            let bytes = self.encode_p(&picture)?;
+            self.finish_reference(&picture, bytes.len());
+            return Ok(vec![access(bytes, &picture, false)]);
         }
         let Some(between) = self.held.take() else {
             self.held = Some(picture);
@@ -1806,7 +1827,7 @@ impl Pictures {
         }
         if self.resolution == 0 {
             self.resolution = timescale;
-            self.headers = layer_bytes(self.width, self.height, timescale);
+            self.headers = layer_bytes(self.profile, self.width, self.height, timescale);
             return Ok(());
         }
         if timescale != self.resolution {
@@ -1911,7 +1932,7 @@ impl Pictures {
             },
             &mut self.reference,
             &mut self.mv,
-            true,
+            self.profile == Profile::AdvancedSimple,
         );
         Ok(out.finish())
     }
@@ -2027,50 +2048,62 @@ fn planes_of(picture: &Held, stride: usize) -> Planes<'_> {
     }
 }
 
-/// `profile_and_level_indication` for an Advanced Simple stream of this
-/// size (ISO/IEC 14496-2 Table G-1, levels by macroblocks a VOP in Table
-/// N-2): level 1 up to QCIF, 3 up to CIF, 4 up to 352x576, and 5 above,
-/// the largest Advanced Simple level, which a picture over 720x576 also
-/// exceeds. FFmpeg writes level 1 for every size.
-fn advanced_simple_level(width: u32, height: u32) -> u8 {
+/// `profile_and_level_indication` for a stream of this size (ISO/IEC
+/// 14496-2 Table G-1, levels by macroblocks a VOP in Annex N). Simple:
+/// level 1 up to QCIF, 3 up to CIF, 4a up to VGA, 5 up to 720x576, and 6
+/// above. Advanced Simple: level 1 up to QCIF, 3 up to CIF, 4 up to
+/// 352x576, and 5 above. Each profile's last level is its largest, which a
+/// larger picture also exceeds. FFmpeg writes level 1 for every size.
+fn profile_and_level(profile: Profile, width: u32, height: u32) -> u8 {
     let mbs = width.div_ceil(16) * height.div_ceil(16);
-    match mbs {
-        0..=99 => 0xF1,
-        100..=396 => 0xF3,
-        397..=792 => 0xF4,
-        _ => 0xF5,
+    match profile {
+        Profile::Simple => match mbs {
+            0..=99 => 0x01,
+            100..=396 => 0x03,
+            397..=1200 => 0x04,
+            1201..=1620 => 0x05,
+            _ => 0x06,
+        },
+        Profile::AdvancedSimple => match mbs {
+            0..=99 => 0xF1,
+            100..=396 => 0xF3,
+            397..=792 => 0xF4,
+            _ => 0xF5,
+        },
     }
 }
 
 /// The visual object sequence header and the visual object header before
 /// the layer, as FFmpeg's encoder writes them: the profile and level, then
-/// a video object, version 5, priority 1, with no video signal type.
+/// a video object, version 5 for Advanced Simple and 1 for Simple,
+/// priority 1, with no video signal type.
 fn write_visual_object(out: &mut BitWriter, profile_and_level: u8) {
     start(out, VOS_START);
     out.bytes(&[profile_and_level]);
     start(out, VISUAL_OBJECT);
     out.put(1, 1); // is_visual_object_identifier
-    out.put(4, 5); // visual_object_verid
+    out.put(4, if profile_and_level >> 4 == 0xF { 5 } else { 1 }); // visual_object_verid
     out.put(3, 1); // visual_object_priority
     out.put(4, 1); // video ID
     out.put(1, 0); // video_signal_type
     out.stuff();
 }
 
-fn layer_bytes(width: u32, height: u32, resolution: u32) -> Vec<u8> {
+fn layer_bytes(profile: Profile, width: u32, height: u32, resolution: u32) -> Vec<u8> {
     let mut out = BitWriter::new();
-    write_visual_object(&mut out, advanced_simple_level(width, height));
+    write_visual_object(&mut out, profile_and_level(profile, width, height));
     start(&mut out, 0x00);
     start(&mut out, 0x20);
+    let advanced = profile == Profile::AdvancedSimple;
     write_vol(
         &mut out,
         width,
         height,
         Layer {
-            advanced: true,
-            quarter: true,
+            advanced,
+            quarter: advanced,
             mpeg: false,
-            low_delay: false,
+            low_delay: !advanced,
             resolution,
         },
     );
@@ -2753,8 +2786,8 @@ mod tests {
 
     #[test]
     fn export_headers_name_the_advanced_simple_profile_first() {
-        let headers = super::layer_bytes(854, 480, 30);
-        // VOS, Advanced Simple level 5 (1590 macroblocks), then the visual
+        let headers = super::layer_bytes(super::Profile::AdvancedSimple, 854, 480, 30);
+        // VOS, Advanced Simple level 5 (1620 macroblocks), then the visual
         // object: identifier, version 5, priority 1, video, no signal
         // type, stuffing.
         assert_eq!(headers[..5], [0, 0, 1, 0xB0, 0xF5]);
@@ -2762,11 +2795,25 @@ mod tests {
         assert_eq!(headers[10], 0b0001_0011);
         assert_eq!(headers[11..15], [0, 0, 1, 0x00]);
         assert_eq!(headers[15..19], [0, 0, 1, 0x20]);
-        assert_eq!(super::advanced_simple_level(176, 144), 0xF1);
-        assert_eq!(super::advanced_simple_level(352, 288), 0xF3);
-        assert_eq!(super::advanced_simple_level(352, 576), 0xF4);
-        assert_eq!(super::advanced_simple_level(720, 576), 0xF5);
-        assert_eq!(super::advanced_simple_level(1920, 1080), 0xF5);
+        let level = |w, h| super::profile_and_level(super::Profile::AdvancedSimple, w, h);
+        assert_eq!(level(176, 144), 0xF1);
+        assert_eq!(level(352, 288), 0xF3);
+        assert_eq!(level(352, 576), 0xF4);
+        assert_eq!(level(720, 576), 0xF5);
+        assert_eq!(level(1920, 1080), 0xF5);
+        let level = |w, h| super::profile_and_level(super::Profile::Simple, w, h);
+        assert_eq!(level(176, 144), 0x01);
+        assert_eq!(level(352, 288), 0x03);
+        assert_eq!(level(640, 480), 0x04);
+        assert_eq!(level(720, 576), 0x05);
+        assert_eq!(level(1280, 720), 0x06);
+        assert_eq!(level(1920, 1080), 0x06);
+        // Simple: version 1 in the visual object, then a Simple layer.
+        let simple = super::layer_bytes(super::Profile::Simple, 854, 480, 30);
+        assert_eq!(simple[..5], [0, 0, 1, 0xB0, 0x05]);
+        assert_eq!(simple[5..10], [0, 0, 1, 0xB5, 0b1000_1001]);
+        let mut decoder = Decoder::with_max_pixels(854 * 480);
+        decoder.configure(&simple).expect("configure simple");
         // The decoder reads them as the configuration.
         let mut decoder = Decoder::with_max_pixels(854 * 480);
         decoder.configure(&headers).expect("configure");
@@ -2885,7 +2932,9 @@ mod tests {
     #[test]
     fn a_second_of_motion_stays_near_the_requested_bitrate() {
         for target in [200_000u32, 400_000, 800_000] {
-            let mut encoder = super::Pictures::open(64, 48, target, false).expect("open");
+            let mut encoder =
+                super::Pictures::open(super::Profile::AdvancedSimple, 64, 48, target, false)
+                    .expect("open");
             let mut bytes = 0usize;
             for n in 0..30usize {
                 let (y, u, v) = moving(64, 48, n);
@@ -2950,8 +2999,14 @@ mod tests {
         bitrate: u32,
         count: usize,
     ) -> (Vec<u8>, Vec<Vec<u8>>, Vec<Vec<u8>>) {
-        let mut encoder =
-            super::Pictures::open(width as u32, height as u32, bitrate, false).expect("open");
+        let mut encoder = super::Pictures::open(
+            super::Profile::AdvancedSimple,
+            width as u32,
+            height as u32,
+            bitrate,
+            false,
+        )
+        .expect("open");
         let mut packets = Vec::new();
         for n in 0..count {
             let (y, u, v) = moving(width, height, n);

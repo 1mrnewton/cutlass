@@ -465,6 +465,9 @@ fn engine_round_trip(rng: &mut Rng) -> Result<(), String> {
     let mut params = CodecParams::video(CodecId::Mpeg4, width, height);
     params.bitrate = [0, 50_000, 400_000, u32::MAX][rng.below(4)];
     params.constant_rate = rng.below(2) == 0;
+    if rng.below(2) == 0 {
+        params.extra = crate::ADVANCED_SIMPLE.to_vec();
+    }
     let mut encoder = EngineEncoder::open(&params).map_err(|err| err.to_string())?;
     let frames = 1 + rng.below(3);
     let mut pictures = Vec::new();
@@ -688,6 +691,7 @@ fn release_decode_and_encode_meet_their_gates() {
     let mut params = CodecParams::video(CodecId::Mpeg4, width, height);
     params.bitrate = 800_000;
     params.constant_rate = true;
+    params.extra = crate::ADVANCED_SIMPLE.to_vec();
     let mut encoder = EngineEncoder::open(&params).expect("encoder");
     let baseline = resident_kib();
     let started = Instant::now();

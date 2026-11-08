@@ -93,14 +93,14 @@ The 44.1 kHz AC-3 frame table makes that clip 192003 bit/s. Every other clip mat
 | --- | --- | --- | --- | --- |
 | ISOBMFF | `ac-3` and `sac3`, object type 0xA5, `dac3` | `ec-3`, object type 0xA6, `dec3` | `ac3_and_eac3_keep_separate_sample_entries` | Verified |
 | WAV | Microsoft tag 0x2000. The Dolby GUID is also read | No Microsoft tag. Written and read as the Dolby GUID FFmpeg writes, in WAVEFORMATEXTENSIBLE | `an_eac3_wave_round_trips_through_its_guid`, `the_dolby_ac3_guid_is_ac3` | Verified. A 0x2000 file that actually holds E-AC-3 stays labeled AC-3. The decoder still reads the syncframe |
-| M4A export | Sound-only, `ftyp M4A`, config and a syncframe that decodes | Same | `sound_alone_writes_ac3_and_eac3_and_reopens` | Verified on an empty timeline |
+| M4A export | Sound-only, `ftyp M4A`, config and a syncframe that decodes. The encoder delay is an edit | Same | `sound_alone_writes_ac3_and_eac3_and_reopens`, `a_real_recording_exports_as_ac3_and_eac3_and_plays_back` | Empty timeline, and two seconds of a 48 kHz stereo recording |
 | WAV export | Not offered | Not offered | `write_sound` | Unsupported |
-| Desktop import | Rust decoder and encoder, registered ahead of the platform | Same | `ac3_and_eac3_open_for_import_and_export`, `an_ac3_movie_opens_seeks_and_reopens` | Verified through the installed readers: open, a 1 kHz tone at 100 ms and 500 ms, probe, reopen. The running window was not exercised |
+| Desktop import | Rust decoder and encoder, registered ahead of the platform | Same | `ac3_and_eac3_open_for_import_and_export`, `an_ac3_movie_opens_seeks_and_reopens`, `a_real_recording_exports_as_ac3_and_eac3_and_plays_back` | Installed readers open, seek, and reopen a 1 kHz tone and an exported recording. The running window was not exercised |
 | Phone | The same Rust codecs, ahead of the platform | Same | `the_phone_opens_ac3_and_eac3` | Verified at the factory |
 | Platform fallback | AudioToolbox fourcc `ac-3`, 1536 samples a frame | fourcc `ec-3`. A shorter frame is the Rust codec's job | the platform tables | Registered behind the Rust codec. Not compared |
 | Matroska, MPEG-TS, CAF | Not implemented. Those container crates are empty, or have no mapping | Same | none | Not present |
 
-MP4 trim from the encoder's gapless side data is not stored. `Mp4Mux` accepts `set_trim` and does not write it. The priming stays in the file, and the decoder removes it when the packet still carries the gapless side data. A file opened from disk does not.
+`Mp4Mux` writes an AC-3 or E-AC-3 gapless trim as one edit. `media_time` is the 256-sample delay, and the segment duration drops the trailing padding. Packet timestamps still include both, because that is the frame. Opus is unchanged: it already shortens its last packet and writes the pre-skip from the head. A file opened from disk skips the delay through that edit. The real-recording test imports two seconds of 48 kHz stereo music, exports both codecs, and checks playback at the start and at one second against the source. The best lag inside ±8 samples is 0, and the source SNR is above 15 dB. It skips when `../local-files` is missing, and fails instead when `AC3_REQUIRE_ORACLES=1`. The media-header duration still counts the priming and the padding.
 
 ## Robustness
 
@@ -182,6 +182,8 @@ cargo test -p cutlass-export --lib sound_alone_writes_ac3_and_eac3_and_reopens
 cargo test -p cutlass --lib an_ac3_movie_opens_seeks_and_reopens
 cargo test -p cutlass --lib ac3_and_eac3_open_for_import_and_export
 cargo test -p cutlass-ffi --lib the_phone_opens_ac3_and_eac3
+cargo test --release -p cutlass-isobmff --lib ac3_and_eac3_trim_is_an_edit_around_the_played_samples
+AC3_REQUIRE_ORACLES=1 cargo test --release -p cutlass --lib a_real_recording_exports_as_ac3_and_eac3_and_plays_back
 cargo test --release -p cutlass-export -p cutlass -p cutlass-ffi --lib ac3
   # this encoder: desktop 2, export 1, ffi 1, all passed
 cargo clippy -p cutlass-ac3 -p cutlass-isobmff -p cutlass-riff \

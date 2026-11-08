@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "lemonade",
+  "name": "Lemonade",
+  "category": "Bright",
+  "adjust": {"exposure": 0.1, "temperature": 0.1},
+  "hsl": {"yellow": [0, 0.4, 0.1]}
+}

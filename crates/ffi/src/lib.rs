@@ -67,12 +67,14 @@ use cutlass_playback::{FaceTable, Program};
 use cutlass_session::{Draft, LinkageSettings, Request, Session};
 use cutlass_store::RepairNote;
 
-/// Open the process log in `directory`.
+/// Open the process log in `directory` and record panics in it.
 ///
 /// A phone shell calls this once at start. The public build writes the file
 /// and does not write stderr.
 pub fn start_log(directory: &Path) -> Result<PathBuf, LogError> {
-    cutlass_logger::init(directory)
+    let opened = cutlass_logger::init(directory);
+    cutlass_logger::install_panic_hook();
+    opened
 }
 
 /// Give the calling thread the interface's priority.
@@ -665,6 +667,33 @@ impl PhoneHost {
         let (request, segment_id) = effect::add_request(self.draft(), effect_id, at);
         self.apply(self.revision(), &[request])?;
         Ok(segment_id)
+    }
+
+    /// Bring in the subtitle file `file_name` (SRT or LRC, by its
+    /// extension), whose text the phone read, as captions on a new subtitle
+    /// lane: one undo step. A file that does not read is refused with why.
+    pub fn import_subtitles(&mut self, file_name: &str, text: &str) -> Result<(), FfiError> {
+        let refused = |reason: String| FfiError::Refused { reason };
+        let format = cutlass_editor::SubtitleFormat::of_file(file_name)
+            .ok_or_else(|| refused(format!("{file_name} is not a subtitle file")))?;
+        let mut taken = media::ids(self.draft());
+        let mut next = std::collections::HashMap::<String, u64>::new();
+        let mut fresh = |prefix: &str| {
+            let n = next.entry(prefix.to_owned()).or_insert(1);
+            loop {
+                let id = format!("{prefix}-{n}");
+                *n += 1;
+                if taken.insert(id.clone()) {
+                    return id;
+                }
+            }
+        };
+        // Captions are set in the first face, as a new title is.
+        let face = self.faces.name().to_owned();
+        let request = cutlass_editor::subtitle_request(text, format, &face, &mut fresh)
+            .map_err(|miss| refused(miss.to_string()))?;
+        self.apply(self.revision(), &[request])?;
+        Ok(())
     }
 
     /// Change what `segment_id` says, as one undo step. Blank words are
@@ -1744,12 +1773,45 @@ mod tests {
         let folder =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../../apps/ios/ios/EffectPreviews");
         let effects = crate::phone_effects();
-        assert_eq!(effects.len(), 10);
+        assert_eq!(effects.len(), cutlass_effects::bundled().len());
         for effect in effects {
             assert!(effect.id.starts_with("recipe/"), "{}", effect.id);
             assert!(!effect.name.is_empty());
             assert!(folder.join(&effect.preview).is_file(), "{}", effect.preview);
         }
+    }
+
+    #[test]
+    fn a_subtitle_file_lands_as_captions_and_a_bad_one_is_refused() {
+        let temp = Temp::new();
+        let roots = Roots::new(&temp);
+        let mut host = roots.create();
+        let before = host.draft().clone();
+        let error = host.import_subtitles("talk.txt", "").unwrap_err();
+        assert!(matches!(error, FfiError::Refused { .. }), "{error:?}");
+        let error = host.import_subtitles("talk.srt", "1\nhello\n").unwrap_err();
+        let FfiError::Refused { reason } = error else {
+            panic!("not refused");
+        };
+        assert!(reason.contains("line 2"), "{reason}");
+        assert_eq!(host.draft(), &before);
+
+        let srt =
+            "1\n00:00:00,000 --> 00:00:01,000\nHello\n\n2\n00:00:01,000 --> 00:00:02,000\nagain\n";
+        host.import_subtitles("talk.SRT", srt).unwrap();
+        host.import_subtitles("song.lrc", "[00:00.50]la\n").unwrap();
+        let lanes: Vec<_> = host
+            .draft()
+            .tracks
+            .iter()
+            .filter(|track| track.flag == cutlass_model::TrackFlag::TextSubtitle)
+            .map(|track| track.segments.len())
+            .collect();
+        assert_eq!(lanes.len(), 2);
+        assert!(lanes.contains(&2) && lanes.contains(&1));
+        host.undo().unwrap();
+        host.undo().unwrap();
+        assert_eq!(host.draft(), &before);
     }
 
     #[test]
@@ -1944,6 +2006,100 @@ mod tests {
         assert!(host.waves(Micros(0), Micros(1), f64::NAN).is_empty());
     }
 
+    /// A 16-bit 5.1 wave file (WAVEFORMATEXTENSIBLE, mask 0x3F): `seconds`
+    /// of a loud tone on the center channel and silence on the other five.
+    fn surround_tone(path: &Path, seconds: u32) {
+        let frames = 48_000 * seconds;
+        let data = frames * 12;
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&(60 + data).to_le_bytes());
+        bytes.extend_from_slice(b"WAVEfmt ");
+        bytes.extend_from_slice(&40_u32.to_le_bytes());
+        bytes.extend_from_slice(&0xFFFE_u16.to_le_bytes());
+        bytes.extend_from_slice(&6_u16.to_le_bytes());
+        bytes.extend_from_slice(&48_000_u32.to_le_bytes());
+        bytes.extend_from_slice(&(48_000_u32 * 12).to_le_bytes());
+        bytes.extend_from_slice(&12_u16.to_le_bytes());
+        bytes.extend_from_slice(&16_u16.to_le_bytes());
+        bytes.extend_from_slice(&22_u16.to_le_bytes());
+        bytes.extend_from_slice(&16_u16.to_le_bytes());
+        bytes.extend_from_slice(&0x3F_u32.to_le_bytes());
+        // KSDATAFORMAT_SUBTYPE_PCM.
+        bytes.extend_from_slice(&[
+            0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xAA, 0x00, 0x38,
+            0x9B, 0x71,
+        ]);
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&data.to_le_bytes());
+        for frame in 0..frames {
+            let center = if frame / 50 % 2 == 0 {
+                24_000_i16
+            } else {
+                -24_000
+            };
+            // FL, FR, FC, LFE, BL, BR.
+            for sample in [0, 0, center, 0, 0, 0] {
+                bytes.extend_from_slice(&sample.to_le_bytes());
+            }
+        }
+        fs::write(path, bytes).unwrap();
+    }
+
+    /// A 5.1 file used to open as nothing past stereo. It now imports, its
+    /// waveform draws from every channel, and the mix folds its center onto
+    /// both sides of the exported stereo sound.
+    #[test]
+    fn a_surround_wave_imports_draws_and_exports_folded_to_stereo() {
+        let temp = Temp::new();
+        let roots = Roots::new(&temp);
+        let mut host = roots.create();
+        two_stills(&mut host);
+        let file = temp.path.join("surround.wav");
+        surround_tone(&file, 1);
+        let material = host.import(&file).unwrap();
+        let sound = host.append(&material).unwrap();
+        let size = 100.0 / 1e6;
+        let ready = |waves: &[crate::PhoneWave]| {
+            waves
+                .iter()
+                .find(|wave| wave.id == sound)
+                .is_some_and(|wave| wave.ready)
+        };
+        let mut waves = host.waves(Micros(0), Micros(3_000_000), size);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !ready(&waves) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            waves = host.waves(Micros(0), Micros(3_000_000), size);
+        }
+        let wave = waves.iter().find(|wave| wave.id == sound).expect("a wave");
+        assert!(wave.ready);
+        assert_eq!(wave.levels.len(), 100);
+        assert!(wave.levels.iter().all(|level| (0.6..=1.0).contains(level)));
+
+        let out = temp.path.join("cut.mp4");
+        host.export(&out, 720, &mut |_, _| true).unwrap();
+        let mut media = crate::readers().open(&out).unwrap();
+        let heard = media.audio_from(Micros(250_000), 4_800).unwrap();
+        assert_eq!(heard.layout.len(), 2);
+        let samples = heard.as_f32().unwrap();
+        let peak = |side: usize| {
+            samples
+                .iter()
+                .skip(side)
+                .step_by(2)
+                .fold(0.0_f32, |peak, sample| peak.max(sample.abs()))
+        };
+        // The center at -3 dB: 0.73 x 0.707, give or take the AAC encode.
+        for side in [0, 1] {
+            assert!(
+                (0.4..0.7).contains(&peak(side)),
+                "side {side}: {}",
+                peak(side)
+            );
+        }
+    }
+
     #[test]
     fn the_cut_exports_as_an_mp4_with_picture_and_sound() {
         let temp = Temp::new();
@@ -2127,6 +2283,31 @@ mod tests {
             .find(|track| track.kind == cutlass_model::TrackType::Audio)
             .unwrap();
         assert_eq!(sound.segments[0].target.start.0, 0);
+    }
+
+    /// A libvorbis file in Ogg imports through the probe as half a second
+    /// of sound, as ffprobe reads it.
+    #[test]
+    fn an_ogg_vorbis_file_imports_as_a_sound() {
+        let temp = Temp::new();
+        let roots = Roots::new(&temp);
+        let mut host = roots.create();
+        let file = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../containers/ogg/tests/fixtures/stereo_44100_q4.ogg");
+        let material = host.import(&file).unwrap();
+        let audio = host
+            .draft()
+            .materials
+            .audios
+            .iter()
+            .find(|audio| audio.id.as_str() == material)
+            .expect("the sound is in the library");
+        assert_eq!(audio.duration, Micros(500_000));
+        assert!(
+            audio.path.ends_with("stereo_44100_q4.ogg"),
+            "{}",
+            audio.path
+        );
     }
 
     #[test]

@@ -784,3 +784,32 @@ fn fixed(value: f64) -> i32 {
 fn write_i32(bytes: &mut [u8], at: usize, value: i32) {
     bytes[at..at + 4].copy_from_slice(&value.to_be_bytes());
 }
+
+#[test]
+fn a_bt709_picture_keeps_its_signal() {
+    let signal =
+        crate::Signal::for_tags(ColorPrimaries::Bt709, Transfer::Bt709, Matrix::Bt709, 0).unwrap();
+    assert!(signal.same_signal());
+}
+
+#[test]
+fn a_bt2020_hlg_picture_is_decoded_adapted_and_encoded_as_rec709() {
+    let signal =
+        crate::Signal::for_tags(ColorPrimaries::Bt2020, Transfer::Hlg, Matrix::Bt709, 0).unwrap();
+    assert!(!signal.same_signal());
+    assert_eq!(signal.source, crate::SignalCurve::Hlg);
+    assert_eq!(signal.dest, crate::SignalCurve::Rec709);
+    let adapt = signal.adapt.expect("a gamut change");
+    // Each row of a D65 to D65 adaptation sums to one: white stays white.
+    for row in adapt {
+        assert!((row.iter().sum::<f64>() - 1.0).abs() < 1.0e-9);
+    }
+}
+
+#[test]
+fn an_unknown_draft_code_has_no_signal() {
+    assert_eq!(
+        crate::Signal::for_tags(ColorPrimaries::Bt709, Transfer::Bt709, Matrix::Bt709, 5,),
+        Err(Error::Draft(5))
+    );
+}

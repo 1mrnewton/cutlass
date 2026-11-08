@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "retro-warm",
+  "name": "Retro Warm",
+  "category": "Vintage",
+  "adjust": {"temperature": 0.3, "contrast": 0.15},
+  "wheels": {"gain": {"hue": 25, "amount": 0.3}, "lift": {"hue": 40, "amount": 0.1}}
+}

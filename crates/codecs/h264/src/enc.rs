@@ -40,6 +40,10 @@ pub struct H264Encoder {
     bitrate: u32,
     spent: u64,
     budget: u64,
+    /// Hold the rate over each second: the budget does not carry past one.
+    constant: bool,
+    /// Time noted in the current second, in the input timescale.
+    window: i64,
 }
 
 struct Held {
@@ -119,6 +123,8 @@ impl H264Encoder {
             bitrate: params.bitrate,
             spent: 0,
             budget: 0,
+            constant: params.constant_rate,
+            window: 0,
         })
     }
 
@@ -270,6 +276,16 @@ impl H264Encoder {
         self.budget = self.budget.saturating_add(target);
         self.spent = self.spent.saturating_add((bytes as u64).saturating_mul(8));
         self.qp = next_qp(self.qp, self.spent, self.budget);
+        if self.constant {
+            self.window = self.window.saturating_add(duration);
+            if self.window >= i64::from(timescale) {
+                // A new second starts with its own budget: an easy second
+                // does not save bits for a hard one.
+                self.window = 0;
+                self.spent = 0;
+                self.budget = 0;
+            }
+        }
     }
 
     fn absorb(&mut self, unit: &[u8], pts: i64, keep: bool) -> Result<(), CodecError> {
@@ -361,6 +377,7 @@ impl VideoEncoder for H264Encoder {
         self.qp = initial_qp(self.bitrate, self.width, self.height);
         self.spent = 0;
         self.budget = 0;
+        self.window = 0;
         self.mirror.reset();
         self.cancel.store(false, Ordering::Relaxed);
     }
@@ -3318,6 +3335,53 @@ mod tests {
                 encoder.qp
             );
         }
+    }
+
+    /// Bits spent in each second of a still second then a busy one.
+    fn second_bits(constant: bool) -> [usize; 2] {
+        let mut params = CodecParams::video(CodecId::H264, 64, 64);
+        params.nal_length_size = 0;
+        params.bitrate = 50_000;
+        params.constant_rate = constant;
+        let mut encoder = H264Encoder::open(&params).unwrap();
+        let mut seconds = [0usize; 2];
+        for n in 0..60usize {
+            let shift = if n < 30 { 0 } else { (n * 2) % 16 };
+            let mut y = vec![0u8; 64 * 64];
+            for row in 0..64usize {
+                for col in 0..64usize {
+                    y[row * 64 + col] =
+                        u8::try_from(((row + col + shift).wrapping_mul(8)) & 255).unwrap_or(0);
+                }
+            }
+            let picture =
+                Yuv420p::try_new(64, 64, y, vec![128; 32 * 32], vec![128; 32 * 32]).unwrap();
+            let input = VideoInput {
+                picture,
+                pts: i64::try_from(n).unwrap_or(0),
+                duration: 1,
+                timescale: 30,
+                force_keyframe: n == 0,
+            };
+            for packet in settle(&mut encoder, &input) {
+                seconds[n / 30] += packet.data.len() * 8;
+            }
+        }
+        seconds
+    }
+
+    #[test]
+    fn a_constant_rate_does_not_spend_a_still_second_s_savings() {
+        let average = second_bits(false);
+        let constant = second_bits(true);
+        // The still second saves bits; on average the busy second spends
+        // them, at a constant rate it does not.
+        assert!(
+            constant[1] < average[1],
+            "busy second: constant {} bits, average {} bits",
+            constant[1],
+            average[1]
+        );
     }
 
     #[test]

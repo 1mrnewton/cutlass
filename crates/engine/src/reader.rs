@@ -5,19 +5,20 @@
 //! same id. Probe reads stream parameters and timestamps. It does not decode.
 //! [`Media::decode_at`] seeks a picture. [`Media::audio_from`] seeks a PCM window.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::fs::File;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use cutlass_codec::access::{
-    ChannelLayout, CodecParams, ColorPrimaries, PixelFormat, SampleFormat, Transfer,
+    ChannelLayout, CodecParams, ColorPrimaries, PixelFormat, SampleFormat, StandardLayout, Transfer,
 };
 use cutlass_codec::{CodecId, ContainerId, FrameSize, StreamCodec, Timescale};
 use cutlass_container::{Demux, DisplayQuarter, OpenError, ProbeResult, ReadError, SeekTo};
 use cutlass_decode::{
     AudioOutput, CodecError, DecodeFactory, Decoder, Output, Packet as AccessPacket, PictureOutput,
-    PictureSamples, StillImage,
+    PictureSamples, SideData, StillImage, Surface,
 };
 use cutlass_model::{Micros, TimeRange};
 
@@ -39,6 +40,9 @@ const AUDIO_PREROLL: i64 = 100_000;
 /// a seek to an open-GOP keyframe, the leading pictures reference frames
 /// before the seek and cannot be decoded.
 const SKIPPED_PICTURES: u32 = 16;
+/// Malformed audio packets one pull may pass over. A bad syncframe must
+/// not end the rest of the file. The decoder is left as it was.
+const SKIPPED_AUDIO: u32 = 16;
 /// Samples from another stream that may sit ahead of the wanted one.
 /// A movie can store an audio chunk before the next picture.
 const OTHER_STREAM_PACKETS: u32 = 4_096;
@@ -88,15 +92,54 @@ pub enum DecodedFrame {
         pixel: PixelFormat,
         primaries: ColorPrimaries,
         transfer: Transfer,
-        bytes: Vec<u8>,
+        /// Shared, so a cache, the read-ahead, and a GPU layer hold one
+        /// picture without copying it.
+        bytes: Arc<Vec<u8>>,
+    },
+    /// A platform GPU buffer that stands for 8-bit 4:2:0. The GPU path
+    /// samples it in place. [`Self::on_cpu`] gives the bytes for every
+    /// other use.
+    Surface {
+        width: u32,
+        height: u32,
+        primaries: ColorPrimaries,
+        transfer: Transfer,
+        surface: Surface,
     },
 }
 
 impl DecodedFrame {
+    /// This frame with CPU samples: a surface becomes the [`Self::Coded`]
+    /// 4:2:0 it stands for, copied out once and shared after that. Every
+    /// other frame is itself.
+    pub fn on_cpu(&self) -> Result<std::borrow::Cow<'_, Self>, EngineError> {
+        match self {
+            Self::Surface {
+                width,
+                height,
+                primaries,
+                transfer,
+                surface,
+            } => Ok(std::borrow::Cow::Owned(Self::Coded {
+                width: *width,
+                height: *height,
+                pixel: PixelFormat::Yuv420p,
+                primaries: *primaries,
+                transfer: *transfer,
+                bytes: surface.yuv420p()?,
+            })),
+            Self::Platform { .. } | Self::Still(_) | Self::Coded { .. } => {
+                Ok(std::borrow::Cow::Borrowed(self))
+            }
+        }
+    }
+
     #[must_use]
     pub fn width(&self) -> u32 {
         match self {
-            Self::Platform { width, .. } | Self::Coded { width, .. } => *width,
+            Self::Platform { width, .. }
+            | Self::Coded { width, .. }
+            | Self::Surface { width, .. } => *width,
             Self::Still(image) => image.width,
         }
     }
@@ -104,7 +147,9 @@ impl DecodedFrame {
     #[must_use]
     pub fn height(&self) -> u32 {
         match self {
-            Self::Platform { height, .. } | Self::Coded { height, .. } => *height,
+            Self::Platform { height, .. }
+            | Self::Coded { height, .. }
+            | Self::Surface { height, .. } => *height,
             Self::Still(image) => image.height,
         }
     }
@@ -115,7 +160,9 @@ impl DecodedFrame {
     pub fn byte_size(&self) -> usize {
         match self {
             Self::Coded { bytes, .. } => bytes.len(),
-            Self::Platform { width, height, .. } => *width as usize * *height as usize * 3 / 2,
+            Self::Platform { width, height, .. } | Self::Surface { width, height, .. } => {
+                *width as usize * *height as usize * 3 / 2
+            }
             Self::Still(image) => image.samples.len() * 2,
         }
     }
@@ -162,6 +209,10 @@ struct Pipe {
     heard: VecDeque<AudioOutput>,
     /// Stream ticks before the stream's time zero, from its edit list.
     lead: i64,
+    /// The container's encoder delay and padding, as decoder side data.
+    gapless: Option<SideData>,
+    /// No packet has been pushed since open or the last reset.
+    fresh: bool,
 }
 
 impl Pipe {
@@ -175,7 +226,22 @@ impl Pipe {
             last_duration: 0,
             heard: VecDeque::new(),
             lead,
+            gapless: None,
+            fresh: true,
         }
+    }
+
+    /// The access packet for `packet`. The first packet after open or a
+    /// reset carries the container's trim, so a decoder that knows its own
+    /// delay can mark the priming and padding as skipped.
+    fn access(&mut self, packet: &cutlass_codec::Packet) -> AccessPacket {
+        let mut access = access_packet(packet);
+        if std::mem::take(&mut self.fresh)
+            && let Some(gapless) = &self.gapless
+        {
+            access.side.push(gapless.clone());
+        }
+        access
     }
 
     /// `lead` in `timescale` ticks per second.
@@ -189,6 +255,7 @@ impl Pipe {
         self.ready.clear();
         self.heard.clear();
         self.drained = false;
+        self.fresh = true;
     }
 }
 
@@ -204,6 +271,8 @@ struct Ready {
 pub struct ReaderFactory {
     families: Vec<Family>,
     decoders: DecodeFactory,
+    /// Files [`Self::open`] reads in place of others: a source's proxy.
+    stand_ins: Arc<HashMap<PathBuf, PathBuf>>,
 }
 
 impl ReaderFactory {
@@ -212,7 +281,37 @@ impl ReaderFactory {
         Self {
             families: Vec::new(),
             decoders: DecodeFactory::new(),
+            stand_ins: Arc::default(),
         }
+    }
+
+    /// The same readers, opening each file of `stand_ins` in place of the
+    /// source it is keyed by. A preview opens proxies this way; probing
+    /// still reads the source, and export keeps readers without them.
+    #[must_use]
+    pub fn with_stand_ins(&self, stand_ins: HashMap<PathBuf, PathBuf>) -> Self {
+        Self {
+            stand_ins: Arc::new(stand_ins),
+            ..self.clone()
+        }
+    }
+
+    /// The file [`Self::open`] reads for `path`.
+    fn stand_in<'a>(&'a self, path: &'a Path) -> &'a Path {
+        if self.stand_ins.is_empty() {
+            return path;
+        }
+        let found = match self.stand_ins.get(path) {
+            Some(found) => Some(found),
+            None => path
+                .canonicalize()
+                .ok()
+                .and_then(|canonical| self.stand_ins.get(&canonical)),
+        };
+        // A proxy since removed leaves the source to play.
+        found
+            .filter(|found| found.is_file())
+            .map_or(path, PathBuf::as_path)
     }
 
     pub fn decoders_mut(&mut self) -> &mut DecodeFactory {
@@ -248,6 +347,7 @@ impl ReaderFactory {
 
     /// Opens the container and a decoder for each picture or audio stream.
     pub fn open(&self, path: &Path) -> Result<Media, EngineError> {
+        let path = self.stand_in(path);
         let info = self.probe(path)?;
         let demux = self.open_demux(path)?;
         let (picture, audio) = open_pipes(&self.decoders, demux.as_ref())?;
@@ -301,6 +401,22 @@ impl AudioRun {
         self.samples.len() / self.layout.len().max(1)
     }
 
+    /// Sample index just past the last held frame.
+    fn end(&self) -> i64 {
+        self.next
+            .saturating_add(i64::try_from(self.frames()).unwrap_or(i64::MAX))
+    }
+
+    /// Hold `frames` frames of silence after the last held frame.
+    fn pad(&mut self, frames: i64) {
+        let frames = usize::try_from(frames.max(0)).unwrap_or(0);
+        let len = self
+            .samples
+            .len()
+            .saturating_add(frames.saturating_mul(self.layout.len()));
+        self.samples.resize(len, 0.0);
+    }
+
     /// Drop up to `frames` leading frames.
     fn skip(&mut self, frames: i64) {
         let frames = usize::try_from(frames.max(0))
@@ -344,7 +460,10 @@ impl Media {
 
     /// [`Self::decode_at`], asking `steer` after each picture decoded on the
     /// way. It can move the target to a later time, which the decode then
-    /// stops at, or stop the decode. A stopped decode is
+    /// stops at, or stop the decode. A later time more than
+    /// [`FORWARD_REACH`] past the picture just decoded seeks to the keyframe
+    /// before it instead of decoding every picture on the way. A stopped
+    /// decode is
     /// [`EngineError::Interrupted`], and the stream stays where it got to, so
     /// a later time continues from there without a seek.
     pub fn decode_steered(
@@ -366,16 +485,7 @@ impl Media {
         let (mut ahead, mut previous) = match cursor {
             Some(cursor) => (cursor.ahead, Some(cursor.last)),
             None => {
-                let (track, timescale) = {
-                    let Some(pipe) = self.picture.as_mut() else {
-                        return Err(EngineError::NoDecoder {
-                            codec: "picture".to_owned(),
-                        });
-                    };
-                    pipe.reset();
-                    (pipe.track, pipe.timescale)
-                };
-                self.seek_picture(source, track, timescale)?;
+                self.restart_picture(source)?;
                 (None, None)
             }
         };
@@ -400,6 +510,12 @@ impl Media {
             };
             match steer(&held) {
                 Steer::Go => {}
+                Steer::Retarget(later) if later.0.saturating_sub(held.end.0) > FORWARD_REACH => {
+                    source = later;
+                    self.restart_picture(source)?;
+                    previous = None;
+                    continue;
+                }
                 Steer::Retarget(later) if later.0 >= held.start.0 => source = later,
                 Steer::Retarget(_) | Steer::Stop => {
                     self.keep(held, None);
@@ -422,6 +538,21 @@ impl Media {
             previous = Some(held);
         }
         Err(EngineError::DecodeLimit)
+    }
+
+    /// Drop what the picture decoder holds and seek to the keyframe before
+    /// `source`.
+    fn restart_picture(&mut self, source: Micros) -> Result<(), EngineError> {
+        let (track, timescale) = {
+            let Some(pipe) = self.picture.as_mut() else {
+                return Err(EngineError::NoDecoder {
+                    codec: "picture".to_owned(),
+                });
+            };
+            pipe.reset();
+            (pipe.track, pipe.timescale)
+        };
+        self.seek_picture(source, track, timescale)
     }
 
     /// Remember `last` for the next [`Media::decode_at`] and return it.
@@ -678,6 +809,25 @@ impl Media {
                 .and_then(|value| value.checked_div(i64::from(output.timescale.max(1))))
                 .unwrap_or(0)
                 .saturating_add(i64::from(output.skip_leading));
+            // Sample ticks one stream tick may round away.
+            let slack = i64::from(output.pcm.rate.div_ceil(output.timescale.max(1))) + 1;
+            if let Some(run) = self.run.as_mut() {
+                if run.frames() == 0 && run.next < want {
+                    // Nothing held: the frames before the window are not kept.
+                    run.next = want.min(start);
+                }
+                let end = run.end();
+                let limit = want.saturating_add(needed).max(end);
+                if start > limit.saturating_add(slack) {
+                    // This output starts past the window. The window ends in
+                    // silence, and the output waits for the next call.
+                    run.pad(limit - end);
+                    if let Some(pipe) = self.audio.as_mut() {
+                        pipe.heard.push_front(output);
+                    }
+                    break;
+                }
+            }
             let pcm = audible(output)?.pcm;
             if pcm.rate == 0 {
                 return Err(EngineError::NoClock);
@@ -695,7 +845,12 @@ impl Media {
                     if run.rate != pcm.rate || run.layout != pcm.layout {
                         return Err(EngineError::Layout);
                     }
-                    run.samples.extend_from_slice(&floats);
+                    let late = start - run.end();
+                    if late.abs() <= slack {
+                        run.samples.extend_from_slice(&floats);
+                    } else {
+                        place(run, start, &floats);
+                    }
                 }
                 None => {
                     if pcm.rate != rate {
@@ -828,6 +983,7 @@ impl Media {
         }
         let mut taken = 0_u32;
         let mut others = 0_u32;
+        let mut skipped = 0_u32;
         loop {
             if taken == DECODE_PACKETS {
                 return Err(EngineError::DecodeLimit);
@@ -843,11 +999,18 @@ impl Media {
                 continue;
             }
             taken = taken.saturating_add(1);
-            let access = access_packet(&packet);
             let Some(pipe) = self.audio.as_mut() else {
                 return Ok(None);
             };
-            let outputs = pipe.decoder.push(&access)?;
+            let access = pipe.access(&packet);
+            let outputs = match pipe.decoder.push(&access) {
+                Ok(outputs) => outputs,
+                Err(CodecError::Malformed { .. }) if skipped < SKIPPED_AUDIO => {
+                    skipped = skipped.saturating_add(1);
+                    continue;
+                }
+                Err(error) => return Err(EngineError::Codec(error)),
+            };
             pipe.heard
                 .extend(outputs.into_iter().filter_map(|output| match output {
                     Output::Audio(audio) => Some(audio),
@@ -857,6 +1020,33 @@ impl Media {
                 return Ok(Some(output));
             }
         }
+    }
+}
+
+/// Hold `floats`, decoded for sample `start`, at its own time in `run`.
+///
+/// A packet the decoder refused leaves a hole that becomes silence, so later
+/// sound stays on its timestamps. Output that starts before the held sound
+/// ends repeats time already held, and only its later frames are kept. A
+/// clock more than a second back is a new timeline, and plays on in order.
+fn place(run: &mut AudioRun, start: i64, floats: &[f32]) {
+    let end = run.end();
+    if start > end {
+        run.pad(start - end);
+        run.samples.extend_from_slice(floats);
+        return;
+    }
+    let overlap = end - start;
+    if overlap > i64::from(run.rate) {
+        run.samples.extend_from_slice(floats);
+        return;
+    }
+    let channels = run.layout.len().max(1);
+    let held = usize::try_from(overlap)
+        .unwrap_or(usize::MAX)
+        .saturating_mul(channels);
+    if let Some(rest) = floats.get(held..) {
+        run.samples.extend_from_slice(rest);
     }
 }
 
@@ -960,19 +1150,31 @@ fn coded_output(output: Output, timescale: Timescale) -> Option<(DecodedFrame, O
 fn frame_from_picture(picture: PictureOutput) -> DecodedFrame {
     let info = picture.info();
     match picture.samples() {
-        PictureSamples::Platform { token } => DecodedFrame::Platform {
-            width: info.width,
-            height: info.height,
-            token,
-        },
-        PictureSamples::Cpu(bytes) => DecodedFrame::Coded {
-            width: info.width,
-            height: info.height,
-            pixel: info.pixel,
-            primaries: info.primaries,
-            transfer: info.transfer,
-            bytes: bytes.to_vec(),
-        },
+        PictureSamples::Platform { token } => {
+            return DecodedFrame::Platform {
+                width: info.width,
+                height: info.height,
+                token,
+            };
+        }
+        PictureSamples::Surface(surface) => {
+            return DecodedFrame::Surface {
+                width: info.width,
+                height: info.height,
+                primaries: info.primaries,
+                transfer: info.transfer,
+                surface: surface.clone(),
+            };
+        }
+        PictureSamples::Cpu(_) => {}
+    }
+    DecodedFrame::Coded {
+        width: info.width,
+        height: info.height,
+        pixel: info.pixel,
+        primaries: info.primaries,
+        transfer: info.transfer,
+        bytes: Arc::new(picture.into_cpu().unwrap_or_default()),
     }
 }
 
@@ -1056,12 +1258,27 @@ fn open_pipe(
         }
         Err(error) => return Err(EngineError::Codec(error)),
     };
-    Ok(Pipe::new(
+    let mut pipe = Pipe::new(
         stream.id().get(),
         stream.timescale(),
         decoder,
         edit_lead(stream.edits()),
-    ))
+    );
+    pipe.gapless = gapless_of(stream);
+    Ok(pipe)
+}
+
+/// The stream's encoder delay and padding as [`SideData::Gapless`], when the
+/// container stored both and they fit.
+fn gapless_of(stream: &cutlass_container::Stream) -> Option<SideData> {
+    let trim = stream.trim();
+    let encoder_delay = u32::try_from(trim.encoder_delay()?).ok()?;
+    let trailing_padding = u32::try_from(trim.trailing_padding()?).ok()?;
+    Some(SideData::Gapless {
+        encoder_delay,
+        trailing_padding,
+        sample_rate: stream.params().sample_rate()?,
+    })
 }
 
 /// `ticks` at `from` ticks per second, counted at `to`. Rounds toward zero;
@@ -1108,12 +1325,7 @@ fn params_for(
     let Some(rate) = rate else {
         return Err(EngineError::NotMedia);
     };
-    let channels = channels.unwrap_or(0);
-    let layout = match channels {
-        1 => ChannelLayout::mono(),
-        2 => ChannelLayout::stereo(),
-        _ => return Err(EngineError::Layout),
-    };
+    let layout = layout_for(id, extra, channels.unwrap_or(0))?;
     let mut params = CodecParams::audio(id, rate, layout);
     let (extra, format) = codec_extra(id, extra)?;
     params.extra = extra;
@@ -1121,6 +1333,77 @@ fn params_for(
         params.sample_format = Some(format);
     }
     Ok(params)
+}
+
+/// Speakers for a stream of `channels` channels, one through eight.
+///
+/// A wave file's `dwChannelMask` names them when it is set; a mask with a
+/// different number of speakers than channels, or one that names a speaker
+/// [`cutlass_codec::access::Channel`] does not have, is refused. Any single
+/// speaker of a one-channel file is mono. An AAC stream uses its
+/// `channelConfiguration`, in the element order the decoder writes. Every
+/// other stream takes the standard layout for its count, in wave order.
+fn layout_for(id: CodecId, extra: &[u8], channels: u16) -> Result<ChannelLayout, EngineError> {
+    let count = usize::from(channels);
+    let standard = StandardLayout::for_count(count).ok_or(EngineError::Layout)?;
+    let layout = match (id, wave_mask(id, extra)) {
+        (_, Some(mask)) if mask != 0 => {
+            if mask.count_ones() != u32::from(channels) {
+                return Err(EngineError::Layout);
+            }
+            if count == 1 {
+                ChannelLayout::mono()
+            } else {
+                ChannelLayout::from_wave_mask(mask).map_err(|_| EngineError::Layout)?
+            }
+        }
+        (CodecId::Aac, _) => aac_configuration(extra)
+            .and_then(ChannelLayout::from_aac_config)
+            .filter(|layout| layout.len() == count)
+            .unwrap_or_else(|| ChannelLayout::standard(standard)),
+        _ => ChannelLayout::standard(standard),
+    };
+    Ok(layout)
+}
+
+/// The `dwChannelMask` of a wave description: bytes 8 to 11 of the sixteen
+/// the wave demuxer hands a PCM stream. Other streams have no mask.
+fn wave_mask(id: CodecId, extra: &[u8]) -> Option<u32> {
+    if id != CodecId::Pcm || extra.len() < 16 {
+        return None;
+    }
+    let bytes: [u8; 4] = extra.get(8..12)?.try_into().ok()?;
+    Some(u32::from_le_bytes(bytes))
+}
+
+/// `channelConfiguration` from an AudioSpecificConfig: an object type of
+/// five bits (31 escapes to six more), a frequency index of four bits (15
+/// is followed by a 24-bit rate), then four bits.
+fn aac_configuration(extra: &[u8]) -> Option<u8> {
+    let mut bits = 0_u64;
+    for byte in extra.iter().take(8) {
+        bits = (bits << 8) | u64::from(*byte);
+    }
+    let available = u32::try_from(extra.len().min(8)).ok()? * 8;
+    let mut at = 0_u32;
+    let mut read = |width: u32| -> Option<u64> {
+        if at + width > available {
+            return None;
+        }
+        at += width;
+        Some((bits >> (available - at)) & ((1 << width) - 1))
+    };
+    let object = read(5)?;
+    if object == 0 {
+        return None;
+    }
+    if object == 31 {
+        read(6)?;
+    }
+    if read(4)? == 15 {
+        read(24)?;
+    }
+    u8::try_from(read(4)?).ok()
 }
 
 /// The PCM decoder reads three layout bytes and a sample format that matches
@@ -1396,7 +1679,7 @@ mod tests {
             pixel: PixelFormat::Yuv420p,
             primaries: ColorPrimaries::Bt709,
             transfer: Transfer::Bt709,
-            bytes: vec![0; 12],
+            bytes: vec![0; 12].into(),
         };
         assert_eq!(coded.byte_size(), 12);
         let platform = DecodedFrame::Platform {
@@ -1405,6 +1688,171 @@ mod tests {
             token: 0,
         };
         assert_eq!(platform.byte_size(), 3840 * 2160 * 3 / 2);
+    }
+
+    /// The sixteen bytes the wave demuxer hands a 16-bit integer PCM stream.
+    fn wave_extra(mask: u32) -> Vec<u8> {
+        let mut extra = Vec::new();
+        extra.extend_from_slice(&1_u16.to_le_bytes());
+        extra.extend_from_slice(&16_u16.to_le_bytes());
+        extra.extend_from_slice(&16_u16.to_le_bytes());
+        extra.extend_from_slice(&4_u16.to_le_bytes());
+        extra.extend_from_slice(&mask.to_le_bytes());
+        extra.extend_from_slice(&0_u16.to_le_bytes());
+        extra.extend_from_slice(&u16::from(mask != 0).to_le_bytes());
+        extra
+    }
+
+    fn sound(id: CodecId, extra: &[u8], channels: u16) -> Result<ChannelLayout, EngineError> {
+        params_for(extra, None, Some(48_000), Some(channels), id)
+            .map(|params| params.layout.expect("an audio stream has a layout"))
+    }
+
+    #[test]
+    fn one_to_eight_channels_open_in_the_standard_layout_for_the_count() {
+        use cutlass_codec::access::Channel::{
+            BackCenter, BackLeft, BackRight, FrontCenter, FrontLeft, FrontRight, Lfe, SideLeft,
+            SideRight,
+        };
+        let expected: [&[cutlass_codec::access::Channel]; 8] = [
+            &[FrontCenter],
+            &[FrontLeft, FrontRight],
+            &[FrontLeft, FrontRight, FrontCenter],
+            &[FrontLeft, FrontRight, BackLeft, BackRight],
+            &[FrontLeft, FrontRight, FrontCenter, BackLeft, BackRight],
+            &[FrontLeft, FrontRight, FrontCenter, Lfe, BackLeft, BackRight],
+            &[
+                FrontLeft,
+                FrontRight,
+                FrontCenter,
+                Lfe,
+                BackCenter,
+                SideLeft,
+                SideRight,
+            ],
+            &[
+                FrontLeft,
+                FrontRight,
+                FrontCenter,
+                Lfe,
+                BackLeft,
+                BackRight,
+                SideLeft,
+                SideRight,
+            ],
+        ];
+        for (index, channels) in expected.into_iter().enumerate() {
+            let count = u16::try_from(index + 1).unwrap();
+            // A wave file with no mask, a float wave file, and the three
+            // layout bytes another container writes all use the count.
+            for extra in [wave_extra(0), Vec::new(), vec![1, 0, 0]] {
+                let layout = sound(CodecId::Pcm, &extra, count).expect("opens");
+                assert_eq!(layout.channels(), channels, "{count} channels");
+            }
+            let other = sound(CodecId::Flac, &[], count).expect("opens");
+            assert_eq!(other.channels(), channels, "{count} flac channels");
+        }
+        assert_eq!(sound(CodecId::Pcm, &[], 0), Err(EngineError::Layout));
+        assert_eq!(sound(CodecId::Pcm, &[], 9), Err(EngineError::Layout));
+        assert_eq!(
+            sound(CodecId::Pcm, &wave_extra(0), 9),
+            Err(EngineError::Layout)
+        );
+        assert_eq!(
+            sound(CodecId::Pcm, &wave_extra(0), u16::MAX),
+            Err(EngineError::Layout)
+        );
+        assert_eq!(
+            params_for(&[], None, Some(48_000), None, CodecId::Pcm),
+            Err(EngineError::Layout)
+        );
+    }
+
+    #[test]
+    fn a_wave_channel_mask_names_the_speakers() {
+        use cutlass_codec::access::Channel::{
+            BackCenter, FrontCenter, FrontLeft, FrontRight, Lfe, SideLeft, SideRight,
+        };
+        // 5.1 with side surrounds, as ffmpeg writes it.
+        let side = sound(CodecId::Pcm, &wave_extra(0x60F), 6).expect("5.1 side");
+        assert_eq!(
+            side.channels(),
+            &[FrontLeft, FrontRight, FrontCenter, Lfe, SideLeft, SideRight]
+        );
+        // Two channels that are not left and right.
+        let odd = sound(CodecId::Pcm, &wave_extra(0x104), 2).expect("center and back");
+        assert_eq!(odd.channels(), &[FrontCenter, BackCenter]);
+        assert_eq!(
+            sound(CodecId::Pcm, &wave_extra(0x3), 2),
+            Ok(ChannelLayout::stereo())
+        );
+        // Any one speaker of a one-channel file is mono.
+        assert_eq!(
+            sound(CodecId::Pcm, &wave_extra(0x1), 1),
+            Ok(ChannelLayout::mono())
+        );
+        assert_eq!(
+            sound(CodecId::Pcm, &wave_extra(0x4), 1),
+            Ok(ChannelLayout::mono())
+        );
+    }
+
+    #[test]
+    fn a_wave_mask_that_disagrees_with_the_count_is_refused() {
+        // Six speakers named for two channels, and two for six.
+        assert_eq!(
+            sound(CodecId::Pcm, &wave_extra(0x3F), 2),
+            Err(EngineError::Layout)
+        );
+        assert_eq!(
+            sound(CodecId::Pcm, &wave_extra(0x3), 6),
+            Err(EngineError::Layout)
+        );
+        assert_eq!(
+            sound(CodecId::Pcm, &wave_extra(0x3), 1),
+            Err(EngineError::Layout)
+        );
+        // Top center has no channel to play on.
+        assert_eq!(
+            sound(CodecId::Pcm, &wave_extra(0x803), 3),
+            Err(EngineError::Layout)
+        );
+        // Nine speakers.
+        assert_eq!(
+            sound(CodecId::Pcm, &wave_extra(0x1FF), 9),
+            Err(EngineError::Layout)
+        );
+    }
+
+    #[test]
+    fn an_aac_stream_uses_its_channel_configuration() {
+        // AAC LC, 48 kHz, configuration 6: 5.1 in element order.
+        let five_one = [0x11, 0xB0];
+        assert_eq!(aac_configuration(&five_one), Some(6));
+        assert_eq!(
+            sound(CodecId::Aac, &five_one, 6),
+            Ok(ChannelLayout::five_one())
+        );
+        // Configuration 2 is stereo.
+        assert_eq!(
+            sound(CodecId::Aac, &[0x11, 0x90], 2),
+            Ok(ChannelLayout::stereo())
+        );
+        // An escaped object type and an explicit rate still reach the field.
+        // Object 31+2, index 15, rate 0x00BB80, configuration 7.
+        let escaped = [0xF8, 0x5E, 0x01, 0x77, 0x00, 0xE0];
+        assert_eq!(aac_configuration(&escaped), Some(7));
+        // A program config element (configuration 0), a configuration that
+        // disagrees with the count, and no config at all use the count.
+        for extra in [&[0x11, 0x80][..], &[0x11, 0xB0], &[]] {
+            assert_eq!(
+                sound(CodecId::Aac, extra, 2),
+                Ok(ChannelLayout::stereo()),
+                "{extra:?}"
+            );
+        }
+        assert_eq!(aac_configuration(&[0x00, 0x00]), None);
+        assert_eq!(aac_configuration(&[0x11]), None);
     }
 
     #[test]

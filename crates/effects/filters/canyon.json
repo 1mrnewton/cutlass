@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "canyon",
+  "name": "Canyon",
+  "category": "Landscape",
+  "adjust": {"temperature": 0.3, "tint": 0.1, "contrast": 0.2, "clarity": 0.2},
+  "hsl": {"red": [0, 0.3, 0], "orange": [0, 0.3, 0]}
+}

@@ -205,8 +205,13 @@ fn picture_output(f: &DecodedFrame, pts: i64, timescale: u32) -> Result<PictureO
             width: w as u32,
             height: h as u32,
             pixel,
-            primaries: primaries(f.color_primaries),
-            transfer: transfer(f.transfer),
+            ..PictureInfo::new(
+                w as u32,
+                h as u32,
+                pixel,
+                primaries(f.color_primaries),
+                transfer(f.transfer),
+            )
         },
         bytes,
         pts,

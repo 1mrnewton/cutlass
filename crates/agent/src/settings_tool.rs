@@ -79,6 +79,12 @@ impl SettingsTool {
         }
     }
 
+    /// Settings a host already holds, read from `path` at `generation`.
+    #[must_use]
+    pub fn held(path: impl Into<PathBuf>, generation: u64, settings: Settings) -> Self {
+        Self::ready(path.into(), generation, settings)
+    }
+
     /// The generation and settings held in memory.
     #[must_use]
     pub fn get(&self) -> SettingsView {
@@ -219,6 +225,10 @@ mod tests {
 
     fn session() -> (Session, TrackId) {
         let mut draft = Draft::empty("D");
+        draft
+            .materials
+            .videos
+            .push(cutlass_model::MaterialVideo::new("media"));
         let track_id = TrackId::new("main");
         draft.tracks[0].id = track_id.clone();
         (Session::open(draft), track_id)

@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "id": "radiance",
+  "name": "Radiance",
+  "category": "Light",
+  "preview": "flowers",
+  "controls": [
+    {"id": "intensity", "name": "Intensity", "default": 1, "min": 0, "max": 2, "unit": "percent", "scale": [[0, "amount"], [1, "amount"]]},
+    {"id": "length", "name": "Length", "default": 0.25, "min": 0, "max": 1, "unit": "percent", "set": [[0, "length"]]}
+  ],
+  "passes": [
+    {"block": "rays", "params": {"amount": 1.5, "length": 0.25, "threshold": 0.5}},
+    {"block": "glow", "params": {"amount": 0.5, "radius": 0.04, "threshold": 0.55}}
+  ]
+}

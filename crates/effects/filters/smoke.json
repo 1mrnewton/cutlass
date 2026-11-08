@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "smoke",
+  "name": "Smoke",
+  "category": "Moody",
+  "adjust": {"fade": 0.3, "saturation": -0.5, "contrast": 0.1, "temperature": 0.05}
+}

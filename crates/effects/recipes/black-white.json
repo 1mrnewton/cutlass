@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "id": "black-white",
+  "name": "Black & White",
+  "category": "Basic",
+  "preview": "portrait",
+  "passes": [
+    { "block": "grade", "params": {"saturation": 0, "contrast": 1.1} }
+  ]
+}

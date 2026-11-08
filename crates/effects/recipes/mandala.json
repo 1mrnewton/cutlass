@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "id": "mandala",
+  "name": "Mandala",
+  "category": "Distort",
+  "preview": "flowers",
+  "poster": 0.8,
+  "controls": [
+    {"id": "speed", "name": "Speed", "default": 1, "min": 0.25, "max": 3, "unit": "times", "speed": true}
+  ],
+  "passes": [
+    {
+      "block": "kaleido",
+      "params": {
+        "segments": 12,
+        "angle": {"wave": {"period": 3, "from": -15, "to": 15}}
+      }
+    },
+    { "block": "hue", "params": {"degrees": {"wave": {"period": 3, "from": -40, "to": 40}}} },
+    { "block": "grade", "params": {"saturation": 1.3} }
+  ]
+}

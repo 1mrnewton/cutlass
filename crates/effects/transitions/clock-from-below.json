@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "clock-from-below",
+  "name": "Clock From Below",
+  "category": "Wipe",
+  "duration": 0.7,
+  "cross": {"kind": 4, "angle": 180, "soft": 0.01}
+}

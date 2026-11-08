@@ -892,6 +892,8 @@ mod tests {
         let model = root.join("parakeet-ctc-0.6b");
         let wav = root.join("GOOGLE IS BACK! (Gemini 3.8 Flash).wav");
         if !model.join("model.safetensors").is_file() || !wav.is_file() {
+            crate::weights_missing("the CTC weights or the Gemini sound");
+            eprintln!("skipped: the weights or the sound are missing");
             return;
         }
         let recognizer = Parakeet::cpu(&model).unwrap();

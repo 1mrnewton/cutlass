@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "id": "flicker",
+  "name": "Flicker",
+  "category": "Light",
+  "preview": "city",
+  "controls": [
+    {"id": "speed", "name": "Speed", "default": 1, "min": 0.25, "max": 3, "unit": "times", "speed": true}
+  ],
+  "passes": [
+    {
+      "block": "grade",
+      "params": {
+        "brightness": {"jitter": {"rate": 15, "from": -0.25, "to": 0.08, "seed": 101}}
+      }
+    }
+  ]
+}

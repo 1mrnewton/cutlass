@@ -1,6 +1,6 @@
 use cutlass_model::{Draft, FreezeInfo, MaterialVideo, SegmentId};
 
-use super::speed::locate;
+use super::locate;
 use super::{EditError, ensure_unlocked};
 
 /// Store a freeze mapping on the video material. This does not seek.
@@ -47,7 +47,7 @@ pub fn set_freeze(
 
 #[cfg(test)]
 mod tests {
-    use cutlass_model::{Draft, FreezeInfo, Micros, Segment, TimeRange, TrackId};
+    use cutlass_model::{FreezeInfo, Micros, Segment, TimeRange, TrackId};
 
     use crate::edit::EditError;
     use crate::request::Request;
@@ -55,7 +55,7 @@ mod tests {
 
     #[test]
     fn a_freeze_is_stored_on_the_video_and_the_ranges_stay() {
-        let mut draft = Draft::empty("D");
+        let mut draft = crate::edit::test_draft("D");
         draft.tracks[0].id = TrackId::new("main");
         let mut session = Session::open(draft);
         let mut segment = Segment::new("a", "media", TimeRange::new(0, 1_000_000));
@@ -112,5 +112,45 @@ mod tests {
             .unwrap_err();
         assert_eq!(error, EditError::MissingSegment);
         assert_eq!(session.draft(), &before);
+    }
+
+    #[test]
+    fn a_freeze_on_shared_media_holds_only_that_clip() {
+        let mut draft = crate::edit::test_draft("D");
+        draft.tracks[0].id = TrackId::new("main");
+        let mut session = Session::open(draft);
+        let place = |id: &str, start: i64| Request::Place {
+            track_id: TrackId::new("main"),
+            segment: Box::new(Segment::new(id, "media", TimeRange::new(start, 1_000_000))),
+        };
+        session
+            .apply(0, &[place("a", 0), place("b", 1_000_000)])
+            .unwrap();
+        session
+            .apply(
+                1,
+                &[Request::SetFreeze {
+                    segment_id: "a".into(),
+                    freeze: Some(FreezeInfo::default()),
+                }],
+            )
+            .unwrap();
+        let draft = session.draft();
+        let material_of = |id: &str| {
+            let segment = draft.tracks[0]
+                .segments
+                .iter()
+                .find(|segment| segment.id.as_str() == id)
+                .unwrap();
+            draft
+                .materials
+                .videos
+                .iter()
+                .find(|video| video.id == segment.material_id)
+                .unwrap()
+        };
+        assert!(material_of("a").freeze.is_some());
+        assert!(material_of("b").freeze.is_none());
+        assert_ne!(material_of("a").id, material_of("b").id);
     }
 }

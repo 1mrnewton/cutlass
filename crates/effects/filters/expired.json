@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "expired",
+  "name": "Expired",
+  "category": "Film",
+  "adjust": {"tint": 0.15, "fade": 0.3, "temperature": 0.2, "saturation": -0.2, "grain": 0.3},
+  "curves": {"blue": [[0, 0.1], [1, 0.85]]}
+}

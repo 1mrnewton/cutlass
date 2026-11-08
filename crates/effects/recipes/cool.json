@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "id": "cool",
+  "name": "Cool",
+  "category": "Basic",
+  "preview": "city",
+  "controls": [
+    {"id": "amount", "name": "Amount", "default": 0.12, "min": 0, "max": 0.5, "unit": "percent", "set": [[0, "amount"]]}
+  ],
+  "passes": [
+    {"block": "flash", "params": {"amount": 0.12, "red": 0.2, "green": 0.5, "blue": 1}}
+  ]
+}

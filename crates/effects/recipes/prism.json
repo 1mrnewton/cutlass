@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "id": "prism",
+  "name": "Prism",
+  "category": "Distort",
+  "preview": "flowers",
+  "poster": 1.0,
+  "controls": [
+    {"id": "speed", "name": "Speed", "default": 1, "min": 0.25, "max": 3, "unit": "times", "speed": true}
+  ],
+  "passes": [
+    {
+      "block": "kaleido",
+      "params": {
+        "segments": 6,
+        "angle": {"keys": [[0, 0], [3, 60]], "repeat": 3}
+      }
+    }
+  ]
+}

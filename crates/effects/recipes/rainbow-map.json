@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "id": "rainbow-map",
+  "name": "Rainbow Map",
+  "category": "Light",
+  "preview": "flowers",
+  "poster": 0.5,
+  "controls": [
+    {"id": "speed", "name": "Speed", "default": 1, "min": 0.25, "max": 3, "unit": "times", "speed": true}
+  ],
+  "passes": [
+    { "block": "gradient_map", "params": {"amount": 0.8, "palette": 2} },
+    { "block": "hue", "params": {"degrees": {"keys": [[0, -180], [3, 180]], "repeat": 3}} }
+  ]
+}

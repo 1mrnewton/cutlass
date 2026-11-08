@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "dusk",
+  "name": "Dusk",
+  "category": "Moody",
+  "adjust": {"temperature": -0.1, "exposure": -0.15},
+  "wheels": {"lift": {"hue": 260, "amount": 0.3}, "gain": {"hue": 20, "amount": 0.25}}
+}

@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "blinds-down",
+  "name": "Blinds Down",
+  "category": "Wipe",
+  "cross": {"kind": 2, "angle": 0, "count": 8, "soft": 0.05}
+}

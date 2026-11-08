@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "greens",
+  "name": "Greens",
+  "category": "Food",
+  "adjust": {"clarity": 0.2},
+  "hsl": {"green": [0, 0.5, 0.1], "yellow": [0.2, 0, 0]}
+}

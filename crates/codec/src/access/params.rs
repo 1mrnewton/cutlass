@@ -11,6 +11,9 @@ use crate::CodecId;
 ///
 /// `nal_length_size` is the length prefix of one video NAL inside an access
 /// unit. Zero means Annex B start codes. Audio leaves it at zero.
+///
+/// `constant_rate` asks a video encoder to hold `bitrate` over each second
+/// instead of on average over the whole stream.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CodecParams {
     pub codec: CodecId,
@@ -19,6 +22,7 @@ pub struct CodecParams {
     pub layout: Option<ChannelLayout>,
     pub sample_format: Option<SampleFormat>,
     pub bitrate: u32,
+    pub constant_rate: bool,
     pub width: u32,
     pub height: u32,
     pub pixel: PixelFormat,
@@ -39,6 +43,7 @@ impl CodecParams {
             layout: Some(layout),
             sample_format: Some(SampleFormat::F32),
             bitrate: 0,
+            constant_rate: false,
             width: 0,
             height: 0,
             pixel: PixelFormat::None,
@@ -68,6 +73,7 @@ impl CodecParams {
             layout: None,
             sample_format: None,
             bitrate: 0,
+            constant_rate: false,
             width,
             height,
             pixel,

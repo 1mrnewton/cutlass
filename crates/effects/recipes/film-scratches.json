@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "id": "film-scratches",
+  "name": "Film Scratches",
+  "category": "Retro",
+  "preview": "portrait",
+  "controls": [
+    {"id": "speed", "name": "Speed", "default": 1, "min": 0.25, "max": 3, "unit": "times", "speed": true},
+    {"id": "dust", "name": "Dust", "default": 1, "min": 0, "max": 2, "unit": "percent", "scale": [[0, "amount"]]}
+  ],
+  "passes": [
+    {
+      "block": "dust",
+      "params": {
+        "amount": 0.15,
+        "scratches": 0.9,
+        "seed": {"jitter": {"rate": 12, "from": 0, "to": 1000, "seed": 141}}
+      }
+    },
+    { "block": "flash", "params": {"amount": 0.2, "red": 1, "green": 0.8, "blue": 0.5} }
+  ]
+}

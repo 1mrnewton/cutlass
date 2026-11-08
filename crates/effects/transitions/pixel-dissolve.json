@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "pixel-dissolve",
+  "name": "Pixel Dissolve",
+  "category": "Basic",
+  "cross": {"kind": 15, "count": 24, "soft": 0.05}
+}

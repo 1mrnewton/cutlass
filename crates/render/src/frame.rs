@@ -1,7 +1,7 @@
 //! Eval's frame layers as render layers, so every shell draws a frame the
 //! same way.
 
-use cutlass_eval::{Composed, FrameLayers, GpuSource};
+use cutlass_eval::{Composed, FrameLayers, GpuSource, YuvSamples};
 
 use crate::{Canvas, Layer, Planes, RenderError, Renderer, Rgba};
 
@@ -15,6 +15,17 @@ impl Renderer {
             });
         }
         self.draw(canvas, &layers_of(frame)?)
+    }
+
+    /// Clear `canvas` and draw `frame` shrunk to fit it: the preview at a
+    /// lower quality, every layer laid out as on the full canvas and
+    /// sampled once per smaller pixel.
+    pub fn draw_frame_scaled(
+        &self,
+        canvas: &Canvas,
+        frame: &FrameLayers,
+    ) -> Result<(), RenderError> {
+        self.draw_scaled(canvas, &layers_of(frame)?, (frame.width, frame.height))
     }
 }
 
@@ -38,9 +49,14 @@ fn layers_of(frame: &FrameLayers) -> Result<Vec<Layer<'_>>, RenderError> {
             GpuSource::Yuv {
                 width,
                 height,
-                bytes,
+                samples,
+                tone,
             } => {
-                let planes = Planes::packed(*width, *height, bytes)?;
+                let planes = match samples {
+                    YuvSamples::Bytes(bytes) => Planes::packed(*width, *height, bytes)?,
+                    YuvSamples::Surface(surface) => Planes::surface(surface, *width, *height),
+                }
+                .with_tone(*tone);
                 match layer.backdrop {
                     Some(backdrop) => Layer::YuvOverBlur {
                         planes,
@@ -64,7 +80,42 @@ fn layers_of(frame: &FrameLayers) -> Result<Vec<Layer<'_>>, RenderError> {
                 size: (child.width, child.height),
                 placement: layer.placement,
             },
-            GpuSource::Effect(steps) => Layer::Effect(steps),
+            GpuSource::Effect(steps, mask) => Layer::Effect(steps, mask.as_ref()),
+            GpuSource::Vector(scene) => Layer::Vector {
+                scene,
+                placement: layer.placement,
+            },
+            GpuSource::Blend { mode, layers } => {
+                if (layers.width, layers.height) != (frame.width, frame.height) {
+                    return Err(RenderError::Size {
+                        width: layers.width,
+                        height: layers.height,
+                    });
+                }
+                Layer::Blend {
+                    mode: *mode,
+                    layers: layers_of(layers)?,
+                }
+            }
+            GpuSource::Transition {
+                kind,
+                t,
+                outgoing,
+                incoming,
+            } => Layer::Transition {
+                kind: *kind,
+                t: *t,
+                outgoing: Rgba {
+                    width: outgoing.width(),
+                    height: outgoing.height(),
+                    bytes: outgoing.rgba(),
+                },
+                incoming: Rgba {
+                    width: incoming.width(),
+                    height: incoming.height(),
+                    bytes: incoming.rgba(),
+                },
+            },
         });
     }
     Ok(layers)
@@ -126,6 +177,41 @@ mod tests {
     }
 
     #[test]
+    fn a_frame_shrunk_to_half_keeps_its_layout() {
+        let Some(renderer) = renderer() else {
+            return;
+        };
+        // Red on the left half of an 8 by 4 frame, blue on the right.
+        let rgba: Vec<u8> = (0..8 * 4)
+            .flat_map(|index| {
+                if index % 8 < 4 {
+                    [255, 0, 0, 255]
+                } else {
+                    [0, 0, 255, 255]
+                }
+            })
+            .collect();
+        let frame = FrameLayers {
+            width: 8,
+            height: 4,
+            layers: vec![picture_layer(8, 4, rgba)],
+        };
+        let (width, height) = crate::preview_size((8, 4), 0.5);
+        assert_eq!((width, height), (4, 2));
+        let canvas = renderer.canvas(width, height).expect("canvas");
+        renderer.draw_frame_scaled(&canvas, &frame).expect("draw");
+        let got = renderer.read(&canvas).expect("read");
+        for (index, pixel) in got.chunks(4).enumerate() {
+            let expected = if index % 4 < 2 {
+                [255, 0, 0, 255]
+            } else {
+                [0, 0, 255, 255]
+            };
+            assert_eq!(pixel, expected, "pixel {index}");
+        }
+    }
+
+    #[test]
     fn a_compound_child_draws_on_its_own_canvas_first() {
         let Some(renderer) = renderer() else {
             return;
@@ -156,7 +242,7 @@ mod tests {
         };
         let invert = cutlass_effects::Step {
             block: cutlass_effects::Block::Invert,
-            values: [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            values: [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
         };
         let frame = FrameLayers {
             width: 4,
@@ -164,7 +250,7 @@ mod tests {
             layers: vec![
                 picture_layer(4, 2, pixels()),
                 GpuLayer {
-                    source: GpuSource::Effect(vec![invert]),
+                    source: GpuSource::Effect(vec![invert], None),
                     placement: Placement::canvas(4, 2),
                     backdrop: None,
                 },
@@ -177,6 +263,71 @@ mod tests {
             .flat_map(|pixel| [255 - pixel[0], 255 - pixel[1], 255 - pixel[2], pixel[3]])
             .collect();
         assert_eq!(renderer.read(&canvas).expect("read"), expected);
+    }
+
+    #[test]
+    fn a_masked_effect_shows_only_inside_its_shape_as_the_cpu_draws_it() {
+        let Some(renderer) = renderer() else {
+            return;
+        };
+        let (width, height) = (48u32, 32u32);
+        let invert = cutlass_effects::Step {
+            block: cutlass_effects::Block::Invert,
+            values: [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        };
+        let grey: Vec<u8> = [200, 200, 200, 255].repeat((width * height) as usize);
+        // Canvas pixels to the frame a full-canvas layer has: -1 to 1 across,
+        // 1 at the top to -1 at the bottom.
+        let frame = [
+            2.0 / width as f32,
+            0.0,
+            -1.0,
+            0.0,
+            -2.0 / height as f32,
+            1.0,
+        ];
+        for (index, shape) in cutlass_effects::MaskShape::ALL.into_iter().enumerate() {
+            let mask = cutlass_effects::CanvasMask {
+                mask: cutlass_effects::Mask {
+                    rotation: 20.0,
+                    feather: 0.3,
+                    round: 0.4,
+                    invert: index % 2 == 1,
+                    ..cutlass_effects::Mask::new(shape)
+                },
+                frame,
+            };
+            let layers = FrameLayers {
+                width,
+                height,
+                layers: vec![
+                    picture_layer(width, height, grey.clone()),
+                    GpuLayer {
+                        source: GpuSource::Effect(vec![invert], Some(mask)),
+                        placement: Placement::canvas(width, height),
+                        backdrop: None,
+                    },
+                ],
+            };
+            let canvas = renderer.canvas(width, height).expect("canvas");
+            renderer.draw_frame(&canvas, &layers).expect("draw");
+            let drawn = renderer.read(&canvas).expect("read");
+            let mut inside = 0;
+            for (at, pixel) in drawn.chunks(4).enumerate() {
+                let x = (at as u32 % width) as f32 + 0.5;
+                let y = (at as u32 / width) as f32 + 0.5;
+                let keep = mask.coverage_at(x, y);
+                let expected = 200.0 + (55.0 - 200.0) * keep;
+                assert!(
+                    (f32::from(pixel[0]) - expected).abs() <= 3.0,
+                    "{shape:?} at ({x}, {y}): {} against {expected}",
+                    pixel[0]
+                );
+                assert_eq!(pixel[3], 255);
+                inside += usize::from(keep > 0.5);
+            }
+            assert!(inside > 0 && inside < drawn.len() / 4, "{shape:?} splits");
+        }
     }
 
     #[test]

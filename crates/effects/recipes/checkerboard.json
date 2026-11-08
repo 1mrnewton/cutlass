@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "id": "checkerboard",
+  "name": "Checkerboard",
+  "category": "Reveal",
+  "preview": "dancer",
+  "poster": 0.4,
+  "controls": [
+    {"id": "speed", "name": "Speed", "default": 1, "min": 0.25, "max": 3, "unit": "times", "speed": true},
+    {"id": "count", "name": "Squares", "default": 6, "min": 2, "max": 16, "unit": "plain", "set": [[0, "count"]]}
+  ],
+  "passes": [
+    {"block": "reveal", "params": {"progress": {"keys": [[0, 0], [0.8, 1]]}, "kind": 6, "count": 6, "soft": 0.02}}
+  ]
+}

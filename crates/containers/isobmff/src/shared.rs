@@ -112,24 +112,32 @@ fn map_stream(movie_timescale: u32, stream: &LegacyStream) -> Result<Stream, Ope
         });
     }
     let codec = map_codec(params.codec)?;
+    // Opus decoders and the Ogg mux read an `OpusHead`; `dOps` holds the
+    // same fields big-endian. The pre-skip is the encoder delay.
+    let mut extradata = params.extradata.clone();
+    let mut trim = Trim::default();
+    if params.codec == LegacyCodec::Opus
+        && let Some(head) = crate::opus::head(&params.extradata)
+    {
+        trim = Trim::new(crate::opus::pre_skip(&head).map(u64::from), None);
+        extradata = head;
+    }
     let described = match params.kind {
         MediaKind::Video(video) => {
             let size =
                 FrameSize::try_new(video.width, video.height).map_err(|_| OpenError::Source {
                     message: "frame size is empty".to_owned(),
                 })?;
-            StreamParams::video(codec, size, params.extradata.clone())
+            StreamParams::video(codec, size, extradata)
         }
-        MediaKind::Audio(audio) => StreamParams::try_audio(
-            codec,
-            audio.sample_rate,
-            audio.channels,
-            params.extradata.clone(),
-        )
-        .map_err(|error| OpenError::Source {
-            message: error.to_string(),
-        })?,
-        MediaKind::Data => StreamParams::opaque(codec, params.extradata.clone()),
+        MediaKind::Audio(audio) => {
+            StreamParams::try_audio(codec, audio.sample_rate, audio.channels, extradata).map_err(
+                |error| OpenError::Source {
+                    message: error.to_string(),
+                },
+            )?
+        }
+        MediaKind::Data => StreamParams::opaque(codec, extradata),
     };
     let mut edits = Vec::with_capacity(stream.edits.len());
     for edit in &stream.edits {
@@ -141,7 +149,7 @@ fn map_stream(movie_timescale: u32, stream: &LegacyStream) -> Result<Stream, Ope
         timescale,
         language(params.language),
         edits,
-        Trim::default(),
+        trim,
     )
     .with_display(stream.display))
 }
@@ -195,6 +203,7 @@ fn map_codec(codec: LegacyCodec) -> Result<StreamCodec, OpenError> {
         LegacyCodec::Vorbis => CodecId::Vorbis,
         LegacyCodec::Alac => CodecId::Alac,
         LegacyCodec::Ac3 => CodecId::Ac3,
+        LegacyCodec::Eac3 => CodecId::Eac3,
         LegacyCodec::Jpeg => CodecId::Jpeg,
         LegacyCodec::Png => CodecId::Png,
         LegacyCodec::Webp => CodecId::Webp,

@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "indie",
+  "name": "Indie",
+  "category": "Cinema",
+  "adjust": {"fade": 0.2, "saturation": -0.15},
+  "wheels": {"lift": {"hue": 170, "amount": 0.2}, "gain": {"hue": 50, "amount": 0.15}}
+}

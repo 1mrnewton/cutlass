@@ -16,6 +16,7 @@ ignore = [
     { id = "RUSTSEC-2026-0368", reason = "candle-core reads and writes zip entries for npy. It does not call extract, which is the vulnerable API. Transcription loads safetensors." },
     { id = "RUSTSEC-2026-0369", reason = "candle-core reads and writes zip entries for npy. It does not call extract, which is the vulnerable API. Transcription loads safetensors." },
     { id = "RUSTSEC-2026-0429", reason = "candle-core reads and writes zip entries for npy. It does not call extract, which is the vulnerable API. Transcription loads safetensors." },
+    { id = "RUSTSEC-2026-0249", reason = "rhai still depends on smartstring, which is unmaintained but has no open vulnerability. The sandbox runs Rhai in a child process with limits." },
 ]
 
 [licenses]
@@ -24,6 +25,12 @@ allow = [
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",
     "BSD-3-Clause",
+    # xxhash-rust, under burn's cubecl-common.
+    "BSL-1.0",
+    # tiny-keccak, under egui's ahash.
+    "CC0-1.0",
+    # The Mozilla root certificates in webpki-roots, for HTTPS downloads.
+    "CDLA-Permissive-2.0",
     "ISC",
     "MIT",
     "MPL-2.0",
@@ -34,13 +41,27 @@ allow = [
     "Zlib",
 ]
 
+# turso_core's cfg_block names a license file, not an expression. The file
+# is the Apache 2.0 license.
+[[licenses.clarify]]
+crate = "cfg_block"
+expression = "Apache-2.0"
+license-files = []
+
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
 deny = [
-    "cc",
+    # ring, rustls's crypto for HTTPS downloads, builds its C and assembly
+    # with cc. burn's kernel cache (cutlass-vision on macOS) stores compiled
+    # GPU kernels in turso, whose aegis and simsimd build C with cc. Nothing
+    # else may.
+    { crate = "cc", wrappers = ["ring", "aegis", "simsimd"] },
     "cmake",
-    "bindgen",
+    # turso_sdk_kit and turso_sync_sdk_kit list bindgen as a build
+    # dependency and never call it: the first's build script only writes a
+    # Windows version resource, and the second has none.
+    { crate = "bindgen", wrappers = ["turso_sdk_kit", "turso_sync_sdk_kit"] },
     "nasm-rs",
     "ffmpeg-sys",
     "ffmpeg-sys-next",

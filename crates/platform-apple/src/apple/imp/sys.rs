@@ -153,6 +153,8 @@ unsafe extern "C" {
 
     pub static kCFTypeDictionaryValueCallBacks: u8;
 
+    pub static kCFTypeArrayCallBacks: u8;
+
     pub static kCFBooleanTrue: *const c_void;
 
     pub static kCFBooleanFalse: *const c_void;
@@ -198,6 +200,13 @@ unsafe extern "C" {
 
     pub fn CFDictionaryGetValue(dict: *const c_void, key: *const c_void) -> *const c_void;
 
+    pub fn CFArrayCreate(
+        allocator: *const c_void,
+        values: *const *const c_void,
+        count: CFIndex,
+        callbacks: *const c_void,
+    ) -> *mut c_void;
+
     pub fn CFArrayGetCount(array: *const c_void) -> CFIndex;
 
     pub fn CFArrayGetValueAtIndex(array: *const c_void, index: CFIndex) -> *const c_void;
@@ -206,6 +215,8 @@ unsafe extern "C" {
 #[link(name = "VideoToolbox", kind = "framework")]
 unsafe extern "C" {
     pub static kVTCompressionPropertyKey_AverageBitRate: *const c_void;
+
+    pub static kVTCompressionPropertyKey_DataRateLimits: *const c_void;
 
     pub static kVTCompressionPropertyKey_AllowFrameReordering: *const c_void;
 
@@ -380,6 +391,12 @@ unsafe extern "C" {
 
     pub static kCVPixelBufferIOSurfacePropertiesKey: *const c_void;
 
+    pub static kCVPixelBufferMetalCompatibilityKey: *const c_void;
+
+    pub static kCVImageBufferTransferFunction_ITU_R_2100_HLG: *const c_void;
+
+    pub static kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ: *const c_void;
+
     pub static kCVImageBufferColorPrimariesKey: *const c_void;
 
     pub static kCVImageBufferColorPrimaries_ITU_R_709_2: *const c_void;
@@ -434,6 +451,32 @@ unsafe extern "C" {
     pub fn CVPixelBufferGetWidthOfPlane(buffer: *mut c_void, plane: usize) -> usize;
 
     pub fn CVPixelBufferGetHeightOfPlane(buffer: *mut c_void, plane: usize) -> usize;
+
+    pub fn CVPixelBufferGetIOSurface(buffer: *mut c_void) -> *mut c_void;
+
+    pub fn CVMetalTextureCacheCreate(
+        allocator: *const c_void,
+        cache_attributes: *const c_void,
+        metal_device: *mut c_void,
+        texture_attributes: *const c_void,
+        cache_out: *mut *mut c_void,
+    ) -> i32;
+
+    pub fn CVMetalTextureCacheCreateTextureFromImage(
+        allocator: *const c_void,
+        cache: *mut c_void,
+        image: *mut c_void,
+        texture_attributes: *const c_void,
+        pixel_format: usize,
+        width: usize,
+        height: usize,
+        plane: usize,
+        texture_out: *mut *mut c_void,
+    ) -> i32;
+
+    pub fn CVMetalTextureGetTexture(texture: *mut c_void) -> *mut c_void;
+
+    pub fn CVMetalTextureCacheFlush(cache: *mut c_void, options: u64);
 
 }
 #[link(name = "ImageIO", kind = "framework")]

@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "romance",
+  "name": "Romance",
+  "category": "Cinema",
+  "adjust": {"tint": 0.1, "temperature": 0.1, "clarity": -0.2, "brilliance": 0.2},
+  "wheels": {"gain": {"hue": 10, "amount": 0.2}}
+}

@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "id": "vortex",
+  "name": "Vortex",
+  "category": "Distort",
+  "preview": "road",
+  "poster": 1.5,
+  "controls": [
+    {"id": "speed", "name": "Speed", "default": 1, "min": 0.25, "max": 3, "unit": "times", "speed": true}
+  ],
+  "passes": [
+    { "block": "swirl", "params": {"angle": {"keys": [[0, 0], [3, 720]]}, "radius": 0.8} }
+  ]
+}

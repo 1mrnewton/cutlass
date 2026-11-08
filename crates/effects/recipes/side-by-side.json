@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "id": "side-by-side",
+  "name": "Side by Side",
+  "category": "Distort",
+  "preview": "portrait",
+  "passes": [
+    { "block": "grid", "params": {"x": 2, "y": 1} }
+  ]
+}

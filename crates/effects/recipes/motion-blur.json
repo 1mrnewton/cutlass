@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "id": "motion-blur",
+  "name": "Motion Blur",
+  "category": "Blur",
+  "preview": "dancer",
+  "controls": [
+    {"id": "blur", "name": "Blur", "default": 1, "min": 0, "max": 3, "unit": "percent", "scale": [[0, "length"]]}
+  ],
+  "passes": [
+    { "block": "motion_blur", "params": {"length": 0.04} }
+  ]
+}

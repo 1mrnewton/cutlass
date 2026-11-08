@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "matte-mono",
+  "name": "Matte Mono",
+  "category": "Mono",
+  "adjust": {"saturation": -1},
+  "curves": {"rgb": [[0, 0.12], [1, 0.9]]}
+}

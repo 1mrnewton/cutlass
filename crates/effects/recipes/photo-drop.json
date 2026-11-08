@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "id": "photo-drop",
+  "name": "Photo Drop",
+  "category": "Distort",
+  "preview": "dancer",
+  "poster": 1.8,
+  "controls": [
+    {"id": "speed", "name": "Speed", "default": 1, "min": 0.25, "max": 3, "unit": "times", "speed": true}
+  ],
+  "passes": [
+    {
+      "block": "prints",
+      "params": {
+        "count": 4,
+        "arrive": {"keys": [[0, 0], [1.2, 2.8]]},
+        "scale": 0.7,
+        "spread": 0.6,
+        "turn": {"wave": {"period": 2.5, "from": -2, "to": 2}},
+        "tilt": 11,
+        "border": 0.022,
+        "blur": 0.04,
+        "wash": 0.4
+      }
+    }
+  ]
+}

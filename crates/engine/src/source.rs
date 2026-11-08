@@ -33,7 +33,7 @@ use crate::waveform::{MAX_BUCKETS, Waveform};
 pub struct VideoSource {
     path: PathBuf,
     media: RefCell<Media>,
-    map: TimelineMap,
+    pub(crate) map: TimelineMap,
     cache: RefCell<FrameWindow<DecodedFrame>>,
     clock: RefCell<MediaClock>,
     preload: RefCell<Preload>,
@@ -46,6 +46,9 @@ pub struct VideoSource {
     patient: Cell<bool>,
     /// A read returned an earlier picture than the one asked for.
     stale: Cell<bool>,
+    /// An animated GIF or WebP plays round and round for as long as its
+    /// clip lasts: the length of one round.
+    round: Option<i64>,
 }
 
 impl VideoSource {
@@ -96,9 +99,19 @@ impl VideoSource {
         self.clock.borrow_mut().advance_audio(frames, rate)
     }
 
+    /// The picture's own time at timeline `time`, wrapped into one round
+    /// for an animated still.
+    fn source_at(&self, time: Micros) -> Result<Micros, map::MapError> {
+        let source = map::map_timeline(&self.map, time)?;
+        Ok(match self.round {
+            Some(round) => Micros(source.0.rem_euclid(round)),
+            None => source,
+        })
+    }
+
     /// Decode into the window unless playback is already past `time`.
     pub fn fill(&self, time: Micros) -> Result<Sample, EngineError> {
-        let source = map::map_timeline(&self.map, time)?;
+        let source = self.source_at(time)?;
         let held = self.decode(source)?;
         let clock = self.clock.borrow();
         let late = clock.kind() == ClockKind::Playback && clock.audio_time().0 > time.0;
@@ -134,7 +147,7 @@ impl VideoSource {
     /// waiting. A clip without a thread, or a time outside the clip, is left
     /// alone.
     pub fn prefetch(&self, time: Micros) {
-        if let (Some(ahead), Ok(source)) = (&self.ahead, map::map_timeline(&self.map, time)) {
+        if let (Some(ahead), Ok(source)) = (&self.ahead, self.source_at(time)) {
             ahead.prefetch(source);
         }
     }
@@ -150,7 +163,7 @@ impl VideoSource {
     /// thread has not decoded it yet returns the stored picture nearest it
     /// and marks itself stale. A clip with nothing stored waits.
     fn frame_at(&self, time: Micros) -> Result<DecodedFrame, EngineError> {
-        let source = map::map_timeline(&self.map, time)?;
+        let source = self.source_at(time)?;
         let cached = self.cache.borrow().get(source.0).cloned();
         if let Some(frame) = cached {
             return Ok(frame);
@@ -188,7 +201,7 @@ impl VideoSource {
     /// A miss is [`EngineError::NotReady`] and does not decode. A time outside
     /// the segment is [`EngineError::Outside`].
     pub fn strip_at(&self, time: Micros) -> Result<StripCell, EngineError> {
-        let source = map::map_timeline(&self.map, time)?;
+        let source = self.source_at(time)?;
         self.preload.borrow().strip(source)
     }
 
@@ -198,7 +211,7 @@ impl VideoSource {
     /// [`EngineError::NotReady`] and is not stored. This does not wait on the
     /// audio clock and does not fill the playback window.
     pub fn fill_strip(&self, time: Micros) -> Result<(), EngineError> {
-        let source = map::map_timeline(&self.map, time)?;
+        let source = self.source_at(time)?;
         let held = self.decode(source)?;
         let picture = decoded_picture(&held.frame)?;
         let Picture::Cpu(bytes) = picture else {
@@ -293,9 +306,65 @@ pub fn open_segment_in(
     let path = located_media(root, stored).ok_or_else(|| EngineError::MissingFile {
         path: PathBuf::from(stored),
     })?;
+    open_at(
+        factory,
+        map::placement_of(draft, segment)?,
+        clock,
+        window,
+        path,
+    )
+}
+
+/// Opens the pictures of segment `id` from `path`, a file that holds the
+/// stretch of the segment's own file starting at `held_from`: a copy made
+/// of that stretch, such as an enhanced one. Each time is read from the
+/// copy at its place in that stretch, so the clip's trim, speed, reverse
+/// and freeze show the same frames they would from the source.
+pub fn open_segment_from(
+    factory: &ReaderFactory,
+    draft: &Draft,
+    id: &SegmentId,
+    clock: ClockKind,
+    window: usize,
+    path: PathBuf,
+    held_from: Micros,
+) -> Result<VideoSource, EngineError> {
+    let segment = draft
+        .tracks
+        .iter()
+        .flat_map(|track| track.segments.iter())
+        .find(|segment| segment.id == *id)
+        .ok_or(EngineError::MissingSegment)?;
+    if map::is_graphic(draft, segment) {
+        return Err(EngineError::NotMedia);
+    }
+    let mut map = map::placement_of(draft, segment)?;
+    let shift = |time: Micros| {
+        time.0
+            .checked_sub(held_from.0)
+            .filter(|shifted| *shifted >= 0)
+            .map(Micros)
+            .ok_or(EngineError::Outside)
+    };
+    map.source.start = shift(map.source.start)?;
+    map.freeze = map.freeze.map(shift).transpose()?;
+    open_at(factory, map, clock, window, path)
+}
+
+fn open_at(
+    factory: &ReaderFactory,
+    map: TimelineMap,
+    clock: ClockKind,
+    window: usize,
+    path: PathBuf,
+) -> Result<VideoSource, EngineError> {
     let media = factory.open(&path)?;
     let display = media.info().display;
-    let map = map::placement_of(draft, segment)?;
+    let round = (media.info().family == cutlass_codec::ContainerId::Still)
+        .then_some(media.info().duration)
+        .flatten()
+        .map(|duration| duration.0)
+        .filter(|duration| *duration > 0);
     Ok(VideoSource {
         path,
         media: RefCell::new(media),
@@ -308,6 +377,7 @@ pub fn open_segment_in(
         ahead: None,
         patient: Cell::new(true),
         stale: Cell::new(false),
+        round,
     })
 }
 
@@ -367,7 +437,7 @@ pub fn decoded_picture(frame: &DecodedFrame) -> Result<Picture, EngineError> {
 }
 
 fn to_picture(frame: &DecodedFrame) -> Result<Picture, EngineError> {
-    match frame {
+    match frame.on_cpu()?.as_ref() {
         DecodedFrame::Platform {
             width,
             height,
@@ -388,6 +458,9 @@ fn to_picture(frame: &DecodedFrame) -> Result<Picture, EngineError> {
             transfer,
             bytes,
         } => coded_bytes(*pixel, *width, *height, *primaries, *transfer, bytes),
+        DecodedFrame::Surface { .. } => Err(EngineError::ColorMiss {
+            layout: "surface".to_owned(),
+        }),
     }
 }
 
@@ -400,6 +473,21 @@ fn coded_bytes(
     bytes: &[u8],
 ) -> Result<Picture, EngineError> {
     let layout = pixel_layout(pixel);
+    if pixel == PixelFormat::Rgba8 {
+        // Straight sRGB RGBA, such as each frame of a GIF: premultiply it.
+        let mut rgba = bytes.to_vec();
+        for pixel in rgba.as_chunks_mut::<4>().0 {
+            let alpha = pixel[3];
+            for channel in &mut pixel[..3] {
+                *channel = premultiply(*channel, alpha);
+            }
+        }
+        return CpuBytes::new(width, height, rgba)
+            .map(Picture::Cpu)
+            .map_err(|_| EngineError::ColorMiss {
+                layout: layout.to_owned(),
+            });
+    }
     if pixel != PixelFormat::Yuv420p {
         return Err(EngineError::ColorMiss {
             layout: layout.to_owned(),
@@ -632,6 +720,8 @@ fn pixel_layout(pixel: PixelFormat) -> &'static str {
         PixelFormat::Yuv444p12 => "yuv444p12",
         PixelFormat::Gbrp10 => "gbrp10",
         PixelFormat::Gbrp12 => "gbrp12",
+        PixelFormat::Gray8 => "gray8",
+        PixelFormat::Gray10 => "gray10",
         PixelFormat::None => "none",
     }
 }

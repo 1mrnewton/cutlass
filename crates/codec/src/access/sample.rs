@@ -29,6 +29,103 @@ pub enum Channel {
     SideRight,
 }
 
+/// Every [`Channel`], in WAVEFORMATEXTENSIBLE speaker-bit order.
+const SPEAKERS: [Channel; 11] = [
+    Channel::FrontLeft,
+    Channel::FrontRight,
+    Channel::FrontCenter,
+    Channel::Lfe,
+    Channel::BackLeft,
+    Channel::BackRight,
+    Channel::FrontLeftOfCenter,
+    Channel::FrontRightOfCenter,
+    Channel::BackCenter,
+    Channel::SideLeft,
+    Channel::SideRight,
+];
+
+impl Channel {
+    /// The WAVEFORMATEXTENSIBLE `dwChannelMask` bit for this speaker.
+    ///
+    /// The bits run front left, front right, center, LFE, back left, back
+    /// right, left and right of center, back center, side left, side right.
+    /// A wave file and FLAC (RFC 9639 section 9.1.3) store channels in this
+    /// order.
+    #[must_use]
+    pub const fn wave_bit(self) -> u32 {
+        match self {
+            Self::FrontLeft => 0x1,
+            Self::FrontRight => 0x2,
+            Self::FrontCenter => 0x4,
+            Self::Lfe => 0x8,
+            Self::BackLeft => 0x10,
+            Self::BackRight => 0x20,
+            Self::FrontLeftOfCenter => 0x40,
+            Self::FrontRightOfCenter => 0x80,
+            Self::BackCenter => 0x100,
+            Self::SideLeft => 0x200,
+            Self::SideRight => 0x400,
+        }
+    }
+}
+
+/// A standard speaker set. [`StandardLayout::wave_mask`] is its
+/// WAVEFORMATEXTENSIBLE `dwChannelMask`; the channels are stored in that
+/// bit order, which is also FLAC's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum StandardLayout {
+    /// Center.
+    Mono,
+    /// Left, right.
+    Stereo,
+    /// 3.0: left, right, center.
+    Surround,
+    /// Left, right, back left, back right.
+    Quad,
+    /// 5.0: left, right, center, back left, back right.
+    FiveZero,
+    /// 5.1: left, right, center, LFE, back left, back right.
+    FiveOne,
+    /// 6.1: left, right, center, LFE, back center, side left, side right.
+    SixOne,
+    /// 7.1: left, right, center, LFE, back left, back right, side left, side right.
+    SevenOne,
+}
+
+impl StandardLayout {
+    /// The layout a file with `channels` channels and no channel mask
+    /// carries: FLAC's fixed assignment for one through eight channels,
+    /// which a wave file without a mask follows too.
+    #[must_use]
+    pub const fn for_count(channels: usize) -> Option<Self> {
+        Some(match channels {
+            1 => Self::Mono,
+            2 => Self::Stereo,
+            3 => Self::Surround,
+            4 => Self::Quad,
+            5 => Self::FiveZero,
+            6 => Self::FiveOne,
+            7 => Self::SixOne,
+            8 => Self::SevenOne,
+            _ => return None,
+        })
+    }
+
+    #[must_use]
+    pub const fn wave_mask(self) -> u32 {
+        match self {
+            Self::Mono => 0x4,
+            Self::Stereo => 0x3,
+            Self::Surround => 0x7,
+            Self::Quad => 0x33,
+            Self::FiveZero => 0x37,
+            Self::FiveOne => 0x3F,
+            Self::SixOne => 0x70F,
+            Self::SevenOne => 0x63F,
+        }
+    }
+}
+
 /// Channel identity and buffer order. `channels[i]` is sample `i` inside
 /// each interleaved frame.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -110,6 +207,56 @@ impl ChannelLayout {
         }
     }
 
+    /// `layout` in WAVEFORMATEXTENSIBLE order.
+    #[must_use]
+    pub fn standard(layout: StandardLayout) -> Self {
+        Self {
+            channels: speakers_of(layout.wave_mask()),
+        }
+    }
+
+    /// The speakers a WAVEFORMATEXTENSIBLE `dwChannelMask` names, in bit
+    /// order. A bit with no [`Channel`] (the top speakers, and the reserved
+    /// bits) is [`LayoutError::Speaker`].
+    pub fn from_wave_mask(mask: u32) -> Result<Self, LayoutError> {
+        let known = SPEAKERS
+            .iter()
+            .fold(0_u32, |bits, channel| bits | channel.wave_bit());
+        if mask & !known != 0 {
+            return Err(LayoutError::Speaker);
+        }
+        Self::new(speakers_of(mask))
+    }
+
+    /// The layout an AAC `channelConfiguration` names, in the bitstream
+    /// element order the decoder writes. Configuration 0 (a program config
+    /// element) and the layouts wider than eight channels are [`None`].
+    #[must_use]
+    pub fn from_aac_config(config: u8) -> Option<Self> {
+        use Channel::{BackCenter, BackLeft, BackRight, FrontCenter, FrontLeft, FrontRight, Lfe};
+        let channels = match config {
+            1 => return Some(Self::mono()),
+            2 => return Some(Self::stereo()),
+            3 => vec![FrontCenter, FrontLeft, FrontRight],
+            4 => vec![FrontCenter, FrontLeft, FrontRight, BackCenter],
+            5 => vec![FrontCenter, FrontLeft, FrontRight, BackLeft, BackRight],
+            6 => return Some(Self::five_one()),
+            7 => return Some(Self::seven_one_wide()),
+            11 => vec![
+                FrontCenter,
+                FrontLeft,
+                FrontRight,
+                BackLeft,
+                BackRight,
+                BackCenter,
+                Lfe,
+            ],
+            12 => return Some(Self::seven_one()),
+            _ => return None,
+        };
+        Some(Self { channels })
+    }
+
     #[must_use]
     pub fn channels(&self) -> &[Channel] {
         &self.channels
@@ -130,6 +277,16 @@ impl ChannelLayout {
 pub enum LayoutError {
     Empty,
     TooMany,
+    /// A channel mask names a speaker [`Channel`] does not have.
+    Speaker,
+}
+
+fn speakers_of(mask: u32) -> Vec<Channel> {
+    SPEAKERS
+        .iter()
+        .copied()
+        .filter(|channel| mask & channel.wave_bit() != 0)
+        .collect()
 }
 
 /// Owned interleaved PCM.
@@ -210,7 +367,7 @@ pub enum PcmError {
 
 #[cfg(test)]
 mod tests {
-    use super::{Channel, ChannelLayout, Pcm, SampleFormat};
+    use super::{Channel, ChannelLayout, LayoutError, Pcm, SPEAKERS, SampleFormat, StandardLayout};
 
     #[test]
     fn stereo_order_is_left_then_right() {
@@ -227,6 +384,134 @@ mod tests {
         assert_eq!(layout.len(), 6);
         assert_eq!(layout.channels()[0], Channel::FrontCenter);
         assert_eq!(layout.channels()[5], Channel::Lfe);
+    }
+
+    #[test]
+    fn standard_layouts_follow_the_wave_speaker_order() {
+        use Channel::{
+            BackCenter, BackLeft, BackRight, FrontCenter, FrontLeft, FrontRight, Lfe, SideLeft,
+            SideRight,
+        };
+        let expected: [(StandardLayout, &[Channel]); 8] = [
+            (StandardLayout::Mono, &[FrontCenter]),
+            (StandardLayout::Stereo, &[FrontLeft, FrontRight]),
+            (
+                StandardLayout::Surround,
+                &[FrontLeft, FrontRight, FrontCenter],
+            ),
+            (
+                StandardLayout::Quad,
+                &[FrontLeft, FrontRight, BackLeft, BackRight],
+            ),
+            (
+                StandardLayout::FiveZero,
+                &[FrontLeft, FrontRight, FrontCenter, BackLeft, BackRight],
+            ),
+            (
+                StandardLayout::FiveOne,
+                &[FrontLeft, FrontRight, FrontCenter, Lfe, BackLeft, BackRight],
+            ),
+            (
+                StandardLayout::SixOne,
+                &[
+                    FrontLeft,
+                    FrontRight,
+                    FrontCenter,
+                    Lfe,
+                    BackCenter,
+                    SideLeft,
+                    SideRight,
+                ],
+            ),
+            (
+                StandardLayout::SevenOne,
+                &[
+                    FrontLeft,
+                    FrontRight,
+                    FrontCenter,
+                    Lfe,
+                    BackLeft,
+                    BackRight,
+                    SideLeft,
+                    SideRight,
+                ],
+            ),
+        ];
+        for (count, (standard, channels)) in expected.into_iter().enumerate() {
+            assert_eq!(StandardLayout::for_count(count + 1), Some(standard));
+            assert_eq!(ChannelLayout::standard(standard).channels(), channels);
+        }
+        assert_eq!(
+            ChannelLayout::standard(StandardLayout::Mono),
+            ChannelLayout::mono()
+        );
+        assert_eq!(
+            ChannelLayout::standard(StandardLayout::Stereo),
+            ChannelLayout::stereo()
+        );
+        assert_eq!(StandardLayout::for_count(0), None);
+        assert_eq!(StandardLayout::for_count(9), None);
+    }
+
+    #[test]
+    fn a_wave_mask_lists_its_speakers_in_bit_order() {
+        // 5.1 with side surrounds, as ffmpeg writes it.
+        let side = ChannelLayout::from_wave_mask(0x60F).expect("5.1 side");
+        assert_eq!(
+            side.channels(),
+            &[
+                Channel::FrontLeft,
+                Channel::FrontRight,
+                Channel::FrontCenter,
+                Channel::Lfe,
+                Channel::SideLeft,
+                Channel::SideRight,
+            ]
+        );
+        for channel in SPEAKERS {
+            let one = ChannelLayout::from_wave_mask(channel.wave_bit()).expect("one speaker");
+            assert_eq!(one.channels(), &[channel]);
+        }
+        assert_eq!(ChannelLayout::from_wave_mask(0), Err(LayoutError::Empty));
+        // Top center, and the reserved all-speakers bit, have no channel.
+        assert_eq!(
+            ChannelLayout::from_wave_mask(0x803),
+            Err(LayoutError::Speaker)
+        );
+        assert_eq!(
+            ChannelLayout::from_wave_mask(0x8000_0003),
+            Err(LayoutError::Speaker)
+        );
+        // Nine speakers do not fit a layout.
+        assert_eq!(
+            ChannelLayout::from_wave_mask(0x1FF),
+            Err(LayoutError::TooMany)
+        );
+    }
+
+    #[test]
+    fn aac_configurations_keep_the_element_order() {
+        let three = ChannelLayout::from_aac_config(3).expect("3");
+        assert_eq!(
+            three.channels(),
+            &[
+                Channel::FrontCenter,
+                Channel::FrontLeft,
+                Channel::FrontRight
+            ]
+        );
+        assert_eq!(
+            ChannelLayout::from_aac_config(6),
+            Some(ChannelLayout::five_one())
+        );
+        assert_eq!(ChannelLayout::from_aac_config(11).map(|l| l.len()), Some(7));
+        assert_eq!(
+            ChannelLayout::from_aac_config(12),
+            Some(ChannelLayout::seven_one())
+        );
+        for config in [0, 8, 9, 10, 13, 14, 15] {
+            assert_eq!(ChannelLayout::from_aac_config(config), None);
+        }
     }
 
     #[test]

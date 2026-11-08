@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "slate",
+  "name": "Slate",
+  "category": "Moody",
+  "adjust": {"saturation": -0.6, "temperature": -0.2, "contrast": 0.15, "fade": 0.1}
+}

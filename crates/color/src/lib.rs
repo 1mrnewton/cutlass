@@ -30,7 +30,7 @@ use cutlass_codec::access::{
 
 pub use lut::{Cube, Lut, ThreeDl};
 pub use still::{StillMap, StillTags};
-pub use transfer::Curve;
+pub use transfer::{Curve, Signal, SignalCurve};
 
 /// Longest edge this crate will convert. Matches the software framebuffer.
 pub const MAX_EDGE: u32 = 8_192;

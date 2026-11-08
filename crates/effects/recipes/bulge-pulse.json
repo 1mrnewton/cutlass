@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "id": "bulge-pulse",
+  "name": "Bulge Pulse",
+  "category": "Distort",
+  "preview": "portrait",
+  "poster": 0.5,
+  "controls": [
+    {"id": "speed", "name": "Speed", "default": 1, "min": 0.25, "max": 3, "unit": "times", "speed": true}
+  ],
+  "passes": [
+    {
+      "block": "bulge",
+      "params": {
+        "amount": {"wave": {"period": 1, "from": 0, "to": 0.5}},
+        "radius": 0.7
+      }
+    }
+  ]
+}

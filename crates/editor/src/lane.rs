@@ -49,8 +49,8 @@ pub fn lanes_for(draft: &Draft, empty: bool) -> Vec<Lane> {
 /// Where a material lands.
 ///
 /// Video, photo, gif, image, and combination land on video. Text, subtitles,
-/// lyrics, and text templates land on text. A sticker lands on sticker. An
-/// adjustment lands on adjust. Audio, a filter, and a video effect return
+/// lyrics, and text templates land on text. A sticker or a shape lands on
+/// sticker. An adjustment lands on adjust. Audio, a filter, and a video effect return
 /// [`None`]: their insert path already stored the track type.
 #[must_use]
 pub fn lane_category(meta: MetaType) -> Option<TrackType> {
@@ -68,7 +68,7 @@ pub fn lane_category(meta: MetaType) -> Option<TrackType> {
         | MetaType::CaptionTemplate
         | MetaType::TextTemplateSubtitle
         | MetaType::TextTemplateLyrics => TrackType::Text,
-        MetaType::Sticker => TrackType::Sticker,
+        MetaType::Sticker | MetaType::Shape => TrackType::Sticker,
         MetaType::Adjust => TrackType::Adjust,
         _ => return None,
     })
@@ -180,6 +180,7 @@ mod tests {
             assert_eq!(lane_category(meta), Some(TrackType::Text));
         }
         assert_eq!(lane_category(MetaType::Sticker), Some(TrackType::Sticker));
+        assert_eq!(lane_category(MetaType::Shape), Some(TrackType::Sticker));
         assert_eq!(lane_category(MetaType::Adjust), Some(TrackType::Adjust));
     }
 

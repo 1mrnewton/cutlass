@@ -1,6 +1,6 @@
 use cutlass_model::{Draft, SegmentId};
 
-use super::speed::locate;
+use super::locate;
 use super::{EditError, ensure_unlocked};
 
 /// Store whether the clip is active: drawn and heard. The clip stays where
@@ -55,7 +55,7 @@ mod tests {
     use crate::session::Session;
 
     fn open() -> (Session, TrackId) {
-        let mut draft = Draft::empty("D");
+        let mut draft = crate::edit::test_draft("D");
         draft.tracks[0].id = TrackId::new("main");
         (Session::open(draft), TrackId::new("main"))
     }

@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "id": "tilt-shift",
+  "name": "Tilt Shift",
+  "category": "Blur",
+  "preview": "city",
+  "controls": [
+    {"id": "blur", "name": "Blur", "default": 1, "min": 0, "max": 2, "unit": "percent", "scale": [[0, "amount"]]},
+    {"id": "size", "name": "Sharp band", "default": 0.3, "min": 0, "max": 1, "unit": "percent", "set": [[0, "size"]]}
+  ],
+  "passes": [
+    {"block": "focus", "params": {"amount": 0.04, "kind": 0, "size": 0.3}},
+    {"block": "grade", "params": {"saturation": 1.25, "contrast": 1.05}}
+  ]
+}

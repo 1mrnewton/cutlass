@@ -22,21 +22,27 @@
 //!
 //! The factory walks the openers registered for that id, in order, and uses
 //! the first that accepts the parameters. An opener declines with
-//! [`CodecError::Unsupported`]. Any other error means the parameters are
-//! not openable, and the walk stops. The desktop registers a platform opener
-//! first, then the Rust opener.
+//! [`CodecError::Unsupported`]. Any other error from one opener (a platform
+//! decoder that fails to start, say) does not stop the walk either: the next
+//! opener is tried, and the first such error is what the caller sees when
+//! none accepts. The desktop registers a platform opener first, then the
+//! Rust opener.
 
 #![forbid(unsafe_code)]
 
 pub mod orient;
+mod surface;
 pub mod video;
+
+pub use surface::{PictureSurface, Surface};
 
 pub use cutlass_codec::CodecId;
 pub use cutlass_codec::access::{
-    BitDepth, Channel, ChannelLayout, CodecError, CodecParams, ColorMatrix, ColorPrimaries,
-    ColorRange, ColorType, FrameError, ImageError, MatrixCoefficients, Packet, Pcm, PhysicalPixel,
-    PixelFormat, Plane, Rgb8, SampleFormat, SideData, StillImage, TextItem, Transfer, Transparency,
-    VideoFrame, Yuv420High, Yuv420p, Yuv420p10, Yuv422High, Yuv422p, Yuv444High, Yuv444p,
+    BitDepth, Channel, ChannelLayout, ChromaSamplePosition, CodecError, CodecParams, ColorMatrix,
+    ColorPrimaries, ColorRange, ColorType, FrameError, ImageError, MatrixCoefficients, Packet, Pcm,
+    PhysicalPixel, PixelFormat, Plane, Rgb8, SampleFormat, SideData, StillImage, TextItem,
+    Transfer, Transparency, VideoFrame, Yuv420High, Yuv420p, Yuv420p10, Yuv422High, Yuv422p,
+    Yuv444High, Yuv444p,
 };
 pub use orient::Orientation;
 pub use video::VideoDecodeFactory;
@@ -76,9 +82,17 @@ pub struct AudioOutput {
 /// Coded size and color of one decoded picture.
 ///
 /// `width` and `height` are the buffer that [`PictureOutput`] stores, tightly
-/// packed, with no stride gap and no display crop. Color conversion stays
-/// outside this crate. [`PixelFormat::Yuv420p`] is 4:2:0: a full-size Y plane,
-/// then U, then V, each `width / 2` by `height / 2`.
+/// packed, with no stride gap and no display crop. `render_width` and
+/// `render_height` are the display size and do not change that buffer. Color
+/// conversion stays outside this crate. [`PixelFormat::Yuv420p`] is 4:2:0: a full-size Y plane,
+/// then U, then V, each `width / 2` by `height / 2`. [`PixelFormat::Yuv422p`]
+/// is 4:2:2: U and V are `width / 2` by `height`. [`PixelFormat::Yuv422p10`]
+/// is that layout with a little-endian `u16` per sample. [`PixelFormat::Yuv420p10`]
+/// is that layout with a little-endian `u16` per sample. [`PixelFormat::Yuv444p`]
+/// is 4:4:4: three full-size planes. [`PixelFormat::Yuv444p10`] is that layout
+/// with a little-endian `u16` per sample. [`PixelFormat::Gray8`]
+/// is one 8-bit plane, `width` by `height`. [`PixelFormat::Gray10`] is that
+/// plane with a little-endian `u16` per sample.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PictureInfo {
     pub width: u32,
@@ -86,12 +100,109 @@ pub struct PictureInfo {
     pub pixel: PixelFormat,
     pub primaries: ColorPrimaries,
     pub transfer: Transfer,
+    pub matrix: ColorMatrix,
+    pub chroma_position: ChromaSamplePosition,
+    /// Display size. This is the sample size when the frame does not override it.
+    /// The sample buffer stays `width` by `height`.
+    pub render_width: u32,
+    pub render_height: u32,
+    /// CICP `colour_primaries`. 2 means unspecified.
+    pub cicp_primaries: u8,
+    /// CICP `transfer_characteristics`. 2 means unspecified.
+    pub cicp_transfer: u8,
+    /// CICP `matrix_coefficients`. 2 means unspecified. 0 is identity.
+    pub cicp_matrix: u8,
+    /// `num_units_in_display_tick`. Zero when the sequence has no timing info.
+    pub num_units_in_display_tick: u32,
+    /// `time_scale`. Zero when the sequence has no timing info.
+    pub time_scale: u32,
+    /// `equal_picture_interval`.
+    pub equal_picture_interval: bool,
+    /// `num_ticks_per_picture_minus_1` when the picture interval is equal.
+    pub num_ticks_per_picture_minus_1: Option<u32>,
+    /// `num_units_in_decoding_tick`. Zero when the sequence has no decoder model.
+    pub num_units_in_decoding_tick: u32,
+    /// `seq_level_idx` of the operating point this picture was decoded under.
+    /// Other codecs leave this 0.
+    pub seq_level_idx: u8,
 }
 
-/// One decoded picture, either CPU bytes or a platform buffer.
+impl PictureInfo {
+    /// A picture whose display size is the sample size.
+    ///
+    /// The CICP bytes follow the named primaries and transfer. The matrix stays
+    /// unspecified. A decoder that read a header sets the bytes from that header.
+    #[must_use]
+    pub fn new(
+        width: u32,
+        height: u32,
+        pixel: PixelFormat,
+        primaries: ColorPrimaries,
+        transfer: Transfer,
+    ) -> Self {
+        Self {
+            width,
+            height,
+            pixel,
+            primaries,
+            transfer,
+            matrix: ColorMatrix::Unspecified,
+            chroma_position: ChromaSamplePosition::Unknown,
+            render_width: width,
+            render_height: height,
+            cicp_primaries: cicp_primaries(primaries),
+            cicp_transfer: cicp_transfer(transfer),
+            cicp_matrix: 2,
+            num_units_in_display_tick: 0,
+            time_scale: 0,
+            equal_picture_interval: false,
+            num_ticks_per_picture_minus_1: None,
+            num_units_in_decoding_tick: 0,
+            seq_level_idx: 0,
+        }
+    }
+}
+
+fn cicp_primaries(primaries: ColorPrimaries) -> u8 {
+    match primaries {
+        ColorPrimaries::Bt709 => 1,
+        ColorPrimaries::Unspecified => 2,
+        ColorPrimaries::Bt601 => 6,
+        ColorPrimaries::Bt2020 => 9,
+        ColorPrimaries::Bt470m => 4,
+        ColorPrimaries::Smpte240m => 7,
+        ColorPrimaries::Film => 8,
+        ColorPrimaries::Smpte428 => 10,
+        ColorPrimaries::Smpte431 => 11,
+        ColorPrimaries::Smpte432 => 12,
+        ColorPrimaries::Ebu3213 => 22,
+    }
+}
+
+fn cicp_transfer(transfer: Transfer) -> u8 {
+    match transfer {
+        Transfer::Bt709 => 1,
+        Transfer::Unspecified => 2,
+        Transfer::Bt601 => 6,
+        Transfer::Bt2020 => 14,
+        Transfer::Smpte240m => 7,
+        Transfer::Linear => 8,
+        Transfer::Log100 => 9,
+        Transfer::LogSqrt => 10,
+        Transfer::Iec61966_2_4 => 11,
+        Transfer::Bt1361 => 12,
+        Transfer::Srgb => 13,
+        Transfer::Pq => 16,
+        Transfer::Smpte428 => 17,
+        Transfer::Hlg => 18,
+    }
+}
+
+/// One decoded picture: CPU bytes, a platform buffer, or a GPU surface.
 ///
 /// A platform buffer is a token. This crate does not sample it. The bytes
 /// behind a CPU picture are the coded samples in [`PictureInfo::pixel`] order.
+/// A [`Surface`] stands for 8-bit 4:2:0 and copies those bytes out on request.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PictureOutput {
     info: PictureInfo,
@@ -104,6 +215,7 @@ pub struct PictureOutput {
 enum PictureStorage {
     Cpu(Vec<u8>),
     Platform { token: u64 },
+    Surface(Surface),
 }
 
 /// Borrowed view of a [`PictureOutput`].
@@ -111,6 +223,7 @@ enum PictureStorage {
 pub enum PictureSamples<'a> {
     Cpu(&'a [u8]),
     Platform { token: u64 },
+    Surface(&'a Surface),
 }
 
 /// What one `push` or `drain` completed.
@@ -203,6 +316,15 @@ pub fn picture_byte_len(width: u32, height: u32, pixel: PixelFormat) -> Result<u
                 what: "picture bytes",
             })
         }
+        PixelFormat::Gray8 => width.checked_mul(height).ok_or(CodecError::Limit {
+            what: "picture bytes",
+        }),
+        PixelFormat::Gray10 => width
+            .checked_mul(height)
+            .and_then(|pixels| pixels.checked_mul(2))
+            .ok_or(CodecError::Limit {
+                what: "picture bytes",
+            }),
     }
 }
 
@@ -273,6 +395,27 @@ impl PictureOutput {
         })
     }
 
+    /// A GPU surface that stands for 8-bit 4:2:0 at `info`'s size.
+    pub fn surface(
+        info: PictureInfo,
+        surface: Surface,
+        pts: i64,
+        timescale: u32,
+    ) -> Result<Self, CodecError> {
+        if info.pixel != PixelFormat::Yuv420p {
+            return Err(CodecError::InvalidApi {
+                what: "surface pixel format",
+            });
+        }
+        picture_byte_len(info.width, info.height, info.pixel)?;
+        Ok(Self {
+            info,
+            pts,
+            timescale,
+            storage: PictureStorage::Surface(surface),
+        })
+    }
+
     #[must_use]
     pub fn info(&self) -> PictureInfo {
         self.info
@@ -288,11 +431,22 @@ impl PictureOutput {
         self.timescale
     }
 
+    /// The CPU bytes, moved out without a copy, or `None` for a platform
+    /// buffer.
+    #[must_use]
+    pub fn into_cpu(self) -> Option<Vec<u8>> {
+        match self.storage {
+            PictureStorage::Cpu(bytes) => Some(bytes),
+            PictureStorage::Platform { .. } | PictureStorage::Surface(_) => None,
+        }
+    }
+
     #[must_use]
     pub fn samples(&self) -> PictureSamples<'_> {
         match &self.storage {
             PictureStorage::Cpu(bytes) => PictureSamples::Cpu(bytes),
             PictureStorage::Platform { token } => PictureSamples::Platform { token: *token },
+            PictureStorage::Surface(surface) => PictureSamples::Surface(surface),
         }
     }
 }
@@ -434,8 +588,8 @@ impl DecodeFactory {
     }
 
     /// Later registrations do not hide an earlier opener that accepts the
-    /// same id. An earlier [`CodecError::Unsupported`] does not hide a
-    /// later opener. The desktop registers a platform opener first, then
+    /// same id. An earlier opener that refuses, for any reason, does not
+    /// hide a later one. The desktop registers a platform opener first, then
     /// the Rust opener.
     pub fn register(
         &mut self,
@@ -445,7 +599,8 @@ impl DecodeFactory {
         self.openers.push(Opener { id, open });
     }
 
-    /// Later video registrations do not hide an earlier one for the same id.
+    /// Later video registrations do not hide an earlier one for the same id,
+    /// and an earlier one that refuses does not hide a later one.
     pub fn register_video(
         &mut self,
         id: CodecId,
@@ -455,39 +610,57 @@ impl DecodeFactory {
     }
 
     pub fn open(&self, params: &CodecParams) -> Result<Box<dyn Decoder>, CodecError> {
-        let mut registered = false;
-        for opener in &self.openers {
-            if opener.id != params.codec {
-                continue;
-            }
-            registered = true;
-            match (opener.open)(params) {
-                Ok(decoder) => return Ok(decoder),
-                Err(CodecError::Unsupported { .. }) => continue,
-                Err(err) => return Err(err),
-            }
-        }
-        if registered {
-            Err(CodecError::Unsupported {
-                what: "no decoder accepted the parameters",
-            })
-        } else {
-            Err(CodecError::Unsupported {
-                what: "codec is not registered",
-            })
-        }
+        first_accepting(
+            self.openers
+                .iter()
+                .filter(|opener| opener.id == params.codec)
+                .map(|opener| opener.open),
+            params,
+            "codec is not registered",
+        )
     }
 
     pub fn open_video(&self, params: &CodecParams) -> Result<Box<dyn VideoDecoder>, CodecError> {
-        for opener in &self.video_openers {
-            if opener.id == params.codec {
-                return (opener.open)(params);
+        first_accepting(
+            self.video_openers
+                .iter()
+                .filter(|opener| opener.id == params.codec)
+                .map(|opener| opener.open),
+            params,
+            "video codec is not registered",
+        )
+    }
+}
+
+/// The first opener that accepts `params`. When none does, the first error
+/// that was not a plain decline, else a decline naming why.
+fn first_accepting<T>(
+    openers: impl Iterator<Item = fn(&CodecParams) -> Result<T, CodecError>>,
+    params: &CodecParams,
+    unregistered: &'static str,
+) -> Result<T, CodecError> {
+    let mut registered = false;
+    let mut failed = None;
+    for open in openers {
+        registered = true;
+        match open(params) {
+            Ok(decoder) => return Ok(decoder),
+            Err(CodecError::Unsupported { .. }) => {}
+            Err(error) => {
+                failed.get_or_insert(error);
             }
         }
-        Err(CodecError::Unsupported {
-            what: "video codec is not registered",
-        })
     }
+    if let Some(error) = failed {
+        return Err(error);
+    }
+    Err(CodecError::Unsupported {
+        what: if registered {
+            "no decoder accepted the parameters"
+        } else {
+            unregistered
+        },
+    })
 }
 
 impl Default for DecodeFactory {
@@ -552,13 +725,13 @@ mod tests {
     }
 
     fn rgba(width: u32, height: u32) -> PictureInfo {
-        PictureInfo {
+        PictureInfo::new(
             width,
             height,
-            pixel: PixelFormat::Rgba8,
-            primaries: ColorPrimaries::Bt709,
-            transfer: Transfer::Bt709,
-        }
+            PixelFormat::Rgba8,
+            ColorPrimaries::Bt709,
+            Transfer::Bt709,
+        )
     }
 
     fn jpeg(width: u32, height: u32, pixel: PixelFormat) -> CodecParams {
@@ -632,13 +805,13 @@ mod tests {
     fn open_raw_rust(params: &CodecParams) -> Result<Box<dyn Decoder>, CodecError> {
         OPEN_RUST.with(|count| count.set(count.get() + 1));
         Ok(Box::new(Raw {
-            info: PictureInfo {
-                width: params.width,
-                height: params.height,
-                pixel: params.pixel,
-                primaries: params.primaries,
-                transfer: params.transfer,
-            },
+            info: PictureInfo::new(
+                params.width,
+                params.height,
+                params.pixel,
+                params.primaries,
+                params.transfer,
+            ),
             mark: 2,
         }))
     }
@@ -801,6 +974,39 @@ mod tests {
         Ok(Box::new(Solid))
     }
 
+    fn open_broken_video(_params: &CodecParams) -> Result<Box<dyn VideoDecoder>, CodecError> {
+        Err(CodecError::Malformed {
+            at_bit: 0,
+            what: "platform session",
+        })
+    }
+
+    #[test]
+    fn a_video_opener_that_fails_falls_through_to_the_next() {
+        let mut factory = DecodeFactory::new();
+        factory.register_video(CodecId::H264, open_broken_video);
+        factory.register_video(CodecId::H264, open_solid);
+        let params = CodecParams::video(CodecId::H264, 2, 2);
+        let mut decoder = factory.open_video(&params).expect("fell through");
+        let out = decoder
+            .push(&Packet::video(vec![1], 0, 1, 30, true))
+            .expect("push");
+        assert_eq!(out.len(), 1);
+
+        let mut broken = DecodeFactory::new();
+        broken.register_video(CodecId::H264, open_broken_video);
+        assert!(matches!(
+            broken.open_video(&params),
+            Err(CodecError::Malformed { .. })
+        ));
+        assert!(matches!(
+            DecodeFactory::new().open_video(&params),
+            Err(CodecError::Unsupported {
+                what: "video codec is not registered",
+            })
+        ));
+    }
+
     #[test]
     fn video_factory_uses_the_first_registration() {
         let mut factory = DecodeFactory::new();
@@ -865,11 +1071,20 @@ mod tests {
     }
 
     #[test]
-    fn a_malformed_configuration_stops_the_walk() {
+    fn a_failing_platform_opener_falls_through_to_the_rust_one() {
         OPEN_RUST.with(|count| count.set(0));
         let mut factory = DecodeFactory::new();
         factory.register(CodecId::Jpeg, open_malformed);
         factory.register(CodecId::Jpeg, open_raw(2));
+        assert!(factory.open(&jpeg(1, 1, PixelFormat::Rgba8)).is_ok());
+        assert_eq!(OPEN_RUST.with(Cell::get), 1);
+    }
+
+    #[test]
+    fn when_none_accepts_the_first_real_error_is_reported() {
+        let mut factory = DecodeFactory::new();
+        factory.register(CodecId::Jpeg, open_raw(1));
+        factory.register(CodecId::Jpeg, open_malformed);
         let err = match factory.open(&jpeg(1, 1, PixelFormat::Rgba8)) {
             Err(err) => err,
             Ok(_) => panic!("malformed"),
@@ -881,7 +1096,6 @@ mod tests {
                 what: "configuration",
             }
         );
-        assert_eq!(OPEN_RUST.with(Cell::get), 0);
     }
 
     #[test]
@@ -962,18 +1176,59 @@ mod tests {
             picture_byte_len(2, 2, PixelFormat::Yuv420p).expect("len"),
             6
         );
-        let info = PictureInfo {
-            width: 2,
-            height: 2,
-            pixel: PixelFormat::Yuv420p,
-            primaries: ColorPrimaries::Unspecified,
-            transfer: Transfer::Unspecified,
-        };
+        let info = PictureInfo::new(
+            2,
+            2,
+            PixelFormat::Yuv420p,
+            ColorPrimaries::Unspecified,
+            Transfer::Unspecified,
+        );
         let picture = PictureOutput::cpu(info, vec![1, 2, 3, 4, 5, 6], 0, 1).expect("yuv");
         assert_eq!(picture.samples(), PictureSamples::Cpu(&[1, 2, 3, 4, 5, 6]));
         assert_eq!(
             picture_byte_len(3, 2, PixelFormat::Yuv420p).expect_err("odd"),
             CodecError::InvalidApi { what: "4:2:0 size" }
+        );
+        assert_eq!(picture_byte_len(3, 2, PixelFormat::Gray8).expect("gray"), 6);
+        assert_eq!(
+            picture_byte_len(3, 2, PixelFormat::Gray10).expect("gray10"),
+            12
+        );
+        assert_eq!(
+            picture_byte_len(2, 2, PixelFormat::Yuv420p10).expect("10-bit"),
+            12
+        );
+        assert_eq!(
+            picture_byte_len(2, 2, PixelFormat::Yuv444p).expect("444"),
+            12
+        );
+        assert_eq!(
+            picture_byte_len(2, 2, PixelFormat::Yuv422p).expect("422"),
+            8
+        );
+        assert_eq!(
+            picture_byte_len(2, 2, PixelFormat::Yuv422p10).expect("422-10"),
+            16
+        );
+        assert_eq!(
+            picture_byte_len(3, 2, PixelFormat::Yuv422p).expect("odd 4:2:2"),
+            14
+        );
+        assert_eq!(
+            picture_byte_len(2, 2, PixelFormat::Yuv444p10).expect("444-10"),
+            24
+        );
+        assert_eq!(
+            picture_byte_len(2, 2, PixelFormat::Yuv420p12).expect("12-bit"),
+            12
+        );
+        assert_eq!(
+            picture_byte_len(2, 2, PixelFormat::Yuv422p12).expect("422-12"),
+            16
+        );
+        assert_eq!(
+            picture_byte_len(2, 2, PixelFormat::Yuv444p12).expect("444-12"),
+            24
         );
     }
 
@@ -1005,13 +1260,13 @@ mod tests {
             }
         );
         let err = PictureOutput::platform(
-            PictureInfo {
-                width: 1,
-                height: 1,
-                pixel: PixelFormat::None,
-                primaries: ColorPrimaries::Unspecified,
-                transfer: Transfer::Unspecified,
-            },
+            PictureInfo::new(
+                1,
+                1,
+                PixelFormat::None,
+                ColorPrimaries::Unspecified,
+                Transfer::Unspecified,
+            ),
             1,
             0,
             1,

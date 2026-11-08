@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "dusty",
+  "name": "Dusty",
+  "category": "Vintage",
+  "adjust": {"fade": 0.3, "grain": 0.4, "saturation": -0.2, "clarity": -0.2, "temperature": 0.1}
+}

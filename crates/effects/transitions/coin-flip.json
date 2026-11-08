@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "id": "coin-flip",
+  "name": "Coin Flip",
+  "category": "Spin",
+  "duration": 0.6,
+  "outgoing": [
+    {"block": "place", "params": {"stretch_x": {"keys": [[0, 1], [0.5, 0.01], [1, 0.01]]}, "scale": {"keys": [[0, 1], [0.5, 0.8], [1, 0.8]]}}}
+  ],
+  "incoming": [
+    {"block": "place", "params": {"stretch_x": {"keys": [[0, 0.01], [0.5, 0.01], [1, 1]]}, "scale": {"keys": [[0, 0.8], [0.5, 0.8], [1, 1]]}}}
+  ],
+  "cross": {"kind": 10}
+}

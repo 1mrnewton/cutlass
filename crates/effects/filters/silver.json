@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "silver",
+  "name": "Silver",
+  "category": "Mono",
+  "adjust": {"saturation": -1, "contrast": 0.2, "highlights": 0.1},
+  "curves": {"rgb": [[0, 0], [0.25, 0.22], [0.75, 0.78], [1, 1]]}
+}

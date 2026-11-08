@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "lavender",
+  "name": "Lavender",
+  "category": "Creative",
+  "adjust": {"tint": 0.2, "temperature": -0.15, "fade": 0.2},
+  "wheels": {"gain": {"hue": 270, "amount": 0.2}}
+}

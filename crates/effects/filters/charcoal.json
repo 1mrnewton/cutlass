@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "charcoal",
+  "name": "Charcoal",
+  "category": "Mono",
+  "adjust": {"saturation": -1, "contrast": 0.3, "fade": 0.1, "grain": 0.3}
+}

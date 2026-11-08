@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "glow-up",
+  "name": "Glow Up",
+  "category": "Bright",
+  "adjust": {"brilliance": 0.4, "exposure": 0.1, "clarity": -0.15}
+}

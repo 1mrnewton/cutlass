@@ -17,7 +17,7 @@ pub fn extract_audio(
     segment_id: &SegmentId,
     material_id: &MaterialId,
 ) -> Result<(), EditError> {
-    let (source_track, source_index) = super::speed::locate(draft, source_id)?;
+    let (source_track, source_index) = super::locate(draft, source_id)?;
     super::ensure_unlocked(draft.tracks[source_track].attribute)?;
     let source = draft.tracks[source_track].segments[source_index].clone();
     let Some(MaterialRef::Video(video)) = draft.materials.get(source.material_id.as_str()) else {

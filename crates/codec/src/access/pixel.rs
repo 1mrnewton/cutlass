@@ -6,6 +6,7 @@ pub enum PixelFormat {
     #[default]
     None,
     Rgba8,
+    /// Tightly packed 8-bit 4:2:0. A full-size Y plane, then U, then V.
     Yuv420p,
     /// 8-bit 4:2:2. Chroma is `(width + 1) / 2` by `height`.
     Yuv422p,
@@ -35,6 +36,10 @@ pub enum PixelFormat {
     Gbrp10,
     /// 12-bit 4:4:4 stored as G, B, R, little-endian samples.
     Gbrp12,
+    /// One tightly packed 8-bit plane, `width` by `height`.
+    Gray8,
+    /// One 10-bit plane. Each sample is a little-endian `u16` in the low 10 bits.
+    Gray10,
 }
 
 /// Color primaries named on a video stream.
@@ -137,6 +142,19 @@ pub enum ColorMatrix {
     YcgcoRo,
 }
 
+/// Where a 4:2:0 chroma sample sits relative to luma.
+///
+/// The values are the AV1 `chroma_sample_position` codes. A sequence that does
+/// not carry the field uses [`ChromaSamplePosition::Unknown`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+pub enum ChromaSamplePosition {
+    #[default]
+    Unknown,
+    Vertical,
+    Colocated,
+    Reserved,
+}
+
 /// Sample range of an 8-bit picture.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 pub enum ColorRange {
@@ -181,7 +199,7 @@ impl PixelFormat {
             | Self::Gbrp
             | Self::Gbrp10
             | Self::Gbrp12 => Some((width, height)),
-            Self::None | Self::Rgba8 => None,
+            Self::None | Self::Rgba8 | Self::Gray8 | Self::Gray10 => None,
         }
     }
 }

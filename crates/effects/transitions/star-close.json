@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "star-close",
+  "name": "Star Close",
+  "category": "Shape",
+  "duration": 0.7,
+  "cross": {"kind": 12, "soft": 0.02, "close": 1}
+}

@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "id": "comic-dots",
+  "name": "Comic Dots",
+  "category": "Retro",
+  "preview": "dancer",
+  "controls": [
+    {"id": "size", "name": "Dots", "default": 1, "min": 0.25, "max": 3, "unit": "percent", "scale": [[0, "size"]]}
+  ],
+  "passes": [
+    { "block": "halftone", "params": {"size": 0.015, "color": 1} },
+    { "block": "edges", "params": {"amount": 0.8} }
+  ]
+}

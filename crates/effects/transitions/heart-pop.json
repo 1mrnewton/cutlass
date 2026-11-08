@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "id": "heart-pop",
+  "name": "Heart Pop",
+  "category": "Shape",
+  "duration": 0.8,
+  "incoming": [
+    {"block": "transform", "params": {"scale": {"keys": [[0.0, 1.3], [0.125, 1.2871], [0.25, 1.2531], [0.375, 1.2051], [0.5, 1.15], [0.625, 1.0949], [0.75, 1.0469], [0.875, 1.0129], [1.0, 1.0]]}}}
+  ],
+  "cross": {"kind": 14, "soft": 0.01, "edge": 0.05, "red": 1, "green": 0.35, "blue": 0.6}
+}

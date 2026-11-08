@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "sunny",
+  "name": "Sunny",
+  "category": "Bright",
+  "adjust": {"exposure": 0.15, "temperature": 0.2, "saturation": 0.15}
+}

@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "duo-purple",
+  "name": "Duo Purple",
+  "category": "Creative",
+  "adjust": {"saturation": -0.5, "contrast": 0.2},
+  "curves": {"red": [[0, 0.3], [1, 0.9]], "green": [[0, 0], [1, 0.6]], "blue": [[0, 0.5], [1, 1]]}
+}

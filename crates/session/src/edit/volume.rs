@@ -1,6 +1,6 @@
 use cutlass_model::{Draft, SegmentId};
 
-use super::speed::locate;
+use super::locate;
 use super::{EditError, ensure_unlocked};
 
 /// Set the segment gain. Mute and solo are track bits, not this number. A
@@ -27,7 +27,7 @@ mod tests {
     use crate::session::Session;
 
     fn open() -> (Session, TrackId) {
-        let mut draft = Draft::empty("D");
+        let mut draft = crate::edit::test_draft("D");
         draft.tracks[0].id = TrackId::new("main");
         (Session::open(draft), TrackId::new("main"))
     }

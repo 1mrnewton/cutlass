@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "id": "disco",
+  "name": "Disco",
+  "category": "Light",
+  "preview": "dancer",
+  "poster": 0.5,
+  "controls": [
+    {"id": "speed", "name": "Speed", "default": 1, "min": 0.25, "max": 3, "unit": "times", "speed": true},
+    {"id": "amount", "name": "Dark", "default": 0.6, "min": 0, "max": 1, "unit": "percent", "set": [[0, "amount"]]}
+  ],
+  "passes": [
+    {"block": "spotlight", "params": {"amount": 0.6, "x": {"wave": {"period": 1.2, "from": -0.4, "to": 0.4}}, "y": {"wave": {"period": 0.9, "from": -0.3, "to": 0.3}}, "size": 0.35, "soft": 0.2}},
+    {"block": "hue", "params": {"degrees": {"wave": {"period": 2, "from": -60, "to": 60}}}}
+  ]
+}

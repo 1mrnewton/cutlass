@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "id": "melt",
+  "name": "Melt",
+  "category": "Distort",
+  "preview": "portrait",
+  "poster": 1.2,
+  "controls": [
+    {"id": "speed", "name": "Speed", "default": 1, "min": 0.25, "max": 3, "unit": "times", "speed": true}
+  ],
+  "passes": [
+    {"block": "ripple", "params": {"amount": {"keys": [[0, 0], [2, 0.05]]}, "length": 0.4, "phase": {"keys": [[0, 0], [2, 3]]}, "kind": 1}},
+    {"block": "stretch", "params": {"y": {"keys": [[0, 1], [2, 1.1]]}}}
+  ]
+}

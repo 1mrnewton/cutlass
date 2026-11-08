@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "fresh",
+  "name": "Fresh",
+  "category": "Food",
+  "adjust": {"tint": -0.2, "saturation": 0.2, "brightness": 0.05}
+}

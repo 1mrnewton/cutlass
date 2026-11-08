@@ -112,7 +112,6 @@ fn edit_cause(error: EditError) -> String {
         EditError::EmptyRedo => "there is nothing to redo".to_owned(),
         EditError::HistoryOpen => "a history transaction is already open".to_owned(),
         EditError::HistoryClosed => "no history transaction is open".to_owned(),
-        EditError::NothingToAmend => "there is no recorded step to amend".to_owned(),
         EditError::UnknownAttribute => {
             "the track attribute is not mute, hide, lock, solo, or muted-by-solo".to_owned()
         }
@@ -141,22 +140,43 @@ fn edit_cause(error: EditError) -> String {
         EditError::Opacity => "the opacity must be from zero to one".to_owned(),
         EditError::KeyTime => "a keyframe must be on its clip".to_owned(),
         EditError::NoKey => "no keyframe is there".to_owned(),
+        EditError::KeyValue => "that setting cannot be keyed to that value".to_owned(),
         EditError::Graph => "that curve is not one the app offers".to_owned(),
         EditError::Animation => "that animation is not one the app offers".to_owned(),
         EditError::NotText => "a text style belongs on text".to_owned(),
+        EditError::NotShape => "a shape style belongs on a shape".to_owned(),
+        EditError::ShapeStyle => {
+            "that shape size, stroke, corner, or shadow is out of range".to_owned()
+        }
         EditError::TextSize => "the text size must be greater than zero and at most 512".to_owned(),
         EditError::TextColor => "the text color is not a hex color".to_owned(),
         EditError::TextAlign => "text alignment is not left, center, or right".to_owned(),
+        EditError::Relight => "that light is not one Relight offers".to_owned(),
+        EditError::Reframe => "that shape or setting is not one Auto reframe offers".to_owned(),
+        EditError::MotionBlur => "that blur is not one Motion blur offers".to_owned(),
+        EditError::FlowRate => {
+            "Optical flow fills a clip to 30, 50 or 60 frames a second".to_owned()
+        }
         EditError::LetterSpacing => "letter spacing must be from -1 to 4".to_owned(),
         EditError::LineSpacing => "line spacing must be greater than -1 and at most 4".to_owned(),
         EditError::LineWidth => "the line width must be from zero through 8192".to_owned(),
         EditError::TextFont => "the face is not a file name".to_owned(),
         EditError::TextStyle => "that outline, shadow, or background is out of range".to_owned(),
+        EditError::FreeLayer => {
+            "arranging needs a picture clip and Free layer on in the project settings".to_owned()
+        }
         EditError::TextEmpty => "type something to add text".to_owned(),
         EditError::UnknownEffect => "that effect is not in this version".to_owned(),
+        EditError::Lut => "that file is not a 3D .cube table".to_owned(),
+        EditError::Mask => "a mask number is out of its range".to_owned(),
+        EditError::Track => "the track or its followers do not fit the clip".to_owned(),
+        EditError::Compound => "that is not a compound clip played at its own speed".to_owned(),
         EditError::NotEffect => "a strength belongs on an effect, filter, or adjustment".to_owned(),
         EditError::EffectTarget => "an effect goes on a picture clip".to_owned(),
         EditError::EffectStrength => "the strength must be from zero to one".to_owned(),
+        EditError::EffectControl => {
+            "the effect has no such control, or the value is outside its range".to_owned()
+        }
         EditError::CanvasColor => "the canvas color is not a hex color".to_owned(),
         EditError::CanvasSize => "the canvas side must be from 1 to 7680".to_owned(),
         EditError::CanvasRatio => "the canvas ratio is not a project ratio".to_owned(),

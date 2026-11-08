@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "green-filter",
+  "name": "Green Filter",
+  "category": "Mono",
+  "adjust": {"saturation": -1, "contrast": 0.1},
+  "hsl": {"green": [0, 0, 0.4], "yellow": [0, 0, 0.3], "red": [0, 0, -0.3]}
+}

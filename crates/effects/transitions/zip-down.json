@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "zip-down",
+  "name": "Zip Down",
+  "category": "Wipe",
+  "cross": {"kind": 16, "angle": -90, "count": 6, "soft": 0.03}
+}

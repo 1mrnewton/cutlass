@@ -1,7 +1,7 @@
 use cutlass_model::{
     Draft, MaterialRef, MaterialTransition, Micros, Segment, SegmentId, TimeRange,
-    beat_timeline_time, clip_mark_time, referenced_time_marks, segment_beats, segment_time_mark,
-    time_mark_items, user_beats,
+    beat_timeline_time, blend_window, clip_mark_time, referenced_time_marks, segment_beats,
+    segment_time_mark, time_mark_items, user_beats,
 };
 
 /// What a drag lined up with. The time is on the timeline, in microseconds.
@@ -13,8 +13,6 @@ pub enum SnapKind {
     Marker,
     Beat,
     TransitionMiddle,
-    /// A vertical guide left on the timeline.
-    Guide,
     /// The start of the timeline, or its stored duration.
     TimelineEnd,
 }
@@ -39,19 +37,6 @@ pub fn snap(
     threshold: Micros,
     ignore: Option<&SegmentId>,
 ) -> Option<SnapTarget> {
-    snap_guides(draft, time, playhead, threshold, ignore, &[])
-}
-
-/// [`snap`] plus vertical guide times. A guide is a target like a marker.
-#[must_use]
-pub fn snap_guides(
-    draft: &Draft,
-    time: Micros,
-    playhead: Micros,
-    threshold: Micros,
-    ignore: Option<&SegmentId>,
-    guides: &[Micros],
-) -> Option<SnapTarget> {
     let limit = u64::try_from(threshold.0).ok()?;
     let mut best: Option<Best> = None;
     consider(&mut best, playhead, SnapKind::Playhead, time.0, limit);
@@ -64,9 +49,6 @@ pub fn snap_guides(
         }
     }
     collect_markers(draft, &mut best, time.0, limit);
-    for guide in guides {
-        consider(&mut best, *guide, SnapKind::Guide, time.0, limit);
-    }
     consider(&mut best, Micros(0), SnapKind::TimelineEnd, time.0, limit);
     consider(
         &mut best,
@@ -81,6 +63,35 @@ pub fn snap_guides(
     })
 }
 
+/// Snap a moving clip by whichever edge lands nearer a target.
+///
+/// `start` is where the clip would start and `duration` its length. Returns
+/// the start after the snap and the time the snapped edge sits on, for the
+/// snap line. An end snap that would put the start before zero is left out.
+#[must_use]
+pub fn snap_span(
+    draft: &Draft,
+    start: Micros,
+    duration: Micros,
+    playhead: Micros,
+    threshold: Micros,
+    ignore: Option<&SegmentId>,
+) -> Option<(Micros, Micros)> {
+    let head = snap(draft, start, playhead, threshold, ignore)
+        .map(|target| (target.time.0.abs_diff(start.0), target.time, target.time));
+    let end = Micros(start.0.saturating_add(duration.0));
+    let tail = snap(draft, end, playhead, threshold, ignore).and_then(|target| {
+        let moved = target.time.0.saturating_sub(duration.0);
+        (moved >= 0).then_some((target.time.0.abs_diff(end.0), Micros(moved), target.time))
+    });
+    match (head, tail) {
+        (Some(head), Some(tail)) if tail.0 < head.0 => Some((tail.1, tail.2)),
+        (Some(head), _) => Some((head.1, head.2)),
+        (None, Some(tail)) => Some((tail.1, tail.2)),
+        (None, None) => None,
+    }
+}
+
 /// The middle of a transition window: `window.start + duration / 2`.
 ///
 /// A duration of zero or less is a hard cut and has no middle. `is_overlap`
@@ -88,16 +99,8 @@ pub fn snap_guides(
 /// that side `duration / 2`, rounded toward zero.
 #[must_use]
 pub fn transition_middle(cut: Micros, transition: &MaterialTransition) -> Option<Micros> {
-    let duration = transition.duration.0;
-    if duration <= 0 {
-        return None;
-    }
-    let window_start = if transition.is_overlap {
-        cut.0.checked_sub(duration / 2)?
-    } else {
-        cut.0.checked_sub(duration)?
-    };
-    window_start.checked_add(duration / 2).map(Micros)
+    let (start, _) = blend_window(cut, transition.duration, transition.is_overlap)?;
+    start.0.checked_add(transition.duration.0 / 2).map(Micros)
 }
 
 struct Best {
@@ -139,8 +142,7 @@ impl SnapKind {
             Self::Marker => 3,
             Self::Beat => 4,
             Self::TransitionMiddle => 5,
-            Self::Guide => 6,
-            Self::TimelineEnd => 7,
+            Self::TimelineEnd => 6,
         }
     }
 }
@@ -482,34 +484,40 @@ mod tests {
     }
 
     #[test]
+    fn a_moving_clip_snaps_by_its_nearer_edge() {
+        let mut draft = Draft::empty("D");
+        draft.duration = Micros(10_000_000);
+        // The end, at 2.95 s, is 50 ms from the playhead at 3 s; the start is far from all.
+        let (start, line) = snap_span(
+            &draft,
+            Micros(1_950_000),
+            Micros(1_000_000),
+            Micros(3_000_000),
+            Micros(100_000),
+            None,
+        )
+        .unwrap();
+        assert_eq!((start, line), (Micros(2_000_000), Micros(3_000_000)));
+        // With both edges in reach the nearer wins: the start is 20 ms from zero.
+        let (start, line) = snap_span(
+            &draft,
+            Micros(20_000),
+            Micros(2_950_000),
+            Micros(3_000_000),
+            Micros(100_000),
+            None,
+        )
+        .unwrap();
+        assert_eq!((start, line), (Micros(0), Micros(0)));
+    }
+
+    #[test]
     fn the_timeline_end_is_a_target() {
         let mut draft = Draft::empty("D");
         draft.duration = Micros(5_000_000);
         let target = snap(&draft, Micros(4_900_000), Micros(0), Micros(200_000), None).unwrap();
         assert_eq!(target.time, Micros(5_000_000));
         assert_eq!(target.kind, SnapKind::TimelineEnd);
-        let guide = snap_guides(
-            &draft,
-            Micros(1_500_000),
-            Micros(0),
-            Micros(2_000),
-            None,
-            &[Micros(1_501_000)],
-        )
-        .unwrap();
-        assert_eq!(guide.kind, SnapKind::Guide);
-        assert_eq!(guide.time, Micros(1_501_000));
-        assert!(
-            snap_guides(
-                &draft,
-                Micros(1_500_000),
-                Micros(0),
-                Micros(2_000),
-                None,
-                &[Micros(1_600_000)],
-            )
-            .is_none()
-        );
     }
 
     #[test]

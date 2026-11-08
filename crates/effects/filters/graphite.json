@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "graphite",
+  "name": "Graphite",
+  "category": "Mono",
+  "adjust": {"saturation": -1, "contrast": 0.1, "fade": 0.2}
+}

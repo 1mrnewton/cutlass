@@ -103,6 +103,64 @@ pub fn map_letters(
     words: &[WordSpan<'_>],
 ) -> Result<LetterMap, CaptionError> {
     let (text, placed) = join_words(words);
+    lay_out(font_bytes, material, text, placed)
+}
+
+/// The page shown at `millis`: the one under way, else the last one that
+/// has started, else the first.
+#[must_use]
+pub fn page_at(pages: &Pages, millis: i64) -> Option<&CaptionPage> {
+    pages
+        .pages
+        .iter()
+        .find(|page| millis >= page.start && millis < page.end)
+        .or_else(|| pages.pages.iter().rev().find(|page| page.start <= millis))
+        .or_else(|| pages.pages.first())
+}
+
+/// The words of `page`, a line of them to each of its lines, laid out
+/// alone with a line break between its lines, and each glyph mapped to its
+/// word as [`map_letters`] maps them. The words keep their column indices.
+pub fn map_page(
+    font_bytes: &[u8],
+    material: &MaterialText,
+    words: &[WordSpan<'_>],
+    pages: &Pages,
+    page: &CaptionPage,
+) -> Result<LetterMap, CaptionError> {
+    let mut text = String::new();
+    let mut placed = Vec::new();
+    for line in pages.lines.get(page.lines.clone()).unwrap_or_default() {
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        let mut first = true;
+        for index in &line.words {
+            let Some(word) = words.iter().find(|word| word.index == *index) else {
+                continue;
+            };
+            if !first {
+                text.push(' ');
+            }
+            first = false;
+            let byte_start = text.len();
+            text.push_str(word.text);
+            placed.push(WordBytes {
+                index: word.index,
+                byte_start,
+                byte_end: text.len(),
+            });
+        }
+    }
+    lay_out(font_bytes, material, text, placed)
+}
+
+fn lay_out(
+    font_bytes: &[u8],
+    material: &MaterialText,
+    text: String,
+    placed: Vec<WordBytes>,
+) -> Result<LetterMap, CaptionError> {
     let mut layout_material = material.clone();
     layout_material.content = text.clone();
     let layout = layout_text(font_bytes, &layout_material).map_err(CaptionError::Text)?;

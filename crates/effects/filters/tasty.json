@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "tasty",
+  "name": "Tasty",
+  "category": "Food",
+  "adjust": {"saturation": 0.25, "contrast": 0.15, "temperature": 0.1, "clarity": 0.15}
+}

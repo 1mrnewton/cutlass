@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "id": "spin-reveal",
+  "name": "Spin Reveal",
+  "category": "Reveal",
+  "preview": "dancer",
+  "poster": 0.4,
+  "controls": [
+    {"id": "speed", "name": "Speed", "default": 1, "min": 0.25, "max": 3, "unit": "times", "speed": true},
+    {"id": "soft", "name": "Edge", "default": 0.03, "min": 0, "max": 0.5, "unit": "percent", "set": [[1, "soft"]]}
+  ],
+  "passes": [
+    {"block": "transform", "params": {"scale": {"keys": [[0, 1.3], [0.8, 1]]}, "rotate": {"keys": [[0, -30], [0.8, 0]]}}},
+    {"block": "reveal", "params": {"progress": {"keys": [[0, 0], [0.8, 1]]}, "kind": 4, "soft": 0.03}}
+  ]
+}

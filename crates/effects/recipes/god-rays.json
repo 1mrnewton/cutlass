@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "id": "god-rays",
+  "name": "God Rays",
+  "category": "Light",
+  "preview": "beach",
+  "controls": [
+    {"id": "intensity", "name": "Intensity", "default": 1, "min": 0, "max": 2, "unit": "percent", "scale": [[0, "amount"]]},
+    {"id": "length", "name": "Length", "default": 0.5, "min": 0, "max": 1, "unit": "percent", "set": [[0, "length"]]}
+  ],
+  "passes": [
+    {"block": "rays", "params": {"amount": 1.2, "x": 0, "y": -0.3, "length": 0.5, "threshold": 0.55}}
+  ]
+}

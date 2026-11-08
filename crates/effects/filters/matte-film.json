@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "matte-film",
+  "name": "Matte Film",
+  "category": "Film",
+  "adjust": {"grain": 0.2, "saturation": -0.1},
+  "curves": {"rgb": [[0, 0.12], [0.5, 0.5], [1, 0.92]]}
+}

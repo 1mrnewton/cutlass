@@ -12,6 +12,7 @@
 use cutlass_model::{AnimType, Draft, MaterialEffect, Micros, Segment, TimeRange};
 use cutlass_picture::{CpuBytes, Picture, PictureSource, Sample, rgba_len};
 
+use crate::blend::blend_pixel;
 use crate::catalog::{self, BlendMode, Distort, PackageKind};
 use crate::package::{self, Package, PackageError, PackageStore};
 
@@ -63,15 +64,17 @@ enum Paint {
 }
 
 /// 0 at the window start and 1 at the window end, as numer/denom.
-/// `In`, `Out`, and `Loop` only. Other [`AnimType`] values return `None`.
+/// `In`, `Out`, `Loop`, and `Caption` only. `Group` and `None` return `None`.
 /// `Loop` repeats: numer is `elapsed % duration`, and an exact multiple is 0.
+/// `Caption` has no slot of its own: it plays in the loop slot with its own
+/// duration, so it repeats the same way.
 /// This does not write a draft.
 #[must_use]
 pub fn progress(kind: AnimType, start: Micros, duration: Micros, time: Micros) -> Option<Progress> {
     let window = match kind {
         AnimType::In | AnimType::Out => Window::Linear,
-        AnimType::Loop => Window::Loop,
-        AnimType::Caption | AnimType::Group | AnimType::None => return None,
+        AnimType::Loop | AnimType::Caption => Window::Loop,
+        AnimType::Group | AnimType::None => return None,
     };
     if duration.0 <= 0 {
         return Some(Progress { numer: 0, denom: 1 });
@@ -294,9 +297,9 @@ fn fade(kind: AnimType, ratio: Progress) -> Option<Scale> {
         return None;
     }
     let numer = match kind {
-        AnimType::In | AnimType::Loop => ratio.numer,
+        AnimType::In | AnimType::Loop | AnimType::Caption => ratio.numer,
         AnimType::Out => ratio.denom.checked_sub(ratio.numer)?,
-        AnimType::Caption | AnimType::Group | AnimType::None => return None,
+        AnimType::Group | AnimType::None => return None,
     };
     Some(Scale::Mul {
         numer,
@@ -481,70 +484,6 @@ fn scale_channel(alpha: u8, numer: u64, denom: u64) -> u8 {
     let mixed = u128::from(alpha) * u128::from(numer) / u128::from(denom);
     let mixed = mixed.min(u128::from(255_u8));
     u8::try_from(mixed).unwrap_or(255)
-}
-
-/// `output = source + destination * (1 - source.alpha)`.
-///
-/// The 8-bit alpha is divided by 255 and the remainder is truncated.
-/// A channel above 255 is clamped. Bytes are not premultiplied first.
-fn over_channel(source: u8, destination: u8, source_alpha: u8) -> u8 {
-    let inverse = u16::from(255_u8.saturating_sub(source_alpha));
-    let mixed = u16::from(source) + u16::from(destination) * inverse / 255;
-    u8::try_from(mixed.min(255)).unwrap_or(255)
-}
-
-fn multiply_channel(source: u8, destination: u8) -> u8 {
-    let mixed = u16::from(source) * u16::from(destination) / 255;
-    u8::try_from(mixed).unwrap_or(255)
-}
-
-fn screen_channel(source: u8, destination: u8) -> u8 {
-    let inverse_source = u16::from(255_u8.saturating_sub(source));
-    let inverse_destination = u16::from(255_u8.saturating_sub(destination));
-    let covered = inverse_source * inverse_destination / 255;
-    u8::try_from(255_u16.saturating_sub(covered)).unwrap_or(255)
-}
-
-fn add_channel(source: u8, destination: u8) -> u8 {
-    let mixed = u16::from(source) + u16::from(destination);
-    u8::try_from(mixed.min(255)).unwrap_or(255)
-}
-
-fn blend_pixel(mode: BlendMode, source: [u8; 4], destination: [u8; 4]) -> [u8; 4] {
-    let [sr, sg, sb, sa] = source;
-    let [dr, dg, db, da] = destination;
-    match mode {
-        BlendMode::SourceOver => [
-            over_channel(sr, dr, sa),
-            over_channel(sg, dg, sa),
-            over_channel(sb, db, sa),
-            over_channel(sa, da, sa),
-        ],
-        BlendMode::Multiply => [
-            multiply_channel(sr, dr),
-            multiply_channel(sg, dg),
-            multiply_channel(sb, db),
-            over_channel(sa, da, sa),
-        ],
-        BlendMode::Screen => [
-            screen_channel(sr, dr),
-            screen_channel(sg, dg),
-            screen_channel(sb, db),
-            over_channel(sa, da, sa),
-        ],
-        BlendMode::Add => [
-            add_channel(sr, dr),
-            add_channel(sg, dg),
-            add_channel(sb, db),
-            over_channel(sa, da, sa),
-        ],
-        BlendMode::Difference => [
-            sr.abs_diff(dr),
-            sg.abs_diff(dg),
-            sb.abs_diff(db),
-            over_channel(sa, da, sa),
-        ],
-    }
 }
 
 fn keep_pixel(pixel: [u8; 4]) -> [u8; 4] {
@@ -775,8 +714,19 @@ mod tests {
     }
 
     #[test]
-    fn progress_refuses_caption_group_none_and_overflow() {
-        for kind in [AnimType::Caption, AnimType::Group, AnimType::None] {
+    fn a_caption_runs_in_the_loop_window_with_its_own_duration() {
+        for time in [-1, 0, 5, 10, 25, 200] {
+            assert_eq!(
+                at(AnimType::Caption, 0, 10, time),
+                at(AnimType::Loop, 0, 10, time)
+            );
+        }
+        fraction(AnimType::Caption, 0, 40, 50, 10, 40);
+    }
+
+    #[test]
+    fn progress_refuses_group_none_and_overflow() {
+        for kind in [AnimType::Group, AnimType::None] {
             assert!(at(kind, 0, 10, 0).is_none());
             assert!(at(kind, 0, 0, 0).is_none());
         }
@@ -822,7 +772,7 @@ mod tests {
     }
 
     #[test]
-    fn multiply_screen_add_and_difference_use_integer_channels() {
+    fn multiply_screen_add_and_difference_mix_premultiplied_pixels() {
         let sample = draw(
             catalog::MULTIPLY,
             &px([200, 0, 0, 255]),
@@ -835,13 +785,15 @@ mod tests {
 
         let sample = draw(
             catalog::MULTIPLY,
-            &px([200, 0, 0, 128]),
+            &px([100, 0, 0, 128]),
             Some(&px([100, 0, 0, 200])),
             TimeRange::new(0, 10),
             None,
             0,
         );
-        assert_pixels(&sample, 1, 1, &[78, 0, 0, 227]);
+        // Premultiplied: the part each covers alone, plus the multiply
+        // where both cover.
+        assert_pixels(&sample, 1, 1, &[111, 0, 0, 228]);
 
         let sample = draw(
             catalog::SCREEN,
@@ -875,13 +827,13 @@ mod tests {
 
         let sample = draw(
             catalog::DIFFERENCE,
-            &px([200, 10, 0, 128]),
+            &px([100, 10, 0, 128]),
             Some(&px([50, 40, 0, 200])),
             TimeRange::new(0, 10),
             None,
             0,
         );
-        assert_pixels(&sample, 1, 1, &[150, 30, 0, 227]);
+        assert_pixels(&sample, 1, 1, &[100, 34, 0, 228]);
     }
 
     #[test]
@@ -1318,8 +1270,25 @@ mod tests {
     }
 
     #[test]
-    fn caption_group_and_none_do_not_draw() {
-        for kind in [AnimType::Caption, AnimType::Group, AnimType::None] {
+    fn a_caption_draws_like_a_loop() {
+        let draw_with = |kind| {
+            draw(
+                catalog::SOURCE_OVER,
+                &px([0, 0, 0, 200]),
+                Some(&px([1, 2, 3, 4])),
+                TimeRange::new(0, 100),
+                Some(span(kind, 0, 10)),
+                15,
+            )
+        };
+        let caption = format!("{:?}", draw_with(AnimType::Caption));
+        assert_eq!(caption, format!("{:?}", draw_with(AnimType::Loop)));
+        assert!(!caption.contains("Miss"), "{caption}");
+    }
+
+    #[test]
+    fn group_and_none_do_not_draw() {
+        for kind in [AnimType::Group, AnimType::None] {
             let sample = draw(
                 catalog::SOURCE_OVER,
                 &px([0, 0, 0, 200]),

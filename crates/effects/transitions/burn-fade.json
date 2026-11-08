@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "burn-fade",
+  "name": "Burn Fade",
+  "category": "Basic",
+  "duration": 0.8,
+  "cross": {"kind": 9, "soft": 0.15, "edge": 0.08, "red": 1, "green": 0.45, "blue": 0.1}
+}

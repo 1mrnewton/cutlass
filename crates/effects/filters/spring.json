@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "spring",
+  "name": "Spring",
+  "category": "Landscape",
+  "adjust": {"tint": -0.05, "exposure": 0.1, "fade": 0.05},
+  "hsl": {"green": [0, 0.3, 0.15]}
+}

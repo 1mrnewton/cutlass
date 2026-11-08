@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "id": "duotone",
+  "name": "Duotone",
+  "category": "Basic",
+  "preview": "portrait",
+  "controls": [
+    {"id": "amount", "name": "Amount", "default": 1, "min": 0, "max": 1, "unit": "percent", "set": [[0, "amount"]]}
+  ],
+  "passes": [
+    {
+      "block": "gradient_map",
+      "params": {
+        "amount": 1,
+        "low_red": 0.1,
+        "low_green": 0.05,
+        "low_blue": 0.35,
+        "high_red": 1,
+        "high_green": 0.45,
+        "high_blue": 0.6
+      }
+    }
+  ]
+}

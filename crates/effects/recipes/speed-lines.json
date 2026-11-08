@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "id": "speed-lines",
+  "name": "Speed Lines",
+  "category": "Blur",
+  "preview": "road",
+  "controls": [
+    {"id": "speed", "name": "Speed", "default": 1, "min": 0.25, "max": 3, "unit": "times", "speed": true},
+    {"id": "intensity", "name": "Intensity", "default": 1, "min": 0, "max": 2, "unit": "percent", "scale": [[0, "amount"]]}
+  ],
+  "passes": [
+    {
+      "block": "zoom_blur",
+      "params": {
+        "amount": {"wave": {"period": 0.5, "from": 0.08, "to": 0.2}}
+      }
+    },
+    { "block": "vignette", "params": {"amount": 0.5, "size": 0.4} }
+  ]
+}

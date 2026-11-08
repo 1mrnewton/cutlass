@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "id": "film-400",
+  "name": "Film 400",
+  "category": "Film",
+  "adjust": {"grain": 0.3, "fade": 0.15},
+  "wheels": {"gain": {"hue": 40, "amount": 0.15}, "lift": {"hue": 200, "amount": 0.1}},
+  "hsl": {"green": [-0.15, 0, 0]}
+}

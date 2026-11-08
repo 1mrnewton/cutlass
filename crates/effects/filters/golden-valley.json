@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "id": "golden-valley",
+  "name": "Golden Valley",
+  "category": "Landscape",
+  "adjust": {"temperature": 0.25},
+  "wheels": {"gain": {"hue": 45, "amount": 0.35}},
+  "hsl": {"green": [-0.3, 0, 0]}
+}

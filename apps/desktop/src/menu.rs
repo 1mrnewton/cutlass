@@ -1,7 +1,7 @@
 //! Right-click menus: the clip menu and the library menus.
 //!
 //! The entries follow the prototype's menus, all of them. A row this build
-//! cannot do yet carries a TODO badge, so nothing on the list is forgotten.
+//! cannot do yet carries a Later badge, so nothing on the list is forgotten.
 //! A menu draws above every panel. A press outside it, Escape, or a scroll
 //! closes it.
 
@@ -76,6 +76,7 @@ const CUT: Entry = done("cut", "Cut", "⌘X");
 const DELETE: Entry = done("delete", "Delete", "⌫");
 const DEACTIVATE: Entry = done("deactivate", "Deactivate", "");
 const REPLACE: Entry = todo("replace", "Replace", "");
+const REPLACE_SOUND: Entry = done("replace", "Replace", "");
 
 const VIDEO: &[Entry] = &[
     COPY,
@@ -105,7 +106,8 @@ const VIDEO: &[Entry] = &[
     done("extract-audio", "Extract audio", "⇧⌘S"),
     done("sync", "Sync video and audio", ""),
     SEP,
-    todo("compound", "Create compound clip", "⌥G"),
+    done("compound", "Create compound clip", "⌥G"),
+    done("open-compound", "Open compound clip", ""),
     done("multicam", "Create multi-camera clip", ""),
     done("group", "Group", ""),
     done("ungroup", "Ungroup", ""),
@@ -113,12 +115,14 @@ const VIDEO: &[Entry] = &[
     done("export", "Export selected clips", ""),
     done("deactivate", "Deactivate clip", "V"),
     done("trim", "Trim clip", ""),
-    todo("replace", "Replace clip", ""),
+    done("replace", "Replace clip", ""),
     done("link-media", "Link to media", ""),
     done("open-file", "Open file location", ""),
+    done("make-proxies", "Make proxy", ""),
+    ARRANGE,
     SEP,
     done("edit-effects", "Edit effects", ""),
-    todo("variable-speed", "Show variable speed animation", "⌥K"),
+    done("variable-speed", "Show variable speed animation", "⌥K"),
     sub(
         "range",
         "Range",
@@ -131,15 +135,21 @@ const VIDEO: &[Entry] = &[
         "render",
         "Render",
         &[
-            todo("render-preview", "Preview", ""),
-            todo("render-full", "Full", ""),
+            done("render-preview", "Preview", ""),
+            done("render-full", "Full", ""),
         ],
     ),
 ];
 
+/// The audio clip menu: the prototype's rows in its order, with this
+/// build's Volume, Speed, Fade and Beat rows after Delete and its Replace
+/// row with the clip rows.
 const AUDIO: &[Entry] = &[
+    todo("generate-video", "Generate video", ""),
     COPY,
     CUT,
+    todo("copy-attributes", "Copy attributes", "⇧⌘C"),
+    todo("paste-attributes", "Paste attributes", ""),
     DELETE,
     SEP,
     done("volume", "Volume", ""),
@@ -147,9 +157,55 @@ const AUDIO: &[Entry] = &[
     done("fade", "Fade", ""),
     done("beat", "Beat", ""),
     SEP,
-    DEACTIVATE,
-    REPLACE,
+    done("transcript", "Transcript", ""),
+    sub(
+        "separate-audio",
+        "Separate audio",
+        &[
+            todo("separate-vocals", "Vocals", ""),
+            todo("separate-instruments", "Instruments", ""),
+            todo("separate-drums", "Drums", ""),
+            todo("separate-guitar", "Guitar", ""),
+            todo("separate-bass", "Bass", ""),
+            todo("separate-strings", "Strings", ""),
+            todo("separate-others", "Others", ""),
+        ],
+    ),
+    done("sync", "Sync video and audio", ""),
+    SEP,
+    done("compound", "Create compound clip", "⌥G"),
+    done("multicam", "Create multi-camera clip", ""),
+    todo("save-preset", "Save preset", ""),
+    done("group", "Group", ""),
+    done("ungroup", "Ungroup", ""),
+    SEP,
+    done("deactivate", "Deactivate clip", "V"),
+    REPLACE_SOUND,
+    done("link-media", "Link to media", ""),
+    done("open-file", "Open file location", ""),
+    SEP,
+    sub(
+        "range",
+        "Range",
+        &[
+            done("range-in", "Set in", ""),
+            done("range-out", "Set out", ""),
+        ],
+    ),
 ];
+
+/// Stack a picture clip above or below the clips it overlaps, with Free
+/// layer on in the project settings.
+const ARRANGE: Entry = sub(
+    "arrange",
+    "Arrange",
+    &[
+        done("arrange-forward", "Bring forward", ""),
+        done("arrange-backward", "Send backward", ""),
+        done("arrange-front", "Bring to front", ""),
+        done("arrange-back", "Send to back", ""),
+    ],
+);
 
 const TEXT: &[Entry] = &[
     COPY,
@@ -158,6 +214,7 @@ const TEXT: &[Entry] = &[
     SEP,
     done("edit-text", "Edit text", ""),
     done("style", "Style", ""),
+    ARRANGE,
     SEP,
     DEACTIVATE,
     REPLACE,
@@ -169,6 +226,7 @@ const STICKER: &[Entry] = &[
     DELETE,
     SEP,
     done("flip", "Flip", ""),
+    ARRANGE,
     SEP,
     DEACTIVATE,
     REPLACE,
@@ -212,13 +270,37 @@ const COMPOSITION: &[Entry] = &[
     CUT,
     DELETE,
     SEP,
-    todo("render-preview", "Render", ""),
+    done("render-preview", "Render", ""),
     SEP,
     DEACTIVATE,
     REPLACE,
 ];
 
 const OTHER: &[Entry] = &[COPY, CUT, DELETE, SEP, DEACTIVATE, REPLACE];
+
+/// The menu for two or more selected clips: only rows that act on every
+/// one of them. Range spans from the first clip's start to the last one's
+/// end.
+pub const MULTI: &[Entry] = &[
+    COPY,
+    CUT,
+    DELETE,
+    SEP,
+    done("compound", "Create compound clip", "⌥G"),
+    todo("paste-attributes", "Paste attributes", ""),
+    SEP,
+    done("deactivate", "Deactivate clips", "V"),
+    done("export", "Export selected clips", ""),
+    SEP,
+    sub(
+        "range",
+        "Range",
+        &[
+            done("range-in", "Set in", ""),
+            done("range-out", "Set out", ""),
+        ],
+    ),
+];
 
 /// The menu for a clip on a track of `kind`.
 #[must_use]
@@ -241,7 +323,6 @@ pub const CLIP_OFF: &[&str] = &[
     "sync",
     "multicam",
     "group",
-    "ungroup",
     "trim",
     "link-media",
     "edit-effects",
@@ -258,6 +339,7 @@ pub const TRACK_HEAD: &[Entry] = &[
     done("add-text", "Add text track", ""),
     SEP,
     done("rename-track", "Rename track", ""),
+    done("solo-track", "Solo track", ""),
     done("delete-track", "Delete track", ""),
 ];
 
@@ -302,16 +384,16 @@ pub const LIBRARY_EMPTY: &[Entry] = &[
     ),
 ];
 
-const PAD: f32 = 6.0;
+const PAD: f32 = tokens::MENU_PAD as f32;
 const ROW: f32 = 32.0;
 const ROW_PAD: f32 = 10.0;
 const GAP: f32 = 16.0;
 const SEPARATOR: f32 = 13.0;
-const RADIUS: u8 = 12;
+const RADIUS: u8 = tokens::MENU_RADIUS;
 const ROW_RADIUS: u8 = 8;
 const LABEL_SIZE: f32 = 13.0;
 const KEY_SIZE: f32 = 12.0;
-const BADGE: &str = "TODO";
+const BADGE: &str = "Later";
 const BADGE_SIZE: f32 = 10.0;
 const BADGE_HEIGHT: f32 = 16.0;
 const CHEVRON: f32 = 14.0;
@@ -327,9 +409,15 @@ pub struct Shown {
     pub dismissed: bool,
 }
 
-/// Draw the menu `id` with its corner at `at`, kept inside the window. A
-/// menu taller than the window scrolls under the pointer. `enabled` says whether a built row can run now; a TODO row always can,
-/// so a click on it can say it is not built yet.
+/// Room around a menu's own window for its shadow to fall in.
+const SHADOW_ROOM: f32 = 48.0;
+
+/// Draw the menu `id` with its corner at `at`, in the window's coordinates.
+///
+/// On the desktop a menu is its own borderless window above the app, so it
+/// can reach past the app window's edge and keeps its full size however small
+/// the window is; it stays inside the monitor. Where egui draws every
+/// viewport inside one window, as in tests, it is drawn inside the window.
 pub fn show(
     ctx: &Context,
     id: Id,
@@ -337,10 +425,213 @@ pub fn show(
     entries: &'static [Entry],
     enabled: &dyn Fn(&str) -> bool,
 ) -> Shown {
+    let window = ctx.input(|input| input.viewport().inner_rect);
+    let (Some(window), false) = (window, ctx.embed_viewports()) else {
+        return show_in(
+            ctx,
+            id,
+            ctx.content_rect().shrink(EDGE),
+            at,
+            entries,
+            enabled,
+        )
+        .0;
+    };
+    let monitor = ctx.input(|input| input.viewport().monitor_size);
+    let bounds = monitor_bounds(window, monitor).shrink(EDGE);
+    let full = size(ctx, entries);
+    let at = window.min + at.to_vec2();
+    let menu = place(bounds, at, Vec2::new(full.x, full.y.min(bounds.height())));
+    let sub_key = id.with("sub-on-screen");
+    let last_sub: Option<Rect> = ctx.data(|data| data.get_temp(sub_key)).flatten();
+    let canvas = last_sub
+        .map_or(menu, |sub| menu.union(sub))
+        .expand(SHADOW_ROOM);
+
+    // The menu is another window, so a press, a scroll, or Escape in the app
+    // window is outside it.
+    let (pressed, wheel, escape, app_focused) = ctx.input(|input| {
+        (
+            input.pointer.any_pressed(),
+            input.smooth_scroll_delta != Vec2::ZERO,
+            input.key_pressed(egui::Key::Escape),
+            input.viewport().focused,
+        )
+    });
+    let builder = egui::ViewportBuilder::default()
+        .with_title("Cutlass menu")
+        .with_decorations(false)
+        .with_transparent(true)
+        .with_has_shadow(false)
+        .with_resizable(false)
+        .with_taskbar(false)
+        .with_active(false)
+        .with_window_level(egui::WindowLevel::AlwaysOnTop)
+        .with_position(canvas.min)
+        .with_inner_size(canvas.size());
+    let offset = canvas.min.to_vec2();
+    let (mut shown, rects, menu_focused) = ctx.show_viewport_immediate(
+        egui::ViewportId::from_hash_of(id.with("menu-window")),
+        builder,
+        |child, _| {
+            let (shown, rects) = show_in(
+                child,
+                id,
+                bounds.translate(-offset),
+                at - offset,
+                entries,
+                enabled,
+            );
+            let focused = child.input(|input| input.viewport().focused);
+            let rects: Vec<Rect> = rects.iter().map(|rect| rect.translate(offset)).collect();
+            (shown, rects, focused)
+        },
+    );
+    let sub = rects.get(1).copied();
+    if sub != last_sub {
+        ctx.data_mut(|data| data.insert_temp(sub_key, sub));
+        ctx.request_repaint();
+    }
+    // Another app took the focus from both windows.
+    let away = app_focused == Some(false) && menu_focused == Some(false);
+    shown.dismissed |= pressed || wheel || escape || away;
+    if shown.picked.is_some() || shown.dismissed {
+        ctx.data_mut(|data| data.remove::<Option<Rect>>(sub_key));
+    }
+    shown
+}
+
+/// One key in a shortcut: a modifier drawn as an icon, or text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Key<'a> {
+    Icon(&'static str),
+    Text(&'a str),
+}
+
+/// The keys of `shortcut`, such as `⇧⌘C` or `Space`, in the order they are
+/// drawn: the modifiers, then the key. On a Mac the modifiers are the
+/// Command, Shift and Option icons and Control's `⌃`. Elsewhere they read
+/// Ctrl, Alt and the Shift icon, in that order. Backspace is its icon.
+fn keys(shortcut: &str, mac: bool) -> Vec<Key<'_>> {
+    let key = shortcut.trim_start_matches(['⌃', '⌥', '⇧', '⌘']);
+    let held = &shortcut[..shortcut.len() - key.len()];
+    let has = |glyph| held.contains(glyph);
+    let mut out = Vec::new();
+    if mac {
+        for glyph in held.chars() {
+            out.push(match glyph {
+                '⌘' => Key::Icon("keyCommand"),
+                '⌥' => Key::Icon("keyOption"),
+                '⇧' => Key::Icon("keyShift"),
+                _ => Key::Text("⌃"),
+            });
+        }
+    } else {
+        if has('⌘') || has('⌃') {
+            out.push(Key::Text("Ctrl"));
+        }
+        if has('⌥') {
+            out.push(Key::Text("Alt"));
+        }
+        if has('⇧') {
+            out.push(Key::Icon("keyShift"));
+        }
+    }
+    match key {
+        "" => {}
+        "⌫" => out.push(Key::Icon("keyBackspace")),
+        key => out.push(Key::Text(key)),
+    }
+    out
+}
+
+/// A key binding from the settings, such as `primary+shift+s`, written as a
+/// menu row's shortcut: `⇧⌘S`. [`keys`] draws it for this platform.
+#[must_use]
+pub fn shortcut_for(chord: &str) -> String {
+    cutlass_settings::keys_label(chord, true)
+}
+
+pub const MAC: bool = cfg!(target_os = "macos");
+/// The edge of a key icon.
+const KEY_ICON: f32 = 13.0;
+/// The space between two keys.
+const KEY_GAP: f32 = 8.0;
+
+fn key_width(ctx: &Context, key: Key<'_>) -> f32 {
+    match key {
+        Key::Icon(_) => KEY_ICON,
+        Key::Text(text) => text_width(ctx, text, KEY_SIZE),
+    }
+}
+
+/// The width the keys of `shortcut` take.
+pub fn keys_width(ctx: &Context, shortcut: &str) -> f32 {
+    let keys = keys(shortcut, MAC);
+    let gaps = keys.len().saturating_sub(1) as f32 * KEY_GAP;
+    keys.iter().map(|key| key_width(ctx, *key)).sum::<f32>() + gaps
+}
+
+/// Paint the keys of `shortcut` with the last one's right edge at `end`.
+pub fn paint_keys(
+    ctx: &Context,
+    painter: &egui::Painter,
+    end: Pos2,
+    shortcut: &str,
+    color: egui::Color32,
+) {
+    let mut x = end.x - keys_width(ctx, shortcut);
+    for key in keys(shortcut, MAC) {
+        match key {
+            Key::Icon(name) => {
+                let rect = Rect::from_min_size(
+                    Pos2::new(x, end.y - KEY_ICON / 2.0),
+                    Vec2::splat(KEY_ICON),
+                );
+                if let Err(error) = crate::icons::paint(painter, rect, name, color) {
+                    cutlass_logger::warn!("{error}");
+                }
+            }
+            Key::Text(text) => {
+                painter.text(
+                    Pos2::new(x, end.y),
+                    Align2::LEFT_CENTER,
+                    text,
+                    FontId::proportional(KEY_SIZE),
+                    color,
+                );
+            }
+        }
+        x += key_width(ctx, key) + KEY_GAP;
+    }
+}
+
+/// The monitor the window is on, in screen points. egui gives its size, not
+/// its corner, so this takes the main monitor at the origin when the window
+/// is on it, and no limit when it is on another.
+fn monitor_bounds(window: Rect, monitor: Option<Vec2>) -> Rect {
+    monitor
+        .map(|size| Rect::from_min_size(Pos2::ZERO, size))
+        .filter(|monitor| monitor.contains(window.min))
+        .unwrap_or(Rect::EVERYTHING)
+}
+
+/// Draw the menu `id` with its corner at `at`, kept inside `screen`, in
+/// `ctx`'s own coordinates. A menu taller than `screen` scrolls under the
+/// pointer. `enabled` says whether a built row can run now; a Later row
+/// always can, so a click on it can say it is not built yet. Returns what the
+/// menu did and the panels it painted: the menu, then any open submenu.
+fn show_in(
+    ctx: &Context,
+    id: Id,
+    screen: Rect,
+    at: Pos2,
+    entries: &'static [Entry],
+    enabled: &dyn Fn(&str) -> bool,
+) -> (Shown, Vec<Rect>) {
     let open_key = id.with("open");
     let scroll_key = id.with("scroll");
     let mut open: Option<&'static str> = ctx.data(|data| data.get_temp(open_key)).flatten();
-    let screen = ctx.content_rect().shrink(EDGE);
     let full = size(ctx, entries);
     let rect = place(screen, at, Vec2::new(full.x, full.y.min(screen.height())));
     let (pressed, pointer, escape, wheel) = ctx.input(|input| {
@@ -429,7 +720,7 @@ pub fn show(
             data.remove::<f32>(scroll_key);
         });
     }
-    shown
+    (shown, rects)
 }
 
 /// The menu's size: its widest row and every row's height.
@@ -448,7 +739,7 @@ fn size(ctx: &Context, entries: &[Entry]) -> Vec2 {
                 if !item.children.is_empty() {
                     row += GAP + CHEVRON;
                 } else if !item.shortcut.is_empty() {
-                    row += GAP + text_width(ctx, item.shortcut, KEY_SIZE);
+                    row += GAP + keys_width(ctx, item.shortcut);
                 }
                 width = width.max(row);
             }
@@ -471,6 +762,21 @@ fn text_width(ctx: &Context, text: &str, size: f32) -> f32 {
             .size()
             .x
     })
+}
+
+/// The Later badge centred on `center`, as a row this build cannot do yet
+/// wears it. Returns where it was drawn.
+pub fn paint_later_badge(ctx: &Context, painter: &egui::Painter, center: Pos2) -> Rect {
+    let badge = Rect::from_center_size(center, Vec2::new(badge_width(ctx), BADGE_HEIGHT));
+    painter.rect_filled(badge, CornerRadius::same(8), tokens::MENU_BADGE);
+    painter.text(
+        badge.center(),
+        Align2::CENTER_CENTER,
+        BADGE,
+        FontId::proportional(BADGE_SIZE),
+        egui::Color32::WHITE,
+    );
+    badge
 }
 
 fn badge_width(ctx: &Context) -> f32 {
@@ -501,12 +807,7 @@ fn paint_menu(
         egui::UiBuilder::new().layer_id(layer).max_rect(rect),
     );
     let painter = ui.painter().with_clip_rect(rect);
-    let shadow = egui::Shadow {
-        offset: [0, 16],
-        blur: 40,
-        spread: 0,
-        color: egui::Color32::from_black_alpha(115),
-    };
+    let shadow = tokens::MENU_SHADOW;
     // The shadow spreads past the panel, so it is clipped to the window, not
     // to the panel.
     ctx.layer_painter(layer)
@@ -561,17 +862,11 @@ fn paint_menu(
             ink,
         );
         if !item.built {
-            let badge = Rect::from_min_size(
-                Pos2::new(label.right() + 8.0, bounds.center().y - BADGE_HEIGHT / 2.0),
-                Vec2::new(badge_width(ctx), BADGE_HEIGHT),
-            );
-            painter.rect_filled(badge, CornerRadius::same(8), tokens::MENU_BADGE);
-            painter.text(
-                badge.center(),
-                Align2::CENTER_CENTER,
-                BADGE,
-                FontId::proportional(BADGE_SIZE),
-                egui::Color32::WHITE,
+            let width = badge_width(ctx);
+            paint_later_badge(
+                ctx,
+                &painter,
+                Pos2::new(label.right() + 8.0 + width / 2.0, bounds.center().y),
             );
         }
         let end = bounds.right() - ROW_PAD;
@@ -587,11 +882,11 @@ fn paint_menu(
                 stroke,
             );
         } else if !item.shortcut.is_empty() {
-            painter.text(
+            paint_keys(
+                ctx,
+                &painter,
                 Pos2::new(end, bounds.center().y),
-                Align2::RIGHT_CENTER,
                 item.shortcut,
-                FontId::proportional(KEY_SIZE),
                 key,
             );
         }
@@ -617,7 +912,7 @@ mod tests {
     }
 
     #[test]
-    fn every_clip_menu_starts_with_copy_cut_and_delete() {
+    fn every_clip_menu_has_copy_cut_and_delete_in_order() {
         for kind in [
             TrackType::Video,
             TrackType::Audio,
@@ -629,7 +924,10 @@ mod tests {
             TrackType::Composition,
             TrackType::Adcube,
         ] {
-            assert_eq!(ids(clip_entries(&kind))[..3], ["copy", "cut", "delete"]);
+            let ids = ids(clip_entries(&kind));
+            let at = |id: &str| ids.iter().position(|row| *row == id);
+            let (copy, cut, delete) = (at("copy"), at("cut"), at("delete"));
+            assert!(copy.is_some() && copy < cut && cut < delete, "{kind:?}");
         }
     }
 
@@ -648,6 +946,7 @@ mod tests {
                 "extract-audio",
                 "sync",
                 "compound",
+                "open-compound",
                 "multicam",
                 "group",
                 "ungroup",
@@ -657,10 +956,103 @@ mod tests {
                 "replace",
                 "link-media",
                 "open-file",
+                "make-proxies",
+                "arrange",
                 "edit-effects",
                 "variable-speed",
                 "range",
                 "render",
+            ]
+        );
+    }
+
+    #[test]
+    fn modifiers_draw_as_icons_on_a_mac_and_as_words_elsewhere() {
+        assert_eq!(
+            keys("⇧⌘C", true),
+            [
+                Key::Icon("keyShift"),
+                Key::Icon("keyCommand"),
+                Key::Text("C")
+            ]
+        );
+        assert_eq!(keys("⌥G", false), [Key::Text("Alt"), Key::Text("G")]);
+        assert_eq!(keys("⌘X", false), [Key::Text("Ctrl"), Key::Text("X")]);
+        assert_eq!(keys("⌫", false), [Key::Icon("keyBackspace")]);
+        assert_eq!(
+            keys("⇧⌘Space", false),
+            [Key::Text("Ctrl"), Key::Icon("keyShift"), Key::Text("Space")]
+        );
+        assert_eq!(keys("⌃Y", true), [Key::Text("⌃"), Key::Text("Y")]);
+        assert_eq!(shortcut_for("primary+shift+s"), "⇧⌘S");
+        assert_eq!(shortcut_for("shift+delete"), "⇧⌫");
+        for name in ["keyCommand", "keyShift", "keyOption", "keyBackspace"] {
+            assert!(crate::icons::require(name).is_ok(), "{name}");
+        }
+    }
+
+    #[test]
+    fn the_multi_select_menu_holds_only_rows_for_every_clip() {
+        assert_eq!(
+            ids(MULTI),
+            [
+                "copy",
+                "cut",
+                "delete",
+                "compound",
+                "paste-attributes",
+                "deactivate",
+                "export",
+                "range",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_audio_menu_lists_every_prototype_row() {
+        assert_eq!(
+            ids(AUDIO),
+            [
+                "generate-video",
+                "copy",
+                "cut",
+                "copy-attributes",
+                "paste-attributes",
+                "delete",
+                "volume",
+                "speed",
+                "fade",
+                "beat",
+                "transcript",
+                "separate-audio",
+                "sync",
+                "compound",
+                "multicam",
+                "save-preset",
+                "group",
+                "ungroup",
+                "deactivate",
+                "replace",
+                "link-media",
+                "open-file",
+                "range",
+            ]
+        );
+        let later: Vec<&str> = AUDIO
+            .iter()
+            .filter_map(|entry| match entry {
+                Entry::Item(item) if !item.built => Some(item.id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            later,
+            [
+                "generate-video",
+                "copy-attributes",
+                "paste-attributes",
+                "separate-audio",
+                "save-preset",
             ]
         );
     }
@@ -676,7 +1068,7 @@ mod tests {
         assert_eq!(built("edit"), Some(true));
         assert_eq!(built("copy"), Some(true));
         assert_eq!(built("range"), Some(true));
-        assert_eq!(built("render"), Some(false));
+        assert_eq!(built("render"), Some(true));
         assert_eq!(built("isolate-voice"), Some(false));
     }
 
@@ -720,6 +1112,32 @@ mod tests {
             modifiers: egui::Modifiers::default(),
         };
         vec![egui::Event::PointerMoved(pos), button(true), button(false)]
+    }
+
+    #[test]
+    fn a_shortcut_is_drawn_as_keys_not_as_one_string() {
+        let ctx = Context::default();
+        let (_, output) = frame(&ctx, 1000.0, Vec::new());
+        assert!(
+            label_at(&output, "⌘C").is_none(),
+            "Copy's keys are not one string"
+        );
+        assert!(
+            label_at(&output, "C").is_some(),
+            "Copy's letter is its own key"
+        );
+        assert!(label_at(&output, "⌫").is_none(), "Delete's key is an icon");
+        if MAC {
+            assert!(
+                label_at(&output, "⌘").is_none(),
+                "Command is an icon on a Mac"
+            );
+        } else {
+            assert!(
+                label_at(&output, "Ctrl").is_some(),
+                "Command reads Ctrl elsewhere"
+            );
+        }
     }
 
     #[test]
@@ -775,11 +1193,16 @@ mod tests {
     fn a_click_on_a_todo_row_picks_it_as_not_built() {
         let ctx = Context::default();
         let (_, output) = frame(&ctx, 1000.0, Vec::new());
+        let isolate = label_at(&output, "Isolate voice").expect("the Isolate voice row")
+            + Vec2::new(4.0, 6.0);
+        frame(&ctx, 1000.0, vec![egui::Event::PointerMoved(isolate)]);
+        let (_, output) = frame(&ctx, 1000.0, vec![egui::Event::PointerMoved(isolate)]);
         let row =
-            label_at(&output, "Replace clip").expect("the Replace clip row") + Vec2::new(4.0, 6.0);
+            label_at(&output, "Keep voice").expect("the Keep voice row") + Vec2::new(4.0, 6.0);
+        frame(&ctx, 1000.0, vec![egui::Event::PointerMoved(row)]);
         let (shown, _) = frame(&ctx, 1000.0, click(row));
         let picked = shown.picked.expect("a pick");
-        assert_eq!((picked.id, picked.built), ("replace", false));
+        assert_eq!((picked.id, picked.built), ("isolate-keep-voice", false));
     }
 
     #[test]
@@ -818,6 +1241,27 @@ mod tests {
                 .dismissed
         );
         assert!(!frame(&ctx, 1000.0, Vec::new()).0.dismissed);
+    }
+
+    #[test]
+    fn a_menu_window_is_bound_by_the_monitor_not_the_app_window() {
+        let window = Rect::from_min_size(Pos2::new(300.0, 200.0), Vec2::new(800.0, 400.0));
+        let monitor = monitor_bounds(window, Some(Vec2::new(1728.0, 1117.0)));
+        assert_eq!(
+            monitor,
+            Rect::from_min_size(Pos2::ZERO, Vec2::new(1728.0, 1117.0))
+        );
+        // Near the window's foot, the menu runs down past it, onto the monitor.
+        let at = window.min + Vec2::new(400.0, 380.0);
+        let menu = place(monitor.shrink(EDGE), at, Vec2::new(248.0, 300.0));
+        assert_eq!(menu.min, at);
+        assert!(menu.bottom() > window.bottom());
+        // A window on another monitor sets no limit rather than a wrong one.
+        let elsewhere = window.translate(Vec2::new(-2000.0, 0.0));
+        assert_eq!(
+            monitor_bounds(elsewhere, Some(Vec2::new(1728.0, 1117.0))),
+            Rect::EVERYTHING
+        );
     }
 
     #[test]

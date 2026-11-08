@@ -8,7 +8,12 @@ pub fn run() -> eframe::Result {
     let mut viewport = egui::ViewportBuilder::default()
         .with_title("Cutlass")
         .with_inner_size([1280.0, 800.0])
-        .with_min_inner_size([tokens::MIN_WINDOW_WIDTH, tokens::MIN_WINDOW_HEIGHT]);
+        .with_min_inner_size([tokens::MIN_WINDOW_WIDTH, tokens::MIN_WINDOW_HEIGHT])
+        // eframe takes one transparency setting from the main window for
+        // every window it opens. Menus need it for their rounded corners and
+        // shadow; the main window still looks solid, since the view paints
+        // its whole area each frame.
+        .with_transparent(true);
     match icon(ICON) {
         Some(icon) => viewport = viewport.with_icon(icon),
         None => cutlass_logger::error!("the window icon did not decode"),
@@ -24,6 +29,10 @@ pub fn run() -> eframe::Result {
     {
         viewport = viewport.with_decorations(false);
     }
+    // Finder sends a bundled app its documents as an Apple Event; listen
+    // before the event loop so the ones that launch the app arrive too.
+    #[cfg(target_os = "macos")]
+    cutlass_platform_apple::listen_for_opened_files();
     eframe::run_native(
         "Cutlass",
         eframe::NativeOptions {
@@ -31,9 +40,23 @@ pub fn run() -> eframe::Result {
             ..Default::default()
         },
         Box::new(|creation| {
-            let settings = crate::load_settings(&Shell::settings_path());
-            let (decoders, encoders) = crate::register_codecs_with(&settings.hardware);
-            let mut shell = Shell::new(decoders, encoders, settings);
+            let file = Shell::settings_path();
+            let loaded = crate::load_settings_file(&file);
+            let (decoders, encoders) = crate::register_codecs_with(&loaded.settings.hardware);
+            let mut shell = Shell::new(decoders, encoders, loaded.settings);
+            shell.keep_settings_file(file, loaded.generation);
+            shell.keep_presets_file(Shell::home().text_presets_file());
+            // At most once a day, and never with the switch off.
+            shell.check_updates_at_launch();
+            // A project folder or files named on the command line, as a
+            // file association passes them.
+            let named: Vec<std::path::PathBuf> = std::env::args_os()
+                .skip(1)
+                .map(std::path::PathBuf::from)
+                .collect();
+            if let Err(error) = shell.drop_files(&named) {
+                shell.notice_error(&error);
+            }
             if let Some(state) = creation.wgpu_render_state.as_ref() {
                 shell.attach_gpu(state);
             }
@@ -42,10 +65,20 @@ pub fn run() -> eframe::Result {
             shell.start_thumbnails(move || ctx.request_repaint());
             let ctx = creation.egui_ctx.clone();
             shell.start_waveforms(move || ctx.request_repaint());
+            // Other hosts, such as `cutlass mcp`, reach the open project here.
+            let ctx = creation.egui_ctx.clone();
+            shell.listen(std::sync::Arc::new(move || ctx.request_repaint()));
+            #[cfg(target_os = "macos")]
+            {
+                let ctx = creation.egui_ctx.clone();
+                cutlass_platform_apple::wake_on_opened_files(move || ctx.request_repaint());
+            }
             Ok(Box::new(DesktopWindow {
                 shell,
                 view: ViewState::new(),
                 last_time: None,
+                #[cfg(target_os = "macos")]
+                menu_bar: None,
             }))
         }),
     )
@@ -107,12 +140,54 @@ struct DesktopWindow {
     shell: Shell,
     view: ViewState,
     last_time: Option<f64>,
+    /// The system menu bar, kept for as long as the window is up.
+    #[cfg(target_os = "macos")]
+    menu_bar: Option<crate::menubar::Native>,
 }
 
 impl eframe::App for DesktopWindow {
+    /// Clear to nothing: the view paints the whole main window, and a menu's
+    /// window shows only its panel and shadow.
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        [0.0; 4]
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let now = ui.input(|input| input.time);
         advance_if_playing(&mut self.shell, &mut self.last_time, now);
+        // Documents Finder opened with the app: a project folder opens and
+        // files import, as when they are dropped on the window.
+        #[cfg(target_os = "macos")]
+        {
+            let opened = cutlass_platform_apple::take_opened_files();
+            if !opened.is_empty() {
+                cutlass_logger::info!("finder opened {} item(s)", opened.len());
+                if let Err(error) = self.shell.drop_files(&opened) {
+                    self.shell.notice_error(&error);
+                }
+            }
+        }
+        // Put up on the first frame, once the system's own launch menu is.
+        #[cfg(target_os = "macos")]
+        if self.menu_bar.is_none() {
+            let ctx = ui.ctx().clone();
+            self.menu_bar = crate::menubar::Native::install(move || ctx.request_repaint());
+            if self.menu_bar.is_none() {
+                cutlass_logger::warn!("the system menu bar could not be built");
+            }
+        }
+        #[cfg(target_os = "macos")]
+        {
+            self.view.system_menus = self.menu_bar.is_some();
+        }
+        #[cfg(target_os = "macos")]
+        if let Some(bar) = self.menu_bar.as_mut() {
+            let settings = self.shell.settings();
+            bar.show_keys(|action| settings.keys_for(action));
+            for id in bar.take() {
+                crate::view::run_menu(&mut self.shell, &mut self.view, Some(frame), &id);
+            }
+        }
         show(&mut self.shell, ui, &mut self.view, Some(frame));
         if let Some(wait) = self.shell.autosave() {
             ui.ctx().request_repaint_after(wait);

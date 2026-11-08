@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "hue-shift",
+  "name": "Hue Shift",
+  "category": "Creative",
+  "adjust": {"hue": 0.3}
+}

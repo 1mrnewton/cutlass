@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "id": "seventies",
+  "name": "Seventies",
+  "category": "Vintage",
+  "adjust": {"temperature": 0.4, "fade": 0.25, "saturation": -0.1, "grain": 0.2},
+  "wheels": {"gain": {"hue": 40, "amount": 0.25}},
+  "hsl": {"green": [-0.4, 0, 0]}
+}

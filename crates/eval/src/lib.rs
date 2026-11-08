@@ -19,14 +19,23 @@
 mod audio;
 mod canvas;
 mod effect;
+mod enhance;
 mod frame;
+mod freeze;
 mod gpu;
 mod heard;
+mod lottie;
 mod media;
 mod nest;
+mod reframe;
+mod relight;
 mod sample;
+mod scenes;
 mod sources;
+mod stable;
+mod steady;
 mod text;
+mod track;
 mod transition;
 
 pub use audio::{AudioError, MixWindow, audio_slice};
@@ -34,14 +43,27 @@ pub use cutlass_compositor::{Device, Frame};
 pub use cutlass_engine::{
     ClipPcm, ClockKind, MixResult, ReaderFactory, SceneError, scene_cuts, timeline_for_source,
 };
+pub use cutlass_gpu::{ToneCurve, YuvTone};
 pub use cutlass_model::Micros;
+pub use enhance::{
+    Blend, DENOISE_MODEL, ENHANCE_MODEL, EnhanceAsk, EnhanceError, EnhanceFrames,
+    INTERPOLATE_MODEL, MOTION_BLUR_MODEL, copy_ask, enhance_ask,
+};
 pub use frame::{
     EvalError, Fonts, NoFonts, Snapshot, frame, frame_in, layers_in, wait_export_frame,
 };
-pub use gpu::{Composed, FrameLayers, GpuBackdrop, GpuLayer, GpuSource};
+pub use freeze::{
+    FREEZE_DURATION, FREEZE_EDGE, FreezeMiss, FreezePoint, FrozenImage, freeze_image, freeze_point,
+};
+pub use gpu::{Composed, FrameLayers, GpuBackdrop, GpuLayer, GpuSource, YuvSamples};
 pub use heard::{ClipAsk, Heard};
 pub use media::OpenClips;
-pub use text::text_size;
+pub use reframe::{REFRAME_MODEL, REFRAME_RATE, ReframeAsk, reframe_ask};
+pub use relight::{RELIGHT_MODEL, RelightAsk, relight_ask};
+pub use scenes::{blend_blocks, kept_cuts, scene_split_times};
+pub use stable::{StableAsk, StableError, measure_camera, stable_ask};
+pub use text::{text_size, text_size_at};
+pub use track::{TrackAsk, TrackError, TrackSpan, path_in_clip, track_clip};
 
 /// The source timestamp Freeze stores so the clip keeps showing `time`.
 ///
@@ -74,11 +96,27 @@ pub fn source_on_timeline(
     timeline_for_source(&map, source)
 }
 
+/// The point of `segment`'s own picture under canvas pixel `x`, `y` at
+/// `time`, on a `canvas` sized canvas: -1 to 1 across the picture, y up, as
+/// masks and selections read it. `None` when the clip is not drawn at
+/// `time`. A point off the picture lies outside -1 to 1.
+#[must_use]
+pub fn clip_point(
+    draft: &cutlass_model::Draft,
+    segment: &cutlass_model::Segment,
+    time: Micros,
+    canvas: (u32, u32),
+    x: f64,
+    y: f64,
+) -> Option<(f64, f64)> {
+    Some(media::clip_frame(draft, segment, time, canvas)?.apply(x, y))
+}
+
 #[cfg(test)]
 mod tests {
     use cutlass_model::{Draft, Micros, Segment, TimeRange};
 
-    use super::freeze_timestamp;
+    use super::{clip_point, freeze_timestamp};
 
     #[test]
     fn a_freeze_timestamp_follows_speed_and_stays_before_reverse() {
@@ -104,5 +142,28 @@ mod tests {
             freeze_timestamp(&draft, &segment, Micros(250)),
             Some(Micros(250))
         );
+    }
+
+    #[test]
+    fn a_canvas_point_maps_into_the_clip_and_follows_its_move() {
+        let mut draft = Draft::empty("D");
+        draft.canvas_config.width = 1920;
+        draft.canvas_config.height = 1080;
+        let mut video = cutlass_model::MaterialVideo::new("v");
+        video.width = 1920;
+        video.height = 1080;
+        draft.materials.videos.push(video);
+        let mut segment = Segment::new("a", "v", TimeRange::new(0, 1_000_000));
+        let at = |segment: &Segment, x: f64, y: f64| {
+            let (u, v) = clip_point(&draft, segment, Micros(0), (1920, 1080), x, y).unwrap();
+            ((u * 1000.0).round() / 1000.0, (v * 1000.0).round() / 1000.0)
+        };
+        assert_eq!(at(&segment, 960.0, 540.0), (0.0, 0.0));
+        assert_eq!(at(&segment, 0.0, 0.0), (-1.0, 1.0));
+        assert_eq!(at(&segment, 1920.0, 1080.0), (1.0, -1.0));
+        // Moved right by half the canvas, the clip's centre is under 1440.
+        segment.clip.transform.x = 0.5;
+        assert_eq!(at(&segment, 1440.0, 540.0), (0.0, 0.0));
+        assert!(at(&segment, 100.0, 540.0).0 < -1.0);
     }
 }

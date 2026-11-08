@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "juicy",
+  "name": "Juicy",
+  "category": "Food",
+  "adjust": {"saturation": 0.35, "contrast": 0.1, "brilliance": 0.2},
+  "hsl": {"orange": [0, 0, 0.1]}
+}

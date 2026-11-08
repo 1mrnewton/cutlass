@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "tea-stain",
+  "name": "Tea Stain",
+  "category": "Vintage",
+  "adjust": {"saturation": -0.5, "temperature": 0.3, "tint": 0.1, "fade": 0.25},
+  "wheels": {"gain": {"hue": 40, "amount": 0.3}}
+}

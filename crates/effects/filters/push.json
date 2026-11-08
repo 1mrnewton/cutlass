@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "push",
+  "name": "Push",
+  "category": "Film",
+  "adjust": {"contrast": 0.4, "grain": 0.45, "saturation": 0.1, "blacks": -0.2}
+}

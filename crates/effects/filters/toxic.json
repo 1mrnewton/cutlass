@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "toxic",
+  "name": "Toxic",
+  "category": "Creative",
+  "adjust": {"tint": -0.5, "saturation": 0.4, "hue": -0.1, "contrast": 0.2}
+}

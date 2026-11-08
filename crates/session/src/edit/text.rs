@@ -3,7 +3,7 @@ use cutlass_model::{
     TrackType, segment_bloom,
 };
 
-use super::speed::locate;
+use super::locate;
 use super::{EditError, ensure_unlocked};
 
 /// Replace the text material's words. A rich title keeps its styled
@@ -129,10 +129,14 @@ pub fn set_text_color(
     Ok(())
 }
 
-/// Store left (`0`), center (`1`), or right (`2`).
+/// Store left (`0`), center (`1`), or right (`2`) across a line, or top
+/// (`3`), middle (`4`), or bottom (`5`) down a vertical column.
 ///
 /// An empty line width takes `line_width` when that number is positive, so
-/// center and right have a box to move in. An empty `font_path` takes `face`.
+/// center and right have a box to move in. Turning text vertical or back
+/// across also takes it, since the width then measures the other way: the
+/// caller passes the canvas height for a column. An empty `font_path` takes
+/// `face`.
 pub fn set_text_align(
     draft: &mut Draft,
     segment_id: &SegmentId,
@@ -141,14 +145,66 @@ pub fn set_text_align(
     line_width: f64,
 ) -> Result<(), EditError> {
     let index = own_text(draft, segment_id)?;
-    if !(0..=2).contains(&alignment) {
+    if !(0..=5).contains(&alignment) {
         return Err(EditError::TextAlign);
     }
+    let typesetting = i32::from(alignment >= 3);
     let text = &mut draft.materials.texts[index];
+    let turned = text.typesetting != typesetting;
     text.alignment = alignment;
-    if text.line_max_width == 0.0 && line_width.is_finite() && line_width > 0.0 {
+    text.typesetting = typesetting;
+    if (turned || text.line_max_width == 0.0) && line_width.is_finite() && line_width > 0.0 {
         text.line_max_width = line_width;
     }
+    fill_face(text, face);
+    Ok(())
+}
+
+/// How much a bold letter's edge grows, as a share of the text size.
+pub const BOLD_WIDTH: f64 = 0.04;
+/// How many degrees an italic letter leans.
+pub const ITALIC_DEGREE: i32 = 12;
+
+/// Bold, italic and underline over a whole text.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Pattern {
+    pub bold: bool,
+    pub italic: bool,
+    pub underline: bool,
+}
+
+impl Pattern {
+    /// The pattern a text stores: any bold width is bold and any lean is
+    /// italic.
+    #[must_use]
+    pub fn of(text: &MaterialText) -> Self {
+        Self {
+            bold: text.bold_width.is_finite() && text.bold_width > 0.0,
+            italic: text.italic_degree != 0,
+            underline: text.underline,
+        }
+    }
+}
+
+/// Turn bold, italic and underline on or off. Bold stores [`BOLD_WIDTH`]
+/// and italic [`ITALIC_DEGREE`]; a part already on keeps its own value. An
+/// empty `font_path` takes `face`.
+pub fn set_text_pattern(
+    draft: &mut Draft,
+    segment_id: &SegmentId,
+    pattern: Pattern,
+    face: &str,
+) -> Result<(), EditError> {
+    let index = own_text(draft, segment_id)?;
+    let text = &mut draft.materials.texts[index];
+    let stored = Pattern::of(text);
+    if pattern.bold != stored.bold {
+        text.bold_width = if pattern.bold { BOLD_WIDTH } else { 0.0 };
+    }
+    if pattern.italic != stored.italic {
+        text.italic_degree = if pattern.italic { ITALIC_DEGREE } else { 0 };
+    }
+    text.underline = pattern.underline;
     fill_face(text, face);
     Ok(())
 }
@@ -311,6 +367,126 @@ pub fn set_text_background(
     Ok(())
 }
 
+/// Draw the caption in the style keyed `style`, or plain when it is empty.
+pub fn set_caption_style(
+    draft: &mut Draft,
+    segment_id: &SegmentId,
+    style: &str,
+) -> Result<(), EditError> {
+    let style = style.trim();
+    if !style.is_empty() && !cutlass_model::CAPTION_STYLE_KEYS.contains(&style) {
+        return Err(EditError::TextStyle);
+    }
+    let index = own_text(draft, segment_id)?;
+    style.clone_into(&mut draft.materials.texts[index].caption_style);
+    Ok(())
+}
+
+/// Record caption template `resource_id` named `name` on the caption, or
+/// take the record off when the id is empty. Keys the record already has
+/// beyond the id and name stay.
+pub fn set_caption_template(
+    draft: &mut Draft,
+    segment_id: &SegmentId,
+    resource_id: &str,
+    name: &str,
+) -> Result<(), EditError> {
+    let index = own_text(draft, segment_id)?;
+    let text = &mut draft.materials.texts[index];
+    if resource_id.is_empty() {
+        text.caption_template_info = cutlass_model::Kept::Absent;
+        return Ok(());
+    }
+    let mut info = text
+        .caption_template_info
+        .get()
+        .cloned()
+        .unwrap_or_default();
+    resource_id.clone_into(&mut info.resource_id);
+    name.clone_into(&mut info.resource_name);
+    text.caption_template_info = cutlass_model::Kept::Set(info);
+    Ok(())
+}
+
+/// The longest a caption's letters wait one after another.
+pub const MAX_CAPTION_STAGGER_MS: i64 = 500;
+
+/// Mark word `word` of the caption as a keyword, or take the mark off. A
+/// word the caption does not have is refused.
+pub fn set_caption_keyword(
+    draft: &mut Draft,
+    segment_id: &SegmentId,
+    word: usize,
+    on: bool,
+) -> Result<(), EditError> {
+    let index = own_text(draft, segment_id)?;
+    let text = &mut draft.materials.texts[index];
+    let columns = if text.current_words.text.is_empty() {
+        &text.words
+    } else {
+        &text.current_words
+    };
+    if word >= columns.text.len() {
+        return Err(EditError::TextStyle);
+    }
+    let marked = &mut text.caption_keywords;
+    marked.retain(|kept| *kept != word);
+    if on {
+        marked.push(word);
+        marked.sort_unstable();
+    }
+    Ok(())
+}
+
+/// Start each letter of the caption's words `millis` after the one before.
+pub fn set_caption_stagger(
+    draft: &mut Draft,
+    segment_id: &SegmentId,
+    millis: i64,
+) -> Result<(), EditError> {
+    if !(0..=MAX_CAPTION_STAGGER_MS).contains(&millis) {
+        return Err(EditError::TextStyle);
+    }
+    let index = own_text(draft, segment_id)?;
+    draft.materials.texts[index].caption_stagger_ms = millis;
+    Ok(())
+}
+
+/// The room a bubble leaves around the letters, in ems, when it has none.
+const BUBBLE_PAD: (f64, f64) = (0.35, 0.3);
+
+/// Shape the background as the bubble keyed `bubble`, or a plain box again
+/// when it is empty. A title with no background yet gets a white one, its
+/// white letters turn black, and it gets room around the letters.
+pub fn set_text_bubble(
+    draft: &mut Draft,
+    segment_id: &SegmentId,
+    bubble: &str,
+) -> Result<(), EditError> {
+    let bubble = bubble.trim();
+    if !bubble.is_empty() && cutlass_model::Bubble::of(bubble).is_none() {
+        return Err(EditError::TextStyle);
+    }
+    let index = own_text(draft, segment_id)?;
+    let text = &mut draft.materials.texts[index];
+    text.bubble = bubble.to_owned();
+    if bubble.is_empty() {
+        return Ok(());
+    }
+    if text.background_style == 0 || text.background_color.is_empty() {
+        text.background_style = 1;
+        text.background_color = "#FFFFFF".to_owned();
+        text.background_alpha = 1.0;
+        if text.text_color.is_empty() || text.text_color.eq_ignore_ascii_case("#FFFFFF") {
+            text.text_color = "#000000".to_owned();
+        }
+    }
+    if text.background_width < BUBBLE_PAD.0 && text.background_height < BUBBLE_PAD.1 {
+        (text.background_width, text.background_height) = BUBBLE_PAD;
+    }
+    Ok(())
+}
+
 /// Make the letters glow in `color`. `glow` is the strength and the range,
 /// each from 0 to 1. The glow is a bloom effect among the clip's sidecars:
 /// one only this clip points at is changed in place, and otherwise a new
@@ -409,6 +585,19 @@ fn style_color(color: &str) -> Result<&str, EditError> {
     } else {
         Err(EditError::TextColor)
     }
+}
+
+/// The font file a new caption is set in: `face` trimmed, or none when it
+/// is empty. A name that is not a file name is refused.
+pub(super) fn caption_face(face: &str) -> Result<String, EditError> {
+    let face = face.trim();
+    if face.is_empty() {
+        return Ok(String::new());
+    }
+    if !face_file(face) {
+        return Err(EditError::TextFont);
+    }
+    Ok(face.to_owned())
 }
 
 fn face_file(face: &str) -> bool {
@@ -568,7 +757,75 @@ mod tests {
         assert_eq!(text.background_style, 0);
         assert!(text.background_color.is_empty());
 
+        let bubble = |key: &str| Request::SetTextBubble {
+            segment_id: "a".into(),
+            bubble: key.to_owned(),
+        };
+        let revision = session.revision();
+        session.apply(revision, &[bubble("speech")]).unwrap();
+        let text = &session.draft().materials.texts[0];
+        assert_eq!(text.bubble, "speech");
+        assert_eq!(
+            (text.background_style, text.background_color.as_str()),
+            (1, "#FFFFFF")
+        );
+        assert!(text.background_width >= 0.35);
+        let revision = session.revision();
+        session.apply(revision, &[bubble("")]).unwrap();
+        let text = &session.draft().materials.texts[0];
+        assert!(text.bubble.is_empty());
+        // The box stays until the background is taken off.
+        assert_eq!(text.background_style, 1);
+
+        let caption = |key: &str| Request::SetCaptionStyle {
+            segment_id: "a".into(),
+            style: key.to_owned(),
+        };
+        let revision = session.revision();
+        session.apply(revision, &[caption("karaoke")]).unwrap();
+        assert_eq!(session.draft().materials.texts[0].caption_style, "karaoke");
+        let revision = session.revision();
+        session.apply(revision, &[caption("")]).unwrap();
+        assert!(session.draft().materials.texts[0].caption_style.is_empty());
+
+        // Keywords and stagger are kept on the material, one undo each.
+        let keyword = |word: usize, on: bool| Request::SetCaptionKeyword {
+            segment_id: "a".into(),
+            word,
+            on,
+        };
+        let revision = session.revision();
+        session
+            .apply(revision, &[keyword(0, true), keyword(0, true)])
+            .unwrap();
+        assert_eq!(session.draft().materials.texts[0].caption_keywords, [0]);
+        let revision = session.revision();
+        session.apply(revision, &[keyword(0, false)]).unwrap();
+        assert!(
+            session.draft().materials.texts[0]
+                .caption_keywords
+                .is_empty()
+        );
+        let stagger = |millis: i64| Request::SetCaptionStagger {
+            segment_id: "a".into(),
+            millis,
+        };
+        let revision = session.revision();
+        session.apply(revision, &[stagger(40)]).unwrap();
+        assert_eq!(session.draft().materials.texts[0].caption_stagger_ms, 40);
+        session.undo().unwrap();
+        assert_eq!(session.draft().materials.texts[0].caption_stagger_ms, 0);
+        for refused in [keyword(1, true), stagger(-1), stagger(501)] {
+            let revision = session.revision();
+            assert_eq!(
+                session.apply(revision, &[refused]),
+                Err(EditError::TextStyle)
+            );
+        }
+
         for (request, error) in [
+            (caption("loud"), EditError::TextStyle),
+            (bubble("cloud"), EditError::TextStyle),
             (outline("#000000", 1.0), EditError::TextStyle),
             (outline("black", 0.1), EditError::TextColor),
             (background("#000000", 2.0), EditError::TextStyle),
@@ -583,7 +840,8 @@ mod tests {
                 EditError::TextStyle,
             ),
         ] {
-            assert_eq!(session.apply(2, &[request]).unwrap_err(), error);
+            let revision = session.revision();
+            assert_eq!(session.apply(revision, &[request]).unwrap_err(), error);
         }
     }
 
@@ -718,6 +976,82 @@ mod tests {
     }
 
     #[test]
+    fn pattern_turns_bold_italic_and_underline_on_and_off_in_one_step() {
+        use super::{BOLD_WIDTH, ITALIC_DEGREE, Pattern};
+        let mut session = open();
+        let pattern = |bold, italic, underline| Request::SetTextPattern {
+            segment_id: "a".into(),
+            bold,
+            italic,
+            underline,
+            face: "face.ttf".to_owned(),
+        };
+        session.apply(0, &[pattern(true, true, true)]).unwrap();
+        let text = &session.draft().materials.texts[0];
+        assert_eq!(text.bold_width, BOLD_WIDTH);
+        assert_eq!(text.italic_degree, ITALIC_DEGREE);
+        assert!(text.underline);
+        assert_eq!(text.font_path, "face.ttf");
+        assert_eq!(
+            Pattern::of(text),
+            Pattern {
+                bold: true,
+                italic: true,
+                underline: true
+            }
+        );
+        session.apply(1, &[pattern(false, true, false)]).unwrap();
+        let text = &session.draft().materials.texts[0];
+        assert_eq!(
+            (text.bold_width, text.italic_degree, text.underline),
+            (0.0, ITALIC_DEGREE, false)
+        );
+        session.undo().unwrap();
+        assert!(session.draft().materials.texts[0].underline);
+    }
+
+    #[test]
+    fn a_pattern_already_on_keeps_its_own_value() {
+        let session = open();
+        let mut draft = session.draft().clone();
+        draft.materials.texts[0].bold_width = 0.008;
+        draft.materials.texts[0].italic_degree = 20;
+        let mut session = Session::open(draft);
+        session
+            .apply(
+                0,
+                &[Request::SetTextPattern {
+                    segment_id: "a".into(),
+                    bold: true,
+                    italic: true,
+                    underline: true,
+                    face: String::new(),
+                }],
+            )
+            .unwrap();
+        let text = &session.draft().materials.texts[0];
+        assert_eq!((text.bold_width, text.italic_degree), (0.008, 20));
+    }
+
+    #[test]
+    fn a_pattern_on_a_missing_clip_leaves_the_draft() {
+        let mut session = open();
+        let before = session.draft().clone();
+        let refused = session.apply(
+            0,
+            &[Request::SetTextPattern {
+                segment_id: "gone".into(),
+                bold: true,
+                italic: false,
+                underline: false,
+                face: String::new(),
+            }],
+        );
+        assert!(refused.is_err());
+        assert_eq!(session.draft(), &before);
+    }
+
+    #[test]
     fn size_color_and_alignment_style_the_line_and_keep_the_words() {
         let mut session = open();
         session
@@ -787,8 +1121,33 @@ mod tests {
             )
             .unwrap();
         assert_eq!(session.draft().materials.texts[0].line_max_width, 200.0);
+        // Down a column: the text turns vertical and the width is the
+        // column's height; back across, it is the line's again.
+        for (version, alignment, line_width, typesetting) in
+            [(5, 4, 120.0, 1), (6, 3, 90.0, 1), (7, 0, 300.0, 0)]
+        {
+            session
+                .apply(
+                    version,
+                    &[Request::SetTextAlign {
+                        segment_id: "a".into(),
+                        alignment,
+                        face: "other.ttf".to_owned(),
+                        line_width,
+                    }],
+                )
+                .unwrap();
+            let text = &session.draft().materials.texts[0];
+            assert_eq!((text.alignment, text.typesetting), (alignment, typesetting));
+        }
+        assert_eq!(session.draft().materials.texts[0].line_max_width, 300.0);
+        session.undo().unwrap();
+        session.undo().unwrap();
+        assert_eq!(session.draft().materials.texts[0].line_max_width, 120.0);
+        session.undo().unwrap();
         session.undo().unwrap();
         assert_eq!(session.draft().materials.texts[0].alignment, 1);
+        assert_eq!(session.draft().materials.texts[0].typesetting, 0);
         assert_eq!(session.draft().materials.texts[0].words.text, ["A"]);
     }
 
@@ -1141,5 +1500,37 @@ mod tests {
             EditError::Overlap
         );
         assert_eq!(session.draft(), &after);
+    }
+
+    #[test]
+    fn a_caption_template_is_recorded_and_taken_off() {
+        use cutlass_model::{MaterialText, Segment, TimeRange};
+
+        let mut draft = Draft::empty("D");
+        draft.materials.texts.push(MaterialText::new("words"));
+        draft.tracks[0]
+            .segments
+            .push(Segment::new("a", "words", TimeRange::new(0, 1_000_000)));
+        crate::edit::text::set_caption_template(
+            &mut draft,
+            &"a".into(),
+            "cutlass-caption-pop",
+            "Pop up",
+        )
+        .unwrap();
+        let info = draft.materials.texts[0]
+            .caption_template_info
+            .get()
+            .unwrap();
+        assert_eq!(
+            (info.resource_id.as_str(), info.resource_name.as_str()),
+            ("cutlass-caption-pop", "Pop up")
+        );
+        crate::edit::text::set_caption_template(&mut draft, &"a".into(), "", "").unwrap();
+        assert!(draft.materials.texts[0].caption_template_info.is_absent());
+        assert!(
+            crate::edit::text::set_caption_template(&mut draft, &"nobody".into(), "x", "x")
+                .is_err()
+        );
     }
 }

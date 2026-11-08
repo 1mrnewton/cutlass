@@ -5,8 +5,18 @@
 //! is not one of the caller's packets. `finish` fills the frame count, the
 //! byte count, and the TOC. Until then the count in the file is zero, so a
 //! failed finish does not advertise a complete duration.
+//!
+//! A stream that has a trim when its first packet arrives also gets an
+//! ID3v2.3 tag ahead of that frame with an `iTunSMPB` comment, the gapless
+//! record Apple's decoders read; the LAME tag in the Info frame is the one
+//! LAME and mpg123 read. Both are filled at finish.
 
 use std::io::{BufWriter, Seek, SeekFrom, Write};
+
+use cutlass_container::{
+    FailedMux, FinishedMux, IndexPlace, Limits, MuxDraft, MuxError, MuxMode, MuxStatus, NewStream,
+    TrackDuration, TrackId, Trim,
+};
 
 use crate::api::{CodecId, CodecParams, ContainerId, Packet};
 use crate::api::{ContainerError, Mux};
@@ -27,6 +37,8 @@ pub struct Mp3Mux<W: Write + Seek> {
     params: Option<CodecParams>,
     stream: Option<StreamLock>,
     xing_pos: u64,
+    /// Where the `iTunSMPB` text starts, when the tag was written.
+    smpb_pos: Option<u64>,
     xing_frame: Vec<u8>,
     xing_at: usize,
     frames: u32,
@@ -40,6 +52,8 @@ pub struct Mp3Mux<W: Write + Seek> {
     next_pts: i64,
     finished: bool,
     cancelled: bool,
+    /// The bookkeeping of the shared [`cutlass_container::Mux`] contract.
+    draft: MuxDraft,
 }
 
 struct StreamLock {
@@ -54,6 +68,7 @@ impl<W: Write + Seek> Mp3Mux<W> {
             params: None,
             stream: None,
             xing_pos: 0,
+            smpb_pos: None,
             xing_frame: Vec::new(),
             xing_at: 0,
             frames: 0,
@@ -67,7 +82,38 @@ impl<W: Write + Seek> Mp3Mux<W> {
             next_pts: 0,
             finished: false,
             cancelled: false,
+            draft: MuxDraft::new(
+                ContainerId::Mp3,
+                MuxMode::Progressive,
+                IndexPlace::Start,
+                single_track(),
+            ),
         }
+    }
+
+    /// Set the encoder delay and trailing padding the LAME tag carries,
+    /// replacing what `add_stream` gave. Both fit in 12 bits.
+    pub fn set_trim(
+        &mut self,
+        encoder_delay: u32,
+        trailing_padding: u32,
+    ) -> Result<(), ContainerError> {
+        if self.finished {
+            return Err(ContainerError::InvalidApi {
+                what: "trim after finish",
+            });
+        }
+        if encoder_delay > 4095 || trailing_padding > 4095 {
+            return Err(ContainerError::Limit {
+                what: "encoder delay",
+            });
+        }
+        let params = self.params.as_mut().ok_or(ContainerError::InvalidApi {
+            what: "trim before add_stream",
+        })?;
+        params.encoder_delay = encoder_delay;
+        params.trailing_padding = trailing_padding;
+        Ok(())
     }
 
     pub fn into_inner(self) -> Result<W, ContainerError> {
@@ -138,6 +184,17 @@ impl<W: Write + Seek> Mp3Mux<W> {
         self.xing_frame[at + 142] = be[2];
         self.xing_frame[at + 143] = be[3];
         let end = self.writer.stream_position()?;
+        if let Some(at) = self.smpb_pos {
+            let total = u64::try_from(self.next_pts).unwrap_or(0);
+            let trim = u64::from(params.encoder_delay) + u64::from(params.trailing_padding);
+            let text = smpb_text(
+                params.encoder_delay,
+                params.trailing_padding,
+                total.saturating_sub(trim),
+            );
+            self.writer.seek(SeekFrom::Start(at))?;
+            self.writer.write_all(text.as_bytes())?;
+        }
         self.writer.seek(SeekFrom::Start(self.xing_pos))?;
         self.writer.write_all(&self.xing_frame)?;
         self.writer.seek(SeekFrom::Start(end))?;
@@ -246,6 +303,15 @@ impl<W: Write + Seek> Mux for Mp3Mux<W> {
         }
 
         if self.stream.is_none() {
+            if params.encoder_delay > 0 || params.trailing_padding > 0 {
+                let (tag, text_at) = smpb_tag();
+                let start = self.writer.stream_position()?;
+                self.write_all(&tag)?;
+                self.smpb_pos = Some(start + text_at);
+            }
+            let params = self.params.as_ref().ok_or(ContainerError::InvalidApi {
+                what: "write before add_stream",
+            })?;
             let frame = build_xing_frame(&header, params)?;
             self.xing_at = 4 + side_info_len(&header);
             self.xing_pos = self.writer.stream_position()?;
@@ -302,6 +368,149 @@ impl<W: Write + Seek> Mux for Mp3Mux<W> {
 
     fn cancel(&mut self) {
         self.cancelled = true;
+    }
+}
+
+/// Apple's gapless comment: priming, padding and the sample count in hex,
+/// fixed width so finish can rewrite it in place.
+fn smpb_text(delay: u32, padding: u32, samples: u64) -> String {
+    format!(
+        " 00000000 {delay:08X} {padding:08X} {samples:016X} 00000000 00000000 00000000 \
+         00000000 00000000 00000000 00000000 00000000"
+    )
+}
+
+/// An ID3v2.3 tag holding one `COMM` frame, description `iTunSMPB`, and
+/// where in the tag its text starts.
+fn smpb_tag() -> (Vec<u8>, u64) {
+    let text = smpb_text(0, 0, 0);
+    let mut body = vec![0u8]; // ISO-8859-1
+    body.extend_from_slice(b"eng");
+    body.extend_from_slice(b"iTunSMPB\0");
+    let text_in_body = body.len();
+    body.extend_from_slice(text.as_bytes());
+    let body_len = u32::try_from(body.len()).unwrap_or(0);
+    let mut frame = b"COMM".to_vec();
+    frame.extend_from_slice(&body_len.to_be_bytes());
+    frame.extend_from_slice(&[0, 0]);
+    let text_in_frame = frame.len() + text_in_body;
+    frame.extend_from_slice(&body);
+    let size = u32::try_from(frame.len()).unwrap_or(0);
+    let mut tag = b"ID3\x03\x00\x00".to_vec();
+    // Syncsafe: seven bits a byte.
+    tag.extend_from_slice(&[
+        ((size >> 21) & 0x7F) as u8,
+        ((size >> 14) & 0x7F) as u8,
+        ((size >> 7) & 0x7F) as u8,
+        (size & 0x7F) as u8,
+    ]);
+    let text_at = (tag.len() + text_in_frame) as u64;
+    tag.extend_from_slice(&frame);
+    (tag, text_at)
+}
+
+fn single_track() -> Limits {
+    let mut limits = Limits::standard();
+    limits.max_tracks = 1;
+    limits
+}
+
+fn rejected(error: ContainerError) -> MuxError {
+    match error {
+        ContainerError::Cancelled => MuxError::Cancelled,
+        other => MuxError::Rejected {
+            message: format!("mp3 {other}"),
+        },
+    }
+}
+
+/// The workspace mux contract: packets are written as they arrive, and the
+/// Info or Xing frame, with the trim [`cutlass_container::Mux::set_trim`]
+/// gave, is filled at finish.
+impl<W: Write + Seek> cutlass_container::Mux for Mp3Mux<W> {
+    fn family(&self) -> ContainerId {
+        ContainerId::Mp3
+    }
+
+    fn add_stream(&mut self, stream: NewStream) -> Result<TrackId, MuxError> {
+        let (Some(rate), Some(channels)) = (stream.params.sample_rate(), stream.params.channels())
+        else {
+            return Err(MuxError::Rejected {
+                message: "mp3 stores one audio stream".to_owned(),
+            });
+        };
+        let Some(codec) = stream.params.codec().clone().known() else {
+            return Err(MuxError::Rejected {
+                message: "mp3 stores Layer III only".to_owned(),
+            });
+        };
+        if stream.timescale.ticks_per_second() != rate {
+            return Err(MuxError::TimescaleMismatch {
+                packet: stream.timescale.ticks_per_second(),
+                stream: rate,
+            });
+        }
+        let mut params = CodecParams::audio(codec, rate, channels);
+        params.extra = stream.params.extradata().to_vec();
+        if let Err(error) = Mux::add_stream(self, params) {
+            return Err(rejected(error));
+        }
+        self.draft.add_stream(stream)
+    }
+
+    fn write_packet(&mut self, packet: &cutlass_codec::Packet) -> Result<(), MuxError> {
+        let (Some(pts), Some(duration)) = (
+            packet.timestamp().presentation_or_decode(),
+            packet.timestamp().duration(),
+        ) else {
+            let error = MuxError::MissingTimestamp;
+            self.draft.abort(error.clone());
+            return Err(error);
+        };
+        let mut frame = Packet::audio(
+            packet.bytes().to_vec(),
+            pts,
+            duration,
+            packet.timescale().ticks_per_second(),
+        );
+        frame.stream = packet.stream();
+        if let Err(error) = Mux::write_packet(self, &frame) {
+            let error = rejected(error);
+            self.draft.abort(error.clone());
+            return Err(error);
+        }
+        self.draft.write_packet(packet)
+    }
+
+    fn interleave(&mut self) -> Result<(), MuxError> {
+        self.draft.interleave()
+    }
+
+    fn cancel(&mut self) {
+        Mux::cancel(self);
+        self.draft.cancel();
+    }
+
+    fn finish(&mut self, durations: &[TrackDuration]) -> Result<FinishedMux, FailedMux> {
+        if self.draft.status() == MuxStatus::Building
+            && let Err(error) = Mux::finish(self)
+        {
+            self.draft.abort(rejected(error));
+        }
+        self.draft.finish(durations)
+    }
+
+    fn status(&self) -> MuxStatus {
+        self.draft.status()
+    }
+
+    fn set_trim(&mut self, track: TrackId, trim: Trim) -> Result<(), MuxError> {
+        if track != TrackId::new(0) {
+            return Err(MuxError::UnknownTrack { id: track.get() });
+        }
+        let delay = u32::try_from(trim.encoder_delay().unwrap_or(0)).unwrap_or(u32::MAX);
+        let padding = u32::try_from(trim.trailing_padding().unwrap_or(0)).unwrap_or(u32::MAX);
+        Mp3Mux::set_trim(self, delay, padding).map_err(rejected)
     }
 }
 
@@ -379,6 +588,108 @@ mod tests {
 
     fn packet(frame: Vec<u8>, pts: i64, duration: i64, rate: u32) -> Packet {
         Packet::audio(frame, pts, duration, rate)
+    }
+
+    #[test]
+    fn the_shared_contract_writes_the_frames_and_the_trim_set_last() {
+        use cutlass_codec::{
+            Packet as SharedPacket, StreamCodec, StreamParams, Timescale, Timestamp,
+        };
+        use cutlass_container::{MuxStatus, NewStream, TrackDuration, TrackId, Trim};
+
+        let mut mux = Mp3Mux::new(Cursor::new(Vec::new()));
+        let shared: &mut dyn cutlass_container::Mux = &mut mux;
+        let params =
+            StreamParams::try_audio(StreamCodec::Known(CodecId::Mp3), 48_000, 2, Vec::new())
+                .expect("params");
+        let track = shared
+            .add_stream(NewStream {
+                params,
+                timescale: Timescale::new(48_000),
+                language: None,
+            })
+            .expect("stream");
+        assert_eq!(track, TrackId::new(0));
+        for index in 0..4u16 {
+            let frame = synthetic_frame(MpegVersion::Mpeg1, 128, 48_000, 2, index);
+            let pts = i64::from(index) * 1152;
+            let timestamp =
+                Timestamp::try_new(Some(pts), Some(pts), Some(1152)).expect("timestamp");
+            let packet = SharedPacket::try_new(0, frame, timestamp, Timescale::new(48_000), true)
+                .expect("packet");
+            // As export hands it over, ahead of each packet: padding on the
+            // last packet only.
+            let padding = if index == 3 { 1000 } else { 0 };
+            shared
+                .set_trim(track, Trim::new(Some(576), Some(padding)))
+                .expect("trim");
+            shared.write_packet(&packet).expect("write");
+        }
+        assert!(shared.set_trim(TrackId::new(1), Trim::default()).is_err());
+        let done = shared
+            .finish(&[TrackDuration {
+                track,
+                timescale: Timescale::new(48_000),
+                ticks: 4 * 1152,
+            }])
+            .expect("finish");
+        assert_eq!(done.durations()[0].ticks, 4 * 1152);
+        assert_eq!(shared.status(), MuxStatus::Finished);
+        let bytes = mux.into_inner().expect("inner").into_inner();
+        assert_eq!(&bytes[..4], b"ID3\x03");
+        let at = bytes
+            .windows(9)
+            .position(|w| w == b"iTunSMPB\0")
+            .expect("iTunSMPB")
+            + 9;
+        let text = std::str::from_utf8(&bytes[at..at + 44]).expect("text");
+        assert_eq!(
+            text,
+            format!(" 00000000 00000240 000003E8 {:016X}", 4 * 1152 - 576 - 1000)
+        );
+        let demux = Mp3Demux::open(Cursor::new(bytes)).expect("open");
+        let trim = demux.streams()[0].trim.expect("trim");
+        assert_eq!((trim.encoder_delay, trim.trailing_padding), (576, 1000));
+    }
+
+    #[test]
+    fn the_shared_contract_fails_on_a_wrong_duration_or_a_trim_too_long() {
+        use cutlass_codec::{
+            Packet as SharedPacket, StreamCodec, StreamParams, Timescale, Timestamp,
+        };
+        use cutlass_container::{NewStream, TrackDuration, Trim};
+
+        let mut mux = Mp3Mux::new(Cursor::new(Vec::new()));
+        let shared: &mut dyn cutlass_container::Mux = &mut mux;
+        let params =
+            StreamParams::try_audio(StreamCodec::Known(CodecId::Mp3), 44_100, 1, Vec::new())
+                .expect("params");
+        let track = shared
+            .add_stream(NewStream {
+                params,
+                timescale: Timescale::new(44_100),
+                language: None,
+            })
+            .expect("stream");
+        assert!(
+            shared
+                .set_trim(track, Trim::new(Some(5000), Some(0)))
+                .is_err()
+        );
+        let frame = synthetic_frame(MpegVersion::Mpeg1, 64, 44_100, 1, 0);
+        let timestamp = Timestamp::try_new(Some(0), Some(0), Some(1152)).expect("timestamp");
+        let packet = SharedPacket::try_new(0, frame, timestamp, Timescale::new(44_100), true)
+            .expect("packet");
+        shared.write_packet(&packet).expect("write");
+        assert!(
+            shared
+                .finish(&[TrackDuration {
+                    track,
+                    timescale: Timescale::new(44_100),
+                    ticks: 2 * 1152,
+                }])
+                .is_err()
+        );
     }
 
     #[test]

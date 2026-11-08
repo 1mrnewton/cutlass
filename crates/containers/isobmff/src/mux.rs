@@ -10,7 +10,10 @@
 //! offset. Edit durations use `MuxOptions::movie_timescale` when the caller
 //! sets it, and the least common multiple of the track timescales otherwise.
 
-use crate::legacy::{CodecId, Edit, Error, MediaKind, Mux, Packet, SampleFormat, StreamParams};
+use crate::alac;
+use crate::legacy::{
+    CodecId, ColorTags, Edit, Error, MediaKind, Mux, Packet, SampleFormat, StreamParams,
+};
 use crate::limits::{
     DEFAULT_SAMPLES_PER_FRAGMENT, MAX_BUFFERED_MUX_BYTES, MAX_PACKET_BYTES, MAX_TRACKS,
 };
@@ -57,6 +60,10 @@ struct TrackOut {
     params: StreamParams,
     edits: Vec<Edit>,
     next_dts: i64,
+    /// Encoder delay and trailing padding, in the track timescale.
+    /// `None` leaves the track as it was. AC-3 and E-AC-3 keep both inside
+    /// the frame durations, so the edit has to name them.
+    gapless: Option<(u64, u64)>,
 }
 
 struct Held {
@@ -120,6 +127,33 @@ impl<W: Write + Seek> IsoBmffMux<W> {
         }
     }
 
+    /// Remember the encoder delay and trailing padding of `track_id`.
+    ///
+    /// Both are samples in the track timescale. A track that already has
+    /// edits keeps those. Otherwise finish writes one edit (ISO/IEC 14496-12
+    /// `elst`): `media_time` is the first sample to present, and the segment
+    /// lasts for the samples that remain after the padding. Packet times are
+    /// unchanged and still include the priming.
+    pub(crate) fn set_gapless(
+        &mut self,
+        track_id: u32,
+        delay: u64,
+        padding: u64,
+    ) -> Result<(), Error> {
+        if self.finished {
+            return Err(Error::Incomplete);
+        }
+        let Some(track) = self
+            .tracks
+            .iter_mut()
+            .find(|track| track.params.track_id == track_id)
+        else {
+            return Err(Error::Missing { what: "track" });
+        };
+        track.gapless = Some((delay, padding));
+        Ok(())
+    }
+
     pub fn set_edits(&mut self, track_id: u32, edits: Vec<Edit>) -> Result<(), Error> {
         let Some(track) = self
             .tracks
@@ -146,6 +180,23 @@ impl<W: Write + Seek> IsoBmffMux<W> {
             return Err(Error::Missing { what: "track" });
         };
         track.params.extradata = extradata;
+        Ok(())
+    }
+
+    /// Sets a track's color code points, written as a `colr` box in its
+    /// sample description at finish.
+    pub fn set_color(&mut self, track_id: u32, color: ColorTags) -> Result<(), Error> {
+        if self.finished {
+            return Err(Error::Incomplete);
+        }
+        let Some(track) = self
+            .tracks
+            .iter_mut()
+            .find(|track| track.params.track_id == track_id)
+        else {
+            return Err(Error::Missing { what: "track" });
+        };
+        track.params.color = Some(color);
         Ok(())
     }
 
@@ -248,6 +299,7 @@ impl<W: Write + Seek> Mux for IsoBmffMux<W> {
             params: stored,
             edits: Vec::new(),
             next_dts: 0,
+            gapless: None,
         });
         Ok(id)
     }
@@ -453,8 +505,7 @@ fn entry_code(params: &StreamParams) -> Result<[u8; 4], Error> {
         CodecId::Av1 => *b"av01",
         CodecId::Vp8 => *b"vp08",
         CodecId::Vp9 => *b"vp09",
-        CodecId::Mpeg4 => *b"mp4v",
-        CodecId::Mpeg2 => *b"mp2v",
+        CodecId::Mpeg4 | CodecId::Mpeg2 => *b"mp4v",
         CodecId::Mjpeg => *b"jpeg",
         CodecId::ProRes => *b"apcn",
         CodecId::Aac | CodecId::Mp3 => *b"mp4a",
@@ -462,6 +513,7 @@ fn entry_code(params: &StreamParams) -> Result<[u8; 4], Error> {
         CodecId::Flac => *b"fLaC",
         CodecId::Alac => *b"alac",
         CodecId::Ac3 => *b"ac-3",
+        CodecId::Eac3 => *b"ec-3",
         CodecId::Pcm => match audio_format(params) {
             SampleFormat::S16Le | SampleFormat::S24Le | SampleFormat::S32Le | SampleFormat::U8 => {
                 *b"sowt"
@@ -671,7 +723,40 @@ fn tkhd(track: &TrackOut, duration: u64) -> Vec<u8> {
 /// A zero segment duration with a media time does not describe a dwell.
 /// Fragmented files leave that duration unknown. Use the media length so a
 /// player does not treat the edit as empty.
+///
+/// An Opus track without edits gets the one its encapsulation asks for:
+/// play from the pre-skip to the end of the sample durations, whose last
+/// one is already cut to the end trim.
+///
+/// A track with gapless trim and no edits of its own plays from the delay
+/// through the last sample that is not padding. That is the AC-3 and E-AC-3
+/// case: the frame duration still holds both.
 fn present_edits(track: &TrackOut, media_duration: u64, movie_scale: u32) -> Vec<Edit> {
+    if track.edits.is_empty()
+        && let Some((delay, padding)) = track.gapless
+        && (delay > 0 || padding > 0)
+        && let Ok(media_time) = i64::try_from(delay)
+        && media_duration > delay.saturating_add(padding)
+    {
+        let played = media_duration - delay - padding;
+        return vec![Edit {
+            segment_duration: scale_u(played, track.params.timescale.get(), movie_scale).max(1),
+            media_time: Some(media_time),
+            media_rate: 0x0001_0000,
+        }];
+    }
+    if track.edits.is_empty()
+        && track.params.codec == CodecId::Opus
+        && let Some(pre_skip) = crate::opus::pre_skip(&track.params.extradata)
+        && media_duration > u64::from(pre_skip)
+    {
+        let played = media_duration - u64::from(pre_skip);
+        return vec![Edit {
+            segment_duration: scale_u(played, track.params.timescale.get(), movie_scale).max(1),
+            media_time: Some(i64::from(pre_skip)),
+            media_rate: 0x0001_0000,
+        }];
+    }
     track
         .edits
         .iter()
@@ -757,9 +842,16 @@ fn stbl(
 ) -> Result<Vec<u8>, Error> {
     let mut body = Vec::new();
     body.extend(stsd(track)?);
+    if let Some(frame) = pcm_frame_bytes(track) {
+        body.extend(pcm_tables(samples, frame, map_offset));
+        return Ok(box_bytes(b"stbl", &body));
+    }
     body.extend(stts(samples));
     if samples.iter().any(|sample| sample.pts != sample.dts) {
         body.extend(ctts(samples)?);
+        if samples.iter().any(|sample| sample.pts < sample.dts) {
+            body.extend(cslg(samples));
+        }
     }
     body.extend(stsc_and_co64(samples, map_offset));
     body.extend(stsz(samples));
@@ -767,6 +859,63 @@ fn stbl(
         body.extend(stss(samples));
     }
     Ok(box_bytes(b"stbl", &body))
+}
+
+/// The bytes of one audio frame of a raw PCM track, or `None` for any
+/// other track.
+fn pcm_frame_bytes(track: &TrackOut) -> Option<u32> {
+    if track.params.codec != CodecId::Pcm {
+        return None;
+    }
+    let MediaKind::Audio(audio) = track.params.kind else {
+        return None;
+    };
+    let bytes = u32::from(audio.channels) * u32::from(audio.bits_per_sample / 8);
+    (bytes > 0).then_some(bytes)
+}
+
+/// Sample tables for raw PCM, as QuickTime reads them: each audio frame is
+/// one sample of one tick, and each written packet is one chunk.
+fn pcm_tables(samples: &[&Held], frame: u32, map_offset: &impl Fn(u64) -> u64) -> Vec<u8> {
+    let frames: Vec<u32> = samples.iter().map(|sample| sample.size / frame).collect();
+    let total: u32 = frames
+        .iter()
+        .fold(0, |sum, count| sum.saturating_add(*count));
+    let mut stts = vec![0, 0, 0, 0];
+    if total == 0 {
+        stts.extend_from_slice(&0u32.to_be_bytes());
+    } else {
+        stts.extend_from_slice(&1u32.to_be_bytes());
+        stts.extend_from_slice(&total.to_be_bytes());
+        stts.extend_from_slice(&1u32.to_be_bytes());
+    }
+    let mut runs: Vec<(u32, u32)> = Vec::new();
+    for (index, count) in frames.iter().enumerate() {
+        if runs.last().is_some_and(|(_, last)| last == count) {
+            continue;
+        }
+        runs.push((u32::try_from(index + 1).unwrap_or(u32::MAX), *count));
+    }
+    let mut stsc = vec![0, 0, 0, 0];
+    stsc.extend_from_slice(&u32::try_from(runs.len()).unwrap_or(0).to_be_bytes());
+    for (first, count) in runs {
+        stsc.extend_from_slice(&first.to_be_bytes());
+        stsc.extend_from_slice(&count.to_be_bytes());
+        stsc.extend_from_slice(&1u32.to_be_bytes());
+    }
+    let mut co64 = vec![0, 0, 0, 0];
+    co64.extend_from_slice(&u32::try_from(samples.len()).unwrap_or(0).to_be_bytes());
+    for sample in samples {
+        co64.extend_from_slice(&map_offset(sample.offset).to_be_bytes());
+    }
+    let mut stsz = vec![0, 0, 0, 0];
+    stsz.extend_from_slice(&frame.to_be_bytes());
+    stsz.extend_from_slice(&total.to_be_bytes());
+    let mut out = box_bytes(b"stts", &stts);
+    out.extend(box_bytes(b"stsc", &stsc));
+    out.extend(box_bytes(b"co64", &co64));
+    out.extend(box_bytes(b"stsz", &stsz));
+    out
 }
 
 fn stsd(track: &TrackOut) -> Result<Vec<u8>, Error> {
@@ -790,7 +939,13 @@ fn stsd(track: &TrackOut) -> Result<Vec<u8>, Error> {
             entry.extend_from_slice(&(-1i16).to_be_bytes());
             entry.extend(config_boxes(track)?);
         }
-        MediaKind::Audio(audio) => {
+        MediaKind::Audio(mut audio) => {
+            if &code == b"alac"
+                && let Some(facts) = alac::facts(&track.params.extradata)
+            {
+                audio.channels = facts.channels;
+                audio.bits_per_sample = facts.bits;
+            }
             entry.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 1]);
             entry.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0]);
             entry.extend_from_slice(&audio.channels.to_be_bytes());
@@ -822,16 +977,30 @@ fn config_boxes(track: &TrackOut) -> Result<Vec<u8>, Error> {
     } else if matches!(&code, b"vp08" | b"vp09") {
         out.extend(box_bytes(b"vpcC", &track.params.extradata));
     } else if &code == b"Opus" {
-        out.extend(box_bytes(b"dOps", &track.params.extradata));
+        let dops = crate::opus::dops(&track.params.extradata).ok_or(Error::Unsupported {
+            what: "Opus configuration that is neither dOps nor OpusHead",
+        })?;
+        out.extend(box_bytes(b"dOps", &dops));
     } else if &code == b"alac" {
-        out.extend(box_bytes(b"alac", &track.params.extradata));
+        // Extradata is the bare cookie; the entry holds its config in an
+        // `alac` box and its layout in a sibling `chan` box, as Apple writes.
+        let (config, chan) = alac::split(&track.params.extradata).ok_or(Error::Missing {
+            what: "alac cookie",
+        })?;
+        out.extend(box_bytes(b"alac", &config));
+        if let Some(chan) = chan {
+            out.extend(box_bytes(b"chan", &chan));
+        }
     } else if matches!(&code, b"ac-3" | b"sac3") {
         out.extend(box_bytes(b"dac3", &track.params.extradata));
     } else if &code == b"ec-3" {
         out.extend(box_bytes(b"dec3", &track.params.extradata));
     } else if &code == b"fLaC" {
         out.extend(box_bytes(b"dfLa", &track.params.extradata));
-    } else if matches!(&code, b"mp4a" | b"mp4v") && !track.params.extradata.is_empty() {
+    } else if matches!(&code, b"mp4a" | b"mp4v")
+        && (!track.params.extradata.is_empty() || track.params.codec == CodecId::Mpeg2)
+    {
+        // An MPEG-2 track is named only by the descriptor's object type.
         out.extend(box_bytes(b"esds", &esds(&track.params)));
     }
     if let Some(color) = track.params.color {
@@ -849,14 +1018,16 @@ fn esds(params: &StreamParams) -> Vec<u8> {
     let (oti, stream_type): (u8, u8) = match params.codec {
         CodecId::Mp3 => (0x6B, 0x15),
         CodecId::Mpeg4 => (0x20, 0x11),
+        CodecId::Mpeg2 => (mpeg2_object_type(&params.extradata), 0x11),
         _ => (0x40, 0x15),
     };
-    let specific = descriptor(0x05, &params.extradata);
     let mut decoder = Vec::new();
     decoder.push(oti);
     decoder.push(stream_type);
     decoder.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-    decoder.extend(specific);
+    if !params.extradata.is_empty() {
+        decoder.extend(descriptor(0x05, &params.extradata));
+    }
     let mut es = Vec::new();
     es.extend_from_slice(&[0, 0, 0]);
     es.extend(descriptor(0x04, &decoder));
@@ -864,6 +1035,37 @@ fn esds(params: &StreamParams) -> Vec<u8> {
     let mut payload = vec![0, 0, 0, 0];
     payload.extend(descriptor(0x03, &es));
     payload
+}
+
+/// The ISO/IEC 14496-1 object type for an H.262 sequence header and its
+/// extension: the profile in `profile_and_level_indication`, 4:2:2 for
+/// that escaped profile, and MPEG-1 when no sequence extension follows.
+/// Main when the headers are not there yet.
+fn mpeg2_object_type(headers: &[u8]) -> u8 {
+    const MAIN: u8 = 0x61;
+    if headers.is_empty() {
+        return MAIN;
+    }
+    let extension = headers
+        .windows(6)
+        .find(|bytes| bytes[..4] == [0, 0, 1, 0xB5] && bytes[4] >> 4 == 1);
+    let Some(bytes) = extension else {
+        return 0x6A;
+    };
+    let indication = (bytes[4] << 4) | (bytes[5] >> 4);
+    if indication & 0x80 != 0 {
+        return match indication & 0x0F {
+            0x02 | 0x05 => 0x65,
+            _ => MAIN,
+        };
+    }
+    match (indication >> 4) & 0x07 {
+        1 => 0x64,
+        2 => 0x63,
+        3 => 0x62,
+        5 => 0x60,
+        _ => MAIN,
+    }
 }
 
 fn descriptor(tag: u8, body: &[u8]) -> Vec<u8> {
@@ -949,6 +1151,34 @@ fn ctts(samples: &[&Held]) -> Result<Vec<u8>, Error> {
         }
     }
     Ok(box_bytes(b"ctts", &payload))
+}
+
+/// `cslg` (ISO/IEC 14496-12 8.6.1.4) for a `ctts` with negative offsets,
+/// as QuickTime and AVFoundation write it: the shift that puts every
+/// composition time at or after its decode time, the least and greatest
+/// offsets, and the first and last composition times. Version 1 holds a
+/// value that does not fit 32 bits.
+fn cslg(samples: &[&Held]) -> Vec<u8> {
+    let offsets = samples.iter().map(|sample| sample.pts - sample.dts);
+    let least = offsets.clone().min().unwrap_or(0);
+    let greatest = offsets.max().unwrap_or(0);
+    let start = samples.iter().map(|sample| sample.pts).min().unwrap_or(0);
+    let end = samples
+        .iter()
+        .map(|sample| sample.pts.saturating_add(i64::from(sample.duration)))
+        .max()
+        .unwrap_or(0);
+    let fields = [least.saturating_neg().max(0), least, greatest, start, end];
+    let narrow = fields.iter().all(|&value| i32::try_from(value).is_ok());
+    let mut payload = vec![u8::from(!narrow), 0, 0, 0];
+    for value in fields {
+        if narrow {
+            payload.extend_from_slice(&i32::try_from(value).unwrap_or(0).to_be_bytes());
+        } else {
+            payload.extend_from_slice(&value.to_be_bytes());
+        }
+    }
+    box_bytes(b"cslg", &payload)
 }
 
 /// One sample per chunk. Interleaved tracks then keep an exact file offset
@@ -1199,4 +1429,33 @@ fn box_bytes(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {
     out.extend_from_slice(kind);
     out.extend_from_slice(payload);
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::mpeg2_object_type;
+
+    fn headers(indication: Option<u8>) -> Vec<u8> {
+        let mut bytes = vec![
+            0, 0, 1, 0xB3, 0x2D, 0x02, 0x40, 0x13, 0xFF, 0xFF, 0xE0, 0x00,
+        ];
+        if let Some(indication) = indication {
+            bytes.extend([0, 0, 1, 0xB5, 0x10 | (indication >> 4), indication << 4]);
+            bytes.extend([0, 1, 0, 0]);
+        }
+        bytes
+    }
+
+    #[test]
+    fn the_mpeg2_object_type_follows_the_sequence_profile() {
+        assert_eq!(mpeg2_object_type(&headers(Some(0x48))), 0x61);
+        assert_eq!(mpeg2_object_type(&headers(Some(0x58))), 0x60);
+        assert_eq!(mpeg2_object_type(&headers(Some(0x14))), 0x64);
+        assert_eq!(mpeg2_object_type(&headers(Some(0x38))), 0x62);
+        assert_eq!(mpeg2_object_type(&headers(Some(0x26))), 0x63);
+        assert_eq!(mpeg2_object_type(&headers(Some(0x85))), 0x65);
+        assert_eq!(mpeg2_object_type(&headers(Some(0x82))), 0x65);
+        assert_eq!(mpeg2_object_type(&headers(None)), 0x6A);
+        assert_eq!(mpeg2_object_type(&[]), 0x61);
+    }
 }

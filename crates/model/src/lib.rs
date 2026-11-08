@@ -27,9 +27,11 @@ mod segment;
 mod serde_util;
 mod time;
 mod track;
+mod tracking;
 
 pub use animation::{
-    ANIMATION_PRESETS, AnimationPreset, Motion, animated_at, animation_preset, segment_animations,
+    ANIMATION_PRESETS, AnimationPreset, Letter, LetterMotion, LetterPose, LetterStep, LoopMotion,
+    Motion, animated_at, animation_preset, letters_at, segment_animations,
 };
 pub use bin::{BinFolder, BinLink, BinPath, VirtualStore};
 pub use clip::{Clip, Flip, Point, UniformScale};
@@ -41,19 +43,25 @@ pub use enums::{
 pub use graphs::{GRAPH_PRESETS, GraphPreset};
 pub use id::{DraftId, MaterialId, SegmentId, TrackId};
 pub use keyframe::{
-    ALPHA_KEY, CommonKeyframe, CommonKeyframeGroup, GraphPoint, KeyframeGraph, POSE_KEYS, add_keys,
-    clip_at, key_offsets, put_key, remove_keys, sample, shift_keys,
+    ALPHA_KEY, CommonKeyframe, CommonKeyframeGroup, GraphPoint, KeyframeGraph, MASK_KEYS,
+    POSE_KEYS, TEXT_COLOR_KEYS, VOLUME_KEY, add_keys, clip_at, is_keyable, is_pose_key,
+    key_offsets, key_offsets_where, put_key, remove_keys, remove_keys_where, sample, shift_keys,
+    text_color_at,
 };
 pub use linkage::{KindSwitches, LinkageSettings, linkage_from_biz};
 pub use materials::{
-    BloomParams, ConstantSpeedError, Crop, CurveSpeed, FreezeInfo, MaterialAnimations,
-    MaterialAudio, MaterialAudioFade, MaterialCanvas, MaterialColorConfig, MaterialDraft,
-    MaterialEffect, MaterialHsl, MaterialPictureAdjust, MaterialPluginEffect, MaterialRef,
-    MaterialShape, MaterialSpeed, MaterialText, MaterialTransition, MaterialVideo,
-    MaterialVideoEffect, Materials, RawMaterial, RichFill, RichFont, RichPaint, RichShadow,
-    RichSolid, RichStroke, RichStyle, RichText, SpeedPoint, StickerAnimation, TimeMarkItem,
-    VisibleBeat, VisibleMark, WordColumns, beat_timeline_time, blend_extents, blend_window,
-    clip_mark_time, constant_target_duration, curve_speed_factor, curve_target_duration, new_beats,
+    Algorithm, BloomParams, Bubble, CAPTION_STYLE_KEYS, CaptionTemplateInfo, ConstantSpeedError,
+    Crop, CurveSpeed, FreezeInfo, Kept, MaterialAnimations, MaterialAudio, MaterialAudioFade,
+    MaterialCanvas, MaterialColorConfig, MaterialDraft, MaterialEffect, MaterialHsl,
+    MaterialPictureAdjust, MaterialPluginEffect, MaterialRef, MaterialShape, MaterialSpeed,
+    MaterialText, MaterialTransition, MaterialVideo, MaterialVideoEffect, Materials, MotionBlur,
+    RawMaterial, Reframe, Relight, RichFill, RichFont, RichPaint, RichShadow, RichSolid,
+    RichStroke, RichStyle, RichText, SHAPE_ARROW, SHAPE_CONTOUR, SHAPE_FILL, SHAPE_LINE,
+    SHAPE_LINE_WIDTH, SHAPE_PEN, SHAPE_SHADOW, SHAPE_SIZE, SHAPE_STROKE_WIDTH, ShapeKind,
+    ShapePoint, SpeedPoint, SpeedPreset, StickerAnimation, SubtitleKeywords, TextRange,
+    TimeMarkItem, VideoAlgorithm, VideoStable, VisibleBeat, VisibleMark, WordColumns,
+    beat_timeline_time, blend_extents, blend_window, clip_mark_time, constant_target_duration,
+    curve_speed_at, curve_speed_factor, curve_target_duration, keywords_in_ranges, new_beats,
     new_time_mark, referenced_time_marks, segment_beats, segment_bloom, segment_time_mark,
     set_time_mark_items, set_user_beats, source_time_at, split_curve, time_mark_items,
     track_holds_beats, user_beats, visible_beats, visible_marks,
@@ -63,3 +71,4 @@ pub use relationship::{LinkPair, Relationship};
 pub use segment::{APPLY_ONE_CLIP, HdrSettings, ResponsiveLayout, Segment};
 pub use time::{FrameError, FrameRate, Micros, RangeError, TimeRange, TimecodeLabel};
 pub use track::Track;
+pub use tracking::{TrackMode, TrackPath, TrackSample, VIDEO_TRACKING};

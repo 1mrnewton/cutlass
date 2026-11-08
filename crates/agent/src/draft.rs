@@ -57,6 +57,10 @@ pub struct ProjectSnapshot {
     pub background: Option<String>,
     /// The stored color space.
     pub color_space: i32,
+    /// Where the last clip on the timeline ends.
+    pub end: Micros,
+    /// Each track's id, kind word and how many segments it holds, in order.
+    pub tracks: Vec<(TrackId, String, usize)>,
 }
 
 /// One segment at one revision.
@@ -145,6 +149,17 @@ impl fmt::Display for QueryView {
                 if let Some(background) = &project.background {
                     write!(formatter, " background={background}")?;
                 }
+                write!(formatter, " end={} tracks=", project.end.0)?;
+                for (index, (id, kind, count)) in project.tracks.iter().enumerate() {
+                    let comma = if index == 0 { "" } else { "," };
+                    // A track without an id, from an older project, is `""`.
+                    let id = if id.as_str().is_empty() {
+                        "\"\""
+                    } else {
+                        id.as_str()
+                    };
+                    write!(formatter, "{comma}{id}:{kind}:{count}")?;
+                }
                 Ok(())
             }
             Self::Track(track) => {
@@ -154,7 +169,11 @@ impl fmt::Display for QueryView {
                     track.revision, track.id, track.kind, track.name
                 )?;
                 for segment in &track.segments {
-                    write!(formatter, " {}", segment.id)?;
+                    write!(
+                        formatter,
+                        " {}@{}+{}",
+                        segment.id, segment.start.0, segment.duration.0
+                    )?;
                 }
                 Ok(())
             }
@@ -426,10 +445,15 @@ pub fn request_name(request: &Request) -> &'static str {
         Request::Trim { .. } => "trim",
         Request::SetWords { .. } => "set_words",
         Request::AddCaption { .. } => "add_caption",
+        Request::RecaptionClip { .. } => "recaption_clip",
+        Request::AddSubtitles { .. } => "add_subtitles",
+        Request::InsertCaption { .. } => "insert_caption",
+        Request::SetCaptionTemplate { .. } => "set_caption_template",
         Request::ExtractAudio { .. } => "extract_audio",
         Request::SetTrackAttribute { .. } => "set_track_attribute",
         Request::SetConstantSpeed { .. } => "set_constant_speed",
         Request::SetCurveSpeed { .. } => "set_curve_speed",
+        Request::SetChangePitch { .. } => "set_change_pitch",
         Request::SetTransition { .. } => "set_transition",
         Request::Split { .. } => "split",
         Request::Link { .. } => "link",
@@ -446,10 +470,18 @@ pub fn request_name(request: &Request) -> &'static str {
         Request::SetVolume { .. } => "set_volume",
         Request::SetFade { .. } => "set_fade",
         Request::SetCrop { .. } => "set_crop",
+        Request::SetStable { .. } => "set_stable",
+        Request::SetEnhance { .. } => "set_enhance",
+        Request::SetDenoise { .. } => "set_denoise",
+        Request::SetInterpolate { .. } => "set_interpolate",
+        Request::SetRelight { .. } => "set_relight",
+        Request::SetReframe { .. } => "set_reframe",
+        Request::SetMotionBlur { .. } => "set_motion_blur",
         Request::SetTextContent { .. } => "set_text_content",
         Request::SetTextSize { .. } => "set_text_size",
         Request::SetTextColor { .. } => "set_text_color",
         Request::SetTextAlign { .. } => "set_text_align",
+        Request::SetTextPattern { .. } => "set_text_pattern",
         Request::SetLetterSpacing { .. } => "set_letter_spacing",
         Request::SetLineSpacing { .. } => "set_line_spacing",
         Request::SetLineWidth { .. } => "set_line_width",
@@ -457,19 +489,51 @@ pub fn request_name(request: &Request) -> &'static str {
         Request::SetTextOutline { .. } => "set_text_outline",
         Request::SetTextShadow { .. } => "set_text_shadow",
         Request::SetTextBackground { .. } => "set_text_background",
+        Request::SetTextBubble { .. } => "set_text_bubble",
+        Request::SetCaptionStyle { .. } => "set_caption_style",
+        Request::SetCaptionKeyword { .. } => "set_caption_keyword",
+        Request::SetCaptionStagger { .. } => "set_caption_stagger",
         Request::SetTextGlow { .. } => "set_text_glow",
         Request::AddText { .. } => "add_text",
+        Request::AddShape { .. } => "add_shape",
+        Request::DrawShape { .. } => "draw_shape",
+        Request::SetShapeSize { .. } => "set_shape_size",
+        Request::SetShapeFill { .. } => "set_shape_fill",
+        Request::SetShapeStroke { .. } => "set_shape_stroke",
+        Request::SetShapeCorners { .. } => "set_shape_corners",
+        Request::SetShapeShadow { .. } => "set_shape_shadow",
         Request::AddEffect { .. } => "add_effect",
         Request::BindEffect { .. } => "bind_effect",
+        Request::SetBlend { .. } => "set_blend",
+        Request::SetAdjust { .. } => "set_adjust",
+        Request::AddAdjustment { .. } => "add_adjustment",
+        Request::AddFilter { .. } => "add_filter",
+        Request::SetHsl { .. } => "set_hsl",
+        Request::SetCurve { .. } => "set_curve",
+        Request::SetWheel { .. } => "set_wheel",
+        Request::SetLut { .. } => "set_lut",
+        Request::SetChroma { .. } => "set_chroma",
+        Request::SetMask { .. } => "set_mask",
+        Request::SetSelection { .. } => "set_selection",
+        Request::Track { .. } => "track",
+        Request::SetColorMask { .. } => "set_color_mask",
         Request::SetEffectStrength { .. } => "set_effect_strength",
+        Request::SetEffectControl { .. } => "set_effect_control",
         Request::SetKeyframes { .. } => "set_keyframes",
         Request::AddKeyframe { .. } => "add_keyframe",
         Request::RemoveKeyframe { .. } => "remove_keyframe",
+        Request::KeyValues { .. } => "key_values",
+        Request::UnkeyValues { .. } => "unkey_values",
         Request::SetKeyframeGraph { .. } => "set_keyframe_graph",
         Request::SetAnimation { .. } => "set_animation",
         Request::KeyPose { .. } => "key_pose",
         Request::Import { .. } => "import",
+        Request::ReplaceMedia { .. } => "replace_media",
+        Request::CreateCompound { .. } => "create_compound",
+        Request::Ungroup { .. } => "ungroup",
+        Request::SetInside { .. } => "set_inside",
         Request::InsertTrack { .. } => "insert_track",
+        Request::InsertTrackAt { .. } => "insert_track_at",
         Request::RemoveTrack { .. } => "remove_track",
         Request::RenameTrack { .. } => "rename_track",
         Request::AddTimeMark { .. } => "add_time_mark",
@@ -485,6 +549,8 @@ pub fn request_name(request: &Request) -> &'static str {
         Request::SetDropFrame { .. } => "set_drop_frame",
         Request::SetColorSpace { .. } => "set_color_space",
         Request::SetProjectName { .. } => "set_project_name",
+        Request::SetFreeLayer { .. } => "set_free_layer",
+        Request::Arrange { .. } => "arrange",
     }
 }
 
@@ -503,6 +569,32 @@ fn project_view(revision: u64, draft: &Draft) -> QueryView {
         ratio: draft.canvas_config.ratio.clone(),
         background: draft.canvas_config.background.clone(),
         color_space: draft.color_space,
+        end: Micros(
+            draft
+                .tracks
+                .iter()
+                .flat_map(|track| &track.segments)
+                .map(|segment| {
+                    segment
+                        .target
+                        .start
+                        .0
+                        .saturating_add(segment.target.duration.0)
+                })
+                .max()
+                .unwrap_or_default(),
+        ),
+        tracks: draft
+            .tracks
+            .iter()
+            .map(|track| {
+                (
+                    track.id.clone(),
+                    track.kind.as_str().to_owned(),
+                    track.segments.len(),
+                )
+            })
+            .collect(),
     })
 }
 
@@ -701,6 +793,7 @@ mod tests {
 
     fn open_tools() -> (DraftTools, TrackId) {
         let mut draft = Draft::empty("D");
+        draft.materials.videos.push(MaterialVideo::new("media"));
         let track_id = TrackId::new("main");
         draft.tracks[0].id = track_id.clone();
         (DraftTools::new(Session::open(draft)), track_id)
@@ -782,6 +875,10 @@ mod tests {
         assert_eq!(project.revision, 1);
         assert_eq!(project.duration, Micros(1_000_000));
         assert!(!view.to_string().contains("only-in-full"));
+        // Each track's id, kind and size, so a model can name them.
+        let text = view.to_string();
+        assert!(text.contains(" end=1000000"), "{text}");
+        assert!(text.contains(" tracks=main:video:1"), "{text}");
         assert_eq!(tools.session().revision(), 1);
     }
 
@@ -837,6 +934,7 @@ mod tests {
     #[test]
     fn query_segment_returns_range_and_revision() {
         let mut draft = Draft::empty("D");
+        draft.materials.videos.push(MaterialVideo::new("media"));
         draft.tracks[0].id = TrackId::new("main");
         let other = TrackId::new("other");
         draft.tracks.push(Track::main(other.clone()));

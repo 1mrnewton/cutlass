@@ -131,7 +131,7 @@ fn scene_error(error: EngineError) -> SceneError {
 }
 
 fn luma_grid(frame: &DecodedFrame) -> Option<[u8; SCENE_CELLS]> {
-    match frame {
+    match frame.on_cpu().ok()?.as_ref() {
         DecodedFrame::Coded {
             width,
             height,
@@ -146,7 +146,9 @@ fn luma_grid(frame: &DecodedFrame) -> Option<[u8; SCENE_CELLS]> {
             downsample(plane, *width, *height)
         }
         DecodedFrame::Still(image) => still_grid(image),
-        DecodedFrame::Coded { .. } | DecodedFrame::Platform { .. } => None,
+        DecodedFrame::Coded { .. }
+        | DecodedFrame::Platform { .. }
+        | DecodedFrame::Surface { .. } => None,
     }
 }
 

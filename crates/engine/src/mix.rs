@@ -1,11 +1,14 @@
 //! One mix of decoded PCM.
 //!
-//! Each audible clip is resampled, stretched, gained, and faded through
+//! The mix is mono or stereo. A clip with more channels, or two channels
+//! that are not left and right, is first folded into stereo by
+//! `cutlass-audio`'s downmix; a mono or stereo clip is passed on as it is.
+//! Each audible clip is then resampled, stretched, gained, and faded through
 //! `cutlass-audio`. A muted track contributes no samples: mute is not a gain
 //! of zero. Text and shapes are refused before any of that runs. The limiter
 //! runs on the sum.
 
-use cutlass_audio::{FadeCurve, fade, limit, resample, stretch};
+use cutlass_audio::{FadeCurve, downmix, fade, limit, resample, stretch};
 use cutlass_codec::access::{ChannelLayout, Pcm};
 use cutlass_model::{Draft, MaterialRef, Micros, Segment, Track, TrackAttribute};
 
@@ -237,6 +240,14 @@ fn process(mix: &Mix, clip: &MixClip) -> Result<Pcm, EngineError> {
     let ClipPcm::Ready(pcm) = &clip.pcm else {
         return Err(EngineError::NotReady);
     };
+    // Before the resample, so it runs on two channels instead of eight.
+    let folded;
+    let pcm = if pcm.layout.len() == 1 || pcm.layout == ChannelLayout::stereo() {
+        pcm
+    } else {
+        folded = downmix(pcm, &ChannelLayout::stereo())?;
+        &folded
+    };
     let pcm = resample(pcm, mix.rate)?;
     let pcm = stretch(&pcm, clip.speed, !clip.pitch_follows_speed)?;
     let pcm = apply_gain(&pcm, clip.volume)?;
@@ -329,6 +340,67 @@ mod tests {
         let other = sum(4, &[stereo, mono(4, vec![0.5, 0.0])]).unwrap();
         assert_eq!(other, summed);
         assert_eq!(sum(8, &[mono(4, vec![0.5])]), Err(EngineError::Layout));
+    }
+
+    fn surround(rate: u32, frames: Vec<[f32; 6]>) -> Pcm {
+        let layout = ChannelLayout::standard(cutlass_codec::access::StandardLayout::FiveOne);
+        Pcm::from_f32(rate, layout, frames.concat()).expect("5.1")
+    }
+
+    #[test]
+    fn a_surround_clip_is_folded_into_stereo_beside_mono_and_stereo() {
+        let mix = Mix {
+            rate: 8_000,
+            limiter: 0,
+        };
+        // FL, FR, FC, LFE, BL, BR.
+        let five_one = surround(
+            8_000,
+            vec![
+                [0.0, 0.0, 0.5, 1.0, 0.0, 0.0],
+                [0.25, 0.0, 0.0, 0.0, 0.0, 0.5],
+            ],
+        );
+        let alone = render(&mix, &[sound(five_one.clone())], ClockKind::Playback).expect("alone");
+        assert_eq!(alone.pcm.layout, ChannelLayout::stereo());
+        let c = std::f32::consts::FRAC_1_SQRT_2;
+        let got = alone.pcm.as_f32().expect("f32");
+        let want = [0.5 * c, 0.5 * c, 0.25, 0.5 * c];
+        for (got, want) in got.iter().zip(want) {
+            assert!((got - want).abs() < 1e-6, "{got} is not {want}");
+        }
+
+        let stereo =
+            Pcm::from_f32(8_000, ChannelLayout::stereo(), vec![0.1, 0.2, 0.3, 0.4]).unwrap();
+        let mono = mono(8_000, vec![0.5, 0.0]);
+        let all = render(
+            &mix,
+            &[sound(five_one), sound(stereo), sound(mono)],
+            ClockKind::Playback,
+        )
+        .expect("three layouts mix");
+        assert_eq!(all.contributed, 3);
+        assert_eq!(all.pcm.layout, ChannelLayout::stereo());
+        let got = all.pcm.as_f32().expect("f32");
+        let want = [0.5 * c + 0.6, 0.5 * c + 0.7, 0.55, 0.5 * c + 0.4];
+        for (got, want) in got.iter().zip(want) {
+            assert!((got - want).abs() < 1e-6, "{got} is not {want}");
+        }
+    }
+
+    #[test]
+    fn mono_and_stereo_clips_reach_the_mix_bit_for_bit() {
+        let mix = Mix {
+            rate: 8_000,
+            limiter: 0,
+        };
+        let mono_pcm = mono(8_000, vec![0.1, -0.7, f32::MIN_POSITIVE]);
+        let heard = render(&mix, &[sound(mono_pcm.clone())], ClockKind::Playback).expect("mono");
+        assert_eq!(heard.pcm, mono_pcm);
+        let stereo =
+            Pcm::from_f32(8_000, ChannelLayout::stereo(), vec![0.3, -0.0, 1.5, -1.25]).unwrap();
+        let heard = render(&mix, &[sound(stereo.clone())], ClockKind::Playback).expect("stereo");
+        assert_eq!(heard.pcm, stereo);
     }
 
     fn sound(pcm: Pcm) -> MixClip {

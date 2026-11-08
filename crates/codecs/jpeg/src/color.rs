@@ -14,9 +14,11 @@ pub(crate) fn ycbcr_to_rgb(y: i32, cb: i32, cr: i32) -> (u8, u8, u8) {
     (clamp_u8(red), clamp_u8(green), clamp_u8(blue))
 }
 
+/// Chroma rounds with one half minus one unit, as libjpeg does, so a
+/// grey pixel lands exactly on 128.
 pub(crate) fn rgb_to_ycbcr(red: i32, green: i32, blue: i32) -> (u8, u8, u8) {
     let y = (19_595 * red + 38_470 * green + 7_471 * blue + 32_768) >> 16;
-    let cb = ((-11_059 * red - 21_709 * green + 32_768 * blue + 32_768) >> 16) + 128;
-    let cr = ((32_768 * red - 27_439 * green - 5_329 * blue + 32_768) >> 16) + 128;
+    let cb = ((-11_059 * red - 21_709 * green + 32_768 * blue + 32_767) >> 16) + 128;
+    let cr = ((32_768 * red - 27_439 * green - 5_329 * blue + 32_767) >> 16) + 128;
     (clamp_u8(y), clamp_u8(cb), clamp_u8(cr))
 }

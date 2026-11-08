@@ -125,6 +125,18 @@ pub struct VideoFrame {
     pub render_width: u32,
     /// Display height. Equal to [`Self::height`] when the frame names no other size.
     pub render_height: u32,
+    /// Straight alpha at full size, when the stream carries it.
+    pub alpha: Option<Alpha>,
+}
+
+/// An alpha plane carried beside the color planes, at its coded depth.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Alpha {
+    /// Bits per sample, 1 to 16. Up to 8 bits store one byte per sample;
+    /// more store two, little-endian.
+    pub bit_depth: u8,
+    /// One sample per pixel, the frame's width by its height.
+    pub plane: Plane,
 }
 
 impl VideoFrame {
@@ -170,6 +182,7 @@ impl VideoFrame {
             matrix: MatrixCoefficients::Unspecified,
             render_width: width,
             render_height: height,
+            alpha: None,
         })
     }
 
@@ -219,7 +232,33 @@ impl VideoFrame {
             matrix: MatrixCoefficients::Unspecified,
             render_width: width,
             render_height: height,
+            alpha: None,
         })
+    }
+
+    /// Attaches a full-size alpha plane of `bit_depth` bits per sample.
+    pub fn with_alpha(mut self, bit_depth: u8, plane: Plane) -> Result<Self, CodecError> {
+        if bit_depth == 0 || bit_depth > 16 {
+            return Err(CodecError::InvalidApi {
+                what: "alpha bit depth",
+            });
+        }
+        let sample_bytes = if bit_depth > 8 { 2 } else { 1 };
+        let row = usize::try_from(plane.width)
+            .ok()
+            .and_then(|w| w.checked_mul(sample_bytes));
+        let need = usize::try_from(plane.height)
+            .ok()
+            .and_then(|h| plane.stride.checked_mul(h));
+        let fits = matches!((row, need), (Some(row), Some(need))
+            if row <= plane.stride && need <= plane.samples.len());
+        if plane.width != self.width || plane.height != self.height || !fits {
+            return Err(CodecError::InvalidApi {
+                what: "alpha plane size",
+            });
+        }
+        self.alpha = Some(Alpha { bit_depth, plane });
+        Ok(self)
     }
 
     /// A black 4:2:0 picture with tight planes.
@@ -821,6 +860,7 @@ impl Yuv444High {
 
 #[cfg(test)]
 mod tests {
+    use super::super::pixel::PixelFormat;
     use super::{
         FrameError, Plane, VideoFrame, Yuv420High, Yuv420p, Yuv420p10, Yuv422High, Yuv422p,
         Yuv444High, Yuv444p,
@@ -926,5 +966,29 @@ mod tests {
             Yuv420p::try_new(16_896, 16, y, chroma.clone(), chroma),
             Err(FrameError::Limit)
         );
+    }
+
+    #[test]
+    fn alpha_rides_a_frame_only_at_the_frame_size() {
+        let frame = VideoFrame::planar(
+            PixelFormat::Yuv444p12,
+            3,
+            2,
+            Plane::bytes(3, 2, 2, vec![0; 12]).expect("y"),
+            Plane::bytes(3, 2, 2, vec![0; 12]).expect("u"),
+            Plane::bytes(3, 2, 2, vec![0; 12]).expect("v"),
+        )
+        .expect("frame");
+        assert_eq!(frame.alpha, None);
+        let alpha = Plane::bytes(3, 2, 2, vec![0xff; 12]).expect("alpha");
+        let with = frame.clone().with_alpha(16, alpha.clone()).expect("alpha");
+        assert_eq!(with.alpha.as_ref().map(|a| a.bit_depth), Some(16));
+        assert!(frame.clone().with_alpha(0, alpha.clone()).is_err());
+        assert!(frame.clone().with_alpha(17, alpha).is_err());
+        let narrow = Plane::bytes(2, 2, 2, vec![0; 8]).expect("narrow");
+        assert!(frame.clone().with_alpha(16, narrow).is_err());
+        let bytes = Plane::bytes(3, 2, 1, vec![0; 6]).expect("bytes");
+        assert!(frame.clone().with_alpha(16, bytes.clone()).is_err());
+        assert!(frame.with_alpha(8, bytes).is_ok());
     }
 }

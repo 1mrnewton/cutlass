@@ -5,6 +5,11 @@
 //! left, 1 center, and 2 right. `letter_spacing` and `line_spacing` are
 //! fractions of `font_size`. A rich title's range may draw its letters at
 //! another size; a line is as tall as its largest letters.
+//!
+//! Vertical text (`typesetting` 1) stands each letter upright in a column,
+//! one em a letter, columns running right to left. `line_max_width` is then
+//! the column height, and alignment 3, 4 and 5 put a short column at the
+//! top, middle or bottom of the tallest (0, 1 and 2 read the same way).
 
 use cutlass_font::Font;
 use cutlass_model::MaterialText;
@@ -12,13 +17,21 @@ use cutlass_model::MaterialText;
 use crate::TextError;
 use crate::shape::{ShapeItem, ShapedGlyph, shape_faces};
 
-/// Horizontal alignment from [`MaterialText::alignment`].
+/// Alignment from [`MaterialText::alignment`]: left, center and right
+/// across a line, or top, middle and bottom down a vertical column.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Alignment {
     Left,
     Center,
     Right,
+    Top,
+    Middle,
+    Bottom,
 }
+
+/// Where a vertical letter's baseline sits in its em, from the top. Fonts
+/// here carry no ascent, so this is the usual share for Latin faces.
+pub(crate) const VERTICAL_BASELINE: f32 = 0.8;
 
 /// One glyph on a line, in pixels. Y is the line baseline, top to bottom.
 #[derive(Clone, Debug, PartialEq)]
@@ -28,6 +41,8 @@ pub struct PlacedGlyph {
     pub glyph_id: u16,
     pub missing: bool,
     pub x: f32,
+    /// This glyph's own baseline: its line's, or its place down a column.
+    pub y: f32,
     pub advance: f32,
     /// Times the layout's `font_size`.
     pub size: f32,
@@ -35,7 +50,8 @@ pub struct PlacedGlyph {
     pub face: usize,
 }
 
-/// One line after wrapping and alignment.
+/// One line after wrapping and alignment; a column for vertical text, whose
+/// `width` is then its height and `baseline` its first letter's.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Line {
     pub glyphs: Vec<PlacedGlyph>,
@@ -56,6 +72,15 @@ pub struct Layout {
 }
 
 impl Layout {
+    /// Whether the lines are vertical columns.
+    #[must_use]
+    pub fn vertical(&self) -> bool {
+        matches!(
+            self.alignment,
+            Alignment::Top | Alignment::Middle | Alignment::Bottom
+        )
+    }
+
     pub fn glyphs(&self) -> impl Iterator<Item = &PlacedGlyph> {
         self.lines.iter().flat_map(|line| line.glyphs.iter())
     }
@@ -82,12 +107,9 @@ pub(crate) fn layout_faces(
     let Some(font) = fonts.first() else {
         return Err(TextError::Limit);
     };
-    if material.typesetting != 0 {
-        return Err(TextError::Typesetting);
-    }
     let words = crate::richtext::read(material)?;
     let text = words.text.as_ref();
-    let alignment = alignment(material.alignment)?;
+    let alignment = alignment(material.alignment, material.typesetting)?;
     let font_size = positive_f32(material.font_size)?;
     let letter_spacing = finite_f32(material.letter_spacing)?;
     let line_spacing = finite_f32(material.line_spacing)?;
@@ -130,30 +152,40 @@ pub(crate) fn layout_faces(
         face * crate::richtext::size_at(&words.runs, glyph.source)
     };
     let size = |glyph: &ShapedGlyph| crate::richtext::size_at(&words.runs, glyph.source);
-    let rows = wrap(&shaped.items, width, letter_px, &units)?;
-    let mut laid = place(
-        rows,
-        Metrics {
-            font_size,
-            letter_px,
-            width,
-            step,
-        },
+    let metrics = Metrics {
+        font_size,
+        letter_px,
+        width,
+        step,
+    };
+    let mut laid = if matches!(
         alignment,
-        &size,
-        &units,
-    )?;
+        Alignment::Top | Alignment::Middle | Alignment::Bottom
+    ) {
+        let em = |glyph: &ShapedGlyph| font_size * size(glyph);
+        let rows = wrap_with(&shaped.items, width, letter_px, &em)?;
+        place_columns(rows, metrics, alignment, &size, &units)?
+    } else {
+        let advance = |glyph: &ShapedGlyph| f32::from(glyph.advance) * units(glyph);
+        let kern = |glyph: &ShapedGlyph| f32::from(glyph.kerning) * units(glyph);
+        let rows = wrap_kerned(&shaped.items, width, letter_px, &advance, &kern)?;
+        place(rows, metrics, alignment, &size, &units)?
+    };
     laid.scale = scale;
     laid.scales = scales;
     Ok(laid)
 }
 
-fn alignment(value: i32) -> Result<Alignment, TextError> {
-    match value {
-        0 => Ok(Alignment::Left),
-        1 => Ok(Alignment::Center),
-        2 => Ok(Alignment::Right),
-        _ => Err(TextError::Alignment),
+fn alignment(value: i32, typesetting: i32) -> Result<Alignment, TextError> {
+    match (typesetting, value) {
+        (0, 0) => Ok(Alignment::Left),
+        (0, 1) => Ok(Alignment::Center),
+        (0, 2) => Ok(Alignment::Right),
+        (1, 0 | 3) => Ok(Alignment::Top),
+        (1, 1 | 4) => Ok(Alignment::Middle),
+        (1, 2 | 5) => Ok(Alignment::Bottom),
+        (0 | 1, _) => Err(TextError::Alignment),
+        _ => Err(TextError::Typesetting),
     }
 }
 
@@ -166,11 +198,23 @@ struct Metrics {
     step: f32,
 }
 
-fn wrap(
+/// Wrap upright letters down columns: each is `length` long, with no
+/// kerning between them.
+fn wrap_with(
     items: &[ShapeItem],
     width: f32,
     letter_px: f32,
-    units: &dyn Fn(&ShapedGlyph) -> f32,
+    length: &dyn Fn(&ShapedGlyph) -> f32,
+) -> Result<Vec<Vec<ShapedGlyph>>, TextError> {
+    wrap_kerned(items, width, letter_px, length, &|_| 0.0)
+}
+
+fn wrap_kerned(
+    items: &[ShapeItem],
+    width: f32,
+    letter_px: f32,
+    length: &dyn Fn(&ShapedGlyph) -> f32,
+    kerning: &dyn Fn(&ShapedGlyph) -> f32,
 ) -> Result<Vec<Vec<ShapedGlyph>>, TextError> {
     let mut lines: Vec<Vec<ShapedGlyph>> = Vec::new();
     let mut used = 0.0_f32;
@@ -184,14 +228,9 @@ fn wrap(
                 used = 0.0;
             }
             ShapeItem::Glyph(glyph) => {
-                let scale = units(glyph);
-                let advance = f32::from(glyph.advance) * scale;
+                let advance = length(glyph);
                 let starting = lines.last().is_none_or(|line| line.is_empty());
-                let kern = if starting {
-                    0.0
-                } else {
-                    f32::from(glyph.kerning) * scale
-                };
+                let kern = if starting { 0.0 } else { kerning(glyph) };
                 let letter = if starting { 0.0 } else { letter_px };
                 let next = used + kern + letter + advance;
                 if !next.is_finite() || !advance.is_finite() {
@@ -252,18 +291,110 @@ fn place(
     }
     for line in &mut lines {
         let shift = match alignment {
-            Alignment::Left => 0.0,
             Alignment::Center => (box_width - line.width) / 2.0,
             Alignment::Right => box_width - line.width,
+            _ => 0.0,
         };
         if !shift.is_finite() {
             return Err(TextError::Limit);
         }
         for glyph in &mut line.glyphs {
             glyph.x += shift;
+            glyph.y = line.baseline;
             if !glyph.x.is_finite() {
                 return Err(TextError::Limit);
             }
+        }
+    }
+    Ok(Layout {
+        lines,
+        font_size,
+        scale: 0.0,
+        scales: Vec::new(),
+        alignment,
+    })
+}
+
+/// Stand each column's letters one under the next, centered across the
+/// column, the first column on the right.
+fn place_columns(
+    rows: Vec<Vec<ShapedGlyph>>,
+    metrics: Metrics,
+    alignment: Alignment,
+    size: &dyn Fn(&ShapedGlyph) -> f32,
+    units: &dyn Fn(&ShapedGlyph) -> f32,
+) -> Result<Layout, TextError> {
+    let Metrics {
+        font_size,
+        letter_px,
+        width: height,
+        step,
+    } = metrics;
+    // Each column's thickness and its distance from the previous one.
+    let pitches: Vec<(f32, f32)> = rows
+        .iter()
+        .enumerate()
+        .map(|(index, row)| {
+            let widest = row.iter().map(size).fold(1.0_f32, f32::max);
+            let pitch = if index == 0 { font_size } else { step };
+            (font_size * widest, pitch * widest)
+        })
+        .collect();
+    let across: f32 = pitches.iter().map(|(_, pitch)| pitch).sum();
+    let mut lines = Vec::with_capacity(rows.len());
+    let mut right = across;
+    for (row, (thick, pitch)) in rows.iter().zip(&pitches) {
+        let middle = right - thick / 2.0;
+        right -= pitch;
+        let mut glyphs = Vec::with_capacity(row.len());
+        let mut pen = 0.0_f32;
+        for (index, glyph) in row.iter().enumerate() {
+            let times = size(glyph);
+            let em = font_size * times;
+            if index > 0 {
+                pen += letter_px;
+            }
+            let advance = f32::from(glyph.advance) * units(glyph);
+            let (x, y) = (middle - advance / 2.0, pen + em * VERTICAL_BASELINE);
+            if ![x, y, advance].iter().all(|value| value.is_finite()) {
+                return Err(TextError::Limit);
+            }
+            glyphs.push(PlacedGlyph {
+                source: glyph.source,
+                character: glyph.character,
+                glyph_id: glyph.glyph_id,
+                missing: glyph.missing,
+                x,
+                y,
+                advance,
+                size: times,
+                face: glyph.face,
+            });
+            pen += em;
+        }
+        let baseline = glyphs
+            .first()
+            .map_or(font_size * VERTICAL_BASELINE, |glyph| glyph.y);
+        lines.push(Line {
+            glyphs,
+            width: pen,
+            baseline,
+        });
+    }
+    let content = lines.iter().map(|line| line.width).fold(0.0_f32, f32::max);
+    let box_height = if height > 0.0 { height } else { content };
+    for line in &mut lines {
+        let shift = match alignment {
+            Alignment::Middle => (box_height - line.width) / 2.0,
+            Alignment::Bottom => box_height - line.width,
+            _ => 0.0,
+        };
+        if !shift.is_finite() {
+            return Err(TextError::Limit);
+        }
+        line.baseline += shift;
+        for glyph in &mut line.glyphs {
+            glyph.y += shift;
         }
     }
     Ok(Layout {
@@ -299,6 +430,7 @@ fn place_line(
             glyph_id: glyph.glyph_id,
             missing: glyph.missing,
             x: pen,
+            y: 0.0,
             advance,
             size: times,
             face: glyph.face,
@@ -414,6 +546,41 @@ mod tests {
     }
 
     #[test]
+    fn vertical_text_stacks_letters_in_columns_from_the_right() {
+        let face = font();
+        let mut text = material("AB\nA");
+        text.typesetting = 1;
+        text.alignment = 3;
+        let laid = layout(&face, &text).expect("vertical");
+        assert!(laid.vertical());
+        assert_eq!(laid.lines.len(), 2);
+        let (first, second) = (&laid.lines[0], &laid.lines[1]);
+        // One em a letter, the baseline 0.8 down each.
+        assert_eq!(first.glyphs[0].y.to_bits(), 800.0_f32.to_bits());
+        assert_eq!(first.glyphs[1].y.to_bits(), 1_800.0_f32.to_bits());
+        assert_eq!(first.width.to_bits(), 2_000.0_f32.to_bits());
+        // The first column is on the right, each letter centered in it.
+        let center = |glyph: &super::PlacedGlyph| glyph.x + glyph.advance / 2.0;
+        assert_eq!(center(&first.glyphs[0]).to_bits(), 1_500.0_f32.to_bits());
+        assert_eq!(center(&second.glyphs[0]).to_bits(), 500.0_f32.to_bits());
+
+        text.alignment = 5;
+        let bottom = layout(&face, &text).expect("bottom");
+        assert_eq!(bottom.lines[1].glyphs[0].y.to_bits(), 1_800.0_f32.to_bits());
+        text.alignment = 4;
+        let middle = layout(&face, &text).expect("middle");
+        assert_eq!(middle.lines[1].glyphs[0].y.to_bits(), 1_300.0_f32.to_bits());
+
+        // A column height wraps the letters onto the next column.
+        text.content = "AB".to_owned();
+        text.alignment = 3;
+        text.line_max_width = 1_500.0;
+        let wrapped = layout(&face, &text).expect("wrapped");
+        assert_eq!(wrapped.lines.len(), 2);
+        assert_eq!(wrapped.lines[1].glyphs[0].character, 'B');
+    }
+
+    #[test]
     fn a_bad_measure_or_a_truncated_font_is_an_error() {
         let face = font();
         let mut text = material("A");
@@ -426,8 +593,12 @@ mod tests {
         text.alignment = 9;
         assert!(matches!(layout(&face, &text), Err(TextError::Alignment)));
         text.alignment = 0;
-        text.typesetting = 1;
+        text.typesetting = 2;
         assert!(matches!(layout(&face, &text), Err(TextError::Typesetting)));
+        text.typesetting = 1;
+        text.alignment = 6;
+        assert!(matches!(layout(&face, &text), Err(TextError::Alignment)));
+        text.alignment = 0;
         text.typesetting = 0;
         text.is_rich_text = true;
         assert!(matches!(

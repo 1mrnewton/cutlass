@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "radiant",
+  "name": "Radiant",
+  "category": "Portrait",
+  "adjust": {"brilliance": 0.4, "highlights": 0.1, "saturation": 0.1}
+}

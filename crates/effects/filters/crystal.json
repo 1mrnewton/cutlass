@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "crystal",
+  "name": "Crystal",
+  "category": "Landscape",
+  "adjust": {"clarity": 0.4, "sharpen": 0.4, "saturation": 0.15, "contrast": 0.2, "blacks": -0.1}
+}

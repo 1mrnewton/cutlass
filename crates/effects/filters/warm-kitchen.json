@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "warm-kitchen",
+  "name": "Warm Kitchen",
+  "category": "Food",
+  "adjust": {"temperature": 0.35, "tint": 0.05, "vignette": 0.2, "contrast": 0.1}
+}

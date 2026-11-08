@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "id": "shine",
+  "name": "Shine",
+  "category": "Light",
+  "outgoing": [
+    {"block": "grade", "params": {"brightness": {"keys": [[0, 0], [0.5, 0.2], [1, 0]]}}}
+  ],
+  "incoming": [
+    {"block": "grade", "params": {"brightness": {"keys": [[0, 0], [0.5, 0.2], [1, 0]]}}}
+  ],
+  "cross": {"kind": 0, "angle": 30, "soft": 0.15, "edge": 0.06, "red": 1, "green": 1, "blue": 1}
+}

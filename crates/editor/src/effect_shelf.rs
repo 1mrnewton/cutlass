@@ -18,6 +18,48 @@ pub const EFFECT_LENGTH: Micros = Micros(3_000_000);
 /// A card's id starts with this, so a drop can tell an effect from a file.
 pub const EFFECT_CARD_PREFIX: &str = "effect:";
 
+/// The one card on the adjustments shelf: an adjustment layer, its sliders
+/// at zero, that runs over every picture below it.
+pub const ADJUSTMENT_CARD: &str = "adjustment:basic";
+
+/// A filter card's id starts with this, then the look's `effect_id`.
+pub const FILTER_CARD_PREFIX: &str = "filter:";
+
+/// The bundled filters as `(card id, name)`, in shelf order.
+#[must_use]
+pub fn filter_cards() -> Vec<(String, &'static str)> {
+    cutlass_effects::looks()
+        .iter()
+        .map(|look| {
+            (
+                format!("{FILTER_CARD_PREFIX}{}", look.effect_id()),
+                look.name.as_str(),
+            )
+        })
+        .collect()
+}
+
+/// The filters shelf's categories that hold at least one filter, in shelf
+/// order.
+#[must_use]
+pub fn filter_categories() -> Vec<&'static str> {
+    cutlass_effects::FILTER_CATEGORIES
+        .iter()
+        .copied()
+        .filter(|category| {
+            cutlass_effects::looks()
+                .iter()
+                .any(|look| look.category == *category)
+        })
+        .collect()
+}
+
+/// The bundled filter a card id names.
+#[must_use]
+pub fn filter_of_card(card_id: &str) -> Option<&'static cutlass_effects::Look> {
+    cutlass_effects::bundled_look(card_id.strip_prefix(FILTER_CARD_PREFIX)?)
+}
+
 /// One card on the effects shelf.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EffectCard {
@@ -26,6 +68,8 @@ pub struct EffectCard {
     /// What [`Request::AddEffect`] takes, such as `recipe/shake`.
     pub effect_id: String,
     pub name: String,
+    /// The shelf category, one of [`cutlass_effects::EFFECT_CATEGORIES`].
+    pub category: String,
 }
 
 /// The bundled effects, in shelf order.
@@ -39,8 +83,20 @@ pub fn effect_cards() -> Vec<EffectCard> {
                 id: format!("{EFFECT_CARD_PREFIX}{effect_id}"),
                 effect_id,
                 name: recipe.name.clone(),
+                category: recipe.category.clone(),
             }
         })
+        .collect()
+}
+
+/// The shelf's categories that hold at least one effect, in shelf order.
+#[must_use]
+pub fn effect_categories() -> Vec<&'static str> {
+    let cards = effect_cards();
+    cutlass_effects::EFFECT_CATEGORIES
+        .iter()
+        .copied()
+        .filter(|category| cards.iter().any(|card| card.category == *category))
         .collect()
 }
 
@@ -124,6 +180,28 @@ fn follows_another(draft: &Draft, clip: &SegmentId) -> bool {
 }
 
 #[cfg(test)]
+mod filter_tests {
+    use super::{filter_cards, filter_of_card};
+
+    #[test]
+    fn every_filter_card_names_its_look() {
+        let cards = filter_cards();
+        assert_eq!(cards.len(), cutlass_effects::looks().len());
+        for (id, name) in cards {
+            assert_eq!(
+                filter_of_card(&id).map(|look| look.name.as_str()),
+                Some(name)
+            );
+        }
+        assert!(filter_of_card("effect:look/warm").is_none());
+        assert_eq!(
+            super::filter_categories(),
+            cutlass_effects::FILTER_CATEGORIES.to_vec()
+        );
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use cutlass_model::{Segment, TimeRange};
     use cutlass_session::Session;
@@ -141,9 +219,10 @@ mod tests {
     }
 
     #[test]
-    fn ten_cards_each_naming_a_bundled_effect() {
+    fn every_card_names_a_bundled_effect() {
         let cards = effect_cards();
-        assert_eq!(cards.len(), 10);
+        assert_eq!(cards.len(), bundled().len());
+        assert!(cards.len() >= 40);
         for card in &cards {
             assert_eq!(
                 effect_of_card(&card.id).as_deref(),
@@ -152,6 +231,16 @@ mod tests {
         }
         assert_eq!(effect_of_card("effect:recipe/none"), None);
         assert_eq!(effect_of_card("recipe/shake"), None);
+        // Only categories with an effect in them, in shelf order.
+        let categories = effect_categories();
+        assert_eq!(categories.first(), Some(&"Basic"));
+        for card in &cards {
+            assert!(
+                categories.contains(&card.category.as_str()),
+                "{}",
+                card.name
+            );
+        }
     }
 
     #[test]

@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "platinum",
+  "name": "Platinum",
+  "category": "Mono",
+  "adjust": {"temperature": 0.15, "fade": 0.15, "contrast": -0.05},
+  "hsl": {"red": [0, -1, 0], "orange": [0, -1, 0], "yellow": [0, -1, 0], "green": [0, -1, 0], "cyan": [0, -1, 0], "blue": [0, -1, 0], "purple": [0, -1, 0], "magenta": [0, -1, 0]}
+}

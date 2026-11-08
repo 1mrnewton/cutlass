@@ -70,6 +70,12 @@ pub fn probe(path: &Path) -> Result<Probed, ProbeError> {
     if let Some(probed) = aiff(path, &header)? {
         return Ok(probed);
     }
+    if let Some(probed) = flac(path, &header)? {
+        return Ok(probed);
+    }
+    if let Some(probed) = ogg(path, &header)? {
+        return Ok(probed);
+    }
     if let Some(probed) = movie(path, &header)? {
         return Ok(probed);
     }
@@ -193,6 +199,77 @@ fn aiff(path: &Path, header: &[u8]) -> Result<Option<Probed>, ProbeError> {
     Ok(Some(Probed::Audio { duration }))
 }
 
+/// The STREAMINFO sample count, or the frames counted when it is unknown.
+fn flac(path: &Path, header: &[u8]) -> Result<Option<Probed>, ProbeError> {
+    if !matches!(
+        cutlass_flac_container::probe(header),
+        cutlass_container::ProbeResult::Accept { .. }
+    ) {
+        return Ok(None);
+    }
+    let file = File::open(path).map_err(|error| io_error(path, error))?;
+    let length = file
+        .metadata()
+        .map_err(|error| io_error(path, error))?
+        .len();
+    let mut demux = cutlass_flac_container::FlacDemux::open(std::io::BufReader::new(file), length)
+        .map_err(|error| ProbeError::new(format!("flac refused the file: {error}")))?;
+    let info = *demux.stream_info();
+    let mut samples = info.total_samples;
+    if samples == 0 {
+        loop {
+            match cutlass_container::Demux::read_packet(&mut demux) {
+                Ok(Some(packet)) => {
+                    let span = packet.timestamp().duration().unwrap_or(0);
+                    samples = samples.saturating_add(u64::try_from(span).unwrap_or(0));
+                }
+                Ok(None) => break,
+                Err(error) => {
+                    return Err(ProbeError::new(format!("flac refused the file: {error}")));
+                }
+            }
+        }
+    }
+    let duration = samples_to_micros(samples, info.sample_rate)?;
+    Ok(Some(Probed::Audio { duration }))
+}
+
+/// Ogg Opus or Ogg Vorbis: the first edit's length, which leaves out an
+/// Opus pre-skip, a Vorbis stream's late start, and the end trim. Other
+/// Ogg mappings (FLAC, Theora) are refused.
+fn ogg(path: &Path, header: &[u8]) -> Result<Option<Probed>, ProbeError> {
+    if !matches!(
+        cutlass_ogg::probe(header),
+        cutlass_container::ProbeResult::Accept { .. }
+    ) {
+        return Ok(None);
+    }
+    let file = File::open(path).map_err(|error| io_error(path, error))?;
+    let length = file
+        .metadata()
+        .map_err(|error| io_error(path, error))?
+        .len();
+    let demux = cutlass_ogg::OggDemux::open(std::io::BufReader::new(file), length)
+        .map_err(|error| ProbeError::new(format!("ogg refused the file: {error}")))?;
+    let streams = cutlass_container::Demux::streams(&demux);
+    let Some(stream) = streams.iter().find(|stream| {
+        matches!(
+            stream.params().codec(),
+            cutlass_codec::StreamCodec::Known(
+                cutlass_codec::CodecId::Opus | cutlass_codec::CodecId::Vorbis
+            )
+        )
+    }) else {
+        return Err(ProbeError::new("only Opus and Vorbis in Ogg are available"));
+    };
+    let samples = stream.edits().first().map_or(0, |edit| edit.duration());
+    let duration = ticks_to_micros(
+        u64::try_from(samples).unwrap_or(0),
+        stream.timescale().ticks_per_second(),
+    )?;
+    Ok(Some(Probed::Audio { duration }))
+}
+
 fn movie(path: &Path, header: &[u8]) -> Result<Option<Probed>, ProbeError> {
     if header.get(4..8) != Some(b"ftyp") {
         return Ok(None);
@@ -267,6 +344,9 @@ fn mpeg_audio(path: &Path, header: &[u8]) -> Result<Option<Probed>, ProbeError> 
     Ok(Some(Probed::Audio { duration }))
 }
 
+/// A raw AAC stream (ADTS, usually `.aac`) is recognised and refused:
+/// no reader the apps register plays it, since it cannot seek, so an
+/// import would add a clip that never sounds.
 fn adts(path: &Path, header: &[u8]) -> Result<Option<Probed>, ProbeError> {
     let Some((first, second)) = header.first().zip(header.get(1)) else {
         return Ok(None);
@@ -275,41 +355,23 @@ fn adts(path: &Path, header: &[u8]) -> Result<Option<Probed>, ProbeError> {
         return Ok(None);
     }
     let file = File::open(path).map_err(|error| io_error(path, error))?;
-    let mut demux = cutlass_adts::AdtsFile::open(file)
-        .map_err(|error| ProbeError::new(format!("aac refused the file: {error}")))?;
-    let streams = cutlass_container::Demux::streams(&demux);
-    let Some(rate) = streams
-        .first()
-        .and_then(|stream| stream.params().sample_rate())
-    else {
-        return Err(ProbeError::new("aac opened a file with no sample rate"));
-    };
-    let mut samples = 0i64;
-    loop {
-        match cutlass_container::Demux::read_packet(&mut demux) {
-            Ok(Some(packet)) => {
-                samples = samples.saturating_add(packet.timestamp().duration().unwrap_or(0));
-            }
-            Ok(None) => break,
-            Err(error) => return Err(ProbeError::new(format!("aac refused the file: {error}"))),
-        }
+    if cutlass_adts::AdtsFile::open(file).is_err() {
+        return Ok(None);
     }
-    if samples <= 0 {
-        return Err(ProbeError::new("aac opened a file with no duration"));
-    }
-    let duration = samples_to_micros(u64::try_from(samples).unwrap_or(0), rate)?;
-    Ok(Some(Probed::Audio { duration }))
+    Err(ProbeError::new(RAW_AAC))
 }
+
+/// Why a raw AAC file is refused, and what plays instead.
+pub const RAW_AAC: &str =
+    "raw AAC (.aac) files cannot be played yet; the same sound in an .m4a or .mp4 can";
 
 fn unavailable(header: &[u8]) -> Option<&'static str> {
     if header.starts_with(&[0x1A, 0x45, 0xDF, 0xA3]) {
         return Some("matroska is not available");
     }
     if header.starts_with(b"OggS") {
+        // A capture pattern with a version other than 0.
         return Some("ogg is not available");
-    }
-    if header.starts_with(b"fLaC") {
-        return Some("flac is not available");
     }
     if header.starts_with(b"caff") {
         return Some("caf is not available");
@@ -401,6 +463,102 @@ mod tests {
             } => (meta, width, height, duration),
             Probed::Audio { .. } => panic!("{} opened as audio", path.display()),
         }
+    }
+
+    /// One second of 20 ms Opus packets after a 312-sample pre-skip, in Ogg.
+    fn ogg_opus() -> Vec<u8> {
+        use cutlass_codec::{CodecId, Packet, StreamCodec, StreamParams, Timescale, Timestamp};
+        use cutlass_container::{Mux, NewStream, TrackDuration};
+        let mut head = b"OpusHead".to_vec();
+        head.extend([1, 2, 0x38, 0x01, 0x80, 0xBB, 0, 0, 0, 0, 0]);
+        let mut mux = cutlass_ogg::OggMux::new(Vec::new());
+        let params = StreamParams::try_audio(StreamCodec::Known(CodecId::Opus), 48_000, 2, head)
+            .expect("params");
+        let track = mux
+            .add_stream(NewStream {
+                params,
+                timescale: Timescale::new(48_000),
+                language: None,
+            })
+            .expect("stream");
+        let mut ticks = 0;
+        while ticks < 48_000 + 312 {
+            let duration = 960.min(48_000 + 312 - ticks);
+            let time = Timestamp::try_new(Some(ticks), Some(ticks), Some(duration)).expect("time");
+            // CELT, fullband, 20 ms, one frame: a TOC and a silent frame.
+            let packet = Packet::try_new(
+                0,
+                vec![0xFC, 0xFF, 0xFE],
+                time,
+                Timescale::new(48_000),
+                true,
+            )
+            .expect("packet");
+            mux.write_packet(&packet).expect("write");
+            ticks += duration;
+        }
+        mux.finish(&[TrackDuration {
+            track,
+            timescale: Timescale::new(48_000),
+            ticks,
+        }])
+        .expect("finish");
+        mux.into_inner()
+    }
+
+    #[test]
+    fn an_ogg_opus_file_is_audio_as_long_as_its_samples_after_the_pre_skip() {
+        let temp = Temp::new();
+        let path = temp.0.join("voice.opus");
+        std::fs::write(&path, ogg_opus()).expect("write");
+        assert_eq!(
+            probe(&path).expect("opus"),
+            Probed::Audio {
+                duration: 1_000_000
+            }
+        );
+        // A damaged head page leaves no Opus stream, and the file is
+        // refused as Ogg rather than taken for another container.
+        let mut damaged = ogg_opus();
+        let at = damaged
+            .windows(8)
+            .position(|w| w == b"OpusHead")
+            .expect("head");
+        damaged[at..at + 8].copy_from_slice(b"Garbage!");
+        std::fs::write(&path, &damaged).expect("write");
+        let error = probe(&path).expect_err("damaged");
+        assert!(error.to_string().contains("ogg"), "{error}");
+    }
+
+    fn ogg_fixture(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../containers/ogg/tests/fixtures")
+            .join(name)
+    }
+
+    /// libvorbis files muxed by GStreamer: as long as ffprobe reads them,
+    /// 22,050 samples at 44.1 kHz and 4,000 at 8 kHz.
+    #[test]
+    fn an_ogg_vorbis_file_is_audio_as_long_as_its_samples() {
+        assert_eq!(
+            probe(&ogg_fixture("stereo_44100_q4.ogg")).expect("vorbis"),
+            Probed::Audio { duration: 500_000 }
+        );
+        assert_eq!(
+            probe(&ogg_fixture("sweep_8000_mono_q0.ogg")).expect("vorbis"),
+            Probed::Audio { duration: 500_000 }
+        );
+        // A damaged identification header leaves no Vorbis stream.
+        let temp = Temp::new();
+        let mut damaged = std::fs::read(ogg_fixture("stereo_44100_q4.ogg")).expect("read");
+        let at = damaged
+            .windows(7)
+            .position(|w| w == b"\x01vorbis")
+            .expect("head");
+        damaged[at + 1..at + 7].copy_from_slice(b"Garbag");
+        let path = temp.write("damaged.ogg", &damaged);
+        let error = probe(&path).expect_err("damaged");
+        assert!(error.to_string().contains("ogg"), "{error}");
     }
 
     #[test]
@@ -540,6 +698,69 @@ mod tests {
         assert_eq!(probe(&path).expect("aiff"), Probed::Audio { duration: 125 });
     }
 
+    #[test]
+    fn a_flac_file_is_audio_with_or_without_a_sample_count() {
+        let temp = Temp::new();
+        let mut bytes = flac_mono(4_000);
+        let path = temp.write("sound.flac", &bytes);
+        assert_eq!(
+            probe(&path).expect("flac"),
+            Probed::Audio { duration: 500_000 }
+        );
+        // Zero the STREAMINFO sample count: the frames are counted instead.
+        bytes[21] &= 0xF0;
+        bytes[22..26].fill(0);
+        let path = temp.write("unknown.flac", &bytes);
+        assert_eq!(
+            probe(&path).expect("flac"),
+            Probed::Audio { duration: 500_000 }
+        );
+    }
+
+    fn flac_mono(samples: usize) -> Vec<u8> {
+        use cutlass_codec::{CodecId, Packet, StreamCodec, StreamParams, Timescale, Timestamp};
+        use cutlass_container::{Mux, NewStream, TrackDuration, TrackId};
+        let source: Vec<i32> = (0..samples).map(|i| (i as i32 % 200) * 50).collect();
+        let settings = cutlass_flac::Settings::level(5).expect("level");
+        let mut encoder = cutlass_flac::FlacEncoder::new(8_000, 1, 16, settings).expect("encoder");
+        let mut frames = encoder.encode(&source).expect("encode");
+        frames.extend(encoder.finish().expect("finish"));
+        let mut mux = cutlass_flac_container::FlacMux::new(std::io::Cursor::new(Vec::new()));
+        let params = StreamParams::try_audio(
+            StreamCodec::Known(CodecId::Flac),
+            8_000,
+            1,
+            encoder.stream_info().to_bytes().to_vec(),
+        )
+        .expect("params");
+        mux.add_stream(NewStream {
+            params,
+            timescale: Timescale::new(8_000),
+            language: None,
+        })
+        .expect("stream");
+        for frame in frames {
+            let pts = i64::try_from(frame.first_sample).expect("pts");
+            let packet = Packet::try_new(
+                0,
+                frame.data,
+                Timestamp::try_new(Some(pts), Some(pts), Some(i64::from(frame.samples)))
+                    .expect("time"),
+                Timescale::new(8_000),
+                true,
+            )
+            .expect("packet");
+            mux.write_packet(&packet).expect("write");
+        }
+        mux.finish(&[TrackDuration {
+            track: TrackId::new(0),
+            timescale: Timescale::new(8_000),
+            ticks: i64::try_from(samples).expect("ticks"),
+        }])
+        .expect("finish");
+        mux.into_inner().into_inner()
+    }
+
     fn aiff_s16(frame: &[u8]) -> Vec<u8> {
         use cutlass_codec::{CodecId, Packet, StreamCodec, StreamParams, Timescale, Timestamp};
         use cutlass_container::{Mux, NewStream, TrackDuration, TrackId};
@@ -600,5 +821,20 @@ mod tests {
         for name in ["truncated.jpg", "hostile.jpg", "unknown.bin"] {
             let _ = probe(&fixture(name));
         }
+    }
+
+    /// Frames of AAC-LC, 48 kHz stereo, each a 7-byte ADTS header with no
+    /// CRC and one byte of payload.
+    fn adts_frames(count: usize) -> Vec<u8> {
+        let frame = [0xFF, 0xF1, 0x4C, 0x80, 0x01, 0x1F, 0xFC, 0x00];
+        frame.repeat(count)
+    }
+
+    #[test]
+    fn a_raw_aac_file_is_refused_with_what_plays_instead() {
+        let temp = Temp::new();
+        let aac = temp.write("sound.aac", &adts_frames(8));
+        let error = probe(&aac).expect_err("raw aac");
+        assert_eq!(error.message(), super::RAW_AAC);
     }
 }

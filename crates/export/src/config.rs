@@ -72,6 +72,46 @@ pub struct ExportRequest {
     pub audio: Option<AudioExport>,
     pub sidecar: Option<SidecarRequest>,
     pub late_by: i64,
+    /// Hold `bitrate` over each second instead of on average.
+    pub constant_rate: bool,
+    /// The ProRes flavor when `codec` is ProRes; other codecs ignore it.
+    pub prores: ProresProfile,
+}
+
+/// The ProRes flavors a movie may be written in, smallest first.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ProresProfile {
+    Proxy,
+    Light,
+    /// ProRes 422.
+    #[default]
+    Standard,
+    High,
+}
+
+impl ProresProfile {
+    pub const ALL: [Self; 4] = [Self::Proxy, Self::Light, Self::Standard, Self::High];
+
+    /// The sample entry, which the encoder and the movie file both name.
+    #[must_use]
+    pub fn code(self) -> [u8; 4] {
+        match self {
+            Self::Proxy => *b"apco",
+            Self::Light => *b"apcs",
+            Self::Standard => *b"apcn",
+            Self::High => *b"apch",
+        }
+    }
+
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Proxy => "Proxy",
+            Self::Light => "LT",
+            Self::Standard => "422",
+            Self::High => "HQ",
+        }
+    }
 }
 
 /// Why export did not write a file.
@@ -93,6 +133,9 @@ pub enum ExportError {
     Audio(AudioError),
     /// The channel count is not mono or stereo, or the sample rate is zero.
     AudioLayout,
+    /// The request asked for more than two channels. A surround source is
+    /// mixed down to stereo; writing surround is not supported yet.
+    SurroundExport { channels: u16 },
     /// The mux trait refused the stream or a packet.
     Mux(MuxError),
     /// A packet timestamp could not be stored in the file timescale.
@@ -138,6 +181,11 @@ impl fmt::Display for ExportError {
             Self::Encoder(error) => write!(formatter, "{error}"),
             Self::Audio(error) => write!(formatter, "{error}"),
             Self::AudioLayout => formatter.write_str("the audio layout is not mono or stereo"),
+            Self::SurroundExport { channels } => write!(
+                formatter,
+                "surround export is not supported yet: export writes mono or stereo, \
+                 not {channels} channels"
+            ),
             Self::Mux(error) => write!(formatter, "{error}"),
             Self::Packet => formatter.write_str("the packet clock does not fit the file"),
             Self::SideData => formatter.write_str("export does not store packet side data"),
@@ -171,12 +219,16 @@ impl std::error::Error for ExportError {
 /// Refuses a short side, a frame rate, a range, or an audio layout that export
 /// will not run.
 pub fn validate(request: &ExportRequest) -> Result<(), ExportError> {
-    let steps = if request.codec == CodecId::Gif {
-        GIF_SHORT_SIDES.as_slice()
-    } else {
-        VIDEO_SHORT_SIDES.as_slice()
+    // A WebP is an animation at the GIF sizes or a still at the video ones.
+    let allowed = match request.codec {
+        CodecId::Gif => GIF_SHORT_SIDES.contains(&request.short_side),
+        CodecId::Webp => {
+            GIF_SHORT_SIDES.contains(&request.short_side)
+                || VIDEO_SHORT_SIDES.contains(&request.short_side)
+        }
+        _ => VIDEO_SHORT_SIDES.contains(&request.short_side),
     };
-    if !steps.contains(&request.short_side) {
+    if !allowed {
         return Err(ExportError::Resolution {
             short_side: request.short_side,
         });
@@ -196,9 +248,21 @@ pub fn validate(request: &ExportRequest) -> Result<(), ExportError> {
     {
         return Err(ExportError::Range);
     }
-    if let Some(audio) = &request.audio
-        && (audio.sample_rate == 0 || (audio.channels != 1 && audio.channels != 2))
-    {
+    if let Some(audio) = &request.audio {
+        check_audio(audio)?;
+    }
+    Ok(())
+}
+
+/// Export writes one or two channels at a rate above zero. More than two is
+/// surround, which is named on its own so the refusal says so.
+pub(crate) fn check_audio(audio: &AudioExport) -> Result<(), ExportError> {
+    if audio.channels > 2 {
+        return Err(ExportError::SurroundExport {
+            channels: audio.channels,
+        });
+    }
+    if audio.sample_rate == 0 || audio.channels == 0 {
         return Err(ExportError::AudioLayout);
     }
     Ok(())
@@ -235,7 +299,13 @@ pub fn output_size(
 pub fn coded_size(codec: CodecId, (width, height): (u32, u32)) -> (u32, u32) {
     let halved = matches!(
         codec,
-        CodecId::H264 | CodecId::Hevc | CodecId::Av1 | CodecId::Vp8 | CodecId::Vp9
+        CodecId::H264
+            | CodecId::Hevc
+            | CodecId::Av1
+            | CodecId::Vp8
+            | CodecId::Vp9
+            | CodecId::Mpeg2
+            | CodecId::Mpeg4
     );
     if halved {
         ((width & !1).max(2), (height & !1).max(2))
@@ -274,6 +344,8 @@ mod tests {
             audio: None,
             sidecar: None,
             late_by: 0,
+            constant_rate: false,
+            prores: crate::ProresProfile::Standard,
         }
     }
 
@@ -322,8 +394,23 @@ mod tests {
         });
         assert_eq!(validate(&audio), Err(ExportError::AudioLayout));
         audio.audio.as_mut().expect("audio").sample_rate = 48_000;
-        audio.audio.as_mut().expect("audio").channels = 6;
+        audio.audio.as_mut().expect("audio").channels = 0;
         assert_eq!(validate(&audio), Err(ExportError::AudioLayout));
+        for channels in [1, 2] {
+            audio.audio.as_mut().expect("audio").channels = channels;
+            assert_eq!(validate(&audio), Ok(()));
+        }
+        for channels in [3, 6, 8, u16::MAX] {
+            audio.audio.as_mut().expect("audio").channels = channels;
+            let refused = validate(&audio).expect_err("surround");
+            assert_eq!(refused, ExportError::SurroundExport { channels });
+            let message = refused.to_string();
+            assert!(message.starts_with("surround export is not supported yet"));
+            assert!(
+                message.contains(&format!("{channels} channels")),
+                "{message}"
+            );
+        }
     }
 
     #[test]
@@ -351,7 +438,9 @@ mod tests {
         use cutlass_codec::CodecId;
         assert_eq!(coded_size(CodecId::H264, (720, 405)), (720, 404));
         assert_eq!(coded_size(CodecId::Hevc, (607, 1080)), (606, 1080));
+        assert_eq!(coded_size(CodecId::Mpeg4, (607, 1080)), (606, 1080));
         assert_eq!(coded_size(CodecId::H264, (1, 1)), (2, 2));
+        assert_eq!(coded_size(CodecId::Mpeg2, (853, 481)), (852, 480));
         assert_eq!(coded_size(CodecId::Png, (720, 405)), (720, 405));
         assert_eq!(coded_size(CodecId::Gif, (607, 1080)), (607, 1080));
     }

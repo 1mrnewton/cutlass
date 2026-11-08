@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "wipe-down-left",
+  "name": "Wipe Down Left",
+  "category": "Wipe",
+  "cross": {"kind": 0, "angle": -135, "soft": 0.02}
+}

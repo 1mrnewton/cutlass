@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "nocturne",
+  "name": "Nocturne",
+  "category": "Moody",
+  "adjust": {"exposure": -0.3, "temperature": -0.3, "highlights": 0.1, "saturation": -0.15},
+  "wheels": {"lift": {"hue": 240, "amount": 0.35}}
+}

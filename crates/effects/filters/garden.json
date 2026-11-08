@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "garden",
+  "name": "Garden",
+  "category": "Food",
+  "adjust": {"tint": -0.1, "exposure": 0.1, "fade": 0.05},
+  "hsl": {"green": [0, 0.4, 0]}
+}

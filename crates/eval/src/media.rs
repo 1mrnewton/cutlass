@@ -22,13 +22,15 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
 
-use cutlass_codec::access::{ColorPrimaries, PixelFormat};
+use cutlass_codec::access::{ColorPrimaries, PixelFormat, Transfer};
+use cutlass_color::{Matrix, Signal, SignalCurve};
 use cutlass_engine::{
     ClockKind, DecodedFrame, DisplayQuarter, ReaderFactory, VideoSource, decoded_picture,
-    open_segment_in,
+    open_segment_from, open_segment_in,
 };
-use cutlass_gpu::{Affine, Placement};
+use cutlass_gpu::{Affine, Placement, ToneCurve, YuvTone};
 use cutlass_model::{
     Clip, Crop, Draft, DraftId, MaterialCanvas, MaterialRef, Micros, Segment, SegmentId, TimeRange,
     TrackAttribute, UniformScale,
@@ -36,7 +38,7 @@ use cutlass_model::{
 use cutlass_picture::{CpuBytes, Picture, PictureSource, Sample, rgba_len};
 
 use crate::canvas::{Backdrop, cover, image_backdrop, over_backdrop, segment_backdrop};
-use crate::gpu::{GpuBackdrop, GpuLayer, GpuSource};
+use crate::gpu::{GpuBackdrop, GpuLayer, GpuSource, YuvSamples};
 
 /// Pictures each open clip decodes ahead of the time asked for.
 const READ_AHEAD: usize = 8;
@@ -50,10 +52,45 @@ fn open_clip(
     root: Option<&Path>,
     patient: bool,
 ) -> Option<VideoSource> {
-    let mut source = open_segment_in(media, draft, id, ClockKind::Export, 1, root).ok()?;
+    // A clip with an enhanced copy draws from it; a copy that will not
+    // open leaves the clip its own file.
+    let copy = crate::enhance::enhanced_copy(draft, root, id).and_then(|(path, from)| {
+        open_segment_from(media, draft, id, ClockKind::Export, 1, path, from).ok()
+    });
+    let mut source = match copy {
+        Some(source) => source,
+        None => open_segment_in(media, draft, id, ClockKind::Export, 1, root).ok()?,
+    };
     let _ = source.read_ahead(media, READ_AHEAD);
     source.set_patient(patient);
     Some(source)
+}
+
+/// Open the depth video that lights clip `id`, when it has one, decoding
+/// ahead like the clip.
+fn open_depth(
+    media: &ReaderFactory,
+    draft: &Draft,
+    id: &SegmentId,
+    root: Option<&Path>,
+    patient: bool,
+) -> Option<VideoSource> {
+    let (path, from) = crate::relight::relight_depth(draft, root, id)?;
+    let mut source = open_segment_from(media, draft, id, ClockKind::Export, 1, path, from).ok()?;
+    let _ = source.read_ahead(media, READ_AHEAD);
+    source.set_patient(patient);
+    Some(source)
+}
+
+/// A shape drawn once and shown on every frame after: the shape as it was
+/// drawn, the density it was asked for, the density it was drawn at, and
+/// the picture.
+#[derive(Clone)]
+pub(crate) struct KeptShape {
+    pub(crate) shape: cutlass_model::MaterialShape,
+    pub(crate) wanted: f64,
+    pub(crate) drawn: f64,
+    pub(crate) raster: CpuBytes,
 }
 
 /// Open video files for one draft revision.
@@ -64,13 +101,26 @@ pub struct OpenClips {
     /// Project folder for a relative media path. An absolute path ignores it.
     root: Option<std::path::PathBuf>,
     sources: HashMap<SegmentId, VideoSource>,
+    /// Relit clips' depth videos for this revision; `None` is a clip
+    /// whose depth is not made yet.
+    relights: HashMap<SegmentId, Option<VideoSource>>,
     nests: HashMap<SegmentId, OpenClips>,
     images: HashMap<String, CpuBytes>,
     /// Title rasters by segment, with the density each was drawn at. A
     /// title does not change within a revision unless its scale is keyed.
     texts: HashMap<SegmentId, (f64, CpuBytes)>,
+    /// Shape rasters by segment. A move or another clip's edit leaves a
+    /// shape as it was, so these outlive a revision; each is checked
+    /// against its shape before it is shown.
+    shapes: HashMap<SegmentId, KeptShape>,
     /// Off, a clip whose picture is not decoded yet shows its last one.
     patient: bool,
+    /// Lottie files by stored path; `None` is a file that did not read.
+    lotties: HashMap<String, Option<Arc<cutlass_lottie::Animation>>>,
+    /// Steadied clips' plans, by segment.
+    steadies: HashMap<SegmentId, Arc<crate::steady::Steady>>,
+    /// Reframed clips' planned windows, by segment.
+    reframes: HashMap<SegmentId, Arc<crate::reframe::Reframed>>,
 }
 
 impl OpenClips {
@@ -82,10 +132,15 @@ impl OpenClips {
             bound: false,
             root: None,
             sources: HashMap::new(),
+            relights: HashMap::new(),
             nests: HashMap::new(),
             images: HashMap::new(),
             texts: HashMap::new(),
+            shapes: HashMap::new(),
             patient: true,
+            lotties: HashMap::new(),
+            steadies: HashMap::new(),
+            reframes: HashMap::new(),
         }
     }
 
@@ -93,7 +148,11 @@ impl OpenClips {
     /// picture while the one asked for decodes, as preview does.
     pub fn set_patient(&mut self, patient: bool) {
         self.patient = patient;
-        for source in self.sources.values() {
+        for source in self
+            .sources
+            .values()
+            .chain(self.relights.values().flatten())
+        {
             source.set_patient(patient);
         }
         for nest in self.nests.values_mut() {
@@ -105,7 +164,11 @@ impl OpenClips {
     /// since the last call. A caller redraws until this is false.
     pub fn take_stale(&mut self) -> bool {
         let mut stale = false;
-        for source in self.sources.values() {
+        for source in self
+            .sources
+            .values()
+            .chain(self.relights.values().flatten())
+        {
             stale |= source.take_stale();
         }
         for nest in self.nests.values_mut() {
@@ -117,12 +180,93 @@ impl OpenClips {
     /// Drops every open file.
     pub fn clear(&mut self) {
         self.sources.clear();
+        self.relights.clear();
         self.nests.clear();
         self.images.clear();
         self.texts.clear();
+        self.shapes.clear();
+        self.lotties.clear();
+        self.steadies.clear();
+        self.reframes.clear();
         self.draft = None;
         self.revision = 0;
         self.bound = false;
+    }
+
+    /// The Lottie animation stored at `stored`, read once per revision. A
+    /// relative path stays inside the project folder. A file past
+    /// [`cutlass_lottie::limits::MAX_BYTES`], unreadable or not an animation
+    /// is `None`.
+    pub(crate) fn lottie(&mut self, stored: &str) -> Option<Arc<cutlass_lottie::Animation>> {
+        if let Some(known) = self.lotties.get(stored) {
+            return known.clone();
+        }
+        let path = if Path::new(stored).is_absolute() {
+            Some(std::path::PathBuf::from(stored))
+        } else {
+            match &self.root {
+                Some(root) => cutlass_engine::media_in_project(root, stored),
+                None => Some(std::path::PathBuf::from(stored)),
+            }
+        };
+        let read = path.and_then(|path| {
+            let size = std::fs::metadata(&path).ok()?.len();
+            if size > cutlass_lottie::limits::MAX_BYTES as u64 {
+                return None;
+            }
+            let bytes = std::fs::read(&path).ok()?;
+            cutlass_lottie::Animation::parse(&bytes).ok().map(Arc::new)
+        });
+        self.lotties.insert(stored.to_owned(), read.clone());
+        read
+    }
+
+    /// The light over `segment` at `time`, opening its depth video the
+    /// first time it is lit this revision. `None` when it is not relit.
+    fn light(
+        &mut self,
+        media: &ReaderFactory,
+        draft: &Draft,
+        segment: &Segment,
+        time: Micros,
+    ) -> Option<cutlass_effects::Lighting> {
+        let lit = crate::relight::light_at(draft, segment, time)?;
+        if !self.relights.contains_key(&segment.id) {
+            let depth = open_depth(
+                media,
+                draft,
+                &segment.id,
+                self.root.as_deref(),
+                self.patient,
+            );
+            self.relights.insert(segment.id.clone(), depth);
+        }
+        Some(lit)
+    }
+
+    /// The depth video opened for clip `id`.
+    fn depth(&self, id: &SegmentId) -> Option<&VideoSource> {
+        self.relights.get(id).and_then(Option::as_ref)
+    }
+
+    /// The project folder, when there is one.
+    pub(crate) fn root(&self) -> Option<&Path> {
+        self.root.as_deref()
+    }
+
+    /// Steadied clips' plans, kept until the clips are dropped.
+    pub(crate) fn steadies(&mut self) -> &mut HashMap<SegmentId, Arc<crate::steady::Steady>> {
+        &mut self.steadies
+    }
+
+    /// Reframed clips' planned windows, kept until the clips are dropped.
+    pub(crate) fn reframes(&mut self) -> &mut HashMap<SegmentId, Arc<crate::reframe::Reframed>> {
+        &mut self.reframes
+    }
+
+    /// Shape rasters, kept across revisions.
+    pub(crate) fn shapes(&mut self) -> &mut HashMap<SegmentId, KeptShape> {
+        &mut self.shapes
     }
 
     /// Title rasters kept for this revision.
@@ -177,7 +321,7 @@ impl OpenClips {
                     || start > until
                     || !matches!(
                         draft.materials.get(segment.material_id.as_str()),
-                        Some(MaterialRef::Video(_))
+                        Some(MaterialRef::Video(video)) if !cutlass_lottie::is_lottie_path(&video.path)
                     )
                 {
                     continue;
@@ -206,9 +350,11 @@ impl OpenClips {
             return;
         }
         self.sources.clear();
+        self.relights.clear();
         self.nests.clear();
         self.images.clear();
         self.texts.clear();
+        self.lotties.clear();
         self.draft = Some(draft.id.clone());
         self.revision = revision;
         self.bound = true;
@@ -260,6 +406,10 @@ pub(crate) struct Placed<'a> {
     crop: Crop,
     crop_scale: f64,
     backdrop: Backdrop,
+    /// The steadying correction at this frame.
+    steady: Option<cutlass_motion::Correction>,
+    /// The clip's depth video and the light over it at this frame.
+    relight: Option<(&'a VideoSource, cutlass_effects::Lighting)>,
 }
 
 pub(crate) fn picture_transform(
@@ -383,7 +533,12 @@ pub(crate) fn video_layers<'a>(
             else {
                 continue;
             };
-            let crop = video.crop;
+            // A Lottie sticker is drawn from its geometry, not decoded.
+            if cutlass_lottie::is_lottie_path(&video.path) {
+                continue;
+            }
+            let crop = crate::reframe::crop_at(clips, draft, segment, time, (width, height))
+                .unwrap_or(video.crop);
             let crop_scale = video.crop_scale;
             let Some((clip, uniform)) = cutlass_model::animated_at(draft, segment, time) else {
                 continue;
@@ -407,25 +562,34 @@ pub(crate) fn video_layers<'a>(
                 clips.sources.insert(segment.id.clone(), source);
             }
             let backdrop = backdrop_for(draft, segment, media, clips, width, height);
+            let steady = crate::steady::steady_at(clips, draft, segment, time);
+            let light = clips.light(media, draft, segment, time);
             chosen.push((
                 segment.render_index,
                 track_index,
                 segment_index,
                 segment.id.clone(),
                 transform,
-                crop,
-                crop_scale,
+                (crop, crop_scale, steady, light),
                 backdrop,
             ));
         }
     }
     let mut layers = Vec::with_capacity(chosen.len());
-    for (render_index, track_index, segment_index, id, transform, crop, crop_scale, backdrop) in
-        chosen
+    for (
+        render_index,
+        track_index,
+        segment_index,
+        id,
+        transform,
+        (crop, crop_scale, steady, light),
+        backdrop,
+    ) in chosen
     {
         let Some(source) = clips.sources.get(&id) else {
             continue;
         };
+        let relight = clips.depth(&id).zip(light);
         layers.push(VideoLayer {
             render_index,
             track_index,
@@ -438,6 +602,8 @@ pub(crate) fn video_layers<'a>(
                 crop,
                 crop_scale,
                 backdrop,
+                steady,
+                relight,
             },
         });
     }
@@ -463,7 +629,8 @@ pub(crate) fn video_picture(
     let Some(MaterialRef::Video(video)) = draft.materials.get(segment.material_id.as_str()) else {
         return None;
     };
-    let crop = video.crop;
+    let crop =
+        crate::reframe::crop_at(clips, draft, segment, time, (width, height)).unwrap_or(video.crop);
     let crop_scale = video.crop_scale;
     let (clip, uniform) = cutlass_model::animated_at(draft, segment, time)?;
     let transform = picture_transform(&clip, &uniform, width, height)?;
@@ -481,7 +648,10 @@ pub(crate) fn video_picture(
         clips.sources.insert(segment.id.clone(), source);
     }
     let backdrop = backdrop_for(draft, segment, media, clips, width, height);
+    let steady = crate::steady::steady_at(clips, draft, segment, time);
+    let light = clips.light(media, draft, segment, time);
     let source = clips.sources.get(&segment.id)?;
+    let relight = clips.depth(&segment.id).zip(light);
     let placed = Placed {
         source,
         width,
@@ -490,6 +660,8 @@ pub(crate) fn video_picture(
         crop,
         crop_scale,
         backdrop,
+        steady,
+        relight,
     };
     match placed.sample(time) {
         Sample::Ready(Picture::Cpu(bytes)) => Some(bytes),
@@ -584,29 +756,59 @@ impl PictureSource for Placed<'_> {
             return Sample::Miss;
         };
         match picture {
-            Picture::Cpu(bytes) => finish_picture(
-                (self.width, self.height),
-                bytes,
-                self.transform,
-                self.source.display(),
-                self.crop,
-                self.crop_scale,
-                &self.backdrop,
-            ),
+            Picture::Cpu(bytes) => {
+                let (bytes, display) = self.relit(bytes, time);
+                finish_picture(
+                    (self.width, self.height),
+                    bytes,
+                    self.transform,
+                    display,
+                    (self.crop, self.crop_scale),
+                    self.steady.as_ref(),
+                    &self.backdrop,
+                )
+            }
             Picture::Platform(_) => Sample::Miss,
         }
     }
 }
 
 impl Placed<'_> {
+    /// The decoded `picture` and its display turn, or, when the clip is
+    /// relit and its depth at `time` is decoded, the picture turned upright
+    /// and lit from that depth, with no turn left.
+    fn relit(&self, picture: CpuBytes, time: Micros) -> (CpuBytes, DisplayQuarter) {
+        let display = self.source.display();
+        let Some((depth, lit)) = &self.relight else {
+            return (picture, display);
+        };
+        let Sample::Ready(Picture::Cpu(near)) = depth.sample(time) else {
+            return (picture, display);
+        };
+        let (Some(upright), Some(near)) = (
+            orient(picture.clone(), display),
+            orient(near, depth.display()),
+        ) else {
+            return (picture, display);
+        };
+        (
+            crate::relight::relit(upright, &near, lit),
+            DisplayQuarter::Zero,
+        )
+    }
+
     /// This clip as GPU layers: a color backdrop, if any, then the decoded
     /// picture with the maps that place it.
     ///
     /// `None` when the GPU path does not reproduce the CPU path: a picture
-    /// that is not 4:2:0 or needs a gamut change, a crop quad that is not a
-    /// parallelogram, or a blur or image backdrop. The caller then uses the
-    /// CPU picture.
+    /// that is not 4:2:0 or whose tags the color crate does not map, a crop
+    /// quad that is not a parallelogram, or a blur or image backdrop. The
+    /// caller then uses the CPU picture.
     pub(crate) fn gpu(&self, time: Micros) -> Option<Vec<GpuLayer>> {
+        // Relight is drawn on the CPU.
+        if self.relight.is_some() {
+            return None;
+        }
         let (backdrop, blur) = match &self.backdrop {
             Backdrop::None => (None, None),
             Backdrop::Color(pixel) => (
@@ -616,17 +818,34 @@ impl Placed<'_> {
             Backdrop::Blur(radius) => (None, Some(*radius)),
             Backdrop::Image(_) => return None,
         };
-        let DecodedFrame::Coded {
-            width,
-            height,
-            pixel: PixelFormat::Yuv420p,
-            primaries: ColorPrimaries::Unspecified | ColorPrimaries::Bt709,
-            bytes,
-            ..
-        } = self.source.decoded_at(time).ok()?
-        else {
-            return None;
-        };
+        let (width, height, primaries, transfer, samples) =
+            match self.source.decoded_at(time).ok()? {
+                DecodedFrame::Coded {
+                    width,
+                    height,
+                    pixel: PixelFormat::Yuv420p,
+                    primaries,
+                    transfer,
+                    bytes,
+                } => (width, height, primaries, transfer, YuvSamples::Bytes(bytes)),
+                DecodedFrame::Surface {
+                    width,
+                    height,
+                    primaries,
+                    transfer,
+                    surface,
+                } => (
+                    width,
+                    height,
+                    primaries,
+                    transfer,
+                    YuvSamples::Surface(surface),
+                ),
+                DecodedFrame::Coded { .. }
+                | DecodedFrame::Platform { .. }
+                | DecodedFrame::Still(_) => return None,
+            };
+        let tone = yuv_tone(primaries, transfer)?;
         if width % 2 != 0 || height % 2 != 0 {
             return None;
         }
@@ -636,6 +855,13 @@ impl Placed<'_> {
             DisplayQuarter::Clockwise90 | DisplayQuarter::Clockwise270 => (height, width),
         };
         let (to_oriented, picture) = gpu_crop(self.crop, self.crop_scale, oriented)?;
+        let to_oriented = match &self.steady {
+            Some(correction) => crate::steady::then(
+                to_oriented,
+                crate::steady::steady_map(correction, oriented)?,
+            ),
+            None => to_oriented,
+        };
         let placement = Placement {
             to_picture: gpu_place(self.transform, picture, (self.width, self.height))?,
             picture,
@@ -660,13 +886,32 @@ impl Placed<'_> {
             source: GpuSource::Yuv {
                 width,
                 height,
-                bytes,
+                samples,
+                tone,
             },
             placement,
             backdrop,
         });
         Some(layers)
     }
+}
+
+/// The step the engine's CPU conversion applies after the BT.709 matrix,
+/// for the draft working space it converts to, or `None` when the color
+/// crate does not map these tags.
+fn yuv_tone(primaries: ColorPrimaries, transfer: Transfer) -> Option<YuvTone> {
+    let signal = Signal::for_tags(primaries, transfer, Matrix::Bt709, 0).ok()?;
+    let curve = |curve| match curve {
+        SignalCurve::Rec709 => ToneCurve::Rec709,
+        SignalCurve::Hlg => ToneCurve::Hlg,
+        SignalCurve::Pq => ToneCurve::Pq,
+    };
+    Some(YuvTone {
+        source: curve(signal.source),
+        dest: curve(signal.dest),
+        adapt: signal.adapt,
+        nits: signal.nits,
+    })
 }
 
 /// Oriented-source pixel center to stored pixels, as [`turned_source`].
@@ -806,6 +1051,37 @@ pub(crate) fn gpu_place(
     Some(Affine([su[0], su[1], su[2], sv[0], sv[1], sv[2]]))
 }
 
+/// Canvas pixel centre to the clip's own frame at `time`: -1 to 1 across
+/// and up, so a mask follows the clip as it moves, turns and flips. The
+/// clip's media size gives its shape; without one it fills the canvas.
+pub(crate) fn clip_frame(
+    draft: &Draft,
+    segment: &Segment,
+    time: Micros,
+    canvas: (u32, u32),
+) -> Option<Affine> {
+    let (clip, uniform) = cutlass_model::animated_at(draft, segment, time)?;
+    let transform = picture_transform(&clip, &uniform, canvas.0, canvas.1)?;
+    let picture = match draft.materials.get(segment.material_id.as_str()) {
+        Some(MaterialRef::Video(video)) => u32::try_from(video.width)
+            .ok()
+            .zip(u32::try_from(video.height).ok())
+            .filter(|&(width, height)| width > 0 && height > 0),
+        _ => None,
+    }
+    .unwrap_or(canvas);
+    let [a, b, c, d, e, f] = gpu_place(transform, picture, canvas)?.0;
+    let (kx, ky) = (2.0 / f64::from(picture.0), 2.0 / f64::from(picture.1));
+    Some(Affine([
+        a * kx,
+        b * kx,
+        c * kx - 1.0,
+        -d * ky,
+        -e * ky,
+        1.0 - f * ky,
+    ]))
+}
+
 impl PictureTransform {
     /// Keep the picture's own size at scale 1: a title, whose raster is cut
     /// tight around its glyphs. A picture larger than the canvas still
@@ -856,15 +1132,23 @@ fn finish_picture(
     picture: CpuBytes,
     transform: PictureTransform,
     display: DisplayQuarter,
-    crop: Crop,
-    crop_scale: f64,
+    (crop, crop_scale): (Crop, f64),
+    steady: Option<&cutlass_motion::Correction>,
     backdrop: &Backdrop,
 ) -> Sample {
     let (canvas_w, canvas_h) = canvas;
     let Some(picture) = orient(picture, display) else {
         return Sample::Miss;
     };
-    let picture = apply_crop(picture, crop, crop_scale);
+    let picture = match steady {
+        Some(correction) => {
+            let Some(picture) = steadied(&picture, correction, crop, crop_scale) else {
+                return Sample::Miss;
+            };
+            picture
+        }
+        None => apply_crop(picture, crop, crop_scale),
+    };
     let sharp = matches!(backdrop, Backdrop::Blur(_)).then(|| picture.clone());
     let Sample::Ready(Picture::Cpu(placed)) =
         place_with(canvas_w, canvas_h, picture, transform, DisplayQuarter::Zero)
@@ -876,6 +1160,29 @@ fn finish_picture(
         sharp.as_ref(),
         backdrop,
     )))
+}
+
+/// The oriented `picture` steadied by `correction`, then cropped: one
+/// resample through both maps, as the GPU pass draws it. A crop that is not
+/// a parallelogram, which the GPU pass does not draw, is cut after.
+fn steadied(
+    picture: &CpuBytes,
+    correction: &cutlass_motion::Correction,
+    crop: Crop,
+    crop_scale: f64,
+) -> Option<CpuBytes> {
+    let size = (picture.width(), picture.height());
+    let steady = crate::steady::steady_map(correction, size)?;
+    match gpu_crop(crop, crop_scale, size) {
+        Some((to_oriented, cropped)) => {
+            crate::steady::resample(picture, crate::steady::then(to_oriented, steady), cropped)
+        }
+        None => Some(apply_crop(
+            crate::steady::resample(picture, steady, size)?,
+            crop,
+            crop_scale,
+        )),
+    }
 }
 
 /// Sample `crop` from the oriented picture.
@@ -1089,7 +1396,7 @@ pub(crate) fn place_with(
     sample_transformed(canvas_w, canvas_h, &picture, transform)
 }
 
-fn orient(picture: CpuBytes, display: DisplayQuarter) -> Option<CpuBytes> {
+pub(crate) fn orient(picture: CpuBytes, display: DisplayQuarter) -> Option<CpuBytes> {
     if display == DisplayQuarter::Zero {
         return Some(picture);
     }
@@ -2026,8 +2333,8 @@ mod tests {
             picture,
             transform,
             DisplayQuarter::Clockwise90,
-            left,
-            1.0,
+            (left, 1.0),
+            None,
             &Backdrop::None,
         ) else {
             panic!("ready");

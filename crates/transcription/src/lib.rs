@@ -14,19 +14,45 @@
 
 #![forbid(unsafe_code)]
 
+mod captions;
 mod features;
 mod file;
 mod job;
+mod lines;
 mod model;
 mod parakeet;
 mod prepare;
 mod search;
 mod timestamp;
 mod unified;
+
+/// Set in a tagged run, the tests that need the real speech weights fail
+/// when the weights are missing instead of skipping.
+pub const REQUIRE_SPEECH_MODEL: &str = "CUTLASS_REQUIRE_SPEECH_MODEL";
+
+/// Called by a real-weights test that found `what` missing, before it
+/// skips: in a tagged run ([`REQUIRE_SPEECH_MODEL`]) it fails instead.
+///
+/// # Panics
+///
+/// When [`REQUIRE_SPEECH_MODEL`] is set.
+pub fn weights_missing(what: &str) {
+    assert!(
+        std::env::var_os(REQUIRE_SPEECH_MODEL).is_none(),
+        "{REQUIRE_SPEECH_MODEL} is set and {what} is missing"
+    );
+}
 mod words;
 
+pub use captions::{
+    HeardClip, HeardMiss, caption_requests, caption_row, caption_source, heard_clip,
+    rerun_requests, words_on_timeline,
+};
 pub use file::FileSource;
 pub use job::{Job, JobError};
+pub use lines::{
+    HeardLine, LINE_LETTERS, LINE_PAUSE_MS, LINE_SHORTEST_MS, LINE_WORDS, heard_lines,
+};
 pub use model::{AcousticModel, AcousticWeights, LocalRecognizer, ModelError};
 pub use parakeet::Parakeet;
 pub use prepare::{Pcm, PcmSource, PrepareError, fit};

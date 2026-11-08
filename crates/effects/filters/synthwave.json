@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "synthwave",
+  "name": "Synthwave",
+  "category": "Creative",
+  "adjust": {"contrast": 0.25, "saturation": 0.2},
+  "wheels": {"lift": {"hue": 270, "amount": 0.5}, "gain": {"hue": 320, "amount": 0.3}}
+}

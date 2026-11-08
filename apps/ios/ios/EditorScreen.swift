@@ -68,15 +68,13 @@ struct EditorScreen: View {
             model.pause()
             exporting = true
         } label: {
-            HStack(spacing: 4) {
-                HugeIcon("export", size: 16)
-                Text("Export").font(.subheadline.weight(.semibold))
-            }
-            .foregroundStyle(Palette.exportInk)
-            .padding(.horizontal, 12)
-            .frame(height: 30)
-            .background(Palette.export, in: Capsule())
-            .opacity(model.hasClips ? 1 : 0.4)
+            Text("Export")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(Palette.exportInk)
+                .padding(.horizontal, 12)
+                .frame(height: 30)
+                .background(Palette.export, in: Capsule())
+                .opacity(model.hasClips ? 1 : 0.4)
         }
         .disabled(!model.hasClips || model.isOpening)
         .padding(.trailing, 12)

@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "id": "blockbuster",
+  "name": "Blockbuster",
+  "category": "Cinema",
+  "adjust": {"contrast": 0.25, "saturation": 0.1, "vignette": 0.2},
+  "curves": {"rgb": [[0, 0], [0.25, 0.21], [0.75, 0.79], [1, 1]]},
+  "wheels": {"lift": {"hue": 200, "amount": 0.5}, "gain": {"hue": 35, "amount": 0.35}}
+}

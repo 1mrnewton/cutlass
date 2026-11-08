@@ -10,6 +10,7 @@ use cutlass_picture::{CpuBytes, Picture, Sample};
 use crate::canvas::canvas_rgba;
 use crate::effect::{RecipeMark, StackLayer, needs_cpu, present, recipe_marks};
 use crate::gpu::{Composed, FrameLayers, GpuLayer};
+use crate::lottie::{LottieLayer, PlacedLottie, lottie_layers, shape_layers};
 use crate::media::{OpenClips, Placed, video_layers};
 use crate::nest::{NestPass, NestedLayer, NestedPicture, nest_layers};
 use crate::sources::{SolidLayer, solid_layers};
@@ -204,7 +205,7 @@ pub(crate) fn compose_layers<D: Device>(
         true,
         |draft, _device, extent, layers| {
             let stack = stack_of(layers);
-            let effects = recipe_marks(draft, time, &stack);
+            let effects = recipe_marks(draft, time, extent, &stack);
             if needs_cpu(draft, time, &stack) {
                 return Ok(Err(effects));
             }
@@ -227,7 +228,7 @@ pub(crate) fn compose_layers<D: Device>(
                 effects
                     .into_iter()
                     .filter(|mark| mark.bound.is_none())
-                    .map(|mark| GpuLayer::effect(mark.steps, width, height)),
+                    .map(|mark| GpuLayer::effect(mark.steps, mark.mask, width, height)),
             );
             Ok(Composed::Layers(layers))
         }
@@ -245,7 +246,8 @@ fn gpu_layers(
     let (bound, effects): (Vec<RecipeMark>, Vec<RecipeMark>) =
         effects.into_iter().partition(|mark| mark.bound.is_some());
     let mut effects = effects.into_iter().peekable();
-    let effect = |mark: RecipeMark| GpuLayer::effect(mark.steps, extent.width, extent.height);
+    let effect =
+        |mark: RecipeMark| GpuLayer::effect(mark.steps, mark.mask, extent.width, extent.height);
     if let Some(pixel) = draft
         .canvas_config
         .background
@@ -267,7 +269,13 @@ fn gpu_layers(
             },
             Paint::Nest(nested) => nested.gpu(),
             Paint::Text(text) => text.gpu(),
-            Paint::Mixed(_) => None,
+            Paint::Lottie(lottie) => lottie.gpu(),
+            Paint::Mixed(mixed) => Some(vec![GpuLayer::transition(
+                mixed.moment.kind,
+                mixed.moment.t(),
+                mixed.outgoing.clone(),
+                mixed.incoming.clone(),
+            )]),
         };
         let mut drawn = match gpu {
             Some(gpu) => gpu,
@@ -286,7 +294,26 @@ fn gpu_layers(
                 })
             })
             .collect();
-        if own.is_empty() || drawn.is_empty() {
+        let mode = draft
+            .tracks
+            .get(layer.key.1)
+            .and_then(|track| track.segments.get(layer.key.2))
+            .and_then(|segment| cutlass_effects::segment_blend(draft, segment));
+        if drawn.is_empty() {
+            // Nothing of this clip shows at this time.
+        } else if let Some(mode) = mode {
+            // The clip and its own effects on a canvas of their own, mixed
+            // with everything below.
+            drawn.extend(own);
+            out.push(GpuLayer::blend(
+                mode,
+                FrameLayers {
+                    width: extent.width,
+                    height: extent.height,
+                    layers: drawn,
+                },
+            ));
+        } else if own.is_empty() {
             out.extend(drawn);
         } else {
             // The clip is drawn on a canvas of its own, its effects run over
@@ -370,6 +397,15 @@ fn with_layers<D: Device, T>(
         extent.height,
         &mut pass,
     )?;
+    let mut lotties = lottie_layers(draft, extent.width, extent.height, pass.time, pass.clips);
+    // Shapes are vector scenes too, drawn and placed the same way.
+    lotties.extend(shape_layers(
+        draft,
+        extent.width,
+        extent.height,
+        pass.time,
+        pass.clips.shapes(),
+    ));
     let mut layers = ordered(
         solid_layers(draft, extent.width, extent.height),
         text_layers(
@@ -390,6 +426,8 @@ fn with_layers<D: Device, T>(
         ),
         nests,
     );
+    // Lottie stickers and shapes join in their place among the other clips.
+    add_lotties(&mut layers, lotties);
     apply_transitions(
         draft,
         snapshot.packages(),
@@ -413,15 +451,29 @@ enum Paint<'a> {
     Solid(SolidColor),
     Text(crate::text::PlacedText),
     Video(Placed<'a>),
+    Lottie(PlacedLottie),
     Nest(NestedPicture),
     Mixed(Mixed),
 }
 
-struct Mixed(CpuBytes);
+/// A clip in a transition: both pictures and the moment, mixed on the GPU
+/// when the frame is drawn there and on the CPU when it is composed.
+struct Mixed {
+    moment: crate::transition::Moment,
+    outgoing: CpuBytes,
+    incoming: CpuBytes,
+}
 
 impl PictureSource for Mixed {
     fn sample(&self, _time: Micros) -> Sample {
-        Sample::Ready(Picture::Cpu(self.0.clone()))
+        let (width, height) = (self.outgoing.width(), self.outgoing.height());
+        match self
+            .moment
+            .mix(self.outgoing.rgba(), self.incoming.rgba(), width, height)
+        {
+            Some(mixed) => Sample::Ready(Picture::Cpu(mixed)),
+            None => Sample::Miss,
+        }
     }
 }
 
@@ -436,6 +488,7 @@ impl Ordered<'_> {
             Paint::Solid(solid) => solid,
             Paint::Text(text) => text,
             Paint::Video(video) => video,
+            Paint::Lottie(lottie) => lottie,
             Paint::Nest(nested) => nested,
             Paint::Mixed(mixed) => mixed,
         }
@@ -472,13 +525,25 @@ fn apply_transitions(
         ) else {
             continue;
         };
-        let (outgoing, incoming) = cut.ordered(covering.rgba(), partner.rgba());
-        let Some(mixed) =
-            crate::transition::fade(store, draft, cut, outgoing, incoming, width, height)
-        else {
+        let Some(moment) = crate::transition::moment(store, draft, cut) else {
             continue;
         };
-        layers[index].paint = Paint::Mixed(Mixed(mixed));
+        let size = (width, height);
+        if (covering.width(), covering.height()) != size
+            || (partner.width(), partner.height()) != size
+        {
+            continue;
+        }
+        let (outgoing, incoming) = if cut.covers_outgoing() {
+            (covering, partner)
+        } else {
+            (partner, covering)
+        };
+        layers[index].paint = Paint::Mixed(Mixed {
+            moment,
+            outgoing,
+            incoming,
+        });
     }
 }
 
@@ -497,6 +562,7 @@ fn partner_picture(
         .find(|layer| layer.key.1 == track && layer.key.2 == segment)?;
     match &layer.paint {
         Paint::Solid(solid) => cpu_at(solid, time),
+        Paint::Lottie(lottie) => cpu_at(lottie, time),
         Paint::Text(_) | Paint::Video(_) | Paint::Nest(_) | Paint::Mixed(_) => None,
     }
 }
@@ -545,6 +611,23 @@ fn ordered<'a>(
     }
     layers.sort_by_key(|layer| layer.key);
     layers
+}
+
+fn add_lotties(layers: &mut Vec<Ordered<'_>>, lotties: Vec<LottieLayer>) {
+    if lotties.is_empty() {
+        return;
+    }
+    for lottie in lotties {
+        layers.push(Ordered {
+            key: (
+                lottie.render_index,
+                lottie.track_index,
+                lottie.segment_index,
+            ),
+            paint: Paint::Lottie(lottie.placed),
+        });
+    }
+    layers.sort_by_key(|layer| layer.key);
 }
 
 /// Keeps `frame` for export. A late arrival is still the picture.
@@ -665,6 +748,503 @@ mod tests {
         let before_invisible = invisible.clone();
         assert_eq!(pixels(&invisible, 10), vec![0, 0, 0, 0, 0, 0, 0, 0]);
         assert_eq!(invisible, before_invisible);
+    }
+
+    #[test]
+    fn a_blended_clip_mixes_with_the_canvas_on_both_paths() {
+        let mut draft = color_clip("0xFF000000", false);
+        draft.canvas_config.background = Some("#808080".to_owned());
+        // Black over grey hides it; screened, black leaves the grey.
+        assert_eq!(pixels(&draft, 0), [0, 0, 0, 255].repeat(2));
+        let segment = cutlass_model::SegmentId::new("segment");
+        let mut session = cutlass_session::Session::open(draft);
+        session
+            .apply(
+                0,
+                &[cutlass_session::Request::SetBlend {
+                    segment_id: segment,
+                    material_id: "mix".into(),
+                    mode: "blend-screen".to_owned(),
+                }],
+            )
+            .unwrap();
+        let draft = session.draft().clone();
+        assert_eq!(pixels(&draft, 0), [128, 128, 128, 255].repeat(2));
+        let mut device = SoftwareDevice::new();
+        let mut clips = OpenClips::new();
+        let Ok(Composed::Layers(frame)) = layers_in(
+            &Snapshot::new(&draft),
+            Micros(0),
+            &mut device,
+            &media(),
+            &mut clips,
+            0,
+            None,
+        ) else {
+            panic!("a blend stays on the GPU path");
+        };
+        assert!(
+            frame.layers.iter().any(|layer| matches!(
+                layer.source,
+                crate::GpuSource::Blend {
+                    mode: cutlass_effects::BlendMode::Screen,
+                    ..
+                }
+            )),
+            "{frame:?}"
+        );
+    }
+
+    #[test]
+    fn an_adjusted_clip_composes_on_the_cpu_with_its_sliders() {
+        let draft = color_clip("0xFF404040", false);
+        assert_eq!(pixels(&draft, 0), [64, 64, 64, 255].repeat(2));
+        let mut session = cutlass_session::Session::open(draft);
+        session
+            .apply(
+                0,
+                &[cutlass_session::Request::SetAdjust {
+                    segment_id: cutlass_model::SegmentId::new("segment"),
+                    material_id: "bright".into(),
+                    key: "exposure".to_owned(),
+                    value: 0.5,
+                }],
+            )
+            .unwrap();
+        let draft = session.draft().clone();
+        assert_eq!(pixels(&draft, 0), [128, 128, 128, 255].repeat(2));
+        let mut device = SoftwareDevice::new();
+        let mut clips = OpenClips::new();
+        assert!(!matches!(
+            layers_in(
+                &Snapshot::new(&draft),
+                Micros(0),
+                &mut device,
+                &media(),
+                &mut clips,
+                0,
+                None,
+            ),
+            Ok(Composed::Layers(_))
+        ));
+    }
+
+    #[test]
+    fn an_adjustment_layer_runs_over_the_picture_below_it() {
+        let draft = color_clip("0xFF404040", false);
+        let mut session = cutlass_session::Session::open(draft);
+        let layer = cutlass_model::SegmentId::new("layer");
+        session
+            .apply(
+                0,
+                &[
+                    cutlass_session::Request::AddAdjustment {
+                        track_id: "look".into(),
+                        segment_id: layer.clone(),
+                        material_id: "adj".into(),
+                        start: Micros(0),
+                        duration: Micros(1_000),
+                    },
+                    cutlass_session::Request::SetAdjust {
+                        segment_id: layer,
+                        material_id: "bright".into(),
+                        key: "exposure".to_owned(),
+                        value: 0.5,
+                    },
+                ],
+            )
+            .unwrap();
+        let mut draft = session.draft().clone();
+        assert_eq!(pixels(&draft, 0), [128, 128, 128, 255].repeat(2));
+        let row = draft
+            .tracks
+            .iter_mut()
+            .find(|track| track.id.as_str() == "look")
+            .unwrap();
+        row.segments[0].visible = false;
+        assert_eq!(pixels(&draft, 0), [64, 64, 64, 255].repeat(2));
+    }
+
+    #[test]
+    fn a_colour_mask_limits_a_clip_and_an_adjustment_layer_to_its_shape() {
+        // Turned a quarter, a linear mask keeps the right half.
+        let right = cutlass_effects::Mask {
+            rotation: 90.0,
+            ..cutlass_effects::Mask::new(cutlass_effects::MaskShape::Linear)
+        };
+        let draft = color_clip("0xFF404040", false);
+        let mut session = cutlass_session::Session::open(draft);
+        let clip = cutlass_model::SegmentId::new("segment");
+        session
+            .apply(
+                0,
+                &[
+                    cutlass_session::Request::SetAdjust {
+                        segment_id: clip.clone(),
+                        material_id: "bright".into(),
+                        key: "exposure".to_owned(),
+                        value: 0.5,
+                    },
+                    cutlass_session::Request::SetColorMask {
+                        segment_id: clip.clone(),
+                        material_id: "where".into(),
+                        mask: Some(right),
+                    },
+                ],
+            )
+            .unwrap();
+        assert_eq!(
+            pixels(session.draft(), 0),
+            [[64, 64, 64, 255], [128, 128, 128, 255]].concat()
+        );
+        let layer = cutlass_model::SegmentId::new("layer");
+        session
+            .apply(
+                1,
+                &[
+                    cutlass_session::Request::SetAdjust {
+                        segment_id: clip,
+                        material_id: "off".into(),
+                        key: "exposure".to_owned(),
+                        value: 0.0,
+                    },
+                    cutlass_session::Request::AddAdjustment {
+                        track_id: "look".into(),
+                        segment_id: layer.clone(),
+                        material_id: "adj".into(),
+                        start: Micros(0),
+                        duration: Micros(1_000),
+                    },
+                    cutlass_session::Request::SetAdjust {
+                        segment_id: layer.clone(),
+                        material_id: "bright2".into(),
+                        key: "exposure".to_owned(),
+                        value: 0.5,
+                    },
+                    cutlass_session::Request::SetColorMask {
+                        segment_id: layer,
+                        material_id: "where2".into(),
+                        mask: Some(cutlass_effects::Mask {
+                            invert: true,
+                            ..right
+                        }),
+                    },
+                ],
+            )
+            .unwrap();
+        assert_eq!(
+            pixels(session.draft(), 0),
+            [[128, 128, 128, 255], [64, 64, 64, 255]].concat()
+        );
+    }
+
+    #[test]
+    fn a_bundled_filter_runs_its_look_at_its_strength() {
+        let draft = color_clip("0xFF404040", false);
+        let mut session = cutlass_session::Session::open(draft);
+        let clip = cutlass_model::SegmentId::new("bright");
+        session
+            .apply(
+                0,
+                &[cutlass_session::Request::AddFilter {
+                    track_id: "looks".into(),
+                    segment_id: clip.clone(),
+                    material_id: "f".into(),
+                    start: Micros(0),
+                    duration: Micros(1_000),
+                    filter_id: "look/bright".to_owned(),
+                }],
+            )
+            .unwrap();
+        let full = pixels(session.draft(), 0);
+        assert!(full[0] > 64, "{full:?}");
+        session
+            .apply(
+                1,
+                &[cutlass_session::Request::SetEffectStrength {
+                    segment_id: clip,
+                    material_id: "f2".into(),
+                    value: 0.0,
+                }],
+            )
+            .unwrap();
+        assert_eq!(pixels(session.draft(), 0), [64, 64, 64, 255].repeat(2));
+    }
+
+    #[test]
+    fn a_graded_clip_runs_its_curve() {
+        let draft = color_clip("0xFF404040", false);
+        let mut session = cutlass_session::Session::open(draft);
+        session
+            .apply(
+                0,
+                &[cutlass_session::Request::SetCurve {
+                    segment_id: cutlass_model::SegmentId::new("segment"),
+                    material_id: "curve".into(),
+                    channel: "rgb".to_owned(),
+                    points: vec![[0.0, 1.0], [1.0, 0.0]],
+                }],
+            )
+            .unwrap();
+        assert_eq!(pixels(session.draft(), 0), [191, 191, 191, 255].repeat(2));
+    }
+
+    #[test]
+    fn a_clip_lut_maps_its_colours_at_its_strength() {
+        let draft = color_clip("0xFFFF0000", false);
+        let mut session = cutlass_session::Session::open(draft);
+        let swap = "LUT_3D_SIZE 2\n0 0 0\n0 1 0\n1 0 0\n1 1 0\n0 0 1\n0 1 1\n1 0 1\n1 1 1\n";
+        session
+            .apply(
+                0,
+                &[cutlass_session::Request::SetLut {
+                    segment_id: cutlass_model::SegmentId::new("segment"),
+                    material_id: "lut".into(),
+                    name: "Swap".to_owned(),
+                    cube: Some(swap.to_owned()),
+                    strength: 1.0,
+                }],
+            )
+            .unwrap();
+        assert_eq!(pixels(session.draft(), 0), [0, 255, 0, 255].repeat(2));
+    }
+
+    #[test]
+    fn a_keyed_clip_shows_what_is_below_its_key_colour() {
+        let mut draft = color_clip("0xFF00FF00", false);
+        draft.canvas_config.background = Some("#808080".to_owned());
+        let mut session = cutlass_session::Session::open(draft);
+        session
+            .apply(
+                0,
+                &[cutlass_session::Request::SetChroma {
+                    segment_id: cutlass_model::SegmentId::new("segment"),
+                    material_id: "key".into(),
+                    color: "#00ff00".to_owned(),
+                    strength: 0.4,
+                    shadow: 0.0,
+                }],
+            )
+            .unwrap();
+        assert_eq!(pixels(session.draft(), 0), [128, 128, 128, 255].repeat(2));
+    }
+
+    #[test]
+    fn a_masked_clip_shows_the_canvas_outside_its_mask_and_the_mask_moves_with_it() {
+        let mut draft = color_clip("0xFFFF0000", false);
+        draft.canvas_config.width = 8;
+        draft.canvas_config.height = 8;
+        draft.canvas_config.background = Some("#808080".to_owned());
+        let mut session = cutlass_session::Session::open(draft);
+        session
+            .apply(
+                0,
+                &[cutlass_session::Request::SetMask {
+                    segment_id: cutlass_model::SegmentId::new("segment"),
+                    material_id: "mask".into(),
+                    mask: Some(cutlass_effects::Mask::new(
+                        cutlass_effects::MaskShape::Circle,
+                    )),
+                }],
+            )
+            .unwrap();
+        let at = |frame: &[u8], x: usize, y: usize| {
+            let index = (y * 8 + x) * 4;
+            [
+                frame[index],
+                frame[index + 1],
+                frame[index + 2],
+                frame[index + 3],
+            ]
+        };
+        let frame = pixels(session.draft(), 0);
+        assert_eq!(at(&frame, 4, 4), [255, 0, 0, 255]);
+        assert_eq!(at(&frame, 0, 0), [128, 128, 128, 255]);
+        assert_eq!(at(&frame, 7, 3), [128, 128, 128, 255]);
+        assert_eq!(at(&frame, 6, 4), [128, 128, 128, 255]);
+
+        // Moved a quarter of the canvas right, the circle goes with it.
+        let mut moved = session.draft().clone();
+        moved.tracks[0].segments[0].clip.transform.x = 0.5;
+        let frame = pixels(&moved, 0);
+        assert_eq!(at(&frame, 6, 4), [255, 0, 0, 255]);
+        assert_eq!(at(&frame, 3, 4), [128, 128, 128, 255]);
+    }
+
+    #[test]
+    fn a_keyed_mask_moves_from_key_to_key() {
+        let mut draft = color_clip("0xFFFF0000", false);
+        draft.canvas_config.width = 8;
+        draft.canvas_config.height = 8;
+        draft.canvas_config.background = Some("#808080".to_owned());
+        let duration = draft.tracks[0].segments[0].target.duration.0;
+        let mut session = cutlass_session::Session::open(draft);
+        let x = cutlass_model::MASK_KEYS[0];
+        let small = cutlass_effects::Mask {
+            width: 0.2,
+            height: 0.2,
+            ..cutlass_effects::Mask::new(cutlass_effects::MaskShape::Rectangle)
+        };
+        let key = |offset: i64, value: f64| cutlass_session::Request::KeyValues {
+            segment_id: cutlass_model::SegmentId::new("segment"),
+            offset: cutlass_model::Micros(offset),
+            values: vec![(x.to_owned(), value)],
+        };
+        session
+            .apply(
+                0,
+                &[
+                    cutlass_session::Request::SetMask {
+                        segment_id: cutlass_model::SegmentId::new("segment"),
+                        material_id: "mask".into(),
+                        mask: Some(small),
+                    },
+                    key(0, -0.5),
+                    key(duration, 0.5),
+                ],
+            )
+            .unwrap();
+        let red = |frame: &[u8], x: usize| frame[(4 * 8 + x) * 4] == 255;
+        // A small square a quarter of the canvas left at the start, in the
+        // middle half way, a quarter right at the end.
+        let start = pixels(session.draft(), 0);
+        assert!(red(&start, 2) && !red(&start, 4) && !red(&start, 6));
+        let middle = pixels(session.draft(), duration / 2);
+        assert!(!red(&middle, 2) && red(&middle, 4) && !red(&middle, 6));
+        let end = pixels(session.draft(), duration - 1);
+        assert!(!red(&end, 2) && !red(&end, 4) && red(&end, 6));
+    }
+
+    #[test]
+    fn a_selected_clip_keeps_the_object_and_shows_the_canvas_around_it() {
+        let mut draft = color_clip("0xFFFF0000", false);
+        draft.canvas_config.width = 8;
+        draft.canvas_config.height = 8;
+        draft.canvas_config.background = Some("#808080".to_owned());
+        // The object is the left half of an 8 by 8 frame.
+        let alpha: Vec<u8> = (0..64).map(|i| if i % 8 < 4 { 255 } else { 0 }).collect();
+        let selection =
+            cutlass_effects::Selection::from_alpha(8, 8, &alpha, cutlass_model::Micros(0)).unwrap();
+        let mut session = cutlass_session::Session::open(draft);
+        session
+            .apply(
+                0,
+                &[cutlass_session::Request::SetSelection {
+                    segment_id: cutlass_model::SegmentId::new("segment"),
+                    material_id: "selection".into(),
+                    selection: Some(selection.clone()),
+                }],
+            )
+            .unwrap();
+        let at = |frame: &[u8], x: usize, y: usize| {
+            let index = (y * 8 + x) * 4;
+            [
+                frame[index],
+                frame[index + 1],
+                frame[index + 2],
+                frame[index + 3],
+            ]
+        };
+        let frame = pixels(session.draft(), 0);
+        for y in 0..8 {
+            assert_eq!(at(&frame, 1, y), [255, 0, 0, 255], "row {y}");
+            assert_eq!(at(&frame, 6, y), [128, 128, 128, 255], "row {y}");
+        }
+
+        // Inverted, the clip keeps everything but the object.
+        let mut session = cutlass_session::Session::open(session.draft().clone());
+        session
+            .apply(
+                0,
+                &[cutlass_session::Request::SetSelection {
+                    segment_id: cutlass_model::SegmentId::new("segment"),
+                    material_id: "inverted".into(),
+                    selection: Some(cutlass_effects::Selection {
+                        invert: true,
+                        ..selection
+                    }),
+                }],
+            )
+            .unwrap();
+        let frame = pixels(session.draft(), 0);
+        assert_eq!(at(&frame, 1, 4), [128, 128, 128, 255]);
+        assert_eq!(at(&frame, 6, 4), [255, 0, 0, 255]);
+
+        // Taken off, the whole clip shows again.
+        session
+            .apply(
+                session.revision(),
+                &[cutlass_session::Request::SetSelection {
+                    segment_id: cutlass_model::SegmentId::new("segment"),
+                    material_id: "gone".into(),
+                    selection: None,
+                }],
+            )
+            .unwrap();
+        let frame = pixels(session.draft(), 0);
+        assert_eq!(at(&frame, 6, 4), [255, 0, 0, 255]);
+        assert_eq!(at(&frame, 1, 4), [255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn a_compound_clip_draws_what_its_clips_drew_and_ungroups_to_the_same() {
+        let mut draft = color_clip("0xFFFF0000", false);
+        draft.materials.material_colors.push(MaterialColorConfig {
+            id: "green".into(),
+            is_color_clip: true,
+            solid_color: "0xFF00FF00".to_owned(),
+            ..MaterialColorConfig::default()
+        });
+        draft.materials.material_colors.push(MaterialColorConfig {
+            id: "blue".into(),
+            is_color_clip: true,
+            solid_color: "0xFF0000FF".to_owned(),
+            ..MaterialColorConfig::default()
+        });
+        draft.tracks[0].segments.push(Segment::new(
+            "second",
+            "green",
+            TimeRange::new(1_000_000, 1_000_000),
+        ));
+        let mut over = cutlass_model::Track::main("over");
+        over.flag = cutlass_model::TrackFlag::default();
+        let mut blue = Segment::new("over", "blue", TimeRange::new(500_000, 1_000_000));
+        blue.clip.alpha = 0.5;
+        blue.render_index = 1;
+        over.segments.push(blue);
+        draft.tracks.push(over);
+        let times = [200_000, 700_000, 1_200_000, 1_700_000];
+        let before: Vec<Vec<u8>> = times.iter().map(|time| pixels(&draft, *time)).collect();
+        let mut session = cutlass_session::Session::open(draft);
+        session
+            .apply(
+                0,
+                &[cutlass_session::Request::CreateCompound {
+                    segment_ids: vec!["segment".into(), "second".into(), "over".into()],
+                    segment_id: "nest".into(),
+                    material_id: "inside".into(),
+                }],
+            )
+            .unwrap();
+        assert_eq!(session.draft().tracks[0].segments.len(), 1);
+        let nested: Vec<Vec<u8>> = times
+            .iter()
+            .map(|time| pixels(session.draft(), *time))
+            .collect();
+        assert_eq!(nested, before);
+        session
+            .apply(
+                1,
+                &[cutlass_session::Request::Ungroup {
+                    segment_id: "nest".into(),
+                }],
+            )
+            .unwrap();
+        let back: Vec<Vec<u8>> = times
+            .iter()
+            .map(|time| pixels(session.draft(), *time))
+            .collect();
+        assert_eq!(back, before);
     }
 
     #[test]
@@ -1144,7 +1724,7 @@ mod recipe_tests {
             .layers
             .iter()
             .enumerate()
-            .filter(|(_, layer)| matches!(layer.source, GpuSource::Effect(_)))
+            .filter(|(_, layer)| matches!(layer.source, GpuSource::Effect(..)))
             .map(|(index, _)| index)
             .collect()
     }
@@ -1155,12 +1735,65 @@ mod recipe_tests {
         let before = draft.clone();
         let frame = layers(&draft, 600_000);
         assert_eq!(effects(&frame), vec![frame.layers.len() - 1]);
-        let Some(GpuSource::Effect(steps)) = frame.layers.last().map(|layer| &layer.source) else {
+        let Some(GpuSource::Effect(steps, _)) = frame.layers.last().map(|layer| &layer.source)
+        else {
             panic!("no effect layer");
         };
         let recipe = bundled_recipe("recipe/white-flash").expect("recipe");
         assert_eq!(steps, &recipe.steps_at(Micros(100_000)));
         assert_eq!(draft, before);
+    }
+
+    #[test]
+    fn an_effect_runs_with_the_controls_stored_on_its_clip() {
+        let mut draft = with_effect("recipe/photo-drop");
+        let effect = draft
+            .materials
+            .video_effects
+            .last_mut()
+            .expect("the effect");
+        cutlass_effects::store_control(effect, "speed", 2.0, 1.0);
+        let frame = layers(&draft, 600_000);
+        let Some(GpuSource::Effect(steps, _)) = frame.layers.last().map(|layer| &layer.source)
+        else {
+            panic!("no effect layer");
+        };
+        let recipe = bundled_recipe("recipe/photo-drop").expect("recipe");
+        let fast = [("speed".to_owned(), 2.0)].into_iter().collect();
+        assert_eq!(steps, &recipe.steps_with(Micros(100_000), &fast));
+        assert_eq!(steps, &recipe.steps_at(Micros(200_000)), "twice as far in");
+    }
+
+    #[test]
+    fn an_effect_with_a_mask_carries_it_placed_on_the_canvas() {
+        let mut draft = with_effect("recipe/vignette");
+        let frame = layers(&draft, 600_000);
+        let Some(GpuSource::Effect(_, mask)) = frame.layers.last().map(|layer| &layer.source)
+        else {
+            panic!("no effect layer");
+        };
+        assert_eq!(*mask, None);
+        let shape = cutlass_effects::Mask::new(cutlass_effects::MaskShape::Circle);
+        draft
+            .materials
+            .common_mask
+            .push(cutlass_model::RawMaterial {
+                id: "fx-mask".into(),
+                kind: cutlass_effects::COLOR_MASK.to_owned(),
+                fields: shape.to_fields(),
+            });
+        let row = draft.tracks.last_mut().expect("the effect row");
+        row.segments[0].extra_material_refs.push("fx-mask".into());
+        let frame = layers(&draft, 600_000);
+        let Some(GpuSource::Effect(_, Some(mask))) = frame.layers.last().map(|layer| &layer.source)
+        else {
+            panic!("no masked effect layer");
+        };
+        assert_eq!(mask.mask, shape);
+        // The canvas is 4 by 2; its middle is the shape's middle, and a
+        // corner is outside a circle half the canvas across.
+        assert!(mask.coverage_at(2.0, 1.0) > 0.99);
+        assert!(mask.coverage_at(0.0, 0.0) < 0.01);
     }
 
     #[test]

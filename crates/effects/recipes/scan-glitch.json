@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "id": "scan-glitch",
+  "name": "Scan Glitch",
+  "category": "Glitch",
+  "preview": "road",
+  "controls": [
+    {"id": "speed", "name": "Speed", "default": 1, "min": 0.25, "max": 3, "unit": "times", "speed": true},
+    {"id": "intensity", "name": "Intensity", "default": 1, "min": 0, "max": 2, "unit": "percent", "scale": [[0, "amount"], [1, "x"]]}
+  ],
+  "passes": [
+    {"block": "slices", "params": {"count": 64, "amount": {"jitter": {"rate": 12, "from": 0, "to": 0.025, "seed": 129}}, "seed": {"jitter": {"rate": 12, "from": 0, "to": 1000, "seed": 130}}}},
+    {"block": "rgb_split", "params": {"x": 0.008}}
+  ]
+}

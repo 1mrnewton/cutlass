@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "summer",
+  "name": "Summer",
+  "category": "Bright",
+  "adjust": {"temperature": 0.25, "saturation": 0.25, "exposure": 0.1, "highlights": -0.1}
+}

@@ -14,11 +14,15 @@ use crate::StorageError;
 
 const PROJECTS: &str = "Projects";
 const CACHE: &str = "Cache";
+const RENDERS: &str = "Renders";
+const UPDATES: &str = "Updates";
 const DOWNLOADS: &str = "Downloads";
 const PROXIES: &str = "Proxies";
 const MODELS: &str = "Models";
 const LOGS: &str = "Logs";
 const SETTINGS: &str = "settings.json";
+const PRESETS: &str = "Presets";
+const TEXT_PRESETS: &str = "text.json";
 
 /// The Cutlass root and the folders under it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -79,6 +83,18 @@ impl Home {
         self.root.join(CACHE)
     }
 
+    /// Timeline stretches drawn ahead for the preview, inside the cache.
+    #[must_use]
+    pub fn renders(&self) -> PathBuf {
+        self.cache().join(RENDERS)
+    }
+
+    /// Downloaded app updates, inside the cache, until one is installed.
+    #[must_use]
+    pub fn updates(&self) -> PathBuf {
+        self.cache().join(UPDATES)
+    }
+
     /// Stock footage and packages the user kept. Never evicted.
     #[must_use]
     pub fn downloads(&self) -> PathBuf {
@@ -105,6 +121,13 @@ impl Home {
     #[must_use]
     pub fn settings_file(&self) -> PathBuf {
         self.root.join(SETTINGS)
+    }
+
+    /// The looks saved with a text's "Save as preset". Its folder is made
+    /// when the first look is saved.
+    #[must_use]
+    pub fn text_presets_file(&self) -> PathBuf {
+        self.root.join(PRESETS).join(TEXT_PRESETS)
     }
 
     fn folders(&self) -> [PathBuf; 6] {
@@ -222,11 +245,17 @@ mod tests {
         assert_eq!(home.root(), root);
         assert_eq!(home.projects(), root.join("Projects"));
         assert_eq!(home.cache(), root.join("Cache"));
+        assert_eq!(home.renders(), root.join("Cache").join("Renders"));
+        assert_eq!(home.updates(), root.join("Cache").join("Updates"));
         assert_eq!(home.downloads(), root.join("Downloads"));
         assert_eq!(home.proxies(), root.join("Proxies"));
         assert_eq!(home.models(), root.join("Models"));
         assert_eq!(home.logs(), root.join("Logs"));
         assert_eq!(home.settings_file(), root.join("settings.json"));
+        assert_eq!(
+            home.text_presets_file(),
+            root.join("Presets").join("text.json")
+        );
     }
 
     #[test]

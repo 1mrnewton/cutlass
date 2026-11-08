@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "id": "thermal",
+  "name": "Thermal",
+  "category": "Retro",
+  "preview": "dancer",
+  "passes": [
+    { "block": "blur", "params": {"radius": 0.002} },
+    { "block": "gradient_map", "params": {"amount": 1, "palette": 1} }
+  ]
+}

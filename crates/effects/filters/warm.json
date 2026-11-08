@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "warm",
+  "name": "Warm",
+  "category": "Bright",
+  "adjust": {"temperature": 0.35, "saturation": 0.1}
+}

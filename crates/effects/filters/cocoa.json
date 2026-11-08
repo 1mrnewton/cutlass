@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "id": "cocoa",
+  "name": "Cocoa",
+  "category": "Food",
+  "adjust": {"temperature": 0.25, "exposure": -0.1, "contrast": 0.2},
+  "wheels": {"gain": {"hue": 30, "amount": 0.2}},
+  "hsl": {"orange": [0, 0, -0.15]}
+}

@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "ring",
+  "name": "Ring",
+  "category": "Shape",
+  "cross": {"kind": 1, "soft": 0.01, "edge": 0.04, "red": 1, "green": 1, "blue": 1}
+}

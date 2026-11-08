@@ -56,11 +56,14 @@ members = [
     "crates/generated",
     "crates/gpu",
     "crates/icons",
+    "crates/licenses",
     "crates/logger",
+    "crates/lottie",
     "crates/model",
     "crates/picture",
     "crates/platform-android",
     "crates/platform-apple",
+    "crates/platform-linux",
     "crates/platform-windows",
     "crates/playback",
     "crates/pool",
@@ -69,11 +72,16 @@ members = [
     "crates/renderer-software",
     "crates/session",
     "crates/settings",
+    "crates/stickers",
     "crates/storage",
     "crates/store",
     "crates/text",
     "crates/transcription",
+    "crates/update",
+    "crates/vision",
+    "crates/motion",
     "tools/icongen",
+    "tools/licenses",
 ]
 
 [workspace.package]
@@ -131,4 +139,63 @@ opt-level = 3
 [profile.dev.package.cutlass-pcm]
 opt-level = 3
 [profile.dev.package.cutlass-vorbis]
+opt-level = 3
+
+# A debug build still plays and exports VP8 at 1080p, and the export test
+# encodes 960x480 through the desktop shell; unoptimised, that test takes
+# 90 s on an M5 and risks the CI runner's job limit. Overflow checks and
+# debug assertions stay on.
+[profile.dev.package.cutlass-vp8]
+opt-level = 3
+
+# Off Apple, H.264 export runs the Rust encoder. Unoptimised, the desktop
+# export test's 480p encode sometimes passes its 60 s limit on a CI runner.
+# Overflow checks and debug assertions stay on.
+[profile.dev.package.cutlass-h264]
+opt-level = 3
+
+# MPEG-2 plays 1080 lines and exports through the Rust encoder on every
+# host. Unoptimised, its encoder tests take 14 s instead of 0.3 s on an M5.
+# Overflow checks and debug assertions stay on.
+[profile.dev.package.cutlass-mpeg2]
+opt-level = 3
+
+# The WebP and ProRes tests round-trip whole pictures through libwebp,
+# FFmpeg and the platform readers. Unoptimised, the WebP lossless
+# round-trip ran past 28 minutes on an M5 without finishing; optimised it
+# takes about a minute. Overflow checks and debug assertions stay on.
+[profile.dev.package.cutlass-webp]
+opt-level = 3
+[profile.dev.package.cutlass-prores]
+opt-level = 3
+
+# The AV1 and HEVC tests decode whole real files, up to 2160p, and compare
+# every frame with dav1d and FFmpeg. Unoptimised, two AV1 file checks ran
+# past 13 minutes without finishing. Overflow checks and debug assertions
+# stay on.
+[profile.dev.package.cutlass-av1]
+opt-level = 3
+[profile.dev.package.cutlass-hevc]
+opt-level = 3
+
+# MPEG-4 Visual playback runs the Rust decoder on Linux, and on the other
+# platforms when hardware decode is off. Unoptimised, the inverse transform
+# and motion compensation miss a frame budget at 1080p. Overflow checks and
+# debug assertions stay on.
+[profile.dev.package.cutlass-mpeg4]
+opt-level = 3
+
+# The vision tests run MobileSAM on the CPU. Unoptimised, one frame takes
+# minutes; burn's CPU backend and its matrix kernels build optimised.
+[profile.dev.package.burn-flex]
+opt-level = 3
+[profile.dev.package.burn-backend]
+opt-level = 3
+[profile.dev.package.burn-std]
+opt-level = 3
+[profile.dev.package.gemm]
+opt-level = 3
+[profile.dev.package.gemm-common]
+opt-level = 3
+[profile.dev.package.gemm-f32]
 opt-level = 3

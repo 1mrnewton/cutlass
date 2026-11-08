@@ -48,6 +48,29 @@ impl Peaks {
             .get(first..=last.min(self.levels.len().saturating_sub(1)))
             .map_or(0.0, |span| span.iter().copied().fold(0.0, f32::max))
     }
+
+    /// The loudest level in each of `columns` equal spans of `duration`, the
+    /// file's length in microseconds. Without a length, the peaks say how
+    /// long the file is. Past what was read is silence.
+    #[must_use]
+    pub fn spread(&self, duration: i64, columns: usize) -> Vec<f32> {
+        let length = if duration > 0 {
+            duration
+        } else {
+            i64::try_from(self.levels.len())
+                .unwrap_or(i64::MAX)
+                .saturating_mul(1_000_000)
+                / i64::from(BUCKETS_PER_SECOND)
+        };
+        let count = i64::try_from(columns.max(1)).unwrap_or(i64::MAX);
+        (0..count)
+            .map(|column| {
+                let from = Micros(length.saturating_mul(column) / count);
+                let to = Micros((length.saturating_mul(column + 1) / count - 1).max(from.0));
+                self.level(from, to)
+            })
+            .collect()
+    }
 }
 
 /// The waveform store and the thread that fills it.
@@ -298,6 +321,18 @@ impl Folder {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_spread_takes_the_loudest_level_in_each_column() {
+        let peaks = Peaks {
+            levels: vec![0.1, 0.9, 0.2, 0.3, 0.0, 0.5],
+            complete: true,
+        };
+        // 60 ms of sound across three columns, 20 ms each.
+        assert_eq!(peaks.spread(60_000, 3), [0.9, 0.3, 0.5]);
+        // Without a stored length, the peaks say how long the file is.
+        assert_eq!(peaks.spread(0, 2), [0.9, 0.5]);
+    }
+
     use super::*;
     use cutlass_codec::access::ChannelLayout;
 

@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "natural",
+  "name": "Natural",
+  "category": "Portrait",
+  "adjust": {"temperature": 0.05, "shadows": 0.1},
+  "hsl": {"orange": [0, -0.1, 0.1]}
+}

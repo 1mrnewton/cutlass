@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "id": "glitch-flash",
+  "name": "Glitch Flash",
+  "category": "Glitch",
+  "preview": "city",
+  "poster": 0.08,
+  "controls": [
+    {"id": "speed", "name": "Speed", "default": 1, "min": 0.25, "max": 3, "unit": "times", "speed": true},
+    {"id": "intensity", "name": "Intensity", "default": 1, "min": 0, "max": 2, "unit": "percent", "scale": [[1, "amount"]]}
+  ],
+  "passes": [
+    {"block": "invert", "params": {"amount": {"keys": [[0, 0], [0.06, 1], [0.12, 0], [0.5, 0]], "repeat": 0.5}}},
+    {"block": "slices", "params": {"count": 10, "amount": {"jitter": {"rate": 8, "from": 0, "to": 0.1, "seed": 123}}, "seed": {"jitter": {"rate": 8, "from": 0, "to": 1000, "seed": 124}}}}
+  ]
+}

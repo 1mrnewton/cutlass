@@ -2,6 +2,13 @@
   "version": 1,
   "id": "glitch",
   "name": "Glitch",
+  "category": "Glitch",
+  "preview": "city",
+  "controls": [
+    {"id": "speed", "name": "Speed", "default": 1, "min": 0.25, "max": 3, "unit": "times", "speed": true},
+    {"id": "intensity", "name": "Intensity", "default": 1, "min": 0, "max": 2, "unit": "percent", "scale": [[0, "amount"], [1, "x"]]},
+    {"id": "hue", "name": "Hue", "default": 0, "min": -180, "max": 180, "unit": "degrees", "set": [[2, "degrees"]]}
+  ],
   "passes": [
     {
       "block": "slices",
@@ -16,6 +23,7 @@
       "params": {
         "x": { "jitter": { "rate": 12, "from": -0.02, "to": 0.02, "seed": 14 } }
       }
-    }
+    },
+    { "block": "hue" }
   ]
 }

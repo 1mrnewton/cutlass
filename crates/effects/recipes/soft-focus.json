@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "id": "soft-focus",
+  "name": "Soft Focus",
+  "category": "Blur",
+  "preview": "portrait",
+  "controls": [
+    {"id": "blur", "name": "Blur", "default": 1, "min": 0, "max": 3, "unit": "percent", "scale": [[0, "radius"]]},
+    {"id": "glow", "name": "Glow", "default": 1, "min": 0, "max": 2, "unit": "percent", "scale": [[1, "amount"]]}
+  ],
+  "passes": [
+    {"block": "blur", "params": {"radius": 0.006}},
+    {"block": "glow", "params": {"amount": 0.8, "radius": 0.05, "threshold": 0.5}}
+  ]
+}

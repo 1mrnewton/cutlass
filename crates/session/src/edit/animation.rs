@@ -1,9 +1,9 @@
 use cutlass_model::{
-    ANIMATION_PRESETS, AnimType, Draft, MaterialAnimations, MaterialId, Micros, SegmentId,
-    StickerAnimation,
+    ANIMATION_PRESETS, AnimType, Draft, MaterialAnimations, MaterialId, MaterialRef, Micros,
+    Motion, SegmentId, StickerAnimation,
 };
 
-use super::speed::locate;
+use super::locate;
 use super::{EditError, ensure_unlocked};
 
 /// The shortest animation the duration slider reaches.
@@ -15,7 +15,11 @@ pub const SHORTEST: Micros = Micros(100_000);
 /// animation. The row is the reference editor's: one `sticker_animation`
 /// in `material_animations` that the segment's `extra_material_refs` name,
 /// dropped when it empties. An out animation starts where it must to end
-/// with the clip.
+/// with the clip. A letter animation goes only on a title. A loop plays
+/// the whole clip, once each `duration`, beside the in and out. A caption
+/// animation goes only on text: it names a loop preset, plays the whole
+/// clip in the loop slot, and while it is there playback skips the in, out
+/// and loop rows.
 pub fn set_animation(
     draft: &mut Draft,
     segment_id: &SegmentId,
@@ -23,20 +27,39 @@ pub fn set_animation(
     resource_id: Option<&str>,
     duration: Micros,
 ) -> Result<(), EditError> {
-    if !matches!(kind, AnimType::In | AnimType::Out) {
+    if !matches!(
+        kind,
+        AnimType::In | AnimType::Out | AnimType::Loop | AnimType::Caption
+    ) {
         return Err(EditError::Animation);
     }
+    // A caption plays in the loop slot, so it names a loop preset.
+    let slot = if kind == AnimType::Caption {
+        AnimType::Loop
+    } else {
+        kind
+    };
     let preset = match resource_id {
         Some(id) => Some(
             ANIMATION_PRESETS
                 .iter()
-                .find(|preset| preset.resource_id == id && preset.kind == kind)
+                .find(|preset| preset.resource_id == id && preset.kind == slot)
                 .ok_or(EditError::Animation)?,
         ),
         None => None,
     };
     let (track_index, segment_index) = locate(draft, segment_id)?;
     ensure_unlocked(draft.tracks[track_index].attribute)?;
+    let letters = preset.is_some_and(|preset| matches!(preset.motion, Motion::Letters(_)));
+    if letters || kind == AnimType::Caption {
+        let material_id = &draft.tracks[track_index].segments[segment_index].material_id;
+        if !matches!(
+            draft.materials.get(material_id.as_str()),
+            Some(MaterialRef::Text(_))
+        ) {
+            return Err(EditError::Animation);
+        }
+    }
     let length = draft.tracks[track_index].segments[segment_index]
         .target
         .duration;
@@ -47,7 +70,12 @@ pub fn set_animation(
         .iter_mut()
         .find(|row| row.id == row_id)
         .ok_or(EditError::MissingMaterial)?;
-    let name = if kind == AnimType::In { "in" } else { "out" };
+    let name = match kind {
+        AnimType::In => "in",
+        AnimType::Out => "out",
+        AnimType::Caption => "caption",
+        _ => "loop",
+    };
     row.animations.retain(|animation| animation.kind != name);
     if let Some(preset) = preset {
         let other: i64 = row
@@ -56,12 +84,17 @@ pub fn set_animation(
             .filter(|animation| matches!(animation.anim_type(), Some(AnimType::In | AnimType::Out)))
             .filter_map(|animation| animation.duration.map(|d| d.0))
             .sum();
-        let room = (length.0 - other).max(SHORTEST.0);
-        let duration = duration.0.clamp(SHORTEST.0, room).min(length.0.max(0));
-        let start = if kind == AnimType::In {
-            0
+        // A loop's length is one round, and it plays the whole clip.
+        let room = if slot == AnimType::Loop {
+            length.0.max(SHORTEST.0)
         } else {
+            (length.0 - other).max(SHORTEST.0)
+        };
+        let duration = duration.0.clamp(SHORTEST.0, room).min(length.0.max(0));
+        let start = if kind == AnimType::Out {
             length.0 - duration
+        } else {
+            0
         };
         row.animations.push(StickerAnimation {
             id: preset.resource_id.to_owned(),
@@ -77,9 +110,14 @@ pub fn set_animation(
             panel: "video".to_owned(),
             ..StickerAnimation::default()
         });
-        // In before out, as the reference editor writes them.
+        // In, out, loop, then caption, as the reference editor writes them.
         row.animations
-            .sort_by_key(|animation| animation.kind != "in");
+            .sort_by_key(|animation| match animation.kind.as_str() {
+                "in" => 0,
+                "out" => 1,
+                "caption" => 3,
+                _ => 2,
+            });
     }
     if row.animations.is_empty() {
         draft
@@ -161,7 +199,7 @@ fn uses(draft: &Draft, id: &MaterialId) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use cutlass_model::{AnimType, Draft, Micros, Segment, TimeRange, animated_at};
+    use cutlass_model::{AnimType, Micros, Segment, TimeRange, animated_at};
 
     use crate::edit::EditError;
     use crate::request::Request;
@@ -171,7 +209,7 @@ mod tests {
     const FADE_OUT: &str = "6798320902548230669";
 
     fn open() -> Session {
-        let mut draft = Draft::empty("D");
+        let mut draft = crate::edit::test_draft("D");
         draft.tracks[0].id = "main".into();
         let mut session = Session::open(draft);
         let segment = Segment::new("a", "media", TimeRange::new(0, 1_000_000));
@@ -251,6 +289,54 @@ mod tests {
     }
 
     #[test]
+    fn a_caption_animation_goes_on_text_in_the_loop_slot_and_plays_alone() {
+        let mut draft = crate::edit::test_draft("D");
+        draft.tracks[0].id = "main".into();
+        draft
+            .materials
+            .texts
+            .push(cutlass_model::MaterialText::new("words"));
+        draft.tracks[0]
+            .segments
+            .push(Segment::new("a", "words", TimeRange::new(0, 4_000_000)));
+        let mut session = Session::open(draft);
+        let pulse = "cutlass-anim-loop-pulse";
+        session
+            .apply(
+                0,
+                &[
+                    set(AnimType::In, Some(FADE_IN), 400_000),
+                    set(AnimType::Caption, Some(pulse), 1_000_000),
+                ],
+            )
+            .unwrap();
+        let draft = session.draft();
+        let row = &draft.materials.material_animations[0];
+        let kinds: Vec<_> = row.animations.iter().map(|a| a.kind.as_str()).collect();
+        assert_eq!(kinds, ["in", "caption"]);
+        assert_eq!(row.animations[1].resource_id, pulse);
+        assert_eq!(row.animations[1].start, Micros(0));
+        assert_eq!(row.animations[1].duration, Some(Micros(1_000_000)));
+        // The caption plays alone: the fade in no longer hides the start.
+        assert_eq!(alpha(&session, 0), 1.0);
+
+        // A caption names a loop preset; an in preset is refused.
+        assert_eq!(
+            session.apply(1, &[set(AnimType::Caption, Some(FADE_IN), 500_000)]),
+            Err(EditError::Animation)
+        );
+        session
+            .apply(1, &[set(AnimType::Caption, None, 0)])
+            .unwrap();
+        let kinds: Vec<_> = session.draft().materials.material_animations[0]
+            .animations
+            .iter()
+            .map(|a| a.kind.clone())
+            .collect();
+        assert_eq!(kinds, ["in"]);
+    }
+
+    #[test]
     fn an_animation_on_the_wrong_side_or_unknown_is_refused() {
         let mut session = open();
         assert_eq!(
@@ -258,8 +344,106 @@ mod tests {
             Err(EditError::Animation)
         );
         assert_eq!(
-            session.apply(1, &[set(AnimType::Loop, None, 500_000)]),
+            session.apply(1, &[set(AnimType::Caption, None, 500_000)]),
             Err(EditError::Animation)
         );
+        // A letter animation is a title's; "media" is not one.
+        assert_eq!(
+            session.apply(
+                1,
+                &[set(
+                    AnimType::In,
+                    Some("cutlass-anim-in-typewriter"),
+                    500_000
+                )]
+            ),
+            Err(EditError::Animation)
+        );
+    }
+
+    #[test]
+    fn a_loop_plays_beside_the_in_and_out_over_the_whole_clip() {
+        let mut session = open();
+        session
+            .apply(
+                session.revision(),
+                &[set(AnimType::In, Some(FADE_IN), 600_000)],
+            )
+            .unwrap();
+        session
+            .apply(
+                session.revision(),
+                &[set(
+                    AnimType::Loop,
+                    Some("cutlass-anim-loop-pulse"),
+                    400_000,
+                )],
+            )
+            .unwrap();
+        session
+            .apply(
+                session.revision(),
+                &[set(AnimType::Out, Some(FADE_OUT), 400_000)],
+            )
+            .unwrap();
+        let draft = session.draft();
+        let kinds: Vec<_> = draft.materials.material_animations[0]
+            .animations
+            .iter()
+            .map(|animation| (animation.kind.as_str(), animation.duration))
+            .collect();
+        // The loop takes no room from the in and out.
+        assert_eq!(
+            kinds,
+            [
+                ("in", Some(Micros(600_000))),
+                ("out", Some(Micros(400_000))),
+                ("loop", Some(Micros(400_000))),
+            ]
+        );
+        let segment = &draft.tracks[0].segments[0];
+        let (clip, uniform) = animated_at(draft, segment, Micros(200_000)).unwrap();
+        assert!(clip.scale.x > 1.0 || uniform.value > 1.0);
+        session
+            .apply(session.revision(), &[set(AnimType::Loop, None, 0)])
+            .unwrap();
+        assert_eq!(
+            session.draft().materials.material_animations[0]
+                .animations
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn a_title_takes_a_letter_animation_that_moves_its_letters_only() {
+        let mut draft = open().draft().clone();
+        // The clip is a title here, not the test draft's picture.
+        draft
+            .materials
+            .videos
+            .retain(|video| video.id.as_str() != "media");
+        draft
+            .materials
+            .texts
+            .push(cutlass_model::MaterialText::new("media"));
+        let mut session = Session::open(draft);
+        session
+            .apply(
+                0,
+                &[set(
+                    AnimType::In,
+                    Some("cutlass-anim-in-typewriter"),
+                    500_000,
+                )],
+            )
+            .unwrap();
+        let draft = session.draft();
+        let segment = &draft.tracks[0].segments[0];
+        let steps = cutlass_model::letters_at(draft, segment, Micros(250_000));
+        assert_eq!(steps.len(), 1);
+        assert!((steps[0].along - 0.5).abs() < 1e-9);
+        // The clip itself stays whole while its letters type in.
+        assert_eq!(alpha(&session, 0), 1.0);
     }
 }

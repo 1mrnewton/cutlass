@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "id": "rack-focus",
+  "name": "Rack Focus",
+  "category": "Blur",
+  "preview": "portrait",
+  "poster": 1.0,
+  "controls": [
+    {"id": "speed", "name": "Speed", "default": 1, "min": 0.25, "max": 3, "unit": "times", "speed": true}
+  ],
+  "passes": [
+    { "block": "blur", "params": {"radius": {"wave": {"period": 2, "from": 0, "to": 0.02}}} }
+  ]
+}

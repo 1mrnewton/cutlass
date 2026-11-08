@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "id": "lime-duotone",
+  "name": "Lime Duotone",
+  "category": "Basic",
+  "preview": "dancer",
+  "controls": [
+    {"id": "amount", "name": "Amount", "default": 1, "min": 0, "max": 1, "unit": "percent", "set": [[0, "amount"]]}
+  ],
+  "passes": [
+    {"block": "gradient_map", "params": {"amount": 1, "low_red": 0.05, "low_green": 0.15, "low_blue": 0.1, "high_red": 0.8, "high_green": 1, "high_blue": 0.3}}
+  ]
+}

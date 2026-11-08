@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "film-200",
+  "name": "Film 200",
+  "category": "Film",
+  "adjust": {"fade": 0.1, "grain": 0.15, "temperature": 0.05, "saturation": 0.05},
+  "curves": {"rgb": [[0, 0], [0.25, 0.22], [0.75, 0.78], [1, 1]]}
+}

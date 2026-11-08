@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "thriller",
+  "name": "Thriller",
+  "category": "Cinema",
+  "adjust": {"tint": -0.2, "saturation": -0.3, "contrast": 0.2},
+  "wheels": {"gain": {"hue": 100, "amount": 0.2}, "lift": {"hue": 160, "amount": 0.2}}
+}

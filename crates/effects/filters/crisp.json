@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "crisp",
+  "name": "Crisp",
+  "category": "Landscape",
+  "adjust": {"clarity": 0.4, "sharpen": 0.4, "contrast": 0.1}
+}

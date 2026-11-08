@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "porcelain",
+  "name": "Porcelain",
+  "category": "Portrait",
+  "adjust": {"exposure": 0.1, "saturation": -0.2, "temperature": -0.05},
+  "hsl": {"orange": [0, -0.3, 0.3]}
+}

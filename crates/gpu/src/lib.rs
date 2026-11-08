@@ -11,8 +11,10 @@
 #![forbid(unsafe_code)]
 
 mod placement;
+mod tone;
 
 pub use placement::{Affine, Placement};
+pub use tone::{ToneCurve, YuvTone};
 
 /// The longest edge a framebuffer or a drawn picture may have.
 pub const MAX_EDGE: u32 = 8_192;

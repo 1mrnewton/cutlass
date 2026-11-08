@@ -8,16 +8,19 @@
 //! segment is a hard cut.
 //!
 //! Before the cut, the incoming picture is sampled from the incoming head.
-//! After the cut, the outgoing picture holds its last frame. The fade package
-//! mixes those two pictures. A missing package, an unreadable package, or any
-//! other package stays the hard cut: the segment that covers the time, alone.
+//! After the cut, the outgoing picture holds its last frame. A built-in
+//! transition (`cutlass_effects::TransitionKind`), or the fade package as a
+//! dissolve, mixes those two pictures. A missing package, an unreadable
+//! package, or any other package stays the hard cut: the segment that covers the time, alone.
 //! A text segment on the side that does not cover the time also stays a hard
 //! cut. The draft is not written.
 
 use std::collections::HashMap;
 
 use cutlass_compositor::{Device, crossfade};
-use cutlass_effects::{PackageKind, PackageStore, Transition, entry, load_transition};
+use cutlass_effects::{
+    PackageKind, PackageStore, Transition, TransitionKind, entry, load_transition, mix_transition,
+};
 use cutlass_model::{Draft, MaterialRef, MaterialTransition, Micros, Segment, TrackAttribute};
 use cutlass_picture::CpuBytes;
 
@@ -44,7 +47,7 @@ impl Cut {
     }
 
     pub(crate) fn partner(&self) -> (usize, usize, Micros) {
-        if self.cover_segment == self.outgoing_segment {
+        if self.covers_outgoing() {
             (
                 self.incoming_track,
                 self.incoming_segment,
@@ -59,16 +62,10 @@ impl Cut {
         }
     }
 
-    pub(crate) fn ordered<'a>(
-        &self,
-        covering: &'a [u8],
-        partner: &'a [u8],
-    ) -> (&'a [u8], &'a [u8]) {
-        if self.cover_segment == self.outgoing_segment {
-            (covering, partner)
-        } else {
-            (partner, covering)
-        }
+    /// The clip that covers the time is the outgoing one, so the time is
+    /// before the cut.
+    pub(crate) fn covers_outgoing(&self) -> bool {
+        self.cover_segment == self.outgoing_segment
     }
 }
 
@@ -127,31 +124,63 @@ pub(crate) fn prepare<D: Device>(
     Ok(Prepared { cuts, pictures })
 }
 
-/// The fade stand-in, or nothing when the package is not that stand-in.
-pub(crate) fn fade(
-    store: &dyn PackageStore,
-    draft: &Draft,
-    cut: &Cut,
-    outgoing: &[u8],
-    incoming: &[u8],
-    width: u32,
-    height: u32,
-) -> Option<CpuBytes> {
-    if !is_fade(store, draft, cut) {
-        return None;
+/// One moment of the transition on a cut: what it draws and how far along
+/// it is.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Moment {
+    pub(crate) kind: TransitionKind,
+    numer: u64,
+    denom: u64,
+}
+
+impl Moment {
+    /// How far along, 0 to 1.
+    pub(crate) fn t(self) -> f32 {
+        #[allow(clippy::cast_precision_loss)]
+        let t = (self.numer as f64 / self.denom as f64) as f32;
+        t
     }
-    let rgba = crossfade(outgoing, incoming, cut.numer, cut.denom)?;
-    CpuBytes::new(width, height, rgba).ok()
+
+    /// The mixed picture on the CPU.
+    pub(crate) fn mix(
+        self,
+        outgoing: &[u8],
+        incoming: &[u8],
+        width: u32,
+        height: u32,
+    ) -> Option<CpuBytes> {
+        let rgba = match self.kind {
+            TransitionKind::Dissolve => crossfade(outgoing, incoming, self.numer, self.denom)?,
+            kind => mix_transition(kind, outgoing, incoming, width, height, self.t())?,
+        };
+        CpuBytes::new(width, height, rgba).ok()
+    }
+}
+
+/// The moment of a cut's transition, or nothing when it names no
+/// transition Cutlass draws.
+pub(crate) fn moment(store: &dyn PackageStore, draft: &Draft, cut: &Cut) -> Option<Moment> {
+    Some(Moment {
+        kind: kind_of(store, draft, cut)?,
+        numer: cut.numer,
+        denom: cut.denom,
+    })
+}
+
+/// The transition on a cut: a built-in one by its material, or the fade
+/// package as a dissolve.
+fn kind_of(store: &dyn PackageStore, draft: &Draft, cut: &Cut) -> Option<TransitionKind> {
+    let transition = transition_on(draft, cut.outgoing_track, cut.outgoing_segment)?;
+    if let Some(kind) = TransitionKind::of(transition) {
+        return Some(kind);
+    }
+    let package = load_transition(store, transition).ok()?;
+    (entry(package.id()).map(|row| row.kind) == Some(PackageKind::Transition(Transition::Fade)))
+        .then_some(TransitionKind::Dissolve)
 }
 
 fn is_fade(store: &dyn PackageStore, draft: &Draft, cut: &Cut) -> bool {
-    let Some(transition) = transition_on(draft, cut.outgoing_track, cut.outgoing_segment) else {
-        return false;
-    };
-    let Ok(package) = load_transition(store, transition) else {
-        return false;
-    };
-    entry(package.id()).map(|row| row.kind) == Some(PackageKind::Transition(Transition::Fade))
+    kind_of(store, draft, cut).is_some()
 }
 
 fn cuts_at(draft: &Draft, time: Micros) -> Vec<Cut> {
@@ -411,6 +440,21 @@ mod tests {
     }
 
     #[test]
+    fn a_built_in_transition_mixes_with_no_package_store() {
+        let mut draft = palette(100, 100, 10, false);
+        draft.materials.transitions[0].effect_id = "cutlass-dip-white".to_owned();
+        assert_eq!(pixels(&draft, None, 95), [255, 255, 255, 255]);
+        assert_eq!(pixels(&draft, None, 89), [255, 0, 0, 255]);
+        // A dip stored before the catalog had ids is known by its name.
+        draft.materials.transitions[0].effect_id = String::new();
+        draft.materials.transitions[0].name = "Dip".to_owned();
+        assert_eq!(pixels(&draft, None, 95), [0, 0, 0, 255]);
+        draft.materials.transitions[0].name = "Dissolve".to_owned();
+        let middle = pixels(&draft, None, 95);
+        assert!(middle[0] > 100 && middle[2] > 100, "{middle:?}");
+    }
+
+    #[test]
     fn a_missing_package_stays_a_hard_cut_and_a_fade_mixes() {
         let draft = palette(100, 100, 10, false);
         let before = draft.clone();
@@ -529,6 +573,66 @@ mod tests {
         let store = publish("transition-fade");
         assert_eq!(draw(&draft, &media, Some(&store), 95), mixed(&still));
         assert_eq!(draft, before);
+    }
+
+    #[test]
+    fn a_built_in_transition_reaches_the_gpu_as_its_two_pictures() {
+        let mut draft = two_colors(100, 100, 40, true);
+        draft.canvas_config.width = 8;
+        draft.canvas_config.height = 4;
+        draft.materials.transitions[0].effect_id =
+            cutlass_effects::TransitionKind::WipeLeft.effect_id();
+        let media = ReaderFactory::new();
+        let mut device = SoftwareDevice::new();
+        let composed = crate::frame::layers_in(
+            &Snapshot::new(&draft),
+            Micros(90),
+            &mut device,
+            &media,
+            &mut OpenClips::new(),
+            0,
+            None,
+        )
+        .expect("layers");
+        let crate::Composed::Layers(frame_layers) = composed else {
+            panic!("composed on the CPU");
+        };
+        let moments: Vec<_> = frame_layers
+            .layers
+            .iter()
+            .filter_map(|layer| match &layer.source {
+                crate::GpuSource::Transition {
+                    kind,
+                    t,
+                    outgoing,
+                    incoming,
+                } => Some((
+                    *kind,
+                    *t,
+                    outgoing.rgba()[..4].to_vec(),
+                    incoming.rgba()[..4].to_vec(),
+                )),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(moments.len(), 1, "{moments:?}");
+        let (kind, t, outgoing, incoming) = &moments[0];
+        assert_eq!(*kind, cutlass_effects::TransitionKind::WipeLeft);
+        assert!((t - 0.25).abs() < 1e-6, "{t}");
+        assert_eq!(outgoing, &[255, 0, 0, 255]);
+        assert_eq!(incoming, &[0, 0, 255, 255]);
+        // The CPU frame mixes the same moment.
+        let cpu = draw(&draft, &media, None, 90);
+        let expected = cutlass_effects::mix_transition(
+            cutlass_effects::TransitionKind::WipeLeft,
+            &[255, 0, 0, 255].repeat(32),
+            &[0, 0, 255, 255].repeat(32),
+            8,
+            4,
+            0.25,
+        )
+        .expect("mix");
+        assert_eq!(cpu, expected);
     }
 
     fn mixed(still: &[u8]) -> Vec<u8> {

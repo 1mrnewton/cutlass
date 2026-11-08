@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "id": "old-film",
+  "name": "Old Film",
+  "category": "Retro",
+  "preview": "beach",
+  "controls": [
+    {"id": "speed", "name": "Speed", "default": 1, "min": 0.25, "max": 3, "unit": "times", "speed": true},
+    {"id": "grain", "name": "Grain", "default": 1, "min": 0, "max": 2, "unit": "percent", "scale": [[3, "amount"]]}
+  ],
+  "passes": [
+    {
+      "block": "transform",
+      "params": {
+        "scale": 1.02,
+        "y": {"jitter": {"rate": 12, "from": -0.003, "to": 0.003, "seed": 91}}
+      }
+    },
+    {
+      "block": "grade",
+      "params": {
+        "saturation": 0.55,
+        "contrast": 1.1,
+        "brightness": {"jitter": {"rate": 12, "from": -0.03, "to": 0.03, "seed": 92}}
+      }
+    },
+    { "block": "flash", "params": {"amount": 0.15, "red": 1, "green": 0.8, "blue": 0.5} },
+    {
+      "block": "noise",
+      "params": {
+        "amount": 0.15,
+        "seed": {"jitter": {"rate": 24, "from": 0, "to": 1000, "seed": 93}}
+      }
+    },
+    { "block": "vignette", "params": {"amount": 0.6, "size": 0.5} }
+  ]
+}

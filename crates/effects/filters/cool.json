@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "cool",
+  "name": "Cool",
+  "category": "Moody",
+  "adjust": {"temperature": -0.35, "tint": 0.05}
+}

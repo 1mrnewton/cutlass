@@ -35,7 +35,7 @@ pub struct ClipWave {
 /// A file not read yet is pushed onto `asks`, as is one still being read:
 /// an audio clip has no waveform until its peaks arrive, a video clip an
 /// empty one, so its band holds open. A video file with no sound, a photo,
-/// or an unknown id has none.
+/// a held frame, or an unknown id has none.
 #[allow(clippy::too_many_arguments)]
 #[must_use]
 pub fn clip_wave(
@@ -59,6 +59,8 @@ pub fn clip_wave(
         || track.attribute.contains(TrackAttribute::MUTE_BY_SOLO);
     let under_picture = match draft.materials.get(segment.material_id.as_str()) {
         Some(MaterialRef::Audio(_)) => false,
+        // A held frame is silent: no wave, no volume line.
+        Some(MaterialRef::Video(video)) if video.freeze.is_some() => return None,
         Some(MaterialRef::Video(video)) if video.kind != MetaType::Photo.as_str() => true,
         _ => return None,
     };
@@ -112,4 +114,50 @@ pub fn clip_wave(
         under_picture,
         muted,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use cutlass_engine::{ReaderFactory, Waveforms};
+    use cutlass_model::{FreezeInfo, MaterialVideo, Segment, SegmentId, TimeRange};
+
+    use super::clip_wave;
+
+    #[test]
+    fn a_held_frame_has_no_wave_and_its_video_does() {
+        let mut draft = crate::color_session(4_000_000, 4_000_000).draft().clone();
+        draft.materials.videos.push(MaterialVideo {
+            id: "movie".into(),
+            path: "/movie.mp4".to_owned(),
+            ..MaterialVideo::default()
+        });
+        draft.materials.videos.push(MaterialVideo {
+            id: "held".into(),
+            path: "/movie.mp4".to_owned(),
+            freeze: Some(FreezeInfo::default()),
+            ..MaterialVideo::default()
+        });
+        for (id, material) in [("playing", "movie"), ("still", "held")] {
+            let mut segment = Segment::new(id, material, TimeRange::new(0, 4_000_000));
+            segment.source_range = Some(TimeRange::new(0, 4_000_000));
+            draft.tracks[0].segments.push(segment);
+        }
+        let waveforms = Waveforms::start(ReaderFactory::default(), || {});
+        let mut asks = Vec::new();
+        let mut wave = |id: &str| {
+            clip_wave(
+                &draft,
+                None,
+                &waveforms,
+                &SegmentId::new(id),
+                0.0001,
+                400.0,
+                0.0..400.0,
+                &mut asks,
+            )
+        };
+        // Its file is not read yet, so the playing clip holds its band open.
+        assert!(wave("playing").is_some());
+        assert!(wave("still").is_none());
+    }
 }

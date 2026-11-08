@@ -86,6 +86,8 @@ impl MaterialEffect {
     pub const MAPPING_SOURCE_PLATFORM: i32 = 1;
     /// The `type` of a title's glow.
     pub const BLOOM: &'static str = "bloom";
+    /// The `type` of a clip's blend mode.
+    pub const MIX_MODE: &'static str = "mix_mode";
 
     pub fn new(id: impl Into<MaterialId>) -> Self {
         Self {

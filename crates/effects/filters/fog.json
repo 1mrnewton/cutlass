@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "fog",
+  "name": "Fog",
+  "category": "Moody",
+  "adjust": {"fade": 0.4, "clarity": -0.4, "saturation": -0.3, "exposure": 0.05},
+  "curves": {"rgb": [[0, 0.18], [1, 0.92]]}
+}

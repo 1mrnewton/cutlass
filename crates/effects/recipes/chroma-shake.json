@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "id": "chroma-shake",
+  "name": "Chroma Shake",
+  "category": "Glitch",
+  "preview": "dancer",
+  "controls": [
+    {"id": "speed", "name": "Speed", "default": 1, "min": 0.25, "max": 3, "unit": "times", "speed": true},
+    {"id": "intensity", "name": "Intensity", "default": 1, "min": 0, "max": 2, "unit": "percent", "scale": [[0, "x"], [1, "x"], [1, "y"]]}
+  ],
+  "passes": [
+    {"block": "transform", "params": {"scale": 1.06, "x": {"jitter": {"rate": 14, "from": -0.02, "to": 0.02, "seed": 115}}}},
+    {"block": "rgb_split", "params": {"x": {"jitter": {"rate": 14, "from": -0.04, "to": 0.04, "seed": 116}}, "y": {"jitter": {"rate": 14, "from": -0.02, "to": 0.02, "seed": 117}}}}
+  ]
+}

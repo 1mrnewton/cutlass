@@ -27,6 +27,8 @@ pub enum CodecId {
     Vorbis,
     Alac,
     Ac3,
+    /// E-AC-3 (A/52 Annex E). Its decoder also plays an AC-3 core.
+    Eac3,
     Jpeg,
     Png,
     Webp,
@@ -155,6 +157,7 @@ mod tests {
             CodecId::Vorbis => "vorbis",
             CodecId::Alac => "alac",
             CodecId::Ac3 => "ac3",
+            CodecId::Eac3 => "eac3",
             CodecId::Jpeg => "jpeg",
             CodecId::Png => "png",
             CodecId::Webp => "webp",

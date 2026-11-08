@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "horizon",
+  "name": "Horizon",
+  "category": "Landscape",
+  "adjust": {"highlights": -0.4, "shadows": 0.3, "clarity": 0.2, "saturation": 0.15}
+}

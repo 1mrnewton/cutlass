@@ -12,10 +12,10 @@ pub struct Commands {
 }
 
 impl Commands {
-    /// `Session::open`, then `set_linkage`. Does not write a folder.
+    /// `Session::open_project`, then `set_linkage`. Does not write a folder.
     #[must_use]
     pub fn open(draft: Draft, linkage: LinkageSettings) -> Self {
-        let mut session = Session::open(draft);
+        let mut session = Session::open_project(draft);
         session.set_linkage(linkage);
         Self { session }
     }
@@ -296,7 +296,7 @@ mod tests {
     }
 
     #[test]
-    fn rollback_restores_the_draft_from_begin_and_drops_the_undo_apply_pushed() {
+    fn rollback_restores_the_draft_from_begin_and_moves_the_revision() {
         let mut commands = opened();
         let track = main_id(&commands);
         commands
@@ -314,6 +314,7 @@ mod tests {
         );
         commands.rollback().unwrap();
         assert_eq!(commands.draft(), &at_begin);
+        // Rollback changed the draft, so the revision moved past the apply's 2.
         assert!(
             commands.draft().tracks[0]
                 .attribute
@@ -324,7 +325,7 @@ mod tests {
                 .attribute
                 .contains(TrackAttribute::HIDE)
         );
-        assert_eq!(commands.revision(), 2);
+        assert_eq!(commands.revision(), 3);
         assert!(!commands.is_recording());
         commands.undo().unwrap();
         assert_eq!(commands.draft().tracks[0].attribute, TrackAttribute(0));
@@ -335,11 +336,11 @@ mod tests {
     }
 
     #[test]
-    fn record_and_commit_forward_and_amend_needs_a_recorded_step() {
+    fn record_and_commit_forward_and_amend_needs_an_open_transaction() {
         let mut commands = opened();
         let before = commands.draft().clone();
         let error = commands.amend().unwrap_err();
-        assert!(matches!(error, FfiError::Edit(EditError::NothingToAmend)));
+        assert!(matches!(error, FfiError::Edit(EditError::HistoryClosed)));
         assert_eq!(commands.draft(), &before);
 
         commands.record().unwrap();

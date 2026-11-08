@@ -12,7 +12,7 @@ use cutlass_codec::access::SideData;
 use cutlass_codec::{
     FrameSize, Packet as FilePacket, StreamCodec, StreamParams, Timescale, Timestamp,
 };
-use cutlass_container::{Mux, MuxStatus, NewStream, TrackDuration, TrackId};
+use cutlass_container::{Mux, MuxStatus, NewStream, TrackDuration, TrackId, Trim};
 use cutlass_encode::{
     AudioInput, ChannelLayout, CodecParams, CpuFrame, EncodeFactory, Encoder, FrameInput,
     FrameTime, Packet as AccessPacket, Pcm, PixelFormat,
@@ -25,7 +25,9 @@ use cutlass_gpu::Extent;
 use cutlass_model::{Draft, FrameRate, Micros, SegmentId, TimeRange};
 use cutlass_render::{RenderError, Renderer, frame_layers};
 
-use crate::config::{AudioExport, ExportError, ExportRequest, coded_size, output_size, validate};
+use crate::config::{
+    AudioExport, ExportError, ExportRequest, check_audio, coded_size, output_size, validate,
+};
 use crate::sidecars::{file_name, sidecar_text, write_sidecar};
 
 const MAX_SAMPLES_PER_FRAME: u32 = 480_000;
@@ -182,19 +184,18 @@ where
     let mut video = open_video(run.factory, run.request, output)?;
     let mut audio_encoder = open_audio(run.factory, run.request)?;
     let mut tracks = add_tracks(run.mux, run.request, output)?;
-    let frames = match encode_pictures(&mut run, &mut *video, &mut tracks, &indexes, output) {
-        Ok(frames) => frames,
-        Err(error) => return Err(stop(run.mux, error)),
-    };
-    if let Err(error) = encode_audio(
+    let frames = match encode_pictures(
         &mut run,
+        &mut *video,
         &mut audio_encoder,
         &mut tracks,
         &indexes,
+        output,
         &mut audio,
     ) {
-        return Err(stop(run.mux, error));
-    }
+        Ok(frames) => frames,
+        Err(error) => return Err(stop(run.mux, error)),
+    };
     if let Err(error) = drain_encoders(run.mux, &mut *video, &mut audio_encoder, &mut tracks) {
         return Err(stop(run.mux, error));
     }
@@ -210,6 +211,68 @@ where
         finished,
         sidecar,
     })
+}
+
+/// Write only the timeline's sound over `request.range` into `mux`.
+///
+/// The mix is the one a movie carries, taken one frame window at a time at
+/// `request.frame_rate`. The short side and the picture codec are not read.
+/// `progress` hears the windows done and the windows in all, and stops the
+/// export by returning false.
+pub fn export_sound<M, F>(
+    draft: &Draft,
+    request: &ExportRequest,
+    factory: &EncodeFactory,
+    mux: &mut M,
+    mut audio: F,
+    progress: Option<&mut dyn FnMut(u64, u64) -> bool>,
+) -> Result<cutlass_container::FinishedMux, ExportError>
+where
+    M: Mux,
+    F: FnMut(&SegmentId, Micros, u32, u32) -> Result<ClipPcm, ExportError>,
+{
+    let settings = request.audio.as_ref().ok_or(ExportError::AudioLayout)?;
+    validate_rate(request.frame_rate)?;
+    check_audio(settings)?;
+    if mux.family() != request.container {
+        return Err(ExportError::Container);
+    }
+    let indexes = frame_indexes(request.frame_rate, &request.range)?;
+    let mut encoder = open_audio(factory, request)?.ok_or(ExportError::AudioLayout)?;
+    let stream = add_audio(mux, settings)?;
+    let mut ticks = 0;
+    let total = u64::try_from(indexes.len()).map_err(|_| ExportError::Limit)?;
+    let mut progress = progress;
+    let written = (|| {
+        for (done, index) in indexes.iter().enumerate() {
+            let time = request
+                .frame_rate
+                .frame_start(*index)
+                .ok_or(ExportError::FrameRate)?;
+            let mut samples = mix_window(draft, settings, request, time, &mut audio)?;
+            samples = coded_pcm(settings.codec, samples)?;
+            let packets = encoder
+                .push(&AudioInput { pcm: samples })
+                .map_err(ExportError::Encoder)?;
+            write_packets(mux, stream.get(), &packets, &mut ticks)?;
+            if let Some(report) = progress.as_mut() {
+                let done = u64::try_from(done + 1).map_err(|_| ExportError::Limit)?;
+                if !report(done, total) {
+                    return Err(ExportError::Cancelled);
+                }
+            }
+        }
+        let packets = encoder.drain().map_err(ExportError::Encoder)?;
+        write_packets(mux, stream.get(), &packets, &mut ticks)?;
+        mux.interleave().map_err(ExportError::Mux)?;
+        mux.finish(&[TrackDuration {
+            track: stream,
+            timescale: Timescale::new(settings.sample_rate),
+            ticks,
+        }])
+        .map_err(|failed| ExportError::Mux(failed.reason().clone()))
+    })();
+    written.map_err(|error| stop(mux, error))
 }
 
 fn validate_rate(rate: FrameRate) -> Result<(), ExportError> {
@@ -307,6 +370,16 @@ fn write_body(
     write_sidecar(dir, &name, &body).map(Some)
 }
 
+/// What a picture track carries before its first packet: a ProRes track
+/// names its profile.
+fn picture_extra(request: &ExportRequest) -> Vec<u8> {
+    if request.codec == cutlass_codec::CodecId::Prores {
+        request.prores.code().to_vec()
+    } else {
+        Vec::new()
+    }
+}
+
 fn open_video(
     factory: &EncodeFactory,
     request: &ExportRequest,
@@ -315,6 +388,10 @@ fn open_video(
     let mut params =
         CodecParams::with_format(request.codec, output.0, output.1, PixelFormat::Rgba8);
     params.bitrate = request.bitrate;
+    params.constant_rate = request.constant_rate;
+    if request.codec == cutlass_codec::CodecId::Prores {
+        params.extra = request.prores.code().to_vec();
+    }
     factory.open(&params).map_err(ExportError::Encoder)
 }
 
@@ -327,6 +404,16 @@ fn open_audio(
     };
     let mut params = CodecParams::audio(audio.codec, audio.sample_rate, layout(audio.channels)?);
     params.bitrate = audio.bitrate;
+    // An MP3 at a named bitrate is that bitrate in every frame.
+    params.constant_rate = audio.codec == cutlass_codec::CodecId::Mp3;
+    if integer_sound(audio.codec) {
+        // A WAV holds 16-bit samples, and so does an exported FLAC.
+        params.sample_format = Some(cutlass_encode::SampleFormat::I16);
+    }
+    if audio.codec == cutlass_codec::CodecId::Alac {
+        // Lossless keeps the float mix at 24 bits.
+        params.sample_format = Some(cutlass_encode::SampleFormat::F32);
+    }
     factory
         .open(&params)
         .map(Some)
@@ -349,7 +436,11 @@ fn add_tracks<M: Mux>(
     let size = FrameSize::try_new(output.0, output.1).map_err(|_| ExportError::Canvas)?;
     let video = mux
         .add_stream(NewStream {
-            params: StreamParams::video(StreamCodec::Known(request.codec), size, Vec::new()),
+            params: StreamParams::video(
+                StreamCodec::Known(request.codec),
+                size,
+                picture_extra(request),
+            ),
             timescale: Timescale::new(request.frame_rate.numerator),
             language: None,
         })
@@ -388,16 +479,21 @@ fn add_audio<M: Mux>(mux: &mut M, audio: &AudioExport) -> Result<TrackId, Export
     .map_err(ExportError::Mux)
 }
 
-fn encode_pictures<D, M>(
+/// Each frame's picture, then the sound under it, so the file holds them
+/// side by side and a player reads both from one place.
+fn encode_pictures<D, M, F>(
     run: &mut ExportRun<'_, D, M>,
     video: &mut dyn Encoder,
+    audio_encoder: &mut Option<Box<dyn Encoder>>,
     tracks: &mut TrackTicks,
     indexes: &[i64],
     output: (u32, u32),
+    audio: &mut F,
 ) -> Result<Vec<ExportedFrame>, ExportError>
 where
     D: Device,
     M: Mux,
+    F: FnMut(&SegmentId, Micros, u32, u32) -> Result<ClipPcm, ExportError>,
 {
     let mut frames = Vec::with_capacity(indexes.len());
     let mut clips = OpenClips::new();
@@ -406,6 +502,7 @@ where
         frames.push(encode_picture(
             run, video, tracks, *index, output, &mut clips,
         )?);
+        encode_audio_window(run, audio_encoder, tracks, *index, audio)?;
         if let Some(progress) = run.progress.as_mut() {
             let done = u64::try_from(frames.len()).map_err(|_| ExportError::Limit)?;
             if !progress(done, total) {
@@ -472,11 +569,12 @@ where
     Ok(evaluated.frame)
 }
 
-fn encode_audio<D, M, F>(
+/// The sound of frame `index`'s window, when the export has sound.
+fn encode_audio_window<D, M, F>(
     run: &mut ExportRun<'_, D, M>,
     audio_encoder: &mut Option<Box<dyn Encoder>>,
     tracks: &mut TrackTicks,
-    indexes: &[i64],
+    index: i64,
     audio: &mut F,
 ) -> Result<(), ExportError>
 where
@@ -493,19 +591,17 @@ where
     let Some(stream) = tracks.audio else {
         return Ok(());
     };
-    for index in indexes {
-        let time = run
-            .request
-            .frame_rate
-            .frame_start(*index)
-            .ok_or(ExportError::FrameRate)?;
-        let samples = mix_window(run.draft, settings, run.request, time, audio)?;
-        let packets = encoder
-            .push(&AudioInput { pcm: samples })
-            .map_err(ExportError::Encoder)?;
-        write_packets(run.mux, stream.get(), &packets, &mut tracks.audio_ticks)?;
-    }
-    Ok(())
+    let time = run
+        .request
+        .frame_rate
+        .frame_start(index)
+        .ok_or(ExportError::FrameRate)?;
+    let samples = mix_window(run.draft, settings, run.request, time, audio)?;
+    let samples = coded_pcm(settings.codec, samples)?;
+    let packets = encoder
+        .push(&AudioInput { pcm: samples })
+        .map_err(ExportError::Encoder)?;
+    write_packets(run.mux, stream.get(), &packets, &mut tracks.audio_ticks)
 }
 
 struct FrameInputs<'a, D> {
@@ -615,7 +711,7 @@ fn map_eval<E: std::fmt::Display>(error: EvalError<E>) -> ExportError {
     }
 }
 
-fn video_time(rate: FrameRate, index: i64) -> Result<FrameTime, ExportError> {
+pub(crate) fn video_time(rate: FrameRate, index: i64) -> Result<FrameTime, ExportError> {
     let duration = i64::from(rate.denominator);
     let pts = index.checked_mul(duration).ok_or(ExportError::Limit)?;
     FrameTime::new(pts, duration, rate.numerator).map_err(|_| ExportError::FrameRate)
@@ -682,6 +778,54 @@ where
     }
 }
 
+/// PCM and FLAC take the mix as 16-bit integers, clipped at full scale.
+fn integer_sound(codec: cutlass_codec::CodecId) -> bool {
+    matches!(
+        codec,
+        cutlass_codec::CodecId::Pcm | cutlass_codec::CodecId::Flac
+    )
+}
+
+/// `pcm` as 16-bit samples, clipped at full scale.
+/// The mix as `codec` takes it: 16-bit for PCM and FLAC, and for ALAC
+/// floats clipped to full scale, which a lossless encoder cannot do itself.
+fn coded_pcm(codec: cutlass_codec::CodecId, pcm: Pcm) -> Result<Pcm, ExportError> {
+    match codec {
+        _ if integer_sound(codec) => to_i16(pcm),
+        cutlass_codec::CodecId::Alac => match pcm.as_f32() {
+            Some(samples) if samples.iter().any(|sample| !(-1.0..=1.0).contains(sample)) => {
+                let clipped = samples
+                    .iter()
+                    .map(|sample| {
+                        if sample.is_nan() {
+                            0.0
+                        } else {
+                            sample.clamp(-1.0, 1.0)
+                        }
+                    })
+                    .collect();
+                Pcm::from_f32(pcm.rate, pcm.layout.clone(), clipped)
+                    .map_err(|_| ExportError::AudioLayout)
+            }
+            _ => Ok(pcm),
+        },
+        _ => Ok(pcm),
+    }
+}
+
+fn to_i16(pcm: Pcm) -> Result<Pcm, ExportError> {
+    if pcm.as_i16().is_some() {
+        return Ok(pcm);
+    }
+    let samples = pcm
+        .as_f32()
+        .ok_or(ExportError::AudioLayout)?
+        .iter()
+        .map(|sample| (sample.clamp(-1.0, 1.0) * 32_767.0).round() as i16)
+        .collect();
+    Pcm::from_i16(pcm.rate, pcm.layout.clone(), samples).map_err(|_| ExportError::AudioLayout)
+}
+
 /// `pcm` with `channels` channels, as the encoder was opened: mono is copied
 /// to both sides, and stereo is averaged down to one.
 fn to_channels(pcm: Pcm, channels: u16) -> Result<Pcm, ExportError> {
@@ -739,6 +883,11 @@ fn silence(rate: u32, channels: u16, frames: u32) -> Result<Pcm, ExportError> {
     Pcm::from_f32(rate, layout, vec![0.0; len]).map_err(|_| ExportError::Audio(AudioError::Mix))
 }
 
+/// `src` drawn at `dst_w` by `dst_h`. A smaller edge averages the source
+/// pixels each output pixel covers, so detail does not shimmer; a larger
+/// edge repeats each source pixel, as before, so a grown picture stays
+/// exactly the preview's. Colour is weighted by alpha, so a transparent
+/// pixel's colour does not bleed into its neighbours.
 fn scale_rgba(
     src_w: u32,
     src_h: u32,
@@ -754,39 +903,129 @@ fn scale_rgba(
         return Ok(src.to_vec());
     }
     let dst_len = rgba_len(dst_w, dst_h).ok_or(ExportError::Limit)?;
-    let mut dst = vec![0_u8; dst_len];
-    for y in 0..dst_h {
-        let src_y = nearest(y, src_h, dst_h)?;
-        for x in 0..dst_w {
-            let src_x = nearest(x, src_w, dst_w)?;
-            let from = pixel_index(src_x, src_y, src_w)?;
-            let to = pixel_index(x, y, dst_w)?;
-            copy_pixel(src, from, &mut dst, to)?;
+    let columns = axis_taps(src_w, dst_w)?;
+    let rows = axis_taps(src_h, dst_h)?;
+    let src_row = usize::try_from(src_w)
+        .ok()
+        .and_then(|width| width.checked_mul(4))
+        .ok_or(ExportError::Limit)?;
+    let mut dst = Vec::with_capacity(dst_len);
+    let mut line = vec![0.0_f32; src_row];
+    for row in &rows {
+        line.fill(0.0);
+        for tap in row {
+            let from = tap.index.checked_mul(src_row).ok_or(ExportError::Limit)?;
+            let pixels = src
+                .get(from..from.checked_add(src_row).ok_or(ExportError::Limit)?)
+                .ok_or_else(|| ExportError::Picture("row".to_owned()))?;
+            for (sum, pixel) in line
+                .as_chunks_mut::<4>()
+                .0
+                .iter_mut()
+                .zip(pixels.as_chunks::<4>().0)
+            {
+                let alpha = f32::from(pixel[3]) * tap.weight;
+                sum[0] += f32::from(pixel[0]) * alpha;
+                sum[1] += f32::from(pixel[1]) * alpha;
+                sum[2] += f32::from(pixel[2]) * alpha;
+                sum[3] += alpha;
+            }
+        }
+        for column in &columns {
+            let mut out = [0.0_f32; 4];
+            for tap in column {
+                let at = tap.index.checked_mul(4).ok_or(ExportError::Limit)?;
+                let sum = line
+                    .get(at..at + 4)
+                    .ok_or_else(|| ExportError::Picture("column".to_owned()))?;
+                for (out, sum) in out.iter_mut().zip(sum) {
+                    *out += sum * tap.weight;
+                }
+            }
+            let alpha = out[3];
+            if alpha <= 0.0 {
+                dst.extend_from_slice(&[0, 0, 0, 0]);
+            } else {
+                dst.extend_from_slice(&[
+                    byte(out[0] / alpha),
+                    byte(out[1] / alpha),
+                    byte(out[2] / alpha),
+                    byte(alpha),
+                ]);
+            }
         }
     }
     Ok(dst)
 }
 
-fn nearest(pos: u32, src_edge: u32, dst_edge: u32) -> Result<u32, ExportError> {
+/// One source pixel's share of an output pixel.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Tap {
+    index: usize,
+    weight: f32,
+}
+
+/// For each output pixel on an edge, the source pixels it reads and their
+/// weights, which add up to one. Shrinking covers the span the output pixel
+/// stands for; growing reads the one source pixel it falls on.
+fn axis_taps(src_edge: u32, dst_edge: u32) -> Result<Vec<Vec<Tap>>, ExportError> {
     if src_edge == 0 || dst_edge == 0 {
         return Err(ExportError::Canvas);
     }
-    let value = u64::from(pos) * u64::from(src_edge) / u64::from(dst_edge);
-    let value = u32::try_from(value).map_err(|_| ExportError::Limit)?;
-    Ok(value.min(src_edge - 1))
+    let src = f64::from(src_edge);
+    let ratio = src / f64::from(dst_edge);
+    let last = usize::try_from(src_edge - 1).map_err(|_| ExportError::Limit)?;
+    let mut taps = Vec::with_capacity(usize::try_from(dst_edge).map_err(|_| ExportError::Limit)?);
+    for out in 0..dst_edge {
+        let out = f64::from(out);
+        let mut pixel = Vec::new();
+        if ratio > 1.0 {
+            let start = out * ratio;
+            let end = (start + ratio).min(src);
+            let mut at = start.floor();
+            while at < end {
+                let covered = (at + 1.0).min(end) - at.max(start);
+                if covered > 0.0 {
+                    pixel.push(Tap {
+                        index: index_of(at, last),
+                        weight: weight_of(covered / ratio),
+                    });
+                }
+                at += 1.0;
+            }
+        } else {
+            pixel.push(Tap {
+                index: index_of((out * ratio).floor(), last),
+                weight: 1.0,
+            });
+        }
+        taps.push(pixel);
+    }
+    Ok(taps)
 }
 
-fn copy_pixel(src: &[u8], from: usize, dst: &mut [u8], to: usize) -> Result<(), ExportError> {
-    let src_end = from.checked_add(4).ok_or(ExportError::Limit)?;
-    let dst_end = to.checked_add(4).ok_or(ExportError::Limit)?;
-    let sample = src
-        .get(from..src_end)
-        .ok_or_else(|| ExportError::Picture("pixel".to_owned()))?;
-    let slot = dst
-        .get_mut(to..dst_end)
-        .ok_or_else(|| ExportError::Picture("pixel".to_owned()))?;
-    slot.copy_from_slice(sample);
-    Ok(())
+/// A whole, non-negative source position as an index no later than `last`.
+fn index_of(position: f64, last: usize) -> usize {
+    // `position` is whole and at least zero; a value past `last` is clamped.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let index = position.max(0.0) as usize;
+    index.min(last)
+}
+
+fn weight_of(share: f64) -> f32 {
+    // A share is between zero and one.
+    #[allow(clippy::cast_possible_truncation)]
+    {
+        share as f32
+    }
+}
+
+fn byte(value: f32) -> u8 {
+    // Clamped to the byte range first.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    {
+        value.round().clamp(0.0, 255.0) as u8
+    }
 }
 
 fn rgba_len(width: u32, height: u32) -> Option<usize> {
@@ -796,17 +1035,7 @@ fn rgba_len(width: u32, height: u32) -> Option<usize> {
         .checked_mul(4)
 }
 
-fn pixel_index(x: u32, y: u32, width: u32) -> Result<usize, ExportError> {
-    let x = usize::try_from(x).map_err(|_| ExportError::Limit)?;
-    let y = usize::try_from(y).map_err(|_| ExportError::Limit)?;
-    let width = usize::try_from(width).map_err(|_| ExportError::Limit)?;
-    y.checked_mul(width)
-        .and_then(|row| row.checked_add(x))
-        .and_then(|pixel| pixel.checked_mul(4))
-        .ok_or(ExportError::Limit)
-}
-
-fn write_packets<M: Mux>(
+pub(crate) fn write_packets<M: Mux>(
     mux: &mut M,
     stream: u32,
     packets: &[AccessPacket],
@@ -819,8 +1048,20 @@ fn write_packets<M: Mux>(
                     mux.set_config(TrackId::new(stream), config)
                         .map_err(|_| ExportError::SideData)?;
                 }
-                // The priming the encoder adds is left in the file.
-                SideData::Gapless { .. } => {}
+                // A container with a gapless field records the priming and
+                // padding; the others leave it in the file.
+                SideData::Gapless {
+                    encoder_delay,
+                    trailing_padding,
+                    ..
+                } => {
+                    let trim = Trim::new(
+                        Some(u64::from(*encoder_delay)),
+                        Some(u64::from(*trailing_padding)),
+                    );
+                    mux.set_trim(TrackId::new(stream), trim)
+                        .map_err(ExportError::Mux)?;
+                }
                 _ => return Err(ExportError::SideData),
             }
         }
@@ -884,7 +1125,7 @@ fn finish_file<M: Mux>(
         .map_err(|failed| ExportError::Mux(failed.reason().clone()))
 }
 
-fn stop<M: Mux>(mux: &mut M, error: ExportError) -> ExportError {
+pub(crate) fn stop<M: Mux>(mux: &mut M, error: ExportError) -> ExportError {
     if mux.status() == MuxStatus::Building {
         mux.cancel();
     }
@@ -983,7 +1224,7 @@ mod tests {
 
     impl Encoder for CopyAudio {
         fn codec(&self) -> CodecId {
-            CodecId::Pcm
+            CodecId::Opus
         }
 
         fn push(&mut self, input: &AudioInput) -> Result<Vec<Packet>, CodecError> {
@@ -1032,8 +1273,8 @@ mod tests {
     }
 
     fn open_pcm(params: &CodecParams) -> Result<Box<dyn Encoder>, CodecError> {
-        if params.codec != CodecId::Pcm || params.bitrate != 128_000 {
-            return Err(CodecError::Unsupported { what: "pcm" });
+        if params.codec != CodecId::Opus || params.bitrate != 128_000 {
+            return Err(CodecError::Unsupported { what: "opus" });
         }
         Ok(Box::new(CopyAudio {
             pts: 0,
@@ -1050,7 +1291,7 @@ mod tests {
         factory.register(CodecId::Gif, open_rgba);
         factory.register(CodecId::H264, open_rgba);
         factory.register(CodecId::Vp9, open_rgba);
-        factory.register(CodecId::Pcm, open_pcm);
+        factory.register(CodecId::Opus, open_pcm);
         factory.register(CodecId::Mjpeg, decline);
         factory
     }
@@ -1091,6 +1332,8 @@ mod tests {
             audio: None,
             sidecar: None,
             late_by: 0,
+            constant_rate: false,
+            prores: crate::ProresProfile::Standard,
         }
     }
 
@@ -1633,7 +1876,7 @@ mod tests {
 
     fn audio_settings() -> AudioExport {
         AudioExport {
-            codec: CodecId::Pcm,
+            codec: CodecId::Opus,
             bitrate: 128_000,
             sample_rate: 4_000,
             channels: 1,
@@ -1876,6 +2119,96 @@ mod tests {
         assert_eq!(asked, vec![loud(0), loud(1_000), loud(2_000)]);
     }
 
+    /// A mux that notes which stream each packet arrives on, in order.
+    struct Order {
+        inner: MuxDraft,
+        streams: Vec<u32>,
+    }
+
+    impl Mux for Order {
+        fn family(&self) -> ContainerId {
+            self.inner.family()
+        }
+        fn add_stream(
+            &mut self,
+            stream: cutlass_container::NewStream,
+        ) -> Result<cutlass_container::TrackId, cutlass_container::MuxError> {
+            self.inner.add_stream(stream)
+        }
+        fn write_packet(
+            &mut self,
+            packet: &cutlass_codec::Packet,
+        ) -> Result<(), cutlass_container::MuxError> {
+            self.streams.push(packet.stream());
+            self.inner.write_packet(packet)
+        }
+        fn interleave(&mut self) -> Result<(), cutlass_container::MuxError> {
+            self.inner.interleave()
+        }
+        fn cancel(&mut self) {
+            self.inner.cancel();
+        }
+        fn finish(
+            &mut self,
+            durations: &[cutlass_container::TrackDuration],
+        ) -> Result<cutlass_container::FinishedMux, cutlass_container::FailedMux> {
+            self.inner.finish(durations)
+        }
+        fn status(&self) -> MuxStatus {
+            self.inner.status()
+        }
+    }
+
+    #[test]
+    fn each_frame_s_sound_follows_its_picture_into_the_file() {
+        let mut request = gif_request(TimeRange::new(0, 3_000));
+        request.frame_rate = FrameRate {
+            numerator: 1_000,
+            denominator: 1,
+        };
+        request.audio = Some(audio_settings());
+        let mut draft = color_draft(240, 135, 1_000_000);
+        push_sound(&mut draft, "loud", 1.0, 0, false);
+        let mut mux = Order {
+            inner: MuxDraft::new(
+                ContainerId::Isobmff,
+                MuxMode::Progressive,
+                IndexPlace::End,
+                Limits::standard(),
+            ),
+            streams: Vec::new(),
+        };
+        let mut device = SoftwareDevice::new();
+        let factory = factory();
+        export(
+            ExportRun {
+                draft: &draft,
+                device: &mut device,
+                request: &request,
+                factory: &factory,
+                readers: readers(),
+                mux: &mut mux,
+                destination: None,
+                root: None,
+                fonts: &cutlass_eval::NoFonts,
+                renderer: None,
+                progress: None,
+            },
+            |_, _, _, _| Ok(ClipPcm::Ready(tone(1.0))),
+        )
+        .expect("export");
+        let video = mux.streams[0];
+        let last_video = mux.streams.iter().rposition(|stream| *stream == video);
+        let first_audio = mux.streams.iter().position(|stream| *stream != video);
+        assert!(
+            first_audio
+                .zip(last_video)
+                .is_some_and(|(audio, video)| audio < video),
+            "sound came after every picture: {:?}",
+            mux.streams
+        );
+    }
+
     #[test]
     fn exported_audio_is_the_mix_with_mute_solo_volume_and_fades() {
         let mut request = gif_request(TimeRange::new(0, 1_000));
@@ -2078,6 +2411,43 @@ mod tests {
     }
 
     #[test]
+    fn shrinking_averages_what_each_pixel_covers_and_growing_repeats() {
+        // Black and white columns, one pixel wide: nearest pixel would keep
+        // only one of them.
+        let stripes: Vec<u8> = (0..8 * 2)
+            .flat_map(|index| {
+                let value = if index % 2 == 0 { 0 } else { 255 };
+                [value, value, value, 255]
+            })
+            .collect();
+        let half = scale_rgba(8, 2, &stripes, 4, 1).expect("half");
+        assert!(
+            half.chunks(4).all(|pixel| pixel == [128, 128, 128, 255]),
+            "{half:?}"
+        );
+
+        // A transparent pixel's colour stays out of its opaque neighbour.
+        let edge = [255, 0, 0, 255, 0, 255, 0, 0];
+        assert_eq!(
+            scale_rgba(2, 1, &edge, 1, 1).expect("edge"),
+            [255, 0, 0, 128]
+        );
+
+        // Two pixels grown to four repeat each one.
+        let pair = [0, 0, 0, 255, 255, 255, 255, 255];
+        let grown = scale_rgba(2, 1, &pair, 4, 1).expect("grown");
+        let reds: Vec<u8> = grown.chunks(4).map(|pixel| pixel[0]).collect();
+        assert_eq!(reds, [0, 0, 255, 255]);
+
+        // A 1080p frame shrunk to 720p keeps a solid colour exactly.
+        let solid = red(1920, 1080);
+        assert_eq!(
+            scale_rgba(1920, 1080, &solid, 1280, 720).expect("720"),
+            red(1280, 720)
+        );
+    }
+
+    #[test]
     fn an_audio_window_past_the_sample_cap_is_refused() {
         let draft = color_draft(240, 135, 1_000_000);
         let before = draft.clone();
@@ -2087,7 +2457,7 @@ mod tests {
             denominator: 1,
         };
         request.audio = Some(AudioExport {
-            codec: CodecId::Pcm,
+            codec: CodecId::Opus,
             bitrate: 128_000,
             sample_rate: u32::MAX,
             channels: 1,

@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "beach-day",
+  "name": "Beach Day",
+  "category": "Bright",
+  "adjust": {"exposure": 0.15, "temperature": 0.1},
+  "hsl": {"cyan": [0, 0.4, 0], "blue": [0, 0.2, 0]}
+}

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "id": "drop-down",
+  "name": "Drop Down",
+  "category": "Slide",
+  "duration": 0.7,
+  "incoming": [
+    {"block": "place", "params": {"y": {"keys": [[0, -1], [0.5, 0.04], [0.7, -0.02], [0.85, 0.008], [1, 0]]}}}
+  ],
+  "cross": {"kind": 10}
+}

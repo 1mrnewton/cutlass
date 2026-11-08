@@ -1,10 +1,10 @@
 //! Preview audio.
 //!
 //! The mix at the playhead is one interleaved stereo slice. The host callback
-//! walks that slice: Core Audio on Apple, WASAPI on Windows, and AAudio on
-//! Android. Linux has no output device, so playback stays silent until one
-//! exists. That silence is not a missing build, and opening the preview is
-//! not a failed open.
+//! walks that slice: Core Audio on Apple, WASAPI on Windows, AAudio on
+//! Android, and the default ALSA device on Linux (PipeWire or PulseAudio on
+//! most desktops). A host whose device does not open stays silent, and
+//! pictures still play.
 //!
 //! [`copy_pipeline_sample`](crate::Player::copy_pipeline_sample) still copies
 //! the sample the caller passes. The queued mix is a separate buffer.
@@ -29,20 +29,15 @@ pub const MAX_SLICE_BYTES: usize = 64 * 1024;
 /// Why the preview is not writing samples to a device.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AudioGap {
-    /// Linux has no output device. Playback stays silent until one exists.
-    /// This names silence. It is not a missing build, and it is not a failed open.
-    Linux,
     /// This host has no output device, or the device did not open.
     NoDevice,
 }
 
 impl fmt::Display for AudioGap {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let message = match self {
-            Self::Linux => "linux playback is silent until an output device exists",
-            Self::NoDevice => "the audio output device is missing",
-        };
-        formatter.write_str(message)
+        match self {
+            Self::NoDevice => formatter.write_str("the audio output device is missing"),
+        }
     }
 }
 
@@ -59,7 +54,7 @@ pub enum AudioHost {
     Windows,
     /// AAudio shared-mode output.
     Android,
-    /// No output device yet.
+    /// The default ALSA output.
     Linux,
     /// An operating system this build does not open.
     Unnamed,
@@ -115,6 +110,8 @@ struct SampleBuffer {
     live: Option<cutlass_platform_windows::OutputQueue>,
     #[cfg(target_os = "android")]
     live: Option<cutlass_platform_android::OutputQueue>,
+    #[cfg(target_os = "linux")]
+    live: Option<cutlass_platform_linux::OutputQueue>,
 }
 
 impl SampleBuffer {
@@ -128,6 +125,17 @@ impl SampleBuffer {
             live: None,
             #[cfg(target_os = "android")]
             live: None,
+            #[cfg(target_os = "linux")]
+            live: None,
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn alsa(queue: cutlass_platform_linux::OutputQueue) -> Self {
+        Self {
+            copied: Vec::new(),
+            queued: Vec::new(),
+            live: Some(queue),
         }
     }
 
@@ -196,6 +204,10 @@ impl SampleBuffer {
         #[cfg(target_os = "android")]
         if let Some(queue) = &self.live {
             return queue.set_sample(sample).map_err(map_android);
+        }
+        #[cfg(target_os = "linux")]
+        if let Some(queue) = &self.live {
+            return queue.set_sample(sample).map_err(map_linux);
         }
         let _ = (self, sample);
         Ok(())
@@ -342,14 +354,13 @@ impl AudioOutput {
         }
     }
 
-    /// Open the output for `host`. Linux is silence, not an error.
+    /// Open the output for `host`. A device that does not open is
+    /// silence, not an error.
     #[must_use]
     pub fn open(host: AudioHost) -> Self {
         match host {
             AudioHost::Software => Self::software(),
-            AudioHost::Linux => Self {
-                kind: OutputKind::Silent(AudioGap::Linux),
-            },
+            AudioHost::Linux => open_linux(),
             AudioHost::Apple => open_apple(),
             AudioHost::Windows => open_windows(),
             AudioHost::Android => open_android(),
@@ -400,10 +411,9 @@ impl AudioOutput {
             OutputKind::Silent(AudioGap::NoDevice) => {
                 matches!(
                     host,
-                    AudioHost::Apple | AudioHost::Windows | AudioHost::Android
+                    AudioHost::Apple | AudioHost::Windows | AudioHost::Android | AudioHost::Linux
                 )
             }
-            OutputKind::Silent(_) => false,
         };
         if reopen {
             *self = Self::open(host);
@@ -504,6 +514,26 @@ fn open_android() -> AudioOutput {
     }
 }
 
+fn open_linux() -> AudioOutput {
+    #[cfg(target_os = "linux")]
+    {
+        match cutlass_platform_linux::OutputQueue::open(RATE, CHANNELS) {
+            Ok(queue) => AudioOutput {
+                kind: OutputKind::Buffer(SampleBuffer::alsa(queue)),
+            },
+            Err(_) => AudioOutput {
+                kind: OutputKind::Silent(AudioGap::NoDevice),
+            },
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        AudioOutput {
+            kind: OutputKind::Silent(AudioGap::NoDevice),
+        }
+    }
+}
+
 #[cfg(target_vendor = "apple")]
 fn map_queue_error(error: cutlass_platform_apple::QueueError) -> PlayheadError {
     match error {
@@ -531,6 +561,16 @@ fn map_android(error: cutlass_platform_android::QueueError) -> PlayheadError {
         cutlass_platform_android::QueueError::Hostile => PlayheadError::Hostile,
         cutlass_platform_android::QueueError::NoDevice
         | cutlass_platform_android::QueueError::Format => PlayheadError::Hostile,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn map_linux(error: cutlass_platform_linux::QueueError) -> PlayheadError {
+    match error {
+        cutlass_platform_linux::QueueError::Truncated => PlayheadError::Truncated,
+        cutlass_platform_linux::QueueError::Hostile
+        | cutlass_platform_linux::QueueError::NoDevice
+        | cutlass_platform_linux::QueueError::Format => PlayheadError::Hostile,
     }
 }
 
@@ -646,14 +686,12 @@ mod tests {
     }
 
     #[test]
-    fn linux_stays_silent_and_pictures_still_play() {
+    fn a_host_with_no_device_stays_silent_and_pictures_still_play() {
         let session = color_session(1_000_000, 1_000_000);
         let mut player = Player::new();
-        player.open_output(AudioHost::Linux);
-        assert_eq!(player.output().gap(), Some(AudioGap::Linux));
-        let text = AudioGap::Linux.to_string();
-        assert!(text.contains("silent"));
-        assert!(!text.contains("missing build"));
+        player.open_output(AudioHost::Unnamed);
+        assert_eq!(player.output().gap(), Some(AudioGap::NoDevice));
+        assert!(AudioGap::NoDevice.to_string().contains("missing"));
         let mut device = SoftwareDevice::new();
         let frame = player
             .seek(&session, &mut device, Micros(10))
@@ -663,7 +701,7 @@ mod tests {
         let outcome = player
             .copy_pipeline_sample(&[1, 2, 3, 4, 5, 6, 7, 8], &mut buffer)
             .expect("named");
-        assert_eq!(outcome, CopyOutcome::Silent(AudioGap::Linux));
+        assert_eq!(outcome, CopyOutcome::Silent(AudioGap::NoDevice));
         assert_eq!(buffer, [9_u8; 8]);
         assert_eq!(player.audio_time(), Micros(0));
     }
@@ -673,14 +711,11 @@ mod tests {
         // The software buffer and a host with no device stay as they are.
         let mut software = AudioOutput::software();
         assert!(!software.wake(AudioHost::Software));
-        let mut linux = AudioOutput::open(AudioHost::Linux);
-        assert!(!linux.wake(AudioHost::Linux));
-        assert_eq!(linux.gap(), Some(AudioGap::Linux));
         let mut unnamed = AudioOutput::open(AudioHost::Unnamed);
         assert!(!unnamed.wake(AudioHost::Unnamed));
         // A device that never opened is opened again on the next play.
         let mut missing = AudioOutput::open(AudioHost::Unnamed);
-        assert!(missing.wake(AudioHost::current()) || AudioHost::current() == AudioHost::Linux);
+        assert!(missing.wake(AudioHost::current()) || AudioHost::current() == AudioHost::Unnamed);
         // A device that is open starts again in place.
         #[cfg(target_vendor = "apple")]
         {
@@ -740,6 +775,17 @@ mod tests {
         assert!(
             output.gap().is_none() || output.gap() == Some(AudioGap::NoDevice),
             "wasapi open must name the queue or the missing device"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "opens the default ALSA output"]
+    fn opening_alsa_names_a_queue_or_a_missing_device() {
+        let output = AudioOutput::open(AudioHost::Linux);
+        assert!(
+            output.gap().is_none() || output.gap() == Some(AudioGap::NoDevice),
+            "alsa open must name the queue or the missing device"
         );
     }
 

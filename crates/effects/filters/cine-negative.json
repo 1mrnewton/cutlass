@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "cine-negative",
+  "name": "Cine Negative",
+  "category": "Film",
+  "adjust": {"contrast": -0.1, "fade": 0.15, "saturation": -0.1},
+  "wheels": {"lift": {"hue": 190, "amount": 0.25}, "gain": {"hue": 30, "amount": 0.2}}
+}

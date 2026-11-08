@@ -1,0 +1,570 @@
+//! The assistant's tools on the open project. Each call runs on the
+//! window's thread against the session the window holds, so an edit the
+//! assistant makes is one undo step like any other, and the player moves
+//! the window's playhead.
+
+use cutlass_agent::{
+    ApprovalAction, Approver, DraftTools, Export, McpClient, McpError, McpTransport, Player,
+    Registry, SettingsTool, Speech, ToolCall, ToolOutcome, ToolSink, TrackAsk, Tracking,
+};
+use cutlass_codec::CodecId;
+use cutlass_model::Micros;
+
+use super::{ExportRequest, Shell};
+use crate::mcp::{Bundled, Probe};
+
+/// Player moves, made on the window once the call is done.
+#[derive(Default)]
+struct Moves {
+    seek: Option<i64>,
+    play: Option<bool>,
+}
+
+impl Player for Moves {
+    fn seek(&mut self, time_us: i64) -> Result<(), String> {
+        if time_us < 0 {
+            return Err("the time is before the start".to_owned());
+        }
+        self.seek = Some(time_us);
+        Ok(())
+    }
+
+    fn play(&mut self) -> Result<(), String> {
+        self.play = Some(true);
+        Ok(())
+    }
+
+    fn pause(&mut self) -> Result<(), String> {
+        self.play = Some(false);
+        Ok(())
+    }
+}
+
+/// Allows what the user already allowed for this call; anything else is
+/// kept, so the window can ask, and refused for now.
+struct Asked<'a> {
+    allowed: &'a [ApprovalAction],
+    wanted: Option<ApprovalAction>,
+}
+
+impl Approver for Asked<'_> {
+    fn decide(&mut self, action: &ApprovalAction) -> bool {
+        if self.allowed.contains(action) {
+            return true;
+        }
+        self.wanted.get_or_insert_with(|| action.clone());
+        false
+    }
+}
+
+/// Transcription as a window job; an earlier call's job is polled here.
+struct Hearing<'a> {
+    shell: &'a mut Shell,
+}
+
+impl Speech for Hearing<'_> {
+    fn start(&mut self, start_us: i64, duration_us: i64) -> Result<String, String> {
+        self.shell
+            .start_hearing(start_us, duration_us)
+            .map_err(|error| error.to_string())
+    }
+
+    fn poll(&mut self, job_id: &str) -> Result<Option<String>, String> {
+        self.shell
+            .hearing(job_id)
+            .map_err(|error| error.to_string())
+    }
+}
+
+/// Tracking: a job the window starts once the call is done, and the
+/// paths of jobs as they stood when the call began.
+struct Tracks {
+    now: super::follow::AgentTracks,
+    started: Option<(String, TrackAsk)>,
+}
+
+impl Tracking for Tracks {
+    fn start(&mut self, ask: &TrackAsk) -> Result<String, String> {
+        if self.started.is_some() {
+            return Err("one tracking job at a time".to_owned());
+        }
+        let id = self.now.next_id();
+        self.started = Some((id.clone(), ask.clone()));
+        Ok(id)
+    }
+
+    fn poll(&mut self, job_id: &str) -> Result<Option<cutlass_model::TrackPath>, String> {
+        self.now.path(job_id)
+    }
+
+    fn clip_path(
+        &self,
+        draft: &cutlass_model::Draft,
+        clip: &cutlass_model::SegmentId,
+        path: &cutlass_model::TrackPath,
+    ) -> Option<cutlass_model::TrackPath> {
+        super::clip_path(draft, clip, path)
+    }
+}
+
+/// An export the window starts once the call is done.
+#[derive(Default)]
+struct Exports {
+    path: Option<String>,
+}
+
+impl Export for Exports {
+    fn start(&mut self, path: &str) -> Result<String, String> {
+        if path.trim().is_empty() {
+            return Err("name the file to export to".to_owned());
+        }
+        self.path = Some(path.to_owned());
+        Ok("export".to_owned())
+    }
+}
+
+struct NoServers;
+
+impl McpTransport for NoServers {
+    fn call(
+        &mut self,
+        server_name: &str,
+        _tool: &str,
+        _arguments: &str,
+    ) -> Result<String, McpError> {
+        Err(McpError::Transport(format!(
+            "the assistant does not call other servers yet, so {server_name} was not reached"
+        )))
+    }
+}
+
+/// What one assistant tool call did, and the approval it waits for when
+/// it needs one the user has not given.
+pub struct AgentRun {
+    pub outcome: ToolOutcome,
+    pub wants: Option<ApprovalAction>,
+}
+
+/// Error text kept in the log for a failed tool call. The rest may be a
+/// script's output.
+const TOOL_ERROR_LOGGED: usize = 300;
+
+/// Log one finished tool call from `source`: its name and id, how long it
+/// took, and the start of its error. The arguments stay out, as
+/// `settings.set` can carry a key and `draft.apply` the user's words.
+pub(crate) fn log_tool_call(
+    source: &str,
+    call: &ToolCall,
+    outcome: &ToolOutcome,
+    took: std::time::Duration,
+) {
+    if outcome.is_error {
+        let mut error = outcome.content.as_str();
+        if error.len() > TOOL_ERROR_LOGGED {
+            let mut end = TOOL_ERROR_LOGGED;
+            while !error.is_char_boundary(end) {
+                end -= 1;
+            }
+            error = &error[..end];
+        }
+        cutlass_logger::warn!(
+            "{source} tool {}{} failed after {took:.1?}: {error}",
+            call.name,
+            call_id(call)
+        );
+    } else {
+        cutlass_logger::info!(
+            "{source} tool {}{} ran in {took:.1?}",
+            call.name,
+            call_id(call)
+        );
+    }
+}
+
+/// ` (id)`, or nothing for a call that came without one.
+fn call_id(call: &ToolCall) -> String {
+    if call.id.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", call.id)
+    }
+}
+
+impl Shell {
+    /// Run one tool call from the assistant on the open project. `allowed`
+    /// is what the user allowed for this call; a call that needs anything
+    /// else does nothing and says what it wants.
+    pub fn run_agent_tool(&mut self, call: &ToolCall, allowed: &[ApprovalAction]) -> AgentRun {
+        let started = std::time::Instant::now();
+        let run = self.run_agent_tool_in(call, allowed);
+        match &run.wants {
+            Some(action) => cutlass_logger::info!(
+                "assistant tool {}{} waits for the user's allow: {action:?}",
+                call.name,
+                call_id(call)
+            ),
+            None => log_tool_call("assistant", call, &run.outcome, started.elapsed()),
+        }
+        run
+    }
+
+    fn run_agent_tool_in(&mut self, call: &ToolCall, allowed: &[ApprovalAction]) -> AgentRun {
+        let Some(session) = self.session.clone() else {
+            return AgentRun {
+                outcome: ToolOutcome {
+                    content: "no project is open".to_owned(),
+                    is_error: true,
+                },
+                wants: None,
+            };
+        };
+        let before = session.revision();
+        let (path, generation) = self
+            .settings_file
+            .clone()
+            .unwrap_or_else(|| (Shell::settings_path(), 0));
+        let settings = SettingsTool::held(path, generation, self.settings.clone());
+        let jobs = std::mem::take(&mut self.agent_speech_jobs);
+        let track_jobs = std::mem::take(&mut self.agent_track_jobs);
+        let tracks = Tracks {
+            now: self.agent_tracks_now(),
+            started: None,
+        };
+        let sandbox =
+            crate::sandbox::local_sandbox(crate::sandbox::this_program(), self.project_folder());
+        let mut registry = Registry::new(
+            DraftTools::new(session),
+            settings,
+            Moves::default(),
+            Probe,
+            Hearing { shell: self },
+            Bundled,
+            (
+                Bundled,
+                Exports::default(),
+                sandbox,
+                Asked {
+                    allowed,
+                    wanted: None,
+                },
+                McpClient::new(NoServers),
+                tracks,
+            ),
+        );
+        registry.set_speech_jobs(jobs);
+        registry.set_track_jobs(track_jobs);
+        let mut outcome = registry.run_tool(call);
+        let wants = registry.approver.wanted.take();
+        let session = registry.draft.session().clone();
+        let moves = std::mem::take(&mut registry.player);
+        let exported = registry.export.path.take();
+        let jobs = registry.take_speech_jobs();
+        let mut track_jobs = registry.take_track_jobs();
+        let tracks = std::mem::replace(
+            &mut registry.tracking,
+            Tracks {
+                now: super::follow::AgentTracks::default(),
+                started: None,
+            },
+        );
+        drop(registry);
+        self.agent_speech_jobs = jobs;
+        self.keep_track_ids(&tracks.now);
+        if let Some((id, ask)) = tracks.started
+            && let Err(error) = self.start_agent_track(id.clone(), &ask)
+        {
+            track_jobs.remove(&id);
+            outcome = ToolOutcome {
+                content: error.to_string(),
+                is_error: true,
+            };
+        }
+        self.agent_track_jobs = track_jobs;
+        if session.revision() != before {
+            self.session = Some(session);
+            self.lanes_cache.replace(None);
+        }
+        if let Some(time) = moves.seek {
+            self.seek(Micros(time));
+        }
+        match moves.play {
+            Some(true) => self.play(),
+            Some(false) => self.pause(),
+            None => {}
+        }
+        if let Some(path) = exported {
+            let replace = call.arguments.trim_start().starts_with("replace");
+            let codec = if path.to_ascii_lowercase().ends_with(".png") {
+                CodecId::Png
+            } else {
+                CodecId::H264
+            };
+            let started = self.export(ExportRequest {
+                path: path.into(),
+                codec,
+                replace,
+                ..ExportRequest::default()
+            });
+            if let Err(error) = started {
+                outcome = ToolOutcome {
+                    content: error.to_string(),
+                    is_error: true,
+                };
+            }
+        }
+        AgentRun { outcome, wants }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use cutlass_agent::ToolCall;
+    use cutlass_model::{Draft, Micros, Segment, TimeRange, TrackId};
+    use cutlass_store::Folder;
+    use serde_json::json;
+
+    use crate::shell::tests::{Temp, shell};
+
+    fn call(name: &str, arguments: &str) -> ToolCall {
+        ToolCall {
+            id: "1".to_owned(),
+            name: name.to_owned(),
+            arguments: arguments.to_owned(),
+        }
+    }
+
+    #[test]
+    fn a_tool_call_is_logged_by_name_and_outcome_without_its_arguments() {
+        crate::test_log::path();
+        let ok = ToolCall {
+            id: "log-call-ok".to_owned(),
+            name: "draft.query".to_owned(),
+            arguments: "args-stay-out".to_owned(),
+        };
+        let done = cutlass_agent::ToolOutcome {
+            content: "the project".to_owned(),
+            is_error: false,
+        };
+        super::log_tool_call("assistant", &ok, &done, std::time::Duration::from_millis(3));
+        let failed = ToolCall {
+            id: "log-call-failed".to_owned(),
+            ..ok.clone()
+        };
+        let long = cutlass_agent::ToolOutcome {
+            content: format!("bad-start{}", "é".repeat(400)),
+            is_error: true,
+        };
+        super::log_tool_call("mcp", &failed, &long, std::time::Duration::from_millis(3));
+        let log = crate::test_log::text();
+        let line = |id: &str| {
+            log.lines()
+                .find(|line| line.contains(id))
+                .unwrap_or_default()
+                .to_owned()
+        };
+        let ran = line("log-call-ok");
+        assert!(ran.contains(" INFO "), "{log}");
+        assert!(
+            ran.contains("assistant tool draft.query (log-call-ok) ran in"),
+            "{log}"
+        );
+        let refused = line("log-call-failed");
+        assert!(refused.contains(" WARN "), "{log}");
+        assert!(
+            refused.contains("mcp tool draft.query (log-call-failed) failed"),
+            "{log}"
+        );
+        assert!(refused.contains("bad-start"), "{log}");
+        assert!(refused.len() < 600, "the error is cut: {refused}");
+        assert!(!log.contains("args-stay-out"), "{log}");
+        let mut desktop = shell();
+        let none = desktop.run_agent_tool(
+            &ToolCall {
+                id: "log-call-no-project".to_owned(),
+                ..ok
+            },
+            &[],
+        );
+        assert!(none.outcome.is_error);
+        let log = crate::test_log::text();
+        assert!(
+            log.contains("assistant tool draft.query (log-call-no-project) failed"),
+            "{log}"
+        );
+    }
+
+    #[test]
+    fn the_assistant_reads_edits_and_moves_the_playhead_in_the_window() {
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        draft.tracks[0].id = TrackId::new("main");
+        draft.tracks[0]
+            .segments
+            .push(Segment::new("a", "missing", TimeRange::new(0, 2_000_000)));
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        let none = desktop
+            .run_agent_tool(&call("draft.query", "project"), &[])
+            .outcome;
+        assert!(none.is_error);
+        desktop.open_folder(&temp.path).unwrap();
+
+        let read = desktop
+            .run_agent_tool(&call("draft.query", "project"), &[])
+            .outcome;
+        assert!(!read.is_error, "{}", read.content);
+        let revision: u64 = read
+            .content
+            .split_whitespace()
+            .find_map(|word| word.strip_prefix("revision="))
+            .and_then(|value| value.parse().ok())
+            .unwrap();
+
+        let split = json!({
+            "expected_revision": revision,
+            "requests": [{
+                "op": "split",
+                "segment_id": "a",
+                "at": 500_000,
+                "right_id": "b",
+            }],
+        });
+        let applied = desktop
+            .run_agent_tool(&call("draft.apply", &split.to_string()), &[])
+            .outcome;
+        assert!(!applied.is_error, "{}", applied.content);
+        let count =
+            |desktop: &crate::shell::Shell| desktop.draft().unwrap().tracks[0].segments.len();
+        assert_eq!(count(&desktop), 2);
+        // The window undoes the assistant's edit like its own.
+        desktop.undo().unwrap();
+        assert_eq!(count(&desktop), 1);
+
+        let stale = desktop
+            .run_agent_tool(&call("draft.apply", &split.to_string()), &[])
+            .outcome;
+        assert!(stale.is_error, "a stale revision is refused");
+
+        let seek = desktop
+            .run_agent_tool(&call("player.seek", "1000000"), &[])
+            .outcome;
+        assert!(!seek.is_error, "{}", seek.content);
+        assert_eq!(desktop.playhead(), Micros(1_000_000));
+
+        // Replacing a file waits for the user's allow, and touches nothing
+        // before it.
+        let taken = temp.path.join("taken.png");
+        std::fs::write(&taken, b"old").unwrap();
+        let replace = call("export.start", &format!("replace {}", taken.display()));
+        let asked = desktop.run_agent_tool(&replace, &[]);
+        assert!(asked.outcome.is_error);
+        let wanted = cutlass_agent::ApprovalAction::ExportReplace {
+            path: taken.display().to_string(),
+        };
+        assert_eq!(asked.wants, Some(wanted.clone()));
+        assert_eq!(std::fs::read(&taken).unwrap(), b"old");
+        let allowed = desktop.run_agent_tool(&replace, &[wanted]);
+        assert!(allowed.wants.is_none());
+        assert!(!allowed.outcome.is_error, "{}", allowed.outcome.content);
+        assert_ne!(
+            std::fs::read(&taken).unwrap(),
+            b"old",
+            "the still was written"
+        );
+        // A new file that is taken is refused without asking.
+        let new = desktop.run_agent_tool(
+            &call("export.start", &format!("new {}", taken.display())),
+            &[],
+        );
+        assert!(new.wants.is_none());
+        assert!(new.outcome.is_error);
+        let settings = desktop
+            .run_agent_tool(&call("settings.get", ""), &[])
+            .outcome;
+        assert!(!settings.is_error, "{}", settings.content);
+    }
+
+    #[test]
+    fn the_assistant_tracks_as_a_window_job_and_hears_its_errors() {
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        draft.canvas_config.width = 1920;
+        draft.canvas_config.height = 1080;
+        draft.materials.videos.push(cutlass_model::MaterialVideo {
+            id: "m".into(),
+            width: 1920,
+            height: 1080,
+            path: "missing.mp4".into(),
+            ..cutlass_model::MaterialVideo::default()
+        });
+        draft.tracks[0]
+            .segments
+            .push(Segment::new("v", "m", TimeRange::new(0, 2_000_000)));
+        let mut lane = cutlass_model::Track::main("stickers");
+        lane.kind = cutlass_model::TrackType::Sticker;
+        lane.segments
+            .push(Segment::new("s", "m", TimeRange::new(0, 2_000_000)));
+        draft.tracks.push(lane);
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        let ask = |target: &str| {
+            json!({
+                "target": target,
+                "at_us": 500_000,
+                "box": [-0.2, 0.2, 0.2, -0.2],
+                "followers": ["s"],
+            })
+            .to_string()
+        };
+        let refused = desktop
+            .run_agent_tool(&call("track.start", &ask("s")), &[])
+            .outcome;
+        assert!(refused.is_error, "a sticker is not tracked");
+        assert!(
+            refused.content.contains("video clip"),
+            "{}",
+            refused.content
+        );
+
+        let started = desktop
+            .run_agent_tool(&call("track.start", &ask("v")), &[])
+            .outcome;
+        assert!(!started.is_error, "{}", started.content);
+        let job = started
+            .content
+            .strip_prefix("job=")
+            .and_then(|rest| rest.split_whitespace().next())
+            .unwrap()
+            .to_owned();
+        // The file is missing, so the job ends with that, and the poll says so.
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let polled = loop {
+            let polled = desktop
+                .run_agent_tool(&call("track.poll", &job), &[])
+                .outcome;
+            if polled.content != "pending" || std::time::Instant::now() > until {
+                break polled;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        assert!(polled.is_error, "{}", polled.content);
+        assert!(
+            polled.content.contains("could not be opened"),
+            "{}",
+            polled.content
+        );
+        let again = desktop
+            .run_agent_tool(&call("track.poll", &job), &[])
+            .outcome;
+        assert!(again.is_error && again.content.contains("unknown tracking job"));
+        assert!(
+            desktop
+                .draft()
+                .unwrap()
+                .materials
+                .video_trackings
+                .is_empty()
+        );
+    }
+}

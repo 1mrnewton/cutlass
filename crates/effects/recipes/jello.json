@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "id": "jello",
+  "name": "Jello",
+  "category": "Motion",
+  "preview": "portrait",
+  "poster": 0.2,
+  "controls": [
+    {"id": "speed", "name": "Speed", "default": 1, "min": 0.25, "max": 3, "unit": "times", "speed": true}
+  ],
+  "passes": [
+    {"block": "stretch", "params": {"x": {"wave": {"period": 0.4, "from": 0.94, "to": 1.06}}, "y": {"wave": {"period": 0.4, "from": 1.06, "to": 0.94}}}}
+  ]
+}

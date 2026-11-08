@@ -1,0 +1,73 @@
+[package]
+name = "ml-bench"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "MIT OR Apache-2.0"
+description = "Times the same segmentation model on candle and on burn."
+
+# Its own workspace: burn and its GPU stack stay out of the editor build,
+# `cargo test --workspace`, and the editor's lockfile.
+[workspace]
+
+[lib]
+# `staticlib` is the library the iPhone app links.
+crate-type = ["rlib", "staticlib"]
+
+[features]
+default = []
+# The GPU on Apple machines: candle's Metal backend and burn's wgpu on Metal.
+metal = ["candle-core/metal", "candle-nn/metal", "candle-transformers/metal", "burn/metal"]
+# The GPU on Android, Windows and Linux: burn's wgpu on Vulkan. candle has no Vulkan backend.
+vulkan = ["burn/vulkan"]
+# Any GPU through wgpu's portable path (WGSL). Older Android drivers lack the Vulkan
+# 1.2 features the `vulkan` path needs.
+wgpu = ["burn/wgpu"]
+# iPhone: candle on Metal, and burn on wgpu's portable compiler pinned to Metal.
+# burn's own Metal compiler only runs on macOS.
+ios = ["candle-core/metal", "candle-nn/metal", "candle-transformers/metal", "burn/wgpu"]
+# Keeps burn's kernel tuning results on disk, so only the first launch pays for them.
+cache = ["burn/persistence"]
+
+[dependencies]
+# The same candle revision as cutlass-transcription.
+candle-core = { version = "0.11.0", git = "https://github.com/huggingface/candle", rev = "12bb5d1f6350f4ea9827d9086f213feec1f0af6a" }
+candle-nn = { version = "0.11.0", git = "https://github.com/huggingface/candle", rev = "12bb5d1f6350f4ea9827d9086f213feec1f0af6a" }
+candle-transformers = { version = "0.11.0", git = "https://github.com/huggingface/candle", rev = "12bb5d1f6350f4ea9827d9086f213feec1f0af6a" }
+burn = { version = "=0.22.1", default-features = false, features = ["std", "flex", "fusion", "autotune"] }
+burn-store = "=0.22.1"
+image = { version = "0.25.8", default-features = false, features = ["png", "jpeg"] }
+safetensors = "0.8.0"
+serde_json = "1.0.154"
+
+[build-dependencies]
+burn-onnx = "=0.22.0"
+
+[profile.release]
+debug = false
+
+[lints.rust]
+# `deny`, not `forbid`: the iPhone entry point exports one C symbol.
+unsafe_code = "deny"
+future_incompatible = { level = "deny", priority = -1 }
+nonstandard_style = { level = "deny", priority = -1 }
+rust_2018_idioms = { level = "deny", priority = -1 }
+trivial_casts = "deny"
+trivial_numeric_casts = "deny"
+unused_lifetimes = "deny"
+unused_qualifications = "deny"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+dbg_macro = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
+wildcard_imports = "deny"
+exit = "deny"
+mem_forget = "deny"
+get_unwrap = "deny"

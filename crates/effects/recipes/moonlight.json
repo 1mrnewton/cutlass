@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "id": "moonlight",
+  "name": "Moonlight",
+  "category": "Light",
+  "preview": "city",
+  "passes": [
+    { "block": "grade", "params": {"brightness": -0.05, "saturation": 0.7} },
+    { "block": "flash", "params": {"amount": 0.12, "red": 0.2, "green": 0.35, "blue": 1} },
+    { "block": "vignette", "params": {"amount": 0.5, "size": 0.5} }
+  ]
+}

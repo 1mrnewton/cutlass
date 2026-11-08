@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "snapshot",
+  "name": "Snapshot",
+  "category": "Vintage",
+  "adjust": {"fade": 0.2, "temperature": 0.15, "contrast": 0.1, "vignette": 0.2, "brightness": 0.05}
+}

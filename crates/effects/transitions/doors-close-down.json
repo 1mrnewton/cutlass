@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "doors-close-down",
+  "name": "Doors Close Down",
+  "category": "Shape",
+  "cross": {"kind": 3, "angle": 90, "soft": 0.02, "close": 1}
+}

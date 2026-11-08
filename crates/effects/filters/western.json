@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "western",
+  "name": "Western",
+  "category": "Cinema",
+  "adjust": {"temperature": 0.4, "saturation": -0.2, "contrast": 0.25, "fade": 0.1},
+  "wheels": {"gain": {"hue": 40, "amount": 0.3}}
+}

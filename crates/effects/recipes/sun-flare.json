@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "id": "sun-flare",
+  "name": "Sun Flare",
+  "category": "Light",
+  "preview": "beach",
+  "controls": [
+    {"id": "intensity", "name": "Intensity", "default": 1, "min": 0, "max": 2, "unit": "percent", "scale": [[0, "amount"], [1, "amount"]]}
+  ],
+  "passes": [
+    {
+      "block": "light_leak",
+      "params": {
+        "amount": 0.7,
+        "x": -0.45,
+        "y": -0.45,
+        "size": 0.7,
+        "red": 1,
+        "green": 0.85,
+        "blue": 0.5
+      }
+    },
+    { "block": "glow", "params": {"amount": 0.8, "radius": 0.05, "threshold": 0.7} }
+  ]
+}

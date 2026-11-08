@@ -70,8 +70,9 @@ pub struct VideoAlgorithm {
 pub struct Algorithm {
     #[serde(default, rename = "type")]
     pub kind: String,
-    /// For Enhance quality, [`Algorithm::HD`] or [`Algorithm::UHD`]; 0 or
-    /// below is off.
+    /// For Enhance quality, [`Algorithm::HD`] or [`Algorithm::UHD`]; for
+    /// Reduce image noise, [`Algorithm::WEAK`] or [`Algorithm::STRONG`]; 0
+    /// or below is off.
     #[serde(default)]
     pub level: i64,
     #[serde(flatten, default)]
@@ -85,6 +86,12 @@ impl Algorithm {
     pub const HD: i64 = 1;
     /// Enhanced to 2160 on the short side.
     pub const UHD: i64 = 2;
+    /// The reference editor's name for Reduce image noise.
+    pub const NOISE_REDUCTION: &'static str = "NoiseReduction";
+    /// Light noise taken out.
+    pub const WEAK: i64 = 1;
+    /// Heavy noise taken out.
+    pub const STRONG: i64 = 2;
 
     /// Whether the algorithm runs.
     #[must_use]
@@ -97,11 +104,23 @@ impl MaterialVideo {
     /// The clip's Enhance quality, when it has one that is on.
     #[must_use]
     pub fn enhance(&self) -> Option<&Algorithm> {
+        self.algorithm(Algorithm::QUALITY_ENHANCE)
+    }
+
+    /// The clip's Reduce image noise, when it has one that is on.
+    #[must_use]
+    pub fn denoise(&self) -> Option<&Algorithm> {
+        self.algorithm(Algorithm::NOISE_REDUCTION)
+    }
+
+    /// The clip's algorithm named `kind`, when it has one that is on.
+    #[must_use]
+    pub fn algorithm(&self, kind: &str) -> Option<&Algorithm> {
         self.video_algorithm
             .as_ref()?
             .algorithms
             .iter()
-            .find(|algorithm| algorithm.kind == Algorithm::QUALITY_ENHANCE && algorithm.is_on())
+            .find(|algorithm| algorithm.kind == kind && algorithm.is_on())
     }
 }
 
@@ -287,5 +306,21 @@ mod tests {
             let video: MaterialVideo = serde_json::from_str(none).unwrap();
             assert!(video.enhance().is_none(), "{none}");
         }
+    }
+
+    #[test]
+    fn a_noise_reduction_reads_apart_from_an_enhance() {
+        let video: MaterialVideo = serde_json::from_str(
+            r#"{"video_algorithm":{"algorithms":[{"type":"QualityEnhance","level":1},{"type":"NoiseReduction","level":2}]}}"#,
+        )
+        .unwrap();
+        assert_eq!(video.denoise().unwrap().level, Algorithm::STRONG);
+        assert_eq!(video.enhance().unwrap().level, Algorithm::HD);
+        let only: MaterialVideo = serde_json::from_str(
+            r#"{"video_algorithm":{"algorithms":[{"type":"NoiseReduction","level":0},{"type":"QualityEnhance","level":1}]}}"#,
+        )
+        .unwrap();
+        assert!(only.denoise().is_none());
+        assert!(only.algorithm("Deflicker").is_none());
     }
 }

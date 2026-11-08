@@ -101,34 +101,51 @@ fn project(level: Option<i64>) -> (Temp, Draft) {
 #[test]
 fn the_ask_is_the_stretch_the_clip_shows_at_the_project_rate() {
     let (temp, draft) = project(None);
-    let ask = enhance_ask(&draft, Some(&temp.0), &"v".into(), Algorithm::HD).unwrap();
+    let ask = enhance_ask(&draft, Some(&temp.0), &"v".into(), Algorithm::HD, 0).unwrap();
     assert_eq!(ask.source, temp.0.join("walk.png").canonicalize().unwrap());
     assert_eq!(ask.range, TimeRange::new(1_000_000, 1_000_000));
     assert_eq!(ask.rate, 10.0);
     assert_eq!(ask.level, Algorithm::HD);
     let key = ask.key();
-    assert_eq!((key.level, key.rate), (Algorithm::HD, 10.0));
+    assert_eq!((key.level, key.denoise, key.rate), (Algorithm::HD, 0, 10.0));
     assert_eq!(key.model, ENHANCE_MODEL);
+    let both = enhance_ask(
+        &draft,
+        Some(&temp.0),
+        &"v".into(),
+        Algorithm::HD,
+        Algorithm::WEAK,
+    )
+    .unwrap()
+    .key();
+    assert_eq!((both.level, both.denoise), (Algorithm::HD, Algorithm::WEAK));
+    assert_eq!(both.model, format!("{DENOISE_MODEL}+{ENHANCE_MODEL}"));
+    let only = enhance_ask(&draft, Some(&temp.0), &"v".into(), 0, Algorithm::STRONG)
+        .unwrap()
+        .key();
+    assert_eq!((only.level, only.denoise), (0, Algorithm::STRONG));
+    assert_eq!(only.model, DENOISE_MODEL);
 }
 
 #[test]
 fn an_off_level_a_graphic_no_stretch_or_a_file_outside_is_refused() {
     let (temp, draft) = project(None);
     let root = Some(temp.0.as_path());
-    assert!(enhance_ask(&draft, root, &"v".into(), 0).is_err());
-    assert!(enhance_ask(&draft, root, &"nope".into(), 1).is_err());
+    assert!(enhance_ask(&draft, root, &"v".into(), 0, 0).is_err());
+    assert!(enhance_ask(&draft, root, &"v".into(), -1, -2).is_err());
+    assert!(enhance_ask(&draft, root, &"nope".into(), 1, 0).is_err());
     let mut text = draft.clone();
     text.tracks[0].kind = TrackType::Text;
-    let Err(EnhanceError::Clip { reason }) = enhance_ask(&text, root, &"v".into(), 1) else {
+    let Err(EnhanceError::Clip { reason }) = enhance_ask(&text, root, &"v".into(), 1, 0) else {
         panic!("a graphic was enhanced");
     };
     assert!(reason.contains("enhanced"), "{reason}");
     let mut none = draft.clone();
     none.tracks[0].segments[0].source_range = Some(TimeRange::new(0, 0));
-    assert!(enhance_ask(&none, root, &"v".into(), 1).is_err());
+    assert!(enhance_ask(&none, root, &"v".into(), 1, 0).is_err());
     let mut escaping = draft;
     escaping.materials.videos[0].path = "../../etc/passwd".into();
-    assert!(enhance_ask(&escaping, root, &"v".into(), 1).is_err());
+    assert!(enhance_ask(&escaping, root, &"v".into(), 1, 0).is_err());
 }
 
 #[test]
@@ -152,7 +169,7 @@ fn a_clip_draws_from_its_copy_once_there_is_one() {
     assert_eq!(enhanced_copy(&draft, Some(&temp.0), &"v".into()), None);
     // The job's copy: here the same pattern as a JPEG, which decodes to
     // other pixels, holding 0.5 s to 3 s of the file.
-    let ask = enhance_ask(&draft, Some(&temp.0), &"v".into(), Algorithm::HD).unwrap();
+    let ask = enhance_ask(&draft, Some(&temp.0), &"v".into(), Algorithm::HD, 0).unwrap();
     let file = enhanced_file(&temp.0, &ask.key(), &TimeRange::new(500_000, 2_500_000)).unwrap();
     fs::copy(fixture("pattern.jpg"), &file).unwrap();
     assert_eq!(
@@ -181,6 +198,50 @@ fn a_clip_draws_from_its_copy_once_there_is_one() {
 }
 
 #[test]
+fn a_denoised_clip_draws_from_its_own_copy_and_both_draw_from_one() {
+    let (temp, mut draft) = project(None);
+    let on = |draft: &mut Draft, kind: &str, level: i64| {
+        draft.materials.videos[0]
+            .video_algorithm
+            .get_or_insert_with(VideoAlgorithm::default)
+            .algorithms
+            .push(Algorithm {
+                kind: kind.into(),
+                level,
+                ..Algorithm::default()
+            });
+    };
+    on(&mut draft, Algorithm::NOISE_REDUCTION, Algorithm::WEAK);
+    assert_eq!(enhanced_copy(&draft, Some(&temp.0), &"v".into()), None);
+    let range = TimeRange::new(1_000_000, 1_000_000);
+    let ask = enhance_ask(&draft, Some(&temp.0), &"v".into(), 0, Algorithm::WEAK).unwrap();
+    let denoised = enhanced_file(&temp.0, &ask.key(), &range).unwrap();
+    fs::copy(fixture("pattern.jpg"), &denoised).unwrap();
+    assert_eq!(
+        enhanced_copy(&draft, Some(&temp.0), &"v".into()),
+        Some((denoised, Micros(1_000_000)))
+    );
+    // Enhance on as well: the denoised copy no longer draws the clip, and
+    // the copy made of both does.
+    on(&mut draft, Algorithm::QUALITY_ENHANCE, Algorithm::HD);
+    assert_eq!(enhanced_copy(&draft, Some(&temp.0), &"v".into()), None);
+    let ask = enhance_ask(
+        &draft,
+        Some(&temp.0),
+        &"v".into(),
+        Algorithm::HD,
+        Algorithm::WEAK,
+    )
+    .unwrap();
+    let both = enhanced_file(&temp.0, &ask.key(), &range).unwrap();
+    fs::copy(fixture("pattern.jpg"), &both).unwrap();
+    assert_eq!(
+        enhanced_copy(&draft, Some(&temp.0), &"v".into()),
+        Some((both, Micros(1_000_000)))
+    );
+}
+
+#[test]
 fn a_frame_is_turned_upright() {
     // Two pixels side by side, red then blue.
     let picture = CpuBytes::new(2, 1, vec![255, 0, 0, 255, 0, 0, 255, 255]).unwrap();
@@ -204,7 +265,7 @@ fn a_frame_is_turned_upright() {
 #[test]
 fn a_still_or_missing_file_is_not_read_as_frames() {
     let (temp, draft) = project(None);
-    let ask = enhance_ask(&draft, Some(&temp.0), &"v".into(), 1).unwrap();
+    let ask = enhance_ask(&draft, Some(&temp.0), &"v".into(), 1, 0).unwrap();
     assert!(matches!(
         EnhanceFrames::open(&stills(), &ask),
         Err(EnhanceError::Clip { .. })

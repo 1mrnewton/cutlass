@@ -57,7 +57,7 @@ fn open(name: &str, movie: Option<&[u8]>) -> (Shell, PathBuf) {
 
 /// Keep a copy of the clip at `level`, as a finished job would.
 fn enhanced(shell: &Shell, temp: &std::path::Path, level: i64) {
-    let ask = enhance_ask(shell.draft().unwrap(), Some(temp), &"v".into(), level).unwrap();
+    let ask = enhance_ask(shell.draft().unwrap(), Some(temp), &"v".into(), level, 0).unwrap();
     let file = enhanced_file(temp, &ask.key(), &ask.range).unwrap();
     std::fs::write(file, b"an enhanced movie").unwrap();
 }

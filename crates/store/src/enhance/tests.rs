@@ -30,6 +30,7 @@ fn project() -> (Temp, EnhanceKey) {
     let key = EnhanceKey {
         source,
         level: 1,
+        denoise: 0,
         model: "realesr-general-x4v3".into(),
         rate: 30.0,
     };
@@ -104,6 +105,10 @@ fn another_level_model_rate_or_a_changed_source_finds_nothing() {
             rate: 60.0,
             ..key.clone()
         },
+        EnhanceKey {
+            denoise: 1,
+            ..key.clone()
+        },
     ] {
         assert_eq!(find_enhanced(&temp.0, &other, &range), None, "{other:?}");
     }
@@ -153,4 +158,33 @@ fn a_folder_that_leads_out_of_the_project_is_refused() {
     let stem = key.stem().unwrap();
     fs::write(outside.0.join(format!("{stem}-0-1000000.mp4")), b"x").unwrap();
     assert_eq!(find_enhanced(&temp.0, &key, &range), None);
+}
+
+#[test]
+fn a_copy_that_is_only_denoised_keeps_its_own_folder() {
+    let (temp, key) = project();
+    let denoised = EnhanceKey {
+        level: 0,
+        denoise: 2,
+        ..key.clone()
+    };
+    let range = TimeRange::new(0, 1_000_000);
+    let file = keep(&temp, &denoised, &range);
+    assert!(file.parent().unwrap().ends_with("Resources/video_denoise"));
+    assert_eq!(
+        find_enhanced(&temp.0, &denoised, &range).map(|f| f.0),
+        Some(file)
+    );
+    assert_eq!(find_enhanced(&temp.0, &key, &range), None);
+    let both = EnhanceKey { denoise: 2, ..key };
+    assert!(
+        keep(&temp, &both, &range)
+            .parent()
+            .unwrap()
+            .ends_with("Resources/video_enhance")
+    );
+    assert_ne!(
+        find_enhanced(&temp.0, &both, &range),
+        find_enhanced(&temp.0, &denoised, &range)
+    );
 }

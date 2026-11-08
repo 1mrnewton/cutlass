@@ -1,11 +1,12 @@
-//! Enhanced copies of clips, kept in the project's
-//! `Resources/video_enhance` folder.
+//! Enhanced and denoised copies of clips, kept in the project's
+//! `Resources/video_enhance` folder, or `Resources/video_denoise` for a
+//! copy that is only denoised.
 //!
-//! Enhancing a clip is slow, so its result is kept with the project, where
-//! export and other machines find it and no cache eviction takes it away.
-//! A copy holds one stretch of one source file. Its name is a hash of the
-//! file as it was on disk (path, size, last change), the level, the model
-//! and the frame rate, then the stretch: `<hash>-<start>-<duration>.mp4`.
+//! Making a copy is slow, so it is kept with the project, where export and
+//! other machines find it and no cache eviction takes it away. A copy
+//! holds one stretch of one source file. Its name is a hash of the file as
+//! it was on disk (path, size, last change), the levels, the model and the
+//! frame rate, then the stretch: `<hash>-<start>-<duration>.mp4`.
 //! A copy whose stretch covers a clip's serves it, so trimming or splitting
 //! an enhanced clip keeps its copy, and a changed source finds none.
 
@@ -19,6 +20,7 @@ use crate::StoreError;
 use crate::folder::{RESOURCES_DIR, io_error, stay_inside};
 
 const ENHANCE_DIR: &str = "video_enhance";
+const DENOISE_DIR: &str = "video_denoise";
 
 /// The most copies looked through for one clip.
 const MAX_LISTED: usize = 4096;
@@ -28,8 +30,10 @@ const MAX_LISTED: usize = 4096;
 pub struct EnhanceKey {
     /// The source file, as the shell opened it.
     pub source: PathBuf,
-    /// The Enhance quality level.
+    /// The Enhance quality level, 0 for a copy that is only denoised.
     pub level: i64,
+    /// The Reduce image noise level, 0 for a copy that is not denoised.
+    pub denoise: i64,
     /// The model that made it, so a better model makes new copies.
     pub model: String,
     /// Pictures per second in the copy.
@@ -53,6 +57,7 @@ impl EnhanceKey {
         bytes.extend_from_slice(&meta.len().to_le_bytes());
         bytes.extend_from_slice(&modified.to_le_bytes());
         bytes.extend_from_slice(&self.level.to_le_bytes());
+        bytes.extend_from_slice(&self.denoise.to_le_bytes());
         bytes.extend_from_slice(self.model.as_bytes());
         bytes.push(0);
         bytes.extend_from_slice(&self.rate.to_bits().to_le_bytes());
@@ -61,6 +66,15 @@ impl EnhanceKey {
             (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
         });
         Ok(format!("{hash:016x}"))
+    }
+
+    /// The folder its copies go in.
+    fn folder(&self) -> &'static str {
+        if self.level > 0 {
+            ENHANCE_DIR
+        } else {
+            DENOISE_DIR
+        }
     }
 }
 
@@ -80,7 +94,7 @@ pub fn enhanced_file(
     let project = project
         .canonicalize()
         .map_err(|error| io_error(project, error))?;
-    let folder = project.join(RESOURCES_DIR).join(ENHANCE_DIR);
+    let folder = project.join(RESOURCES_DIR).join(key.folder());
     stay_inside(&project, &folder)?;
     fs::create_dir_all(&folder).map_err(|error| io_error(&folder, error))?;
     stay_inside(&project, &folder)?;
@@ -100,7 +114,7 @@ pub fn find_enhanced(
 ) -> Option<(PathBuf, TimeRange)> {
     let stem = key.stem().ok()?;
     let project = project.canonicalize().ok()?;
-    let folder = project.join(RESOURCES_DIR).join(ENHANCE_DIR);
+    let folder = project.join(RESOURCES_DIR).join(key.folder());
     stay_inside(&project, &folder).ok()?;
     let end = range.start.0.checked_add(range.duration.0)?;
     let mut best: Option<(PathBuf, TimeRange)> = None;

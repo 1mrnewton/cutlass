@@ -68,7 +68,7 @@ impl Shell {
             let root = self.path.clone().ok_or_else(|| {
                 ShellError::Unavailable("save the project before enhancing a clip".to_owned())
             })?;
-            let ask = enhance_ask(self.session_draft()?, Some(&root), &segment_id, level)
+            let ask = enhance_ask(self.session_draft()?, Some(&root), &segment_id, level, 0)
                 .map_err(|error| ShellError::Unavailable(error.to_string()))?;
             if find_enhanced(&root, &ask.key(), &ask.range).is_none() {
                 self.start_enhance(root, ask)?;

@@ -1,14 +1,15 @@
-//! Enhance quality, as eval sees it: what a clip's enhanced copy is made
-//! from, the clip's frames upright for the model, and which copy draws a
-//! clip.
+//! Enhance quality and Reduce image noise, as eval sees them: what a
+//! clip's copy is made from, the clip's frames upright for the models, and
+//! which copy draws a clip.
 //!
 //! [`enhance_ask`] names the copy: the stretch of the clip's file its
-//! timeline shows, at the project's frame rate. The job reads that stretch
-//! through [`EnhanceFrames`] and writes the copy where
-//! `cutlass_store::enhanced_file` says. Nothing here runs the model or
-//! writes the draft. Once the copy is there, a clip that asks for Enhance
-//! quality at the copy's level draws from it, in preview and export alike;
-//! until then it draws its own file.
+//! timeline shows, at the project's frame rate, and the two levels. A clip
+//! with both on has one copy, denoised and then enhanced. The job reads
+//! that stretch through [`EnhanceFrames`] and writes the copy where
+//! `cutlass_store::enhanced_file` says. Nothing here runs a model or
+//! writes the draft. Once the copy is there, a clip that asks for the
+//! copy's levels draws from it, in preview and export alike; until then it
+//! draws its own file.
 
 use std::path::{Path, PathBuf};
 
@@ -23,6 +24,9 @@ use crate::stable::{StableError, source_times, stable_ask};
 /// The model enhanced copies are made with. A copy made by another is not
 /// used.
 pub const ENHANCE_MODEL: &str = "realesr-general-x4v3";
+
+/// The model denoised copies are made with.
+pub const DENOISE_MODEL: &str = "fastdvdnet-clipped";
 
 /// Why a clip could not be enhanced.
 #[derive(Clone, Debug, PartialEq)]
@@ -43,8 +47,8 @@ impl std::fmt::Display for EnhanceError {
 
 impl std::error::Error for EnhanceError {}
 
-/// What an enhanced copy is made from: a stretch of one file at a frame
-/// rate and a level.
+/// What a copy is made from: a stretch of one file at a frame rate, and
+/// the levels it is enhanced and denoised at.
 #[derive(Clone, Debug, PartialEq)]
 pub struct EnhanceAsk {
     /// The clip's file on disk.
@@ -53,36 +57,47 @@ pub struct EnhanceAsk {
     pub range: TimeRange,
     /// Pictures per second: the project's.
     pub rate: f64,
-    /// The Enhance quality level.
+    /// The Enhance quality level; 0 makes a copy that is only denoised.
     pub level: i64,
+    /// The Reduce image noise level; 0 makes a copy that is not denoised.
+    pub denoise: i64,
 }
 
 impl EnhanceAsk {
     /// The name its copy is kept under.
     #[must_use]
     pub fn key(&self) -> EnhanceKey {
+        let model = match (self.level > 0, self.denoise > 0) {
+            (true, true) => format!("{DENOISE_MODEL}+{ENHANCE_MODEL}"),
+            (false, _) => DENOISE_MODEL.to_owned(),
+            (true, false) => ENHANCE_MODEL.to_owned(),
+        };
         EnhanceKey {
             source: self.source.clone(),
-            level: self.level,
-            model: ENHANCE_MODEL.to_owned(),
+            level: self.level.max(0),
+            denoise: self.denoise.max(0),
+            model,
             rate: self.rate,
         }
     }
 }
 
-/// What enhancing clip `segment_id` at `level` makes. A relative file
-/// stays inside `root`.
+/// What enhancing clip `segment_id` at `level` and denoising it at
+/// `denoise` makes. A relative file stays inside `root`.
 pub fn enhance_ask(
     draft: &Draft,
     root: Option<&Path>,
     segment_id: &SegmentId,
     level: i64,
+    denoise: i64,
 ) -> Result<EnhanceAsk, EnhanceError> {
     let clip = |reason: &str| EnhanceError::Clip {
         reason: reason.into(),
     };
-    if level <= 0 {
-        return Err(clip("Enhance quality is off for this clip"));
+    if level <= 0 && denoise <= 0 {
+        return Err(clip(
+            "Enhance quality and Reduce image noise are off for this clip",
+        ));
     }
     let file = stable_ask(draft, root, segment_id).map_err(|error| match error {
         StableError::Clip { reason } => EnhanceError::Clip {
@@ -107,12 +122,14 @@ pub fn enhance_ask(
         source: file.source,
         range,
         rate: file.rate,
-        level,
+        level: level.max(0),
+        denoise: denoise.max(0),
     })
 }
 
 /// The copy that draws `segment_id` and where in the file it starts, when
-/// the clip asks for Enhance quality and its copy is in the project.
+/// the clip asks for Enhance quality or Reduce image noise and its copy is
+/// in the project.
 pub(crate) fn enhanced_copy(
     draft: &Draft,
     root: Option<&Path>,
@@ -127,8 +144,15 @@ pub(crate) fn enhanced_copy(
     let Some(MaterialRef::Video(video)) = draft.materials.get(segment.material_id.as_str()) else {
         return None;
     };
-    let level = video.enhance()?.level;
-    let ask = enhance_ask(draft, Some(root), segment_id, level).ok()?;
+    let level = |algorithm: Option<&cutlass_model::Algorithm>| algorithm.map_or(0, |a| a.level);
+    let ask = enhance_ask(
+        draft,
+        Some(root),
+        segment_id,
+        level(video.enhance()),
+        level(video.denoise()),
+    )
+    .ok()?;
     let (path, held) = find_enhanced(root, &ask.key(), &ask.range)?;
     Some((path, held.start))
 }

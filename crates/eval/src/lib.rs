@@ -27,6 +27,7 @@ mod heard;
 mod lottie;
 mod media;
 mod nest;
+mod reframe;
 mod relight;
 mod sample;
 mod scenes;
@@ -57,6 +58,7 @@ pub use freeze::{
 pub use gpu::{Composed, FrameLayers, GpuBackdrop, GpuLayer, GpuSource, YuvSamples};
 pub use heard::{ClipAsk, Heard};
 pub use media::OpenClips;
+pub use reframe::{REFRAME_MODEL, REFRAME_RATE, ReframeAsk, reframe_ask};
 pub use relight::{RELIGHT_MODEL, RelightAsk, relight_ask};
 pub use scenes::{blend_blocks, kept_cuts, scene_split_times};
 pub use stable::{StableAsk, StableError, measure_camera, stable_ask};

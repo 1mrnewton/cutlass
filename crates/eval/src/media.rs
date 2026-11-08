@@ -119,6 +119,8 @@ pub struct OpenClips {
     lotties: HashMap<String, Option<Arc<cutlass_lottie::Animation>>>,
     /// Steadied clips' plans, by segment.
     steadies: HashMap<SegmentId, Arc<crate::steady::Steady>>,
+    /// Reframed clips' planned windows, by segment.
+    reframes: HashMap<SegmentId, Arc<crate::reframe::Reframed>>,
 }
 
 impl OpenClips {
@@ -138,6 +140,7 @@ impl OpenClips {
             patient: true,
             lotties: HashMap::new(),
             steadies: HashMap::new(),
+            reframes: HashMap::new(),
         }
     }
 
@@ -184,6 +187,7 @@ impl OpenClips {
         self.shapes.clear();
         self.lotties.clear();
         self.steadies.clear();
+        self.reframes.clear();
         self.draft = None;
         self.revision = 0;
         self.bound = false;
@@ -253,6 +257,11 @@ impl OpenClips {
     /// Steadied clips' plans, kept until the clips are dropped.
     pub(crate) fn steadies(&mut self) -> &mut HashMap<SegmentId, Arc<crate::steady::Steady>> {
         &mut self.steadies
+    }
+
+    /// Reframed clips' planned windows, kept until the clips are dropped.
+    pub(crate) fn reframes(&mut self) -> &mut HashMap<SegmentId, Arc<crate::reframe::Reframed>> {
+        &mut self.reframes
     }
 
     /// Shape rasters, kept across revisions.
@@ -528,7 +537,8 @@ pub(crate) fn video_layers<'a>(
             if cutlass_lottie::is_lottie_path(&video.path) {
                 continue;
             }
-            let crop = video.crop;
+            let crop = crate::reframe::crop_at(clips, draft, segment, time, (width, height))
+                .unwrap_or(video.crop);
             let crop_scale = video.crop_scale;
             let Some((clip, uniform)) = cutlass_model::animated_at(draft, segment, time) else {
                 continue;
@@ -619,7 +629,8 @@ pub(crate) fn video_picture(
     let Some(MaterialRef::Video(video)) = draft.materials.get(segment.material_id.as_str()) else {
         return None;
     };
-    let crop = video.crop;
+    let crop =
+        crate::reframe::crop_at(clips, draft, segment, time, (width, height)).unwrap_or(video.crop);
     let crop_scale = video.crop_scale;
     let (clip, uniform) = cutlass_model::animated_at(draft, segment, time)?;
     let transform = picture_transform(&clip, &uniform, width, height)?;

@@ -14,7 +14,7 @@
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-use cutlass_ac3::{Ac3Decoder, Ac3Encoder, ENCODER_DELAY};
+use cutlass_ac3::{Ac3Decoder, Ac3Encoder, ENCODER_DELAY, EncoderConfig, Format};
 use cutlass_decode::{Channel, ChannelLayout, CodecError, CodecId, Decoder, Output, Packet, Pcm};
 use cutlass_encode::{AudioInput, Encoder};
 
@@ -85,7 +85,7 @@ fn encoded_seeds() -> Vec<Vec<u8>> {
         let samples = tone(frames, layout.len(), 48_000, 0.2);
         push(
             &mut seeds,
-            encode(codec, 48_000, layout, 192_000, &samples).expect("seed"),
+            encode(codec, 48_000, layout, 192_000, 6, &samples).expect("seed"),
         );
     }
     let mono = ChannelLayout::mono();
@@ -97,6 +97,7 @@ fn encoded_seeds() -> Vec<Vec<u8>> {
             48_000,
             mono.clone(),
             40_000,
+            6,
             &tone(frames, 1, 48_000, 0.2),
         )
         .expect("spectral extension seed"),
@@ -108,6 +109,7 @@ fn encoded_seeds() -> Vec<Vec<u8>> {
             48_000,
             mono,
             96_000,
+            6,
             &tone(frames, 1, 48_000, 0.85),
         )
         .expect("hybrid transform seed"),
@@ -119,10 +121,25 @@ fn encoded_seeds() -> Vec<Vec<u8>> {
             48_000,
             ChannelLayout::seven_one(),
             0,
+            6,
             &tone(frames, 8, 48_000, 0.2),
         )
         .expect("7.1 seed"),
     );
+    for blocks in [1usize, 2, 3] {
+        push(
+            &mut seeds,
+            encode(
+                CodecId::Eac3,
+                48_000,
+                ChannelLayout::stereo(),
+                192_000,
+                blocks,
+                &tone(frames, 2, 48_000, 0.2),
+            )
+            .expect("short frame seed"),
+        );
+    }
     seeds
 }
 
@@ -310,11 +327,17 @@ fn encode(
     rate: u32,
     layout: ChannelLayout,
     bitrate: u32,
+    blocks: usize,
     samples: &[f32],
 ) -> Result<Vec<Packet>, CodecError> {
-    let mut params = cutlass_encode::CodecParams::audio(codec, rate, layout.clone());
-    params.bitrate = bitrate;
-    let mut encoder = Ac3Encoder::open(&params)?;
+    let format = match codec {
+        CodecId::Eac3 => Format::Eac3,
+        _ => Format::Ac3,
+    };
+    let mut config = EncoderConfig::new(format, rate, layout.clone());
+    config.bit_rate = bitrate;
+    config.blocks = if format == Format::Eac3 { blocks } else { 6 };
+    let mut encoder = Ac3Encoder::new(config)?;
     let pcm = Pcm::from_f32(rate, layout, samples.to_vec()).expect("pcm");
     let mut packets = encoder.push(&AudioInput { pcm })?;
     packets.extend(encoder.drain()?);
@@ -336,11 +359,21 @@ fn encoder_round(rng: &mut Rng) -> Result<bool, &'static str> {
             if layout.len() == 8 && codec == CodecId::Ac3 {
                 layout = ChannelLayout::stereo();
             }
-            let bitrate = legal_bitrate(codec, layout.len(), rng);
+            let mut bitrate = legal_bitrate(codec, layout.len(), rng);
+            // One, two, and three blocks are E-AC-3 only, and a short
+            // frame at 40 kbit/s does not fit. 7.1 stays at six blocks.
+            let blocks = if codec == CodecId::Eac3 && layout.len() <= 6 {
+                [1, 2, 3, 6][rng.below(4)]
+            } else {
+                6
+            };
+            if blocks < 6 && bitrate < 96_000 {
+                bitrate = 0;
+            }
             let frames = 1_536 * (rng.below(2) + 1);
             let amplitude = if rng.below(5) == 0 { 0.85 } else { 0.2 };
             let samples = tone(frames, layout.len(), rate, amplitude);
-            let packets = match encode(codec, rate, layout, bitrate, &samples) {
+            let packets = match encode(codec, rate, layout, bitrate, blocks, &samples) {
                 Ok(packets) => packets,
                 Err(_) => return Err("legal encode failed"),
             };

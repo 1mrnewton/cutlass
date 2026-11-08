@@ -109,18 +109,23 @@ The 44.1 kHz AC-3 frame table makes that clip 192003 bit/s. Every other clip mat
 
 cargo-fuzz is not used. `libfuzzer-sys` builds C through `cc`, which `deny.toml` bans.
 
-A two-minute release campaign on this encoder found nothing. Legal rounds include 7.1, a 40 kbit/s mono frame, an 80 kbit/s stereo frame, a 96 kbit/s mono frame, and peaks above half scale, so spectral extension, the hybrid transform, and dynamic range words are in the corpus. `Ac3Encoder::open` still writes six blocks, so one-block, two-block, and three-block frames are not in this run. Release turns overflow checks off. The 300-second run below is the test profile, where an overflow panics, and it is an earlier encoder. This crate's dev profile still compiles the library at opt-level 3.
+A two-minute release campaign on 8 November 2026 found nothing. Legal rounds include 7.1, a 40 kbit/s mono frame, an 80 kbit/s stereo frame, a 96 kbit/s mono frame, peaks above half scale, and E-AC-3 frames of one, two, and three blocks. Short frames are stereo or fewer than seven channels, and they use the default rate when the drawn rate is below 96 kbit/s, so a 40 kbit/s frame stays at six blocks. 7.1 stays at six blocks. The one-block, two-block, and three-block stereo streams are also decoder seeds. Release turns overflow checks off. The 300-second run below is the test profile, where an overflow panics, and it is an earlier encoder. This crate's dev profile still compiles the library at opt-level 3.
+
+```text
+AC3_FUZZ_SECS=120 cargo test --release -p cutlass-ac3 --test ac3 -- --ignored campaign --nocapture
+ac3 decoder campaign: seed 0xac3dec0d seconds 120 inputs 7617224 errors 7603785 accepted 13439 findings 0
+ac3 encoder campaign: seed 0xac3e0c0d seconds 120 rounds 426452 refused 212748 encoded 213704 findings 0
+test result: ok. 1 passed; 0 failed; finished in 120.00s
+```
+
+Earlier encoders, kept so the longer runs stay visible. The first of these is the six-block-only encoder:
 
 ```text
 AC3_FUZZ_SECS=120 cargo test --release -p cutlass-ac3 --test ac3 -- --ignored campaign --nocapture
 ac3 decoder campaign: seed 0xac3dec0d seconds 120 inputs 9141348 errors 9127049 accepted 14299 findings 0
 ac3 encoder campaign: seed 0xac3e0c0d seconds 120 rounds 567989 refused 284327 encoded 283662 findings 0
 test result: ok. 1 passed; 0 failed; finished in 120.00s
-```
 
-Earlier encoders, kept so the longer runs stay visible:
-
-```text
 AC3_FUZZ_SECS=120 cargo test --release -p cutlass-ac3 --test ac3 -- --ignored campaign --nocapture
 ac3 decoder campaign: seed 0xac3dec0d seconds 120 inputs 9430442 errors 9416165 accepted 14277 findings 0
 ac3 encoder campaign: seed 0xac3e0c0d seconds 120 rounds 668080 refused 333925 encoded 334155 findings 0

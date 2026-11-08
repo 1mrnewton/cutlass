@@ -234,6 +234,9 @@ pub struct ViewState {
     /// Which part of the sticker shelf shows: Yours, Stickers, Shapes or
     /// GIPHY.
     sticker_group: usize,
+    /// Which part of the effects shelf shows: Video effects or Body
+    /// effects.
+    effect_group: usize,
     /// A folder being named, and what is typed so far.
     library_renaming: Option<(String, String)>,
     projects_root: Option<std::path::PathBuf>,
@@ -310,6 +313,7 @@ impl Default for ViewState {
             library_sort: cutlass_editor::LibrarySort::Name,
             library_stock: false,
             sticker_group: STICKERS,
+            effect_group: VIDEO_EFFECTS,
             library_renaming: None,
             projects_root: None,
             listed: Vec::new(),
@@ -1853,6 +1857,17 @@ fn asset_column(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect
             view.sticker_group = group;
         }
     }
+    if shelf == Shelf::Effects {
+        column.add_space(8.0);
+        if let Some(group) = segmented(
+            &mut column,
+            "effect-group",
+            &EFFECT_GROUPS,
+            view.effect_group,
+        ) {
+            view.effect_group = group;
+        }
+    }
     let bin = matches!(shelf, Shelf::Media | Shelf::Audio) && !stock;
     if bin {
         // A folder that is gone, as after another project opened, is the top.
@@ -1904,6 +1919,18 @@ fn asset_column(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect
                         .size(tokens::TYPE_SIZE)
                         .color(tokens::MUTED),
                 );
+                return;
+            }
+            if shelf == Shelf::Effects && view.effect_group == BODY_EFFECTS {
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new("Effects that follow a body will show here.")
+                            .size(tokens::TYPE_SIZE)
+                            .color(tokens::MUTED),
+                    );
+                    inspector::later_badge(ui);
+                });
                 return;
             }
             let group = view.sticker_group;
@@ -2005,6 +2032,11 @@ const YOURS: usize = 0;
 const STICKERS: usize = 1;
 const SHAPES: usize = 2;
 const GIPHY: usize = 3;
+
+/// The parts of the effects shelf, in switch order.
+const EFFECT_GROUPS: [&str; 2] = ["Video effects", "Body effects"];
+const VIDEO_EFFECTS: usize = 0;
+const BODY_EFFECTS: usize = 1;
 
 /// `labels` as one segmented control across the column, `current` on.
 /// Returns the label clicked when it is not the current one.
@@ -11334,6 +11366,58 @@ mod tests {
         assert!(!lines.iter().any(|line| line == "Fill"));
         assert!(!lines.iter().any(|line| line == "Corner radius"));
         assert!(lines.iter().any(|line| line == "Stroke"));
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn the_effects_shelf_switches_between_video_and_body_effects() {
+        let temp = std::env::temp_dir().join(format!("cutlass-fx-groups-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        cutlass_store::Folder::new(cutlass_model::Draft::empty("draft"))
+            .save(&temp)
+            .unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        let mut view = ViewState::new();
+        view.library_shelf = Shelf::Effects;
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let frame = |shell: &mut Shell, view: &mut ViewState, events: Vec<egui::Event>| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: screen,
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, view, None),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        let output = frame(&mut shell, &mut view, Vec::new());
+        assert!(text_pos(&output, "Video effects").is_some());
+        let first = cutlass_editor::effect_cards().remove(0).name;
+        assert!(text_pos(&output, &first).is_some(), "{first}");
+        let body = text_pos(&output, "Body effects").unwrap() + Vec2::new(4.0, 4.0);
+        let press = |pressed| egui::Event::PointerButton {
+            pos: body,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        frame(&mut shell, &mut view, vec![egui::Event::PointerMoved(body)]);
+        frame(&mut shell, &mut view, vec![press(true), press(false)]);
+        assert_eq!(view.effect_group, BODY_EFFECTS);
+        let output = frame(&mut shell, &mut view, Vec::new());
+        let lines = galleys(&output);
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == "Effects that follow a body will show here.")
+        );
+        assert!(lines.iter().any(|line| line == "Later"));
+        assert!(text_pos(&output, &first).is_none());
         let _ = std::fs::remove_dir_all(&temp);
     }
 

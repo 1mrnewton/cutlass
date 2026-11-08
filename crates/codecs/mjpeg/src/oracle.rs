@@ -362,12 +362,23 @@ fn cjpeg_440_rgb_and_restart_frames_match_djpeg() {
         &["-rgb"],
         &["-sample", "2x2", "-restart", "1"],
         &["-sample", "2x1", "-progressive"],
+        &["-sample", "2x1", "-quality", "5"],
     ] {
         let jpeg = run(Command::new(&tools.cjpeg)
             .args(["-dct", "int", "-quality", "88"])
             .args(args)
             .arg(&source))
         .stdout;
+        if args.contains(&"5") {
+            let coarse = crate::tests::segments(&jpeg);
+            assert!(coarse.iter().any(|(marker, ..)| *marker == 0xc1), "SOF1");
+            assert!(
+                coarse
+                    .iter()
+                    .any(|(marker, start, _)| *marker == 0xdb && jpeg[start + 4] >> 4 == 1),
+                "16-bit DQT"
+            );
+        }
         let (_, _, channels, want) = djpeg(&tools, &dir, &jpeg);
         let mut decoder = MjpegDecoder::open(&params(width, height, &[])).expect("open");
         assert_eq!(our_rgb(&mut decoder, &jpeg, channels), want, "{args:?}");

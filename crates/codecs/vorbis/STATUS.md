@@ -34,7 +34,7 @@ Channels: the decoder takes 1 to 8 channels, the `ChannelLayout` limit, in the V
 ### Timing contract
 
 - Packet `n` decodes to `previous_blocksize / 4 + current_blocksize / 4` samples; the first packet after open or `reset` decodes to none.
-- The container gives each packet that duration (the first packet's is 0). Pts is the stream position of the packet's first returned sample. A packet stamped shorter than it decodes is an end trim (`skip_trailing`). A negative start (granule of the first page below its samples) is the stream's first edit, applied by the engine, as Opus pre-skip is.
+- The container gives each packet that duration (the first packet's is 0). Pts is the stream position of the packet's first returned sample. A packet stamped shorter than it decodes is an end trim (`skip_trailing`). Once a packet has come with a clock and a nonzero duration, a duration of 0 is a length too: a packet wholly past the end-of-stream granule is trimmed whole. Before that, 0 is no length (the engine passes a missing duration as 0) and nothing is trimmed, so a stream whose every packet is stamped 0 is not trimmed. A negative start (granule of the first page below its samples) is the stream's first edit, applied by the engine, as Opus pre-skip is.
 - The encoder's first packet has pts 0 and duration 0. Packet `k` returns the samples between the centers of blocks `k - 1` and `k`, so output starts at input sample 0 with no delay to trim. The last packet's duration is shortened to the input length and it carries `SideData::Gapless` with the trailing padding.
 
 ### Limits
@@ -66,7 +66,7 @@ Encoder:
 3. With a bitrate: the mean over a non-sparse item is within 10% of the request.
 4. At libvorbis's rate for quality 0.4 and 0.6 (stereo 44.1 kHz), this encoder's mean per-band log-spectral distance (critical bands, decoded by libvorbis) is at most 1.5 dB above libvorbis's at the same rate (within 10%).
 
-Integration: an Ogg Vorbis file opens, seeks, and plays in the desktop reader, probes, exports sound alone to `.ogg`, and the export reopens with the same samples.
+Integration: an Ogg Vorbis file opens, seeks, and plays in the desktop reader; imports on the desktop and the phone through `cutlass-probe` at its edit's length; exports sound alone to `.ogg`, and the export reopens with the same samples and imports again. The desktop and the phone code Vorbis with this crate ahead of any platform codec.
 
 Performance (release, this machine): decode at least 100x real time for 44.1 kHz stereo; encode at least 20x; peak memory recorded.
 
@@ -129,7 +129,13 @@ Interop items: mono 44.1 kHz q 0.4, stereo 44.1 kHz q 0.3, stereo 48 kHz q 0.7, 
 
 `readers::tests::an_ogg_vorbis_file_opens_seeks_and_decodes`: two seconds of stereo 44.1 kHz, probe duration 2,000,000 µs. `audio_from` at the start and at one second matches a continuous decode of the same file, sample for sample.
 
-`movie::tests::sound_alone_writes_a_vorbis_file`: half a second of silence through `write_sound` into an Ogg file. The edit duration is 22,050 samples. Reopening it with `VorbisDecoder` returns 22,050 frames, each sample under 1e-3. The desktop names that file `.ogg`, and a picture export that asks for Vorbis is refused. The phone registers the same Rust decoder and encoder.
+`movie::tests::sound_alone_writes_a_vorbis_file`: half a second of silence through `write_sound` into an Ogg file. The edit duration is 22,050 samples. Reopening it with `VorbisDecoder` returns 22,050 frames, each sample under 1e-3. The desktop names that file `.ogg`, and a picture export that asks for Vorbis is refused.
+
+Import goes through `cutlass-probe`, on the desktop (`Shell::import_file`), the phone (`ffi` `import`), and MCP media info. `an_ogg_vorbis_file_is_audio_as_long_as_its_samples` (probe): the libvorbis fixtures `stereo_44100_q4.ogg` and `sweep_8000_mono_q0.ogg` probe to 500,000 µs, as ffprobe reads them (22,050 and 4,000 samples), and a damaged identification header is refused. `an_ogg_vorbis_file_imports_as_a_sound` (phone): the stereo fixture imports as a 500,000 µs sound. `an_export_writes_a_mov_the_sound_alone_a_gif_and_a_caption_file` (desktop): a Vorbis sound export probes as audio and imports again at the probed length.
+
+Registration order: `the_rust_vorbis_codec_goes_ahead_of_the_platform_one` in the desktop app and in `ffi` opens the app's encoder and decoder from the factories and checks that their packets and samples equal `VorbisEncoder` and `VorbisDecoder` opened directly. No platform adapter registers Vorbis today, so there is no reversed-order check as there is for Opus.
+
+`a_packet_wholly_past_the_end_granule_is_trimmed_whole` (decoder): the stereo fixture with its last page's granule moved back to the page before, read through `OggDemux`; the packets stamped 0 come back with `skip_trailing` equal to their samples, and the kept samples equal the edit.
 
 ### Fuzz
 

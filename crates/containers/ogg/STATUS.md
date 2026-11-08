@@ -33,7 +33,7 @@ Opus times use timescale 48,000 in the granule domain. Vorbis times use the stre
 
 Vorbis:
 
-- A packet lasts a quarter of its block plus a quarter of the previous packet's block. The first audio packet, and the first after a seek resumes, lasts 0, as a decoder returns nothing for it. Header packets and empty packets last 0.
+- A packet lasts a quarter of its block plus a quarter of the previous packet's block. The first audio packet lasts 0, as a decoder returns nothing for it. The first packet after a seek keeps the duration it has in the whole file; the decoder still returns nothing for it. Header packets and empty packets last 0.
 - The first audio page with a completed packet sets the start: its granule minus its packets' samples. When that is negative the stream starts before zero (a stream copy cut mid-file does this); when the page is also the last page, the start is 0 and the end is trimmed.
 - Each Vorbis stream has `Trim::new(Some(max(-start, 0)), trailing)` and one `Edit` with `media_time = max(start, 0)` and `duration = end - media_time`, so the samples before zero that section A.2 discards are skipped. FFmpeg and GStreamer both decode those samples; the engine skips them through the edit.
 - Extradata is the three headers in Xiph lacing, as libavformat and Matroska carry them. When they exceed `Limits::max_extradata_bytes` the comment is replaced by one with only the vendor string; when even that is too large, open fails with `HostileSize`.
@@ -79,7 +79,7 @@ Mux:
 | Last page | Written by `finish` with the end-of-stream flag; an empty stream gets an empty end page with granule 0. A final packet shorter than its TOC becomes end trimming. |
 | Cropped start with end trimming | RFC 7845 4.5 reads a first-and-last page as starting at granule minus samples, so the packets before the trimmed one are written on their own page. One trimmed packet alone starting after 0 is refused at finish. |
 | Stream shorter than its pre-skip | Refused at finish. |
-| Timing | Timescale 48,000 for Opus, the sample rate for Vorbis. Each stream's packets must be contiguous; an overlap, gap, a duration longer than the natural one, a trimmed packet that is not the last, or a negative first Opus time is `Rejected`. |
+| Timing | Timescale 48,000 for Opus, the sample rate for Vorbis. Each stream's packets must be contiguous; an overlap, gap, a duration longer than the natural one (a first Vorbis packet may carry what it returns after a short or a long block, as one read after a seek does), a trimmed packet that is not the last, or a negative first Opus time is `Rejected`. |
 | Serials and sequences | Serial `0x6375746C` ("cutl") for the first stream, plus one per stream (`with_first_serial` changes the base). Page sequence starts at 0 per stream. |
 | Failure | Any refused call fails the mux; `finish` then returns `FailedMux` and `status()` is `Failed`. A write error is `Rejected("ogg write failed: ...")`. |
 | `finish` | Checks each track's duration against the packet sum, writes the end pages, flushes, and returns `FinishedMux::complete` with `IndexPlace::Absent` and `MuxMode::Progressive`. |
@@ -120,15 +120,16 @@ Every length read from the file is checked against these before a buffer is rese
 | Seek | Bisection, pre-roll | n/a | `every_seek_lands_before_the_preroll_and_returns_no_stale_packet`, oracle seeks on 8 encodes, the 30-minute measurement | Verified |
 | Damaged input | Resync, gaps, typed errors | n/a | behavior tests and the mutation campaign | Verified for the cases listed |
 | Forward input | Read, no seek | n/a | `a_forward_input_reads_the_same_packets_and_refuses_seek` | Verified |
-| Vorbis headers, mono to 5.1, 22.05 to 48 kHz, one to two modes, blocks 256/2048 and 1024/1024 and 2048/2048 | Read | Written | `vorbis_files_demux_to_the_same_packets_times_and_trim`, `remuxed_vorbis_files_read_like_their_source` on 7 files from libvorbis, FFmpeg's encoder, a stream copy cut, and a WebM copy; the 25 in-crate Vorbis behavior tests and 10 header unit tests | Verified against libavformat and GStreamer |
+| Vorbis headers, mono to 5.1, 22.05 to 48 kHz, one to two modes, blocks 256/2048 and 1024/1024 and 2048/2048 | Read | Written | `vorbis_files_demux_to_the_same_packets_times_and_trim`, `remuxed_vorbis_files_read_like_their_source` on 7 files from libvorbis, FFmpeg's encoder, a stream copy cut, and a WebM copy; the 26 in-crate Vorbis behavior tests and 10 header unit tests | Verified against libavformat and GStreamer |
 | Vorbis start before zero | Applied | Written | the stream copy cut (start -3,648), its remux, and `a_vorbis_stream_that_starts_before_zero_muxes_and_reads_back` | Verified against libavformat and GStreamer |
+| Vorbis stream copy from a seek | n/a | Written: a first packet stamped with what it returns after a short or a long block is taken, and the stream starts where it ends | `packets_demuxed_after_a_seek_remux_and_read_back`: the libvorbis stereo fixture, seeked to 10,000 and remuxed, reads back with the same packets and times after the first, and the source's end | Verified by this crate's demuxer; no independent reader run on that remux |
 | Vorbis end trimming, edit | Applied | Written | ffmpeg decodes `end - start` samples for every exact-granule file and its remux; GStreamer the same or one more | Verified |
 | Rounded granules (WebM-to-Ogg copy) | Contiguous, `granule_drift()` | n/a | `webm-copy` and `a_granule_off_by_less_than_a_packet_keeps_the_timeline` | Verified |
 | Opus and Vorbis in one file | Each a track with its own timescale | Written | `a_file_with_opus_and_vorbis_reads_both`, `opus_and_vorbis_mux_into_one_file`, the fuzz corpus | Verified in this crate only |
 | FLAC, Theora, Speex packets | Not returned | Refused | `an_unknown_mapping_is_listed_and_its_pages_skipped` | Unsupported |
 | Opus or Vorbis in WebM or Matroska | n/a | n/a | n/a | Out of scope |
-| App registration (Vorbis) | Not yet | Not yet | `cutlass-probe` still refuses Ogg files that are not Opus | Not run: the app integration of Vorbis is a later step |
-| App registration (Opus) | Desktop and phone readers, `cutlass-probe` | Sound export to `.opus` | `an_opus_file_opens_seeks_and_decodes_after_the_pre_skip` (desktop), `an_ogg_opus_file_is_audio_as_long_as_its_samples_after_the_pre_skip` (probe), `sound_alone_writes_an_opus_file` (export), the desktop export test | Verified. Ogg files of other mappings are refused by the probe ("only Opus in Ogg is available") |
+| App registration (Vorbis) | Desktop and phone readers, `cutlass-probe` | Sound export to `.ogg` | `an_ogg_vorbis_file_opens_seeks_and_decodes` (desktop reader), `an_ogg_vorbis_file_is_audio_as_long_as_its_samples` (probe, libvorbis fixtures against ffprobe), `an_ogg_vorbis_file_imports_as_a_sound` (phone import), `sound_alone_writes_a_vorbis_file` (export), the desktop export test (export, probe, import) | Verified on macOS |
+| App registration (Opus) | Desktop and phone readers, `cutlass-probe` | Sound export to `.opus` | `an_opus_file_opens_seeks_and_decodes_after_the_pre_skip` (desktop), `an_ogg_opus_file_is_audio_as_long_as_its_samples_after_the_pre_skip` (probe), `sound_alone_writes_an_opus_file` (export), the desktop export test | Verified. Ogg files of other mappings than Opus and Vorbis are refused by the probe ("only Opus and Vorbis in Ogg are available") |
 | Linux and Windows | Not run | Not run | This file was written on macOS | Not run |
 
 ## Commands and results
@@ -235,7 +236,6 @@ The campaigns found three muxer bugs, each fixed with a behavior test: a stream 
 
 - Opus family 255 is parsed and accepted but not checked against an independent file.
 - FLAC, Theora, and Speex mappings are listed, not demuxed.
-- Vorbis in the app (probe, readers, export) is not wired yet.
 - A Vorbis file with three or more modes, or blocks other than those above, is covered by unit tests only.
 - Chained files return the first link only.
 - cargo-fuzz not run (reason above).

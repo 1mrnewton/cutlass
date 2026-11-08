@@ -39,6 +39,21 @@ pub fn filter_cards() -> Vec<(String, &'static str)> {
         .collect()
 }
 
+/// The filters shelf's categories that hold at least one filter, in shelf
+/// order.
+#[must_use]
+pub fn filter_categories() -> Vec<&'static str> {
+    cutlass_effects::FILTER_CATEGORIES
+        .iter()
+        .copied()
+        .filter(|category| {
+            cutlass_effects::looks()
+                .iter()
+                .any(|look| look.category == *category)
+        })
+        .collect()
+}
+
 /// The bundled filter a card id names.
 #[must_use]
 pub fn filter_of_card(card_id: &str) -> Option<&'static cutlass_effects::Look> {
@@ -179,6 +194,10 @@ mod filter_tests {
             );
         }
         assert!(filter_of_card("effect:look/warm").is_none());
+        assert_eq!(
+            super::filter_categories(),
+            cutlass_effects::FILTER_CATEGORIES.to_vec()
+        );
     }
 }
 

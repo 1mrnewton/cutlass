@@ -241,6 +241,8 @@ pub struct ViewState {
     effect_category: String,
     /// The transitions category the shelf shows; empty shows them all.
     transition_category: String,
+    /// The filters category the shelf shows; empty shows them all.
+    filter_category: String,
     /// A folder being named, and what is typed so far.
     library_renaming: Option<(String, String)>,
     projects_root: Option<std::path::PathBuf>,
@@ -320,6 +322,7 @@ impl Default for ViewState {
             effect_group: VIDEO_EFFECTS,
             effect_category: String::new(),
             transition_category: String::new(),
+            filter_category: String::new(),
             library_renaming: None,
             projects_root: None,
             listed: Vec::new(),
@@ -1892,6 +1895,15 @@ fn asset_column(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect
             &mut view.transition_category,
         );
     }
+    if shelf == Shelf::Filters {
+        column.add_space(8.0);
+        category_chips(
+            &mut column,
+            "filter-categories",
+            &cutlass_editor::filter_categories(),
+            &mut view.filter_category,
+        );
+    }
     let bin = matches!(shelf, Shelf::Media | Shelf::Audio) && !stock;
     if bin {
         // A folder that is gone, as after another project opened, is the top.
@@ -2003,6 +2015,13 @@ fn asset_column(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect
                 cards.retain(|card| {
                     cutlass_editor::transition_of_card(&card.id)
                         .is_some_and(|offer| offer.category == category)
+                });
+            }
+            if shelf == Shelf::Filters && !view.filter_category.is_empty() {
+                let category = view.filter_category.as_str();
+                cards.retain(|card| {
+                    cutlass_editor::filter_of_card(&card.id)
+                        .is_some_and(|look| look.category == category)
                 });
             }
             fill_looks(shell, ui.ctx(), &mut cards);
@@ -2706,11 +2725,17 @@ fn fill_looks(shell: &mut Shell, ctx: &egui::Context, cards: &mut [BinCard]) {
                         path: card.id.clone().into(),
                         time: Micros(0),
                     };
-                    let (width, height) = (96, 64);
+                    // Twice the card's size, for a sharp picture on a dense screen.
+                    let (width, height) = (192, 128);
                     let texture = if let Some(entry) = textures.shown.get_mut(&key) {
                         entry.1 = textures.frame;
                         entry.0.id()
                     } else {
+                        if stills == 0 {
+                            ctx.request_repaint();
+                            continue;
+                        }
+                        stills -= 1;
                         let thumb = cutlass_engine::Thumb {
                             width,
                             height,
@@ -10765,7 +10790,8 @@ mod tests {
         assert_eq!(filters.len(), cutlass_effects::looks().len());
         assert_eq!(filters[0].name, cutlass_effects::looks()[0].name);
         assert_eq!(filters[0].look, CardLook::Picture(None));
-        assert_eq!(top_cards(&draft, Shelf::Filters, "noir").len(), 1);
+        // Noir and Neo Noir.
+        assert_eq!(top_cards(&draft, Shelf::Filters, "noir").len(), 2);
     }
 
     #[test]
@@ -11535,6 +11561,50 @@ mod tests {
         assert!(!lines.iter().any(|line| line == "Fill"));
         assert!(!lines.iter().any(|line| line == "Corner radius"));
         assert!(lines.iter().any(|line| line == "Stroke"));
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn the_filters_shelf_shows_one_category_at_a_time() {
+        let temp = std::env::temp_dir().join(format!("cutlass-fl-cats-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        cutlass_store::Folder::new(cutlass_model::Draft::empty("draft"))
+            .save(&temp)
+            .unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        let mut view = ViewState::new();
+        view.library_shelf = Shelf::Filters;
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let frame = |shell: &mut Shell, view: &mut ViewState, events: Vec<egui::Event>| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: screen,
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, view, None),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        let output = frame(&mut shell, &mut view, Vec::new());
+        assert!(text_pos(&output, "Golden").is_some());
+        let chip = text_pos(&output, "Food").expect("the Food chip") + Vec2::new(4.0, 4.0);
+        let press = |pressed| egui::Event::PointerButton {
+            pos: chip,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        frame(&mut shell, &mut view, vec![egui::Event::PointerMoved(chip)]);
+        frame(&mut shell, &mut view, vec![press(true), press(false)]);
+        assert_eq!(view.filter_category, "Food");
+        let output = frame(&mut shell, &mut view, Vec::new());
+        assert!(text_pos(&output, "Tasty").is_some());
+        assert!(text_pos(&output, "Golden").is_none());
         let _ = std::fs::remove_dir_all(&temp);
     }
 

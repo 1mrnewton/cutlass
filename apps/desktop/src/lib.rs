@@ -276,9 +276,31 @@ mod tests {
         let mut decoder = decoders
             .open(&CodecParams::video(CodecId::Mpeg4, 48, 32))
             .expect("rust mpeg4");
-        let mut outputs = decoder
-            .push(&Packet::video(stream, 0, 1, 25, true))
-            .expect("decode");
+        // One VOP per packet, as a container hands them over; the headers
+        // before the first VOP ride with it. The decoder refuses a packet
+        // holding more VOPs than a packed stream needs.
+        let mut cuts = Vec::new();
+        let mut header = None;
+        for at in 0..stream.len().saturating_sub(3) {
+            if stream[at..at + 3] == [0, 0, 1] {
+                if stream[at + 3] == 0xB6 {
+                    cuts.push(header.take().unwrap_or(at));
+                } else if header.is_none() && cuts.is_empty() {
+                    header = Some(at);
+                }
+            }
+        }
+        cuts.push(stream.len());
+        let mut outputs = Vec::new();
+        for (index, pair) in cuts.windows(2).enumerate() {
+            let packet = stream[pair[0]..pair[1]].to_vec();
+            let pts = i64::try_from(index).expect("index");
+            outputs.extend(
+                decoder
+                    .push(&Packet::video(packet, pts, 1, 25, index == 0))
+                    .expect("decode"),
+            );
+        }
         outputs.extend(decoder.drain().expect("drain"));
         let mut got = Vec::new();
         for output in outputs {

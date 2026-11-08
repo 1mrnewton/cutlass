@@ -181,6 +181,9 @@ pub enum EditError {
     EffectTarget,
     /// An effect strength is outside 0 through 1.
     EffectStrength,
+    /// The effect has no control by that name, or the value is not a
+    /// number in its range.
+    EffectControl,
     /// The canvas color is not empty and not a color the preview paints.
     CanvasColor,
     /// A canvas side is outside 1 through 7680.
@@ -626,6 +629,12 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             material_id,
             value,
         } => effect::set_effect_strength(draft, segment_id, material_id, *value),
+        Request::SetEffectControl {
+            segment_id,
+            material_id,
+            control,
+            value,
+        } => effect::set_effect_control(draft, segment_id, material_id, control, *value),
         Request::SetKeyframes {
             segment_id,
             keyframes,

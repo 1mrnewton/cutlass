@@ -19,6 +19,7 @@ pub mod adjust;
 pub mod blend;
 pub mod catalog;
 pub mod chroma;
+pub mod controls;
 pub mod grade;
 pub mod look;
 pub mod lut;
@@ -41,6 +42,7 @@ pub use catalog::{
     Transition, entries, entry,
 };
 pub use chroma::{CHROMA, Chroma, parse_hex, segment_chroma};
+pub use controls::{store_control, stored_controls};
 pub use grade::{
     COLOR_CURVES, COLOR_WHEELS, Colour, CurveChannel, Grade, HSL, HSL_COLORS, MAX_CURVE_POINTS,
     Wheel, WheelSetting, curve_table, is_colour_work, points_json, segment_colour, segment_grade,
@@ -59,8 +61,9 @@ pub use preview::{
     preview_scenes, preview_time,
 };
 pub use recipe::{
-    Block, Curve, EFFECT_CATEGORIES, MAX_PASSES, MAX_VALUES, Param, Pass, RECIPE_PREFIX,
-    RECIPE_VERSION, Recipe, RecipeError, Step, bundled, bundled_recipe,
+    Block, Control, ControlUnit, Curve, EFFECT_CATEGORIES, MAX_CONTROLS, MAX_PASSES, MAX_VALUES,
+    Param, Pass, RECIPE_PREFIX, RECIPE_VERSION, Recipe, RecipeError, Step, Target, bundled,
+    bundled_recipe,
 };
 pub use selection::{
     MAX_SELECTION_SIDE, SELECTION, Selection, segment_has_selection, segment_selection,

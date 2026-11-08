@@ -567,6 +567,16 @@ pub enum Request {
         material_id: MaterialId,
         value: f64,
     },
+    /// Set the control `control` (such as `speed`) of the recipe effect the
+    /// clip uses to `value`, inside the control's range. When another clip
+    /// uses that material too, a copy named `material_id` takes its place on
+    /// this clip only.
+    SetEffectControl {
+        segment_id: SegmentId,
+        material_id: MaterialId,
+        control: String,
+        value: f64,
+    },
     /// Replace the segment's keyframe groups.
     SetKeyframes {
         segment_id: SegmentId,

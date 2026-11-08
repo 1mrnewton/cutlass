@@ -1743,6 +1743,25 @@ mod recipe_tests {
     }
 
     #[test]
+    fn an_effect_runs_with_the_controls_stored_on_its_clip() {
+        let mut draft = with_effect("recipe/photo-drop");
+        let effect = draft
+            .materials
+            .video_effects
+            .last_mut()
+            .expect("the effect");
+        cutlass_effects::store_control(effect, "speed", 2.0, 1.0);
+        let frame = layers(&draft, 600_000);
+        let Some(GpuSource::Effect(steps)) = frame.layers.last().map(|layer| &layer.source) else {
+            panic!("no effect layer");
+        };
+        let recipe = bundled_recipe("recipe/photo-drop").expect("recipe");
+        let fast = [("speed".to_owned(), 2.0)].into_iter().collect();
+        assert_eq!(steps, &recipe.steps_with(Micros(100_000), &fast));
+        assert_eq!(steps, &recipe.steps_at(Micros(200_000)), "twice as far in");
+    }
+
+    #[test]
     fn a_layer_with_a_higher_index_stays_above_the_effect() {
         let mut draft = with_effect("recipe/vignette");
         let top = draft.tracks.len() - 1;

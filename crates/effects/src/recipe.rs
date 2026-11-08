@@ -33,6 +33,8 @@ pub const MAX_VALUES: usize = 12;
 pub const MAX_JITTER_RATE: f32 = 120.0;
 /// The effect id a recipe is stored under on a draft's effect material.
 pub const RECIPE_PREFIX: &str = "recipe/";
+/// The most controls one recipe may show.
+pub const MAX_CONTROLS: usize = 6;
 
 /// One building block the GPU runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Deserialize)]
@@ -478,6 +480,64 @@ pub struct Jitter {
     pub seed: u32,
 }
 
+/// How a control's value reads in the inspector.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ControlUnit {
+    /// A plain number.
+    #[default]
+    Plain,
+    /// A rate, such as 1.5x.
+    Times,
+    /// A part from 0 to 1 shown as a percent.
+    Percent,
+    /// An angle in degrees.
+    Degrees,
+}
+
+/// A pass's parameter a control acts on: the pass's place in the recipe
+/// and the parameter's name.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub struct Target(pub usize, pub String);
+
+/// One setting a recipe shows in the inspector, such as Speed or
+/// Intensity. Its value plays the effect faster (`speed`), multiplies
+/// parameters as the recipe writes them (`scale`), or replaces them
+/// (`set`). A value is kept to the parameter's range.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Control {
+    /// Lowercase letters, digits and underscores; the name it is stored by.
+    pub id: String,
+    /// What the inspector calls it.
+    pub name: String,
+    pub default: f32,
+    pub min: f32,
+    pub max: f32,
+    #[serde(default)]
+    pub unit: ControlUnit,
+    /// The value multiplies the effect's own time.
+    #[serde(default)]
+    pub speed: bool,
+    #[serde(default)]
+    pub scale: Vec<Target>,
+    #[serde(default)]
+    pub set: Vec<Target>,
+}
+
+impl Control {
+    /// `value` kept inside this control's range; the default when it is
+    /// not a number.
+    #[must_use]
+    pub fn clamp(&self, value: f32) -> f32 {
+        if value.is_finite() {
+            value.clamp(self.min, self.max)
+        } else {
+            self.default
+        }
+    }
+}
+
 /// One pass of a recipe as written.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -509,6 +569,9 @@ pub struct Recipe {
     /// [`crate::DEFAULT_POSTER`]. A flash names the moment it is brightest.
     #[serde(default)]
     pub poster: Option<f32>,
+    /// The settings the inspector shows for it, at most [`MAX_CONTROLS`].
+    #[serde(default)]
+    pub controls: Vec<Control>,
     pub passes: Vec<Pass>,
 }
 
@@ -545,6 +608,10 @@ pub enum RecipeError {
     /// A curve's own numbers are unusable: no keys, too many, keys out of
     /// order, or a period or rate that is not positive.
     Curve { block: Block, name: String },
+    /// A control is unusable: a bad or repeated id, a range that does not
+    /// hold its default, a speed that can reach zero, a target that names
+    /// no pass or parameter, or more than [`MAX_CONTROLS`] of them.
+    Control(String),
 }
 
 impl fmt::Display for RecipeError {
@@ -570,6 +637,7 @@ impl fmt::Display for RecipeError {
                 write!(formatter, "{block:?} {name} goes outside its range")
             }
             Self::Curve { block, name } => write!(formatter, "{block:?} {name} has a broken curve"),
+            Self::Control(id) => write!(formatter, "the control {id} is not usable"),
         }
     }
 }
@@ -630,6 +698,7 @@ impl Recipe {
         if self.passes.is_empty() || self.passes.len() > MAX_PASSES {
             return Err(RecipeError::Passes);
         }
+        self.check_controls()?;
         for pass in &self.passes {
             for (name, curve) in &pass.params {
                 let Some(param) = pass.block.params().iter().find(|p| p.name == name) else {
@@ -642,6 +711,52 @@ impl Recipe {
             }
         }
         Ok(())
+    }
+
+    fn check_controls(&self) -> Result<(), RecipeError> {
+        if self.controls.len() > MAX_CONTROLS {
+            return Err(RecipeError::Control(String::new()));
+        }
+        for (index, control) in self.controls.iter().enumerate() {
+            let refuse = || Err(RecipeError::Control(control.id.clone()));
+            let id_ok = !control.id.is_empty()
+                && control.id.len() <= 32
+                && control
+                    .id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_');
+            let repeated = self.controls[..index]
+                .iter()
+                .any(|other| other.id == control.id);
+            let numbers = [control.default, control.min, control.max];
+            let range_ok = numbers.iter().all(|value| value.is_finite())
+                && control.min <= control.default
+                && control.default <= control.max;
+            let name_ok = !control.name.trim().is_empty() && control.name.chars().count() <= 32;
+            if !id_ok || repeated || !range_ok || !name_ok || (control.speed && control.min <= 0.0)
+            {
+                return refuse();
+            }
+            for Target(pass, name) in control.scale.iter().chain(&control.set) {
+                let known = self
+                    .passes
+                    .get(*pass)
+                    .is_some_and(|pass| pass.block.params().iter().any(|param| param.name == name));
+                if !known {
+                    return refuse();
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Every control at its default.
+    #[must_use]
+    pub fn default_controls(&self) -> BTreeMap<String, f32> {
+        self.controls
+            .iter()
+            .map(|control| (control.id.clone(), control.default))
+            .collect()
     }
 
     /// The id stored on a draft's effect material.
@@ -671,17 +786,54 @@ impl Recipe {
     /// before the start is the start.
     #[must_use]
     pub fn steps_at(&self, time: Micros) -> Vec<Step> {
+        self.steps_with(time, &BTreeMap::new())
+    }
+
+    /// Every pass at `time` with the controls set to `controls`, by id. A
+    /// control left out is at its default, and a value past its range is
+    /// kept to it; each parameter stays in its own range.
+    #[must_use]
+    pub fn steps_with(&self, time: Micros, controls: &BTreeMap<String, f32>) -> Vec<Step> {
+        let value_of = |control: &Control| {
+            control.clamp(
+                controls
+                    .get(&control.id)
+                    .copied()
+                    .unwrap_or(control.default),
+            )
+        };
+        let speed: f64 = self
+            .controls
+            .iter()
+            .filter(|control| control.speed)
+            .map(|control| f64::from(value_of(control)))
+            .product();
         // Seconds as f64 first: a long timeline keeps its fraction.
-        let seconds = (time.0.max(0) as f64 / 1_000_000.0) as f32;
+        let seconds = (time.0.max(0) as f64 / 1_000_000.0 * speed) as f32;
         self.passes
             .iter()
-            .map(|pass| {
+            .enumerate()
+            .map(|(index, pass)| {
                 let mut values = [0.0; MAX_VALUES];
                 for (slot, param) in values.iter_mut().zip(pass.block.params()) {
-                    *slot = pass
+                    let mut value = pass
                         .params
                         .get(param.name)
                         .map_or(param.default, |curve| curve.at(seconds));
+                    let aims = |targets: &[Target]| {
+                        targets
+                            .iter()
+                            .any(|Target(pass, name)| *pass == index && name == param.name)
+                    };
+                    for control in &self.controls {
+                        if aims(&control.scale) {
+                            value *= value_of(control);
+                        }
+                        if aims(&control.set) {
+                            value = value_of(control);
+                        }
+                    }
+                    *slot = value.clamp(param.min, param.max);
                 }
                 Step {
                     block: pass.block,
@@ -1150,6 +1302,65 @@ mod tests {
             read(r#"{"version":0,"id":"a","name":"A","passes":[{"block":"blur"}]}"#),
             Err(RecipeError::Shape(_))
         ));
+    }
+
+    #[test]
+    fn controls_speed_scale_and_set_the_steps_within_their_ranges() {
+        let recipe = read(
+            r#"{"version":1,"id":"a","name":"A","controls":[
+                {"id":"speed","name":"Speed","default":1,"min":0.5,"max":3,"unit":"times","speed":true},
+                {"id":"strength","name":"Strength","default":1,"min":0,"max":4,"scale":[[0,"amount"]]},
+                {"id":"green","name":"Green","default":0.5,"min":0,"max":1,"set":[[0,"green"]]}],
+                "passes":[{"block":"flash","params":{"amount":{"keys":[[0,0],[1,0.5]]}}}]}"#,
+        )
+        .unwrap();
+        let at = |seconds: f64, controls: &[(&str, f32)]| {
+            let controls = controls
+                .iter()
+                .map(|(id, value)| ((*id).to_owned(), *value))
+                .collect();
+            recipe.steps_with(Micros((seconds * 1_000_000.0) as i64), &controls)[0].values
+        };
+        // Defaults: the curve as written, green at its default.
+        assert!((at(0.5, &[])[0] - 0.25).abs() < 1e-5);
+        assert!((at(0.5, &[])[2] - 0.5).abs() < 1e-5);
+        assert_eq!(
+            recipe.steps_at(Micros(500_000)),
+            recipe.steps_with(Micros(500_000), &recipe.default_controls())
+        );
+        // Twice as fast reaches the same value in half the time.
+        assert!((at(0.25, &[("speed", 2.0)])[0] - 0.25).abs() < 1e-5);
+        // A speed past its range is kept to it.
+        assert_eq!(at(0.1, &[("speed", 100.0)]), at(0.1, &[("speed", 3.0)]));
+        // Scaled, and kept to the parameter's own range.
+        assert!((at(0.5, &[("strength", 2.0)])[0] - 0.5).abs() < 1e-5);
+        assert!((at(1.0, &[("strength", 4.0)])[0] - 1.0).abs() < 1e-5);
+        assert!((at(0.5, &[("green", 0.1)])[2] - 0.1).abs() < 1e-5);
+    }
+
+    #[test]
+    fn broken_controls_are_refused() {
+        for control in [
+            r#"{"id":"Speed","name":"S","default":1,"min":0.5,"max":2,"speed":true}"#,
+            r#"{"id":"s","name":"S","default":3,"min":0.5,"max":2}"#,
+            r#"{"id":"s","name":"S","default":1,"min":0,"max":2,"speed":true}"#,
+            r#"{"id":"s","name":"S","default":1,"min":0,"max":2,"scale":[[1,"amount"]]}"#,
+            r#"{"id":"s","name":"S","default":1,"min":0,"max":2,"set":[[0,"nothing"]]}"#,
+            r#"{"id":"s","name":" ","default":1,"min":0,"max":2}"#,
+        ] {
+            let text = format!(
+                r#"{{"version":1,"id":"a","name":"A","controls":[{control}],"passes":[{{"block":"flash"}}]}}"#
+            );
+            assert!(
+                matches!(read(&text), Err(RecipeError::Control(_))),
+                "{control}"
+            );
+        }
+        let twice = r#"{"id":"s","name":"S","default":1,"min":0,"max":2}"#;
+        let text = format!(
+            r#"{{"version":1,"id":"a","name":"A","controls":[{twice},{twice}],"passes":[{{"block":"flash"}}]}}"#
+        );
+        assert!(matches!(read(&text), Err(RecipeError::Control(_))));
     }
 
     #[test]

@@ -511,6 +511,7 @@ pub fn request_name(request: &Request) -> &'static str {
         Request::Track { .. } => "track",
         Request::SetColorMask { .. } => "set_color_mask",
         Request::SetEffectStrength { .. } => "set_effect_strength",
+        Request::SetEffectControl { .. } => "set_effect_control",
         Request::SetKeyframes { .. } => "set_keyframes",
         Request::AddKeyframe { .. } => "add_keyframe",
         Request::RemoveKeyframe { .. } => "remove_keyframe",

@@ -19,6 +19,7 @@ struct Effect {
     size: vec2<f32>,
     a: vec4<f32>,
     b: vec4<f32>,
+    c: vec4<f32>,
 };
 
 @group(0) @binding(0) var source: texture_2d<f32>;
@@ -531,14 +532,29 @@ fn prints(uv: vec2<f32>) -> vec4<f32> {
         vec2<f32>(0.1, 0.16),
     );
     var leans = array<f32, 4>(-1.0, 0.7, -0.45, 0.9);
+    // Where each print flies in from, in shorter sides from its place,
+    // and how far it is turned as it sets off.
+    var starts = array<vec2<f32>, 4>(
+        vec2<f32>(0.15, 1.3),
+        vec2<f32>(1.5, 0.35),
+        vec2<f32>(-1.5, -0.3),
+        vec2<f32>(0.9, -1.3),
+    );
+    var spins = array<f32, 4>(-8.0, 28.0, -32.0, 20.0);
     let border = fx.b.y;
     // Back to front, each print over what is behind it.
     for (var i = 0u; i < count; i = i + 1u) {
-        let half = frame_half * fx.a.y * (1.0 - 0.2 * f32(i));
-        let turn = radians(fx.a.w + fx.b.x * leans[i]);
+        let flight = clamp(fx.c.x - 0.6 * f32(i), 0.0, 1.0);
+        if (flight <= 0.0) {
+            continue;
+        }
+        // Fast at first, slowing as it lands.
+        let left = pow(1.0 - flight, 3.0);
+        let half = frame_half * fx.a.y * (1.0 - 0.2 * f32(i)) * (1.0 + 0.15 * left);
+        let turn = radians(fx.a.w + fx.b.x * leans[i] + spins[i] * left);
         let c = cos(turn);
         let s = sin(turn);
-        let d = p - places[i] * fx.a.z;
+        let d = p - places[i] * fx.a.z - starts[i] * left;
         let local = vec2<f32>(c * d.x + s * d.y, -s * d.x + c * d.y);
         let edge = half + vec2<f32>(border);
         // A soft shadow below and to the right.
@@ -598,7 +614,7 @@ fn fs(in: Out) -> @location(0) vec4<f32> {
 ";
 
 /// Bytes in one step's uniform block.
-const PARAMS: u64 = 48;
+const PARAMS: u64 = 64;
 
 pub(crate) struct Effects {
     pipeline: wgpu::RenderPipeline,
@@ -1288,6 +1304,31 @@ mod tests {
         // Behind, the copy paled halfway to white.
         let corner = at(1, 1);
         assert!(corner[0] > 200 && corner[1] > 100, "{corner:?}");
+        // Before its turn, a print is not there: only the pale copy.
+        let early = draw(
+            &renderer,
+            &scene,
+            size,
+            &[step(
+                Block::Prints,
+                &[
+                    (0, 1.0),
+                    (1, 0.5),
+                    (2, 0.0),
+                    (4, 0.0),
+                    (5, 0.06),
+                    (6, 0.0),
+                    (7, 0.5),
+                    (8, 0.0),
+                ],
+            )],
+        );
+        let i = 4 * (24 * size.0 + 24) as usize;
+        assert!(
+            early[i + 1] > 100,
+            "pale, not the print's red: {:?}",
+            &early[i..i + 3]
+        );
     }
 
     #[test]

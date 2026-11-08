@@ -28,7 +28,7 @@ pub const MAX_KEYS: usize = 64;
 /// The largest recipe file read.
 pub const MAX_RECIPE_BYTES: usize = 64 * 1024;
 /// The most values one block takes.
-pub const MAX_VALUES: usize = 8;
+pub const MAX_VALUES: usize = 12;
 /// The fastest a held random value may change, in steps per second.
 pub const MAX_JITTER_RATE: f32 = 120.0;
 /// The effect id a recipe is stored under on a draft's effect material.
@@ -299,6 +299,9 @@ const FRINGE: &[Param] = &[
 /// sit from the middle, `turn` turns the whole stack and `tilt` turns each
 /// print its own way, in degrees. `border`, the white edge, and `blur`, the
 /// copy behind, are fractions of the shorter side; `wash` pales that copy.
+/// `arrive` is the clock the prints fly in by, the back one first: each
+/// takes one unit to land and the next sets off 0.6 after it, so a print
+/// is still settling when the next comes. At 8 every print has landed.
 const PRINTS: &[Param] = &[
     param("count", 0.0, 0.0, 4.0),
     param("scale", 0.7, 0.1, 1.5),
@@ -308,6 +311,7 @@ const PRINTS: &[Param] = &[
     param("border", 0.025, 0.0, 0.1),
     param("blur", 0.03, 0.0, 0.1),
     param("wash", 0.5, 0.0, 1.0),
+    param("arrive", 8.0, 0.0, 8.0),
 ];
 const HALFTONE: &[Param] = &[
     param("size", 0.0, 0.0, 0.1),
@@ -316,6 +320,43 @@ const HALFTONE: &[Param] = &[
 ];
 
 impl Block {
+    /// Every block, in the order of their codes.
+    pub const ALL: [Self; 33] = [
+        Self::Transform,
+        Self::RgbSplit,
+        Self::Slices,
+        Self::Blur,
+        Self::Grade,
+        Self::Flash,
+        Self::Vignette,
+        Self::Noise,
+        Self::Scanlines,
+        Self::Mirror,
+        Self::Pixelate,
+        Self::Invert,
+        Self::ZoomBlur,
+        Self::MotionBlur,
+        Self::Swirl,
+        Self::Ripple,
+        Self::Bulge,
+        Self::Glow,
+        Self::LightLeak,
+        Self::Hue,
+        Self::Tile,
+        Self::Posterize,
+        Self::Edges,
+        Self::GradientMap,
+        Self::Grid,
+        Self::Spotlight,
+        Self::Reveal,
+        Self::Stretch,
+        Self::Dust,
+        Self::Kaleido,
+        Self::Fringe,
+        Self::Halftone,
+        Self::Prints,
+    ];
+
     /// The parameters in the order the shader reads them.
     #[must_use]
     pub const fn params(self) -> &'static [Param] {
@@ -930,6 +971,21 @@ mod tests {
         let plain =
             read(r#"{"version":1,"id":"a","name":"A","passes":[{"block":"grade","params":{}}]}"#);
         assert!(plain.is_ok_and(|recipe| recipe.category.is_empty()));
+    }
+
+    #[test]
+    fn every_block_fits_the_values_a_step_carries_and_its_code_is_its_place() {
+        for (index, block) in Block::ALL.iter().enumerate() {
+            assert!(block.params().len() <= super::MAX_VALUES, "{block:?}");
+            assert_eq!(block.code() as usize, index, "{block:?}");
+            for param in block.params() {
+                assert!(
+                    param.min <= param.default && param.default <= param.max,
+                    "{block:?} {}",
+                    param.name
+                );
+            }
+        }
     }
 
     #[test]

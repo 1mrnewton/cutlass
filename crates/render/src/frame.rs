@@ -242,7 +242,7 @@ mod tests {
         };
         let invert = cutlass_effects::Step {
             block: cutlass_effects::Block::Invert,
-            values: [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            values: [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
         };
         let frame = FrameLayers {
             width: 4,

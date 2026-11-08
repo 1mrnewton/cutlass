@@ -1957,6 +1957,13 @@ fn asset_column(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect
                     shell.add_filter(&id)
                 } else if id.starts_with(crate::shell::STICKER_CARD_PREFIX) {
                     shell.add_sticker(&id)
+                } else if id == cutlass_editor::PEN_CARD {
+                    if shell.pen().is_some() {
+                        shell.stop_pen();
+                        Ok(())
+                    } else {
+                        shell.start_pen()
+                    }
                 } else if id.starts_with(cutlass_editor::SHAPE_CARD_PREFIX) {
                     shell.add_shape(&id)
                 } else if id.starts_with(cutlass_editor::TEMPLATE_CARD_PREFIX) {
@@ -2027,9 +2034,9 @@ fn segmented(ui: &mut Ui, id: &str, labels: &[&str], current: usize) -> Option<u
     picked
 }
 
-/// The shape shelf's cards whose names hold `query`.
+/// The shape shelf's cards whose names hold `query`, then the pen.
 fn shape_cards(query: &str) -> Vec<BinCard> {
-    cutlass_editor::shape_cards()
+    let mut cards: Vec<BinCard> = cutlass_editor::shape_cards()
         .into_iter()
         .filter(|(_, kind)| query.is_empty() || kind.name().to_lowercase().contains(query))
         .map(|(id, kind)| BinCard {
@@ -2039,7 +2046,18 @@ fn shape_cards(query: &str) -> Vec<BinCard> {
             on_timeline: false,
             look: CardLook::Shape(kind),
         })
-        .collect()
+        .collect();
+    let pen = cutlass_model::SHAPE_PEN;
+    if query.is_empty() || pen.to_lowercase().contains(query) {
+        cards.push(BinCard {
+            id: cutlass_editor::PEN_CARD.to_owned(),
+            name: pen.to_owned(),
+            meta: String::new(),
+            on_timeline: false,
+            look: CardLook::Pen,
+        });
+    }
+    cards
 }
 
 /// A shape's outline, white on the card, as the library shows it.
@@ -2306,17 +2324,28 @@ fn card_grid(
             );
         let rect = Rect::from_min_size(origin, Vec2::new(CARD_W, CARD_H + CARD_LABEL));
         let folder = card.look == CardLook::Folder;
-        paint_bin_card(ui, rect, card, view.library_picked.contains(&card.id));
+        let pen = card.look == CardLook::Pen;
+        let lit = view.library_picked.contains(&card.id) || (pen && shell.pen().is_some());
+        paint_bin_card(ui, rect, card, lit);
         if folder && folder_name_field(shell, ui, view, card, rect) {
             continue;
         }
         // A click picks the card. A drag only starts once the pointer moves.
-        let sense = if folder {
+        let sense = if folder || pen {
             Sense::click()
         } else {
             Sense::click_and_drag()
         };
         let response = ui.interact(rect, ui.scope_id().with(&card.id), sense);
+        if pen {
+            // The pen is a tool, not a clip: a click picks it up or puts
+            // it down.
+            if response.clicked() {
+                added = Some(card.id.clone());
+            }
+            response.on_hover_text("Draw a shape on the preview");
+            continue;
+        }
         if folder {
             drop_into_folder(shell, &response, &card.id);
         } else {
@@ -2553,7 +2582,11 @@ fn fill_looks(shell: &mut Shell, ctx: &egui::Context, cards: &mut [BinCard]) {
                         card.look = CardLook::Sound(levels);
                     }
                 }
-                CardLook::Swatch | CardLook::Folder | CardLook::Title(_) | CardLook::Shape(_) => {}
+                CardLook::Swatch
+                | CardLook::Folder
+                | CardLook::Title(_)
+                | CardLook::Shape(_)
+                | CardLook::Pen => {}
             }
         }
     });
@@ -2581,6 +2614,15 @@ fn paint_card_face(painter: &egui::Painter, rect: Rect, card: &BinCard) {
         CardLook::Shape(kind) => {
             painter.rect_filled(rect, radius, tokens::ICON_BUTTON);
             paint_shape_mark(painter, rect, *kind);
+        }
+        CardLook::Pen => {
+            painter.rect_filled(rect, radius, tokens::ICON_BUTTON);
+            let _ = icons::paint(
+                painter,
+                Rect::from_center_size(rect.center(), Vec2::splat(40.0)),
+                "draw",
+                tokens::TEXT,
+            );
         }
         CardLook::Folder => {
             painter.rect_filled(rect, radius, tokens::ICON_BUTTON);
@@ -2675,6 +2717,8 @@ enum CardLook {
     Title(Color32),
     /// A shape from the shape shelf, drawn as its outline.
     Shape(cutlass_model::ShapeKind),
+    /// The pen, which draws a shape on the preview.
+    Pen,
 }
 
 /// Where the library is looking: its folders, the one shown, and the order.
@@ -2935,7 +2979,7 @@ fn preview_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rec
     preview_wheel(ui, view, frame);
     // The preview drag lands before the canvas is drawn, on the canvas
     // where it was last drawn, so this frame's picture already has it.
-    let staging = shell.picking().is_none() && shell.tracking().is_none();
+    let staging = shell.picking().is_none() && shell.tracking().is_none() && shell.pen().is_none();
     let hover = match (view.preview_canvas, canvas) {
         (Some(placed), Some(size)) if staging => stage_input(shell, ui, view, frame, placed, size),
         _ => {
@@ -3010,8 +3054,162 @@ fn preview_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rec
         }
         pick_layer(shell, ui, frame, placed, size);
         track_layer(shell, ui, view, frame, placed, size);
+        pen_layer(shell, ui, frame, placed, size);
     }
     transport_bar(shell, ui, view, transport);
+}
+
+/// How near, in screen points, a press has to be to the first point to
+/// close the path.
+const PEN_CLOSE_REACH: f32 = 8.0;
+
+/// The pen on the preview: each press puts a point down, a drag before
+/// the release bends the curve through it, and a press on the first point
+/// closes the path and places the shape.
+fn pen_layer(shell: &mut Shell, ui: &mut Ui, frame: Rect, placed: Rect, size: Vec2) {
+    if shell.pen().is_none() {
+        return;
+    }
+    let area = placed.intersect(frame);
+    let response = ui
+        .interact(
+            area,
+            ui.scope_id().with("preview-pen"),
+            Sense::click_and_drag(),
+        )
+        .on_hover_cursor(egui::CursorIcon::Crosshair);
+    let to_canvas = |pos: Pos2| {
+        let (x, y) = canvas_pixel(placed, size, pos);
+        [x, y]
+    };
+    // Screen points to canvas pixels, for the reach to close.
+    let per_point = f64::from(size.x / placed.width().max(1.0));
+    let reach = f64::from(PEN_CLOSE_REACH) * per_point;
+    let (pressed, down, released, pointer) = ui.input(|input| {
+        (
+            input.pointer.primary_pressed(),
+            input.pointer.primary_down(),
+            input.pointer.primary_released(),
+            input.pointer.interact_pos(),
+        )
+    });
+    let mut closed = false;
+    if let Some(pen) = shell.pen_mut() {
+        if pressed
+            && response.hovered()
+            && let Some(pos) = pointer
+        {
+            closed = pen.press(to_canvas(pos), reach) == Some(cutlass_editor::PenPress::Closed);
+        } else if down
+            && pen.is_pulling()
+            && let Some(pos) = pointer
+        {
+            pen.drag(to_canvas(pos));
+        }
+        if released && pen.is_pulling() {
+            pen.release();
+            closed = pen.is_closed();
+        }
+    }
+    if closed
+        && !down
+        && let Err(error) = shell.finish_pen()
+    {
+        shell.notice_error(&error);
+    }
+    let Some(pen) = shell.pen() else {
+        return;
+    };
+    let painter = ui.painter().with_clip_rect(frame.intersect(ui.clip_rect()));
+    let hint = if pen.points().is_empty() {
+        "Click to put a point down, drag to curve it"
+    } else {
+        "Click the first point to close, Enter to finish, Esc to stop"
+    };
+    let galley =
+        painter.layout_no_wrap(hint.to_owned(), FontId::proportional(12.0), Color32::WHITE);
+    let chip = Rect::from_center_size(
+        Pos2::new(frame.center().x, frame.top() + 18.0),
+        galley.size() + Vec2::new(16.0, 8.0),
+    );
+    painter.rect_filled(chip, 6.0, Color32::from_black_alpha(170));
+    painter.galley(chip.center() - galley.size() / 2.0, galley, Color32::WHITE);
+    let screen = |p: [f64; 2]| screen_point(placed, size, (p[0], p[1]));
+    let line = egui::Stroke::new(1.5, tokens::EXPORT);
+    let curve = |cubic: [[f64; 2]; 4], stroke: egui::Stroke| {
+        egui::Shape::CubicBezier(egui::epaint::CubicBezierShape::from_points_stroke(
+            cubic.map(screen),
+            false,
+            Color32::TRANSPARENT,
+            stroke,
+        ))
+    };
+    for cubic in pen.cubics() {
+        painter.add(curve(cubic, line));
+    }
+    let hover = response.hover_pos().map(to_canvas);
+    if let Some(next) = hover.and_then(|at| pen.next_cubic(at)) {
+        painter.add(curve(
+            next,
+            egui::Stroke::new(1.0, tokens::EXPORT.gamma_multiply(0.6)),
+        ));
+    }
+    let closing = hover.is_some_and(|at| pen.closes_at(at, reach));
+    for (index, point) in pen.points().iter().enumerate() {
+        let at = screen(point.at);
+        if point.handle_out != [0.0, 0.0] {
+            let tips = [point.handle_in, point.handle_out]
+                .map(|d| screen([point.at[0] + d[0], point.at[1] + d[1]]));
+            painter.line_segment([tips[0], tips[1]], egui::Stroke::new(1.0, Color32::WHITE));
+            for tip in tips {
+                painter.circle_filled(tip, 3.0, Color32::WHITE);
+            }
+        }
+        let first = index == 0;
+        let radius = if first && closing { 6.0 } else { 4.0 };
+        let fill = if first {
+            tokens::EXPORT
+        } else {
+            Color32::WHITE
+        };
+        painter.rect(
+            Rect::from_center_size(at, Vec2::splat(radius * 2.0)),
+            1.0,
+            fill,
+            egui::Stroke::new(1.0, tokens::EXPORT),
+            egui::StrokeKind::Middle,
+        );
+    }
+}
+
+/// Enter or Escape places the path drawn so far (Escape with nothing drawn
+/// puts the pen down), and Backspace or Delete takes back the last point.
+/// Returns whether a key was the pen's.
+fn pen_keys(shell: &mut Shell, ui: &Ui) -> bool {
+    let (enter, escape, back) = ui.input(|input| {
+        (
+            input.key_pressed(egui::Key::Enter),
+            input.key_pressed(egui::Key::Escape),
+            input.key_pressed(egui::Key::Backspace) || input.key_pressed(egui::Key::Delete),
+        )
+    });
+    let drawn = shell.pen().is_some_and(|pen| !pen.points().is_empty());
+    if back {
+        if let Some(pen) = shell.pen_mut() {
+            pen.undo();
+        }
+        return true;
+    }
+    if escape && !drawn {
+        shell.stop_pen();
+        return true;
+    }
+    if (enter || escape)
+        && let Err(error) = shell.finish_pen()
+    {
+        shell.notice_error(&error);
+    }
+    enter || escape
 }
 
 /// What a drag on the preview grabbed.
@@ -8125,6 +8323,9 @@ fn shortcuts(shell: &mut Shell, ui: &Ui, view: &mut ViewState) {
     if ui.ctx().text_edit_focused() || view.settings_open || view.licenses.is_some() {
         return;
     }
+    if shell.pen().is_some() && pen_keys(shell, ui) {
+        return;
+    }
     if let Some(chord) = ui.input(pressed_chord)
         && let Err(error) = shell.run_shortcut(&chord)
         && !error.to_string().contains("not available")
@@ -11075,6 +11276,117 @@ mod tests {
             Some(cutlass_model::ShapeKind::Circle)
         );
         assert_eq!(shell.panel(), Some(cutlass_editor::Panel::Shape));
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn the_pen_draws_a_shape_on_the_preview() {
+        let temp = std::env::temp_dir().join(format!("cutlass-pen-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        cutlass_store::Folder::new(cutlass_model::Draft::empty("draft"))
+            .save(&temp)
+            .unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        let mut view = ViewState::new();
+        view.library_shelf = Shelf::Stickers;
+        view.sticker_group = SHAPES;
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 1600.0)));
+        let frame = |shell: &mut Shell, view: &mut ViewState, events: Vec<egui::Event>| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: screen,
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, view, None),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        let press = |pos: Pos2, pressed: bool| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        let click = |shell: &mut Shell, view: &mut ViewState, at: Pos2| {
+            frame(shell, view, vec![egui::Event::PointerMoved(at)]);
+            frame(shell, view, vec![press(at, true), press(at, false)]);
+        };
+        let output = frame(&mut shell, &mut view, Vec::new());
+        let card = text_pos(&output, "Pen").expect("the pen card") - Vec2::new(0.0, 30.0);
+        click(&mut shell, &mut view, card);
+        assert!(shell.pen().is_some(), "the card picks up the pen");
+        let lines = galleys(&frame(&mut shell, &mut view, Vec::new()));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.starts_with("Click to put a point down"))
+        );
+
+        let canvas = view.preview_canvas.expect("the preview is drawn");
+        let at = |x: f32, y: f32| canvas.min + canvas.size() * Vec2::new(x, y);
+        click(&mut shell, &mut view, at(0.25, 0.25));
+        // A drag bends the curve through the second point.
+        let second = at(0.5, 0.25);
+        frame(
+            &mut shell,
+            &mut view,
+            vec![egui::Event::PointerMoved(second)],
+        );
+        frame(&mut shell, &mut view, vec![press(second, true)]);
+        let pulled = second + Vec2::new(20.0, 0.0);
+        frame(
+            &mut shell,
+            &mut view,
+            vec![egui::Event::PointerMoved(pulled)],
+        );
+        frame(
+            &mut shell,
+            &mut view,
+            vec![egui::Event::PointerMoved(pulled), press(pulled, false)],
+        );
+        let bent = shell.pen().unwrap().points()[1];
+        assert!(bent.handle_out[0] > 0.0, "{bent:?}");
+        click(&mut shell, &mut view, at(0.5, 0.5));
+        assert!(shell.draft().unwrap().materials.shapes.is_empty());
+        // Back on the first point closes the path and places the shape.
+        click(&mut shell, &mut view, at(0.25, 0.25) + Vec2::new(2.0, 1.0));
+        let draft = shell.draft().unwrap();
+        let shape = &draft.materials.shapes[0];
+        assert_eq!(shape.points().len(), 3);
+        assert_eq!(shape.shape_type, cutlass_model::SHAPE_CONTOUR);
+        assert_eq!(shape.name, cutlass_model::SHAPE_PEN);
+        let row = draft
+            .tracks
+            .iter()
+            .find(|track| track.kind == cutlass_model::TrackType::Sticker)
+            .expect("a sticker row");
+        // The clip sits left of and above the middle, where it was drawn.
+        let clip = &row.segments[0].clip;
+        assert!(clip.transform.x < 0.0 && clip.transform.y > 0.0, "{clip:?}");
+        assert_eq!(shell.panel(), Some(cutlass_editor::Panel::Shape));
+        assert!(shell.pen().is_some_and(|pen| pen.points().is_empty()));
+
+        // Two points and Enter make an open line; Escape then puts the pen down.
+        click(&mut shell, &mut view, at(0.6, 0.6));
+        click(&mut shell, &mut view, at(0.8, 0.7));
+        let key = |key| egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame(&mut shell, &mut view, vec![key(egui::Key::Enter)]);
+        let shapes = &shell.draft().unwrap().materials.shapes;
+        assert_eq!(shapes.len(), 2);
+        assert!(shapes[1].is_open());
+        frame(&mut shell, &mut view, vec![key(egui::Key::Escape)]);
+        assert!(shell.pen().is_none());
         let _ = std::fs::remove_dir_all(&temp);
     }
 

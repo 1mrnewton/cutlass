@@ -109,6 +109,7 @@ impl Shell {
             ));
         }
         self.picking = Some(self.pick_target()?);
+        self.pen = None;
         Ok(())
     }
 

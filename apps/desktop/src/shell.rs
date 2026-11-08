@@ -821,6 +821,8 @@ pub struct Shell {
     picking: Option<select::Picking>,
     /// A track being set up on the selected clip.
     tracking: Option<follow::Tracking>,
+    /// A shape being drawn with the pen, while the preview takes presses.
+    pen: Option<cutlass_editor::PenPath>,
     /// What each speech job heard, by id, for the assistant's tools.
     heard: std::collections::HashMap<String, Result<String, String>>,
     hearings: u64,
@@ -943,6 +945,7 @@ impl Shell {
             vision: None,
             picking: None,
             tracking: None,
+            pen: None,
             heard: std::collections::HashMap::new(),
             hearings: 0,
             wants_speech_model: false,

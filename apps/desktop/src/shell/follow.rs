@@ -111,6 +111,7 @@ impl Shell {
     pub fn start_tracking(&mut self) -> Result<(), ShellError> {
         let segment_id = self.track_target()?;
         self.picking = None;
+        self.pen = None;
         self.tracking = Some(Tracking {
             segment_id,
             time: self.playhead(),

@@ -82,7 +82,8 @@ pub(super) fn shape_panel(
     );
     body(ui, |ui| opacity_slider(shell, ui, state, inspection));
     let kind = shape.shape_kind();
-    let line = kind.is_some_and(ShapeKind::is_line);
+    // A line, an arrow or an open pen path has no inside to fill.
+    let line = shape.is_open();
     if !line {
         fill(shell, ui, state, &shape);
     }
@@ -102,7 +103,7 @@ pub(super) fn size_row(
     shape: &MaterialShape,
 ) {
     let (width, height) = shape.size();
-    let line = shape.shape_kind().is_some_and(ShapeKind::is_line);
+    let line = shape.is_straight();
     let (new_w, new_h) = if line {
         pair_row(ui, state, "Size", ("W", width.round()), ("", f64::NAN))
     } else {

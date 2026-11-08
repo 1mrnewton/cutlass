@@ -4,6 +4,9 @@ use cutlass_model::ShapeKind;
 
 /// A shape card's id starts with this, then the shape's name.
 pub const SHAPE_CARD_PREFIX: &str = "shape:";
+/// The pen's card, after the shapes: a click picks up the pen to draw a
+/// shape on the preview rather than placing one.
+pub const PEN_CARD: &str = "pen";
 
 /// The shapes in shelf order, as `(card id, kind)`.
 #[must_use]

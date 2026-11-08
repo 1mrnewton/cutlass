@@ -32,10 +32,6 @@ impl<'a> BitReader<'a> {
         self.base.saturating_add(self.pos as u64)
     }
 
-    pub(crate) fn position(&self) -> usize {
-        self.pos
-    }
-
     pub(crate) fn bits_left(&self) -> isize {
         (self.data.len() * 8) as isize - self.pos as isize
     }
@@ -196,12 +192,6 @@ impl BitWriter {
     pub(crate) fn start_code(&mut self, code: u8) {
         self.align();
         self.out.extend_from_slice(&[0, 0, 1, code]);
-    }
-
-    /// Appends whole bytes. The writer must be aligned.
-    pub(crate) fn extend_aligned(&mut self, bytes: &[u8]) {
-        self.align();
-        self.out.extend_from_slice(bytes);
     }
 
     pub(crate) fn finish(mut self) -> Vec<u8> {

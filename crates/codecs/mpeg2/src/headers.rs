@@ -30,11 +30,13 @@ pub(crate) const PICTURE_B: u8 = 3;
 pub(crate) const PICTURE_D: u8 = 4;
 
 pub(crate) const STRUCTURE_TOP: u8 = 1;
+#[cfg(test)]
 pub(crate) const STRUCTURE_BOTTOM: u8 = 2;
 pub(crate) const STRUCTURE_FRAME: u8 = 3;
 
 pub(crate) const CHROMA_420: u8 = 1;
 pub(crate) const CHROMA_422: u8 = 2;
+#[cfg(test)]
 pub(crate) const CHROMA_444: u8 = 3;
 
 /// A quantiser matrix in raster order.
@@ -449,6 +451,7 @@ impl QuantMatrixExtension {
         Ok(out)
     }
 
+    #[cfg(test)]
     pub(crate) fn write(&self, w: &mut BitWriter) {
         w.start_code(EXTENSION);
         w.put(4, u32::from(EXT_QUANT_MATRIX));

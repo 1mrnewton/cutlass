@@ -23,6 +23,7 @@ mod assistant;
 mod audio;
 mod grade;
 mod inspector;
+mod mask;
 mod remove_bg;
 mod retouch;
 mod speed;
@@ -8975,7 +8976,23 @@ mod tests {
         assert_eq!(mask.shape, cutlass_effects::MaskShape::Circle);
         let lines = galleys(&frame(&mut shell, &mut view, Vec::new()));
         for label in [
-            "X", "Y", "Width", "Height", "Rotate", "Feather", "Invert", "50%",
+            "Mask1 Circle",
+            "Split",
+            "Filmstrip",
+            "Text",
+            "Mask settings",
+            "Position",
+            "X",
+            "Y",
+            "Rotation",
+            "Size",
+            "W",
+            "H",
+            "Feather",
+            "Invert",
+            "Track mask",
+            "Direction",
+            "Later",
         ] {
             assert!(lines.iter().any(|line| line == label), "{label}: {lines:?}");
         }
@@ -8988,10 +9005,24 @@ mod tests {
             .unwrap();
         let output = frame(&mut shell, &mut view, Vec::new());
         assert!(galleys(&output).iter().any(|line| line == "Round corners"));
-        let none = text_pos(&output, "None").expect("none") + Vec2::new(4.0, 4.0);
-        let _ = frame(&mut shell, &mut view, vec![egui::Event::PointerMoved(none)]);
-        let _ = frame(&mut shell, &mut view, vec![press(none, true)]);
-        let _ = frame(&mut shell, &mut view, vec![press(none, false)]);
+        // The Mask switch takes the mask off.
+        let label = output
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Text(text) if text.galley.text() == "Mask" => Some(text.pos),
+                _ => None,
+            })
+            .max_by(|a, b| a.y.total_cmp(&b.y))
+            .expect("the Mask switch's name");
+        let switch = label + Vec2::new(-14.0, 8.0);
+        let _ = frame(
+            &mut shell,
+            &mut view,
+            vec![egui::Event::PointerMoved(switch)],
+        );
+        let _ = frame(&mut shell, &mut view, vec![press(switch, true)]);
+        let _ = frame(&mut shell, &mut view, vec![press(switch, false)]);
         assert!(shell.inspection().unwrap().mask.is_none());
         shell.undo().unwrap();
         assert_eq!(
@@ -9012,7 +9043,7 @@ mod tests {
                 .iter()
                 .any(|line| line == "Pick a shape to keep the colour work inside it.")
         );
-        let star = text_pos(&output, "Star").expect("star shape") + Vec2::new(4.0, 4.0);
+        let star = text_pos(&output, "Stars").expect("star shape") + Vec2::new(4.0, 4.0);
         let _ = frame(&mut shell, &mut view, vec![egui::Event::PointerMoved(star)]);
         let _ = frame(&mut shell, &mut view, vec![press(star, true)]);
         let _ = frame(&mut shell, &mut view, vec![press(star, false)]);

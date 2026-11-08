@@ -184,7 +184,7 @@ fn video_panel(
                 return;
             }
             if state.page == 2 {
-                mask_page(shell, ui, state, inspection.mask, false);
+                super::mask::mask_page(shell, ui, state, inspection.mask, false);
                 return;
             }
             if state.page == 3 {
@@ -931,7 +931,7 @@ fn animation_tab(
 }
 
 /// Act on a press of `setting`'s keyframe buttons.
-fn setting_step(shell: &mut Shell, setting: KeyedSetting, step: Option<KeyStep>) {
+pub(super) fn setting_step(shell: &mut Shell, setting: KeyedSetting, step: Option<KeyStep>) {
     match step {
         Some(KeyStep::Back) => shell.step_setting_key(setting, false),
         Some(KeyStep::Toggle) => send(shell, |shell| shell.toggle_setting_key(setting)),
@@ -942,7 +942,7 @@ fn setting_step(shell: &mut Shell, setting: KeyedSetting, step: Option<KeyStep>)
 
 /// A press on a row's keyframe buttons.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum KeyStep {
+pub(super) enum KeyStep {
     Back,
     Toggle,
     Forward,
@@ -957,7 +957,7 @@ const KEYS_WIDTH: f32 = 3.0 * KEY_BUTTON + 2.0 * KEY_GAP;
 /// `row` with the clip's keyframe buttons at its end, when the clip takes
 /// keys. The model keys a clip's whole pose at once, so each row's buttons
 /// step through and toggle the same keys.
-fn keyed_row<R>(
+pub(super) fn keyed_row<R>(
     ui: &mut Ui,
     keys: Option<&cutlass_editor::ClipKeys>,
     playhead: Micros,
@@ -1306,222 +1306,13 @@ fn colour_page(
         1 => super::grade::hsl_page(shell, ui, state, inspection),
         2 => super::grade::curves_page(shell, ui, state, inspection),
         3 => super::grade::wheels_page(shell, ui, state, inspection),
-        _ => mask_page(shell, ui, state, inspection.color_mask, true),
+        _ => super::mask::mask_page(shell, ui, state, inspection.color_mask, true),
     }
     true
 }
 
 /// The Cutout page: chroma key, with the cutouts that need a model marked
 /// for later.
-/// The Mask page: a shape cuts the clip in its own frame, or with `colour`
-/// limits where its colour work shows. None takes the mask off; the
-/// sliders place, size, turn and soften it.
-fn mask_page(
-    shell: &mut Shell,
-    ui: &mut Ui,
-    state: &mut InspectorState,
-    mask: Option<cutlass_effects::Mask>,
-    colour: bool,
-) {
-    use cutlass_effects::{Mask, MaskShape};
-    let set: fn(&mut Shell, Option<Mask>) -> Result<(), ShellError> = if colour {
-        Shell::set_color_mask
-    } else {
-        Shell::set_mask
-    };
-    let prefix = if colour { "color-" } else { "" };
-    body(ui, |ui| {
-        let mut picked: Option<Option<MaskShape>> = None;
-        ui.horizontal_wrapped(|ui| {
-            if ui
-                .add(ui::Choice::new(
-                    mask.is_none(),
-                    RichText::new("None").size(12.0),
-                ))
-                .clicked()
-            {
-                picked = Some(None);
-            }
-            for shape in MaskShape::ALL {
-                let on = mask.is_some_and(|mask| mask.shape == shape);
-                if ui
-                    .add(ui::Choice::new(on, RichText::new(shape.label()).size(12.0)))
-                    .clicked()
-                {
-                    picked = Some(Some(shape));
-                }
-            }
-        });
-        match picked {
-            Some(None) if mask.is_some() => send(shell, |shell| set(shell, None)),
-            Some(Some(shape)) if mask.is_none_or(|mask| mask.shape != shape) => {
-                let next = mask.map_or_else(|| Mask::new(shape), |mask| Mask { shape, ..mask });
-                send(shell, |shell| set(shell, Some(next)));
-            }
-            _ => {}
-        }
-        if !colour && mask.is_some() {
-            let keys = shell.setting_keys(KeyedSetting::Mask);
-            let playhead = shell.playhead();
-            let mut step = None;
-            keyed_row(ui, keys.as_ref(), playhead, &mut step, |ui| {
-                ui.label(
-                    RichText::new("Keyframe the mask")
-                        .size(12.0)
-                        .color(tokens::MUTED),
-                );
-            });
-            setting_step(shell, KeyedSetting::Mask, step);
-        }
-        let Some(mask) = mask else {
-            ui.add_space(6.0);
-            ui.label(
-                RichText::new(if colour {
-                    "Pick a shape to keep the colour work inside it."
-                } else {
-                    "Pick a shape to mask the clip."
-                })
-                .size(11.0)
-                .color(tokens::MUTED),
-            );
-            return;
-        };
-        ui.add_space(6.0);
-        let percent = |v: f64| format!("{v:.0}%");
-        let mut changed = None;
-        let mut field = |ui: &mut Ui,
-                         state: &mut InspectorState,
-                         key: &str,
-                         label: &str,
-                         stored: f32,
-                         scale: f64,
-                         range: std::ops::RangeInclusive<f64>,
-                         show: &dyn Fn(f64) -> String,
-                         put: fn(&mut Mask, f32)| {
-            if let Some(value) = slider(
-                ui,
-                state,
-                &format!("{prefix}{key}"),
-                label,
-                (f64::from(stored) * scale).round(),
-                range,
-                show,
-            ) {
-                let mut next = mask;
-                #[allow(clippy::cast_possible_truncation)]
-                put(&mut next, (value / scale) as f32);
-                changed = Some(next);
-            }
-        };
-        field(
-            ui,
-            state,
-            "mask-x",
-            "X",
-            mask.x,
-            100.0,
-            -200.0..=200.0,
-            &percent,
-            |m, v| m.x = v,
-        );
-        field(
-            ui,
-            state,
-            "mask-y",
-            "Y",
-            mask.y,
-            100.0,
-            -200.0..=200.0,
-            &percent,
-            |m, v| m.y = v,
-        );
-        match mask.shape {
-            MaskShape::Linear => {}
-            MaskShape::Mirror => {
-                field(
-                    ui,
-                    state,
-                    "mask-height",
-                    "Band",
-                    mask.height,
-                    100.0,
-                    0.0..=400.0,
-                    &percent,
-                    |m, v| m.height = v,
-                );
-            }
-            _ => {
-                field(
-                    ui,
-                    state,
-                    "mask-width",
-                    "Width",
-                    mask.width,
-                    100.0,
-                    0.0..=400.0,
-                    &percent,
-                    |m, v| m.width = v,
-                );
-                field(
-                    ui,
-                    state,
-                    "mask-height",
-                    "Height",
-                    mask.height,
-                    100.0,
-                    0.0..=400.0,
-                    &percent,
-                    |m, v| m.height = v,
-                );
-            }
-        }
-        field(
-            ui,
-            state,
-            "mask-rotation",
-            "Rotate",
-            mask.rotation,
-            1.0,
-            -180.0..=180.0,
-            &|v| format!("{v:.0}°"),
-            |m, v| m.rotation = v,
-        );
-        field(
-            ui,
-            state,
-            "mask-feather",
-            "Feather",
-            mask.feather,
-            100.0,
-            0.0..=100.0,
-            &|v| format!("{v:.0}"),
-            |m, v| m.feather = v,
-        );
-        if mask.shape == MaskShape::Rectangle {
-            field(
-                ui,
-                state,
-                "mask-round",
-                "Round corners",
-                mask.round,
-                100.0,
-                0.0..=100.0,
-                &|v| format!("{v:.0}"),
-                |m, v| m.round = v,
-            );
-        }
-        if switch_row(ui, "Invert", mask.invert, true).clicked() {
-            changed = Some(Mask {
-                invert: !mask.invert,
-                ..mask
-            });
-        }
-        if let Some(next) = changed {
-            send(shell, |shell| set(shell, Some(next)));
-        }
-    });
-}
-
 /// The LUT section: the switch takes the LUT off or asks for a file; the
 /// body names the table, picks another, and sets its strength.
 fn lut_section(
@@ -3134,7 +2925,7 @@ pub(super) fn value_box(ui: &mut Ui, text: &str) {
 
 /// A name and two number boxes at the right. A box whose stored value is
 /// NaN is left out. `Some` is a new finite number typed into that box.
-fn pair_row(
+pub(super) fn pair_row(
     ui: &mut Ui,
     state: &mut InspectorState,
     label: &str,

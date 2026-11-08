@@ -1,5 +1,5 @@
 use std::io::Write as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use burn::nn::Initializer;
@@ -275,4 +275,58 @@ fn enhance_720p_on_the_gpu() {
 #[ignore = "a timing run, not a check, and slow on the CPU"]
 fn enhance_720p_on_the_cpu() {
     time_720p(Compute::Cpu);
+}
+
+/// Set in a tagged run, the tests that need the real weights fail when
+/// they are missing instead of skipping.
+const REQUIRE: &str = "CUTLASS_REQUIRE_ENHANCE_MODEL";
+
+fn local_models() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../local-files/models/enhance")
+}
+
+/// The pattern and what PyTorch made of it, written by
+/// `tools/vision-models/scripts/fetch_enhance.sh`.
+fn reference() -> Option<(Vec<u8>, Vec<u8>)> {
+    let dir = local_models();
+    let file = dir.join("reference_pattern.safetensors");
+    if !dir.join(ENHANCE_WEIGHTS).is_file() || !file.is_file() {
+        assert!(
+            std::env::var_os(REQUIRE).is_none(),
+            "{REQUIRE} is set and the enhance weights or {} are missing",
+            file.display()
+        );
+        return None;
+    }
+    let bytes = std::fs::read(&file).unwrap();
+    let tensors = safetensors::SafeTensors::deserialize(&bytes).unwrap();
+    let rgb = tensors.tensor("rgb").unwrap();
+    assert_eq!(rgb.shape(), [32, 48, 3]);
+    let enhanced = tensors.tensor("enhanced").unwrap();
+    assert_eq!(enhanced.shape(), [128, 192, 3]);
+    Some((rgb.data().to_vec(), enhanced.data().to_vec()))
+}
+
+fn worst_against_pytorch(compute: Compute) -> Option<u8> {
+    let (rgb, want) = reference()?;
+    assert_eq!(rgb, frame(48, 32), "the script drew another pattern");
+    let enhancer = Enhancer::load(&local_models(), compute).unwrap();
+    let got = enhancer.enhance(&image(48, 32, &rgb)).unwrap();
+    assert_eq!((got.width, got.height), (192, 128));
+    got.rgb.iter().zip(&want).map(|(a, b)| a.abs_diff(*b)).max()
+}
+
+#[test]
+fn the_real_weights_make_what_pytorch_makes() {
+    if let Some(worst) = worst_against_pytorch(Compute::Cpu) {
+        assert!(worst <= 1, "{worst} levels from PyTorch");
+    }
+}
+
+#[test]
+#[ignore = "needs a Metal GPU"]
+fn the_real_weights_in_half_precision_stay_close_to_pytorch() {
+    if let Some(worst) = worst_against_pytorch(Compute::Gpu) {
+        assert!(worst <= 2, "{worst} levels from PyTorch");
+    }
 }

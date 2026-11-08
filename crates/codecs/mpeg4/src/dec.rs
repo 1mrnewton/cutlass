@@ -250,6 +250,8 @@ impl Decoder {
         if vol.vol_control || changed {
             self.low_delay = vol.vol_control && vol.low_delay;
         }
+        // Field distances round to the first B-VOP's distance in this layer.
+        self.clock.t_frame = 0;
         self.vol = Some(vol);
         Ok(())
     }

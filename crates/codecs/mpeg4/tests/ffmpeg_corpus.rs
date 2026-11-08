@@ -158,9 +158,11 @@ fn run(stream: &Path, reference: &Path) -> Result {
             ));
         }
     }
-    if let Some((w, h, _)) = pictures.first() {
-        let frame = (*w * *h * 3 / 2) as usize;
-        reference_frames = want.len() / frame.max(1);
+    // Reference frames past ours, counted at the size of our last picture,
+    // or as one when there is no picture to size them by.
+    if offset < want.len() {
+        let last = pictures.last().map_or(want.len(), |p| p.2.len().max(1));
+        reference_frames += (want.len() - offset).div_ceil(last);
     }
     Result {
         name,
@@ -180,7 +182,7 @@ fn decodes_the_ffmpeg_corpus_bit_exactly() {
     };
     let filter = std::env::var("MPEG4_ONLY").ok();
     let mut streams = Vec::new();
-    for sub in ["gen", "fate"] {
+    for sub in ["gen", "es"] {
         let Ok(entries) = std::fs::read_dir(dir.join(sub)) else {
             continue;
         };

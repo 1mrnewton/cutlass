@@ -717,6 +717,50 @@ fn every_eac3_block_count_decodes_with_ffmpeg() {
     }
 }
 
+/// The block count may change from one syncframe to the next. One access
+/// unit that does is the same program FFmpeg decodes.
+#[test]
+fn a_stream_may_change_its_block_count() {
+    let Some(ffmpeg) = oracle("ffmpeg", "-version") else {
+        return;
+    };
+    let channels = &[L, R];
+    let rate = 48_000u32;
+    let mut bytes = Vec::new();
+    let mut expected = 0i64;
+    for blocks in [6usize, 1, 3, 2, 6] {
+        let mut cfg = config(Format::Eac3, rate, channels, 192_000);
+        cfg.blocks = blocks;
+        let pcm = tones(channels, rate, rate as usize / 2, 0.25);
+        for packet in encode(cfg, &pcm) {
+            assert_eq!(probe(&packet.data).expect("probe").blocks, blocks);
+            bytes.extend_from_slice(&packet.data);
+            expected += packet.duration;
+        }
+    }
+    let mut decoder = Ac3Decoder::open(&cutlass_decode::CodecParams::audio(
+        CodecId::Eac3,
+        rate,
+        layout(channels),
+    ))
+    .expect("decoder");
+    let mut outputs = decoder
+        .push(&Packet::audio(bytes.clone(), 0, expected, rate))
+        .expect("decode");
+    outputs.extend(decoder.drain().expect("drain"));
+    let ours = audible(outputs);
+    assert_eq!(ours.len(), expected as usize * channels.len());
+    let theirs = ffmpeg_decode(&ffmpeg, &bytes, &["-f", "eac3"]);
+    let n = ours.len().min(theirs.len());
+    let quality = snr(&ours[..n], &theirs[..n]);
+    assert!(
+        quality > 60.0,
+        "block-count change: {quality:.1} dB, {} vs {} samples",
+        ours.len(),
+        theirs.len()
+    );
+}
+
 /// A short block used to turn coupling on or off inside an E-AC-3
 /// syncframe, and reference decoders reject that frame. The onset of a
 /// tone stays in the comparison. Full-band noise at the default rate is

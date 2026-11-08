@@ -1,8 +1,9 @@
 //! A Simple-profile encoder.
 //!
 //! An I-VOP, then P-VOPs: H.263 quantisation, one or four half-sample
-//! vectors per macroblock, no AC prediction. Quarter-sample motion,
-//! B-VOPs, and rate control are not emitted here yet. The coded size is a
+//! vectors per macroblock, no AC prediction. [`encode_advanced`] puts a
+//! B-VOP between references. Quarter-sample motion and rate control are
+//! not emitted here yet. The coded size is a
 //! whole number of macroblocks; a caller with another size is refused
 //! rather than cropped. Motion search stays inside ±8 pixels so every
 //! vector fits `fcode` 1.
@@ -13,12 +14,12 @@ use cutlass_decode::CodecError;
 
 use crate::bits::BitWriter;
 use crate::block::{Quant, dequant_inter, dequant_intra};
-use crate::frame::Frame;
+use crate::frame::{Frame, Kind, MbRecord};
 use crate::idct;
 use crate::mc::{self, Pel, Rows};
 use crate::tables::{
-    CBPY, CoefTable, DC_CHROMA, DC_LUMA, MCBPC_INTER, MCBPC_INTRA, MVD, TCOEF_ESCAPE, ZIGZAG,
-    dc_scaler_chroma, dc_scaler_luma, tables,
+    CBPY, CoefTable, DC_CHROMA, DC_LUMA, MB_TYPE_B, MCBPC_INTER, MCBPC_INTRA, MVD, TCOEF_ESCAPE,
+    ZIGZAG, dc_scaler_chroma, dc_scaler_luma, tables,
 };
 use crate::vop::clip_block;
 
@@ -75,7 +76,7 @@ fn encode_pictures(
     // to recognise the stream; the pictures do not depend on it.
     start(&mut out, 0x00);
     start(&mut out, 0x20);
-    write_vol(&mut out, width, height);
+    write_vol(&mut out, width, height, false);
     for (index, &(y, u, v)) in frames.iter().enumerate() {
         let planes = Planes { y, u, v, stride: w };
         start(&mut out, 0xB6);
@@ -95,19 +96,125 @@ fn encode_pictures(
     Ok(out.finish())
 }
 
+/// Display-order pictures. With three or more, every other picture is a
+/// B-VOP coded after the reference it precedes, and the layer is Advanced
+/// Simple with `low_delay` clear so those pictures come back in display
+/// order. `quant` is `vop_quant`, 1 to 31.
+pub fn encode_advanced(
+    frames: &[(&[u8], &[u8], &[u8])],
+    width: u32,
+    height: u32,
+    quant: u8,
+) -> Result<Vec<u8>, CodecError> {
+    if frames.is_empty()
+        || width == 0
+        || height == 0
+        || !width.is_multiple_of(16)
+        || !height.is_multiple_of(16)
+        || u64::from(width) * u64::from(height) > 8192 * 8192
+    {
+        return Err(CodecError::InvalidApi { what: "frame size" });
+    }
+    if !(1..=31).contains(&quant) {
+        return Err(CodecError::InvalidApi { what: "quantiser" });
+    }
+    let (w, h) = (width as usize, height as usize);
+    let chroma = (w / 2) * (h / 2);
+    for &(y, u, v) in frames {
+        if y.len() < w * h || u.len() < chroma || v.len() < chroma {
+            return Err(CodecError::InvalidApi {
+                what: "plane length",
+            });
+        }
+    }
+    let refs = reference_indices(frames.len());
+    let has_b = refs.windows(2).any(|pair| pair[1] > pair[0] + 1);
+    let mbw = w / 16;
+    let mbh = h / 16;
+    let quant = i32::from(quant);
+    let mut reference = Frame::new(mbw, mbh);
+    let mut mv = vec![(0i32, 0i32); mbw * 2 * mbh * 2];
+    let mut earlier: Option<Frame> = None;
+    let mut out = BitWriter::new();
+    start(&mut out, 0x00);
+    start(&mut out, 0x20);
+    write_vol(&mut out, width, height, has_b);
+    for (n, &display) in refs.iter().enumerate() {
+        let (y, u, v) = frames[display];
+        let planes = Planes { y, u, v, stride: w };
+        start(&mut out, 0xB6);
+        if n == 0 {
+            write_i_vop(&mut out, &planes, quant, &mut reference, &mut mv);
+        } else {
+            write_p_vop(
+                &mut out,
+                &planes,
+                quant,
+                display as u32,
+                &mut reference,
+                &mut mv,
+            );
+            if let Some(past) = earlier.as_ref() {
+                let prev = refs[n - 1];
+                for (step, &(y, u, v)) in frames[prev + 1..display].iter().enumerate() {
+                    let between = Planes { y, u, v, stride: w };
+                    start(&mut out, 0xB6);
+                    write_b_vop(
+                        &mut out,
+                        &between,
+                        quant,
+                        (prev + 1 + step) as u32,
+                        &Refs {
+                            past,
+                            future: &reference,
+                            pp: (display - prev) as i32,
+                            pb: (step + 1) as i32,
+                        },
+                    );
+                }
+            }
+        }
+        earlier = Some(reference.clone());
+    }
+    Ok(out.finish())
+}
+
+/// Reference pictures in display order: the first, then every second, and
+/// always the last.
+fn reference_indices(count: usize) -> Vec<usize> {
+    let mut refs = vec![0];
+    let mut next = 2;
+    while next < count {
+        refs.push(next);
+        next += 2;
+    }
+    if count > 1 && refs[refs.len() - 1] != count - 1 {
+        refs.push(count - 1);
+    }
+    refs
+}
+
 fn start(out: &mut BitWriter, code: u8) {
     out.bytes(&[0, 0, 1, code]);
 }
 
-/// Simple object, 4:2:0, square pixels, low delay, H.263 quantiser.
-fn write_vol(out: &mut BitWriter, width: u32, height: u32) {
+/// Simple object, or Advanced Simple when `advanced` so a B-VOP is legal.
+/// 4:2:0, square pixels, H.263 quantiser. Advanced Simple clears
+/// `low_delay` and uses version 5, which is where `quarter_sample` sits.
+fn write_vol(out: &mut BitWriter, width: u32, height: u32, advanced: bool) {
     out.put(1, 0); // random_accessible_vol
-    out.put(8, 1); // simple
-    out.put(1, 0); // is_object_layer_identifier
+    out.put(8, if advanced { 17 } else { 1 });
+    if advanced {
+        out.put(1, 1); // is_object_layer_identifier
+        out.put(4, 5); // verid
+        out.put(3, 1); // priority
+    } else {
+        out.put(1, 0);
+    }
     out.put(4, 1); // square
     out.put(1, 1); // vol_control_parameters
     out.put(2, 1); // 4:2:0
-    out.put(1, 1); // low_delay
+    out.put(1, u32::from(!advanced)); // low_delay
     out.put(1, 0); // no vbv
     out.put(2, 0); // rectangular
     out.put(1, 1);
@@ -121,12 +228,23 @@ fn write_vol(out: &mut BitWriter, width: u32, height: u32) {
     out.put(1, 1);
     out.put(1, 0); // progressive
     out.put(1, 1); // obmc_disable
-    out.put(1, 0); // no sprite
+    if advanced {
+        out.put(2, 0); // no sprite
+    } else {
+        out.put(1, 0); // no sprite
+    }
     out.put(1, 0); // not_8_bit
     out.put(1, 0); // h.263 quantiser
+    if advanced {
+        out.put(1, 0); // quarter_sample
+    }
     out.put(1, 1); // complexity_estimation_disable
     out.put(1, 1); // resync_marker_disable
     out.put(1, 0); // data_partitioned
+    if advanced {
+        out.put(1, 0); // newpred
+        out.put(1, 0); // reduced resolution
+    }
     out.put(1, 0); // scalability
     out.stuff();
 }
@@ -145,6 +263,7 @@ fn write_i_vop(
     out.put(5, quant as u32);
     let mbw = recon.mbw;
     let mbh = recon.mbh;
+    recon.mbs.resize(mbw * mbh, MbRecord::default());
     mv.fill((0, 0));
     let mut dc = [
         vec![1024i32; mbw * 2 * mbh * 2],
@@ -157,6 +276,7 @@ fn write_i_vop(
             for k in 0..6 {
                 paint_intra(recon, mbx, mby, k, &levels[k], dcs[k], quant);
             }
+            set_record(recon, mby * mbw + mbx, Kind::Intra, [(0, 0); 4]);
         }
     }
     out.stuff();
@@ -465,6 +585,7 @@ fn write_p_vop(
     out.put(3, 1); // fcode_forward
     let past = recon.clone();
     let mut next = Frame::new(past.mbw, past.mbh);
+    next.mbs.resize(past.mbw * past.mbh, MbRecord::default());
     let mbw = past.mbw;
     let mbh = past.mbh;
     {
@@ -547,6 +668,7 @@ impl Predicted<'_> {
             out.bit(true);
             set_mv(self.mv, mbw, mbx, mby, (0, 0));
             blit(self.next, mbx, mby, &py, &pu, &pv);
+            set_record(self.next, mby * mbw + mbx, Kind::Skipped, [(0, 0); 4]);
             return;
         }
         out.bit(false);
@@ -582,6 +704,11 @@ impl Predicted<'_> {
             if coded[k] {
                 add_inter(self.next, mbx, mby, k, &levels[k], self.quant);
             }
+        }
+        if use_four {
+            set_record(self.next, mby * mbw + mbx, Kind::Four, four);
+        } else {
+            set_record(self.next, mby * mbw + mbx, Kind::Frame, [vector; 4]);
         }
     }
 
@@ -942,9 +1069,348 @@ fn write_mv(out: &mut BitWriter, value: i32, pred: i32) {
     out.bit(diff < 0);
 }
 
+fn set_record(frame: &mut Frame, mb: usize, kind: Kind, mv: [(i32, i32); 4]) {
+    if let Some(slot) = frame.mbs.get_mut(mb) {
+        *slot = MbRecord {
+            kind,
+            mv,
+            ..MbRecord::default()
+        };
+    }
+}
+
+/// The two references a B-VOP sits between, and the clock distances the
+/// decoder will derive from their times. `pb` is this picture's distance
+/// from the past reference; `pp` is the distance between the references.
+struct Refs<'a> {
+    past: &'a Frame,
+    future: &'a Frame,
+    pp: i32,
+    pb: i32,
+}
+
+fn write_b_vop(out: &mut BitWriter, planes: &Planes<'_>, quant: i32, frame: u32, refs: &Refs<'_>) {
+    out.put(2, 2); // B
+    write_time(out, frame);
+    out.bit(true); // coded
+    out.put(3, 0); // intra_dc_vlc_thr
+    out.put(5, quant as u32);
+    out.put(3, 1); // fcode_forward
+    out.put(3, 1); // fcode_backward
+    let mbw = refs.past.mbw;
+    let mbh = refs.past.mbh;
+    for mby in 0..mbh {
+        let mut last = [(0i32, 0i32); 2];
+        for mbx in 0..mbw {
+            write_b_mb(out, planes, quant, refs, (mbx, mby), &mut last);
+        }
+    }
+    out.stuff();
+}
+
+fn write_b_mb(
+    out: &mut BitWriter,
+    planes: &Planes<'_>,
+    quant: i32,
+    refs: &Refs<'_>,
+    at: (usize, usize),
+    last: &mut [(i32, i32); 2],
+) {
+    let (mbx, mby) = at;
+    let mb = mby * refs.past.mbw + mbx;
+    if refs
+        .future
+        .mbs
+        .get(mb)
+        .is_some_and(|record| record.kind == Kind::Skipped)
+    {
+        return;
+    }
+    let direct = direct_prediction(refs, mbx, mby);
+    let forward = search_frame(
+        planes.y,
+        planes.stride,
+        refs.past,
+        (mbx * 16, mby * 16, 16),
+        last[0],
+    );
+    let backward = search_frame(
+        planes.y,
+        planes.stride,
+        refs.future,
+        (mbx * 16, mby * 16, 16),
+        last[1],
+    );
+    let fwd = compensate(refs.past, mbx, mby, forward);
+    let bwd = compensate(refs.future, mbx, mby, backward);
+    let both = blend(fwd, bwd);
+    let mut best_sad = plane_sad(planes.y, planes.stride, (mbx * 16, mby * 16), &direct.0, 16);
+    let mut mode = BMotion::Direct;
+    let mut prediction = direct;
+    let fwd_sad = plane_sad(planes.y, planes.stride, (mbx * 16, mby * 16), &fwd.0, 16);
+    if fwd_sad < best_sad {
+        best_sad = fwd_sad;
+        mode = BMotion::Forward(forward);
+        prediction = fwd;
+    }
+    let bwd_sad = plane_sad(planes.y, planes.stride, (mbx * 16, mby * 16), &bwd.0, 16);
+    if bwd_sad < best_sad {
+        best_sad = bwd_sad;
+        mode = BMotion::Backward(backward);
+        prediction = bwd;
+    }
+    let both_sad = plane_sad(planes.y, planes.stride, (mbx * 16, mby * 16), &both.0, 16);
+    if both_sad < best_sad {
+        mode = BMotion::Both(forward, backward);
+        prediction = both;
+    }
+    let (levels, coded) = inter_residual(planes, mbx, mby, quant, &prediction);
+    let cbp = coded_pattern(&coded);
+    if matches!(mode, BMotion::Direct) && cbp == 0 {
+        out.bit(true);
+        return;
+    }
+    out.bit(false);
+    out.bit(cbp == 0);
+    let type_index = match mode {
+        BMotion::Direct => 0,
+        BMotion::Both(_, _) => 1,
+        BMotion::Backward(_) => 2,
+        BMotion::Forward(_) => 3,
+    };
+    let (len, code) = MB_TYPE_B[type_index];
+    out.put(u32::from(len), u32::from(code));
+    if cbp != 0 {
+        out.put(6, cbp);
+        if type_index != 0 {
+            out.bit(false);
+        }
+    }
+    match mode {
+        BMotion::Direct => {
+            write_mv(out, 0, 0);
+            write_mv(out, 0, 0);
+        }
+        BMotion::Forward(vector) => {
+            write_mv(out, vector.0, last[0].0);
+            write_mv(out, vector.1, last[0].1);
+            last[0] = vector;
+        }
+        BMotion::Backward(vector) => {
+            write_mv(out, vector.0, last[1].0);
+            write_mv(out, vector.1, last[1].1);
+            last[1] = vector;
+        }
+        BMotion::Both(forward, backward) => {
+            write_mv(out, forward.0, last[0].0);
+            write_mv(out, forward.1, last[0].1);
+            write_mv(out, backward.0, last[1].0);
+            write_mv(out, backward.1, last[1].1);
+            last[0] = forward;
+            last[1] = backward;
+        }
+    }
+    for (k, level) in levels.iter().enumerate() {
+        if coded[k] {
+            write_levels(out, level, 0, true);
+        }
+    }
+}
+
+enum BMotion {
+    Direct,
+    Forward((i32, i32)),
+    Backward((i32, i32)),
+    Both((i32, i32), (i32, i32)),
+}
+
+/// Direct mode with a zero delta. Each colocated vector is scaled by
+/// `pb / pp` forward and `(pb - pp) / pp` backward, the same truncating
+/// division the decoder uses.
+fn direct_prediction(refs: &Refs<'_>, mbx: usize, mby: usize) -> ([u8; 256], [u8; 64], [u8; 64]) {
+    let record = refs
+        .future
+        .mbs
+        .get(mby * refs.future.mbw + mbx)
+        .copied()
+        .unwrap_or_default();
+    let scale = |vector: (i32, i32)| {
+        let pp = refs.pp.max(1);
+        let forward = (vector.0 * refs.pb / pp, vector.1 * refs.pb / pp);
+        let backward = (
+            vector.0 * (refs.pb - pp) / pp,
+            vector.1 * (refs.pb - pp) / pp,
+        );
+        (forward, backward)
+    };
+    if record.kind == Kind::Four {
+        let mut forward = [(0i32, 0i32); 4];
+        let mut backward = [(0i32, 0i32); 4];
+        for (k, vector) in record.mv.iter().enumerate() {
+            (forward[k], backward[k]) = scale(*vector);
+        }
+        blend(
+            compensate_four(refs.past, mbx, mby, forward),
+            compensate_four(refs.future, mbx, mby, backward),
+        )
+    } else {
+        let (forward, backward) = scale(record.mv[0]);
+        blend(
+            compensate(refs.past, mbx, mby, forward),
+            compensate(refs.future, mbx, mby, backward),
+        )
+    }
+}
+
+fn blend(
+    forward: ([u8; 256], [u8; 64], [u8; 64]),
+    backward: ([u8; 256], [u8; 64], [u8; 64]),
+) -> ([u8; 256], [u8; 64], [u8; 64]) {
+    let (mut y, mut u, mut v) = forward;
+    mc::average(&mut y, &backward.0);
+    mc::average(&mut u, &backward.1);
+    mc::average(&mut v, &backward.2);
+    (y, u, v)
+}
+
+fn plane_sad(
+    src: &[u8],
+    stride: usize,
+    at: (usize, usize),
+    pred: &[u8],
+    pred_stride: usize,
+) -> u32 {
+    let (x, y) = at;
+    let mut sad = 0u32;
+    for row in 0..16 {
+        for col in 0..16 {
+            let sample = src.get((y + row) * stride + x + col).copied().unwrap_or(0);
+            let predicted = pred.get(row * pred_stride + col).copied().unwrap_or(0);
+            sad += u32::from(sample.abs_diff(predicted));
+        }
+    }
+    sad
+}
+
+fn coded_pattern(coded: &[bool; 6]) -> u32 {
+    let mut pattern = 0u32;
+    for (k, &on) in coded.iter().enumerate() {
+        if on {
+            pattern |= 32 >> k;
+        }
+    }
+    pattern
+}
+
+fn inter_residual(
+    planes: &Planes<'_>,
+    mbx: usize,
+    mby: usize,
+    quant: i32,
+    pred: &([u8; 256], [u8; 64], [u8; 64]),
+) -> ([[i32; 64]; 6], [bool; 6]) {
+    let (y, u, v) = pred;
+    let mut levels = [[0i32; 64]; 6];
+    let mut coded = [false; 6];
+    for k in 0..6 {
+        let pixels = if k < 4 {
+            let (px, py) = ((k & 1) * 8, (k >> 1) * 8);
+            diff_block(
+                planes.y,
+                planes.stride,
+                (mbx * 16 + px, mby * 16 + py),
+                y,
+                16,
+                (px, py),
+            )
+        } else {
+            let plane = if k == 4 { planes.u } else { planes.v };
+            let block = if k == 4 { u } else { v };
+            diff_block(
+                plane,
+                planes.stride / 2,
+                (mbx * 8, mby * 8),
+                block,
+                8,
+                (0, 0),
+            )
+        };
+        let coef = forward(&pixels);
+        for (level, value) in levels[k].iter_mut().zip(coef) {
+            *level = quant_ac(value, quant);
+            coded[k] |= *level != 0;
+        }
+    }
+    (levels, coded)
+}
+
+fn search_frame(
+    y: &[u8],
+    width: usize,
+    reference: &Frame,
+    at: (usize, usize, usize),
+    pred: (i32, i32),
+) -> (i32, i32) {
+    let (x, y0, size) = at;
+    let cost = |mv: (i32, i32)| -> u32 {
+        let mut predicted = [0u8; 256];
+        let [plane, _, _] =
+            reference.refs(((reference.mbw * 16) as u32, (reference.mbh * 16) as u32));
+        mc::luma_block(
+            &plane,
+            x as i32,
+            y0 as i32,
+            size,
+            size,
+            mv.0,
+            mv.1,
+            Pel::Half,
+            Rows::Frame,
+            false,
+            &mut predicted,
+        );
+        let mut sad = 0u32;
+        for row in 0..size {
+            for col in 0..size {
+                let sample = y.get((y0 + row) * width + x + col).copied().unwrap_or(0);
+                sad += u32::from(sample.abs_diff(predicted[row * size + col]));
+            }
+        }
+        sad.saturating_mul(2) + (mv.0 - pred.0).unsigned_abs() + (mv.1 - pred.1).unsigned_abs()
+    };
+    let mut best = clamp_mv(pred.0, pred.1);
+    let mut best_cost = cost(best);
+    for dy in (-SEARCH..=SEARCH).step_by(2) {
+        for dx in (-SEARCH..=SEARCH).step_by(2) {
+            let mv = clamp_mv(pred.0 + dx, pred.1 + dy);
+            let score = cost(mv);
+            if score < best_cost {
+                best = mv;
+                best_cost = score;
+            }
+        }
+    }
+    let center = best;
+    for dy in -1..=1 {
+        for dx in -1..=1 {
+            let mv = clamp_mv(center.0 + dx, center.1 + dy);
+            let score = cost(mv);
+            if score < best_cost {
+                best = mv;
+                best_cost = score;
+            }
+        }
+    }
+    if cost((0, 0)) < best_cost {
+        (0, 0)
+    } else {
+        best
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{encode_intra, encode_pictures};
+    use super::{encode_advanced, encode_intra, encode_pictures};
     use crate::dec::Decoder;
     use cutlass_decode::CodecError;
 
@@ -1155,6 +1621,86 @@ mod tests {
         ffmpeg_matches(&ffmpeg, &bytes, &ours, "four");
     }
 
+    #[test]
+    fn a_bidirectional_picture_is_shown_between_its_references() {
+        let y0 = pattern(64, 48, 3);
+        let u0 = pattern(32, 24, 9);
+        let v0 = pattern(32, 24, 15);
+        let y1 = shift_right(&y0, 64, 48, 2);
+        let u1 = shift_right(&u0, 32, 24, 1);
+        let v1 = shift_right(&v0, 32, 24, 1);
+        let y2 = shift_right(&y0, 64, 48, 4);
+        let u2 = shift_right(&u0, 32, 24, 2);
+        let v2 = shift_right(&v0, 32, 24, 2);
+        let bytes = encode_advanced(
+            &[
+                (y0.as_slice(), u0.as_slice(), v0.as_slice()),
+                (y1.as_slice(), u1.as_slice(), v1.as_slice()),
+                (y2.as_slice(), u2.as_slice(), v2.as_slice()),
+            ],
+            64,
+            48,
+            5,
+        )
+        .expect("encode");
+        let pictures = decode_all(&bytes);
+        assert_eq!(pictures.len(), 3);
+        assert_eq!(vop_kind(&bytes, 0), 0);
+        assert_eq!(vop_kind(&bytes, 1), 1);
+        assert_eq!(vop_kind(&bytes, 2), 2);
+        let luma = 64 * 48;
+        assert!(
+            mae(&pictures[0][..luma], &y0) < 8.0,
+            "{}",
+            mae(&pictures[0][..luma], &y0)
+        );
+        assert!(
+            mae(&pictures[1][..luma], &y1) < 8.0,
+            "{}",
+            mae(&pictures[1][..luma], &y1)
+        );
+        assert!(
+            mae(&pictures[2][..luma], &y2) < 8.0,
+            "{}",
+            mae(&pictures[2][..luma], &y2)
+        );
+        let Some(ffmpeg) = ffmpeg_bin() else {
+            eprintln!(
+                "ffmpeg is not installed; the bidirectional picture was not checked independently"
+            );
+            return;
+        };
+        let mut ours = Vec::new();
+        for picture in &pictures {
+            ours.extend_from_slice(picture);
+        }
+        ffmpeg_matches(&ffmpeg, &bytes, &ours, "bidirectional");
+    }
+
+    #[test]
+    fn a_repeated_bidirectional_picture_matches_its_references() {
+        let y = vec![140u8; 48 * 32];
+        let c = vec![120u8; 24 * 16];
+        let frame = (y.as_slice(), c.as_slice(), c.as_slice());
+        let bytes = encode_advanced(&[frame, frame, frame], 48, 32, 4).expect("encode");
+        let pictures = decode_all(&bytes);
+        assert_eq!(pictures.len(), 3);
+        assert_eq!(vop_kind(&bytes, 2), 2);
+        assert_eq!(pictures[0], pictures[1]);
+        assert_eq!(pictures[1], pictures[2]);
+        let Some(ffmpeg) = ffmpeg_bin() else {
+            eprintln!(
+                "ffmpeg is not installed; the skipped bidirectional picture was not checked independently"
+            );
+            return;
+        };
+        let mut ours = Vec::new();
+        for picture in &pictures {
+            ours.extend_from_slice(picture);
+        }
+        ffmpeg_matches(&ffmpeg, &bytes, &ours, "b-skip");
+    }
+
     fn pattern(width: usize, height: usize, salt: usize) -> Vec<u8> {
         let mut plane = vec![0u8; width * height];
         for row in 0..height {
@@ -1200,7 +1746,7 @@ mod tests {
         out
     }
 
-    /// `vop_coding_type` of VOP `index`: 0 intra, 1 predicted.
+    /// `vop_coding_type` of VOP `index`: 0 intra, 1 predicted, 2 bidirectional.
     fn vop_kind(bytes: &[u8], index: usize) -> u8 {
         let mut seen = 0usize;
         for i in 0..bytes.len().saturating_sub(4) {

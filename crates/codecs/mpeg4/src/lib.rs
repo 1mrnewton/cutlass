@@ -15,5 +15,5 @@ mod tables;
 mod vlc;
 mod vop;
 
-pub use enc::encode_intra;
+pub use enc::{encode_advanced, encode_intra};
 pub use engine::{EngineDecoder, register_engine_decoders};

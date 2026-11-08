@@ -24,6 +24,7 @@ mod audio;
 mod grade;
 mod inspector;
 mod mask;
+mod relight;
 mod remove_bg;
 mod retouch;
 mod shape;
@@ -9510,6 +9511,102 @@ mod tests {
             !lines.iter().any(|line| line.starts_with("Processing")),
             "no job runs"
         );
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn a_relit_clip_shows_its_group_of_lights_and_a_custom_one_its_color_and_angle() {
+        use cutlass_model::{Algorithm, Draft, MaterialVideo, Segment, TimeRange, VideoAlgorithm};
+        let temp =
+            std::env::temp_dir().join(format!("cutlass-relight-view-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let mut draft = Draft::empty("draft");
+        for (id, preset) in [("ambient", "neon_two_tone"), ("custom", "custom")] {
+            draft.materials.videos.push(MaterialVideo {
+                video_algorithm: Some(VideoAlgorithm {
+                    algorithms: vec![Algorithm {
+                        kind: Algorithm::RELIGHT.into(),
+                        level: 1,
+                        preset: preset.into(),
+                        strength: Some(0.4),
+                        color: if preset == "custom" {
+                            "#3366ff".into()
+                        } else {
+                            String::new()
+                        },
+                        angle: Some(90.0),
+                        ..Algorithm::default()
+                    }],
+                    ..VideoAlgorithm::default()
+                }),
+                ..MaterialVideo::new(id)
+            });
+        }
+        draft.tracks[0].segments.push(Segment::new(
+            "main",
+            "ambient",
+            TimeRange::new(0, 2_000_000),
+        ));
+        draft.tracks[0].segments.push(Segment::new(
+            "other",
+            "custom",
+            TimeRange::new(2_000_000, 2_000_000),
+        ));
+        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let mut draw = |shell: &mut Shell, clip: &str| {
+            shell.select(Some(SegmentId::new(clip)));
+            let mut lines = Vec::new();
+            for _ in 0..2 {
+                view.inspector.focus(inspector::Focus {
+                    tab: 0,
+                    page: 0,
+                    section: Some("relight"),
+                });
+                let mut output = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(Rect::from_min_size(
+                            Pos2::ZERO,
+                            Vec2::new(1600.0, 2400.0),
+                        )),
+                        ..Default::default()
+                    },
+                    |ui| show(shell, ui, &mut view, None),
+                );
+                lines = galleys(&output);
+                output.textures_delta.clear();
+            }
+            lines
+        };
+        let lines = draw(&mut shell, "main");
+        let ambient = cutlass_effects::RELIGHT_PRESETS
+            .iter()
+            .filter(|preset| preset.group == cutlass_effects::RelightGroup::Ambient)
+            .map(|preset| preset.name);
+        for label in [
+            "Relight", "Facial", "Ambient", "Creative", "Custom", "Strength", "40%",
+        ]
+        .into_iter()
+        .chain(ambient)
+        {
+            assert!(lines.iter().any(|line| line == label), "{label}: {lines:?}");
+        }
+        assert!(
+            !lines.iter().any(|line| line == "Angle"),
+            "a preset has no angle"
+        );
+        assert!(
+            !lines.iter().any(|line| line.starts_with("Reading depth")),
+            "no job runs"
+        );
+        let lines = draw(&mut shell, "other");
+        for label in ["Custom", "Strength", "Color", "Angle", "90°"] {
+            assert!(lines.iter().any(|line| line == label), "{label}: {lines:?}");
+        }
         let _ = std::fs::remove_dir_all(&temp);
     }
 

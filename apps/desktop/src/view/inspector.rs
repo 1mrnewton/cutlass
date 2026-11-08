@@ -67,7 +67,7 @@ pub(super) struct InspectorState {
     pub(super) wants_lut: bool,
     /// The pictures drawn for the Templates, Bubble and Effects tiles, by
     /// item id. They outlast a pick of another clip.
-    tiles: HashMap<String, egui::TextureHandle>,
+    pub(super) tiles: HashMap<String, egui::TextureHandle>,
 }
 
 /// Where a clip menu row sends the inspector.
@@ -198,12 +198,12 @@ fn video_panel(
             enhance_quality(shell, ui, state);
             reduce_noise(shell, ui, state);
             optical_flow(shell, ui, state);
+            super::relight::relight(shell, ui, state);
             for label in [
                 "AI remove",
                 "AI expand",
                 "AI remix",
                 "Lip sync",
-                "Relight",
                 "Auto reframe",
                 "Removing video flickers",
                 "AI movement",

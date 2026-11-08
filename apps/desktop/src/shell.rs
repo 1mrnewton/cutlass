@@ -2598,6 +2598,20 @@ impl Shell {
         }
     }
 
+    /// Pick the timeline's tool: the split blade, or select, which also
+    /// ends the marker and beat modes.
+    pub fn pick_tool(&mut self, blade: bool) {
+        if blade {
+            if !self.blade() {
+                self.toggle_blade();
+            }
+        } else {
+            self.clear_blade();
+            self.clear_marker();
+            self.clear_beat();
+        }
+    }
+
     pub fn run_shortcut(&mut self, keys: &str) -> Result<(), ShellError> {
         let action = self.settings.action_for(keys).map(str::to_owned);
         match action {
@@ -2612,6 +2626,14 @@ impl Shell {
         match Some(action) {
             Some("undo") => self.undo(),
             Some("redo" | "redo_y") => self.redo(),
+            Some("select_tool") => {
+                self.pick_tool(false);
+                Ok(())
+            }
+            Some("blade_tool") => {
+                self.pick_tool(true);
+                Ok(())
+            }
             Some("play") => {
                 self.toggle_play();
                 Ok(())
@@ -11623,6 +11645,21 @@ mod tests {
         desktop.undo().unwrap();
         assert_eq!(effects(&desktop).len(), 1);
         assert!(desktop.add_effect("effect:recipe/none").is_err());
+    }
+
+    #[test]
+    fn a_and_b_pick_the_select_and_split_tools() {
+        let temp = Temp::new();
+        touching_cut(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        assert!(!desktop.blade());
+        desktop.run_shortcut("b").unwrap();
+        assert!(desktop.blade());
+        desktop.run_shortcut("b").unwrap();
+        assert!(desktop.blade(), "B again keeps the blade");
+        desktop.run_shortcut("a").unwrap();
+        assert!(!desktop.blade());
     }
 
     #[test]

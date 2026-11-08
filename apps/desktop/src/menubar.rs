@@ -53,6 +53,9 @@ pub const MENUS: &[Menu] = &[
     Menu {
         title: "Edit",
         items: &[
+            item("select_tool", "Select tool"),
+            item("blade_tool", "Split tool"),
+            None,
             item("undo", "Undo"),
             item("redo", "Redo"),
             None,

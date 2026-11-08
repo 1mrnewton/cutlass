@@ -21,6 +21,8 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("mark_in", "Mark in"),
     ("mark_out", "Mark out"),
     ("clear_marks", "Clear marks"),
+    ("select_tool", "Select tool"),
+    ("blade_tool", "Split tool"),
     ("undo", "Undo"),
     ("redo", "Redo"),
     ("redo_y", "Redo (second key)"),
@@ -55,6 +57,8 @@ pub fn default_keys(action: &str) -> Option<&'static str> {
         "mark_in" => "i",
         "mark_out" => "o",
         "clear_marks" => "alt+x",
+        "select_tool" => "a",
+        "blade_tool" => "b",
         "undo" => "primary+z",
         "redo" => "primary+shift+z",
         // Control-Y is the second redo. Away from a Mac, Control is the

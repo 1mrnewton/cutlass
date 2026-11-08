@@ -1,9 +1,15 @@
 //! The setup header (Vorbis I section 4.2.4): codebooks, time placeholders,
 //! floors, residues, mappings, and modes.
 
-use crate::bits::{BitReader, BitWriter, ilog};
-use crate::codebook::{BookSpec, Budget, Codebook};
-use crate::header::{malformed, setup_reader, setup_writer};
+#[cfg(test)]
+use crate::bits::BitWriter;
+use crate::bits::{BitReader, ilog};
+#[cfg(test)]
+use crate::codebook::BookSpec;
+use crate::codebook::{Budget, Codebook};
+#[cfg(test)]
+use crate::header::setup_writer;
+use crate::header::{malformed, setup_reader};
 use cutlass_decode::CodecError;
 
 /// Floor 1 points, the spec's limit.
@@ -20,6 +26,7 @@ pub(crate) struct Setup {
 }
 
 /// A setup header as written: book descriptions instead of decode tables.
+#[cfg(test)]
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct SetupSpec {
     pub books: Vec<BookSpec>,
@@ -140,6 +147,7 @@ impl Setup {
     }
 }
 
+#[cfg(test)]
 impl SetupSpec {
     /// Parses a setup header into its written form.
     #[cfg(test)]
@@ -433,6 +441,7 @@ impl Floor1 {
     }
 }
 
+#[cfg(test)]
 fn write_floor1(w: &mut BitWriter, floor: &Floor1) {
     w.write(floor.partition_classes.len() as u32, 5);
     for &class in &floor.partition_classes {
@@ -506,6 +515,7 @@ fn parse_residue(
     })
 }
 
+#[cfg(test)]
 fn write_residue(w: &mut BitWriter, residue: &Residue) {
     w.write(u32::from(residue.kind), 16);
     w.write(residue.begin, 24);
@@ -594,6 +604,7 @@ fn parse_mapping(
     })
 }
 
+#[cfg(test)]
 fn write_mapping(w: &mut BitWriter, mapping: &Mapping, channels: usize) {
     w.write(0, 16);
     w.write_bit(mapping.submaps.len() > 1);

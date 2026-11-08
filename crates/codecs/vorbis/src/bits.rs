@@ -112,6 +112,7 @@ impl<'a> BitReader<'a> {
         self.cache = 0;
     }
 
+    #[cfg(test)]
     pub(crate) fn ended(&self) -> bool {
         self.ended
     }
@@ -131,6 +132,7 @@ impl<'a> BitReader<'a> {
 }
 
 /// Writes LSb-first values.
+#[cfg(test)]
 #[derive(Clone, Debug, Default)]
 pub(crate) struct BitWriter {
     bytes: Vec<u8>,
@@ -138,6 +140,7 @@ pub(crate) struct BitWriter {
     count: u32,
 }
 
+#[cfg(test)]
 impl BitWriter {
     pub(crate) fn new() -> Self {
         Self::default()
@@ -230,6 +233,7 @@ mod tests {
         writer.write(1, 1);
         writer.write(0xdead_beef, 32);
         writer.write(0x7fff_ffff, 31);
+        assert_eq!(writer.len(), 64);
         let bytes = writer.finish();
         let mut reader = BitReader::new(&bytes);
         assert_eq!(reader.read(1), Some(1));

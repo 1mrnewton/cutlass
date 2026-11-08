@@ -3,7 +3,9 @@
 //! with Xiph lacing, as Matroska `CodecPrivate` and FFmpeg's extradata
 //! carry them.
 
-use crate::bits::{BitReader, BitWriter};
+use crate::bits::BitReader;
+#[cfg(test)]
+use crate::bits::BitWriter;
 use cutlass_decode::CodecError;
 
 /// The largest configuration this crate takes. libvorbis setups are under
@@ -240,15 +242,17 @@ impl Headers {
                 what: "Vorbis configuration",
             });
         }
-        if config.first() == Some(&2) {
-            if let Some(headers) = Self::split_xiph(config) {
-                return Ok(headers);
-            }
+        if config.first() == Some(&2)
+            && let Some(headers) = Self::split_xiph(config)
+        {
+            return Ok(headers);
         }
-        if config.len() >= 6 && config[0] == 0 && usize::from(config[1]) == ID_HEADER_BYTES {
-            if let Some(headers) = Self::split_sixteen(config) {
-                return Ok(headers);
-            }
+        if config.len() >= 6
+            && config[0] == 0
+            && usize::from(config[1]) == ID_HEADER_BYTES
+            && let Some(headers) = Self::split_sixteen(config)
+        {
+            return Ok(headers);
         }
         if config.first() == Some(&ID_HEADER) {
             return Self::split_plain(config);
@@ -383,6 +387,7 @@ pub(crate) fn setup_reader(packet: &[u8]) -> Result<BitReader<'_>, CodecError> {
     Ok(BitReader::new(&packet[7..]))
 }
 
+#[cfg(test)]
 /// Starts a setup packet: the type byte and the signature.
 pub(crate) fn setup_writer() -> BitWriter {
     let mut writer = BitWriter::new();

@@ -8177,9 +8177,9 @@ fn export_choices(shell: &Shell, ui: &mut Ui, view: &mut ViewState) {
                 view.export_mov = true;
             }
         });
-        // ProRes is written in a MOV, VP8 in an MP4.
+        // ProRes and Motion JPEG are written in a MOV, VP8 in an MP4.
         let fits = |codec: CodecId| match codec {
-            CodecId::Prores => view.export_mov,
+            CodecId::Prores | CodecId::Mjpeg => view.export_mov,
             CodecId::Vp8 => !view.export_mov,
             _ => true,
         };
@@ -8192,6 +8192,7 @@ fn export_choices(shell: &Shell, ui: &mut Ui, view: &mut ViewState) {
                 (CodecId::Hevc, "HEVC"),
                 (CodecId::Vp8, "VP8"),
                 (CodecId::Prores, "ProRes"),
+                (CodecId::Mjpeg, "Motion JPEG"),
             ] {
                 if !fits(codec) {
                     continue;

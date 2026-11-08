@@ -6,7 +6,7 @@ The specification is ATSC A/52:2018. AC-3 is the main document. E-AC-3 is Annex 
 
 Read, and not copied: `../pub-packages/ffmpeg/libavcodec/ac3dec.c`, `ac3enc.c`, `ac3.c`, `eac3dec.c`, `eac3_data.c`, and `../pub-packages/ffmpeg/libavformat/mov.c`, `riff.c`. GStreamer's `ac3parse` and `ac3dec` under `../pub-packages/gstreamer/subprojects` were the second implementation. FFmpeg 8.1.1 at `/opt/homebrew/bin/ffmpeg` and `/usr/bin/afconvert` are the oracles. They are not a fallback.
 
-`../local-files` has no AC-3 or E-AC-3 file. Import, seek, and export were checked on files this crate muxed into a temporary directory.
+`../local-files` has no AC-3 or E-AC-3 file, and no 5.1 recording. Program material from that folder was resampled or decoded to PCM, encoded by this crate, and checked against FFmpeg and Apple. The files stay where they are.
 
 ## Limits
 
@@ -37,7 +37,7 @@ The encoder delay is 256 samples, one half transform. At 48 kHz that is 5.333 ms
 | Mono, stereo, 3/0, 2/1, 3/1, 2/2, 3/2, with and without LFE | Speaker order. Surrounds are side channels. The single surround is back center. LFE is its own channel | Same layouts. Coded order is L C R Ls Rs, then LFE | `each_channel_carries_its_own_tone_in_speaker_order`, `every_layout_decodes_in_order_with_its_lfe` | Verified |
 | 32, 44.1, and 48 kHz | Yes | Yes | `every_fixture_decodes_with_its_rate_layout_and_length`, `ffmpeg_decodes_our_streams` | Verified |
 | Table 5.18 frame sizes, including the lowest legal rate | Yes | Coarse exponents when the frame cannot hold a full-band adaptive set | `ac3_syncframes_follow_table_5_18`, `the_lowest_rates_still_code_every_layout` | Verified |
-| Coupling, rematrixing, block switching, exponent strategies | Yes | Coupling and rematrixing. A transient takes short blocks. A steady tone does not | decoder fixtures, `a_transient_switches_to_short_blocks_and_stays_clean`, FATE `monsters_inc` and `millers_crossing` | Verified |
+| Coupling, rematrixing, block switching, exponent strategies | Yes | Coupling and rematrixing. A transient takes short blocks. A steady tone does not | decoder fixtures, `a_transient_stays_quiet_before_the_attack`, FATE `monsters_inc` and `millers_crossing` | Verified |
 | Phase flags and delta bit allocation | Parsed and applied | Not written | the frame parser. No FATE sample in this set isolates them | Applied, not separately oracled |
 | Dialogue level, heavy compression, downmix levels, surround EX, production info | Exposed on `Metadata`. Line and heavy modes apply `dynrng` and `compr` when asked. The default is full range | `dialnorm`, `bsmod`, `dsurmod`, and Annex D mix codes. No `dynrng` or `compr` words | `metadata_reports_what_the_encoder_wrote`, `metadata_round_trips`, `dynamic_range_off_ignores_the_words_and_line_mode_applies_them`, FATE line and heavy | Verified |
 | Downmix | Lo/Ro uses `cmixlev` and `surmixlev`, else −4.5 dB and −6 dB. Lt/Rt uses 0.707 unless extended levels exist. Mono is half the Lo/Ro sum. LFE joins a stereo or mono downmix at `lfemixlevcod` minus 4.5 dB when that code exists | Writes the levels it was given | `downmix_follows_the_a52_equations_with_the_stream_levels`, `lo_ro_downmix_matches_ffmpeg`, `mono_downmix_is_half_the_lo_ro_sum` | Verified |
@@ -60,7 +60,7 @@ FFmpeg disagrees with A/52 on block-switched blocks. On those FATE samples Apple
 | Reduced sample rates | Refused | Not written | `the_eac3_reduced_rates_are_unsupported` | Unsupported |
 | 1, 2, 3, and 6 blocks | Yes | Yes. One block uses D45 exponents. Two blocks use D45 then D25 | `eac3_holds_any_bit_rate_at_any_block_count`. FATE `serenity` is one block per frame | Our encoder verified. An independent 2-block or 3-block file is not in the FATE set |
 | Spectral extension and AHT | Rebuilt from the side data | Not written | FATE `csi_miami` (`spx_blocks` and `aht_channels`) | Decode verified. Encode not implemented |
-| Coupling and rematrixing | Yes. The coupling band structure is kept from the default and replaced when the frame sends one | The band structure is always sent (`cplbndstrce` 1), including when it matches the default, so a decoder that installs the default only on block 0 stays aligned | `coupling_and_rematrixing_carry_the_low_rate_programs`, FATE `matrix2` | Verified |
+| Coupling and rematrixing | Yes. The coupling band structure is kept from the default and replaced when the frame sends one | The band structure is always sent (`cplbndstrce` 1), including when it matches the default. Block switching is not used: a short block would change coupling inside the syncframe, and FFmpeg and Apple reject that pattern. If membership would still change, coupling is off for the whole frame | `coupling_and_rematrixing_carry_the_low_rate_programs`, `ffmpeg_decodes_an_eac3_frame_that_starts_with_a_transient`, FATE `matrix2` | Verified |
 | Enhanced coupling | Refused | Not written | the frame parser | Unsupported |
 | Transient pre-noise | Parsed and exposed on `Ac3Decoder::transients`. Not applied to the samples | Not written (`transproce` 0) | `transients` | Parsed, not applied |
 | Program scale `pgmscl` | Exposed on `Metadata`. Not applied | Not written | the header parser | Parsed, not applied |
@@ -69,6 +69,23 @@ FFmpeg disagrees with A/52 on block-switched blocks. On those FATE samples Apple
 | Dependent dynamic range | With dependents, dynamics not off, and no downmix, the last dependent's words apply to the whole program. A downmix uses independent substream 0 | n/a | the decoder | Implemented. Not in the FATE DRC check |
 | Independent decode | Same gates as AC-3 | Same gates as AC-3, including 32 kHz | the same tests | Verified, with the same Apple exceptions |
 | Timing and lifecycle | Same as AC-3 | Same as AC-3 | the same tests | Verified |
+
+## Program material
+
+Four seconds from `../local-files`, encoded at the default rate, compared on the middle of the file. SNR is this decoder against the source, against FFmpeg (`-drc_scale 0`), and against Apple. The test requires FFmpeg and Apple above 30 dB and the source above 15 dB. One second of stereo silence at 48 kHz stays under an RMS of 1e-3 for both formats. The music clips were muxed to ISOBMFF, read back byte for byte, sought to one second, and decoded.
+
+| Clip | Format | Rate | Source | FFmpeg | Apple |
+| --- | --- | --- | --- | --- | --- |
+| Speech, 48 kHz mono, from a 16 kHz WAV | AC-3 | 96 kbps | 34.7 dB | 48.8 dB | 50.0 dB |
+| Speech | E-AC-3 | 64 kbps | 23.3 dB | 35.2 dB | 36.5 dB |
+| Music, 48 kHz stereo | AC-3 | 192 kbps | 28.8 dB | 41.7 dB | 43.7 dB |
+| Music | E-AC-3 | 128 kbps | 18.6 dB | 32.2 dB | 32.9 dB |
+| Talk, 44.1 kHz stereo | AC-3 | 192 kbps | 52.2 dB | 67.3 dB | not printed |
+| Talk | E-AC-3 | 128 kbps | 37.8 dB | 52.1 dB | 54.0 dB |
+| Thunder, 48 kHz stereo | AC-3 | 192 kbps | 48.8 dB | 51.9 dB | 53.4 dB |
+| Thunder | E-AC-3 | 128 kbps | 46.2 dB | 49.3 dB | 50.6 dB |
+
+The 44.1 kHz AC-3 frame table makes that clip 192003 bit/s. Every other clip matched its frame's implied rate within 1 percent. Talk AC-3 was above the 60 dB FFmpeg gate, so that run did not print Apple; the locked test still requires Apple above 30 dB, and it passed. A single 1536-sample window can sit far under the file figure: speech E-AC-3 reached 5.0 dB and talk E-AC-3 reached −0.3 dB. Every packet of those files still decodes with `-f eac3`. The music E-AC-3 file used to be rejected (`expacc` out of range) when coupling turned on after a short first block.
 
 ## Containers, playback, and export
 
@@ -91,7 +108,7 @@ MP4 trim from the encoder's gapless side data is not stored. `Mp4Mux` accepts `s
 
 cargo-fuzz is not used. `libfuzzer-sys` builds C through `cc`, which `deny.toml` bans.
 
-The long campaigns run together, two threads, at commit `56a561f4` (the codec they exercise is unchanged since). Release turns overflow checks off. The second run is the test profile, where an overflow panics. This crate's dev profile still compiles the library at opt-level 3.
+The long campaigns ran together, two threads, at commit `56a561f4`. They do not cover the later encoder change that keeps E-AC-3 coupling constant for a syncframe. `bounded_mutations_do_not_panic` does, and it passed on that encoder. Release turns overflow checks off. The second run is the test profile, where an overflow panics. This crate's dev profile still compiles the library at opt-level 3.
 
 ```text
 AC3_FUZZ_SECS=1800 cargo test --release -p cutlass-ac3 --test ac3 -- --ignored campaign --nocapture
@@ -143,8 +160,9 @@ Resident set grew as the bench moved from stereo to 5.1, which is the allocator 
 
 ```text
 AC3_REQUIRE_ORACLES=1 AC3_FATE_SAMPLES=/tmp/cutlass-ac3-eac3/fixtures/fate \
-  cargo test --release -p cutlass-ac3 --lib          # 57 passed
-  the ac3 integration binary, campaign excluded      # 45 passed, 1 ignored
+  cargo test --release -p cutlass-ac3 -- --skip decoder_and_encoder_campaigns
+  # lib 59 passed; integration 48 passed, 1 ignored (the long campaign)
+cargo clippy -p cutlass-ac3 --all-targets -- -D warnings
 AC3_FUZZ_SECS=1800 cargo test --release -p cutlass-ac3 --test ac3 -- --ignored campaign --nocapture
 AC3_FUZZ_SECS=300 cargo test -p cutlass-ac3 --test ac3 -- --ignored campaign --nocapture
 the release throughput bench

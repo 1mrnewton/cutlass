@@ -10,5 +10,6 @@
 mod bits;
 mod codebook;
 mod header;
+mod setup;
 
 pub use header::{Comments, Headers, Identification, MAX_CHANNELS, MAX_CONFIG_BYTES};

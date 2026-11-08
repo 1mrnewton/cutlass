@@ -36,7 +36,7 @@ pub use denoise::{
 };
 pub use device::{Compute, gpu_available, keep_kernels_in};
 pub use enhance::{ENHANCE_MAX_SIDE, ENHANCE_WEIGHTS, Enhanced, Enhancer, SCALE, convert_pytorch};
-pub use enhance_job::{EnhanceJobError, enhance_clip, enhanced_size};
+pub use enhance_job::{CopyModels, EnhanceJobError, enhance_clip, enhanced_size, noise_for_level};
 pub use frame::MAX_SIDE;
 pub use job::{JobError, SelectJob};
 pub use mask::Mask;

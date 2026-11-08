@@ -11,7 +11,9 @@ use cutlass_eval::{EnhanceAsk, enhance_ask};
 use cutlass_model::{Algorithm, MaterialRef, SegmentId};
 use cutlass_session::Request;
 use cutlass_store::find_enhanced;
-use cutlass_vision::{Compute, ENHANCE_WEIGHTS, EnhanceJobError, Enhancer, enhance_clip};
+use cutlass_vision::{
+    Compute, CopyModels, ENHANCE_WEIGHTS, EnhanceJobError, Enhancer, enhance_clip,
+};
 
 use super::{Landing, Shell, ShellError};
 
@@ -105,7 +107,11 @@ impl Shell {
                 .map_err(|error| Some(error.to_string()))
                 .and_then(|enhancer| {
                     progress.stage("Processing");
-                    enhance_clip(&readers, &encoders, &enhancer, &ask, &root, &mut |done| {
+                    let models = CopyModels {
+                        enhancer: Some(&enhancer),
+                        denoiser: None,
+                    };
+                    enhance_clip(&readers, &encoders, models, &ask, &root, &mut |done| {
                         progress.fraction(done);
                         !progress.cancelled()
                     })

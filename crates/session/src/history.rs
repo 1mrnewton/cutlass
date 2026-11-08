@@ -4,8 +4,9 @@ use crate::edit::EditError;
 
 #[derive(Clone, Debug)]
 struct OpenHistory {
+    /// The draft at `begin` or `record`.
     draft: Draft,
-    undo: Vec<Draft>,
+    /// The redo stack at that moment, which `rollback` gives back.
     redo: Vec<Draft>,
 }
 
@@ -19,12 +20,14 @@ struct RecordedStep {
 /// with project size times session length; the oldest step goes first.
 pub const UNDO_LIMIT: usize = 100;
 
-/// Undo and redo stacks, plus a transaction those stacks do not open.
+/// Undo and redo stacks, and one open transaction.
 ///
-/// `apply` still pushes the previous draft on success, and the undo stack
-/// keeps at most [`UNDO_LIMIT`] steps. `begin`, `record`,
-/// `commit`, `amend`, and `rollback` are the other calls. `rollback` puts
-/// the open draft, and those stacks, back where they were at `begin`.
+/// Outside a transaction each `apply` is one undo step, and the stack keeps
+/// at most [`UNDO_LIMIT`] of them. `begin` or `record` opens a transaction:
+/// the applies inside it push nothing, and `commit` turns the whole of it
+/// into one undo step, or none when the draft ended where it began.
+/// `amend` closes it into the undo step before it instead. `rollback` puts
+/// the draft and the redo stack back where they were at `begin`.
 #[derive(Clone, Debug, Default)]
 pub struct History {
     undo: Vec<Draft>,
@@ -36,7 +39,15 @@ pub struct History {
 
 impl History {
     /// Push one step. Past [`UNDO_LIMIT`] the oldest step is dropped.
+    /// Inside a transaction nothing is pushed: `commit` makes the step.
     pub fn push_undo(&mut self, draft: Draft) {
+        if self.open.is_some() {
+            return;
+        }
+        self.push_step(draft);
+    }
+
+    fn push_step(&mut self, draft: Draft) {
         if self.undo.len() >= UNDO_LIMIT {
             self.undo.remove(0);
         }
@@ -67,13 +78,18 @@ impl History {
         self.redo.clear();
     }
 
+    /// Whether a transaction is open.
+    #[must_use]
+    pub fn is_open(&self) -> bool {
+        self.open.is_some()
+    }
+
     pub fn begin(&mut self, draft: &Draft) -> Result<(), EditError> {
         if self.open.is_some() {
             return Err(EditError::HistoryOpen);
         }
         self.open = Some(OpenHistory {
             draft: draft.clone(),
-            undo: self.undo.clone(),
             redo: self.redo.clone(),
         });
         Ok(())
@@ -92,7 +108,8 @@ impl History {
         self.recording
     }
 
-    /// Close the transaction. A draft that changed becomes one recorded step.
+    /// Close the transaction. A draft that changed becomes one undo step,
+    /// and one recorded step.
     pub fn commit(&mut self, draft: &Draft) -> Result<(), EditError> {
         let Some(open) = self.open.take() else {
             return Err(EditError::HistoryClosed);
@@ -100,32 +117,38 @@ impl History {
         self.recording = false;
         if open.draft != *draft {
             self.steps.push(RecordedStep {
-                before: open.draft,
+                before: open.draft.clone(),
                 after: draft.clone(),
             });
+            self.push_step(open.draft);
         }
         Ok(())
     }
 
-    /// Fold the open draft into the last recorded step and close the transaction.
+    /// Close the open transaction into the undo step before it, so one undo
+    /// takes back both. With no step before it, this is `commit`.
     pub fn amend(&mut self, draft: &Draft) -> Result<(), EditError> {
-        {
-            let Some(last) = self.steps.last_mut() else {
-                return Err(EditError::NothingToAmend);
-            };
-            last.after = draft.clone();
+        if self.open.is_none() {
+            return Err(EditError::HistoryClosed);
+        }
+        if self.undo.is_empty() {
+            return self.commit(draft);
         }
         self.open = None;
         self.recording = false;
+        if let Some(last) = self.steps.last_mut() {
+            last.after = draft.clone();
+        }
         Ok(())
     }
 
-    /// Restore the draft and the undo stacks captured by `begin` or `record`.
+    /// Close the transaction and hand back the draft from `begin` or
+    /// `record`. The redo stack is as it was then; the undo stack was not
+    /// touched inside the transaction.
     pub fn rollback(&mut self) -> Result<Draft, EditError> {
         let Some(open) = self.open.take() else {
             return Err(EditError::HistoryClosed);
         };
-        self.undo = open.undo;
         self.redo = open.redo;
         self.recording = false;
         Ok(open.draft)

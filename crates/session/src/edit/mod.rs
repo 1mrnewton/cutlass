@@ -80,10 +80,9 @@ pub enum EditError {
     EmptyRedo,
     /// `begin` or `record` was called while a transaction was already open.
     HistoryOpen,
-    /// `commit`, `amend`, or `rollback` needs the transaction `begin` or `record` opened.
+    /// `commit`, `amend`, or `rollback` needs the transaction `begin` or
+    /// `record` opened; `undo` and `redo` wait until it is closed.
     HistoryClosed,
-    /// `amend` folds into a recorded step, and none exists yet.
-    NothingToAmend,
     /// The bit is not mute, hide, lock, solo, or muted-by-solo.
     UnknownAttribute,
     MissingMaterial,

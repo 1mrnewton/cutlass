@@ -117,8 +117,12 @@ impl Session {
         self.history.can_redo()
     }
 
-    /// Restore the draft from before the last apply. The revision still advances.
+    /// Restore the draft from before the last apply. The revision still
+    /// advances. Refused while a transaction is open.
     pub fn undo(&mut self) -> Result<u64, EditError> {
+        if self.history.is_open() {
+            return Err(EditError::HistoryOpen);
+        }
         let previous = self.history.pop_undo().ok_or(EditError::EmptyUndo)?;
         let current = std::mem::replace(&mut self.draft, previous);
         self.history.push_redo(current);
@@ -127,7 +131,11 @@ impl Session {
     }
 
     /// Reapply the draft that undo removed. The revision advances again.
+    /// Refused while a transaction is open.
     pub fn redo(&mut self) -> Result<u64, EditError> {
+        if self.history.is_open() {
+            return Err(EditError::HistoryOpen);
+        }
         let next = self.history.pop_redo().ok_or(EditError::EmptyRedo)?;
         let current = std::mem::replace(&mut self.draft, next);
         self.history.push_undo(current);
@@ -135,7 +143,8 @@ impl Session {
         Ok(self.revision)
     }
 
-    /// Snapshot the open draft. `apply` still pushes undo on its own.
+    /// Open a transaction: the applies until [`Self::commit`] are one undo
+    /// step.
     pub fn begin(&mut self) -> Result<(), EditError> {
         self.history.begin(&self.draft)
     }
@@ -150,19 +159,22 @@ impl Session {
         self.history.is_recording()
     }
 
-    /// Close the transaction. A changed draft is one recorded step, not a second undo push.
+    /// Close the transaction. A changed draft is one undo step.
     pub fn commit(&mut self) -> Result<(), EditError> {
         self.history.commit(&self.draft)
     }
 
-    /// Fold the open draft into the last recorded step.
+    /// Close the transaction into the undo step before it.
     pub fn amend(&mut self) -> Result<(), EditError> {
         self.history.amend(&self.draft)
     }
 
-    /// Put the open draft back where it was at [`Self::begin`] or [`Self::record`].
+    /// Put the open draft back where it was at [`Self::begin`] or
+    /// [`Self::record`]. The revision advances, as for any change a reader
+    /// of the draft must notice.
     pub fn rollback(&mut self) -> Result<(), EditError> {
         self.draft = self.history.rollback()?;
+        self.revision = self.revision.saturating_add(1);
         Ok(())
     }
 
@@ -193,7 +205,7 @@ pub fn drop_empty_lanes(draft: &mut Draft) {
 mod tests {
     use cutlass_model::{
         ConstantSpeedError, Draft, MaterialAudioFade, MaterialId, MaterialSpeed, MaterialText,
-        MaterialTransition, Micros, Segment, SpeedMode, SpeedPoint, TimeRange, Track,
+        MaterialTransition, Micros, Segment, SegmentId, SpeedMode, SpeedPoint, TimeRange, Track,
         TrackAttribute, TrackId, WordColumns,
     };
 
@@ -907,7 +919,7 @@ mod tests {
     }
 
     #[test]
-    fn rollback_restores_the_draft_from_begin_and_drops_the_undo_apply_pushed() {
+    fn rollback_restores_the_draft_from_begin_and_bumps_the_revision() {
         let (mut session, track) = session();
         session
             .apply(0, &[place(&track, "a", 0, 1_000_000)])
@@ -920,7 +932,8 @@ mod tests {
         assert_eq!(session.draft().tracks[0].segments.len(), 2);
         session.rollback().unwrap();
         assert_eq!(session.draft(), &at_begin);
-        assert_eq!(session.revision(), 2);
+        // The apply was 2; the rollback changed the draft again.
+        assert_eq!(session.revision(), 3);
         assert_eq!(session.recorded_steps(), 0);
         session.undo().unwrap();
         assert!(session.draft().tracks[0].segments.is_empty());
@@ -928,12 +941,17 @@ mod tests {
     }
 
     #[test]
-    fn commit_records_one_step_and_apply_still_pushes_one_undo() {
+    fn a_committed_transaction_is_one_undo_step() {
         let (mut session, track) = session();
         session.begin().unwrap();
         session
             .apply(0, &[place(&track, "a", 0, 1_000_000)])
             .unwrap();
+        session
+            .apply(1, &[place(&track, "b", 1_000_000, 500_000)])
+            .unwrap();
+        assert!(!session.can_undo(), "no step until the commit");
+        assert_eq!(session.undo().unwrap_err(), EditError::HistoryOpen);
         session.commit().unwrap();
         assert_eq!(session.recorded_steps(), 1);
         assert_eq!(
@@ -942,45 +960,61 @@ mod tests {
         );
         assert_eq!(
             session.recorded_after().map(|draft| draft.duration),
-            Some(Micros(1_000_000))
+            Some(Micros(1_500_000))
         );
         assert!(session.commit().is_err());
         session.undo().unwrap();
-        assert_eq!(session.draft().duration, Micros(0));
+        assert!(session.draft().tracks[0].segments.is_empty());
         assert_eq!(session.undo().unwrap_err(), EditError::EmptyUndo);
+        session.redo().unwrap();
+        assert_eq!(session.draft().tracks[0].segments.len(), 2);
     }
 
     #[test]
-    fn amend_folds_into_the_last_recorded_step() {
+    fn a_transaction_that_changes_nothing_adds_no_step() {
         let (mut session, track) = session();
+        session.begin().unwrap();
+        session.commit().unwrap();
+        assert!(!session.can_undo());
         session.begin().unwrap();
         session
             .apply(0, &[place(&track, "a", 0, 1_000_000)])
             .unwrap();
-        session.commit().unwrap();
-        session.begin().unwrap();
         session
+            .apply(
+                1,
+                &[Request::Remove {
+                    segment_id: SegmentId::new("a"),
+                }],
+            )
+            .unwrap();
+        session.commit().unwrap();
+        assert!(!session.can_undo());
+    }
+
+    #[test]
+    fn amend_joins_the_open_transaction_to_the_step_before_it() {
+        let (mut edited, track) = session();
+        edited
+            .apply(0, &[place(&track, "a", 0, 1_000_000)])
+            .unwrap();
+        edited.begin().unwrap();
+        edited
             .apply(1, &[place(&track, "b", 1_000_000, 500_000)])
             .unwrap();
-        session.amend().unwrap();
-        assert_eq!(session.recorded_steps(), 1);
-        assert_eq!(session.draft().tracks[0].segments.len(), 2);
-        assert_eq!(
-            session
-                .recorded_after()
-                .map(|draft| draft.tracks[0].segments.len()),
-            Some(2)
-        );
-        assert_eq!(
-            session
-                .recorded_before()
-                .map(|draft| draft.tracks[0].segments.len()),
-            Some(0)
-        );
-        session.undo().unwrap();
-        assert_eq!(session.draft().tracks[0].segments.len(), 1);
-        session.undo().unwrap();
-        assert!(session.draft().tracks[0].segments.is_empty());
+        edited.amend().unwrap();
+        assert_eq!(edited.draft().tracks[0].segments.len(), 2);
+        edited.undo().unwrap();
+        assert!(edited.draft().tracks[0].segments.is_empty());
+        assert_eq!(edited.undo().unwrap_err(), EditError::EmptyUndo);
+
+        // With no step before it, amend is a commit.
+        let (mut fresh, track) = session();
+        fresh.begin().unwrap();
+        fresh.apply(0, &[place(&track, "a", 0, 1_000_000)]).unwrap();
+        fresh.amend().unwrap();
+        fresh.undo().unwrap();
+        assert!(fresh.draft().tracks[0].segments.is_empty());
     }
 
     #[test]
@@ -998,13 +1032,15 @@ mod tests {
         session.rollback().unwrap();
         assert!(!session.is_recording());
         assert!(session.draft().tracks[0].segments.is_empty());
-        assert_eq!(session.revision(), 2);
+        assert_eq!(session.revision(), 3);
         session.record().unwrap();
-        session.apply(2, &[place(&track, "c", 0, 250_000)]).unwrap();
+        session.apply(3, &[place(&track, "c", 0, 250_000)]).unwrap();
         session.commit().unwrap();
         assert!(!session.is_recording());
         assert_eq!(session.recorded_steps(), 1);
         assert_eq!(session.draft().tracks[0].segments.len(), 1);
+        session.undo().unwrap();
+        assert!(session.draft().tracks[0].segments.is_empty());
     }
 
     #[test]
@@ -1013,7 +1049,8 @@ mod tests {
         let before = session.draft().clone();
         assert_eq!(session.rollback().unwrap_err(), EditError::HistoryClosed);
         assert_eq!(session.commit().unwrap_err(), EditError::HistoryClosed);
-        assert_eq!(session.amend().unwrap_err(), EditError::NothingToAmend);
+        assert_eq!(session.amend().unwrap_err(), EditError::HistoryClosed);
+        assert_eq!(session.revision(), 0);
         session.begin().unwrap();
         assert_eq!(session.begin().unwrap_err(), EditError::HistoryOpen);
         assert_eq!(session.draft(), &before);
@@ -1194,7 +1231,7 @@ mod tests {
         assert_eq!(session.draft().tracks[0].segments.len(), 1);
         session.rollback().unwrap();
         assert_eq!(session.draft().tracks[0].segments.len(), 1);
-        assert_eq!(session.revision(), 1);
+        assert_eq!(session.revision(), 2);
     }
 
     fn blend(id: &str, duration: i64, overlap: bool) -> MaterialTransition {

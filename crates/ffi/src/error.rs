@@ -112,7 +112,6 @@ fn edit_cause(error: EditError) -> String {
         EditError::EmptyRedo => "there is nothing to redo".to_owned(),
         EditError::HistoryOpen => "a history transaction is already open".to_owned(),
         EditError::HistoryClosed => "no history transaction is open".to_owned(),
-        EditError::NothingToAmend => "there is no recorded step to amend".to_owned(),
         EditError::UnknownAttribute => {
             "the track attribute is not mute, hide, lock, solo, or muted-by-solo".to_owned()
         }

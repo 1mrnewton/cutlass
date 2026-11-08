@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 
 mod bits;
+mod block;
 mod frame;
 mod header;
 mod idct;

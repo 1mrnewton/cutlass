@@ -466,7 +466,11 @@ fn map_codec(fourcc: [u8; 4], oti: Option<u8>) -> CodecId {
         b"av01" => CodecId::Av1,
         b"vp08" => CodecId::Vp8,
         b"vp09" => CodecId::Vp9,
+        // ISO/IEC 14496-1 objectTypeIndication: MPEG-2 Simple, Main, SNR,
+        // Spatial, High and 4:2:2, then MPEG-1; 0x6C is JPEG. An absent or
+        // unlisted one stays MPEG-4 Visual (0x20).
         b"mp4v" => match oti {
+            Some(0x60..=0x65 | 0x6A) => CodecId::Mpeg2,
             Some(0x6C) => CodecId::Mjpeg,
             _ => CodecId::Mpeg4,
         },
@@ -602,5 +606,8 @@ mod tests {
         };
         assert_eq!(visual(b"mp4v", &esds(0x6C)), (CodecId::Mjpeg, Vec::new()));
         assert_eq!(visual(b"mp4v", &esds(0x20)).0, CodecId::Mpeg4);
+        assert_eq!(visual(b"mp4v", &esds(0x61)).0, CodecId::Mpeg2);
+        assert_eq!(visual(b"mp4v", &esds(0x6A)).0, CodecId::Mpeg2);
+        assert_eq!(visual(b"mp4v", &[]).0, CodecId::Mpeg4);
     }
 }

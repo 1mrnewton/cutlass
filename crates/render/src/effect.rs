@@ -494,6 +494,67 @@ fn halftone(uv: vec2<f32>) -> vec4<f32> {
     return premultiplied(mix(straight(c), printed, fx.a.y), c.a);
 }
 
+// How far `p` is outside a rectangle `half` each way with corners rounded
+// by `round`; negative inside.
+fn rounded_box(p: vec2<f32>, half: vec2<f32>, round: f32) -> f32 {
+    let q = abs(p) - half + vec2<f32>(round);
+    return length(max(q, vec2<f32>(0.0))) + min(max(q.x, q.y), 0.0) - round;
+}
+
+fn prints(uv: vec2<f32>) -> vec4<f32> {
+    let count = min(u32(fx.a.x + 0.5), 4u);
+    let input = fetch(uv);
+    if (count == 0u) {
+        return input;
+    }
+    let short = min(fx.size.x, fx.size.y);
+    // Behind: a soft, pale copy of the picture.
+    var back = input;
+    if (fx.b.z > 0.0) {
+        let reach = fx.b.z * short / fx.size;
+        var sum = vec4<f32>(0.0);
+        for (var k = 0; k < 48; k = k + 1) {
+            let r = sqrt((f32(k) + 0.5) / 48.0);
+            let turn = f32(k) * 2.3999632;
+            sum = sum + fetch(uv + vec2<f32>(cos(turn), sin(turn)) * r * reach);
+        }
+        back = sum / 48.0;
+    }
+    var rgb = mix(straight(back), vec3<f32>(1.0), fx.b.w);
+    let p = from_point(uv, vec2<f32>(0.0));
+    let frame_half = fx.size / short * 0.5;
+    let pixel = 1.0 / short;
+    var places = array<vec2<f32>, 4>(
+        vec2<f32>(0.02, -0.06),
+        vec2<f32>(0.26, -0.1),
+        vec2<f32>(-0.22, 0.1),
+        vec2<f32>(0.1, 0.16),
+    );
+    var leans = array<f32, 4>(-1.0, 0.7, -0.45, 0.9);
+    let border = fx.b.y;
+    // Back to front, each print over what is behind it.
+    for (var i = 0u; i < count; i = i + 1u) {
+        let half = frame_half * fx.a.y * (1.0 - 0.2 * f32(i));
+        let turn = radians(fx.a.w + fx.b.x * leans[i]);
+        let c = cos(turn);
+        let s = sin(turn);
+        let d = p - places[i] * fx.a.z;
+        let local = vec2<f32>(c * d.x + s * d.y, -s * d.x + c * d.y);
+        let edge = half + vec2<f32>(border);
+        // A soft shadow below and to the right.
+        let fall = d - vec2<f32>(0.01, 0.016);
+        let shadow_local = vec2<f32>(c * fall.x + s * fall.y, -s * fall.x + c * fall.y);
+        let shadow = 1.0 - smoothstep(-0.01, 0.05, rounded_box(shadow_local, edge, border * 0.4));
+        rgb = rgb * (1.0 - shadow * 0.35);
+        let card = 1.0 - smoothstep(-pixel, pixel, rounded_box(local, edge, border * 0.4));
+        let photo = 1.0 - smoothstep(-pixel, pixel, rounded_box(local, half, border * 1.2));
+        let picture = straight(fetch(local / half * 0.5 + vec2<f32>(0.5)));
+        let face = mix(vec3<f32>(0.96, 0.96, 0.95), picture, photo);
+        rgb = mix(rgb, face, card);
+    }
+    return premultiplied(rgb, max(input.a, back.a));
+}
+
 @fragment
 fn fs(in: Out) -> @location(0) vec4<f32> {
     let uv = in.position.xy / fx.size;
@@ -530,6 +591,7 @@ fn fs(in: Out) -> @location(0) vec4<f32> {
         case 29u: { return kaleido(uv); }
         case 30u: { return fringe(uv); }
         case 31u: { return halftone(uv); }
+        case 32u: { return prints(uv); }
         default: { return fetch(uv); }
     }
 }
@@ -812,6 +874,7 @@ mod tests {
             step(Block::Kaleido, &[]),
             step(Block::Fringe, &[]),
             step(Block::Halftone, &[]),
+            step(Block::Prints, &[]),
         ];
         close(&draw(&renderer, &ROW, (4, 1), &resting), &ROW);
     }
@@ -1176,6 +1239,55 @@ mod tests {
             &[step(Block::Dust, &[(0, 1.0), (1, 1.0)])],
         );
         assert_ne!(dusty, grey);
+    }
+
+    #[test]
+    fn prints_show_the_whole_picture_in_a_white_edged_print_over_a_pale_copy() {
+        let Some(renderer) = renderer() else { return };
+        let size = (64u32, 48u32);
+        // Left half red, right half blue.
+        let scene: Vec<u8> = (0..size.0 * size.1)
+            .flat_map(|index| {
+                if index % size.0 < size.0 / 2 {
+                    [255, 0, 0, 255]
+                } else {
+                    [0, 0, 255, 255]
+                }
+            })
+            .collect();
+        // One flat print in the middle, half the frame's size.
+        let one = draw(
+            &renderer,
+            &scene,
+            size,
+            &[step(
+                Block::Prints,
+                &[
+                    (0, 1.0),
+                    (1, 0.5),
+                    (2, 0.0),
+                    (4, 0.0),
+                    (5, 0.06),
+                    (6, 0.0),
+                    (7, 0.5),
+                ],
+            )],
+        );
+        let at = |x: u32, y: u32| {
+            let i = 4 * (y * size.0 + x) as usize;
+            [one[i], one[i + 1], one[i + 2]]
+        };
+        // The print holds the whole picture, shrunk: red then blue.
+        let red = at(24, 24);
+        let blue = at(40, 24);
+        assert!(red[0] > 200 && red[2] < 60, "{red:?}");
+        assert!(blue[2] > 200 && blue[0] < 60, "{blue:?}");
+        // Its white edge, just outside the picture.
+        let edge = at(32, 10);
+        assert!(edge.iter().all(|c| *c > 220), "{edge:?}");
+        // Behind, the copy paled halfway to white.
+        let corner = at(1, 1);
+        assert!(corner[0] > 200 && corner[1] > 100, "{corner:?}");
     }
 
     #[test]

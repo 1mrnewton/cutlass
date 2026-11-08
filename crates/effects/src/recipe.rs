@@ -104,6 +104,9 @@ pub enum Block {
     Fringe,
     /// Print the picture as dots, big where it is dark.
     Halftone,
+    /// Lay the picture out as a stack of tilted photo prints with white
+    /// borders and soft shadows, over a soft, pale copy of itself.
+    Prints,
 }
 
 /// One parameter of a block: its name, its value when a recipe leaves it
@@ -291,6 +294,21 @@ const FRINGE: &[Param] = &[
 ];
 /// `size` is a dot's cell, as a fraction of the shorter side; `color` 0
 /// prints black dots and 1 dots of the picture's own colour, on white.
+/// `count` prints from 0 (none) to 4, the back one the largest. `scale`
+/// is the back print's size against the frame, `spread` how far the prints
+/// sit from the middle, `turn` turns the whole stack and `tilt` turns each
+/// print its own way, in degrees. `border`, the white edge, and `blur`, the
+/// copy behind, are fractions of the shorter side; `wash` pales that copy.
+const PRINTS: &[Param] = &[
+    param("count", 0.0, 0.0, 4.0),
+    param("scale", 0.7, 0.1, 1.5),
+    param("spread", 0.5, 0.0, 1.0),
+    param("turn", 0.0, -180.0, 180.0),
+    param("tilt", 8.0, 0.0, 45.0),
+    param("border", 0.025, 0.0, 0.1),
+    param("blur", 0.03, 0.0, 0.1),
+    param("wash", 0.5, 0.0, 1.0),
+];
 const HALFTONE: &[Param] = &[
     param("size", 0.0, 0.0, 0.1),
     param("amount", 1.0, 0.0, 1.0),
@@ -334,6 +352,7 @@ impl Block {
             Self::Kaleido => KALEIDO,
             Self::Fringe => FRINGE,
             Self::Halftone => HALFTONE,
+            Self::Prints => PRINTS,
         }
     }
 
@@ -373,6 +392,7 @@ impl Block {
             Self::Kaleido => 29,
             Self::Fringe => 30,
             Self::Halftone => 31,
+            Self::Prints => 32,
         }
     }
 }
@@ -737,7 +757,7 @@ fn unit_hash(seed: u64, step: u64) -> f32 {
     (x >> 40) as f32 / (1u64 << 24) as f32
 }
 
-const BUNDLED_FILES: [&str; 101] = [
+const BUNDLED_FILES: [&str; 103] = [
     include_str!("../recipes/vignette.json"),
     include_str!("../recipes/black-white.json"),
     include_str!("../recipes/vivid.json"),
@@ -839,6 +859,8 @@ const BUNDLED_FILES: [&str; 101] = [
     include_str!("../recipes/prism.json"),
     include_str!("../recipes/mandala.json"),
     include_str!("../recipes/lens-fringe.json"),
+    include_str!("../recipes/photo-stack.json"),
+    include_str!("../recipes/photo-drop.json"),
 ];
 
 /// The recipes that ship in the app, in picker order.

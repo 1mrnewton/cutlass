@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "id": "photo-stack",
+  "name": "Photo Stack",
+  "category": "Distort",
+  "preview": "beach",
+  "poster": 1.0,
+  "passes": [
+    {
+      "block": "prints",
+      "params": {
+        "count": 3,
+        "scale": {"keys": [[0, 0.66], [3, 0.72]]},
+        "spread": 0.55,
+        "turn": {"wave": {"period": 3, "from": -3, "to": 3}},
+        "tilt": 9,
+        "border": 0.022,
+        "blur": 0.035,
+        "wash": 0.45
+      }
+    }
+  ]
+}

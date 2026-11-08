@@ -248,6 +248,17 @@ pub enum Request {
         color: String,
         angle: f64,
     },
+    /// Cut a video clip to `ratio`, one of `Reframe::RATIOS`, following
+    /// its subject, holding as still as `stability` (1 Flexible, 2
+    /// Default, 3 Stable) and following as fast as `speed` (1 Fast, 2
+    /// Default, 3 Slow); or stop with an empty ratio. Where the subject is
+    /// is found apart from the draft.
+    SetReframe {
+        segment_id: SegmentId,
+        ratio: String,
+        stability: i64,
+        speed: i64,
+    },
     /// Replace the text material's string. Word columns stay as stored.
     SetTextContent {
         segment_id: SegmentId,

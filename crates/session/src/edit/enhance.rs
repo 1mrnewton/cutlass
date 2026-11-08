@@ -1,4 +1,4 @@
-use cutlass_model::{Algorithm, Draft, MaterialRef, SegmentId, VideoAlgorithm};
+use cutlass_model::{Algorithm, Draft, MaterialRef, Reframe, SegmentId, VideoAlgorithm};
 
 /// The longest preset id Relight stores.
 const MAX_PRESET: usize = 64;
@@ -62,6 +62,36 @@ pub fn set_relight(
         algorithm.color = color.to_owned();
         algorithm.angle = Some(angle.rem_euclid(360.0));
     })
+}
+
+/// Cut the clip to `ratio` around its subject with these settings, or
+/// stop with an empty ratio, as [`set_enhance`] does.
+pub fn set_reframe(
+    draft: &mut Draft,
+    segment_id: &SegmentId,
+    ratio: &str,
+    stability: i64,
+    speed: i64,
+) -> Result<(), EditError> {
+    let settings = Reframe::FLEXIBLE..=Reframe::STABLE;
+    if !(ratio.is_empty() || Reframe::RATIOS.contains(&ratio))
+        || !settings.contains(&stability)
+        || !settings.contains(&speed)
+    {
+        return Err(EditError::Reframe);
+    }
+    let level = i64::from(!ratio.is_empty());
+    set_filled(
+        draft,
+        segment_id,
+        Algorithm::AUTO_REFRAME,
+        level,
+        |algorithm| {
+            algorithm.ratio = ratio.to_owned();
+            algorithm.stability = Some(stability);
+            algorithm.speed = Some(speed);
+        },
+    )
 }
 
 fn set_algorithm(
@@ -137,8 +167,8 @@ fn set_filled(
 #[cfg(test)]
 mod tests {
     use cutlass_model::{
-        Algorithm, Draft, MaterialAudio, MaterialId, MaterialVideo, Segment, TimeRange, Track,
-        TrackAttribute, TrackId, TrackType, VideoAlgorithm,
+        Algorithm, Draft, MaterialAudio, MaterialId, MaterialVideo, Reframe, Segment, TimeRange,
+        Track, TrackAttribute, TrackId, TrackType, VideoAlgorithm,
     };
 
     use crate::edit::EditError;
@@ -361,6 +391,60 @@ mod tests {
                 angle: -45.0,
             }],
         )
+    }
+
+    fn reframe(
+        session: &mut Session,
+        ratio: &str,
+        stability: i64,
+        speed: i64,
+    ) -> Result<u64, EditError> {
+        let revision = session.revision();
+        session.apply(
+            revision,
+            &[Request::SetReframe {
+                segment_id: "picture".into(),
+                ratio: ratio.into(),
+                stability,
+                speed,
+            }],
+        )
+    }
+
+    #[test]
+    fn reframe_stores_its_shape_and_settings_and_an_empty_ratio_stops_it() {
+        let mut session = session_with(None);
+        set(&mut session, "picture", Algorithm::HD).unwrap();
+        reframe(&mut session, "9:16", Reframe::STABLE, Reframe::FAST).unwrap();
+        let cut = session.draft().materials.videos[0].reframe().unwrap();
+        assert_eq!(
+            (cut.ratio.as_str(), cut.stability, cut.speed),
+            ("9:16", Reframe::STABLE, Reframe::FAST)
+        );
+        reframe(&mut session, Reframe::ORIGINAL, 2, 2).unwrap();
+        assert_eq!(
+            session.draft().materials.videos[0].reframe().unwrap().ratio,
+            Reframe::ORIGINAL
+        );
+        let before = session.draft().clone();
+        for (ratio, stability, speed) in [
+            ("7:5", 2, 2),
+            ("9:16", 0, 2),
+            ("9:16", 2, 4),
+            ("../x", 2, 2),
+        ] {
+            assert_eq!(
+                reframe(&mut session, ratio, stability, speed),
+                Err(EditError::Reframe),
+                "{ratio} {stability} {speed}"
+            );
+        }
+        assert_eq!(session.draft(), &before);
+        reframe(&mut session, "", 2, 2).unwrap();
+        assert!(session.draft().materials.videos[0].reframe().is_none());
+        assert_eq!(level(&session), Some(Algorithm::HD));
+        session.undo().unwrap();
+        assert!(session.draft().materials.videos[0].reframe().is_some());
     }
 
     #[test]

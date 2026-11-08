@@ -114,6 +114,8 @@ pub enum EditError {
     FlowRate,
     /// A Relight preset id, strength, color or angle is not one it stores.
     Relight,
+    /// An Auto reframe shape, stabilization or speed is not one it offers.
+    Reframe,
     /// The picture has no sound to place.
     NoSound,
     /// The picture's sound is already its own clip.
@@ -347,6 +349,12 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             color,
             angle,
         } => enhance::set_relight(draft, segment_id, preset, *strength, color, *angle),
+        Request::SetReframe {
+            segment_id,
+            ratio,
+            stability,
+            speed,
+        } => enhance::set_reframe(draft, segment_id, ratio, *stability, *speed),
         Request::SetTextContent {
             segment_id,
             content,

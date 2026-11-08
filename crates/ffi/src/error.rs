@@ -152,6 +152,7 @@ fn edit_cause(error: EditError) -> String {
         EditError::TextColor => "the text color is not a hex color".to_owned(),
         EditError::TextAlign => "text alignment is not left, center, or right".to_owned(),
         EditError::Relight => "that light is not one Relight offers".to_owned(),
+        EditError::Reframe => "that shape or setting is not one Auto reframe offers".to_owned(),
         EditError::FlowRate => {
             "Optical flow fills a clip to 30, 50 or 60 frames a second".to_owned()
         }

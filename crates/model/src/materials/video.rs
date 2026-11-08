@@ -90,8 +90,88 @@ pub struct Algorithm {
     /// the right, 90 from above, 180 from the left. Absent is 135.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub angle: Option<f64>,
+    /// For Auto reframe, the shape it reframes to, one of
+    /// [`Reframe::RATIOS`].
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub ratio: String,
+    /// For Auto reframe, how still the frame holds: [`Reframe::FLEXIBLE`],
+    /// [`Reframe::DEFAULT`] or [`Reframe::STABLE`]. Absent is the default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stability: Option<i64>,
+    /// For Auto reframe, how fast the frame may follow:
+    /// [`Reframe::FAST`], [`Reframe::DEFAULT`] or [`Reframe::SLOW`].
+    /// Absent is the default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speed: Option<i64>,
     #[serde(flatten, default)]
     pub rest: Map<String, Value>,
+}
+
+/// A clip's Auto reframe: the shape it is cut to around its subject, how
+/// still that cut holds and how fast it follows.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Reframe {
+    /// One of [`Reframe::RATIOS`].
+    pub ratio: String,
+    pub stability: i64,
+    pub speed: i64,
+}
+
+impl Reframe {
+    /// The project's own shape.
+    pub const ORIGINAL: &'static str = "original";
+    /// The shapes offered, wide then tall, the project's first.
+    pub const RATIOS: [&'static str; 10] = [
+        Self::ORIGINAL,
+        "16:9",
+        "4:3",
+        "2.35:1",
+        "2:1",
+        "1.85:1",
+        "9:16",
+        "3:4",
+        "5.8-inch",
+        "1:1",
+    ];
+    /// Image stabilization: follows closely.
+    pub const FLEXIBLE: i64 = 1;
+    /// The middle setting of both choices.
+    pub const DEFAULT: i64 = 2;
+    /// Image stabilization: holds still longest.
+    pub const STABLE: i64 = 3;
+    /// Camera moving speed: quickest.
+    pub const FAST: i64 = 1;
+    /// Camera moving speed: slowest.
+    pub const SLOW: i64 = 3;
+
+    /// Width over height of `ratio` for a project `canvas` wide and high,
+    /// or `None` when it is not one offered or the canvas has no size.
+    #[must_use]
+    pub fn aspect_of(ratio: &str, canvas: (u32, u32)) -> Option<f64> {
+        let fraction = |w: f64, h: f64| Some(w / h);
+        match ratio {
+            Self::ORIGINAL => {
+                (canvas.0 > 0 && canvas.1 > 0).then(|| f64::from(canvas.0) / f64::from(canvas.1))
+            }
+            "16:9" => fraction(16.0, 9.0),
+            "4:3" => fraction(4.0, 3.0),
+            "2.35:1" => fraction(2.35, 1.0),
+            "2:1" => fraction(2.0, 1.0),
+            "1.85:1" => fraction(1.85, 1.0),
+            "9:16" => fraction(9.0, 16.0),
+            "3:4" => fraction(3.0, 4.0),
+            // A 5.8-inch phone's screen, 1125 by 2436.
+            "5.8-inch" => fraction(1125.0, 2436.0),
+            "1:1" => fraction(1.0, 1.0),
+            _ => None,
+        }
+    }
+
+    /// Width over height of this clip's shape in a project `canvas`.
+    #[must_use]
+    pub fn aspect(&self, canvas: (u32, u32)) -> Option<f64> {
+        Self::aspect_of(&self.ratio, canvas)
+    }
 }
 
 /// A clip's Relight: a preset light, or the Custom one, at a strength.
@@ -134,6 +214,9 @@ impl Algorithm {
     /// Cutlass's name for Relight, which lights a clip again from the depth
     /// of its frames.
     pub const RELIGHT: &'static str = "Relight";
+    /// Cutlass's name for Auto reframe, which cuts a clip to a shape that
+    /// follows its subject.
+    pub const AUTO_REFRAME: &'static str = "AutoReframe";
 
     /// Whether the algorithm runs.
     #[must_use]
@@ -180,6 +263,25 @@ impl MaterialVideo {
             strength,
             color: algorithm.color.clone(),
             angle,
+        })
+    }
+
+    /// The clip's Auto reframe, when it has one that is on with a shape.
+    /// A setting out of range reads as the default.
+    #[must_use]
+    pub fn reframe(&self) -> Option<Reframe> {
+        let algorithm = self
+            .algorithm(Algorithm::AUTO_REFRAME)
+            .filter(|algorithm| Reframe::RATIOS.contains(&algorithm.ratio.as_str()))?;
+        let setting = |value: Option<i64>| {
+            value
+                .filter(|value| (Reframe::FLEXIBLE..=Reframe::STABLE).contains(value))
+                .unwrap_or(Reframe::DEFAULT)
+        };
+        Some(Reframe {
+            ratio: algorithm.ratio.clone(),
+            stability: setting(algorithm.stability),
+            speed: setting(algorithm.speed),
         })
     }
 
@@ -320,6 +422,39 @@ mod tests {
         let freeze = held.freeze.unwrap();
         assert_eq!(freeze.source_material_id, "src");
         assert_eq!(freeze.timestamp, Micros(1500));
+    }
+
+    #[test]
+    fn auto_reframe_reads_its_shape_and_settings_and_a_wrong_one_reads_as_off_or_default() {
+        let video: MaterialVideo = serde_json::from_str(
+            r#"{"video_algorithm":{"algorithms":[{"type":"AutoReframe","level":1,"ratio":"9:16","stability":3,"speed":9}]}}"#,
+        )
+        .unwrap();
+        let reframe = video.reframe().unwrap();
+        assert_eq!(
+            (reframe.ratio.as_str(), reframe.stability, reframe.speed),
+            ("9:16", Reframe::STABLE, Reframe::DEFAULT)
+        );
+        assert_eq!(reframe.aspect((1920, 1080)), Some(9.0 / 16.0));
+        let back = serde_json::to_value(&video).unwrap();
+        assert_eq!(back["video_algorithm"]["algorithms"][0]["ratio"], "9:16");
+        let odd: MaterialVideo = serde_json::from_str(
+            r#"{"video_algorithm":{"algorithms":[{"type":"AutoReframe","level":1,"ratio":"7:5"}]}}"#,
+        )
+        .unwrap();
+        assert!(odd.reframe().is_none());
+        for ratio in Reframe::RATIOS {
+            let aspect = Reframe::aspect_of(ratio, (1080, 1920)).unwrap();
+            assert!(aspect.is_finite() && aspect > 0.0, "{ratio}");
+        }
+        assert_eq!(
+            Reframe::aspect_of(Reframe::ORIGINAL, (1080, 1920)),
+            Some(0.5625)
+        );
+        assert_eq!(Reframe::aspect_of(Reframe::ORIGINAL, (0, 1920)), None);
+        // Nothing new is written for an algorithm that is not Auto reframe.
+        let plain = serde_json::to_value(Algorithm::default()).unwrap();
+        assert!(plain.get("ratio").is_none() && plain.get("speed").is_none());
     }
 
     #[test]

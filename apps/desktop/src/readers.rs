@@ -548,7 +548,7 @@ mod tests {
         let name = "06 First Person Shooter (feat. J. Cole).m4a";
         let source_path = root.join(name);
         if !source_path.is_file() {
-            if std::env::var_os("AC3_REQUIRE_ORACLES").is_some() {
+            if std::env::var_os("AC3_REQUIRE_ORACLES").is_some_and(|value| value == "1") {
                 panic!("missing {}", source_path.display());
             }
             return;
@@ -659,7 +659,7 @@ mod tests {
         if path.is_dir() {
             return Some(path);
         }
-        if std::env::var_os("AC3_REQUIRE_ORACLES").is_some() {
+        if std::env::var_os("AC3_REQUIRE_ORACLES").is_some_and(|value| value == "1") {
             panic!("missing {}", path.display());
         }
         None

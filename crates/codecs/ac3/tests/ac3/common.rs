@@ -305,6 +305,10 @@ pub fn fate_dir() -> Option<PathBuf> {
     match std::env::var_os("AC3_FATE_SAMPLES") {
         Some(dir) if Path::new(&dir).is_dir() => Some(PathBuf::from(dir)),
         _ => {
+            assert!(
+                !require_oracles(),
+                "AC3_FATE_SAMPLES is required and does not name the FATE sample folder"
+            );
             eprintln!("skipped: AC3_FATE_SAMPLES does not name the FATE sample folder");
             None
         }

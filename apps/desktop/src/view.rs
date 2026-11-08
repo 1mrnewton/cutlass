@@ -3013,7 +3013,9 @@ fn effect_card(effect: cutlass_editor::EffectCard) -> BinCard {
     BinCard {
         id: effect.id,
         name: effect.name,
-        meta: card_meta(cutlass_editor::EFFECT_LENGTH.0),
+        // The card is a preview of the look; its length on the timeline
+        // is not part of it.
+        meta: String::new(),
         on_timeline: false,
         look: CardLook::Picture(None),
     }
@@ -11524,6 +11526,9 @@ mod tests {
         assert!(text_pos(&output, "Video effects").is_some());
         let first = cutlass_editor::effect_cards().remove(0).name;
         assert!(text_pos(&output, &first).is_some(), "{first}");
+        // An effect card is a preview of the look, with no length on it.
+        let length = card_meta(cutlass_editor::EFFECT_LENGTH.0);
+        assert!(text_pos(&output, &length).is_none(), "{length}");
         // The category row: All, then each category with an effect.
         assert!(text_pos(&output, "All").is_some());
         let motion = text_pos(&output, "Motion").expect("the Motion chip") + Vec2::new(4.0, 4.0);

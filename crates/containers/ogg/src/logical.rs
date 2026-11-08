@@ -158,6 +158,9 @@ pub struct Counters {
     pub lost_pages: u64,
     /// Packet pieces dropped because a piece before or after them was lost.
     pub dropped_pieces: u64,
+    /// Pages whose granule disagreed with the packet durations by less than
+    /// the shortest packet.
+    pub granule_drift: u64,
 }
 
 /// How a mapping times its packets.
@@ -184,6 +187,16 @@ pub struct Logical {
 }
 
 impl Logical {
+    /// Samples in the shortest packet the stream can have: 2.5 ms for Opus
+    /// (RFC 6716 section 3.1), half the short block for Vorbis. A lost page
+    /// takes at least this many samples with it.
+    fn shortest_packet(&self) -> i64 {
+        match &self.timing {
+            Timing::Opus { .. } => 120,
+            Timing::Vorbis(modes) => i64::from(modes.blocksizes[0] / 2),
+        }
+    }
+
     /// Samples of each completed packet, in order.
     fn samples(&mut self, completed: &[Partial]) -> Vec<i64> {
         let state = &mut self.state;
@@ -260,6 +273,7 @@ impl Logical {
         }
         let samples = self.samples(&completed);
         let total: i64 = samples.iter().sum();
+        let shortest = self.shortest_packet();
         let state = &mut self.state;
         let granule = if page.granule == -1 {
             // A page that completes packets must carry a granule position.
@@ -320,10 +334,17 @@ impl Logical {
                         floor: state.last_granule,
                     });
                 }
+                let start = granule - total;
                 if page.eos() && granule < expected.saturating_add(total) {
                     expected
+                } else if (start - expected).abs() < shortest {
+                    // Less than any packet: the granule was rounded, and
+                    // no data is missing.
+                    if start != expected {
+                        counters.granule_drift += 1;
+                    }
+                    expected
                 } else {
-                    let start = granule - total;
                     if start < expected {
                         return Err(OggError::GranuleBackwards {
                             serial: self.serial,
@@ -501,6 +522,51 @@ mod tests {
         take(&mut eos_back, &page(2, 0, 1920, &[packet(10), packet(10)])).expect("page");
         assert!(matches!(
             take(&mut eos_back, &page(3, FLAG_EOS, 1900, &[packet(10)])),
+            Err(OggError::GranuleBackwards { .. })
+        ));
+    }
+
+    #[test]
+    fn a_granule_off_by_less_than_a_packet_keeps_the_timeline() {
+        let mut opus = stream();
+        take(&mut opus, &page(2, 0, 1920, &[packet(10), packet(10)])).expect("page");
+        let mut gaps = Vec::new();
+        let mut counters = Counters::default();
+        let mut out = Vec::new();
+        for (sequence, granule) in [(3, 2848), (4, 3840), (5, 4816)] {
+            opus.take_page(
+                &page(sequence, 0, granule, &[packet(10)]),
+                &mut out,
+                &mut gaps,
+                &mut counters,
+            )
+            .expect("drifted page");
+        }
+        assert_eq!(times(&out), vec![(1920, 960), (2880, 960), (3840, 960)]);
+        assert!(gaps.is_empty());
+        assert_eq!(counters.granule_drift, 2);
+        // 120 samples off is a lost 2.5 ms packet: a gap.
+        opus.take_page(
+            &page(6, 0, 5880, &[packet(10)]),
+            &mut out,
+            &mut gaps,
+            &mut counters,
+        )
+        .expect("gap");
+        assert_eq!(gaps.len(), 1);
+        assert_eq!(out.last().map(|ready| ready.pts), Some(4920));
+
+        let mut stream = vorbis();
+        take(
+            &mut stream,
+            &page(2, 0, 1024, &[LONG, LONG].map(vorbis_packet)),
+        )
+        .expect("page");
+        let out =
+            take(&mut stream, &page(3, 0, 2048 - 127, &[vorbis_packet(LONG)])).expect("drift");
+        assert_eq!(times(&out), vec![(1024, 1024)]);
+        assert!(matches!(
+            take(&mut stream, &page(4, 0, 3072 - 128, &[vorbis_packet(LONG)])),
             Err(OggError::GranuleBackwards { .. })
         ));
     }

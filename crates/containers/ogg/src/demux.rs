@@ -1021,6 +1021,15 @@ impl<R: Read> OggDemux<R> {
         self.counters.dropped_pieces
     }
 
+    /// Pages since open or the last seek whose granule position disagreed
+    /// with the packet durations by less than the shortest packet, and was
+    /// taken as rounding. A remux that rebuilds granules from millisecond
+    /// timestamps writes such pages.
+    #[must_use]
+    pub const fn granule_drift(&self) -> u64 {
+        self.counters.granule_drift
+    }
+
     /// Pages of a serial the first link did not begin.
     #[must_use]
     pub const fn ignored_pages(&self) -> u64 {

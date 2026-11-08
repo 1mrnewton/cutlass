@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "id": "bounce-in",
+  "name": "Bounce In",
+  "category": "Slide",
+  "duration": 0.7,
+  "incoming": [
+    {"block": "place", "params": {"x": {"keys": [[0, 1], [0.55, -0.06], [0.75, 0.025], [0.9, -0.008], [1, 0]]}}}
+  ],
+  "cross": {"kind": 10}
+}

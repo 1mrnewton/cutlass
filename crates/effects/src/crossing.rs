@@ -350,7 +350,7 @@ pub fn transition_preview_t(elapsed: Micros) -> f32 {
 }
 
 /// The transition recipes the app ships, in shelf order.
-const BUNDLED_FILES: [&str; 33] = [
+const BUNDLED_FILES: [&str; 69] = [
     include_str!("../transitions/flash.json"),
     include_str!("../transitions/quick-flash.json"),
     include_str!("../transitions/red-flash.json"),
@@ -384,6 +384,42 @@ const BUNDLED_FILES: [&str; 33] = [
     include_str!("../transitions/wipe-blur.json"),
     include_str!("../transitions/band-wipe.json"),
     include_str!("../transitions/venetian.json"),
+    include_str!("../transitions/reveal-left.json"),
+    include_str!("../transitions/reveal-right.json"),
+    include_str!("../transitions/reveal-up.json"),
+    include_str!("../transitions/reveal-down.json"),
+    include_str!("../transitions/card-stack.json"),
+    include_str!("../transitions/swipe-left.json"),
+    include_str!("../transitions/swipe-right.json"),
+    include_str!("../transitions/swipe-up.json"),
+    include_str!("../transitions/swipe-down.json"),
+    include_str!("../transitions/bounce-in.json"),
+    include_str!("../transitions/slide-fade.json"),
+    include_str!("../transitions/elastic-push.json"),
+    include_str!("../transitions/drop-down.json"),
+    include_str!("../transitions/rise-up.json"),
+    include_str!("../transitions/diagonal-slide.json"),
+    include_str!("../transitions/diagonal-slide-down.json"),
+    include_str!("../transitions/zoom-blur-in.json"),
+    include_str!("../transitions/shrink-away.json"),
+    include_str!("../transitions/zoom-through.json"),
+    include_str!("../transitions/punch-in.json"),
+    include_str!("../transitions/crash-zoom.json"),
+    include_str!("../transitions/zoom-rotate-in.json"),
+    include_str!("../transitions/iris-zoom.json"),
+    include_str!("../transitions/grow-in.json"),
+    include_str!("../transitions/zoom-fade.json"),
+    include_str!("../transitions/zoom-pulse.json"),
+    include_str!("../transitions/lens-zoom.json"),
+    include_str!("../transitions/warp-zoom.json"),
+    include_str!("../transitions/zoom-left.json"),
+    include_str!("../transitions/zoom-right.json"),
+    include_str!("../transitions/dolly-fade.json"),
+    include_str!("../transitions/snap-zoom.json"),
+    include_str!("../transitions/pop-in.json"),
+    include_str!("../transitions/pop-out.json"),
+    include_str!("../transitions/tunnel-zoom.json"),
+    include_str!("../transitions/zoom-out-fade.json"),
 ];
 
 /// Every bundled transition recipe, read once.

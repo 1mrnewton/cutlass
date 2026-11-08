@@ -178,9 +178,6 @@ fn video_panel(
             }
             position_size(shell, ui, state, inspection, "Rotate");
             blend(shell, ui, state, inspection, true);
-            if !still {
-                tracking(shell, ui, state);
-            }
             for label in [
                 "Stabilize",
                 "Enhance quality",
@@ -689,8 +686,9 @@ fn placement(
                 send(shell, |shell| shell.align_selected(align));
             }
         }
-        // Mirror, side to side, is on the timeline toolbar.
-        if shell.mirror_enabled() {
+        // Mirror, side to side, is on the timeline toolbar. A video or
+        // photo clip has no upside-down flip here, as in the reference.
+        if rotate_label != Some("Rotate") && shell.mirror_enabled() {
             let flipped = shell.flipped();
             if switch_row(ui, "Flip upside down", flipped, true).clicked() {
                 send(shell, Shell::toggle_vertical_flip);
@@ -1316,146 +1314,6 @@ fn cutout_page(
                 shell.set_chroma(&hex, strength, value / 100.0)
             });
         }
-    });
-}
-
-/// Tracking: draw a box around the target on the preview, choose Object or
-/// Plane and the clips that follow it, then Track runs as a job.
-fn tracking(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState) {
-    let setting_up = shell.tracking().is_some();
-    let header = section(ui, state, "tracking", "Tracking", None, false);
-    if !header.open && !setting_up {
-        return;
-    }
-    body(ui, |ui| {
-        let Some(tracking) = shell.tracking().cloned() else {
-            note(
-                ui,
-                "Follow something in this clip with a sticker, text or another clip.",
-            );
-            ui.horizontal(|ui| {
-                row_label(ui, "");
-                if ui
-                    .add_enabled(
-                        shell.track_enabled(),
-                        ui::Button::new("Track").text_size(12.0),
-                    )
-                    .on_disabled_hover_text("Put the playhead on an unlocked video clip.")
-                    .clicked()
-                {
-                    state.open.insert("tracking".to_owned());
-                    send(shell, Shell::start_tracking);
-                }
-                if shell.fix_enabled()
-                    && ui
-                        .add(ui::Button::new("Fix frame").text_size(12.0))
-                        .on_hover_text(
-                            "Redraw the box on a frame where the track went wrong, \
-                             and track again from there.",
-                        )
-                        .clicked()
-                {
-                    state.open.insert("tracking".to_owned());
-                    send(shell, Shell::start_fixing);
-                }
-            });
-            return;
-        };
-        let fixing = tracking.fixing.is_some();
-        ui.horizontal(|ui| {
-            row_label(ui, "Follow");
-            ui::Segmented::show(ui, |ui| {
-                for (name, mode) in [
-                    ("Object", cutlass_model::TrackMode::Object),
-                    ("Plane", cutlass_model::TrackMode::Plane),
-                ] {
-                    if ui
-                        .add(ui::Choice::new(tracking.mode == mode, name))
-                        .clicked()
-                    {
-                        shell.set_track_mode(mode);
-                    }
-                }
-            });
-        });
-        note(
-            ui,
-            if fixing {
-                "Drag on the preview to redraw the box on this frame. The track is \
-                 redone from here, away from where it was first drawn."
-            } else if tracking.canvas_box.is_some() {
-                "Drag on the preview again to redraw the box."
-            } else {
-                "Drag on the preview to draw a box around what to follow."
-            },
-        );
-        ui.label(
-            RichText::new("Clips that follow it")
-                .size(12.0)
-                .color(tokens::MUTED),
-        );
-        let choices = shell.follower_choices();
-        if choices.is_empty() {
-            note(ui, "Put a sticker, text or clip over this one first.");
-        }
-        for choice in choices {
-            let on = tracking.followers.contains(&choice.segment_id);
-            let row = ui.horizontal(|ui| {
-                let check = check_box(ui, on, &choice.name);
-                let name = ui.add(
-                    egui::Label::new(RichText::new(&choice.name).size(12.0).color(tokens::TEXT))
-                        .truncate()
-                        .sense(Sense::click()),
-                );
-                check.clicked() || name.clicked()
-            });
-            if row.inner {
-                shell.toggle_follower(&choice.segment_id);
-            }
-        }
-        ui.add_space(ROW_GAP);
-        ui.label(
-            RichText::new("Masks that follow it")
-                .size(12.0)
-                .color(tokens::MUTED),
-        );
-        note(
-            ui,
-            "The clip's mask moves with the box; a clip with no mask gets one the \
-             size of the box. Blur a copy of the clip to hide a face or a plate.",
-        );
-        for choice in shell.mask_choices() {
-            let on = tracking.masks.contains(&choice.segment_id);
-            let row = ui.horizontal(|ui| {
-                let check = check_box(ui, on, &choice.name);
-                let name = ui.add(
-                    egui::Label::new(RichText::new(&choice.name).size(12.0).color(tokens::TEXT))
-                        .truncate()
-                        .sense(Sense::click()),
-                );
-                check.clicked() || name.clicked()
-            });
-            if row.inner {
-                shell.toggle_mask_follower(&choice.segment_id);
-            }
-        }
-        ui.add_space(6.0);
-        ui.horizontal(|ui| {
-            if ui
-                .add_enabled(
-                    shell.track_ready(),
-                    ui::Button::new(if fixing { "Track from here" } else { "Track" })
-                        .text_size(12.0),
-                )
-                .on_disabled_hover_text("Draw a box and choose a clip or a mask to follow it.")
-                .clicked()
-            {
-                send(shell, Shell::run_tracking);
-            }
-            if ui.add(ui::Button::new("Cancel").text_size(12.0)).clicked() {
-                shell.stop_tracking();
-            }
-        });
     });
 }
 

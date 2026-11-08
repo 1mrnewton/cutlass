@@ -8361,7 +8361,6 @@ mod tests {
                     "Uniform scale",
                     "Position",
                     "Rotate",
-                    "Flip upside down",
                     "Blend",
                     "Stabilize",
                     "Motion blur",
@@ -8377,6 +8376,8 @@ mod tests {
                     "Mode",
                     "Opacity",
                     "Line width",
+                    "Flip upside down",
+                    "Tracking",
                 ]
                 .as_slice(),
             ),

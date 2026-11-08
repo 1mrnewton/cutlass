@@ -33,20 +33,22 @@ pub fn readers() -> ReaderFactory {
     readers
 }
 
-/// FLAC, ALAC, MP3, Opus and WebP, the platform decoders for this OS, then
-/// PNG, GIF, JPEG, AAC, H.264, HEVC, PCM and ProRes.
+/// FLAC, ALAC, MP3, Opus, WebP and Motion JPEG, the platform decoders for
+/// this OS, then PNG, GIF, JPEG, AAC, H.264, HEVC, PCM and ProRes.
 #[must_use]
 pub fn decoders() -> DecodeFactory {
     let mut decoders = DecodeFactory::new();
     // Rust audio codecs go ahead of the platform ones, so FLAC, ALAC, MP3
     // and Opus decode the same on the phone as on the desktop. WebP goes
     // ahead too: ImageIO gives one picture per packet and does not keep an
-    // animation's canvas.
+    // animation's canvas. Motion JPEG goes ahead because VideoToolbox
+    // refuses 4:2:2 frames after it opens and weaves no fields.
     cutlass_flac::register_decoders(&mut decoders);
     cutlass_alac::register_decoders(&mut decoders);
     cutlass_mp3::register_decoders(&mut decoders);
     cutlass_opus::register_decoders(&mut decoders);
     cutlass_webp::register_decoders(&mut decoders);
+    cutlass_mjpeg::register_decoders(&mut decoders);
     #[cfg(target_vendor = "apple")]
     cutlass_platform_apple::register_decoders(&mut decoders);
     cutlass_png::register_decoders(&mut decoders);

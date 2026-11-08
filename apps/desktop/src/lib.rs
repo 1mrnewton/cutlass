@@ -47,7 +47,8 @@ pub fn register_codecs_with(
     // and the end trim. The Opus decoder matches the RFC vectors and plays
     // multistream and every API rate. WebP still images follow the same
     // rule, and an animated file's later packets are bare frames only the
-    // Rust decoder composes.
+    // Rust decoder composes. So does Motion JPEG: VideoToolbox refuses 4:2:2
+    // frames, the common layout, after it opens, and weaves no fields.
     cutlass_flac::register_decoders(&mut decoders);
     cutlass_flac::register_encoders(&mut encoders);
     cutlass_alac::register_decoders(&mut decoders);
@@ -58,6 +59,8 @@ pub fn register_codecs_with(
     cutlass_opus::register_encoders(&mut encoders);
     cutlass_webp::register_decoders(&mut decoders);
     cutlass_webp::register_encoders(&mut encoders);
+    cutlass_mjpeg::register_decoders(&mut decoders);
+    cutlass_mjpeg::register_encoders(&mut encoders);
     #[cfg(target_os = "macos")]
     {
         // Pictures stay in their IOSurface; the preview samples them in place.
@@ -340,6 +343,63 @@ mod tests {
             cutlass_encode::Encoder::codec(encoder.as_ref()),
             CodecId::Prores
         );
+    }
+
+    #[test]
+    fn motion_jpeg_opens_in_rust_when_the_platform_is_off() {
+        use cutlass_settings::Hardware;
+
+        let off = Hardware {
+            decode: false,
+            encode: false,
+            ..Hardware::default()
+        };
+        let (decoders, encoders) = super::register_codecs_with(&off);
+        let mut read = CodecParams::with_format(CodecId::Mjpeg, 64, 48, PixelFormat::Rgba8);
+        read.extra = b"jpeg\x01\x00".to_vec();
+        let decoder = decoders.open(&read).expect("rust motion jpeg decoder");
+        assert_eq!(
+            cutlass_decode::Decoder::codec(decoder.as_ref()),
+            CodecId::Mjpeg
+        );
+        let encoder = encoders
+            .open(&picture(CodecId::Mjpeg, 64, 48))
+            .expect("rust motion jpeg encoder");
+        assert_eq!(
+            cutlass_encode::Encoder::codec(encoder.as_ref()),
+            CodecId::Mjpeg
+        );
+    }
+
+    /// With hardware decode on, Motion JPEG still decodes in Rust: here a
+    /// 4:2:2 frame, which VideoToolbox opens for and then refuses.
+    #[test]
+    fn motion_jpeg_decodes_in_rust_ahead_of_the_platform() {
+        let rgba: Vec<u8> = (0..64u32 * 48)
+            .flat_map(|i| [(i % 64 * 4) as u8, (i / 64 * 5) as u8, 90, 255])
+            .collect();
+        let mut encoder = cutlass_mjpeg::MjpegEncoder::open(&picture(CodecId::Mjpeg, 64, 48))
+            .expect("encoder")
+            .with_sampling(cutlass_mjpeg::Sampling::Yuv422);
+        let frame = encoder.encode_rgba(64, 48, &rgba, 1, 30).expect("frame");
+        let decode = |decoders: &cutlass_decode::DecodeFactory| {
+            let params = CodecParams::with_format(CodecId::Mjpeg, 64, 48, PixelFormat::Rgba8);
+            let mut decoder = decoders.open(&params)?;
+            let mut outputs =
+                decoder.push(&cutlass_decode::Packet::audio(frame.clone(), 0, 1, 30))?;
+            outputs.extend(decoder.drain()?);
+            Ok::<usize, cutlass_decode::CodecError>(outputs.len())
+        };
+        let (decoders, _) = super::register_codecs();
+        assert_eq!(decode(&decoders).expect("the app decodes it"), 1);
+        #[cfg(target_os = "macos")]
+        {
+            let mut reversed = cutlass_decode::DecodeFactory::new();
+            cutlass_platform_apple::register_surface_decoders_with(&mut reversed, true);
+            cutlass_mjpeg::register_decoders(&mut reversed);
+            let platform = decode(&reversed);
+            assert!(!matches!(platform, Ok(1)), "VideoToolbox decoded 4:2:2");
+        }
     }
 
     #[test]

@@ -2736,6 +2736,7 @@ dependencies = [
  "cutlass-isobmff",
  "cutlass-jpeg",
  "cutlass-logger",
+ "cutlass-mjpeg",
  "cutlass-model",
  "cutlass-mp3",
  "cutlass-mp3-container",

@@ -4,9 +4,11 @@
 //! constant bit rate syncframes.
 //!
 //! One independent substream: mono to 5.1 with LFE at 32, 44.1 and
-//! 48 kHz. E-AC-3 takes any bit rate and 1, 2, 3 or 6 blocks per
-//! syncframe. Spectral extension, AHT, enhanced coupling, dependent
-//! substreams and transient pre-noise processing are never written. A block
+//! 48 kHz. E-AC-3 also writes a 7.1 program as that 5.1 frame plus one
+//! dependent frame for the back pair. It takes any bit rate and 1, 2, 3
+//! or 6 blocks per syncframe. Spectral extension and AHT are written.
+//! Enhanced coupling and transient pre-noise processing are never written.
+//! A block
 //! peaking above half scale sends a dynamic range word that brings it back
 //! to half scale; heavy-compression words are never written. Delta bit
 //! allocation is written only when a block carries
@@ -23,7 +25,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use cutlass_encode::{
     AudioInput, Channel, ChannelLayout, CodecError, CodecId, CodecParams, Encoder, FrameInput,
-    Packet, SideData,
+    Packet, Pcm, SideData,
 };
 
 use crate::bitalloc::{self, Mask, Params};
@@ -212,6 +214,41 @@ fn coding(layout: &ChannelLayout) -> Result<(u8, bool, Vec<usize>), CodecError> 
     Ok((acmod, lfe.is_some(), order))
 }
 
+struct SevenPointOne {
+    /// Independent coded channels, in A/52 order, as public-layout indices.
+    core: Vec<usize>,
+    backs: [usize; 2],
+}
+
+/// 7.1 is the side pair and the back pair together. Anything else is `None`.
+fn seven_point_one(layout: &ChannelLayout) -> Option<SevenPointOne> {
+    let channels = layout.channels();
+    if channels.len() != 8 {
+        return None;
+    }
+    let find = |wanted: Channel| channels.iter().position(|c| *c == wanted);
+    let (l, r, c, lfe, ls, rs, lb, rb) = (
+        find(Channel::FrontLeft)?,
+        find(Channel::FrontRight)?,
+        find(Channel::FrontCenter)?,
+        find(Channel::Lfe)?,
+        find(Channel::SideLeft)?,
+        find(Channel::SideRight)?,
+        find(Channel::BackLeft)?,
+        find(Channel::BackRight)?,
+    );
+    Some(SevenPointOne {
+        core: vec![l, c, r, ls, rs, lfe],
+        backs: [lb, rb],
+    })
+}
+
+fn layout_of(channels: Vec<Channel>) -> Result<ChannelLayout, CodecError> {
+    ChannelLayout::new(channels).map_err(|_| CodecError::Unsupported {
+        what: "channel layout",
+    })
+}
+
 fn fscod_of(sample_rate: u32) -> Option<u8> {
     match sample_rate {
         48_000 => Some(0),
@@ -310,14 +347,40 @@ pub struct Ac3Encoder {
     first: bool,
     drained: bool,
     cancel: Arc<AtomicBool>,
+    /// This substream's bit rate. A 7.1 program's public rate is the sum.
+    rate: u32,
+    /// Dependent `chanmap` when this encoder writes that substream.
+    chanmap: Option<u16>,
+    /// The back-pair frame of a 7.1 program.
+    program: Option<Program>,
     /// AC-3 delta bit allocation copied onto each frame's first block.
     /// The rate control leaves this empty.
     #[cfg(test)]
     forced_delta: Option<bitalloc::Delta>,
 }
 
+/// Back surrounds carried in the dependent substream of a 7.1 program.
+struct Program {
+    backs: Box<Ac3Encoder>,
+    /// Index of each back channel in the public layout.
+    back_at: [usize; 2],
+}
+
+/// Table E2.5 bit 6, `Lrs`/`Rrs`. The `dec3` `chan_loc` bit 1 is that pair.
+const BACK_PAIR: u16 = 0x0200;
+
 impl Ac3Encoder {
     pub fn new(config: EncoderConfig) -> Result<Self, CodecError> {
+        Self::build(config, None)
+    }
+
+    fn build(config: EncoderConfig, chanmap: Option<u16>) -> Result<Self, CodecError> {
+        if chanmap.is_none()
+            && config.format == Format::Eac3
+            && let Some(split) = seven_point_one(&config.layout)
+        {
+            return Self::with_backs(config, split);
+        }
         let Some(fscod) = fscod_of(config.sample_rate) else {
             return Err(CodecError::Unsupported {
                 what: "sample rate",
@@ -379,7 +442,7 @@ impl Ac3Encoder {
             // The open check is the coarse coding: one exponent set, no
             // coupling. A frame that cannot hold even that is illegal at
             // this rate; a noisier frame falls back to it at runtime.
-            let coarse = coarse_side(&shape, &meta);
+            let coarse = coarse_side(&shape, &meta, chanmap);
             let fits = if eac3 {
                 let min_words = (coarse.total + TAIL_BITS + SIDE_MARGIN).div_ceil(16);
                 (nominal_bits as usize / 16 >= min_words).then_some(min_words)
@@ -439,7 +502,47 @@ impl Ac3Encoder {
             forced_delta: None,
             order,
             config,
+            rate: bit_rate,
+            chanmap,
+            program: None,
         })
+    }
+
+    /// An E-AC-3 7.1 program: a 5.1 independent frame and one dependent
+    /// frame for the back pair. The public rate is the sum of the two.
+    fn with_backs(config: EncoderConfig, split: SevenPointOne) -> Result<Self, CodecError> {
+        let (core_rate, back_rate) = if config.bit_rate == 0 {
+            (
+                default_bit_rate(Format::Eac3, 5, true),
+                default_bit_rate(Format::Eac3, 2, false),
+            )
+        } else {
+            let core = config.bit_rate / 7 * 5;
+            (core, config.bit_rate - core)
+        };
+        let mut core_config = config.clone();
+        core_config.bit_rate = core_rate;
+        core_config.layout = layout_of(vec![
+            Channel::FrontLeft,
+            Channel::FrontRight,
+            Channel::FrontCenter,
+            Channel::Lfe,
+            Channel::SideLeft,
+            Channel::SideRight,
+        ])?;
+        let mut back_config = config.clone();
+        back_config.bit_rate = back_rate;
+        back_config.layout = ChannelLayout::stereo();
+        let mut core = Self::build(core_config, None)?;
+        let backs = Self::build(back_config, Some(BACK_PAIR))?;
+        core.program = Some(Program {
+            backs: Box::new(backs),
+            back_at: split.backs,
+        });
+        core.order = split.core;
+        core.config.layout = config.layout;
+        core.config.bit_rate = core_rate + back_rate;
+        Ok(core)
     }
 
     /// Open from codec parameters. A non-zero AC-3 `bitrate` snaps to the
@@ -498,8 +601,8 @@ impl Ac3Encoder {
                     bsmod: self.meta.bsmod,
                     acmod: shape.acmod,
                     lfeon: shape.lfeon,
-                    num_dep_sub: 0,
-                    chan_loc: 0,
+                    num_dep_sub: u8::from(self.program.is_some()),
+                    chan_loc: u16::from(self.program.is_some()) * 0x002,
                 }],
             }
             .to_bytes()
@@ -527,7 +630,7 @@ impl Ac3Encoder {
         if pcm.layout != self.config.layout {
             return Err(CodecError::InvalidApi { what: "layout" });
         }
-        let channels = self.order.len();
+        let channels = self.config.layout.len();
         let samples: Vec<f32> = if let Some(data) = pcm.as_f32() {
             for sample in data {
                 if !sample.is_finite() {
@@ -552,7 +655,23 @@ impl Ac3Encoder {
             let pending = &mut self.pending[coded];
             pending.extend(samples.iter().skip(input).step_by(channels));
         }
-        self.accepted += (samples.len() / channels) as u64;
+        let frames = samples.len() / channels;
+        self.accepted += frames as u64;
+        if let Some(program) = &mut self.program {
+            let mut stereo = Vec::with_capacity(frames * 2);
+            for frame in 0..frames {
+                let base = frame * channels;
+                stereo.push(samples[base + program.back_at[0]]);
+                stereo.push(samples[base + program.back_at[1]]);
+            }
+            let pcm = Pcm::from_f32(
+                self.config.sample_rate,
+                program.backs.config.layout.clone(),
+                stereo,
+            )
+            .map_err(|_| CodecError::InvalidApi { what: "layout" })?;
+            program.backs.accept(&AudioInput { pcm })?;
+        }
         Ok(())
     }
 
@@ -588,7 +707,7 @@ impl Ac3Encoder {
 
     fn next_size(&mut self) -> Size {
         let spf = self.frame_samples() as u128;
-        let rate = u128::from(self.config.bit_rate);
+        let rate = u128::from(self.rate);
         let target = rate * (self.clock.samples + spf) / u128::from(self.config.sample_rate);
         let owed = target.saturating_sub(self.clock.bits);
         let fscod = usize::from(self.shape.fscod);
@@ -732,6 +851,7 @@ impl Ac3Encoder {
             frmsizecod: size.frmsizecod,
             index: self.frame_index,
             snr: snr as u16,
+            chanmap: self.chanmap,
         };
         let (writer, layout) = write::frame(&shape, &self.meta, &frame, &self.blocks, &skip, true);
         if layout.total + TAIL_BITS > size.bytes * 8 {
@@ -771,6 +891,7 @@ impl Ac3Encoder {
             frmsizecod: size.frmsizecod,
             index: self.frame_index,
             snr: 0,
+            chanmap: self.chanmap,
         };
         let (_, layout) = write::frame(
             shape,
@@ -874,8 +995,33 @@ impl Ac3Encoder {
                 }
             }
         }
+        if let Some(program) = &mut self.program {
+            let backs = program.backs.finish()?;
+            splice(&mut packets, backs)?;
+        }
         Ok(packets)
     }
+
+    /// Append one dependent frame to each independent frame.
+    fn attach(&mut self, packets: &mut [Packet]) -> Result<(), CodecError> {
+        let Some(program) = &mut self.program else {
+            return Ok(());
+        };
+        let backs = program.backs.run()?;
+        splice(packets, backs)
+    }
+}
+
+fn splice(packets: &mut [Packet], backs: Vec<Packet>) -> Result<(), CodecError> {
+    if backs.len() != packets.len() {
+        return Err(CodecError::Limit {
+            what: "dependent substream",
+        });
+    }
+    for (packet, back) in packets.iter_mut().zip(backs) {
+        packet.data.extend(back.data);
+    }
+    Ok(())
 }
 
 /// What the SNR search holds fixed for one syncframe.
@@ -948,7 +1094,7 @@ impl Search<'_> {
 const SIDE_MARGIN: usize = 64;
 
 /// Side information of one coarse exponent set and no coupling.
-fn coarse_side(shape: &Shape, meta: &Meta) -> Layout {
+fn coarse_side(shape: &Shape, meta: &Meta, chanmap: Option<u16>) -> Layout {
     let mut blocks = vec![Block::default(); shape.blocks];
     plan::plan(shape, &mut blocks, Mode::Coarse);
     let frame = Frame {
@@ -956,6 +1102,7 @@ fn coarse_side(shape: &Shape, meta: &Meta) -> Layout {
         frmsizecod: 0,
         index: 0,
         snr: 0,
+        chanmap,
     };
     write::frame(shape, meta, &frame, &blocks, &[0; MAX_BLOCKS], false).1
 }
@@ -1038,7 +1185,9 @@ impl Encoder for Ac3Encoder {
             });
         }
         self.accept(input)?;
-        self.run()
+        let mut packets = self.run()?;
+        self.attach(&mut packets)?;
+        Ok(packets)
     }
 
     fn push_frame(&mut self, _input: &FrameInput) -> Result<Vec<Packet>, CodecError> {

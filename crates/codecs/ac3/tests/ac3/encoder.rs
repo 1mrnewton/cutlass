@@ -5,8 +5,8 @@
 use std::f64::consts::PI;
 
 use cutlass_ac3::{
-    Ac3Decoder, Ac3Encoder, DynamicRange, ENCODER_DELAY, EncoderConfig, EncoderMetadata, Format,
-    MixCodes, Options, ac3_bit_rate, probe,
+    Ac3Decoder, Ac3Encoder, Dec3, DynamicRange, ENCODER_DELAY, EncoderConfig, EncoderMetadata,
+    Format, MixCodes, Options, StreamType, ac3_bit_rate, probe,
 };
 use cutlass_decode::{Channel, ChannelLayout, CodecError, CodecId, Decoder, Packet, Pcm, SideData};
 use cutlass_encode::{AudioInput, Encoder};
@@ -459,7 +459,7 @@ fn the_first_packet_carries_the_config_record() {
                 assert_eq!(dac3.bit_rate_code, 15);
             }
             Format::Eac3 => {
-                let dec3 = cutlass_ac3::Dec3::parse(&record).expect("dec3");
+                let dec3 = Dec3::parse(&record).expect("dec3");
                 assert_eq!(dec3.data_rate, 384);
                 assert_eq!(dec3.substreams.len(), 1);
                 assert_eq!(dec3.substreams[0].acmod, 7);
@@ -567,7 +567,7 @@ fn unsupported_configurations_are_refused() {
         ..config(Format::Eac3, 48_000, &[L, R], 0)
     }));
     assert!(unsupported(config(
-        Format::Eac3,
+        Format::Ac3,
         48_000,
         &[L, R, C, Lfe, Bl, Br, Sl, Sr],
         0
@@ -714,6 +714,78 @@ fn line_mode(codec_id: CodecId, packets: &[Packet]) -> Vec<f32> {
     }
     outputs.extend(decoder.drain().expect("drain"));
     audible(outputs)
+}
+
+/// E-AC-3 7.1 is a 5.1 frame plus a dependent frame for the back pair.
+#[test]
+fn a_seven_point_one_program_keeps_each_speaker() {
+    let Some(ffmpeg) = oracle("ffmpeg", "-version") else {
+        return;
+    };
+    let rate = 48_000u32;
+    let channels = [L, R, C, Lfe, Bl, Br, Sl, Sr];
+    let hz = [300.0, 500.0, 700.0, 60.0, 900.0, 1100.0, 1500.0, 1700.0];
+    let frames = rate as usize;
+    let mut pcm = Vec::with_capacity(frames * channels.len());
+    for n in 0..frames {
+        let t = n as f64 / f64::from(rate);
+        for &freq in &hz {
+            pcm.push((0.25 * (2.0 * PI * freq * t).sin()) as f32);
+        }
+    }
+    let packets = encode(config(Format::Eac3, rate, &channels, 1_024_000), &pcm);
+    let record = packets
+        .iter()
+        .find_map(|packet| {
+            packet.side.iter().find_map(|side| match side {
+                SideData::Config(bytes) => Some(bytes.clone()),
+                _ => None,
+            })
+        })
+        .expect("dec3");
+    let dec3 = Dec3::parse(&record).expect("dec3");
+    let sub = &dec3.substreams[0];
+    assert_eq!(sub.acmod, 7);
+    assert!(sub.lfeon);
+    assert_eq!(sub.num_dep_sub, 1);
+    assert_eq!(sub.chan_loc, 0x002);
+    let head = probe(&packets[0].data).expect("independent");
+    assert_eq!(head.stream_type, StreamType::Independent);
+    let dependent = probe(&packets[0].data[head.frame_bytes..]).expect("dependent");
+    assert_eq!(dependent.stream_type, StreamType::Dependent);
+    assert_eq!(dependent.blocks, head.blocks);
+    let ours = decode(CodecId::Eac3, &packets);
+    assert!(ours.decoder.tools().dependent_frames > 0);
+    assert_eq!(ours.channels, channels);
+    let heard = ffmpeg_decode(&ffmpeg, &stream(&packets), &["-f", "eac3"]);
+    let window = 2_048..frames - 2_048;
+    for (index, &freq) in hz.iter().enumerate() {
+        let channel = deinterleave(&ours.pcm, channels.len(), index);
+        assert!(
+            stands_out(&channel[window.clone()], rate, freq, &hz),
+            "{:?} lost {freq}",
+            channels[index]
+        );
+    }
+    // FFmpeg's acmod 7 layout is the back pair, and so is this dependent
+    // frame, so FFmpeg replaces the independent surrounds with the backs.
+    // The side tones are not a separate pair in that decode.
+    for &freq in &hz[..6] {
+        let found = (0..channels.len()).any(|slot| {
+            let reference = deinterleave(&heard, channels.len(), slot);
+            let end = window.end.min(reference.len());
+            reference.len() > window.start
+                && stands_out(&reference[window.start..end], rate, freq, &hz)
+        });
+        assert!(found, "ffmpeg lost {freq}");
+    }
+}
+
+fn stands_out(channel: &[f32], rate: u32, own: f64, hz: &[f64]) -> bool {
+    let mine = power(channel, rate, own);
+    hz.iter()
+        .filter(|freq| (**freq - own).abs() > 1.0)
+        .all(|freq| mine > power(channel, rate, *freq) * 8.0)
 }
 
 /// A steady tone keeps one exponent set, so the frame is one hybrid transform.

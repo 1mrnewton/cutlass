@@ -63,6 +63,8 @@ pub(crate) struct Frame {
     pub index: u64,
     /// `(csnroffst << 4) | fsnroffst`.
     pub snr: u16,
+    /// E-AC-3 dependent `chanmap`. `None` is an independent substream.
+    pub chanmap: Option<u16>,
 }
 
 /// Bit positions a syncframe written without mantissas reaches: the end
@@ -86,7 +88,7 @@ pub(crate) fn frame(
     let mut w = BitWriter::with_capacity(frame.bytes);
     if shape.eac3 {
         eac3_header(&mut w, shape, meta, frame);
-        audfrm(&mut w, shape, blocks, frame.snr);
+        audfrm(&mut w, shape, blocks, frame.snr, frame.chanmap.is_none());
     } else {
         ac3_header(&mut w, shape, meta, frame);
     }
@@ -96,6 +98,7 @@ pub(crate) fn frame(
         shape,
         flags: FrameFlags::of(shape, blocks),
         snr: frame.snr,
+        independent: frame.chanmap.is_none(),
     };
     for (blk, block) in blocks.iter().enumerate() {
         audblk(&mut w, &context, blk, block, &mut coupling, skip[blk]);
@@ -192,8 +195,9 @@ fn ac3_header(w: &mut BitWriter, shape: &Shape, meta: &Meta, frame: &Frame) {
 
 fn eac3_header(w: &mut BitWriter, shape: &Shape, meta: &Meta, frame: &Frame) {
     let acmod = shape.acmod;
+    let dependent = frame.chanmap.is_some();
     w.put(16, u32::from(crate::header::SYNCWORD));
-    w.put(2, 0); // strmtyp: independent
+    w.put(2, if dependent { 1 } else { 0 }); // strmtyp
     w.put(3, 0); // substreamid
     w.put(11, (frame.bytes / 2 - 1) as u32);
     w.put(2, u32::from(shape.fscod));
@@ -203,7 +207,13 @@ fn eac3_header(w: &mut BitWriter, shape: &Shape, meta: &Meta, frame: &Frame) {
     w.put(5, 16);
     w.put(5, u32::from(meta.dialnorm));
     w.flag(false); // compre
-    let mixing = meta.mix.is_some() || (shape.lfeon && meta.lfe_mix.is_some());
+    if let Some(map) = frame.chanmap {
+        w.flag(true); // chanmape
+        w.put(16, u32::from(map));
+    }
+    // A dependent frame has no program-scale words. Leave mixing off so
+    // the header does not write the independent-only fields.
+    let mixing = !dependent && (meta.mix.is_some() || (shape.lfeon && meta.lfe_mix.is_some()));
     w.flag(mixing);
     if mixing {
         let mix = meta.mix.unwrap_or(MixCodes::DEFAULT);
@@ -245,7 +255,7 @@ fn eac3_header(w: &mut BitWriter, shape: &Shape, meta: &Meta, frame: &Frame) {
     }
     w.flag(false); // audprodie
     w.flag(false); // sourcefscod
-    if shape.blocks != 6 {
+    if !dependent && shape.blocks != 6 {
         w.flag((frame.index * shape.blocks as u64).is_multiple_of(6)); // convsync
     }
     w.flag(false); // addbsie
@@ -261,7 +271,7 @@ fn numblkscod(blocks: usize) -> u32 {
 }
 
 /// Annex E Table E1.3.
-fn audfrm(w: &mut BitWriter, shape: &Shape, blocks: &[Block], snr: u16) {
+fn audfrm(w: &mut BitWriter, shape: &Shape, blocks: &[Block], snr: u16, independent: bool) {
     let nf = shape.nf;
     let hybrid = blocks
         .first()
@@ -302,17 +312,20 @@ fn audfrm(w: &mut BitWriter, shape: &Shape, blocks: &[Block], snr: u16) {
             w.flag(block.expstr[LFE] != REUSE);
         }
     }
-    if shape.blocks == 6 {
-        for ch in 0..nf {
-            let strategies: Vec<u8> = blocks.iter().map(|b| b.expstr[ch]).collect();
-            let code = FRAME_EXPSTR
-                .iter()
-                .position(|row| row[..] == strategies[..])
-                .unwrap_or(0);
-            w.put(5, code as u32); // convexpstr
+    // Converter strategies exist only on an independent substream.
+    if independent {
+        if shape.blocks == 6 {
+            for ch in 0..nf {
+                let strategies: Vec<u8> = blocks.iter().map(|b| b.expstr[ch]).collect();
+                let code = FRAME_EXPSTR
+                    .iter()
+                    .position(|row| row[..] == strategies[..])
+                    .unwrap_or(0);
+                w.put(5, code as u32); // convexpstr
+            }
+        } else {
+            w.flag(false); // convexpstre
         }
-    } else {
-        w.flag(false); // convexpstre
     }
     if hybrid {
         for _ in 0..nf {
@@ -369,6 +382,7 @@ struct Context<'a> {
     shape: &'a Shape,
     flags: FrameFlags,
     snr: u16,
+    independent: bool,
 }
 
 fn audblk(
@@ -379,7 +393,9 @@ fn audblk(
     coupling: &mut CouplingState,
     skip: u16,
 ) {
-    let Context { shape, flags, snr } = *context;
+    let Context {
+        shape, flags, snr, ..
+    } = *context;
     let eac3 = shape.eac3;
     let nf = shape.nf;
     let acmod = shape.acmod;
@@ -544,7 +560,7 @@ fn audblk(
                 w.put(3, 4); // fgaincod
             }
         }
-    } else {
+    } else if context.independent {
         w.flag(false); // convsnroffste
     }
     if block.cplinu {

@@ -5,18 +5,21 @@
 //! packet, two fields in one packet, a format A header, a comment. Frames
 //! from independent encoders are in `oracle.rs`.
 
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use cutlass_decode::video::VideoDecoder;
 use cutlass_decode::{
     CodecError, CodecId, CodecParams, ColorRange, DecodeFactory, Decoder, MatrixCoefficients,
-    Output, Packet, PixelFormat, VideoDecodeFactory,
+    Output, Packet, PixelFormat, Plane, VideoDecodeFactory, VideoFrame,
 };
+use cutlass_encode::video::{VideoEncoder, VideoInput};
+use cutlass_encode::{CpuFrame, EncodeFactory, Encoder, FrameInput, FrameTime};
 use cutlass_jpeg::{Coefficients, Planes, Sampling, Tables, WriteSettings, decode_image};
 
 use crate::{
-    FieldOrder, MAX_PACKET, MjpegDecoder, MjpegPictureDecoder, register_decoders,
-    register_video_decoders,
+    FieldOrder, MAX_PACKET, MjpegDecoder, MjpegEncoder, MjpegPictureDecoder, RateMode,
+    register_decoders, register_encoders, register_video_decoders,
 };
 
 pub(crate) fn params(width: u32, height: u32, extra: &[u8]) -> CodecParams {
@@ -618,4 +621,254 @@ fn the_picture_decoder_hands_the_engine_rgba_with_the_packet_time() {
     let mut picture_decoder = MjpegPictureDecoder::open(&params(0, 0, &[])).expect("open");
     picture_decoder.push(&packet(jpeg, 0)).expect("no size");
     assert_eq!(picture_decoder.inner().last_field_order(), None);
+}
+
+fn rgba_frame(rgb: &[u8], width: u32, height: u32, pts: i64) -> FrameInput {
+    let mut rgba = Vec::with_capacity(rgb.len() / 3 * 4);
+    for pixel in rgb.as_chunks::<3>().0 {
+        rgba.extend_from_slice(&[pixel[0], pixel[1], pixel[2], 255]);
+    }
+    let time = FrameTime::new(pts, 1001, 30_000).expect("time");
+    FrameInput::Cpu(CpuFrame::new(width, height, PixelFormat::Rgba8, rgba, time).expect("frame"))
+}
+
+#[test]
+fn the_encoder_writes_frames_this_decoder_and_the_core_read_back() {
+    let (width, height) = (45, 31);
+    let rgb = detailed_rgb(width, height, 15);
+    let mut encoders = EncodeFactory::new();
+    register_encoders(&mut encoders);
+    let mut quality_params = params(width, height, &[90]);
+    quality_params.pixel = PixelFormat::Rgba8;
+    let mut encoder = encoders.open(&quality_params).expect("open");
+    let packets = encoder
+        .push_frame(&rgba_frame(&rgb, width, height, 5005))
+        .expect("encode");
+    assert_eq!(packets.len(), 1);
+    let packet = &packets[0];
+    assert!(packet.keyframe);
+    assert_eq!(
+        (packet.pts, packet.duration, packet.timescale),
+        (5005, 1001, 30_000)
+    );
+    // The same bytes as the core's encoder at the same quality and sampling.
+    assert_eq!(
+        packet.data,
+        encode(&rgb, width, height, Sampling::Yuv420, 90)
+    );
+    let mut decoder = MjpegDecoder::open(&params(width, height, &[])).expect("open");
+    let back = rgba_of(&mut decoder, &packet.data);
+    assert!(psnr(&rgb_of_rgba(&back), &rgb) > 25.0);
+    assert!(encoder.drain().expect("drain").is_empty());
+}
+
+#[test]
+fn quality_changes_size_and_bad_settings_are_refused() {
+    let rgb = detailed_rgb(64, 48, 16);
+    let size = |quality: u8| {
+        let mut encoder = MjpegEncoder::open(&params(64, 48, &[quality])).expect("open");
+        let FrameInput::Cpu(frame) = rgba_frame(&rgb, 64, 48, 0) else {
+            unreachable!()
+        };
+        encoder
+            .encode_rgba(64, 48, frame.bytes(), 1001, 30_000)
+            .expect("encode")
+            .len()
+    };
+    assert!(size(20) < size(60) && size(60) < size(95));
+    for extra in [&[0u8][..], &[101], &[50, 50]] {
+        assert!(matches!(
+            MjpegEncoder::open(&params(64, 48, extra)),
+            Err(CodecError::Unsupported { .. })
+        ));
+    }
+    assert!(
+        MjpegEncoder::open(&params(64, 48, &[]))
+            .expect("open")
+            .with_mode(RateMode::Quality(0))
+            .is_err()
+    );
+    assert!(matches!(
+        MjpegEncoder::open(&params(20_000, 16, &[])),
+        Err(CodecError::Limit { .. })
+    ));
+    let mut gray = params(64, 48, &[]);
+    gray.pixel = PixelFormat::Yuv440p;
+    assert!(MjpegEncoder::open(&gray).is_err());
+    let mut encoder = MjpegEncoder::open(&params(64, 48, &[])).expect("open");
+    assert_eq!(encoder.mode(), RateMode::Quality(75));
+    assert!(matches!(
+        encoder.push_frame(&rgba_frame(&rgb, 64, 48, 0)),
+        Ok(packets) if packets.len() == 1
+    ));
+    let small = detailed_rgb(32, 48, 1);
+    assert!(matches!(
+        encoder.push_frame(&rgba_frame(&small, 32, 48, 0)),
+        Err(CodecError::InvalidApi { .. })
+    ));
+    let pcm =
+        cutlass_encode::Pcm::from_f32(48_000, cutlass_encode::ChannelLayout::mono(), vec![0.0])
+            .expect("pcm");
+    assert!(Encoder::push(&mut encoder, &cutlass_encode::AudioInput { pcm }).is_err());
+}
+
+fn planar_frame(format: PixelFormat, width: u32, height: u32) -> VideoFrame {
+    let plane = |w: u32, h: u32, seed: u32| {
+        let samples = (0..w * h)
+            .map(|i| ((i * 7 + seed * 31 + i / w * 3) % 256) as u8)
+            .collect();
+        Plane::tight(w, h, samples).expect("plane")
+    };
+    let (cw, ch) = format.chroma_wh(width, height).unwrap_or((0, 0));
+    let mut frame = if format == PixelFormat::Gray8 {
+        let mut frame = VideoFrame::blank_yuv420p(width, height).expect("blank");
+        frame.format = PixelFormat::Gray8;
+        frame.y = plane(width, height, 1);
+        frame.u = Plane::tight(0, 0, Vec::new()).expect("u");
+        frame.v = Plane::tight(0, 0, Vec::new()).expect("v");
+        frame
+    } else {
+        VideoFrame::planar(
+            format,
+            width,
+            height,
+            plane(width, height, 1),
+            plane(cw, ch, 2),
+            plane(cw, ch, 3),
+        )
+        .expect("frame")
+    };
+    frame.range = ColorRange::Full;
+    frame
+}
+
+#[test]
+fn planar_input_keeps_its_sampling_through_encode_and_decode() {
+    for format in [
+        PixelFormat::Gray8,
+        PixelFormat::Yuv420p,
+        PixelFormat::Yuv422p,
+        PixelFormat::Yuv444p,
+    ] {
+        let source = planar_frame(format, 27, 19);
+        let mut encoder = MjpegEncoder::open(&params(27, 19, &[95])).expect("open");
+        let packets = VideoEncoder::push(
+            &mut encoder,
+            &VideoInput {
+                frame: source.clone(),
+                pts: 7,
+                duration: 1,
+                timescale: 24,
+            },
+        )
+        .expect("encode");
+        let mut decoder = MjpegDecoder::open(&params(27, 19, &[])).expect("open");
+        let frame = decoder
+            .decode(&packets[0].data)
+            .expect("decode")
+            .into_frame()
+            .expect("frame");
+        assert_eq!(frame.format, format);
+        assert_eq!(frame.u.width, source.u.width);
+        assert!(
+            psnr(&frame.y.samples, &source.y.samples) > 30.0,
+            "{format:?}"
+        );
+    }
+    let mut studio = planar_frame(PixelFormat::Yuv420p, 16, 16);
+    studio.range = ColorRange::Limited;
+    let mut encoder = MjpegEncoder::open(&params(16, 16, &[])).expect("open");
+    assert!(matches!(
+        encoder.encode_frame(&studio, 1, 24),
+        Err(CodecError::Unsupported {
+            what: "studio range input"
+        })
+    ));
+    let mut hd = planar_frame(PixelFormat::Yuv420p, 16, 16);
+    hd.matrix = MatrixCoefficients::Bt709;
+    assert!(encoder.encode_frame(&hd, 1, 24).is_err());
+    let odd = planar_frame(PixelFormat::Yuv440p, 16, 16);
+    assert!(encoder.encode_frame(&odd, 1, 24).is_err());
+}
+
+#[test]
+fn cancel_stops_the_encoder_until_reset() {
+    let rgb = detailed_rgb(16, 16, 17);
+    let mut encoder = MjpegEncoder::open(&params(16, 16, &[])).expect("open");
+    let flag = Encoder::cancel_flag(&encoder);
+    flag.store(true, Ordering::Relaxed);
+    assert_eq!(
+        encoder.push_frame(&rgba_frame(&rgb, 16, 16, 0)),
+        Err(CodecError::Cancelled)
+    );
+    Encoder::reset(&mut encoder);
+    assert!(encoder.push_frame(&rgba_frame(&rgb, 16, 16, 0)).is_ok());
+    assert!(Arc::ptr_eq(&flag, &VideoEncoder::cancel_flag(&encoder)));
+}
+
+/// A clip that pans across a detailed picture, so every frame differs.
+fn panning_clip(width: u32, height: u32, frames: u32) -> Vec<Vec<u8>> {
+    let wide = detailed_rgb(width + frames * 3, height, 18);
+    let stride = ((width + frames * 3) * 3) as usize;
+    (0..frames)
+        .map(|frame| {
+            let mut out = Vec::with_capacity((width * height * 3) as usize);
+            for y in 0..height as usize {
+                let at = y * stride + frame as usize * 9;
+                out.extend_from_slice(&wide[at..at + (width * 3) as usize]);
+            }
+            out
+        })
+        .collect()
+}
+
+#[test]
+fn bitrate_mode_holds_the_mean_rate_within_ten_percent() {
+    let (width, height, frames) = (160, 96, 30u32);
+    let clip = panning_clip(width, height, frames);
+    // Measure the clip at quality 50 and 90, then target the middle.
+    let sizes: Vec<usize> = [50u8, 90]
+        .iter()
+        .map(|q| {
+            clip.iter()
+                .map(|rgb| encode(rgb, width, height, Sampling::Yuv420, *q).len())
+                .sum()
+        })
+        .collect();
+    let mean_bytes = (sizes[0] + sizes[1]) as f64 / 2.0 / f64::from(frames);
+    let bitrate = (mean_bytes * 8.0 * 30_000.0 / 1001.0) as u32;
+    let mut rate_params = params(width, height, &[]);
+    rate_params.bitrate = bitrate;
+    let mut encoder = MjpegEncoder::open(&rate_params).expect("open");
+    assert_eq!(encoder.mode(), RateMode::Bitrate(u64::from(bitrate)));
+    let mut total = 0usize;
+    let mut qualities = Vec::new();
+    for (index, rgb) in clip.iter().enumerate() {
+        let packets = encoder
+            .push_frame(&rgba_frame(rgb, width, height, index as i64 * 1001))
+            .expect("encode");
+        total += packets[0].data.len();
+        qualities.push(encoder.last_quality().expect("quality"));
+    }
+    let achieved = total as f64 * 8.0 / (f64::from(frames) * 1001.0 / 30_000.0);
+    let error = (achieved - f64::from(bitrate)).abs() / f64::from(bitrate);
+    assert!(
+        error < 0.10,
+        "achieved {achieved} target {bitrate} qualities {qualities:?}"
+    );
+    assert!(
+        qualities.iter().all(|q| (50..=90).contains(q)),
+        "{qualities:?}"
+    );
+
+    // A frame with no duration has no share of a rate.
+    let FrameInput::Cpu(frame) = rgba_frame(&clip[0], width, height, 0) else {
+        unreachable!()
+    };
+    assert!(matches!(
+        encoder.encode_rgba(width, height, frame.bytes(), 0, 30_000),
+        Err(CodecError::InvalidApi {
+            what: "frame duration"
+        })
+    ));
 }

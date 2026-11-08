@@ -358,22 +358,35 @@ fn layout_of(params: &CodecParams) -> Result<ChannelLayout, CodecError> {
     Ok(layout)
 }
 
-/// Samples in an E-AC-3 syncframe: `numblkscod` is 1, 2, 3, or 6 blocks
-/// of 256. A frame that is not E-AC-3 leaves the caller on the six-block size.
+/// Samples in an E-AC-3 packet. Each syncframe's `numblkscod` is 1, 2, 3,
+/// or 6 blocks of 256, and an MP4 sample may hold several short syncframes
+/// in a row. Only program 0's independent syncframes add time: a dependent
+/// substream or another program covers the same samples. A packet that is
+/// not E-AC-3 leaves the caller on the six-block size.
 fn eac3_packet_frames(data: &[u8]) -> Option<usize> {
-    let head = data.get(..6)?;
-    if u16::from_be_bytes([head[0], head[1]]) != 0x0b77 {
-        return None;
+    let mut at = 0usize;
+    let mut frames = 0usize;
+    while at < data.len() {
+        let head = data.get(at..at + 6)?;
+        if u16::from_be_bytes([head[0], head[1]]) != 0x0b77 {
+            return None;
+        }
+        let bsid = head[5] >> 3;
+        if !(11..=16).contains(&bsid) {
+            return None;
+        }
+        if head[4] >> 6 == 0b11 {
+            return None;
+        }
+        let strmtyp = head[2] >> 6;
+        let substreamid = (head[2] >> 3) & 7;
+        if strmtyp != 1 && substreamid == 0 {
+            frames += [1, 2, 3, 6][usize::from((head[4] >> 4) & 3)] * 256;
+        }
+        let words = (usize::from(head[2] & 7) << 8 | usize::from(head[3])) + 1;
+        at += words * 2;
     }
-    let bsid = head[5] >> 3;
-    if !(11..=16).contains(&bsid) {
-        return None;
-    }
-    if head[4] >> 6 == 0b11 {
-        return None;
-    }
-    let blocks = [1, 2, 3, 6][usize::from((head[4] >> 4) & 3)];
-    Some(blocks * 256)
+    (frames > 0).then_some(frames)
 }
 
 fn compressed_desc(
@@ -690,12 +703,14 @@ impl Decoder for AudioDecoder {
         };
         // AudioToolbox drops its own warm-up from the first packet it
         // decodes, so that packet's sound is the end of the packet, not the
-        // start. HE-AAC loses about a thousand frames this way.
+        // start. HE-AAC loses about a thousand frames this way. The packet's
+        // own length counts, so a short E-AC-3 syncframe is not measured
+        // against six blocks.
         let mut pts = packet.pts;
         if !self.sounded {
             self.sounded = true;
             let heard = usize::try_from(pcm.samples).unwrap_or(usize::MAX);
-            let dropped = self.packet_frames.saturating_sub(heard);
+            let dropped = frames.saturating_sub(heard);
             let dropped = i64::try_from(dropped).unwrap_or(0);
             pts = pts.saturating_add(
                 dropped.saturating_mul(i64::from(timescale)) / i64::from(self.rate.max(1)),
@@ -1168,13 +1183,22 @@ mod tests {
         assert!(encoder.drain().expect("second").is_empty());
     }
 
-    #[test]
-    fn an_eac3_syncframe_asks_for_its_own_block_count() {
+    /// An 8-byte E-AC-3 syncframe header: `frmsiz` 3 (four words), then
+    /// `strmtyp`, `substreamid`, and `numblkscod` as given.
+    fn eac3_head(strmtyp: u8, substreamid: u8, numblkscod: u8) -> [u8; 8] {
         let mut frame = [0u8; 8];
         frame[0] = 0x0b;
         frame[1] = 0x77;
-        frame[4] = 0b0001_0000;
+        frame[2] = strmtyp << 6 | substreamid << 3;
+        frame[3] = 3;
+        frame[4] = numblkscod << 4;
         frame[5] = 11 << 3;
+        frame
+    }
+
+    #[test]
+    fn an_eac3_syncframe_asks_for_its_own_block_count() {
+        let mut frame = eac3_head(0, 0, 1);
         assert_eq!(eac3_packet_frames(&frame), Some(512));
         frame[4] = 0b0011_0000;
         assert_eq!(eac3_packet_frames(&frame), Some(1536));
@@ -1183,6 +1207,22 @@ mod tests {
         frame[5] = 8 << 3;
         frame[4] = 0;
         assert_eq!(eac3_packet_frames(&frame), None);
+    }
+
+    /// Several one-block syncframes in one MP4 sample add up. A dependent
+    /// substream and a second program cover the same time and add nothing.
+    #[test]
+    fn an_eac3_packet_of_short_syncframes_counts_each_one() {
+        let mut packet = Vec::new();
+        for _ in 0..3 {
+            packet.extend_from_slice(&eac3_head(0, 0, 0));
+            packet.extend_from_slice(&eac3_head(1, 0, 0));
+            packet.extend_from_slice(&eac3_head(0, 1, 0));
+        }
+        assert_eq!(eac3_packet_frames(&packet), Some(768));
+        packet.push(0);
+        assert_eq!(eac3_packet_frames(&packet), None, "a trailing stray byte");
+        assert_eq!(eac3_packet_frames(&eac3_head(1, 0, 3)), None);
     }
 
     #[test]

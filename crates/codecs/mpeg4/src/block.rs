@@ -17,15 +17,38 @@ pub(crate) enum Coding {
     Short,
 }
 
-/// Reads one block's coefficients as quantised levels into `levels`
-/// (raster order), placing the first at scan position `start`.
+/// What [`read_coefs`] stores for each coefficient.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Scale {
+    /// The quantised level, inverse quantised afterwards.
+    Levels,
+    /// The inter coefficient of the second (H.263) method,
+    /// `sign(l) (mul |l| + add)`. An escape's level zero still gets `add`:
+    /// a fixed-length escape with the sign of a negative level, a
+    /// reversible one with its sign bit, as FFmpeg reconstructs them.
+    H263 { mul: i32, add: i32 },
+}
+
+impl Scale {
+    fn apply(self, level: i32) -> i32 {
+        match self {
+            Self::Levels => level,
+            Self::H263 { mul, add } if level > 0 => level * mul + add,
+            Self::H263 { mul, add } => level * mul - add,
+        }
+    }
+}
+
+/// Reads one block's coefficients into `values` (raster order), placing
+/// the first at scan position `start`.
 pub(crate) fn read_coefs(
     r: &mut BitReader<'_>,
     table: &CoefTable,
     coding: Coding,
     scan: &[u8; 64],
     start: usize,
-    levels: &mut [i32; 64],
+    scale: Scale,
+    values: &mut [i32; 64],
 ) -> Result<(), CodecError> {
     let escape = table.codes.len() as u16;
     let mut i = start;
@@ -33,11 +56,12 @@ pub(crate) fn read_coefs(
         let Some(symbol) = table.vlc.read(r) else {
             return Err(r.malformed("texture coefficient"));
         };
-        let (last, run, level) = if symbol != escape {
+        let (last, run, value) = if symbol != escape {
             let Some(c) = table.codes.get(usize::from(symbol)) else {
                 return Err(r.malformed("texture coefficient"));
             };
-            (c.last, usize::from(c.run), signed(r, i32::from(c.level)))
+            let level = signed(r, i32::from(c.level));
+            (c.last, usize::from(c.run), scale.apply(level))
         } else {
             match coding {
                 Coding::Short => {
@@ -47,7 +71,7 @@ pub(crate) fn read_coefs(
                     if level == 0 || level == -128 {
                         return Err(r.malformed("short header escape level"));
                     }
-                    (last, run, level)
+                    (last, run, scale.apply(level))
                 }
                 Coding::Reversible => {
                     r.marker("reversible escape")?;
@@ -55,34 +79,34 @@ pub(crate) fn read_coefs(
                     let run = r.read(6) as usize;
                     r.marker("reversible escape")?;
                     let level = r.read(11) as i32;
+                    let magnitude = match scale {
+                        Scale::Levels => level,
+                        Scale::H263 { mul, add } => level * mul + add,
+                    };
                     if r.read(5) != 0b10000 {
                         return Err(r.malformed("reversible escape tail"));
                     }
-                    let level = if r.bit() { -level } else { level };
-                    if level == 0 {
-                        return Err(r.malformed("reversible escape level"));
-                    }
-                    (last, run, level)
+                    (last, run, signed(r, magnitude))
                 }
                 Coding::Vlc => {
                     if !r.bit() {
                         // Level offset by the largest the code table holds.
                         let (last, run, level) = plain(r, table, escape)?;
                         let extra = i32::from(table.max_level[usize::from(last)][run.min(63)]);
-                        (last, run, signed(r, level + extra))
+                        (last, run, scale.apply(signed(r, level + extra)))
                     } else if !r.bit() {
                         // Run offset by the longest the code table holds.
                         let (last, run, level) = plain(r, table, escape)?;
                         let index = (level as usize).min(63);
                         let extra = usize::from(table.max_run[usize::from(last)][index]) + 1;
-                        (last, run + extra, signed(r, level))
+                        (last, run + extra, scale.apply(signed(r, level)))
                     } else {
                         let last = r.bit();
                         let run = r.read(6) as usize;
                         r.marker("escape level")?;
                         let level = r.read_signed(12);
                         r.marker("escape level")?;
-                        (last, run, level)
+                        (last, run, scale.apply(level))
                     }
                 }
             }
@@ -91,8 +115,8 @@ pub(crate) fn read_coefs(
         let Some(&pos) = scan.get(i) else {
             return Err(r.malformed("coefficient past the block"));
         };
-        if let Some(slot) = levels.get_mut(usize::from(pos)) {
-            *slot = level;
+        if let Some(slot) = values.get_mut(usize::from(pos)) {
+            *slot = value;
         }
         if last {
             break;
@@ -190,21 +214,30 @@ pub(crate) fn dequant_intra(levels: &[i32; 64], dc: i32, q: i32, quant: Quant<'_
     out
 }
 
-/// Inverse quantises an inter block from levels in raster order.
-pub(crate) fn dequant_inter(levels: &[i32; 64], q: i32, quant: Quant<'_>) -> [i16; 64] {
+/// How [`read_coefs`] reads an inter block quantised with `q`.
+pub(crate) fn inter_scale(q: i32, quant: Quant<'_>) -> Scale {
+    match quant {
+        Quant::H263 => Scale::H263 {
+            mul: 2 * q,
+            add: (q - 1) | 1,
+        },
+        Quant::Mpeg { .. } => Scale::Levels,
+    }
+}
+
+/// Inverse quantises an inter block read with [`inter_scale`]: H.263
+/// coefficients are already scaled and only saturate.
+pub(crate) fn dequant_inter(values: &[i32; 64], q: i32, quant: Quant<'_>) -> [i16; 64] {
     let mut out = [0i16; 64];
     match quant {
         Quant::H263 => {
-            let (mul, add) = (2 * q, (q - 1) | 1);
-            for (o, &l) in out.iter_mut().zip(levels) {
-                if l != 0 {
-                    *o = saturate(l.signum() * (l.abs() * mul + add));
-                }
+            for (o, &v) in out.iter_mut().zip(values) {
+                *o = saturate(v);
             }
         }
         Quant::Mpeg { inter, .. } => {
             let mut sum = 0i32;
-            for ((o, &l), &w) in out.iter_mut().zip(levels).zip(inter) {
+            for ((o, &l), &w) in out.iter_mut().zip(values).zip(inter) {
                 if l != 0 {
                     let v = saturate(l.signum() * (((2 * l.abs() + 1) * q * i32::from(w)) >> 4));
                     sum += i32::from(v);
@@ -221,7 +254,9 @@ pub(crate) fn dequant_inter(levels: &[i32; 64], q: i32, quant: Quant<'_>) -> [i1
 
 #[cfg(test)]
 mod tests {
-    use super::{Coding, Quant, dequant_inter, dequant_intra, read_coefs, read_dc};
+    use super::{
+        Coding, Quant, Scale, dequant_inter, dequant_intra, inter_scale, read_coefs, read_dc,
+    };
     use crate::bits::{BitReader, BitWriter};
     use crate::tables::{DEFAULT_INTER_MATRIX, DEFAULT_INTRA_MATRIX, TCOEF_ESCAPE, ZIGZAG, tables};
 
@@ -256,7 +291,16 @@ mod tests {
         let bytes = w.finish();
         let mut r = BitReader::new(&bytes);
         let mut levels = [0i32; 64];
-        read_coefs(&mut r, t, Coding::Vlc, &ZIGZAG, 0, &mut levels).expect("block");
+        read_coefs(
+            &mut r,
+            t,
+            Coding::Vlc,
+            &ZIGZAG,
+            0,
+            Scale::Levels,
+            &mut levels,
+        )
+        .expect("block");
         let run2 = usize::from(t.max_run[0][1]) + 1;
         let level1 = 1 + i32::from(t.max_level[0][1]);
         let mut want = [0i32; 64];
@@ -280,9 +324,31 @@ mod tests {
         let bytes = w.finish();
         let mut levels = [0i32; 64];
         let mut r = BitReader::new(&bytes);
-        assert!(read_coefs(&mut r, t, Coding::Vlc, &ZIGZAG, 0, &mut levels).is_err());
+        assert!(
+            read_coefs(
+                &mut r,
+                t,
+                Coding::Vlc,
+                &ZIGZAG,
+                0,
+                Scale::Levels,
+                &mut levels
+            )
+            .is_err()
+        );
         let mut r = BitReader::new(&bytes[..1]);
-        assert!(read_coefs(&mut r, t, Coding::Vlc, &ZIGZAG, 0, &mut levels).is_err());
+        assert!(
+            read_coefs(
+                &mut r,
+                t,
+                Coding::Vlc,
+                &ZIGZAG,
+                0,
+                Scale::Levels,
+                &mut levels
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -304,10 +370,22 @@ mod tests {
         let mut levels = [0i32; 64];
         levels[1] = 3;
         levels[8] = -2;
-        // H.263: 2q|l| + q (odd q), or q - 1 (even q).
-        let out = dequant_inter(&levels, 5, Quant::H263);
+        // H.263: 2q|l| + q (odd q), or q - 1 (even q), applied as inter
+        // levels are read.
+        let h263 = |levels: &[i32; 64], q: i32| {
+            let scale = inter_scale(q, Quant::H263);
+            assert!(
+                scale
+                    == Scale::H263 {
+                        mul: 2 * q,
+                        add: (q - 1) | 1
+                    }
+            );
+            levels.map(|l| if l == 0 { 0 } else { scale.apply(l) })
+        };
+        let out = dequant_inter(&h263(&levels, 5), 5, Quant::H263);
         assert_eq!((out[1], out[8]), (35, -25));
-        let out = dequant_inter(&levels, 4, Quant::H263);
+        let out = dequant_inter(&h263(&levels, 4), 4, Quant::H263);
         assert_eq!((out[1], out[8]), (27, -19));
         let out = dequant_intra(&levels, 1024, 4, Quant::H263);
         assert_eq!((out[0], out[1], out[8]), (1024, 27, -19));
@@ -329,7 +407,31 @@ mod tests {
         assert_eq!(sum & 1, 1);
         // Saturation.
         levels[1] = 2000;
-        let out = dequant_inter(&levels, 31, Quant::H263);
-        assert_eq!(out[1], 2047);
+        let out = dequant_inter(&h263(&levels, 31), 31, Quant::H263);
+        assert_eq!((out[1], out[8]), (2047, -155));
+    }
+
+    #[test]
+    fn an_escaped_zero_level_still_reconstructs_in_h263_inter_blocks() {
+        let t = &tables().inter;
+        let mut w = BitWriter::new();
+        // Escape 3: last, run 0, level 0.
+        w.put(u32::from(TCOEF_ESCAPE.0), u32::from(TCOEF_ESCAPE.1));
+        w.put(2, 0b11);
+        w.put(1, 1);
+        w.put(6, 0);
+        w.put(1, 1);
+        w.put(12, 0);
+        w.put(1, 1);
+        let bytes = w.finish();
+        let read = |scale| {
+            let mut values = [0i32; 64];
+            let mut r = BitReader::new(&bytes);
+            read_coefs(&mut r, t, Coding::Vlc, &ZIGZAG, 0, scale, &mut values).expect("block");
+            values[0]
+        };
+        // FFmpeg's reconstruction: a level that is not positive takes -add.
+        assert_eq!(read(inter_scale(6, Quant::H263)), -5);
+        assert_eq!(read(Scale::Levels), 0);
     }
 }

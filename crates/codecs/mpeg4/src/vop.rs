@@ -5,7 +5,9 @@
 use cutlass_decode::CodecError;
 
 use crate::bits::BitReader;
-use crate::block::{Coding, Quant, dequant_inter, dequant_intra, read_coefs, read_dc};
+use crate::block::{
+    Coding, Quant, Scale, dequant_inter, dequant_intra, inter_scale, read_coefs, read_dc,
+};
 use crate::frame::{Frame, Kind, MbRecord};
 use crate::header::{Encoder, VopType, read_trajectory};
 use crate::idct;
@@ -548,13 +550,13 @@ impl Vop<'_> {
                     }
                 };
                 if coded {
-                    read_coefs(r, table, coding, scan(dir), 1, &mut levels)?;
+                    read_coefs(r, table, coding, scan(dir), 1, Scale::Levels, &mut levels)?;
                 }
                 (qf, dir)
             } else {
                 let (pred, dir) = self.dc_pred(mbx, mby, k);
                 if coded {
-                    read_coefs(r, table, coding, scan(dir), 0, &mut levels)?;
+                    read_coefs(r, table, coding, scan(dir), 0, Scale::Levels, &mut levels)?;
                 }
                 let diff = levels[0];
                 levels[0] = 0;
@@ -596,9 +598,17 @@ impl Vop<'_> {
             if cbp & (32 >> k) == 0 {
                 continue;
             }
-            let mut levels = [0i32; 64];
-            read_coefs(r, table, coding, scan, 0, &mut levels)?;
-            blocks.coef[k] = dequant_inter(&levels, self.q, quant);
+            let mut values = [0i32; 64];
+            read_coefs(
+                r,
+                table,
+                coding,
+                scan,
+                0,
+                inter_scale(self.q, quant),
+                &mut values,
+            )?;
+            blocks.coef[k] = dequant_inter(&values, self.q, quant);
             blocks.coded |= 1 << k;
         }
         Ok(())
@@ -1728,7 +1738,15 @@ impl Vop<'_> {
                 let dc = if v == 255 { 1024 } else { v * 8 };
                 let mut levels = [0i32; 64];
                 if cbp & (32 >> k) != 0 {
-                    read_coefs(r, &t.inter, Coding::Short, &ZIGZAG, 1, &mut levels)?;
+                    read_coefs(
+                        r,
+                        &t.inter,
+                        Coding::Short,
+                        &ZIGZAG,
+                        1,
+                        Scale::Levels,
+                        &mut levels,
+                    )?;
                 }
                 blocks.coef[k] = dequant_intra(&levels, dc, self.q, Quant::H263);
             }

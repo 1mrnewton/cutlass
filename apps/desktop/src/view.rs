@@ -19,6 +19,7 @@ use crate::ui;
 use crate::widgets;
 
 mod assistant;
+mod audio;
 mod grade;
 mod inspector;
 mod speed;
@@ -8377,7 +8378,23 @@ mod tests {
             ),
             (
                 "sound",
-                &["Audio", "Speed", "Volume", "Fade in", "Fade out", "Denoise"],
+                &[
+                    "Basic",
+                    "Voice changer",
+                    "Speed",
+                    "Volume",
+                    "Fade in",
+                    "Fade out",
+                    "Normalize loudness",
+                    "Enhance voice",
+                    "Audio translator",
+                    "Reduce noise",
+                    "Separate audio",
+                    "Vocals",
+                    "Keep remaining audio",
+                    "Fill channel",
+                    "Later",
+                ],
                 &["Position & Size", "Stroke", "Video"],
             ),
             (

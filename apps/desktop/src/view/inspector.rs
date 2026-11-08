@@ -22,29 +22,29 @@ use cutlass_model::{ANIMATION_PRESETS, AnimType, Micros, Motion};
 use super::ViewState;
 
 /// The active tab color, and an on switch.
-const ACCENT: Color32 = Color32::from_rgb(0x2a, 0xd4, 0xe0);
+pub(super) const ACCENT: Color32 = Color32::from_rgb(0x2a, 0xd4, 0xe0);
 const PAGES: Color32 = tokens::INSET;
 const PAGE_ON: Color32 = Color32::from_rgb(0x3a, 0x3a, 0x3a);
-const BOX: Color32 = tokens::RAISED;
+pub(super) const BOX: Color32 = tokens::RAISED;
 const LABEL_WIDTH: f32 = 92.0;
-const VALUE_WIDTH: f32 = 60.0;
+pub(super) const VALUE_WIDTH: f32 = 60.0;
 const PAIR_BOX: f32 = 84.0;
 /// The height of a control row, and the gap under it.
-const ROW_HEIGHT: f32 = 28.0;
-const ROW_GAP: f32 = 6.0;
+pub(super) const ROW_HEIGHT: f32 = 28.0;
+pub(super) const ROW_GAP: f32 = 6.0;
 /// The widest and narrowest gap between the inspector's tabs.
 const TAB_GAP: f32 = 18.0;
 const TAB_GAP_MIN: f32 = 8.0;
-const LATER: &str = "Later: Cutlass has no edit for this yet";
+pub(super) const LATER: &str = "Later: Cutlass has no edit for this yet";
 
 /// Which tab, page, and sections are open. They reset when another clip
 /// is picked, as the prototype's panels do.
 #[derive(Default)]
 pub(super) struct InspectorState {
     clip: String,
-    tab: usize,
+    pub(super) tab: usize,
     pub(super) page: usize,
-    open: HashSet<String>,
+    pub(super) open: HashSet<String>,
     /// Typed text in a number or word field while it has focus.
     fields: HashMap<String, String>,
     /// A slider or color being dragged; it is sent when the pointer lets go.
@@ -493,20 +493,7 @@ fn audio_panel(
     state: &mut InspectorState,
     inspection: &Inspection,
 ) {
-    let tab = state.tab;
-    tabs(ui, &["Audio", "Speed"], &mut state.tab);
-    if tab != state.tab {
-        state.page = 0;
-    }
-    if state.tab == 1 {
-        super::speed::speed_tab(shell, ui, state, inspection);
-        return;
-    }
-    body(ui, |ui| {
-        sound_sliders(shell, ui, state, inspection);
-        later_slider(ui, "Denoise", 0.0, "0");
-    });
-    later_button(ui, "Change voice");
+    super::audio::audio_panel(shell, ui, state, inspection);
 }
 
 fn sticker_panel(
@@ -788,7 +775,7 @@ fn canvas(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState, inspection
     }
 }
 
-fn sound_section(
+pub(super) fn sound_section(
     shell: &mut Shell,
     ui: &mut Ui,
     state: &mut InspectorState,
@@ -2463,7 +2450,7 @@ pub(super) fn send(shell: &mut Shell, edit: impl FnOnce(&mut Shell) -> Result<()
 
 /// The text tabs across the top. The active one is cyan. Tabs that do not
 /// fit scroll sideways, as the prototype's do.
-fn tabs(ui: &mut Ui, labels: &[&str], current: &mut usize) {
+pub(super) fn tabs(ui: &mut Ui, labels: &[&str], current: &mut usize) {
     paid_tabs(ui, labels, &[], current);
 }
 
@@ -2688,7 +2675,7 @@ fn section_name(ui: &mut Ui, label: &str) -> egui::Response {
 }
 
 /// A painted fold mark: down when open, right when shut.
-fn chevron(ui: &mut Ui, open: bool) -> egui::Response {
+pub(super) fn chevron(ui: &mut Ui, open: bool) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(12.0), Sense::click());
     let c = rect.center();
     let points = if open {
@@ -2710,7 +2697,7 @@ fn chevron(ui: &mut Ui, open: bool) -> egui::Response {
 }
 
 /// The faint line under a section header or a feature row.
-fn divider(ui: &mut Ui) {
+pub(super) fn divider(ui: &mut Ui) {
     let line = ui.cursor().min.y;
     let span = ui.max_rect().x_range();
     ui.painter()
@@ -2734,7 +2721,7 @@ fn later_row(ui: &mut Ui, label: &str) {
 }
 
 /// A small "Later" mark, painted at text height so it never stretches a row.
-fn later_badge(ui: &mut Ui) {
+pub(super) fn later_badge(ui: &mut Ui) {
     let galley =
         ui.painter()
             .layout_no_wrap("Later".to_owned(), FontId::proportional(10.0), ACCENT);
@@ -2839,7 +2826,7 @@ struct CatalogPage {
 }
 
 /// The side of a catalog tile, and the gap between two.
-const CATALOG_TILE: f32 = 60.0;
+pub(super) const CATALOG_TILE: f32 = 60.0;
 const CATALOG_GAP: f32 = 6.0;
 /// Tile pictures drawn in one frame; the rest follow in the next.
 const TILES_PER_FRAME: usize = 4;
@@ -2932,7 +2919,7 @@ fn catalog_page(
 }
 
 /// The None tile: a ring with a slash.
-fn none_tile(ui: &mut Ui, on: bool) -> egui::Response {
+pub(super) fn none_tile(ui: &mut Ui, on: bool) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(CATALOG_TILE), Sense::click());
     let response = response.on_hover_text("None");
     response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "None"));
@@ -2946,7 +2933,7 @@ fn none_tile(ui: &mut Ui, on: bool) -> egui::Response {
 }
 
 /// A tile's box: raised, lighter on hover, outlined when worn.
-fn tile_frame(ui: &Ui, rect: Rect, response: &egui::Response, on: bool) {
+pub(super) fn tile_frame(ui: &Ui, rect: Rect, response: &egui::Response, on: bool) {
     let painter = ui.painter();
     let fill = if response.hovered() {
         tokens::RAISED.gamma_multiply(1.3)
@@ -3150,7 +3137,7 @@ pub(super) fn body(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
     ui.add_space(ROW_GAP);
 }
 
-fn row_label(ui: &mut Ui, label: &str) {
+pub(super) fn row_label(ui: &mut Ui, label: &str) {
     let (rect, _) = ui.allocate_exact_size(Vec2::new(LABEL_WIDTH, ROW_HEIGHT), Sense::hover());
     let color = if ui.is_enabled() {
         tokens::TEXT
@@ -3267,7 +3254,7 @@ fn later_slider(ui: &mut Ui, label: &str, value: f64, shown: &str) {
     ui.add_space(ROW_GAP);
 }
 
-fn value_box(ui: &mut Ui, text: &str) {
+pub(super) fn value_box(ui: &mut Ui, text: &str) {
     let (rect, _) = ui.allocate_exact_size(Vec2::new(VALUE_WIDTH, ROW_HEIGHT), Sense::hover());
     ui.painter().rect_filled(rect, CornerRadius::same(8), BOX);
     ui.painter().text(
@@ -3431,7 +3418,7 @@ pub(super) fn switch_row(ui: &mut Ui, label: &str, on: bool, editable: bool) -> 
     response
 }
 
-fn check_box(ui: &mut Ui, on: bool, name: &str) -> egui::Response {
+pub(super) fn check_box(ui: &mut Ui, on: bool, name: &str) -> egui::Response {
     // The caller flips the stored value on a click; this copy only draws.
     let mut shown = on;
     ui.add(ui::Check::new(&mut shown, "").name(name))

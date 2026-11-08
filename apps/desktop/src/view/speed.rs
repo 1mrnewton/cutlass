@@ -48,6 +48,47 @@ pub(super) fn speed_tab(
     });
 }
 
+/// An audio clip's Speed tab: one speed, the length it plays for, whether
+/// the pitch follows, and Reset back to normal speed. Sound has no curve.
+pub(super) fn audio_speed_tab(
+    shell: &mut Shell,
+    ui: &mut Ui,
+    state: &mut InspectorState,
+    inspection: &Inspection,
+) {
+    normal_page(shell, ui, state, inspection);
+    body(ui, |ui| {
+        ui.horizontal(|ui| {
+            super::inspector::row_label(ui, "Duration");
+            let seconds = inspection.duration.0 as f64 / 1_000_000.0;
+            super::inspector::value_box(ui, &format!("{seconds:.1}s"));
+            super::inspector::later_badge(ui);
+        })
+        .response
+        .on_hover_text("Typing a length comes later; set the speed instead");
+        ui.add_space(super::inspector::ROW_GAP);
+        if switch_row(ui, "Change pitch", inspection.change_pitch, true)
+            .on_hover_text("Let the voice go higher when faster and lower when slower")
+            .clicked()
+        {
+            let on = !inspection.change_pitch;
+            send(shell, |shell| shell.set_change_pitch(on));
+        }
+        ui.horizontal(|ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let normal = inspection.speed == 1.0 && inspection.speed_curve.is_none();
+                if ui
+                    .add_enabled(!normal, ui::Button::new("Reset").text_size(12.0))
+                    .on_hover_text("Back to normal speed")
+                    .clicked()
+                {
+                    send(shell, |shell| shell.set_speed(1.0));
+                }
+            });
+        });
+    });
+}
+
 fn normal_page(
     shell: &mut Shell,
     ui: &mut Ui,

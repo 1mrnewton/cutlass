@@ -16,6 +16,20 @@ pub fn set_denoise(draft: &mut Draft, segment_id: &SegmentId, level: i64) -> Res
     set_algorithm(draft, segment_id, Algorithm::NOISE_REDUCTION, level)
 }
 
+/// Fill the clip to `fps` frames a second with Optical flow, one of
+/// [`Algorithm::FRAME_RATES`], or stop at 0 or below, as [`set_enhance`]
+/// does.
+pub fn set_interpolate(
+    draft: &mut Draft,
+    segment_id: &SegmentId,
+    fps: i64,
+) -> Result<(), EditError> {
+    if fps > 0 && !Algorithm::FRAME_RATES.contains(&fps) {
+        return Err(EditError::FlowRate);
+    }
+    set_algorithm(draft, segment_id, Algorithm::COMPLEMENT_FRAME, fps)
+}
+
 fn set_algorithm(
     draft: &mut Draft,
     segment_id: &SegmentId,
@@ -228,5 +242,91 @@ mod tests {
             },
             Err(EditError::NotVideo)
         );
+    }
+
+    fn interpolate(session: &mut Session, segment: &str, fps: i64) -> Result<u64, EditError> {
+        let revision = session.revision();
+        session.apply(
+            revision,
+            &[Request::SetInterpolate {
+                segment_id: segment.into(),
+                fps,
+            }],
+        )
+    }
+
+    fn fps(session: &Session) -> Option<i64> {
+        session.draft().materials.videos[0]
+            .interpolate()
+            .map(|flow| flow.level)
+    }
+
+    #[test]
+    fn optical_flow_takes_an_offered_rate_beside_the_others_and_zero_stops_it() {
+        let mut session = session_with(None);
+        set(&mut session, "picture", Algorithm::HD).unwrap();
+        for rate in Algorithm::FRAME_RATES {
+            interpolate(&mut session, "picture", rate).unwrap();
+            assert_eq!(fps(&session), Some(rate));
+        }
+        assert_eq!(level(&session), Some(Algorithm::HD));
+        let before = session.draft().clone();
+        for odd in [24, 1, 120, i64::MAX] {
+            assert_eq!(
+                interpolate(&mut session, "picture", odd),
+                Err(EditError::FlowRate),
+                "{odd}"
+            );
+        }
+        assert_eq!(session.draft(), &before);
+        assert_eq!(
+            interpolate(&mut session, "tone", 30),
+            Err(EditError::NotVideo)
+        );
+        interpolate(&mut session, "picture", 0).unwrap();
+        assert_eq!(fps(&session), None);
+        assert_eq!(level(&session), Some(Algorithm::HD));
+        session.undo().unwrap();
+        assert_eq!(fps(&session), Some(60));
+    }
+
+    #[test]
+    fn optical_flow_on_every_clip_at_once_is_one_undo_step() {
+        let mut draft = session_with(None).draft().clone();
+        draft.tracks[0].segments.push(Segment::new(
+            "second",
+            "picture",
+            TimeRange::new(1_000_000, 1_000_000),
+        ));
+        let mut session = Session::open(draft);
+        let revision = session.revision();
+        session
+            .apply(
+                revision,
+                &[
+                    Request::SetInterpolate {
+                        segment_id: "picture".into(),
+                        fps: 50,
+                    },
+                    Request::SetInterpolate {
+                        segment_id: "second".into(),
+                        fps: 50,
+                    },
+                ],
+            )
+            .unwrap();
+        let flowed = |session: &Session| {
+            session
+                .draft()
+                .materials
+                .videos
+                .iter()
+                .filter(|video| video.interpolate().is_some_and(|flow| flow.level == 50))
+                .count()
+        };
+        // Each clip owns its copy of the material, both filled.
+        assert_eq!(flowed(&session), 2);
+        session.undo().unwrap();
+        assert_eq!(flowed(&session), 0);
     }
 }

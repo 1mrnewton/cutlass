@@ -110,6 +110,8 @@ pub enum EditError {
     NotAudio,
     /// Extract audio applies to a video clip.
     NotVideo,
+    /// Optical flow fills a clip only to a frame rate it offers.
+    FlowRate,
     /// The picture has no sound to place.
     NoSound,
     /// The picture's sound is already its own clip.
@@ -332,6 +334,9 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
         }
         Request::SetDenoise { segment_id, level } => {
             enhance::set_denoise(draft, segment_id, *level)
+        }
+        Request::SetInterpolate { segment_id, fps } => {
+            enhance::set_interpolate(draft, segment_id, *fps)
         }
         Request::SetTextContent {
             segment_id,

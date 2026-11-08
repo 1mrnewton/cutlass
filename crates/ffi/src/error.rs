@@ -151,6 +151,9 @@ fn edit_cause(error: EditError) -> String {
         EditError::TextSize => "the text size must be greater than zero and at most 512".to_owned(),
         EditError::TextColor => "the text color is not a hex color".to_owned(),
         EditError::TextAlign => "text alignment is not left, center, or right".to_owned(),
+        EditError::FlowRate => {
+            "Optical flow fills a clip to 30, 50 or 60 frames a second".to_owned()
+        }
         EditError::LetterSpacing => "letter spacing must be from -1 to 4".to_owned(),
         EditError::LineSpacing => "line spacing must be greater than -1 and at most 4".to_owned(),
         EditError::LineWidth => "the line width must be from zero through 8192".to_owned(),

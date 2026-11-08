@@ -164,6 +164,9 @@ impl std::fmt::Display for ShellError {
             Self::Edit(EditError::TextAlign) => {
                 formatter.write_str("text alignment is not left, center, or right")
             }
+            Self::Edit(EditError::FlowRate) => {
+                formatter.write_str("Optical flow fills a clip to 30, 50 or 60 frames a second")
+            }
             Self::Edit(EditError::LetterSpacing) => {
                 formatter.write_str("letter spacing must be from -1 to 4")
             }

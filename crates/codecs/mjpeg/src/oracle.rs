@@ -1,7 +1,9 @@
 //! Checks against independent implementations: FFmpeg's `mjpeg` encoder and
 //! decoder, and libjpeg-turbo's `cjpeg` and `djpeg`. They run as separate
 //! programs in tests only. A missing program skips the test, unless
-//! `MJPEG_REQUIRE_ORACLES=1`, which makes it fail.
+//! `MJPEG_REQUIRE_ORACLES=1`, which makes it fail. One test needs no tool:
+//! it decodes frames committed under `fixtures/` and compares digests of
+//! djpeg's output recorded when they were made.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -579,5 +581,97 @@ fn real_footage_frames_from_local_files_match_djpeg() {
                 );
             }
         }
+    }
+}
+
+/// FNV-1a, 64-bit, over decoded samples.
+fn digest(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x100_0000_01b3)
+    })
+}
+
+struct Reference {
+    name: &'static str,
+    jpeg: &'static [u8],
+    /// Strip the DHT before decoding.
+    no_dht: bool,
+    size: (u32, u32),
+    channels: usize,
+    digest: u64,
+}
+
+/// Committed frames from cjpeg and FFmpeg, checked against digests of
+/// libjpeg-turbo's output, so this runs with no tool installed. The
+/// frames are 45×29 from a synthetic picture, and the field pair is two
+/// 40×24 cjpeg images in one packet. Each digest is FNV-1a over the RGB
+/// or grey samples of `djpeg -dct int -pnm` (libjpeg-turbo 3.2.0); for the
+/// pair, over the two fields' outputs interleaved row by row. The FFmpeg
+/// frame (`-c:v mjpeg -huffman default -pix_fmt yuvj422p -q:v 4`) is
+/// decoded with its DHT stripped, so the Annex K tables are checked too.
+#[test]
+fn committed_reference_frames_match_their_djpeg_digests() {
+    let cases = [
+        Reference {
+            name: "cjpeg 4:2:0 q75",
+            jpeg: include_bytes!("../fixtures/cjpeg-420.jpg"),
+            no_dht: false,
+            size: (45, 29),
+            channels: 3,
+            digest: 0x49ba_2672_626a_f677,
+        },
+        Reference {
+            name: "cjpeg 4:2:2 progressive q90",
+            jpeg: include_bytes!("../fixtures/cjpeg-422-progressive.jpg"),
+            no_dht: false,
+            size: (45, 29),
+            channels: 3,
+            digest: 0xa704_cbea_3463_0470,
+        },
+        Reference {
+            name: "cjpeg grey, restart 1",
+            jpeg: include_bytes!("../fixtures/cjpeg-gray-restart.jpg"),
+            no_dht: false,
+            size: (45, 29),
+            channels: 1,
+            digest: 0xf606_c309_fbfa_b282,
+        },
+        Reference {
+            name: "ffmpeg 4:2:2 without DHT",
+            jpeg: include_bytes!("../fixtures/ffmpeg-422.jpg"),
+            no_dht: true,
+            size: (45, 29),
+            channels: 3,
+            digest: 0xc4dd_448e_48a6_cfcd,
+        },
+        Reference {
+            name: "cjpeg 4:2:0 field pair",
+            jpeg: include_bytes!("../fixtures/field-pair-420.jpg"),
+            no_dht: false,
+            size: (40, 48),
+            channels: 3,
+            digest: 0x2294_38f3_d474_16e5,
+        },
+    ];
+    for Reference {
+        name,
+        jpeg,
+        no_dht,
+        size: (width, height),
+        channels,
+        digest: want,
+    } in cases
+    {
+        let packet = if no_dht {
+            let stripped = strip(jpeg, &[0xc4]);
+            assert!(stripped.len() < jpeg.len(), "{name}: DHT present");
+            stripped
+        } else {
+            jpeg.to_vec()
+        };
+        let mut decoder = MjpegDecoder::open(&params(width, height, &[])).expect("open");
+        let rgb = our_rgb(&mut decoder, &packet, channels);
+        assert_eq!(rgb.len(), (width * height) as usize * channels, "{name}");
+        assert_eq!(digest(&rgb), want, "{name}");
     }
 }

@@ -95,10 +95,12 @@ Field order has no slot in `PictureInfo`, `VideoFrame`, or the engine's frame. F
 
 Tools: FFmpeg 8.1.1 (`/opt/homebrew/bin/ffmpeg`), libjpeg-turbo 3.2.0 `cjpeg` and `djpeg`. Machine: Apple M5 Pro, 18 cores. `MJPEG_REQUIRE_ORACLES=1` makes a missing tool fail the oracle tests instead of skipping them; every `cutlass-mjpeg` run recorded here set it, and the desktop and ISOBMFF oracle tests found FFmpeg and ran.
 
+Which checks need the tools: every test in `oracle.rs` except one runs FFmpeg, cjpeg, or djpeg, and skips without them, so they do not run on a machine without them; `.github/workflows/ci.yml` installs none of them. `committed_reference_frames_match_their_djpeg_digests` needs no tool: it decodes five frames committed in `fixtures/` (cjpeg 4:2:0, 4:2:2 progressive, grey with restart 1, an FFmpeg 4:2:2 frame with its DHT stripped, and a cjpeg 4:2:0 field pair) and compares the RGB samples with FNV-1a digests of `djpeg -dct int` output recorded when the fixtures were made. It is bit-exact on those five only; the planar within-1 checks against FFmpeg, the encoder checks against cjpeg, and real footage still need the tools. The ISOBMFF FFmpeg checks also skip without FFmpeg, and have no flag that makes them fail.
+
 | Gate | Budget | Result |
 | --- | --- | --- |
 | Planar decode against FFmpeg (`-idct int`, raw `yuvj*` planes) | Every sample within 1 (T.83) on grey, 4:4:4, 4:2:2, 4:2:0, 4:4:0 | Met |
-| RGBA decode against `djpeg -dct int` | Bit-exact on grey, 4:4:4, 4:2:2, 4:2:0, 4:4:0, RGB, progressive, SOF1 | Met, including 5 frames each of two real clips, scaled to 720 rows as `yuvj420p` and to 641×361 as `yuvj422p` |
+| RGBA decode against `djpeg -dct int` | Bit-exact on grey, 4:4:4, 4:2:2, 4:2:0, 4:4:0, RGB, progressive, SOF1 | Met, including 5 frames each of two real clips, scaled to 720 rows as `yuvj420p` and to 641×361 as `yuvj422p`. Needs the tools, except the five committed frames in `committed_reference_frames_match_their_djpeg_digests` |
 | Encoder output | `ffmpeg -xerror` and `djpeg` decode every frame with no warning | Met |
 | Encoder quality | Same quality and sampling as `cjpeg -dct int`: size within 2 % and PSNR within 0.2 dB | Met; decoded samples are equal to cjpeg's |
 | Rate control | Mean bitrate within 10 % of the target over a clip | Met |

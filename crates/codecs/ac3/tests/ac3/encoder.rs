@@ -5,8 +5,8 @@
 use std::f64::consts::PI;
 
 use cutlass_ac3::{
-    Ac3Decoder, Ac3Encoder, ENCODER_DELAY, EncoderConfig, EncoderMetadata, Format, MixCodes,
-    Options, ac3_bit_rate, probe,
+    Ac3Decoder, Ac3Encoder, DynamicRange, ENCODER_DELAY, EncoderConfig, EncoderMetadata, Format,
+    MixCodes, Options, ac3_bit_rate, probe,
 };
 use cutlass_decode::{Channel, ChannelLayout, CodecError, CodecId, Decoder, Packet, Pcm, SideData};
 use cutlass_encode::{AudioInput, Encoder};
@@ -655,6 +655,65 @@ fn ffmpeg_decodes_our_streams() {
             }
         }
     }
+}
+
+/// A block louder than half scale carries a `dynrng` cut, and line mode applies it.
+#[test]
+fn a_loud_block_is_cut_to_half_scale() {
+    let Some(ffmpeg) = oracle("ffmpeg", "-version") else {
+        return;
+    };
+    let rate = 48_000u32;
+    let channels = [C];
+    let pcm = tones(&channels, rate, rate as usize, 0.9);
+    for format in [Format::Ac3, Format::Eac3] {
+        let packets = encode(config(format, rate, &channels, 0), &pcm);
+        let full = decode(codec(format), &packets);
+        let line = line_mode(codec(format), &packets);
+        let span = 4_096..pcm.len() - 4_096;
+        let full_peak = peak(&full.pcm[span.clone()]);
+        let line_peak = peak(&line[span.clone()]);
+        assert!(full_peak > 0.7, "{format:?} full {full_peak}");
+        assert!(
+            (0.35..0.65).contains(&line_peak),
+            "{format:?} line {line_peak}"
+        );
+        let kind = if format == Format::Eac3 {
+            "eac3"
+        } else {
+            "ac3"
+        };
+        let theirs = ffmpeg_decode(&ffmpeg, &stream(&packets), &["-drc_scale", "1", "-f", kind]);
+        let skip = ENCODER_DELAY as usize;
+        let heard: Vec<f32> = theirs.into_iter().skip(skip).collect();
+        let end = span.end.min(line.len()).min(heard.len());
+        let quality = snr(&line[span.start..end], &heard[span.start..end]);
+        assert!(quality > 40.0, "{format:?} line mode {quality:.1} dB");
+    }
+}
+
+fn peak(samples: &[f32]) -> f32 {
+    samples
+        .iter()
+        .fold(0.0, |max, sample| max.max(sample.abs()))
+}
+
+fn line_mode(codec_id: CodecId, packets: &[Packet]) -> Vec<f32> {
+    let params = cutlass_decode::CodecParams::audio(codec_id, 0, ChannelLayout::mono());
+    let options = Options {
+        dynamic_range: DynamicRange::Line {
+            cut: 1.0,
+            boost: 1.0,
+        },
+        ..Options::default()
+    };
+    let mut decoder = Ac3Decoder::with_options(&params, options).expect("decoder");
+    let mut outputs = Vec::new();
+    for packet in packets {
+        outputs.extend(decoder.push(packet).expect("decode"));
+    }
+    outputs.extend(decoder.drain().expect("drain"));
+    audible(outputs)
 }
 
 /// A steady tone keeps one exponent set, so the frame is one hybrid transform.

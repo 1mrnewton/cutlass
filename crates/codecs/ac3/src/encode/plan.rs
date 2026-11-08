@@ -136,6 +136,9 @@ pub(crate) struct Block {
     pub spx_mant: [[u8; crate::spx::MAX_BANDS]; MAX_FBW],
     /// Adaptive hybrid transform. One exponent set, mantissas once per frame.
     pub aht: [bool; SLOTS],
+    /// `dynrng` in force for this block, and whether this block sends it.
+    pub dynrng: u8,
+    pub dynrnge: bool,
     /// AC-3 `snroffste`.
     pub snroffste: bool,
 }
@@ -168,6 +171,8 @@ impl Default for Block {
             spx_exp: [[0; crate::spx::MAX_BANDS]; MAX_FBW],
             spx_mant: [[0; crate::spx::MAX_BANDS]; MAX_FBW],
             aht: [false; SLOTS],
+            dynrng: 0,
+            dynrnge: false,
             snroffste: false,
         }
     }

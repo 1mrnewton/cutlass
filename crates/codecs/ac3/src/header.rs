@@ -258,6 +258,24 @@ pub fn dynrng_gain(code: u8) -> f32 {
     mantissa / 64.0 * ((exponent + 1) as f32).exp2()
 }
 
+/// The `dynrng` code whose gain is closest to `gain`. Code 0 is unity.
+pub(crate) fn dynrng_code(gain: f32) -> u8 {
+    if !gain.is_finite() || gain <= 0.0 {
+        return 0;
+    }
+    let target = gain.ln();
+    let mut best = 0u8;
+    let mut error = f32::MAX;
+    for code in 0..=255u16 {
+        let distance = (dynrng_gain(code as u8).ln() - target).abs();
+        if distance < error {
+            error = distance;
+            best = code as u8;
+        }
+    }
+    best
+}
+
 /// `compr` as a linear gain (section 7.7.2.1): a signed 4-bit exponent of
 /// 6.02 dB steps and the mantissa 0.5 + m/32 above it.
 #[must_use]
@@ -869,6 +887,9 @@ mod tests {
         assert!((dynrng_gain(0) - 1.0).abs() < 1e-6);
         assert!((dynrng_gain(0x1f) - 63.0 / 32.0).abs() < 1e-6);
         assert!((dynrng_gain(0x80) - 1.0 / 16.0).abs() < 1e-6);
+        assert_eq!(dynrng_code(1.0), 0);
+        let half = dynrng_code(0.5);
+        assert!((dynrng_gain(half) - 0.5).abs() < 0.02, "{half}");
         assert!((compr_gain(0) - 1.0).abs() < 1e-6);
         assert!((compr_gain(0xF0) - 0.5).abs() < 1e-9);
         assert!((compr_gain(0x80) - 1.0 / 256.0).abs() < 1e-9);

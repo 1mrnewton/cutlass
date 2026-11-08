@@ -6,8 +6,10 @@
 //! One independent substream: mono to 5.1 with LFE at 32, 44.1 and
 //! 48 kHz. E-AC-3 takes any bit rate and 1, 2, 3 or 6 blocks per
 //! syncframe. Spectral extension, AHT, enhanced coupling, dependent
-//! substreams, transient pre-noise processing and dynamic range words are
-//! never written. Delta bit allocation is written only when a block carries
+//! substreams and transient pre-noise processing are never written. A block
+//! peaking above half scale sends a dynamic range word that brings it back
+//! to half scale; heavy-compression words are never written. Delta bit
+//! allocation is written only when a block carries
 //! segments; the rate control leaves every segment empty. Spectral extension
 //! replaces the top bins of a low-rate E-AC-3 frame. A steady six-block
 //! frame with one exponent set uses the adaptive hybrid transform.
@@ -25,7 +27,7 @@ use cutlass_encode::{
 };
 
 use crate::bitalloc::{self, Mask, Params};
-use crate::header::{Dac3, Dec3, Dec3Substream};
+use crate::header::{Dac3, Dec3, Dec3Substream, dynrng_code};
 use crate::mdct::{COEFS, Transform};
 use crate::tables::{FRAME_WORDS, NOMINAL_KBPS, REUSE};
 use analysis::Analysis;
@@ -612,6 +614,29 @@ impl Ac3Encoder {
         size
     }
 
+    /// Cut a block that peaks above half scale. A repeated level reuses the word.
+    fn range_words(&mut self, from: usize) {
+        let mut in_force = 0u8;
+        for blk in 0..self.shape.blocks {
+            let at = from + blk * COEFS;
+            let mut peak = 0.0f32;
+            for channel in &self.pending {
+                for &sample in &channel[at..at + COEFS] {
+                    peak = peak.max(sample.abs());
+                }
+            }
+            let code = if peak > 0.5 && peak.is_finite() {
+                dynrng_code(0.5 / peak)
+            } else {
+                0
+            };
+            let block = &mut self.blocks[blk];
+            block.dynrnge = code != in_force;
+            block.dynrng = code;
+            in_force = code;
+        }
+    }
+
     fn code_frame(&mut self, from: usize) -> Result<Packet, CodecError> {
         let nf = self.shape.nf;
         for blk in 0..self.shape.blocks {
@@ -648,6 +673,7 @@ impl Ac3Encoder {
         let mut mode = Mode::Adaptive;
         let (snr, skip) = loop {
             plan::plan(&shape, &mut self.blocks, mode);
+            self.range_words(from);
             #[cfg(test)]
             if !shape.eac3
                 && let Some(delta) = self.forced_delta

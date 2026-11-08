@@ -393,7 +393,10 @@ fn audblk(
             w.flag(block.dith[ch]);
         }
     }
-    w.flag(false); // dynrnge
+    w.flag(block.dynrnge);
+    if block.dynrnge {
+        w.put(8, u32::from(block.dynrng));
+    }
     if eac3 {
         spectral(w, shape, blk, block, coupling);
     }

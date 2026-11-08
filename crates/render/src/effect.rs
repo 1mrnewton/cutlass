@@ -386,10 +386,28 @@ fn reveal(uv: vec2<f32>) -> vec4<f32> {
     let along = vec2<f32>(cos(turn), -sin(turn));
     // How far through the run this pixel is, 0 to 1.
     var run = 0.0;
+    let p = from_point(uv, vec2<f32>(0.0));
+    let half = fx.size / min(fx.size.x, fx.size.y) * 0.5;
     if (kind == 1u) {
-        let p = from_point(uv, vec2<f32>(0.0));
-        let corner = length(fx.size / min(fx.size.x, fx.size.y)) * 0.5;
-        run = length(p) / corner;
+        run = length(p) / length(half);
+    } else if (kind == 3u) {
+        let reach = (abs(along.x) + abs(along.y)) * 0.5;
+        run = abs(dot(uv - vec2<f32>(0.5), along)) / reach;
+    } else if (kind == 4u) {
+        // Clockwise from straight up, then on from `angle`.
+        let round = atan2(p.x, -p.y) / 6.2831853 - fx.a.z / 360.0;
+        run = fract(round + 1.0);
+    } else if (kind == 5u) {
+        run = (abs(p.x) + abs(p.y)) / (half.x + half.y);
+    } else if (kind == 6u) {
+        let count = max(floor(fx.b.x + 0.5), 1.0);
+        let at = uv * fx.size / (min(fx.size.x, fx.size.y) / count);
+        let cell = floor(at);
+        let odd = f32((u32(cell.x) + u32(cell.y)) & 1u);
+        run = odd * 0.5 + fract(at.x) * 0.5;
+    } else if (kind == 7u) {
+        let grain = vec2<u32>(uv * fx.size / 3.0);
+        run = rand(grain.x, grain.y, 7u);
     } else {
         let reach = (abs(along.x) + abs(along.y)) * 0.5;
         run = dot(uv - vec2<f32>(0.5), along) / reach * 0.5 + 0.5;
@@ -400,6 +418,66 @@ fn reveal(uv: vec2<f32>) -> vec4<f32> {
     let soft = fx.a.w;
     let shown = 1.0 - smoothstep(progress * (1.0 + soft) - soft, progress * (1.0 + soft), run);
     return vec4<f32>(c.rgb * shown, c.a);
+}
+
+fn blocks(uv: vec2<f32>) -> vec4<f32> {
+    let tall = max(fx.a.y * min(fx.size.x, fx.size.y), 2.0);
+    let cell = floor(uv * fx.size / vec2<f32>(tall * 2.5, tall));
+    let cx = u32(cell.x + 1000.0);
+    let cy = u32(cell.y + 1000.0);
+    let seed = u32(fx.a.w);
+    if (rand(cx, cy, seed) >= fx.a.x) {
+        return fetch(uv);
+    }
+    let push = vec2<f32>(rand(cx, cy, seed + 1u), rand(cx, cy, seed + 2u)) * 2.0 - vec2<f32>(1.0);
+    let c = fetch(uv + push * fx.a.z * vec2<f32>(1.0, 0.3));
+    if (rand(cx, cy, seed + 3u) < fx.b.x) {
+        return vec4<f32>(c.b, c.r, c.g, c.a);
+    }
+    return c;
+}
+
+fn rays(uv: vec2<f32>) -> vec4<f32> {
+    let base = fetch(uv);
+    let toward = (vec2<f32>(0.5) + fx.a.yz - uv) * fx.a.w;
+    var light = vec3<f32>(0.0);
+    for (var k = 0; k < 40; k = k + 1) {
+        let t = f32(k) / 39.0;
+        let c = fetch(uv + toward * t);
+        light = light + max(straight(c) - vec3<f32>(fx.b.x), vec3<f32>(0.0)) * c.a * (1.0 - t);
+    }
+    let rgb = base.rgb + light / 10.0 * fx.a.x;
+    return vec4<f32>(min(rgb, vec3<f32>(base.a)), base.a);
+}
+
+fn focus(uv: vec2<f32>) -> vec4<f32> {
+    let kind = u32(fx.a.y + 0.5);
+    let p = from_point(uv, vec2<f32>(0.0));
+    let sharp = fx.a.z * 0.5;
+    var weight = 0.0;
+    if (kind == 0u) {
+        weight = smoothstep(sharp, sharp + 0.25, abs(uv.y - 0.5 - fx.a.w));
+    } else {
+        weight = smoothstep(sharp, sharp + 0.4, length(p));
+    }
+    var sum = vec4<f32>(0.0);
+    if (kind == 2u) {
+        // Taps along an arc around the middle.
+        let spin = radians(fx.b.x) * weight * min(fx.a.x * 10.0, 1.0);
+        for (var k = -16; k <= 16; k = k + 1) {
+            let a = spin * f32(k) / 16.0;
+            let q = vec2<f32>(p.x * cos(a) - p.y * sin(a), p.x * sin(a) + p.y * cos(a));
+            sum = sum + fetch(to_uv(q, vec2<f32>(0.0)));
+        }
+        return sum / 33.0;
+    }
+    let reach = fx.a.x * weight * min(fx.size.x, fx.size.y) / fx.size;
+    for (var k = 0; k < 48; k = k + 1) {
+        let r = sqrt((f32(k) + 0.5) / 48.0);
+        let turn = f32(k) * 2.3999632;
+        sum = sum + fetch(uv + vec2<f32>(cos(turn), sin(turn)) * r * reach);
+    }
+    return sum / 48.0;
 }
 
 fn stretch(uv: vec2<f32>) -> vec4<f32> {
@@ -608,6 +686,9 @@ fn fs(in: Out) -> @location(0) vec4<f32> {
         case 30u: { return fringe(uv); }
         case 31u: { return halftone(uv); }
         case 32u: { return prints(uv); }
+        case 33u: { return blocks(uv); }
+        case 34u: { return rays(uv); }
+        case 35u: { return focus(uv); }
         default: { return fetch(uv); }
     }
 }
@@ -891,6 +972,9 @@ mod tests {
             step(Block::Fringe, &[]),
             step(Block::Halftone, &[]),
             step(Block::Prints, &[]),
+            step(Block::Blocks, &[]),
+            step(Block::Rays, &[]),
+            step(Block::Focus, &[]),
         ];
         close(&draw(&renderer, &ROW, (4, 1), &resting), &ROW);
     }
@@ -1210,6 +1294,122 @@ mod tests {
             ]
             .concat(),
         );
+    }
+
+    #[test]
+    fn the_new_reveals_open_from_where_they_are_named() {
+        let Some(renderer) = renderer() else { return };
+        let size = (32u32, 32u32);
+        let white = solid(size, [255, 255, 255, 255]);
+        let lit = |picture: &[u8], x: u32, y: u32| picture[4 * (y * size.0 + x) as usize] > 128;
+        let reveal = |kind: f32, progress: f32| {
+            draw(
+                &renderer,
+                &white,
+                size,
+                &[step(
+                    Block::Reveal,
+                    &[(0, progress), (1, kind), (3, 0.0), (4, 4.0)],
+                )],
+            )
+        };
+        // Doors open from the middle line out.
+        let doors = reveal(3.0, 0.4);
+        assert!(lit(&doors, 16, 16) && !lit(&doors, 1, 16));
+        // A clock hand sweeps from the top: a quarter shows the top right.
+        let clock = reveal(4.0, 0.25);
+        assert!(lit(&clock, 24, 8) && !lit(&clock, 8, 24) && !lit(&clock, 8, 8));
+        // A diamond opens from the middle; its corners come last.
+        let diamond = reveal(5.0, 0.5);
+        assert!(lit(&diamond, 16, 16) && !lit(&diamond, 1, 1));
+        // Half way, one colour of the checkerboard is in and the other not.
+        let checker = reveal(6.0, 0.5);
+        assert!(lit(&checker, 4, 4) && !lit(&checker, 12, 4));
+        // Half way, a dissolve shows grains all over, about half of them.
+        let grains = reveal(7.0, 0.5);
+        let shown = (0..size.0 * size.1)
+            .filter(|at| grains[4 * *at as usize] > 128)
+            .count();
+        assert!((300..=724).contains(&shown), "{shown}");
+    }
+
+    #[test]
+    fn blocks_rays_and_focus_do_as_named() {
+        let Some(renderer) = renderer() else { return };
+        let size = (64u32, 32u32);
+        // Red on the left, blue on the right.
+        let halves: Vec<u8> = (0..size.0 * size.1)
+            .flat_map(|at| {
+                if at % size.0 < size.0 / 2 {
+                    [255, 0, 0, 255]
+                } else {
+                    [0, 0, 255, 255]
+                }
+            })
+            .collect();
+        // Every block out of place moves some colour across the line, and
+        // swapped ones bring in green.
+        let broken = draw(
+            &renderer,
+            &halves,
+            size,
+            &[step(
+                Block::Blocks,
+                &[(0, 1.0), (1, 0.1), (2, 0.3), (4, 1.0)],
+            )],
+        );
+        assert_ne!(broken, halves);
+        assert!(broken.chunks(4).any(|pixel| pixel[1] > 200));
+        // Rays only add light, and only from what is bright enough.
+        let dark = solid(size, [40, 40, 40, 255]);
+        let lit = draw(&renderer, &dark, size, &[step(Block::Rays, &[(0, 3.0)])]);
+        close(&lit, &dark);
+        // A bright middle streaks out over the dark around it.
+        let middle: Vec<u8> = (0..size.0 * size.1)
+            .flat_map(|at| {
+                let (x, y) = (at % size.0, at / size.0);
+                if (24..40).contains(&x) && (8..24).contains(&y) {
+                    [255, 255, 255, 255]
+                } else {
+                    [40, 40, 40, 255]
+                }
+            })
+            .collect();
+        let shone = draw(
+            &renderer,
+            &middle,
+            size,
+            &[step(Block::Rays, &[(0, 2.0), (3, 0.8)])],
+        );
+        assert!(
+            shone
+                .iter()
+                .zip(&middle)
+                .all(|(after, before)| u16::from(*after) + 1 >= u16::from(*before))
+        );
+        let i = 4 * (16 * size.0 + 12) as usize;
+        assert!(shone[i] > 56, "streaked: {}", shone[i]);
+        // A tilt-shift keeps its band sharp and blurs the line elsewhere.
+        let tilt = draw(
+            &renderer,
+            &halves,
+            size,
+            &[step(Block::Focus, &[(0, 0.1), (1, 0.0), (2, 0.2)])],
+        );
+        let at = |picture: &[u8], x: u32, y: u32| picture[4 * (y * size.0 + x) as usize];
+        assert_eq!(at(&tilt, 30, 16), 255, "the band stays sharp");
+        assert!(at(&tilt, 30, 1) < 250, "the top is blurred across the line");
+        // A spin leaves the middle alone and smears the corners.
+        let spun = draw(
+            &renderer,
+            &halves,
+            size,
+            &[step(
+                Block::Focus,
+                &[(0, 0.1), (1, 2.0), (2, 0.1), (4, 60.0)],
+            )],
+        );
+        assert_ne!(spun, halves);
     }
 
     #[test]

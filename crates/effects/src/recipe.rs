@@ -109,6 +109,14 @@ pub enum Block {
     /// Lay the picture out as a stack of tilted photo prints with white
     /// borders and soft shadows, over a soft, pale copy of itself.
     Prints,
+    /// Knock random blocks of the frame out of place, some with their
+    /// colours swapped, as a broken video stream does.
+    Blocks,
+    /// Streaks of light from the bright parts out from a point.
+    Rays,
+    /// Blur by place: all but a sharp band, all but a sharp middle, or
+    /// spun around the middle.
+    Focus,
 }
 
 /// One parameter of a block: its name, its value when a recipe leaves it
@@ -257,11 +265,15 @@ const SPOTLIGHT: &[Param] = &[
     param("soft", 0.15, 0.0, 1.0),
 ];
 /// `progress` 0 shows nothing and 1 all of it. `kind` 0 wipes from one
-/// side, 1 opens a circle from the middle, 2 opens `count` blinds. `angle`
-/// 0 runs left to right; `soft` is the edge, as a fraction of the run.
+/// side, 1 opens a circle from the middle, 2 opens `count` blinds, 3 opens
+/// two doors from the middle line, 4 sweeps round like a clock hand from
+/// `angle`, 5 opens a diamond, 6 fills a checkerboard of `count` squares
+/// across, one colour then the other, and 7 dissolves in fine grains.
+/// `angle` 0 runs left to right; `soft` is the edge, as a fraction of the
+/// run.
 const REVEAL: &[Param] = &[
     param("progress", 1.0, 0.0, 1.0),
-    param("kind", 0.0, 0.0, 2.0),
+    param("kind", 0.0, 0.0, 7.0),
     param("angle", 0.0, -180.0, 180.0),
     param("soft", 0.02, 0.0, 0.5),
     param("count", 8.0, 1.0, 64.0),
@@ -315,6 +327,37 @@ const PRINTS: &[Param] = &[
     param("wash", 0.5, 0.0, 1.0),
     param("arrive", 8.0, 0.0, 8.0),
 ];
+/// `amount` is the share of blocks knocked out, `size` a block's height as
+/// a fraction of the shorter side (blocks are wider than tall), `shift`
+/// how far one moves, in frames, and `color` the share of those whose
+/// colours swap.
+const BLOCKS: &[Param] = &[
+    param("amount", 0.0, 0.0, 1.0),
+    param("size", 0.06, 0.01, 0.5),
+    param("shift", 0.05, 0.0, 0.3),
+    param("seed", 0.0, 0.0, 1000.0),
+    param("color", 0.3, 0.0, 1.0),
+];
+/// `x` and `y` move the point from the middle, in frames; `length` is how
+/// far toward it a streak reaches, `threshold` the brightness that shines.
+const RAYS: &[Param] = &[
+    param("amount", 0.0, 0.0, 3.0),
+    param("x", 0.0, -1.0, 1.0),
+    param("y", 0.0, -1.0, 1.0),
+    param("length", 0.4, 0.0, 1.0),
+    param("threshold", 0.6, 0.0, 1.0),
+];
+/// `amount` is the blur at its widest, a fraction of the shorter side.
+/// `kind` 0 keeps a band across sharp, as a tilt-shift lens does, 1 keeps
+/// the middle sharp, 2 spins the picture around the middle by up to
+/// `angle` degrees. `size` is the sharp part, `y` moves the band.
+const FOCUS: &[Param] = &[
+    param("amount", 0.0, 0.0, 0.1),
+    param("kind", 0.0, 0.0, 2.0),
+    param("size", 0.3, 0.0, 1.0),
+    param("y", 0.0, -0.5, 0.5),
+    param("angle", 10.0, 0.0, 90.0),
+];
 const HALFTONE: &[Param] = &[
     param("size", 0.0, 0.0, 0.1),
     param("amount", 1.0, 0.0, 1.0),
@@ -323,7 +366,7 @@ const HALFTONE: &[Param] = &[
 
 impl Block {
     /// Every block, in the order of their codes.
-    pub const ALL: [Self; 33] = [
+    pub const ALL: [Self; 36] = [
         Self::Transform,
         Self::RgbSplit,
         Self::Slices,
@@ -357,6 +400,9 @@ impl Block {
         Self::Fringe,
         Self::Halftone,
         Self::Prints,
+        Self::Blocks,
+        Self::Rays,
+        Self::Focus,
     ];
 
     /// The parameters in the order the shader reads them.
@@ -396,6 +442,9 @@ impl Block {
             Self::Fringe => FRINGE,
             Self::Halftone => HALFTONE,
             Self::Prints => PRINTS,
+            Self::Blocks => BLOCKS,
+            Self::Rays => RAYS,
+            Self::Focus => FOCUS,
         }
     }
 
@@ -436,6 +485,9 @@ impl Block {
             Self::Fringe => 30,
             Self::Halftone => 31,
             Self::Prints => 32,
+            Self::Blocks => 33,
+            Self::Rays => 34,
+            Self::Focus => 35,
         }
     }
 }

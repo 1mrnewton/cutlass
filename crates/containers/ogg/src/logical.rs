@@ -1,5 +1,6 @@
-//! One logical stream: packet reassembly across pages and the Opus
-//! granule arithmetic of RFC 7845 section 4.
+//! One logical stream: packet reassembly across pages and the granule
+//! arithmetic of the Opus (RFC 7845 section 4) and Vorbis (Vorbis I
+//! section A.2) mappings.
 //!
 //! Pages arrive in file order. Each page's pieces are joined into packets.
 //! A packet whose earlier piece was lost (a page-sequence gap, a page that
@@ -12,12 +13,19 @@
 //! start. On the end-of-stream page a granule below the samples is end
 //! trimming: the packets start where the previous page ended and the last
 //! durations are cut so the final packet ends at the granule.
+//!
+//! Opus samples come from each packet's TOC. A Vorbis packet's samples are
+//! a quarter of its block plus a quarter of the previous packet's block,
+//! and the first packet after a fresh start or a resume has none, which is
+//! also what a decoder returns for it. A Vorbis first page may complete
+//! more samples than its granule: the stream starts before zero.
 
 use cutlass_container::{Gap, TrackId};
 
 use crate::error::OggError;
 use crate::opus::packet_samples;
 use crate::page::Page;
+use crate::vorbis::{self, VorbisModes};
 
 /// One packet completed on the current page, with its time.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -29,7 +37,7 @@ pub struct Ready {
     pub pts: i64,
     /// Samples after end trimming.
     pub duration: i64,
-    /// Samples from the TOC, before end trimming.
+    /// Samples the mapping gives the packet, before end trimming.
     pub samples: i64,
     /// Offset of the page the packet completed on.
     pub page: u64,
@@ -90,14 +98,14 @@ impl Partial {
         self.bytes.extend_from_slice(data);
     }
 
-    fn samples(&self) -> i64 {
-        let head: &[u8] = if self.over {
+    /// The packet's first bytes, kept even past the bound.
+    fn head(&self) -> &[u8] {
+        if self.over {
             let keep = usize::try_from(self.len.min(2)).unwrap_or(2);
             &self.toc[..keep]
         } else {
             &self.bytes
-        };
-        i64::from(packet_samples(head).unwrap_or(0))
+        }
     }
 }
 
@@ -113,6 +121,8 @@ pub struct State {
     last_granule: i64,
     /// The end-of-stream page has been read.
     pub ended: bool,
+    /// Vorbis: block size of the last audio packet completed.
+    previous_block: Option<u32>,
 }
 
 impl State {
@@ -124,6 +134,7 @@ impl State {
             next: 0,
             last_granule: 0,
             ended: false,
+            previous_block: None,
         }
     }
 
@@ -135,6 +146,7 @@ impl State {
             next: 0,
             last_granule: 0,
             ended: false,
+            previous_block: None,
         }
     }
 }
@@ -148,20 +160,46 @@ pub struct Counters {
     pub dropped_pieces: u64,
 }
 
-/// An Opus logical stream's fixed facts and its reading state.
+/// How a mapping times its packets.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Timing {
+    /// Opus: the TOC gives each packet's samples, and the first `pre_skip`
+    /// samples are decoded and dropped.
+    Opus { pre_skip: i64 },
+    /// Vorbis: each packet's mode gives its block size.
+    Vorbis(VorbisModes),
+}
+
+/// A logical stream's fixed facts and its reading state.
 #[derive(Clone, Debug)]
-pub struct Opus {
+pub struct Logical {
     pub serial: u32,
     pub track: u32,
-    pub pre_skip: i64,
-    /// Pages with a lower sequence number hold the two header packets.
+    pub timing: Timing,
+    /// Pages with a lower sequence number hold the header packets.
     pub first_audio_sequence: u32,
     /// Largest audio packet kept, in bytes.
     pub packet_cap: u64,
     pub state: State,
 }
 
-impl Opus {
+impl Logical {
+    /// Samples of each completed packet, in order.
+    fn samples(&mut self, completed: &[Partial]) -> Vec<i64> {
+        let state = &mut self.state;
+        completed
+            .iter()
+            .map(|packet| match &self.timing {
+                Timing::Opus { .. } => i64::from(packet_samples(packet.head()).unwrap_or(0)),
+                Timing::Vorbis(modes) => modes.block(packet.head()).map_or(0, |block| {
+                    let samples = vorbis::packet_samples(state.previous_block, block);
+                    state.previous_block = Some(block);
+                    samples
+                }),
+            })
+            .collect()
+    }
+
     /// Takes one page of this stream. Completed packets go to `out` in
     /// order; a timeline jump goes to `gaps`.
     pub fn take_page(
@@ -220,8 +258,9 @@ impl Opus {
             }
             return Ok(());
         }
-        let samples: Vec<i64> = completed.iter().map(Partial::samples).collect();
+        let samples = self.samples(&completed);
         let total: i64 = samples.iter().sum();
+        let state = &mut self.state;
         let granule = if page.granule == -1 {
             // A page that completes packets must carry a granule position.
             // Running streams can still time the packets; others cannot.
@@ -237,24 +276,27 @@ impl Opus {
 
         let start = match state.phase {
             Phase::Fresh => {
-                if granule < total {
-                    if !page.eos() {
-                        return Err(OggError::InitialGranule {
-                            serial: self.serial,
-                            granule,
-                            samples: total,
-                        });
-                    }
-                    if granule < self.pre_skip {
+                if granule >= total {
+                    granule - total
+                } else if page.eos() {
+                    if let Timing::Opus { pre_skip } = self.timing
+                        && granule < pre_skip
+                    {
                         return Err(OggError::PreSkipPastEnd {
                             serial: self.serial,
                             end: granule,
-                            pre_skip: self.pre_skip,
+                            pre_skip,
                         });
                     }
                     0
-                } else {
+                } else if matches!(self.timing, Timing::Vorbis(_)) {
                     granule - total
+                } else {
+                    return Err(OggError::InitialGranule {
+                        serial: self.serial,
+                        granule,
+                        samples: total,
+                    });
                 }
             }
             Phase::Resume { discard } => {
@@ -334,9 +376,10 @@ impl Opus {
 
 #[cfg(test)]
 mod tests {
-    use super::{Counters, Opus, Phase, Ready, State};
+    use super::{Counters, Logical, Phase, Ready, State, Timing};
     use crate::error::OggError;
     use crate::page::{FLAG_CONTINUED, FLAG_EOS, Page};
+    use crate::vorbis::VorbisModes;
     use cutlass_container::Gap;
 
     /// A 20 ms CELT packet of `len` bytes.
@@ -366,18 +409,18 @@ mod tests {
         }
     }
 
-    fn stream() -> Opus {
-        Opus {
+    fn stream() -> Logical {
+        Logical {
             serial: 7,
             track: 0,
-            pre_skip: 312,
+            timing: Timing::Opus { pre_skip: 312 },
             first_audio_sequence: 2,
             packet_cap: 61_440,
             state: State::fresh(),
         }
     }
 
-    fn take(stream: &mut Opus, page: &Page) -> Result<Vec<Ready>, OggError> {
+    fn take(stream: &mut Logical, page: &Page) -> Result<Vec<Ready>, OggError> {
         let mut out = Vec::new();
         let mut gaps = Vec::new();
         let mut counters = Counters::default();
@@ -554,6 +597,117 @@ mod tests {
                 .is_empty()
         );
         assert_eq!(opus.state, State::fresh());
+    }
+
+    /// A Vorbis stream with blocks 256 and 2048: mode 0 short, mode 1 long.
+    fn vorbis() -> Logical {
+        Logical {
+            timing: Timing::Vorbis(VorbisModes {
+                long: vec![false, true],
+                bits: 1,
+                blocksizes: [256, 2048],
+            }),
+            ..stream()
+        }
+    }
+
+    const SHORT: u8 = 0;
+    const LONG: u8 = 1 << 1;
+
+    fn vorbis_packet(mode: u8) -> Vec<u8> {
+        vec![mode, 0x11, 0x22]
+    }
+
+    #[test]
+    fn a_vorbis_packet_lasts_a_quarter_of_each_block() {
+        let mut stream = vorbis();
+        let packets = [LONG, LONG, SHORT, SHORT, LONG].map(vorbis_packet);
+        let out = take(&mut stream, &page(2, 0, 2304, &packets)).expect("page");
+        assert_eq!(
+            times(&out),
+            vec![(0, 0), (0, 1024), (1024, 576), (1600, 128), (1728, 576)]
+        );
+    }
+
+    #[test]
+    fn a_vorbis_stream_may_start_before_zero() {
+        let mut stream = vorbis();
+        let packets = [LONG, LONG, LONG].map(vorbis_packet);
+        let out = take(&mut stream, &page(2, 0, 1000, &packets)).expect("page");
+        assert_eq!(times(&out), vec![(-1048, 0), (-1048, 1024), (-24, 1024)]);
+        let out = take(&mut stream, &page(3, 0, 2024, &[vorbis_packet(LONG)])).expect("page");
+        assert_eq!(times(&out), vec![(1000, 1024)]);
+    }
+
+    #[test]
+    fn a_short_vorbis_stream_starts_at_zero_and_trims_its_end() {
+        let mut stream = vorbis();
+        let packets = [LONG, LONG, LONG].map(vorbis_packet);
+        let out = take(&mut stream, &page(2, FLAG_EOS, 1500, &packets)).expect("page");
+        assert_eq!(times(&out), vec![(0, 0), (0, 1024), (1024, 476)]);
+        assert_eq!(out[2].samples, 1024);
+        assert!(stream.state.ended);
+    }
+
+    #[test]
+    fn the_last_vorbis_page_trims_the_final_packet() {
+        let mut stream = vorbis();
+        take(
+            &mut stream,
+            &page(2, 0, 1024, &[LONG, LONG].map(vorbis_packet)),
+        )
+        .expect("page");
+        let out = take(
+            &mut stream,
+            &page(3, FLAG_EOS, 1600, &[vorbis_packet(SHORT)]),
+        )
+        .expect("eos");
+        assert_eq!(times(&out), vec![(1024, 576)]);
+        let mut trimmed = vorbis();
+        take(
+            &mut trimmed,
+            &page(2, 0, 1024, &[LONG, LONG].map(vorbis_packet)),
+        )
+        .expect("page");
+        let out = take(
+            &mut trimmed,
+            &page(3, FLAG_EOS, 1100, &[vorbis_packet(SHORT)]),
+        )
+        .expect("eos");
+        assert_eq!(times(&out), vec![(1024, 76)]);
+        assert_eq!(out[0].samples - out[0].duration, 500);
+    }
+
+    #[test]
+    fn a_resumed_vorbis_stream_keeps_the_block_of_discarded_packets() {
+        let mut stream = vorbis();
+        stream.state = State::resume(true);
+        let landing = page(9, 0, 9600, &[LONG, SHORT].map(vorbis_packet));
+        assert!(take(&mut stream, &landing).expect("landing").is_empty());
+        let out = take(&mut stream, &page(10, 0, 10_176, &[vorbis_packet(LONG)])).expect("next");
+        assert_eq!(times(&out), vec![(9600, 576)]);
+
+        let mut kept = vorbis();
+        kept.state = State::resume(false);
+        let out = take(
+            &mut kept,
+            &page(9, 0, 9600, &[LONG, SHORT].map(vorbis_packet)),
+        )
+        .expect("landing");
+        assert_eq!(times(&out), vec![(9024, 0), (9024, 576)]);
+    }
+
+    #[test]
+    fn vorbis_header_and_empty_packets_have_no_duration() {
+        let mut stream = vorbis();
+        let packets = [
+            vorbis_packet(LONG),
+            vec![1, 2],
+            Vec::new(),
+            vorbis_packet(LONG),
+        ];
+        let out = take(&mut stream, &page(2, 0, 1024, &packets)).expect("page");
+        assert_eq!(times(&out), vec![(0, 0), (0, 0), (0, 0), (0, 1024)]);
     }
 
     #[test]

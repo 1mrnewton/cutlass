@@ -799,6 +799,9 @@ fn stbl(
     body.extend(stts(samples));
     if samples.iter().any(|sample| sample.pts != sample.dts) {
         body.extend(ctts(samples)?);
+        if samples.iter().any(|sample| sample.pts < sample.dts) {
+            body.extend(cslg(samples));
+        }
     }
     body.extend(stsc_and_co64(samples, map_offset));
     body.extend(stsz(samples));
@@ -1098,6 +1101,34 @@ fn ctts(samples: &[&Held]) -> Result<Vec<u8>, Error> {
         }
     }
     Ok(box_bytes(b"ctts", &payload))
+}
+
+/// `cslg` (ISO/IEC 14496-12 8.6.1.4) for a `ctts` with negative offsets,
+/// as QuickTime and AVFoundation write it: the shift that puts every
+/// composition time at or after its decode time, the least and greatest
+/// offsets, and the first and last composition times. Version 1 holds a
+/// value that does not fit 32 bits.
+fn cslg(samples: &[&Held]) -> Vec<u8> {
+    let offsets = samples.iter().map(|sample| sample.pts - sample.dts);
+    let least = offsets.clone().min().unwrap_or(0);
+    let greatest = offsets.max().unwrap_or(0);
+    let start = samples.iter().map(|sample| sample.pts).min().unwrap_or(0);
+    let end = samples
+        .iter()
+        .map(|sample| sample.pts.saturating_add(i64::from(sample.duration)))
+        .max()
+        .unwrap_or(0);
+    let fields = [least.saturating_neg().max(0), least, greatest, start, end];
+    let narrow = fields.iter().all(|&value| i32::try_from(value).is_ok());
+    let mut payload = vec![u8::from(!narrow), 0, 0, 0];
+    for value in fields {
+        if narrow {
+            payload.extend_from_slice(&i32::try_from(value).unwrap_or(0).to_be_bytes());
+        } else {
+            payload.extend_from_slice(&value.to_be_bytes());
+        }
+    }
+    box_bytes(b"cslg", &payload)
 }
 
 /// One sample per chunk. Interleaved tracks then keep an exact file offset

@@ -136,15 +136,15 @@ fn prores_color(frame: &[u8]) -> Option<ColorTags> {
 /// 422, HQ, 4444 and 4444 XQ, by their sample entry.
 const PRORES_ENTRIES: [[u8; 4]; 6] = [*b"apco", *b"apcs", *b"apcn", *b"apch", *b"ap4h", *b"ap4x"];
 
-/// The box writer's parameters for `stream`: H.264, HEVC, ProRes, Motion
-/// JPEG, VP8 or MPEG-2 pictures, or AAC, Opus, or 16-bit PCM sound. A VP8
-/// track's extradata is its `vpcC` payload. A ProRes track whose extradata is
+/// The box writer's parameters for `stream`: H.264, HEVC, MPEG-4 Visual,
+/// ProRes, Motion JPEG, VP8 or MPEG-2 pictures, or AAC, Opus, or 16-bit PCM
+/// sound. A VP8 track's extradata is its `vpcC` payload. A ProRes track whose extradata is
 /// a profile's four-character code is written with that sample entry.
 /// Motion JPEG is a QuickTime `jpeg` entry, so only a movie takes it.
 fn box_params(stream: &NewStream, brand: FileBrand) -> Result<StreamParams, MuxError> {
     let StreamCodec::Known(codec) = stream.params.codec() else {
         return Err(rejected(
-            "mp4 export writes H.264, HEVC, ProRes, Motion JPEG, VP8, MPEG-2, AAC, ALAC, Opus, and PCM",
+            "mp4 export writes H.264, HEVC, MPEG-4 Visual, ProRes, Motion JPEG, VP8, MPEG-2, AAC, ALAC, Opus, and PCM",
         ));
     };
     let scale = BoxScale(stream.timescale.ticks_per_second());
@@ -152,7 +152,7 @@ fn box_params(stream: &NewStream, brand: FileBrand) -> Result<StreamParams, MuxE
         Id::Mjpeg if brand != FileBrand::Mov => {
             return Err(rejected("Motion JPEG is written to a .mov movie"));
         }
-        Id::H264 | Id::Hevc | Id::Prores | Id::Mjpeg | Id::Vp8 | Id::Mpeg2 => {
+        Id::H264 | Id::Hevc | Id::Mpeg4 | Id::Prores | Id::Mjpeg | Id::Vp8 | Id::Mpeg2 => {
             let size = stream
                 .params
                 .size()
@@ -160,6 +160,7 @@ fn box_params(stream: &NewStream, brand: FileBrand) -> Result<StreamParams, MuxE
             let codec = match codec {
                 Id::H264 => CodecId::H264,
                 Id::Hevc => CodecId::Hevc,
+                Id::Mpeg4 => CodecId::Mpeg4,
                 Id::Vp8 => CodecId::Vp8,
                 Id::Mjpeg => CodecId::Mjpeg,
                 Id::Mpeg2 => CodecId::Mpeg2,
@@ -205,7 +206,7 @@ fn box_params(stream: &NewStream, brand: FileBrand) -> Result<StreamParams, MuxE
         }
         _ => {
             return Err(rejected(
-                "mp4 export writes H.264, HEVC, ProRes, Motion JPEG, VP8, MPEG-2, AAC, ALAC, Opus, and PCM",
+                "mp4 export writes H.264, HEVC, MPEG-4 Visual, ProRes, Motion JPEG, VP8, MPEG-2, AAC, ALAC, Opus, and PCM",
             ));
         }
     };
@@ -544,6 +545,71 @@ mod tests {
         let edit = stream.edits()[0];
         assert_eq!(edit.media_time(), Some(312));
         assert_eq!(edit.duration(), 2000);
+    }
+
+    /// An MPEG-4 Visual track whose layer headers arrive with the first
+    /// packet is an `mp4v` entry with object type 0x20 and those headers,
+    /// its reordered samples get a `cslg`, and they read back in decode
+    /// order with their times.
+    #[test]
+    fn an_mpeg4_visual_track_is_an_mp4v_entry_with_its_headers() {
+        for brand in [FileBrand::Mp4, FileBrand::Mov] {
+            let mut mux = Mp4Mux::with_brand(Cursor::new(Vec::new()), brand);
+            let picture = mux
+                .add_stream(NewStream {
+                    params: StreamParams::video(
+                        StreamCodec::Known(Id::Mpeg4),
+                        FrameSize::try_new(64, 48).unwrap(),
+                        Vec::new(),
+                    ),
+                    timescale: Timescale::new(30),
+                    language: None,
+                })
+                .unwrap();
+            let headers = [0, 0, 1, 0xB0, 0xF1, 0, 0, 1, 0x20, 0x08];
+            mux.set_config(picture, &headers).unwrap();
+            for pts in [0, 2, 1] {
+                let vop = vec![0, 0, 1, 0xB6, u8::try_from(pts).unwrap()];
+                mux.write_packet(&packet(picture.get(), vop, pts, 1, 30))
+                    .unwrap();
+            }
+            mux.finish(&[TrackDuration {
+                track: picture,
+                timescale: Timescale::new(30),
+                ticks: 3,
+            }])
+            .unwrap();
+            let bytes = mux.into_writer().unwrap().into_inner();
+            assert!(bytes.windows(4).any(|w| w == b"mp4v"));
+            // The B sample shows before it decodes: a version 1 `ctts`, and
+            // `cslg` with shift 1, offsets -1 to 1, and times 0 to 3.
+            let ctts = bytes.windows(4).position(|w| w == b"ctts").unwrap();
+            assert_eq!(bytes[ctts + 4], 1);
+            let cslg = bytes.windows(4).position(|w| w == b"cslg").unwrap();
+            assert_eq!(
+                u32::from_be_bytes(bytes[cslg - 4..cslg].try_into().unwrap()),
+                32
+            );
+            let field = |n: usize| {
+                let at = cslg + 8 + n * 4;
+                i32::from_be_bytes(bytes[at..at + 4].try_into().unwrap())
+            };
+            assert_eq!(bytes[cslg + 4], 0, "version 0");
+            assert_eq!((0..5).map(field).collect::<Vec<_>>(), [1, -1, 1, 0, 3]);
+            let mut file = crate::IsoBmffFile::open(Cursor::new(bytes)).unwrap();
+            let params = cutlass_container::Demux::streams(&file)[0].params().clone();
+            assert_eq!(params.codec(), &StreamCodec::Known(Id::Mpeg4));
+            assert_eq!(params.extradata(), headers.as_slice());
+            let mut times = Vec::new();
+            let mut marks = Vec::new();
+            while let Some(packet) = cutlass_container::Demux::read_packet(&mut file).unwrap() {
+                let time = packet.timestamp();
+                times.push((time.decode().unwrap(), time.presentation().unwrap()));
+                marks.push(packet.bytes()[4]);
+            }
+            assert_eq!(times, [(0, 0), (1, 2), (2, 1)], "{brand:?}");
+            assert_eq!(marks, [0, 2, 1], "{brand:?}");
+        }
     }
 
     #[test]

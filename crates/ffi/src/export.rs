@@ -30,7 +30,9 @@ pub struct PhoneExport {
 }
 
 /// Opus, Vorbis and Motion JPEG in Rust, the platform encoders for this OS,
-/// then H.264, AAC and ProRes in Rust.
+/// then H.264, MPEG-4 Visual, AAC and ProRes in Rust. The phone's own export
+/// still writes H.264; MPEG-4 is there when a caller asks for it and the
+/// platform encoder declines.
 #[must_use]
 pub fn encoders() -> EncodeFactory {
     let mut encoders = EncodeFactory::new();
@@ -42,6 +44,7 @@ pub fn encoders() -> EncodeFactory {
     #[cfg(target_vendor = "apple")]
     cutlass_platform_apple::register_encoders(&mut encoders);
     cutlass_h264::register_encoders(&mut encoders);
+    cutlass_mpeg4::register_engine_encoders(&mut encoders);
     cutlass_aac::register_encoders(&mut encoders);
     cutlass_prores::register_encoders(&mut encoders);
     encoders

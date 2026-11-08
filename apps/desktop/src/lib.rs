@@ -94,12 +94,16 @@ pub fn register_codecs_with(
     cutlass_prores::register_encoders(&mut encoders);
     cutlass_vp8::register_engine_decoders(&mut decoders);
     cutlass_vp8::register_engine_encoders(&mut encoders);
-    // After the platform decoders: the Rust HEVC and MPEG-2 decoders serve
-    // Linux, and the other platforms when hardware decode is off. No
-    // platform encodes MPEG-2.
+    // After the platform codecs: the Rust HEVC, MPEG-2 and MPEG-4 Visual
+    // decoders serve Linux, and the other platforms when hardware decode is
+    // off. No platform encodes MPEG-2. VideoToolbox claims MPEG-4 Visual on
+    // Apple; these openers run when the platform opener is absent, and the
+    // MPEG-4 encoder is the same fallback.
     cutlass_hevc::register_decoders(&mut decoders);
     cutlass_mpeg2::register_decoders(&mut decoders);
     cutlass_mpeg2::register_encoders(&mut encoders);
+    cutlass_mpeg4::register_engine_decoders(&mut decoders);
+    cutlass_mpeg4::register_engine_encoders(&mut encoders);
     (decoders, encoders)
 }
 
@@ -247,6 +251,80 @@ mod tests {
         encoders
             .open(&picture(CodecId::H264, 64, 64))
             .expect("hardware encode stays on");
+    }
+
+    #[test]
+    fn mpeg4_visual_decodes_when_the_platform_decoder_is_absent() {
+        use cutlass_decode::{Output, Packet, PictureSamples};
+        use cutlass_settings::Hardware;
+
+        #[cfg(target_os = "macos")]
+        {
+            let (on, _) = super::register_codecs();
+            on.open(&CodecParams::video(CodecId::Mpeg4, 48, 32))
+                .expect("videotoolbox mpeg4");
+        }
+        let off = Hardware {
+            decode: false,
+            ..Hardware::default()
+        };
+        let (decoders, _) = super::register_codecs_with(&off);
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../crates/codecs/mpeg4/tests/fixtures");
+        let stream = std::fs::read(root.join("asp.m4v")).expect("fixture");
+        let want = std::fs::read(root.join("asp.yuv")).expect("reference");
+        let mut decoder = decoders
+            .open(&CodecParams::video(CodecId::Mpeg4, 48, 32))
+            .expect("rust mpeg4");
+        let mut outputs = decoder
+            .push(&Packet::video(stream, 0, 1, 25, true))
+            .expect("decode");
+        outputs.extend(decoder.drain().expect("drain"));
+        let mut got = Vec::new();
+        for output in outputs {
+            let Output::Picture(picture) = output else {
+                continue;
+            };
+            let PictureSamples::Cpu(samples) = picture.samples() else {
+                panic!("the rust decoder returns cpu samples");
+            };
+            got.extend_from_slice(samples);
+        }
+        assert_eq!(got, want);
+    }
+
+    /// Hardware encode off leaves VideoToolbox out, so the Rust encoder
+    /// writes the VOP. A platform encoder registered first would hide it.
+    #[test]
+    fn mpeg4_visual_encodes_when_the_platform_encoder_is_absent() {
+        use cutlass_settings::Hardware;
+
+        let off = Hardware {
+            encode: false,
+            ..Hardware::default()
+        };
+        let (_decoders, encoders) = super::register_codecs_with(&off);
+        let mut params = CodecParams::with_format(CodecId::Mpeg4, 16, 16, PixelFormat::Rgba8);
+        params.bitrate = 200_000;
+        let mut encoder = encoders.open(&params).expect("rust mpeg4 encoder");
+        let time = cutlass_encode::FrameTime::new(0, 1, 25).expect("time");
+        let frame =
+            cutlass_encode::CpuFrame::new(16, 16, PixelFormat::Rgba8, vec![128; 16 * 16 * 4], time)
+                .expect("frame");
+        let packets = encoder
+            .push_frame(&cutlass_encode::FrameInput::Cpu(frame))
+            .expect("encode");
+        assert!(
+            packets[0].data.starts_with(&[0, 0, 1, 0xB6]),
+            "the rust encoder writes a VOP"
+        );
+        assert!(
+            packets[0]
+                .side
+                .iter()
+                .any(|side| matches!(side, cutlass_decode::SideData::Config(_))),
+            "the layer rides on the first packet"
+        );
     }
 
     /// A second of stereo tones, MP3 packets from the Rust encoder, and

@@ -299,7 +299,13 @@ pub fn output_size(
 pub fn coded_size(codec: CodecId, (width, height): (u32, u32)) -> (u32, u32) {
     let halved = matches!(
         codec,
-        CodecId::H264 | CodecId::Hevc | CodecId::Av1 | CodecId::Vp8 | CodecId::Vp9 | CodecId::Mpeg2
+        CodecId::H264
+            | CodecId::Hevc
+            | CodecId::Av1
+            | CodecId::Vp8
+            | CodecId::Vp9
+            | CodecId::Mpeg2
+            | CodecId::Mpeg4
     );
     if halved {
         ((width & !1).max(2), (height & !1).max(2))
@@ -432,6 +438,7 @@ mod tests {
         use cutlass_codec::CodecId;
         assert_eq!(coded_size(CodecId::H264, (720, 405)), (720, 404));
         assert_eq!(coded_size(CodecId::Hevc, (607, 1080)), (606, 1080));
+        assert_eq!(coded_size(CodecId::Mpeg4, (607, 1080)), (606, 1080));
         assert_eq!(coded_size(CodecId::H264, (1, 1)), (2, 2));
         assert_eq!(coded_size(CodecId::Mpeg2, (853, 481)), (852, 480));
         assert_eq!(coded_size(CodecId::Png, (720, 405)), (720, 405));

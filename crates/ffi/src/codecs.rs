@@ -34,8 +34,8 @@ pub fn readers() -> ReaderFactory {
 }
 
 /// FLAC, ALAC, MP3, Opus, Vorbis, WebP and Motion JPEG, the platform
-/// decoders for this OS, then PNG, GIF, JPEG, AAC, H.264, HEVC, MPEG-2, PCM
-/// and ProRes.
+/// decoders for this OS, then PNG, GIF, JPEG, AAC, H.264, HEVC, MPEG-2,
+/// MPEG-4 Visual, PCM and ProRes.
 #[must_use]
 pub fn decoders() -> DecodeFactory {
     let mut decoders = DecodeFactory::new();
@@ -58,9 +58,12 @@ pub fn decoders() -> DecodeFactory {
     cutlass_jpeg::register_decoders(&mut decoders);
     cutlass_aac::register_decoders(&mut decoders);
     cutlass_h264::register_decoders(&mut decoders);
-    // HEVC and MPEG-2 in Rust, after the platform decoders.
+    // HEVC, MPEG-2 and MPEG-4 Visual in Rust, after the platform decoders.
+    // On Apple the platform claims MPEG-4 Visual. Its opener here decodes
+    // that codec when the platform opener is absent.
     cutlass_hevc::register_decoders(&mut decoders);
     cutlass_mpeg2::register_decoders(&mut decoders);
+    cutlass_mpeg4::register_engine_decoders(&mut decoders);
     cutlass_pcm::register_decoders(&mut decoders);
     cutlass_prores::register_decoders(&mut decoders);
     decoders

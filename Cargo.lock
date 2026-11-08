@@ -2704,6 +2704,7 @@ dependencies = [
  "cutlass-model",
  "cutlass-mp3",
  "cutlass-mp3-container",
+ "cutlass-mpeg4",
  "cutlass-ogg",
  "cutlass-opus",
  "cutlass-pcm",
@@ -2748,6 +2749,7 @@ dependencies = [
  "cutlass-mp3",
  "cutlass-mp3-container",
  "cutlass-mpeg2",
+ "cutlass-mpeg4",
  "cutlass-ogg",
  "cutlass-opus",
  "cutlass-pcm",
@@ -2941,8 +2943,11 @@ dependencies = [
 name = "cutlass-mpeg4"
 version = "0.1.0"
 dependencies = [
+ "cutlass-codec",
+ "cutlass-container",
  "cutlass-decode",
  "cutlass-encode",
+ "cutlass-isobmff",
 ]
 
 [[package]]
@@ -3002,6 +3007,7 @@ version = "0.1.0"
 dependencies = [
  "cutlass-decode",
  "cutlass-encode",
+ "cutlass-mpeg4",
  "objc2 0.6.5",
  "objc2-metal 0.3.2",
  "pollster",

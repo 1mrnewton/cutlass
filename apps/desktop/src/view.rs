@@ -8505,7 +8505,7 @@ fn export_choices(shell: &Shell, ui: &mut Ui, view: &mut ViewState) {
             }
         });
         // ProRes and Motion JPEG are written in a MOV, VP8 and MPEG-2 in an
-        // MP4.
+        // MP4. MPEG-4 in either.
         let fits = |codec: CodecId| match codec {
             CodecId::Prores | CodecId::Mjpeg => view.export_mov,
             CodecId::Vp8 | CodecId::Mpeg2 => !view.export_mov,
@@ -8518,6 +8518,7 @@ fn export_choices(shell: &Shell, ui: &mut Ui, view: &mut ViewState) {
             for (codec, name) in [
                 (CodecId::H264, "H.264"),
                 (CodecId::Hevc, "HEVC"),
+                (CodecId::Mpeg4, "MPEG-4"),
                 (CodecId::Vp8, "VP8"),
                 (CodecId::Mpeg2, "MPEG-2"),
                 (CodecId::Prores, "ProRes"),

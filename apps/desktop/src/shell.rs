@@ -589,12 +589,11 @@ pub enum ExportQuality {
 }
 
 impl ExportQuality {
-    /// The bitrate for an H.264, HEVC, Motion JPEG, VP8, or MPEG-2 picture
-    /// `short_side` pixels on its short side. HEVC gets the same picture
-    /// from fewer bits; VP8 spends what H.264 does; MPEG-2 needs twice that.
-    /// Motion JPEG codes every frame alone: a 1080p frame of footage at
-    /// quality 75 is about 240 KB, near five times H.264's rate at 30 frames
-    /// a second.
+    /// The bitrate for a picture `short_side` pixels on its short side.
+    /// HEVC gets the same picture from fewer bits; MPEG-2 needs twice what
+    /// H.264 spends. Motion JPEG codes every frame alone: a 1080p frame of
+    /// footage at quality 75 is about 240 KB, near five times H.264's rate at
+    /// 30 frames a second. The other picture codecs spend what H.264 does.
     #[must_use]
     pub fn bitrate(self, short_side: u32, codec: CodecId) -> u32 {
         let base = cutlass_export::video_bitrate(short_side);
@@ -7411,6 +7410,7 @@ impl Shell {
             request.codec,
             CodecId::H264
                 | CodecId::Hevc
+                | CodecId::Mpeg4
                 | CodecId::Prores
                 | CodecId::Mjpeg
                 | CodecId::Vp8

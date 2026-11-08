@@ -125,7 +125,12 @@ The log-spectral distance is the RMS over 1-Bark bands of a 2048-point Hann, hop
 
 Interop items: mono 44.1 kHz q 0.4, stereo 44.1 kHz q 0.3, stereo 48 kHz q 0.7, 5.1 48 kHz q 0.5, mono 8 kHz q 0.2, stereo 96 kHz q 0.4.
 
+### Integration
+
+`readers::tests::an_ogg_vorbis_file_opens_seeks_and_decodes`: two seconds of stereo 44.1 kHz, probe duration 2,000,000 µs. `audio_from` at the start and at one second matches a continuous decode of the same file, sample for sample.
+
+`movie::tests::sound_alone_writes_a_vorbis_file`: half a second of silence through `write_sound` into an Ogg file. The edit duration is 22,050 samples. Reopening it with `VorbisDecoder` returns 22,050 frames, each sample under 1e-3. The desktop names that file `.ogg`, and a picture export that asks for Vorbis is refused. The phone registers the same Rust decoder and encoder.
+
 ### Not run
 
-- Vorbis in the desktop reader: open, seek, play, probe, export to `.ogg`, reopen.
 - A Vorbis fuzz campaign, and release measurements of decode and encode throughput, latency, and memory.

@@ -657,6 +657,30 @@ fn ffmpeg_decodes_our_streams() {
     }
 }
 
+/// A steady tone keeps one exponent set, so the frame is one hybrid transform.
+#[test]
+fn a_steady_tone_uses_the_hybrid_transform() {
+    let Some(ffmpeg) = oracle("ffmpeg", "-version") else {
+        return;
+    };
+    let rate = 48_000u32;
+    let channels = [C];
+    let pcm = tones(&channels, rate, rate as usize, 0.25);
+    let packets = encode(config(Format::Eac3, rate, &channels, 96_000), &pcm);
+    let ours = decode(CodecId::Eac3, &packets);
+    assert!(
+        ours.decoder.tools().aht_channels > 0,
+        "a steady tone did not use the hybrid transform"
+    );
+    let theirs = ffmpeg_decode(&ffmpeg, &stream(&packets), &["-f", "eac3"]);
+    let skip = ENCODER_DELAY as usize;
+    let b: Vec<f32> = theirs.into_iter().skip(skip).collect();
+    let n = ours.pcm.len().min(b.len());
+    let margin = 1536.min(n / 4);
+    let quality = snr(&ours.pcm[margin..n - margin], &b[margin..n - margin]);
+    assert!(quality > 50.0, "hybrid transform {quality:.1} dB");
+}
+
 /// A low-rate E-AC-3 frame extends the top bins instead of dropping them.
 #[test]
 fn spectral_extension_matches_ffmpeg() {

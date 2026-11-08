@@ -134,6 +134,8 @@ pub(crate) struct Block {
     pub spx_master: [u8; MAX_FBW],
     pub spx_exp: [[u8; crate::spx::MAX_BANDS]; MAX_FBW],
     pub spx_mant: [[u8; crate::spx::MAX_BANDS]; MAX_FBW],
+    /// Adaptive hybrid transform. One exponent set, mantissas once per frame.
+    pub aht: [bool; SLOTS],
     /// AC-3 `snroffste`.
     pub snroffste: bool,
 }
@@ -165,6 +167,7 @@ impl Default for Block {
             spx_master: [0; MAX_FBW],
             spx_exp: [[0; crate::spx::MAX_BANDS]; MAX_FBW],
             spx_mant: [[0; crate::spx::MAX_BANDS]; MAX_FBW],
+            aht: [false; SLOTS],
             snroffste: false,
         }
     }
@@ -197,6 +200,37 @@ pub(crate) fn plan(shape: &Shape, blocks: &mut [Block], mode: Mode) {
     rematrix(shape, blocks);
     exponents(shape, blocks, mode);
     snr_flags(shape, blocks);
+    hybrid(shape, blocks);
+}
+
+/// One hybrid transform when every channel keeps a single exponent set.
+fn hybrid(shape: &Shape, blocks: &mut [Block]) {
+    if !shape.eac3 || shape.blocks != 6 || shape.spx.is_some() {
+        return;
+    }
+    if blocks.iter().any(|block| block.cplinu) {
+        return;
+    }
+    let mut slots = Vec::with_capacity(shape.nf + 1);
+    slots.extend(0..shape.nf);
+    if shape.lfeon {
+        slots.push(LFE);
+    }
+    let steady = slots.iter().all(|&slot| {
+        blocks
+            .iter()
+            .filter(|block| block.expstr[slot] != REUSE)
+            .count()
+            == 1
+    });
+    if !steady {
+        return;
+    }
+    for block in blocks.iter_mut() {
+        for &slot in &slots {
+            block.aht[slot] = true;
+        }
+    }
 }
 
 fn uncoupled(blocks: &mut [Block], nf: usize, full: usize) {

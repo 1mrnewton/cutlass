@@ -169,10 +169,8 @@ pub(crate) fn idct6(x: &mut [f32; 6]) {
     *x = out;
 }
 
-/// The forward DCT an AHT encoder would use: the transpose of `idct6`
-/// scaled so that `idct6(dct6(x)) == x`.
-#[cfg(test)]
-fn dct6(c: &mut [f32; 6]) {
+/// The forward DCT: the transpose of `idct6`, scaled so `idct6(dct6(x)) == x`.
+pub(crate) fn dct6(c: &mut [f32; 6]) {
     let mut out = [0.0f32; 6];
     for (j, value) in out.iter_mut().enumerate() {
         let r = if j == 0 { FRAC_1_SQRT_2 } else { 1.0 };
@@ -183,6 +181,85 @@ fn dct6(c: &mut [f32; 6]) {
         *value = SQRT_2 * r * sum / 6.0;
     }
     *c = out;
+}
+
+/// Bits of one channel's AHT mantissas: `gaqmod` 0 and no gains.
+pub(crate) fn payload_bits(bap: &[u8], start: usize, end: usize) -> usize {
+    let mut bits = 2usize;
+    for &value in &bap[start..end.min(bap.len())] {
+        let width = HEBAP_BITS[usize::from(value.min(19))] as usize;
+        if value == 0 {
+            continue;
+        } else if value < 8 {
+            bits += width;
+        } else {
+            bits += 6 * width;
+        }
+    }
+    bits
+}
+
+/// Write one channel's AHT mantissas from its six normalized blocks.
+/// `normalized[bin][block]` is the mantissa before the inverse DCT.
+pub(crate) fn write(
+    w: &mut crate::bits::BitWriter,
+    bap: &[u8],
+    normalized: &[[f32; 6]],
+    start: usize,
+    end: usize,
+) {
+    w.put(2, 0);
+    let end = end.min(bap.len()).min(normalized.len());
+    for (&value, coeffs) in bap[start..end].iter().zip(&normalized[start..end]) {
+        if value == 0 {
+            continue;
+        }
+        let mut coeffs = *coeffs;
+        dct6(&mut coeffs);
+        let width = HEBAP_BITS[usize::from(value.min(19))];
+        if value < 8 {
+            w.put(width, closest_vq(value, &coeffs));
+        } else {
+            for &coeff in &coeffs {
+                w.put(width, gaq(value, coeff) as u32);
+            }
+        }
+    }
+}
+
+fn closest_vq(hebap: u8, target: &[f32; 6]) -> u32 {
+    let table: &[[i16; 6]] = match hebap {
+        1 => &VQ_HEBAP1,
+        2 => &VQ_HEBAP2,
+        3 => &VQ_HEBAP3,
+        4 => &VQ_HEBAP4,
+        5 => &VQ_HEBAP5,
+        6 => &VQ_HEBAP6,
+        _ => &VQ_HEBAP7,
+    };
+    let mut best = 0u32;
+    let mut error = f32::MAX;
+    for (index, vector) in table.iter().enumerate() {
+        let mut distance = 0.0f32;
+        for (&wanted, &code) in target.iter().zip(vector) {
+            let delta = wanted - f32::from(code) / 32768.0;
+            distance += delta * delta;
+        }
+        if distance < error {
+            error = distance;
+            best = index as u32;
+        }
+    }
+    best
+}
+
+fn gaq(hebap: u8, value: f32) -> i32 {
+    let bits = HEBAP_BITS[usize::from(hebap.min(19))];
+    let row = usize::from(hebap.saturating_sub(8).min(11));
+    let scale = f32::from(GAQ_A1[row]) / 32768.0;
+    let half = (1i32 << (bits - 1)) as f32;
+    let x = value / (1.0 + scale);
+    (x * half).round().clamp(-half, half - 1.0) as i32
 }
 
 #[cfg(test)]

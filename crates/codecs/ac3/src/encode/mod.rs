@@ -9,7 +9,8 @@
 //! substreams, transient pre-noise processing and dynamic range words are
 //! never written. Delta bit allocation is written only when a block carries
 //! segments; the rate control leaves every segment empty. Spectral extension
-//! replaces the top bins of a low-rate E-AC-3 frame.
+//! replaces the top bins of a low-rate E-AC-3 frame. A steady six-block
+//! frame with one exponent set uses the adaptive hybrid transform.
 
 mod analysis;
 mod plan;
@@ -779,7 +780,7 @@ impl Ac3Encoder {
                         snr: 0,
                         leak,
                         delta: (held.count > 0).then_some(held.segments()),
-                        high_efficiency: false,
+                        high_efficiency: block.aht[slot],
                     };
                     bitalloc::mask(&block.exps[slot], &channel)?
                 };
@@ -792,7 +793,7 @@ impl Ac3Encoder {
                     snr: 0,
                     leak,
                     delta: None,
-                    high_efficiency: false,
+                    high_efficiency: block.aht[slot],
                 };
                 allocations[blk * SLOTS + slot] = Some((mask, channel));
             }
@@ -879,6 +880,9 @@ impl Search<'_> {
                 }
             }
             mantissas[blk] = write::mantissa_bits(shape, &blocks[blk]);
+            if blk == 0 {
+                mantissas[blk] += write::aht_payload_bits(shape, &blocks[0]);
+            }
         }
         let budget = self.bytes * 8 - TAIL_BITS;
         let total = self.layout.total + mantissas.iter().sum::<usize>();

@@ -101,7 +101,7 @@ pub(crate) fn frame(
         audblk(&mut w, &context, blk, block, &mut coupling, skip[blk]);
         layout.side_end[blk] = w.bits();
         if mantissas {
-            write_mantissas(&mut w, shape, block);
+            write_mantissas(&mut w, shape, blocks, blk);
         }
     }
     layout.total = w.bits();
@@ -263,9 +263,12 @@ fn numblkscod(blocks: usize) -> u32 {
 /// Annex E Table E1.3.
 fn audfrm(w: &mut BitWriter, shape: &Shape, blocks: &[Block], snr: u16) {
     let nf = shape.nf;
+    let hybrid = blocks
+        .first()
+        .is_some_and(|block| block.aht.iter().any(|&on| on));
     if shape.blocks == 6 {
         w.flag(true); // expstre
-        w.flag(false); // ahte
+        w.flag(hybrid);
     }
     w.put(2, 0); // snroffststr
     w.flag(false); // transproce
@@ -310,6 +313,14 @@ fn audfrm(w: &mut BitWriter, shape: &Shape, blocks: &[Block], snr: u16) {
         }
     } else {
         w.flag(false); // convexpstre
+    }
+    if hybrid {
+        for _ in 0..nf {
+            w.flag(true); // chahtinu
+        }
+        if shape.lfeon {
+            w.flag(true); // lfeahtinu
+        }
     }
     w.put(6, u32::from(snr >> 4));
     w.put(4, u32::from(snr & 15));
@@ -650,6 +661,9 @@ fn groups(w: &mut BitWriter, reference: u8, values: impl Iterator<Item = u8>) {
 pub(crate) fn mantissa_bits(shape: &Shape, block: &Block) -> usize {
     let (mut ones, mut twos, mut fours, mut bits) = (0usize, 0usize, 0usize, 0usize);
     for slot in block.active(shape) {
+        if block.aht[slot] {
+            continue;
+        }
         for &bap in &block.bap[slot][block.start[slot]..block.end[slot]] {
             match bap {
                 0 => {}
@@ -661,6 +675,15 @@ pub(crate) fn mantissa_bits(shape: &Shape, block: &Block) -> usize {
         }
     }
     bits + ones.div_ceil(3) * 5 + twos.div_ceil(3) * 7 + fours.div_ceil(2) * 7
+}
+
+/// AHT mantissa bits, counted on the first block where they are written.
+pub(crate) fn aht_payload_bits(shape: &Shape, block: &Block) -> usize {
+    block
+        .active(shape)
+        .filter(|&slot| block.aht[slot])
+        .map(|slot| crate::aht::payload_bits(&block.bap[slot], block.start[slot], block.end[slot]))
+        .sum()
 }
 
 /// Symmetric quantizer of `levels` levels for a mantissa in [-1, 1).
@@ -677,9 +700,24 @@ fn asymmetric(m: f32, bits: u32) -> i32 {
 
 /// One block's mantissas in bit stream order, grouped as section 7.3.5
 /// reads them.
-fn write_mantissas(w: &mut BitWriter, shape: &Shape, block: &Block) {
+fn write_mantissas(w: &mut BitWriter, shape: &Shape, blocks: &[Block], blk: usize) {
+    let block = &blocks[blk];
     let mut order: Vec<(u8, u32)> = Vec::with_capacity(COEFS * 2);
     let mut push = |slot: usize| {
+        if block.aht[slot] {
+            if blk == 0 {
+                let mut normalized = [[0.0f32; 6]; COEFS];
+                let (start, end) = (block.start[slot], block.end[slot]);
+                for (bin, row) in normalized.iter_mut().enumerate().take(end).skip(start) {
+                    let exp = block.exps[slot][bin];
+                    for (frame, source) in blocks.iter().enumerate().take(6) {
+                        row[frame] = source.coefs[slot][bin] * f32::from(exp).exp2();
+                    }
+                }
+                crate::aht::write(w, &block.bap[slot], &normalized, start, end);
+            }
+            return;
+        }
         let (start, end) = (block.start[slot], block.end[slot]);
         for bin in start..end {
             let bap = block.bap[slot][bin];

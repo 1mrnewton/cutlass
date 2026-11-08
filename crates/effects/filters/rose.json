@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "rose",
+  "name": "Rose",
+  "category": "Portrait",
+  "adjust": {"tint": 0.25, "temperature": 0.1, "fade": 0.1}
+}

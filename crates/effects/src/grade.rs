@@ -259,6 +259,8 @@ impl Grade {
 pub struct Colour {
     /// A chroma key, cut out before any colour work.
     pub chroma: Option<Chroma>,
+    /// A filter's curves, wheels and HSL, run before the clip's own.
+    pub look: Grade,
     pub grade: Grade,
     pub adjust: Adjust,
     pub lut: Option<ClipLut>,
@@ -268,6 +270,7 @@ impl Colour {
     #[must_use]
     pub fn is_identity(&self) -> bool {
         self.chroma.is_none_or(|chroma| chroma.strength <= 0.0)
+            && self.look.is_identity()
             && self.grade.is_identity()
             && self.adjust.is_identity()
             && self.lut.as_ref().is_none_or(|lut| lut.strength <= 0.0)
@@ -279,6 +282,7 @@ impl Colour {
         if let Some(chroma) = &self.chroma {
             chroma.apply(rgba);
         }
+        self.look.apply(rgba);
         self.grade.apply(rgba);
         adjust_rgba(&self.adjust, rgba, width, height, seed);
         if let Some(lut) = &self.lut {
@@ -311,6 +315,7 @@ pub fn is_colour_work(material: MaterialRef<'_>) -> bool {
 pub fn segment_colour(draft: &Draft, segment: &Segment) -> Colour {
     Colour {
         chroma: segment_chroma(draft, segment),
+        look: Grade::default(),
         grade: segment_grade(draft, segment),
         adjust: segment_adjust(draft, segment),
         lut: segment_lut(draft, segment),

@@ -10762,8 +10762,8 @@ mod tests {
         assert!(top_cards(&draft, Shelf::Adjustments, "adj").len() == 1);
         assert!(top_cards(&draft, Shelf::Adjustments, "nope").is_empty());
         let filters = top_cards(&draft, Shelf::Filters, "");
-        assert_eq!(filters.len(), 20);
-        assert_eq!(filters[0].name, "Warm");
+        assert_eq!(filters.len(), cutlass_effects::looks().len());
+        assert_eq!(filters[0].name, cutlass_effects::looks()[0].name);
         assert_eq!(filters[0].look, CardLook::Picture(None));
         assert_eq!(top_cards(&draft, Shelf::Filters, "noir").len(), 1);
     }

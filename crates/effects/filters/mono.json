@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "mono",
+  "name": "Mono",
+  "category": "Mono",
+  "adjust": {"saturation": -1.0, "contrast": 0.1}
+}

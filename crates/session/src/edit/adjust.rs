@@ -282,8 +282,8 @@ mod tests {
         assert_eq!(track.kind, TrackType::Filter);
         assert_eq!(track.segments[0].render_index, 10_000);
         let look = cutlass_effects::segment_look(&draft, &track.segments[0]).unwrap();
-        assert!(look.get(AdjustKey::Temperature).abs() < 1e-6);
-        assert!(look.get(AdjustKey::Saturation) > 0.0);
+        assert!(look.adjust.get(AdjustKey::Temperature).abs() < 1e-6);
+        assert!(look.adjust.get(AdjustKey::Saturation) > 0.0);
     }
 
     #[test]

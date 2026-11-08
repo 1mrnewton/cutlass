@@ -54,7 +54,10 @@ pub use grade::{
     Wheel, WheelSetting, curve_table, is_colour_work, points_json, segment_colour, segment_grade,
     tidy_points, wheel_json,
 };
-pub use look::{FILTER, LOOK_PREFIX, LOOKS, Look, bundled_look, look_poster, segment_look};
+pub use look::{
+    FILTER, FILTER_CATEGORIES, LOOK_PREFIX, Look, bundled_look, look_poster, looks, read_look,
+    segment_look,
+};
 pub use lut::{ClipLut, KEPT_SIZE, LUT, Lut, LutError, MAX_CUBE_SIZE, segment_lut};
 pub use mask::{
     COLOR_MASK, CanvasMask, MASK, MASK_WGSL, Mask, MaskShape, listed_mask, segment_color_mask,

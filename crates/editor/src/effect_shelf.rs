@@ -28,12 +28,12 @@ pub const FILTER_CARD_PREFIX: &str = "filter:";
 /// The bundled filters as `(card id, name)`, in shelf order.
 #[must_use]
 pub fn filter_cards() -> Vec<(String, &'static str)> {
-    cutlass_effects::LOOKS
+    cutlass_effects::looks()
         .iter()
         .map(|look| {
             (
                 format!("{FILTER_CARD_PREFIX}{}", look.effect_id()),
-                look.name,
+                look.name.as_str(),
             )
         })
         .collect()
@@ -171,9 +171,12 @@ mod filter_tests {
     #[test]
     fn every_filter_card_names_its_look() {
         let cards = filter_cards();
-        assert_eq!(cards.len(), 20);
+        assert_eq!(cards.len(), cutlass_effects::looks().len());
         for (id, name) in cards {
-            assert_eq!(filter_of_card(&id).map(|look| look.name), Some(name));
+            assert_eq!(
+                filter_of_card(&id).map(|look| look.name.as_str()),
+                Some(name)
+            );
         }
         assert!(filter_of_card("effect:look/warm").is_none());
     }

@@ -13880,7 +13880,10 @@ mod tests {
         let mut desktop = shell();
         desktop.open_folder(&temp.path).unwrap();
         assert!(desktop.add_filter("filter:look/none").is_err());
-        let (card, _) = cutlass_editor::filter_cards()[5].clone();
+        let (card, _) = cutlass_editor::filter_cards()
+            .into_iter()
+            .find(|(card, _)| card.ends_with("look/noir"))
+            .unwrap();
         desktop.add_filter(&card).unwrap();
         let clip = desktop.selected().cloned().unwrap();
         let draft = desktop.draft().unwrap();

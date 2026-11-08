@@ -14,7 +14,7 @@ use std::io::{Seek, Write};
 use cutlass_codec::{CodecId as Id, ContainerId, Packet, StreamCodec, Timescale};
 use cutlass_container::{
     FailedMux, FinishedMux, IndexPlace, Mux, MuxError, MuxMode, MuxStatus, NewStream,
-    TrackDuration, TrackId,
+    TrackDuration, TrackId, Trim,
 };
 
 use crate::legacy::{
@@ -33,6 +33,8 @@ struct Track {
     next: i64,
     /// A ProRes track whose `colr` box still waits for its first frame.
     color_from_frame: bool,
+    /// The last gapless trim an AC-3 or E-AC-3 encoder handed over.
+    trim: Option<Trim>,
 }
 
 /// An MP4 file written as packets arrive, with its index at the end.
@@ -291,6 +293,7 @@ impl<W: Write + Seek> Mux for Mp4Mux<W> {
             codec,
             next: 0,
             color_from_frame: codec == CodecId::ProRes,
+            trim: None,
         });
         Ok(id)
     }
@@ -371,6 +374,19 @@ impl<W: Write + Seek> Mux for Mp4Mux<W> {
                 return Err(FailedMux::incomplete(self.payload, error));
             }
         }
+        for track in &self.tracks {
+            let Some(trim) = track.trim else {
+                continue;
+            };
+            if let Err(error) = self.inner.set_gapless(
+                track.boxed,
+                trim.encoder_delay().unwrap_or(0),
+                trim.trailing_padding().unwrap_or(0),
+            ) {
+                let error = self.fail(boxed(error));
+                return Err(FailedMux::incomplete(self.payload, error));
+            }
+        }
         if let Err(error) = legacy::Mux::finish(&mut self.inner) {
             let error = self.fail(boxed(error));
             return Err(FailedMux::incomplete(self.payload, error));
@@ -403,6 +419,20 @@ impl<W: Write + Seek> Mux for Mp4Mux<W> {
             .set_extradata(self.tracks[index].boxed, stored)
             .map_err(|error| self.fail(boxed(error)))
     }
+
+    /// AC-3 and E-AC-3 keep the encoder delay and the trailing padding
+    /// inside the frame durations. The edit written at finish skips the
+    /// delay and ends before the padding. Opus already shortens its last
+    /// packet and writes its pre-skip from the head, so this trim is not
+    /// stored again for it.
+    fn set_trim(&mut self, track: TrackId, trim: Trim) -> Result<(), MuxError> {
+        self.building()?;
+        let index = self.track(track.get()).map_err(|error| self.fail(error))?;
+        if matches!(self.tracks[index].codec, CodecId::Ac3 | CodecId::Eac3) {
+            self.tracks[index].trim = Some(trim);
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -412,7 +442,7 @@ mod tests {
     use cutlass_codec::{
         CodecId as Id, FrameSize, Packet, StreamCodec, StreamParams, Timescale, Timestamp,
     };
-    use cutlass_container::{Mux, NewStream, TrackDuration};
+    use cutlass_container::{Mux, NewStream, TrackDuration, Trim};
 
     use super::{Mp4Mux, bare_asc};
     use crate::mux::FileBrand;
@@ -532,6 +562,55 @@ mod tests {
         let edit = stream.edits()[0];
         assert_eq!(edit.media_time(), Some(312));
         assert_eq!(edit.duration(), 2000);
+    }
+
+    /// AC-3 and E-AC-3 frame durations include the encoder delay and the
+    /// trailing padding. The edit starts after the delay and ends before
+    /// the padding. A later trim replaces an earlier one.
+    #[test]
+    fn ac3_and_eac3_trim_is_an_edit_around_the_played_samples() {
+        for codec in [Id::Ac3, Id::Eac3] {
+            let mut mux = Mp4Mux::with_brand(Cursor::new(Vec::new()), FileBrand::M4a);
+            let sound = mux
+                .add_stream(NewStream {
+                    params: StreamParams::try_audio(
+                        StreamCodec::Known(codec),
+                        48_000,
+                        2,
+                        Vec::new(),
+                    )
+                    .unwrap(),
+                    timescale: Timescale::new(48_000),
+                    language: None,
+                })
+                .unwrap();
+            mux.set_trim(sound, Trim::new(Some(1), Some(1))).unwrap();
+            mux.set_trim(sound, Trim::new(Some(256), Some(128)))
+                .unwrap();
+            for (pts, duration) in [(0, 1536), (1536, 1536)] {
+                mux.write_packet(&packet(
+                    sound.get(),
+                    vec![0x0B, 0x77],
+                    pts,
+                    duration,
+                    48_000,
+                ))
+                .unwrap();
+            }
+            mux.finish(&[TrackDuration {
+                track: sound,
+                timescale: Timescale::new(48_000),
+                ticks: 3072,
+            }])
+            .unwrap();
+            let bytes = mux.into_writer().unwrap().into_inner();
+            let file = crate::IsoBmffFile::open(Cursor::new(bytes)).unwrap();
+            let stream = &cutlass_container::Demux::streams(&file)[0];
+            let edit = stream.edits()[0];
+            assert_eq!(edit.media_time(), Some(256), "{codec:?}");
+            assert_eq!(edit.duration(), 3072 - 256 - 128, "{codec:?}");
+            assert!(stream.trim().encoder_delay().is_none(), "{codec:?}");
+        }
     }
 
     #[test]

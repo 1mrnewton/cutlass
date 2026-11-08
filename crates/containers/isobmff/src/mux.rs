@@ -60,6 +60,10 @@ struct TrackOut {
     params: StreamParams,
     edits: Vec<Edit>,
     next_dts: i64,
+    /// Encoder delay and trailing padding, in the track timescale.
+    /// `None` leaves the track as it was. AC-3 and E-AC-3 keep both inside
+    /// the frame durations, so the edit has to name them.
+    gapless: Option<(u64, u64)>,
 }
 
 struct Held {
@@ -121,6 +125,33 @@ impl<W: Write + Seek> IsoBmffMux<W> {
             sequence: 1,
             tfra: Vec::new(),
         }
+    }
+
+    /// Remember the encoder delay and trailing padding of `track_id`.
+    ///
+    /// Both are samples in the track timescale. A track that already has
+    /// edits keeps those. Otherwise finish writes one edit (ISO/IEC 14496-12
+    /// `elst`): `media_time` is the first sample to present, and the segment
+    /// lasts for the samples that remain after the padding. Packet times are
+    /// unchanged and still include the priming.
+    pub(crate) fn set_gapless(
+        &mut self,
+        track_id: u32,
+        delay: u64,
+        padding: u64,
+    ) -> Result<(), Error> {
+        if self.finished {
+            return Err(Error::Incomplete);
+        }
+        let Some(track) = self
+            .tracks
+            .iter_mut()
+            .find(|track| track.params.track_id == track_id)
+        else {
+            return Err(Error::Missing { what: "track" });
+        };
+        track.gapless = Some((delay, padding));
+        Ok(())
     }
 
     pub fn set_edits(&mut self, track_id: u32, edits: Vec<Edit>) -> Result<(), Error> {
@@ -268,6 +299,7 @@ impl<W: Write + Seek> Mux for IsoBmffMux<W> {
             params: stored,
             edits: Vec::new(),
             next_dts: 0,
+            gapless: None,
         });
         Ok(id)
     }
@@ -696,7 +728,24 @@ fn tkhd(track: &TrackOut, duration: u64) -> Vec<u8> {
 /// An Opus track without edits gets the one its encapsulation asks for:
 /// play from the pre-skip to the end of the sample durations, whose last
 /// one is already cut to the end trim.
+///
+/// A track with gapless trim and no edits of its own plays from the delay
+/// through the last sample that is not padding. That is the AC-3 and E-AC-3
+/// case: the frame duration still holds both.
 fn present_edits(track: &TrackOut, media_duration: u64, movie_scale: u32) -> Vec<Edit> {
+    if track.edits.is_empty()
+        && let Some((delay, padding)) = track.gapless
+        && (delay > 0 || padding > 0)
+        && let Ok(media_time) = i64::try_from(delay)
+        && media_duration > delay.saturating_add(padding)
+    {
+        let played = media_duration - delay - padding;
+        return vec![Edit {
+            segment_duration: scale_u(played, track.params.timescale.get(), movie_scale).max(1),
+            media_time: Some(media_time),
+            media_rate: 0x0001_0000,
+        }];
+    }
     if track.edits.is_empty()
         && track.params.codec == CodecId::Opus
         && let Some(pre_skip) = crate::opus::pre_skip(&track.params.extradata)

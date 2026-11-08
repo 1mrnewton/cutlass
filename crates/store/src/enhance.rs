@@ -57,7 +57,11 @@ impl EnhanceKey {
         bytes.extend_from_slice(&meta.len().to_le_bytes());
         bytes.extend_from_slice(&modified.to_le_bytes());
         bytes.extend_from_slice(&self.level.to_le_bytes());
-        bytes.extend_from_slice(&self.denoise.to_le_bytes());
+        // Only when on, so a copy that is only enhanced keeps the name it
+        // had before copies could be denoised.
+        if self.denoise > 0 {
+            bytes.extend_from_slice(&self.denoise.to_le_bytes());
+        }
         bytes.extend_from_slice(self.model.as_bytes());
         bytes.push(0);
         bytes.extend_from_slice(&self.rate.to_bits().to_le_bytes());

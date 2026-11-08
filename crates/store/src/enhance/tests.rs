@@ -188,3 +188,30 @@ fn a_copy_that_is_only_denoised_keeps_its_own_folder() {
         find_enhanced(&temp.0, &denoised, &range)
     );
 }
+
+#[test]
+fn a_copy_that_is_only_enhanced_keeps_the_name_it_had_before_denoising() {
+    // The hash as it was before keys had a noise level, which copies made
+    // then are named by.
+    let (_temp, key) = project();
+    let meta = fs::metadata(&key.source).unwrap();
+    let modified = meta
+        .modified()
+        .unwrap()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(key.source.to_string_lossy().as_bytes());
+    bytes.push(0);
+    bytes.extend_from_slice(&meta.len().to_le_bytes());
+    bytes.extend_from_slice(&modified.to_le_bytes());
+    bytes.extend_from_slice(&key.level.to_le_bytes());
+    bytes.extend_from_slice(key.model.as_bytes());
+    bytes.push(0);
+    bytes.extend_from_slice(&key.rate.to_bits().to_le_bytes());
+    let hash = bytes.iter().fold(0xcbf2_9ce4_8422_2325_u64, |hash, &byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+    });
+    assert_eq!(key.stem().unwrap(), format!("{hash:016x}"));
+}

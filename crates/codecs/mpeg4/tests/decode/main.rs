@@ -7,3 +7,5 @@ mod common;
 mod corpus;
 #[cfg(test)]
 mod lifecycle;
+#[cfg(test)]
+mod packed;

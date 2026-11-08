@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "id": "soft-wipe",
+  "name": "Soft Wipe",
+  "category": "Reveal",
+  "preview": "flowers",
+  "poster": 0.5,
+  "controls": [
+    {"id": "speed", "name": "Speed", "default": 1, "min": 0.25, "max": 3, "unit": "times", "speed": true},
+    {"id": "soft", "name": "Edge", "default": 0.4, "min": 0, "max": 0.5, "unit": "percent", "set": [[0, "soft"]]}
+  ],
+  "passes": [
+    {"block": "reveal", "params": {"progress": {"keys": [[0, 0], [1, 1]]}, "kind": 0, "angle": 0, "soft": 0.4}}
+  ]
+}

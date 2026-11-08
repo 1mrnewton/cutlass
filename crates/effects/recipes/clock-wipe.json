@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "id": "clock-wipe",
+  "name": "Clock Wipe",
+  "category": "Reveal",
+  "preview": "flowers",
+  "poster": 0.4,
+  "controls": [
+    {"id": "speed", "name": "Speed", "default": 1, "min": 0.25, "max": 3, "unit": "times", "speed": true},
+    {"id": "soft", "name": "Edge", "default": 0.02, "min": 0, "max": 0.5, "unit": "percent", "set": [[0, "soft"]]}
+  ],
+  "passes": [
+    {"block": "reveal", "params": {"progress": {"keys": [[0, 0], [0.8, 1]]}, "kind": 4, "soft": 0.02}}
+  ]
+}

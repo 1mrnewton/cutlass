@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "id": "corrupt",
+  "name": "Corrupt",
+  "category": "Glitch",
+  "preview": "city",
+  "controls": [
+    {"id": "speed", "name": "Speed", "default": 1, "min": 0.25, "max": 3, "unit": "times", "speed": true},
+    {"id": "intensity", "name": "Intensity", "default": 1, "min": 0, "max": 2, "unit": "percent", "scale": [[0, "amount"], [1, "amount"]]}
+  ],
+  "passes": [
+    {"block": "blocks", "params": {"amount": {"jitter": {"rate": 10, "from": 0.1, "to": 0.5, "seed": 107}}, "size": 0.05, "shift": 0.1, "seed": {"jitter": {"rate": 10, "from": 0, "to": 1000, "seed": 108}}, "color": 0.8}},
+    {"block": "slices", "params": {"count": 12, "amount": {"jitter": {"rate": 10, "from": 0, "to": 0.08, "seed": 109}}, "seed": {"jitter": {"rate": 10, "from": 0, "to": 1000, "seed": 110}}}},
+    {"block": "hue", "params": {"degrees": {"jitter": {"rate": 4, "from": -60, "to": 60, "seed": 111}}}}
+  ]
+}

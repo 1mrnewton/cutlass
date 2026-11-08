@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "id": "shutters",
+  "name": "Shutters",
+  "category": "Reveal",
+  "preview": "road",
+  "poster": 0.3,
+  "controls": [
+    {"id": "speed", "name": "Speed", "default": 1, "min": 0.25, "max": 3, "unit": "times", "speed": true},
+    {"id": "count", "name": "Slats", "default": 12, "min": 2, "max": 32, "unit": "plain", "set": [[0, "count"]]}
+  ],
+  "passes": [
+    {"block": "reveal", "params": {"progress": {"keys": [[0, 0], [0.6, 1]]}, "kind": 2, "angle": -90, "count": 12, "soft": 0.05}}
+  ]
+}

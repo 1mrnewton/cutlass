@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "id": "bad-signal",
+  "name": "Bad Signal",
+  "category": "Glitch",
+  "preview": "road",
+  "controls": [
+    {"id": "speed", "name": "Speed", "default": 1, "min": 0.25, "max": 3, "unit": "times", "speed": true},
+    {"id": "intensity", "name": "Intensity", "default": 1, "min": 0, "max": 2, "unit": "percent", "scale": [[0, "amount"], [1, "amount"], [2, "amount"]]}
+  ],
+  "passes": [
+    {"block": "slices", "params": {"count": 40, "amount": {"jitter": {"rate": 10, "from": 0, "to": 0.06, "seed": 112}}, "seed": {"jitter": {"rate": 10, "from": 0, "to": 1000, "seed": 113}}}},
+    {"block": "noise", "params": {"amount": 0.25, "seed": {"jitter": {"rate": 24, "from": 0, "to": 1000, "seed": 114}}}},
+    {"block": "scanlines", "params": {"amount": 0.3, "count": 240}},
+    {"block": "grade", "params": {"saturation": 0.7}}
+  ]
+}

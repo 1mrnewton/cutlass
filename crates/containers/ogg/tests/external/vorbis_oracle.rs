@@ -9,17 +9,22 @@
 //! GStreamer's `oggdemux` (each packet's granule end), and the sample
 //! counts `vorbis` in ffmpeg and `vorbisdec` in GStreamer decode.
 //!
+//! The muxer: each file is demuxed by this crate and muxed again, and the
+//! copy must read like its source in libavformat, GStreamer, both decoders,
+//! and this crate, with every granule exact.
+//!
 //! libavformat's parser starts each stream as if a short block came before
 //! the first packet, so its first packet has a duration and starts that
 //! much earlier. From the second packet on, both demuxers give the same
 //! times, and every packet ends at the same sample.
 
+use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use cutlass_codec::{CodecId, Packet, StreamCodec};
-use cutlass_container::{Demux, Landing, SeekTo};
-use cutlass_ogg::VorbisComment;
+use cutlass_codec::{CodecId, Packet, StreamCodec, StreamParams};
+use cutlass_container::{Demux, Landing, Mux, MuxStatus, NewStream, SeekTo, TrackDuration};
+use cutlass_ogg::{OggMux, VorbisComment};
 
 use crate::oracle::{duration, open, pts, read_all};
 use crate::support::{
@@ -529,4 +534,180 @@ fn a_chained_vorbis_file_returns_its_first_link() {
         ffmpeg_decoded_samples(&first)
     );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Muxes `source`'s packets into `out`: the headers in the stream's
+/// extradata, or given to `set_config` as three 16-bit lengths and packets.
+fn remux(source: &Path, out: &Path, set_config: bool) -> Vec<Packet> {
+    let mut demux = open(source);
+    let stream = demux.streams()[0].clone();
+    let packets = read_all(&mut demux);
+    let params = stream.params();
+    let extradata = if set_config {
+        Vec::new()
+    } else {
+        params.extradata().to_vec()
+    };
+    let mut mux = OggMux::new(File::create(out).expect("create"));
+    let track = mux
+        .add_stream(NewStream {
+            params: StreamParams::try_audio(
+                params.codec().clone(),
+                params.sample_rate().expect("rate"),
+                params.channels().expect("channels"),
+                extradata,
+            )
+            .expect("params"),
+            timescale: stream.timescale(),
+            language: None,
+        })
+        .expect("add stream");
+    if set_config {
+        let mut config = Vec::new();
+        for packet in xiph_split(params.extradata()) {
+            config.extend_from_slice(&u16::try_from(packet.len()).expect("len").to_be_bytes());
+            config.extend_from_slice(packet);
+        }
+        mux.set_config(track, &config).expect("set config");
+    }
+    let mut ticks = 0;
+    for packet in &packets {
+        mux.write_packet(packet).expect("write");
+        mux.interleave().expect("interleave");
+        ticks += duration(packet);
+    }
+    let finished = mux
+        .finish(&[TrackDuration {
+            track,
+            timescale: stream.timescale(),
+            ticks,
+        }])
+        .expect("finish");
+    assert!(finished.is_complete());
+    assert_eq!(mux.status(), MuxStatus::Finished);
+    packets
+}
+
+#[test]
+fn remuxed_vorbis_files_read_like_their_source() {
+    let Some(root) = environment("remuxed_vorbis_files_read_like_their_source") else {
+        return;
+    };
+    let dir = scratch("vorbis-mux-oracle");
+    let files = produce(&root, &dir);
+    for (index, file) in files.iter().enumerate() {
+        let name = format!("{}.remux", file.name);
+        let out = dir.join(format!("{name}.ogg"));
+        let packets = remux(&file.path, &out, index % 2 == 1);
+        let copy = Produced {
+            name: name.clone(),
+            path: out.clone(),
+            granules: Granules::Exact,
+        };
+        check_against_ffmpeg(&copy, &dir);
+        check_seeks(&copy);
+
+        assert_eq!(
+            ffprobe_stream(&out),
+            ffprobe_stream(&file.path),
+            "{name} stream"
+        );
+        assert_eq!(
+            ffmpeg_payload(&out),
+            ffmpeg_payload(&file.path),
+            "{name} payload"
+        );
+        if file.granules == Granules::Exact {
+            same_probe_packets(&out, &file.path, &name, source_blocks(&file.path));
+            assert_eq!(
+                ffmpeg_decoded_samples(&out),
+                ffmpeg_decoded_samples(&file.path),
+                "{name} decoded samples"
+            );
+        }
+
+        let source = open(&file.path);
+        let mut again = open(&out);
+        assert_eq!(
+            again.streams()[0].params(),
+            source.streams()[0].params(),
+            "{name} params"
+        );
+        let info = again.vorbis(0).expect("info").clone();
+        let original = source.vorbis(0).expect("info").clone();
+        assert_eq!(info.comment, original.comment, "{name} comment");
+        assert_eq!(info.start, original.start, "{name} start");
+        let round = read_all(&mut again);
+        assert_eq!(round.len(), packets.len(), "{name} count");
+        for (mine, theirs) in round.iter().zip(&packets) {
+            assert_eq!(mine.bytes(), theirs.bytes(), "{name} bytes");
+            assert_eq!(mine.timestamp(), theirs.timestamp(), "{name} times");
+        }
+        if file.granules == Granules::Exact {
+            assert_eq!(info.end, original.end, "{name} end");
+            assert_eq!(
+                again.streams()[0].edits(),
+                source.streams()[0].edits(),
+                "{name} edit"
+            );
+            assert_eq!(
+                again.streams()[0].trim(),
+                source.streams()[0].trim(),
+                "{name} trim"
+            );
+        }
+        let source_len = std::fs::metadata(&file.path).expect("meta").len();
+        let out_len = std::fs::metadata(&out).expect("meta").len();
+        eprintln!(
+            "{name}: {} packets, start {:?}, end {:?}, source {source_len} bytes, remux {out_len} bytes",
+            packets.len(),
+            info.start,
+            info.end
+        );
+    }
+    assert!(files.len() >= 6, "only {} files ran", files.len());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn source_blocks(path: &Path) -> [i64; 2] {
+    open(path)
+        .vorbis(0)
+        .expect("info")
+        .id
+        .blocksizes
+        .map(i64::from)
+}
+
+/// libavformat gives both files the same packets, sizes, hashes, and ends.
+/// The first short packet after a long one it times by where pages break,
+/// and the remux breaks pages elsewhere than the source, so only there may
+/// a start differ, by the difference between its two durations.
+fn same_probe_packets(out: &Path, source: &Path, name: &str, [short, long]: [i64; 2]) {
+    let after = ffprobe_packets(out);
+    let before = ffprobe_packets(source);
+    assert_eq!(after.len(), before.len(), "{name} ffprobe count");
+    let quirk = [short / 2, long / 4 + short / 4];
+    let mut moved = 0;
+    for (index, (mine, theirs)) in after.iter().zip(&before).enumerate() {
+        assert_eq!(
+            (mine.size, &mine.hash),
+            (theirs.size, &theirs.hash),
+            "{name} ffprobe packet {index}"
+        );
+        assert_eq!(
+            mine.pts + mine.duration,
+            theirs.pts + theirs.duration,
+            "{name} ffprobe packet {index} end"
+        );
+        if mine.pts != theirs.pts {
+            assert!(
+                quirk.contains(&mine.duration) && quirk.contains(&theirs.duration),
+                "{name} ffprobe packet {index}: {mine:?} against {theirs:?}"
+            );
+            moved += 1;
+        }
+    }
+    if moved > 0 {
+        eprintln!("{name}: ffprobe times {moved} long-to-short packets by page position");
+    }
 }

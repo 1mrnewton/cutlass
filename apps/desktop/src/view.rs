@@ -2409,6 +2409,7 @@ fn card_grid(
     let pitch = CARD_H + CARD_LABEL + CARD_GAP;
     let height = rows as f32 * pitch;
     let (area, _) = ui.allocate_exact_size(Vec2::new(width, height), Sense::hover());
+    let mut hovered_effect = None;
     for (index, card) in cards.iter().enumerate() {
         let origin = area.min
             + Vec2::new(
@@ -2430,6 +2431,9 @@ fn card_grid(
             Sense::click_and_drag()
         };
         let response = ui.interact(rect, ui.scope_id().with(&card.id), sense);
+        if response.hovered() && card.id.starts_with(cutlass_editor::EFFECT_CARD_PREFIX) {
+            hovered_effect = Some(card.id.as_str());
+        }
         if pen {
             // The pen is a tool, not a clip: a click picks it up or puts
             // it down.
@@ -2484,6 +2488,7 @@ fn card_grid(
             added = Some(card.id.clone());
         }
     }
+    note_effect_hover(ui.ctx(), hovered_effect);
     added
 }
 
@@ -2615,9 +2620,51 @@ fn middle_ellipsis(ctx: &egui::Context, text: &str, font: &FontId, width: f32) -
 /// Read each card's picture or sound from the shell, asking for what is
 /// missing.
 fn fill_looks(shell: &mut Shell, ctx: &egui::Context, cards: &mut [BinCard]) {
+    let hover = ctx.data(|data| data.get_temp::<(String, f64)>(effect_hover_id()));
+    let now = ctx.input(|input| input.time);
+    let mut stills = EFFECT_STILLS_A_FRAME;
     with_film_textures(ctx, |textures| {
         for card in cards.iter_mut() {
             match card.look {
+                CardLook::Picture(_) if card.id.starts_with(cutlass_editor::EFFECT_CARD_PREFIX) => {
+                    // The card under the pointer plays.
+                    if let Some((_, since)) = hover.as_ref().filter(|(id, _)| *id == card.id) {
+                        let elapsed = Micros(((now - since).max(0.0) * 1_000_000.0) as i64);
+                        if let Some(frame) = shell.effect_frame(&card.id, elapsed) {
+                            card.look = CardLook::Picture(Some(frame));
+                            let step = 1.0 / f64::from(cutlass_effects::PREVIEW_RATE);
+                            ctx.request_repaint_after_secs(step as f32);
+                            continue;
+                        }
+                    }
+                    let key = cutlass_engine::ThumbKey {
+                        path: card.id.clone().into(),
+                        time: Micros(0),
+                    };
+                    if let Some(entry) = textures.shown.get_mut(&key) {
+                        entry.1 = textures.frame;
+                        let size = entry.0.size();
+                        card.look = CardLook::Picture(Some((
+                            entry.0.id(),
+                            [size[0] as u32, size[1] as u32],
+                        )));
+                        continue;
+                    }
+                    if stills == 0 {
+                        ctx.request_repaint();
+                        continue;
+                    }
+                    stills -= 1;
+                    if let Some((rgba, [width, height])) = shell.effect_still(&card.id) {
+                        let thumb = cutlass_engine::Thumb {
+                            width,
+                            height,
+                            rgba,
+                        };
+                        let texture = film_texture(ctx, textures, key, &thumb);
+                        card.look = CardLook::Picture(Some((texture, [width, height])));
+                    }
+                }
                 CardLook::Picture(_) if card.id.starts_with(cutlass_editor::FILTER_CARD_PREFIX) => {
                     let Some(look) = cutlass_editor::filter_of_card(&card.id) else {
                         continue;
@@ -2968,9 +3015,36 @@ fn effect_card(effect: cutlass_editor::EffectCard) -> BinCard {
         name: effect.name,
         meta: card_meta(cutlass_editor::EFFECT_LENGTH.0),
         on_timeline: false,
-        look: CardLook::Swatch,
+        look: CardLook::Picture(None),
     }
 }
+
+/// Where the effect card under the pointer is kept between frames: its id
+/// and the time the pointer came onto it, in seconds.
+fn effect_hover_id() -> egui::Id {
+    egui::Id::NULL.with("effect card hover")
+}
+
+/// Note the effect card under the pointer, keeping the time it came onto
+/// it while it stays there.
+fn note_effect_hover(ctx: &egui::Context, hovered: Option<&str>) {
+    let now = ctx.input(|input| input.time);
+    ctx.data_mut(|data| {
+        let kept = data.get_temp::<(String, f64)>(effect_hover_id());
+        match hovered {
+            Some(id) if kept.as_ref().is_some_and(|(kept, _)| kept == id) => {}
+            Some(id) => {
+                data.insert_temp(effect_hover_id(), (id.to_owned(), now));
+            }
+            None => {
+                data.remove::<(String, f64)>(effect_hover_id());
+            }
+        }
+    });
+}
+
+/// Effect stills drawn in one frame at most; the rest follow on the next.
+const EFFECT_STILLS_A_FRAME: usize = 12;
 
 /// A sticker on a clear card `width` by `height`, as tall as the card and
 /// in the middle, so the card's cover crop keeps all of it.

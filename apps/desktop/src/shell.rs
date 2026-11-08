@@ -50,6 +50,7 @@ use cutlass_transcription::{
 
 mod assistant;
 mod compound;
+mod effect_preview;
 mod follow;
 pub(crate) use follow::clip_path;
 mod hear;

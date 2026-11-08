@@ -180,6 +180,153 @@ fn invert(uv: vec2<f32>) -> vec4<f32> {
     return premultiplied(mix(rgb, vec3<f32>(1.0) - rgb, fx.a.x), c.a);
 }
 
+// From the middle of the frame (or a point moved from it) to `uv`, in
+// shorter sides; and back.
+fn from_point(uv: vec2<f32>, point: vec2<f32>) -> vec2<f32> {
+    return (uv - vec2<f32>(0.5) - point) * fx.size / min(fx.size.x, fx.size.y);
+}
+
+fn to_uv(p: vec2<f32>, point: vec2<f32>) -> vec2<f32> {
+    return p * min(fx.size.x, fx.size.y) / fx.size + vec2<f32>(0.5) + point;
+}
+
+fn luma(rgb: vec3<f32>) -> f32 {
+    return dot(rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
+}
+
+fn zoom_blur(uv: vec2<f32>) -> vec4<f32> {
+    let centre = vec2<f32>(0.5) + fx.a.yz;
+    let toward = (centre - uv) * fx.a.x;
+    var sum = vec4<f32>(0.0);
+    for (var k = 0; k < 32; k = k + 1) {
+        sum = sum + fetch(uv + toward * (f32(k) / 31.0));
+    }
+    return sum / 32.0;
+}
+
+fn motion_blur(uv: vec2<f32>) -> vec4<f32> {
+    let turn = radians(fx.a.y);
+    let reach = fx.a.x * min(fx.size.x, fx.size.y);
+    let step = vec2<f32>(cos(turn), -sin(turn)) * reach / fx.size / 16.0;
+    var sum = vec4<f32>(0.0);
+    for (var k = -16; k <= 16; k = k + 1) {
+        sum = sum + fetch(uv + step * f32(k));
+    }
+    return sum / 33.0;
+}
+
+fn swirl(uv: vec2<f32>) -> vec4<f32> {
+    let point = fx.a.zw;
+    let p = from_point(uv, point);
+    let r = length(p);
+    let radius = max(fx.a.y, 0.0001);
+    if (r >= radius) {
+        return fetch(uv);
+    }
+    let falloff = 1.0 - r / radius;
+    let turn = radians(fx.a.x) * falloff * falloff;
+    let c = cos(turn);
+    let s = sin(turn);
+    return fetch(to_uv(vec2<f32>(c * p.x - s * p.y, s * p.x + c * p.y), point));
+}
+
+fn ripple(uv: vec2<f32>) -> vec4<f32> {
+    let p = from_point(uv, vec2<f32>(0.0));
+    let kind = u32(fx.a.w + 0.5);
+    let wave = 6.2831853;
+    var q = p;
+    if (kind == 0u) {
+        q.x = p.x + fx.a.x * sin(wave * (p.y / fx.a.y - fx.a.z));
+    } else if (kind == 1u) {
+        q.y = p.y + fx.a.x * sin(wave * (p.x / fx.a.y - fx.a.z));
+    } else {
+        let r = length(p);
+        if (r > 0.0) {
+            q = p + p / r * fx.a.x * sin(wave * (r / fx.a.y - fx.a.z));
+        }
+    }
+    return fetch(to_uv(q, vec2<f32>(0.0)));
+}
+
+fn bulge(uv: vec2<f32>) -> vec4<f32> {
+    let point = fx.a.zw;
+    let p = from_point(uv, point);
+    let n = length(p) / max(fx.a.y, 0.0001);
+    if (n >= 1.0) {
+        return fetch(uv);
+    }
+    let pull = 1.0 - fx.a.x * (1.0 - n * n);
+    return fetch(to_uv(p * pull, point));
+}
+
+fn glow(uv: vec2<f32>) -> vec4<f32> {
+    let base = fetch(uv);
+    let reach = fx.a.y * min(fx.size.x, fx.size.y) / fx.size;
+    var light = vec3<f32>(0.0);
+    // A disc of taps laid out on the golden angle, so none line up.
+    for (var k = 0; k < 48; k = k + 1) {
+        let r = sqrt((f32(k) + 0.5) / 48.0);
+        let turn = f32(k) * 2.3999632;
+        let c = fetch(uv + vec2<f32>(cos(turn), sin(turn)) * r * reach);
+        light = light + max(straight(c) - vec3<f32>(fx.a.z), vec3<f32>(0.0)) * c.a;
+    }
+    let rgb = base.rgb + light / 48.0 * fx.a.x;
+    return vec4<f32>(min(rgb, vec3<f32>(base.a)), base.a);
+}
+
+fn light_leak(uv: vec2<f32>) -> vec4<f32> {
+    let c = fetch(uv);
+    let p = from_point(uv, fx.a.yz);
+    let d = length(p) / max(fx.a.w, 0.0001);
+    let light = fx.b.xyz * fx.a.x * exp(-d * d * 2.0);
+    // Screen: light only ever brightens.
+    let rgb = vec3<f32>(1.0) - (vec3<f32>(1.0) - straight(c)) * (vec3<f32>(1.0) - light);
+    return premultiplied(rgb, c.a);
+}
+
+fn hue(uv: vec2<f32>) -> vec4<f32> {
+    let c = fetch(uv);
+    let rgb = straight(c);
+    // Turn about the grey axis, keeping brightness.
+    let turn = radians(fx.a.x);
+    let k = vec3<f32>(0.57735);
+    let cs = cos(turn);
+    let turned = rgb * cs + cross(k, rgb) * sin(turn) + k * dot(k, rgb) * (1.0 - cs);
+    return premultiplied(turned, c.a);
+}
+
+fn tile(uv: vec2<f32>) -> vec4<f32> {
+    let count = max(floor(fx.a.xy + vec2<f32>(0.5)), vec2<f32>(1.0));
+    return fetch(fract(uv * count));
+}
+
+fn posterize(uv: vec2<f32>) -> vec4<f32> {
+    let c = fetch(uv);
+    let steps = max(floor(fx.a.x + 0.5), 2.0) - 1.0;
+    return premultiplied(floor(straight(c) * steps + vec3<f32>(0.5)) / steps, c.a);
+}
+
+fn edges(uv: vec2<f32>) -> vec4<f32> {
+    let c = fetch(uv);
+    let px = 1.0 / fx.size;
+    let tl = luma(fetch(uv + vec2<f32>(-px.x, -px.y)).rgb);
+    let t = luma(fetch(uv + vec2<f32>(0.0, -px.y)).rgb);
+    let tr = luma(fetch(uv + vec2<f32>(px.x, -px.y)).rgb);
+    let l = luma(fetch(uv + vec2<f32>(-px.x, 0.0)).rgb);
+    let r = luma(fetch(uv + vec2<f32>(px.x, 0.0)).rgb);
+    let bl = luma(fetch(uv + vec2<f32>(-px.x, px.y)).rgb);
+    let b = luma(fetch(uv + vec2<f32>(0.0, px.y)).rgb);
+    let br = luma(fetch(uv + vec2<f32>(px.x, px.y)).rgb);
+    let gx = tr + 2.0 * r + br - tl - 2.0 * l - bl;
+    let gy = bl + 2.0 * b + br - tl - 2.0 * t - tr;
+    let line = clamp(length(vec2<f32>(gx, gy)) * 2.0, 0.0, 1.0);
+    let rgb = straight(c);
+    let inked = rgb * (1.0 - line * fx.a.x);
+    // Alone, each outline keeps the colour under it, lit up.
+    let alone = min(rgb * 1.5 + vec3<f32>(0.2), vec3<f32>(1.0)) * line;
+    return premultiplied(mix(inked, alone, fx.a.y), c.a);
+}
+
 @fragment
 fn fs(in: Out) -> @location(0) vec4<f32> {
     let uv = in.position.xy / fx.size;
@@ -196,6 +343,17 @@ fn fs(in: Out) -> @location(0) vec4<f32> {
         case 9u: { return mirror(uv); }
         case 10u: { return pixelate(uv); }
         case 11u: { return invert(uv); }
+        case 12u: { return zoom_blur(uv); }
+        case 13u: { return motion_blur(uv); }
+        case 14u: { return swirl(uv); }
+        case 15u: { return ripple(uv); }
+        case 16u: { return bulge(uv); }
+        case 17u: { return glow(uv); }
+        case 18u: { return light_leak(uv); }
+        case 19u: { return hue(uv); }
+        case 20u: { return tile(uv); }
+        case 21u: { return posterize(uv); }
+        case 22u: { return edges(uv); }
         default: { return fetch(uv); }
     }
 }
@@ -458,6 +616,17 @@ mod tests {
             step(Block::Flash, &[]),
             step(Block::Pixelate, &[]),
             step(Block::Invert, &[(0, 0.0)]),
+            step(Block::ZoomBlur, &[]),
+            step(Block::MotionBlur, &[]),
+            step(Block::Swirl, &[]),
+            step(Block::Ripple, &[]),
+            step(Block::Bulge, &[]),
+            step(Block::Glow, &[]),
+            step(Block::LightLeak, &[]),
+            step(Block::Hue, &[]),
+            step(Block::Tile, &[]),
+            step(Block::Posterize, &[]),
+            step(Block::Edges, &[]),
         ];
         close(&draw(&renderer, &ROW, (4, 1), &resting), &ROW);
     }
@@ -578,6 +747,136 @@ mod tests {
             step(Block::Vignette, &[(0, 1.0)]),
         ];
         close(&draw(&renderer, &clear, (4, 1), &steps), &clear);
+    }
+
+    fn solid(size: (u32, u32), pixel: [u8; 4]) -> Vec<u8> {
+        pixel.repeat((size.0 * size.1) as usize)
+    }
+
+    #[test]
+    fn hue_posterize_and_tile_change_colour_and_layout_as_named() {
+        let Some(renderer) = renderer() else { return };
+        // A third of the way round the wheel, red becomes green.
+        let red = [255, 0, 0, 255];
+        close(
+            &draw(&renderer, &red, (1, 1), &[step(Block::Hue, &[(0, 120.0)])]),
+            &[0, 255, 0, 255],
+        );
+        let greys = [100, 100, 100, 255, 200, 200, 200, 255];
+        close(
+            &draw(
+                &renderer,
+                &greys,
+                (2, 1),
+                &[step(Block::Posterize, &[(0, 2.0)])],
+            ),
+            &[0, 0, 0, 255, 255, 255, 255, 255],
+        );
+        // Two copies across: red, green, blue, white, twice.
+        let wide: Vec<u8> = ROW.chunks(4).flat_map(|pixel| pixel.repeat(2)).collect();
+        let tiled = draw(&renderer, &wide, (8, 1), &[step(Block::Tile, &[(0, 2.0)])]);
+        close(&tiled, &[ROW, ROW].concat());
+    }
+
+    #[test]
+    fn moving_blocks_only_move_pixels_so_a_flat_colour_stays_flat() {
+        let Some(renderer) = renderer() else { return };
+        let size = (16, 12);
+        let flat = solid(size, [40, 120, 200, 255]);
+        for moved in [
+            step(Block::ZoomBlur, &[(0, 0.4)]),
+            step(Block::MotionBlur, &[(0, 0.2), (1, 30.0)]),
+            step(Block::Swirl, &[(0, 360.0)]),
+            step(Block::Ripple, &[(0, 0.05), (3, 2.0)]),
+            step(Block::Bulge, &[(0, 0.8)]),
+            step(Block::Bulge, &[(0, -0.8)]),
+        ] {
+            close(&draw(&renderer, &flat, size, &[moved]), &flat);
+        }
+    }
+
+    #[test]
+    fn a_motion_blur_smears_along_its_angle_only() {
+        let Some(renderer) = renderer() else { return };
+        let size = (16u32, 16u32);
+        // One white column on black.
+        let column: Vec<u8> = (0..size.0 * size.1)
+            .flat_map(|index| {
+                let v = if index % size.0 == 8 { 255 } else { 0 };
+                [v, v, v, 255]
+            })
+            .collect();
+        let across = draw(
+            &renderer,
+            &column,
+            size,
+            &[step(Block::MotionBlur, &[(0, 0.2)])],
+        );
+        assert!(across[4 * 6] > 0, "the light spreads sideways");
+        let down = draw(
+            &renderer,
+            &column,
+            size,
+            &[step(Block::MotionBlur, &[(0, 0.2), (1, 90.0)])],
+        );
+        close(&down, &column);
+    }
+
+    #[test]
+    fn glow_spreads_only_light_above_its_threshold() {
+        let Some(renderer) = renderer() else { return };
+        let size = (15u32, 15u32);
+        // A white patch three pixels square in the middle of black.
+        let spot: Vec<u8> = (0..size.0 * size.1)
+            .flat_map(|index| {
+                let (x, y) = (index % size.0, index / size.0);
+                let v = if (6..9).contains(&x) && (6..9).contains(&y) {
+                    255
+                } else {
+                    0
+                };
+                [v, v, v, 255]
+            })
+            .collect();
+        let glowing = draw(
+            &renderer,
+            &spot,
+            size,
+            &[step(Block::Glow, &[(0, 3.0), (1, 0.3)])],
+        );
+        let beside = 4 * (7 * size.0 + 4) as usize;
+        assert!(glowing[beside] > 0, "the light reaches past the patch");
+        let dim = solid(size, [80, 80, 80, 255]);
+        close(
+            &draw(&renderer, &dim, size, &[step(Block::Glow, &[(0, 3.0)])]),
+            &dim,
+        );
+    }
+
+    #[test]
+    fn a_light_leak_only_brightens_and_edges_alone_leave_flat_colour_black() {
+        let Some(renderer) = renderer() else { return };
+        let size = (8u32, 8u32);
+        let scene: Vec<u8> = (0..size.0 * size.1)
+            .flat_map(|index| [(index * 4) as u8, 60, 200, 255])
+            .collect();
+        let lit = draw(
+            &renderer,
+            &scene,
+            size,
+            &[step(Block::LightLeak, &[(0, 1.0)])],
+        );
+        assert!(
+            lit.iter()
+                .zip(&scene)
+                .all(|(after, before)| u16::from(*after) + 1 >= u16::from(*before))
+        );
+        assert!(lit.iter().zip(&scene).any(|(after, before)| after > before));
+        let flat = solid(size, [40, 120, 200, 255]);
+        close(
+            &draw(&renderer, &flat, size, &[step(Block::Edges, &[(1, 1.0)])]),
+            &solid(size, [0, 0, 0, 255]),
+        );
     }
 
     #[test]

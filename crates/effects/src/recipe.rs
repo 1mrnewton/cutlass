@@ -62,6 +62,28 @@ pub enum Block {
     Pixelate,
     /// Turn the colours inside out.
     Invert,
+    /// Smear toward a point, as if zooming during the exposure.
+    ZoomBlur,
+    /// Smear along one direction, as if the camera moved.
+    MotionBlur,
+    /// Twist the picture around a point, most at the middle.
+    Swirl,
+    /// Waves running across, down or out from the middle.
+    Ripple,
+    /// Swell the picture out from a point, or pinch it in.
+    Bulge,
+    /// Let the bright parts bleed light around them.
+    Glow,
+    /// A soft patch of coloured light laid over the picture.
+    LightLeak,
+    /// Turn every colour around the colour wheel.
+    Hue,
+    /// Repeat the whole picture in a grid.
+    Tile,
+    /// Fewer shades of each colour, in flat bands.
+    Posterize,
+    /// Draw the outlines: darken them, or show them alone.
+    Edges,
 }
 
 /// One parameter of a block: its name, its value when a recipe leaves it
@@ -120,6 +142,68 @@ const SCANLINES: &[Param] = &[
 const MIRROR: &[Param] = &[param("side", 0.0, 0.0, 3.0)];
 const PIXELATE: &[Param] = &[param("size", 0.0, 0.0, 0.25)];
 const INVERT: &[Param] = &[param("amount", 1.0, 0.0, 1.0)];
+/// `amount` is how far toward the point a pixel is smeared; `x` and `y`
+/// move the point from the middle.
+const ZOOM_BLUR: &[Param] = &[
+    param("amount", 0.0, 0.0, 0.5),
+    param("x", 0.0, -0.5, 0.5),
+    param("y", 0.0, -0.5, 0.5),
+];
+/// `length` is a fraction of the shorter side; `angle` 0 is across.
+const MOTION_BLUR: &[Param] = &[
+    param("length", 0.0, 0.0, 0.2),
+    param("angle", 0.0, -180.0, 180.0),
+];
+/// `radius` is a fraction of the shorter side.
+const SWIRL: &[Param] = &[
+    param("angle", 0.0, -720.0, 720.0),
+    param("radius", 0.5, 0.0, 1.5),
+    param("x", 0.0, -0.5, 0.5),
+    param("y", 0.0, -0.5, 0.5),
+];
+/// `amount` and `length` are fractions of the shorter side. A `phase`
+/// going 0 to 1 moves the waves on by one wave. `kind` 0 shifts sideways
+/// in bands down the frame, 1 shifts up and down in bands across it, 2
+/// runs rings out from the middle.
+const RIPPLE: &[Param] = &[
+    param("amount", 0.0, 0.0, 0.1),
+    param("length", 0.1, 0.01, 1.0),
+    param("phase", 0.0, -100.0, 100.0),
+    param("kind", 0.0, 0.0, 2.0),
+];
+/// A positive `amount` swells, a negative one pinches; `radius` is a
+/// fraction of the shorter side.
+const BULGE: &[Param] = &[
+    param("amount", 0.0, -1.0, 0.9),
+    param("radius", 0.5, 0.01, 1.5),
+    param("x", 0.0, -0.5, 0.5),
+    param("y", 0.0, -0.5, 0.5),
+];
+/// Light above `threshold` spreads as far as `radius`, a fraction of the
+/// shorter side.
+const GLOW: &[Param] = &[
+    param("amount", 0.0, 0.0, 3.0),
+    param("radius", 0.03, 0.0, 0.2),
+    param("threshold", 0.6, 0.0, 1.0),
+];
+/// `x` and `y` place the light from the middle, in frames; `size` is a
+/// fraction of the shorter side.
+const LIGHT_LEAK: &[Param] = &[
+    param("amount", 0.0, 0.0, 1.0),
+    param("x", 0.0, -1.5, 1.5),
+    param("y", 0.0, -1.5, 1.5),
+    param("size", 0.5, 0.01, 3.0),
+    param("red", 1.0, 0.0, 1.0),
+    param("green", 0.5, 0.0, 1.0),
+    param("blue", 0.2, 0.0, 1.0),
+];
+const HUE: &[Param] = &[param("degrees", 0.0, -180.0, 180.0)];
+/// Whole copies across and down.
+const TILE: &[Param] = &[param("x", 1.0, 1.0, 8.0), param("y", 1.0, 1.0, 8.0)];
+const POSTERIZE: &[Param] = &[param("levels", 256.0, 2.0, 256.0)];
+/// `amount` darkens the outlines over the picture; `only` fades the
+/// picture away to leave light outlines on black.
+const EDGES: &[Param] = &[param("amount", 0.0, 0.0, 1.0), param("only", 0.0, 0.0, 1.0)];
 
 impl Block {
     /// The parameters in the order the shader reads them.
@@ -138,6 +222,17 @@ impl Block {
             Self::Mirror => MIRROR,
             Self::Pixelate => PIXELATE,
             Self::Invert => INVERT,
+            Self::ZoomBlur => ZOOM_BLUR,
+            Self::MotionBlur => MOTION_BLUR,
+            Self::Swirl => SWIRL,
+            Self::Ripple => RIPPLE,
+            Self::Bulge => BULGE,
+            Self::Glow => GLOW,
+            Self::LightLeak => LIGHT_LEAK,
+            Self::Hue => HUE,
+            Self::Tile => TILE,
+            Self::Posterize => POSTERIZE,
+            Self::Edges => EDGES,
         }
     }
 
@@ -157,6 +252,17 @@ impl Block {
             Self::Mirror => 9,
             Self::Pixelate => 10,
             Self::Invert => 11,
+            Self::ZoomBlur => 12,
+            Self::MotionBlur => 13,
+            Self::Swirl => 14,
+            Self::Ripple => 15,
+            Self::Bulge => 16,
+            Self::Glow => 17,
+            Self::LightLeak => 18,
+            Self::Hue => 19,
+            Self::Tile => 20,
+            Self::Posterize => 21,
+            Self::Edges => 22,
         }
     }
 }

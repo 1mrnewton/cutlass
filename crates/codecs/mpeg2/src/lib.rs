@@ -5,8 +5,14 @@
 
 mod bits;
 mod dct;
+mod decoder;
+mod engine;
+pub mod es;
 mod frame;
 mod headers;
 mod mc;
 mod slice;
 mod tables;
+
+pub use decoder::{DEFAULT_MAX_PIXELS, Mpeg2Decoder};
+pub use engine::register_decoders;

@@ -1530,19 +1530,17 @@ impl<R: Read + Seek + Send> Demux for OggDemux<R> {
         };
         let timestamp = Timestamp::try_new(Some(ready.pts), Some(ready.pts), Some(ready.duration))
             .map_err(|_| ReadError::Source {
-                message: "negative Opus packet duration".to_owned(),
+                message: "negative Ogg packet duration".to_owned(),
             })?;
-        Packet::try_new(
-            ready.track,
-            bytes,
-            timestamp,
-            Timescale::new(OPUS_RATE),
-            true,
-        )
-        .map_err(|error| ReadError::Source {
-            message: error.to_string(),
-        })
-        .map(Some)
+        let timescale = usize::try_from(ready.track)
+            .ok()
+            .and_then(|index| self.streams.get(index))
+            .map_or(Timescale::new(OPUS_RATE), Stream::timescale);
+        Packet::try_new(ready.track, bytes, timestamp, timescale, true)
+            .map_err(|error| ReadError::Source {
+                message: error.to_string(),
+            })
+            .map(Some)
     }
 
     fn seek(&mut self, to: SeekTo) -> Result<SeekLanding, ReadError> {

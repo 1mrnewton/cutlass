@@ -82,6 +82,8 @@ fn open_error(bytes: &[u8]) -> String {
 fn read_times(demux: &mut OggDemux<Cursor<Vec<u8>>>) -> Vec<(i64, i64, u8)> {
     let mut out = Vec::new();
     while let Some(packet) = demux.read_packet().expect("read") {
+        let stream = usize::try_from(packet.stream()).expect("stream");
+        assert_eq!(packet.timescale(), demux.streams()[stream].timescale());
         let time = packet.timestamp();
         out.push((
             time.presentation().expect("pts"),

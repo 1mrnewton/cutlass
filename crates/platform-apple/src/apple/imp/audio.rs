@@ -358,6 +358,24 @@ fn layout_of(params: &CodecParams) -> Result<ChannelLayout, CodecError> {
     Ok(layout)
 }
 
+/// Samples in an E-AC-3 syncframe: `numblkscod` is 1, 2, 3, or 6 blocks
+/// of 256. A frame that is not E-AC-3 leaves the caller on the six-block size.
+fn eac3_packet_frames(data: &[u8]) -> Option<usize> {
+    let head = data.get(..6)?;
+    if u16::from_be_bytes([head[0], head[1]]) != 0x0b77 {
+        return None;
+    }
+    let bsid = head[5] >> 3;
+    if !(11..=16).contains(&bsid) {
+        return None;
+    }
+    if head[4] >> 6 == 0b11 {
+        return None;
+    }
+    let blocks = [1, 2, 3, 6][usize::from((head[4] >> 4) & 3)];
+    Some(blocks * 256)
+}
+
 fn compressed_desc(
     codec: CodecId,
     rate: u32,
@@ -370,8 +388,8 @@ fn compressed_desc(
         CodecId::Mp3 => (u32::from_be_bytes(*b".mp3"), 1152),
         CodecId::Opus => (u32::from_be_bytes(*b"opus"), 960),
         CodecId::Ac3 => (u32::from_be_bytes(*b"ac-3"), 1536),
-        // Six blocks is the common syncframe. A shorter E-AC-3 frame is
-        // decoded by the Rust codec, which is registered ahead of this one.
+        // The description uses a six-block frame. A shorter syncframe asks
+        // for its own length in `eac3_packet_frames`.
         CodecId::Eac3 => (u32::from_be_bytes(*b"ec-3"), 1536),
         CodecId::Pcm => return pcm_desc(rate, channels, SampleFormat::F32),
         CodecId::Vorbis => return Err(CodecError::Unsupported { what: "vorbis" }),
@@ -648,6 +666,8 @@ impl Decoder for AudioDecoder {
         };
         let frames = if self.codec == CodecId::Pcm {
             packet.data.len() / usize::try_from(bytes_per_frame).unwrap_or(1)
+        } else if self.codec == CodecId::Eac3 {
+            eac3_packet_frames(&packet.data).unwrap_or(self.packet_frames)
         } else {
             self.packet_frames
         };
@@ -1146,6 +1166,23 @@ mod tests {
         let drained = encoder.drain().expect("drain");
         assert!(!drained.is_empty());
         assert!(encoder.drain().expect("second").is_empty());
+    }
+
+    #[test]
+    fn an_eac3_syncframe_asks_for_its_own_block_count() {
+        let mut frame = [0u8; 8];
+        frame[0] = 0x0b;
+        frame[1] = 0x77;
+        frame[4] = 0b0001_0000;
+        frame[5] = 11 << 3;
+        assert_eq!(eac3_packet_frames(&frame), Some(512));
+        frame[4] = 0b0011_0000;
+        assert_eq!(eac3_packet_frames(&frame), Some(1536));
+        frame[4] = 0b1100_0000;
+        assert_eq!(eac3_packet_frames(&frame), None);
+        frame[5] = 8 << 3;
+        frame[4] = 0;
+        assert_eq!(eac3_packet_frames(&frame), None);
     }
 
     #[test]

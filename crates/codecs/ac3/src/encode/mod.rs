@@ -7,7 +7,8 @@
 //! 48 kHz. E-AC-3 takes any bit rate and 1, 2, 3 or 6 blocks per
 //! syncframe. Spectral extension, AHT, enhanced coupling, dependent
 //! substreams, transient pre-noise processing and dynamic range words are
-//! never written.
+//! never written. Delta bit allocation is written only when a block carries
+//! segments; the rate control leaves every segment empty.
 
 mod analysis;
 mod plan;
@@ -305,6 +306,10 @@ pub struct Ac3Encoder {
     first: bool,
     drained: bool,
     cancel: Arc<AtomicBool>,
+    /// AC-3 delta bit allocation copied onto each frame's first block.
+    /// The rate control leaves this empty.
+    #[cfg(test)]
+    forced_delta: Option<bitalloc::Delta>,
 }
 
 impl Ac3Encoder {
@@ -421,6 +426,8 @@ impl Ac3Encoder {
             first: true,
             drained: false,
             cancel: Arc::new(AtomicBool::new(false)),
+            #[cfg(test)]
+            forced_delta: None,
             order,
             config,
         })
@@ -448,6 +455,12 @@ impl Ac3Encoder {
             (Format::Eac3, rate) => rate,
         };
         Self::new(config)
+    }
+
+    /// Put one delta bit allocation on each AC-3 frame's first channel.
+    #[cfg(test)]
+    fn force_delta(&mut self, delta: bitalloc::Delta) {
+        self.forced_delta = Some(delta);
     }
 
     /// The configuration in force, with the bit rate and blocks resolved.
@@ -628,6 +641,12 @@ impl Ac3Encoder {
         let mut mode = Mode::Adaptive;
         let (snr, skip) = loop {
             plan::plan(&shape, &mut self.blocks, mode);
+            #[cfg(test)]
+            if !shape.eac3
+                && let Some(delta) = self.forced_delta
+            {
+                self.blocks[0].deltas[0] = delta;
+            }
             if let Some((offset, skip)) = self.allocate(&shape, size)? {
                 // A short syncframe has the same bit rate and far fewer
                 // bits, so the six-block cutoff leaves the mantissas below
@@ -719,23 +738,46 @@ impl Ac3Encoder {
             false,
         );
         let mut allocations: Vec<Allocation> = vec![None; self.blocks.len() * SLOTS];
+        // A block that does not send `deltbaie` keeps the previous block's
+        // segments. The mask has to follow that, or the mantissas drift.
+        let mut carried = [bitalloc::Delta::default(); SLOTS];
         for (blk, block) in self.blocks.iter().enumerate() {
             for slot in block.active(shape) {
+                if block.deltas[slot].count > 0 {
+                    carried[slot] = block.deltas[slot];
+                }
                 if block.expstr[slot] == REUSE {
                     continue;
                 }
+                let held = carried[slot];
+                let start = block.start[slot];
+                let end = block.end[slot];
+                let leak = (slot == plan::CPL).then_some((0, 0));
+                let mask = {
+                    let channel = bitalloc::Channel {
+                        start,
+                        end,
+                        fscod: shape.fscod,
+                        params: self.params,
+                        fgaincod: FGAINCOD,
+                        snr: 0,
+                        leak,
+                        delta: (held.count > 0).then_some(held.segments()),
+                        high_efficiency: false,
+                    };
+                    bitalloc::mask(&block.exps[slot], &channel)?
+                };
                 let channel = bitalloc::Channel {
-                    start: block.start[slot],
-                    end: block.end[slot],
+                    start,
+                    end,
                     fscod: shape.fscod,
                     params: self.params,
                     fgaincod: FGAINCOD,
                     snr: 0,
-                    leak: (slot == plan::CPL).then_some((0, 0)),
+                    leak,
                     delta: None,
                     high_efficiency: false,
                 };
-                let mask = bitalloc::mask(&block.exps[slot], &channel)?;
                 allocations[blk * SLOTS + slot] = Some((mask, channel));
             }
         }
@@ -981,5 +1023,104 @@ impl Encoder for Ac3Encoder {
 
     fn cancel_flag(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.cancel)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bitalloc::{Delta, MAX_SEGMENTS, Segment};
+    use crate::decode::Ac3Decoder;
+    use cutlass_decode::{Decoder, Packet as DecodedPacket};
+    use cutlass_encode::{AudioInput, ChannelLayout, Encoder, Pcm};
+
+    #[test]
+    fn a_delta_segment_matches_ffmpeg() {
+        let ffmpeg = std::process::Command::new("ffmpeg")
+            .arg("-version")
+            .output();
+        if ffmpeg.is_err() {
+            eprintln!("skipped: ffmpeg is not installed");
+            return;
+        }
+        let rate = 48_000u32;
+        let layout = ChannelLayout::mono();
+        let mut spec = CodecParams::audio(CodecId::Ac3, rate, layout.clone());
+        spec.bitrate = 96_000;
+        let mut encoder = Ac3Encoder::open(&spec).expect("encoder");
+        let mut segments = [Segment::default(); MAX_SEGMENTS];
+        segments[0] = Segment {
+            offset: 0,
+            len: 4,
+            ba: 3,
+        };
+        encoder.force_delta(Delta { segments, count: 1 });
+        let frames = 1_536 * 2;
+        let samples: Vec<f32> = (0..frames)
+            .map(|index| {
+                let t = index as f32 / rate as f32;
+                (t * 440.0 * std::f32::consts::TAU).sin() * 0.4
+            })
+            .collect();
+        let pcm = Pcm::from_f32(rate, layout.clone(), samples).expect("pcm");
+        let mut packets = encoder.push(&AudioInput { pcm }).expect("push");
+        packets.extend(encoder.drain().expect("drain"));
+        let bytes: Vec<u8> = packets
+            .iter()
+            .flat_map(|packet| packet.data.iter().copied())
+            .collect();
+        let dir = std::env::temp_dir().join(format!("cutlass-ac3-delta-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let input = dir.join("in.ac3");
+        let output = dir.join("out.f32");
+        std::fs::write(&input, &bytes).expect("write");
+        let ffmpeg_out = std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-y", "-drc_scale", "0", "-f", "ac3", "-i"])
+            .arg(&input)
+            .args(["-f", "f32le", "-c:a", "pcm_f32le"])
+            .arg(&output)
+            .output()
+            .expect("ffmpeg");
+        assert!(
+            ffmpeg_out.status.success(),
+            "ffmpeg rejected the delta segment: {}",
+            String::from_utf8_lossy(&ffmpeg_out.stderr)
+        );
+        let mut decoder =
+            Ac3Decoder::open(&CodecParams::audio(CodecId::Ac3, rate, layout)).expect("decoder");
+        let mut ours = Vec::new();
+        for packet in &packets {
+            let decoded =
+                DecodedPacket::audio(packet.data.clone(), packet.pts, packet.duration, rate);
+            for output in decoder.push(&decoded).unwrap_or_else(|error| {
+                panic!("decode {error:?} frame {} bytes", packet.data.len())
+            }) {
+                if let cutlass_decode::Output::Audio(audio) = output {
+                    ours.extend_from_slice(audio.pcm.as_f32().expect("f32"));
+                }
+            }
+        }
+        assert!(
+            decoder.tools().delta_blocks > 0,
+            "the frame carried no delta"
+        );
+        let reference = std::fs::read(&output).expect("pcm");
+        let theirs: Vec<f32> = reference
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|b| f32::from_le_bytes(*b))
+            .collect();
+        let n = ours.len().min(theirs.len());
+        assert!(n > 1_000, "decoded {n} samples");
+        let signal: f64 = ours[..n].iter().map(|s| f64::from(*s).powi(2)).sum();
+        let noise: f64 = ours[..n]
+            .iter()
+            .zip(&theirs[..n])
+            .map(|(a, b)| (f64::from(*a) - f64::from(*b)).powi(2))
+            .sum();
+        let quality = 10.0 * (signal / noise.max(1e-20)).log10();
+        assert!(quality > 60.0, "delta allocation {quality:.1} dB");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

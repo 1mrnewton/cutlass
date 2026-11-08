@@ -545,7 +545,28 @@ fn audblk(
         }
     }
     if !eac3 {
-        w.flag(false); // deltbaie
+        let slots: Vec<usize> = block.active(shape).filter(|&slot| slot != LFE).collect();
+        let any = slots.iter().any(|&slot| block.deltas[slot].count > 0);
+        w.flag(any); // deltbaie
+        if any {
+            for &slot in &slots {
+                // 1 is a new allocation. 2 is none, which drops a reused one.
+                let mode = if block.deltas[slot].count > 0 { 1 } else { 2 };
+                w.put(2, mode);
+            }
+            for &slot in &slots {
+                let delta = &block.deltas[slot];
+                if delta.count == 0 {
+                    continue;
+                }
+                w.put(3, (delta.count - 1) as u32);
+                for segment in delta.segments() {
+                    w.put(5, u32::from(segment.offset));
+                    w.put(4, u32::from(segment.len));
+                    w.put(3, u32::from(segment.ba));
+                }
+            }
+        }
         w.flag(skip > 0); // skiple
         if skip > 0 {
             w.put(9, u32::from(skip));

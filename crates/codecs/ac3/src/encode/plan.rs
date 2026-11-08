@@ -85,6 +85,8 @@ pub(crate) struct Block {
     /// Exponents as the decoder rebuilds them.
     pub exps: [[u8; COEFS]; SLOTS],
     pub bap: [[u8; COEFS]; SLOTS],
+    /// Delta bit allocation. Empty unless a test asks a block to carry it.
+    pub deltas: [crate::bitalloc::Delta; SLOTS],
     /// AC-3 `snroffste`.
     pub snroffste: bool,
 }
@@ -111,6 +113,7 @@ impl Default for Block {
             end: [0; SLOTS],
             exps: [[0; COEFS]; SLOTS],
             bap: [[0; COEFS]; SLOTS],
+            deltas: [crate::bitalloc::Delta::default(); SLOTS],
             snroffste: false,
         }
     }

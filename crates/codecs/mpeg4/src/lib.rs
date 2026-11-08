@@ -4,6 +4,8 @@
 
 mod bits;
 mod block;
+mod dec;
+mod engine;
 mod frame;
 mod header;
 mod idct;

@@ -12,6 +12,7 @@ use crate::aht::{self, Premantissas};
 use crate::bitalloc::{self, Delta, MAX_SEGMENTS, Params, Segment};
 use crate::bits::BitReader;
 use crate::crc;
+use crate::ecpl;
 use crate::exponents;
 use crate::header::{Bsi, Metadata, StreamType, Syntax, compr_gain, dynrng_gain, program_gain};
 use crate::mdct::{COEFS, SPAN, Transform, overlap_add};
@@ -67,6 +68,8 @@ pub struct Tools {
     pub short_blocks: u64,
     /// Blocks with coupling in use.
     pub coupling_blocks: u64,
+    /// Of those, blocks that use enhanced coupling.
+    pub enhanced_blocks: u64,
     /// Of those, blocks with phase flags in use.
     pub phase_blocks: u64,
     /// Blocks that rematrixed at least one band.
@@ -92,6 +95,7 @@ impl Tools {
         self.blocks += other.blocks;
         self.short_blocks += other.short_blocks;
         self.coupling_blocks += other.coupling_blocks;
+        self.enhanced_blocks += other.enhanced_blocks;
         self.phase_blocks += other.phase_blocks;
         self.rematrix_blocks += other.rematrix_blocks;
         self.spx_blocks += other.spx_blocks;
@@ -117,6 +121,10 @@ pub(crate) struct Substream {
     seed: u32,
     /// Recent output of each full-band channel, oldest first.
     tpnp: [Vec<f32>; MAX_FBW],
+    /// Coupling spectrum of the previous frame's last block, when that
+    /// block used enhanced coupling.
+    ecpl_live: bool,
+    ecpl_prev: [f32; COEFS],
 }
 
 impl Substream {
@@ -125,6 +133,8 @@ impl Substream {
             delay: [[0.0; COEFS]; MAX_CODED],
             seed: 0x1234_5678,
             tpnp: std::array::from_fn(|_| Vec::new()),
+            ecpl_live: false,
+            ecpl_prev: [0.0; COEFS],
         }
     }
 }
@@ -503,6 +513,22 @@ struct State<'a> {
     dith: [bool; MAX_FBW],
     dynrng: [Option<u8>; 2],
     cplinu: bool,
+    ecpl: bool,
+    ecpl_seen: bool,
+    ecplbegf: usize,
+    ecpl_begin_sub: usize,
+    ecpl_end_sub: usize,
+    ecpl_struct: [bool; ecpl::MAX_BANDS],
+    ecpl_band_count: usize,
+    ecpl_band_size: [usize; ecpl::MAX_BANDS],
+    ecpl_interp: bool,
+    ecpl_first: usize,
+    ecpl_amp: [[u8; ecpl::MAX_BANDS]; MAX_FBW],
+    ecpl_angle: [[u8; ecpl::MAX_BANDS]; MAX_FBW],
+    ecpl_chaos: [[u8; ecpl::MAX_BANDS]; MAX_FBW],
+    ecpl_trans: [bool; MAX_FBW],
+    ecpl_have: [bool; MAX_FBW],
+    ecpl_spectrum: [f32; COEFS],
     chincpl: [bool; MAX_FBW],
     phsflginu: bool,
     cpl_begin: usize,
@@ -543,6 +569,22 @@ impl<'a> State<'a> {
             dith: [true; MAX_FBW],
             dynrng: [None; 2],
             cplinu: false,
+            ecpl: false,
+            ecpl_seen: false,
+            ecplbegf: 0,
+            ecpl_begin_sub: 0,
+            ecpl_end_sub: 0,
+            ecpl_struct: [false; ecpl::MAX_BANDS],
+            ecpl_band_count: 0,
+            ecpl_band_size: [0; ecpl::MAX_BANDS],
+            ecpl_interp: false,
+            ecpl_first: 0,
+            ecpl_amp: [[0; ecpl::MAX_BANDS]; MAX_FBW],
+            ecpl_angle: [[0; ecpl::MAX_BANDS]; MAX_FBW],
+            ecpl_chaos: [[0; ecpl::MAX_BANDS]; MAX_FBW],
+            ecpl_trans: [false; MAX_FBW],
+            ecpl_have: [false; MAX_FBW],
+            ecpl_spectrum: [0.0; COEFS],
             chincpl: [false; MAX_FBW],
             phsflginu: false,
             cpl_begin: 0,
@@ -778,15 +820,32 @@ impl<'a> State<'a> {
     }
 
     fn cpl_begin_bin(&self) -> usize {
-        37 + 12 * self.cpl_begin
+        if self.ecpl {
+            ecpl::SUBBAND_START[self.ecpl_begin_sub.min(ecpl::MAX_BANDS)]
+        } else {
+            37 + 12 * self.cpl_begin
+        }
     }
 
     fn cpl_end_bin(&self) -> usize {
-        37 + 12 * self.cpl_end
+        if self.ecpl {
+            ecpl::SUBBAND_START[self.ecpl_end_sub.min(ecpl::SUBBAND_START.len() - 1)]
+        } else {
+            37 + 12 * self.cpl_end
+        }
     }
 
     /// Annex E 3.3.2, which reduces to Tables 7.25 to 7.28 for AC-3.
     fn rematrix_bands(&self) -> usize {
+        if self.cplinu && self.ecpl {
+            return match self.ecplbegf {
+                0 => 0,
+                1 => 1,
+                2 => 2,
+                3 | 4 => 3,
+                _ => 4,
+            };
+        }
         if self.cplinu {
             match self.cpl_begin {
                 0 => 2,
@@ -895,16 +954,13 @@ impl<'a> State<'a> {
             self.first_cplcos = [true; MAX_FBW];
             self.first_cplleak = true;
             self.phsflginu = false;
+            self.ecpl = false;
             return Ok(());
         }
         if acmod < 2 {
             return Err(malformed(r, "coupling in a mono or 1+1 stream"));
         }
-        if self.eac3 && r.bit("ecplinu")? {
-            return Err(CodecError::Unsupported {
-                what: "E-AC-3 enhanced coupling",
-            });
-        }
+        let enhanced = self.eac3 && r.bit("ecplinu")?;
         if self.eac3 && acmod == 2 {
             self.chincpl = [true, true, false, false, false];
         } else {
@@ -912,6 +968,18 @@ impl<'a> State<'a> {
                 self.chincpl[ch] = r.bit("chincpl")?;
             }
         }
+        if enhanced {
+            self.enhanced_strategy(r)?;
+            for ch in 0..nf {
+                if self.chincpl[ch] && self.blksw[ch] {
+                    return Err(CodecError::Unsupported {
+                        what: "enhanced coupling in a short block",
+                    });
+                }
+            }
+            return Ok(());
+        }
+        self.ecpl = false;
         self.phsflginu = acmod == 2 && r.bit("phsflginu")?;
         self.cpl_begin = r.read(4, "cplbegf")? as usize;
         self.cpl_end = if self.eac3 && self.spxinu {
@@ -931,7 +999,51 @@ impl<'a> State<'a> {
         Ok(())
     }
 
+    /// Annex E 2.3.3.16 through 2.3.3.19.
+    fn enhanced_strategy(&mut self, r: &mut BitReader<'_>) -> Result<(), CodecError> {
+        self.ecpl = true;
+        self.phsflginu = false;
+        let begin_code = r.read(4, "ecplbegf")? as usize;
+        let begin = ecpl::begin_subband(begin_code);
+        let end = if self.spxinu {
+            if self.spxbegf < 6 {
+                self.spxbegf + 5
+            } else {
+                self.spxbegf * 2
+            }
+        } else {
+            ecpl::end_subband(r.read(4, "ecplendf")? as usize)
+        };
+        if begin >= end || end > ecpl::MAX_BANDS || begin >= ecpl::MAX_BANDS {
+            return Err(malformed(r, "enhanced coupling range"));
+        }
+        let fresh = !self.ecpl_seen;
+        self.ecpl_seen = true;
+        if r.bit("ecplbndstrce")? {
+            self.ecpl_struct = [false; ecpl::MAX_BANDS];
+            let from = 9.max(begin + 1);
+            for sub in from..end {
+                self.ecpl_struct[sub] = r.bit("ecplbndstrc")?;
+            }
+        } else if fresh {
+            self.ecpl_struct = ecpl::default_structure();
+        }
+        let (count, size) = ecpl::bands(begin, end, &self.ecpl_struct);
+        if count == 0 {
+            return Err(malformed(r, "enhanced coupling bands"));
+        }
+        self.ecplbegf = begin_code;
+        self.ecpl_begin_sub = begin;
+        self.ecpl_end_sub = end;
+        self.ecpl_band_count = count;
+        self.ecpl_band_size = size;
+        Ok(())
+    }
+
     fn coupling_coordinates(&mut self, r: &mut BitReader<'_>) -> Result<(), CodecError> {
+        if self.ecpl {
+            return self.enhanced_coordinates(r);
+        }
         let mut any = false;
         for ch in 0..self.nf {
             if !self.chincpl[ch] {
@@ -973,6 +1085,73 @@ impl<'a> State<'a> {
             }
         }
         Ok(())
+    }
+
+    /// Annex E 2.3.3.20 through 2.3.3.26.
+    fn enhanced_coordinates(&mut self, r: &mut BitReader<'_>) -> Result<(), CodecError> {
+        self.ecpl_interp = r.bit("ecplangleintrp")?;
+        let mut first = None;
+        let bands = self.ecpl_band_count;
+        for ch in 0..self.nf {
+            if !self.chincpl[ch] {
+                self.first_cplcos[ch] = true;
+                self.ecpl_have[ch] = false;
+                continue;
+            }
+            let is_first = first.is_none();
+            if is_first {
+                first = Some(ch);
+            }
+            let (send_amp, send_angle) = if self.first_cplcos[ch] {
+                self.first_cplcos[ch] = false;
+                (true, !is_first)
+            } else {
+                let amp = r.bit("ecplparam1e")?;
+                let angle = if is_first {
+                    false
+                } else {
+                    r.bit("ecplparam2e")?
+                };
+                (amp, angle)
+            };
+            if send_amp {
+                for band in 0..bands {
+                    self.ecpl_amp[ch][band] = r.read(5, "ecplamp")? as u8;
+                }
+                self.ecpl_have[ch] = true;
+            } else if !self.ecpl_have[ch] {
+                return Err(malformed(r, "enhanced coupling amplitudes missing"));
+            }
+            if send_angle {
+                for band in 0..bands {
+                    self.ecpl_angle[ch][band] = r.read(6, "ecplangle")? as u8;
+                    self.ecpl_chaos[ch][band] = r.read(3, "ecplchaos")? as u8;
+                }
+            }
+            if is_first {
+                self.ecpl_trans[ch] = false;
+            } else {
+                self.ecpl_trans[ch] = r.bit("ecpltrans")?;
+            }
+        }
+        self.ecpl_first = first.unwrap_or(0);
+        Ok(())
+    }
+
+    fn ecpl_setup(&self) -> ecpl::Setup {
+        ecpl::Setup {
+            start: self.cpl_begin_bin(),
+            end: self.cpl_end_bin(),
+            band_count: self.ecpl_band_count,
+            band_size: self.ecpl_band_size,
+            interp: self.ecpl_interp,
+            first: self.ecpl_first,
+            amp: self.ecpl_amp,
+            angle: self.ecpl_angle,
+            chaos: self.ecpl_chaos,
+            transient: self.ecpl_trans,
+            coupled: self.chincpl,
+        }
     }
 
     /// `baie` to `deltbaie`: parameters, SNR offsets, fast gains, leak and
@@ -1118,7 +1297,15 @@ impl<'a> State<'a> {
             self.read_slot(r, blk, LFE, &mut groups, &mut coefs[nf], None)?;
         }
 
-        if self.cplinu {
+        if self.ecpl {
+            self.ecpl_spectrum = [0.0; COEFS];
+            let start = self.cpl_begin_bin();
+            let end = self.cpl_end_bin().min(COEFS);
+            let exps = &self.slots[CPL].exps;
+            for bin in start..end {
+                self.ecpl_spectrum[bin] = cpl[bin] * scale(exps[bin]);
+            }
+        } else if self.cplinu {
             let start = self.cpl_begin_bin();
             let exps = &self.slots[CPL].exps;
             for (ch, row) in coefs.iter_mut().enumerate().take(nf) {
@@ -1331,6 +1518,35 @@ pub(crate) fn decode(
         compr: bsi.compr,
         ..Drc::default()
     };
+    struct Held {
+        coefs: [[f32; COEFS]; MAX_CODED],
+        blksw: [bool; MAX_FBW],
+        spectrum: [f32; COEFS],
+        setup: ecpl::Setup,
+        block: usize,
+    }
+    let mut held: Option<Held> = None;
+    let mut prev_live = substream.ecpl_live;
+    let mut prev_spectrum = substream.ecpl_prev;
+    let quiet = [0.0f32; COEFS];
+    let mut render = |coefs: &[[f32; COEFS]; MAX_CODED], blksw: &[bool; MAX_FBW], blk: usize| {
+        for ch in 0..coded {
+            let short = ch < bsi.nfchans && blksw[ch];
+            if short {
+                transform.inverse_short(&coefs[ch], &mut block);
+            } else {
+                transform.inverse_long(&coefs[ch], &mut block);
+            }
+            let start = ch * samples + blk * COEFS;
+            let scale = program_scale(&bsi.metadata, ch);
+            if scale != 1.0 {
+                for sample in &mut block {
+                    *sample *= scale;
+                }
+            }
+            overlap_add(&block, &mut delay[ch], &mut pcm[start..start + COEFS]);
+        }
+    };
     for blk in 0..bsi.blocks {
         state.block(&mut r, blk, &fi, &mut coefs)?;
         drc.dynrng[blk] = state.dynrng;
@@ -1377,22 +1593,58 @@ pub(crate) fn decode(
                 }
             }
         }
-        for ch in 0..coded {
-            let short = ch < bsi.nfchans && state.blksw[ch];
-            if short {
-                transform.inverse_short(&coefs[ch], &mut block);
+        if let Some(ready) = held.take() {
+            let next = if state.ecpl {
+                &state.ecpl_spectrum
             } else {
-                transform.inverse_long(&coefs[ch], &mut block);
-            }
-            let start = ch * samples + blk * COEFS;
-            let scale = program_scale(&bsi.metadata, ch);
-            if scale != 1.0 {
-                for sample in &mut block {
-                    *sample *= scale;
-                }
-            }
-            overlap_add(&block, &mut delay[ch], &mut pcm[start..start + COEFS]);
+                &quiet
+            };
+            let previous = if prev_live { &prev_spectrum } else { &quiet };
+            let mut shaped = ready.coefs;
+            ecpl::distribute(
+                transform,
+                previous,
+                &ready.spectrum,
+                next,
+                &mut shaped,
+                &ready.setup,
+                ready.block,
+            );
+            render(&shaped, &ready.blksw, ready.block);
+            prev_spectrum = ready.spectrum;
+            prev_live = true;
         }
+        if state.ecpl {
+            tools.enhanced_blocks += 1;
+            held = Some(Held {
+                coefs,
+                blksw: state.blksw,
+                spectrum: state.ecpl_spectrum,
+                setup: state.ecpl_setup(),
+                block: blk,
+            });
+        } else {
+            render(&coefs, &state.blksw, blk);
+            prev_live = false;
+        }
+    }
+    if let Some(ready) = held {
+        let previous = if prev_live { &prev_spectrum } else { &quiet };
+        let mut shaped = ready.coefs;
+        ecpl::distribute(
+            transform,
+            previous,
+            &ready.spectrum,
+            &quiet,
+            &mut shaped,
+            &ready.setup,
+            ready.block,
+        );
+        render(&shaped, &ready.blksw, ready.block);
+        substream.ecpl_live = true;
+        substream.ecpl_prev = ready.spectrum;
+    } else {
+        substream.ecpl_live = false;
     }
     substream.delay = delay;
     substream.seed = state.noise.0;
@@ -1417,4 +1669,322 @@ pub(crate) fn decode(
         tools,
         drc,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bitalloc::{self, Channel};
+    use crate::bits::BitWriter;
+    use crate::exponents::{cpl_groups, fbw_groups};
+    use crate::header::{self, Syntax};
+    use crate::mdct::Transform;
+    use crate::tables::{BAP_BITS, D15};
+
+    const FRAME_BYTES: usize = 2048;
+
+    /// A stereo E-AC-3 frame whose coupling is enhanced. A short frame is one
+    /// block with both channels switched; a long frame is two blocks, so the
+    /// second block supplies the spectrum the first one is decoded against.
+    fn enhanced_frame(short: bool) -> Vec<u8> {
+        let blocks = if short { 1 } else { 2 };
+        let start = ecpl::SUBBAND_START[0];
+        let end = ecpl::SUBBAND_START[7];
+        let csnr = 40u32;
+        let params = Params::from_codes(2, 1, 1, 2, 7);
+        let snr = (csnr as i32 - 15) << 4;
+        let mut cpl_exps = [0u8; 256];
+        cpl_exps[start..end].fill(0);
+        let mut ch_exps = [0u8; 256];
+        ch_exps[..start].fill(0);
+        let channel = |exps: &[u8; 256], from, to, leak| {
+            let mut bap = [0u8; 256];
+            bitalloc::allocate(
+                exps,
+                &Channel {
+                    start: from,
+                    end: to,
+                    fscod: 0,
+                    params,
+                    fgaincod: 4,
+                    snr,
+                    leak,
+                    delta: None,
+                    high_efficiency: false,
+                },
+                &mut bap,
+            )
+            .expect("allocation");
+            bap
+        };
+        let cpl_bap = channel(&cpl_exps, start, end, Some((0, 0)));
+        let ch_bap = channel(&ch_exps, 0, start, None);
+        assert!(
+            cpl_bap[start..end].iter().any(|&bap| bap > 0),
+            "the coupling channel was allocated no bits"
+        );
+
+        let mut w = BitWriter::with_capacity(FRAME_BYTES);
+        w.put(16, u32::from(header::SYNCWORD));
+        w.put(2, 0);
+        w.put(3, 0);
+        w.put(11, (FRAME_BYTES / 2 - 1) as u32);
+        w.put(2, 0);
+        w.put(2, u32::from(blocks == 2));
+        w.put(3, 2);
+        w.flag(false);
+        w.put(5, 16);
+        w.put(5, 27);
+        w.flag(false);
+        w.flag(false);
+        w.flag(true);
+        w.put(3, 0);
+        w.flag(false);
+        w.flag(true);
+        w.put(2, 0);
+        w.put(2, 0);
+        w.flag(false);
+        w.flag(false);
+        w.flag(false);
+        w.flag(false);
+
+        w.put(2, 0);
+        w.flag(false);
+        w.flag(short);
+        w.flag(false);
+        w.flag(false);
+        w.flag(false);
+        w.flag(false);
+        w.flag(false);
+        w.flag(false);
+        w.flag(true);
+        if blocks > 1 {
+            w.flag(false);
+        }
+        for blk in 0..blocks {
+            let strategy = if blk == 0 { u32::from(D15) } else { 0 };
+            w.put(2, strategy);
+            w.put(2, strategy);
+            w.put(2, strategy);
+        }
+        w.flag(false);
+        w.put(6, csnr);
+        w.put(4, 0);
+        if blocks > 1 {
+            w.flag(false);
+        }
+
+        if short {
+            w.flag(true);
+            w.flag(true);
+        }
+        w.flag(false);
+        w.flag(false);
+        w.flag(true);
+        w.put(4, 0);
+        w.put(4, 0);
+        w.flag(false);
+        if !short {
+            w.flag(false);
+            for _ in 0..7 {
+                w.put(5, 0);
+            }
+            for _ in 0..7 {
+                w.put(5, 0);
+            }
+            for _ in 0..7 {
+                w.put(6, 0);
+                w.put(3, 0);
+            }
+            w.flag(false);
+            w.put(4, 0);
+            for _ in 0..cpl_groups(D15, start, end) {
+                w.put(7, 2 * 25 + 2 * 5 + 2);
+            }
+            for _ in 0..2 {
+                w.put(4, 0);
+                for _ in 0..fbw_groups(D15, start) {
+                    w.put(7, 2 * 25 + 2 * 5 + 2);
+                }
+                w.put(2, 0);
+            }
+            w.flag(false);
+            w.put(3, 0);
+            w.put(3, 0);
+            write_quantized(&mut w, &ch_bap, &cpl_bap, start, end);
+            if blocks > 1 {
+                w.flag(false); // dynrnge
+                w.flag(false); // spxstre
+                w.flag(false); // ecplangleintrp
+                w.flag(false); // ecplparam1e, first channel
+                w.flag(false); // ecplparam1e, second channel
+                w.flag(false); // ecplparam2e
+                w.flag(false); // ecpltrans
+                w.flag(false); // rematstr
+                w.flag(false); // convsnroffste
+                w.flag(false); // cplleake
+                write_quantized(&mut w, &ch_bap, &cpl_bap, start, end);
+            }
+        }
+
+        let mut data = w.finish();
+        assert!(
+            data.len() < FRAME_BYTES - 2,
+            "frame grew past {FRAME_BYTES}"
+        );
+        data.resize(FRAME_BYTES, 0);
+        let word = crc::update(0, &data[2..FRAME_BYTES - 2]);
+        data[FRAME_BYTES - 2..].copy_from_slice(&word.to_be_bytes());
+        data
+    }
+
+    fn write_quantized(
+        w: &mut BitWriter,
+        channel: &[u8; 256],
+        coupling: &[u8; 256],
+        start: usize,
+        end: usize,
+    ) {
+        let mut items = Vec::new();
+        for &bap in &channel[..start] {
+            if bap > 0 {
+                items.push((bap, zero_code(bap)));
+            }
+        }
+        let mut marked = false;
+        for &bap in &coupling[start..end] {
+            if bap == 0 {
+                continue;
+            }
+            let code = if marked {
+                zero_code(bap)
+            } else {
+                marked = true;
+                loud_code(bap)
+            };
+            items.push((bap, code));
+        }
+        for &bap in &channel[..start] {
+            if bap > 0 {
+                items.push((bap, zero_code(bap)));
+            }
+        }
+
+        let mut grouped: [Vec<u32>; 3] = Default::default();
+        for &(bap, code) in &items {
+            if let Some(kind) = group_kind(bap) {
+                grouped[kind].push(code);
+            }
+        }
+        let mut seen = [0usize; 3];
+        for &(bap, code) in &items {
+            match group_kind(bap) {
+                Some(kind) => {
+                    let (per, bits, radix) = [(3usize, 5u32, 3u32), (3, 7, 5), (2, 7, 11)][kind];
+                    if seen[kind].is_multiple_of(per) {
+                        let members = &grouped[kind][seen[kind]..];
+                        let mut value = 0u32;
+                        for index in 0..per {
+                            value = value * radix
+                                + members.get(index).copied().unwrap_or(zero_code(bap));
+                        }
+                        w.put(bits, value);
+                    }
+                    seen[kind] += 1;
+                }
+                None => w.put(BAP_BITS[usize::from(bap)], code),
+            }
+        }
+    }
+
+    fn zero_code(bap: u8) -> u32 {
+        match bap {
+            1 => 1,
+            2 => 2,
+            3 => 3,
+            4 => 5,
+            5 => 7,
+            _ => 0,
+        }
+    }
+
+    fn loud_code(bap: u8) -> u32 {
+        match bap {
+            1 => 2,
+            2 => 4,
+            3 => 6,
+            4 => 10,
+            5 => 14,
+            6..=15 => (1u32 << (BAP_BITS[usize::from(bap)] - 1)) - 1,
+            _ => 0,
+        }
+    }
+
+    fn group_kind(bap: u8) -> Option<usize> {
+        match bap {
+            1 => Some(0),
+            2 => Some(1),
+            4 => Some(2),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn enhanced_coupling_puts_the_same_signal_in_both_channels() {
+        let frame = enhanced_frame(false);
+        let bsi = header::parse(&frame).expect("header");
+        assert_eq!(bsi.syntax, Syntax::Eac3);
+        let transform = Transform::new();
+        let mut sub = Substream::new();
+        let decoded =
+            decode(&frame, &bsi, &mut sub, &transform, DynamicRange::Off, None).expect("decode");
+        assert_eq!(decoded.tools.enhanced_blocks, 2);
+        assert_eq!(decoded.tools.coupling_blocks, 2);
+        assert_eq!(decoded.samples, 512);
+        assert!(sub.ecpl_live);
+        let left = decoded.channel(0);
+        let right = decoded.channel(1);
+        let energy: f32 = left.iter().map(|sample| sample * sample).sum();
+        assert!(energy > 1.0, "coupled energy {energy}");
+        let worst = left
+            .iter()
+            .zip(right)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        assert!(worst < 1.0e-4, "channel mismatch {worst}");
+        let again = decode(&frame, &bsi, &mut sub, &transform, DynamicRange::Off, None)
+            .expect("second frame");
+        assert!(again.pcm.iter().all(|sample| sample.is_finite()));
+        assert!(sub.ecpl_live);
+    }
+
+    #[test]
+    fn enhanced_coupling_in_a_short_block_is_refused() {
+        let good = enhanced_frame(false);
+        let good_bsi = header::parse(&good).expect("header");
+        let transform = Transform::new();
+        let mut sub = Substream::new();
+        decode(
+            &good,
+            &good_bsi,
+            &mut sub,
+            &transform,
+            DynamicRange::Off,
+            None,
+        )
+        .expect("first frame");
+        let delay = sub.delay;
+        let frame = enhanced_frame(true);
+        let bsi = header::parse(&frame).expect("header");
+        let err = decode(&frame, &bsi, &mut sub, &transform, DynamicRange::Off, None)
+            .expect_err("short block");
+        assert!(matches!(
+            err,
+            CodecError::Unsupported {
+                what: "enhanced coupling in a short block"
+            }
+        ));
+        assert_eq!(sub.delay, delay);
+        assert!(sub.ecpl_live);
+    }
 }

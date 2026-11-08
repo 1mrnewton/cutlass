@@ -9,6 +9,7 @@ mod bitalloc;
 mod bits;
 mod crc;
 mod decode;
+mod ecpl;
 mod encode;
 mod exponents;
 mod frame;

@@ -139,6 +139,7 @@ pub(crate) struct Transform {
     short_twiddle: Vec<Complex>,
     long_fft: Fft,
     short_fft: Fft,
+    full_fft: Fft,
 }
 
 impl Transform {
@@ -168,6 +169,32 @@ impl Transform {
             short_twiddle,
             long_fft: Fft::new(SPAN / 4),
             short_fft: Fft::new(SPAN / 8),
+            full_fft: Fft::new(SPAN),
+        }
+    }
+
+    /// The first half of the Kaiser-Bessel window. The second half is this
+    /// table read backwards.
+    pub(crate) fn window_half(&self) -> &[f32; COEFS] {
+        &self.window
+    }
+
+    /// Unnormalized forward DFT, `e^{-j2πkn/N}`.
+    pub(crate) fn forward_dft(
+        &self,
+        real: &[f32; SPAN],
+        imag: &[f32; SPAN],
+        out_re: &mut [f32; SPAN],
+        out_im: &mut [f32; SPAN],
+    ) {
+        let mut data = [Complex::default(); SPAN];
+        for (slot, (&re, &im)) in data.iter_mut().zip(real.iter().zip(imag)) {
+            *slot = Complex { re, im };
+        }
+        self.full_fft.run(&mut data, false);
+        for (slot, (re, im)) in data.iter().zip(out_re.iter_mut().zip(out_im.iter_mut())) {
+            *re = slot.re;
+            *im = slot.im;
         }
     }
 

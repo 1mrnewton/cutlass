@@ -164,6 +164,7 @@ fn clip_draft(path: &str) -> Draft {
         path: path.into(),
         width: 1920,
         height: 1080,
+        duration: Micros(9_000_000),
         ..MaterialVideo::default()
     });
     let mut segment = Segment::new("v", "m", TimeRange::new(0, 2_000_000));
@@ -173,16 +174,25 @@ fn clip_draft(path: &str) -> Draft {
 }
 
 #[test]
-fn the_ask_names_the_file_the_source_range_and_the_project_rate() {
-    let draft = clip_draft("/movies/walk.mp4");
+fn the_ask_names_the_whole_file_and_the_project_rate() {
+    let mut draft = clip_draft("/movies/walk.mp4");
     let ask = stable_ask(&draft, None, &"v".into()).unwrap();
     assert_eq!(
         ask,
         StableAsk {
             source: PathBuf::from("/movies/walk.mp4"),
-            range: TimeRange::new(500_000, 2_000_000),
+            range: TimeRange::new(0, 9_000_000),
             rate: 25.0,
         }
+    );
+    // A trim asks the same, so the kept path is shared.
+    draft.tracks[0].segments[0].source_range = Some(TimeRange::new(3_000_000, 1_000_000));
+    assert_eq!(stable_ask(&draft, None, &"v".into()).unwrap(), ask);
+    // With no length on the material, as far as the clip reads.
+    draft.materials.videos[0].duration = Micros(0);
+    assert_eq!(
+        stable_ask(&draft, None, &"v".into()).unwrap().range,
+        TimeRange::new(0, 4_000_000)
     );
     let mut odd = draft.clone();
     odd.fps = f64::NAN;
@@ -212,6 +222,7 @@ fn a_missing_clip_a_graphic_or_a_file_outside_the_project_is_refused() {
         Err(StableError::Clip { .. })
     ));
     let mut empty = draft;
+    empty.materials.videos[0].duration = Micros(0);
     empty.tracks[0].segments[0].source_range = Some(TimeRange::new(0, 0));
     assert!(stable_ask(&empty, None, &"v".into()).is_err());
     empty.tracks[0].segments[0].source_range = None;

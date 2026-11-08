@@ -1,19 +1,19 @@
 //! The steadying job: measure how the camera moved through a video clip,
 //! for `cutlass_motion::plan` to steady.
 //!
-//! [`stable_ask`] names what to measure: the clip's file, its source range
-//! and the project's frame rate. That is also what the measured path is
-//! kept under, so a shell looks for a kept path first and runs
-//! [`measure_camera`] only when there is none. The file is read forward
-//! once, frame by frame in the file's own time, so a trim or a speed change
-//! on the timeline does not change what is measured. Nothing here writes
-//! the draft or the disk.
+//! [`stable_ask`] names what to measure: the clip's whole file, from its
+//! start to its end, at the project's frame rate. That is also what the
+//! measured path is kept under, so a shell looks for a kept path first and
+//! runs [`measure_camera`] only when there is none. The file is read
+//! forward once, frame by frame in the file's own time, so a trim, a split
+//! or a speed change on the timeline reuses the same path. Nothing here
+//! writes the draft or the disk.
 
 use std::path::{Path, PathBuf};
 
 use cutlass_codec::ContainerId;
 use cutlass_engine::{ReaderFactory, decoded_picture, is_graphic, media_in_project, media_path};
-use cutlass_model::{Draft, Micros, SegmentId, TimeRange};
+use cutlass_model::{Draft, MaterialRef, Micros, SegmentId, TimeRange};
 use cutlass_motion::{Camera, Gray, MotionError, Path as CameraPath};
 use cutlass_picture::Picture;
 
@@ -52,7 +52,7 @@ impl std::error::Error for StableError {}
 pub struct StableAsk {
     /// The clip's file on disk.
     pub source: PathBuf,
-    /// The clip's source range, in the file's own time.
+    /// The whole file, in its own time.
     pub range: TimeRange,
     /// Frames measured per second: the project's.
     pub rate: f64,
@@ -90,11 +90,21 @@ pub fn stable_ask(
             None => path.to_path_buf(),
         }
     };
-    let range = segment
+    // The whole file: the material's length, or at least as far as the
+    // clip reads.
+    let used = segment
         .source_range
-        .clone()
+        .as_ref()
         .filter(|range| range.start.0 >= 0 && range.duration.0 > 0)
-        .ok_or_else(|| clip("the clip has no length to steady"))?;
+        .map_or(0, |range| range.start.0.saturating_add(range.duration.0));
+    let length = match draft.materials.get(segment.material_id.as_str()) {
+        Some(MaterialRef::Video(video)) => video.duration.0.max(used),
+        _ => used,
+    };
+    if length <= 0 {
+        return Err(clip("the clip has no length to steady"));
+    }
+    let range = TimeRange::new(0, length);
     Ok(StableAsk {
         source,
         range,

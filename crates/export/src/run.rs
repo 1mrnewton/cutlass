@@ -885,8 +885,9 @@ fn silence(rate: u32, channels: u16, frames: u32) -> Result<Pcm, ExportError> {
 
 /// `src` drawn at `dst_w` by `dst_h`. A smaller edge averages the source
 /// pixels each output pixel covers, so detail does not shimmer; a larger
-/// edge blends the two nearest pixels. Colour is weighted by alpha, so a
-/// transparent pixel's colour does not bleed into its neighbours.
+/// edge repeats each source pixel, as before, so a grown picture stays
+/// exactly the preview's. Colour is weighted by alpha, so a transparent
+/// pixel's colour does not bleed into its neighbours.
 fn scale_rgba(
     src_w: u32,
     src_h: u32,
@@ -966,7 +967,7 @@ struct Tap {
 
 /// For each output pixel on an edge, the source pixels it reads and their
 /// weights, which add up to one. Shrinking covers the span the output pixel
-/// stands for; growing blends the two source pixels around its centre.
+/// stands for; growing reads the one source pixel it falls on.
 fn axis_taps(src_edge: u32, dst_edge: u32) -> Result<Vec<Vec<Tap>>, ExportError> {
     if src_edge == 0 || dst_edge == 0 {
         return Err(ExportError::Canvas);
@@ -993,19 +994,10 @@ fn axis_taps(src_edge: u32, dst_edge: u32) -> Result<Vec<Vec<Tap>>, ExportError>
                 at += 1.0;
             }
         } else {
-            let centre = ((out + 0.5) * ratio - 0.5).clamp(0.0, src - 1.0);
-            let below = centre.floor();
-            let share = centre - below;
             pixel.push(Tap {
-                index: index_of(below, last),
-                weight: weight_of(1.0 - share),
+                index: index_of((out * ratio).floor(), last),
+                weight: 1.0,
             });
-            if share > 0.0 {
-                pixel.push(Tap {
-                    index: index_of(below + 1.0, last),
-                    weight: weight_of(share),
-                });
-            }
         }
         taps.push(pixel);
     }
@@ -2419,7 +2411,7 @@ mod tests {
     }
 
     #[test]
-    fn shrinking_averages_what_each_pixel_covers_and_growing_blends() {
+    fn shrinking_averages_what_each_pixel_covers_and_growing_repeats() {
         // Black and white columns, one pixel wide: nearest pixel would keep
         // only one of them.
         let stripes: Vec<u8> = (0..8 * 2)
@@ -2441,11 +2433,11 @@ mod tests {
             [255, 0, 0, 128]
         );
 
-        // Two pixels grown to four blend toward each other in the middle.
+        // Two pixels grown to four repeat each one.
         let pair = [0, 0, 0, 255, 255, 255, 255, 255];
         let grown = scale_rgba(2, 1, &pair, 4, 1).expect("grown");
         let reds: Vec<u8> = grown.chunks(4).map(|pixel| pixel[0]).collect();
-        assert_eq!(reds, [0, 64, 191, 255]);
+        assert_eq!(reds, [0, 0, 255, 255]);
 
         // A 1080p frame shrunk to 720p keeps a solid colour exactly.
         let solid = red(1920, 1080);

@@ -15,7 +15,7 @@ use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
 use std::time::SystemTime;
 
-use cutlass_model::Draft;
+use cutlass_model::{Draft, LinkageSettings};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -274,25 +274,34 @@ impl Folder {
 
     /// Record the linkage switch for this draft. Other keys in the file stay.
     pub fn set_linkage_enabled(&mut self, enabled: bool) {
-        let timeline_id = self.draft.id.as_str().to_owned();
-        let root = self
-            .biz_config
-            .get_or_insert_with(|| Value::Object(Map::new()));
-        let Some(root) = root.as_object_mut() else {
-            return;
-        };
-        let timelines = root
-            .entry("timeline_settings")
-            .or_insert_with(|| Value::Object(Map::new()));
-        let Some(timelines) = timelines.as_object_mut() else {
-            return;
-        };
-        let timeline = timelines
-            .entry(timeline_id)
-            .or_insert_with(|| Value::Object(Map::new()));
-        if let Some(timeline) = timeline.as_object_mut() {
+        if let Some(timeline) = self.timeline_settings() {
             timeline.insert("linkage_enabled".to_owned(), Value::Bool(enabled));
         }
+    }
+
+    /// Record the linkage switch and the follow and cut kinds for this
+    /// draft. Other keys in the file stay.
+    pub fn set_linkage(&mut self, settings: LinkageSettings) {
+        if let Some(timeline) = self.timeline_settings() {
+            timeline.insert("linkage_enabled".to_owned(), Value::Bool(settings.enabled));
+            timeline.insert("follow".to_owned(), settings.follow.to_biz());
+            timeline.insert("cut".to_owned(), settings.cut.to_biz());
+        }
+    }
+
+    /// This draft's object under `timeline_settings`, made when missing.
+    /// `None` when the file holds something other than objects there.
+    fn timeline_settings(&mut self) -> Option<&mut Map<String, Value>> {
+        let timeline_id = self.draft.id.as_str().to_owned();
+        self.biz_config
+            .get_or_insert_with(|| Value::Object(Map::new()))
+            .as_object_mut()?
+            .entry("timeline_settings")
+            .or_insert_with(|| Value::Object(Map::new()))
+            .as_object_mut()?
+            .entry(timeline_id)
+            .or_insert_with(|| Value::Object(Map::new()))
+            .as_object_mut()
     }
 
     /// Write the folder. The top draft file is a byte copy of the main timeline.
@@ -1269,6 +1278,22 @@ mod tests {
         assert_eq!(biz["kept"], 1);
         assert_eq!(biz["timeline_settings"]["D"]["follow"]["audio"], false);
         assert_eq!(biz["timeline_settings"]["D"]["linkage_enabled"], false);
+    }
+
+    #[test]
+    fn set_linkage_writes_the_kinds_and_keeps_the_other_keys() {
+        let mut folder = Folder::new(Draft::empty("D"));
+        folder.biz_config = Some(serde_json::json!({ "kept": 1 }));
+        let mut settings = cutlass_model::LinkageSettings::default();
+        settings.follow.audio = false;
+        settings.cut.audio = false;
+        folder.set_linkage(settings);
+        let biz = folder.biz_config.unwrap();
+        assert_eq!(biz["kept"], 1);
+        assert_eq!(
+            cutlass_model::linkage_from_biz(Some(&biz), "D", false),
+            settings
+        );
     }
 
     #[test]

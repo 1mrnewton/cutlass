@@ -106,6 +106,23 @@ pub fn linkage_from_biz(
     }
 }
 
+impl KindSwitches {
+    /// The switches as `draft_biz_config.json` stores them, every key
+    /// written, so [`linkage_from_biz`] reads back the same set.
+    #[must_use]
+    pub fn to_biz(self) -> Value {
+        serde_json::json!({
+            "overlay": self.overlay,
+            "text": self.text,
+            "sticker": self.sticker,
+            "effect": self.effect,
+            "filter": self.filter,
+            "adjust": self.adjust,
+            "audio": self.audio,
+        })
+    }
+}
+
 fn kind_switches(value: Option<&Value>) -> KindSwitches {
     let Some(object) = value.and_then(Value::as_object) else {
         return KindSwitches::ALL;
@@ -160,5 +177,22 @@ mod tests {
         assert!(explicit.follow.overlay);
         assert!(!explicit.cut.text);
         assert!(explicit.cut.audio);
+    }
+
+    #[test]
+    fn written_switches_read_back_the_same() {
+        let mut follow = KindSwitches::ALL;
+        follow.audio = false;
+        follow.sticker = false;
+        let mut cut = KindSwitches::ALL;
+        cut.text = false;
+        let biz = json!({
+            "timeline_settings": {
+                "D": { "linkage_enabled": true, "follow": follow.to_biz(), "cut": cut.to_biz() }
+            }
+        });
+        let read = linkage_from_biz(Some(&biz), "D", false);
+        assert_eq!(read.follow, follow);
+        assert_eq!(read.cut, cut);
     }
 }

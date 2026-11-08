@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "split-across",
+  "name": "Split Across",
+  "category": "Wipe",
+  "cross": {"kind": 3, "angle": 90, "soft": 0.03}
+}

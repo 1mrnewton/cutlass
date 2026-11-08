@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "id": "wipe-slide",
+  "name": "Wipe Slide",
+  "category": "Wipe",
+  "outgoing": [
+    {"block": "place", "params": {"x": {"keys": [[0, 0], [1, -0.3]]}}}
+  ],
+  "cross": {"kind": 0, "angle": 180, "soft": 0.02}
+}

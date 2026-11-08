@@ -45,8 +45,9 @@ pub use catalog::{
 pub use chroma::{CHROMA, Chroma, parse_hex, segment_chroma};
 pub use controls::{store_control, stored_controls};
 pub use crossing::{
-    CROSS, CrossKind, Crossing, DEFAULT_CROSSING_SECONDS, TRANSITION_CATEGORIES, TransitionRecipe,
-    bundled_transitions,
+    CROSS, CrossKind, Crossing, DEFAULT_CROSSING_SECONDS, PREVIEW_PAIRS, TRANSITION_CATEGORIES,
+    TRANSITION_PREVIEW_LOOP, TransitionRecipe, bundled_transitions, transition_preview_t,
+    transition_scenes,
 };
 pub use grade::{
     COLOR_CURVES, COLOR_WHEELS, Colour, CurveChannel, Grade, HSL, HSL_COLORS, MAX_CURVE_POINTS,

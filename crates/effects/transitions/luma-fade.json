@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "luma-fade",
+  "name": "Luma Fade",
+  "category": "Basic",
+  "duration": 0.8,
+  "cross": {"kind": 9, "soft": 0.3}
+}

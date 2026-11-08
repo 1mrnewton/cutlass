@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "checker-wipe",
+  "name": "Checker Wipe",
+  "category": "Wipe",
+  "cross": {"kind": 6, "count": 6, "soft": 0.02}
+}

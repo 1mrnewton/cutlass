@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "venetian",
+  "name": "Venetian",
+  "category": "Wipe",
+  "cross": {"kind": 2, "angle": -90, "count": 16, "soft": 0.2}
+}

@@ -297,8 +297,94 @@ impl TransitionRecipe {
     }
 }
 
+/// The scene pairs a card plays between when its recipe names none, spread
+/// over the shelf so neighbours differ.
+pub const PREVIEW_PAIRS: [(&str, &str); 8] = [
+    ("portrait", "beach"),
+    ("city", "lake"),
+    ("skater", "flowers"),
+    ("cafe", "road"),
+    ("concert", "dancer"),
+    ("lake", "portrait"),
+    ("beach", "city"),
+    ("flowers", "skater"),
+];
+
+/// The two scenes `kind`'s card plays between: its recipe's own, or a pair
+/// picked by its key.
+#[must_use]
+pub fn transition_scenes(kind: crate::TransitionKind) -> (&'static str, &'static str) {
+    if let Some([from, to]) = kind.recipe().map(|recipe| recipe.preview.as_slice())
+        && let (Some(from), Some(to)) = (scene_name(from), scene_name(to))
+    {
+        return (from, to);
+    }
+    let sum = kind.key().bytes().fold(0usize, |sum, byte| {
+        sum.wrapping_mul(31).wrapping_add(usize::from(byte))
+    });
+    PREVIEW_PAIRS[sum % PREVIEW_PAIRS.len()]
+}
+
+fn scene_name(name: &str) -> Option<&'static str> {
+    crate::preview_scenes()
+        .into_iter()
+        .find(|scene| *scene == name)
+}
+
+/// How long a playing transition card takes before it starts again: the
+/// outgoing scene held, the transition, then the incoming scene held.
+pub const TRANSITION_PREVIEW_LOOP: Micros = Micros(1_600_000);
+const PREVIEW_HOLD: f32 = 0.3;
+
+/// The transition's `t` a card playing for `elapsed` shows, stepped at
+/// [`crate::PREVIEW_RATE`].
+#[must_use]
+pub fn transition_preview_t(elapsed: Micros) -> f32 {
+    let step = 1_000_000 / i64::from(crate::PREVIEW_RATE);
+    let looped = elapsed.0.max(0) % TRANSITION_PREVIEW_LOOP.0;
+    #[allow(clippy::cast_precision_loss)]
+    let seconds = (looped - looped % step) as f32 / 1_000_000.0;
+    #[allow(clippy::cast_precision_loss)]
+    let length = TRANSITION_PREVIEW_LOOP.0 as f32 / 1_000_000.0;
+    ((seconds - PREVIEW_HOLD) / (length - 2.0 * PREVIEW_HOLD)).clamp(0.0, 1.0)
+}
+
 /// The transition recipes the app ships, in shelf order.
-const BUNDLED_FILES: [&str; 0] = [];
+const BUNDLED_FILES: [&str; 33] = [
+    include_str!("../transitions/flash.json"),
+    include_str!("../transitions/quick-flash.json"),
+    include_str!("../transitions/red-flash.json"),
+    include_str!("../transitions/luma-fade.json"),
+    include_str!("../transitions/grain-dissolve.json"),
+    include_str!("../transitions/pixel-dissolve.json"),
+    include_str!("../transitions/overexpose.json"),
+    include_str!("../transitions/underexpose.json"),
+    include_str!("../transitions/mono-fade.json"),
+    include_str!("../transitions/tint-fade.json"),
+    include_str!("../transitions/slow-fade.json"),
+    include_str!("../transitions/film-fade.json"),
+    include_str!("../transitions/burn-fade.json"),
+    include_str!("../transitions/soft-wipe-left.json"),
+    include_str!("../transitions/soft-wipe-right.json"),
+    include_str!("../transitions/wipe-up-right.json"),
+    include_str!("../transitions/wipe-up-left.json"),
+    include_str!("../transitions/wipe-down-left.json"),
+    include_str!("../transitions/wipe-down-right.json"),
+    include_str!("../transitions/split-across.json"),
+    include_str!("../transitions/split-down.json"),
+    include_str!("../transitions/clock-wipe.json"),
+    include_str!("../transitions/clock-from-below.json"),
+    include_str!("../transitions/blinds-across.json"),
+    include_str!("../transitions/blinds-down.json"),
+    include_str!("../transitions/zip-across.json"),
+    include_str!("../transitions/zip-down.json"),
+    include_str!("../transitions/checker-wipe.json"),
+    include_str!("../transitions/line-wipe.json"),
+    include_str!("../transitions/wipe-slide.json"),
+    include_str!("../transitions/wipe-blur.json"),
+    include_str!("../transitions/band-wipe.json"),
+    include_str!("../transitions/venetian.json"),
+];
 
 /// Every bundled transition recipe, read once.
 #[must_use]

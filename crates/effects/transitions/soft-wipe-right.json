@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "soft-wipe-right",
+  "name": "Soft Wipe Right",
+  "category": "Wipe",
+  "cross": {"kind": 0, "angle": 0, "soft": 0.3}
+}

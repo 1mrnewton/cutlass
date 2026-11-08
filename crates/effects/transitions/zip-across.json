@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "zip-across",
+  "name": "Zip Across",
+  "category": "Wipe",
+  "cross": {"kind": 16, "angle": 0, "count": 6, "soft": 0.03}
+}

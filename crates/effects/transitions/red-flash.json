@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "id": "red-flash",
+  "name": "Red Flash",
+  "category": "Basic",
+  "outgoing": [
+    {"block": "flash", "params": {"amount": {"keys": [[0, 0], [0.5, 1]]}, "red": 1, "green": 0.1, "blue": 0.15}}
+  ],
+  "incoming": [
+    {"block": "flash", "params": {"amount": {"keys": [[0.5, 1], [1, 0]]}, "red": 1, "green": 0.1, "blue": 0.15}}
+  ],
+  "cross": {"kind": 8, "progress": {"keys": [[0.49, 0], [0.51, 1]]}}
+}

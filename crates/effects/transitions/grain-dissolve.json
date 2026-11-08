@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "grain-dissolve",
+  "name": "Grain Dissolve",
+  "category": "Basic",
+  "cross": {"kind": 7, "soft": 0.1}
+}

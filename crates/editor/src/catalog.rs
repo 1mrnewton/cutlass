@@ -80,9 +80,14 @@ mod tests {
         }
         assert_eq!(catalog_search("").len(), all.len());
         let dissolve = catalog_search("Transition DISSOLVE");
-        assert_eq!(dissolve.len(), 1, "{dissolve:?}");
         assert!(
-            dissolve[0].starts_with("transition cutlass-"),
+            dissolve.contains(&"transition cutlass-dissolve Dissolve".to_owned()),
+            "{dissolve:?}"
+        );
+        assert!(
+            dissolve
+                .iter()
+                .all(|entry| entry.starts_with("transition cutlass-")),
             "{dissolve:?}"
         );
         let fades = catalog_search("animation fade");

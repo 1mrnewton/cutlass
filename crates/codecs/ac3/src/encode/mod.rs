@@ -91,6 +91,12 @@ const COUPLING: [(u32, u32); 6] = [
 ];
 const NO_COUPLING_KBPS: u32 = 112;
 
+/// 2/0 at 48 kHz and 128 kbit/s. The per-channel table waits until about
+/// 10 kHz. The reference encoder starts at sub-band 1. That start scores
+/// higher against the source, and Apple's decode of it falls under 30 dB.
+/// Sub-band 3 is the earliest start that stays above that on the music clip.
+const STEREO_128_START: usize = 3;
+
 /// Which syntax the encoder writes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Format {
@@ -297,17 +303,53 @@ fn bandwidth_code(cutoff: u32, sample_rate: u32) -> u8 {
     ((bin - 73.0) / 3.0).round().clamp(0.0, 60.0) as u8
 }
 
-/// Coupling sub-bands for a bandwidth: begin from the rate, end at the
-/// sub-band that holds the bandwidth.
-fn coupling_range(
-    bandwidth: u8,
-    begin_hz: Option<u32>,
+/// Nearest Table 5.18 rate. A tie stays with the lower rate.
+fn bitrate_index(bit_rate: u32) -> usize {
+    let mut best = 0usize;
+    let mut best_dist = u32::MAX;
+    for (index, &kbps) in NOMINAL_KBPS.iter().enumerate() {
+        let dist = (u32::from(kbps) * 1000).abs_diff(bit_rate);
+        if dist < best_dist {
+            best = index;
+            best_dist = dist;
+        }
+    }
+    best
+}
+
+/// First coupling sub-band. 2/0 at 48 kHz and 128 kbit/s uses
+/// [`STEREO_128_START`]. Every other layout follows [`COUPLING`] until
+/// [`NO_COUPLING_KBPS`] per channel.
+fn coupling_start(
+    acmod: u8,
+    fscod: u8,
+    nf: usize,
+    bit_rate: u32,
     sample_rate: u32,
-) -> Option<(usize, usize)> {
-    let begin_hz = begin_hz?;
+) -> Option<usize> {
+    if acmod < 2 || nf < 2 {
+        return None;
+    }
+    if acmod == 2 && fscod == 0 && bitrate_index(bit_rate) == 8 {
+        return Some(STEREO_128_START);
+    }
+    let per_channel = bit_rate / 1000 / nf as u32;
+    if per_channel >= NO_COUPLING_KBPS {
+        return None;
+    }
+    let bin = f64::from(interpolate(&COUPLING, per_channel)) * 512.0 / f64::from(sample_rate);
+    Some(((bin - 37.0) / 12.0).round().clamp(0.0, 15.0) as usize)
+}
+
+/// Coupling sub-bands for a bandwidth: `start` through the sub-band that
+/// holds the bandwidth. A start past the end keeps the last sub-band.
+fn coupling_range(bandwidth: u8, start: Option<usize>) -> Option<(usize, usize)> {
+    let start = start?;
     let end = (usize::from(bandwidth) / 4 + 3).min(18);
-    let bin = f64::from(begin_hz) * 512.0 / f64::from(sample_rate);
-    let begin = ((bin - 37.0) / 12.0).round().clamp(0.0, 15.0) as usize;
+    if end == 0 {
+        return None;
+    }
+    let begin = start.min(end - 1).min(15);
     (begin < end).then_some((begin, end))
 }
 
@@ -443,8 +485,7 @@ impl Ac3Encoder {
         };
         let params = Params::from_codes(codes[0], codes[1], codes[2], codes[3], codes[4]);
         let per_channel = bit_rate / 1000 / nf as u32;
-        let begin_hz =
-            (nf > 1 && per_channel < NO_COUPLING_KBPS).then(|| interpolate(&COUPLING, per_channel));
+        let start = coupling_start(acmod, fscod, nf, bit_rate, config.sample_rate);
         let mut bandwidth = bandwidth_code(interpolate(&CUTOFF, per_channel), config.sample_rate);
         let spf = blocks * COEFS;
         let nominal_bits = u64::from(bit_rate) * spf as u64 / u64::from(config.sample_rate);
@@ -458,7 +499,7 @@ impl Ac3Encoder {
                 blocks,
                 fscod,
                 bandwidth,
-                coupling: coupling_range(bandwidth, begin_hz, config.sample_rate),
+                coupling: coupling_range(bandwidth, start),
                 spx: None,
             };
             // The open check is the coarse coding: one exponent set, no
@@ -1418,6 +1459,18 @@ mod tests {
     use crate::decode::Ac3Decoder;
     use cutlass_decode::{Decoder, Packet as DecodedPacket};
     use cutlass_encode::{AudioInput, ChannelLayout, Encoder, Pcm};
+
+    #[test]
+    fn stereo_at_128k_couples_from_subband_three() {
+        assert_eq!(
+            coupling_start(2, 0, 2, 128_000, 48_000),
+            Some(STEREO_128_START)
+        );
+        // 192 kbit/s stays on the per-channel table, near 14 kHz.
+        assert_eq!(coupling_start(2, 0, 2, 192_000, 48_000), Some(9));
+        assert_eq!(coupling_start(2, 1, 2, 128_000, 44_100), Some(7));
+        assert!(coupling_start(1, 0, 1, 128_000, 48_000).is_none());
+    }
 
     #[test]
     fn a_delta_segment_matches_ffmpeg() {

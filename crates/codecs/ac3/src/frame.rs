@@ -1785,7 +1785,7 @@ mod tests {
         w.put(4, 0);
         w.flag(false);
         if !short {
-            w.flag(false);
+            w.flag(true);
             for _ in 0..7 {
                 w.put(5, 0);
             }
@@ -1815,7 +1815,7 @@ mod tests {
             if blocks > 1 {
                 w.flag(false); // dynrnge
                 w.flag(false); // spxstre
-                w.flag(false); // ecplangleintrp
+                w.flag(true); // ecplangleintrp
                 w.flag(false); // ecplparam1e, first channel
                 w.flag(false); // ecplparam1e, second channel
                 w.flag(false); // ecplparam2e

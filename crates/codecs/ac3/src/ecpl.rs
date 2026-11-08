@@ -435,4 +435,134 @@ mod tests {
         }
         assert!(worst < 1.0e-4, "identity error {worst} at the coupled bins");
     }
+
+    fn two_even_bands() -> Setup {
+        let mut band_size = [0usize; MAX_BANDS];
+        band_size[0] = 12;
+        band_size[1] = 12;
+        Setup {
+            start: SUBBAND_START[4],
+            end: SUBBAND_START[6],
+            band_count: 2,
+            band_size,
+            interp: true,
+            first: 0,
+            amp: [[0; MAX_BANDS]; MAX_FBW],
+            angle: [[0; MAX_BANDS]; MAX_FBW],
+            chaos: [[0; MAX_BANDS]; MAX_FBW],
+            transient: [false; MAX_FBW],
+            coupled: [false; MAX_FBW],
+        }
+    }
+
+    #[test]
+    fn interpolation_holds_a_constant_angle_and_crosses_each_band_center() {
+        let mut setup = two_even_bands();
+        setup.angle[1][0] = 16;
+        setup.angle[1][1] = 16;
+        let (_, angle) = bin_parameters(&setup, 1, false);
+        for (bin, value) in angle.iter().enumerate().take(setup.end).skip(setup.start) {
+            assert!((value - 0.5).abs() < 1.0e-6, "bin {bin} drifted to {value}");
+        }
+
+        setup.angle[1][0] = 0;
+        setup.angle[1][1] = 16;
+        let slope = 0.5 / 12.0;
+        let (_, angle) = bin_parameters(&setup, 1, false);
+        let at = setup.start;
+        assert!((angle[at + 5] - (0.0 - slope / 2.0)).abs() < 1.0e-5);
+        assert!((angle[at + 6] - (slope / 2.0)).abs() < 1.0e-5);
+        let center = (angle[at + 17] + angle[at + 18]) / 2.0;
+        assert!((center - 0.5).abs() < 1.0e-5, "second band center {center}");
+    }
+
+    #[test]
+    fn interpolation_takes_the_short_arc_across_the_branch_cut() {
+        let mut setup = two_even_bands();
+        // 29/32 and (35-64)/32. The short arc climbs through +1, not down through 0.
+        setup.angle[1][0] = 29;
+        setup.angle[1][1] = 35;
+        let (_, angle) = bin_parameters(&setup, 1, false);
+        let at = setup.start;
+        assert!(angle[at + 6] > angle[at + 5]);
+        assert!(angle[at + 5] > 0.8);
+    }
+
+    #[test]
+    fn chaos_scales_only_a_steady_channel_that_is_not_first() {
+        let mut setup = two_even_bands();
+        setup.interp = false;
+        setup.chaos[1][0] = 7;
+        setup.chaos[1][1] = 7;
+        let (amp, _) = bin_parameters(&setup, 1, false);
+        assert!((amp[setup.start] - 0.62).abs() < 1.0e-5);
+
+        setup.transient[1] = true;
+        let (amp, _) = bin_parameters(&setup, 1, false);
+        assert!((amp[setup.start] - 1.0).abs() < 1.0e-6);
+
+        setup.transient[1] = false;
+        setup.chaos[0][0] = 7;
+        let (amp, angle) = bin_parameters(&setup, 0, true);
+        assert!((amp[setup.start] - 1.0).abs() < 1.0e-6);
+        assert_eq!(angle[setup.start], 0.0);
+    }
+
+    #[test]
+    fn a_transient_draws_a_new_angle_each_block_and_a_steady_channel_does_not() {
+        let transform = Transform::new();
+        let mut signal = [0.0f32; COEFS * 4];
+        for (n, sample) in signal.iter_mut().enumerate() {
+            *sample = (n as f32 * 0.60).sin() * 0.5;
+        }
+        let mut blocks = [[0.0f32; COEFS]; 3];
+        for (block, coefs) in blocks.iter_mut().enumerate() {
+            let mut input = [0.0f32; SPAN];
+            input.copy_from_slice(&signal[block * COEFS..block * COEFS + SPAN]);
+            transform.forward_long(&input, coefs);
+        }
+        let mut setup = two_even_bands();
+        setup.interp = false;
+        setup.coupled[1] = true;
+        setup.chaos[1][0] = 7;
+        setup.chaos[1][1] = 7;
+        let render = |setup: &Setup, block: usize| {
+            let mut channels = [[0.0f32; COEFS]; 2];
+            distribute(
+                &transform,
+                &blocks[0],
+                &blocks[1],
+                &blocks[2],
+                &mut channels,
+                setup,
+                block,
+            );
+            channels[1]
+        };
+        let steady = render(&setup, 0);
+        let steady_again = render(&setup, 4);
+        let drift = steady
+            .iter()
+            .zip(&steady_again)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        assert!(drift < 1.0e-6, "steady chaos moved by {drift}");
+
+        setup.transient[1] = true;
+        let first = render(&setup, 0);
+        let second = render(&setup, 1);
+        let moved = first
+            .iter()
+            .zip(&second)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        let energy: f32 = blocks[1][setup.start..setup.end]
+            .iter()
+            .map(|sample| sample * sample)
+            .sum();
+        assert!(
+            moved > 1.0e-3,
+            "transient chaos stayed put, delta {moved}, coupling energy {energy}"
+        );
+    }
 }

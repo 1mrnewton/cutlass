@@ -4818,7 +4818,10 @@ fn paint_toolbar(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rec
                     ui.label(RichText::new(COMPOUND_TITLE).size(12.0).color(tokens::TEXT));
                     toolbar_separator(ui);
                 }
-                paint_tools(shell, ui, view, TOOLS_LEFT);
+                paint_tool_picker(shell, ui);
+                toolbar_separator(ui);
+                let tools = left_tools(!shell.selection().is_empty());
+                paint_tools(shell, ui, view, &tools);
             });
         });
     let mut pinned = ui.new_child(
@@ -4941,7 +4944,7 @@ fn tool_enabled(shell: &Shell, name: &str) -> bool {
         "select" | "delete" | "zoomIn" | "zoomOut" | "zoomFit" | "linkage" | "magnet" | "snap" => {
             true
         }
-        "split" | "marker" | "beat" => shell.has_clip(),
+        "split" | "marker" | "beat" | "splitAt" | "trimLeft" | "trimRight" => shell.has_clip(),
         "freeze" => shell.freeze_enabled(),
         "reverse" => shell.reverse_enabled(),
         "mirror" => shell.mirror_enabled(),
@@ -4970,6 +4973,9 @@ fn tool_clicked(shell: &mut Shell, name: &str) {
         "zoomOut" => shell.zoom_out(),
         "zoomFit" => shell.zoom_fit(),
         "delete" => shell.delete_target(),
+        "splitAt" => shell.split_playhead(),
+        "trimLeft" => shell.delete_side(TrimEdge::Start),
+        "trimRight" => shell.delete_side(TrimEdge::End),
         "split" => {
             shell.toggle_blade();
             Ok(())
@@ -5003,6 +5009,100 @@ fn tool_clicked(shell: &mut Shell, name: &str) {
 }
 
 /// The arrow beside Linkage: a menu that opens the Linkage settings dialog.
+/// The tool picker: the tool in use, Select or Split, and a chevron that
+/// opens the two with their keys.
+fn paint_tool_picker(shell: &mut Shell, ui: &mut Ui) {
+    let blade = shell.blade();
+    let (rect, response) = ui.allocate_exact_size(
+        Vec2::new(TOOL_BUTTON + LINKAGE_CHEVRON, TOOL_BUTTON),
+        Sense::click(),
+    );
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Tools"));
+    let response = response.on_hover_text(if blade { "Split tool" } else { "Select tool" });
+    let id = egui::Id::unique("tool-picker");
+    let open = egui::Popup::is_id_open(ui.ctx(), id);
+    if response.hovered() || open {
+        ui.painter()
+            .rect_filled(rect, CornerRadius::same(6), tokens::MENU_HOVER);
+    }
+    let icon = Rect::from_center_size(
+        Pos2::new(rect.left() + TOOL_BUTTON / 2.0, rect.center().y),
+        Vec2::splat(16.0),
+    );
+    let _ = icons::paint(
+        ui.painter(),
+        icon,
+        if blade { "blade" } else { "select" },
+        tokens::TEXT,
+    );
+    let c = Pos2::new(rect.right() - LINKAGE_CHEVRON / 2.0, rect.center().y);
+    let (tip, wing) = if open { (-2.0, 2.0) } else { (2.0, -2.0) };
+    ui.painter().add(egui::Shape::line(
+        vec![
+            c + Vec2::new(-3.5, wing),
+            c + Vec2::new(0.0, tip),
+            c + Vec2::new(3.5, wing),
+        ],
+        egui::Stroke::new(1.5, tokens::MENU_CHEVRON),
+    ));
+    egui::Popup::menu(&response)
+        .id(id)
+        .width(200.0)
+        .gap(4.0)
+        .frame(
+            egui::Frame::new()
+                .fill(tokens::MENU)
+                .corner_radius(CornerRadius::same(tokens::EXPORT_RADIUS))
+                .inner_margin(egui::Margin::same(4)),
+        )
+        .show(|ui| {
+            ui.set_width(192.0);
+            for (pick_blade, icon, label, action) in [
+                (false, "select", "Select", "select_tool"),
+                (true, "blade", "Split", "blade_tool"),
+            ] {
+                let (row, row_response) =
+                    ui.allocate_exact_size(Vec2::new(ui.available_width(), 32.0), Sense::click());
+                row_response
+                    .widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
+                if row_response.hovered() || blade == pick_blade {
+                    ui.painter()
+                        .rect_filled(row, CornerRadius::same(6), tokens::MENU_HOVER);
+                }
+                let _ = icons::paint(
+                    ui.painter(),
+                    Rect::from_center_size(
+                        row.left_center() + Vec2::new(18.0, 0.0),
+                        Vec2::splat(16.0),
+                    ),
+                    icon,
+                    tokens::TEXT,
+                );
+                ui.painter().text(
+                    row.left_center() + Vec2::new(36.0, 0.0),
+                    Align2::LEFT_CENTER,
+                    label,
+                    FontId::proportional(tokens::TYPE_SIZE),
+                    tokens::TEXT,
+                );
+                let keys = shell.settings().keys_for(action);
+                if !keys.is_empty() {
+                    crate::menu::paint_keys(
+                        ui.ctx(),
+                        ui.painter(),
+                        row.right_center() - Vec2::new(10.0, 0.0),
+                        &crate::menu::shortcut_for(keys),
+                        tokens::MENU_KEY,
+                    );
+                }
+                if row_response.clicked() {
+                    shell.pick_tool(pick_blade);
+                    ui.close();
+                }
+            }
+        });
+}
+
 fn linkage_menu(shell: &Shell, ui: &mut Ui, view: &mut ViewState) {
     let (rect, response) = ui.allocate_exact_size(Vec2::new(LINKAGE_CHEVRON, 28.0), Sense::click());
     response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Linkage options"));
@@ -5138,15 +5238,34 @@ fn linkage_dialog(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
 /// What the toolbar says while a compound clip is open.
 const COMPOUND_TITLE: &str = "Compound clip";
 
-/// The edit tools, at the toolbar's left.
+/// The tools at the toolbar's left, after the tool picker, whether or not
+/// a clip is picked.
 const TOOLS_LEFT: &[Option<(&str, &str)>] = &[
     Some(("undo", "Undo")),
     Some(("redo", "Redo")),
     None,
-    Some(("select", "Select")),
-    Some(("split", "Split")),
+    Some(("splitAt", "Split at the playhead")),
+    Some(("trimLeft", "Delete left of the playhead")),
+    Some(("trimRight", "Delete right of the playhead")),
     Some(("delete", "Delete")),
     None,
+    Some(("marker", "Marker")),
+    Some(("beat", "Beat")),
+];
+
+/// The tools left of the pinned group: [`TOOLS_LEFT`], and when a clip is
+/// picked, a separator and [`TOOLS_CLIP`] after them.
+fn left_tools(picked: bool) -> Vec<Option<(&'static str, &'static str)>> {
+    let mut tools = TOOLS_LEFT.to_vec();
+    if picked {
+        tools.push(None);
+        tools.extend_from_slice(TOOLS_CLIP);
+    }
+    tools
+}
+
+/// The tools a picked clip adds after them.
+const TOOLS_CLIP: &[Option<(&str, &str)>] = &[
     Some(("freeze", "Freeze frame")),
     Some(("reverse", "Reverse")),
     Some(("mirror", "Mirror")),
@@ -5154,9 +5273,6 @@ const TOOLS_LEFT: &[Option<(&str, &str)>] = &[
     Some(("crop", "Crop")),
     Some(("transcribe", "Transcribe")),
     Some(("splitScenes", "Split scenes")),
-    None,
-    Some(("marker", "Marker")),
-    Some(("beat", "Beat")),
 ];
 
 /// Snap through zoom, kept at the toolbar's right edge.
@@ -14430,6 +14546,47 @@ mod tests {
             "{scrolled:?}"
         );
         let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn a_picked_clip_adds_its_tools_to_the_toolbar() {
+        let names = |picked| {
+            left_tools(picked)
+                .into_iter()
+                .flatten()
+                .map(|tool| tool.0)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            names(false),
+            [
+                "undo",
+                "redo",
+                "splitAt",
+                "trimLeft",
+                "trimRight",
+                "delete",
+                "marker",
+                "beat"
+            ]
+        );
+        let picked = names(true);
+        assert_eq!(picked[..8], names(false)[..]);
+        assert_eq!(
+            picked[8..],
+            [
+                "freeze",
+                "reverse",
+                "mirror",
+                "rotate",
+                "crop",
+                "transcribe",
+                "splitScenes"
+            ]
+        );
+        for name in ["splitAt", "trimLeft", "trimRight", "blade", "select"] {
+            assert!(icons::require(name).is_ok(), "{name}");
+        }
     }
 
     #[test]

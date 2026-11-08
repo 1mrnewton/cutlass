@@ -17647,6 +17647,38 @@ mod tests {
         assert_eq!(locked.to_string(), "the track is locked");
     }
 
+    /// A still deep into a long clip shows its frame from its first
+    /// microsecond to its last.
+    #[test]
+    fn a_still_late_in_a_clip_maps_to_its_frame_throughout() {
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        draft.canvas_config.width = 2;
+        draft.canvas_config.height = 1;
+        let mut video = MaterialVideo::new("picture");
+        video.path = "clip".to_owned();
+        video.duration = Micros(60_000_000);
+        draft.materials.videos.push(video);
+        let mut picture = Segment::new("picture", "picture", TimeRange::new(0, 60_000_000));
+        picture.source_range = Some(TimeRange::new(0, 60_000_000));
+        draft.tracks[0].segments.push(picture);
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.select(Some(SegmentId::new("picture")));
+        desktop.seek(Micros(36_000_000));
+        desktop.freeze_frame().unwrap();
+        let draft = desktop.draft().unwrap();
+        let still = &draft.tracks[0].segments[1];
+        let map = cutlass_engine::placement_of(draft, still).expect("map");
+        for time in [still.target.start.0, still.target.end().0 - 1] {
+            assert_eq!(
+                cutlass_engine::map_timeline(&map, Micros(time)),
+                Ok(Micros(36_000_000))
+            );
+        }
+    }
+
     #[test]
     fn snapping_starts_on_and_a_drag_keeps_the_pointer_when_it_is_off() {
         let mut bare = shell();

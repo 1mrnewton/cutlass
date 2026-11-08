@@ -84,7 +84,9 @@ pub fn freeze_requests(
     let mut still = segment.clone();
     still.id = still_id.clone();
     still.target = TimeRange::new(at.0, duration.0);
-    still.source_range = Some(TimeRange::new(0, duration.0));
+    // The held frame must lie in the still's source range, or the frame
+    // lookup refuses it and the still draws nothing.
+    still.source_range = Some(TimeRange::new(freeze.timestamp.0, duration.0));
     still.speed = 1.0;
     still.reverse = false;
     still.group_id.clear();
@@ -208,6 +210,7 @@ mod tests {
             );
             let still = &session.draft().tracks[0].segments[1];
             assert!(still.extra_material_refs.is_empty());
+            assert_eq!(still.source_range, Some(TimeRange::new(500_000, 3_000_000)));
             assert_eq!(still.speed, 1.0);
             session.undo().unwrap();
             assert_eq!(session.draft().tracks[0].segments.len(), 2);

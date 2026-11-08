@@ -6,7 +6,7 @@
 //! block switched blocks and in E-AC-3 LFE, so it is not the reference
 //! for the audio.
 
-use cutlass_ac3::{DynamicRange, Options, Tools};
+use cutlass_ac3::{DynamicRange, Extension, Options, Tools};
 use cutlass_decode::{Channel, CodecId, Decoder};
 
 use crate::common::{
@@ -144,6 +144,56 @@ fn each_sample_matches_apple_per_channel() {
             );
         }
     }
+}
+
+/// Annex E 3.8.2: a core decode is the independent substream. It matches
+/// a stream with the dependent frames removed, and it counts every
+/// dependent frame it left out.
+#[test]
+fn a_core_decode_drops_the_dependent_substream() {
+    let Some(data) = load("eac3/the_great_wall_7.1.eac3") else {
+        return;
+    };
+    let (full, tools) = decode_tools(&data, Options::default());
+    assert!(tools.dependent_frames > 0);
+    let mut alone = Vec::new();
+    for unit in units(&data) {
+        let info = cutlass_ac3::probe(&unit).expect("independent frame");
+        assert_ne!(info.stream_type, cutlass_ac3::StreamType::Dependent);
+        alone.push(unit[..info.frame_bytes].to_vec());
+    }
+    let (core_only, _) = decode_tools(&alone.concat(), Options::default());
+    let mut decoder = open(
+        codec_of(&data),
+        Options {
+            extension: Extension::Core,
+            ..Options::default()
+        },
+    );
+    let mut pcm = Vec::new();
+    for (index, unit) in units(&data).iter().enumerate() {
+        pcm.extend(samples(
+            decoder.push(&packet(unit, index, 0)).expect("push"),
+        ));
+    }
+    assert_eq!(decoder.skipped_dependents(), tools.dependent_frames);
+    let (_, layout) = decoder.stream().expect("stream");
+    assert_eq!(layout.channels(), core_only.channels.as_slice());
+    assert!(layout.len() < full.channels.len());
+    assert_eq!(pcm.len(), core_only.pcm.len());
+    let mut worst = 0.0_f32;
+    let mut at = 0_usize;
+    for (index, (left, right)) in pcm.iter().zip(&core_only.pcm).enumerate() {
+        let delta = (left - right).abs();
+        if delta > worst {
+            worst = delta;
+            at = index;
+        }
+    }
+    assert!(
+        worst == 0.0,
+        "core differs from the independent frames at sample {at} by {worst}"
+    );
 }
 
 #[test]

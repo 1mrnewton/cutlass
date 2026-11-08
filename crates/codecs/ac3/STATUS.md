@@ -55,7 +55,7 @@ FFmpeg disagrees with A/52 on block-switched blocks. On those FATE samples Apple
 | Capability | Decode | Encode | Evidence | Status |
 | --- | --- | --- | --- | --- |
 | Mono, stereo, 5.0, 5.1 | Same speaker order as AC-3 | Same layouts as AC-3, one independent substream | fixtures, `every_layout_decodes_in_order_with_its_lfe` | Verified |
-| 7.1 dependent substream | The dependent's channels join the program. A location outside the eleven speakers is `Unsupported`. `Extension::Core` plays the independent substream and counts the rest | Not written | FATE `the_great_wall_7.1` | Decode verified. Encode not implemented |
+| 7.1 dependent substream | The dependent's channels join the program. A location outside the eleven speakers is `Unsupported`. `Extension::Core` plays the independent substream and counts every dependent frame | Not written | FATE `the_great_wall_7.1`, `a_core_decode_drops_the_dependent_substream` | Decode verified. Encode not implemented |
 | 32, 44.1, and 48 kHz | Yes | Yes | fixtures, `ffmpeg_decodes_our_streams` | Verified |
 | Reduced sample rates | Refused | Not written | `the_eac3_reduced_rates_are_unsupported` | Unsupported |
 | 1, 2, 3, and 6 blocks | Yes | Yes. One block uses D45 exponents. Two blocks use D45 then D25 | `eac3_holds_any_bit_rate_at_any_block_count`. FATE `serenity` is one block per frame | Our encoder verified. An independent 2-block or 3-block file is not in the FATE set |
@@ -168,6 +168,8 @@ Resident set grew as the bench moved from stereo to 5.1, which is the allocator 
 ```text
 AC3_REQUIRE_ORACLES=1 AC3_FATE_SAMPLES=/tmp/cutlass-ac3-eac3/fixtures/fate \
   cargo test --release -p cutlass-ac3 -- --skip decoder_and_encoder_campaigns
+AC3_FATE_SAMPLES=/tmp/cutlass-ac3-eac3/fixtures/fate \
+  cargo test --release -p cutlass-ac3 --test ac3 a_core_decode_drops_the_dependent_substream
   # lib 59 passed; integration 48 passed, 1 ignored (the long campaign)
 cargo clippy -p cutlass-ac3 --all-targets -- -D warnings
 AC3_FUZZ_SECS=120 cargo test --release -p cutlass-ac3 --test ac3 -- --ignored campaign --nocapture

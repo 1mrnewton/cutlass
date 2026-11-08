@@ -396,16 +396,20 @@ impl Ac3Decoder {
             });
         }
         let dynamics = self.options.dynamic_range;
+        let core = self.options.extension == Extension::Core;
         let mut slots = Vec::with_capacity(groups.len());
         for (head, dependents) in groups {
             let (at, frame, bsi) = &parsed[head];
             // Annex E 3.8.5: reproducing the complete mix, the last
             // dependent substream's dynamic range words apply to the whole
-            // program; a downmix keeps independent substream 0's.
+            // program; a downmix keeps independent substream 0's. A core
+            // decode is the independent substream alone, so it keeps
+            // that substream's words.
             let mut last = None;
             let mut words = None;
             if dynamics != DynamicRange::Off
                 && self.options.downmix == Downmix::None
+                && !core
                 && let Some(&index) = dependents.last()
             {
                 let (dat, dframe, dbsi) = &parsed[index];
@@ -450,6 +454,12 @@ impl Ac3Decoder {
                 if let Some(decoded) = &cached {
                     states.tools.add(&decoded.tools);
                 }
+                // Annex E 3.8.2: a core decode plays the independent
+                // substream and leaves the dependents out.
+                if core {
+                    states.skipped_dependents += 1;
+                    continue;
+                }
                 if self.options.downmix != Downmix::None {
                     continue;
                 }
@@ -458,10 +468,6 @@ impl Ac3Decoder {
                     None => acmod_locations(dbsi.acmod, dbsi.lfeon),
                 };
                 if locations.iter().any(|l| l.speaker().is_none()) {
-                    if self.options.extension == Extension::Core {
-                        states.skipped_dependents += 1;
-                        continue;
-                    }
                     return Err(CodecError::Unsupported {
                         what: "E-AC-3 channel location outside the 11 speakers",
                     });

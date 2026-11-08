@@ -1626,3 +1626,75 @@ fn a_stand_in_opens_in_place_of_its_source_and_probing_still_reads_the_source() 
         "Png"
     );
 }
+
+#[test]
+fn a_copy_of_a_stretch_is_read_at_its_place_in_that_stretch() {
+    let factory = factory();
+    let path = fixture("pattern.jpg");
+    let (mut draft, id) = draft_for(&path);
+    let segment = &mut draft.tracks[0].segments[0];
+    segment.source_range = Some(TimeRange::new(3_000_000, 1_000_000));
+    // The copy starts 2 s into the source, so the clip's 3 s is its 1 s.
+    let from = crate::open_segment_from(
+        &factory,
+        &draft,
+        &id,
+        ClockKind::Export,
+        2,
+        path.clone(),
+        Micros(2_000_000),
+    )
+    .expect("copy");
+    assert_eq!(from.map.source, TimeRange::new(1_000_000, 1_000_000));
+    assert_eq!(from.path(), path.as_path());
+    let whole = open_segment(&factory, &draft, &id, ClockKind::Export, 2).expect("source");
+    assert_eq!(
+        from.map.target, whole.map.target,
+        "the timeline place stays"
+    );
+    // A held frame moves with the copy.
+    let frozen = {
+        let mut held = draft.clone();
+        held.materials.videos[0].freeze = Some(cutlass_model::FreezeInfo {
+            timestamp: Micros(3_500_000),
+            ..cutlass_model::FreezeInfo::default()
+        });
+        held
+    };
+    let still = crate::open_segment_from(
+        &factory,
+        &frozen,
+        &id,
+        ClockKind::Export,
+        2,
+        path.clone(),
+        Micros(2_000_000),
+    );
+    let plain = open_segment(&factory, &frozen, &id, ClockKind::Export, 2).expect("frozen");
+    let held = plain.map.freeze.expect("a held frame");
+    assert_eq!(
+        still.expect("frozen copy").map.freeze,
+        Some(Micros(held.0 - 2_000_000))
+    );
+    // A copy that starts after the clip, or no such clip, is refused.
+    let late = crate::open_segment_from(
+        &factory,
+        &draft,
+        &id,
+        ClockKind::Export,
+        2,
+        path.clone(),
+        Micros(3_000_001),
+    );
+    assert!(matches!(late, Err(EngineError::Outside)));
+    let missing = crate::open_segment_from(
+        &factory,
+        &draft,
+        &SegmentId::new("nope"),
+        ClockKind::Export,
+        2,
+        path,
+        Micros(0),
+    );
+    assert!(matches!(missing, Err(EngineError::MissingSegment)));
+}

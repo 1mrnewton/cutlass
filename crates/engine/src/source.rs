@@ -33,7 +33,7 @@ use crate::waveform::{MAX_BUCKETS, Waveform};
 pub struct VideoSource {
     path: PathBuf,
     media: RefCell<Media>,
-    map: TimelineMap,
+    pub(crate) map: TimelineMap,
     cache: RefCell<FrameWindow<DecodedFrame>>,
     clock: RefCell<MediaClock>,
     preload: RefCell<Preload>,
@@ -306,6 +306,58 @@ pub fn open_segment_in(
     let path = located_media(root, stored).ok_or_else(|| EngineError::MissingFile {
         path: PathBuf::from(stored),
     })?;
+    open_at(
+        factory,
+        map::placement_of(draft, segment)?,
+        clock,
+        window,
+        path,
+    )
+}
+
+/// Opens the pictures of segment `id` from `path`, a file that holds the
+/// stretch of the segment's own file starting at `held_from`: a copy made
+/// of that stretch, such as an enhanced one. Each time is read from the
+/// copy at its place in that stretch, so the clip's trim, speed, reverse
+/// and freeze show the same frames they would from the source.
+pub fn open_segment_from(
+    factory: &ReaderFactory,
+    draft: &Draft,
+    id: &SegmentId,
+    clock: ClockKind,
+    window: usize,
+    path: PathBuf,
+    held_from: Micros,
+) -> Result<VideoSource, EngineError> {
+    let segment = draft
+        .tracks
+        .iter()
+        .flat_map(|track| track.segments.iter())
+        .find(|segment| segment.id == *id)
+        .ok_or(EngineError::MissingSegment)?;
+    if map::is_graphic(draft, segment) {
+        return Err(EngineError::NotMedia);
+    }
+    let mut map = map::placement_of(draft, segment)?;
+    let shift = |time: Micros| {
+        time.0
+            .checked_sub(held_from.0)
+            .filter(|shifted| *shifted >= 0)
+            .map(Micros)
+            .ok_or(EngineError::Outside)
+    };
+    map.source.start = shift(map.source.start)?;
+    map.freeze = map.freeze.map(shift).transpose()?;
+    open_at(factory, map, clock, window, path)
+}
+
+fn open_at(
+    factory: &ReaderFactory,
+    map: TimelineMap,
+    clock: ClockKind,
+    window: usize,
+    path: PathBuf,
+) -> Result<VideoSource, EngineError> {
     let media = factory.open(&path)?;
     let display = media.info().display;
     let round = (media.info().family == cutlass_codec::ContainerId::Still)
@@ -313,7 +365,6 @@ pub fn open_segment_in(
         .flatten()
         .map(|duration| duration.0)
         .filter(|duration| *duration > 0);
-    let map = map::placement_of(draft, segment)?;
     Ok(VideoSource {
         path,
         media: RefCell::new(media),

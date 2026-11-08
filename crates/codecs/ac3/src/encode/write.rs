@@ -69,8 +69,9 @@ pub(crate) struct Frame {
     pub chanmap: Option<u16>,
     /// Heavy-compression word for this frame. `None` omits `compr`.
     pub compr: Option<u8>,
-    /// Channel 0 transient pre-noise parameters. `None` leaves the tool off.
-    pub transient: Option<crate::frame::Transient>,
+    /// Transient pre-noise for each full-band channel. All `None` leaves
+    /// the tool off.
+    pub transients: [Option<crate::frame::Transient>; MAX_FBW],
 }
 
 /// Bit positions a syncframe written without mantissas reaches: the end
@@ -100,7 +101,7 @@ pub(crate) fn frame(
             blocks,
             frame.snr,
             frame.chanmap.is_none(),
-            frame.transient,
+            &frame.transients,
         );
     } else {
         ac3_header(&mut w, shape, meta, frame);
@@ -313,7 +314,7 @@ fn audfrm(
     blocks: &[Block],
     snr: u16,
     independent: bool,
-    transient: Option<crate::frame::Transient>,
+    transients: &[Option<crate::frame::Transient>],
 ) {
     let nf = shape.nf;
     let hybrid = blocks
@@ -324,7 +325,7 @@ fn audfrm(
         w.flag(hybrid);
     }
     w.put(2, 0); // snroffststr
-    w.flag(transient.is_some());
+    w.flag(transients.iter().take(nf).any(|item| item.is_some()));
     let flags = FrameFlags::of(shape, blocks);
     w.flag(flags.blkswe);
     w.flag(flags.dithflage);
@@ -380,12 +381,12 @@ fn audfrm(
     }
     w.put(6, u32::from(snr >> 4));
     w.put(4, u32::from(snr & 15));
-    if let Some(transient) = transient {
+    if transients.iter().take(nf).any(|item| item.is_some()) {
         for ch in 0..nf {
-            let on = ch == 0 && transient.location < 1024;
-            w.flag(on);
-            if on {
-                w.put(10, u32::from(transient.location));
+            let transient = transients.get(ch).copied().flatten();
+            w.flag(transient.is_some());
+            if let Some(transient) = transient {
+                w.put(10, u32::from(transient.location.min(1023)));
                 w.put(8, u32::from(transient.length));
             }
         }

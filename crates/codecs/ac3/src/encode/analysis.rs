@@ -71,9 +71,10 @@ impl Transients {
         }
     }
 
-    /// Whether `block`, the 256 new samples of an audio block, holds a
-    /// transient.
-    pub(crate) fn detect(&mut self, block: &[f32; COEFS]) -> bool {
+    /// Sample index of the first transient in `block`, at 64-sample
+    /// resolution. `None` when the block stays below the silence floor or
+    /// no segment jumps.
+    pub(crate) fn locate(&mut self, block: &[f32; COEFS]) -> Option<usize> {
         let mut level1 = 0.0f32;
         let mut level2 = [0.0f32; 2];
         let mut level3 = [0.0f32; 4];
@@ -87,21 +88,25 @@ impl Transients {
         let previous = self.last;
         self.last = [level1, level2[1], level3[3]];
         if level1 < SILENCE {
-            return false;
+            return None;
         }
-        let jump = |peaks: &[f32], before: f32, threshold: f32| {
+        let first = |peaks: &[f32], before: f32, threshold: f32| {
             let mut prior = before;
-            for &peak in peaks {
+            for (index, &peak) in peaks.iter().enumerate() {
                 if peak * threshold > prior {
-                    return true;
+                    return Some(index);
                 }
                 prior = peak;
             }
-            false
+            None
         };
-        jump(&[level1], previous[0], THRESHOLDS[0])
-            || jump(&level2, previous[1], THRESHOLDS[1])
-            || jump(&level3, previous[2], THRESHOLDS[2])
+        if let Some(quarter) = first(&level3, previous[2], THRESHOLDS[2]) {
+            return Some(quarter * 64);
+        }
+        if let Some(half) = first(&level2, previous[1], THRESHOLDS[1]) {
+            return Some(half * 128);
+        }
+        first(&[level1], previous[0], THRESHOLDS[0]).map(|_whole| 0)
     }
 }
 
@@ -122,16 +127,17 @@ impl Analysis {
 
     /// Transform the block whose new samples are `block`. With
     /// `may_switch`, a transient in those samples selects the pair of
-    /// short transforms. Returns `blksw`.
+    /// short transforms. Returns `blksw` and the sample index of the
+    /// transient inside the block.
     pub(crate) fn block(
         &mut self,
         transform: &Transform,
         block: &[f32; COEFS],
         may_switch: bool,
         coefs: &mut [f32; COEFS],
-    ) -> bool {
-        let transient = self.transients.detect(block);
-        let short = may_switch && transient;
+    ) -> (bool, Option<usize>) {
+        let at = self.transients.locate(block);
+        let short = may_switch && at.is_some();
         let mut input = [0.0f32; SPAN];
         input[..COEFS].copy_from_slice(&self.history);
         input[COEFS..].copy_from_slice(block);
@@ -141,7 +147,7 @@ impl Analysis {
             transform.forward_long(&input, coefs);
         }
         self.history = *block;
-        short
+        (short, at)
     }
 }
 
@@ -166,9 +172,11 @@ mod tests {
         let mut blocks = blocks(&tone);
         // The filter starts at rest, so the onset of the tone is a transient.
         for block in blocks.by_ref().take(2) {
-            detector.detect(&block);
+            detector.locate(&block);
         }
-        let flagged = blocks.filter(|block| detector.detect(block)).count();
+        let flagged = blocks
+            .filter(|block| detector.locate(block).is_some())
+            .count();
         assert_eq!(flagged, 0);
     }
 
@@ -177,7 +185,9 @@ mod tests {
         let mut samples = sine(256 * 8, 500.0, 0.01);
         samples[256 * 5 + 100] = 0.9;
         let mut detector = Transients::new(48_000);
-        let flags: Vec<bool> = blocks(&samples).map(|b| detector.detect(&b)).collect();
+        let flags: Vec<bool> = blocks(&samples)
+            .map(|b| detector.locate(&b).is_some())
+            .collect();
         assert!(flags[5], "{flags:?}");
         assert!(!flags[..5].contains(&true), "{flags:?}");
     }
@@ -187,8 +197,8 @@ mod tests {
         let mut detector = Transients::new(48_000);
         let mut block = [0.0f32; COEFS];
         block[200] = SILENCE * 0.5;
-        assert!(!detector.detect(&[0.0; COEFS]));
-        assert!(!detector.detect(&block));
+        assert!(detector.locate(&[0.0; COEFS]).is_none());
+        assert!(detector.locate(&block).is_none());
     }
 
     #[test]
@@ -198,10 +208,14 @@ mod tests {
         let mut coefs = [0.0f32; COEFS];
         let mut block = [0.0f32; COEFS];
         block[255] = 0.8;
-        assert!(!analysis.block(&transform, &[0.0; COEFS], true, &mut coefs));
-        assert!(analysis.block(&transform, &block, true, &mut coefs));
+        assert!(
+            !analysis
+                .block(&transform, &[0.0; COEFS], true, &mut coefs)
+                .0
+        );
+        assert!(analysis.block(&transform, &block, true, &mut coefs).0);
         let mut again = Analysis::new(48_000);
         again.block(&transform, &[0.0; COEFS], false, &mut coefs);
-        assert!(!again.block(&transform, &block, false, &mut coefs));
+        assert!(!again.block(&transform, &block, false, &mut coefs).0);
     }
 }

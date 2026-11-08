@@ -18,42 +18,84 @@ pub(crate) const HISTORY: usize = 1536;
 /// `history` is oldest first. A sample that is no longer in either buffer
 /// is left alone.
 pub(crate) fn apply(pcm: &mut [f32], history: &[f32], transient: Transient) {
-    let transloc = usize::from(transient.location) * 4;
-    let translen = usize::from(transient.length);
-    let pn = (transloc % 256) + 256;
-    let tot = pn + translen + TC1;
-    let start = transloc as isize - tot as isize;
-    let synth_start = transloc as isize - (2 * TC1 + 2 * pn) as isize;
-    let read = |index: isize| -> f32 {
-        if index >= 0 {
-            return pcm.get(index as usize).copied().unwrap_or(0.0);
-        }
-        let at = history.len() as isize + index;
-        if at < 0 {
-            0.0
-        } else {
-            history.get(at as usize).copied().unwrap_or(0.0)
-        }
-    };
+    let window = window(transient);
+    let read = |index: isize| -> f32 { sample_at(pcm, history, index) };
     // Snapshot first. The copy can overlap the region it overwrites.
-    let synth: Vec<f32> = (0..tot)
-        .map(|samp| read(synth_start + samp as isize))
+    let synth: Vec<f32> = (0..window.tot)
+        .map(|samp| read(window.synth_start + samp as isize))
         .collect();
     for (samp, &copied) in synth.iter().enumerate() {
-        let index = start + samp as isize;
+        let index = window.start + samp as isize;
         if index < 0 || index >= pcm.len() as isize {
             continue;
         }
         let at = index as usize;
-        pcm[at] = if samp < TC1 {
-            let into = fade_in(samp, TC1);
-            pcm[at] * (1.0 - into) + copied * into
-        } else if samp + TC2 < tot {
-            copied
-        } else {
-            let into = fade_in(samp + TC2 - tot, TC2);
-            pcm[at] * into + copied * (1.0 - into)
-        };
+        pcm[at] = mix(pcm[at], copied, samp, window.tot);
+    }
+}
+
+/// Whether the replacement leaves this frame's source in place.
+///
+/// The tool exists to cover decoder pre-echo. It is not a request to
+/// replace a real attack with earlier silence.
+pub(crate) fn matches_source(pcm: &[f32], history: &[f32], transient: Transient) -> bool {
+    let window = window(transient);
+    let mut error = 0.0f64;
+    let mut energy = 0.0f64;
+    for samp in 0..window.tot {
+        let index = window.start + samp as isize;
+        if index < 0 || index >= pcm.len() as isize {
+            continue;
+        }
+        let original = pcm[index as usize];
+        let copied = sample_at(pcm, history, window.synth_start + samp as isize);
+        let mixed = mix(original, copied, samp, window.tot);
+        let diff = f64::from(mixed - original);
+        error += diff * diff;
+        let sample = f64::from(original);
+        energy += sample * sample;
+    }
+    error <= 1.0e-4 * energy.max(1.0e-8)
+}
+
+struct Window {
+    start: isize,
+    tot: usize,
+    synth_start: isize,
+}
+
+fn window(transient: Transient) -> Window {
+    let transloc = usize::from(transient.location) * 4;
+    let pn = (transloc % 256) + 256;
+    let tot = pn + usize::from(transient.length) + TC1;
+    Window {
+        start: transloc as isize - tot as isize,
+        tot,
+        synth_start: transloc as isize - (2 * TC1 + 2 * pn) as isize,
+    }
+}
+
+fn sample_at(pcm: &[f32], history: &[f32], index: isize) -> f32 {
+    if index >= 0 {
+        return pcm.get(index as usize).copied().unwrap_or(0.0);
+    }
+    let at = history.len() as isize + index;
+    if at < 0 {
+        0.0
+    } else {
+        history.get(at as usize).copied().unwrap_or(0.0)
+    }
+}
+
+fn mix(original: f32, copied: f32, samp: usize, tot: usize) -> f32 {
+    if samp < TC1 {
+        let into = fade_in(samp, TC1);
+        original * (1.0 - into) + copied * into
+    } else if samp + TC2 < tot {
+        copied
+    } else {
+        let into = fade_in(samp + TC2 - tot, TC2);
+        original * into + copied * (1.0 - into)
     }
 }
 
@@ -106,5 +148,22 @@ mod tests {
         // this frame and comes from history, not from the constant 1.
         assert!(pcm[0] > 100.0, "{}", pcm[0]);
         assert_eq!(pcm[400], 1.0);
+    }
+
+    #[test]
+    fn a_replacement_that_moves_the_attack_is_refused() {
+        let mut tone = vec![0.0f32; 256];
+        tone.extend((0..512).map(|n| (n as f32 * 0.01).sin()));
+        let onset = Transient {
+            location: 32,
+            length: 0,
+        };
+        assert!(!matches_source(&tone[256..], &tone[..256], onset));
+        let quiet = vec![0.01f32; 1536];
+        let hit = Transient {
+            location: 256,
+            length: 0,
+        };
+        assert!(matches_source(&quiet[512..], &quiet[..512], hit));
     }
 }

@@ -7,8 +7,11 @@
 //! 48 kHz. E-AC-3 also writes a 7.1 program as that 5.1 frame plus one
 //! dependent frame for the back pair. It takes any bit rate and 1, 2, 3
 //! or 6 blocks per syncframe. Spectral extension and AHT are written.
-//! Enhanced coupling is never written. Transient pre-noise parameters are
-//! not chosen; a test may place them on channel 0.
+//! Enhanced coupling is never written. An E-AC-3 frame names the first
+//! transient in each full-band channel whose replacement already matches
+//! the source, so the decoder can cover pre-echo without moving the
+//! attack. A test may place channel 0 instead. The words are omitted when
+//! the syncframe cannot hold them.
 //! A block
 //! peaking above half scale sends a dynamic range word that brings it back
 //! to half scale, and the frame sends a heavy-compression word for the
@@ -41,7 +44,7 @@ use crate::header::{Dac3, Dec3, Dec3Substream, compr_code, dynrng_code};
 use crate::mdct::{COEFS, Transform};
 use crate::tables::{FRAME_WORDS, NOMINAL_KBPS, REUSE};
 use analysis::Analysis;
-use plan::{Block, LFE, MAX_BLOCKS, Mode, SLOTS, Shape};
+use plan::{Block, LFE, MAX_BLOCKS, MAX_FBW, Mode, SLOTS, Shape};
 pub use write::MixCodes;
 use write::{Frame, Layout, Meta, TAIL_BITS};
 
@@ -351,7 +354,7 @@ pub struct Ac3Encoder {
     pending: Vec<Vec<f32>>,
     blocks: Vec<Block>,
     originals: Vec<[[f32; COEFS]; SLOTS]>,
-    last_blksw: [bool; plan::MAX_FBW],
+    last_blksw: [bool; MAX_FBW],
     clock: RateClock,
     snr: i32,
     frame_index: u64,
@@ -373,8 +376,7 @@ pub struct Ac3Encoder {
     /// The rate control leaves this empty.
     #[cfg(test)]
     forced_delta: Option<bitalloc::Delta>,
-    /// E-AC-3 transient pre-noise parameters for channel 0. The encoder
-    /// does not choose these.
+    /// E-AC-3 transient pre-noise parameters forced onto channel 0.
     #[cfg(test)]
     forced_transient: Option<crate::frame::Transient>,
 }
@@ -510,7 +512,7 @@ impl Ac3Encoder {
             pending: vec![Vec::new(); channels],
             blocks: vec![Block::default(); blocks],
             originals: vec![[[0.0; COEFS]; SLOTS]; blocks],
-            last_blksw: [false; plan::MAX_FBW],
+            last_blksw: [false; MAX_FBW],
             clock: RateClock::default(),
             snr: 15 << 4,
             frame_index: 0,
@@ -598,7 +600,24 @@ impl Ac3Encoder {
         self.forced_delta = Some(delta);
     }
 
-    /// Write one channel's transient pre-noise parameters on every E-AC-3 frame.
+    /// Detected transients, unless this is AC-3 or a test replaced channel 0.
+    fn pre_noise(
+        &self,
+        heard: [Option<crate::frame::Transient>; MAX_FBW],
+    ) -> [Option<crate::frame::Transient>; MAX_FBW] {
+        if !self.shape.eac3 {
+            return [None; MAX_FBW];
+        }
+        #[cfg(test)]
+        if let Some(forced) = self.forced_transient {
+            let mut heard = heard;
+            heard[0] = Some(forced);
+            return heard;
+        }
+        heard
+    }
+
+    /// Replace channel 0's detected transient on every E-AC-3 frame.
     #[cfg(test)]
     pub(crate) fn force_transient(&mut self, location: u16, length: u8) {
         self.forced_transient =
@@ -794,6 +813,7 @@ impl Ac3Encoder {
 
     fn code_frame(&mut self, from: usize) -> Result<Packet, CodecError> {
         let nf = self.shape.nf;
+        let mut heard = [None; MAX_FBW];
         for blk in 0..self.shape.blocks {
             let mut block = Block::default();
             for coded in 0..self.order.len() {
@@ -805,14 +825,34 @@ impl Ac3Encoder {
                 // off for the whole E-AC-3 frame when that would change
                 // from one block to the next. Spectral extension copies
                 // long-transform bins, so a frame that uses it stays long.
-                let short = self.analysis[coded].block(
+                let (short, at) = self.analysis[coded].block(
                     &self.transform,
                     &samples,
                     coded < nf && self.shape.spx.is_none(),
                     &mut block.coefs[slot],
                 );
-                if coded < nf {
+                if let Some(channel) = heard.get_mut(coded)
+                    && coded < nf
+                {
                     block.blksw[coded] = short;
+                    if channel.is_none()
+                        && let Some(offset) = at
+                        && let Ok(location) = u16::try_from((blk * COEFS + offset) / 4)
+                        && location < 1024
+                    {
+                        let transient = crate::frame::Transient {
+                            location,
+                            length: 0,
+                        };
+                        let history_from = from.saturating_sub(crate::tpnp::HISTORY);
+                        if crate::tpnp::matches_source(
+                            &self.pending[coded][from..],
+                            &self.pending[coded][history_from..from],
+                            transient,
+                        ) {
+                            *channel = Some(transient);
+                        }
+                    }
                 }
             }
             for ch in 0..nf {
@@ -836,6 +876,8 @@ impl Ac3Encoder {
             shape.spx = None;
         }
         let mut mode = Mode::Adaptive;
+        let mut transients = self.pre_noise(heard);
+        let mut dropped_pre_noise = false;
         let (snr, skip) = loop {
             plan::plan(&shape, &mut self.blocks, mode);
             self.range_words(from, forced.as_deref());
@@ -845,7 +887,7 @@ impl Ac3Encoder {
             {
                 self.blocks[0].deltas[0] = delta;
             }
-            if let Some((offset, skip)) = self.allocate(&shape, size, heavy)? {
+            if let Some((offset, skip)) = self.allocate(&shape, size, heavy, transients)? {
                 // A short syncframe has the same bit rate and far fewer
                 // bits, so the six-block cutoff leaves the mantissas below
                 // the nominal offset. Give the bits to a narrower band.
@@ -863,6 +905,12 @@ impl Ac3Encoder {
                     continue;
                 }
                 break (offset, skip);
+            }
+            if !dropped_pre_noise && transients.iter().any(|item| item.is_some()) {
+                dropped_pre_noise = true;
+                transients = self.pre_noise([None; MAX_FBW]);
+                restore(&mut self.blocks, &self.originals);
+                continue;
             }
             if shape.spx.is_some() {
                 shape.spx = None;
@@ -899,10 +947,7 @@ impl Ac3Encoder {
             snr: snr as u16,
             chanmap: self.chanmap,
             compr: heavy,
-            #[cfg(test)]
-            transient: self.forced_transient,
-            #[cfg(not(test))]
-            transient: None,
+            transients,
         };
         let (writer, layout) = write::frame(&shape, &self.meta, &frame, &self.blocks, &skip, true);
         if layout.total + TAIL_BITS > size.bytes * 8 {
@@ -954,6 +999,7 @@ impl Ac3Encoder {
         shape: &Shape,
         size: Size,
         heavy: Option<u8>,
+        transients: [Option<crate::frame::Transient>; MAX_FBW],
     ) -> Result<Option<(i32, [u16; MAX_BLOCKS])>, CodecError> {
         let probe = Frame {
             bytes: size.bytes,
@@ -962,10 +1008,7 @@ impl Ac3Encoder {
             snr: 0,
             chanmap: self.chanmap,
             compr: heavy,
-            #[cfg(test)]
-            transient: self.forced_transient,
-            #[cfg(not(test))]
-            transient: None,
+            transients,
         };
         let (_, layout) = write::frame(
             shape,
@@ -1235,7 +1278,7 @@ fn coarse_side(shape: &Shape, meta: &Meta, chanmap: Option<u16>) -> Layout {
         snr: 0,
         chanmap,
         compr: None,
-        transient: None,
+        transients: [None; MAX_FBW],
     };
     write::frame(shape, meta, &frame, &blocks, &[0; MAX_BLOCKS], false).1
 }

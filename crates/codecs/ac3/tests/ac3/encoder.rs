@@ -360,6 +360,12 @@ fn a_transient_stays_quiet_before_the_attack() {
             decoded.decoder.tools().short_blocks > 0,
             "{format:?} kept the long transform across the attack"
         );
+        let named = decoded.decoder.tools().transient_channels;
+        if format == Format::Eac3 {
+            assert!(named > 0, "the attack was not named");
+        } else {
+            assert_eq!(named, 0);
+        }
         let left = deinterleave(&decoded.pcm, 2, 0);
         let before = &left[29_000..29_900];
         let peak = before.iter().fold(0.0f32, |m, v| m.max(v.abs()));

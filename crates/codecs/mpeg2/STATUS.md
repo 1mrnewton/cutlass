@@ -166,6 +166,8 @@ The timed campaigns used `MPEG2_FUZZ_SEED=20261108` and a budget of 1800 seconds
 - Encoder, 8 November 2026, 15:06–15:36. Binary copied from the tree at `d4695bdf`. No encoder source has changed since. Printed seed `0x13526b9`. 118 459 iterations, 84 278 encoders opened, 1 265 473 pictures coded, 219 206 refused pushes, slowest iteration 1.49 s. `test result: ok`.
 - Decoder, 15:20–15:50, binary of `2d925e2c` (the field-pair fix is in it; a 4:4:4 comment and this record came after, and neither changes decoding). Printed seed `0x1352519`. 6 273 828 iterations, the four modes within 1 568–1 569 thousand each, 2 720 941 refusals checked against the clean pictures, 61 571 821 pictures, slowest iteration 53 ms. `test result: ok`.
 
+- Decoder, 8 November 2026, 22:20–22:30, release binary of `b373f8c6`: the in-place second field and the corpus with `inter_fields.m2v`, whole and one packet per field. The 30-minute campaign above predates both, so this shorter run is the evidence for them. Same seed, printed `0x1352519`, budget 600 s. 3 647 497 iterations, modes within 911–913 thousand each, 1 578 593 refusals checked, 30 935 230 pictures, slowest iteration 10.6 ms. `test result: ok`. Log `/tmp/cutlass-mpeg2/fuzz/decoder-fieldsapart.log`.
+
 An earlier decoder campaign was on the binary from before the field-pair fix and was stopped. It is not evidence for this decoder. Both logs are in `/tmp/cutlass-mpeg2/fuzz/`. A failed assertion, a panic, or an iteration over 20 seconds fails the test, so a passing result is zero findings.
 
 Two bugs the encoder fuzzer found, both fixed and covered by tests that fail without the fix:

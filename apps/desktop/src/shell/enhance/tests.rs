@@ -57,9 +57,21 @@ fn open(name: &str, movie: Option<&[u8]>) -> (Shell, PathBuf) {
 
 /// Keep a copy of the clip at `level`, as a finished job would.
 fn enhanced(shell: &Shell, temp: &std::path::Path, level: i64) {
-    let ask = enhance_ask(shell.draft().unwrap(), Some(temp), &"v".into(), level, 0).unwrap();
+    copied(shell, temp, level, 0);
+}
+
+/// Keep a copy of the clip at these levels, as a finished job would.
+fn copied(shell: &Shell, temp: &std::path::Path, level: i64, denoise: i64) {
+    let ask = enhance_ask(
+        shell.draft().unwrap(),
+        Some(temp),
+        &"v".into(),
+        level,
+        denoise,
+    )
+    .unwrap();
     let file = enhanced_file(temp, &ask.key(), &ask.range).unwrap();
-    std::fs::write(file, b"an enhanced movie").unwrap();
+    std::fs::write(file, b"a copied movie").unwrap();
 }
 
 #[test]
@@ -111,5 +123,71 @@ fn a_photo_a_sound_nothing_selected_or_a_missing_file_is_refused() {
     assert_eq!(shell.revision(), revision);
     assert!(shell.job().is_none());
     assert_eq!(shell.enhance_level(), 0);
+    let _ = std::fs::remove_dir_all(&temp);
+}
+
+#[test]
+fn a_denoised_clip_with_a_copy_takes_its_level_at_once_beside_enhance() {
+    let (mut shell, temp) = open("denoised", Some(b"a movie"));
+    copied(&shell, &temp, 0, Algorithm::WEAK);
+    copied(&shell, &temp, 0, Algorithm::STRONG);
+    copied(&shell, &temp, Algorithm::HD, Algorithm::STRONG);
+    shell.select(Some("v".into()));
+    assert_eq!(shell.denoise_level(), 0);
+    shell.set_denoise(Algorithm::WEAK).unwrap();
+    assert!(shell.job().is_none(), "nothing to make");
+    shell.set_denoise(Algorithm::STRONG).unwrap();
+    assert_eq!(shell.denoise_level(), Algorithm::STRONG);
+    // Enhance on as well: the copy of both is there.
+    shell.set_enhance(Algorithm::HD).unwrap();
+    assert!(shell.job().is_none());
+    assert_eq!(
+        (shell.enhance_level(), shell.denoise_level()),
+        (Algorithm::HD, Algorithm::STRONG)
+    );
+    assert!(shell.denoise_progress().is_none());
+    // Enhance off again: the denoised copy draws the clip.
+    shell.set_enhance(0).unwrap();
+    assert!(shell.job().is_none());
+    assert_eq!(shell.denoise_level(), Algorithm::STRONG);
+    shell.undo().unwrap();
+    assert_eq!(shell.enhance_level(), Algorithm::HD);
+    let _ = std::fs::remove_dir_all(&temp);
+}
+
+#[test]
+fn turning_one_off_never_fails_even_when_the_others_copy_cannot_start() {
+    let (mut shell, temp) = open("one-off", Some(b"a movie"));
+    copied(&shell, &temp, Algorithm::HD, 0);
+    copied(&shell, &temp, Algorithm::HD, Algorithm::WEAK);
+    shell.select(Some("v".into()));
+    shell.set_enhance(Algorithm::HD).unwrap();
+    shell.set_denoise(Algorithm::WEAK).unwrap();
+    assert!(shell.job().is_none());
+    // The movie goes, so a copy only denoised cannot be asked for.
+    std::fs::remove_file(temp.join("walk.mp4")).unwrap();
+    shell.set_enhance(0).unwrap();
+    assert!(shell.job().is_none());
+    assert_eq!(
+        (shell.enhance_level(), shell.denoise_level()),
+        (0, Algorithm::WEAK)
+    );
+    // Turning it on is refused, and the level stays.
+    assert!(shell.set_denoise(Algorithm::STRONG).is_err());
+    assert_eq!(shell.denoise_level(), Algorithm::WEAK);
+    shell.set_denoise(0).unwrap();
+    assert_eq!(shell.denoise_level(), 0);
+    let _ = std::fs::remove_dir_all(&temp);
+}
+
+#[test]
+fn a_photo_or_a_sound_is_not_denoised() {
+    let (mut shell, temp) = open("denoise-refused", None);
+    assert!(shell.set_denoise(1).is_err(), "nothing selected");
+    for id in ["p", "a"] {
+        shell.select(Some(id.into()));
+        assert!(shell.set_denoise(1).is_err(), "{id}");
+        assert_eq!(shell.denoise_level(), 0);
+    }
     let _ = std::fs::remove_dir_all(&temp);
 }

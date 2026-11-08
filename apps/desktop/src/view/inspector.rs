@@ -196,8 +196,8 @@ fn video_panel(
             blend(shell, ui, state, inspection, true);
             stabilize(shell, ui, state);
             enhance_quality(shell, ui, state);
+            reduce_noise(shell, ui, state);
             for label in [
-                "Noise reduction",
                 "Optical flow",
                 "AI remove",
                 "AI expand",
@@ -945,6 +945,66 @@ fn enhance_quality(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState) {
         });
         if let Some(value) = picked.filter(|value| *value != level) {
             send(shell, move |shell| shell.set_enhance(value));
+        }
+    });
+}
+
+/// The Reduce image noise levels, as the stored level and the name shown.
+const DENOISE_LEVELS: [(i64, &str); 2] = [
+    (cutlass_model::Algorithm::WEAK, "Weak"),
+    (cutlass_model::Algorithm::STRONG, "Strong"),
+];
+
+/// Reduce image noise: on, it makes the clip's denoised copy at a level as
+/// a job, unless the project has one. With Enhance quality on as well, the
+/// one copy is made under Enhance quality and shows its progress there.
+fn reduce_noise(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState) {
+    let level = shell.denoise_level();
+    let header = section(
+        ui,
+        state,
+        "denoise",
+        "Reduce image noise",
+        Some((level > 0, true)),
+        false,
+    );
+    if header.toggled {
+        let next = if level > 0 {
+            0
+        } else {
+            cutlass_model::Algorithm::WEAK
+        };
+        send(shell, move |shell| shell.set_denoise(next));
+    }
+    if !header.open || level <= 0 {
+        return;
+    }
+    let progress = shell.denoise_progress();
+    body(ui, |ui| {
+        if let Some(done) = progress {
+            note(ui, &format!("Processing {:.1}%", done * 100.0));
+        }
+        let shown = DENOISE_LEVELS
+            .iter()
+            .find(|(value, _)| *value == level)
+            .map_or("Weak", |(_, name)| name);
+        let mut picked = None;
+        label_row(ui, "Level", |ui| {
+            egui::ComboBox::from_id_salt("denoise-level")
+                .selected_text(shown)
+                .show_ui(ui, |ui| {
+                    for (value, name) in DENOISE_LEVELS {
+                        if ui
+                            .add(ui::Choice::new(value == level, name).wide())
+                            .clicked()
+                        {
+                            picked = Some(value);
+                        }
+                    }
+                });
+        });
+        if let Some(value) = picked.filter(|value| *value != level) {
+            send(shell, move |shell| shell.set_denoise(value));
         }
     });
 }

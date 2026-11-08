@@ -785,16 +785,26 @@ impl<R: Read + Seek> OggDemux<R> {
         let mut hi = link_end;
         let mut hi_granule = info.end();
         let mut best: Option<(u64, i64)> = None;
+        // Each probe interpolates between the bounds, a quarter window
+        // toward the bound that has not moved yet, so two probes bracket
+        // the target; each further probe on the same side doubles that
+        // step. Three in a row on one side fall back to a midpoint.
+        let mut last_low: Option<bool> = None;
+        let mut same_side = 0_u32;
         while hi.saturating_sub(lo) > BISECT_WINDOW && cost.probes < MAX_SEEK_PROBES {
             cost.probes += 1;
             let mid = match hi_granule {
-                Some(hi_g) if cost.probes <= 2 && hi_g > lo_granule => {
+                Some(hi_g) if same_side < 3 && hi_g > lo_granule => {
                     let span = i128::from(hi - lo);
                     let along = i128::from(aim - lo_granule) * span / i128::from(hi_g - lo_granule);
-                    let guess = u64::try_from(along).unwrap_or(0);
-                    lo.saturating_add(guess)
-                        .saturating_sub(BISECT_WINDOW / 4)
-                        .clamp(lo, hi - 1)
+                    let guess = lo.saturating_add(u64::try_from(along).unwrap_or(0));
+                    let step = (BISECT_WINDOW / 4) << same_side.saturating_sub(1);
+                    let biased = if last_low == Some(true) {
+                        guess.saturating_add(step)
+                    } else {
+                        guess.saturating_sub(step)
+                    };
+                    biased.clamp(lo, hi - 1)
                 }
                 _ => lo + (hi - lo) / 2,
             };
@@ -820,6 +830,13 @@ impl<R: Read + Seek> OggDemux<R> {
                     Err(error) => return Err(error),
                 }
             }
+            let low = hit.as_ref().is_some_and(|page| page.granule <= aim);
+            same_side = if last_low == Some(low) {
+                same_side + 1
+            } else {
+                1
+            };
+            last_low = Some(low);
             match hit {
                 Some(page) if page.granule <= aim => {
                     best = Some((page.offset, page.granule));

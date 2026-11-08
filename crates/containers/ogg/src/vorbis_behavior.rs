@@ -933,3 +933,61 @@ fn a_vorbis_page_that_would_end_before_zero_is_refused() {
     assert!(error.contains("before 0"), "{error}");
     finish(-1500, 3, 1024).expect("ends past 0 untrimmed");
 }
+
+#[test]
+fn a_seek_in_a_long_variable_rate_file_takes_few_probes() {
+    let headers = headers();
+    let mut mux = OggMux::new(Cursor::new(Vec::new()));
+    let track = mux.add_stream(vorbis_params(&headers)).expect("stream");
+    // 8,000 long blocks, 186 s, with packets from 200 to 1,800 bytes in a
+    // slow swell, so bytes per sample change along the file.
+    let mut pts = 0;
+    let mut starts = Vec::new();
+    for index in 0..8_000_usize {
+        let swell = (index / 400) % 5;
+        let len = 200 + swell * 300 + (index * 37) % 200;
+        let mut bytes = packet(LONG, u8::try_from(index % 256).expect("tag"));
+        bytes.resize(len, 0x33);
+        let duration = if index == 0 { 0 } else { 1024 };
+        starts.push(pts);
+        mux.write_packet(&timed(track.get(), bytes, pts, duration))
+            .expect("write");
+        pts += duration;
+    }
+    mux.finish(&[TrackDuration {
+        track,
+        timescale: Timescale::new(44_100),
+        ticks: pts,
+    }])
+    .expect("finish");
+    let bytes = mux.into_inner().into_inner();
+    assert!(bytes.len() > 7_000_000);
+    let mut demux = open(&bytes);
+    let mut worst = 0;
+    let mut total = 0;
+    for step in 1..60 {
+        let target = pts * step / 60 + 333;
+        let landing = demux
+            .seek(SeekTo {
+                track: 0,
+                time: target,
+                end: None,
+            })
+            .expect("seek");
+        let Landing::Packet { time, .. } = landing.landing else {
+            panic!("{target} reached the end");
+        };
+        let aim = target - 1024;
+        let holding = starts[1..]
+            .iter()
+            .rev()
+            .find(|&&start| start <= aim)
+            .expect("packet");
+        assert_eq!(time, *holding, "landing for {target}");
+        worst = worst.max(demux.last_seek().probes);
+        total += demux.last_seek().probes;
+    }
+    // Halving alone takes 7 probes to reach the 64 KiB window here.
+    assert!(worst <= 6, "a seek took {worst} probes");
+    assert!(total <= 59 * 4, "{total} probes for 59 seeks");
+}

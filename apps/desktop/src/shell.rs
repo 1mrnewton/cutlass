@@ -7330,6 +7330,12 @@ impl Shell {
             Some(rate) => rate.min(MAX_BITRATE),
             None => request.quality.bitrate(short_side, request.codec),
         };
+        if request.codec == CodecId::Mpeg2
+            && let Some(why) =
+                self.mpeg2_refusal(request.short_side, Some(base.frame_rate), bitrate)
+        {
+            return Err(ShellError::Unavailable(why));
+        }
         let (width, height) = self.scaled_canvas(request.short_side)?;
         let mut params = CodecParams::with_format(
             request.codec,
@@ -7500,6 +7506,36 @@ impl Shell {
             ));
         }
         Ok(range)
+    }
+
+    /// Why an MPEG-2 export at `short_side` and `frame_rate` (`None` is the
+    /// project's) cannot be written, or `None` when Main profile holds it.
+    /// `bitrate` zero leaves the rate to the quality step. Asked before the
+    /// job starts, so a picture past 1920×1152, 1080p at 50 or 60 Hz, or a
+    /// frame rate MPEG-2 does not list is named in the dialog.
+    pub fn mpeg2_refusal(
+        &self,
+        short_side: i32,
+        frame_rate: Option<FrameRate>,
+        bitrate: u32,
+    ) -> Option<String> {
+        let rate = frame_rate
+            .or_else(|| self.draft().and_then(Draft::frame_rate))
+            .unwrap_or(FrameRate::FPS_30);
+        let size = match self.scaled_canvas(short_side) {
+            Ok(size) => size,
+            Err(error) => return Some(error.to_string()),
+        };
+        let (width, height) = cutlass_export::coded_size(CodecId::Mpeg2, size);
+        let fps = f64::from(rate.numerator) / f64::from(rate.denominator.max(1));
+        match cutlass_mpeg2::main_profile_level(width, height, fps, bitrate) {
+            Ok(_) => None,
+            Err(cutlass_decode::CodecError::Unsupported { what }) => Some(format!(
+                "MPEG-2 cannot carry {width}×{height} at {}: {what}",
+                cutlass_editor::rate_label(rate)
+            )),
+            Err(error) => Some(format!("MPEG-2 cannot carry this export: {error}")),
+        }
     }
 
     /// An encoder for `codec` opens on this machine.
@@ -15095,9 +15131,14 @@ mod tests {
 
     /// A two-second color project, 64 by 32, at 30 frames a second.
     pub(super) fn movie_project(dir: &Path) {
+        movie_project_sized(dir, 64, 32);
+    }
+
+    /// [`movie_project`] on a `width` × `height` canvas.
+    pub(super) fn movie_project_sized(dir: &Path, width: i32, height: i32) {
         let mut draft = Draft::empty("draft");
-        draft.canvas_config.width = 64;
-        draft.canvas_config.height = 32;
+        draft.canvas_config.width = width;
+        draft.canvas_config.height = height;
         draft.materials.material_colors.push(MaterialColorConfig {
             id: "color".into(),
             is_color_clip: true,
@@ -15353,6 +15394,60 @@ mod tests {
     /// MPEG-2 exports through the Rust encoder at twice H.264's rate into
     /// an MP4 `mp4v` track, which the desktop's readers decode back to the
     /// clip's colour with hardware decode on and off; a MOV is refused.
+    #[test]
+    fn mpeg2_settings_past_main_profile_are_refused_before_the_job() {
+        let fps = |numerator| {
+            Some(FrameRate {
+                numerator,
+                denominator: 1,
+            })
+        };
+        for (canvas, side, rate, bitrate, limit) in [
+            ((1920, 1080), 1080, fps(50), None, "luma samples"),
+            ((1920, 1080), 1080, fps(60), None, "luma samples"),
+            ((1920, 1080), 1440, fps(30), None, "1920×1152"),
+            ((1920, 1080), 2160, fps(30), None, "1920×1152"),
+            ((1080, 1920), 1080, fps(30), None, "1920×1152"),
+            ((1080, 1920), 720, fps(30), None, "1920×1152"),
+            ((1920, 1080), 720, fps(15), None, "Table 6-4"),
+            ((1920, 1080), 720, fps(30), Some(90_000_000), "80 Mb/s"),
+        ] {
+            let temp = Temp::new();
+            movie_project_sized(&temp.path, canvas.0, canvas.1);
+            let mut desktop = shell();
+            desktop.open_folder(&temp.path).unwrap();
+            let refusal = desktop.mpeg2_refusal(side, rate, bitrate.unwrap_or(0));
+            let why = refusal.unwrap_or_else(|| panic!("{canvas:?} {side} {rate:?}"));
+            assert!(why.starts_with("MPEG-2 cannot carry"), "{why}");
+            assert!(why.contains(limit), "{why}");
+            let error = desktop
+                .export(ExportRequest {
+                    path: temp.path.join("mpeg2.mp4"),
+                    short_side: side,
+                    codec: CodecId::Mpeg2,
+                    frame_rate: rate,
+                    bitrate,
+                    ..ExportRequest::default()
+                })
+                .unwrap_err();
+            assert_eq!(error.to_string(), why);
+            assert!(desktop.job().is_none(), "{why}");
+        }
+        // What Main profile holds stays offered: 1080p30, 720p60, and a
+        // portrait 480 short side.
+        for (canvas, side, rate) in [
+            ((1920, 1080), 1080, fps(30)),
+            ((1920, 1080), 720, fps(60)),
+            ((1080, 1920), 480, fps(60)),
+        ] {
+            let temp = Temp::new();
+            movie_project_sized(&temp.path, canvas.0, canvas.1);
+            let mut desktop = shell();
+            desktop.open_folder(&temp.path).unwrap();
+            assert_eq!(desktop.mpeg2_refusal(side, rate, 0), None, "{canvas:?}");
+        }
+    }
+
     #[test]
     fn an_mpeg2_export_lands_an_mp4_that_plays_back() {
         assert_eq!(

@@ -7,7 +7,7 @@ mod encode {
     use cutlass_encode::{
         CpuFrame, EncodeFactory, FrameInput, FrameTime, VideoEncoder, VideoInput,
     };
-    use cutlass_mpeg2::{Mpeg2Decoder, Mpeg2Encoder, register_encoders};
+    use cutlass_mpeg2::{Mpeg2Decoder, Mpeg2Encoder, main_profile_level, register_encoders};
 
     /// A textured picture moving two samples right and one down per frame,
     /// with fixed noise so the rate, not the quantiser floor, limits it.
@@ -229,6 +229,54 @@ mod encode {
             level(640, 360, 15, 1),
             Err(CodecError::Unsupported { .. })
         ));
+    }
+
+    #[test]
+    fn the_level_check_before_export_matches_the_stream() {
+        for (w, h, scale, duration) in [
+            (720, 480, 30_000, 1001),
+            (720, 576, 25, 1),
+            (1280, 720, 50, 1),
+            (1440, 1080, 25, 1),
+            (1280, 720, 60, 1),
+            (1920, 1080, 30, 1),
+            (1080, 1080, 30, 1),
+            (608, 1080, 30, 1),
+        ] {
+            let rate = f64::from(scale) / duration as f64;
+            assert_eq!(
+                main_profile_level(w, h, rate, 0),
+                level(w, h, scale, duration),
+                "{w}x{h} at {rate}"
+            );
+        }
+        assert_eq!(main_profile_level(1440, 1080, 25.0, 0), Ok(0x46));
+        assert_eq!(main_profile_level(1920, 1080, 25.0, 0), Ok(0x44));
+        // The bit rate alone lifts the level: Main 15, High-1440 60 Mb/s.
+        assert_eq!(main_profile_level(720, 576, 25.0, 15_000_000), Ok(0x48));
+        assert_eq!(main_profile_level(720, 576, 25.0, 15_000_001), Ok(0x46));
+        assert_eq!(main_profile_level(720, 576, 25.0, 60_000_001), Ok(0x44));
+        let unsupported = |result: Result<u8, CodecError>| match result {
+            Err(CodecError::Unsupported { what }) => what,
+            other => panic!("{other:?}"),
+        };
+        // 1080p50 and 1080p60 need more luma samples than High level.
+        for rate in [50.0, 60_000.0 / 1001.0, 60.0] {
+            let what = unsupported(main_profile_level(1920, 1080, rate, 0));
+            assert!(what.contains("luma samples"), "{what}");
+        }
+        // Portrait 1080x1920 and 720x1280, and a 1440 or 2160 short side,
+        // are taller or wider than 1920x1152.
+        for (w, h) in [(1080, 1920), (720, 1280), (2560, 1440), (3840, 2160)] {
+            let what = unsupported(main_profile_level(w, h, 30.0, 0));
+            assert!(what.contains("1920×1152"), "{w}x{h}: {what}");
+        }
+        for rate in [15.0, 48.0, 120.0] {
+            let what = unsupported(main_profile_level(640, 360, rate, 0));
+            assert!(what.contains("Table 6-4"), "{rate}: {what}");
+        }
+        let what = unsupported(main_profile_level(720, 576, 25.0, 80_000_001));
+        assert!(what.contains("80 Mb/s"), "{what}");
     }
 
     #[test]

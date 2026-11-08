@@ -19,5 +19,5 @@ mod slice;
 mod tables;
 
 pub use decoder::{DEFAULT_MAX_PIXELS, Mpeg2Decoder};
-pub use encoder::{Mpeg2Encoder, register_encoders};
+pub use encoder::{Mpeg2Encoder, main_profile_level, register_encoders};
 pub use engine::register_decoders;

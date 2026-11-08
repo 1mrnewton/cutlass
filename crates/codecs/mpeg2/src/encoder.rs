@@ -75,6 +75,76 @@ const LEVELS: [Level; 3] = [
     },
 ];
 
+/// The highest level this encoder writes.
+const TOP: &Level = &LEVELS[LEVELS.len() - 1];
+
+const TOO_LARGE: CodecError = CodecError::Unsupported {
+    what: "picture larger than 1920×1152, the most Main profile High level holds",
+};
+const TOO_FAST: CodecError = CodecError::Unsupported {
+    what: "bit rate above 80 Mb/s, the most Main profile High level holds",
+};
+
+/// The `profile_and_level_indication` of the lowest Main profile level
+/// that holds `width` × `height` at `frames_per_second` and `bitrate` bits a
+/// second (zero leaves the rate to the encoder), as [`Mpeg2Encoder`] picks
+/// it at the first picture. An export can ask this before it starts.
+///
+/// # Errors
+///
+/// [`CodecError::Unsupported`] naming the limit: a picture past 1920×1152,
+/// a frame rate that Table 6-4 does not list, more luma samples a second
+/// than High level allows (1080p at 50 or 60 Hz), or a bit rate past
+/// 80 Mb/s.
+pub fn main_profile_level(
+    width: u32,
+    height: u32,
+    frames_per_second: f64,
+    bitrate: u32,
+) -> Result<u8, CodecError> {
+    pick_level(width, height, frames_per_second, bitrate).map(|(_, level)| level.indication)
+}
+
+/// The Table 6-4 `frame_rate_code` within 0.1% of `rate`, and the lowest
+/// level that holds the stream.
+fn pick_level(
+    width: u32,
+    height: u32,
+    rate: f64,
+    bitrate: u32,
+) -> Result<(usize, &'static Level), CodecError> {
+    if width > TOP.width || height > TOP.height {
+        return Err(TOO_LARGE);
+    }
+    if bitrate > TOP.bitrate {
+        return Err(TOO_FAST);
+    }
+    let Some(code) = (1..FRAME_RATES.len()).find(|&c| {
+        let (n, d) = FRAME_RATES[c];
+        (f64::from(n) / f64::from(d) - rate).abs() <= rate * 0.001
+    }) else {
+        return Err(CodecError::Unsupported {
+            what: "frame rate outside Table 6-4: 23.976, 24, 25, 29.97, 30, 50, 59.94 or 60",
+        });
+    };
+    let (n, d) = FRAME_RATES[code];
+    let luma = u64::from(width) * u64::from(height);
+    let luma_rate = (luma as f64 * f64::from(n) / f64::from(d)).ceil() as u64;
+    LEVELS
+        .iter()
+        .find(|level| {
+            width <= level.width
+                && height <= level.height
+                && code <= usize::from(level.max_rate_code)
+                && luma_rate <= level.luma_rate
+                && bitrate <= level.bitrate
+        })
+        .map(|level| (code, level))
+        .ok_or(CodecError::Unsupported {
+            what: "more luma samples a second than Main profile High level holds",
+        })
+}
+
 /// Registers the encoder for export.
 pub fn register_encoders(factory: &mut EncodeFactory) {
     factory.register_video(CodecId::Mpeg2, open_encoder);
@@ -187,15 +257,11 @@ impl Mpeg2Encoder {
                 what: "picture size",
             });
         }
-        if width > 1920 || height > 1152 {
-            return Err(CodecError::Unsupported {
-                what: "picture larger than Main profile High level",
-            });
+        if width > TOP.width || height > TOP.height {
+            return Err(TOO_LARGE);
         }
-        if LEVELS.iter().all(|level| params.bitrate > level.bitrate) {
-            return Err(CodecError::Unsupported {
-                what: "bit rate above Main profile High level",
-            });
+        if params.bitrate > TOP.bitrate {
+            return Err(TOO_FAST);
         }
         let geo = Geometry {
             mb_width: width.div_ceil(16) as usize,
@@ -223,35 +289,20 @@ impl Mpeg2Encoder {
 
     /// Chooses the frame rate code, level, and rate from the first picture.
     fn open_stream(&self, duration: i64, timescale: u32) -> Result<Stream, CodecError> {
-        let rate = timescale as f64 / duration as f64;
-        let Some(code) = (1..FRAME_RATES.len()).find(|&c| {
-            let (n, d) = FRAME_RATES[c];
-            (f64::from(n) / f64::from(d) - rate).abs() <= rate * 0.001
-        }) else {
-            return Err(CodecError::Unsupported {
-                what: "frame rate outside Table 6-4",
-            });
-        };
+        let (code, level) = pick_level(
+            self.width,
+            self.height,
+            timescale as f64 / duration as f64,
+            self.bitrate,
+        )?;
         let (n, d) = FRAME_RATES[code];
         let frame_rate = f64::from(n) / f64::from(d);
         let luma = u64::from(self.width) * u64::from(self.height);
-        let luma_rate = (luma as f64 * frame_rate).ceil() as u64;
         let default_rate = (0.3 * luma as f64 * frame_rate).max(1_000_000.0);
         let requested = if self.bitrate == 0 {
             None
         } else {
             Some(f64::from(self.bitrate))
-        };
-        let Some(level) = LEVELS.iter().find(|level| {
-            self.width <= level.width
-                && self.height <= level.height
-                && code <= usize::from(level.max_rate_code)
-                && luma_rate <= level.luma_rate
-                && requested.is_none_or(|r| r <= f64::from(level.bitrate))
-        }) else {
-            return Err(CodecError::Unsupported {
-                what: "picture rate or bit rate above Main profile High level",
-            });
         };
         let bitrate = requested
             .unwrap_or(default_rate)

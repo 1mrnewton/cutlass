@@ -8258,6 +8258,12 @@ fn export_choices(shell: &Shell, ui: &mut Ui, view: &mut ViewState) {
                 }
             });
         }
+        // MPEG-2 Main profile stops at 1920×1152, 1080p30, and the Table
+        // 6-4 frame rates, so the steps past those are greyed.
+        let mpeg2 = export.codec == CodecId::Mpeg2;
+        let holds = |side: i32, rate: Option<FrameRate>| {
+            !mpeg2 || shell.mpeg2_refusal(side, rate, 0).is_none()
+        };
         choices_row(ui, "Frame rate", |ui| {
             for (rate, name) in [
                 (None, "Project"),
@@ -8267,8 +8273,9 @@ fn export_choices(shell: &Shell, ui: &mut Ui, view: &mut ViewState) {
                 (Some(FrameRate::FPS_50), "50"),
                 (Some(FrameRate::FPS_60), "60"),
             ] {
+                let label = ui::Choice::new(export.frame_rate == rate, name);
                 if ui
-                    .add(ui::Choice::new(export.frame_rate == rate, name))
+                    .add_enabled(holds(export.short_side, rate), label)
                     .clicked()
                 {
                     export.frame_rate = rate;
@@ -8277,14 +8284,23 @@ fn export_choices(shell: &Shell, ui: &mut Ui, view: &mut ViewState) {
         });
         choices_row(ui, "Short side", |ui| {
             for side in crate::shell::SHORT_SIDES {
+                let label = ui::Choice::new(export.short_side == side, side.to_string());
                 if ui
-                    .add(ui::Choice::new(export.short_side == side, side.to_string()))
+                    .add_enabled(holds(side, export.frame_rate), label)
                     .clicked()
                 {
                     export.short_side = side;
                 }
             }
         });
+        if mpeg2 {
+            let custom = view.export_mbps.as_deref().and_then(parse_mbps);
+            let refusal =
+                shell.mpeg2_refusal(export.short_side, export.frame_rate, custom.unwrap_or(0));
+            if let Some(why) = refusal {
+                ui.label(why);
+            }
+        }
     }
     ui.add(ui::Check::new(&mut export.sound, "Audio"));
     // PCM goes in a MOV or a WAV, never an MP4. FLAC, MP3 and Opus are

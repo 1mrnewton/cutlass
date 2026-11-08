@@ -373,12 +373,19 @@ impl Ac3Decoder {
         // frames that follow it.
         let mut groups: Vec<(usize, Vec<usize>)> = Vec::new();
         let mut in_program = false;
+        let mut saw_independent = false;
         for (index, (at, _, bsi)) in parsed.iter().enumerate() {
             if bsi.stream_type != StreamType::Dependent {
+                saw_independent = true;
                 in_program = bsi.substream_id == self.options.program;
                 if in_program {
                     groups.push((index, Vec::new()));
                 }
+            } else if !saw_independent {
+                return Err(CodecError::Malformed {
+                    at_bit: *at as u64 * 8,
+                    what: "dependent substream before its independent substream",
+                });
             } else if in_program {
                 let Some(group) = groups.last_mut() else {
                     return Err(CodecError::Malformed {
@@ -929,6 +936,136 @@ mod tests {
         );
         assert_eq!(acmod_locations(4, false)[2], Location::Cs);
         assert_eq!(acmod_locations(1, false), vec![Location::C]);
+    }
+
+    /// Two independent programs in one access unit. Each `program` hears
+    /// only its own syncframe. A dependent frame with no independent
+    /// frame before it is refused.
+    #[test]
+    fn each_program_is_its_own_substream_and_a_leading_dependent_is_refused() {
+        use cutlass_encode::{AudioInput, ChannelLayout, CodecParams, Encoder, Pcm};
+
+        use crate::bits::BitWriter;
+        use crate::encode::Ac3Encoder;
+        use crate::header::SYNCWORD;
+
+        let frame = |hz: f32| {
+            let rate = 48_000;
+            let layout = ChannelLayout::mono();
+            let mut spec = CodecParams::audio(CodecId::Eac3, rate, layout.clone());
+            spec.bitrate = 96_000;
+            let mut encoder = Ac3Encoder::open(&spec).expect("encoder");
+            let frames = encoder.frame_samples();
+            let samples: Vec<f32> = (0..frames)
+                .map(|index| {
+                    let t = index as f32 / rate as f32;
+                    (t * hz * std::f32::consts::TAU).sin() * 0.5
+                })
+                .collect();
+            let pcm = Pcm::from_f32(rate, layout, samples).expect("pcm");
+            encoder
+                .push(&AudioInput { pcm })
+                .expect("encode")
+                .remove(0)
+                .data
+        };
+        let reseal = |frame: &mut [u8]| {
+            let end = frame.len() - 2;
+            let word = crate::crc::update(0, &frame[2..end]);
+            frame[end..].copy_from_slice(&word.to_be_bytes());
+        };
+        let mut unit = frame(1_000.0);
+        let mut high = frame(3_000.0);
+        high[2] = (high[2] & !0b0011_1000) | (1 << 3);
+        reseal(&mut high);
+        unit.extend_from_slice(&high);
+
+        let hear = |data: &[u8], program: u8| {
+            let params = CodecParams::audio(CodecId::Eac3, 48_000, ChannelLayout::mono());
+            let mut decoder = Ac3Decoder::with_options(
+                &params,
+                Options {
+                    program,
+                    ..Options::default()
+                },
+            )
+            .expect("decoder");
+            let packet = Packet::audio(data.to_vec(), 0, 1_536, 48_000);
+            let outputs = decoder.push(&packet).expect("decode");
+            let Output::Audio(audio) = &outputs[0] else {
+                panic!("audio");
+            };
+            audio.pcm.as_f32().expect("f32").to_vec()
+        };
+        let low_only = hear(&unit, 0);
+        let high_only = hear(&unit, 1);
+        assert!(
+            band(&low_only, 1_000.0) > band(&low_only, 3_000.0) * 20.0,
+            "program 0 heard the other substream"
+        );
+        assert!(
+            band(&high_only, 3_000.0) > band(&high_only, 1_000.0) * 20.0,
+            "program 1 heard the other substream"
+        );
+        let missing = Ac3Decoder::with_options(
+            &CodecParams::audio(CodecId::Eac3, 48_000, ChannelLayout::mono()),
+            Options::default(),
+        )
+        .expect("decoder")
+        .push(&Packet::audio(high, 0, 1_536, 48_000));
+        assert!(matches!(
+            missing,
+            Err(CodecError::Malformed {
+                what: "no frame of the selected program",
+                ..
+            })
+        ));
+
+        let mut dependent = BitWriter::with_capacity(64);
+        dependent.put(16, u32::from(SYNCWORD));
+        dependent.put(2, 1);
+        dependent.put(3, 0);
+        dependent.put(11, 31);
+        dependent.put(2, 0);
+        dependent.put(2, 3);
+        dependent.put(3, 1);
+        dependent.flag(false);
+        dependent.put(5, 16);
+        dependent.put(5, 27);
+        dependent.flag(false);
+        dependent.flag(false);
+        dependent.flag(false);
+        dependent.flag(false);
+        dependent.flag(false);
+        let mut dependent = dependent.finish();
+        dependent.resize(64, 0);
+        reseal(&mut dependent);
+        let early = Ac3Decoder::open(&CodecParams::audio(
+            CodecId::Eac3,
+            48_000,
+            ChannelLayout::mono(),
+        ))
+        .expect("decoder")
+        .push(&Packet::audio(dependent, 0, 1_536, 48_000));
+        assert!(matches!(
+            early,
+            Err(CodecError::Malformed {
+                what: "dependent substream before its independent substream",
+                ..
+            })
+        ));
+    }
+
+    fn band(samples: &[f32], hz: f64) -> f64 {
+        let w = 2.0 * std::f64::consts::PI * hz / 48_000.0;
+        let coeff = 2.0 * w.cos();
+        let (mut s1, mut s2) = (0.0f64, 0.0f64);
+        for sample in samples {
+            let s = f64::from(*sample) + coeff * s1 - s2;
+            s2 = s1;
+            s1 = s;
+        }
+        s2 * s2 + s1 * s1 - coeff * s1 * s2
     }
 
     #[test]

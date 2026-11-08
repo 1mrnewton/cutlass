@@ -4820,7 +4820,12 @@ fn paint_toolbar(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rec
                 }
                 paint_tool_picker(shell, ui);
                 toolbar_separator(ui);
-                let tools = left_tools(!shell.selection().is_empty());
+                let picked = if shell.selection().is_empty() {
+                    None
+                } else {
+                    shell.selected_track_kind()
+                };
+                let tools = left_tools(picked.as_ref());
                 paint_tools(shell, ui, view, &tools);
             });
         });
@@ -5245,19 +5250,36 @@ const TOOLS_LEFT: &[Option<(&str, &str)>] = &[
     Some(("delete", "Delete")),
     None,
     Some(("marker", "Add marker at the playhead")),
-    Some(("beat", "Beat")),
 ];
 
 /// The tools left of the pinned group: [`TOOLS_LEFT`], and when a clip is
-/// picked, a separator and [`TOOLS_CLIP`] after them.
-fn left_tools(picked: bool) -> Vec<Option<(&'static str, &'static str)>> {
+/// picked, a separator and the tools for its lane's kind: [`TOOLS_AUDIO`]
+/// for a sound clip, [`TOOLS_CLIP`] for the rest.
+fn left_tools(
+    picked: Option<&cutlass_model::TrackType>,
+) -> Vec<Option<(&'static str, &'static str)>> {
     let mut tools = TOOLS_LEFT.to_vec();
-    if picked {
+    if let Some(kind) = picked {
         tools.push(None);
-        tools.extend_from_slice(TOOLS_CLIP);
+        tools.extend_from_slice(match kind {
+            cutlass_model::TrackType::Audio | cutlass_model::TrackType::TextToVideoTextAudio => {
+                TOOLS_AUDIO
+            }
+            _ => TOOLS_CLIP,
+        });
     }
     tools
 }
+
+/// The tools a picked audio clip adds. The last three are drawn dimmed
+/// until they are built.
+const TOOLS_AUDIO: &[Option<(&str, &str)>] = &[
+    Some(("transcribe", "Transcribe")),
+    Some(("beat", "Beat")),
+    Some(("normalize", "Normalize loudness (later)")),
+    Some(("enhanceVoice", "Enhance voice (later)")),
+    Some(("reduceNoise", "Reduce noise (later)")),
+];
 
 /// The tools a picked clip adds after them.
 const TOOLS_CLIP: &[Option<(&str, &str)>] = &[
@@ -14523,30 +14545,28 @@ mod tests {
 
     #[test]
     fn a_picked_clip_adds_its_tools_to_the_toolbar() {
-        let names = |picked| {
+        use cutlass_model::TrackType::{Audio, Video};
+        let names = |picked: Option<&cutlass_model::TrackType>| {
             left_tools(picked)
                 .into_iter()
                 .flatten()
                 .map(|tool| tool.0)
                 .collect::<Vec<_>>()
         };
+        let base = [
+            "undo",
+            "redo",
+            "splitAt",
+            "trimLeft",
+            "trimRight",
+            "delete",
+            "marker",
+        ];
+        assert_eq!(names(None), base);
+        let video = names(Some(&Video));
+        assert_eq!(video[..base.len()], base);
         assert_eq!(
-            names(false),
-            [
-                "undo",
-                "redo",
-                "splitAt",
-                "trimLeft",
-                "trimRight",
-                "delete",
-                "marker",
-                "beat"
-            ]
-        );
-        let picked = names(true);
-        assert_eq!(picked[..8], names(false)[..]);
-        assert_eq!(
-            picked[8..],
+            video[base.len()..],
             [
                 "freeze",
                 "reverse",
@@ -14557,8 +14577,35 @@ mod tests {
                 "splitScenes"
             ]
         );
-        for name in ["splitAt", "trimLeft", "trimRight", "blade", "select"] {
+        let audio = names(Some(&Audio));
+        assert_eq!(audio[..base.len()], base);
+        assert_eq!(
+            audio[base.len()..],
+            [
+                "transcribe",
+                "beat",
+                "normalize",
+                "enhanceVoice",
+                "reduceNoise"
+            ]
+        );
+        for name in [
+            "splitAt",
+            "trimLeft",
+            "trimRight",
+            "blade",
+            "select",
+            "normalize",
+            "enhanceVoice",
+            "reduceNoise",
+        ] {
             assert!(icons::require(name).is_ok(), "{name}");
+        }
+        // Not built yet: drawn dimmed.
+        let (decoders, encoders) = crate::register_codecs();
+        let shell = Shell::new(decoders, encoders, Settings::default());
+        for name in ["normalize", "enhanceVoice", "reduceNoise"] {
+            assert!(!tool_enabled(&shell, name), "{name}");
         }
     }
 

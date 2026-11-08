@@ -105,10 +105,14 @@ fn parse_visual(
     // A ProRes entry has no configuration box. Its code names the profile,
     // which sets the decoder's output depth, so it rides as the extradata.
     // A QuickTime Motion JPEG code names its framing, and `fiel` the stored
-    // field order, so both ride there too.
+    // field order, so both ride there too. ISO/IEC 14496-1 defines no
+    // decoder-specific info for JPEG (0x6C), so an `mp4v` entry's is
+    // dropped, as FFmpeg's decoder ignores it.
     let extradata = if codec == CodecId::ProRes && configured.extradata.is_empty() {
         fourcc.to_vec()
-    } else if codec == CodecId::Mjpeg && fourcc != *b"mp4v" && configured.extradata.is_empty() {
+    } else if codec == CodecId::Mjpeg && fourcc == *b"mp4v" {
+        Vec::new()
+    } else if codec == CodecId::Mjpeg && configured.extradata.is_empty() {
         let mut extradata = fourcc.to_vec();
         if let Some(fiel) = configured.fiel {
             extradata.extend_from_slice(&fiel);
@@ -605,6 +609,21 @@ mod tests {
             boxed(b"esds", &payload)
         };
         assert_eq!(visual(b"mp4v", &esds(0x6C)), (CodecId::Mjpeg, Vec::new()));
+        // A decoder-specific descriptor under object type 0x6C has no
+        // meaning for JPEG and is not handed to the decoder.
+        let mut specific = vec![0, 0, 0, 0, 3, 24, 0, 1, 0, 4, 19, 0x6C, 0x11];
+        specific.extend([0; 11]);
+        specific.extend([5, 4, 0x12, 0x34, 0x56, 0x78]);
+        assert_eq!(
+            visual(b"mp4v", &boxed(b"esds", &specific)),
+            (CodecId::Mjpeg, Vec::new())
+        );
+        // The same descriptor under MPEG-4 Visual is its configuration.
+        specific[11] = 0x20;
+        assert_eq!(
+            visual(b"mp4v", &boxed(b"esds", &specific)),
+            (CodecId::Mpeg4, vec![0x12, 0x34, 0x56, 0x78])
+        );
         assert_eq!(visual(b"mp4v", &esds(0x20)).0, CodecId::Mpeg4);
         assert_eq!(visual(b"mp4v", &esds(0x61)).0, CodecId::Mpeg2);
         assert_eq!(visual(b"mp4v", &esds(0x6A)).0, CodecId::Mpeg2);

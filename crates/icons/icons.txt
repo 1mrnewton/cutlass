@@ -68,6 +68,9 @@ magnet         MagnetIcon
 linkage        Link01Icon
 marker         Flag01Icon
 beat           MusicNote01Icon
+normalize      AudioWaveformIcon
+enhanceVoice   AiVoiceIcon
+reduceNoise    VolumeMinusIcon
 zoomIn         ZoomInAreaIcon
 zoomOut        ZoomOutAreaIcon
 zoomFit        custom

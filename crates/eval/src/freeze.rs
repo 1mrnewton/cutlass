@@ -21,6 +21,7 @@ pub enum FreezeMiss {
 ///
 /// The hold is stored on the clip's video. When other clips share that
 /// video, the edit gives this clip its own copy first, so only it freezes.
+/// The reversed file is named only when the clip is reversed.
 pub fn freeze_toggle(
     draft: &Draft,
     segment_id: &SegmentId,
@@ -45,7 +46,11 @@ pub fn freeze_toggle(
     Ok(Some(FreezeInfo {
         source_material_id: video.id.as_str().to_owned(),
         source_material_path: video.path.clone(),
-        reverse_material_path: video.reverse_path.clone(),
+        reverse_material_path: if segment.reverse {
+            video.reverse_path.clone()
+        } else {
+            String::new()
+        },
         timestamp,
         rest: Default::default(),
     }))
@@ -89,6 +94,23 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(first.timestamp, Micros(0));
+    }
+
+    #[test]
+    fn the_reversed_file_is_named_only_for_a_reversed_clip() {
+        let mut reversible = video();
+        reversible.reverse_path = "/clip.reversed.mov".to_owned();
+        let mut draft = draft(Some(reversible));
+        let id = SegmentId::new("a");
+        let forward = freeze_toggle(&draft, &id, Micros(1_000_000))
+            .unwrap()
+            .unwrap();
+        assert_eq!(forward.reverse_material_path, "");
+        draft.tracks[0].segments[0].reverse = true;
+        let backward = freeze_toggle(&draft, &id, Micros(1_000_000))
+            .unwrap()
+            .unwrap();
+        assert_eq!(backward.reverse_material_path, "/clip.reversed.mov");
     }
 
     #[test]

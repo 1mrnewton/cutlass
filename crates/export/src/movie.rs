@@ -777,26 +777,27 @@ mod tests {
         String::from_utf8_lossy(&out.stdout).trim().to_owned()
     }
 
-    /// Export with B-VOPs, the first reordering encoder: samples go in
-    /// decode order with a version 1 `ctts` and a `cslg`, and the file
+    /// The MPEG-4 Visual encoder opened at Advanced Simple, which export
+    /// asks for through `CodecParams::extra`.
+    fn advanced_simple(
+        params: &cutlass_encode::CodecParams,
+    ) -> Result<Box<dyn cutlass_encode::VideoEncoder>, cutlass_codec::access::CodecError> {
+        let mut params = params.clone();
+        params.extra = cutlass_mpeg4::ADVANCED_SIMPLE.to_vec();
+        Ok(Box::new(cutlass_mpeg4::EngineEncoder::open(&params)?))
+    }
+
+    /// Simple, the export default: I then P-VOPs, each sample shown at its
+    /// decode time. Advanced Simple, the first reordering encoder: samples
+    /// in decode order with a version 1 `ctts` and a `cslg`. Either file
     /// reads back, here and in FFmpeg, as every picture in display order
     /// at its own time.
     #[test]
-    fn an_mpeg4_visual_movie_with_b_vops_reads_back_in_display_order() {
+    fn an_mpeg4_visual_movie_reads_back_in_display_order() {
         let dir = std::env::temp_dir().join(format!("cutlass-mpeg4-movie-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let mut encoders = EncodeFactory::new();
-        cutlass_mpeg4::register_engine_encoders(&mut encoders);
         let draft = two_colours();
         let readers = ReaderFactory::new();
-        let sources = MovieSources {
-            draft: &draft,
-            root: None,
-            readers: &readers,
-            fonts: &NoFonts,
-            renderer: None,
-            encoders: &encoders,
-        };
         let request = ExportRequest {
             range: TimeRange::new(0, 333_334),
             short_side: 480,
@@ -812,50 +813,85 @@ mod tests {
         };
         let ffprobe = oracle("ffprobe");
         let ffmpeg = oracle("ffmpeg");
-        for name in ["visual.mp4", "visual.mov"] {
-            let path = dir.join(name);
-            let result = super::write_movie(&sources, &request, &path, &mut |_, _| true).unwrap();
-            assert_eq!(result.frames.len(), 10, "{name}");
-            let bytes = std::fs::read(&path).unwrap();
-            assert!(bytes.windows(4).any(|w| w == b"cslg"), "{name}");
-            let (timescale, samples, shown) = read_back(bytes);
-            assert_eq!(timescale, 30, "{name}");
-            // Decode order: I, then each P-VOP before the B-VOP it follows.
-            let kinds: Vec<u8> = samples.iter().map(|s| s.2).collect();
-            assert_eq!(kinds, [0, 1, 2, 1, 2, 1, 2, 1, 2, 1], "{name}");
-            let dts: Vec<i64> = samples.iter().map(|s| s.0).collect();
-            assert!(dts.windows(2).all(|w| w[0] < w[1]), "{name}: {dts:?}");
-            let mut pts: Vec<i64> = samples.iter().map(|s| s.1).collect();
-            assert_eq!(pts[..3], [0, 2, 1], "{name}");
-            pts.sort_unstable();
-            assert_eq!(pts, (0..10).collect::<Vec<_>>(), "{name}");
-            // Display order: every picture at its own time, red then blue
-            // (BT.709 luma 63, then 32).
-            let times: Vec<i64> = shown.iter().map(|p| p.0).collect();
-            assert_eq!(times, (0..10).collect::<Vec<_>>(), "{name}");
-            for (time, picture) in &shown {
-                let luma = &picture[..854 * 480];
-                let luma = luma.iter().map(|&y| u32::from(y)).sum::<u32>() / (854 * 480);
-                let want = if *time < 5 { 63 } else { 32 };
-                assert!(
-                    luma.abs_diff(want) <= 3,
-                    "{name}: picture {time} luma {luma}"
-                );
+        for advanced in [false, true] {
+            let mut encoders = EncodeFactory::new();
+            if advanced {
+                encoders.register_video(CodecId::Mpeg4, advanced_simple);
+            } else {
+                cutlass_mpeg4::register_engine_encoders(&mut encoders);
             }
-            if let Some(ffprobe) = &ffprobe {
-                let mut probed = probed_pictures(ffprobe, &path);
-                assert_eq!(probed.len(), 10, "{name}: {probed:?}");
-                let first = probed[0];
-                probed.iter_mut().for_each(|t| *t -= first);
-                assert_eq!(probed, (0..10).collect::<Vec<_>>(), "{name}");
-                assert_eq!(probed_profile(ffprobe, &path), "Advanced Simple Profile");
-            }
-            if let Some(ffmpeg) = &ffmpeg {
-                let ours: Vec<u8> = shown.iter().flat_map(|p| p.1.iter().copied()).collect();
-                assert!(
-                    ffmpeg_decode(ffmpeg, &path) == ours,
-                    "{name}: FFmpeg decodes otherwise"
+            let sources = MovieSources {
+                draft: &draft,
+                root: None,
+                readers: &readers,
+                fonts: &NoFonts,
+                renderer: None,
+                encoders: &encoders,
+            };
+            for name in ["visual.mp4", "visual.mov"] {
+                let name = format!("{}-{name}", if advanced { "asp" } else { "sp" });
+                let path = dir.join(&name);
+                let result =
+                    super::write_movie(&sources, &request, &path, &mut |_, _| true).unwrap();
+                assert_eq!(result.frames.len(), 10, "{name}");
+                let bytes = std::fs::read(&path).unwrap();
+                let has = |tag: &[u8]| bytes.windows(4).any(|w| w == tag);
+                assert_eq!(has(b"ctts"), advanced, "{name}");
+                assert_eq!(has(b"cslg"), advanced, "{name}");
+                let (timescale, samples, shown) = read_back(bytes);
+                assert_eq!(timescale, 30, "{name}");
+                // Decode order: I, then P-VOPs, each but the last followed
+                // by the B-VOP before it when there are B-VOPs.
+                let kinds: Vec<u8> = samples.iter().map(|s| s.2).collect();
+                let want: &[u8] = if advanced {
+                    &[0, 1, 2, 1, 2, 1, 2, 1, 2, 1]
+                } else {
+                    &[0, 1, 1, 1, 1, 1, 1, 1, 1, 1]
+                };
+                assert_eq!(kinds, want, "{name}");
+                let dts: Vec<i64> = samples.iter().map(|s| s.0).collect();
+                assert_eq!(dts, (0..10).collect::<Vec<_>>(), "{name}");
+                let mut pts: Vec<i64> = samples.iter().map(|s| s.1).collect();
+                assert_eq!(
+                    pts[..3],
+                    if advanced { [0, 2, 1] } else { [0, 1, 2] },
+                    "{name}"
                 );
+                pts.sort_unstable();
+                assert_eq!(pts, (0..10).collect::<Vec<_>>(), "{name}");
+                // Display order: every picture at its own time, red then
+                // blue (BT.709 luma 63, then 32).
+                let times: Vec<i64> = shown.iter().map(|p| p.0).collect();
+                assert_eq!(times, (0..10).collect::<Vec<_>>(), "{name}");
+                for (time, picture) in &shown {
+                    let luma = &picture[..854 * 480];
+                    let luma = luma.iter().map(|&y| u32::from(y)).sum::<u32>() / (854 * 480);
+                    let want = if *time < 5 { 63 } else { 32 };
+                    assert!(
+                        luma.abs_diff(want) <= 3,
+                        "{name}: picture {time} luma {luma}"
+                    );
+                }
+                if let Some(ffprobe) = &ffprobe {
+                    let mut probed = probed_pictures(ffprobe, &path);
+                    assert_eq!(probed.len(), 10, "{name}: {probed:?}");
+                    let first = probed[0];
+                    probed.iter_mut().for_each(|t| *t -= first);
+                    assert_eq!(probed, (0..10).collect::<Vec<_>>(), "{name}");
+                    let profile = if advanced {
+                        "Advanced Simple Profile"
+                    } else {
+                        "Simple Profile"
+                    };
+                    assert_eq!(probed_profile(ffprobe, &path), profile, "{name}");
+                }
+                if let Some(ffmpeg) = &ffmpeg {
+                    let ours: Vec<u8> = shown.iter().flat_map(|p| p.1.iter().copied()).collect();
+                    assert!(
+                        ffmpeg_decode(ffmpeg, &path) == ours,
+                        "{name}: FFmpeg decodes otherwise"
+                    );
+                }
             }
         }
         std::fs::remove_dir_all(&dir).unwrap();

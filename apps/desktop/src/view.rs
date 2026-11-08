@@ -239,6 +239,8 @@ pub struct ViewState {
     effect_group: usize,
     /// The video effects category shown; empty is All.
     effect_category: String,
+    /// The transitions category the shelf shows; empty shows them all.
+    transition_category: String,
     /// A folder being named, and what is typed so far.
     library_renaming: Option<(String, String)>,
     projects_root: Option<std::path::PathBuf>,
@@ -317,6 +319,7 @@ impl Default for ViewState {
             sticker_group: STICKERS,
             effect_group: VIDEO_EFFECTS,
             effect_category: String::new(),
+            transition_category: String::new(),
             library_renaming: None,
             projects_root: None,
             listed: Vec::new(),
@@ -1872,8 +1875,22 @@ fn asset_column(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect
         }
         if view.effect_group == VIDEO_EFFECTS {
             column.add_space(8.0);
-            effect_category_chips(&mut column, view);
+            category_chips(
+                &mut column,
+                "effect-categories",
+                &cutlass_editor::effect_categories(),
+                &mut view.effect_category,
+            );
         }
+    }
+    if shelf == Shelf::Transitions {
+        column.add_space(8.0);
+        category_chips(
+            &mut column,
+            "transition-categories",
+            &cutlass_editor::transition_categories(),
+            &mut view.transition_category,
+        );
     }
     let bin = matches!(shelf, Shelf::Media | Shelf::Audio) && !stock;
     if bin {
@@ -1981,6 +1998,13 @@ fn asset_column(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect
                         .is_some_and(|recipe| recipe.category == category)
                 });
             }
+            if shelf == Shelf::Transitions && !view.transition_category.is_empty() {
+                let category = view.transition_category.as_str();
+                cards.retain(|card| {
+                    cutlass_editor::transition_of_card(&card.id)
+                        .is_some_and(|offer| offer.category == category)
+                });
+            }
             fill_looks(shell, ui.ctx(), &mut cards);
             if cards.is_empty() {
                 let message = if !query.trim().is_empty() {
@@ -2048,11 +2072,11 @@ const STICKERS: usize = 1;
 const SHAPES: usize = 2;
 const GIPHY: usize = 3;
 
-/// The video effects categories as a row of chips, All first, that
-/// scrolls sideways when there are more than fit; the mouse wheel scrolls
-/// it too.
-fn effect_category_chips(ui: &mut Ui, view: &mut ViewState) {
-    let names = std::iter::once("All").chain(cutlass_editor::effect_categories());
+/// A shelf's categories as a row of chips, All first, that scrolls
+/// sideways when there are more than fit; the mouse wheel scrolls it too.
+/// `picked` is the category shown, empty for All.
+fn category_chips(ui: &mut Ui, id: &str, categories: &[&str], picked: &mut String) {
+    let names = std::iter::once("All").chain(categories.iter().copied());
     let row = ui.available_rect_before_wrap();
     let hovered =
         ui.rect_contains_pointer(Rect::from_min_size(row.min, Vec2::new(row.width(), 28.0)));
@@ -2065,23 +2089,21 @@ fn effect_category_chips(ui: &mut Ui, view: &mut ViewState) {
             }
         });
     }
-    ui::Scroll::horizontal("effect-categories")
-        .without_bar()
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 6.0;
-                for name in names {
-                    let value = if name == "All" { "" } else { name };
-                    let chip = ui::Button::new(name)
-                        .on(view.effect_category == value)
-                        .text_size(12.0)
-                        .radius(12);
-                    if ui.add(chip).clicked() {
-                        value.clone_into(&mut view.effect_category);
-                    }
+    ui::Scroll::horizontal(id).without_bar().show(ui, |ui| {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            for name in names {
+                let value = if name == "All" { "" } else { name };
+                let chip = ui::Button::new(name)
+                    .on(*picked == value)
+                    .text_size(12.0)
+                    .radius(12);
+                if ui.add(chip).clicked() {
+                    value.clone_into(picked);
                 }
-            });
+            }
         });
+    });
 }
 
 /// The parts of the effects shelf, in switch order.
@@ -2431,7 +2453,7 @@ fn card_grid(
             Sense::click_and_drag()
         };
         let response = ui.interact(rect, ui.scope_id().with(&card.id), sense);
-        if response.hovered() && card.id.starts_with(cutlass_editor::EFFECT_CARD_PREFIX) {
+        if response.hovered() && plays_on_hover(&card.id) {
             hovered_effect = Some(card.id.as_str());
         }
         if pen {
@@ -2626,11 +2648,17 @@ fn fill_looks(shell: &mut Shell, ctx: &egui::Context, cards: &mut [BinCard]) {
     with_film_textures(ctx, |textures| {
         for card in cards.iter_mut() {
             match card.look {
-                CardLook::Picture(_) if card.id.starts_with(cutlass_editor::EFFECT_CARD_PREFIX) => {
+                CardLook::Picture(_) if plays_on_hover(&card.id) => {
+                    let transition = card.id.starts_with(cutlass_editor::TRANSITION_CARD_PREFIX);
                     // The card under the pointer plays.
                     if let Some((_, since)) = hover.as_ref().filter(|(id, _)| *id == card.id) {
                         let elapsed = Micros(((now - since).max(0.0) * 1_000_000.0) as i64);
-                        if let Some(frame) = shell.effect_frame(&card.id, elapsed) {
+                        let frame = if transition {
+                            shell.transition_frame(&card.id, elapsed)
+                        } else {
+                            shell.effect_frame(&card.id, elapsed)
+                        };
+                        if let Some(frame) = frame {
                             card.look = CardLook::Picture(Some(frame));
                             let step = 1.0 / f64::from(cutlass_effects::PREVIEW_RATE);
                             ctx.request_repaint_after_secs(step as f32);
@@ -2655,7 +2683,12 @@ fn fill_looks(shell: &mut Shell, ctx: &egui::Context, cards: &mut [BinCard]) {
                         continue;
                     }
                     stills -= 1;
-                    if let Some((rgba, [width, height])) = shell.effect_still(&card.id) {
+                    let still = if transition {
+                        shell.transition_still(&card.id)
+                    } else {
+                        shell.effect_still(&card.id)
+                    };
+                    if let Some((rgba, [width, height])) = still {
                         let thumb = cutlass_engine::Thumb {
                             width,
                             height,
@@ -2924,7 +2957,7 @@ fn bin_cards(
                     name: offer.name.to_owned(),
                     meta: card_meta(offer.duration),
                     on_timeline: false,
-                    look: CardLook::Swatch,
+                    look: CardLook::Picture(None),
                 });
             }
         }
@@ -3019,6 +3052,13 @@ fn effect_card(effect: cutlass_editor::EffectCard) -> BinCard {
         on_timeline: false,
         look: CardLook::Picture(None),
     }
+}
+
+/// Whether a card plays while the pointer rests on it: an effect or a
+/// transition.
+fn plays_on_hover(card_id: &str) -> bool {
+    card_id.starts_with(cutlass_editor::EFFECT_CARD_PREFIX)
+        || card_id.starts_with(cutlass_editor::TRANSITION_CARD_PREFIX)
 }
 
 /// Where the effect card under the pointer is kept between frames: its id
@@ -10701,18 +10741,20 @@ mod tests {
         assert!(top_cards(&draft, Shelf::Audio, "").is_empty());
         assert!(top_cards(&draft, Shelf::Media, "nope").is_empty());
         let blends = top_cards(&draft, Shelf::Transitions, "");
-        assert_eq!(blends.len(), 20);
+        assert_eq!(blends.len(), 200);
         assert_eq!(
             blends[..3]
                 .iter()
                 .map(|card| card.name.as_str())
                 .collect::<Vec<_>>(),
-            ["Dissolve", "Dip to black", "Dip to white"]
+            ["Dissolve", "Dip to Black", "Dip to White"]
         );
         assert_eq!(blends[0].meta, "0.5s");
         assert!(!blends[0].on_timeline);
-        assert_eq!(top_cards(&draft, Shelf::Transitions, "dip").len(), 2);
-        assert_eq!(top_cards(&draft, Shelf::Transitions, "push").len(), 4);
+        // The dips, and Blur Dip.
+        assert_eq!(top_cards(&draft, Shelf::Transitions, "dip").len(), 3);
+        // The pushes, and Elastic Push.
+        assert_eq!(top_cards(&draft, Shelf::Transitions, "push").len(), 5);
         let layers = top_cards(&draft, Shelf::Adjustments, "");
         assert_eq!(layers.len(), 1);
         assert_eq!(layers[0].id, cutlass_editor::ADJUSTMENT_CARD);
@@ -11493,6 +11535,51 @@ mod tests {
         assert!(!lines.iter().any(|line| line == "Fill"));
         assert!(!lines.iter().any(|line| line == "Corner radius"));
         assert!(lines.iter().any(|line| line == "Stroke"));
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn the_transitions_shelf_shows_one_category_at_a_time() {
+        let temp = std::env::temp_dir().join(format!("cutlass-tr-cats-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        cutlass_store::Folder::new(cutlass_model::Draft::empty("draft"))
+            .save(&temp)
+            .unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        let mut view = ViewState::new();
+        view.library_shelf = Shelf::Transitions;
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let frame = |shell: &mut Shell, view: &mut ViewState, events: Vec<egui::Event>| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: screen,
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, view, None),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        let output = frame(&mut shell, &mut view, Vec::new());
+        assert!(text_pos(&output, "All").is_some());
+        assert!(text_pos(&output, "Dissolve").is_some());
+        let chip = text_pos(&output, "Wipe").expect("the Wipe chip") + Vec2::new(4.0, 4.0);
+        let press = |pressed| egui::Event::PointerButton {
+            pos: chip,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        frame(&mut shell, &mut view, vec![egui::Event::PointerMoved(chip)]);
+        frame(&mut shell, &mut view, vec![press(true), press(false)]);
+        assert_eq!(view.transition_category, "Wipe");
+        let output = frame(&mut shell, &mut view, Vec::new());
+        assert!(text_pos(&output, "Wipe Left").is_some());
+        assert!(text_pos(&output, "Dissolve").is_none());
         let _ = std::fs::remove_dir_all(&temp);
     }
 

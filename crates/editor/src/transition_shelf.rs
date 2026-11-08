@@ -7,6 +7,9 @@ use cutlass_session::Request;
 
 use crate::hit::{BadScale, Pointer, TimelineScale, hit_test};
 
+/// What a transition card's id starts with; the transition's id follows.
+pub const TRANSITION_CARD_PREFIX: &str = "transition:";
+
 /// A blend the shelf can drop onto a main-track cut.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TransitionOffer {
@@ -25,7 +28,7 @@ pub struct TransitionOffer {
 impl TransitionOffer {
     #[must_use]
     pub fn card_id(self) -> String {
-        format!("transition:{}", self.id)
+        format!("{TRANSITION_CARD_PREFIX}{}", self.id)
     }
 }
 
@@ -48,22 +51,22 @@ const fn offer(kind: TransitionKind, id: &'static str, name: &'static str) -> Tr
 /// rest cross the cut.
 const BUILT_IN_OFFERS: &[TransitionOffer] = &[
     offer(TransitionKind::Dissolve, "dissolve", "Dissolve"),
-    offer(TransitionKind::DipToBlack, "dip", "Dip to black"),
-    offer(TransitionKind::DipToWhite, "dip-white", "Dip to white"),
-    offer(TransitionKind::WipeLeft, "wipe-left", "Wipe left"),
-    offer(TransitionKind::WipeRight, "wipe-right", "Wipe right"),
-    offer(TransitionKind::WipeUp, "wipe-up", "Wipe up"),
-    offer(TransitionKind::WipeDown, "wipe-down", "Wipe down"),
-    offer(TransitionKind::SlideLeft, "slide-left", "Slide left"),
-    offer(TransitionKind::SlideRight, "slide-right", "Slide right"),
-    offer(TransitionKind::SlideUp, "slide-up", "Slide up"),
-    offer(TransitionKind::SlideDown, "slide-down", "Slide down"),
-    offer(TransitionKind::PushLeft, "push-left", "Push left"),
-    offer(TransitionKind::PushRight, "push-right", "Push right"),
-    offer(TransitionKind::PushUp, "push-up", "Push up"),
-    offer(TransitionKind::PushDown, "push-down", "Push down"),
-    offer(TransitionKind::ZoomIn, "zoom-in", "Zoom in"),
-    offer(TransitionKind::ZoomOut, "zoom-out", "Zoom out"),
+    offer(TransitionKind::DipToBlack, "dip", "Dip to Black"),
+    offer(TransitionKind::DipToWhite, "dip-white", "Dip to White"),
+    offer(TransitionKind::WipeLeft, "wipe-left", "Wipe Left"),
+    offer(TransitionKind::WipeRight, "wipe-right", "Wipe Right"),
+    offer(TransitionKind::WipeUp, "wipe-up", "Wipe Up"),
+    offer(TransitionKind::WipeDown, "wipe-down", "Wipe Down"),
+    offer(TransitionKind::SlideLeft, "slide-left", "Slide Left"),
+    offer(TransitionKind::SlideRight, "slide-right", "Slide Right"),
+    offer(TransitionKind::SlideUp, "slide-up", "Slide Up"),
+    offer(TransitionKind::SlideDown, "slide-down", "Slide Down"),
+    offer(TransitionKind::PushLeft, "push-left", "Push Left"),
+    offer(TransitionKind::PushRight, "push-right", "Push Right"),
+    offer(TransitionKind::PushUp, "push-up", "Push Up"),
+    offer(TransitionKind::PushDown, "push-down", "Push Down"),
+    offer(TransitionKind::ZoomIn, "zoom-in", "Zoom In"),
+    offer(TransitionKind::ZoomOut, "zoom-out", "Zoom Out"),
     offer(TransitionKind::Spin, "spin", "Spin"),
     offer(TransitionKind::Blur, "blur", "Blur"),
     offer(TransitionKind::Glitch, "glitch", "Glitch"),

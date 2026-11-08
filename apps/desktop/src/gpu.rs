@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use cutlass_effects::PreviewScene;
+use cutlass_effects::{PreviewScene, TransitionKind};
 use cutlass_eval::FrameLayers;
 use cutlass_model::Micros;
 use cutlass_render::{Canvas, Layer, Placement, Recipe, RenderError, Renderer, Rgba};
@@ -67,39 +67,40 @@ impl Preview {
         time: Micros,
     ) -> Result<(egui::TextureId, [u32; 2]), RenderError> {
         let size = (scene.width, scene.height);
-        if self
-            .effect_live
-            .as_ref()
-            .is_none_or(|(canvas, _)| canvas.size() != size)
-        {
-            let canvas = self.renderer.canvas(size.0, size.1)?;
-            let mut egui = self.egui.write();
-            let id = match self.effect_live.take() {
-                Some((_, id)) => {
-                    egui.update_egui_texture_from_wgpu_texture(
-                        self.renderer.device(),
-                        canvas.view(),
-                        wgpu::FilterMode::Linear,
-                        id,
-                    );
-                    id
-                }
-                None => egui.register_native_texture(
-                    self.renderer.device(),
-                    canvas.view(),
-                    wgpu::FilterMode::Linear,
-                ),
-            };
-            self.effect_live = Some((canvas, id));
-        }
-        let Some((canvas, id)) = self.effect_live.as_ref() else {
-            return Err(RenderError::Size {
-                width: size.0,
-                height: size.1,
-            });
-        };
+        let (canvas, id) = live_card(&self.renderer, &self.egui, &mut self.effect_live, size)?;
         draw_effect(&self.renderer, canvas, recipe, scene, time)?;
-        Ok((*id, [size.0, size.1]))
+        Ok((id, [size.0, size.1]))
+    }
+
+    /// Draw `kind` at `t` from `from` to `to` on the card canvas egui shows.
+    pub(crate) fn transition_frame(
+        &mut self,
+        kind: TransitionKind,
+        from: &PreviewScene,
+        to: &PreviewScene,
+        t: f32,
+    ) -> Result<(egui::TextureId, [u32; 2]), RenderError> {
+        let size = (from.width, from.height);
+        let (canvas, id) = live_card(&self.renderer, &self.egui, &mut self.effect_live, size)?;
+        draw_transition(&self.renderer, canvas, kind, from, to, t)?;
+        Ok((id, [size.0, size.1]))
+    }
+
+    /// `kind` halfway from `from` to `to`, as straight RGBA.
+    pub(crate) fn transition_still(
+        &mut self,
+        kind: TransitionKind,
+        from: &PreviewScene,
+        to: &PreviewScene,
+    ) -> Result<Vec<u8>, RenderError> {
+        let canvas = still_card(
+            &self.renderer,
+            &mut self.effect_still,
+            (from.width, from.height),
+        )?;
+        draw_transition(&self.renderer, canvas, kind, from, to, 0.5)?;
+        // Both scenes are opaque, so what shows is opaque too.
+        self.renderer.read(canvas)
     }
 
     /// `recipe` at its poster moment over `scene`, as straight RGBA.
@@ -108,20 +109,11 @@ impl Preview {
         recipe: &Recipe,
         scene: &PreviewScene,
     ) -> Result<Vec<u8>, RenderError> {
-        let size = (scene.width, scene.height);
-        if self
-            .effect_still
-            .as_ref()
-            .is_none_or(|canvas| canvas.size() != size)
-        {
-            self.effect_still = Some(self.renderer.canvas(size.0, size.1)?);
-        }
-        let Some(canvas) = self.effect_still.as_ref() else {
-            return Err(RenderError::Size {
-                width: size.0,
-                height: size.1,
-            });
-        };
+        let canvas = still_card(
+            &self.renderer,
+            &mut self.effect_still,
+            (scene.width, scene.height),
+        )?;
         draw_effect(&self.renderer, canvas, recipe, scene, recipe.poster_time())?;
         // The scene is opaque, so premultiplied is the same as straight.
         self.renderer.read(canvas)
@@ -216,6 +208,90 @@ impl Preview {
 }
 
 /// `recipe` at `time` over the whole of `scene`.
+/// The card canvas egui shows, `size`, made or resized as needed.
+fn live_card<'a>(
+    renderer: &Renderer,
+    egui: &RwLock<egui_wgpu::Renderer>,
+    slot: &'a mut Option<(Canvas, egui::TextureId)>,
+    size: (u32, u32),
+) -> Result<(&'a Canvas, egui::TextureId), RenderError> {
+    if slot
+        .as_ref()
+        .is_none_or(|(canvas, _)| canvas.size() != size)
+    {
+        let canvas = renderer.canvas(size.0, size.1)?;
+        let mut egui = egui.write();
+        let id = match slot.take() {
+            Some((_, id)) => {
+                egui.update_egui_texture_from_wgpu_texture(
+                    renderer.device(),
+                    canvas.view(),
+                    wgpu::FilterMode::Linear,
+                    id,
+                );
+                id
+            }
+            None => egui.register_native_texture(
+                renderer.device(),
+                canvas.view(),
+                wgpu::FilterMode::Linear,
+            ),
+        };
+        *slot = Some((canvas, id));
+    }
+    let Some((canvas, id)) = slot.as_ref() else {
+        return Err(RenderError::Size {
+            width: size.0,
+            height: size.1,
+        });
+    };
+    Ok((canvas, *id))
+}
+
+/// The canvas a card's still is drawn on before it is read back.
+fn still_card<'a>(
+    renderer: &Renderer,
+    slot: &'a mut Option<Canvas>,
+    size: (u32, u32),
+) -> Result<&'a Canvas, RenderError> {
+    if slot.as_ref().is_none_or(|canvas| canvas.size() != size) {
+        *slot = Some(renderer.canvas(size.0, size.1)?);
+    }
+    slot.as_ref().ok_or(RenderError::Size {
+        width: size.0,
+        height: size.1,
+    })
+}
+
+/// `kind` at `t` from one card scene to another, both the canvas's size.
+fn draw_transition(
+    renderer: &Renderer,
+    canvas: &Canvas,
+    kind: TransitionKind,
+    from: &PreviewScene,
+    to: &PreviewScene,
+    t: f32,
+) -> Result<(), RenderError> {
+    renderer.draw(
+        canvas,
+        &[Layer::Transition {
+            kind,
+            t,
+            outgoing: scene_picture(from),
+            incoming: scene_picture(to),
+        }],
+    )
+}
+
+/// A card scene as the compositor takes it.
+fn scene_picture(scene: &PreviewScene) -> Rgba<'_> {
+    Rgba {
+        width: scene.width,
+        height: scene.height,
+        bytes: &scene.rgba,
+    }
+}
+
 fn draw_effect(
     renderer: &Renderer,
     canvas: &Canvas,

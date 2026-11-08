@@ -3219,7 +3219,7 @@ impl Shell {
             x: self.time_zero_x(x),
             y,
         };
-        if material_id.starts_with("transition:") {
+        if material_id.starts_with(cutlass_editor::TRANSITION_CARD_PREFIX) {
             let main = draft.tracks.iter().find(|track| track.is_main())?;
             return Some(LibraryLanding::Row {
                 track_id: main.id.clone(),
@@ -3346,7 +3346,7 @@ impl Shell {
             let index = self.gap_lane_index(&kind, boundary)?;
             Some((kind, index))
         });
-        if !material_id.starts_with("transition:")
+        if !material_id.starts_with(cutlass_editor::TRANSITION_CARD_PREFIX)
             && let Some((kind, index)) = opened
         {
             let Some(LibraryLanding::NewLane {
@@ -3367,7 +3367,7 @@ impl Shell {
             self.gap_lane = None;
             return placed;
         }
-        if material_id.starts_with("transition:") {
+        if material_id.starts_with(cutlass_editor::TRANSITION_CARD_PREFIX) {
             self.drop_transition(material_id, x, y)
         } else if material_id.starts_with(cutlass_editor::TITLE_CARD_PREFIX) {
             self.drop_title(material_id, x, y)
@@ -12168,7 +12168,7 @@ mod tests {
             )
             .unwrap();
         let blend = &desktop.draft().unwrap().materials.transitions[0];
-        assert_eq!(blend.name, "Dip to black");
+        assert_eq!(blend.name, "Dip to Black");
         assert_eq!(blend.effect_id, "cutlass-dip");
         assert_eq!(blend.duration, Micros(100));
         assert!(!blend.is_overlap);

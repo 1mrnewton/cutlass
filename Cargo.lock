@@ -3216,8 +3216,11 @@ dependencies = [
 name = "cutlass-vorbis"
 version = "0.1.0"
 dependencies = [
+ "cutlass-codec",
+ "cutlass-container",
  "cutlass-decode",
  "cutlass-encode",
+ "cutlass-ogg",
 ]
 
 [[package]]

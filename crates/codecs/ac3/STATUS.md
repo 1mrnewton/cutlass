@@ -95,7 +95,7 @@ The 44.1 kHz AC-3 frame table makes that clip 192003 bit/s. Every other clip mat
 | WAV | Microsoft tag 0x2000. The Dolby GUID is also read | No Microsoft tag. Written and read as the Dolby GUID FFmpeg writes, in WAVEFORMATEXTENSIBLE | `an_eac3_wave_round_trips_through_its_guid`, `the_dolby_ac3_guid_is_ac3` | Verified. A 0x2000 file that actually holds E-AC-3 stays labeled AC-3. The decoder still reads the syncframe |
 | M4A export | Sound-only, `ftyp M4A`, config and a syncframe that decodes. The encoder delay is an edit | Same | `sound_alone_writes_ac3_and_eac3_and_reopens`, `a_real_recording_exports_as_ac3_and_eac3_and_plays_back` | Empty timeline, and two seconds of a 48 kHz stereo recording |
 | WAV export | Not offered | Not offered | `write_sound` | Unsupported |
-| Desktop import | Rust decoder and encoder, registered ahead of the platform | Same | `ac3_and_eac3_open_for_import_and_export`, `an_ac3_movie_opens_seeks_and_reopens`, `a_real_recording_exports_as_ac3_and_eac3_and_plays_back` | Installed readers open, seek, and reopen a 1 kHz tone and an exported recording. The running window was not exercised |
+| Desktop import | Rust decoder and encoder, registered ahead of the platform | Same | `ac3_and_eac3_open_for_import_and_export`, `an_ac3_movie_opens_seeks_and_reopens`, `a_surround_movie_keeps_each_speaker_through_seek`, `a_real_recording_exports_as_ac3_and_eac3_and_plays_back` | Installed readers open, seek, and reopen a 1 kHz tone, a 5.1 tone (side surrounds and LFE), and an exported recording. The running window was not exercised |
 | Phone | The same Rust codecs, ahead of the platform | Same | `the_phone_opens_ac3_and_eac3` | Verified at the factory |
 | Platform fallback | AudioToolbox fourcc `ac-3`, 1536 samples a frame | fourcc `ec-3`. A shorter frame is the Rust codec's job | the platform tables | Registered behind the Rust codec. Not compared |
 | Matroska, MPEG-TS, CAF | Not implemented. Those container crates are empty, or have no mapping | Same | none | Not present |
@@ -182,6 +182,7 @@ cargo test -p cutlass-riff --lib an_eac3_wave_round_trips_through_its_guid
 cargo test -p cutlass-riff --lib the_dolby_ac3_guid_is_ac3
 cargo test -p cutlass-export --lib sound_alone_writes_ac3_and_eac3_and_reopens
 cargo test -p cutlass --lib an_ac3_movie_opens_seeks_and_reopens
+cargo test --release -p cutlass --lib a_surround_movie_keeps_each_speaker_through_seek
 cargo test -p cutlass --lib ac3_and_eac3_open_for_import_and_export
 cargo test -p cutlass-ffi --lib the_phone_opens_ac3_and_eac3
 cargo test --release -p cutlass-isobmff --lib ac3_and_eac3_trim_is_an_edit_around_the_played_samples

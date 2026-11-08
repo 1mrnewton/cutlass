@@ -2822,17 +2822,13 @@ impl Shell {
         }
         match self.plan_trim(segment_id, edge, x) {
             Ok(plan) => {
-                // Shrinking from the start, the edge follows the pointer and
-                // the row waits for the drag to end: a packed row closes the
-                // gap then. Growing either way, or shrinking from the end,
-                // shows the row where the edit will put it.
-                let shrinks_start = plan.edge == TrimEdge::Start
-                    && self
-                        .draft()
-                        .and_then(|draft| locate(draft, &plan.segment_id))
-                        .is_some_and(|(segment, _)| plan.time > segment.target.start);
-                let spans = if shrinks_start {
-                    std::collections::HashMap::new()
+                // A start edge follows the pointer and the clip's end stays,
+                // with everything after it. On a packed row the clips before
+                // it slide by the same amount to stay attached; the row packs
+                // from zero again when the drag lets go. An end edge shows
+                // the row where the edit will put it.
+                let spans = if plan.edge == TrimEdge::Start {
+                    self.start_trim_spans(&plan.segment_id, plan.time)
                 } else {
                     self.trim_spans(&plan.request())
                 };
@@ -2879,6 +2875,52 @@ impl Shell {
                 (before.get(&segment.id) != Some(&span)).then(|| (segment.id.clone(), span))
             })
             .collect()
+    }
+
+    /// A held start drag: the clip from `time` to its end, and on a packed
+    /// row each clip before it moved by as much as its start did.
+    fn start_trim_spans(
+        &self,
+        id: &SegmentId,
+        time: Micros,
+    ) -> std::collections::HashMap<SegmentId, (Micros, Micros)> {
+        let mut spans = std::collections::HashMap::new();
+        let Some(draft) = self.draft() else {
+            return spans;
+        };
+        let Some(track) = draft
+            .tracks
+            .iter()
+            .find(|track| track.segments.iter().any(|segment| &segment.id == id))
+        else {
+            return spans;
+        };
+        let Some(segment) = track.segments.iter().find(|segment| &segment.id == id) else {
+            return spans;
+        };
+        let end = segment.target.end().0;
+        let time = time.0.min(end.saturating_sub(1));
+        spans.insert(id.clone(), (Micros(time), Micros(end - time)));
+        let packed = draft.config.maintrack_adsorb
+            && track.is_main()
+            && !track.attribute.contains(TrackAttribute::LOCK);
+        if packed {
+            let shift = time - segment.target.start.0;
+            for before in track
+                .segments
+                .iter()
+                .filter(|other| other.target.start.0 < segment.target.start.0)
+            {
+                spans.insert(
+                    before.id.clone(),
+                    (
+                        Micros(before.target.start.0.saturating_add(shift)),
+                        before.target.duration,
+                    ),
+                );
+            }
+        }
+        spans
     }
 
     /// Where a clip shows while an edge is dragged, when the trim moves or
@@ -15755,11 +15797,11 @@ mod tests {
         );
     }
 
-    /// On a packed main row, a start edge dragged in follows the pointer
-    /// and the next clip waits; on release the row closes up. Dragged out,
-    /// the row shifts right as it goes.
+    /// On a packed main row a held start edge follows the pointer, the
+    /// clip's end and what follows stay, and the clips before slide with
+    /// the edge; letting go packs the row from zero again.
     #[test]
-    fn a_start_edge_follows_the_pointer_in_and_pushes_the_row_out() {
+    fn a_start_edge_follows_the_pointer_and_the_clips_before_slide() {
         let temp = Temp::new();
         let mut draft = Draft::empty("draft");
         draft.config.maintrack_adsorb = true;
@@ -15784,33 +15826,32 @@ mod tests {
         let clip = SegmentId::new("clip");
         let next = SegmentId::new("next");
         let first = SegmentId::new("first");
-        let start = desktop.draft().unwrap().tracks[0].segments[1]
-            .target
-            .clone();
-        let end = start.end().0;
-        // In: the clip's start follows the pointer; its end and the next clip stay.
-        desktop.preview_edge(
-            clip.clone(),
-            TrimEdge::Start,
-            lane_time(&desktop, 1_500_000.0),
-        );
-        assert!(desktop.trim_preview(&clip).is_none());
-        assert!(desktop.trim_preview(&next).is_none());
-        let (_, time) = desktop.preview_span(&clip).expect("the edge follows");
-        assert!(time.0 > start.start.0);
-        // Out: the row shifts right as the clip grows.
-        desktop.preview_edge(
-            clip.clone(),
-            TrimEdge::Start,
-            lane_time(&desktop, 500_000.0),
-        );
-        let (grown_start, grown) = desktop.trim_preview(&clip).expect("the clip grows");
-        assert_eq!(grown_start, start.start);
-        assert!(grown.0 > start.duration.0);
-        let (next_start, _) = desktop.trim_preview(&next).expect("the row shifts");
-        assert_eq!(next_start.0, grown_start.0 + grown.0);
-        assert!(next_start.0 > end);
-        assert!(desktop.trim_preview(&first).is_none());
+        for pointer in [1_500_000.0, 500_000.0] {
+            desktop.preview_edge(clip.clone(), TrimEdge::Start, lane_time(&desktop, pointer));
+            let (start, duration) = desktop.trim_preview(&clip).expect("the edge follows");
+            assert!((start.0 - pointer as i64).abs() < 100_000, "{start:?}");
+            assert_eq!(start.0 + duration.0, 3_000_000);
+            assert!(desktop.trim_preview(&next).is_none());
+            let (first_start, first_duration) = desktop
+                .trim_preview(&first)
+                .expect("the clip before slides");
+            assert_eq!(first_start.0 + first_duration.0, start.0);
+        }
+        desktop
+            .trim_edge(
+                clip.clone(),
+                TrimEdge::Start,
+                lane_time(&desktop, 1_500_000.0),
+            )
+            .unwrap();
+        let row: Vec<_> = desktop.draft().unwrap().tracks[0]
+            .segments
+            .iter()
+            .map(|segment| segment.target.start.0)
+            .collect();
+        assert_eq!(row[0], 0);
+        assert_eq!(row[1], 1_000_000);
+        assert!(row[2] < 3_000_000);
     }
 
     #[test]

@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "id": "vivid",
+  "name": "Vivid",
+  "category": "Basic",
+  "passes": [
+    { "block": "grade", "params": {"saturation": 1.5, "contrast": 1.15} }
+  ]
+}

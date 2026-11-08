@@ -197,9 +197,10 @@ mod tests {
     }
 
     #[test]
-    fn ten_cards_each_naming_a_bundled_effect() {
+    fn every_card_names_a_bundled_effect() {
         let cards = effect_cards();
-        assert_eq!(cards.len(), 10);
+        assert_eq!(cards.len(), bundled().len());
+        assert!(cards.len() >= 40);
         for card in &cards {
             assert_eq!(
                 effect_of_card(&card.id).as_deref(),

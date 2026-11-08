@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "id": "earthquake",
+  "name": "Earthquake",
+  "category": "Motion",
+  "passes": [
+    {
+      "block": "transform",
+      "params": {
+        "scale": 1.2,
+        "x": {"jitter": {"rate": 20, "from": -0.06, "to": 0.06, "seed": 41}},
+        "y": {"jitter": {"rate": 20, "from": -0.06, "to": 0.06, "seed": 42}},
+        "rotate": {"jitter": {"rate": 20, "from": -3, "to": 3, "seed": 43}}
+      }
+    },
+    {
+      "block": "blur",
+      "params": {
+        "radius": {"jitter": {"rate": 20, "from": 0, "to": 0.004, "seed": 44}}
+      }
+    }
+  ]
+}

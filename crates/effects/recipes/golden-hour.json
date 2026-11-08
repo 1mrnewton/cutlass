@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "id": "golden-hour",
+  "name": "Golden Hour",
+  "category": "Light",
+  "passes": [
+    { "block": "flash", "params": {"amount": 0.22, "red": 1, "green": 0.6, "blue": 0.2} },
+    { "block": "grade", "params": {"brightness": 0.03, "saturation": 1.2} },
+    { "block": "vignette", "params": {"amount": 0.35, "size": 0.6} }
+  ]
+}

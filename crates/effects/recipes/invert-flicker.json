@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "id": "invert-flicker",
+  "name": "Invert Flicker",
+  "category": "Glitch",
+  "passes": [
+    {
+      "block": "invert",
+      "params": {
+        "amount": {"keys": [[0, 0], [0.05, 0], [0.06, 1], [0.12, 1], [0.13, 0], [0.4, 0], [0.41, 1], [0.44, 1], [0.45, 0]], "repeat": 0.8}
+      }
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "id": "red-pulse",
+  "name": "Red Pulse",
+  "category": "Light",
+  "passes": [
+    {
+      "block": "flash",
+      "params": {
+        "amount": {"wave": {"period": 1, "from": 0, "to": 0.35}},
+        "red": 1,
+        "green": 0.1,
+        "blue": 0.2
+      }
+    }
+  ]
+}

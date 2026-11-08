@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "id": "rgb-shift",
+  "name": "RGB Shift",
+  "category": "Glitch",
+  "passes": [
+    {
+      "block": "rgb_split",
+      "params": {
+        "x": {"jitter": {"rate": 6, "from": -0.02, "to": 0.02, "seed": 71}},
+        "y": {"jitter": {"rate": 6, "from": -0.015, "to": 0.015, "seed": 72}}
+      }
+    }
+  ]
+}

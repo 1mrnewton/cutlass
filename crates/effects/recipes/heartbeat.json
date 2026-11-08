@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "id": "heartbeat",
+  "name": "Heartbeat",
+  "category": "Motion",
+  "passes": [
+    {
+      "block": "transform",
+      "params": {
+        "scale": {"keys": [[0, 1], [0.08, 1.1], [0.18, 1], [0.28, 1.07], [0.45, 1]], "repeat": 0.9}
+      }
+    }
+  ]
+}

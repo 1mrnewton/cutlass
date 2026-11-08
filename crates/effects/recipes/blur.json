@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "id": "blur",
+  "name": "Blur",
+  "category": "Blur",
+  "passes": [
+    { "block": "blur", "params": {"radius": 0.02} }
+  ]
+}

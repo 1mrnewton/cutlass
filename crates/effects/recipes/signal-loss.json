@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "id": "signal-loss",
+  "name": "Signal Loss",
+  "category": "Glitch",
+  "passes": [
+    {
+      "block": "slices",
+      "params": {
+        "count": 64,
+        "amount": {"jitter": {"rate": 10, "from": 0, "to": 0.3, "seed": 61}},
+        "seed": {"jitter": {"rate": 20, "from": 0, "to": 1000, "seed": 62}}
+      }
+    },
+    { "block": "grade", "params": {"saturation": 0.3, "contrast": 1.2} },
+    {
+      "block": "noise",
+      "params": {
+        "amount": 0.3,
+        "seed": {"jitter": {"rate": 24, "from": 0, "to": 1000, "seed": 63}}
+      }
+    }
+  ]
+}

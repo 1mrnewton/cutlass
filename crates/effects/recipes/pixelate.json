@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "id": "pixelate",
+  "name": "Pixelate",
+  "category": "Distort",
+  "passes": [
+    { "block": "pixelate", "params": {"size": 0.03} }
+  ]
+}

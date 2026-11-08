@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "id": "mirror-vertical",
+  "name": "Mirror Vertical",
+  "category": "Distort",
+  "passes": [
+    { "block": "mirror", "params": {"side": 2} }
+  ]
+}

@@ -1773,7 +1773,7 @@ mod tests {
         let folder =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../../apps/ios/ios/EffectPreviews");
         let effects = crate::phone_effects();
-        assert_eq!(effects.len(), 10);
+        assert_eq!(effects.len(), cutlass_effects::bundled().len());
         for effect in effects {
             assert!(effect.id.starts_with("recipe/"), "{}", effect.id);
             assert!(!effect.name.is_empty());

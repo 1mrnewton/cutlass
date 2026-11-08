@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "id": "invert",
+  "name": "Invert",
+  "category": "Basic",
+  "passes": [
+    { "block": "invert", "params": {"amount": 1} }
+  ]
+}

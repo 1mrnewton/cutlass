@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "id": "dutch-angle",
+  "name": "Dutch Angle",
+  "category": "Distort",
+  "passes": [
+    { "block": "transform", "params": {"scale": 1.25, "rotate": 8} }
+  ]
+}

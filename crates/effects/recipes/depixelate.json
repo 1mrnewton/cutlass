@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "id": "depixelate",
+  "name": "Depixelate",
+  "category": "Distort",
+  "passes": [
+    { "block": "pixelate", "params": {"size": {"keys": [[0, 0.1], [1, 0]]}} }
+  ]
+}

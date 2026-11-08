@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "id": "rack-focus",
+  "name": "Rack Focus",
+  "category": "Blur",
+  "passes": [
+    { "block": "blur", "params": {"radius": {"wave": {"period": 2, "from": 0, "to": 0.02}}} }
+  ]
+}

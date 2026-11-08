@@ -342,7 +342,11 @@ mod tests {
     }
 
     fn written(codec: CodecId, container: ContainerId, name: &str) -> (PathBuf, Vec<u8>) {
-        let dir = std::env::temp_dir().join(format!("cutlass-sound-{}-{name}", std::process::id()));
+        // Tests run in parallel, and two may write the same file name.
+        let dir = std::env::temp_dir().join(format!(
+            "cutlass-sound-{}-{codec:?}-{name}",
+            std::process::id()
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         let mut encoders = EncodeFactory::new();
         cutlass_aac::register_encoders(&mut encoders);

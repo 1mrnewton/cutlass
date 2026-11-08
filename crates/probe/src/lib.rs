@@ -338,6 +338,9 @@ fn mpeg_audio(path: &Path, header: &[u8]) -> Result<Option<Probed>, ProbeError> 
     Ok(Some(Probed::Audio { duration }))
 }
 
+/// A raw AAC stream (ADTS, usually `.aac`) is recognised and refused:
+/// no reader the apps register plays it, since it cannot seek, so an
+/// import would add a clip that never sounds.
 fn adts(path: &Path, header: &[u8]) -> Result<Option<Probed>, ProbeError> {
     let Some((first, second)) = header.first().zip(header.get(1)) else {
         return Ok(None);
@@ -346,31 +349,15 @@ fn adts(path: &Path, header: &[u8]) -> Result<Option<Probed>, ProbeError> {
         return Ok(None);
     }
     let file = File::open(path).map_err(|error| io_error(path, error))?;
-    let mut demux = cutlass_adts::AdtsFile::open(file)
-        .map_err(|error| ProbeError::new(format!("aac refused the file: {error}")))?;
-    let streams = cutlass_container::Demux::streams(&demux);
-    let Some(rate) = streams
-        .first()
-        .and_then(|stream| stream.params().sample_rate())
-    else {
-        return Err(ProbeError::new("aac opened a file with no sample rate"));
-    };
-    let mut samples = 0i64;
-    loop {
-        match cutlass_container::Demux::read_packet(&mut demux) {
-            Ok(Some(packet)) => {
-                samples = samples.saturating_add(packet.timestamp().duration().unwrap_or(0));
-            }
-            Ok(None) => break,
-            Err(error) => return Err(ProbeError::new(format!("aac refused the file: {error}"))),
-        }
+    if cutlass_adts::AdtsFile::open(file).is_err() {
+        return Ok(None);
     }
-    if samples <= 0 {
-        return Err(ProbeError::new("aac opened a file with no duration"));
-    }
-    let duration = samples_to_micros(u64::try_from(samples).unwrap_or(0), rate)?;
-    Ok(Some(Probed::Audio { duration }))
+    Err(ProbeError::new(RAW_AAC))
 }
+
+/// Why a raw AAC file is refused, and what plays instead.
+pub const RAW_AAC: &str =
+    "raw AAC (.aac) files cannot be played yet; the same sound in an .m4a or .mp4 can";
 
 fn unavailable(header: &[u8]) -> Option<&'static str> {
     if header.starts_with(&[0x1A, 0x45, 0xDF, 0xA3]) {
@@ -797,5 +784,20 @@ mod tests {
         for name in ["truncated.jpg", "hostile.jpg", "unknown.bin"] {
             let _ = probe(&fixture(name));
         }
+    }
+
+    /// Frames of AAC-LC, 48 kHz stereo, each a 7-byte ADTS header with no
+    /// CRC and one byte of payload.
+    fn adts_frames(count: usize) -> Vec<u8> {
+        let frame = [0xFF, 0xF1, 0x4C, 0x80, 0x01, 0x1F, 0xFC, 0x00];
+        frame.repeat(count)
+    }
+
+    #[test]
+    fn a_raw_aac_file_is_refused_with_what_plays_instead() {
+        let temp = Temp::new();
+        let aac = temp.write("sound.aac", &adts_frames(8));
+        let error = probe(&aac).expect_err("raw aac");
+        assert_eq!(error.message(), super::RAW_AAC);
     }
 }

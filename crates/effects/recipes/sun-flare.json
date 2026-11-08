@@ -4,6 +4,9 @@
   "name": "Sun Flare",
   "category": "Light",
   "preview": "beach",
+  "controls": [
+    {"id": "intensity", "name": "Intensity", "default": 1, "min": 0, "max": 2, "unit": "percent", "scale": [[0, "amount"], [1, "amount"]]}
+  ],
   "passes": [
     {
       "block": "light_leak",

@@ -4,6 +4,9 @@
   "name": "Night Vision",
   "category": "Retro",
   "preview": "city",
+  "controls": [
+    {"id": "grain", "name": "Grain", "default": 1, "min": 0, "max": 2, "unit": "percent", "scale": [[2, "amount"]]}
+  ],
   "passes": [
     {
       "block": "gradient_map",

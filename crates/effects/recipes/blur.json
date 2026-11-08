@@ -4,6 +4,9 @@
   "name": "Blur",
   "category": "Blur",
   "preview": "portrait",
+  "controls": [
+    {"id": "blur", "name": "Blur", "default": 1, "min": 0, "max": 3, "unit": "percent", "scale": [[0, "radius"]]}
+  ],
   "passes": [
     { "block": "blur", "params": {"radius": 0.02} }
   ]

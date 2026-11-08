@@ -4,6 +4,10 @@
   "name": "Dusty Film",
   "category": "Retro",
   "preview": "beach",
+  "controls": [
+    {"id": "speed", "name": "Speed", "default": 1, "min": 0.25, "max": 3, "unit": "times", "speed": true},
+    {"id": "dust", "name": "Dust", "default": 1, "min": 0, "max": 2, "unit": "percent", "scale": [[2, "amount"]]}
+  ],
   "passes": [
     {
       "block": "transform",

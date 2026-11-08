@@ -5,6 +5,9 @@
   "category": "Light",
   "preview": "beach",
   "poster": 0.7,
+  "controls": [
+    {"id": "speed", "name": "Speed", "default": 1, "min": 0.25, "max": 3, "unit": "times", "speed": true}
+  ],
   "passes": [
     { "block": "hue", "params": {"degrees": {"keys": [[0, -180], [2, 180]], "repeat": 2}} }
   ]

@@ -4,6 +4,9 @@
   "name": "Black & White Film",
   "category": "Retro",
   "preview": "portrait",
+  "controls": [
+    {"id": "grain", "name": "Grain", "default": 1, "min": 0, "max": 2, "unit": "percent", "scale": [[1, "amount"]]}
+  ],
   "passes": [
     { "block": "grade", "params": { "saturation": 0, "contrast": 1.25 } },
     {

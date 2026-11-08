@@ -4,6 +4,9 @@
   "name": "Pixelate",
   "category": "Distort",
   "preview": "dancer",
+  "controls": [
+    {"id": "size", "name": "Size", "default": 1, "min": 0.25, "max": 3, "unit": "percent", "scale": [[0, "size"]]}
+  ],
   "passes": [
     { "block": "pixelate", "params": {"size": 0.03} }
   ]

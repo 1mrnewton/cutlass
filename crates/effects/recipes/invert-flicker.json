@@ -5,6 +5,9 @@
   "category": "Glitch",
   "preview": "city",
   "poster": 0.08,
+  "controls": [
+    {"id": "speed", "name": "Speed", "default": 1, "min": 0.25, "max": 3, "unit": "times", "speed": true}
+  ],
   "passes": [
     {
       "block": "invert",

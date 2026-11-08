@@ -5,6 +5,10 @@
   "category": "Reveal",
   "preview": "road",
   "poster": 0.3,
+  "controls": [
+    {"id": "speed", "name": "Speed", "default": 1, "min": 0.25, "max": 3, "unit": "times", "speed": true},
+    {"id": "count", "name": "Blinds", "default": 8, "min": 2, "max": 32, "unit": "plain", "set": [[0, "count"]]}
+  ],
   "passes": [
     {
       "block": "reveal",

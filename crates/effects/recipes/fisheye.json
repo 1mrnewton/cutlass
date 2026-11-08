@@ -4,6 +4,9 @@
   "name": "Fisheye",
   "category": "Distort",
   "preview": "portrait",
+  "controls": [
+    {"id": "strength", "name": "Strength", "default": 1, "min": 0, "max": 2, "unit": "percent", "scale": [[0, "amount"]]}
+  ],
   "passes": [
     { "block": "bulge", "params": {"amount": 0.5, "radius": 0.9} }
   ]

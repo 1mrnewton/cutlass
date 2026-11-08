@@ -4,6 +4,9 @@
   "name": "CRT",
   "category": "Retro",
   "preview": "city",
+  "controls": [
+    {"id": "lines", "name": "Lines", "default": 1, "min": 0, "max": 2, "unit": "percent", "scale": [[2, "amount"]]}
+  ],
   "passes": [
     { "block": "blur", "params": {"radius": 0.001} },
     { "block": "rgb_split", "params": {"x": 0.003} },

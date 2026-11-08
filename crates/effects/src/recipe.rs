@@ -1305,6 +1305,26 @@ mod tests {
     }
 
     #[test]
+    fn every_bundled_control_changes_its_effect() {
+        let times =
+            [0.04, 0.1, 0.2, 0.5, 0.9, 1.4, 2.1].map(|seconds| Micros((seconds * 1e6) as i64));
+        for recipe in bundled() {
+            for control in &recipe.controls {
+                let moved = if control.default < control.max {
+                    control.max
+                } else {
+                    control.min
+                };
+                let set = [(control.id.clone(), moved)].into_iter().collect();
+                let changes = times
+                    .iter()
+                    .any(|time| recipe.steps_with(*time, &set) != recipe.steps_at(*time));
+                assert!(changes, "{} {} does nothing", recipe.id, control.id);
+            }
+        }
+    }
+
+    #[test]
     fn controls_speed_scale_and_set_the_steps_within_their_ranges() {
         let recipe = read(
             r#"{"version":1,"id":"a","name":"A","controls":[

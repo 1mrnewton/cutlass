@@ -4,6 +4,9 @@
   "name": "Halftone",
   "category": "Retro",
   "preview": "portrait",
+  "controls": [
+    {"id": "size", "name": "Size", "default": 1, "min": 0.25, "max": 3, "unit": "percent", "scale": [[0, "size"]]}
+  ],
   "passes": [
     { "block": "halftone", "params": {"size": 0.02} }
   ]

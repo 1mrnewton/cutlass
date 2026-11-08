@@ -5,6 +5,10 @@
   "category": "Reveal",
   "preview": "beach",
   "poster": 0.25,
+  "controls": [
+    {"id": "speed", "name": "Speed", "default": 1, "min": 0.25, "max": 3, "unit": "times", "speed": true},
+    {"id": "soft", "name": "Edge", "default": 0.15, "min": 0, "max": 0.5, "unit": "percent", "set": [[0, "soft"]]}
+  ],
   "passes": [
     {
       "block": "reveal",

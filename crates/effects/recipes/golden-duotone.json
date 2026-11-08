@@ -4,6 +4,9 @@
   "name": "Golden Duotone",
   "category": "Basic",
   "preview": "beach",
+  "controls": [
+    {"id": "amount", "name": "Amount", "default": 1, "min": 0, "max": 1, "unit": "percent", "set": [[0, "amount"]]}
+  ],
   "passes": [
     {
       "block": "gradient_map",

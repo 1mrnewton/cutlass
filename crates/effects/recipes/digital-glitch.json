@@ -4,6 +4,11 @@
   "name": "Digital Glitch",
   "category": "Glitch",
   "preview": "city",
+  "controls": [
+    {"id": "speed", "name": "Speed", "default": 1, "min": 0.25, "max": 3, "unit": "times", "speed": true},
+    {"id": "intensity", "name": "Intensity", "default": 1, "min": 0, "max": 2, "unit": "percent", "scale": [[1, "amount"], [2, "x"]]},
+    {"id": "hue", "name": "Hue", "default": 0, "min": -180, "max": 180, "unit": "degrees", "set": [[3, "degrees"]]}
+  ],
   "passes": [
     {
       "block": "pixelate",
@@ -24,6 +29,7 @@
       "params": {
         "x": {"jitter": {"rate": 8, "from": -0.015, "to": 0.015, "seed": 55}}
       }
-    }
+    },
+    { "block": "hue" }
   ]
 }

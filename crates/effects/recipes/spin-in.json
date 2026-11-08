@@ -5,6 +5,9 @@
   "category": "Motion",
   "preview": "dancer",
   "poster": 0.15,
+  "controls": [
+    {"id": "speed", "name": "Speed", "default": 1, "min": 0.25, "max": 3, "unit": "times", "speed": true}
+  ],
   "passes": [
     {
       "block": "transform",

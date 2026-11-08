@@ -4,6 +4,9 @@
   "name": "Glow",
   "category": "Light",
   "preview": "city",
+  "controls": [
+    {"id": "intensity", "name": "Intensity", "default": 1, "min": 0, "max": 2, "unit": "percent", "scale": [[0, "amount"]]}
+  ],
   "passes": [
     { "block": "glow", "params": {"amount": 1.5, "radius": 0.03, "threshold": 0.6} }
   ]

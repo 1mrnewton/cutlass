@@ -5,6 +5,9 @@
   "category": "Light",
   "preview": "city",
   "poster": 0.75,
+  "controls": [
+    {"id": "speed", "name": "Speed", "default": 1, "min": 0.25, "max": 3, "unit": "times", "speed": true}
+  ],
   "passes": [
     {
       "block": "spotlight",

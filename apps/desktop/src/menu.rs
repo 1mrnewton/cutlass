@@ -1028,6 +1028,32 @@ mod tests {
     }
 
     #[test]
+    fn a_shortcut_is_drawn_as_keys_not_as_one_string() {
+        let ctx = Context::default();
+        let (_, output) = frame(&ctx, 1000.0, Vec::new());
+        assert!(
+            label_at(&output, "⌘C").is_none(),
+            "Copy's keys are not one string"
+        );
+        assert!(
+            label_at(&output, "C").is_some(),
+            "Copy's letter is its own key"
+        );
+        assert!(label_at(&output, "⌫").is_none(), "Delete's key is an icon");
+        if MAC {
+            assert!(
+                label_at(&output, "⌘").is_none(),
+                "Command is an icon on a Mac"
+            );
+        } else {
+            assert!(
+                label_at(&output, "Ctrl").is_some(),
+                "Command reads Ctrl elsewhere"
+            );
+        }
+    }
+
+    #[test]
     fn the_shadow_is_not_cut_off_at_the_panel_edge() {
         let ctx = Context::default();
         let (_, output) = frame(&ctx, 1000.0, Vec::new());

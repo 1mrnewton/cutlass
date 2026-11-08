@@ -42,6 +42,9 @@ pub(crate) struct Fixes {
     pub(crate) direct_blocksize: bool,
     /// DivX 5.00 build 413's sprite trajectory.
     pub(crate) divx_413: bool,
+    /// Quarter-sample field luma as two 8x8 halves, which libavcodec's
+    /// encoder reconstructs with, instead of one 16x8 block.
+    pub(crate) qpel_field_halves: bool,
 }
 
 impl Fixes {
@@ -61,6 +64,7 @@ impl Fixes {
             legacy_qpel: below(enc.lavc_build, 4653),
             direct_blocksize: below(enc.lavc_build, 4655) || divx.is_some(),
             divx_413: divx == Some(500) && build == Some(413),
+            qpel_field_halves: enc.lavc_build.is_some(),
         }
     }
 }
@@ -802,19 +806,31 @@ impl Vop<'_> {
                 for f in 0..2 {
                     let (mx, my) = mv[f];
                     let rows = Rows::Field(select[f] & 1);
-                    mc::luma_block(
-                        &ry,
-                        x,
-                        (mby * 8) as i32,
-                        16,
-                        8,
-                        mx,
-                        my,
-                        pel,
-                        rows,
-                        rounding,
-                        &mut luma,
-                    );
+                    let fy = (mby * 8) as i32;
+                    if quarter && fixes.qpel_field_halves {
+                        let mut half = [0u8; 64];
+                        for side in 0..2 {
+                            mc::luma_block(
+                                &ry,
+                                x + 8 * side as i32,
+                                fy,
+                                8,
+                                8,
+                                mx,
+                                my,
+                                pel,
+                                rows,
+                                rounding,
+                                &mut half,
+                            );
+                            for row in 0..8 {
+                                let d = row * 16 + 8 * side;
+                                luma[d..d + 8].copy_from_slice(&half[row * 8..row * 8 + 8]);
+                            }
+                        }
+                    } else {
+                        mc::luma_block(&ry, x, fy, 16, 8, mx, my, pel, rows, rounding, &mut luma);
+                    }
                     for row in 0..8 {
                         let d = (2 * row + f) * 16;
                         y[d..d + 16].copy_from_slice(&luma[row * 16..row * 16 + 16]);

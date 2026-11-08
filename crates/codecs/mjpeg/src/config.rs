@@ -35,6 +35,8 @@ pub(crate) struct Config {
     pub(crate) flavour: Option<Flavour>,
     /// From `fiel`, when it names two fields.
     pub(crate) field_order: Option<FieldOrder>,
+    /// The `fiel` field count: 1 progressive, 2 interlaced.
+    pub(crate) fields: Option<u8>,
     /// Tables in force before the first packet: the Annex K.3 Huffman
     /// tables, then whatever a table stream in the extradata defined.
     pub(crate) tables: Tables,
@@ -45,6 +47,7 @@ impl Config {
         let mut config = Self {
             flavour: None,
             field_order: None,
+            fields: None,
             tables: Tables::standard_huffman(),
         };
         if extra.is_empty() {
@@ -69,6 +72,7 @@ impl Config {
             _ => return Err(unsupported()),
         });
         config.field_order = fiel.and_then(field_order);
+        config.fields = fiel.map(|[fields, _]| fields);
         Ok(config)
     }
 }
@@ -120,6 +124,10 @@ mod tests {
         }
         let progressive = Config::parse(&[b'j', b'p', b'e', b'g', 1, 0]).expect("one field");
         assert_eq!(progressive.field_order, None);
+        assert_eq!(progressive.fields, Some(1));
+        assert_eq!(a.fields, None);
+        let unordered = Config::parse(&[b'j', b'p', b'e', b'g', 2, 0]).expect("two fields");
+        assert_eq!((unordered.fields, unordered.field_order), (Some(2), None));
         assert_eq!(
             Config::parse(b"mjpb").expect("mjpb").flavour,
             Some(Flavour::FormatB)

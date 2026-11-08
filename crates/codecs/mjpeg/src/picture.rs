@@ -1,10 +1,22 @@
 //! One packet to one picture.
 //!
 //! A packet is one JPEG image, or two when the track is interlaced: each
-//! image is one field, and the frame is the two woven row by row. A packet
-//! is interlaced when its first image is a field of the container's frame:
-//! the same width, and a height `h` with `h > 8` and `2h - 16 < H <= 2h`
-//! for the container height `H`. Bytes after the last image are ignored.
+//! image is one field, and the frame is the two woven row by row.
+//!
+//! As in FFmpeg, the first packet after open or reset decides whether the
+//! stream is interlaced, and a later size change does not make it so. That
+//! packet is a field pair when its first image is field-shaped (the
+//! container's width, or an unknown one, and a height `h` with
+//! `4h < 3H` for the container height `H`) and a second image follows it in
+//! the packet. A field-shaped image alone is a whole frame unless the track
+//! says it is a field: a `fiel` atom naming two fields, or an APP0 `AVI1`
+//! polarity of 1 or 2. That case is refused as one field per packet.
+//!
+//! Once a stream is interlaced, a packet whose first image has the first
+//! field's size is a pair, and any other size is a frame. Once it is
+//! progressive, every packet is a frame, so a stream may drop to half the
+//! container height. A woven frame is `min(H, 2h)` rows. Bytes after the
+//! last image are ignored.
 
 use cutlass_decode::{
     CodecError, ColorPrimaries, ColorRange, MatrixCoefficients, PixelFormat, Plane, Transfer,
@@ -36,6 +48,19 @@ pub(crate) struct Unpacker {
     /// Container size; zero when unknown.
     width: u32,
     height: u32,
+    /// Set by the first packet that decodes after open or reset.
+    layout: Option<Layout>,
+}
+
+/// What the first decoded packet showed about the stream.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Layout {
+    Frames,
+    /// Two fields per packet, each this size.
+    Fields {
+        width: u32,
+        height: u32,
+    },
 }
 
 impl Unpacker {
@@ -48,12 +73,15 @@ impl Unpacker {
             config,
             width,
             height,
+            layout: None,
         })
     }
 
-    /// Back to the tables the track opened with.
+    /// Back to the tables the track opened with, and to an undecided
+    /// layout.
     pub(crate) fn reset(&mut self) {
         self.tables = self.config.tables.clone();
+        self.layout = None;
     }
 
     /// Decode one packet. Tables the packet defines are kept only when the
@@ -74,61 +102,89 @@ impl Unpacker {
         }
         let mut tables = self.tables.clone();
         let first = decode_image(data, &mut tables)?;
-        let picture = if self.is_field(&first.image) {
-            let rest = data.get(first.len..).unwrap_or(&[]);
-            let Some(start) = rest.windows(2).position(|pair| pair == [0xff, 0xd8]) else {
+        let (w, h) = (first.image.width, first.image.height);
+        let pair = match self.layout {
+            Some(Layout::Frames) => false,
+            Some(Layout::Fields { width, height }) => (w, h) == (width, height),
+            None => self.field_shaped(&first.image),
+        };
+        let rest = data.get(first.len..).unwrap_or(&[]);
+        let second = rest.windows(2).position(|pair| pair == [0xff, 0xd8]);
+        let (picture, layout) = match (pair, second) {
+            (true, Some(start)) => {
+                let second = decode_image(&rest[start..], &mut tables)?.image;
+                if !same_layout(&first.image, &second) {
+                    return Err(CodecError::Malformed {
+                        at_bit: bit_offset(first.len + start),
+                        what: "second field",
+                    });
+                }
+                let picture = self.weave_pair(first.image, second);
+                (
+                    picture,
+                    Layout::Fields {
+                        width: w,
+                        height: h,
+                    },
+                )
+            }
+            (true, None) if self.layout.is_some() || self.signals_fields(&first.image) => {
                 return Err(CodecError::Unsupported {
                     what: "one field per packet",
                 });
-            };
-            let second = decode_image(&rest[start..], &mut tables)?.image;
-            if !same_layout(&first.image, &second) {
-                return Err(CodecError::Malformed {
-                    at_bit: bit_offset(first.len + start),
-                    what: "second field",
-                });
             }
-            let order = self
-                .config
-                .field_order
-                .or(match first.image.avid_standard {
-                    Some(1) => Some(FieldOrder::BottomFirst),
-                    Some(2) => Some(FieldOrder::TopFirst),
-                    _ => None,
-                })
-                .unwrap_or(FieldOrder::TopFirst);
-            let (top, bottom) = match order {
-                FieldOrder::TopFirst => (first.image, second),
-                FieldOrder::BottomFirst => (second, first.image),
-            };
-            Picture {
-                width: top.width,
-                height: self.height,
-                fields: Some(order),
-                top,
-                bottom: Some(bottom),
-            }
-        } else {
-            Picture {
-                width: first.image.width,
-                height: first.image.height,
-                fields: None,
-                top: first.image,
-                bottom: None,
-            }
+            _ => (
+                Picture {
+                    width: w,
+                    height: h,
+                    fields: None,
+                    top: first.image,
+                    bottom: None,
+                },
+                self.layout.unwrap_or(Layout::Frames),
+            ),
         };
         self.tables = tables;
+        self.layout = Some(layout);
         Ok(picture)
     }
 
-    fn is_field(&self, image: &Image) -> bool {
-        let (h, frame) = (image.height, self.height);
-        frame != 0
-            && frame != h
-            && h > 8
-            && frame > 2 * (h - 8)
-            && frame <= 2 * h
+    fn weave_pair(&self, first: Image, second: Image) -> Picture {
+        let order = self
+            .config
+            .field_order
+            .or(match first.avid_standard {
+                Some(1) => Some(FieldOrder::BottomFirst),
+                Some(2) => Some(FieldOrder::TopFirst),
+                _ => None,
+            })
+            .unwrap_or(FieldOrder::TopFirst);
+        let (top, bottom) = match order {
+            FieldOrder::TopFirst => (first, second),
+            FieldOrder::BottomFirst => (second, first),
+        };
+        Picture {
+            width: top.width,
+            height: self.height.min(top.height.saturating_mul(2)),
+            fields: Some(order),
+            top,
+            bottom: Some(bottom),
+        }
+    }
+
+    /// FFmpeg's test: an image under three quarters of the container
+    /// height is a field. The width must match too, when it is known.
+    fn field_shaped(&self, image: &Image) -> bool {
+        self.height != 0
+            && image.height > 0
+            && u64::from(image.height) * 4 < u64::from(self.height) * 3
             && (self.width == 0 || self.width == image.width)
+    }
+
+    /// The track or the image names it a field: `fiel` with two fields,
+    /// or an `AVI1` polarity of 1 or 2.
+    fn signals_fields(&self, image: &Image) -> bool {
+        self.config.fields == Some(2) || matches!(image.avi1_polarity, Some(1 | 2))
     }
 }
 

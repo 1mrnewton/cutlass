@@ -397,13 +397,38 @@ fn format_a_headers_and_padding_between_fields_are_skipped() {
 fn field_packets_that_do_not_pair_are_refused() {
     let (width, height) = (32, 32);
     let fixture = field_fixture(width, height, Sampling::Yuv420);
-    let mut decoder = MjpegDecoder::open(&params(width, height, &[])).expect("open");
-    assert!(matches!(
-        decoder.decode(&fixture.top),
-        Err(CodecError::Unsupported {
-            what: "one field per packet"
-        })
-    ));
+    // A lone field-shaped image is a field only when the track or the
+    // image says so: `fiel` with two fields, or an `AVI1` polarity.
+    let mut avi1 = b"AVI1".to_vec();
+    avi1.resize(14, 0);
+    avi1[4] = 1;
+    let marked = with_segment(&fixture.top, 0xe0, &avi1);
+    for (extra, data) in [
+        (&b"jpeg\x02\x00"[..], &fixture.top),
+        (&b"jpeg\x02\x01"[..], &fixture.top),
+        (&[][..], &marked),
+    ] {
+        let mut decoder = MjpegDecoder::open(&params(width, height, extra)).expect("open");
+        assert!(matches!(
+            decoder.decode(data),
+            Err(CodecError::Unsupported {
+                what: "one field per packet"
+            })
+        ));
+    }
+    avi1[4] = 0;
+    for (extra, data) in [
+        (&[][..], fixture.top.clone()),
+        (&b"jpeg\x01\x00"[..], fixture.top.clone()),
+        (&[][..], with_segment(&fixture.top, 0xe0, &avi1)),
+    ] {
+        let mut decoder = MjpegDecoder::open(&params(width, height, extra)).expect("open");
+        let picture = decoder.decode(&data).expect("a whole frame");
+        assert_eq!(picture.fields, None);
+        assert_eq!(picture.height, fixture.field_height);
+    }
+
+    let mut decoder = MjpegDecoder::open(&params(width, height, b"jpeg\x02\x01")).expect("open");
     let other = encode(
         &detailed_rgb(width, fixture.field_height, 9),
         width,
@@ -424,20 +449,119 @@ fn field_packets_that_do_not_pair_are_refused() {
     cut.extend_from_slice(&fixture.bottom[..fixture.bottom.len() / 2]);
     assert!(decoder.decode(&cut).is_err());
 
-    // Without a container height, or at a height that is not a field pair,
-    // the first image is the frame.
+    // Without a container height, at a height three quarters of the
+    // container or more, or at another width, the first image is the frame.
     let mut pair = fixture.top.clone();
     pair.extend_from_slice(&fixture.bottom);
     for (w, h) in [
         (0, 0),
         (width, fixture.field_height),
-        (width, 2 * fixture.field_height + 1),
+        (width, fixture.field_height * 4 / 3),
+        (width * 2, height),
     ] {
         let mut decoder = MjpegDecoder::open(&params(w, h, &[])).expect("open");
         let picture = decoder.decode(&pair).expect("frame");
-        assert_eq!(picture.fields, None);
+        assert_eq!(picture.fields, None, "{w}x{h}");
         assert_eq!(picture.height, fixture.field_height);
     }
+    // A taller container keeps the woven frame at twice the field.
+    let mut decoder =
+        MjpegDecoder::open(&params(width, 2 * fixture.field_height + 7, &[])).expect("open");
+    let picture = decoder.decode(&pair).expect("pair");
+    assert_eq!(picture.fields, Some(FieldOrder::TopFirst));
+    assert_eq!(picture.height, 2 * fixture.field_height);
+}
+
+#[test]
+fn ntsc_fields_of_240_rows_weave_in_a_486_line_container() {
+    let (width, height) = (720, 480);
+    let fixture = field_fixture(width, height, Sampling::Yuv422);
+    assert_eq!(fixture.field_height, 240);
+    let mut data = fixture.top.clone();
+    data.extend_from_slice(&fixture.bottom);
+    let want = interleave(
+        &image_rgba(&fixture.top),
+        &image_rgba(&fixture.bottom),
+        width as usize * 4,
+        height as usize,
+    );
+    for extra in [&[][..], b"jpeg", b"jpeg\x02\x01"] {
+        let mut decoder = MjpegDecoder::open(&params(width, 486, extra)).expect("open");
+        let picture = decoder.decode(&data).expect("pair");
+        assert_eq!((picture.width, picture.height), (720, 480));
+        assert_eq!(picture.fields, Some(FieldOrder::TopFirst));
+        let mut rgba = Vec::new();
+        picture.to_rgba(&mut rgba).expect("rgba");
+        assert!(rgba == want, "woven rgba");
+        let frame = picture.into_frame().expect("frame");
+        assert_eq!((frame.width, frame.height), (720, 480));
+        // The stream stays interlaced: the next pair weaves too.
+        assert!(decoder.decode(&data).expect("next").fields.is_some());
+    }
+}
+
+#[test]
+fn a_progressive_stream_may_drop_to_half_the_container_height() {
+    let (width, height) = (48, 64);
+    let full = encode(
+        &detailed_rgb(width, height, 40),
+        width,
+        height,
+        Sampling::Yuv420,
+        85,
+    );
+    let half = encode(
+        &detailed_rgb(width, 32, 41),
+        width,
+        32,
+        Sampling::Yuv420,
+        85,
+    );
+    let other_half = encode(
+        &detailed_rgb(width, 32, 42),
+        width,
+        32,
+        Sampling::Yuv420,
+        85,
+    );
+    let mut two = half.clone();
+    two.extend_from_slice(&other_half);
+
+    // A progressive stream: the half-height packet is a frame of its own,
+    // and so is one followed by a second image.
+    let mut decoder = MjpegDecoder::open(&params(width, height, &[])).expect("open");
+    assert_eq!(decoder.decode(&full).expect("full").height, height);
+    for data in [&half, &two] {
+        let picture = decoder.decode(data).expect("half");
+        assert_eq!((picture.height, picture.fields), (32, None));
+        let mut rgba = Vec::new();
+        picture.to_rgba(&mut rgba).expect("rgba");
+        assert_eq!(rgba, image_rgba(&half));
+    }
+    // The same when the stream opens on the half-height packet.
+    let mut decoder = MjpegDecoder::open(&params(width, height, &[])).expect("open");
+    assert_eq!(decoder.decode(&half).expect("half").fields, None);
+    assert_eq!(decoder.decode(&two).expect("two").fields, None);
+
+    // An interlaced stream: a pair weaves, a whole frame is a frame, and a
+    // lone field is refused without disturbing the stream.
+    let mut decoder = MjpegDecoder::open(&params(width, height, &[])).expect("open");
+    let picture = decoder.decode(&two).expect("pair");
+    assert_eq!(
+        (picture.height, picture.fields),
+        (64, Some(FieldOrder::TopFirst))
+    );
+    assert_eq!(decoder.decode(&full).expect("full").fields, None);
+    assert!(matches!(
+        decoder.decode(&half),
+        Err(CodecError::Unsupported {
+            what: "one field per packet"
+        })
+    ));
+    assert!(decoder.decode(&two).expect("pair again").fields.is_some());
+    // Reset forgets the layout: the next packet decides again.
+    VideoDecoder::reset(&mut decoder);
+    assert_eq!(decoder.decode(&half).expect("after reset").fields, None);
 }
 
 #[test]

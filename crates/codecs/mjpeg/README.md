@@ -36,13 +36,13 @@ Decoded:
 - Grey, YCbCr at any legal sampling (4:4:4, 4:2:2, 4:2:0, and 4:4:0 kept on the planar path, others upsampled to 4:4:4), and RGB (Adobe transform 0 or `R`,`G`,`B` ids, `Gbrp` on the planar path).
 - Restart intervals, byte stuffing, fill bytes, odd sizes cropped from the padded MCUs.
 - Frames without DHT (Annex K.3 tables), frames without DQT (carried tables), and tables in the extradata.
-- Two field images in one packet, woven by the container height; field order from `fiel`, then from an `AVID` comment. Apple `mjpg` APP1 headers (format A).
+- Two field images in one packet, woven when the stream's first packet holds an image under three quarters of the container height followed by a second image, as FFmpeg decides; a progressive stream may later drop to half the container height. Field order from `fiel`, then from an `AVID` comment. Apple `mjpg` APP1 headers (format A).
 - The `CS=ITU601` comment, read as a C string, marks studio range.
 - A size or sampling change from one packet to the next.
 
 Encoded: baseline SOF0 with JFIF APP0, Annex K quantizers scaled the libjpeg way, the standard Huffman tables, and optional restart markers, at a fixed quality or a bitrate.
 
-Refused, by name: format B, arithmetic, lossless, differential, hierarchical, JPEG-LS, precision other than 8, CMYK, a packet over 64 MiB, a frame over 16 384 on an edge or 16 777 216 pixels, more than two images in a packet, and field images that do not pair.
+Refused, by name: format B, arithmetic, lossless, differential, hierarchical, JPEG-LS, precision other than 8, CMYK, a packet over 64 MiB, a frame over 16 384 on an edge or 16 777 216 pixels, more than two images in a packet, field images that do not pair, and a lone field when `fiel` or an `AVI1` marker says the track is interlaced.
 
 ## Accuracy
 

@@ -150,6 +150,9 @@ pub struct Image {
     pub studio_range: bool,
     /// Byte 12 of a COM segment that starts `AVID`: 1 is NTSC, 2 is PAL.
     pub avid_standard: Option<u8>,
+    /// The polarity byte of an APP0 `AVI1` segment (OpenDML Motion JPEG):
+    /// 0 is a whole frame, 1 and 2 the first and second field.
+    pub avi1_polarity: Option<u8>,
     /// EXIF orientation, when APP1 carries one. Not applied.
     pub orientation: Option<u16>,
 }
@@ -286,6 +289,7 @@ struct Meta {
     jfif: bool,
     studio_range: bool,
     avid_standard: Option<u8>,
+    avi1_polarity: Option<u8>,
 }
 
 #[derive(Clone, Copy)]
@@ -670,6 +674,7 @@ fn parse_dri(body: &[u8], at: u64) -> Result<u16, CodecError> {
 fn note(marker: u8, body: &[u8], meta: &mut Meta) {
     match marker {
         APP0 if body.starts_with(b"JFIF\0") => meta.jfif = true,
+        APP0 if body.starts_with(b"AVI1") => meta.avi1_polarity = body.get(4).copied(),
         APP1 => {
             if let Some(orientation) = exif_orientation(body) {
                 meta.orientation = Some(orientation);
@@ -1304,6 +1309,7 @@ fn finish(mut frame: Frame, meta: &Meta) -> Result<Image, CodecError> {
         jfif: meta.jfif,
         studio_range: meta.studio_range,
         avid_standard: meta.avid_standard,
+        avi1_polarity: meta.avi1_polarity,
         orientation: meta.orientation,
     })
 }

@@ -1213,3 +1213,23 @@ fn a_studio_range_comment_is_read_as_a_c_string() {
     assert!(!with_comment(b"CS=ITU60"));
     assert!(!with_comment(b"Lavc62"));
 }
+
+#[test]
+fn an_avi1_segment_names_its_field_polarity() {
+    let image = planar_jpeg(8, 8, Sampling::Gray, 75);
+    let with_app0 = |body: &[u8]| {
+        let mut out = image[..2].to_vec();
+        out.extend_from_slice(&[0xff, 0xe0]);
+        out.extend_from_slice(&u16::try_from(body.len() + 2).expect("len").to_be_bytes());
+        out.extend_from_slice(body);
+        out.extend_from_slice(&image[2..]);
+        decode_image(&out, &mut Tables::new())
+            .expect("image")
+            .image
+            .avi1_polarity
+    };
+    assert_eq!(with_app0(b"AVI1\x01\x00\x00\x00\x10\x00"), Some(1));
+    assert_eq!(with_app0(b"AVI1\x00"), Some(0));
+    assert_eq!(with_app0(b"AVI1"), None);
+    assert_eq!(with_app0(b"AVI2\x01"), None);
+}

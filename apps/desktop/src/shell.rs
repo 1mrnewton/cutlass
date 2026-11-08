@@ -853,6 +853,9 @@ pub struct Shell {
     holding: bool,
     /// The kind, clip and revision of the last edit made while holding.
     held_edit: Option<(HeldEdit, u64)>,
+    /// A clip with Optical flow on whose speed changed while the pointer
+    /// was held: its copy for the new speed starts once it is let go.
+    refill: Option<SegmentId>,
     /// A move, scale or turn on the preview in flight.
     stage: Option<StageLive>,
     /// Timeline thumbnails, once the window starts them.
@@ -963,6 +966,7 @@ impl Shell {
             saving: None,
             holding: false,
             held_edit: None,
+            refill: None,
             stage: None,
             thumbnails: None,
             film_asks: Vec::new(),
@@ -4556,7 +4560,12 @@ impl Shell {
     pub fn set_speed(&mut self, speed: f64) -> Result<(), ShellError> {
         let segment_id = self.selected().cloned().ok_or(ShellError::NoProject)?;
         self.refuse_locked(&segment_id)?;
-        self.apply(Request::SetConstantSpeed { segment_id, speed })
+        self.apply(Request::SetConstantSpeed {
+            segment_id: segment_id.clone(),
+            speed,
+        })?;
+        self.speed_changed(segment_id);
+        Ok(())
     }
 
     /// Run the selected clip on the speed curve `points`, `x` the share of
@@ -4569,10 +4578,12 @@ impl Shell {
         self.refuse_locked(&segment_id)?;
         let speed_id = MaterialId::new(self.fresh("speed"));
         self.apply(Request::SetCurveSpeed {
-            segment_id,
+            segment_id: segment_id.clone(),
             speed_id,
             points: points.to_vec(),
-        })
+        })?;
+        self.speed_changed(segment_id);
+        Ok(())
     }
 
     /// Let the selected clip's pitch follow its speed, or keep it.
@@ -7784,6 +7795,19 @@ impl Shell {
         self.holding = holding;
         if !holding {
             self.held_edit = None;
+            if let Some(segment_id) = self.refill.take() {
+                self.refill_copy(&segment_id);
+            }
+        }
+    }
+
+    /// Clip `segment_id` plays at a new speed: with Optical flow on, its
+    /// copy for that speed is made, now or once the pointer is let go.
+    fn speed_changed(&mut self, segment_id: SegmentId) {
+        if self.holding {
+            self.refill = Some(segment_id);
+        } else {
+            self.refill_copy(&segment_id);
         }
     }
 

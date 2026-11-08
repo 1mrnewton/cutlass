@@ -358,6 +358,22 @@ impl Shell {
         })
     }
 
+    /// Make clip `segment_id`'s copy for its speed when Optical flow is on
+    /// and the project lacks it. The speed is already stored, so a copy
+    /// that cannot start is only logged; the clip draws its own file.
+    pub(super) fn refill_copy(&mut self, segment_id: &SegmentId) {
+        let Some(draft) = self.draft() else {
+            return;
+        };
+        let levels = levels_of(draft, segment_id);
+        if levels.interpolate <= 0 {
+            return;
+        }
+        if let Err(error) = self.make_copies(&[(segment_id.clone(), levels)]) {
+            cutlass_logger::warn!("the clip's copy for its new speed was not started: {error}");
+        }
+    }
+
     /// The selected clip's algorithm `kind` level, 0 when it is off.
     fn copied_level(&self, kind: &str) -> i64 {
         let Some(draft) = self.draft() else {

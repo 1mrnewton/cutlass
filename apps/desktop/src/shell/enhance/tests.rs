@@ -284,3 +284,30 @@ fn apply_to_all_with_no_file_to_fill_is_refused_and_the_clips_stay() {
     shell.set_interpolate_all(0).unwrap();
     let _ = std::fs::remove_dir_all(&temp);
 }
+
+#[test]
+fn a_new_speed_waits_for_the_slider_to_be_let_go_before_its_copy_is_made() {
+    let (mut shell, temp) = open("speed", Some(b"a movie"));
+    flowed(&shell, &temp, "v", 0, 0, 30);
+    shell.select(Some("v".into()));
+    shell.set_interpolate(30).unwrap();
+    // Dragged: each value is stored, and the copy waits.
+    shell.hold_edits(true);
+    shell.set_speed(0.75).unwrap();
+    shell.set_speed(0.5).unwrap();
+    assert_eq!(shell.refill, Some("v".into()));
+    assert!(shell.job().is_none());
+    // The copy for half speed is there, so letting go has nothing to make.
+    flowed(&shell, &temp, "v", 0, 0, 30);
+    shell.hold_edits(false);
+    assert_eq!(shell.refill, None);
+    assert!(shell.job().is_none());
+    assert_eq!(shell.interpolate_level(), 30);
+    // A clip without Optical flow waits for nothing.
+    shell.set_interpolate(0).unwrap();
+    shell.hold_edits(true);
+    shell.set_speed(2.0).unwrap();
+    shell.hold_edits(false);
+    assert!(shell.job().is_none());
+    let _ = std::fs::remove_dir_all(&temp);
+}

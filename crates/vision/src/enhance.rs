@@ -274,7 +274,7 @@ pub fn convert_pytorch(from: &Path, to: &Path) -> Result<(), VisionError> {
 }
 
 /// Casts every weight to one precision.
-struct Precision(FloatDType);
+pub(crate) struct Precision(pub(crate) FloatDType);
 
 impl ModuleMapper for Precision {
     fn map_float<const D: usize>(&mut self, param: Param<Tensor<D>>) -> Param<Tensor<D>> {
@@ -283,16 +283,16 @@ impl ModuleMapper for Precision {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Rect {
-    left: u32,
-    top: u32,
-    width: u32,
-    height: u32,
+pub(crate) struct Rect {
+    pub(crate) left: u32,
+    pub(crate) top: u32,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
 }
 
 impl Rect {
     /// `self` with `by` more on each side, inside a `width` by `height` frame.
-    fn grown(self, by: u32, width: u32, height: u32) -> Self {
+    pub(crate) fn grown(self, by: u32, width: u32, height: u32) -> Self {
         let left = self.left.saturating_sub(by);
         let top = self.top.saturating_sub(by);
         let right = (self.left + self.width + by).min(width);
@@ -345,7 +345,7 @@ fn planes(image: &Image<'_>, rect: Rect) -> Vec<f32> {
     chw
 }
 
-fn to_byte(value: f32) -> u8 {
+pub(crate) fn to_byte(value: f32) -> u8 {
     if value.is_nan() {
         return 0;
     }

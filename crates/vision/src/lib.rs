@@ -11,9 +11,13 @@
 //!
 //! The second is Enhance quality: [`Enhancer`] makes a frame four times
 //! larger and repairs blur, noise and compression on the way.
+//!
+//! The third is Reduce image noise: [`Denoiser`] cleans each frame of a
+//! clip from the frames around it, so the noise it takes out stays still.
 
 #![forbid(unsafe_code)]
 
+mod denoise;
 mod device;
 mod enhance;
 mod enhance_job;
@@ -26,6 +30,10 @@ mod mobile_sam;
 use std::fmt;
 use std::path::PathBuf;
 
+pub use denoise::{
+    DENOISE_MAX_SIDE, DENOISE_WEIGHTS, DenoiseStream, Denoiser, MAX_NOISE, MIN_NOISE,
+    convert_fastdvdnet,
+};
 pub use device::{Compute, gpu_available, keep_kernels_in};
 pub use enhance::{ENHANCE_MAX_SIDE, ENHANCE_WEIGHTS, Enhanced, Enhancer, SCALE, convert_pytorch};
 pub use enhance_job::{EnhanceJobError, enhance_clip, enhanced_size};

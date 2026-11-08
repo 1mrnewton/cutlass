@@ -4394,8 +4394,9 @@ impl Shell {
     /// Hold the frame under the playhead, or the clip's first frame when the
     /// playhead is elsewhere. A second click plays the clip again.
     ///
-    /// The hold is stored on the video. Another clip that uses that same media
-    /// holds the same frame. One undo restores the previous picture.
+    /// The hold is stored on the clip's video; a video other clips share is
+    /// copied for this clip first, so only it freezes. One undo restores the
+    /// previous picture.
     pub fn toggle_freeze(&mut self) -> Result<(), ShellError> {
         let Some(segment_id) = self.selected().cloned() else {
             return Err(if self.session.is_none() {

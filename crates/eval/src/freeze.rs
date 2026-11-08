@@ -19,8 +19,8 @@ pub enum FreezeMiss {
 /// frozen; otherwise the frame under `playhead`, or the clip's first frame
 /// when the playhead is elsewhere.
 ///
-/// The hold is stored on the video, so another clip that uses the same
-/// media holds the same frame.
+/// The hold is stored on the clip's video. When other clips share that
+/// video, the edit gives this clip its own copy first, so only it freezes.
 pub fn freeze_toggle(
     draft: &Draft,
     segment_id: &SegmentId,

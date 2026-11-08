@@ -15,6 +15,7 @@ use cutlass_encode::{EncodeFactory, Encoder, PictureInput};
 
 use crate::decode::{JpegDecoder, decode_jpeg, read_jpeg_info};
 use crate::encode::{JpegEncoder, encode_jpeg};
+use crate::image::{Tables, decode_image};
 use crate::tables::{AC_LUMA_COUNTS, AC_LUMA_SYMBOLS, DC_LUMA_COUNTS, DC_LUMA_SYMBOLS};
 
 fn params(extra: &[u8]) -> CodecParams {
@@ -652,6 +653,147 @@ fn an_independent_stream_matches_size_format_and_count() {
     let image = decode(&mjpeg).expect("ffmpeg");
     assert_eq!((image.width, image.height), (8, 8));
     assert_eq!(image.samples.len(), 8 * 8 * 3);
+}
+
+/// Detailed odd-sized RGB: gradients, hard edges, and noise.
+fn detailed_rgb(width: u32, height: u32) -> Vec<u8> {
+    let mut rng = Rng(0x6a70_6567);
+    let mut bytes = Vec::with_capacity((width * height * 3) as usize);
+    for y in 0..height {
+        for x in 0..width {
+            let noise = (rng.next() >> 56) as u32 % 48;
+            let edge = if (x / 7 + y / 5) % 2 == 0 { 200 } else { 30 };
+            bytes.push(((x * 255 / width.max(1)) as u8).wrapping_add(noise as u8));
+            bytes.push(((edge + noise) % 256) as u8);
+            bytes.push(((y * 255 / height.max(1) + noise / 2) % 256) as u8);
+        }
+    }
+    bytes
+}
+
+fn p6(width: u32, height: u32, rgb: &[u8]) -> Vec<u8> {
+    let mut file = format!("P6\n{width} {height}\n255\n").into_bytes();
+    file.extend_from_slice(rgb);
+    file
+}
+
+/// Pixel bytes of a binary PPM or PGM.
+fn pnm_pixels(file: &[u8]) -> Vec<u8> {
+    let mut fields = 0;
+    let mut at = 0;
+    while fields < 4 {
+        while file[at].is_ascii_whitespace() {
+            at += 1;
+        }
+        while !file[at].is_ascii_whitespace() {
+            at += 1;
+        }
+        fields += 1;
+    }
+    file[at + 1..].to_vec()
+}
+
+fn djpeg_int(djpeg: &Path, jpeg: &[u8]) -> Vec<u8> {
+    let out = Command::new(djpeg)
+        .args(["-dct", "int"])
+        .output_from(jpeg)
+        .expect("djpeg");
+    assert!(out.status.success(), "{out:?}");
+    assert!(
+        out.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    pnm_pixels(&out.stdout)
+}
+
+fn assert_matches_libjpeg(cjpeg: &Path, djpeg: &Path, source: &[u8], args: &[&str]) {
+    let out = Command::new(cjpeg)
+        .args(args)
+        .output_from(source)
+        .expect("cjpeg");
+    assert!(out.status.success(), "{args:?} {out:?}");
+    let expected = djpeg_int(djpeg, &out.stdout);
+    let decoded = decode_image(&out.stdout, &mut Tables::new()).expect("decode");
+    let ours = decoded.image.to_rgb().expect("rgb");
+    assert_eq!(decoded.len, out.stdout.len(), "{args:?}");
+    assert_eq!(ours.len(), expected.len(), "{args:?}");
+    let differing = ours.iter().zip(&expected).filter(|(a, b)| a != b).count();
+    assert_eq!(
+        differing, 0,
+        "{args:?}: {differing} samples differ from djpeg -dct int"
+    );
+}
+
+const LIBJPEG_LAYOUTS: [&[&str]; 10] = [
+    &["-sample", "1x1"],
+    &["-sample", "2x1"],
+    &["-sample", "2x2"],
+    &["-sample", "1x2"],
+    &["-grayscale"],
+    &["-sample", "2x2", "-restart", "2"],
+    &["-sample", "2x2", "-progressive"],
+    &["-sample", "2x1", "-optimize"],
+    &["-sample", "2x2", "-quality", "100"],
+    &["-sample", "2x2", "-quality", "5"],
+];
+
+#[test]
+fn the_integer_idct_and_upsampling_match_libjpeg() {
+    let (Some(cjpeg), Some(djpeg)) = (tool("cjpeg"), tool("djpeg")) else {
+        require_or_skip("cjpeg and djpeg");
+        return;
+    };
+    let source = p6(67, 45, &detailed_rgb(67, 45));
+    for args in LIBJPEG_LAYOUTS {
+        assert_matches_libjpeg(&cjpeg, &djpeg, &source, args);
+    }
+}
+
+#[test]
+fn a_real_frame_matches_libjpeg_when_the_folder_is_present() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let Some(checkout) = root.ancestors().nth(3) else {
+        return;
+    };
+    let folder = checkout.join("../local-files");
+    let (Some(ffmpeg), Some(cjpeg), Some(djpeg)) = (tool("ffmpeg"), tool("cjpeg"), tool("djpeg"))
+    else {
+        return;
+    };
+    let Some(video) = first_video(&folder) else {
+        return;
+    };
+    let out = Command::new(&ffmpeg)
+        .args(["-v", "error", "-i"])
+        .arg(&video)
+        .args(["-frames:v", "1", "-f", "image2pipe", "-vcodec", "ppm", "-"])
+        .output()
+        .expect("ffmpeg");
+    assert!(out.status.success(), "{out:?}");
+    for args in [
+        &["-sample", "2x2"][..],
+        &["-sample", "2x1", "-restart", "1"],
+        &["-sample", "1x1", "-progressive"],
+    ] {
+        assert_matches_libjpeg(&cjpeg, &djpeg, &out.stdout, args);
+    }
+}
+
+#[test]
+fn reciprocal_quantization_matches_division() {
+    for step in 1..=255u16 {
+        let divisor = i32::from(step) * 8;
+        let recip = (1u64 << 32).div_ceil(u64::from(step) << 3);
+        for value in -16_384i32..=16_384 {
+            let expected = (value.abs() + divisor / 2) / divisor * value.signum();
+            assert_eq!(
+                crate::compress::divide(value, step, recip),
+                expected,
+                "{value}/{step}"
+            );
+        }
+    }
 }
 
 #[test]

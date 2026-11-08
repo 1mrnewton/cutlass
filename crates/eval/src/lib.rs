@@ -29,6 +29,7 @@ mod nest;
 mod sample;
 mod scenes;
 mod sources;
+mod stable;
 mod text;
 mod track;
 mod transition;
@@ -50,6 +51,7 @@ pub use gpu::{Composed, FrameLayers, GpuBackdrop, GpuLayer, GpuSource, YuvSample
 pub use heard::{ClipAsk, Heard};
 pub use media::OpenClips;
 pub use scenes::{blend_blocks, kept_cuts, scene_split_times};
+pub use stable::{StableAsk, StableError, measure_camera, stable_ask};
 pub use text::{text_size, text_size_at};
 pub use track::{TrackAsk, TrackError, TrackSpan, path_in_clip, track_clip};
 

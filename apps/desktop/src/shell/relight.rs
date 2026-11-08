@@ -19,7 +19,7 @@ use super::{Landing, Shell, ShellError};
 pub(crate) const RELIGHT_JOB: &str = "Relight";
 
 /// The folder in `Models` holding the depth model.
-const RELIGHT_FOLDER: &str = "relight";
+pub(super) const RELIGHT_FOLDER: &str = "relight";
 
 impl Shell {
     /// The selected clip, when it is a movie that can be relit.

@@ -42,8 +42,39 @@ pub struct MaterialVideo {
     /// Held source frame. Absent and null stay unset.
     #[serde(default)]
     pub freeze: Option<FreezeInfo>,
+    /// Steadying. Absent and null are off.
+    #[serde(default)]
+    pub stable: Option<VideoStable>,
     #[serde(flatten, default)]
     pub rest: Map<String, Value>,
+}
+
+/// How a clip is steadied: the reference editor's `stable` block, a level
+/// and the file of corrections.
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+pub struct VideoStable {
+    /// 1 cuts least, 2 is the recommended level, 3 is the most stable.
+    /// 0 or below is off.
+    #[serde(default, rename = "stable_level")]
+    pub level: i64,
+    /// The measured camera path in the project folder, once there is one.
+    #[serde(default)]
+    pub matrix_path: String,
+    #[serde(flatten, default)]
+    pub rest: Map<String, Value>,
+}
+
+impl VideoStable {
+    /// Least cut away.
+    pub const MINIMUM_CUT: i64 = 1;
+    pub const RECOMMENDED: i64 = 2;
+    pub const MOST_STABLE: i64 = 3;
+
+    /// Whether the clip is steadied.
+    #[must_use]
+    pub fn is_on(&self) -> bool {
+        self.level > 0
+    }
 }
 
 /// A crop quad. Each corner is an `x` and a `y`. Zero is the empty value.
@@ -110,6 +141,7 @@ impl Default for MaterialVideo {
             reverse_path: String::new(),
             reverse_intensifies_path: String::new(),
             freeze: None,
+            stable: None,
             rest: Map::new(),
         }
     }
@@ -142,5 +174,25 @@ mod tests {
         let freeze = held.freeze.unwrap();
         assert_eq!(freeze.source_material_id, "src");
         assert_eq!(freeze.timestamp, Micros(1500));
+    }
+
+    #[test]
+    fn a_stable_block_reads_and_writes_its_level_and_keeps_unknown_keys() {
+        let video: MaterialVideo = serde_json::from_str(
+            r#"{"stable":{"stable_level":2,"matrix_path":"Resources/video_stable/a.json","time_range":{"start":0,"duration":5}}}"#,
+        )
+        .unwrap();
+        let stable = video.stable.clone().unwrap();
+        assert_eq!(stable.level, VideoStable::RECOMMENDED);
+        assert!(stable.is_on());
+        assert_eq!(stable.matrix_path, "Resources/video_stable/a.json");
+        assert!(stable.rest.contains_key("time_range"));
+        let back: MaterialVideo =
+            serde_json::from_str(&serde_json::to_string(&video).unwrap()).unwrap();
+        assert_eq!(back, video);
+        let off: MaterialVideo = serde_json::from_str(r#"{"stable":{"stable_level":0}}"#).unwrap();
+        assert!(!off.stable.unwrap().is_on());
+        let null: MaterialVideo = serde_json::from_str(r#"{"stable":null}"#).unwrap();
+        assert!(null.stable.is_none());
     }
 }

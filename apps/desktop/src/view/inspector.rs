@@ -195,8 +195,8 @@ fn video_panel(
             position_size(shell, ui, state, inspection, "Rotate");
             blend(shell, ui, state, inspection, true);
             stabilize(shell, ui, state);
+            enhance_quality(shell, ui, state);
             for label in [
-                "Enhance quality",
                 "Noise reduction",
                 "Optical flow",
                 "AI remove",
@@ -886,6 +886,65 @@ fn stabilize(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState) {
         });
         if let Some(value) = picked.filter(|value| *value != level) {
             send(shell, move |shell| shell.set_stable(value));
+        }
+    });
+}
+
+/// The Enhance quality levels, as the stored level and the name shown.
+const ENHANCE_LEVELS: [(i64, &str); 2] = [
+    (cutlass_model::Algorithm::HD, "HD"),
+    (cutlass_model::Algorithm::UHD, "UHD"),
+];
+
+/// Enhance quality: on, it makes the clip's enhanced copy at a level as a
+/// job, unless the project has one; the job shows its progress here.
+fn enhance_quality(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState) {
+    let level = shell.enhance_level();
+    let header = section(
+        ui,
+        state,
+        "enhance",
+        "Enhance quality",
+        Some((level > 0, true)),
+        false,
+    );
+    if header.toggled {
+        let next = if level > 0 {
+            0
+        } else {
+            cutlass_model::Algorithm::HD
+        };
+        send(shell, move |shell| shell.set_enhance(next));
+    }
+    if !header.open || level <= 0 {
+        return;
+    }
+    let progress = shell.enhance_progress();
+    body(ui, |ui| {
+        if let Some(done) = progress {
+            note(ui, &format!("Processing {:.1}%", done * 100.0));
+        }
+        let shown = ENHANCE_LEVELS
+            .iter()
+            .find(|(value, _)| *value == level)
+            .map_or("HD", |(_, name)| name);
+        let mut picked = None;
+        label_row(ui, "Level", |ui| {
+            egui::ComboBox::from_id_salt("enhance-level")
+                .selected_text(shown)
+                .show_ui(ui, |ui| {
+                    for (value, name) in ENHANCE_LEVELS {
+                        if ui
+                            .add(ui::Choice::new(value == level, name).wide())
+                            .clicked()
+                        {
+                            picked = Some(value);
+                        }
+                    }
+                });
+        });
+        if let Some(value) = picked.filter(|value| *value != level) {
+            send(shell, move |shell| shell.set_enhance(value));
         }
     });
 }

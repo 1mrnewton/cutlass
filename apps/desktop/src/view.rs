@@ -9345,6 +9345,61 @@ mod tests {
     }
 
     #[test]
+    fn an_enhanced_clip_shows_its_level_under_enhance_quality() {
+        use cutlass_model::{Algorithm, Draft, MaterialVideo, Segment, TimeRange, VideoAlgorithm};
+        let temp =
+            std::env::temp_dir().join(format!("cutlass-enhance-view-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let mut draft = Draft::empty("draft");
+        draft.materials.videos.push(MaterialVideo {
+            video_algorithm: Some(VideoAlgorithm {
+                algorithms: vec![Algorithm {
+                    kind: Algorithm::QUALITY_ENHANCE.into(),
+                    level: Algorithm::UHD,
+                    ..Algorithm::default()
+                }],
+                ..VideoAlgorithm::default()
+            }),
+            ..MaterialVideo::new("movie")
+        });
+        draft.tracks[0]
+            .segments
+            .push(Segment::new("main", "movie", TimeRange::new(0, 2_000_000)));
+        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        shell.select(Some(SegmentId::new("main")));
+        assert_eq!(shell.enhance_level(), Algorithm::UHD);
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let mut lines = Vec::new();
+        for _ in 0..2 {
+            view.inspector.focus(inspector::Focus {
+                tab: 0,
+                page: 0,
+                section: Some("enhance"),
+            });
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 2400.0))),
+                    ..Default::default()
+                },
+                |ui| show(&mut shell, ui, &mut view, None),
+            );
+            lines = galleys(&output);
+            output.textures_delta.clear();
+        }
+        for label in ["Enhance quality", "Level", "UHD"] {
+            assert!(lines.iter().any(|line| line == label), "{label}: {lines:?}");
+        }
+        assert!(
+            !lines.iter().any(|line| line.starts_with("Processing")),
+            "no job runs"
+        );
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+    #[test]
     fn each_kind_of_clip_paints_its_own_inspector_panel() {
         use cutlass_model::{
             Draft, MaterialAudio, MaterialEffect, MaterialText, MaterialVideo, RawMaterial,

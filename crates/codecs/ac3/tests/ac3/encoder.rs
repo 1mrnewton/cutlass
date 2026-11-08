@@ -6,7 +6,7 @@ use std::f64::consts::PI;
 
 use cutlass_ac3::{
     Ac3Decoder, Ac3Encoder, Dec3, DynamicRange, ENCODER_DELAY, EncoderConfig, EncoderMetadata,
-    Format, MixCodes, Options, StreamType, ac3_bit_rate, probe,
+    Extension, Format, MixCodes, Options, StreamType, ac3_bit_rate, probe,
 };
 use cutlass_decode::{Channel, ChannelLayout, CodecError, CodecId, Decoder, Packet, Pcm, SideData};
 use cutlass_encode::{AudioInput, Encoder};
@@ -95,8 +95,12 @@ struct Decoded {
 }
 
 fn decode(codec: CodecId, packets: &[Packet]) -> Decoded {
+    decode_with(codec, packets, Options::default())
+}
+
+fn decode_with(codec: CodecId, packets: &[Packet], options: Options) -> Decoded {
     let params = cutlass_decode::CodecParams::audio(codec, 0, ChannelLayout::stereo());
-    let mut decoder = Ac3Decoder::with_options(&params, Options::default()).expect("decoder");
+    let mut decoder = Ac3Decoder::with_options(&params, options).expect("decoder");
     let mut outputs = Vec::new();
     for packet in packets {
         outputs.extend(decoder.push(packet).expect("decode"));
@@ -692,6 +696,11 @@ fn a_loud_block_is_cut_to_half_scale() {
     }
 }
 
+fn channel_peak(pcm: &[f32], channels: usize, index: usize, span: std::ops::Range<usize>) -> f32 {
+    let channel = deinterleave(pcm, channels, index);
+    peak(&channel[span])
+}
+
 fn peak(samples: &[f32]) -> f32 {
     samples
         .iter()
@@ -821,6 +830,67 @@ fn a_seven_point_one_program_keeps_each_speaker() {
         });
         assert!(found, "ffmpeg lost {freq}");
     }
+}
+
+/// Annex E 3.8.5: the complete mix uses the dependent frame's range words.
+/// A loud center still cuts when the back pair is quiet, and a core decode
+/// keeps the independent frame's own word.
+#[test]
+fn a_complete_mix_uses_the_dependent_range_word() {
+    let rate = 48_000u32;
+    let channels = [L, R, C, Lfe, Bl, Br, Sl, Sr];
+    let amplitude = [0.05, 0.05, 0.9, 0.05, 0.05, 0.05, 0.05, 0.05];
+    let frames = rate as usize;
+    let mut pcm = Vec::with_capacity(frames * channels.len());
+    for n in 0..frames {
+        for (channel, &amp) in channels.iter().zip(&amplitude) {
+            let t = n as f64 / f64::from(rate);
+            pcm.push((amp * (2.0 * PI * tone(*channel) * t).sin()) as f32);
+        }
+    }
+    let packets = encode(config(Format::Eac3, rate, &channels, 1_024_000), &pcm);
+    let full = decode(CodecId::Eac3, &packets);
+    assert_eq!(full.channels, channels);
+    let span = 4_096..frames - 4_096;
+    let full_peak = channel_peak(&full.pcm, channels.len(), 2, span.clone());
+    assert!(full_peak > 0.7, "full {full_peak}");
+    for mode in [
+        DynamicRange::Line {
+            cut: 1.0,
+            boost: 1.0,
+        },
+        DynamicRange::Heavy,
+    ] {
+        let heard = decode_with(
+            CodecId::Eac3,
+            &packets,
+            Options {
+                dynamic_range: mode,
+                ..Options::default()
+            },
+        );
+        let cut = channel_peak(&heard.pcm, channels.len(), 2, span.clone());
+        assert!((0.35..0.65).contains(&cut), "{mode:?} {cut}");
+    }
+    let core = decode_with(
+        CodecId::Eac3,
+        &packets,
+        Options {
+            dynamic_range: DynamicRange::Line {
+                cut: 1.0,
+                boost: 1.0,
+            },
+            extension: Extension::Core,
+            ..Options::default()
+        },
+    );
+    let center = core
+        .channels
+        .iter()
+        .position(|channel| *channel == C)
+        .expect("center");
+    let core_peak = channel_peak(&core.pcm, core.channels.len(), center, span);
+    assert!((0.35..0.65).contains(&core_peak), "core {core_peak}");
 }
 
 fn stands_out(channel: &[f32], rate: u32, own: f64, hz: &[f64]) -> bool {

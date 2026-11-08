@@ -11,7 +11,9 @@
 //! A block
 //! peaking above half scale sends a dynamic range word that brings it back
 //! to half scale, and the frame sends a heavy-compression word for the
-//! same cut. Delta bit
+//! same cut. On a 7.1 program the dependent frame carries the peak of the
+//! whole mix, and the independent frame keeps the peak of its own channels.
+//! Delta bit
 //! allocation is written only when a block carries
 //! segments; the rate control leaves every segment empty. Spectral extension
 //! replaces the top bins of a low-rate E-AC-3 frame. A steady six-block
@@ -21,6 +23,7 @@ mod analysis;
 mod plan;
 mod write;
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -354,6 +357,10 @@ pub struct Ac3Encoder {
     chanmap: Option<u16>,
     /// The back-pair frame of a 7.1 program.
     program: Option<Program>,
+    /// Block peaks of frames this dependent substream has not coded yet.
+    /// The program writes one entry per frame so the complete mix follows
+    /// Annex E 3.8.5. Empty means this substream uses its own samples.
+    program_peaks: VecDeque<Vec<f32>>,
     /// AC-3 delta bit allocation copied onto each frame's first block.
     /// The rate control leaves this empty.
     #[cfg(test)]
@@ -506,6 +513,7 @@ impl Ac3Encoder {
             rate: bit_rate,
             chanmap,
             program: None,
+            program_peaks: VecDeque::new(),
         })
     }
 
@@ -735,16 +743,22 @@ impl Ac3Encoder {
     }
 
     /// Cut a block that peaks above half scale. A repeated level reuses the word.
-    fn range_words(&mut self, from: usize) {
+    /// `forced` is the program peak of each block, for a dependent substream.
+    fn range_words(&mut self, from: usize, forced: Option<&[f32]>) {
         let mut in_force = 0u8;
         for blk in 0..self.shape.blocks {
-            let at = from + blk * COEFS;
-            let mut peak = 0.0f32;
-            for channel in &self.pending {
-                for &sample in &channel[at..at + COEFS] {
-                    peak = peak.max(sample.abs());
+            let peak = if let Some(peaks) = forced {
+                peaks.get(blk).copied().unwrap_or(0.0)
+            } else {
+                let at = from + blk * COEFS;
+                let mut peak = 0.0f32;
+                for channel in &self.pending {
+                    for &sample in &channel[at..at + COEFS] {
+                        peak = peak.max(sample.abs());
+                    }
                 }
-            }
+                peak
+            };
             let code = if peak > 0.5 && peak.is_finite() {
                 dynrng_code(0.5 / peak)
             } else {
@@ -789,12 +803,13 @@ impl Ac3Encoder {
             self.blocks[blk] = block;
         }
         let size = self.next_size();
-        let heavy = heavy_word(&self.pending, from, self.shape.blocks);
+        let forced = self.program_peaks.front().cloned();
+        let heavy = heavy_word(&self.pending, from, self.shape.blocks, forced.as_deref());
         let mut shape = self.shape;
         let mut mode = Mode::Adaptive;
         let (snr, skip) = loop {
             plan::plan(&shape, &mut self.blocks, mode);
-            self.range_words(from);
+            self.range_words(from, forced.as_deref());
             #[cfg(test)]
             if !shape.eac3
                 && let Some(delta) = self.forced_delta
@@ -877,7 +892,24 @@ impl Ac3Encoder {
             self.first = false;
             packet.side.push(SideData::Config(self.config_record()));
         }
+        self.note_program_peaks(from);
+        if forced.is_some() {
+            self.program_peaks.pop_front();
+        }
         Ok(packet)
+    }
+
+    /// Queue this frame's program peaks for the dependent substream.
+    fn note_program_peaks(&mut self, from: usize) {
+        let blocks = self.shape.blocks;
+        let peaks = self.program.as_ref().map(|program| {
+            combined_block_peaks(&self.pending, &program.backs.pending, from, blocks)
+        });
+        if let Some(peaks) = peaks
+            && let Some(program) = &mut self.program
+        {
+            program.backs.program_peaks.push_back(peaks);
+        }
     }
 
     /// Masks for every slot that sends exponents, then the largest SNR
@@ -1099,21 +1131,60 @@ impl Search<'_> {
 const SIDE_MARGIN: usize = 64;
 
 /// One heavy-compression word when the frame peaks above half scale.
-fn heavy_word(pending: &[Vec<f32>], from: usize, blocks: usize) -> Option<u8> {
-    let samples = blocks * COEFS;
-    let mut peak = 0.0f32;
-    for channel in pending {
-        let span = channel.get(from..from + samples)?;
-        for &sample in span {
-            peak = peak.max(sample.abs());
+/// `forced` is one peak per block for a dependent substream.
+fn heavy_word(
+    pending: &[Vec<f32>],
+    from: usize,
+    blocks: usize,
+    forced: Option<&[f32]>,
+) -> Option<u8> {
+    let peak = if let Some(peaks) = forced {
+        peaks.iter().copied().fold(0.0, f32::max)
+    } else {
+        let samples = blocks * COEFS;
+        let mut peak = 0.0f32;
+        for channel in pending {
+            let span = channel.get(from..from + samples)?;
+            for &sample in span {
+                peak = peak.max(sample.abs());
+            }
         }
-    }
+        peak
+    };
     if peak > 0.5 && peak.is_finite() {
         let code = compr_code(0.5 / peak);
         (code != 0).then_some(code)
     } else {
         None
     }
+}
+
+/// The louder of the independent channels and the back pair, one peak per block.
+fn combined_block_peaks(
+    core: &[Vec<f32>],
+    backs: &[Vec<f32>],
+    from: usize,
+    blocks: usize,
+) -> Vec<f32> {
+    (0..blocks)
+        .map(|blk| {
+            let at = from + blk * COEFS;
+            block_peak(core, at).max(block_peak(backs, at))
+        })
+        .collect()
+}
+
+fn block_peak(channels: &[Vec<f32>], at: usize) -> f32 {
+    let mut peak = 0.0f32;
+    for channel in channels {
+        let Some(span) = channel.get(at..at + COEFS) else {
+            continue;
+        };
+        for &sample in span {
+            peak = peak.max(sample.abs());
+        }
+    }
+    peak
 }
 
 /// Side information of one coarse exponent set and no coupling.

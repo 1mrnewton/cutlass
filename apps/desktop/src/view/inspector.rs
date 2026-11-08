@@ -46,7 +46,7 @@ pub(super) struct InspectorState {
     pub(super) page: usize,
     pub(super) open: HashSet<String>,
     /// Typed text in a number or word field while it has focus.
-    fields: HashMap<String, String>,
+    pub(super) fields: HashMap<String, String>,
     /// A slider or color being dragged; it is sent when the pointer lets go.
     live: HashMap<String, f64>,
     colors: HashMap<String, Color32>,
@@ -199,12 +199,12 @@ fn video_panel(
             reduce_noise(shell, ui, state);
             optical_flow(shell, ui, state);
             super::relight::relight(shell, ui, state);
+            super::reframe::auto_reframe(shell, ui, state);
             for label in [
                 "AI remove",
                 "AI expand",
                 "AI remix",
                 "Lip sync",
-                "Auto reframe",
                 "Removing video flickers",
                 "AI movement",
                 "Camera tracking",
@@ -3128,7 +3128,7 @@ pub(super) fn row_label(ui: &mut Ui, label: &str) {
     );
 }
 
-fn label_row(ui: &mut Ui, label: &str, add: impl FnOnce(&mut Ui)) {
+pub(super) fn label_row(ui: &mut Ui, label: &str, add: impl FnOnce(&mut Ui)) {
     ui.horizontal(|ui| {
         row_label(ui, label);
         add(ui);

@@ -24,6 +24,7 @@ mod audio;
 mod grade;
 mod inspector;
 mod mask;
+mod reframe;
 mod relight;
 mod remove_bg;
 mod retouch;
@@ -9607,6 +9608,79 @@ mod tests {
         for label in ["Custom", "Strength", "Color", "Angle", "90°"] {
             assert!(lines.iter().any(|line| line == label), "{label}: {lines:?}");
         }
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn a_reframed_clip_shows_its_shape_settings_and_apply_under_auto_reframe() {
+        use cutlass_model::{Algorithm, Draft, MaterialVideo, Segment, TimeRange, VideoAlgorithm};
+        let temp =
+            std::env::temp_dir().join(format!("cutlass-reframe-view-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let mut draft = Draft::empty("draft");
+        draft.materials.videos.push(MaterialVideo {
+            video_algorithm: Some(VideoAlgorithm {
+                algorithms: vec![Algorithm {
+                    kind: Algorithm::AUTO_REFRAME.into(),
+                    level: 1,
+                    ratio: "1:1".into(),
+                    stability: Some(3),
+                    speed: Some(1),
+                    ..Algorithm::default()
+                }],
+                ..VideoAlgorithm::default()
+            }),
+            ..MaterialVideo::new("movie")
+        });
+        draft.tracks[0]
+            .segments
+            .push(Segment::new("main", "movie", TimeRange::new(0, 2_000_000)));
+        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        shell.select(Some(SegmentId::new("main")));
+        assert_eq!(shell.reframe().unwrap().ratio, "1:1");
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let mut lines = Vec::new();
+        for _ in 0..2 {
+            view.inspector.focus(inspector::Focus {
+                tab: 0,
+                page: 0,
+                section: Some("reframe"),
+            });
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 2400.0))),
+                    ..Default::default()
+                },
+                |ui| show(&mut shell, ui, &mut view, None),
+            );
+            lines = galleys(&output);
+            output.textures_delta.clear();
+        }
+        for label in [
+            "Auto reframe",
+            "Aspect ratio",
+            "1:1",
+            "Image stabilization",
+            "Stable",
+            "Fast",
+            "Apply",
+        ] {
+            assert!(lines.iter().any(|line| line == label), "{label}: {lines:?}");
+        }
+        assert!(
+            lines.iter().any(|line| line.starts_with("Camera moving")),
+            "{lines:?}"
+        );
+        assert!(
+            !lines
+                .iter()
+                .any(|line| line.starts_with("Finding the subject")),
+            "no job runs"
+        );
         let _ = std::fs::remove_dir_all(&temp);
     }
 

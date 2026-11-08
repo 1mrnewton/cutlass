@@ -74,7 +74,7 @@ pub use filmstrip::{FilmTile, MAX_TILES, film_tiles};
 pub use fling::{
     FLING_DECAY, FLING_LIMIT, FLING_REST, FLING_START, FlingStep, fling_start, fling_step,
 };
-pub use freeze::freeze_requests;
+pub use freeze::{FreezeImage, freeze_requests};
 pub use gesture::{
     DropGesture, DropOutcome, GestureError, GestureOutcome, MoveGesture, Placement, TrimGesture,
     TrimPlan, drop_gesture, move_gesture, placement, trim_gesture,

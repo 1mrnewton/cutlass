@@ -1,8 +1,16 @@
 //! Freeze: which frame a still clip holds, and where it goes.
 
-use cutlass_model::{Draft, FreezeInfo, MaterialRef, Micros, SegmentId};
+use std::path::Path;
+
+use cutlass_encode::{
+    BitDepth, CodecId, CodecParams, ColorType, EncodeFactory, PictureInput, StillImage,
+};
+use cutlass_engine::{ReaderFactory, decoded_picture};
+use cutlass_model::{Draft, FreezeInfo, MaterialRef, Micros, SegmentId, TimeRange};
+use cutlass_picture::Picture;
 
 use crate::freeze_timestamp;
+use crate::media::orient;
 
 /// A playhead this close to a clip's edge freezes at that edge: the still
 /// goes before or after the clip, which is not split.
@@ -58,6 +66,9 @@ pub fn freeze_point(
     if video.freeze.is_some() {
         return Err(FreezeMiss::AlreadyHeld);
     }
+    if video.kind == "photo" {
+        return Err(FreezeMiss::NotVideo);
+    }
     let start = segment.target.start.0;
     let end = segment.target.end().0;
     if playhead.0 < start || playhead.0 > end {
@@ -86,6 +97,48 @@ pub fn freeze_point(
             rest: Default::default(),
         },
     })
+}
+
+/// A held frame saved as a PNG, upright as the file asks it to be shown.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FrozenImage {
+    pub width: u32,
+    pub height: u32,
+    pub png: Vec<u8>,
+}
+
+/// The frame of the file at `path` at source time `at`, encoded as a PNG
+/// for a freeze still. `None` when the file cannot be read there or no PNG
+/// encoder is registered.
+#[must_use]
+pub fn freeze_image(
+    media: &ReaderFactory,
+    encoders: &EncodeFactory,
+    path: &Path,
+    at: Micros,
+) -> Option<FrozenImage> {
+    let mut opened = media.open(path).ok()?;
+    let display = opened.info().display;
+    let length = opened
+        .info()
+        .duration
+        .map_or(i64::MAX / 2, |end| end.0.max(1));
+    let held = opened.decode_at(at, &TimeRange::new(0, length)).ok()?;
+    let Picture::Cpu(bytes) = decoded_picture(&held.frame).ok()? else {
+        return None;
+    };
+    let bytes = orient(bytes, display)?;
+    let (width, height) = (bytes.width(), bytes.height());
+    let samples = bytes.rgba().iter().copied().map(u16::from).collect();
+    let image = StillImage::from_samples(width, height, ColorType::Rgba, BitDepth::Eight, samples)
+        .checked()
+        .ok()?;
+    let mut encoder = encoders
+        .open(&CodecParams::video(CodecId::Png, width, height))
+        .ok()?;
+    let packets = encoder.push_picture(&PictureInput { image }).ok()?;
+    let png = packets.into_iter().next()?.data;
+    Some(FrozenImage { width, height, png })
 }
 
 #[cfg(test)]

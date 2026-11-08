@@ -2659,6 +2659,7 @@ dependencies = [
  "cutlass-container",
  "cutlass-decode",
  "cutlass-effects",
+ "cutlass-encode",
  "cutlass-engine",
  "cutlass-generated",
  "cutlass-gpu",

@@ -4,9 +4,24 @@
 //! pieces, so the clip keeps all of its frames and the timeline grows by the
 //! still's length. At a clip's edge the still goes before or after it
 //! instead, with no split. Which frame and where come from the evaluator.
+//!
+//! The still is a photo: the held frame saved as a picture file, which the
+//! caller writes first. Its material keeps the freeze as a record of which
+//! frame of which file it came from.
 
-use cutlass_model::{Draft, FreezeInfo, MaterialRef, Micros, SegmentId, TimeRange, TrackAttribute};
-use cutlass_session::Request;
+use cutlass_model::{
+    Draft, FreezeInfo, MaterialRef, MaterialVideo, MetaType, Micros, SegmentId, TimeRange,
+    TrackAttribute,
+};
+use cutlass_session::{ImportedMedium, Request};
+
+/// The picture file a still shows, as stored in the draft.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FreezeImage {
+    pub path: String,
+    pub width: i32,
+    pub height: i32,
+}
 
 /// The requests that put a still of `freeze` at `at` for `duration`, as one
 /// undo step. `None` when the clip is not on the timeline, `at` is not on
@@ -15,14 +30,16 @@ use cutlass_session::Request;
 /// Later clips on the clip's row move right by `duration`, taking what is
 /// linked to them; a packed main row makes that room by itself. The still
 /// keeps the clip's look (position, scale, crop, filters) but plays at
-/// normal speed with no transition, animation, fade or keyframes. Its
-/// video is its own copy, so the clip it came from keeps playing.
-/// `fresh` makes an unused id from a prefix.
+/// normal speed with no transition, animation, fade or keyframes. It shows
+/// `image`, a new photo in the library that keeps the clip's crop and
+/// `freeze` as the record of its frame. `fresh` makes an unused id from a
+/// prefix.
 pub fn freeze_requests(
     draft: &Draft,
     segment_id: &SegmentId,
     at: Micros,
     freeze: FreezeInfo,
+    image: FreezeImage,
     duration: Micros,
     fresh: &mut dyn FnMut(&str) -> String,
 ) -> Option<Vec<Request>> {
@@ -80,13 +97,25 @@ pub fn freeze_requests(
             });
         }
     }
+    let Some(MaterialRef::Video(source)) = draft.materials.get(segment.material_id.as_str()) else {
+        return None;
+    };
     let still_id = SegmentId::new(fresh("freeze"));
+    let mut photo = MaterialVideo::new(fresh("mat"));
+    photo.kind = MetaType::Photo.as_str().to_owned();
+    photo.path = image.path;
+    photo.width = image.width;
+    photo.height = image.height;
+    photo.duration = MaterialVideo::MAPPING_DURATION.max(duration);
+    photo.crop = source.crop;
+    photo.crop_ratio.clone_from(&source.crop_ratio);
+    photo.crop_scale = source.crop_scale;
+    photo.freeze = Some(freeze);
     let mut still = segment.clone();
-    still.id = still_id.clone();
+    still.id = still_id;
+    still.material_id = photo.id.clone();
     still.target = TimeRange::new(at.0, duration.0);
-    // The held frame must lie in the still's source range, or the frame
-    // lookup refuses it and the still draws nothing.
-    still.source_range = Some(TimeRange::new(freeze.timestamp.0, duration.0));
+    still.source_range = Some(TimeRange::new(0, duration.0));
     still.speed = 1.0;
     still.reverse = false;
     still.group_id.clear();
@@ -103,13 +132,12 @@ pub fn freeze_requests(
             )
         )
     });
+    requests.push(Request::Import {
+        medium: ImportedMedium::Video(Box::new(photo)),
+    });
     requests.push(Request::Place {
         track_id: track.id.clone(),
         segment: Box::new(still),
-    });
-    requests.push(Request::SetFreeze {
-        segment_id: still_id,
-        freeze: Some(freeze),
     });
     Some(requests)
 }
@@ -155,6 +183,14 @@ mod tests {
         }
     }
 
+    fn image() -> FreezeImage {
+        FreezeImage {
+            path: "Resources/freeze.png".to_owned(),
+            width: 1920,
+            height: 1080,
+        }
+    }
+
     fn ids() -> impl FnMut(&str) -> String {
         let mut n = 0;
         move |prefix: &str| {
@@ -193,6 +229,7 @@ mod tests {
                 &"a".into(),
                 Micros(500_000),
                 held(500_000),
+                image(),
                 Micros(3_000_000),
                 &mut ids(),
             )
@@ -208,12 +245,25 @@ mod tests {
                 ],
                 "magnet {magnet}"
             );
-            let still = &session.draft().tracks[0].segments[1];
+            let draft = session.draft();
+            let still = &draft.tracks[0].segments[1];
             assert!(still.extra_material_refs.is_empty());
-            assert_eq!(still.source_range, Some(TimeRange::new(500_000, 3_000_000)));
+            assert_eq!(still.source_range, Some(TimeRange::new(0, 3_000_000)));
             assert_eq!(still.speed, 1.0);
+            let Some(MaterialRef::Video(photo)) = draft.materials.get(still.material_id.as_str())
+            else {
+                panic!("the still has no picture");
+            };
+            assert_eq!(photo.kind, "photo");
+            assert_eq!(photo.path, "Resources/freeze.png");
+            assert_eq!((photo.width, photo.height), (1920, 1080));
+            assert_eq!(photo.freeze, Some(held(500_000)));
+            let source = &draft.tracks[0].segments[0];
+            assert_eq!(source.material_id.as_str(), "v");
+            assert!(draft.materials.videos[0].freeze.is_none());
             session.undo().unwrap();
             assert_eq!(session.draft().tracks[0].segments.len(), 2);
+            assert_eq!(session.draft().materials.videos.len(), 1);
         }
     }
 
@@ -225,6 +275,7 @@ mod tests {
             &"a".into(),
             Micros(2_000_000),
             held(1_999_999),
+            image(),
             Micros(3_000_000),
             &mut ids(),
         )
@@ -245,6 +296,7 @@ mod tests {
             &"a".into(),
             Micros(0),
             held(0),
+            image(),
             Micros(1_000_000),
             &mut ids(),
         )
@@ -271,6 +323,7 @@ mod tests {
                     &"a".into(),
                     Micros(at),
                     held(0),
+                    image(),
                     Micros(duration),
                     &mut ids()
                 )
@@ -283,6 +336,7 @@ mod tests {
                 &"z".into(),
                 Micros(0),
                 held(0),
+                image(),
                 Micros(1),
                 &mut ids()
             )

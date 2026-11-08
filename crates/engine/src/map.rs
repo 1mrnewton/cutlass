@@ -266,7 +266,11 @@ fn material<'a>(draft: &'a Draft, segment: &Segment) -> Option<MaterialRef<'a>> 
 
 fn freeze_timestamp(draft: &Draft, segment: &Segment) -> Option<Micros> {
     match material(draft, segment) {
-        Some(MaterialRef::Video(video)) => video.freeze.as_ref().map(|freeze| freeze.timestamp),
+        // A still saved from a freeze keeps the hold as a record of its
+        // frame; the picture is already that frame.
+        Some(MaterialRef::Video(video)) if video.kind != "photo" => {
+            video.freeze.as_ref().map(|freeze| freeze.timestamp)
+        }
         _ => None,
     }
 }
@@ -831,6 +835,13 @@ mod tests {
         let map = placement_of(&draft, &draft.tracks[0].segments[0]).expect("constant");
         assert_eq!(map.freeze, Some(Micros(40)));
         assert_eq!(map_timeline(&map, Micros(10)), Ok(Micros(40)));
+
+        // A photo saved from a freeze shows its own picture; the hold is a
+        // record of the frame it came from.
+        draft.materials.videos[0].kind = "photo".to_owned();
+        let map = placement_of(&draft, &draft.tracks[0].segments[0]).expect("photo");
+        assert_eq!(map.freeze, None);
+        draft.materials.videos[0].kind = "video".to_owned();
 
         draft.materials.videos[0].freeze = None;
         draft.materials.speeds[0].mode = SpeedMode::Normal;

@@ -43,7 +43,9 @@ pub use cutlass_model::Micros;
 pub use frame::{
     EvalError, Fonts, NoFonts, Snapshot, frame, frame_in, layers_in, wait_export_frame,
 };
-pub use freeze::{FREEZE_DURATION, FREEZE_EDGE, FreezeMiss, FreezePoint, freeze_point};
+pub use freeze::{
+    FREEZE_DURATION, FREEZE_EDGE, FreezeMiss, FreezePoint, FrozenImage, freeze_image, freeze_point,
+};
 pub use gpu::{Composed, FrameLayers, GpuBackdrop, GpuLayer, GpuSource, YuvSamples};
 pub use heard::{ClipAsk, Heard};
 pub use media::OpenClips;

@@ -30,10 +30,10 @@ use cutlass_engine::{Thumb, ThumbKey, Thumbnails, Waveforms};
 use cutlass_eval::{ReaderFactory, SceneError, scene_cuts};
 use cutlass_export::{ProresProfile, SidecarKind};
 use cutlass_model::{
-    Crop, Draft, FrameRate, KindSwitches, MaterialAudio, MaterialId, MaterialRef, MaterialVideo,
-    MetaType, Micros, Segment, SegmentId, TimeRange, TimecodeLabel, TrackAttribute, TrackId,
-    TrackType, WordColumns, linkage_from_biz, source_time_at, track_holds_beats, visible_beats,
-    visible_marks,
+    Crop, Draft, FrameRate, FreezeInfo, KindSwitches, MaterialAudio, MaterialId, MaterialRef,
+    MaterialVideo, MetaType, Micros, Segment, SegmentId, TimeRange, TimecodeLabel, TrackAttribute,
+    TrackId, TrackType, WordColumns, linkage_from_biz, source_time_at, track_holds_beats,
+    visible_beats, visible_marks,
 };
 use cutlass_playback::{
     AudioHost, FilmCell, FrameCache, PLAY_FRAMES, Program, Transport, film_cells, media_file,
@@ -4508,7 +4508,7 @@ impl Shell {
     #[must_use]
     pub fn freeze_enabled(&self) -> bool {
         self.selected_video()
-            .is_some_and(|video| video.freeze.is_none())
+            .is_some_and(|video| video.freeze.is_none() && video.kind != "photo")
     }
 
     /// Put a still of the frame under the playhead into the timeline at the
@@ -4538,6 +4538,7 @@ impl Shell {
             )
         })?;
         self.refuse_locked(&segment_id)?;
+        let (stored, written) = self.save_freeze_image(&segment_id, &point.freeze)?;
         let mut next_id = self.next_id;
         let mut fresh = |prefix: &str| {
             next_id = next_id.saturating_add(1);
@@ -4548,19 +4549,61 @@ impl Shell {
             &segment_id,
             point.at,
             point.freeze,
+            stored,
             cutlass_eval::FREEZE_DURATION,
             &mut fresh,
         );
         self.next_id = next_id;
+        let mut written = CopyGuard(Some(written));
         let requests = requests
             .ok_or_else(|| ShellError::Unavailable("the clip is not on the timeline".to_owned()))?;
         let still = requests.iter().rev().find_map(|request| match request {
-            Request::SetFreeze { segment_id, .. } => Some(segment_id.clone()),
+            Request::Place { segment, .. } => Some(segment.id.clone()),
             _ => None,
         });
         self.apply_requests(&requests)?;
+        written.keep();
         self.select(still);
         Ok(())
+    }
+
+    /// Decode the frame `freeze` holds and save it as a PNG in the
+    /// project's `Resources` folder, named after the clip and the frame's
+    /// time. Returns the picture as the draft stores it and the file
+    /// written.
+    fn save_freeze_image(
+        &self,
+        segment_id: &SegmentId,
+        freeze: &FreezeInfo,
+    ) -> Result<(cutlass_editor::FreezeImage, PathBuf), ShellError> {
+        let project = self.path.clone().ok_or(ShellError::NoProject)?;
+        let unreadable =
+            || ShellError::Unavailable("the clip's frame could not be read".to_owned());
+        let source = self
+            .media_file(Some(&freeze.source_material_path))
+            .ok_or_else(unreadable)?;
+        let image =
+            cutlass_eval::freeze_image(&self.readers, &self.encoders, &source, freeze.timestamp)
+                .ok_or_else(unreadable)?;
+        let resources = project.join("Resources");
+        std::fs::create_dir_all(&resources).map_err(|error| ShellError::Io(error.to_string()))?;
+        let name = freeze_file_name(segment_id, freeze.timestamp);
+        let destination = unique_file(&resources, std::ffi::OsStr::new(&name))?;
+        std::fs::write(&destination, &image.png)
+            .map_err(|error| ShellError::Io(error.to_string()))?;
+        let stored = destination
+            .file_name()
+            .map(|file| format!("Resources/{}", file.to_string_lossy()))
+            .ok_or_else(|| ShellError::Io("the still has no name".to_owned()))?;
+        let size = |side: u32| i32::try_from(side).unwrap_or(i32::MAX);
+        Ok((
+            cutlass_editor::FreezeImage {
+                path: stored,
+                width: size(image.width),
+                height: size(image.height),
+            },
+            destination,
+        ))
     }
 
     /// The selected clip is a picture or a sound, so Reverse can flip it.
@@ -8574,6 +8617,29 @@ fn portable(path: &Path) -> String {
         .map(|component| component.as_os_str().to_string_lossy().into_owned())
         .collect::<Vec<_>>()
         .join("/")
+}
+
+/// `freeze_`, the clip id with anything but letters, digits, `_` and `-`
+/// as `_`, then the held time in microseconds: the reference's name for a
+/// freeze picture.
+fn freeze_file_name(segment_id: &SegmentId, at: Micros) -> String {
+    let id: String = segment_id
+        .as_str()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let id = if id.is_empty() {
+        "segment".to_owned()
+    } else {
+        id
+    };
+    format!("freeze_{id}_{}.png", at.0)
 }
 
 fn unique_file(directory: &Path, name: &std::ffi::OsStr) -> Result<PathBuf, ShellError> {
@@ -17777,7 +17843,7 @@ mod tests {
         draft.canvas_config.height = 1;
         draft.config.maintrack_adsorb = false;
         let mut video = MaterialVideo::new("picture");
-        video.path = "clip".to_owned();
+        video.path = "clip.png".to_owned();
         video.duration = Micros(10_000_000);
         draft.materials.videos.push(video);
         let mut picture = Segment::new("picture", "picture", TimeRange::new(0, 2_000_000));
@@ -17790,6 +17856,7 @@ mod tests {
             .push(Segment::new("tone", "tone", TimeRange::new(0, 2_000_000)));
         draft.tracks.push(sound);
         Folder::new(draft).save(&temp.path).unwrap();
+        copy_pattern(&temp.path.join("clip.png"));
 
         let mut desktop = shell();
         desktop.open_folder(&temp.path).unwrap();
@@ -17823,15 +17890,22 @@ mod tests {
         );
         let still = &draft.tracks[0].segments[1];
         assert_eq!(desktop.selected(), Some(&still.id));
-        let Some(cutlass_model::MaterialRef::Video(held)) =
+        let Some(cutlass_model::MaterialRef::Video(photo)) =
             draft.materials.get(still.material_id.as_str())
         else {
-            panic!("the still is video");
+            panic!("the still is a picture");
         };
-        let held = held.freeze.clone().expect("held frame");
+        // The still is a photo of the frame, saved in the project.
+        assert_eq!(photo.kind, "photo");
+        let stored = "Resources/freeze_picture_800000.png";
+        assert_eq!(photo.path, stored);
+        assert_eq!((photo.width, photo.height), (16, 16));
+        let png = std::fs::read(temp.path.join(stored)).expect("the still's file");
+        assert!(png.starts_with(b"\x89PNG"));
+        let held = photo.freeze.clone().expect("held frame");
         // The sped clip at 0.4 s shows 0.8 s of the file.
         assert_eq!(held.timestamp, Micros(800_000));
-        assert_eq!(held.source_material_path, "clip");
+        assert_eq!(held.source_material_path, "clip.png");
         assert_eq!(still.speed, 1.0);
         // The clip it came from still plays.
         let Some(cutlass_model::MaterialRef::Video(source)) = draft
@@ -17871,13 +17945,14 @@ mod tests {
         draft.canvas_config.width = 2;
         draft.canvas_config.height = 1;
         let mut video = MaterialVideo::new("picture");
-        video.path = "clip".to_owned();
+        video.path = "clip.png".to_owned();
         video.duration = Micros(60_000_000);
         draft.materials.videos.push(video);
         let mut picture = Segment::new("picture", "picture", TimeRange::new(0, 60_000_000));
         picture.source_range = Some(TimeRange::new(0, 60_000_000));
         draft.tracks[0].segments.push(picture);
         Folder::new(draft).save(&temp.path).unwrap();
+        copy_pattern(&temp.path.join("clip.png"));
         let mut desktop = shell();
         desktop.open_folder(&temp.path).unwrap();
         desktop.select(Some(SegmentId::new("picture")));
@@ -17885,13 +17960,39 @@ mod tests {
         desktop.freeze_frame().unwrap();
         let draft = desktop.draft().unwrap();
         let still = &draft.tracks[0].segments[1];
+        let Some(cutlass_model::MaterialRef::Video(photo)) =
+            draft.materials.get(still.material_id.as_str())
+        else {
+            panic!("the still is a picture");
+        };
+        assert_eq!(
+            photo.freeze.as_ref().map(|held| held.timestamp),
+            Some(Micros(36_000_000))
+        );
+        // The photo's own picture plays; the hold is only its record.
         let map = cutlass_engine::placement_of(draft, still).expect("map");
+        assert_eq!(map.freeze, None);
         for time in [still.target.start.0, still.target.end().0 - 1] {
-            assert_eq!(
-                cutlass_engine::map_timeline(&map, Micros(time)),
-                Ok(Micros(36_000_000))
-            );
+            assert!(cutlass_engine::map_timeline(&map, Micros(time)).is_ok());
         }
+        // A second freeze of the same frame gets its own file.
+        desktop.select(Some(SegmentId::new("picture")));
+        desktop.seek(Micros(36_000_000));
+        desktop.undo().unwrap();
+        desktop.select(Some(SegmentId::new("picture")));
+        desktop.seek(Micros(36_000_000));
+        desktop.freeze_frame().unwrap();
+        assert!(
+            temp.path
+                .join("Resources/freeze_picture_36000000-2.png")
+                .is_file()
+        );
+    }
+
+    fn copy_pattern(to: &Path) {
+        let pattern = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../crates/engine/fixtures/pattern.png");
+        std::fs::copy(pattern, to).unwrap();
     }
 
     #[test]

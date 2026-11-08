@@ -1195,7 +1195,7 @@ pub(crate) fn place_with(
     sample_transformed(canvas_w, canvas_h, &picture, transform)
 }
 
-fn orient(picture: CpuBytes, display: DisplayQuarter) -> Option<CpuBytes> {
+pub(crate) fn orient(picture: CpuBytes, display: DisplayQuarter) -> Option<CpuBytes> {
     if display == DisplayQuarter::Zero {
         return Some(picture);
     }

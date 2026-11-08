@@ -71,8 +71,9 @@ pub struct Algorithm {
     #[serde(default, rename = "type")]
     pub kind: String,
     /// For Enhance quality, [`Algorithm::HD`] or [`Algorithm::UHD`]; for
-    /// Reduce image noise, [`Algorithm::WEAK`] or [`Algorithm::STRONG`]; 0
-    /// or below is off.
+    /// Reduce image noise, [`Algorithm::WEAK`] or [`Algorithm::STRONG`];
+    /// for Optical flow, the frames a second it fills the clip to, such as
+    /// [`Algorithm::FRAME_RATES`]. 0 or below is off.
     #[serde(default)]
     pub level: i64,
     #[serde(flatten, default)]
@@ -92,6 +93,11 @@ impl Algorithm {
     pub const WEAK: i64 = 1;
     /// Heavy noise taken out.
     pub const STRONG: i64 = 2;
+    /// The reference editor's name for Optical flow, which fills a slowed
+    /// clip with frames made between its own.
+    pub const COMPLEMENT_FRAME: &'static str = "ComplementFrame";
+    /// The frame rates Optical flow offers.
+    pub const FRAME_RATES: [i64; 3] = [30, 50, 60];
 
     /// Whether the algorithm runs.
     #[must_use]
@@ -111,6 +117,12 @@ impl MaterialVideo {
     #[must_use]
     pub fn denoise(&self) -> Option<&Algorithm> {
         self.algorithm(Algorithm::NOISE_REDUCTION)
+    }
+
+    /// The clip's Optical flow, when it has one that is on.
+    #[must_use]
+    pub fn interpolate(&self) -> Option<&Algorithm> {
+        self.algorithm(Algorithm::COMPLEMENT_FRAME)
     }
 
     /// The clip's algorithm named `kind`, when it has one that is on.
@@ -322,5 +334,22 @@ mod tests {
         .unwrap();
         assert!(only.denoise().is_none());
         assert!(only.algorithm("Deflicker").is_none());
+    }
+
+    #[test]
+    fn an_optical_flow_reads_its_frame_rate_and_keeps_its_sub_type() {
+        let video: MaterialVideo = serde_json::from_str(
+            r#"{"video_algorithm":{"algorithms":[{"type":"ComplementFrame","level":60,"complement_frame_type":"optical_flow"}]}}"#,
+        )
+        .unwrap();
+        let flow = video.interpolate().unwrap();
+        assert_eq!(flow.level, 60);
+        assert!(flow.rest.contains_key("complement_frame_type"));
+        assert!(video.enhance().is_none() && video.denoise().is_none());
+        let theirs: MaterialVideo = serde_json::from_str(
+            r#"{"video_algorithm":{"algorithms":[{"type":"ComplementFrame"}]}}"#,
+        )
+        .unwrap();
+        assert!(theirs.interpolate().is_none());
     }
 }

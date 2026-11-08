@@ -8759,8 +8759,18 @@ mod tests {
         };
         for (page, labels) in [
             (1, ["Red", "Hue", "Saturation", "Lightness"].as_slice()),
-            (2, ["RGB", "Green", "Reset curve"].as_slice()),
-            (3, ["Lift", "Gamma", "Gain", "Brightness"].as_slice()),
+            (2, ["All", "Luma", "Green (G)", "Blue (B)"].as_slice()),
+            (
+                3,
+                [
+                    "Shadows",
+                    "Middle grey",
+                    "Highlights",
+                    "Brightness",
+                    "Offset",
+                ]
+                .as_slice(),
+            ),
         ] {
             view.inspector.focus(inspector::Focus {
                 tab: 4,

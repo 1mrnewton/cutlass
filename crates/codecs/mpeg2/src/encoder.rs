@@ -138,17 +138,34 @@ type Histogram = [u32; 64];
 /// recordings stay under 0.25; a cut between two of them is about 1.7.
 const CUT: f64 = 0.5;
 
-fn histogram(luma: &[u8]) -> Box<Histogram> {
+/// Histogram of every other luma row. Four tables take neighbouring
+/// samples, so runs of one level do not wait on a single counter.
+fn histogram(luma: &[u8], width: usize) -> Box<Histogram> {
+    let mut lanes = [[0u32; 64]; 4];
+    for row in luma.chunks_exact(width.max(1)).step_by(2) {
+        let (quads, rest) = row.as_chunks::<4>();
+        for quad in quads {
+            for (lane, &sample) in lanes.iter_mut().zip(quad) {
+                lane[usize::from(sample >> 2)] += 1;
+            }
+        }
+        for &sample in rest {
+            lanes[0][usize::from(sample >> 2)] += 1;
+        }
+    }
     let mut bins = Box::new([0u32; 64]);
-    for &sample in luma {
-        bins[usize::from(sample >> 2)] += 1;
+    for lane in &lanes {
+        for (bin, count) in bins.iter_mut().zip(lane) {
+            *bin += count;
+        }
     }
     bins
 }
 
 /// Whether `next` shows a different scene from `last`: the pictures share
 /// too few luma levels for prediction to help.
-fn scene_cut(last: &Histogram, next: &Histogram, samples: usize) -> bool {
+fn scene_cut(last: &Histogram, next: &Histogram) -> bool {
+    let samples: u64 = next.iter().map(|&count| u64::from(count)).sum();
     let distance: u64 = last
         .iter()
         .zip(next)
@@ -521,11 +538,11 @@ impl VideoEncoder for Mpeg2Encoder {
             self.stream = Some(self.open_stream(duration, input.timescale)?);
         }
         let gop_size = self.stream.as_ref().map_or(1, |stream| stream.gop_size);
-        let luma = histogram(input.picture.y());
+        let luma = histogram(input.picture.y(), input.picture.width() as usize);
         let cut = self
             .last_luma
             .as_deref()
-            .is_some_and(|last| scene_cut(last, &luma, input.picture.y().len()));
+            .is_some_and(|last| scene_cut(last, &luma));
         self.drained = false;
         let mut source = Source {
             frame: self.pad(&input.picture),

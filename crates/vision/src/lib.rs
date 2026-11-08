@@ -20,7 +20,7 @@
 //!
 //! The fifth is depth for Relight: [`DepthModel`] guesses how near each
 //! pixel of a frame is, from which the light finds the way each surface
-//! faces.
+//! faces; [`relight_clip`] writes a clip's guesses as a grey video.
 
 #![forbid(unsafe_code)]
 
@@ -35,6 +35,7 @@ mod interpolate;
 mod job;
 mod mask;
 mod mobile_sam;
+mod relight_job;
 
 use std::fmt;
 use std::path::PathBuf;
@@ -56,6 +57,7 @@ pub use interpolate::{
 pub use job::{JobError, SelectJob};
 pub use mask::Mask;
 pub use mobile_sam::{DECODER_WEIGHTS, ENCODER_WEIGHTS, MobileSam};
+pub use relight_job::{RELIGHT_SIDE, relight_clip};
 
 /// The most clicks one selection takes.
 pub const MAX_CLICKS: usize = 32;

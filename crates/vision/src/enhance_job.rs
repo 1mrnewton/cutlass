@@ -332,7 +332,7 @@ fn lost(index: usize) -> EnhanceJobError {
     })
 }
 
-fn rgb_of(rgba: &[u8]) -> Vec<u8> {
+pub(crate) fn rgb_of(rgba: &[u8]) -> Vec<u8> {
     rgba.as_chunks::<4>()
         .0
         .iter()

@@ -27,6 +27,7 @@ pub use frame::{DynamicRange, Tools, Transient};
 pub use header::{
     Dac3, Dec3, Dec3Substream, MAX_FRAME_BYTES, Metadata, MixLevels, PROBE_BYTES, SYNCWORD,
     StreamType, SyncInfo, Syntax, ac3_bit_rate, compr_db, compr_gain, dynrng_gain, probe,
+    program_gain,
 };
 
 use cutlass_decode::{CodecError, CodecId, CodecParams, DecodeFactory, Decoder};

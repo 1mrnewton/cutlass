@@ -6,7 +6,7 @@ use std::f64::consts::PI;
 
 use cutlass_ac3::{
     Ac3Decoder, Ac3Encoder, Dec3, DynamicRange, ENCODER_DELAY, EncoderConfig, EncoderMetadata,
-    Extension, Format, MixCodes, Options, StreamType, ac3_bit_rate, probe,
+    Extension, Format, MixCodes, Options, StreamType, ac3_bit_rate, probe, program_gain,
 };
 use cutlass_decode::{Channel, ChannelLayout, CodecError, CodecId, Decoder, Packet, Pcm, SideData};
 use cutlass_encode::{AudioInput, Encoder};
@@ -722,26 +722,41 @@ fn peak(samples: &[f32]) -> f32 {
 /// `pgmscl` scales the substream that carries it. −6 dB is half power, and
 /// the mute code is silence.
 #[test]
-fn a_program_scale_cuts_the_substream() {
+fn a_program_scale_is_kept_and_not_applied() {
     let rate = 48_000u32;
     let channels = [C];
     let pcm = tones(&channels, rate, rate as usize, 0.4);
     let plain = config(Format::Eac3, rate, &channels, 0);
-    let mut scaled = plain.clone();
-    scaled.metadata.program_scale_db = Some(-6);
     let full = decode(CodecId::Eac3, &encode(plain.clone(), &pcm));
-    let cut = decode(CodecId::Eac3, &encode(scaled, &pcm));
-    let metadata = cut.decoder.metadata().expect("metadata");
-    assert_eq!(metadata.program_scale_db, Some(-6));
     let span = 4_096..pcm.len() - 4_096;
-    let ratio = peak(&cut.pcm[span.clone()]) / peak(&full.pcm[span.clone()]);
-    let want = 10.0f32.powf(-6.0 / 20.0);
-    assert!((ratio - want).abs() < 0.05, "scale ratio {ratio}");
-    let mut mute = plain;
-    mute.metadata.program_scale_db = Some(-51);
-    let muted = decode(CodecId::Eac3, &encode(mute, &pcm));
-    let muted_peak = peak(&muted.pcm[span]);
-    assert!(muted_peak < 1.0e-4, "mute {muted_peak}");
+    let ffmpeg = oracle("ffmpeg", "-version");
+    for db in [-6i8, -51] {
+        let mut scaled = plain.clone();
+        scaled.metadata.program_scale_db = Some(db);
+        let packets = encode(scaled, &pcm);
+        let ours = decode(CodecId::Eac3, &packets);
+        let metadata = ours.decoder.metadata().expect("metadata");
+        assert_eq!(metadata.program_scale_db, Some(db));
+        // The word reaches a mixer as a gain; −51 is the mute code.
+        let gain = program_gain(db);
+        if db == -51 {
+            assert_eq!(gain, 0.0);
+        } else {
+            assert!((gain - 10.0f32.powf(f32::from(db) / 20.0)).abs() < 1e-6);
+        }
+        let ratio = peak(&ours.pcm[span.clone()]) / peak(&full.pcm[span.clone()]);
+        assert!((ratio - 1.0).abs() < 1e-3, "{db} dB played at {ratio}");
+        // FFmpeg skips the word too, so the mute-code stream is audible there.
+        if let Some(ffmpeg) = &ffmpeg {
+            let theirs = ffmpeg_decode(ffmpeg, &stream(&packets), &[]);
+            let skip = ENCODER_DELAY as usize;
+            let theirs = &theirs[skip..];
+            let n = ours.pcm.len().min(theirs.len());
+            let margin = 1_536;
+            let quality = snr(&ours.pcm[margin..n - margin], &theirs[margin..n - margin]);
+            assert!(quality > 60.0, "{db} dB against FFmpeg: {quality:.1} dB");
+        }
+    }
 }
 
 /// A frame louder than half scale carries `compr`, and heavy mode applies it.

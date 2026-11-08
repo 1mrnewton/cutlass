@@ -207,7 +207,9 @@ pub struct Metadata {
     pub copyright: bool,
     pub original: bool,
     /// Program scale factor in dB (`pgmscl` - 51), E-AC-3 independent only.
-    /// Code 0 is mute and is stored as −51. Absent means 0 dB.
+    /// Code 0 is mute and is stored as −51. Absent means 0 dB. It is mixing
+    /// metadata: the decoder does not apply it, as FFmpeg and Apple do not.
+    /// [`program_gain`] turns it into a gain for a mixer that wants it.
     pub program_scale_db: Option<i8>,
     /// The second channel's scale in 1+1 mode (`pgmscl2`). −51 is mute.
     pub program_scale2_db: Option<i8>,

@@ -220,8 +220,10 @@ pub fn oracle(tool: &str, probe_arg: &str) -> Option<String> {
 fn read_f32(path: &Path) -> Vec<f32> {
     let bytes = std::fs::read(path).expect("reference output");
     bytes
-        .chunks_exact(4)
-        .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|b| f32::from_le_bytes(*b))
         .collect()
 }
 
@@ -276,8 +278,10 @@ pub fn apple_decode(afconvert: &str, data: &[u8]) -> (usize, Vec<f32>) {
             channels = usize::from(u16::from_le_bytes([body[2], body[3]]));
         } else if id == b"data" {
             pcm = body
-                .chunks_exact(4)
-                .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|b| f32::from_le_bytes(*b))
                 .collect();
         }
         at += 8 + len + (len & 1);

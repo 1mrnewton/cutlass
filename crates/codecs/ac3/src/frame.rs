@@ -746,7 +746,8 @@ impl<'a> State<'a> {
             if slot.aht && blk > 0 {
                 continue;
             }
-            let delta = (slot.delta.count > 0 && slot_index != LFE).then_some(slot.delta.segments);
+            let delta = slot.delta;
+            let delta = (delta.count > 0 && slot_index != LFE).then_some(delta);
             let channel = bitalloc::Channel {
                 start: slot.start,
                 end: slot.end,
@@ -755,9 +756,7 @@ impl<'a> State<'a> {
                 fgaincod: slot.fgaincod,
                 snr: ((csnr - 15) << 4) + slot.fsnr as i32,
                 leak: if slot_index == CPL { self.leak } else { None },
-                delta: delta
-                    .as_ref()
-                    .map(|s| &s[..slot.delta.count.min(MAX_SEGMENTS)]),
+                delta: delta.as_ref().map(Delta::segments),
                 high_efficiency: slot.aht,
             };
             let exps = slot.exps;

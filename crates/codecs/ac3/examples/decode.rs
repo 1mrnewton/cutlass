@@ -52,8 +52,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .and_then(|i| args.get(i + 1))
             .map(String::as_str)
     };
-    let mut options = Options::default();
-    options.dynamic_range = match flag("--drc") {
+    let dynamic_range = match flag("--drc") {
         Some("line") => DynamicRange::Line {
             cut: 1.0,
             boost: 1.0,
@@ -61,11 +60,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some("heavy") => DynamicRange::Heavy,
         _ => DynamicRange::Off,
     };
-    options.downmix = match flag("--downmix") {
+    let downmix = match flag("--downmix") {
         Some("loro") => Downmix::LoRo,
         Some("ltrt") => Downmix::LtRt,
         Some("mono") => Downmix::Mono,
         _ => Downmix::None,
+    };
+    let mut options = Options {
+        dynamic_range,
+        downmix,
+        ..Options::default()
     };
     if let Some(program) = flag("--program") {
         options.program = program.parse()?;

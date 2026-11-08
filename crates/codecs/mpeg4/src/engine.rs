@@ -173,3 +173,82 @@ impl Decoder for EngineDecoder {
         self.pts.clear();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ASP: &[u8] = include_bytes!("../tests/fixtures/asp.m4v");
+
+    fn packet(data: &[u8]) -> Packet {
+        Packet {
+            stream: 0,
+            data: data.to_vec(),
+            pts: 0,
+            duration: 1,
+            timescale: 25,
+            keyframe: true,
+            side: Vec::new(),
+        }
+    }
+
+    fn first_vop() -> usize {
+        ASP.windows(4)
+            .position(|w| w == [0, 0, 1, 0xB6])
+            .expect("a VOP")
+    }
+
+    #[test]
+    fn a_layer_over_the_pixel_limit_is_refused() {
+        let params = CodecParams::video(CodecId::Mpeg4, 0, 0);
+        let mut decoder = EngineDecoder::open_limited(&params, 48 * 32 - 1).expect("open");
+        let refused = decoder.push(&packet(ASP));
+        assert!(
+            matches!(refused, Err(CodecError::Limit { .. })),
+            "{refused:?}"
+        );
+
+        let mut configured = params.clone();
+        configured.extra = ASP[..first_vop()].to_vec();
+        let refused = EngineDecoder::open_limited(&configured, 48 * 32 - 1)
+            .and_then(|mut d| d.push(&packet(&ASP[first_vop()..])));
+        assert!(
+            matches!(refused, Err(CodecError::Limit { .. })),
+            "{refused:?}"
+        );
+
+        let mut decoder = EngineDecoder::open_limited(&params, 48 * 32).expect("open");
+        assert!(!decoder.push(&packet(ASP)).expect("push").is_empty());
+    }
+
+    #[test]
+    fn reserved_colour_codes_are_unspecified() {
+        let colour = Colour {
+            full_range: false,
+            primaries: Some(3),
+            transfer: Some(0),
+            matrix: Some(200),
+        };
+        let image = Image {
+            width: 2,
+            height: 2,
+            bytes: vec![0; 6],
+        };
+        let reserved = info(&image, colour);
+        assert_eq!(reserved.primaries, ColorPrimaries::Unspecified);
+        assert_eq!(reserved.transfer, Transfer::Unspecified);
+        assert_eq!(reserved.matrix, ColorMatrix::Unspecified);
+        assert_eq!(reserved.cicp_matrix, 200);
+
+        let bt709 = Colour {
+            full_range: false,
+            primaries: Some(1),
+            transfer: Some(1),
+            matrix: Some(1),
+        };
+        let standard = info(&image, bt709);
+        assert_eq!(standard.primaries, ColorPrimaries::Bt709);
+        assert_eq!(standard.transfer, Transfer::Bt709);
+        assert_eq!(standard.matrix, ColorMatrix::Bt709);
+    }
+}

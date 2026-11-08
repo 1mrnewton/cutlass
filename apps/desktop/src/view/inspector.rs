@@ -99,11 +99,20 @@ pub(super) fn clip_panel(
     if state.clip != inspection.segment_id.as_str() {
         *state = InspectorState {
             clip: inspection.segment_id.as_str().to_owned(),
-            open: ["position", "sound", "custom-removal", "chroma"]
-                .into_iter()
-                .chain(matches!(panel, Panel::Text | Panel::Caption).then_some("blend"))
-                .map(str::to_owned)
-                .collect(),
+            open: [
+                "position",
+                "sound",
+                "custom-removal",
+                "chroma",
+                "auto-adjust",
+                "color-match",
+                "lut",
+                "adjust",
+            ]
+            .into_iter()
+            .chain(matches!(panel, Panel::Text | Panel::Caption).then_some("blend"))
+            .map(str::to_owned)
+            .collect(),
             tiles: std::mem::take(&mut state.tiles),
             ..InspectorState::default()
         };
@@ -1185,10 +1194,31 @@ fn adjust_tab(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState, inspec
     if colour_page(shell, ui, state, inspection) {
         return;
     }
-    ui.horizontal(|ui| {
-        ui.set_min_height(40.0);
-        ui.label(RichText::new("Auto adjust").size(13.0).color(tokens::TEXT));
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+    auto_adjust(shell, ui, state);
+    color_match(shell, ui, state);
+    super::audio::later_section(
+        ui,
+        state,
+        "color-correction",
+        "Color correction",
+        Some("Correct the colour cast and exposure for you."),
+        Some(&mut |ui: &mut Ui| super::audio::later_slider(ui, "Intensity", 80.0)),
+    );
+    lut_section(shell, ui, state, inspection);
+    adjust_sliders(shell, ui, state, inspection);
+    footer(ui, &["Apply to all", "Save as preset"]);
+}
+
+/// Auto adjust: Apply evens out the clip's exposure, contrast and colour
+/// cast in one step. How strongly comes later.
+fn auto_adjust(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState) {
+    let header = section(ui, state, "auto-adjust", "Auto adjust", None, false);
+    if !header.open {
+        return;
+    }
+    body(ui, |ui| {
+        ui.horizontal(|ui| {
+            row_label(ui, "");
             if ui
                 .add(ui::Button::new("Apply").text_size(12.0))
                 .on_hover_text("Even out exposure, contrast and colour cast")
@@ -1197,14 +1227,28 @@ fn adjust_tab(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState, inspec
                 send(shell, Shell::auto_adjust);
             }
         });
+        ui.add_space(ROW_GAP);
+        super::audio::later_value(ui, "Intensity", 80.0);
     });
-    divider(ui);
+}
+
+/// Color match: pick another clip and this one takes its colours. A still
+/// picked from the clip or an imported image, and how strongly, come later.
+fn color_match(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState) {
+    let header = section(ui, state, "color-match", "Color match", None, false);
+    if !header.open {
+        return;
+    }
     let choices = shell.match_choices();
     let mut matched = None;
-    ui.horizontal(|ui| {
-        ui.set_min_height(40.0);
-        ui.label(RichText::new("Color match").size(13.0).color(tokens::TEXT));
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+    body(ui, |ui| {
+        ui.label(
+            RichText::new("Pick a clip to match, or import an image.")
+                .size(12.0)
+                .color(tokens::MUTED),
+        );
+        ui.add_space(ROW_GAP);
+        label_row(ui, "Clip", |ui| {
             ui.add_enabled_ui(!choices.is_empty(), |ui| {
                 egui::ComboBox::from_id_salt("color-match")
                     .selected_text(RichText::new("Match to…").size(12.0))
@@ -1219,19 +1263,38 @@ fn adjust_tab(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState, inspec
                     .on_disabled_hover_text("Add another picture clip to match");
             });
         });
+        ui.add_space(ROW_GAP);
+        ui.add_enabled_ui(false, |ui| {
+            ui.horizontal(|ui| {
+                let (rect, response) =
+                    ui.allocate_exact_size(Vec2::splat(CATALOG_TILE), Sense::click());
+                response.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::Role::Button, false, "Import an image")
+                });
+                tile_frame(ui, rect, &response, false);
+                let (centre, arm) = (rect.center(), 12.0);
+                let stroke = Stroke::new(2.0, tokens::MUTED);
+                ui.painter().line_segment(
+                    [centre - Vec2::new(arm, 0.0), centre + Vec2::new(arm, 0.0)],
+                    stroke,
+                );
+                ui.painter().line_segment(
+                    [centre - Vec2::new(0.0, arm), centre + Vec2::new(0.0, arm)],
+                    stroke,
+                );
+                later_badge(ui);
+            });
+        })
+        .response
+        .on_disabled_hover_text(LATER);
+        ui.add_space(ROW_GAP);
+        super::audio::later_value(ui, "Intensity", 80.0);
     });
     if let Some(reference) = matched {
         send(shell, |shell| shell.match_colour(&reference));
     }
-    divider(ui);
-    later_row(ui, "Color correction");
-    lut_section(shell, ui, state, inspection);
-    adjust_sliders(shell, ui, state, inspection);
-    footer(ui, &["Apply to all", "Save as preset"]);
 }
 
-/// The HSL, Curves, Color wheel or Mask page, when one is picked; false on
-/// the Basic page.
 fn colour_page(
     shell: &mut Shell,
     ui: &mut Ui,
@@ -1482,7 +1545,7 @@ fn lut_section(
     }
     body(ui, |ui| {
         ui.horizontal(|ui| {
-            row_label(ui, "File");
+            row_label(ui, "Name");
             let name = inspection
                 .lut
                 .as_ref()
@@ -1502,7 +1565,7 @@ fn lut_section(
                 ui,
                 state,
                 "lut-strength",
-                "Strength",
+                "Intensity",
                 stored,
                 0.0..=100.0,
                 |v| format!("{v:.0}"),
@@ -1510,6 +1573,26 @@ fn lut_section(
                 send(shell, |shell| shell.set_lut_strength(value / 100.0));
             }
         }
+        ui.add_enabled_ui(false, |ui| {
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Protect skin tone").size(12.0));
+                        later_badge(ui);
+                    });
+                    ui.label(
+                        RichText::new("Keep skin tones natural under the LUT.")
+                            .size(11.0)
+                            .color(tokens::MUTED),
+                    );
+                });
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    check_box(ui, false, "Protect skin tone");
+                });
+            });
+        })
+        .response
+        .on_disabled_hover_text(LATER);
     });
 }
 
@@ -1532,15 +1615,53 @@ fn adjust_sliders(
     if !header.open && !state.open.contains("adjust") {
         return;
     }
+    use cutlass_effects::AdjustKey as Key;
+    // Grouped as the reference groups them; Brightness and Hue, which it
+    // does not show, sit with their kind.
+    let groups: [(&str, &[Key]); 3] = [
+        (
+            "Color",
+            &[Key::Temperature, Key::Tint, Key::Saturation, Key::Hue],
+        ),
+        (
+            "Lightness",
+            &[
+                Key::Exposure,
+                Key::Brightness,
+                Key::Contrast,
+                Key::Highlights,
+                Key::Shadows,
+                Key::Whites,
+                Key::Blacks,
+                Key::Brilliance,
+            ],
+        ),
+        (
+            "Effects",
+            &[
+                Key::Sharpen,
+                Key::Clarity,
+                Key::Grain,
+                Key::Fade,
+                Key::Vignette,
+            ],
+        ),
+    ];
     body(ui, |ui| {
-        for key in cutlass_effects::AdjustKey::ALL {
-            let stored = (f64::from(inspection.adjust.get(key)) * 100.0).round();
-            let low = f64::from(key.min()) * 100.0;
-            let id = format!("adjust-{}", key.kind());
-            if let Some(value) = slider(ui, state, &id, key.label(), stored, low..=100.0, |v| {
-                format!("{v:.0}")
-            }) {
-                send(shell, |shell| shell.set_adjust(key, value / 100.0));
+        for (title, keys) in groups {
+            ui.add_space(4.0);
+            ui.label(RichText::new(title).size(12.0).color(tokens::MUTED));
+            divider(ui);
+            for key in keys {
+                let key = *key;
+                let stored = (f64::from(inspection.adjust.get(key)) * 100.0).round();
+                let low = f64::from(key.min()) * 100.0;
+                let id = format!("adjust-{}", key.kind());
+                if let Some(value) = slider(ui, state, &id, key.label(), stored, low..=100.0, |v| {
+                    format!("{v:.0}")
+                }) {
+                    send(shell, |shell| shell.set_adjust(key, value / 100.0));
+                }
             }
         }
     });

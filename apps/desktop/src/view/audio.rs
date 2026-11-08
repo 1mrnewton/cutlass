@@ -259,8 +259,22 @@ pub(super) fn later_slider(ui: &mut Ui, label: &str, value: f64) {
     ui.add_space(ROW_GAP);
 }
 
+/// A control with no edit yet inside a working section: its name with a
+/// "Later" mark, then a dimmed slider at `value`.
+pub(super) fn later_value(ui: &mut Ui, label: &str, value: f64) {
+    ui.add_enabled_ui(false, |ui| {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(label).size(12.0));
+            later_badge(ui);
+        });
+        later_slider(ui, "", value);
+    })
+    .response
+    .on_disabled_hover_text(LATER);
+}
+
 /// A drop-down look: a box with its text and a down mark.
-fn choice_row(ui: &mut Ui, label: Option<&str>, text: &str) {
+pub(super) fn choice_row(ui: &mut Ui, label: Option<&str>, text: &str) {
     ui.horizontal(|ui| {
         if let Some(label) = label {
             row_label(ui, label);

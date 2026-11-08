@@ -8854,7 +8854,7 @@ mod tests {
             shell.inspection().unwrap().lut,
             Some(("Teal punch".to_owned(), 1.0))
         );
-        for label in ["LUT", "Teal punch", "Strength", "100"] {
+        for label in ["LUT", "Teal punch", "Intensity", "100", "Protect skin tone"] {
             assert!(lines.iter().any(|line| line == label), "{label}: {lines:?}");
         }
         // The Remove BG page keys green out and shows the key's values, with

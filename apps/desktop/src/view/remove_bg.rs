@@ -9,7 +9,7 @@ use egui::{RichText, Ui, Vec2};
 use crate::shell::{Inspection, Shell};
 use crate::{tokens, ui};
 
-use super::audio::{later_section, later_slider, name_tile, right_button};
+use super::audio::{later_section, later_slider, later_value, name_tile, right_button};
 use super::inspector::{
     InspectorState, LATER, ROW_GAP, body, color_row, later_badge, none_tile, note, row_label,
     section, send, slider,
@@ -256,15 +256,7 @@ fn chroma_key(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState, inspec
             });
         }
         for label in ["Feather edge", "Clean up edge"] {
-            ui.add_enabled_ui(false, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(label).size(12.0));
-                    later_badge(ui);
-                });
-                later_slider(ui, "", 0.0);
-            })
-            .response
-            .on_disabled_hover_text(LATER);
+            later_value(ui, label, 0.0);
         }
     });
 }

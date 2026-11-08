@@ -313,6 +313,24 @@ fn read_mv(r: &mut BitReader<'_>, pred: i32, fcode: u32) -> Result<i32, CodecErr
     Ok((v << bits) >> bits)
 }
 
+/// The widest direct-mode vector: a coded vector wraps at 12 bits, ±2048
+/// at f_code 7 (Section 7.6.3), and the delta adds at most 32 to it.
+const DIRECT_LIMIT: i64 = 2048 + 32;
+
+/// Scales colocated vector `p` by the B-VOP distances `pb` of `pp` and adds
+/// delta `d` (Section 7.6.9.5), giving the forward and backward vectors.
+/// The time distances reach 3600 s at 65535 ticks a second, so the product
+/// is formed in i64 and the result held to the vector range.
+fn direct_scale(p: i32, d: i32, pp: i32, pb: i32) -> (i32, i32) {
+    let (p, d) = (i64::from(p), i64::from(d));
+    let pp = i64::from(pp).max(1);
+    let pb = i64::from(pb);
+    let f = p * pb / pp + d;
+    let b = if d != 0 { f - p } else { p * (pb - pp) / pp };
+    let hold = |v: i64| v.clamp(-DIRECT_LIMIT, DIRECT_LIMIT) as i32;
+    (hold(f), hold(b))
+}
+
 fn rounded_div(a: i32, b: i32) -> i32 {
     if a >= 0 {
         (a + (b >> 1)) / b
@@ -1356,15 +1374,9 @@ impl Vop<'_> {
             .copied()
             .unwrap_or_default();
         let t = self.pic.times;
-        let scale = |p: i32, d: i32, pp: i32, pb: i32| {
-            let pp = pp.max(1);
-            let f = p * pb / pp + d;
-            let b = if d != 0 { f - p } else { p * (pb - pp) / pp };
-            (f, b)
-        };
         let pair = |p: (i32, i32), pp: i32, pb: i32| {
-            let (fx, bx) = scale(p.0, delta.0, pp, pb);
-            let (fy, by) = scale(p.1, delta.1, pp, pb);
+            let (fx, bx) = direct_scale(p.0, delta.0, pp, pb);
+            let (fy, by) = direct_scale(p.1, delta.1, pp, pb);
             ((fx, fy), (bx, by))
         };
         match rec.kind {
@@ -1841,5 +1853,24 @@ mod tests {
         assert_eq!(clip_block(392, 13, 2, -16, 400), 13);
         // Chroma of a 4MV macroblock stops at half the picture.
         assert_eq!(clip_block(144, 21, 1, -8, 150), 12);
+    }
+
+    #[test]
+    fn direct_vectors_hold_at_the_longest_time_distance() {
+        // 3600 s of modulo_time_base at 65535 ticks a second, the widest
+        // coded vector: the i32 product of these overflowed.
+        let pp = 3600 * 65535;
+        let (f, b) = direct_scale(2047, 0, pp, pp - 1);
+        assert_eq!((f, b), (2046, 0));
+        let (f, b) = direct_scale(-2048, 0, pp, 1);
+        assert_eq!((f, b), (0, 2047));
+        let (f, b) = direct_scale(-2048, -32, pp, pp - 1);
+        assert_eq!((f, b), (-2079, -31));
+        // Ordinary distances: a third of the way, with and without delta.
+        assert_eq!(direct_scale(12, 0, 3, 1), (4, -8));
+        assert_eq!(direct_scale(12, 2, 3, 1), (6, -6));
+        // Distances that cannot occur still give a vector in range.
+        assert_eq!(direct_scale(2047, 32, 1, i32::MAX), (2080, 2080));
+        assert_eq!(direct_scale(2047, 0, 0, 0), (0, -2047));
     }
 }

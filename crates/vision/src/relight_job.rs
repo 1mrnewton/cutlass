@@ -152,7 +152,7 @@ fn lost(index: u64) -> EnhanceJobError {
 
 /// The values [`TAIL`] in from each end of `values`, ignoring any that are
 /// not numbers.
-fn tails(values: &[f32]) -> (f32, f32) {
+pub(crate) fn tails(values: &[f32]) -> (f32, f32) {
     let mut kept: Vec<f32> = values.iter().copied().filter(|v| v.is_finite()).collect();
     if kept.is_empty() {
         return (0.0, 1.0);

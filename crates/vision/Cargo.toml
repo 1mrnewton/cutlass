@@ -11,6 +11,7 @@ cutlass-effects = { path = "../effects", version = "0.1.0" }
 cutlass-encode = { path = "../encode", version = "0.1.0" }
 cutlass-eval = { path = "../eval", version = "0.1.0" }
 cutlass-export = { path = "../export", version = "0.1.0" }
+cutlass-motion = { path = "../motion", version = "0.1.0" }
 cutlass-store = { path = "../store", version = "0.1.0" }
 cutlass-model = { path = "../model", version = "0.1.0" }
 cutlass-session = { path = "../session", version = "0.1.0" }

@@ -1,6 +1,6 @@
 //! The containers and codecs a phone opens.
 //!
-//! Rust audio decoders (FLAC, ALAC, MP3 and Opus) go first, so a file
+//! Rust audio decoders (FLAC, ALAC, MP3, Opus and Vorbis) go first, so a file
 //! decodes the same on every platform, and a lossless file bit-exactly.
 //! WebP goes first too: ImageIO gives one picture per packet and does not
 //! keep an animation's canvas. The Apple decoders come next on an Apple
@@ -17,8 +17,8 @@ use cutlass_eval::ReaderFactory;
 use cutlass_isobmff::IsoBmffFile;
 use cutlass_still::{StillDemux, still_limits};
 
-/// ISOBMFF, WAV, AIFF, FLAC, Ogg Opus, MP3, and stills, decoded with
-/// [`decoders`].
+/// ISOBMFF, WAV, AIFF, FLAC, Ogg (Opus and Vorbis), MP3, and stills, decoded
+/// with [`decoders`].
 #[must_use]
 pub fn readers() -> ReaderFactory {
     let mut readers = ReaderFactory::new();
@@ -33,19 +33,20 @@ pub fn readers() -> ReaderFactory {
     readers
 }
 
-/// FLAC, ALAC, MP3, Opus and WebP, the platform decoders for this OS, then
-/// PNG, GIF, JPEG, AAC, H.264, HEVC, PCM and ProRes.
+/// FLAC, ALAC, MP3, Opus, Vorbis and WebP, the platform decoders for this OS,
+/// then PNG, GIF, JPEG, AAC, H.264, HEVC, PCM and ProRes.
 #[must_use]
 pub fn decoders() -> DecodeFactory {
     let mut decoders = DecodeFactory::new();
-    // Rust audio codecs go ahead of the platform ones, so FLAC, ALAC, MP3
-    // and Opus decode the same on the phone as on the desktop. WebP goes
-    // ahead too: ImageIO gives one picture per packet and does not keep an
-    // animation's canvas.
+    // Rust audio codecs go ahead of the platform ones, so FLAC, ALAC, MP3,
+    // Opus and Vorbis decode the same on the phone as on the desktop. WebP
+    // goes ahead too: ImageIO gives one picture per packet and does not keep
+    // an animation's canvas.
     cutlass_flac::register_decoders(&mut decoders);
     cutlass_alac::register_decoders(&mut decoders);
     cutlass_mp3::register_decoders(&mut decoders);
     cutlass_opus::register_decoders(&mut decoders);
+    cutlass_vorbis::register_decoders(&mut decoders);
     cutlass_webp::register_decoders(&mut decoders);
     #[cfg(target_vendor = "apple")]
     cutlass_platform_apple::register_decoders(&mut decoders);
@@ -353,6 +354,58 @@ mod tests {
             let mut platform = reversed.open(&spec).expect("platform encoder");
             assert_ne!(encode(platform.as_mut()), packets);
         }
+    }
+
+    /// The phone encodes and decodes Vorbis with the Rust codec: the same
+    /// packets and samples as `VorbisEncoder` and `VorbisDecoder` opened
+    /// directly, so a platform codec registered ahead of it fails here.
+    #[test]
+    fn the_rust_vorbis_codec_goes_ahead_of_the_platform_one() {
+        let mut spec = CodecParams::audio(CodecId::Vorbis, 48_000, ChannelLayout::stereo());
+        spec.bitrate = 128_000;
+        let samples: Vec<f32> = (0..2 * 9600)
+            .map(|i| ((i as f32) * 0.017).sin() * 0.4)
+            .collect();
+        let input = AudioInput {
+            pcm: Pcm::from_f32(48_000, ChannelLayout::stereo(), samples).expect("pcm"),
+        };
+        let encode = |encoder: &mut dyn Encoder| {
+            let mut packets = encoder.push(&input).expect("push");
+            packets.extend(encoder.drain().expect("drain"));
+            packets
+        };
+        let packets = encode(&mut cutlass_vorbis::VorbisEncoder::open(&spec).expect("encoder"));
+        let mut phone = crate::export::encoders()
+            .open(&spec)
+            .expect("phone encoder");
+        assert_eq!(phone.codec(), CodecId::Vorbis);
+        assert_eq!(encode(phone.as_mut()), packets);
+        let mut listen = CodecParams::audio(CodecId::Vorbis, 48_000, ChannelLayout::stereo());
+        listen.extra = packets
+            .iter()
+            .flat_map(|packet| &packet.side)
+            .find_map(|side| match side {
+                cutlass_encode::SideData::Config(config) => Some(config.clone()),
+                _ => None,
+            })
+            .expect("vorbis headers");
+        let decode = |decoder: &mut dyn Decoder| {
+            let mut out: Vec<f32> = Vec::new();
+            for packet in &packets {
+                for output in decoder.push(packet).expect("push") {
+                    if let Output::Audio(audio) = output {
+                        out.extend(audio.pcm.as_f32().expect("f32"));
+                    }
+                }
+            }
+            out
+        };
+        let mut rust = cutlass_vorbis::VorbisDecoder::open(&listen).expect("rust");
+        let expected = decode(&mut rust);
+        assert!(expected.iter().any(|sample| sample.abs() > 0.1));
+        let mut phone = super::decoders().open(&listen).expect("phone");
+        assert_eq!(phone.codec(), CodecId::Vorbis);
+        assert_eq!(decode(phone.as_mut()), expected);
     }
 
     /// The phone decodes ALAC with the Rust decoder: the same buffers as

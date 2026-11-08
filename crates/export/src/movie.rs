@@ -138,7 +138,8 @@ fn write_part(
 
 /// Write only the timeline's sound over `request.range` to `destination`:
 /// AAC or ALAC in an M4A file, PCM in a WAV file, FLAC in a FLAC file, MP3
-/// in an MP3 file, or Opus in an Ogg (`.opus`) file, as `request.audio`
+/// in an MP3 file, Opus in an Ogg (`.opus`) file, or Vorbis in an Ogg
+/// (`.ogg`) file, as `request.audio`
 /// names.
 /// The file is written beside its destination and moved there when done.
 pub fn write_sound(
@@ -206,7 +207,7 @@ pub fn write_sound(
                 mux.into_inner()
                     .map_err(|error| ExportError::File(error.to_string()))?
             }
-            (CodecId::Opus, ContainerId::Ogg) => {
+            (CodecId::Opus, ContainerId::Ogg) | (CodecId::Vorbis, ContainerId::Ogg) => {
                 let mut mux = OggMux::new(out);
                 export_sound(
                     sources.draft,
@@ -351,6 +352,7 @@ mod tests {
         cutlass_flac::register_encoders(&mut encoders);
         cutlass_mp3::register_encoders(&mut encoders);
         cutlass_opus::register_encoders(&mut encoders);
+        cutlass_vorbis::register_encoders(&mut encoders);
         let draft = Draft::empty("D");
         let readers = ReaderFactory::new();
         let sources = MovieSources {
@@ -449,6 +451,32 @@ mod tests {
             ticks += packet.timestamp().duration().unwrap();
         }
         assert_eq!(u64::try_from(ticks).unwrap(), pre_skip + 24_000);
+    }
+
+    /// Half a second of silence as Vorbis. Reopening it yields that half
+    /// second, and nothing before the first sample.
+    #[test]
+    fn sound_alone_writes_a_vorbis_file() {
+        let (_, ogg) = written(CodecId::Vorbis, ContainerId::Ogg, "cut.ogg");
+        assert_eq!(&ogg[..4], b"OggS");
+        let length = ogg.len() as u64;
+        let mut demux = cutlass_ogg::OggDemux::open(std::io::Cursor::new(ogg), length).unwrap();
+        let stream = cutlass_container::Demux::streams(&demux)[0].clone();
+        assert_eq!(
+            stream.params().codec(),
+            &cutlass_codec::StreamCodec::Known(CodecId::Vorbis)
+        );
+        assert_eq!(stream.edits()[0].duration(), 22_050);
+        let mut decoder =
+            cutlass_vorbis::VorbisDecoder::from_config(stream.params().extradata()).unwrap();
+        let mut samples = Vec::new();
+        while let Some(packet) = cutlass_container::Demux::read_packet(&mut demux).unwrap() {
+            let decoded = decoder.decode(packet.bytes()).unwrap();
+            let keep = usize::try_from(packet.timestamp().duration().unwrap()).unwrap() * 2;
+            samples.extend(decoded.into_iter().take(keep));
+        }
+        assert_eq!(samples.len(), 22_050 * 2);
+        assert!(samples.iter().all(|sample| sample.abs() < 1e-3));
     }
 
     #[test]

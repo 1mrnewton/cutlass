@@ -2285,6 +2285,31 @@ mod tests {
         assert_eq!(sound.segments[0].target.start.0, 0);
     }
 
+    /// A libvorbis file in Ogg imports through the probe as half a second
+    /// of sound, as ffprobe reads it.
+    #[test]
+    fn an_ogg_vorbis_file_imports_as_a_sound() {
+        let temp = Temp::new();
+        let roots = Roots::new(&temp);
+        let mut host = roots.create();
+        let file = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../containers/ogg/tests/fixtures/stereo_44100_q4.ogg");
+        let material = host.import(&file).unwrap();
+        let audio = host
+            .draft()
+            .materials
+            .audios
+            .iter()
+            .find(|audio| audio.id.as_str() == material)
+            .expect("the sound is in the library");
+        assert_eq!(audio.duration, Micros(500_000));
+        assert!(
+            audio.path.ends_with("stereo_44100_q4.ogg"),
+            "{}",
+            audio.path
+        );
+    }
+
     #[test]
     fn a_refused_import_leaves_the_draft_and_writes_no_copy() {
         let temp = Temp::new();

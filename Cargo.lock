@@ -2714,6 +2714,7 @@ dependencies = [
  "cutlass-riff",
  "cutlass-session",
  "cutlass-still",
+ "cutlass-vorbis",
  "cutlass-webp",
  "image",
  "serde_json",
@@ -2760,6 +2761,7 @@ dependencies = [
  "cutlass-still",
  "cutlass-storage",
  "cutlass-store",
+ "cutlass-vorbis",
  "cutlass-webp",
 ]
 
@@ -3234,8 +3236,11 @@ dependencies = [
 name = "cutlass-vorbis"
 version = "0.1.0"
 dependencies = [
+ "cutlass-codec",
+ "cutlass-container",
  "cutlass-decode",
  "cutlass-encode",
+ "cutlass-ogg",
 ]
 
 [[package]]

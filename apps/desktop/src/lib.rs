@@ -24,8 +24,8 @@ pub mod widgets;
 pub mod window;
 
 /// Platform openers go first. A codec they decline falls through to the
-/// software opener registered after them. The Rust FLAC, ALAC, MP3, Opus
-/// and WebP codecs are the exception: they go ahead of the platform.
+/// software opener registered after them. The Rust FLAC, ALAC, MP3, Opus,
+/// Vorbis and WebP codecs are the exception: they go ahead of the platform.
 /// Hardware decode and encode are on.
 pub fn register_codecs() -> (cutlass_decode::DecodeFactory, cutlass_encode::EncodeFactory) {
     register_codecs_with(&cutlass_settings::Hardware::default())
@@ -44,7 +44,8 @@ pub fn register_codecs_with(
     // the STREAMINFO (sample count and MD5) a FLAC file is finished with;
     // ALAC's hands it the final cookie; MP3's hands it the delay and padding
     // its LAME tag needs; Opus's hands it the OpusHead, with its pre-skip,
-    // and the end trim. The Opus decoder matches the RFC vectors and plays
+    // and the end trim. Vorbis hands it the three headers and has no
+    // encoder delay. The Opus decoder matches the RFC vectors and plays
     // multistream and every API rate. WebP still images follow the same
     // rule, and an animated file's later packets are bare frames only the
     // Rust decoder composes.
@@ -56,6 +57,8 @@ pub fn register_codecs_with(
     cutlass_mp3::register_encoders(&mut encoders);
     cutlass_opus::register_decoders(&mut decoders);
     cutlass_opus::register_encoders(&mut encoders);
+    cutlass_vorbis::register_decoders(&mut decoders);
+    cutlass_vorbis::register_encoders(&mut encoders);
     cutlass_webp::register_decoders(&mut decoders);
     cutlass_webp::register_encoders(&mut encoders);
     #[cfg(target_os = "macos")]
@@ -536,6 +539,52 @@ mod tests {
             let mut platform = reversed.open(&listen).expect("platform opus decoder");
             assert_ne!(opus_samples(platform.as_mut(), &packets), decoded);
         }
+    }
+
+    /// The codec configuration a Vorbis encoder hands the muxer: the three
+    /// headers on its first packet.
+    fn vorbis_config(packets: &[cutlass_encode::Packet]) -> Vec<u8> {
+        packets
+            .iter()
+            .flat_map(|packet| &packet.side)
+            .find_map(|side| match side {
+                cutlass_encode::SideData::Config(config) => Some(config.clone()),
+                _ => None,
+            })
+            .expect("vorbis headers")
+    }
+
+    /// The app's Vorbis codec is the Rust one: its packets and its samples
+    /// are those `cutlass_vorbis` gives when opened directly, so a platform
+    /// codec registered ahead of it would fail both checks.
+    #[test]
+    fn the_rust_vorbis_codec_goes_ahead_of_the_platform_one() {
+        use cutlass_decode::ChannelLayout;
+
+        let (decoders, encoders) = super::register_codecs();
+        let mut spec = CodecParams::audio(CodecId::Vorbis, 48_000, ChannelLayout::stereo());
+        spec.bitrate = 128_000;
+        let mut app = encoders.open(&spec).expect("app vorbis encoder");
+        assert_eq!(
+            cutlass_encode::Encoder::codec(app.as_ref()),
+            CodecId::Vorbis
+        );
+        let mut rust = cutlass_vorbis::VorbisEncoder::open(&spec).expect("rust vorbis encoder");
+        let packets = opus_packets(&mut rust);
+        assert!(packets.len() > 10);
+        assert_eq!(opus_packets(app.as_mut()), packets);
+
+        let mut listen = CodecParams::audio(CodecId::Vorbis, 48_000, ChannelLayout::stereo());
+        listen.extra = vorbis_config(&packets);
+        let mut app = decoders.open(&listen).expect("app vorbis decoder");
+        assert_eq!(
+            cutlass_decode::Decoder::codec(app.as_ref()),
+            CodecId::Vorbis
+        );
+        let mut rust = cutlass_vorbis::VorbisDecoder::open(&listen).expect("rust vorbis decoder");
+        let decoded = opus_samples(&mut rust, &packets);
+        assert!(decoded.iter().any(|sample| sample.abs() > 0.1));
+        assert_eq!(opus_samples(app.as_mut(), &packets), decoded);
     }
 
     #[test]

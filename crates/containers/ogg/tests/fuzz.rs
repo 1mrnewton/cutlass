@@ -5,7 +5,8 @@
 //! campaigns are deterministic (a fixed xorshift generator per seed), so a
 //! failure names the seed and iteration that reproduce it.
 //!
-//! Demux: valid files written by [`OggMux`] are mutated (bit flips, byte
+//! Demux: valid Opus and Vorbis files written by [`OggMux`], and Vorbis
+//! files from libvorbis and FFmpeg (`tests/fixtures`), are mutated (bit flips, byte
 //! writes, inserts, deletes, cuts, splices, duplicated ranges), and half of
 //! the mutants get their page checksums repaired so the mutation reaches
 //! the page and packet parsers behind the checksum. Each mutant is probed,
@@ -13,7 +14,8 @@
 //! call must return within a bounded number of steps, packets must be
 //! within the limits, and each stream's times must not go backwards.
 //!
-//! Mux: random stream setups and packet sequences, including invalid ones.
+//! Mux: random Opus and Vorbis stream setups and packet sequences,
+//! including invalid ones. Vorbis streams take real setup headers.
 //! A refused call must leave the mux failed, and a mux that finishes must
 //! produce a file this crate demuxes back to exactly the accepted packets.
 //!
@@ -104,8 +106,129 @@ fn new_stream(channels: u16, extradata: Vec<u8>) -> NewStream {
 }
 
 fn packet(track: u32, bytes: Vec<u8>, pts: i64, duration: i64) -> Packet {
+    packet_at(track, bytes, pts, duration, 48_000)
+}
+
+fn packet_at(track: u32, bytes: Vec<u8>, pts: i64, duration: i64, rate: u32) -> Packet {
     let time = Timestamp::try_new(Some(pts), Some(pts), Some(duration)).expect("time");
-    Packet::try_new(track, bytes, time, Timescale::new(48_000), true).expect("packet")
+    Packet::try_new(track, bytes, time, Timescale::new(rate), true).expect("packet")
+}
+
+const VORBIS_FILES: [&[u8]; 4] = [
+    include_bytes!("fixtures/stereo_44100_q4.ogg"),
+    include_bytes!("fixtures/sweep_8000_mono_q0.ogg"),
+    include_bytes!("fixtures/surround51_48000_q4.ogg"),
+    include_bytes!("fixtures/ffmpeg_stereo_44100.ogg"),
+];
+const VORBIS_CHAIN: &[u8] = include_bytes!("fixtures/chained_mono_stereo.ogg");
+
+/// A real Vorbis stream: its params, modes, block sizes, and packets.
+struct VorbisSeed {
+    params: StreamParams,
+    rate: u32,
+    modes: Vec<bool>,
+    blocks: [u32; 2],
+    packets: Vec<Packet>,
+}
+
+impl VorbisSeed {
+    /// Bits of the mode number in an audio packet.
+    fn mode_bits(&self) -> u32 {
+        u32::BITS - u32::try_from(self.modes.len() - 1).unwrap().leading_zeros()
+    }
+
+    fn block(&self, mode: usize) -> u32 {
+        self.blocks[usize::from(self.modes[mode])]
+    }
+}
+
+fn vorbis_seeds() -> &'static [VorbisSeed] {
+    static SEEDS: OnceLock<Vec<VorbisSeed>> = OnceLock::new();
+    SEEDS.get_or_init(|| {
+        VORBIS_FILES
+            .iter()
+            .map(|bytes| {
+                let len = u64::try_from(bytes.len()).unwrap();
+                let mut demux = OggDemux::open(Cursor::new(bytes.to_vec()), len).expect("fixture");
+                let params = demux.streams()[0].params().clone();
+                let info = demux.vorbis(0).expect("vorbis").clone();
+                let mut packets = Vec::new();
+                while let Some(packet) = demux.read_packet().expect("read") {
+                    packets.push(packet);
+                }
+                VorbisSeed {
+                    rate: info.id.sample_rate,
+                    modes: info.modes,
+                    blocks: info.id.blocksizes,
+                    params,
+                    packets,
+                }
+            })
+            .collect()
+    })
+}
+
+fn vorbis_stream(seed: &VorbisSeed, extradata: Vec<u8>) -> NewStream {
+    let params = &seed.params;
+    NewStream {
+        params: StreamParams::try_audio(
+            params.codec().clone(),
+            seed.rate,
+            params.channels().expect("channels"),
+            extradata,
+        )
+        .expect("params"),
+        timescale: Timescale::new(seed.rate),
+        language: None,
+    }
+}
+
+/// `seed`'s packets muxed again, from `start`, alone or beside an Opus
+/// stream.
+fn vorbis_corpus_file(rng: &mut Rng, seed: &VorbisSeed, start: i64, with_opus: bool) -> Vec<u8> {
+    let mut mux = OggMux::new(Cursor::new(Vec::new()));
+    let vorbis = mux
+        .add_stream(vorbis_stream(seed, seed.params.extradata().to_vec()))
+        .expect("vorbis");
+    let opus = with_opus.then(|| mux.add_stream(new_stream(2, head(2, 312))).expect("opus"));
+    let mut vorbis_ticks = 0;
+    let mut opus_ticks = 0;
+    for (index, source) in seed.packets.iter().enumerate() {
+        let duration = source.timestamp().duration().expect("duration");
+        let pts = start + vorbis_ticks;
+        mux.write_packet(&packet_at(
+            vorbis.get(),
+            source.bytes().to_vec(),
+            pts,
+            duration,
+            seed.rate,
+        ))
+        .expect("vorbis packet");
+        vorbis_ticks += duration;
+        if let Some(opus) = opus
+            && index % 2 == 0
+        {
+            let mut bytes: Vec<u8> = (0..40 + rng.below(200)).map(|_| rng.byte()).collect();
+            bytes[0] = 19 << 3;
+            mux.write_packet(&packet(opus.get(), bytes, opus_ticks, 960))
+                .expect("opus packet");
+            opus_ticks += 960;
+        }
+    }
+    let mut durations = vec![TrackDuration {
+        track: vorbis,
+        timescale: Timescale::new(seed.rate),
+        ticks: vorbis_ticks,
+    }];
+    if let Some(opus) = opus {
+        durations.push(TrackDuration {
+            track: opus,
+            timescale: Timescale::new(48_000),
+            ticks: opus_ticks,
+        });
+    }
+    mux.finish(&durations).expect("finish");
+    mux.into_inner().into_inner()
 }
 
 /// TOC bytes for 2.5, 5, 10, 20, 40, and 60 ms frames, code 0, and a code 3
@@ -177,7 +300,14 @@ fn corpus() -> Vec<Vec<u8>> {
     let short = corpus_file(&mut rng, 1, 3, false);
     let mut chained = short.clone();
     chained.extend_from_slice(&corpus_file(&mut rng, 1, 5, false));
-    vec![one, two, three, short, chained]
+    let mut files = vec![one, two, three, short, chained];
+    files.extend(VORBIS_FILES.iter().map(|bytes| bytes.to_vec()));
+    files.push(VORBIS_CHAIN.to_vec());
+    let seeds = vorbis_seeds();
+    files.push(vorbis_corpus_file(&mut rng, &seeds[0], 0, false));
+    files.push(vorbis_corpus_file(&mut rng, &seeds[1], -700, false));
+    files.push(vorbis_corpus_file(&mut rng, &seeds[3], 0, true));
+    files
 }
 
 /// Rewrites the checksum of every page found, so mutants get past it.
@@ -341,6 +471,7 @@ fn exercise_demux(rng: &mut Rng, bytes: &[u8], intact: bool, label: &str) {
                         let start = demux
                             .opus(track)
                             .and_then(|info| info.start)
+                            .or_else(|| demux.vorbis(track).and_then(|info| info.start))
                             .expect("a landing needs a start");
                         if intact {
                             assert!(
@@ -408,49 +539,71 @@ fn demux_campaign(seed: u64, iterations: usize) -> Duration {
     slowest
 }
 
-/// One random mux session. Returns whether it finished.
-fn mux_session(rng: &mut Rng, label: &str) -> bool {
-    let mut mux = OggMux::new(Cursor::new(Vec::new()));
-    let tracks = 1 + rng.below(3);
-    let mut ids = Vec::new();
-    let mut ok = true;
-    for _ in 0..tracks {
-        let channels = u8::try_from(1 + rng.below(8)).unwrap();
-        let config = match rng.below(10) {
+/// One stream of a random mux session.
+enum SessionTrack {
+    Opus {
+        channels: u8,
+    },
+    Vorbis {
+        seed: &'static VorbisSeed,
+        previous: Option<u32>,
+    },
+}
+
+impl SessionTrack {
+    const fn rate(&self) -> u32 {
+        match self {
+            Self::Opus { .. } => 48_000,
+            Self::Vorbis { seed, .. } => seed.rate,
+        }
+    }
+}
+
+/// A random Opus or Vorbis stream to add, and the track it becomes.
+fn session_stream(rng: &mut Rng) -> (NewStream, SessionTrack) {
+    if rng.chance(40) {
+        let seeds = vorbis_seeds();
+        let seed = &seeds[rng.below(seeds.len())];
+        let extradata = match rng.below(10) {
             0 => Vec::new(),
-            1 => (0..rng.below(40)).map(|_| rng.byte()).collect(),
-            _ => head(channels, u16::try_from(rng.below(4000)).unwrap()),
-        };
-        let declared = if rng.chance(5) {
-            u16::from(channels) + 1
-        } else {
-            u16::from(channels)
-        };
-        match mux.add_stream(new_stream(declared, config)) {
-            Ok(id) => ids.push((id, channels)),
-            Err(_) => {
-                ok = false;
-                break;
+            1 => (0..rng.below(80)).map(|_| rng.byte()).collect(),
+            2 => {
+                let mut cut = seed.params.extradata().to_vec();
+                cut.truncate(rng.below(cut.len()));
+                cut
             }
-        }
+            _ => seed.params.extradata().to_vec(),
+        };
+        let stream = vorbis_stream(seed, extradata);
+        return (
+            stream,
+            SessionTrack::Vorbis {
+                seed,
+                previous: None,
+            },
+        );
     }
-    if ok {
-        for (id, channels) in &ids {
-            if rng.chance(15) {
-                let pre = u16::try_from(rng.below(1000)).unwrap();
-                if mux.set_config(*id, &head(*channels, pre)).is_err() {
-                    ok = false;
-                    break;
-                }
-            }
-        }
-    }
-    let mut accepted: Vec<Vec<Packet>> = vec![Vec::new(); ids.len()];
-    let mut next = vec![i64::try_from(rng.below(3)).unwrap() * 960; ids.len()];
-    if ok {
-        let count = rng.below(60);
-        for _ in 0..count {
-            let slot = rng.below(ids.len());
+    let channels = u8::try_from(1 + rng.below(8)).unwrap();
+    let config = match rng.below(10) {
+        0 => Vec::new(),
+        1 => (0..rng.below(40)).map(|_| rng.byte()).collect(),
+        _ => head(channels, u16::try_from(rng.below(4000)).unwrap()),
+    };
+    let declared = if rng.chance(5) {
+        u16::from(channels) + 1
+    } else {
+        u16::from(channels)
+    };
+    (
+        new_stream(declared, config),
+        SessionTrack::Opus { channels },
+    )
+}
+
+/// A random packet for `track` and its natural duration.
+fn session_packet(rng: &mut Rng, track: &mut SessionTrack) -> (Vec<u8>, i64) {
+    match track {
+        SessionTrack::Opus { .. } => {
             let size = if rng.chance(5) {
                 rng.below(130_000)
             } else {
@@ -458,6 +611,82 @@ fn mux_session(rng: &mut Rng, label: &str) -> bool {
             };
             let bytes = opus_payload(rng, size);
             let samples = i64::from(packet_samples(&bytes).unwrap_or(0));
+            (bytes, samples)
+        }
+        SessionTrack::Vorbis { seed, previous } => {
+            // Now and then a mode past the setup's, or a header packet.
+            let extra = usize::from(rng.chance(3));
+            let mode = rng.below(seed.modes.len() + extra);
+            let bits = seed.mode_bits();
+            let size = if rng.chance(3) {
+                rng.below(70_000)
+            } else {
+                1 + rng.below(900)
+            };
+            let mut bytes: Vec<u8> = (0..size.max(1)).map(|_| rng.byte()).collect();
+            let high = u32::from(bytes[0]) >> (1 + bits) << (1 + bits);
+            let low = u32::try_from(mode).unwrap() << 1 | u32::from(rng.chance(2));
+            bytes[0] = u8::try_from((high | low) & 0xFF).unwrap();
+            if mode >= seed.modes.len() || bytes[0] & 1 == 1 {
+                return (bytes, 0);
+            }
+            let block = seed.block(mode);
+            let samples = previous.map_or(0, |last| i64::from(last / 4 + block / 4));
+            *previous = Some(block);
+            (bytes, samples)
+        }
+    }
+}
+
+/// One random mux session. Returns, when it finished, the Vorbis packets
+/// read back.
+fn mux_session(rng: &mut Rng, label: &str) -> Option<usize> {
+    let mut mux = OggMux::new(Cursor::new(Vec::new()));
+    let count = 1 + rng.below(3);
+    let mut tracks: Vec<(cutlass_container::TrackId, SessionTrack)> = Vec::new();
+    let mut ok = true;
+    for _ in 0..count {
+        let (stream, track) = session_stream(rng);
+        match mux.add_stream(stream) {
+            Ok(id) => tracks.push((id, track)),
+            Err(_) => {
+                ok = false;
+                break;
+            }
+        }
+    }
+    if ok {
+        for (id, track) in &tracks {
+            if !rng.chance(15) {
+                continue;
+            }
+            let config = match track {
+                SessionTrack::Opus { channels } => {
+                    head(*channels, u16::try_from(rng.below(1000)).unwrap())
+                }
+                SessionTrack::Vorbis { seed, .. } => seed.params.extradata().to_vec(),
+            };
+            if mux.set_config(*id, &config).is_err() {
+                ok = false;
+                break;
+            }
+        }
+    }
+    let mut accepted: Vec<Vec<Packet>> = vec![Vec::new(); tracks.len()];
+    let mut next: Vec<i64> = tracks
+        .iter()
+        .map(|(_, track)| match track {
+            SessionTrack::Opus { .. } => i64::try_from(rng.below(3)).unwrap() * 960,
+            SessionTrack::Vorbis { .. } => {
+                i64::try_from(rng.below(3000)).unwrap() - if rng.chance(30) { 3000 } else { 0 }
+            }
+        })
+        .collect();
+    if ok {
+        let count = rng.below(60);
+        for _ in 0..count {
+            let slot = rng.below(tracks.len());
+            let (bytes, samples) = session_packet(rng, &mut tracks[slot].1);
             let duration = match rng.below(20) {
                 0 => samples / 2,
                 1 => samples + 1,
@@ -470,7 +699,8 @@ fn mux_session(rng: &mut Rng, label: &str) -> bool {
             if rng.chance(2) {
                 pts -= 960;
             }
-            let p = packet(ids[slot].0.get(), bytes, pts, duration);
+            let rate = tracks[slot].1.rate();
+            let p = packet_at(tracks[slot].0.get(), bytes, pts, duration, rate);
             match mux.write_packet(&p) {
                 Ok(()) => {
                     next[slot] = pts + duration;
@@ -490,12 +720,12 @@ fn mux_session(rng: &mut Rng, label: &str) -> bool {
             "{label}: refused but not failed"
         );
     }
-    let durations: Vec<TrackDuration> = ids
+    let durations: Vec<TrackDuration> = tracks
         .iter()
         .zip(&accepted)
-        .map(|((id, _), packets)| TrackDuration {
+        .map(|((id, track), packets)| TrackDuration {
             track: *id,
-            timescale: Timescale::new(48_000),
+            timescale: Timescale::new(track.rate()),
             ticks: packets
                 .iter()
                 .map(|p| p.timestamp().duration().unwrap())
@@ -505,11 +735,11 @@ fn mux_session(rng: &mut Rng, label: &str) -> bool {
     let finished = mux.finish(&durations);
     if !ok {
         assert!(finished.is_err(), "{label}: a failed mux reported success");
-        return false;
+        return None;
     }
     if finished.is_err() {
         assert_eq!(mux.status(), MuxStatus::Failed, "{label}: finish failed");
-        return false;
+        return None;
     }
     let bytes = mux.into_inner().into_inner();
     let len = u64::try_from(bytes.len()).unwrap();
@@ -517,7 +747,7 @@ fn mux_session(rng: &mut Rng, label: &str) -> bool {
         Ok(demux) => demux,
         Err(error) => panic!("{label}: the muxer wrote a file the demuxer refuses: {error}"),
     };
-    let mut back: Vec<Vec<Packet>> = vec![Vec::new(); ids.len()];
+    let mut back: Vec<Vec<Packet>> = vec![Vec::new(); tracks.len()];
     while let Some(p) = demux.read_packet().expect("read back") {
         back[usize::try_from(p.stream()).unwrap()].push(p);
     }
@@ -528,14 +758,24 @@ fn mux_session(rng: &mut Rng, label: &str) -> bool {
             assert_eq!(left.timestamp(), right.timestamp(), "{label}: time");
         }
     }
-    true
+    Some(
+        tracks
+            .iter()
+            .zip(&back)
+            .filter(|((_, track), _)| matches!(track, SessionTrack::Vorbis { .. }))
+            .map(|(_, packets)| packets.len())
+            .sum(),
+    )
 }
 
-fn mux_campaign(seed: u64, sessions: usize) -> usize {
+/// Sessions that finished, and the Vorbis packets they read back.
+fn mux_campaign(seed: u64, sessions: usize) -> (usize, usize) {
     let mut rng = Rng::new(seed);
     (0..sessions)
-        .filter(|session| mux_session(&mut rng, &format!("seed {seed} session {session}")))
-        .count()
+        .filter_map(|session| mux_session(&mut rng, &format!("seed {seed} session {session}")))
+        .fold((0, 0), |(finished, vorbis), packets| {
+            (finished + 1, vorbis + packets)
+        })
 }
 
 #[test]
@@ -548,10 +788,14 @@ fn fuzz_seeds_demux() {
 #[test]
 fn fuzz_seeds_mux() {
     let mut finished = 0;
+    let mut vorbis = 0;
     for seed in 0..64 {
-        finished += mux_campaign(seed, 8);
+        let (sessions, packets) = mux_campaign(seed, 8);
+        finished += sessions;
+        vorbis += packets;
     }
     assert!(finished > 0, "no random mux session finished");
+    assert!(vorbis > 0, "no Vorbis packet was muxed and read back");
 }
 
 fn campaign_length() -> Duration {
@@ -591,13 +835,17 @@ fn fuzz_campaign_mux() {
     let mut seed = 1_000;
     let mut sessions = 0;
     let mut finished = 0;
+    let mut vorbis = 0;
     while started.elapsed() < length {
-        finished += mux_campaign(seed, 20);
+        let (done, packets) = mux_campaign(seed, 20);
+        finished += done;
+        vorbis += packets;
         sessions += 20;
         seed += 1;
     }
     eprintln!(
-        "mux campaign: {sessions} sessions ({finished} finished and read back) in {:.1} s",
+        "mux campaign: {sessions} sessions ({finished} finished and read back, {vorbis} Vorbis packets) in {:.1} s",
         started.elapsed().as_secs_f64()
     );
+    assert!(vorbis > 0, "no Vorbis packet was muxed and read back");
 }

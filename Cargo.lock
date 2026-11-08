@@ -2708,6 +2708,7 @@ dependencies = [
  "cutlass-riff",
  "cutlass-session",
  "cutlass-still",
+ "cutlass-vorbis",
  "cutlass-webp",
  "image",
  "serde_json",

@@ -440,17 +440,13 @@ fn read_trajectory_component(r: &mut BitReader<'_>) -> Result<i32, CodecError> {
 pub(crate) fn read_trajectory(
     r: &mut BitReader<'_>,
     points: u8,
-    lenient_first_marker: bool,
+    divx_413: bool,
 ) -> Result<[(i32, i32); 3], CodecError> {
     let mut out = [(0, 0); 3];
     for slot in out.iter_mut().take(usize::from(points)) {
         let x = read_trajectory_component(r)?;
-        if lenient_first_marker {
-            // One DivX 5 build omits this marker.
-            if r.peek(1) == 1 {
-                r.skip(1);
-            }
-        } else {
+        // DivX 5.00 build 413 writes no marker between the components.
+        if !divx_413 {
             r.marker("sprite trajectory")?;
         }
         let y = read_trajectory_component(r)?;

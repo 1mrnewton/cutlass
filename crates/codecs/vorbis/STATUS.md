@@ -96,7 +96,7 @@ FFmpeg's native encoder, stereo only, same check: q1 and q4 at 44.1 kHz (264640 
 
 Checked-in fixtures agree the same way, 135.2 to 139.2 dB, aside from the two short files above. The local `.webm` track, copied to Ogg, is 1,465,920 samples of digital silence at 48 kHz and matches both decoders exactly.
 
-Gates 1 to 3 pass. The malformed-packet and lifecycle tests in `tests/decoder.rs` pass. A recorded fuzz campaign has not run.
+Gates 1 to 3 pass. The malformed-packet and lifecycle tests in `tests/decoder.rs` pass. Gate 5's campaign is recorded below.
 
 Gate 4, streams this crate writes (`tests/synthetic.rs`), mono 44.1 kHz, short block 256 and long block 2048. The same sample count as this decoder, SNR against FFmpeg and libvorbis:
 
@@ -131,6 +131,23 @@ Interop items: mono 44.1 kHz q 0.4, stereo 44.1 kHz q 0.3, stereo 48 kHz q 0.7, 
 
 `movie::tests::sound_alone_writes_a_vorbis_file`: half a second of silence through `write_sound` into an Ogg file. The edit duration is 22,050 samples. Reopening it with `VorbisDecoder` returns 22,050 frames, each sample under 1e-3. The desktop names that file `.ogg`, and a picture export that asks for Vorbis is refused. The phone registers the same Rust decoder and encoder.
 
-### Not run
+### Fuzz
 
-- A Vorbis fuzz campaign, and release measurements of decode and encode throughput, latency, and memory.
+In-process, not libFuzzer. `fuzz_seeds_do_not_panic` runs 96 decode mutants and 32 encoder opens on every `cargo test`, from seed `0x00c0ffee`. The corpus is the five checked-in Ogg fixtures plus a short encode from this crate. Mutants are random configurations, truncated headers, bit flips, splices, and overwrites. The encoder is opened at random channel counts, rates, qualities (including non-finite), and bitrates, and fed PCM that includes NaN and out-of-range samples. A successful encode is decoded. After a mutant the decoder is reset and fed a real packet.
+
+Release campaigns on this machine, `cargo test --release -p cutlass-vorbis --test fuzz -- --ignored --test-threads=2`:
+
+| Campaign | Budget | Cases | Refused | Non-finite | Ending seed |
+| --- | --- | --- | --- | --- | --- |
+| Decode, origin `0x9e3779b97f4a7c15` | 1800 s | 5,066,278 | 2,154,375 | 0 | `0x7c585fc72adf978d` |
+| Encode, origin `0x2545f4914f6cdd1d` | 600 s | 3,316,570 | 3,310,167 | 0 | `0xa1e0e63b735f70df` |
+
+No panic. Nothing to minimize.
+
+### Performance
+
+Apple M5 Pro, 18 cores, 48 GiB, macOS 27.0.1 (26A434), rustc 1.99.1. `cargo test --release` (opt-level 3, no LTO). Ten seconds of dense stereo at 44.1 kHz, encoded at 128 kb/s from quality 0.4. Each full-file time is the median of three runs after a warmup.
+
+The slowest of three invocations still clears the gates: encode 0.0612 s (163×), decode 0.0101 s (988×). A later invocation, with per-packet timing, was encode 0.0419 s (239×) and decode 0.0084 s (1184×). Packet time on that run: p50 17 µs, p95 24 µs, p99 30 µs, first packet 30 µs. `encoder_delay` is 0. That file's trailing padding is 344 samples, so the played length is the 441,000 input frames.
+
+`/usr/bin/time -l` on the measurement process reported a maximum resident set of 58,605,568 bytes. That process holds the 10 s buffer and the 60 s buffer used to time cancellation. Encode cancellation, raised 30 ms into a 60 s push, returned `Cancelled` within 0.1 ms. The audio decoder has no cancel flag; one packet is the unit of work. Allocations were not counted separately.

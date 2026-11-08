@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "id": "swirl-wipe",
+  "name": "Swirl Wipe",
+  "category": "Distort",
+  "outgoing": [
+    {"block": "swirl", "params": {"angle": {"keys": [[0, 0], [0.5, 240], [1, 0]]}, "radius": 1.0}}
+  ],
+  "incoming": [
+    {"block": "swirl", "params": {"angle": {"keys": [[0, 0], [0.5, 240], [1, 0]]}, "radius": 1.0}}
+  ],
+  "cross": {"kind": 1, "soft": 0.3}
+}

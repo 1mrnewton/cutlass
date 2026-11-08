@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "tiles",
+  "name": "Tiles",
+  "category": "Shape",
+  "duration": 0.7,
+  "cross": {"kind": 15, "count": 4, "soft": 0.1}
+}

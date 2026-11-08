@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "hexagon-close",
+  "name": "Hexagon Close",
+  "category": "Shape",
+  "cross": {"kind": 13, "soft": 0.02, "close": 1}
+}

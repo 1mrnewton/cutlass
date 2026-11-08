@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "heart-open",
+  "name": "Heart Open",
+  "category": "Shape",
+  "duration": 0.7,
+  "cross": {"kind": 14, "soft": 0.02}
+}

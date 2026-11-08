@@ -6,4 +6,5 @@
 
 mod bits;
 mod crc;
+mod header;
 mod tables;

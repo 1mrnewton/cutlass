@@ -141,8 +141,9 @@ fn column(block: &[i16; 64], c: usize) -> [i32; 8] {
 }
 
 fn rows(block: &mut [i16; 64]) {
-    for r in block.chunks_exact_mut(8) {
-        row(r);
+    let (rows, _) = block.as_chunks_mut::<8>();
+    for row_block in rows {
+        row(row_block);
     }
 }
 

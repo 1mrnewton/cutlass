@@ -52,4 +52,4 @@ Decoder fuzz, debug test profile so overflow checks stay on, pixel cap 1920×108
 
 `../local-files` was probed with ffprobe: 63 media files, none MPEG-4 Visual. The test skips when that folder is missing.
 
-`cargo clippy -p cutlass-mpeg4 --all-targets -- -D warnings` is still red on older unused items in this crate. Those were not silenced.
+A layer with resync markers disabled is not scanned for a video packet. `cargo fmt -p cutlass-mpeg4 -- --check` and `cargo clippy -p cutlass-mpeg4 --all-targets -- -D warnings` are clean.

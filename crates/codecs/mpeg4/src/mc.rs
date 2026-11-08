@@ -507,9 +507,10 @@ impl Warp {
             && delta[1][0] == 0
             && delta[1][1] == a << shift[0]
         {
-            for c in 0..2 {
-                offset[0][c] >>= shift[0];
-                offset[1][c] >>= shift[1];
+            let [row0, row1] = &mut offset;
+            for (left, right) in row0.iter_mut().zip(row1.iter_mut()) {
+                *left >>= shift[0];
+                *right >>= shift[1];
             }
             return Some(Self {
                 offset,

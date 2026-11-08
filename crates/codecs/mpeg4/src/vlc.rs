@@ -84,14 +84,6 @@ impl Vlc {
         r.skip(u32::from(entry.len));
         Some(entry.symbol)
     }
-
-    /// The fraction of the code space the codes fill, as a numerator over
-    /// `2^bits`: a complete code fills all of it.
-    #[cfg(test)]
-    pub(crate) fn filled(&self) -> (usize, usize) {
-        let used = self.table.iter().filter(|e| e.len != 0).count();
-        (used, self.table.len())
-    }
 }
 
 #[cfg(test)]

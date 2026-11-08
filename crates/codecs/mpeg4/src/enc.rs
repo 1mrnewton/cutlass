@@ -1691,7 +1691,10 @@ impl Pictures {
         if width == 0 || height == 0 || !width.is_multiple_of(2) || !height.is_multiple_of(2) {
             return Err(CodecError::InvalidApi { what: "frame size" });
         }
-        if width > 8191 || height > 8191 || u64::from(width) * u64::from(height) > 8192 * 8192 {
+        if width > crate::header::MAX_EDGE
+            || height > crate::header::MAX_EDGE
+            || u64::from(width) * u64::from(height) > 8192 * 8192
+        {
             return Err(CodecError::Limit { what: "frame size" });
         }
         let mbw = usize::try_from(width.div_ceil(16)).unwrap_or(0);

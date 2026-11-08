@@ -84,11 +84,6 @@ pub(crate) struct Colour {
     pub(crate) matrix: Option<u8>,
 }
 
-/// `visual_object_sequence`'s profile and level indication.
-pub(crate) fn parse_vos(payload: &[u8]) -> Option<u8> {
-    payload.first().copied()
-}
-
 /// The colour description of a `visual_object` header, when it names a
 /// video object.
 pub(crate) fn parse_visual_object(payload: &[u8]) -> Colour {
@@ -126,15 +121,10 @@ pub(crate) enum SpriteUsage {
 /// A decoded `VideoObjectLayer()` header.
 #[derive(Clone, Debug)]
 pub(crate) struct Vol {
-    pub(crate) vo_type: u8,
-    pub(crate) verid: u8,
-    /// Pixel aspect ratio, width over height; `(0, 0)` when unspecified.
-    pub(crate) pixel_aspect: (u8, u8),
     pub(crate) vol_control: bool,
     pub(crate) low_delay: bool,
     pub(crate) time_resolution: u32,
     pub(crate) time_bits: u32,
-    pub(crate) fixed_increment: Option<u32>,
     pub(crate) width: u32,
     pub(crate) height: u32,
     pub(crate) interlaced: bool,
@@ -239,7 +229,9 @@ pub(crate) fn parse_vol(payload: &[u8]) -> Result<Vol, CodecError> {
         1
     };
     let aspect = r.read(4);
-    let pixel_aspect = match aspect {
+    // Extended pixel aspect is two bytes. The picture buffer stays square
+    // samples; nothing in playback reads the ratio.
+    let _pixel_aspect = match aspect {
         1 => (1, 1),
         2 => (12, 11),
         3 => (10, 11),
@@ -284,7 +276,9 @@ pub(crate) fn parse_vol(payload: &[u8]) -> Result<Vol, CodecError> {
     }
     let time_bits = (32 - (time_resolution - 1).leading_zeros()).max(1);
     r.skip(1);
-    let fixed_increment = if r.bit() {
+    // `fixed_vop_time_increment` when the rate is fixed. Each VOP still
+    // carries its own increment, which is the clock the pictures use.
+    let _fixed_increment = if r.bit() {
         Some(r.read(time_bits))
     } else {
         None
@@ -371,14 +365,10 @@ pub(crate) fn parse_vol(payload: &[u8]) -> Result<Vol, CodecError> {
         return Err(unsupported("interlaced data partitioning"));
     }
     Ok(Vol {
-        vo_type,
-        verid,
-        pixel_aspect,
         vol_control,
         low_delay,
         time_resolution,
         time_bits,
-        fixed_increment,
         width,
         height,
         interlaced,
@@ -653,11 +643,17 @@ pub(crate) fn parse_user_data(payload: &[u8], enc: &mut Encoder) {
 /// A short-header (H.263 baseline) picture header.
 #[derive(Clone, Debug)]
 pub(crate) struct ShortHeader {
+    /// Eight-bit H.263 temporal reference. Playback times the picture from
+    /// the container, so only the parser test reads this.
+    #[cfg(test)]
     pub(crate) temporal_reference: u32,
     pub(crate) width: u32,
     pub(crate) height: u32,
     pub(crate) inter: bool,
     pub(crate) quant: u32,
+    /// Groups of blocks in the source format. The picture loop uses
+    /// `gob_rows`; the parser test checks this count.
+    #[cfg(test)]
     pub(crate) gobs: u32,
     /// Macroblock rows in one group of blocks.
     pub(crate) gob_rows: u32,
@@ -702,12 +698,16 @@ pub(crate) fn parse_short_header(payload: &[u8]) -> Result<ShortHeader, CodecErr
         }
     }
     r.check("short header")?;
+    #[cfg(not(test))]
+    let _ = (temporal_reference, gobs);
     Ok(ShortHeader {
+        #[cfg(test)]
         temporal_reference,
         width,
         height,
         inter,
         quant,
+        #[cfg(test)]
         gobs,
         gob_rows,
         data_start: r.position(),

@@ -6,9 +6,9 @@ use cutlass_decode::CodecError;
 use crate::block::Quant;
 use crate::frame::Frame;
 use crate::header::{
-    Colour, Encoder, GOV_START, ShortHeader, SpriteUsage, USER_DATA, VISUAL_OBJECT, VOP_START, Vol,
-    VopType, is_short_header, is_vol, parse_gov, parse_short_header, parse_user_data,
-    parse_visual_object, parse_vol, parse_vop, units,
+    Colour, Encoder, GOV_START, ShortHeader, SpriteUsage, USER_DATA, VISUAL_OBJECT, VOP_START,
+    VOS_END, VOS_START, Vol, VopType, is_short_header, is_video_object, is_vol, parse_gov,
+    parse_short_header, parse_user_data, parse_visual_object, parse_vol, parse_vop, units,
 };
 use crate::mc::Warp;
 use crate::vop::{self, Fixes, Grid, Layer, Picture, Times};
@@ -196,8 +196,10 @@ impl Decoder {
                     self.clock.time_base = i64::from(seconds);
                 }
             }
-            // Visual object sequence, video object, and the other start
-            // codes carry nothing the pictures depend on.
+            // A sequence header names a profile. The layer header is what
+            // decides which tools the pictures use.
+            VOS_START | VOS_END => {}
+            c if is_video_object(c) => {}
             _ => {}
         }
         Ok(())
@@ -346,6 +348,7 @@ impl Decoder {
             warping_points: vol.warping_points,
             time_bits: vol.time_bits,
             short: false,
+            resync: vol.resync,
             fixes: self.fixes,
         };
         let pic = Picture {
@@ -443,6 +446,7 @@ impl Decoder {
             warping_points: 0,
             time_bits: 0,
             short: true,
+            resync: false,
             fixes: Fixes::default(),
         };
         let pic = Picture {

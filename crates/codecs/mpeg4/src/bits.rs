@@ -30,11 +30,6 @@ impl<'a> BitReader<'a> {
         self.pos
     }
 
-    /// Total bits in the input.
-    pub(crate) fn len_bits(&self) -> usize {
-        self.len
-    }
-
     /// Bits left before the end; zero once the reader has run past it.
     pub(crate) fn left(&self) -> usize {
         self.len.saturating_sub(self.pos)
@@ -130,11 +125,6 @@ impl<'a> BitReader<'a> {
         }
     }
 
-    /// Skips to the next byte boundary.
-    pub(crate) fn align(&mut self) {
-        self.pos = (self.pos + 7) & !7;
-    }
-
     /// Bits until the next byte boundary, 1 to 8: MPEG-4 stuffing always
     /// takes at least one bit.
     pub(crate) fn bits_to_align(&self) -> u32 {
@@ -173,11 +163,6 @@ pub(crate) struct BitWriter {
 impl BitWriter {
     pub(crate) fn new() -> Self {
         Self::default()
-    }
-
-    /// Bits written so far.
-    pub(crate) fn len_bits(&self) -> usize {
-        self.out.len() * 8 + self.held as usize
     }
 
     /// Writes the low `n` bits (0..=32) of `value`.
@@ -220,6 +205,7 @@ impl BitWriter {
     }
 
     /// Whether the writer sits on a byte boundary.
+    #[cfg(test)]
     pub(crate) fn aligned(&self) -> bool {
         self.held == 0
     }
@@ -251,7 +237,7 @@ mod tests {
         let data = [0b1010_1100, 0b0101_0011, 0xFF];
         let mut r = BitReader::new(&data);
         assert_eq!(r.read(3), 0b101);
-        assert_eq!(r.read(7), 0b0110_001);
+        assert_eq!(r.read(7), 0b011_0001);
         assert_eq!(r.peek(6), 0b010011);
         assert_eq!(r.read_signed(4), 0b0100);
         assert_eq!(r.read_signed(2), -1);

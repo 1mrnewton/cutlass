@@ -952,7 +952,8 @@ mod tests {
     #[test]
     fn every_table_is_a_prefix_code() {
         let full = 1u64 << 16;
-        let lists: Vec<(&str, Vec<(u8, u16, u16)>)> = vec![
+        type Listed<'a> = (&'a str, Vec<(u8, u16, u16)>);
+        let lists: Vec<Listed<'_>> = vec![
             ("intra", with_escape(&INTRA_TCOEF, TCOEF_ESCAPE)),
             ("inter", with_escape(&INTER_TCOEF, TCOEF_ESCAPE)),
             ("intra rvlc", with_escape(&INTRA_RVLC, RVLC_ESCAPE)),

@@ -90,6 +90,9 @@ pub(crate) struct Layer<'a> {
     pub(crate) warping_points: u8,
     pub(crate) time_bits: u32,
     pub(crate) short: bool,
+    /// The layer did not disable resync markers, so a video packet may
+    /// follow a macroblock.
+    pub(crate) resync: bool,
     pub(crate) fixes: Fixes,
 }
 
@@ -182,6 +185,13 @@ enum Motion {
         select: [u8; 2],
     },
     Gmc,
+}
+
+/// The motion-compensated samples of one macroblock.
+struct Predicted<'a> {
+    y: &'a mut [u8; 256],
+    u: &'a mut [u8; 64],
+    v: &'a mut [u8; 64],
 }
 
 /// Coefficients of one macroblock, dequantised, and which blocks carry
@@ -680,6 +690,9 @@ impl Vop<'_> {
     /// When a resync marker follows, a reader positioned at it, past the
     /// stuffing. Macroblock stuffing before it is consumed from `r`.
     fn at_resync<'d>(&self, r: &mut BitReader<'d>) -> Option<BitReader<'d>> {
+        if !self.layer.resync {
+            return None;
+        }
         if !self.layer.partitioned && self.kind() != VopType::B {
             let n = if self.kind() == VopType::I { 9 } else { 10 };
             while r.left() > n as usize && r.peek(n) == 1 {
@@ -759,10 +772,9 @@ impl Vop<'_> {
         motion: Motion,
         reference: &Frame,
         rounding: bool,
-        y: &mut [u8; 256],
-        u: &mut [u8; 64],
-        v: &mut [u8; 64],
+        predicted: Predicted<'_>,
     ) {
+        let Predicted { y, u, v } = predicted;
         let [ry, ru, rv] = reference.refs(self.layer.edge);
         let quarter = self.layer.quarter;
         let pel = match (quarter, self.layer.fixes.legacy_qpel) {
@@ -928,19 +940,52 @@ impl Vop<'_> {
                 (self.past, None)
             };
             if let (Some(m), Some(f)) = (fwd, fwd_ref) {
-                self.predict(mbx, mby, m, f, rounding, &mut py, &mut pu, &mut pv);
+                self.predict(
+                    mbx,
+                    mby,
+                    m,
+                    f,
+                    rounding,
+                    Predicted {
+                        y: &mut py,
+                        u: &mut pu,
+                        v: &mut pv,
+                    },
+                );
             }
             if let (Some(m), Some(b)) = (bwd, bwd_ref) {
                 if fwd.is_some() {
                     let mut by = [0u8; 256];
                     let mut bu = [0u8; 64];
                     let mut bv = [0u8; 64];
-                    self.predict(mbx, mby, m, b, rounding, &mut by, &mut bu, &mut bv);
+                    self.predict(
+                        mbx,
+                        mby,
+                        m,
+                        b,
+                        rounding,
+                        Predicted {
+                            y: &mut by,
+                            u: &mut bu,
+                            v: &mut bv,
+                        },
+                    );
                     mc::average(&mut py, &by);
                     mc::average(&mut pu, &bu);
                     mc::average(&mut pv, &bv);
                 } else {
-                    self.predict(mbx, mby, m, b, rounding, &mut py, &mut pu, &mut pv);
+                    self.predict(
+                        mbx,
+                        mby,
+                        m,
+                        b,
+                        rounding,
+                        Predicted {
+                            y: &mut py,
+                            u: &mut pu,
+                            v: &mut pv,
+                        },
+                    );
                 }
             }
             let base = mby * 16 * ls + mbx * 16;
@@ -1630,10 +1675,12 @@ impl Vop<'_> {
         let rows = self.pic.gob_rows.max(1);
         for mb in 0..self.mb_num {
             let (mbx, mby) = self.mb_xy(mb);
-            if mbx == 0 && mby > 0 && mby % rows == 0 {
-                if let Some(q) = self.gob_header(r, (mby / rows) as u32)? {
-                    self.begin_packet(mb, q);
-                }
+            if mbx == 0
+                && mby > 0
+                && mby.is_multiple_of(rows)
+                && let Some(q) = self.gob_header(r, (mby / rows) as u32)?
+            {
+                self.begin_packet(mb, q);
             }
             self.short_macroblock(r, mb)?;
             r.check("macroblock")?;

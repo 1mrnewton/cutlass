@@ -11,5 +11,9 @@ cutlass-decode = { path = "../../decode", version = "0.1.0" }
 cutlass-encode = { path = "../../encode", version = "0.1.0" }
 cutlass-jpeg = { path = "../jpeg", version = "0.1.0" }
 
+[[bench]]
+name = "throughput"
+harness = false
+
 [lints]
 workspace = true

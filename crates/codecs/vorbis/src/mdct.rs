@@ -145,7 +145,6 @@ impl Mdct {
         scratch.dct = dct;
     }
 
-    #[cfg(test)]
     /// The forward transform of `2m` samples into `m` coefficients.
     pub(crate) fn forward(&self, samples: &[f32], out: &mut [f32], scratch: &mut Scratch) {
         let m = self.m;

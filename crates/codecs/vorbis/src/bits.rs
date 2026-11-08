@@ -132,7 +132,6 @@ impl<'a> BitReader<'a> {
 }
 
 /// Writes LSb-first values.
-#[cfg(test)]
 #[derive(Clone, Debug, Default)]
 pub(crate) struct BitWriter {
     bytes: Vec<u8>,
@@ -140,7 +139,6 @@ pub(crate) struct BitWriter {
     count: u32,
 }
 
-#[cfg(test)]
 impl BitWriter {
     pub(crate) fn new() -> Self {
         Self::default()
@@ -172,6 +170,7 @@ impl BitWriter {
     }
 
     /// Bits written so far.
+    #[cfg(test)]
     pub(crate) fn len(&self) -> u64 {
         self.bytes.len() as u64 * 8 + u64::from(self.count)
     }

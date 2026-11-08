@@ -1,9 +1,7 @@
 //! Codebooks (Vorbis I section 3): entry lengths, the Huffman tree they
 //! imply, and the optional vector lookup table.
 
-#[cfg(test)]
-use crate::bits::BitWriter;
-use crate::bits::{BitReader, ilog};
+use crate::bits::{BitReader, BitWriter, ilog};
 use crate::header::malformed;
 use cutlass_decode::CodecError;
 
@@ -327,7 +325,6 @@ impl BookSpec {
         })
     }
 
-    #[cfg(test)]
     /// Writes the book as [`Self::parse`] reads it, picking ordered or
     /// sparse length coding by size.
     pub(crate) fn write(&self, writer: &mut BitWriter) {
@@ -460,7 +457,7 @@ pub(crate) fn assign_codewords(lengths: &[u8]) -> Result<Vec<(u32, u8)>, CodecEr
     Ok(codes)
 }
 
-fn reverse(code: u32, len: u32) -> u32 {
+pub(crate) fn reverse(code: u32, len: u32) -> u32 {
     if len == 0 {
         0
     } else {
@@ -502,7 +499,6 @@ pub(crate) fn float32_unpack(word: u32) -> f32 {
     (signed * 2_f64.powi(exponent - 788)) as f32
 }
 
-#[cfg(test)]
 /// The inverse of [`float32_unpack`] for values it can represent: a 21-bit
 /// mantissa and an exponent.
 pub(crate) fn float32_pack(value: f32) -> u32 {

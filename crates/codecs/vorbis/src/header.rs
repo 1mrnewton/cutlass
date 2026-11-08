@@ -3,9 +3,7 @@
 //! with Xiph lacing, as Matroska `CodecPrivate` and FFmpeg's extradata
 //! carry them.
 
-use crate::bits::BitReader;
-#[cfg(test)]
-use crate::bits::BitWriter;
+use crate::bits::{BitReader, BitWriter};
 use cutlass_decode::CodecError;
 
 /// The largest configuration this crate takes. libvorbis setups are under
@@ -387,7 +385,6 @@ pub(crate) fn setup_reader(packet: &[u8]) -> Result<BitReader<'_>, CodecError> {
     Ok(BitReader::new(&packet[7..]))
 }
 
-#[cfg(test)]
 /// Starts a setup packet: the type byte and the signature.
 pub(crate) fn setup_writer() -> BitWriter {
     let mut writer = BitWriter::new();

@@ -9,8 +9,10 @@
 
 use std::path::{Path, PathBuf};
 
-use cutlass_decode::{CodecId, CodecParams, Decoder, Output, Packet, PictureSamples};
+use cutlass_decode::{CodecError, CodecId, CodecParams, Decoder};
 use cutlass_mpeg4::EngineDecoder;
+
+use crate::common::{packet, pictures, split};
 
 fn corpus() -> Option<PathBuf> {
     let dir = std::env::var_os("MPEG4_CORPUS").map_or_else(
@@ -18,40 +20,6 @@ fn corpus() -> Option<PathBuf> {
         PathBuf::from,
     );
     dir.is_dir().then_some(dir)
-}
-
-/// Splits an elementary stream into one packet per picture: each VOP with
-/// the headers before it, or each short-header picture.
-fn split(data: &[u8]) -> Vec<Vec<u8>> {
-    let short = matches!(data, [0, 0, b, ..] if b & 0xFC == 0x80);
-    let mut cuts = Vec::new();
-    let mut pending: Option<usize> = None;
-    let mut i = 0;
-    while i + 3 < data.len() {
-        let is_start = data[i] == 0 && data[i + 1] == 0;
-        if short && is_start && data[i + 2] & 0xFC == 0x80 {
-            cuts.push(i);
-            i += 3;
-            continue;
-        }
-        if !short && is_start && data[i + 2] == 1 {
-            let code = data[i + 3];
-            if code == 0xB6 {
-                cuts.push(pending.take().unwrap_or(i));
-            } else if pending.is_none() {
-                pending = Some(i);
-            }
-            i += 4;
-            continue;
-        }
-        i += 1;
-    }
-    let mut out = Vec::new();
-    for (n, &start) in cuts.iter().enumerate() {
-        let end = cuts.get(n + 1).copied().unwrap_or(data.len());
-        out.push(data[start..end].to_vec());
-    }
-    out
 }
 
 struct Result {
@@ -85,31 +53,11 @@ fn run(stream: &Path, reference: &Path) -> Result {
     let data = std::fs::read(stream).expect("stream");
     let want = std::fs::read(reference).expect("reference");
     let mut decoder = EngineDecoder::open(&CodecParams::video(CodecId::Mpeg4, 0, 0)).expect("open");
-    let mut pictures: Vec<(u32, u32, Vec<u8>)> = Vec::new();
+    let mut got = Vec::new();
     let mut error = None;
-    let mut keep = |out: Vec<Output>| {
-        for o in out {
-            if let Output::Picture(p) = o {
-                let info = p.info();
-                let PictureSamples::Cpu(bytes) = p.samples() else {
-                    panic!("platform buffer");
-                };
-                pictures.push((info.width, info.height, bytes.to_vec()));
-            }
-        }
-    };
     for (n, data) in split(&data).into_iter().enumerate() {
-        let packet = Packet {
-            stream: 0,
-            data,
-            pts: n as i64,
-            duration: 1,
-            timescale: 25,
-            keyframe: false,
-            side: Vec::new(),
-        };
-        match decoder.push(&packet) {
-            Ok(out) => keep(out),
+        match decoder.push(&packet(data, n as i64)) {
+            Ok(out) => got.extend(pictures(out)),
             Err(e) => {
                 error = Some(format!("packet {n}: {e}"));
                 break;
@@ -117,8 +65,10 @@ fn run(stream: &Path, reference: &Path) -> Result {
         }
     }
     if error.is_none() {
-        keep(decoder.drain().expect("drain"));
+        got.extend(pictures(decoder.drain().expect("drain")));
     }
+    let pictures: Vec<(u32, u32, Vec<u8>)> =
+        got.into_iter().map(|(w, h, _, b)| (w, h, b)).collect();
     if let Some(dump) = std::env::var_os("MPEG4_DUMP") {
         let bytes: Vec<u8> = pictures.iter().flat_map(|p| p.2.iter().copied()).collect();
         std::fs::write(Path::new(&dump).join(format!("{name}.yuv")), bytes).expect("dump");
@@ -241,16 +191,7 @@ fn refuses_the_studio_profile() {
     let mut decoder = EngineDecoder::open(&CodecParams::video(CodecId::Mpeg4, 0, 0)).expect("open");
     let mut outcome = Ok(());
     for (n, data) in split(&data).into_iter().enumerate() {
-        let packet = Packet {
-            stream: 0,
-            data,
-            pts: n as i64,
-            duration: 1,
-            timescale: 25,
-            keyframe: false,
-            side: Vec::new(),
-        };
-        match decoder.push(&packet) {
+        match decoder.push(&packet(data, n as i64)) {
             Ok(out) => assert!(out.is_empty(), "a studio picture decoded"),
             Err(e) => {
                 outcome = Err(e);
@@ -259,7 +200,7 @@ fn refuses_the_studio_profile() {
         }
     }
     assert!(
-        matches!(outcome, Err(cutlass_decode::CodecError::Unsupported { .. })),
+        matches!(outcome, Err(CodecError::Unsupported { .. })),
         "{outcome:?}"
     );
 }

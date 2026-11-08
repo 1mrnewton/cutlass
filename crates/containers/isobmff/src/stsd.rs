@@ -449,7 +449,14 @@ fn map_codec(fourcc: [u8; 4], oti: Option<u8>) -> CodecId {
         b"av01" => CodecId::Av1,
         b"vp08" => CodecId::Vp8,
         b"vp09" => CodecId::Vp9,
-        b"mp4v" => CodecId::Mpeg4,
+        // ISO/IEC 14496-1 objectTypeIndication. An absent or unlisted one
+        // stays MPEG-4 Visual (0x20).
+        b"mp4v" => match oti {
+            Some(0x60..=0x65) => CodecId::Mpeg2,
+            Some(0x6A) => CodecId::Unknown(fourcc),
+            Some(0x6C) => CodecId::Mjpeg,
+            _ => CodecId::Mpeg4,
+        },
         b"mp2v" => CodecId::Mpeg2,
         b"jpeg" | b"mjpa" | b"mjpb" => CodecId::Mjpeg,
         b"apch" | b"apcn" | b"apcs" | b"apco" | b"ap4h" | b"ap4x" => CodecId::ProRes,
@@ -521,5 +528,74 @@ fn read_u16(bytes: &[u8]) -> u16 {
     match bytes {
         [a, b, ..] => u16::from_be_bytes([*a, *b]),
         _ => 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn atom(kind: &[u8; 4], body: &[u8]) -> Vec<u8> {
+        let mut out = u32::try_from(body.len() + 8)
+            .unwrap()
+            .to_be_bytes()
+            .to_vec();
+        out.extend_from_slice(kind);
+        out.extend_from_slice(body);
+        out
+    }
+
+    fn descriptor(tag: u8, body: &[u8]) -> Vec<u8> {
+        let mut out = vec![tag, u8::try_from(body.len()).unwrap()];
+        out.extend_from_slice(body);
+        out
+    }
+
+    /// One `mp4v` entry whose `esds` names `oti` and carries `specific`.
+    fn mp4v(oti: Option<u8>, specific: &[u8]) -> Vec<u8> {
+        let mut visual = vec![0; 78];
+        visual[7] = 1;
+        visual[24..28].copy_from_slice(&[0, 48, 0, 32]);
+        if let Some(oti) = oti {
+            let mut config = vec![oti, 0x11, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+            config.extend(descriptor(0x05, specific));
+            let mut es = vec![0, 1, 0];
+            es.extend(descriptor(0x04, &config));
+            let mut esds = vec![0; 4];
+            esds.extend(descriptor(0x03, &es));
+            visual.extend(atom(b"esds", &esds));
+        }
+        let mut stsd = vec![0, 0, 0, 0, 0, 0, 0, 1];
+        stsd.extend(atom(b"mp4v", &visual));
+        stsd
+    }
+
+    fn codec(oti: Option<u8>) -> SampleDesc {
+        let mut budget = 64;
+        let mut entries =
+            parse_stsd(&mp4v(oti, &[0, 0, 1, 0xB0, 1]), *b"vide", &mut budget, 0).expect("parse");
+        assert_eq!(entries.len(), 1);
+        entries.remove(0)
+    }
+
+    #[test]
+    fn an_mp4v_entry_is_named_by_its_object_type() {
+        let visual = codec(Some(0x20));
+        assert_eq!(visual.codec, CodecId::Mpeg4);
+        assert!(matches!(
+            visual.kind,
+            MediaKind::Video(VideoParams {
+                width: 48,
+                height: 32
+            })
+        ));
+        assert_eq!(visual.extradata, [0, 0, 1, 0xB0, 1]);
+        assert_eq!(codec(None).codec, CodecId::Mpeg4);
+        for mpeg2 in 0x60..=0x65 {
+            assert_eq!(codec(Some(mpeg2)).codec, CodecId::Mpeg2, "{mpeg2:#x}");
+        }
+        assert_eq!(codec(Some(0x6A)).codec, CodecId::Unknown(*b"mp4v"));
+        assert_eq!(codec(Some(0x6C)).codec, CodecId::Mjpeg);
+        assert_eq!(codec(Some(0x21)).codec, CodecId::Mpeg4);
     }
 }

@@ -991,3 +991,77 @@ fn a_seek_in_a_long_variable_rate_file_takes_few_probes() {
     assert!(worst <= 6, "a seek took {worst} probes");
     assert!(total <= 59 * 4, "{total} probes for 59 seeks");
 }
+
+/// A stream copy cut mid-file: the packets a seek lands on in a libvorbis
+/// file, the first stamped with what it returns after the block before it,
+/// mux into a file that starts where that packet ends and reads back with
+/// the same packets, times, and end.
+#[test]
+fn packets_demuxed_after_a_seek_remux_and_read_back() {
+    let source = include_bytes!("../tests/fixtures/stereo_44100_q4.ogg").to_vec();
+    let mut demux = open(&source);
+    let stream = demux.streams()[0].clone();
+    let end = stream.edits()[0].duration();
+    let landing = demux
+        .seek(SeekTo {
+            track: 0,
+            time: 10_000,
+            end: None,
+        })
+        .expect("seek");
+    let Landing::Packet { time, .. } = landing.landing else {
+        panic!("landed at the end");
+    };
+    assert!(time > 0, "the seek lands mid-file at {time}");
+    let mut packets = Vec::new();
+    while let Some(packet) = demux.read_packet().expect("read") {
+        packets.push(packet);
+    }
+    let lead = packets[0].timestamp().duration().expect("duration");
+    assert!(lead > 0, "the landing packet carries a duration");
+
+    let mut mux = OggMux::new(Cursor::new(Vec::new()));
+    let track = mux
+        .add_stream(NewStream {
+            params: stream.params().clone(),
+            timescale: stream.timescale(),
+            language: None,
+        })
+        .expect("stream");
+    let mut ticks = 0;
+    for packet in &packets {
+        let time = packet.timestamp();
+        ticks += time.duration().expect("duration");
+        let copy = Packet::try_new(
+            track.get(),
+            packet.bytes().to_vec(),
+            time,
+            packet.timescale(),
+            packet.keyframe(),
+        )
+        .expect("packet");
+        mux.write_packet(&copy).expect("write");
+    }
+    mux.finish(&[TrackDuration {
+        track,
+        timescale: stream.timescale(),
+        ticks,
+    }])
+    .expect("finish");
+    let copied = mux.into_inner().into_inner();
+
+    let mut demux = open(&copied);
+    let info = demux.vorbis(0).expect("info").clone();
+    assert_eq!((info.start, info.end), (Some(time + lead), Some(end)));
+    let back: Vec<_> = std::iter::from_fn(|| demux.read_packet().expect("read")).collect();
+    assert_eq!(back.len(), packets.len());
+    let first = back[0].timestamp();
+    assert_eq!(
+        (first.presentation(), first.duration()),
+        (Some(time + lead), Some(0))
+    );
+    for (mine, theirs) in back.iter().zip(&packets).skip(1) {
+        assert_eq!(mine.bytes(), theirs.bytes());
+        assert_eq!(mine.timestamp(), theirs.timestamp());
+    }
+}

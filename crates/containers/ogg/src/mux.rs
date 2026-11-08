@@ -23,7 +23,10 @@
 //! finish, because no reader can play it.
 //!
 //! A Vorbis stream's timescale is its sample rate. Its first packet has
-//! duration 0, as a Vorbis decoder returns nothing for it. A stream may
+//! duration 0, as a Vorbis decoder returns nothing for it. A first packet
+//! read after a seek carries the duration it had after the block before
+//! it; that is taken too, and the stream starts where that packet ends,
+//! since no decoder returns those samples from this file. A stream may
 //! start before 0, as a stream copy cut mid-file does: its first audio page
 //! stays open until a packet ends at 0 or later, and section A.2 reads the
 //! samples before 0 from that page's granule. A stream whose first page
@@ -436,7 +439,28 @@ impl<W: Write> OggMux<W> {
                 (vorbis::packet_samples(*previous, block), Some(block))
             }
         };
-        if duration > samples {
+        // A first Vorbis packet demuxed after a seek is stamped with what
+        // it returns after the block before it, short or long.
+        let lead = match (&track.mapping, block, track.next) {
+            (
+                Mapping::Vorbis {
+                    headers: Some(headers),
+                    ..
+                },
+                Some(block),
+                None,
+            ) if duration > 0
+                && headers
+                    .modes
+                    .blocksizes
+                    .iter()
+                    .any(|&before| vorbis::packet_samples(Some(before), block) == duration) =>
+            {
+                duration
+            }
+            _ => 0,
+        };
+        if duration - lead > samples {
             return Err(rejected(format!(
                 "packet duration {duration} is longer than its natural {samples} samples"
             )));
@@ -468,6 +492,7 @@ impl<W: Write> OggMux<W> {
             duration,
             samples,
             block,
+            lead,
         })
     }
 
@@ -603,6 +628,9 @@ struct Checked {
     samples: i64,
     /// Vorbis: the packet's block size.
     block: Option<u32>,
+    /// Vorbis: the duration of a first packet cut from the middle of a
+    /// stream, which no decoder of this file returns.
+    lead: i64,
 }
 
 /// The three Vorbis headers of a configuration, checked against the
@@ -746,6 +774,7 @@ impl<W: Write> Mux for OggMux<W> {
             duration,
             samples,
             block,
+            lead,
         } = self
             .check_packet(index, packet)
             .map_err(|error| self.fail(error))?;
@@ -758,13 +787,13 @@ impl<W: Write> Mux for OggMux<W> {
         }
         let track = &mut self.tracks[index];
         if track.next.is_none() {
-            track.first = Some(pts);
+            track.first = Some(pts.saturating_add(lead));
         }
         if let Mapping::Vorbis { previous, .. } = &mut track.mapping {
             *previous = block;
         }
         track.next = Some(end);
-        track.trimmed = duration < samples;
+        track.trimmed = duration - lead < samples;
         track.sum = track.sum.saturating_add(duration);
         if self.last_time.is_some_and(|last| pts < last) {
             self.in_order = false;

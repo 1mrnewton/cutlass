@@ -8,7 +8,7 @@
 //! tone (5.5 dB) by the masker's tonality, measured as spectral flatness.
 //! A tonal band therefore contributes less masking than a noisy one.
 //! The absolute threshold of hearing (Terhardt) sets the least the
-//! threshold can be, with full scale taken as 96 dB SPL.
+//! threshold can be, with full scale taken as 114 dB SPL.
 
 /// One block size's analysis tables.
 #[derive(Clone, Debug)]
@@ -27,6 +27,11 @@ pub(crate) struct Bands {
 pub(crate) fn bark(frequency: f64) -> f64 {
     13.0 * (0.000_76 * frequency).atan() + 3.5 * (frequency / 7_500.0).powi(2).atan()
 }
+
+/// dB SPL of a full-scale sine. A 96 dB reference puts this threshold
+/// above the noise of an ordinary mix at the edges of hearing, and those
+/// bands are then left silent.
+const FULL_SCALE_SPL: f64 = 114.0;
 
 /// Terhardt's threshold in quiet, dB SPL.
 fn threshold_in_quiet(frequency: f64) -> f64 {
@@ -82,7 +87,7 @@ impl Bands {
         }
         let ath = (0..bins)
             .map(|k| {
-                let db = threshold_in_quiet(hz(k as f64)).min(60.0) - 96.0;
+                let db = threshold_in_quiet(hz(k as f64)).min(60.0) - FULL_SCALE_SPL;
                 (FULL_SCALE * 10_f64.powf(db / 10.0)) as f32
             })
             .collect();
@@ -96,6 +101,11 @@ impl Bands {
 
     pub(crate) fn count(&self) -> usize {
         self.edges.len() - 1
+    }
+
+    /// Bin edges of the half-Bark bands, including 0 and the bin count.
+    pub(crate) fn edges(&self) -> &[usize] {
+        &self.edges
     }
 
     /// The masking threshold of `spectrum` per bin, as power, into

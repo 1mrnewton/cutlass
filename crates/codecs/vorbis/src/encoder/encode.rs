@@ -85,6 +85,19 @@ struct State {
     bits: u64,
     rated: u64,
     shift_extra: f32,
+    /// Fraction of the lowpass still coded. A bitrate target narrows it
+    /// when raising the mask is not enough.
+    cutoff: f32,
+    /// Longest run of bins one noise pulse has to carry. A bitrate target
+    /// widens it; a pulse of amplitude 4 still matches the energy out to
+    /// about 96 bins.
+    piece: usize,
+    /// Noise floor as a multiple of the bin. A bitrate the mask cannot
+    /// reach raises it, which shrinks the noise pulses.
+    noise_scale: f32,
+    /// Set once the rate has been within reach, so a later wobble does not
+    /// start stripping noise.
+    reached: bool,
     drained: bool,
 }
 
@@ -102,6 +115,10 @@ impl Default for State {
             bits: 0,
             rated: 0,
             shift_extra: 0.0,
+            cutoff: 1.0,
+            piece: 96,
+            noise_scale: 2.5,
+            reached: false,
             drained: false,
         }
     }
@@ -502,15 +519,25 @@ impl VorbisEncoder {
     fn analyze(&mut self, long: bool) -> Result<(), CodecError> {
         let size = usize::from(long);
         let half = self.profile.blocksizes[size] / 2;
-        let bandwidth = self.profile.bandwidth[size].min(half);
-        let shift = (self.tune.mask_shift + self.state.shift_extra).clamp(-6.0, 24.0);
+        let full = self.profile.bandwidth[size].min(half).max(1);
+        let bandwidth = ((full as f32) * self.state.cutoff).round() as usize;
+        let bandwidth = bandwidth.clamp(1, full);
+        for spectrum in &mut self.scratch.spectrum {
+            for bin in spectrum.iter_mut().skip(bandwidth) {
+                *bin = 0.0;
+            }
+        }
+        // The floor of the clamp is how far a bitrate target can push the
+        // mask up. A higher floor leaves a dense signal stuck above the
+        // rate it was asked for.
+        let shift = (self.tune.mask_shift + self.state.shift_extra).clamp(-18.0, 24.0);
         let headroom = (self.tune.headroom
             * if self.state.shift_extra < 0.0 {
                 2.0_f32.powf(self.state.shift_extra / 6.0)
             } else {
                 1.0
             })
-        .clamp(4.0, 160.0);
+        .clamp(1.0, 160.0);
         let tolerance = (self.tune.tolerance
             + if self.state.shift_extra < 0.0 {
                 (-self.state.shift_extra / 3.0) as i32
@@ -539,6 +566,7 @@ impl VorbisEncoder {
                 &self.scratch.mask,
                 bandwidth,
                 headroom,
+                self.state.noise_scale,
                 &mut self.scratch.target,
                 &mut self.scratch.weight,
             );
@@ -588,7 +616,7 @@ impl VorbisEncoder {
         let nyquist = f64::from(self.profile.rate) / 2.0;
         let normalize = Normalize {
             start: ((self.tune.norm_hz / nyquist) * half as f64) as usize,
-            width: 16,
+            width: self.state.piece.max(8),
             threshold: self.tune.norm_threshold,
         };
         let groups = self.profile.groups.len();
@@ -602,7 +630,7 @@ impl VorbisEncoder {
                 self.scratch.residue.resize(1, Vec::new());
                 self.scratch.residue[0].resize(end, 0);
                 let (left, right) = (channels[0], channels[1]);
-                quantize_coupled(self, left, right, bins, point, &normalize);
+                quantize_coupled(self, left, right, bins, point, &normalize, size);
             } else {
                 self.scratch.residue.resize(channels.len(), Vec::new());
                 for (slot, &channel) in channels.iter().enumerate() {
@@ -619,7 +647,13 @@ impl VorbisEncoder {
                             self.scratch.spectrum[channel][bin] / self.scratch.curve[channel][bin],
                         );
                     }
-                    quant::quantize(&ratio, &normalize, &mut self.scratch.residue[slot]);
+                    quant::quantize(
+                        &ratio,
+                        &normalize,
+                        self.bands[size].edges(),
+                        0,
+                        &mut self.scratch.residue[slot],
+                    );
                     self.scratch.ratio = ratio;
                 }
             }
@@ -660,8 +694,44 @@ impl VorbisEncoder {
             return Ok(());
         }
         let error = (self.state.bits as f64 / want).log2() as f32;
-        let gain = if self.tune.constant { 0.9 } else { 0.4 };
+        // Far over the target, move quickly. Near it, move slowly so a
+        // short file does not wind up on the other side of the band.
+        let gain = if self.tune.constant {
+            0.5
+        } else if error > 0.40 {
+            0.6
+        } else if error > 0.0 {
+            0.12
+        } else {
+            0.4
+        };
         self.state.shift_extra = (self.state.shift_extra - error * gain).clamp(-18.0, 12.0);
+        // Wider pieces are fewer pulses. Out to 96 bins a pulse of
+        // amplitude 4 still carries the piece, so the band energy stays.
+        if error > 0.08 {
+            self.state.piece = (self.state.piece + 4).min(96);
+        } else if error < -0.08 {
+            self.state.piece = self.state.piece.saturating_sub(2).max(16);
+        }
+        // A running error under 0.5, while the noise floor is still the one
+        // the log-spectral check measures, means the mask can carry this
+        // target. Latch it. A dense stereo item at 64 kb/s is still near
+        // 0.75 after the mask has settled, so it does not latch. After a
+        // second and a half that stream raises the noise floor, then
+        // narrows the lowpass, until the rate comes down.
+        if error < 0.50 && self.state.noise_scale < 3.0 {
+            self.state.reached = true;
+        }
+        let second_and_a_half = u64::from(self.profile.rate) + u64::from(self.profile.rate) / 2;
+        if self.state.rated > second_and_a_half && !self.state.reached && error > 0.02 {
+            if self.state.noise_scale < 30.0 {
+                self.state.noise_scale = (self.state.noise_scale + 1.0).min(30.0);
+            } else {
+                self.state.cutoff = (self.state.cutoff - 0.08).max(0.18);
+            }
+        } else if error < -0.08 {
+            self.state.cutoff = (self.state.cutoff + 0.02).min(1.0);
+        }
         Ok(())
     }
 
@@ -705,14 +775,16 @@ impl Tune {
             mask_shift: quality * 14.0,
             ath_shift: (1.0 - quality) * 12.0,
             tolerance: ((1.0 - quality) * 3.0).round() as i32,
-            headroom: 8.0 + quality * 72.0,
+            // Large enough for a tone's signal-to-noise, small enough that a
+            // coupled angle stays in the residue class of limit 16.
+            headroom: 16.0,
             point_hz: if quality >= 0.75 {
                 nyquist
             } else {
                 5_000.0 + f64::from(quality) / 0.75 * 12_000.0
             },
-            norm_hz: 400.0,
-            norm_threshold: if quality >= 0.9 { 1.0e9 } else { 0.75 },
+            norm_hz: 0.0,
+            norm_threshold: 0.25,
             bitrate: (bitrate > 0).then_some(bitrate),
             constant,
         }
@@ -734,26 +806,67 @@ impl Tune {
     }
 }
 
-/// Masking floor in Y units: the mask, or high enough that `spectrum /
-/// floor` stays near `headroom`. Bins past `bandwidth` hold that shelf so
-/// the curve does not fall through the top of the coded band.
+/// True when `bin` sits on a tonal peak: above its mask, within two bins
+/// of the local maximum, and within 9 dB of that peak.
+fn tone_bin(spectrum: &[f32], mask: &[f32], bin: usize) -> bool {
+    let signal = spectrum[bin].abs();
+    let noise = mask.get(bin).copied().unwrap_or(0.0).max(1e-20).sqrt();
+    if signal < 1e-5 || signal < noise * 2.0 {
+        return false;
+    }
+    let start = bin.saturating_sub(2);
+    let end = (bin + 3).min(spectrum.len());
+    let mut peak = start;
+    for k in start..end {
+        if spectrum[k].abs() > spectrum[peak].abs() {
+            peak = k;
+        }
+    }
+    let distance = bin.abs_diff(peak);
+    distance <= 2 && signal >= spectrum[peak].abs() * 0.35
+}
+
+/// Masking floor in Y units. A peak uses `signal / headroom` so the
+/// residue keeps the tone. A bin sitting under the mask uses at most a
+/// small multiple of its own magnitude, so rounding cannot delete it and
+/// noise normalization can put the energy back inside a narrow band.
+/// Bins past `bandwidth` hold that shelf so the curve does not fall
+/// through the top of the coded band.
 fn fill_target(
     spectrum: &[f32],
     mask: &[f32],
     bandwidth: usize,
     headroom: f32,
+    noise_scale: f32,
     target: &mut [f32],
     weight: &mut [f32],
 ) {
     let (low, step) = floorfit::y_scale();
     let bandwidth = bandwidth.min(spectrum.len()).max(1);
     for bin in 0..bandwidth {
-        let signal = spectrum[bin].abs().max(1e-12);
+        let signal = spectrum[bin].abs();
         let noise = mask[bin].max(1e-20).sqrt();
-        let amplitude = noise.max(signal / headroom);
+        // The local maximum of a tone, and the bin beside it, keep
+        // `signal / headroom`. Every other bin is noise: a small multiple
+        // of itself, so the residue rounds away and one pulse per band
+        // carries the energy.
+        let peak = tone_bin(spectrum, mask, bin);
+        let amplitude = if signal < 1e-8 {
+            noise.max(1e-12)
+        } else if peak {
+            signal / headroom
+        } else {
+            signal * noise_scale
+        };
         let db = 20.0 * amplitude.log10();
         target[bin] = ((db - low) / step).clamp(0.0, 127.0);
-        weight[bin] = (signal / noise).min(32.0);
+        weight[bin] = if signal < 1e-8 {
+            0.05
+        } else if peak {
+            32.0
+        } else {
+            2.0
+        };
     }
     let shelf = target[bandwidth - 1];
     for bin in bandwidth..spectrum.len() {
@@ -771,6 +884,7 @@ fn quantize_coupled(
     bins: usize,
     point: usize,
     normalize: &Normalize,
+    size: usize,
 ) {
     let spectra = [
         encoder.scratch.spectrum[left].clone(),
@@ -786,11 +900,13 @@ fn quantize_coupled(
         floors: [floors[0].as_slice(), floors[1].as_slice()],
         silent,
     };
+    let edges = encoder.bands[size].edges().to_vec();
     quant::quantize_pair(
         &pair,
         bins,
         point,
         normalize,
+        &edges,
         &mut encoder.scratch.pair,
         &mut encoder.scratch.residue[0],
     );

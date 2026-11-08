@@ -9,9 +9,9 @@
 
 use crate::encoder::profile::MAX_RESIDUE;
 
-/// Noise normalization: in each run of `width` bins from `start`, while
-/// the energy rounded away is at least `threshold`, the largest values
-/// that rounded to 0 become ±1.
+/// Noise normalization: in each run of `width` bins from `start`, when
+/// the energy rounded away is at least `threshold`, the largest value
+/// that rounded to 0 becomes one pulse that carries that energy.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Normalize {
     pub start: usize,
@@ -20,36 +20,82 @@ pub(crate) struct Normalize {
 }
 
 /// Rounds `ratio` (spectrum over floor) into `out`, normalizing from
-/// `normalize.start`; bins from `ratio.len()` up are 0.
-pub(crate) fn quantize(ratio: &[f32], normalize: &Normalize, out: &mut [i32]) {
+/// `normalize.start`. `bands` are absolute bin edges; `origin` is the bin
+/// `ratio[0]` represents. Empty `bands` uses `normalize.width` instead.
+/// Bins from `ratio.len()` up are 0.
+pub(crate) fn quantize(
+    ratio: &[f32],
+    normalize: &Normalize,
+    bands: &[usize],
+    origin: usize,
+    out: &mut [i32],
+) {
     out.fill(0);
+    // With bands, ±1 is rounded away and one pulse per band carries that
+    // energy. A grid of ±1 is what the residue books spend bits on.
+    let dead_zone = bands.len() >= 2;
     for (slot, &r) in out.iter_mut().zip(ratio) {
-        *slot = (r.round() as i32).clamp(-MAX_RESIDUE, MAX_RESIDUE);
+        let rounded = (r.round() as i32).clamp(-MAX_RESIDUE, MAX_RESIDUE);
+        *slot = if dead_zone && rounded.abs() <= 2 {
+            0
+        } else {
+            rounded
+        };
+    }
+    if bands.len() >= 2 {
+        let mut band = bands.partition_point(|&edge| edge <= origin);
+        band = band.saturating_sub(1);
+        let first = normalize.start.saturating_sub(origin);
+        while band + 1 < bands.len() {
+            let start = bands[band].saturating_sub(origin).max(first);
+            let end = bands[band + 1].saturating_sub(origin);
+            // A half-Bark above a few kilohertz is wider than one pulse can
+            // carry. Split it so each piece keeps its energy.
+            let piece = normalize.width.max(8);
+            let mut at = start;
+            while at < end {
+                let stop = (at + piece).min(end);
+                restore_window(ratio, out, at, stop, normalize.threshold);
+                at = stop;
+            }
+            band += 1;
+        }
+        return;
     }
     let width = normalize.width.max(1);
-    let mut start = normalize.start.min(ratio.len());
-    let mut small: Vec<(f32, usize)> = Vec::with_capacity(width);
+    let mut start = normalize.start.saturating_sub(origin).min(ratio.len());
     while start < ratio.len() {
         let end = (start + width).min(ratio.len());
-        small.clear();
-        let mut energy = 0.0_f32;
-        for k in start..end {
-            if out[k] == 0 {
-                energy += ratio[k] * ratio[k];
-                small.push((ratio[k].abs(), k));
-            }
-        }
-        if energy >= normalize.threshold {
-            small.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
-            for &(_, k) in &small {
-                if energy < normalize.threshold {
-                    break;
-                }
-                out[k] = if ratio[k] < 0.0 { -1 } else { 1 };
-                energy -= 1.0;
-            }
-        }
+        restore_window(ratio, out, start, end, normalize.threshold);
         start = end;
+    }
+}
+
+/// One pulse at the largest discarded bin, with amplitude `sqrt(energy)`,
+/// when the discarded energy in `start..end` reaches `threshold`.
+fn restore_window(ratio: &[f32], out: &mut [i32], start: usize, end: usize, threshold: f32) {
+    let end = end.min(ratio.len());
+    if start >= end {
+        return;
+    }
+    let mut energy = 0.0_f32;
+    let mut best = start;
+    let mut best_abs = -1.0_f32;
+    for k in start..end {
+        if out[k] == 0 {
+            energy += ratio[k] * ratio[k];
+            let magnitude = ratio[k].abs();
+            if magnitude > best_abs {
+                best_abs = magnitude;
+                best = k;
+            }
+        }
+    }
+    if energy >= threshold && best_abs >= 0.0 {
+        // Stay in a small residue class. A bigger pulse codes the whole
+        // partition with an expensive book.
+        let amp = (energy.sqrt().round() as i32).clamp(1, 4);
+        out[best] = if ratio[best] < 0.0 { -amp } else { amp };
     }
 }
 
@@ -100,6 +146,7 @@ pub(crate) fn quantize_pair(
     bins: usize,
     point: usize,
     normalize: &Normalize,
+    bands: &[usize],
     scratch: &mut PairScratch,
     out: &mut [i32],
 ) {
@@ -120,7 +167,13 @@ pub(crate) fn quantize_pair(
         scratch.ratio[c].clear();
         scratch.ratio[c].extend((0..point).map(|k| ratio(c, k)));
         scratch.values[c].resize(point, 0);
-        quantize(&scratch.ratio[c], normalize, &mut scratch.values[c]);
+        quantize(
+            &scratch.ratio[c],
+            normalize,
+            bands,
+            0,
+            &mut scratch.values[c],
+        );
     }
     for k in 0..point {
         let (m, a) = couple(scratch.values[0][k], scratch.values[1][k]);
@@ -128,10 +181,6 @@ pub(crate) fn quantize_pair(
         out[2 * k + 1] = a.clamp(-MAX_RESIDUE, MAX_RESIDUE);
     }
     if point < bins {
-        let shared = Normalize {
-            start: normalize.start.saturating_sub(point),
-            ..*normalize
-        };
         scratch.ratio[0].clear();
         for k in point..bins {
             let (l, r) = (pair.spectra[0][k], pair.spectra[1][k]);
@@ -141,7 +190,13 @@ pub(crate) fn quantize_pair(
             scratch.ratio[0].push(sign * magnitude);
         }
         scratch.values[0].resize(bins - point, 0);
-        quantize(&scratch.ratio[0], &shared, &mut scratch.values[0]);
+        quantize(
+            &scratch.ratio[0],
+            normalize,
+            bands,
+            point,
+            &mut scratch.values[0],
+        );
         for k in point..bins {
             out[2 * k] = scratch.values[0][k - point];
         }
@@ -179,22 +234,22 @@ mod tests {
         let on = Normalize { start: 0, ..off };
         let ratio = [0.45_f32, -0.44, 0.43, 0.42, 0.1, 2.6, 0.0, 0.0];
         let mut plain = [0; 8];
-        quantize(&ratio, &off, &mut plain);
+        quantize(&ratio, &off, &[], 0, &mut plain);
         assert_eq!(plain, [0, 0, 0, 0, 0, 3, 0, 0]);
         let mut filled = [0; 8];
-        quantize(&ratio, &on, &mut filled);
+        quantize(&ratio, &on, &[], 0, &mut filled);
         // 0.765 of energy rounded away: below the threshold, nothing fills.
         assert_eq!(filled, plain);
         let loud = [0.49_f32, -0.48, 0.47, 0.46, 0.45, 0.44, 0.1, 0.0];
-        quantize(&loud, &on, &mut filled);
+        quantize(&loud, &on, &[], 0, &mut filled);
         assert_eq!(filled, [1, 0, 0, 0, 0, 0, 0, 0]);
-        // 1.31 dropped: each ±1 put back takes 1.0 of it.
+        // 1.31 dropped, and one pulse of amplitude 1 carries it.
         let quiet = Normalize {
             threshold: 0.25,
             ..on
         };
-        quantize(&loud, &quiet, &mut filled);
-        assert_eq!(filled, [1, -1, 0, 0, 0, 0, 0, 0]);
+        quantize(&loud, &quiet, &[], 0, &mut filled);
+        assert_eq!(filled, [1, 0, 0, 0, 0, 0, 0, 0]);
     }
 
     #[test]
@@ -218,6 +273,7 @@ mod tests {
             4,
             2,
             &normalize,
+            &[],
             &mut PairScratch::default(),
             &mut out,
         );
@@ -235,6 +291,7 @@ mod tests {
             4,
             2,
             &normalize,
+            &[],
             &mut PairScratch::default(),
             &mut out,
         );

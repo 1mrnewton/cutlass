@@ -8,4 +8,5 @@ mod dct;
 mod frame;
 mod headers;
 mod mc;
+mod slice;
 mod tables;

@@ -29,14 +29,15 @@ pub struct PhoneExport {
     pub height: u32,
 }
 
-/// Opus in Rust, the platform encoders for this OS, then H.264, AAC and
-/// ProRes in Rust.
+/// Opus, AC-3 and E-AC-3 in Rust, the platform encoders for this OS, then
+/// H.264, AAC and ProRes in Rust.
 #[must_use]
 pub fn encoders() -> EncodeFactory {
     let mut encoders = EncodeFactory::new();
     // Rust audio codecs go ahead of the platform ones, so Opus encodes the
     // same on the phone as on the desktop.
     cutlass_opus::register_encoders(&mut encoders);
+    cutlass_ac3::register_encoders(&mut encoders);
     #[cfg(target_vendor = "apple")]
     cutlass_platform_apple::register_encoders(&mut encoders);
     cutlass_h264::register_encoders(&mut encoders);

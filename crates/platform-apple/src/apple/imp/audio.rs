@@ -370,6 +370,9 @@ fn compressed_desc(
         CodecId::Mp3 => (u32::from_be_bytes(*b".mp3"), 1152),
         CodecId::Opus => (u32::from_be_bytes(*b"opus"), 960),
         CodecId::Ac3 => (u32::from_be_bytes(*b"ac-3"), 1536),
+        // Six blocks is the common syncframe. A shorter E-AC-3 frame is
+        // decoded by the Rust codec, which is registered ahead of this one.
+        CodecId::Eac3 => (u32::from_be_bytes(*b"ec-3"), 1536),
         CodecId::Pcm => return pcm_desc(rate, channels, SampleFormat::F32),
         CodecId::Vorbis => return Err(CodecError::Unsupported { what: "vorbis" }),
         _ => {

@@ -33,8 +33,8 @@ pub fn readers() -> ReaderFactory {
     readers
 }
 
-/// FLAC, ALAC, MP3, Opus and WebP, the platform decoders for this OS, then
-/// PNG, GIF, JPEG, AAC, H.264, HEVC, PCM and ProRes.
+/// FLAC, ALAC, MP3, AC-3, E-AC-3, Opus and WebP, the platform decoders for
+/// this OS, then PNG, GIF, JPEG, AAC, H.264, HEVC, PCM and ProRes.
 #[must_use]
 pub fn decoders() -> DecodeFactory {
     let mut decoders = DecodeFactory::new();
@@ -45,6 +45,7 @@ pub fn decoders() -> DecodeFactory {
     cutlass_flac::register_decoders(&mut decoders);
     cutlass_alac::register_decoders(&mut decoders);
     cutlass_mp3::register_decoders(&mut decoders);
+    cutlass_ac3::register_decoders(&mut decoders);
     cutlass_opus::register_decoders(&mut decoders);
     cutlass_webp::register_decoders(&mut decoders);
     #[cfg(target_vendor = "apple")]
@@ -411,6 +412,17 @@ mod tests {
                 platform.push(&damaged).is_ok(),
                 "the platform decoder was not picked"
             );
+        }
+    }
+
+    #[test]
+    fn the_phone_opens_ac3_and_eac3() {
+        for codec in [CodecId::Ac3, CodecId::Eac3] {
+            let spec = CodecParams::audio(codec, 48_000, ChannelLayout::stereo());
+            let encoder = crate::export::encoders().open(&spec).expect("encoder");
+            assert_eq!(Encoder::codec(encoder.as_ref()), codec);
+            let decoder = super::decoders().open(&spec).expect("decoder");
+            assert_eq!(Decoder::codec(decoder.as_ref()), codec);
         }
     }
 

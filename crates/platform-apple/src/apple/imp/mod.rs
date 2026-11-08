@@ -87,7 +87,7 @@ const VIDEO: [CodecId; 9] = [
     CodecId::Prores,
 ];
 
-const AUDIO: [CodecId; 8] = [
+const AUDIO: [CodecId; 9] = [
     CodecId::Aac,
     CodecId::Opus,
     CodecId::Mp3,
@@ -96,6 +96,7 @@ const AUDIO: [CodecId; 8] = [
     CodecId::Vorbis,
     CodecId::Alac,
     CodecId::Ac3,
+    CodecId::Eac3,
 ];
 
 const STILL: [CodecId; 4] = [CodecId::Jpeg, CodecId::Png, CodecId::Webp, CodecId::Gif];

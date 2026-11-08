@@ -441,6 +441,112 @@ mod tests {
         assert_eq!(ready.pcm.layout.len(), 2);
     }
 
+    /// An AC-3 or E-AC-3 movie opens, plays the tone, seeks, and opens again.
+    #[test]
+    fn an_ac3_movie_opens_seeks_and_reopens() {
+        use cutlass_encode::{AudioInput, ChannelLayout, CodecParams, Encoder, Pcm, SideData};
+
+        for codec in [CodecId::Ac3, CodecId::Eac3] {
+            let path = std::env::temp_dir().join(format!(
+                "cutlass-readers-{codec:?}-{}.mp4",
+                std::process::id()
+            ));
+            let rate = 48_000u32;
+            let layout = ChannelLayout::stereo();
+            let samples: Vec<f32> = (0..rate as usize)
+                .flat_map(|i| {
+                    let t = i as f32 / rate as f32;
+                    let left = (t * 1_000.0 * std::f32::consts::TAU).sin() * 0.4;
+                    [left, left * 0.5]
+                })
+                .collect();
+            let mut spec = CodecParams::audio(codec, rate, layout.clone());
+            spec.bitrate = 192_000;
+            let mut encoder = cutlass_ac3::Ac3Encoder::open(&spec).expect("encoder");
+            let pcm = Pcm::from_f32(rate, layout, samples).expect("pcm");
+            let mut packets = encoder.push(&AudioInput { pcm }).expect("push");
+            packets.extend(encoder.drain().expect("drain"));
+            let mut mux =
+                cutlass_isobmff::Mp4Mux::new(std::fs::File::create(&path).expect("create"));
+            let params = StreamParams::try_audio(StreamCodec::Known(codec), rate, 2, Vec::new())
+                .expect("params");
+            let track = mux
+                .add_stream(NewStream {
+                    params,
+                    timescale: Timescale::new(rate),
+                    language: None,
+                })
+                .expect("stream");
+            let mut ticks = 0i64;
+            for packet in &packets {
+                for side in &packet.side {
+                    if let SideData::Config(config) = side {
+                        mux.set_config(track, config).expect("config");
+                    }
+                }
+                let timestamp =
+                    Timestamp::try_new(Some(packet.pts), Some(packet.pts), Some(packet.duration))
+                        .expect("time");
+                let out = Packet::try_new(
+                    track.get(),
+                    packet.data.clone(),
+                    timestamp,
+                    Timescale::new(rate),
+                    true,
+                )
+                .expect("packet");
+                mux.write_packet(&out).expect("write");
+                ticks += packet.duration;
+            }
+            mux.finish(&[TrackDuration {
+                track,
+                timescale: Timescale::new(rate),
+                ticks,
+            }])
+            .expect("finish");
+            drop(mux);
+
+            let window = |at| {
+                let mut media = installed_readers().open(&path).expect("open");
+                media
+                    .audio_from(cutlass_model::Micros(at), 2_048)
+                    .expect("audio")
+            };
+            let start = window(100_000);
+            let later = window(500_000);
+            let info = installed_readers().probe(&path).expect("probe");
+            assert!(info.duration.is_some(), "{codec:?}");
+            installed_readers().open(&path).expect("reopen");
+            std::fs::remove_file(&path).expect("remove");
+            for (name, pcm) in [("start", &start), ("seek", &later)] {
+                let samples = pcm.as_f32().expect("f32");
+                assert_eq!(samples.len(), 2 * 2_048, "{codec:?} {name}");
+                assert!(
+                    tone_margin(samples, rate, 1_000.0) > 20.0,
+                    "{codec:?} {name}"
+                );
+            }
+        }
+    }
+
+    /// How far, in dB, the left channel's energy at `freq` sits above the
+    /// energy an octave up.
+    fn tone_margin(interleaved: &[f32], rate: u32, freq: f64) -> f64 {
+        let left: Vec<f32> = interleaved.iter().step_by(2).copied().collect();
+        let at = |hz: f64| {
+            let w = 2.0 * std::f64::consts::PI * hz / f64::from(rate);
+            let coeff = 2.0 * w.cos();
+            let (mut s1, mut s2) = (0.0f64, 0.0f64);
+            for sample in &left {
+                let s = f64::from(*sample) + coeff * s1 - s2;
+                s2 = s1;
+                s1 = s;
+            }
+            s2 * s2 + s1 * s1 - coeff * s1 * s2
+        };
+        10.0 * (at(freq) / at(freq * 2.0).max(1e-12)).log10()
+    }
+
     fn aiff_s16(frame: &[u8]) -> Vec<u8> {
         let mut mux = cutlass_aiff::AiffMux::new(std::io::Cursor::new(Vec::new()));
         let params =

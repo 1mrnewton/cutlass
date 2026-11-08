@@ -2718,6 +2718,7 @@ name = "cutlass-ffi"
 version = "0.1.0"
 dependencies = [
  "cutlass-aac",
+ "cutlass-ac3",
  "cutlass-aiff",
  "cutlass-alac",
  "cutlass-codec",

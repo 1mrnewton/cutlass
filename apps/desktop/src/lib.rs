@@ -43,7 +43,8 @@ pub fn register_codecs_with(
     // and encodes the same on every platform. FLAC's encoder hands the muxer
     // the STREAMINFO (sample count and MD5) a FLAC file is finished with;
     // ALAC's hands it the final cookie; MP3's hands it the delay and padding
-    // its LAME tag needs; Opus's hands it the OpusHead, with its pre-skip,
+    // its LAME tag needs; AC-3 and E-AC-3 hand it `dac3` or `dec3`; Opus's
+    // hands it the OpusHead, with its pre-skip,
     // and the end trim. The Opus decoder matches the RFC vectors and plays
     // multistream and every API rate. WebP still images follow the same
     // rule, and an animated file's later packets are bare frames only the
@@ -54,6 +55,8 @@ pub fn register_codecs_with(
     cutlass_alac::register_encoders(&mut encoders);
     cutlass_mp3::register_decoders(&mut decoders);
     cutlass_mp3::register_encoders(&mut encoders);
+    cutlass_ac3::register_decoders(&mut decoders);
+    cutlass_ac3::register_encoders(&mut encoders);
     cutlass_opus::register_decoders(&mut decoders);
     cutlass_opus::register_encoders(&mut encoders);
     cutlass_webp::register_decoders(&mut decoders);
@@ -535,6 +538,20 @@ mod tests {
             cutlass_opus::register_decoders(&mut reversed);
             let mut platform = reversed.open(&listen).expect("platform opus decoder");
             assert_ne!(opus_samples(platform.as_mut(), &packets), decoded);
+        }
+    }
+
+    #[test]
+    fn ac3_and_eac3_open_for_import_and_export() {
+        use cutlass_decode::ChannelLayout;
+
+        let (decoders, encoders) = super::register_codecs();
+        for codec in [CodecId::Ac3, CodecId::Eac3] {
+            let spec = CodecParams::audio(codec, 48_000, ChannelLayout::stereo());
+            let encoder = encoders.open(&spec).expect("encoder");
+            assert_eq!(cutlass_encode::Encoder::codec(encoder.as_ref()), codec);
+            let decoder = decoders.open(&spec).expect("decoder");
+            assert_eq!(cutlass_decode::Decoder::codec(decoder.as_ref()), codec);
         }
     }
 

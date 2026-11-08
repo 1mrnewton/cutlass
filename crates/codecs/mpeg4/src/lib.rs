@@ -13,3 +13,5 @@ mod mc;
 mod tables;
 mod vlc;
 mod vop;
+
+pub use engine::{EngineDecoder, register_engine_decoders};

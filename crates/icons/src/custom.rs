@@ -3,7 +3,7 @@
 use crate::{Cap, IconData, Join, Mark, Shape, Stroke};
 
 /// Every custom mark. `icons.txt` names one with `custom`.
-pub static CUSTOM: &[IconData] = &[BLADE, ZOOMFIT, KEYBACKSPACE];
+pub static CUSTOM: &[IconData] = &[BLADE, ZOOMFIT, KEYBACKSPACE, SPLITAT, TRIMLEFT, TRIMRIGHT];
 
 /// The split tool's blade. Filled, not stroked.
 pub const BLADE: IconData = IconData {
@@ -74,5 +74,46 @@ pub const KEYBACKSPACE: IconData = IconData {
             even_odd: false,
             stroke: LINE,
         },
+    ],
+};
+
+/// A closing bracket on the left half: the clip before the playhead.
+const BEFORE: &str = "M4 5H9V19H4";
+/// An opening bracket on the right half: the clip after the playhead.
+const AFTER: &str = "M20 5H15V19H20";
+
+const fn stroked(path: &'static str) -> Mark {
+    Mark {
+        shape: Shape::Path(path),
+        fill: false,
+        even_odd: false,
+        stroke: LINE,
+    }
+}
+
+/// Split at the playhead: the clip's two halves, parted.
+pub const SPLITAT: IconData = IconData {
+    name: "splitAt",
+    source: None,
+    marks: &[stroked(BEFORE), stroked(AFTER)],
+};
+
+/// Delete left of the playhead: the half before it dashed, as gone.
+pub const TRIMLEFT: IconData = IconData {
+    name: "trimLeft",
+    source: None,
+    marks: &[
+        stroked("M4 5H5.5M7.5 5H9V6.5M9 9V11M9 13V15M9 17.5V19H7.5M5.5 19H4"),
+        stroked(AFTER),
+    ],
+};
+
+/// Delete right of the playhead: the half after it dashed, as gone.
+pub const TRIMRIGHT: IconData = IconData {
+    name: "trimRight",
+    source: None,
+    marks: &[
+        stroked(BEFORE),
+        stroked("M20 5H18.5M16.5 5H15V6.5M15 9V11M15 13V15M15 17.5V19H16.5M18.5 19H20"),
     ],
 };

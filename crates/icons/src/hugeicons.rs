@@ -3732,5 +3732,8 @@ pub static ICONS: &[IconData] = &[
         ],
     },
     crate::custom::KEYBACKSPACE,
+    crate::custom::SPLITAT,
+    crate::custom::TRIMLEFT,
+    crate::custom::TRIMRIGHT,
     crate::custom::BLADE,
 ];

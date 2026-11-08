@@ -112,6 +112,9 @@ keyShift       ArrowUpBigIcon
 keyOption      OptionIcon
 keyWindows     WindowsOldIcon
 keyBackspace   custom
+splitAt        custom
+trimLeft       custom
+trimRight      custom
 
 # Custom marks.
 blade          custom

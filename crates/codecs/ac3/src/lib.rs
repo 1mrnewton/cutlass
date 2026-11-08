@@ -5,3 +5,4 @@
 #![forbid(unsafe_code)]
 
 mod bits;
+mod crc;

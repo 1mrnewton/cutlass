@@ -28,6 +28,7 @@ pub mod mask;
 pub mod package;
 pub mod preview;
 pub mod recipe;
+pub mod relight;
 pub mod selection;
 pub mod source;
 pub mod transitions;
@@ -76,6 +77,10 @@ pub use recipe::{
     Block, Control, ControlUnit, Curve, EFFECT_CATEGORIES, MAX_CONTROLS, MAX_PASSES, MAX_VALUES,
     Param, Pass, RECIPE_PREFIX, RECIPE_VERSION, Recipe, RecipeError, Step, Target, bundled,
     bundled_recipe,
+};
+pub use relight::{
+    CUSTOM_COLOR, Light, Lighting, MAX_LIGHTS, RELIGHT_PRESETS, RelightGroup, RelightPreset,
+    lighting, relight_preset, relight_rgba, relight_tile,
 };
 pub use selection::{
     MAX_SELECTION_SIDE, SELECTION, Selection, segment_has_selection, segment_selection,

@@ -20,7 +20,8 @@
 //! replaces the top bins of a low-rate E-AC-3 frame. A steady six-block
 //! frame with one exponent set uses the adaptive hybrid transform, and a
 //! gain on the small coefficients when that gain is shorter than a fixed
-//! mantissa.
+//! mantissa. A mix of gains 2 and 4 is packed into 5-bit groups when that
+//! is shorter than one gain for the whole channel.
 
 mod analysis;
 mod plan;

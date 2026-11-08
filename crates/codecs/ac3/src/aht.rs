@@ -191,7 +191,7 @@ pub(crate) fn payload_bits(bap: &[u8], normalized: &[[f32; 6]], start: usize, en
 
 /// Write one channel's AHT mantissas from its six normalized blocks.
 /// `normalized[bin][block]` is the mantissa before the inverse DCT.
-/// `gaqmod` 1 or 2 is written when that gain is shorter than `gaqmod` 0
+/// `gaqmod` 1, 2, or 3 is written when that gain is shorter than `gaqmod` 0
 /// and no coefficient is more than one step further from the original.
 pub(crate) fn write(
     w: &mut crate::bits::BitWriter,
@@ -203,7 +203,9 @@ pub(crate) fn write(
     let end = end.min(bap.len()).min(normalized.len());
     let (mode, _) = chosen(bap, normalized, start, end);
     w.put(2, u32::from(mode));
-    if mode != 0 {
+    if mode == 3 {
+        write_groups(w, bap, normalized, start, end);
+    } else if mode != 0 {
         for bin in start..end {
             let hebap = bap[bin];
             if (8..end_bap(mode)).contains(&hebap) {
@@ -223,7 +225,16 @@ pub(crate) fn write(
             w.put(width, closest_vq(hebap, &coeffs));
             continue;
         }
-        if mode != 0 && (8..end_bap(mode)).contains(&hebap) {
+        if mode == 3 && (8..end_bap(mode)).contains(&hebap) {
+            let log_gain = best_log_gain(hebap, &coeffs);
+            if log_gain != 0 {
+                let choice = gain_choice(log_gain, hebap, &coeffs);
+                for piece in choice.pieces {
+                    write_piece(w, width, log_gain, piece);
+                }
+                continue;
+            }
+        } else if mode != 0 && (8..end_bap(mode)).contains(&hebap) {
             let choice = gain_choice(mode, hebap, &coeffs);
             if choice.high {
                 for piece in choice.pieces {
@@ -250,7 +261,7 @@ fn chosen(bap: &[u8], normalized: &[[f32; 6]], start: usize, end: usize) -> (u8,
     {
         return (0, best);
     }
-    for mode in [1u8, 2] {
+    for mode in [1u8, 2, 3] {
         let bits = channel_bits(mode, bap, normalized, start, end);
         if bits < best {
             best = bits;
@@ -262,6 +273,7 @@ fn chosen(bap: &[u8], normalized: &[[f32; 6]], start: usize, end: usize) -> (u8,
 
 fn channel_bits(mode: u8, bap: &[u8], normalized: &[[f32; 6]], start: usize, end: usize) -> usize {
     let mut bits = 2usize;
+    let mut gains = 0usize;
     for bin in start..end {
         let hebap = bap[bin];
         if hebap == 0 {
@@ -276,10 +288,69 @@ fn channel_bits(mode: u8, bap: &[u8], normalized: &[[f32; 6]], start: usize, end
             bits += 6 * width as usize;
             continue;
         }
-        let choice = gain_choice(mode, hebap, &freq(&normalized[bin]));
-        bits += 1 + choice.mant_bits(width, mode);
+        let coeffs = freq(&normalized[bin]);
+        if mode == 3 {
+            gains += 1;
+            let log_gain = best_log_gain(hebap, &coeffs);
+            bits += if log_gain == 0 {
+                6 * width as usize
+            } else {
+                gain_choice(log_gain, hebap, &coeffs).mant_bits(width, log_gain)
+            };
+        } else {
+            let choice = gain_choice(mode, hebap, &coeffs);
+            bits += 1 + choice.mant_bits(width, mode);
+        }
+    }
+    if mode == 3 {
+        bits += gains.div_ceil(3) * 5;
     }
     bits
+}
+
+/// `gaqmod` 3: three gain states packed into a 5-bit group (Table E3.4).
+fn write_groups(
+    w: &mut crate::bits::BitWriter,
+    bap: &[u8],
+    normalized: &[[f32; 6]],
+    start: usize,
+    end: usize,
+) {
+    let mut states = [0u8; 256];
+    let mut count = 0usize;
+    for bin in start..end {
+        let hebap = bap[bin];
+        if (8..17).contains(&hebap) {
+            states[count] = best_log_gain(hebap, &freq(&normalized[bin]));
+            count += 1;
+        }
+    }
+    for group in 0..count.div_ceil(3) {
+        let at = group * 3;
+        let first = u32::from(states[at]);
+        let second = u32::from(states.get(at + 1).copied().unwrap_or(0));
+        let third = u32::from(states.get(at + 2).copied().unwrap_or(0));
+        w.put(5, first * 9 + second * 3 + third);
+    }
+}
+
+/// Smallest of gains 1, 2, and 4 whose mantissas stay within one step.
+fn best_log_gain(hebap: u8, coeffs: &[f32; 6]) -> u8 {
+    let width = HEBAP_BITS[usize::from(hebap.min(19))];
+    let mut best = 0u8;
+    let mut best_bits = 6 * width as usize;
+    for log_gain in [1u8, 2] {
+        let choice = gain_choice(log_gain, hebap, coeffs);
+        if !choice.high {
+            continue;
+        }
+        let bits = choice.mant_bits(width, log_gain);
+        if bits < best_bits {
+            best_bits = bits;
+            best = log_gain;
+        }
+    }
+    best
 }
 
 fn end_bap(mode: u8) -> u8 {
@@ -660,5 +731,35 @@ mod tests {
         assert_eq!(w.bits(), bits);
         let bytes = w.finish();
         assert_eq!(bytes[0] >> 6, 0);
+    }
+
+    #[test]
+    fn mixed_gains_share_one_five_bit_group() {
+        // hebap 8 sits in the gain-2 range and not the gain-4 range.
+        // hebap 14 is outside a gain-2 mode, and its zeros want gain 4.
+        let mut fine = [0.25, 0.25, 0.25, 0.2, -0.2, 0.15];
+        idct6(&mut fine);
+        let mut normalized = [[0.0f32; 6]; 256];
+        normalized[0] = fine;
+        let mut bap = [0u8; 256];
+        bap[0] = 8;
+        bap[1] = 14;
+        let bits = payload_bits(&bap, &normalized, 0, 2);
+        let mut w = BitWriter::with_capacity(64);
+        write(&mut w, &bap, &normalized, 0, 2);
+        assert_eq!(w.bits(), bits);
+        let bytes = w.finish();
+        assert_eq!(bytes[0] >> 6, 3, "gaqmod {}", bytes[0] >> 6);
+        let mut out = [[0.0; 6]; 256];
+        let mut zero = [false; 256];
+        let mut r = BitReader::new(&bytes);
+        read(&mut r, &bap, 0, 2, &mut out, &mut zero).unwrap();
+        assert_eq!(r.pos(), bits);
+        for (got, want) in out[0].iter().zip(fine) {
+            assert!((got - want).abs() < 0.35, "fine {got} {want}");
+        }
+        for got in out[1] {
+            assert!(got.abs() < 1e-4, "quiet {got}");
+        }
     }
 }

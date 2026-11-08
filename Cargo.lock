@@ -2666,6 +2666,7 @@ dependencies = [
  "cutlass-engine",
  "cutlass-generated",
  "cutlass-gpu",
+ "cutlass-jpeg",
  "cutlass-logger",
  "cutlass-lottie",
  "cutlass-model",

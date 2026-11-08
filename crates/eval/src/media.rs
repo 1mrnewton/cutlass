@@ -28,7 +28,7 @@ use cutlass_codec::access::{ColorPrimaries, PixelFormat, Transfer};
 use cutlass_color::{Matrix, Signal, SignalCurve};
 use cutlass_engine::{
     ClockKind, DecodedFrame, DisplayQuarter, ReaderFactory, VideoSource, decoded_picture,
-    open_segment_in,
+    open_segment_from, open_segment_in,
 };
 use cutlass_gpu::{Affine, Placement, ToneCurve, YuvTone};
 use cutlass_model::{
@@ -52,7 +52,15 @@ fn open_clip(
     root: Option<&Path>,
     patient: bool,
 ) -> Option<VideoSource> {
-    let mut source = open_segment_in(media, draft, id, ClockKind::Export, 1, root).ok()?;
+    // A clip with an enhanced copy draws from it; a copy that will not
+    // open leaves the clip its own file.
+    let copy = crate::enhance::enhanced_copy(draft, root, id).and_then(|(path, from)| {
+        open_segment_from(media, draft, id, ClockKind::Export, 1, path, from).ok()
+    });
+    let mut source = match copy {
+        Some(source) => source,
+        None => open_segment_in(media, draft, id, ClockKind::Export, 1, root).ok()?,
+    };
     let _ = source.read_ahead(media, READ_AHEAD);
     source.set_patient(patient);
     Some(source)

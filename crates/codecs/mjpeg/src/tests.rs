@@ -81,7 +81,7 @@ pub(crate) fn encode(
 }
 
 /// The marker segments before the first scan, as (marker, start, end).
-fn segments(jpeg: &[u8]) -> Vec<(u8, usize, usize)> {
+pub(crate) fn segments(jpeg: &[u8]) -> Vec<(u8, usize, usize)> {
     let mut out = Vec::new();
     let mut at = 2;
     while jpeg[at + 1] != 0xda {

@@ -535,7 +535,8 @@ mod tests {
 
     /// An MPEG-4 Visual track whose layer headers arrive with the first
     /// packet is an `mp4v` entry with object type 0x20 and those headers,
-    /// and its samples read back in decode order with their times.
+    /// its reordered samples get a `cslg`, and they read back in decode
+    /// order with their times.
     #[test]
     fn an_mpeg4_visual_track_is_an_mp4v_entry_with_its_headers() {
         for brand in [FileBrand::Mp4, FileBrand::Mov] {
@@ -566,6 +567,21 @@ mod tests {
             .unwrap();
             let bytes = mux.into_writer().unwrap().into_inner();
             assert!(bytes.windows(4).any(|w| w == b"mp4v"));
+            // The B sample shows before it decodes: a version 1 `ctts`, and
+            // `cslg` with shift 1, offsets -1 to 1, and times 0 to 3.
+            let ctts = bytes.windows(4).position(|w| w == b"ctts").unwrap();
+            assert_eq!(bytes[ctts + 4], 1);
+            let cslg = bytes.windows(4).position(|w| w == b"cslg").unwrap();
+            assert_eq!(
+                u32::from_be_bytes(bytes[cslg - 4..cslg].try_into().unwrap()),
+                32
+            );
+            let field = |n: usize| {
+                let at = cslg + 8 + n * 4;
+                i32::from_be_bytes(bytes[at..at + 4].try_into().unwrap())
+            };
+            assert_eq!(bytes[cslg + 4], 0, "version 0");
+            assert_eq!((0..5).map(field).collect::<Vec<_>>(), [1, -1, 1, 0, 3]);
             let mut file = crate::IsoBmffFile::open(Cursor::new(bytes)).unwrap();
             let params = cutlass_container::Demux::streams(&file)[0].params().clone();
             assert_eq!(params.codec(), &StreamCodec::Known(Id::Mpeg4));

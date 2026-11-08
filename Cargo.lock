@@ -2473,8 +2473,11 @@ dependencies = [
 name = "cutlass-ac3"
 version = "0.1.0"
 dependencies = [
+ "cutlass-codec",
+ "cutlass-container",
  "cutlass-decode",
  "cutlass-encode",
+ "cutlass-isobmff",
 ]
 
 [[package]]
@@ -2688,6 +2691,7 @@ name = "cutlass-export"
 version = "0.1.0"
 dependencies = [
  "cutlass-aac",
+ "cutlass-ac3",
  "cutlass-alac",
  "cutlass-codec",
  "cutlass-container",
@@ -2726,6 +2730,7 @@ name = "cutlass-ffi"
 version = "0.1.0"
 dependencies = [
  "cutlass-aac",
+ "cutlass-ac3",
  "cutlass-aiff",
  "cutlass-alac",
  "cutlass-codec",

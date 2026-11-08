@@ -1,0 +1,1490 @@
+//! The encoders: our decoder, FFmpeg and Apple read what they write, at
+//! every layout, rate and block count, with the bit rate, timing and
+//! metadata they were asked for.
+
+use std::f64::consts::PI;
+
+use cutlass_ac3::{
+    Ac3Decoder, Ac3Encoder, Dec3, DynamicRange, ENCODER_DELAY, EncoderConfig, EncoderMetadata,
+    Extension, Format, MixCodes, Options, StreamType, ac3_bit_rate, probe, program_gain,
+};
+use cutlass_decode::{Channel, ChannelLayout, CodecError, CodecId, Decoder, Packet, Pcm, SideData};
+use cutlass_encode::{AudioInput, Encoder};
+
+use crate::common::{apple_decode, audible, deinterleave, ffmpeg_decode, oracle, power, snr, tone};
+
+fn layout(channels: &[Channel]) -> ChannelLayout {
+    ChannelLayout::new(channels.to_vec()).expect("layout")
+}
+
+use Channel::{
+    BackCenter as Cs, BackLeft as Bl, BackRight as Br, FrontCenter as C, FrontLeft as L,
+    FrontRight as R, Lfe, SideLeft as Sl, SideRight as Sr,
+};
+
+/// Every layout the encoders take, with its `acmod` and LFE.
+const LAYOUTS: [(&[Channel], u8, bool); 12] = [
+    (&[C], 1, false),
+    (&[L, R], 2, false),
+    (&[L, R, C], 3, false),
+    (&[L, R, Cs], 4, false),
+    (&[L, R, C, Cs], 5, false),
+    (&[L, R, Sl, Sr], 6, false),
+    (&[L, R, C, Sl, Sr], 7, false),
+    (&[L, R, Lfe], 2, true),
+    (&[C, L, R, Bl, Br, Lfe], 7, true),
+    (&[L, R, C, Lfe, Sl, Sr], 7, true),
+    (&[L, R, Cs, Lfe], 4, true),
+    (&[L, R, C, Lfe], 3, true),
+];
+
+/// A tone per speaker at `amplitude`, interleaved in `channels` order.
+fn tones(channels: &[Channel], rate: u32, frames: usize, amplitude: f64) -> Vec<f32> {
+    let mut pcm = Vec::with_capacity(frames * channels.len());
+    for n in 0..frames {
+        for &channel in channels {
+            let t = n as f64 / f64::from(rate);
+            pcm.push((amplitude * (2.0 * PI * tone(channel) * t).sin()) as f32);
+        }
+    }
+    pcm
+}
+
+fn input(channels: &[Channel], rate: u32, pcm: Vec<f32>) -> AudioInput {
+    AudioInput {
+        pcm: Pcm::from_f32(rate, layout(channels), pcm).expect("pcm"),
+    }
+}
+
+/// Encode `pcm` in uneven pushes, then drain.
+fn encode(config: EncoderConfig, pcm: &[f32]) -> Vec<Packet> {
+    let channels = config.layout.channels().to_vec();
+    let rate = config.sample_rate;
+    let mut encoder = Ac3Encoder::new(config).expect("open");
+    let n = channels.len();
+    let mut packets = Vec::new();
+    let mut at = 0;
+    for chunk in [1usize, 700, 4096, 333, 2000].iter().cycle() {
+        if at >= pcm.len() {
+            break;
+        }
+        let end = (at + chunk * n).min(pcm.len());
+        packets.extend(
+            encoder
+                .push(&input(&channels, rate, pcm[at..end].to_vec()))
+                .expect("push"),
+        );
+        at = end;
+    }
+    packets.extend(encoder.drain().expect("drain"));
+    packets
+}
+
+fn stream(packets: &[Packet]) -> Vec<u8> {
+    packets
+        .iter()
+        .flat_map(|p| p.data.iter().copied())
+        .collect()
+}
+
+struct Decoded {
+    channels: Vec<Channel>,
+    /// Gapless-trimmed, interleaved.
+    pcm: Vec<f32>,
+    decoder: Ac3Decoder,
+}
+
+fn decode(codec: CodecId, packets: &[Packet]) -> Decoded {
+    decode_with(codec, packets, Options::default())
+}
+
+fn decode_with(codec: CodecId, packets: &[Packet], options: Options) -> Decoded {
+    let params = cutlass_decode::CodecParams::audio(codec, 0, ChannelLayout::stereo());
+    let mut decoder = Ac3Decoder::with_options(&params, options).expect("decoder");
+    let mut outputs = Vec::new();
+    for packet in packets {
+        outputs.extend(decoder.push(packet).expect("decode"));
+    }
+    outputs.extend(decoder.drain().expect("drain"));
+    let channels = decoder.stream().expect("stream").1.channels().to_vec();
+    Decoded {
+        channels,
+        pcm: audible(outputs),
+        decoder,
+    }
+}
+
+fn config(format: Format, rate: u32, channels: &[Channel], bit_rate: u32) -> EncoderConfig {
+    EncoderConfig {
+        bit_rate,
+        ..EncoderConfig::new(format, rate, layout(channels))
+    }
+}
+
+fn codec(format: Format) -> CodecId {
+    match format {
+        Format::Ac3 => CodecId::Ac3,
+        Format::Eac3 => CodecId::Eac3,
+    }
+}
+
+/// The input channel each decoded channel came from: the surround pair
+/// decodes as the side pair whichever pair went in.
+fn source(channels: &[Channel], decoded: Channel) -> Option<usize> {
+    let alias = |c: Channel| match c {
+        Bl => Sl,
+        Br => Sr,
+        other => other,
+    };
+    channels.iter().position(|&c| alias(c) == alias(decoded))
+}
+
+#[test]
+fn every_layout_decodes_in_order_with_its_lfe() {
+    for format in [Format::Ac3, Format::Eac3] {
+        for (channels, acmod, lfe) in LAYOUTS {
+            let rate = 48_000;
+            let pcm = tones(channels, rate, 48_000, 0.25);
+            let packets = encode(config(format, rate, channels, 0), &pcm);
+            let decoded = decode(codec(format), &packets);
+            let metadata = decoded.decoder.metadata().expect("metadata");
+            assert_eq!(
+                (metadata.acmod, metadata.lfe),
+                (acmod, lfe),
+                "{format:?} {channels:?}"
+            );
+            assert_eq!(
+                decoded.channels.len(),
+                channels.len(),
+                "{format:?} {channels:?}"
+            );
+            let n = channels.len();
+            for (index, &channel) in decoded.channels.iter().enumerate() {
+                let from = source(channels, channel)
+                    .unwrap_or_else(|| panic!("{format:?} {channels:?}: {channel:?} not sent"));
+                let ours = deinterleave(&decoded.pcm, n, index);
+                let sent = deinterleave(&pcm, n, from);
+                let middle = 4_096..ours.len() - 4_096;
+                let quality = snr(&ours[middle.clone()], &sent[middle.clone()]);
+                let floor = if channel == Lfe { 20.0 } else { 25.0 };
+                assert!(
+                    quality > floor,
+                    "{format:?} {channels:?} {channel:?}: {quality:.1} dB"
+                );
+                let own = power(&ours[middle.clone()], rate, tone(channel));
+                // Side and back surrounds share a fixture tone, so a
+                // decoded side channel is not a leak of the back channel.
+                for &other in channels
+                    .iter()
+                    .filter(|&&c| c != channel && c != Lfe && tone(c) != tone(channel))
+                {
+                    let leak = power(&ours[middle.clone()], rate, tone(other));
+                    assert!(
+                        own > leak * 100.0,
+                        "{format:?} {channels:?}: {channel:?} carries {other:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn decoded_length_matches_the_input_exactly() {
+    for format in [Format::Ac3, Format::Eac3] {
+        for frames in [1usize, 255, 256, 1_280, 1_536, 1_537, 10_000] {
+            let channels = [L, R];
+            let pcm = tones(&channels, 48_000, frames, 0.3);
+            let packets = encode(config(format, 48_000, &channels, 0), &pcm);
+            let spf = 1536i64;
+            for (index, packet) in packets.iter().enumerate() {
+                assert_eq!(packet.pts, index as i64 * spf);
+                assert_eq!(packet.duration, spf);
+                assert_eq!(packet.timescale, 48_000);
+            }
+            let total = packets.len() as u64 * 1536;
+            assert_eq!(total, (frames as u64 + 256).div_ceil(1536) * 1536);
+            let Some(SideData::Gapless {
+                encoder_delay,
+                trailing_padding,
+                ..
+            }) = packets.last().and_then(|p| {
+                p.side
+                    .iter()
+                    .find(|s| matches!(s, SideData::Gapless { .. }))
+            })
+            else {
+                panic!("gapless side data");
+            };
+            assert_eq!(*encoder_delay, ENCODER_DELAY);
+            assert_eq!(
+                u64::from(*trailing_padding),
+                total - frames as u64 - u64::from(ENCODER_DELAY)
+            );
+            let decoded = decode(codec(format), &packets);
+            assert_eq!(decoded.pcm.len(), pcm.len(), "{format:?} {frames}");
+        }
+    }
+}
+
+#[test]
+fn the_decoded_signal_lines_up_with_the_input() {
+    // A click at a known sample comes back at the same sample.
+    for format in [Format::Ac3, Format::Eac3] {
+        let mut pcm = vec![0.0f32; 9_000];
+        pcm[5_000] = 0.9;
+        let packets = encode(config(format, 48_000, &[C], 0), &pcm);
+        let decoded = decode(codec(format), &packets);
+        let peak = decoded
+            .pcm
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.abs().total_cmp(&b.1.abs()))
+            .map(|(i, _)| i);
+        assert_eq!(peak, Some(5_000), "{format:?}");
+    }
+}
+
+#[test]
+fn ac3_syncframes_follow_table_5_18() {
+    for rate in [48_000u32, 44_100, 32_000] {
+        for kbps in [64u32, 192, 448, 640] {
+            let channels = [L, R];
+            let pcm = tones(&channels, rate, rate as usize * 2, 0.3);
+            let packets = encode(config(Format::Ac3, rate, &channels, kbps * 1000), &pcm);
+            let mut bytes = 0usize;
+            for packet in &packets {
+                let info = probe(&packet.data).expect("probe");
+                assert_eq!(info.frame_bytes, packet.data.len());
+                assert_eq!(ac3_bit_rate(packet.data[4] & 0x3f), Some(kbps * 1000));
+                bytes += packet.data.len();
+            }
+            let seconds = packets.len() as f64 * 1536.0 / f64::from(rate);
+            let actual = bytes as f64 * 8.0 / seconds;
+            let target = f64::from(kbps * 1000);
+            assert!(
+                (actual - target).abs() / target < 0.002,
+                "{rate} {kbps}: {actual:.0} bit/s"
+            );
+        }
+    }
+}
+
+#[test]
+fn eac3_holds_any_bit_rate_at_any_block_count() {
+    for blocks in [1usize, 2, 3, 6] {
+        for bit_rate in [96_000u32, 127_000, 200_000, 333_333] {
+            let channels = [L, R];
+            let rate = 48_000;
+            let pcm = tones(&channels, rate, rate as usize * 2, 0.3);
+            let mut cfg = config(Format::Eac3, rate, &channels, bit_rate);
+            cfg.blocks = blocks;
+            let packets = encode(cfg, &pcm);
+            let spf = blocks * 256;
+            let bytes: usize = packets.iter().map(|p| p.data.len()).sum();
+            for packet in &packets {
+                assert_eq!(packet.duration, spf as i64);
+                let info = probe(&packet.data).expect("probe");
+                assert_eq!(info.frame_bytes, packet.data.len());
+            }
+            let seconds = (packets.len() * spf) as f64 / f64::from(rate);
+            let actual = bytes as f64 * 8.0 / seconds;
+            let target = f64::from(bit_rate);
+            // One syncframe of rounding over the whole stream.
+            let slack = 16.0 / seconds + target * 0.001;
+            assert!(
+                (actual - target).abs() <= slack,
+                "{blocks} blocks {bit_rate}: {actual:.0}"
+            );
+            let decoded = decode(CodecId::Eac3, &packets);
+            assert_eq!(decoded.pcm.len(), pcm.len());
+            let tools = decoded.decoder.tools();
+            assert_eq!(tools.short_frames > 0, blocks < 6);
+            let middle = 4_096..pcm.len() / 2 - 4_096;
+            let left = deinterleave(&decoded.pcm, 2, 0);
+            let sent = deinterleave(&pcm, 2, 0);
+            let quality = snr(&left[middle.clone()], &sent[middle]);
+            assert!(
+                quality > 25.0,
+                "{blocks} blocks {bit_rate}: {quality:.1} dB"
+            );
+        }
+    }
+}
+
+#[test]
+fn quality_rises_with_the_bit_rate() {
+    for format in [Format::Ac3, Format::Eac3] {
+        let channels = [L, R];
+        let rate = 48_000;
+        // Noise-like program: a chord with a slow sweep.
+        let pcm: Vec<f32> = (0..rate as usize * 2)
+            .flat_map(|n| {
+                let t = n as f64 / f64::from(rate);
+                let sweep = 200.0 + 4_000.0 * t;
+                let l = 0.2 * (2.0 * PI * sweep * t).sin() + 0.1 * (2.0 * PI * 3_100.0 * t).sin();
+                let r = 0.2 * (2.0 * PI * 440.0 * t).sin() + 0.1 * (2.0 * PI * 7_500.0 * t).sin();
+                [l as f32, r as f32]
+            })
+            .collect();
+        let mut last = f64::NEG_INFINITY;
+        for kbps in [96u32, 192, 384] {
+            let packets = encode(config(format, rate, &channels, kbps * 1000), &pcm);
+            let decoded = decode(codec(format), &packets);
+            let quality = snr(&decoded.pcm, &pcm);
+            assert!(
+                quality > last,
+                "{format:?} {kbps}: {quality:.1} after {last:.1}"
+            );
+            last = quality;
+        }
+    }
+}
+
+#[test]
+fn a_transient_stays_quiet_before_the_attack() {
+    for format in [Format::Ac3, Format::Eac3] {
+        let channels = [L, R];
+        let rate = 48_000;
+        let mut pcm = vec![0.0f32; rate as usize * 2];
+        // Silence, then a burst of noise-like tone at full level.
+        for n in 30_000..pcm.len() / 2 {
+            let t = n as f64 / f64::from(rate);
+            let v = (0.8 * (2.0 * PI * 9_000.0 * t).sin()) as f32;
+            pcm[2 * n] = v;
+            pcm[2 * n + 1] = v * 0.5;
+        }
+        let packets = encode(config(format, rate, &channels, 0), &pcm);
+        let decoded = decode(codec(format), &packets);
+        assert!(
+            decoded.decoder.tools().short_blocks > 0,
+            "{format:?} kept the long transform across the attack"
+        );
+        let named = decoded.decoder.tools().transient_channels;
+        if format == Format::Eac3 {
+            assert!(named > 0, "the attack was not named");
+        } else {
+            assert_eq!(named, 0);
+        }
+        let left = deinterleave(&decoded.pcm, 2, 0);
+        let before = &left[29_000..29_900];
+        let peak = before.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        assert!(peak < 0.05, "{format:?}: pre-echo {peak}");
+    }
+}
+
+#[test]
+fn coupling_and_rematrixing_carry_the_low_rate_programs() {
+    for format in [Format::Ac3, Format::Eac3] {
+        let channels = [L, R];
+        let rate = 48_000;
+        let pcm: Vec<f32> = (0..rate as usize)
+            .flat_map(|n| {
+                let t = n as f64 / f64::from(rate);
+                let common = 0.3 * (2.0 * PI * 600.0 * t).sin();
+                let high = 0.05 * (2.0 * PI * 9_000.0 * t).sin();
+                [(common + high) as f32, (common * 0.95 + high * 0.8) as f32]
+            })
+            .collect();
+        let packets = encode(config(format, rate, &channels, 96_000), &pcm);
+        let decoded = decode(codec(format), &packets);
+        let tools = decoded.decoder.tools();
+        assert!(tools.coupling_blocks > 0, "{format:?}");
+        assert!(tools.rematrix_blocks > 0, "{format:?}");
+    }
+}
+
+#[test]
+fn metadata_round_trips() {
+    let mix = MixCodes {
+        dmixmod: 2,
+        ltrt_center: 3,
+        ltrt_surround: 5,
+        loro_center: 6,
+        loro_surround: 7,
+    };
+    let channels = [L, R, C, Lfe, Sl, Sr];
+    for format in [Format::Ac3, Format::Eac3] {
+        let mut cfg = config(format, 48_000, &channels, 0);
+        cfg.metadata = EncoderMetadata {
+            dialnorm: 24,
+            bsmod: 3,
+            dsurmod: 0,
+            mix: Some(mix),
+            lfe_mix: (format == Format::Eac3).then_some(12),
+            program_scale_db: None,
+            compression: false,
+        };
+        let pcm = tones(&channels, 48_000, 6_000, 0.2);
+        let packets = encode(cfg, &pcm);
+        let decoded = decode(codec(format), &packets);
+        let metadata = decoded.decoder.metadata().expect("metadata");
+        assert_eq!(metadata.dialnorm, 24);
+        assert_eq!(metadata.bsmod, 3);
+        assert_eq!(metadata.dmixmod, Some(2));
+        let levels = metadata.mix_levels.expect("mix levels");
+        // Annex D codes are powers of two: code 3 is 2^-1/4 (−1.5 dB),
+        // code 5 is 2^-3/4 (−4.5 dB).
+        let gain = |quarters: i32| 2f32.powf(quarters as f32 / 4.0);
+        assert!((levels.ltrt_center - gain(-1)).abs() < 1e-6);
+        assert!((levels.ltrt_surround - gain(-3)).abs() < 1e-6);
+        assert!((levels.loro_center - 0.5).abs() < 1e-3);
+        assert_eq!(levels.loro_surround, 0.0);
+        if format == Format::Eac3 {
+            assert_eq!(metadata.lfe_mix_db, Some(-2));
+        }
+    }
+    let channels = [L, R];
+    for format in [Format::Ac3, Format::Eac3] {
+        let mut cfg = config(format, 44_100, &channels, 0);
+        cfg.metadata.dsurmod = 2;
+        let packets = encode(cfg, &tones(&channels, 44_100, 3_000, 0.2));
+        let decoded = decode(codec(format), &packets);
+        assert_eq!(decoded.decoder.metadata().expect("metadata").dsurmod, 2);
+    }
+}
+
+#[test]
+fn the_first_packet_carries_the_config_record() {
+    let channels = [L, R, C, Lfe, Sl, Sr];
+    for format in [Format::Ac3, Format::Eac3] {
+        let cfg = config(format, 48_000, &channels, 0);
+        let encoder = Ac3Encoder::new(cfg.clone()).expect("open");
+        let record = encoder.config_record();
+        let packets = encode(cfg, &tones(&channels, 48_000, 4_000, 0.2));
+        let configs: Vec<_> = packets
+            .iter()
+            .enumerate()
+            .flat_map(|(i, p)| {
+                p.side.iter().filter_map(move |s| match s {
+                    SideData::Config(bytes) => Some((i, bytes.clone())),
+                    _ => None,
+                })
+            })
+            .collect();
+        assert_eq!(configs, vec![(0, record.clone())]);
+        match format {
+            Format::Ac3 => {
+                let dac3 = cutlass_ac3::Dac3::parse(&record).expect("dac3");
+                assert_eq!((dac3.acmod, dac3.lfeon, dac3.fscod), (7, true, 0));
+                assert_eq!(dac3.bit_rate_code, 15);
+            }
+            Format::Eac3 => {
+                let dec3 = Dec3::parse(&record).expect("dec3");
+                assert_eq!(dec3.data_rate, 384);
+                assert_eq!(dec3.substreams.len(), 1);
+                assert_eq!(dec3.substreams[0].acmod, 7);
+                assert!(dec3.substreams[0].lfeon);
+            }
+        }
+    }
+}
+
+#[test]
+fn reset_starts_a_fresh_stream_and_drain_ends_it() {
+    let channels = [L, R];
+    for format in [Format::Ac3, Format::Eac3] {
+        let cfg = config(format, 48_000, &channels, 0);
+        let pcm = tones(&channels, 48_000, 5_000, 0.3);
+        let fresh = encode(cfg.clone(), &pcm);
+        let mut encoder = Ac3Encoder::new(cfg).expect("open");
+        encoder
+            .push(&input(
+                &channels,
+                48_000,
+                tones(&channels, 48_000, 3_333, 0.7),
+            ))
+            .expect("push");
+        encoder.reset();
+        let mut again = encoder.push(&input(&channels, 48_000, pcm)).expect("push");
+        again.extend(encoder.drain().expect("drain"));
+        assert_eq!(again, fresh, "{format:?}");
+        assert!(encoder.drain().expect("second drain").is_empty());
+        assert!(matches!(
+            encoder.push(&input(&channels, 48_000, vec![0.0; 2])),
+            Err(CodecError::InvalidApi { .. })
+        ));
+        encoder.reset();
+        assert!(encoder.drain().expect("empty drain").is_empty());
+    }
+}
+
+#[test]
+fn illegal_input_fails_and_adds_nothing() {
+    let channels = [L, R];
+    let cfg = config(Format::Ac3, 48_000, &channels, 0);
+    let pcm = tones(&channels, 48_000, 4_000, 0.3);
+    let clean = encode(cfg.clone(), &pcm);
+    let mut encoder = Ac3Encoder::new(cfg).expect("open");
+    let mut packets = encoder
+        .push(&input(&channels, 48_000, pcm[..2_000].to_vec()))
+        .expect("push");
+    let mut bad = vec![0.1f32; 600];
+    bad[301] = f32::NAN;
+    assert_eq!(
+        encoder.push(&input(&channels, 48_000, bad)),
+        Err(CodecError::NonFinite)
+    );
+    assert_eq!(
+        encoder.push(&input(&channels, 48_000, vec![1.5; 4])),
+        Err(CodecError::OutOfRange)
+    );
+    assert!(matches!(
+        encoder.push(&input(&channels, 44_100, vec![0.0; 4])),
+        Err(CodecError::InvalidApi { .. })
+    ));
+    assert!(matches!(
+        encoder.push(&input(&[C], 48_000, vec![0.0; 4])),
+        Err(CodecError::InvalidApi { .. })
+    ));
+    packets.extend(
+        encoder
+            .push(&input(&channels, 48_000, pcm[2_000..].to_vec()))
+            .expect("push"),
+    );
+    packets.extend(encoder.drain().expect("drain"));
+    assert_eq!(packets, clean);
+}
+
+#[test]
+fn a_raised_cancel_flag_stops_the_next_frame() {
+    let channels = [L, R];
+    let mut encoder = Ac3Encoder::new(config(Format::Eac3, 48_000, &channels, 0)).expect("open");
+    encoder
+        .cancel_flag()
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(
+        encoder.push(&input(
+            &channels,
+            48_000,
+            tones(&channels, 48_000, 4_000, 0.2)
+        )),
+        Err(CodecError::Cancelled)
+    );
+}
+
+#[test]
+fn unsupported_configurations_are_refused() {
+    let unsupported = |cfg: EncoderConfig| {
+        matches!(
+            Ac3Encoder::new(cfg),
+            Err(CodecError::Unsupported { .. } | CodecError::InvalidApi { .. })
+        )
+    };
+    assert!(unsupported(config(Format::Ac3, 22_050, &[L, R], 0)));
+    assert!(unsupported(config(Format::Ac3, 48_000, &[L, R], 100_000)));
+    assert!(unsupported(EncoderConfig {
+        blocks: 4,
+        ..config(Format::Eac3, 48_000, &[L, R], 0)
+    }));
+    assert!(unsupported(config(
+        Format::Ac3,
+        48_000,
+        &[L, R, C, Lfe, Bl, Br, Sl, Sr],
+        0
+    )));
+    assert!(unsupported(config(Format::Ac3, 48_000, &[L, C], 0)));
+    assert!(unsupported(config(Format::Eac3, 48_000, &[L, R], 4_000)));
+    assert!(unsupported(config(
+        Format::Eac3,
+        48_000,
+        &[L, R],
+        2_000_000
+    )));
+    let mut cfg = config(Format::Ac3, 48_000, &[L, R, Lfe], 0);
+    cfg.metadata.lfe_mix = Some(10);
+    assert!(unsupported(cfg));
+    let mut cfg = config(Format::Ac3, 48_000, &[L, R], 0);
+    cfg.metadata.dialnorm = 0;
+    assert!(unsupported(cfg));
+    let mut cfg = config(Format::Ac3, 48_000, &[C], 0);
+    cfg.metadata.program_scale_db = Some(-6);
+    assert!(unsupported(cfg));
+    let mut cfg = config(Format::Eac3, 48_000, &[C], 0);
+    cfg.metadata.program_scale_db = Some(13);
+    assert!(unsupported(cfg));
+}
+
+#[test]
+fn the_lowest_rates_still_code_every_layout() {
+    for (format, kbps) in [(Format::Ac3, 32u32), (Format::Eac3, 32)] {
+        for (channels, _, _) in LAYOUTS {
+            let rate = 48_000;
+            let bit_rate = kbps * 1000 * channels.len().div_ceil(2) as u32;
+            let bit_rate = match format {
+                Format::Ac3 => [32u32, 64, 96, 128]
+                    .iter()
+                    .map(|k| k * 1000)
+                    .find(|&r| r >= bit_rate)
+                    .unwrap_or(128_000),
+                Format::Eac3 => bit_rate,
+            };
+            // Full-band noise is the hardest program for the rate control.
+            let mut seed = 1u32;
+            let pcm: Vec<f32> = (0..rate as usize * channels.len())
+                .map(|_| {
+                    seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                    (seed >> 8) as f32 / (1u32 << 24) as f32 - 0.5
+                })
+                .collect();
+            let packets = encode(config(format, rate, channels, bit_rate), &pcm);
+            let decoded = decode(codec(format), &packets);
+            assert_eq!(decoded.pcm.len(), pcm.len(), "{format:?} {channels:?}");
+        }
+    }
+}
+
+/// FFmpeg reads our streams and hears what our decoder hears.
+#[test]
+fn ffmpeg_decodes_our_streams() {
+    let Some(ffmpeg) = oracle("ffmpeg", "-version") else {
+        return;
+    };
+    for format in [Format::Ac3, Format::Eac3] {
+        for (channels, _, _) in LAYOUTS {
+            for rate in [48_000u32, 44_100, 32_000] {
+                let pcm = tones(channels, rate, rate as usize, 0.25);
+                let packets = encode(config(format, rate, channels, 0), &pcm);
+                let ours = decode(codec(format), &packets);
+                let theirs = ffmpeg_decode(&ffmpeg, &stream(&packets), &[]);
+                let n = channels.len();
+                // FFmpeg writes WAVEFORMATEXTENSIBLE order and no trim.
+                let mut order: Vec<usize> = (0..n).collect();
+                order.sort_by_key(|&i| ours.channels[i].wave_bit());
+                let skip = ENCODER_DELAY as usize;
+                for (theirs_index, &our_index) in order.iter().enumerate() {
+                    let a = deinterleave(&ours.pcm, n, our_index);
+                    let b: Vec<f32> = deinterleave(&theirs, n, theirs_index)
+                        .into_iter()
+                        .skip(skip)
+                        .collect();
+                    let n = a.len().min(b.len());
+                    // The first and last frames are the transform warmup and
+                    // the flush. The program itself is the span between them.
+                    let margin = 1536.min(n / 4);
+                    let quality = snr(&a[margin..n - margin], &b[margin..n - margin]);
+                    assert!(
+                        quality > 60.0,
+                        "{format:?} {channels:?} {rate}: {:?} {quality:.1} dB",
+                        ours.channels[our_index]
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// The config with [`EncoderMetadata::compression`] on.
+fn compressed(mut config: EncoderConfig) -> EncoderConfig {
+    config.metadata.compression = true;
+    config
+}
+
+/// By default a loud program carries no `dynrng` or `compr`, as FFmpeg's
+/// encoder writes none, so line and heavy mode play it at full level.
+#[test]
+fn a_loud_program_carries_no_range_words_by_default() {
+    let rate = 48_000u32;
+    let channels = [C];
+    let pcm = tones(&channels, rate, rate as usize, 0.9);
+    let span = 4_096..pcm.len() - 4_096;
+    for format in [Format::Ac3, Format::Eac3] {
+        let packets = encode(config(format, rate, &channels, 0), &pcm);
+        let full = decode(codec(format), &packets);
+        let full_peak = peak(&full.pcm[span.clone()]);
+        assert!(full_peak > 0.7, "{format:?} full {full_peak}");
+        for mode in [
+            DynamicRange::Line {
+                cut: 1.0,
+                boost: 1.0,
+            },
+            DynamicRange::Heavy,
+        ] {
+            let heard = played(codec(format), &packets, mode);
+            assert_eq!(heard, full.pcm, "{format:?} {mode:?}");
+        }
+    }
+}
+
+/// A block louder than half scale carries a `dynrng` cut when compression
+/// is asked for, and line mode applies it.
+#[test]
+fn a_loud_block_is_cut_to_half_scale() {
+    let Some(ffmpeg) = oracle("ffmpeg", "-version") else {
+        return;
+    };
+    let rate = 48_000u32;
+    let channels = [C];
+    let pcm = tones(&channels, rate, rate as usize, 0.9);
+    for format in [Format::Ac3, Format::Eac3] {
+        let packets = encode(compressed(config(format, rate, &channels, 0)), &pcm);
+        let full = decode(codec(format), &packets);
+        let line = line_mode(codec(format), &packets);
+        let span = 4_096..pcm.len() - 4_096;
+        let full_peak = peak(&full.pcm[span.clone()]);
+        let line_peak = peak(&line[span.clone()]);
+        assert!(full_peak > 0.7, "{format:?} full {full_peak}");
+        assert!(
+            (0.35..0.65).contains(&line_peak),
+            "{format:?} line {line_peak}"
+        );
+        let kind = if format == Format::Eac3 {
+            "eac3"
+        } else {
+            "ac3"
+        };
+        let theirs = ffmpeg_decode(&ffmpeg, &stream(&packets), &["-drc_scale", "1", "-f", kind]);
+        let skip = ENCODER_DELAY as usize;
+        let heard: Vec<f32> = theirs.into_iter().skip(skip).collect();
+        let end = span.end.min(line.len()).min(heard.len());
+        let quality = snr(&line[span.start..end], &heard[span.start..end]);
+        assert!(quality > 40.0, "{format:?} line mode {quality:.1} dB");
+    }
+}
+
+fn channel_peak(pcm: &[f32], channels: usize, index: usize, span: std::ops::Range<usize>) -> f32 {
+    let channel = deinterleave(pcm, channels, index);
+    peak(&channel[span])
+}
+
+fn peak(samples: &[f32]) -> f32 {
+    samples
+        .iter()
+        .fold(0.0, |max, sample| max.max(sample.abs()))
+}
+
+/// `pgmscl` scales the substream that carries it. −6 dB is half power, and
+/// the mute code is silence.
+#[test]
+fn a_program_scale_is_kept_and_not_applied() {
+    let rate = 48_000u32;
+    let channels = [C];
+    let pcm = tones(&channels, rate, rate as usize, 0.4);
+    let plain = config(Format::Eac3, rate, &channels, 0);
+    let full = decode(CodecId::Eac3, &encode(plain.clone(), &pcm));
+    let span = 4_096..pcm.len() - 4_096;
+    let ffmpeg = oracle("ffmpeg", "-version");
+    for db in [-6i8, -51] {
+        let mut scaled = plain.clone();
+        scaled.metadata.program_scale_db = Some(db);
+        let packets = encode(scaled, &pcm);
+        let ours = decode(CodecId::Eac3, &packets);
+        let metadata = ours.decoder.metadata().expect("metadata");
+        assert_eq!(metadata.program_scale_db, Some(db));
+        // The word reaches a mixer as a gain; −51 is the mute code.
+        let gain = program_gain(db);
+        if db == -51 {
+            assert_eq!(gain, 0.0);
+        } else {
+            assert!((gain - 10.0f32.powf(f32::from(db) / 20.0)).abs() < 1e-6);
+        }
+        let ratio = peak(&ours.pcm[span.clone()]) / peak(&full.pcm[span.clone()]);
+        assert!((ratio - 1.0).abs() < 1e-3, "{db} dB played at {ratio}");
+        // FFmpeg skips the word too, so the mute-code stream is audible there.
+        if let Some(ffmpeg) = &ffmpeg {
+            let theirs = ffmpeg_decode(ffmpeg, &stream(&packets), &[]);
+            let skip = ENCODER_DELAY as usize;
+            let theirs = &theirs[skip..];
+            let n = ours.pcm.len().min(theirs.len());
+            let margin = 1_536;
+            let quality = snr(&ours.pcm[margin..n - margin], &theirs[margin..n - margin]);
+            assert!(quality > 60.0, "{db} dB against FFmpeg: {quality:.1} dB");
+        }
+    }
+}
+
+/// A frame louder than half scale carries `compr` when compression is
+/// asked for, and heavy mode applies it.
+#[test]
+fn a_loud_frame_carries_heavy_compression() {
+    let Some(ffmpeg) = oracle("ffmpeg", "-version") else {
+        return;
+    };
+    let rate = 48_000u32;
+    let channels = [C];
+    let pcm = tones(&channels, rate, rate as usize, 0.9);
+    for format in [Format::Ac3, Format::Eac3] {
+        let packets = encode(compressed(config(format, rate, &channels, 0)), &pcm);
+        let full = decode(codec(format), &packets);
+        let heavy = played(codec(format), &packets, DynamicRange::Heavy);
+        let span = 4_096..pcm.len() - 4_096;
+        assert!(peak(&full.pcm[span.clone()]) > 0.7, "{format:?} full");
+        let heavy_peak = peak(&heavy[span.clone()]);
+        assert!(
+            (0.35..0.65).contains(&heavy_peak),
+            "{format:?} heavy {heavy_peak}"
+        );
+        if format == Format::Ac3 {
+            let theirs = ffmpeg_decode(
+                &ffmpeg,
+                &stream(&packets),
+                &["-drc_scale", "1", "-heavy_compr", "1", "-f", "ac3"],
+            );
+            let heard: Vec<f32> = theirs.into_iter().skip(ENCODER_DELAY as usize).collect();
+            let end = span.end.min(heavy.len()).min(heard.len());
+            let quality = snr(&heavy[span.start..end], &heard[span.start..end]);
+            assert!(quality > 40.0, "heavy mode {quality:.1} dB");
+        }
+    }
+}
+
+fn line_mode(codec_id: CodecId, packets: &[Packet]) -> Vec<f32> {
+    played(
+        codec_id,
+        packets,
+        DynamicRange::Line {
+            cut: 1.0,
+            boost: 1.0,
+        },
+    )
+}
+
+fn played(codec_id: CodecId, packets: &[Packet], dynamic_range: DynamicRange) -> Vec<f32> {
+    let params = cutlass_decode::CodecParams::audio(codec_id, 0, ChannelLayout::mono());
+    let options = Options {
+        dynamic_range,
+        ..Options::default()
+    };
+    let mut decoder = Ac3Decoder::with_options(&params, options).expect("decoder");
+    let mut outputs = Vec::new();
+    for packet in packets {
+        outputs.extend(decoder.push(packet).expect("decode"));
+    }
+    outputs.extend(decoder.drain().expect("drain"));
+    audible(outputs)
+}
+
+/// E-AC-3 7.1 is a 5.1 frame plus a dependent frame for the back pair.
+#[test]
+fn a_seven_point_one_program_keeps_each_speaker() {
+    let Some(ffmpeg) = oracle("ffmpeg", "-version") else {
+        return;
+    };
+    let rate = 48_000u32;
+    let channels = [L, R, C, Lfe, Bl, Br, Sl, Sr];
+    let hz = [300.0, 500.0, 700.0, 60.0, 900.0, 1100.0, 1500.0, 1700.0];
+    let frames = rate as usize;
+    let mut pcm = Vec::with_capacity(frames * channels.len());
+    for n in 0..frames {
+        let t = n as f64 / f64::from(rate);
+        for &freq in &hz {
+            pcm.push((0.25 * (2.0 * PI * freq * t).sin()) as f32);
+        }
+    }
+    let packets = encode(config(Format::Eac3, rate, &channels, 1_024_000), &pcm);
+    let record = packets
+        .iter()
+        .find_map(|packet| {
+            packet.side.iter().find_map(|side| match side {
+                SideData::Config(bytes) => Some(bytes.clone()),
+                _ => None,
+            })
+        })
+        .expect("dec3");
+    let dec3 = Dec3::parse(&record).expect("dec3");
+    let sub = &dec3.substreams[0];
+    assert_eq!(sub.acmod, 7);
+    assert!(sub.lfeon);
+    assert_eq!(sub.num_dep_sub, 1);
+    assert_eq!(sub.chan_loc, 0x002);
+    let head = probe(&packets[0].data).expect("independent");
+    assert_eq!(head.stream_type, StreamType::Independent);
+    let dependent = probe(&packets[0].data[head.frame_bytes..]).expect("dependent");
+    assert_eq!(dependent.stream_type, StreamType::Dependent);
+    assert_eq!(dependent.blocks, head.blocks);
+    let ours = decode(CodecId::Eac3, &packets);
+    assert!(ours.decoder.tools().dependent_frames > 0);
+    assert_eq!(ours.channels, channels);
+    let heard = ffmpeg_decode(&ffmpeg, &stream(&packets), &["-f", "eac3"]);
+    let window = 2_048..frames - 2_048;
+    for (index, &freq) in hz.iter().enumerate() {
+        let channel = deinterleave(&ours.pcm, channels.len(), index);
+        assert!(
+            stands_out(&channel[window.clone()], rate, freq, &hz),
+            "{:?} lost {freq}",
+            channels[index]
+        );
+    }
+    // FFmpeg's acmod 7 layout is the back pair, and so is this dependent
+    // frame, so FFmpeg replaces the independent surrounds with the backs.
+    // The side tones are not a separate pair in that decode.
+    for &freq in &hz[..6] {
+        let found = (0..channels.len()).any(|slot| {
+            let reference = deinterleave(&heard, channels.len(), slot);
+            let end = window.end.min(reference.len());
+            reference.len() > window.start
+                && stands_out(&reference[window.start..end], rate, freq, &hz)
+        });
+        assert!(found, "ffmpeg lost {freq}");
+    }
+}
+
+/// Annex E 3.8.5: the complete mix uses the dependent frame's range words.
+/// A loud center still cuts when the back pair is quiet, and a core decode
+/// keeps the independent frame's own word.
+#[test]
+fn a_complete_mix_uses_the_dependent_range_word() {
+    let rate = 48_000u32;
+    let channels = [L, R, C, Lfe, Bl, Br, Sl, Sr];
+    let amplitude = [0.05, 0.05, 0.9, 0.05, 0.05, 0.05, 0.05, 0.05];
+    let frames = rate as usize;
+    let mut pcm = Vec::with_capacity(frames * channels.len());
+    for n in 0..frames {
+        for (channel, &amp) in channels.iter().zip(&amplitude) {
+            let t = n as f64 / f64::from(rate);
+            pcm.push((amp * (2.0 * PI * tone(*channel) * t).sin()) as f32);
+        }
+    }
+    let packets = encode(
+        compressed(config(Format::Eac3, rate, &channels, 1_024_000)),
+        &pcm,
+    );
+    let full = decode(CodecId::Eac3, &packets);
+    assert_eq!(full.channels, channels);
+    let span = 4_096..frames - 4_096;
+    let full_peak = channel_peak(&full.pcm, channels.len(), 2, span.clone());
+    assert!(full_peak > 0.7, "full {full_peak}");
+    for mode in [
+        DynamicRange::Line {
+            cut: 1.0,
+            boost: 1.0,
+        },
+        DynamicRange::Heavy,
+    ] {
+        let heard = decode_with(
+            CodecId::Eac3,
+            &packets,
+            Options {
+                dynamic_range: mode,
+                ..Options::default()
+            },
+        );
+        let cut = channel_peak(&heard.pcm, channels.len(), 2, span.clone());
+        assert!((0.35..0.65).contains(&cut), "{mode:?} {cut}");
+    }
+    let core = decode_with(
+        CodecId::Eac3,
+        &packets,
+        Options {
+            dynamic_range: DynamicRange::Line {
+                cut: 1.0,
+                boost: 1.0,
+            },
+            extension: Extension::Core,
+            ..Options::default()
+        },
+    );
+    let center = core
+        .channels
+        .iter()
+        .position(|channel| *channel == C)
+        .expect("center");
+    let core_peak = channel_peak(&core.pcm, core.channels.len(), center, span);
+    assert!((0.35..0.65).contains(&core_peak), "core {core_peak}");
+}
+
+fn stands_out(channel: &[f32], rate: u32, own: f64, hz: &[f64]) -> bool {
+    let mine = power(channel, rate, own);
+    hz.iter()
+        .filter(|freq| (**freq - own).abs() > 1.0)
+        .all(|freq| mine > power(channel, rate, *freq) * 8.0)
+}
+
+/// A steady tone keeps one exponent set, so the frame is one hybrid transform.
+#[test]
+fn a_steady_tone_uses_the_hybrid_transform() {
+    let Some(ffmpeg) = oracle("ffmpeg", "-version") else {
+        return;
+    };
+    let rate = 48_000u32;
+    let channels = [C];
+    let pcm = tones(&channels, rate, rate as usize, 0.25);
+    let packets = encode(config(Format::Eac3, rate, &channels, 96_000), &pcm);
+    let ours = decode(CodecId::Eac3, &packets);
+    assert!(
+        ours.decoder.tools().aht_channels > 0,
+        "a steady tone did not use the hybrid transform"
+    );
+    let theirs = ffmpeg_decode(&ffmpeg, &stream(&packets), &["-f", "eac3"]);
+    let skip = ENCODER_DELAY as usize;
+    let b: Vec<f32> = theirs.into_iter().skip(skip).collect();
+    let n = ours.pcm.len().min(b.len());
+    let margin = 1536.min(n / 4);
+    let quality = snr(&ours.pcm[margin..n - margin], &b[margin..n - margin]);
+    assert!(quality > 50.0, "hybrid transform {quality:.1} dB");
+}
+
+/// A steady mix uses a gain on the small hybrid-transform coefficients.
+#[test]
+fn gain_adaptive_quantization_matches_ffmpeg() {
+    let Some(ffmpeg) = oracle("ffmpeg", "-version") else {
+        return;
+    };
+    let rate = 48_000u32;
+    let channels = [C];
+    let pcm: Vec<f32> = (0..rate as usize)
+        .map(|n| {
+            let t = n as f64 / f64::from(rate);
+            (0.2 * (2.0 * PI * 440.0 * t).sin()
+                + 0.12 * (2.0 * PI * 1240.0 * t).sin()
+                + 0.08 * (2.0 * PI * 3100.0 * t).sin()) as f32
+        })
+        .collect();
+    let packets = encode(config(Format::Eac3, rate, &channels, 96_000), &pcm);
+    let ours = decode(CodecId::Eac3, &packets);
+    assert!(
+        ours.decoder.tools().aht_channels > 0,
+        "the mix did not use the hybrid transform"
+    );
+    assert!(
+        ours.decoder.tools().gaq_channels > 0,
+        "the mix did not use a gain"
+    );
+    let theirs = ffmpeg_decode(&ffmpeg, &stream(&packets), &["-f", "eac3"]);
+    let skip = ENCODER_DELAY as usize;
+    let b: Vec<f32> = theirs.into_iter().skip(skip).collect();
+    let n = ours.pcm.len().min(b.len());
+    let margin = 1536.min(n / 4);
+    let quality = snr(&ours.pcm[margin..n - margin], &b[margin..n - margin]);
+    assert!(quality > 45.0, "gain adaptive {quality:.1} dB");
+}
+
+/// A low-rate E-AC-3 frame extends the top bins instead of dropping them.
+#[test]
+fn spectral_extension_matches_ffmpeg() {
+    let Some(ffmpeg) = oracle("ffmpeg", "-version") else {
+        return;
+    };
+    let rate = 48_000u32;
+    let channels = [C];
+    let mut state = 0x1234_5678u32;
+    let pcm: Vec<f32> = (0..rate as usize)
+        .map(|_| {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (state >> 16) as i16 as f32 / 32_768.0 * 0.2
+        })
+        .collect();
+    let packets = encode(config(Format::Eac3, rate, &channels, 40_000), &pcm);
+    let ours = decode(CodecId::Eac3, &packets);
+    assert!(
+        ours.decoder.tools().spx_blocks > 0,
+        "the low rate did not use spectral extension"
+    );
+    let theirs = ffmpeg_decode(&ffmpeg, &stream(&packets), &["-f", "eac3"]);
+    let skip = ENCODER_DELAY as usize;
+    let a = &ours.pcm;
+    let b: Vec<f32> = theirs.into_iter().skip(skip).collect();
+    let n = a.len().min(b.len());
+    let margin = 1536.min(n / 4);
+    let quality = snr(&a[margin..n - margin], &b[margin..n - margin]);
+    let tone_pcm = tones(&channels, rate, rate as usize, 0.25);
+    let tone_packets = encode(config(Format::Eac3, rate, &channels, 40_000), &tone_pcm);
+    let tone_ours = decode(CodecId::Eac3, &tone_packets);
+    let tone_theirs = ffmpeg_decode(&ffmpeg, &stream(&tone_packets), &["-f", "eac3"]);
+    let tone_b: Vec<f32> = tone_theirs.into_iter().skip(skip).collect();
+    let tn = tone_ours.pcm.len().min(tone_b.len());
+    let tone_q = snr(
+        &tone_ours.pcm[margin..tn - margin],
+        &tone_b[margin..tn - margin],
+    );
+    assert!(
+        tone_q > 60.0,
+        "tone through spectral extension {tone_q:.1} dB"
+    );
+    let high = power(&a[margin..n - margin], rate, 10_000.0);
+    let high_src = power(&pcm[margin..n - margin], rate, 10_000.0);
+    let low = power(&a[margin..n - margin], rate, 3_000.0);
+    let ratio = high / high_src.max(1.0e-12);
+    assert!(
+        (0.25..4.0).contains(&ratio),
+        "10 kHz ratio {ratio:.2}, noise vs ffmpeg {quality:.1} dB, 3 kHz {low:.3}"
+    );
+}
+
+/// One, two, three and six blocks per syncframe. Each packet lasts that
+/// many blocks, and FFmpeg hears the same program our decoder hears.
+#[test]
+fn every_eac3_block_count_decodes_with_ffmpeg() {
+    let Some(ffmpeg) = oracle("ffmpeg", "-version") else {
+        return;
+    };
+    let rate = 48_000u32;
+    let layouts: [&[Channel]; 3] = [&[C], &[L, R], &[L, R, C, Lfe, Sl, Sr]];
+    for blocks in [1usize, 2, 3, 6] {
+        for channels in layouts {
+            let mut cfg = config(Format::Eac3, rate, channels, 0);
+            cfg.blocks = blocks;
+            let pcm = tones(channels, rate, rate as usize, 0.25);
+            let packets = encode(cfg, &pcm);
+            let spf = (blocks * 256) as i64;
+            assert!(!packets.is_empty(), "{blocks} {channels:?}");
+            for packet in &packets {
+                assert_eq!(packet.duration, spf, "{blocks} {channels:?}");
+                let info = probe(&packet.data).expect("probe");
+                assert_eq!(info.blocks, blocks, "{blocks} {channels:?}");
+            }
+            let ours = decode(CodecId::Eac3, &packets);
+            assert_eq!(
+                ours.pcm.len(),
+                pcm.len(),
+                "{blocks} blocks {channels:?}: sample count"
+            );
+            let theirs = ffmpeg_decode(&ffmpeg, &stream(&packets), &["-f", "eac3"]);
+            let nch = channels.len();
+            let mut order: Vec<usize> = (0..nch).collect();
+            order.sort_by_key(|&i| ours.channels[i].wave_bit());
+            let skip = ENCODER_DELAY as usize;
+            for (theirs_index, &our_index) in order.iter().enumerate() {
+                let a = deinterleave(&ours.pcm, nch, our_index);
+                let b: Vec<f32> = deinterleave(&theirs, nch, theirs_index)
+                    .into_iter()
+                    .skip(skip)
+                    .collect();
+                let n = a.len().min(b.len());
+                let margin = 1536.min(n / 4);
+                let quality = snr(&a[margin..n - margin], &b[margin..n - margin]);
+                let src = deinterleave(&pcm, nch, our_index);
+                let against = snr(&a[margin..n - margin], &src[margin..n - margin]);
+                assert!(
+                    quality > 60.0,
+                    "{blocks} blocks {channels:?} {:?}: {quality:.1} dB against FFmpeg",
+                    ours.channels[our_index]
+                );
+                let floor = if blocks == 1 { 40.0 } else { 60.0 };
+                assert!(
+                    against > floor,
+                    "{blocks} blocks {channels:?} {:?}: {against:.1} dB against the source",
+                    ours.channels[our_index]
+                );
+            }
+        }
+    }
+}
+
+/// An inverted right channel in the coupling band stays inverted. The
+/// phase flag is what keeps the two sides from cancelling.
+#[test]
+fn an_inverted_stereo_band_keeps_its_phase() {
+    let Some(ffmpeg) = oracle("ffmpeg", "-version") else {
+        return;
+    };
+    let channels = &[L, R];
+    let rate = 48_000u32;
+    let frames = rate as usize;
+    let mut pcm = Vec::with_capacity(frames * 2);
+    for index in 0..frames {
+        let t = index as f64 / f64::from(rate);
+        let sample = (0.4 * (2.0 * PI * 9_000.0 * t).sin()) as f32;
+        pcm.push(sample);
+        pcm.push(-sample);
+    }
+    for format in [Format::Ac3, Format::Eac3] {
+        let bit_rate = if format == Format::Ac3 {
+            192_000
+        } else {
+            96_000
+        };
+        let packets = encode(config(format, rate, channels, bit_rate), &pcm);
+        let ours = decode(codec(format), &packets);
+        assert!(
+            ours.decoder.tools().phase_blocks > 0,
+            "{format:?} wrote no phase flags"
+        );
+        let n = channels.len();
+        for index in 0..n {
+            let got = deinterleave(&ours.pcm, n, index);
+            let sent = deinterleave(&pcm, n, index);
+            let margin = 1536.min(got.len() / 4);
+            let quality = snr(
+                &got[margin..got.len() - margin],
+                &sent[margin..sent.len() - margin],
+            );
+            assert!(
+                quality > 20.0,
+                "{format:?} channel {index}: {quality:.1} dB"
+            );
+        }
+        let theirs = ffmpeg_decode(&ffmpeg, &stream(&packets), &[]);
+        let skip = ENCODER_DELAY as usize * n;
+        let theirs = &theirs[skip.min(theirs.len())..];
+        let compared = ours.pcm.len().min(theirs.len());
+        let quality = snr(&ours.pcm[..compared], &theirs[..compared]);
+        assert!(quality > 50.0, "{format:?} against FFmpeg: {quality:.1} dB");
+    }
+}
+
+/// The block count may change from one syncframe to the next. One access
+/// unit that does is the same program FFmpeg decodes.
+#[test]
+fn a_stream_may_change_its_block_count() {
+    let Some(ffmpeg) = oracle("ffmpeg", "-version") else {
+        return;
+    };
+    let channels = &[L, R];
+    let rate = 48_000u32;
+    let mut bytes = Vec::new();
+    let mut expected = 0i64;
+    for blocks in [6usize, 1, 3, 2, 6] {
+        let mut cfg = config(Format::Eac3, rate, channels, 192_000);
+        cfg.blocks = blocks;
+        let pcm = tones(channels, rate, rate as usize / 2, 0.25);
+        for packet in encode(cfg, &pcm) {
+            assert_eq!(probe(&packet.data).expect("probe").blocks, blocks);
+            bytes.extend_from_slice(&packet.data);
+            expected += packet.duration;
+        }
+    }
+    let mut decoder = Ac3Decoder::open(&cutlass_decode::CodecParams::audio(
+        CodecId::Eac3,
+        rate,
+        layout(channels),
+    ))
+    .expect("decoder");
+    let mut outputs = decoder
+        .push(&Packet::audio(bytes.clone(), 0, expected, rate))
+        .expect("decode");
+    outputs.extend(decoder.drain().expect("drain"));
+    let ours = audible(outputs);
+    assert_eq!(ours.len(), expected as usize * channels.len());
+    let theirs = ffmpeg_decode(&ffmpeg, &bytes, &["-f", "eac3"]);
+    let n = ours.len().min(theirs.len());
+    let quality = snr(&ours[..n], &theirs[..n]);
+    assert!(
+        quality > 60.0,
+        "block-count change: {quality:.1} dB, {} vs {} samples",
+        ours.len(),
+        theirs.len()
+    );
+}
+
+/// A short block used to turn coupling on or off inside an E-AC-3
+/// syncframe, and reference decoders reject that frame. The onset of a
+/// tone stays in the comparison. Full-band noise at the default rate is
+/// mostly dither, so it only has to be a syncframe FFmpeg accepts.
+#[test]
+fn ffmpeg_decodes_an_eac3_frame_that_starts_with_a_transient() {
+    let Some(ffmpeg) = oracle("ffmpeg", "-version") else {
+        return;
+    };
+    let channels = &[L, R];
+    let rate = 48_000u32;
+    let mut seed = 1u32;
+    let noise: Vec<f32> = (0..1536 * 2)
+        .map(|_| {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (seed >> 8) as f32 / (1u32 << 24) as f32 - 0.5
+        })
+        .collect();
+    let packets = encode(config(Format::Eac3, rate, channels, 0), &noise);
+    let _ours = decode(CodecId::Eac3, &packets);
+    let _theirs = ffmpeg_decode(&ffmpeg, &stream(&packets), &["-f", "eac3"]);
+
+    let mut impulse = vec![0.0f32; 1536 * 2];
+    impulse[768 * 2] = 0.8;
+    impulse[768 * 2 + 1] = 0.8;
+    let packets = encode(config(Format::Eac3, rate, channels, 0), &impulse);
+    let ours = decode(CodecId::Eac3, &packets);
+    let theirs = ffmpeg_decode(&ffmpeg, &stream(&packets), &["-f", "eac3"]);
+    let skip = ENCODER_DELAY as usize * 2;
+    let theirs = &theirs[skip.min(theirs.len())..];
+    let n = ours.pcm.len().min(theirs.len());
+    let quality = snr(&ours.pcm[..n], &theirs[..n]);
+    assert!(quality > 50.0, "impulse {quality:.1} dB");
+
+    let pcm = tones(channels, rate, rate as usize, 0.25);
+    let packets = encode(config(Format::Eac3, rate, channels, 0), &pcm);
+    let ours = decode(CodecId::Eac3, &packets);
+    let theirs = ffmpeg_decode(&ffmpeg, &stream(&packets), &[]);
+    let a = deinterleave(&ours.pcm, 2, 0);
+    let b: Vec<f32> = deinterleave(&theirs, 2, 0)
+        .into_iter()
+        .skip(ENCODER_DELAY as usize)
+        .collect();
+    let n = a.len().min(b.len());
+    let tail = 1536.min(n / 8);
+    let quality = snr(&a[..n - tail], &b[..n - tail]);
+    assert!(quality > 50.0, "onset {quality:.1} dB");
+}
+
+fn ffmpeg_encode(
+    ffmpeg: &str,
+    pcm: &[f32],
+    codec: &str,
+    kbps: u32,
+    channels: usize,
+    layout: Option<&str>,
+) -> Vec<u8> {
+    let dir = std::env::temp_dir().join("cutlass-ac3-noise");
+    std::fs::create_dir_all(&dir).expect("temp");
+    let input = dir.join(format!("in-{codec}-{channels}.f32"));
+    let output = dir.join(format!("out-{codec}-{channels}.{codec}"));
+    let mut bytes = Vec::with_capacity(pcm.len() * 4);
+    for sample in pcm {
+        bytes.extend_from_slice(&sample.to_le_bytes());
+    }
+    std::fs::write(&input, bytes).expect("pcm");
+    let channels = channels.to_string();
+    let rate = format!("{kbps}k");
+    let mut command = std::process::Command::new(ffmpeg);
+    command.args([
+        "-v", "error", "-y", "-f", "f32le", "-ar", "48000", "-ac", &channels,
+    ]);
+    if let Some(layout) = layout {
+        command.args(["-channel_layout", layout]);
+    }
+    let status = command
+        .arg("-i")
+        .arg(&input)
+        .args(["-f", codec, "-c:a", codec, "-b:a", &rate])
+        .arg(&output)
+        .status()
+        .expect("ffmpeg encode");
+    assert!(status.success(), "ffmpeg encode failed");
+    std::fs::read(&output).expect("encoded")
+}
+
+/// One second of stereo white noise, and one impulse. Noise at the default
+/// rate is close to the dither floor, so the gate is FFmpeg's own encoder
+/// on the same samples. The impulse is compared to FFmpeg's decode of this
+/// encoder's stream.
+#[test]
+fn noise_and_an_impulse_match_ffmpeg() {
+    let Some(ffmpeg) = oracle("ffmpeg", "-version") else {
+        return;
+    };
+    let channels = &[L, R];
+    let rate = 48_000u32;
+    let mut seed = 1u32;
+    let noise: Vec<f32> = (0..rate as usize * 2)
+        .map(|_| {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            ((seed >> 8) as f32 / (1u32 << 24) as f32 - 0.5) * 0.4
+        })
+        .collect();
+    let mut impulse = vec![0.0f32; rate as usize * 2];
+    let at = (rate as usize / 2) * 2;
+    impulse[at] = 0.8;
+    impulse[at + 1] = -0.8;
+    for format in [Format::Ac3, Format::Eac3] {
+        let flag = if format == Format::Ac3 { "ac3" } else { "eac3" };
+        let kbps = cutlass_ac3::default_bit_rate(format, 2, false) / 1000;
+        for (name, pcm, interop) in [("noise", &noise, false), ("impulse", &impulse, true)] {
+            let packets = encode(config(format, rate, channels, 0), pcm);
+            let ours = decode(codec(format), &packets);
+            let skip = ENCODER_DELAY as usize * 2;
+            if interop {
+                let theirs = ffmpeg_decode(&ffmpeg, &stream(&packets), &["-f", flag]);
+                let theirs = &theirs[skip.min(theirs.len())..];
+                let n = ours.pcm.len().min(theirs.len());
+                let quality = snr(&ours.pcm[..n], &theirs[..n]);
+                assert!(quality > 50.0, "{format:?} {name} {quality:.1} dB");
+            }
+            let foreign = ffmpeg_encode(&ffmpeg, pcm, flag, kbps, 2, None);
+            let foreign_pcm = decode(codec(format), &[Packet::audio(foreign, 0, 0, rate)]);
+            let foreign_heard = &foreign_pcm.pcm[skip.min(foreign_pcm.pcm.len())..];
+            let n = ours.pcm.len().min(foreign_heard.len()).min(pcm.len());
+            let ours_source = snr(&ours.pcm[..n], &pcm[..n]);
+            let their_source = snr(&foreign_heard[..n], &pcm[..n]);
+            assert!(
+                ours_source + 1.0 >= their_source,
+                "{format:?} {name}: ours {ours_source:.1} dB, ffmpeg {their_source:.1} dB"
+            );
+        }
+    }
+}
+
+/// One second of 5.1 noise and one impulse on every speaker, at the
+/// default rate. The gate is the same as stereo: this encoder stays within
+/// 1 dB of FFmpeg's encoder against the source, and the impulse stays above
+/// 50 dB against FFmpeg's decode.
+#[test]
+fn surround_noise_and_an_impulse_match_ffmpeg() {
+    let Some(ffmpeg) = oracle("ffmpeg", "-version") else {
+        return;
+    };
+    let channels = &[L, R, C, Lfe, Sl, Sr];
+    let rate = 48_000u32;
+    let n = channels.len();
+    let mut seed = 2u32;
+    let noise: Vec<f32> = (0..rate as usize * n)
+        .map(|_| {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            ((seed >> 8) as f32 / (1u32 << 24) as f32 - 0.5) * 0.4
+        })
+        .collect();
+    let mut impulse = vec![0.0f32; rate as usize * n];
+    let at = (rate as usize / 2) * n;
+    for (index, sample) in impulse[at..at + n].iter_mut().enumerate() {
+        *sample = if index.is_multiple_of(2) { 0.8 } else { -0.8 };
+    }
+    for format in [Format::Ac3, Format::Eac3] {
+        let flag = if format == Format::Ac3 { "ac3" } else { "eac3" };
+        let kbps = cutlass_ac3::default_bit_rate(format, 5, true) / 1000;
+        for (name, pcm, interop) in [("noise", &noise, false), ("impulse", &impulse, true)] {
+            let packets = encode(config(format, rate, channels, 0), pcm);
+            let ours = decode(codec(format), &packets);
+            let skip = ENCODER_DELAY as usize * n;
+            if interop {
+                let theirs = ffmpeg_decode(&ffmpeg, &stream(&packets), &["-f", flag]);
+                let theirs = &theirs[skip.min(theirs.len())..];
+                let len = ours.pcm.len().min(theirs.len());
+                let quality = snr(&ours.pcm[..len], &theirs[..len]);
+                assert!(quality > 50.0, "{format:?} {name} {quality:.1} dB");
+            }
+            let foreign = ffmpeg_encode(&ffmpeg, pcm, flag, kbps, n, Some("5.1(side)"));
+            let foreign_pcm = decode(codec(format), &[Packet::audio(foreign, 0, 0, rate)]);
+            let foreign_heard = &foreign_pcm.pcm[skip.min(foreign_pcm.pcm.len())..];
+            let len = ours.pcm.len().min(foreign_heard.len()).min(pcm.len());
+            let ours_source = snr(&ours.pcm[..len], &pcm[..len]);
+            let their_source = snr(&foreign_heard[..len], &pcm[..len]);
+            assert!(
+                ours_source + 1.0 >= their_source,
+                "{format:?} {name}: ours {ours_source:.1} dB, ffmpeg {their_source:.1} dB"
+            );
+        }
+    }
+}
+
+/// Apple's decoder reads our streams.
+#[test]
+fn apple_decodes_our_streams() {
+    let Some(afconvert) = oracle("afconvert", "-h") else {
+        return;
+    };
+    for format in [Format::Ac3, Format::Eac3] {
+        for (channels, _, _) in LAYOUTS {
+            let rate = 48_000;
+            let pcm = tones(channels, rate, rate as usize, 0.25);
+            let packets = encode(config(format, rate, channels, 0), &pcm);
+            let ours = decode(codec(format), &packets);
+            let (count, theirs) = apple_decode(&afconvert, &stream(&packets));
+            let n = channels.len();
+            // Apple folds a center into the fronts and drops LFE for 3/1
+            // and 2/1 once an LFE is present, and it drops the single
+            // surround of 2/1 and 3/1. Speakers it does render are matched
+            // by the signal, in whichever slot it chose.
+            let folded =
+                channels.contains(&Lfe) && (channels.contains(&C) || channels.contains(&Cs));
+            for index in 0..n {
+                if folded || ours.channels[index] == Cs {
+                    continue;
+                }
+                let a = deinterleave(&ours.pcm, n, index);
+                let mut best = f64::NEG_INFINITY;
+                for apple in 0..count {
+                    let b = deinterleave(&theirs, count, apple);
+                    let len = a.len().min(b.len()).saturating_sub(2_048);
+                    if len < 256 {
+                        continue;
+                    }
+                    best = best.max(snr(&a[..len], &b[..len]));
+                }
+                assert!(
+                    best > 40.0,
+                    "{format:?} {channels:?}: {:?} {best:.1} dB",
+                    ours.channels[index]
+                );
+            }
+        }
+    }
+}

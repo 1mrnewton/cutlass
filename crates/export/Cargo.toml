@@ -26,6 +26,7 @@ image = { version = "0.25.10", default-features = false, features = ["png", "jpe
 
 [dev-dependencies]
 cutlass-aac = { path = "../codecs/aac", version = "0.1.0" }
+cutlass-ac3 = { path = "../codecs/ac3", version = "0.1.0" }
 cutlass-alac = { path = "../codecs/alac", version = "0.1.0" }
 cutlass-flac = { path = "../codecs/flac", version = "0.1.0" }
 cutlass-gif = { path = "../codecs/gif", version = "0.1.0" }

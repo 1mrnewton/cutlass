@@ -245,7 +245,11 @@ impl WavFormat {
             };
             out.extend_from_slice(&valid.to_le_bytes());
             out.extend_from_slice(&self.channel_mask.to_le_bytes());
-            write_guid(&mut out, self.tag);
+            if self.codec == StreamCodec::Known(CodecId::Eac3) {
+                out.extend_from_slice(&EAC3_GUID);
+            } else {
+                write_guid(&mut out, self.tag);
+            }
             out.extend_from_slice(&self.extra);
         } else if self.tag != 0x0001 || !self.extra.is_empty() {
             let extra_len = u16::try_from(self.extra.len()).map_err(|_| FormatError::Hostile {
@@ -325,7 +329,13 @@ pub(crate) fn parse_fmt(payload: &[u8]) -> Result<WavFormat, FormatError> {
     }
 
     let codec = if let Some(guid) = guid_unknown {
-        named_unknown(&guid_name(&guid))?
+        if guid == EAC3_GUID {
+            StreamCodec::Known(CodecId::Eac3)
+        } else if guid == AC3_GUID {
+            StreamCodec::Known(CodecId::Ac3)
+        } else {
+            named_unknown(&guid_name(&guid))?
+        }
     } else {
         codec_for_tag(tag)?
     };
@@ -395,11 +405,13 @@ impl FormatError {
 
 fn default_format(channels: u16, rate: u32, codec: &StreamCodec) -> Result<WavFormat, FormatError> {
     check_rate_channels(rate, channels)?;
+    let eac3 = matches!(codec, StreamCodec::Known(CodecId::Eac3));
     let (tag, bits, kind) = match codec {
         StreamCodec::Known(CodecId::Pcm) => (0x0001, 16, Kind::Integer),
         StreamCodec::Known(CodecId::Mp3) => (0x0055, 0, Kind::Compressed),
         StreamCodec::Known(CodecId::Aac) => (0x00FF, 0, Kind::Compressed),
         StreamCodec::Known(CodecId::Ac3) => (0x2000, 0, Kind::Compressed),
+        StreamCodec::Known(CodecId::Eac3) => (0xFFFE, 0, Kind::Compressed),
         StreamCodec::Known(CodecId::Flac) => (0xF1AC, 0, Kind::Compressed),
         StreamCodec::Known(_) => {
             return Err(FormatError::Bad("codec cannot be stored in wav"));
@@ -422,7 +434,8 @@ fn default_format(channels: u16, rate: u32, codec: &StreamCodec) -> Result<WavFo
         valid_bits: 0,
         channel_mask: 0,
         kind,
-        extensible: false,
+        // E-AC-3 has no Microsoft format tag. The file carries its GUID.
+        extensible: eac3,
         codec: codec.clone(),
         extra: Vec::new(),
         samples_per_block: None,
@@ -519,6 +532,16 @@ fn ima_samples(channels: u16, block_align: u16) -> Option<u64> {
     }
     Some(1 + (block - header) * 2 / channels)
 }
+
+/// Dolby AC-3 waveform GUID, on disk in the order FFmpeg writes it.
+const AC3_GUID: [u8; 16] = [
+    0x2C, 0x80, 0x6D, 0xE0, 0x46, 0xDB, 0xCF, 0x11, 0xB4, 0xD1, 0x00, 0x80, 0x5F, 0x6C, 0xBB, 0xEA,
+];
+
+/// E-AC-3 waveform GUID. There is no Microsoft format tag for it.
+const EAC3_GUID: [u8; 16] = [
+    0xAF, 0x87, 0xFB, 0xA7, 0x02, 0x2D, 0xFB, 0x42, 0xA4, 0xD4, 0x05, 0xCD, 0x93, 0x84, 0x3B, 0xDD,
+];
 
 /// Media-subtype GUID tail: `{xxxxxxxx-0000-0010-8000-00aa00389b71}`.
 fn subformat_tag(guid: &[u8; 16]) -> Option<u16> {
@@ -639,6 +662,30 @@ mod tests {
         };
         let text = String::from_utf8_lossy(tag.tag());
         assert!(text.starts_with("wav-guid:"), "{text}");
+    }
+
+    #[test]
+    fn an_eac3_wave_round_trips_through_its_guid() {
+        let format =
+            super::default_format(2, 48_000, &StreamCodec::Known(CodecId::Eac3)).expect("format");
+        let bytes = format.fmt_payload(16_000).expect("payload");
+        let back = parse_fmt(&bytes).expect("parse");
+        assert_eq!(back.codec(), &StreamCodec::Known(CodecId::Eac3));
+        assert_eq!(back.sample_rate(), 48_000);
+        assert!(back.extensible());
+    }
+
+    #[test]
+    fn the_dolby_ac3_guid_is_ac3() {
+        let mut fmt = pcm_fmt(2, 48_000, 16);
+        fmt[0] = 0xFE;
+        fmt[1] = 0xFF;
+        fmt.extend_from_slice(&22u16.to_le_bytes());
+        fmt.extend_from_slice(&0u16.to_le_bytes());
+        fmt.extend_from_slice(&0u32.to_le_bytes());
+        fmt.extend_from_slice(&super::AC3_GUID);
+        let format = parse_fmt(&fmt).expect("ac3 guid");
+        assert_eq!(format.codec(), &StreamCodec::Known(CodecId::Ac3));
     }
 
     #[test]

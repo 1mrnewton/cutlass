@@ -1,7 +1,8 @@
 //! The containers and codecs a phone opens.
 //!
-//! Rust audio decoders (FLAC, ALAC, MP3, Opus and Vorbis) go first, so a file
-//! decodes the same on every platform, and a lossless file bit-exactly.
+//! Rust audio decoders (FLAC, ALAC, MP3, AC-3, E-AC-3, Opus and Vorbis) go
+//! first, so a file decodes the same on every platform, and a lossless file
+//! bit-exactly.
 //! WebP goes first too: ImageIO gives one picture per packet and does not
 //! keep an animation's canvas. The Apple decoders come next on an Apple
 //! phone; a codec they decline falls through to the Rust decoder of the
@@ -33,20 +34,21 @@ pub fn readers() -> ReaderFactory {
     readers
 }
 
-/// FLAC, ALAC, MP3, Opus, Vorbis, WebP and Motion JPEG, the platform
-/// decoders for this OS, then PNG, GIF, JPEG, AAC, H.264, HEVC, MPEG-2,
-/// MPEG-4 Visual, PCM and ProRes.
+/// FLAC, ALAC, MP3, AC-3, E-AC-3, Opus, Vorbis, WebP and Motion JPEG, the
+/// platform decoders for this OS, then PNG, GIF, JPEG, AAC, H.264, HEVC,
+/// MPEG-2, MPEG-4 Visual, PCM and ProRes.
 #[must_use]
 pub fn decoders() -> DecodeFactory {
     let mut decoders = DecodeFactory::new();
     // Rust audio codecs go ahead of the platform ones, so FLAC, ALAC, MP3,
-    // Opus and Vorbis decode the same on the phone as on the desktop. WebP
-    // goes ahead too: ImageIO gives one picture per packet and does not keep
-    // an animation's canvas. Motion JPEG goes ahead because VideoToolbox
-    // refuses 4:2:2 frames after it opens and weaves no fields.
+    // AC-3, E-AC-3, Opus and Vorbis decode the same on the phone as on the
+    // desktop. WebP goes ahead too: ImageIO gives one picture per packet and
+    // does not keep an animation's canvas. Motion JPEG goes ahead because
+    // VideoToolbox refuses 4:2:2 frames after it opens and weaves no fields.
     cutlass_flac::register_decoders(&mut decoders);
     cutlass_alac::register_decoders(&mut decoders);
     cutlass_mp3::register_decoders(&mut decoders);
+    cutlass_ac3::register_decoders(&mut decoders);
     cutlass_opus::register_decoders(&mut decoders);
     cutlass_vorbis::register_decoders(&mut decoders);
     cutlass_webp::register_decoders(&mut decoders);
@@ -471,6 +473,86 @@ mod tests {
                 platform.push(&damaged).is_ok(),
                 "the platform decoder was not picked"
             );
+        }
+    }
+
+    fn ac3_round_trip(
+        encoder: &mut dyn Encoder,
+        decoder: &mut dyn Decoder,
+    ) -> (Vec<Vec<u8>>, Vec<f32>) {
+        let rate = 48_000u32;
+        let frames = 1536 * 2;
+        let samples: Vec<f32> = (0..frames)
+            .flat_map(|i| {
+                let t = i as f32 / rate as f32;
+                [
+                    0.3 * (t * 440.0 * std::f32::consts::TAU).sin(),
+                    0.2 * (t * 660.0 * std::f32::consts::TAU).sin(),
+                ]
+            })
+            .collect();
+        let pcm = Pcm::from_f32(rate, ChannelLayout::stereo(), samples).expect("pcm");
+        let mut packets = encoder.push(&AudioInput { pcm }).expect("encode");
+        packets.extend(encoder.drain().expect("drain"));
+        let mut decoded = Vec::new();
+        for packet in &packets {
+            for output in decoder.push(packet).expect("decode") {
+                if let Output::Audio(audio) = output {
+                    decoded.extend_from_slice(audio.pcm.as_f32().expect("f32"));
+                }
+            }
+        }
+        for output in decoder.drain().expect("drain") {
+            if let Output::Audio(audio) = output {
+                decoded.extend_from_slice(audio.pcm.as_f32().expect("f32"));
+            }
+        }
+        let bytes = packets.into_iter().map(|packet| packet.data).collect();
+        (bytes, decoded)
+    }
+
+    #[test]
+    fn the_phone_codes_ac3_and_eac3_with_the_rust_codec() {
+        for codec in [CodecId::Ac3, CodecId::Eac3] {
+            let mut spec = CodecParams::audio(codec, 48_000, ChannelLayout::stereo());
+            spec.bitrate = 192_000;
+            let mut rust_encoder = cutlass_ac3::Ac3Encoder::open(&spec).expect("rust encoder");
+            let mut rust_decoder = cutlass_ac3::Ac3Decoder::open(&spec).expect("rust decoder");
+            let rust = ac3_round_trip(&mut rust_encoder, &mut rust_decoder);
+            assert!(!rust.0.is_empty() && !rust.1.is_empty(), "{codec:?}");
+            let mut phone_encoder = crate::export::encoders()
+                .open(&spec)
+                .expect("phone encoder");
+            let mut phone_decoder = super::decoders().open(&spec).expect("phone decoder");
+            let phone = ac3_round_trip(phone_encoder.as_mut(), phone_decoder.as_mut());
+            assert!(phone.0 == rust.0, "{codec:?} encodes with the Rust encoder");
+            assert!(phone.1 == rust.1, "{codec:?} decodes with the Rust decoder");
+
+            #[cfg(target_vendor = "apple")]
+            {
+                // AudioToolbox registers both ids. When it accepts the
+                // parameters its bytes and samples differ, so a reversed
+                // registration fails here. A refusal falls through to Rust.
+                let mut only = cutlass_encode::EncodeFactory::new();
+                cutlass_platform_apple::register_encoders(&mut only);
+                if let Ok(mut platform) = only.open(&spec) {
+                    let mut again = cutlass_ac3::Ac3Decoder::open(&spec).expect("decoder");
+                    let encoded = ac3_round_trip(platform.as_mut(), &mut again);
+                    assert!(
+                        encoded.0 != rust.0,
+                        "{codec:?} platform encoder matched the Rust encoder"
+                    );
+                }
+                let mut only = cutlass_decode::DecodeFactory::new();
+                cutlass_platform_apple::register_decoders(&mut only);
+                let mut platform = only.open(&spec).expect("platform decoder");
+                let mut rust_encoder = cutlass_ac3::Ac3Encoder::open(&spec).expect("encoder");
+                let decoded = ac3_round_trip(&mut rust_encoder, platform.as_mut());
+                assert!(
+                    decoded.1 != rust.1,
+                    "{codec:?} platform decoder matched the Rust decoder"
+                );
+            }
         }
     }
 

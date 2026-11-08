@@ -451,9 +451,10 @@ impl Default for ExportRequest {
     }
 }
 
-/// The sound of an export: AAC (in an MP4, a movie or an M4A), 16-bit PCM
-/// (in a movie or a WAV), 16-bit FLAC (alone, in a FLAC file), MP3 (alone,
-/// in an MP3 file), or Opus (alone, in an Ogg `.opus` file).
+/// The sound of an export: AAC, AC-3, or E-AC-3 (in an MP4, a movie or an
+/// M4A), ALAC (in an M4A), 16-bit PCM (in a movie or a WAV), 16-bit FLAC
+/// (alone, in a FLAC file), MP3 (alone, in an MP3 file), or Opus (alone, in
+/// an Ogg `.opus` file).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SoundFormat {
     pub codec: CodecId,
@@ -8950,6 +8951,49 @@ mod tests {
     };
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+
+    /// Every AC-3 and E-AC-3 setting the export dialog offers (both sample
+    /// rates, stereo and mono, and each bitrate) opens the installed encoder
+    /// and codes a second of sound.
+    #[test]
+    fn the_export_dialogs_ac3_and_eac3_settings_open_the_encoder() {
+        use cutlass_encode::{AudioInput, ChannelLayout};
+        let (_, encoders) = crate::register_codecs();
+        for codec in [CodecId::Ac3, CodecId::Eac3] {
+            for sample_rate in super::SoundFormat::SAMPLE_RATES {
+                for channels in [2u16, 1] {
+                    for bitrate in super::SoundFormat::BITRATES {
+                        let sound = super::SoundFormat {
+                            codec,
+                            sample_rate,
+                            channels,
+                            bitrate,
+                        };
+                        assert_eq!(sound.extension(), "m4a");
+                        let export = sound.export();
+                        let layout = if channels == 1 {
+                            ChannelLayout::mono()
+                        } else {
+                            ChannelLayout::stereo()
+                        };
+                        let mut params =
+                            CodecParams::audio(export.codec, export.sample_rate, layout.clone());
+                        params.bitrate = export.bitrate;
+                        let name = format!("{codec:?} {sample_rate} {channels} {bitrate}");
+                        let mut encoder = encoders.open(&params).expect(&name);
+                        assert_eq!(encoder.codec(), codec, "{name}");
+                        let frames = sample_rate as usize * usize::from(channels);
+                        let pcm =
+                            cutlass_encode::Pcm::from_f32(sample_rate, layout, vec![0.1; frames])
+                                .expect("pcm");
+                        let mut packets = encoder.push(&AudioInput { pcm }).expect(&name);
+                        packets.extend(encoder.drain().expect(&name));
+                        assert!(packets.len() > 20, "{name}: {} packets", packets.len());
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn vorbis_sound_alone_is_an_ogg_file() {

@@ -203,6 +203,7 @@ fn map_codec(codec: LegacyCodec) -> Result<StreamCodec, OpenError> {
         LegacyCodec::Vorbis => CodecId::Vorbis,
         LegacyCodec::Alac => CodecId::Alac,
         LegacyCodec::Ac3 => CodecId::Ac3,
+        LegacyCodec::Eac3 => CodecId::Eac3,
         LegacyCodec::Jpeg => CodecId::Jpeg,
         LegacyCodec::Png => CodecId::Png,
         LegacyCodec::Webp => CodecId::Webp,

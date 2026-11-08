@@ -137,10 +137,9 @@ fn write_part(
 }
 
 /// Write only the timeline's sound over `request.range` to `destination`:
-/// AAC or ALAC in an M4A file, PCM in a WAV file, FLAC in a FLAC file, MP3
-/// in an MP3 file, Opus in an Ogg (`.opus`) file, or Vorbis in an Ogg
-/// (`.ogg`) file, as `request.audio`
-/// names.
+/// AAC, ALAC, AC-3, or E-AC-3 in an M4A file, PCM in a WAV file, FLAC in a
+/// FLAC file, MP3 in an MP3 file, Opus in an Ogg (`.opus`) file, or Vorbis
+/// in an Ogg (`.ogg`) file, as `request.audio` names.
 /// The file is written beside its destination and moved there when done.
 pub fn write_sound(
     sources: &MovieSources<'_>,
@@ -158,7 +157,7 @@ pub fn write_sound(
     let written = (|| {
         let out = BufWriter::new(File::create(&part).map_err(file)?);
         let out = match (codec, request.container) {
-            (CodecId::Aac | CodecId::Alac, ContainerId::Isobmff) => {
+            (CodecId::Aac | CodecId::Alac | CodecId::Ac3 | CodecId::Eac3, ContainerId::Isobmff) => {
                 let mut mux = Mp4Mux::with_brand(out, FileBrand::M4a);
                 export_sound(
                     sources.draft,
@@ -343,7 +342,11 @@ mod tests {
     }
 
     fn written(codec: CodecId, container: ContainerId, name: &str) -> (PathBuf, Vec<u8>) {
-        let dir = std::env::temp_dir().join(format!("cutlass-sound-{}-{name}", std::process::id()));
+        // Tests run in parallel, and two may write the same file name.
+        let dir = std::env::temp_dir().join(format!(
+            "cutlass-sound-{}-{codec:?}-{name}",
+            std::process::id()
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         let mut encoders = EncodeFactory::new();
         cutlass_aac::register_encoders(&mut encoders);
@@ -352,6 +355,7 @@ mod tests {
         cutlass_flac::register_encoders(&mut encoders);
         cutlass_mp3::register_encoders(&mut encoders);
         cutlass_opus::register_encoders(&mut encoders);
+        cutlass_ac3::register_encoders(&mut encoders);
         cutlass_vorbis::register_encoders(&mut encoders);
         let draft = Draft::empty("D");
         let readers = ReaderFactory::new();
@@ -415,6 +419,40 @@ mod tests {
         let frames = u32::from_be_bytes([mp3[at + 8], mp3[at + 9], mp3[at + 10], mp3[at + 11]]);
         // Half a second at 44.1 kHz.
         assert_eq!(frames * 1152 - cutlass_mp3::ENCODER_DELAY - padding, 22_050);
+    }
+
+    #[test]
+    fn sound_alone_writes_ac3_and_eac3_and_reopens() {
+        use cutlass_codec::StreamCodec;
+        use cutlass_container::Demux;
+        use cutlass_decode::{ChannelLayout, CodecParams, Decoder, Output, Packet as AudioPacket};
+
+        for codec in [CodecId::Ac3, CodecId::Eac3] {
+            let (_, bytes) = written(codec, ContainerId::Isobmff, "cut.m4a");
+            let mut file =
+                cutlass_isobmff::IsoBmffFile::open(std::io::Cursor::new(bytes)).expect("open");
+            let streams = Demux::streams(&file);
+            assert_eq!(streams[0].params().codec(), &StreamCodec::Known(codec));
+            assert!(!streams[0].params().extradata().is_empty());
+            let stored = Demux::read_packet(&mut file)
+                .expect("read")
+                .expect("packet");
+            assert_eq!(&stored.bytes()[..2], &[0x0B, 0x77]);
+            let mut decoder = cutlass_ac3::Ac3Decoder::open(&CodecParams::audio(
+                codec,
+                44_100,
+                ChannelLayout::stereo(),
+            ))
+            .expect("decoder");
+            let duration = stored.timestamp().duration().expect("duration");
+            let packet = AudioPacket::audio(stored.bytes().to_vec(), 0, duration, 44_100);
+            let decoded = decoder.push(&packet).expect("decode");
+            assert!(
+                decoded
+                    .iter()
+                    .any(|output| matches!(output, Output::Audio(_)))
+            );
+        }
     }
 
     #[test]

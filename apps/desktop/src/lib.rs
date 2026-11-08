@@ -43,9 +43,10 @@ pub fn register_codecs_with(
     // and encodes the same on every platform. FLAC's encoder hands the muxer
     // the STREAMINFO (sample count and MD5) a FLAC file is finished with;
     // ALAC's hands it the final cookie; MP3's hands it the delay and padding
-    // its LAME tag needs; Opus's hands it the OpusHead, with its pre-skip,
-    // and the end trim. Vorbis hands it the three headers and has no
-    // encoder delay. The Opus decoder matches the RFC vectors and plays
+    // its LAME tag needs; AC-3 and E-AC-3 hand it `dac3` or `dec3`; Opus's
+    // hands it the OpusHead, with its pre-skip, and the end trim. Vorbis
+    // hands it the three headers and has no encoder delay. The Opus
+    // decoder matches the RFC vectors and plays
     // multistream and every API rate. WebP still images follow the same
     // rule, and an animated file's later packets are bare frames only the
     // Rust decoder composes. So does Motion JPEG: VideoToolbox refuses 4:2:2
@@ -56,6 +57,8 @@ pub fn register_codecs_with(
     cutlass_alac::register_encoders(&mut encoders);
     cutlass_mp3::register_decoders(&mut decoders);
     cutlass_mp3::register_encoders(&mut encoders);
+    cutlass_ac3::register_decoders(&mut decoders);
+    cutlass_ac3::register_encoders(&mut encoders);
     cutlass_opus::register_decoders(&mut decoders);
     cutlass_opus::register_encoders(&mut encoders);
     cutlass_vorbis::register_decoders(&mut decoders);
@@ -701,6 +704,91 @@ mod tests {
             cutlass_opus::register_decoders(&mut reversed);
             let mut platform = reversed.open(&listen).expect("platform opus decoder");
             assert_ne!(opus_samples(platform.as_mut(), &packets), decoded);
+        }
+    }
+
+    /// Packets and samples from one encoder and one decoder.
+    fn ac3_round_trip(
+        encoder: &mut dyn cutlass_encode::Encoder,
+        decoder: &mut dyn cutlass_decode::Decoder,
+    ) -> (Vec<Vec<u8>>, Vec<f32>) {
+        use cutlass_decode::{ChannelLayout, Output, Pcm};
+        use cutlass_encode::AudioInput;
+
+        let rate = 48_000u32;
+        let frames = 1536 * 2;
+        let samples: Vec<f32> = (0..frames)
+            .flat_map(|i| {
+                let t = i as f32 / rate as f32;
+                [
+                    0.3 * (t * 440.0 * std::f32::consts::TAU).sin(),
+                    0.2 * (t * 660.0 * std::f32::consts::TAU).sin(),
+                ]
+            })
+            .collect();
+        let pcm = Pcm::from_f32(rate, ChannelLayout::stereo(), samples).expect("pcm");
+        let mut packets = encoder.push(&AudioInput { pcm }).expect("encode");
+        packets.extend(encoder.drain().expect("drain"));
+        let mut decoded = Vec::new();
+        for packet in &packets {
+            for output in decoder.push(packet).expect("decode") {
+                if let Output::Audio(audio) = output {
+                    decoded.extend_from_slice(audio.pcm.as_f32().expect("f32"));
+                }
+            }
+        }
+        for output in decoder.drain().expect("drain") {
+            if let Output::Audio(audio) = output {
+                decoded.extend_from_slice(audio.pcm.as_f32().expect("f32"));
+            }
+        }
+        let bytes = packets.into_iter().map(|packet| packet.data).collect();
+        (bytes, decoded)
+    }
+
+    #[test]
+    fn ac3_and_eac3_are_coded_by_the_rust_codec_ahead_of_the_platform() {
+        use cutlass_decode::ChannelLayout;
+
+        let (decoders, encoders) = super::register_codecs();
+        for codec in [CodecId::Ac3, CodecId::Eac3] {
+            let mut spec = CodecParams::audio(codec, 48_000, ChannelLayout::stereo());
+            spec.bitrate = 192_000;
+            let mut rust_encoder = cutlass_ac3::Ac3Encoder::open(&spec).expect("rust encoder");
+            let mut rust_decoder = cutlass_ac3::Ac3Decoder::open(&spec).expect("rust decoder");
+            let rust = ac3_round_trip(&mut rust_encoder, &mut rust_decoder);
+            assert!(!rust.0.is_empty() && !rust.1.is_empty(), "{codec:?}");
+            let mut app_encoder = encoders.open(&spec).expect("app encoder");
+            let mut app_decoder = decoders.open(&spec).expect("app decoder");
+            let app = ac3_round_trip(app_encoder.as_mut(), app_decoder.as_mut());
+            assert!(app.0 == rust.0, "{codec:?} encodes with the Rust encoder");
+            assert!(app.1 == rust.1, "{codec:?} decodes with the Rust decoder");
+
+            // AudioToolbox registers both ids. When it accepts the
+            // parameters its bytes and samples differ, so a reversed
+            // registration fails here. A refusal falls through to Rust.
+            #[cfg(target_os = "macos")]
+            {
+                let mut only = cutlass_encode::EncodeFactory::new();
+                cutlass_platform_apple::register_encoders_with(&mut only, true);
+                if let Ok(mut platform) = only.open(&spec) {
+                    let mut again = cutlass_ac3::Ac3Decoder::open(&spec).expect("decoder");
+                    let encoded = ac3_round_trip(platform.as_mut(), &mut again);
+                    assert!(
+                        encoded.0 != rust.0,
+                        "{codec:?} platform encoder matched the Rust encoder"
+                    );
+                }
+                let mut only = cutlass_decode::DecodeFactory::new();
+                cutlass_platform_apple::register_surface_decoders_with(&mut only, true);
+                let mut platform = only.open(&spec).expect("platform decoder");
+                let mut rust_encoder = cutlass_ac3::Ac3Encoder::open(&spec).expect("encoder");
+                let decoded = ac3_round_trip(&mut rust_encoder, platform.as_mut());
+                assert!(
+                    decoded.1 != rust.1,
+                    "{codec:?} platform decoder matched the Rust decoder"
+                );
+            }
         }
     }
 

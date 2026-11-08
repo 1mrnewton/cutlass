@@ -8663,6 +8663,18 @@ fn export_choices(shell: &Shell, ui: &mut Ui, view: &mut ViewState) {
             {
                 audio.codec = CodecId::Alac;
             }
+            if ui
+                .add(ui::Choice::new(audio.codec == CodecId::Ac3, "AC-3"))
+                .clicked()
+            {
+                audio.codec = CodecId::Ac3;
+            }
+            if ui
+                .add(ui::Choice::new(audio.codec == CodecId::Eac3, "E-AC-3"))
+                .clicked()
+            {
+                audio.codec = CodecId::Eac3;
+            }
             let pcm = ui::Choice::new(audio.codec == CodecId::Pcm, "PCM");
             if ui.add_enabled(pcm_fits, pcm).clicked() {
                 audio.codec = CodecId::Pcm;
@@ -15913,6 +15925,14 @@ mod tests {
         assert_eq!(export_extension(&view), "m4a");
         view.export.audio.codec = cutlass_decode::CodecId::Alac;
         assert_eq!(export_extension(&view), "m4a");
+        view.export.audio.codec = cutlass_decode::CodecId::Ac3;
+        assert_eq!(export_extension(&view), "m4a");
+        view.export.audio.codec = cutlass_decode::CodecId::Eac3;
+        assert_eq!(export_extension(&view), "m4a");
+        view.export_mov = false;
+        view.export.picture = true;
+        assert_eq!(export_extension(&view), "mp4");
+        view.export.picture = false;
         view.export.audio.codec = cutlass_decode::CodecId::Pcm;
         assert_eq!(export_extension(&view), "wav");
         view.export.sound = false;

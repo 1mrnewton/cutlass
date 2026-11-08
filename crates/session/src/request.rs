@@ -223,6 +223,9 @@ pub enum Request {
     },
     /// Store the crop quad. Ratio and scale stay.
     SetCrop { segment_id: SegmentId, crop: Crop },
+    /// Steady a video clip at `level` (1 cuts least, 2 recommended, 3 most
+    /// stable), or stop at 0 or below. The kept camera path stays.
+    SetStable { segment_id: SegmentId, level: i64 },
     /// Replace the text material's string. Word columns stay as stored.
     SetTextContent {
         segment_id: SegmentId,

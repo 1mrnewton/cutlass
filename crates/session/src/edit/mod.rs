@@ -35,6 +35,7 @@ mod rotate;
 mod shape;
 mod speed;
 mod split;
+mod stable;
 mod text;
 mod track;
 mod transition;
@@ -324,6 +325,7 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             fade_out,
         } => fade::set_fade(draft, segment_id, fade_id, *fade_in, *fade_out),
         Request::SetCrop { segment_id, crop } => crop::set_crop(draft, segment_id, *crop),
+        Request::SetStable { segment_id, level } => stable::set_stable(draft, segment_id, *level),
         Request::SetTextContent {
             segment_id,
             content,

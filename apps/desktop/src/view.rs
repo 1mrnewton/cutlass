@@ -23,6 +23,7 @@ mod audio;
 mod grade;
 mod inspector;
 mod remove_bg;
+mod retouch;
 mod speed;
 
 const CARD_W: f32 = 144.0;
@@ -8885,6 +8886,31 @@ mod tests {
             "25",
             "Feather edge",
             "Clean up edge",
+            "Later",
+        ] {
+            assert!(lines.iter().any(|line| line == label), "{label}: {lines:?}");
+        }
+        // The Retouch page lays out every touch-up, all marked Later.
+        view.inspector.focus(inspector::Focus {
+            tab: 0,
+            page: 3,
+            section: None,
+        });
+        let _ = frame(&mut shell, &mut view, Vec::new());
+        let lines = galleys(&frame(&mut shell, &mut view, Vec::new()));
+        for label in [
+            "Face",
+            "Body presets",
+            "Auto styles",
+            "Skin",
+            "Smooth",
+            "Skin tone",
+            "Features",
+            "Eyes",
+            "Makeup",
+            "Natural",
+            "Manual",
+            "Protect face",
             "Later",
         ] {
             assert!(lines.iter().any(|line| line == label), "{label}: {lines:?}");

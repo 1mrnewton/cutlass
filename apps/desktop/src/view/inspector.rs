@@ -61,6 +61,8 @@ pub(super) struct InspectorState {
     pub(super) curve_drag: Option<(usize, Vec<(f32, f32)>)>,
     /// A speed curve point being dragged, and the points as they are now.
     pub(super) speed_drag: Option<(usize, Vec<(f64, f64)>)>,
+    /// The chip picked in each row of chips on a page, by row.
+    pub(super) chips: HashMap<&'static str, usize>,
     /// The LUT file picker was asked for; the view opens it.
     pub(super) wants_lut: bool,
     /// The pictures drawn for the Templates, Bubble and Effects tiles, by
@@ -176,8 +178,8 @@ fn video_panel(
                 mask_page(shell, ui, state, inspection.mask, false);
                 return;
             }
-            if state.page != 0 {
-                later_note(ui, ["", "Remove BG", "Mask", "Retouch"][state.page]);
+            if state.page == 3 {
+                super::retouch::retouch_page(ui, state);
                 return;
             }
             position_size(shell, ui, state, inspection, "Rotate");

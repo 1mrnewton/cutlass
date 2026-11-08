@@ -4096,7 +4096,6 @@ fn paint_toolbar(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rec
                                 "linkage" => shell.linkage_enabled(),
                                 "magnet" => shell.magnet_enabled(),
                                 "snap" => shell.snap_enabled(),
-                                "freeze" => shell.frozen(),
                                 "reverse" => shell.reversed(),
                                 "mirror" => shell.mirrored(),
                                 "rotate" => shell.rotated(),
@@ -4110,8 +4109,6 @@ fn paint_toolbar(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rec
                                 "magnet" => "Magnet off",
                                 "snap" if shell.snap_enabled() => "Snap on",
                                 "snap" => "Snap off",
-                                "freeze" if shell.frozen() => "Frozen",
-                                "freeze" => "Freeze",
                                 "reverse" if shell.reversed() => "Reversed",
                                 "reverse" => "Reverse",
                                 "mirror" if shell.mirrored() => "Mirrored",
@@ -4214,7 +4211,7 @@ fn tool_clicked(shell: &mut Shell, name: &str) {
             shell.toggle_snap();
             Ok(())
         }
-        "freeze" => shell.toggle_freeze(),
+        "freeze" => shell.freeze_frame(),
         "reverse" => shell.toggle_reverse(),
         "mirror" => shell.toggle_mirror(),
         "rotate" => shell.turn_clockwise(),
@@ -4372,7 +4369,7 @@ const TOOLS: &[Option<(&str, &str)>] = &[
     Some(("split", "Split")),
     Some(("delete", "Delete")),
     None,
-    Some(("freeze", "Freeze")),
+    Some(("freeze", "Freeze frame")),
     Some(("reverse", "Reverse")),
     Some(("mirror", "Mirror")),
     Some(("rotate", "Rotate")),

@@ -4400,26 +4400,20 @@ impl Shell {
         }
     }
 
-    /// The selected clip is a video, so Freeze can hold one of its frames.
+    /// The selected clip is a video that is not already a still, so Freeze
+    /// can put a still of one of its frames into the timeline.
     #[must_use]
     pub fn freeze_enabled(&self) -> bool {
-        self.selected_video().is_some()
-    }
-
-    /// The selected video is holding one frame.
-    #[must_use]
-    pub fn frozen(&self) -> bool {
         self.selected_video()
-            .is_some_and(|video| video.freeze.is_some())
+            .is_some_and(|video| video.freeze.is_none())
     }
 
-    /// Hold the frame under the playhead, or the clip's first frame when the
-    /// playhead is elsewhere. A second click plays the clip again.
-    ///
-    /// The hold is stored on the clip's video; a video other clips share is
-    /// copied for this clip first, so only it freezes. One undo restores the
-    /// previous picture.
-    pub fn toggle_freeze(&mut self) -> Result<(), ShellError> {
+    /// Put a still of the frame under the playhead into the timeline at the
+    /// playhead, for [`cutlass_eval::FREEZE_DURATION`]. The clip is split
+    /// around it and later clips on its row move right; near the clip's
+    /// edge the still goes beside it instead. The still is selected. One
+    /// undo takes it out and puts the clip back together.
+    pub fn freeze_frame(&mut self) -> Result<(), ShellError> {
         let Some(segment_id) = self.selected().cloned() else {
             return Err(if self.session.is_none() {
                 ShellError::NoProject
@@ -4427,21 +4421,43 @@ impl Shell {
                 ShellError::Unavailable("nothing is selected".to_owned())
             });
         };
-        let freeze = cutlass_eval::freeze_toggle(self.session_draft()?, &segment_id, self.playhead)
+        let point = cutlass_eval::freeze_point(self.session_draft()?, &segment_id, self.playhead)
             .map_err(|miss| {
-                ShellError::Unavailable(
-                    match miss {
-                        cutlass_eval::FreezeMiss::UnknownSegment => {
-                            "the clip is not on the timeline"
-                        }
-                        cutlass_eval::FreezeMiss::NotVideo => "a freeze belongs on video",
-                        cutlass_eval::FreezeMiss::NoFrame => "the clip has no frame to hold",
-                    }
-                    .to_owned(),
-                )
-            })?;
+            ShellError::Unavailable(
+                match miss {
+                    cutlass_eval::FreezeMiss::UnknownSegment => "the clip is not on the timeline",
+                    cutlass_eval::FreezeMiss::NotVideo => "a freeze belongs on video",
+                    cutlass_eval::FreezeMiss::NoFrame => "the clip has no frame to hold",
+                    cutlass_eval::FreezeMiss::Outside => "move the playhead onto the clip",
+                    cutlass_eval::FreezeMiss::AlreadyHeld => "the clip is already a still",
+                }
+                .to_owned(),
+            )
+        })?;
         self.refuse_locked(&segment_id)?;
-        self.apply(Request::SetFreeze { segment_id, freeze })
+        let mut next_id = self.next_id;
+        let mut fresh = |prefix: &str| {
+            next_id = next_id.saturating_add(1);
+            format!("{prefix}-{next_id}")
+        };
+        let requests = cutlass_editor::freeze_requests(
+            self.session_draft()?,
+            &segment_id,
+            point.at,
+            point.freeze,
+            cutlass_eval::FREEZE_DURATION,
+            &mut fresh,
+        );
+        self.next_id = next_id;
+        let requests = requests
+            .ok_or_else(|| ShellError::Unavailable("the clip is not on the timeline".to_owned()))?;
+        let still = requests.iter().rev().find_map(|request| match request {
+            Request::SetFreeze { segment_id, .. } => Some(segment_id.clone()),
+            _ => None,
+        });
+        self.apply_requests(&requests)?;
+        self.select(still);
+        Ok(())
     }
 
     /// The selected clip is a picture or a sound, so Reverse can flip it.
@@ -8272,6 +8288,7 @@ fn locate<'a>(draft: &'a Draft, id: &SegmentId) -> Option<(&'a Segment, bool)> {
 
 fn clip_name(draft: &Draft, segment: &Segment) -> String {
     match draft.materials.get(segment.material_id.as_str()) {
+        Some(MaterialRef::Video(video)) if video.freeze.is_some() => "Freeze".to_owned(),
         Some(MaterialRef::Video(video)) if !video.path.is_empty() => file_name(&video.path),
         Some(MaterialRef::Audio(audio)) if !audio.path.is_empty() => file_name(&audio.path),
         Some(MaterialRef::Text(text)) if !text.content.is_empty() => text.content.clone(),
@@ -17531,11 +17548,11 @@ mod tests {
     }
 
     #[test]
-    fn a_freeze_holds_the_frame_under_the_playhead() {
+    fn a_freeze_puts_a_still_of_the_playhead_frame_into_the_clip() {
         let mut bare = shell();
         assert!(!bare.freeze_enabled());
         assert_eq!(
-            bare.toggle_freeze().unwrap_err().to_string(),
+            bare.freeze_frame().unwrap_err().to_string(),
             "no project is open"
         );
 
@@ -17565,68 +17582,69 @@ mod tests {
         desktop.select(Some(SegmentId::new("tone")));
         assert!(!desktop.freeze_enabled());
         assert_eq!(
-            desktop.toggle_freeze().unwrap_err().to_string(),
+            desktop.freeze_frame().unwrap_err().to_string(),
             "a freeze belongs on video"
         );
 
         desktop.select(Some(SegmentId::new("picture")));
         assert!(desktop.freeze_enabled());
-        assert!(!desktop.frozen());
-        desktop.seek(Micros(500_000));
-        desktop.toggle_freeze().unwrap();
-        let held = desktop.draft().unwrap().materials.videos[0]
-            .freeze
-            .clone()
-            .expect("held frame");
-        assert_eq!(held.timestamp, Micros(500_000));
-        assert_eq!(held.source_material_id, "picture");
-        assert_eq!(held.source_material_path, "clip");
-        assert!(desktop.frozen());
-        assert_eq!(
-            desktop.draft().unwrap().tracks[0].segments[0].target,
-            TimeRange::new(0, 2_000_000)
-        );
-        desktop.undo().unwrap();
-        assert!(
-            desktop.draft().unwrap().materials.videos[0]
-                .freeze
-                .is_none()
-        );
-        desktop.redo().unwrap();
-        assert!(desktop.frozen());
-        desktop.toggle_freeze().unwrap();
-        assert!(!desktop.frozen());
-
         desktop.seek(Micros(5_000_000));
-        desktop.toggle_freeze().unwrap();
         assert_eq!(
-            desktop.draft().unwrap().materials.videos[0]
-                .freeze
-                .as_ref()
-                .expect("first frame")
-                .timestamp,
-            Micros(0)
+            desktop.freeze_frame().unwrap_err().to_string(),
+            "move the playhead onto the clip"
         );
-        desktop.toggle_freeze().unwrap();
         desktop.set_speed(2.0).unwrap();
         desktop.seek(Micros(400_000));
-        desktop.toggle_freeze().unwrap();
+        desktop.freeze_frame().unwrap();
+        let draft = desktop.draft().unwrap();
+        let row: Vec<_> = draft.tracks[0]
+            .segments
+            .iter()
+            .map(|segment| (segment.target.start.0, segment.target.duration.0))
+            .collect();
         assert_eq!(
-            desktop.draft().unwrap().materials.videos[0]
-                .freeze
-                .as_ref()
-                .expect("sped frame")
-                .timestamp,
-            Micros(800_000)
+            row,
+            vec![(0, 400_000), (400_000, 3_000_000), (3_400_000, 600_000)]
+        );
+        let still = &draft.tracks[0].segments[1];
+        assert_eq!(desktop.selected(), Some(&still.id));
+        let Some(cutlass_model::MaterialRef::Video(held)) =
+            draft.materials.get(still.material_id.as_str())
+        else {
+            panic!("the still is video");
+        };
+        let held = held.freeze.clone().expect("held frame");
+        // The sped clip at 0.4 s shows 0.8 s of the file.
+        assert_eq!(held.timestamp, Micros(800_000));
+        assert_eq!(held.source_material_path, "clip");
+        assert_eq!(still.speed, 1.0);
+        // The clip it came from still plays.
+        let Some(cutlass_model::MaterialRef::Video(source)) = draft
+            .materials
+            .get(draft.tracks[0].segments[0].material_id.as_str())
+        else {
+            panic!("the clip is video");
+        };
+        assert!(source.freeze.is_none());
+        assert!(!desktop.freeze_enabled());
+        assert_eq!(
+            desktop.freeze_frame().unwrap_err().to_string(),
+            "the clip is already a still"
         );
 
+        desktop.undo().unwrap();
+        assert_eq!(desktop.draft().unwrap().tracks[0].segments.len(), 1);
+        desktop.redo().unwrap();
+        assert_eq!(desktop.draft().unwrap().tracks[0].segments.len(), 3);
+
+        desktop.select(Some(SegmentId::new("picture")));
         let track = desktop.draft().unwrap().tracks[0].id.clone();
         desktop
             .toggle_attribute(track, TrackAttribute::LOCK)
             .unwrap();
-        let locked = desktop.toggle_freeze().unwrap_err();
+        desktop.seek(Micros(200_000));
+        let locked = desktop.freeze_frame().unwrap_err();
         assert_eq!(locked.to_string(), "the track is locked");
-        assert!(desktop.frozen());
     }
 
     #[test]

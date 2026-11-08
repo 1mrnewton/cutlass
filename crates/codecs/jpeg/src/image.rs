@@ -185,6 +185,43 @@ pub fn decode_image(bytes: &[u8], tables: &mut Tables) -> Result<Decoded, CodecE
     }
 }
 
+/// Read an abbreviated table-specification stream (ITU-T T.81 B.5): SOI,
+/// DQT, DHT, APP, and COM segments, then EOI. `tables` changes only when the
+/// whole stream reads. Returns the bytes used through EOI.
+pub fn read_tables(bytes: &[u8], tables: &mut Tables) -> Result<usize, CodecError> {
+    if bytes.len() > MAX_INPUT {
+        return Err(CodecError::Limit { what: "jpeg bytes" });
+    }
+    let mut input = Cursor::new(bytes);
+    if input.take_marker()? != SOI {
+        return Err(input.malformed("start of image"));
+    }
+    let mut read = tables.clone();
+    for _ in 0..MAX_MARKERS {
+        match input.take_marker()? {
+            EOI => {
+                *tables = read;
+                return Ok(input.offset());
+            }
+            DQT => {
+                let body = input.segment()?;
+                parse_dqt(body, &mut read.quant, input.at())?;
+            }
+            DHT => {
+                let body = input.segment()?;
+                parse_dht(body, &mut read, input.at())?;
+            }
+            APP0..=0xef | COM => {
+                input.segment()?;
+            }
+            _ => return Err(input.malformed("table specification")),
+        }
+    }
+    Err(CodecError::Limit {
+        what: "jpeg markers",
+    })
+}
+
 /// The frame header, stopping at the first scan. A frame header followed
 /// by a broken segment still reports its size.
 pub(crate) fn read_header(bytes: &[u8]) -> Result<Header, CodecError> {

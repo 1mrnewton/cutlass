@@ -29,7 +29,7 @@ mod tests;
 pub use compress::{Coefficients, PlaneRef, Planes, Sampling, Source, WriteSettings};
 pub use decode::{JpegDecoder, JpegInfo, read_jpeg_info};
 pub use encode::JpegEncoder;
-pub use image::{ColorModel, Component, Decoded, Image, Tables, decode_image};
+pub use image::{ColorModel, Component, Decoded, Image, Tables, decode_image, read_tables};
 pub use limits::{MAX_EDGE, MAX_INPUT, MAX_PIXELS};
 
 use cutlass_decode::{CodecError, CodecId, CodecParams, DecodeFactory, Decoder};

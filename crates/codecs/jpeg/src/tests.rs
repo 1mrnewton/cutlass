@@ -13,9 +13,10 @@ use cutlass_decode::{
 };
 use cutlass_encode::{EncodeFactory, Encoder, PictureInput};
 
+use crate::compress::{Coefficients, Planes, Sampling, WriteSettings};
 use crate::decode::{JpegDecoder, decode_jpeg, read_jpeg_info};
 use crate::encode::{JpegEncoder, encode_jpeg};
-use crate::image::{Tables, decode_image};
+use crate::image::{Tables, decode_image, read_tables};
 use crate::tables::{AC_LUMA_COUNTS, AC_LUMA_SYMBOLS, DC_LUMA_COUNTS, DC_LUMA_SYMBOLS};
 
 fn params(extra: &[u8]) -> CodecParams {
@@ -1091,4 +1092,101 @@ fn first_video(folder: &Path) -> Option<PathBuf> {
         .collect();
     paths.sort_by_key(|path| path.metadata().map(|meta| meta.len()).unwrap_or(u64::MAX));
     paths.into_iter().next()
+}
+
+/// `bytes` as a table-specification stream and the abbreviated image left
+/// when its DQT and DHT segments are taken out.
+fn split_tables(bytes: &[u8]) -> (Vec<u8>, Vec<u8>) {
+    let mut tables = vec![0xff, 0xd8];
+    let mut image = vec![0xff, 0xd8];
+    let mut at = 2;
+    loop {
+        let marker = bytes[at + 1];
+        let len = usize::from(u16::from_be_bytes([bytes[at + 2], bytes[at + 3]]));
+        let segment = &bytes[at..at + 2 + len];
+        if marker == 0xda {
+            image.extend_from_slice(&bytes[at..]);
+            break;
+        }
+        if matches!(marker, 0xdb | 0xc4) {
+            tables.extend_from_slice(segment);
+        } else {
+            image.extend_from_slice(segment);
+        }
+        at += 2 + len;
+    }
+    tables.extend_from_slice(&[0xff, 0xd9]);
+    (tables, image)
+}
+
+fn planar_jpeg(width: u32, height: u32, sampling: Sampling, quality: u8) -> Vec<u8> {
+    let rgb = detailed_rgb(width, height);
+    let mut planes = Planes::default();
+    planes
+        .from_rgb(&rgb, 3, width, height, sampling)
+        .expect("planes");
+    let mut coefficients = Coefficients::new();
+    coefficients
+        .transform(&planes.source().expect("source"))
+        .expect("transform");
+    let mut out = Vec::new();
+    coefficients
+        .write(
+            &WriteSettings {
+                quality,
+                restart_interval: 0,
+                jfif: true,
+            },
+            &mut out,
+        )
+        .expect("write");
+    out
+}
+
+#[test]
+fn an_abbreviated_image_decodes_with_tables_read_before_it() {
+    let full = planar_jpeg(40, 24, Sampling::Yuv420, 80);
+    let (table_stream, abbreviated) = split_tables(&full);
+    let want = decode_image(&full, &mut Tables::new()).expect("full image");
+
+    let mut tables = Tables::new();
+    assert_eq!(
+        read_tables(&table_stream, &mut tables),
+        Ok(table_stream.len())
+    );
+    assert!(tables.has_quant(0) && tables.has_quant(1));
+    assert!(tables.has_huffman(0, 0) && tables.has_huffman(1, 1));
+    let got = decode_image(&abbreviated, &mut tables).expect("abbreviated image");
+    assert_eq!(got.image, want.image);
+    assert_eq!(got.len, abbreviated.len());
+
+    assert!(matches!(
+        decode_image(&abbreviated, &mut Tables::new()),
+        Err(CodecError::Malformed { .. })
+    ));
+}
+
+#[test]
+fn a_table_stream_with_a_frame_or_a_cut_leaves_the_tables() {
+    let full = planar_jpeg(16, 16, Sampling::Gray, 50);
+    let mut tables = Tables::new();
+    assert!(matches!(
+        read_tables(&full, &mut tables),
+        Err(CodecError::Malformed { .. })
+    ));
+    assert!(!tables.has_quant(0));
+
+    let (table_stream, _) = split_tables(&full);
+    for cut in 0..table_stream.len() {
+        let mut tables = Tables::new();
+        assert!(
+            read_tables(&table_stream[..cut], &mut tables).is_err(),
+            "cut {cut}"
+        );
+        assert!(
+            !tables.has_quant(0) && !tables.has_huffman(0, 0),
+            "cut {cut}"
+        );
+    }
+    assert!(read_tables(&[], &mut Tables::new()).is_err());
 }

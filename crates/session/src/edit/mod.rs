@@ -715,7 +715,7 @@ pub fn apply_all(
         .map(|track| track.id.clone())
         .collect();
     for request in requests {
-        let before = draft.clone();
+        let before = linkage::segments_of(draft);
         apply_request(draft, request)?;
         linkage::after_request(draft, &before, linkage)?;
         magnet::pack(draft, linkage)?;

@@ -56,14 +56,14 @@ pub use materials::{
     MaterialPictureAdjust, MaterialPluginEffect, MaterialRef, MaterialShape, MaterialSpeed,
     MaterialText, MaterialTransition, MaterialVideo, MaterialVideoEffect, Materials, RawMaterial,
     RichFill, RichFont, RichPaint, RichShadow, RichSolid, RichStroke, RichStyle, RichText,
-    SHAPE_ARROW, SHAPE_CONTOUR, SHAPE_FILL, SHAPE_LINE, SHAPE_LINE_WIDTH, SHAPE_SHADOW, SHAPE_SIZE,
-    SHAPE_STROKE_WIDTH, ShapeKind, ShapePoint, SpeedPoint, SpeedPreset, StickerAnimation,
-    SubtitleKeywords, TextRange, TimeMarkItem, VisibleBeat, VisibleMark, WordColumns,
-    beat_timeline_time, blend_extents, blend_window, clip_mark_time, constant_target_duration,
-    curve_speed_at, curve_speed_factor, curve_target_duration, keywords_in_ranges, new_beats,
-    new_time_mark, referenced_time_marks, segment_beats, segment_bloom, segment_time_mark,
-    set_time_mark_items, set_user_beats, source_time_at, split_curve, time_mark_items,
-    track_holds_beats, user_beats, visible_beats, visible_marks,
+    SHAPE_ARROW, SHAPE_CONTOUR, SHAPE_FILL, SHAPE_LINE, SHAPE_LINE_WIDTH, SHAPE_PEN, SHAPE_SHADOW,
+    SHAPE_SIZE, SHAPE_STROKE_WIDTH, ShapeKind, ShapePoint, SpeedPoint, SpeedPreset,
+    StickerAnimation, SubtitleKeywords, TextRange, TimeMarkItem, VisibleBeat, VisibleMark,
+    WordColumns, beat_timeline_time, blend_extents, blend_window, clip_mark_time,
+    constant_target_duration, curve_speed_at, curve_speed_factor, curve_target_duration,
+    keywords_in_ranges, new_beats, new_time_mark, referenced_time_marks, segment_beats,
+    segment_bloom, segment_time_mark, set_time_mark_items, set_user_beats, source_time_at,
+    split_curve, time_mark_items, track_holds_beats, user_beats, visible_beats, visible_marks,
 };
 pub use meta::MetaType;
 pub use relationship::{LinkPair, Relationship};

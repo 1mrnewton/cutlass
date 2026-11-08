@@ -1495,7 +1495,10 @@ mod tests {
         down.alignment = 3;
         let (wide, low, _) = picture(&across);
         let (width, height, _) = picture(&down);
-        assert!(height > width && wide > low, "{width}x{height} {wide}x{low}");
+        assert!(
+            height > width && wide > low,
+            "{width}x{height} {wide}x{low}"
+        );
         down.underline = true;
         let (width, height, rgba) = picture(&down);
         // Some column on the right is red down most of the letters.

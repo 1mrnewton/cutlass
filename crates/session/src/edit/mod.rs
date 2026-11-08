@@ -449,6 +449,22 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             TimeRange::new(start.0, duration.0),
             *kind,
         ),
+        Request::DrawShape {
+            track_id,
+            segment_id,
+            material_id,
+            start,
+            duration,
+            points,
+            closed,
+        } => shape::draw_shape(
+            draft,
+            track_id,
+            [segment_id.as_str(), material_id.as_str()],
+            TimeRange::new(start.0, duration.0),
+            points,
+            *closed,
+        ),
         Request::SetShapeSize {
             segment_id,
             width,

@@ -7,8 +7,8 @@
 //! opacity `border_alpha`, and shadow opacity `shadow_alpha`.
 
 use cutlass_model::{
-    Draft, MaterialId, MaterialShape, SHAPE_SIZE, Segment, SegmentId, ShapeKind, TimeRange,
-    TrackId, TrackType,
+    Draft, MaterialId, MaterialShape, SHAPE_SIZE, Segment, SegmentId, ShapeKind, ShapePoint,
+    TimeRange, TrackId, TrackType,
 };
 
 use super::{EditError, ensure_unlocked, locate};
@@ -22,6 +22,9 @@ const MAX_SHADOW_DISTANCE: f64 = 1_024.0;
 /// Solid, dashed and dotted.
 const STROKE_STYLES: i32 = 3;
 
+/// The most points a drawn path can have.
+const MAX_POINTS: usize = 1_024;
+
 /// Put a new `kind` shape over `target` on `track_id`, a sticker row made
 /// when it is missing.
 pub fn add_shape(
@@ -32,7 +35,67 @@ pub fn add_shape(
     target: TimeRange,
     kind: ShapeKind,
 ) -> Result<(), EditError> {
-    if material_id.is_empty() || draft.materials.get(material_id.as_str()).is_some() {
+    let shape = MaterialShape::preset(material_id.clone(), kind, SHAPE_SIZE, SHAPE_SIZE);
+    put_shape(draft, track_id, segment_id, target, shape, [0.0, 0.0])
+}
+
+/// Put a shape drawn with the pen through `points` over `target` on
+/// `track_id`, its clip where the drawing was. `ids` is the new segment's
+/// and the new material's.
+pub fn draw_shape(
+    draft: &mut Draft,
+    track_id: &TrackId,
+    ids: [&str; 2],
+    target: TimeRange,
+    points: &[ShapePoint],
+    closed: bool,
+) -> Result<(), EditError> {
+    let finite = |pair: [f64; 2]| pair.iter().all(|value| value.is_finite());
+    let fits = |pair: [f64; 2]| pair.iter().all(|value| value.abs() <= MAX_SIZE);
+    if points.len() < 2
+        || points.len() > MAX_POINTS
+        || !points.iter().all(|point| {
+            [point.at, point.handle_in, point.handle_out]
+                .into_iter()
+                .all(|pair| finite(pair) && fits(pair))
+        })
+    {
+        return Err(EditError::ShapeStyle);
+    }
+    let points: Vec<ShapePoint> = points
+        .iter()
+        .map(|point| ShapePoint {
+            round: 0.0,
+            ..*point
+        })
+        .collect();
+    let (shape, middle) = MaterialShape::drawn(MaterialId::new(ids[1]), &points, closed);
+    let (width, height) = shape.size();
+    // A path that never leaves one spot draws nothing.
+    if width.max(height) < 1.0 || width > MAX_SIZE || height > MAX_SIZE {
+        return Err(EditError::ShapeStyle);
+    }
+    let half = |side: i32| {
+        if side > 0 { f64::from(side) / 2.0 } else { 1.0 }
+    };
+    let at = [
+        middle[0] / half(draft.canvas_config.width),
+        middle[1] / half(draft.canvas_config.height),
+    ];
+    put_shape(draft, track_id, &SegmentId::new(ids[0]), target, shape, at)
+}
+
+/// Place `shape` on a sticker row, made when it is missing, its clip moved
+/// to `at` (fractions of half the canvas, y up).
+fn put_shape(
+    draft: &mut Draft,
+    track_id: &TrackId,
+    segment_id: &SegmentId,
+    target: TimeRange,
+    shape: MaterialShape,
+    at: [f64; 2],
+) -> Result<(), EditError> {
+    if shape.id.is_empty() || draft.materials.get(shape.id.as_str()).is_some() {
         return Err(EditError::DuplicateMaterial);
     }
     if let Some(track) = draft.tracks.iter().find(|track| &track.id == track_id) {
@@ -43,15 +106,12 @@ pub fn add_shape(
     } else {
         super::track::insert_track(draft, track_id, &TrackType::Sticker)?;
     }
-    let mut segment = Segment::new(segment_id.clone(), material_id.clone(), target);
+    let mut segment = Segment::new(segment_id.clone(), shape.id.clone(), target);
     segment.render_index = TrackType::Sticker.render_floor().unwrap_or(0);
+    segment.clip.transform.x = at[0];
+    segment.clip.transform.y = at[1];
     super::place::place(draft, track_id, segment)?;
-    draft.materials.shapes.push(MaterialShape::preset(
-        material_id.clone(),
-        kind,
-        SHAPE_SIZE,
-        SHAPE_SIZE,
-    ));
+    draft.materials.shapes.push(shape);
     Ok(())
 }
 
@@ -65,7 +125,7 @@ pub fn set_shape_size(
 ) -> Result<(), EditError> {
     let index = own_shape(draft, segment_id)?;
     let shape = &mut draft.materials.shapes[index];
-    let line = shape.shape_kind().is_some_and(ShapeKind::is_line);
+    let line = shape.is_straight();
     let height = if line { 0.0 } else { height };
     let fits = |value: f64| (1.0..=MAX_SIZE).contains(&value);
     if !fits(width) || !(fits(height) || line) {
@@ -220,7 +280,9 @@ fn own_shape(draft: &mut Draft, segment_id: &SegmentId) -> Result<usize, EditErr
 
 #[cfg(test)]
 mod tests {
-    use cutlass_model::{Draft, MaterialId, SHAPE_FILL, SegmentId, ShapeKind, TimeRange, TrackId};
+    use cutlass_model::{
+        Draft, MaterialId, SHAPE_FILL, SegmentId, ShapeKind, ShapePoint, TimeRange, TrackId,
+    };
 
     use super::*;
 
@@ -236,6 +298,50 @@ mod tests {
         )
         .unwrap();
         draft
+    }
+
+    #[test]
+    fn a_drawn_path_sits_where_it_was_drawn() {
+        let mut draft = Draft::empty("d");
+        draft.canvas_config.width = 1920;
+        draft.canvas_config.height = 1080;
+        let corner = |x: f64, y: f64| ShapePoint {
+            at: [x, y],
+            round: 5.0,
+            ..ShapePoint::default()
+        };
+        let points = [
+            corner(480.0, 270.0),
+            corner(960.0, 270.0),
+            corner(960.0, 0.0),
+        ];
+        draw_shape(
+            &mut draft,
+            &TrackId::new("row"),
+            ["seg", "mat"],
+            TimeRange::new(0, 3_000_000),
+            &points,
+            true,
+        )
+        .unwrap();
+        let shape = &draft.materials.shapes[0];
+        assert_eq!(shape.size(), (480.0, 270.0));
+        assert_eq!(shape.roundness, vec![0.0; 3]);
+        let segment = &draft.tracks[0].segments[0];
+        assert_eq!(draft.tracks[0].kind, TrackType::Sticker);
+        assert_eq!(segment.clip.transform.x, 0.75);
+        assert_eq!(segment.clip.transform.y, 0.25);
+
+        let one = [corner(10.0, 10.0), corner(10.0, 10.0)];
+        let refused = draw_shape(
+            &mut draft,
+            &TrackId::new("row"),
+            ["seg2", "mat2"],
+            TimeRange::new(3_000_000, 1_000_000),
+            &one,
+            false,
+        );
+        assert_eq!(refused, Err(EditError::ShapeStyle));
     }
 
     #[test]

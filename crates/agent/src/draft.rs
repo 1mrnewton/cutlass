@@ -489,6 +489,7 @@ pub fn request_name(request: &Request) -> &'static str {
         Request::SetTextGlow { .. } => "set_text_glow",
         Request::AddText { .. } => "add_text",
         Request::AddShape { .. } => "add_shape",
+        Request::DrawShape { .. } => "draw_shape",
         Request::SetShapeSize { .. } => "set_shape_size",
         Request::SetShapeFill { .. } => "set_shape_fill",
         Request::SetShapeStroke { .. } => "set_shape_stroke",

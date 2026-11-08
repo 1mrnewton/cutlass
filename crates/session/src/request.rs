@@ -2,8 +2,8 @@ use serde::{Deserialize, Serialize};
 
 use cutlass_model::{
     AnimType, CommonKeyframeGroup, Crop, FreezeInfo, MaterialAudio, MaterialId, MaterialTransition,
-    MaterialVideo, Micros, Segment, SegmentId, ShapeKind, SpeedPoint, TimeRange, TrackId,
-    TrackType, WordColumns,
+    MaterialVideo, Micros, Segment, SegmentId, ShapeKind, ShapePoint, SpeedPoint, TimeRange,
+    TrackId, TrackType, WordColumns,
 };
 
 /// A media record stored in the library. A segment places it later.
@@ -364,6 +364,19 @@ pub enum Request {
         start: Micros,
         duration: Micros,
         kind: ShapeKind,
+    },
+    /// Place a shape drawn with the pen through `points`, in canvas pixels
+    /// from the canvas middle with y up, from `start` for `duration` on
+    /// `track_id`. The clip sits where the drawing was. A closed path is
+    /// filled; an open one is a line.
+    DrawShape {
+        track_id: TrackId,
+        segment_id: SegmentId,
+        material_id: MaterialId,
+        start: Micros,
+        duration: Micros,
+        points: Vec<ShapePoint>,
+        closed: bool,
     },
     /// Make the shape `width` by `height` canvas pixels. Its points are
     /// stretched to the new size; the clip's scale stays.

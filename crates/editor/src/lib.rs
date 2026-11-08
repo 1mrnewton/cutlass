@@ -28,6 +28,7 @@ mod keys;
 mod lane;
 mod library;
 mod media_place;
+mod pen;
 mod project_choices;
 mod reorder;
 mod ripple;
@@ -96,6 +97,7 @@ pub use library::{
     parent_of, place, rename_folder,
 };
 pub use media_place::{MediaPlace, extract_request, media_requests, sound_row};
+pub use pen::{PEN_DRAG_MIN, PenPath, PenPress};
 pub use project_choices::{
     COLOR_SPACES, PROJECT_RATES, PROJECT_RATIOS, PROJECT_RESOLUTIONS, ProjectSettings,
     color_space_name, is_drop_rate, next_canvas, next_color_space, next_rate, project_canvas,

@@ -23,6 +23,8 @@ pub const SHAPE_LINE_WIDTH: f64 = 8.0;
 /// A shadow's distance, angle (degrees) and opacity when it is first
 /// switched on.
 pub const SHAPE_SHADOW: (f64, f64, f64) = (10.0, 45.0, 0.5);
+/// The name of a shape drawn with the pen.
+pub const SHAPE_PEN: &str = "Pen";
 
 /// The shapes the library offers. Each is stored as points, so the kind is
 /// kept in the material's name, not in `shape_type`.
@@ -81,7 +83,7 @@ const CIRCLE_HANDLE: f64 = 0.552_284_7;
 /// One point of an outline: where it is, its in and out handles as offsets
 /// from it, and how far its corner is rounded. Canvas pixels from the
 /// shape's centre, y up.
-#[derive(Clone, Copy, Debug, PartialEq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Default, Serialize, Deserialize)]
 pub struct ShapePoint {
     pub at: [f64; 2],
     pub handle_in: [f64; 2],
@@ -217,6 +219,58 @@ impl MaterialShape {
         }
     }
 
+    /// A shape drawn with the pen through `points`, canvas pixels with y
+    /// up from any origin. A closed path is filled grey; an open one is a
+    /// grey line. The points are moved so the drawing's bounds are centred
+    /// on the shape's middle; the second value is where that middle was.
+    #[must_use]
+    pub fn drawn(id: MaterialId, points: &[ShapePoint], closed: bool) -> (Self, [f64; 2]) {
+        let ([low_x, low_y], [high_x, high_y]) = path_bounds(points, closed);
+        let middle = [(low_x + high_x) / 2.0, (low_y + high_y) / 2.0];
+        let mut shape = Self {
+            id,
+            kind: "shape".to_owned(),
+            shape_type: if closed { SHAPE_CONTOUR } else { SHAPE_LINE },
+            roundness: vec![0.0; points.len()],
+            shape_size: vec![high_x - low_x, high_y - low_y],
+            shape_scale: vec![1.0, 1.0],
+            global_alpha: 1.0,
+            color: if closed {
+                SHAPE_FILL.to_owned()
+            } else {
+                String::new()
+            },
+            border_width: if closed { 0.0 } else { SHAPE_LINE_WIDTH },
+            border_color: SHAPE_FILL.to_owned(),
+            border_alpha: 1.0,
+            shadow_color: "#000000".to_owned(),
+            name: SHAPE_PEN.to_owned(),
+            ..Self::default()
+        };
+        for point in points {
+            shape
+                .custom_points
+                .extend([point.at[0] - middle[0], point.at[1] - middle[1]]);
+            shape.custom_points_in.extend(point.handle_in);
+            shape.custom_points_out.extend(point.handle_out);
+        }
+        (shape, middle)
+    }
+
+    /// Open and drawn by its stroke, with no fill and no corners: a line,
+    /// an arrow, or an open pen path.
+    #[must_use]
+    pub fn is_open(&self) -> bool {
+        matches!(self.shape_type, SHAPE_LINE | SHAPE_ARROW)
+    }
+
+    /// A straight line or arrow from the library, which has a length and
+    /// no height.
+    #[must_use]
+    pub fn is_straight(&self) -> bool {
+        self.shape_kind().is_some_and(ShapeKind::is_line)
+    }
+
     /// Which library shape this is, read from its name.
     #[must_use]
     pub fn shape_kind(&self) -> Option<ShapeKind> {
@@ -286,6 +340,49 @@ impl MaterialShape {
     }
 }
 
+/// The lowest and highest x and y the path's curves reach, closed back to
+/// its start when `closed`.
+fn path_bounds(points: &[ShapePoint], closed: bool) -> ([f64; 2], [f64; 2]) {
+    /// Steps along each cubic, enough for bounds within a pixel at any size
+    /// a shape takes.
+    const STEPS: usize = 32;
+    let mut low = [f64::INFINITY; 2];
+    let mut high = [f64::NEG_INFINITY; 2];
+    let mut take = |p: [f64; 2]| {
+        for axis in 0..2 {
+            low[axis] = low[axis].min(p[axis]);
+            high[axis] = high[axis].max(p[axis]);
+        }
+    };
+    for point in points {
+        take(point.at);
+    }
+    let count = points.len();
+    let sides = if closed {
+        count
+    } else {
+        count.saturating_sub(1)
+    };
+    for side in 0..sides {
+        let (a, b) = (points[side], points[(side + 1) % count]);
+        let add = |p: [f64; 2], d: [f64; 2]| [p[0] + d[0], p[1] + d[1]];
+        let (p0, p1, p2, p3) = (a.at, add(a.at, a.handle_out), add(b.at, b.handle_in), b.at);
+        for step in 1..STEPS {
+            let t = step as f64 / STEPS as f64;
+            let u = 1.0 - t;
+            let w = [u * u * u, 3.0 * u * u * t, 3.0 * u * t * t, t * t * t];
+            take([
+                w[0] * p0[0] + w[1] * p1[0] + w[2] * p2[0] + w[3] * p3[0],
+                w[0] * p0[1] + w[1] * p1[1] + w[2] * p2[1] + w[3] * p3[1],
+            ]);
+        }
+    }
+    if count == 0 {
+        return ([0.0; 2], [0.0; 2]);
+    }
+    (low, high)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -337,5 +434,38 @@ mod tests {
         let json = serde_json::to_value(&line).unwrap();
         let back: MaterialShape = serde_json::from_value(json).unwrap();
         assert_eq!(back, line);
+    }
+
+    #[test]
+    fn a_drawn_path_is_centred_on_its_bounds() {
+        let corner = |x: f64, y: f64| ShapePoint {
+            at: [x, y],
+            ..ShapePoint::default()
+        };
+        let points = [
+            corner(100.0, 100.0),
+            corner(300.0, 100.0),
+            corner(300.0, 0.0),
+        ];
+        let (closed, middle) = MaterialShape::drawn("p".into(), &points, true);
+        assert_eq!(middle, [200.0, 50.0]);
+        assert_eq!(closed.shape_type, SHAPE_CONTOUR);
+        assert_eq!(closed.name, SHAPE_PEN);
+        assert_eq!(closed.size(), (200.0, 100.0));
+        assert_eq!(closed.points()[0].at, [-100.0, 50.0]);
+        assert_eq!(closed.color, SHAPE_FILL);
+        assert!(!closed.is_open() && !closed.is_straight());
+
+        // A curve bulges past its points, and the bounds take it in.
+        let mut bent = points;
+        bent[0].handle_out = [0.0, 80.0];
+        bent[1].handle_in = [0.0, 80.0];
+        let (open, middle) = MaterialShape::drawn("q".into(), &bent, false);
+        assert!(open.is_open());
+        assert!(open.color.is_empty());
+        assert_eq!(open.border_width, SHAPE_LINE_WIDTH);
+        let (_, height) = open.size();
+        assert!((height - 160.0).abs() < 1.0, "{height}");
+        assert!((middle[1] - 80.0).abs() < 1.0);
     }
 }

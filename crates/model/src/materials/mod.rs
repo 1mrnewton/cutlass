@@ -40,7 +40,7 @@ pub use rich::{
     RichFill, RichFont, RichPaint, RichShadow, RichSolid, RichStroke, RichStyle, RichText,
 };
 pub use shape::{
-    MaterialShape, SHAPE_ARROW, SHAPE_CONTOUR, SHAPE_FILL, SHAPE_LINE, SHAPE_LINE_WIDTH,
+    MaterialShape, SHAPE_ARROW, SHAPE_CONTOUR, SHAPE_FILL, SHAPE_LINE, SHAPE_LINE_WIDTH, SHAPE_PEN,
     SHAPE_SHADOW, SHAPE_SIZE, SHAPE_STROKE_WIDTH, ShapeKind, ShapePoint,
 };
 pub use speed::{

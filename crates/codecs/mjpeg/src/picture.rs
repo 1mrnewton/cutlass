@@ -242,6 +242,12 @@ impl Picture {
 
     /// Planar samples at their coded sampling.
     ///
+    /// A woven field pair is a progressive frame: fields coded 4:2:0 or
+    /// 4:4:0 come out `Yuv422p` or `Yuv444p`, their chroma stretched to the
+    /// field height with libjpeg's vertical triangle filter and woven with
+    /// the luma, so a consumer reading the frame as progressive puts each
+    /// row's chroma on that row.
+    ///
     /// Grey is `Gray8`. YCbCr is `Yuv444p`, `Yuv422p`, `Yuv440p`, or
     /// `Yuv420p` when the chroma components share one of those ratios to
     /// luma, and `Yuv444p` after upsampling otherwise. RGB is `Gbrp`.
@@ -249,18 +255,35 @@ impl Picture {
     /// BT.601.
     pub fn into_frame(self) -> Result<VideoFrame, CodecError> {
         let studio = self.top.studio_range;
-        let (format, top) = planes(self.top)?;
+        let field_rows = self.top.height;
+        let (mut format, top) = planes(self.top)?;
         let planes = match self.bottom {
             None => top,
             Some(bottom) => {
                 let (_, bottom) = planes(bottom)?;
+                // A field's chroma row sits between two of that field's
+                // rows, four frame rows apart. Chroma halved vertically is
+                // stretched to the field's height before weaving, so each
+                // frame row has its own field's chroma.
+                let stretch = match format {
+                    PixelFormat::Yuv420p => Some(PixelFormat::Yuv422p),
+                    PixelFormat::Yuv440p => Some(PixelFormat::Yuv444p),
+                    _ => None,
+                };
+                format = stretch.unwrap_or(format);
                 let mut woven = Vec::with_capacity(top.len());
                 for (index, (a, b)) in top.iter().zip(&bottom).enumerate() {
                     let (width, height) = plane_size(format, self.width, self.height, index);
                     let row = usize::try_from(width).map_err(|_| limit())?;
                     let rows = usize::try_from(height).map_err(|_| limit())?;
                     let mut out = Vec::new();
-                    weave(&a.samples, &b.samples, row, rows, &mut out)?;
+                    if stretch.is_some() && index > 0 {
+                        let a = stretch_rows(a, field_rows)?;
+                        let b = stretch_rows(b, field_rows)?;
+                        weave(&a, &b, row, rows, &mut out)?;
+                    } else {
+                        weave(&a.samples, &b.samples, row, rows, &mut out)?;
+                    }
                     woven.push(Plane::tight(width, height, out)?);
                 }
                 woven
@@ -340,6 +363,40 @@ fn studio_rgba(image: &Image, out: &mut Vec<u8>) -> Result<(), CodecError> {
         ]);
     }
     Ok(())
+}
+
+/// A plane `rows` high from one half as high, with libjpeg's vertical
+/// triangle filter: three quarters of the nearer row and one quarter of the
+/// farther, the edge row repeated.
+fn stretch_rows(plane: &Plane, rows: u32) -> Result<Vec<u8>, CodecError> {
+    let width = usize::try_from(plane.width).map_err(|_| limit())?;
+    let have = usize::try_from(plane.height).map_err(|_| limit())?;
+    let rows = usize::try_from(rows).map_err(|_| limit())?;
+    if have == 0 || have < rows.div_ceil(2) || plane.samples.len() < width * have {
+        return Err(CodecError::Malformed {
+            at_bit: 0,
+            what: "field chroma",
+        });
+    }
+    let line = |index: usize| {
+        let index = index.min(have - 1);
+        &plane.samples[index * width..(index + 1) * width]
+    };
+    let mut out = Vec::new();
+    out.try_reserve_exact(width * rows).map_err(|_| limit())?;
+    for y in 0..rows {
+        let near = line(y / 2);
+        let (far, bias) = if y.is_multiple_of(2) {
+            (line((y / 2).saturating_sub(1)), 1)
+        } else {
+            (line(y / 2 + 1), 2)
+        };
+        out.extend(near.iter().zip(far).map(|(&a, &b)| {
+            let value = (u16::from(a) * 3 + u16::from(b) + bias) >> 2;
+            u8::try_from(value).unwrap_or(u8::MAX)
+        }));
+    }
+    Ok(out)
 }
 
 /// Even rows from `top`, odd rows from `bottom`, `rows` rows of `row` bytes.

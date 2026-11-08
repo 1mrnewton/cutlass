@@ -298,6 +298,13 @@ fn two_fields_weave_into_the_container_frame() {
 
         let frame = picture.into_frame().expect("frame");
         assert_eq!((frame.width, frame.height), (width, height));
+        let stretched = sampling == Sampling::Yuv420;
+        let format = match sampling {
+            Sampling::Yuv420 | Sampling::Yuv422 => PixelFormat::Yuv422p,
+            Sampling::Yuv444 => PixelFormat::Yuv444p,
+            _ => PixelFormat::Gray8,
+        };
+        assert_eq!(frame.format, format, "height {height}");
         let top = decode_image(&fixture.top, &mut Tables::standard_huffman()).expect("top");
         let bottom =
             decode_image(&fixture.bottom, &mut Tables::standard_huffman()).expect("bottom");
@@ -306,12 +313,16 @@ fn two_fields_weave_into_the_container_frame() {
                 break;
             };
             let b = &bottom.image.components[index];
-            let want = interleave(
-                &a.samples,
-                &b.samples,
-                a.width as usize,
-                plane.height as usize,
-            );
+            let (a, b) = if stretched && index > 0 {
+                let rows = fixture.field_height as usize;
+                (
+                    triangle_rows(&a.samples, a.width as usize, rows),
+                    triangle_rows(&b.samples, b.width as usize, rows),
+                )
+            } else {
+                (a.samples.clone(), b.samples.clone())
+            };
+            let want = interleave(&a, &b, plane.width as usize, plane.height as usize);
             assert_eq!(plane.samples, want, "height {height} plane {index}");
         }
         // Even rows hold the top field: the frame is nearer the source it
@@ -326,6 +337,58 @@ fn two_fields_weave_into_the_container_frame() {
             let right = psnr(&rgb_of_rgba(&rgba), &fixture.rgb);
             let wrong = psnr(&rgb_of_rgba(&swapped), &fixture.rgb);
             assert!(right > wrong + 1.0, "height {height}: {right} vs {wrong}");
+        }
+    }
+}
+
+/// `rows` rows from a plane half as high: 3/4 of the nearer row and 1/4 of
+/// the farther, rounding as libjpeg's h1v2 upsampler does.
+fn triangle_rows(samples: &[u8], width: usize, rows: usize) -> Vec<u8> {
+    let have = samples.len() / width;
+    let at = |y: usize, x: usize| u16::from(samples[y.min(have - 1) * width + x]);
+    let mut out = Vec::with_capacity(width * rows);
+    for y in 0..rows {
+        let (far, bias) = if y % 2 == 0 {
+            ((y / 2).saturating_sub(1), 1)
+        } else {
+            (y / 2 + 1, 2)
+        };
+        for x in 0..width {
+            out.push(((at(y / 2, x) * 3 + at(far, x) + bias) >> 2) as u8);
+        }
+    }
+    out
+}
+
+#[test]
+fn woven_420_fields_give_every_frame_row_its_own_fields_chroma() {
+    let (width, rows) = (32, 16);
+    let flat = |rgb: [u8; 3]| -> Vec<u8> {
+        let pixels: Vec<u8> = rgb
+            .iter()
+            .copied()
+            .cycle()
+            .take((width * rows * 3) as usize)
+            .collect();
+        encode(&pixels, width, rows, Sampling::Yuv420, 95)
+    };
+    let mut data = flat([220, 30, 30]);
+    data.extend_from_slice(&flat([30, 30, 220]));
+    let mut decoder = MjpegDecoder::open(&params(width, 2 * rows, &[])).expect("open");
+    let frame = decoder
+        .decode(&data)
+        .expect("pair")
+        .into_frame()
+        .expect("frame");
+    assert_eq!(frame.format, PixelFormat::Yuv422p);
+    assert_eq!((frame.v.width, frame.v.height), (width / 2, 2 * rows));
+    // Red rows carry a high Cr and blue rows a low one, row by row.
+    for (y, line) in frame.v.samples.chunks(frame.v.stride).enumerate() {
+        let cr = line.iter().map(|&value| u32::from(value)).sum::<u32>() / line.len() as u32;
+        if y % 2 == 0 {
+            assert!(cr > 180, "row {y}: Cr {cr}");
+        } else {
+            assert!(cr < 140, "row {y}: Cr {cr}");
         }
     }
 }

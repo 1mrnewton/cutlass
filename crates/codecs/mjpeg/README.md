@@ -8,7 +8,7 @@ Native safe Rust Motion JPEG decoder and encoder in `cutlass-mjpeg`, on the JPEG
 
 One packet is one frame, and every frame is a key frame. A packet holds one JPEG image, or two field images of one interlaced frame.
 
-- `MjpegDecoder` implements `VideoDecoder`. `decode(&[u8])` returns a `Picture`. `Picture::into_frame` gives planar samples at their coded sampling, and `Picture::to_rgba` gives straight RGBA. `last_field_order` reports the field order of the last two-field packet.
+- `MjpegDecoder` implements `VideoDecoder`. `decode(&[u8])` returns a `Picture`. `Picture::into_frame` gives planar samples at their coded sampling (a woven 4:2:0 or 4:4:0 field pair as 4:2:2 or 4:4:4, its chroma stretched per field), and `Picture::to_rgba` gives straight RGBA. `last_field_order` reports the field order of the last two-field packet.
 - `MjpegPictureDecoder` implements `Decoder` and hands the engine `Rgba8` pictures at the packet's time.
 - `MjpegEncoder` implements `Encoder` (RGBA CPU frames, what export sends) and `VideoEncoder` (planar frames). `encode_rgba` and `encode_frame` are the same paths without the traits.
 

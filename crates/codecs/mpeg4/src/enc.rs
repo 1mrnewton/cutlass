@@ -2717,8 +2717,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// FFmpeg, the independent decoder. A test without it skips, unless
+    /// `MPEG4_REQUIRE_ORACLES` is set, which turns the skip into a failure.
     fn ffmpeg_bin() -> Option<std::path::PathBuf> {
-        [
+        let found = [
             "/opt/homebrew/bin/ffmpeg",
             "/usr/local/bin/ffmpeg",
             "ffmpeg",
@@ -2730,7 +2732,12 @@ mod tests {
                 .arg("-version")
                 .output()
                 .is_ok_and(|out| out.status.success())
-        })
+        });
+        assert!(
+            found.is_some() || std::env::var_os("MPEG4_REQUIRE_ORACLES").is_none(),
+            "ffmpeg is required by MPEG4_REQUIRE_ORACLES"
+        );
+        found
     }
 
     #[test]

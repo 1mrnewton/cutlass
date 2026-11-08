@@ -566,14 +566,21 @@ fn encoder_fuzz_does_not_panic() {
     assert!(inputs > 20, "the encoder campaign barely ran: {inputs}");
 }
 
+/// An FFmpeg tool. A test without it skips, unless `MPEG4_REQUIRE_ORACLES`
+/// is set, which turns the skip into a failure.
 fn tool(name: &str) -> Option<String> {
-    [
+    let found = [
         format!("/opt/homebrew/bin/{name}"),
         format!("/usr/local/bin/{name}"),
         name.to_string(),
     ]
     .into_iter()
-    .find(|path| Command::new(path).arg("-version").output().is_ok())
+    .find(|path| Command::new(path).arg("-version").output().is_ok());
+    assert!(
+        found.is_some() || std::env::var_os("MPEG4_REQUIRE_ORACLES").is_none(),
+        "{name} is required by MPEG4_REQUIRE_ORACLES"
+    );
+    found
 }
 
 fn pattern(width: u32, height: u32, shift: usize) -> (Vec<u8>, Vec<u8>, Vec<u8>) {

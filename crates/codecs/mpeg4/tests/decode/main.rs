@@ -5,3 +5,5 @@
 mod common;
 #[cfg(test)]
 mod corpus;
+#[cfg(test)]
+mod lifecycle;

@@ -54,6 +54,14 @@ fn rounded_div(a: i64, b: i64) -> i64 {
     }
 }
 
+/// The most VOPs one packet may hold. A packed bitstream puts a P-VOP and
+/// the B-VOP before it in one packet, two VOPs; FFmpeg's
+/// `mpeg4_unpack_bframes` unpacks only those two and warns past them. One
+/// more leaves room for a not-coded VOP after the pair. Every coded VOP is
+/// a whole picture, so without a cap one small packet of skipped P-VOPs
+/// would make a thousand of them.
+const MAX_PACKET_VOPS: usize = 3;
+
 fn narrow(v: i64) -> i32 {
     v.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
 }
@@ -145,8 +153,14 @@ impl Decoder {
             out.timed = true;
             return Ok(out);
         }
+        let units = units(data);
+        if units.iter().filter(|u| u.code == VOP_START).count() > MAX_PACKET_VOPS {
+            return Err(CodecError::Limit {
+                what: "VOPs in one packet",
+            });
+        }
         let mut coded = 0;
-        for unit in units(data) {
+        for unit in units {
             if unit.code == VOP_START {
                 if self.vop(unit.payload, &mut out.pictures)? {
                     coded += 1;

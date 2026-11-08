@@ -340,27 +340,47 @@ mod tests {
             .expect("a VOP")
     }
 
+    /// The headers and the first VOP.
+    fn first_packet() -> &'static [u8] {
+        let second = ASP[first_vop() + 4..]
+            .windows(4)
+            .position(|w| w == [0, 0, 1, 0xB6])
+            .expect("a second VOP");
+        &ASP[..first_vop() + 4 + second]
+    }
+
     #[test]
     fn a_layer_over_the_pixel_limit_is_refused() {
         let params = CodecParams::video(CodecId::Mpeg4, 0, 0);
         let mut decoder = EngineDecoder::open_limited(&params, 48 * 32 - 1).expect("open");
-        let refused = decoder.push(&packet(ASP));
+        let refused = decoder.push(&packet(first_packet()));
         assert!(
-            matches!(refused, Err(CodecError::Limit { .. })),
+            matches!(
+                refused,
+                Err(CodecError::Limit {
+                    what: "picture size"
+                })
+            ),
             "{refused:?}"
         );
 
         let mut configured = params.clone();
         configured.extra = ASP[..first_vop()].to_vec();
         let refused = EngineDecoder::open_limited(&configured, 48 * 32 - 1)
-            .and_then(|mut d| d.push(&packet(&ASP[first_vop()..])));
+            .and_then(|mut d| d.push(&packet(&first_packet()[first_vop()..])));
         assert!(
-            matches!(refused, Err(CodecError::Limit { .. })),
+            matches!(
+                refused,
+                Err(CodecError::Limit {
+                    what: "picture size"
+                })
+            ),
             "{refused:?}"
         );
 
         let mut decoder = EngineDecoder::open_limited(&params, 48 * 32).expect("open");
-        assert!(!decoder.push(&packet(ASP)).expect("push").is_empty());
+        decoder.push(&packet(first_packet())).expect("push");
+        assert!(!decoder.drain().expect("drain").is_empty());
     }
 
     #[test]

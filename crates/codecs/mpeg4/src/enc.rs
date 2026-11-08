@@ -2166,9 +2166,26 @@ mod tests {
     use crate::frame::Frame;
     use cutlass_decode::CodecError;
 
+    /// One packet per VOP, the first with the headers before it.
+    fn per_vop(bytes: &[u8]) -> Vec<&[u8]> {
+        let mut cuts: Vec<usize> = bytes
+            .windows(4)
+            .enumerate()
+            .filter(|(_, w)| *w == [0, 0, 1, 0xB6])
+            .map(|(at, _)| at)
+            .skip(1)
+            .collect();
+        cuts.insert(0, 0);
+        cuts.push(bytes.len());
+        cuts.windows(2).map(|w| &bytes[w[0]..w[1]]).collect()
+    }
+
     fn decode_all(bytes: &[u8]) -> Vec<Vec<u8>> {
         let mut decoder = Decoder::with_max_pixels(8192 * 8192);
-        let mut pictures = decoder.decode(bytes).expect("decode").pictures;
+        let mut pictures = Vec::new();
+        for packet in per_vop(bytes) {
+            pictures.extend(decoder.decode(packet).expect("decode").pictures);
+        }
         pictures.extend(decoder.drain());
         pictures.into_iter().map(|picture| picture.bytes).collect()
     }

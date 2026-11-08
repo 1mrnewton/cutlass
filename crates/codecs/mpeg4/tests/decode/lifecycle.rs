@@ -159,6 +159,40 @@ fn damage_lasts_until_the_next_i_vop() {
 }
 
 #[test]
+fn a_packet_holds_at_most_three_vops() {
+    let packets = split(&fixture("partitioned.m4v"));
+    assert_eq!(&coding_types(&packets)[..2], [0, 1]);
+    let repeated = |n: usize| packets[1].repeat(n);
+    let mut decoder = open();
+    let first = pictures(decoder.push(&packet(packets[0].clone(), 0)).expect("I"));
+    // One packet of a thousand P-VOPs would be a thousand pictures.
+    for n in [4, 1000] {
+        let refused = decoder.push(&packet(repeated(n), 1));
+        assert!(
+            matches!(refused, Err(CodecError::Limit { .. })),
+            "{n}: {refused:?}"
+        );
+    }
+    // The refused packets changed nothing: the next P-VOP decodes as the
+    // stream's own second picture.
+    let mut got = first;
+    got.extend(pictures(
+        decoder.push(&packet(packets[1].clone(), 1)).expect("P"),
+    ));
+    got.extend(pictures(decoder.drain().expect("drain")));
+    assert_eq!(got.len(), 2);
+    assert!(joined(&got) == fixture("partitioned.yuv")[..2 * FRAME]);
+    // Three is the most, and decodes.
+    let mut decoder = open();
+    let mut three = pictures(decoder.push(&packet(packets[0].clone(), 0)).expect("I"));
+    three.extend(pictures(
+        decoder.push(&packet(repeated(3), 1)).expect("three"),
+    ));
+    three.extend(pictures(decoder.drain().expect("drain")));
+    assert_eq!(three.len(), 4);
+}
+
+#[test]
 fn hostile_bytes_fail_closed() {
     let headers = {
         let asp = fixture("asp.m4v");

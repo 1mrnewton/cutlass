@@ -6756,7 +6756,7 @@ fn track_marquee(
     rows: &[crate::shell::LaneView],
     boxes: &[Rect],
 ) {
-    if response.drag_started()
+    if response.drag_started_by(egui::PointerButton::Primary)
         && let Some(pos) = ui.input(|input| input.pointer.press_origin())
     {
         view.marquee_press = Some(pos);
@@ -6767,14 +6767,14 @@ fn track_marquee(
         .marquee_press
         .is_some_and(|press| pos.is_some_and(|pos| (pos - press).length_sq() >= 16.0));
     if moved
-        && response.dragged()
+        && response.dragged_by(egui::PointerButton::Primary)
         && let (Some(press), Some(pos)) = (view.marquee_press, pos)
     {
         view.marquee = Some(Rect::from_two_pos(press, pos));
         scroll_with_drag(shell, ui, f64::from(pos.x - lanes_left).max(0.0));
     }
     let shift = ui.input(|input| input.modifiers.shift);
-    if response.drag_stopped() {
+    if response.drag_stopped_by(egui::PointerButton::Primary) {
         if moved && let Some(rect) = view.marquee {
             shell.select_box(clips_touching(shell, rows, boxes, lanes_left, rect), shift);
         } else if !shift {
@@ -7576,7 +7576,7 @@ fn paint_clip(
                 return;
             }
         }
-        if response.drag_started()
+        if response.drag_started_by(egui::PointerButton::Primary)
             && let Some(pos) = pointer_pos(ui, &response)
         {
             let grab = (pos.x - clip_rect.left(), pos.y - clip_rect.top());
@@ -7588,7 +7588,7 @@ fn paint_clip(
         let pos = pointer_pos(ui, &response);
         let moved = pos.is_some_and(|pos| shell.clip_drag_moved(pos.x, pos.y));
         if moved
-            && response.dragged()
+            && response.dragged_by(egui::PointerButton::Primary)
             && shell.clip_edge(&clip.id).is_none()
             && let Some(pos) = pos
         {
@@ -7606,7 +7606,7 @@ fn paint_clip(
                 paint_floating_clip(shell, ui, lane, clip, floating, lanes_left);
             }
         }
-        if response.drag_stopped() && !moved {
+        if response.drag_stopped_by(egui::PointerButton::Primary) && !moved {
             if ui.input(|input| input.modifiers.shift) {
                 shell.toggle_selected(clip.id.clone());
             } else {
@@ -7673,12 +7673,13 @@ fn paint_clip_keys(
                 .push(hit);
         });
         let dragged_to = response
-            .dragged()
+            .dragged_by(egui::PointerButton::Primary)
             .then(|| ui.input(|input| input.pointer.interact_pos()))
             .flatten();
         let at = dragged_to.map_or(x, |pos| pos.x.clamp(clip_rect.left(), clip_rect.right()));
         let on = shell.playhead() == time;
-        let color = if response.hovered() || response.dragged() || on {
+        let color = if response.hovered() || response.dragged_by(egui::PointerButton::Primary) || on
+        {
             tokens::EXPORT
         } else {
             Color32::WHITE
@@ -7694,7 +7695,7 @@ fn paint_clip_keys(
             color,
             egui::Stroke::new(1.0, Color32::BLACK),
         ));
-        if response.drag_stopped()
+        if response.drag_stopped_by(egui::PointerButton::Primary)
             && let Some(pos) = ui.input(|input| input.pointer.interact_pos())
         {
             let x = pos.x.clamp(clip_rect.left(), clip_rect.right());
@@ -7729,10 +7730,10 @@ fn drag_clip_edge(
         Sense::drag(),
     );
     response.clone().on_hover_text(&clip.name);
-    if response.hovered() || response.dragged() {
+    if response.hovered() || response.dragged_by(egui::PointerButton::Primary) {
         ui.set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
     }
-    if response.drag_started()
+    if response.drag_started_by(egui::PointerButton::Primary)
         && let Some(pos) = pointer_pos(ui, &response)
     {
         let time = match edge {
@@ -7747,7 +7748,7 @@ fn drag_clip_edge(
             (pos.x - edge_x, 0.0),
         );
     }
-    if response.dragged()
+    if response.dragged_by(egui::PointerButton::Primary)
         && let Some(pos) = pointer_pos(ui, &response)
     {
         scroll_with_drag(shell, ui, f64::from(pos.x - lanes_left).max(0.0));
@@ -7949,7 +7950,7 @@ fn finish_clip_pointer(
     spot: LaneSpot,
     edge: Option<TrimEdge>,
 ) {
-    if !response.drag_stopped() {
+    if !response.drag_stopped_by(egui::PointerButton::Primary) {
         return;
     }
     let Some(pos) = pointer_pos(ui, response) else {
@@ -13832,6 +13833,70 @@ mod tests {
         assert!(
             (times[1].0 - 2_000_000).abs() <= 34_000,
             "the key landed at {times:?}"
+        );
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn a_right_click_on_one_of_several_picked_clips_keeps_them_all() {
+        let temp = std::env::temp_dir().join(format!("cutlass-multi-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let mut draft = cutlass_model::Draft::empty("draft");
+        draft.config.maintrack_adsorb = false;
+        draft.canvas_config.width = 2;
+        draft.canvas_config.height = 1;
+        for (id, start) in [("a", 0), ("b", 3_000_000)] {
+            draft.tracks[0].segments.push(cutlass_model::Segment::new(
+                id,
+                "color",
+                cutlass_model::TimeRange::new(start, 1_000_000),
+            ));
+        }
+        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let frame = |shell: &mut Shell, view: &mut ViewState, events: Vec<egui::Event>| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: screen,
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, view, None),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        frame(&mut shell, &mut view, Vec::new());
+        let output = frame(&mut shell, &mut view, Vec::new());
+        let label = text_pos(&output, "b").expect("the second clip");
+        shell.select(Some(SegmentId::new("a")));
+        shell.toggle_selected(SegmentId::new("b"));
+        let on_b = label + Vec2::new(4.0, 12.0);
+        let press = |pressed| egui::Event::PointerButton {
+            pos: on_b,
+            button: egui::PointerButton::Secondary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        // Pressed in one frame and let go in the next, as a hand does.
+        frame(
+            &mut shell,
+            &mut view,
+            vec![egui::Event::PointerMoved(on_b), press(true)],
+        );
+        frame(&mut shell, &mut view, vec![press(false)]);
+        frame(&mut shell, &mut view, Vec::new());
+        assert_eq!(shell.selection().len(), 2, "both clips stay picked");
+        assert!(shell.clip_menu().is_some(), "the menu is open");
+        let output = frame(&mut shell, &mut view, Vec::new());
+        assert!(
+            text_pos(&output, "Deactivate clips").is_some(),
+            "the menu for several clips"
         );
         let _ = std::fs::remove_dir_all(&temp);
     }

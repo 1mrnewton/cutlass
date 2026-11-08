@@ -2743,6 +2743,7 @@ dependencies = [
  "cutlass-isobmff",
  "cutlass-jpeg",
  "cutlass-logger",
+ "cutlass-mjpeg",
  "cutlass-model",
  "cutlass-mp3",
  "cutlass-mp3-container",
@@ -2892,6 +2893,7 @@ version = "0.1.0"
 dependencies = [
  "cutlass-decode",
  "cutlass-encode",
+ "cutlass-jpeg",
 ]
 
 [[package]]

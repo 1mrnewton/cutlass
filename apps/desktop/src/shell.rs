@@ -405,7 +405,8 @@ pub struct ExportRequest {
     /// file asked for beside it takes the same name and folder.
     pub path: PathBuf,
     pub short_side: i32,
-    /// PNG writes the frame at the playhead; H.264, HEVC or ProRes a movie.
+    /// PNG writes the frame at the playhead; H.264, HEVC, ProRes, Motion
+    /// JPEG or VP8 a movie.
     pub codec: CodecId,
     pub replace: bool,
     pub span: ExportSpan,
@@ -588,16 +589,18 @@ pub enum ExportQuality {
 }
 
 impl ExportQuality {
-    /// The bitrate for an H.264, HEVC, or VP8 picture `short_side` pixels
-    /// on its short side. HEVC gets the same picture from fewer bits; VP8
-    /// spends what H.264 does.
+    /// The bitrate for an H.264, HEVC, Motion JPEG, or VP8 picture
+    /// `short_side` pixels on its short side. HEVC gets the same picture
+    /// from fewer bits; VP8 spends what H.264 does. Motion JPEG codes every
+    /// frame alone: a 1080p frame of footage at quality 75 is about 240 KB,
+    /// near five times H.264's rate at 30 frames a second.
     #[must_use]
     pub fn bitrate(self, short_side: u32, codec: CodecId) -> u32 {
         let base = cutlass_export::video_bitrate(short_side);
-        let base = if codec == CodecId::Hevc {
-            base / 10 * 6
-        } else {
-            base
+        let base = match codec {
+            CodecId::Hevc => base / 10 * 6,
+            CodecId::Mjpeg => base.saturating_mul(5),
+            _ => base,
         };
         match self {
             Self::Lower => base / 2,
@@ -7334,6 +7337,11 @@ impl Shell {
                 "ProRes is written in a MOV".to_owned(),
             ));
         }
+        if request.codec == CodecId::Mjpeg && !mov {
+            return Err(ShellError::Unavailable(
+                "Motion JPEG is written in a MOV".to_owned(),
+            ));
+        }
         if request.codec == CodecId::Vp8 && mov {
             return Err(ShellError::Unavailable(
                 "VP8 is written in an MP4".to_owned(),
@@ -7388,7 +7396,7 @@ impl Shell {
         }
         if !matches!(
             request.codec,
-            CodecId::H264 | CodecId::Hevc | CodecId::Prores | CodecId::Vp8
+            CodecId::H264 | CodecId::Hevc | CodecId::Prores | CodecId::Mjpeg | CodecId::Vp8
         ) {
             return Err(ShellError::ExportUnavailable);
         }
@@ -15362,6 +15370,222 @@ mod tests {
             frames += 1;
         }
         assert!(frames > 0);
+    }
+
+    fn rust_only_shell() -> (Shell, ReaderFactory) {
+        let off = cutlass_settings::Hardware {
+            decode: false,
+            encode: false,
+            ..cutlass_settings::Hardware::default()
+        };
+        let (decoders, encoders) = crate::register_codecs_with(&off);
+        let readers = crate::readers::readers_with(decoders.clone());
+        let settings = Settings {
+            hardware: off,
+            ..Settings::default()
+        };
+        (Shell::new(decoders, encoders, settings), readers)
+    }
+
+    fn rgba_at(readers: &ReaderFactory, path: &Path, at: i64) -> (u32, u32, Vec<u8>) {
+        let mut media = readers.open(path).unwrap();
+        let held = media
+            .decode_at(Micros(at), &TimeRange::new(0, 10_000_000))
+            .unwrap();
+        let cutlass_engine::DecodedFrame::Coded {
+            width,
+            height,
+            pixel,
+            bytes,
+            ..
+        } = held.frame
+        else {
+            panic!("a coded picture");
+        };
+        assert_eq!(pixel, PixelFormat::Rgba8);
+        (width, height, bytes.to_vec())
+    }
+
+    /// Motion JPEG exports through the Rust encoder into a MOV that the
+    /// Rust decoder plays back in the clip's colour; an MP4 is refused.
+    #[test]
+    fn a_motion_jpeg_export_lands_a_mov_that_plays_back() {
+        let temp = Temp::new();
+        movie_project(&temp.path);
+        let (mut desktop, readers) = rust_only_shell();
+        desktop.open_folder(&temp.path).unwrap();
+        assert!(desktop.encodes(CodecId::Mjpeg));
+        let mp4 = desktop.export(ExportRequest {
+            path: temp.path.join("mjpeg.mp4"),
+            short_side: 480,
+            codec: CodecId::Mjpeg,
+            ..ExportRequest::default()
+        });
+        assert_eq!(
+            mp4.unwrap_err().to_string(),
+            "Motion JPEG is written in a MOV"
+        );
+
+        let destination = temp.path.join("mjpeg.mov");
+        desktop
+            .export(ExportRequest {
+                path: destination.clone(),
+                short_side: 480,
+                codec: CodecId::Mjpeg,
+                sound: false,
+                ..ExportRequest::default()
+            })
+            .unwrap();
+        land_job(&mut desktop);
+        assert_eq!(desktop.notice(), "Exported mjpeg.mov");
+        let bytes = std::fs::read(&destination).unwrap();
+        assert_eq!(&bytes[4..12], b"ftypqt  ");
+        assert!(bytes.windows(4).any(|w| w == b"jpeg"));
+
+        let (width, height, rgba) = rgba_at(&readers, &destination, 1_500_000);
+        assert_eq!((width, height), (960, 480));
+        let near = |pixel: &[u8; 4]| {
+            pixel[0].abs_diff(0x33) <= 3
+                && pixel[1].abs_diff(0x66) <= 3
+                && pixel[2].abs_diff(0x99) <= 3
+        };
+        let (pixels, rest) = rgba.as_chunks::<4>();
+        assert!(rest.is_empty() && pixels.iter().all(near));
+    }
+
+    #[test]
+    fn motion_jpeg_is_given_five_times_the_h264_rate() {
+        use super::ExportQuality;
+        for quality in [
+            ExportQuality::Lower,
+            ExportQuality::Recommended,
+            ExportQuality::Higher,
+        ] {
+            assert_eq!(
+                quality.bitrate(1080, CodecId::Mjpeg),
+                quality.bitrate(1080, CodecId::H264) * 5
+            );
+        }
+    }
+
+    fn ffmpeg() -> Option<PathBuf> {
+        let homebrew = PathBuf::from("/opt/homebrew/bin/ffmpeg");
+        if homebrew.is_file() {
+            return Some(homebrew);
+        }
+        std::env::var_os("PATH").and_then(|paths| {
+            std::env::split_paths(&paths)
+                .map(|dir| dir.join("ffmpeg"))
+                .find(|path| path.is_file())
+        })
+    }
+
+    fn ffmpeg_rgba(ffmpeg: &Path, movie: &Path, frame: u32) -> Vec<u8> {
+        let output = std::process::Command::new(ffmpeg)
+            .args(["-v", "error", "-i"])
+            .arg(movie)
+            .args(["-vf", &format!("select=eq(n\\,{frame})"), "-frames:v", "1"])
+            .args(["-f", "rawvideo", "-pix_fmt", "rgba", "-"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output.stdout
+    }
+
+    fn psnr(a: &[u8], b: &[u8]) -> f64 {
+        assert_eq!(a.len(), b.len());
+        let error: f64 = a
+            .iter()
+            .zip(b)
+            .map(|(x, y)| (f64::from(*x) - f64::from(*y)).powi(2))
+            .sum::<f64>()
+            / a.len() as f64;
+        10.0 * (255.0f64 * 255.0 / error.max(1e-9)).log10()
+    }
+
+    /// Real footage as FFmpeg's 4:2:2 Motion JPEG movie plays in the app as
+    /// FFmpeg decodes it, after seeks either way, and exports to a Motion
+    /// JPEG movie FFmpeg reads without complaint.
+    #[test]
+    fn a_real_motion_jpeg_movie_plays_seeks_and_exports() {
+        let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../local-files/16929689_1920_1080_30fps.mp4");
+        let Some(ffmpeg) = ffmpeg() else {
+            eprintln!("skipped: ffmpeg is missing");
+            return;
+        };
+        if !source.is_file() {
+            eprintln!("skipped: {} is missing", source.display());
+            return;
+        }
+        let temp = Temp::new();
+        let movie = temp.path.join("footage.mov");
+        let made = std::process::Command::new(&ffmpeg)
+            .args(["-v", "error", "-t", "2", "-i"])
+            .arg(&source)
+            .args(["-vf", "scale=854:480", "-c:v", "mjpeg", "-q:v", "3"])
+            .args(["-pix_fmt", "yuvj422p", "-an"])
+            .arg(&movie)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let mut desktop = shell();
+        let readers = crate::readers::installed_readers();
+        // Frame n spans n/30 s; ask for its middle, out of order.
+        for frame in [45, 9, 30] {
+            let at = (i64::from(frame) * 1_000_000 + 500_000) / 30;
+            let (width, height, ours) = rgba_at(&readers, &movie, at);
+            assert_eq!((width, height), (854, 480));
+            let theirs = ffmpeg_rgba(&ffmpeg, &movie, frame);
+            let mean = ours
+                .iter()
+                .zip(&theirs)
+                .map(|(a, b)| f64::from(a.abs_diff(*b)))
+                .sum::<f64>()
+                / ours.len() as f64;
+            assert!(mean < 1.5, "frame {frame}: mean difference {mean}");
+        }
+
+        let project = temp.path.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let mut draft = crate::open_movie::movie_draft(&movie, 854, 480, false).unwrap();
+        draft.duration = Micros(1_000_000);
+        Folder::new(draft).save(&project).unwrap();
+        desktop.open_folder(&project).unwrap();
+        let exported = temp.path.join("exported.mov");
+        desktop
+            .export(ExportRequest {
+                path: exported.clone(),
+                short_side: 480,
+                codec: CodecId::Mjpeg,
+                sound: false,
+                ..ExportRequest::default()
+            })
+            .unwrap();
+        land_job(&mut desktop);
+        assert_eq!(desktop.notice(), "Exported exported.mov");
+        let checked = std::process::Command::new(&ffmpeg)
+            .args(["-v", "warning", "-xerror", "-i"])
+            .arg(&exported)
+            .args(["-f", "null", "-"])
+            .output()
+            .unwrap();
+        assert!(
+            checked.status.success() && checked.stderr.is_empty(),
+            "{}",
+            String::from_utf8_lossy(&checked.stderr)
+        );
+        let at = 15 * 1_000_000 / 30 + 16_000;
+        let (width, height, ours) = rgba_at(&readers, &exported, at);
+        assert_eq!((width, height), (854, 480));
+        let (_, _, source_frame) = rgba_at(&readers, &movie, at);
+        let quality = psnr(&ours, &source_frame);
+        assert!(quality > 30.0, "export PSNR {quality:.1} dB");
+        assert_eq!(ffmpeg_rgba(&ffmpeg, &exported, 15).len(), ours.len());
     }
 
     /// VP8 exports through the Rust encoder into an MP4 that the desktop's

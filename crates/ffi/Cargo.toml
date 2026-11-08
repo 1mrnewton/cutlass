@@ -48,6 +48,7 @@ cutlass-mp3 = { path = "../codecs/mp3", version = "0.1.0" }
 cutlass-opus = { path = "../codecs/opus", version = "0.1.0" }
 cutlass-vorbis = { path = "../codecs/vorbis", version = "0.1.0" }
 cutlass-prores = { path = "../codecs/prores", version = "0.1.0" }
+cutlass-mjpeg = { path = "../codecs/mjpeg", version = "0.1.0" }
 
 [target.'cfg(target_vendor = "apple")'.dependencies]
 cutlass-platform-apple = { path = "../platform-apple", version = "0.1.0" }

@@ -5,14 +5,14 @@
 //! coefficient planes exist.
 
 /// Longest edge this codec will decode or encode.
-pub(crate) const MAX_EDGE: u32 = 16_384;
+pub const MAX_EDGE: u32 = 16_384;
 
 /// Most pixels in one still.
-pub(crate) const MAX_PIXELS: u64 = 16_777_216;
+pub const MAX_PIXELS: u64 = 16_777_216;
 
 /// Largest accepted bitstream. The caller owns the bytes; this stops a scan
 /// of a buffer that cannot be a still under [`MAX_PIXELS`].
-pub(crate) const MAX_INPUT: usize = 64 * 1024 * 1024;
+pub const MAX_INPUT: usize = 64 * 1024 * 1024;
 
 /// Most marker segments in one image. Each segment is at most 65 533 bytes.
 pub(crate) const MAX_MARKERS: usize = 4_096;

@@ -33,21 +33,24 @@ pub fn readers() -> ReaderFactory {
     readers
 }
 
-/// FLAC, ALAC, MP3, Opus, Vorbis and WebP, the platform decoders for this OS,
-/// then PNG, GIF, JPEG, AAC, H.264, HEVC, PCM and ProRes.
+/// FLAC, ALAC, MP3, Opus, Vorbis, WebP and Motion JPEG, the platform
+/// decoders for this OS, then PNG, GIF, JPEG, AAC, H.264, HEVC, PCM and
+/// ProRes.
 #[must_use]
 pub fn decoders() -> DecodeFactory {
     let mut decoders = DecodeFactory::new();
     // Rust audio codecs go ahead of the platform ones, so FLAC, ALAC, MP3,
     // Opus and Vorbis decode the same on the phone as on the desktop. WebP
     // goes ahead too: ImageIO gives one picture per packet and does not keep
-    // an animation's canvas.
+    // an animation's canvas. Motion JPEG goes ahead because VideoToolbox
+    // refuses 4:2:2 frames after it opens and weaves no fields.
     cutlass_flac::register_decoders(&mut decoders);
     cutlass_alac::register_decoders(&mut decoders);
     cutlass_mp3::register_decoders(&mut decoders);
     cutlass_opus::register_decoders(&mut decoders);
     cutlass_vorbis::register_decoders(&mut decoders);
     cutlass_webp::register_decoders(&mut decoders);
+    cutlass_mjpeg::register_decoders(&mut decoders);
     #[cfg(target_vendor = "apple")]
     cutlass_platform_apple::register_decoders(&mut decoders);
     cutlass_png::register_decoders(&mut decoders);
@@ -524,5 +527,70 @@ mod tests {
             }
         }
         assert_eq!(frames, 6);
+    }
+
+    /// A phone decodes and encodes Motion JPEG with the Rust codec: the
+    /// same RGBA and the same packet bytes. The frame is 4:2:2, which the
+    /// Apple platform decoder, put first, opens for and then refuses.
+    #[test]
+    fn a_phone_codes_motion_jpeg_in_rust_ahead_of_the_platform() {
+        use cutlass_decode::PixelFormat;
+        use cutlass_encode::{CpuFrame, FrameInput, FrameTime};
+
+        let rgba: Vec<u8> = (0..64u32 * 48)
+            .flat_map(|i| [(i % 64 * 4) as u8, (i / 64 * 5) as u8, 90, 255])
+            .collect();
+        let params = CodecParams::with_format(CodecId::Mjpeg, 64, 48, PixelFormat::Rgba8);
+        let frame = cutlass_mjpeg::MjpegEncoder::open(&params)
+            .expect("encoder")
+            .with_sampling(cutlass_mjpeg::Sampling::Yuv422)
+            .encode_rgba(64, 48, &rgba, 1, 30)
+            .expect("frame");
+        let packet = cutlass_decode::Packet::video(frame, 0, 1, 30, true);
+        let decode = |decoders: &cutlass_decode::DecodeFactory| {
+            let mut decoder = decoders.open(&params)?;
+            let mut pictures = Vec::new();
+            for output in decoder.push(&packet)? {
+                if let Output::Picture(picture) = output {
+                    pictures.push(picture.into_cpu().ok_or(
+                        cutlass_decode::CodecError::InvalidApi {
+                            what: "not a cpu picture",
+                        },
+                    )?);
+                }
+            }
+            Ok::<_, cutlass_decode::CodecError>(pictures)
+        };
+        let mut rust = cutlass_decode::DecodeFactory::new();
+        cutlass_mjpeg::register_decoders(&mut rust);
+        let expected = decode(&rust).expect("rust");
+        assert_eq!(expected.len(), 1);
+        assert_eq!(decode(&super::decoders()).expect("phone"), expected);
+
+        let time = FrameTime::new(0, 1, 30).expect("time");
+        let input = FrameInput::Cpu(
+            CpuFrame::new(64, 48, PixelFormat::Rgba8, rgba.clone(), time).expect("frame"),
+        );
+        let mut phone = crate::export::encoders()
+            .open(&params)
+            .expect("phone encoder");
+        let packets = phone.push_frame(&input).expect("encode");
+        let ours = cutlass_mjpeg::MjpegEncoder::open(&params)
+            .expect("encoder")
+            .encode_rgba(64, 48, &rgba, 1, 30)
+            .expect("frame");
+        assert_eq!(packets.len(), 1);
+        assert_eq!(packets[0].data, ours);
+
+        #[cfg(target_vendor = "apple")]
+        {
+            let mut reversed = cutlass_decode::DecodeFactory::new();
+            cutlass_platform_apple::register_decoders(&mut reversed);
+            cutlass_mjpeg::register_decoders(&mut reversed);
+            assert!(
+                decode(&reversed).ok() != Some(expected),
+                "the platform decoder was not picked"
+            );
+        }
     }
 }

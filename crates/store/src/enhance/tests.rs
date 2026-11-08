@@ -229,7 +229,11 @@ fn a_copy_that_is_only_interpolated_has_its_own_folder_and_name() {
         ..key.clone()
     };
     let file = keep(&temp, &flowed, &range);
-    assert!(file.parent().unwrap().ends_with("Resources/video_interpolate"));
+    assert!(
+        file.parent()
+            .unwrap()
+            .ends_with("Resources/video_interpolate")
+    );
     assert_eq!(
         find_enhanced(&temp.0, &flowed, &range).map(|f| f.0),
         Some(file)

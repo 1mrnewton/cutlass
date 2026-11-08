@@ -49,18 +49,7 @@ impl EnhanceKey {
     /// The name every copy of this key starts with, or an error when the
     /// source cannot be read.
     fn stem(&self) -> Result<String, StoreError> {
-        let meta = fs::metadata(&self.source).map_err(|error| io_error(&self.source, error))?;
-        let modified = meta
-            .modified()
-            .ok()
-            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-            .and_then(|since| i64::try_from(since.as_millis()).ok())
-            .unwrap_or(i64::MIN);
         let mut bytes = Vec::new();
-        bytes.extend_from_slice(self.source.to_string_lossy().as_bytes());
-        bytes.push(0);
-        bytes.extend_from_slice(&meta.len().to_le_bytes());
-        bytes.extend_from_slice(&modified.to_le_bytes());
         bytes.extend_from_slice(&self.level.to_le_bytes());
         // Only when on, so a copy that is only enhanced keeps the name it
         // had before copies could be denoised.
@@ -74,11 +63,7 @@ impl EnhanceKey {
         bytes.extend_from_slice(self.model.as_bytes());
         bytes.push(0);
         bytes.extend_from_slice(&self.rate.to_bits().to_le_bytes());
-        // FNV-1a, 64 bits: a file name, not a lock.
-        let hash = bytes.iter().fold(0xcbf2_9ce4_8422_2325_u64, |hash, &byte| {
-            (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
-        });
-        Ok(format!("{hash:016x}"))
+        source_stem(&self.source, &bytes)
     }
 
     /// The folder its copies go in.
@@ -100,22 +85,7 @@ pub fn enhanced_file(
     key: &EnhanceKey,
     range: &TimeRange,
 ) -> Result<PathBuf, StoreError> {
-    if range.start.0 < 0 || range.duration.0 <= 0 {
-        return Err(StoreError::PathEscapes {
-            name: format!("{}+{}", range.start.0, range.duration.0),
-        });
-    }
-    let stem = key.stem()?;
-    let project = project
-        .canonicalize()
-        .map_err(|error| io_error(project, error))?;
-    let folder = project.join(RESOURCES_DIR).join(key.folder());
-    stay_inside(&project, &folder)?;
-    fs::create_dir_all(&folder).map_err(|error| io_error(&folder, error))?;
-    stay_inside(&project, &folder)?;
-    let file = folder.join(format!("{stem}-{}-{}.mp4", range.start.0, range.duration.0));
-    stay_inside(&project, &file)?;
-    Ok(file)
+    copy_file(project, &key.stem()?, key.folder(), range)
 }
 
 /// The shortest copy made as `key` says whose stretch covers `range`, and
@@ -127,15 +97,50 @@ pub fn find_enhanced(
     key: &EnhanceKey,
     range: &TimeRange,
 ) -> Option<(PathBuf, TimeRange)> {
-    let stem = key.stem().ok()?;
+    find_copy(project, &key.stem().ok()?, key.folder(), range)
+}
+
+/// Where a file named `stem` holding `range` goes in `folder` of the
+/// project's resources. The folder is made; the file is not.
+pub(crate) fn copy_file(
+    project: &Path,
+    stem: &str,
+    folder: &str,
+    range: &TimeRange,
+) -> Result<PathBuf, StoreError> {
+    if range.start.0 < 0 || range.duration.0 <= 0 {
+        return Err(StoreError::PathEscapes {
+            name: format!("{}+{}", range.start.0, range.duration.0),
+        });
+    }
+    let project = project
+        .canonicalize()
+        .map_err(|error| io_error(project, error))?;
+    let folder = project.join(RESOURCES_DIR).join(folder);
+    stay_inside(&project, &folder)?;
+    fs::create_dir_all(&folder).map_err(|error| io_error(&folder, error))?;
+    stay_inside(&project, &folder)?;
+    let file = folder.join(format!("{stem}-{}-{}.mp4", range.start.0, range.duration.0));
+    stay_inside(&project, &file)?;
+    Ok(file)
+}
+
+/// The shortest file named `stem` in `folder` whose stretch covers
+/// `range`, and that stretch.
+pub(crate) fn find_copy(
+    project: &Path,
+    stem: &str,
+    folder: &str,
+    range: &TimeRange,
+) -> Option<(PathBuf, TimeRange)> {
     let project = project.canonicalize().ok()?;
-    let folder = project.join(RESOURCES_DIR).join(key.folder());
+    let folder = project.join(RESOURCES_DIR).join(folder);
     stay_inside(&project, &folder).ok()?;
     let end = range.start.0.checked_add(range.duration.0)?;
     let mut best: Option<(PathBuf, TimeRange)> = None;
     for entry in fs::read_dir(&folder).ok()?.take(MAX_LISTED).flatten() {
         let name = entry.file_name();
-        let Some(held) = name.to_str().and_then(|name| stretch(name, &stem)) else {
+        let Some(held) = name.to_str().and_then(|name| stretch(name, stem)) else {
             continue;
         };
         let held_end = held.start.0.saturating_add(held.duration.0);
@@ -154,6 +159,29 @@ pub fn find_enhanced(
         }
     }
     best
+}
+
+/// A name for `source` as it is on disk (path, size, last change) and
+/// `extra`, or an error when the source cannot be read.
+pub(crate) fn source_stem(source: &Path, extra: &[u8]) -> Result<String, StoreError> {
+    let meta = fs::metadata(source).map_err(|error| io_error(source, error))?;
+    let modified = meta
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .and_then(|since| i64::try_from(since.as_millis()).ok())
+        .unwrap_or(i64::MIN);
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(source.to_string_lossy().as_bytes());
+    bytes.push(0);
+    bytes.extend_from_slice(&meta.len().to_le_bytes());
+    bytes.extend_from_slice(&modified.to_le_bytes());
+    bytes.extend_from_slice(extra);
+    // FNV-1a, 64 bits: a file name, not a lock.
+    let hash = bytes.iter().fold(0xcbf2_9ce4_8422_2325_u64, |hash, &byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+    });
+    Ok(format!("{hash:016x}"))
 }
 
 /// The stretch a copy named `name` holds, when it starts with `stem`.

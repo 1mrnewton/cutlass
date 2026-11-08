@@ -9,6 +9,8 @@
 // `clippy.toml` allows `expect` and `panic` in `cfg(test)` code; the
 // helpers live outside `#[test]` functions, so the modules say so.
 #[cfg(test)]
+mod campaign;
+#[cfg(test)]
 mod common;
 #[cfg(test)]
 mod decoder;

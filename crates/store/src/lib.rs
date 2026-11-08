@@ -10,6 +10,7 @@
 
 mod atomic;
 mod backup;
+mod enhance;
 mod folder;
 mod hold;
 mod json;
@@ -23,6 +24,7 @@ use std::path::PathBuf;
 
 pub use backup::copy_backup;
 pub use cutlass_model::Draft;
+pub use enhance::{EnhanceKey, enhanced_file, find_enhanced};
 pub use folder::{
     DockItem, DraftMeta, Folder, IdMap, IdPair, MaterialBin, Opened, ProjectIndex, TimelineEntry,
     TimelineLayout, open,

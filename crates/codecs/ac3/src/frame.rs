@@ -1566,15 +1566,28 @@ pub(crate) fn decode(
                 .iter()
                 .any(|&slot| state.slots[slot].delta.count > 0),
         );
-        for (ch, row) in coefs.iter_mut().enumerate().take(coded) {
-            let program = usize::from(bsi.acmod == 0 && ch == 1);
-            let g = gain(
+        let block_gain = |program: usize| {
+            gain(
                 applied.dynrng[blk][program],
                 applied.compr[program],
                 dynamics,
-            );
+            )
+        };
+        for (ch, row) in coefs.iter_mut().enumerate().take(coded) {
+            let g = block_gain(usize::from(bsi.acmod == 0 && ch == 1));
             if g != 1.0 {
                 for value in row.iter_mut() {
+                    *value *= g;
+                }
+            }
+        }
+        if state.ecpl {
+            // Enhanced coupling writes the coupled bins from this spectrum,
+            // so it takes the block's gain too. In 1+1 mode the gain is the
+            // first coupled channel's program.
+            let g = block_gain(usize::from(bsi.acmod == 0 && state.ecpl_first == 1));
+            if g != 1.0 {
+                for value in &mut state.ecpl_spectrum {
                     *value *= g;
                 }
             }
@@ -1956,6 +1969,50 @@ mod tests {
             .expect("second frame");
         assert!(again.pcm.iter().all(|sample| sample.is_finite()));
         assert!(sub.ecpl_live);
+    }
+
+    /// Line and heavy dynamics turn the coupled band down by the block's
+    /// `dynrng` or `compr` word, as they do every other bin.
+    #[test]
+    fn enhanced_coupling_takes_the_dynamic_range_gain() {
+        let frame = enhanced_frame(false);
+        let bsi = header::parse(&frame).expect("header");
+        let transform = Transform::new();
+        let run = |dynamics, words: &Drc| {
+            let mut sub = Substream::new();
+            decode(&frame, &bsi, &mut sub, &transform, dynamics, Some(words)).expect("decode")
+        };
+        let mut words = Drc::default();
+        let full = run(DynamicRange::Off, &words);
+        // Code 0xE0 is a gain of one half.
+        for blk in 0..MAX_BLOCKS {
+            words.dynrng[blk] = [Some(0xE0); 2];
+        }
+        words.compr = [Some(0xEF); 2];
+        let heavy_gain = compr_gain(0xEF);
+        assert!(heavy_gain < 0.9, "compr gain {heavy_gain}");
+        for (name, dynamics, expected) in [
+            (
+                "line",
+                DynamicRange::Line {
+                    cut: 1.0,
+                    boost: 1.0,
+                },
+                0.5,
+            ),
+            ("heavy", DynamicRange::Heavy, heavy_gain),
+        ] {
+            let turned = run(dynamics, &words);
+            let energy: f32 = full.pcm.iter().map(|x| x * x).sum();
+            assert!(energy > 1.0, "{name}: no coupled sound");
+            let worst = full
+                .pcm
+                .iter()
+                .zip(&turned.pcm)
+                .map(|(a, b)| (a * expected - b).abs())
+                .fold(0.0f32, f32::max);
+            assert!(worst < 1.0e-4, "{name}: off by {worst}");
+        }
     }
 
     #[test]

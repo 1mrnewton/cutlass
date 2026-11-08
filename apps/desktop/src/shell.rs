@@ -53,6 +53,7 @@ mod compound;
 mod effect_preview;
 mod follow;
 pub(crate) use follow::clip_path;
+mod enhance;
 mod hear;
 mod inspector;
 mod listen;

@@ -356,11 +356,10 @@ fn a_transient_stays_quiet_before_the_attack() {
         }
         let packets = encode(config(format, rate, &channels, 0), &pcm);
         let decoded = decode(codec(format), &packets);
-        // E-AC-3 does not switch length: a short block would change
-        // coupling inside the syncframe, which the reference decoders
-        // reject. AC-3 still switches, and that is what holds pre-echo down.
-        let switched = decoded.decoder.tools().short_blocks > 0;
-        assert_eq!(switched, format == Format::Ac3, "{format:?}");
+        assert!(
+            decoded.decoder.tools().short_blocks > 0,
+            "{format:?} kept the long transform across the attack"
+        );
         let left = deinterleave(&decoded.pcm, 2, 0);
         let before = &left[29_000..29_900];
         let peak = before.iter().fold(0.0f32, |m, v| m.max(v.abs()));

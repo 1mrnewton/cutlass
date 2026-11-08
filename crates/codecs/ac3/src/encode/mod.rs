@@ -784,14 +784,14 @@ impl Ac3Encoder {
                 let at = from + blk * COEFS;
                 samples.copy_from_slice(&self.pending[coded][at..at + COEFS]);
                 let slot = if coded < nf { coded } else { LFE };
-                // E-AC-3 keeps one transform length for the frame. A short
-                // block would drop that channel out of coupling, and a
-                // syncframe whose coupling use then changes is not what
-                // the reference decoders read.
+                // A short block leaves the coupling. The plan turns coupling
+                // off for the whole E-AC-3 frame when that would change
+                // from one block to the next. Spectral extension copies
+                // long-transform bins, so a frame that uses it stays long.
                 let short = self.analysis[coded].block(
                     &self.transform,
                     &samples,
-                    coded < nf && !self.shape.eac3,
+                    coded < nf && self.shape.spx.is_none(),
                     &mut block.coefs[slot],
                 );
                 if coded < nf {
@@ -810,6 +810,14 @@ impl Ac3Encoder {
         let forced = self.program_peaks.front().cloned();
         let heavy = heavy_word(&self.pending, from, self.shape.blocks, forced.as_deref());
         let mut shape = self.shape;
+        // Spectral extension copies long-transform bins. A short block
+        // does not have those bins, so the frame stays full band.
+        if self.blocks[..shape.blocks]
+            .iter()
+            .any(|block| block.blksw[..nf].contains(&true))
+        {
+            shape.spx = None;
+        }
         let mut mode = Mode::Adaptive;
         let (snr, skip) = loop {
             plan::plan(&shape, &mut self.blocks, mode);

@@ -216,6 +216,13 @@ fn hybrid(shape: &Shape, blocks: &mut [Block]) {
     if blocks.iter().any(|block| block.cplinu) {
         return;
     }
+    // The hybrid transform is one long spectrum. A short block is not.
+    if blocks
+        .iter()
+        .any(|block| block.blksw[..shape.nf].contains(&true))
+    {
+        return;
+    }
     let mut slots = Vec::with_capacity(shape.nf + 1);
     slots.extend(0..shape.nf);
     if shape.lfeon {

@@ -524,3 +524,90 @@ fn a_slowed_clip_with_every_level_on_is_made_in_one_copy() {
     assert!(file.parent().unwrap().ends_with("Resources/video_enhance"));
     assert_eq!(first_frame(&file).0, 1440);
 }
+
+fn blurring(blur: f64, direction: i64) -> cutlass_model::MotionBlur {
+    cutlass_model::MotionBlur {
+        blur,
+        blend: 0.0,
+        direction,
+        times: 1,
+    }
+}
+
+#[test]
+fn a_shutter_averages_in_linear_light_and_puts_back_the_sharp_frame() {
+    let black = vec![0_u8; 6];
+    let white = vec![255_u8; 6];
+    let mean = shutter(&[black.clone(), white.clone()], &black, 0.0);
+    // Half the light, not half the code value.
+    assert!(mean.iter().all(|v| (184..=188).contains(v)), "{mean:?}");
+    assert_eq!(shutter(std::slice::from_ref(&white), &black, 1.0), black);
+    assert_eq!(shutter(&[], &black, 0.0), black);
+    assert_eq!(shutter(&[vec![1_u8; 3]], &black, 0.0), black);
+}
+
+#[test]
+fn a_blur_of_no_length_makes_the_clip_own_frames_and_one_without_its_model_is_refused() {
+    let (temp, draft) = project();
+    let blur = blurring(0.0, cutlass_model::MotionBlur::BOTH);
+    let ask =
+        cutlass_eval::copy_ask(&draft, Some(&temp.0), &"v".into(), 0, 0, 0, Some(&blur)).unwrap();
+    let refused = enhance_clip(
+        &readers(),
+        &encoders(),
+        CopyModels::default(),
+        &ask,
+        &temp.0,
+        &mut |_| true,
+    );
+    let Err(EnhanceJobError::Vision(VisionError::Model { message })) = refused else {
+        panic!("blurred without a model: {refused:?}");
+    };
+    assert!(message.contains("Motion blur"), "{message}");
+    let interpolator = Interpolator::untrained(Compute::Cpu).unwrap();
+    let file = enhance_clip(
+        &readers(),
+        &encoders(),
+        interpolating(&interpolator),
+        &ask,
+        &temp.0,
+        &mut |_| true,
+    )
+    .unwrap();
+    assert!(
+        file.parent()
+            .unwrap()
+            .ends_with("Resources/video_motion_blur")
+    );
+    let reds = reds(&file, 10.0);
+    for (k, own) in [(0, 60), (1, 80), (2, 100)] {
+        assert!(reds[k].abs_diff(own) <= 4, "{k}: {reds:?}");
+    }
+}
+
+#[test]
+fn a_trained_forward_blur_lies_between_a_frame_and_the_next() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../local-files/models/interpolate");
+    if !dir.join(INTERPOLATE_WEIGHTS).is_file() {
+        return;
+    }
+    let (temp, draft) = project();
+    let blur = blurring(1.0, cutlass_model::MotionBlur::FORWARD);
+    let ask =
+        cutlass_eval::copy_ask(&draft, Some(&temp.0), &"v".into(), 0, 0, 0, Some(&blur)).unwrap();
+    let interpolator = Interpolator::load(&dir, Compute::Cpu).unwrap();
+    let file = enhance_clip(
+        &readers(),
+        &encoders(),
+        interpolating(&interpolator),
+        &ask,
+        &temp.0,
+        &mut |_| true,
+    )
+    .unwrap();
+    // Each frame reaches to the next, 20 lighter: about halfway in light.
+    let reds = reds(&file, 10.0);
+    for (k, own) in [(0, 60_u8), (1, 80)] {
+        assert!(reds[k] > own + 4 && reds[k] < own + 16, "{k}: {reds:?}");
+    }
+}

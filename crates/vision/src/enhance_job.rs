@@ -1,11 +1,12 @@
-//! The Enhance quality, Reduce image noise and Optical flow job: read a
-//! clip's stretch frame by frame, denoise it from the frames around it,
-//! make the frames between its own that the copy's rate asks for, enhance
-//! it and size it for the level, and write the copy into the project,
-//! where eval draws the clip from it. A clip with more than one on gets
-//! one copy, in that order: the enhance model sharpens noise it is handed,
-//! and frames are made from the clip's own before they are grown, at a
-//! quarter or less of the pixels.
+//! The Enhance quality, Reduce image noise, Optical flow and Motion blur
+//! job: read a clip's stretch frame by frame, denoise it from the frames
+//! around it, make the frames between its own that the copy's rate asks
+//! for, blur each frame by averaging frames made across its blur in linear
+//! light, enhance it and size it for the level, and write the copy into
+//! the project, where eval draws the clip from it. A clip with more than
+//! one on gets one copy, in that order: the enhance model sharpens noise
+//! it is handed, and frames are made from the clip's own before they are
+//! grown, at a quarter or less of the pixels.
 //!
 //! The job needs no session and writes no draft, so a shell runs it off
 //! the main thread. A stopped or failed job leaves no copy behind.
@@ -128,14 +129,17 @@ pub fn enhance_clip(
         (true, Some(denoiser)) => Some(denoiser),
         (true, None) => return Err(missing("Reduce image noise")),
     };
-    let interpolator = match (ask.interpolate > 0, models.interpolator) {
+    let flows = ask.interpolate > 0 || ask.motion_blur.is_some();
+    let interpolator = match (flows, models.interpolator) {
         (false, _) => None,
         (true, Some(interpolator)) => Some(interpolator),
-        (true, None) => return Err(missing("Optical flow")),
+        (true, None) if ask.interpolate > 0 => return Err(missing("Optical flow")),
+        (true, None) => return Err(missing("Motion blur")),
     };
     if enhancer.is_none() && denoiser.is_none() && interpolator.is_none() {
         return Err(EnhanceJobError::Clip(EnhanceError::Clip {
-            reason: "Enhance quality, Reduce image noise and Optical flow are off for this clip"
+            reason: "Enhance quality, Reduce image noise, Optical flow and Motion blur are off \
+                     for this clip"
                 .into(),
         }));
     }
@@ -155,6 +159,12 @@ pub fn enhance_clip(
     })?;
     let count = frames.len();
     let blends = frames.blends().to_vec();
+    let samples = frames.samples().to_vec();
+    let mix = ask
+        .motion_blur
+        .as_ref()
+        .map_or(0.0, |blur| blur.blend as f32);
+    let blurred = ask.motion_blur.is_some();
     let mut stream = denoiser
         .map(|denoiser| denoiser.stream(count, source.0, source.1, noise_for_level(ask.denoise)))
         .transpose()
@@ -230,7 +240,25 @@ pub fn enhance_clip(
                         reason: format!("the copy has no frame {index}"),
                     })
                 })
-                .and_then(|blend| window.frame(blend, count, source, interpolator, &mut own))
+                .and_then(|blend| {
+                    let across = usize::try_from(index)
+                        .ok()
+                        .and_then(|index| samples.get(index))
+                        .filter(|_| blurred);
+                    let first = across
+                        .and_then(|across| across.first())
+                        .map_or(blend.from, |sample| sample.from.min(blend.from));
+                    window.forget_before(first);
+                    let sharp = window.frame(blend, count, source, interpolator, &mut own)?;
+                    let Some(across) = across else {
+                        return Ok(sharp);
+                    };
+                    let mut made = Vec::with_capacity(across.len());
+                    for sample in across {
+                        made.push(window.frame(*sample, count, source, interpolator, &mut own)?);
+                    }
+                    Ok(shutter(&made, &sharp, mix))
+                })
                 .and_then(|rgb| match enhancer {
                     Some(enhancer) => enhance_one(enhancer, source, &rgb, (width, height)),
                     None => Ok(cropped_rgba(source, &rgb, (width, height))),
@@ -266,6 +294,12 @@ struct Own {
 }
 
 impl Window {
+    /// Drop the frames before `index`, which no later frame of the copy
+    /// reads.
+    fn forget_before(&mut self, index: usize) {
+        self.kept.retain(|kept| kept.index >= index);
+    }
+
     /// Frame `blend` of the copy as RGB: one of the clip's `count` frames
     /// as read by `own`, or one made between two of them.
     fn frame(
@@ -287,7 +321,6 @@ impl Window {
             });
             self.next += 1;
         }
-        self.kept.retain(|kept| kept.index >= blend.from);
         let interpolator = match interpolator {
             Some(interpolator) if made => interpolator,
             _ => {
@@ -324,6 +357,32 @@ impl Window {
             .between(prepared(blend.from)?, prepared(blend.from + 1)?, blend.at)
             .map_err(EnhanceJobError::Vision)
     }
+}
+
+/// The average of `frames` in linear light, with `mix` of `sharp` put
+/// back. All are RGB of one size; with none, `sharp`.
+fn shutter(frames: &[Vec<u8>], sharp: &[u8], mix: f32) -> Vec<u8> {
+    if frames.is_empty() || frames.iter().any(|frame| frame.len() != sharp.len()) {
+        return sharp.to_vec();
+    }
+    let linear: Vec<f32> = (0..=255_u8)
+        .map(|byte| (f32::from(byte) / 255.0).powf(2.2))
+        .collect();
+    let share = 1.0 / frames.len() as f32;
+    let mix = mix.clamp(0.0, 1.0);
+    (0..sharp.len())
+        .map(|i| {
+            let mean: f32 = frames
+                .iter()
+                .map(|frame| linear[usize::from(frame[i])])
+                .sum::<f32>()
+                * share;
+            let value = mean * (1.0 - mix) + linear[usize::from(sharp[i])] * mix;
+            (value.max(0.0).powf(1.0 / 2.2) * 255.0)
+                .round()
+                .clamp(0.0, 255.0) as u8
+        })
+        .collect()
 }
 
 fn lost(index: usize) -> EnhanceJobError {

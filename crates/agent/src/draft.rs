@@ -471,6 +471,7 @@ pub fn request_name(request: &Request) -> &'static str {
         Request::SetFade { .. } => "set_fade",
         Request::SetCrop { .. } => "set_crop",
         Request::SetStable { .. } => "set_stable",
+        Request::SetEnhance { .. } => "set_enhance",
         Request::SetTextContent { .. } => "set_text_content",
         Request::SetTextSize { .. } => "set_text_size",
         Request::SetTextColor { .. } => "set_text_color",

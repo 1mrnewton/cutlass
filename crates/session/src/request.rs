@@ -226,6 +226,9 @@ pub enum Request {
     /// Steady a video clip at `level` (1 cuts least, 2 recommended, 3 most
     /// stable), or stop at 0 or below. The kept camera path stays.
     SetStable { segment_id: SegmentId, level: i64 },
+    /// Enhance a video clip's quality at `level` (1 HD, 2 UHD), or stop at
+    /// 0 or below. The enhanced copy is made apart from the draft.
+    SetEnhance { segment_id: SegmentId, level: i64 },
     /// Replace the text material's string. Word columns stay as stored.
     SetTextContent {
         segment_id: SegmentId,

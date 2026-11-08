@@ -7,6 +7,7 @@ mod chroma;
 mod color;
 mod crop;
 mod effect;
+mod enhance;
 mod extract;
 mod fade;
 mod follow;
@@ -326,6 +327,9 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
         } => fade::set_fade(draft, segment_id, fade_id, *fade_in, *fade_out),
         Request::SetCrop { segment_id, crop } => crop::set_crop(draft, segment_id, *crop),
         Request::SetStable { segment_id, level } => stable::set_stable(draft, segment_id, *level),
+        Request::SetEnhance { segment_id, level } => {
+            enhance::set_enhance(draft, segment_id, *level)
+        }
         Request::SetTextContent {
             segment_id,
             content,

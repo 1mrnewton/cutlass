@@ -15,6 +15,7 @@ mod hold;
 mod json;
 mod projects;
 mod repair;
+mod stable;
 mod upgrade;
 
 use std::fmt;
@@ -30,6 +31,7 @@ pub use hold::{Hold, held_address, hold};
 pub use json::{parse_draft, write_draft};
 pub use projects::{ListedProject, create_project, list_projects, listed_project};
 pub use repair::{RepairNote, repair};
+pub use stable::{StableKey, load_camera_path, save_camera_path};
 pub use upgrade::{BUILD, Protocol, upgrade};
 
 /// Why a folder could not be read or written.

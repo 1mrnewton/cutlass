@@ -1184,6 +1184,157 @@ fn audio_windows_join_without_a_seam_and_a_seek_lands_on_the_sample() {
     std::fs::remove_file(&path).expect("remove");
 }
 
+/// Frames in one [`Ramp`] packet.
+const RAMP_FRAMES: i64 = 480;
+
+/// A mono decoder whose sample at stream tick `t` is `t / 100_000`, so a
+/// sample out of place shows its own time. A packet whose first byte is
+/// `0xff` is malformed.
+struct Ramp;
+
+impl Decoder for Ramp {
+    fn codec(&self) -> CodecId {
+        CodecId::Pcm
+    }
+
+    fn push(&mut self, packet: &Packet) -> Result<Vec<Output>, CodecError> {
+        if packet.data.first() == Some(&0xff) {
+            return Err(CodecError::Malformed {
+                at_bit: 0,
+                what: "marked packet",
+            });
+        }
+        let samples = (0..RAMP_FRAMES)
+            .map(|index| ramp_at(packet.pts + index))
+            .collect();
+        let pcm = cutlass_codec::access::Pcm::from_f32(
+            48_000,
+            cutlass_codec::access::ChannelLayout::mono(),
+            samples,
+        )
+        .map_err(|_| CodecError::Limit { what: "pcm" })?;
+        Ok(vec![Output::Audio(cutlass_decode::AudioOutput {
+            pcm,
+            pts: packet.pts,
+            timescale: packet.timescale,
+            skip_leading: 0,
+            skip_trailing: 0,
+            concealed: false,
+        })])
+    }
+
+    fn drain(&mut self) -> Result<Vec<Output>, CodecError> {
+        Ok(Vec::new())
+    }
+
+    fn reset(&mut self) {}
+}
+
+fn ramp_at(tick: i64) -> f32 {
+    tick as f32 / 100_000.0
+}
+
+fn open_ramp_decoder(_params: &CodecParams) -> Result<Box<dyn Decoder>, CodecError> {
+    Ok(Box::new(Ramp))
+}
+
+/// Twenty ramp packets at 48 kHz. Packet 5 is malformed, and packet 10
+/// comes twice.
+fn open_ramp(_path: &Path) -> Result<Box<dyn Demux>, OpenError> {
+    let scale = Timescale::new(48_000);
+    let params = StreamParams::try_audio(StreamCodec::Known(CodecId::Pcm), 48_000, 1, Vec::new())
+        .map_err(|_| OpenError::Source {
+        message: "params".to_owned(),
+    })?;
+    let stream = Stream::new(
+        TrackId::new(1),
+        params,
+        scale,
+        None,
+        Vec::new(),
+        Trim::default(),
+    );
+    let mut packets = Vec::new();
+    for index in (0..20_i64).chain([10]) {
+        let pts = index * RAMP_FRAMES;
+        let timestamp =
+            Timestamp::try_new(Some(pts), Some(pts), Some(RAMP_FRAMES)).map_err(|_| {
+                OpenError::Source {
+                    message: "time".to_owned(),
+                }
+            })?;
+        let data = if index == 5 { vec![0xff] } else { vec![0] };
+        let packet = FilePacket::try_new(1, data, timestamp, scale, true).map_err(|_| {
+            OpenError::Source {
+                message: "packet".to_owned(),
+            }
+        })?;
+        packets.push(packet);
+    }
+    // The repeat of packet 10 sits right after the first one.
+    let repeat = packets.remove(20);
+    packets.insert(11, repeat);
+    Ok(Box::new(Scripted {
+        streams: vec![stream],
+        packets,
+        cursor: 0,
+        cancelled: false,
+        lands: true,
+    }))
+}
+
+/// The ramp the reader should return from `from` for `count` frames:
+/// silence where packet 5 was refused, the ramp everywhere else.
+fn ramp_expected(from: i64, count: i64) -> Vec<f32> {
+    (from..from + count)
+        .map(|tick| {
+            if (5 * RAMP_FRAMES..6 * RAMP_FRAMES).contains(&tick) {
+                0.0
+            } else {
+                ramp_at(tick)
+            }
+        })
+        .collect()
+}
+
+#[test]
+fn a_refused_audio_packet_is_silence_and_later_sound_keeps_its_time() {
+    let mut readers = ReaderFactory::new();
+    readers.register_container(probe_script, open_ramp);
+    readers
+        .decoders_mut()
+        .register(CodecId::Pcm, open_ramp_decoder);
+
+    // One window across the refused packet and the repeated one.
+    let mut media = readers.open(&fixture("pattern.jpg")).expect("open");
+    let whole = media.audio_from(Micros(0), 7_200).expect("window");
+    assert_eq!(whole.as_f32().expect("f32"), &ramp_expected(0, 7_200)[..]);
+
+    // Windows shorter than the hole join on the same times. One ends inside
+    // the hole and the next starts there, with no seek.
+    for size in [100_i64, 480, 1_000] {
+        let mut media = readers.open(&fixture("pattern.jpg")).expect("open");
+        let mut joined = Vec::new();
+        let mut at = 0_i64;
+        while at + size <= 7_200 {
+            let pcm = media
+                .audio_from(
+                    Micros(at * 1_000_000 / 48_000),
+                    u32::try_from(size).expect("size"),
+                )
+                .expect("window");
+            joined.extend_from_slice(pcm.as_f32().expect("f32"));
+            at += size;
+        }
+        assert_eq!(joined, ramp_expected(0, at), "windows of {size}");
+    }
+
+    // A seek past the hole lands on the asked sample.
+    let mut media = readers.open(&fixture("pattern.jpg")).expect("open");
+    let later = media.audio_from(Micros(70_000), 960).expect("seek");
+    assert_eq!(later.as_f32().expect("f32"), &ramp_expected(3_360, 960)[..]);
+}
+
 /// A 16-bit WAVEFORMATEXTENSIBLE file with `channels` interleaved channels
 /// and `mask` as its `dwChannelMask`.
 fn write_extensible_wav(path: &Path, channels: u16, mask: u32, samples: &[i16]) {

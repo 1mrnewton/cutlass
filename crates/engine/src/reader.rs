@@ -401,6 +401,22 @@ impl AudioRun {
         self.samples.len() / self.layout.len().max(1)
     }
 
+    /// Sample index just past the last held frame.
+    fn end(&self) -> i64 {
+        self.next
+            .saturating_add(i64::try_from(self.frames()).unwrap_or(i64::MAX))
+    }
+
+    /// Hold `frames` frames of silence after the last held frame.
+    fn pad(&mut self, frames: i64) {
+        let frames = usize::try_from(frames.max(0)).unwrap_or(0);
+        let len = self
+            .samples
+            .len()
+            .saturating_add(frames.saturating_mul(self.layout.len()));
+        self.samples.resize(len, 0.0);
+    }
+
     /// Drop up to `frames` leading frames.
     fn skip(&mut self, frames: i64) {
         let frames = usize::try_from(frames.max(0))
@@ -793,6 +809,25 @@ impl Media {
                 .and_then(|value| value.checked_div(i64::from(output.timescale.max(1))))
                 .unwrap_or(0)
                 .saturating_add(i64::from(output.skip_leading));
+            // Sample ticks one stream tick may round away.
+            let slack = i64::from(output.pcm.rate.div_ceil(output.timescale.max(1))) + 1;
+            if let Some(run) = self.run.as_mut() {
+                if run.frames() == 0 && run.next < want {
+                    // Nothing held: the frames before the window are not kept.
+                    run.next = want.min(start);
+                }
+                let end = run.end();
+                let limit = want.saturating_add(needed).max(end);
+                if start > limit.saturating_add(slack) {
+                    // This output starts past the window. The window ends in
+                    // silence, and the output waits for the next call.
+                    run.pad(limit - end);
+                    if let Some(pipe) = self.audio.as_mut() {
+                        pipe.heard.push_front(output);
+                    }
+                    break;
+                }
+            }
             let pcm = audible(output)?.pcm;
             if pcm.rate == 0 {
                 return Err(EngineError::NoClock);
@@ -810,7 +845,12 @@ impl Media {
                     if run.rate != pcm.rate || run.layout != pcm.layout {
                         return Err(EngineError::Layout);
                     }
-                    run.samples.extend_from_slice(&floats);
+                    let late = start - run.end();
+                    if late.abs() <= slack {
+                        run.samples.extend_from_slice(&floats);
+                    } else {
+                        place(run, start, &floats);
+                    }
                 }
                 None => {
                     if pcm.rate != rate {
@@ -980,6 +1020,33 @@ impl Media {
                 return Ok(Some(output));
             }
         }
+    }
+}
+
+/// Hold `floats`, decoded for sample `start`, at its own time in `run`.
+///
+/// A packet the decoder refused leaves a hole that becomes silence, so later
+/// sound stays on its timestamps. Output that starts before the held sound
+/// ends repeats time already held, and only its later frames are kept. A
+/// clock more than a second back is a new timeline, and plays on in order.
+fn place(run: &mut AudioRun, start: i64, floats: &[f32]) {
+    let end = run.end();
+    if start > end {
+        run.pad(start - end);
+        run.samples.extend_from_slice(floats);
+        return;
+    }
+    let overlap = end - start;
+    if overlap > i64::from(run.rate) {
+        run.samples.extend_from_slice(floats);
+        return;
+    }
+    let channels = run.layout.len().max(1);
+    let held = usize::try_from(overlap)
+        .unwrap_or(usize::MAX)
+        .saturating_mul(channels);
+    if let Some(rest) = floats.get(held..) {
+        run.samples.extend_from_slice(rest);
     }
 }
 

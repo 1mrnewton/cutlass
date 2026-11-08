@@ -530,22 +530,21 @@ mod tests {
     }
 
     /// A CRC-failed syncframe in the middle of an AC-3 file is passed over.
-    /// The tone before it and the tone after it both play.
+    /// Its time is silence, and the sweep after it plays at its own time,
+    /// sample for sample as the intact file plays it.
     #[test]
     fn a_bad_ac3_frame_is_skipped_and_the_rest_plays() {
         use cutlass_decode::Decoder;
         use cutlass_encode::{AudioInput, ChannelLayout, CodecParams, Encoder, Pcm, SideData};
 
-        let path = std::env::temp_dir().join(format!(
-            "cutlass-readers-bad-ac3-{}.mp4",
-            std::process::id()
-        ));
         let rate = 48_000u32;
         let layout = ChannelLayout::stereo();
+        // A sweep from 200 Hz to 4 kHz: one frame early is a different pitch.
         let samples: Vec<f32> = (0..rate as usize)
             .flat_map(|i| {
-                let t = i as f32 / rate as f32;
-                let left = (t * 1_000.0 * std::f32::consts::TAU).sin() * 0.4;
+                let t = f64::from(i as u32) / f64::from(rate);
+                let phase = std::f64::consts::TAU * (200.0 * t + 1_900.0 * t * t);
+                let left = (phase.sin() * 0.4) as f32;
                 [left, left * 0.5]
             })
             .collect();
@@ -555,10 +554,11 @@ mod tests {
         let pcm = Pcm::from_f32(rate, layout, samples).expect("pcm");
         let mut packets = encoder.push(&AudioInput { pcm }).expect("push");
         packets.extend(encoder.drain().expect("drain"));
-        assert!(packets.len() > 6, "need a frame in the middle");
-        packets[3].data[20] ^= 0xff;
+        assert!(packets.len() > 8, "need a frame in the middle");
+        let mut damaged = packets.clone();
+        damaged[3].data[20] ^= 0xff;
         let mut check = cutlass_ac3::Ac3Decoder::open(&spec).expect("decoder");
-        for (index, packet) in packets.iter().enumerate().take(5) {
+        for (index, packet) in damaged.iter().enumerate().take(5) {
             let pushed = check.push(packet);
             if index == 3 {
                 assert!(pushed.is_err(), "the damaged frame was accepted");
@@ -566,64 +566,111 @@ mod tests {
                 pushed.expect("a good frame");
             }
         }
-        let mut mux = cutlass_isobmff::Mp4Mux::new(std::fs::File::create(&path).expect("create"));
-        let params = StreamParams::try_audio(StreamCodec::Known(CodecId::Ac3), rate, 2, Vec::new())
-            .expect("params");
-        let track = mux
-            .add_stream(NewStream {
-                params,
-                timescale: Timescale::new(rate),
-                language: None,
-            })
-            .expect("stream");
-        let mut ticks = 0i64;
-        for packet in &packets {
-            for side in &packet.side {
-                if let SideData::Config(config) = side {
-                    mux.set_config(track, config).expect("config");
+        let write = |name: &str, packets: &[cutlass_encode::Packet]| {
+            let path = std::env::temp_dir().join(format!(
+                "cutlass-readers-{name}-ac3-{}.mp4",
+                std::process::id()
+            ));
+            let mut mux =
+                cutlass_isobmff::Mp4Mux::new(std::fs::File::create(&path).expect("create"));
+            let params =
+                StreamParams::try_audio(StreamCodec::Known(CodecId::Ac3), rate, 2, Vec::new())
+                    .expect("params");
+            let track = mux
+                .add_stream(NewStream {
+                    params,
+                    timescale: Timescale::new(rate),
+                    language: None,
+                })
+                .expect("stream");
+            let mut ticks = 0i64;
+            for packet in packets {
+                for side in &packet.side {
+                    if let SideData::Config(config) = side {
+                        mux.set_config(track, config).expect("config");
+                    }
                 }
+                let timestamp =
+                    Timestamp::try_new(Some(packet.pts), Some(packet.pts), Some(packet.duration))
+                        .expect("time");
+                let out = Packet::try_new(
+                    track.get(),
+                    packet.data.clone(),
+                    timestamp,
+                    Timescale::new(rate),
+                    true,
+                )
+                .expect("packet");
+                mux.write_packet(&out).expect("write");
+                ticks += packet.duration;
             }
-            let timestamp =
-                Timestamp::try_new(Some(packet.pts), Some(packet.pts), Some(packet.duration))
-                    .expect("time");
-            let out = Packet::try_new(
-                track.get(),
-                packet.data.clone(),
-                timestamp,
-                Timescale::new(rate),
-                true,
-            )
-            .expect("packet");
-            mux.write_packet(&out).expect("write");
-            ticks += packet.duration;
-        }
-        mux.finish(&[TrackDuration {
-            track,
-            timescale: Timescale::new(rate),
-            ticks,
-        }])
-        .expect("finish");
-        drop(mux);
-
-        let window = |at, frames| {
-            installed_readers()
-                .open(&path)
-                .expect("open")
-                .audio_from(cutlass_model::Micros(at), frames)
-                .expect("audio")
+            mux.finish(&[TrackDuration {
+                track,
+                timescale: Timescale::new(rate),
+                ticks,
+            }])
+            .expect("finish");
+            path
         };
-        // 8192 samples cross the damaged fourth syncframe.
-        let start = window(0, 8_192);
-        let later = window(250_000, 2_048);
-        std::fs::remove_file(&path).expect("remove");
-        for (name, pcm, frames) in [("start", &start, 8_192), ("after", &later, 2_048)] {
-            let samples = pcm.as_f32().expect("f32");
-            assert_eq!(samples.len(), 2 * frames, "{name}");
-            assert!(
-                tone_margin(samples, rate, 1_000.0) > 20.0,
-                "{name} lost the tone"
-            );
+        let clean_path = write("clean", &packets);
+        let bad_path = write("bad", &damaged);
+
+        // One window, then the same span in 1024-frame windows that run on
+        // without a seek.
+        let frames = 8 * 1_536;
+        let read = |path: &std::path::Path, step: u32| {
+            let mut media = installed_readers().open(path).expect("open");
+            let mut out = Vec::new();
+            let mut at = 0u32;
+            while at < frames {
+                let micros = i64::from(at) * 1_000_000 / i64::from(rate);
+                let pcm = media
+                    .audio_from(cutlass_model::Micros(micros), step)
+                    .expect("audio");
+                out.extend_from_slice(pcm.as_f32().expect("f32"));
+                at += step;
+            }
+            out
+        };
+        let clean = read(&clean_path, frames);
+        let whole = read(&bad_path, frames);
+        let stepped = read(&bad_path, 1_024);
+        let seek = |path: &std::path::Path| {
+            installed_readers()
+                .open(path)
+                .expect("open")
+                .audio_from(cutlass_model::Micros(250_000), 2_048)
+                .expect("audio")
+                .as_f32()
+                .expect("f32")
+                .to_vec()
+        };
+        let clean_later = seek(&clean_path);
+        let bad_later = seek(&bad_path);
+        std::fs::remove_file(&clean_path).expect("remove");
+        std::fs::remove_file(&bad_path).expect("remove");
+
+        // The decoder trims the 256-sample delay from the head of the
+        // stream, so syncframe `k`'s own sound plays from `1536 k`.
+        let frame = |k: usize| 1_536 * k * 2;
+        let peak = |samples: &[f32]| samples.iter().fold(0.0f32, |top, x| top.max(x.abs()));
+        for (name, bad) in [("one window", &whole), ("stepped", &stepped)] {
+            assert_eq!(bad.len(), clean.len(), "{name}");
+            assert_eq!(bad[..frame(3)], clean[..frame(3)], "{name} before");
+            assert_eq!(peak(&bad[frame(3)..frame(4)]), 0.0, "{name} hole");
+            // Syncframe 4 overlaps onto syncframe 2, not 3. From syncframe 5
+            // on the decoder is back on the intact file's samples.
+            let after = &bad[frame(5)..];
+            let reference = &clean[frame(5)..];
+            let worst = after
+                .iter()
+                .zip(reference)
+                .fold(0.0f32, |top, (a, b)| top.max((a - b).abs()));
+            assert!(worst < 1e-4, "{name} after the hole is off by {worst}");
+            assert!(peak(after) > 0.1, "{name} after the hole is quiet");
         }
+        assert_eq!(bad_later, clean_later, "seek past the hole");
+        assert_eq!(bad_later.len(), 2 * 2_048);
     }
 
     /// A real recording is imported, exported as AC-3 and E-AC-3, then

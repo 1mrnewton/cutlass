@@ -529,6 +529,103 @@ mod tests {
         }
     }
 
+    /// A CRC-failed syncframe in the middle of an AC-3 file is passed over.
+    /// The tone before it and the tone after it both play.
+    #[test]
+    fn a_bad_ac3_frame_is_skipped_and_the_rest_plays() {
+        use cutlass_decode::Decoder;
+        use cutlass_encode::{AudioInput, ChannelLayout, CodecParams, Encoder, Pcm, SideData};
+
+        let path = std::env::temp_dir().join(format!(
+            "cutlass-readers-bad-ac3-{}.mp4",
+            std::process::id()
+        ));
+        let rate = 48_000u32;
+        let layout = ChannelLayout::stereo();
+        let samples: Vec<f32> = (0..rate as usize)
+            .flat_map(|i| {
+                let t = i as f32 / rate as f32;
+                let left = (t * 1_000.0 * std::f32::consts::TAU).sin() * 0.4;
+                [left, left * 0.5]
+            })
+            .collect();
+        let mut spec = CodecParams::audio(CodecId::Ac3, rate, layout.clone());
+        spec.bitrate = 192_000;
+        let mut encoder = cutlass_ac3::Ac3Encoder::open(&spec).expect("encoder");
+        let pcm = Pcm::from_f32(rate, layout, samples).expect("pcm");
+        let mut packets = encoder.push(&AudioInput { pcm }).expect("push");
+        packets.extend(encoder.drain().expect("drain"));
+        assert!(packets.len() > 6, "need a frame in the middle");
+        packets[3].data[20] ^= 0xff;
+        let mut check = cutlass_ac3::Ac3Decoder::open(&spec).expect("decoder");
+        for (index, packet) in packets.iter().enumerate().take(5) {
+            let pushed = check.push(packet);
+            if index == 3 {
+                assert!(pushed.is_err(), "the damaged frame was accepted");
+            } else {
+                pushed.expect("a good frame");
+            }
+        }
+        let mut mux = cutlass_isobmff::Mp4Mux::new(std::fs::File::create(&path).expect("create"));
+        let params = StreamParams::try_audio(StreamCodec::Known(CodecId::Ac3), rate, 2, Vec::new())
+            .expect("params");
+        let track = mux
+            .add_stream(NewStream {
+                params,
+                timescale: Timescale::new(rate),
+                language: None,
+            })
+            .expect("stream");
+        let mut ticks = 0i64;
+        for packet in &packets {
+            for side in &packet.side {
+                if let SideData::Config(config) = side {
+                    mux.set_config(track, config).expect("config");
+                }
+            }
+            let timestamp =
+                Timestamp::try_new(Some(packet.pts), Some(packet.pts), Some(packet.duration))
+                    .expect("time");
+            let out = Packet::try_new(
+                track.get(),
+                packet.data.clone(),
+                timestamp,
+                Timescale::new(rate),
+                true,
+            )
+            .expect("packet");
+            mux.write_packet(&out).expect("write");
+            ticks += packet.duration;
+        }
+        mux.finish(&[TrackDuration {
+            track,
+            timescale: Timescale::new(rate),
+            ticks,
+        }])
+        .expect("finish");
+        drop(mux);
+
+        let window = |at, frames| {
+            installed_readers()
+                .open(&path)
+                .expect("open")
+                .audio_from(cutlass_model::Micros(at), frames)
+                .expect("audio")
+        };
+        // 8192 samples cross the damaged fourth syncframe.
+        let start = window(0, 8_192);
+        let later = window(250_000, 2_048);
+        std::fs::remove_file(&path).expect("remove");
+        for (name, pcm, frames) in [("start", &start, 8_192), ("after", &later, 2_048)] {
+            let samples = pcm.as_f32().expect("f32");
+            assert_eq!(samples.len(), 2 * frames, "{name}");
+            assert!(
+                tone_margin(samples, rate, 1_000.0) > 20.0,
+                "{name} lost the tone"
+            );
+        }
+    }
+
     /// A real recording is imported, exported as AC-3 and E-AC-3, then
     /// reopened and seeked. The file's edit skips the encoder delay, so
     /// playback lines up with the source.

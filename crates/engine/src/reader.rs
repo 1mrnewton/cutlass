@@ -40,6 +40,9 @@ const AUDIO_PREROLL: i64 = 100_000;
 /// a seek to an open-GOP keyframe, the leading pictures reference frames
 /// before the seek and cannot be decoded.
 const SKIPPED_PICTURES: u32 = 16;
+/// Malformed audio packets one pull may pass over. A bad syncframe must
+/// not end the rest of the file. The decoder is left as it was.
+const SKIPPED_AUDIO: u32 = 16;
 /// Samples from another stream that may sit ahead of the wanted one.
 /// A movie can store an audio chunk before the next picture.
 const OTHER_STREAM_PACKETS: u32 = 4_096;
@@ -940,6 +943,7 @@ impl Media {
         }
         let mut taken = 0_u32;
         let mut others = 0_u32;
+        let mut skipped = 0_u32;
         loop {
             if taken == DECODE_PACKETS {
                 return Err(EngineError::DecodeLimit);
@@ -959,7 +963,14 @@ impl Media {
                 return Ok(None);
             };
             let access = pipe.access(&packet);
-            let outputs = pipe.decoder.push(&access)?;
+            let outputs = match pipe.decoder.push(&access) {
+                Ok(outputs) => outputs,
+                Err(CodecError::Malformed { .. }) if skipped < SKIPPED_AUDIO => {
+                    skipped = skipped.saturating_add(1);
+                    continue;
+                }
+                Err(error) => return Err(EngineError::Codec(error)),
+            };
             pipe.heard
                 .extend(outputs.into_iter().filter_map(|output| match output {
                     Output::Audio(audio) => Some(audio),

@@ -172,6 +172,13 @@ opt-level = 3
 [profile.dev.package.cutlass-hevc]
 opt-level = 3
 
+# MPEG-4 Visual playback runs the Rust decoder on Linux, and on the other
+# platforms when hardware decode is off. Unoptimised, the inverse transform
+# and motion compensation miss a frame budget at 1080p. Overflow checks and
+# debug assertions stay on.
+[profile.dev.package.cutlass-mpeg4]
+opt-level = 3
+
 # The vision tests run MobileSAM on the CPU. Unoptimised, one frame takes
 # minutes; burn's CPU backend and its matrix kernels build optimised.
 [profile.dev.package.burn-flex]

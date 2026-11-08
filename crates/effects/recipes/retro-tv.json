@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "id": "retro-tv",
+  "name": "Retro TV",
+  "category": "Retro",
+  "preview": "road",
+  "controls": [
+    {"id": "lines", "name": "Lines", "default": 1, "min": 0, "max": 2, "unit": "percent", "scale": [[1, "amount"]]},
+    {"id": "curve", "name": "Curve", "default": 1, "min": 0, "max": 3, "unit": "percent", "scale": [[0, "amount"]]}
+  ],
+  "passes": [
+    {"block": "bulge", "params": {"amount": 0.15, "radius": 1}},
+    {"block": "scanlines", "params": {"amount": 0.35, "count": 160}},
+    {"block": "vignette", "params": {"amount": 0.8, "size": 0.4}}
+  ]
+}

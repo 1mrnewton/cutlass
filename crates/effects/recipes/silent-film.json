@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "id": "silent-film",
+  "name": "Silent Film",
+  "category": "Retro",
+  "preview": "portrait",
+  "controls": [
+    {"id": "speed", "name": "Speed", "default": 1, "min": 0.25, "max": 3, "unit": "times", "speed": true},
+    {"id": "dust", "name": "Dust", "default": 1, "min": 0, "max": 2, "unit": "percent", "scale": [[1, "amount"], [1, "scratches"]]}
+  ],
+  "passes": [
+    {"block": "grade", "params": {"saturation": 0, "contrast": 1.2, "brightness": {"jitter": {"rate": 12, "from": -0.06, "to": 0.04, "seed": 706}}}},
+    {"block": "dust", "params": {"amount": 0.3, "scratches": 0.5, "seed": {"jitter": {"rate": 12, "from": 0, "to": 1000, "seed": 707}}}},
+    {"block": "vignette", "params": {"amount": 0.7, "size": 0.45}}
+  ]
+}

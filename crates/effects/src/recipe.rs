@@ -1002,7 +1002,7 @@ fn unit_hash(seed: u64, step: u64) -> f32 {
     (x >> 40) as f32 / (1u64 << 24) as f32
 }
 
-const BUNDLED_FILES: [&str; 186] = [
+const BUNDLED_FILES: [&str; 200] = [
     include_str!("../recipes/vignette.json"),
     include_str!("../recipes/black-white.json"),
     include_str!("../recipes/vivid.json"),
@@ -1134,6 +1134,15 @@ const BUNDLED_FILES: [&str; 186] = [
     include_str!("../recipes/comic-dots.json"),
     include_str!("../recipes/dusty-film.json"),
     include_str!("../recipes/film-scratches.json"),
+    include_str!("../recipes/faded-film.json"),
+    include_str!("../recipes/super-8.json"),
+    include_str!("../recipes/newsprint.json"),
+    include_str!("../recipes/pocket-game.json"),
+    include_str!("../recipes/vhs-rewind.json"),
+    include_str!("../recipes/retro-tv.json"),
+    include_str!("../recipes/cross-process.json"),
+    include_str!("../recipes/silent-film.json"),
+    include_str!("../recipes/print-dots.json"),
     include_str!("../recipes/white-flash.json"),
     include_str!("../recipes/black-flash.json"),
     include_str!("../recipes/strobe.json"),
@@ -1189,6 +1198,11 @@ const BUNDLED_FILES: [&str; 186] = [
     include_str!("../recipes/lens-fringe.json"),
     include_str!("../recipes/photo-stack.json"),
     include_str!("../recipes/photo-drop.json"),
+    include_str!("../recipes/funhouse.json"),
+    include_str!("../recipes/twist.json"),
+    include_str!("../recipes/liquid.json"),
+    include_str!("../recipes/melt.json"),
+    include_str!("../recipes/bubble.json"),
 ];
 
 /// The recipes that ship in the app, in picker order.

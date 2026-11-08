@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "id": "vhs-rewind",
+  "name": "VHS Rewind",
+  "category": "Retro",
+  "preview": "city",
+  "controls": [
+    {"id": "speed", "name": "Speed", "default": 1, "min": 0.25, "max": 3, "unit": "times", "speed": true},
+    {"id": "intensity", "name": "Intensity", "default": 1, "min": 0, "max": 2, "unit": "percent", "scale": [[0, "amount"], [2, "x"]]}
+  ],
+  "passes": [
+    {"block": "slices", "params": {"count": 6, "amount": {"jitter": {"rate": 12, "from": 0.05, "to": 0.2, "seed": 704}}, "seed": {"jitter": {"rate": 12, "from": 0, "to": 1000, "seed": 705}}}},
+    {"block": "scanlines", "params": {"amount": 0.4, "count": 200}},
+    {"block": "rgb_split", "params": {"x": 0.012}},
+    {"block": "grade", "params": {"saturation": 0.7}}
+  ]
+}

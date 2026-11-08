@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "id": "super-8",
+  "name": "Super 8",
+  "category": "Retro",
+  "preview": "dancer",
+  "controls": [
+    {"id": "speed", "name": "Speed", "default": 1, "min": 0.25, "max": 3, "unit": "times", "speed": true},
+    {"id": "grain", "name": "Grain", "default": 1, "min": 0, "max": 3, "unit": "percent", "scale": [[2, "amount"]]}
+  ],
+  "passes": [
+    {"block": "transform", "params": {"scale": 1.05, "y": {"jitter": {"rate": 18, "from": -0.006, "to": 0.006, "seed": 702}}}},
+    {"block": "flash", "params": {"amount": 0.12, "red": 1, "green": 0.7, "blue": 0.35}},
+    {"block": "noise", "params": {"amount": 0.2, "seed": {"jitter": {"rate": 24, "from": 0, "to": 1000, "seed": 703}}}},
+    {"block": "vignette", "params": {"amount": 0.7, "size": 0.45}}
+  ]
+}

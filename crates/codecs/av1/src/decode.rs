@@ -491,7 +491,7 @@ mod tests {
     }
 
     #[test]
-    fn hostile_bytes_do_not_panic() {
+    fn hostile_bytes_leave_the_reference() {
         let params = CodecParams::video(CodecId::Av1, 32, 32);
         let mut encoder = Av1Encoder::open(&params).expect("encoder");
         encoder.set_gop(1);
@@ -523,13 +523,16 @@ mod tests {
                 keyframe: false,
                 side: Vec::new(),
             };
-            // Random bytes must never panic; most are refused.
+            // Random bytes must never panic. A buffer with no size field may
+            // be a legal show-existing frame; either way the stored
+            // reference has to survive.
             let _ = decoder.push(&packet);
         }
-        // A random packet may be a valid frame and replace the reference, so
-        // only the absence of a panic is checked here.
-        let _ = decoder.push(&repeat[0]);
-        let _ = shown;
+        let again = push_now(&mut decoder, &repeat[0]).expect("reference still there");
+        assert_eq!(
+            shown[0].as_video().expect("video").picture.y.samples(),
+            again[0].as_video().expect("video").picture.y.samples()
+        );
     }
 
     /// Pushes `packet` and drains, so its pictures come out now.

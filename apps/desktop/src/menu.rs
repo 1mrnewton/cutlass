@@ -1,7 +1,7 @@
 //! Right-click menus: the clip menu and the library menus.
 //!
 //! The entries follow the prototype's menus, all of them. A row this build
-//! cannot do yet carries a TODO badge, so nothing on the list is forgotten.
+//! cannot do yet carries a Later badge, so nothing on the list is forgotten.
 //! A menu draws above every panel. A press outside it, Escape, or a scroll
 //! closes it.
 
@@ -141,9 +141,15 @@ const VIDEO: &[Entry] = &[
     ),
 ];
 
+/// The audio clip menu: the prototype's rows in its order, with this
+/// build's Volume, Speed, Fade and Beat rows after Delete and its Replace
+/// row with the clip rows.
 const AUDIO: &[Entry] = &[
+    todo("generate-video", "Generate video", ""),
     COPY,
     CUT,
+    todo("copy-attributes", "Copy attributes", "⇧⌘C"),
+    todo("paste-attributes", "Paste attributes", ""),
     DELETE,
     SEP,
     done("volume", "Volume", ""),
@@ -151,8 +157,36 @@ const AUDIO: &[Entry] = &[
     done("fade", "Fade", ""),
     done("beat", "Beat", ""),
     SEP,
-    DEACTIVATE,
+    done("transcript", "Transcript", ""),
+    sub(
+        "isolate-voice",
+        "Separate audio",
+        &[
+            todo("isolate-keep-voice", "Keep voice", ""),
+            todo("isolate-keep-background", "Keep background", ""),
+        ],
+    ),
+    done("sync", "Sync video and audio", ""),
+    SEP,
+    done("compound", "Create compound clip", "⌥G"),
+    done("multicam", "Create multi-camera clip", ""),
+    todo("save-preset", "Save preset", ""),
+    done("group", "Group", ""),
+    done("ungroup", "Ungroup", ""),
+    SEP,
+    done("deactivate", "Deactivate clip", "V"),
     REPLACE_SOUND,
+    done("link-media", "Link to media", ""),
+    done("open-file", "Open file location", ""),
+    SEP,
+    sub(
+        "range",
+        "Range",
+        &[
+            done("range-in", "Set in", ""),
+            done("range-out", "Set out", ""),
+        ],
+    ),
 ];
 
 /// Stack a picture clip above or below the clips it overlaps, with Free
@@ -330,7 +364,7 @@ const RADIUS: u8 = tokens::MENU_RADIUS;
 const ROW_RADIUS: u8 = 8;
 const LABEL_SIZE: f32 = 13.0;
 const KEY_SIZE: f32 = 12.0;
-const BADGE: &str = "TODO";
+const BADGE: &str = "Later";
 const BADGE_SIZE: f32 = 10.0;
 const BADGE_HEIGHT: f32 = 16.0;
 const CHEVRON: f32 = 14.0;
@@ -450,7 +484,7 @@ fn monitor_bounds(window: Rect, monitor: Option<Vec2>) -> Rect {
 
 /// Draw the menu `id` with its corner at `at`, kept inside `screen`, in
 /// `ctx`'s own coordinates. A menu taller than `screen` scrolls under the
-/// pointer. `enabled` says whether a built row can run now; a TODO row
+/// pointer. `enabled` says whether a built row can run now; a Later row
 /// always can, so a click on it can say it is not built yet. Returns what the
 /// menu did and the panels it painted: the menu, then any open submenu.
 fn show_in(
@@ -735,7 +769,7 @@ mod tests {
     }
 
     #[test]
-    fn every_clip_menu_starts_with_copy_cut_and_delete() {
+    fn every_clip_menu_has_copy_cut_and_delete_in_order() {
         for kind in [
             TrackType::Video,
             TrackType::Audio,
@@ -747,7 +781,10 @@ mod tests {
             TrackType::Composition,
             TrackType::Adcube,
         ] {
-            assert_eq!(ids(clip_entries(&kind))[..3], ["copy", "cut", "delete"]);
+            let ids = ids(clip_entries(&kind));
+            let at = |id: &str| ids.iter().position(|row| *row == id);
+            let (copy, cut, delete) = (at("copy"), at("cut"), at("delete"));
+            assert!(copy.is_some() && copy < cut && cut < delete, "{kind:?}");
         }
     }
 
@@ -782,6 +819,55 @@ mod tests {
                 "variable-speed",
                 "range",
                 "render",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_audio_menu_lists_every_prototype_row() {
+        assert_eq!(
+            ids(AUDIO),
+            [
+                "generate-video",
+                "copy",
+                "cut",
+                "copy-attributes",
+                "paste-attributes",
+                "delete",
+                "volume",
+                "speed",
+                "fade",
+                "beat",
+                "transcript",
+                "isolate-voice",
+                "sync",
+                "compound",
+                "multicam",
+                "save-preset",
+                "group",
+                "ungroup",
+                "deactivate",
+                "replace",
+                "link-media",
+                "open-file",
+                "range",
+            ]
+        );
+        let later: Vec<&str> = AUDIO
+            .iter()
+            .filter_map(|entry| match entry {
+                Entry::Item(item) if !item.built => Some(item.id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            later,
+            [
+                "generate-video",
+                "copy-attributes",
+                "paste-attributes",
+                "isolate-voice",
+                "save-preset",
             ]
         );
     }

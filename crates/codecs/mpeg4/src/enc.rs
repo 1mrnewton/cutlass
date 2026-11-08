@@ -1,8 +1,8 @@
 //! A Simple-profile encoder.
 //!
-//! An I-VOP, then P-VOPs: H.263 quantisation, one or four motion vectors
-//! per macroblock, no AC prediction. [`encode_advanced`] puts a B-VOP
-//! between references and can use quarter-sample motion. Rate control is
+//! An I-VOP, then P-VOPs: one or four motion vectors per macroblock, no
+//! AC prediction. [`encode_advanced`] puts a B-VOP between references and
+//! can use quarter-sample motion and the MPEG quantiser. Rate control is
 //! not emitted here yet. The coded size is a
 //! whole number of macroblocks; a caller with another size is refused
 //! rather than cropped. Motion search stays inside ±8 pixels so every
@@ -18,12 +18,20 @@ use crate::frame::{Frame, Kind, MbRecord};
 use crate::idct;
 use crate::mc::{self, Pel, Rows};
 use crate::tables::{
-    CBPY, CoefTable, DC_CHROMA, DC_LUMA, MB_TYPE_B, MCBPC_INTER, MCBPC_INTRA, MVD, TCOEF_ESCAPE,
-    ZIGZAG, dc_scaler_chroma, dc_scaler_luma, tables,
+    CBPY, CoefTable, DC_CHROMA, DC_LUMA, DEFAULT_INTER_MATRIX, DEFAULT_INTRA_MATRIX, MB_TYPE_B,
+    MCBPC_INTER, MCBPC_INTRA, MVD, TCOEF_ESCAPE, ZIGZAG, dc_scaler_chroma, dc_scaler_luma, tables,
 };
 use crate::vop::clip_block;
 
 const TIME_RESOLUTION: u32 = 25;
+
+/// One picture's quantiser: the scale, and whether levels use the MPEG
+/// matrices instead of the H.263 reconstruction.
+#[derive(Clone, Copy)]
+struct Q {
+    scale: i32,
+    mpeg: bool,
+}
 
 /// One intra picture as an elementary stream: the video object layer,
 /// then one I-VOP. `quant` is `vop_quant`, 1 to 31.
@@ -69,6 +77,10 @@ fn encode_pictures(
     }
     let mbw = w / 16;
     let mbh = h / 16;
+    let q = Q {
+        scale: i32::from(quant),
+        mpeg: false,
+    };
     let mut recon = Frame::new(mbw, mbh);
     let mut mv = vec![(0i32, 0i32); mbw * 2 * mbh * 2];
     let mut out = BitWriter::new();
@@ -76,17 +88,17 @@ fn encode_pictures(
     // to recognise the stream; the pictures do not depend on it.
     start(&mut out, 0x00);
     start(&mut out, 0x20);
-    write_vol(&mut out, width, height, false, false, true);
+    write_vol(&mut out, width, height, false, false, false, true);
     for (index, &(y, u, v)) in frames.iter().enumerate() {
         let planes = Planes { y, u, v, stride: w };
         start(&mut out, 0xB6);
         if index == 0 {
-            write_i_vop(&mut out, &planes, i32::from(quant), &mut recon, &mut mv);
+            write_i_vop(&mut out, &planes, q, &mut recon, &mut mv);
         } else {
             write_p_vop(
                 &mut out,
                 &planes,
-                i32::from(quant),
+                q,
                 index as u32,
                 &mut recon,
                 &mut mv,
@@ -101,13 +113,15 @@ fn encode_pictures(
 /// B-VOP coded after the reference it precedes, and the layer is Advanced
 /// Simple with `low_delay` clear so those pictures come back in display
 /// order. `quarter` selects quarter-sample motion, which also makes the
-/// layer Advanced Simple. `quant` is `vop_quant`, 1 to 31.
+/// layer Advanced Simple. `mpeg` selects the MPEG quantiser and the
+/// default matrices. `quant` is `vop_quant`, 1 to 31.
 pub fn encode_advanced(
     frames: &[(&[u8], &[u8], &[u8])],
     width: u32,
     height: u32,
     quant: u8,
     quarter: bool,
+    mpeg: bool,
 ) -> Result<Vec<u8>, CodecError> {
     if frames.is_empty()
         || width == 0
@@ -135,25 +149,28 @@ pub fn encode_advanced(
     let advanced = has_b || quarter;
     let mbw = w / 16;
     let mbh = h / 16;
-    let quant = i32::from(quant);
+    let q = Q {
+        scale: i32::from(quant),
+        mpeg,
+    };
     let mut reference = Frame::new(mbw, mbh);
     let mut mv = vec![(0i32, 0i32); mbw * 2 * mbh * 2];
     let mut earlier: Option<Frame> = None;
     let mut out = BitWriter::new();
     start(&mut out, 0x00);
     start(&mut out, 0x20);
-    write_vol(&mut out, width, height, advanced, quarter, !has_b);
+    write_vol(&mut out, width, height, advanced, quarter, mpeg, !has_b);
     for (n, &display) in refs.iter().enumerate() {
         let (y, u, v) = frames[display];
         let planes = Planes { y, u, v, stride: w };
         start(&mut out, 0xB6);
         if n == 0 {
-            write_i_vop(&mut out, &planes, quant, &mut reference, &mut mv);
+            write_i_vop(&mut out, &planes, q, &mut reference, &mut mv);
         } else {
             write_p_vop(
                 &mut out,
                 &planes,
-                quant,
+                q,
                 display as u32,
                 &mut reference,
                 &mut mv,
@@ -167,7 +184,7 @@ pub fn encode_advanced(
                     write_b_vop(
                         &mut out,
                         &between,
-                        quant,
+                        q,
                         (prev + 1 + step) as u32,
                         &Refs {
                             past,
@@ -205,15 +222,17 @@ fn start(out: &mut BitWriter, code: u8) {
 }
 
 /// Simple object, or Advanced Simple when `advanced` so a B-VOP or
-/// quarter-sample motion is legal. 4:2:0, square pixels, H.263 quantiser.
-/// Version 5 is where `quarter_sample` sits. `low_delay` stays set when
-/// the stream has no B-VOP.
+/// quarter-sample motion is legal. 4:2:0, square pixels. `mpeg` selects
+/// the default MPEG matrices; otherwise the quantiser is H.263. Version 5
+/// is where `quarter_sample` sits. `low_delay` stays set when the stream
+/// has no B-VOP.
 fn write_vol(
     out: &mut BitWriter,
     width: u32,
     height: u32,
     advanced: bool,
     quarter: bool,
+    mpeg: bool,
     low_delay: bool,
 ) {
     out.put(1, 0); // random_accessible_vol
@@ -248,7 +267,11 @@ fn write_vol(
         out.put(1, 0); // no sprite
     }
     out.put(1, 0); // not_8_bit
-    out.put(1, 0); // h.263 quantiser
+    out.put(1, u32::from(mpeg));
+    if mpeg {
+        out.put(1, 0); // default intra matrix
+        out.put(1, 0); // default non-intra matrix
+    }
     if advanced {
         out.put(1, u32::from(quarter));
     }
@@ -266,7 +289,7 @@ fn write_vol(
 fn write_i_vop(
     out: &mut BitWriter,
     planes: &Planes<'_>,
-    quant: i32,
+    q: Q,
     recon: &mut Frame,
     mv: &mut [(i32, i32)],
 ) {
@@ -274,7 +297,7 @@ fn write_i_vop(
     write_time(out, 0);
     out.put(1, 1); // coded
     out.put(3, 0); // intra_dc_vlc_thr: DC stays in the DC VLC
-    out.put(5, quant as u32);
+    out.put(5, q.scale as u32);
     let mbw = recon.mbw;
     let mbh = recon.mbh;
     recon.mbs.resize(mbw * mbh, MbRecord::default());
@@ -286,9 +309,9 @@ fn write_i_vop(
     ];
     for mby in 0..mbh {
         for mbx in 0..mbw {
-            let (levels, dcs) = write_intra_mb(out, planes, mbx, mby, quant, &mut dc);
+            let (levels, dcs) = write_intra_mb(out, planes, mbx, mby, q, &mut dc);
             for k in 0..6 {
-                paint_intra(recon, mbx, mby, k, &levels[k], dcs[k], quant);
+                paint_intra(recon, mbx, mby, k, &levels[k], dcs[k], q);
             }
             set_record(recon, mby * mbw + mbx, Kind::Intra, [(0, 0); 4]);
         }
@@ -322,7 +345,7 @@ fn write_intra_mb(
     planes: &Planes<'_>,
     mbx: usize,
     mby: usize,
-    quant: i32,
+    q: Q,
     dc: &mut [Vec<i32>; 3],
 ) -> ([[i32; 64]; 6], [i32; 6]) {
     let mut coded = [false; 6];
@@ -350,9 +373,9 @@ fn write_intra_mb(
             (mbx as isize, mby as isize)
         };
         let scale = if k < 4 {
-            dc_scaler_luma(quant as u32)
+            dc_scaler_luma(q.scale as u32)
         } else {
-            dc_scaler_chroma(quant as u32)
+            dc_scaler_chroma(q.scale as u32)
         };
         let predicted = predict(&dc[plane_of(k)], across, bx, by);
         let qf = div_round(coef[0], scale).clamp(0, 2047 / scale);
@@ -362,7 +385,7 @@ fn write_intra_mb(
         reconstructed[k] = stored;
         levels[k][0] = diff;
         for i in 1..64 {
-            levels[k][i] = quant_ac(coef[i], quant);
+            levels[k][i] = quantise(coef[i], q, i, true);
             coded[k] |= levels[k][i] != 0;
         }
     }
@@ -394,11 +417,11 @@ fn paint_intra(
     k: usize,
     levels: &[i32; 64],
     dc: i32,
-    quant: i32,
+    q: Q,
 ) {
     let mut ac = [0i32; 64];
     ac[1..].copy_from_slice(&levels[1..]);
-    let mut coef = dequant_intra(&ac, dc, quant, Quant::H263);
+    let mut coef = dequant_intra(&ac, dc, q.scale, method(q));
     put_block(frame, mbx, mby, k, &mut coef, false);
 }
 
@@ -495,6 +518,66 @@ fn write_coef(out: &mut BitWriter, table: &CoefTable, last: bool, run: usize, le
     out.bit(true);
 }
 
+/// The inverse quantiser `q` selects.
+fn method(q: Q) -> Quant<'static> {
+    if q.mpeg {
+        Quant::Mpeg {
+            intra: &DEFAULT_INTRA_MATRIX,
+            inter: &DEFAULT_INTER_MATRIX,
+        }
+    } else {
+        Quant::H263
+    }
+}
+
+/// Level whose reconstruction is nearest `coef`. `index` is the raster
+/// position, and it selects the MPEG matrix weight.
+fn quantise(coef: i32, q: Q, index: usize, intra: bool) -> i32 {
+    if !q.mpeg {
+        return quant_ac(coef, q.scale);
+    }
+    let weight = i32::from(if intra {
+        DEFAULT_INTRA_MATRIX[index]
+    } else {
+        DEFAULT_INTER_MATRIX[index]
+    });
+    if coef == 0 || weight == 0 || q.scale <= 0 {
+        return 0;
+    }
+    let mag = coef.unsigned_abs() as i32;
+    let step = if intra {
+        2 * q.scale * weight
+    } else {
+        q.scale * weight
+    };
+    let recon = |level: i32| -> i32 {
+        if level == 0 {
+            0
+        } else if intra {
+            (level * step) >> 4
+        } else {
+            ((2 * level + 1) * step) >> 4
+        }
+    };
+    let guess = if intra {
+        (mag << 4) / step
+    } else {
+        ((mag << 4) / step).saturating_sub(1) / 2
+    };
+    let mut best = 0i32;
+    let mut best_err = mag;
+    let low = guess.saturating_sub(2);
+    let high = (guess + 2).min(2047);
+    for level in low..=high {
+        let err = (recon(level) - mag).abs();
+        if err < best_err {
+            best = level;
+            best_err = err;
+        }
+    }
+    coef.signum() * best
+}
+
 /// H.263 intra AC level whose reconstruction is nearest `coef`.
 fn quant_ac(coef: i32, quant: i32) -> i32 {
     if coef == 0 {
@@ -585,7 +668,7 @@ const SEARCH: i32 = 16;
 fn write_p_vop(
     out: &mut BitWriter,
     planes: &Planes<'_>,
-    quant: i32,
+    q: Q,
     frame: u32,
     recon: &mut Frame,
     mv: &mut [(i32, i32)],
@@ -596,7 +679,7 @@ fn write_p_vop(
     out.bit(true); // coded
     out.bit(false); // rounding
     out.put(3, 0); // intra_dc_vlc_thr
-    out.put(5, quant as u32);
+    out.put(5, q.scale as u32);
     out.put(3, 1); // fcode_forward
     let past = recon.clone();
     let mut next = Frame::new(past.mbw, past.mbh);
@@ -610,7 +693,7 @@ fn write_p_vop(
             v: planes.v,
             width: planes.stride,
             height: past.mbh * 16,
-            quant,
+            q,
             past: &past,
             next: &mut next,
             mv,
@@ -632,7 +715,7 @@ struct Predicted<'a> {
     v: &'a [u8],
     width: usize,
     height: usize,
-    quant: i32,
+    q: Q,
     past: &'a Frame,
     next: &'a mut Frame,
     mv: &'a mut [(i32, i32)],
@@ -671,7 +754,7 @@ impl Predicted<'_> {
             let pixels = self.residual(mbx, mby, k, &py, &pu, &pv);
             let coef = forward(&pixels);
             for i in 0..64 {
-                levels[k][i] = quant_ac(coef[i], self.quant);
+                levels[k][i] = quantise(coef[i], self.q, i, false);
                 coded[k] |= levels[k][i] != 0;
             }
         }
@@ -719,7 +802,7 @@ impl Predicted<'_> {
         blit(self.next, mbx, mby, &py, &pu, &pv);
         for k in 0..6 {
             if coded[k] {
-                add_inter(self.next, mbx, mby, k, &levels[k], self.quant);
+                add_inter(self.next, mbx, mby, k, &levels[k], self.q);
             }
         }
         if use_four {
@@ -988,20 +1071,24 @@ fn blit(frame: &mut Frame, mbx: usize, mby: usize, y: &[u8; 256], u: &[u8; 64], 
     }
 }
 
-fn add_inter(frame: &mut Frame, mbx: usize, mby: usize, k: usize, levels: &[i32; 64], quant: i32) {
-    let mut values = [0i32; 64];
-    let mul = 2 * quant;
-    let add = (quant - 1) | 1;
-    for (slot, &level) in values.iter_mut().zip(levels) {
-        *slot = if level > 0 {
-            level * mul + add
-        } else if level < 0 {
-            level * mul - add
-        } else {
-            0
-        };
-    }
-    let mut coef = dequant_inter(&values, quant, Quant::H263);
+fn add_inter(frame: &mut Frame, mbx: usize, mby: usize, k: usize, levels: &[i32; 64], q: Q) {
+    let mut coef = if q.mpeg {
+        dequant_inter(levels, q.scale, method(q))
+    } else {
+        let mut values = [0i32; 64];
+        let mul = 2 * q.scale;
+        let add = (q.scale - 1) | 1;
+        for (slot, &level) in values.iter_mut().zip(levels) {
+            *slot = if level > 0 {
+                level * mul + add
+            } else if level < 0 {
+                level * mul - add
+            } else {
+                0
+            };
+        }
+        dequant_inter(&values, q.scale, Quant::H263)
+    };
     put_block(frame, mbx, mby, k, &mut coef, true);
 }
 
@@ -1129,12 +1216,12 @@ struct Refs<'a> {
     quarter: bool,
 }
 
-fn write_b_vop(out: &mut BitWriter, planes: &Planes<'_>, quant: i32, frame: u32, refs: &Refs<'_>) {
+fn write_b_vop(out: &mut BitWriter, planes: &Planes<'_>, q: Q, frame: u32, refs: &Refs<'_>) {
     out.put(2, 2); // B
     write_time(out, frame);
     out.bit(true); // coded
     out.put(3, 0); // intra_dc_vlc_thr
-    out.put(5, quant as u32);
+    out.put(5, q.scale as u32);
     out.put(3, 1); // fcode_forward
     out.put(3, 1); // fcode_backward
     let mbw = refs.past.mbw;
@@ -1142,7 +1229,7 @@ fn write_b_vop(out: &mut BitWriter, planes: &Planes<'_>, quant: i32, frame: u32,
     for mby in 0..mbh {
         let mut last = [(0i32, 0i32); 2];
         for mbx in 0..mbw {
-            write_b_mb(out, planes, quant, refs, (mbx, mby), &mut last);
+            write_b_mb(out, planes, q, refs, (mbx, mby), &mut last);
         }
     }
     out.stuff();
@@ -1151,7 +1238,7 @@ fn write_b_vop(out: &mut BitWriter, planes: &Planes<'_>, quant: i32, frame: u32,
 fn write_b_mb(
     out: &mut BitWriter,
     planes: &Planes<'_>,
-    quant: i32,
+    q: Q,
     refs: &Refs<'_>,
     at: (usize, usize),
     last: &mut [(i32, i32); 2],
@@ -1206,7 +1293,7 @@ fn write_b_mb(
         mode = BMotion::Both(forward, backward);
         prediction = both;
     }
-    let (levels, coded) = inter_residual(planes, mbx, mby, quant, &prediction);
+    let (levels, coded) = inter_residual(planes, mbx, mby, q, &prediction);
     let cbp = coded_pattern(&coded);
     if matches!(mode, BMotion::Direct) && cbp == 0 {
         out.bit(true);
@@ -1352,7 +1439,7 @@ fn inter_residual(
     planes: &Planes<'_>,
     mbx: usize,
     mby: usize,
-    quant: i32,
+    q: Q,
     pred: &([u8; 256], [u8; 64], [u8; 64]),
 ) -> ([[i32; 64]; 6], [bool; 6]) {
     let (y, u, v) = pred;
@@ -1382,8 +1469,8 @@ fn inter_residual(
             )
         };
         let coef = forward(&pixels);
-        for (level, value) in levels[k].iter_mut().zip(coef) {
-            *level = quant_ac(value, quant);
+        for (i, (level, value)) in levels[k].iter_mut().zip(coef).enumerate() {
+            *level = quantise(value, q, i, false);
             coded[k] |= *level != 0;
         }
     }
@@ -1691,6 +1778,7 @@ mod tests {
             48,
             5,
             false,
+            false,
         )
         .expect("encode");
         let pictures = decode_all(&bytes);
@@ -1732,7 +1820,8 @@ mod tests {
         let y = vec![140u8; 48 * 32];
         let c = vec![120u8; 24 * 16];
         let frame = (y.as_slice(), c.as_slice(), c.as_slice());
-        let bytes = encode_advanced(&[frame, frame, frame], 48, 32, 4, false).expect("encode");
+        let bytes =
+            encode_advanced(&[frame, frame, frame], 48, 32, 4, false, false).expect("encode");
         let pictures = decode_all(&bytes);
         assert_eq!(pictures.len(), 3);
         assert_eq!(vop_kind(&bytes, 2), 2);
@@ -1768,6 +1857,7 @@ mod tests {
             48,
             4,
             true,
+            false,
         )
         .expect("encode");
         let pictures = decode_all(&bytes);
@@ -1797,6 +1887,52 @@ mod tests {
             ours.extend_from_slice(picture);
         }
         ffmpeg_matches(&ffmpeg, &bytes, &ours, "quarter");
+    }
+
+    #[test]
+    fn an_mpeg_quantiser_reconstructs_with_the_default_matrices() {
+        let y0 = pattern(64, 48, 7);
+        let u0 = pattern(32, 24, 13);
+        let v0 = pattern(32, 24, 19);
+        let y1 = shift_right(&y0, 64, 48, 4);
+        let u1 = shift_right(&u0, 32, 24, 2);
+        let v1 = shift_right(&v0, 32, 24, 2);
+        let bytes = encode_advanced(
+            &[
+                (y0.as_slice(), u0.as_slice(), v0.as_slice()),
+                (y1.as_slice(), u1.as_slice(), v1.as_slice()),
+            ],
+            64,
+            48,
+            5,
+            false,
+            true,
+        )
+        .expect("encode");
+        let pictures = decode_all(&bytes);
+        assert_eq!(pictures.len(), 2);
+        assert_eq!(vop_kind(&bytes, 0), 0);
+        assert_eq!(vop_kind(&bytes, 1), 1);
+        let luma = 64 * 48;
+        assert!(
+            mae(&pictures[0][..luma], &y0) < 8.0,
+            "{}",
+            mae(&pictures[0][..luma], &y0)
+        );
+        assert!(
+            mae(&pictures[1][..luma], &y1) < 8.0,
+            "{}",
+            mae(&pictures[1][..luma], &y1)
+        );
+        let Some(ffmpeg) = ffmpeg_bin() else {
+            eprintln!("ffmpeg is not installed; the MPEG quantiser was not checked independently");
+            return;
+        };
+        let mut ours = Vec::new();
+        for picture in &pictures {
+            ours.extend_from_slice(picture);
+        }
+        ffmpeg_matches(&ffmpeg, &bytes, &ours, "mpeg-quant");
     }
 
     /// The picture a quarter-sample vector `mv` predicts from these planes.

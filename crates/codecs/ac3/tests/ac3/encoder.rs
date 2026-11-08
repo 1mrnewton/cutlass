@@ -1253,6 +1253,79 @@ fn ffmpeg_decodes_an_eac3_frame_that_starts_with_a_transient() {
     assert!(quality > 50.0, "onset {quality:.1} dB");
 }
 
+fn ffmpeg_encode(ffmpeg: &str, pcm: &[f32], codec: &str, kbps: u32) -> Vec<u8> {
+    let dir = std::env::temp_dir().join("cutlass-ac3-noise");
+    std::fs::create_dir_all(&dir).expect("temp");
+    let input = dir.join(format!("in-{codec}.f32"));
+    let output = dir.join(format!("out-{codec}.{codec}"));
+    let mut bytes = Vec::with_capacity(pcm.len() * 4);
+    for sample in pcm {
+        bytes.extend_from_slice(&sample.to_le_bytes());
+    }
+    std::fs::write(&input, bytes).expect("pcm");
+    let status = std::process::Command::new(ffmpeg)
+        .args([
+            "-v", "error", "-y", "-f", "f32le", "-ar", "48000", "-ac", "2", "-i",
+        ])
+        .arg(&input)
+        .args(["-f", codec, "-c:a", codec, "-b:a", &format!("{kbps}k")])
+        .arg(&output)
+        .status()
+        .expect("ffmpeg encode");
+    assert!(status.success(), "ffmpeg encode failed");
+    std::fs::read(&output).expect("encoded")
+}
+
+/// One second of stereo white noise, and one impulse. Noise at the default
+/// rate is close to the dither floor, so the gate is FFmpeg's own encoder
+/// on the same samples. The impulse is compared to FFmpeg's decode of this
+/// encoder's stream.
+#[test]
+fn noise_and_an_impulse_match_ffmpeg() {
+    let Some(ffmpeg) = oracle("ffmpeg", "-version") else {
+        return;
+    };
+    let channels = &[L, R];
+    let rate = 48_000u32;
+    let mut seed = 1u32;
+    let noise: Vec<f32> = (0..rate as usize * 2)
+        .map(|_| {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            ((seed >> 8) as f32 / (1u32 << 24) as f32 - 0.5) * 0.4
+        })
+        .collect();
+    let mut impulse = vec![0.0f32; rate as usize * 2];
+    let at = (rate as usize / 2) * 2;
+    impulse[at] = 0.8;
+    impulse[at + 1] = -0.8;
+    for format in [Format::Ac3, Format::Eac3] {
+        let flag = if format == Format::Ac3 { "ac3" } else { "eac3" };
+        let kbps = cutlass_ac3::default_bit_rate(format, 2, false) / 1000;
+        for (name, pcm, interop) in [("noise", &noise, false), ("impulse", &impulse, true)] {
+            let packets = encode(config(format, rate, channels, 0), pcm);
+            let ours = decode(codec(format), &packets);
+            let skip = ENCODER_DELAY as usize * 2;
+            if interop {
+                let theirs = ffmpeg_decode(&ffmpeg, &stream(&packets), &["-f", flag]);
+                let theirs = &theirs[skip.min(theirs.len())..];
+                let n = ours.pcm.len().min(theirs.len());
+                let quality = snr(&ours.pcm[..n], &theirs[..n]);
+                assert!(quality > 50.0, "{format:?} {name} {quality:.1} dB");
+            }
+            let foreign = ffmpeg_encode(&ffmpeg, pcm, flag, kbps);
+            let foreign_pcm = decode(codec(format), &[Packet::audio(foreign, 0, 0, rate)]);
+            let foreign_heard = &foreign_pcm.pcm[skip.min(foreign_pcm.pcm.len())..];
+            let n = ours.pcm.len().min(foreign_heard.len()).min(pcm.len());
+            let ours_source = snr(&ours.pcm[..n], &pcm[..n]);
+            let their_source = snr(&foreign_heard[..n], &pcm[..n]);
+            assert!(
+                ours_source + 1.0 >= their_source,
+                "{format:?} {name}: ours {ours_source:.1} dB, ffmpeg {their_source:.1} dB"
+            );
+        }
+    }
+}
+
 /// Apple's decoder reads our streams.
 #[test]
 fn apple_decodes_our_streams() {

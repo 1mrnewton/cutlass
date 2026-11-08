@@ -86,6 +86,8 @@ Four seconds from `../local-files`, encoded at the default rate, compared on the
 | Thunder, 48 kHz stereo | AC-3 | 192 kbps | 48.8 dB | 52.1 dB | 53.6 dB |
 | Thunder | E-AC-3 | 128 kbps | 45.8 dB | 49.0 dB | 50.5 dB |
 
+Stereo white noise and one impulse, one second at 48 kHz and the default rate, were measured the same day. Noise against the source is 3.6 dB for AC-3 and 1.7 dB for E-AC-3. FFmpeg's encoder on the same samples is 3.6 dB and 1.6 dB. An impulse decoded from this encoder matches FFmpeg's decode at 71 dB (AC-3) and 66 dB (E-AC-3). `noise_and_an_impulse_match_ffmpeg` keeps this encoder within 1 dB of FFmpeg's encoder against the source, and the impulse above 50 dB against FFmpeg's decode. FFmpeg's decode of the noise itself is not sample-close: unallocated bins are dithered by different generators, and an E-AC-3 transient is skipped by FFmpeg.
+
 These file figures were measured again on 8 November 2026, after block switching, gain-adaptive quantization, and transient pre-noise. The 44.1 kHz AC-3 frame table makes that clip 192003 bit/s. Every other clip matched its frame's implied rate within 1 percent. A single 1536-sample window can sit far under the file figure: on an earlier encoder, speech E-AC-3 reached 5.0 dB and talk E-AC-3 reached −0.3 dB. Those windows are quiet. The speech window is RMS 0.001 on our decode, on FFmpeg, and on the source. The talk windows are digital silence, RMS 0. The ratio there is dither against dither. Every packet of those files still decodes with `-f eac3`. The music E-AC-3 file used to be rejected (`expacc` out of range) when coupling turned on after a short first block.
 
 ## Containers, playback, and export

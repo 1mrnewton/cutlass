@@ -31,6 +31,7 @@ fn project() -> (Temp, EnhanceKey) {
         source,
         level: 1,
         denoise: 0,
+        interpolate: 0,
         model: "realesr-general-x4v3".into(),
         rate: 30.0,
     };
@@ -214,4 +215,53 @@ fn a_copy_that_is_only_enhanced_keeps_the_name_it_had_before_denoising() {
         (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
     });
     assert_eq!(key.stem().unwrap(), format!("{hash:016x}"));
+}
+
+#[test]
+fn a_copy_that_is_only_interpolated_has_its_own_folder_and_name() {
+    let (temp, key) = project();
+    let range = TimeRange::new(0, 1_000_000);
+    let flowed = EnhanceKey {
+        level: 0,
+        interpolate: 60,
+        model: "rife-v4.26".into(),
+        rate: 120.0,
+        ..key.clone()
+    };
+    let file = keep(&temp, &flowed, &range);
+    assert!(file.parent().unwrap().ends_with("Resources/video_interpolate"));
+    assert_eq!(
+        find_enhanced(&temp.0, &flowed, &range).map(|f| f.0),
+        Some(file)
+    );
+    let at_30 = EnhanceKey {
+        interpolate: 30,
+        ..flowed.clone()
+    };
+    assert_eq!(find_enhanced(&temp.0, &at_30, &range), None);
+    // Interpolated and enhanced goes with the enhanced copies, named apart
+    // from a copy that is only enhanced.
+    let both = EnhanceKey {
+        interpolate: 60,
+        ..key.clone()
+    };
+    assert!(
+        keep(&temp, &both, &range)
+            .parent()
+            .unwrap()
+            .ends_with("Resources/video_enhance")
+    );
+    assert_ne!(both.stem().unwrap(), key.stem().unwrap());
+    let denoised = EnhanceKey {
+        level: 0,
+        denoise: 1,
+        interpolate: 60,
+        ..key
+    };
+    assert!(
+        keep(&temp, &denoised, &range)
+            .parent()
+            .unwrap()
+            .ends_with("Resources/video_denoise")
+    );
 }

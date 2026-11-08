@@ -101,7 +101,7 @@ fn project(level: Option<i64>) -> (Temp, Draft) {
 #[test]
 fn the_ask_is_the_stretch_the_clip_shows_at_the_project_rate() {
     let (temp, draft) = project(None);
-    let ask = enhance_ask(&draft, Some(&temp.0), &"v".into(), Algorithm::HD, 0).unwrap();
+    let ask = enhance_ask(&draft, Some(&temp.0), &"v".into(), Algorithm::HD, 0, 0).unwrap();
     assert_eq!(ask.source, temp.0.join("walk.png").canonicalize().unwrap());
     assert_eq!(ask.range, TimeRange::new(1_000_000, 1_000_000));
     assert_eq!(ask.rate, 10.0);
@@ -115,12 +115,13 @@ fn the_ask_is_the_stretch_the_clip_shows_at_the_project_rate() {
         &"v".into(),
         Algorithm::HD,
         Algorithm::WEAK,
+        0,
     )
     .unwrap()
     .key();
     assert_eq!((both.level, both.denoise), (Algorithm::HD, Algorithm::WEAK));
     assert_eq!(both.model, format!("{DENOISE_MODEL}+{ENHANCE_MODEL}"));
-    let only = enhance_ask(&draft, Some(&temp.0), &"v".into(), 0, Algorithm::STRONG)
+    let only = enhance_ask(&draft, Some(&temp.0), &"v".into(), 0, Algorithm::STRONG, 0)
         .unwrap()
         .key();
     assert_eq!((only.level, only.denoise), (0, Algorithm::STRONG));
@@ -131,21 +132,21 @@ fn the_ask_is_the_stretch_the_clip_shows_at_the_project_rate() {
 fn an_off_level_a_graphic_no_stretch_or_a_file_outside_is_refused() {
     let (temp, draft) = project(None);
     let root = Some(temp.0.as_path());
-    assert!(enhance_ask(&draft, root, &"v".into(), 0, 0).is_err());
-    assert!(enhance_ask(&draft, root, &"v".into(), -1, -2).is_err());
-    assert!(enhance_ask(&draft, root, &"nope".into(), 1, 0).is_err());
+    assert!(enhance_ask(&draft, root, &"v".into(), 0, 0, 0).is_err());
+    assert!(enhance_ask(&draft, root, &"v".into(), -1, -2, 0).is_err());
+    assert!(enhance_ask(&draft, root, &"nope".into(), 1, 0, 0).is_err());
     let mut text = draft.clone();
     text.tracks[0].kind = TrackType::Text;
-    let Err(EnhanceError::Clip { reason }) = enhance_ask(&text, root, &"v".into(), 1, 0) else {
+    let Err(EnhanceError::Clip { reason }) = enhance_ask(&text, root, &"v".into(), 1, 0, 0) else {
         panic!("a graphic was enhanced");
     };
     assert!(reason.contains("enhanced"), "{reason}");
     let mut none = draft.clone();
     none.tracks[0].segments[0].source_range = Some(TimeRange::new(0, 0));
-    assert!(enhance_ask(&none, root, &"v".into(), 1, 0).is_err());
+    assert!(enhance_ask(&none, root, &"v".into(), 1, 0, 0).is_err());
     let mut escaping = draft;
     escaping.materials.videos[0].path = "../../etc/passwd".into();
-    assert!(enhance_ask(&escaping, root, &"v".into(), 1, 0).is_err());
+    assert!(enhance_ask(&escaping, root, &"v".into(), 1, 0, 0).is_err());
 }
 
 #[test]
@@ -169,7 +170,7 @@ fn a_clip_draws_from_its_copy_once_there_is_one() {
     assert_eq!(enhanced_copy(&draft, Some(&temp.0), &"v".into()), None);
     // The job's copy: here the same pattern as a JPEG, which decodes to
     // other pixels, holding 0.5 s to 3 s of the file.
-    let ask = enhance_ask(&draft, Some(&temp.0), &"v".into(), Algorithm::HD, 0).unwrap();
+    let ask = enhance_ask(&draft, Some(&temp.0), &"v".into(), Algorithm::HD, 0, 0).unwrap();
     let file = enhanced_file(&temp.0, &ask.key(), &TimeRange::new(500_000, 2_500_000)).unwrap();
     fs::copy(fixture("pattern.jpg"), &file).unwrap();
     assert_eq!(
@@ -214,7 +215,7 @@ fn a_denoised_clip_draws_from_its_own_copy_and_both_draw_from_one() {
     on(&mut draft, Algorithm::NOISE_REDUCTION, Algorithm::WEAK);
     assert_eq!(enhanced_copy(&draft, Some(&temp.0), &"v".into()), None);
     let range = TimeRange::new(1_000_000, 1_000_000);
-    let ask = enhance_ask(&draft, Some(&temp.0), &"v".into(), 0, Algorithm::WEAK).unwrap();
+    let ask = enhance_ask(&draft, Some(&temp.0), &"v".into(), 0, Algorithm::WEAK, 0).unwrap();
     let denoised = enhanced_file(&temp.0, &ask.key(), &range).unwrap();
     fs::copy(fixture("pattern.jpg"), &denoised).unwrap();
     assert_eq!(
@@ -231,6 +232,7 @@ fn a_denoised_clip_draws_from_its_own_copy_and_both_draw_from_one() {
         &"v".into(),
         Algorithm::HD,
         Algorithm::WEAK,
+        0,
     )
     .unwrap();
     let both = enhanced_file(&temp.0, &ask.key(), &range).unwrap();
@@ -265,7 +267,7 @@ fn a_frame_is_turned_upright() {
 #[test]
 fn a_still_or_missing_file_is_not_read_as_frames() {
     let (temp, draft) = project(None);
-    let ask = enhance_ask(&draft, Some(&temp.0), &"v".into(), 1, 0).unwrap();
+    let ask = enhance_ask(&draft, Some(&temp.0), &"v".into(), 1, 0, 0).unwrap();
     assert!(matches!(
         EnhanceFrames::open(&stills(), &ask),
         Err(EnhanceError::Clip { .. })
@@ -278,4 +280,114 @@ fn a_still_or_missing_file_is_not_read_as_frames() {
         EnhanceFrames::open(&stills(), &gone),
         Err(EnhanceError::Frame { .. })
     ));
+}
+
+#[test]
+fn optical_flow_fills_the_copy_to_its_rate_over_the_slowest_speed() {
+    let (temp, mut draft) = project(None);
+    let root = Some(temp.0.as_path());
+    let ask = enhance_ask(&draft, root, &"v".into(), 0, 0, 30).unwrap();
+    assert_eq!((ask.rate, ask.interpolate), (30.0, 30));
+    let key = ask.key();
+    assert_eq!(
+        (key.interpolate, key.model.as_str()),
+        (30, INTERPOLATE_MODEL)
+    );
+    // Half speed needs twice the frames of the file's time.
+    draft.tracks[0].segments[0].speed = 0.5;
+    draft.tracks[0].segments[0].target = TimeRange::new(0, 2_000_000);
+    let slow = enhance_ask(&draft, root, &"v".into(), 0, 0, 60).unwrap();
+    assert_eq!(slow.rate, 120.0);
+    // Faster than the project's rate needs, it keeps the project's.
+    draft.tracks[0].segments[0].speed = 4.0;
+    draft.tracks[0].segments[0].target = TimeRange::new(0, 250_000);
+    let fast = enhance_ask(&draft, root, &"v".into(), 0, 0, 30).unwrap();
+    assert_eq!(fast.rate, 10.0);
+    let all = enhance_ask(
+        &draft,
+        root,
+        &"v".into(),
+        Algorithm::HD,
+        Algorithm::WEAK,
+        30,
+    )
+    .unwrap()
+    .key();
+    assert_eq!(
+        all.model,
+        format!("{DENOISE_MODEL}+{INTERPOLATE_MODEL}+{ENHANCE_MODEL}")
+    );
+    // Off, the rate is the project's and the name is as before.
+    let off = enhance_ask(&draft, root, &"v".into(), Algorithm::HD, 0, 0).unwrap();
+    assert_eq!((off.rate, off.key().interpolate), (10.0, 0));
+    assert!(enhance_ask(&draft, root, &"v".into(), 0, 0, -30).is_err());
+}
+
+#[test]
+fn each_frame_of_the_copy_is_a_frame_of_the_file_or_lies_between_two() {
+    let times = [0, 100_000, 200_000].map(Micros).to_vec();
+    let copy = [
+        0, 25_000, 50_000, 99_000, 100_000, 150_000, 250_000, 300_000,
+    ]
+    .map(Micros)
+    .to_vec();
+    let made = blends(&times, &copy);
+    let pairs: Vec<(usize, f32)> = made.iter().map(|b| (b.from, b.at)).collect();
+    assert_eq!(
+        pairs,
+        [
+            (0, 0.0),
+            (0, 0.25),
+            (0, 0.5),
+            (1, 0.0),
+            (1, 0.0),
+            (1, 0.5),
+            (2, 0.0),
+            (2, 0.0)
+        ]
+    );
+    // Before the first frame is the first; a file of one frame is that one.
+    assert_eq!(blends(&times, &[Micros(-5)]), [Blend { from: 0, at: 0.0 }]);
+    assert_eq!(
+        blends(&[Micros(0)], &[Micros(0), Micros(70_000)]),
+        [Blend { from: 0, at: 0.0 }, Blend { from: 0, at: 0.0 }]
+    );
+    assert!(made.windows(2).all(|pair| pair[0].from <= pair[1].from));
+}
+
+#[test]
+fn an_interpolated_clip_draws_from_its_copy() {
+    let (temp, mut draft) = project(None);
+    draft.materials.videos[0].video_algorithm = Some(VideoAlgorithm {
+        algorithms: vec![Algorithm {
+            kind: Algorithm::COMPLEMENT_FRAME.into(),
+            level: 60,
+            ..Algorithm::default()
+        }],
+        ..VideoAlgorithm::default()
+    });
+    assert_eq!(enhanced_copy(&draft, Some(&temp.0), &"v".into()), None);
+    let ask = enhance_ask(&draft, Some(&temp.0), &"v".into(), 0, 0, 60).unwrap();
+    let file = enhanced_file(&temp.0, &ask.key(), &ask.range).unwrap();
+    assert!(
+        file.parent()
+            .unwrap()
+            .ends_with("Resources/video_interpolate")
+    );
+    fs::copy(fixture("pattern.jpg"), &file).unwrap();
+    assert_eq!(
+        enhanced_copy(&draft, Some(&temp.0), &"v".into()),
+        Some((file, Micros(1_000_000)))
+    );
+    // A new speed asks for another rate, which that copy is not.
+    draft.tracks[0].segments[0].speed = 0.5;
+    draft.tracks[0].segments[0].target = TimeRange::new(0, 2_000_000);
+    assert_eq!(enhanced_copy(&draft, Some(&temp.0), &"v".into()), None);
+}
+
+#[test]
+fn a_still_is_refused_before_its_frames_are_read() {
+    let (temp, draft) = project(None);
+    let ask = enhance_ask(&draft, Some(&temp.0), &"v".into(), 0, 0, 30).unwrap();
+    assert!(EnhanceFrames::open(&stills(), &ask).is_err());
 }

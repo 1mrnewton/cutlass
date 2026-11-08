@@ -1,12 +1,13 @@
-//! Enhanced and denoised copies of clips, kept in the project's
-//! `Resources/video_enhance` folder, or `Resources/video_denoise` for a
-//! copy that is only denoised.
+//! Enhanced, denoised and interpolated copies of clips, kept in the
+//! project's `Resources/video_enhance` folder, `Resources/video_denoise`
+//! for a copy that is denoised but not enhanced, or
+//! `Resources/video_interpolate` for one that is only interpolated.
 //!
 //! Making a copy is slow, so it is kept with the project, where export and
 //! other machines find it and no cache eviction takes it away. A copy
 //! holds one stretch of one source file. Its name is a hash of the file as
 //! it was on disk (path, size, last change), the levels, the model and the
-//! frame rate, then the stretch: `<hash>-<start>-<duration>.mp4`.
+//! copy's frame rate, then the stretch: `<hash>-<start>-<duration>.mp4`.
 //! A copy whose stretch covers a clip's serves it, so trimming or splitting
 //! an enhanced clip keeps its copy, and a changed source finds none.
 
@@ -21,6 +22,7 @@ use crate::folder::{RESOURCES_DIR, io_error, stay_inside};
 
 const ENHANCE_DIR: &str = "video_enhance";
 const DENOISE_DIR: &str = "video_denoise";
+const INTERPOLATE_DIR: &str = "video_interpolate";
 
 /// The most copies looked through for one clip.
 const MAX_LISTED: usize = 4096;
@@ -34,6 +36,9 @@ pub struct EnhanceKey {
     pub level: i64,
     /// The Reduce image noise level, 0 for a copy that is not denoised.
     pub denoise: i64,
+    /// The Optical flow frame rate, 0 for a copy with no frames made
+    /// between the clip's own.
+    pub interpolate: i64,
     /// The model that made it, so a better model makes new copies.
     pub model: String,
     /// Pictures per second in the copy.
@@ -62,6 +67,10 @@ impl EnhanceKey {
         if self.denoise > 0 {
             bytes.extend_from_slice(&self.denoise.to_le_bytes());
         }
+        if self.interpolate > 0 {
+            bytes.push(b'i');
+            bytes.extend_from_slice(&self.interpolate.to_le_bytes());
+        }
         bytes.extend_from_slice(self.model.as_bytes());
         bytes.push(0);
         bytes.extend_from_slice(&self.rate.to_bits().to_le_bytes());
@@ -76,8 +85,10 @@ impl EnhanceKey {
     fn folder(&self) -> &'static str {
         if self.level > 0 {
             ENHANCE_DIR
-        } else {
+        } else if self.denoise > 0 {
             DENOISE_DIR
+        } else {
+            INTERPOLATE_DIR
         }
     }
 }

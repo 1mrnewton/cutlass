@@ -68,6 +68,7 @@ fn copied(shell: &Shell, temp: &std::path::Path, level: i64, denoise: i64) {
         &"v".into(),
         level,
         denoise,
+        0,
     )
     .unwrap();
     let file = enhanced_file(temp, &ask.key(), &ask.range).unwrap();

@@ -166,8 +166,9 @@ fn an_odd_last_row_and_column_are_left_off_a_denoised_frame() {
 #[test]
 fn a_clip_is_denoised_into_a_copy_at_its_own_size() {
     let (temp, draft) = project();
-    let ask = cutlass_eval::enhance_ask(&draft, Some(&temp.0), &"v".into(), 0, Algorithm::STRONG)
-        .unwrap();
+    let ask =
+        cutlass_eval::enhance_ask(&draft, Some(&temp.0), &"v".into(), 0, Algorithm::STRONG, 0)
+            .unwrap();
     let denoiser = Denoiser::untrained(Compute::Cpu).unwrap();
     let mut heard = Vec::new();
     let file = enhance_clip(
@@ -204,6 +205,7 @@ fn a_clip_with_both_is_denoised_then_enhanced_into_one_copy() {
         &"v".into(),
         Algorithm::HD,
         Algorithm::WEAK,
+        0,
     )
     .unwrap();
     let enhancer = Enhancer::untrained(Compute::Cpu).unwrap();
@@ -218,7 +220,7 @@ fn a_clip_with_both_is_denoised_then_enhanced_into_one_copy() {
     assert_eq!((w, h), (1440, 1080));
     // Not the clip enhanced alone: the denoiser changed what the enhancer saw.
     let alone =
-        cutlass_eval::enhance_ask(&draft, Some(&temp.0), &"v".into(), Algorithm::HD, 0).unwrap();
+        cutlass_eval::enhance_ask(&draft, Some(&temp.0), &"v".into(), Algorithm::HD, 0, 0).unwrap();
     let file = enhance_clip(
         &readers(),
         &encoders(),
@@ -241,6 +243,7 @@ fn a_level_whose_model_is_not_loaded_is_refused_and_leaves_no_copy() {
         &"v".into(),
         Algorithm::HD,
         Algorithm::WEAK,
+        0,
     )
     .unwrap();
     for models in [CopyModels::default(), enhancing(&enhancer)] {
@@ -275,7 +278,7 @@ fn a_level_whose_model_is_not_loaded_is_refused_and_leaves_no_copy() {
 fn a_clip_is_enhanced_into_a_copy_its_stretch_finds() {
     let (temp, draft) = project();
     let ask =
-        cutlass_eval::enhance_ask(&draft, Some(&temp.0), &"v".into(), Algorithm::HD, 0).unwrap();
+        cutlass_eval::enhance_ask(&draft, Some(&temp.0), &"v".into(), Algorithm::HD, 0, 0).unwrap();
     let enhancer = Enhancer::untrained(Compute::Cpu).unwrap();
     let mut heard = Vec::new();
     let file = enhance_clip(
@@ -303,7 +306,7 @@ fn a_clip_is_enhanced_into_a_copy_its_stretch_finds() {
 fn a_stopped_job_leaves_no_copy() {
     let (temp, draft) = project();
     let ask =
-        cutlass_eval::enhance_ask(&draft, Some(&temp.0), &"v".into(), Algorithm::HD, 0).unwrap();
+        cutlass_eval::enhance_ask(&draft, Some(&temp.0), &"v".into(), Algorithm::HD, 0, 0).unwrap();
     let enhancer = Enhancer::untrained(Compute::Cpu).unwrap();
     let stopped = enhance_clip(
         &readers(),
@@ -323,7 +326,7 @@ fn a_stopped_job_leaves_no_copy() {
 fn a_missing_file_or_no_encoder_is_an_error_and_leaves_no_copy() {
     let (temp, draft) = project();
     let ask =
-        cutlass_eval::enhance_ask(&draft, Some(&temp.0), &"v".into(), Algorithm::HD, 0).unwrap();
+        cutlass_eval::enhance_ask(&draft, Some(&temp.0), &"v".into(), Algorithm::HD, 0, 0).unwrap();
     let enhancer = Enhancer::untrained(Compute::Cpu).unwrap();
     let no_encoder = enhance_clip(
         &readers(),

@@ -130,6 +130,7 @@ impl Shell {
             segment_id,
             enhance,
             denoise,
+            0,
         )
         .map_err(|error| ShellError::Unavailable(error.to_string()))?;
         if find_enhanced(&root, &ask.key(), &ask.range).is_some() {

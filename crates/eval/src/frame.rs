@@ -398,7 +398,13 @@ fn with_layers<D: Device, T>(
     )?;
     let mut lotties = lottie_layers(draft, extent.width, extent.height, pass.time, pass.clips);
     // Shapes are vector scenes too, drawn and placed the same way.
-    lotties.extend(shape_layers(draft, extent.width, extent.height, pass.time));
+    lotties.extend(shape_layers(
+        draft,
+        extent.width,
+        extent.height,
+        pass.time,
+        pass.clips.shapes(),
+    ));
     let mut layers = ordered(
         solid_layers(draft, extent.width, extent.height),
         text_layers(

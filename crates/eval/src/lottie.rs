@@ -10,16 +10,19 @@
 //! does not read or parse leaves the clip off the frame.
 
 use std::cell::OnceCell;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use cutlass_engine::DisplayQuarter;
 use cutlass_gpu::{Affine, Placement};
 use cutlass_lottie::{Scene, is_lottie_path, rasterize};
-use cutlass_model::{Draft, MaterialRef, Micros, TrackAttribute};
+use cutlass_model::{Draft, MaterialRef, Micros, SegmentId, TrackAttribute};
 use cutlass_picture::{CpuBytes, PictureSource, Sample};
 
 use crate::gpu::{GpuLayer, GpuSource};
-use crate::media::{OpenClips, PictureTransform, gpu_place, picture_transform, place_with};
+use crate::media::{
+    KeptShape, OpenClips, PictureTransform, gpu_place, picture_transform, place_with,
+};
 
 /// The longest edge a Lottie frame is drawn at.
 pub(crate) const MAX_RASTER_EDGE: f64 = 2_048.0;
@@ -40,6 +43,9 @@ pub(crate) struct PlacedLottie {
     height: u32,
     transform: PictureTransform,
     raster: OnceCell<Option<CpuBytes>>,
+    /// Drawn before, as a shape is: the GPU takes the picture rather than
+    /// drawing the geometry again.
+    kept: bool,
 }
 
 impl PlacedLottie {
@@ -54,7 +60,12 @@ impl PlacedLottie {
     /// The frame as one vector layer, placed as [`PictureSource::sample`]
     /// places the raster. `None` when the frame costs the GPU too much.
     pub(crate) fn gpu(&self) -> Option<Vec<GpuLayer>> {
-        if self.scene.gpu_cost() > MAX_GPU_COST {
+        let kept = if self.kept {
+            self.raster().cloned()
+        } else {
+            None
+        };
+        if kept.is_none() && self.scene.gpu_cost() > MAX_GPU_COST {
             return None;
         }
         let size = (self.scene.width, self.scene.height);
@@ -67,7 +78,10 @@ impl PlacedLottie {
             opacity: f64::from(self.transform.opacity()) / 255.0,
         };
         Some(vec![GpuLayer {
-            source: GpuSource::Vector(Arc::clone(&self.scene)),
+            source: kept.map_or_else(
+                || GpuSource::Vector(Arc::clone(&self.scene)),
+                GpuSource::Rgba,
+            ),
             placement,
             backdrop: None,
         }])
@@ -92,11 +106,17 @@ impl PictureSource for PlacedLottie {
 /// The size a `width` by `height` animation is drawn at.
 /// Shape clips at `time`, each a vector scene drawn at the clip's scale so
 /// it stays sharp, placed like a picture at its own size in canvas pixels.
+///
+/// A shape is drawn once at the density its scale asks for and the picture
+/// is kept in `kept`, shown on every frame after, and after moves and other
+/// clips' edits; only a change to the shape, or a scale that crosses a
+/// quarter step, draws it again.
 pub(crate) fn shape_layers(
     draft: &Draft,
     width: u32,
     height: u32,
     time: Micros,
+    kept: &mut HashMap<SegmentId, KeptShape>,
 ) -> Vec<LottieLayer> {
     let mut layers = Vec::new();
     for (track_index, track) in draft.tracks.iter().enumerate() {
@@ -140,25 +160,55 @@ pub(crate) fn shape_layers(
             } else {
                 1.0
             };
-            let Some((scene, drawn)) = cutlass_generated::shape_scene(shape, wanted) else {
+            let known = kept
+                .get(&segment.id)
+                .filter(|known| known.wanted == wanted && known.shape == *shape)
+                .cloned();
+            let Some(shape) = known.or_else(|| {
+                let (scene, drawn) = cutlass_generated::shape_scene(shape, wanted)?;
+                let raster = CpuBytes::new(scene.width, scene.height, rasterize(&scene)).ok()?;
+                let drawn = KeptShape {
+                    shape: shape.clone(),
+                    wanted,
+                    drawn,
+                    raster,
+                };
+                // Pictures of shapes since deleted go once there are many.
+                if kept.len() >= MAX_KEPT_SHAPES {
+                    kept.clear();
+                }
+                kept.insert(segment.id.clone(), drawn.clone());
+                Some(drawn)
+            }) else {
                 continue;
             };
+            let (picture_w, picture_h) = (shape.raster.width(), shape.raster.height());
             layers.push(LottieLayer {
                 render_index: segment.render_index,
                 track_index,
                 segment_index,
                 placed: PlacedLottie {
-                    scene: Arc::new(scene),
+                    // The size the picture is placed by; the geometry is
+                    // not drawn again.
+                    scene: Arc::new(Scene {
+                        width: picture_w,
+                        height: picture_h,
+                        items: Vec::new(),
+                    }),
                     width,
                     height,
-                    transform: transform.dense(drawn),
-                    raster: OnceCell::new(),
+                    transform: transform.dense(shape.drawn),
+                    raster: OnceCell::from(Some(shape.raster)),
+                    kept: true,
                 },
             });
         }
     }
     layers
 }
+
+/// The most shape pictures kept at once.
+const MAX_KEPT_SHAPES: usize = 64;
 
 /// The most picture pixels a shape is drawn with per shown pixel.
 const MAX_SHAPE_DENSITY: f64 = 8.0;
@@ -233,6 +283,7 @@ pub(crate) fn lottie_layers(
                     height,
                     transform,
                     raster: OnceCell::new(),
+                    kept: false,
                 },
             });
         }
@@ -353,6 +404,53 @@ mod tests {
                 .iter()
                 .all(|byte| *byte == 0)
         );
+    }
+
+    #[test]
+    fn a_shape_is_drawn_once_and_again_only_when_it_changes() {
+        let mut draft = Draft::empty("draft");
+        draft.canvas_config.width = 100;
+        draft.canvas_config.height = 100;
+        draft
+            .materials
+            .shapes
+            .push(cutlass_model::MaterialShape::preset(
+                "sq".into(),
+                cutlass_model::ShapeKind::Rectangle,
+                20.0,
+                20.0,
+            ));
+        let mut row = Track::main("stickers");
+        row.kind = TrackType::Sticker;
+        row.segments
+            .push(Segment::new("shape", "sq", TimeRange::new(0, 1_000_000)));
+        draft.tracks.push(row);
+        let mut kept = HashMap::new();
+        let shown = |draft: &Draft, kept: &mut HashMap<SegmentId, KeptShape>, time: i64| {
+            let layers = shape_layers(draft, 100, 100, Micros(time), kept);
+            let placed = &layers[0].placed;
+            assert!(placed.kept);
+            placed.raster().unwrap().clone()
+        };
+        let first = shown(&draft, &mut kept, 0);
+        assert_eq!(kept.len(), 1);
+        // Mark the kept picture: a later frame and a move show the mark,
+        // so neither drew the shape again.
+        let id = SegmentId::new("shape");
+        let marked =
+            CpuBytes::new(first.width(), first.height(), vec![7; first.rgba().len()]).unwrap();
+        kept.get_mut(&id).unwrap().raster = marked.clone();
+        assert_eq!(shown(&draft, &mut kept, 500_000), marked);
+        draft.tracks[1].segments[0].clip.transform.x = 0.5;
+        assert_eq!(shown(&draft, &mut kept, 0), marked);
+        // A new fill draws it again.
+        draft.materials.shapes[0].color = "#ff0000".to_owned();
+        assert_ne!(shown(&draft, &mut kept, 0), marked);
+        // So does a scale past the next quarter step, at the denser size.
+        kept.get_mut(&id).unwrap().raster = marked.clone();
+        draft.tracks[1].segments[0].uniform_scale.value = 2.0;
+        let dense = shown(&draft, &mut kept, 0);
+        assert!(dense.width() > first.width());
     }
 
     #[test]

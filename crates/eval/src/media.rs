@@ -58,6 +58,17 @@ fn open_clip(
     Some(source)
 }
 
+/// A shape drawn once and shown on every frame after: the shape as it was
+/// drawn, the density it was asked for, the density it was drawn at, and
+/// the picture.
+#[derive(Clone)]
+pub(crate) struct KeptShape {
+    pub(crate) shape: cutlass_model::MaterialShape,
+    pub(crate) wanted: f64,
+    pub(crate) drawn: f64,
+    pub(crate) raster: CpuBytes,
+}
+
 /// Open video files for one draft revision.
 pub struct OpenClips {
     draft: Option<DraftId>,
@@ -71,6 +82,10 @@ pub struct OpenClips {
     /// Title rasters by segment, with the density each was drawn at. A
     /// title does not change within a revision unless its scale is keyed.
     texts: HashMap<SegmentId, (f64, CpuBytes)>,
+    /// Shape rasters by segment. A move or another clip's edit leaves a
+    /// shape as it was, so these outlive a revision; each is checked
+    /// against its shape before it is shown.
+    shapes: HashMap<SegmentId, KeptShape>,
     /// Off, a clip whose picture is not decoded yet shows its last one.
     patient: bool,
     /// Lottie files by stored path; `None` is a file that did not read.
@@ -89,6 +104,7 @@ impl OpenClips {
             nests: HashMap::new(),
             images: HashMap::new(),
             texts: HashMap::new(),
+            shapes: HashMap::new(),
             patient: true,
             lotties: HashMap::new(),
         }
@@ -125,6 +141,7 @@ impl OpenClips {
         self.nests.clear();
         self.images.clear();
         self.texts.clear();
+        self.shapes.clear();
         self.lotties.clear();
         self.draft = None;
         self.revision = 0;
@@ -157,6 +174,11 @@ impl OpenClips {
         });
         self.lotties.insert(stored.to_owned(), read.clone());
         read
+    }
+
+    /// Shape rasters, kept across revisions.
+    pub(crate) fn shapes(&mut self) -> &mut HashMap<SegmentId, KeptShape> {
+        &mut self.shapes
     }
 
     /// Title rasters kept for this revision.

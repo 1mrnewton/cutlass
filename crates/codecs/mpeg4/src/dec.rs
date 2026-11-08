@@ -186,7 +186,10 @@ impl Decoder {
             VISUAL_OBJECT => self.colour = parse_visual_object(payload),
             USER_DATA => {
                 parse_user_data(payload, &mut self.encoder);
-                self.fixes = Fixes::from_encoder(&self.encoder);
+                self.fixes = Fixes {
+                    xvid_ilace: self.fixes.xvid_ilace,
+                    ..Fixes::from_encoder(&self.encoder)
+                };
             }
             GOV_START => {
                 if let Some(seconds) = parse_gov(payload) {
@@ -485,8 +488,26 @@ impl Decoder {
             VopType::B => (self.older.as_ref(), self.newer.as_ref()),
         };
         if let Err(error) = vop::decode(data, layer, pic, grid, past, future, &mut frame) {
-            self.spare.push(frame);
-            return Err(error);
+            // Old Xvid builds write dct_type in every interlaced P
+            // macroblock and say so nowhere but their FourCC. A P-VOP that
+            // fails as written and decodes whole that way is one of them.
+            let xvid = Layer {
+                fixes: Fixes {
+                    xvid_ilace: true,
+                    ..layer.fixes
+                },
+                ..*layer
+            };
+            let retry = layer.interlaced
+                && !layer.fixes.xvid_ilace
+                && matches!(pic.kind, VopType::P | VopType::S)
+                && self.encoder.divx_version.is_none()
+                && self.encoder.lavc_build.is_none();
+            if !(retry && vop::decode(data, &xvid, pic, grid, past, future, &mut frame).is_ok()) {
+                self.spare.push(frame);
+                return Err(error);
+            }
+            self.fixes.xvid_ilace = true;
         }
         if pic.kind == VopType::B {
             pictures.push(image(&frame, size));

@@ -45,6 +45,9 @@ pub(crate) struct Fixes {
     /// Quarter-sample field luma as two 8x8 halves, which libavcodec's
     /// encoder reconstructs with, instead of one 16x8 block.
     pub(crate) qpel_field_halves: bool,
+    /// `dct_type` in every interlaced P macroblock, coded blocks or not,
+    /// as old Xvid builds write it. No header names those builds.
+    pub(crate) xvid_ilace: bool,
 }
 
 impl Fixes {
@@ -65,11 +68,13 @@ impl Fixes {
             direct_blocksize: below(enc.lavc_build, 4655) || divx.is_some(),
             divx_413: divx == Some(500) && build == Some(413),
             qpel_field_halves: enc.lavc_build.is_some(),
+            xvid_ilace: false,
         }
     }
 }
 
 /// The coding tools of a VOL, or of short-header pictures.
+#[derive(Clone, Copy)]
 pub(crate) struct Layer<'a> {
     pub(crate) mbw: usize,
     pub(crate) mbh: usize,
@@ -1103,7 +1108,8 @@ impl Vop<'_> {
         if sym & 8 != 0 {
             self.set_q(DQUANT[r.read(2) as usize]);
         }
-        let field_dct = self.layer.interlaced && cbp != 0 && r.bit();
+        let field_dct =
+            self.layer.interlaced && (cbp != 0 || self.layer.fixes.xvid_ilace) && r.bit();
         let f = self.pic.fcode_forward;
         let (motion, record) = if four {
             let mut mvs = [(0, 0); 4];

@@ -30,9 +30,10 @@ use cutlass_engine::{Thumb, ThumbKey, Thumbnails, Waveforms};
 use cutlass_eval::{ReaderFactory, SceneError, scene_cuts};
 use cutlass_export::{ProresProfile, SidecarKind};
 use cutlass_model::{
-    Crop, Draft, FrameRate, MaterialAudio, MaterialId, MaterialRef, MaterialVideo, MetaType,
-    Micros, Segment, SegmentId, TimeRange, TimecodeLabel, TrackAttribute, TrackId, TrackType,
-    WordColumns, linkage_from_biz, source_time_at, track_holds_beats, visible_beats, visible_marks,
+    Crop, Draft, FrameRate, KindSwitches, MaterialAudio, MaterialId, MaterialRef, MaterialVideo,
+    MetaType, Micros, Segment, SegmentId, TimeRange, TimecodeLabel, TrackAttribute, TrackId,
+    TrackType, WordColumns, linkage_from_biz, source_time_at, track_holds_beats, visible_beats,
+    visible_marks,
 };
 use cutlass_playback::{
     AudioHost, FilmCell, FrameCache, PLAY_FRAMES, Program, Transport, film_cells, media_file,
@@ -1567,7 +1568,7 @@ impl Shell {
             return Err(ShellError::MissingFolder(path));
         }
         let session = self.session.as_ref().ok_or(ShellError::NoProject)?;
-        let enabled = session.linkage().enabled;
+        let linkage = session.linkage();
         let revision = session.revision();
         let draft = self.root_draft().ok_or(ShellError::NoProject)?;
         let folder = self.folder.as_mut().ok_or(ShellError::NoProject)?;
@@ -1592,7 +1593,7 @@ impl Shell {
                 slot.clone_from(&name);
             }
         }
-        folder.set_linkage_enabled(enabled);
+        folder.set_linkage(linkage);
         Ok((path, folder.clone(), revision))
     }
 
@@ -4222,6 +4223,27 @@ impl Shell {
         let session = self.session.as_mut().ok_or(ShellError::NoProject)?;
         let mut settings = session.linkage();
         settings.enabled = !settings.enabled;
+        session.set_linkage(settings);
+        Ok(())
+    }
+
+    /// The kinds of clip that move or go with the main-track clip they are
+    /// linked to. `None` with no project open.
+    #[must_use]
+    pub fn linkage_kinds(&self) -> Option<KindSwitches> {
+        self.session
+            .as_ref()
+            .map(|session| session.linkage().follow)
+    }
+
+    /// Choose the kinds that move, are cut, and are deleted with their
+    /// main-track clip. The linkage switch and the stored pairs stay; a
+    /// kind turned off just stays where it is. This is not an undo step.
+    pub fn set_linkage_kinds(&mut self, kinds: KindSwitches) -> Result<(), ShellError> {
+        let session = self.session.as_mut().ok_or(ShellError::NoProject)?;
+        let mut settings = session.linkage();
+        settings.follow = kinds;
+        settings.cut = kinds;
         session.set_linkage(settings);
         Ok(())
     }
@@ -10844,6 +10866,29 @@ mod tests {
             saved.biz_config.unwrap()["timeline_settings"][saved.draft.id.as_str()]["linkage_enabled"],
             false
         );
+    }
+
+    #[test]
+    fn linkage_kinds_are_kept_with_the_project() {
+        let root = Temp::new();
+        let path = Shell::create_project(&root.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&path).unwrap();
+        assert_eq!(
+            desktop.linkage_kinds(),
+            Some(cutlass_model::KindSwitches::ALL)
+        );
+        let mut kinds = cutlass_model::KindSwitches::ALL;
+        kinds.audio = false;
+        desktop.set_linkage_kinds(kinds).unwrap();
+        desktop.close_project().unwrap();
+        desktop.open_folder(&path).unwrap();
+        assert_eq!(desktop.linkage_kinds(), Some(kinds));
+        assert!(desktop.linkage_enabled());
+        assert!(matches!(
+            shell().set_linkage_kinds(kinds),
+            Err(ShellError::NoProject)
+        ));
     }
 
     #[test]

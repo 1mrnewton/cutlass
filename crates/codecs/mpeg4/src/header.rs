@@ -357,7 +357,14 @@ pub(crate) fn parse_vol(payload: &[u8]) -> Result<Vol, CodecError> {
         }
     }
     if r.bit() {
-        return Err(unsupported("scalability"));
+        // hierarchy_type, ref_layer_id, ref_layer_sampling_direc, then the
+        // four sampling factors. A zero factor is no real enhancement
+        // layer: some encoders set the flag and send none of these fields.
+        let mut s = r.clone();
+        s.skip(6);
+        if (0..4).all(|_| s.read(5) != 0) {
+            return Err(unsupported("scalability"));
+        }
     }
     r.check("video object layer")?;
     if data_partitioning && interlaced {
@@ -718,9 +725,17 @@ mod tests {
         parse_vop, units,
     };
     use crate::bits::BitWriter;
+    use cutlass_decode::CodecError;
 
     /// A Simple profile VOL: 30000 ticks a second, 176 by 144, progressive.
     pub(crate) fn simple_vol(width: u32, height: u32) -> Vec<u8> {
+        let mut w = vol_up_to_scalability(width, height);
+        w.put(1, 0); // scalability
+        w.stuff();
+        w.finish()
+    }
+
+    fn vol_up_to_scalability(width: u32, height: u32) -> BitWriter {
         let mut w = BitWriter::new();
         w.put(1, 0); // random_accessible_vol
         w.put(8, 1); // simple object
@@ -745,9 +760,31 @@ mod tests {
         w.put(1, 1); // complexity_estimation_disable
         w.put(1, 1); // resync_marker_disable
         w.put(1, 0); // data_partitioned
-        w.put(1, 0); // scalability
+        w
+    }
+
+    #[test]
+    fn ignores_a_scalability_flag_without_an_enhancement_layer() {
+        let mut w = vol_up_to_scalability(352, 240);
+        w.put(1, 1); // scalability, and nothing after it
         w.stuff();
-        w.finish()
+        let vol = parse_vol(&w.finish()).expect("vol");
+        assert_eq!((vol.width, vol.height), (352, 240));
+
+        let mut w = vol_up_to_scalability(352, 240);
+        w.put(1, 1);
+        w.put(6, 0);
+        for factor in [1, 2, 1, 2] {
+            w.put(5, factor);
+        }
+        w.put(1, 0); // enhancement_type
+        w.stuff();
+        assert!(matches!(
+            parse_vol(&w.finish()),
+            Err(CodecError::Unsupported {
+                what: "scalability"
+            })
+        ));
     }
 
     #[test]

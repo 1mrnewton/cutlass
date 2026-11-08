@@ -182,6 +182,8 @@ cargo test -p cutlass-export --lib sound_alone_writes_ac3_and_eac3_and_reopens
 cargo test -p cutlass --lib an_ac3_movie_opens_seeks_and_reopens
 cargo test -p cutlass --lib ac3_and_eac3_open_for_import_and_export
 cargo test -p cutlass-ffi --lib the_phone_opens_ac3_and_eac3
+cargo test --release -p cutlass-export -p cutlass -p cutlass-ffi --lib ac3
+  # this encoder: desktop 2, export 1, ffi 1, all passed
 cargo clippy -p cutlass-ac3 -p cutlass-isobmff -p cutlass-riff \
   -p cutlass-platform-apple -p cutlass-export -p cutlass-ffi -p cutlass \
   --all-targets -- -D warnings

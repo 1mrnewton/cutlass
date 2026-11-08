@@ -8286,13 +8286,13 @@ fn export_choices(shell: &Shell, ui: &mut Ui, view: &mut ViewState) {
         });
     }
     ui.add(ui::Check::new(&mut export.sound, "Audio"));
-    // PCM goes in a MOV or a WAV, never an MP4. FLAC, MP3 and Opus are
-    // sound alone, each in a file of its own (Opus in an Ogg file).
+    // PCM goes in a MOV or a WAV, never an MP4. FLAC, MP3, Opus and Vorbis
+    // are sound alone, each in a file of its own (Opus and Vorbis in an Ogg file).
     let pcm_fits = view.export_mov || !export.picture;
     let alone_fits = !export.picture;
     let alone = matches!(
         export.audio.codec,
-        CodecId::Flac | CodecId::Mp3 | CodecId::Opus
+        CodecId::Flac | CodecId::Mp3 | CodecId::Opus | CodecId::Vorbis
     );
     if (!pcm_fits && export.audio.codec == CodecId::Pcm) || (!alone_fits && alone) {
         export.audio.codec = CodecId::Aac;
@@ -8328,6 +8328,10 @@ fn export_choices(shell: &Shell, ui: &mut Ui, view: &mut ViewState) {
             if ui.add_enabled(alone_fits, opus).clicked() {
                 audio.codec = CodecId::Opus;
                 audio.sample_rate = 48_000;
+            }
+            let vorbis = ui::Choice::new(audio.codec == CodecId::Vorbis, "Vorbis");
+            if ui.add_enabled(alone_fits, vorbis).clicked() {
+                audio.codec = CodecId::Vorbis;
             }
         });
         choices_row(ui, "Sample rate", |ui| {

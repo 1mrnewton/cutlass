@@ -484,6 +484,7 @@ impl SoundFormat {
             CodecId::Flac => "flac",
             CodecId::Mp3 => "mp3",
             CodecId::Opus => "opus",
+            CodecId::Vorbis => "ogg",
             _ => "m4a",
         }
     }
@@ -494,7 +495,7 @@ impl SoundFormat {
             CodecId::Pcm => cutlass_codec::ContainerId::Riff,
             CodecId::Flac => cutlass_codec::ContainerId::Flac,
             CodecId::Mp3 => cutlass_codec::ContainerId::Mp3,
-            CodecId::Opus => cutlass_codec::ContainerId::Ogg,
+            CodecId::Opus | CodecId::Vorbis => cutlass_codec::ContainerId::Ogg,
             _ => cutlass_codec::ContainerId::Isobmff,
         }
     }
@@ -7316,6 +7317,11 @@ impl Shell {
                 "Opus sound is written alone, in an Opus file".to_owned(),
             ));
         }
+        if request.sound && request.audio.codec == CodecId::Vorbis {
+            return Err(ShellError::Unavailable(
+                "Vorbis sound is written alone, in an Ogg file".to_owned(),
+            ));
+        }
         let bitrate = match request.bitrate {
             Some(0) => {
                 return Err(ShellError::Unavailable(
@@ -8833,6 +8839,17 @@ mod tests {
     };
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+
+    #[test]
+    fn vorbis_sound_alone_is_an_ogg_file() {
+        let sound = super::SoundFormat {
+            codec: CodecId::Vorbis,
+            ..super::SoundFormat::default()
+        };
+        assert_eq!(sound.extension(), "ogg");
+        assert_eq!(sound.container(), ContainerId::Ogg);
+        assert!(!sound.lossless());
+    }
 
     static MOVIE_OPENS: AtomicU32 = AtomicU32::new(0);
     static KEPT_OPENS: AtomicU32 = AtomicU32::new(0);
@@ -15580,6 +15597,19 @@ mod tests {
         assert_eq!(
             opus_movie.unwrap_err().to_string(),
             "Opus sound is written alone, in an Opus file"
+        );
+        let vorbis_movie = desktop.export(ExportRequest {
+            path: temp.path.join("vorbis.mp4"),
+            short_side: 480,
+            audio: super::SoundFormat {
+                codec: CodecId::Vorbis,
+                ..super::SoundFormat::default()
+            },
+            ..ExportRequest::default()
+        });
+        assert_eq!(
+            vorbis_movie.unwrap_err().to_string(),
+            "Vorbis sound is written alone, in an Ogg file"
         );
 
         // A GIF alone, and then again beside a movie, which finds it taken.

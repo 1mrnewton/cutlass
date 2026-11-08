@@ -2755,6 +2755,7 @@ dependencies = [
  "cutlass-still",
  "cutlass-storage",
  "cutlass-store",
+ "cutlass-vorbis",
  "cutlass-webp",
 ]
 

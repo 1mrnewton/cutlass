@@ -17,8 +17,8 @@ use cutlass_eval::ReaderFactory;
 use cutlass_isobmff::IsoBmffFile;
 use cutlass_still::{StillDemux, still_limits};
 
-/// ISOBMFF, WAV, AIFF, FLAC, Ogg Opus, MP3, and stills, decoded with
-/// [`decoders`].
+/// ISOBMFF, WAV, AIFF, FLAC, Ogg (Opus and Vorbis), MP3, and stills, decoded
+/// with [`decoders`].
 #[must_use]
 pub fn readers() -> ReaderFactory {
     let mut readers = ReaderFactory::new();
@@ -33,19 +33,20 @@ pub fn readers() -> ReaderFactory {
     readers
 }
 
-/// FLAC, ALAC, MP3, Opus and WebP, the platform decoders for this OS, then
-/// PNG, GIF, JPEG, AAC, H.264, HEVC, PCM and ProRes.
+/// FLAC, ALAC, MP3, Opus, Vorbis and WebP, the platform decoders for this OS,
+/// then PNG, GIF, JPEG, AAC, H.264, HEVC, PCM and ProRes.
 #[must_use]
 pub fn decoders() -> DecodeFactory {
     let mut decoders = DecodeFactory::new();
-    // Rust audio codecs go ahead of the platform ones, so FLAC, ALAC, MP3
-    // and Opus decode the same on the phone as on the desktop. WebP goes
-    // ahead too: ImageIO gives one picture per packet and does not keep an
-    // animation's canvas.
+    // Rust audio codecs go ahead of the platform ones, so FLAC, ALAC, MP3,
+    // Opus and Vorbis decode the same on the phone as on the desktop. WebP
+    // goes ahead too: ImageIO gives one picture per packet and does not keep
+    // an animation's canvas.
     cutlass_flac::register_decoders(&mut decoders);
     cutlass_alac::register_decoders(&mut decoders);
     cutlass_mp3::register_decoders(&mut decoders);
     cutlass_opus::register_decoders(&mut decoders);
+    cutlass_vorbis::register_decoders(&mut decoders);
     cutlass_webp::register_decoders(&mut decoders);
     #[cfg(target_vendor = "apple")]
     cutlass_platform_apple::register_decoders(&mut decoders);

@@ -8,6 +8,7 @@ mod aht;
 mod bitalloc;
 mod bits;
 mod crc;
+mod decode;
 mod exponents;
 mod frame;
 mod header;
@@ -15,4 +16,21 @@ mod mdct;
 mod spx;
 mod tables;
 
+pub use decode::{Ac3Decoder, Downmix, Extension, Options};
 pub use frame::{DynamicRange, Tools, Transient};
+pub use header::{
+    Dac3, Dec3, Dec3Substream, MAX_FRAME_BYTES, Metadata, MixLevels, PROBE_BYTES, SYNCWORD,
+    StreamType, SyncInfo, Syntax, ac3_bit_rate, compr_db, compr_gain, dynrng_gain, probe,
+};
+
+use cutlass_decode::{CodecError, CodecId, CodecParams, DecodeFactory, Decoder};
+
+fn open_decoder(params: &CodecParams) -> Result<Box<dyn Decoder>, CodecError> {
+    Ok(Box::new(Ac3Decoder::open(params)?))
+}
+
+/// Register the AC-3 and E-AC-3 decoder.
+pub fn register_decoders(factory: &mut DecodeFactory) {
+    factory.register(CodecId::Ac3, open_decoder);
+    factory.register(CodecId::Eac3, open_decoder);
+}

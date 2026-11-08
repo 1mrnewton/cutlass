@@ -449,11 +449,11 @@ fn map_codec(fourcc: [u8; 4], oti: Option<u8>) -> CodecId {
         b"av01" => CodecId::Av1,
         b"vp08" => CodecId::Vp8,
         b"vp09" => CodecId::Vp9,
-        // ISO/IEC 14496-1 objectTypeIndication. An absent or unlisted one
-        // stays MPEG-4 Visual (0x20).
+        // ISO/IEC 14496-1 objectTypeIndication: MPEG-2 Simple, Main, SNR,
+        // Spatial, High and 4:2:2, then MPEG-1; 0x6C is JPEG. An absent or
+        // unlisted one stays MPEG-4 Visual (0x20).
         b"mp4v" => match oti {
-            Some(0x60..=0x65) => CodecId::Mpeg2,
-            Some(0x6A) => CodecId::Unknown(fourcc),
+            Some(0x60..=0x65 | 0x6A) => CodecId::Mpeg2,
             Some(0x6C) => CodecId::Mjpeg,
             _ => CodecId::Mpeg4,
         },
@@ -594,7 +594,7 @@ mod tests {
         for mpeg2 in 0x60..=0x65 {
             assert_eq!(codec(Some(mpeg2)).codec, CodecId::Mpeg2, "{mpeg2:#x}");
         }
-        assert_eq!(codec(Some(0x6A)).codec, CodecId::Unknown(*b"mp4v"));
+        assert_eq!(codec(Some(0x6A)).codec, CodecId::Mpeg2, "MPEG-1");
         assert_eq!(codec(Some(0x6C)).codec, CodecId::Mjpeg);
         assert_eq!(codec(Some(0x21)).codec, CodecId::Mpeg4);
     }

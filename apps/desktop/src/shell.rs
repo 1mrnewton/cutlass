@@ -434,9 +434,10 @@ impl Default for ExportRequest {
     }
 }
 
-/// The sound of an export: AAC (in an MP4, a movie or an M4A), 16-bit PCM
-/// (in a movie or a WAV), 16-bit FLAC (alone, in a FLAC file), MP3 (alone,
-/// in an MP3 file), or Opus (alone, in an Ogg `.opus` file).
+/// The sound of an export: AAC, AC-3, or E-AC-3 (in an MP4, a movie or an
+/// M4A), ALAC (in an M4A), 16-bit PCM (in a movie or a WAV), 16-bit FLAC
+/// (alone, in a FLAC file), MP3 (alone, in an MP3 file), or Opus (alone, in
+/// an Ogg `.opus` file).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SoundFormat {
     pub codec: CodecId,

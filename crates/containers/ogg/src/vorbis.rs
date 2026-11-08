@@ -250,6 +250,81 @@ pub fn xiph_lace(packets: [&[u8]; 3]) -> Vec<u8> {
     out
 }
 
+/// The three header packets of a Vorbis configuration in Xiph lacing, with
+/// three 16-bit big-endian lengths, or back to back. `None` when none of
+/// the forms fits.
+#[must_use]
+pub fn split_config(config: &[u8]) -> Option<[Vec<u8>; 3]> {
+    split_xiph(config)
+        .or_else(|| split_sixteen(config))
+        .or_else(|| split_plain(config))
+}
+
+fn split_xiph(config: &[u8]) -> Option<[Vec<u8>; 3]> {
+    if config.first() != Some(&2) {
+        return None;
+    }
+    let mut at = 1;
+    let mut lengths = [0_usize; 2];
+    for length in &mut lengths {
+        loop {
+            let &byte = config.get(at)?;
+            at += 1;
+            *length = length.checked_add(usize::from(byte))?;
+            if byte < 255 {
+                break;
+            }
+        }
+    }
+    let first_end = at.checked_add(lengths[0])?;
+    let second_end = first_end.checked_add(lengths[1])?;
+    if second_end >= config.len() {
+        return None;
+    }
+    let packets = [
+        config[at..first_end].to_vec(),
+        config[first_end..second_end].to_vec(),
+        config[second_end..].to_vec(),
+    ];
+    headers_in_order(packets)
+}
+
+fn split_sixteen(config: &[u8]) -> Option<[Vec<u8>; 3]> {
+    let mut at = 0;
+    let mut packets: [Vec<u8>; 3] = Default::default();
+    for packet in &mut packets {
+        let len = usize::from(u16::from_be_bytes([*config.get(at)?, *config.get(at + 1)?]));
+        at += 2;
+        *packet = config.get(at..at.checked_add(len)?)?.to_vec();
+        at += len;
+    }
+    if at != config.len() {
+        return None;
+    }
+    headers_in_order(packets)
+}
+
+fn split_plain(config: &[u8]) -> Option<[Vec<u8>; 3]> {
+    let id = config.get(..ID_BYTES)?;
+    let rest = &config[ID_BYTES..];
+    if !rest.starts_with(COMMENT_MAGIC) {
+        return None;
+    }
+    let (_, _, end) =
+        read_comment_list(rest, COMMENT_MAGIC.len(), false, |_| OggError::NoPage).ok()?;
+    let comment_end = end.checked_add(1)?;
+    let comment = rest.get(..comment_end)?;
+    let setup = rest.get(comment_end..)?;
+    headers_in_order([id.to_vec(), comment.to_vec(), setup.to_vec()])
+}
+
+fn headers_in_order(packets: [Vec<u8>; 3]) -> Option<[Vec<u8>; 3]> {
+    (packets[0].starts_with(ID_MAGIC)
+        && packets[1].starts_with(COMMENT_MAGIC)
+        && packets[2].starts_with(SETUP_MAGIC))
+    .then_some(packets)
+}
+
 /// Bits used to write `value` (section 9.2.1).
 const fn ilog(value: u32) -> u32 {
     u32::BITS - value.leading_zeros()

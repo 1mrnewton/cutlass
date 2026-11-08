@@ -6,14 +6,16 @@
 
 use std::io::Cursor;
 
-use cutlass_codec::{CodecId, StreamCodec};
-use cutlass_container::{Demux, Landing, Limits, OpenError, SeekTo};
+use cutlass_codec::{CodecId, Packet, StreamCodec, StreamParams, Timescale, Timestamp};
+use cutlass_container::{
+    Demux, Landing, Limits, Mux, MuxError, NewStream, OpenError, SeekTo, TrackDuration,
+};
 
-use crate::OggDemux;
 use crate::opus::OpusTags;
-use crate::page::{FLAG_BOS, FLAG_EOS, encode, lacing_for};
+use crate::page::{FLAG_BOS, FLAG_EOS, encode, lacing_for, parse_header};
 use crate::vorbis::build::{audio, comment, id, setup};
 use crate::vorbis::xiph_lace;
+use crate::{OggDemux, OggMux};
 
 const SERIAL: u32 = 0x5EED;
 const SHORT: u8 = 0;
@@ -484,4 +486,360 @@ fn every_cut_of_a_vorbis_file_fails_closed_or_opens() {
             while let Ok(Some(_)) = demux.read_packet() {}
         }
     }
+}
+
+fn vorbis_params(headers: &[Vec<u8>; 3]) -> NewStream {
+    NewStream {
+        params: StreamParams::try_audio(
+            StreamCodec::Known(CodecId::Vorbis),
+            44_100,
+            2,
+            xiph_lace([&headers[0], &headers[1], &headers[2]]),
+        )
+        .expect("params"),
+        timescale: Timescale::new(44_100),
+        language: None,
+    }
+}
+
+fn timed(stream: u32, bytes: Vec<u8>, pts: i64, duration: i64) -> Packet {
+    let time = Timestamp::try_new(Some(pts), Some(pts), Some(duration)).expect("time");
+    Packet::try_new(stream, bytes, time, Timescale::new(44_100), true).expect("packet")
+}
+
+/// Modes for `count` packets, natural durations, from block flags.
+fn natural(modes: &[u8]) -> Vec<i64> {
+    let block = |mode: u8| if mode == LONG { 2048 } else { 256 };
+    modes
+        .iter()
+        .enumerate()
+        .map(|(index, &mode)| {
+            if index == 0 {
+                0
+            } else {
+                (block(modes[index - 1]) + block(mode)) / 4
+            }
+        })
+        .collect()
+}
+
+/// Muxes packets in `modes` from `start`; the last lasts `last` samples,
+/// or its natural duration.
+fn mux_vorbis(headers: &[Vec<u8>; 3], start: i64, modes: &[u8], last: Option<i64>) -> Vec<u8> {
+    let mut mux = OggMux::new(Cursor::new(Vec::new()));
+    let track = mux.add_stream(vorbis_params(headers)).expect("stream");
+    let durations = natural(modes);
+    let mut pts = start;
+    let mut sum = 0;
+    for (index, (&mode, &natural)) in modes.iter().zip(&durations).enumerate() {
+        let duration = if index + 1 == modes.len() {
+            last.unwrap_or(natural)
+        } else {
+            natural
+        };
+        let tag = u8::try_from(index % 256).expect("tag");
+        mux.write_packet(&timed(track.get(), packet(mode, tag), pts, duration))
+            .expect("write");
+        pts += duration;
+        sum += duration;
+    }
+    mux.finish(&[TrackDuration {
+        track,
+        timescale: Timescale::new(44_100),
+        ticks: sum,
+    }])
+    .expect("finish");
+    mux.into_inner().into_inner()
+}
+
+/// Every page of a file: (header, lacing values).
+fn page_list(bytes: &[u8]) -> Vec<(crate::page::Header, Vec<u8>)> {
+    let mut out = Vec::new();
+    let mut at = 0;
+    while let Some(header) = parse_header(&bytes[at..]) {
+        let table = 27 + usize::from(header.segments);
+        let lacing = bytes[at + 27..at + table].to_vec();
+        let body: usize = lacing.iter().map(|&value| usize::from(value)).sum();
+        out.push((header, lacing));
+        at += table + body;
+    }
+    out
+}
+
+#[test]
+fn a_muxed_vorbis_stream_reads_back_with_its_headers_times_and_trim() {
+    let headers = headers();
+    let modes: Vec<u8> = (0..300)
+        .map(|index| if index % 7 < 3 { SHORT } else { LONG })
+        .collect();
+    let durations = natural(&modes);
+    let bytes = mux_vorbis(&headers, 0, &modes, Some(100));
+    let mut demux = open(&bytes);
+    let stream = demux.streams()[0].clone();
+    assert_eq!(
+        stream.params().codec(),
+        &StreamCodec::Known(CodecId::Vorbis)
+    );
+    assert_eq!(
+        stream.params().extradata(),
+        xiph_lace([&headers[0], &headers[1], &headers[2]]).as_slice()
+    );
+    assert_eq!(stream.timescale().ticks_per_second(), 44_100);
+    let total: i64 = durations[..299].iter().sum::<i64>() + 100;
+    assert_eq!(stream.edits()[0].media_time(), Some(0));
+    assert_eq!(stream.edits()[0].duration(), total);
+    assert_eq!(
+        stream.trim().trailing_padding(),
+        Some(u64::try_from(durations[299] - 100).expect("trim"))
+    );
+    let read = read_times(&mut demux);
+    assert_eq!(read.len(), 300);
+    let mut pts = 0;
+    for (index, &(time, duration, tag)) in read.iter().enumerate() {
+        let expected = if index == 299 { 100 } else { durations[index] };
+        assert_eq!((time, duration), (pts, expected), "packet {index}");
+        assert_eq!(tag, u8::try_from(index % 256).expect("tag"));
+        pts += duration;
+    }
+}
+
+#[test]
+fn vorbis_headers_take_their_own_pages() {
+    let headers = headers();
+    let bytes = mux_vorbis(&headers, 0, &[LONG, LONG, SHORT, LONG], None);
+    let pages = page_list(&bytes);
+    let (bos, bos_lacing) = &pages[0];
+    assert_eq!(bos.flags, FLAG_BOS);
+    assert_eq!((bos.granule, bos.sequence), (0, 0));
+    assert_eq!(bos_lacing, &lacing_for(headers[0].len()));
+    let (setup_page, setup_lacing) = &pages[1];
+    assert_eq!((setup_page.granule, setup_page.sequence), (0, 1));
+    let mut expected = lacing_for(headers[1].len());
+    expected.extend(lacing_for(headers[2].len()));
+    assert_eq!(
+        setup_lacing, &expected,
+        "comment and setup, and nothing after"
+    );
+    let (audio, _) = &pages[2];
+    assert_eq!(audio.sequence, 2);
+    assert_eq!(audio.flags, FLAG_EOS);
+    assert_eq!(audio.granule, 1024 + 576 + 576);
+}
+
+#[test]
+fn a_comment_longer_than_a_page_spans_pages() {
+    let [first, _, third] = headers();
+    let picture = format!("METADATA_BLOCK_PICTURE={}", "A".repeat(70_000));
+    let second = comment("vendor", &["TITLE=Long", picture.as_str()]);
+    let headers = [first, second, third];
+    let bytes = mux_vorbis(&headers, 0, &[LONG, LONG, LONG], None);
+    let pages = page_list(&bytes);
+    assert_eq!(pages[1].0.granule, -1, "a page that completes no packet");
+    assert_eq!(pages[2].0.flags, crate::page::FLAG_CONTINUED);
+    assert_eq!(pages[2].0.granule, 0);
+    let mut demux = open(&bytes);
+    let info = demux.vorbis(0).expect("info");
+    assert_eq!(info.comment.comments.len(), 2);
+    assert_eq!(info.comment.comments[1], picture);
+    assert_eq!(read_times(&mut demux).len(), 3);
+}
+
+#[test]
+fn vorbis_configs_in_three_layouts_are_accepted() {
+    let headers = headers();
+    let mut sixteen = Vec::new();
+    let mut plain = Vec::new();
+    for packet in &headers {
+        sixteen.extend_from_slice(&u16::try_from(packet.len()).expect("len").to_be_bytes());
+        sixteen.extend_from_slice(packet);
+        plain.extend_from_slice(packet);
+    }
+    for config in [sixteen, plain] {
+        let mut mux = OggMux::new(Cursor::new(Vec::new()));
+        let mut params = vorbis_params(&headers);
+        params.params =
+            StreamParams::try_audio(StreamCodec::Known(CodecId::Vorbis), 44_100, 2, Vec::new())
+                .expect("params");
+        let track = mux.add_stream(params).expect("stream");
+        mux.set_config(track, &config).expect("config");
+        mux.write_packet(&timed(track.get(), packet(LONG, 0), 0, 0))
+            .expect("write");
+        mux.write_packet(&timed(track.get(), packet(LONG, 1), 0, 1024))
+            .expect("write");
+        mux.finish(&[TrackDuration {
+            track,
+            timescale: Timescale::new(44_100),
+            ticks: 1024,
+        }])
+        .expect("finish");
+        let demux = open(&mux.into_inner().into_inner());
+        assert_eq!(
+            demux.streams()[0].params().extradata(),
+            xiph_lace([&headers[0], &headers[1], &headers[2]]).as_slice()
+        );
+    }
+}
+
+#[test]
+fn the_vorbis_muxer_refuses_what_a_reader_cannot_time() {
+    let headers = headers();
+    let start = |pts: i64, mode: u8, duration: i64| {
+        let mut mux = OggMux::new(Cursor::new(Vec::new()));
+        let track = mux.add_stream(vorbis_params(&headers)).expect("stream");
+        let result = mux.write_packet(&timed(track.get(), packet(mode, 0), pts, duration));
+        (mux, track, result)
+    };
+    let message = |result: Result<(), MuxError>| match result {
+        Err(MuxError::Rejected { message }) => message,
+        other => panic!("{other:?}"),
+    };
+    assert!(message(start(-10, LONG, 0).2).contains("starts at -10"));
+    assert!(message(start(0, LONG, 1).2).contains("natural 0"));
+    let (mut mux, track, first) = start(0, LONG, 0);
+    first.expect("first");
+    assert!(message(mux.write_packet(&timed(track.get(), vec![1, 2, 3], 0, 0))).contains("header"));
+    let (mut mux, track, first) = start(0, LONG, 0);
+    first.expect("first");
+    assert!(
+        message(mux.write_packet(&timed(track.get(), packet(SHORT, 1), 0, 577)))
+            .contains("natural 576")
+    );
+    let (mut mux, track, first) = start(0, LONG, 0);
+    first.expect("first");
+    mux.write_packet(&timed(track.get(), packet(SHORT, 1), 0, 100))
+        .expect("trimmed");
+    assert!(
+        message(mux.write_packet(&timed(track.get(), packet(SHORT, 2), 100, 128)))
+            .contains("only the last packet")
+    );
+    let (mut mux, track, first) = start(0, LONG, 0);
+    first.expect("first");
+    assert!(
+        message(mux.write_packet(&timed(track.get(), packet(LONG, 1), 10, 1024))).contains("gap")
+    );
+
+    let mut mux = OggMux::new(Cursor::new(Vec::new()));
+    let track = mux.add_stream(vorbis_params(&headers)).expect("stream");
+    let wrong = Packet::try_new(
+        track.get(),
+        packet(LONG, 0),
+        Timestamp::try_new(Some(0), Some(0), Some(0)).expect("time"),
+        Timescale::new(48_000),
+        true,
+    )
+    .expect("packet");
+    assert!(matches!(
+        mux.write_packet(&wrong),
+        Err(MuxError::TimescaleMismatch {
+            packet: 48_000,
+            stream: 44_100
+        })
+    ));
+
+    let mut mux = OggMux::new(Cursor::new(Vec::new()));
+    let mut mono = vorbis_params(&headers);
+    mono.params = StreamParams::try_audio(
+        StreamCodec::Known(CodecId::Vorbis),
+        44_100,
+        1,
+        xiph_lace([&headers[0], &headers[1], &headers[2]]),
+    )
+    .expect("params");
+    assert!(message(mux.add_stream(mono).map(|_| ())).contains("channels"));
+
+    let mut mux = OggMux::new(Cursor::new(Vec::new()));
+    let bare = || {
+        let mut bare = vorbis_params(&headers);
+        bare.params =
+            StreamParams::try_audio(StreamCodec::Known(CodecId::Vorbis), 44_100, 2, Vec::new())
+                .expect("params");
+        bare
+    };
+    let track = mux.add_stream(bare()).expect("stream");
+    assert!(message(mux.set_config(track, b"\x01vorbis")).contains("three Vorbis headers"));
+    let mut mux = OggMux::new(Cursor::new(Vec::new()));
+    let track = mux.add_stream(bare()).expect("stream");
+    assert!(
+        message(mux.write_packet(&timed(track.get(), packet(LONG, 0), 0, 0)))
+            .contains("no Vorbis id, comment, and setup headers")
+    );
+}
+
+#[test]
+fn a_late_vorbis_start_with_a_trimmed_end_keeps_both() {
+    let headers = headers();
+    let bytes = mux_vorbis(&headers, 44_100, &[LONG, LONG, LONG], Some(600));
+    let mut demux = open(&bytes);
+    let info = demux.vorbis(0).expect("info").clone();
+    assert_eq!((info.start, info.end), (Some(44_100), Some(44_100 + 1624)));
+    assert_eq!(
+        read_times(&mut demux),
+        vec![(44_100, 0, 0), (44_100, 1024, 1), (45_124, 600, 2)]
+    );
+}
+
+#[test]
+fn opus_and_vorbis_mux_into_one_file() {
+    let headers = headers();
+    let mut mux = OggMux::new(Cursor::new(Vec::new()));
+    let mut head = b"OpusHead".to_vec();
+    head.extend_from_slice(&[1, 2, 0, 0]);
+    head.extend_from_slice(&48_000_u32.to_le_bytes());
+    head.extend_from_slice(&[0, 0, 0]);
+    let opus = mux
+        .add_stream(NewStream {
+            params: StreamParams::try_audio(StreamCodec::Known(CodecId::Opus), 48_000, 2, head)
+                .expect("params"),
+            timescale: Timescale::new(48_000),
+            language: None,
+        })
+        .expect("opus");
+    let vorbis = mux.add_stream(vorbis_params(&headers)).expect("vorbis");
+    let opus_packet = |pts: i64| {
+        Packet::try_new(
+            opus.get(),
+            vec![31 << 3, 1, 2],
+            Timestamp::try_new(Some(pts), Some(pts), Some(960)).expect("time"),
+            Timescale::new(48_000),
+            true,
+        )
+        .expect("packet")
+    };
+    mux.write_packet(&opus_packet(0)).expect("opus");
+    mux.write_packet(&timed(vorbis.get(), packet(LONG, 0), 0, 0))
+        .expect("vorbis");
+    mux.write_packet(&opus_packet(960)).expect("opus");
+    mux.write_packet(&timed(vorbis.get(), packet(LONG, 1), 0, 1024))
+        .expect("vorbis");
+    mux.finish(&[
+        TrackDuration {
+            track: opus,
+            timescale: Timescale::new(48_000),
+            ticks: 1920,
+        },
+        TrackDuration {
+            track: vorbis,
+            timescale: Timescale::new(44_100),
+            ticks: 1024,
+        },
+    ])
+    .expect("finish");
+    let mut demux = open(&mux.into_inner().into_inner());
+    assert_eq!(
+        demux.streams()[0].params().codec(),
+        &StreamCodec::Known(CodecId::Opus)
+    );
+    assert_eq!(
+        demux.streams()[1].params().codec(),
+        &StreamCodec::Known(CodecId::Vorbis)
+    );
+    let mut counts = [0, 0];
+    while let Some(packet) = demux.read_packet().expect("read") {
+        counts[usize::try_from(packet.stream()).expect("stream")] += 1;
+        assert_eq!(
+            packet.timescale(),
+            demux.streams()[usize::try_from(packet.stream()).expect("stream")].timescale()
+        );
+    }
+    assert_eq!(counts, [2, 2]);
 }

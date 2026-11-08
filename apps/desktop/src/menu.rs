@@ -479,26 +479,51 @@ enum Key<'a> {
     Text(&'a str),
 }
 
-/// The keys of `shortcut`, such as `⇧⌘C`, in the order they are drawn.
-/// On a Mac the modifiers are the Command, Shift and Option icons. Elsewhere
-/// Command reads Ctrl and Option reads Alt; Shift and Backspace keep their
-/// icons.
+/// The keys of `shortcut`, such as `⇧⌘C` or `Space`, in the order they are
+/// drawn: the modifiers, then the key. On a Mac the modifiers are the
+/// Command, Shift and Option icons and Control's `⌃`. Elsewhere they read
+/// Ctrl, Alt and the Shift icon, in that order. Backspace is its icon.
 fn keys(shortcut: &str, mac: bool) -> Vec<Key<'_>> {
-    shortcut
-        .char_indices()
-        .map(|(at, glyph)| match (glyph, mac) {
-            ('⌘', true) => Key::Icon("keyCommand"),
-            ('⌘', false) => Key::Text("Ctrl"),
-            ('⌥', true) => Key::Icon("keyOption"),
-            ('⌥', false) => Key::Text("Alt"),
-            ('⇧', _) => Key::Icon("keyShift"),
-            ('⌫', _) => Key::Icon("keyBackspace"),
-            _ => Key::Text(&shortcut[at..at + glyph.len_utf8()]),
-        })
-        .collect()
+    let key = shortcut.trim_start_matches(['⌃', '⌥', '⇧', '⌘']);
+    let held = &shortcut[..shortcut.len() - key.len()];
+    let has = |glyph| held.contains(glyph);
+    let mut out = Vec::new();
+    if mac {
+        for glyph in held.chars() {
+            out.push(match glyph {
+                '⌘' => Key::Icon("keyCommand"),
+                '⌥' => Key::Icon("keyOption"),
+                '⇧' => Key::Icon("keyShift"),
+                _ => Key::Text("⌃"),
+            });
+        }
+    } else {
+        if has('⌘') || has('⌃') {
+            out.push(Key::Text("Ctrl"));
+        }
+        if has('⌥') {
+            out.push(Key::Text("Alt"));
+        }
+        if has('⇧') {
+            out.push(Key::Icon("keyShift"));
+        }
+    }
+    match key {
+        "" => {}
+        "⌫" => out.push(Key::Icon("keyBackspace")),
+        key => out.push(Key::Text(key)),
+    }
+    out
 }
 
-const MAC: bool = cfg!(target_os = "macos");
+/// A key binding from the settings, such as `primary+shift+s`, written as a
+/// menu row's shortcut: `⇧⌘S`. [`keys`] draws it for this platform.
+#[must_use]
+pub fn shortcut_for(chord: &str) -> String {
+    cutlass_settings::keys_label(chord, true)
+}
+
+pub const MAC: bool = cfg!(target_os = "macos");
 /// The edge of a key icon.
 const KEY_ICON: f32 = 13.0;
 /// The space between two keys.
@@ -512,14 +537,14 @@ fn key_width(ctx: &Context, key: Key<'_>) -> f32 {
 }
 
 /// The width the keys of `shortcut` take.
-fn keys_width(ctx: &Context, shortcut: &str) -> f32 {
+pub fn keys_width(ctx: &Context, shortcut: &str) -> f32 {
     let keys = keys(shortcut, MAC);
     let gaps = keys.len().saturating_sub(1) as f32 * KEY_GAP;
     keys.iter().map(|key| key_width(ctx, *key)).sum::<f32>() + gaps
 }
 
 /// Paint the keys of `shortcut` with the last one's right edge at `end`.
-fn paint_keys(
+pub fn paint_keys(
     ctx: &Context,
     painter: &egui::Painter,
     end: Pos2,
@@ -916,6 +941,13 @@ mod tests {
         assert_eq!(keys("⌥G", false), [Key::Text("Alt"), Key::Text("G")]);
         assert_eq!(keys("⌘X", false), [Key::Text("Ctrl"), Key::Text("X")]);
         assert_eq!(keys("⌫", false), [Key::Icon("keyBackspace")]);
+        assert_eq!(
+            keys("⇧⌘Space", false),
+            [Key::Text("Ctrl"), Key::Icon("keyShift"), Key::Text("Space")]
+        );
+        assert_eq!(keys("⌃Y", true), [Key::Text("⌃"), Key::Text("Y")]);
+        assert_eq!(shortcut_for("primary+shift+s"), "⇧⌘S");
+        assert_eq!(shortcut_for("shift+delete"), "⇧⌫");
         for name in ["keyCommand", "keyShift", "keyOption", "keyBackspace"] {
             assert!(crate::icons::require(name).is_ok(), "{name}");
         }

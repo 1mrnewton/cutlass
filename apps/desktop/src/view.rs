@@ -1030,7 +1030,7 @@ fn file_menu(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Optio
         ui.close();
         view.dialogs.open_project(parent);
     }
-    if ui.button("Settings…").clicked() {
+    if menu_row(ui, "Settings…", shell.settings().keys_for("settings"), true).clicked() {
         ui.close();
         view.settings_open = true;
     }
@@ -1047,6 +1047,50 @@ fn file_menu(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Optio
         ui.close();
         view.dialogs.import(parent);
     }
+}
+
+/// One row of the window's own menus: its label, then the keys bound to it
+/// drawn as keys at the right, as the clip menu draws them. Empty `chord`
+/// draws no keys.
+fn menu_row(ui: &mut Ui, label: &str, chord: &str, enabled: bool) -> egui::Response {
+    const GAP: f32 = 24.0;
+    let shortcut = if chord.is_empty() {
+        String::new()
+    } else {
+        crate::menu::shortcut_for(chord)
+    };
+    let keys = if shortcut.is_empty() {
+        0.0
+    } else {
+        GAP + crate::menu::keys_width(ui.ctx(), &shortcut)
+    };
+    let padding = ui.spacing().button_padding.x;
+    let text = ui
+        .painter()
+        .layout_no_wrap(
+            label.to_owned(),
+            egui::TextStyle::Button.resolve(ui.style()),
+            tokens::TEXT,
+        )
+        .size()
+        .x;
+    let button = egui::Button::new(label).min_size(Vec2::new(text + 2.0 * padding + keys, 0.0));
+    let response = ui.add_enabled(enabled, button);
+    if !shortcut.is_empty() {
+        let color = if enabled {
+            tokens::MENU_KEY
+        } else {
+            tokens::MENU_KEY_DISABLED
+        };
+        crate::menu::paint_keys(
+            ui.ctx(),
+            ui.painter(),
+            Pos2::new(response.rect.right() - padding, response.rect.center().y),
+            &shortcut,
+            color,
+        );
+    }
+    response
 }
 
 /// The items of the menu bar's `title` menu, but those in `skip`, each
@@ -1072,7 +1116,8 @@ fn menu_items(
             Some(item) if skip.contains(&item.id) => {}
             Some(item) => {
                 drawn = true;
-                if ui.button(item.label).clicked() {
+                let chord = shell.settings().keys_for(item.id).to_owned();
+                if menu_row(ui, item.label, &chord, true).clicked() {
                     ui.close();
                     chosen = Some(item.id);
                 }
@@ -1713,13 +1758,15 @@ fn settings_heading(ui: &mut Ui, text: &str) {
 
 fn edit_menu(shell: &mut Shell, ui: &mut Ui) {
     let (undo, redo) = (shell.can_undo(), shell.can_redo());
-    if ui.add_enabled(undo, ui::Button::new("Undo")).clicked() {
+    let keys = |action| shell.settings().keys_for(action).to_owned();
+    let (undo_keys, redo_keys) = (keys("undo"), keys("redo"));
+    if menu_row(ui, "Undo", &undo_keys, undo).clicked() {
         ui.close();
         if let Err(error) = shell.undo() {
             shell.notice_error(&error);
         }
     }
-    if ui.add_enabled(redo, ui::Button::new("Redo")).clicked() {
+    if menu_row(ui, "Redo", &redo_keys, redo).clicked() {
         ui.close();
         if let Err(error) = shell.redo() {
             shell.notice_error(&error);

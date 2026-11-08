@@ -4,11 +4,12 @@ version.workspace = true
 edition.workspace = true
 publish.workspace = true
 license.workspace = true
-description = "The mjpeg codec."
+description = "Motion JPEG decode and encode, on the cutlass-jpeg core."
 
 [dependencies]
 cutlass-decode = { path = "../../decode", version = "0.1.0" }
 cutlass-encode = { path = "../../encode", version = "0.1.0" }
+cutlass-jpeg = { path = "../jpeg", version = "0.1.0" }
 
 [lints]
 workspace = true

@@ -439,6 +439,64 @@ fn known_video(fourcc: [u8; 4]) -> bool {
             | b"ap4h"
             | b"ap4x"
             | b"encv"
+    ) || mpeg_video(fourcc)
+}
+
+/// QuickTime sample entries for MPEG-1 and MPEG-2 video: camcorder, HDV,
+/// IMX, and XDCAM. Both are one H.262 elementary stream.
+fn mpeg_video(fourcc: [u8; 4]) -> bool {
+    matches!(
+        &fourcc,
+        b"mp2v"
+            | b"m2v1"
+            | b"hdv1"
+            | b"hdv2"
+            | b"hdv3"
+            | b"hdv4"
+            | b"hdv5"
+            | b"hdv6"
+            | b"hdv7"
+            | b"hdv8"
+            | b"hdv9"
+            | b"hdva"
+            | b"mx3n"
+            | b"mx3p"
+            | b"mx4n"
+            | b"mx4p"
+            | b"mx5n"
+            | b"mx5p"
+            | b"xd51"
+            | b"xd54"
+            | b"xd55"
+            | b"xd59"
+            | b"xd5a"
+            | b"xd5b"
+            | b"xd5c"
+            | b"xd5d"
+            | b"xd5e"
+            | b"xd5f"
+            | b"xdv1"
+            | b"xdv2"
+            | b"xdv3"
+            | b"xdv4"
+            | b"xdv5"
+            | b"xdv6"
+            | b"xdv7"
+            | b"xdv8"
+            | b"xdv9"
+            | b"xdva"
+            | b"xdvb"
+            | b"xdvc"
+            | b"xdvd"
+            | b"xdve"
+            | b"xdvf"
+            | b"xdhd"
+            | b"xdh2"
+            | b"AVmp"
+            | b"m1v "
+            | b"m1v1"
+            | b"mpeg"
+            | b"mp1v"
     )
 }
 
@@ -449,8 +507,13 @@ fn map_codec(fourcc: [u8; 4], oti: Option<u8>) -> CodecId {
         b"av01" => CodecId::Av1,
         b"vp08" => CodecId::Vp8,
         b"vp09" => CodecId::Vp9,
-        b"mp4v" => CodecId::Mpeg4,
-        b"mp2v" => CodecId::Mpeg2,
+        // ISO/IEC 14496-1 object types: MPEG-2 Simple, Main, SNR, Spatial,
+        // High, and 4:2:2, then MPEG-1.
+        b"mp4v" => match oti {
+            Some(0x60..=0x65 | 0x6A) => CodecId::Mpeg2,
+            _ => CodecId::Mpeg4,
+        },
+        _ if mpeg_video(fourcc) => CodecId::Mpeg2,
         b"jpeg" | b"mjpa" | b"mjpb" => CodecId::Mjpeg,
         b"apch" | b"apcn" | b"apcs" | b"apco" | b"ap4h" | b"ap4x" => CodecId::ProRes,
         b"Opus" => CodecId::Opus,
@@ -521,5 +584,33 @@ fn read_u16(bytes: &[u8]) -> u16 {
     match bytes {
         [a, b, ..] => u16::from_be_bytes([*a, *b]),
         _ => 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CodecId, known_video, map_codec};
+
+    #[test]
+    fn mp4v_is_mpeg2_only_for_an_mpeg2_or_mpeg1_object_type() {
+        for oti in [0x60, 0x61, 0x62, 0x63, 0x64, 0x65, 0x6A] {
+            assert_eq!(map_codec(*b"mp4v", Some(oti)), CodecId::Mpeg2, "{oti:#x}");
+        }
+        for oti in [None, Some(0x20), Some(0x66), Some(0x6B)] {
+            assert_eq!(map_codec(*b"mp4v", oti), CodecId::Mpeg4, "{oti:?}");
+        }
+    }
+
+    #[test]
+    fn quicktime_mpeg_entries_are_mpeg2_pictures() {
+        for code in [
+            b"mp2v", b"m2v1", b"hdv2", b"hdva", b"mx5p", b"xd5b", b"xdvf", b"xdh2", b"AVmp",
+            b"m1v ", b"mpeg", b"mp1v",
+        ] {
+            assert!(known_video(*code));
+            assert_eq!(map_codec(*code, None), CodecId::Mpeg2);
+        }
+        assert!(!known_video(*b"xd52"));
+        assert_eq!(map_codec(*b"xd52", None), CodecId::Unknown(*b"xd52"));
     }
 }

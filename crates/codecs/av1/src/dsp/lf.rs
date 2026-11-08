@@ -166,8 +166,10 @@ fn lanes<P: Pixel, const FS: usize, const HORZ: bool, const L: usize>(
         }
     } else {
         for l in 0..L {
-            let base = (y + first + l) * stride + x - 7;
-            let src = &buf[base + lo..base + hi];
+            // Line `k` sits at `x + k - 7`; near the left border only `lo`
+            // keeps that from going below zero.
+            let row = (y + first + l) * stride + x;
+            let src = &buf[row + lo - 7..row + hi - 7];
             for k in lo..hi {
                 v[k][l] = src[k - lo].to_i32() as i16;
             }
@@ -194,8 +196,8 @@ fn lanes<P: Pixel, const FS: usize, const HORZ: bool, const L: usize>(
         }
     } else {
         for l in 0..L {
-            let base = (y + first + l) * stride + x - 7;
-            let dst = &mut buf[base + wlo..base + whi];
+            let row = (y + first + l) * stride + x;
+            let dst = &mut buf[row + wlo - 7..row + whi - 7];
             for k in wlo..whi {
                 dst[k - wlo] = P::from_i32(i32::from(v[k][l]));
             }
@@ -603,6 +605,44 @@ mod tests {
             for i in -n..n {
                 f[idx(i)] = fo[(i + 8) as usize];
             }
+        }
+    }
+
+    #[test]
+    fn a_vertical_edge_next_to_the_left_border_matches_the_spec() {
+        // A 4:2:0 chroma edge at x = 2 reads only p1..q1, and the 6- and
+        // 8-tap filters at x = 3 and x = 4 reach column 0. Their index must
+        // not pass below zero on the way (a debug build checks that).
+        let (w, h) = (16usize, 8usize);
+        for (x, filter_size, kfs, plane) in [(2, 4, 4, 1), (3, 6, 8, 1), (4, 8, 8, 0)] {
+            let frame: Vec<i32> = (0..w * h)
+                .map(|i| {
+                    if i % w >= x {
+                        140
+                    } else {
+                        100 + (i % 3) as i32
+                    }
+                })
+                .collect();
+            // The transliteration always reads p3, so it runs on a copy with
+            // four more columns on the left.
+            let pad = 4;
+            let wide_w = w + pad;
+            let mut wide = vec![0i32; wide_w * h];
+            for row in 0..h {
+                wide[row * wide_w + pad..(row + 1) * wide_w]
+                    .copy_from_slice(&frame[row * w..(row + 1) * w]);
+                let (rx, ry) = ((x + pad) as i32, row as i32);
+                ref_sample(&mut wide, wide_w, rx, ry, plane, 40, 0, 1, 0, kfs, 8);
+            }
+            let refr: Vec<i32> = (0..h)
+                .flat_map(|row| wide[row * wide_w + pad..(row + 1) * wide_w].to_vec())
+                .collect();
+            let mut buf: Vec<u8> = frame.iter().map(|&v| v as u8).collect();
+            filter_vertical_edge(&mut buf, w, x, 0, h, filter_size, 40, 0, 8);
+            let got: Vec<i32> = buf.iter().map(|v| v.to_i32()).collect();
+            assert_ne!(refr, frame, "x {x}: the edge is filtered");
+            assert_eq!(got, refr, "x {x} filter size {filter_size}");
         }
     }
 

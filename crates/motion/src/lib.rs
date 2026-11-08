@@ -10,6 +10,9 @@
 //! Each step answers the new corners and a confidence, [`Step::Hidden`]
 //! while the target is out of sight and looked for again by correlation,
 //! or [`Step::Lost`] once it stayed away too long.
+//!
+//! [`plan`] steadies a clip from how the whole picture moved through it.
+//!
 //! Pure Rust; no model, no file.
 
 mod fit;
@@ -18,12 +21,14 @@ mod gray;
 mod points;
 mod quad;
 mod search;
+mod stabilize;
 
 use fit::{Model, Random, ransac};
 use gray::Pyramid;
 use quad::Corners;
 
 pub use gray::{GRAY_SIDE, Gray, MAX_SIDE};
+pub use stabilize::{Correction, Move, Path, Plan, Strength, plan};
 
 /// What the target's move may be.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -90,6 +95,8 @@ pub enum MotionError {
     Target { reason: String },
     /// The target has too little texture to follow.
     Featureless,
+    /// A camera path's frame rate or size is not usable.
+    Path { reason: String },
 }
 
 impl std::fmt::Display for MotionError {
@@ -98,6 +105,7 @@ impl std::fmt::Display for MotionError {
             Self::Frame { reason } => write!(f, "bad frame: {reason}"),
             Self::Target { reason } => write!(f, "bad target: {reason}"),
             Self::Featureless => f.write_str("the target has too little detail to follow"),
+            Self::Path { reason } => write!(f, "bad camera path: {reason}"),
         }
     }
 }

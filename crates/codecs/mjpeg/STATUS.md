@@ -105,35 +105,57 @@ Tools: FFmpeg 8.1.1 (`/opt/homebrew/bin/ffmpeg`), libjpeg-turbo 3.2.0 `cjpeg` an
 | Interlaced | Woven output equals the two independently decoded fields interleaved | Met |
 | Real media | Fixtures made from `../local-files` footage by FFmpeg and cjpeg, decode, seek, export, and reopen with FFmpeg | Met. `../local-files` holds no Motion JPEG file, so every Motion JPEG input is made from its H.264 footage |
 | Malformed input | Truncation at every byte of a frame, bit flips, and hostile headers return errors; the next good packet decodes | Met (`every_truncation_and_bit_flip_fails_closed_and_the_next_packet_decodes`, 3 000-case mutation test) |
-| Fuzz | At least 30 minutes on the decoder entry, recorded | See Fuzz below |
-| Decode speed | 1920×1080 4:2:0 to planar and to RGBA, one thread, release: under 16 ms per frame | Met: 3.35 ms planar, 6.76 ms RGBA |
-| Encode speed | The same frame at a fixed quality: under 33 ms | Met: 13.93 ms at quality 75 |
-| Memory | No growth across 1 000 frames; peak recorded | Met: see Performance |
-| Checks | `cargo fmt`, `cargo clippy -D warnings`, and `cargo test` on the changed crates and their direct consumers. The user asked for no full-workspace run | See Checks below |
+| Fuzz | At least 30 minutes on the decoder entry, recorded | Met: 2 000 s, 117 147 093 cases, no panic |
+| Decode speed | 1920×1080 4:2:0 to planar and to RGBA, one thread, release: under 16 ms per frame | Met: 3.33 ms planar, 6.76 ms RGBA |
+| Encode speed | The same frame at a fixed quality: under 33 ms | Met: 14.59 ms at quality 75 |
+| Memory | No growth across 1 000 frames; peak recorded | Met: +480 KiB decode, none encode; bench peak 527 MB resident |
+| Checks | `cargo fmt`, `cargo clippy -D warnings`, and `cargo test` on the changed crates and their direct consumers. The user asked for no full-workspace run | Met: see Checks |
 
 ## Performance
 
-Command: `cargo bench -p cutlass-mjpeg --bench throughput`, run on Sun Nov 8 2026 while the fuzz campaign held one other core. Six 1920×1080 frames from `16929689_1920_1080_30fps.mp4`, 60 pictures per pass, best of 5 passes, one thread.
+Command: `cargo bench -p cutlass-mjpeg --bench throughput`, its binary run under `/usr/bin/time -l` at 15:12 UTC on Sun Nov 8 2026 with the machine otherwise idle. Six 1920×1080 frames from `16929689_1920_1080_30fps.mp4`, 60 pictures per pass, best of 5 passes, one thread.
 
 ```text
-encode RGBA 4:2:0 q75: 13.93 ms/frame, 210 KB/frame, 50.3 Mb/s at 30 fps
-encode RGBA 4:2:2 q75: 16.95 ms/frame, 220 KB/frame
-encode RGBA 4:2:0 at 60 Mb/s: 28.38 ms/frame, 60.0 Mb/s delivered
-decode this encoder 4:2:0 q75: planar 3.35 ms/frame, RGBA 6.76 ms/frame; ffmpeg -threads 1 2.83 ms/frame
-decode this encoder 4:2:2 q75: planar 3.71 ms/frame, RGBA 6.68 ms/frame; ffmpeg -threads 1 3.11 ms/frame
-decode ffmpeg 4:2:2 -q:v 3: planar 3.80 ms/frame, RGBA 6.77 ms/frame; ffmpeg -threads 1 3.14 ms/frame
-memory: decode resident 170496 KiB at frame 100, 152688 KiB at 1000 (-17808 KiB); encode at 60 Mb/s 157792 KiB, 157792 KiB (+0 KiB)
+encode RGBA 4:2:0 q75: 14.59 ms/frame, 210 KB/frame, 50.3 Mb/s at 30 fps
+encode RGBA 4:2:2 q75: 16.87 ms/frame, 220 KB/frame
+encode RGBA 4:2:0 at 60 Mb/s: 28.23 ms/frame, 60.0 Mb/s delivered
+decode this encoder 4:2:0 q75: planar 3.33 ms/frame, RGBA 6.76 ms/frame; ffmpeg -threads 1 2.84 ms/frame
+decode this encoder 4:2:2 q75: planar 3.76 ms/frame, RGBA 6.69 ms/frame; ffmpeg -threads 1 3.17 ms/frame
+decode ffmpeg 4:2:2 -q:v 3: planar 3.80 ms/frame, RGBA 6.85 ms/frame; ffmpeg -threads 1 3.36 ms/frame
+memory: decode resident 182064 KiB at frame 100, 182544 KiB at 1000 (+480 KiB); encode at 60 Mb/s 187648 KiB, 152912 KiB (-34736 KiB)
+       64.20 real        63.86 user         0.40 sys
+           526630912  maximum resident set size
+           195002896  peak memory footprint
 ```
 
-The FFmpeg time is `ffmpeg -threads 1 -f mjpeg` decoding the same stream to raw planes, total wall time over the frame count, so it includes process start. Rate mode costs about twice a fixed quality because it counts the frame's scan bits at two or more qualities, starting from the last frame's, before writing. Resident size includes the six source frames and every encoded stream the bench holds.
+An earlier run, with the fuzz campaign on another core, gave 13.93, 16.95, and 28.38 ms to encode and 3.35 and 6.76 ms to decode.
+
+The FFmpeg time is `ffmpeg -threads 1 -f mjpeg` decoding the same stream to raw planes, total wall time over the frame count, so it includes process start. Rate mode costs about twice a fixed quality because it counts the frame's scan bits at two or more qualities, starting from the last frame's, before writing. The peak is the whole bench process: six RGBA source frames, every encoded stream, and FFmpeg's decoded output, as well as the codec. Resident size between frame 100 and frame 1 000 is the growth gate; the codec's own buffers are reused from frame to frame.
 
 ## Fuzz
 
-Pending: the 2 000 s campaign result is recorded here when it finishes.
+`MJPEG_FUZZ_SECONDS=2000 MJPEG_FUZZ_SEED=20261108 cargo test --release -p cutlass-mjpeg fuzz_campaign -- --ignored --nocapture`, from 14:38:10 to 15:11:32 UTC on commit `f13e5bcd`. Later commits changed only tests, the bench, and documents.
+
+```text
+fuzz campaign: seed 20261108, 117147093 cases in 2000 s, 93400448 refused, 16426569 accepted, 7320076 encoder cases, no panics
+```
+
+The corpus is eight packets: 4:2:0 with restart 2, 4:2:2 without DHT, 4:4:4 17×13 with restart 1, grey, an abbreviated packet whose tables are in the extradata, a 40×47 field pair, a format A pair, and an `AVID` bottom-first pair. Each case applies one of eight mutations (bit flips, truncation, a random span, a header byte, a segment length, a splice, inserted markers or bytes, a duplicated range). One case in sixteen encodes a random 1..70 picture at a random sampling, quality, and restart interval and decodes it back. Every accepted picture is checked for size limits and consistent buffers, and after every case the unmutated packet must still decode to its reference picture, so a refused packet cannot disturb the decoder's tables or state. `mutated_packets_fail_closed_and_leave_the_decoder_as_it_was` runs 3 000 of these cases in every `cargo test`.
+
+The JPEG core's own campaign also ran, because this branch rewrote its entropy decoder, IDCT, and planar path: `JPEG_FUZZ_SECS=1200 cargo test --release -p cutlass-jpeg decoder_fuzz_campaign -- --ignored`, 14:47:57 to 15:07:59 UTC on `aa357b8f`, printed `fuzz_cases=805305614 seed=0x4a504500ffd8ffd9 secs=1200` with no panic. That older campaign flips one byte of an 8×8 grey image or feeds random bytes, so it is shallow next to the Motion JPEG one.
 
 ## Checks
 
-Pending: recorded on the final commit.
+On `aa357b8f`, with `CARGO_TARGET_DIR` and `TMPDIR` under `/tmp/cutlass-mjpeg-work`:
+
+| Command | Result |
+| --- | --- |
+| `cargo fmt -p cutlass-jpeg -p cutlass-mjpeg -p cutlass-isobmff -p cutlass -p cutlass-ffi -- --check` | Clean |
+| `cargo clippy -p cutlass-jpeg -p cutlass-mjpeg -p cutlass-isobmff -p cutlass -p cutlass-ffi --all-targets -- -D warnings` | Clean |
+| `MJPEG_REQUIRE_ORACLES=1 JPEG_REQUIRE_ORACLES=1 cargo test --no-fail-fast -p cutlass-jpeg -p cutlass-mjpeg -p cutlass-isobmff -p cutlass-ffi` | jpeg 28 passed, 2 ignored (timing budget, fuzz campaign); mjpeg 30 passed, 1 ignored (fuzz campaign); isobmff 65 passed; ffi 87 passed |
+| `cargo test --no-fail-fast -p cutlass` (desktop) | 436 passed, 6 ignored; sandbox 2 passed; doc tests 8 ignored |
+
+`a_real_motion_jpeg_movie_plays_seeks_and_exports` was run alone with `--nocapture` and printed no skip line. The desktop test build prints one linker notice, that the debug test binary's unwind section is over 16 MB; it is not a compiler or clippy warning. The repository's `cargo lint` and `cargo test --workspace` cover the whole workspace and were not run, as the task asked.
 
 ## Gaps
 

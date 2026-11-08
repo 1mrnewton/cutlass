@@ -59,13 +59,13 @@ With `MJPEG_REQUIRE_ORACLES=1` a missing oracle fails a test instead of skipping
 
 | Work | Time per frame |
 | --- | --- |
-| Encode RGBA 4:2:0, quality 75 (210 KB) | 13.93 ms |
-| Encode RGBA 4:2:0 at 60 Mb/s (60.0 Mb/s delivered) | 28.38 ms |
-| Decode 4:2:0 to planar | 3.35 ms |
+| Encode RGBA 4:2:0, quality 75 (210 KB) | 14.59 ms |
+| Encode RGBA 4:2:0 at 60 Mb/s (60.0 Mb/s delivered) | 28.23 ms |
+| Decode 4:2:0 to planar | 3.33 ms |
 | Decode 4:2:0 to RGBA | 6.76 ms |
-| `ffmpeg -threads 1` decode of the same stream, process start included | 2.83 ms |
+| `ffmpeg -threads 1` decode of the same stream, process start included | 2.84 ms |
 
-Resident memory did not grow between frame 100 and frame 1 000, for decode or for encode. `STATUS.md` has the full output.
+Resident memory grew 480 KiB between frame 100 and frame 1 000 for decode, and not at all for encode. `STATUS.md` has the full output.
 
 ## Gaps
 

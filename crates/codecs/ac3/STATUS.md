@@ -21,7 +21,7 @@ Read, and not copied: `../pub-packages/ffmpeg/libavcodec/ac3dec.c`, `ac3enc.c`, 
 | Enhanced coupling in a short block | refused | `Unsupported` `enhanced coupling in a short block` |
 | Empty packet | refused, decoder unchanged | `InvalidApi` |
 | Encoder input | finite, within a few ulps of full scale, even channel count, same rate and layout | `NonFinite`, `OutOfRange`, `UnevenChannels`, `InvalidApi` |
-| Encoder layout | mono through 5.1 with LFE. A side pair and a back pair together are refused | `Unsupported` |
+| Encoder layout | mono through 5.1 with LFE. E-AC-3 also takes 7.1, a side pair plus a back pair. AC-3 refuses that layout, and any other mix of the two pairs is refused | `Unsupported` |
 | AC-3 bit rate | a Table 5.18 rate. A non-zero request snaps to the nearest. Zero uses the default | `Unsupported` when even the coarse frame does not fit |
 | E-AC-3 bit rate | any positive rate. Zero uses the default | `Limit` when a frame still cannot be packed |
 | E-AC-3 blocks | 1, 2, 3, or 6. AC-3 is 6 | `Unsupported` otherwise |
@@ -88,6 +88,8 @@ Four seconds from `../local-files`, encoded at the default rate, compared on the
 
 Stereo white noise and one impulse, one second at 48 kHz and the default rate, were measured the same day. Noise against the source is 3.6 dB for AC-3 and 1.7 dB for E-AC-3. FFmpeg's encoder on the same samples is 3.6 dB and 1.6 dB. An impulse decoded from this encoder matches FFmpeg's decode at 71 dB (AC-3) and 66 dB (E-AC-3). `noise_and_an_impulse_match_ffmpeg` keeps this encoder within 1 dB of FFmpeg's encoder against the source, and the impulse above 50 dB against FFmpeg's decode. FFmpeg's decode of the noise itself is not sample-close: unallocated bins are dithered by different generators, and an E-AC-3 transient is skipped by FFmpeg.
 
+The same gate on one second of 5.1, layout `5.1(side)`, default rates 448 and 384 kbit/s, was measured the same day. Noise against the source is 2.3 dB for AC-3 and 1.7 dB for E-AC-3. FFmpeg's encoder is 2.6 dB and 2.1 dB. The impulse against the source is 2.3 dB and 3.7 dB, against FFmpeg's encoder 3.3 dB and 3.1 dB, and against FFmpeg's decode of this stream 71.7 dB and 65.6 dB. `surround_noise_and_an_impulse_match_ffmpeg` uses that gate.
+
 E-AC-3 stereo at 128 kbit/s starts coupling at sub-band 3. The per-channel table waited until about 10 kHz, and the music clip was 18.6 dB against the source. Sub-band 3 raises that to 19.5 dB and FFmpeg's decode of the same stream from 31.7 dB to 34.1 dB. Apple stays at 32.0 dB. Thunder at the same rate loses 0.5 dB against the source. The reference encoder starts at sub-band 1, which scored 20.7 dB against the source and 27.9 dB against Apple, under the 30 dB floor.
 
 These file figures were measured again on 8 November 2026, after block switching, gain-adaptive quantization, and transient pre-noise. The 128 kbit/s coupling start was measured the same day, after that. The 44.1 kHz AC-3 frame table makes that clip 192003 bit/s. Every other clip matched its frame's implied rate within 1 percent. A single 1536-sample window can sit far under the file figure: on an earlier encoder, speech E-AC-3 reached 5.0 dB and talk E-AC-3 reached −0.3 dB. Those windows are quiet. The speech window is RMS 0.001 on our decode, on FFmpeg, and on the source. The talk windows are digital silence, RMS 0. The ratio there is dither against dither. Every packet of those files still decodes with `-f eac3`. The music E-AC-3 file used to be rejected (`expacc` out of range) when coupling turned on after a short first block.
@@ -100,8 +102,8 @@ These file figures were measured again on 8 November 2026, after block switching
 | WAV | Microsoft tag 0x2000. The Dolby GUID is also read | No Microsoft tag. Written and read as the Dolby GUID FFmpeg writes, in WAVEFORMATEXTENSIBLE | `an_eac3_wave_round_trips_through_its_guid`, `the_dolby_ac3_guid_is_ac3` | Verified. A 0x2000 file that actually holds E-AC-3 stays labeled AC-3. The decoder still reads the syncframe |
 | M4A export | Sound-only, `ftyp M4A`, config and a syncframe that decodes. The encoder delay is an edit | Same | `sound_alone_writes_ac3_and_eac3_and_reopens`, `a_real_recording_exports_as_ac3_and_eac3_and_plays_back` | Empty timeline, and two seconds of a 48 kHz stereo recording |
 | WAV export | Not offered | Not offered | `write_sound` | Unsupported |
-| Desktop import | Rust decoder and encoder, registered ahead of the platform | Same | `ac3_and_eac3_open_for_import_and_export`, `an_ac3_movie_opens_seeks_and_reopens`, `a_surround_movie_keeps_each_speaker_through_seek`, `a_real_recording_exports_as_ac3_and_eac3_and_plays_back` | Installed readers open, seek, and reopen a 1 kHz tone, a 5.1 tone (side surrounds and LFE), and an exported recording. The running window was not exercised |
-| Phone | The same Rust codecs, ahead of the platform | Same | `the_phone_opens_ac3_and_eac3` | Verified at the factory |
+| Desktop import | Rust decoder and encoder, registered ahead of the platform | Same | `ac3_and_eac3_are_coded_by_the_rust_codec_ahead_of_the_platform`, `an_ac3_movie_opens_seeks_and_reopens`, `a_surround_movie_keeps_each_speaker_through_seek`, `a_bad_ac3_frame_is_skipped_and_the_rest_plays`, `a_real_recording_exports_as_ac3_and_eac3_and_plays_back` | Installed readers open, seek, and reopen a 1 kHz tone, a 5.1 tone (side surrounds and LFE), and an exported recording. A CRC-failed syncframe in the middle is skipped and the tone on either side still plays. The running window was not exercised |
+| Phone | The same Rust codecs, ahead of the platform | Same | `the_phone_codes_ac3_and_eac3_with_the_rust_codec` | The factory's packets and samples match the Rust codec. AudioToolbox's decoder, opened alone, does not |
 | Platform fallback | AudioToolbox fourcc `ac-3`, 1536 samples a frame | fourcc `ec-3`. The description stays at six blocks, and a syncframe asks for its own `numblkscod` length | the platform tables | Registered behind the Rust codec. Not compared |
 | Matroska, MPEG-TS, CAF | Not implemented. Those container crates are empty, or have no mapping | Same | none | Not present |
 
@@ -215,8 +217,12 @@ cargo test -p cutlass-riff --lib the_dolby_ac3_guid_is_ac3
 cargo test -p cutlass-export --lib sound_alone_writes_ac3_and_eac3_and_reopens
 cargo test -p cutlass --lib an_ac3_movie_opens_seeks_and_reopens
 cargo test --release -p cutlass --lib a_surround_movie_keeps_each_speaker_through_seek
-cargo test -p cutlass --lib ac3_and_eac3_open_for_import_and_export
-cargo test -p cutlass-ffi --lib the_phone_opens_ac3_and_eac3
+cargo test --release -p cutlass --lib ac3_and_eac3_are_coded_by_the_rust_codec_ahead_of_the_platform
+cargo test --release -p cutlass-ffi --lib the_phone_codes_ac3_and_eac3_with_the_rust_codec
+cargo test --release -p cutlass --lib a_bad_ac3_frame_is_skipped_and_the_rest_plays
+cargo test --release -p cutlass-ac3 --test ac3 every_fixture_matches_the_committed_ffmpeg_pcm
+cargo test --release -p cutlass-ac3 --test ac3 surround_noise_and_an_impulse_match_ffmpeg
+cargo clippy -p cutlass-ac3 -p cutlass-isobmff -p cutlass-riff -p cutlass-export -p cutlass-ffi --all-targets --target x86_64-unknown-linux-gnu -- -D warnings
 cargo test --release -p cutlass-isobmff --lib ac3_and_eac3_trim_is_an_edit_around_the_played_samples
 AC3_REQUIRE_ORACLES=1 cargo test --release -p cutlass --lib a_real_recording_exports_as_ac3_and_eac3_and_plays_back
 cargo test --release -p cutlass-export -p cutlass -p cutlass-ffi --lib ac3

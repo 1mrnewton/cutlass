@@ -1253,22 +1253,36 @@ fn ffmpeg_decodes_an_eac3_frame_that_starts_with_a_transient() {
     assert!(quality > 50.0, "onset {quality:.1} dB");
 }
 
-fn ffmpeg_encode(ffmpeg: &str, pcm: &[f32], codec: &str, kbps: u32) -> Vec<u8> {
+fn ffmpeg_encode(
+    ffmpeg: &str,
+    pcm: &[f32],
+    codec: &str,
+    kbps: u32,
+    channels: usize,
+    layout: Option<&str>,
+) -> Vec<u8> {
     let dir = std::env::temp_dir().join("cutlass-ac3-noise");
     std::fs::create_dir_all(&dir).expect("temp");
-    let input = dir.join(format!("in-{codec}.f32"));
-    let output = dir.join(format!("out-{codec}.{codec}"));
+    let input = dir.join(format!("in-{codec}-{channels}.f32"));
+    let output = dir.join(format!("out-{codec}-{channels}.{codec}"));
     let mut bytes = Vec::with_capacity(pcm.len() * 4);
     for sample in pcm {
         bytes.extend_from_slice(&sample.to_le_bytes());
     }
     std::fs::write(&input, bytes).expect("pcm");
-    let status = std::process::Command::new(ffmpeg)
-        .args([
-            "-v", "error", "-y", "-f", "f32le", "-ar", "48000", "-ac", "2", "-i",
-        ])
+    let channels = channels.to_string();
+    let rate = format!("{kbps}k");
+    let mut command = std::process::Command::new(ffmpeg);
+    command.args([
+        "-v", "error", "-y", "-f", "f32le", "-ar", "48000", "-ac", &channels,
+    ]);
+    if let Some(layout) = layout {
+        command.args(["-channel_layout", layout]);
+    }
+    let status = command
+        .arg("-i")
         .arg(&input)
-        .args(["-f", codec, "-c:a", codec, "-b:a", &format!("{kbps}k")])
+        .args(["-f", codec, "-c:a", codec, "-b:a", &rate])
         .arg(&output)
         .status()
         .expect("ffmpeg encode");
@@ -1312,12 +1326,64 @@ fn noise_and_an_impulse_match_ffmpeg() {
                 let quality = snr(&ours.pcm[..n], &theirs[..n]);
                 assert!(quality > 50.0, "{format:?} {name} {quality:.1} dB");
             }
-            let foreign = ffmpeg_encode(&ffmpeg, pcm, flag, kbps);
+            let foreign = ffmpeg_encode(&ffmpeg, pcm, flag, kbps, 2, None);
             let foreign_pcm = decode(codec(format), &[Packet::audio(foreign, 0, 0, rate)]);
             let foreign_heard = &foreign_pcm.pcm[skip.min(foreign_pcm.pcm.len())..];
             let n = ours.pcm.len().min(foreign_heard.len()).min(pcm.len());
             let ours_source = snr(&ours.pcm[..n], &pcm[..n]);
             let their_source = snr(&foreign_heard[..n], &pcm[..n]);
+            assert!(
+                ours_source + 1.0 >= their_source,
+                "{format:?} {name}: ours {ours_source:.1} dB, ffmpeg {their_source:.1} dB"
+            );
+        }
+    }
+}
+
+/// One second of 5.1 noise and one impulse on every speaker, at the
+/// default rate. The gate is the same as stereo: this encoder stays within
+/// 1 dB of FFmpeg's encoder against the source, and the impulse stays above
+/// 50 dB against FFmpeg's decode.
+#[test]
+fn surround_noise_and_an_impulse_match_ffmpeg() {
+    let Some(ffmpeg) = oracle("ffmpeg", "-version") else {
+        return;
+    };
+    let channels = &[L, R, C, Lfe, Sl, Sr];
+    let rate = 48_000u32;
+    let n = channels.len();
+    let mut seed = 2u32;
+    let noise: Vec<f32> = (0..rate as usize * n)
+        .map(|_| {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            ((seed >> 8) as f32 / (1u32 << 24) as f32 - 0.5) * 0.4
+        })
+        .collect();
+    let mut impulse = vec![0.0f32; rate as usize * n];
+    let at = (rate as usize / 2) * n;
+    for (index, sample) in impulse[at..at + n].iter_mut().enumerate() {
+        *sample = if index.is_multiple_of(2) { 0.8 } else { -0.8 };
+    }
+    for format in [Format::Ac3, Format::Eac3] {
+        let flag = if format == Format::Ac3 { "ac3" } else { "eac3" };
+        let kbps = cutlass_ac3::default_bit_rate(format, 5, true) / 1000;
+        for (name, pcm, interop) in [("noise", &noise, false), ("impulse", &impulse, true)] {
+            let packets = encode(config(format, rate, channels, 0), pcm);
+            let ours = decode(codec(format), &packets);
+            let skip = ENCODER_DELAY as usize * n;
+            if interop {
+                let theirs = ffmpeg_decode(&ffmpeg, &stream(&packets), &["-f", flag]);
+                let theirs = &theirs[skip.min(theirs.len())..];
+                let len = ours.pcm.len().min(theirs.len());
+                let quality = snr(&ours.pcm[..len], &theirs[..len]);
+                assert!(quality > 50.0, "{format:?} {name} {quality:.1} dB");
+            }
+            let foreign = ffmpeg_encode(&ffmpeg, pcm, flag, kbps, n, Some("5.1(side)"));
+            let foreign_pcm = decode(codec(format), &[Packet::audio(foreign, 0, 0, rate)]);
+            let foreign_heard = &foreign_pcm.pcm[skip.min(foreign_pcm.pcm.len())..];
+            let len = ours.pcm.len().min(foreign_heard.len()).min(pcm.len());
+            let ours_source = snr(&ours.pcm[..len], &pcm[..len]);
+            let their_source = snr(&foreign_heard[..len], &pcm[..len]);
             assert!(
                 ours_source + 1.0 >= their_source,
                 "{format:?} {name}: ours {ours_source:.1} dB, ffmpeg {their_source:.1} dB"

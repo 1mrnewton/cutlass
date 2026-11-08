@@ -109,14 +109,16 @@ The 44.1 kHz AC-3 frame table makes that clip 192003 bit/s. Every other clip mat
 
 cargo-fuzz is not used. `libfuzzer-sys` builds C through `cc`, which `deny.toml` bans.
 
-A two-minute release campaign on this encoder, after stereo coupling started writing phase flags, found nothing. The record after that is earlier encoders. Its two-minute run is from before phase flags and before a short frame narrowed its bandwidth, and the longer runs are from commit `56a561f4`, before E-AC-3 stopped switching block length. Release turns overflow checks off. The 300-second run is the test profile, where an overflow panics. This crate's dev profile still compiles the library at opt-level 3.
+A two-minute release campaign on this encoder found nothing. Legal rounds include 7.1, a 40 kbit/s mono frame, an 80 kbit/s stereo frame, a 96 kbit/s mono frame, and peaks above half scale, so spectral extension, the hybrid transform, and dynamic range words are in the corpus. `Ac3Encoder::open` still writes six blocks, so one-block, two-block, and three-block frames are not in this run. Release turns overflow checks off. The 300-second run below is the test profile, where an overflow panics, and it is an earlier encoder. This crate's dev profile still compiles the library at opt-level 3.
 
 ```text
 AC3_FUZZ_SECS=120 cargo test --release -p cutlass-ac3 --test ac3 -- --ignored campaign --nocapture
-ac3 decoder campaign: seed 0xac3dec0d seconds 120 inputs 9360159 errors 9346166 accepted 13993 findings 0
-ac3 encoder campaign: seed 0xac3e0c0d seconds 120 rounds 662922 refused 331338 encoded 331584 findings 0
+ac3 decoder campaign: seed 0xac3dec0d seconds 120 inputs 9141348 errors 9127049 accepted 14299 findings 0
+ac3 encoder campaign: seed 0xac3e0c0d seconds 120 rounds 567989 refused 284327 encoded 283662 findings 0
 test result: ok. 1 passed; 0 failed; finished in 120.00s
 ```
+
+Earlier encoders, kept so the longer runs stay visible:
 
 ```text
 AC3_FUZZ_SECS=120 cargo test --release -p cutlass-ac3 --test ac3 -- --ignored campaign --nocapture
@@ -137,37 +139,47 @@ test result: ok. 1 passed; 0 failed; finished in 300.00s
 
 ## Performance
 
-`cargo build --release -p cutlass-ac3 --bench throughput`, then the bench binary, on 8 November 2026, after the E-AC-3 encoder stopped switching block length. Apple M5 Pro, 18 cores, 48 GiB, macOS 27.0.1, rustc 1.99.1, ffmpeg 8.1.1. Ten seconds at 48 kHz. Each figure is the median of three runs after one warmup. Cutlass times the codec only. ffmpeg times a new process, including startup. `/usr/bin/time -l` on the whole bench: 2.42 s real, maximum resident set 64,258,048 bytes, peak footprint 63,291,800 bytes.
+`cargo build --release -p cutlass-ac3 --bench throughput`, then the bench binary, on 8 November 2026, on the encoder that writes spectral extension, the hybrid transform, dynamic range words, and 7.1. Apple M5 Pro, 18 cores, 48 GiB, macOS 27.0.1, rustc 1.99.1, ffmpeg 8.1.1. Ten seconds at 48 kHz. Each figure is the median of three runs after one warmup. Cutlass times the codec only. ffmpeg times a new process, including startup. `/usr/bin/time -l` on the whole bench: 2.89 s real, maximum resident set 117,669,888 bytes, peak footprint 116,752,864 bytes.
 
 ```text
 encoder delay 256 samples (5.333 ms at 48000 Hz)
-rss at start 2160 KiB
+rss at start 2176 KiB
 AC-3 stereo 192 kbps
-  encode 26.945 ms, 371x realtime
-  decode 8.833 ms, 1132x realtime
-  decode frame latency p50 27.3 us, p95 27.8 us, p99 28.3 us over 313 frames
-  rss before a further 60 s of decode 18976 KiB, after 18992 KiB
+  encode 27.602 ms, 362x realtime
+  decode 8.887 ms, 1125x realtime
+  decode frame latency p50 27.6 us, p95 28.3 us, p99 28.8 us over 313 frames
+  rss before a further 60 s of decode 18896 KiB, after 18912 KiB
 E-AC-3 stereo 192 kbps
-  encode 19.148 ms, 522x realtime
-  decode 8.537 ms, 1171x realtime
-  decode frame latency p50 26.7 us, p95 27.3 us, p99 27.8 us over 313 frames
-  rss before a further 60 s of decode 19024 KiB, after 19040 KiB
+  encode 19.867 ms, 503x realtime
+  decode 8.627 ms, 1159x realtime
+  decode frame latency p50 27.0 us, p95 27.9 us, p99 28.5 us over 313 frames
+  rss before a further 60 s of decode 18960 KiB, after 18960 KiB
 AC-3 5.1 448 kbps
-  encode 56.126 ms, 178x realtime
-  decode 21.327 ms, 469x realtime
-  decode frame latency p50 66.0 us, p95 68.5 us, p99 70.1 us over 313 frames
-  rss before a further 60 s of decode 61696 KiB, after 61696 KiB
+  encode 56.812 ms, 176x realtime
+  decode 21.337 ms, 469x realtime
+  decode frame latency p50 66.2 us, p95 68.6 us, p99 69.9 us over 313 frames
+  rss before a further 60 s of decode 61632 KiB, after 61632 KiB
 E-AC-3 5.1 384 kbps
-  encode 44.429 ms, 225x realtime
-  decode 19.521 ms, 512x realtime
-  decode frame latency p50 60.2 us, p95 62.3 us, p99 65.5 us over 313 frames
-  rss before a further 60 s of decode 62720 KiB, after 62720 KiB
-cancel of a 5 s stereo push, flag already set: 0.277 ms
-ffmpeg ac3 stereo, process time including startup: encode 31.165 ms (321x), decode 23.893 ms (419x)
-ffmpeg eac3 stereo, process time including startup: encode 30.488 ms (328x), decode 23.884 ms (419x)
+  encode 44.851 ms, 223x realtime
+  decode 19.726 ms, 507x realtime
+  decode frame latency p50 61.0 us, p95 83.5 us, p99 205.2 us over 313 frames
+  rss before a further 60 s of decode 63040 KiB, after 63056 KiB
+E-AC-3 mono 40 kbps
+  encode 7.762 ms, 1288x realtime
+  decode 3.500 ms, 2857x realtime
+  decode frame latency p50 10.8 us, p95 11.1 us, p99 11.2 us over 313 frames
+  rss before a further 60 s of decode 63184 KiB, after 63184 KiB
+E-AC-3 7.1 default
+  encode 62.268 ms, 161x realtime
+  decode 26.289 ms, 380x realtime
+  decode frame latency p50 81.9 us, p95 84.0 us, p99 85.1 us over 313 frames
+  rss before a further 60 s of decode 114848 KiB, after 114848 KiB
+cancel of a 5 s stereo push, flag already set: 0.293 ms
+ffmpeg ac3 stereo, process time including startup: encode 32.157 ms (311x), decode 25.271 ms (396x)
+ffmpeg eac3 stereo, process time including startup: encode 31.651 ms (316x), decode 24.720 ms (405x)
 ```
 
-Resident set grew as the bench moved from stereo to 5.1, which is the allocator keeping the larger working set, and did not grow across a further minute of decoding the same packets. Cancel with the flag already set returns after the sample check and before a frame is coded.
+Resident set grew as the bench moved from stereo to 5.1 and then to 7.1, which is the allocator keeping the larger working set, and did not grow across a further minute of decoding the same packets. The E-AC-3 5.1 p99 is one slow frame in the sample, not the median. Cancel with the flag already set returns after the sample check and before a frame is coded.
 
 ## Commands run
 

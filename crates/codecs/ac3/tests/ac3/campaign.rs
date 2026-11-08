@@ -72,17 +72,57 @@ fn corpus() -> Vec<Vec<u8>> {
 
 fn encoded_seeds() -> Vec<Vec<u8>> {
     let mut seeds = Vec::new();
-    for codec in [CodecId::Ac3, CodecId::Eac3] {
-        let layout = ChannelLayout::stereo();
-        let frames = 1536 * 2;
-        let samples = tone(frames, layout.len(), 48_000);
-        let packets = encode(codec, 48_000, layout, 192_000, &samples).expect("seed");
+    let push = |seeds: &mut Vec<Vec<u8>>, packets: Vec<Packet>| {
         let mut bytes = Vec::new();
         for packet in packets {
             bytes.extend_from_slice(&packet.data);
         }
         seeds.push(bytes);
+    };
+    for codec in [CodecId::Ac3, CodecId::Eac3] {
+        let layout = ChannelLayout::stereo();
+        let frames = 1536 * 2;
+        let samples = tone(frames, layout.len(), 48_000, 0.2);
+        push(
+            &mut seeds,
+            encode(codec, 48_000, layout, 192_000, &samples).expect("seed"),
+        );
     }
+    let mono = ChannelLayout::mono();
+    let frames = 1536 * 2;
+    push(
+        &mut seeds,
+        encode(
+            CodecId::Eac3,
+            48_000,
+            mono.clone(),
+            40_000,
+            &tone(frames, 1, 48_000, 0.2),
+        )
+        .expect("spectral extension seed"),
+    );
+    push(
+        &mut seeds,
+        encode(
+            CodecId::Eac3,
+            48_000,
+            mono,
+            96_000,
+            &tone(frames, 1, 48_000, 0.85),
+        )
+        .expect("hybrid transform seed"),
+    );
+    push(
+        &mut seeds,
+        encode(
+            CodecId::Eac3,
+            48_000,
+            ChannelLayout::seven_one(),
+            0,
+            &tone(frames, 8, 48_000, 0.2),
+        )
+        .expect("7.1 seed"),
+    );
     seeds
 }
 
@@ -239,16 +279,30 @@ fn layouts() -> Vec<ChannelLayout> {
     ]
 }
 
-fn tone(frames: usize, channels: usize, rate: u32) -> Vec<f32> {
+fn tone(frames: usize, channels: usize, rate: u32, amplitude: f32) -> Vec<f32> {
     let mut samples = Vec::with_capacity(frames * channels);
     for index in 0..frames {
         let t = index as f32 / rate as f32;
         for channel in 0..channels {
             let freq = 180.0 + 90.0 * channel as f32;
-            samples.push((t * freq * std::f32::consts::TAU).sin() * 0.2);
+            samples.push((t * freq * std::f32::consts::TAU).sin() * amplitude);
         }
     }
     samples
+}
+
+/// A rate the open check accepts, chosen so the new tools are reached.
+/// Zero is the layout's default.
+fn legal_bitrate(codec: CodecId, channels: usize, rng: &mut Rng) -> u32 {
+    if codec != CodecId::Eac3 {
+        return 0;
+    }
+    match (channels, rng.below(3)) {
+        (1, 0) => 40_000,
+        (1, 1) => 96_000,
+        (2, 0) => 80_000,
+        _ => 0,
+    }
 }
 
 fn encode(
@@ -278,10 +332,15 @@ fn encoder_round(rng: &mut Rng) -> Result<bool, &'static str> {
             };
             let rate = [32_000, 44_100, 48_000][rng.below(3)];
             let layouts = layouts();
-            let layout = layouts[rng.below(3)].clone();
+            let mut layout = layouts[rng.below(layouts.len())].clone();
+            if layout.len() == 8 && codec == CodecId::Ac3 {
+                layout = ChannelLayout::stereo();
+            }
+            let bitrate = legal_bitrate(codec, layout.len(), rng);
             let frames = 1_536 * (rng.below(2) + 1);
-            let samples = tone(frames, layout.len(), rate);
-            let packets = match encode(codec, rate, layout, 0, &samples) {
+            let amplitude = if rng.below(5) == 0 { 0.85 } else { 0.2 };
+            let samples = tone(frames, layout.len(), rate, amplitude);
+            let packets = match encode(codec, rate, layout, bitrate, &samples) {
                 Ok(packets) => packets,
                 Err(_) => return Err("legal encode failed"),
             };
@@ -408,7 +467,7 @@ fn cancel_stops_before_the_next_frame_and_reset_encodes_again() {
     params.bitrate = 192_000;
     let mut encoder = Ac3Encoder::open(&params).expect("encoder");
     encoder.cancel_flag().store(true, Ordering::Relaxed);
-    let samples = tone(48_000, layout.len(), 48_000);
+    let samples = tone(48_000, layout.len(), 48_000, 0.2);
     let pcm = Pcm::from_f32(48_000, layout.clone(), samples).expect("pcm");
     let started = Instant::now();
     let error = encoder.push(&AudioInput { pcm }).expect_err("cancel");
@@ -420,7 +479,7 @@ fn cancel_stops_before_the_next_frame_and_reset_encodes_again() {
     );
     encoder.cancel_flag().store(false, Ordering::Relaxed);
     encoder.reset();
-    let again = tone(1536, 2, 48_000);
+    let again = tone(1536, 2, 48_000, 0.2);
     let pcm = Pcm::from_f32(48_000, layout, again).expect("pcm");
     let packets = encoder.push(&AudioInput { pcm }).expect("after reset");
     assert!(!packets.is_empty());

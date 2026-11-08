@@ -54,6 +54,18 @@ fn main() -> Result<(), String> {
             layout: five_one()?,
             bitrate: 384_000,
         },
+        Case {
+            name: "E-AC-3 mono 40 kbps",
+            codec: CodecId::Eac3,
+            layout: ChannelLayout::mono(),
+            bitrate: 40_000,
+        },
+        Case {
+            name: "E-AC-3 7.1 default",
+            codec: CodecId::Eac3,
+            layout: ChannelLayout::seven_one(),
+            bitrate: 0,
+        },
     ];
     println!("{SECONDS} s at {RATE} Hz; median of 3 after 1 warmup; times are this process");
     println!(

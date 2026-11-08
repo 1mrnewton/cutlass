@@ -19,4 +19,6 @@ pub use imp::{
     with_pixel_buffer,
 };
 #[cfg(target_os = "macos")]
-pub use imp::{listen_for_opened_files, take_opened_files, wake_on_opened_files};
+pub use imp::{
+    listen_for_opened_files, menu_keys_shown_only, take_opened_files, wake_on_opened_files,
+};

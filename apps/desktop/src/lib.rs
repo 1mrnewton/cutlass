@@ -88,12 +88,13 @@ pub fn register_codecs_with(
     cutlass_prores::register_encoders(&mut encoders);
     cutlass_vp8::register_engine_decoders(&mut decoders);
     cutlass_vp8::register_engine_encoders(&mut encoders);
-    // After the platform decoders: the Rust HEVC and MPEG-4 Visual decoders
+    // After the platform codecs: the Rust HEVC and MPEG-4 Visual decoders
     // serve Linux, and the other platforms when hardware decode is off.
-    // VideoToolbox claims MPEG-4 Visual on Apple. This opener decodes that
-    // codec when the platform opener is absent.
+    // VideoToolbox claims MPEG-4 Visual on Apple. These openers run when
+    // the platform opener is absent. The encoder is the same fallback.
     cutlass_hevc::register_decoders(&mut decoders);
     cutlass_mpeg4::register_engine_decoders(&mut decoders);
+    cutlass_mpeg4::register_engine_encoders(&mut encoders);
     (decoders, encoders)
 }
 
@@ -281,6 +282,40 @@ mod tests {
             got.extend_from_slice(samples);
         }
         assert_eq!(got, want);
+    }
+
+    /// Hardware encode off leaves VideoToolbox out, so the Rust encoder
+    /// writes the VOP. A platform encoder registered first would hide it.
+    #[test]
+    fn mpeg4_visual_encodes_when_the_platform_encoder_is_absent() {
+        use cutlass_settings::Hardware;
+
+        let off = Hardware {
+            encode: false,
+            ..Hardware::default()
+        };
+        let (_decoders, encoders) = super::register_codecs_with(&off);
+        let mut params = CodecParams::with_format(CodecId::Mpeg4, 16, 16, PixelFormat::Rgba8);
+        params.bitrate = 200_000;
+        let mut encoder = encoders.open(&params).expect("rust mpeg4 encoder");
+        let time = cutlass_encode::FrameTime::new(0, 1, 25).expect("time");
+        let frame =
+            cutlass_encode::CpuFrame::new(16, 16, PixelFormat::Rgba8, vec![128; 16 * 16 * 4], time)
+                .expect("frame");
+        let packets = encoder
+            .push_frame(&cutlass_encode::FrameInput::Cpu(frame))
+            .expect("encode");
+        assert!(
+            packets[0].data.starts_with(&[0, 0, 1, 0xB6]),
+            "the rust encoder writes a VOP"
+        );
+        assert!(
+            packets[0]
+                .side
+                .iter()
+                .any(|side| matches!(side, cutlass_decode::SideData::Config(_))),
+            "the layer rides on the first packet"
+        );
     }
 
     /// A second of stereo tones, MP3 packets from the Rust encoder, and

@@ -571,9 +571,9 @@ pub enum ExportQuality {
 }
 
 impl ExportQuality {
-    /// The bitrate for an H.264, HEVC, or VP8 picture `short_side` pixels
-    /// on its short side. HEVC gets the same picture from fewer bits; VP8
-    /// spends what H.264 does.
+    /// The bitrate for a picture `short_side` pixels on its short side.
+    /// HEVC gets the same picture from fewer bits. The other picture
+    /// codecs spend what H.264 does.
     #[must_use]
     pub fn bitrate(self, short_side: u32, codec: CodecId) -> u32 {
         let base = cutlass_export::video_bitrate(short_side);
@@ -7340,7 +7340,7 @@ impl Shell {
         }
         if !matches!(
             request.codec,
-            CodecId::H264 | CodecId::Hevc | CodecId::Prores | CodecId::Vp8
+            CodecId::H264 | CodecId::Hevc | CodecId::Mpeg4 | CodecId::Prores | CodecId::Vp8
         ) {
             return Err(ShellError::ExportUnavailable);
         }

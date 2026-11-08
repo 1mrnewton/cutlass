@@ -65,6 +65,34 @@ fn each_channel_carries_its_own_tone_in_speaker_order() {
     }
 }
 
+/// FFmpeg 8.1.1 PCM for each fixture, committed so the check runs without
+/// FFmpeg. `reference/<name>.f32` is `-drc_scale 0` interleaved float.
+#[test]
+fn every_fixture_matches_the_committed_ffmpeg_pcm() {
+    for name in FIXTURES {
+        let data = fixture(name);
+        let ours = decode(&data);
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/reference")
+            .join(format!("{name}.f32"));
+        let bytes =
+            std::fs::read(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+        let reference: Vec<f32> = bytes
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|word| f32::from_le_bytes(*word))
+            .collect();
+        let n = ours.channels.len();
+        assert_eq!(reference.len(), ours.pcm.len(), "{name}");
+        for (index, speaker) in ours.channels.iter().enumerate() {
+            let quality = snr(&ours.channel(index), &deinterleave(&reference, n, index));
+            let floor = if *speaker == Lfe { 120.0 } else { 55.0 };
+            assert!(quality > floor, "{name} {speaker:?}: {quality:.1} dB");
+        }
+    }
+}
+
 #[test]
 fn every_fixture_matches_ffmpeg_to_the_dither_floor() {
     let Some(ffmpeg) = oracle("ffmpeg", "-version") else {

@@ -41,5 +41,8 @@ switching. Those tools are checked against the FFmpeg FATE samples in
 (`ac3/` and `eac3/` from `https://fate-suite.ffmpeg.org`). The samples are not
 committed.
 
-Reference PCM is produced at test time by FFmpeg 8.1.1 (`-drc_scale 0`) and
-macOS `afconvert` when they are installed.
+`reference/<name>.f32` is the fixture of the same name decoded by FFmpeg 8.1.1
+with `-drc_scale 0`: interleaved little-endian `f32` in WAVEFORMATEXTENSIBLE
+order. The committed-PCM test compares against it, so the check runs where
+FFmpeg is not installed. A live FFmpeg decode and macOS `afconvert` are still
+used when they are.

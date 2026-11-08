@@ -232,8 +232,8 @@ fn ref_count(draft: &Draft, id: &MaterialId) -> usize {
 #[cfg(test)]
 mod tests {
     use cutlass_model::{
-        Draft, MaterialId, Micros, Segment, SegmentId, TimeRange, TrackAttribute, TrackId,
-        TrackType, segment_beats, user_beats,
+        MaterialId, Micros, Segment, SegmentId, TimeRange, TrackAttribute, TrackId, TrackType,
+        segment_beats, user_beats,
     };
 
     use crate::edit::EditError;
@@ -243,7 +243,7 @@ mod tests {
     fn audio_clip() -> Request {
         Request::Place {
             track_id: TrackId::new("audio"),
-            segment: Box::new(Segment::new("clip", "media", TimeRange::new(0, 1_000_000))),
+            segment: Box::new(Segment::new("clip", "tone", TimeRange::new(0, 1_000_000))),
         }
     }
 
@@ -256,7 +256,7 @@ mod tests {
     }
 
     fn open() -> Session {
-        let mut session = Session::open(Draft::empty("D"));
+        let mut session = Session::open(crate::edit::test_draft("D"));
         session
             .apply(
                 0,
@@ -309,7 +309,7 @@ mod tests {
             .unwrap();
         assert!(session.draft().materials.beats.is_empty());
 
-        let mut video = Session::open(Draft::empty("D"));
+        let mut video = Session::open(crate::edit::test_draft("D"));
         video
             .apply(
                 0,
@@ -423,7 +423,7 @@ mod tests {
 
     #[test]
     fn a_source_range_keeps_the_stored_time_across_a_split() {
-        let mut session = Session::open(Draft::empty("D"));
+        let mut session = Session::open(crate::edit::test_draft("D"));
         session
             .apply(
                 0,
@@ -433,7 +433,7 @@ mod tests {
                 }],
             )
             .unwrap();
-        let mut clip = Segment::new("clip", "media", TimeRange::new(0, 1_000_000));
+        let mut clip = Segment::new("clip", "tone", TimeRange::new(0, 1_000_000));
         clip.source_range = Some(TimeRange::new(0, 1_000_000));
         session
             .apply(

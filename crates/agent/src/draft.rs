@@ -778,6 +778,7 @@ mod tests {
 
     fn open_tools() -> (DraftTools, TrackId) {
         let mut draft = Draft::empty("D");
+        draft.materials.videos.push(MaterialVideo::new("media"));
         let track_id = TrackId::new("main");
         draft.tracks[0].id = track_id.clone();
         (DraftTools::new(Session::open(draft)), track_id)
@@ -918,6 +919,7 @@ mod tests {
     #[test]
     fn query_segment_returns_range_and_revision() {
         let mut draft = Draft::empty("D");
+        draft.materials.videos.push(MaterialVideo::new("media"));
         draft.tracks[0].id = TrackId::new("main");
         let other = TrackId::new("other");
         draft.tracks.push(Track::main(other.clone()));

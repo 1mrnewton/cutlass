@@ -62,7 +62,7 @@ mod tests {
     use crate::session::Session;
 
     fn open() -> (Session, TrackId) {
-        let mut draft = Draft::empty("D");
+        let mut draft = crate::edit::test_draft("D");
         draft.tracks[0].id = TrackId::new("main");
         let mut segment = Segment::new("a", "media", TimeRange::new(0, 1_000_000));
         segment.source_range = Some(TimeRange::new(10, 1_000_000));
@@ -117,7 +117,7 @@ mod tests {
 
     #[test]
     fn a_scale_changes_both_axes_and_keeps_the_uniform_switch() {
-        let mut draft = Draft::empty("D");
+        let mut draft = crate::edit::test_draft("D");
         draft.tracks[0].id = TrackId::new("main");
         let mut segment = Segment::new("a", "media", TimeRange::new(0, 1_000_000));
         segment.clip.rotation = 90.0;

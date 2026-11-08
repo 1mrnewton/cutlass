@@ -161,6 +161,10 @@ mod tests {
 
     fn session() -> Session {
         let mut draft = Draft::empty("D");
+        draft
+            .materials
+            .videos
+            .push(cutlass_model::MaterialVideo::new("m"));
         draft.config.maintrack_adsorb = false;
         draft.tracks[0].id = TrackId::new("main");
         for (id, start) in [("a", 1_000_000), ("b", 3_000_000)] {

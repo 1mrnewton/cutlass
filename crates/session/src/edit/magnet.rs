@@ -81,7 +81,7 @@ pub(super) fn pack(draft: &mut Draft, linkage: &LinkageSettings) -> Result<(), E
 #[cfg(test)]
 mod tests {
     use cutlass_model::{
-        Draft, Micros, Segment, SegmentId, TimeRange, TrackAttribute, TrackId, TrackType,
+        Micros, Segment, SegmentId, TimeRange, TrackAttribute, TrackId, TrackType,
     };
 
     use crate::edit::EditError;
@@ -97,7 +97,7 @@ mod tests {
 
     #[test]
     fn the_main_lane_packs_from_zero_and_another_lane_keeps_a_gap() {
-        let mut session = Session::open(Draft::empty("D"));
+        let mut session = Session::open(crate::edit::test_draft("D"));
         session.apply(0, &[place("a", 500_000, 100_000)]).unwrap();
         assert_eq!(
             session.draft().tracks[0].segments[0].target,
@@ -157,7 +157,7 @@ mod tests {
 
     #[test]
     fn a_move_onto_a_main_clip_reorders_and_a_delete_closes_the_gap() {
-        let mut session = Session::open(Draft::empty("D"));
+        let mut session = Session::open(crate::edit::test_draft("D"));
         session.apply(0, &[place("a", 0, 100_000)]).unwrap();
         session.apply(1, &[place("b", 100_000, 100_000)]).unwrap();
         session
@@ -193,7 +193,7 @@ mod tests {
 
     #[test]
     fn a_locked_main_lane_refuses_the_magnet_switch() {
-        let mut session = Session::open(Draft::empty("D"));
+        let mut session = Session::open(crate::edit::test_draft("D"));
         session
             .apply(
                 0,
@@ -213,7 +213,7 @@ mod tests {
 
     #[test]
     fn a_linked_clip_follows_the_pack() {
-        let mut session = Session::open(Draft::empty("D"));
+        let mut session = Session::open(crate::edit::test_draft("D"));
         session.apply(0, &[place("main", 0, 200_000)]).unwrap();
         session
             .apply(

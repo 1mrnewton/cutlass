@@ -364,6 +364,14 @@ mod tests {
 
     fn session(clips: &[(&str, i64, i64)]) -> Session {
         let mut draft = Draft::empty("D");
+        draft
+            .materials
+            .videos
+            .push(cutlass_model::MaterialVideo::new("media"));
+        draft.materials.audios.push(cutlass_model::MaterialAudio {
+            id: cutlass_model::MaterialId::new("song"),
+            ..cutlass_model::MaterialAudio::default()
+        });
         draft.config.maintrack_adsorb = false;
         let track = TrackId::new("main");
         draft.tracks[0].id = track.clone();

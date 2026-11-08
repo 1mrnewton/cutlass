@@ -226,14 +226,14 @@ fn keyed<'a>(
 
 #[cfg(test)]
 mod tests {
-    use cutlass_model::{Draft, Micros, Segment, TimeRange, key_offsets};
+    use cutlass_model::{Micros, Segment, TimeRange, key_offsets};
 
     use crate::edit::EditError;
     use crate::request::Request;
     use crate::session::Session;
 
     fn open() -> Session {
-        let mut draft = Draft::empty("D");
+        let mut draft = crate::edit::test_draft("D");
         draft.tracks[0].id = "main".into();
         let mut session = Session::open(draft);
         let mut segment = Segment::new("a", "media", TimeRange::new(0, 1_000_000));

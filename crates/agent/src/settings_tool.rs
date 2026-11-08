@@ -225,6 +225,10 @@ mod tests {
 
     fn session() -> (Session, TrackId) {
         let mut draft = Draft::empty("D");
+        draft
+            .materials
+            .videos
+            .push(cutlass_model::MaterialVideo::new("media"));
         let track_id = TrackId::new("main");
         draft.tracks[0].id = track_id.clone();
         (Session::open(draft), track_id)

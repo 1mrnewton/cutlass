@@ -50,7 +50,13 @@ def main() -> None:
             {"jsonrpc": "2.0", "id": 4, "method": "tools/call",
              "params": {"name": "draft_apply", "arguments": {
                  "expected_revision": 0,
-                 "requests": [{"op": "place", "track_id": "main", "segment": segment}],
+                 # A place names a material the draft holds, so the
+                 # picture is imported in the same step.
+                 "requests": [
+                     {"op": "import", "medium": {"video": {
+                         "id": "media", "type": "video", "duration": 1_000_000}}},
+                     {"op": "place", "track_id": "main", "segment": segment},
+                 ],
              }}},
             # The local sandbox: a Rhai script in a child process.
             {"jsonrpc": "2.0", "id": 5, "method": "tools/call",

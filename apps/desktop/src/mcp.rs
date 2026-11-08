@@ -356,6 +356,9 @@ mod tests {
         let place = json!({
             "expected_revision": 0,
             "requests": [{
+                "op": "import",
+                "medium": {"video": {"id": "media", "type": "video", "duration": 1_000_000}},
+            }, {
                 "op": "place",
                 "track_id": "main",
                 "segment": serde_json::to_value(cutlass_model::Segment::new(
@@ -504,6 +507,9 @@ mod tests {
         let place = json!({
             "expected_revision": 0,
             "requests": [{
+                "op": "import",
+                "medium": {"video": {"id": "media", "type": "video", "duration": 1_000_000}},
+            }, {
                 "op": "place",
                 "track_id": "main",
                 "segment": serde_json::to_value(cutlass_model::Segment::new(

@@ -194,7 +194,7 @@ mod tests {
     use cutlass_model::TrackAttribute;
 
     fn open() -> (Session, TrackId) {
-        let mut draft = cutlass_model::Draft::empty("D");
+        let mut draft = crate::edit::test_draft("D");
         let main = TrackId::new("main");
         draft.tracks[0].id = main.clone();
         (Session::open(draft), main)
@@ -406,7 +406,7 @@ mod tests {
 
     #[test]
     fn an_empty_id_and_a_none_type_are_refused() {
-        let mut draft = cutlass_model::Draft::empty("D");
+        let mut draft = crate::edit::test_draft("D");
         let error = insert_track(&mut draft, &TrackId::new(""), &TrackType::Audio).unwrap_err();
         assert_eq!(error, EditError::TrackKind);
         let error = insert_track(&mut draft, &TrackId::new("lane"), &TrackType::None).unwrap_err();
@@ -416,7 +416,7 @@ mod tests {
 
     #[test]
     fn a_text_lane_sits_above_video() {
-        let mut draft = cutlass_model::Draft::empty("D");
+        let mut draft = crate::edit::test_draft("D");
         insert_track(&mut draft, &TrackId::new("words"), &TrackType::Text).unwrap();
         assert_eq!(draft.tracks[0].kind, TrackType::Text);
         assert!(draft.tracks[1].is_main());

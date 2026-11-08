@@ -570,7 +570,7 @@ mod tests {
     use crate::session::Session;
 
     fn open() -> (Session, TrackId, TrackId) {
-        let mut draft = Draft::empty("D");
+        let mut draft = crate::edit::test_draft("D");
         draft.config.maintrack_adsorb = false;
         draft.tracks[0].id = TrackId::new("main");
         let mut overlay = Track::main("over");
@@ -794,7 +794,7 @@ mod tests {
 
     #[test]
     fn trim_and_duration_scale_the_dependent_and_leave_the_child_draft() {
-        let mut draft = Draft::empty("D");
+        let mut draft = crate::edit::test_draft("D");
         draft.config.maintrack_adsorb = false;
         draft.tracks[0].id = TrackId::new("main");
         let mut overlay = Track::main("over");
@@ -980,6 +980,7 @@ mod tests {
             id: "media".into(),
             ..cutlass_model::MaterialVideo::default()
         });
+        let videos = draft.materials.videos.len();
         let mut session = Session::open(draft);
         session
             .apply(
@@ -1013,7 +1014,7 @@ mod tests {
             .unwrap();
         let draft = session.draft();
         assert!(draft.materials.audio_fades.is_empty());
-        assert_eq!(draft.materials.videos.len(), 1);
+        assert_eq!(draft.materials.videos.len(), videos);
         // With linkage off "b" stays, and no pair names the clip that went.
         assert_eq!(draft.tracks[1].segments.len(), 1);
         assert!(draft.relationships[0].id_to_id.is_empty());

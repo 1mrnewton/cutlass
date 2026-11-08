@@ -199,7 +199,7 @@ fn uses(draft: &Draft, id: &MaterialId) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use cutlass_model::{AnimType, Draft, Micros, Segment, TimeRange, animated_at};
+    use cutlass_model::{AnimType, Micros, Segment, TimeRange, animated_at};
 
     use crate::edit::EditError;
     use crate::request::Request;
@@ -209,7 +209,7 @@ mod tests {
     const FADE_OUT: &str = "6798320902548230669";
 
     fn open() -> Session {
-        let mut draft = Draft::empty("D");
+        let mut draft = crate::edit::test_draft("D");
         draft.tracks[0].id = "main".into();
         let mut session = Session::open(draft);
         let segment = Segment::new("a", "media", TimeRange::new(0, 1_000_000));
@@ -290,7 +290,7 @@ mod tests {
 
     #[test]
     fn a_caption_animation_goes_on_text_in_the_loop_slot_and_plays_alone() {
-        let mut draft = Draft::empty("D");
+        let mut draft = crate::edit::test_draft("D");
         draft.tracks[0].id = "main".into();
         draft
             .materials
@@ -418,6 +418,11 @@ mod tests {
     #[test]
     fn a_title_takes_a_letter_animation_that_moves_its_letters_only() {
         let mut draft = open().draft().clone();
+        // The clip is a title here, not the test draft's picture.
+        draft
+            .materials
+            .videos
+            .retain(|video| video.id.as_str() != "media");
         draft
             .materials
             .texts

@@ -196,7 +196,15 @@ pub enum EditError {
 
 pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditError> {
     match request {
-        Request::Place { track_id, segment } => place(draft, track_id, (**segment).clone()),
+        Request::Place { track_id, segment } => {
+            // A request that adds its own material (text, an effect, words)
+            // places through `place` after pushing it; a bare Place has to
+            // name one the draft already holds.
+            if draft.materials.get(segment.material_id.as_str()).is_none() {
+                return Err(EditError::MissingMaterial);
+            }
+            place(draft, track_id, (**segment).clone())
+        }
         Request::Move {
             segment_id,
             track_id,
@@ -672,6 +680,27 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
         }
         Request::Arrange { segment_id, step } => layer::arrange(draft, segment_id, *step),
     }
+}
+
+/// An empty draft whose pools hold the materials test clips name (pictures,
+/// and the sounds `tone` and `song`), so a bare `Place` in a test finds its material.
+#[cfg(test)]
+pub(crate) fn test_draft(id: &str) -> Draft {
+    let mut draft = Draft::empty(id);
+    for material in ["media", "m", "x", "v", "pic", "picture", "tall", "old"] {
+        draft
+            .materials
+            .videos
+            .push(cutlass_model::MaterialVideo::new(material));
+    }
+    for material in ["tone", "song"] {
+        draft.materials.audios.push(cutlass_model::MaterialAudio {
+            id: cutlass_model::MaterialId::new(material),
+            duration: Micros(10_000_000),
+            ..cutlass_model::MaterialAudio::default()
+        });
+    }
+    draft
 }
 
 pub fn apply_all(

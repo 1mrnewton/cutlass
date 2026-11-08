@@ -22,14 +22,14 @@ pub fn set_rotation(
 
 #[cfg(test)]
 mod tests {
-    use cutlass_model::{Draft, Micros, Segment, TimeRange, TrackAttribute, TrackId};
+    use cutlass_model::{Micros, Segment, TimeRange, TrackAttribute, TrackId};
 
     use crate::edit::EditError;
     use crate::request::Request;
     use crate::session::Session;
 
     fn open() -> (Session, TrackId) {
-        let mut draft = Draft::empty("D");
+        let mut draft = crate::edit::test_draft("D");
         draft.tracks[0].id = TrackId::new("main");
         (Session::open(draft), TrackId::new("main"))
     }

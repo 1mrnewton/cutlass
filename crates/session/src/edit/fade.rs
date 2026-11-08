@@ -69,7 +69,7 @@ pub fn set_fade(
 #[cfg(test)]
 mod tests {
     use cutlass_model::{
-        Draft, MaterialAudioFade, MaterialId, Micros, Segment, TimeRange, TrackAttribute, TrackId,
+        MaterialAudioFade, MaterialId, Micros, Segment, TimeRange, TrackAttribute, TrackId,
     };
 
     use crate::edit::EditError;
@@ -78,7 +78,7 @@ mod tests {
 
     #[test]
     fn a_fade_is_a_straight_ramp_and_a_negative_duration_is_refused() {
-        let mut draft = Draft::empty("D");
+        let mut draft = crate::edit::test_draft("D");
         draft.tracks[0].id = TrackId::new("main");
         let track = draft.tracks[0].id.clone();
         let mut session = Session::open(draft);
@@ -150,7 +150,7 @@ mod tests {
 
     #[test]
     fn a_stored_curve_stays_and_a_locked_lane_is_refused() {
-        let mut draft = Draft::empty("D");
+        let mut draft = crate::edit::test_draft("D");
         draft.tracks[0].id = TrackId::new("main");
         draft.materials.audio_fades.push(MaterialAudioFade {
             id: MaterialId::new("fade"),

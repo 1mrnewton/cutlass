@@ -1520,6 +1520,10 @@ mod tests {
 
     fn open(temp: &Temp, approver: Gate) -> TestRegistry {
         let mut draft = Draft::empty("D");
+        draft
+            .materials
+            .videos
+            .push(cutlass_model::MaterialVideo::new("media"));
         draft.tracks[0].id = TrackId::new("main");
         open_draft(temp, approver, draft)
     }
@@ -1618,6 +1622,10 @@ mod tests {
         let temp = Temp::new();
         let mut registry = open(&temp, Gate::refuse());
         let mut draft = Draft::empty("D");
+        draft
+            .materials
+            .videos
+            .push(cutlass_model::MaterialVideo::new("media"));
         draft.tracks[0].id = TrackId::new("");
         registry.draft = DraftTools::new(Session::open(draft));
         let project = registry.parse("draft.query", "project").unwrap();
@@ -2308,6 +2316,10 @@ mod tests {
     /// it, both two seconds long.
     fn tracked_draft() -> Draft {
         let mut draft = Draft::empty("D");
+        draft
+            .materials
+            .videos
+            .push(cutlass_model::MaterialVideo::new("media"));
         draft.canvas_config.width = 1920;
         draft.canvas_config.height = 1080;
         draft.materials.videos.push(cutlass_model::MaterialVideo {
@@ -2319,6 +2331,11 @@ mod tests {
         draft.tracks[0]
             .segments
             .push(Segment::new("v", "m", TimeRange::new(0, 2_000_000)));
+        draft.materials.stickers.push(cutlass_model::RawMaterial {
+            id: "art".into(),
+            kind: "sticker".to_owned(),
+            ..cutlass_model::RawMaterial::default()
+        });
         let mut lane = cutlass_model::Track::main("stickers");
         lane.kind = cutlass_model::TrackType::Sticker;
         lane.segments

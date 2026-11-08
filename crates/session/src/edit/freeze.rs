@@ -47,7 +47,7 @@ pub fn set_freeze(
 
 #[cfg(test)]
 mod tests {
-    use cutlass_model::{Draft, FreezeInfo, Micros, Segment, TimeRange, TrackId};
+    use cutlass_model::{FreezeInfo, Micros, Segment, TimeRange, TrackId};
 
     use crate::edit::EditError;
     use crate::request::Request;
@@ -55,7 +55,7 @@ mod tests {
 
     #[test]
     fn a_freeze_is_stored_on_the_video_and_the_ranges_stay() {
-        let mut draft = Draft::empty("D");
+        let mut draft = crate::edit::test_draft("D");
         draft.tracks[0].id = TrackId::new("main");
         let mut session = Session::open(draft);
         let mut segment = Segment::new("a", "media", TimeRange::new(0, 1_000_000));

@@ -204,7 +204,7 @@ pub fn drop_empty_lanes(draft: &mut Draft) {
 #[cfg(test)]
 mod tests {
     use cutlass_model::{
-        ConstantSpeedError, Draft, MaterialAudioFade, MaterialId, MaterialSpeed, MaterialText,
+        ConstantSpeedError, MaterialAudioFade, MaterialId, MaterialSpeed, MaterialText,
         MaterialTransition, Micros, Segment, SegmentId, SpeedMode, SpeedPoint, TimeRange, Track,
         TrackAttribute, TrackId, WordColumns,
     };
@@ -213,7 +213,7 @@ mod tests {
     use crate::request::{Request, TrimEdge};
 
     fn session() -> (Session, TrackId) {
-        let mut draft = Draft::empty("D");
+        let mut draft = crate::edit::test_draft("D");
         // These cases check the requested span. Packing is covered in the magnet tests.
         draft.config.maintrack_adsorb = false;
         let track_id = TrackId::new("main");
@@ -223,7 +223,7 @@ mod tests {
 
     #[test]
     fn a_project_opens_without_its_empty_lanes_but_keeps_main_and_full_ones() {
-        let mut draft = Draft::empty("D");
+        let mut draft = crate::edit::test_draft("D");
         draft.tracks[0].segments.clear();
         let mut sound = Track::main(TrackId::new("sound"));
         sound.kind = cutlass_model::TrackType::Audio;
@@ -1041,6 +1041,25 @@ mod tests {
         assert_eq!(session.draft().tracks[0].segments.len(), 1);
         session.undo().unwrap();
         assert!(session.draft().tracks[0].segments.is_empty());
+    }
+
+    #[test]
+    fn a_place_naming_no_material_is_refused_and_the_draft_stays() {
+        let (mut session, track) = session();
+        let before = session.draft().clone();
+        let stray = Request::Place {
+            track_id: track.clone(),
+            segment: Box::new(Segment::new("a", "nowhere", TimeRange::new(0, 1_000_000))),
+        };
+        assert_eq!(
+            session.apply(0, &[stray]).unwrap_err(),
+            EditError::MissingMaterial
+        );
+        assert_eq!(session.draft(), &before);
+        assert_eq!(session.revision(), 0);
+        session
+            .apply(0, &[place(&track, "a", 0, 1_000_000)])
+            .unwrap();
     }
 
     #[test]

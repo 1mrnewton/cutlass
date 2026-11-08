@@ -10980,6 +10980,7 @@ mod tests {
         draft.config.maintrack_adsorb = false;
         draft.canvas_config.width = 2;
         draft.canvas_config.height = 1;
+        draft.materials.videos.push(MaterialVideo::new("media"));
         draft.tracks[0]
             .segments
             .push(Segment::new("clip", "media", TimeRange::new(0, 2_000_000)));
@@ -11098,6 +11099,12 @@ mod tests {
         let mut draft = Draft::empty("draft");
         draft.canvas_config.width = 2;
         draft.canvas_config.height = 1;
+        draft.materials.videos.push(MaterialVideo::new("media"));
+        draft.materials.audios.push(MaterialAudio {
+            id: MaterialId::new("tone"),
+            duration: Micros(2_000_000),
+            ..MaterialAudio::default()
+        });
         draft.tracks[0].segments.push(Segment::new(
             "picture",
             "media",

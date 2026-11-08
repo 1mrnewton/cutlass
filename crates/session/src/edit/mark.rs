@@ -321,7 +321,7 @@ fn ref_count(draft: &Draft, id: &MaterialId) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use cutlass_model::{Draft, MaterialId, Micros, Segment, SegmentId, TimeRange, TrackAttribute};
+    use cutlass_model::{MaterialId, Micros, Segment, SegmentId, TimeRange, TrackAttribute};
 
     use crate::edit::EditError;
     use crate::request::Request;
@@ -345,7 +345,7 @@ mod tests {
 
     #[test]
     fn a_ruler_mark_stays_a_time_and_a_clip_mark_is_an_offset() {
-        let mut draft = Draft::empty("D");
+        let mut draft = crate::edit::test_draft("D");
         draft.config.maintrack_adsorb = false;
         let mut session = Session::open(draft);
         session.apply(0, &[place_clip()]).unwrap();
@@ -409,7 +409,7 @@ mod tests {
 
     #[test]
     fn removing_a_mark_drops_it_and_its_empty_material_in_one_undo_step() {
-        let mut draft = Draft::empty("D");
+        let mut draft = crate::edit::test_draft("D");
         draft.config.maintrack_adsorb = false;
         let mut session = Session::open(draft);
         session.apply(0, &[place_clip()]).unwrap();
@@ -487,7 +487,7 @@ mod tests {
 
     #[test]
     fn a_split_gives_each_piece_the_marks_on_its_side() {
-        let mut session = Session::open(Draft::empty("D"));
+        let mut session = Session::open(crate::edit::test_draft("D"));
         session.apply(0, &[place_clip()]).unwrap();
         session
             .apply(1, &[mark(Some("clip"), 200_000, "marks")])
@@ -524,7 +524,7 @@ mod tests {
 
     #[test]
     fn a_locked_clip_refuses_a_marker() {
-        let mut session = Session::open(Draft::empty("D"));
+        let mut session = Session::open(crate::edit::test_draft("D"));
         session.apply(0, &[place_clip()]).unwrap();
         session
             .apply(

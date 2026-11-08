@@ -10,3 +10,4 @@ mod idct;
 mod mc;
 mod tables;
 mod vlc;
+mod vop;

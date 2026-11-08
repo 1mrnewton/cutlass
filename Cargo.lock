@@ -2419,6 +2419,7 @@ dependencies = [
  "cutlass-matroska",
  "cutlass-mjpeg",
  "cutlass-model",
+ "cutlass-motion",
  "cutlass-mp3",
  "cutlass-mp3-container",
  "cutlass-mpeg2",

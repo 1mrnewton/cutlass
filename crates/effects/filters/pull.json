@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "pull",
+  "name": "Pull",
+  "category": "Film",
+  "adjust": {"contrast": -0.25, "fade": 0.2, "saturation": -0.1, "shadows": 0.2}
+}

@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "id": "olive",
+  "name": "Olive",
+  "category": "Portrait",
+  "adjust": {"tint": -0.1, "temperature": 0.1},
+  "wheels": {"gain": {"hue": 70, "amount": 0.15}},
+  "hsl": {"yellow": [-0.2, 0, 0]}
+}

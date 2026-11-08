@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "picnic",
+  "name": "Picnic",
+  "category": "Food",
+  "adjust": {"temperature": 0.15, "saturation": 0.2, "exposure": 0.1},
+  "curves": {"rgb": [[0, 0], [0.25, 0.23], [0.75, 0.77], [1, 1]]}
+}

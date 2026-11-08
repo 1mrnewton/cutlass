@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "peach",
+  "name": "Peach",
+  "category": "Portrait",
+  "adjust": {"temperature": 0.15, "tint": 0.1, "fade": 0.1},
+  "wheels": {"gain": {"hue": 25, "amount": 0.2}}
+}

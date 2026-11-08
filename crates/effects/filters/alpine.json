@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "alpine",
+  "name": "Alpine",
+  "category": "Landscape",
+  "adjust": {"temperature": -0.15, "clarity": 0.3, "whites": 0.15},
+  "hsl": {"blue": [0, 0.3, 0]}
+}

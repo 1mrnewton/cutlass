@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "id": "bronze",
+  "name": "Bronze",
+  "category": "Portrait",
+  "adjust": {"temperature": 0.3, "contrast": 0.2},
+  "wheels": {"gain": {"hue": 35, "amount": 0.3}},
+  "hsl": {"orange": [0, 0.2, -0.1]}
+}

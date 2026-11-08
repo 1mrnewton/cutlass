@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "citrus",
+  "name": "Citrus",
+  "category": "Food",
+  "adjust": {"temperature": 0.1, "exposure": 0.1},
+  "hsl": {"yellow": [0, 0.4, 0], "orange": [0, 0.3, 0]}
+}

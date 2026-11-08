@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "meadow",
+  "name": "Meadow",
+  "category": "Landscape",
+  "adjust": {"brilliance": 0.2, "temperature": 0.1},
+  "hsl": {"yellow": [0, 0.3, 0], "green": [-0.2, 0, 0]}
+}

@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "blush",
+  "name": "Blush",
+  "category": "Portrait",
+  "adjust": {"tint": 0.2, "fade": 0.1},
+  "hsl": {"red": [0, 0, 0.1], "orange": [-0.1, 0, 0]}
+}

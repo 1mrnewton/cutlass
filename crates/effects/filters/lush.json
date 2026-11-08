@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "lush",
+  "name": "Lush",
+  "category": "Landscape",
+  "adjust": {"saturation": 0.3, "contrast": 0.1},
+  "hsl": {"green": [0, 0.3, -0.1]}
+}

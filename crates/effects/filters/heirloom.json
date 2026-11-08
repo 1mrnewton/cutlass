@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "heirloom",
+  "name": "Heirloom",
+  "category": "Vintage",
+  "adjust": {"saturation": -0.4, "temperature": 0.25, "contrast": 0.15, "vignette": 0.4, "grain": 0.25, "fade": 0.1}
+}

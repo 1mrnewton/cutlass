@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "grainy",
+  "name": "Grainy",
+  "category": "Film",
+  "adjust": {"grain": 0.7, "contrast": 0.1}
+}

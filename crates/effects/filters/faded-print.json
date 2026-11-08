@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "faded-print",
+  "name": "Faded Print",
+  "category": "Film",
+  "adjust": {"fade": 0.45, "temperature": 0.15, "tint": 0.1, "saturation": -0.3},
+  "curves": {"blue": [[0, 0.15], [1, 0.9]]}
+}

@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "highland",
+  "name": "Highland",
+  "category": "Landscape",
+  "adjust": {"contrast": 0.2, "saturation": -0.15, "temperature": -0.1, "clarity": 0.3, "vignette": 0.2},
+  "hsl": {"green": [0, -0.2, 0]}
+}

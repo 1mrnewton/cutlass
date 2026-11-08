@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "rustic",
+  "name": "Rustic",
+  "category": "Food",
+  "adjust": {"temperature": 0.2, "saturation": -0.1, "contrast": 0.2, "clarity": 0.25, "vignette": 0.3, "fade": 0.05}
+}

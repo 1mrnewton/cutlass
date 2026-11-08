@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "velvet",
+  "name": "Velvet",
+  "category": "Portrait",
+  "adjust": {"contrast": 0.1, "shadows": -0.15, "tint": 0.1, "vignette": 0.2},
+  "hsl": {"red": [0, 0.2, 0]}
+}

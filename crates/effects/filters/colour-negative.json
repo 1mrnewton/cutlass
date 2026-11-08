@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "colour-negative",
+  "name": "Colour Negative",
+  "category": "Film",
+  "adjust": {"fade": 0.2, "temperature": 0.1, "grain": 0.2},
+  "hsl": {"green": [-0.3, -0.2, 0]}
+}

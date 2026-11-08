@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "film-800",
+  "name": "Film 800",
+  "category": "Film",
+  "adjust": {"grain": 0.55, "contrast": 0.1, "fade": 0.15, "saturation": -0.1}
+}

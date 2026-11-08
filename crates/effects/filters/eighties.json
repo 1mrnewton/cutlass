@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "eighties",
+  "name": "Eighties",
+  "category": "Vintage",
+  "adjust": {"tint": 0.15, "saturation": 0.2, "fade": 0.15},
+  "wheels": {"lift": {"hue": 280, "amount": 0.2}, "gain": {"hue": 30, "amount": 0.15}}
+}

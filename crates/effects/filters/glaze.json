@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "glaze",
+  "name": "Glaze",
+  "category": "Food",
+  "adjust": {"brilliance": 0.3, "highlights": 0.15, "clarity": 0.2, "saturation": 0.15}
+}

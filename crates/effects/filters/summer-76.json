@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "summer-76",
+  "name": "Summer '76",
+  "category": "Vintage",
+  "adjust": {"temperature": 0.45, "saturation": 0.15, "fade": 0.2, "highlights": -0.15},
+  "hsl": {"blue": [0.2, -0.2, 0]}
+}

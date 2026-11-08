@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "yellowed",
+  "name": "Yellowed",
+  "category": "Vintage",
+  "adjust": {"fade": 0.15, "saturation": -0.1},
+  "curves": {"blue": [[0, 0], [1, 0.75]]}
+}

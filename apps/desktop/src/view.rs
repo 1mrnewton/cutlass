@@ -5281,14 +5281,16 @@ fn ruler_and_lanes(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
     if let Some(main) = main_index
         && let Some(row) = drawn.get(main).copied()
     {
-        // One line across the sheet, the head too, where the lanes above
-        // main end and main's row begins.
+        // One line across the heads and one across the lanes, the bare
+        // cover column between them, where the lanes above main end and
+        // main's row begins.
         if main > 0 {
-            ui.painter().hline(
-                tracks.x_range(),
-                row.top() - LANE_GAP / 2.0,
-                egui::Stroke::new(1.0, tokens::LANE_LINE),
-            );
+            let y = row.top() - LANE_GAP / 2.0;
+            let heads = head_rect(row).x_range();
+            for span in [heads, egui::Rangef::new(lanes_left, tracks.right())] {
+                ui.painter()
+                    .hline(span, y, egui::Stroke::new(1.0, tokens::LANE_LINE));
+            }
         }
         if laid.peek {
             let y = row.bottom() - tokens::MAIN_CLIP_INSET / 2.0;
@@ -5297,6 +5299,13 @@ fn ruler_and_lanes(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
     }
     paint_new_lane(shell, ui, &boxes, lanes_left);
     ui.set_clip_rect(clip);
+    // The heads and the cover column are parted by one line, from the
+    // ruler's top to the panel's foot.
+    ui.painter().vline(
+        tracks.left() + tokens::TRACK_HEAD,
+        rect.y_range(),
+        egui::Stroke::new(1.0, tokens::GAP),
+    );
     shell.send_timeline_asks();
     track_marquee(shell, ui, view, &marquee, lanes_left, &rows, &boxes);
     let playhead_x = lane_x(
@@ -6489,17 +6498,13 @@ fn paint_lane(
     index: usize,
     boxes: &[Rect],
 ) {
-    // Every row, its head too, takes the lane fill; the hairline between
+    // The head and the row take the lane fill; the cover column between
+    // them is left bare, so the panel shows there, and the hairline between
     // rows is the panel showing through the gap.
-    let whole = Rect::from_min_max(Pos2::new(head_rect(row).left(), row.top()), row.max);
     ui.painter()
-        .rect_filled(whole, CornerRadius::ZERO, tokens::LANE);
-    // The head's buttons and the lanes are parted by a line.
-    ui.painter().vline(
-        head_rect(row).right(),
-        row.y_range(),
-        egui::Stroke::new(1.0, tokens::PANEL),
-    );
+        .rect_filled(head_rect(row), CornerRadius::ZERO, tokens::LANE);
+    ui.painter()
+        .rect_filled(row, CornerRadius::ZERO, tokens::LANE);
     if lane.main && lane.clips.is_empty() {
         ui.painter().rect_stroke(
             row,
@@ -14199,6 +14204,51 @@ mod tests {
             scrolled.iter().all(|height| *height == tokens::CLIP_HEIGHT),
             "{scrolled:?}"
         );
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn the_cover_column_between_heads_and_lanes_is_bare() {
+        let temp = std::env::temp_dir().join(format!("cutlass-cover-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let mut draft = cutlass_model::Draft::empty("draft");
+        draft.canvas_config.width = 2;
+        draft.canvas_config.height = 1;
+        draft.tracks[0].segments.push(cutlass_model::Segment::new(
+            "low",
+            "color",
+            cutlass_model::TimeRange::new(0, 2_000_000),
+        ));
+        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0))),
+                ..Default::default()
+            },
+            |ui| show(&mut shell, ui, &mut view, None),
+        );
+        output.textures_delta.clear();
+        let at = text_pos(&output, "low").expect("the clip");
+        let lane_fill_at = |point: Pos2| {
+            output.shapes.iter().any(|clipped| match &clipped.shape {
+                egui::Shape::Rect(rect) => {
+                    rect.fill == tokens::LANE
+                        && rect.rect.contains(point)
+                        && clipped.clip_rect.contains(point)
+                }
+                _ => false,
+            })
+        };
+        // The clip's name sits a little inside the lanes' left edge.
+        let cover = Pos2::new(at.x - 12.0 - tokens::COVER_WIDTH / 2.0, at.y);
+        let head = Pos2::new(at.x - 12.0 - tokens::COVER_WIDTH - 20.0, at.y);
+        assert!(!lane_fill_at(cover), "the cover column takes no lane fill");
+        assert!(lane_fill_at(head), "the head keeps its lane fill");
         let _ = std::fs::remove_dir_all(&temp);
     }
 

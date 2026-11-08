@@ -3,7 +3,7 @@
 use crate::{Cap, IconData, Join, Mark, Shape, Stroke};
 
 /// Every custom mark. `icons.txt` names one with `custom`.
-pub static CUSTOM: &[IconData] = &[BLADE, ZOOMFIT];
+pub static CUSTOM: &[IconData] = &[BLADE, ZOOMFIT, KEYBACKSPACE];
 
 /// The split tool's blade. Filled, not stroked.
 pub const BLADE: IconData = IconData {
@@ -47,6 +47,29 @@ pub const ZOOMFIT: IconData = IconData {
             shape: Shape::Path(
                 "M10 3H14M3 10V14M6.5 21C4.567 21 3 19.433 3 17.5M17.5 3C19.433 3 21 4.567 21 6.5M3 6.5C3 4.567 4.567 3 6.5 3",
             ),
+            fill: false,
+            even_odd: false,
+            stroke: LINE,
+        },
+    ],
+};
+
+/// The backspace key: a key pointing left with a cross in it, stroked like
+/// the Hugeicons key marks beside it. The free set has none.
+pub const KEYBACKSPACE: IconData = IconData {
+    name: "keyBackspace",
+    source: None,
+    marks: &[
+        Mark {
+            shape: Shape::Path(
+                "M8.6 5H18C19.6569 5 21 6.34315 21 8V16C21 17.6569 19.6569 19 18 19H8.6C8.0034 19 7.4374 18.7336 7.0574 18.274L3.3074 13.274C2.7309 12.5232 2.7309 11.4768 3.3074 10.726L7.0574 5.726C7.4374 5.2664 8.0034 5 8.6 5Z",
+            ),
+            fill: false,
+            even_odd: false,
+            stroke: LINE,
+        },
+        Mark {
+            shape: Shape::Path("M12 9.5L17 14.5M17 9.5L12 14.5"),
             fill: false,
             even_odd: false,
             stroke: LINE,

@@ -111,6 +111,7 @@ keyCommand     CommandIcon
 keyShift       ArrowUpBigIcon
 keyOption      OptionIcon
 keyWindows     WindowsOldIcon
+keyBackspace   custom
 
 # Custom marks.
 blade          custom

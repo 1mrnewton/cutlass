@@ -626,6 +626,10 @@ struct PendingTrim {
     edge: TrimEdge,
     time: Micros,
     snapped: bool,
+    /// Every clip the trim would move or resize, the trimmed one included,
+    /// as (start, duration): later clips a packed row pushes, and linked
+    /// clips that follow. Empty when the trim would be refused.
+    spans: std::collections::HashMap<SegmentId, (Micros, Micros)>,
 }
 
 /// A clip kept for paste. `offset` is its start relative to the earliest copied clip.
@@ -2818,15 +2822,59 @@ impl Shell {
         }
         match self.plan_trim(segment_id, edge, x) {
             Ok(plan) => {
+                let spans = self.trim_spans(&plan.request());
                 self.pending_trim = Some(PendingTrim {
                     id: plan.segment_id,
                     edge: plan.edge,
                     time: plan.time,
                     snapped: plan.snapped,
+                    spans,
                 });
             }
             Err(_) => self.pending_trim = None,
         }
+    }
+
+    /// Where every clip would be once `request` lands, for the ones it
+    /// moves or resizes: the edit runs on a copy of the draft, so packing
+    /// and linkage push the same clips the real edit will.
+    fn trim_spans(
+        &self,
+        request: &Request,
+    ) -> std::collections::HashMap<SegmentId, (Micros, Micros)> {
+        let Some(session) = self.session.as_ref() else {
+            return std::collections::HashMap::new();
+        };
+        let draft = session.draft();
+        let mut copy = Session::open(draft.clone());
+        copy.set_linkage(session.linkage());
+        if copy.apply(0, std::slice::from_ref(request)).is_err() {
+            return std::collections::HashMap::new();
+        }
+        let before: std::collections::HashMap<&SegmentId, (Micros, Micros)> = draft
+            .tracks
+            .iter()
+            .flat_map(|track| &track.segments)
+            .map(|segment| (&segment.id, (segment.target.start, segment.target.duration)))
+            .collect();
+        copy.draft()
+            .tracks
+            .iter()
+            .flat_map(|track| &track.segments)
+            .filter_map(|segment| {
+                let span = (segment.target.start, segment.target.duration);
+                (before.get(&segment.id) != Some(&span)).then(|| (segment.id.clone(), span))
+            })
+            .collect()
+    }
+
+    /// Where a clip shows while an edge is dragged, when the trim moves or
+    /// resizes it, as (start, duration).
+    #[must_use]
+    pub fn trim_preview(&self, id: &SegmentId) -> Option<(Micros, Micros)> {
+        self.pending_trim
+            .as_ref()
+            .and_then(|pending| pending.spans.get(id).copied())
     }
 
     /// The preview edge for this clip, as a timeline time.
@@ -15637,6 +15685,61 @@ mod tests {
     fn lane_time(desktop: &Shell, time: f64) -> f64 {
         let origin = desktop.view_origin().0 as f64;
         (time - origin) * desktop.pixel_size()
+    }
+
+    /// On a packed main row, a held end drag pushes the next clip as it
+    /// goes, and the draft is written only when the drag lets go.
+    #[test]
+    fn a_held_trim_pushes_the_next_clip_live() {
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        draft.config.maintrack_adsorb = true;
+        draft.canvas_config.width = 2;
+        draft.canvas_config.height = 1;
+        let mut video = MaterialVideo::new("media");
+        video.duration = Micros(10_000_000);
+        draft.materials.videos.push(video);
+        for (id, start) in [("clip", 0), ("next", 1_000_000)] {
+            let mut clip = Segment::new(id, "media", TimeRange::new(start, 1_000_000));
+            clip.source_range = Some(TimeRange::new(0, 1_000_000));
+            draft.tracks[0].segments.push(clip);
+        }
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.toggle_snap();
+        let clip = SegmentId::new("clip");
+        let next = SegmentId::new("next");
+        desktop.preview_edge(
+            clip.clone(),
+            TrimEdge::End,
+            lane_time(&desktop, 1_500_000.0),
+        );
+        let (start, duration) = desktop.trim_preview(&clip).expect("the clip grows");
+        assert_eq!(start, Micros(0));
+        let end = duration.0;
+        assert!((1_400_000..=1_600_000).contains(&end), "{end}");
+        assert_eq!(
+            desktop.trim_preview(&next),
+            Some((Micros(end), Micros(1_000_000)))
+        );
+        // Nothing is written while the drag is held.
+        assert_eq!(
+            desktop.draft().unwrap().tracks[0].segments[1].target.start,
+            Micros(1_000_000)
+        );
+        desktop
+            .trim_edge(
+                clip.clone(),
+                TrimEdge::End,
+                lane_time(&desktop, 1_500_000.0),
+            )
+            .unwrap();
+        assert!(desktop.trim_preview(&next).is_none());
+        assert_eq!(
+            desktop.draft().unwrap().tracks[0].segments[1].target.start,
+            Micros(end)
+        );
     }
 
     #[test]

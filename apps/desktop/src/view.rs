@@ -7329,6 +7329,10 @@ fn edge_name(edge: TrimEdge) -> &'static str {
 }
 
 fn preview_bounds(shell: &Shell, clip: &crate::shell::ClipSpan) -> (Micros, Micros) {
+    // A held trim draws every clip it moves where the edit will put it.
+    if let Some(span) = shell.trim_preview(&clip.id) {
+        return span;
+    }
     let Some((edge, time)) = shell.preview_span(&clip.id) else {
         return (clip.start, clip.duration);
     };

@@ -34,7 +34,7 @@ pub fn readers() -> ReaderFactory {
 }
 
 /// FLAC, ALAC, MP3, Opus and WebP, the platform decoders for this OS, then
-/// PNG, GIF, JPEG, AAC, H.264, HEVC, PCM and ProRes.
+/// PNG, GIF, JPEG, AAC, H.264, HEVC, MPEG-2, PCM and ProRes.
 #[must_use]
 pub fn decoders() -> DecodeFactory {
     let mut decoders = DecodeFactory::new();
@@ -54,8 +54,9 @@ pub fn decoders() -> DecodeFactory {
     cutlass_jpeg::register_decoders(&mut decoders);
     cutlass_aac::register_decoders(&mut decoders);
     cutlass_h264::register_decoders(&mut decoders);
-    // HEVC in Rust, after the platform decoders.
+    // HEVC and MPEG-2 in Rust, after the platform decoders.
     cutlass_hevc::register_decoders(&mut decoders);
+    cutlass_mpeg2::register_decoders(&mut decoders);
     cutlass_pcm::register_decoders(&mut decoders);
     cutlass_prores::register_decoders(&mut decoders);
     decoders
@@ -412,6 +413,54 @@ mod tests {
                 "the platform decoder was not picked"
             );
         }
+    }
+
+    /// The phone plays MPEG-2: the platform decoder where it takes the
+    /// stream, else the Rust one, gives every picture of a stream with B
+    /// pictures once, in display order.
+    #[test]
+    fn the_phone_decodes_mpeg2() {
+        use cutlass_encode::{VideoEncoder, VideoInput};
+        let (width, height) = (64, 48);
+        let mut encoder =
+            cutlass_mpeg2::Mpeg2Encoder::open(&CodecParams::video(CodecId::Mpeg2, width, height))
+                .expect("encoder");
+        let mut packets = Vec::new();
+        for t in 0..8u8 {
+            let luma: Vec<u8> = (0..width * height)
+                .map(|i| (i % width) as u8 * 3 + t * 4)
+                .collect();
+            let chroma = vec![128; (width * height / 4) as usize];
+            let picture =
+                cutlass_decode::Yuv420p::try_new(width, height, luma, chroma.clone(), chroma)
+                    .expect("picture");
+            let input = VideoInput {
+                picture,
+                pts: i64::from(t),
+                duration: 1,
+                timescale: 25,
+                force_keyframe: false,
+            };
+            packets.extend(encoder.push(&input).expect("push"));
+        }
+        packets.extend(VideoEncoder::drain(&mut encoder).expect("drain"));
+        let mut params = CodecParams::video(CodecId::Mpeg2, width, height);
+        params.extra = encoder.extradata().to_vec();
+        let mut phone = super::decoders().open(&params).expect("phone");
+        let mut times = Vec::new();
+        for packet in &packets {
+            for output in phone.push(packet).expect("push") {
+                if let Output::Picture(picture) = output {
+                    times.push(picture.pts());
+                }
+            }
+        }
+        for output in phone.drain().expect("drain") {
+            if let Output::Picture(picture) = output {
+                times.push(picture.pts());
+            }
+        }
+        assert_eq!(times, (0..8).collect::<Vec<i64>>());
     }
 
     /// A lossless 1x1 WebP of one opaque red pixel, as `cwebp -lossless` 1.6.0

@@ -2739,6 +2739,7 @@ dependencies = [
  "cutlass-model",
  "cutlass-mp3",
  "cutlass-mp3-container",
+ "cutlass-mpeg2",
  "cutlass-ogg",
  "cutlass-opus",
  "cutlass-pcm",

@@ -145,7 +145,8 @@ pub struct Image {
     pub progressive: bool,
     /// An APP0 `JFIF` segment was present.
     pub jfif: bool,
-    /// A COM segment `CS=ITU601` declared studio-range YCbCr.
+    /// A COM segment whose text, up to a NUL or a final newline, is
+    /// `CS=ITU601`, declaring studio-range YCbCr.
     pub studio_range: bool,
     /// Byte 12 of a COM segment that starts `AVID`: 1 is NTSC, 2 is PAL.
     pub avid_standard: Option<u8>,
@@ -678,7 +679,10 @@ fn note(marker: u8, body: &[u8], meta: &mut Meta) {
             meta.adobe = Some(body[11]);
         }
         COM => {
+            // Read as a C string, as writers terminate it with NUL or a
+            // newline.
             let text = body.strip_suffix(b"\n").unwrap_or(body);
+            let text = text.split(|&byte| byte == 0).next().unwrap_or(text);
             if text == b"CS=ITU601" {
                 meta.studio_range = true;
             } else if body.starts_with(b"AVID") {

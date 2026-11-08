@@ -1190,3 +1190,26 @@ fn a_table_stream_with_a_frame_or_a_cut_leaves_the_tables() {
     }
     assert!(read_tables(&[], &mut Tables::new()).is_err());
 }
+
+#[test]
+fn a_studio_range_comment_is_read_as_a_c_string() {
+    let image = planar_jpeg(8, 8, Sampling::Gray, 75);
+    let with_comment = |text: &[u8]| {
+        let mut out = image[..2].to_vec();
+        out.extend_from_slice(&[0xff, 0xfe]);
+        out.extend_from_slice(&u16::try_from(text.len() + 2).expect("len").to_be_bytes());
+        out.extend_from_slice(text);
+        out.extend_from_slice(&image[2..]);
+        decode_image(&out, &mut Tables::new())
+            .expect("image")
+            .image
+            .studio_range
+    };
+    assert!(with_comment(b"CS=ITU601"));
+    assert!(with_comment(b"CS=ITU601\0"));
+    assert!(with_comment(b"CS=ITU601\n"));
+    assert!(with_comment(b"CS=ITU601\0trailing"));
+    assert!(!with_comment(b"CS=ITU601X"));
+    assert!(!with_comment(b"CS=ITU60"));
+    assert!(!with_comment(b"Lavc62"));
+}

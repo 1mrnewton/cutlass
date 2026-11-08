@@ -8,7 +8,11 @@
 //! scale 1.0 in the Vorbis channel order, unclipped.
 //!
 //! A packet stamped with a duration shorter than it decodes is an end trim
-//! (`skip_trailing`), as the Ogg end-of-stream granule makes it. A negative
+//! (`skip_trailing`), as the Ogg end-of-stream granule makes it. A duration
+//! of 0 is a length only once a packet has come stamped with a length (the
+//! source stamps them, as Ogg does): then a packet wholly past the
+//! end-of-stream granule is trimmed whole. Before that, 0 is no length and
+//! nothing is trimmed. A negative
 //! start is the container's edit. Header packets in the stream (a chained
 //! link) and a `SideData::Config` that differs from the current one replace
 //! the configuration and start again as after a reset.
@@ -141,6 +145,9 @@ pub struct VorbisDecoder {
     overlap: Overlap,
     pending: Pending,
     work: Work,
+    /// A packet came with a clock and a nonzero duration, so a duration of
+    /// 0 is a length rather than none.
+    stamped: bool,
 }
 
 /// The result of decoding one audio packet, before it is committed.
@@ -180,6 +187,7 @@ impl VorbisDecoder {
             overlap: Overlap::default(),
             pending: Pending::default(),
             work: Work::default(),
+            stamped: false,
         })
     }
 
@@ -474,14 +482,17 @@ impl VorbisDecoder {
         out
     }
 
-    fn output(&self, samples: Vec<f32>, packet: &Packet) -> Result<Vec<Output>, CodecError> {
+    fn output(&mut self, samples: Vec<f32>, packet: &Packet) -> Result<Vec<Output>, CodecError> {
+        if packet.timescale > 0 && packet.duration > 0 {
+            self.stamped = true;
+        }
         let channels = self.stream.channels();
         let count = samples.len() / channels;
         if count == 0 {
             return Ok(Vec::new());
         }
         let rate = self.stream.id.sample_rate;
-        let trailing = if packet.timescale > 0 && packet.duration > 0 {
+        let trailing = if packet.timescale > 0 && (packet.duration > 0 || self.stamped) {
             let wanted =
                 i128::from(packet.duration) * i128::from(rate) / i128::from(packet.timescale);
             (count as i128 - wanted).clamp(0, count as i128) as u32

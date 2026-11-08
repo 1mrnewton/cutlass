@@ -339,3 +339,80 @@ fn decoding_is_deterministic() {
     let bytes = fixture("surround51_48000_q4.ogg");
     assert_eq!(decode_file(&bytes), decode_file(&bytes));
 }
+
+/// `bytes` with its last page's granule set to the one before it, so every
+/// packet ending on that page lies wholly past the end, and its checksum
+/// written again.
+fn end_at_the_page_before(bytes: &[u8]) -> (Vec<u8>, i64) {
+    let mut pages = Vec::new();
+    let mut at = 0;
+    while at + 27 <= bytes.len() {
+        let header = cutlass_ogg::page::parse_header(&bytes[at..]).unwrap();
+        let table = 27 + usize::from(header.segments);
+        let body: usize = bytes[at + 27..at + table]
+            .iter()
+            .map(|&l| usize::from(l))
+            .sum();
+        pages.push((at, table, body, header.granule));
+        at += table + body;
+    }
+    let (last, table, body, _) = *pages.last().unwrap();
+    let end = pages[..pages.len() - 1]
+        .iter()
+        .rev()
+        .find_map(|&(_, _, _, granule)| (granule != -1).then_some(granule))
+        .unwrap();
+    let mut out = bytes.to_vec();
+    out[last + 6..last + 14].copy_from_slice(&end.to_le_bytes());
+    let crc = cutlass_ogg::crc::page_crc(
+        &out[last..last + table],
+        &out[last + table..last + table + body],
+    );
+    out[last + 22..last + 26].copy_from_slice(&crc.to_le_bytes());
+    (out, end)
+}
+
+/// Packets the Ogg demuxer stamps with a duration of 0, because the
+/// end-of-stream granule falls before them, are trimmed whole: what plays
+/// is the edit's length, not the decoded one.
+#[test]
+fn a_packet_wholly_past_the_end_granule_is_trimmed_whole() {
+    use cutlass_container::Demux;
+
+    let (bytes, end) = end_at_the_page_before(&fixture("stereo_44100_q4.ogg"));
+    let length = bytes.len() as u64;
+    let mut demux = cutlass_ogg::OggDemux::open(std::io::Cursor::new(bytes), length).unwrap();
+    let stream = demux.streams()[0].clone();
+    assert_eq!(stream.edits()[0].duration(), end);
+    let mut decoder = VorbisDecoder::from_config(stream.params().extradata()).unwrap();
+    let (mut kept, mut whole) = (0_i64, 0);
+    while let Some(packet) = demux.read_packet().unwrap() {
+        let duration = packet.timestamp().duration().unwrap();
+        let access = Packet::audio(
+            packet.bytes().to_vec(),
+            packet.timestamp().presentation_or_decode().unwrap(),
+            duration,
+            packet.timescale().ticks_per_second(),
+        );
+        let Some(out) = audio(decoder.push(&access).unwrap()) else {
+            continue;
+        };
+        if duration == 0 {
+            assert_eq!(out.skip_trailing, out.pcm.samples, "trimmed whole");
+            whole += 1;
+        }
+        kept += i64::from(out.pcm.samples - out.skip_trailing);
+    }
+    assert!(
+        whole > 0,
+        "the last page holds a packet wholly past the end"
+    );
+    assert_eq!(kept, end);
+
+    // A source that stamps no lengths gets every sample of a packet.
+    let (config, packets) = split_stream(&fixture("stereo_44100_q4.ogg"));
+    let mut decoder = open(&config);
+    push_all(&mut decoder, &packets[..2], 44_100);
+    let out = audio(decoder.push(&packet(&packets[2].data, 0, 44_100)).unwrap()).unwrap();
+    assert_eq!(out.skip_trailing, 0);
+}

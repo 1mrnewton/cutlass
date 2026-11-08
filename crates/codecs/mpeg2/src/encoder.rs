@@ -145,6 +145,11 @@ impl Mpeg2Encoder {
                 what: "picture larger than Main profile High level",
             });
         }
+        if LEVELS.iter().all(|level| params.bitrate > level.bitrate) {
+            return Err(CodecError::Unsupported {
+                what: "bit rate above Main profile High level",
+            });
+        }
         let geo = Geometry {
             mb_width: width.div_ceil(16) as usize,
             mb_height: height.div_ceil(16) as usize,

@@ -418,11 +418,15 @@ mod encode {
         ));
         let mut params = CodecParams::video(CodecId::Mpeg2, 720, 576);
         params.bitrate = 90_000_000;
-        let mut encoder = Mpeg2Encoder::open(&params).unwrap();
         assert!(matches!(
-            encoder.push(&input(720, 576, 0)),
+            Mpeg2Encoder::open(&params),
             Err(CodecError::Unsupported { .. })
         ));
+        // 80 Mb/s opens, and only High level holds it.
+        params.bitrate = 80_000_000;
+        let mut encoder = Mpeg2Encoder::open(&params).unwrap();
+        encoder.push(&input(720, 576, 0)).unwrap();
+        assert_eq!(encoder.extradata()[16..18], [0x14, 0x4A]);
     }
 
     #[test]

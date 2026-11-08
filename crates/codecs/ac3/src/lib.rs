@@ -4,10 +4,12 @@
 
 #![forbid(unsafe_code)]
 
+mod aht;
 mod bitalloc;
 mod bits;
 mod crc;
 mod exponents;
 mod header;
 mod mdct;
+mod spx;
 mod tables;

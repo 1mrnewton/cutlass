@@ -2790,6 +2790,7 @@ version = "0.1.0"
 name = "cutlass-generated"
 version = "0.1.0"
 dependencies = [
+ "cutlass-lottie",
  "cutlass-model",
  "cutlass-picture",
 ]

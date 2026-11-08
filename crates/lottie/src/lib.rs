@@ -30,6 +30,7 @@ mod eval;
 mod geom;
 pub mod limits;
 mod pack;
+mod path;
 mod prop;
 mod raster;
 mod scene;
@@ -41,6 +42,7 @@ use std::fmt;
 
 pub use anim::Animation;
 pub use pack::{DATA_WIDTH, Packed, PackedItem, pack};
+pub use path::{LineCap, LineJoin, Outline, Pen, fill_edges, stroke_edges};
 pub use raster::{rasterize, shade};
 pub use scene::{
     Bounds, Edge, Expansion, Fill, FillRule, Gradient, GradientKind, Group, Item, Mask, MaskMode,

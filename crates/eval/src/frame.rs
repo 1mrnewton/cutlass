@@ -10,7 +10,7 @@ use cutlass_picture::{CpuBytes, Picture, Sample};
 use crate::canvas::canvas_rgba;
 use crate::effect::{RecipeMark, StackLayer, needs_cpu, present, recipe_marks};
 use crate::gpu::{Composed, FrameLayers, GpuLayer};
-use crate::lottie::{LottieLayer, PlacedLottie, lottie_layers};
+use crate::lottie::{LottieLayer, PlacedLottie, lottie_layers, shape_layers};
 use crate::media::{OpenClips, Placed, video_layers};
 use crate::nest::{NestPass, NestedLayer, NestedPicture, nest_layers};
 use crate::sources::{SolidLayer, solid_layers};
@@ -396,7 +396,9 @@ fn with_layers<D: Device, T>(
         extent.height,
         &mut pass,
     )?;
-    let lotties = lottie_layers(draft, extent.width, extent.height, pass.time, pass.clips);
+    let mut lotties = lottie_layers(draft, extent.width, extent.height, pass.time, pass.clips);
+    // Shapes are vector scenes too, drawn and placed the same way.
+    lotties.extend(shape_layers(draft, extent.width, extent.height, pass.time));
     let mut layers = ordered(
         solid_layers(draft, extent.width, extent.height),
         text_layers(
@@ -417,7 +419,7 @@ fn with_layers<D: Device, T>(
         ),
         nests,
     );
-    // Lottie stickers join in their place among the other clips.
+    // Lottie stickers and shapes join in their place among the other clips.
     add_lotties(&mut layers, lotties);
     apply_transitions(
         draft,

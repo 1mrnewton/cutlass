@@ -90,6 +90,79 @@ impl PictureSource for PlacedLottie {
 }
 
 /// The size a `width` by `height` animation is drawn at.
+/// Shape clips at `time`, each a vector scene drawn at the clip's scale so
+/// it stays sharp, placed like a picture at its own size in canvas pixels.
+pub(crate) fn shape_layers(
+    draft: &Draft,
+    width: u32,
+    height: u32,
+    time: Micros,
+) -> Vec<LottieLayer> {
+    let mut layers = Vec::new();
+    for (track_index, track) in draft.tracks.iter().enumerate() {
+        if track.attribute.contains(TrackAttribute::HIDE) {
+            continue;
+        }
+        for (segment_index, segment) in track.segments.iter().enumerate() {
+            if !segment.visible {
+                continue;
+            }
+            let start = segment.target.start.0;
+            let Some(end) = start.checked_add(segment.target.duration.0) else {
+                continue;
+            };
+            if time.0 < start || time.0 >= end {
+                continue;
+            }
+            let Some(MaterialRef::Shape(shape)) = draft.materials.get(segment.material_id.as_str())
+            else {
+                continue;
+            };
+            let Some((clip, uniform)) = cutlass_model::animated_at(draft, segment, time) else {
+                continue;
+            };
+            let Some(transform) =
+                picture_transform(&clip, &uniform, width, height).map(PictureTransform::native)
+            else {
+                continue;
+            };
+            if transform.omitted() {
+                continue;
+            }
+            let scale = if uniform.on {
+                uniform.value.abs()
+            } else {
+                clip.scale.x.abs().max(clip.scale.y.abs())
+            };
+            // Up in quarter steps, so a pinch does not redraw at every move.
+            let wanted = if scale.is_finite() && scale > 1.0 {
+                ((scale * 4.0).ceil() / 4.0).min(MAX_SHAPE_DENSITY)
+            } else {
+                1.0
+            };
+            let Some((scene, drawn)) = cutlass_generated::shape_scene(shape, wanted) else {
+                continue;
+            };
+            layers.push(LottieLayer {
+                render_index: segment.render_index,
+                track_index,
+                segment_index,
+                placed: PlacedLottie {
+                    scene: Arc::new(scene),
+                    width,
+                    height,
+                    transform: transform.dense(drawn),
+                    raster: OnceCell::new(),
+                },
+            });
+        }
+    }
+    layers
+}
+
+/// The most picture pixels a shape is drawn with per shown pixel.
+const MAX_SHAPE_DENSITY: f64 = 8.0;
+
 fn raster_size(width: f64, height: f64) -> (u32, u32) {
     let scale = (MAX_RASTER_EDGE / width.max(height)).min(1.0);
     let edge = |value: f64| (value * scale).round().clamp(1.0, MAX_RASTER_EDGE) as u32;
@@ -241,6 +314,45 @@ mod tests {
         )
         .unwrap()
         .rgba
+    }
+
+    #[test]
+    fn a_shape_draws_at_its_own_size_where_its_clip_puts_it() {
+        let mut draft = Draft::empty("draft");
+        draft.canvas_config.width = 100;
+        draft.canvas_config.height = 100;
+        let mut square = cutlass_model::MaterialShape::preset(
+            "sq".into(),
+            cutlass_model::ShapeKind::Rectangle,
+            20.0,
+            20.0,
+        );
+        square.color = "#ff0000".to_owned();
+        draft.materials.shapes.push(square);
+        let mut row = Track::main("stickers");
+        row.kind = TrackType::Sticker;
+        row.segments
+            .push(Segment::new("shape", "sq", TimeRange::new(0, 1_000_000)));
+        draft.tracks.push(row);
+        let mut clips = OpenClips::new();
+        // A 20 pixel square in the middle of the 100 pixel canvas.
+        let picture = cpu(&draft, 0, &mut clips, 0);
+        assert!(red_at(&picture, 50, 50));
+        assert!(red_at(&picture, 41, 59));
+        assert!(!red_at(&picture, 38, 50));
+        assert!(!red_at(&picture, 50, 62));
+        // Doubled by the clip's scale, and still sharp at its edge.
+        draft.tracks[1].segments[0].uniform_scale.value = 2.0;
+        let picture = cpu(&draft, 0, &mut clips, 1);
+        assert!(red_at(&picture, 31, 50));
+        assert!(red_at(&picture, 69, 69));
+        assert!(!red_at(&picture, 28, 50));
+        // After the clip: nothing.
+        assert!(
+            cpu(&draft, 1_000_000, &mut clips, 2)
+                .iter()
+                .all(|byte| *byte == 0)
+        );
     }
 
     #[test]

@@ -41,6 +41,7 @@ cutlass-jpeg = { path = "../codecs/jpeg", version = "0.1.0" }
 cutlass-aac = { path = "../codecs/aac", version = "0.1.0" }
 cutlass-h264 = { path = "../codecs/h264", version = "0.1.0" }
 cutlass-hevc = { path = "../codecs/hevc", version = "0.1.0" }
+cutlass-mpeg4 = { path = "../codecs/mpeg4", version = "0.1.0" }
 cutlass-pcm = { path = "../codecs/pcm", version = "0.1.0" }
 cutlass-flac = { path = "../codecs/flac", version = "0.1.0" }
 cutlass-alac = { path = "../codecs/alac", version = "0.1.0" }

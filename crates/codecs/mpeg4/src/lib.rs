@@ -15,6 +15,9 @@ mod tables;
 mod vlc;
 mod vop;
 
+#[cfg(test)]
+mod prove;
+
 pub use enc::{encode_advanced, encode_intra};
 pub use engine::{
     EngineDecoder, EngineEncoder, register_engine_decoders, register_engine_encoders,

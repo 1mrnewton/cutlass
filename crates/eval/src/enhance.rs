@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 
 use cutlass_codec::ContainerId;
 use cutlass_engine::{DisplayQuarter, Media, ReaderFactory, decoded_picture};
-use cutlass_model::{Draft, MaterialRef, Micros, SegmentId, TimeRange};
+use cutlass_model::{Draft, MaterialRef, Micros, MotionBlur, SegmentId, TimeRange};
 use cutlass_picture::{CpuBytes, Picture};
 use cutlass_store::{EnhanceKey, find_enhanced};
 
@@ -33,6 +33,9 @@ pub const DENOISE_MODEL: &str = "fastdvdnet-clipped";
 
 /// The model that makes the frames between a clip's own for Optical flow.
 pub const INTERPOLATE_MODEL: &str = "rife-v4.26";
+
+/// What blurs a copy: frames made between the clip's own, averaged.
+pub const MOTION_BLUR_MODEL: &str = "rife-v4.26-shutter-1";
 
 /// The slowest speed Optical flow fills for, so a copy's rate stays
 /// bounded.
@@ -86,6 +89,8 @@ pub struct EnhanceAsk {
     /// The Optical flow frame rate; 0 makes a copy with only the clip's
     /// own frames.
     pub interpolate: i64,
+    /// The Motion blur each frame of the copy gets, if any.
+    pub motion_blur: Option<MotionBlur>,
 }
 
 impl EnhanceAsk {
@@ -96,6 +101,7 @@ impl EnhanceAsk {
         let model = [
             (self.denoise > 0, DENOISE_MODEL),
             (self.interpolate > 0, INTERPOLATE_MODEL),
+            (self.motion_blur.is_some(), MOTION_BLUR_MODEL),
             (self.level > 0, ENHANCE_MODEL),
         ]
         .iter()
@@ -108,6 +114,12 @@ impl EnhanceAsk {
             level: self.level.max(0),
             denoise: self.denoise.max(0),
             interpolate: self.interpolate.max(0),
+            motion_blur: self.motion_blur.as_ref().map_or_else(String::new, |blur| {
+                format!(
+                    "b{:.3}-m{:.3}-d{}-x{}",
+                    blur.blur, blur.blend, blur.direction, blur.times
+                )
+            }),
             model,
             rate: self.rate,
         }
@@ -125,12 +137,26 @@ pub fn enhance_ask(
     denoise: i64,
     interpolate: i64,
 ) -> Result<EnhanceAsk, EnhanceError> {
+    copy_ask(draft, root, segment_id, level, denoise, interpolate, None)
+}
+
+/// [`enhance_ask`], with each frame of the copy blurred along its motion
+/// as `motion_blur` says.
+pub fn copy_ask(
+    draft: &Draft,
+    root: Option<&Path>,
+    segment_id: &SegmentId,
+    level: i64,
+    denoise: i64,
+    interpolate: i64,
+    motion_blur: Option<&MotionBlur>,
+) -> Result<EnhanceAsk, EnhanceError> {
     let clip = |reason: &str| EnhanceError::Clip {
         reason: reason.into(),
     };
-    if level <= 0 && denoise <= 0 && interpolate <= 0 {
+    if level <= 0 && denoise <= 0 && interpolate <= 0 && motion_blur.is_none() {
         return Err(clip(
-            "Enhance quality, Reduce image noise and Optical flow are off for this clip",
+            "Enhance quality, Reduce image noise, Optical flow and Motion blur are off for this clip",
         ));
     }
     let (source, range, own_rate, segment) = clip_stretch(draft, root, segment_id, "enhanced")?;
@@ -147,6 +173,7 @@ pub fn enhance_ask(
         level: level.max(0),
         denoise: denoise.max(0),
         interpolate: interpolate.max(0),
+        motion_blur: motion_blur.cloned(),
     })
 }
 
@@ -220,13 +247,14 @@ pub(crate) fn enhanced_copy(
         return None;
     };
     let level = |algorithm: Option<&cutlass_model::Algorithm>| algorithm.map_or(0, |a| a.level);
-    let ask = enhance_ask(
+    let ask = copy_ask(
         draft,
         Some(root),
         segment_id,
         level(video.enhance()),
         level(video.denoise()),
         level(video.interpolate()),
+        video.motion_blur().as_ref(),
     )
     .ok()?;
     let (path, held) = find_enhanced(root, &ask.key(), &ask.range)?;
@@ -248,6 +276,9 @@ pub struct EnhanceFrames {
     media: Media,
     times: Vec<Micros>,
     blends: Vec<Blend>,
+    /// For each frame of the copy, the frames averaged into it: its own
+    /// blend alone, or with Motion blur on, those across its blur.
+    samples: Vec<Vec<Blend>>,
     range: TimeRange,
     display: DisplayQuarter,
 }
@@ -271,7 +302,11 @@ impl EnhanceFrames {
             });
         }
         let display = media.info().display;
-        let (times, blends) = if ask.interpolate > 0 {
+        let shutter = ask
+            .motion_blur
+            .as_ref()
+            .map(|blur| shutter_times(&copy, ask.rate, blur));
+        let (times, blends) = if ask.interpolate > 0 || ask.motion_blur.is_some() {
             let times = file_times(&mut media, &ask.range)?;
             let blends = blends(&times, &copy);
             (times, blends)
@@ -281,10 +316,18 @@ impl EnhanceFrames {
                 .collect();
             (copy, blends)
         };
+        let samples = match shutter {
+            Some(shutter) => shutter
+                .iter()
+                .map(|across| self::blends(&times, across))
+                .collect(),
+            None => blends.iter().map(|blend| vec![*blend]).collect(),
+        };
         Ok(Self {
             media,
             times,
             blends,
+            samples,
             range: ask.range.clone(),
             display,
         })
@@ -301,6 +344,14 @@ impl EnhanceFrames {
     #[must_use]
     pub fn blends(&self) -> &[Blend] {
         &self.blends
+    }
+
+    /// For each frame of the copy, in order, the frames averaged into it.
+    /// Each frame's first `from` is at least the last frame's, and within
+    /// a frame they rise.
+    #[must_use]
+    pub fn samples(&self) -> &[Vec<Blend>] {
+        &self.samples
     }
 
     /// Whether there are none.
@@ -358,6 +409,30 @@ fn file_times(media: &mut Media, range: &TimeRange) -> Result<Vec<Micros>, Enhan
         });
     }
     Ok(times)
+}
+
+/// The times averaged into each frame of a copy at `copy`, `rate` frames a
+/// second: `2 × times + 1` evenly across the blur, which is `blur` of a
+/// frame's time long and reaches after the frame, before it, or both.
+fn shutter_times(copy: &[Micros], rate: f64, blur: &MotionBlur) -> Vec<Vec<Micros>> {
+    let frame = 1_000_000.0 / rate;
+    let length = blur.blur.clamp(0.0, 1.0) * frame;
+    let start = match blur.direction {
+        MotionBlur::FORWARD => 0.0,
+        MotionBlur::BACKWARD => -length,
+        _ => -length / 2.0,
+    };
+    let count = (2 * blur.times.clamp(1, 6) + 1) as usize;
+    copy.iter()
+        .map(|at| {
+            (0..count)
+                .map(|j| {
+                    let offset = start + length * j as f64 / (count - 1) as f64;
+                    Micros(at.0 + offset.round() as i64)
+                })
+                .collect()
+        })
+        .collect()
 }
 
 /// Where each time of `copy` lies among the file's frames at `times`: on

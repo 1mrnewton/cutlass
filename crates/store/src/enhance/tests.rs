@@ -32,6 +32,7 @@ fn project() -> (Temp, EnhanceKey) {
         level: 1,
         denoise: 0,
         interpolate: 0,
+        motion_blur: String::new(),
         model: "realesr-general-x4v3".into(),
         rate: 30.0,
     };
@@ -224,6 +225,7 @@ fn a_copy_that_is_only_interpolated_has_its_own_folder_and_name() {
     let flowed = EnhanceKey {
         level: 0,
         interpolate: 60,
+        motion_blur: String::new(),
         model: "rife-v4.26".into(),
         rate: 120.0,
         ..key.clone()
@@ -240,6 +242,7 @@ fn a_copy_that_is_only_interpolated_has_its_own_folder_and_name() {
     );
     let at_30 = EnhanceKey {
         interpolate: 30,
+        motion_blur: String::new(),
         ..flowed.clone()
     };
     assert_eq!(find_enhanced(&temp.0, &at_30, &range), None);
@@ -247,6 +250,7 @@ fn a_copy_that_is_only_interpolated_has_its_own_folder_and_name() {
     // from a copy that is only enhanced.
     let both = EnhanceKey {
         interpolate: 60,
+        motion_blur: String::new(),
         ..key.clone()
     };
     assert!(
@@ -260,6 +264,7 @@ fn a_copy_that_is_only_interpolated_has_its_own_folder_and_name() {
         level: 0,
         denoise: 1,
         interpolate: 60,
+        motion_blur: String::new(),
         ..key
     };
     assert!(
@@ -267,5 +272,31 @@ fn a_copy_that_is_only_interpolated_has_its_own_folder_and_name() {
             .parent()
             .unwrap()
             .ends_with("Resources/video_denoise")
+    );
+}
+
+#[test]
+fn a_blurred_copy_has_its_own_name_and_one_only_blurred_its_own_folder() {
+    let (temp, key) = project();
+    let range = TimeRange::new(0, 1_000_000);
+    let blurred = EnhanceKey {
+        motion_blur: "b1.000-m0.000-d0-x1".into(),
+        ..key.clone()
+    };
+    assert_ne!(blurred.stem().unwrap(), key.stem().unwrap());
+    let other = EnhanceKey {
+        motion_blur: "b0.500-m0.000-d0-x1".into(),
+        ..key.clone()
+    };
+    assert_ne!(blurred.stem().unwrap(), other.stem().unwrap());
+    let only = EnhanceKey {
+        level: 0,
+        ..blurred
+    };
+    let file = enhanced_file(&temp.0, &only, &range).unwrap();
+    assert!(
+        file.parent()
+            .unwrap()
+            .ends_with("Resources/video_motion_blur")
     );
 }

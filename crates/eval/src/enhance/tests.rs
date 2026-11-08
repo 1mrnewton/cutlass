@@ -2,7 +2,7 @@ use std::fs::{self, File};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use cutlass_container::{Demux, Input, OpenError, Probe, ProbeResult};
-use cutlass_model::{Algorithm, MaterialVideo, Segment, TrackType, VideoAlgorithm};
+use cutlass_model::{Algorithm, MaterialVideo, MotionBlur, Segment, TrackType, VideoAlgorithm};
 use cutlass_renderer_software::SoftwareDevice;
 use cutlass_still::{StillDemux, StillProbe, still_limits};
 use cutlass_store::enhanced_file;
@@ -390,4 +390,99 @@ fn a_still_is_refused_before_its_frames_are_read() {
     let (temp, draft) = project(None);
     let ask = enhance_ask(&draft, Some(&temp.0), &"v".into(), 0, 0, 30).unwrap();
     assert!(EnhanceFrames::open(&stills(), &ask).is_err());
+}
+
+fn blur(blur: f64, direction: i64, times: i64) -> MotionBlur {
+    MotionBlur {
+        blur,
+        blend: 0.0,
+        direction,
+        times,
+    }
+}
+
+#[test]
+fn each_frame_is_blurred_across_its_shutter_the_way_it_reaches() {
+    let copy = [Micros(1_000_000), Micros(1_100_000)];
+    let both = shutter_times(&copy, 10.0, &blur(1.0, MotionBlur::BOTH, 1));
+    assert_eq!(
+        both[0],
+        vec![Micros(950_000), Micros(1_000_000), Micros(1_050_000)]
+    );
+    assert_eq!(both[1][0], Micros(1_050_000));
+    let forward = shutter_times(&copy, 10.0, &blur(0.5, MotionBlur::FORWARD, 2));
+    assert_eq!(forward[0].len(), 5);
+    assert_eq!(
+        (forward[0][0], forward[0][4]),
+        (Micros(1_000_000), Micros(1_050_000))
+    );
+    let backward = shutter_times(&copy, 10.0, &blur(1.0, MotionBlur::BACKWARD, 6));
+    assert_eq!(backward[0].len(), 13);
+    assert_eq!(
+        (backward[0][0], backward[0][12]),
+        (Micros(900_000), Micros(1_000_000))
+    );
+    // No length is the frame itself, every time.
+    let none = shutter_times(&copy, 10.0, &blur(0.0, MotionBlur::BOTH, 1));
+    assert!(none[0].iter().all(|time| *time == Micros(1_000_000)));
+}
+
+#[test]
+fn a_blurred_copy_has_its_own_key_and_motion_blur_alone_asks_for_one() {
+    let (temp, mut draft) = project(None);
+    let root = Some(temp.0.as_path());
+    let sharp = enhance_ask(&draft, root, &"v".into(), Algorithm::HD, 0, 0).unwrap();
+    let blurred = copy_ask(
+        &draft,
+        root,
+        &"v".into(),
+        Algorithm::HD,
+        0,
+        0,
+        Some(&blur(1.0, MotionBlur::BOTH, 1)),
+    )
+    .unwrap();
+    assert_ne!(sharp.key(), blurred.key());
+    assert_eq!(
+        blurred.key().model,
+        format!("{MOTION_BLUR_MODEL}+{ENHANCE_MODEL}")
+    );
+    assert_eq!(blurred.key().motion_blur, "b1.000-m0.000-d0-x1");
+    let only = copy_ask(
+        &draft,
+        root,
+        &"v".into(),
+        0,
+        0,
+        0,
+        Some(&blur(0.5, MotionBlur::FORWARD, 4)),
+    )
+    .unwrap();
+    assert_eq!(only.rate, 10.0);
+    assert!(copy_ask(&draft, root, &"v".into(), 0, 0, 0, None).is_err());
+    // A clip with Motion blur on draws from its blurred copy once there is
+    // one.
+    draft.materials.videos[0].video_algorithm = Some(VideoAlgorithm {
+        algorithms: vec![Algorithm {
+            kind: Algorithm::MOTION_BLUR.into(),
+            level: 1,
+            strength: Some(0.5),
+            direction: Some(MotionBlur::FORWARD),
+            speed: Some(4),
+            ..Algorithm::default()
+        }],
+        ..VideoAlgorithm::default()
+    });
+    assert_eq!(enhanced_copy(&draft, root, &"v".into()), None);
+    let file = enhanced_file(&temp.0, &only.key(), &only.range).unwrap();
+    assert!(
+        file.parent()
+            .unwrap()
+            .ends_with("Resources/video_motion_blur")
+    );
+    fs::copy(fixture("pattern.jpg"), &file).unwrap();
+    assert_eq!(
+        enhanced_copy(&draft, root, &"v".into()),
+        Some((file, only.range.start))
+    );
 }

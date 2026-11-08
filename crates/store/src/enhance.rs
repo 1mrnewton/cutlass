@@ -1,7 +1,8 @@
 //! Enhanced, denoised and interpolated copies of clips, kept in the
 //! project's `Resources/video_enhance` folder, `Resources/video_denoise`
 //! for a copy that is denoised but not enhanced, or
-//! `Resources/video_interpolate` for one that is only interpolated.
+//! `Resources/video_interpolate` for one that is only interpolated, or
+//! `Resources/video_motion_blur` for one that is only blurred.
 //!
 //! Making a copy is slow, so it is kept with the project, where export and
 //! other machines find it and no cache eviction takes it away. A copy
@@ -23,6 +24,7 @@ use crate::folder::{RESOURCES_DIR, io_error, stay_inside};
 const ENHANCE_DIR: &str = "video_enhance";
 const DENOISE_DIR: &str = "video_denoise";
 const INTERPOLATE_DIR: &str = "video_interpolate";
+const MOTION_BLUR_DIR: &str = "video_motion_blur";
 
 /// The most copies looked through for one clip.
 const MAX_LISTED: usize = 4096;
@@ -39,6 +41,9 @@ pub struct EnhanceKey {
     /// The Optical flow frame rate, 0 for a copy with no frames made
     /// between the clip's own.
     pub interpolate: i64,
+    /// The Motion blur it was made with, written out, or empty for a copy
+    /// that is not blurred.
+    pub motion_blur: String,
     /// The model that made it, so a better model makes new copies.
     pub model: String,
     /// Pictures per second in the copy.
@@ -60,6 +65,11 @@ impl EnhanceKey {
             bytes.push(b'i');
             bytes.extend_from_slice(&self.interpolate.to_le_bytes());
         }
+        if !self.motion_blur.is_empty() {
+            bytes.push(b'm');
+            bytes.extend_from_slice(self.motion_blur.as_bytes());
+            bytes.push(0);
+        }
         bytes.extend_from_slice(self.model.as_bytes());
         bytes.push(0);
         bytes.extend_from_slice(&self.rate.to_bits().to_le_bytes());
@@ -72,8 +82,10 @@ impl EnhanceKey {
             ENHANCE_DIR
         } else if self.denoise > 0 {
             DENOISE_DIR
-        } else {
+        } else if self.interpolate > 0 {
             INTERPOLATE_DIR
+        } else {
+            MOTION_BLUR_DIR
         }
     }
 }

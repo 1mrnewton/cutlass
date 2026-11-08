@@ -1,0 +1,163 @@
+# AC-3 and E-AC-3 support record
+
+Branch `ac3-eac3`, worktree `/Users/mrnewton/dev/cutlass/cutlass-ac3-eac3`. Native safe Rust in `cutlass-ac3`. No `unsafe`. No bundled C, FFmpeg, AudioToolbox call, or AC-3 crate. Decode and encode are both in scope, and the two syntaxes stay distinct.
+
+The specification is ATSC A/52:2018. AC-3 is the main document. E-AC-3 is Annex E. Annex D is the alternate bit stream information. Mix levels are the powers of two in Annex D, not `10^(dB/20)`.
+
+Read, and not copied: `../pub-packages/ffmpeg/libavcodec/ac3dec.c`, `ac3enc.c`, `ac3.c`, `eac3dec.c`, `eac3_data.c`, and `../pub-packages/ffmpeg/libavformat/mov.c`, `riff.c`. GStreamer's `ac3parse` and `ac3dec` under `../pub-packages/gstreamer/subprojects` were the second implementation. FFmpeg 8.1.1 at `/opt/homebrew/bin/ffmpeg` and `/usr/bin/afconvert` are the oracles. They are not a fallback.
+
+`../local-files` has no AC-3 or E-AC-3 file. Import, seek, and export were checked on files this crate muxed into a temporary directory.
+
+## Limits
+
+| Limit | Value | Error |
+| --- | --- | --- |
+| Syncframe | at most 4096 bytes | `Truncated` or `Malformed` |
+| Syncframes in one access unit | 432 (six blocks of eight programs, eight dependents each) | `Limit` `syncframes per access unit` |
+| Sample rate | 32 kHz, 44.1 kHz, 48 kHz. Zero at open means the first frame decides | `Unsupported` otherwise, including E-AC-3 reduced rates |
+| Channels | at most 8 | `Unsupported` `more than 8 channels` |
+| Program | `substreamid` 0 through 7 | `InvalidApi` above |
+| `bsid` | 0 through 8 is AC-3, 11 through 16 is E-AC-3 | `Unsupported` for 9, 10, and above 16 |
+| Enhanced coupling | refused | `Unsupported` |
+| Empty packet | refused, decoder unchanged | `InvalidApi` |
+| Encoder input | finite, within a few ulps of full scale, even channel count, same rate and layout | `NonFinite`, `OutOfRange`, `UnevenChannels`, `InvalidApi` |
+| Encoder layout | mono through 5.1 with LFE. A side pair and a back pair together are refused | `Unsupported` |
+| AC-3 bit rate | a Table 5.18 rate. A non-zero request snaps to the nearest. Zero uses the default | `Unsupported` when even the coarse frame does not fit |
+| E-AC-3 bit rate | any positive rate. Zero uses the default | `Limit` when a frame still cannot be packed |
+| E-AC-3 blocks | 1, 2, 3, or 6. AC-3 is 6 | `Unsupported` otherwise |
+
+Default bit rates, kbps, for 1, 2, 3, 4, 5, and 5.1 channels: AC-3 96, 192, 256, 320, 384, 448. E-AC-3 64, 128, 192, 224, 256, 384.
+
+The encoder delay is 256 samples, one half transform. At 48 kHz that is 5.333 ms. The first packet carries `dac3` or `dec3`, and every packet carries the gapless delay and trailing padding.
+
+## AC-3
+
+| Capability | Decode | Encode | Evidence | Status |
+| --- | --- | --- | --- | --- |
+| Mono, stereo, 3/0, 2/1, 3/1, 2/2, 3/2, with and without LFE | Speaker order. Surrounds are side channels. The single surround is back center. LFE is its own channel | Same layouts. Coded order is L C R Ls Rs, then LFE | `each_channel_carries_its_own_tone_in_speaker_order`, `every_layout_decodes_in_order_with_its_lfe` | Verified |
+| 32, 44.1, and 48 kHz | Yes | Yes | `every_fixture_decodes_with_its_rate_layout_and_length`, `ffmpeg_decodes_our_streams` | Verified |
+| Table 5.18 frame sizes, including the lowest legal rate | Yes | Coarse exponents when the frame cannot hold a full-band adaptive set | `ac3_syncframes_follow_table_5_18`, `the_lowest_rates_still_code_every_layout` | Verified |
+| Coupling, rematrixing, block switching, exponent strategies | Yes | Coupling and rematrixing. A transient takes short blocks. A steady tone does not | decoder fixtures, `a_transient_switches_to_short_blocks_and_stays_clean`, FATE `monsters_inc` and `millers_crossing` | Verified |
+| Phase flags and delta bit allocation | Parsed and applied | Not written | the frame parser. No FATE sample in this set isolates them | Applied, not separately oracled |
+| Dialogue level, heavy compression, downmix levels, surround EX, production info | Exposed on `Metadata`. Line and heavy modes apply `dynrng` and `compr` when asked. The default is full range | `dialnorm`, `bsmod`, `dsurmod`, and Annex D mix codes. No `dynrng` or `compr` words | `metadata_reports_what_the_encoder_wrote`, `metadata_round_trips`, `dynamic_range_off_ignores_the_words_and_line_mode_applies_them`, FATE line and heavy | Verified |
+| Downmix | Lo/Ro uses `cmixlev` and `surmixlev`, else −4.5 dB and −6 dB. Lt/Rt uses 0.707 unless extended levels exist. Mono is half the Lo/Ro sum. LFE joins a stereo or mono downmix at `lfemixlevcod` minus 4.5 dB when that code exists | Writes the levels it was given | `downmix_follows_the_a52_equations_with_the_stream_levels`, `lo_ro_downmix_matches_ffmpeg`, `mono_downmix_is_half_the_lo_ro_sum` | Verified |
+| Independent decode | FFmpeg on the fixtures, to the dither floor. Apple per channel, to the dither floor | Middle of the file above 60 dB SNR against FFmpeg, at every layout and rate. Apple above 40 dB on the speakers it renders | `every_fixture_matches_ffmpeg_to_the_dither_floor`, `every_fixture_matches_apple_to_the_dither_floor`, `ffmpeg_decodes_our_streams`, `apple_decodes_our_streams` | Verified, with the Apple exceptions below |
+| Timing | Packet time is kept. A seek with one preroll frame restores the overlap. Gapless side data trims the delay and the padding | Decoded length equals the input. The signal lines up after the 256-sample delay | `timestamps_pass_through_and_every_sample_is_returned`, `after_a_seek_one_preroll_frame_restores_the_overlap`, `gapless_side_data_trims_the_delay_and_padding_exactly`, `decoded_length_matches_the_input_exactly` | Verified |
+| Lifecycle | Empty packet, a bad frame, and a rate or layout change leave the decoder as it was. `reset` repeats. A second `drain` is empty | Illegal input adds nothing. `reset` starts a new stream. Cancel stops before the next frame | decoder lifecycle tests, `illegal_input_fails_and_adds_nothing`, `reset_starts_a_fresh_stream_and_drain_ends_it`, `cancel_stops_before_the_next_frame_and_reset_encodes_again` | Verified |
+| Concealment | Not implemented. `concealed` stays false | n/a | none | Not implemented |
+
+Apple's decoder is not a discrete-channel oracle for every mode. It renders 2/1 as left, a silent center, and right, and drops the back-center surround of 2/1 and 3/1. With LFE and a center or a single surround, it folds the center into the fronts and drops LFE. The Apple test skips those speakers. FFmpeg of the same streams keeps the channels, so the bitstream is the one we wrote.
+
+FFmpeg disagrees with A/52 on block-switched blocks. On those FATE samples Apple is the reference, and it matches.
+
+## E-AC-3
+
+| Capability | Decode | Encode | Evidence | Status |
+| --- | --- | --- | --- | --- |
+| Mono, stereo, 5.0, 5.1 | Same speaker order as AC-3 | Same layouts as AC-3, one independent substream | fixtures, `every_layout_decodes_in_order_with_its_lfe` | Verified |
+| 7.1 dependent substream | The dependent's channels join the program. A location outside the eleven speakers is `Unsupported`. `Extension::Core` plays the independent substream and counts the rest | Not written | FATE `the_great_wall_7.1` | Decode verified. Encode not implemented |
+| 32, 44.1, and 48 kHz | Yes | Yes | fixtures, `ffmpeg_decodes_our_streams` | Verified |
+| Reduced sample rates | Refused | Not written | `the_eac3_reduced_rates_are_unsupported` | Unsupported |
+| 1, 2, 3, and 6 blocks | Yes | Yes. One block uses D45 exponents. Two blocks use D45 then D25 | `eac3_holds_any_bit_rate_at_any_block_count`. FATE `serenity` is one block per frame | Our encoder verified. An independent 2-block or 3-block file is not in the FATE set |
+| Spectral extension and AHT | Rebuilt from the side data | Not written | FATE `csi_miami` (`spx_blocks` and `aht_channels`) | Decode verified. Encode not implemented |
+| Coupling and rematrixing | Yes. The coupling band structure is kept from the default and replaced when the frame sends one | The band structure is always sent (`cplbndstrce` 1), including when it matches the default, so a decoder that installs the default only on block 0 stays aligned | `coupling_and_rematrixing_carry_the_low_rate_programs`, FATE `matrix2` | Verified |
+| Enhanced coupling | Refused | Not written | the frame parser | Unsupported |
+| Transient pre-noise | Parsed and exposed on `Ac3Decoder::transients`. Not applied to the samples | Not written (`transproce` 0) | `transients` | Parsed, not applied |
+| Program scale `pgmscl` | Exposed on `Metadata`. Not applied | Not written | the header parser | Parsed, not applied |
+| Dialogue level, mix levels, LFE mix | Exposed. The downmix uses them | `dialnorm` and `lfemixlevcod` round-trip | `metadata_round_trips` | Verified |
+| Dynamic range | Line mode matches FFmpeg's `drc_scale`. Heavy mode applies each frame's `compr` word. FFmpeg's E-AC-3 path never sets `compression_exists`, so it is not the heavy-mode oracle | No `dynrng` or `compr` words | `line_and_heavy_compression_match_ffmpeg`, `eac3_heavy_compression_applies_each_frames_compr_word` | Verified against the stream, not against FFmpeg's heavy mode |
+| Dependent dynamic range | With dependents, dynamics not off, and no downmix, the last dependent's words apply to the whole program. A downmix uses independent substream 0 | n/a | the decoder | Implemented. Not in the FATE DRC check |
+| Independent decode | Same gates as AC-3 | Same gates as AC-3, including 32 kHz | the same tests | Verified, with the same Apple exceptions |
+| Timing and lifecycle | Same as AC-3 | Same as AC-3 | the same tests | Verified |
+
+## Containers, playback, and export
+
+| Path | AC-3 | E-AC-3 | Evidence | Status |
+| --- | --- | --- | --- | --- |
+| ISOBMFF | `ac-3` and `sac3`, object type 0xA5, `dac3` | `ec-3`, object type 0xA6, `dec3` | `ac3_and_eac3_keep_separate_sample_entries` | Verified |
+| WAV | Microsoft tag 0x2000. The Dolby GUID is also read | No Microsoft tag. Written and read as the Dolby GUID FFmpeg writes, in WAVEFORMATEXTENSIBLE | `an_eac3_wave_round_trips_through_its_guid`, `the_dolby_ac3_guid_is_ac3` | Verified. A 0x2000 file that actually holds E-AC-3 stays labeled AC-3. The decoder still reads the syncframe |
+| M4A export | Sound-only, `ftyp M4A`, config and a syncframe that decodes | Same | `sound_alone_writes_ac3_and_eac3_and_reopens` | Verified on an empty timeline |
+| WAV export | Not offered | Not offered | `write_sound` | Unsupported |
+| Desktop import | Rust decoder and encoder, registered ahead of the platform | Same | `ac3_and_eac3_open_for_import_and_export`, `an_ac3_movie_opens_seeks_and_reopens` | Verified through the installed readers: open, a 1 kHz tone at 100 ms and 500 ms, probe, reopen. The running window was not exercised |
+| Phone | The same Rust codecs, ahead of the platform | Same | `the_phone_opens_ac3_and_eac3` | Verified at the factory |
+| Platform fallback | AudioToolbox fourcc `ac-3`, 1536 samples a frame | fourcc `ec-3`. A shorter frame is the Rust codec's job | the platform tables | Registered behind the Rust codec. Not compared |
+| Matroska, MPEG-TS, CAF | Not implemented. Those container crates are empty, or have no mapping | Same | none | Not present |
+
+MP4 trim from the encoder's gapless side data is not stored. `Mp4Mux` accepts `set_trim` and does not write it. The priming stays in the file, and the decoder removes it when the packet still carries the gapless side data. A file opened from disk does not.
+
+## Robustness
+
+`bounded_mutations_do_not_panic` runs on every `cargo test`: 2048 mutated frames from the fixtures and from both encoders, and 128 encoder rounds of legal and hostile input. A panic, a non-finite sample, or a legal frame that does not decode fails it.
+
+cargo-fuzz is not used. `libfuzzer-sys` builds C through `cc`, which `deny.toml` bans.
+
+The long campaigns run together, two threads, at commit `56a561f4` (the codec they exercise is unchanged since). Release turns overflow checks off. The second run is the test profile, where an overflow panics. This crate's dev profile still compiles the library at opt-level 3.
+
+```text
+AC3_FUZZ_SECS=1800 cargo test --release -p cutlass-ac3 --test ac3 -- --ignored campaign --nocapture
+ac3 decoder campaign: seed 0xac3dec0d seconds 1800 inputs 139183455 errors 138970023 accepted 213432 findings 0
+ac3 encoder campaign: seed 0xac3e0c0d seconds 1800 rounds 9772334 refused 4882999 encoded 4889335 findings 0
+test result: ok. 1 passed; 0 failed; finished in 1800.00s
+
+AC3_FUZZ_SECS=300 cargo test -p cutlass-ac3 --test ac3 -- --ignored campaign --nocapture
+ac3 decoder campaign: seed 0xac3dec0d seconds 300 inputs 22217058 errors 22183167 accepted 33891 findings 0
+ac3 encoder campaign: seed 0xac3e0c0d seconds 300 rounds 1556225 refused 777633 encoded 778592 findings 0
+test result: ok. 1 passed; 0 failed; finished in 300.00s
+```
+
+## Performance
+
+`cargo build --release -p cutlass-ac3 --bench throughput`, then the bench binary, on 8 November 2026. Apple M5 Pro, 18 cores, 48 GiB, macOS 27.0.1, rustc 1.99.1, ffmpeg 8.1.1. Ten seconds at 48 kHz. Each figure is the median of three runs after one warmup. Cutlass times the codec only. ffmpeg times a new process, including startup. `/usr/bin/time -l` on the whole bench: 2.49 s real, maximum resident set 88,899,584 bytes, peak footprint 87,949,744 bytes.
+
+```text
+encoder delay 256 samples (5.333 ms at 48000 Hz)
+rss at start 2176 KiB
+AC-3 stereo 192 kbps
+  encode 29.612 ms, 338x realtime
+  decode 9.852 ms, 1015x realtime
+  decode frame latency p50 33.5 us, p95 34.9 us, p99 38.1 us over 313 frames
+  rss before a further 60 s of decode 25104 KiB, after 25120 KiB
+E-AC-3 stereo 192 kbps
+  encode 29.471 ms, 339x realtime
+  decode 9.381 ms, 1066x realtime
+  decode frame latency p50 28.3 us, p95 38.6 us, p99 53.9 us over 313 frames
+  rss before a further 60 s of decode 27120 KiB, after 27136 KiB
+AC-3 5.1 448 kbps
+  encode 63.168 ms, 158x realtime
+  decode 26.573 ms, 376x realtime
+  decode frame latency p50 83.0 us, p95 87.5 us, p99 99.6 us over 313 frames
+  rss before a further 60 s of decode 83184 KiB, after 83184 KiB
+E-AC-3 5.1 384 kbps
+  encode 49.341 ms, 203x realtime
+  decode 21.650 ms, 462x realtime
+  decode frame latency p50 62.5 us, p95 64.5 us, p99 67.3 us over 313 frames
+  rss before a further 60 s of decode 86752 KiB, after 86752 KiB
+cancel of a 5 s stereo push, flag already set: 0.339 ms
+ffmpeg ac3 stereo, process time including startup: encode 35.442 ms (282x), decode 27.726 ms (361x)
+ffmpeg eac3 stereo, process time including startup: encode 35.706 ms (280x), decode 28.736 ms (348x)
+```
+
+Resident set grew as the bench moved from stereo to 5.1, which is the allocator keeping the larger working set, and did not grow across a further minute of decoding the same packets. Cancel with the flag already set returns after the sample check and before a frame is coded.
+
+## Commands run
+
+```text
+AC3_REQUIRE_ORACLES=1 AC3_FATE_SAMPLES=/tmp/cutlass-ac3-eac3/fixtures/fate \
+  cargo test --release -p cutlass-ac3 --lib          # 57 passed
+  the ac3 integration binary, campaign excluded      # 45 passed, 1 ignored
+AC3_FUZZ_SECS=1800 cargo test --release -p cutlass-ac3 --test ac3 -- --ignored campaign --nocapture
+AC3_FUZZ_SECS=300 cargo test -p cutlass-ac3 --test ac3 -- --ignored campaign --nocapture
+the release throughput bench
+cargo test -p cutlass-isobmff --lib ac3_and_eac3_keep_separate_sample_entries
+cargo test -p cutlass-riff --lib an_eac3_wave_round_trips_through_its_guid
+cargo test -p cutlass-riff --lib the_dolby_ac3_guid_is_ac3
+cargo test -p cutlass-export --lib sound_alone_writes_ac3_and_eac3_and_reopens
+cargo test -p cutlass --lib an_ac3_movie_opens_seeks_and_reopens
+cargo test -p cutlass --lib ac3_and_eac3_open_for_import_and_export
+cargo test -p cutlass-ffi --lib the_phone_opens_ac3_and_eac3
+cargo clippy -p cutlass-ac3 -p cutlass-isobmff -p cutlass-riff \
+  -p cutlass-platform-apple -p cutlass-export -p cutlass-ffi -p cutlass \
+  --all-targets -- -D warnings
+```
+
+Linux and Windows were not run.

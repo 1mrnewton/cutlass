@@ -8,10 +8,14 @@
 //!
 //! A selection runs in two steps. [`Selector::encode`] reads the frame once.
 //! [`Selector::select`] turns clicks into a mask and runs on every click.
+//!
+//! The second is Enhance quality: [`Enhancer`] makes a frame four times
+//! larger and repairs blur, noise and compression on the way.
 
 #![forbid(unsafe_code)]
 
 mod device;
+mod enhance;
 mod frame;
 mod generated;
 mod job;
@@ -22,6 +26,7 @@ use std::fmt;
 use std::path::PathBuf;
 
 pub use device::{Compute, gpu_available, keep_kernels_in};
+pub use enhance::{ENHANCE_MAX_SIDE, ENHANCE_WEIGHTS, Enhanced, Enhancer, SCALE, convert_pytorch};
 pub use frame::MAX_SIDE;
 pub use job::{JobError, SelectJob};
 pub use mask::Mask;

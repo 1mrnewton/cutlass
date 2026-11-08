@@ -162,7 +162,10 @@ fn read(data: TensorData) -> Result<Vec<f32>, VisionError> {
 
 /// Loads a `.bpk` file into `model`. Every tensor the model has must come
 /// from the file, at the shape the model expects.
-fn load_weights<M: ModuleSnapshot>(model: &mut M, path: &Path) -> Result<(), VisionError> {
+pub(crate) fn load_weights<M: ModuleSnapshot>(
+    model: &mut M,
+    path: &Path,
+) -> Result<(), VisionError> {
     let refused = |message: String| VisionError::Weights {
         path: path.to_path_buf(),
         message,

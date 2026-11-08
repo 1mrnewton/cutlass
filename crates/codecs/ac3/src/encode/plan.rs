@@ -72,6 +72,9 @@ pub(crate) struct Block {
     pub chincpl: [bool; MAX_FBW],
     pub cplcoe: [bool; MAX_FBW],
     pub coords: [Coords; MAX_FBW],
+    /// Stereo coupling: negate the right channel's coordinate in a band.
+    pub phsflginu: bool,
+    pub phsflg: [bool; MAX_CPL_BANDS],
     pub cplleake: bool,
     pub rematstr: bool,
     pub nrematbd: usize,
@@ -97,6 +100,8 @@ impl Default for Block {
             chincpl: [false; MAX_FBW],
             cplcoe: [false; MAX_FBW],
             coords: [Coords::default(); MAX_FBW],
+            phsflginu: false,
+            phsflg: [false; MAX_CPL_BANDS],
             cplleake: false,
             rematstr: false,
             nrematbd: 0,
@@ -197,6 +202,7 @@ fn coupling(shape: &Shape, blocks: &mut [Block], mode: Mode) {
     let end = 37 + 12 * endf;
     let bands = Bands::new(&DEFAULT_CPL_BANDS, begf, endf);
     let mut previous: Option<([bool; MAX_FBW], bool)> = None;
+    let mut previous_phase = false;
     // Band energies per block: [channel][band], then the coupling channel.
     let mut energy = vec![[[0.0f64; MAX_CPL_BANDS]; MAX_FBW + 1]; blocks.len()];
     let mut raw = vec![[[0.0f32; MAX_CPL_BANDS]; MAX_FBW]; blocks.len()];
@@ -228,6 +234,11 @@ fn coupling(shape: &Shape, blocks: &mut [Block], mode: Mode) {
         block.end[CPL] = end;
         if !cplinu {
             block.cplcoe = [false; MAX_FBW];
+            block.phsflginu = false;
+            if blk > 0 && previous_phase {
+                block.cplstre = true;
+            }
+            previous_phase = false;
             continue;
         }
         let gain = 1.0 / count as f32;
@@ -237,6 +248,35 @@ fn coupling(shape: &Shape, blocks: &mut [Block], mode: Mode) {
                 *sum += value * gain;
             }
         }
+        // Section 7.4: a negative dot product in a stereo band is a phase
+        // flag, and the coupling channel is summed with that channel negated.
+        block.phsflg = [false; MAX_CPL_BANDS];
+        block.phsflginu = false;
+        if shape.acmod == 2 && chincpl[0] && chincpl[1] {
+            let mut bin = begin;
+            for (band, &size) in bands.sizes().iter().enumerate() {
+                let dot: f64 = block.coefs[0][bin..bin + size]
+                    .iter()
+                    .zip(&block.coefs[1][bin..bin + size])
+                    .map(|(&left, &right)| f64::from(left) * f64::from(right))
+                    .sum();
+                if dot < 0.0 {
+                    block.phsflg[band] = true;
+                    block.phsflginu = true;
+                    for (sum, &value) in cpl[bin..bin + size]
+                        .iter_mut()
+                        .zip(&block.coefs[1][bin..bin + size])
+                    {
+                        *sum -= 2.0 * value * gain;
+                    }
+                }
+                bin += size;
+            }
+        }
+        if blk > 0 && block.phsflginu != previous_phase {
+            block.cplstre = true;
+        }
+        previous_phase = block.phsflginu;
         block.coefs[CPL] = cpl;
         let mut bin = begin;
         for (band, &size) in bands.sizes().iter().enumerate() {
@@ -262,7 +302,9 @@ fn coupling(shape: &Shape, blocks: &mut [Block], mode: Mode) {
                 && match before {
                     None => true,
                     Some((previous, chincpl)) => {
-                        block.cplstre || !chincpl[ch] || {
+                        let phase_changed = blocks[blk].phsflg[..bands.count]
+                            != blocks[blk - 1].phsflg[..bands.count];
+                        block.cplstre || !chincpl[ch] || phase_changed || {
                             let drift: f32 = current[..bands.count]
                                 .iter()
                                 .zip(&previous[ch][..bands.count])

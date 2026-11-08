@@ -403,7 +403,7 @@ fn audblk(
                 }
             }
             if acmod == 2 {
-                w.flag(false); // phsflginu
+                w.flag(block.phsflginu);
             }
             let (begin, end) = shape.coupling.unwrap_or((0, 3));
             w.put(4, begin as u32);
@@ -427,6 +427,7 @@ fn audblk(
     // Coupling coordinates.
     if block.cplinu {
         let bands = shape.cpl_bands().count;
+        let mut sent = false;
         for ch in 0..nf {
             if !block.chincpl[ch] {
                 coupling.first_coords[ch] = true;
@@ -444,6 +445,12 @@ fn audblk(
                     w.put(4, u32::from(coords.exp[band]));
                     w.put(4, u32::from(coords.mant[band]));
                 }
+                sent = true;
+            }
+        }
+        if acmod == 2 && block.phsflginu && sent {
+            for &flag in &block.phsflg[..bands] {
+                w.flag(flag);
             }
         }
     }

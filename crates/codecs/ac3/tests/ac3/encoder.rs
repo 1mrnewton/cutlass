@@ -717,6 +717,58 @@ fn every_eac3_block_count_decodes_with_ffmpeg() {
     }
 }
 
+/// An inverted right channel in the coupling band stays inverted. The
+/// phase flag is what keeps the two sides from cancelling.
+#[test]
+fn an_inverted_stereo_band_keeps_its_phase() {
+    let Some(ffmpeg) = oracle("ffmpeg", "-version") else {
+        return;
+    };
+    let channels = &[L, R];
+    let rate = 48_000u32;
+    let frames = rate as usize;
+    let mut pcm = Vec::with_capacity(frames * 2);
+    for index in 0..frames {
+        let t = index as f64 / f64::from(rate);
+        let sample = (0.4 * (2.0 * PI * 9_000.0 * t).sin()) as f32;
+        pcm.push(sample);
+        pcm.push(-sample);
+    }
+    for format in [Format::Ac3, Format::Eac3] {
+        let bit_rate = if format == Format::Ac3 {
+            192_000
+        } else {
+            96_000
+        };
+        let packets = encode(config(format, rate, channels, bit_rate), &pcm);
+        let ours = decode(codec(format), &packets);
+        assert!(
+            ours.decoder.tools().phase_blocks > 0,
+            "{format:?} wrote no phase flags"
+        );
+        let n = channels.len();
+        for index in 0..n {
+            let got = deinterleave(&ours.pcm, n, index);
+            let sent = deinterleave(&pcm, n, index);
+            let margin = 1536.min(got.len() / 4);
+            let quality = snr(
+                &got[margin..got.len() - margin],
+                &sent[margin..sent.len() - margin],
+            );
+            assert!(
+                quality > 20.0,
+                "{format:?} channel {index}: {quality:.1} dB"
+            );
+        }
+        let theirs = ffmpeg_decode(&ffmpeg, &stream(&packets), &[]);
+        let skip = ENCODER_DELAY as usize * n;
+        let theirs = &theirs[skip.min(theirs.len())..];
+        let compared = ours.pcm.len().min(theirs.len());
+        let quality = snr(&ours.pcm[..compared], &theirs[..compared]);
+        assert!(quality > 50.0, "{format:?} against FFmpeg: {quality:.1} dB");
+    }
+}
+
 /// The block count may change from one syncframe to the next. One access
 /// unit that does is the same program FFmpeg decodes.
 #[test]

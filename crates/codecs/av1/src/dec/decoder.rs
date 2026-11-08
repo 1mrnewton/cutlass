@@ -16,9 +16,9 @@ use super::msac::Msac;
 use super::mvpred::{MfEntry, MfPlan, motion_field_plan};
 use super::obu::{
     FrameHeader, GrainParams, HeaderContext, KEY_FRAME, OBU_FRAME, OBU_FRAME_HEADER,
-    OBU_REDUNDANT_FRAME_HEADER, OBU_SEQUENCE_HEADER, OBU_TILE_GROUP, OBU_TILE_LIST,
-    PRIMARY_REF_NONE, RefHeaderState, SequenceHeader, TRANSLATION, parse_frame_header,
-    parse_sequence_header, relative_dist, split_obus,
+    OBU_REDUNDANT_FRAME_HEADER, OBU_SEQUENCE_HEADER, OBU_TEMPORAL_DELIMITER, OBU_TILE_GROUP,
+    OBU_TILE_LIST, PRIMARY_REF_NONE, RefHeaderState, SequenceHeader, TRANSLATION,
+    parse_frame_header, parse_sequence_header, relative_dist, split_obus,
 };
 use super::postfilter;
 use super::recon::Scratch;
@@ -119,6 +119,18 @@ pub struct DecodedFrame {
     pub transfer: u8,
     pub matrix: u8,
     pub full_range: bool,
+    /// `chroma_sample_position` (0 unknown, 1 vertical, 2 colocated).
+    pub chroma_sample_position: u8,
+    /// Sequence timing info; zero when the sequence has none.
+    pub num_units_in_display_tick: u32,
+    pub time_scale: u32,
+    pub equal_picture_interval: bool,
+    /// Present when the picture interval is equal.
+    pub num_ticks_per_picture_minus_1: Option<u32>,
+    /// Zero when the sequence has no decoder model info.
+    pub num_units_in_decoding_tick: u32,
+    /// `seq_level_idx` of the operating point decoded.
+    pub seq_level_idx: u8,
 }
 
 /// What a frame's parse leaves for later frames (its CDFs, its motion
@@ -804,6 +816,9 @@ pub struct Av1Core {
     /// earlier ones as soon as they are done); `None` (the default) keeps
     /// back as many as there are [`Self::threads`].
     pub frame_delay: Option<usize>,
+    /// Operating point to decode (`choose_operating_point()`); 0 by default.
+    /// Set it with [`Self::select_operating_point`].
+    operating_point: usize,
     workers: Arc<Workers>,
 }
 
@@ -841,19 +856,40 @@ impl Av1Core {
             max_pixels: 35_651_584,
             threads: std::thread::available_parallelism().map_or(1, usize::from),
             frame_delay: None,
+            operating_point: 0,
             workers: Arc::default(),
         }
+    }
+
+    /// Selects the operating point to decode (7.2.1); the default is 0. OBUs
+    /// of layers outside it are dropped. An index past the last point of the
+    /// current sequence, or of a later sequence header, is refused with
+    /// `Unsupported`.
+    pub fn select_operating_point(&mut self, index: usize) -> R<()> {
+        if index > 31 {
+            return Err(CodecError::Unsupported {
+                what: "operating point",
+            });
+        }
+        if let Some(seq) = &mut self.seq {
+            let mut chosen = seq.clone();
+            chosen.choose_operating_point(index)?;
+            *seq = chosen;
+        }
+        self.operating_point = index;
+        Ok(())
     }
 
     /// Drops every reference and every frame not returned yet (frames
     /// still decoding finish on their threads and are discarded).
     pub fn reset(&mut self) {
         let seq = self.seq.take();
-        let (grain, max, threads, delay) = (
+        let (grain, max, threads, delay, op) = (
             self.apply_grain,
             self.max_pixels,
             self.threads,
             self.frame_delay,
+            self.operating_point,
         );
         *self = Self::new();
         self.seq = seq;
@@ -861,6 +897,7 @@ impl Av1Core {
         self.max_pixels = max;
         self.threads = threads;
         self.frame_delay = delay;
+        self.operating_point = op;
     }
 
     /// The header state of every reference slot.
@@ -983,12 +1020,27 @@ impl Av1Core {
 
     fn decode_unit(&mut self, data: &[u8], tag: u64) -> R<()> {
         for obu in split_obus(data)? {
+            // 7.5: an OBU of a layer outside the operating point is dropped.
+            if obu.obu_type != OBU_SEQUENCE_HEADER
+                && obu.obu_type != OBU_TEMPORAL_DELIMITER
+                && obu.has_extension
+                && let Some(seq) = &self.seq
+                && seq.operating_point_idc != 0
+            {
+                let idc = seq.operating_point_idc;
+                let in_t = (idc >> obu.temporal_id) & 1;
+                let in_s = (idc >> (obu.spatial_id + 8)) & 1;
+                if in_t == 0 || in_s == 0 {
+                    continue;
+                }
+            }
             match obu.obu_type {
                 OBU_SEQUENCE_HEADER => {
-                    let s = parse_sequence_header(obu.payload)?;
+                    let mut s = parse_sequence_header(obu.payload)?;
                     if s.max_frame_width > 16384 || s.max_frame_height > 16384 {
                         return Err(CodecError::Limit { what: "frame size" });
                     }
+                    s.choose_operating_point(self.operating_point)?;
                     self.seq = Some(s);
                 }
                 OBU_FRAME_HEADER | OBU_REDUNDANT_FRAME_HEADER | OBU_FRAME => {
@@ -1002,16 +1054,6 @@ impl Av1Core {
                     let Some(seq) = self.seq.clone() else {
                         return Err(malformed("frame before sequence header"));
                     };
-                    if let Some(op) = seq.operating_points.first()
-                        && op.idc != 0
-                        && obu.has_extension
-                    {
-                        let in_t = (op.idc >> obu.temporal_id) & 1;
-                        let in_s = (op.idc >> (obu.spatial_id + 8)) & 1;
-                        if in_t == 0 || in_s == 0 {
-                            continue;
-                        }
-                    }
                     let ctx = HeaderContext {
                         seq: &seq,
                         refs: &self.ref_hdr,
@@ -1203,6 +1245,15 @@ impl Av1Core {
             transfer: seq.transfer_characteristics,
             matrix: seq.matrix_coefficients,
             full_range: seq.color_range,
+            chroma_sample_position: seq.chroma_sample_position,
+            num_units_in_display_tick: seq.num_units_in_display_tick,
+            time_scale: seq.time_scale,
+            equal_picture_interval: seq.equal_picture_interval,
+            num_ticks_per_picture_minus_1: seq
+                .equal_picture_interval
+                .then_some(seq.num_ticks_per_picture_minus_1),
+            num_units_in_decoding_tick: seq.num_units_in_decoding_tick,
+            seq_level_idx: seq.seq_level_idx(),
         }
     }
 

@@ -12,8 +12,8 @@
 use std::collections::VecDeque;
 
 use cutlass_decode::{
-    CodecError, CodecId, CodecParams, ColorPrimaries, Decoder, Output, Packet, PictureInfo,
-    PictureOutput, PixelFormat, Transfer,
+    ChromaSamplePosition, CodecError, CodecId, CodecParams, ColorMatrix, ColorPrimaries, Decoder,
+    Output, Packet, PictureInfo, PictureOutput, PixelFormat, Transfer,
 };
 
 use crate::dec::decoder::{AnyPicture, Av1Core, DecodedFrame};
@@ -51,6 +51,15 @@ impl Av1Decoder {
         Ok(d)
     }
 
+    /// Selects the operating point to decode (AV1 7.2.1); the default is
+    /// point 0. Frames of layers outside it are dropped, and pictures report
+    /// its `seq_level_idx`. An index past the sequence's last point is
+    /// refused (`Unsupported`), at once when the sequence is known, else at
+    /// its sequence header.
+    pub fn select_operating_point(&mut self, index: u8) -> Result<(), CodecError> {
+        self.core.select_operating_point(usize::from(index))
+    }
+
     fn load_config(&mut self) -> Result<(), CodecError> {
         if !self.config_obus.is_empty() {
             let obus = self.config_obus.clone();
@@ -83,11 +92,13 @@ impl Av1Decoder {
     }
 }
 
+// The colour codes are ISO/IEC 23091-4 (H.273), as in AV1 6.4.2; the
+// names follow the other decoders (HEVC, H.264).
 fn primaries(code: u8) -> ColorPrimaries {
     match code {
         1 => ColorPrimaries::Bt709,
         4 => ColorPrimaries::Bt470m,
-        6 => ColorPrimaries::Bt601,
+        5 | 6 => ColorPrimaries::Bt601,
         7 => ColorPrimaries::Smpte240m,
         8 => ColorPrimaries::Film,
         9 => ColorPrimaries::Bt2020,
@@ -110,7 +121,38 @@ fn transfer(code: u8) -> Transfer {
         10 => Transfer::LogSqrt,
         11 => Transfer::Iec61966_2_4,
         12 => Transfer::Bt1361,
+        13 => Transfer::Srgb,
+        16 => Transfer::Pq,
+        17 => Transfer::Smpte428,
+        18 => Transfer::Hlg,
         _ => Transfer::Unspecified,
+    }
+}
+
+fn matrix(code: u8) -> ColorMatrix {
+    match code {
+        0 => ColorMatrix::Identity,
+        1 => ColorMatrix::Bt709,
+        4 => ColorMatrix::Fcc,
+        5 | 6 => ColorMatrix::Bt601,
+        7 => ColorMatrix::Smpte240m,
+        8 => ColorMatrix::Ycgco,
+        9 | 10 => ColorMatrix::Bt2020,
+        11 => ColorMatrix::Smpte2085,
+        12 => ColorMatrix::ChromaDerived,
+        13 => ColorMatrix::ChromaDerivedConstant,
+        14 => ColorMatrix::Ictcp,
+        _ => ColorMatrix::Unspecified,
+    }
+}
+
+/// `chroma_sample_position` (AV1 6.4.2).
+fn chroma_position(code: u8) -> ChromaSamplePosition {
+    match code {
+        1 => ChromaSamplePosition::Vertical,
+        2 => ChromaSamplePosition::Colocated,
+        3 => ChromaSamplePosition::Reserved,
+        _ => ChromaSamplePosition::Unknown,
     }
 }
 
@@ -201,22 +243,37 @@ fn picture_output(f: &DecodedFrame, pts: i64, timescale: u32) -> Result<PictureO
         }
     }
     PictureOutput::cpu(
-        PictureInfo {
-            width: w as u32,
-            height: h as u32,
-            pixel,
-            ..PictureInfo::new(
-                w as u32,
-                h as u32,
-                pixel,
-                primaries(f.color_primaries),
-                transfer(f.transfer),
-            )
-        },
+        picture_info(f, w as u32, h as u32, pixel),
         bytes,
         pts,
         timescale,
     )
+}
+
+/// The shown frame's description: its sample size, colour, display size,
+/// and the sequence's timing and level. The CICP bytes are the sequence
+/// header's own codes.
+fn picture_info(f: &DecodedFrame, width: u32, height: u32, pixel: PixelFormat) -> PictureInfo {
+    PictureInfo {
+        width,
+        height,
+        pixel,
+        primaries: primaries(f.color_primaries),
+        transfer: transfer(f.transfer),
+        matrix: matrix(f.matrix),
+        chroma_position: chroma_position(f.chroma_sample_position),
+        render_width: u32::try_from(f.render_width).unwrap_or(u32::MAX),
+        render_height: u32::try_from(f.render_height).unwrap_or(u32::MAX),
+        cicp_primaries: f.color_primaries,
+        cicp_transfer: f.transfer,
+        cicp_matrix: f.matrix,
+        num_units_in_display_tick: f.num_units_in_display_tick,
+        time_scale: f.time_scale,
+        equal_picture_interval: f.equal_picture_interval,
+        num_ticks_per_picture_minus_1: f.num_ticks_per_picture_minus_1,
+        num_units_in_decoding_tick: f.num_units_in_decoding_tick,
+        seq_level_idx: f.seq_level_idx,
+    }
 }
 
 impl Decoder for Av1Decoder {

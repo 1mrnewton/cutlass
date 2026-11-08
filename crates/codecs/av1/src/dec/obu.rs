@@ -72,11 +72,22 @@ pub struct SequenceHeader {
     pub still_picture: bool,
     pub reduced_still_picture_header: bool,
     pub timing_info_present: bool,
+    /// `num_units_in_display_tick`; 0 without timing info.
+    pub num_units_in_display_tick: u32,
+    /// `time_scale`; 0 without timing info.
+    pub time_scale: u32,
     pub equal_picture_interval: bool,
+    /// `num_ticks_per_picture_minus_1`; 0 unless the picture interval is equal.
+    pub num_ticks_per_picture_minus_1: u32,
     pub decoder_model_info_present: bool,
+    /// `num_units_in_decoding_tick`; 0 without decoder model info.
+    pub num_units_in_decoding_tick: u32,
     pub buffer_removal_time_length: u32,
     pub frame_presentation_time_length: u32,
     pub operating_points: Vec<OperatingPoint>,
+    /// The operating point `choose_operating_point()` picked (an index into
+    /// `operating_points`); the parser picks 0.
+    pub operating_point: usize,
     pub operating_point_idc: u16,
     pub frame_width_bits: u32,
     pub frame_height_bits: u32,
@@ -119,6 +130,26 @@ impl SequenceHeader {
     pub fn num_planes(&self) -> usize {
         if self.mono_chrome { 1 } else { 3 }
     }
+
+    /// Picks operating point `index` (`choose_operating_point()`, 7.2.1) and
+    /// its `OperatingPointIdc`. An index past the last point is refused.
+    pub fn choose_operating_point(&mut self, index: usize) -> R<()> {
+        let Some(op) = self.operating_points.get(index) else {
+            return Err(CodecError::Unsupported {
+                what: "operating point",
+            });
+        };
+        self.operating_point_idc = op.idc;
+        self.operating_point = index;
+        Ok(())
+    }
+
+    /// `seq_level_idx` of the chosen operating point.
+    pub fn seq_level_idx(&self) -> u8 {
+        self.operating_points
+            .get(self.operating_point)
+            .map_or(0, |op| op.seq_level_idx)
+    }
 }
 
 const SELECT_SCREEN_CONTENT_TOOLS: u8 = 2;
@@ -146,16 +177,16 @@ pub fn parse_sequence_header(data: &[u8]) -> R<SequenceHeader> {
         s.timing_info_present = r.flag()?;
         let mut buffer_delay_length = 0;
         if s.timing_info_present {
-            r.f(32)?; // num_units_in_display_tick
-            r.f(32)?; // time_scale
+            s.num_units_in_display_tick = r.f(32)?;
+            s.time_scale = r.f(32)?;
             s.equal_picture_interval = r.flag()?;
             if s.equal_picture_interval {
-                r.uvlc()?;
+                s.num_ticks_per_picture_minus_1 = r.uvlc()?;
             }
             s.decoder_model_info_present = r.flag()?;
             if s.decoder_model_info_present {
                 buffer_delay_length = r.f(5)? + 1;
-                r.f(32)?;
+                s.num_units_in_decoding_tick = r.f(32)?;
                 s.buffer_removal_time_length = r.f(5)? + 1;
                 s.frame_presentation_time_length = r.f(5)? + 1;
             }

@@ -1479,10 +1479,30 @@ mod tests {
                 force_color_description: rng.flag(),
             };
             let bytes = write_sequence_header_with(&s, &o);
-            assert_eq!(parse_sequence_header(&bytes).unwrap(), s);
+            assert_eq!(parse_sequence_header(&bytes).unwrap(), with_timing(&s, &o));
             let bytes = write_sequence_header(&s);
-            assert_eq!(parse_sequence_header(&bytes).unwrap(), s);
+            let defaults = SequenceHeaderWriteOptions::default();
+            assert_eq!(
+                parse_sequence_header(&bytes).unwrap(),
+                with_timing(&s, &defaults)
+            );
         }
+    }
+
+    /// `s` with the timing values the writer took from `o`, where it wrote them.
+    fn with_timing(s: &SequenceHeader, o: &SequenceHeaderWriteOptions) -> SequenceHeader {
+        let mut want = s.clone();
+        if s.timing_info_present {
+            want.num_units_in_display_tick = o.num_units_in_display_tick;
+            want.time_scale = o.time_scale;
+            if s.equal_picture_interval {
+                want.num_ticks_per_picture_minus_1 = o.num_ticks_per_picture_minus_1;
+            }
+            if s.decoder_model_info_present {
+                want.num_units_in_decoding_tick = o.num_units_in_decoding_tick;
+            }
+        }
+        want
     }
 
     type Gm = ([u8; 8], [[i32; 6]; 8]);

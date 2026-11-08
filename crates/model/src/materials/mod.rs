@@ -39,7 +39,10 @@ pub use mark::{
 pub use rich::{
     RichFill, RichFont, RichPaint, RichShadow, RichSolid, RichStroke, RichStyle, RichText,
 };
-pub use shape::MaterialShape;
+pub use shape::{
+    MaterialShape, SHAPE_ARROW, SHAPE_CONTOUR, SHAPE_FILL, SHAPE_LINE, SHAPE_LINE_WIDTH,
+    SHAPE_SHADOW, SHAPE_SIZE, SHAPE_STROKE_WIDTH, ShapeKind, ShapePoint,
+};
 pub use speed::{
     ConstantSpeedError, CurveSpeed, MaterialSpeed, SpeedPoint, SpeedPreset,
     constant_target_duration, curve_speed_at, curve_speed_factor, curve_target_duration,

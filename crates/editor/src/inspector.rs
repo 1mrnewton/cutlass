@@ -28,6 +28,8 @@ pub enum Panel {
     Filter,
     Adjust,
     Sticker,
+    /// A shape from the library: a rectangle, a circle, a line and so on.
+    Shape,
     /// A clip this build has no panel for.
     Other,
 }
@@ -47,6 +49,7 @@ impl Panel {
             Self::Filter => "Filter",
             Self::Adjust => "Adjustment",
             Self::Sticker => "Sticker",
+            Self::Shape => "Shape",
             Self::Other => "Clip",
         }
     }
@@ -113,6 +116,7 @@ pub fn panel_of(draft: &Draft, track: &Track, segment: &Segment) -> Panel {
         Some(MaterialRef::Text(text)) if is_caption(track, text) => Panel::Caption,
         Some(MaterialRef::Text(_)) => Panel::Text,
         Some(MaterialRef::VideoEffect(_) | MaterialRef::Plugin(_)) => Panel::Effect,
+        Some(MaterialRef::Shape(_)) => Panel::Shape,
         _ => match track.kind {
             TrackType::Audio | TrackType::TextToVideoTextAudio => Panel::Audio,
             TrackType::Text | TrackType::TextToVideoText => Panel::Text,
@@ -385,6 +389,24 @@ mod tests {
         assert_eq!(canvas_pixels((0.5, 0.5), (1920, 1080)), (480.0, -270.0));
         assert_eq!(stored_position((480.0, -270.0), (1920, 1080)), (0.5, 0.5));
         assert_eq!(canvas_pixels((1.0, 0.0), (0, 0)), (960.0, 0.0));
+    }
+
+    #[test]
+    fn a_shape_opens_the_shape_panel() {
+        let mut draft = Draft::empty("D");
+        draft
+            .materials
+            .shapes
+            .push(cutlass_model::MaterialShape::preset(
+                "sq".into(),
+                cutlass_model::ShapeKind::Rectangle,
+                320.0,
+                320.0,
+            ));
+        let segment = Segment::new("a", "sq", cutlass_model::TimeRange::new(0, 1));
+        let mut row = Track::main("stickers");
+        row.kind = TrackType::Sticker;
+        assert_eq!(panel_of(&draft, &row, &segment), Panel::Shape);
     }
 
     #[test]

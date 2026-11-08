@@ -2,8 +2,8 @@ use serde::{Deserialize, Serialize};
 
 use cutlass_model::{
     AnimType, CommonKeyframeGroup, Crop, FreezeInfo, MaterialAudio, MaterialId, MaterialTransition,
-    MaterialVideo, Micros, Segment, SegmentId, SpeedPoint, TimeRange, TrackId, TrackType,
-    WordColumns,
+    MaterialVideo, Micros, Segment, SegmentId, ShapeKind, SpeedPoint, TimeRange, TrackId,
+    TrackType, WordColumns,
 };
 
 /// A media record stored in the library. A segment places it later.
@@ -354,6 +354,55 @@ pub enum Request {
         duration: Micros,
         content: String,
         face: String,
+    },
+    /// Place a new `kind` shape from `start` for `duration` on `track_id`,
+    /// a sticker row made when it is missing.
+    AddShape {
+        track_id: TrackId,
+        segment_id: SegmentId,
+        material_id: MaterialId,
+        start: Micros,
+        duration: Micros,
+        kind: ShapeKind,
+    },
+    /// Make the shape `width` by `height` canvas pixels. Its points are
+    /// stretched to the new size; the clip's scale stays.
+    SetShapeSize {
+        segment_id: SegmentId,
+        width: f64,
+        height: f64,
+    },
+    /// Fill the shape with `color` at `opacity` from 0 to 1. An empty color
+    /// takes the fill off.
+    SetShapeFill {
+        segment_id: SegmentId,
+        color: String,
+        opacity: f64,
+    },
+    /// Stroke the shape's outline `width` canvas pixels wide in `color` at
+    /// `opacity`, solid (0), dashed (1) or dotted (2). A width of 0 takes
+    /// the stroke off.
+    SetShapeStroke {
+        segment_id: SegmentId,
+        color: String,
+        width: f64,
+        opacity: f64,
+        style: i32,
+    },
+    /// Round the shape's corners by `radius` canvas pixels: one value for
+    /// every corner, or one per corner. Zeros take the rounding off.
+    SetShapeCorners {
+        segment_id: SegmentId,
+        radius: Vec<f64>,
+    },
+    /// Cast a `color` shadow `distance` canvas pixels away at `angle`
+    /// degrees, at `opacity`. An opacity of 0 takes the shadow off.
+    SetShapeShadow {
+        segment_id: SegmentId,
+        color: String,
+        distance: f64,
+        angle: f64,
+        opacity: f64,
     },
     /// Place the bundled effect `effect_id`, such as `recipe/shake`, from
     /// `start` for `duration`. `track_id` is created as an effect row when

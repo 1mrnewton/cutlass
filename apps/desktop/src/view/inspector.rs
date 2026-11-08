@@ -136,7 +136,7 @@ pub(super) fn clip_panel(
             text_panel(shell, ui, state, inspection, panel == Panel::Caption);
         }
         Panel::Audio => audio_panel(shell, ui, state, inspection),
-        Panel::Sticker => sticker_panel(shell, ui, state, inspection),
+        Panel::Sticker | Panel::Shape => sticker_panel(shell, ui, state, inspection),
         Panel::Effect => effect_panel(shell, ui, state, inspection, "Effect", false),
         Panel::Filter => effect_panel(shell, ui, state, inspection, "Filter", true),
         Panel::Adjust => adjust_panel(shell, ui, state, inspection),

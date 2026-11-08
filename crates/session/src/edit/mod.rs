@@ -32,6 +32,7 @@ mod rate;
 mod replace;
 mod reverse;
 mod rotate;
+mod shape;
 mod speed;
 mod split;
 mod text;
@@ -158,6 +159,10 @@ pub enum EditError {
     TextStyle,
     /// A new text clip needs something to say.
     TextEmpty,
+    /// A shape style belongs on a shape.
+    NotShape,
+    /// A shape's size, stroke, corner, or shadow amount is out of its range.
+    ShapeStyle,
     /// The effect is not one the app ships.
     UnknownEffect,
     /// The `.cube` file is not a 3D table, or the clip has no LUT to change.
@@ -429,6 +434,48 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             content,
             face,
         ),
+        Request::AddShape {
+            track_id,
+            segment_id,
+            material_id,
+            start,
+            duration,
+            kind,
+        } => shape::add_shape(
+            draft,
+            track_id,
+            segment_id,
+            material_id,
+            TimeRange::new(start.0, duration.0),
+            *kind,
+        ),
+        Request::SetShapeSize {
+            segment_id,
+            width,
+            height,
+        } => shape::set_shape_size(draft, segment_id, *width, *height),
+        Request::SetShapeFill {
+            segment_id,
+            color,
+            opacity,
+        } => shape::set_shape_fill(draft, segment_id, color, *opacity),
+        Request::SetShapeStroke {
+            segment_id,
+            color,
+            width,
+            opacity,
+            style,
+        } => shape::set_shape_stroke(draft, segment_id, color, [*width, *opacity], *style),
+        Request::SetShapeCorners { segment_id, radius } => {
+            shape::set_shape_corners(draft, segment_id, radius)
+        }
+        Request::SetShapeShadow {
+            segment_id,
+            color,
+            distance,
+            angle,
+            opacity,
+        } => shape::set_shape_shadow(draft, segment_id, color, [*distance, *angle, *opacity]),
         Request::AddEffect {
             track_id,
             segment_id,

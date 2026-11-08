@@ -366,6 +366,15 @@ mod encode {
         );
         encoder.reset();
         assert!(encoder.push(&input(w, h, 0)).is_ok(), "reset clears cancel");
+
+        // A cancelled drain keeps the waiting pictures for the next one.
+        let mut waiting = encoder.push(&input(w, h, 1)).unwrap();
+        flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(encoder.drain().unwrap_err(), CodecError::Cancelled);
+        assert_eq!(encoder.drain().unwrap_err(), CodecError::Cancelled);
+        flag.store(false, std::sync::atomic::Ordering::Relaxed);
+        waiting.extend(encoder.drain().unwrap());
+        assert_eq!(waiting.len(), 2, "both pictures after the cancelled drain");
     }
 
     #[test]

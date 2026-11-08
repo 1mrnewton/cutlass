@@ -518,12 +518,15 @@ impl VideoEncoder for Mpeg2Encoder {
     }
 
     fn drain(&mut self) -> Result<Vec<Packet>, CodecError> {
+        if self.cancel.load(Ordering::Relaxed) {
+            return Err(CodecError::Cancelled);
+        }
         if self.drained {
             return Ok(Vec::new());
         }
-        self.drained = true;
         let mut tail = Vec::new();
         self.close_gop(&mut tail)?;
+        self.drained = true;
         let mut out: Vec<Packet> = self.held.take().into_iter().chain(tail).collect();
         if let Some(last) = out.last_mut() {
             last.data.extend_from_slice(&[0, 0, 1, SEQUENCE_END]);

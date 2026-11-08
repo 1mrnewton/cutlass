@@ -44,7 +44,8 @@ pub fn register_codecs_with(
     // the STREAMINFO (sample count and MD5) a FLAC file is finished with;
     // ALAC's hands it the final cookie; MP3's hands it the delay and padding
     // its LAME tag needs; Opus's hands it the OpusHead, with its pre-skip,
-    // and the end trim. The Opus decoder matches the RFC vectors and plays
+    // and the end trim. Vorbis hands it the three headers and has no
+    // encoder delay. The Opus decoder matches the RFC vectors and plays
     // multistream and every API rate. WebP still images follow the same
     // rule, and an animated file's later packets are bare frames only the
     // Rust decoder composes.
@@ -56,6 +57,8 @@ pub fn register_codecs_with(
     cutlass_mp3::register_encoders(&mut encoders);
     cutlass_opus::register_decoders(&mut decoders);
     cutlass_opus::register_encoders(&mut encoders);
+    cutlass_vorbis::register_decoders(&mut decoders);
+    cutlass_vorbis::register_encoders(&mut encoders);
     cutlass_webp::register_decoders(&mut decoders);
     cutlass_webp::register_encoders(&mut encoders);
     #[cfg(target_os = "macos")]

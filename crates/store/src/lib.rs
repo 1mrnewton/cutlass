@@ -15,6 +15,7 @@ mod folder;
 mod hold;
 mod json;
 mod projects;
+mod reframe;
 mod relight;
 mod repair;
 mod stable;
@@ -33,6 +34,7 @@ pub use folder::{
 pub use hold::{Hold, held_address, hold};
 pub use json::{parse_draft, write_draft};
 pub use projects::{ListedProject, create_project, list_projects, listed_project};
+pub use reframe::{ReframeKey, SubjectPath, load_subject_path, save_subject_path};
 pub use relight::{RelightKey, find_relight, relight_file};
 pub use repair::{RepairNote, repair};
 pub use stable::{StableKey, load_camera_path, save_camera_path};

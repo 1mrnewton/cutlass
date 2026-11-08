@@ -902,7 +902,19 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
                 self.code_superblock(r, c)?;
                 c += sb4;
             }
+            self.check_overread()?;
             r += sb4;
+        }
+        Ok(())
+    }
+
+    /// Refuses a tile whose symbols ran past the end of its data.
+    fn check_overread(&self) -> R<()> {
+        if self.msac.overread() {
+            return Err(CodecError::Truncated {
+                at_bit: 0,
+                what: "tile data",
+            });
         }
         Ok(())
     }
@@ -934,6 +946,7 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
                     on_row(self.fs, self.cur, self.rec.as_deref_mut(), r, r1, false);
                 }
             }
+            self.check_overread()?;
             on_row(self.fs, self.cur, self.rec.as_deref_mut(), r, r1, true);
             r += sb4;
         }

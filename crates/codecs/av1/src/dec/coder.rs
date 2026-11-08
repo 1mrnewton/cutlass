@@ -88,6 +88,12 @@ pub trait Coder {
     fn with_local<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
         f(self)
     }
+    /// True when the decoder has read past the end of its data by more than
+    /// the 15 bits a symbol decoder may look ahead (never when writing).
+    #[inline(always)]
+    fn overread(&self) -> bool {
+        false
+    }
     /// Runs `f` on the decoder itself, for loops written for decoding only;
     /// `None` when the coder writes.
     #[inline(always)]
@@ -98,6 +104,10 @@ pub trait Coder {
 }
 
 impl Coder for Msac<'_> {
+    #[inline(always)]
+    fn overread(&self) -> bool {
+        Msac::overread(self)
+    }
     #[inline(always)]
     fn decoder<R>(&mut self, f: impl FnOnce(&mut Msac<'_>) -> R) -> Option<R> {
         Some(f(self))

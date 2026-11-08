@@ -52,6 +52,14 @@ impl<'a> Msac<'a> {
         self.cnt = cnt;
     }
 
+    /// True once the decoder has consumed more bits than the data holds,
+    /// beyond the look-ahead its window allows: the ones it pads the end
+    /// with are being read as symbols. libdav1d refuses a tile in this
+    /// state at the end of each superblock row.
+    pub fn overread(&self) -> bool {
+        self.cnt <= -15
+    }
+
     /// Runs `f` on a copy of the decoder state held in a local, then stores
     /// it back: inside a loop the state then stays in registers instead of
     /// going through memory for every symbol.

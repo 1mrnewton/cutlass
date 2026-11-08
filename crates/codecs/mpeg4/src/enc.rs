@@ -17,6 +17,7 @@ use cutlass_decode::CodecError;
 use crate::bits::BitWriter;
 use crate::block::{Quant, dequant_inter, dequant_intra};
 use crate::frame::{Frame, Kind, MbRecord};
+use crate::header::{VISUAL_OBJECT, VOS_START};
 use crate::idct;
 use crate::mc::{self, Pel, Rows};
 use crate::tables::{
@@ -2026,8 +2027,39 @@ fn planes_of(picture: &Held, stride: usize) -> Planes<'_> {
     }
 }
 
+/// `profile_and_level_indication` for an Advanced Simple stream of this
+/// size (ISO/IEC 14496-2 Table G-1, levels by macroblocks a VOP in Table
+/// N-2): level 1 up to QCIF, 3 up to CIF, 4 up to 352x576, and 5 above,
+/// the largest Advanced Simple level, which a picture over 720x576 also
+/// exceeds. FFmpeg writes level 1 for every size.
+fn advanced_simple_level(width: u32, height: u32) -> u8 {
+    let mbs = width.div_ceil(16) * height.div_ceil(16);
+    match mbs {
+        0..=99 => 0xF1,
+        100..=396 => 0xF3,
+        397..=792 => 0xF4,
+        _ => 0xF5,
+    }
+}
+
+/// The visual object sequence header and the visual object header before
+/// the layer, as FFmpeg's encoder writes them: the profile and level, then
+/// a video object, version 5, priority 1, with no video signal type.
+fn write_visual_object(out: &mut BitWriter, profile_and_level: u8) {
+    start(out, VOS_START);
+    out.bytes(&[profile_and_level]);
+    start(out, VISUAL_OBJECT);
+    out.put(1, 1); // is_visual_object_identifier
+    out.put(4, 5); // visual_object_verid
+    out.put(3, 1); // visual_object_priority
+    out.put(4, 1); // video ID
+    out.put(1, 0); // video_signal_type
+    out.stuff();
+}
+
 fn layer_bytes(width: u32, height: u32, resolution: u32) -> Vec<u8> {
     let mut out = BitWriter::new();
+    write_visual_object(&mut out, advanced_simple_level(width, height));
     start(&mut out, 0x00);
     start(&mut out, 0x20);
     write_vol(
@@ -2717,6 +2749,27 @@ mod tests {
         let theirs = std::fs::read(&yuv).expect("yuv");
         assert_eq!(ours, theirs);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn export_headers_name_the_advanced_simple_profile_first() {
+        let headers = super::layer_bytes(854, 480, 30);
+        // VOS, Advanced Simple level 5 (1590 macroblocks), then the visual
+        // object: identifier, version 5, priority 1, video, no signal
+        // type, stuffing.
+        assert_eq!(headers[..5], [0, 0, 1, 0xB0, 0xF5]);
+        assert_eq!(headers[5..10], [0, 0, 1, 0xB5, 0b1010_1001]);
+        assert_eq!(headers[10], 0b0001_0011);
+        assert_eq!(headers[11..15], [0, 0, 1, 0x00]);
+        assert_eq!(headers[15..19], [0, 0, 1, 0x20]);
+        assert_eq!(super::advanced_simple_level(176, 144), 0xF1);
+        assert_eq!(super::advanced_simple_level(352, 288), 0xF3);
+        assert_eq!(super::advanced_simple_level(352, 576), 0xF4);
+        assert_eq!(super::advanced_simple_level(720, 576), 0xF5);
+        assert_eq!(super::advanced_simple_level(1920, 1080), 0xF5);
+        // The decoder reads them as the configuration.
+        let mut decoder = Decoder::with_max_pixels(854 * 480);
+        decoder.configure(&headers).expect("configure");
     }
 
     /// FNV-1a over 64 bits: a digest that needs no dependency.

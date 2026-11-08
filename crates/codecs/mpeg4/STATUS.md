@@ -34,7 +34,7 @@ Export uses `EngineEncoder`. It is Advanced Simple and progressive:
 - The quantiser is H.263, from 1 to 31. A named bitrate moves it. Zero bitrate keeps the starting quantiser. `constant_rate` starts the budget again each second.
 - The layer's time resolution is the picture timescale, from 1 to 65535. Export's frame-rate numerator fits. A later picture that uses another timescale is refused.
 - A width or height that is not a multiple of 16 is padded by repeating the edge. The layer keeps the visible size. Both edges must be even and at most 8191.
-- The configuration is the video object and the layer, and it contains no picture. Each packet is one VOP.
+- The configuration is the visual object sequence header (Advanced Simple, `profile_and_level_indication` 0xF1 to 0xF5 by macroblocks a picture, where FFmpeg always writes level 1), the visual object header, the video object, and the layer, as FFmpeg writes them, and it contains no picture. Each packet is one VOP.
 
 GMC, static sprites, interlace, data partitioning, resync markers, RVLC, short headers, custom matrices, shape, N-bit video, NEWPRED, reduced resolution, and scalability are not written. The export choice is that progressive Advanced Simple stream, not every tool in the specification.
 

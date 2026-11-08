@@ -4,8 +4,9 @@
 //! packed 4:2:0 pictures in display order. The decoder configuration is
 //! the `esds` DecoderSpecificInfo: the VOS, visual object and VOL headers.
 //! Export opens an [`Encoder`](cutlass_encode::VideoEncoder) the same way.
-//! Each packet is one VOP. The configuration is the video object and the
-//! layer, with no picture in it.
+//! Each packet is one VOP. The configuration is the visual object
+//! sequence, the visual object, the video object, and the layer, with no
+//! picture in it.
 
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;

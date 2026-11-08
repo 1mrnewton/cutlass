@@ -62,14 +62,14 @@ pub const KEYBACKSPACE: IconData = IconData {
     marks: &[
         Mark {
             shape: Shape::Path(
-                "M8.6 5H18C19.6569 5 21 6.34315 21 8V16C21 17.6569 19.6569 19 18 19H8.6C8.0034 19 7.4374 18.7336 7.0574 18.274L3.3074 13.274C2.7309 12.5232 2.7309 11.4768 3.3074 10.726L7.0574 5.726C7.4374 5.2664 8.0034 5 8.6 5Z",
+                "M8.6 4H18C19.6569 4 21 5.34315 21 7V17C21 18.6569 19.6569 20 18 20H8.6C8.0034 20 7.4374 19.7336 7.0574 19.274L3.3074 13.274C2.7309 12.5232 2.7309 11.4768 3.3074 10.726L7.0574 4.726C7.4374 4.2664 8.0034 4 8.6 4Z",
             ),
             fill: false,
             even_odd: false,
             stroke: LINE,
         },
         Mark {
-            shape: Shape::Path("M12 9.5L17 14.5M17 9.5L12 14.5"),
+            shape: Shape::Path("M11.75 9.25L17.25 14.75M17.25 9.25L11.75 14.75"),
             fill: false,
             even_odd: false,
             stroke: LINE,
@@ -78,9 +78,9 @@ pub const KEYBACKSPACE: IconData = IconData {
 };
 
 /// A closing bracket on the left half: the clip before the playhead.
-const BEFORE: &str = "M4 5H9V19H4";
+const BEFORE: &str = "M4 3H9V21H4";
 /// An opening bracket on the right half: the clip after the playhead.
-const AFTER: &str = "M20 5H15V19H20";
+const AFTER: &str = "M20 3H15V21H20";
 
 const fn stroked(path: &'static str) -> Mark {
     Mark {
@@ -103,7 +103,7 @@ pub const TRIMLEFT: IconData = IconData {
     name: "trimLeft",
     source: None,
     marks: &[
-        stroked("M4 5H5.5M7.5 5H9V6.5M9 9V11M9 13V15M9 17.5V19H7.5M5.5 19H4"),
+        stroked("M4 3H5.5M7.5 3H9V4.5M9 7V9M9 11V13M9 15V17M9 19.5V21H7.5M5.5 21H4"),
         stroked(AFTER),
     ],
 };
@@ -114,6 +114,6 @@ pub const TRIMRIGHT: IconData = IconData {
     source: None,
     marks: &[
         stroked(BEFORE),
-        stroked("M20 5H18.5M16.5 5H15V6.5M15 9V11M15 13V15M15 17.5V19H16.5M18.5 19H20"),
+        stroked("M20 3H18.5M16.5 3H15V4.5M15 7V9M15 11V13M15 15V17M15 19.5V21H16.5M18.5 21H20"),
     ],
 };

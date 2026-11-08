@@ -4,13 +4,13 @@
     android:viewportWidth="24"
     android:viewportHeight="24">
   <path
-      android:pathData="M4 5H9V19H4"
+      android:pathData="M4 3H9V21H4"
       android:strokeColor="#FF000000"
       android:strokeWidth="1.5"
       android:strokeLineCap="round"
       android:strokeLineJoin="round" />
   <path
-      android:pathData="M20 5H18.5M16.5 5H15V6.5M15 9V11M15 13V15M15 17.5V19H16.5M18.5 19H20"
+      android:pathData="M20 3H18.5M16.5 3H15V4.5M15 7V9M15 11V13M15 15V17M15 19.5V21H16.5M18.5 21H20"
       android:strokeColor="#FF000000"
       android:strokeWidth="1.5"
       android:strokeLineCap="round"

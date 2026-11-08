@@ -698,13 +698,55 @@ fn peak(samples: &[f32]) -> f32 {
         .fold(0.0, |max, sample| max.max(sample.abs()))
 }
 
+/// A frame louder than half scale carries `compr`, and heavy mode applies it.
+#[test]
+fn a_loud_frame_carries_heavy_compression() {
+    let Some(ffmpeg) = oracle("ffmpeg", "-version") else {
+        return;
+    };
+    let rate = 48_000u32;
+    let channels = [C];
+    let pcm = tones(&channels, rate, rate as usize, 0.9);
+    for format in [Format::Ac3, Format::Eac3] {
+        let packets = encode(config(format, rate, &channels, 0), &pcm);
+        let full = decode(codec(format), &packets);
+        let heavy = played(codec(format), &packets, DynamicRange::Heavy);
+        let span = 4_096..pcm.len() - 4_096;
+        assert!(peak(&full.pcm[span.clone()]) > 0.7, "{format:?} full");
+        let heavy_peak = peak(&heavy[span.clone()]);
+        assert!(
+            (0.35..0.65).contains(&heavy_peak),
+            "{format:?} heavy {heavy_peak}"
+        );
+        if format == Format::Ac3 {
+            let theirs = ffmpeg_decode(
+                &ffmpeg,
+                &stream(&packets),
+                &["-drc_scale", "1", "-heavy_compr", "1", "-f", "ac3"],
+            );
+            let heard: Vec<f32> = theirs.into_iter().skip(ENCODER_DELAY as usize).collect();
+            let end = span.end.min(heavy.len()).min(heard.len());
+            let quality = snr(&heavy[span.start..end], &heard[span.start..end]);
+            assert!(quality > 40.0, "heavy mode {quality:.1} dB");
+        }
+    }
+}
+
 fn line_mode(codec_id: CodecId, packets: &[Packet]) -> Vec<f32> {
-    let params = cutlass_decode::CodecParams::audio(codec_id, 0, ChannelLayout::mono());
-    let options = Options {
-        dynamic_range: DynamicRange::Line {
+    played(
+        codec_id,
+        packets,
+        DynamicRange::Line {
             cut: 1.0,
             boost: 1.0,
         },
+    )
+}
+
+fn played(codec_id: CodecId, packets: &[Packet], dynamic_range: DynamicRange) -> Vec<f32> {
+    let params = cutlass_decode::CodecParams::audio(codec_id, 0, ChannelLayout::mono());
+    let options = Options {
+        dynamic_range,
         ..Options::default()
     };
     let mut decoder = Ac3Decoder::with_options(&params, options).expect("decoder");

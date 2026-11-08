@@ -285,6 +285,24 @@ pub fn compr_gain(code: u8) -> f32 {
     mantissa / 32.0 * ((exponent + 1) as f32).exp2()
 }
 
+/// The `compr` code whose gain is closest to `gain`. Code 0 is unity.
+pub(crate) fn compr_code(gain: f32) -> u8 {
+    if !gain.is_finite() || gain <= 0.0 {
+        return 0;
+    }
+    let target = gain.ln();
+    let mut best = 0u8;
+    let mut error = f32::MAX;
+    for code in 0..=255u16 {
+        let distance = (compr_gain(code as u8).ln() - target).abs();
+        if distance < error {
+            error = distance;
+            best = code as u8;
+        }
+    }
+    best
+}
+
 /// One syncframe's bit stream information.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Bsi {
@@ -891,6 +909,9 @@ mod tests {
         let half = dynrng_code(0.5);
         assert!((dynrng_gain(half) - 0.5).abs() < 0.02, "{half}");
         assert!((compr_gain(0) - 1.0).abs() < 1e-6);
+        assert_eq!(compr_code(1.0), 0);
+        let compr_half = compr_code(0.5);
+        assert!((compr_gain(compr_half) - 0.5).abs() < 0.02, "{compr_half}");
         assert!((compr_gain(0xF0) - 0.5).abs() < 1e-9);
         assert!((compr_gain(0x80) - 1.0 / 256.0).abs() < 1e-9);
         assert!(compr_db(0).abs() < 1e-4);

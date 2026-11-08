@@ -65,6 +65,8 @@ pub(crate) struct Frame {
     pub snr: u16,
     /// E-AC-3 dependent `chanmap`. `None` is an independent substream.
     pub chanmap: Option<u16>,
+    /// Heavy-compression word for this frame. `None` omits `compr`.
+    pub compr: Option<u8>,
 }
 
 /// Bit positions a syncframe written without mantissas reaches: the end
@@ -173,7 +175,7 @@ fn ac3_header(w: &mut BitWriter, shape: &Shape, meta: &Meta, frame: &Frame) {
     }
     w.flag(shape.lfeon);
     w.put(5, u32::from(meta.dialnorm));
-    w.flag(false); // compre
+    compression(w, frame.compr);
     w.flag(false); // langcode
     w.flag(false); // audprodie
     w.flag(false); // copyrightb
@@ -206,7 +208,7 @@ fn eac3_header(w: &mut BitWriter, shape: &Shape, meta: &Meta, frame: &Frame) {
     w.flag(shape.lfeon);
     w.put(5, 16);
     w.put(5, u32::from(meta.dialnorm));
-    w.flag(false); // compre
+    compression(w, frame.compr);
     if let Some(map) = frame.chanmap {
         w.flag(true); // chanmape
         w.put(16, u32::from(map));
@@ -259,6 +261,13 @@ fn eac3_header(w: &mut BitWriter, shape: &Shape, meta: &Meta, frame: &Frame) {
         w.flag((frame.index * shape.blocks as u64).is_multiple_of(6)); // convsync
     }
     w.flag(false); // addbsie
+}
+
+fn compression(w: &mut BitWriter, code: Option<u8>) {
+    w.flag(code.is_some());
+    if let Some(code) = code {
+        w.put(8, u32::from(code));
+    }
 }
 
 fn numblkscod(blocks: usize) -> u32 {

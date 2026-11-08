@@ -10,7 +10,8 @@
 //! Enhanced coupling and transient pre-noise processing are never written.
 //! A block
 //! peaking above half scale sends a dynamic range word that brings it back
-//! to half scale; heavy-compression words are never written. Delta bit
+//! to half scale, and the frame sends a heavy-compression word for the
+//! same cut. Delta bit
 //! allocation is written only when a block carries
 //! segments; the rate control leaves every segment empty. Spectral extension
 //! replaces the top bins of a low-rate E-AC-3 frame. A steady six-block
@@ -29,7 +30,7 @@ use cutlass_encode::{
 };
 
 use crate::bitalloc::{self, Mask, Params};
-use crate::header::{Dac3, Dec3, Dec3Substream, dynrng_code};
+use crate::header::{Dac3, Dec3, Dec3Substream, compr_code, dynrng_code};
 use crate::mdct::{COEFS, Transform};
 use crate::tables::{FRAME_WORDS, NOMINAL_KBPS, REUSE};
 use analysis::Analysis;
@@ -788,6 +789,7 @@ impl Ac3Encoder {
             self.blocks[blk] = block;
         }
         let size = self.next_size();
+        let heavy = heavy_word(&self.pending, from, self.shape.blocks);
         let mut shape = self.shape;
         let mut mode = Mode::Adaptive;
         let (snr, skip) = loop {
@@ -799,7 +801,7 @@ impl Ac3Encoder {
             {
                 self.blocks[0].deltas[0] = delta;
             }
-            if let Some((offset, skip)) = self.allocate(&shape, size)? {
+            if let Some((offset, skip)) = self.allocate(&shape, size, heavy)? {
                 // A short syncframe has the same bit rate and far fewer
                 // bits, so the six-block cutoff leaves the mantissas below
                 // the nominal offset. Give the bits to a narrower band.
@@ -852,6 +854,7 @@ impl Ac3Encoder {
             index: self.frame_index,
             snr: snr as u16,
             chanmap: self.chanmap,
+            compr: heavy,
         };
         let (writer, layout) = write::frame(&shape, &self.meta, &frame, &self.blocks, &skip, true);
         if layout.total + TAIL_BITS > size.bytes * 8 {
@@ -885,6 +888,7 @@ impl Ac3Encoder {
         &mut self,
         shape: &Shape,
         size: Size,
+        heavy: Option<u8>,
     ) -> Result<Option<(i32, [u16; MAX_BLOCKS])>, CodecError> {
         let probe = Frame {
             bytes: size.bytes,
@@ -892,6 +896,7 @@ impl Ac3Encoder {
             index: self.frame_index,
             snr: 0,
             chanmap: self.chanmap,
+            compr: heavy,
         };
         let (_, layout) = write::frame(
             shape,
@@ -1093,6 +1098,24 @@ impl Search<'_> {
 /// and dither flags.
 const SIDE_MARGIN: usize = 64;
 
+/// One heavy-compression word when the frame peaks above half scale.
+fn heavy_word(pending: &[Vec<f32>], from: usize, blocks: usize) -> Option<u8> {
+    let samples = blocks * COEFS;
+    let mut peak = 0.0f32;
+    for channel in pending {
+        let span = channel.get(from..from + samples)?;
+        for &sample in span {
+            peak = peak.max(sample.abs());
+        }
+    }
+    if peak > 0.5 && peak.is_finite() {
+        let code = compr_code(0.5 / peak);
+        (code != 0).then_some(code)
+    } else {
+        None
+    }
+}
+
 /// Side information of one coarse exponent set and no coupling.
 fn coarse_side(shape: &Shape, meta: &Meta, chanmap: Option<u16>) -> Layout {
     let mut blocks = vec![Block::default(); shape.blocks];
@@ -1103,6 +1126,7 @@ fn coarse_side(shape: &Shape, meta: &Meta, chanmap: Option<u16>) -> Layout {
         index: 0,
         snr: 0,
         chanmap,
+        compr: None,
     };
     write::frame(shape, meta, &frame, &blocks, &[0; MAX_BLOCKS], false).1
 }

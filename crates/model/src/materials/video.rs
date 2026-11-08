@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::id::MaterialId;
-use crate::time::{Micros, TimeRange};
+use crate::time::Micros;
 
 fn one() -> f64 {
     1.0
@@ -64,8 +64,8 @@ pub struct VideoAlgorithm {
 }
 
 /// One algorithm over a clip's frames. The reference editor stores only
-/// its `type`; the level, the result and the stretch it covers are
-/// Cutlass's own keys.
+/// its `type`; the level is Cutlass's own key. The result is found by the
+/// clip's file and level in the project folder, not stored here.
 #[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 pub struct Algorithm {
     #[serde(default, rename = "type")]
@@ -74,13 +74,6 @@ pub struct Algorithm {
     /// below is off.
     #[serde(default)]
     pub level: i64,
-    /// The finished result in the project folder, once there is one.
-    #[serde(default)]
-    pub result_path: String,
-    /// The stretch of the source file the result holds, in the file's own
-    /// time. The result's first frame is this range's start.
-    #[serde(default)]
-    pub result_range: Option<TimeRange>,
     #[serde(flatten, default)]
     pub rest: Map<String, Value>,
 }
@@ -261,15 +254,13 @@ mod tests {
     }
 
     #[test]
-    fn an_enhance_reads_its_level_result_and_range_and_keeps_unknown_keys() {
+    fn an_enhance_reads_its_level_and_keeps_unknown_keys() {
         let video: MaterialVideo = serde_json::from_str(
-            r#"{"video_algorithm":{"algorithms":[{"type":"Deflicker","level":1},{"type":"QualityEnhance","level":2,"result_path":"Resources/video_enhance/a.mp4","result_range":{"start":1000,"duration":2000},"model_id":"x"}],"gameplay":null}}"#,
+            r#"{"video_algorithm":{"algorithms":[{"type":"Deflicker","level":1},{"type":"QualityEnhance","level":2,"model_id":"x"}],"gameplay":null}}"#,
         )
         .unwrap();
         let enhance = video.enhance().unwrap();
         assert_eq!(enhance.level, Algorithm::UHD);
-        assert_eq!(enhance.result_path, "Resources/video_enhance/a.mp4");
-        assert_eq!(enhance.result_range, Some(TimeRange::new(1000, 2000)));
         assert!(enhance.rest.contains_key("model_id"));
         assert!(
             video

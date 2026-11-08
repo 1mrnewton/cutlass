@@ -481,7 +481,8 @@ enum Key<'a> {
 
 /// The keys of `shortcut`, such as `⇧⌘C`, in the order they are drawn.
 /// On a Mac the modifiers are the Command, Shift and Option icons. Elsewhere
-/// Command reads Ctrl and Option reads Alt, and Shift keeps its icon.
+/// Command reads Ctrl and Option reads Alt; Shift and Backspace keep their
+/// icons.
 fn keys(shortcut: &str, mac: bool) -> Vec<Key<'_>> {
     shortcut
         .char_indices()
@@ -491,6 +492,7 @@ fn keys(shortcut: &str, mac: bool) -> Vec<Key<'_>> {
             ('⌥', true) => Key::Icon("keyOption"),
             ('⌥', false) => Key::Text("Alt"),
             ('⇧', _) => Key::Icon("keyShift"),
+            ('⌫', _) => Key::Icon("keyBackspace"),
             _ => Key::Text(&shortcut[at..at + glyph.len_utf8()]),
         })
         .collect()
@@ -913,7 +915,8 @@ mod tests {
         );
         assert_eq!(keys("⌥G", false), [Key::Text("Alt"), Key::Text("G")]);
         assert_eq!(keys("⌘X", false), [Key::Text("Ctrl"), Key::Text("X")]);
-        for name in ["keyCommand", "keyShift", "keyOption"] {
+        assert_eq!(keys("⌫", false), [Key::Icon("keyBackspace")]);
+        for name in ["keyCommand", "keyShift", "keyOption", "keyBackspace"] {
             assert!(crate::icons::require(name).is_ok(), "{name}");
         }
     }

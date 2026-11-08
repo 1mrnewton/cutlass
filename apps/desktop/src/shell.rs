@@ -172,6 +172,9 @@ impl std::fmt::Display for ShellError {
             Self::Edit(EditError::Reframe) => {
                 formatter.write_str("that shape or setting is not one Auto reframe offers")
             }
+            Self::Edit(EditError::MotionBlur) => {
+                formatter.write_str("that blur is not one Motion blur offers")
+            }
             Self::Edit(EditError::FlowRate) => {
                 formatter.write_str("Optical flow fills a clip to 30, 50 or 60 frames a second")
             }

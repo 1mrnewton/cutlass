@@ -1,4 +1,6 @@
-use cutlass_model::{Algorithm, Draft, MaterialRef, Reframe, SegmentId, VideoAlgorithm};
+use cutlass_model::{
+    Algorithm, Draft, MaterialRef, MotionBlur, Reframe, SegmentId, VideoAlgorithm,
+};
 
 /// The longest preset id Relight stores.
 const MAX_PRESET: usize = 64;
@@ -94,6 +96,36 @@ pub fn set_reframe(
     )
 }
 
+/// Blur the clip along its motion as `blur` says, or stop when `on` is
+/// false, as [`set_enhance`] does.
+pub fn set_motion_blur(
+    draft: &mut Draft,
+    segment_id: &SegmentId,
+    on: bool,
+    blur: &MotionBlur,
+) -> Result<(), EditError> {
+    let share = 0.0..=1.0;
+    if !share.contains(&blur.blur)
+        || !share.contains(&blur.blend)
+        || !(MotionBlur::BOTH..=MotionBlur::BACKWARD).contains(&blur.direction)
+        || !MotionBlur::TIMES.contains(&blur.times)
+    {
+        return Err(EditError::MotionBlur);
+    }
+    set_filled(
+        draft,
+        segment_id,
+        Algorithm::MOTION_BLUR,
+        i64::from(on),
+        |algorithm| {
+            algorithm.strength = Some(blur.blur);
+            algorithm.blend = Some(blur.blend);
+            algorithm.direction = Some(blur.direction);
+            algorithm.speed = Some(blur.times);
+        },
+    )
+}
+
 fn set_algorithm(
     draft: &mut Draft,
     segment_id: &SegmentId,
@@ -167,8 +199,8 @@ fn set_filled(
 #[cfg(test)]
 mod tests {
     use cutlass_model::{
-        Algorithm, Draft, MaterialAudio, MaterialId, MaterialVideo, Reframe, Segment, TimeRange,
-        Track, TrackAttribute, TrackId, TrackType, VideoAlgorithm,
+        Algorithm, Draft, MaterialAudio, MaterialId, MaterialVideo, MotionBlur, Reframe, Segment,
+        TimeRange, Track, TrackAttribute, TrackId, TrackType, VideoAlgorithm,
     };
 
     use crate::edit::EditError;
@@ -409,6 +441,69 @@ mod tests {
                 speed,
             }],
         )
+    }
+
+    fn motion_blur(
+        session: &mut Session,
+        on: bool,
+        blur: f64,
+        blend: f64,
+        direction: i64,
+        times: i64,
+    ) -> Result<u64, EditError> {
+        let revision = session.revision();
+        session.apply(
+            revision,
+            &[Request::SetMotionBlur {
+                segment_id: "picture".into(),
+                on,
+                blur,
+                blend,
+                direction,
+                times,
+            }],
+        )
+    }
+
+    #[test]
+    fn motion_blur_stores_its_settings_and_off_stops_it() {
+        let mut session = session_with(None);
+        set(&mut session, "picture", Algorithm::HD).unwrap();
+        motion_blur(&mut session, true, 0.8, 0.2, MotionBlur::FORWARD, 4).unwrap();
+        assert_eq!(
+            session.draft().materials.videos[0].motion_blur(),
+            Some(MotionBlur {
+                blur: 0.8,
+                blend: 0.2,
+                direction: MotionBlur::FORWARD,
+                times: 4
+            })
+        );
+        let before = session.draft().clone();
+        for (blur, blend, direction, times) in [
+            (1.5, 0.0, 0, 1),
+            (0.5, -0.1, 0, 1),
+            (f64::NAN, 0.0, 0, 1),
+            (0.5, 0.0, 3, 1),
+            (0.5, 0.0, 0, 3),
+        ] {
+            assert_eq!(
+                motion_blur(&mut session, true, blur, blend, direction, times),
+                Err(EditError::MotionBlur),
+                "{blur} {blend} {direction} {times}"
+            );
+        }
+        assert_eq!(session.draft(), &before);
+        motion_blur(&mut session, false, 1.0, 0.0, 0, 1).unwrap();
+        assert!(session.draft().materials.videos[0].motion_blur().is_none());
+        assert_eq!(level(&session), Some(Algorithm::HD));
+        session.undo().unwrap();
+        assert_eq!(
+            session.draft().materials.videos[0]
+                .motion_blur()
+                .map(|blur| blur.times),
+            Some(4)
+        );
     }
 
     #[test]

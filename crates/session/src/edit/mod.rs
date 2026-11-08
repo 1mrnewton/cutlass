@@ -44,7 +44,9 @@ mod trim;
 mod volume;
 mod words;
 
-use cutlass_model::{Draft, LinkageSettings, Micros, RangeError, TimeRange, TrackAttribute};
+use cutlass_model::{
+    Draft, LinkageSettings, Micros, MotionBlur, RangeError, TimeRange, TrackAttribute,
+};
 
 use crate::request::Request;
 
@@ -116,6 +118,8 @@ pub enum EditError {
     Relight,
     /// An Auto reframe shape, stabilization or speed is not one it offers.
     Reframe,
+    /// A Motion blur length, blend, direction or speed is not one it offers.
+    MotionBlur,
     /// The picture has no sound to place.
     NoSound,
     /// The picture's sound is already its own clip.
@@ -355,6 +359,24 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             stability,
             speed,
         } => enhance::set_reframe(draft, segment_id, ratio, *stability, *speed),
+        Request::SetMotionBlur {
+            segment_id,
+            on,
+            blur,
+            blend,
+            direction,
+            times,
+        } => enhance::set_motion_blur(
+            draft,
+            segment_id,
+            *on,
+            &MotionBlur {
+                blur: *blur,
+                blend: *blend,
+                direction: *direction,
+                times: *times,
+            },
+        ),
         Request::SetTextContent {
             segment_id,
             content,

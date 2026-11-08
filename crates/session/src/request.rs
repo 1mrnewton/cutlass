@@ -259,6 +259,20 @@ pub enum Request {
         stability: i64,
         speed: i64,
     },
+    /// Blur a video clip along how things move through it, or stop when
+    /// `on` is false. `blur` is the blur's length as a share of a frame's
+    /// time and `blend` the share of the sharp frame mixed back in, both 0
+    /// to 1; `direction` is 0 both ways, 1 forward or 2 backward; `times`
+    /// is 1, 2, 4 or 6 frames made across each blur. The blurred copy is
+    /// made apart from the draft.
+    SetMotionBlur {
+        segment_id: SegmentId,
+        on: bool,
+        blur: f64,
+        blend: f64,
+        direction: i64,
+        times: i64,
+    },
     /// Replace the text material's string. Word columns stay as stored.
     SetTextContent {
         segment_id: SegmentId,

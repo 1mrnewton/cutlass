@@ -98,13 +98,46 @@ pub struct Algorithm {
     /// [`Reframe::DEFAULT`] or [`Reframe::STABLE`]. Absent is the default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stability: Option<i64>,
+    /// For Motion blur, the share of the sharp frame mixed back in, 0 to
+    /// 1. Absent is 0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blend: Option<f64>,
+    /// For Motion blur, where the blur reaches: [`MotionBlur::BOTH`],
+    /// [`MotionBlur::FORWARD`] or [`MotionBlur::BACKWARD`]. Absent is both.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direction: Option<i64>,
     /// For Auto reframe, how fast the frame may follow:
     /// [`Reframe::FAST`], [`Reframe::DEFAULT`] or [`Reframe::SLOW`].
-    /// Absent is the default.
+    /// Absent is the default. For Motion blur, how many frames are made
+    /// across each blur, one of [`MotionBlur::TIMES`]; absent is once.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub speed: Option<i64>,
     #[serde(flatten, default)]
     pub rest: Map<String, Value>,
+}
+
+/// A clip's Motion blur: how long the blur is, how much of the sharp frame
+/// is mixed back in, which way it reaches and how finely it is made.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MotionBlur {
+    /// The blur's length as a share of a frame's time, 0 to 1.
+    pub blur: f64,
+    /// The share of the sharp frame mixed back in, 0 to 1.
+    pub blend: f64,
+    pub direction: i64,
+    /// One of [`MotionBlur::TIMES`]: more makes a smoother blur.
+    pub times: i64,
+}
+
+impl MotionBlur {
+    /// The blur reaches before and after each frame.
+    pub const BOTH: i64 = 0;
+    /// The blur trails after each frame.
+    pub const FORWARD: i64 = 1;
+    /// The blur leads before each frame.
+    pub const BACKWARD: i64 = 2;
+    /// The speeds offered: Once, Twice, 4 times and 6 times.
+    pub const TIMES: [i64; 4] = [1, 2, 4, 6];
 }
 
 /// A clip's Auto reframe: the shape it is cut to around its subject, how
@@ -217,6 +250,9 @@ impl Algorithm {
     /// Cutlass's name for Auto reframe, which cuts a clip to a shape that
     /// follows its subject.
     pub const AUTO_REFRAME: &'static str = "AutoReframe";
+    /// Cutlass's name for Motion blur, which blurs each frame along how
+    /// things move through it.
+    pub const MOTION_BLUR: &'static str = "MotionBlur";
 
     /// Whether the algorithm runs.
     #[must_use]
@@ -282,6 +318,30 @@ impl MaterialVideo {
             ratio: algorithm.ratio.clone(),
             stability: setting(algorithm.stability),
             speed: setting(algorithm.speed),
+        })
+    }
+
+    /// The clip's Motion blur, when it has one that is on. A setting out of
+    /// range reads as its default.
+    #[must_use]
+    pub fn motion_blur(&self) -> Option<MotionBlur> {
+        let algorithm = self.algorithm(Algorithm::MOTION_BLUR)?;
+        let share = |value: Option<f64>, absent: f64| {
+            value
+                .filter(|value| value.is_finite())
+                .map_or(absent, |value| value.clamp(0.0, 1.0))
+        };
+        Some(MotionBlur {
+            blur: share(algorithm.strength, 1.0),
+            blend: share(algorithm.blend, 0.0),
+            direction: algorithm
+                .direction
+                .filter(|direction| (MotionBlur::BOTH..=MotionBlur::BACKWARD).contains(direction))
+                .unwrap_or(MotionBlur::BOTH),
+            times: algorithm
+                .speed
+                .filter(|times| MotionBlur::TIMES.contains(times))
+                .unwrap_or(1),
         })
     }
 
@@ -422,6 +482,41 @@ mod tests {
         let freeze = held.freeze.unwrap();
         assert_eq!(freeze.source_material_id, "src");
         assert_eq!(freeze.timestamp, Micros(1500));
+    }
+
+    #[test]
+    fn motion_blur_reads_its_settings_and_a_wrong_one_reads_as_its_default() {
+        let video: MaterialVideo = serde_json::from_str(
+            r#"{"video_algorithm":{"algorithms":[{"type":"MotionBlur","level":1,"strength":0.5,"blend":0.25,"direction":2,"speed":4}]}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            video.motion_blur(),
+            Some(MotionBlur {
+                blur: 0.5,
+                blend: 0.25,
+                direction: MotionBlur::BACKWARD,
+                times: 4
+            })
+        );
+        let odd: MaterialVideo = serde_json::from_str(
+            r#"{"video_algorithm":{"algorithms":[{"type":"MotionBlur","level":1,"strength":7,"direction":5,"speed":3}]}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            odd.motion_blur(),
+            Some(MotionBlur {
+                blur: 1.0,
+                blend: 0.0,
+                direction: MotionBlur::BOTH,
+                times: 1
+            })
+        );
+        let off: MaterialVideo = serde_json::from_str(
+            r#"{"video_algorithm":{"algorithms":[{"type":"MotionBlur","level":0}]}}"#,
+        )
+        .unwrap();
+        assert!(off.motion_blur().is_none());
     }
 
     #[test]

@@ -51,7 +51,8 @@ pub use speed::{
 pub use text::{Bubble, CAPTION_STYLE_KEYS, MaterialText};
 pub use transition::{MaterialTransition, blend_extents, blend_window};
 pub use video::{
-    Algorithm, Crop, FreezeInfo, MaterialVideo, Reframe, Relight, VideoAlgorithm, VideoStable,
+    Algorithm, Crop, FreezeInfo, MaterialVideo, MotionBlur, Reframe, Relight, VideoAlgorithm,
+    VideoStable,
 };
 pub use words::WordColumns;
 

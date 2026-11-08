@@ -8,10 +8,10 @@
 use std::io::Write;
 
 fn main() -> std::io::Result<()> {
-    let Some(out) = std::env::args_os().nth(1).map(std::path::PathBuf::from) else {
-        eprintln!("usage: filter_posters <output folder>");
-        std::process::exit(2);
-    };
+    let out = std::env::args_os()
+        .nth(1)
+        .map(std::path::PathBuf::from)
+        .ok_or_else(|| std::io::Error::other("usage: filter_posters <output folder>"))?;
     std::fs::create_dir_all(&out)?;
     let (width, height) = (144, 96);
     for look in cutlass_effects::looks() {

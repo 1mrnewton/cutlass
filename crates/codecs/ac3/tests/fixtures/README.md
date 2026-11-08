@@ -46,3 +46,25 @@ with `-drc_scale 0`: interleaved little-endian `f32` in WAVEFORMATEXTENSIBLE
 order. The committed-PCM test compares against it, so the check runs where
 FFmpeg is not installed. A live FFmpeg decode and macOS `afconvert` are still
 used when they are.
+
+Each one is made from this folder with:
+
+```text
+ffmpeg -v error -y -drc_scale 0 -i NAME -f f32le -c:a pcm_f32le reference/NAME.f32
+```
+
+FFmpeg 8.1.1 on macOS reproduced every file byte for byte on 8 November 2026.
+
+| File | SHA-256 |
+| --- | --- |
+| `reference/ac3_2.1_44100.ac3.f32` | `50f1ce9842cb21a687761ca7e197163fc33b44bc9efc0a02b41f9c3ac2f1d109` |
+| `reference/ac3_3.0-back_48000.ac3.f32` | `c54ea6f7501c2829225ea66ce30b360650c323b3234bc9964732a7a4bdeb1692` |
+| `reference/ac3_3.0_32000.ac3.f32` | `6222f1d155ceab79c6be3b03baf79975976d9b6f4a573644b2bc4da849b69aa1` |
+| `reference/ac3_5.1_48000_xbsi.ac3.f32` | `e25e07ca1e7f07dc2ee4d04aafa4847ecc55c78fbf825c825bacc2a57b9f1aa7` |
+| `reference/ac3_mono_48000.ac3.f32` | `35b2ab74564da6a04bfbfad65b07f2f548c8d35ec1093e893be4497d70cc1087` |
+| `reference/ac3_quad_48000.ac3.f32` | `938f46af381c0985365e41a4e503156e5c5dc1d8f518c852344d7a359fc2ec01` |
+| `reference/ac3_stereo_44100.ac3.f32` | `7c100fbcc4d6cdcf2dee71738b988adeab372229ead3a2afcb64110a2a75044e` |
+| `reference/eac3_5.0_48000.eac3.f32` | `91c198e4d99217c77c813a2c8a5c2fa54a2a8067c2bde1b9233003b4f11b5700` |
+| `reference/eac3_5.1_44100.eac3.f32` | `f7acda93e34f51800daf35cbda6909540667c5ac3d4c4cf71c422ded1c863157` |
+| `reference/eac3_mono_32000.eac3.f32` | `30a698d5eec606f9bb9cd14b95c49490cced8ddd113f805141198120555c5e25` |
+| `reference/eac3_stereo_48000.eac3.f32` | `0438370a3ea443d0e5f3be4cbd33e8bdf64a65cb3622bf60a593cd158b29dbc0` |

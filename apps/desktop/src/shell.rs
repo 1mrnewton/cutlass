@@ -58,6 +58,7 @@ mod listen;
 mod proxy;
 mod render;
 mod select;
+mod shape;
 mod speech_model;
 mod update;
 
@@ -3296,6 +3297,8 @@ impl Shell {
             } else if material_id.starts_with(STICKER_CARD_PREFIX) {
                 let sticker = shelf_sticker(material_id).ok()?;
                 (TrackType::Sticker, sticker_length(sticker))
+            } else if cutlass_editor::shape_of_card(material_id).is_some() {
+                (TrackType::Sticker, STICKER_LENGTH)
             } else {
                 material_span(self.draft()?, material_id)?
             },
@@ -3371,6 +3374,8 @@ impl Shell {
             self.drop_filter(material_id, x, y)
         } else if material_id.starts_with(STICKER_CARD_PREFIX) {
             self.drop_sticker(material_id, x, y)
+        } else if material_id.starts_with(cutlass_editor::SHAPE_CARD_PREFIX) {
+            self.drop_shape(material_id, x, y)
         } else if material_id.starts_with(cutlass_editor::TEMPLATE_CARD_PREFIX) {
             self.drop_template(material_id, x, y)
         } else {
@@ -3397,6 +3402,8 @@ impl Shell {
         } else if material_id.starts_with(STICKER_CARD_PREFIX) {
             let sticker = shelf_sticker(material_id)?;
             self.place_sticker(sticker, duration, Some(track_id), start)
+        } else if material_id.starts_with(cutlass_editor::SHAPE_CARD_PREFIX) {
+            self.place_shape(material_id, track_id, start)
         } else if material_id.starts_with(cutlass_editor::TEMPLATE_CARD_PREFIX) {
             self.place_template(material_id, track_id, start)
         } else {
@@ -3795,6 +3802,49 @@ impl Shell {
         });
         self.apply_requests(&requests)?;
         self.select(Some(place.segment_id));
+        Ok(())
+    }
+
+    /// Add the shape shelf's `card_id` at the playhead, on the first sticker
+    /// row with room, else on a new one. The new shape is picked.
+    pub fn add_shape(&mut self, card_id: &str) -> Result<(), ShellError> {
+        let start = self.playhead;
+        let track_id = free_row(
+            self.session_draft()?,
+            TrackType::Sticker,
+            start,
+            STICKER_LENGTH,
+        )
+        .unwrap_or_else(|| TrackId::new(self.fresh("track")));
+        self.place_shape(card_id, track_id, start)
+    }
+
+    /// Place the shape shelf's `card_id` where it was dropped on the lanes.
+    pub fn drop_shape(&mut self, card_id: &str, x: f64, y: f64) -> Result<(), ShellError> {
+        let (track_id, start) = self.layer_drop(TrackType::Sticker, x, y)?;
+        self.place_shape(card_id, track_id, start)
+    }
+
+    fn place_shape(
+        &mut self,
+        card_id: &str,
+        track_id: TrackId,
+        start: Micros,
+    ) -> Result<(), ShellError> {
+        let kind = cutlass_editor::shape_of_card(card_id).ok_or_else(|| {
+            ShellError::Unavailable("the shape is not on the shape shelf".to_owned())
+        })?;
+        let segment_id = SegmentId::new(self.fresh("seg"));
+        let material_id = MaterialId::new(self.fresh("shape"));
+        self.apply(Request::AddShape {
+            track_id,
+            segment_id: segment_id.clone(),
+            material_id,
+            start,
+            duration: STICKER_LENGTH,
+            kind,
+        })?;
+        self.select(Some(segment_id));
         Ok(())
     }
 
@@ -8439,6 +8489,7 @@ fn clip_name(draft: &Draft, segment: &Segment) -> String {
         Some(MaterialRef::Audio(audio)) if !audio.path.is_empty() => file_name(&audio.path),
         Some(MaterialRef::Text(text)) if !text.content.is_empty() => text.content.clone(),
         Some(MaterialRef::Draft(compound)) if !compound.name.is_empty() => compound.name.clone(),
+        Some(MaterialRef::Shape(shape)) if !shape.name.is_empty() => shape.name.clone(),
         _ => segment.id.as_str().to_owned(),
     }
 }

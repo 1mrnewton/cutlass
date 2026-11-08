@@ -33,6 +33,7 @@ mod reorder;
 mod ripple;
 mod ruler;
 mod saved_look;
+mod shape_shelf;
 mod snap;
 mod stage;
 mod subtitles;
@@ -104,6 +105,7 @@ pub use reorder::{place_of, reorder_start};
 pub use ripple::{close_gap, gap_at, ripple_delete};
 pub use ruler::{RulerStep, Tick, clock, ruler_step, ruler_ticks, zoom_ceiling};
 pub use saved_look::{SavedLook, look_requests, read_looks, saved_look, write_looks};
+pub use shape_shelf::{SHAPE_CARD_PREFIX, shape_cards, shape_of_card};
 pub use snap::{SnapKind, SnapTarget, snap, snap_span, transition_middle};
 pub use stage::{
     MAX_SCALE, MIN_SCALE, NoText, Pose, SCALE_REACH, SNAP_REACH, StageAlign, StageBox,

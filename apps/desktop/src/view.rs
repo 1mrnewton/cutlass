@@ -230,6 +230,9 @@ pub struct ViewState {
     library_sort: cutlass_editor::LibrarySort,
     /// The media shelf shows free stock instead of the project's files.
     library_stock: bool,
+    /// Which part of the sticker shelf shows: Yours, Stickers, Shapes or
+    /// GIPHY.
+    sticker_group: usize,
     /// A folder being named, and what is typed so far.
     library_renaming: Option<(String, String)>,
     projects_root: Option<std::path::PathBuf>,
@@ -305,6 +308,7 @@ impl Default for ViewState {
             library_folder: String::new(),
             library_sort: cutlass_editor::LibrarySort::Name,
             library_stock: false,
+            sticker_group: STICKERS,
             library_renaming: None,
             projects_root: None,
             listed: Vec::new(),
@@ -1829,6 +1833,17 @@ fn asset_column(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect
         column.add_space(8.0);
         source_switch(&mut column, view);
     }
+    if shelf == Shelf::Stickers {
+        column.add_space(8.0);
+        if let Some(group) = segmented(
+            &mut column,
+            "sticker-group",
+            &STICKER_GROUPS,
+            view.sticker_group,
+        ) {
+            view.sticker_group = group;
+        }
+    }
     let bin = matches!(shelf, Shelf::Media | Shelf::Audio) && !stock;
     if bin {
         // A folder that is gone, as after another project opened, is the top.
@@ -1880,6 +1895,23 @@ fn asset_column(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect
                 );
                 return;
             }
+            let group = view.sticker_group;
+            if shelf == Shelf::Stickers && (group == YOURS || group == GIPHY) {
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(if group == YOURS {
+                            "Stickers you make or import will show here."
+                        } else {
+                            "GIPHY search will show here."
+                        })
+                        .size(tokens::TYPE_SIZE)
+                        .color(tokens::MUTED),
+                    );
+                    inspector::later_badge(ui);
+                });
+                return;
+            }
             let mut cards = if bin {
                 folder_cards(shell.library_store(), &view.library_folder, &query)
             } else {
@@ -1893,6 +1925,9 @@ fn asset_column(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect
                 };
                 bin_cards(draft, &place, shelf, &query)
             }));
+            if shelf == Shelf::Stickers && group == SHAPES {
+                cards = shape_cards(&query);
+            }
             fill_looks(shell, ui.ctx(), &mut cards);
             if cards.is_empty() {
                 let message = if !query.trim().is_empty() {
@@ -1921,6 +1956,8 @@ fn asset_column(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect
                     shell.add_filter(&id)
                 } else if id.starts_with(crate::shell::STICKER_CARD_PREFIX) {
                     shell.add_sticker(&id)
+                } else if id.starts_with(cutlass_editor::SHAPE_CARD_PREFIX) {
+                    shell.add_shape(&id)
                 } else if id.starts_with(cutlass_editor::TEMPLATE_CARD_PREFIX) {
                     shell.add_template(&id)
                 } else {
@@ -1935,26 +1972,37 @@ fn asset_column(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect
 }
 
 /// Project or Free stock, over the media shelf.
-/// Project and Free stock as one segmented control across the column.
 fn source_switch(ui: &mut Ui, view: &mut ViewState) {
+    let current = usize::from(view.library_stock);
+    if let Some(picked) = segmented(ui, "library-source", &["Project", "Free stock"], current) {
+        view.library_stock = picked == 1;
+        view.library_picked.clear();
+        view.library_anchor = None;
+    }
+}
+
+/// The parts of the sticker shelf, in switch order.
+const STICKER_GROUPS: [&str; 4] = ["Yours", "Stickers", "Shapes", "GIPHY"];
+const YOURS: usize = 0;
+const STICKERS: usize = 1;
+const SHAPES: usize = 2;
+const GIPHY: usize = 3;
+
+/// `labels` as one segmented control across the column, `current` on.
+/// Returns the label clicked when it is not the current one.
+fn segmented(ui: &mut Ui, id: &str, labels: &[&str], current: usize) -> Option<usize> {
     let (track, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 34.0), Sense::hover());
     ui.painter()
         .rect_filled(track, CornerRadius::same(10), tokens::PROJECT_BAR);
-    let half = (track.width() - 6.0) / 2.0;
-    for (index, (label, stock)) in [("Project", false), ("Free stock", true)]
-        .into_iter()
-        .enumerate()
-    {
+    let part = (track.width() - 6.0) / labels.len().max(1) as f32;
+    let mut picked = None;
+    for (index, label) in labels.iter().enumerate() {
         let segment = Rect::from_min_size(
-            track.min + Vec2::new(3.0 + half * index as f32, 3.0),
-            Vec2::new(half, track.height() - 6.0),
+            track.min + Vec2::new(3.0 + part * index as f32, 3.0),
+            Vec2::new(part, track.height() - 6.0),
         );
-        let response = ui.interact(
-            segment,
-            ui.scope_id().with(("library-source", index)),
-            Sense::click(),
-        );
-        let on = view.library_stock == stock;
+        let response = ui.interact(segment, ui.scope_id().with((id, index)), Sense::click());
+        let on = index == current;
         if on {
             ui.painter()
                 .rect_filled(segment, CornerRadius::same(8), tokens::ACTIVE);
@@ -1967,16 +2015,68 @@ fn source_switch(ui: &mut Ui, view: &mut ViewState) {
         ui.painter().text(
             segment.center(),
             Align2::CENTER_CENTER,
-            label,
+            *label,
             FontId::proportional(tokens::TYPE_SIZE),
             color,
         );
         if response.clicked() && !on {
-            view.library_stock = stock;
-            view.library_picked.clear();
-            view.library_anchor = None;
+            picked = Some(index);
         }
     }
+    picked
+}
+
+/// The shape shelf's cards whose names hold `query`.
+fn shape_cards(query: &str) -> Vec<BinCard> {
+    cutlass_editor::shape_cards()
+        .into_iter()
+        .filter(|(_, kind)| query.is_empty() || kind.name().to_lowercase().contains(query))
+        .map(|(id, kind)| BinCard {
+            id,
+            name: kind.name().to_owned(),
+            meta: String::new(),
+            on_timeline: false,
+            look: CardLook::Shape(kind),
+        })
+        .collect()
+}
+
+/// A shape's outline, white on the card, as the library shows it.
+fn paint_shape_mark(painter: &egui::Painter, rect: Rect, kind: cutlass_model::ShapeKind) {
+    use cutlass_model::ShapeKind;
+    let stroke = egui::Stroke::new(2.0, tokens::TEXT);
+    let box_side = rect.width().min(rect.height()) * 0.5;
+    let mark = Rect::from_center_size(rect.center(), Vec2::splat(box_side));
+    if kind == ShapeKind::Circle {
+        painter.circle_stroke(mark.center(), box_side / 2.0, stroke);
+        return;
+    }
+    let preset = cutlass_model::MaterialShape::preset(Default::default(), kind, 2.0, 2.0);
+    let points: Vec<Pos2> = preset
+        .points()
+        .iter()
+        .map(|point| {
+            mark.center() + Vec2::new(point.at[0] as f32, -point.at[1] as f32) * (box_side / 2.0)
+        })
+        .collect();
+    if kind.is_line() {
+        painter.line_segment([points[0], points[1]], stroke);
+        if kind == ShapeKind::Arrow {
+            let tip = points[1];
+            let head = box_side * 0.18;
+            painter.add(egui::Shape::convex_polygon(
+                vec![
+                    tip,
+                    tip + Vec2::new(-head * 1.6, -head),
+                    tip + Vec2::new(-head * 1.6, head),
+                ],
+                tokens::TEXT,
+                egui::Stroke::NONE,
+            ));
+        }
+        return;
+    }
+    painter.add(egui::Shape::closed_line(points, stroke));
 }
 
 /// Inside a folder: "All", then each folder down to the one shown. A click
@@ -2452,7 +2552,7 @@ fn fill_looks(shell: &mut Shell, ctx: &egui::Context, cards: &mut [BinCard]) {
                         card.look = CardLook::Sound(levels);
                     }
                 }
-                CardLook::Swatch | CardLook::Folder | CardLook::Title(_) => {}
+                CardLook::Swatch | CardLook::Folder | CardLook::Title(_) | CardLook::Shape(_) => {}
             }
         }
     });
@@ -2476,6 +2576,10 @@ fn paint_card_face(painter: &egui::Painter, rect: Rect, card: &BinCard) {
                 FontId::proportional(28.0),
                 *color,
             );
+        }
+        CardLook::Shape(kind) => {
+            painter.rect_filled(rect, radius, tokens::ICON_BUTTON);
+            paint_shape_mark(painter, rect, *kind);
         }
         CardLook::Folder => {
             painter.rect_filled(rect, radius, tokens::ICON_BUTTON);
@@ -2568,6 +2672,8 @@ enum CardLook {
     Folder,
     /// A title style: "Aa" in its color.
     Title(Color32),
+    /// A shape from the shape shelf, drawn as its outline.
+    Shape(cutlass_model::ShapeKind),
 }
 
 /// Where the library is looking: its folders, the one shown, and the order.
@@ -10796,6 +10902,98 @@ mod tests {
         let main = lanes.iter().find(|lane| lane.main).expect("main lane");
         assert_eq!(main.clips.len(), 1);
         assert!(view.library_picked.is_empty());
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn the_shapes_on_the_sticker_shelf_add_a_shape_on_a_sticker_row() {
+        let temp = std::env::temp_dir().join(format!("cutlass-shapes-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        cutlass_store::Folder::new(cutlass_model::Draft::empty("draft"))
+            .save(&temp)
+            .unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        let mut view = ViewState::new();
+        view.library_shelf = Shelf::Stickers;
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let frame = |shell: &mut Shell, view: &mut ViewState, events: Vec<egui::Event>| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: screen,
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, view, None),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        let click = |shell: &mut Shell, view: &mut ViewState, at: Pos2| {
+            let press = |pressed| egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::default(),
+            };
+            frame(shell, view, vec![egui::Event::PointerMoved(at)]);
+            frame(shell, view, vec![press(true), press(false)]);
+        };
+        let output = frame(&mut shell, &mut view, Vec::new());
+        for label in ["Yours", "Stickers", "Shapes", "GIPHY"] {
+            assert!(text_pos(&output, label).is_some(), "{label}");
+        }
+        // GIPHY waits on its client.
+        let giphy = text_pos(&output, "GIPHY").unwrap() + Vec2::new(4.0, 4.0);
+        click(&mut shell, &mut view, giphy);
+        let lines = galleys(&frame(&mut shell, &mut view, Vec::new()));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == "GIPHY search will show here.")
+        );
+        assert!(lines.iter().any(|line| line == "Later"));
+        let output = frame(&mut shell, &mut view, Vec::new());
+        let shapes = text_pos(&output, "Shapes").unwrap() + Vec2::new(4.0, 4.0);
+        click(&mut shell, &mut view, shapes);
+        let output = frame(&mut shell, &mut view, Vec::new());
+        for kind in cutlass_model::ShapeKind::ALL {
+            assert!(text_pos(&output, kind.name()).is_some(), "{}", kind.name());
+        }
+        // The circle card dragged onto the lanes.
+        let card = text_pos(&output, "Circle").expect("the circle card") - Vec2::new(0.0, 30.0);
+        let lane = text_pos(&output, "No clips").expect("lane");
+        let press = |pos: Pos2, pressed: bool| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        frame(
+            &mut shell,
+            &mut view,
+            vec![egui::Event::PointerMoved(card), press(card, true)],
+        );
+        frame(&mut shell, &mut view, vec![egui::Event::PointerMoved(lane)]);
+        frame(
+            &mut shell,
+            &mut view,
+            vec![egui::Event::PointerMoved(lane), press(lane, false)],
+        );
+        let draft = shell.draft().unwrap();
+        let row = draft
+            .tracks
+            .iter()
+            .find(|track| track.kind == cutlass_model::TrackType::Sticker)
+            .expect("a sticker row");
+        assert_eq!(row.segments.len(), 1);
+        assert_eq!(
+            draft.materials.shapes[0].shape_kind(),
+            Some(cutlass_model::ShapeKind::Circle)
+        );
+        assert_eq!(shell.panel(), Some(cutlass_editor::Panel::Shape));
         let _ = std::fs::remove_dir_all(&temp);
     }
 

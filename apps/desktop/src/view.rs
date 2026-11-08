@@ -167,6 +167,8 @@ pub struct ViewState {
     server_args: std::collections::HashMap<usize, String>,
     /// A settings change waiting for the user to allow what it turns on.
     approval: Option<Approval>,
+    /// The Linkage settings dialog is open, with the kinds as ticked so far.
+    linkage_kinds: Option<cutlass_model::KindSwitches>,
     /// The dialog's choices; its path is `export_path`.
     export: ExportRequest,
     /// Write a MOV rather than an MP4.
@@ -266,6 +268,7 @@ impl Default for ViewState {
             recording: None,
             server_args: std::collections::HashMap::new(),
             approval: None,
+            linkage_kinds: None,
             export: ExportRequest::default(),
             export_mov: false,
             export_mbps: None,
@@ -408,6 +411,9 @@ pub fn show(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Option
     }
     if view.approval.is_some() {
         approval_dialog(shell, ui, view);
+    }
+    if view.linkage_kinds.is_some() {
+        linkage_dialog(shell, ui, view);
     }
     if shell.wants_speech_model() {
         speech_model_dialog(shell, ui);
@@ -4022,7 +4028,7 @@ fn timeline_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Re
     panel(ui, rect);
     shell.chrome.timeline = true;
     let toolbar = Rect::from_min_size(rect.min, Vec2::new(rect.width(), tokens::TOOLBAR_HEIGHT));
-    paint_toolbar(shell, ui, toolbar);
+    paint_toolbar(shell, ui, view, toolbar);
     paint_notice(
         shell,
         ui,
@@ -4055,7 +4061,7 @@ fn timeline_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Re
     });
 }
 
-fn paint_toolbar(shell: &mut Shell, ui: &mut Ui, rect: Rect) {
+fn paint_toolbar(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect) {
     let mut bar = ui.new_child(
         egui::UiBuilder::new()
             .max_rect(rect.shrink2(Vec2::new(10.0, 4.0)))
@@ -4118,6 +4124,9 @@ fn paint_toolbar(shell: &mut Shell, ui: &mut Ui, rect: Rect) {
                             };
                             if toolbar_button(ui, name, tip, enabled, active).clicked() {
                                 tool_clicked(shell, name);
+                            }
+                            if *name == "linkage" {
+                                linkage_menu(shell, ui, view);
                             }
                         }
                     }
@@ -4216,6 +4225,139 @@ fn tool_clicked(shell: &mut Shell, name: &str) {
     };
     if let Err(error) = result {
         shell.notice_error(&error);
+    }
+}
+
+/// The arrow beside Linkage: a menu that opens the Linkage settings dialog.
+fn linkage_menu(shell: &Shell, ui: &mut Ui, view: &mut ViewState) {
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(16.0, 28.0), Sense::click());
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Linkage options"));
+    let response = response.on_hover_text("Linkage settings");
+    let open = egui::Popup::is_id_open(ui.ctx(), egui::Id::unique("linkage-menu"));
+    if response.hovered() || open {
+        ui.painter()
+            .rect_filled(rect, CornerRadius::same(6), tokens::MENU_HOVER);
+    }
+    let c = rect.center();
+    let (tip, wing) = if open { (-2.0, 2.0) } else { (2.0, -2.0) };
+    ui.painter().add(egui::Shape::line(
+        vec![
+            c + Vec2::new(-3.5, wing),
+            c + Vec2::new(0.0, tip),
+            c + Vec2::new(3.5, wing),
+        ],
+        egui::Stroke::new(1.5, tokens::MENU_CHEVRON),
+    ));
+    egui::Popup::menu(&response)
+        .id(egui::Id::unique("linkage-menu"))
+        .width(180.0)
+        .gap(4.0)
+        .frame(
+            egui::Frame::new()
+                .fill(tokens::MENU)
+                .corner_radius(CornerRadius::same(tokens::EXPORT_RADIUS))
+                .inner_margin(egui::Margin::same(4)),
+        )
+        .show(|ui| {
+            ui.set_width(172.0);
+            let (row, row_response) =
+                ui.allocate_exact_size(Vec2::new(ui.available_width(), 30.0), Sense::click());
+            row_response.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::Role::Button, true, "Linkage settings")
+            });
+            if row_response.hovered() {
+                ui.painter()
+                    .rect_filled(row, CornerRadius::same(6), tokens::MENU_HOVER);
+            }
+            ui.painter().text(
+                row.left_center() + Vec2::new(10.0, 0.0),
+                Align2::LEFT_CENTER,
+                "Linkage settings",
+                FontId::proportional(tokens::TYPE_SIZE),
+                tokens::TEXT,
+            );
+            if row_response.clicked() {
+                view.linkage_kinds = shell.linkage_kinds();
+                ui.close();
+            }
+        });
+}
+
+/// One kind's switch in the linkage settings.
+type KindField = fn(&mut cutlass_model::KindSwitches) -> &mut bool;
+
+/// The kinds of clip that move or go with their main-track clip, as boxes
+/// to tick, in the order the timeline's lanes name them.
+const LINKAGE_KINDS: [(&str, KindField); 7] = [
+    ("Text", |kinds| &mut kinds.text),
+    ("Effects", |kinds| &mut kinds.effect),
+    ("Stickers", |kinds| &mut kinds.sticker),
+    ("Filters", |kinds| &mut kinds.filter),
+    ("Adjust", |kinds| &mut kinds.adjust),
+    ("Overlay", |kinds| &mut kinds.overlay),
+    ("Audio", |kinds| &mut kinds.audio),
+];
+
+/// Choose which kinds follow their main-track clip. Done keeps the choice;
+/// Cancel, Escape and the close button leave it as it was.
+fn linkage_dialog(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
+    let Some(mut kinds) = view.linkage_kinds else {
+        return;
+    };
+    let mut answer = None;
+    let ((), closed) = widgets::dialog(ui, "Linkage settings", |ui| {
+        ui.horizontal(|ui| {
+            ui.add_space(16.0);
+            ui.vertical(|ui| {
+                ui.set_max_width(372.0);
+                ui.label(
+                    "With linkage on, the ticked kinds move, split and are deleted with \
+                     the main-track clip they sit on. Audio includes sound effects.",
+                );
+                ui.add_space(8.0);
+                egui::Grid::new("linkage-kinds")
+                    .num_columns(2)
+                    .spacing(Vec2::new(24.0, 10.0))
+                    .show(ui, |ui| {
+                        for (index, (label, field)) in LINKAGE_KINDS.iter().enumerate() {
+                            ui.add(ui::Check::new(field(&mut kinds), *label));
+                            if index % 2 == 1 {
+                                ui.end_row();
+                            }
+                        }
+                    });
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    let mut all = kinds == cutlass_model::KindSwitches::ALL;
+                    if ui.add(ui::Check::new(&mut all, "Select all")).changed() {
+                        for (_, field) in &LINKAGE_KINDS {
+                            *field(&mut kinds) = all;
+                        }
+                    }
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui.add(ui::Button::primary("Done")).clicked() {
+                            answer = Some(true);
+                        }
+                        if ui.add(ui::Button::new("Cancel")).clicked() {
+                            answer = Some(false);
+                        }
+                    });
+                });
+            });
+        });
+    });
+    view.linkage_kinds = Some(kinds);
+    let cancelled = closed || ui.input(|input| input.key_pressed(egui::Key::Escape));
+    match answer {
+        Some(true) => {
+            view.linkage_kinds = None;
+            if let Err(error) = shell.set_linkage_kinds(kinds) {
+                shell.notice_error(&error);
+            }
+        }
+        Some(false) => view.linkage_kinds = None,
+        None if cancelled => view.linkage_kinds = None,
+        None => {}
     }
 }
 
@@ -14076,6 +14218,60 @@ mod tests {
         view.settings_open = true;
         let painted = painted_text(&run(&mut shell, &mut view, Vec::new()));
         assert!(painted.contains("Check for updates"), "{painted}");
+    }
+
+    /// The arrow beside Linkage opens its settings; Done keeps the ticked
+    /// kinds and Cancel leaves them.
+    #[test]
+    fn linkage_settings_choose_the_kinds_that_follow() {
+        use egui_kittest::kittest::Queryable;
+        let temp = std::env::temp_dir().join(format!("cutlass-linkage-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        cutlass_store::Folder::new(cutlass_model::Draft::empty("draft"))
+            .save(&temp)
+            .unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(Vec2::new(1280.0, 800.0))
+            .build_ui_state(
+                |ui, (shell, view): &mut (Shell, ViewState)| show(shell, ui, view, None),
+                (shell, {
+                    // The empty media shelf's line has a glyph the test fonts lack.
+                    let mut view = ViewState::new();
+                    view.library_shelf = Shelf::Filters;
+                    view
+                }),
+            );
+        harness.run_steps(2);
+        harness.get_by_label("Linkage options").click();
+        harness.run_steps(2);
+        harness.get_by_label("Linkage settings").click();
+        harness.run_steps(2);
+        assert!(harness.state().1.linkage_kinds.is_some());
+        // The library has an Audio tab too; the dialog is drawn last.
+        harness.query_all_by_label("Audio").last().unwrap().click();
+        harness.run_steps(1);
+        harness.get_by_label("Cancel").click();
+        harness.run_steps(2);
+        assert_eq!(
+            harness.state().0.linkage_kinds(),
+            Some(cutlass_model::KindSwitches::ALL)
+        );
+        harness.state_mut().1.linkage_kinds = harness.state().0.linkage_kinds();
+        harness.run_steps(2);
+        // The library has an Audio tab too; the dialog is drawn last.
+        harness.query_all_by_label("Audio").last().unwrap().click();
+        harness.run_steps(1);
+        harness.get_by_label("Done").click();
+        harness.run_steps(2);
+        let kinds = harness.state().0.linkage_kinds().unwrap();
+        assert!(!kinds.audio);
+        assert!(kinds.text && kinds.overlay);
+        assert!(harness.state().1.linkage_kinds.is_none());
+        drop(harness);
+        let _ = std::fs::remove_dir_all(&temp);
     }
 
     /// The stickers shelf, the Licenses window and the project settings painted by the real

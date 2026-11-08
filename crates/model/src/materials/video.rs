@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::id::MaterialId;
-use crate::time::Micros;
+use crate::time::{Micros, TimeRange};
 
 fn one() -> f64 {
     1.0
@@ -45,8 +45,71 @@ pub struct MaterialVideo {
     /// Steadying. Absent and null are off.
     #[serde(default)]
     pub stable: Option<VideoStable>,
+    /// Algorithms run over the clip's frames, such as Enhance quality.
+    /// Absent and null are none.
+    #[serde(default)]
+    pub video_algorithm: Option<VideoAlgorithm>,
     #[serde(flatten, default)]
     pub rest: Map<String, Value>,
+}
+
+/// The reference editor's `video_algorithm` block: a list of algorithms,
+/// each named by its `type`.
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+pub struct VideoAlgorithm {
+    #[serde(default)]
+    pub algorithms: Vec<Algorithm>,
+    #[serde(flatten, default)]
+    pub rest: Map<String, Value>,
+}
+
+/// One algorithm over a clip's frames. The reference editor stores only
+/// its `type`; the level, the result and the stretch it covers are
+/// Cutlass's own keys.
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+pub struct Algorithm {
+    #[serde(default, rename = "type")]
+    pub kind: String,
+    /// For Enhance quality, [`Algorithm::HD`] or [`Algorithm::UHD`]; 0 or
+    /// below is off.
+    #[serde(default)]
+    pub level: i64,
+    /// The finished result in the project folder, once there is one.
+    #[serde(default)]
+    pub result_path: String,
+    /// The stretch of the source file the result holds, in the file's own
+    /// time. The result's first frame is this range's start.
+    #[serde(default)]
+    pub result_range: Option<TimeRange>,
+    #[serde(flatten, default)]
+    pub rest: Map<String, Value>,
+}
+
+impl Algorithm {
+    /// The reference editor's name for Enhance quality.
+    pub const QUALITY_ENHANCE: &'static str = "QualityEnhance";
+    /// Enhanced to 1080 on the short side.
+    pub const HD: i64 = 1;
+    /// Enhanced to 2160 on the short side.
+    pub const UHD: i64 = 2;
+
+    /// Whether the algorithm runs.
+    #[must_use]
+    pub fn is_on(&self) -> bool {
+        self.level > 0
+    }
+}
+
+impl MaterialVideo {
+    /// The clip's Enhance quality, when it has one that is on.
+    #[must_use]
+    pub fn enhance(&self) -> Option<&Algorithm> {
+        self.video_algorithm
+            .as_ref()?
+            .algorithms
+            .iter()
+            .find(|algorithm| algorithm.kind == Algorithm::QUALITY_ENHANCE && algorithm.is_on())
+    }
 }
 
 /// How a clip is steadied: the reference editor's `stable` block, a level
@@ -142,6 +205,7 @@ impl Default for MaterialVideo {
             reverse_intensifies_path: String::new(),
             freeze: None,
             stable: None,
+            video_algorithm: None,
             rest: Map::new(),
         }
     }
@@ -194,5 +258,43 @@ mod tests {
         assert!(!off.stable.unwrap().is_on());
         let null: MaterialVideo = serde_json::from_str(r#"{"stable":null}"#).unwrap();
         assert!(null.stable.is_none());
+    }
+
+    #[test]
+    fn an_enhance_reads_its_level_result_and_range_and_keeps_unknown_keys() {
+        let video: MaterialVideo = serde_json::from_str(
+            r#"{"video_algorithm":{"algorithms":[{"type":"Deflicker","level":1},{"type":"QualityEnhance","level":2,"result_path":"Resources/video_enhance/a.mp4","result_range":{"start":1000,"duration":2000},"model_id":"x"}],"gameplay":null}}"#,
+        )
+        .unwrap();
+        let enhance = video.enhance().unwrap();
+        assert_eq!(enhance.level, Algorithm::UHD);
+        assert_eq!(enhance.result_path, "Resources/video_enhance/a.mp4");
+        assert_eq!(enhance.result_range, Some(TimeRange::new(1000, 2000)));
+        assert!(enhance.rest.contains_key("model_id"));
+        assert!(
+            video
+                .video_algorithm
+                .as_ref()
+                .unwrap()
+                .rest
+                .contains_key("gameplay")
+        );
+        let back: MaterialVideo =
+            serde_json::from_str(&serde_json::to_string(&video).unwrap()).unwrap();
+        assert_eq!(back, video);
+        // The reference editor's own block, with only a type, is off.
+        let theirs: MaterialVideo = serde_json::from_str(
+            r#"{"video_algorithm":{"algorithms":[{"type":"QualityEnhance"}]}}"#,
+        )
+        .unwrap();
+        assert!(theirs.enhance().is_none());
+        for none in [
+            "{}",
+            r#"{"video_algorithm":null}"#,
+            r#"{"video_algorithm":{}}"#,
+        ] {
+            let video: MaterialVideo = serde_json::from_str(none).unwrap();
+            assert!(video.enhance().is_none(), "{none}");
+        }
     }
 }

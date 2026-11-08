@@ -259,7 +259,7 @@ impl Decoder {
     /// Decodes one VOP. Returns whether it was a coded picture this
     /// decoder decoded.
     fn vop(&mut self, payload: &[u8], pictures: &mut Vec<Image>) -> Result<bool, CodecError> {
-        let Some(vol) = self.vol.clone() else {
+        let Some(mut vol) = self.vol.clone() else {
             return Err(CodecError::Malformed {
                 at_bit: 0,
                 what: "VOP before its video object layer",
@@ -272,6 +272,11 @@ impl Decoder {
             });
         }
         let hdr = parse_vop(payload, &vol, self.fixes.divx_413)?;
+        if hdr.time_bits != vol.time_bits {
+            // The width the stream uses holds until the next VOL.
+            vol.time_bits = hdr.time_bits;
+            self.vol = Some(vol.clone());
+        }
         let Some(times) =
             self.advance_clock(&vol, hdr.kind, hdr.modulo_time_base, hdr.time_increment)
         else {

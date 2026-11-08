@@ -404,6 +404,8 @@ pub(crate) enum VopType {
 pub(crate) struct Vop {
     pub(crate) kind: VopType,
     pub(crate) modulo_time_base: u32,
+    /// The `vop_time_increment` width this VOP was read with.
+    pub(crate) time_bits: u32,
     pub(crate) time_increment: u32,
     pub(crate) coded: bool,
     pub(crate) rounding: bool,
@@ -451,6 +453,23 @@ pub(crate) fn read_trajectory(
     Ok(out)
 }
 
+/// The `vop_time_increment` width a VOP whose marker is not where its VOL
+/// puts it was written with: the first width followed by the marker, a
+/// set `vop_coded`, and a zero `intra_dc_vlc_thr`, as FFmpeg searches.
+/// Some encoders size the field from another time resolution.
+fn guess_time_bits(r: &BitReader<'_>, kind: VopType, sprite: SpriteUsage) -> u32 {
+    let rounding = kind == VopType::P || (kind == VopType::S && sprite == SpriteUsage::Gmc);
+    (1..16)
+        .find(|&bits| {
+            if rounding {
+                r.peek(bits + 6) & 0x37 == 0x30
+            } else {
+                r.peek(bits + 5) & 0x1f == 0x18
+            }
+        })
+        .unwrap_or(16)
+}
+
 /// Parses a `VideoObjectPlane()` payload against its VOL.
 pub(crate) fn parse_vop(payload: &[u8], vol: &Vol, divx_413: bool) -> Result<Vop, CodecError> {
     let mut r = BitReader::new(payload);
@@ -468,12 +487,18 @@ pub(crate) fn parse_vop(payload: &[u8], vol: &Vol, divx_413: bool) -> Result<Vop
         }
     }
     r.skip(1); // marker
-    let time_increment = r.read(vol.time_bits);
+    let time_bits = if r.peek(vol.time_bits + 1) & 1 == 1 {
+        vol.time_bits
+    } else {
+        guess_time_bits(&r, kind, vol.sprite)
+    };
+    let time_increment = r.read(time_bits);
     r.skip(1); // marker
     let coded = r.bit();
     let mut vop = Vop {
         kind,
         modulo_time_base,
+        time_bits,
         time_increment,
         coded,
         rounding: false,
@@ -690,7 +715,7 @@ pub(crate) fn parse_short_header(payload: &[u8]) -> Result<ShortHeader, CodecErr
 mod tests {
     use super::{
         Encoder, SpriteUsage, is_short_header, parse_short_header, parse_user_data, parse_vol,
-        units,
+        parse_vop, units,
     };
     use crate::bits::BitWriter;
 
@@ -774,6 +799,34 @@ mod tests {
         let mut enc = Encoder::default();
         parse_user_data(b"XviD0050", &mut enc);
         assert_eq!(enc.xvid_build, Some(50));
+    }
+
+    /// A coded I-VOP header with a `bits`-wide `vop_time_increment`.
+    fn i_vop(bits: u32, increment: u32) -> Vec<u8> {
+        let mut w = BitWriter::new();
+        w.put(2, 0); // I
+        w.put(1, 0); // modulo_time_base
+        w.put(1, 1);
+        w.put(bits, increment);
+        w.put(1, 1);
+        w.put(1, 1); // vop_coded
+        w.put(3, 0); // intra_dc_vlc_thr
+        w.put(5, 4); // vop_quant
+        w.stuff();
+        w.finish()
+    }
+
+    #[test]
+    fn finds_the_time_increment_width_a_vop_was_written_with() {
+        let vol = parse_vol(&simple_vol(176, 144)).expect("vol");
+        let vop = parse_vop(&i_vop(15, 1001), &vol, false).expect("vop");
+        assert_eq!((vop.time_bits, vop.time_increment), (15, 1001));
+        // The VOL says 15 bits, the VOP was written with 7: the marker
+        // is not at bit 15, so the width comes from the bits after it.
+        let vop = parse_vop(&i_vop(7, 0), &vol, false).expect("vop");
+        assert_eq!((vop.time_bits, vop.time_increment), (7, 0));
+        assert!(vop.coded);
+        assert_eq!(vop.quant, 4);
     }
 
     #[test]

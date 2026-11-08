@@ -1987,4 +1987,43 @@ mod tests {
         assert_eq!(sub.delay, delay);
         assert!(sub.ecpl_live);
     }
+
+    /// With spectral extension on, the coupling end is not in the bitstream.
+    /// It is the first spectral-extension bin, for every `spxbegf`.
+    #[test]
+    fn spectral_extension_ends_enhanced_coupling_on_its_first_bin() {
+        let bsi = header::parse(&enhanced_frame(false)).expect("header");
+        for spxbegf in 0..8 {
+            let mut state = State::new(&bsi, 1);
+            state.spxinu = true;
+            state.spxbegf = spxbegf;
+            let mut writer = BitWriter::default();
+            writer.put(4, 0);
+            writer.flag(false);
+            let bytes = writer.finish();
+            let mut reader = BitReader::new(&bytes);
+            state.enhanced_strategy(&mut reader).expect("strategy");
+            let end_sub = if spxbegf < 6 {
+                spxbegf + 5
+            } else {
+                spxbegf * 2
+            };
+            assert_eq!(state.ecpl_end_sub, end_sub, "{spxbegf}");
+            assert_eq!(
+                state.cpl_end_bin(),
+                spx::band_bin(spx::begin_subband(spxbegf)),
+                "{spxbegf}"
+            );
+            assert_eq!(reader.pos(), 5, "{spxbegf}");
+        }
+        let mut state = State::new(&bsi, 1);
+        state.spxinu = true;
+        state.spxbegf = 0;
+        let mut writer = BitWriter::default();
+        writer.put(4, 15);
+        writer.flag(false);
+        let bytes = writer.finish();
+        let mut reader = BitReader::new(&bytes);
+        assert!(state.enhanced_strategy(&mut reader).is_err());
+    }
 }

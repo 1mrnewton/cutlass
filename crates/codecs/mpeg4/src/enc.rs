@@ -1,7 +1,7 @@
 //! A Simple-profile encoder.
 //!
-//! An I-VOP, then P-VOPs: H.263 quantisation, one half-sample vector per
-//! macroblock, no AC prediction. Quarter-sample motion, four vectors,
+//! An I-VOP, then P-VOPs: H.263 quantisation, one or four half-sample
+//! vectors per macroblock, no AC prediction. Quarter-sample motion,
 //! B-VOPs, and rate control are not emitted here yet. The coded size is a
 //! whole number of macroblocks; a caller with another size is refused
 //! rather than cropped. Motion search stays inside ±8 pixels so every
@@ -20,6 +20,7 @@ use crate::tables::{
     CBPY, CoefTable, DC_CHROMA, DC_LUMA, MCBPC_INTER, MCBPC_INTRA, MVD, TCOEF_ESCAPE, ZIGZAG,
     dc_scaler_chroma, dc_scaler_luma, tables,
 };
+use crate::vop::clip_block;
 
 const TIME_RESOLUTION: u32 = 25;
 
@@ -502,9 +503,30 @@ struct Predicted<'a> {
 
 impl Predicted<'_> {
     fn write_mb(&mut self, out: &mut BitWriter, mbx: usize, mby: usize) {
-        let pred = mv_pred(self.mv, self.width / 16, mbx, mby);
-        let vector = self.search(mbx, mby, pred);
-        let (py, pu, pv) = compensate(self.past, mbx, mby, vector);
+        let mbw = self.width / 16;
+        let pred = mv_pred(self.mv, mbw, mbx, mby, 0);
+        let vector = self.search_at(mbx * 16, mby * 16, 16, pred);
+        let cost16 = self.block_cost(mbx * 16, mby * 16, 16, vector, pred);
+        let mut four = [(0i32, 0i32); 4];
+        let mut cost4 = 0u32;
+        for (k, slot) in four.iter_mut().enumerate() {
+            let block_pred = mv_pred(self.mv, mbw, mbx, mby, k);
+            let (x, y) = (mbx * 16 + (k & 1) * 8, mby * 16 + (k >> 1) * 8);
+            *slot = self.search_at(x, y, 8, block_pred);
+            cost4 = cost4.saturating_add(self.block_cost(x, y, 8, *slot, block_pred));
+            set_block_mv(self.mv, mbw, mbx, mby, k, *slot);
+        }
+        // Four vectors cost three extra differences. Use them when the
+        // prediction is actually better, not when the two modes tie.
+        let use_four = cost4 + 64 < cost16;
+        if !use_four {
+            set_mv(self.mv, mbw, mbx, mby, vector);
+        }
+        let (py, pu, pv) = if use_four {
+            compensate_four(self.past, mbx, mby, four)
+        } else {
+            compensate(self.past, mbx, mby, vector)
+        };
         let mut levels = [[0i32; 64]; 6];
         let mut coded = [false; 6];
         for k in 0..6 {
@@ -516,15 +538,20 @@ impl Predicted<'_> {
             }
         }
         let any = coded.iter().any(|&bit| bit);
-        if vector == (0, 0) && !any {
+        let still = if use_four {
+            four == [(0, 0); 4]
+        } else {
+            vector == (0, 0)
+        };
+        if still && !any {
             out.bit(true);
-            set_mv(self.mv, self.width / 16, mbx, mby, (0, 0));
+            set_mv(self.mv, mbw, mbx, mby, (0, 0));
             blit(self.next, mbx, mby, &py, &pu, &pv);
             return;
         }
         out.bit(false);
         let cbpc = u32::from(coded[4]) << 1 | u32::from(coded[5]);
-        let (len, code) = mcbpc_inter(cbpc);
+        let (len, code) = mcbpc_inter(if use_four { 16 + cbpc } else { cbpc });
         out.put(len, code);
         let luma = u32::from(coded[0]) << 3
             | u32::from(coded[1]) << 2
@@ -532,14 +559,24 @@ impl Predicted<'_> {
             | u32::from(coded[3]);
         let (len, code) = CBPY[(luma ^ 0xF) as usize];
         out.put(u32::from(len), u32::from(code));
-        write_mv(out, vector.0, pred.0);
-        write_mv(out, vector.1, pred.1);
+        if use_four {
+            for (k, vector) in four.iter().enumerate() {
+                let block_pred = mv_pred(self.mv, mbw, mbx, mby, k);
+                write_mv(out, vector.0, block_pred.0);
+                write_mv(out, vector.1, block_pred.1);
+            }
+        } else {
+            write_mv(out, vector.0, pred.0);
+            write_mv(out, vector.1, pred.1);
+        }
         for k in 0..6 {
             if coded[k] {
                 write_levels(out, &levels[k], 0, true);
             }
         }
-        set_mv(self.mv, self.width / 16, mbx, mby, vector);
+        if !use_four {
+            set_mv(self.mv, mbw, mbx, mby, vector);
+        }
         blit(self.next, mbx, mby, &py, &pu, &pv);
         for k in 0..6 {
             if coded[k] {
@@ -574,13 +611,13 @@ impl Predicted<'_> {
         }
     }
 
-    fn search(&self, mbx: usize, mby: usize, pred: (i32, i32)) -> (i32, i32) {
+    fn search_at(&self, x: usize, y: usize, size: usize, pred: (i32, i32)) -> (i32, i32) {
         let mut best = clamp_mv(pred.0, pred.1);
-        let mut best_cost = self.cost(mbx, mby, best, pred);
+        let mut best_cost = self.block_cost(x, y, size, best, pred);
         for dy in (-SEARCH..=SEARCH).step_by(2) {
             for dx in (-SEARCH..=SEARCH).step_by(2) {
                 let mv = clamp_mv(pred.0 + dx, pred.1 + dy);
-                let cost = self.cost(mbx, mby, mv, pred);
+                let cost = self.block_cost(x, y, size, mv, pred);
                 if cost < best_cost {
                     best = mv;
                     best_cost = cost;
@@ -591,26 +628,26 @@ impl Predicted<'_> {
         for dy in -1..=1 {
             for dx in -1..=1 {
                 let mv = clamp_mv(center.0 + dx, center.1 + dy);
-                let cost = self.cost(mbx, mby, mv, pred);
+                let cost = self.block_cost(x, y, size, mv, pred);
                 if cost < best_cost {
                     best = mv;
                     best_cost = cost;
                 }
             }
         }
-        let zero = self.cost(mbx, mby, (0, 0), pred);
+        let zero = self.block_cost(x, y, size, (0, 0), pred);
         if zero < best_cost { (0, 0) } else { best }
     }
 
-    fn cost(&self, mbx: usize, mby: usize, mv: (i32, i32), pred: (i32, i32)) -> u32 {
+    fn block_cost(&self, x: usize, y: usize, size: usize, mv: (i32, i32), pred: (i32, i32)) -> u32 {
         let mut predicted = [0u8; 256];
         let [reference, _, _] = self.past.refs((self.width as u32, self.height as u32));
         mc::luma_block(
             &reference,
-            (mbx * 16) as i32,
-            (mby * 16) as i32,
-            16,
-            16,
+            x as i32,
+            y as i32,
+            size,
+            size,
             mv.0,
             mv.1,
             Pel::Half,
@@ -619,16 +656,14 @@ impl Predicted<'_> {
             &mut predicted,
         );
         let mut sad = 0u32;
-        let x = mbx * 16;
-        let y = mby * 16;
-        for row in 0..16 {
-            for col in 0..16 {
+        for row in 0..size {
+            for col in 0..size {
                 let sample = self
                     .y
                     .get((y + row) * self.width + x + col)
                     .copied()
                     .unwrap_or(0);
-                sad += u32::from(sample.abs_diff(predicted[row * 16 + col]));
+                sad += u32::from(sample.abs_diff(predicted[row * size + col]));
             }
         }
         sad.saturating_mul(2) + (mv.0 - pred.0).unsigned_abs() + (mv.1 - pred.1).unsigned_abs()
@@ -687,6 +722,54 @@ fn compensate(
         false,
         &mut v,
     );
+    (y, u, v)
+}
+
+/// Four 8x8 predictions. Each luma vector is clipped the way the decoder
+/// clips it, and chroma uses the rounded sum of the four.
+fn compensate_four(
+    past: &Frame,
+    mbx: usize,
+    mby: usize,
+    mvs: [(i32, i32); 4],
+) -> ([u8; 256], [u8; 64], [u8; 64]) {
+    let mut y = [0u8; 256];
+    let mut u = [0u8; 64];
+    let mut v = [0u8; 64];
+    let width = (past.mbw * 16) as i32;
+    let height = (past.mbh * 16) as i32;
+    let [ry, ru, rv] = past.refs((width as u32, height as u32));
+    let (x, yy) = ((mbx * 16) as i32, (mby * 16) as i32);
+    let (mut sx, mut sy) = (0i32, 0i32);
+    for (k, &(mx, my)) in mvs.iter().enumerate() {
+        let (bx, by) = ((k & 1) * 8, (k >> 1) * 8);
+        let (bx0, by0) = (x + bx as i32, yy + by as i32);
+        let mut block = [0u8; 64];
+        mc::luma_block(
+            &ry,
+            bx0,
+            by0,
+            8,
+            8,
+            clip_block(bx0, mx, 1, -16, width),
+            clip_block(by0, my, 1, -16, height),
+            Pel::Half,
+            Rows::Frame,
+            false,
+            &mut block,
+        );
+        for row in 0..8 {
+            let dst = (by + row) * 16 + bx;
+            y[dst..dst + 8].copy_from_slice(&block[row * 8..row * 8 + 8]);
+        }
+        sx += mx;
+        sy += my;
+    }
+    let (cx0, cy0) = ((mbx * 8) as i32, (mby * 8) as i32);
+    let cx = clip_block(cx0, mc::chroma_4mv(sx), 1, -8, width >> 1);
+    let cy = clip_block(cy0, mc::chroma_4mv(sy), 1, -8, height >> 1);
+    mc::chroma_block(&ru, cx0, cy0, 8, 8, cx, cy, Rows::Frame, false, &mut u);
+    mc::chroma_block(&rv, cx0, cy0, 8, 8, cx, cy, Rows::Frame, false, &mut v);
     (y, u, v)
 }
 
@@ -777,13 +860,24 @@ fn put_block(frame: &mut Frame, mbx: usize, mby: usize, k: usize, coef: &mut [i1
     }
 }
 
-/// The median predictor of a 16x16 vector (Section 7.6.5, block 0).
-fn mv_pred(mv: &[(i32, i32)], mbw: usize, mbx: usize, mby: usize) -> (i32, i32) {
+/// The median predictor of 8x8 block `k` (Section 7.6.5). A 16x16 vector
+/// uses block 0.
+fn mv_pred(mv: &[(i32, i32)], mbw: usize, mbx: usize, mby: usize, k: usize) -> (i32, i32) {
     let w = 2 * mbw;
-    let bx = (2 * mbx) as isize;
-    let by = (2 * mby) as isize;
+    let bx = (2 * mbx + (k & 1)) as isize;
+    let by = (2 * mby + (k >> 1)) as isize;
+    let third = if k == 3 {
+        -1
+    } else if k == 0 {
+        2
+    } else {
+        1
+    };
     let mut valid = [None; 3];
-    for (slot, (dx, dy)) in valid.iter_mut().zip([(-1, 0), (0, -1), (2, -1)]) {
+    for (slot, (dx, dy)) in valid
+        .iter_mut()
+        .zip([(-1isize, 0isize), (0, -1), (third, -1)])
+    {
         let x = bx + dx;
         let y = by + dy;
         if x < 0 || y < 0 || x as usize >= w {
@@ -806,12 +900,23 @@ fn median(a: i32, b: i32, c: i32) -> i32 {
 }
 
 fn set_mv(mv: &mut [(i32, i32)], mbw: usize, mbx: usize, mby: usize, vector: (i32, i32)) {
-    let w = 2 * mbw;
     for k in 0..4 {
-        let i = (2 * mby + (k >> 1)) * w + 2 * mbx + (k & 1);
-        if let Some(slot) = mv.get_mut(i) {
-            *slot = vector;
-        }
+        set_block_mv(mv, mbw, mbx, mby, k, vector);
+    }
+}
+
+fn set_block_mv(
+    mv: &mut [(i32, i32)],
+    mbw: usize,
+    mbx: usize,
+    mby: usize,
+    k: usize,
+    vector: (i32, i32),
+) {
+    let w = 2 * mbw;
+    let i = (2 * mby + (k >> 1)) * w + 2 * mbx + (k & 1);
+    if let Some(slot) = mv.get_mut(i) {
+        *slot = vector;
     }
 }
 
@@ -1004,6 +1109,52 @@ mod tests {
         ffmpeg_matches(&ffmpeg, &bytes, &ours, "shift");
     }
 
+    #[test]
+    fn a_split_picture_uses_four_vectors() {
+        let y0 = pattern(64, 48, 5);
+        let u0 = pattern(32, 24, 11);
+        let v0 = pattern(32, 24, 17);
+        let y1 = shift_left_half(&y0, 64, 48, 16, 4);
+        let u1 = shift_left_half(&u0, 32, 24, 8, 2);
+        let v1 = shift_left_half(&v0, 32, 24, 8, 2);
+        let bytes = encode_pictures(
+            &[
+                (y0.as_slice(), u0.as_slice(), v0.as_slice()),
+                (y1.as_slice(), u1.as_slice(), v1.as_slice()),
+            ],
+            64,
+            48,
+            5,
+        )
+        .expect("encode");
+        let pictures = decode_all(&bytes);
+        assert_eq!(pictures.len(), 2);
+        assert_eq!(vop_kind(&bytes, 1), 1);
+        let (intra, predicted) = vop_lengths(&bytes);
+        // One vector cannot describe both halves, and that P-VOP is larger
+        // than the I-VOP. Four vectors are what makes this one smaller.
+        assert!(
+            predicted < intra,
+            "P-VOP {predicted} bytes, I-VOP {intra} bytes"
+        );
+        assert!(
+            mae(&pictures[1][..64 * 48], &y1) < 8.0,
+            "{}",
+            mae(&pictures[1][..64 * 48], &y1)
+        );
+        let Some(ffmpeg) = ffmpeg_bin() else {
+            eprintln!(
+                "ffmpeg is not installed; the four-vector picture was not checked independently"
+            );
+            return;
+        };
+        let mut ours = Vec::new();
+        for picture in &pictures {
+            ours.extend_from_slice(picture);
+        }
+        ffmpeg_matches(&ffmpeg, &bytes, &ours, "four");
+    }
+
     fn pattern(width: usize, height: usize, salt: usize) -> Vec<u8> {
         let mut plane = vec![0u8; width * height];
         for row in 0..height {
@@ -1013,6 +1164,29 @@ mod tests {
             }
         }
         plane
+    }
+
+    /// Moves the left half of every `block` columns right by `by` pixels.
+    /// The right half stays, so one vector per macroblock cannot describe it.
+    fn shift_left_half(
+        src: &[u8],
+        width: usize,
+        height: usize,
+        block: usize,
+        by: usize,
+    ) -> Vec<u8> {
+        let mut out = src.to_vec();
+        let half = block / 2;
+        for row in 0..height {
+            for origin in (0..width).step_by(block) {
+                for col in 0..half {
+                    let x = origin + col;
+                    let from = x.saturating_sub(by);
+                    out[row * width + x] = src[row * width + from];
+                }
+            }
+        }
+        out
     }
 
     fn shift_right(src: &[u8], width: usize, height: usize, by: usize) -> Vec<u8> {

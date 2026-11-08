@@ -319,7 +319,7 @@ fn median(a: i32, b: i32, c: i32) -> i32 {
 /// block's integer position stays in `low..=limit`, with no fraction at
 /// `limit`. FFmpeg places 8x8 blocks this way, so a vector past the
 /// picture reads the rows between the picture and the padded edge.
-fn clip_block(origin: i32, m: i32, shift: u32, low: i32, limit: i32) -> i32 {
+pub(crate) fn clip_block(origin: i32, m: i32, shift: u32, low: i32, limit: i32) -> i32 {
     let pos = (origin + (m >> shift)).clamp(low, limit);
     let fraction = if pos == limit {
         0

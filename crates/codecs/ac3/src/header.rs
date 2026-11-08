@@ -161,9 +161,11 @@ pub struct MixLevels {
 
 /// Program metadata from the bit stream information.
 ///
-/// Levels are what the stream carries. The decoder applies none of them
-/// unless its options ask for it: `dialnorm` and `compr` describe the
-/// program for a downstream renderer.
+/// Levels are what the stream carries. `dialnorm` describes the program.
+/// Dynamic range words apply when the options ask for them, and downmix
+/// levels apply when a downmix is requested. `pgmscl` is applied to the
+/// substream that carries it. `extpgmscl` describes an external program
+/// this decoder does not mix.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Metadata {
     pub syntax: Syntax,
@@ -205,7 +207,10 @@ pub struct Metadata {
     pub copyright: bool,
     pub original: bool,
     /// Program scale factor in dB (`pgmscl` - 51), E-AC-3 independent only.
+    /// Code 0 is mute and is stored as −51. Absent means 0 dB.
     pub program_scale_db: Option<i8>,
+    /// The second channel's scale in 1+1 mode (`pgmscl2`). −51 is mute.
+    pub program_scale2_db: Option<i8>,
     /// External program scale factor in dB (`extpgmscl` - 51).
     pub ext_program_scale_db: Option<i8>,
     /// Dependent substream custom channel map (Table E2.5), MSB is Left.
@@ -237,9 +242,20 @@ impl Metadata {
             copyright: false,
             original: false,
             program_scale_db: None,
+            program_scale2_db: None,
             ext_program_scale_db: None,
             chanmap: None,
         }
+    }
+}
+
+/// Linear gain of a `pgmscl` value in dB. −51 is the mute code.
+#[must_use]
+pub fn program_gain(db: i8) -> f32 {
+    if db <= -51 {
+        0.0
+    } else {
+        10.0f32.powf(f32::from(db) / 20.0)
     }
 }
 
@@ -511,7 +527,7 @@ fn parse_eac3(frame: &[u8], info: SyncInfo) -> Result<Bsi, CodecError> {
                 metadata.program_scale_db = Some(r.read(6, "pgmscl")? as i8 - 51);
             }
             if acmod == 0 && r.bit("pgmscl2e")? {
-                r.skip(6, "pgmscl2")?;
+                metadata.program_scale2_db = Some(r.read(6, "pgmscl2")? as i8 - 51);
             }
             if r.bit("extpgmscle")? {
                 metadata.ext_program_scale_db = Some(r.read(6, "extpgmscl")? as i8 - 51);
@@ -908,6 +924,9 @@ mod tests {
         assert_eq!(dynrng_code(1.0), 0);
         let half = dynrng_code(0.5);
         assert!((dynrng_gain(half) - 0.5).abs() < 0.02, "{half}");
+        assert!((program_gain(0) - 1.0).abs() < 1e-6);
+        assert!((program_gain(-6) - 10.0f32.powf(-6.0 / 20.0)).abs() < 1e-5);
+        assert_eq!(program_gain(-51), 0.0);
         assert!((compr_gain(0) - 1.0).abs() < 1e-6);
         assert_eq!(compr_code(1.0), 0);
         let compr_half = compr_code(0.5);

@@ -407,6 +407,7 @@ fn metadata_round_trips() {
             dsurmod: 0,
             mix: Some(mix),
             lfe_mix: (format == Format::Eac3).then_some(12),
+            program_scale_db: None,
         };
         let pcm = tones(&channels, 48_000, 6_000, 0.2);
         let packets = encode(cfg, &pcm);
@@ -590,6 +591,12 @@ fn unsupported_configurations_are_refused() {
     let mut cfg = config(Format::Ac3, 48_000, &[L, R], 0);
     cfg.metadata.dialnorm = 0;
     assert!(unsupported(cfg));
+    let mut cfg = config(Format::Ac3, 48_000, &[C], 0);
+    cfg.metadata.program_scale_db = Some(-6);
+    assert!(unsupported(cfg));
+    let mut cfg = config(Format::Eac3, 48_000, &[C], 0);
+    cfg.metadata.program_scale_db = Some(13);
+    assert!(unsupported(cfg));
 }
 
 #[test]
@@ -705,6 +712,31 @@ fn peak(samples: &[f32]) -> f32 {
     samples
         .iter()
         .fold(0.0, |max, sample| max.max(sample.abs()))
+}
+
+/// `pgmscl` scales the substream that carries it. −6 dB is half power, and
+/// the mute code is silence.
+#[test]
+fn a_program_scale_cuts_the_substream() {
+    let rate = 48_000u32;
+    let channels = [C];
+    let pcm = tones(&channels, rate, rate as usize, 0.4);
+    let plain = config(Format::Eac3, rate, &channels, 0);
+    let mut scaled = plain.clone();
+    scaled.metadata.program_scale_db = Some(-6);
+    let full = decode(CodecId::Eac3, &encode(plain.clone(), &pcm));
+    let cut = decode(CodecId::Eac3, &encode(scaled, &pcm));
+    let metadata = cut.decoder.metadata().expect("metadata");
+    assert_eq!(metadata.program_scale_db, Some(-6));
+    let span = 4_096..pcm.len() - 4_096;
+    let ratio = peak(&cut.pcm[span.clone()]) / peak(&full.pcm[span.clone()]);
+    let want = 10.0f32.powf(-6.0 / 20.0);
+    assert!((ratio - want).abs() < 0.05, "scale ratio {ratio}");
+    let mut mute = plain;
+    mute.metadata.program_scale_db = Some(-51);
+    let muted = decode(CodecId::Eac3, &encode(mute, &pcm));
+    let muted_peak = peak(&muted.pcm[span]);
+    assert!(muted_peak < 1.0e-4, "mute {muted_peak}");
 }
 
 /// A frame louder than half scale carries `compr`, and heavy mode applies it.

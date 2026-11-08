@@ -106,6 +106,9 @@ pub struct EncoderMetadata {
     pub mix: Option<MixCodes>,
     /// E-AC-3 `lfemixlevcod` 0 to 31: LFE at 10 - code dB in a downmix.
     pub lfe_mix: Option<u8>,
+    /// E-AC-3 `pgmscl` in dB, −50 to +12. −51 writes the mute code.
+    /// `None` omits the word, which is 0 dB.
+    pub program_scale_db: Option<i8>,
 }
 
 impl Default for EncoderMetadata {
@@ -116,6 +119,7 @@ impl Default for EncoderMetadata {
             dsurmod: 0,
             mix: None,
             lfe_mix: None,
+            program_scale_db: None,
         }
     }
 }
@@ -1221,6 +1225,7 @@ fn check_metadata(metadata: &EncoderMetadata, eac3: bool) -> Result<Meta, CodecE
         dsurmod,
         mix,
         lfe_mix,
+        program_scale_db,
     } = *metadata;
     if !(1..=31).contains(&dialnorm) {
         return Err(CodecError::InvalidApi { what: "dialnorm" });
@@ -1256,12 +1261,25 @@ fn check_metadata(metadata: &EncoderMetadata, eac3: bool) -> Result<Meta, CodecE
             });
         }
     }
+    if let Some(db) = program_scale_db {
+        if !eac3 {
+            return Err(CodecError::Unsupported {
+                what: "program scale in AC-3",
+            });
+        }
+        if db != -51 && !(-50..=12).contains(&db) {
+            return Err(CodecError::InvalidApi {
+                what: "program scale",
+            });
+        }
+    }
     Ok(Meta {
         dialnorm,
         bsmod,
         dsurmod,
         mix,
         lfe_mix,
+        program_scale_db,
     })
 }
 

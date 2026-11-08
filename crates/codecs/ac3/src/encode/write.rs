@@ -52,6 +52,8 @@ pub(crate) struct Meta {
     pub mix: Option<MixCodes>,
     /// E-AC-3 `lfemixlevcod`.
     pub lfe_mix: Option<u8>,
+    /// E-AC-3 `pgmscl` in dB. −51 is the mute code.
+    pub program_scale_db: Option<i8>,
 }
 
 /// What changes per syncframe besides the blocks.
@@ -215,7 +217,10 @@ fn eac3_header(w: &mut BitWriter, shape: &Shape, meta: &Meta, frame: &Frame) {
     }
     // A dependent frame has no program-scale words. Leave mixing off so
     // the header does not write the independent-only fields.
-    let mixing = !dependent && (meta.mix.is_some() || (shape.lfeon && meta.lfe_mix.is_some()));
+    let mixing = !dependent
+        && (meta.mix.is_some()
+            || (shape.lfeon && meta.lfe_mix.is_some())
+            || meta.program_scale_db.is_some());
     w.flag(mixing);
     if mixing {
         let mix = meta.mix.unwrap_or(MixCodes::DEFAULT);
@@ -236,7 +241,12 @@ fn eac3_header(w: &mut BitWriter, shape: &Shape, meta: &Meta, frame: &Frame) {
                 w.put(5, u32::from(code));
             }
         }
-        w.flag(false); // pgmscle
+        if let Some(db) = meta.program_scale_db {
+            w.flag(true);
+            w.put(6, program_scale_code(db));
+        } else {
+            w.flag(false); // pgmscle
+        }
         w.flag(false); // extpgmscle
         w.put(2, 0); // mixdef
         if acmod < 2 {
@@ -261,6 +271,14 @@ fn eac3_header(w: &mut BitWriter, shape: &Shape, meta: &Meta, frame: &Frame) {
         w.flag((frame.index * shape.blocks as u64).is_multiple_of(6)); // convsync
     }
     w.flag(false); // addbsie
+}
+
+fn program_scale_code(db: i8) -> u32 {
+    if db <= -51 {
+        0
+    } else {
+        u32::from(u8::try_from(i16::from(db) + 51).unwrap_or(0))
+    }
 }
 
 fn compression(w: &mut BitWriter, code: Option<u8>) {

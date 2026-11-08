@@ -13,7 +13,7 @@ use crate::bitalloc::{self, Delta, MAX_SEGMENTS, Params, Segment};
 use crate::bits::BitReader;
 use crate::crc;
 use crate::exponents;
-use crate::header::{Bsi, StreamType, Syntax, compr_gain, dynrng_gain};
+use crate::header::{Bsi, Metadata, StreamType, Syntax, compr_gain, dynrng_gain, program_gain};
 use crate::mdct::{COEFS, SPAN, Transform, overlap_add};
 use crate::spx::{self, Bands};
 use crate::tables::{
@@ -1245,6 +1245,16 @@ impl<'a> State<'a> {
     }
 }
 
+/// `pgmscl` for this channel. In 1+1 mode the second channel uses `pgmscl2`.
+fn program_scale(metadata: &Metadata, channel: usize) -> f32 {
+    let db = if metadata.acmod == 0 && channel == 1 {
+        metadata.program_scale2_db
+    } else {
+        metadata.program_scale_db
+    };
+    db.map_or(1.0, program_gain)
+}
+
 fn gain(code: Option<u8>, compr: Option<u8>, mode: DynamicRange) -> f32 {
     match mode {
         DynamicRange::Off => 1.0,
@@ -1363,6 +1373,12 @@ pub(crate) fn decode(
                 transform.inverse_long(&coefs[ch], &mut block);
             }
             let start = ch * samples + blk * COEFS;
+            let scale = program_scale(&bsi.metadata, ch);
+            if scale != 1.0 {
+                for sample in &mut block {
+                    *sample *= scale;
+                }
+            }
             overlap_add(&block, &mut delay[ch], &mut pcm[start..start + COEFS]);
         }
     }

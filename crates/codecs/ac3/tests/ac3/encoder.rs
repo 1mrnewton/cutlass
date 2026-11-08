@@ -413,6 +413,7 @@ fn metadata_round_trips() {
             mix: Some(mix),
             lfe_mix: (format == Format::Eac3).then_some(12),
             program_scale_db: None,
+            compression: false,
         };
         let pcm = tones(&channels, 48_000, 6_000, 0.2);
         let packets = encode(cfg, &pcm);
@@ -673,7 +674,40 @@ fn ffmpeg_decodes_our_streams() {
     }
 }
 
-/// A block louder than half scale carries a `dynrng` cut, and line mode applies it.
+/// The config with [`EncoderMetadata::compression`] on.
+fn compressed(mut config: EncoderConfig) -> EncoderConfig {
+    config.metadata.compression = true;
+    config
+}
+
+/// By default a loud program carries no `dynrng` or `compr`, as FFmpeg's
+/// encoder writes none, so line and heavy mode play it at full level.
+#[test]
+fn a_loud_program_carries_no_range_words_by_default() {
+    let rate = 48_000u32;
+    let channels = [C];
+    let pcm = tones(&channels, rate, rate as usize, 0.9);
+    let span = 4_096..pcm.len() - 4_096;
+    for format in [Format::Ac3, Format::Eac3] {
+        let packets = encode(config(format, rate, &channels, 0), &pcm);
+        let full = decode(codec(format), &packets);
+        let full_peak = peak(&full.pcm[span.clone()]);
+        assert!(full_peak > 0.7, "{format:?} full {full_peak}");
+        for mode in [
+            DynamicRange::Line {
+                cut: 1.0,
+                boost: 1.0,
+            },
+            DynamicRange::Heavy,
+        ] {
+            let heard = played(codec(format), &packets, mode);
+            assert_eq!(heard, full.pcm, "{format:?} {mode:?}");
+        }
+    }
+}
+
+/// A block louder than half scale carries a `dynrng` cut when compression
+/// is asked for, and line mode applies it.
 #[test]
 fn a_loud_block_is_cut_to_half_scale() {
     let Some(ffmpeg) = oracle("ffmpeg", "-version") else {
@@ -683,7 +717,7 @@ fn a_loud_block_is_cut_to_half_scale() {
     let channels = [C];
     let pcm = tones(&channels, rate, rate as usize, 0.9);
     for format in [Format::Ac3, Format::Eac3] {
-        let packets = encode(config(format, rate, &channels, 0), &pcm);
+        let packets = encode(compressed(config(format, rate, &channels, 0)), &pcm);
         let full = decode(codec(format), &packets);
         let line = line_mode(codec(format), &packets);
         let span = 4_096..pcm.len() - 4_096;
@@ -759,7 +793,8 @@ fn a_program_scale_is_kept_and_not_applied() {
     }
 }
 
-/// A frame louder than half scale carries `compr`, and heavy mode applies it.
+/// A frame louder than half scale carries `compr` when compression is
+/// asked for, and heavy mode applies it.
 #[test]
 fn a_loud_frame_carries_heavy_compression() {
     let Some(ffmpeg) = oracle("ffmpeg", "-version") else {
@@ -769,7 +804,7 @@ fn a_loud_frame_carries_heavy_compression() {
     let channels = [C];
     let pcm = tones(&channels, rate, rate as usize, 0.9);
     for format in [Format::Ac3, Format::Eac3] {
-        let packets = encode(config(format, rate, &channels, 0), &pcm);
+        let packets = encode(compressed(config(format, rate, &channels, 0)), &pcm);
         let full = decode(codec(format), &packets);
         let heavy = played(codec(format), &packets, DynamicRange::Heavy);
         let span = 4_096..pcm.len() - 4_096;
@@ -900,7 +935,10 @@ fn a_complete_mix_uses_the_dependent_range_word() {
             pcm.push((amp * (2.0 * PI * tone(*channel) * t).sin()) as f32);
         }
     }
-    let packets = encode(config(Format::Eac3, rate, &channels, 1_024_000), &pcm);
+    let packets = encode(
+        compressed(config(Format::Eac3, rate, &channels, 1_024_000)),
+        &pcm,
+    );
     let full = decode(CodecId::Eac3, &packets);
     assert_eq!(full.channels, channels);
     let span = 4_096..frames - 4_096;

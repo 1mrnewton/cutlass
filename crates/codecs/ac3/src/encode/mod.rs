@@ -122,6 +122,11 @@ pub struct EncoderMetadata {
     /// E-AC-3 `pgmscl` in dB, −50 to +12. −51 writes the mute code.
     /// `None` omits the word, which is 0 dB.
     pub program_scale_db: Option<i8>,
+    /// Write `dynrng` and `compr` words that bring a block or frame peaking
+    /// above half scale down to half scale. Off by default, as FFmpeg's
+    /// encoder writes none: a player that applies line-mode dynamic range
+    /// would otherwise turn mastered audio down by up to 6 dB.
+    pub compression: bool,
 }
 
 impl Default for EncoderMetadata {
@@ -133,6 +138,7 @@ impl Default for EncoderMetadata {
             mix: None,
             lfe_mix: None,
             program_scale_db: None,
+            compression: false,
         }
     }
 }
@@ -825,10 +831,14 @@ impl Ac3Encoder {
 
     /// Cut a block that peaks above half scale. A repeated level reuses the word.
     /// `forced` is the program peak of each block, for a dependent substream.
+    /// Without [`EncoderMetadata::compression`] no block sends the word.
     fn range_words(&mut self, from: usize, forced: Option<&[f32]>) {
+        let compression = self.config.metadata.compression;
         let mut in_force = 0u8;
         for blk in 0..self.shape.blocks {
-            let peak = if let Some(peaks) = forced {
+            let peak = if !compression {
+                0.0
+            } else if let Some(peaks) = forced {
                 peaks.get(blk).copied().unwrap_or(0.0)
             } else {
                 let at = from + blk * COEFS;
@@ -906,7 +916,11 @@ impl Ac3Encoder {
         }
         let size = self.next_size();
         let forced = self.program_peaks.front().cloned();
-        let heavy = heavy_word(&self.pending, from, self.shape.blocks, forced.as_deref());
+        let heavy = if self.config.metadata.compression {
+            heavy_word(&self.pending, from, self.shape.blocks, forced.as_deref())
+        } else {
+            None
+        };
         let mut shape = self.shape;
         // Spectral extension copies long-transform bins. A short block
         // does not have those bins, so the frame stays full band.
@@ -1344,6 +1358,7 @@ fn check_metadata(metadata: &EncoderMetadata, eac3: bool) -> Result<Meta, CodecE
         mix,
         lfe_mix,
         program_scale_db,
+        compression: _,
     } = *metadata;
     if !(1..=31).contains(&dialnorm) {
         return Err(CodecError::InvalidApi { what: "dialnorm" });

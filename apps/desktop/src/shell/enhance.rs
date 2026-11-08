@@ -184,6 +184,7 @@ impl Shell {
                     let models = CopyModels {
                         enhancer: enhancer.as_ref(),
                         denoiser: denoiser.as_ref(),
+                        interpolator: None,
                     };
                     enhance_clip(&readers, &encoders, models, &ask, &root, &mut |done| {
                         progress.fraction(done);

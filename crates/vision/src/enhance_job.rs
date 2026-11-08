@@ -1,8 +1,11 @@
-//! The Enhance quality and Reduce image noise job: read a clip's stretch
-//! frame by frame, denoise it from the frames around it, enhance it and
-//! size it for the level, and write the copy into the project, where eval
-//! draws the clip from it. A clip with both on gets one copy, denoised and
-//! then enhanced, since the enhance model sharpens noise it is handed.
+//! The Enhance quality, Reduce image noise and Optical flow job: read a
+//! clip's stretch frame by frame, denoise it from the frames around it,
+//! make the frames between its own that the copy's rate asks for, enhance
+//! it and size it for the level, and write the copy into the project,
+//! where eval draws the clip from it. A clip with more than one on gets
+//! one copy, in that order: the enhance model sharpens noise it is handed,
+//! and frames are made from the clip's own before they are grown, at a
+//! quarter or less of the pixels.
 //!
 //! The job needs no session and writes no draft, so a shell runs it off
 //! the main thread. A stopped or failed job leaves no copy behind.
@@ -10,14 +13,14 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use cutlass_eval::{EnhanceAsk, EnhanceError, EnhanceFrames, ReaderFactory};
+use cutlass_eval::{Blend, EnhanceAsk, EnhanceError, EnhanceFrames, ReaderFactory};
 use cutlass_export::{ExportError, PictureMovie, video_bitrate, write_pictures};
 use cutlass_model::{Algorithm, FrameRate};
 use cutlass_store::{StoreError, enhanced_file};
 use image::imageops::{self, FilterType};
 use image::{ImageBuffer, Rgb};
 
-use crate::{Denoiser, Enhancer, Image, VisionError};
+use crate::{Denoiser, Enhancer, Image, Interpolator, Prepared, VisionError};
 
 /// The short side of each level's copy.
 const HD_SIDE: u32 = 1080;
@@ -94,11 +97,13 @@ pub fn noise_for_level(level: i64) -> f32 {
 pub struct CopyModels<'a> {
     pub enhancer: Option<&'a Enhancer>,
     pub denoiser: Option<&'a Denoiser>,
+    pub interpolator: Option<&'a Interpolator>,
 }
 
 /// Make `ask`'s copy in the project at `project` and return its path: the
-/// clip denoised when its noise level is on, then enhanced when its
-/// Enhance quality level is. `progress` hears the share done after each
+/// clip denoised when its noise level is on, filled with frames made
+/// between its own when Optical flow is, then enhanced when its Enhance
+/// quality level is. `progress` hears the share done after each
 /// frame, and stops the job by answering `false`.
 pub fn enhance_clip(
     readers: &ReaderFactory,
@@ -123,9 +128,15 @@ pub fn enhance_clip(
         (true, Some(denoiser)) => Some(denoiser),
         (true, None) => return Err(missing("Reduce image noise")),
     };
-    if enhancer.is_none() && denoiser.is_none() {
+    let interpolator = match (ask.interpolate > 0, models.interpolator) {
+        (false, _) => None,
+        (true, Some(interpolator)) => Some(interpolator),
+        (true, None) => return Err(missing("Optical flow")),
+    };
+    if enhancer.is_none() && denoiser.is_none() && interpolator.is_none() {
         return Err(EnhanceJobError::Clip(EnhanceError::Clip {
-            reason: "Enhance quality and Reduce image noise are off for this clip".into(),
+            reason: "Enhance quality, Reduce image noise and Optical flow are off for this clip"
+                .into(),
         }));
     }
     let mut frames = EnhanceFrames::open(readers, ask).map_err(EnhanceJobError::Clip)?;
@@ -143,6 +154,7 @@ pub fn enhance_clip(
         })
     })?;
     let count = frames.len();
+    let blends = frames.blends().to_vec();
     let mut stream = denoiser
         .map(|denoiser| denoiser.stream(count, source.0, source.1, noise_for_level(ask.denoise)))
         .transpose()
@@ -152,7 +164,7 @@ pub fn enhance_clip(
         height,
         frame_rate: rate,
         bitrate: video_bitrate(width.min(height)),
-        frames: count as u64,
+        frames: blends.len() as u64,
     };
     let file = enhanced_file(project, &ask.key(), &ask.range)
         .map_err(|error: StoreError| EnhanceJobError::Store(error.to_string()))?;
@@ -179,39 +191,46 @@ pub fn enhance_clip(
         }
         Ok(rgb_of(picture.rgba()))
     };
+    // The clip's own frames in order, denoised when that is on.
+    let mut own = |index: usize| -> Result<Vec<u8>, EnhanceJobError> {
+        match stream.as_mut() {
+            Some(stream) => {
+                let mut lost = None;
+                let next = stream.next(&mut |k| {
+                    read(k).map_err(|error| {
+                        let message = error.to_string();
+                        lost = Some(error);
+                        VisionError::Model { message }
+                    })
+                });
+                match next {
+                    Ok(Some(rgb)) => Ok(rgb),
+                    Ok(None) => Err(EnhanceJobError::Clip(EnhanceError::Frame {
+                        reason: format!("the clip ended before frame {index}"),
+                    })),
+                    Err(error) => Err(lost.unwrap_or(EnhanceJobError::Vision(error))),
+                }
+            }
+            None => read(index),
+        }
+    };
+    let mut window = Window::default();
     let mut failed = None;
-    let total = count as f32;
+    let total = blends.len() as f32;
     let written = write_pictures(
         encoders,
         &movie,
         &file,
         &mut |index| {
             let made = usize::try_from(index)
-                .map_err(|_| {
+                .ok()
+                .and_then(|index| blends.get(index).copied())
+                .ok_or_else(|| {
                     EnhanceJobError::Clip(EnhanceError::Frame {
-                        reason: format!("frame {index}"),
+                        reason: format!("the copy has no frame {index}"),
                     })
                 })
-                .and_then(|index| match stream.as_mut() {
-                    Some(stream) => {
-                        let mut lost = None;
-                        let next = stream.next(&mut |k| {
-                            read(k).map_err(|error| {
-                                let message = error.to_string();
-                                lost = Some(error);
-                                VisionError::Model { message }
-                            })
-                        });
-                        match next {
-                            Ok(Some(rgb)) => Ok(rgb),
-                            Ok(None) => Err(EnhanceJobError::Clip(EnhanceError::Frame {
-                                reason: format!("the clip ended before frame {index}"),
-                            })),
-                            Err(error) => Err(lost.unwrap_or(EnhanceJobError::Vision(error))),
-                        }
-                    }
-                    None => read(index),
-                })
+                .and_then(|blend| window.frame(blend, count, source, interpolator, &mut own))
                 .and_then(|rgb| match enhancer {
                     Some(enhancer) => enhance_one(enhancer, source, &rgb, (width, height)),
                     None => Ok(cropped_rgba(source, &rgb, (width, height))),
@@ -229,6 +248,88 @@ pub fn enhance_clip(
         Err(ExportError::Cancelled) => Err(EnhanceJobError::Stopped),
         Err(error) => Err(failed.unwrap_or(EnhanceJobError::Movie(error))),
     }
+}
+
+/// The clip's own frames a frame of the copy is made from: the last two
+/// read, each prepared for the interpolator once it is needed.
+#[derive(Default)]
+struct Window {
+    /// The next of the clip's own frames to read.
+    next: usize,
+    kept: Vec<Own>,
+}
+
+struct Own {
+    index: usize,
+    rgb: Vec<u8>,
+    prepared: Option<Prepared>,
+}
+
+impl Window {
+    /// Frame `blend` of the copy as RGB: one of the clip's `count` frames
+    /// as read by `own`, or one made between two of them.
+    fn frame(
+        &mut self,
+        blend: Blend,
+        count: usize,
+        size: (u32, u32),
+        interpolator: Option<&Interpolator>,
+        own: &mut dyn FnMut(usize) -> Result<Vec<u8>, EnhanceJobError>,
+    ) -> Result<Vec<u8>, EnhanceJobError> {
+        let made = blend.at > 0.0 && blend.from + 1 < count;
+        let last = if made { blend.from + 1 } else { blend.from };
+        while self.next <= last.min(count.saturating_sub(1)) {
+            let rgb = own(self.next)?;
+            self.kept.push(Own {
+                index: self.next,
+                rgb,
+                prepared: None,
+            });
+            self.next += 1;
+        }
+        self.kept.retain(|kept| kept.index >= blend.from);
+        let interpolator = match interpolator {
+            Some(interpolator) if made => interpolator,
+            _ => {
+                return self
+                    .kept
+                    .iter()
+                    .find(|kept| kept.index == blend.from)
+                    .map(|kept| kept.rgb.clone())
+                    .ok_or_else(|| lost(blend.from));
+            }
+        };
+        for kept in &mut self.kept {
+            if kept.prepared.is_none() {
+                let image = Image {
+                    width: size.0,
+                    height: size.1,
+                    rgb: &kept.rgb,
+                };
+                kept.prepared = Some(
+                    interpolator
+                        .prepare(&image)
+                        .map_err(EnhanceJobError::Vision)?,
+                );
+            }
+        }
+        let prepared = |index: usize| {
+            self.kept
+                .iter()
+                .find(|kept| kept.index == index)
+                .and_then(|kept| kept.prepared.as_ref())
+                .ok_or_else(|| lost(index))
+        };
+        interpolator
+            .between(prepared(blend.from)?, prepared(blend.from + 1)?, blend.at)
+            .map_err(EnhanceJobError::Vision)
+    }
+}
+
+fn lost(index: usize) -> EnhanceJobError {
+    EnhanceJobError::Clip(EnhanceError::Frame {
+        reason: format!("the clip's frame {index} was read past"),
+    })
 }
 
 fn rgb_of(rgba: &[u8]) -> Vec<u8> {

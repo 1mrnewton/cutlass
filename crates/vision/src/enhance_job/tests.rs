@@ -9,7 +9,7 @@ use cutlass_model::{Draft, MaterialVideo, Micros, Segment, TimeRange};
 use cutlass_store::find_enhanced;
 
 use super::*;
-use crate::{Compute, MAX_NOISE, MIN_NOISE};
+use crate::{Compute, INTERPOLATE_WEIGHTS, MAX_NOISE, MIN_NOISE};
 
 struct Temp(PathBuf);
 
@@ -68,6 +68,7 @@ fn enhancing(enhancer: &Enhancer) -> CopyModels<'_> {
     CopyModels {
         enhancer: Some(enhancer),
         denoiser: None,
+        interpolator: None,
     }
 }
 
@@ -177,6 +178,7 @@ fn a_clip_is_denoised_into_a_copy_at_its_own_size() {
         CopyModels {
             enhancer: None,
             denoiser: Some(&denoiser),
+            interpolator: None,
         },
         &ask,
         &temp.0,
@@ -213,6 +215,7 @@ fn a_clip_with_both_is_denoised_then_enhanced_into_one_copy() {
     let both = CopyModels {
         enhancer: Some(&enhancer),
         denoiser: Some(&denoiser),
+        interpolator: None,
     };
     let file = enhance_clip(&readers(), &encoders(), both, &ask, &temp.0, &mut |_| true).unwrap();
     assert!(file.parent().unwrap().ends_with("Resources/video_enhance"));
@@ -353,4 +356,171 @@ fn a_missing_file_or_no_encoder_is_an_error_and_leaves_no_copy() {
         ),
         Err(EnhanceJobError::Clip(_))
     ));
+}
+
+fn interpolating(interpolator: &Interpolator) -> CopyModels<'_> {
+    CopyModels {
+        interpolator: Some(interpolator),
+        ..CopyModels::default()
+    }
+}
+
+/// The red of the copy's frames, at its `rate`, over its 0.3 s.
+fn reds(file: &Path, rate: f64) -> Vec<u8> {
+    let mut media = readers().open(file).unwrap();
+    let range = TimeRange::new(0, 300_000);
+    (0..(0.3 * rate).round() as i64)
+        .map(|k| {
+            let at = Micros((k as f64 * 1_000_000.0 / rate).round() as i64);
+            let held = media.decode_at(at, &range).unwrap();
+            let Ok(cutlass_picture::Picture::Cpu(picture)) = decoded_picture(&held.frame) else {
+                panic!("not in memory");
+            };
+            picture.rgba()[(W as usize * H as usize / 2 + W as usize / 2) * 4]
+        })
+        .collect()
+}
+
+#[test]
+fn a_clip_is_filled_with_frames_made_between_its_own() {
+    let (temp, draft) = project();
+    let ask = cutlass_eval::enhance_ask(&draft, Some(&temp.0), &"v".into(), 0, 0, 30).unwrap();
+    assert_eq!(ask.rate, 30.0);
+    let interpolator = Interpolator::untrained(Compute::Cpu).unwrap();
+    let mut heard = Vec::new();
+    let file = enhance_clip(
+        &readers(),
+        &encoders(),
+        interpolating(&interpolator),
+        &ask,
+        &temp.0,
+        &mut |done| {
+            heard.push(done);
+            true
+        },
+    )
+    .unwrap();
+    // Nine frames for 0.3 s at 30 a second, three of them the clip's own.
+    assert_eq!(heard.len(), 9);
+    assert_eq!(heard.last(), Some(&1.0));
+    assert!(
+        file.parent()
+            .unwrap()
+            .ends_with("Resources/video_interpolate")
+    );
+    assert_eq!(
+        find_enhanced(&temp.0, &ask.key(), &ask.range),
+        Some((file.clone(), ask.range.clone()))
+    );
+    let (w, h, _) = first_frame(&file);
+    assert_eq!((w, h), (W, H));
+    let reds = reds(&file, 30.0);
+    // The clip's own frames 2, 3 and 4 land where they were.
+    for (k, own) in [(0, 60), (3, 80), (6, 100)] {
+        assert!(reds[k].abs_diff(own) <= 4, "{k}: {reds:?}");
+    }
+}
+
+#[test]
+fn trained_frames_between_two_lie_between_them() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../local-files/models/interpolate");
+    if !dir.join(INTERPOLATE_WEIGHTS).is_file() {
+        assert!(
+            std::env::var_os("CUTLASS_REQUIRE_INTERPOLATE_MODEL").is_none(),
+            "the interpolate weights are missing"
+        );
+        return;
+    }
+    let (temp, draft) = project();
+    let ask = cutlass_eval::enhance_ask(&draft, Some(&temp.0), &"v".into(), 0, 0, 30).unwrap();
+    let interpolator = Interpolator::load(&dir, Compute::Cpu).unwrap();
+    let file = enhance_clip(
+        &readers(),
+        &encoders(),
+        interpolating(&interpolator),
+        &ask,
+        &temp.0,
+        &mut |_| true,
+    )
+    .unwrap();
+    // The file's frames go 60, 80, 100 and then 120, so the copy climbs
+    // through the ones made between them too.
+    let reds = reds(&file, 30.0);
+    assert!(reds.windows(2).all(|pair| pair[0] < pair[1]), "{reds:?}");
+    assert!(reds[8] > 100 + 4 && reds[8] < 120, "{reds:?}");
+}
+
+#[test]
+fn optical_flow_without_its_model_is_refused_and_leaves_no_copy() {
+    let (temp, draft) = project();
+    let ask = cutlass_eval::enhance_ask(&draft, Some(&temp.0), &"v".into(), 0, 0, 60).unwrap();
+    let result = enhance_clip(
+        &readers(),
+        &encoders(),
+        CopyModels::default(),
+        &ask,
+        &temp.0,
+        &mut |_| true,
+    );
+    let Err(EnhanceJobError::Vision(VisionError::Model { message })) = result else {
+        panic!("made a copy without the model");
+    };
+    assert!(message.contains("Optical flow"), "{message}");
+    assert_eq!(find_enhanced(&temp.0, &ask.key(), &ask.range), None);
+    // Stopped part way, nothing is kept either.
+    let interpolator = Interpolator::untrained(Compute::Cpu).unwrap();
+    let mut seen = 0;
+    let stopped = enhance_clip(
+        &readers(),
+        &encoders(),
+        interpolating(&interpolator),
+        &ask,
+        &temp.0,
+        &mut |_| {
+            seen += 1;
+            seen < 4
+        },
+    );
+    assert_eq!(stopped, Err(EnhanceJobError::Stopped));
+    assert_eq!(find_enhanced(&temp.0, &ask.key(), &ask.range), None);
+}
+
+#[test]
+fn a_slowed_clip_with_every_level_on_is_made_in_one_copy() {
+    let (temp, mut draft) = project();
+    draft.tracks[0].segments[0].speed = 0.5;
+    draft.tracks[0].segments[0].target = TimeRange::new(0, 600_000);
+    let ask = cutlass_eval::enhance_ask(
+        &draft,
+        Some(&temp.0),
+        &"v".into(),
+        Algorithm::HD,
+        Algorithm::WEAK,
+        30,
+    )
+    .unwrap();
+    assert_eq!(ask.rate, 60.0);
+    let enhancer = Enhancer::untrained(Compute::Cpu).unwrap();
+    let denoiser = Denoiser::untrained(Compute::Cpu).unwrap();
+    let interpolator = Interpolator::untrained(Compute::Cpu).unwrap();
+    let mut frames = 0;
+    let file = enhance_clip(
+        &readers(),
+        &encoders(),
+        CopyModels {
+            enhancer: Some(&enhancer),
+            denoiser: Some(&denoiser),
+            interpolator: Some(&interpolator),
+        },
+        &ask,
+        &temp.0,
+        &mut |_| {
+            frames += 1;
+            true
+        },
+    )
+    .unwrap();
+    assert_eq!(frames, 18);
+    assert!(file.parent().unwrap().ends_with("Resources/video_enhance"));
+    assert_eq!(first_frame(&file).0, 1440);
 }

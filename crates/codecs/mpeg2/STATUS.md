@@ -33,7 +33,7 @@ Simple, Main, 4:2:2, and High profile, one layer, 8-bit. The profile byte is rep
 
 Display order uses two references. After reset, B pictures of an open GOP with no forward reference are not shown. A bad unit is an error and the decoder stays as it was. There is no error concealment. Sizes are limited by the engine's pixel cap (8192×8192); a larger header returns `Limit`. A `sequence_scalable_extension` returns `Unsupported`.
 
-The elementary-stream splitter returns the same access units however the bytes are chunked. Both fields of a field picture stay one unit, including when a `sequence_end_code` sits between them.
+The elementary-stream splitter returns the same access units however the bytes are chunked. Both fields of a field picture stay one unit, including when a `sequence_end_code` sits between them. When a container hands the two fields over in two packets, the second decodes into the first field's frame in place; a refused second field hands the open first field back (`decoder::tests`), and the fuzzer's corpus includes the field stream cut one packet per field.
 
 ## Encoder
 
@@ -148,7 +148,7 @@ A cut costs a new intra picture. On a 720×576 splice at 3 Mb/s the worst pictur
 
 Scoped `cargo test` on this machine, all passing:
 
-- `cutlass-mpeg2`, always run: 44 lib, 15 encode, 5 fields, 3 of the 4 inter_fields tests, 2 fuzz smoke, 18 lifecycle, 6 oracle, and the first half of the isobmff test (our mux, demux, and decode).
+- `cutlass-mpeg2`, always run: 46 lib, 15 encode, 5 fields, 3 of the 4 inter_fields tests, 2 fuzz smoke, 18 lifecycle, 6 oracle, and the first half of the isobmff test (our mux, demux, and decode).
 - `cutlass-mpeg2`, only where the oracle or corpus is present: the FFmpeg and ffprobe leg of the isobmff test, the inter_fields FFmpeg and ffprobe test, and the local test (`../local-files` and FFmpeg). Without them each says `skipped:` on stderr and passes, so a CI run without them is not evidence for these legs. `MPEG2_REQUIRE_ORACLES=1` turns a skip into a failure; with it set, both ran here and passed on all four recordings.
 - `cutlass-isobmff` lib tests, including the `mp4v` object-type and QuickTime fourcc tests.
 - `cutlass-export` coded-size test.

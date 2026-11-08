@@ -246,7 +246,19 @@ impl Mpeg2Decoder {
                 what: "empty packet",
             });
         }
+        // An open first field moves into the working state instead of being
+        // shared with it, so its second field decodes into the frame in
+        // place rather than into a copy of the whole frame.
+        let first = self
+            .state
+            .open_field
+            .as_mut()
+            .and_then(|open| open.frame.take());
+        let first_at = first.as_ref().map(Arc::as_ptr);
         let mut state = self.state.clone();
+        if let Some(open) = state.open_field.as_mut() {
+            open.frame = first;
+        }
         let mut done = Vec::new();
         let clock = Clock {
             pts: packet.pts,
@@ -254,10 +266,26 @@ impl Mpeg2Decoder {
             timescale: packet.timescale,
             started: 0,
         };
-        self.units(&mut state, &packet.data, clock, &mut done)?;
-        let out = done.iter().map(output).collect::<Result<Vec<_>, _>>()?;
-        self.state = state;
-        Ok(out)
+        let out = self
+            .units(&mut state, &packet.data, clock, &mut done)
+            .and_then(|()| done.iter().map(output).collect::<Result<Vec<_>, _>>());
+        match out {
+            Ok(out) => {
+                self.state = state;
+                Ok(out)
+            }
+            Err(error) => {
+                // The first field comes back. A refused packet may have
+                // written only the lines of the other parity, and those are
+                // written again in full before the frame is shown: by its
+                // second field, which must cover the picture, or by
+                // `finish_unpaired`.
+                if let (Some(at), Some(open)) = (first_at, self.state.open_field.as_mut()) {
+                    open.frame = find_frame(at, &state, &done);
+                }
+                Err(error)
+            }
+        }
     }
 
     /// Releases the frame held for display order and any unpaired field.
@@ -637,6 +665,7 @@ impl Mpeg2Decoder {
             _ => (None, None),
         };
         let fallback = st.newer.clone();
+        let parity_and_type = pair.as_ref().map(|open| (open.parity, open.coding_type));
         let (mut frame, info) = match pair {
             Some(open) => (open.frame, open.info),
             None => {
@@ -653,7 +682,21 @@ impl Mpeg2Decoder {
                 fwd: fwd.as_deref(),
                 bwd: bwd.as_deref(),
             };
-            decode_picture(&picture, Arc::make_mut(target), slices, fallback.as_deref())?;
+            let decoded =
+                decode_picture(&picture, Arc::make_mut(target), slices, fallback.as_deref());
+            if let Err(error) = decoded {
+                // A refused second field leaves its first field open, so
+                // `push` can hand the frame back.
+                if let Some((parity, coding_type)) = parity_and_type {
+                    st.open_field = Some(OpenField {
+                        frame,
+                        info,
+                        parity,
+                        coding_type,
+                    });
+                }
+                return Err(error);
+            }
         }
         match params.field {
             Some(parity) if !params.second_field => {
@@ -708,6 +751,22 @@ fn complete(
     } else if let Some(held) = st.held.replace(decoded) {
         done.push(held);
     }
+}
+
+/// The frame at `at`, wherever a refused packet left it.
+fn find_frame(at: *const Frame, state: &State, done: &[Decoded]) -> Option<Arc<Frame>> {
+    let open = state
+        .open_field
+        .as_ref()
+        .and_then(|open| open.frame.as_ref());
+    let held = state.held.as_ref().map(|held| &held.frame);
+    open.into_iter()
+        .chain(held)
+        .chain(state.newer.as_ref())
+        .chain(state.older.as_ref())
+        .chain(done.iter().map(|decoded| &decoded.frame))
+        .find(|frame| std::ptr::eq(Arc::as_ptr(frame), at))
+        .cloned()
 }
 
 /// A first field whose pair never came: its lines fill the missing field.
@@ -895,5 +954,119 @@ pub(crate) fn colour(colour: Option<(u8, u8, u8)>) -> (ColorPrimaries, Transfer,
 impl Default for Mpeg2Decoder {
     fn default() -> Self {
         Self::new(DEFAULT_MAX_PIXELS)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use cutlass_decode::{Packet, VideoOutput};
+
+    use super::Mpeg2Decoder;
+    use crate::es::split;
+
+    /// The committed field stream: frame 0 is an I field pair, frame 1 a P
+    /// field pair whose bottom field predicts from its top.
+    const STREAM: &[u8] = include_bytes!("../tests/fixtures/inter_fields.m2v");
+
+    fn packet(data: &[u8], pts: i64) -> Packet {
+        Packet {
+            stream: 0,
+            data: data.to_vec(),
+            pts,
+            duration: 1,
+            timescale: 25,
+            keyframe: pts == 0,
+            side: Vec::new(),
+        }
+    }
+
+    /// The units of the stream, each pair cut into its two fields.
+    fn fields() -> Vec<Vec<u8>> {
+        let units = split(STREAM).unwrap();
+        let mut out = Vec::new();
+        for unit in units.iter().take(2) {
+            let data = &unit.data;
+            let pictures: Vec<usize> = data
+                .windows(4)
+                .enumerate()
+                .filter(|(_, w)| *w == [0, 0, 1, 0])
+                .map(|(at, _)| at)
+                .collect();
+            assert_eq!(pictures.len(), 2);
+            out.push(data[..pictures[1]].to_vec());
+            out.push(data[pictures[1]..].to_vec());
+        }
+        out
+    }
+
+    fn open_frame(decoder: &Mpeg2Decoder) -> *const crate::frame::Frame {
+        let open = decoder.state.open_field.as_ref().unwrap();
+        Arc::as_ptr(open.frame.as_ref().unwrap())
+    }
+
+    fn clean() -> Vec<VideoOutput> {
+        let mut decoder = Mpeg2Decoder::default();
+        let mut out = Vec::new();
+        for (index, field) in fields().iter().enumerate() {
+            out.extend(decoder.push(&packet(field, index as i64 / 2)).unwrap());
+        }
+        out.extend(decoder.drain().unwrap());
+        out
+    }
+
+    #[test]
+    fn a_pair_split_across_packets_decodes_into_one_frame_without_a_copy() {
+        let fields = fields();
+        let mut decoder = Mpeg2Decoder::default();
+        decoder.push(&packet(&fields[0], 0)).unwrap();
+        decoder.push(&packet(&fields[1], 0)).unwrap();
+        decoder.push(&packet(&fields[2], 1)).unwrap();
+        let first = open_frame(&decoder);
+        decoder.push(&packet(&fields[3], 1)).unwrap();
+        let newer = decoder.state.newer.as_ref().unwrap();
+        assert!(std::ptr::eq(Arc::as_ptr(newer), first));
+        assert_eq!(Arc::strong_count(newer), 2, "held and newest reference");
+    }
+
+    /// Pushes the first three fields, then `refused` (which must fail),
+    /// then `after`, then drains.
+    fn with_refusal(refused: &[u8], after: Option<&[u8]>) -> Vec<VideoOutput> {
+        let fields = fields();
+        let mut decoder = Mpeg2Decoder::default();
+        let mut out = Vec::new();
+        for (index, field) in fields[..3].iter().enumerate() {
+            out.extend(decoder.push(&packet(field, index as i64 / 2)).unwrap());
+        }
+        let first = open_frame(&decoder);
+        assert!(decoder.push(&packet(refused, 1)).is_err());
+        assert!(std::ptr::eq(open_frame(&decoder), first), "handed back");
+        if let Some(after) = after {
+            out.extend(decoder.push(&packet(after, 1)).unwrap());
+        }
+        out.extend(decoder.drain().unwrap());
+        out
+    }
+
+    #[test]
+    fn a_refused_second_field_leaves_the_first_open() {
+        let fields = fields();
+        // The P bottom field without its second slice: the first slice
+        // writes its lines, then the picture is refused for its gap.
+        let second = &fields[3];
+        let slice2 = second.windows(4).position(|w| w == [0, 0, 1, 2]).unwrap();
+        let cut = &second[..slice2];
+        assert_eq!(with_refusal(cut, Some(second)), clean());
+
+        // Drained after the refusal, the first field fills the frame, as if
+        // the refused field had never come.
+        let mut lone = Mpeg2Decoder::default();
+        let mut expected = Vec::new();
+        for (index, field) in fields[..3].iter().enumerate() {
+            expected.extend(lone.push(&packet(field, index as i64 / 2)).unwrap());
+        }
+        expected.extend(lone.drain().unwrap());
+        assert_eq!(with_refusal(cut, None), expected);
     }
 }

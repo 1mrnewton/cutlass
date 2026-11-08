@@ -4,7 +4,8 @@
 //! `MPEG2_FUZZ_SECS` or `MPEG2_ENCODE_FUZZ_SECS` for a timed campaign, and
 //! `MPEG2_FUZZ_SEED` for another seed; the summary goes to stdout.
 //!
-//! Decoder: mutated packets injected into real streams, mutated streams
+//! Decoder: mutated packets injected into real streams (a field stream
+//! among them, also cut one packet per field), mutated streams
 //! split at random boundaries, mutated configuration, and random reset and
 //! drain. A panic fails the run. A refused packet leaves the decoder as it
 //! was, so the stream around it decodes to the clean pictures. No picture
@@ -227,6 +228,35 @@ mod fuzz {
         bytes: Vec<u8>,
         units: Vec<AccessUnit>,
         clean: Vec<u64>,
+        /// The units are single fields, not the splitter's pairs.
+        fields_apart: bool,
+    }
+
+    /// `units` with each field pair cut into one packet per field, as a
+    /// container that stores fields apart delivers them.
+    fn fields_apart(units: &[AccessUnit]) -> Vec<AccessUnit> {
+        let mut out = Vec::new();
+        for unit in units {
+            let second = unit
+                .data
+                .windows(4)
+                .enumerate()
+                .filter(|(_, w)| *w == [0, 0, 1, 0])
+                .map(|(at, _)| at)
+                .nth(1);
+            match second {
+                Some(at) => {
+                    for data in [&unit.data[..at], &unit.data[at..]] {
+                        out.push(AccessUnit {
+                            data: data.to_vec(),
+                            ..unit.clone()
+                        });
+                    }
+                }
+                None => out.push(unit.clone()),
+            }
+        }
+        out
     }
 
     fn clean(units: &[AccessUnit]) -> Vec<u64> {
@@ -252,6 +282,7 @@ mod fuzz {
             "interlaced.m2v",
             "chroma422.m2v",
             "mpeg1.m1v",
+            "inter_fields.m2v",
         ]
         .into_iter()
         .map(fixture)
@@ -259,7 +290,7 @@ mod fuzz {
         sources.push(encoded(64, 48, 0, false, &mut rng));
         sources.push(encoded(96, 64, 300_000, true, &mut rng));
         sources.push(encoded(100, 70, 0, false, &mut rng));
-        let corpus: Vec<Stream> = sources
+        let mut corpus: Vec<Stream> = sources
             .into_iter()
             .map(|bytes| {
                 let units = split(&bytes).unwrap();
@@ -268,9 +299,22 @@ mod fuzz {
                     bytes,
                     units,
                     clean,
+                    fields_apart: false,
                 }
             })
             .collect();
+        // The field stream again, one packet per field: a refused packet
+        // between two fields must leave the first one open.
+        let bytes = fixture("inter_fields.m2v");
+        let units = fields_apart(&split(&bytes).unwrap());
+        let clean_fields = clean(&units);
+        assert_eq!(clean_fields, corpus[4].clean, "fields apart decode alike");
+        corpus.push(Stream {
+            bytes,
+            units,
+            clean: clean_fields,
+            fields_apart: true,
+        });
 
         let started = Instant::now();
         let (mut iterations, mut refused, mut pictures, mut slowest) =
@@ -337,7 +381,7 @@ mod fuzz {
                     if !failed && let Ok(last) = splitter.finish() {
                         units.extend(last);
                     }
-                    if bytes == stream.bytes {
+                    if bytes == stream.bytes && !stream.fields_apart {
                         assert!(!failed);
                         assert_eq!(units, stream.units, "chunked split differs");
                     }

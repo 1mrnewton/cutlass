@@ -112,6 +112,8 @@ pub enum EditError {
     NotVideo,
     /// Optical flow fills a clip only to a frame rate it offers.
     FlowRate,
+    /// A Relight preset id, strength, color or angle is not one it stores.
+    Relight,
     /// The picture has no sound to place.
     NoSound,
     /// The picture's sound is already its own clip.
@@ -338,6 +340,13 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
         Request::SetInterpolate { segment_id, fps } => {
             enhance::set_interpolate(draft, segment_id, *fps)
         }
+        Request::SetRelight {
+            segment_id,
+            preset,
+            strength,
+            color,
+            angle,
+        } => enhance::set_relight(draft, segment_id, preset, *strength, color, *angle),
         Request::SetTextContent {
             segment_id,
             content,

@@ -474,6 +474,7 @@ pub fn request_name(request: &Request) -> &'static str {
         Request::SetEnhance { .. } => "set_enhance",
         Request::SetDenoise { .. } => "set_denoise",
         Request::SetInterpolate { .. } => "set_interpolate",
+        Request::SetRelight { .. } => "set_relight",
         Request::SetTextContent { .. } => "set_text_content",
         Request::SetTextSize { .. } => "set_text_size",
         Request::SetTextColor { .. } => "set_text_color",

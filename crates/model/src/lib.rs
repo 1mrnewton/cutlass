@@ -55,7 +55,7 @@ pub use materials::{
     MaterialCanvas, MaterialColorConfig, MaterialDraft, MaterialEffect, MaterialHsl,
     MaterialPictureAdjust, MaterialPluginEffect, MaterialRef, MaterialShape, MaterialSpeed,
     MaterialText, MaterialTransition, MaterialVideo, MaterialVideoEffect, Materials, RawMaterial,
-    RichFill, RichFont, RichPaint, RichShadow, RichSolid, RichStroke, RichStyle, RichText,
+    Relight, RichFill, RichFont, RichPaint, RichShadow, RichSolid, RichStroke, RichStyle, RichText,
     SHAPE_ARROW, SHAPE_CONTOUR, SHAPE_FILL, SHAPE_LINE, SHAPE_LINE_WIDTH, SHAPE_PEN, SHAPE_SHADOW,
     SHAPE_SIZE, SHAPE_STROKE_WIDTH, ShapeKind, ShapePoint, SpeedPoint, SpeedPreset,
     StickerAnimation, SubtitleKeywords, TextRange, TimeMarkItem, VideoAlgorithm, VideoStable,

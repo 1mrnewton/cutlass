@@ -236,6 +236,18 @@ pub enum Request {
     /// a second (30, 50 or 60) however slow it plays, or stop at 0 or
     /// below. The filled copy is made apart from the draft.
     SetInterpolate { segment_id: SegmentId, fps: i64 },
+    /// Light a video clip again with the preset `preset` at `strength` (0
+    /// to 1), or stop with an empty preset. The Custom light takes `color`
+    /// (`#rrggbb`, empty for its default) and `angle` (degrees, 0 from the
+    /// right, 90 from above). The depth it is lit from is made apart from
+    /// the draft.
+    SetRelight {
+        segment_id: SegmentId,
+        preset: String,
+        strength: f64,
+        color: String,
+        angle: f64,
+    },
     /// Replace the text material's string. Word columns stay as stored.
     SetTextContent {
         segment_id: SegmentId,

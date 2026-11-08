@@ -1,5 +1,8 @@
 use cutlass_model::{Algorithm, Draft, MaterialRef, SegmentId, VideoAlgorithm};
 
+/// The longest preset id Relight stores.
+const MAX_PRESET: usize = 64;
+
 use super::locate;
 use super::{EditError, ensure_unlocked};
 
@@ -30,11 +33,54 @@ pub fn set_interpolate(
     set_algorithm(draft, segment_id, Algorithm::COMPLEMENT_FRAME, fps)
 }
 
+/// Light the clip again with the preset `preset` at `strength` (0 to 1),
+/// the Custom light taking `color` (`#rrggbb`) and `angle` (degrees), or
+/// stop with an empty preset, as [`set_enhance`] does.
+pub fn set_relight(
+    draft: &mut Draft,
+    segment_id: &SegmentId,
+    preset: &str,
+    strength: f64,
+    color: &str,
+    angle: f64,
+) -> Result<(), EditError> {
+    let named = preset.len() <= MAX_PRESET
+        && preset.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_' || byte == b'-'
+        });
+    let hex = color.is_empty()
+        || (color.len() == 7
+            && color.starts_with('#')
+            && color.bytes().skip(1).all(|byte| byte.is_ascii_hexdigit()));
+    if !named || !hex || !(0.0..=1.0).contains(&strength) || !angle.is_finite() {
+        return Err(EditError::Relight);
+    }
+    let level = i64::from(!preset.is_empty());
+    set_filled(draft, segment_id, Algorithm::RELIGHT, level, |algorithm| {
+        algorithm.preset = preset.to_owned();
+        algorithm.strength = Some(strength);
+        algorithm.color = color.to_owned();
+        algorithm.angle = Some(angle.rem_euclid(360.0));
+    })
+}
+
 fn set_algorithm(
     draft: &mut Draft,
     segment_id: &SegmentId,
     kind: &str,
     level: i64,
+) -> Result<(), EditError> {
+    set_filled(draft, segment_id, kind, level, |_| {})
+}
+
+/// [`set_algorithm`], with `fill` setting the algorithm's other fields
+/// when it is on.
+fn set_filled(
+    draft: &mut Draft,
+    segment_id: &SegmentId,
+    kind: &str,
+    level: i64,
+    fill: impl FnOnce(&mut Algorithm),
 ) -> Result<(), EditError> {
     let (track_index, segment_index) = locate(draft, segment_id)?;
     ensure_unlocked(draft.tracks[track_index].attribute)?;
@@ -63,15 +109,23 @@ fn set_algorithm(
         .iter()
         .position(|algorithm| algorithm.kind == kind);
     match (found, level > 0) {
-        (Some(index), true) => block.algorithms[index].level = level,
+        (Some(index), true) => {
+            let algorithm = &mut block.algorithms[index];
+            algorithm.level = level;
+            fill(algorithm);
+        }
         (Some(index), false) => {
             block.algorithms.remove(index);
         }
-        (None, true) => block.algorithms.push(Algorithm {
-            kind: kind.to_owned(),
-            level,
-            ..Algorithm::default()
-        }),
+        (None, true) => {
+            let mut algorithm = Algorithm {
+                kind: kind.to_owned(),
+                level,
+                ..Algorithm::default()
+            };
+            fill(&mut algorithm);
+            block.algorithms.push(algorithm);
+        }
         (None, false) => {}
     }
     if block.algorithms.is_empty() && block.rest.is_empty() {
@@ -288,6 +342,74 @@ mod tests {
         assert_eq!(level(&session), Some(Algorithm::HD));
         session.undo().unwrap();
         assert_eq!(fps(&session), Some(60));
+    }
+
+    fn relight(
+        session: &mut Session,
+        preset: &str,
+        strength: f64,
+        color: &str,
+    ) -> Result<u64, EditError> {
+        let revision = session.revision();
+        session.apply(
+            revision,
+            &[Request::SetRelight {
+                segment_id: "picture".into(),
+                preset: preset.into(),
+                strength,
+                color: color.into(),
+                angle: -45.0,
+            }],
+        )
+    }
+
+    #[test]
+    fn relight_stores_its_light_beside_the_others_and_an_empty_preset_stops_it() {
+        let mut session = session_with(None);
+        set(&mut session, "picture", Algorithm::HD).unwrap();
+        relight(&mut session, "warm_key", 0.6, "").unwrap();
+        let lit = session.draft().materials.videos[0].relight().unwrap();
+        assert_eq!(
+            (lit.preset.as_str(), lit.strength, lit.angle),
+            ("warm_key", 0.6, 315.0)
+        );
+        relight(&mut session, "custom", 1.0, "#33aaFF").unwrap();
+        let lit = session.draft().materials.videos[0].relight().unwrap();
+        assert_eq!(
+            (lit.preset.as_str(), lit.color.as_str()),
+            ("custom", "#33aaFF")
+        );
+        assert_eq!(level(&session), Some(Algorithm::HD));
+        let before = session.draft().clone();
+        for (preset, strength, color) in [
+            ("Warm Key", 1.0, ""),
+            ("../x", 1.0, ""),
+            ("warm", 1.5, ""),
+            ("warm", f64::NAN, ""),
+            ("warm", 1.0, "red"),
+            ("warm", 1.0, "#12345g"),
+        ] {
+            assert_eq!(
+                relight(&mut session, preset, strength, color),
+                Err(EditError::Relight),
+                "{preset} {strength} {color}"
+            );
+        }
+        assert_eq!(
+            relight(&mut session, &"a".repeat(65), 1.0, ""),
+            Err(EditError::Relight)
+        );
+        assert_eq!(session.draft(), &before);
+        relight(&mut session, "", 1.0, "").unwrap();
+        assert!(session.draft().materials.videos[0].relight().is_none());
+        assert_eq!(level(&session), Some(Algorithm::HD));
+        session.undo().unwrap();
+        assert_eq!(
+            session.draft().materials.videos[0]
+                .relight()
+                .map(|lit| lit.preset),
+            Some("custom".into())
+        );
     }
 
     #[test]

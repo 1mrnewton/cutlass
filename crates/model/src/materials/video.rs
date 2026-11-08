@@ -76,8 +76,41 @@ pub struct Algorithm {
     /// [`Algorithm::FRAME_RATES`]. 0 or below is off.
     #[serde(default)]
     pub level: i64,
+    /// For Relight, the light's preset id, which `cutlass-effects` names.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub preset: String,
+    /// For Relight, how strongly the light replaces the clip's own, 0 to
+    /// 1. Absent is 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strength: Option<f64>,
+    /// For Relight's Custom light, its color as `#rrggbb`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub color: String,
+    /// For Relight's Custom light, where it comes from in degrees: 0 from
+    /// the right, 90 from above, 180 from the left. Absent is 135.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub angle: Option<f64>,
     #[serde(flatten, default)]
     pub rest: Map<String, Value>,
+}
+
+/// A clip's Relight: a preset light, or the Custom one, at a strength.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Relight {
+    pub preset: String,
+    /// 0 to 1.
+    pub strength: f64,
+    /// The Custom light's color as `#rrggbb`, empty for the preset's own.
+    pub color: String,
+    /// The Custom light's direction in degrees.
+    pub angle: f64,
+}
+
+impl Relight {
+    /// The preset id of the light set by hand.
+    pub const CUSTOM: &'static str = "custom";
+    /// A Custom light's direction when none is stored: from the upper left.
+    pub const DEFAULT_ANGLE: f64 = 135.0;
 }
 
 impl Algorithm {
@@ -98,6 +131,9 @@ impl Algorithm {
     pub const COMPLEMENT_FRAME: &'static str = "ComplementFrame";
     /// The frame rates Optical flow offers.
     pub const FRAME_RATES: [i64; 3] = [30, 50, 60];
+    /// Cutlass's name for Relight, which lights a clip again from the depth
+    /// of its frames.
+    pub const RELIGHT: &'static str = "Relight";
 
     /// Whether the algorithm runs.
     #[must_use]
@@ -123,6 +159,28 @@ impl MaterialVideo {
     #[must_use]
     pub fn interpolate(&self) -> Option<&Algorithm> {
         self.algorithm(Algorithm::COMPLEMENT_FRAME)
+    }
+
+    /// The clip's Relight, when it has one that is on with a preset.
+    #[must_use]
+    pub fn relight(&self) -> Option<Relight> {
+        let algorithm = self
+            .algorithm(Algorithm::RELIGHT)
+            .filter(|algorithm| !algorithm.preset.is_empty())?;
+        let strength = algorithm
+            .strength
+            .filter(|strength| strength.is_finite())
+            .map_or(1.0, |strength| strength.clamp(0.0, 1.0));
+        let angle = algorithm
+            .angle
+            .filter(|angle| angle.is_finite())
+            .unwrap_or(Relight::DEFAULT_ANGLE);
+        Some(Relight {
+            preset: algorithm.preset.clone(),
+            strength,
+            color: algorithm.color.clone(),
+            angle,
+        })
     }
 
     /// The clip's algorithm named `kind`, when it has one that is on.
@@ -334,6 +392,46 @@ mod tests {
         .unwrap();
         assert!(only.denoise().is_none());
         assert!(only.algorithm("Deflicker").is_none());
+    }
+
+    #[test]
+    fn a_relight_reads_its_preset_strength_and_light_and_others_stay_bare() {
+        let video: MaterialVideo = serde_json::from_str(
+            r##"{"video_algorithm":{"algorithms":[{"type":"Relight","level":1,"preset":"custom","strength":0.4,"color":"#ff8800","angle":30},{"type":"QualityEnhance","level":1}]}}"##,
+        )
+        .unwrap();
+        assert_eq!(
+            video.relight(),
+            Some(Relight {
+                preset: "custom".into(),
+                strength: 0.4,
+                color: "#ff8800".into(),
+                angle: 30.0,
+            })
+        );
+        let back = serde_json::to_string(&video).unwrap();
+        assert!(back.contains(r#""strength":0.4"#), "{back}");
+        // Fields Relight does not use are not written for the others.
+        assert!(
+            back.contains(r#"{"type":"QualityEnhance","level":1}"#),
+            "{back}"
+        );
+        let bare: MaterialVideo = serde_json::from_str(
+            r#"{"video_algorithm":{"algorithms":[{"type":"Relight","level":1,"preset":"warm","strength":7}]}}"#,
+        )
+        .unwrap();
+        let relight = bare.relight().unwrap();
+        assert_eq!(
+            (relight.strength, relight.angle),
+            (1.0, Relight::DEFAULT_ANGLE)
+        );
+        for off in [
+            r#"{"video_algorithm":{"algorithms":[{"type":"Relight","level":0,"preset":"warm"}]}}"#,
+            r#"{"video_algorithm":{"algorithms":[{"type":"Relight","level":1}]}}"#,
+        ] {
+            let video: MaterialVideo = serde_json::from_str(off).unwrap();
+            assert!(video.relight().is_none(), "{off}");
+        }
     }
 
     #[test]

@@ -38,8 +38,6 @@ pub(crate) struct Fixes {
     pub(crate) dc_clip: bool,
     /// The quarter-sample filter of libavcodec builds before 4653.
     pub(crate) legacy_qpel: bool,
-    /// Direct mode predicts 16x16 even with quarter samples.
-    pub(crate) direct_blocksize: bool,
     /// DivX 5.00 build 413's sprite trajectory.
     pub(crate) divx_413: bool,
     /// Quarter-sample field luma as two 8x8 halves, which libavcodec's
@@ -65,7 +63,6 @@ impl Fixes {
             edge: at_most(enc.xvid_build, 12) || below(enc.lavc_build, 4670) || below(divx, 500),
             dc_clip: at_most(enc.xvid_build, 32) || at_most(enc.lavc_build, 4712),
             legacy_qpel: below(enc.lavc_build, 4653),
-            direct_blocksize: below(enc.lavc_build, 4655) || divx.is_some(),
             divx_413: divx == Some(500) && build == Some(413),
             qpel_field_halves: enc.lavc_build.is_some(),
             xvid_ilace: false,
@@ -1350,7 +1347,11 @@ impl Vop<'_> {
             }
             _ => {
                 let (f, b) = pair(rec.mv[0], t.pp, t.pb);
-                if self.layer.quarter && !self.layer.fixes.direct_blocksize {
+                // Quarter-sample direct mode filters each 8x8 block on its
+                // own (Section 7.6.9.5). DivX 5 and libavcodec before build
+                // 4655 encode as if 16x16; FFmpeg detects them but decodes
+                // 8x8 anyway, and so does this decoder.
+                if self.layer.quarter {
                     (Motion::Four([f; 4]), Motion::Four([b; 4]))
                 } else {
                     (Motion::Frame(f), Motion::Frame(b))

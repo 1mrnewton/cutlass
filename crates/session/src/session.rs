@@ -1044,6 +1044,43 @@ mod tests {
     }
 
     #[test]
+    fn the_undo_stack_drops_its_oldest_steps_past_its_byte_budget() {
+        let (mut stack, track) = session();
+        let step = crate::history::json_bytes(stack.draft());
+        // Room for about three steps of this size.
+        stack.history.set_byte_budget(step * 3 + step / 2);
+        for index in 0..6_u64 {
+            let start = i64::try_from(index).unwrap() * 1_000_000;
+            stack
+                .apply(
+                    index,
+                    &[place(&track, &format!("c{index}"), start, 1_000_000)],
+                )
+                .unwrap();
+        }
+        assert!(
+            stack.history.undo_bytes() <= step * 4,
+            "the stack kept too much"
+        );
+        let mut undone = 0;
+        while stack.undo().is_ok() {
+            undone += 1;
+        }
+        assert!((1..6).contains(&undone), "{undone} steps were kept");
+        assert_eq!(stack.history.undo_bytes(), 0);
+
+        // A single step larger than the budget still stays.
+        let (mut tight, track) = session();
+        tight.history.set_byte_budget(1);
+        tight.apply(0, &[place(&track, "a", 0, 1_000_000)]).unwrap();
+        tight
+            .apply(1, &[place(&track, "b", 1_000_000, 1_000_000)])
+            .unwrap();
+        tight.undo().unwrap();
+        assert_eq!(tight.undo().unwrap_err(), EditError::EmptyUndo);
+    }
+
+    #[test]
     fn a_place_naming_no_material_is_refused_and_the_draft_stays() {
         let (mut session, track) = session();
         let before = session.draft().clone();

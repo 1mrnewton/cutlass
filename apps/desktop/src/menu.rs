@@ -159,11 +159,16 @@ const AUDIO: &[Entry] = &[
     SEP,
     done("transcript", "Transcript", ""),
     sub(
-        "isolate-voice",
+        "separate-audio",
         "Separate audio",
         &[
-            todo("isolate-keep-voice", "Keep voice", ""),
-            todo("isolate-keep-background", "Keep background", ""),
+            todo("separate-vocals", "Vocals", ""),
+            todo("separate-instruments", "Instruments", ""),
+            todo("separate-drums", "Drums", ""),
+            todo("separate-guitar", "Guitar", ""),
+            todo("separate-bass", "Bass", ""),
+            todo("separate-strings", "Strings", ""),
+            todo("separate-others", "Others", ""),
         ],
     ),
     done("sync", "Sync video and audio", ""),
@@ -978,7 +983,7 @@ mod tests {
                 "fade",
                 "beat",
                 "transcript",
-                "isolate-voice",
+                "separate-audio",
                 "sync",
                 "compound",
                 "multicam",
@@ -1005,7 +1010,7 @@ mod tests {
                 "generate-video",
                 "copy-attributes",
                 "paste-attributes",
-                "isolate-voice",
+                "separate-audio",
                 "save-preset",
             ]
         );

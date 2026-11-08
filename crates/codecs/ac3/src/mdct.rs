@@ -171,6 +171,7 @@ impl Transform {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn window(&self) -> &[f32; COEFS] {
         &self.window
     }

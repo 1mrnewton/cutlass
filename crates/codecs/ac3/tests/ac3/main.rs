@@ -13,4 +13,6 @@ mod common;
 #[cfg(test)]
 mod decoder;
 #[cfg(test)]
+mod encoder;
+#[cfg(test)]
 mod fate;

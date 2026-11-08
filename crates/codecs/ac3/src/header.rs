@@ -12,10 +12,6 @@ pub const SYNCWORD: u16 = 0x0B77;
 /// Largest syncframe in bytes: E-AC-3 `frmsiz` is 11 bits of 16-bit words.
 pub const MAX_FRAME_BYTES: usize = 4096;
 
-/// Smallest syncframe either syntax can describe: AC-3 `frmsizecod` 0 at
-/// 48 kHz, 64 words.
-const MIN_AC3_FRAME_BYTES: usize = 128;
-
 /// Bytes [`probe`] reads.
 pub const PROBE_BYTES: usize = 6;
 

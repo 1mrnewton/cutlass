@@ -169,9 +169,10 @@ pub(crate) fn idct6(x: &mut [f32; 6]) {
     *x = out;
 }
 
-/// The forward DCT the encoder uses: the transpose of `idct6` scaled so
-/// that `idct6(dct6(x)) == x`.
-pub(crate) fn dct6(c: &mut [f32; 6]) {
+/// The forward DCT an AHT encoder would use: the transpose of `idct6`
+/// scaled so that `idct6(dct6(x)) == x`.
+#[cfg(test)]
+fn dct6(c: &mut [f32; 6]) {
     let mut out = [0.0f32; 6];
     for (j, value) in out.iter_mut().enumerate() {
         let r = if j == 0 { FRAC_1_SQRT_2 } else { 1.0 };

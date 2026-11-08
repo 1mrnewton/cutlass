@@ -123,6 +123,7 @@ impl BitWriter {
     }
 
     /// The low `count` bits of a two's complement value.
+    #[cfg(test)]
     pub(crate) fn signed(&mut self, count: u32, value: i32) {
         self.put(count, value as u32);
     }

@@ -1,12 +1,14 @@
-//! A Simple-profile encoder.
+//! A Simple-profile encoder, and the Advanced Simple encoder export uses.
 //!
 //! An I-VOP, then P-VOPs: one or four motion vectors per macroblock, no
 //! AC prediction. [`encode_advanced`] puts a B-VOP between references and
-//! can use quarter-sample motion and the MPEG quantiser. Rate control is
-//! not emitted here yet. The coded size is a
-//! whole number of macroblocks; a caller with another size is refused
-//! rather than cropped. Motion search stays inside ±8 pixels so every
-//! vector fits `fcode` 1.
+//! can use quarter-sample motion and the MPEG quantiser. [`Pictures`] is
+//! the export path: the same tools, quarter-sample on, H.263 quant, and a
+//! quantiser that follows a bitrate. GMC, sprites, interlace, data
+//! partitioning, resync and RVLC are not written. The batch encoders
+//! refuse a size that is not a whole number of macroblocks. [`Pictures`]
+//! pads one and keeps the visible size in the layer. Motion search stays
+//! inside ±8 pixels so every vector fits `fcode` 1.
 
 use std::sync::OnceLock;
 
@@ -1620,6 +1622,540 @@ fn search_frame(
     }
 }
 
+/// One accepted picture, padded out to whole macroblocks.
+struct Held {
+    y: Vec<u8>,
+    u: Vec<u8>,
+    v: Vec<u8>,
+    pts: i64,
+    duration: i64,
+}
+
+/// One VOP, without the object-layer headers.
+pub(crate) struct Access {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) pts: i64,
+    pub(crate) duration: i64,
+    pub(crate) keyframe: bool,
+}
+
+/// A picture the export encoder has not padded yet.
+pub(crate) struct PictureIn<'a> {
+    pub(crate) y: &'a [u8],
+    pub(crate) u: &'a [u8],
+    pub(crate) v: &'a [u8],
+    pub(crate) pts: i64,
+    pub(crate) duration: i64,
+    pub(crate) timescale: u32,
+    pub(crate) keyframe: bool,
+}
+
+/// Advanced Simple pictures for export.
+///
+/// The first picture is an I-VOP. Each later picture is held so the next
+/// one can be a P-VOP and the held one a B-VOP between them. `low_delay`
+/// is clear, so a decoder shows them in presentation order. The quantiser
+/// starts from the bitrate and moves when the bytes spent leave the budget.
+/// Zero bitrate keeps the starting quantiser.
+pub(crate) struct Pictures {
+    width: u32,
+    height: u32,
+    stride: usize,
+    chroma_stride: usize,
+    quant: i32,
+    initial: i32,
+    bitrate: u32,
+    constant: bool,
+    spent: u64,
+    budget: u64,
+    window: i64,
+    resolution: u32,
+    headers: Vec<u8>,
+    reference: Frame,
+    reference_pts: i64,
+    coded: bool,
+    mv: Vec<(i32, i32)>,
+    clock: TimeBase,
+    held: Option<Held>,
+    drained: bool,
+}
+
+impl Pictures {
+    /// `bitrate` is bits a second. Zero keeps one quantiser for every picture.
+    pub(crate) fn open(
+        width: u32,
+        height: u32,
+        bitrate: u32,
+        constant: bool,
+    ) -> Result<Self, CodecError> {
+        if width == 0 || height == 0 || !width.is_multiple_of(2) || !height.is_multiple_of(2) {
+            return Err(CodecError::InvalidApi { what: "frame size" });
+        }
+        if width > 8191 || height > 8191 || u64::from(width) * u64::from(height) > 8192 * 8192 {
+            return Err(CodecError::Limit { what: "frame size" });
+        }
+        let mbw = usize::try_from(width.div_ceil(16)).unwrap_or(0);
+        let mbh = usize::try_from(height.div_ceil(16)).unwrap_or(0);
+        if mbw == 0 || mbh == 0 {
+            return Err(CodecError::InvalidApi { what: "frame size" });
+        }
+        let mut reference = Frame::new(mbw, mbh);
+        reference.clip_width =
+            i32::try_from(width).map_err(|_| CodecError::Limit { what: "frame size" })?;
+        reference.clip_height =
+            i32::try_from(height).map_err(|_| CodecError::Limit { what: "frame size" })?;
+        let quant = initial_quant(bitrate, width, height);
+        Ok(Self {
+            width,
+            height,
+            stride: mbw * 16,
+            chroma_stride: mbw * 8,
+            quant,
+            initial: quant,
+            bitrate,
+            constant,
+            spent: 0,
+            budget: 0,
+            window: 0,
+            resolution: 0,
+            headers: Vec::new(),
+            reference,
+            reference_pts: 0,
+            coded: false,
+            mv: vec![(0, 0); mbw * 2 * mbh * 2],
+            clock: TimeBase::default(),
+            held: None,
+            drained: false,
+        })
+    }
+
+    pub(crate) fn headers(&self) -> &[u8] {
+        &self.headers
+    }
+
+    #[cfg(test)]
+    pub(crate) fn quant(&self) -> i32 {
+        self.quant
+    }
+
+    pub(crate) fn push(&mut self, input: PictureIn<'_>) -> Result<Vec<Access>, CodecError> {
+        self.prepare(input.timescale)?;
+        self.drained = false;
+        let duration = if input.duration <= 0 {
+            1
+        } else {
+            input.duration
+        };
+        let picture = self.store(input.y, input.u, input.v, input.pts, duration)?;
+        if input.keyframe || !self.coded {
+            return self.intra(picture);
+        }
+        let Some(between) = self.held.take() else {
+            self.held = Some(picture);
+            return Ok(Vec::new());
+        };
+        self.pair(between, picture)
+    }
+
+    pub(crate) fn drain(&mut self) -> Result<Vec<Access>, CodecError> {
+        if self.drained {
+            return Ok(Vec::new());
+        }
+        self.drained = true;
+        if self.coded
+            && let Some(held) = &self.held
+        {
+            self.time_ok(held.pts)?;
+        }
+        let Some(held) = self.held.take() else {
+            return Ok(Vec::new());
+        };
+        if !self.coded {
+            let bytes = self.encode_i(&held)?;
+            self.coded = true;
+            self.finish_reference(&held, bytes.len());
+            return Ok(vec![access(bytes, &held, true)]);
+        }
+        let bytes = self.encode_p(&held)?;
+        self.finish_reference(&held, bytes.len());
+        Ok(vec![access(bytes, &held, false)])
+    }
+
+    pub(crate) fn reset(&mut self) {
+        self.quant = self.initial;
+        self.spent = 0;
+        self.budget = 0;
+        self.window = 0;
+        self.reference_pts = 0;
+        self.coded = false;
+        self.clock = TimeBase::default();
+        self.held = None;
+        self.drained = false;
+        self.mv.fill((0, 0));
+    }
+
+    fn prepare(&mut self, timescale: u32) -> Result<(), CodecError> {
+        if timescale == 0 || timescale > 65_535 {
+            return Err(CodecError::InvalidApi {
+                what: "time resolution",
+            });
+        }
+        if self.resolution == 0 {
+            self.resolution = timescale;
+            self.headers = layer_bytes(self.width, self.height, timescale);
+            return Ok(());
+        }
+        if timescale != self.resolution {
+            return Err(CodecError::InvalidApi {
+                what: "time resolution",
+            });
+        }
+        Ok(())
+    }
+
+    fn intra(&mut self, picture: Held) -> Result<Vec<Access>, CodecError> {
+        if let Some(held) = &self.held {
+            self.time_ok(held.pts)?;
+            let later = ticks_of(picture.pts)?;
+            let earlier = ticks_of(held.pts)?;
+            if later / self.resolution.max(1) < earlier / self.resolution.max(1) {
+                return Err(CodecError::InvalidApi {
+                    what: "picture time",
+                });
+            }
+        }
+        let mut packets = Vec::new();
+        if let Some(held) = self.held.take() {
+            let bytes = self.encode_p(&held)?;
+            self.finish_reference(&held, bytes.len());
+            packets.push(access(bytes, &held, false));
+        }
+        self.time_ok(picture.pts)?;
+        let bytes = self.encode_i(&picture)?;
+        self.coded = true;
+        self.finish_reference(&picture, bytes.len());
+        packets.push(access(bytes, &picture, true));
+        Ok(packets)
+    }
+
+    fn pair(&mut self, between: Held, picture: Held) -> Result<Vec<Access>, CodecError> {
+        let (pp, pb) = match distances(self.reference_pts, picture.pts, between.pts) {
+            Ok(times) => times,
+            Err(error) => {
+                self.held = Some(between);
+                return Err(error);
+            }
+        };
+        if let Err(error) = self.time_ok(picture.pts) {
+            self.held = Some(between);
+            return Err(error);
+        }
+        let past = self.reference.clone();
+        let predicted = self.encode_p(&picture)?;
+        self.note(predicted.len(), picture.duration);
+        let bidirectional = self.encode_b(&between, &past, pp, pb)?;
+        self.note(bidirectional.len(), between.duration);
+        self.reference_pts = picture.pts;
+        Ok(vec![
+            access(predicted, &picture, false),
+            access(bidirectional, &between, false),
+        ])
+    }
+
+    fn finish_reference(&mut self, picture: &Held, bytes: usize) {
+        self.note(bytes, picture.duration);
+        self.reference_pts = picture.pts;
+    }
+
+    fn encode_i(&mut self, picture: &Held) -> Result<Vec<u8>, CodecError> {
+        let mut out = BitWriter::new();
+        start(&mut out, 0xB6);
+        let planes = planes_of(picture, self.stride);
+        let quant = self.q();
+        let ticks = ticks_of(picture.pts)?;
+        let resolution = self.resolution;
+        write_i_vop(
+            &mut out,
+            &planes,
+            quant,
+            &mut self.reference,
+            &mut self.mv,
+            &mut When {
+                ticks,
+                resolution,
+                base: &mut self.clock,
+            },
+        );
+        Ok(out.finish())
+    }
+
+    fn encode_p(&mut self, picture: &Held) -> Result<Vec<u8>, CodecError> {
+        let mut out = BitWriter::new();
+        start(&mut out, 0xB6);
+        let planes = planes_of(picture, self.stride);
+        let quant = self.q();
+        let ticks = ticks_of(picture.pts)?;
+        let resolution = self.resolution;
+        write_p_vop(
+            &mut out,
+            &planes,
+            quant,
+            &mut When {
+                ticks,
+                resolution,
+                base: &mut self.clock,
+            },
+            &mut self.reference,
+            &mut self.mv,
+            true,
+        );
+        Ok(out.finish())
+    }
+
+    fn encode_b(
+        &mut self,
+        picture: &Held,
+        past: &Frame,
+        pp: i32,
+        pb: i32,
+    ) -> Result<Vec<u8>, CodecError> {
+        let mut out = BitWriter::new();
+        start(&mut out, 0xB6);
+        let planes = planes_of(picture, self.stride);
+        let quant = self.q();
+        let ticks = ticks_of(picture.pts)?;
+        let resolution = self.resolution;
+        write_b_vop(
+            &mut out,
+            &planes,
+            quant,
+            &mut When {
+                ticks,
+                resolution,
+                base: &mut self.clock,
+            },
+            &Refs {
+                past,
+                future: &self.reference,
+                pp,
+                pb,
+                quarter: true,
+            },
+        );
+        Ok(out.finish())
+    }
+
+    fn q(&self) -> Q {
+        Q {
+            scale: self.quant.clamp(1, 31),
+            mpeg: false,
+        }
+    }
+
+    fn time_ok(&self, pts: i64) -> Result<(), CodecError> {
+        let ticks = ticks_of(pts)?;
+        let seconds = ticks / self.resolution.max(1);
+        if seconds < self.clock.seconds {
+            return Err(CodecError::InvalidApi {
+                what: "picture time",
+            });
+        }
+        Ok(())
+    }
+
+    fn note(&mut self, bytes: usize, duration: i64) {
+        if self.bitrate == 0 || self.resolution == 0 || duration <= 0 {
+            return;
+        }
+        let bits = u64::try_from(bytes).unwrap_or(u64::MAX).saturating_mul(8);
+        let target = u64::from(self.bitrate).saturating_mul(u64::try_from(duration).unwrap_or(0))
+            / u64::from(self.resolution);
+        self.budget = self.budget.saturating_add(target);
+        self.spent = self.spent.saturating_add(bits);
+        self.quant = next_quant(self.quant, self.spent, self.budget);
+        if self.constant {
+            self.window = self.window.saturating_add(duration);
+            if self.window >= i64::from(self.resolution) {
+                self.window = 0;
+                self.spent = 0;
+                self.budget = 0;
+            }
+        }
+    }
+
+    fn store(
+        &self,
+        y: &[u8],
+        u: &[u8],
+        v: &[u8],
+        pts: i64,
+        duration: i64,
+    ) -> Result<Held, CodecError> {
+        let width = usize::try_from(self.width).unwrap_or(0);
+        let height = usize::try_from(self.height).unwrap_or(0);
+        let rows = self.reference.mbh * 16;
+        let chroma_rows = self.reference.mbh * 8;
+        Ok(Held {
+            y: pad_plane(y, width, height, self.stride, rows)?,
+            u: pad_plane(u, width / 2, height / 2, self.chroma_stride, chroma_rows)?,
+            v: pad_plane(v, width / 2, height / 2, self.chroma_stride, chroma_rows)?,
+            pts,
+            duration,
+        })
+    }
+}
+
+fn access(bytes: Vec<u8>, picture: &Held, keyframe: bool) -> Access {
+    Access {
+        bytes,
+        pts: picture.pts,
+        duration: picture.duration,
+        keyframe,
+    }
+}
+
+fn planes_of(picture: &Held, stride: usize) -> Planes<'_> {
+    Planes {
+        y: &picture.y,
+        u: &picture.u,
+        v: &picture.v,
+        stride,
+    }
+}
+
+fn layer_bytes(width: u32, height: u32, resolution: u32) -> Vec<u8> {
+    let mut out = BitWriter::new();
+    start(&mut out, 0x00);
+    start(&mut out, 0x20);
+    write_vol(
+        &mut out,
+        width,
+        height,
+        Layer {
+            advanced: true,
+            quarter: true,
+            mpeg: false,
+            low_delay: false,
+            resolution,
+        },
+    );
+    out.finish()
+}
+
+fn ticks_of(pts: i64) -> Result<u32, CodecError> {
+    u32::try_from(pts).map_err(|_| CodecError::InvalidApi {
+        what: "picture time",
+    })
+}
+
+fn distances(past: i64, future: i64, between: i64) -> Result<(i32, i32), CodecError> {
+    let bad = CodecError::InvalidApi {
+        what: "picture time",
+    };
+    let pp = future.checked_sub(past).ok_or(bad)?;
+    let pb = between.checked_sub(past).ok_or(bad)?;
+    if pp <= 0 || pb <= 0 || pb >= pp {
+        return Err(bad);
+    }
+    let pp = i32::try_from(pp).map_err(|_| bad)?;
+    let pb = i32::try_from(pb).map_err(|_| bad)?;
+    Ok((pp, pb))
+}
+
+fn pad_plane(
+    src: &[u8],
+    width: usize,
+    height: usize,
+    stride: usize,
+    rows: usize,
+) -> Result<Vec<u8>, CodecError> {
+    if width == 0 || height == 0 || stride < width || rows < height {
+        return Err(CodecError::InvalidApi { what: "frame size" });
+    }
+    let need = width
+        .checked_mul(height)
+        .ok_or(CodecError::Limit { what: "frame size" })?;
+    if src.len() < need {
+        return Err(CodecError::InvalidApi {
+            what: "plane length",
+        });
+    }
+    let bytes = stride
+        .checked_mul(rows)
+        .ok_or(CodecError::Limit { what: "frame size" })?;
+    let mut out = vec![0u8; bytes];
+    for y in 0..height {
+        let from = y * width;
+        let dst = y * stride;
+        out[dst..dst + width].copy_from_slice(&src[from..from + width]);
+        let edge = src[from + width - 1];
+        out[dst + width..dst + stride].fill(edge);
+    }
+    let last = (height - 1) * stride;
+    for y in height..rows {
+        out.copy_within(last..last + stride, y * stride);
+    }
+    Ok(out)
+}
+
+fn initial_quant(bitrate: u32, width: u32, height: u32) -> i32 {
+    if bitrate == 0 || width == 0 || height == 0 {
+        return 8;
+    }
+    let pixels = u64::from(width)
+        .saturating_mul(u64::from(height))
+        .saturating_mul(30);
+    if pixels == 0 {
+        return 8;
+    }
+    let bpp_milli = u64::from(bitrate).saturating_mul(1000) / pixels;
+    if bpp_milli == 0 {
+        return 28;
+    }
+    (16 + 4 * log2_ratio(200, bpp_milli)).clamp(4, 28)
+}
+
+fn log2_ratio(numer: u64, denom: u64) -> i32 {
+    if numer == 0 || denom == 0 {
+        return 0;
+    }
+    let mut n = numer;
+    let mut d = denom;
+    let mut shift = 0i32;
+    while n < d && shift > -8 {
+        n = n.saturating_mul(2);
+        shift -= 1;
+    }
+    while n >= d.saturating_mul(2) && shift < 8 {
+        d = d.saturating_mul(2);
+        shift += 1;
+    }
+    shift
+}
+
+fn next_quant(quant: i32, spent: u64, budget: u64) -> i32 {
+    if budget == 0 {
+        return quant.clamp(1, 31);
+    }
+    let ratio = spent.saturating_mul(100) / budget;
+    let stepped = if ratio > 150 {
+        quant + 4
+    } else if ratio > 120 {
+        quant + 2
+    } else if ratio > 105 {
+        quant + 1
+    } else if ratio < 50 {
+        quant - 4
+    } else if ratio < 80 {
+        quant - 2
+    } else if ratio < 95 {
+        quant - 1
+    } else {
+        quant
+    };
+    stepped.clamp(1, 31)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{compensate, encode_advanced, encode_intra, encode_pictures};
@@ -2184,5 +2720,161 @@ mod tests {
         let refused = encode_intra(&y, &c, &c, 16, 8, 4);
         assert!(matches!(refused, Err(CodecError::InvalidApi { .. })));
         assert!(encode_intra(&y, &c, &c, 16, 16, 0).is_err());
+    }
+
+    #[test]
+    fn quant_moves_toward_the_budget() {
+        assert_eq!(super::next_quant(10, 200, 100), 14);
+        assert_eq!(super::next_quant(10, 40, 100), 6);
+        assert_eq!(super::next_quant(1, 10, 100), 1);
+        assert_eq!(super::next_quant(31, 300, 100), 31);
+        assert_eq!(super::next_quant(8, 100, 100), 8);
+    }
+
+    #[test]
+    fn a_padded_picture_keeps_its_visible_size() {
+        let (headers, packets, pictures) = coded_movie(64, 40, 0, 4);
+        assert_eq!(pictures.len(), 4);
+        assert_eq!(pictures[0].len(), 64 * 40 * 3 / 2);
+        assert!(
+            !headers.windows(4).any(|w| w == [0, 0, 1, 0xB6]),
+            "a VOP does not belong in the layer headers"
+        );
+        assert!(
+            packets
+                .iter()
+                .all(|packet| packet.starts_with(&[0, 0, 1, 0xB6]))
+        );
+        let Some(ffmpeg) = ffmpeg_bin() else {
+            eprintln!("ffmpeg is not installed; the padded picture was not checked independently");
+            return;
+        };
+        let mut stream = headers;
+        for packet in &packets {
+            stream.extend_from_slice(packet);
+        }
+        let mut ours = Vec::new();
+        for picture in &pictures {
+            ours.extend_from_slice(picture);
+        }
+        ffmpeg_matches(&ffmpeg, &stream, &ours, "padded");
+    }
+
+    #[test]
+    fn a_second_of_motion_stays_near_the_requested_bitrate() {
+        for target in [200_000u32, 400_000, 800_000] {
+            let mut encoder = super::Pictures::open(64, 48, target, false).expect("open");
+            let mut bytes = 0usize;
+            for n in 0..30usize {
+                let (y, u, v) = moving(64, 48, n);
+                let packets = encoder
+                    .push(super::PictureIn {
+                        y: &y,
+                        u: &u,
+                        v: &v,
+                        pts: i64::try_from(n).unwrap_or(0),
+                        duration: 1,
+                        timescale: 30,
+                        keyframe: false,
+                    })
+                    .expect("push");
+                for packet in packets {
+                    bytes += packet.bytes.len();
+                }
+            }
+            for packet in encoder.drain().expect("drain") {
+                bytes += packet.bytes.len();
+            }
+            bytes += encoder.headers().len();
+            let bits = bytes.saturating_mul(8);
+            let wanted = usize::try_from(target).unwrap_or(0);
+            let low = wanted * 3 / 4;
+            let high = wanted * 5 / 4;
+            assert!(
+                bits >= low && bits <= high,
+                "target {target}: payload {bits} bits, quant {}, wanted {low}..={high}",
+                encoder.quant()
+            );
+        }
+    }
+
+    /// Pictures through the next second, so the time base increments, and
+    /// FFmpeg reconstructs the same samples.
+    #[test]
+    fn pictures_past_one_second_match_ffmpeg() {
+        let (headers, packets, pictures) = coded_movie(64, 48, 120_000, 32);
+        assert!(pictures.len() > 30, "{}", pictures.len());
+        let Some(ffmpeg) = ffmpeg_bin() else {
+            eprintln!(
+                "ffmpeg is not installed; the picture past one second was not checked independently"
+            );
+            return;
+        };
+        let mut stream = headers;
+        for packet in &packets {
+            stream.extend_from_slice(packet);
+        }
+        let mut ours = Vec::new();
+        for picture in &pictures {
+            ours.extend_from_slice(picture);
+        }
+        ffmpeg_matches(&ffmpeg, &stream, &ours, "one-second");
+    }
+
+    /// `count` moving pictures. The returned pictures are display order.
+    fn coded_movie(
+        width: usize,
+        height: usize,
+        bitrate: u32,
+        count: usize,
+    ) -> (Vec<u8>, Vec<Vec<u8>>, Vec<Vec<u8>>) {
+        let mut encoder =
+            super::Pictures::open(width as u32, height as u32, bitrate, false).expect("open");
+        let mut packets = Vec::new();
+        for n in 0..count {
+            let (y, u, v) = moving(width, height, n);
+            packets.extend(
+                encoder
+                    .push(super::PictureIn {
+                        y: &y,
+                        u: &u,
+                        v: &v,
+                        pts: i64::try_from(n).unwrap_or(0),
+                        duration: 1,
+                        timescale: 30,
+                        keyframe: false,
+                    })
+                    .expect("push"),
+            );
+        }
+        packets.extend(encoder.drain().expect("drain"));
+        let headers = encoder.headers().to_vec();
+        let mut stream = headers.clone();
+        let bytes: Vec<Vec<u8>> = packets.into_iter().map(|packet| packet.bytes).collect();
+        for packet in &bytes {
+            stream.extend_from_slice(packet);
+        }
+        let pictures = decode_all(&stream);
+        (headers, bytes, pictures)
+    }
+
+    fn moving(width: usize, height: usize, n: usize) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+        let shift = n * 2;
+        let mut y = vec![0u8; width * height];
+        let mut u = vec![0u8; (width / 2) * (height / 2)];
+        let mut v = vec![0u8; (width / 2) * (height / 2)];
+        for row in 0..height {
+            for col in 0..width {
+                y[row * width + col] = (((row + col + shift) * 3 + (col ^ row)) % 180 + 20) as u8;
+            }
+        }
+        for row in 0..height / 2 {
+            for col in 0..width / 2 {
+                let at = row * (width / 2) + col;
+                u[at] = ((col * 5 + row + shift) % 80 + 80) as u8;
+                v[at] = ((row * 5 + col + shift / 2) % 80 + 80) as u8;
+            }
+        }
+        (y, u, v)
     }
 }

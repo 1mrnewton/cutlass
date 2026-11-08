@@ -1,16 +1,24 @@
-//! The MPEG-4 Visual decoder on the engine's codec traits.
+//! MPEG-4 Visual on the engine's codec traits.
 //!
 //! Playback opens a [`Decoder`] through [`DecodeFactory::open`] and takes
 //! packed 4:2:0 pictures in display order. The decoder configuration is
 //! the `esds` DecoderSpecificInfo: the VOS, visual object and VOL headers.
+//! Export opens an [`Encoder`](cutlass_encode::VideoEncoder) the same way.
+//! Each packet is one VOP. The configuration is the video object and the
+//! layer, with no picture in it.
 
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use cutlass_decode::{
     CodecError, CodecId, CodecParams, ColorMatrix, ColorPrimaries, DecodeFactory, Decoder, Output,
     Packet, PictureInfo, PictureOutput, PixelFormat, SideData, Transfer,
 };
+use cutlass_encode::{EncodeFactory, VideoEncoder, VideoInput};
+
+use crate::enc::Pictures;
 
 use crate::dec::{self, Image};
 use crate::header::Colour;
@@ -23,8 +31,20 @@ pub fn register_engine_decoders(factory: &mut DecodeFactory) {
     factory.register(CodecId::Mpeg4, open_engine_decoder);
 }
 
+/// Registers the MPEG-4 Visual encoder that export opens.
+///
+/// A platform encoder registered earlier is asked first. This one runs
+/// when that opener is absent or declines the parameters.
+pub fn register_engine_encoders(factory: &mut EncodeFactory) {
+    factory.register_video(CodecId::Mpeg4, open_engine_encoder);
+}
+
 fn open_engine_decoder(params: &CodecParams) -> Result<Box<dyn Decoder>, CodecError> {
     Ok(Box::new(EngineDecoder::open(params)?))
+}
+
+fn open_engine_encoder(params: &CodecParams) -> Result<Box<dyn VideoEncoder>, CodecError> {
+    Ok(Box::new(EngineEncoder::open(params)?))
 }
 
 /// MPEG-4 Visual for playback: one packed 4:2:0 picture per displayed VOP.
@@ -174,9 +194,131 @@ impl Decoder for EngineDecoder {
     }
 }
 
+/// MPEG-4 Visual for export.
+///
+/// Pictures are 4:2:0. RGBA in the parameters is accepted because export
+/// converts each frame before [`VideoEncoder::push`]. The stream is
+/// Advanced Simple: an I-VOP, then P-VOPs with the picture before each as
+/// a B-VOP, quarter-sample motion, and the H.263 quantiser. A named bitrate
+/// moves the quantiser. Zero keeps the starting one. GMC, sprites,
+/// interlace, data partitioning, resync and RVLC are not written. A height
+/// or width that is not a multiple of 16 is padded, and the layer keeps
+/// the visible size.
+pub struct EngineEncoder {
+    inner: Pictures,
+    width: u32,
+    height: u32,
+    timescale: u32,
+    cancel: Arc<AtomicBool>,
+}
+
+impl EngineEncoder {
+    /// Opens at `params.bitrate` bits a second. `nal_length_size` is not a
+    /// length prefix: each packet is one VOP, beginning with its start code.
+    pub fn open(params: &CodecParams) -> Result<Self, CodecError> {
+        if params.codec != CodecId::Mpeg4 {
+            return Err(CodecError::Unsupported { what: "codec" });
+        }
+        if !matches!(params.pixel, PixelFormat::Yuv420p | PixelFormat::Rgba8) {
+            return Err(CodecError::Unsupported {
+                what: "pixel format",
+            });
+        }
+        let inner = Pictures::open(
+            params.width,
+            params.height,
+            params.bitrate,
+            params.constant_rate,
+        )?;
+        Ok(Self {
+            inner,
+            width: params.width,
+            height: params.height,
+            timescale: 0,
+            cancel: Arc::new(AtomicBool::new(false)),
+        })
+    }
+}
+
+impl VideoEncoder for EngineEncoder {
+    fn codec(&self) -> CodecId {
+        CodecId::Mpeg4
+    }
+
+    fn push(&mut self, input: &VideoInput) -> Result<Vec<Packet>, CodecError> {
+        if self.cancel.load(Ordering::Relaxed) {
+            return Err(CodecError::Cancelled);
+        }
+        let picture = &input.picture;
+        if picture.width() != self.width || picture.height() != self.height {
+            return Err(CodecError::InvalidApi {
+                what: "picture size",
+            });
+        }
+        let packets = self.inner.push(crate::enc::PictureIn {
+            y: picture.y(),
+            u: picture.u(),
+            v: picture.v(),
+            pts: input.pts,
+            duration: input.duration,
+            timescale: input.timescale,
+            keyframe: input.force_keyframe,
+        })?;
+        self.timescale = input.timescale;
+        Ok(packets
+            .into_iter()
+            .map(|packet| {
+                Packet::video(
+                    packet.bytes,
+                    packet.pts,
+                    packet.duration,
+                    input.timescale,
+                    packet.keyframe,
+                )
+            })
+            .collect())
+    }
+
+    fn drain(&mut self) -> Result<Vec<Packet>, CodecError> {
+        if self.cancel.load(Ordering::Relaxed) {
+            return Err(CodecError::Cancelled);
+        }
+        let timescale = self.timescale;
+        Ok(self
+            .inner
+            .drain()?
+            .into_iter()
+            .map(|packet| {
+                Packet::video(
+                    packet.bytes,
+                    packet.pts,
+                    packet.duration,
+                    timescale,
+                    packet.keyframe,
+                )
+            })
+            .collect())
+    }
+
+    fn reset(&mut self) {
+        self.inner.reset();
+        self.timescale = 0;
+        self.cancel.store(false, Ordering::Relaxed);
+    }
+
+    fn cancel_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.cancel)
+    }
+
+    fn extradata(&self) -> &[u8] {
+        self.inner.headers()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cutlass_decode::Yuv420p;
 
     const ASP: &[u8] = include_bytes!("../tests/fixtures/asp.m4v");
 
@@ -250,5 +392,167 @@ mod tests {
         assert_eq!(standard.primaries, ColorPrimaries::Bt709);
         assert_eq!(standard.transfer, Transfer::Bt709);
         assert_eq!(standard.matrix, ColorMatrix::Bt709);
+    }
+
+    #[test]
+    fn export_packets_come_back_in_display_order() {
+        let mut params = CodecParams::with_format(CodecId::Mpeg4, 64, 48, PixelFormat::Rgba8);
+        params.bitrate = 400_000;
+        let mut factory = EncodeFactory::new();
+        register_engine_encoders(&mut factory);
+        let mut encoder = factory.open(&params).expect("open");
+        let mut packets = Vec::new();
+        for n in 0..4 {
+            let (y, u, v) = moving(n);
+            let picture = Yuv420p::try_new(64, 48, y, u, v).expect("picture");
+            packets.extend(
+                encoder
+                    .push_frame(&cutlass_encode::FrameInput::Cpu(
+                        cutlass_encode::CpuFrame::new(
+                            64,
+                            48,
+                            PixelFormat::Yuv420p,
+                            packed(&picture),
+                            cutlass_encode::FrameTime::new(
+                                i64::from(u32::try_from(n).unwrap_or(0)),
+                                1,
+                                30,
+                            )
+                            .expect("time"),
+                        )
+                        .expect("frame"),
+                    ))
+                    .expect("push"),
+            );
+        }
+        packets.extend(encoder.drain().expect("drain"));
+        let key = packets.iter().filter(|packet| packet.keyframe).count();
+        assert_eq!(key, 1);
+        assert!(
+            packets.iter().any(|packet| {
+                packet
+                    .side
+                    .iter()
+                    .any(|side| matches!(side, SideData::Config(_)))
+            }),
+            "export reads the layer from the first packet"
+        );
+        assert!(packets.iter().any(|packet| vop_type(&packet.data) == 2));
+        assert!(
+            packets
+                .iter()
+                .all(|packet| packet.data.starts_with(&[0, 0, 1, 0xB6]))
+        );
+
+        let mut decoder =
+            EngineDecoder::open(&CodecParams::video(CodecId::Mpeg4, 64, 48)).expect("decoder");
+        let mut shown = Vec::new();
+        for packet in &packets {
+            if let Some(config) = packet.side.iter().find_map(|side| match side {
+                SideData::Config(config) => Some(config.clone()),
+                _ => None,
+            }) {
+                assert!(
+                    !config.windows(4).any(|w| w == [0, 0, 1, 0xB6]),
+                    "the configuration holds a picture"
+                );
+            }
+            for output in decoder.push(packet).expect("decode") {
+                shown.push(output);
+            }
+        }
+        for output in decoder.drain().expect("drain") {
+            shown.push(output);
+        }
+        let times: Vec<i64> = shown
+            .iter()
+            .map(|output| match output {
+                Output::Picture(picture) => picture.pts(),
+                Output::Audio(_) => panic!("a picture stream returned sound"),
+            })
+            .collect();
+        assert_eq!(times, vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn a_keyframe_flushes_the_held_picture_first() {
+        let params = CodecParams::video(CodecId::Mpeg4, 32, 32);
+        let mut encoder = EngineEncoder::open(&params).expect("open");
+        let mut kinds = Vec::new();
+        for (n, key) in [(0, false), (1, false), (2, true)] {
+            let picture = Yuv420p::solid(32, 32, 40 + u8::try_from(n).unwrap_or(0), 128, 128)
+                .expect("picture");
+            for packet in encoder
+                .push(&VideoInput {
+                    picture,
+                    pts: n,
+                    duration: 1,
+                    timescale: 25,
+                    force_keyframe: key,
+                })
+                .expect("push")
+            {
+                kinds.push((packet.pts, vop_type(&packet.data), packet.keyframe));
+            }
+        }
+        assert_eq!(kinds, vec![(0, 0, true), (1, 1, false), (2, 0, true)]);
+    }
+
+    #[test]
+    fn a_bad_picture_is_refused() {
+        let params = CodecParams::video(CodecId::Mpeg4, 64, 48);
+        let mut encoder = EngineEncoder::open(&params).expect("open");
+        let picture = Yuv420p::solid(32, 32, 10, 128, 128).expect("picture");
+        let refused = encoder.push(&VideoInput {
+            picture,
+            pts: 0,
+            duration: 1,
+            timescale: 0,
+            force_keyframe: false,
+        });
+        assert!(matches!(refused, Err(CodecError::InvalidApi { .. })));
+        assert!(EngineEncoder::open(&CodecParams::video(CodecId::H264, 64, 48)).is_err());
+        assert!(EngineEncoder::open(&CodecParams::video(CodecId::Mpeg4, 64, 15)).is_err());
+        encoder.cancel_flag().store(true, Ordering::Relaxed);
+        let picture = Yuv420p::solid(64, 48, 10, 128, 128).expect("picture");
+        let refused = encoder.push(&VideoInput {
+            picture,
+            pts: 0,
+            duration: 1,
+            timescale: 30,
+            force_keyframe: false,
+        });
+        assert!(matches!(refused, Err(CodecError::Cancelled)));
+    }
+
+    fn vop_type(packet: &[u8]) -> u8 {
+        packet.get(4).map_or(255, |byte| byte >> 6)
+    }
+
+    fn moving(n: usize) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+        let shift = n * 2;
+        let mut y = vec![0u8; 64 * 48];
+        let mut u = vec![0u8; 32 * 24];
+        let mut v = vec![0u8; 32 * 24];
+        for row in 0..48 {
+            for col in 0..64 {
+                y[row * 64 + col] = (((row + col + shift) * 3 + (col ^ row)) % 180 + 20) as u8;
+            }
+        }
+        for row in 0..24 {
+            for col in 0..32 {
+                let at = row * 32 + col;
+                u[at] = ((col * 5 + row + shift) % 80 + 80) as u8;
+                v[at] = ((row * 5 + col + shift / 2) % 80 + 80) as u8;
+            }
+        }
+        (y, u, v)
+    }
+
+    fn packed(picture: &Yuv420p) -> Vec<u8> {
+        let mut bytes = picture.y().to_vec();
+        bytes.extend_from_slice(picture.u());
+        bytes.extend_from_slice(picture.v());
+        bytes
     }
 }

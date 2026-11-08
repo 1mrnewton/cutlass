@@ -16,4 +16,6 @@ mod vlc;
 mod vop;
 
 pub use enc::{encode_advanced, encode_intra};
-pub use engine::{EngineDecoder, register_engine_decoders};
+pub use engine::{
+    EngineDecoder, EngineEncoder, register_engine_decoders, register_engine_encoders,
+};

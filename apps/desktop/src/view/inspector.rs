@@ -200,6 +200,7 @@ fn video_panel(
             optical_flow(shell, ui, state);
             super::relight::relight(shell, ui, state);
             super::reframe::auto_reframe(shell, ui, state);
+            super::motion_blur::motion_blur(shell, ui, state);
             for label in [
                 "AI remove",
                 "AI expand",
@@ -208,7 +209,6 @@ fn video_panel(
                 "Removing video flickers",
                 "AI movement",
                 "Camera tracking",
-                "Motion blur",
             ] {
                 later_row(ui, label);
             }

@@ -24,6 +24,7 @@ mod audio;
 mod grade;
 mod inspector;
 mod mask;
+mod motion_blur;
 mod reframe;
 mod relight;
 mod remove_bg;
@@ -9679,6 +9680,75 @@ mod tests {
             !lines
                 .iter()
                 .any(|line| line.starts_with("Finding the subject")),
+            "no job runs"
+        );
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn a_blurred_clip_shows_its_blur_blend_direction_and_speed_under_motion_blur() {
+        use cutlass_model::{Algorithm, Draft, MaterialVideo, Segment, TimeRange, VideoAlgorithm};
+        let temp =
+            std::env::temp_dir().join(format!("cutlass-motion-blur-view-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let mut draft = Draft::empty("draft");
+        draft.materials.videos.push(MaterialVideo {
+            video_algorithm: Some(VideoAlgorithm {
+                algorithms: vec![Algorithm {
+                    kind: Algorithm::MOTION_BLUR.into(),
+                    level: 1,
+                    strength: Some(0.8),
+                    blend: Some(0.25),
+                    direction: Some(2),
+                    speed: Some(4),
+                    ..Algorithm::default()
+                }],
+                ..VideoAlgorithm::default()
+            }),
+            ..MaterialVideo::new("movie")
+        });
+        draft.tracks[0]
+            .segments
+            .push(Segment::new("main", "movie", TimeRange::new(0, 2_000_000)));
+        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        shell.select(Some(SegmentId::new("main")));
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let mut lines = Vec::new();
+        for _ in 0..2 {
+            view.inspector.focus(inspector::Focus {
+                tab: 0,
+                page: 0,
+                section: Some("motion-blur"),
+            });
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 2400.0))),
+                    ..Default::default()
+                },
+                |ui| show(&mut shell, ui, &mut view, None),
+            );
+            lines = galleys(&output);
+            output.textures_delta.clear();
+        }
+        for label in [
+            "Motion blur",
+            "Blur",
+            "80",
+            "Blend",
+            "25",
+            "Direction",
+            "Backward",
+            "Speed",
+            "4 times",
+        ] {
+            assert!(lines.iter().any(|line| line == label), "{label}: {lines:?}");
+        }
+        assert!(
+            !lines.iter().any(|line| line.starts_with("Processing")),
             "no job runs"
         );
         let _ = std::fs::remove_dir_all(&temp);

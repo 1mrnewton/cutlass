@@ -693,7 +693,6 @@ fn the_vorbis_muxer_refuses_what_a_reader_cannot_time() {
         Err(MuxError::Rejected { message }) => message,
         other => panic!("{other:?}"),
     };
-    assert!(message(start(-10, LONG, 0).2).contains("starts at -10"));
     assert!(message(start(0, LONG, 1).2).contains("natural 0"));
     let (mut mux, track, first) = start(0, LONG, 0);
     first.expect("first");
@@ -842,4 +841,95 @@ fn opus_and_vorbis_mux_into_one_file() {
         );
     }
     assert_eq!(counts, [2, 2]);
+}
+
+#[test]
+fn a_vorbis_stream_that_starts_before_zero_muxes_and_reads_back() {
+    let headers = headers();
+    let bytes = mux_vorbis(&headers, -1000, &[LONG; 4], None);
+    let pages = page_list(&bytes);
+    assert_eq!(pages.len(), 4);
+    assert_eq!((pages[2].0.flags, pages[2].0.granule), (0, 2072));
+    assert_eq!((pages[3].0.flags, pages[3].0.granule), (FLAG_EOS, 2072));
+    assert!(pages[3].1.is_empty(), "an empty last page");
+    let mut demux = open(&bytes);
+    let stream = demux.streams()[0].clone();
+    let info = demux.vorbis(0).expect("info").clone();
+    assert_eq!(
+        (info.start, info.end, info.trailing),
+        (Some(-1000), Some(2072), Some(0))
+    );
+    assert_eq!(stream.edits()[0].media_time(), Some(0));
+    assert_eq!(stream.edits()[0].duration(), 2072);
+    assert_eq!(stream.trim().encoder_delay(), Some(1000));
+    assert_eq!(
+        read_times(&mut demux),
+        vec![
+            (-1000, 0, 0),
+            (-1000, 1024, 1),
+            (24, 1024, 2),
+            (1048, 1024, 3)
+        ]
+    );
+}
+
+#[test]
+fn a_vorbis_stream_before_zero_with_a_trimmed_end_keeps_both() {
+    let headers = headers();
+    let bytes = mux_vorbis(&headers, -1000, &[LONG; 4], Some(600));
+    let pages = page_list(&bytes);
+    assert_eq!((pages[2].0.flags, pages[2].0.granule), (0, 1048));
+    assert_eq!((pages[3].0.flags, pages[3].0.granule), (FLAG_EOS, 1648));
+    let mut demux = open(&bytes);
+    let info = demux.vorbis(0).expect("info").clone();
+    assert_eq!(
+        (info.start, info.end, info.trailing),
+        (Some(-1000), Some(1648), Some(424))
+    );
+    assert_eq!(
+        read_times(&mut demux),
+        vec![
+            (-1000, 0, 0),
+            (-1000, 1024, 1),
+            (24, 1024, 2),
+            (1048, 600, 3)
+        ]
+    );
+}
+
+#[test]
+fn a_vorbis_page_that_would_end_before_zero_is_refused() {
+    let headers = headers();
+    let finish = |start: i64, count: usize, last: i64| {
+        let mut mux = OggMux::new(Cursor::new(Vec::new()));
+        let track = mux.add_stream(vorbis_params(&headers)).expect("stream");
+        let durations = natural(&vec![LONG; count]);
+        let mut pts = start;
+        let mut sum = 0;
+        for (index, &natural) in durations.iter().enumerate() {
+            let duration = if index + 1 == count { last } else { natural };
+            let tag = u8::try_from(index % 256).expect("tag");
+            mux.write_packet(&timed(track.get(), packet(LONG, tag), pts, duration))
+                .map_err(|error| error.to_string())?;
+            pts += duration;
+            sum += duration;
+        }
+        mux.finish(&[TrackDuration {
+            track,
+            timescale: Timescale::new(44_100),
+            ticks: sum,
+        }])
+        .map(|_| ())
+        .map_err(|failed| failed.reason().to_string())
+    };
+    // Only the trimmed packet crosses 0, and it must go on a later page.
+    let error = finish(-1500, 3, 600).expect_err("head ends before 0");
+    assert!(
+        error.to_string().contains("would end at -476, before 0"),
+        "{error}"
+    );
+    // 255 lacing values fill the first page while its packets end before 0.
+    let error = finish(-400_000, 300, 1024).expect_err("page full before 0");
+    assert!(error.contains("before 0"), "{error}");
+    finish(-1500, 3, 1024).expect("ends past 0 untrimmed");
 }

@@ -23,8 +23,11 @@
 //! finish, because no reader can play it.
 //!
 //! A Vorbis stream's timescale is its sample rate. Its first packet has
-//! duration 0, as a Vorbis decoder returns nothing for it, and must start
-//! at 0 or later: a stream that starts before zero is not written.
+//! duration 0, as a Vorbis decoder returns nothing for it. A stream may
+//! start before 0, as a stream copy cut mid-file does: its first audio page
+//! stays open until a packet ends at 0 or later, and section A.2 reads the
+//! samples before 0 from that page's granule. A stream whose first page
+//! would close before 0, at 255 lacing values, is refused.
 //!
 //! Serial numbers are deterministic: the first stream takes
 //! [`FIRST_SERIAL`] (or the value given to [`OggMux::with_first_serial`])
@@ -88,6 +91,8 @@ struct Track {
     continued: bool,
     /// End of the last packet completed on this page, or -1.
     granule: i64,
+    /// A packet completes on this page.
+    completes: bool,
     /// Samples of packets completed on this page.
     page_samples: i64,
     /// End of the last packet written.
@@ -109,7 +114,8 @@ struct Track {
 impl Track {
     fn page_full(&self) -> bool {
         self.lacing.len() >= 255
-            || (self.granule != -1
+            || (self.completes
+                && self.granule >= 0
                 && (self.body.len() >= MUX_PAGE_BYTES || self.page_samples >= i64::from(self.rate)))
     }
 
@@ -259,10 +265,20 @@ impl<W: Write> OggMux<W> {
         if eos {
             flags |= FLAG_EOS;
         }
-        let granule = if eos && track.granule == -1 {
-            track.next.unwrap_or(0)
-        } else {
+        let granule = if track.completes {
+            if track.granule < 0 {
+                return Err(rejected(format!(
+                    "a page of Vorbis stream {} would end at {}, before 0; the stream starts at {}",
+                    track.id.get(),
+                    track.granule,
+                    track.first.unwrap_or(0)
+                )));
+            }
             track.granule
+        } else if eos {
+            track.next.unwrap_or(0).max(0)
+        } else {
+            -1
         };
         let page = encode(
             flags,
@@ -273,27 +289,35 @@ impl<W: Write> OggMux<W> {
             &track.body,
         );
         track.sequence = track.sequence.wrapping_add(1);
-        if track.granule != -1 {
+        if track.completes {
             track.completed_pages = track.completed_pages.saturating_add(1);
         }
         track.continued = track.lacing.last() == Some(&255);
         track.lacing.clear();
         track.body.clear();
         track.granule = -1;
+        track.completes = false;
         track.page_samples = 0;
         self.emit(&page)
     }
 
-    /// RFC 7845 section 4.5 reads the first audio page with a completed
-    /// packet, when it is also the last page, as starting at its granule
-    /// minus its samples, or at 0 when the granule is smaller. A stream
-    /// that starts after 0 and trims its end cannot say both on that one
-    /// page, so the packets before the trimmed one go on a page of their
-    /// own. One trimmed packet alone, starting after 0, cannot be written.
+    /// RFC 7845 section 4.5 and Vorbis I section A.2 read the first audio
+    /// page with a completed packet, when it is also the last page, as
+    /// starting at its granule minus its samples, or at 0 when the granule
+    /// is smaller. A stream that starts anywhere but 0 and trims its end
+    /// cannot say both on that one page, so the packets before the trimmed
+    /// one go on a page of their own. One trimmed packet alone, starting
+    /// after 0, cannot be written. A Vorbis stream that starts before 0 and
+    /// trims nothing ends on an empty page of its own.
     fn separate_trim_from_start(&mut self, index: usize) -> Result<(), MuxError> {
         let track = &mut self.tracks[index];
-        if track.completed_pages > 0 || !track.trimmed || track.first.is_none_or(|first| first == 0)
-        {
+        if track.completed_pages > 0 || track.first.is_none_or(|first| first == 0) {
+            return Ok(());
+        }
+        if !track.trimmed {
+            if track.first.is_some_and(|first| first < 0) && track.completes {
+                self.flush_page(index, false)?;
+            }
             return Ok(());
         }
         let Some((sequence, lacing_at, body_at, granule, samples)) = track.last_packet else {
@@ -314,12 +338,14 @@ impl<W: Write> OggMux<W> {
         let end = track.granule;
         let tail_samples = track.page_samples.saturating_sub(samples);
         track.granule = granule;
+        track.completes = true;
         track.page_samples = samples;
         self.flush_page(index, false)?;
         let track = &mut self.tracks[index];
         track.lacing = tail_lacing;
         track.body = tail_body;
         track.granule = end;
+        track.completes = true;
         track.page_samples = tail_samples;
         Ok(())
     }
@@ -354,6 +380,7 @@ impl<W: Write> OggMux<W> {
             offset += len;
             if values.peek().is_none() {
                 track.granule = end;
+                track.completes = true;
                 track.page_samples = track.page_samples.saturating_add(samples);
             }
         }
@@ -431,7 +458,7 @@ impl<W: Write> OggMux<W> {
                     "packet at {pts} leaves a gap after {next}; Ogg needs packets that fill it"
                 )));
             }
-            None if pts < 0 => {
+            None if pts < 0 && matches!(track.mapping, Mapping::Opus { .. }) => {
                 return Err(rejected(format!("first packet starts at {pts}")));
             }
             _ => {}
@@ -690,6 +717,7 @@ impl<W: Write> Mux for OggMux<W> {
             body: Vec::new(),
             continued: false,
             granule: -1,
+            completes: false,
             page_samples: 0,
             next: None,
             trimmed: false,

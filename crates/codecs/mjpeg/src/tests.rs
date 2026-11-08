@@ -623,6 +623,86 @@ fn the_picture_decoder_hands_the_engine_rgba_with_the_packet_time() {
     assert_eq!(picture_decoder.inner().last_field_order(), None);
 }
 
+#[test]
+fn size_and_sampling_may_change_between_packets() {
+    let stream = [
+        (32, 16, Sampling::Yuv420, PixelFormat::Yuv420p),
+        (23, 17, Sampling::Yuv422, PixelFormat::Yuv422p),
+        (9, 7, Sampling::Gray, PixelFormat::Gray8),
+        (40, 24, Sampling::Yuv444, PixelFormat::Yuv444p),
+        (32, 16, Sampling::Yuv420, PixelFormat::Yuv420p),
+    ];
+    let mut planar = MjpegDecoder::open(&params(32, 16, &[])).expect("open");
+    let mut engine = MjpegPictureDecoder::open(&params(32, 16, &[])).expect("open");
+    for (index, (width, height, sampling, format)) in stream.into_iter().enumerate() {
+        let jpeg = encode(
+            &detailed_rgb(width, height, 30 + index as u32),
+            width,
+            height,
+            sampling,
+            85,
+        );
+        let frame = planar
+            .decode(&jpeg)
+            .expect("decode")
+            .into_frame()
+            .expect("frame");
+        assert_eq!(
+            (frame.width, frame.height, frame.format),
+            (width, height, format)
+        );
+        let fresh = MjpegDecoder::open(&params(width, height, &[]))
+            .expect("open")
+            .decode(&jpeg)
+            .expect("fresh")
+            .into_frame()
+            .expect("frame");
+        assert_eq!(frame.y.samples, fresh.y.samples, "{index}");
+        assert_eq!(frame.v.samples, fresh.v.samples, "{index}");
+
+        let out = engine
+            .push(&packet(jpeg.clone(), index as i64))
+            .expect("push");
+        let Ok([Output::Picture(picture)]) = <[Output; 1]>::try_from(out) else {
+            panic!("one picture");
+        };
+        assert_eq!(
+            (picture.info().width, picture.info().height),
+            (width, height)
+        );
+        assert_eq!(
+            picture.into_cpu().expect("cpu"),
+            image_rgba(&jpeg),
+            "{index}"
+        );
+    }
+
+    let mut any_size = MjpegEncoder::open(&params(0, 0, &[80])).expect("open");
+    for (width, height) in [(16, 16), (33, 9), (16, 16)] {
+        let rgba: Vec<u8> = detailed_rgb(width, height, 40)
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .flat_map(|p| [p[0], p[1], p[2], 255])
+            .collect();
+        let jpeg = any_size
+            .encode_rgba(width, height, &rgba, 1, 25)
+            .expect("encode");
+        let frame = planar
+            .decode(&jpeg)
+            .expect("decode")
+            .into_frame()
+            .expect("frame");
+        assert_eq!((frame.width, frame.height), (width, height));
+    }
+    let mut fixed = MjpegEncoder::open(&params(16, 16, &[80])).expect("open");
+    assert!(matches!(
+        fixed.encode_rgba(33, 9, &[0; 33 * 9 * 4], 1, 25),
+        Err(CodecError::InvalidApi { .. })
+    ));
+    assert!(fixed.encode_rgba(16, 16, &[0; 16 * 16 * 4], 1, 25).is_ok());
+}
+
 fn rgba_frame(rgb: &[u8], width: u32, height: u32, pts: i64) -> FrameInput {
     let mut rgba = Vec::with_capacity(rgb.len() / 3 * 4);
     for pixel in rgb.as_chunks::<3>().0 {

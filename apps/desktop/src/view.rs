@@ -4873,7 +4873,6 @@ fn paint_tools(
                 let enabled = tool_enabled(shell, name);
                 let active = match *name {
                     "split" => shell.blade(),
-                    "marker" => shell.marking(),
                     "beat" => shell.beating(),
                     "linkage" => shell.linkage_enabled(),
                     "magnet" => shell.magnet_enabled(),
@@ -4959,7 +4958,6 @@ fn tool_enabled(shell: &Shell, name: &str) -> bool {
 fn tool_clicked(shell: &mut Shell, name: &str) {
     if name == "select" {
         shell.clear_blade();
-        shell.clear_marker();
         shell.clear_beat();
         return;
     }
@@ -4980,10 +4978,7 @@ fn tool_clicked(shell: &mut Shell, name: &str) {
             shell.toggle_blade();
             Ok(())
         }
-        "marker" => {
-            shell.toggle_marker();
-            Ok(())
-        }
+        "marker" => shell.mark_playhead(),
         "beat" => {
             shell.toggle_beat();
             Ok(())
@@ -5249,7 +5244,7 @@ const TOOLS_LEFT: &[Option<(&str, &str)>] = &[
     Some(("trimRight", "Delete right of the playhead")),
     Some(("delete", "Delete")),
     None,
-    Some(("marker", "Marker")),
+    Some(("marker", "Add marker at the playhead")),
     Some(("beat", "Beat")),
 ];
 
@@ -5574,11 +5569,7 @@ fn ruler_and_lanes(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
         && let Some(pointer) = ruler_hit.interact_pointer_pos()
     {
         let x = f64::from(pointer.x - lanes_left).max(0.0);
-        if shell.marking() && !marker_clicked {
-            if let Err(error) = shell.drop_marker(None, x, 0.0) {
-                shell.notice_error(&error);
-            }
-        } else if !marker_clicked && let Err(error) = shell.seek_ruler(x) {
+        if !marker_clicked && let Err(error) = shell.seek_ruler(x) {
             shell.notice_error(&error);
         }
     }
@@ -7688,24 +7679,6 @@ fn paint_clip(
         {
             let x = f64::from(pos.x - lanes_left).max(0.0);
             if let Err(error) = shell.split_pointer(clip.id.clone(), x, editor_lane_y(index)) {
-                shell.notice_error(&error);
-            }
-        }
-    } else if body.width() > 0.0 && shell.marking() {
-        let response = ui.interact(
-            body,
-            ui.scope_id().with(("clip", index, clip.id.as_str())),
-            Sense::click(),
-        );
-        response.clone().on_hover_text(span.clone());
-        if response.hovered() {
-            ui.set_cursor_icon(egui::CursorIcon::VerticalText);
-        }
-        if response.clicked()
-            && let Some(pos) = pointer_pos(ui, &response)
-        {
-            let x = f64::from(pos.x - lanes_left).max(0.0);
-            if let Err(error) = shell.drop_marker(Some(clip.id.clone()), x, editor_lane_y(index)) {
                 shell.notice_error(&error);
             }
         }
@@ -15169,12 +15142,20 @@ mod tests {
     }
 
     #[test]
-    fn the_marker_drops_on_the_clip_under_the_pointer() {
+    fn the_marker_tool_marks_the_playhead_once_and_arms_nothing() {
         let (mut shell, temp) = open_span("marker", 2_000_000);
         let mut view = ViewState::new();
         let ctx = egui::Context::default();
         let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
-        shell.toggle_marker();
+        let id = shell.draft().unwrap().tracks[0].segments[0].id.clone();
+        shell.select(Some(id.clone()));
+        shell.seek(Micros(1_000_000));
+        tool_clicked(&mut shell, "marker");
+        let marks = shell.markers();
+        assert_eq!(marks.len(), 1, "notice {}", shell.notice());
+        assert_eq!(marks[0].segment_id.as_ref(), Some(&id));
+        assert_eq!(marks[0].time, Micros(1_000_000));
+        // No tool stays armed: a click on the clip afterwards drops nothing.
         let mut output = ctx.run_ui(
             egui::RawInput {
                 screen_rect: screen,
@@ -15182,14 +15163,9 @@ mod tests {
             },
             |ui| show(&mut shell, ui, &mut view, None),
         );
-        let id = shell.draft().unwrap().tracks[0].segments[0]
-            .id
-            .as_str()
-            .to_owned();
-        let text = text_pos(&output, &id).expect("clip");
+        let text = text_pos(&output, id.as_str()).expect("clip");
         output.textures_delta.clear();
-        let width = (2_000_000_f32 * shell.pixel_size() as f32).max(8.0);
-        let center = Pos2::new(text.x - 8.0 + width / 2.0, text.y);
+        let center = Pos2::new(text.x + 20.0, text.y + 12.0);
         let press = |pressed: bool| egui::Event::PointerButton {
             pos: center,
             button: egui::PointerButton::Primary,
@@ -15205,20 +15181,7 @@ mod tests {
             |ui| show(&mut shell, ui, &mut view, None),
         );
         output.textures_delta.clear();
-        assert_eq!(
-            shell.draft().unwrap().tracks[0].segments.len(),
-            1,
-            "the marker click changed the clip ({})",
-            shell.notice()
-        );
-        let marks = shell.markers();
-        assert_eq!(marks.len(), 1, "notice {}", shell.notice());
-        assert_eq!(
-            marks[0].segment_id.as_ref().map(|id| id.as_str()),
-            Some(id.as_str())
-        );
-        assert!(marks[0].stored_start > 0);
-        assert!(marks[0].stored_start < 2_000_000);
+        assert_eq!(shell.markers().len(), 1, "the click dropped a mark");
         let _ = std::fs::remove_dir_all(&temp);
     }
 

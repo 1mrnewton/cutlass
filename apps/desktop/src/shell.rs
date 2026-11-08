@@ -792,7 +792,6 @@ pub struct Shell {
     /// Clips on a speed curve draw it on their bar.
     speed_curves: bool,
     /// The marker tool drops a mark on the ruler or on a clip.
-    marking: bool,
     selected_marker: Option<MarkerPick>,
     /// The beat tool drops a mark on an audio clip.
     beating: bool,
@@ -927,7 +926,6 @@ impl Shell {
             snapping: true,
             blade: false,
             speed_curves: false,
-            marking: false,
             selected_marker: None,
             beating: false,
             selected_beat: None,
@@ -1359,7 +1357,6 @@ impl Shell {
         self.clipboard.clear();
         self.clip_menu = None;
         self.blade = false;
-        self.marking = false;
         self.selected_marker = None;
         self.beating = false;
         self.selected_beat = None;
@@ -1526,7 +1523,6 @@ impl Shell {
         self.clipboard.clear();
         self.clip_menu = None;
         self.blade = false;
-        self.marking = false;
         self.selected_marker = None;
         self.beating = false;
         self.selected_beat = None;
@@ -2607,7 +2603,6 @@ impl Shell {
             }
         } else {
             self.clear_blade();
-            self.clear_marker();
             self.clear_beat();
         }
     }
@@ -6566,7 +6561,6 @@ impl Shell {
         self.selection.clear();
         if !self.has_clip() {
             self.blade = false;
-            self.marking = false;
             self.beating = false;
         }
         Ok(())
@@ -6727,7 +6721,6 @@ impl Shell {
     pub fn toggle_blade(&mut self) {
         self.blade = !self.blade && self.has_clip();
         if self.blade {
-            self.marking = false;
             self.beating = false;
         }
     }
@@ -6735,25 +6728,6 @@ impl Shell {
     /// Turn the blade off. Select uses this.
     pub fn clear_blade(&mut self) {
         self.blade = false;
-    }
-
-    /// The marker tool is armed. A click on the ruler or a clip drops a mark.
-    #[must_use]
-    pub fn marking(&self) -> bool {
-        self.marking
-    }
-
-    pub fn toggle_marker(&mut self) {
-        self.marking = !self.marking && self.has_clip();
-        if self.marking {
-            self.blade = false;
-            self.beating = false;
-        }
-    }
-
-    /// Turn the marker tool off. Select uses this.
-    pub fn clear_marker(&mut self) {
-        self.marking = false;
     }
 
     /// Markers currently drawn. A clip mark past the clip is omitted.
@@ -6797,47 +6771,55 @@ impl Shell {
         self.selection.clear();
     }
 
-    /// Drop a mark at the pointer. `None` is the ruler. `Some` is that clip.
-    ///
-    /// A ruler mark is a timeline time. A clip mark is stored as an offset
-    /// from the clip start, so a later move carries it.
-    pub fn drop_marker(
-        &mut self,
-        segment_id: Option<SegmentId>,
-        x: f64,
-        y: f64,
-    ) -> Result<(), ShellError> {
+    /// Drop one mark where the playhead is: on the picked clip under it, so
+    /// the mark moves with the clip, or else on the ruler.
+    pub fn mark_playhead(&mut self) -> Result<(), ShellError> {
+        let at = self.playhead();
+        let on_clip = self.draft().and_then(|draft| {
+            draft
+                .tracks
+                .iter()
+                .flat_map(|track| &track.segments)
+                .filter(|segment| self.selection.contains(&segment.id))
+                .find(|segment| {
+                    let start = segment.target.start.0;
+                    start <= at.0 && at.0 < start.saturating_add(segment.target.duration.0)
+                })
+                .map(|segment| segment.id.clone())
+        });
+        self.mark_at(on_clip, at)
+    }
+
+    /// Add a mark at timeline time `at`, on `segment_id` when given, which
+    /// must cover that time, or else on the ruler.
+    fn mark_at(&mut self, segment_id: Option<SegmentId>, at: Micros) -> Result<(), ShellError> {
         if !self.has_clip() {
             return Err(ShellError::Unavailable(
                 "marker is not available".to_owned(),
             ));
         }
-        let x = self.time_zero_x(x);
-        let scale = self.scale();
-        let pointer_y = if segment_id.is_some() { y } else { 0.0 };
-        let at = {
-            let draft = self.session_draft()?;
-            let hit = hit_test(draft, scale, Pointer { x, y: pointer_y }).map_err(|_| {
-                ShellError::Unavailable("the marker missed the timeline".to_owned())
-            })?;
-            let Some(hit) = hit else {
-                return Err(ShellError::Unavailable(
-                    "the marker missed the timeline".to_owned(),
-                ));
-            };
-            if let Some(id) = &segment_id
-                && hit.segment_id.as_ref() != Some(id)
-            {
+        if let Some(id) = &segment_id {
+            let covers = self
+                .session_draft()?
+                .tracks
+                .iter()
+                .flat_map(|track| &track.segments)
+                .any(|segment| {
+                    let start = segment.target.start.0;
+                    &segment.id == id
+                        && start <= at.0
+                        && at.0 < start.saturating_add(segment.target.duration.0)
+                });
+            if !covers {
                 return Err(ShellError::Unavailable(
                     "the marker missed the clip".to_owned(),
                 ));
             }
-            Micros(hit.time.0.max(0))
-        };
+        }
         let material_id = MaterialId::new(self.fresh("time-mark"));
         self.apply(Request::AddTimeMark {
             segment_id,
-            at,
+            at: Micros(at.0.max(0)),
             color: MARKER_COLOR.to_owned(),
             material_id,
         })
@@ -6872,7 +6854,6 @@ impl Shell {
         self.beating = !self.beating && self.has_clip();
         if self.beating {
             self.blade = false;
-            self.marking = false;
         }
     }
 
@@ -11353,8 +11334,7 @@ mod tests {
     #[test]
     fn a_marker_lands_on_the_ruler_or_on_a_clip() {
         let mut bare = shell();
-        bare.toggle_marker();
-        assert!(!bare.marking());
+        assert!(bare.mark_playhead().is_err());
 
         let temp = Temp::new();
         let mut draft = Draft::empty("draft");
@@ -11369,18 +11349,10 @@ mod tests {
         let mut desktop = shell();
         desktop.open_folder(&temp.path).unwrap();
         desktop.pixel_size = 0.001;
-        desktop.toggle_marker();
-        assert!(desktop.marking());
-        desktop.toggle_blade();
-        assert!(desktop.blade());
-        assert!(!desktop.marking());
-        desktop.clear_blade();
-        desktop.toggle_marker();
-
         let y = crate::tokens::LANE_HEIGHT / 2.0;
-        desktop
-            .drop_marker(None, lane_time(&desktop, 1_500_000.0), 0.0)
-            .unwrap();
+        // Nothing picked: the mark lands on the ruler at the playhead.
+        desktop.seek(Micros(1_500_000));
+        desktop.mark_playhead().unwrap();
         assert!(
             desktop.draft().unwrap().tracks[0].segments[0]
                 .extra_material_refs
@@ -11395,10 +11367,11 @@ mod tests {
         assert!(desktop.markers().is_empty());
         desktop.redo().unwrap();
 
+        // The picked clip under the playhead takes the mark.
         let id = SegmentId::new("clip");
-        desktop
-            .drop_marker(Some(id.clone()), lane_time(&desktop, 400_000.0), y)
-            .unwrap();
+        desktop.select(Some(id.clone()));
+        desktop.seek(Micros(400_000));
+        desktop.mark_playhead().unwrap();
         let clip_mark = desktop
             .markers()
             .into_iter()
@@ -11410,9 +11383,7 @@ mod tests {
             desktop.draft().unwrap().tracks[0].segments[0].target,
             TimeRange::new(0, 2_000_000)
         );
-        let again = desktop
-            .drop_marker(Some(id.clone()), lane_time(&desktop, 400_000.0), y)
-            .unwrap_err();
+        let again = desktop.mark_playhead().unwrap_err();
         assert_eq!(again.to_string(), "a marker is already there");
 
         let track_id = desktop.draft().unwrap().tracks[0].id.clone();
@@ -11420,7 +11391,7 @@ mod tests {
             .toggle_attribute(track_id.clone(), TrackAttribute::LOCK)
             .unwrap();
         let locked = desktop
-            .drop_marker(Some(id.clone()), lane_time(&desktop, 800_000.0), y)
+            .mark_at(Some(id.clone()), Micros(800_000))
             .unwrap_err();
         assert_eq!(locked.to_string(), "the track is locked");
         desktop
@@ -11435,9 +11406,13 @@ mod tests {
                 .iter()
                 .all(|mark| mark.segment_id.is_none())
         );
-        desktop
-            .drop_marker(Some(id.clone()), lane_time(&desktop, 400_000.0), y)
-            .unwrap();
+        desktop.mark_at(Some(id.clone()), Micros(400_000)).unwrap();
+        assert!(
+            desktop
+                .mark_at(Some(id.clone()), Micros(3_000_000))
+                .is_err(),
+            "a clip mark must fall on the clip"
+        );
         desktop
             .drag_segment(id.clone(), lane_time(&desktop, 1_000_000.0), y)
             .unwrap();
@@ -11503,11 +11478,6 @@ mod tests {
         desktop.pixel_size = 0.001;
         desktop.toggle_beat();
         assert!(desktop.beating());
-        desktop.toggle_marker();
-        assert!(desktop.marking());
-        assert!(!desktop.beating());
-        desktop.clear_marker();
-        desktop.toggle_beat();
         desktop.toggle_blade();
         assert!(desktop.blade());
         assert!(!desktop.beating());

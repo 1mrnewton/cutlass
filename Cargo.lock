@@ -2472,8 +2472,11 @@ dependencies = [
 name = "cutlass-ac3"
 version = "0.1.0"
 dependencies = [
+ "cutlass-codec",
+ "cutlass-container",
  "cutlass-decode",
  "cutlass-encode",
+ "cutlass-isobmff",
 ]
 
 [[package]]

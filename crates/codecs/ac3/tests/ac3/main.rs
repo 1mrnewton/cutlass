@@ -18,3 +18,5 @@ mod decoder;
 mod encoder;
 #[cfg(test)]
 mod fate;
+#[cfg(test)]
+mod real;

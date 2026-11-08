@@ -5970,12 +5970,22 @@ impl Shell {
     }
 
     /// Keep the selected picture's colour work, or the selected adjustment
-    /// layer, inside `mask`, or take that limit off.
+    /// layer or effect, inside `mask`, or take that limit off.
     pub fn set_color_mask(
         &mut self,
         mask: Option<cutlass_effects::Mask>,
     ) -> Result<(), ShellError> {
-        let segment_id = self.adjust_segment()?;
+        let segment_id = match self.selected() {
+            Some(segment_id)
+                if matches!(
+                    placed(self.session_draft()?, segment_id),
+                    Some((_, TrackType::Effect))
+                ) =>
+            {
+                segment_id.clone()
+            }
+            _ => self.adjust_segment()?,
+        };
         self.refuse_locked(&segment_id)?;
         let material_id = MaterialId::new(self.fresh("color-mask"));
         self.apply(Request::SetColorMask {

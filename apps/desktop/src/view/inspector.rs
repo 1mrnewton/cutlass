@@ -547,6 +547,10 @@ fn effect_panel(
     filter: bool,
 ) {
     tabs(ui, &[title], &mut 0);
+    if !filter && let Some(controls) = shell.effect_controls() {
+        recipe_pages(shell, ui, state, inspection, &controls);
+        return;
+    }
     note(ui, &shell.effect_name().unwrap_or_default());
     body(ui, |ui| {
         if let Some(stored) = shell.effect_strength() {
@@ -569,6 +573,72 @@ fn effect_panel(
             }
         }
     });
+}
+
+/// A recipe effect's pages: Basic holds the recipe's own controls, Mask
+/// keeps the effect inside a shape, as an adjustment layer's does.
+fn recipe_pages(
+    shell: &mut Shell,
+    ui: &mut Ui,
+    state: &mut InspectorState,
+    inspection: &Inspection,
+    controls: &[(cutlass_effects::Control, f32)],
+) {
+    pages(ui, &["Basic", "Mask"], &mut state.page);
+    if state.page != 0 {
+        super::mask::mask_page(shell, ui, state, inspection.color_mask, true);
+        return;
+    }
+    note(ui, &shell.effect_name().unwrap_or_default());
+    body(ui, |ui| {
+        if controls.is_empty() {
+            ui.label(
+                RichText::new("This effect has no settings of its own.")
+                    .size(12.0)
+                    .color(tokens::MUTED),
+            );
+        }
+        for (control, value) in controls {
+            if let Some(next) = control_slider(ui, state, control, *value) {
+                let id = control.id.clone();
+                send(shell, move |shell| shell.set_effect_control(&id, next));
+            }
+        }
+    });
+}
+
+/// One recipe control as a slider, shown in its unit. Returns the value to
+/// store, in the recipe's own terms.
+fn control_slider(
+    ui: &mut Ui,
+    state: &mut InspectorState,
+    control: &cutlass_effects::Control,
+    value: f32,
+) -> Option<f64> {
+    use cutlass_effects::ControlUnit;
+    let scale = if control.unit == ControlUnit::Percent {
+        100.0
+    } else {
+        1.0
+    };
+    let range = f64::from(control.min) * scale..=f64::from(control.max) * scale;
+    let key = format!("control {}", control.id);
+    let shown = (f64::from(value) * scale * 100.0).round() / 100.0;
+    let moved = slider(
+        ui,
+        state,
+        &key,
+        &control.name,
+        shown,
+        range,
+        |v| match control.unit {
+            ControlUnit::Times => format!("{v:.2}x"),
+            ControlUnit::Percent => format!("{v:.0}%"),
+            ControlUnit::Degrees => format!("{v:.0}°"),
+            ControlUnit::Plain => format!("{v:.2}"),
+        },
+    )?;
+    Some((moved / scale * 100.0).round() / 100.0)
 }
 
 fn adjust_panel(

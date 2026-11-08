@@ -26,8 +26,8 @@ pub fn set_mask(
 }
 
 /// Limit `segment_id`'s colour work to `mask`, or take that limit off with
-/// `None`. On an adjustment layer the mask is where on the canvas the
-/// layer acts.
+/// `None`. On an adjustment layer or an effect the mask is where on the
+/// canvas the layer acts.
 pub fn set_color_mask(
     draft: &mut Draft,
     segment_id: &SegmentId,
@@ -40,7 +40,12 @@ pub fn set_color_mask(
         material_id,
         shape_fields(mask)?,
         COLOR_MASK,
-        &[TrackType::Video, TrackType::Sticker, TrackType::Adjust],
+        &[
+            TrackType::Video,
+            TrackType::Sticker,
+            TrackType::Adjust,
+            TrackType::Effect,
+        ],
     )
 }
 

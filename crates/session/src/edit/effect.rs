@@ -421,6 +421,36 @@ mod tests {
         assert_eq!(stored(&session), None);
     }
 
+    #[test]
+    fn an_effect_takes_a_mask_that_limits_where_it_acts() {
+        let mut session = open();
+        session
+            .apply(0, &[add("fx", "drop", 0, "recipe/photo-drop")])
+            .unwrap();
+        let mask = cutlass_effects::Mask::new(cutlass_effects::MaskShape::Circle);
+        session
+            .apply(
+                1,
+                &[Request::SetColorMask {
+                    segment_id: SegmentId::new("drop"),
+                    material_id: MaterialId::new("drop-mask"),
+                    mask: Some(mask),
+                }],
+            )
+            .unwrap();
+        let draft = session.draft();
+        let segment = draft
+            .tracks
+            .iter()
+            .flat_map(|track| &track.segments)
+            .find(|segment| segment.id.as_str() == "drop")
+            .unwrap();
+        assert_eq!(
+            cutlass_effects::segment_color_mask(draft, segment),
+            Some(mask)
+        );
+    }
+
     fn strength(segment: &str, material: &str, value: f64) -> Request {
         Request::SetEffectStrength {
             segment_id: SegmentId::new(segment),

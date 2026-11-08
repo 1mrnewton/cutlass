@@ -105,6 +105,47 @@ impl Shell {
         })
     }
 
+    /// The selected recipe effect's own controls, each with the value its
+    /// clip holds, or its default. `None` when the selection is not a
+    /// recipe effect; empty when the recipe has no controls.
+    #[must_use]
+    pub fn effect_controls(&self) -> Option<Vec<(cutlass_effects::Control, f32)>> {
+        let draft = self.draft()?;
+        let segment = self.selected_segment()?;
+        let MaterialRef::VideoEffect(effect) = draft.materials.get(segment.material_id.as_str())?
+        else {
+            return None;
+        };
+        let recipe = cutlass_effects::bundled_recipe(&effect.effect_id)?;
+        let stored = cutlass_effects::stored_controls(effect);
+        Some(
+            recipe
+                .controls
+                .iter()
+                .map(|control| {
+                    let value = stored
+                        .get(&control.id)
+                        .map_or(control.default, |value| control.clamp(*value));
+                    (control.clone(), value)
+                })
+                .collect(),
+        )
+    }
+
+    /// Store `value` for the selected effect's control `control`. A split
+    /// clip's halves get their own once one changes. One undo restores it.
+    pub fn set_effect_control(&mut self, control: &str, value: f64) -> Result<(), ShellError> {
+        let segment_id = self.selected_or_refuse()?;
+        self.refuse_locked(&segment_id)?;
+        let material_id = MaterialId::new(self.fresh("effect"));
+        self.apply(Request::SetEffectControl {
+            segment_id,
+            material_id,
+            control: control.to_owned(),
+            value,
+        })
+    }
+
     /// Turn the selected picture to `degrees`, clockwise on the preview.
     /// One undo restores the previous turn.
     pub fn set_rotation(&mut self, degrees: f64) -> Result<(), ShellError> {

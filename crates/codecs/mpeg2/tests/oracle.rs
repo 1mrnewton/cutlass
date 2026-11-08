@@ -12,6 +12,12 @@
 //!   scale, and 10-bit intra DC.
 //! - `chroma422.m2v`: `-pix_fmt yuv422p -g 4 -bf 1 -q:v 3 -inter_matrix ...`,
 //!   4:2:2 profile with a loaded non-intra matrix.
+//! - `chroma444.m2v`: a 16×16 High-profile 4:4:4 stream written from
+//!   H.262, because FFmpeg's encoder has no 4:4:4 mode. The intra picture
+//!   gives each of the twelve blocks its own level, in the Figure 6-12
+//!   order, and the following P picture copies it with a zero vector.
+//!   `chroma444.yuv` is FFmpeg 8.1.1's decode (`-f rawvideo -pix_fmt
+//!   yuv444p`).
 //! - `mpeg1.m1v`: `-c:v mpeg1video -g 6 -bf 2 -q:v 4`, 90x62, a size that
 //!   is not a multiple of 16.
 //!
@@ -57,7 +63,9 @@ mod oracle {
     }
 
     fn planes(frame: &VideoOutput) -> [&[u8]; 3] {
-        if let Some(full) = &frame.yuv422 {
+        if let Some(full) = &frame.yuv444 {
+            [full.y(), full.u(), full.v()]
+        } else if let Some(full) = &frame.yuv422 {
             [full.y(), full.u(), full.v()]
         } else {
             [frame.picture.y(), frame.picture.u(), frame.picture.v()]
@@ -113,6 +121,13 @@ mod oracle {
     #[test]
     fn interlaced_frame_pictures_match_the_reference_decoder() {
         check("interlaced.m2v", (96, 64), 10);
+    }
+
+    #[test]
+    fn chroma_444_block_placement_matches_the_reference_decoder() {
+        let frames = decode(&fixture("chroma444.m2v"));
+        assert!(frames.iter().all(|f| f.yuv444.is_some()));
+        check("chroma444.m2v", (16, 16), 2);
     }
 
     #[test]

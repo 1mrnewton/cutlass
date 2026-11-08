@@ -758,6 +758,8 @@ fn place(geo: &Geometry, i: usize, dct_field: bool) -> (usize, usize, usize, usi
         match geo.chroma_format {
             CHROMA_420 => return (c, 0, 0, 1),
             CHROMA_422 => (0, k),
+            // Figure 6-12. Cb blocks 4, 6, 8, 10 are the top-left,
+            // bottom-left, top-right and bottom-right; Cr is 5, 7, 9, 11.
             _ => (k >> 1, k & 1),
         }
     };
@@ -1020,6 +1022,11 @@ mod tests {
             ..geo
         };
         assert_eq!(chroma_vector(&geo, 2, [-3, -3]), [-1, -3]);
+        let geo = Geometry {
+            chroma_format: crate::headers::CHROMA_444,
+            ..geo
+        };
+        assert_eq!(chroma_vector(&geo, 1, [-3, 5]), [-3, 5]);
     }
 
     #[test]
@@ -1042,6 +1049,7 @@ mod tests {
             chroma_format: crate::headers::CHROMA_444,
             ..geo420
         };
+        assert_eq!(place(&geo444, 6, false), (1, 0, 8, 1));
         assert_eq!(place(&geo444, 8, false), (1, 8, 0, 1));
         assert_eq!(place(&geo444, 11, false), (2, 8, 8, 1));
         assert_eq!(place(&geo444, 6, true), (1, 0, 1, 2));

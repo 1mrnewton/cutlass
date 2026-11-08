@@ -16,6 +16,7 @@
 
 mod device;
 mod enhance;
+mod enhance_job;
 mod frame;
 mod generated;
 mod job;
@@ -27,6 +28,7 @@ use std::path::PathBuf;
 
 pub use device::{Compute, gpu_available, keep_kernels_in};
 pub use enhance::{ENHANCE_MAX_SIDE, ENHANCE_WEIGHTS, Enhanced, Enhancer, SCALE, convert_pytorch};
+pub use enhance_job::{EnhanceJobError, enhance_clip, enhanced_size};
 pub use frame::MAX_SIDE;
 pub use job::{JobError, SelectJob};
 pub use mask::Mask;

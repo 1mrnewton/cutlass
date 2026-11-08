@@ -2822,7 +2822,20 @@ impl Shell {
         }
         match self.plan_trim(segment_id, edge, x) {
             Ok(plan) => {
-                let spans = self.trim_spans(&plan.request());
+                // Shrinking from the start, the edge follows the pointer and
+                // the row waits for the drag to end: a packed row closes the
+                // gap then. Growing either way, or shrinking from the end,
+                // shows the row where the edit will put it.
+                let shrinks_start = plan.edge == TrimEdge::Start
+                    && self
+                        .draft()
+                        .and_then(|draft| locate(draft, &plan.segment_id))
+                        .is_some_and(|(segment, _)| plan.time > segment.target.start);
+                let spans = if shrinks_start {
+                    std::collections::HashMap::new()
+                } else {
+                    self.trim_spans(&plan.request())
+                };
                 self.pending_trim = Some(PendingTrim {
                     id: plan.segment_id,
                     edge: plan.edge,
@@ -15740,6 +15753,64 @@ mod tests {
             desktop.draft().unwrap().tracks[0].segments[1].target.start,
             Micros(end)
         );
+    }
+
+    /// On a packed main row, a start edge dragged in follows the pointer
+    /// and the next clip waits; on release the row closes up. Dragged out,
+    /// the row shifts right as it goes.
+    #[test]
+    fn a_start_edge_follows_the_pointer_in_and_pushes_the_row_out() {
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        draft.config.maintrack_adsorb = true;
+        draft.canvas_config.width = 2;
+        draft.canvas_config.height = 1;
+        let mut video = MaterialVideo::new("media");
+        video.duration = Micros(10_000_000);
+        draft.materials.videos.push(video);
+        for (id, start, duration, source) in [
+            ("first", 0, 1_000_000, 0),
+            ("clip", 1_000_000, 2_000_000, 2_000_000),
+            ("next", 3_000_000, 1_000_000, 0),
+        ] {
+            let mut clip = Segment::new(id, "media", TimeRange::new(start, duration));
+            clip.source_range = Some(TimeRange::new(source, duration));
+            draft.tracks[0].segments.push(clip);
+        }
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.toggle_snap();
+        let clip = SegmentId::new("clip");
+        let next = SegmentId::new("next");
+        let first = SegmentId::new("first");
+        let start = desktop.draft().unwrap().tracks[0].segments[1]
+            .target
+            .clone();
+        let end = start.end().0;
+        // In: the clip's start follows the pointer; its end and the next clip stay.
+        desktop.preview_edge(
+            clip.clone(),
+            TrimEdge::Start,
+            lane_time(&desktop, 1_500_000.0),
+        );
+        assert!(desktop.trim_preview(&clip).is_none());
+        assert!(desktop.trim_preview(&next).is_none());
+        let (_, time) = desktop.preview_span(&clip).expect("the edge follows");
+        assert!(time.0 > start.start.0);
+        // Out: the row shifts right as the clip grows.
+        desktop.preview_edge(
+            clip.clone(),
+            TrimEdge::Start,
+            lane_time(&desktop, 500_000.0),
+        );
+        let (grown_start, grown) = desktop.trim_preview(&clip).expect("the clip grows");
+        assert_eq!(grown_start, start.start);
+        assert!(grown.0 > start.duration.0);
+        let (next_start, _) = desktop.trim_preview(&next).expect("the row shifts");
+        assert_eq!(next_start.0, grown_start.0 + grown.0);
+        assert!(next_start.0 > end);
+        assert!(desktop.trim_preview(&first).is_none());
     }
 
     #[test]

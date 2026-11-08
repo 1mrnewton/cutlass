@@ -9,7 +9,10 @@ mod bitalloc;
 mod bits;
 mod crc;
 mod exponents;
+mod frame;
 mod header;
 mod mdct;
 mod spx;
 mod tables;
+
+pub use frame::{DynamicRange, Tools, Transient};

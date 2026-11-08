@@ -22,6 +22,7 @@ mod assistant;
 mod audio;
 mod grade;
 mod inspector;
+mod remove_bg;
 mod speed;
 
 const CARD_W: f32 = 144.0;
@@ -8353,9 +8354,9 @@ mod tests {
                     "Animation",
                     "Adjust",
                     "Basic",
-                    "Cutout",
+                    "Remove BG",
                     "Mask",
-                    "Enhance",
+                    "Retouch",
                     "Position & Size",
                     "Scale",
                     "Uniform scale",
@@ -8855,7 +8856,8 @@ mod tests {
         for label in ["LUT", "Teal punch", "Strength", "100"] {
             assert!(lines.iter().any(|line| line == label), "{label}: {lines:?}");
         }
-        // The Cutout page keys green out and shows the key's values.
+        // The Remove BG page keys green out and shows the key's values, with
+        // the parts still to build marked Later.
         shell.set_chroma("#00ff00", 0.4, 0.25).unwrap();
         view.inspector.focus(inspector::Focus {
             tab: 0,
@@ -8865,13 +8867,25 @@ mod tests {
         let _ = frame(&mut shell, &mut view, Vec::new());
         let lines = galleys(&frame(&mut shell, &mut view, Vec::new()));
         for label in [
+            "Auto removal",
+            "Stroke",
+            "Paper",
+            "Spacing",
+            "Object texture",
+            "Custom removal",
+            "Select object",
+            "Smart brush",
+            "Apply",
             "Chroma key",
-            "Color",
+            "Color picker",
             "Green",
-            "Strength",
+            "Intensity",
             "40",
             "Shadow",
             "25",
+            "Feather edge",
+            "Clean up edge",
+            "Later",
         ] {
             assert!(lines.iter().any(|line| line == label), "{label}: {lines:?}");
         }

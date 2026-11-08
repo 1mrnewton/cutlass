@@ -97,7 +97,7 @@ pub(super) fn clip_panel(
     if state.clip != inspection.segment_id.as_str() {
         *state = InspectorState {
             clip: inspection.segment_id.as_str().to_owned(),
-            open: ["position", "sound"]
+            open: ["position", "sound", "custom-removal", "chroma"]
                 .into_iter()
                 .chain(matches!(panel, Panel::Text | Panel::Caption).then_some("blend"))
                 .map(str::to_owned)
@@ -163,9 +163,13 @@ fn video_panel(
     }
     match state.tab {
         0 => {
-            pages(ui, &["Basic", "Cutout", "Mask", "Enhance"], &mut state.page);
+            pages(
+                ui,
+                &["Basic", "Remove BG", "Mask", "Retouch"],
+                &mut state.page,
+            );
             if state.page == 1 {
-                cutout_page(shell, ui, state, inspection);
+                super::remove_bg::remove_bg_page(shell, ui, state, inspection);
                 return;
             }
             if state.page == 2 {
@@ -173,7 +177,7 @@ fn video_panel(
                 return;
             }
             if state.page != 0 {
-                later_note(ui, ["", "Cutout", "Mask", "Enhance"][state.page]);
+                later_note(ui, ["", "Remove BG", "Mask", "Retouch"][state.page]);
                 return;
             }
             position_size(shell, ui, state, inspection, "Rotate");
@@ -1244,125 +1248,6 @@ fn colour_page(
 
 /// The Cutout page: chroma key, with the cutouts that need a model marked
 /// for later.
-fn cutout_page(
-    shell: &mut Shell,
-    ui: &mut Ui,
-    state: &mut InspectorState,
-    inspection: &Inspection,
-) {
-    later_row(ui, "Remove background");
-    select_object(shell, ui, inspection);
-    let key = inspection.chroma;
-    let header = section(
-        ui,
-        state,
-        "chroma",
-        "Chroma key",
-        Some((key.is_some(), true)),
-        false,
-    );
-    if header.toggled {
-        if key.is_some() {
-            send(shell, |shell| shell.set_chroma("", 0.0, 0.0));
-        } else {
-            state.open.insert("chroma".to_owned());
-            send(shell, |shell| shell.set_chroma("#00ff00", 0.4, 0.0));
-        }
-    }
-    let Some(key) = key else {
-        return;
-    };
-    if !header.open && !state.open.contains("chroma") {
-        return;
-    }
-    body(ui, |ui| {
-        let (strength, shadow) = (f64::from(key.strength), f64::from(key.shadow));
-        if let Some(color) = color_row(ui, state, "chroma-color", "Color", &key.hex()) {
-            send(shell, |shell| shell.set_chroma(&color, strength, shadow));
-        }
-        ui.horizontal(|ui| {
-            row_label(ui, "");
-            for (name, hex) in [("Green", "#00ff00"), ("Blue", "#0000ff")] {
-                if ui.add(ui::Button::new(name).text_size(12.0)).clicked() {
-                    send(shell, |shell| shell.set_chroma(hex, strength, shadow));
-                }
-            }
-        });
-        ui.add_space(ROW_GAP);
-        let hex = key.hex();
-        if let Some(value) = slider(
-            ui,
-            state,
-            "chroma-strength",
-            "Strength",
-            (strength * 100.0).round(),
-            0.0..=100.0,
-            |v| format!("{v:.0}"),
-        ) {
-            send(shell, |shell| shell.set_chroma(&hex, value / 100.0, shadow));
-        }
-        if let Some(value) = slider(
-            ui,
-            state,
-            "chroma-shadow",
-            "Shadow",
-            (shadow * 100.0).round(),
-            0.0..=100.0,
-            |v| format!("{v:.0}"),
-        ) {
-            send(shell, |shell| {
-                shell.set_chroma(&hex, strength, value / 100.0)
-            });
-        }
-    });
-}
-
-/// Select object: click the object on the preview and the clip is cut down
-/// to it. Clear takes the selection off.
-fn select_object(shell: &mut Shell, ui: &mut Ui, inspection: &Inspection) {
-    ui.add_space(8.0);
-    ui.label(
-        RichText::new("Select object")
-            .size(13.0)
-            .color(tokens::TEXT),
-    );
-    let picking = shell.picking().is_some();
-    if picking {
-        note(
-            ui,
-            "Click the object on the preview. Shift-click to take a part out.",
-        );
-    } else if !shell.vision_model_ready() {
-        note(ui, "The selection model is not on this machine yet.");
-    }
-    ui.horizontal(|ui| {
-        if picking {
-            if ui.add(ui::Button::new("Done").text_size(12.0)).clicked() {
-                shell.stop_picking();
-            }
-        } else if ui
-            .add_enabled(
-                shell.pick_enabled(),
-                ui::Button::new("Select object").text_size(12.0),
-            )
-            .on_disabled_hover_text("Put the playhead on an unlocked video clip.")
-            .clicked()
-        {
-            send(shell, Shell::start_picking);
-        }
-        if ui
-            .add_enabled(
-                inspection.selected,
-                ui::Button::new("Clear").text_size(12.0),
-            )
-            .clicked()
-        {
-            send(shell, Shell::clear_selection);
-        }
-    });
-    divider(ui);
-}
-
 /// The Mask page: a shape cuts the clip in its own frame, or with `colour`
 /// limits where its colour work shows. None takes the mask off; the
 /// sliders place, size, turn and soften it.
@@ -2457,16 +2342,16 @@ pub(super) fn pages(ui: &mut Ui, labels: &[&str], current: &mut usize) {
     ui.add_space(ROW_GAP);
 }
 
-struct Header {
-    open: bool,
-    toggled: bool,
-    reset: bool,
+pub(super) struct Header {
+    pub(super) open: bool,
+    pub(super) toggled: bool,
+    pub(super) reset: bool,
 }
 
 /// A section header: an optional on switch (`(on, editable)`), the name
 /// with a chevron that folds the section, and, with `keys`, the reset and
 /// keyframe buttons.
-fn section(
+pub(super) fn section(
     ui: &mut Ui,
     state: &mut InspectorState,
     key: &str,
@@ -2590,7 +2475,7 @@ pub(super) fn later_badge(ui: &mut Ui) {
         .galley(rect.center() - galley.size() / 2.0, galley, ACCENT);
 }
 
-fn later_note(ui: &mut Ui, what: &str) {
+pub(super) fn later_note(ui: &mut Ui, what: &str) {
     note(
         ui,
         &format!("{what} comes later. Cutlass has no edit for it yet."),
@@ -3215,7 +3100,7 @@ fn number_box(
 
 /// A name and a swatch that opens a color picker. The color is sent once,
 /// when the pointer lets go. An empty stored color shows white.
-fn color_row(
+pub(super) fn color_row(
     ui: &mut Ui,
     state: &mut InspectorState,
     key: &str,

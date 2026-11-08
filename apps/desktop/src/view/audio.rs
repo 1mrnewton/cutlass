@@ -105,7 +105,7 @@ fn basic_tab(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState, inspect
         "enhance-voice",
         "Enhance voice",
         Some("Make speech clearer and fuller."),
-        Some(&mut |ui: &mut Ui| later_slider(ui, "Intensity", "75")),
+        Some(&mut |ui: &mut Ui| later_slider(ui, "Intensity", 75.0)),
     );
     later_section(
         ui,
@@ -194,7 +194,7 @@ fn voice_tab(ui: &mut Ui, state: &mut InspectorState) {
 /// A section for a feature with no edit yet: a dimmed on box, its name,
 /// a fold mark and a "Later" mark, a line on what it does, and, when it is
 /// open, its controls dimmed. These start open; the name folds them.
-fn later_section(
+pub(super) fn later_section(
     ui: &mut Ui,
     state: &mut InspectorState,
     key: &str,
@@ -244,17 +244,17 @@ fn later_section(
 }
 
 /// A dimmed slider row with a fixed value.
-fn later_slider(ui: &mut Ui, label: &str, shown: &str) {
+pub(super) fn later_slider(ui: &mut Ui, label: &str, value: f64) {
     ui.horizontal(|ui| {
         row_label(ui, label);
         let track = (ui.available_width() - super::inspector::VALUE_WIDTH - 8.0).max(40.0);
-        let mut value = 75.0;
+        let mut value = value;
         ui.add(
             ui::Slider::new(&mut value, 0.0..=100.0)
                 .name(label)
                 .width(track),
         );
-        value_box(ui, shown);
+        value_box(ui, &format!("{value:.0}"));
     });
     ui.add_space(ROW_GAP);
 }
@@ -291,7 +291,7 @@ fn choice_row(ui: &mut Ui, label: Option<&str>, text: &str) {
     ui.add_space(ROW_GAP);
 }
 
-fn right_button(ui: &mut Ui, label: &str) {
+pub(super) fn right_button(ui: &mut Ui, label: &str) {
     ui.horizontal(|ui| {
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             ui.add(ui::Button::new(label).text_size(12.0));
@@ -360,7 +360,7 @@ fn voice_tiles(ui: &mut Ui, first: Option<&str>, names: &[&str]) {
     ui.add_space(ROW_GAP);
 }
 
-fn name_tile(ui: &mut Ui, name: &str, on: bool) -> egui::Response {
+pub(super) fn name_tile(ui: &mut Ui, name: &str, on: bool) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(CATALOG_TILE), Sense::click());
     response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, false, name));
     tile_frame(ui, rect, &response, on);

@@ -27,20 +27,22 @@ impl RefPlane<'_> {
     /// Copies the `w` by `h` block whose top-left sample is `(x, y)` into
     /// `out` (stride `w`).
     pub(crate) fn fetch(&self, x: i32, y: i32, w: usize, h: usize, rows: Rows, out: &mut [u8]) {
-        // A field pads within itself: its last row repeats, not the
-        // frame's.
-        let (step, parity, rows_in) = match rows {
-            Rows::Frame => (1, 0, self.edge_h),
-            Rows::Field(p) => (2, i32::from(p), (self.edge_h - i32::from(p) + 1) / 2),
+        // The frame is padded, then a field is read from it: past the
+        // bottom a top field reads the last frame row, which is the
+        // bottom field's.
+        let (step, parity) = match rows {
+            Rows::Frame => (1, 0),
+            Rows::Field(p) => (2, i32::from(p)),
         };
         let last_x = self.edge_w - 1;
-        let last_y = rows_in - 1;
-        let inside = x >= 0 && x + w as i32 - 1 <= last_x && y >= 0 && y + h as i32 - 1 <= last_y;
+        let last_y = self.edge_h - 1;
+        let (top, bottom) = (step * y + parity, step * (y + h as i32 - 1) + parity);
+        let inside = x >= 0 && x + w as i32 - 1 <= last_x && top >= 0 && bottom <= last_y;
         for j in 0..h {
             let Some(dst) = out.get_mut(j * w..j * w + w) else {
                 return;
             };
-            let fy = step * (y + j as i32).clamp(0, last_y.max(0)) + parity;
+            let fy = (step * (y + j as i32) + parity).clamp(0, last_y.max(0));
             let base = fy as usize * self.stride;
             if inside {
                 let start = base + x as usize;
@@ -758,13 +760,17 @@ mod tests {
         // Bottom field row 1 is frame row 3.
         r.fetch(0, 1, 1, 1, Rows::Field(1), &mut out[..1]);
         assert_eq!(out[0], data[3 * 16]);
-        // Past the bottom, each field repeats its own last row.
+        // Past the bottom both fields read the padded frame's last row,
+        // and above the top its first.
         r.fetch(0, 9, 1, 1, Rows::Field(0), &mut out[..1]);
-        assert_eq!(out[0], data[14 * 16]);
+        assert_eq!(out[0], data[15 * 16]);
         r.fetch(0, 9, 1, 1, Rows::Field(1), &mut out[..1]);
         assert_eq!(out[0], data[15 * 16]);
         r.fetch(0, -2, 1, 1, Rows::Field(1), &mut out[..1]);
-        assert_eq!(out[0], data[16]);
+        assert_eq!(out[0], data[0]);
+        // Inside, a field reads its own rows.
+        r.fetch(0, 7, 1, 1, Rows::Field(0), &mut out[..1]);
+        assert_eq!(out[0], data[14 * 16]);
     }
 
     #[test]

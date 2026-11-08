@@ -1,6 +1,7 @@
 //! The MPEG-2 Main profile encoder: progressive 4:2:0 frame pictures in
 //! closed groups of pictures with two B pictures between anchors, TM5 rate
-//! control, and a VBV buffer model.
+//! control, and a VBV buffer model. A cut in the pictures, or a forced
+//! keyframe, starts a new GOP.
 //!
 //! Packets leave in decode order. Every I picture carries the sequence
 //! header, its extensions, and a GOP header, so any keyframe starts a
@@ -125,6 +126,35 @@ pub struct Mpeg2Encoder {
     /// The newest packet, kept so drain can end the sequence in it.
     held: Option<Packet>,
     drained: bool,
+    /// Luma histogram of the last accepted picture, to find a cut.
+    last_luma: Option<Box<Histogram>>,
+}
+
+/// Luma levels in 64 bins of four.
+type Histogram = [u32; 64];
+
+/// Histogram distance, as a share of the picture's samples (0 to 2), above
+/// which a picture starts a new GOP. Motion and lighting on the local
+/// recordings stay under 0.25; a cut between two of them is about 1.7.
+const CUT: f64 = 0.5;
+
+fn histogram(luma: &[u8]) -> Box<Histogram> {
+    let mut bins = Box::new([0u32; 64]);
+    for &sample in luma {
+        bins[usize::from(sample >> 2)] += 1;
+    }
+    bins
+}
+
+/// Whether `next` shows a different scene from `last`: the pictures share
+/// too few luma levels for prediction to help.
+fn scene_cut(last: &Histogram, next: &Histogram, samples: usize) -> bool {
+    let distance: u64 = last
+        .iter()
+        .zip(next)
+        .map(|(&a, &b)| u64::from(a.abs_diff(b)))
+        .sum();
+    distance as f64 > CUT * samples as f64
 }
 
 impl Mpeg2Encoder {
@@ -170,6 +200,7 @@ impl Mpeg2Encoder {
             refs: [None, None],
             held: None,
             drained: false,
+            last_luma: None,
         })
     }
 
@@ -490,6 +521,11 @@ impl VideoEncoder for Mpeg2Encoder {
             self.stream = Some(self.open_stream(duration, input.timescale)?);
         }
         let gop_size = self.stream.as_ref().map_or(1, |stream| stream.gop_size);
+        let luma = histogram(input.picture.y());
+        let cut = self
+            .last_luma
+            .as_deref()
+            .is_some_and(|last| scene_cut(last, &luma, input.picture.y().len()));
         self.drained = false;
         let mut source = Source {
             frame: self.pad(&input.picture),
@@ -499,7 +535,7 @@ impl VideoEncoder for Mpeg2Encoder {
             temporal_reference: 0,
         };
         let mut out = Vec::new();
-        if input.force_keyframe || self.refs[1].is_none() || self.gop_pos >= gop_size {
+        if input.force_keyframe || cut || self.refs[1].is_none() || self.gop_pos >= gop_size {
             self.close_gop(&mut out)?;
             out.push(self.encode(PICTURE_I, source)?);
             self.gop_pos = 1;
@@ -514,6 +550,7 @@ impl VideoEncoder for Mpeg2Encoder {
             }
         }
         self.frames += 1;
+        self.last_luma = Some(luma);
         Ok(self.release(out))
     }
 
@@ -544,6 +581,7 @@ impl VideoEncoder for Mpeg2Encoder {
         self.gop_pos = 0;
         self.frames = 0;
         self.drained = false;
+        self.last_luma = None;
         if let Some(stream) = self.stream.as_mut() {
             stream.rate.reset();
         }

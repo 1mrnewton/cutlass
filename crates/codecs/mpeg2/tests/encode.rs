@@ -297,6 +297,63 @@ mod encode {
         }
     }
 
+    /// Keyframe pts and the decoded luma PSNR of each picture, for 20
+    /// frames at 25 fps that switch to a darker, coarser scene at `cut`.
+    fn encode_with_cut(cut: Option<u32>) -> (Vec<i64>, Vec<f64>) {
+        let (w, h) = (176, 144);
+        let source = |t: u32| {
+            let mut frame = input(w, h, t);
+            if cut.is_some_and(|cut| t >= cut) {
+                let shifted = input(w / 2, h / 2, t + 40).picture;
+                let y: Vec<u8> = (0..(w * h) as usize)
+                    .map(|i| {
+                        let (row, col) = (i / w as usize, i % w as usize);
+                        shifted.y()[(row / 2) * (w / 2) as usize + col / 2] / 3 + 20
+                    })
+                    .collect();
+                let p = &frame.picture;
+                frame.picture = Yuv420p::try_new(w, h, y, p.u().to_vec(), p.v().to_vec()).unwrap();
+            }
+            frame
+        };
+        let mut encoder = open(w, h, 600_000, false);
+        let mut packets = Vec::new();
+        for t in 0..20 {
+            packets.extend(encoder.push(&source(t)).unwrap());
+        }
+        packets.extend(encoder.drain().unwrap());
+        let keyframes = packets
+            .iter()
+            .filter(|p| p.keyframe)
+            .map(|p| p.pts)
+            .collect();
+        let mut decoder = Mpeg2Decoder::default();
+        let mut frames = Vec::new();
+        for packet in &packets {
+            frames.extend(decoder.push(packet).unwrap());
+        }
+        frames.extend(decoder.drain().unwrap());
+        assert_eq!(frames.len(), 20);
+        let quality = frames
+            .iter()
+            .map(|frame| {
+                let t = frame.pts as u32;
+                psnr(frame.picture.y(), source(t).picture.y())
+            })
+            .collect();
+        (keyframes, quality)
+    }
+
+    #[test]
+    fn a_scene_cut_starts_a_gop_and_motion_does_not() {
+        let (smooth, _) = encode_with_cut(None);
+        assert_eq!(smooth, [0, 12]);
+        let (keyframes, quality) = encode_with_cut(Some(8));
+        assert_eq!(keyframes, [0, 8]);
+        let worst = quality.iter().copied().fold(f64::MAX, f64::min);
+        assert!(worst > 30.0, "{quality:?}");
+    }
+
     #[test]
     fn a_forced_keyframe_closes_the_gop_there() {
         let (w, h) = (64, 48);

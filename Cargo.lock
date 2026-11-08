@@ -2747,6 +2747,7 @@ dependencies = [
  "cutlass-model",
  "cutlass-mp3",
  "cutlass-mp3-container",
+ "cutlass-mpeg2",
  "cutlass-ogg",
  "cutlass-opus",
  "cutlass-pcm",
@@ -2929,8 +2930,11 @@ dependencies = [
 name = "cutlass-mpeg2"
 version = "0.1.0"
 dependencies = [
+ "cutlass-codec",
+ "cutlass-container",
  "cutlass-decode",
  "cutlass-encode",
+ "cutlass-isobmff",
 ]
 
 [[package]]

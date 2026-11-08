@@ -94,9 +94,12 @@ pub fn register_codecs_with(
     cutlass_prores::register_encoders(&mut encoders);
     cutlass_vp8::register_engine_decoders(&mut decoders);
     cutlass_vp8::register_engine_encoders(&mut encoders);
-    // After the platform decoders: the Rust HEVC decoder serves Linux, and
-    // the other platforms when hardware decode is off.
+    // After the platform decoders: the Rust HEVC and MPEG-2 decoders serve
+    // Linux, and the other platforms when hardware decode is off. No
+    // platform encodes MPEG-2.
     cutlass_hevc::register_decoders(&mut decoders);
+    cutlass_mpeg2::register_decoders(&mut decoders);
+    cutlass_mpeg2::register_encoders(&mut encoders);
     (decoders, encoders)
 }
 

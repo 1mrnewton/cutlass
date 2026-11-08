@@ -154,6 +154,12 @@ opt-level = 3
 [profile.dev.package.cutlass-h264]
 opt-level = 3
 
+# MPEG-2 plays 1080 lines and exports through the Rust encoder on every
+# host. Unoptimised, its encoder tests take 14 s instead of 0.3 s on an M5.
+# Overflow checks and debug assertions stay on.
+[profile.dev.package.cutlass-mpeg2]
+opt-level = 3
+
 # The WebP and ProRes tests round-trip whole pictures through libwebp,
 # FFmpeg and the platform readers. Unoptimised, the WebP lossless
 # round-trip ran past 28 minutes on an M5 without finishing; optimised it

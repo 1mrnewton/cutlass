@@ -85,6 +85,8 @@ pub struct AudioEncoder {
     pending: Vec<u8>,
     cookie: Vec<u8>,
     leading: u32,
+    /// Sample ticks coded so far: the next packet's presentation time.
+    next_pts: i64,
     produced: bool,
     drained: bool,
     cancel: Arc<AtomicBool>,
@@ -342,6 +344,7 @@ pub fn open_encoder(params: &CodecParams) -> Result<Box<dyn Encoder>, CodecError
         pending: Vec::new(),
         cookie,
         leading,
+        next_pts: 0,
         produced: false,
         drained: false,
         cancel: Arc::new(AtomicBool::new(false)),
@@ -811,6 +814,7 @@ impl Encoder for AudioEncoder {
         }
         self.pending.clear();
         self.produced = false;
+        self.next_pts = 0;
         self.drained = false;
     }
 
@@ -862,10 +866,14 @@ impl AudioEncoder {
             if encoded.is_empty() {
                 break;
             }
+            // Each packet sits where its frames begin; a muxer that takes
+            // these as presentation times otherwise stacks them all at zero.
+            let pts = self.next_pts;
+            self.next_pts = self.next_pts.saturating_add(i64::from(frames));
             let mut packet = Encoded {
                 stream: 0,
                 data: encoded,
-                pts: 0,
+                pts,
                 duration: i64::from(frames),
                 timescale: self.rate,
                 keyframe: true,
@@ -1136,6 +1144,22 @@ mod tests {
         );
         let pcm = Pcm::from_f32(48_000, ChannelLayout::mono(), vec![0.25]).expect("pcm");
         assert!(encoder.push(&AudioInput { pcm }).is_ok());
+    }
+
+    /// Packets are stamped in order from zero, each where the one before
+    /// ends, so a muxer writes no composition offsets for sound.
+    #[test]
+    fn aac_packets_follow_one_another_in_time() {
+        let mut encoder = open_encoder(&audio_params(CodecId::Aac, 48_000)).expect("open");
+        let pcm = Pcm::from_f32(48_000, ChannelLayout::mono(), vec![0.2; 48_000]).expect("pcm");
+        let mut packets = encoder.push(&AudioInput { pcm }).expect("push");
+        packets.extend(encoder.drain().expect("drain"));
+        assert!(packets.len() > 10, "{} packets", packets.len());
+        let mut at = 0;
+        for packet in &packets {
+            assert_eq!(packet.pts, at);
+            at += packet.duration;
+        }
     }
 
     #[test]

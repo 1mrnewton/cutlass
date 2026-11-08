@@ -1,5 +1,8 @@
 //! The decoder against libvorbis and FFmpeg's own decoder.
 //!
+//! The local webm's Vorbis track is digital silence; it checks silent
+//! blocks and a real file's packets, not the signal path.
+//!
 //! Files come from libvorbis (GStreamer `vorbisenc`) and FFmpeg's native
 //! encoder, made from `local-files` audio (a synthetic source without
 //! it). Each is decoded here (packets read by a test-only Ogg reader, cut
@@ -114,7 +117,18 @@ fn check(dir: &Path, file: &Path, name: &str) {
         .rev()
         .find_map(|p| p.granule)
         .unwrap();
-    assert_eq!(frames as i64, end, "{name}: the end granule's sample count");
+    let (ffmpeg_frames, libvorbis_frames) = (ffmpeg.len() / channels, libvorbis.len() / channels);
+    if end as usize <= ffmpeg_frames.max(libvorbis_frames) {
+        assert_eq!(frames as i64, end, "{name}: the end granule's sample count");
+    } else {
+        // A granule past the stream (a remux from millisecond times): both
+        // references output every decoded sample.
+        assert_eq!(
+            ffmpeg_frames, libvorbis_frames,
+            "{name}: the references agree"
+        );
+        assert_eq!(frames, ffmpeg_frames, "{name}: every decoded sample");
+    }
     assert!(
         ffmpeg_snr >= MIN_SNR_DB,
         "{name}: {ffmpeg_snr} dB against ffmpeg"
@@ -216,5 +230,63 @@ fn fixtures_decode_like_libvorbis_and_ffmpeg() {
             .join(name);
         check(&dir, &file, name);
     }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn ffmpeg_encoder_files_decode_like_libvorbis_and_ffmpeg() {
+    if !has_gst_vorbis() || !has_ffmpeg() {
+        eprintln!("skipped: needs GStreamer vorbisdec and ffmpeg");
+        return;
+    }
+    let dir = scratch("decoder-ffmpeg-encoder");
+    // FFmpeg's encoder writes stereo only.
+    let channels = 2;
+    for (rate, quality) in [
+        (44_100, 1),
+        (44_100, 4),
+        (48_000, 8),
+        (22_050, 3),
+        (32_000, 6),
+    ] {
+        let wav = source(&dir, rate, channels, 6);
+        let name = format!("ffmpeg q{quality} {channels} ch {rate}");
+        let file = dir.join(format!("ffmpeg-{quality}-{channels}-{rate}.ogg"));
+        run(Command::new("ffmpeg")
+            .args(["-v", "error", "-y", "-i"])
+            .arg(&wav)
+            .args([
+                "-c:a",
+                "vorbis",
+                "-strict",
+                "-2",
+                "-q:a",
+                &quality.to_string(),
+            ])
+            .arg(&file));
+        check(&dir, &file, &name);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_local_webm_stream_decodes_like_libvorbis_and_ffmpeg() {
+    let Some(root) = common::local_files() else {
+        eprintln!("skipped: no local-files");
+        return;
+    };
+    if !has_gst_vorbis() || !has_ffmpeg() {
+        eprintln!("skipped: needs GStreamer vorbisdec and ffmpeg");
+        return;
+    }
+    let dir = scratch("decoder-webm");
+    let file = dir.join("webm-audio.ogg");
+    // The packets as they are, moved from Matroska to Ogg.
+    run(Command::new("ffmpeg")
+        .args(["-v", "error", "-y", "-i"])
+        .arg(root.join("file_example_WEBM_1920_3_7MB.webm"))
+        .args(["-vn", "-c:a", "copy"])
+        .arg(&file));
+    check(&dir, &file, "local webm");
     let _ = std::fs::remove_dir_all(&dir);
 }

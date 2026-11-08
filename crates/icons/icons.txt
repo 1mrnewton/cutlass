@@ -107,6 +107,10 @@ viewOff        ViewOffSlashIcon
 volumeOff      VolumeOffIcon
 more           MoreHorizontalIcon
 solo           HeadphonesIcon
+keyCommand     CommandIcon
+keyShift       ArrowUpBigIcon
+keyOption      OptionIcon
+keyWindows     WindowsOldIcon
 
 # Custom marks.
 blade          custom

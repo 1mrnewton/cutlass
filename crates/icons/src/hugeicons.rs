@@ -3595,5 +3595,141 @@ pub static ICONS: &[IconData] = &[
             },
         ],
     },
+    IconData {
+        name: "keyCommand",
+        source: Some("CommandIcon"),
+        marks: &[
+            Mark {
+                shape: Shape::Path("M15 9V15H9V9H15Z"),
+                fill: false,
+                even_odd: false,
+                stroke: Some(Stroke {
+                    width: 1.5,
+                    cap: Cap::Butt,
+                    join: Join::Round,
+                }),
+            },
+            Mark {
+                shape: Shape::Path(
+                    "M15 15H18C19.6569 15 21 16.3431 21 18C21 19.6569 19.6569 21 18 21C16.3431 21 15 19.6569 15 18V15Z",
+                ),
+                fill: false,
+                even_odd: false,
+                stroke: Some(Stroke {
+                    width: 1.5,
+                    cap: Cap::Butt,
+                    join: Join::Round,
+                }),
+            },
+            Mark {
+                shape: Shape::Path(
+                    "M9 15.002H6C4.34315 15.002 3 16.3451 3 18.002C3 19.6588 4.34315 21.002 6 21.002C7.65685 21.002 9 19.6588 9 18.002V15.002Z",
+                ),
+                fill: false,
+                even_odd: false,
+                stroke: Some(Stroke {
+                    width: 1.5,
+                    cap: Cap::Butt,
+                    join: Join::Round,
+                }),
+            },
+            Mark {
+                shape: Shape::Path(
+                    "M15 9L15 6C15 4.34315 16.3431 3 18 3C19.6569 3 21 4.34315 21 6C21 7.65685 19.6569 9 18 9H15Z",
+                ),
+                fill: false,
+                even_odd: false,
+                stroke: Some(Stroke {
+                    width: 1.5,
+                    cap: Cap::Butt,
+                    join: Join::Round,
+                }),
+            },
+            Mark {
+                shape: Shape::Path(
+                    "M9 9V6C9 4.34315 7.65685 3 6 3C4.34315 3 3 4.34315 3 6C3 7.65685 4.34315 9 6 9H9Z",
+                ),
+                fill: false,
+                even_odd: false,
+                stroke: Some(Stroke {
+                    width: 1.5,
+                    cap: Cap::Butt,
+                    join: Join::Round,
+                }),
+            },
+        ],
+    },
+    IconData {
+        name: "keyShift",
+        source: Some("ArrowUpBigIcon"),
+        marks: &[Mark {
+            shape: Shape::Path(
+                "M15.544 11.5H15V17.5C15 18.4319 15 18.8978 14.8478 19.2654C14.6448 19.7554 14.2554 20.1448 13.7654 20.3478C13.3978 20.5 12.9319 20.5 12 20.5C11.0681 20.5 10.6022 20.5 10.2346 20.3478C9.74458 20.1448 9.35523 19.7554 9.15224 19.2654C9 18.8978 9 18.4319 9 17.5V11.5H8.45596C6.37322 11.5 5.33185 11.5 5.05779 10.8997C4.78372 10.2994 5.49744 9.58174 6.92487 8.14642L10.4689 4.58281C11.1868 3.86094 11.5458 3.5 12 3.5C12.4542 3.5 12.8132 3.86094 13.5311 4.58281L17.0751 8.14643C18.5026 9.58175 19.2163 10.2994 18.9422 10.8997C18.6681 11.5 17.6268 11.5 15.544 11.5Z",
+            ),
+            fill: false,
+            even_odd: false,
+            stroke: Some(Stroke {
+                width: 1.5,
+                cap: Cap::Round,
+                join: Join::Round,
+            }),
+        }],
+    },
+    IconData {
+        name: "keyOption",
+        source: Some("OptionIcon"),
+        marks: &[
+            Mark {
+                shape: Shape::Path(
+                    "M4 5H5.04362C6.96246 5 7.92187 5 8.67328 5.49548C9.42469 5.99095 9.80263 6.8728 10.5585 8.63648L13.4415 15.3635C14.1974 17.1272 14.5753 18.009 15.3267 18.5045C16.0781 19 17.0375 19 18.9564 19H20",
+                ),
+                fill: false,
+                even_odd: false,
+                stroke: Some(Stroke {
+                    width: 1.5,
+                    cap: Cap::Round,
+                    join: Join::Miter,
+                }),
+            },
+            Mark {
+                shape: Shape::Path("M14 5H20"),
+                fill: false,
+                even_odd: false,
+                stroke: Some(Stroke {
+                    width: 1.5,
+                    cap: Cap::Round,
+                    join: Join::Miter,
+                }),
+            },
+        ],
+    },
+    IconData {
+        name: "keyWindows",
+        source: Some("WindowsOldIcon"),
+        marks: &[
+            Mark {
+                shape: Shape::Path(
+                    "M14.0136 3.99538L8.01361 4.99036C5.61912 5.38744 4.42188 5.58597 3.71094 6.421C3 7.25602 3 8.46368 3 10.879L3 13.121C3 15.5363 3 16.744 3.71094 17.579C4.42188 18.414 5.61913 18.6126 8.01361 19.0096L14.0136 20.0046C17.2567 20.5424 18.8782 20.8113 19.9391 19.9171C21 19.023 21 17.3873 21 14.116V9.88402C21 6.6127 21 4.97704 19.9391 4.08286C18.8782 3.18868 17.2567 3.45758 14.0136 3.99538Z",
+                ),
+                fill: false,
+                even_odd: false,
+                stroke: Some(Stroke {
+                    width: 1.5,
+                    cap: Cap::Round,
+                    join: Join::Round,
+                }),
+            },
+            Mark {
+                shape: Shape::Path("M11 4.5V19.5M3 12H21"),
+                fill: false,
+                even_odd: false,
+                stroke: Some(Stroke {
+                    width: 1.5,
+                    cap: Cap::Round,
+                    join: Join::Round,
+                }),
+            },
+        ],
+    },
     crate::custom::BLADE,
 ];

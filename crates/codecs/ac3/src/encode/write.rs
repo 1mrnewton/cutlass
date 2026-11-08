@@ -340,6 +340,7 @@ impl FrameFlags {
 struct CouplingState {
     first_coords: [bool; MAX_FBW],
     first_leak: bool,
+    first_spx: [bool; MAX_FBW],
 }
 
 impl CouplingState {
@@ -347,6 +348,7 @@ impl CouplingState {
         Self {
             first_coords: [true; MAX_FBW],
             first_leak: true,
+            first_spx: [true; MAX_FBW],
         }
     }
 }
@@ -382,7 +384,7 @@ fn audblk(
     }
     w.flag(false); // dynrnge
     if eac3 {
-        w.flag(false); // spxinu in block 0, spxstre after
+        spectral(w, shape, blk, block, coupling);
     }
 
     // Coupling strategy.
@@ -480,7 +482,7 @@ fn audblk(
         }
     }
     for ch in 0..nf {
-        if block.expstr[ch] != REUSE && !block.chincpl[ch] {
+        if block.expstr[ch] != REUSE && !block.chincpl[ch] && shape.spx.is_none() {
             w.put(6, u32::from(shape.bandwidth));
         }
     }
@@ -573,6 +575,54 @@ fn audblk(
             for _ in 0..skip {
                 w.put(8, 0);
             }
+        }
+    }
+}
+
+/// Spectral extension strategy and coordinates (Annex E 3.6).
+fn spectral(
+    w: &mut BitWriter,
+    shape: &Shape,
+    blk: usize,
+    block: &Block,
+    state: &mut CouplingState,
+) {
+    let Some(spx) = shape.spx else {
+        // Block 0 carries `spxinu`. Later blocks carry `spxstre`.
+        w.flag(false);
+        return;
+    };
+    if blk == 0 {
+        w.flag(true); // spxinu
+        if shape.acmod != 1 {
+            for _ in 0..shape.nf {
+                w.flag(true);
+            }
+        }
+        w.put(2, spx.start as u32);
+        w.put(3, spx.begf as u32);
+        w.put(3, spx.endf as u32);
+        w.flag(false); // the default band structure
+    } else {
+        w.flag(false); // spxstre
+    }
+    let bands = spx.range().bands.count;
+    for ch in 0..shape.nf {
+        let send = if state.first_spx[ch] {
+            state.first_spx[ch] = false;
+            true
+        } else {
+            w.flag(block.spx_send[ch]);
+            block.spx_send[ch]
+        };
+        if !send {
+            continue;
+        }
+        w.put(5, 31); // spxblnd: copied signal, no noise
+        w.put(2, u32::from(block.spx_master[ch]));
+        for band in 0..bands {
+            w.put(4, u32::from(block.spx_exp[ch][band]));
+            w.put(2, u32::from(block.spx_mant[ch][band]));
         }
     }
 }

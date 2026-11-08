@@ -657,6 +657,58 @@ fn ffmpeg_decodes_our_streams() {
     }
 }
 
+/// A low-rate E-AC-3 frame extends the top bins instead of dropping them.
+#[test]
+fn spectral_extension_matches_ffmpeg() {
+    let Some(ffmpeg) = oracle("ffmpeg", "-version") else {
+        return;
+    };
+    let rate = 48_000u32;
+    let channels = [C];
+    let mut state = 0x1234_5678u32;
+    let pcm: Vec<f32> = (0..rate as usize)
+        .map(|_| {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (state >> 16) as i16 as f32 / 32_768.0 * 0.2
+        })
+        .collect();
+    let packets = encode(config(Format::Eac3, rate, &channels, 40_000), &pcm);
+    let ours = decode(CodecId::Eac3, &packets);
+    assert!(
+        ours.decoder.tools().spx_blocks > 0,
+        "the low rate did not use spectral extension"
+    );
+    let theirs = ffmpeg_decode(&ffmpeg, &stream(&packets), &["-f", "eac3"]);
+    let skip = ENCODER_DELAY as usize;
+    let a = &ours.pcm;
+    let b: Vec<f32> = theirs.into_iter().skip(skip).collect();
+    let n = a.len().min(b.len());
+    let margin = 1536.min(n / 4);
+    let quality = snr(&a[margin..n - margin], &b[margin..n - margin]);
+    let tone_pcm = tones(&channels, rate, rate as usize, 0.25);
+    let tone_packets = encode(config(Format::Eac3, rate, &channels, 40_000), &tone_pcm);
+    let tone_ours = decode(CodecId::Eac3, &tone_packets);
+    let tone_theirs = ffmpeg_decode(&ffmpeg, &stream(&tone_packets), &["-f", "eac3"]);
+    let tone_b: Vec<f32> = tone_theirs.into_iter().skip(skip).collect();
+    let tn = tone_ours.pcm.len().min(tone_b.len());
+    let tone_q = snr(
+        &tone_ours.pcm[margin..tn - margin],
+        &tone_b[margin..tn - margin],
+    );
+    assert!(
+        tone_q > 60.0,
+        "tone through spectral extension {tone_q:.1} dB"
+    );
+    let high = power(&a[margin..n - margin], rate, 10_000.0);
+    let high_src = power(&pcm[margin..n - margin], rate, 10_000.0);
+    let low = power(&a[margin..n - margin], rate, 3_000.0);
+    let ratio = high / high_src.max(1.0e-12);
+    assert!(
+        (0.25..4.0).contains(&ratio),
+        "10 kHz ratio {ratio:.2}, noise vs ffmpeg {quality:.1} dB, 3 kHz {low:.3}"
+    );
+}
+
 /// One, two, three and six blocks per syncframe. Each packet lasts that
 /// many blocks, and FFmpeg hears the same program our decoder hears.
 #[test]

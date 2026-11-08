@@ -119,6 +119,43 @@ impl Coords {
     }
 }
 
+/// Closest `mstrspxco`, `spxcoexp` and `spxcomant` to each band's gain.
+pub(crate) fn quantize(gains: &[f32]) -> (u8, [(u8, u8); MAX_BANDS]) {
+    let mut best_master = 0u8;
+    let mut best_error = f32::MAX;
+    let mut best = [(0u8, 0u8); MAX_BANDS];
+    for master in 0..4u8 {
+        let mut error = 0.0f32;
+        let mut chosen = [(0u8, 0u8); MAX_BANDS];
+        for (band, &gain) in gains.iter().enumerate().take(MAX_BANDS) {
+            let (exp, mant, delta) = closest(master, gain.max(0.0));
+            chosen[band] = (exp, mant);
+            error += delta;
+        }
+        if error < best_error {
+            best_error = error;
+            best_master = master;
+            best = chosen;
+        }
+    }
+    (best_master, best)
+}
+
+fn closest(master: u8, gain: f32) -> (u8, u8, f32) {
+    let mut best = (0u8, 0u8, f32::MAX);
+    let mut coords = Coords::default();
+    for exp in 0..16u8 {
+        for mant in 0..4u8 {
+            coords.set(0, u32::from(exp), u32::from(mant), u32::from(master));
+            let delta = (coords.coord[0] - gain).abs();
+            if delta < best.2 {
+                best = (exp, mant, delta);
+            }
+        }
+    }
+    best
+}
+
 /// Synthesize one channel's coefficients from `range.begin_bin()` to
 /// `range.end_bin()` (clause 3.6.4). `noise` returns zero-mean,
 /// unit-variance samples.
@@ -275,6 +312,25 @@ mod tests {
         assert!((tc[49] - gains[2] as f32).abs() < 1e-6);
         assert!((tc[51] - gains[0] as f32).abs() < 1e-6);
         assert_eq!(tc[52], 1.0);
+    }
+
+    #[test]
+    fn the_low_rate_extension_blends_no_noise() {
+        let begin = begin_subband(3);
+        let end = end_subband(5);
+        let range = Range {
+            start: 2,
+            begin,
+            end,
+            bands: Bands::new(&DEFAULT_SPX_BANDS, begin, end),
+        };
+        assert!(2 < begin);
+        let mut coords = Coords::default();
+        coords.blend(&range, 31);
+        for band in 0..range.bands.count {
+            assert_eq!(coords.noise[band], 0.0, "band {band}");
+            assert!((coords.signal[band] - 1.0).abs() < 1e-6, "band {band}");
+        }
     }
 
     #[test]

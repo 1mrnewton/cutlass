@@ -8,7 +8,8 @@
 //! syncframe. Spectral extension, AHT, enhanced coupling, dependent
 //! substreams, transient pre-noise processing and dynamic range words are
 //! never written. Delta bit allocation is written only when a block carries
-//! segments; the rate control leaves every segment empty.
+//! segments; the rate control leaves every segment empty. Spectral extension
+//! replaces the top bins of a low-rate E-AC-3 frame.
 
 mod analysis;
 mod plan;
@@ -370,6 +371,7 @@ impl Ac3Encoder {
                 fscod,
                 bandwidth,
                 coupling: coupling_range(bandwidth, begin_hz, config.sample_rate),
+                spx: None,
             };
             // The open check is the coarse coding: one exponent set, no
             // coupling. A frame that cannot hold even that is illegal at
@@ -394,11 +396,15 @@ impl Ac3Encoder {
             }
             bandwidth = bandwidth.saturating_sub(4);
         }
-        let Some((shape, min_words)) = found else {
+        let Some((mut shape, min_words)) = found else {
             return Err(CodecError::Unsupported {
                 what: "bit rate too low for the channel layout",
             });
         };
+        shape.spx = plan::extension_for(eac3, per_channel, shape.end_bin());
+        if shape.spx.is_some() {
+            shape.coupling = None;
+        }
         if eac3 && nominal_bits.div_ceil(16) as usize > MAX_EAC3_WORDS {
             return Err(CodecError::Unsupported {
                 what: "bit rate above the largest syncframe",
@@ -652,15 +658,24 @@ impl Ac3Encoder {
                 // bits, so the six-block cutoff leaves the mantissas below
                 // the nominal offset. Give the bits to a narrower band.
                 if shape.blocks < 6 && offset < NOMINAL_SNR && shape.bandwidth > 0 {
-                    shape.bandwidth = shape.bandwidth.saturating_sub(4);
-                    shape.coupling = shape.coupling.and_then(|(begin, end)| {
-                        let end = end.min(usize::from(shape.bandwidth) / 4 + 3);
-                        (begin < end).then_some((begin, end))
-                    });
+                    if shape.spx.is_some() {
+                        shape.spx = None;
+                    } else {
+                        shape.bandwidth = shape.bandwidth.saturating_sub(4);
+                        shape.coupling = shape.coupling.and_then(|(begin, end)| {
+                            let end = end.min(usize::from(shape.bandwidth) / 4 + 3);
+                            (begin < end).then_some((begin, end))
+                        });
+                    }
                     restore(&mut self.blocks, &self.originals);
                     continue;
                 }
                 break (offset, skip);
+            }
+            if shape.spx.is_some() {
+                shape.spx = None;
+                restore(&mut self.blocks, &self.originals);
+                continue;
             }
             if matches!(mode, Mode::Adaptive) && shape.bandwidth > 0 {
                 shape.bandwidth = shape.bandwidth.saturating_sub(8);
@@ -677,6 +692,7 @@ impl Ac3Encoder {
             if matches!(mode, Mode::Adaptive) {
                 mode = Mode::Coarse;
                 shape.coupling = None;
+                shape.spx = None;
                 restore(&mut self.blocks, &self.originals);
                 continue;
             }

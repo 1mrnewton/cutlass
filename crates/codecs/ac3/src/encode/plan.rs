@@ -5,7 +5,7 @@
 use crate::exponents::{cpl_groups, fbw_groups, group_size};
 use crate::mdct::COEFS;
 use crate::spx::Bands;
-use crate::tables::{D15, D25, D45, DEFAULT_CPL_BANDS, REUSE};
+use crate::tables::{D15, D25, D45, DEFAULT_CPL_BANDS, DEFAULT_SPX_BANDS, REUSE};
 
 pub(crate) const MAX_FBW: usize = 5;
 pub(crate) const CPL: usize = MAX_FBW;
@@ -37,6 +37,48 @@ pub(crate) struct Shape {
     pub bandwidth: u8,
     /// `cplbegf` and the coupling end sub-band, `cplendf + 3`.
     pub coupling: Option<(usize, usize)>,
+    /// Spectral extension. Channels are coded up to its begin bin.
+    pub spx: Option<Spx>,
+}
+
+/// The low-rate spectral extension: copy sub-band 2, code through
+/// sub-band 5, synthesize through sub-band 13. `spxblnd` 31 leaves the
+/// blend on the copied signal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Spx {
+    pub start: usize,
+    pub begf: usize,
+    pub endf: usize,
+}
+
+impl Spx {
+    pub(crate) const LOW_RATE: Self = Self {
+        start: 2,
+        begf: 3,
+        endf: 5,
+    };
+
+    pub(crate) fn range(self) -> crate::spx::Range {
+        let begin = crate::spx::begin_subband(self.begf);
+        let end = crate::spx::end_subband(self.endf);
+        crate::spx::Range {
+            start: self.start,
+            begin,
+            end,
+            bands: Bands::new(&DEFAULT_SPX_BANDS, begin, end),
+        }
+    }
+
+    pub(crate) fn begin_bin(self) -> usize {
+        self.range().begin_bin()
+    }
+}
+
+/// Spectral extension below 48 kbit/s per channel, when it replaces bins
+/// that rate would still code. 48 kbit/s per channel still couples.
+pub(crate) fn extension_for(eac3: bool, per_channel_kbps: u32, end_bin: usize) -> Option<Spx> {
+    let spx = Spx::LOW_RATE;
+    (eac3 && per_channel_kbps < 48 && end_bin > spx.begin_bin() + 12).then_some(spx)
 }
 
 impl Shape {
@@ -87,6 +129,11 @@ pub(crate) struct Block {
     pub bap: [[u8; COEFS]; SLOTS],
     /// Delta bit allocation. Empty unless a test asks a block to carry it.
     pub deltas: [crate::bitalloc::Delta; SLOTS],
+    /// Send new spectral-extension coordinates for this channel.
+    pub spx_send: [bool; MAX_FBW],
+    pub spx_master: [u8; MAX_FBW],
+    pub spx_exp: [[u8; crate::spx::MAX_BANDS]; MAX_FBW],
+    pub spx_mant: [[u8; crate::spx::MAX_BANDS]; MAX_FBW],
     /// AC-3 `snroffste`.
     pub snroffste: bool,
 }
@@ -114,6 +161,10 @@ impl Default for Block {
             exps: [[0; COEFS]; SLOTS],
             bap: [[0; COEFS]; SLOTS],
             deltas: [crate::bitalloc::Delta::default(); SLOTS],
+            spx_send: [false; MAX_FBW],
+            spx_master: [0; MAX_FBW],
+            spx_exp: [[0; crate::spx::MAX_BANDS]; MAX_FBW],
+            spx_mant: [[0; crate::spx::MAX_BANDS]; MAX_FBW],
             snroffste: false,
         }
     }
@@ -142,6 +193,7 @@ pub(crate) enum Mode {
 /// and LFE), `blksw`, and `dith` the analysis set.
 pub(crate) fn plan(shape: &Shape, blocks: &mut [Block], mode: Mode) {
     coupling(shape, blocks, mode);
+    spectral(shape, blocks);
     rematrix(shape, blocks);
     exponents(shape, blocks, mode);
     snr_flags(shape, blocks);
@@ -193,6 +245,10 @@ fn eac3_coupling_stable(nf: usize, blocks: &[Block], mode: Mode) -> bool {
 fn coupling(shape: &Shape, blocks: &mut [Block], mode: Mode) {
     let nf = shape.nf;
     let full = shape.end_bin();
+    if let Some(spx) = shape.spx {
+        uncoupled(blocks, nf, spx.begin_bin());
+        return;
+    }
     let Some((begf, endf)) = shape.coupling else {
         uncoupled(blocks, nf, full);
         return;
@@ -408,6 +464,74 @@ pub(crate) fn coord_value(coords: &Coords, band: usize) -> f32 {
         (mant + 16.0) / 32.0
     };
     8.0 * temp * (-((exp + 3 * u32::from(coords.master)) as f32)).exp2()
+}
+
+/// Coordinates that scale the copied bins up to the original band energy.
+fn spectral(shape: &Shape, blocks: &mut [Block]) {
+    let Some(spx) = shape.spx else {
+        return;
+    };
+    let range = spx.range();
+    let count = range.bands.count;
+    let mut previous = [[(0u8, 0u8); crate::spx::MAX_BANDS]; MAX_FBW];
+    let mut previous_master = [0u8; MAX_FBW];
+    let mut have_previous = false;
+    for block in blocks.iter_mut() {
+        for ch in 0..shape.nf {
+            let gains = band_gains(&block.coefs[ch], &range);
+            let (master, coded) = crate::spx::quantize(&gains[..count]);
+            let mut same = have_previous && master == previous_master[ch];
+            block.spx_master[ch] = master;
+            previous_master[ch] = master;
+            for band in 0..count {
+                block.spx_exp[ch][band] = coded[band].0;
+                block.spx_mant[ch][band] = coded[band].1;
+                same = same && previous[ch][band] == coded[band];
+                previous[ch][band] = coded[band];
+            }
+            block.spx_send[ch] = !same;
+        }
+        have_previous = true;
+    }
+}
+
+/// Energy of the original band over the energy of the bins that will be copied into it.
+fn band_gains(coefs: &[f32; COEFS], range: &crate::spx::Range) -> [f32; crate::spx::MAX_BANDS] {
+    let copy_start = range.copy_start();
+    let copy_end = range.begin_bin();
+    let mut copied = [0.0f32; COEFS];
+    let mut copy = copy_start;
+    let mut insert = copy_end;
+    for &size in range.bands.sizes() {
+        for _ in 0..size {
+            if copy == copy_end {
+                copy = copy_start;
+            }
+            if let (Some(&value), Some(slot)) = (coefs.get(copy), copied.get_mut(insert)) {
+                *slot = value;
+            }
+            insert += 1;
+            copy += 1;
+        }
+    }
+    let mut gains = [0.0f32; crate::spx::MAX_BANDS];
+    let mut bin = copy_end;
+    for (band, &size) in range.bands.sizes().iter().enumerate() {
+        let energy = |samples: &[f32]| -> f32 {
+            let total: f32 = samples.iter().map(|value| value * value).sum();
+            (total / size as f32).sqrt()
+        };
+        let from = copied.get(bin..bin + size).unwrap_or(&[]);
+        let to = coefs.get(bin..bin + size).unwrap_or(&[]);
+        let source = energy(from);
+        gains[band] = if source > 1.0e-8 {
+            energy(to) / source
+        } else {
+            0.0
+        };
+        bin += size;
+    }
+    gains
 }
 
 /// Annex E 3.3.2, which reduces to Tables 7.25 to 7.28 for AC-3.
@@ -696,6 +820,7 @@ mod tests {
             fscod: 0,
             bandwidth: 48,
             coupling,
+            spx: None,
         }
     }
 

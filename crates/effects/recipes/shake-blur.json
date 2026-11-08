@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "id": "shake-blur",
+  "name": "Shake Blur",
+  "category": "Blur",
+  "preview": "road",
+  "controls": [
+    {"id": "speed", "name": "Speed", "default": 1, "min": 0.25, "max": 3, "unit": "times", "speed": true},
+    {"id": "intensity", "name": "Intensity", "default": 1, "min": 0, "max": 2, "unit": "percent", "scale": [[0, "x"], [1, "length"]]}
+  ],
+  "passes": [
+    {"block": "transform", "params": {"scale": 1.06, "x": {"jitter": {"rate": 10, "from": -0.02, "to": 0.02, "seed": 301}}}},
+    {"block": "motion_blur", "params": {"length": {"jitter": {"rate": 10, "from": 0.01, "to": 0.04, "seed": 302}}}}
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "id": "focus-pulse",
+  "name": "Focus Pulse",
+  "category": "Blur",
+  "preview": "flowers",
+  "poster": 0.6,
+  "controls": [
+    {"id": "speed", "name": "Speed", "default": 1, "min": 0.25, "max": 3, "unit": "times", "speed": true},
+    {"id": "intensity", "name": "Intensity", "default": 1, "min": 0, "max": 2, "unit": "percent", "scale": [[0, "radius"]]}
+  ],
+  "passes": [
+    {"block": "blur", "params": {"radius": {"wave": {"period": 1.2, "from": 0, "to": 0.02}}}}
+  ]
+}

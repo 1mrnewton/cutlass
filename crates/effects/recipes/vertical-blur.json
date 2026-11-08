@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "id": "vertical-blur",
+  "name": "Vertical Blur",
+  "category": "Blur",
+  "preview": "road",
+  "controls": [
+    {"id": "blur", "name": "Blur", "default": 1, "min": 0, "max": 3, "unit": "percent", "scale": [[0, "length"]]},
+    {"id": "angle", "name": "Angle", "default": 90, "min": -180, "max": 180, "unit": "degrees", "set": [[0, "angle"]]}
+  ],
+  "passes": [
+    {"block": "motion_blur", "params": {"length": 0.05, "angle": 90}}
+  ]
+}

@@ -2,6 +2,7 @@
   "version": 1,
   "id": "shake",
   "name": "Shake",
+  "category": "Motion",
   "passes": [
     {
       "block": "transform",

@@ -2,6 +2,7 @@
   "version": 1,
   "id": "vhs",
   "name": "VHS",
+  "category": "Retro",
   "passes": [
     {
       "block": "slices",

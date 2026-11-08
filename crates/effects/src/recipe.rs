@@ -220,8 +220,17 @@ pub struct Recipe {
     pub id: String,
     /// What the picker shows.
     pub name: String,
+    /// The shelf category it is listed under, one of
+    /// [`EFFECT_CATEGORIES`]; a recipe without one is listed under All only.
+    #[serde(default)]
+    pub category: String,
     pub passes: Vec<Pass>,
 }
+
+/// The effects shelf's categories, in the order the shelf lists them.
+pub const EFFECT_CATEGORIES: &[&str] = &[
+    "Basic", "Motion", "Blur", "Glitch", "Retro", "Light", "Distort",
+];
 
 /// One block with every value worked out for one moment.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -509,8 +518,8 @@ pub fn bundled_recipe(effect_id: &str) -> Option<&'static Recipe> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BUNDLED_FILES, Block, MAX_PASSES, MAX_RECIPE_BYTES, Recipe, RecipeError, bundled,
-        bundled_recipe, unit_hash,
+        BUNDLED_FILES, Block, EFFECT_CATEGORIES, MAX_PASSES, MAX_RECIPE_BYTES, Recipe, RecipeError,
+        bundled, bundled_recipe, unit_hash,
     };
     use cutlass_model::Micros;
 
@@ -536,6 +545,19 @@ mod tests {
         );
         assert!(bundled_recipe("shake").is_none());
         assert!(bundled_recipe("recipe/none").is_none());
+        // Every bundled effect is filed under a shelf category.
+        for recipe in bundled() {
+            assert!(
+                EFFECT_CATEGORIES.contains(&recipe.category.as_str()),
+                "{} has category {:?}",
+                recipe.id,
+                recipe.category
+            );
+        }
+        // One from elsewhere may leave it out.
+        let plain =
+            read(r#"{"version":1,"id":"a","name":"A","passes":[{"block":"grade","params":{}}]}"#);
+        assert!(plain.is_ok_and(|recipe| recipe.category.is_empty()));
     }
 
     #[test]

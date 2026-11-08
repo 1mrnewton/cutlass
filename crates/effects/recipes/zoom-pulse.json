@@ -2,6 +2,7 @@
   "version": 1,
   "id": "zoom-pulse",
   "name": "Zoom Pulse",
+  "category": "Motion",
   "passes": [
     {
       "block": "transform",

@@ -2,6 +2,7 @@
   "version": 1,
   "id": "film-grain",
   "name": "Black & White Film",
+  "category": "Retro",
   "passes": [
     { "block": "grade", "params": { "saturation": 0, "contrast": 1.25 } },
     {

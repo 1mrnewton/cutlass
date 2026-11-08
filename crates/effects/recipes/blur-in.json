@@ -2,6 +2,7 @@
   "version": 1,
   "id": "blur-in",
   "name": "Blur In",
+  "category": "Blur",
   "passes": [
     {
       "block": "blur",

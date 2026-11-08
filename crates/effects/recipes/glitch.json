@@ -2,6 +2,7 @@
   "version": 1,
   "id": "glitch",
   "name": "Glitch",
+  "category": "Glitch",
   "passes": [
     {
       "block": "slices",

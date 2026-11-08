@@ -2,6 +2,7 @@
   "version": 1,
   "id": "vignette",
   "name": "Vignette",
+  "category": "Basic",
   "passes": [
     { "block": "vignette", "params": { "amount": 0.75, "size": 0.45 } }
   ]

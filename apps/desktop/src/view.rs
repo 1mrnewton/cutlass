@@ -237,6 +237,8 @@ pub struct ViewState {
     /// Which part of the effects shelf shows: Video effects or Body
     /// effects.
     effect_group: usize,
+    /// The video effects category shown; empty is All.
+    effect_category: String,
     /// A folder being named, and what is typed so far.
     library_renaming: Option<(String, String)>,
     projects_root: Option<std::path::PathBuf>,
@@ -314,6 +316,7 @@ impl Default for ViewState {
             library_stock: false,
             sticker_group: STICKERS,
             effect_group: VIDEO_EFFECTS,
+            effect_category: String::new(),
             library_renaming: None,
             projects_root: None,
             listed: Vec::new(),
@@ -1867,6 +1870,10 @@ fn asset_column(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect
         ) {
             view.effect_group = group;
         }
+        if view.effect_group == VIDEO_EFFECTS {
+            column.add_space(8.0);
+            effect_category_chips(&mut column, view);
+        }
     }
     let bin = matches!(shelf, Shelf::Media | Shelf::Audio) && !stock;
     if bin {
@@ -1966,6 +1973,14 @@ fn asset_column(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect
             if shelf == Shelf::Stickers && group == SHAPES {
                 cards = shape_cards(&query);
             }
+            if shelf == Shelf::Effects && !view.effect_category.is_empty() {
+                let category = view.effect_category.as_str();
+                cards.retain(|card| {
+                    cutlass_editor::effect_of_card(&card.id)
+                        .and_then(|id| cutlass_effects::bundled_recipe(&id))
+                        .is_some_and(|recipe| recipe.category == category)
+                });
+            }
             fill_looks(shell, ui.ctx(), &mut cards);
             if cards.is_empty() {
                 let message = if !query.trim().is_empty() {
@@ -2032,6 +2047,42 @@ const YOURS: usize = 0;
 const STICKERS: usize = 1;
 const SHAPES: usize = 2;
 const GIPHY: usize = 3;
+
+/// The video effects categories as a row of chips, All first, that
+/// scrolls sideways when there are more than fit; the mouse wheel scrolls
+/// it too.
+fn effect_category_chips(ui: &mut Ui, view: &mut ViewState) {
+    let names = std::iter::once("All").chain(cutlass_editor::effect_categories());
+    let row = ui.available_rect_before_wrap();
+    let hovered =
+        ui.rect_contains_pointer(Rect::from_min_size(row.min, Vec2::new(row.width(), 28.0)));
+    if hovered {
+        // A wheel turned up or down moves the row sideways.
+        ui.input_mut(|input| {
+            let delta = input.smooth_scroll_delta;
+            if delta.x == 0.0 && delta.y != 0.0 {
+                input.smooth_scroll_delta = Vec2::new(delta.y, 0.0);
+            }
+        });
+    }
+    ui::Scroll::horizontal("effect-categories")
+        .without_bar()
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                for name in names {
+                    let value = if name == "All" { "" } else { name };
+                    let chip = ui::Button::new(name)
+                        .on(view.effect_category == value)
+                        .text_size(12.0)
+                        .radius(12);
+                    if ui.add(chip).clicked() {
+                        value.clone_into(&mut view.effect_category);
+                    }
+                }
+            });
+        });
+}
 
 /// The parts of the effects shelf, in switch order.
 const EFFECT_GROUPS: [&str; 2] = ["Video effects", "Body effects"];
@@ -11399,6 +11450,60 @@ mod tests {
         assert!(text_pos(&output, "Video effects").is_some());
         let first = cutlass_editor::effect_cards().remove(0).name;
         assert!(text_pos(&output, &first).is_some(), "{first}");
+        // The category row: All, then each category with an effect.
+        assert!(text_pos(&output, "All").is_some());
+        let motion = text_pos(&output, "Motion").expect("the Motion chip") + Vec2::new(4.0, 4.0);
+        let tap = |at: Pos2| {
+            vec![
+                egui::Event::PointerMoved(at),
+                egui::Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::default(),
+                },
+                egui::Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ]
+        };
+        frame(
+            &mut shell,
+            &mut view,
+            vec![egui::Event::PointerMoved(motion)],
+        );
+        frame(&mut shell, &mut view, tap(motion));
+        assert_eq!(view.effect_category, "Motion");
+        let output = frame(&mut shell, &mut view, Vec::new());
+        assert!(text_pos(&output, "Zoom Pulse").is_some());
+        assert!(text_pos(&output, "Glitch").is_none_or(|at| at.y < motion.y + 20.0));
+        assert!(text_pos(&output, "Film Grain").is_none());
+        // The wheel moves the row sideways.
+        let before = text_pos(&output, "Motion").unwrap();
+        for _ in 0..4 {
+            frame(
+                &mut shell,
+                &mut view,
+                vec![
+                    egui::Event::PointerMoved(before),
+                    egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Point,
+                        delta: Vec2::new(0.0, -60.0),
+                        modifiers: egui::Modifiers::default(),
+                        phase: egui::TouchPhase::Move,
+                        source: egui::MouseWheelSource::Wheel,
+                    },
+                ],
+            );
+        }
+        let output = frame(&mut shell, &mut view, Vec::new());
+        let after = text_pos(&output, "Motion").unwrap();
+        assert!(after.x < before.x, "{before:?} then {after:?}");
+        assert_eq!(after.y, before.y);
+        let output = frame(&mut shell, &mut view, Vec::new());
         let body = text_pos(&output, "Body effects").unwrap() + Vec2::new(4.0, 4.0);
         let press = |pressed| egui::Event::PointerButton {
             pos: body,

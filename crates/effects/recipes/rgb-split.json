@@ -2,6 +2,7 @@
   "version": 1,
   "id": "rgb-split",
   "name": "RGB Split",
+  "category": "Glitch",
   "passes": [
     {
       "block": "rgb_split",

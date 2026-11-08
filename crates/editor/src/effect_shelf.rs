@@ -53,6 +53,8 @@ pub struct EffectCard {
     /// What [`Request::AddEffect`] takes, such as `recipe/shake`.
     pub effect_id: String,
     pub name: String,
+    /// The shelf category, one of [`cutlass_effects::EFFECT_CATEGORIES`].
+    pub category: String,
 }
 
 /// The bundled effects, in shelf order.
@@ -66,8 +68,20 @@ pub fn effect_cards() -> Vec<EffectCard> {
                 id: format!("{EFFECT_CARD_PREFIX}{effect_id}"),
                 effect_id,
                 name: recipe.name.clone(),
+                category: recipe.category.clone(),
             }
         })
+        .collect()
+}
+
+/// The shelf's categories that hold at least one effect, in shelf order.
+#[must_use]
+pub fn effect_categories() -> Vec<&'static str> {
+    let cards = effect_cards();
+    cutlass_effects::EFFECT_CATEGORIES
+        .iter()
+        .copied()
+        .filter(|category| cards.iter().any(|card| card.category == *category))
         .collect()
 }
 
@@ -194,6 +208,16 @@ mod tests {
         }
         assert_eq!(effect_of_card("effect:recipe/none"), None);
         assert_eq!(effect_of_card("recipe/shake"), None);
+        // Only categories with an effect in them, in shelf order.
+        let categories = effect_categories();
+        assert_eq!(categories.first(), Some(&"Basic"));
+        for card in &cards {
+            assert!(
+                categories.contains(&card.category.as_str()),
+                "{}",
+                card.name
+            );
+        }
     }
 
     #[test]

@@ -184,19 +184,18 @@ where
     let mut video = open_video(run.factory, run.request, output)?;
     let mut audio_encoder = open_audio(run.factory, run.request)?;
     let mut tracks = add_tracks(run.mux, run.request, output)?;
-    let frames = match encode_pictures(&mut run, &mut *video, &mut tracks, &indexes, output) {
-        Ok(frames) => frames,
-        Err(error) => return Err(stop(run.mux, error)),
-    };
-    if let Err(error) = encode_audio(
+    let frames = match encode_pictures(
         &mut run,
+        &mut *video,
         &mut audio_encoder,
         &mut tracks,
         &indexes,
+        output,
         &mut audio,
     ) {
-        return Err(stop(run.mux, error));
-    }
+        Ok(frames) => frames,
+        Err(error) => return Err(stop(run.mux, error)),
+    };
     if let Err(error) = drain_encoders(run.mux, &mut *video, &mut audio_encoder, &mut tracks) {
         return Err(stop(run.mux, error));
     }
@@ -480,16 +479,21 @@ fn add_audio<M: Mux>(mux: &mut M, audio: &AudioExport) -> Result<TrackId, Export
     .map_err(ExportError::Mux)
 }
 
-fn encode_pictures<D, M>(
+/// Each frame's picture, then the sound under it, so the file holds them
+/// side by side and a player reads both from one place.
+fn encode_pictures<D, M, F>(
     run: &mut ExportRun<'_, D, M>,
     video: &mut dyn Encoder,
+    audio_encoder: &mut Option<Box<dyn Encoder>>,
     tracks: &mut TrackTicks,
     indexes: &[i64],
     output: (u32, u32),
+    audio: &mut F,
 ) -> Result<Vec<ExportedFrame>, ExportError>
 where
     D: Device,
     M: Mux,
+    F: FnMut(&SegmentId, Micros, u32, u32) -> Result<ClipPcm, ExportError>,
 {
     let mut frames = Vec::with_capacity(indexes.len());
     let mut clips = OpenClips::new();
@@ -498,6 +502,7 @@ where
         frames.push(encode_picture(
             run, video, tracks, *index, output, &mut clips,
         )?);
+        encode_audio_window(run, audio_encoder, tracks, *index, audio)?;
         if let Some(progress) = run.progress.as_mut() {
             let done = u64::try_from(frames.len()).map_err(|_| ExportError::Limit)?;
             if !progress(done, total) {
@@ -564,11 +569,12 @@ where
     Ok(evaluated.frame)
 }
 
-fn encode_audio<D, M, F>(
+/// The sound of frame `index`'s window, when the export has sound.
+fn encode_audio_window<D, M, F>(
     run: &mut ExportRun<'_, D, M>,
     audio_encoder: &mut Option<Box<dyn Encoder>>,
     tracks: &mut TrackTicks,
-    indexes: &[i64],
+    index: i64,
     audio: &mut F,
 ) -> Result<(), ExportError>
 where
@@ -585,20 +591,17 @@ where
     let Some(stream) = tracks.audio else {
         return Ok(());
     };
-    for index in indexes {
-        let time = run
-            .request
-            .frame_rate
-            .frame_start(*index)
-            .ok_or(ExportError::FrameRate)?;
-        let mut samples = mix_window(run.draft, settings, run.request, time, audio)?;
-        samples = coded_pcm(settings.codec, samples)?;
-        let packets = encoder
-            .push(&AudioInput { pcm: samples })
-            .map_err(ExportError::Encoder)?;
-        write_packets(run.mux, stream.get(), &packets, &mut tracks.audio_ticks)?;
-    }
-    Ok(())
+    let time = run
+        .request
+        .frame_rate
+        .frame_start(index)
+        .ok_or(ExportError::FrameRate)?;
+    let samples = mix_window(run.draft, settings, run.request, time, audio)?;
+    let samples = coded_pcm(settings.codec, samples)?;
+    let packets = encoder
+        .push(&AudioInput { pcm: samples })
+        .map_err(ExportError::Encoder)?;
+    write_packets(run.mux, stream.get(), &packets, &mut tracks.audio_ticks)
 }
 
 struct FrameInputs<'a, D> {
@@ -880,6 +883,10 @@ fn silence(rate: u32, channels: u16, frames: u32) -> Result<Pcm, ExportError> {
     Pcm::from_f32(rate, layout, vec![0.0; len]).map_err(|_| ExportError::Audio(AudioError::Mix))
 }
 
+/// `src` drawn at `dst_w` by `dst_h`. A smaller edge averages the source
+/// pixels each output pixel covers, so detail does not shimmer; a larger
+/// edge blends the two nearest pixels. Colour is weighted by alpha, so a
+/// transparent pixel's colour does not bleed into its neighbours.
 fn scale_rgba(
     src_w: u32,
     src_h: u32,
@@ -895,39 +902,138 @@ fn scale_rgba(
         return Ok(src.to_vec());
     }
     let dst_len = rgba_len(dst_w, dst_h).ok_or(ExportError::Limit)?;
-    let mut dst = vec![0_u8; dst_len];
-    for y in 0..dst_h {
-        let src_y = nearest(y, src_h, dst_h)?;
-        for x in 0..dst_w {
-            let src_x = nearest(x, src_w, dst_w)?;
-            let from = pixel_index(src_x, src_y, src_w)?;
-            let to = pixel_index(x, y, dst_w)?;
-            copy_pixel(src, from, &mut dst, to)?;
+    let columns = axis_taps(src_w, dst_w)?;
+    let rows = axis_taps(src_h, dst_h)?;
+    let src_row = usize::try_from(src_w)
+        .ok()
+        .and_then(|width| width.checked_mul(4))
+        .ok_or(ExportError::Limit)?;
+    let mut dst = Vec::with_capacity(dst_len);
+    let mut line = vec![0.0_f32; src_row];
+    for row in &rows {
+        line.fill(0.0);
+        for tap in row {
+            let from = tap.index.checked_mul(src_row).ok_or(ExportError::Limit)?;
+            let pixels = src
+                .get(from..from.checked_add(src_row).ok_or(ExportError::Limit)?)
+                .ok_or_else(|| ExportError::Picture("row".to_owned()))?;
+            for (sum, pixel) in line
+                .as_chunks_mut::<4>()
+                .0
+                .iter_mut()
+                .zip(pixels.as_chunks::<4>().0)
+            {
+                let alpha = f32::from(pixel[3]) * tap.weight;
+                sum[0] += f32::from(pixel[0]) * alpha;
+                sum[1] += f32::from(pixel[1]) * alpha;
+                sum[2] += f32::from(pixel[2]) * alpha;
+                sum[3] += alpha;
+            }
+        }
+        for column in &columns {
+            let mut out = [0.0_f32; 4];
+            for tap in column {
+                let at = tap.index.checked_mul(4).ok_or(ExportError::Limit)?;
+                let sum = line
+                    .get(at..at + 4)
+                    .ok_or_else(|| ExportError::Picture("column".to_owned()))?;
+                for (out, sum) in out.iter_mut().zip(sum) {
+                    *out += sum * tap.weight;
+                }
+            }
+            let alpha = out[3];
+            if alpha <= 0.0 {
+                dst.extend_from_slice(&[0, 0, 0, 0]);
+            } else {
+                dst.extend_from_slice(&[
+                    byte(out[0] / alpha),
+                    byte(out[1] / alpha),
+                    byte(out[2] / alpha),
+                    byte(alpha),
+                ]);
+            }
         }
     }
     Ok(dst)
 }
 
-fn nearest(pos: u32, src_edge: u32, dst_edge: u32) -> Result<u32, ExportError> {
+/// One source pixel's share of an output pixel.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Tap {
+    index: usize,
+    weight: f32,
+}
+
+/// For each output pixel on an edge, the source pixels it reads and their
+/// weights, which add up to one. Shrinking covers the span the output pixel
+/// stands for; growing blends the two source pixels around its centre.
+fn axis_taps(src_edge: u32, dst_edge: u32) -> Result<Vec<Vec<Tap>>, ExportError> {
     if src_edge == 0 || dst_edge == 0 {
         return Err(ExportError::Canvas);
     }
-    let value = u64::from(pos) * u64::from(src_edge) / u64::from(dst_edge);
-    let value = u32::try_from(value).map_err(|_| ExportError::Limit)?;
-    Ok(value.min(src_edge - 1))
+    let src = f64::from(src_edge);
+    let ratio = src / f64::from(dst_edge);
+    let last = usize::try_from(src_edge - 1).map_err(|_| ExportError::Limit)?;
+    let mut taps = Vec::with_capacity(usize::try_from(dst_edge).map_err(|_| ExportError::Limit)?);
+    for out in 0..dst_edge {
+        let out = f64::from(out);
+        let mut pixel = Vec::new();
+        if ratio > 1.0 {
+            let start = out * ratio;
+            let end = (start + ratio).min(src);
+            let mut at = start.floor();
+            while at < end {
+                let covered = (at + 1.0).min(end) - at.max(start);
+                if covered > 0.0 {
+                    pixel.push(Tap {
+                        index: index_of(at, last),
+                        weight: weight_of(covered / ratio),
+                    });
+                }
+                at += 1.0;
+            }
+        } else {
+            let centre = ((out + 0.5) * ratio - 0.5).clamp(0.0, src - 1.0);
+            let below = centre.floor();
+            let share = centre - below;
+            pixel.push(Tap {
+                index: index_of(below, last),
+                weight: weight_of(1.0 - share),
+            });
+            if share > 0.0 {
+                pixel.push(Tap {
+                    index: index_of(below + 1.0, last),
+                    weight: weight_of(share),
+                });
+            }
+        }
+        taps.push(pixel);
+    }
+    Ok(taps)
 }
 
-fn copy_pixel(src: &[u8], from: usize, dst: &mut [u8], to: usize) -> Result<(), ExportError> {
-    let src_end = from.checked_add(4).ok_or(ExportError::Limit)?;
-    let dst_end = to.checked_add(4).ok_or(ExportError::Limit)?;
-    let sample = src
-        .get(from..src_end)
-        .ok_or_else(|| ExportError::Picture("pixel".to_owned()))?;
-    let slot = dst
-        .get_mut(to..dst_end)
-        .ok_or_else(|| ExportError::Picture("pixel".to_owned()))?;
-    slot.copy_from_slice(sample);
-    Ok(())
+/// A whole, non-negative source position as an index no later than `last`.
+fn index_of(position: f64, last: usize) -> usize {
+    // `position` is whole and at least zero; a value past `last` is clamped.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let index = position.max(0.0) as usize;
+    index.min(last)
+}
+
+fn weight_of(share: f64) -> f32 {
+    // A share is between zero and one.
+    #[allow(clippy::cast_possible_truncation)]
+    {
+        share as f32
+    }
+}
+
+fn byte(value: f32) -> u8 {
+    // Clamped to the byte range first.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    {
+        value.round().clamp(0.0, 255.0) as u8
+    }
 }
 
 fn rgba_len(width: u32, height: u32) -> Option<usize> {
@@ -935,16 +1041,6 @@ fn rgba_len(width: u32, height: u32) -> Option<usize> {
         .ok()?
         .checked_mul(usize::try_from(height).ok()?)?
         .checked_mul(4)
-}
-
-fn pixel_index(x: u32, y: u32, width: u32) -> Result<usize, ExportError> {
-    let x = usize::try_from(x).map_err(|_| ExportError::Limit)?;
-    let y = usize::try_from(y).map_err(|_| ExportError::Limit)?;
-    let width = usize::try_from(width).map_err(|_| ExportError::Limit)?;
-    y.checked_mul(width)
-        .and_then(|row| row.checked_add(x))
-        .and_then(|pixel| pixel.checked_mul(4))
-        .ok_or(ExportError::Limit)
 }
 
 fn write_packets<M: Mux>(
@@ -2031,6 +2127,96 @@ mod tests {
         assert_eq!(asked, vec![loud(0), loud(1_000), loud(2_000)]);
     }
 
+    /// A mux that notes which stream each packet arrives on, in order.
+    struct Order {
+        inner: MuxDraft,
+        streams: Vec<u32>,
+    }
+
+    impl Mux for Order {
+        fn family(&self) -> ContainerId {
+            self.inner.family()
+        }
+        fn add_stream(
+            &mut self,
+            stream: cutlass_container::NewStream,
+        ) -> Result<cutlass_container::TrackId, cutlass_container::MuxError> {
+            self.inner.add_stream(stream)
+        }
+        fn write_packet(
+            &mut self,
+            packet: &cutlass_codec::Packet,
+        ) -> Result<(), cutlass_container::MuxError> {
+            self.streams.push(packet.stream());
+            self.inner.write_packet(packet)
+        }
+        fn interleave(&mut self) -> Result<(), cutlass_container::MuxError> {
+            self.inner.interleave()
+        }
+        fn cancel(&mut self) {
+            self.inner.cancel();
+        }
+        fn finish(
+            &mut self,
+            durations: &[cutlass_container::TrackDuration],
+        ) -> Result<cutlass_container::FinishedMux, cutlass_container::FailedMux> {
+            self.inner.finish(durations)
+        }
+        fn status(&self) -> MuxStatus {
+            self.inner.status()
+        }
+    }
+
+    #[test]
+    fn each_frame_s_sound_follows_its_picture_into_the_file() {
+        let mut request = gif_request(TimeRange::new(0, 3_000));
+        request.frame_rate = FrameRate {
+            numerator: 1_000,
+            denominator: 1,
+        };
+        request.audio = Some(audio_settings());
+        let mut draft = color_draft(240, 135, 1_000_000);
+        push_sound(&mut draft, "loud", 1.0, 0, false);
+        let mut mux = Order {
+            inner: MuxDraft::new(
+                ContainerId::Isobmff,
+                MuxMode::Progressive,
+                IndexPlace::End,
+                Limits::standard(),
+            ),
+            streams: Vec::new(),
+        };
+        let mut device = SoftwareDevice::new();
+        let factory = factory();
+        export(
+            ExportRun {
+                draft: &draft,
+                device: &mut device,
+                request: &request,
+                factory: &factory,
+                readers: readers(),
+                mux: &mut mux,
+                destination: None,
+                root: None,
+                fonts: &cutlass_eval::NoFonts,
+                renderer: None,
+                progress: None,
+            },
+            |_, _, _, _| Ok(ClipPcm::Ready(tone(1.0))),
+        )
+        .expect("export");
+        let video = mux.streams[0];
+        let last_video = mux.streams.iter().rposition(|stream| *stream == video);
+        let first_audio = mux.streams.iter().position(|stream| *stream != video);
+        assert!(
+            first_audio
+                .zip(last_video)
+                .is_some_and(|(audio, video)| audio < video),
+            "sound came after every picture: {:?}",
+            mux.streams
+        );
+    }
+
     #[test]
     fn exported_audio_is_the_mix_with_mute_solo_volume_and_fades() {
         let mut request = gif_request(TimeRange::new(0, 1_000));
@@ -2229,6 +2415,43 @@ mod tests {
         assert_eq!(
             scale_rgba(960, 480, &played, 480, 240).unwrap(),
             result.finished.packets()[0].bytes()
+        );
+    }
+
+    #[test]
+    fn shrinking_averages_what_each_pixel_covers_and_growing_blends() {
+        // Black and white columns, one pixel wide: nearest pixel would keep
+        // only one of them.
+        let stripes: Vec<u8> = (0..8 * 2)
+            .flat_map(|index| {
+                let value = if index % 2 == 0 { 0 } else { 255 };
+                [value, value, value, 255]
+            })
+            .collect();
+        let half = scale_rgba(8, 2, &stripes, 4, 1).expect("half");
+        assert!(
+            half.chunks(4).all(|pixel| pixel == [128, 128, 128, 255]),
+            "{half:?}"
+        );
+
+        // A transparent pixel's colour stays out of its opaque neighbour.
+        let edge = [255, 0, 0, 255, 0, 255, 0, 0];
+        assert_eq!(
+            scale_rgba(2, 1, &edge, 1, 1).expect("edge"),
+            [255, 0, 0, 128]
+        );
+
+        // Two pixels grown to four blend toward each other in the middle.
+        let pair = [0, 0, 0, 255, 255, 255, 255, 255];
+        let grown = scale_rgba(2, 1, &pair, 4, 1).expect("grown");
+        let reds: Vec<u8> = grown.chunks(4).map(|pixel| pixel[0]).collect();
+        assert_eq!(reds, [0, 64, 191, 255]);
+
+        // A 1080p frame shrunk to 720p keeps a solid colour exactly.
+        let solid = red(1920, 1080);
+        assert_eq!(
+            scale_rgba(1920, 1080, &solid, 1280, 720).expect("720"),
+            red(1280, 720)
         );
     }
 

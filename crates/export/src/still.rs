@@ -66,7 +66,7 @@ pub fn write_still(
     )?;
     let bytes = encoded(width, height, &rgba, format, sources.encoders)?;
     let part = part_path(destination).ok_or(ExportError::Path)?;
-    let written = fs::write(&part, bytes).and_then(|()| fs::rename(&part, destination));
+    let written = write_synced(&part, &bytes).and_then(|()| fs::rename(&part, destination));
     if let Err(error) = written {
         let _ = fs::remove_file(&part);
         return Err(ExportError::File(error.to_string()));
@@ -136,6 +136,15 @@ fn webp(
             "the webp encoder did not answer one file".to_owned(),
         )),
     }
+}
+
+/// `bytes` into `path`, on the disk before the call returns, so a crash
+/// after the rename cannot leave an empty picture.
+fn write_synced(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let mut file = fs::File::create(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()
 }
 
 #[cfg(test)]

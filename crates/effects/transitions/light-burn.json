@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "id": "light-burn",
+  "name": "Light Burn",
+  "category": "Light",
+  "duration": 0.8,
+  "outgoing": [
+    {"block": "glow", "params": {"amount": {"keys": [[0, 0], [0.5, 1.5], [1, 0]]}, "radius": 0.05, "threshold": 0.5}}
+  ],
+  "incoming": [
+    {"block": "glow", "params": {"amount": {"keys": [[0, 0], [0.5, 1.5], [1, 0]]}, "radius": 0.05, "threshold": 0.5}}
+  ],
+  "cross": {"kind": 9, "soft": 0.1, "edge": 0.08, "red": 1, "green": 0.6, "blue": 0.15}
+}

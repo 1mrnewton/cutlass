@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "id": "pixel-glitch",
+  "name": "Pixel Glitch",
+  "category": "Glitch",
+  "outgoing": [
+    {"block": "pixelate", "params": {"size": {"keys": [[0, 0], [0.2, 0.02], [0.35, 0.06], [0.5, 0.1], [0.65, 0.06], [0.8, 0.02], [1, 0]]}}},
+    {"block": "rgb_split", "params": {"x": {"keys": [[0, 0], [0.5, 0.03], [1, 0]]}}}
+  ],
+  "incoming": [
+    {"block": "pixelate", "params": {"size": {"keys": [[0, 0], [0.2, 0.02], [0.35, 0.06], [0.5, 0.1], [0.65, 0.06], [0.8, 0.02], [1, 0]]}}},
+    {"block": "rgb_split", "params": {"x": {"keys": [[0, 0], [0.5, 0.03], [1, 0]]}}}
+  ],
+  "cross": {"kind": 8, "progress": {"keys": [[0.49, 0], [0.51, 1]]}}
+}

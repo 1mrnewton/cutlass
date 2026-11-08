@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "id": "scan-wipe",
+  "name": "Scan Wipe",
+  "category": "Glitch",
+  "outgoing": [
+    {"block": "scanlines", "params": {"amount": {"keys": [[0, 0], [0.5, 0.6], [1, 0]]}, "count": 150}},
+    {"block": "rgb_split", "params": {"y": {"keys": [[0, 0], [0.5, 0.02], [1, 0]]}}}
+  ],
+  "incoming": [
+    {"block": "scanlines", "params": {"amount": {"keys": [[0, 0], [0.5, 0.6], [1, 0]]}, "count": 150}},
+    {"block": "rgb_split", "params": {"y": {"keys": [[0, 0], [0.5, 0.02], [1, 0]]}}}
+  ],
+  "cross": {"kind": 0, "angle": -90, "edge": 0.03, "red": 0.3, "green": 1, "blue": 0.5}
+}

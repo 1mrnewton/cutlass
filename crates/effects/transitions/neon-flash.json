@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "id": "neon-flash",
+  "name": "Neon Flash",
+  "category": "Light",
+  "duration": 0.4,
+  "outgoing": [
+    {"block": "hue", "params": {"degrees": {"keys": [[0, 0], [0.5, 60], [1, 0]]}}},
+    {"block": "flash", "params": {"amount": {"keys": [[0, 0], [0.5, 1], [1, 0]]}, "red": 0.9, "green": 0.2, "blue": 1}}
+  ],
+  "incoming": [
+    {"block": "hue", "params": {"degrees": {"keys": [[0, 0], [0.5, 60], [1, 0]]}}},
+    {"block": "flash", "params": {"amount": {"keys": [[0, 0], [0.5, 1], [1, 0]]}, "red": 0.9, "green": 0.2, "blue": 1}}
+  ],
+  "cross": {"kind": 8, "progress": {"keys": [[0.49, 0], [0.51, 1]]}}
+}

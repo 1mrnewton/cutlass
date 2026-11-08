@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "id": "rainbow-flash",
+  "name": "Rainbow Flash",
+  "category": "Light",
+  "outgoing": [
+    {"block": "gradient_map", "params": {"amount": {"keys": [[0, 0], [0.5, 1], [1, 0]]}, "palette": 2}},
+    {"block": "grade", "params": {"brightness": {"keys": [[0, 0], [0.5, 0.2], [1, 0]]}}}
+  ],
+  "incoming": [
+    {"block": "gradient_map", "params": {"amount": {"keys": [[0, 0], [0.5, 1], [1, 0]]}, "palette": 2}},
+    {"block": "grade", "params": {"brightness": {"keys": [[0, 0], [0.5, 0.2], [1, 0]]}}}
+  ],
+  "cross": {"kind": 8, "progress": {"keys": [[0.4, 0], [0.6, 1]]}}
+}

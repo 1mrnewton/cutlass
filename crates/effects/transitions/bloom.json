@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "id": "bloom",
+  "name": "Bloom",
+  "category": "Light",
+  "outgoing": [
+    {"block": "glow", "params": {"amount": {"keys": [[0, 0], [0.5, 3], [1, 0]]}, "radius": 0.12, "threshold": 0.1}},
+    {"block": "grade", "params": {"brightness": {"keys": [[0, 0], [0.5, 0.35], [1, 0]]}, "contrast": {"keys": [[0, 1], [0.5, 0.7], [1, 1]]}}}
+  ],
+  "incoming": [
+    {"block": "glow", "params": {"amount": {"keys": [[0, 0], [0.5, 3], [1, 0]]}, "radius": 0.12, "threshold": 0.1}},
+    {"block": "grade", "params": {"brightness": {"keys": [[0, 0], [0.5, 0.35], [1, 0]]}, "contrast": {"keys": [[0, 1], [0.5, 0.7], [1, 1]]}}}
+  ],
+  "cross": {"kind": 8, "progress": {"keys": [[0.4, 0], [0.6, 1]]}}
+}

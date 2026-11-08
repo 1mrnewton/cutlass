@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "id": "glow-fade",
+  "name": "Glow Fade",
+  "category": "Light",
+  "duration": 0.8,
+  "outgoing": [
+    {"block": "glow", "params": {"amount": {"keys": [[0, 0], [0.5, 3], [1, 0]]}, "radius": 0.08, "threshold": 0.3}}
+  ],
+  "incoming": [
+    {"block": "glow", "params": {"amount": {"keys": [[0, 0], [0.5, 3], [1, 0]]}, "radius": 0.08, "threshold": 0.3}}
+  ],
+  "cross": {"kind": 8}
+}

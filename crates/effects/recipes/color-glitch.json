@@ -3,6 +3,7 @@
   "id": "color-glitch",
   "name": "Color Glitch",
   "category": "Glitch",
+  "preview": "city",
   "passes": [
     {
       "block": "hue",

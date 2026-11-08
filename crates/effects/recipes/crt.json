@@ -3,6 +3,7 @@
   "id": "crt",
   "name": "CRT",
   "category": "Retro",
+  "preview": "city",
   "passes": [
     { "block": "blur", "params": {"radius": 0.001} },
     { "block": "rgb_split", "params": {"x": 0.003} },

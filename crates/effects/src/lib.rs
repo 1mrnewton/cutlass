@@ -24,6 +24,7 @@ pub mod look;
 pub mod lut;
 pub mod mask;
 pub mod package;
+pub mod preview;
 pub mod recipe;
 pub mod selection;
 pub mod source;
@@ -52,6 +53,10 @@ pub use package::{
     Located, MAX_PACKAGE_BYTES, MissingPackages, Package, PackageError, PackageStore,
     animation_package_id, load, load_segment, load_transition, map_storage_error, package_id,
     plugin_package_id, segment_package_id, transition_package_id, video_package_id,
+};
+pub use preview::{
+    DEFAULT_POSTER, DEFAULT_PREVIEW_SCENE, PREVIEW_LOOP, PREVIEW_RATE, PreviewScene, preview_scene,
+    preview_scenes, preview_time,
 };
 pub use recipe::{
     Block, Curve, EFFECT_CATEGORIES, MAX_PASSES, MAX_VALUES, Param, Pass, RECIPE_PREFIX,

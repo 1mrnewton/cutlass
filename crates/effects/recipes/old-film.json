@@ -3,6 +3,7 @@
   "id": "old-film",
   "name": "Old Film",
   "category": "Retro",
+  "preview": "beach",
   "passes": [
     {
       "block": "transform",

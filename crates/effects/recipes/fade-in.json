@@ -3,6 +3,8 @@
   "id": "fade-in",
   "name": "Fade In",
   "category": "Basic",
+  "preview": "portrait",
+  "poster": 0.25,
   "passes": [
     {
       "block": "flash",

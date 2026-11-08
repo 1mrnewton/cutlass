@@ -3,6 +3,7 @@
   "id": "neon-edges",
   "name": "Neon Edges",
   "category": "Glitch",
+  "preview": "city",
   "passes": [
     { "block": "edges", "params": {"only": 1} },
     { "block": "hue", "params": {"degrees": {"keys": [[0, -180], [3, 180]], "repeat": 3}} },

@@ -3,6 +3,7 @@
   "id": "signal-loss",
   "name": "Signal Loss",
   "category": "Glitch",
+  "preview": "city",
   "passes": [
     {
       "block": "slices",

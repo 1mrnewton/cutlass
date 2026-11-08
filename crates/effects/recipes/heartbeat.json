@@ -3,6 +3,8 @@
   "id": "heartbeat",
   "name": "Heartbeat",
   "category": "Motion",
+  "preview": "portrait",
+  "poster": 0.08,
   "passes": [
     {
       "block": "transform",

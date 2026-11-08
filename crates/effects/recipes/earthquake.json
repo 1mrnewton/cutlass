@@ -3,6 +3,7 @@
   "id": "earthquake",
   "name": "Earthquake",
   "category": "Motion",
+  "preview": "dancer",
   "passes": [
     {
       "block": "transform",

@@ -3,6 +3,7 @@
   "id": "vignette",
   "name": "Vignette",
   "category": "Basic",
+  "preview": "portrait",
   "passes": [
     { "block": "vignette", "params": { "amount": 0.75, "size": 0.45 } }
   ]

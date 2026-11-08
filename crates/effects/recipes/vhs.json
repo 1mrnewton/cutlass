@@ -3,6 +3,7 @@
   "id": "vhs",
   "name": "VHS",
   "category": "Retro",
+  "preview": "city",
   "passes": [
     {
       "block": "slices",

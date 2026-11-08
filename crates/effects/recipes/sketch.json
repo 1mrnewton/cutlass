@@ -3,6 +3,7 @@
   "id": "sketch",
   "name": "Sketch",
   "category": "Retro",
+  "preview": "portrait",
   "passes": [
     { "block": "edges", "params": {"only": 1} },
     { "block": "invert", "params": {"amount": 1} },

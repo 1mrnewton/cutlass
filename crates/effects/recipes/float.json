@@ -3,6 +3,7 @@
   "id": "float",
   "name": "Float",
   "category": "Motion",
+  "preview": "dancer",
   "passes": [
     {
       "block": "transform",

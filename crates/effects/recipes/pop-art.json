@@ -3,6 +3,7 @@
   "id": "pop-art",
   "name": "Pop Art",
   "category": "Retro",
+  "preview": "portrait",
   "passes": [
     { "block": "posterize", "params": {"levels": 4} },
     { "block": "grade", "params": {"saturation": 1.6, "contrast": 1.1} }

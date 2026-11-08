@@ -3,6 +3,8 @@
   "id": "spin-in",
   "name": "Spin In",
   "category": "Motion",
+  "preview": "dancer",
+  "poster": 0.15,
   "passes": [
     {
       "block": "transform",

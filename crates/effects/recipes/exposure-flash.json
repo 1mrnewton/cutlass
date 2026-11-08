@@ -3,6 +3,8 @@
   "id": "exposure-flash",
   "name": "Exposure Flash",
   "category": "Light",
+  "preview": "city",
+  "poster": 0.1,
   "passes": [
     {
       "block": "grade",

@@ -3,6 +3,8 @@
   "id": "blur-in",
   "name": "Blur In",
   "category": "Blur",
+  "preview": "portrait",
+  "poster": 0.4,
   "passes": [
     {
       "block": "blur",

@@ -3,6 +3,7 @@
   "id": "sun-flare",
   "name": "Sun Flare",
   "category": "Light",
+  "preview": "beach",
   "passes": [
     {
       "block": "light_leak",

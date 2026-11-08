@@ -3,6 +3,7 @@
   "id": "digital-glitch",
   "name": "Digital Glitch",
   "category": "Glitch",
+  "preview": "city",
   "passes": [
     {
       "block": "pixelate",

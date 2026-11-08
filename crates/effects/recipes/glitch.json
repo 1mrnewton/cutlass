@@ -3,6 +3,7 @@
   "id": "glitch",
   "name": "Glitch",
   "category": "Glitch",
+  "preview": "city",
   "passes": [
     {
       "block": "slices",

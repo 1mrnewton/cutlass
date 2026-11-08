@@ -3,6 +3,7 @@
   "id": "glow",
   "name": "Glow",
   "category": "Light",
+  "preview": "city",
   "passes": [
     { "block": "glow", "params": {"amount": 1.5, "radius": 0.03, "threshold": 0.6} }
   ]

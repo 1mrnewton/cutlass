@@ -3,6 +3,8 @@
   "id": "bounce",
   "name": "Bounce",
   "category": "Motion",
+  "preview": "dancer",
+  "poster": 0.1,
   "passes": [
     {
       "block": "transform",

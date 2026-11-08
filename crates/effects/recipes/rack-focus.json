@@ -3,6 +3,8 @@
   "id": "rack-focus",
   "name": "Rack Focus",
   "category": "Blur",
+  "preview": "portrait",
+  "poster": 1.0,
   "passes": [
     { "block": "blur", "params": {"radius": {"wave": {"period": 2, "from": 0, "to": 0.02}}} }
   ]

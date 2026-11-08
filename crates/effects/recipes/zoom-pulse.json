@@ -3,6 +3,8 @@
   "id": "zoom-pulse",
   "name": "Zoom Pulse",
   "category": "Motion",
+  "preview": "dancer",
+  "poster": 0.12,
   "passes": [
     {
       "block": "transform",

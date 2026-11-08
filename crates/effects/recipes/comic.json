@@ -3,6 +3,7 @@
   "id": "comic",
   "name": "Comic",
   "category": "Retro",
+  "preview": "portrait",
   "passes": [
     { "block": "posterize", "params": {"levels": 6} },
     { "block": "grade", "params": {"saturation": 1.3} },

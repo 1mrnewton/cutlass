@@ -3,6 +3,7 @@
   "id": "motion-blur",
   "name": "Motion Blur",
   "category": "Blur",
+  "preview": "dancer",
   "passes": [
     { "block": "motion_blur", "params": {"length": 0.04} }
   ]

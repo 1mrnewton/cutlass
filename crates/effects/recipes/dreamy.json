@@ -3,6 +3,7 @@
   "id": "dreamy",
   "name": "Dreamy",
   "category": "Blur",
+  "preview": "portrait",
   "passes": [
     { "block": "blur", "params": {"radius": 0.006} },
     { "block": "grade", "params": {"brightness": 0.06, "contrast": 0.9, "saturation": 1.1} },

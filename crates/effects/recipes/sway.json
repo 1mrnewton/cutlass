@@ -3,6 +3,7 @@
   "id": "sway",
   "name": "Sway",
   "category": "Motion",
+  "preview": "dancer",
   "passes": [
     {
       "block": "transform",

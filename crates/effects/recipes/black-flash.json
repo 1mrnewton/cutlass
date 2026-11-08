@@ -3,6 +3,8 @@
   "id": "black-flash",
   "name": "Black Flash",
   "category": "Light",
+  "preview": "city",
+  "poster": 0.08,
   "passes": [
     {
       "block": "flash",

@@ -3,6 +3,7 @@
   "id": "blur",
   "name": "Blur",
   "category": "Blur",
+  "preview": "portrait",
   "passes": [
     { "block": "blur", "params": {"radius": 0.02} }
   ]

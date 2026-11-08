@@ -3,6 +3,8 @@
   "id": "white-flash",
   "name": "White Flash",
   "category": "Light",
+  "preview": "city",
+  "poster": 0.08,
   "passes": [
     {
       "block": "flash",

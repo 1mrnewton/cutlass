@@ -3,6 +3,7 @@
   "id": "flicker",
   "name": "Flicker",
   "category": "Light",
+  "preview": "city",
   "passes": [
     {
       "block": "grade",

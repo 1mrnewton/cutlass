@@ -3,6 +3,7 @@
   "id": "pixelate",
   "name": "Pixelate",
   "category": "Distort",
+  "preview": "dancer",
   "passes": [
     { "block": "pixelate", "params": {"size": 0.03} }
   ]

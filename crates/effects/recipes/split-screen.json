@@ -3,6 +3,7 @@
   "id": "split-screen",
   "name": "Split Screen",
   "category": "Distort",
+  "preview": "dancer",
   "passes": [
     { "block": "tile", "params": {"x": 2, "y": 2} }
   ]

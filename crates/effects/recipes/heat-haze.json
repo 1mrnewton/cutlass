@@ -3,6 +3,7 @@
   "id": "heat-haze",
   "name": "Heat Haze",
   "category": "Distort",
+  "preview": "beach",
   "passes": [
     {
       "block": "ripple",

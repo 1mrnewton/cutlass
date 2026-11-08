@@ -3,6 +3,7 @@
   "id": "kaleidoscope",
   "name": "Kaleidoscope",
   "category": "Distort",
+  "preview": "flowers",
   "passes": [
     { "block": "mirror", "params": {"side": 0} },
     { "block": "mirror", "params": {"side": 2} }

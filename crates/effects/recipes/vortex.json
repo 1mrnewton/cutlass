@@ -3,6 +3,8 @@
   "id": "vortex",
   "name": "Vortex",
   "category": "Distort",
+  "preview": "road",
+  "poster": 1.5,
   "passes": [
     { "block": "swirl", "params": {"angle": {"keys": [[0, 0], [3, 720]]}, "radius": 0.8} }
   ]

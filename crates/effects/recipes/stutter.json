@@ -3,6 +3,7 @@
   "id": "stutter",
   "name": "Stutter",
   "category": "Glitch",
+  "preview": "dancer",
   "passes": [
     {
       "block": "transform",

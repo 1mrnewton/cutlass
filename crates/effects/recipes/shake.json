@@ -3,6 +3,7 @@
   "id": "shake",
   "name": "Shake",
   "category": "Motion",
+  "preview": "dancer",
   "passes": [
     {
       "block": "transform",

@@ -3,6 +3,7 @@
   "id": "rose-leak",
   "name": "Rose Leak",
   "category": "Light",
+  "preview": "portrait",
   "passes": [
     {
       "block": "light_leak",

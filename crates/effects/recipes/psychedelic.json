@@ -3,6 +3,8 @@
   "id": "psychedelic",
   "name": "Psychedelic",
   "category": "Distort",
+  "preview": "flowers",
+  "poster": 0.8,
   "passes": [
     {
       "block": "swirl",

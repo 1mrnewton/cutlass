@@ -330,6 +330,14 @@ pub struct Recipe {
     /// [`EFFECT_CATEGORIES`]; a recipe without one is listed under All only.
     #[serde(default)]
     pub category: String,
+    /// The scene its card shows it over, one of
+    /// [`crate::preview_scenes`]; empty is [`crate::DEFAULT_PREVIEW_SCENE`].
+    #[serde(default)]
+    pub preview: String,
+    /// The second of the effect its card's still is taken from; none is
+    /// [`crate::DEFAULT_POSTER`]. A flash names the moment it is brightest.
+    #[serde(default)]
+    pub poster: Option<f32>,
     pub passes: Vec<Pass>,
 }
 
@@ -434,6 +442,20 @@ impl Recipe {
         if !id_ok || !name_ok {
             return Err(RecipeError::Name);
         }
+        if !self.preview.is_empty() && crate::preview_scene(&self.preview).is_none() {
+            return Err(RecipeError::Shape(format!(
+                "no preview scene {}",
+                self.preview
+            )));
+        }
+        if self
+            .poster
+            .is_some_and(|poster| !poster.is_finite() || !(0.0..=60.0).contains(&poster))
+        {
+            return Err(RecipeError::Shape(
+                "a poster time from 0 to 60 s".to_owned(),
+            ));
+        }
         if self.passes.is_empty() || self.passes.len() > MAX_PASSES {
             return Err(RecipeError::Passes);
         }
@@ -455,6 +477,23 @@ impl Recipe {
     #[must_use]
     pub fn effect_id(&self) -> String {
         format!("{RECIPE_PREFIX}{}", self.id)
+    }
+
+    /// The scene its card shows it over.
+    #[must_use]
+    pub fn preview_scene(&self) -> &str {
+        if self.preview.is_empty() {
+            crate::DEFAULT_PREVIEW_SCENE
+        } else {
+            &self.preview
+        }
+    }
+
+    /// The moment of the effect its card's still shows.
+    #[must_use]
+    pub fn poster_time(&self) -> Micros {
+        let seconds = self.poster.unwrap_or(crate::DEFAULT_POSTER);
+        Micros((f64::from(seconds) * 1_000_000.0).round() as i64)
     }
 
     /// Every pass with its values at `time` from the effect's start. A time
@@ -722,6 +761,10 @@ mod tests {
                 recipe.id,
                 recipe.category
             );
+        }
+        // And names the scene its card shows it over.
+        for recipe in bundled() {
+            assert!(!recipe.preview.is_empty(), "{} names no scene", recipe.id);
         }
         // One from elsewhere may leave it out.
         let plain =

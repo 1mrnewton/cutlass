@@ -3,6 +3,7 @@
   "id": "zoom-blur",
   "name": "Zoom Blur",
   "category": "Blur",
+  "preview": "road",
   "passes": [
     { "block": "zoom_blur", "params": {"amount": 0.15} }
   ]

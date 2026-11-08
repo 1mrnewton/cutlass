@@ -3,6 +3,7 @@
   "id": "vivid",
   "name": "Vivid",
   "category": "Basic",
+  "preview": "portrait",
   "passes": [
     { "block": "grade", "params": {"saturation": 1.5, "contrast": 1.15} }
   ]

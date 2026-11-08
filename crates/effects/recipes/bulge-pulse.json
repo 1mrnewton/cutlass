@@ -3,6 +3,8 @@
   "id": "bulge-pulse",
   "name": "Bulge Pulse",
   "category": "Distort",
+  "preview": "portrait",
+  "poster": 0.5,
   "passes": [
     {
       "block": "bulge",

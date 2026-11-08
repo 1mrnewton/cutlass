@@ -3,6 +3,8 @@
   "id": "light-leak",
   "name": "Light Leak",
   "category": "Light",
+  "preview": "beach",
+  "poster": 1.4,
   "passes": [
     {
       "block": "light_leak",

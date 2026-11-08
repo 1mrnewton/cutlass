@@ -3,6 +3,7 @@
   "id": "dutch-angle",
   "name": "Dutch Angle",
   "category": "Distort",
+  "preview": "dancer",
   "passes": [
     { "block": "transform", "params": {"scale": 1.25, "rotate": 8} }
   ]

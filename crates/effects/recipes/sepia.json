@@ -3,6 +3,7 @@
   "id": "sepia",
   "name": "Sepia",
   "category": "Retro",
+  "preview": "portrait",
   "passes": [
     { "block": "grade", "params": {"saturation": 0, "contrast": 1.05} },
     { "block": "flash", "params": {"amount": 0.3, "red": 1, "green": 0.75, "blue": 0.45} }

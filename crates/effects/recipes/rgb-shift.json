@@ -3,6 +3,7 @@
   "id": "rgb-shift",
   "name": "RGB Shift",
   "category": "Glitch",
+  "preview": "city",
   "passes": [
     {
       "block": "rgb_split",

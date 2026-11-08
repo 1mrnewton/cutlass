@@ -2614,6 +2614,8 @@ dependencies = [
 name = "cutlass-effects"
 version = "0.1.0"
 dependencies = [
+ "cutlass-decode",
+ "cutlass-jpeg",
  "cutlass-model",
  "cutlass-picture",
  "cutlass-storage",

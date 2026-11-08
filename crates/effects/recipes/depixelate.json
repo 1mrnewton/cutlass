@@ -3,6 +3,8 @@
   "id": "depixelate",
   "name": "Depixelate",
   "category": "Distort",
+  "preview": "dancer",
+  "poster": 0.4,
   "passes": [
     { "block": "pixelate", "params": {"size": {"keys": [[0, 0.1], [1, 0]]}} }
   ]

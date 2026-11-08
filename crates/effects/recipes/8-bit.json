@@ -3,6 +3,7 @@
   "id": "8-bit",
   "name": "8-Bit",
   "category": "Retro",
+  "preview": "dancer",
   "passes": [
     { "block": "pixelate", "params": {"size": 0.02} },
     { "block": "grade", "params": {"saturation": 1.3, "contrast": 1.2} }

@@ -3,6 +3,8 @@
   "id": "red-pulse",
   "name": "Red Pulse",
   "category": "Light",
+  "preview": "city",
+  "poster": 0.5,
   "passes": [
     {
       "block": "flash",

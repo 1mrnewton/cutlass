@@ -3,6 +3,7 @@
   "id": "wavy",
   "name": "Wavy",
   "category": "Distort",
+  "preview": "beach",
   "passes": [
     {
       "block": "ripple",

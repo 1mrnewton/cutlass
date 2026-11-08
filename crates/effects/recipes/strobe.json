@@ -3,6 +3,8 @@
   "id": "strobe",
   "name": "Strobe",
   "category": "Light",
+  "preview": "city",
+  "poster": 0.03,
   "passes": [
     {
       "block": "flash",

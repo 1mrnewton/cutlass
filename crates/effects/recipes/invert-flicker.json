@@ -3,6 +3,8 @@
   "id": "invert-flicker",
   "name": "Invert Flicker",
   "category": "Glitch",
+  "preview": "city",
+  "poster": 0.08,
   "passes": [
     {
       "block": "invert",

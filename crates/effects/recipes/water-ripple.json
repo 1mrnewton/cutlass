@@ -3,6 +3,7 @@
   "id": "water-ripple",
   "name": "Water Ripple",
   "category": "Distort",
+  "preview": "beach",
   "passes": [
     {
       "block": "ripple",

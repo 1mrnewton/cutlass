@@ -3,5 +3,6 @@
 #![forbid(unsafe_code)]
 
 mod bits;
+mod header;
 mod tables;
 mod vlc;

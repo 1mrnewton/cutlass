@@ -109,16 +109,21 @@ The 44.1 kHz AC-3 frame table makes that clip 192003 bit/s. Every other clip mat
 
 cargo-fuzz is not used. `libfuzzer-sys` builds C through `cc`, which `deny.toml` bans.
 
-A two-minute release campaign on this encoder, after E-AC-3 stopped switching block length, found nothing. The longer campaigns below are from commit `56a561f4`, before that encoder change. Release turns overflow checks off. The 300-second run is the test profile, where an overflow panics. This crate's dev profile still compiles the library at opt-level 3.
+A two-minute release campaign on this encoder, after stereo coupling started writing phase flags, found nothing. The record after that is earlier encoders. Its two-minute run is from before phase flags and before a short frame narrowed its bandwidth, and the longer runs are from commit `56a561f4`, before E-AC-3 stopped switching block length. Release turns overflow checks off. The 300-second run is the test profile, where an overflow panics. This crate's dev profile still compiles the library at opt-level 3.
+
+```text
+AC3_FUZZ_SECS=120 cargo test --release -p cutlass-ac3 --test ac3 -- --ignored campaign --nocapture
+ac3 decoder campaign: seed 0xac3dec0d seconds 120 inputs 9360159 errors 9346166 accepted 13993 findings 0
+ac3 encoder campaign: seed 0xac3e0c0d seconds 120 rounds 662922 refused 331338 encoded 331584 findings 0
+test result: ok. 1 passed; 0 failed; finished in 120.00s
+```
 
 ```text
 AC3_FUZZ_SECS=120 cargo test --release -p cutlass-ac3 --test ac3 -- --ignored campaign --nocapture
 ac3 decoder campaign: seed 0xac3dec0d seconds 120 inputs 9430442 errors 9416165 accepted 14277 findings 0
 ac3 encoder campaign: seed 0xac3e0c0d seconds 120 rounds 668080 refused 333925 encoded 334155 findings 0
 test result: ok. 1 passed; 0 failed; finished in 120.00s
-```
 
-```text
 AC3_FUZZ_SECS=1800 cargo test --release -p cutlass-ac3 --test ac3 -- --ignored campaign --nocapture
 ac3 decoder campaign: seed 0xac3dec0d seconds 1800 inputs 139183455 errors 138970023 accepted 213432 findings 0
 ac3 encoder campaign: seed 0xac3e0c0d seconds 1800 rounds 9772334 refused 4882999 encoded 4889335 findings 0

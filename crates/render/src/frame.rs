@@ -80,7 +80,7 @@ fn layers_of(frame: &FrameLayers) -> Result<Vec<Layer<'_>>, RenderError> {
                 size: (child.width, child.height),
                 placement: layer.placement,
             },
-            GpuSource::Effect(steps) => Layer::Effect(steps),
+            GpuSource::Effect(steps, mask) => Layer::Effect(steps, mask.as_ref()),
             GpuSource::Vector(scene) => Layer::Vector {
                 scene,
                 placement: layer.placement,
@@ -250,7 +250,7 @@ mod tests {
             layers: vec![
                 picture_layer(4, 2, pixels()),
                 GpuLayer {
-                    source: GpuSource::Effect(vec![invert]),
+                    source: GpuSource::Effect(vec![invert], None),
                     placement: Placement::canvas(4, 2),
                     backdrop: None,
                 },
@@ -263,6 +263,71 @@ mod tests {
             .flat_map(|pixel| [255 - pixel[0], 255 - pixel[1], 255 - pixel[2], pixel[3]])
             .collect();
         assert_eq!(renderer.read(&canvas).expect("read"), expected);
+    }
+
+    #[test]
+    fn a_masked_effect_shows_only_inside_its_shape_as_the_cpu_draws_it() {
+        let Some(renderer) = renderer() else {
+            return;
+        };
+        let (width, height) = (48u32, 32u32);
+        let invert = cutlass_effects::Step {
+            block: cutlass_effects::Block::Invert,
+            values: [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        };
+        let grey: Vec<u8> = [200, 200, 200, 255].repeat((width * height) as usize);
+        // Canvas pixels to the frame a full-canvas layer has: -1 to 1 across,
+        // 1 at the top to -1 at the bottom.
+        let frame = [
+            2.0 / width as f32,
+            0.0,
+            -1.0,
+            0.0,
+            -2.0 / height as f32,
+            1.0,
+        ];
+        for (index, shape) in cutlass_effects::MaskShape::ALL.into_iter().enumerate() {
+            let mask = cutlass_effects::CanvasMask {
+                mask: cutlass_effects::Mask {
+                    rotation: 20.0,
+                    feather: 0.3,
+                    round: 0.4,
+                    invert: index % 2 == 1,
+                    ..cutlass_effects::Mask::new(shape)
+                },
+                frame,
+            };
+            let layers = FrameLayers {
+                width,
+                height,
+                layers: vec![
+                    picture_layer(width, height, grey.clone()),
+                    GpuLayer {
+                        source: GpuSource::Effect(vec![invert], Some(mask)),
+                        placement: Placement::canvas(width, height),
+                        backdrop: None,
+                    },
+                ],
+            };
+            let canvas = renderer.canvas(width, height).expect("canvas");
+            renderer.draw_frame(&canvas, &layers).expect("draw");
+            let drawn = renderer.read(&canvas).expect("read");
+            let mut inside = 0;
+            for (at, pixel) in drawn.chunks(4).enumerate() {
+                let x = (at as u32 % width) as f32 + 0.5;
+                let y = (at as u32 / width) as f32 + 0.5;
+                let keep = mask.coverage_at(x, y);
+                let expected = 200.0 + (55.0 - 200.0) * keep;
+                assert!(
+                    (f32::from(pixel[0]) - expected).abs() <= 3.0,
+                    "{shape:?} at ({x}, {y}): {} against {expected}",
+                    pixel[0]
+                );
+                assert_eq!(pixel[3], 255);
+                inside += usize::from(keep > 0.5);
+            }
+            assert!(inside > 0 && inside < drawn.len() / 4, "{shape:?} splits");
+        }
     }
 
     #[test]

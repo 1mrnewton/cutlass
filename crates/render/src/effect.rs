@@ -844,7 +844,7 @@ mod tests {
                 &canvas,
                 &[
                     Layer::Rgba(picture, Placement::canvas(size.0, size.1)),
-                    Layer::Effect(steps),
+                    Layer::Effect(steps, None),
                 ],
             )
             .expect("draw");
@@ -980,7 +980,7 @@ mod tests {
                         },
                         Placement::canvas(4, 1),
                     ),
-                    Layer::Effect(&steps),
+                    Layer::Effect(&steps, None),
                     Layer::Rgba(
                         Rgba {
                             width: 1,

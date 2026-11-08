@@ -133,7 +133,7 @@ pub enum Layer<'a> {
         placement: Placement,
     },
     /// An effect over everything drawn before it in the same list.
-    Effect(&'a [Step]),
+    Effect(&'a [Step], Option<&'a cutlass_effects::CanvasMask>),
     /// `layers` drawn on a canvas the size of this one, then mixed by
     /// `mode` with everything drawn before it in the same list.
     Blend {

@@ -393,12 +393,13 @@ fn adjustment_layers<'a>(
 }
 
 /// A recipe effect at one frame: where it sits among the layers, its steps
-/// at that time, and the clip it runs over alone, as track and segment
-/// index, when it is bound to one.
+/// at that time, the clip it runs over alone, as track and segment index,
+/// when it is bound to one, and the mask it shows inside, if any.
 pub(crate) struct RecipeMark {
     pub(crate) key: (i32, usize, usize),
     pub(crate) steps: Vec<Step>,
     pub(crate) bound: Option<(usize, usize)>,
+    pub(crate) mask: Option<cutlass_effects::CanvasMask>,
 }
 
 /// The bundled recipe effects covering `time`, back to front. Their steps
@@ -407,6 +408,7 @@ pub(crate) struct RecipeMark {
 pub(crate) fn recipe_marks(
     draft: &Draft,
     time: Micros,
+    extent: Extent,
     stack: &[StackLayer<'_>],
 ) -> Vec<RecipeMark> {
     let mut marks: Vec<RecipeMark> = effect_segments(draft, time, stack)
@@ -425,11 +427,27 @@ pub(crate) fn recipe_marks(
                 key: (segment.render_index, track_index, segment_index),
                 steps: recipe.steps_with(offset, &controls),
                 bound,
+                mask: effect_mask(draft, segment, time, extent),
             })
         })
         .collect();
     marks.sort_by_key(|mark| mark.key);
     marks
+}
+
+/// `segment`'s colour mask placed on an `extent` canvas at `time`: where
+/// on the canvas the effect acts, as for an adjustment layer.
+fn effect_mask(
+    draft: &Draft,
+    segment: &Segment,
+    time: Micros,
+    extent: Extent,
+) -> Option<cutlass_effects::CanvasMask> {
+    let mask = cutlass_effects::segment_color_mask(draft, segment)?;
+    let frame = clip_frame(draft, segment, time, (extent.width, extent.height))?;
+    #[allow(clippy::cast_possible_truncation)]
+    let frame = frame.0.map(|value| value as f32);
+    Some(cutlass_effects::CanvasMask { mask, frame })
 }
 
 /// Visible effect segments on visible rows that cover `time` and are not

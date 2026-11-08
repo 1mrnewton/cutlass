@@ -67,7 +67,7 @@ fn preview(renderer: &Renderer, scene: &[u8], recipe: &Recipe) -> Result<Vec<u8>
             &canvas,
             &[
                 Layer::Rgba(picture, Placement::canvas(SIDE, SIDE)),
-                Layer::Effect(&steps),
+                Layer::Effect(&steps, None),
             ],
         )?;
         let rgba = renderer.read(&canvas)?;

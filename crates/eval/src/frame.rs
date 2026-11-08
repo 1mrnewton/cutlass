@@ -205,7 +205,7 @@ pub(crate) fn compose_layers<D: Device>(
         true,
         |draft, _device, extent, layers| {
             let stack = stack_of(layers);
-            let effects = recipe_marks(draft, time, &stack);
+            let effects = recipe_marks(draft, time, extent, &stack);
             if needs_cpu(draft, time, &stack) {
                 return Ok(Err(effects));
             }
@@ -228,7 +228,7 @@ pub(crate) fn compose_layers<D: Device>(
                 effects
                     .into_iter()
                     .filter(|mark| mark.bound.is_none())
-                    .map(|mark| GpuLayer::effect(mark.steps, width, height)),
+                    .map(|mark| GpuLayer::effect(mark.steps, mark.mask, width, height)),
             );
             Ok(Composed::Layers(layers))
         }
@@ -246,7 +246,8 @@ fn gpu_layers(
     let (bound, effects): (Vec<RecipeMark>, Vec<RecipeMark>) =
         effects.into_iter().partition(|mark| mark.bound.is_some());
     let mut effects = effects.into_iter().peekable();
-    let effect = |mark: RecipeMark| GpuLayer::effect(mark.steps, extent.width, extent.height);
+    let effect =
+        |mark: RecipeMark| GpuLayer::effect(mark.steps, mark.mask, extent.width, extent.height);
     if let Some(pixel) = draft
         .canvas_config
         .background
@@ -1723,7 +1724,7 @@ mod recipe_tests {
             .layers
             .iter()
             .enumerate()
-            .filter(|(_, layer)| matches!(layer.source, GpuSource::Effect(_)))
+            .filter(|(_, layer)| matches!(layer.source, GpuSource::Effect(..)))
             .map(|(index, _)| index)
             .collect()
     }
@@ -1734,7 +1735,8 @@ mod recipe_tests {
         let before = draft.clone();
         let frame = layers(&draft, 600_000);
         assert_eq!(effects(&frame), vec![frame.layers.len() - 1]);
-        let Some(GpuSource::Effect(steps)) = frame.layers.last().map(|layer| &layer.source) else {
+        let Some(GpuSource::Effect(steps, _)) = frame.layers.last().map(|layer| &layer.source)
+        else {
             panic!("no effect layer");
         };
         let recipe = bundled_recipe("recipe/white-flash").expect("recipe");
@@ -1752,13 +1754,46 @@ mod recipe_tests {
             .expect("the effect");
         cutlass_effects::store_control(effect, "speed", 2.0, 1.0);
         let frame = layers(&draft, 600_000);
-        let Some(GpuSource::Effect(steps)) = frame.layers.last().map(|layer| &layer.source) else {
+        let Some(GpuSource::Effect(steps, _)) = frame.layers.last().map(|layer| &layer.source)
+        else {
             panic!("no effect layer");
         };
         let recipe = bundled_recipe("recipe/photo-drop").expect("recipe");
         let fast = [("speed".to_owned(), 2.0)].into_iter().collect();
         assert_eq!(steps, &recipe.steps_with(Micros(100_000), &fast));
         assert_eq!(steps, &recipe.steps_at(Micros(200_000)), "twice as far in");
+    }
+
+    #[test]
+    fn an_effect_with_a_mask_carries_it_placed_on_the_canvas() {
+        let mut draft = with_effect("recipe/vignette");
+        let frame = layers(&draft, 600_000);
+        let Some(GpuSource::Effect(_, mask)) = frame.layers.last().map(|layer| &layer.source)
+        else {
+            panic!("no effect layer");
+        };
+        assert_eq!(*mask, None);
+        let shape = cutlass_effects::Mask::new(cutlass_effects::MaskShape::Circle);
+        draft
+            .materials
+            .common_mask
+            .push(cutlass_model::RawMaterial {
+                id: "fx-mask".into(),
+                kind: cutlass_effects::COLOR_MASK.to_owned(),
+                fields: shape.to_fields(),
+            });
+        let row = draft.tracks.last_mut().expect("the effect row");
+        row.segments[0].extra_material_refs.push("fx-mask".into());
+        let frame = layers(&draft, 600_000);
+        let Some(GpuSource::Effect(_, Some(mask))) = frame.layers.last().map(|layer| &layer.source)
+        else {
+            panic!("no masked effect layer");
+        };
+        assert_eq!(mask.mask, shape);
+        // The canvas is 4 by 2; its middle is the shape's middle, and a
+        // corner is outside a circle half the canvas across.
+        assert!(mask.coverage_at(2.0, 1.0) > 0.99);
+        assert!(mask.coverage_at(0.0, 0.0) < 0.01);
     }
 
     #[test]

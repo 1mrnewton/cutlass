@@ -365,6 +365,132 @@ fn smoothstep(low: f32, high: f32, value: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
+/// A mask placed on the canvas: `frame` takes a canvas pixel to the
+/// layer's own frame, where the shape is measured, as
+/// `(a·x + b·y + c, d·x + e·y + f)`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CanvasMask {
+    pub mask: Mask,
+    pub frame: [f32; 6],
+}
+
+impl CanvasMask {
+    /// How much of the layer's work shows at canvas pixel centre `(x, y)`.
+    #[must_use]
+    pub fn coverage_at(&self, x: f32, y: f32) -> f32 {
+        let [a, b, c, d, e, f] = self.frame;
+        self.mask
+            .coverage(a * x + b * y + c, d * x + e * y + f)
+            .clamp(0.0, 1.0)
+    }
+
+    /// The sixteen numbers [`MASK_WGSL`]'s `CanvasMask` holds.
+    #[must_use]
+    pub fn uniform(&self) -> [f32; 16] {
+        let [a, b, c, d, e, f] = self.frame;
+        let shape = MaskShape::ALL
+            .iter()
+            .position(|shape| *shape == self.mask.shape)
+            .unwrap_or_default();
+        let m = &self.mask;
+        #[allow(clippy::cast_precision_loss)]
+        let shape = shape as f32;
+        [
+            a,
+            b,
+            c,
+            d,
+            e,
+            f,
+            shape,
+            if m.invert { 1.0 } else { 0.0 },
+            m.x,
+            m.y,
+            m.width,
+            m.height,
+            m.rotation,
+            m.feather,
+            m.round,
+            0.0,
+        ]
+    }
+}
+
+/// [`Mask::coverage`] for a GPU pass, measured at a canvas pixel through a
+/// [`CanvasMask`]. Kept beside the CPU arithmetic so the two change
+/// together.
+pub const MASK_WGSL: &str = r"
+struct CanvasMask {
+    frame0: vec4<f32>,
+    frame1: vec4<f32>,
+    shape0: vec4<f32>,
+    shape1: vec4<f32>,
+}
+
+fn mask_smooth(low: f32, high: f32, value: f32) -> f32 {
+    let t = clamp((value - low) / (high - low), 0.0, 1.0);
+    return t * t * (3.0 - 2.0 * t);
+}
+
+fn mask_edge(value: f32, soft: f32) -> f32 {
+    return mask_smooth(1.0 + soft, 1.0 - soft, value);
+}
+
+fn mask_coverage(m: CanvasMask, pixel: vec2<f32>) -> f32 {
+    let u = m.frame0.x * pixel.x + m.frame0.y * pixel.y + m.frame0.z;
+    let v = m.frame0.w * pixel.x + m.frame1.x * pixel.y + m.frame1.y;
+    let turn = radians(m.shape1.x);
+    let s = sin(turn);
+    let c = cos(turn);
+    let du = u - m.shape0.x;
+    let dv = v - m.shape0.y;
+    let a = c * du + s * dv;
+    let b = -s * du + c * dv;
+    let soft = max(m.shape1.y, 0.0) * 0.5 + 1e-4;
+    let hw = max(m.shape0.z, 1e-4);
+    let hh = max(m.shape0.w, 1e-4);
+    var keep = 0.0;
+    switch u32(m.frame1.z + 0.5) {
+        case 0u: { keep = mask_smooth(soft, -soft, b); }
+        case 1u: { keep = mask_smooth(hh + soft, hh - soft, abs(b)); }
+        case 2u: {
+            let r = sqrt((a / hw) * (a / hw) + (b / hh) * (b / hh));
+            keep = mask_edge(r, soft / min(hw, hh));
+        }
+        case 3u: {
+            let corner = clamp(m.shape1.z, 0.0, 1.0) * min(hw, hh);
+            let qx = abs(a) - (hw - corner);
+            let qy = abs(b) - (hh - corner);
+            let outside = length(vec2<f32>(max(qx, 0.0), max(qy, 0.0)));
+            let distance = outside + min(max(qx, qy), 0.0) - corner;
+            keep = mask_smooth(soft, -soft, distance);
+        }
+        case 4u: {
+            let x = a / hw * 1.2;
+            let y = b / hh * 1.2 + 0.15;
+            let ring = x * x + y * y - 1.0;
+            let value = ring * ring * ring - x * x * y * y * y;
+            keep = mask_smooth(soft * 2.0, -soft * 2.0, value);
+        }
+        default: {
+            let x = a / hw;
+            let y = b / hh;
+            let radius = sqrt(x * x + y * y);
+            let angle = atan2(y, x) - 1.5707964;
+            let sector = 6.2831855 / 5.0;
+            let wrapped = angle - sector * floor(angle / sector);
+            let into = abs(wrapped / sector - 0.5) * 2.0;
+            let reach = 0.45 + 0.55 * into;
+            keep = mask_edge(radius / reach, soft / min(hw, hh));
+        }
+    }
+    if m.frame1.w > 0.5 {
+        keep = 1.0 - keep;
+    }
+    return clamp(keep, 0.0, 1.0);
+}
+";
+
 #[cfg(test)]
 mod tests {
     use cutlass_model::{Draft, MaterialId, RawMaterial, Segment, TimeRange};

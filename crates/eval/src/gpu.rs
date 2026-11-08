@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use cutlass_compositor::Frame;
 use cutlass_decode::Surface;
-use cutlass_effects::{BlendMode, Step, TransitionKind};
+use cutlass_effects::{BlendMode, CanvasMask, Step, TransitionKind};
 use cutlass_gpu::{Affine, Placement, YuvTone};
 use cutlass_picture::CpuBytes;
 
@@ -34,8 +34,8 @@ pub enum GpuSource {
     /// A compound clip's child frame, drawn onto its own canvas first.
     Nested(Box<FrameLayers>),
     /// A recipe effect over every layer before it, with its values at this
-    /// frame's time.
-    Effect(Vec<Step>),
+    /// frame's time, shown only inside its mask when it has one.
+    Effect(Vec<Step>, Option<CanvasMask>),
     /// A clip drawn on a canvas of its own, then mixed with every layer
     /// before it by `mode`.
     Blend {
@@ -94,9 +94,14 @@ impl GpuLayer {
     }
 
     /// An effect over everything below it on a `width` by `height` canvas.
-    pub(crate) fn effect(steps: Vec<Step>, width: u32, height: u32) -> Self {
+    pub(crate) fn effect(
+        steps: Vec<Step>,
+        mask: Option<CanvasMask>,
+        width: u32,
+        height: u32,
+    ) -> Self {
         Self {
-            source: GpuSource::Effect(steps),
+            source: GpuSource::Effect(steps, mask),
             placement: Placement::canvas(width, height),
             backdrop: None,
         }

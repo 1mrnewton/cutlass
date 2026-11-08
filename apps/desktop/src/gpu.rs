@@ -233,7 +233,7 @@ fn draw_effect(
         canvas,
         &[
             Layer::Rgba(picture, Placement::canvas(scene.width, scene.height)),
-            Layer::Effect(&steps),
+            Layer::Effect(&steps, None),
         ],
     )
 }

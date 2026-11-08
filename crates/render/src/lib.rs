@@ -22,6 +22,7 @@
 mod blur;
 mod effect;
 mod frame;
+mod keep;
 mod layer;
 mod mix;
 mod target;
@@ -81,6 +82,7 @@ pub struct Renderer {
     layers: layer::Pipelines,
     blurs: blur::Blurs,
     effects: effect::Effects,
+    keep: keep::Keep,
     mix: mix::Mix,
     transition: transition::Transition,
     vector: vector::Vector,
@@ -102,6 +104,7 @@ impl Renderer {
         let layers = layer::Pipelines::new(&device);
         let blurs = blur::Blurs::new(&device);
         let effects = effect::Effects::new(&device);
+        let keep = keep::Keep::new(&device);
         let mix = mix::Mix::new(&device);
         let transition = transition::Transition::new(&device);
         let vector = vector::Vector::new(&device);
@@ -111,6 +114,7 @@ impl Renderer {
             layers,
             blurs,
             effects,
+            keep,
             mix,
             transition,
             vector,
@@ -373,7 +377,7 @@ impl Renderer {
                     };
                     bound.push(self.layers.bind(device, queue, &uploaded, fit(*placement)));
                 }
-                Layer::Effect(steps) => {
+                Layer::Effect(steps, mask) => {
                     if steps.is_empty() {
                         continue;
                     }
@@ -382,10 +386,22 @@ impl Renderer {
                     let first = blur::scratch(device, size);
                     let second = blur::scratch(device, size);
                     Self::paint(&self.layers, encoder, &first, &bound);
-                    let result = self
+                    let before = mask.map(|_| {
+                        let before = blur::scratch(device, size);
+                        Self::paint(&self.layers, encoder, &before, &bound);
+                        before
+                    });
+                    let mut result = self
                         .effects
                         .run(device, queue, encoder, &first, &second, size, steps)
                         .clone();
+                    // A masked effect shows only inside its shape.
+                    if let (Some(mask), Some(before)) = (mask, before) {
+                        let kept = blur::scratch(device, size);
+                        self.keep
+                            .run(device, queue, encoder, &before, &result, &kept, mask);
+                        result = kept;
+                    }
                     let uploaded = layer::Uploaded {
                         views: [result.clone(), result.clone(), result],
                         size,

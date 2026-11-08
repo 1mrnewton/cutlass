@@ -174,7 +174,27 @@ impl Renderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("cutlass-render frame"),
             });
-        self.draw_into(&mut encoder, canvas.view(), canvas.size(), layers)?;
+        let size = canvas.size();
+        self.draw_into(&mut encoder, canvas.view(), size, layers, size)?;
+        self.queue.submit([encoder.finish()]);
+        Ok(())
+    }
+
+    /// Clear `canvas` and draw `layers`, laid out for a `full` sized
+    /// canvas, shrunk to fit it: a preview drawn at a lower quality. A
+    /// `full` of the canvas's own size is [`Self::draw`].
+    pub fn draw_scaled(
+        &self,
+        canvas: &Canvas,
+        layers: &[Layer<'_>],
+        full: (u32, u32),
+    ) -> Result<(), RenderError> {
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("cutlass-render scaled frame"),
+            });
+        self.draw_into(&mut encoder, canvas.view(), canvas.size(), layers, full)?;
         self.queue.submit([encoder.finish()]);
         Ok(())
     }
@@ -187,14 +207,22 @@ impl Renderer {
         target: &wgpu::TextureView,
         size: (u32, u32),
         layers: &[Layer<'_>],
+        full: (u32, u32),
     ) -> Result<(), RenderError> {
         let (device, queue) = (&self.device, &self.queue);
+        // Each layer is placed on the `full` canvas; the target may be
+        // smaller, so its pixel centres map back by the ratio.
+        let scale = (
+            f64::from(size.0) / f64::from(full.0.max(1)),
+            f64::from(size.1) / f64::from(full.1.max(1)),
+        );
+        let fit = |placement: Placement| shrunk(placement, scale);
         let mut bound = Vec::with_capacity(layers.len());
         for layer in layers {
             match layer {
                 Layer::Rgba(rgba, placement) => {
                     let uploaded = layer::Pipelines::upload_rgba(device, queue, rgba)?;
-                    bound.push(self.layers.bind(device, queue, &uploaded, *placement));
+                    bound.push(self.layers.bind(device, queue, &uploaded, fit(*placement)));
                 }
                 Layer::Yuv(planes, placement) => {
                     let uploaded = layer::Pipelines::upload_planes(
@@ -203,7 +231,7 @@ impl Renderer {
                         planes,
                         self.import.as_ref(),
                     )?;
-                    bound.push(self.layers.bind(device, queue, &uploaded, *placement));
+                    bound.push(self.layers.bind(device, queue, &uploaded, fit(*placement)));
                 }
                 Layer::YuvOverBlur {
                     planes,
@@ -217,14 +245,16 @@ impl Renderer {
                         planes,
                         self.import.as_ref(),
                     )?;
-                    let backdrop = self.blurred(encoder, &uploaded, *cover, *radius, size);
+                    // The blur reaches as far across the smaller canvas.
+                    let radius = scaled_radius(*radius, scale.0.min(scale.1));
+                    let backdrop = self.blurred(encoder, &uploaded, fit(*cover), radius, size);
                     bound.push(self.layers.bind(
                         device,
                         queue,
                         &backdrop,
                         Placement::canvas(size.0, size.1),
                     ));
-                    bound.push(self.layers.bind(device, queue, &uploaded, *placement));
+                    bound.push(self.layers.bind(device, queue, &uploaded, fit(*placement)));
                 }
                 Layer::Nested {
                     layers,
@@ -238,8 +268,9 @@ impl Renderer {
                             height: inner.1,
                         });
                     }
+                    // A compound's own canvas is drawn whole, then shrunk.
                     let view = blur::scratch(device, *inner);
-                    self.draw_into(encoder, &view, *inner, layers)?;
+                    self.draw_into(encoder, &view, *inner, layers, *inner)?;
                     let uploaded = layer::Uploaded {
                         views: [view.clone(), view.clone(), view],
                         size: *inner,
@@ -247,7 +278,7 @@ impl Renderer {
                         tone: cutlass_gpu::YuvTone::NONE,
                         interleaved: false,
                     };
-                    bound.push(self.layers.bind(device, queue, &uploaded, *placement));
+                    bound.push(self.layers.bind(device, queue, &uploaded, fit(*placement)));
                 }
                 Layer::Blend {
                     mode,
@@ -256,7 +287,7 @@ impl Renderer {
                     // The clip alone, what is below it, then the two mixed;
                     // the mix is the bottom layer from here on.
                     let top = blur::scratch(device, size);
-                    self.draw_into(encoder, &top, size, inner)?;
+                    self.draw_into(encoder, &top, size, inner, full)?;
                     let below = blur::scratch(device, size);
                     Self::paint(&self.layers, encoder, &below, &bound);
                     let mixed = blur::scratch(device, size);
@@ -283,14 +314,18 @@ impl Renderer {
                     outgoing,
                     incoming,
                 } => {
+                    // Both sides are full-size pictures: they are mixed at
+                    // their own size, then shrunk onto the canvas.
+                    let whole = (outgoing.width, outgoing.height);
                     for side in [outgoing, incoming] {
-                        if (side.width, side.height) != size {
+                        if (side.width, side.height) != whole || whole != full {
                             return Err(RenderError::Size {
                                 width: side.width,
                                 height: side.height,
                             });
                         }
                     }
+                    let size = whole;
                     let canvas = Placement::canvas(size.0, size.1);
                     let mut outgoing = layer::Pipelines::upload_rgba(device, queue, outgoing)?;
                     let mut incoming = layer::Pipelines::upload_rgba(device, queue, incoming)?;
@@ -316,7 +351,7 @@ impl Renderer {
                         tone: cutlass_gpu::YuvTone::NONE,
                         interleaved: false,
                     };
-                    bound.push(self.layers.bind(device, queue, &uploaded, canvas));
+                    bound.push(self.layers.bind(device, queue, &uploaded, fit(canvas)));
                 }
                 Layer::Vector { scene, placement } => {
                     let inner = (scene.width, scene.height);
@@ -336,7 +371,7 @@ impl Renderer {
                         tone: cutlass_gpu::YuvTone::NONE,
                         interleaved: false,
                     };
-                    bound.push(self.layers.bind(device, queue, &uploaded, *placement));
+                    bound.push(self.layers.bind(device, queue, &uploaded, fit(*placement)));
                 }
                 Layer::Effect(steps) => {
                     if steps.is_empty() {
@@ -448,6 +483,36 @@ impl Renderer {
     pub fn read(&self, canvas: &Canvas) -> Result<Vec<u8>, RenderError> {
         canvas.read(&self.device, &self.queue)
     }
+}
+
+/// `placement`, laid out on a full-size canvas, for a canvas `scale` times
+/// that size each way: a target pixel centre at `p` is the canvas point
+/// `p / scale`.
+fn shrunk(placement: Placement, scale: (f64, f64)) -> Placement {
+    let (sx, sy) = scale;
+    if sx == 1.0 && sy == 1.0 {
+        return placement;
+    }
+    let [a, b, c, d, e, f] = placement.to_picture.0;
+    Placement {
+        to_picture: Affine([a / sx, b / sy, c, d / sx, e / sy, f]),
+        ..placement
+    }
+}
+
+/// A blur `radius` in full-canvas pixels on a canvas `scale` times the size.
+fn scaled_radius(radius: u32, scale: f64) -> u32 {
+    if radius == 0 || scale == 1.0 {
+        return radius;
+    }
+    ((f64::from(radius) * scale).round() as u32).max(1)
+}
+
+/// A `size` canvas drawn at `scale` of its size, at least a pixel each way.
+#[must_use]
+pub fn preview_size(size: (u32, u32), scale: f64) -> (u32, u32) {
+    let side = |value: u32| ((f64::from(value) * scale).round() as u32).max(1);
+    (side(size.0), side(size.1))
 }
 
 #[cfg(test)]

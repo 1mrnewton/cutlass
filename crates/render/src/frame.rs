@@ -16,6 +16,17 @@ impl Renderer {
         }
         self.draw(canvas, &layers_of(frame)?)
     }
+
+    /// Clear `canvas` and draw `frame` shrunk to fit it: the preview at a
+    /// lower quality, every layer laid out as on the full canvas and
+    /// sampled once per smaller pixel.
+    pub fn draw_frame_scaled(
+        &self,
+        canvas: &Canvas,
+        frame: &FrameLayers,
+    ) -> Result<(), RenderError> {
+        self.draw_scaled(canvas, &layers_of(frame)?, (frame.width, frame.height))
+    }
 }
 
 /// `composed` as layers: a frame eval already composed on the CPU becomes
@@ -163,6 +174,41 @@ mod tests {
         let canvas = renderer.canvas(4, 2).expect("canvas");
         renderer.draw_frame(&canvas, &frame).expect("draw");
         assert_eq!(renderer.read(&canvas).expect("read"), pixels());
+    }
+
+    #[test]
+    fn a_frame_shrunk_to_half_keeps_its_layout() {
+        let Some(renderer) = renderer() else {
+            return;
+        };
+        // Red on the left half of an 8 by 4 frame, blue on the right.
+        let rgba: Vec<u8> = (0..8 * 4)
+            .flat_map(|index| {
+                if index % 8 < 4 {
+                    [255, 0, 0, 255]
+                } else {
+                    [0, 0, 255, 255]
+                }
+            })
+            .collect();
+        let frame = FrameLayers {
+            width: 8,
+            height: 4,
+            layers: vec![picture_layer(8, 4, rgba)],
+        };
+        let (width, height) = crate::preview_size((8, 4), 0.5);
+        assert_eq!((width, height), (4, 2));
+        let canvas = renderer.canvas(width, height).expect("canvas");
+        renderer.draw_frame_scaled(&canvas, &frame).expect("draw");
+        let got = renderer.read(&canvas).expect("read");
+        for (index, pixel) in got.chunks(4).enumerate() {
+            let expected = if index % 4 < 2 {
+                [255, 0, 0, 255]
+            } else {
+                [0, 0, 255, 255]
+            };
+            assert_eq!(pixel, expected, "pixel {index}");
+        }
     }
 
     #[test]

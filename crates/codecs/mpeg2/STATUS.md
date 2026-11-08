@@ -76,7 +76,7 @@ Interlaced, 4:2:2, and 4:4:4 encoding are out of scope: export hands the encoder
 | Playback and export registration | Desktop and phones | Desktop MP4 | Verified by the desktop and ffi tests named below. |
 | ISOBMFF `mp4v` and the QuickTime fourccs | Demux | Mux `mp4v` + `esds` | Verified. `stsd.rs`, `file_mux.rs`, `tests/isobmff.rs`. |
 | Malformed input, drain, reset, cancel, size change | Fail closed, state kept | Same | Verified. `lifecycle.rs`, `encode.rs`, and the fuzzer's smoke run. |
-| Fuzz, 30 minutes each | Seeded campaign | Seeded campaign | Running. See Robustness. Not passed yet. |
+| Fuzz, 30 minutes each | Seeded campaign | Seeded campaign | Verified. See Robustness. Zero findings. |
 
 ## Fixture manifest
 
@@ -159,12 +159,12 @@ Scoped `cargo test` on this machine, all passing:
 
 The smoke fuzz under `cargo test` runs 400 decoder iterations and 60 encoder iterations. A refused decoder packet leaves the pictures around it unchanged. Splitting a clean stream in random chunks matches splitting it whole. A drained encoder run decodes to the pictures it accepted, in order, and a replay without the refused pushes writes the same bytes. One iteration may not exceed 20 seconds.
 
-The timed campaigns, seed `20261108`, budget 1800 seconds each:
+The timed campaigns used `MPEG2_FUZZ_SEED=20261108` and a budget of 1800 seconds. The same variables repeat them. The runner xors that seed with a per-target salt (`0xDEC` for the decoder, `0xE4C` for the encoder) and forces it odd; the seed printed below is the generator's starting state.
 
-- Encoder: process started 15:06 on the encoder as of `d4695bdf`. No encoder source has changed since. Log `/tmp/cutlass-mpeg2/fuzz/encoder.log`. Still running when this record was written.
-- Decoder: restarted 15:20 on `2d925e2c`, which includes the field-pair fix. An earlier campaign was on the decoder from before that fix and was stopped; it is not evidence for this binary. Log `/tmp/cutlass-mpeg2/fuzz/decoder.log`. Still running.
+- Encoder, 8 November 2026, 15:06–15:36. Binary copied from the tree at `d4695bdf`. No encoder source has changed since. Printed seed `0x13526b9`. 118 459 iterations, 84 278 encoders opened, 1 265 473 pictures coded, 219 206 refused pushes, slowest iteration 1.49 s. `test result: ok`.
+- Decoder, 15:20–15:50, binary of `2d925e2c` (the field-pair fix is in it; a 4:4:4 comment and this record came after, and neither changes decoding). Printed seed `0x1352519`. 6 273 828 iterations, the four modes within 1 568–1 569 thousand each, 2 720 941 refusals checked against the clean pictures, 61 571 821 pictures, slowest iteration 53 ms. `test result: ok`.
 
-The 30-minute gate is not passed until those two logs print a finished summary with zero findings.
+An earlier decoder campaign was on the binary from before the field-pair fix and was stopped. It is not evidence for this decoder. Both logs are in `/tmp/cutlass-mpeg2/fuzz/`. A failed assertion, a panic, or an iteration over 20 seconds fails the test, so a passing result is zero findings.
 
 Two bugs the encoder fuzzer found, both fixed and covered by tests that fail without the fix:
 
@@ -189,10 +189,9 @@ The gates are 30 fps encode and 120 fps decode at 1080p, and a decoder resident 
 
 ## Conclusion
 
-Decoder, encoder, ISOBMFF, desktop export, and phone playback are implemented and verified against the gates above, except two items:
+Decoder, encoder, ISOBMFF, desktop export, and phone playback are implemented. The gates that can run on this machine pass, including both 30-minute fuzz campaigns.
 
-- The 30-minute fuzz campaigns are still running. They are not passed.
-- VideoToolbox has no MPEG-2 decoder on this Mac, so the second-decoder comparison is unavailable.
+VideoToolbox has no MPEG-2 decoder on this Mac (`Failed setup for format videotoolbox_vld`), so the second-decoder comparison is unavailable. FFmpeg is the independent oracle for both directions. GStreamer's software MPEG-2 decoder is that same FFmpeg decoder, so it is not a second implementation.
 
 Out of scope, and still out of scope: scalable layers, interlaced and 4:2:2 and 4:4:4 encoding, error concealment, and opening `.ts`, `.mpg`, `.vob`, or raw `.m2v` in the app. Those containers have no Cutlass crate yet.
 

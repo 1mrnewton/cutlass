@@ -178,16 +178,15 @@ impl PictureRate {
     pub(crate) fn quant(&mut self, index: usize, spent: f64) -> u32 {
         let fullness = self.start + spent - self.target * index as f64 / self.macroblocks;
         let base = (fullness * 31.0 / self.reaction).max(1.0);
-        let code = (base.round() as i32 + self.offset).clamp(1, 31);
+        let code = code(base.round() + f64::from(self.offset));
         self.quant_sum += f64::from(code);
         self.quant_count += 1.0;
-        code as u32
+        code
     }
 
     /// The quantiser the first macroblock would get, for the search weight.
     pub(crate) fn base_quant(&self) -> u32 {
-        let base = (self.start * 31.0 / self.reaction).round() as i32 + self.offset;
-        base.clamp(1, 31) as u32
+        code((self.start * 31.0 / self.reaction).round() + f64::from(self.offset))
     }
 
     #[cfg(test)]
@@ -200,6 +199,15 @@ impl PictureRate {
         self.quant_sum = 0.0;
         self.quant_count = 0.0;
     }
+}
+
+/// A quantiser code, 1 to 31, for any `value`: one too large for an
+/// integer is 31, and one that is not a number is 31 too.
+fn code(value: f64) -> u32 {
+    if value.is_nan() {
+        return 31;
+    }
+    value.clamp(1.0, 31.0) as u32
 }
 
 #[cfg(test)]
@@ -237,6 +245,23 @@ mod tests {
         assert!(picture.quant(99, 0.0) < early);
         picture.offset = 31;
         assert_eq!(picture.quant(99, 0.0), 31);
+    }
+
+    #[test]
+    fn a_rate_of_one_bit_a_second_still_gets_the_coarsest_quantiser() {
+        let rate = Rate::new(RateConfig {
+            bitrate: 1.0,
+            peak: 2.0,
+            vbv_bits: 16_384.0,
+            frame_rate: 25.0,
+            constant: false,
+        });
+        let mut picture = rate.begin(PICTURE_I, 100);
+        picture.offset = 31;
+        assert_eq!(picture.base_quant(), 31);
+        assert_eq!(picture.quant(50, 1e300), 31);
+        assert_eq!(code(f64::NAN), 31);
+        assert_eq!(code(-5.0), 1);
     }
 
     #[test]

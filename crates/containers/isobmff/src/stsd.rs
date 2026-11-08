@@ -104,8 +104,16 @@ fn parse_visual(
     let codec = map_codec(fourcc, configured.object_type);
     // A ProRes entry has no configuration box. Its code names the profile,
     // which sets the decoder's output depth, so it rides as the extradata.
+    // A QuickTime Motion JPEG code names its framing, and `fiel` the stored
+    // field order, so both ride there too.
     let extradata = if codec == CodecId::ProRes && configured.extradata.is_empty() {
         fourcc.to_vec()
+    } else if codec == CodecId::Mjpeg && fourcc != *b"mp4v" && configured.extradata.is_empty() {
+        let mut extradata = fourcc.to_vec();
+        if let Some(fiel) = configured.fiel {
+            extradata.extend_from_slice(&fiel);
+        }
+        extradata
     } else {
         configured.extradata
     };
@@ -225,6 +233,8 @@ struct Configured {
     chan: Option<Vec<u8>>,
     color: Option<ColorTags>,
     object_type: Option<u8>,
+    /// A `fiel` box: the field count, then the stored order.
+    fiel: Option<[u8; 2]>,
 }
 
 fn configuration(data: &[u8], budget: &mut u32, depth: u32) -> Result<Configured, Error> {
@@ -232,6 +242,7 @@ fn configuration(data: &[u8], budget: &mut u32, depth: u32) -> Result<Configured
     let mut color = None;
     let mut object_type = None;
     let mut chan = None;
+    let mut fiel = None;
     let boxes = parse::atoms(data, 0, budget)?;
     for atom in boxes {
         match &atom.kind {
@@ -260,6 +271,11 @@ fn configuration(data: &[u8], budget: &mut u32, depth: u32) -> Result<Configured
             }
             b"colr" => color = color.or(parse_colr(atom.payload)),
             b"chan" => chan = Some(atom.payload.to_vec()),
+            b"fiel" => {
+                if let [count, order, ..] = *atom.payload {
+                    fiel = Some([count, order]);
+                }
+            }
             _ => {}
         }
     }
@@ -268,6 +284,7 @@ fn configuration(data: &[u8], budget: &mut u32, depth: u32) -> Result<Configured
         chan,
         color,
         object_type,
+        fiel,
     })
 }
 
@@ -449,7 +466,10 @@ fn map_codec(fourcc: [u8; 4], oti: Option<u8>) -> CodecId {
         b"av01" => CodecId::Av1,
         b"vp08" => CodecId::Vp8,
         b"vp09" => CodecId::Vp9,
-        b"mp4v" => CodecId::Mpeg4,
+        b"mp4v" => match oti {
+            Some(0x6C) => CodecId::Mjpeg,
+            _ => CodecId::Mpeg4,
+        },
         b"mp2v" => CodecId::Mpeg2,
         b"jpeg" | b"mjpa" | b"mjpb" => CodecId::Mjpeg,
         b"apch" | b"apcn" | b"apcs" | b"apco" | b"ap4h" | b"ap4x" => CodecId::ProRes,
@@ -521,5 +541,66 @@ fn read_u16(bytes: &[u8]) -> u16 {
     match bytes {
         [a, b, ..] => u16::from_be_bytes([*a, *b]),
         _ => 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_stsd;
+    use crate::legacy::{CodecId, MediaKind};
+
+    fn boxed(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+        let mut out = u32::try_from(payload.len() + 8)
+            .unwrap()
+            .to_be_bytes()
+            .to_vec();
+        out.extend_from_slice(kind);
+        out.extend_from_slice(payload);
+        out
+    }
+
+    fn visual(code: &[u8; 4], children: &[u8]) -> (CodecId, Vec<u8>) {
+        let mut entry = vec![0u8; 78];
+        entry[7] = 1;
+        entry[24..26].copy_from_slice(&720u16.to_be_bytes());
+        entry[26..28].copy_from_slice(&486u16.to_be_bytes());
+        entry.extend_from_slice(children);
+        let mut stsd = vec![0, 0, 0, 0, 0, 0, 0, 1];
+        stsd.extend(boxed(code, &entry));
+        let mut budget = 64;
+        let mut entries = parse_stsd(&stsd, *b"vide", &mut budget, 0).unwrap();
+        let desc = entries.remove(0);
+        assert!(matches!(desc.kind, MediaKind::Video(video) if video.height == 486));
+        (desc.codec, desc.extradata)
+    }
+
+    #[test]
+    fn a_motion_jpeg_entry_carries_its_code_and_field_order() {
+        assert_eq!(visual(b"jpeg", &[]), (CodecId::Mjpeg, b"jpeg".to_vec()));
+        let fiel = boxed(b"fiel", &[2, 14]);
+        assert_eq!(
+            visual(b"mjpa", &fiel),
+            (CodecId::Mjpeg, b"mjpa\x02\x0e".to_vec())
+        );
+        assert_eq!(
+            visual(b"mjpb", &boxed(b"fiel", &[1, 0])),
+            (CodecId::Mjpeg, b"mjpb\x01\x00".to_vec())
+        );
+        // A `fiel` box too short to name an order adds nothing.
+        assert_eq!(
+            visual(b"jpeg", &boxed(b"fiel", &[2])),
+            (CodecId::Mjpeg, b"jpeg".to_vec())
+        );
+    }
+
+    #[test]
+    fn an_mp4v_entry_is_motion_jpeg_only_for_object_type_0x6c() {
+        let esds = |oti: u8| {
+            let mut payload = vec![0, 0, 0, 0, 3, 18, 0, 1, 0, 4, 13, oti, 0x11];
+            payload.extend([0; 11]);
+            boxed(b"esds", &payload)
+        };
+        assert_eq!(visual(b"mp4v", &esds(0x6C)), (CodecId::Mjpeg, Vec::new()));
+        assert_eq!(visual(b"mp4v", &esds(0x20)).0, CodecId::Mpeg4);
     }
 }

@@ -1887,14 +1887,14 @@ impl Shell {
             .is_some_and(|path| !path.is_empty())
     }
 
-    /// Mark in at the selected clip's start.
+    /// Mark in at the selected clips' start.
     pub fn mark_clip_in(&mut self) -> Result<(), ShellError> {
         let start = self.selected_span()?.0;
         self.marks.set_in(start);
         Ok(())
     }
 
-    /// Mark out at the selected clip's end.
+    /// Mark out at the selected clips' end.
     pub fn mark_clip_out(&mut self) -> Result<(), ShellError> {
         let (start, duration) = self.selected_span()?;
         self.marks
@@ -1902,11 +1902,23 @@ impl Shell {
         Ok(())
     }
 
+    /// The span the selected clips cover together: the earliest start, and
+    /// the length up to the latest end.
     fn selected_span(&self) -> Result<(Micros, Micros), ShellError> {
-        let segment = self
-            .selected_segment()
-            .ok_or_else(|| ShellError::Unavailable("nothing is selected".to_owned()))?;
-        Ok((segment.target.start, segment.target.duration))
+        let nothing = || ShellError::Unavailable("nothing is selected".to_owned());
+        let draft = self.draft().ok_or_else(nothing)?;
+        let (start, end) = draft
+            .tracks
+            .iter()
+            .flat_map(|track| &track.segments)
+            .filter(|segment| self.selection.contains(&segment.id))
+            .map(|segment| {
+                let start = segment.target.start.0;
+                (start, start.saturating_add(segment.target.duration.0))
+            })
+            .reduce(|(start, end), (from, to)| (start.min(from), end.max(to)))
+            .ok_or_else(nothing)?;
+        Ok((Micros(start), Micros(end - start)))
     }
 
     /// Show a card's file in the system's file manager.
@@ -11642,6 +11654,13 @@ mod tests {
         desktop.mark_clip_in().unwrap();
         desktop.mark_clip_out().unwrap();
         assert_eq!(desktop.marks().mark_in, Some(Micros(1_000_000)));
+        assert_eq!(desktop.marks().mark_out, Some(Micros(2_000_000)));
+        // Two clips picked: the range runs from the first's start to the
+        // last's end.
+        desktop.toggle_selected(SegmentId::new("left"));
+        desktop.mark_clip_in().unwrap();
+        desktop.mark_clip_out().unwrap();
+        assert_eq!(desktop.marks().mark_in, Some(Micros(0)));
         assert_eq!(desktop.marks().mark_out, Some(Micros(2_000_000)));
         desktop.select(None);
         assert!(desktop.toggle_active().is_err());

@@ -5703,6 +5703,12 @@ fn paint_clip_menu(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
         shell.close_clip_menu();
         return;
     };
+    // Two or more clips picked: the menu of rows that act on all of them.
+    let entries = if shell.selection().len() > 1 {
+        crate::menu::MULTI
+    } else {
+        crate::menu::clip_entries(&kind)
+    };
     let enabled = |id: &str| match id {
         "edit-crop" => shell.crop_enabled(),
         "split-scenes" => shell.split_scenes_enabled(),
@@ -5718,7 +5724,7 @@ fn paint_clip_menu(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
         ui.ctx(),
         ui.scope_id().with("clip-menu"),
         Pos2::new(menu.x, menu.y),
-        crate::menu::clip_entries(&kind),
+        entries,
         &enabled,
     );
     if let Some(item) = shown.picked {

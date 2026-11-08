@@ -278,6 +278,30 @@ const COMPOSITION: &[Entry] = &[
 
 const OTHER: &[Entry] = &[COPY, CUT, DELETE, SEP, DEACTIVATE, REPLACE];
 
+/// The menu for two or more selected clips: only rows that act on every
+/// one of them. Range spans from the first clip's start to the last one's
+/// end.
+pub const MULTI: &[Entry] = &[
+    COPY,
+    CUT,
+    DELETE,
+    SEP,
+    done("compound", "Create compound clip", "⌥G"),
+    todo("paste-attributes", "Paste attributes", ""),
+    SEP,
+    done("deactivate", "Deactivate clips", "V"),
+    done("export", "Export selected clips", ""),
+    SEP,
+    sub(
+        "range",
+        "Range",
+        &[
+            done("range-in", "Set in", ""),
+            done("range-out", "Set out", ""),
+        ],
+    ),
+];
+
 /// The menu for a clip on a track of `kind`.
 #[must_use]
 pub fn clip_entries(kind: &TrackType) -> &'static [Entry] {
@@ -965,6 +989,23 @@ mod tests {
         for name in ["keyCommand", "keyShift", "keyOption", "keyBackspace"] {
             assert!(crate::icons::require(name).is_ok(), "{name}");
         }
+    }
+
+    #[test]
+    fn the_multi_select_menu_holds_only_rows_for_every_clip() {
+        assert_eq!(
+            ids(MULTI),
+            [
+                "copy",
+                "cut",
+                "delete",
+                "compound",
+                "paste-attributes",
+                "deactivate",
+                "export",
+                "range",
+            ]
+        );
     }
 
     #[test]

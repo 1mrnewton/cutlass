@@ -112,6 +112,8 @@ pub(crate) struct Drc {
 pub(crate) struct Substream {
     delay: [[f32; COEFS]; MAX_CODED],
     seed: u32,
+    /// Recent output of each full-band channel, oldest first.
+    tpnp: [Vec<f32>; MAX_FBW],
 }
 
 impl Substream {
@@ -119,6 +121,7 @@ impl Substream {
         Self {
             delay: [[0.0; COEFS]; MAX_CODED],
             seed: 0x1234_5678,
+            tpnp: std::array::from_fn(|_| Vec::new()),
         }
     }
 }
@@ -1384,6 +1387,19 @@ pub(crate) fn decode(
     }
     substream.delay = delay;
     substream.seed = state.noise.0;
+    for ch in 0..bsi.nfchans {
+        let start = ch * samples;
+        let end = start + samples;
+        if let Some(transient) = fi.transients[ch] {
+            crate::tpnp::apply(&mut pcm[start..end], &substream.tpnp[ch], transient);
+        }
+        let history = &mut substream.tpnp[ch];
+        history.extend_from_slice(&pcm[start..end]);
+        let overflow = history.len().saturating_sub(crate::tpnp::HISTORY);
+        if overflow > 0 {
+            history.drain(..overflow);
+        }
+    }
     Ok(Decoded {
         channels: coded,
         samples,

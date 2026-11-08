@@ -16,6 +16,7 @@ mod header;
 mod mdct;
 mod spx;
 mod tables;
+mod tpnp;
 
 pub use decode::{Ac3Decoder, Downmix, Extension, Options};
 pub use encode::{

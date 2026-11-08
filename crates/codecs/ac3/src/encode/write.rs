@@ -69,6 +69,8 @@ pub(crate) struct Frame {
     pub chanmap: Option<u16>,
     /// Heavy-compression word for this frame. `None` omits `compr`.
     pub compr: Option<u8>,
+    /// Channel 0 transient pre-noise parameters. `None` leaves the tool off.
+    pub transient: Option<crate::frame::Transient>,
 }
 
 /// Bit positions a syncframe written without mantissas reaches: the end
@@ -92,7 +94,14 @@ pub(crate) fn frame(
     let mut w = BitWriter::with_capacity(frame.bytes);
     if shape.eac3 {
         eac3_header(&mut w, shape, meta, frame);
-        audfrm(&mut w, shape, blocks, frame.snr, frame.chanmap.is_none());
+        audfrm(
+            &mut w,
+            shape,
+            blocks,
+            frame.snr,
+            frame.chanmap.is_none(),
+            frame.transient,
+        );
     } else {
         ac3_header(&mut w, shape, meta, frame);
     }
@@ -298,7 +307,14 @@ fn numblkscod(blocks: usize) -> u32 {
 }
 
 /// Annex E Table E1.3.
-fn audfrm(w: &mut BitWriter, shape: &Shape, blocks: &[Block], snr: u16, independent: bool) {
+fn audfrm(
+    w: &mut BitWriter,
+    shape: &Shape,
+    blocks: &[Block],
+    snr: u16,
+    independent: bool,
+    transient: Option<crate::frame::Transient>,
+) {
     let nf = shape.nf;
     let hybrid = blocks
         .first()
@@ -308,7 +324,7 @@ fn audfrm(w: &mut BitWriter, shape: &Shape, blocks: &[Block], snr: u16, independ
         w.flag(hybrid);
     }
     w.put(2, 0); // snroffststr
-    w.flag(false); // transproce
+    w.flag(transient.is_some());
     let flags = FrameFlags::of(shape, blocks);
     w.flag(flags.blkswe);
     w.flag(flags.dithflage);
@@ -364,6 +380,16 @@ fn audfrm(w: &mut BitWriter, shape: &Shape, blocks: &[Block], snr: u16, independ
     }
     w.put(6, u32::from(snr >> 4));
     w.put(4, u32::from(snr & 15));
+    if let Some(transient) = transient {
+        for ch in 0..nf {
+            let on = ch == 0 && transient.location < 1024;
+            w.flag(on);
+            if on {
+                w.put(10, u32::from(transient.location));
+                w.put(8, u32::from(transient.length));
+            }
+        }
+    }
     if shape.blocks > 1 {
         w.flag(false); // blkstrtinfoe
     }

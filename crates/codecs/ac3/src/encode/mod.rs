@@ -7,7 +7,8 @@
 //! 48 kHz. E-AC-3 also writes a 7.1 program as that 5.1 frame plus one
 //! dependent frame for the back pair. It takes any bit rate and 1, 2, 3
 //! or 6 blocks per syncframe. Spectral extension and AHT are written.
-//! Enhanced coupling and transient pre-noise processing are never written.
+//! Enhanced coupling is never written. Transient pre-noise parameters are
+//! not chosen; a test may place them on channel 0.
 //! A block
 //! peaking above half scale sends a dynamic range word that brings it back
 //! to half scale, and the frame sends a heavy-compression word for the
@@ -369,6 +370,10 @@ pub struct Ac3Encoder {
     /// The rate control leaves this empty.
     #[cfg(test)]
     forced_delta: Option<bitalloc::Delta>,
+    /// E-AC-3 transient pre-noise parameters for channel 0. The encoder
+    /// does not choose these.
+    #[cfg(test)]
+    forced_transient: Option<crate::frame::Transient>,
 }
 
 /// Back surrounds carried in the dependent substream of a 7.1 program.
@@ -512,6 +517,8 @@ impl Ac3Encoder {
             cancel: Arc::new(AtomicBool::new(false)),
             #[cfg(test)]
             forced_delta: None,
+            #[cfg(test)]
+            forced_transient: None,
             order,
             config,
             rate: bit_rate,
@@ -586,6 +593,13 @@ impl Ac3Encoder {
     #[cfg(test)]
     fn force_delta(&mut self, delta: bitalloc::Delta) {
         self.forced_delta = Some(delta);
+    }
+
+    /// Write one channel's transient pre-noise parameters on every E-AC-3 frame.
+    #[cfg(test)]
+    pub(crate) fn force_transient(&mut self, location: u16, length: u8) {
+        self.forced_transient =
+            (location < 1024).then_some(crate::frame::Transient { location, length });
     }
 
     /// The configuration in force, with the bit rate and blocks resolved.
@@ -882,6 +896,10 @@ impl Ac3Encoder {
             snr: snr as u16,
             chanmap: self.chanmap,
             compr: heavy,
+            #[cfg(test)]
+            transient: self.forced_transient,
+            #[cfg(not(test))]
+            transient: None,
         };
         let (writer, layout) = write::frame(&shape, &self.meta, &frame, &self.blocks, &skip, true);
         if layout.total + TAIL_BITS > size.bytes * 8 {
@@ -941,6 +959,10 @@ impl Ac3Encoder {
             snr: 0,
             chanmap: self.chanmap,
             compr: heavy,
+            #[cfg(test)]
+            transient: self.forced_transient,
+            #[cfg(not(test))]
+            transient: None,
         };
         let (_, layout) = write::frame(
             shape,
@@ -1210,6 +1232,7 @@ fn coarse_side(shape: &Shape, meta: &Meta, chanmap: Option<u16>) -> Layout {
         snr: 0,
         chanmap,
         compr: None,
+        transient: None,
     };
     write::frame(shape, meta, &frame, &blocks, &[0; MAX_BLOCKS], false).1
 }
@@ -1437,6 +1460,81 @@ mod tests {
             .sum();
         let quality = 10.0 * (signal / noise.max(1e-20)).log10();
         assert!(quality > 60.0, "delta allocation {quality:.1} dB");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_forced_transient_window_is_copied_into_the_frame() {
+        let rate = 48_000u32;
+        let layout = ChannelLayout::mono();
+        let mut spec = CodecParams::audio(CodecId::Eac3, rate, layout.clone());
+        spec.bitrate = 96_000;
+        let mut encoder = Ac3Encoder::open(&spec).expect("encoder");
+        encoder.force_transient(256, 64);
+        let frames = rate as usize;
+        let samples: Vec<f32> = (0..frames)
+            .map(|index| {
+                let t = index as f32 / rate as f32;
+                (t * 440.0 * std::f32::consts::TAU).sin() * 0.25
+            })
+            .collect();
+        let pcm = Pcm::from_f32(rate, layout.clone(), samples).expect("pcm");
+        let mut packets = encoder.push(&AudioInput { pcm }).expect("push");
+        packets.extend(encoder.drain().expect("drain"));
+        let mut decoder =
+            Ac3Decoder::open(&CodecParams::audio(CodecId::Eac3, rate, layout)).expect("decoder");
+        let mut ours = Vec::new();
+        for packet in &packets {
+            let decoded =
+                DecodedPacket::audio(packet.data.clone(), packet.pts, packet.duration, rate);
+            for output in decoder.push(&decoded).expect("decode") {
+                if let cutlass_decode::Output::Audio(audio) = output {
+                    ours.extend_from_slice(audio.pcm.as_f32().expect("f32"));
+                }
+            }
+        }
+        for output in decoder.drain().expect("drain") {
+            if let cutlass_decode::Output::Audio(audio) = output {
+                ours.extend_from_slice(audio.pcm.as_f32().expect("f32"));
+            }
+        }
+        assert!(decoder.tools().transient_channels > 0);
+        let base = 2 * 1536;
+        let source = &ours[base + 256..base + 448];
+        let copied = &ours[base + 704..base + 896];
+        let err = source
+            .iter()
+            .zip(copied)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        assert!(err < 1.0e-6, "copied window {err}");
+        let ffmpeg = std::process::Command::new("ffmpeg")
+            .arg("-version")
+            .output();
+        if ffmpeg.is_err() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("cutlass-ac3-tpnp-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let input = dir.join("in.eac3");
+        let output = dir.join("out.f32");
+        let bytes: Vec<u8> = packets
+            .iter()
+            .flat_map(|packet| packet.data.iter().copied())
+            .collect();
+        std::fs::write(&input, &bytes).expect("write");
+        let ffmpeg_out = std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-y", "-drc_scale", "0", "-f", "eac3", "-i"])
+            .arg(&input)
+            .args(["-f", "f32le", "-c:a", "pcm_f32le"])
+            .arg(&output)
+            .output()
+            .expect("ffmpeg");
+        assert!(
+            ffmpeg_out.status.success(),
+            "ffmpeg rejected the transient parameters: {}",
+            String::from_utf8_lossy(&ffmpeg_out.stderr)
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

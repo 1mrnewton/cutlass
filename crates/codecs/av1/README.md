@@ -40,6 +40,20 @@ through FFmpeg, covering the tools above, matches libdav1d byte for byte
 (`examples/av1fuzz.rs`) finds no panics; corrupt input returns a
 `CodecError` and leaves the reference frames unchanged.
 
+Fixtures: `fixtures/` holds 177 files, 86 streams (each `.ivf` is one
+stream; `name_N.obu` files are one stream, a packet per file, in `N`
+order). `tests/fixtures.rs` decodes every stream through `Av1Decoder` and
+compares each shown frame with the libdav1d digest committed in
+`tests/libdav1d-digests.txt`, so CI checks them without FFmpeg. `wide.ivf`
+(16448x64, past level 6.3) is refused instead, as libdav1d refuses it. To
+rewrite the digests from the local `ffmpeg` with libdav1d (which runs
+`ffmpeg -threads 1 [-f obu] -c:v libdav1d -threads 1 -i STREAM -noautoscale
+-fps_mode passthrough -f rawvideo -` on each stream):
+
+```
+cargo test --release -p cutlass-av1 --test fixtures -- --ignored write_libdav1d_digests
+```
+
 With several threads (`Av1Core::threads`) parsing, reconstruction and the
 post filters run in a pipeline. It takes about 1.9x the time of libdav1d
 single threaded and 1.6x with 4 threads; libdav1d uses hand-written

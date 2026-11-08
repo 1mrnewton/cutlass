@@ -4,4 +4,5 @@
 #![forbid(unsafe_code)]
 
 mod bits;
+mod dct;
 mod tables;

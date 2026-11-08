@@ -58,6 +58,7 @@ mod hear;
 mod inspector;
 mod listen;
 mod proxy;
+mod relight;
 mod render;
 mod select;
 mod shape;

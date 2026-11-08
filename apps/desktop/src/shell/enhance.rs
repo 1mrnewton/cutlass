@@ -37,7 +37,7 @@ const INTERPOLATE_FOLDER: &str = "interpolate";
 
 /// The folder holding a model: the one in `Models`, or in a debug build
 /// the checkout's `local-files` copy when `Models` has none.
-fn model_dir(folder: &str, weights: &str) -> PathBuf {
+pub(super) fn model_dir(folder: &str, weights: &str) -> PathBuf {
     let installed = Shell::home().models().join(folder);
     if installed.join(weights).is_file() {
         return installed;

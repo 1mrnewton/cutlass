@@ -529,6 +529,225 @@ mod tests {
         }
     }
 
+    /// A real recording is imported, exported as AC-3 and E-AC-3, then
+    /// reopened and seeked. The file's edit skips the encoder delay, so
+    /// playback lines up with the source.
+    #[test]
+    fn a_real_recording_exports_as_ac3_and_eac3_and_plays_back() {
+        use cutlass_encode::EncodeFactory;
+        use cutlass_eval::NoFonts;
+        use cutlass_export::{AudioExport, ExportRequest, MovieSources, write_sound};
+        use cutlass_model::{
+            Draft, FrameRate, MaterialAudio, MaterialId, Micros, Segment, TimeRange, Track,
+            TrackType,
+        };
+
+        let Some(root) = local_media() else {
+            return;
+        };
+        let name = "06 First Person Shooter (feat. J. Cole).m4a";
+        let source_path = root.join(name);
+        if !source_path.is_file() {
+            if std::env::var_os("AC3_REQUIRE_ORACLES").is_some() {
+                panic!("missing {}", source_path.display());
+            }
+            return;
+        }
+        let source_at = |at| {
+            installed_readers()
+                .open(&source_path)
+                .expect("import")
+                .audio_from(Micros(at), 16_384)
+                .expect("source")
+        };
+        let start = source_at(40_000_000);
+        let later = source_at(41_000_000);
+        assert_eq!(start.rate, 48_000);
+        assert!(
+            rms(start.as_f32().expect("f32")) > 0.01,
+            "the imported window is silent"
+        );
+
+        let mut draft = Draft::empty("song");
+        draft.duration = Micros(2_000_000);
+        draft.materials.audios.push(MaterialAudio {
+            id: MaterialId::new("song"),
+            path: name.to_owned(),
+            duration: Micros(42_000_000),
+            ..MaterialAudio::default()
+        });
+        let mut track = Track::main("song");
+        track.kind = TrackType::Audio;
+        let mut segment = Segment::new("song", "song", TimeRange::new(0, 2_000_000));
+        segment.source_range = Some(TimeRange::new(40_000_000, 2_000_000));
+        track.segments.push(segment);
+        draft.tracks.push(track);
+
+        for codec in [CodecId::Ac3, CodecId::Eac3] {
+            let bitrate = if codec == CodecId::Ac3 {
+                192_000
+            } else {
+                128_000
+            };
+            let dir =
+                std::env::temp_dir().join(format!("cutlass-real-{codec:?}-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).expect("dir");
+            let path = dir.join("cut.m4a");
+            let mut encoders = EncodeFactory::new();
+            cutlass_ac3::register_encoders(&mut encoders);
+            let readers = installed_readers();
+            let sources = MovieSources {
+                draft: &draft,
+                root: Some(&root),
+                readers: &readers,
+                fonts: &NoFonts,
+                renderer: None,
+                encoders: &encoders,
+            };
+            let request = ExportRequest {
+                range: TimeRange::new(0, 2_000_000),
+                short_side: 0,
+                codec,
+                bitrate: 0,
+                frame_rate: FrameRate::FPS_30,
+                container: cutlass_codec::ContainerId::Isobmff,
+                audio: Some(AudioExport {
+                    codec,
+                    bitrate,
+                    sample_rate: 48_000,
+                    channels: 2,
+                    limiter: 0,
+                }),
+                sidecar: None,
+                late_by: 0,
+                constant_rate: false,
+                prores: cutlass_export::ProresProfile::Standard,
+            };
+            write_sound(&sources, &request, &path, &mut |_, _| true).expect("export");
+
+            let file = cutlass_isobmff::IsoBmffFile::open(
+                std::fs::File::open(&path).expect("open export"),
+            )
+            .expect("movie");
+            let edit = cutlass_container::Demux::streams(&file)[0].edits()[0];
+            assert_eq!(
+                edit.media_time(),
+                Some(i64::from(cutlass_ac3::ENCODER_DELAY)),
+                "{codec:?}"
+            );
+
+            let played = installed_readers()
+                .open(&path)
+                .expect("playback")
+                .audio_from(Micros(0), 16_384)
+                .expect("play");
+            let seeked = installed_readers()
+                .open(&path)
+                .expect("reopen")
+                .audio_from(Micros(1_000_000), 16_384)
+                .expect("seek");
+            installed_readers().open(&path).expect("reopen");
+            std::fs::remove_dir_all(&dir).expect("remove");
+            assert_aligned(&start, &played, codec);
+            assert_aligned(&later, &seeked, codec);
+        }
+    }
+
+    fn local_media() -> Option<std::path::PathBuf> {
+        let path =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../local-files");
+        if path.is_dir() {
+            return Some(path);
+        }
+        if std::env::var_os("AC3_REQUIRE_ORACLES").is_some() {
+            panic!("missing {}", path.display());
+        }
+        None
+    }
+
+    fn rms(samples: &[f32]) -> f64 {
+        let energy: f64 = samples
+            .iter()
+            .map(|sample| f64::from(*sample).powi(2))
+            .sum();
+        (energy / f64::from(u32::try_from(samples.len()).unwrap_or(1).max(1))).sqrt()
+    }
+
+    fn left(pcm: &cutlass_codec::access::Pcm) -> Vec<f32> {
+        let channels = pcm.layout.len().max(1);
+        pcm.as_f32()
+            .expect("f32")
+            .iter()
+            .step_by(channels)
+            .copied()
+            .collect()
+    }
+
+    fn assert_aligned(
+        source: &cutlass_codec::access::Pcm,
+        played: &cutlass_codec::access::Pcm,
+        codec: CodecId,
+    ) {
+        assert_eq!(
+            (played.rate, played.layout.len()),
+            (source.rate, 2),
+            "{codec:?}"
+        );
+        let reference = left(source);
+        let got = left(played);
+        let mut best_lag = 0;
+        let mut best = f64::MIN;
+        for lag in -8..=8 {
+            let score = lagged_snr(&reference, &got, lag);
+            if score > best {
+                best = score;
+                best_lag = lag;
+            }
+        }
+        let at_zero = lagged_snr(&reference, &got, 0);
+        assert_eq!(
+            best_lag, 0,
+            "{codec:?} lines up at lag {best_lag} ({best:.1} dB), not at 0 ({at_zero:.1} dB)"
+        );
+        assert!(at_zero > 15.0, "{codec:?} {at_zero:.1} dB");
+    }
+
+    /// A positive `lag` drops the start of `got`: the playback is that many
+    /// samples late.
+    fn lagged_snr(reference: &[f32], got: &[f32], lag: i32) -> f64 {
+        let (reference, got) = aligned(reference, got, lag);
+        let n = reference.len().min(got.len());
+        if n == 0 {
+            return f64::MIN;
+        }
+        let (mut signal, mut noise) = (0.0, 0.0);
+        for index in 0..n {
+            let sample = f64::from(reference[index]);
+            let error = sample - f64::from(got[index]);
+            signal += sample * sample;
+            noise += error * error;
+        }
+        if noise == 0.0 {
+            return 200.0;
+        }
+        10.0 * (signal / noise).log10()
+    }
+
+    fn aligned<'a>(reference: &'a [f32], got: &'a [f32], lag: i32) -> (&'a [f32], &'a [f32]) {
+        let shift = usize::try_from(lag.unsigned_abs()).unwrap_or(0);
+        if lag > 0 {
+            let got = got.get(shift..).unwrap_or(&[]);
+            let reference = reference
+                .get(..reference.len().saturating_sub(shift))
+                .unwrap_or(&[]);
+            (reference, got)
+        } else {
+            let reference = reference.get(shift..).unwrap_or(&[]);
+            let got = got.get(..got.len().saturating_sub(shift)).unwrap_or(&[]);
+            (reference, got)
+        }
+    }
+
     /// How far, in dB, the left channel's energy at `freq` sits above the
     /// energy an octave up.
     fn tone_margin(interleaved: &[f32], rate: u32, freq: f64) -> f64 {

@@ -955,6 +955,41 @@ fn a_steady_tone_uses_the_hybrid_transform() {
     assert!(quality > 50.0, "hybrid transform {quality:.1} dB");
 }
 
+/// A steady mix uses a gain on the small hybrid-transform coefficients.
+#[test]
+fn gain_adaptive_quantization_matches_ffmpeg() {
+    let Some(ffmpeg) = oracle("ffmpeg", "-version") else {
+        return;
+    };
+    let rate = 48_000u32;
+    let channels = [C];
+    let pcm: Vec<f32> = (0..rate as usize)
+        .map(|n| {
+            let t = n as f64 / f64::from(rate);
+            (0.2 * (2.0 * PI * 440.0 * t).sin()
+                + 0.12 * (2.0 * PI * 1240.0 * t).sin()
+                + 0.08 * (2.0 * PI * 3100.0 * t).sin()) as f32
+        })
+        .collect();
+    let packets = encode(config(Format::Eac3, rate, &channels, 96_000), &pcm);
+    let ours = decode(CodecId::Eac3, &packets);
+    assert!(
+        ours.decoder.tools().aht_channels > 0,
+        "the mix did not use the hybrid transform"
+    );
+    assert!(
+        ours.decoder.tools().gaq_channels > 0,
+        "the mix did not use a gain"
+    );
+    let theirs = ffmpeg_decode(&ffmpeg, &stream(&packets), &["-f", "eac3"]);
+    let skip = ENCODER_DELAY as usize;
+    let b: Vec<f32> = theirs.into_iter().skip(skip).collect();
+    let n = ours.pcm.len().min(b.len());
+    let margin = 1536.min(n / 4);
+    let quality = snr(&ours.pcm[margin..n - margin], &b[margin..n - margin]);
+    assert!(quality > 45.0, "gain adaptive {quality:.1} dB");
+}
+
 /// A low-rate E-AC-3 frame extends the top bins instead of dropping them.
 #[test]
 fn spectral_extension_matches_ffmpeg() {

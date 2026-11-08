@@ -18,7 +18,9 @@
 //! allocation is written only when a block carries
 //! segments; the rate control leaves every segment empty. Spectral extension
 //! replaces the top bins of a low-rate E-AC-3 frame. A steady six-block
-//! frame with one exponent set uses the adaptive hybrid transform.
+//! frame with one exponent set uses the adaptive hybrid transform, and a
+//! gain on the small coefficients when that gain is shorter than a fixed
+//! mantissa.
 
 mod analysis;
 mod plan;
@@ -1124,7 +1126,7 @@ impl Search<'_> {
             }
             mantissas[blk] = write::mantissa_bits(shape, &blocks[blk]);
             if blk == 0 {
-                mantissas[blk] += write::aht_payload_bits(shape, &blocks[0]);
+                mantissas[blk] += write::aht_payload_bits(shape, blocks);
             }
         }
         let budget = self.bytes * 8 - TAIL_BITS;

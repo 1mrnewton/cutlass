@@ -750,12 +750,46 @@ pub(crate) fn mantissa_bits(shape: &Shape, block: &Block) -> usize {
 }
 
 /// AHT mantissa bits, counted on the first block where they are written.
-pub(crate) fn aht_payload_bits(shape: &Shape, block: &Block) -> usize {
+pub(crate) fn aht_payload_bits(shape: &Shape, blocks: &[Block]) -> usize {
+    let Some(block) = blocks.first() else {
+        return 0;
+    };
     block
         .active(shape)
         .filter(|&slot| block.aht[slot])
-        .map(|slot| crate::aht::payload_bits(&block.bap[slot], block.start[slot], block.end[slot]))
+        .map(|slot| {
+            let samples = aht_samples(blocks, slot);
+            crate::aht::payload_bits(
+                &block.bap[slot],
+                &samples,
+                block.start[slot],
+                block.end[slot],
+            )
+        })
         .sum()
+}
+
+/// Six normalized mantissas of one AHT slot, one row per bin.
+fn aht_samples(blocks: &[Block], slot: usize) -> [[f32; 6]; COEFS] {
+    let mut normalized = [[0.0; 6]; COEFS];
+    let Some(first) = blocks.first() else {
+        return normalized;
+    };
+    let end = first.end[slot].min(COEFS);
+    for (bin, row) in normalized
+        .iter_mut()
+        .enumerate()
+        .take(end)
+        .skip(first.start[slot])
+    {
+        let scale = f32::from(first.exps[slot][bin]).exp2();
+        for (frame, sample) in row.iter_mut().enumerate() {
+            if let Some(block) = blocks.get(frame) {
+                *sample = block.coefs[slot][bin] * scale;
+            }
+        }
+    }
+    normalized
 }
 
 /// Symmetric quantizer of `levels` levels for a mantissa in [-1, 1).
@@ -778,15 +812,14 @@ fn write_mantissas(w: &mut BitWriter, shape: &Shape, blocks: &[Block], blk: usiz
     let mut push = |slot: usize| {
         if block.aht[slot] {
             if blk == 0 {
-                let mut normalized = [[0.0f32; 6]; COEFS];
-                let (start, end) = (block.start[slot], block.end[slot]);
-                for (bin, row) in normalized.iter_mut().enumerate().take(end).skip(start) {
-                    let exp = block.exps[slot][bin];
-                    for (frame, source) in blocks.iter().enumerate().take(6) {
-                        row[frame] = source.coefs[slot][bin] * f32::from(exp).exp2();
-                    }
-                }
-                crate::aht::write(w, &block.bap[slot], &normalized, start, end);
+                let normalized = aht_samples(blocks, slot);
+                crate::aht::write(
+                    w,
+                    &block.bap[slot],
+                    &normalized,
+                    block.start[slot],
+                    block.end[slot],
+                );
             }
             return;
         }

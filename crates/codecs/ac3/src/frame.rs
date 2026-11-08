@@ -76,6 +76,8 @@ pub struct Tools {
     /// Channel frames coded with the adaptive hybrid transform, coupling
     /// and LFE included.
     pub aht_channels: u64,
+    /// Of those, channel frames whose mantissas used a gain (`gaqmod` 1 or 2).
+    pub gaq_channels: u64,
     /// Channel frames that carried transient pre-noise data.
     pub transient_channels: u64,
     /// Blocks with delta bit allocation in use on any channel.
@@ -94,6 +96,7 @@ impl Tools {
         self.rematrix_blocks += other.rematrix_blocks;
         self.spx_blocks += other.spx_blocks;
         self.aht_channels += other.aht_channels;
+        self.gaq_channels += other.gaq_channels;
         self.transient_channels += other.transient_channels;
         self.delta_blocks += other.delta_blocks;
     }
@@ -525,6 +528,7 @@ struct State<'a> {
     csnr: Option<u32>,
     pre: [Option<Box<Premantissas>>; SLOTS],
     pre_zero: [[bool; 256]; SLOTS],
+    gaq_channels: u64,
     noise: Noise,
 }
 
@@ -564,6 +568,7 @@ impl<'a> State<'a> {
             csnr: None,
             pre: Default::default(),
             pre_zero: [[false; 256]; SLOTS],
+            gaq_channels: 0,
             noise: Noise(seed),
         }
     }
@@ -1178,7 +1183,7 @@ impl<'a> State<'a> {
         if self.slots[slot_index].aht {
             if blk == 0 {
                 let pre = self.pre[slot_index].get_or_insert_with(|| Box::new([[0.0; 6]; 256]));
-                aht::read(
+                let mode = aht::read(
                     r,
                     &self.slots[slot_index].bap,
                     start,
@@ -1186,6 +1191,9 @@ impl<'a> State<'a> {
                     pre,
                     &mut self.pre_zero[slot_index],
                 )?;
+                if mode != 0 {
+                    self.gaq_channels += 1;
+                }
             }
             let Some(pre) = self.pre[slot_index].as_ref() else {
                 return Err(malformed(r, "AHT mantissas missing"));
@@ -1334,6 +1342,7 @@ pub(crate) fn decode(
         tools.rematrix_blocks +=
             u64::from(bsi.acmod == 2 && state.rematflg[..state.nrematbd].contains(&true));
         tools.spx_blocks += u64::from(state.spxinu);
+        tools.gaq_channels = state.gaq_channels;
         tools.delta_blocks += u64::from(
             state
                 .active()

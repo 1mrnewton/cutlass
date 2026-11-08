@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "id": "comic",
+  "name": "Comic",
+  "category": "Retro",
+  "passes": [
+    { "block": "posterize", "params": {"levels": 6} },
+    { "block": "grade", "params": {"saturation": 1.3} },
+    { "block": "edges", "params": {"amount": 1} }
+  ]
+}

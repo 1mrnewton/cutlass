@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "id": "impact",
+  "name": "Impact",
+  "category": "Motion",
+  "passes": [
+    { "block": "transform", "params": {"scale": {"keys": [[0, 1.2], [0.25, 1]], "repeat": 1}} },
+    { "block": "zoom_blur", "params": {"amount": {"keys": [[0, 0.3], [0.25, 0]], "repeat": 1}} },
+    { "block": "flash", "params": {"amount": {"keys": [[0, 0.5], [0.1, 0]], "repeat": 1}} }
+  ]
+}

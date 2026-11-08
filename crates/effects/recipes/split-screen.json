@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "id": "split-screen",
+  "name": "Split Screen",
+  "category": "Distort",
+  "passes": [
+    { "block": "tile", "params": {"x": 2, "y": 2} }
+  ]
+}

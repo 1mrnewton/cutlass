@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "id": "sketch",
+  "name": "Sketch",
+  "category": "Retro",
+  "passes": [
+    { "block": "edges", "params": {"only": 1} },
+    { "block": "invert", "params": {"amount": 1} },
+    { "block": "grade", "params": {"saturation": 0, "contrast": 1.3, "brightness": 0.05} }
+  ]
+}

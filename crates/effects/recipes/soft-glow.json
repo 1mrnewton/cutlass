@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "id": "soft-glow",
+  "name": "Soft Glow",
+  "category": "Light",
+  "passes": [
+    { "block": "glow", "params": {"amount": 1, "radius": 0.08, "threshold": 0.4} },
+    { "block": "grade", "params": {"contrast": 0.95, "brightness": 0.02} }
+  ]
+}

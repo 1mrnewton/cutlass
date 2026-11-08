@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "id": "zoom-blur",
+  "name": "Zoom Blur",
+  "category": "Blur",
+  "passes": [
+    { "block": "zoom_blur", "params": {"amount": 0.15} }
+  ]
+}

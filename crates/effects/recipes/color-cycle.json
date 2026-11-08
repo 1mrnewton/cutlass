@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "id": "color-cycle",
+  "name": "Color Cycle",
+  "category": "Light",
+  "passes": [
+    { "block": "hue", "params": {"degrees": {"keys": [[0, -180], [2, 180]], "repeat": 2}} }
+  ]
+}

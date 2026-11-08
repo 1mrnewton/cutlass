@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "id": "pinch",
+  "name": "Pinch",
+  "category": "Distort",
+  "passes": [
+    { "block": "bulge", "params": {"amount": -0.6, "radius": 0.6} }
+  ]
+}

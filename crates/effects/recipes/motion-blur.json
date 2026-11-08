@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "id": "motion-blur",
+  "name": "Motion Blur",
+  "category": "Blur",
+  "passes": [
+    { "block": "motion_blur", "params": {"length": 0.04} }
+  ]
+}

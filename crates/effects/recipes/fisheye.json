@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "id": "fisheye",
+  "name": "Fisheye",
+  "category": "Distort",
+  "passes": [
+    { "block": "bulge", "params": {"amount": 0.5, "radius": 0.9} }
+  ]
+}

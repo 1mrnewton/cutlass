@@ -2435,16 +2435,17 @@ mod tests {
             "{}",
             mae(&pictures[2][..luma], &y2)
         );
-        let Some(ffmpeg) = ffmpeg_bin() else {
-            eprintln!(
-                "ffmpeg is not installed; the bidirectional picture was not checked independently"
-            );
-            return;
-        };
         let mut ours = Vec::new();
         for picture in &pictures {
             ours.extend_from_slice(picture);
         }
+        matches_recorded_ffmpeg(&bytes, &ours, BIDIRECTIONAL);
+        let Some(ffmpeg) = ffmpeg_bin() else {
+            eprintln!(
+                "ffmpeg is not installed; the bidirectional picture was checked against its recorded FFmpeg decode only"
+            );
+            return;
+        };
         ffmpeg_matches(&ffmpeg, &bytes, &ours, "bidirectional");
     }
 
@@ -2509,16 +2510,17 @@ mod tests {
             "{}",
             mae(&pictures[2][..luma], &y2)
         );
-        let Some(ffmpeg) = ffmpeg_bin() else {
-            eprintln!(
-                "ffmpeg is not installed; the quarter-sample picture was not checked independently"
-            );
-            return;
-        };
         let mut ours = Vec::new();
         for picture in &pictures {
             ours.extend_from_slice(picture);
         }
+        matches_recorded_ffmpeg(&bytes, &ours, QUARTER);
+        let Some(ffmpeg) = ffmpeg_bin() else {
+            eprintln!(
+                "ffmpeg is not installed; the quarter-sample picture was checked against its recorded FFmpeg decode only"
+            );
+            return;
+        };
         ffmpeg_matches(&ffmpeg, &bytes, &ours, "quarter");
     }
 
@@ -2715,6 +2717,46 @@ mod tests {
         let theirs = std::fs::read(&yuv).expect("yuv");
         assert_eq!(ours, theirs);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// FNV-1a over 64 bits: a digest that needs no dependency.
+    fn fnv(bytes: &[u8]) -> u64 {
+        bytes.iter().fold(0xCBF2_9CE4_8422_2325, |hash, &b| {
+            (hash ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01B3)
+        })
+    }
+
+    /// A stream this encoder wrote and FFmpeg 8.1.1 decoded, recorded so the
+    /// check runs where FFmpeg is absent, as in CI: the stream's digest and
+    /// the digest of FFmpeg's decode of it (`ffmpeg_matches`' options).
+    struct Recorded {
+        name: &'static str,
+        stream: u64,
+        ffmpeg: u64,
+    }
+
+    const BIDIRECTIONAL: Recorded = Recorded {
+        name: "bidirectional",
+        stream: 0x673D570BC6036BDC,
+        ffmpeg: 0x3236BB53D34EE319,
+    };
+
+    const QUARTER: Recorded = Recorded {
+        name: "quarter",
+        stream: 0xD0AB417798323B92,
+        ffmpeg: 0x21A9D8267662520A,
+    };
+
+    /// The encoder still writes the stream FFmpeg decoded, and this decoder
+    /// gives what FFmpeg gave for it. When FFmpeg is present,
+    /// `ffmpeg_matches` checks the recorded decode again.
+    fn matches_recorded_ffmpeg(bytes: &[u8], ours: &[u8], recorded: Recorded) {
+        assert_eq!(
+            (fnv(bytes), fnv(ours)),
+            (recorded.stream, recorded.ffmpeg),
+            "{}: the stream or its decode moved from the recorded FFmpeg check",
+            recorded.name
+        );
     }
 
     /// FFmpeg, the independent decoder. A test without it skips, unless

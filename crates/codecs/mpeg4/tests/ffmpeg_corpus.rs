@@ -1,9 +1,10 @@
 //! Bit-exact decodes against FFmpeg's reference output.
 //!
 //! The corpus lives beside the checkouts, at `../mpeg4-part2-corpus` from
-//! the workspace root (or `MPEG4_CORPUS`). Each `gen/*.m4v` or `*.h263`
-//! elementary stream has a `*.yuv` FFmpeg 8.1.1 decode beside it, made
-//! with `-cpuflags 0 -flags +bitexact -idct simple -fps_mode passthrough`.
+//! the workspace root (or `MPEG4_CORPUS`). Each `gen/` (FFmpeg-encoded)
+//! and `es/` (third-party) `*.m4v` or `*.h263` elementary stream has a
+//! `*.yuv` FFmpeg 8.1.1 decode beside it, made with `-threads 1 -cpuflags 0
+//! -flags +bitexact -idct simple -fps_mode passthrough -noautoscale`.
 //! The test skips when the folder is missing, as it is in CI.
 
 use std::path::{Path, PathBuf};
@@ -228,4 +229,37 @@ fn decodes_the_ffmpeg_corpus_bit_exactly() {
         }
     }
     assert!(failed.is_empty(), "mismatches: {failed:?}");
+}
+
+#[test]
+fn refuses_the_studio_profile() {
+    let Some(dir) = corpus() else {
+        eprintln!("skipped: no MPEG-4 Visual corpus");
+        return;
+    };
+    let data = std::fs::read(dir.join("fate/mpeg4_sstp_dpcm.m4v")).expect("studio stream");
+    let mut decoder = EngineDecoder::open(&CodecParams::video(CodecId::Mpeg4, 0, 0)).expect("open");
+    let mut outcome = Ok(());
+    for (n, data) in split(&data).into_iter().enumerate() {
+        let packet = Packet {
+            stream: 0,
+            data,
+            pts: n as i64,
+            duration: 1,
+            timescale: 25,
+            keyframe: false,
+            side: Vec::new(),
+        };
+        match decoder.push(&packet) {
+            Ok(out) => assert!(out.is_empty(), "a studio picture decoded"),
+            Err(e) => {
+                outcome = Err(e);
+                break;
+            }
+        }
+    }
+    assert!(
+        matches!(outcome, Err(cutlass_decode::CodecError::Unsupported { .. })),
+        "{outcome:?}"
+    );
 }

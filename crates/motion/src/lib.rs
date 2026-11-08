@@ -13,6 +13,8 @@
 //!
 //! [`Camera`] measures how the whole picture moved through a clip, for
 //! steadying it, and [`plan`] turns that into a steady clip.
+//! [`plan_reframe`] places Auto reframe's window over a clip from where its
+//! subject was found.
 //!
 //! Pure Rust; no model, no file.
 
@@ -21,6 +23,7 @@ mod flow;
 mod gray;
 mod points;
 mod quad;
+mod reframe;
 mod search;
 mod stabilize;
 
@@ -29,6 +32,7 @@ use gray::Pyramid;
 use quad::Corners;
 
 pub use gray::{GRAY_SIDE, Gray, MAX_SIDE};
+pub use reframe::{Follow, Subject, plan_reframe, window_size};
 pub use stabilize::{Camera, Correction, Move, Path, Plan, Strength, plan};
 
 /// What the target's move may be.

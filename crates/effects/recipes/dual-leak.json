@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "id": "dual-leak",
+  "name": "Dual Leak",
+  "category": "Light",
+  "preview": "portrait",
+  "poster": 1.0,
+  "controls": [
+    {"id": "speed", "name": "Speed", "default": 1, "min": 0.25, "max": 3, "unit": "times", "speed": true},
+    {"id": "intensity", "name": "Intensity", "default": 1, "min": 0, "max": 2, "unit": "percent", "scale": [[0, "amount"], [1, "amount"]]}
+  ],
+  "passes": [
+    {"block": "light_leak", "params": {"amount": 0.85, "x": {"wave": {"period": 4, "from": -0.6, "to": -0.2}}, "y": -0.4, "size": 0.8, "red": 1, "green": 0.3, "blue": 0.5}},
+    {"block": "light_leak", "params": {"amount": 0.85, "x": {"wave": {"period": 5, "from": 0.6, "to": 0.2}}, "y": 0.4, "size": 0.8, "red": 1, "green": 0.6, "blue": 0.1}}
+  ]
+}

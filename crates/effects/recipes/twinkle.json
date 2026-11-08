@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "id": "twinkle",
+  "name": "Twinkle",
+  "category": "Light",
+  "preview": "city",
+  "poster": 0.4,
+  "controls": [
+    {"id": "speed", "name": "Speed", "default": 1, "min": 0.25, "max": 3, "unit": "times", "speed": true},
+    {"id": "intensity", "name": "Intensity", "default": 1, "min": 0, "max": 2, "unit": "percent", "scale": [[0, "amount"]]}
+  ],
+  "passes": [
+    {"block": "glow", "params": {"amount": {"wave": {"period": 0.8, "from": 0.2, "to": 1.6}}, "radius": 0.03, "threshold": 0.5}}
+  ]
+}

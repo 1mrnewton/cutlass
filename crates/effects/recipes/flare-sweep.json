@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "id": "flare-sweep",
+  "name": "Flare Sweep",
+  "category": "Light",
+  "preview": "portrait",
+  "poster": 0.9,
+  "controls": [
+    {"id": "speed", "name": "Speed", "default": 1, "min": 0.25, "max": 3, "unit": "times", "speed": true},
+    {"id": "intensity", "name": "Intensity", "default": 1, "min": 0, "max": 2, "unit": "percent", "scale": [[0, "amount"]]}
+  ],
+  "passes": [
+    {"block": "light_leak", "params": {"amount": 0.9, "x": {"keys": [[0, -1.2], [2, 1.2]]}, "y": -0.3, "size": 0.9, "red": 1, "green": 0.8, "blue": 0.5}}
+  ]
+}

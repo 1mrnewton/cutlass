@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "id": "neon-glow",
+  "name": "Neon Glow",
+  "category": "Light",
+  "preview": "city",
+  "controls": [
+    {"id": "speed", "name": "Speed", "default": 1, "min": 0.25, "max": 3, "unit": "times", "speed": true},
+    {"id": "intensity", "name": "Intensity", "default": 1, "min": 0, "max": 2, "unit": "percent", "scale": [[0, "amount"]]}
+  ],
+  "passes": [
+    {"block": "glow", "params": {"amount": 1.5, "radius": 0.05, "threshold": 0.4}},
+    {"block": "grade", "params": {"saturation": 1.5}},
+    {"block": "hue", "params": {"degrees": {"wave": {"period": 4, "from": -30, "to": 30}}}}
+  ]
+}

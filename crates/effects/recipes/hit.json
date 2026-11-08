@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "id": "hit",
+  "name": "Hit",
+  "category": "Motion",
+  "preview": "dancer",
+  "poster": 0.05,
+  "controls": [
+    {"id": "speed", "name": "Speed", "default": 1, "min": 0.25, "max": 3, "unit": "times", "speed": true},
+    {"id": "intensity", "name": "Intensity", "default": 1, "min": 0, "max": 2, "unit": "percent", "scale": [[0, "x"]]}
+  ],
+  "passes": [
+    {"block": "transform", "params": {"scale": {"keys": [[0, 1.15], [0.15, 1], [1, 1]], "repeat": 1}, "x": {"jitter": {"rate": 20, "from": -0.015, "to": 0.015, "seed": 501}}}}
+  ]
+}

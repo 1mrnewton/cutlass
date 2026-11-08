@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "id": "pop-in",
+  "name": "Pop In",
+  "category": "Motion",
+  "preview": "portrait",
+  "poster": 0.1,
+  "controls": [
+    {"id": "speed", "name": "Speed", "default": 1, "min": 0.25, "max": 3, "unit": "times", "speed": true}
+  ],
+  "passes": [
+    {"block": "stretch", "params": {"x": {"keys": [[0, 0.6], [0.2, 1.08], [0.3, 1]]}, "y": {"keys": [[0, 0.6], [0.2, 1.08], [0.3, 1]]}, "black": 1}}
+  ]
+}

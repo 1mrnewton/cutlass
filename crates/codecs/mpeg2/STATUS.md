@@ -147,7 +147,8 @@ A cut costs a new intra picture. On a 720×576 splice at 3 Mb/s the worst pictur
 
 Scoped `cargo test` on this machine, all passing:
 
-- `cutlass-mpeg2`: 44 lib, 14 encode, 5 fields, 2 fuzz smoke, 1 isobmff, 18 lifecycle, 1 local, 6 oracle.
+- `cutlass-mpeg2`, always run: 44 lib, 15 encode, 5 fields, 2 fuzz smoke, 18 lifecycle, 6 oracle, and the first half of the isobmff test (our mux, demux, and decode).
+- `cutlass-mpeg2`, only where the oracle or corpus is present: the FFmpeg and ffprobe leg of the isobmff test, and the local test (`../local-files` and FFmpeg). Without them each says `skipped:` on stderr and passes, so a CI run without them is not evidence for these legs. `MPEG2_REQUIRE_ORACLES=1` turns a skip into a failure; with it set, both ran here and passed on all four recordings.
 - `cutlass-isobmff` lib tests, including the `mp4v` object-type and QuickTime fourcc tests.
 - `cutlass-export` coded-size test.
 - `cutlass` desktop tests filtered to export and codec registration.

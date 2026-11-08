@@ -2,12 +2,16 @@
 //! engine's encode factory, the packets and the sequence headers into
 //! `Mp4Mux`. The file reads back with the same packets and times, our
 //! engine decoder plays it in display order, and FFmpeg decodes it to the
-//! same pictures within the bound two inverse DCTs allow.
+//! same pictures within the bound two inverse DCTs allow. Without FFmpeg
+//! that last leg says so and skips, or fails when `MPEG2_REQUIRE_ORACLES` is
+//! set.
+
+#[cfg(test)]
+mod oracles;
 
 #[cfg(test)]
 mod isobmff {
     use std::io::Cursor;
-    use std::path::PathBuf;
     use std::process::Command;
 
     use cutlass_codec::{
@@ -39,22 +43,6 @@ mod isobmff {
                 ]
             })
             .collect()
-    }
-
-    fn ffmpeg_bin() -> Option<PathBuf> {
-        [
-            "/opt/homebrew/bin/ffmpeg",
-            "/usr/local/bin/ffmpeg",
-            "ffmpeg",
-        ]
-        .into_iter()
-        .map(PathBuf::from)
-        .find(|path| {
-            Command::new(path)
-                .arg("-version")
-                .output()
-                .is_ok_and(|o| o.status.success())
-        })
     }
 
     fn psnr(a: &[u8], b: &[u8]) -> f64 {
@@ -180,8 +168,8 @@ mod isobmff {
         }
         assert_eq!(times, (0..i64::from(FRAMES)).collect::<Vec<_>>());
 
-        let Some(ffmpeg) = ffmpeg_bin() else {
-            println!("ffmpeg missing; the MP4 was checked with our demuxer and decoder only");
+        // Without FFmpeg only our demuxer and decoder checked the MP4.
+        let Some(ffmpeg) = crate::oracles::ffmpeg() else {
             return;
         };
         let dir = std::env::temp_dir().join(format!("cutlass-mpeg2-mp4-{}", std::process::id()));
@@ -211,15 +199,19 @@ mod isobmff {
             assert!(quality >= 50.0, "frame {index}: {quality:.1} dB");
         }
 
-        let probe = Command::new(ffmpeg.with_file_name("ffprobe"))
-            .args(["-v", "error", "-show_entries"])
-            .args(["stream=codec_name,profile,width,height,has_b_frames"])
-            .args(["-of", "default=noprint_wrappers=1"])
-            .arg(&mp4)
-            .output();
-        if let Ok(probe) = probe
-            && probe.status.success()
-        {
+        if let Some(ffprobe) = crate::oracles::ffprobe(&ffmpeg) {
+            let probe = Command::new(ffprobe)
+                .args(["-v", "error", "-show_entries"])
+                .args(["stream=codec_name,profile,width,height,has_b_frames"])
+                .args(["-of", "default=noprint_wrappers=1"])
+                .arg(&mp4)
+                .output()
+                .unwrap();
+            assert!(
+                probe.status.success(),
+                "{}",
+                String::from_utf8_lossy(&probe.stderr)
+            );
             let text = String::from_utf8_lossy(&probe.stdout);
             for line in [
                 "codec_name=mpeg2video",

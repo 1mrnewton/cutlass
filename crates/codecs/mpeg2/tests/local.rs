@@ -8,12 +8,17 @@
 //! MPEG-2 and our decoder must play as FFmpeg does.
 //!
 //! The folder is not in CI, and neither may FFmpeg be; the test then says
-//! why and returns.
+//! on stderr what is missing and skips, or fails when
+//! `MPEG2_REQUIRE_ORACLES` is set. With the flag, every clip below must be
+//! there.
+
+#[cfg(test)]
+mod oracles;
 
 #[cfg(test)]
 mod local {
     use std::io::Cursor;
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
     use std::process::Command;
 
     use cutlass_codec::{
@@ -62,22 +67,6 @@ mod local {
         },
     ];
     const FRAMES: usize = 30;
-
-    fn ffmpeg_bin() -> Option<PathBuf> {
-        [
-            "/opt/homebrew/bin/ffmpeg",
-            "/usr/local/bin/ffmpeg",
-            "ffmpeg",
-        ]
-        .into_iter()
-        .map(PathBuf::from)
-        .find(|path| {
-            Command::new(path)
-                .arg("-version")
-                .output()
-                .is_ok_and(|o| o.status.success())
-        })
-    }
 
     fn run(command: &mut Command) {
         let out = command.output().unwrap();
@@ -249,11 +238,13 @@ mod local {
     fn local_recordings_round_trip_through_mp4_both_ways() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../../local-files");
         if !root.is_dir() {
-            println!("{} is missing; nothing to check", root.display());
+            crate::oracles::skip(&root.display().to_string());
             return;
         }
-        let Some(ffmpeg) = ffmpeg_bin() else {
-            println!("ffmpeg is missing; the local recordings were not checked");
+        let Some(ffmpeg) = crate::oracles::ffmpeg() else {
+            return;
+        };
+        let Some(ffprobe) = crate::oracles::ffprobe(&ffmpeg) else {
             return;
         };
         let dir = std::env::temp_dir().join(format!("cutlass-mpeg2-local-{}", std::process::id()));
@@ -262,7 +253,7 @@ mod local {
         for clip in &CLIPS {
             let source = root.join(clip.name);
             if !source.is_file() {
-                println!("{} is missing", clip.name);
+                crate::oracles::skip(&format!("local-files/{}", clip.name));
                 continue;
             }
             let raw = dir.join("source.yuv");
@@ -276,7 +267,7 @@ mod local {
                 .args(["-frames:v", &FRAMES.to_string(), "-vf", &filter])
                 .args(["-f", "rawvideo"])
                 .arg(&raw));
-            let probe = Command::new(ffmpeg.with_file_name("ffprobe"))
+            let probe = Command::new(&ffprobe)
                 .args(["-v", "error", "-select_streams", "v:0"])
                 .args(["-show_entries", "stream=width,height", "-of", "csv=p=0"])
                 .arg(&source)
@@ -352,6 +343,6 @@ mod local {
             checked += 1;
         }
         let _ = std::fs::remove_dir_all(&dir);
-        println!("{checked} recordings checked");
+        eprintln!("{checked} of {} recordings checked", CLIPS.len());
     }
 }

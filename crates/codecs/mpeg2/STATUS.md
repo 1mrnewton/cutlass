@@ -65,8 +65,8 @@ Interlaced, 4:2:2, and 4:4:4 encoding are out of scope: export hands the encoder
 | 4:2:2 | Yes | Out of scope | Verified. `chroma422.m2v`, `hhi_burst_422_short`, `xdcam8mp2`, `real_422`. |
 | 4:4:4 | Yes | Out of scope | Verified. `chroma444.m2v` matches FFmpeg on every sample, including a predicted picture. |
 | I, P, B frame pictures | Yes | Yes | Verified. |
-| Field pictures | Yes | Out of scope | Verified. `tests/fields.rs`, `t.m2v`, `real_1080i`. |
-| Frame, field, 16×8, dual-prime prediction, field DCT | Yes | Frame, half-pel | Verified on decode by `interlaced.m2v` and the FATE field streams. Dual-prime has a unit test for the vector formula. |
+| Field pictures | Yes | Out of scope | Verified. `tests/fields.rs` (I field pairs), `tests/inter_fields.rs` (P and B field pairs, a second field predicting from its first, skips), and once from `/tmp` on `t.m2v`. |
+| Frame, field, 16×8, dual-prime prediction, field DCT | Yes | Frame, half-pel | Verified on decode. `interlaced.m2v` covers field motion and field DCT in frame pictures. `inter_fields.m2v` covers 16×8 in P and B fields, field dual-prime, and frame dual-prime, equal to FFmpeg's decode on every sample. Removing the dmvector, or the second field's prediction from its own first field, fails it. |
 | Alternate scan, B.15, both quantiser scales, DC precision, matrices | Yes | `q_scale_type` 0, table B.15, zigzag, 8-bit DC | Decode verified by `interlaced.m2v` (alternate scan, B.15, non-linear scale, 10-bit DC). Encode writes the one combination above. |
 | MPEG-1, including D pictures and full-pel vectors | Yes | No | Verified. `mpeg1.m1v`, `real_mpeg1`. |
 | Display order, open GOP after a reset | Yes | Closed GOPs only | Verified. `lifecycle.rs`. |
@@ -89,8 +89,9 @@ Checked in under `tests/fixtures`, produced by FFmpeg 8.1.1 unless noted. The `.
 | `chroma422.m2v` | 4:2:2 with a loaded non-intra matrix |
 | `chroma444.m2v` | 16×16 High profile 4:4:4, written from H.262 because FFmpeg cannot encode 4:4:4. Twelve distinct block levels, then a P picture with a zero vector. SHA-256 `ba282d3ac4636265eed2742cb9a874464069706f1bc0bdde6fae4dd2f9258bc5` |
 | `mpeg1.m1v` | 90×62 MPEG-1, a size that is not a multiple of 16 |
+| `inter_fields.m2v` | 64×64 interlaced Main profile, written from H.262 by `tests/inter_fields.rs`, which checks the committed bytes are what it writes: an I field pair, a P field pair (field, 16×8, dual prime, a skip, the bottom field predicting from its top), a P frame picture (frame, field, dual prime, a skip), a P field pair, and a B field pair (forward, backward, bidirectional, field and 16×8, skips). No residuals, so `inter_fields.yuv` (FFmpeg 8.1.1, `-xerror`) must match exactly. 612 bytes. FFmpeg's `-err_detect explode` refuses every field picture, FATE's `t.mpg` too, so the live FFmpeg leg uses `-xerror` alone. |
 
-Not checked in, fetched from `https://fate-suite.ffmpeg.org/mpeg2/`: `sony-ct3.bs`, `tcela-6.bits`, `hhi_burst_422_short.bits`, `matrixbench_mpeg2.lq1.mpg`, `mpeg2_field_encoding.ts`, `xdcam8mp2-1s_small.ts`, `dvd_still_frame.vob`, `dvd_single_frame.vob`, `t.mpg`. Real elementary streams extracted from `../local-files` live in `/tmp/cutlass-mpeg2/es` and are not in the repo.
+Not checked in, fetched from `https://fate-suite.ffmpeg.org/mpeg2/`: `sony-ct3.bs`, `tcela-6.bits`, `hhi_burst_422_short.bits`, `matrixbench_mpeg2.lq1.mpg`, `mpeg2_field_encoding.ts`, `xdcam8mp2-1s_small.ts`, `dvd_still_frame.vob`, `dvd_single_frame.vob`, `t.mpg`. Real elementary streams extracted from `../local-files` live in `/tmp/cutlass-mpeg2/es` and are not in the repo. Those FATE streams carry no license that lets this repo redistribute them, and the local recordings are not ours to publish, which is why the inter field regression stream is written by the test instead of cut from one of them. The FATE comparisons in the table below were one-off runs from `/tmp`, not committed tests.
 
 ## Correctness
 
@@ -147,8 +148,8 @@ A cut costs a new intra picture. On a 720×576 splice at 3 Mb/s the worst pictur
 
 Scoped `cargo test` on this machine, all passing:
 
-- `cutlass-mpeg2`, always run: 44 lib, 15 encode, 5 fields, 2 fuzz smoke, 18 lifecycle, 6 oracle, and the first half of the isobmff test (our mux, demux, and decode).
-- `cutlass-mpeg2`, only where the oracle or corpus is present: the FFmpeg and ffprobe leg of the isobmff test, and the local test (`../local-files` and FFmpeg). Without them each says `skipped:` on stderr and passes, so a CI run without them is not evidence for these legs. `MPEG2_REQUIRE_ORACLES=1` turns a skip into a failure; with it set, both ran here and passed on all four recordings.
+- `cutlass-mpeg2`, always run: 44 lib, 15 encode, 5 fields, 3 of the 4 inter_fields tests, 2 fuzz smoke, 18 lifecycle, 6 oracle, and the first half of the isobmff test (our mux, demux, and decode).
+- `cutlass-mpeg2`, only where the oracle or corpus is present: the FFmpeg and ffprobe leg of the isobmff test, the inter_fields FFmpeg and ffprobe test, and the local test (`../local-files` and FFmpeg). Without them each says `skipped:` on stderr and passes, so a CI run without them is not evidence for these legs. `MPEG2_REQUIRE_ORACLES=1` turns a skip into a failure; with it set, both ran here and passed on all four recordings.
 - `cutlass-isobmff` lib tests, including the `mp4v` object-type and QuickTime fourcc tests.
 - `cutlass-export` coded-size test.
 - `cutlass` desktop tests filtered to export and codec registration.

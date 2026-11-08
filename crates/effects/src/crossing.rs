@@ -109,6 +109,8 @@ const fn param(name: &'static str, default: f32, min: f32, max: f32) -> Param {
 /// recipe that leaves `progress` out swaps at the transition's own pace:
 /// `progress` is `t`. `edge` lays a band of the `red`, `green`, `blue`
 /// colour along the swapping line, as wide as that part of the run.
+/// `close` runs the swap the other way: a shape closes in on the
+/// outgoing picture instead of opening out of it.
 pub const CROSS: &[Param] = &[
     param("progress", 0.0, 0.0, 1.0),
     param("kind", 8.0, 0.0, 16.0),
@@ -121,6 +123,7 @@ pub const CROSS: &[Param] = &[
     param("red", 1.0, 0.0, 1.0),
     param("green", 1.0, 0.0, 1.0),
     param("blue", 1.0, 0.0, 1.0),
+    param("close", 0.0, 0.0, 1.0),
 ];
 
 /// A transition as data.
@@ -350,7 +353,7 @@ pub fn transition_preview_t(elapsed: Micros) -> f32 {
 }
 
 /// The transition recipes the app ships, in shelf order.
-const BUNDLED_FILES: [&str; 140] = [
+const BUNDLED_FILES: [&str; 180] = [
     include_str!("../transitions/flash.json"),
     include_str!("../transitions/quick-flash.json"),
     include_str!("../transitions/red-flash.json"),
@@ -491,6 +494,46 @@ const BUNDLED_FILES: [&str; 140] = [
     include_str!("../transitions/color-glitch.json"),
     include_str!("../transitions/bitcrush.json"),
     include_str!("../transitions/interlace.json"),
+    include_str!("../transitions/circle-open.json"),
+    include_str!("../transitions/circle-close.json"),
+    include_str!("../transitions/diamond-open.json"),
+    include_str!("../transitions/diamond-close.json"),
+    include_str!("../transitions/star-open.json"),
+    include_str!("../transitions/star-close.json"),
+    include_str!("../transitions/heart-open.json"),
+    include_str!("../transitions/heart-close.json"),
+    include_str!("../transitions/hexagon-open.json"),
+    include_str!("../transitions/hexagon-close.json"),
+    include_str!("../transitions/circle-from-corner.json"),
+    include_str!("../transitions/ring.json"),
+    include_str!("../transitions/heart-pop.json"),
+    include_str!("../transitions/star-burst.json"),
+    include_str!("../transitions/tiles.json"),
+    include_str!("../transitions/doors-close.json"),
+    include_str!("../transitions/doors-close-down.json"),
+    include_str!("../transitions/soft-circle.json"),
+    include_str!("../transitions/star-spin.json"),
+    include_str!("../transitions/shutter.json"),
+    include_str!("../transitions/ripple.json"),
+    include_str!("../transitions/water-drop.json"),
+    include_str!("../transitions/wave.json"),
+    include_str!("../transitions/wave-down.json"),
+    include_str!("../transitions/swirl-wipe.json"),
+    include_str!("../transitions/bulge.json"),
+    include_str!("../transitions/pinch.json"),
+    include_str!("../transitions/stretch.json"),
+    include_str!("../transitions/stretch-up.json"),
+    include_str!("../transitions/squeeze.json"),
+    include_str!("../transitions/kaleidoscope.json"),
+    include_str!("../transitions/tile.json"),
+    include_str!("../transitions/grid.json"),
+    include_str!("../transitions/heat-haze.json"),
+    include_str!("../transitions/jelly.json"),
+    include_str!("../transitions/melt.json"),
+    include_str!("../transitions/fisheye.json"),
+    include_str!("../transitions/shockwave.json"),
+    include_str!("../transitions/black-hole.json"),
+    include_str!("../transitions/lens-warp.json"),
 ];
 
 /// Every bundled transition recipe, read once.
@@ -555,7 +598,7 @@ mod tests {
         assert_eq!(at.outgoing[0].block, Block::Blur);
         assert!((at.outgoing[0].values[0] - 0.05).abs() < 1e-6);
         assert_eq!(late.at(f32::NAN).cross[0], 0.0);
-        assert_eq!(CROSS.len(), 11);
+        assert_eq!(CROSS.len(), 12);
     }
 
     #[test]

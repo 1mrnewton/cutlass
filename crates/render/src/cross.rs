@@ -13,7 +13,7 @@ struct Cross {
     a: vec4<f32>,
     // count, x, y, edge
     b: vec4<f32>,
-    // red, green, blue
+    // red, green, blue, close
     c: vec4<f32>,
     size: vec4<f32>,
 };
@@ -149,12 +149,22 @@ fn fs(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
             // A shape out from the point, measured so it just covers the
             // frame's farthest corner at the end.
             let flip = vec2<f32>(1.0, -1.0);
-            let far = max(
+            var far = max(
                 max(reach(kind, (half - point * size / short) * flip), reach(kind, (vec2<f32>(-half.x, half.y) - point * size / short) * flip)),
                 max(reach(kind, (-half - point * size / short) * flip), reach(kind, (vec2<f32>(half.x, -half.y) - point * size / short) * flip))
             );
+            if (kind == 12u) {
+                // A star's valleys reach no farther than 0.45 of its points,
+                // so it grows until even they cover the farthest corner.
+                let off = point * size / short;
+                far = max(max(length(half - off), length(vec2<f32>(-half.x, half.y) - off)),
+                          max(length(-half - off), length(vec2<f32>(half.x, -half.y) - off))) / 0.45;
+            }
             run = reach(kind, p * flip) / max(far, 0.0001);
         }
+    }
+    if (cx.c.w > 0.5) {
+        run = 1.0 - run;
     }
     var shown = progress;
     if (kind != 8u) {
@@ -261,8 +271,8 @@ impl Cross {
         size: (u32, u32),
     ) {
         let mut values = [0.0f32; 16];
-        // In the order of `CROSS`: four to a vec4, the colour third.
-        values[..11].copy_from_slice(&crossing.cross[..11]);
+        // In the order of `CROSS`: four to a vec4, the colour and close third.
+        values[..12].copy_from_slice(&crossing.cross);
         #[allow(clippy::cast_precision_loss)]
         {
             values[12] = size.0 as f32;

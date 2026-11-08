@@ -30,6 +30,7 @@ mod sample;
 mod scenes;
 mod sources;
 mod stable;
+mod steady;
 mod text;
 mod track;
 mod transition;

@@ -2677,6 +2677,7 @@ dependencies = [
  "cutlass-session",
  "cutlass-still",
  "cutlass-storage",
+ "cutlass-store",
  "cutlass-text",
 ]
 

@@ -90,6 +90,8 @@ pub struct OpenClips {
     patient: bool,
     /// Lottie files by stored path; `None` is a file that did not read.
     lotties: HashMap<String, Option<Arc<cutlass_lottie::Animation>>>,
+    /// Steadied clips' plans, by segment.
+    steadies: HashMap<SegmentId, Arc<crate::steady::Steady>>,
 }
 
 impl OpenClips {
@@ -107,6 +109,7 @@ impl OpenClips {
             shapes: HashMap::new(),
             patient: true,
             lotties: HashMap::new(),
+            steadies: HashMap::new(),
         }
     }
 
@@ -143,6 +146,7 @@ impl OpenClips {
         self.texts.clear();
         self.shapes.clear();
         self.lotties.clear();
+        self.steadies.clear();
         self.draft = None;
         self.revision = 0;
         self.bound = false;
@@ -174,6 +178,16 @@ impl OpenClips {
         });
         self.lotties.insert(stored.to_owned(), read.clone());
         read
+    }
+
+    /// The project folder, when there is one.
+    pub(crate) fn root(&self) -> Option<&Path> {
+        self.root.as_deref()
+    }
+
+    /// Steadied clips' plans, kept until the clips are dropped.
+    pub(crate) fn steadies(&mut self) -> &mut HashMap<SegmentId, Arc<crate::steady::Steady>> {
+        &mut self.steadies
     }
 
     /// Shape rasters, kept across revisions.
@@ -317,6 +331,8 @@ pub(crate) struct Placed<'a> {
     crop: Crop,
     crop_scale: f64,
     backdrop: Backdrop,
+    /// The steadying correction at this frame.
+    steady: Option<cutlass_motion::Correction>,
 }
 
 pub(crate) fn picture_transform(
@@ -468,21 +484,28 @@ pub(crate) fn video_layers<'a>(
                 clips.sources.insert(segment.id.clone(), source);
             }
             let backdrop = backdrop_for(draft, segment, media, clips, width, height);
+            let steady = crate::steady::steady_at(clips, draft, segment, time);
             chosen.push((
                 segment.render_index,
                 track_index,
                 segment_index,
                 segment.id.clone(),
                 transform,
-                crop,
-                crop_scale,
+                (crop, crop_scale, steady),
                 backdrop,
             ));
         }
     }
     let mut layers = Vec::with_capacity(chosen.len());
-    for (render_index, track_index, segment_index, id, transform, crop, crop_scale, backdrop) in
-        chosen
+    for (
+        render_index,
+        track_index,
+        segment_index,
+        id,
+        transform,
+        (crop, crop_scale, steady),
+        backdrop,
+    ) in chosen
     {
         let Some(source) = clips.sources.get(&id) else {
             continue;
@@ -499,6 +522,7 @@ pub(crate) fn video_layers<'a>(
                 crop,
                 crop_scale,
                 backdrop,
+                steady,
             },
         });
     }
@@ -542,6 +566,7 @@ pub(crate) fn video_picture(
         clips.sources.insert(segment.id.clone(), source);
     }
     let backdrop = backdrop_for(draft, segment, media, clips, width, height);
+    let steady = crate::steady::steady_at(clips, draft, segment, time);
     let source = clips.sources.get(&segment.id)?;
     let placed = Placed {
         source,
@@ -551,6 +576,7 @@ pub(crate) fn video_picture(
         crop,
         crop_scale,
         backdrop,
+        steady,
     };
     match placed.sample(time) {
         Sample::Ready(Picture::Cpu(bytes)) => Some(bytes),
@@ -650,8 +676,8 @@ impl PictureSource for Placed<'_> {
                 bytes,
                 self.transform,
                 self.source.display(),
-                self.crop,
-                self.crop_scale,
+                (self.crop, self.crop_scale),
+                self.steady.as_ref(),
                 &self.backdrop,
             ),
             Picture::Platform(_) => Sample::Miss,
@@ -714,6 +740,13 @@ impl Placed<'_> {
             DisplayQuarter::Clockwise90 | DisplayQuarter::Clockwise270 => (height, width),
         };
         let (to_oriented, picture) = gpu_crop(self.crop, self.crop_scale, oriented)?;
+        let to_oriented = match &self.steady {
+            Some(correction) => crate::steady::then(
+                to_oriented,
+                crate::steady::steady_map(correction, oriented)?,
+            ),
+            None => to_oriented,
+        };
         let placement = Placement {
             to_picture: gpu_place(self.transform, picture, (self.width, self.height))?,
             picture,
@@ -984,15 +1017,23 @@ fn finish_picture(
     picture: CpuBytes,
     transform: PictureTransform,
     display: DisplayQuarter,
-    crop: Crop,
-    crop_scale: f64,
+    (crop, crop_scale): (Crop, f64),
+    steady: Option<&cutlass_motion::Correction>,
     backdrop: &Backdrop,
 ) -> Sample {
     let (canvas_w, canvas_h) = canvas;
     let Some(picture) = orient(picture, display) else {
         return Sample::Miss;
     };
-    let picture = apply_crop(picture, crop, crop_scale);
+    let picture = match steady {
+        Some(correction) => {
+            let Some(picture) = steadied(&picture, correction, crop, crop_scale) else {
+                return Sample::Miss;
+            };
+            picture
+        }
+        None => apply_crop(picture, crop, crop_scale),
+    };
     let sharp = matches!(backdrop, Backdrop::Blur(_)).then(|| picture.clone());
     let Sample::Ready(Picture::Cpu(placed)) =
         place_with(canvas_w, canvas_h, picture, transform, DisplayQuarter::Zero)
@@ -1004,6 +1045,29 @@ fn finish_picture(
         sharp.as_ref(),
         backdrop,
     )))
+}
+
+/// The oriented `picture` steadied by `correction`, then cropped: one
+/// resample through both maps, as the GPU pass draws it. A crop that is not
+/// a parallelogram, which the GPU pass does not draw, is cut after.
+fn steadied(
+    picture: &CpuBytes,
+    correction: &cutlass_motion::Correction,
+    crop: Crop,
+    crop_scale: f64,
+) -> Option<CpuBytes> {
+    let size = (picture.width(), picture.height());
+    let steady = crate::steady::steady_map(correction, size)?;
+    match gpu_crop(crop, crop_scale, size) {
+        Some((to_oriented, cropped)) => {
+            crate::steady::resample(picture, crate::steady::then(to_oriented, steady), cropped)
+        }
+        None => Some(apply_crop(
+            crate::steady::resample(picture, steady, size)?,
+            crop,
+            crop_scale,
+        )),
+    }
 }
 
 /// Sample `crop` from the oriented picture.
@@ -2154,8 +2218,8 @@ mod tests {
             picture,
             transform,
             DisplayQuarter::Clockwise90,
-            left,
-            1.0,
+            (left, 1.0),
+            None,
             &Backdrop::None,
         ) else {
             panic!("ready");

@@ -70,7 +70,7 @@ marker         Flag01Icon
 beat           MusicNote01Icon
 zoomIn         ZoomInAreaIcon
 zoomOut        ZoomOutAreaIcon
-zoomFit        FitToScreenIcon
+zoomFit        custom
 guides         RulerIcon
 lock           SquareLock01Icon
 # The phone editor's bars and panels.

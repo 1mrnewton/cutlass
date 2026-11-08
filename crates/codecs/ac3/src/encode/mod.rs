@@ -42,6 +42,10 @@ const MAX_EAC3_WORDS: usize = 2048;
 /// Highest `(csnroffst << 4) | fsnroffst`.
 const MAX_SNR: i32 = 1023;
 
+/// `csnroffst` 15, plus eight coarse steps. A short frame that cannot
+/// reach this gives bandwidth back until it can, or until none is left.
+const NOMINAL_SNR: i32 = (15 << 4) + 128;
+
 /// `fgaincod` every channel sends: the default fast gain.
 const FGAINCOD: u32 = 4;
 
@@ -624,8 +628,20 @@ impl Ac3Encoder {
         let mut mode = Mode::Adaptive;
         let (snr, skip) = loop {
             plan::plan(&shape, &mut self.blocks, mode);
-            if let Some(found) = self.allocate(&shape, size)? {
-                break found;
+            if let Some((offset, skip)) = self.allocate(&shape, size)? {
+                // A short syncframe has the same bit rate and far fewer
+                // bits, so the six-block cutoff leaves the mantissas below
+                // the nominal offset. Give the bits to a narrower band.
+                if shape.blocks < 6 && offset < NOMINAL_SNR && shape.bandwidth > 0 {
+                    shape.bandwidth = shape.bandwidth.saturating_sub(4);
+                    shape.coupling = shape.coupling.and_then(|(begin, end)| {
+                        let end = end.min(usize::from(shape.bandwidth) / 4 + 3);
+                        (begin < end).then_some((begin, end))
+                    });
+                    restore(&mut self.blocks, &self.originals);
+                    continue;
+                }
+                break (offset, skip);
             }
             if matches!(mode, Mode::Adaptive) && shape.bandwidth > 0 {
                 shape.bandwidth = shape.bandwidth.saturating_sub(8);

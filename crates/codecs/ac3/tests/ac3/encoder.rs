@@ -657,6 +657,66 @@ fn ffmpeg_decodes_our_streams() {
     }
 }
 
+/// One, two, three and six blocks per syncframe. Each packet lasts that
+/// many blocks, and FFmpeg hears the same program our decoder hears.
+#[test]
+fn every_eac3_block_count_decodes_with_ffmpeg() {
+    let Some(ffmpeg) = oracle("ffmpeg", "-version") else {
+        return;
+    };
+    let rate = 48_000u32;
+    let layouts: [&[Channel]; 3] = [&[C], &[L, R], &[L, R, C, Lfe, Sl, Sr]];
+    for blocks in [1usize, 2, 3, 6] {
+        for channels in layouts {
+            let mut cfg = config(Format::Eac3, rate, channels, 0);
+            cfg.blocks = blocks;
+            let pcm = tones(channels, rate, rate as usize, 0.25);
+            let packets = encode(cfg, &pcm);
+            let spf = (blocks * 256) as i64;
+            assert!(!packets.is_empty(), "{blocks} {channels:?}");
+            for packet in &packets {
+                assert_eq!(packet.duration, spf, "{blocks} {channels:?}");
+                let info = probe(&packet.data).expect("probe");
+                assert_eq!(info.blocks, blocks, "{blocks} {channels:?}");
+            }
+            let ours = decode(CodecId::Eac3, &packets);
+            assert_eq!(
+                ours.pcm.len(),
+                pcm.len(),
+                "{blocks} blocks {channels:?}: sample count"
+            );
+            let theirs = ffmpeg_decode(&ffmpeg, &stream(&packets), &["-f", "eac3"]);
+            let nch = channels.len();
+            let mut order: Vec<usize> = (0..nch).collect();
+            order.sort_by_key(|&i| ours.channels[i].wave_bit());
+            let skip = ENCODER_DELAY as usize;
+            for (theirs_index, &our_index) in order.iter().enumerate() {
+                let a = deinterleave(&ours.pcm, nch, our_index);
+                let b: Vec<f32> = deinterleave(&theirs, nch, theirs_index)
+                    .into_iter()
+                    .skip(skip)
+                    .collect();
+                let n = a.len().min(b.len());
+                let margin = 1536.min(n / 4);
+                let quality = snr(&a[margin..n - margin], &b[margin..n - margin]);
+                let src = deinterleave(&pcm, nch, our_index);
+                let against = snr(&a[margin..n - margin], &src[margin..n - margin]);
+                assert!(
+                    quality > 60.0,
+                    "{blocks} blocks {channels:?} {:?}: {quality:.1} dB against FFmpeg",
+                    ours.channels[our_index]
+                );
+                let floor = if blocks == 1 { 40.0 } else { 60.0 };
+                assert!(
+                    against > floor,
+                    "{blocks} blocks {channels:?} {:?}: {against:.1} dB against the source",
+                    ours.channels[our_index]
+                );
+            }
+        }
+    }
+}
+
 /// A short block used to turn coupling on or off inside an E-AC-3
 /// syncframe, and reference decoders reject that frame. The onset of a
 /// tone stays in the comparison. Full-band noise at the default rate is

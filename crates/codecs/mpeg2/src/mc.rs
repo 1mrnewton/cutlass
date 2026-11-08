@@ -64,40 +64,53 @@ fn kernel(
     half: [usize; 2],
     average: bool,
 ) {
+    if average {
+        rows::<true>(dst, src, base, stride, size, half);
+    } else {
+        rows::<false>(dst, src, base, stride, size, half);
+    }
+}
+
+/// The rows of one block. Every loop runs over slices of exactly `w`
+/// samples so it compiles to vector code without bounds checks.
+#[inline(always)]
+fn rows<const AVERAGE: bool>(
+    dst: &mut Target<'_>,
+    src: &[u8],
+    base: usize,
+    stride: usize,
+    size: [usize; 2],
+    half: [usize; 2],
+) {
     let [w, h] = size;
     for j in 0..h {
         let at = dst.offset + j * dst.stride;
         let d = &mut dst.buf[at..at + w];
-        let a = &src[base + j * stride..base + j * stride + w + half[0]];
-        match (half[0], half[1], average) {
-            (0, 0, false) => d.copy_from_slice(&a[..w]),
-            (0, 0, true) => {
-                for (d, &a) in d.iter_mut().zip(a) {
-                    *d = ((u16::from(*d) + u16::from(a) + 1) >> 1) as u8;
+        let row = base + j * stride;
+        let a = &src[row..row + w];
+        match half {
+            [0, 0] if !AVERAGE => d.copy_from_slice(a),
+            [0, 0] => {
+                for (d, &x) in d.iter_mut().zip(a) {
+                    *d = avg2(*d, x);
                 }
             }
-            (1, 0, _) => {
-                for i in 0..w {
-                    let p = ((u16::from(a[i]) + u16::from(a[i + 1]) + 1) >> 1) as u8;
-                    d[i] = blend(d[i], p, average);
-                }
-            }
-            (0, 1, _) => {
-                let b = &src[base + (j + 1) * stride..base + (j + 1) * stride + w];
-                for i in 0..w {
-                    let p = ((u16::from(a[i]) + u16::from(b[i]) + 1) >> 1) as u8;
-                    d[i] = blend(d[i], p, average);
+            [1, 0] | [0, 1] => {
+                let next = if half[0] == 1 { row + 1 } else { row + stride };
+                let b = &src[next..next + w];
+                for ((d, &x), &y) in d.iter_mut().zip(a).zip(b) {
+                    let p = avg2(x, y);
+                    *d = if AVERAGE { avg2(*d, p) } else { p };
                 }
             }
             _ => {
-                let b = &src[base + (j + 1) * stride..base + (j + 1) * stride + w + 1];
-                for i in 0..w {
-                    let sum = u16::from(a[i])
-                        + u16::from(a[i + 1])
-                        + u16::from(b[i])
-                        + u16::from(b[i + 1]);
+                let a1 = &src[row + 1..row + 1 + w];
+                let b = &src[row + stride..row + stride + w];
+                let b1 = &src[row + stride + 1..row + stride + 1 + w];
+                for ((((d, &x), &x1), &y), &y1) in d.iter_mut().zip(a).zip(a1).zip(b).zip(b1) {
+                    let sum = u16::from(x) + u16::from(x1) + u16::from(y) + u16::from(y1);
                     let p = ((sum + 2) >> 2) as u8;
-                    d[i] = blend(d[i], p, average);
+                    *d = if AVERAGE { avg2(*d, p) } else { p };
                 }
             }
         }
@@ -105,12 +118,8 @@ fn kernel(
 }
 
 #[inline(always)]
-fn blend(old: u8, new: u8, average: bool) -> u8 {
-    if average {
-        ((u16::from(old) + u16::from(new) + 1) >> 1) as u8
-    } else {
-        new
-    }
+fn avg2(a: u8, b: u8) -> u8 {
+    ((u16::from(a) + u16::from(b) + 1) >> 1) as u8
 }
 
 #[cfg(test)]

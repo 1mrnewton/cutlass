@@ -233,3 +233,11 @@ cargo clippy -p cutlass-ac3 -p cutlass-isobmff -p cutlass-riff \
 ```
 
 Linux and Windows were not run.
+
+## Readiness
+
+The declared target is in place on `ac3-eac3` at `/Users/mrnewton/dev/cutlass/cutlass-ac3-eac3`. Decode and encode of both syntaxes are native safe Rust in `cutlass-ac3`. ISOBMFF and WAV open them, M4A export writes them, and the desktop export dialog offers both.
+
+`cargo test --release -p cutlass-ac3` on 8 November 2026: 81 library tests passed, 63 integration tests passed, and the thirty-minute campaign stayed ignored. That campaign was already run, twice for two minutes and once for thirty minutes, with no findings. The fixture check against the committed FFmpeg PCM passed in that same run, as did the live FFmpeg and Apple oracles and the program-material files.
+
+What this target does not do: E-AC-3 reduced sample rates, enhanced-coupling encode (`ecplinu` stays 0; FFmpeg does not decode the tool), a raw `.ac3` reader, Matroska, MPEG-TS, and CAF. WAV export stays PCM. The movie-header duration still counts priming and padding. The codec still returns an error for a bad syncframe; the engine skips up to sixteen of those and keeps going. Linux and Windows were not run as product shells.

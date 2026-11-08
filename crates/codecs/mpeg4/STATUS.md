@@ -38,12 +38,18 @@ Export uses `EngineEncoder`. It is Advanced Simple and progressive:
 
 GMC, static sprites, interlace, data partitioning, resync markers, RVLC, short headers, custom matrices, shape, N-bit video, NEWPRED, reduced resolution, and scalability are not written. The export choice is that progressive Advanced Simple stream, not every tool in the specification.
 
-The desktop and the phone ask a platform encoder first. This encoder runs when that opener is absent or declines the parameters. The phone's own export still writes H.264.
+The desktop and the phone ask a platform encoder first. This encoder runs when that opener is absent or declines the parameters. The phone's own export still writes H.264. On this Mac, `VTCompressionSessionCreate` for MPEG-4 returned `-12908` (`kVTCouldNotFindVideoEncoderErr`) and no session. Opening maps that status to unsupported, so export uses this encoder.
 
 ## Checks
 
-`cargo test -p cutlass-mpeg4 --release --lib` — 47 passed. FFmpeg 8.1.1, one thread, the simple inverse transform, and raw 4:2:0 compared bit-exactly against this decoder for intra, predicted, four-vector, bidirectional, quarter-sample, and MPEG-quantiser streams, for a 64×40 padded stream, and for 32 pictures that cross a one-second boundary.
+`cargo test -p cutlass-mpeg4` — 53 lib tests passed, 1 ignored, and the decode and MP4 integration tests passed, including the elementary-stream corpus beside the checkout. FFmpeg 8.1.1, one thread, the simple inverse transform, and raw 4:2:0 compared bit-exactly against this decoder for intra, predicted, four-vector, bidirectional, quarter-sample, and MPEG-quantiser streams, for a 64×40 padded stream, and for 32 pictures that cross a one-second boundary. The checked-in `asp.mp4` matches that same FFmpeg decode.
 
 A 64×48 stream at 30 pictures a second stayed within ±25% of 200, 400, and 800 kbit/s over one second.
 
-Not run: a fuzzer, a release timing or memory measurement, and the real files in `../local-files`. `cargo clippy -p cutlass-mpeg4 --all-targets -- -D warnings` is still red on older unused items in this crate. Those were not silenced.
+Release gates, Apple M5 Pro, 18 cores, 48 GiB, rustc 1.99.1, `cargo test -p cutlass-mpeg4 --release --lib release_decode_and_encode_meet_their_gates -- --ignored --nocapture`. A 1280×720 simple stream, 30 pictures, decoded in 0.051 s and grew the resident set by 8688 KiB. The budget was 1 s and 64 MiB. Advanced Simple encode of 320×240, 30 pictures, at 800 kbit/s took 1.827 s and grew 768 KiB. The budget was 5 s and 64 MiB.
+
+Decoder fuzz, debug test profile so overflow checks stay on, pixel cap 1920×1088, seed `0x4d5045344432`, `MPEG4_FUZZ_SECS=1800`. 42,014,484 inputs, 95,057,282 pictures, 11,258,426 rejected inputs, findings 0. The core decoder and the engine decoder agreed, and a good intra picture still decoded after each input. Encoder fuzz, same profile, seed `0x4d504534454e`, `MPEG4_ENC_FUZZ_SECS=1800`. 6,541,489 inputs, each successful stream decoded back to the same picture count, findings 0. Both runs were 2026-11-08 17:13:20Z through 18:13:20Z.
+
+`../local-files` was probed with ffprobe: 63 media files, none MPEG-4 Visual. The test skips when that folder is missing.
+
+`cargo clippy -p cutlass-mpeg4 --all-targets -- -D warnings` is still red on older unused items in this crate. Those were not silenced.

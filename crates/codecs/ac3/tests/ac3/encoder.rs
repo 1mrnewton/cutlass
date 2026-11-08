@@ -338,7 +338,7 @@ fn quality_rises_with_the_bit_rate() {
 }
 
 #[test]
-fn a_transient_switches_to_short_blocks_and_stays_clean() {
+fn a_transient_stays_quiet_before_the_attack() {
     for format in [Format::Ac3, Format::Eac3] {
         let channels = [L, R];
         let rate = 48_000;
@@ -352,8 +352,11 @@ fn a_transient_switches_to_short_blocks_and_stays_clean() {
         }
         let packets = encode(config(format, rate, &channels, 0), &pcm);
         let decoded = decode(codec(format), &packets);
-        assert!(decoded.decoder.tools().short_blocks > 0, "{format:?}");
-        // Pre-echo: the quiet stretch before the attack stays quiet.
+        // E-AC-3 does not switch length: a short block would change
+        // coupling inside the syncframe, which the reference decoders
+        // reject. AC-3 still switches, and that is what holds pre-echo down.
+        let switched = decoded.decoder.tools().short_blocks > 0;
+        assert_eq!(switched, format == Format::Ac3, "{format:?}");
         let left = deinterleave(&decoded.pcm, 2, 0);
         let before = &left[29_000..29_900];
         let peak = before.iter().fold(0.0f32, |m, v| m.max(v.abs()));
@@ -652,6 +655,55 @@ fn ffmpeg_decodes_our_streams() {
             }
         }
     }
+}
+
+/// A short block used to turn coupling on or off inside an E-AC-3
+/// syncframe, and reference decoders reject that frame. The onset of a
+/// tone stays in the comparison. Full-band noise at the default rate is
+/// mostly dither, so it only has to be a syncframe FFmpeg accepts.
+#[test]
+fn ffmpeg_decodes_an_eac3_frame_that_starts_with_a_transient() {
+    let Some(ffmpeg) = oracle("ffmpeg", "-version") else {
+        return;
+    };
+    let channels = &[L, R];
+    let rate = 48_000u32;
+    let mut seed = 1u32;
+    let noise: Vec<f32> = (0..1536 * 2)
+        .map(|_| {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (seed >> 8) as f32 / (1u32 << 24) as f32 - 0.5
+        })
+        .collect();
+    let packets = encode(config(Format::Eac3, rate, channels, 0), &noise);
+    let _ours = decode(CodecId::Eac3, &packets);
+    let _theirs = ffmpeg_decode(&ffmpeg, &stream(&packets), &["-f", "eac3"]);
+
+    let mut impulse = vec![0.0f32; 1536 * 2];
+    impulse[768 * 2] = 0.8;
+    impulse[768 * 2 + 1] = 0.8;
+    let packets = encode(config(Format::Eac3, rate, channels, 0), &impulse);
+    let ours = decode(CodecId::Eac3, &packets);
+    let theirs = ffmpeg_decode(&ffmpeg, &stream(&packets), &["-f", "eac3"]);
+    let skip = ENCODER_DELAY as usize * 2;
+    let theirs = &theirs[skip.min(theirs.len())..];
+    let n = ours.pcm.len().min(theirs.len());
+    let quality = snr(&ours.pcm[..n], &theirs[..n]);
+    assert!(quality > 50.0, "impulse {quality:.1} dB");
+
+    let pcm = tones(channels, rate, rate as usize, 0.25);
+    let packets = encode(config(Format::Eac3, rate, channels, 0), &pcm);
+    let ours = decode(CodecId::Eac3, &packets);
+    let theirs = ffmpeg_decode(&ffmpeg, &stream(&packets), &[]);
+    let a = deinterleave(&ours.pcm, 2, 0);
+    let b: Vec<f32> = deinterleave(&theirs, 2, 0)
+        .into_iter()
+        .skip(ENCODER_DELAY as usize)
+        .collect();
+    let n = a.len().min(b.len());
+    let tail = 1536.min(n / 8);
+    let quality = snr(&a[..n - tail], &b[..n - tail]);
+    assert!(quality > 50.0, "onset {quality:.1} dB");
 }
 
 /// Apple's decoder reads our streams.

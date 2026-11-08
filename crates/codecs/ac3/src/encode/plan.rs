@@ -139,23 +139,60 @@ pub(crate) fn plan(shape: &Shape, blocks: &mut [Block], mode: Mode) {
     snr_flags(shape, blocks);
 }
 
+fn uncoupled(blocks: &mut [Block], nf: usize, full: usize) {
+    for block in blocks.iter_mut() {
+        block.cplstre = true;
+        block.cplinu = false;
+        block.chincpl = [false; MAX_FBW];
+        block.cplcoe = [false; MAX_FBW];
+        block.cplleake = false;
+        for ch in 0..nf {
+            block.start[ch] = 0;
+            block.end[ch] = full;
+        }
+    }
+}
+
+/// Channels that would be coupled in this block. A short block leaves
+/// the coupling, and coupling needs two channels.
+fn coupled_channels(nf: usize, block: &Block) -> [bool; MAX_FBW] {
+    let mut member = [false; MAX_FBW];
+    for (on, &short) in member.iter_mut().zip(&block.blksw).take(nf) {
+        *on = !short;
+    }
+    if member[..nf].iter().filter(|&&on| on).count() < 2 {
+        member = [false; MAX_FBW];
+    }
+    member
+}
+
+/// E-AC-3 reference decoders reject a syncframe whose coupling use
+/// changes between blocks. AC-3 carries the strategy in each block and
+/// can change it.
+fn eac3_coupling_stable(nf: usize, blocks: &[Block], mode: Mode) -> bool {
+    if !matches!(mode, Mode::Adaptive) {
+        return true;
+    }
+    let Some(first) = blocks.first() else {
+        return true;
+    };
+    let member = coupled_channels(nf, first);
+    blocks
+        .iter()
+        .all(|block| coupled_channels(nf, block) == member)
+}
+
 fn coupling(shape: &Shape, blocks: &mut [Block], mode: Mode) {
     let nf = shape.nf;
     let full = shape.end_bin();
     let Some((begf, endf)) = shape.coupling else {
-        for block in blocks.iter_mut() {
-            block.cplstre = true;
-            block.cplinu = false;
-            block.chincpl = [false; MAX_FBW];
-            block.cplcoe = [false; MAX_FBW];
-            block.cplleake = false;
-            for ch in 0..nf {
-                block.start[ch] = 0;
-                block.end[ch] = full;
-            }
-        }
+        uncoupled(blocks, nf, full);
         return;
     };
+    if shape.eac3 && !eac3_coupling_stable(nf, blocks, mode) {
+        uncoupled(blocks, nf, full);
+        return;
+    }
     let begin = 37 + 12 * begf;
     let end = 37 + 12 * endf;
     let bands = Bands::new(&DEFAULT_CPL_BANDS, begf, endf);
@@ -685,6 +722,40 @@ mod tests {
         assert!(blocks[3].expstr[2] != REUSE && blocks[4].expstr[2] != REUSE);
         assert!(blocks[0].cplcoe[..5].iter().all(|&c| c));
         assert!(blocks[4].cplcoe[0]);
+    }
+
+    #[test]
+    fn eac3_coupling_stays_off_when_it_would_start_late() {
+        let mut shape = shape(2, 2, Some((6, 15)));
+        shape.eac3 = true;
+        let mut blocks: Vec<Block> = (0..6).map(|_| Block::default()).collect();
+        for block in &mut blocks {
+            for ch in 0..2 {
+                for bin in 0..253 {
+                    block.coefs[ch][bin] = 0.01;
+                }
+            }
+        }
+        blocks[0].blksw[0] = true;
+        plan(&shape, &mut blocks, Mode::Adaptive);
+        assert!(blocks.iter().all(|block| !block.cplinu));
+        assert!(blocks.iter().all(|block| block.end[0] == shape.end_bin()));
+    }
+
+    #[test]
+    fn eac3_couples_every_block_when_none_are_short() {
+        let mut shape = shape(2, 2, Some((6, 15)));
+        shape.eac3 = true;
+        let mut blocks: Vec<Block> = (0..6).map(|_| Block::default()).collect();
+        for block in &mut blocks {
+            for ch in 0..2 {
+                for bin in 0..253 {
+                    block.coefs[ch][bin] = 0.01;
+                }
+            }
+        }
+        plan(&shape, &mut blocks, Mode::Adaptive);
+        assert!(blocks.iter().all(|block| block.cplinu && block.chincpl[0]));
     }
 
     #[test]

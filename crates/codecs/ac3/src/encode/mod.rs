@@ -597,10 +597,14 @@ impl Ac3Encoder {
                 let at = from + blk * COEFS;
                 samples.copy_from_slice(&self.pending[coded][at..at + COEFS]);
                 let slot = if coded < nf { coded } else { LFE };
+                // E-AC-3 keeps one transform length for the frame. A short
+                // block would drop that channel out of coupling, and a
+                // syncframe whose coupling use then changes is not what
+                // the reference decoders read.
                 let short = self.analysis[coded].block(
                     &self.transform,
                     &samples,
-                    coded < nf,
+                    coded < nf && !self.shape.eac3,
                     &mut block.coefs[slot],
                 );
                 if coded < nf {

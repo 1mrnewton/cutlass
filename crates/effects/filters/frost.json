@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "frost",
+  "name": "Frost",
+  "category": "Creative",
+  "adjust": {"temperature": -0.5, "exposure": 0.15, "saturation": -0.3, "whites": 0.2, "fade": 0.1},
+  "hsl": {"blue": [0, 0, 0.2]}
+}

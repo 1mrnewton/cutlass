@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "bleach-bypass",
+  "name": "Bleach Bypass",
+  "category": "Cinema",
+  "adjust": {"saturation": -0.5, "contrast": 0.4, "clarity": 0.2, "highlights": 0.1}
+}

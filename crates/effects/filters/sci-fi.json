@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "id": "sci-fi",
+  "name": "Sci-Fi",
+  "category": "Cinema",
+  "adjust": {"temperature": -0.25, "tint": -0.1, "contrast": 0.25},
+  "wheels": {"lift": {"hue": 180, "amount": 0.4}},
+  "hsl": {"orange": [0, -0.3, 0]}
+}

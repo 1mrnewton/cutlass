@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "gold-rush",
+  "name": "Gold Rush",
+  "category": "Creative",
+  "adjust": {"saturation": -0.3, "contrast": 0.2},
+  "wheels": {"gain": {"hue": 50, "amount": 0.6}, "lift": {"hue": 40, "amount": 0.3}}
+}

@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "sunset-pop",
+  "name": "Sunset Pop",
+  "category": "Creative",
+  "adjust": {"saturation": 0.2},
+  "wheels": {"lift": {"hue": 300, "amount": 0.4}, "gain": {"hue": 40, "amount": 0.5}}
+}

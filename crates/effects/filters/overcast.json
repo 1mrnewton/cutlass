@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "overcast",
+  "name": "Overcast",
+  "category": "Moody",
+  "adjust": {"saturation": -0.3, "contrast": -0.1, "temperature": -0.1, "fade": 0.15, "highlights": -0.2}
+}

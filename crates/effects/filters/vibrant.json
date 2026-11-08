@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "vibrant",
+  "name": "Vibrant",
+  "category": "Bright",
+  "adjust": {"saturation": 0.4, "brilliance": 0.2, "clarity": 0.2}
+}

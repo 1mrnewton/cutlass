@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "brooding",
+  "name": "Brooding",
+  "category": "Moody",
+  "adjust": {"exposure": -0.15, "contrast": 0.3, "saturation": -0.25, "vignette": 0.3},
+  "wheels": {"lift": {"hue": 200, "amount": 0.25}}
+}

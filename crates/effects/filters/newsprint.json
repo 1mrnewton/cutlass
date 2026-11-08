@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "newsprint",
+  "name": "Newsprint",
+  "category": "Mono",
+  "adjust": {"saturation": -1, "contrast": 0.4, "grain": 0.5, "fade": 0.1}
+}

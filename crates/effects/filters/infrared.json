@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "infrared",
+  "name": "Infrared",
+  "category": "Mono",
+  "adjust": {"saturation": -1, "contrast": 0.2},
+  "hsl": {"green": [0, 0, 1], "yellow": [0, 0, 0.5], "blue": [0, 0, -0.5]}
+}

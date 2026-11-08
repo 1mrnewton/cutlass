@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "grit",
+  "name": "Grit",
+  "category": "Mono",
+  "adjust": {"saturation": -1, "clarity": 0.6, "sharpen": 0.5, "contrast": 0.3, "grain": 0.3}
+}

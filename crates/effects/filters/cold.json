@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "cold",
+  "name": "Cold",
+  "category": "Moody",
+  "adjust": {"temperature": -0.45, "saturation": -0.2, "contrast": 0.15}
+}

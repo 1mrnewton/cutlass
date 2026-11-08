@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "hazy-sun",
+  "name": "Hazy Sun",
+  "category": "Bright",
+  "adjust": {"exposure": 0.1, "fade": 0.25, "temperature": 0.3, "highlights": 0.2, "saturation": -0.1}
+}

@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "epic-drama",
+  "name": "Epic Drama",
+  "category": "Cinema",
+  "adjust": {"contrast": 0.3, "saturation": -0.2, "clarity": 0.3, "vignette": 0.4},
+  "wheels": {"lift": {"hue": 210, "amount": 0.2}}
+}

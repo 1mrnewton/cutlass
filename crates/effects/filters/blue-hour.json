@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "blue-hour",
+  "name": "Blue Hour",
+  "category": "Cinema",
+  "adjust": {"temperature": -0.3, "exposure": -0.1},
+  "wheels": {"lift": {"hue": 230, "amount": 0.3}, "gain": {"hue": 260, "amount": 0.1}}
+}

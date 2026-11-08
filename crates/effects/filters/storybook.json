@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "storybook",
+  "name": "Storybook",
+  "category": "Cinema",
+  "adjust": {"fade": 0.25, "saturation": 0.1, "tint": 0.1, "contrast": -0.1},
+  "wheels": {"lift": {"hue": 330, "amount": 0.15}, "gain": {"hue": 50, "amount": 0.2}}
+}

@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "cheerful",
+  "name": "Cheerful",
+  "category": "Bright",
+  "adjust": {"saturation": 0.3, "exposure": 0.1, "temperature": 0.1, "contrast": 0.1}
+}

@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "ink",
+  "name": "Ink",
+  "category": "Mono",
+  "adjust": {"saturation": -1, "contrast": 0.7, "blacks": -0.4, "whites": 0.3}
+}

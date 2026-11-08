@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "neo-noir",
+  "name": "Neo Noir",
+  "category": "Cinema",
+  "adjust": {"saturation": -0.6, "contrast": 0.3, "vignette": 0.4},
+  "wheels": {"lift": {"hue": 200, "amount": 0.3}}
+}

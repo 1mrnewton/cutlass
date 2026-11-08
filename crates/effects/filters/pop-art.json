@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "pop-art",
+  "name": "Pop Art",
+  "category": "Creative",
+  "adjust": {"saturation": 0.8, "contrast": 0.5, "clarity": 0.3}
+}

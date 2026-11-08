@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "opposite",
+  "name": "Opposite",
+  "category": "Creative",
+  "adjust": {"hue": 1.0}
+}

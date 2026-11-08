@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "soft-mono",
+  "name": "Soft Mono",
+  "category": "Mono",
+  "adjust": {"saturation": -1, "clarity": -0.4, "brilliance": 0.2, "fade": 0.1}
+}

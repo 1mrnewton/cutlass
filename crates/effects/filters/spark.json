@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "spark",
+  "name": "Spark",
+  "category": "Bright",
+  "adjust": {"contrast": 0.25, "clarity": 0.3, "saturation": 0.2, "whites": 0.15}
+}

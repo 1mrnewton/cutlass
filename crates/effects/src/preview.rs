@@ -17,7 +17,7 @@ use cutlass_jpeg::JpegDecoder;
 use cutlass_model::Micros;
 
 /// The scenes, by name, as the JPEG files the app ships.
-const SCENE_FILES: [(&str, &[u8]); 13] = [
+const SCENE_FILES: [(&str, &[u8]); 15] = [
     ("portrait", include_bytes!("../previews/portrait.jpg")),
     ("city", include_bytes!("../previews/city.jpg")),
     ("beach", include_bytes!("../previews/beach.jpg")),
@@ -31,6 +31,8 @@ const SCENE_FILES: [(&str, &[u8]); 13] = [
     ("food", include_bytes!("../previews/food.jpg")),
     ("street", include_bytes!("../previews/street.jpg")),
     ("park", include_bytes!("../previews/park.jpg")),
+    ("bridge", include_bytes!("../previews/bridge.jpg")),
+    ("picnic", include_bytes!("../previews/picnic.jpg")),
 ];
 
 /// The scene a recipe that names none is shown over.

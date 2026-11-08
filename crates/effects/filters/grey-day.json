@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "grey-day",
+  "name": "Grey Day",
+  "category": "Moody",
+  "adjust": {"saturation": -0.5, "contrast": -0.05, "fade": 0.1}
+}

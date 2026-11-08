@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "rain",
+  "name": "Rain",
+  "category": "Moody",
+  "adjust": {"temperature": -0.25, "saturation": -0.2, "clarity": -0.15, "fade": 0.1, "exposure": -0.1}
+}

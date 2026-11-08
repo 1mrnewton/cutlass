@@ -1864,6 +1864,8 @@ fn asset_column(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect
     if back.clicked() {
         view.library_picked.clear();
         view.library_anchor = None;
+        // The pen's card is lit while the pen is up, so it lets go too.
+        shell.stop_pen();
     }
     if bin
         && back.secondary_clicked()
@@ -2341,6 +2343,9 @@ fn card_grid(
             // The pen is a tool, not a clip: a click picks it up or puts
             // it down.
             if response.clicked() {
+                // Only the pen is lit while it is up.
+                view.library_picked.clear();
+                view.library_anchor = None;
                 added = Some(card.id.clone());
             }
             response.on_hover_text("Draw a shape on the preview");
@@ -2362,6 +2367,8 @@ fn card_grid(
                 view.library_anchor = Some(card.id.clone());
             } else {
                 pick_card(view, cards, &card.id, modifiers);
+                // Picking another card puts the pen down.
+                shell.stop_pen();
             }
         }
         if response.secondary_clicked() {
@@ -11320,6 +11327,16 @@ mod tests {
         let card = text_pos(&output, "Pen").expect("the pen card") - Vec2::new(0.0, 30.0);
         click(&mut shell, &mut view, card);
         assert!(shell.pen().is_some(), "the card picks up the pen");
+        // A click on the empty shelf puts it down, as it unpicks a card.
+        let empty = card + Vec2::new(200.0, 0.0);
+        click(&mut shell, &mut view, empty);
+        assert!(shell.pen().is_none(), "an empty click puts the pen down");
+        let rectangle = text_pos(&frame(&mut shell, &mut view, Vec::new()), "Rectangle").unwrap()
+            - Vec2::new(0.0, 30.0);
+        click(&mut shell, &mut view, rectangle);
+        click(&mut shell, &mut view, card);
+        assert!(shell.pen().is_some());
+        assert!(view.library_picked.is_empty(), "only the pen is lit");
         let lines = galleys(&frame(&mut shell, &mut view, Vec::new()));
         assert!(
             lines

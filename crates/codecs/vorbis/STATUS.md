@@ -96,7 +96,17 @@ FFmpeg's native encoder, stereo only, same check: q1 and q4 at 44.1 kHz (264640 
 
 Checked-in fixtures agree the same way, 135.2 to 139.2 dB, aside from the two short files above. The local `.webm` track, copied to Ogg, is 1,465,920 samples of digital silence at 48 kHz and matches both decoders exactly.
 
-Gates 1 to 3 pass. Gate 4 (floor 0, residue 0 and 1, lookup type 2, many modes) has not run. The malformed-packet and lifecycle tests in `tests/decoder.rs` pass. A recorded fuzz campaign has not run.
+Gates 1 to 3 pass. The malformed-packet and lifecycle tests in `tests/decoder.rs` pass. A recorded fuzz campaign has not run.
+
+Gate 4, streams this crate writes (`tests/synthetic.rs`), mono 44.1 kHz, short block 256 and long block 2048. The same sample count as this decoder, SNR against FFmpeg and libvorbis:
+
+| Stream | Samples | SNR, dB |
+| --- | --- | --- |
+| Residue 0, floor 1, lookup type 1 | 32768 | 142.4 / 137.6 |
+| Residue 1, floor 1, lookup type 1 | 32768 | 143.6 / 136.5 |
+| Floor 0, residue 1 | 32768 | 144.3 / 134.1 |
+| Lookup type 2 | 32768 | libvorbis 136.0; FFmpeg refuses the book |
+| Four modes, short and long blocks | 126336 | 139.0 / 135.5 |
 
 ### Encoder
 
@@ -117,6 +127,5 @@ Interop items: mono 44.1 kHz q 0.4, stereo 44.1 kHz q 0.3, stereo 48 kHz q 0.7, 
 
 ### Not run
 
-- Floor 0, residue 0 and 1, lookup type 2, and many-mode streams, cross-decoded.
 - Vorbis in the desktop reader: open, seek, play, probe, export to `.ogg`, reopen.
 - A Vorbis fuzz campaign, and release measurements of decode and encode throughput, latency, and memory.

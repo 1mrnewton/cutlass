@@ -237,7 +237,7 @@ mod tests {
         let data = [0b1010_1100, 0b0101_0011];
         let mut reader = BitReader::new(&data);
         assert_eq!(reader.read(3), 0b101);
-        assert_eq!(reader.read(7), 0b0110_001);
+        assert_eq!(reader.read(7), 0b011_0001);
         assert_eq!(reader.peek(8), 0b0100_1100);
         assert_eq!(reader.read(6), 0b01_0011);
         assert!(!reader.overrun());

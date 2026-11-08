@@ -5,5 +5,7 @@
 
 mod bits;
 mod dct;
+mod frame;
 mod headers;
+mod mc;
 mod tables;

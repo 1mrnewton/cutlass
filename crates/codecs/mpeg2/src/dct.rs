@@ -103,7 +103,7 @@ columns!(columns_i64, i64, i64::from, |v| v as i32);
 /// raster order; output is `f[y][x]`, not yet saturated to [-256, 255].
 pub(crate) fn idct(block: &mut [i32; 64]) {
     let mut max = 0;
-    for r in block.chunks_exact_mut(8) {
+    for r in block.as_chunks_mut::<8>().0 {
         max = max.max(row(r));
     }
     if max <= COL_I32_LIMIT {

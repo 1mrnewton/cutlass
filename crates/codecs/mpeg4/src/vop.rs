@@ -75,6 +75,8 @@ pub(crate) struct Layer<'a> {
     pub(crate) mbh: usize,
     /// Luma columns and rows motion compensation pads from.
     pub(crate) edge: (u32, u32),
+    /// The picture's luma width and height.
+    pub(crate) size: (u32, u32),
     pub(crate) interlaced: bool,
     pub(crate) quarter: bool,
     pub(crate) quant: Quant<'a>,
@@ -307,6 +309,20 @@ fn rounded_div(a: i32, b: i32) -> i32 {
 
 fn median(a: i32, b: i32, c: i32) -> i32 {
     a.max(b).min(a.min(b).max(c))
+}
+
+/// One axis of an 8x8 block vector, `shift` fraction bits, moved so the
+/// block's integer position stays in `low..=limit`, with no fraction at
+/// `limit`. FFmpeg places 8x8 blocks this way, so a vector past the
+/// picture reads the rows between the picture and the padded edge.
+fn clip_block(origin: i32, m: i32, shift: u32, low: i32, limit: i32) -> i32 {
+    let pos = (origin + (m >> shift)).clamp(low, limit);
+    let fraction = if pos == limit {
+        0
+    } else {
+        m & ((1 << shift) - 1)
+    };
+    ((pos - origin) << shift) | fraction
 }
 
 impl Vop<'_> {
@@ -745,6 +761,7 @@ impl Vop<'_> {
         let fixes = self.layer.fixes;
         let (x, yy) = ((mbx * 16) as i32, (mby * 16) as i32);
         let (cx0, cy0) = ((mbx * 8) as i32, (mby * 8) as i32);
+        let (width, height) = (self.layer.size.0 as i32, self.layer.size.1 as i32);
         match motion {
             Motion::Frame((mx, my)) => {
                 mc::luma_block(&ry, x, yy, 16, 16, mx, my, pel, Rows::Frame, rounding, y);
@@ -769,16 +786,18 @@ impl Vop<'_> {
             Motion::Four(mvs) => {
                 let mut tmp = [0u8; 64];
                 let (mut sx, mut sy) = (0, 0);
+                let shift = if quarter { 2 } else { 1 };
                 for (k, &(mx, my)) in mvs.iter().enumerate() {
                     let (bx, by) = ((k & 1) * 8, (k >> 1) * 8);
+                    let (bx0, by0) = (x + bx as i32, yy + by as i32);
                     mc::luma_block(
                         &ry,
-                        x + bx as i32,
-                        yy + by as i32,
+                        bx0,
+                        by0,
                         8,
                         8,
-                        mx,
-                        my,
+                        clip_block(bx0, mx, shift, -16, width),
+                        clip_block(by0, my, shift, -16, height),
                         pel,
                         Rows::Frame,
                         rounding,
@@ -796,7 +815,8 @@ impl Vop<'_> {
                         sy += my;
                     }
                 }
-                let (cx, cy) = (mc::chroma_4mv(sx), mc::chroma_4mv(sy));
+                let cx = clip_block(cx0, mc::chroma_4mv(sx), 1, -8, width >> 1);
+                let cy = clip_block(cy0, mc::chroma_4mv(sy), 1, -8, height >> 1);
                 mc::chroma_block(&ru, cx0, cy0, 8, 8, cx, cy, Rows::Frame, rounding, u);
                 mc::chroma_block(&rv, cx0, cy0, 8, 8, cx, cy, Rows::Frame, rounding, v);
             }
@@ -1726,5 +1746,28 @@ fn frame_record(mv: (i32, i32)) -> MbRecord {
         kind: Kind::Frame,
         mv: [mv; 4],
         ..MbRecord::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn block_vectors_stop_at_the_picture() {
+        // Block at row 296 of a 300-row picture, ten rows down: the block
+        // starts at row 300 and keeps no half-pel step there.
+        assert_eq!(clip_block(296, 21, 1, -16, 300), 8);
+        assert_eq!(clip_block(296, 20, 1, -16, 300), 8);
+        // Inside the picture the vector is unchanged, fraction included.
+        assert_eq!(clip_block(296, 7, 1, -16, 300), 7);
+        assert_eq!(clip_block(0, -31, 1, -16, 300), -31);
+        // Far above, the block stops sixteen rows out and keeps its fraction.
+        assert_eq!(clip_block(0, -41, 1, -16, 300), -31);
+        // Quarter-pel: two fraction bits, both dropped at the limit.
+        assert_eq!(clip_block(392, 47, 2, -16, 400), 32);
+        assert_eq!(clip_block(392, 13, 2, -16, 400), 13);
+        // Chroma of a 4MV macroblock stops at half the picture.
+        assert_eq!(clip_block(144, 21, 1, -8, 150), 12);
     }
 }

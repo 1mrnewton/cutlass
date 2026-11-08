@@ -15612,6 +15612,41 @@ mod tests {
             "Vorbis sound is written alone, in an Ogg file"
         );
 
+        // Vorbis alone is an Ogg file the probe reads and the shell imports
+        // again as a sound as long as the probe says.
+        run(
+            &mut desktop,
+            ExportRequest {
+                path: temp.path.join("vorbis_sound.mp4"),
+                picture: false,
+                audio: super::SoundFormat {
+                    codec: CodecId::Vorbis,
+                    ..super::SoundFormat::default()
+                },
+                ..ExportRequest::default()
+            },
+        );
+        let vorbis = temp.path.join("vorbis_sound.ogg");
+        let bytes = std::fs::read(&vorbis).unwrap();
+        assert_eq!(&bytes[..4], b"OggS");
+        assert_eq!(&bytes[29..35], b"vorbis");
+        let cutlass_probe::Probed::Audio { duration } = cutlass_probe::probe(&vorbis).unwrap()
+        else {
+            panic!("a Vorbis file probed as video");
+        };
+        assert!(duration > 0);
+        let audios = desktop.draft().unwrap().materials.audios.len();
+        desktop.import_file(&vorbis).unwrap();
+        let materials = &desktop.draft().unwrap().materials.audios;
+        assert_eq!(materials.len(), audios + 1);
+        let imported = materials.last().unwrap();
+        assert!(
+            imported.path.ends_with("vorbis_sound.ogg"),
+            "{}",
+            imported.path
+        );
+        assert_eq!(imported.duration.0, duration);
+
         // A GIF alone, and then again beside a movie, which finds it taken.
         let gif = super::GifExport {
             short_side: 240,

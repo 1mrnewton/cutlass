@@ -234,8 +234,9 @@ fn flac(path: &Path, header: &[u8]) -> Result<Option<Probed>, ProbeError> {
     Ok(Some(Probed::Audio { duration }))
 }
 
-/// Ogg Opus: the first edit's length, which leaves out the pre-skip and
-/// the end trim. Other Ogg mappings (Vorbis, FLAC, Theora) are refused.
+/// Ogg Opus or Ogg Vorbis: the first edit's length, which leaves out an
+/// Opus pre-skip, a Vorbis stream's late start, and the end trim. Other
+/// Ogg mappings (FLAC, Theora) are refused.
 fn ogg(path: &Path, header: &[u8]) -> Result<Option<Probed>, ProbeError> {
     if !matches!(
         cutlass_ogg::probe(header),
@@ -252,9 +253,14 @@ fn ogg(path: &Path, header: &[u8]) -> Result<Option<Probed>, ProbeError> {
         .map_err(|error| ProbeError::new(format!("ogg refused the file: {error}")))?;
     let streams = cutlass_container::Demux::streams(&demux);
     let Some(stream) = streams.iter().find(|stream| {
-        stream.params().codec() == &cutlass_codec::StreamCodec::Known(cutlass_codec::CodecId::Opus)
+        matches!(
+            stream.params().codec(),
+            cutlass_codec::StreamCodec::Known(
+                cutlass_codec::CodecId::Opus | cutlass_codec::CodecId::Vorbis
+            )
+        )
     }) else {
-        return Err(ProbeError::new("only Opus in Ogg is available"));
+        return Err(ProbeError::new("only Opus and Vorbis in Ogg are available"));
     };
     let samples = stream.edits().first().map_or(0, |edit| edit.duration());
     let duration = ticks_to_micros(
@@ -520,6 +526,37 @@ mod tests {
             .expect("head");
         damaged[at..at + 8].copy_from_slice(b"Garbage!");
         std::fs::write(&path, &damaged).expect("write");
+        let error = probe(&path).expect_err("damaged");
+        assert!(error.to_string().contains("ogg"), "{error}");
+    }
+
+    fn ogg_fixture(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../containers/ogg/tests/fixtures")
+            .join(name)
+    }
+
+    /// libvorbis files muxed by GStreamer: as long as ffprobe reads them,
+    /// 22,050 samples at 44.1 kHz and 4,000 at 8 kHz.
+    #[test]
+    fn an_ogg_vorbis_file_is_audio_as_long_as_its_samples() {
+        assert_eq!(
+            probe(&ogg_fixture("stereo_44100_q4.ogg")).expect("vorbis"),
+            Probed::Audio { duration: 500_000 }
+        );
+        assert_eq!(
+            probe(&ogg_fixture("sweep_8000_mono_q0.ogg")).expect("vorbis"),
+            Probed::Audio { duration: 500_000 }
+        );
+        // A damaged identification header leaves no Vorbis stream.
+        let temp = Temp::new();
+        let mut damaged = std::fs::read(ogg_fixture("stereo_44100_q4.ogg")).expect("read");
+        let at = damaged
+            .windows(7)
+            .position(|w| w == b"\x01vorbis")
+            .expect("head");
+        damaged[at + 1..at + 7].copy_from_slice(b"Garbag");
+        let path = temp.write("damaged.ogg", &damaged);
         let error = probe(&path).expect_err("damaged");
         assert!(error.to_string().contains("ogg"), "{error}");
     }

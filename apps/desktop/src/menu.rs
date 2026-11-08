@@ -735,6 +735,21 @@ fn text_width(ctx: &Context, text: &str, size: f32) -> f32 {
     })
 }
 
+/// The Later badge centred on `center`, as a row this build cannot do yet
+/// wears it. Returns where it was drawn.
+pub fn paint_later_badge(ctx: &Context, painter: &egui::Painter, center: Pos2) -> Rect {
+    let badge = Rect::from_center_size(center, Vec2::new(badge_width(ctx), BADGE_HEIGHT));
+    painter.rect_filled(badge, CornerRadius::same(8), tokens::MENU_BADGE);
+    painter.text(
+        badge.center(),
+        Align2::CENTER_CENTER,
+        BADGE,
+        FontId::proportional(BADGE_SIZE),
+        egui::Color32::WHITE,
+    );
+    badge
+}
+
 fn badge_width(ctx: &Context) -> f32 {
     text_width(ctx, BADGE, BADGE_SIZE) + 12.0
 }
@@ -818,17 +833,11 @@ fn paint_menu(
             ink,
         );
         if !item.built {
-            let badge = Rect::from_min_size(
-                Pos2::new(label.right() + 8.0, bounds.center().y - BADGE_HEIGHT / 2.0),
-                Vec2::new(badge_width(ctx), BADGE_HEIGHT),
-            );
-            painter.rect_filled(badge, CornerRadius::same(8), tokens::MENU_BADGE);
-            painter.text(
-                badge.center(),
-                Align2::CENTER_CENTER,
-                BADGE,
-                FontId::proportional(BADGE_SIZE),
-                egui::Color32::WHITE,
+            let width = badge_width(ctx);
+            paint_later_badge(
+                ctx,
+                &painter,
+                Pos2::new(label.right() + 8.0 + width / 2.0, bounds.center().y),
             );
         }
         let end = bounds.right() - ROW_PAD;

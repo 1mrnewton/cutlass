@@ -6505,6 +6505,9 @@ fn paint_lane(
         .rect_filled(head_rect(row), CornerRadius::ZERO, tokens::LANE);
     ui.painter()
         .rect_filled(row, CornerRadius::ZERO, tokens::LANE);
+    if lane.main {
+        paint_cover(shell, ui, row);
+    }
     if lane.main && lane.clips.is_empty() {
         ui.painter().rect_stroke(
             row,
@@ -6546,6 +6549,78 @@ fn paint_lane(
     }
 }
 
+/// The Cover box in the bare column beside the main lane: a pencil and the
+/// word Cover in a dashed square, with the Later badge under it. It picks
+/// no cover yet; a click says so.
+fn paint_cover(shell: &mut Shell, ui: &Ui, row: Rect) {
+    const SIDE: f32 = 52.0;
+    const BADGE_GAP: f32 = 4.0;
+    const BADGE: f32 = 16.0;
+    let column = Rect::from_x_y_ranges(
+        egui::Rangef::new(head_rect(row).right(), row.left()),
+        row.y_range(),
+    );
+    let side = SIDE
+        .min(column.height() - BADGE_GAP - BADGE - 8.0)
+        .max(28.0);
+    let block = side + BADGE_GAP + BADGE;
+    let card = Rect::from_center_size(
+        Pos2::new(column.center().x, column.center().y - (block - side) / 2.0),
+        Vec2::splat(side),
+    );
+    let response = ui.interact(card, ui.scope_id().with("cover"), Sense::click());
+    let painter = ui.painter();
+    let fill = if response.hovered() {
+        tokens::DIALOG_HEAD
+    } else {
+        tokens::LANE_LINE
+    };
+    painter.rect_filled(card, CornerRadius::same(6), fill);
+    let dash = egui::Stroke::new(1.0, tokens::FAINT);
+    let inner = card.shrink(6.0);
+    for (from, to) in [
+        (
+            Pos2::new(inner.left(), card.top()),
+            Pos2::new(inner.right(), card.top()),
+        ),
+        (
+            Pos2::new(inner.left(), card.bottom()),
+            Pos2::new(inner.right(), card.bottom()),
+        ),
+        (
+            Pos2::new(card.left(), inner.top()),
+            Pos2::new(card.left(), inner.bottom()),
+        ),
+        (
+            Pos2::new(card.right(), inner.top()),
+            Pos2::new(card.right(), inner.bottom()),
+        ),
+    ] {
+        painter.extend(egui::Shape::dashed_line(&[from, to], dash, 3.0, 2.0));
+    }
+    let icon = Rect::from_center_size(
+        Pos2::new(card.center().x, card.top() + side * 0.36),
+        Vec2::splat(14.0),
+    );
+    let _ = icons::paint(painter, icon, "editText", tokens::TEXT);
+    painter.text(
+        Pos2::new(card.center().x, card.top() + side * 0.72),
+        Align2::CENTER_CENTER,
+        "Cover",
+        FontId::proportional(11.0),
+        tokens::TEXT,
+    );
+    crate::menu::paint_later_badge(
+        ui.ctx(),
+        painter,
+        Pos2::new(card.center().x, card.bottom() + BADGE_GAP + BADGE / 2.0),
+    );
+    if response.clicked() {
+        shell.set_notice("Cover is not built yet".to_owned());
+    }
+    response.on_hover_text("Pick the project's cover");
+}
+
 /// The lane's kind as an icon at the head's left. Its name is not written
 /// out; [`lane_head`] shows it on hover.
 fn paint_lane_head(ui: &Ui, row: Rect, icon: &str) -> Rect {
@@ -6563,6 +6638,18 @@ const HEAD_STEP: f32 = 25.0;
 /// The head's buttons, left to right: lock, show or hide (not on a sound
 /// lane), mute (only on a lane that makes sound), and more, which opens the
 /// track menu.
+/// The head's slot for `button`, counted after the kind icon: each button
+/// keeps its column on every lane, and a lane without one leaves its slot
+/// empty, so the icons line up down the heads.
+fn head_slot(button: &str) -> f32 {
+    match button {
+        "lock" => 1.0,
+        "hide" => 2.0,
+        "mute" => 3.0,
+        _ => 4.0,
+    }
+}
+
 fn head_buttons(lane: &crate::shell::LaneView) -> Vec<&'static str> {
     let sound = lane.main
         || matches!(
@@ -6578,7 +6665,16 @@ fn head_buttons(lane: &crate::shell::LaneView) -> Vec<&'static str> {
     if sound {
         buttons.push("mute");
     }
-    buttons.push("more");
+    // The track menu's more is on video and audio lanes only, main too; a
+    // right-click on any head still opens the menu.
+    if lane.main
+        || matches!(
+            lane.kind,
+            cutlass_model::TrackType::Video | cutlass_model::TrackType::Audio
+        )
+    {
+        buttons.push("more");
+    }
     buttons
 }
 
@@ -6591,8 +6687,8 @@ fn lane_switches(
     index: usize,
 ) {
     let head = head_rect(row);
-    for (at, button) in head_buttons(lane).into_iter().enumerate() {
-        let step = u16::try_from(at + 1).map_or(0.0, f32::from);
+    for button in head_buttons(lane) {
+        let step = head_slot(button);
         let center = Pos2::new(head.left() + HEAD_FIRST + HEAD_STEP * step, row.center().y);
         let rect = Rect::from_center_size(center, Vec2::splat(22.0));
         let response = ui.interact(rect, ui.scope_id().with((button, index)), Sense::click());
@@ -14249,6 +14345,13 @@ mod tests {
         let head = Pos2::new(at.x - 12.0 - tokens::COVER_WIDTH - 20.0, at.y);
         assert!(!lane_fill_at(cover), "the cover column takes no lane fill");
         assert!(lane_fill_at(head), "the head keeps its lane fill");
+        let cover = text_pos(&output, "Cover").expect("the Cover box");
+        let later = text_pos(&output, "Later").expect("its Later badge");
+        assert!(later.y > cover.y, "the badge sits under the box");
+        assert!(
+            cover.x < at.x && cover.x > head.x,
+            "the box is in the column"
+        );
         let _ = std::fs::remove_dir_all(&temp);
     }
 
@@ -14325,11 +14428,21 @@ mod tests {
             ["lock", "hide", "mute", "more"]
         );
         assert_eq!(head_buttons(&lane(Audio, false)), ["lock", "mute", "more"]);
-        assert_eq!(head_buttons(&lane(Text, false)), ["lock", "hide", "more"]);
+        assert_eq!(head_buttons(&lane(Text, false)), ["lock", "hide"]);
         assert_eq!(
-            head_buttons(&lane(Sticker, false)),
-            ["lock", "hide", "more"]
+            head_buttons(&lane(cutlass_model::TrackType::Mixed, false)),
+            ["lock", "hide", "mute"]
         );
+        assert_eq!(head_buttons(&lane(Sticker, false)), ["lock", "hide"]);
+        // A button keeps its column whichever buttons the lane has.
+        let slots = |lane| {
+            head_buttons(&lane)
+                .into_iter()
+                .map(head_slot)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(slots(lane(Audio, false)), [1.0, 3.0, 4.0]);
+        assert_eq!(slots(lane(Text, false)), [1.0, 2.0]);
         // Every icon the head draws is in the set.
         for name in [
             "lock",

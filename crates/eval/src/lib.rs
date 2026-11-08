@@ -19,6 +19,7 @@
 mod audio;
 mod canvas;
 mod effect;
+mod enhance;
 mod frame;
 mod freeze;
 mod gpu;
@@ -26,9 +27,13 @@ mod heard;
 mod lottie;
 mod media;
 mod nest;
+mod reframe;
+mod relight;
 mod sample;
 mod scenes;
 mod sources;
+mod stable;
+mod steady;
 mod text;
 mod track;
 mod transition;
@@ -40,6 +45,10 @@ pub use cutlass_engine::{
 };
 pub use cutlass_gpu::{ToneCurve, YuvTone};
 pub use cutlass_model::Micros;
+pub use enhance::{
+    Blend, DENOISE_MODEL, ENHANCE_MODEL, EnhanceAsk, EnhanceError, EnhanceFrames,
+    INTERPOLATE_MODEL, MOTION_BLUR_MODEL, copy_ask, enhance_ask,
+};
 pub use frame::{
     EvalError, Fonts, NoFonts, Snapshot, frame, frame_in, layers_in, wait_export_frame,
 };
@@ -49,7 +58,10 @@ pub use freeze::{
 pub use gpu::{Composed, FrameLayers, GpuBackdrop, GpuLayer, GpuSource, YuvSamples};
 pub use heard::{ClipAsk, Heard};
 pub use media::OpenClips;
+pub use reframe::{REFRAME_MODEL, REFRAME_RATE, ReframeAsk, reframe_ask};
+pub use relight::{RELIGHT_MODEL, RelightAsk, relight_ask};
 pub use scenes::{blend_blocks, kept_cuts, scene_split_times};
+pub use stable::{StableAsk, StableError, measure_camera, stable_ask};
 pub use text::{text_size, text_size_at};
 pub use track::{TrackAsk, TrackError, TrackSpan, path_in_clip, track_clip};
 

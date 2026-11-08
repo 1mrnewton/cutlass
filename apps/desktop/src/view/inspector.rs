@@ -46,7 +46,7 @@ pub(super) struct InspectorState {
     pub(super) page: usize,
     pub(super) open: HashSet<String>,
     /// Typed text in a number or word field while it has focus.
-    fields: HashMap<String, String>,
+    pub(super) fields: HashMap<String, String>,
     /// A slider or color being dragged; it is sent when the pointer lets go.
     live: HashMap<String, f64>,
     colors: HashMap<String, Color32>,
@@ -67,7 +67,7 @@ pub(super) struct InspectorState {
     pub(super) wants_lut: bool,
     /// The pictures drawn for the Templates, Bubble and Effects tiles, by
     /// item id. They outlast a pick of another clip.
-    tiles: HashMap<String, egui::TextureHandle>,
+    pub(super) tiles: HashMap<String, egui::TextureHandle>,
 }
 
 /// Where a clip menu row sends the inspector.
@@ -194,21 +194,21 @@ fn video_panel(
             }
             position_size(shell, ui, state, inspection, "Rotate");
             blend(shell, ui, state, inspection, true);
+            stabilize(shell, ui, state);
+            enhance_quality(shell, ui, state);
+            reduce_noise(shell, ui, state);
+            optical_flow(shell, ui, state);
+            super::relight::relight(shell, ui, state);
+            super::reframe::auto_reframe(shell, ui, state);
+            super::motion_blur::motion_blur(shell, ui, state);
             for label in [
-                "Stabilize",
-                "Enhance quality",
-                "Noise reduction",
-                "Optical flow",
                 "AI remove",
                 "AI expand",
                 "AI remix",
                 "Lip sync",
-                "Relight",
-                "Auto reframe",
                 "Removing video flickers",
                 "AI movement",
                 "Camera tracking",
-                "Motion blur",
             ] {
                 later_row(ui, label);
             }
@@ -827,6 +827,245 @@ fn blend(
             }
         }
         opacity_slider(shell, ui, state, inspection);
+    });
+}
+
+/// The steadying levels, as the stored level and the name shown.
+const STABLE_LEVELS: [(i64, &str); 3] = [
+    (cutlass_model::VideoStable::RECOMMENDED, "Recommended"),
+    (cutlass_model::VideoStable::MINIMUM_CUT, "Minimum cut"),
+    (cutlass_model::VideoStable::MOST_STABLE, "Most stable"),
+];
+
+/// Stabilize: on, it steadies the clip at a level, measuring the movie
+/// first if the project has not; the measuring shows its progress here.
+fn stabilize(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState) {
+    let level = shell.stable_level();
+    let header = section(
+        ui,
+        state,
+        "stabilize",
+        "Stabilize",
+        Some((level > 0, true)),
+        false,
+    );
+    if header.toggled {
+        let next = if level > 0 {
+            0
+        } else {
+            cutlass_model::VideoStable::RECOMMENDED
+        };
+        send(shell, move |shell| shell.set_stable(next));
+    }
+    if !header.open || level <= 0 {
+        return;
+    }
+    let progress = shell.stable_progress();
+    body(ui, |ui| {
+        if let Some(done) = progress {
+            note(ui, &format!("Processing {:.1}%", done * 100.0));
+        }
+        let shown = STABLE_LEVELS
+            .iter()
+            .find(|(value, _)| *value == level)
+            .map_or("Recommended", |(_, name)| name);
+        let mut picked = None;
+        label_row(ui, "Level", |ui| {
+            egui::ComboBox::from_id_salt("stable-level")
+                .selected_text(shown)
+                .show_ui(ui, |ui| {
+                    for (value, name) in STABLE_LEVELS {
+                        if ui
+                            .add(ui::Choice::new(value == level, name).wide())
+                            .clicked()
+                        {
+                            picked = Some(value);
+                        }
+                    }
+                });
+        });
+        if let Some(value) = picked.filter(|value| *value != level) {
+            send(shell, move |shell| shell.set_stable(value));
+        }
+    });
+}
+
+/// The Enhance quality levels, as the stored level and the name shown.
+const ENHANCE_LEVELS: [(i64, &str); 2] = [
+    (cutlass_model::Algorithm::HD, "HD"),
+    (cutlass_model::Algorithm::UHD, "UHD"),
+];
+
+/// Enhance quality: on, it makes the clip's enhanced copy at a level as a
+/// job, unless the project has one; the job shows its progress here.
+fn enhance_quality(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState) {
+    let level = shell.enhance_level();
+    let header = section(
+        ui,
+        state,
+        "enhance",
+        "Enhance quality",
+        Some((level > 0, true)),
+        false,
+    );
+    if header.toggled {
+        let next = if level > 0 {
+            0
+        } else {
+            cutlass_model::Algorithm::HD
+        };
+        send(shell, move |shell| shell.set_enhance(next));
+    }
+    if !header.open || level <= 0 {
+        return;
+    }
+    let progress = shell.enhance_progress();
+    body(ui, |ui| {
+        if let Some(done) = progress {
+            note(ui, &format!("Processing {:.1}%", done * 100.0));
+        }
+        let shown = ENHANCE_LEVELS
+            .iter()
+            .find(|(value, _)| *value == level)
+            .map_or("HD", |(_, name)| name);
+        let mut picked = None;
+        label_row(ui, "Level", |ui| {
+            egui::ComboBox::from_id_salt("enhance-level")
+                .selected_text(shown)
+                .show_ui(ui, |ui| {
+                    for (value, name) in ENHANCE_LEVELS {
+                        if ui
+                            .add(ui::Choice::new(value == level, name).wide())
+                            .clicked()
+                        {
+                            picked = Some(value);
+                        }
+                    }
+                });
+        });
+        if let Some(value) = picked.filter(|value| *value != level) {
+            send(shell, move |shell| shell.set_enhance(value));
+        }
+    });
+}
+
+/// The Reduce image noise levels, as the stored level and the name shown.
+const DENOISE_LEVELS: [(i64, &str); 2] = [
+    (cutlass_model::Algorithm::WEAK, "Weak"),
+    (cutlass_model::Algorithm::STRONG, "Strong"),
+];
+
+/// Reduce image noise: on, it makes the clip's denoised copy at a level as
+/// a job, unless the project has one. With Enhance quality on as well, the
+/// one copy is made under Enhance quality and shows its progress there.
+fn reduce_noise(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState) {
+    let level = shell.denoise_level();
+    let header = section(
+        ui,
+        state,
+        "denoise",
+        "Reduce image noise",
+        Some((level > 0, true)),
+        false,
+    );
+    if header.toggled {
+        let next = if level > 0 {
+            0
+        } else {
+            cutlass_model::Algorithm::WEAK
+        };
+        send(shell, move |shell| shell.set_denoise(next));
+    }
+    if !header.open || level <= 0 {
+        return;
+    }
+    let progress = shell.denoise_progress();
+    body(ui, |ui| {
+        if let Some(done) = progress {
+            note(ui, &format!("Processing {:.1}%", done * 100.0));
+        }
+        let shown = DENOISE_LEVELS
+            .iter()
+            .find(|(value, _)| *value == level)
+            .map_or("Weak", |(_, name)| name);
+        let mut picked = None;
+        label_row(ui, "Level", |ui| {
+            egui::ComboBox::from_id_salt("denoise-level")
+                .selected_text(shown)
+                .show_ui(ui, |ui| {
+                    for (value, name) in DENOISE_LEVELS {
+                        if ui
+                            .add(ui::Choice::new(value == level, name).wide())
+                            .clicked()
+                        {
+                            picked = Some(value);
+                        }
+                    }
+                });
+        });
+        if let Some(value) = picked.filter(|value| *value != level) {
+            send(shell, move |shell| shell.set_denoise(value));
+        }
+    });
+}
+
+/// Optical flow: on, it makes the clip's copy filled with frames made
+/// between its own to a frame rate as a job, unless the project has one.
+/// Apply to all gives every movie clip this clip's rate. With Enhance
+/// quality or Reduce image noise on as well, the one copy is made under
+/// that section and shows its progress there.
+fn optical_flow(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState) {
+    let fps = shell.interpolate_level();
+    let header = section(
+        ui,
+        state,
+        "interpolate",
+        "Optical flow",
+        Some((fps > 0, true)),
+        false,
+    );
+    if header.toggled {
+        let next = if fps > 0 {
+            0
+        } else {
+            cutlass_model::Algorithm::FRAME_RATES[0]
+        };
+        send(shell, move |shell| shell.set_interpolate(next));
+    }
+    if !header.open || fps <= 0 {
+        return;
+    }
+    let progress = shell.interpolate_progress();
+    body(ui, |ui| {
+        if let Some(done) = progress {
+            note(ui, &format!("Processing {:.1}%", done * 100.0));
+        }
+        let mut picked = None;
+        label_row(ui, "Frame rate", |ui| {
+            egui::ComboBox::from_id_salt("interpolate-rate")
+                .selected_text(format!("{fps} fps"))
+                .show_ui(ui, |ui| {
+                    for value in cutlass_model::Algorithm::FRAME_RATES {
+                        if ui
+                            .add(ui::Choice::new(value == fps, format!("{value} fps")).wide())
+                            .clicked()
+                        {
+                            picked = Some(value);
+                        }
+                    }
+                });
+        });
+        if let Some(value) = picked.filter(|value| *value != fps) {
+            send(shell, move |shell| shell.set_interpolate(value));
+        }
+        ui.add_space(6.0);
+        if ui
+            .add(ui::Button::new("Apply to all").text_size(12.0))
+            .on_hover_text("Fill every video clip to this frame rate")
+            .clicked()
+        {
+            send(shell, move |shell| shell.set_interpolate_all(fps));
+        }
     });
 }
 
@@ -2889,7 +3128,7 @@ pub(super) fn row_label(ui: &mut Ui, label: &str) {
     );
 }
 
-fn label_row(ui: &mut Ui, label: &str, add: impl FnOnce(&mut Ui)) {
+pub(super) fn label_row(ui: &mut Ui, label: &str, add: impl FnOnce(&mut Ui)) {
     ui.horizontal(|ui| {
         row_label(ui, label);
         add(ui);

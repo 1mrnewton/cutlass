@@ -7,6 +7,7 @@ mod chroma;
 mod color;
 mod crop;
 mod effect;
+mod enhance;
 mod extract;
 mod fade;
 mod follow;
@@ -35,6 +36,7 @@ mod rotate;
 mod shape;
 mod speed;
 mod split;
+mod stable;
 mod text;
 mod track;
 mod transition;
@@ -42,7 +44,9 @@ mod trim;
 mod volume;
 mod words;
 
-use cutlass_model::{Draft, LinkageSettings, Micros, RangeError, TimeRange, TrackAttribute};
+use cutlass_model::{
+    Draft, LinkageSettings, Micros, MotionBlur, RangeError, TimeRange, TrackAttribute,
+};
 
 use crate::request::Request;
 
@@ -108,6 +112,14 @@ pub enum EditError {
     NotAudio,
     /// Extract audio applies to a video clip.
     NotVideo,
+    /// Optical flow fills a clip only to a frame rate it offers.
+    FlowRate,
+    /// A Relight preset id, strength, color or angle is not one it stores.
+    Relight,
+    /// An Auto reframe shape, stabilization or speed is not one it offers.
+    Reframe,
+    /// A Motion blur length, blend, direction or speed is not one it offers.
+    MotionBlur,
     /// The picture has no sound to place.
     NoSound,
     /// The picture's sound is already its own clip.
@@ -324,6 +336,47 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             fade_out,
         } => fade::set_fade(draft, segment_id, fade_id, *fade_in, *fade_out),
         Request::SetCrop { segment_id, crop } => crop::set_crop(draft, segment_id, *crop),
+        Request::SetStable { segment_id, level } => stable::set_stable(draft, segment_id, *level),
+        Request::SetEnhance { segment_id, level } => {
+            enhance::set_enhance(draft, segment_id, *level)
+        }
+        Request::SetDenoise { segment_id, level } => {
+            enhance::set_denoise(draft, segment_id, *level)
+        }
+        Request::SetInterpolate { segment_id, fps } => {
+            enhance::set_interpolate(draft, segment_id, *fps)
+        }
+        Request::SetRelight {
+            segment_id,
+            preset,
+            strength,
+            color,
+            angle,
+        } => enhance::set_relight(draft, segment_id, preset, *strength, color, *angle),
+        Request::SetReframe {
+            segment_id,
+            ratio,
+            stability,
+            speed,
+        } => enhance::set_reframe(draft, segment_id, ratio, *stability, *speed),
+        Request::SetMotionBlur {
+            segment_id,
+            on,
+            blur,
+            blend,
+            direction,
+            times,
+        } => enhance::set_motion_blur(
+            draft,
+            segment_id,
+            *on,
+            &MotionBlur {
+                blur: *blur,
+                blend: *blend,
+                direction: *direction,
+                times: *times,
+            },
+        ),
         Request::SetTextContent {
             segment_id,
             content,

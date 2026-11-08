@@ -1,7 +1,8 @@
 //! The containers and codecs a phone opens.
 //!
-//! Rust audio decoders (FLAC, ALAC, MP3, AC-3, E-AC-3 and Opus) go first, so a file
-//! decodes the same on every platform, and a lossless file bit-exactly.
+//! Rust audio decoders (FLAC, ALAC, MP3, AC-3, E-AC-3, Opus and Vorbis) go
+//! first, so a file decodes the same on every platform, and a lossless file
+//! bit-exactly.
 //! WebP goes first too: ImageIO gives one picture per packet and does not
 //! keep an animation's canvas. The Apple decoders come next on an Apple
 //! phone; a codec they decline falls through to the Rust decoder of the
@@ -17,8 +18,8 @@ use cutlass_eval::ReaderFactory;
 use cutlass_isobmff::IsoBmffFile;
 use cutlass_still::{StillDemux, still_limits};
 
-/// ISOBMFF, WAV, AIFF, FLAC, Ogg Opus, MP3, and stills, decoded with
-/// [`decoders`].
+/// ISOBMFF, WAV, AIFF, FLAC, Ogg (Opus and Vorbis), MP3, and stills, decoded
+/// with [`decoders`].
 #[must_use]
 pub fn readers() -> ReaderFactory {
     let mut readers = ReaderFactory::new();
@@ -33,21 +34,25 @@ pub fn readers() -> ReaderFactory {
     readers
 }
 
-/// FLAC, ALAC, MP3, AC-3, E-AC-3, Opus and WebP, the platform decoders for
-/// this OS, then PNG, GIF, JPEG, AAC, H.264, HEVC, PCM and ProRes.
+/// FLAC, ALAC, MP3, AC-3, E-AC-3, Opus, Vorbis, WebP and Motion JPEG, the
+/// platform decoders for this OS, then PNG, GIF, JPEG, AAC, H.264, HEVC,
+/// MPEG-2, MPEG-4 Visual, PCM and ProRes.
 #[must_use]
 pub fn decoders() -> DecodeFactory {
     let mut decoders = DecodeFactory::new();
     // Rust audio codecs go ahead of the platform ones, so FLAC, ALAC, MP3,
-    // AC-3, E-AC-3 and Opus decode the same on the phone as on the desktop. WebP goes
-    // ahead too: ImageIO gives one picture per packet and does not keep an
-    // animation's canvas.
+    // AC-3, E-AC-3, Opus and Vorbis decode the same on the phone as on the
+    // desktop. WebP goes ahead too: ImageIO gives one picture per packet and
+    // does not keep an animation's canvas. Motion JPEG goes ahead because
+    // VideoToolbox refuses 4:2:2 frames after it opens and weaves no fields.
     cutlass_flac::register_decoders(&mut decoders);
     cutlass_alac::register_decoders(&mut decoders);
     cutlass_mp3::register_decoders(&mut decoders);
     cutlass_ac3::register_decoders(&mut decoders);
     cutlass_opus::register_decoders(&mut decoders);
+    cutlass_vorbis::register_decoders(&mut decoders);
     cutlass_webp::register_decoders(&mut decoders);
+    cutlass_mjpeg::register_decoders(&mut decoders);
     #[cfg(target_vendor = "apple")]
     cutlass_platform_apple::register_decoders(&mut decoders);
     cutlass_png::register_decoders(&mut decoders);
@@ -55,8 +60,12 @@ pub fn decoders() -> DecodeFactory {
     cutlass_jpeg::register_decoders(&mut decoders);
     cutlass_aac::register_decoders(&mut decoders);
     cutlass_h264::register_decoders(&mut decoders);
-    // HEVC in Rust, after the platform decoders.
+    // HEVC, MPEG-2 and MPEG-4 Visual in Rust, after the platform decoders.
+    // On Apple the platform claims MPEG-4 Visual. Its opener here decodes
+    // that codec when the platform opener is absent.
     cutlass_hevc::register_decoders(&mut decoders);
+    cutlass_mpeg2::register_decoders(&mut decoders);
+    cutlass_mpeg4::register_engine_decoders(&mut decoders);
     cutlass_pcm::register_decoders(&mut decoders);
     cutlass_prores::register_decoders(&mut decoders);
     decoders
@@ -356,6 +365,58 @@ mod tests {
         }
     }
 
+    /// The phone encodes and decodes Vorbis with the Rust codec: the same
+    /// packets and samples as `VorbisEncoder` and `VorbisDecoder` opened
+    /// directly, so a platform codec registered ahead of it fails here.
+    #[test]
+    fn the_rust_vorbis_codec_goes_ahead_of_the_platform_one() {
+        let mut spec = CodecParams::audio(CodecId::Vorbis, 48_000, ChannelLayout::stereo());
+        spec.bitrate = 128_000;
+        let samples: Vec<f32> = (0..2 * 9600)
+            .map(|i| ((i as f32) * 0.017).sin() * 0.4)
+            .collect();
+        let input = AudioInput {
+            pcm: Pcm::from_f32(48_000, ChannelLayout::stereo(), samples).expect("pcm"),
+        };
+        let encode = |encoder: &mut dyn Encoder| {
+            let mut packets = encoder.push(&input).expect("push");
+            packets.extend(encoder.drain().expect("drain"));
+            packets
+        };
+        let packets = encode(&mut cutlass_vorbis::VorbisEncoder::open(&spec).expect("encoder"));
+        let mut phone = crate::export::encoders()
+            .open(&spec)
+            .expect("phone encoder");
+        assert_eq!(phone.codec(), CodecId::Vorbis);
+        assert_eq!(encode(phone.as_mut()), packets);
+        let mut listen = CodecParams::audio(CodecId::Vorbis, 48_000, ChannelLayout::stereo());
+        listen.extra = packets
+            .iter()
+            .flat_map(|packet| &packet.side)
+            .find_map(|side| match side {
+                cutlass_encode::SideData::Config(config) => Some(config.clone()),
+                _ => None,
+            })
+            .expect("vorbis headers");
+        let decode = |decoder: &mut dyn Decoder| {
+            let mut out: Vec<f32> = Vec::new();
+            for packet in &packets {
+                for output in decoder.push(packet).expect("push") {
+                    if let Output::Audio(audio) = output {
+                        out.extend(audio.pcm.as_f32().expect("f32"));
+                    }
+                }
+            }
+            out
+        };
+        let mut rust = cutlass_vorbis::VorbisDecoder::open(&listen).expect("rust");
+        let expected = decode(&mut rust);
+        assert!(expected.iter().any(|sample| sample.abs() > 0.1));
+        let mut phone = super::decoders().open(&listen).expect("phone");
+        assert_eq!(phone.codec(), CodecId::Vorbis);
+        assert_eq!(decode(phone.as_mut()), expected);
+    }
+
     /// The phone decodes ALAC with the Rust decoder: the same buffers as
     /// `AlacDecoder`, a 5.1 stream in ALAC's own channel order, and the same
     /// refusal of a damaged frame. On an Apple phone the platform decoder,
@@ -495,6 +556,54 @@ mod tests {
         }
     }
 
+    /// The phone plays MPEG-2: the platform decoder where it takes the
+    /// stream, else the Rust one, gives every picture of a stream with B
+    /// pictures once, in display order.
+    #[test]
+    fn the_phone_decodes_mpeg2() {
+        use cutlass_encode::{VideoEncoder, VideoInput};
+        let (width, height) = (64, 48);
+        let mut encoder =
+            cutlass_mpeg2::Mpeg2Encoder::open(&CodecParams::video(CodecId::Mpeg2, width, height))
+                .expect("encoder");
+        let mut packets = Vec::new();
+        for t in 0..8u8 {
+            let luma: Vec<u8> = (0..width * height)
+                .map(|i| (i % width) as u8 * 3 + t * 4)
+                .collect();
+            let chroma = vec![128; (width * height / 4) as usize];
+            let picture =
+                cutlass_decode::Yuv420p::try_new(width, height, luma, chroma.clone(), chroma)
+                    .expect("picture");
+            let input = VideoInput {
+                picture,
+                pts: i64::from(t),
+                duration: 1,
+                timescale: 25,
+                force_keyframe: false,
+            };
+            packets.extend(encoder.push(&input).expect("push"));
+        }
+        packets.extend(VideoEncoder::drain(&mut encoder).expect("drain"));
+        let mut params = CodecParams::video(CodecId::Mpeg2, width, height);
+        params.extra = encoder.extradata().to_vec();
+        let mut phone = super::decoders().open(&params).expect("phone");
+        let mut times = Vec::new();
+        for packet in &packets {
+            for output in phone.push(packet).expect("push") {
+                if let Output::Picture(picture) = output {
+                    times.push(picture.pts());
+                }
+            }
+        }
+        for output in phone.drain().expect("drain") {
+            if let Output::Picture(picture) = output {
+                times.push(picture.pts());
+            }
+        }
+        assert_eq!(times, (0..8).collect::<Vec<i64>>());
+    }
+
     /// A lossless 1x1 WebP of one opaque red pixel, as `cwebp -lossless` 1.6.0
     /// wrote it.
     const RED: [u8; 36] = [
@@ -552,5 +661,70 @@ mod tests {
             }
         }
         assert_eq!(frames, 6);
+    }
+
+    /// A phone decodes and encodes Motion JPEG with the Rust codec: the
+    /// same RGBA and the same packet bytes. The frame is 4:2:2, which the
+    /// Apple platform decoder, put first, opens for and then refuses.
+    #[test]
+    fn a_phone_codes_motion_jpeg_in_rust_ahead_of_the_platform() {
+        use cutlass_decode::PixelFormat;
+        use cutlass_encode::{CpuFrame, FrameInput, FrameTime};
+
+        let rgba: Vec<u8> = (0..64u32 * 48)
+            .flat_map(|i| [(i % 64 * 4) as u8, (i / 64 * 5) as u8, 90, 255])
+            .collect();
+        let params = CodecParams::with_format(CodecId::Mjpeg, 64, 48, PixelFormat::Rgba8);
+        let frame = cutlass_mjpeg::MjpegEncoder::open(&params)
+            .expect("encoder")
+            .with_sampling(cutlass_mjpeg::Sampling::Yuv422)
+            .encode_rgba(64, 48, &rgba, 1, 30)
+            .expect("frame");
+        let packet = cutlass_decode::Packet::video(frame, 0, 1, 30, true);
+        let decode = |decoders: &cutlass_decode::DecodeFactory| {
+            let mut decoder = decoders.open(&params)?;
+            let mut pictures = Vec::new();
+            for output in decoder.push(&packet)? {
+                if let Output::Picture(picture) = output {
+                    pictures.push(picture.into_cpu().ok_or(
+                        cutlass_decode::CodecError::InvalidApi {
+                            what: "not a cpu picture",
+                        },
+                    )?);
+                }
+            }
+            Ok::<_, cutlass_decode::CodecError>(pictures)
+        };
+        let mut rust = cutlass_decode::DecodeFactory::new();
+        cutlass_mjpeg::register_decoders(&mut rust);
+        let expected = decode(&rust).expect("rust");
+        assert_eq!(expected.len(), 1);
+        assert_eq!(decode(&super::decoders()).expect("phone"), expected);
+
+        let time = FrameTime::new(0, 1, 30).expect("time");
+        let input = FrameInput::Cpu(
+            CpuFrame::new(64, 48, PixelFormat::Rgba8, rgba.clone(), time).expect("frame"),
+        );
+        let mut phone = crate::export::encoders()
+            .open(&params)
+            .expect("phone encoder");
+        let packets = phone.push_frame(&input).expect("encode");
+        let ours = cutlass_mjpeg::MjpegEncoder::open(&params)
+            .expect("encoder")
+            .encode_rgba(64, 48, &rgba, 1, 30)
+            .expect("frame");
+        assert_eq!(packets.len(), 1);
+        assert_eq!(packets[0].data, ours);
+
+        #[cfg(target_vendor = "apple")]
+        {
+            let mut reversed = cutlass_decode::DecodeFactory::new();
+            cutlass_platform_apple::register_decoders(&mut reversed);
+            cutlass_mjpeg::register_decoders(&mut reversed);
+            assert!(
+                decode(&reversed).ok() != Some(expected),
+                "the platform decoder was not picked"
+            );
+        }
     }
 }

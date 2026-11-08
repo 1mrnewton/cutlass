@@ -29,7 +29,7 @@ The encoder writes baseline SOF0 only. Grey is 4:4:4. Color is 4:2:0. Quality 1.
 
 `register_decoders` and `register_encoders` register `CodecId::Jpeg` the same way PNG registers itself. The desktop registers the software opener after the platform opener. On macOS, ImageIO accepts JPEG first. Tests in this crate open the software factory directly. ImageIO is not the proof for these gates.
 
-EXIF orientation, when the APP1 TIFF block is readable, is stored on `JpegInfo` and is not applied. The coded width and height stay the SOF values. A broken EXIF block is ignored. The picture still decodes.
+EXIF orientation, when the APP1 TIFF block is readable, is stored on `JpegInfo`, and `decode_picture` turns the still upright by it. `JpegInfo` keeps the SOF width and height. A broken EXIF block is ignored. The picture still decodes.
 
 ## Resource limits
 
@@ -71,9 +71,11 @@ Lossy comparison checks size and format. Analytic blocks also check samples. The
 | Baseline SOF0, 8-bit, 1 or 3 components | Grey or RGB | Grey 4:4:4, color 4:2:0 | Hand-built zero, DC, and AC blocks. cjpeg and ffmpeg files. This encoder opened by ffmpeg | Verified |
 | Extended sequential SOF1, 8-bit Huffman | Same scan as baseline, including more than two Huffman ids | Not emitted | Marker `0xC1` on the zero block | Verified |
 | Progressive SOF2 Huffman, including successive approximation | DC and AC first scans and refinement | Not emitted | Hand-built AC scan, DC point transform, and AC correction. cjpeg `-progressive` | Verified |
-| Restart intervals | Reset DC predictors and the EOB run | Not emitted | Hand-built DRI of 1. cjpeg `-restart 1` | Verified on decode |
+| Restart intervals | Reset DC predictors and the EOB run. A marker other than the next RSTn is malformed | `Coefficients` with `restart_interval` | Hand-built DRI of 1. cjpeg `-restart 1` and `-restart 2` match djpeg | Verified on decode |
+| Sample accuracy | libjpeg `islow` IDCT and triangle upsampling | libjpeg `islow` FDCT, rounding, and chroma bias | RGB equals `djpeg -dct int` in ten cjpeg layouts and on a real frame | Verified |
+| Planar core for Motion JPEG | `decode_image` with carried `Tables`, `Image` planes cropped per A.1.1 | `Planes`, `Coefficients` (transform once, count bits, write) | Crate tests; used by `cutlass-mjpeg` | Verified |
 | Frame size | Width and height from SOF. `read_jpeg_info` stops at the first SOS | Taken from the still | Header-only file returns the size and does not decode. Orientation 6 does not swap the axes | Verified |
-| EXIF orientation | Exposed on `JpegInfo`, not applied. Bad EXIF ignored | Not emitted | APP1 orientation 6, and a broken APP1 | Verified |
+| EXIF orientation | Exposed on `JpegInfo` and applied by `decode_picture`. Bad EXIF ignored | Not emitted | APP1 orientation 6, and a broken APP1 | Verified |
 | DQT 8-bit and 16-bit, DHT, DRI, APP0–15, COM | Accepted. A zero quantizer is malformed | 8-bit Annex K tables and standard Huffman tables. APP0 JFIF | Hand-built tables. Encoder output opens in ffmpeg | Verified |
 | Arithmetic SOF9–11, SOF13–15, and DAC | Refused, `what` is `arithmetic coding` | Not emitted | Each marker, including through `read_jpeg_info` | Verified, refused |
 | Lossless, differential, JPEG-LS, hierarchical, DNL, reserved `0xC8` | Refused by those names | Not emitted | One marker each | Verified, refused |
@@ -83,7 +85,7 @@ Lossy comparison checks size and format. Analytic blocks also check samples. The
 | Quality 1..=100 | n/a | IJG scale. Quality 10 is smaller than quality 90 on a noisy picture | Encoder tests | Verified |
 | Factory and export selection | `DecodeFactory` for `CodecId::Jpeg` | `EncodeFactory` for `CodecId::Jpeg`. Desktop registers it after the platform opener | Crate factory test and `apps/desktop` | Verified |
 | Motion JPEG, the still container, ImageIO | Not this crate | Not this crate | Outside the issues | Unsupported |
-| Fancy upsampling, ICC application, thumbnails, bitrate control | Box upsampling. ICC and thumbnails are not applied. Bitrate does not select a quantizer | 4:2:0 box average | Recorded so a caller does not expect them | Unsupported |
+| ICC application, thumbnails, bitrate control | ICC and thumbnails are not applied. Bitrate does not select a quantizer in `JpegEncoder` | n/a | Recorded so a caller does not expect them | Unsupported |
 
 ## Interoperability consequences
 
@@ -91,8 +93,9 @@ Lossy comparison checks size and format. Analytic blocks also check samples. The
 - ImageIO accepts JPEG on macOS and converts to RGBA, including orientation. That decoder is not this crate and does not satisfy these gates.
 - Trailing bytes after a complete EOI are ignored. A second image in the same buffer is not a second frame.
 - An AC scan before any DC coefficient for that component is malformed. A repeated band is malformed. A progressive image that ends after the DC scan is legal: the missing AC coefficients stay zero.
-- The encoder pads the last entropy byte with ones and stuffs `0xFF` as `FF 00`. Restart markers are not written.
-- Color 4:4:4 and 4:2:2 files decode. The encoder does not emit them. It emits 4:2:0 for RGB.
+- The encoder pads the last entropy byte with ones and stuffs `0xFF` as `FF 00`. `JpegEncoder` writes no restart markers.
+- Color 4:4:4, 4:2:2, and 4:4:0 files decode. `JpegEncoder` emits 4:2:0 for RGB; `Coefficients` also writes 4:4:4 and 4:2:2.
+- A scan whose Huffman table was never defined is malformed here. Motion JPEG's default tables are `Tables::standard_huffman`, which `cutlass-mjpeg` uses and this decoder does not.
 
 ## Lifecycle
 
@@ -118,6 +121,10 @@ Followed `.cursor/skills/ship-codec/SKILL.md` and `references/video-image.md`, p
 - `../local-files` has no `.jpg`. When the folder and ffmpeg are present, the test extracts one frame from the smallest video and decodes it. The test returns without failing when the folder is absent.
 
 ### Performance
+
+Integer core, Sun Nov 8 2026, release, one thread, best of 10, Apple M5 Pro: 1920×1080 4:2:0 `cjpeg -quality 85` frame of real footage (275 394 bytes). `decode_picture` 9.5 ms (21.2 ms before this core), planar `decode_image` 3.8 ms, `to_rgba` 3.4 ms. `push_picture` quality 75 15.5 ms (16.2 ms before), 241 548 bytes.
+
+Earlier record, before the integer core:
 
 Release, one thread, rustc 1.99.1, Apple M5 Pro. Workload: 1920×1080 RGB encoded at quality 75 (4:2:0) and decoded back. Two runs: encode 19 ms then 12 ms, decode 22 ms then 17 ms, 97 959 bytes. Both are inside the 500 ms and 250 ms budgets. The slower run is the number to keep. This is not a memory-profile number. The process peak was not sampled separately from the test harness.
 

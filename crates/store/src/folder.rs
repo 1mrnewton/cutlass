@@ -32,7 +32,7 @@ const META_FILE: &str = "draft_meta_info.json";
 const TIMELINES_DIR: &str = "Timelines";
 const ATTACHMENT_DIR: &str = "common_attachment";
 const ID_MAP_FILE: &str = "attachment_id_mapping.json";
-const RESOURCES_DIR: &str = "Resources";
+pub(crate) const RESOURCES_DIR: &str = "Resources";
 const BIZ_CONFIG_FILE: &str = "draft_biz_config.json";
 const VIRTUAL_STORE_FILE: &str = "draft_virtual_store.json";
 const DESKTOP_OS: &[&str] = &["windows", "mac", "macOS"];
@@ -694,7 +694,7 @@ fn write_sidecars(root: &Path, folder: &Folder) -> Result<(), StoreError> {
     Ok(())
 }
 
-fn write_bytes(root: &Path, path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
+pub(crate) fn write_bytes(root: &Path, path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
     stay_inside(root, path)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| io_error(parent, error))?;
@@ -733,7 +733,7 @@ fn canonicalize_root(path: &Path) -> Result<PathBuf, StoreError> {
 /// Refuse a path whose existing ancestor, or whose own target, sits outside `root`.
 /// `root` is already canonical. A missing tail is allowed only when every existing
 /// ancestor is still inside the folder and the lexical path does not climb out.
-fn stay_inside(root: &Path, path: &Path) -> Result<(), StoreError> {
+pub(crate) fn stay_inside(root: &Path, path: &Path) -> Result<(), StoreError> {
     if path
         .components()
         .any(|component| component == Component::ParentDir)
@@ -786,7 +786,7 @@ fn read_optional(path: &Path) -> Result<Option<Vec<u8>>, StoreError> {
     }
 }
 
-fn io_error(path: &Path, error: std::io::Error) -> StoreError {
+pub(crate) fn io_error(path: &Path, error: std::io::Error) -> StoreError {
     StoreError::Io {
         path: path.to_path_buf(),
         message: error.to_string(),

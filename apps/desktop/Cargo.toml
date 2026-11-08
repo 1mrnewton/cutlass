@@ -99,3 +99,4 @@ pollster = "1.0"
 egui_kittest = { version = "=0.37.0", features = ["wgpu"] }
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 cutlass-color = { path = "../../crates/color", version = "0.1.0" }
+cutlass-motion = { path = "../../crates/motion", version = "0.1.0" }

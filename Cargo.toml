@@ -154,6 +154,12 @@ opt-level = 3
 [profile.dev.package.cutlass-h264]
 opt-level = 3
 
+# MPEG-2 plays 1080 lines and exports through the Rust encoder on every
+# host. Unoptimised, its encoder tests take 14 s instead of 0.3 s on an M5.
+# Overflow checks and debug assertions stay on.
+[profile.dev.package.cutlass-mpeg2]
+opt-level = 3
+
 # The WebP and ProRes tests round-trip whole pictures through libwebp,
 # FFmpeg and the platform readers. Unoptimised, the WebP lossless
 # round-trip ran past 28 minutes on an M5 without finishing; optimised it
@@ -170,6 +176,13 @@ opt-level = 3
 [profile.dev.package.cutlass-av1]
 opt-level = 3
 [profile.dev.package.cutlass-hevc]
+opt-level = 3
+
+# MPEG-4 Visual playback runs the Rust decoder on Linux, and on the other
+# platforms when hardware decode is off. Unoptimised, the inverse transform
+# and motion compensation miss a frame budget at 1080p. Overflow checks and
+# debug assertions stay on.
+[profile.dev.package.cutlass-mpeg4]
 opt-level = 3
 
 # The vision tests run MobileSAM on the CPU. Unoptimised, one frame takes

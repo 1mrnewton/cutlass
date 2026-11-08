@@ -230,6 +230,122 @@ fn ffmpeg_reads_files_this_muxer_wrote() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// FFmpeg's Motion JPEG movie is a `jpeg` entry with a `fiel` box, and its
+/// MP4 is `mp4v` with object type 0x6C. This demuxer reads the packets
+/// FFmpeg does, and FFmpeg reads the movie the export muxer writes back.
+#[test]
+fn ffmpeg_motion_jpeg_files_demux_and_remux() {
+    use cutlass_codec::{CodecId, StreamCodec};
+    use cutlass_container::{Demux as _, Mux as _, NewStream, TrackDuration};
+    let Some(ffmpeg) = tool("ffmpeg") else {
+        eprintln!("not available: ffmpeg");
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!("isobmff-mjpeg-oracle-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    // FFmpeg takes the field order it stores from the frames.
+    let make = |name: &str, field: &str| {
+        let path = dir.join(name);
+        run(
+            &ffmpeg,
+            &[
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=duration=0.5:size=48x32:rate=10",
+                "-c:v",
+                "mjpeg",
+                "-pix_fmt",
+                "yuvj422p",
+                "-vf",
+                &format!("setfield={field}"),
+                path.to_str().unwrap(),
+            ],
+        );
+        path
+    };
+    let cases = [
+        (make("fields.mov", "bff"), b"jpeg\x02\x06".to_vec()),
+        (make("progressive.mov", "prog"), b"jpeg\x01\x00".to_vec()),
+        (make("movie.mp4", "prog"), Vec::new()),
+    ];
+    for (path, extradata) in cases {
+        let file = crate::IsoBmffFile::open(std::fs::File::open(&path).unwrap()).unwrap();
+        let stream = file.streams()[0].clone();
+        assert_eq!(
+            stream.params().codec(),
+            &StreamCodec::Known(CodecId::Mjpeg),
+            "{}",
+            path.display()
+        );
+        assert_eq!(
+            stream.params().extradata(),
+            extradata.as_slice(),
+            "{}",
+            path.display()
+        );
+        let (_, legacy) = packets_of(&path);
+        assert_ffmpeg_sees_packets(&ffmpeg, &path, &legacy, "v:0");
+
+        let mut file = file;
+        let mut mux =
+            crate::Mp4Mux::with_brand(std::io::Cursor::new(Vec::new()), crate::FileBrand::Mov);
+        let track = mux
+            .add_stream(NewStream {
+                params: cutlass_codec::StreamParams::video(
+                    StreamCodec::Known(CodecId::Mjpeg),
+                    stream.params().size().unwrap(),
+                    Vec::new(),
+                ),
+                timescale: stream.timescale(),
+                language: None,
+            })
+            .unwrap();
+        let mut end = 0;
+        while let Some(packet) = file.read_packet().unwrap() {
+            let time = packet.timestamp();
+            end = end.max(time.presentation_or_decode().unwrap() + time.duration().unwrap());
+            let packet = cutlass_codec::Packet::try_new(
+                track.get(),
+                packet.bytes().to_vec(),
+                time,
+                packet.timescale(),
+                packet.keyframe(),
+            )
+            .unwrap();
+            mux.write_packet(&packet).unwrap();
+        }
+        mux.finish(&[TrackDuration {
+            track,
+            timescale: stream.timescale(),
+            ticks: end,
+        }])
+        .unwrap();
+        let remuxed = dir.join("remux.mov");
+        std::fs::write(&remuxed, mux.into_writer().unwrap().into_inner()).unwrap();
+        assert_ffmpeg_sees_packets(&ffmpeg, &remuxed, &legacy, "v:0");
+        let probed = Command::new(tool("ffprobe").unwrap_or_else(|| PathBuf::from("ffprobe")))
+            .args([
+                "-v",
+                "error",
+                "-show_entries",
+                "stream=codec_name,codec_tag_string",
+                "-of",
+                "csv=p=0",
+            ])
+            .arg(&remuxed)
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&probed.stdout).trim(), "mjpeg,jpeg");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 fn packets_of(path: &Path) -> (crate::StreamParams, Vec<crate::Packet>) {
     let bytes = std::fs::read(path).unwrap();
     let mut source = SliceSource::new(&bytes);

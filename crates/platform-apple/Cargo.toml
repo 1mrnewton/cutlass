@@ -11,6 +11,7 @@ cutlass-decode = { path = "../decode", version = "0.1.0" }
 cutlass-encode = { path = "../encode", version = "0.1.0" }
 
 [dev-dependencies]
+cutlass-mpeg4 = { path = "../codecs/mpeg4", version = "0.1.0" }
 pollster = "1.0"
 
 # The preview imports a decoded IOSurface into the renderer's Metal device.

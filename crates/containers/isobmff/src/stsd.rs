@@ -104,8 +104,20 @@ fn parse_visual(
     let codec = map_codec(fourcc, configured.object_type);
     // A ProRes entry has no configuration box. Its code names the profile,
     // which sets the decoder's output depth, so it rides as the extradata.
+    // A QuickTime Motion JPEG code names its framing, and `fiel` the stored
+    // field order, so both ride there too. ISO/IEC 14496-1 defines no
+    // decoder-specific info for JPEG (0x6C), so an `mp4v` entry's is
+    // dropped, as FFmpeg's decoder ignores it.
     let extradata = if codec == CodecId::ProRes && configured.extradata.is_empty() {
         fourcc.to_vec()
+    } else if codec == CodecId::Mjpeg && fourcc == *b"mp4v" {
+        Vec::new()
+    } else if codec == CodecId::Mjpeg && configured.extradata.is_empty() {
+        let mut extradata = fourcc.to_vec();
+        if let Some(fiel) = configured.fiel {
+            extradata.extend_from_slice(&fiel);
+        }
+        extradata
     } else {
         configured.extradata
     };
@@ -225,6 +237,8 @@ struct Configured {
     chan: Option<Vec<u8>>,
     color: Option<ColorTags>,
     object_type: Option<u8>,
+    /// A `fiel` box: the field count, then the stored order.
+    fiel: Option<[u8; 2]>,
 }
 
 fn configuration(data: &[u8], budget: &mut u32, depth: u32) -> Result<Configured, Error> {
@@ -232,6 +246,7 @@ fn configuration(data: &[u8], budget: &mut u32, depth: u32) -> Result<Configured
     let mut color = None;
     let mut object_type = None;
     let mut chan = None;
+    let mut fiel = None;
     let boxes = parse::atoms(data, 0, budget)?;
     for atom in boxes {
         match &atom.kind {
@@ -260,6 +275,11 @@ fn configuration(data: &[u8], budget: &mut u32, depth: u32) -> Result<Configured
             }
             b"colr" => color = color.or(parse_colr(atom.payload)),
             b"chan" => chan = Some(atom.payload.to_vec()),
+            b"fiel" => {
+                if let [count, order, ..] = *atom.payload {
+                    fiel = Some([count, order]);
+                }
+            }
             _ => {}
         }
     }
@@ -268,6 +288,7 @@ fn configuration(data: &[u8], budget: &mut u32, depth: u32) -> Result<Configured
         chan,
         color,
         object_type,
+        fiel,
     })
 }
 
@@ -439,6 +460,64 @@ fn known_video(fourcc: [u8; 4]) -> bool {
             | b"ap4h"
             | b"ap4x"
             | b"encv"
+    ) || mpeg_video(fourcc)
+}
+
+/// QuickTime sample entries for MPEG-1 and MPEG-2 video: camcorder, HDV,
+/// IMX, and XDCAM. Both are one H.262 elementary stream.
+fn mpeg_video(fourcc: [u8; 4]) -> bool {
+    matches!(
+        &fourcc,
+        b"mp2v"
+            | b"m2v1"
+            | b"hdv1"
+            | b"hdv2"
+            | b"hdv3"
+            | b"hdv4"
+            | b"hdv5"
+            | b"hdv6"
+            | b"hdv7"
+            | b"hdv8"
+            | b"hdv9"
+            | b"hdva"
+            | b"mx3n"
+            | b"mx3p"
+            | b"mx4n"
+            | b"mx4p"
+            | b"mx5n"
+            | b"mx5p"
+            | b"xd51"
+            | b"xd54"
+            | b"xd55"
+            | b"xd59"
+            | b"xd5a"
+            | b"xd5b"
+            | b"xd5c"
+            | b"xd5d"
+            | b"xd5e"
+            | b"xd5f"
+            | b"xdv1"
+            | b"xdv2"
+            | b"xdv3"
+            | b"xdv4"
+            | b"xdv5"
+            | b"xdv6"
+            | b"xdv7"
+            | b"xdv8"
+            | b"xdv9"
+            | b"xdva"
+            | b"xdvb"
+            | b"xdvc"
+            | b"xdvd"
+            | b"xdve"
+            | b"xdvf"
+            | b"xdhd"
+            | b"xdh2"
+            | b"AVmp"
+            | b"m1v "
+            | b"m1v1"
+            | b"mpeg"
+            | b"mp1v"
     )
 }
 
@@ -449,8 +528,15 @@ fn map_codec(fourcc: [u8; 4], oti: Option<u8>) -> CodecId {
         b"av01" => CodecId::Av1,
         b"vp08" => CodecId::Vp8,
         b"vp09" => CodecId::Vp9,
-        b"mp4v" => CodecId::Mpeg4,
-        b"mp2v" => CodecId::Mpeg2,
+        // ISO/IEC 14496-1 objectTypeIndication: MPEG-2 Simple, Main, SNR,
+        // Spatial, High and 4:2:2, then MPEG-1; 0x6C is JPEG. An absent or
+        // unlisted one stays MPEG-4 Visual (0x20).
+        b"mp4v" => match oti {
+            Some(0x60..=0x65 | 0x6A) => CodecId::Mpeg2,
+            Some(0x6C) => CodecId::Mjpeg,
+            _ => CodecId::Mpeg4,
+        },
+        _ if mpeg_video(fourcc) => CodecId::Mpeg2,
         b"jpeg" | b"mjpa" | b"mjpb" => CodecId::Mjpeg,
         b"apch" | b"apcn" | b"apcs" | b"apco" | b"ap4h" | b"ap4x" => CodecId::ProRes,
         b"Opus" => CodecId::Opus,
@@ -523,5 +609,161 @@ fn read_u16(bytes: &[u8]) -> u16 {
     match bytes {
         [a, b, ..] => u16::from_be_bytes([*a, *b]),
         _ => 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn boxed(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+        let mut out = u32::try_from(payload.len() + 8)
+            .unwrap()
+            .to_be_bytes()
+            .to_vec();
+        out.extend_from_slice(kind);
+        out.extend_from_slice(payload);
+        out
+    }
+
+    fn visual(code: &[u8; 4], children: &[u8]) -> (CodecId, Vec<u8>) {
+        let mut entry = vec![0u8; 78];
+        entry[7] = 1;
+        entry[24..26].copy_from_slice(&720u16.to_be_bytes());
+        entry[26..28].copy_from_slice(&486u16.to_be_bytes());
+        entry.extend_from_slice(children);
+        let mut stsd = vec![0, 0, 0, 0, 0, 0, 0, 1];
+        stsd.extend(boxed(code, &entry));
+        let mut budget = 64;
+        let mut entries = parse_stsd(&stsd, *b"vide", &mut budget, 0).unwrap();
+        let desc = entries.remove(0);
+        assert!(matches!(desc.kind, MediaKind::Video(video) if video.height == 486));
+        (desc.codec, desc.extradata)
+    }
+
+    #[test]
+    fn a_motion_jpeg_entry_carries_its_code_and_field_order() {
+        assert_eq!(visual(b"jpeg", &[]), (CodecId::Mjpeg, b"jpeg".to_vec()));
+        let fiel = boxed(b"fiel", &[2, 14]);
+        assert_eq!(
+            visual(b"mjpa", &fiel),
+            (CodecId::Mjpeg, b"mjpa\x02\x0e".to_vec())
+        );
+        assert_eq!(
+            visual(b"mjpb", &boxed(b"fiel", &[1, 0])),
+            (CodecId::Mjpeg, b"mjpb\x01\x00".to_vec())
+        );
+        // A `fiel` box too short to name an order adds nothing.
+        assert_eq!(
+            visual(b"jpeg", &boxed(b"fiel", &[2])),
+            (CodecId::Mjpeg, b"jpeg".to_vec())
+        );
+    }
+
+    #[test]
+    fn an_mp4v_entry_is_motion_jpeg_only_for_object_type_0x6c() {
+        let esds = |oti: u8| {
+            let mut payload = vec![0, 0, 0, 0, 3, 18, 0, 1, 0, 4, 13, oti, 0x11];
+            payload.extend([0; 11]);
+            boxed(b"esds", &payload)
+        };
+        assert_eq!(visual(b"mp4v", &esds(0x6C)), (CodecId::Mjpeg, Vec::new()));
+        // A decoder-specific descriptor under object type 0x6C has no
+        // meaning for JPEG and is not handed to the decoder.
+        let mut specific = vec![0, 0, 0, 0, 3, 24, 0, 1, 0, 4, 19, 0x6C, 0x11];
+        specific.extend([0; 11]);
+        specific.extend([5, 4, 0x12, 0x34, 0x56, 0x78]);
+        assert_eq!(
+            visual(b"mp4v", &boxed(b"esds", &specific)),
+            (CodecId::Mjpeg, Vec::new())
+        );
+        // The same descriptor under MPEG-4 Visual is its configuration.
+        specific[11] = 0x20;
+        assert_eq!(
+            visual(b"mp4v", &boxed(b"esds", &specific)),
+            (CodecId::Mpeg4, vec![0x12, 0x34, 0x56, 0x78])
+        );
+        assert_eq!(visual(b"mp4v", &esds(0x20)).0, CodecId::Mpeg4);
+        assert_eq!(visual(b"mp4v", &esds(0x61)).0, CodecId::Mpeg2);
+        assert_eq!(visual(b"mp4v", &esds(0x6A)).0, CodecId::Mpeg2);
+        assert_eq!(visual(b"mp4v", &[]).0, CodecId::Mpeg4);
+    }
+
+    #[test]
+    fn mp4v_is_mpeg2_only_for_an_mpeg2_or_mpeg1_object_type() {
+        for oti in [0x60, 0x61, 0x62, 0x63, 0x64, 0x65, 0x6A] {
+            assert_eq!(map_codec(*b"mp4v", Some(oti)), CodecId::Mpeg2, "{oti:#x}");
+        }
+        for oti in [None, Some(0x20), Some(0x66), Some(0x6B)] {
+            assert_eq!(map_codec(*b"mp4v", oti), CodecId::Mpeg4, "{oti:?}");
+        }
+        assert_eq!(map_codec(*b"mp4v", Some(0x6C)), CodecId::Mjpeg);
+    }
+
+    #[test]
+    fn quicktime_mpeg_entries_are_mpeg2_pictures() {
+        for code in [
+            b"mp2v", b"m2v1", b"hdv2", b"hdva", b"mx5p", b"xd5b", b"xdvf", b"xdh2", b"AVmp",
+            b"m1v ", b"mpeg", b"mp1v",
+        ] {
+            assert!(known_video(*code));
+            assert_eq!(map_codec(*code, None), CodecId::Mpeg2);
+        }
+        assert!(!known_video(*b"xd52"));
+        assert_eq!(map_codec(*b"xd52", None), CodecId::Unknown(*b"xd52"));
+    }
+
+    fn descriptor(tag: u8, body: &[u8]) -> Vec<u8> {
+        let mut out = vec![tag, u8::try_from(body.len()).unwrap()];
+        out.extend_from_slice(body);
+        out
+    }
+
+    /// One `mp4v` entry whose `esds` names `oti` and carries `specific`.
+    fn mp4v(oti: Option<u8>, specific: &[u8]) -> Vec<u8> {
+        let mut visual = vec![0; 78];
+        visual[7] = 1;
+        visual[24..28].copy_from_slice(&[0, 48, 0, 32]);
+        if let Some(oti) = oti {
+            let mut config = vec![oti, 0x11, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+            config.extend(descriptor(0x05, specific));
+            let mut es = vec![0, 1, 0];
+            es.extend(descriptor(0x04, &config));
+            let mut esds = vec![0; 4];
+            esds.extend(descriptor(0x03, &es));
+            visual.extend(boxed(b"esds", &esds));
+        }
+        let mut stsd = vec![0, 0, 0, 0, 0, 0, 0, 1];
+        stsd.extend(boxed(b"mp4v", &visual));
+        stsd
+    }
+
+    fn codec(oti: Option<u8>) -> SampleDesc {
+        let mut budget = 64;
+        let mut entries =
+            parse_stsd(&mp4v(oti, &[0, 0, 1, 0xB0, 1]), *b"vide", &mut budget, 0).expect("parse");
+        assert_eq!(entries.len(), 1);
+        entries.remove(0)
+    }
+
+    #[test]
+    fn an_mp4v_entry_is_named_by_its_object_type() {
+        let visual = codec(Some(0x20));
+        assert_eq!(visual.codec, CodecId::Mpeg4);
+        assert!(matches!(
+            visual.kind,
+            MediaKind::Video(VideoParams {
+                width: 48,
+                height: 32
+            })
+        ));
+        assert_eq!(visual.extradata, [0, 0, 1, 0xB0, 1]);
+        assert_eq!(codec(None).codec, CodecId::Mpeg4);
+        for mpeg2 in 0x60..=0x65 {
+            assert_eq!(codec(Some(mpeg2)).codec, CodecId::Mpeg2, "{mpeg2:#x}");
+        }
+        assert_eq!(codec(Some(0x6A)).codec, CodecId::Mpeg2, "MPEG-1");
+        assert_eq!(codec(Some(0x6C)).codec, CodecId::Mjpeg);
+        assert_eq!(codec(Some(0x21)).codec, CodecId::Mpeg4);
     }
 }

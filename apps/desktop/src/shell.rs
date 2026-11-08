@@ -53,14 +53,18 @@ mod compound;
 mod effect_preview;
 mod follow;
 pub(crate) use follow::clip_path;
+mod enhance;
 mod hear;
 mod inspector;
 mod listen;
 mod proxy;
+mod reframe;
+mod relight;
 mod render;
 mod select;
 mod shape;
 mod speech_model;
+mod stable;
 mod update;
 
 pub use assistant::AgentRun;
@@ -161,6 +165,18 @@ impl std::fmt::Display for ShellError {
             }
             Self::Edit(EditError::TextAlign) => {
                 formatter.write_str("text alignment is not left, center, or right")
+            }
+            Self::Edit(EditError::Relight) => {
+                formatter.write_str("that light is not one Relight offers")
+            }
+            Self::Edit(EditError::Reframe) => {
+                formatter.write_str("that shape or setting is not one Auto reframe offers")
+            }
+            Self::Edit(EditError::MotionBlur) => {
+                formatter.write_str("that blur is not one Motion blur offers")
+            }
+            Self::Edit(EditError::FlowRate) => {
+                formatter.write_str("Optical flow fills a clip to 30, 50 or 60 frames a second")
             }
             Self::Edit(EditError::LetterSpacing) => {
                 formatter.write_str("letter spacing must be from -1 to 4")
@@ -389,7 +405,8 @@ pub struct ExportRequest {
     /// file asked for beside it takes the same name and folder.
     pub path: PathBuf,
     pub short_side: i32,
-    /// PNG writes the frame at the playhead; H.264, HEVC or ProRes a movie.
+    /// PNG writes the frame at the playhead; H.264, HEVC, ProRes, Motion
+    /// JPEG or VP8 a movie.
     pub codec: CodecId,
     pub replace: bool,
     pub span: ExportSpan,
@@ -485,6 +502,7 @@ impl SoundFormat {
             CodecId::Flac => "flac",
             CodecId::Mp3 => "mp3",
             CodecId::Opus => "opus",
+            CodecId::Vorbis => "ogg",
             _ => "m4a",
         }
     }
@@ -495,7 +513,7 @@ impl SoundFormat {
             CodecId::Pcm => cutlass_codec::ContainerId::Riff,
             CodecId::Flac => cutlass_codec::ContainerId::Flac,
             CodecId::Mp3 => cutlass_codec::ContainerId::Mp3,
-            CodecId::Opus => cutlass_codec::ContainerId::Ogg,
+            CodecId::Opus | CodecId::Vorbis => cutlass_codec::ContainerId::Ogg,
             _ => cutlass_codec::ContainerId::Isobmff,
         }
     }
@@ -572,16 +590,19 @@ pub enum ExportQuality {
 }
 
 impl ExportQuality {
-    /// The bitrate for an H.264, HEVC, or VP8 picture `short_side` pixels
-    /// on its short side. HEVC gets the same picture from fewer bits; VP8
-    /// spends what H.264 does.
+    /// The bitrate for a picture `short_side` pixels on its short side.
+    /// HEVC gets the same picture from fewer bits; MPEG-2 needs twice what
+    /// H.264 spends. Motion JPEG codes every frame alone: a 1080p frame of
+    /// footage at quality 75 is about 240 KB, near five times H.264's rate at
+    /// 30 frames a second. The other picture codecs spend what H.264 does.
     #[must_use]
     pub fn bitrate(self, short_side: u32, codec: CodecId) -> u32 {
         let base = cutlass_export::video_bitrate(short_side);
-        let base = if codec == CodecId::Hevc {
-            base / 10 * 6
-        } else {
-            base
+        let base = match codec {
+            CodecId::Hevc => base / 10 * 6,
+            CodecId::Mjpeg => base.saturating_mul(5),
+            CodecId::Mpeg2 => base.saturating_mul(2),
+            _ => base,
         };
         match self {
             Self::Lower => base / 2,
@@ -793,7 +814,6 @@ pub struct Shell {
     /// Clips on a speed curve draw it on their bar.
     speed_curves: bool,
     /// The marker tool drops a mark on the ruler or on a clip.
-    marking: bool,
     selected_marker: Option<MarkerPick>,
     /// The beat tool drops a mark on an audio clip.
     beating: bool,
@@ -850,6 +870,9 @@ pub struct Shell {
     holding: bool,
     /// The kind, clip and revision of the last edit made while holding.
     held_edit: Option<(HeldEdit, u64)>,
+    /// A clip with Optical flow on whose speed changed while the pointer
+    /// was held: its copy for the new speed starts once it is let go.
+    refill: Option<SegmentId>,
     /// A move, scale or turn on the preview in flight.
     stage: Option<StageLive>,
     /// Timeline thumbnails, once the window starts them.
@@ -928,7 +951,6 @@ impl Shell {
             snapping: true,
             blade: false,
             speed_curves: false,
-            marking: false,
             selected_marker: None,
             beating: false,
             selected_beat: None,
@@ -961,6 +983,7 @@ impl Shell {
             saving: None,
             holding: false,
             held_edit: None,
+            refill: None,
             stage: None,
             thumbnails: None,
             film_asks: Vec::new(),
@@ -1360,7 +1383,6 @@ impl Shell {
         self.clipboard.clear();
         self.clip_menu = None;
         self.blade = false;
-        self.marking = false;
         self.selected_marker = None;
         self.beating = false;
         self.selected_beat = None;
@@ -1527,7 +1549,6 @@ impl Shell {
         self.clipboard.clear();
         self.clip_menu = None;
         self.blade = false;
-        self.marking = false;
         self.selected_marker = None;
         self.beating = false;
         self.selected_beat = None;
@@ -1888,14 +1909,14 @@ impl Shell {
             .is_some_and(|path| !path.is_empty())
     }
 
-    /// Mark in at the selected clip's start.
+    /// Mark in at the selected clips' start.
     pub fn mark_clip_in(&mut self) -> Result<(), ShellError> {
         let start = self.selected_span()?.0;
         self.marks.set_in(start);
         Ok(())
     }
 
-    /// Mark out at the selected clip's end.
+    /// Mark out at the selected clips' end.
     pub fn mark_clip_out(&mut self) -> Result<(), ShellError> {
         let (start, duration) = self.selected_span()?;
         self.marks
@@ -1903,11 +1924,23 @@ impl Shell {
         Ok(())
     }
 
+    /// The span the selected clips cover together: the earliest start, and
+    /// the length up to the latest end.
     fn selected_span(&self) -> Result<(Micros, Micros), ShellError> {
-        let segment = self
-            .selected_segment()
-            .ok_or_else(|| ShellError::Unavailable("nothing is selected".to_owned()))?;
-        Ok((segment.target.start, segment.target.duration))
+        let nothing = || ShellError::Unavailable("nothing is selected".to_owned());
+        let draft = self.draft().ok_or_else(nothing)?;
+        let (start, end) = draft
+            .tracks
+            .iter()
+            .flat_map(|track| &track.segments)
+            .filter(|segment| self.selection.contains(&segment.id))
+            .map(|segment| {
+                let start = segment.target.start.0;
+                (start, start.saturating_add(segment.target.duration.0))
+            })
+            .reduce(|(start, end), (from, to)| (start.min(from), end.max(to)))
+            .ok_or_else(nothing)?;
+        Ok((Micros(start), Micros(end - start)))
     }
 
     /// Show a card's file in the system's file manager.
@@ -2587,6 +2620,19 @@ impl Shell {
         }
     }
 
+    /// Pick the timeline's tool: the split blade, or select, which also
+    /// ends the marker and beat modes.
+    pub fn pick_tool(&mut self, blade: bool) {
+        if blade {
+            if !self.blade() {
+                self.toggle_blade();
+            }
+        } else {
+            self.clear_blade();
+            self.clear_beat();
+        }
+    }
+
     pub fn run_shortcut(&mut self, keys: &str) -> Result<(), ShellError> {
         let action = self.settings.action_for(keys).map(str::to_owned);
         match action {
@@ -2601,6 +2647,14 @@ impl Shell {
         match Some(action) {
             Some("undo") => self.undo(),
             Some("redo" | "redo_y") => self.redo(),
+            Some("select_tool") => {
+                self.pick_tool(false);
+                Ok(())
+            }
+            Some("blade_tool") => {
+                self.pick_tool(true);
+                Ok(())
+            }
             Some("play") => {
                 self.toggle_play();
                 Ok(())
@@ -4523,7 +4577,12 @@ impl Shell {
     pub fn set_speed(&mut self, speed: f64) -> Result<(), ShellError> {
         let segment_id = self.selected().cloned().ok_or(ShellError::NoProject)?;
         self.refuse_locked(&segment_id)?;
-        self.apply(Request::SetConstantSpeed { segment_id, speed })
+        self.apply(Request::SetConstantSpeed {
+            segment_id: segment_id.clone(),
+            speed,
+        })?;
+        self.speed_changed(segment_id);
+        Ok(())
     }
 
     /// Run the selected clip on the speed curve `points`, `x` the share of
@@ -4536,10 +4595,12 @@ impl Shell {
         self.refuse_locked(&segment_id)?;
         let speed_id = MaterialId::new(self.fresh("speed"));
         self.apply(Request::SetCurveSpeed {
-            segment_id,
+            segment_id: segment_id.clone(),
             speed_id,
             points: points.to_vec(),
-        })
+        })?;
+        self.speed_changed(segment_id);
+        Ok(())
     }
 
     /// Let the selected clip's pitch follow its speed, or keep it.
@@ -6533,7 +6594,6 @@ impl Shell {
         self.selection.clear();
         if !self.has_clip() {
             self.blade = false;
-            self.marking = false;
             self.beating = false;
         }
         Ok(())
@@ -6694,7 +6754,6 @@ impl Shell {
     pub fn toggle_blade(&mut self) {
         self.blade = !self.blade && self.has_clip();
         if self.blade {
-            self.marking = false;
             self.beating = false;
         }
     }
@@ -6702,25 +6761,6 @@ impl Shell {
     /// Turn the blade off. Select uses this.
     pub fn clear_blade(&mut self) {
         self.blade = false;
-    }
-
-    /// The marker tool is armed. A click on the ruler or a clip drops a mark.
-    #[must_use]
-    pub fn marking(&self) -> bool {
-        self.marking
-    }
-
-    pub fn toggle_marker(&mut self) {
-        self.marking = !self.marking && self.has_clip();
-        if self.marking {
-            self.blade = false;
-            self.beating = false;
-        }
-    }
-
-    /// Turn the marker tool off. Select uses this.
-    pub fn clear_marker(&mut self) {
-        self.marking = false;
     }
 
     /// Markers currently drawn. A clip mark past the clip is omitted.
@@ -6764,47 +6804,55 @@ impl Shell {
         self.selection.clear();
     }
 
-    /// Drop a mark at the pointer. `None` is the ruler. `Some` is that clip.
-    ///
-    /// A ruler mark is a timeline time. A clip mark is stored as an offset
-    /// from the clip start, so a later move carries it.
-    pub fn drop_marker(
-        &mut self,
-        segment_id: Option<SegmentId>,
-        x: f64,
-        y: f64,
-    ) -> Result<(), ShellError> {
+    /// Drop one mark where the playhead is: on the picked clip under it, so
+    /// the mark moves with the clip, or else on the ruler.
+    pub fn mark_playhead(&mut self) -> Result<(), ShellError> {
+        let at = self.playhead();
+        let on_clip = self.draft().and_then(|draft| {
+            draft
+                .tracks
+                .iter()
+                .flat_map(|track| &track.segments)
+                .filter(|segment| self.selection.contains(&segment.id))
+                .find(|segment| {
+                    let start = segment.target.start.0;
+                    start <= at.0 && at.0 < start.saturating_add(segment.target.duration.0)
+                })
+                .map(|segment| segment.id.clone())
+        });
+        self.mark_at(on_clip, at)
+    }
+
+    /// Add a mark at timeline time `at`, on `segment_id` when given, which
+    /// must cover that time, or else on the ruler.
+    fn mark_at(&mut self, segment_id: Option<SegmentId>, at: Micros) -> Result<(), ShellError> {
         if !self.has_clip() {
             return Err(ShellError::Unavailable(
                 "marker is not available".to_owned(),
             ));
         }
-        let x = self.time_zero_x(x);
-        let scale = self.scale();
-        let pointer_y = if segment_id.is_some() { y } else { 0.0 };
-        let at = {
-            let draft = self.session_draft()?;
-            let hit = hit_test(draft, scale, Pointer { x, y: pointer_y }).map_err(|_| {
-                ShellError::Unavailable("the marker missed the timeline".to_owned())
-            })?;
-            let Some(hit) = hit else {
-                return Err(ShellError::Unavailable(
-                    "the marker missed the timeline".to_owned(),
-                ));
-            };
-            if let Some(id) = &segment_id
-                && hit.segment_id.as_ref() != Some(id)
-            {
+        if let Some(id) = &segment_id {
+            let covers = self
+                .session_draft()?
+                .tracks
+                .iter()
+                .flat_map(|track| &track.segments)
+                .any(|segment| {
+                    let start = segment.target.start.0;
+                    &segment.id == id
+                        && start <= at.0
+                        && at.0 < start.saturating_add(segment.target.duration.0)
+                });
+            if !covers {
                 return Err(ShellError::Unavailable(
                     "the marker missed the clip".to_owned(),
                 ));
             }
-            Micros(hit.time.0.max(0))
-        };
+        }
         let material_id = MaterialId::new(self.fresh("time-mark"));
         self.apply(Request::AddTimeMark {
             segment_id,
-            at,
+            at: Micros(at.0.max(0)),
             color: MARKER_COLOR.to_owned(),
             material_id,
         })
@@ -6839,7 +6887,6 @@ impl Shell {
         self.beating = !self.beating && self.has_clip();
         if self.beating {
             self.blade = false;
-            self.marking = false;
         }
     }
 
@@ -7292,9 +7339,19 @@ impl Shell {
                 "ProRes is written in a MOV".to_owned(),
             ));
         }
+        if request.codec == CodecId::Mjpeg && !mov {
+            return Err(ShellError::Unavailable(
+                "Motion JPEG is written in a MOV".to_owned(),
+            ));
+        }
         if request.codec == CodecId::Vp8 && mov {
             return Err(ShellError::Unavailable(
                 "VP8 is written in an MP4".to_owned(),
+            ));
+        }
+        if request.codec == CodecId::Mpeg2 && mov {
+            return Err(ShellError::Unavailable(
+                "MPEG-2 is written in an MP4".to_owned(),
             ));
         }
         if request.sound && request.audio.codec == CodecId::Pcm && !mov {
@@ -7317,6 +7374,11 @@ impl Shell {
                 "Opus sound is written alone, in an Opus file".to_owned(),
             ));
         }
+        if request.sound && request.audio.codec == CodecId::Vorbis {
+            return Err(ShellError::Unavailable(
+                "Vorbis sound is written alone, in an Ogg file".to_owned(),
+            ));
+        }
         let bitrate = match request.bitrate {
             Some(0) => {
                 return Err(ShellError::Unavailable(
@@ -7326,6 +7388,12 @@ impl Shell {
             Some(rate) => rate.min(MAX_BITRATE),
             None => request.quality.bitrate(short_side, request.codec),
         };
+        if request.codec == CodecId::Mpeg2
+            && let Some(why) =
+                self.mpeg2_refusal(request.short_side, Some(base.frame_rate), bitrate)
+        {
+            return Err(ShellError::Unavailable(why));
+        }
         let (width, height) = self.scaled_canvas(request.short_side)?;
         let mut params = CodecParams::with_format(
             request.codec,
@@ -7341,7 +7409,13 @@ impl Shell {
         }
         if !matches!(
             request.codec,
-            CodecId::H264 | CodecId::Hevc | CodecId::Prores | CodecId::Vp8
+            CodecId::H264
+                | CodecId::Hevc
+                | CodecId::Mpeg4
+                | CodecId::Prores
+                | CodecId::Mjpeg
+                | CodecId::Vp8
+                | CodecId::Mpeg2
         ) {
             return Err(ShellError::ExportUnavailable);
         }
@@ -7496,6 +7570,36 @@ impl Shell {
             ));
         }
         Ok(range)
+    }
+
+    /// Why an MPEG-2 export at `short_side` and `frame_rate` (`None` is the
+    /// project's) cannot be written, or `None` when Main profile holds it.
+    /// `bitrate` zero leaves the rate to the quality step. Asked before the
+    /// job starts, so a picture past 1920×1152, 1080p at 50 or 60 Hz, or a
+    /// frame rate MPEG-2 does not list is named in the dialog.
+    pub fn mpeg2_refusal(
+        &self,
+        short_side: i32,
+        frame_rate: Option<FrameRate>,
+        bitrate: u32,
+    ) -> Option<String> {
+        let rate = frame_rate
+            .or_else(|| self.draft().and_then(Draft::frame_rate))
+            .unwrap_or(FrameRate::FPS_30);
+        let size = match self.scaled_canvas(short_side) {
+            Ok(size) => size,
+            Err(error) => return Some(error.to_string()),
+        };
+        let (width, height) = cutlass_export::coded_size(CodecId::Mpeg2, size);
+        let fps = f64::from(rate.numerator) / f64::from(rate.denominator.max(1));
+        match cutlass_mpeg2::main_profile_level(width, height, fps, bitrate) {
+            Ok(_) => None,
+            Err(cutlass_decode::CodecError::Unsupported { what }) => Some(format!(
+                "MPEG-2 cannot carry {width}×{height} at {}: {what}",
+                cutlass_editor::rate_label(rate)
+            )),
+            Err(error) => Some(format!("MPEG-2 cannot carry this export: {error}")),
+        }
     }
 
     /// An encoder for `codec` opens on this machine.
@@ -7765,6 +7869,19 @@ impl Shell {
         self.holding = holding;
         if !holding {
             self.held_edit = None;
+            if let Some(segment_id) = self.refill.take() {
+                self.refill_copy(&segment_id);
+            }
+        }
+    }
+
+    /// Clip `segment_id` plays at a new speed: with Optical flow on, its
+    /// copy for that speed is made, now or once the pointer is let go.
+    fn speed_changed(&mut self, segment_id: SegmentId) {
+        if self.holding {
+            self.refill = Some(segment_id);
+        } else {
+            self.refill_copy(&segment_id);
         }
     }
 
@@ -8876,6 +8993,17 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn vorbis_sound_alone_is_an_ogg_file() {
+        let sound = super::SoundFormat {
+            codec: CodecId::Vorbis,
+            ..super::SoundFormat::default()
+        };
+        assert_eq!(sound.extension(), "ogg");
+        assert_eq!(sound.container(), ContainerId::Ogg);
+        assert!(!sound.lossless());
     }
 
     static MOVIE_OPENS: AtomicU32 = AtomicU32::new(0);
@@ -11363,8 +11491,7 @@ mod tests {
     #[test]
     fn a_marker_lands_on_the_ruler_or_on_a_clip() {
         let mut bare = shell();
-        bare.toggle_marker();
-        assert!(!bare.marking());
+        assert!(bare.mark_playhead().is_err());
 
         let temp = Temp::new();
         let mut draft = Draft::empty("draft");
@@ -11379,18 +11506,10 @@ mod tests {
         let mut desktop = shell();
         desktop.open_folder(&temp.path).unwrap();
         desktop.pixel_size = 0.001;
-        desktop.toggle_marker();
-        assert!(desktop.marking());
-        desktop.toggle_blade();
-        assert!(desktop.blade());
-        assert!(!desktop.marking());
-        desktop.clear_blade();
-        desktop.toggle_marker();
-
         let y = crate::tokens::LANE_HEIGHT / 2.0;
-        desktop
-            .drop_marker(None, lane_time(&desktop, 1_500_000.0), 0.0)
-            .unwrap();
+        // Nothing picked: the mark lands on the ruler at the playhead.
+        desktop.seek(Micros(1_500_000));
+        desktop.mark_playhead().unwrap();
         assert!(
             desktop.draft().unwrap().tracks[0].segments[0]
                 .extra_material_refs
@@ -11405,10 +11524,11 @@ mod tests {
         assert!(desktop.markers().is_empty());
         desktop.redo().unwrap();
 
+        // The picked clip under the playhead takes the mark.
         let id = SegmentId::new("clip");
-        desktop
-            .drop_marker(Some(id.clone()), lane_time(&desktop, 400_000.0), y)
-            .unwrap();
+        desktop.select(Some(id.clone()));
+        desktop.seek(Micros(400_000));
+        desktop.mark_playhead().unwrap();
         let clip_mark = desktop
             .markers()
             .into_iter()
@@ -11420,9 +11540,7 @@ mod tests {
             desktop.draft().unwrap().tracks[0].segments[0].target,
             TimeRange::new(0, 2_000_000)
         );
-        let again = desktop
-            .drop_marker(Some(id.clone()), lane_time(&desktop, 400_000.0), y)
-            .unwrap_err();
+        let again = desktop.mark_playhead().unwrap_err();
         assert_eq!(again.to_string(), "a marker is already there");
 
         let track_id = desktop.draft().unwrap().tracks[0].id.clone();
@@ -11430,7 +11548,7 @@ mod tests {
             .toggle_attribute(track_id.clone(), TrackAttribute::LOCK)
             .unwrap();
         let locked = desktop
-            .drop_marker(Some(id.clone()), lane_time(&desktop, 800_000.0), y)
+            .mark_at(Some(id.clone()), Micros(800_000))
             .unwrap_err();
         assert_eq!(locked.to_string(), "the track is locked");
         desktop
@@ -11445,9 +11563,13 @@ mod tests {
                 .iter()
                 .all(|mark| mark.segment_id.is_none())
         );
-        desktop
-            .drop_marker(Some(id.clone()), lane_time(&desktop, 400_000.0), y)
-            .unwrap();
+        desktop.mark_at(Some(id.clone()), Micros(400_000)).unwrap();
+        assert!(
+            desktop
+                .mark_at(Some(id.clone()), Micros(3_000_000))
+                .is_err(),
+            "a clip mark must fall on the clip"
+        );
         desktop
             .drag_segment(id.clone(), lane_time(&desktop, 1_000_000.0), y)
             .unwrap();
@@ -11513,11 +11635,6 @@ mod tests {
         desktop.pixel_size = 0.001;
         desktop.toggle_beat();
         assert!(desktop.beating());
-        desktop.toggle_marker();
-        assert!(desktop.marking());
-        assert!(!desktop.beating());
-        desktop.clear_marker();
-        desktop.toggle_beat();
         desktop.toggle_blade();
         assert!(desktop.blade());
         assert!(!desktop.beating());
@@ -11658,6 +11775,21 @@ mod tests {
     }
 
     #[test]
+    fn a_and_b_pick_the_select_and_split_tools() {
+        let temp = Temp::new();
+        touching_cut(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        assert!(!desktop.blade());
+        desktop.run_shortcut("b").unwrap();
+        assert!(desktop.blade());
+        desktop.run_shortcut("b").unwrap();
+        assert!(desktop.blade(), "B again keeps the blade");
+        desktop.run_shortcut("a").unwrap();
+        assert!(!desktop.blade());
+    }
+
+    #[test]
     fn v_deactivates_the_picked_clip_dims_it_and_undo_restores_it() {
         let temp = Temp::new();
         touching_cut(&temp.path);
@@ -11686,6 +11818,13 @@ mod tests {
         desktop.mark_clip_in().unwrap();
         desktop.mark_clip_out().unwrap();
         assert_eq!(desktop.marks().mark_in, Some(Micros(1_000_000)));
+        assert_eq!(desktop.marks().mark_out, Some(Micros(2_000_000)));
+        // Two clips picked: the range runs from the first's start to the
+        // last's end.
+        desktop.toggle_selected(SegmentId::new("left"));
+        desktop.mark_clip_in().unwrap();
+        desktop.mark_clip_out().unwrap();
+        assert_eq!(desktop.marks().mark_in, Some(Micros(0)));
         assert_eq!(desktop.marks().mark_out, Some(Micros(2_000_000)));
         desktop.select(None);
         assert!(desktop.toggle_active().is_err());
@@ -15134,9 +15273,14 @@ mod tests {
 
     /// A two-second color project, 64 by 32, at 30 frames a second.
     pub(super) fn movie_project(dir: &Path) {
+        movie_project_sized(dir, 64, 32);
+    }
+
+    /// [`movie_project`] on a `width` × `height` canvas.
+    pub(super) fn movie_project_sized(dir: &Path, width: i32, height: i32) {
         let mut draft = Draft::empty("draft");
-        draft.canvas_config.width = 64;
-        draft.canvas_config.height = 32;
+        draft.canvas_config.width = width;
+        draft.canvas_config.height = height;
         draft.materials.material_colors.push(MaterialColorConfig {
             id: "color".into(),
             is_color_clip: true,
@@ -15325,6 +15469,222 @@ mod tests {
         assert!(frames > 0);
     }
 
+    fn rust_only_shell() -> (Shell, ReaderFactory) {
+        let off = cutlass_settings::Hardware {
+            decode: false,
+            encode: false,
+            ..cutlass_settings::Hardware::default()
+        };
+        let (decoders, encoders) = crate::register_codecs_with(&off);
+        let readers = crate::readers::readers_with(decoders.clone());
+        let settings = Settings {
+            hardware: off,
+            ..Settings::default()
+        };
+        (Shell::new(decoders, encoders, settings), readers)
+    }
+
+    fn rgba_at(readers: &ReaderFactory, path: &Path, at: i64) -> (u32, u32, Vec<u8>) {
+        let mut media = readers.open(path).unwrap();
+        let held = media
+            .decode_at(Micros(at), &TimeRange::new(0, 10_000_000))
+            .unwrap();
+        let cutlass_engine::DecodedFrame::Coded {
+            width,
+            height,
+            pixel,
+            bytes,
+            ..
+        } = held.frame
+        else {
+            panic!("a coded picture");
+        };
+        assert_eq!(pixel, PixelFormat::Rgba8);
+        (width, height, bytes.to_vec())
+    }
+
+    /// Motion JPEG exports through the Rust encoder into a MOV that the
+    /// Rust decoder plays back in the clip's colour; an MP4 is refused.
+    #[test]
+    fn a_motion_jpeg_export_lands_a_mov_that_plays_back() {
+        let temp = Temp::new();
+        movie_project(&temp.path);
+        let (mut desktop, readers) = rust_only_shell();
+        desktop.open_folder(&temp.path).unwrap();
+        assert!(desktop.encodes(CodecId::Mjpeg));
+        let mp4 = desktop.export(ExportRequest {
+            path: temp.path.join("mjpeg.mp4"),
+            short_side: 480,
+            codec: CodecId::Mjpeg,
+            ..ExportRequest::default()
+        });
+        assert_eq!(
+            mp4.unwrap_err().to_string(),
+            "Motion JPEG is written in a MOV"
+        );
+
+        let destination = temp.path.join("mjpeg.mov");
+        desktop
+            .export(ExportRequest {
+                path: destination.clone(),
+                short_side: 480,
+                codec: CodecId::Mjpeg,
+                sound: false,
+                ..ExportRequest::default()
+            })
+            .unwrap();
+        land_job(&mut desktop);
+        assert_eq!(desktop.notice(), "Exported mjpeg.mov");
+        let bytes = std::fs::read(&destination).unwrap();
+        assert_eq!(&bytes[4..12], b"ftypqt  ");
+        assert!(bytes.windows(4).any(|w| w == b"jpeg"));
+
+        let (width, height, rgba) = rgba_at(&readers, &destination, 1_500_000);
+        assert_eq!((width, height), (960, 480));
+        let near = |pixel: &[u8; 4]| {
+            pixel[0].abs_diff(0x33) <= 3
+                && pixel[1].abs_diff(0x66) <= 3
+                && pixel[2].abs_diff(0x99) <= 3
+        };
+        let (pixels, rest) = rgba.as_chunks::<4>();
+        assert!(rest.is_empty() && pixels.iter().all(near));
+    }
+
+    #[test]
+    fn motion_jpeg_is_given_five_times_the_h264_rate() {
+        use super::ExportQuality;
+        for quality in [
+            ExportQuality::Lower,
+            ExportQuality::Recommended,
+            ExportQuality::Higher,
+        ] {
+            assert_eq!(
+                quality.bitrate(1080, CodecId::Mjpeg),
+                quality.bitrate(1080, CodecId::H264) * 5
+            );
+        }
+    }
+
+    fn ffmpeg() -> Option<PathBuf> {
+        let homebrew = PathBuf::from("/opt/homebrew/bin/ffmpeg");
+        if homebrew.is_file() {
+            return Some(homebrew);
+        }
+        std::env::var_os("PATH").and_then(|paths| {
+            std::env::split_paths(&paths)
+                .map(|dir| dir.join("ffmpeg"))
+                .find(|path| path.is_file())
+        })
+    }
+
+    fn ffmpeg_rgba(ffmpeg: &Path, movie: &Path, frame: u32) -> Vec<u8> {
+        let output = std::process::Command::new(ffmpeg)
+            .args(["-v", "error", "-i"])
+            .arg(movie)
+            .args(["-vf", &format!("select=eq(n\\,{frame})"), "-frames:v", "1"])
+            .args(["-f", "rawvideo", "-pix_fmt", "rgba", "-"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output.stdout
+    }
+
+    fn psnr(a: &[u8], b: &[u8]) -> f64 {
+        assert_eq!(a.len(), b.len());
+        let error: f64 = a
+            .iter()
+            .zip(b)
+            .map(|(x, y)| (f64::from(*x) - f64::from(*y)).powi(2))
+            .sum::<f64>()
+            / a.len() as f64;
+        10.0 * (255.0f64 * 255.0 / error.max(1e-9)).log10()
+    }
+
+    /// Real footage as FFmpeg's 4:2:2 Motion JPEG movie plays in the app as
+    /// FFmpeg decodes it, after seeks either way, and exports to a Motion
+    /// JPEG movie FFmpeg reads without complaint.
+    #[test]
+    fn a_real_motion_jpeg_movie_plays_seeks_and_exports() {
+        let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../local-files/16929689_1920_1080_30fps.mp4");
+        let Some(ffmpeg) = ffmpeg() else {
+            eprintln!("skipped: ffmpeg is missing");
+            return;
+        };
+        if !source.is_file() {
+            eprintln!("skipped: {} is missing", source.display());
+            return;
+        }
+        let temp = Temp::new();
+        let movie = temp.path.join("footage.mov");
+        let made = std::process::Command::new(&ffmpeg)
+            .args(["-v", "error", "-t", "2", "-i"])
+            .arg(&source)
+            .args(["-vf", "scale=854:480", "-c:v", "mjpeg", "-q:v", "3"])
+            .args(["-pix_fmt", "yuvj422p", "-an"])
+            .arg(&movie)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let mut desktop = shell();
+        let readers = crate::readers::installed_readers();
+        // Frame n spans n/30 s; ask for its middle, out of order.
+        for frame in [45, 9, 30] {
+            let at = (i64::from(frame) * 1_000_000 + 500_000) / 30;
+            let (width, height, ours) = rgba_at(&readers, &movie, at);
+            assert_eq!((width, height), (854, 480));
+            let theirs = ffmpeg_rgba(&ffmpeg, &movie, frame);
+            let mean = ours
+                .iter()
+                .zip(&theirs)
+                .map(|(a, b)| f64::from(a.abs_diff(*b)))
+                .sum::<f64>()
+                / ours.len() as f64;
+            assert!(mean < 1.5, "frame {frame}: mean difference {mean}");
+        }
+
+        let project = temp.path.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let mut draft = crate::open_movie::movie_draft(&movie, 854, 480, false).unwrap();
+        draft.duration = Micros(1_000_000);
+        Folder::new(draft).save(&project).unwrap();
+        desktop.open_folder(&project).unwrap();
+        let exported = temp.path.join("exported.mov");
+        desktop
+            .export(ExportRequest {
+                path: exported.clone(),
+                short_side: 480,
+                codec: CodecId::Mjpeg,
+                sound: false,
+                ..ExportRequest::default()
+            })
+            .unwrap();
+        land_job(&mut desktop);
+        assert_eq!(desktop.notice(), "Exported exported.mov");
+        let checked = std::process::Command::new(&ffmpeg)
+            .args(["-v", "warning", "-xerror", "-i"])
+            .arg(&exported)
+            .args(["-f", "null", "-"])
+            .output()
+            .unwrap();
+        assert!(
+            checked.status.success() && checked.stderr.is_empty(),
+            "{}",
+            String::from_utf8_lossy(&checked.stderr)
+        );
+        let at = 15 * 1_000_000 / 30 + 16_000;
+        let (width, height, ours) = rgba_at(&readers, &exported, at);
+        assert_eq!((width, height), (854, 480));
+        let (_, _, source_frame) = rgba_at(&readers, &movie, at);
+        let quality = psnr(&ours, &source_frame);
+        assert!(quality > 30.0, "export PSNR {quality:.1} dB");
+        assert_eq!(ffmpeg_rgba(&ffmpeg, &exported, 15).len(), ours.len());
+    }
+
     /// VP8 exports through the Rust encoder into an MP4 that the desktop's
     /// own readers open and decode back to the clip's colour; a MOV is
     /// refused.
@@ -15387,6 +15747,139 @@ mod tests {
         let (u, v) = chroma.split_at(chroma.len() / 2);
         let near = |plane: &[u8], value: u8| plane.iter().all(|&s| s.abs_diff(value) <= 4);
         assert!(near(y, 97) && near(u, 156) && near(v, 104));
+    }
+
+    /// MPEG-2 exports through the Rust encoder at twice H.264's rate into
+    /// an MP4 `mp4v` track, which the desktop's readers decode back to the
+    /// clip's colour with hardware decode on and off; a MOV is refused.
+    #[test]
+    fn mpeg2_settings_past_main_profile_are_refused_before_the_job() {
+        let fps = |numerator| {
+            Some(FrameRate {
+                numerator,
+                denominator: 1,
+            })
+        };
+        for (canvas, side, rate, bitrate, limit) in [
+            ((1920, 1080), 1080, fps(50), None, "luma samples"),
+            ((1920, 1080), 1080, fps(60), None, "luma samples"),
+            ((1920, 1080), 1440, fps(30), None, "1920×1152"),
+            ((1920, 1080), 2160, fps(30), None, "1920×1152"),
+            ((1080, 1920), 1080, fps(30), None, "1920×1152"),
+            ((1080, 1920), 720, fps(30), None, "1920×1152"),
+            ((1920, 1080), 720, fps(15), None, "Table 6-4"),
+            ((1920, 1080), 720, fps(30), Some(90_000_000), "80 Mb/s"),
+        ] {
+            let temp = Temp::new();
+            movie_project_sized(&temp.path, canvas.0, canvas.1);
+            let mut desktop = shell();
+            desktop.open_folder(&temp.path).unwrap();
+            let refusal = desktop.mpeg2_refusal(side, rate, bitrate.unwrap_or(0));
+            let why = refusal.unwrap_or_else(|| panic!("{canvas:?} {side} {rate:?}"));
+            assert!(why.starts_with("MPEG-2 cannot carry"), "{why}");
+            assert!(why.contains(limit), "{why}");
+            let error = desktop
+                .export(ExportRequest {
+                    path: temp.path.join("mpeg2.mp4"),
+                    short_side: side,
+                    codec: CodecId::Mpeg2,
+                    frame_rate: rate,
+                    bitrate,
+                    ..ExportRequest::default()
+                })
+                .unwrap_err();
+            assert_eq!(error.to_string(), why);
+            assert!(desktop.job().is_none(), "{why}");
+        }
+        // What Main profile holds stays offered: 1080p30, 720p60, and a
+        // portrait 480 short side.
+        for (canvas, side, rate) in [
+            ((1920, 1080), 1080, fps(30)),
+            ((1920, 1080), 720, fps(60)),
+            ((1080, 1920), 480, fps(60)),
+        ] {
+            let temp = Temp::new();
+            movie_project_sized(&temp.path, canvas.0, canvas.1);
+            let mut desktop = shell();
+            desktop.open_folder(&temp.path).unwrap();
+            assert_eq!(desktop.mpeg2_refusal(side, rate, 0), None, "{canvas:?}");
+        }
+    }
+
+    #[test]
+    fn an_mpeg2_export_lands_an_mp4_that_plays_back() {
+        assert_eq!(
+            super::ExportQuality::Recommended.bitrate(1080, CodecId::Mpeg2),
+            2 * super::ExportQuality::Recommended.bitrate(1080, CodecId::H264)
+        );
+        let temp = Temp::new();
+        movie_project(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        assert!(desktop.encodes(CodecId::Mpeg2));
+        let mov = desktop.export(ExportRequest {
+            path: temp.path.join("mpeg2.mov"),
+            short_side: 480,
+            codec: CodecId::Mpeg2,
+            ..ExportRequest::default()
+        });
+        assert_eq!(mov.unwrap_err().to_string(), "MPEG-2 is written in an MP4");
+
+        let destination = temp.path.join("mpeg2.mp4");
+        desktop
+            .export(ExportRequest {
+                path: destination.clone(),
+                short_side: 480,
+                codec: CodecId::Mpeg2,
+                ..ExportRequest::default()
+            })
+            .unwrap();
+        land_job(&mut desktop);
+        assert_eq!(desktop.notice(), "Exported mpeg2.mp4");
+        let bytes = std::fs::read(&destination).unwrap();
+        assert!(bytes.windows(4).any(|w| w == b"mp4v"));
+        assert!(bytes.windows(4).any(|w| w == b"esds"));
+
+        let off = cutlass_settings::Hardware {
+            decode: false,
+            encode: false,
+            ..cutlass_settings::Hardware::default()
+        };
+        let mut coded = 0;
+        for readers in [
+            crate::readers::installed_readers(),
+            crate::readers::readers_with(crate::register_codecs_with(&off).0),
+        ] {
+            let mut media = readers.open(&destination).unwrap();
+            assert_eq!(
+                (media.info().width, media.info().height),
+                (Some(960), Some(480))
+            );
+            let held = media
+                .decode_at(Micros(1_500_000), &TimeRange::new(0, 2_000_000))
+                .unwrap();
+            let (width, height, pixel, bytes) = match held.frame {
+                cutlass_engine::DecodedFrame::Coded {
+                    width,
+                    height,
+                    pixel,
+                    bytes,
+                    ..
+                } => (width, height, pixel, bytes),
+                cutlass_engine::DecodedFrame::Surface { .. } => continue,
+                _ => panic!("a coded picture"),
+            };
+            assert_eq!((width, height), (960, 480));
+            assert_eq!(pixel, PixelFormat::Yuv420p);
+            // 0x336699 in BT.709 limited range: Y 97, Cb 156, Cr 104.
+            let (y, chroma) = bytes.split_at(960 * 480);
+            let (u, v) = chroma.split_at(chroma.len() / 2);
+            let near = |plane: &[u8], value: u8| plane.iter().all(|&s| s.abs_diff(value) <= 4);
+            assert!(near(y, 97) && near(u, 156) && near(v, 104));
+            coded += 1;
+        }
+        // Hardware decode may hand back a surface; the Rust decoder may not.
+        assert!(coded >= 1);
     }
 
     #[test]
@@ -15625,6 +16118,54 @@ mod tests {
             opus_movie.unwrap_err().to_string(),
             "Opus sound is written alone, in an Opus file"
         );
+        let vorbis_movie = desktop.export(ExportRequest {
+            path: temp.path.join("vorbis.mp4"),
+            short_side: 480,
+            audio: super::SoundFormat {
+                codec: CodecId::Vorbis,
+                ..super::SoundFormat::default()
+            },
+            ..ExportRequest::default()
+        });
+        assert_eq!(
+            vorbis_movie.unwrap_err().to_string(),
+            "Vorbis sound is written alone, in an Ogg file"
+        );
+
+        // Vorbis alone is an Ogg file the probe reads and the shell imports
+        // again as a sound as long as the probe says.
+        run(
+            &mut desktop,
+            ExportRequest {
+                path: temp.path.join("vorbis_sound.mp4"),
+                picture: false,
+                audio: super::SoundFormat {
+                    codec: CodecId::Vorbis,
+                    ..super::SoundFormat::default()
+                },
+                ..ExportRequest::default()
+            },
+        );
+        let vorbis = temp.path.join("vorbis_sound.ogg");
+        let bytes = std::fs::read(&vorbis).unwrap();
+        assert_eq!(&bytes[..4], b"OggS");
+        assert_eq!(&bytes[29..35], b"vorbis");
+        let cutlass_probe::Probed::Audio { duration } = cutlass_probe::probe(&vorbis).unwrap()
+        else {
+            panic!("a Vorbis file probed as video");
+        };
+        assert!(duration > 0);
+        let audios = desktop.draft().unwrap().materials.audios.len();
+        desktop.import_file(&vorbis).unwrap();
+        let materials = &desktop.draft().unwrap().materials.audios;
+        assert_eq!(materials.len(), audios + 1);
+        let imported = materials.last().unwrap();
+        assert!(
+            imported.path.ends_with("vorbis_sound.ogg"),
+            "{}",
+            imported.path
+        );
+        assert_eq!(imported.duration.0, duration);
 
         // A GIF alone, and then again beside a movie, which finds it taken.
         let gif = super::GifExport {

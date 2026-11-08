@@ -2419,6 +2419,7 @@ dependencies = [
  "cutlass-matroska",
  "cutlass-mjpeg",
  "cutlass-model",
+ "cutlass-motion",
  "cutlass-mp3",
  "cutlass-mp3-container",
  "cutlass-mpeg2",
@@ -2668,6 +2669,7 @@ dependencies = [
  "cutlass-engine",
  "cutlass-generated",
  "cutlass-gpu",
+ "cutlass-jpeg",
  "cutlass-logger",
  "cutlass-lottie",
  "cutlass-model",
@@ -2680,6 +2682,7 @@ dependencies = [
  "cutlass-session",
  "cutlass-still",
  "cutlass-storage",
+ "cutlass-store",
  "cutlass-text",
 ]
 
@@ -2694,24 +2697,29 @@ dependencies = [
  "cutlass-container",
  "cutlass-decode",
  "cutlass-encode",
+ "cutlass-engine",
  "cutlass-eval",
  "cutlass-flac",
  "cutlass-flac-container",
  "cutlass-gif",
  "cutlass-gpu",
+ "cutlass-h264",
  "cutlass-isobmff",
  "cutlass-model",
  "cutlass-mp3",
  "cutlass-mp3-container",
+ "cutlass-mpeg4",
  "cutlass-ogg",
  "cutlass-opus",
  "cutlass-pcm",
+ "cutlass-picture",
  "cutlass-playback",
  "cutlass-render",
  "cutlass-renderer-software",
  "cutlass-riff",
  "cutlass-session",
  "cutlass-still",
+ "cutlass-vorbis",
  "cutlass-webp",
  "image",
  "serde_json",
@@ -2741,9 +2749,12 @@ dependencies = [
  "cutlass-isobmff",
  "cutlass-jpeg",
  "cutlass-logger",
+ "cutlass-mjpeg",
  "cutlass-model",
  "cutlass-mp3",
  "cutlass-mp3-container",
+ "cutlass-mpeg2",
+ "cutlass-mpeg4",
  "cutlass-ogg",
  "cutlass-opus",
  "cutlass-pcm",
@@ -2759,6 +2770,7 @@ dependencies = [
  "cutlass-still",
  "cutlass-storage",
  "cutlass-store",
+ "cutlass-vorbis",
  "cutlass-webp",
 ]
 
@@ -2889,6 +2901,7 @@ version = "0.1.0"
 dependencies = [
  "cutlass-decode",
  "cutlass-encode",
+ "cutlass-jpeg",
 ]
 
 [[package]]
@@ -2924,16 +2937,22 @@ dependencies = [
 name = "cutlass-mpeg2"
 version = "0.1.0"
 dependencies = [
+ "cutlass-codec",
+ "cutlass-container",
  "cutlass-decode",
  "cutlass-encode",
+ "cutlass-isobmff",
 ]
 
 [[package]]
 name = "cutlass-mpeg4"
 version = "0.1.0"
 dependencies = [
+ "cutlass-codec",
+ "cutlass-container",
  "cutlass-decode",
  "cutlass-encode",
+ "cutlass-isobmff",
 ]
 
 [[package]]
@@ -2993,6 +3012,7 @@ version = "0.1.0"
 dependencies = [
  "cutlass-decode",
  "cutlass-encode",
+ "cutlass-mpeg4",
  "objc2 0.6.5",
  "objc2-metal 0.3.2",
  "pollster",
@@ -3164,6 +3184,7 @@ name = "cutlass-store"
 version = "0.1.0"
 dependencies = [
  "cutlass-model",
+ "cutlass-motion",
  "serde",
  "serde_json",
 ]
@@ -3210,9 +3231,20 @@ dependencies = [
  "burn-store",
  "cubecl-environment",
  "cubecl-runtime",
+ "cutlass-codec",
+ "cutlass-container",
  "cutlass-effects",
+ "cutlass-encode",
+ "cutlass-engine",
+ "cutlass-eval",
+ "cutlass-export",
+ "cutlass-h264",
+ "cutlass-isobmff",
  "cutlass-model",
+ "cutlass-motion",
+ "cutlass-picture",
  "cutlass-session",
+ "cutlass-store",
  "image",
  "safetensors 0.8.0",
 ]
@@ -3221,8 +3253,11 @@ dependencies = [
 name = "cutlass-vorbis"
 version = "0.1.0"
 dependencies = [
+ "cutlass-codec",
+ "cutlass-container",
  "cutlass-decode",
  "cutlass-encode",
+ "cutlass-ogg",
 ]
 
 [[package]]

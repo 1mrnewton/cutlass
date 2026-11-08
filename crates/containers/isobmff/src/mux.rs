@@ -505,8 +505,7 @@ fn entry_code(params: &StreamParams) -> Result<[u8; 4], Error> {
         CodecId::Av1 => *b"av01",
         CodecId::Vp8 => *b"vp08",
         CodecId::Vp9 => *b"vp09",
-        CodecId::Mpeg4 => *b"mp4v",
-        CodecId::Mpeg2 => *b"mp2v",
+        CodecId::Mpeg4 | CodecId::Mpeg2 => *b"mp4v",
         CodecId::Mjpeg => *b"jpeg",
         CodecId::ProRes => *b"apcn",
         CodecId::Aac | CodecId::Mp3 => *b"mp4a",
@@ -850,6 +849,9 @@ fn stbl(
     body.extend(stts(samples));
     if samples.iter().any(|sample| sample.pts != sample.dts) {
         body.extend(ctts(samples)?);
+        if samples.iter().any(|sample| sample.pts < sample.dts) {
+            body.extend(cslg(samples));
+        }
     }
     body.extend(stsc_and_co64(samples, map_offset));
     body.extend(stsz(samples));
@@ -995,7 +997,10 @@ fn config_boxes(track: &TrackOut) -> Result<Vec<u8>, Error> {
         out.extend(box_bytes(b"dec3", &track.params.extradata));
     } else if &code == b"fLaC" {
         out.extend(box_bytes(b"dfLa", &track.params.extradata));
-    } else if matches!(&code, b"mp4a" | b"mp4v") && !track.params.extradata.is_empty() {
+    } else if matches!(&code, b"mp4a" | b"mp4v")
+        && (!track.params.extradata.is_empty() || track.params.codec == CodecId::Mpeg2)
+    {
+        // An MPEG-2 track is named only by the descriptor's object type.
         out.extend(box_bytes(b"esds", &esds(&track.params)));
     }
     if let Some(color) = track.params.color {
@@ -1013,14 +1018,16 @@ fn esds(params: &StreamParams) -> Vec<u8> {
     let (oti, stream_type): (u8, u8) = match params.codec {
         CodecId::Mp3 => (0x6B, 0x15),
         CodecId::Mpeg4 => (0x20, 0x11),
+        CodecId::Mpeg2 => (mpeg2_object_type(&params.extradata), 0x11),
         _ => (0x40, 0x15),
     };
-    let specific = descriptor(0x05, &params.extradata);
     let mut decoder = Vec::new();
     decoder.push(oti);
     decoder.push(stream_type);
     decoder.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-    decoder.extend(specific);
+    if !params.extradata.is_empty() {
+        decoder.extend(descriptor(0x05, &params.extradata));
+    }
     let mut es = Vec::new();
     es.extend_from_slice(&[0, 0, 0]);
     es.extend(descriptor(0x04, &decoder));
@@ -1028,6 +1035,37 @@ fn esds(params: &StreamParams) -> Vec<u8> {
     let mut payload = vec![0, 0, 0, 0];
     payload.extend(descriptor(0x03, &es));
     payload
+}
+
+/// The ISO/IEC 14496-1 object type for an H.262 sequence header and its
+/// extension: the profile in `profile_and_level_indication`, 4:2:2 for
+/// that escaped profile, and MPEG-1 when no sequence extension follows.
+/// Main when the headers are not there yet.
+fn mpeg2_object_type(headers: &[u8]) -> u8 {
+    const MAIN: u8 = 0x61;
+    if headers.is_empty() {
+        return MAIN;
+    }
+    let extension = headers
+        .windows(6)
+        .find(|bytes| bytes[..4] == [0, 0, 1, 0xB5] && bytes[4] >> 4 == 1);
+    let Some(bytes) = extension else {
+        return 0x6A;
+    };
+    let indication = (bytes[4] << 4) | (bytes[5] >> 4);
+    if indication & 0x80 != 0 {
+        return match indication & 0x0F {
+            0x02 | 0x05 => 0x65,
+            _ => MAIN,
+        };
+    }
+    match (indication >> 4) & 0x07 {
+        1 => 0x64,
+        2 => 0x63,
+        3 => 0x62,
+        5 => 0x60,
+        _ => MAIN,
+    }
 }
 
 fn descriptor(tag: u8, body: &[u8]) -> Vec<u8> {
@@ -1113,6 +1151,34 @@ fn ctts(samples: &[&Held]) -> Result<Vec<u8>, Error> {
         }
     }
     Ok(box_bytes(b"ctts", &payload))
+}
+
+/// `cslg` (ISO/IEC 14496-12 8.6.1.4) for a `ctts` with negative offsets,
+/// as QuickTime and AVFoundation write it: the shift that puts every
+/// composition time at or after its decode time, the least and greatest
+/// offsets, and the first and last composition times. Version 1 holds a
+/// value that does not fit 32 bits.
+fn cslg(samples: &[&Held]) -> Vec<u8> {
+    let offsets = samples.iter().map(|sample| sample.pts - sample.dts);
+    let least = offsets.clone().min().unwrap_or(0);
+    let greatest = offsets.max().unwrap_or(0);
+    let start = samples.iter().map(|sample| sample.pts).min().unwrap_or(0);
+    let end = samples
+        .iter()
+        .map(|sample| sample.pts.saturating_add(i64::from(sample.duration)))
+        .max()
+        .unwrap_or(0);
+    let fields = [least.saturating_neg().max(0), least, greatest, start, end];
+    let narrow = fields.iter().all(|&value| i32::try_from(value).is_ok());
+    let mut payload = vec![u8::from(!narrow), 0, 0, 0];
+    for value in fields {
+        if narrow {
+            payload.extend_from_slice(&i32::try_from(value).unwrap_or(0).to_be_bytes());
+        } else {
+            payload.extend_from_slice(&value.to_be_bytes());
+        }
+    }
+    box_bytes(b"cslg", &payload)
 }
 
 /// One sample per chunk. Interleaved tracks then keep an exact file offset
@@ -1363,4 +1429,33 @@ fn box_bytes(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {
     out.extend_from_slice(kind);
     out.extend_from_slice(payload);
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::mpeg2_object_type;
+
+    fn headers(indication: Option<u8>) -> Vec<u8> {
+        let mut bytes = vec![
+            0, 0, 1, 0xB3, 0x2D, 0x02, 0x40, 0x13, 0xFF, 0xFF, 0xE0, 0x00,
+        ];
+        if let Some(indication) = indication {
+            bytes.extend([0, 0, 1, 0xB5, 0x10 | (indication >> 4), indication << 4]);
+            bytes.extend([0, 1, 0, 0]);
+        }
+        bytes
+    }
+
+    #[test]
+    fn the_mpeg2_object_type_follows_the_sequence_profile() {
+        assert_eq!(mpeg2_object_type(&headers(Some(0x48))), 0x61);
+        assert_eq!(mpeg2_object_type(&headers(Some(0x58))), 0x60);
+        assert_eq!(mpeg2_object_type(&headers(Some(0x14))), 0x64);
+        assert_eq!(mpeg2_object_type(&headers(Some(0x38))), 0x62);
+        assert_eq!(mpeg2_object_type(&headers(Some(0x26))), 0x63);
+        assert_eq!(mpeg2_object_type(&headers(Some(0x85))), 0x65);
+        assert_eq!(mpeg2_object_type(&headers(Some(0x82))), 0x65);
+        assert_eq!(mpeg2_object_type(&headers(None)), 0x6A);
+        assert_eq!(mpeg2_object_type(&[]), 0x61);
+    }
 }

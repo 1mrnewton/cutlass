@@ -24,8 +24,8 @@ pub mod widgets;
 pub mod window;
 
 /// Platform openers go first. A codec they decline falls through to the
-/// software opener registered after them. The Rust FLAC, ALAC, MP3, Opus
-/// and WebP codecs are the exception: they go ahead of the platform.
+/// software opener registered after them. The Rust FLAC, ALAC, MP3, Opus,
+/// Vorbis and WebP codecs are the exception: they go ahead of the platform.
 /// Hardware decode and encode are on.
 pub fn register_codecs() -> (cutlass_decode::DecodeFactory, cutlass_encode::EncodeFactory) {
     register_codecs_with(&cutlass_settings::Hardware::default())
@@ -44,11 +44,13 @@ pub fn register_codecs_with(
     // the STREAMINFO (sample count and MD5) a FLAC file is finished with;
     // ALAC's hands it the final cookie; MP3's hands it the delay and padding
     // its LAME tag needs; AC-3 and E-AC-3 hand it `dac3` or `dec3`; Opus's
-    // hands it the OpusHead, with its pre-skip,
-    // and the end trim. The Opus decoder matches the RFC vectors and plays
+    // hands it the OpusHead, with its pre-skip, and the end trim. Vorbis
+    // hands it the three headers and has no encoder delay. The Opus
+    // decoder matches the RFC vectors and plays
     // multistream and every API rate. WebP still images follow the same
     // rule, and an animated file's later packets are bare frames only the
-    // Rust decoder composes.
+    // Rust decoder composes. So does Motion JPEG: VideoToolbox refuses 4:2:2
+    // frames, the common layout, after it opens, and weaves no fields.
     cutlass_flac::register_decoders(&mut decoders);
     cutlass_flac::register_encoders(&mut encoders);
     cutlass_alac::register_decoders(&mut decoders);
@@ -59,8 +61,12 @@ pub fn register_codecs_with(
     cutlass_ac3::register_encoders(&mut encoders);
     cutlass_opus::register_decoders(&mut decoders);
     cutlass_opus::register_encoders(&mut encoders);
+    cutlass_vorbis::register_decoders(&mut decoders);
+    cutlass_vorbis::register_encoders(&mut encoders);
     cutlass_webp::register_decoders(&mut decoders);
     cutlass_webp::register_encoders(&mut encoders);
+    cutlass_mjpeg::register_decoders(&mut decoders);
+    cutlass_mjpeg::register_encoders(&mut encoders);
     #[cfg(target_os = "macos")]
     {
         // Pictures stay in their IOSurface; the preview samples them in place.
@@ -91,9 +97,16 @@ pub fn register_codecs_with(
     cutlass_prores::register_encoders(&mut encoders);
     cutlass_vp8::register_engine_decoders(&mut decoders);
     cutlass_vp8::register_engine_encoders(&mut encoders);
-    // After the platform decoders: the Rust HEVC decoder serves Linux, and
-    // the other platforms when hardware decode is off.
+    // After the platform codecs: the Rust HEVC, MPEG-2 and MPEG-4 Visual
+    // decoders serve Linux, and the other platforms when hardware decode is
+    // off. No platform encodes MPEG-2. VideoToolbox claims MPEG-4 Visual on
+    // Apple; these openers run when the platform opener is absent, and the
+    // MPEG-4 encoder is the same fallback.
     cutlass_hevc::register_decoders(&mut decoders);
+    cutlass_mpeg2::register_decoders(&mut decoders);
+    cutlass_mpeg2::register_encoders(&mut encoders);
+    cutlass_mpeg4::register_engine_decoders(&mut decoders);
+    cutlass_mpeg4::register_engine_encoders(&mut encoders);
     (decoders, encoders)
 }
 
@@ -243,6 +256,102 @@ mod tests {
             .expect("hardware encode stays on");
     }
 
+    #[test]
+    fn mpeg4_visual_decodes_when_the_platform_decoder_is_absent() {
+        use cutlass_decode::{Output, Packet, PictureSamples};
+        use cutlass_settings::Hardware;
+
+        #[cfg(target_os = "macos")]
+        {
+            let (on, _) = super::register_codecs();
+            on.open(&CodecParams::video(CodecId::Mpeg4, 48, 32))
+                .expect("videotoolbox mpeg4");
+        }
+        let off = Hardware {
+            decode: false,
+            ..Hardware::default()
+        };
+        let (decoders, _) = super::register_codecs_with(&off);
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../crates/codecs/mpeg4/tests/fixtures");
+        let stream = std::fs::read(root.join("asp.m4v")).expect("fixture");
+        let want = std::fs::read(root.join("asp.yuv")).expect("reference");
+        let mut decoder = decoders
+            .open(&CodecParams::video(CodecId::Mpeg4, 48, 32))
+            .expect("rust mpeg4");
+        // One VOP per packet, as a container hands them over; the headers
+        // before the first VOP ride with it. The decoder refuses a packet
+        // holding more VOPs than a packed stream needs.
+        let mut cuts = Vec::new();
+        let mut header = None;
+        for at in 0..stream.len().saturating_sub(3) {
+            if stream[at..at + 3] == [0, 0, 1] {
+                if stream[at + 3] == 0xB6 {
+                    cuts.push(header.take().unwrap_or(at));
+                } else if header.is_none() && cuts.is_empty() {
+                    header = Some(at);
+                }
+            }
+        }
+        cuts.push(stream.len());
+        let mut outputs = Vec::new();
+        for (index, pair) in cuts.windows(2).enumerate() {
+            let packet = stream[pair[0]..pair[1]].to_vec();
+            let pts = i64::try_from(index).expect("index");
+            outputs.extend(
+                decoder
+                    .push(&Packet::video(packet, pts, 1, 25, index == 0))
+                    .expect("decode"),
+            );
+        }
+        outputs.extend(decoder.drain().expect("drain"));
+        let mut got = Vec::new();
+        for output in outputs {
+            let Output::Picture(picture) = output else {
+                continue;
+            };
+            let PictureSamples::Cpu(samples) = picture.samples() else {
+                panic!("the rust decoder returns cpu samples");
+            };
+            got.extend_from_slice(samples);
+        }
+        assert_eq!(got, want);
+    }
+
+    /// Hardware encode off leaves VideoToolbox out, so the Rust encoder
+    /// writes the VOP. A platform encoder registered first would hide it.
+    #[test]
+    fn mpeg4_visual_encodes_when_the_platform_encoder_is_absent() {
+        use cutlass_settings::Hardware;
+
+        let off = Hardware {
+            encode: false,
+            ..Hardware::default()
+        };
+        let (_decoders, encoders) = super::register_codecs_with(&off);
+        let mut params = CodecParams::with_format(CodecId::Mpeg4, 16, 16, PixelFormat::Rgba8);
+        params.bitrate = 200_000;
+        let mut encoder = encoders.open(&params).expect("rust mpeg4 encoder");
+        let time = cutlass_encode::FrameTime::new(0, 1, 25).expect("time");
+        let frame =
+            cutlass_encode::CpuFrame::new(16, 16, PixelFormat::Rgba8, vec![128; 16 * 16 * 4], time)
+                .expect("frame");
+        let packets = encoder
+            .push_frame(&cutlass_encode::FrameInput::Cpu(frame))
+            .expect("encode");
+        assert!(
+            packets[0].data.starts_with(&[0, 0, 1, 0xB6]),
+            "the rust encoder writes a VOP"
+        );
+        assert!(
+            packets[0]
+                .side
+                .iter()
+                .any(|side| matches!(side, cutlass_decode::SideData::Config(_))),
+            "the layer rides on the first packet"
+        );
+    }
+
     /// A second of stereo tones, MP3 packets from the Rust encoder, and
     /// what `decoders` makes of them.
     fn mp3_round_trip(
@@ -343,6 +452,63 @@ mod tests {
             cutlass_encode::Encoder::codec(encoder.as_ref()),
             CodecId::Prores
         );
+    }
+
+    #[test]
+    fn motion_jpeg_opens_in_rust_when_the_platform_is_off() {
+        use cutlass_settings::Hardware;
+
+        let off = Hardware {
+            decode: false,
+            encode: false,
+            ..Hardware::default()
+        };
+        let (decoders, encoders) = super::register_codecs_with(&off);
+        let mut read = CodecParams::with_format(CodecId::Mjpeg, 64, 48, PixelFormat::Rgba8);
+        read.extra = b"jpeg\x01\x00".to_vec();
+        let decoder = decoders.open(&read).expect("rust motion jpeg decoder");
+        assert_eq!(
+            cutlass_decode::Decoder::codec(decoder.as_ref()),
+            CodecId::Mjpeg
+        );
+        let encoder = encoders
+            .open(&picture(CodecId::Mjpeg, 64, 48))
+            .expect("rust motion jpeg encoder");
+        assert_eq!(
+            cutlass_encode::Encoder::codec(encoder.as_ref()),
+            CodecId::Mjpeg
+        );
+    }
+
+    /// With hardware decode on, Motion JPEG still decodes in Rust: here a
+    /// 4:2:2 frame, which VideoToolbox opens for and then refuses.
+    #[test]
+    fn motion_jpeg_decodes_in_rust_ahead_of_the_platform() {
+        let rgba: Vec<u8> = (0..64u32 * 48)
+            .flat_map(|i| [(i % 64 * 4) as u8, (i / 64 * 5) as u8, 90, 255])
+            .collect();
+        let mut encoder = cutlass_mjpeg::MjpegEncoder::open(&picture(CodecId::Mjpeg, 64, 48))
+            .expect("encoder")
+            .with_sampling(cutlass_mjpeg::Sampling::Yuv422);
+        let frame = encoder.encode_rgba(64, 48, &rgba, 1, 30).expect("frame");
+        let decode = |decoders: &cutlass_decode::DecodeFactory| {
+            let params = CodecParams::with_format(CodecId::Mjpeg, 64, 48, PixelFormat::Rgba8);
+            let mut decoder = decoders.open(&params)?;
+            let mut outputs =
+                decoder.push(&cutlass_decode::Packet::audio(frame.clone(), 0, 1, 30))?;
+            outputs.extend(decoder.drain()?);
+            Ok::<usize, cutlass_decode::CodecError>(outputs.len())
+        };
+        let (decoders, _) = super::register_codecs();
+        assert_eq!(decode(&decoders).expect("the app decodes it"), 1);
+        #[cfg(target_os = "macos")]
+        {
+            let mut reversed = cutlass_decode::DecodeFactory::new();
+            cutlass_platform_apple::register_surface_decoders_with(&mut reversed, true);
+            cutlass_mjpeg::register_decoders(&mut reversed);
+            let platform = decode(&reversed);
+            assert!(!matches!(platform, Ok(1)), "VideoToolbox decoded 4:2:2");
+        }
     }
 
     #[test]
@@ -624,6 +790,52 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The codec configuration a Vorbis encoder hands the muxer: the three
+    /// headers on its first packet.
+    fn vorbis_config(packets: &[cutlass_encode::Packet]) -> Vec<u8> {
+        packets
+            .iter()
+            .flat_map(|packet| &packet.side)
+            .find_map(|side| match side {
+                cutlass_encode::SideData::Config(config) => Some(config.clone()),
+                _ => None,
+            })
+            .expect("vorbis headers")
+    }
+
+    /// The app's Vorbis codec is the Rust one: its packets and its samples
+    /// are those `cutlass_vorbis` gives when opened directly, so a platform
+    /// codec registered ahead of it would fail both checks.
+    #[test]
+    fn the_rust_vorbis_codec_goes_ahead_of_the_platform_one() {
+        use cutlass_decode::ChannelLayout;
+
+        let (decoders, encoders) = super::register_codecs();
+        let mut spec = CodecParams::audio(CodecId::Vorbis, 48_000, ChannelLayout::stereo());
+        spec.bitrate = 128_000;
+        let mut app = encoders.open(&spec).expect("app vorbis encoder");
+        assert_eq!(
+            cutlass_encode::Encoder::codec(app.as_ref()),
+            CodecId::Vorbis
+        );
+        let mut rust = cutlass_vorbis::VorbisEncoder::open(&spec).expect("rust vorbis encoder");
+        let packets = opus_packets(&mut rust);
+        assert!(packets.len() > 10);
+        assert_eq!(opus_packets(app.as_mut()), packets);
+
+        let mut listen = CodecParams::audio(CodecId::Vorbis, 48_000, ChannelLayout::stereo());
+        listen.extra = vorbis_config(&packets);
+        let mut app = decoders.open(&listen).expect("app vorbis decoder");
+        assert_eq!(
+            cutlass_decode::Decoder::codec(app.as_ref()),
+            CodecId::Vorbis
+        );
+        let mut rust = cutlass_vorbis::VorbisDecoder::open(&listen).expect("rust vorbis decoder");
+        let decoded = opus_samples(&mut rust, &packets);
+        assert!(decoded.iter().any(|sample| sample.abs() > 0.1));
+        assert_eq!(opus_samples(app.as_mut(), &packets), decoded);
     }
 
     #[test]

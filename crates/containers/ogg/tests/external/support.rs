@@ -254,7 +254,7 @@ pub fn ffmpeg_payload(path: &Path) -> Vec<u8> {
     out.stdout
 }
 
-fn gstreamer_on_path() -> bool {
+pub fn gstreamer_on_path() -> bool {
     Command::new("gst-launch-1.0")
         .arg("--version")
         .stdout(Stdio::null())
@@ -309,8 +309,13 @@ pub fn gstreamer_packets(path: &Path) -> Option<Vec<(usize, i64)>> {
     Some(packets)
 }
 
-/// Samples per channel GStreamer's `oggdemux ! opusdec` decodes.
-pub fn gstreamer_decoded_samples(path: &Path, scratch: &Path) -> Option<u64> {
+/// Samples per channel GStreamer's `oggdemux ! decoder` decodes at `rate`.
+pub fn gstreamer_decoded_samples(
+    path: &Path,
+    scratch: &Path,
+    decoder: &str,
+    rate: u32,
+) -> Option<u64> {
     if !gstreamer_on_path() {
         return None;
     }
@@ -323,11 +328,11 @@ pub fn gstreamer_decoded_samples(path: &Path, scratch: &Path) -> Option<u64> {
             "!",
             "oggdemux",
             "!",
-            "opusdec",
+            decoder,
             "!",
             "audioconvert",
             "!",
-            "audio/x-raw,format=S16LE,channels=1,rate=48000",
+            &format!("audio/x-raw,format=S16LE,channels=1,rate={rate}"),
             "!",
             "filesink",
             &format!("location={}", raw.display()),

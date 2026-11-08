@@ -711,7 +711,7 @@ fn map_eval<E: std::fmt::Display>(error: EvalError<E>) -> ExportError {
     }
 }
 
-fn video_time(rate: FrameRate, index: i64) -> Result<FrameTime, ExportError> {
+pub(crate) fn video_time(rate: FrameRate, index: i64) -> Result<FrameTime, ExportError> {
     let duration = i64::from(rate.denominator);
     let pts = index.checked_mul(duration).ok_or(ExportError::Limit)?;
     FrameTime::new(pts, duration, rate.numerator).map_err(|_| ExportError::FrameRate)
@@ -1035,7 +1035,7 @@ fn rgba_len(width: u32, height: u32) -> Option<usize> {
         .checked_mul(4)
 }
 
-fn write_packets<M: Mux>(
+pub(crate) fn write_packets<M: Mux>(
     mux: &mut M,
     stream: u32,
     packets: &[AccessPacket],
@@ -1125,7 +1125,7 @@ fn finish_file<M: Mux>(
         .map_err(|failed| ExportError::Mux(failed.reason().clone()))
 }
 
-fn stop<M: Mux>(mux: &mut M, error: ExportError) -> ExportError {
+pub(crate) fn stop<M: Mux>(mux: &mut M, error: ExportError) -> ExportError {
     if mux.status() == MuxStatus::Building {
         mux.cancel();
     }

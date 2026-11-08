@@ -223,6 +223,56 @@ pub enum Request {
     },
     /// Store the crop quad. Ratio and scale stay.
     SetCrop { segment_id: SegmentId, crop: Crop },
+    /// Steady a video clip at `level` (1 cuts least, 2 recommended, 3 most
+    /// stable), or stop at 0 or below. The kept camera path stays.
+    SetStable { segment_id: SegmentId, level: i64 },
+    /// Enhance a video clip's quality at `level` (1 HD, 2 UHD), or stop at
+    /// 0 or below. The enhanced copy is made apart from the draft.
+    SetEnhance { segment_id: SegmentId, level: i64 },
+    /// Reduce a video clip's noise at `level` (1 Weak, 2 Strong), or stop
+    /// at 0 or below. The denoised copy is made apart from the draft.
+    SetDenoise { segment_id: SegmentId, level: i64 },
+    /// Fill a video clip with frames made between its own, to `fps` frames
+    /// a second (30, 50 or 60) however slow it plays, or stop at 0 or
+    /// below. The filled copy is made apart from the draft.
+    SetInterpolate { segment_id: SegmentId, fps: i64 },
+    /// Light a video clip again with the preset `preset` at `strength` (0
+    /// to 1), or stop with an empty preset. The Custom light takes `color`
+    /// (`#rrggbb`, empty for its default) and `angle` (degrees, 0 from the
+    /// right, 90 from above). The depth it is lit from is made apart from
+    /// the draft.
+    SetRelight {
+        segment_id: SegmentId,
+        preset: String,
+        strength: f64,
+        color: String,
+        angle: f64,
+    },
+    /// Cut a video clip to `ratio`, one of `Reframe::RATIOS`, following
+    /// its subject, holding as still as `stability` (1 Flexible, 2
+    /// Default, 3 Stable) and following as fast as `speed` (1 Fast, 2
+    /// Default, 3 Slow); or stop with an empty ratio. Where the subject is
+    /// is found apart from the draft.
+    SetReframe {
+        segment_id: SegmentId,
+        ratio: String,
+        stability: i64,
+        speed: i64,
+    },
+    /// Blur a video clip along how things move through it, or stop when
+    /// `on` is false. `blur` is the blur's length as a share of a frame's
+    /// time and `blend` the share of the sharp frame mixed back in, both 0
+    /// to 1; `direction` is 0 both ways, 1 forward or 2 backward; `times`
+    /// is 1, 2, 4 or 6 frames made across each blur. The blurred copy is
+    /// made apart from the draft.
+    SetMotionBlur {
+        segment_id: SegmentId,
+        on: bool,
+        blur: f64,
+        blend: f64,
+        direction: i64,
+        times: i64,
+    },
     /// Replace the text material's string. Word columns stay as stored.
     SetTextContent {
         segment_id: SegmentId,

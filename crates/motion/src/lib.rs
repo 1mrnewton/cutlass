@@ -10,6 +10,12 @@
 //! Each step answers the new corners and a confidence, [`Step::Hidden`]
 //! while the target is out of sight and looked for again by correlation,
 //! or [`Step::Lost`] once it stayed away too long.
+//!
+//! [`Camera`] measures how the whole picture moved through a clip, for
+//! steadying it, and [`plan`] turns that into a steady clip.
+//! [`plan_reframe`] places Auto reframe's window over a clip from where its
+//! subject was found.
+//!
 //! Pure Rust; no model, no file.
 
 mod fit;
@@ -17,13 +23,17 @@ mod flow;
 mod gray;
 mod points;
 mod quad;
+mod reframe;
 mod search;
+mod stabilize;
 
 use fit::{Model, Random, ransac};
 use gray::Pyramid;
 use quad::Corners;
 
 pub use gray::{GRAY_SIDE, Gray, MAX_SIDE};
+pub use reframe::{Follow, Subject, plan_reframe, window_size};
+pub use stabilize::{Camera, Correction, Move, Path, Plan, Strength, plan};
 
 /// What the target's move may be.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -90,6 +100,8 @@ pub enum MotionError {
     Target { reason: String },
     /// The target has too little texture to follow.
     Featureless,
+    /// A camera path's frame rate or size is not usable.
+    Path { reason: String },
 }
 
 impl std::fmt::Display for MotionError {
@@ -98,6 +110,7 @@ impl std::fmt::Display for MotionError {
             Self::Frame { reason } => write!(f, "bad frame: {reason}"),
             Self::Target { reason } => write!(f, "bad target: {reason}"),
             Self::Featureless => f.write_str("the target has too little detail to follow"),
+            Self::Path { reason } => write!(f, "bad camera path: {reason}"),
         }
     }
 }

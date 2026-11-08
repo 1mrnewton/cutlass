@@ -113,7 +113,7 @@ pub fn track_clip(
         };
         let gray = Gray::from_rgba(picture.width(), picture.height(), picture.rgba())
             .map_err(TrackError::Motion)?;
-        upright(gray, display)
+        upright(gray, display).map_err(TrackError::Motion)
     };
     let canvas = (
         u32::try_from(draft.canvas_config.width.max(1)).unwrap_or(1),
@@ -157,12 +157,7 @@ fn frame_times(draft: &Draft, segment: &Segment, at: Micros) -> Result<FrameTime
             reason: "move the playhead onto the clip".into(),
         });
     }
-    let fps = if draft.fps.is_finite() && (1.0..=240.0).contains(&draft.fps) {
-        draft.fps
-    } else {
-        30.0
-    };
-    let step = 1_000_000.0 / fps;
+    let step = 1_000_000.0 / project_rate(draft);
     let time = |k: i64| Micros(at.0 + (k as f64 * step).round() as i64);
     let after = (1..).map(time).take_while(|t| t.0 < end).collect();
     let before = (1..)
@@ -170,6 +165,15 @@ fn frame_times(draft: &Draft, segment: &Segment, at: Micros) -> Result<FrameTime
         .take_while(|t| t.0 >= start)
         .collect();
     Ok(FrameTimes { before, at, after })
+}
+
+/// The project's frames per second, or 30 when it names none usable.
+pub(crate) fn project_rate(draft: &Draft) -> f64 {
+    if draft.fps.is_finite() && (1.0..=240.0).contains(&draft.fps) {
+        draft.fps
+    } else {
+        30.0
+    }
 }
 
 /// Track through `times`, reading each frame with `frame_at` and placing
@@ -317,7 +321,7 @@ fn on_canvas(
 }
 
 /// `gray` turned by the file's display quarter, so it is upright.
-fn upright(gray: Gray, display: DisplayQuarter) -> Result<Gray, TrackError> {
+pub(crate) fn upright(gray: Gray, display: DisplayQuarter) -> Result<Gray, MotionError> {
     let (w, h) = (gray.width() as usize, gray.height() as usize);
     if display == DisplayQuarter::Zero {
         return Ok(gray);
@@ -339,7 +343,7 @@ fn upright(gray: Gray, display: DisplayQuarter) -> Result<Gray, TrackError> {
             data[oy * out_w + ox] = values[y * w + x];
         }
     }
-    Gray::new(out_w as u32, out_h as u32, data).map_err(TrackError::Motion)
+    Gray::new(out_w as u32, out_h as u32, data)
 }
 
 #[cfg(test)]

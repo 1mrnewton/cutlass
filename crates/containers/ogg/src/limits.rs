@@ -45,7 +45,3 @@ pub const OPUS_RATE: u32 = 48_000;
 
 /// The mux closes a page once its body reaches this many bytes.
 pub const MUX_PAGE_BYTES: usize = 4_096;
-
-/// The mux closes a page once its completed packets span this many samples
-/// (one second at 48 kHz).
-pub const MUX_PAGE_SAMPLES: i64 = 48_000;

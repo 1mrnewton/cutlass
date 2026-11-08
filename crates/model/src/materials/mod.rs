@@ -50,7 +50,10 @@ pub use speed::{
 };
 pub use text::{Bubble, CAPTION_STYLE_KEYS, MaterialText};
 pub use transition::{MaterialTransition, blend_extents, blend_window};
-pub use video::{Crop, FreezeInfo, MaterialVideo};
+pub use video::{
+    Algorithm, Crop, FreezeInfo, MaterialVideo, MotionBlur, Reframe, Relight, VideoAlgorithm,
+    VideoStable,
+};
 pub use words::WordColumns;
 
 /// A material this model does not name field by field. `id` and `type` are lifted out.

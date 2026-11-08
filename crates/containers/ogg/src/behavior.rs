@@ -804,8 +804,8 @@ fn missing_or_garbled_opus_tags_fail_open() {
 
 #[test]
 fn an_unknown_mapping_is_listed_and_its_pages_skipped() {
-    let vorbis = b"\x01vorbis\0\0\0\0\x02\x44\xac\0\0".to_vec();
-    let mut file = encode(FLAG_BOS, 0, 5, 0, &lacing_for(vorbis.len()), &vorbis);
+    let flac = b"\x7fFLAC\x01\0\0\x01fLaC\0\0\0\x22".to_vec();
+    let mut file = encode(FLAG_BOS, 0, 5, 0, &lacing_for(flac.len()), &flac);
     let header = head(1, 312);
     file.extend(encode(
         FLAG_BOS,
@@ -824,9 +824,9 @@ fn an_unknown_mapping_is_listed_and_its_pages_skipped() {
     assert_eq!(demux.streams().len(), 2);
     assert_eq!(
         demux.streams()[0].params().codec(),
-        &StreamCodec::Unknown(UnknownCodec::new(b"ogg:vorbis".to_vec()).expect("tag"))
+        &StreamCodec::Unknown(UnknownCodec::new(b"ogg:flac".to_vec()).expect("tag"))
     );
-    assert_eq!(demux.streams()[0].params().extradata(), vorbis.as_slice());
+    assert_eq!(demux.streams()[0].params().extradata(), flac.as_slice());
     assert!(!demux.streams()[0].timescale().is_clock());
     let packets = read_all(&mut demux);
     assert_eq!(packets.len(), 1);

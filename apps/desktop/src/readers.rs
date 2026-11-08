@@ -11,14 +11,14 @@ use cutlass_isobmff::IsoBmffFile;
 use cutlass_still::{StillDemux, still_limits};
 
 /// The codecs [`crate::register_codecs`] installs, plus ISOBMFF, WAV, AIFF,
-/// FLAC, Ogg Opus, MP3, and stills.
+/// FLAC, Ogg (Opus and Vorbis), MP3, and stills.
 #[cfg(test)]
 pub(crate) fn installed_readers() -> ReaderFactory {
     readers_with(crate::register_codecs().0)
 }
 
-/// ISOBMFF, WAV, AIFF, FLAC, Ogg Opus, MP3, and stills, decoded with
-/// `decoders`.
+/// ISOBMFF, WAV, AIFF, FLAC, Ogg (Opus and Vorbis), MP3, and stills,
+/// decoded with `decoders`.
 pub(crate) fn readers_with(decoders: DecodeFactory) -> ReaderFactory {
     let mut readers = ReaderFactory::new();
     readers.register_container(probe_isobmff, open_isobmff);
@@ -282,6 +282,94 @@ mod tests {
         }
         let snr = 10.0 * (signal / noise.max(1e-30)).log10();
         assert!(snr > 30.0, "SNR {snr:.1} dB after a seek");
+    }
+
+    /// An `.ogg` Vorbis file opens, probes, and plays the decoder's own
+    /// samples from the start and after a seek. There is no encoder delay.
+    #[test]
+    fn an_ogg_vorbis_file_opens_seeks_and_decodes() {
+        use cutlass_encode::{AudioInput, ChannelLayout, CodecParams, Encoder, Pcm, SideData};
+
+        let path =
+            std::env::temp_dir().join(format!("cutlass-readers-vorbis-{}.ogg", std::process::id()));
+        let rate = 44_100_u32;
+        let frames = rate as usize * 2;
+        let samples: Vec<f32> = (0..frames * 2)
+            .map(|i| ((i as f32) * 0.02).sin() * 0.25)
+            .collect();
+        let spec = CodecParams::audio(CodecId::Vorbis, rate, ChannelLayout::stereo());
+        let mut encoder = cutlass_vorbis::VorbisEncoder::open(&spec).expect("encoder");
+        let pcm = Pcm::from_f32(rate, ChannelLayout::stereo(), samples).expect("pcm");
+        let mut packets = encoder.push(&AudioInput { pcm }).expect("push");
+        packets.extend(encoder.drain().expect("drain"));
+        let config = packets
+            .iter()
+            .find_map(|packet| {
+                packet.side.iter().find_map(|side| match side {
+                    SideData::Config(config) => Some(config.clone()),
+                    _ => None,
+                })
+            })
+            .expect("headers");
+        let mut mux = cutlass_ogg::OggMux::new(std::fs::File::create(&path).expect("create"));
+        let params =
+            StreamParams::try_audio(StreamCodec::Known(CodecId::Vorbis), rate, 2, config.clone())
+                .expect("params");
+        let track = mux
+            .add_stream(NewStream {
+                params,
+                timescale: Timescale::new(rate),
+                language: None,
+            })
+            .expect("stream");
+        let mut ticks = 0;
+        for packet in &packets {
+            let timestamp =
+                Timestamp::try_new(Some(packet.pts), Some(packet.pts), Some(packet.duration))
+                    .expect("timestamp");
+            let out = Packet::try_new(
+                track.get(),
+                packet.data.clone(),
+                timestamp,
+                Timescale::new(rate),
+                true,
+            )
+            .expect("packet");
+            mux.write_packet(&out).expect("write");
+            ticks += packet.duration;
+        }
+        mux.finish(&[TrackDuration {
+            track,
+            timescale: Timescale::new(rate),
+            ticks,
+        }])
+        .expect("finish");
+        drop(mux);
+
+        let mut decoder = cutlass_vorbis::VorbisDecoder::from_config(&config).expect("decoder");
+        let mut expected = Vec::new();
+        for packet in &packets {
+            expected.extend(decoder.decode(&packet.data).expect("decode"));
+        }
+        expected.truncate(frames * 2);
+
+        let readers = installed_readers();
+        let info = readers.probe(&path).expect("probe");
+        assert_eq!(info.duration.map(|d| d.0), Some(2_000_000));
+        let mut media = readers.open(&path).expect("open");
+        let window = 4_096_usize;
+        let first = media
+            .audio_from(cutlass_model::Micros(0), window as u32)
+            .expect("audio");
+        let first = first.as_f32().expect("f32");
+        assert_eq!(first, &expected[..window * 2]);
+        let later = media
+            .audio_from(cutlass_model::Micros(1_000_000), window as u32)
+            .expect("seek");
+        std::fs::remove_file(&path).expect("remove");
+        let later = later.as_f32().expect("f32");
+        let at = rate as usize * 2;
+        assert_eq!(later, &expected[at..at + window * 2]);
     }
 
     #[test]

@@ -8,24 +8,59 @@
 //!
 //! A selection runs in two steps. [`Selector::encode`] reads the frame once.
 //! [`Selector::select`] turns clicks into a mask and runs on every click.
+//!
+//! The second is Enhance quality: [`Enhancer`] makes a frame four times
+//! larger and repairs blur, noise and compression on the way.
+//!
+//! The third is Reduce image noise: [`Denoiser`] cleans each frame of a
+//! clip from the frames around it, so the noise it takes out stays still.
+//!
+//! The fourth is Optical flow: [`Interpolator`] makes the frames between
+//! two frames, for a clip at a higher frame rate or slowed down.
+//!
+//! The fifth is depth for Relight: [`DepthModel`] guesses how near each
+//! pixel of a frame is, from which the light finds the way each surface
+//! faces; [`relight_clip`] writes a clip's guesses as a grey video, and
+//! [`find_subjects`] finds what stands out nearest for Auto reframe.
 
 #![forbid(unsafe_code)]
 
+mod denoise;
+mod depth;
 mod device;
+mod enhance;
+mod enhance_job;
 mod frame;
 mod generated;
+mod interpolate;
 mod job;
 mod mask;
 mod mobile_sam;
+mod reframe_job;
+mod relight_job;
 
 use std::fmt;
 use std::path::PathBuf;
 
+pub use denoise::{
+    DENOISE_MAX_SIDE, DENOISE_WEIGHTS, DenoiseStream, Denoiser, MAX_NOISE, MIN_NOISE,
+    convert_fastdvdnet,
+};
+pub use depth::{
+    DEPTH_MAX_SIDE, DEPTH_SIDE, DEPTH_WEIGHTS, DepthMap, DepthModel, convert_depth_anything,
+};
 pub use device::{Compute, gpu_available, keep_kernels_in};
+pub use enhance::{ENHANCE_MAX_SIDE, ENHANCE_WEIGHTS, Enhanced, Enhancer, SCALE, convert_pytorch};
+pub use enhance_job::{CopyModels, EnhanceJobError, enhance_clip, enhanced_size, noise_for_level};
 pub use frame::MAX_SIDE;
+pub use interpolate::{
+    INTERPOLATE_MAX_SIDE, INTERPOLATE_WEIGHTS, Interpolator, Prepared, convert_rife,
+};
 pub use job::{JobError, SelectJob};
 pub use mask::Mask;
 pub use mobile_sam::{DECODER_WEIGHTS, ENCODER_WEIGHTS, MobileSam};
+pub use reframe_job::{REFRAME_SIDE, find_subjects, subject_of};
+pub use relight_job::{RELIGHT_SIDE, relight_clip};
 
 /// The most clicks one selection takes.
 pub const MAX_CLICKS: usize = 32;

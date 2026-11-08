@@ -60,6 +60,19 @@ pub enum OggError {
     },
     /// A page completes packets and its granule position is -1.
     MissingGranule { serial: u32 },
+    /// A Vorbis identification or comment header is cut short or has a
+    /// field out of range (Vorbis I sections 4.2.2 and 5).
+    BadVorbisHeader { serial: u32, reason: &'static str },
+    /// The identification header names a Vorbis version other than 0.
+    UnsupportedVorbisVersion { serial: u32, version: u32 },
+    /// The setup header is cut short or names something it does not have
+    /// (Vorbis I section 4.2.4).
+    BadVorbisSetup { serial: u32, reason: &'static str },
+    /// The file ended before a Vorbis stream's comment and setup headers.
+    MissingVorbisHeaders { serial: u32 },
+    /// The page where the setup header completes also completes an audio
+    /// packet (Vorbis I section A.2).
+    SetupPageNotFinished { serial: u32 },
     /// A seek needs a random-access input.
     ForwardOnly,
 }
@@ -145,6 +158,27 @@ impl fmt::Display for OggError {
                 )
             }
             Self::ForwardOnly => formatter.write_str("forward Ogg input cannot seek"),
+            Self::BadVorbisHeader { serial, reason } => {
+                write!(
+                    formatter,
+                    "Vorbis header of stream {serial:#010x}: {reason}"
+                )
+            }
+            Self::UnsupportedVorbisVersion { serial, version } => write!(
+                formatter,
+                "Vorbis stream {serial:#010x} has unsupported version {version}"
+            ),
+            Self::BadVorbisSetup { serial, reason } => {
+                write!(formatter, "Vorbis setup of stream {serial:#010x}: {reason}")
+            }
+            Self::MissingVorbisHeaders { serial } => write!(
+                formatter,
+                "Ogg stream {serial:#010x} ends before its Vorbis comment and setup headers"
+            ),
+            Self::SetupPageNotFinished { serial } => write!(
+                formatter,
+                "Vorbis setup header of stream {serial:#010x} does not finish its page"
+            ),
         }
     }
 }
@@ -167,9 +201,11 @@ impl OggError {
                 declared: *declared,
                 limit: *limit,
             },
-            Self::UnsupportedOpusVersion { .. } => OpenError::UnsupportedBrand {
-                family: cutlass_codec::ContainerId::Ogg,
-            },
+            Self::UnsupportedOpusVersion { .. } | Self::UnsupportedVorbisVersion { .. } => {
+                OpenError::UnsupportedBrand {
+                    family: cutlass_codec::ContainerId::Ogg,
+                }
+            }
             Self::DuplicateSerial { serial } => OpenError::DuplicateTrack { id: *serial },
             _ => OpenError::Source {
                 message: self.to_string(),

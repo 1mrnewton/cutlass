@@ -13,8 +13,10 @@ use cutlass_decode::{
 };
 use cutlass_encode::{EncodeFactory, Encoder, PictureInput};
 
+use crate::compress::{Coefficients, Planes, Sampling, WriteSettings};
 use crate::decode::{JpegDecoder, decode_jpeg, read_jpeg_info};
 use crate::encode::{JpegEncoder, encode_jpeg};
+use crate::image::{Tables, decode_image, read_tables};
 use crate::tables::{AC_LUMA_COUNTS, AC_LUMA_SYMBOLS, DC_LUMA_COUNTS, DC_LUMA_SYMBOLS};
 
 fn params(extra: &[u8]) -> CodecParams {
@@ -654,6 +656,147 @@ fn an_independent_stream_matches_size_format_and_count() {
     assert_eq!(image.samples.len(), 8 * 8 * 3);
 }
 
+/// Detailed odd-sized RGB: gradients, hard edges, and noise.
+fn detailed_rgb(width: u32, height: u32) -> Vec<u8> {
+    let mut rng = Rng(0x6a70_6567);
+    let mut bytes = Vec::with_capacity((width * height * 3) as usize);
+    for y in 0..height {
+        for x in 0..width {
+            let noise = (rng.next() >> 56) as u32 % 48;
+            let edge = if (x / 7 + y / 5) % 2 == 0 { 200 } else { 30 };
+            bytes.push(((x * 255 / width.max(1)) as u8).wrapping_add(noise as u8));
+            bytes.push(((edge + noise) % 256) as u8);
+            bytes.push(((y * 255 / height.max(1) + noise / 2) % 256) as u8);
+        }
+    }
+    bytes
+}
+
+fn p6(width: u32, height: u32, rgb: &[u8]) -> Vec<u8> {
+    let mut file = format!("P6\n{width} {height}\n255\n").into_bytes();
+    file.extend_from_slice(rgb);
+    file
+}
+
+/// Pixel bytes of a binary PPM or PGM.
+fn pnm_pixels(file: &[u8]) -> Vec<u8> {
+    let mut fields = 0;
+    let mut at = 0;
+    while fields < 4 {
+        while file[at].is_ascii_whitespace() {
+            at += 1;
+        }
+        while !file[at].is_ascii_whitespace() {
+            at += 1;
+        }
+        fields += 1;
+    }
+    file[at + 1..].to_vec()
+}
+
+fn djpeg_int(djpeg: &Path, jpeg: &[u8]) -> Vec<u8> {
+    let out = Command::new(djpeg)
+        .args(["-dct", "int"])
+        .output_from(jpeg)
+        .expect("djpeg");
+    assert!(out.status.success(), "{out:?}");
+    assert!(
+        out.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    pnm_pixels(&out.stdout)
+}
+
+fn assert_matches_libjpeg(cjpeg: &Path, djpeg: &Path, source: &[u8], args: &[&str]) {
+    let out = Command::new(cjpeg)
+        .args(args)
+        .output_from(source)
+        .expect("cjpeg");
+    assert!(out.status.success(), "{args:?} {out:?}");
+    let expected = djpeg_int(djpeg, &out.stdout);
+    let decoded = decode_image(&out.stdout, &mut Tables::new()).expect("decode");
+    let ours = decoded.image.to_rgb().expect("rgb");
+    assert_eq!(decoded.len, out.stdout.len(), "{args:?}");
+    assert_eq!(ours.len(), expected.len(), "{args:?}");
+    let differing = ours.iter().zip(&expected).filter(|(a, b)| a != b).count();
+    assert_eq!(
+        differing, 0,
+        "{args:?}: {differing} samples differ from djpeg -dct int"
+    );
+}
+
+const LIBJPEG_LAYOUTS: [&[&str]; 10] = [
+    &["-sample", "1x1"],
+    &["-sample", "2x1"],
+    &["-sample", "2x2"],
+    &["-sample", "1x2"],
+    &["-grayscale"],
+    &["-sample", "2x2", "-restart", "2"],
+    &["-sample", "2x2", "-progressive"],
+    &["-sample", "2x1", "-optimize"],
+    &["-sample", "2x2", "-quality", "100"],
+    &["-sample", "2x2", "-quality", "5"],
+];
+
+#[test]
+fn the_integer_idct_and_upsampling_match_libjpeg() {
+    let (Some(cjpeg), Some(djpeg)) = (tool("cjpeg"), tool("djpeg")) else {
+        require_or_skip("cjpeg and djpeg");
+        return;
+    };
+    let source = p6(67, 45, &detailed_rgb(67, 45));
+    for args in LIBJPEG_LAYOUTS {
+        assert_matches_libjpeg(&cjpeg, &djpeg, &source, args);
+    }
+}
+
+#[test]
+fn a_real_frame_matches_libjpeg_when_the_folder_is_present() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let Some(checkout) = root.ancestors().nth(3) else {
+        return;
+    };
+    let folder = checkout.join("../local-files");
+    let (Some(ffmpeg), Some(cjpeg), Some(djpeg)) = (tool("ffmpeg"), tool("cjpeg"), tool("djpeg"))
+    else {
+        return;
+    };
+    let Some(video) = first_video(&folder) else {
+        return;
+    };
+    let out = Command::new(&ffmpeg)
+        .args(["-v", "error", "-i"])
+        .arg(&video)
+        .args(["-frames:v", "1", "-f", "image2pipe", "-vcodec", "ppm", "-"])
+        .output()
+        .expect("ffmpeg");
+    assert!(out.status.success(), "{out:?}");
+    for args in [
+        &["-sample", "2x2"][..],
+        &["-sample", "2x1", "-restart", "1"],
+        &["-sample", "1x1", "-progressive"],
+    ] {
+        assert_matches_libjpeg(&cjpeg, &djpeg, &out.stdout, args);
+    }
+}
+
+#[test]
+fn reciprocal_quantization_matches_division() {
+    for step in 1..=255u16 {
+        let divisor = i32::from(step) * 8;
+        let recip = (1u64 << 32).div_ceil(u64::from(step) << 3);
+        for value in -16_384i32..=16_384 {
+            let expected = (value.abs() + divisor / 2) / divisor * value.signum();
+            assert_eq!(
+                crate::compress::divide(value, step, recip),
+                expected,
+                "{value}/{step}"
+            );
+        }
+    }
+}
+
 #[test]
 fn local_files_decode_when_the_folder_is_present() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -949,4 +1092,144 @@ fn first_video(folder: &Path) -> Option<PathBuf> {
         .collect();
     paths.sort_by_key(|path| path.metadata().map(|meta| meta.len()).unwrap_or(u64::MAX));
     paths.into_iter().next()
+}
+
+/// `bytes` as a table-specification stream and the abbreviated image left
+/// when its DQT and DHT segments are taken out.
+fn split_tables(bytes: &[u8]) -> (Vec<u8>, Vec<u8>) {
+    let mut tables = vec![0xff, 0xd8];
+    let mut image = vec![0xff, 0xd8];
+    let mut at = 2;
+    loop {
+        let marker = bytes[at + 1];
+        let len = usize::from(u16::from_be_bytes([bytes[at + 2], bytes[at + 3]]));
+        let segment = &bytes[at..at + 2 + len];
+        if marker == 0xda {
+            image.extend_from_slice(&bytes[at..]);
+            break;
+        }
+        if matches!(marker, 0xdb | 0xc4) {
+            tables.extend_from_slice(segment);
+        } else {
+            image.extend_from_slice(segment);
+        }
+        at += 2 + len;
+    }
+    tables.extend_from_slice(&[0xff, 0xd9]);
+    (tables, image)
+}
+
+fn planar_jpeg(width: u32, height: u32, sampling: Sampling, quality: u8) -> Vec<u8> {
+    let rgb = detailed_rgb(width, height);
+    let mut planes = Planes::default();
+    planes
+        .from_rgb(&rgb, 3, width, height, sampling)
+        .expect("planes");
+    let mut coefficients = Coefficients::new();
+    coefficients
+        .transform(&planes.source().expect("source"))
+        .expect("transform");
+    let mut out = Vec::new();
+    coefficients
+        .write(
+            &WriteSettings {
+                quality,
+                restart_interval: 0,
+                jfif: true,
+            },
+            &mut out,
+        )
+        .expect("write");
+    out
+}
+
+#[test]
+fn an_abbreviated_image_decodes_with_tables_read_before_it() {
+    let full = planar_jpeg(40, 24, Sampling::Yuv420, 80);
+    let (table_stream, abbreviated) = split_tables(&full);
+    let want = decode_image(&full, &mut Tables::new()).expect("full image");
+
+    let mut tables = Tables::new();
+    assert_eq!(
+        read_tables(&table_stream, &mut tables),
+        Ok(table_stream.len())
+    );
+    assert!(tables.has_quant(0) && tables.has_quant(1));
+    assert!(tables.has_huffman(0, 0) && tables.has_huffman(1, 1));
+    let got = decode_image(&abbreviated, &mut tables).expect("abbreviated image");
+    assert_eq!(got.image, want.image);
+    assert_eq!(got.len, abbreviated.len());
+
+    assert!(matches!(
+        decode_image(&abbreviated, &mut Tables::new()),
+        Err(CodecError::Malformed { .. })
+    ));
+}
+
+#[test]
+fn a_table_stream_with_a_frame_or_a_cut_leaves_the_tables() {
+    let full = planar_jpeg(16, 16, Sampling::Gray, 50);
+    let mut tables = Tables::new();
+    assert!(matches!(
+        read_tables(&full, &mut tables),
+        Err(CodecError::Malformed { .. })
+    ));
+    assert!(!tables.has_quant(0));
+
+    let (table_stream, _) = split_tables(&full);
+    for cut in 0..table_stream.len() {
+        let mut tables = Tables::new();
+        assert!(
+            read_tables(&table_stream[..cut], &mut tables).is_err(),
+            "cut {cut}"
+        );
+        assert!(
+            !tables.has_quant(0) && !tables.has_huffman(0, 0),
+            "cut {cut}"
+        );
+    }
+    assert!(read_tables(&[], &mut Tables::new()).is_err());
+}
+
+#[test]
+fn a_studio_range_comment_is_read_as_a_c_string() {
+    let image = planar_jpeg(8, 8, Sampling::Gray, 75);
+    let with_comment = |text: &[u8]| {
+        let mut out = image[..2].to_vec();
+        out.extend_from_slice(&[0xff, 0xfe]);
+        out.extend_from_slice(&u16::try_from(text.len() + 2).expect("len").to_be_bytes());
+        out.extend_from_slice(text);
+        out.extend_from_slice(&image[2..]);
+        decode_image(&out, &mut Tables::new())
+            .expect("image")
+            .image
+            .studio_range
+    };
+    assert!(with_comment(b"CS=ITU601"));
+    assert!(with_comment(b"CS=ITU601\0"));
+    assert!(with_comment(b"CS=ITU601\n"));
+    assert!(with_comment(b"CS=ITU601\0trailing"));
+    assert!(!with_comment(b"CS=ITU601X"));
+    assert!(!with_comment(b"CS=ITU60"));
+    assert!(!with_comment(b"Lavc62"));
+}
+
+#[test]
+fn an_avi1_segment_names_its_field_polarity() {
+    let image = planar_jpeg(8, 8, Sampling::Gray, 75);
+    let with_app0 = |body: &[u8]| {
+        let mut out = image[..2].to_vec();
+        out.extend_from_slice(&[0xff, 0xe0]);
+        out.extend_from_slice(&u16::try_from(body.len() + 2).expect("len").to_be_bytes());
+        out.extend_from_slice(body);
+        out.extend_from_slice(&image[2..]);
+        decode_image(&out, &mut Tables::new())
+            .expect("image")
+            .image
+            .avi1_polarity
+    };
+    assert_eq!(with_app0(b"AVI1\x01\x00\x00\x00\x10\x00"), Some(1));
+    assert_eq!(with_app0(b"AVI1\x00"), Some(0));
+    assert_eq!(with_app0(b"AVI1"), None);
+    assert_eq!(with_app0(b"AVI2\x01"), None);
 }

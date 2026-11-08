@@ -482,6 +482,7 @@ fn entry_code(params: &StreamParams) -> Result<[u8; 4], Error> {
         CodecId::Flac => *b"fLaC",
         CodecId::Alac => *b"alac",
         CodecId::Ac3 => *b"ac-3",
+        CodecId::Eac3 => *b"ec-3",
         CodecId::Pcm => match audio_format(params) {
             SampleFormat::S16Le | SampleFormat::S24Le | SampleFormat::S32Le | SampleFormat::U8 => {
                 *b"sowt"

@@ -69,6 +69,37 @@ fn must_err(bytes: &[u8]) -> Error {
     }
 }
 
+#[test]
+fn ac3_and_eac3_keep_separate_sample_entries() {
+    for (codec, entry, config) in [
+        (CodecId::Ac3, *b"ac-3", vec![0x11, 0x22, 0x33]),
+        (CodecId::Eac3, *b"ec-3", vec![0x44, 0x55, 0x66, 0x77]),
+    ] {
+        let mut params =
+            StreamParams::audio(codec, Timescale(48_000), 48_000, 2, 16, Default::default());
+        params.extradata = config.clone();
+        let bytes = write_movie(
+            MuxOptions::default(),
+            vec![(
+                params,
+                vec![packet(0, 0, 1536, &[0x0B, 0x77], true, 48_000)],
+            )],
+        );
+        let movie = open(&bytes);
+        let stream = &movie.streams()[0];
+        assert_eq!(stream.params.codec, codec);
+        assert_eq!(&stream.params.sample_entry, &entry);
+        assert_eq!(stream.params.extradata, config);
+        let box_name: &[u8] = if codec == CodecId::Ac3 {
+            b"dac3"
+        } else {
+            b"dec3"
+        };
+        assert!(bytes.windows(4).any(|window| window == box_name));
+        assert_eq!(read_all(&bytes)[0].payload, [0x0B, 0x77]);
+    }
+}
+
 fn read_all(bytes: &[u8]) -> Vec<Packet> {
     let mut movie = open(bytes);
     let mut source = SliceSource::new(bytes);

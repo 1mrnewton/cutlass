@@ -141,7 +141,7 @@ const PRORES_ENTRIES: [[u8; 4]; 6] = [*b"apco", *b"apcs", *b"apcn", *b"apch", *b
 fn box_params(stream: &NewStream) -> Result<StreamParams, MuxError> {
     let StreamCodec::Known(codec) = stream.params.codec() else {
         return Err(rejected(
-            "mp4 export writes H.264, HEVC, ProRes, VP8, AAC, ALAC, Opus, and PCM",
+            "mp4 export writes H.264, HEVC, ProRes, VP8, AAC, ALAC, Opus, AC-3, E-AC-3, and PCM",
         ));
     };
     let scale = BoxScale(stream.timescale.ticks_per_second());
@@ -159,7 +159,7 @@ fn box_params(stream: &NewStream) -> Result<StreamParams, MuxError> {
             };
             StreamParams::video(codec, scale, size.width(), size.height())
         }
-        Id::Aac | Id::Opus | Id::Pcm => {
+        Id::Aac | Id::Opus | Id::Pcm | Id::Ac3 | Id::Eac3 => {
             let rate = stream
                 .params
                 .sample_rate()
@@ -171,6 +171,8 @@ fn box_params(stream: &NewStream) -> Result<StreamParams, MuxError> {
             let codec = match codec {
                 Id::Aac => CodecId::Aac,
                 Id::Opus => CodecId::Opus,
+                Id::Ac3 => CodecId::Ac3,
+                Id::Eac3 => CodecId::Eac3,
                 _ => CodecId::Pcm,
             };
             StreamParams::audio(codec, scale, rate, channels, 16, SampleFormat::S16Le)
@@ -197,7 +199,7 @@ fn box_params(stream: &NewStream) -> Result<StreamParams, MuxError> {
         }
         _ => {
             return Err(rejected(
-                "mp4 export writes H.264, HEVC, ProRes, VP8, AAC, ALAC, Opus, and PCM",
+                "mp4 export writes H.264, HEVC, ProRes, VP8, AAC, ALAC, Opus, AC-3, E-AC-3, and PCM",
             ));
         }
     };

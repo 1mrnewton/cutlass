@@ -456,14 +456,16 @@ fn map_codec(fourcc: [u8; 4], oti: Option<u8>) -> CodecId {
         b"Opus" => CodecId::Opus,
         b"fLaC" => CodecId::Flac,
         b"alac" => CodecId::Alac,
-        b"ac-3" | b"sac3" | b"ec-3" => CodecId::Ac3,
+        b"ac-3" | b"sac3" => CodecId::Ac3,
+        b"ec-3" => CodecId::Eac3,
         b"sowt" | b"twos" | b"raw " | b"in24" | b"in32" | b"fl32" | b"fl64" | b"lpcm" | b"NONE" => {
             CodecId::Pcm
         }
         b".mp3" => CodecId::Mp3,
         b"mp4a" => match oti {
             Some(0x69 | 0x6B) => CodecId::Mp3,
-            Some(0xA5 | 0xA6) => CodecId::Ac3,
+            Some(0xA5) => CodecId::Ac3,
+            Some(0xA6) => CodecId::Eac3,
             _ => CodecId::Aac,
         },
         _ => CodecId::Unknown(fourcc),

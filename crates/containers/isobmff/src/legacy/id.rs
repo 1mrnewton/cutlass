@@ -18,6 +18,7 @@ pub enum CodecId {
     Vorbis,
     Alac,
     Ac3,
+    Eac3,
     Jpeg,
     Png,
     Webp,

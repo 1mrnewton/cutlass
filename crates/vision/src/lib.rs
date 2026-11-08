@@ -17,10 +17,15 @@
 //!
 //! The fourth is Optical flow: [`Interpolator`] makes the frames between
 //! two frames, for a clip at a higher frame rate or slowed down.
+//!
+//! The fifth is depth for Relight: [`DepthModel`] guesses how near each
+//! pixel of a frame is, from which the light finds the way each surface
+//! faces.
 
 #![forbid(unsafe_code)]
 
 mod denoise;
+mod depth;
 mod device;
 mod enhance;
 mod enhance_job;
@@ -37,6 +42,9 @@ use std::path::PathBuf;
 pub use denoise::{
     DENOISE_MAX_SIDE, DENOISE_WEIGHTS, DenoiseStream, Denoiser, MAX_NOISE, MIN_NOISE,
     convert_fastdvdnet,
+};
+pub use depth::{
+    DEPTH_MAX_SIDE, DEPTH_SIDE, DEPTH_WEIGHTS, DepthMap, DepthModel, convert_depth_anything,
 };
 pub use device::{Compute, gpu_available, keep_kernels_in};
 pub use enhance::{ENHANCE_MAX_SIDE, ENHANCE_WEIGHTS, Enhanced, Enhancer, SCALE, convert_pytorch};

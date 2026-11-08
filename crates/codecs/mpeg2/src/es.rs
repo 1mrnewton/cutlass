@@ -153,7 +153,9 @@ impl Splitter {
             _ => {}
         }
         self.current.extend_from_slice(unit);
-        if code == SEQUENCE_END {
+        // A first field keeps its unit open across an end code, so the
+        // second field joins it.
+        if code == SEQUENCE_END && !self.awaiting_second_field {
             self.emit(out);
         }
         Ok(())

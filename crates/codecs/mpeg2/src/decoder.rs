@@ -383,10 +383,12 @@ impl Mpeg2Decoder {
                     self.picture(st, &unit, &mut clock, done)?;
                 }
                 SEQUENCE_END => {
-                    if let Some(open) = st.open_field.take() {
-                        finish_unpaired(st, open, done);
-                    }
-                    if let Some(held) = st.held.take() {
+                    // An end between the two fields of a frame does not
+                    // break the pair: the second field may still follow,
+                    // and the held frame displays after this one.
+                    if st.open_field.is_none()
+                        && let Some(held) = st.held.take()
+                    {
                         done.push(held);
                     }
                     k += 1;

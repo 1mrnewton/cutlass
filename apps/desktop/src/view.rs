@@ -4785,16 +4785,27 @@ fn timeline_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Re
 }
 
 fn paint_toolbar(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect) {
+    let inner = rect.shrink2(Vec2::new(10.0, 4.0));
+    // Snap through zoom keep to the right edge, apart from the edit tools,
+    // which scroll sideways in the room left of them.
+    let right = Rect::from_min_max(
+        Pos2::new(inner.right() - tools_width(TOOLS_RIGHT), inner.top()),
+        inner.max,
+    );
+    let left = Rect::from_min_max(
+        inner.min,
+        Pos2::new((right.left() - TOOLS_GAP).max(inner.left()), inner.bottom()),
+    );
     let mut bar = ui.new_child(
         egui::UiBuilder::new()
-            .max_rect(rect.shrink2(Vec2::new(10.0, 4.0)))
+            .max_rect(left)
             .layout(Layout::left_to_right(Align::Center)),
     );
     ui::Scroll::horizontal("timeline-toolbar")
         .auto_shrink([false, true])
         .show(&mut bar, |ui| {
             ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 4.0;
+                ui.spacing_mut().item_spacing.x = TOOL_SPACING;
                 if shell.compound_depth() > 0 {
                     if ui
                         .add(ui::Button::new("‹ Back").text_size(12.0))
@@ -4807,56 +4818,99 @@ fn paint_toolbar(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rec
                     ui.label(RichText::new(COMPOUND_TITLE).size(12.0).color(tokens::TEXT));
                     toolbar_separator(ui);
                 }
-                for item in TOOLS {
-                    match item {
-                        None => toolbar_separator(ui),
-                        Some((name, tip)) => {
-                            let enabled = tool_enabled(shell, name);
-                            let active = match *name {
-                                "split" => shell.blade(),
-                                "marker" => shell.marking(),
-                                "beat" => shell.beating(),
-                                "linkage" => shell.linkage_enabled(),
-                                "magnet" => shell.magnet_enabled(),
-                                "snap" => shell.snap_enabled(),
-                                "reverse" => shell.reversed(),
-                                "mirror" => shell.mirrored(),
-                                "rotate" => shell.rotated(),
-                                "crop" => shell.cropped(),
-                                _ => false,
-                            };
-                            let tip = match *name {
-                                "linkage" if shell.linkage_enabled() => "Linkage on",
-                                "linkage" => "Linkage off",
-                                "magnet" if shell.magnet_enabled() => "Magnet on",
-                                "magnet" => "Magnet off",
-                                "snap" if shell.snap_enabled() => "Snap on",
-                                "snap" => "Snap off",
-                                "reverse" if shell.reversed() => "Reversed",
-                                "reverse" => "Reverse",
-                                "mirror" if shell.mirrored() => "Mirrored",
-                                "mirror" => "Mirror",
-                                "rotate" if shell.rotated() => "Rotated",
-                                "rotate" => "Rotate",
-                                "crop" if shell.cropped() => "Cropped",
-                                "crop" => "Crop",
-                                _ => tip,
-                            };
-                            if toolbar_button(ui, name, tip, enabled, active).clicked() {
-                                tool_clicked(shell, name);
-                            }
-                            if *name == "linkage" {
-                                linkage_menu(shell, ui, view);
-                            }
-                        }
-                    }
-                }
+                paint_tools(shell, ui, view, TOOLS_LEFT);
             });
         });
+    let mut pinned = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(right)
+            .layout(Layout::left_to_right(Align::Center)),
+    );
+    pinned.spacing_mut().item_spacing.x = TOOL_SPACING;
+    paint_tools(shell, &mut pinned, view, TOOLS_RIGHT);
+}
+
+/// The space between two toolbar items, and between the two groups.
+const TOOL_SPACING: f32 = 4.0;
+const TOOLS_GAP: f32 = 16.0;
+/// A tool button, a separator, and the linkage chevron, as drawn.
+const TOOL_BUTTON: f32 = 28.0;
+const TOOL_SEPARATOR: f32 = 13.0;
+const LINKAGE_CHEVRON: f32 = 16.0;
+
+/// The width `items` take in a row: each button, separator and the
+/// linkage chevron, with the spacing between them.
+fn tools_width(items: &[Option<(&str, &str)>]) -> f32 {
+    let mut widths: Vec<f32> = Vec::new();
+    for item in items {
+        match item {
+            None => widths.push(TOOL_SEPARATOR),
+            Some((name, _)) => {
+                widths.push(TOOL_BUTTON);
+                if *name == "linkage" {
+                    widths.push(LINKAGE_CHEVRON);
+                }
+            }
+        }
+    }
+    let gaps = widths.len().saturating_sub(1) as f32 * TOOL_SPACING;
+    widths.iter().sum::<f32>() + gaps
+}
+
+fn paint_tools(
+    shell: &mut Shell,
+    ui: &mut Ui,
+    view: &mut ViewState,
+    items: &[Option<(&str, &str)>],
+) {
+    for item in items {
+        match item {
+            None => toolbar_separator(ui),
+            Some((name, tip)) => {
+                let enabled = tool_enabled(shell, name);
+                let active = match *name {
+                    "split" => shell.blade(),
+                    "marker" => shell.marking(),
+                    "beat" => shell.beating(),
+                    "linkage" => shell.linkage_enabled(),
+                    "magnet" => shell.magnet_enabled(),
+                    "snap" => shell.snap_enabled(),
+                    "reverse" => shell.reversed(),
+                    "mirror" => shell.mirrored(),
+                    "rotate" => shell.rotated(),
+                    "crop" => shell.cropped(),
+                    _ => false,
+                };
+                let tip = match *name {
+                    "linkage" if shell.linkage_enabled() => "Linkage on",
+                    "linkage" => "Linkage off",
+                    "magnet" if shell.magnet_enabled() => "Magnet on",
+                    "magnet" => "Magnet off",
+                    "snap" if shell.snap_enabled() => "Snap on",
+                    "snap" => "Snap off",
+                    "reverse" if shell.reversed() => "Reversed",
+                    "reverse" => "Reverse",
+                    "mirror" if shell.mirrored() => "Mirrored",
+                    "mirror" => "Mirror",
+                    "rotate" if shell.rotated() => "Rotated",
+                    "rotate" => "Rotate",
+                    "crop" if shell.cropped() => "Cropped",
+                    "crop" => "Crop",
+                    _ => tip,
+                };
+                if toolbar_button(ui, name, tip, enabled, active).clicked() {
+                    tool_clicked(shell, name);
+                }
+                if *name == "linkage" {
+                    linkage_menu(shell, ui, view);
+                }
+            }
+        }
+    }
 }
 
 fn toolbar_separator(ui: &mut Ui) {
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(13.0, 28.0), Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(TOOL_SEPARATOR, 28.0), Sense::hover());
     ui.painter().vline(
         rect.center().x,
         (rect.center().y - 8.0)..=(rect.center().y + 8.0),
@@ -4875,7 +4929,7 @@ fn toolbar_button(
         enabled || active,
         ui::Button::icon(name)
             .on(active)
-            .min_size(Vec2::splat(28.0))
+            .min_size(Vec2::splat(TOOL_BUTTON))
             .tip(tip),
     )
 }
@@ -4950,7 +5004,7 @@ fn tool_clicked(shell: &mut Shell, name: &str) {
 
 /// The arrow beside Linkage: a menu that opens the Linkage settings dialog.
 fn linkage_menu(shell: &Shell, ui: &mut Ui, view: &mut ViewState) {
-    let (rect, response) = ui.allocate_exact_size(Vec2::new(16.0, 28.0), Sense::click());
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(LINKAGE_CHEVRON, 28.0), Sense::click());
     response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Linkage options"));
     let response = response.on_hover_text("Linkage settings");
     let open = egui::Popup::is_id_open(ui.ctx(), egui::Id::unique("linkage-menu"));
@@ -5084,7 +5138,8 @@ fn linkage_dialog(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
 /// What the toolbar says while a compound clip is open.
 const COMPOUND_TITLE: &str = "Compound clip";
 
-const TOOLS: &[Option<(&str, &str)>] = &[
+/// The edit tools, at the toolbar's left.
+const TOOLS_LEFT: &[Option<(&str, &str)>] = &[
     Some(("undo", "Undo")),
     Some(("redo", "Redo")),
     None,
@@ -5102,7 +5157,10 @@ const TOOLS: &[Option<(&str, &str)>] = &[
     None,
     Some(("marker", "Marker")),
     Some(("beat", "Beat")),
-    None,
+];
+
+/// Snap through zoom, kept at the toolbar's right edge.
+const TOOLS_RIGHT: &[Option<(&str, &str)>] = &[
     Some(("snap", "Snap")),
     Some(("magnet", "Magnet")),
     Some(("linkage", "Linkage")),
@@ -14372,6 +14430,48 @@ mod tests {
             "{scrolled:?}"
         );
         let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn the_right_tools_take_the_width_they_are_kept_for() {
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let mut drawn = 0.0;
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0))),
+                ..Default::default()
+            },
+            |ui| {
+                let mut pinned = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(Rect::from_min_size(
+                            Pos2::new(600.0, 10.0),
+                            Vec2::new(600.0, 36.0),
+                        ))
+                        .layout(Layout::left_to_right(Align::Center)),
+                );
+                pinned.spacing_mut().item_spacing.x = TOOL_SPACING;
+                paint_tools(&mut shell, &mut pinned, &mut view, TOOLS_RIGHT);
+                drawn = pinned.min_rect().width();
+            },
+        );
+        output.textures_delta.clear();
+        assert!(
+            (drawn - tools_width(TOOLS_RIGHT)).abs() < 0.5,
+            "drawn {drawn}, kept {}",
+            tools_width(TOOLS_RIGHT)
+        );
+        assert_eq!(
+            TOOLS_RIGHT.first().copied().flatten().map(|tool| tool.0),
+            Some("snap")
+        );
+        assert_eq!(
+            TOOLS_RIGHT.last().copied().flatten().map(|tool| tool.0),
+            Some("zoomIn")
+        );
     }
 
     #[test]

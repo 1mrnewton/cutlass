@@ -472,6 +472,84 @@ pub fn show(
     shown
 }
 
+/// One key in a shortcut: a modifier drawn as an icon, or text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Key<'a> {
+    Icon(&'static str),
+    Text(&'a str),
+}
+
+/// The keys of `shortcut`, such as `⇧⌘C`, in the order they are drawn.
+/// On a Mac the modifiers are the Command, Shift and Option icons. Elsewhere
+/// Command reads Ctrl and Option reads Alt, and Shift keeps its icon.
+fn keys(shortcut: &str, mac: bool) -> Vec<Key<'_>> {
+    shortcut
+        .char_indices()
+        .map(|(at, glyph)| match (glyph, mac) {
+            ('⌘', true) => Key::Icon("keyCommand"),
+            ('⌘', false) => Key::Text("Ctrl"),
+            ('⌥', true) => Key::Icon("keyOption"),
+            ('⌥', false) => Key::Text("Alt"),
+            ('⇧', _) => Key::Icon("keyShift"),
+            _ => Key::Text(&shortcut[at..at + glyph.len_utf8()]),
+        })
+        .collect()
+}
+
+const MAC: bool = cfg!(target_os = "macos");
+/// The edge of a key icon.
+const KEY_ICON: f32 = 13.0;
+/// The space between two keys.
+const KEY_GAP: f32 = 8.0;
+
+fn key_width(ctx: &Context, key: Key<'_>) -> f32 {
+    match key {
+        Key::Icon(_) => KEY_ICON,
+        Key::Text(text) => text_width(ctx, text, KEY_SIZE),
+    }
+}
+
+/// The width the keys of `shortcut` take.
+fn keys_width(ctx: &Context, shortcut: &str) -> f32 {
+    let keys = keys(shortcut, MAC);
+    let gaps = keys.len().saturating_sub(1) as f32 * KEY_GAP;
+    keys.iter().map(|key| key_width(ctx, *key)).sum::<f32>() + gaps
+}
+
+/// Paint the keys of `shortcut` with the last one's right edge at `end`.
+fn paint_keys(
+    ctx: &Context,
+    painter: &egui::Painter,
+    end: Pos2,
+    shortcut: &str,
+    color: egui::Color32,
+) {
+    let mut x = end.x - keys_width(ctx, shortcut);
+    for key in keys(shortcut, MAC) {
+        match key {
+            Key::Icon(name) => {
+                let rect = Rect::from_min_size(
+                    Pos2::new(x, end.y - KEY_ICON / 2.0),
+                    Vec2::splat(KEY_ICON),
+                );
+                if let Err(error) = crate::icons::paint(painter, rect, name, color) {
+                    cutlass_logger::warn!("{error}");
+                }
+            }
+            Key::Text(text) => {
+                painter.text(
+                    Pos2::new(x, end.y),
+                    Align2::LEFT_CENTER,
+                    text,
+                    FontId::proportional(KEY_SIZE),
+                    color,
+                );
+            }
+        }
+        x += key_width(ctx, key) + KEY_GAP;
+    }
+}
+
 /// The monitor the window is on, in screen points. egui gives its size, not
 /// its corner, so this takes the main monitor at the origin when the window
 /// is on it, and no limit when it is on another.
@@ -605,7 +683,7 @@ fn size(ctx: &Context, entries: &[Entry]) -> Vec2 {
                 if !item.children.is_empty() {
                     row += GAP + CHEVRON;
                 } else if !item.shortcut.is_empty() {
-                    row += GAP + text_width(ctx, item.shortcut, KEY_SIZE);
+                    row += GAP + keys_width(ctx, item.shortcut);
                 }
                 width = width.max(row);
             }
@@ -739,11 +817,11 @@ fn paint_menu(
                 stroke,
             );
         } else if !item.shortcut.is_empty() {
-            painter.text(
+            paint_keys(
+                ctx,
+                &painter,
                 Pos2::new(end, bounds.center().y),
-                Align2::RIGHT_CENTER,
                 item.shortcut,
-                FontId::proportional(KEY_SIZE),
                 key,
             );
         }
@@ -821,6 +899,23 @@ mod tests {
                 "render",
             ]
         );
+    }
+
+    #[test]
+    fn modifiers_draw_as_icons_on_a_mac_and_as_words_elsewhere() {
+        assert_eq!(
+            keys("⇧⌘C", true),
+            [
+                Key::Icon("keyShift"),
+                Key::Icon("keyCommand"),
+                Key::Text("C")
+            ]
+        );
+        assert_eq!(keys("⌥G", false), [Key::Text("Alt"), Key::Text("G")]);
+        assert_eq!(keys("⌘X", false), [Key::Text("Ctrl"), Key::Text("X")]);
+        for name in ["keyCommand", "keyShift", "keyOption"] {
+            assert!(crate::icons::require(name).is_ok(), "{name}");
+        }
     }
 
     #[test]

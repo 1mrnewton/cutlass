@@ -29,6 +29,9 @@ cutlass-aac = { path = "../codecs/aac", version = "0.1.0" }
 cutlass-alac = { path = "../codecs/alac", version = "0.1.0" }
 cutlass-flac = { path = "../codecs/flac", version = "0.1.0" }
 cutlass-gif = { path = "../codecs/gif", version = "0.1.0" }
+cutlass-h264 = { path = "../codecs/h264", version = "0.1.0" }
+cutlass-engine = { path = "../engine", version = "0.1.0" }
+cutlass-picture = { path = "../picture", version = "0.1.0" }
 cutlass-mp3 = { path = "../codecs/mp3", version = "0.1.0" }
 cutlass-opus = { path = "../codecs/opus", version = "0.1.0" }
 cutlass-webp = { path = "../codecs/webp", version = "0.1.0" }

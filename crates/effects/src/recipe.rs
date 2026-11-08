@@ -84,6 +84,26 @@ pub enum Block {
     Posterize,
     /// Draw the outlines: darken them, or show them alone.
     Edges,
+    /// Colour each pixel by its brightness from a palette: two colours of
+    /// its own, heat, or a rainbow.
+    GradientMap,
+    /// Repeat the picture in a grid, each copy cropped to fill its cell.
+    Grid,
+    /// Darken all but a soft circle of light.
+    Spotlight,
+    /// Show the picture only on one side of a moving edge: a wipe, an iris
+    /// or blinds. The rest is black.
+    Reveal,
+    /// Scale across and down apart, optionally black past the picture.
+    Stretch,
+    /// Specks of dust and scratches, as on old film.
+    Dust,
+    /// Repeat one wedge around a point, as a kaleidoscope does.
+    Kaleido,
+    /// Pull red out and blue in from a point, as a cheap lens does.
+    Fringe,
+    /// Print the picture as dots, big where it is dark.
+    Halftone,
 }
 
 /// One parameter of a block: its name, its value when a recipe leaves it
@@ -204,6 +224,78 @@ const POSTERIZE: &[Param] = &[param("levels", 256.0, 2.0, 256.0)];
 /// `amount` darkens the outlines over the picture; `only` fades the
 /// picture away to leave light outlines on black.
 const EDGES: &[Param] = &[param("amount", 0.0, 0.0, 1.0), param("only", 0.0, 0.0, 1.0)];
+/// `palette` 0 runs from the low colour to the high one, 1 is heat from
+/// black through blue, magenta and orange to white, 2 is a rainbow.
+const GRADIENT_MAP: &[Param] = &[
+    param("amount", 0.0, 0.0, 1.0),
+    param("palette", 0.0, 0.0, 2.0),
+    param("low_red", 0.0, 0.0, 1.0),
+    param("low_green", 0.0, 0.0, 1.0),
+    param("low_blue", 0.0, 0.0, 1.0),
+    param("high_red", 1.0, 0.0, 1.0),
+    param("high_green", 1.0, 0.0, 1.0),
+    param("high_blue", 1.0, 0.0, 1.0),
+];
+/// Whole cells across and down; `zoom` above 1 crops each copy closer.
+const GRID: &[Param] = &[
+    param("x", 1.0, 1.0, 8.0),
+    param("y", 1.0, 1.0, 8.0),
+    param("zoom", 1.0, 1.0, 4.0),
+];
+/// `x` and `y` move the light from the middle, in frames; `size` and
+/// `soft` are fractions of the shorter side.
+const SPOTLIGHT: &[Param] = &[
+    param("amount", 0.0, 0.0, 1.0),
+    param("x", 0.0, -1.0, 1.0),
+    param("y", 0.0, -1.0, 1.0),
+    param("size", 0.3, 0.0, 2.0),
+    param("soft", 0.15, 0.0, 1.0),
+];
+/// `progress` 0 shows nothing and 1 all of it. `kind` 0 wipes from one
+/// side, 1 opens a circle from the middle, 2 opens `count` blinds. `angle`
+/// 0 runs left to right; `soft` is the edge, as a fraction of the run.
+const REVEAL: &[Param] = &[
+    param("progress", 1.0, 0.0, 1.0),
+    param("kind", 0.0, 0.0, 2.0),
+    param("angle", 0.0, -180.0, 180.0),
+    param("soft", 0.02, 0.0, 0.5),
+    param("count", 8.0, 1.0, 64.0),
+];
+/// `black` 1 leaves black where the shrunk picture no longer reaches;
+/// 0 reflects it, as the other moving blocks do.
+const STRETCH: &[Param] = &[
+    param("x", 1.0, 0.0, 4.0),
+    param("y", 1.0, 0.0, 4.0),
+    param("black", 0.0, 0.0, 1.0),
+];
+/// `amount` is how much of the frame is specked, `scratches` how likely
+/// each of three scratches is, `size` a speck's room as a fraction of the
+/// shorter side.
+const DUST: &[Param] = &[
+    param("amount", 0.0, 0.0, 1.0),
+    param("scratches", 0.0, 0.0, 1.0),
+    param("seed", 0.0, 0.0, 1000.0),
+    param("size", 0.03, 0.005, 0.2),
+];
+/// `segments` below 2 leaves the picture as it is.
+const KALEIDO: &[Param] = &[
+    param("segments", 1.0, 1.0, 32.0),
+    param("angle", 0.0, -360.0, 360.0),
+    param("x", 0.0, -0.5, 0.5),
+    param("y", 0.0, -0.5, 0.5),
+];
+const FRINGE: &[Param] = &[
+    param("amount", 0.0, 0.0, 0.2),
+    param("x", 0.0, -0.5, 0.5),
+    param("y", 0.0, -0.5, 0.5),
+];
+/// `size` is a dot's cell, as a fraction of the shorter side; `color` 0
+/// prints black dots and 1 dots of the picture's own colour, on white.
+const HALFTONE: &[Param] = &[
+    param("size", 0.0, 0.0, 0.1),
+    param("amount", 1.0, 0.0, 1.0),
+    param("color", 0.0, 0.0, 1.0),
+];
 
 impl Block {
     /// The parameters in the order the shader reads them.
@@ -233,6 +325,15 @@ impl Block {
             Self::Tile => TILE,
             Self::Posterize => POSTERIZE,
             Self::Edges => EDGES,
+            Self::GradientMap => GRADIENT_MAP,
+            Self::Grid => GRID,
+            Self::Spotlight => SPOTLIGHT,
+            Self::Reveal => REVEAL,
+            Self::Stretch => STRETCH,
+            Self::Dust => DUST,
+            Self::Kaleido => KALEIDO,
+            Self::Fringe => FRINGE,
+            Self::Halftone => HALFTONE,
         }
     }
 
@@ -263,6 +364,15 @@ impl Block {
             Self::Tile => 20,
             Self::Posterize => 21,
             Self::Edges => 22,
+            Self::GradientMap => 23,
+            Self::Grid => 24,
+            Self::Spotlight => 25,
+            Self::Reveal => 26,
+            Self::Stretch => 27,
+            Self::Dust => 28,
+            Self::Kaleido => 29,
+            Self::Fringe => 30,
+            Self::Halftone => 31,
         }
     }
 }

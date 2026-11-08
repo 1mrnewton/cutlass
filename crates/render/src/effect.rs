@@ -327,6 +327,173 @@ fn edges(uv: vec2<f32>) -> vec4<f32> {
     return premultiplied(mix(inked, alone, fx.a.y), c.a);
 }
 
+fn gradient_map(uv: vec2<f32>) -> vec4<f32> {
+    let c = fetch(uv);
+    let rgb = straight(c);
+    let level = clamp(luma(rgb), 0.0, 1.0);
+    let palette = u32(fx.a.y + 0.5);
+    var mapped = mix(vec3<f32>(fx.a.z, fx.a.w, fx.b.x), fx.b.yzw, level);
+    if (palette == 1u) {
+        var heat = array<vec3<f32>, 6>(
+            vec3<f32>(0.0, 0.0, 0.0),
+            vec3<f32>(0.1, 0.1, 0.8),
+            vec3<f32>(0.8, 0.1, 0.6),
+            vec3<f32>(1.0, 0.5, 0.0),
+            vec3<f32>(1.0, 0.95, 0.2),
+            vec3<f32>(1.0, 1.0, 1.0),
+        );
+        let at = level * 5.0;
+        let index = min(u32(floor(at)), 4u);
+        mapped = mix(heat[index], heat[index + 1u], at - f32(index));
+    } else if (palette == 2u) {
+        let hue = level * 0.85;
+        mapped = clamp(
+            abs(fract(vec3<f32>(hue) + vec3<f32>(1.0, 0.6666667, 0.3333333)) * 6.0 - vec3<f32>(3.0))
+                - vec3<f32>(1.0),
+            vec3<f32>(0.0),
+            vec3<f32>(1.0),
+        );
+    }
+    return premultiplied(mix(rgb, mapped, fx.a.x), c.a);
+}
+
+fn grid(uv: vec2<f32>) -> vec4<f32> {
+    let count = max(floor(fx.a.xy + vec2<f32>(0.5)), vec2<f32>(1.0));
+    let local = fract(uv * count);
+    // Each cell shows the middle of the frame at the cell's own shape.
+    let cell = fx.size / count;
+    let fill = max(cell.x / fx.size.x, cell.y / fx.size.y);
+    let region = cell / (fill * fx.size) / max(fx.a.z, 1.0);
+    return fetch(vec2<f32>(0.5) + (local - vec2<f32>(0.5)) * region);
+}
+
+fn spotlight(uv: vec2<f32>) -> vec4<f32> {
+    let c = fetch(uv);
+    let d = length(from_point(uv, fx.a.yz));
+    let lit = 1.0 - smoothstep(fx.a.w, fx.a.w + fx.b.x + 0.0001, d);
+    return vec4<f32>(c.rgb * (1.0 - fx.a.x * (1.0 - lit)), c.a);
+}
+
+fn reveal(uv: vec2<f32>) -> vec4<f32> {
+    let c = fetch(uv);
+    let progress = fx.a.x;
+    if (progress >= 1.0) {
+        return c;
+    }
+    let kind = u32(fx.a.y + 0.5);
+    let turn = radians(fx.a.z);
+    let along = vec2<f32>(cos(turn), -sin(turn));
+    // How far through the run this pixel is, 0 to 1.
+    var run = 0.0;
+    if (kind == 1u) {
+        let p = from_point(uv, vec2<f32>(0.0));
+        let corner = length(fx.size / min(fx.size.x, fx.size.y)) * 0.5;
+        run = length(p) / corner;
+    } else {
+        let reach = (abs(along.x) + abs(along.y)) * 0.5;
+        run = dot(uv - vec2<f32>(0.5), along) / reach * 0.5 + 0.5;
+        if (kind == 2u) {
+            run = fract(run * max(floor(fx.b.x + 0.5), 1.0));
+        }
+    }
+    let soft = fx.a.w;
+    let shown = 1.0 - smoothstep(progress * (1.0 + soft) - soft, progress * (1.0 + soft), run);
+    return vec4<f32>(c.rgb * shown, c.a);
+}
+
+fn stretch(uv: vec2<f32>) -> vec4<f32> {
+    let scale = max(fx.a.xy, vec2<f32>(0.0001));
+    let back = (uv - vec2<f32>(0.5)) / scale + vec2<f32>(0.5);
+    let outside = any(back < vec2<f32>(0.0)) || any(back > vec2<f32>(1.0));
+    if (outside && fx.a.z >= 0.5) {
+        return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+    }
+    return fetch(back);
+}
+
+fn dust(uv: vec2<f32>) -> vec4<f32> {
+    let c = fetch(uv);
+    var rgb = straight(c);
+    let seed = u32(fx.a.z);
+    let p = from_point(uv, vec2<f32>(0.0)) + vec2<f32>(4.0);
+    let room = max(fx.a.w, 0.001);
+    let cell = floor(p / room);
+    let cx = u32(cell.x);
+    let cy = u32(cell.y);
+    if (rand(cx, cy, seed) < fx.a.x * 0.35) {
+        let middle = (cell + vec2<f32>(rand(cx, cy, seed + 1u), rand(cx, cy, seed + 2u))) * room;
+        let radius = room * (0.08 + 0.25 * rand(cx, cy, seed + 3u));
+        let speck = 1.0 - smoothstep(radius * 0.6, radius, length(p - middle));
+        let light = rand(cx, cy, seed + 4u) < 0.3;
+        if (light) {
+            rgb = mix(rgb, vec3<f32>(0.95), speck * 0.8);
+        } else {
+            rgb = mix(rgb, vec3<f32>(0.05), speck * 0.85);
+        }
+    }
+    for (var k = 0u; k < 3u; k = k + 1u) {
+        if (rand(k, 7u, seed) < fx.a.y) {
+            let x = rand(k, 8u, seed) + 0.01 * sin(uv.y * 9.0 + f32(k));
+            let width = 1.2 / fx.size.x;
+            let line = 1.0 - smoothstep(0.0, width, abs(uv.x - x));
+            rgb = mix(rgb, vec3<f32>(0.1), line * 0.6);
+        }
+    }
+    return premultiplied(rgb, c.a);
+}
+
+fn kaleido(uv: vec2<f32>) -> vec4<f32> {
+    let count = floor(fx.a.x + 0.5);
+    if (count < 2.0) {
+        return fetch(uv);
+    }
+    let point = fx.a.zw;
+    let p = from_point(uv, point);
+    let turn = radians(fx.a.y);
+    let wedge = 6.2831853 / count;
+    var angle = atan2(p.y, p.x) - turn;
+    angle = angle - floor(angle / wedge) * wedge;
+    if (angle > wedge * 0.5) {
+        angle = wedge - angle;
+    }
+    angle = angle + turn;
+    let r = length(p);
+    return fetch(to_uv(vec2<f32>(cos(angle), sin(angle)) * r, point));
+}
+
+fn fringe(uv: vec2<f32>) -> vec4<f32> {
+    let centre = vec2<f32>(0.5) + fx.a.yz;
+    let out = centre + (uv - centre) * (1.0 - fx.a.x);
+    let inside = centre + (uv - centre) * (1.0 + fx.a.x);
+    let middle = fetch(uv);
+    let red = fetch(out);
+    let blue = fetch(inside);
+    return vec4<f32>(red.r, middle.g, blue.b, max(middle.a, max(red.a, blue.a)));
+}
+
+fn halftone(uv: vec2<f32>) -> vec4<f32> {
+    let c = fetch(uv);
+    let short = min(fx.size.x, fx.size.y);
+    let cell = fx.a.x * short;
+    if (cell < 2.0) {
+        return c;
+    }
+    // A grid turned 45 degrees, as printers turn theirs.
+    let pixel = uv * fx.size;
+    let k = 0.70710678;
+    let turned = vec2<f32>(k * pixel.x - k * pixel.y, k * pixel.x + k * pixel.y);
+    let middle_turned = (floor(turned / cell) + vec2<f32>(0.5)) * cell;
+    let middle = vec2<f32>(k * middle_turned.x + k * middle_turned.y, -k * middle_turned.x + k * middle_turned.y);
+    let sample = straight(fetch(middle / fx.size));
+    let radius = sqrt(1.0 - clamp(luma(sample), 0.0, 1.0)) * cell * 0.7;
+    // A dot under a pixel wide fades out rather than leaving half a pixel.
+    let dot_cover = (1.0 - smoothstep(radius - 0.75, radius + 0.75, length(turned - middle_turned)))
+        * min(radius / 0.75, 1.0);
+    let ink = mix(vec3<f32>(0.05), sample, fx.a.z);
+    let printed = mix(vec3<f32>(0.97), ink, dot_cover);
+    return premultiplied(mix(straight(c), printed, fx.a.y), c.a);
+}
+
 @fragment
 fn fs(in: Out) -> @location(0) vec4<f32> {
     let uv = in.position.xy / fx.size;
@@ -354,6 +521,15 @@ fn fs(in: Out) -> @location(0) vec4<f32> {
         case 20u: { return tile(uv); }
         case 21u: { return posterize(uv); }
         case 22u: { return edges(uv); }
+        case 23u: { return gradient_map(uv); }
+        case 24u: { return grid(uv); }
+        case 25u: { return spotlight(uv); }
+        case 26u: { return reveal(uv); }
+        case 27u: { return stretch(uv); }
+        case 28u: { return dust(uv); }
+        case 29u: { return kaleido(uv); }
+        case 30u: { return fringe(uv); }
+        case 31u: { return halftone(uv); }
         default: { return fetch(uv); }
     }
 }
@@ -627,6 +803,15 @@ mod tests {
             step(Block::Tile, &[]),
             step(Block::Posterize, &[]),
             step(Block::Edges, &[]),
+            step(Block::GradientMap, &[]),
+            step(Block::Grid, &[]),
+            step(Block::Spotlight, &[]),
+            step(Block::Reveal, &[]),
+            step(Block::Stretch, &[]),
+            step(Block::Dust, &[]),
+            step(Block::Kaleido, &[]),
+            step(Block::Fringe, &[]),
+            step(Block::Halftone, &[]),
         ];
         close(&draw(&renderer, &ROW, (4, 1), &resting), &ROW);
     }
@@ -790,6 +975,10 @@ mod tests {
             step(Block::Ripple, &[(0, 0.05), (3, 2.0)]),
             step(Block::Bulge, &[(0, 0.8)]),
             step(Block::Bulge, &[(0, -0.8)]),
+            step(Block::Grid, &[(0, 3.0), (1, 2.0), (2, 1.5)]),
+            step(Block::Kaleido, &[(0, 6.0), (1, 30.0)]),
+            step(Block::Fringe, &[(0, 0.1)]),
+            step(Block::Stretch, &[(0, 1.5), (1, 0.7)]),
         ] {
             close(&draw(&renderer, &flat, size, &[moved]), &flat);
         }
@@ -877,6 +1066,116 @@ mod tests {
             &draw(&renderer, &flat, size, &[step(Block::Edges, &[(1, 1.0)])]),
             &solid(size, [0, 0, 0, 255]),
         );
+    }
+
+    #[test]
+    fn a_gradient_map_colours_by_brightness() {
+        let Some(renderer) = renderer() else { return };
+        // Black to white is grey by brightness.
+        let grey = draw(
+            &renderer,
+            &[255, 0, 0, 255],
+            (1, 1),
+            &[step(Block::GradientMap, &[(0, 1.0)])],
+        );
+        assert!(grey[0].abs_diff(grey[1]) <= 1 && grey[1].abs_diff(grey[2]) <= 1);
+        // Heat runs from black to white.
+        let ends = [0, 0, 0, 255, 255, 255, 255, 255];
+        close(
+            &draw(
+                &renderer,
+                &ends,
+                (2, 1),
+                &[step(Block::GradientMap, &[(0, 1.0), (1, 1.0)])],
+            ),
+            &ends,
+        );
+    }
+
+    #[test]
+    fn a_reveal_shows_only_what_it_has_reached_and_a_stretch_can_leave_black() {
+        let Some(renderer) = renderer() else { return };
+        let white = solid((8, 1), [255, 255, 255, 255]);
+        let black = solid((8, 1), [0, 0, 0, 255]);
+        close(
+            &draw(
+                &renderer,
+                &white,
+                (8, 1),
+                &[step(Block::Reveal, &[(0, 0.0)])],
+            ),
+            &black,
+        );
+        let half = draw(
+            &renderer,
+            &white,
+            (8, 1),
+            &[step(Block::Reveal, &[(0, 0.5), (3, 0.0)])],
+        );
+        close(
+            &half,
+            &[solid((4, 1), [255; 4]), solid((4, 1), [0, 0, 0, 255])].concat(),
+        );
+        let narrow = draw(
+            &renderer,
+            &white,
+            (8, 1),
+            &[step(Block::Stretch, &[(0, 0.5), (2, 1.0)])],
+        );
+        close(
+            &narrow,
+            &[
+                solid((2, 1), [0, 0, 0, 255]),
+                solid((4, 1), [255; 4]),
+                solid((2, 1), [0, 0, 0, 255]),
+            ]
+            .concat(),
+        );
+    }
+
+    #[test]
+    fn a_spotlight_halftone_and_dust_mark_the_picture_as_named() {
+        let Some(renderer) = renderer() else { return };
+        let size = (16u32, 16u32);
+        let white = solid(size, [255, 255, 255, 255]);
+        let lit = draw(
+            &renderer,
+            &white,
+            size,
+            &[step(Block::Spotlight, &[(0, 1.0), (3, 0.1), (4, 0.05)])],
+        );
+        let middle = 4 * (8 * size.0 + 8) as usize;
+        assert!(lit[middle] > 240, "the middle stays lit");
+        assert!(lit[0] < 15, "the corner goes dark");
+        // White prints no dots; black prints mostly ink.
+        let printed = draw(
+            &renderer,
+            &white,
+            size,
+            &[step(Block::Halftone, &[(0, 0.25)])],
+        );
+        assert!(printed.chunks(4).all(|pixel| pixel[0] > 230));
+        let dark = solid(size, [0, 0, 0, 255]);
+        let inked = draw(
+            &renderer,
+            &dark,
+            size,
+            &[step(Block::Halftone, &[(0, 0.25)])],
+        );
+        let mean = inked
+            .chunks(4)
+            .map(|pixel| u32::from(pixel[0]))
+            .sum::<u32>()
+            / 256;
+        assert!(mean < 128, "{mean}");
+        let grey = solid(size, [128, 128, 128, 255]);
+        let dusty = draw(
+            &renderer,
+            &grey,
+            size,
+            &[step(Block::Dust, &[(0, 1.0), (1, 1.0)])],
+        );
+        assert_ne!(dusty, grey);
     }
 
     #[test]

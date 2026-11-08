@@ -10,8 +10,6 @@
 //! pads one and keeps the visible size in the layer. Motion search stays
 //! inside ±8 pixels so every vector fits `fcode` 1.
 
-use std::sync::OnceLock;
-
 use cutlass_decode::CodecError;
 
 use crate::bits::BitWriter;
@@ -703,23 +701,23 @@ fn forward(pixels: &[i32; 64]) -> [i32; 64] {
     out
 }
 
+/// The forward DCT basis, `basis[k][n] = c(k) / 2 * cos((2n + 1) k pi / 16)`
+/// with `c(0) = 1 / sqrt(2)`, written out so every platform's encoder
+/// makes the same stream: libm `cos` may differ by an ulp between them.
+#[rustfmt::skip]
+const BASIS: [[f64; 8]; 8] = [
+    [0.35355339059327373, 0.35355339059327373, 0.35355339059327373, 0.35355339059327373, 0.35355339059327373, 0.35355339059327373, 0.35355339059327373, 0.35355339059327373],
+    [0.4903926402016152, 0.4157348061512726, 0.27778511650980114, 0.09754516100806417, -0.0975451610080641, -0.277785116509801, -0.4157348061512727, -0.4903926402016152],
+    [0.46193976625564337, 0.19134171618254492, -0.19134171618254486, -0.46193976625564337, -0.4619397662556434, -0.19134171618254517, 0.191341716182545, 0.46193976625564326],
+    [0.4157348061512726, -0.0975451610080641, -0.4903926402016152, -0.2777851165098011, 0.2777851165098009, 0.4903926402016152, 0.09754516100806439, -0.41573480615127256],
+    [0.3535533905932738, -0.35355339059327373, -0.35355339059327384, 0.3535533905932737, 0.35355339059327384, -0.35355339059327334, -0.3535533905932736, 0.3535533905932733],
+    [0.27778511650980114, -0.4903926402016152, 0.09754516100806415, 0.41573480615127273, -0.41573480615127256, -0.09754516100806401, 0.4903926402016153, -0.27778511650980076],
+    [0.19134171618254492, -0.4619397662556434, 0.46193976625564326, -0.19134171618254495, -0.19134171618254528, 0.46193976625564337, -0.4619397662556432, 0.19134171618254478],
+    [0.09754516100806417, -0.2777851165098011, 0.41573480615127273, -0.4903926402016153, 0.4903926402016152, -0.4157348061512725, 0.27778511650980076, -0.09754516100806429],
+];
+
 fn basis() -> &'static [[f64; 8]; 8] {
-    static BASIS: OnceLock<[[f64; 8]; 8]> = OnceLock::new();
-    BASIS.get_or_init(|| {
-        let mut rows = [[0.0f64; 8]; 8];
-        for (k, row) in rows.iter_mut().enumerate() {
-            let scale = if k == 0 {
-                0.5 / std::f64::consts::SQRT_2
-            } else {
-                0.5
-            };
-            for (n, value) in row.iter_mut().enumerate() {
-                let angle = (2.0 * n as f64 + 1.0) * k as f64 * std::f64::consts::PI / 16.0;
-                *value = scale * angle.cos();
-            }
-        }
-        rows
-    })
+    &BASIS
 }
 
 fn nearest(value: f64) -> i32 {
@@ -2230,6 +2228,22 @@ mod tests {
     use crate::dec::Decoder;
     use crate::frame::Frame;
     use cutlass_decode::CodecError;
+
+    #[test]
+    fn the_written_basis_is_the_cosine_formula() {
+        for (k, row) in super::BASIS.iter().enumerate() {
+            let scale = if k == 0 {
+                0.5 / std::f64::consts::SQRT_2
+            } else {
+                0.5
+            };
+            for (n, &value) in row.iter().enumerate() {
+                let angle = (2.0 * n as f64 + 1.0) * k as f64 * std::f64::consts::PI / 16.0;
+                let want = scale * angle.cos();
+                assert!((value - want).abs() <= 1e-15, "basis[{k}][{n}]");
+            }
+        }
+    }
 
     /// One packet per VOP, the first with the headers before it.
     fn per_vop(bytes: &[u8]) -> Vec<&[u8]> {

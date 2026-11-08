@@ -4,10 +4,12 @@
 //! next display time, so the pictures must leave in display order with
 //! those times.
 
-use cutlass_decode::{CodecId, CodecParams, Decoder};
+use cutlass_decode::{CodecError, CodecId, CodecParams, Decoder};
 use cutlass_mpeg4::EngineDecoder;
 
 use crate::common::{Picture, fixture, packet, pictures, split};
+
+const FRAME: usize = 48 * 32 * 3 / 2;
 
 fn open() -> EngineDecoder {
     EngineDecoder::open(&CodecParams::video(CodecId::Mpeg4, 0, 0)).expect("open")
@@ -96,4 +98,55 @@ fn a_placeholder_without_a_pair_is_an_ordinary_not_coded_vop() {
     let shown = pictures(decoder.drain().expect("drain"));
     assert_eq!(shown.len(), 1);
     assert_eq!(shown[0].2, 0);
+}
+
+#[test]
+fn a_failed_b_vop_in_a_packed_pair_keeps_the_later_times() {
+    let vops = split(&fixture("asp.m4v"));
+    let want = fixture("asp.yuv");
+    let packed = pack(&vops);
+    let at = packed.iter().position(|(_, pair)| *pair).expect("a pair");
+    let mut packets: Vec<Vec<u8>> = packed.into_iter().map(|(data, _)| data).collect();
+    // Cut the B-VOP of the first pair to its start code and a byte: the
+    // P-VOP before it decodes, the B-VOP cannot.
+    let second = packets[at][4..]
+        .windows(4)
+        .position(|w| w == [0, 0, 1, 0xB6])
+        .expect("the B-VOP")
+        + 4;
+    assert_eq!(packets[at][second + 4] >> 6, 2, "a B-VOP");
+    packets[at].truncate(second + 5);
+
+    let mut decoder = open();
+    let mut got = Vec::new();
+    for (n, data) in packets.iter().enumerate() {
+        match decoder.push(&packet(data.clone(), n as i64)) {
+            Ok(out) => got.extend(pictures(out)),
+            Err(error) => {
+                assert_eq!(n, at, "packet {n} failed: {error}");
+                assert!(
+                    matches!(
+                        error,
+                        CodecError::Malformed { .. } | CodecError::Truncated { .. }
+                    ),
+                    "{error:?}"
+                );
+            }
+        }
+    }
+    got.extend(pictures(decoder.drain().expect("drain")));
+
+    // Only the damaged B-VOP is missing. It was displayed at the pair's
+    // packet time, and every other picture keeps its own.
+    let lost = at as i64;
+    let times: Vec<i64> = got.iter().map(|p| p.2).collect();
+    let expected: Vec<i64> = (0..10).filter(|&t| t != lost).collect();
+    assert_eq!(times, expected);
+    for p in &got {
+        let t = p.2 as usize;
+        assert!(
+            p.3 == want[t * FRAME..(t + 1) * FRAME],
+            "picture at {t} differs from FFmpeg"
+        );
+    }
 }

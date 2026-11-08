@@ -58,6 +58,9 @@ pub struct EngineDecoder {
     inner: dec::Decoder,
     pts: BinaryHeap<Reverse<i64>>,
     timescale: u32,
+    /// Pictures a failed packet decoded before its error, given out first
+    /// by the next push or drain.
+    pending: Vec<Output>,
 }
 
 impl EngineDecoder {
@@ -78,7 +81,25 @@ impl EngineDecoder {
             inner,
             pts: BinaryHeap::new(),
             timescale: 0,
+            pending: Vec::new(),
         })
+    }
+
+    /// Times and describes what one packet decoded.
+    fn finish(&mut self, decoded: dec::Decoded, pts: i64) -> Result<Vec<Output>, CodecError> {
+        if decoded.timed {
+            self.pts.push(Reverse(pts));
+        }
+        let out = decoded
+            .pictures
+            .into_iter()
+            .map(|image| self.output(image, pts))
+            .collect::<Result<Vec<_>, _>>()?;
+        // A failed VOP would have shown next and taken the next time.
+        for _ in 0..decoded.lost {
+            self.pts.pop();
+        }
+        Ok(out)
     }
 
     fn output(&mut self, image: Image, fallback: i64) -> Result<Output, CodecError> {
@@ -165,32 +186,39 @@ impl Decoder for EngineDecoder {
             return Ok(Vec::new());
         }
         self.timescale = packet.timescale;
-        let decoded = self.inner.decode(&packet.data)?;
-        if decoded.timed {
-            self.pts.push(Reverse(packet.pts));
-        }
-        decoded
-            .pictures
-            .into_iter()
-            .map(|image| self.output(image, packet.pts))
-            .collect()
+        let decoded = match self.inner.decode(&packet.data) {
+            Ok(decoded) => decoded,
+            Err(error) => {
+                if let Some(partial) = self.inner.take_partial() {
+                    let committed = self.finish(partial, packet.pts)?;
+                    self.pending.extend(committed);
+                }
+                return Err(error);
+            }
+        };
+        let mut out = std::mem::take(&mut self.pending);
+        out.extend(self.finish(decoded, packet.pts)?);
+        Ok(out)
     }
 
     fn drain(&mut self) -> Result<Vec<Output>, CodecError> {
         let fallback = self.pts.peek().map_or(0, |Reverse(pts)| *pts);
-        let out = self
+        let drained = self
             .inner
             .drain()
             .into_iter()
             .map(|image| self.output(image, fallback))
-            .collect();
+            .collect::<Result<Vec<_>, _>>();
         self.pts.clear();
-        out
+        let mut out = std::mem::take(&mut self.pending);
+        out.extend(drained?);
+        Ok(out)
     }
 
     fn reset(&mut self) {
         self.inner.reset();
         self.pts.clear();
+        self.pending.clear();
     }
 }
 

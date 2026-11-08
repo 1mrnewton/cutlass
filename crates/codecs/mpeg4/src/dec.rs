@@ -28,6 +28,10 @@ pub(crate) struct Decoded {
     /// The packet's time belongs to a picture: one this packet decoded,
     /// or the B-VOP a packed bitstream put in the previous packet.
     pub(crate) timed: bool,
+    /// VOPs that failed after a picture of the same packet decoded. Each
+    /// would have taken a time, so that many are dropped after
+    /// `pictures` take theirs.
+    pub(crate) lost: usize,
 }
 
 /// VOP times in VOL ticks (Section 6.3.5's modulo time base).
@@ -94,6 +98,9 @@ pub(crate) struct Decoder {
     /// Pictures decoded in packets that held more than one, whose
     /// not-coded placeholder packets are still to come.
     packed_extra: usize,
+    /// What a packet gave before a later VOP in it failed: the pictures
+    /// and references it already committed, kept for the caller.
+    partial: Option<Decoded>,
     spare: Vec<Frame>,
 }
 
@@ -113,6 +120,7 @@ impl Decoder {
             low_delay: false,
             clock: Clock::default(),
             packed_extra: 0,
+            partial: None,
             spare: Vec::new(),
         }
     }
@@ -140,7 +148,12 @@ impl Decoder {
 
     /// Decodes one packet: any headers, then each VOP in it, or one
     /// short-header picture.
+    ///
+    /// When a VOP fails after another in the same packet decoded, as a
+    /// B-VOP after its P-VOP in a packed bitstream, the error is returned
+    /// and [`Self::take_partial`] holds what the packet did commit.
     pub(crate) fn decode(&mut self, data: &[u8]) -> Result<Decoded, CodecError> {
+        self.partial = None;
         let mut out = Decoded::default();
         if is_short_header(data) {
             out.timed = self.short(data, &mut out.pictures)?;
@@ -161,12 +174,26 @@ impl Decoder {
         }
         let mut coded = 0;
         for unit in units {
-            if unit.code == VOP_START {
-                if self.vop(unit.payload, &mut out.pictures)? {
-                    coded += 1;
-                }
+            let step = if unit.code == VOP_START {
+                self.vop(unit.payload, &mut out.pictures)
+                    .map(|decoded| coded += usize::from(decoded))
             } else {
-                self.header(unit.code, unit.payload, &mut out.pictures)?;
+                self.header(unit.code, unit.payload, &mut out.pictures)
+            };
+            if let Err(error) = step {
+                if coded > 0 {
+                    // The pictures before it are committed, and the failed
+                    // VOP's placeholder packet still comes: count it as
+                    // a packed VOP whose time goes unused.
+                    if unit.code == VOP_START {
+                        self.packed_extra += 1;
+                        out.lost = 1;
+                    }
+                    out.timed = true;
+                    self.packed_extra += coded - 1;
+                    self.partial = Some(out);
+                }
+                return Err(error);
             }
         }
         if coded > 0 {
@@ -174,6 +201,11 @@ impl Decoder {
             self.packed_extra += coded - 1;
         }
         Ok(out)
+    }
+
+    /// What the last packet committed before it failed, if anything.
+    pub(crate) fn take_partial(&mut self) -> Option<Decoded> {
+        self.partial.take()
     }
 
     /// The pictures still waiting for display.
@@ -187,6 +219,7 @@ impl Decoder {
     pub(crate) fn reset(&mut self) {
         self.drop_references();
         self.packed_extra = 0;
+        self.partial = None;
     }
 
     fn header(

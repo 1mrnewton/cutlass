@@ -411,7 +411,7 @@ fn apply_chroma_row<P: Pixel>(
 /// `averageLuma` for one chroma row.
 fn luma_average_row<P: Pixel>(luma: &[P], avg: &mut [i32], sub_x: bool) {
     if sub_x {
-        for (a, l) in avg.iter_mut().zip(luma.chunks_exact(2)) {
+        for (a, l) in avg.iter_mut().zip(luma.as_chunks::<2>().0) {
             *a = (l[0].to_i32() + l[1].to_i32() + 1) >> 1;
         }
         if luma.len() % 2 == 1

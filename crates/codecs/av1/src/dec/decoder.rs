@@ -1674,7 +1674,7 @@ fn ref_data(seq: &SequenceHeader, hdr: &FrameHeader, fs: &FrameState) -> RefData
             };
             let refs = &mut mf_ref[y8 * w8..][..w8];
             let mvs = &mut mf_mv[y8 * w8..][..w8];
-            for ((m, r), v) in mi.chunks_exact(2).zip(refs).zip(mvs) {
+            for ((m, r), v) in mi.as_chunks::<2>().0.iter().zip(refs).zip(mvs) {
                 let m = &m[1];
                 // The second list wins when both qualify.
                 for list in [1, 0] {

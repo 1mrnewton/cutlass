@@ -174,8 +174,10 @@ impl Av1Encoder {
         let enc = self.encoder(duration, timescale)?;
         let data = if wide {
             let s: Vec<u16> = bytes
-                .chunks_exact(2)
-                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|c| u16::from_le_bytes(*c))
                 .collect();
             let (y, rest) = s.split_at(w * h);
             let (u, v) = rest.split_at(cw * ch);

@@ -212,8 +212,10 @@ fn main() -> Result<(), String> {
         y.pos = fstart + frame_bytes;
         let pkt = if y.bd > 8 {
             let s: Vec<u16> = buf
-                .chunks_exact(2)
-                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|c| u16::from_le_bytes(*c))
                 .collect();
             let (py, rest) = s.split_at(y.w * y.h);
             let (pu, pv) = rest.split_at(cw * ch);

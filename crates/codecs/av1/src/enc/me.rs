@@ -508,8 +508,8 @@ pub fn downscale_2x<P: Pixel>(
         let d = &mut dst[r * dst_stride..][..ow];
         for ((o, p0), p1) in d[..pairs]
             .iter_mut()
-            .zip(r0.chunks_exact(2))
-            .zip(r1.chunks_exact(2))
+            .zip(r0.as_chunks::<2>().0)
+            .zip(r1.as_chunks::<2>().0)
         {
             let s = p0[0].to_i32() + p0[1].to_i32() + p1[0].to_i32() + p1[1].to_i32();
             *o = P::from_i32((s + 2) >> 2);

@@ -11946,7 +11946,7 @@ mod tests {
         desktop.open_folder(&temp.path).unwrap();
         desktop.pixel_size = 0.001;
         desktop.seek(Micros(500_000));
-        let lower = cutlass_editor::title_style("title:lower-third").unwrap();
+        let lower = cutlass_editor::title_style("title:default").unwrap();
         desktop.add_title(&lower.card_id()).unwrap();
         desktop.add_title(&lower.card_id()).unwrap();
         let rows = |desktop: &Shell| {
@@ -11961,8 +11961,7 @@ mod tests {
         assert_eq!(rows(&desktop), 2, "the second title overlaps the first");
         let draft = desktop.draft().unwrap();
         let text = &draft.materials.texts[0];
-        assert_eq!(text.words().unwrap(), "Lower third");
-        assert_eq!(text.text_color, "#EFC56A");
+        assert_eq!(text.words().unwrap(), "Default text");
         let picked = desktop.selected().cloned().unwrap();
         let segment = draft
             .tracks
@@ -11972,25 +11971,17 @@ mod tests {
             .unwrap();
         assert_eq!(segment.target.start, Micros(500_000));
         assert_eq!(segment.target.duration, cutlass_editor::TITLE_LENGTH);
-        assert!(segment.clip.transform.y < 0.0);
         desktop.undo().unwrap();
         assert_eq!(rows(&desktop), 1);
         assert_eq!(desktop.draft().unwrap().materials.texts.len(), 1);
 
-        let end = cutlass_editor::title_style("title:end-card").unwrap();
+        let end = cutlass_editor::title_style("title:default").unwrap();
         let text_row = crate::tokens::LANE_HEIGHT / 2.0;
         desktop
             .drop_title(&end.card_id(), lane_time(&desktop, 4_000_000.0), text_row)
             .unwrap();
         assert_eq!(rows(&desktop), 1, "the drop lands after the first title");
-        let draft = desktop.draft().unwrap();
-        let dropped = draft
-            .materials
-            .texts
-            .iter()
-            .find(|text| text.words().as_deref() == Some("End card"))
-            .unwrap();
-        assert_eq!(dropped.text_color, "#F0E2C4");
+        assert_eq!(desktop.draft().unwrap().materials.texts.len(), 2);
         assert!(desktop.drop_title("title:nope", 0.0, text_row).is_err());
     }
 
@@ -16120,7 +16111,7 @@ mod tests {
         Folder::new(draft).save(&temp.path).unwrap();
         let mut desktop = shell();
         desktop.open_folder(&temp.path).unwrap();
-        let card = cutlass_editor::title_style("title:end-card")
+        let card = cutlass_editor::title_style("title:default")
             .unwrap()
             .card_id();
         let overlay_row = crate::tokens::LANE_HEIGHT / 2.0;
@@ -16176,7 +16167,7 @@ mod tests {
         Folder::new(draft).save(&temp.path).unwrap();
         let mut desktop = shell();
         desktop.open_folder(&temp.path).unwrap();
-        let card = cutlass_editor::title_style("title:end-card")
+        let card = cutlass_editor::title_style("title:default")
             .unwrap()
             .card_id();
         let x = lane_time(&desktop, 4_000_000.0);
@@ -18857,7 +18848,7 @@ mod tests {
             desktop.stage_pick(stage.center_x, stage.center_y),
             Some(sticker.clone())
         );
-        let title = cutlass_editor::title_style("title:lower-third").unwrap();
+        let title = cutlass_editor::title_style("title:default").unwrap();
         desktop.add_title(&title.card_id()).unwrap();
         let title = desktop.selected().cloned().unwrap();
         let stage = desktop.stage_box(&title).expect("a title has a box");
@@ -18886,7 +18877,7 @@ mod tests {
             let mut desktop = shell();
             desktop.open_folder(&temp.path).unwrap();
             desktop.pixel_size = 0.001;
-            let title = cutlass_editor::title_style("title:lower-third").unwrap();
+            let title = cutlass_editor::title_style("title:default").unwrap();
             desktop.add_title(&title.card_id()).unwrap();
             desktop.draft().unwrap().materials.texts[0]
                 .font_path

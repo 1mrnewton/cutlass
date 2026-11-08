@@ -2993,13 +2993,6 @@ fn bin_cards(
                 }
                 cards.push(title_card(style));
             }
-            // The title templates follow the single styles.
-            for template in cutlass_editor::TITLE_TEMPLATES {
-                if !query.is_empty() && !template.name.to_lowercase().contains(&query) {
-                    continue;
-                }
-                cards.push(template_card(template));
-            }
         }
         Shelf::Effects => {
             for effect in cutlass_editor::effect_cards() {

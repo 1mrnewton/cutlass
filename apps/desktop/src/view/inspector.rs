@@ -239,7 +239,7 @@ fn video_panel(
         2 => super::speed::speed_tab(shell, ui, state, inspection),
         3 => animation_tab(shell, ui, state, &["In", "Out", "Combo"], VIDEO_MOTIONS),
         4 => adjust_tab(shell, ui, state, inspection),
-        _ => later_note(ui, "AI stylize"),
+        _ => super::ai_stylize::ai_stylize_tab(ui, state),
     }
 }
 

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "id": "lens-fringe",
+  "name": "Lens Fringe",
+  "category": "Distort",
+  "preview": "road",
+  "passes": [
+    { "block": "fringe", "params": {"amount": 0.035} },
+    { "block": "vignette", "params": {"amount": 0.3, "size": 0.55} }
+  ]
+}

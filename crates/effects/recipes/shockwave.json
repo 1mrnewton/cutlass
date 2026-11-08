@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "id": "shockwave",
+  "name": "Shockwave",
+  "category": "Motion",
+  "preview": "dancer",
+  "poster": 0.05,
+  "passes": [
+    { "block": "transform", "params": {"scale": {"keys": [[0, 1.08], [0.4, 1]], "repeat": 1}} },
+    { "block": "fringe", "params": {"amount": {"keys": [[0, 0.08], [0.4, 0]], "repeat": 1}} },
+    {
+      "block": "ripple",
+      "params": {
+        "amount": {"keys": [[0, 0.02], [0.4, 0]], "repeat": 1},
+        "length": 0.15,
+        "phase": {"keys": [[0, 0], [0.4, 1]], "repeat": 1},
+        "kind": 2
+      }
+    }
+  ]
+}

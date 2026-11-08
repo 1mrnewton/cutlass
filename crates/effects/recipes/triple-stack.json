@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "id": "triple-stack",
+  "name": "Triple Stack",
+  "category": "Distort",
+  "preview": "dancer",
+  "passes": [
+    { "block": "grid", "params": {"x": 1, "y": 3} }
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "id": "spotlight",
+  "name": "Spotlight",
+  "category": "Light",
+  "preview": "portrait",
+  "passes": [
+    { "block": "spotlight", "params": {"amount": 0.85, "size": 0.25, "soft": 0.2} }
+  ]
+}

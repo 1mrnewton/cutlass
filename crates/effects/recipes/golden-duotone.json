@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "id": "golden-duotone",
+  "name": "Golden Duotone",
+  "category": "Basic",
+  "preview": "beach",
+  "passes": [
+    {
+      "block": "gradient_map",
+      "params": {
+        "amount": 1,
+        "low_red": 0.15,
+        "low_green": 0.08,
+        "low_blue": 0.02,
+        "high_red": 1,
+        "high_green": 0.85,
+        "high_blue": 0.45
+      }
+    }
+  ]
+}

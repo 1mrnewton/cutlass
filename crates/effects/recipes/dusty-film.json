@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "id": "dusty-film",
+  "name": "Dusty Film",
+  "category": "Retro",
+  "preview": "beach",
+  "passes": [
+    {
+      "block": "transform",
+      "params": {
+        "scale": 1.02,
+        "y": {"jitter": {"rate": 12, "from": -0.003, "to": 0.003, "seed": 131}}
+      }
+    },
+    { "block": "grade", "params": {"saturation": 0.6, "contrast": 1.1} },
+    {
+      "block": "dust",
+      "params": {
+        "amount": 0.85,
+        "scratches": 0.7,
+        "seed": {"jitter": {"rate": 12, "from": 0, "to": 1000, "seed": 132}},
+        "size": 0.04
+      }
+    },
+    { "block": "vignette", "params": {"amount": 0.5, "size": 0.5} }
+  ]
+}

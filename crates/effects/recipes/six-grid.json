@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "id": "six-grid",
+  "name": "Six Grid",
+  "category": "Distort",
+  "preview": "beach",
+  "passes": [
+    { "block": "grid", "params": {"x": 3, "y": 2} }
+  ]
+}

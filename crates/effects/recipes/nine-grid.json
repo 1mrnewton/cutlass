@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "id": "nine-grid",
+  "name": "Nine Grid",
+  "category": "Distort",
+  "preview": "flowers",
+  "passes": [
+    { "block": "grid", "params": {"x": 3, "y": 3, "zoom": 1.3} }
+  ]
+}

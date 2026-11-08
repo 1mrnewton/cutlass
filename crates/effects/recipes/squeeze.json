@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "id": "squeeze",
+  "name": "Squeeze",
+  "category": "Motion",
+  "preview": "dancer",
+  "poster": 0.2,
+  "passes": [
+    { "block": "transform", "params": {"scale": 1.15} },
+    {
+      "block": "stretch",
+      "params": {
+        "x": {"keys": [[0, 1], [0.2, 1.15], [0.4, 0.9], [0.6, 1]], "repeat": 0.6},
+        "y": {"keys": [[0, 1], [0.2, 0.88], [0.4, 1.1], [0.6, 1]], "repeat": 0.6}
+      }
+    }
+  ]
+}

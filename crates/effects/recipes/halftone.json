@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "id": "halftone",
+  "name": "Halftone",
+  "category": "Retro",
+  "preview": "portrait",
+  "passes": [
+    { "block": "halftone", "params": {"size": 0.02} }
+  ]
+}

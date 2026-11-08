@@ -453,7 +453,7 @@ pub struct Recipe {
 
 /// The effects shelf's categories, in the order the shelf lists them.
 pub const EFFECT_CATEGORIES: &[&str] = &[
-    "Basic", "Motion", "Blur", "Glitch", "Retro", "Light", "Distort",
+    "Basic", "Motion", "Reveal", "Blur", "Glitch", "Retro", "Light", "Distort",
 ];
 
 /// One block with every value worked out for one moment.
@@ -737,12 +737,15 @@ fn unit_hash(seed: u64, step: u64) -> f32 {
     (x >> 40) as f32 / (1u64 << 24) as f32
 }
 
-const BUNDLED_FILES: [&str; 73] = [
+const BUNDLED_FILES: [&str; 101] = [
     include_str!("../recipes/vignette.json"),
     include_str!("../recipes/black-white.json"),
     include_str!("../recipes/vivid.json"),
     include_str!("../recipes/fade-in.json"),
     include_str!("../recipes/invert.json"),
+    include_str!("../recipes/duotone.json"),
+    include_str!("../recipes/golden-duotone.json"),
+    include_str!("../recipes/ocean-duotone.json"),
     include_str!("../recipes/shake.json"),
     include_str!("../recipes/zoom-pulse.json"),
     include_str!("../recipes/earthquake.json"),
@@ -755,6 +758,12 @@ const BUNDLED_FILES: [&str; 73] = [
     include_str!("../recipes/whip-in.json"),
     include_str!("../recipes/whip-pan.json"),
     include_str!("../recipes/impact.json"),
+    include_str!("../recipes/shockwave.json"),
+    include_str!("../recipes/squeeze.json"),
+    include_str!("../recipes/iris-in.json"),
+    include_str!("../recipes/wipe-in.json"),
+    include_str!("../recipes/diagonal-wipe.json"),
+    include_str!("../recipes/blinds.json"),
     include_str!("../recipes/blur-in.json"),
     include_str!("../recipes/blur.json"),
     include_str!("../recipes/rack-focus.json"),
@@ -781,6 +790,14 @@ const BUNDLED_FILES: [&str; 73] = [
     include_str!("../recipes/pop-art.json"),
     include_str!("../recipes/comic.json"),
     include_str!("../recipes/sketch.json"),
+    include_str!("../recipes/tv-off.json"),
+    include_str!("../recipes/tv-on.json"),
+    include_str!("../recipes/thermal.json"),
+    include_str!("../recipes/night-vision.json"),
+    include_str!("../recipes/halftone.json"),
+    include_str!("../recipes/comic-dots.json"),
+    include_str!("../recipes/dusty-film.json"),
+    include_str!("../recipes/film-scratches.json"),
     include_str!("../recipes/white-flash.json"),
     include_str!("../recipes/black-flash.json"),
     include_str!("../recipes/strobe.json"),
@@ -795,6 +812,10 @@ const BUNDLED_FILES: [&str; 73] = [
     include_str!("../recipes/rose-leak.json"),
     include_str!("../recipes/sun-flare.json"),
     include_str!("../recipes/color-cycle.json"),
+    include_str!("../recipes/spotlight.json"),
+    include_str!("../recipes/searchlight.json"),
+    include_str!("../recipes/film-burn.json"),
+    include_str!("../recipes/rainbow-map.json"),
     include_str!("../recipes/mirror.json"),
     include_str!("../recipes/mirror-vertical.json"),
     include_str!("../recipes/kaleidoscope.json"),
@@ -811,6 +832,13 @@ const BUNDLED_FILES: [&str; 73] = [
     include_str!("../recipes/bulge-pulse.json"),
     include_str!("../recipes/split-screen.json"),
     include_str!("../recipes/psychedelic.json"),
+    include_str!("../recipes/triple-stack.json"),
+    include_str!("../recipes/side-by-side.json"),
+    include_str!("../recipes/six-grid.json"),
+    include_str!("../recipes/nine-grid.json"),
+    include_str!("../recipes/prism.json"),
+    include_str!("../recipes/mandala.json"),
+    include_str!("../recipes/lens-fringe.json"),
 ];
 
 /// The recipes that ship in the app, in picker order.

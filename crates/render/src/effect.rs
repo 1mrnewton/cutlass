@@ -1181,12 +1181,18 @@ mod tests {
     #[test]
     fn every_bundled_recipe_runs_and_moves_the_picture() {
         let Some(renderer) = renderer() else { return };
-        // Large enough that a gentle blur still reaches a whole pixel.
-        let (width, height) = (64u32, 48u32);
+        // Large enough that a gentle blur or a fine halftone still reaches
+        // a whole pixel.
+        let (width, height) = (160u32, 120u32);
         let scene: Vec<u8> = (0..width * height)
             .flat_map(|index| {
                 let (x, y) = (index % width, index / width);
-                [(x * 4) as u8, (y * 5) as u8, ((x + y) * 2) as u8, 255]
+                [
+                    (x * 255 / width) as u8,
+                    (y * 255 / height) as u8,
+                    ((x + y) * 255 / (width + height)) as u8,
+                    255,
+                ]
             })
             .collect();
         for recipe in bundled() {

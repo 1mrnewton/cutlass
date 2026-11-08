@@ -136,7 +136,8 @@ pub(super) fn clip_panel(
             text_panel(shell, ui, state, inspection, panel == Panel::Caption);
         }
         Panel::Audio => audio_panel(shell, ui, state, inspection),
-        Panel::Sticker | Panel::Shape => sticker_panel(shell, ui, state, inspection),
+        Panel::Sticker => sticker_panel(shell, ui, state, inspection),
+        Panel::Shape => super::shape::shape_panel(shell, ui, state, inspection),
         Panel::Effect => effect_panel(shell, ui, state, inspection, "Effect", false),
         Panel::Filter => effect_panel(shell, ui, state, inspection, "Filter", true),
         Panel::Adjust => adjust_panel(shell, ui, state, inspection),
@@ -605,22 +606,26 @@ fn position_size(
         inspection,
         "Position & Size",
         Some(rotate_label),
+        false,
     );
 }
 
 /// A caption's Transform: scale, uniform scale and position, each with its
 /// keyframe controls, as the video panel keys them.
 fn transform(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState, inspection: &Inspection) {
-    placement(shell, ui, state, inspection, "Transform", None);
+    placement(shell, ui, state, inspection, "Transform", None, false);
 }
 
-fn placement(
+/// The clip's place on the canvas. With `size`, a shape's own size comes
+/// first, in canvas pixels.
+pub(super) fn placement(
     shell: &mut Shell,
     ui: &mut Ui,
     state: &mut InspectorState,
     inspection: &Inspection,
     title: &str,
     rotate_label: Option<&str>,
+    size: bool,
 ) {
     let header = section(ui, state, "position", title, None, true);
     if header.reset {
@@ -635,7 +640,11 @@ fn placement(
     let keys = shell.keys();
     let playhead = shell.playhead();
     let mut step = None;
+    let shape = if size { shell.shape() } else { None };
     body(ui, |ui| {
+        if let Some(shape) = &shape {
+            super::shape::size_row(shell, ui, state, shape);
+        }
         let scale = (inspection.scale_x * 100.0).round();
         let scaled = keyed_row(ui, keys.as_ref(), playhead, &mut step, |ui| {
             slider(ui, state, "scale", "Scale", scale, 1.0..=500.0, |v| {
@@ -751,7 +760,7 @@ fn blend(
     });
 }
 
-fn opacity_slider(
+pub(super) fn opacity_slider(
     shell: &mut Shell,
     ui: &mut Ui,
     state: &mut InspectorState,
@@ -894,7 +903,7 @@ const TEXT_MOTIONS: &[&[&str]] = &[
 /// starts with None. In, Out and Loop store the shared presets on a
 /// picture or title, with a length (a loop's is one round); Combo is still
 /// to come.
-fn animation_tab(
+pub(super) fn animation_tab(
     shell: &mut Shell,
     ui: &mut Ui,
     state: &mut InspectorState,

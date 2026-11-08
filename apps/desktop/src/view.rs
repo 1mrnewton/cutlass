@@ -26,6 +26,7 @@ mod inspector;
 mod mask;
 mod remove_bg;
 mod retouch;
+mod shape;
 mod speed;
 
 const CARD_W: f32 = 144.0;
@@ -10902,6 +10903,86 @@ mod tests {
         let main = lanes.iter().find(|lane| lane.main).expect("main lane");
         assert_eq!(main.clips.len(), 1);
         assert!(view.library_picked.is_empty());
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn the_shape_inspector_lays_out_its_sections_and_switches_the_stroke() {
+        let temp = std::env::temp_dir().join(format!("cutlass-shape-panel-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        cutlass_store::Folder::new(cutlass_model::Draft::empty("draft"))
+            .save(&temp)
+            .unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        shell.add_shape("shape:Rectangle").unwrap();
+        let mut view = ViewState::new();
+        view.library_shelf = Shelf::Stickers;
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 2000.0)));
+        let frame = |shell: &mut Shell, view: &mut ViewState, events: Vec<egui::Event>| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: screen,
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, view, None),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        let _ = frame(&mut shell, &mut view, Vec::new());
+        let output = frame(&mut shell, &mut view, Vec::new());
+        let lines = galleys(&output);
+        for label in [
+            "Vector image",
+            "Animation",
+            "Tracking",
+            "Transform",
+            "Size",
+            "320",
+            "Fill",
+            "Stroke",
+            "Style",
+            "Weight",
+            "Corner radius",
+            "Each corner",
+            "Shadow",
+            "Distance",
+            "Angle",
+        ] {
+            assert!(lines.iter().any(|line| line == label), "{label}: {lines:?}");
+        }
+        assert_eq!(shell.shape().unwrap().border_width, 0.0);
+        // The Stroke box, left of its name, switches the stroke on.
+        let name = text_pos(&output, "Stroke").expect("the Stroke section");
+        let check = name + Vec2::new(-14.0, 8.0);
+        let press = |pos: Pos2, pressed: bool| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        let _ = frame(
+            &mut shell,
+            &mut view,
+            vec![egui::Event::PointerMoved(check)],
+        );
+        let _ = frame(&mut shell, &mut view, vec![press(check, true)]);
+        let _ = frame(&mut shell, &mut view, vec![press(check, false)]);
+        assert_eq!(
+            shell.shape().unwrap().border_width,
+            cutlass_model::SHAPE_STROKE_WIDTH
+        );
+        // A line has no fill or corners, and its stroke cannot go off.
+        shell.add_shape("shape:Line").unwrap();
+        let _ = frame(&mut shell, &mut view, Vec::new());
+        let lines = galleys(&frame(&mut shell, &mut view, Vec::new()));
+        assert!(!lines.iter().any(|line| line == "Fill"));
+        assert!(!lines.iter().any(|line| line == "Corner radius"));
+        assert!(lines.iter().any(|line| line == "Stroke"));
         let _ = std::fs::remove_dir_all(&temp);
     }
 

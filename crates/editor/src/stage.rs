@@ -136,8 +136,8 @@ pub fn canvas_size(draft: &Draft) -> (f64, f64) {
     }
 }
 
-/// The box of the picture or title clip `segment_id` at `time`. Other
-/// clips, and ones with no size, have none.
+/// The box of the picture, title or shape clip `segment_id` at `time`.
+/// Other clips, and ones with no size, have none.
 #[must_use]
 pub fn stage_box(
     draft: &Draft,
@@ -484,6 +484,12 @@ fn fitted(
             let (width, height) = sizes.text_size(segment, time)?;
             (width, height, true)
         }
+        // A shape is its own size in canvas pixels; a line is as tall as
+        // its stroke.
+        MaterialRef::Shape(shape) => {
+            let (width, height) = shape.size();
+            (width, height.max(shape.border_width).max(1.0), true)
+        }
         _ => return None,
     };
     if !(width.is_finite() && height.is_finite() && width > 0.0 && height > 0.0) {
@@ -572,6 +578,41 @@ mod tests {
         assert!(near(pose.x, 0.5), "x {}", pose.x);
         // Off the clip there is nothing to key.
         assert_eq!(keyed_pose(&draft, &main, Micros(11)), None);
+    }
+
+    #[test]
+    fn a_shape_is_boxed_at_its_own_size() {
+        let mut draft = draft();
+        draft
+            .materials
+            .shapes
+            .push(cutlass_model::MaterialShape::preset(
+                cutlass_model::MaterialId::new("sq"),
+                cutlass_model::ShapeKind::Rectangle,
+                320.0,
+                200.0,
+            ));
+        draft
+            .materials
+            .shapes
+            .push(cutlass_model::MaterialShape::preset(
+                cutlass_model::MaterialId::new("line"),
+                cutlass_model::ShapeKind::Line,
+                400.0,
+                0.0,
+            ));
+        let mut row = Track::main("shapes");
+        row.kind = cutlass_model::TrackType::Sticker;
+        row.segments
+            .push(Segment::new("shape", "sq", TimeRange::new(0, 10)));
+        row.segments
+            .push(Segment::new("line", "line", TimeRange::new(0, 10)));
+        draft.tracks.push(row);
+        let stage = stage_box(&draft, &SegmentId::new("shape"), Micros(0), &NoText).unwrap();
+        assert!(near(stage.width, 320.0) && near(stage.height, 200.0));
+        assert!(near(stage.center_x, 960.0) && near(stage.center_y, 540.0));
+        let line = stage_box(&draft, &SegmentId::new("line"), Micros(0), &NoText).unwrap();
+        assert!(near(line.width, 400.0) && near(line.height, 8.0));
     }
 
     #[test]

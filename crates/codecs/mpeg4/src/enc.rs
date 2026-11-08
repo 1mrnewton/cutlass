@@ -1,8 +1,8 @@
 //! A Simple-profile encoder.
 //!
-//! An I-VOP, then P-VOPs: H.263 quantisation, one or four half-sample
-//! vectors per macroblock, no AC prediction. [`encode_advanced`] puts a
-//! B-VOP between references. Quarter-sample motion and rate control are
+//! An I-VOP, then P-VOPs: H.263 quantisation, one or four motion vectors
+//! per macroblock, no AC prediction. [`encode_advanced`] puts a B-VOP
+//! between references and can use quarter-sample motion. Rate control is
 //! not emitted here yet. The coded size is a
 //! whole number of macroblocks; a caller with another size is refused
 //! rather than cropped. Motion search stays inside ±8 pixels so every
@@ -76,7 +76,7 @@ fn encode_pictures(
     // to recognise the stream; the pictures do not depend on it.
     start(&mut out, 0x00);
     start(&mut out, 0x20);
-    write_vol(&mut out, width, height, false);
+    write_vol(&mut out, width, height, false, false, true);
     for (index, &(y, u, v)) in frames.iter().enumerate() {
         let planes = Planes { y, u, v, stride: w };
         start(&mut out, 0xB6);
@@ -90,6 +90,7 @@ fn encode_pictures(
                 index as u32,
                 &mut recon,
                 &mut mv,
+                false,
             );
         }
     }
@@ -99,12 +100,14 @@ fn encode_pictures(
 /// Display-order pictures. With three or more, every other picture is a
 /// B-VOP coded after the reference it precedes, and the layer is Advanced
 /// Simple with `low_delay` clear so those pictures come back in display
-/// order. `quant` is `vop_quant`, 1 to 31.
+/// order. `quarter` selects quarter-sample motion, which also makes the
+/// layer Advanced Simple. `quant` is `vop_quant`, 1 to 31.
 pub fn encode_advanced(
     frames: &[(&[u8], &[u8], &[u8])],
     width: u32,
     height: u32,
     quant: u8,
+    quarter: bool,
 ) -> Result<Vec<u8>, CodecError> {
     if frames.is_empty()
         || width == 0
@@ -129,6 +132,7 @@ pub fn encode_advanced(
     }
     let refs = reference_indices(frames.len());
     let has_b = refs.windows(2).any(|pair| pair[1] > pair[0] + 1);
+    let advanced = has_b || quarter;
     let mbw = w / 16;
     let mbh = h / 16;
     let quant = i32::from(quant);
@@ -138,7 +142,7 @@ pub fn encode_advanced(
     let mut out = BitWriter::new();
     start(&mut out, 0x00);
     start(&mut out, 0x20);
-    write_vol(&mut out, width, height, has_b);
+    write_vol(&mut out, width, height, advanced, quarter, !has_b);
     for (n, &display) in refs.iter().enumerate() {
         let (y, u, v) = frames[display];
         let planes = Planes { y, u, v, stride: w };
@@ -153,6 +157,7 @@ pub fn encode_advanced(
                 display as u32,
                 &mut reference,
                 &mut mv,
+                quarter,
             );
             if let Some(past) = earlier.as_ref() {
                 let prev = refs[n - 1];
@@ -169,6 +174,7 @@ pub fn encode_advanced(
                             future: &reference,
                             pp: (display - prev) as i32,
                             pb: (step + 1) as i32,
+                            quarter,
                         },
                     );
                 }
@@ -198,10 +204,18 @@ fn start(out: &mut BitWriter, code: u8) {
     out.bytes(&[0, 0, 1, code]);
 }
 
-/// Simple object, or Advanced Simple when `advanced` so a B-VOP is legal.
-/// 4:2:0, square pixels, H.263 quantiser. Advanced Simple clears
-/// `low_delay` and uses version 5, which is where `quarter_sample` sits.
-fn write_vol(out: &mut BitWriter, width: u32, height: u32, advanced: bool) {
+/// Simple object, or Advanced Simple when `advanced` so a B-VOP or
+/// quarter-sample motion is legal. 4:2:0, square pixels, H.263 quantiser.
+/// Version 5 is where `quarter_sample` sits. `low_delay` stays set when
+/// the stream has no B-VOP.
+fn write_vol(
+    out: &mut BitWriter,
+    width: u32,
+    height: u32,
+    advanced: bool,
+    quarter: bool,
+    low_delay: bool,
+) {
     out.put(1, 0); // random_accessible_vol
     out.put(8, if advanced { 17 } else { 1 });
     if advanced {
@@ -214,7 +228,7 @@ fn write_vol(out: &mut BitWriter, width: u32, height: u32, advanced: bool) {
     out.put(4, 1); // square
     out.put(1, 1); // vol_control_parameters
     out.put(2, 1); // 4:2:0
-    out.put(1, u32::from(!advanced)); // low_delay
+    out.put(1, u32::from(low_delay));
     out.put(1, 0); // no vbv
     out.put(2, 0); // rectangular
     out.put(1, 1);
@@ -236,7 +250,7 @@ fn write_vol(out: &mut BitWriter, width: u32, height: u32, advanced: bool) {
     out.put(1, 0); // not_8_bit
     out.put(1, 0); // h.263 quantiser
     if advanced {
-        out.put(1, 0); // quarter_sample
+        out.put(1, u32::from(quarter));
     }
     out.put(1, 1); // complexity_estimation_disable
     out.put(1, 1); // resync_marker_disable
@@ -575,6 +589,7 @@ fn write_p_vop(
     frame: u32,
     recon: &mut Frame,
     mv: &mut [(i32, i32)],
+    quarter: bool,
 ) {
     out.put(2, 1); // P
     write_time(out, frame);
@@ -599,6 +614,7 @@ fn write_p_vop(
             past: &past,
             next: &mut next,
             mv,
+            quarter,
         };
         for mby in 0..mbh {
             for mbx in 0..mbw {
@@ -620,6 +636,7 @@ struct Predicted<'a> {
     past: &'a Frame,
     next: &'a mut Frame,
     mv: &'a mut [(i32, i32)],
+    quarter: bool,
 }
 
 impl Predicted<'_> {
@@ -644,9 +661,9 @@ impl Predicted<'_> {
             set_mv(self.mv, mbw, mbx, mby, vector);
         }
         let (py, pu, pv) = if use_four {
-            compensate_four(self.past, mbx, mby, four)
+            compensate_four(self.past, mbx, mby, four, self.quarter)
         } else {
-            compensate(self.past, mbx, mby, vector)
+            compensate(self.past, mbx, mby, vector, self.quarter)
         };
         let mut levels = [[0i32; 64]; 6];
         let mut coded = [false; 6];
@@ -741,8 +758,9 @@ impl Predicted<'_> {
     fn search_at(&self, x: usize, y: usize, size: usize, pred: (i32, i32)) -> (i32, i32) {
         let mut best = clamp_mv(pred.0, pred.1);
         let mut best_cost = self.block_cost(x, y, size, best, pred);
-        for dy in (-SEARCH..=SEARCH).step_by(2) {
-            for dx in (-SEARCH..=SEARCH).step_by(2) {
+        let step = motion_step(self.quarter);
+        for dy in (-SEARCH..=SEARCH).step_by(step) {
+            for dx in (-SEARCH..=SEARCH).step_by(step) {
                 let mv = clamp_mv(pred.0 + dx, pred.1 + dy);
                 let cost = self.block_cost(x, y, size, mv, pred);
                 if cost < best_cost {
@@ -777,7 +795,7 @@ impl Predicted<'_> {
             size,
             mv.0,
             mv.1,
-            Pel::Half,
+            motion_pel(self.quarter),
             Rows::Frame,
             false,
             &mut predicted,
@@ -801,11 +819,25 @@ fn clamp_mv(x: i32, y: i32) -> (i32, i32) {
     (x.clamp(-SEARCH, SEARCH), y.clamp(-SEARCH, SEARCH))
 }
 
+fn motion_pel(quarter: bool) -> Pel {
+    if quarter { Pel::Quarter } else { Pel::Half }
+}
+
+/// One pixel, in the vector units `quarter` selects.
+fn motion_step(quarter: bool) -> usize {
+    if quarter { 4 } else { 2 }
+}
+
+fn chroma_vector(m: i32, quarter: bool) -> i32 {
+    mc::chroma_hpel(if quarter { m / 2 } else { m })
+}
+
 fn compensate(
     past: &Frame,
     mbx: usize,
     mby: usize,
     mv: (i32, i32),
+    quarter: bool,
 ) -> ([u8; 256], [u8; 64], [u8; 64]) {
     let mut y = [0u8; 256];
     let mut u = [0u8; 64];
@@ -819,12 +851,12 @@ fn compensate(
         16,
         mv.0,
         mv.1,
-        Pel::Half,
+        motion_pel(quarter),
         Rows::Frame,
         false,
         &mut y,
     );
-    let (cx, cy) = (mc::chroma_hpel(mv.0), mc::chroma_hpel(mv.1));
+    let (cx, cy) = (chroma_vector(mv.0, quarter), chroma_vector(mv.1, quarter));
     mc::chroma_block(
         &ru,
         (mbx * 8) as i32,
@@ -859,6 +891,7 @@ fn compensate_four(
     mbx: usize,
     mby: usize,
     mvs: [(i32, i32); 4],
+    quarter: bool,
 ) -> ([u8; 256], [u8; 64], [u8; 64]) {
     let mut y = [0u8; 256];
     let mut u = [0u8; 64];
@@ -868,6 +901,7 @@ fn compensate_four(
     let [ry, ru, rv] = past.refs((width as u32, height as u32));
     let (x, yy) = ((mbx * 16) as i32, (mby * 16) as i32);
     let (mut sx, mut sy) = (0i32, 0i32);
+    let shift = if quarter { 2 } else { 1 };
     for (k, &(mx, my)) in mvs.iter().enumerate() {
         let (bx, by) = ((k & 1) * 8, (k >> 1) * 8);
         let (bx0, by0) = (x + bx as i32, yy + by as i32);
@@ -878,9 +912,9 @@ fn compensate_four(
             by0,
             8,
             8,
-            clip_block(bx0, mx, 1, -16, width),
-            clip_block(by0, my, 1, -16, height),
-            Pel::Half,
+            clip_block(bx0, mx, shift, -16, width),
+            clip_block(by0, my, shift, -16, height),
+            motion_pel(quarter),
             Rows::Frame,
             false,
             &mut block,
@@ -889,8 +923,13 @@ fn compensate_four(
             let dst = (by + row) * 16 + bx;
             y[dst..dst + 8].copy_from_slice(&block[row * 8..row * 8 + 8]);
         }
-        sx += mx;
-        sy += my;
+        if quarter {
+            sx += mx / 2;
+            sy += my / 2;
+        } else {
+            sx += mx;
+            sy += my;
+        }
     }
     let (cx0, cy0) = ((mbx * 8) as i32, (mby * 8) as i32);
     let cx = clip_block(cx0, mc::chroma_4mv(sx), 1, -8, width >> 1);
@@ -1087,6 +1126,7 @@ struct Refs<'a> {
     future: &'a Frame,
     pp: i32,
     pb: i32,
+    quarter: bool,
 }
 
 fn write_b_vop(out: &mut BitWriter, planes: &Planes<'_>, quant: i32, frame: u32, refs: &Refs<'_>) {
@@ -1133,6 +1173,7 @@ fn write_b_mb(
         refs.past,
         (mbx * 16, mby * 16, 16),
         last[0],
+        refs.quarter,
     );
     let backward = search_frame(
         planes.y,
@@ -1140,9 +1181,10 @@ fn write_b_mb(
         refs.future,
         (mbx * 16, mby * 16, 16),
         last[1],
+        refs.quarter,
     );
-    let fwd = compensate(refs.past, mbx, mby, forward);
-    let bwd = compensate(refs.future, mbx, mby, backward);
+    let fwd = compensate(refs.past, mbx, mby, forward, refs.quarter);
+    let bwd = compensate(refs.future, mbx, mby, backward, refs.quarter);
     let both = blend(fwd, bwd);
     let mut best_sad = plane_sad(planes.y, planes.stride, (mbx * 16, mby * 16), &direct.0, 16);
     let mut mode = BMotion::Direct;
@@ -1243,21 +1285,25 @@ fn direct_prediction(refs: &Refs<'_>, mbx: usize, mby: usize) -> ([u8; 256], [u8
         );
         (forward, backward)
     };
-    if record.kind == Kind::Four {
-        let mut forward = [(0i32, 0i32); 4];
-        let mut backward = [(0i32, 0i32); 4];
-        for (k, vector) in record.mv.iter().enumerate() {
-            (forward[k], backward[k]) = scale(*vector);
+    let (forward, backward) = scale(record.mv[0]);
+    // Quarter-sample direct mode filters each 8x8 block, even when the
+    // colocated macroblock had one vector.
+    if record.kind == Kind::Four || refs.quarter {
+        let mut forward_blocks = [forward; 4];
+        let mut backward_blocks = [backward; 4];
+        if record.kind == Kind::Four {
+            for (k, vector) in record.mv.iter().enumerate() {
+                (forward_blocks[k], backward_blocks[k]) = scale(*vector);
+            }
         }
         blend(
-            compensate_four(refs.past, mbx, mby, forward),
-            compensate_four(refs.future, mbx, mby, backward),
+            compensate_four(refs.past, mbx, mby, forward_blocks, refs.quarter),
+            compensate_four(refs.future, mbx, mby, backward_blocks, refs.quarter),
         )
     } else {
-        let (forward, backward) = scale(record.mv[0]);
         blend(
-            compensate(refs.past, mbx, mby, forward),
-            compensate(refs.future, mbx, mby, backward),
+            compensate(refs.past, mbx, mby, forward, refs.quarter),
+            compensate(refs.future, mbx, mby, backward, refs.quarter),
         )
     }
 }
@@ -1350,6 +1396,7 @@ fn search_frame(
     reference: &Frame,
     at: (usize, usize, usize),
     pred: (i32, i32),
+    quarter: bool,
 ) -> (i32, i32) {
     let (x, y0, size) = at;
     let cost = |mv: (i32, i32)| -> u32 {
@@ -1364,7 +1411,7 @@ fn search_frame(
             size,
             mv.0,
             mv.1,
-            Pel::Half,
+            motion_pel(quarter),
             Rows::Frame,
             false,
             &mut predicted,
@@ -1380,8 +1427,9 @@ fn search_frame(
     };
     let mut best = clamp_mv(pred.0, pred.1);
     let mut best_cost = cost(best);
-    for dy in (-SEARCH..=SEARCH).step_by(2) {
-        for dx in (-SEARCH..=SEARCH).step_by(2) {
+    let step = motion_step(quarter);
+    for dy in (-SEARCH..=SEARCH).step_by(step) {
+        for dx in (-SEARCH..=SEARCH).step_by(step) {
             let mv = clamp_mv(pred.0 + dx, pred.1 + dy);
             let score = cost(mv);
             if score < best_cost {
@@ -1410,8 +1458,9 @@ fn search_frame(
 
 #[cfg(test)]
 mod tests {
-    use super::{encode_advanced, encode_intra, encode_pictures};
+    use super::{compensate, encode_advanced, encode_intra, encode_pictures};
     use crate::dec::Decoder;
+    use crate::frame::Frame;
     use cutlass_decode::CodecError;
 
     fn decode_all(bytes: &[u8]) -> Vec<Vec<u8>> {
@@ -1641,6 +1690,7 @@ mod tests {
             64,
             48,
             5,
+            false,
         )
         .expect("encode");
         let pictures = decode_all(&bytes);
@@ -1682,7 +1732,7 @@ mod tests {
         let y = vec![140u8; 48 * 32];
         let c = vec![120u8; 24 * 16];
         let frame = (y.as_slice(), c.as_slice(), c.as_slice());
-        let bytes = encode_advanced(&[frame, frame, frame], 48, 32, 4).expect("encode");
+        let bytes = encode_advanced(&[frame, frame, frame], 48, 32, 4, false).expect("encode");
         let pictures = decode_all(&bytes);
         assert_eq!(pictures.len(), 3);
         assert_eq!(vop_kind(&bytes, 2), 2);
@@ -1699,6 +1749,88 @@ mod tests {
             ours.extend_from_slice(picture);
         }
         ffmpeg_matches(&ffmpeg, &bytes, &ours, "b-skip");
+    }
+
+    #[test]
+    fn a_quarter_sample_picture_lands_between_its_references() {
+        let y0 = pattern(64, 48, 3);
+        let u0 = pattern(32, 24, 9);
+        let v0 = pattern(32, 24, 15);
+        let (y1, u1, v1) = quarter_moved(&y0, &u0, &v0, 64, 48, (-1, 0));
+        let (y2, u2, v2) = quarter_moved(&y0, &u0, &v0, 64, 48, (-2, 0));
+        let bytes = encode_advanced(
+            &[
+                (y0.as_slice(), u0.as_slice(), v0.as_slice()),
+                (y1.as_slice(), u1.as_slice(), v1.as_slice()),
+                (y2.as_slice(), u2.as_slice(), v2.as_slice()),
+            ],
+            64,
+            48,
+            4,
+            true,
+        )
+        .expect("encode");
+        let pictures = decode_all(&bytes);
+        assert_eq!(pictures.len(), 3);
+        assert_eq!(vop_kind(&bytes, 0), 0);
+        assert_eq!(vop_kind(&bytes, 1), 1);
+        assert_eq!(vop_kind(&bytes, 2), 2);
+        let luma = 64 * 48;
+        assert!(
+            mae(&pictures[1][..luma], &y1) < 8.0,
+            "{}",
+            mae(&pictures[1][..luma], &y1)
+        );
+        assert!(
+            mae(&pictures[2][..luma], &y2) < 8.0,
+            "{}",
+            mae(&pictures[2][..luma], &y2)
+        );
+        let Some(ffmpeg) = ffmpeg_bin() else {
+            eprintln!(
+                "ffmpeg is not installed; the quarter-sample picture was not checked independently"
+            );
+            return;
+        };
+        let mut ours = Vec::new();
+        for picture in &pictures {
+            ours.extend_from_slice(picture);
+        }
+        ffmpeg_matches(&ffmpeg, &bytes, &ours, "quarter");
+    }
+
+    /// The picture a quarter-sample vector `mv` predicts from these planes.
+    fn quarter_moved(
+        y: &[u8],
+        u: &[u8],
+        v: &[u8],
+        width: usize,
+        height: usize,
+        mv: (i32, i32),
+    ) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+        let mut reference = Frame::new(width / 16, height / 16);
+        let chroma = (width / 2) * (height / 2);
+        reference.y[..width * height].copy_from_slice(&y[..width * height]);
+        reference.u[..chroma].copy_from_slice(&u[..chroma]);
+        reference.v[..chroma].copy_from_slice(&v[..chroma]);
+        let mut yo = vec![0u8; width * height];
+        let mut uo = vec![0u8; chroma];
+        let mut vo = vec![0u8; chroma];
+        for mby in 0..height / 16 {
+            for mbx in 0..width / 16 {
+                let (py, pu, pv) = compensate(&reference, mbx, mby, mv, true);
+                for row in 0..16 {
+                    let start = (mby * 16 + row) * width + mbx * 16;
+                    yo[start..start + 16].copy_from_slice(&py[row * 16..row * 16 + 16]);
+                }
+                for row in 0..8 {
+                    let start = (mby * 8 + row) * (width / 2) + mbx * 8;
+                    uo[start..start + 8].copy_from_slice(&pu[row * 8..row * 8 + 8]);
+                    vo[start..start + 8].copy_from_slice(&pv[row * 8..row * 8 + 8]);
+                }
+            }
+        }
+        (yo, uo, vo)
     }
 
     fn pattern(width: usize, height: usize, salt: usize) -> Vec<u8> {

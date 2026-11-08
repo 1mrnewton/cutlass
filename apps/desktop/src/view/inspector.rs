@@ -194,8 +194,8 @@ fn video_panel(
             }
             position_size(shell, ui, state, inspection, "Rotate");
             blend(shell, ui, state, inspection, true);
+            stabilize(shell, ui, state);
             for label in [
-                "Stabilize",
                 "Enhance quality",
                 "Noise reduction",
                 "Optical flow",
@@ -827,6 +827,66 @@ fn blend(
             }
         }
         opacity_slider(shell, ui, state, inspection);
+    });
+}
+
+/// The steadying levels, as the stored level and the name shown.
+const STABLE_LEVELS: [(i64, &str); 3] = [
+    (cutlass_model::VideoStable::RECOMMENDED, "Recommended"),
+    (cutlass_model::VideoStable::MINIMUM_CUT, "Minimum cut"),
+    (cutlass_model::VideoStable::MOST_STABLE, "Most stable"),
+];
+
+/// Stabilize: on, it steadies the clip at a level, measuring the movie
+/// first if the project has not; the measuring shows its progress here.
+fn stabilize(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState) {
+    let level = shell.stable_level();
+    let header = section(
+        ui,
+        state,
+        "stabilize",
+        "Stabilize",
+        Some((level > 0, true)),
+        false,
+    );
+    if header.toggled {
+        let next = if level > 0 {
+            0
+        } else {
+            cutlass_model::VideoStable::RECOMMENDED
+        };
+        send(shell, move |shell| shell.set_stable(next));
+    }
+    if !header.open || level <= 0 {
+        return;
+    }
+    let progress = shell.stable_progress();
+    body(ui, |ui| {
+        if let Some(done) = progress {
+            note(ui, &format!("Processing {:.1}%", done * 100.0));
+        }
+        let shown = STABLE_LEVELS
+            .iter()
+            .find(|(value, _)| *value == level)
+            .map_or("Recommended", |(_, name)| name);
+        let mut picked = None;
+        label_row(ui, "Level", |ui| {
+            egui::ComboBox::from_id_salt("stable-level")
+                .selected_text(shown)
+                .show_ui(ui, |ui| {
+                    for (value, name) in STABLE_LEVELS {
+                        if ui
+                            .add(ui::Choice::new(value == level, name).wide())
+                            .clicked()
+                        {
+                            picked = Some(value);
+                        }
+                    }
+                });
+        });
+        if let Some(value) = picked.filter(|value| *value != level) {
+            send(shell, move |shell| shell.set_stable(value));
+        }
     });
 }
 

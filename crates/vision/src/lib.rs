@@ -14,6 +14,9 @@
 //!
 //! The third is Reduce image noise: [`Denoiser`] cleans each frame of a
 //! clip from the frames around it, so the noise it takes out stays still.
+//!
+//! The fourth is Optical flow: [`Interpolator`] makes the frames between
+//! two frames, for a clip at a higher frame rate or slowed down.
 
 #![forbid(unsafe_code)]
 
@@ -23,6 +26,7 @@ mod enhance;
 mod enhance_job;
 mod frame;
 mod generated;
+mod interpolate;
 mod job;
 mod mask;
 mod mobile_sam;
@@ -38,6 +42,9 @@ pub use device::{Compute, gpu_available, keep_kernels_in};
 pub use enhance::{ENHANCE_MAX_SIDE, ENHANCE_WEIGHTS, Enhanced, Enhancer, SCALE, convert_pytorch};
 pub use enhance_job::{CopyModels, EnhanceJobError, enhance_clip, enhanced_size, noise_for_level};
 pub use frame::MAX_SIDE;
+pub use interpolate::{
+    INTERPOLATE_MAX_SIDE, INTERPOLATE_WEIGHTS, Interpolator, Prepared, convert_rife,
+};
 pub use job::{JobError, SelectJob};
 pub use mask::Mask;
 pub use mobile_sam::{DECODER_WEIGHTS, ENCODER_WEIGHTS, MobileSam};

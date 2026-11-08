@@ -472,6 +472,7 @@ pub fn request_name(request: &Request) -> &'static str {
         Request::SetCrop { .. } => "set_crop",
         Request::SetStable { .. } => "set_stable",
         Request::SetEnhance { .. } => "set_enhance",
+        Request::SetDenoise { .. } => "set_denoise",
         Request::SetTextContent { .. } => "set_text_content",
         Request::SetTextSize { .. } => "set_text_size",
         Request::SetTextColor { .. } => "set_text_color",

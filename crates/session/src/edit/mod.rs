@@ -330,6 +330,9 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
         Request::SetEnhance { segment_id, level } => {
             enhance::set_enhance(draft, segment_id, *level)
         }
+        Request::SetDenoise { segment_id, level } => {
+            enhance::set_denoise(draft, segment_id, *level)
+        }
         Request::SetTextContent {
             segment_id,
             content,

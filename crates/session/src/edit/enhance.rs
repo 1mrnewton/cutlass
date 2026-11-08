@@ -7,6 +7,21 @@ use super::{EditError, ensure_unlocked};
 /// clip's own copy of its material changes; its other algorithms and any
 /// keys the block holds stay.
 pub fn set_enhance(draft: &mut Draft, segment_id: &SegmentId, level: i64) -> Result<(), EditError> {
+    set_algorithm(draft, segment_id, Algorithm::QUALITY_ENHANCE, level)
+}
+
+/// Reduce the clip's noise at `level` (Weak or Strong), or stop at 0 or
+/// below, as [`set_enhance`] does.
+pub fn set_denoise(draft: &mut Draft, segment_id: &SegmentId, level: i64) -> Result<(), EditError> {
+    set_algorithm(draft, segment_id, Algorithm::NOISE_REDUCTION, level)
+}
+
+fn set_algorithm(
+    draft: &mut Draft,
+    segment_id: &SegmentId,
+    kind: &str,
+    level: i64,
+) -> Result<(), EditError> {
     let (track_index, segment_index) = locate(draft, segment_id)?;
     ensure_unlocked(draft.tracks[track_index].attribute)?;
     let material_id = draft.tracks[track_index].segments[segment_index]
@@ -32,14 +47,14 @@ pub fn set_enhance(draft: &mut Draft, segment_id: &SegmentId, level: i64) -> Res
     let found = block
         .algorithms
         .iter()
-        .position(|algorithm| algorithm.kind == Algorithm::QUALITY_ENHANCE);
+        .position(|algorithm| algorithm.kind == kind);
     match (found, level > 0) {
         (Some(index), true) => block.algorithms[index].level = level,
         (Some(index), false) => {
             block.algorithms.remove(index);
         }
         (None, true) => block.algorithms.push(Algorithm {
-            kind: Algorithm::QUALITY_ENHANCE.to_owned(),
+            kind: kind.to_owned(),
             level,
             ..Algorithm::default()
         }),
@@ -167,5 +182,51 @@ mod tests {
             .unwrap();
         assert_eq!(set(&mut session, "picture", 1), Err(EditError::LockedTrack));
         assert_eq!(block(&session), None);
+    }
+
+    #[test]
+    fn noise_reduction_sits_beside_enhance_and_each_stops_alone() {
+        let mut session = session_with(None);
+        set(&mut session, "picture", Algorithm::HD).unwrap();
+        let denoise = |session: &mut Session, level: i64| {
+            let revision = session.revision();
+            session.apply(
+                revision,
+                &[Request::SetDenoise {
+                    segment_id: "picture".into(),
+                    level,
+                }],
+            )
+        };
+        denoise(&mut session, Algorithm::STRONG).unwrap();
+        let video = &session.draft().materials.videos[0];
+        assert_eq!(video.denoise().map(|a| a.level), Some(Algorithm::STRONG));
+        assert_eq!(level(&session), Some(Algorithm::HD));
+        set(&mut session, "picture", 0).unwrap();
+        assert_eq!(level(&session), None);
+        assert_eq!(
+            session.draft().materials.videos[0]
+                .denoise()
+                .map(|a| a.level),
+            Some(Algorithm::STRONG)
+        );
+        denoise(&mut session, 0).unwrap();
+        assert_eq!(block(&session), None);
+        session.undo().unwrap();
+        assert!(session.draft().materials.videos[0].denoise().is_some());
+        assert!(denoise(&mut session, Algorithm::WEAK).is_ok());
+        assert_eq!(
+            {
+                let revision = session.revision();
+                session.apply(
+                    revision,
+                    &[Request::SetDenoise {
+                        segment_id: "tone".into(),
+                        level: 1,
+                    }],
+                )
+            },
+            Err(EditError::NotVideo)
+        );
     }
 }

@@ -229,6 +229,9 @@ pub enum Request {
     /// Enhance a video clip's quality at `level` (1 HD, 2 UHD), or stop at
     /// 0 or below. The enhanced copy is made apart from the draft.
     SetEnhance { segment_id: SegmentId, level: i64 },
+    /// Reduce a video clip's noise at `level` (1 Weak, 2 Strong), or stop
+    /// at 0 or below. The denoised copy is made apart from the draft.
+    SetDenoise { segment_id: SegmentId, level: i64 },
     /// Replace the text material's string. Word columns stay as stored.
     SetTextContent {
         segment_id: SegmentId,

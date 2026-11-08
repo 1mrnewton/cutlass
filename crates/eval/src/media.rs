@@ -66,6 +66,22 @@ fn open_clip(
     Some(source)
 }
 
+/// Open the depth video that lights clip `id`, when it has one, decoding
+/// ahead like the clip.
+fn open_depth(
+    media: &ReaderFactory,
+    draft: &Draft,
+    id: &SegmentId,
+    root: Option<&Path>,
+    patient: bool,
+) -> Option<VideoSource> {
+    let (path, from) = crate::relight::relight_depth(draft, root, id)?;
+    let mut source = open_segment_from(media, draft, id, ClockKind::Export, 1, path, from).ok()?;
+    let _ = source.read_ahead(media, READ_AHEAD);
+    source.set_patient(patient);
+    Some(source)
+}
+
 /// A shape drawn once and shown on every frame after: the shape as it was
 /// drawn, the density it was asked for, the density it was drawn at, and
 /// the picture.
@@ -85,6 +101,9 @@ pub struct OpenClips {
     /// Project folder for a relative media path. An absolute path ignores it.
     root: Option<std::path::PathBuf>,
     sources: HashMap<SegmentId, VideoSource>,
+    /// Relit clips' depth videos for this revision; `None` is a clip
+    /// whose depth is not made yet.
+    relights: HashMap<SegmentId, Option<VideoSource>>,
     nests: HashMap<SegmentId, OpenClips>,
     images: HashMap<String, CpuBytes>,
     /// Title rasters by segment, with the density each was drawn at. A
@@ -111,6 +130,7 @@ impl OpenClips {
             bound: false,
             root: None,
             sources: HashMap::new(),
+            relights: HashMap::new(),
             nests: HashMap::new(),
             images: HashMap::new(),
             texts: HashMap::new(),
@@ -125,7 +145,11 @@ impl OpenClips {
     /// picture while the one asked for decodes, as preview does.
     pub fn set_patient(&mut self, patient: bool) {
         self.patient = patient;
-        for source in self.sources.values() {
+        for source in self
+            .sources
+            .values()
+            .chain(self.relights.values().flatten())
+        {
             source.set_patient(patient);
         }
         for nest in self.nests.values_mut() {
@@ -137,7 +161,11 @@ impl OpenClips {
     /// since the last call. A caller redraws until this is false.
     pub fn take_stale(&mut self) -> bool {
         let mut stale = false;
-        for source in self.sources.values() {
+        for source in self
+            .sources
+            .values()
+            .chain(self.relights.values().flatten())
+        {
             stale |= source.take_stale();
         }
         for nest in self.nests.values_mut() {
@@ -149,6 +177,7 @@ impl OpenClips {
     /// Drops every open file.
     pub fn clear(&mut self) {
         self.sources.clear();
+        self.relights.clear();
         self.nests.clear();
         self.images.clear();
         self.texts.clear();
@@ -186,6 +215,34 @@ impl OpenClips {
         });
         self.lotties.insert(stored.to_owned(), read.clone());
         read
+    }
+
+    /// The light over `segment` at `time`, opening its depth video the
+    /// first time it is lit this revision. `None` when it is not relit.
+    fn light(
+        &mut self,
+        media: &ReaderFactory,
+        draft: &Draft,
+        segment: &Segment,
+        time: Micros,
+    ) -> Option<cutlass_effects::Lighting> {
+        let lit = crate::relight::light_at(draft, segment, time)?;
+        if !self.relights.contains_key(&segment.id) {
+            let depth = open_depth(
+                media,
+                draft,
+                &segment.id,
+                self.root.as_deref(),
+                self.patient,
+            );
+            self.relights.insert(segment.id.clone(), depth);
+        }
+        Some(lit)
+    }
+
+    /// The depth video opened for clip `id`.
+    fn depth(&self, id: &SegmentId) -> Option<&VideoSource> {
+        self.relights.get(id).and_then(Option::as_ref)
     }
 
     /// The project folder, when there is one.
@@ -284,6 +341,7 @@ impl OpenClips {
             return;
         }
         self.sources.clear();
+        self.relights.clear();
         self.nests.clear();
         self.images.clear();
         self.texts.clear();
@@ -341,6 +399,8 @@ pub(crate) struct Placed<'a> {
     backdrop: Backdrop,
     /// The steadying correction at this frame.
     steady: Option<cutlass_motion::Correction>,
+    /// The clip's depth video and the light over it at this frame.
+    relight: Option<(&'a VideoSource, cutlass_effects::Lighting)>,
 }
 
 pub(crate) fn picture_transform(
@@ -493,13 +553,14 @@ pub(crate) fn video_layers<'a>(
             }
             let backdrop = backdrop_for(draft, segment, media, clips, width, height);
             let steady = crate::steady::steady_at(clips, draft, segment, time);
+            let light = clips.light(media, draft, segment, time);
             chosen.push((
                 segment.render_index,
                 track_index,
                 segment_index,
                 segment.id.clone(),
                 transform,
-                (crop, crop_scale, steady),
+                (crop, crop_scale, steady, light),
                 backdrop,
             ));
         }
@@ -511,13 +572,14 @@ pub(crate) fn video_layers<'a>(
         segment_index,
         id,
         transform,
-        (crop, crop_scale, steady),
+        (crop, crop_scale, steady, light),
         backdrop,
     ) in chosen
     {
         let Some(source) = clips.sources.get(&id) else {
             continue;
         };
+        let relight = clips.depth(&id).zip(light);
         layers.push(VideoLayer {
             render_index,
             track_index,
@@ -531,6 +593,7 @@ pub(crate) fn video_layers<'a>(
                 crop_scale,
                 backdrop,
                 steady,
+                relight,
             },
         });
     }
@@ -575,7 +638,9 @@ pub(crate) fn video_picture(
     }
     let backdrop = backdrop_for(draft, segment, media, clips, width, height);
     let steady = crate::steady::steady_at(clips, draft, segment, time);
+    let light = clips.light(media, draft, segment, time);
     let source = clips.sources.get(&segment.id)?;
+    let relight = clips.depth(&segment.id).zip(light);
     let placed = Placed {
         source,
         width,
@@ -585,6 +650,7 @@ pub(crate) fn video_picture(
         crop_scale,
         backdrop,
         steady,
+        relight,
     };
     match placed.sample(time) {
         Sample::Ready(Picture::Cpu(bytes)) => Some(bytes),
@@ -679,21 +745,47 @@ impl PictureSource for Placed<'_> {
             return Sample::Miss;
         };
         match picture {
-            Picture::Cpu(bytes) => finish_picture(
-                (self.width, self.height),
-                bytes,
-                self.transform,
-                self.source.display(),
-                (self.crop, self.crop_scale),
-                self.steady.as_ref(),
-                &self.backdrop,
-            ),
+            Picture::Cpu(bytes) => {
+                let (bytes, display) = self.relit(bytes, time);
+                finish_picture(
+                    (self.width, self.height),
+                    bytes,
+                    self.transform,
+                    display,
+                    (self.crop, self.crop_scale),
+                    self.steady.as_ref(),
+                    &self.backdrop,
+                )
+            }
             Picture::Platform(_) => Sample::Miss,
         }
     }
 }
 
 impl Placed<'_> {
+    /// The decoded `picture` and its display turn, or, when the clip is
+    /// relit and its depth at `time` is decoded, the picture turned upright
+    /// and lit from that depth, with no turn left.
+    fn relit(&self, picture: CpuBytes, time: Micros) -> (CpuBytes, DisplayQuarter) {
+        let display = self.source.display();
+        let Some((depth, lit)) = &self.relight else {
+            return (picture, display);
+        };
+        let Sample::Ready(Picture::Cpu(near)) = depth.sample(time) else {
+            return (picture, display);
+        };
+        let (Some(upright), Some(near)) = (
+            orient(picture.clone(), display),
+            orient(near, depth.display()),
+        ) else {
+            return (picture, display);
+        };
+        (
+            crate::relight::relit(upright, &near, lit),
+            DisplayQuarter::Zero,
+        )
+    }
+
     /// This clip as GPU layers: a color backdrop, if any, then the decoded
     /// picture with the maps that place it.
     ///
@@ -702,6 +794,10 @@ impl Placed<'_> {
     /// quad that is not a parallelogram, or a blur or image backdrop. The
     /// caller then uses the CPU picture.
     pub(crate) fn gpu(&self, time: Micros) -> Option<Vec<GpuLayer>> {
+        // Relight is drawn on the CPU.
+        if self.relight.is_some() {
+            return None;
+        }
         let (backdrop, blur) = match &self.backdrop {
             Backdrop::None => (None, None),
             Backdrop::Color(pixel) => (

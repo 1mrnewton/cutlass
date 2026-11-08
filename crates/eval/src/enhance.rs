@@ -133,9 +133,39 @@ pub fn enhance_ask(
             "Enhance quality, Reduce image noise and Optical flow are off for this clip",
         ));
     }
+    let (source, range, own_rate, segment) = clip_stretch(draft, root, segment_id, "enhanced")?;
+    let rate = if interpolate > 0 {
+        let filled = interpolate as f64 / slowest_speed(draft, segment);
+        filled.max(own_rate)
+    } else {
+        own_rate
+    };
+    Ok(EnhanceAsk {
+        source,
+        range,
+        rate,
+        level: level.max(0),
+        denoise: denoise.max(0),
+        interpolate: interpolate.max(0),
+    })
+}
+
+/// The file clip `segment_id` shows, the stretch of it on the timeline,
+/// the project's frame rate and the clip, with `done` naming what the
+/// clip's refusal says could not be done to it. A relative file stays
+/// inside `root`.
+pub(crate) fn clip_stretch<'a>(
+    draft: &'a Draft,
+    root: Option<&Path>,
+    segment_id: &SegmentId,
+    done: &str,
+) -> Result<(PathBuf, TimeRange, f64, &'a cutlass_model::Segment), EnhanceError> {
+    let clip = |reason: &str| EnhanceError::Clip {
+        reason: reason.into(),
+    };
     let file = stable_ask(draft, root, segment_id).map_err(|error| match error {
         StableError::Clip { reason } => EnhanceError::Clip {
-            reason: reason.replace("steadied", "enhanced"),
+            reason: reason.replace("steadied", done),
         },
         other => EnhanceError::Frame {
             reason: other.to_string(),
@@ -152,20 +182,7 @@ pub fn enhance_ask(
         .clone()
         .filter(|range| range.start.0 >= 0 && range.duration.0 > 0)
         .ok_or_else(|| clip("the clip shows none of its file"))?;
-    let rate = if interpolate > 0 {
-        let filled = interpolate as f64 / slowest_speed(draft, segment);
-        filled.max(file.rate)
-    } else {
-        file.rate
-    };
-    Ok(EnhanceAsk {
-        source: file.source,
-        range,
-        rate,
-        level: level.max(0),
-        denoise: denoise.max(0),
-        interpolate: interpolate.max(0),
-    })
+    Ok((file.source, range, file.rate, segment))
 }
 
 /// The slowest `segment` plays its file anywhere along it, no slower than

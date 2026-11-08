@@ -81,8 +81,11 @@ impl Rate {
     }
 
     /// Opens a GOP of `p` P pictures and `b` B pictures after its I picture.
+    /// Pictures the last GOP planned and never coded, because a cut or a
+    /// forced keyframe closed it early, give their share back.
     pub(crate) fn start_gop(&mut self, p: u32, b: u32) {
-        let frames = f64::from(1 + p + b);
+        let unused = f64::from(self.left[0] + self.left[1]);
+        let frames = f64::from(1 + p + b) - unused;
         self.remaining += self.config.bitrate * frames / self.config.frame_rate;
         self.left = [p, b];
     }
@@ -245,6 +248,26 @@ mod tests {
         assert!(picture.quant(99, 0.0) < early);
         picture.offset = 31;
         assert_eq!(picture.quant(99, 0.0), 31);
+    }
+
+    #[test]
+    fn a_gop_closed_early_gives_back_the_share_of_its_missing_pictures() {
+        let per_picture = 4_000_000.0 / 25.0;
+        let mut rate = Rate::new(config(false));
+        rate.start_gop(4, 7);
+        assert_eq!(rate.remaining, 12.0 * per_picture);
+        for kind in [PICTURE_I, PICTURE_P, PICTURE_B] {
+            let picture = rate.begin(kind, 100);
+            rate.end(&picture, per_picture);
+        }
+        // Nine pictures were never coded; the next GOP starts with what
+        // the three coded ones left, not with their budget too.
+        rate.start_gop(4, 7);
+        assert!(
+            (rate.remaining - 12.0 * per_picture).abs() < 1e-6,
+            "{}",
+            rate.remaining
+        );
     }
 
     #[test]

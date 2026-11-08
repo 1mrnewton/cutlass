@@ -11,8 +11,8 @@
 
 use std::path::PathBuf;
 
-use cutlass_eval::{EnhanceAsk, enhance_ask};
-use cutlass_model::{Algorithm, Draft, MaterialRef, SegmentId, TrackAttribute};
+use cutlass_eval::{EnhanceAsk, copy_ask};
+use cutlass_model::{Algorithm, Draft, MaterialRef, MotionBlur, SegmentId, TrackAttribute};
 use cutlass_session::Request;
 use cutlass_store::find_enhanced;
 use cutlass_vision::{
@@ -29,6 +29,7 @@ use super::{Landing, Shell, ShellError};
 pub(crate) const ENHANCE_JOB: &str = "Enhance quality";
 pub(crate) const DENOISE_JOB: &str = "Reduce image noise";
 pub(crate) const INTERPOLATE_JOB: &str = "Optical flow";
+pub(crate) const MOTION_BLUR_JOB: &str = "Motion blur";
 
 /// The folders in `Models` holding each model.
 const ENHANCE_FOLDER: &str = "enhance";
@@ -55,25 +56,27 @@ pub(super) fn model_dir(folder: &str, weights: &str) -> PathBuf {
 }
 
 /// Which of the levels a change sets.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, PartialEq)]
 enum Copied {
     Enhance,
     Denoise,
     Interpolate,
+    MotionBlur(Option<MotionBlur>),
 }
 
-/// A clip's three levels: Enhance quality, Reduce image noise and the
-/// Optical flow frame rate.
-#[derive(Clone, Copy, Default, PartialEq, Eq)]
+/// A clip's levels: Enhance quality, Reduce image noise, the Optical flow
+/// frame rate and Motion blur.
+#[derive(Clone, Default, PartialEq)]
 struct Levels {
     enhance: i64,
     denoise: i64,
     interpolate: i64,
+    motion_blur: Option<MotionBlur>,
 }
 
 impl Levels {
-    fn any(self) -> bool {
-        self.enhance > 0 || self.denoise > 0 || self.interpolate > 0
+    fn any(&self) -> bool {
+        self.enhance > 0 || self.denoise > 0 || self.interpolate > 0 || self.motion_blur.is_some()
     }
 }
 
@@ -90,6 +93,7 @@ fn levels_of(draft: &Draft, segment_id: &SegmentId) -> Levels {
         enhance: level(video.enhance()),
         denoise: level(video.denoise()),
         interpolate: level(video.interpolate()),
+        motion_blur: video.motion_blur(),
     }
 }
 
@@ -188,6 +192,24 @@ impl Shell {
         self.apply_requests(&requests)
     }
 
+    /// Blur the selected clip along its motion as `blur` says, or stop with
+    /// `None`, as [`Self::set_enhance`] does: a clip whose blurred copy
+    /// the project lacks has it made as a job first.
+    pub fn set_motion_blur(&mut self, blur: Option<MotionBlur>) -> Result<(), ShellError> {
+        // Refused before a job starts for a blur the draft would not take.
+        if let Some(blur) = &blur {
+            let share = 0.0..=1.0;
+            if !share.contains(&blur.blur)
+                || !share.contains(&blur.blend)
+                || !(MotionBlur::BOTH..=MotionBlur::BACKWARD).contains(&blur.direction)
+                || !MotionBlur::TIMES.contains(&blur.times)
+            {
+                return Err(ShellError::Edit(cutlass_session::EditError::MotionBlur));
+            }
+        }
+        self.set_copied(Copied::MotionBlur(blur), 0)
+    }
+
     fn set_copied(&mut self, which: Copied, level: i64) -> Result<(), ShellError> {
         let segment_id = self.enhance_segment()?;
         self.refuse_locked(&segment_id)?;
@@ -196,16 +218,21 @@ impl Shell {
             return Err(ShellError::Edit(cutlass_session::EditError::FlowRate));
         }
         let mut levels = levels_of(self.session_draft()?, &segment_id);
-        match which {
+        let turning_on = match &which {
+            Copied::MotionBlur(blur) => blur.is_some(),
+            _ => level > 0,
+        };
+        match &which {
             Copied::Enhance => levels.enhance = level,
             Copied::Denoise => levels.denoise = level,
             Copied::Interpolate => levels.interpolate = level,
+            Copied::MotionBlur(blur) => levels.motion_blur = blur.clone(),
         }
         if levels.any() {
             let made = self.make_copies(&[(segment_id.clone(), levels)]);
             // Turning one off never fails: the clip draws its own file
             // until the copy of what stays on is made.
-            if level > 0 {
+            if turning_on {
                 made?;
             } else if let Err(error) = made {
                 cutlass_logger::warn!("the clip's copy was not started: {error}");
@@ -218,6 +245,23 @@ impl Shell {
                 segment_id,
                 fps: level,
             },
+            Copied::MotionBlur(blur) => {
+                let on = blur.is_some();
+                let blur = blur.unwrap_or(MotionBlur {
+                    blur: 1.0,
+                    blend: 0.0,
+                    direction: MotionBlur::BOTH,
+                    times: 1,
+                });
+                Request::SetMotionBlur {
+                    segment_id,
+                    on,
+                    blur: blur.blur,
+                    blend: blur.blend,
+                    direction: blur.direction,
+                    times: blur.times,
+                }
+            }
         })
     }
 
@@ -234,13 +278,14 @@ impl Shell {
         let mut asks: Vec<EnhanceAsk> = Vec::new();
         let (mut asked, mut refused) = (0, None);
         for (segment_id, levels) in &wanted {
-            let ask = enhance_ask(
+            let ask = copy_ask(
                 draft,
                 Some(&root),
                 segment_id,
                 levels.enhance,
                 levels.denoise,
                 levels.interpolate,
+                levels.motion_blur.as_ref(),
             );
             match ask {
                 Ok(ask) => {
@@ -274,11 +319,14 @@ impl Shell {
         let label = match asks.as_slice() {
             [ask] if ask.level > 0 => ENHANCE_JOB,
             [ask] if ask.denoise > 0 => DENOISE_JOB,
+            [ask] if ask.interpolate <= 0 && ask.motion_blur.is_some() => MOTION_BLUR_JOB,
             _ => INTERPOLATE_JOB,
         };
         let enhance = asks.iter().any(|ask| ask.level > 0);
         let denoise = asks.iter().any(|ask| ask.denoise > 0);
-        let interpolate = asks.iter().any(|ask| ask.interpolate > 0);
+        let interpolate = asks
+            .iter()
+            .any(|ask| ask.interpolate > 0 || ask.motion_blur.is_some());
         if Compute::best() != Compute::Gpu {
             return Err(ShellError::Unavailable(format!(
                 "{label} needs a GPU this build can use"
@@ -427,6 +475,24 @@ impl Shell {
     #[must_use]
     pub fn denoise_progress(&self) -> Option<f32> {
         self.copy_progress(DENOISE_JOB)
+    }
+
+    /// The selected clip's Motion blur, `None` when it is off.
+    #[must_use]
+    pub fn motion_blur(&self) -> Option<MotionBlur> {
+        let draft = self.draft()?;
+        let segment_id = self.selected()?;
+        let (segment, _) = super::placed(draft, segment_id)?;
+        match draft.materials.get(segment.material_id.as_str()) {
+            Some(MaterialRef::Video(video)) => video.motion_blur(),
+            _ => None,
+        }
+    }
+
+    /// How far a job making a copy that is only blurred is, 0 to 1.
+    #[must_use]
+    pub fn motion_blur_progress(&self) -> Option<f32> {
+        self.copy_progress(MOTION_BLUR_JOB)
     }
 
     /// How far a job filling clips that are not denoised or enhanced, or

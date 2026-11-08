@@ -1,5 +1,7 @@
+use cutlass_eval::{copy_ask, enhance_ask};
 use cutlass_model::{
-    Draft, MaterialAudio, MaterialVideo, Micros, Segment, TimeRange, Track, TrackAttribute,
+    Draft, MaterialAudio, MaterialVideo, Micros, MotionBlur, Segment, TimeRange, Track,
+    TrackAttribute,
 };
 use cutlass_settings::Settings;
 use cutlass_store::enhanced_file;
@@ -309,5 +311,64 @@ fn a_new_speed_waits_for_the_slider_to_be_let_go_before_its_copy_is_made() {
     shell.set_speed(2.0).unwrap();
     shell.hold_edits(false);
     assert!(shell.job().is_none());
+    let _ = std::fs::remove_dir_all(&temp);
+}
+
+fn blur(times: i64) -> MotionBlur {
+    MotionBlur {
+        blur: 0.8,
+        blend: 0.1,
+        direction: MotionBlur::FORWARD,
+        times,
+    }
+}
+
+/// Keep a copy of clip `v` blurred as `blur` says, as a finished job would.
+fn blurred(shell: &Shell, temp: &std::path::Path, blur: &MotionBlur) {
+    let ask = copy_ask(
+        shell.draft().unwrap(),
+        Some(temp),
+        &"v".into(),
+        0,
+        0,
+        0,
+        Some(blur),
+    )
+    .unwrap();
+    let file = enhanced_file(temp, &ask.key(), &ask.range).unwrap();
+    std::fs::write(file, b"a blurred movie").unwrap();
+}
+
+#[test]
+fn a_clip_with_a_blurred_copy_takes_its_blur_at_once_and_undo_returns() {
+    let (mut shell, temp) = open("blurred", Some(b"a movie"));
+    blurred(&shell, &temp, &blur(4));
+    shell.select(Some("v".into()));
+    assert_eq!(shell.motion_blur(), None);
+    shell.set_motion_blur(Some(blur(4))).unwrap();
+    assert!(shell.job().is_none(), "nothing to make");
+    assert_eq!(shell.motion_blur(), Some(blur(4)));
+    assert!(shell.motion_blur_progress().is_none());
+    shell.set_motion_blur(None).unwrap();
+    assert_eq!(shell.motion_blur(), None);
+    shell.undo().unwrap();
+    assert_eq!(shell.motion_blur(), Some(blur(4)));
+    let _ = std::fs::remove_dir_all(&temp);
+}
+
+#[test]
+fn a_photo_or_a_wrong_blur_is_not_blurred_and_off_needs_no_copy() {
+    let (mut shell, temp) = open("blur-refused", Some(b"a movie"));
+    shell.select(Some("p".into()));
+    assert!(shell.set_motion_blur(Some(blur(1))).is_err());
+    shell.select(Some("v".into()));
+    shell.set_motion_blur(None).unwrap();
+    assert!(shell.job().is_none());
+    blurred(&shell, &temp, &blur(3));
+    assert!(
+        shell.set_motion_blur(Some(blur(3))).is_err(),
+        "3 times is not offered"
+    );
+    assert_eq!(shell.motion_blur(), None);
     let _ = std::fs::remove_dir_all(&temp);
 }

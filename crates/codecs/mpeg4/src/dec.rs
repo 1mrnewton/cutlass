@@ -101,6 +101,13 @@ pub(crate) struct Decoder {
     /// What a packet gave before a later VOP in it failed: the pictures
     /// and references it already committed, kept for the caller.
     partial: Option<Decoded>,
+    /// FFmpeg's `padding_bug_score`: how often pictures ended without
+    /// the stuffing that should end them.
+    padding_score: i32,
+    /// FFmpeg's `FF_BUG_NO_PADDING`: the stream does not stuff its
+    /// pictures, so a layer that disables resync markers is taken at its
+    /// word.
+    no_padding: bool,
     spare: Vec<Frame>,
 }
 
@@ -121,6 +128,8 @@ impl Decoder {
             clock: Clock::default(),
             packed_extra: 0,
             partial: None,
+            padding_score: 0,
+            no_padding: false,
             spare: Vec::new(),
         }
     }
@@ -395,7 +404,7 @@ impl Decoder {
             warping_points: vol.warping_points,
             time_bits: vol.time_bits,
             short: false,
-            resync: vol.resync,
+            resync: vol.resync || !self.no_padding,
             fixes: self.fixes,
         };
         let pic = Picture {
@@ -538,27 +547,40 @@ impl Decoder {
             VopType::P | VopType::S => (self.newer.as_ref(), None),
             VopType::B => (self.older.as_ref(), self.newer.as_ref()),
         };
-        if let Err(error) = vop::decode(data, layer, pic, grid, past, future, &mut frame) {
-            // Old Xvid builds write dct_type in every interlaced P
-            // macroblock and say so nowhere but their FourCC. A P-VOP that
-            // fails as written and decodes whole that way is one of them.
-            let xvid = Layer {
-                fixes: Fixes {
-                    xvid_ilace: true,
-                    ..layer.fixes
-                },
-                ..*layer
-            };
-            let retry = layer.interlaced
-                && !layer.fixes.xvid_ilace
-                && matches!(pic.kind, VopType::P | VopType::S)
-                && self.encoder.divx_version.is_none()
-                && self.encoder.lavc_build.is_none();
-            if !(retry && vop::decode(data, &xvid, pic, grid, past, future, &mut frame).is_ok()) {
-                self.spare.push(frame);
-                return Err(error);
+        let ending = vop::decode(data, layer, pic, grid, past, future, &mut frame);
+        let ending = match ending {
+            Ok(ending) => ending,
+            Err(error) => {
+                // Old Xvid builds write dct_type in every interlaced P
+                // macroblock and say so nowhere but their FourCC. A P-VOP that
+                // fails as written and decodes whole that way is one of them.
+                let xvid = Layer {
+                    fixes: Fixes {
+                        xvid_ilace: true,
+                        ..layer.fixes
+                    },
+                    ..*layer
+                };
+                let retry = layer.interlaced
+                    && !layer.fixes.xvid_ilace
+                    && matches!(pic.kind, VopType::P | VopType::S)
+                    && self.encoder.divx_version.is_none()
+                    && self.encoder.lavc_build.is_none();
+                let again = if retry {
+                    vop::decode(data, &xvid, pic, grid, past, future, &mut frame).ok()
+                } else {
+                    None
+                };
+                let Some(ending) = again else {
+                    self.spare.push(frame);
+                    return Err(error);
+                };
+                self.fixes.xvid_ilace = true;
+                ending
             }
-            self.fixes.xvid_ilace = true;
+        };
+        if !layer.short {
+            self.note_padding(ending, layer.partitioned);
         }
         if pic.kind == VopType::B {
             pictures.push(image(&frame, size));
@@ -582,6 +604,17 @@ impl Decoder {
         }
         self.newer = Some(frame);
         Ok(())
+    }
+
+    /// Updates FFmpeg's padding detection with how a picture ended. A
+    /// data-partitioned layer always looks for markers.
+    fn note_padding(&mut self, ending: vop::Ending, partitioned: bool) {
+        self.padding_score = self.padding_score.saturating_add(ending.score);
+        if partitioned {
+            self.no_padding = false;
+        } else if ending.unpadded {
+            self.no_padding = self.padding_score > -2;
+        }
     }
 
     /// Displays the held reference.
@@ -617,5 +650,85 @@ fn image(frame: &Frame, (width, height): (u32, u32)) -> Image {
         width,
         height,
         bytes: frame.packed(width as usize, height as usize),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::vop::Ending;
+
+    const PACKETS: &[u8] = include_bytes!("../tests/fixtures/packets.m4v");
+
+    #[test]
+    fn stuffed_pictures_keep_the_marker_search_on() {
+        let mut decoder = Decoder::with_max_pixels(48 * 32);
+        let at = PACKETS[4..]
+            .windows(4)
+            .position(|w| w == [0, 0, 1, 0xB6])
+            .expect("a VOP")
+            + 4;
+        let mut cuts: Vec<usize> = PACKETS
+            .windows(4)
+            .enumerate()
+            .filter(|(n, w)| *n >= at && *w == [0, 0, 1, 0xB6])
+            .map(|(n, _)| n)
+            .skip(1)
+            .collect();
+        cuts.insert(0, 0);
+        cuts.push(PACKETS.len());
+        for pair in cuts.windows(2) {
+            decoder.decode(&PACKETS[pair[0]..pair[1]]).expect("decode");
+        }
+        // Each picture ends in video packets and stuffing: the score only
+        // falls, and the search stays on.
+        assert!(decoder.padding_score <= -3, "{}", decoder.padding_score);
+        assert!(!decoder.no_padding);
+    }
+
+    #[test]
+    fn a_picture_without_stuffing_turns_the_marker_search_off() {
+        let mut decoder = Decoder::with_max_pixels(16 * 16);
+        // Bits ran out right at the last macroblock: FFmpeg scores 16.
+        decoder.note_padding(
+            Ending {
+                score: 16,
+                unpadded: true,
+            },
+            false,
+        );
+        assert!(decoder.no_padding);
+        // Pictures that end in a marker or stuffing leave the flag alone.
+        decoder.note_padding(
+            Ending {
+                score: -1,
+                unpadded: false,
+            },
+            false,
+        );
+        assert!(decoder.no_padding);
+        // Stuffed ends found with the search off count down until the
+        // score falls to -2, then the search is back on.
+        let stuffed = Ending {
+            score: -1,
+            unpadded: true,
+        };
+        for _ in 0..16 {
+            decoder.note_padding(stuffed, false);
+        }
+        assert_eq!(decoder.padding_score, -1);
+        assert!(decoder.no_padding);
+        decoder.note_padding(stuffed, false);
+        assert_eq!(decoder.padding_score, -2);
+        assert!(!decoder.no_padding);
+        // A data-partitioned layer always searches.
+        decoder.note_padding(
+            Ending {
+                score: 100,
+                unpadded: true,
+            },
+            true,
+        );
+        assert!(!decoder.no_padding);
     }
 }

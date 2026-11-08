@@ -52,4 +52,4 @@ Decoder fuzz, debug test profile so overflow checks stay on, pixel cap 1920×108
 
 `../local-files` was probed with ffprobe: 63 media files, none MPEG-4 Visual. The test skips when that folder is missing.
 
-A layer with resync markers disabled is not scanned for a video packet. `cargo fmt -p cutlass-mpeg4 -- --check` and `cargo clippy -p cutlass-mpeg4 --all-targets -- -D warnings` are clean.
+A layer with resync markers disabled is still scanned for video packets, as FFmpeg does, until its pictures show they lack end stuffing (FFmpeg's `padding_bug_score` and `FF_BUG_NO_PADDING`). `cargo fmt -p cutlass-mpeg4 -- --check` and `cargo clippy -p cutlass-mpeg4 --all-targets -- -D warnings` are clean.

@@ -90,8 +90,10 @@ pub(crate) struct Layer<'a> {
     pub(crate) warping_points: u8,
     pub(crate) time_bits: u32,
     pub(crate) short: bool,
-    /// The layer did not disable resync markers, so a video packet may
-    /// follow a macroblock.
+    /// Look for a resync marker after each macroblock. FFmpeg does unless
+    /// the layer disables them and its stream also lacks the stuffing that
+    /// ends a picture (`FF_BUG_NO_PADDING`), because some encoders write
+    /// video packets under a layer that says there are none.
     pub(crate) resync: bool,
     pub(crate) fixes: Fixes,
 }
@@ -213,6 +215,18 @@ impl Blocks {
 /// Decodes the macroblocks of one picture from `data` into `out`.
 /// `past` is the forward reference of a P-, S- or B-VOP and `future`
 /// the backward reference of a B-VOP.
+/// How a picture's bits ended, for FFmpeg's padding detection
+/// (`h263dec.c`): a score that falls while pictures end in a video packet
+/// or in proper stuffing and rises when they stop without it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Ending {
+    pub(crate) score: i32,
+    /// The picture ran out of macroblocks without the stuffing or the
+    /// marker that ends one, so the score decides whether to keep
+    /// looking for markers.
+    pub(crate) unpadded: bool,
+}
+
 pub(crate) fn decode(
     data: &[u8],
     layer: &Layer<'_>,
@@ -221,7 +235,7 @@ pub(crate) fn decode(
     past: Option<&Frame>,
     future: Option<&Frame>,
     out: &mut Frame,
-) -> Result<(), CodecError> {
+) -> Result<Ending, CodecError> {
     let mb_num = layer.mbw * layer.mbh;
     if !grid.fits(layer.mbw, layer.mbh) || out.mbw != layer.mbw || out.mbh != layer.mbh {
         return Err(CodecError::InvalidApi {
@@ -263,11 +277,12 @@ pub(crate) fn decode(
         q: pic.quant.clamp(1, 31) as i32,
         last_mv: [[(0, 0); 2]; 2],
         prefix,
+        packets: 0,
     };
     if layer.short {
-        vop.short_picture(&mut r)
+        vop.short_picture(&mut r).map(|()| Ending::default())
     } else if layer.partitioned && pic.kind != VopType::B {
-        vop.partitioned(&mut r)
+        vop.partitioned(&mut r).map(|()| Ending::default())
     } else {
         vop.combined(&mut r)
     }
@@ -289,6 +304,8 @@ struct Vop<'a> {
     last_mv: [[(i32, i32); 2]; 2],
     /// Zeros of a resync marker.
     prefix: u32,
+    /// Video packets begun after the first.
+    packets: i32,
 }
 
 fn read_mv(r: &mut BitReader<'_>, pred: i32, fcode: u32) -> Result<i32, CodecError> {
@@ -730,6 +747,49 @@ impl Vop<'_> {
         (!t.overrun() && zeros >= self.prefix).then_some(at)
     }
 
+    /// How the bits after the last macroblock end the picture, scored the
+    /// way FFmpeg's `decode_slice` scores them: each video packet and a
+    /// properly stuffed end count down; no bits left, or bits that are not
+    /// stuffing, count up.
+    fn ending(&self, r: &mut BitReader<'_>) -> Ending {
+        let mut score = -self.packets;
+        let mask = |pos: usize| 0x7F >> (7 - (pos & 7) as u32);
+        // `at_resync` consumes the stuffing, and finds nothing when markers
+        // are not looked for.
+        let marked = self.at_resync(r).is_some();
+        let stuffed = r.left() <= 8 && (r.peek(8) | mask(r.position())) == 0x7F;
+        if self.layer.resync && (marked || stuffed) {
+            return Ending {
+                score: score - 1,
+                unpadded: false,
+            };
+        }
+        let left = r.left();
+        let pos = r.position();
+        // NEC N-02B stuffs with the wrong code.
+        if left >= 48 && r.peek(24) == 0x4010 {
+            score += 32;
+        }
+        if left < 137 {
+            if left == 0 {
+                score += 16;
+            } else if left != 1 {
+                let v = r.peek(8) | mask(pos);
+                if v == 0x7F && left <= 8 {
+                    score -= 1;
+                } else if v == 0x7F && (pos + 8) & 8 != 0 && left <= 16 {
+                    score += 4;
+                } else {
+                    score += 1;
+                }
+            }
+        }
+        Ending {
+            score,
+            unpadded: true,
+        }
+    }
+
     /// Starts the video packet a header read.
     fn begin_packet(&mut self, mb: usize, q: u32) {
         if q != 0 {
@@ -1061,7 +1121,7 @@ impl Vop<'_> {
 
     // ---- combined (not partitioned) VOPs ----
 
-    fn combined(&mut self, r: &mut BitReader<'_>) -> Result<(), CodecError> {
+    fn combined(&mut self, r: &mut BitReader<'_>) -> Result<Ending, CodecError> {
         let mut mb = 0;
         loop {
             if mb % self.layer.mbw == 0 && self.kind() == VopType::B {
@@ -1075,13 +1135,14 @@ impl Vop<'_> {
             r.check("macroblock")?;
             mb += 1;
             if mb == self.mb_num {
-                return Ok(());
+                return Ok(self.ending(r));
             }
             if let Some(mut probe) = self.at_resync(r) {
                 let (n, q) = self.packet_header(&mut probe)?;
                 if n == mb {
                     *r = probe;
                     self.begin_packet(n, q);
+                    self.packets += 1;
                 } else if !(n > mb && self.kind() == VopType::B && self.colocated_skip(mb)) {
                     // A B-VOP's skipped macroblocks hold no bits, so the
                     // marker can belong to a later one; anything else

@@ -12,6 +12,8 @@
 //!   Simple: video packets, data partitioning, I-VOPs at 0 and 5.
 //! - `interlaced.m4v`: 48x64, `-flags +ildct+ilme -top 1 -bf 1 -q:v 4
 //!   -g 10`. Field DCT, field prediction, B-VOPs.
+//! - `packets.m4v`: 48x32, 3 pictures, `-ps 40 -q:v 4 -g 10 -bf 0`.
+//!   Simple: video packets without data partitioning.
 //!
 //! Each `.yuv` is FFmpeg's decode of its stream with `-threads 1
 //! -cpuflags 0 -flags +bitexact -idct simple -fps_mode passthrough
@@ -190,6 +192,30 @@ fn a_packet_holds_at_most_three_vops() {
     ));
     three.extend(pictures(decoder.drain().expect("drain")));
     assert_eq!(three.len(), 4);
+}
+
+#[test]
+fn video_packets_decode_under_a_layer_that_disables_them() {
+    // Some encoders set resync_marker_disable and write video packets
+    // anyway. FFmpeg still looks for the markers while the pictures end
+    // in proper stuffing, and so does this decoder.
+    let stream = fixture("packets.m4v");
+    let want = fixture("packets.yuv");
+    let vol = stream
+        .windows(4)
+        .position(|w| w == [0, 0, 1, 0x20])
+        .expect("a VOL")
+        + 4;
+    // Payload byte 10 holds complexity_estimation_disable, then
+    // resync_marker_disable (0x20), then data_partitioned.
+    assert_eq!(stream[vol + 10], 0x43, "the fixture's layer");
+    let mut flagged = stream.clone();
+    flagged[vol + 10] |= 0x20;
+    for data in [&stream, &flagged] {
+        let got = decode_all(&mut open(), &split(data));
+        assert_eq!(got.len(), 3);
+        assert!(joined(&got) == want, "differs from FFmpeg");
+    }
 }
 
 #[test]

@@ -4,6 +4,7 @@
 
 #![forbid(unsafe_code)]
 
+mod bitalloc;
 mod bits;
 mod crc;
 mod exponents;

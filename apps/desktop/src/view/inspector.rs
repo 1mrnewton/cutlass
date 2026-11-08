@@ -197,8 +197,8 @@ fn video_panel(
             stabilize(shell, ui, state);
             enhance_quality(shell, ui, state);
             reduce_noise(shell, ui, state);
+            optical_flow(shell, ui, state);
             for label in [
-                "Optical flow",
                 "AI remove",
                 "AI expand",
                 "AI remix",
@@ -1005,6 +1005,66 @@ fn reduce_noise(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState) {
         });
         if let Some(value) = picked.filter(|value| *value != level) {
             send(shell, move |shell| shell.set_denoise(value));
+        }
+    });
+}
+
+/// Optical flow: on, it makes the clip's copy filled with frames made
+/// between its own to a frame rate as a job, unless the project has one.
+/// Apply to all gives every movie clip this clip's rate. With Enhance
+/// quality or Reduce image noise on as well, the one copy is made under
+/// that section and shows its progress there.
+fn optical_flow(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState) {
+    let fps = shell.interpolate_level();
+    let header = section(
+        ui,
+        state,
+        "interpolate",
+        "Optical flow",
+        Some((fps > 0, true)),
+        false,
+    );
+    if header.toggled {
+        let next = if fps > 0 {
+            0
+        } else {
+            cutlass_model::Algorithm::FRAME_RATES[0]
+        };
+        send(shell, move |shell| shell.set_interpolate(next));
+    }
+    if !header.open || fps <= 0 {
+        return;
+    }
+    let progress = shell.interpolate_progress();
+    body(ui, |ui| {
+        if let Some(done) = progress {
+            note(ui, &format!("Processing {:.1}%", done * 100.0));
+        }
+        let mut picked = None;
+        label_row(ui, "Frame rate", |ui| {
+            egui::ComboBox::from_id_salt("interpolate-rate")
+                .selected_text(format!("{fps} fps"))
+                .show_ui(ui, |ui| {
+                    for value in cutlass_model::Algorithm::FRAME_RATES {
+                        if ui
+                            .add(ui::Choice::new(value == fps, format!("{value} fps")).wide())
+                            .clicked()
+                        {
+                            picked = Some(value);
+                        }
+                    }
+                });
+        });
+        if let Some(value) = picked.filter(|value| *value != fps) {
+            send(shell, move |shell| shell.set_interpolate(value));
+        }
+        ui.add_space(6.0);
+        if ui
+            .add(ui::Button::new("Apply to all").text_size(12.0))
+            .on_hover_text("Fill every video clip to this frame rate")
+            .clicked()
+        {
+            send(shell, move |shell| shell.set_interpolate_all(fps));
         }
     });
 }

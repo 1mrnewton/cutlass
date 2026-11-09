@@ -590,6 +590,208 @@ pub fn relight_rgba(rgba: &mut [u8], width: u32, height: u32, depth: &[u8], ligh
     }
 }
 
+/// One axis of a bilinear stretch from `from` pixels to `to`, centres
+/// matched: for each output index, the low and high source index and how
+/// far between. Empty when either is zero.
+#[must_use]
+pub fn stretch_axis(to: usize, from: usize) -> Vec<(usize, usize, f32)> {
+    if from == 0 {
+        return Vec::new();
+    }
+    (0..to)
+        .map(|i| {
+            let at = ((i as f32 + 0.5) * from as f32 / to as f32 - 0.5).max(0.0);
+            let lo = (at as usize).min(from - 1);
+            let hi = (lo + 1).min(from - 1);
+            (lo, hi, at - lo as f32)
+        })
+        .collect()
+}
+
+/// Bytes in [`relight_uniform`]'s block.
+pub const RELIGHT_UNIFORM_BYTES: usize = (4 + 3 * MAX_LIGHTS) * 16;
+
+/// The uniform block [`RELIGHT_WGSL`] reads to light a `width` by `height`
+/// picture from a `depth_width` by `depth_height` depth: the two sizes,
+/// the step and light count, the ambient light and strength, the relief,
+/// then each light's colour and power, unit direction and reach, and focus.
+#[must_use]
+pub fn relight_uniform(
+    lighting: &Lighting,
+    (width, height): (u32, u32),
+    (depth_width, depth_height): (u32, u32),
+) -> Vec<u8> {
+    let short = width.min(height);
+    let step = (short / 160).max(1);
+    let lights: Vec<&Light> = lighting.lights.iter().take(MAX_LIGHTS).collect();
+    let mut bytes = Vec::with_capacity(RELIGHT_UNIFORM_BYTES);
+    #[allow(clippy::cast_possible_truncation)]
+    let count = lights.len() as u32;
+    for value in [width, height, depth_width, depth_height, step, count, 0, 0] {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    let [r, g, b] = lighting.ambient;
+    #[allow(clippy::cast_precision_loss)]
+    let tilt = RELIEF * short as f32;
+    let mut floats = vec![
+        r,
+        g,
+        b,
+        lighting.strength.clamp(0.0, 1.0),
+        tilt,
+        WRAP,
+        0.0,
+        0.0,
+    ];
+    for light in lights {
+        let [x, y, z] = unit(light.toward);
+        floats.extend(light.color);
+        floats.push(light.power);
+        floats.extend([x, y, z, light.reach, light.focus, 0.0, 0.0, 0.0]);
+    }
+    for value in floats {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    bytes.resize(RELIGHT_UNIFORM_BYTES, 0);
+    bytes
+}
+
+/// [`relight_rgba`] for a GPU pass: `relight_pixel` lights the picture's
+/// premultiplied bytes at a pixel from `relight_depth`, the depth stretched
+/// to the picture as eval stretches it. The renderer binds `relight` (the
+/// [`relight_uniform`] block), `relight_picture`, `relight_depth_map`, and
+/// `relight_axes`: [`stretch_axis`] across in row 0 and down in row 1, as
+/// low index, high index and weight, so the GPU need not divide.
+/// Kept beside the CPU arithmetic so the two change together.
+pub const RELIGHT_WGSL: &str = r"
+struct RelightLight {
+    // Linear colour, power.
+    color: vec4<f32>,
+    // Unit direction towards the light, reach.
+    toward: vec4<f32>,
+    // Focus.
+    shape: vec4<f32>,
+};
+
+struct Relight {
+    // Picture width and height, depth width and height.
+    size: vec4<u32>,
+    // Step between depth samples, light count.
+    counts: vec4<u32>,
+    // Ambient light, strength.
+    ambient: vec4<f32>,
+    // Tilt, wrap.
+    relief: vec4<f32>,
+    lights: array<RelightLight, 4>,
+};
+
+// Half away from zero, as the CPU rounds; WGSL's own rounds half to even.
+// Every value rounded here is at least zero.
+fn relight_round(x: f32) -> f32 {
+    return floor(x + 0.5);
+}
+
+// One axis of the depth stretch at output index `i`: the low and high
+// source index and how far between, row `row` of `relight_axes`.
+fn relight_axis(i: u32, row: i32) -> vec3<f32> {
+    return textureLoad(relight_axes, vec2<i32>(i32(i), row), 0).xyz;
+}
+
+fn relight_red(x: f32, y: f32) -> f32 {
+    return relight_round(textureLoad(relight_depth_map, vec2<i32>(i32(x), i32(y)), 0).r * 255.0);
+}
+
+// The stretched depth at picture pixel `(x, y)`, from 0 far to 1 near.
+fn relight_depth(x: u32, y: u32) -> f32 {
+    let ax = relight_axis(x, 0);
+    let ay = relight_axis(y, 1);
+    let top = relight_red(ax.x, ay.x) + (relight_red(ax.y, ay.x) - relight_red(ax.x, ay.x)) * ax.z;
+    let bottom = relight_red(ax.x, ay.y) + (relight_red(ax.y, ay.y) - relight_red(ax.x, ay.y)) * ax.z;
+    return clamp(relight_round(top + (bottom - top) * ay.z), 0.0, 255.0) / 255.0;
+}
+
+fn relight_unit(v: vec3<f32>) -> vec3<f32> {
+    let size = sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
+    if (size > 1e-6) {
+        return v / size;
+    }
+    return vec3<f32>(0.0, 0.0, 1.0);
+}
+
+fn relight_normal(x: u32, y: u32) -> vec3<f32> {
+    let step = relight.counts.x;
+    let w = relight.size.x;
+    let h = relight.size.y;
+    let left = select(0u, x - step, x >= step);
+    let right = min(x + step, w - 1u);
+    let up = select(0u, y - step, y >= step);
+    let down = min(y + step, h - 1u);
+    let tilt = relight.relief.x;
+    let across = (relight_depth(right, y) - relight_depth(left, y)) / f32(max(right - left, 1u));
+    let downward = (relight_depth(x, down) - relight_depth(x, up)) / f32(max(down - up, 1u));
+    return relight_unit(vec3<f32>(-across * tilt, downward * tilt, 1.0));
+}
+
+fn relight_reached(light: RelightLight, normal: vec3<f32>, near: f32) -> f32 {
+    let toward = light.toward.xyz;
+    let wrap = relight.relief.y;
+    let facing = toward.x * normal.x + toward.y * normal.y + toward.z * normal.z;
+    var diffuse = max((facing + wrap) / (1.0 + wrap), 0.0);
+    if (light.shape.x > 1.0) {
+        diffuse = pow(diffuse, light.shape.x);
+    }
+    var rim = 0.0;
+    if (toward.z < 0.0) {
+        let side = max(normal.x * toward.x + normal.y * toward.y, 0.0);
+        let across = max(sqrt(toward.x * toward.x + toward.y * toward.y), 0.2);
+        rim = pow(max(1.0 - normal.z, 0.0), 1.5) * side / across * 2.0;
+    }
+    let closeness = near * near * (3.0 - 2.0 * near);
+    let depth_weight = 1.0 - light.toward.w * (1.0 - closeness);
+    return light.color.w * (diffuse + rim) * depth_weight;
+}
+
+fn relight_linear(c: f32) -> f32 {
+    if (c <= 0.04045) {
+        return c / 12.92;
+    }
+    return pow((c + 0.055) / 1.055, 2.4);
+}
+
+// A linear value back to a byte the way the CPU's table does: through the
+// nearest of 4096 steps of its square root.
+fn relight_byte(linear: f32) -> f32 {
+    let at = relight_round(sqrt(clamp(linear, 0.0, 1.0)) * 4096.0);
+    let step = at / 4096.0;
+    let c = clamp(step * step, 0.0, 1.0);
+    var srgb = 1.055 * pow(c, 1.0 / 2.4) - 0.055;
+    if (c <= 0.0031308) {
+        srgb = c * 12.92;
+    }
+    return relight_round(srgb * 255.0);
+}
+
+fn relight_pixel(x: u32, y: u32) -> vec4<f32> {
+    let c = textureLoad(relight_picture, vec2<i32>(i32(x), i32(y)), 0);
+    let normal = relight_normal(x, y);
+    let near = relight_depth(x, y);
+    var gain = relight.ambient.xyz;
+    for (var index = 0u; index < relight.counts.y; index = index + 1u) {
+        let light = relight.lights[index];
+        gain = gain + relight_reached(light, normal, near) * light.color.xyz;
+    }
+    let strength = relight.ambient.w;
+    let bytes = floor(c.rgb * 255.0 + 0.5);
+    var out = vec3<f32>(0.0);
+    for (var channel = 0; channel < 3; channel = channel + 1) {
+        let own = relight_linear(bytes[channel] / 255.0);
+        let lit = own * gain[channel];
+        out[channel] = relight_byte(own + (lit - own) * strength);
+    }
+    return vec4<f32>(out / 255.0, c.a);
+}
+";
+
 /// A `size` by `size` RGBA picture of a grey ball on a dark floor lit by
 /// `lighting`, as a preset's tile.
 #[must_use]

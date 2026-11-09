@@ -7,7 +7,9 @@
 //! layers before it, and a clip with a blend mode is drawn alone and then
 //! mixed with the layers before it. A clip's colour work, mask and
 //! selection run over that clip alone, and a look or an adjustment layer's
-//! colour work over the layers before it. A frame with an effect package
+//! colour work over the layers before it. A relit clip is drawn upright on
+//! a canvas of its own, lit there from its depth, then placed. A frame
+//! with an effect package
 //! is composed on the CPU as before, and its recipe effects still run on
 //! the GPU over that picture.
 
@@ -15,7 +17,7 @@ use std::sync::Arc;
 
 use cutlass_compositor::Frame;
 use cutlass_decode::Surface;
-use cutlass_effects::{BlendMode, CanvasMask, Colour, Step, TransitionKind};
+use cutlass_effects::{BlendMode, CanvasMask, Colour, Lighting, Step, TransitionKind};
 use cutlass_gpu::{Affine, Placement, YuvTone};
 use cutlass_picture::CpuBytes;
 
@@ -50,6 +52,10 @@ pub enum GpuSource {
     Cut(CanvasMask),
     /// Every layer before it, kept only where a clip's selection is.
     Select(SelectionCut),
+    /// Every layer before it, lit again by `lighting` from `depth`, a grey
+    /// picture nearer when lighter, stretched to the canvas. Only on a
+    /// relit clip's own upright canvas.
+    Relight { depth: CpuBytes, lighting: Lighting },
     /// A clip drawn on a canvas of its own, then mixed with every layer
     /// before it by `mode`.
     Blend {

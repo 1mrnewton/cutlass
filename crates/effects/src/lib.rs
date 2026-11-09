@@ -83,8 +83,9 @@ pub use recipe::{
     bundled_recipe,
 };
 pub use relight::{
-    CUSTOM_COLOR, Light, Lighting, MAX_LIGHTS, RELIGHT_PRESETS, RelightGroup, RelightPreset,
-    lighting, relight_preset, relight_rgba, relight_tile,
+    CUSTOM_COLOR, Light, Lighting, MAX_LIGHTS, RELIGHT_PRESETS, RELIGHT_UNIFORM_BYTES,
+    RELIGHT_WGSL, RelightGroup, RelightPreset, lighting, relight_preset, relight_rgba,
+    relight_tile, relight_uniform, stretch_axis,
 };
 pub use selection::{
     MAX_SELECTION_SIDE, SELECTION, Selection, segment_has_selection, segment_selection,

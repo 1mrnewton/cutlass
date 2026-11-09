@@ -240,3 +240,41 @@ fn relight_1080p_timing() {
         format!("relight 1080p: {:?}\n", started.elapsed()).as_bytes(),
     );
 }
+
+#[test]
+fn a_stretch_axis_matches_centres_and_stays_inside() {
+    assert_eq!(stretch_axis(2, 2), vec![(0, 1, 0.0), (1, 1, 0.0)]);
+    assert_eq!(
+        stretch_axis(4, 2),
+        // Past the last centre both ends are the edge pixel.
+        vec![(0, 1, 0.0), (0, 1, 0.25), (0, 1, 0.75), (1, 1, 0.25)]
+    );
+    assert_eq!(stretch_axis(1, 2), vec![(0, 1, 0.5)]);
+    assert!(stretch_axis(3, 0).is_empty());
+    assert!(stretch_axis(0, 3).is_empty());
+}
+
+#[test]
+fn the_relight_uniform_holds_the_sizes_and_at_most_four_lights() {
+    let mut lit = lighting(&relight("warm_key", 2.0), 0.0).unwrap();
+    let bytes = relight_uniform(&lit, (320, 200), (40, 30));
+    assert_eq!(bytes.len(), RELIGHT_UNIFORM_BYTES);
+    let word = |bytes: &[u8], index: usize| {
+        u32::from_le_bytes(bytes[index * 4..index * 4 + 4].try_into().unwrap())
+    };
+    let float =
+        |index: usize| f32::from_le_bytes(bytes[index * 4..index * 4 + 4].try_into().unwrap());
+    let words: Vec<u32> = (0..6).map(|index| word(&bytes, index)).collect();
+    // The sizes, a step of one pixel per 160 of the short side, two lights.
+    assert_eq!(words, [320, 200, 40, 30, 1, 2]);
+    // Strength is held to one; the relief is the CPU's.
+    assert_eq!(float(11), 1.0);
+    assert_eq!(float(12), 1.6 * 200.0);
+    // The first light's direction is a unit vector.
+    let [x, y, z] = [float(20), float(21), float(22)];
+    assert!((x * x + y * y + z * z - 1.0).abs() < 1e-5);
+    lit.lights = vec![lit.lights[0]; MAX_LIGHTS + 2];
+    let crowded = relight_uniform(&lit, (320, 200), (40, 30));
+    assert_eq!(crowded.len(), RELIGHT_UNIFORM_BYTES);
+    assert_eq!(word(&crowded, 5), 4);
+}

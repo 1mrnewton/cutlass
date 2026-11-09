@@ -749,6 +749,7 @@ fn decodes_on_gpu(frame: &cutlass_eval::FrameLayers) -> bool {
         | cutlass_eval::GpuSource::Colour { .. }
         | cutlass_eval::GpuSource::Cut(_)
         | cutlass_eval::GpuSource::Select(_)
+        | cutlass_eval::GpuSource::Relight { .. }
         | cutlass_eval::GpuSource::Vector(_)
         | cutlass_eval::GpuSource::Transition { .. } => false,
     })
@@ -768,6 +769,7 @@ fn decodes_in_place(frame: &cutlass_eval::FrameLayers) -> bool {
         | cutlass_eval::GpuSource::Colour { .. }
         | cutlass_eval::GpuSource::Cut(_)
         | cutlass_eval::GpuSource::Select(_)
+        | cutlass_eval::GpuSource::Relight { .. }
         | cutlass_eval::GpuSource::Vector(_)
         | cutlass_eval::GpuSource::Transition { .. } => false,
     })
@@ -1010,6 +1012,80 @@ fn adjust_request(
     }
 }
 
+/// The movie lit by Relight presets from a depth the job kept in the
+/// project: the GPU lights its upright picture as the CPU does, moved and
+/// turned or not.
+#[test]
+fn a_relit_movie_lights_on_the_gpu_like_the_cpu() {
+    let movies = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../local-files");
+    let path = movies.join("IMG_8143.MP4");
+    if !path.is_file() {
+        eprintln!("skipped: ../local-files/IMG_8143.MP4 is missing");
+        return;
+    }
+    let Some(renderer) = importing_renderer() else {
+        eprintln!("skipped: no GPU");
+        return;
+    };
+    let root = std::env::temp_dir().join(format!("cutlass-relit-gpu-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    // The depth "video" is a still whose red varies across it.
+    let mut draft = movie_draft(&path, 848, 608, true).unwrap();
+    relit_with::<0>(&mut draft);
+    let ask = cutlass_eval::relight_ask(&draft, Some(&root), &"movie".into()).unwrap();
+    let depth =
+        cutlass_store::relight_file(&root, &ask.key(), &TimeRange::new(0, 1_000_000)).unwrap();
+    std::fs::copy(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../crates/engine/fixtures/pattern.jpg"),
+        &depth,
+    )
+    .unwrap();
+    let fonts = crate::face::installed();
+    let readers = crate::readers::installed_readers();
+    let cases: [(&str, (u32, u32), Edit); 3] = [
+        ("relit", (848, 608), relit_with::<0>),
+        ("relit from behind, shrunk", (424, 304), relit_with::<1>),
+        ("relit, moved and turned", (848, 608), |draft| {
+            relit_with::<2>(draft);
+            let clip = &mut draft.tracks[0].segments[1].clip;
+            clip.scale.x = 0.6;
+            clip.scale.y = 0.5;
+            clip.rotation = 25.0;
+            clip.alpha = 0.8;
+        }),
+    ];
+    for (name, size, edit) in cases {
+        gpu_matches_cpu_in(
+            &renderer,
+            &fonts,
+            &readers,
+            &path,
+            name,
+            size,
+            edit,
+            Some(&root),
+        );
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The movie lit by preset `PRESET` of a few: a warm key, a rim from
+/// behind, and coloured moving spots.
+fn relit_with<const PRESET: usize>(draft: &mut Draft) {
+    let preset = ["warm_key", "rim_glow", "rainbow_spots"][PRESET];
+    draft.materials.videos[0].video_algorithm = Some(cutlass_model::VideoAlgorithm {
+        algorithms: vec![cutlass_model::Algorithm {
+            kind: cutlass_model::Algorithm::RELIGHT.into(),
+            level: 1,
+            preset: preset.into(),
+            strength: Some(0.9),
+            ..cutlass_model::Algorithm::default()
+        }],
+        ..cutlass_model::VideoAlgorithm::default()
+    });
+}
+
 /// A BT.2020 HLG movie takes the GPU path, and the shader's transfer and
 /// gamut step lands where the CPU conversion does.
 #[test]
@@ -1085,20 +1161,37 @@ fn gpu_matches_cpu(
     readers: &ReaderFactory,
     path: &Path,
     name: &str,
+    size: (u32, u32),
+    edit: Edit,
+) {
+    gpu_matches_cpu_in(renderer, fonts, readers, path, name, size, edit, None);
+}
+
+/// [`gpu_matches_cpu`] in the project folder `root`, where the jobs keep
+/// what they make.
+#[allow(clippy::too_many_arguments)]
+fn gpu_matches_cpu_in(
+    renderer: &cutlass_render::Renderer,
+    fonts: &crate::face::FaceTable,
+    readers: &ReaderFactory,
+    path: &Path,
+    name: &str,
     (width, height): (u32, u32),
     edit: Edit,
+    root: Option<&Path>,
 ) {
     let mut draft = movie_draft(path, width, height, true).unwrap();
     edit(&mut draft);
     let time = Micros(500_000);
     let mut device = SoftwareDevice::new();
-    let cpu = frame(
+    let cpu = cutlass_eval::frame_in(
         &Snapshot::with_fonts(&draft, fonts),
         time,
         &mut device,
         readers,
         &mut OpenClips::new(),
         0,
+        root,
     )
     .unwrap()
     .rgba;
@@ -1110,7 +1203,7 @@ fn gpu_matches_cpu(
         readers,
         &mut clips,
         0,
-        None,
+        root,
     )
     .unwrap();
     let cutlass_eval::Composed::Layers(layers) = composed else {
@@ -1124,6 +1217,18 @@ fn gpu_matches_cpu(
         assert!(
             decodes_in_place(&layers),
             "{name}: the movie was copied off the GPU"
+        );
+    }
+    if name.starts_with("relit") {
+        assert!(
+            layers.layers.iter().any(|layer| matches!(
+                &layer.source,
+                cutlass_eval::GpuSource::Nested(child) if child.layers.iter().any(|inner| matches!(
+                    inner.source,
+                    cutlass_eval::GpuSource::Relight { .. }
+                ))
+            )),
+            "{name}: the movie was not lit on the GPU"
         );
     }
     if name == "title over video" && !fonts.name().is_empty() {

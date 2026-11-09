@@ -94,6 +94,14 @@ fn layers_of(frame: &FrameLayers) -> Result<Vec<Layer<'_>>, RenderError> {
                 invert: cut.invert,
                 frame: cut.frame,
             }),
+            GpuSource::Relight { depth, lighting } => Layer::Relight(crate::Relit {
+                depth: Rgba {
+                    width: depth.width(),
+                    height: depth.height(),
+                    bytes: depth.rgba(),
+                },
+                lighting,
+            }),
             GpuSource::Vector(scene) => Layer::Vector {
                 scene,
                 placement: layer.placement,

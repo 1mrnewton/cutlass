@@ -148,6 +148,11 @@ pub enum Layer<'a> {
     /// Everything drawn before it in the same list, kept only where a
     /// clip's selection is.
     Select(crate::Selected<'a>),
+    /// Everything drawn before it in the same list, lit again from a depth
+    /// picture stretched to the canvas. It reads the canvas at the size it
+    /// is drawn, so it belongs on a [`Layer::Nested`] canvas, which is
+    /// drawn whole.
+    Relight(crate::Relit<'a>),
     /// `layers` drawn on a canvas the size of this one, then mixed by
     /// `mode` with everything drawn before it in the same list.
     Blend {

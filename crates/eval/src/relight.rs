@@ -11,7 +11,7 @@
 
 use std::path::{Path, PathBuf};
 
-use cutlass_effects::{Lighting, lighting};
+use cutlass_effects::{Lighting, lighting, stretch_axis};
 use cutlass_model::{Draft, MaterialRef, Micros, Segment, SegmentId, TimeRange};
 use cutlass_picture::CpuBytes;
 use cutlass_store::{RelightKey, find_relight};
@@ -130,17 +130,7 @@ fn stretched_grey(depth: &CpuBytes, width: u32, height: u32) -> Option<Vec<u8>> 
     if dw == 0 || dh == 0 || w == 0 || h == 0 || src.len() < dw * dh * 4 {
         return None;
     }
-    let axis = |to: usize, from: usize| -> Vec<(usize, usize, f32)> {
-        (0..to)
-            .map(|i| {
-                let at = ((i as f32 + 0.5) * from as f32 / to as f32 - 0.5).max(0.0);
-                let lo = (at as usize).min(from - 1);
-                let hi = (lo + 1).min(from - 1);
-                (lo, hi, at - lo as f32)
-            })
-            .collect()
-    };
-    let (xs, ys) = (axis(w, dw), axis(h, dh));
+    let (xs, ys) = (stretch_axis(w, dw), stretch_axis(h, dh));
     let red = |x: usize, y: usize| f32::from(src[(y * dw + x) * 4]);
     let mut out = Vec::with_capacity(w * h);
     for &(y0, y1, fy) in &ys {

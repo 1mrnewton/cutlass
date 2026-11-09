@@ -28,6 +28,7 @@ mod frame;
 mod keep;
 mod layer;
 mod mix;
+mod relight;
 mod target;
 mod transition;
 mod vector;
@@ -38,6 +39,7 @@ pub use cutlass_effects::{Block, Recipe, Step};
 pub use cutlass_gpu::{Affine, Placement};
 pub use frame::frame_layers;
 pub use layer::{Layer, Plane, PlaneSource, Planes, Rgba};
+pub use relight::Relit;
 pub use target::Canvas;
 pub use wgpu;
 
@@ -88,6 +90,7 @@ pub struct Renderer {
     effects: effect::Effects,
     colours: colour::Colours,
     cuts: cut::Cuts,
+    relights: relight::Relights,
     keep: keep::Keep,
     cross: cross::Cross,
     mix: mix::Mix,
@@ -113,6 +116,7 @@ impl Renderer {
         let effects = effect::Effects::new(&device);
         let colours = colour::Colours::new(&device);
         let cuts = cut::Cuts::new(&device);
+        let relights = relight::Relights::new(&device);
         let keep = keep::Keep::new(&device);
         let cross = cross::Cross::new(&device);
         let mix = mix::Mix::new(&device);
@@ -126,6 +130,7 @@ impl Renderer {
             effects,
             colours,
             cuts,
+            relights,
             keep,
             cross,
             mix,
@@ -483,6 +488,20 @@ impl Renderer {
                         device,
                         queue,
                         &canvas_picture(kept, size),
+                        Placement::canvas(size.0, size.1),
+                    ));
+                }
+                Layer::Relight(relit) => {
+                    let first = blur::scratch(device, size);
+                    Self::paint(&self.layers, encoder, &first, &bound);
+                    let lit = blur::scratch(device, size);
+                    self.relights
+                        .run(device, queue, encoder, &first, &lit, size, relit)?;
+                    bound.clear();
+                    bound.push(self.layers.bind(
+                        device,
+                        queue,
+                        &canvas_picture(lit, size),
                         Placement::canvas(size.0, size.1),
                     ));
                 }

@@ -21,6 +21,7 @@ pub mod catalog;
 pub mod chroma;
 pub mod controls;
 pub mod crossing;
+pub mod gpu;
 pub mod grade;
 pub mod look;
 pub mod lut;
@@ -49,6 +50,9 @@ pub use crossing::{
     CROSS, CrossKind, Crossing, DEFAULT_CROSSING_SECONDS, PREVIEW_PAIRS, TRANSITION_CATEGORIES,
     TRANSITION_PREVIEW_LOOP, TransitionRecipe, bundled_transitions, transition_preview_t,
     transition_scenes,
+};
+pub use gpu::{
+    COLOUR_UNIFORM_BYTES, COLOUR_VALUES, COLOUR_WGSL, ColourPass, ColourStage, clarity_radius,
 };
 pub use grade::{
     COLOR_CURVES, COLOR_WHEELS, Colour, CurveChannel, Grade, HSL, HSL_COLORS, MAX_CURVE_POINTS,

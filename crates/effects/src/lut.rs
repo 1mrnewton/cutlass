@@ -145,6 +145,12 @@ impl Lut {
         self.size
     }
 
+    /// Every point's colour, red changing fastest, then green, then blue.
+    #[must_use]
+    pub fn table(&self) -> &[[f32; 3]] {
+        &self.table
+    }
+
     /// The colour the table gives `colour`, between its points.
     #[must_use]
     pub fn sample(&self, colour: [f32; 3]) -> [f32; 3] {

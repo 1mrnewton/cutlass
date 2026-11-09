@@ -11,7 +11,7 @@ use crate::canvas::canvas_rgba;
 use crate::effect::{
     RecipeMark, StackLayer, clip_package, clip_passes, colour_marks, present, recipe_marks,
 };
-use crate::gpu::{Composed, FrameLayers, GpuLayer};
+use crate::gpu::{FrameLayers, GpuLayer};
 use crate::lottie::{LottieLayer, PlacedLottie, lottie_layers, shape_layers};
 use crate::media::{OpenClips, Placed, video_layers};
 use crate::nest::{NestPass, NestedLayer, NestedPicture, nest_layers};
@@ -180,7 +180,7 @@ pub fn layers_in<D: Device>(
     clips: &mut OpenClips,
     revision: u64,
     root: Option<&std::path::Path>,
-) -> Result<Composed, EvalError<D::Error>> {
+) -> Result<FrameLayers, EvalError<D::Error>> {
     clips.set_project(root);
     compose_layers(snapshot, time, device, media, clips, revision, &[])
 }
@@ -194,9 +194,9 @@ pub(crate) fn compose_layers<D: Device>(
     clips: &mut OpenClips,
     revision: u64,
     ancestors: &[cutlass_model::DraftId],
-) -> Result<Composed, EvalError<D::Error>> {
+) -> Result<FrameLayers, EvalError<D::Error>> {
     let store = snapshot.packages();
-    let layers = with_layers(
+    with_layers(
         snapshot,
         time,
         device,
@@ -213,8 +213,7 @@ pub(crate) fn compose_layers<D: Device>(
                 draft, store, time, extent, layers, effects, colours,
             ))
         },
-    )?;
-    Ok(Composed::Layers(layers))
+    )
 }
 
 /// `layers` as GPU layers, with `effects` (recipes) and `colours` (looks,
@@ -782,7 +781,7 @@ mod tests {
         assert_eq!(pixels(&draft, 0), [128, 128, 128, 255].repeat(2));
         let mut device = SoftwareDevice::new();
         let mut clips = OpenClips::new();
-        let Ok(Composed::Layers(frame)) = layers_in(
+        let Ok(frame) = layers_in(
             &Snapshot::new(&draft),
             Micros(0),
             &mut device,
@@ -825,7 +824,7 @@ mod tests {
         assert_eq!(pixels(&draft, 0), [128, 128, 128, 255].repeat(2));
         let mut device = SoftwareDevice::new();
         let mut clips = OpenClips::new();
-        let Ok(Composed::Layers(frame)) = layers_in(
+        let Ok(frame) = layers_in(
             &Snapshot::new(&draft),
             Micros(0),
             &mut device,
@@ -854,7 +853,7 @@ mod tests {
     fn gpu_frame(draft: &Draft) -> FrameLayers {
         let mut device = SoftwareDevice::new();
         let mut clips = OpenClips::new();
-        let Ok(Composed::Layers(frame)) = layers_in(
+        let Ok(frame) = layers_in(
             &Snapshot::new(draft),
             Micros(0),
             &mut device,
@@ -1787,7 +1786,7 @@ mod recipe_tests {
     use cutlass_renderer_software::SoftwareDevice;
 
     use super::{Snapshot, layers_in};
-    use crate::gpu::{Composed, FrameLayers, GpuSource};
+    use crate::gpu::{FrameLayers, GpuSource};
     use crate::media::OpenClips;
 
     fn colour(draft: &mut Draft, id: &str, render_index: i32, track: usize) {
@@ -1826,7 +1825,7 @@ mod recipe_tests {
         let mut device = SoftwareDevice::new();
         let media = ReaderFactory::new();
         let mut clips = OpenClips::new();
-        match layers_in(
+        layers_in(
             &Snapshot::new(draft),
             Micros(time),
             &mut device,
@@ -1836,10 +1835,6 @@ mod recipe_tests {
             None,
         )
         .expect("layers")
-        {
-            Composed::Layers(layers) => layers,
-            Composed::Frame(_) => panic!("composed on the CPU"),
-        }
     }
 
     fn effects(frame: &FrameLayers) -> Vec<usize> {
@@ -2000,7 +1995,7 @@ mod recipe_tests {
         let media = ReaderFactory::new();
         let mut clips = OpenClips::new();
         let draft = with_effect("recipe/no-such-effect");
-        let composed = layers_in(
+        let layers = layers_in(
             &Snapshot::new(&draft),
             Micros(600_000),
             &mut device,
@@ -2010,8 +2005,6 @@ mod recipe_tests {
             None,
         )
         .expect("frame");
-        if let Composed::Layers(frame) = composed {
-            assert!(effects(&frame).is_empty());
-        }
+        assert!(effects(&layers).is_empty());
     }
 }

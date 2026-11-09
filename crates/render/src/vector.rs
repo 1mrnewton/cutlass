@@ -382,7 +382,7 @@ mod tests {
 
     #[test]
     fn a_placed_lottie_sticker_draws_the_same_frame_on_both_paths() {
-        use cutlass_eval::{Composed, Micros, OpenClips, ReaderFactory, Snapshot};
+        use cutlass_eval::{Micros, OpenClips, ReaderFactory, Snapshot};
         use cutlass_model::{Draft, MaterialVideo, Segment, TimeRange, Track, TrackType};
         use cutlass_renderer_software::SoftwareDevice;
 
@@ -416,7 +416,7 @@ mod tests {
             let cpu =
                 cutlass_eval::frame(&snapshot, Micros(time), &mut device, &media, &mut clips, 0)
                     .expect("cpu frame");
-            let composed = cutlass_eval::layers_in(
+            let layers = cutlass_eval::layers_in(
                 &snapshot,
                 Micros(time),
                 &mut device,
@@ -426,9 +426,6 @@ mod tests {
                 None,
             )
             .expect("layers");
-            let Composed::Layers(layers) = composed else {
-                panic!("composed on the CPU");
-            };
             assert!(
                 layers
                     .layers

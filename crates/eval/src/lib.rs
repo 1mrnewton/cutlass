@@ -55,7 +55,7 @@ pub use frame::{
 pub use freeze::{
     FREEZE_DURATION, FREEZE_EDGE, FreezeMiss, FreezePoint, FrozenImage, freeze_image, freeze_point,
 };
-pub use gpu::{Composed, FrameLayers, GpuBackdrop, GpuLayer, GpuSource, SelectionCut, YuvSamples};
+pub use gpu::{FrameLayers, GpuBackdrop, GpuLayer, GpuSource, SelectionCut, YuvSamples};
 pub use heard::{ClipAsk, Heard};
 pub use media::OpenClips;
 pub use reframe::{REFRAME_MODEL, REFRAME_RATE, ReframeAsk, reframe_ask};

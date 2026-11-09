@@ -38,7 +38,6 @@ pub use cut::Selected;
 pub use cutlass_decode::Surface;
 pub use cutlass_effects::{Block, Recipe, Step};
 pub use cutlass_gpu::{Affine, Placement};
-pub use frame::frame_layers;
 pub use layer::{Layer, Plane, PlaneSource, Planes, Rgba};
 pub use relight::Relit;
 pub use target::Canvas;

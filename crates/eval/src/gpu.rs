@@ -14,7 +14,6 @@
 
 use std::sync::Arc;
 
-use cutlass_compositor::Frame;
 use cutlass_decode::Surface;
 use cutlass_effects::{BlendMode, CanvasMask, Colour, Lighting, Step, TransitionKind};
 use cutlass_gpu::{Affine, Placement, YuvTone};
@@ -247,24 +246,4 @@ pub struct FrameLayers {
     pub width: u32,
     pub height: u32,
     pub layers: Vec<GpuLayer>,
-}
-
-impl FrameLayers {
-    /// A frame composed on the CPU, as one layer the size of the canvas.
-    #[must_use]
-    pub fn pixels(frame: Frame) -> Option<Self> {
-        let picture = CpuBytes::new(frame.extent.width, frame.extent.height, frame.rgba).ok()?;
-        Some(Self {
-            width: picture.width(),
-            height: picture.height(),
-            layers: vec![GpuLayer::canvas(picture)],
-        })
-    }
-}
-
-/// A frame as GPU layers, or composed pixels when it needs the CPU.
-#[derive(Debug)]
-pub enum Composed {
-    Layers(FrameLayers),
-    Frame(Frame),
 }

@@ -1131,7 +1131,7 @@ fn an_hdr_movie_converts_on_the_gpu_like_the_cpu() {
     }
     // The decoder reads the file's HLG tag, so the shader decodes HLG.
     let draft = movie_draft(&path, 960, 540, false).unwrap();
-    let composed = cutlass_eval::layers_in(
+    let layers = cutlass_eval::layers_in(
         &Snapshot::with_fonts(&draft, &fonts),
         Micros(500_000),
         &mut SoftwareDevice::new(),
@@ -1141,9 +1141,6 @@ fn an_hdr_movie_converts_on_the_gpu_like_the_cpu() {
         None,
     )
     .unwrap();
-    let cutlass_eval::Composed::Layers(layers) = composed else {
-        panic!("composed on the CPU");
-    };
     let tones: Vec<_> = layers
         .layers
         .iter()
@@ -1198,7 +1195,7 @@ fn gpu_matches_cpu_in(
     .unwrap()
     .rgba;
     let mut clips = OpenClips::new();
-    let composed = cutlass_eval::layers_in(
+    let layers = cutlass_eval::layers_in(
         &Snapshot::with_fonts(&draft, fonts),
         time,
         &mut device,
@@ -1208,9 +1205,6 @@ fn gpu_matches_cpu_in(
         root,
     )
     .unwrap();
-    let cutlass_eval::Composed::Layers(layers) = composed else {
-        panic!("{name}: composed on the CPU");
-    };
     assert!(
         decodes_on_gpu(&layers),
         "{name}: the movie did not reach the GPU"

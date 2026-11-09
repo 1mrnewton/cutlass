@@ -4,7 +4,7 @@
 #![cfg(test)]
 
 use cutlass_effects::{Located, Mask, MaskShape, PackageError, PackageStore, Selection};
-use cutlass_eval::{Composed, GpuSource, Micros, OpenClips, ReaderFactory, Snapshot};
+use cutlass_eval::{GpuSource, Micros, OpenClips, ReaderFactory, Snapshot};
 use cutlass_model::{
     Draft, MaterialColorConfig, MaterialEffect, Segment, SegmentId, TimeRange, Track, TrackType,
 };
@@ -81,7 +81,7 @@ fn both_with(
     let mut clips = OpenClips::new();
     let cpu = cutlass_eval::frame(&snapshot, Micros(time), &mut device, &media, &mut clips, 0)
         .expect("cpu frame");
-    let composed = cutlass_eval::layers_in(
+    let layers = cutlass_eval::layers_in(
         &snapshot,
         Micros(time),
         &mut device,
@@ -91,9 +91,6 @@ fn both_with(
         None,
     )
     .expect("layers");
-    let Composed::Layers(layers) = composed else {
-        panic!("composed on the CPU");
-    };
     let canvas = renderer.canvas(WIDTH, HEIGHT).expect("canvas");
     renderer.draw_frame(&canvas, &layers).expect("draw");
     let sources = layers

@@ -215,8 +215,7 @@ impl FrameCache {
             .preroll(media, session.draft(), session.revision(), time, horizon);
     }
 
-    /// The frame at `time` as GPU layers, or composed pixels when it needs
-    /// the CPU. The open clips are shared with [`Self::frame`]. Nothing is
+    /// The frame at `time` as GPU layers. The open clips are shared with [`Self::frame`]. Nothing is
     /// stored: the caller keeps what it drew.
     pub fn layers<D: Device>(
         &mut self,
@@ -226,7 +225,7 @@ impl FrameCache {
         media: &ReaderFactory,
         root: Option<&Path>,
         fonts: &dyn Fonts,
-    ) -> Result<cutlass_eval::Composed, PresentError<D::Error>> {
+    ) -> Result<cutlass_eval::FrameLayers, PresentError<D::Error>> {
         cutlass_eval::layers_in(
             &Snapshot::with_fonts(session.draft(), fonts),
             time,

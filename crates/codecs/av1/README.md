@@ -31,12 +31,30 @@ specification (v1.0.0 with errata 1) for all three profiles:
   length-delimited temporal units (`Av1Core::decode_annexb`).
 
 Not implemented: large-scale tile decoding (`OBU_TILE_LIST`, the light-field
-extension). libdav1d, and therefore FFmpeg, does not implement it either.
-Only operating point 0 is output.
+extension), refused with `CodecError::Unsupported`. libdav1d, and therefore
+FFmpeg, does not implement it either.
+
+Operating point 0 is decoded unless `Av1Decoder::select_operating_point`
+picks another; OBUs of layers outside it are dropped, and an index past the
+sequence's last point is `Unsupported`. A sequence wider or taller than 16384,
+or a frame of more luma samples than level 6.3 allows (35,651,584,
+`Av1Core::max_pixels`), is `Limit` before its picture is allocated. A tile whose symbols run past the end
+of its data is refused, as libdav1d refuses it.
+
+Every shown picture carries its description in `PictureInfo`: the pixel
+format, colour primaries, transfer and matrix (named, and as the sequence
+header's CICP bytes), chroma sample position, the frame's own render size
+(the samples stay the frame size), the sequence's timing info
+(`num_units_in_display_tick`, `time_scale`, `equal_picture_interval`,
+`num_ticks_per_picture_minus_1`), the decoder model's
+`num_units_in_decoding_tick` (parsed; the schedule is not run), and the
+`seq_level_idx` of the operating point decoded. Monochrome comes out as
+4:2:0 with neutral chroma; an identity matrix on 4:4:4 as GBR.
 
 Correctness: the output of 46 streams produced by libaom, SVT-AV1 and rav1e
 through FFmpeg, covering the tools above, matches libdav1d byte for byte
-(`tools/conf.py`, `tools/checkall.sh`). A mutation fuzzer
+(`tools/conf.py`, `tools/checkall.sh`), and so does every frame of the
+fixture streams below. A mutation fuzzer
 (`examples/av1fuzz.rs`) finds no panics; corrupt input returns a
 `CodecError` and leaves the reference frames unchanged.
 
@@ -123,6 +141,8 @@ plane slices and returns finished temporal units (`flush` at the end).
   `--temporal-filter`, `--recon`).
 - `examples/av1bench.rs` decode timing with a thread count.
 - `examples/av1fuzz.rs` mutation fuzzer.
+- `examples/roundtrip.rs` asks ffmpeg for one 64x64 keyframe and compares
+  this decoder's picture with libdav1d's (prints `skip` without ffmpeg).
 - `tools/` the scripts behind the numbers in `STATUS.md`: stream generation
   and libdav1d comparison (`conf.py`, `cases.py`, `checkall.sh`), the
   encoder format matrix (`encmatrix.sh`), and rate-distortion comparisons

@@ -9,7 +9,7 @@ re-measure locally before relying on them.
 ```
 cargo fmt
 cargo clippy -p cutlass-av1 --all-targets -- -D warnings
-cargo test -p cutlass-av1 --release
+cargo test -p cutlass-av1 --release      # includes the libdav1d fixture digests
 AV1TEST=<dir with conf.py streams> crates/codecs/av1/tools/checkall.sh   # 46 ok
 crates/codecs/av1/tools/encmatrix.sh                                     # 13 match
 ```
@@ -22,7 +22,6 @@ libaom `-cpu-used 6`). Regenerate test streams with `tools/conf.py`.
 ## Feature gaps
 
 Decoder:
-- Operating point selection (only operating point 0 is output).
 - Large-scale tile (`OBU_TILE_LIST`); libdav1d/FFmpeg lack it too.
 
 Encoder tools the decoder supports but the encoder never chooses:

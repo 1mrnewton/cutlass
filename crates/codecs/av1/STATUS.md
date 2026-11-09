@@ -20,7 +20,9 @@ from the specification text.
 | OBUs: sequence header, temporal delimiter, frame, frame header, redundant header, tile group, metadata, padding | done |
 | Annex B length-delimited input (`Av1Core::decode_annexb`) | done |
 | Large-scale tile (`OBU_TILE_LIST`) | not implemented (also absent from libdav1d/FFmpeg) |
-| Operating point selection / spatial layers | operating point 0 only |
+| Operating point selection (`Av1Decoder::select_operating_point`), layer dropping | done |
+| Level limit: past level 6.3 is `Limit`; a tile that reads past its data is refused | done |
+| Picture metadata: colour (named and CICP), chroma position, per-frame render size, timing info, decoding tick, `seq_level_idx` of the decoded point | done |
 | Frame types: key, inter, intra-only, switch; hidden frames, show_existing_frame, error resilience, frame ids, order hints, frame size with refs | done |
 | Superblocks 64/128, uniform and explicit tiles, multiple tile groups, context update tile | done |
 | Intra: all modes, angle deltas, edge filter/upsampling, filter intra, CFL, palette, intra block copy | done |
@@ -41,6 +43,13 @@ from the specification text.
   OBMC/warp/wedge/difference-weighted/distance-weighted/inter-intra enabled).
   `tools/checkall.sh`: **46/46 identical to libdav1d** (`-autoscale 0`, film
   grain applied), at 1, 2, 3 and 4 threads.
+- Fixtures (`fixtures/`, 177 files, 86 streams from aomenc and hand-made
+  OBU edits): every frame of 85 streams matches the libdav1d 1.5.3
+  digests in `tests/libdav1d-digests.txt` (FFmpeg 8.1.1,
+  `-c:v libdav1d -threads 1 -noautoscale -fps_mode passthrough`; grey
+  streams on luma, with neutral chroma checked), checked by
+  `tests/fixtures.rs` in CI without FFmpeg. `wide.ivf` (16448x64) is
+  refused as past level 6.3, as libdav1d refuses it.
 - Mutation fuzzing (`examples/av1fuzz.rs`): no panics. Corrupt packets
   return an error and leave the reference slots as they were; frame size is
   limited (`Av1Core::max_pixels`) to bound memory.
@@ -191,7 +200,10 @@ content (`testsrc2`, 10 frames) is 23% behind.
 ## Checks
 
 `cargo fmt`, `cargo clippy -p cutlass-av1 --all-targets -- -D warnings`
-and `cargo test -p cutlass-av1 --release` (103 tests: transform, filter,
-predictor and coder kernels against spec transliterations, header and
-OBU round trips, Annex B, encoder/decoder API including reordered GOPs and
-error recovery, thread-independent tile coding) pass.
+and `cargo test -p cutlass-av1 --release` (126 tests pass, 2 ignored: transform,
+filter, predictor and coder kernels against spec transliterations, header
+and OBU round trips, Annex B, encoder/decoder API including reordered GOPs
+and error recovery, thread-independent tile coding; in `tests/`, the
+libdav1d fixture check, picture metadata, operating points, the level
+refusal, and OBU framing). The same suite passes in a debug build,
+which checks arithmetic overflow.

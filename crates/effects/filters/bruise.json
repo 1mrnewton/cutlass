@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "bruise",
+  "name": "Bruise",
+  "category": "Moody",
+  "adjust": {"tint": 0.2, "temperature": -0.2, "saturation": -0.2},
+  "wheels": {"lift": {"hue": 280, "amount": 0.3}}
+}

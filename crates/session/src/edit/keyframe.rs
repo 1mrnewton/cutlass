@@ -1,5 +1,6 @@
 use cutlass_model::{
-    CommonKeyframeGroup, Draft, GRAPH_PRESETS, KeyframeGraph, Micros, POSE_KEYS, Segment, SegmentId,
+    CommonKeyframeGroup, Draft, GRAPH_PRESETS, KeyframeGraph, Micros, POSE_KEYS, Segment,
+    SegmentId, is_keyable, is_pose_key,
 };
 
 use super::locate;
@@ -37,7 +38,7 @@ pub fn add_keyframe(
     cutlass_model::add_keys(segment, &graphs, offset).ok_or(EditError::KeyTime)
 }
 
-/// Remove every key at `offset` from the clip's start.
+/// Remove the pose keys at `offset` from the clip's start.
 pub fn remove_keyframe(
     draft: &mut Draft,
     segment_id: &SegmentId,
@@ -47,11 +48,12 @@ pub fn remove_keyframe(
     let graphs: Vec<String> = segment
         .common_keyframes
         .iter()
+        .filter(|group| is_pose_key(&group.property_type))
         .flat_map(|group| &group.keyframe_list)
         .filter(|key| key.time_offset == offset && !key.graph_id.is_empty())
         .map(|key| key.graph_id.clone())
         .collect();
-    if !cutlass_model::remove_keys(segment, offset) {
+    if !cutlass_model::remove_keys_where(segment, offset, is_pose_key) {
         return Err(EditError::NoKey);
     }
     prune(draft, &graphs);
@@ -60,7 +62,7 @@ pub fn remove_keyframe(
 
 /// Ease the span that ends at the key `offset` from the clip's start along
 /// the Graphs panel curve `graph`, or make it straight with `None`, on each
-/// group with a key there and one before it. Each group gets its own copy
+/// pose group with a key there and one before it. Each group gets its own copy
 /// of the curve, as the reference editor stores it.
 pub fn set_keyframe_graph(
     draft: &mut Draft,
@@ -81,6 +83,9 @@ pub fn set_keyframe_graph(
     let owner = segment.id.as_str().to_owned();
     let (mut old, mut new, mut spans) = (Vec::new(), Vec::new(), 0);
     for group in &mut segment.common_keyframes {
+        if !is_pose_key(&group.property_type) {
+            continue;
+        }
         let earlier = group
             .keyframe_list
             .iter()
@@ -154,6 +159,56 @@ pub fn key_pose(
     Ok(())
 }
 
+/// Key each of `values` (a property and its value) at `offset` from the
+/// clip's start. Only properties a reader plays are taken.
+pub fn key_values(
+    draft: &mut Draft,
+    segment_id: &SegmentId,
+    offset: Micros,
+    values: &[(String, f64)],
+) -> Result<(), EditError> {
+    if values.is_empty()
+        || values
+            .iter()
+            .any(|(property, value)| !is_keyable(property) || !value.is_finite())
+    {
+        return Err(EditError::KeyValue);
+    }
+    let segment = keyed(draft, segment_id, offset)?;
+    for (property, value) in values {
+        cutlass_model::put_key(segment, property, offset, *value);
+    }
+    Ok(())
+}
+
+/// Take the keys on `properties` at `offset` from the clip's start off.
+pub fn unkey_values(
+    draft: &mut Draft,
+    segment_id: &SegmentId,
+    offset: Micros,
+    properties: &[String],
+) -> Result<(), EditError> {
+    if properties.is_empty() || properties.iter().any(|property| !is_keyable(property)) {
+        return Err(EditError::KeyValue);
+    }
+    let segment = keyed(draft, segment_id, offset)?;
+    let graphs: Vec<String> = segment
+        .common_keyframes
+        .iter()
+        .filter(|group| properties.contains(&group.property_type))
+        .flat_map(|group| &group.keyframe_list)
+        .filter(|key| key.time_offset == offset && !key.graph_id.is_empty())
+        .map(|key| key.graph_id.clone())
+        .collect();
+    if !cutlass_model::remove_keys_where(segment, offset, |property| {
+        properties.iter().any(|wanted| wanted == property)
+    }) {
+        return Err(EditError::NoKey);
+    }
+    prune(draft, &graphs);
+    Ok(())
+}
+
 /// The unlocked clip `segment_id`, when `offset` is on it.
 fn keyed<'a>(
     draft: &'a mut Draft,
@@ -171,14 +226,14 @@ fn keyed<'a>(
 
 #[cfg(test)]
 mod tests {
-    use cutlass_model::{Draft, Micros, Segment, TimeRange, key_offsets};
+    use cutlass_model::{Micros, Segment, TimeRange, key_offsets};
 
     use crate::edit::EditError;
     use crate::request::Request;
     use crate::session::Session;
 
     fn open() -> Session {
-        let mut draft = Draft::empty("D");
+        let mut draft = crate::edit::test_draft("D");
         draft.tracks[0].id = "main".into();
         let mut session = Session::open(draft);
         let mut segment = Segment::new("a", "media", TimeRange::new(0, 1_000_000));
@@ -382,5 +437,101 @@ mod tests {
             )
             .unwrap();
         assert!(session.draft().keyframe_graph_list.is_empty());
+    }
+
+    fn values(offset: i64, values: &[(&str, f64)]) -> Request {
+        Request::KeyValues {
+            segment_id: "a".into(),
+            offset: Micros(offset),
+            values: values.iter().map(|(p, v)| ((*p).to_owned(), *v)).collect(),
+        }
+    }
+
+    #[test]
+    fn named_values_are_keyed_and_taken_off_apart_from_the_pose() {
+        let mut session = open();
+        let x = cutlass_model::MASK_KEYS[0];
+        let revision = session
+            .apply(
+                1,
+                &[
+                    values(0, &[(x, -0.5), ("KFTypeVolume", 1.0)]),
+                    values(800_000, &[(x, 0.5), ("KFTypeVolume", 0.25)]),
+                    Request::AddKeyframe {
+                        segment_id: "a".into(),
+                        offset: Micros(800_000),
+                    },
+                ],
+            )
+            .unwrap();
+        let segment = &session.draft().tracks[0].segments[0];
+        let at = |segment: &Segment, name: &str, offset: i64| {
+            cutlass_model::sample(&segment.common_keyframes, &[], &[name], offset)
+                .flatten()
+                .unwrap()
+        };
+        assert!((at(segment, x, 400_000) - 0.0).abs() < 1e-9);
+        assert!((at(segment, "KFTypeVolume", 400_000) - 0.625).abs() < 1e-9);
+        // A key already there takes the new value.
+        let revision = session
+            .apply(revision, &[values(800_000, &[(x, 0.75)])])
+            .unwrap();
+        let segment = &session.draft().tracks[0].segments[0];
+        assert_eq!(at(segment, x, 800_000), 0.75);
+
+        // The pose's ◆ takes only the pose off.
+        let revision = session
+            .apply(
+                revision,
+                &[Request::RemoveKeyframe {
+                    segment_id: "a".into(),
+                    offset: Micros(800_000),
+                }],
+            )
+            .unwrap();
+        let segment = &session.draft().tracks[0].segments[0];
+        assert!(cutlass_model::key_offsets_where(segment, cutlass_model::is_pose_key).is_empty());
+        assert_eq!(key_offsets(segment), [Micros(0), Micros(800_000)]);
+
+        session
+            .apply(
+                revision,
+                &[Request::UnkeyValues {
+                    segment_id: "a".into(),
+                    offset: Micros(800_000),
+                    properties: vec![x.to_owned()],
+                }],
+            )
+            .unwrap();
+        let segment = &session.draft().tracks[0].segments[0];
+        assert_eq!(at(segment, x, 800_000), -0.5, "only the first key is left");
+        assert_eq!(at(segment, "KFTypeVolume", 800_000), 0.25);
+    }
+
+    #[test]
+    fn a_value_nothing_plays_or_off_the_clip_is_refused() {
+        let mut session = open();
+        for (request, error) in [
+            (values(0, &[("KFTypeBrightness", 0.5)]), EditError::KeyValue),
+            (
+                values(0, &[("KFTypeVolume", f64::NAN)]),
+                EditError::KeyValue,
+            ),
+            (values(0, &[]), EditError::KeyValue),
+            (
+                values(2_000_000, &[("KFTypeVolume", 1.0)]),
+                EditError::KeyTime,
+            ),
+            (
+                Request::UnkeyValues {
+                    segment_id: "a".into(),
+                    offset: Micros(0),
+                    properties: vec!["KFTypeVolume".to_owned()],
+                },
+                EditError::NoKey,
+            ),
+        ] {
+            assert_eq!(session.apply(1, &[request]), Err(error));
+        }
     }
 }

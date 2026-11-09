@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "soft-glow",
+  "name": "Soft Glow",
+  "category": "Portrait",
+  "adjust": {"clarity": -0.3, "brilliance": 0.2, "exposure": 0.05}
+}

@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "dark-forest",
+  "name": "Dark Forest",
+  "category": "Moody",
+  "adjust": {"exposure": -0.2, "contrast": 0.2, "vignette": 0.3},
+  "hsl": {"green": [0.2, -0.3, -0.2]}
+}

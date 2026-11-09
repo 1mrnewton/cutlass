@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "id": "tile",
+  "name": "Tile",
+  "category": "Distort",
+  "outgoing": [
+    {"block": "tile", "params": {"x": {"keys": [[0, 1], [0.5, 4], [1, 1]]}, "y": {"keys": [[0, 1], [0.5, 4], [1, 1]]}}}
+  ],
+  "incoming": [
+    {"block": "tile", "params": {"x": {"keys": [[0, 1], [0.5, 4], [1, 1]]}, "y": {"keys": [[0, 1], [0.5, 4], [1, 1]]}}}
+  ],
+  "cross": {"kind": 8, "progress": {"keys": [[0.49, 0], [0.51, 1]]}}
+}

@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "id": "teal-orange",
+  "name": "Teal & Orange",
+  "category": "Cinema",
+  "adjust": {"contrast": 0.15},
+  "wheels": {"lift": {"hue": 190, "amount": 0.4}, "gain": {"hue": 30, "amount": 0.3}},
+  "hsl": {"orange": [0, 0.1, 0]}
+}

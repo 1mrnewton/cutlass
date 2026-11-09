@@ -1,0 +1,13 @@
+[package]
+name = "vision-models"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "MIT OR Apache-2.0"
+description = "Turns the vision crate's ONNX models into burn code and burnpack weights."
+
+# Its own workspace: burn-onnx stays out of the editor's build.
+[workspace]
+
+[dependencies]
+burn-onnx = "=0.22.0"

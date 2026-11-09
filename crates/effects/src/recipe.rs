@@ -28,11 +28,13 @@ pub const MAX_KEYS: usize = 64;
 /// The largest recipe file read.
 pub const MAX_RECIPE_BYTES: usize = 64 * 1024;
 /// The most values one block takes.
-pub const MAX_VALUES: usize = 8;
+pub const MAX_VALUES: usize = 12;
 /// The fastest a held random value may change, in steps per second.
 pub const MAX_JITTER_RATE: f32 = 120.0;
 /// The effect id a recipe is stored under on a draft's effect material.
 pub const RECIPE_PREFIX: &str = "recipe/";
+/// The most controls one recipe may show.
+pub const MAX_CONTROLS: usize = 6;
 
 /// One building block the GPU runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Deserialize)]
@@ -62,6 +64,63 @@ pub enum Block {
     Pixelate,
     /// Turn the colours inside out.
     Invert,
+    /// Smear toward a point, as if zooming during the exposure.
+    ZoomBlur,
+    /// Smear along one direction, as if the camera moved.
+    MotionBlur,
+    /// Twist the picture around a point, most at the middle.
+    Swirl,
+    /// Waves running across, down or out from the middle.
+    Ripple,
+    /// Swell the picture out from a point, or pinch it in.
+    Bulge,
+    /// Let the bright parts bleed light around them.
+    Glow,
+    /// A soft patch of coloured light laid over the picture.
+    LightLeak,
+    /// Turn every colour around the colour wheel.
+    Hue,
+    /// Repeat the whole picture in a grid.
+    Tile,
+    /// Fewer shades of each colour, in flat bands.
+    Posterize,
+    /// Draw the outlines: darken them, or show them alone.
+    Edges,
+    /// Colour each pixel by its brightness from a palette: two colours of
+    /// its own, heat, or a rainbow.
+    GradientMap,
+    /// Repeat the picture in a grid, each copy cropped to fill its cell.
+    Grid,
+    /// Darken all but a soft circle of light.
+    Spotlight,
+    /// Show the picture only on one side of a moving edge: a wipe, an iris
+    /// or blinds. The rest is black.
+    Reveal,
+    /// Scale across and down apart, optionally black past the picture.
+    Stretch,
+    /// Specks of dust and scratches, as on old film.
+    Dust,
+    /// Repeat one wedge around a point, as a kaleidoscope does.
+    Kaleido,
+    /// Pull red out and blue in from a point, as a cheap lens does.
+    Fringe,
+    /// Print the picture as dots, big where it is dark.
+    Halftone,
+    /// Lay the picture out as a stack of tilted photo prints with white
+    /// borders and soft shadows, over a soft, pale copy of itself.
+    Prints,
+    /// Knock random blocks of the frame out of place, some with their
+    /// colours swapped, as a broken video stream does.
+    Blocks,
+    /// Streaks of light from the bright parts out from a point.
+    Rays,
+    /// Blur by place: all but a sharp band, all but a sharp middle, or
+    /// spun around the middle.
+    Focus,
+    /// Scale, move, stretch, turn and fade the picture as a card: clear
+    /// where it no longer reaches, so what is behind it shows. A
+    /// transition slides or flips one picture off the other with it.
+    Place,
 }
 
 /// One parameter of a block: its name, its value when a recipe leaves it
@@ -120,8 +179,248 @@ const SCANLINES: &[Param] = &[
 const MIRROR: &[Param] = &[param("side", 0.0, 0.0, 3.0)];
 const PIXELATE: &[Param] = &[param("size", 0.0, 0.0, 0.25)];
 const INVERT: &[Param] = &[param("amount", 1.0, 0.0, 1.0)];
+/// `amount` is how far toward the point a pixel is smeared; `x` and `y`
+/// move the point from the middle.
+const ZOOM_BLUR: &[Param] = &[
+    param("amount", 0.0, 0.0, 0.5),
+    param("x", 0.0, -0.5, 0.5),
+    param("y", 0.0, -0.5, 0.5),
+];
+/// `length` is a fraction of the shorter side; `angle` 0 is across.
+const MOTION_BLUR: &[Param] = &[
+    param("length", 0.0, 0.0, 0.2),
+    param("angle", 0.0, -180.0, 180.0),
+];
+/// `radius` is a fraction of the shorter side.
+const SWIRL: &[Param] = &[
+    param("angle", 0.0, -720.0, 720.0),
+    param("radius", 0.5, 0.0, 1.5),
+    param("x", 0.0, -0.5, 0.5),
+    param("y", 0.0, -0.5, 0.5),
+];
+/// `amount` and `length` are fractions of the shorter side. A `phase`
+/// going 0 to 1 moves the waves on by one wave. `kind` 0 shifts sideways
+/// in bands down the frame, 1 shifts up and down in bands across it, 2
+/// runs rings out from the middle.
+const RIPPLE: &[Param] = &[
+    param("amount", 0.0, 0.0, 0.1),
+    param("length", 0.1, 0.01, 1.0),
+    param("phase", 0.0, -100.0, 100.0),
+    param("kind", 0.0, 0.0, 2.0),
+];
+/// A positive `amount` swells, a negative one pinches; `radius` is a
+/// fraction of the shorter side.
+const BULGE: &[Param] = &[
+    param("amount", 0.0, -1.0, 0.9),
+    param("radius", 0.5, 0.01, 1.5),
+    param("x", 0.0, -0.5, 0.5),
+    param("y", 0.0, -0.5, 0.5),
+];
+/// Light above `threshold` spreads as far as `radius`, a fraction of the
+/// shorter side.
+const GLOW: &[Param] = &[
+    param("amount", 0.0, 0.0, 3.0),
+    param("radius", 0.03, 0.0, 0.2),
+    param("threshold", 0.6, 0.0, 1.0),
+];
+/// `x` and `y` place the light from the middle, in frames; `size` is a
+/// fraction of the shorter side.
+const LIGHT_LEAK: &[Param] = &[
+    param("amount", 0.0, 0.0, 1.0),
+    param("x", 0.0, -1.5, 1.5),
+    param("y", 0.0, -1.5, 1.5),
+    param("size", 0.5, 0.01, 3.0),
+    param("red", 1.0, 0.0, 1.0),
+    param("green", 0.5, 0.0, 1.0),
+    param("blue", 0.2, 0.0, 1.0),
+];
+const HUE: &[Param] = &[param("degrees", 0.0, -180.0, 180.0)];
+/// Whole copies across and down.
+const TILE: &[Param] = &[param("x", 1.0, 1.0, 8.0), param("y", 1.0, 1.0, 8.0)];
+const POSTERIZE: &[Param] = &[param("levels", 256.0, 2.0, 256.0)];
+/// `amount` darkens the outlines over the picture; `only` fades the
+/// picture away to leave light outlines on black.
+const EDGES: &[Param] = &[param("amount", 0.0, 0.0, 1.0), param("only", 0.0, 0.0, 1.0)];
+/// `palette` 0 runs from the low colour to the high one, 1 is heat from
+/// black through blue, magenta and orange to white, 2 is a rainbow.
+const GRADIENT_MAP: &[Param] = &[
+    param("amount", 0.0, 0.0, 1.0),
+    param("palette", 0.0, 0.0, 2.0),
+    param("low_red", 0.0, 0.0, 1.0),
+    param("low_green", 0.0, 0.0, 1.0),
+    param("low_blue", 0.0, 0.0, 1.0),
+    param("high_red", 1.0, 0.0, 1.0),
+    param("high_green", 1.0, 0.0, 1.0),
+    param("high_blue", 1.0, 0.0, 1.0),
+];
+/// Whole cells across and down; `zoom` above 1 crops each copy closer.
+const GRID: &[Param] = &[
+    param("x", 1.0, 1.0, 8.0),
+    param("y", 1.0, 1.0, 8.0),
+    param("zoom", 1.0, 1.0, 4.0),
+];
+/// `x` and `y` move the light from the middle, in frames; `size` and
+/// `soft` are fractions of the shorter side.
+const SPOTLIGHT: &[Param] = &[
+    param("amount", 0.0, 0.0, 1.0),
+    param("x", 0.0, -1.0, 1.0),
+    param("y", 0.0, -1.0, 1.0),
+    param("size", 0.3, 0.0, 2.0),
+    param("soft", 0.15, 0.0, 1.0),
+];
+/// `progress` 0 shows nothing and 1 all of it. `kind` 0 wipes from one
+/// side, 1 opens a circle from the middle, 2 opens `count` blinds, 3 opens
+/// two doors from the middle line, 4 sweeps round like a clock hand from
+/// `angle`, 5 opens a diamond, 6 fills a checkerboard of `count` squares
+/// across, one colour then the other, and 7 dissolves in fine grains.
+/// `angle` 0 runs left to right; `soft` is the edge, as a fraction of the
+/// run.
+const REVEAL: &[Param] = &[
+    param("progress", 1.0, 0.0, 1.0),
+    param("kind", 0.0, 0.0, 7.0),
+    param("angle", 0.0, -180.0, 180.0),
+    param("soft", 0.02, 0.0, 0.5),
+    param("count", 8.0, 1.0, 64.0),
+];
+/// `black` 1 leaves black where the shrunk picture no longer reaches;
+/// 0 reflects it, as the other moving blocks do.
+const STRETCH: &[Param] = &[
+    param("x", 1.0, 0.0, 4.0),
+    param("y", 1.0, 0.0, 4.0),
+    param("black", 0.0, 0.0, 1.0),
+];
+/// `amount` is how much of the frame is specked, `scratches` how likely
+/// each of three scratches is, `size` a speck's room as a fraction of the
+/// shorter side.
+const DUST: &[Param] = &[
+    param("amount", 0.0, 0.0, 1.0),
+    param("scratches", 0.0, 0.0, 1.0),
+    param("seed", 0.0, 0.0, 1000.0),
+    param("size", 0.03, 0.005, 0.2),
+];
+/// `segments` below 2 leaves the picture as it is.
+const KALEIDO: &[Param] = &[
+    param("segments", 1.0, 1.0, 32.0),
+    param("angle", 0.0, -360.0, 360.0),
+    param("x", 0.0, -0.5, 0.5),
+    param("y", 0.0, -0.5, 0.5),
+];
+const FRINGE: &[Param] = &[
+    param("amount", 0.0, 0.0, 0.2),
+    param("x", 0.0, -0.5, 0.5),
+    param("y", 0.0, -0.5, 0.5),
+];
+/// `size` is a dot's cell, as a fraction of the shorter side; `color` 0
+/// prints black dots and 1 dots of the picture's own colour, on white.
+/// `count` prints from 0 (none) to 4, the back one the largest. `scale`
+/// is the back print's size against the frame, `spread` how far the prints
+/// sit from the middle, `turn` turns the whole stack and `tilt` turns each
+/// print its own way, in degrees. `border`, the white edge, and `blur`, the
+/// copy behind, are fractions of the shorter side; `wash` pales that copy.
+/// `arrive` is the clock the prints fly in by, the back one first: each
+/// takes one unit to land and the next sets off 0.6 after it, so a print
+/// is still settling when the next comes. At 8 every print has landed.
+const PRINTS: &[Param] = &[
+    param("count", 0.0, 0.0, 4.0),
+    param("scale", 0.7, 0.1, 1.5),
+    param("spread", 0.5, 0.0, 1.0),
+    param("turn", 0.0, -180.0, 180.0),
+    param("tilt", 8.0, 0.0, 45.0),
+    param("border", 0.025, 0.0, 0.1),
+    param("blur", 0.03, 0.0, 0.1),
+    param("wash", 0.5, 0.0, 1.0),
+    param("arrive", 8.0, 0.0, 8.0),
+];
+/// `amount` is the share of blocks knocked out, `size` a block's height as
+/// a fraction of the shorter side (blocks are wider than tall), `shift`
+/// how far one moves, in frames, and `color` the share of those whose
+/// colours swap.
+const BLOCKS: &[Param] = &[
+    param("amount", 0.0, 0.0, 1.0),
+    param("size", 0.06, 0.01, 0.5),
+    param("shift", 0.05, 0.0, 0.3),
+    param("seed", 0.0, 0.0, 1000.0),
+    param("color", 0.3, 0.0, 1.0),
+];
+/// `x` and `y` move the point from the middle, in frames; `length` is how
+/// far toward it a streak reaches, `threshold` the brightness that shines.
+const RAYS: &[Param] = &[
+    param("amount", 0.0, 0.0, 3.0),
+    param("x", 0.0, -1.0, 1.0),
+    param("y", 0.0, -1.0, 1.0),
+    param("length", 0.4, 0.0, 1.0),
+    param("threshold", 0.6, 0.0, 1.0),
+];
+/// `amount` is the blur at its widest, a fraction of the shorter side.
+/// `kind` 0 keeps a band across sharp, as a tilt-shift lens does, 1 keeps
+/// the middle sharp, 2 spins the picture around the middle by up to
+/// `angle` degrees. `size` is the sharp part, `y` moves the band.
+const FOCUS: &[Param] = &[
+    param("amount", 0.0, 0.0, 0.1),
+    param("kind", 0.0, 0.0, 2.0),
+    param("size", 0.3, 0.0, 1.0),
+    param("y", 0.0, -0.5, 0.5),
+    param("angle", 10.0, 0.0, 90.0),
+];
+/// `x` and `y` move the picture right and down, in frames; `stretch_x`
+/// and `stretch_y` scale it across and down on top of `scale`.
+const PLACE: &[Param] = &[
+    param("scale", 1.0, 0.0, 4.0),
+    param("x", 0.0, -2.0, 2.0),
+    param("y", 0.0, -2.0, 2.0),
+    param("rotate", 0.0, -360.0, 360.0),
+    param("stretch_x", 1.0, 0.0, 4.0),
+    param("stretch_y", 1.0, 0.0, 4.0),
+    param("opacity", 1.0, 0.0, 1.0),
+];
+const HALFTONE: &[Param] = &[
+    param("size", 0.0, 0.0, 0.1),
+    param("amount", 1.0, 0.0, 1.0),
+    param("color", 0.0, 0.0, 1.0),
+];
 
 impl Block {
+    /// Every block, in the order of their codes.
+    pub const ALL: [Self; 37] = [
+        Self::Transform,
+        Self::RgbSplit,
+        Self::Slices,
+        Self::Blur,
+        Self::Grade,
+        Self::Flash,
+        Self::Vignette,
+        Self::Noise,
+        Self::Scanlines,
+        Self::Mirror,
+        Self::Pixelate,
+        Self::Invert,
+        Self::ZoomBlur,
+        Self::MotionBlur,
+        Self::Swirl,
+        Self::Ripple,
+        Self::Bulge,
+        Self::Glow,
+        Self::LightLeak,
+        Self::Hue,
+        Self::Tile,
+        Self::Posterize,
+        Self::Edges,
+        Self::GradientMap,
+        Self::Grid,
+        Self::Spotlight,
+        Self::Reveal,
+        Self::Stretch,
+        Self::Dust,
+        Self::Kaleido,
+        Self::Fringe,
+        Self::Halftone,
+        Self::Prints,
+        Self::Blocks,
+        Self::Rays,
+        Self::Focus,
+        Self::Place,
+    ];
+
     /// The parameters in the order the shader reads them.
     #[must_use]
     pub const fn params(self) -> &'static [Param] {
@@ -138,6 +437,31 @@ impl Block {
             Self::Mirror => MIRROR,
             Self::Pixelate => PIXELATE,
             Self::Invert => INVERT,
+            Self::ZoomBlur => ZOOM_BLUR,
+            Self::MotionBlur => MOTION_BLUR,
+            Self::Swirl => SWIRL,
+            Self::Ripple => RIPPLE,
+            Self::Bulge => BULGE,
+            Self::Glow => GLOW,
+            Self::LightLeak => LIGHT_LEAK,
+            Self::Hue => HUE,
+            Self::Tile => TILE,
+            Self::Posterize => POSTERIZE,
+            Self::Edges => EDGES,
+            Self::GradientMap => GRADIENT_MAP,
+            Self::Grid => GRID,
+            Self::Spotlight => SPOTLIGHT,
+            Self::Reveal => REVEAL,
+            Self::Stretch => STRETCH,
+            Self::Dust => DUST,
+            Self::Kaleido => KALEIDO,
+            Self::Fringe => FRINGE,
+            Self::Halftone => HALFTONE,
+            Self::Prints => PRINTS,
+            Self::Blocks => BLOCKS,
+            Self::Rays => RAYS,
+            Self::Focus => FOCUS,
+            Self::Place => PLACE,
         }
     }
 
@@ -157,6 +481,31 @@ impl Block {
             Self::Mirror => 9,
             Self::Pixelate => 10,
             Self::Invert => 11,
+            Self::ZoomBlur => 12,
+            Self::MotionBlur => 13,
+            Self::Swirl => 14,
+            Self::Ripple => 15,
+            Self::Bulge => 16,
+            Self::Glow => 17,
+            Self::LightLeak => 18,
+            Self::Hue => 19,
+            Self::Tile => 20,
+            Self::Posterize => 21,
+            Self::Edges => 22,
+            Self::GradientMap => 23,
+            Self::Grid => 24,
+            Self::Spotlight => 25,
+            Self::Reveal => 26,
+            Self::Stretch => 27,
+            Self::Dust => 28,
+            Self::Kaleido => 29,
+            Self::Fringe => 30,
+            Self::Halftone => 31,
+            Self::Prints => 32,
+            Self::Blocks => 33,
+            Self::Rays => 34,
+            Self::Focus => 35,
+            Self::Place => 36,
         }
     }
 }
@@ -201,6 +550,64 @@ pub struct Jitter {
     pub seed: u32,
 }
 
+/// How a control's value reads in the inspector.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ControlUnit {
+    /// A plain number.
+    #[default]
+    Plain,
+    /// A rate, such as 1.5x.
+    Times,
+    /// A part from 0 to 1 shown as a percent.
+    Percent,
+    /// An angle in degrees.
+    Degrees,
+}
+
+/// A pass's parameter a control acts on: the pass's place in the recipe
+/// and the parameter's name.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub struct Target(pub usize, pub String);
+
+/// One setting a recipe shows in the inspector, such as Speed or
+/// Intensity. Its value plays the effect faster (`speed`), multiplies
+/// parameters as the recipe writes them (`scale`), or replaces them
+/// (`set`). A value is kept to the parameter's range.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Control {
+    /// Lowercase letters, digits and underscores; the name it is stored by.
+    pub id: String,
+    /// What the inspector calls it.
+    pub name: String,
+    pub default: f32,
+    pub min: f32,
+    pub max: f32,
+    #[serde(default)]
+    pub unit: ControlUnit,
+    /// The value multiplies the effect's own time.
+    #[serde(default)]
+    pub speed: bool,
+    #[serde(default)]
+    pub scale: Vec<Target>,
+    #[serde(default)]
+    pub set: Vec<Target>,
+}
+
+impl Control {
+    /// `value` kept inside this control's range; the default when it is
+    /// not a number.
+    #[must_use]
+    pub fn clamp(&self, value: f32) -> f32 {
+        if value.is_finite() {
+            value.clamp(self.min, self.max)
+        } else {
+            self.default
+        }
+    }
+}
+
 /// One pass of a recipe as written.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -220,8 +627,28 @@ pub struct Recipe {
     pub id: String,
     /// What the picker shows.
     pub name: String,
+    /// The shelf category it is listed under, one of
+    /// [`EFFECT_CATEGORIES`]; a recipe without one is listed under All only.
+    #[serde(default)]
+    pub category: String,
+    /// The scene its card shows it over, one of
+    /// [`crate::preview_scenes`]; empty is [`crate::DEFAULT_PREVIEW_SCENE`].
+    #[serde(default)]
+    pub preview: String,
+    /// The second of the effect its card's still is taken from; none is
+    /// [`crate::DEFAULT_POSTER`]. A flash names the moment it is brightest.
+    #[serde(default)]
+    pub poster: Option<f32>,
+    /// The settings the inspector shows for it, at most [`MAX_CONTROLS`].
+    #[serde(default)]
+    pub controls: Vec<Control>,
     pub passes: Vec<Pass>,
 }
+
+/// The effects shelf's categories, in the order the shelf lists them.
+pub const EFFECT_CATEGORIES: &[&str] = &[
+    "Basic", "Motion", "Reveal", "Blur", "Glitch", "Retro", "Light", "Distort",
+];
 
 /// One block with every value worked out for one moment.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -251,6 +678,10 @@ pub enum RecipeError {
     /// A curve's own numbers are unusable: no keys, too many, keys out of
     /// order, or a period or rate that is not positive.
     Curve { block: Block, name: String },
+    /// A control is unusable: a bad or repeated id, a range that does not
+    /// hold its default, a speed that can reach zero, a target that names
+    /// no pass or parameter, or more than [`MAX_CONTROLS`] of them.
+    Control(String),
 }
 
 impl fmt::Display for RecipeError {
@@ -276,6 +707,7 @@ impl fmt::Display for RecipeError {
                 write!(formatter, "{block:?} {name} goes outside its range")
             }
             Self::Curve { block, name } => write!(formatter, "{block:?} {name} has a broken curve"),
+            Self::Control(id) => write!(formatter, "the control {id} is not usable"),
         }
     }
 }
@@ -319,21 +751,71 @@ impl Recipe {
         if !id_ok || !name_ok {
             return Err(RecipeError::Name);
         }
+        if !self.preview.is_empty() && crate::preview_scene(&self.preview).is_none() {
+            return Err(RecipeError::Shape(format!(
+                "no preview scene {}",
+                self.preview
+            )));
+        }
+        if self
+            .poster
+            .is_some_and(|poster| !poster.is_finite() || !(0.0..=60.0).contains(&poster))
+        {
+            return Err(RecipeError::Shape(
+                "a poster time from 0 to 60 s".to_owned(),
+            ));
+        }
         if self.passes.is_empty() || self.passes.len() > MAX_PASSES {
             return Err(RecipeError::Passes);
         }
-        for pass in &self.passes {
-            for (name, curve) in &pass.params {
-                let Some(param) = pass.block.params().iter().find(|p| p.name == name) else {
-                    return Err(RecipeError::UnknownParam {
-                        block: pass.block,
-                        name: name.clone(),
-                    });
-                };
-                check_curve(pass.block, param, curve)?;
+        self.check_controls()?;
+        check_passes(&self.passes)
+    }
+
+    fn check_controls(&self) -> Result<(), RecipeError> {
+        if self.controls.len() > MAX_CONTROLS {
+            return Err(RecipeError::Control(String::new()));
+        }
+        for (index, control) in self.controls.iter().enumerate() {
+            let refuse = || Err(RecipeError::Control(control.id.clone()));
+            let id_ok = !control.id.is_empty()
+                && control.id.len() <= 32
+                && control
+                    .id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_');
+            let repeated = self.controls[..index]
+                .iter()
+                .any(|other| other.id == control.id);
+            let numbers = [control.default, control.min, control.max];
+            let range_ok = numbers.iter().all(|value| value.is_finite())
+                && control.min <= control.default
+                && control.default <= control.max;
+            let name_ok = !control.name.trim().is_empty() && control.name.chars().count() <= 32;
+            if !id_ok || repeated || !range_ok || !name_ok || (control.speed && control.min <= 0.0)
+            {
+                return refuse();
+            }
+            for Target(pass, name) in control.scale.iter().chain(&control.set) {
+                let known = self
+                    .passes
+                    .get(*pass)
+                    .is_some_and(|pass| pass.block.params().iter().any(|param| param.name == name));
+                if !known {
+                    return refuse();
+                }
             }
         }
         Ok(())
+    }
+
+    /// Every control at its default.
+    #[must_use]
+    pub fn default_controls(&self) -> BTreeMap<String, f32> {
+        self.controls
+            .iter()
+            .map(|control| (control.id.clone(), control.default))
+            .collect()
     }
 
     /// The id stored on a draft's effect material.
@@ -342,21 +824,75 @@ impl Recipe {
         format!("{RECIPE_PREFIX}{}", self.id)
     }
 
+    /// The scene its card shows it over.
+    #[must_use]
+    pub fn preview_scene(&self) -> &str {
+        if self.preview.is_empty() {
+            crate::DEFAULT_PREVIEW_SCENE
+        } else {
+            &self.preview
+        }
+    }
+
+    /// The moment of the effect its card's still shows.
+    #[must_use]
+    pub fn poster_time(&self) -> Micros {
+        let seconds = self.poster.unwrap_or(crate::DEFAULT_POSTER);
+        Micros((f64::from(seconds) * 1_000_000.0).round() as i64)
+    }
+
     /// Every pass with its values at `time` from the effect's start. A time
     /// before the start is the start.
     #[must_use]
     pub fn steps_at(&self, time: Micros) -> Vec<Step> {
+        self.steps_with(time, &BTreeMap::new())
+    }
+
+    /// Every pass at `time` with the controls set to `controls`, by id. A
+    /// control left out is at its default, and a value past its range is
+    /// kept to it; each parameter stays in its own range.
+    #[must_use]
+    pub fn steps_with(&self, time: Micros, controls: &BTreeMap<String, f32>) -> Vec<Step> {
+        let value_of = |control: &Control| {
+            control.clamp(
+                controls
+                    .get(&control.id)
+                    .copied()
+                    .unwrap_or(control.default),
+            )
+        };
+        let speed: f64 = self
+            .controls
+            .iter()
+            .filter(|control| control.speed)
+            .map(|control| f64::from(value_of(control)))
+            .product();
         // Seconds as f64 first: a long timeline keeps its fraction.
-        let seconds = (time.0.max(0) as f64 / 1_000_000.0) as f32;
+        let seconds = (time.0.max(0) as f64 / 1_000_000.0 * speed) as f32;
         self.passes
             .iter()
-            .map(|pass| {
+            .enumerate()
+            .map(|(index, pass)| {
                 let mut values = [0.0; MAX_VALUES];
                 for (slot, param) in values.iter_mut().zip(pass.block.params()) {
-                    *slot = pass
+                    let mut value = pass
                         .params
                         .get(param.name)
                         .map_or(param.default, |curve| curve.at(seconds));
+                    let aims = |targets: &[Target]| {
+                        targets
+                            .iter()
+                            .any(|Target(pass, name)| *pass == index && name == param.name)
+                    };
+                    for control in &self.controls {
+                        if aims(&control.scale) {
+                            value *= value_of(control);
+                        }
+                        if aims(&control.set) {
+                            value = value_of(control);
+                        }
+                    }
+                    *slot = value.clamp(param.min, param.max);
                 }
                 Step {
                     block: pass.block,
@@ -367,7 +903,7 @@ impl Recipe {
     }
 }
 
-fn check_curve(block: Block, param: &Param, curve: &Curve) -> Result<(), RecipeError> {
+pub(crate) fn check_curve(block: Block, param: &Param, curve: &Curve) -> Result<(), RecipeError> {
     let range = |value: f32| {
         if value.is_finite() && value >= param.min && value <= param.max {
             Ok(())
@@ -419,9 +955,25 @@ fn check_curve(block: Block, param: &Param, curve: &Curve) -> Result<(), RecipeE
     }
 }
 
+/// Every parameter of `passes` is one its block has, inside its range.
+pub(crate) fn check_passes(passes: &[Pass]) -> Result<(), RecipeError> {
+    for pass in passes {
+        for (name, curve) in &pass.params {
+            let Some(param) = pass.block.params().iter().find(|p| p.name == name) else {
+                return Err(RecipeError::UnknownParam {
+                    block: pass.block,
+                    name: name.clone(),
+                });
+            };
+            check_curve(pass.block, param, curve)?;
+        }
+    }
+    Ok(())
+}
+
 impl Curve {
     /// The value at `seconds`, never negative.
-    fn at(&self, seconds: f32) -> f32 {
+    pub(crate) fn at(&self, seconds: f32) -> f32 {
         match self {
             Self::Constant(value) => *value,
             Self::Keys { keys, repeat } => {
@@ -473,17 +1025,207 @@ fn unit_hash(seed: u64, step: u64) -> f32 {
     (x >> 40) as f32 / (1u64 << 24) as f32
 }
 
-const BUNDLED_FILES: [&str; 10] = [
+const BUNDLED_FILES: [&str; 200] = [
+    include_str!("../recipes/vignette.json"),
+    include_str!("../recipes/black-white.json"),
+    include_str!("../recipes/vivid.json"),
+    include_str!("../recipes/fade-in.json"),
+    include_str!("../recipes/invert.json"),
+    include_str!("../recipes/duotone.json"),
+    include_str!("../recipes/golden-duotone.json"),
+    include_str!("../recipes/ocean-duotone.json"),
+    include_str!("../recipes/warm.json"),
+    include_str!("../recipes/cool.json"),
+    include_str!("../recipes/noir.json"),
+    include_str!("../recipes/matte.json"),
+    include_str!("../recipes/teal-orange.json"),
+    include_str!("../recipes/pastel.json"),
+    include_str!("../recipes/cinematic.json"),
+    include_str!("../recipes/bright.json"),
+    include_str!("../recipes/moody.json"),
+    include_str!("../recipes/white-in.json"),
+    include_str!("../recipes/pink-duotone.json"),
+    include_str!("../recipes/lime-duotone.json"),
+    include_str!("../recipes/muted.json"),
+    include_str!("../recipes/punchy.json"),
     include_str!("../recipes/shake.json"),
     include_str!("../recipes/zoom-pulse.json"),
+    include_str!("../recipes/earthquake.json"),
+    include_str!("../recipes/heartbeat.json"),
+    include_str!("../recipes/slow-zoom.json"),
+    include_str!("../recipes/sway.json"),
+    include_str!("../recipes/float.json"),
+    include_str!("../recipes/spin-in.json"),
+    include_str!("../recipes/bounce.json"),
+    include_str!("../recipes/whip-in.json"),
+    include_str!("../recipes/whip-pan.json"),
+    include_str!("../recipes/impact.json"),
+    include_str!("../recipes/shockwave.json"),
+    include_str!("../recipes/squeeze.json"),
+    include_str!("../recipes/zoom-in.json"),
+    include_str!("../recipes/zoom-out.json"),
+    include_str!("../recipes/pan-left.json"),
+    include_str!("../recipes/pan-right.json"),
+    include_str!("../recipes/tilt-up.json"),
+    include_str!("../recipes/rock.json"),
+    include_str!("../recipes/jello.json"),
+    include_str!("../recipes/drop-in.json"),
+    include_str!("../recipes/slide-up.json"),
+    include_str!("../recipes/pop-in.json"),
+    include_str!("../recipes/spin.json"),
+    include_str!("../recipes/wobble.json"),
+    include_str!("../recipes/handheld.json"),
+    include_str!("../recipes/flash-zoom.json"),
+    include_str!("../recipes/tumble-in.json"),
+    include_str!("../recipes/hit.json"),
+    include_str!("../recipes/iris-in.json"),
+    include_str!("../recipes/wipe-in.json"),
+    include_str!("../recipes/diagonal-wipe.json"),
+    include_str!("../recipes/blinds.json"),
+    include_str!("../recipes/barn-doors.json"),
+    include_str!("../recipes/split-open.json"),
+    include_str!("../recipes/clock-wipe.json"),
+    include_str!("../recipes/diamond.json"),
+    include_str!("../recipes/checkerboard.json"),
+    include_str!("../recipes/dissolve.json"),
+    include_str!("../recipes/wipe-down.json"),
+    include_str!("../recipes/wipe-left.json"),
+    include_str!("../recipes/soft-wipe.json"),
+    include_str!("../recipes/shutters.json"),
+    include_str!("../recipes/zoom-reveal.json"),
+    include_str!("../recipes/spin-reveal.json"),
+    include_str!("../recipes/pixel-reveal.json"),
+    include_str!("../recipes/glitch-reveal.json"),
+    include_str!("../recipes/blur-in.json"),
+    include_str!("../recipes/blur.json"),
+    include_str!("../recipes/rack-focus.json"),
+    include_str!("../recipes/dreamy.json"),
+    include_str!("../recipes/zoom-blur.json"),
+    include_str!("../recipes/zoom-burst.json"),
+    include_str!("../recipes/motion-blur.json"),
+    include_str!("../recipes/speed-lines.json"),
+    include_str!("../recipes/tilt-shift.json"),
+    include_str!("../recipes/lens-blur.json"),
+    include_str!("../recipes/spin-blur.json"),
+    include_str!("../recipes/blur-out.json"),
+    include_str!("../recipes/focus-pulse.json"),
+    include_str!("../recipes/dream-zoom.json"),
+    include_str!("../recipes/shake-blur.json"),
+    include_str!("../recipes/spin-out.json"),
+    include_str!("../recipes/soft-focus.json"),
+    include_str!("../recipes/blur-flash.json"),
+    include_str!("../recipes/vertical-blur.json"),
+    include_str!("../recipes/frosted.json"),
     include_str!("../recipes/rgb-split.json"),
     include_str!("../recipes/glitch.json"),
+    include_str!("../recipes/digital-glitch.json"),
+    include_str!("../recipes/signal-loss.json"),
+    include_str!("../recipes/rgb-shift.json"),
+    include_str!("../recipes/invert-flicker.json"),
+    include_str!("../recipes/stutter.json"),
+    include_str!("../recipes/neon-edges.json"),
+    include_str!("../recipes/color-glitch.json"),
+    include_str!("../recipes/data-blocks.json"),
+    include_str!("../recipes/datamosh.json"),
+    include_str!("../recipes/corrupt.json"),
+    include_str!("../recipes/bad-signal.json"),
+    include_str!("../recipes/chroma-shake.json"),
+    include_str!("../recipes/static.json"),
+    include_str!("../recipes/interlace.json"),
+    include_str!("../recipes/glitch-flash.json"),
+    include_str!("../recipes/hologram.json"),
+    include_str!("../recipes/pixel-glitch.json"),
+    include_str!("../recipes/scan-glitch.json"),
+    include_str!("../recipes/error.json"),
+    include_str!("../recipes/retro-glitch.json"),
+    include_str!("../recipes/wave-glitch.json"),
+    include_str!("../recipes/tear.json"),
     include_str!("../recipes/vhs.json"),
-    include_str!("../recipes/blur-in.json"),
-    include_str!("../recipes/white-flash.json"),
-    include_str!("../recipes/vignette.json"),
     include_str!("../recipes/film-grain.json"),
+    include_str!("../recipes/old-film.json"),
+    include_str!("../recipes/sepia.json"),
+    include_str!("../recipes/8-bit.json"),
+    include_str!("../recipes/crt.json"),
+    include_str!("../recipes/pop-art.json"),
+    include_str!("../recipes/comic.json"),
+    include_str!("../recipes/sketch.json"),
+    include_str!("../recipes/tv-off.json"),
+    include_str!("../recipes/tv-on.json"),
+    include_str!("../recipes/thermal.json"),
+    include_str!("../recipes/night-vision.json"),
+    include_str!("../recipes/halftone.json"),
+    include_str!("../recipes/comic-dots.json"),
+    include_str!("../recipes/dusty-film.json"),
+    include_str!("../recipes/film-scratches.json"),
+    include_str!("../recipes/faded-film.json"),
+    include_str!("../recipes/super-8.json"),
+    include_str!("../recipes/newsprint.json"),
+    include_str!("../recipes/pocket-game.json"),
+    include_str!("../recipes/vhs-rewind.json"),
+    include_str!("../recipes/retro-tv.json"),
+    include_str!("../recipes/cross-process.json"),
+    include_str!("../recipes/silent-film.json"),
+    include_str!("../recipes/print-dots.json"),
+    include_str!("../recipes/white-flash.json"),
+    include_str!("../recipes/black-flash.json"),
+    include_str!("../recipes/strobe.json"),
+    include_str!("../recipes/flicker.json"),
+    include_str!("../recipes/red-pulse.json"),
+    include_str!("../recipes/exposure-flash.json"),
+    include_str!("../recipes/golden-hour.json"),
+    include_str!("../recipes/moonlight.json"),
+    include_str!("../recipes/glow.json"),
+    include_str!("../recipes/soft-glow.json"),
+    include_str!("../recipes/light-leak.json"),
+    include_str!("../recipes/rose-leak.json"),
+    include_str!("../recipes/sun-flare.json"),
+    include_str!("../recipes/color-cycle.json"),
+    include_str!("../recipes/spotlight.json"),
+    include_str!("../recipes/searchlight.json"),
+    include_str!("../recipes/film-burn.json"),
+    include_str!("../recipes/rainbow-map.json"),
+    include_str!("../recipes/god-rays.json"),
+    include_str!("../recipes/light-burst.json"),
+    include_str!("../recipes/star-glow.json"),
+    include_str!("../recipes/neon-glow.json"),
+    include_str!("../recipes/flare-sweep.json"),
+    include_str!("../recipes/amber-leak.json"),
+    include_str!("../recipes/blue-leak.json"),
+    include_str!("../recipes/dual-leak.json"),
+    include_str!("../recipes/disco.json"),
+    include_str!("../recipes/twinkle.json"),
+    include_str!("../recipes/radiance.json"),
+    include_str!("../recipes/blink.json"),
     include_str!("../recipes/mirror.json"),
+    include_str!("../recipes/mirror-vertical.json"),
+    include_str!("../recipes/kaleidoscope.json"),
+    include_str!("../recipes/pixelate.json"),
+    include_str!("../recipes/depixelate.json"),
+    include_str!("../recipes/dutch-angle.json"),
+    include_str!("../recipes/swirl.json"),
+    include_str!("../recipes/vortex.json"),
+    include_str!("../recipes/water-ripple.json"),
+    include_str!("../recipes/wavy.json"),
+    include_str!("../recipes/heat-haze.json"),
+    include_str!("../recipes/fisheye.json"),
+    include_str!("../recipes/pinch.json"),
+    include_str!("../recipes/bulge-pulse.json"),
+    include_str!("../recipes/split-screen.json"),
+    include_str!("../recipes/psychedelic.json"),
+    include_str!("../recipes/triple-stack.json"),
+    include_str!("../recipes/side-by-side.json"),
+    include_str!("../recipes/six-grid.json"),
+    include_str!("../recipes/nine-grid.json"),
+    include_str!("../recipes/prism.json"),
+    include_str!("../recipes/mandala.json"),
+    include_str!("../recipes/lens-fringe.json"),
+    include_str!("../recipes/photo-stack.json"),
+    include_str!("../recipes/photo-drop.json"),
+    include_str!("../recipes/funhouse.json"),
+    include_str!("../recipes/twist.json"),
+    include_str!("../recipes/liquid.json"),
+    include_str!("../recipes/melt.json"),
+    include_str!("../recipes/bubble.json"),
 ];
 
 /// The recipes that ship in the app, in picker order.
@@ -509,8 +1251,8 @@ pub fn bundled_recipe(effect_id: &str) -> Option<&'static Recipe> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BUNDLED_FILES, Block, MAX_PASSES, MAX_RECIPE_BYTES, Recipe, RecipeError, bundled,
-        bundled_recipe, unit_hash,
+        BUNDLED_FILES, Block, EFFECT_CATEGORIES, MAX_PASSES, MAX_RECIPE_BYTES, Recipe, RecipeError,
+        bundled, bundled_recipe, unit_hash,
     };
     use cutlass_model::Micros;
 
@@ -536,6 +1278,38 @@ mod tests {
         );
         assert!(bundled_recipe("shake").is_none());
         assert!(bundled_recipe("recipe/none").is_none());
+        // Every bundled effect is filed under a shelf category.
+        for recipe in bundled() {
+            assert!(
+                EFFECT_CATEGORIES.contains(&recipe.category.as_str()),
+                "{} has category {:?}",
+                recipe.id,
+                recipe.category
+            );
+        }
+        // And names the scene its card shows it over.
+        for recipe in bundled() {
+            assert!(!recipe.preview.is_empty(), "{} names no scene", recipe.id);
+        }
+        // One from elsewhere may leave it out.
+        let plain =
+            read(r#"{"version":1,"id":"a","name":"A","passes":[{"block":"grade","params":{}}]}"#);
+        assert!(plain.is_ok_and(|recipe| recipe.category.is_empty()));
+    }
+
+    #[test]
+    fn every_block_fits_the_values_a_step_carries_and_its_code_is_its_place() {
+        for (index, block) in Block::ALL.iter().enumerate() {
+            assert!(block.params().len() <= super::MAX_VALUES, "{block:?}");
+            assert_eq!(block.code() as usize, index, "{block:?}");
+            for param in block.params() {
+                assert!(
+                    param.min <= param.default && param.default <= param.max,
+                    "{block:?} {}",
+                    param.name
+                );
+            }
+        }
     }
 
     #[test]
@@ -700,6 +1474,85 @@ mod tests {
             read(r#"{"version":0,"id":"a","name":"A","passes":[{"block":"blur"}]}"#),
             Err(RecipeError::Shape(_))
         ));
+    }
+
+    #[test]
+    fn every_bundled_control_changes_its_effect() {
+        let times =
+            [0.04, 0.1, 0.2, 0.5, 0.9, 1.4, 2.1].map(|seconds| Micros((seconds * 1e6) as i64));
+        for recipe in bundled() {
+            for control in &recipe.controls {
+                let moved = if control.default < control.max {
+                    control.max
+                } else {
+                    control.min
+                };
+                let set = [(control.id.clone(), moved)].into_iter().collect();
+                let changes = times
+                    .iter()
+                    .any(|time| recipe.steps_with(*time, &set) != recipe.steps_at(*time));
+                assert!(changes, "{} {} does nothing", recipe.id, control.id);
+            }
+        }
+    }
+
+    #[test]
+    fn controls_speed_scale_and_set_the_steps_within_their_ranges() {
+        let recipe = read(
+            r#"{"version":1,"id":"a","name":"A","controls":[
+                {"id":"speed","name":"Speed","default":1,"min":0.5,"max":3,"unit":"times","speed":true},
+                {"id":"strength","name":"Strength","default":1,"min":0,"max":4,"scale":[[0,"amount"]]},
+                {"id":"green","name":"Green","default":0.5,"min":0,"max":1,"set":[[0,"green"]]}],
+                "passes":[{"block":"flash","params":{"amount":{"keys":[[0,0],[1,0.5]]}}}]}"#,
+        )
+        .unwrap();
+        let at = |seconds: f64, controls: &[(&str, f32)]| {
+            let controls = controls
+                .iter()
+                .map(|(id, value)| ((*id).to_owned(), *value))
+                .collect();
+            recipe.steps_with(Micros((seconds * 1_000_000.0) as i64), &controls)[0].values
+        };
+        // Defaults: the curve as written, green at its default.
+        assert!((at(0.5, &[])[0] - 0.25).abs() < 1e-5);
+        assert!((at(0.5, &[])[2] - 0.5).abs() < 1e-5);
+        assert_eq!(
+            recipe.steps_at(Micros(500_000)),
+            recipe.steps_with(Micros(500_000), &recipe.default_controls())
+        );
+        // Twice as fast reaches the same value in half the time.
+        assert!((at(0.25, &[("speed", 2.0)])[0] - 0.25).abs() < 1e-5);
+        // A speed past its range is kept to it.
+        assert_eq!(at(0.1, &[("speed", 100.0)]), at(0.1, &[("speed", 3.0)]));
+        // Scaled, and kept to the parameter's own range.
+        assert!((at(0.5, &[("strength", 2.0)])[0] - 0.5).abs() < 1e-5);
+        assert!((at(1.0, &[("strength", 4.0)])[0] - 1.0).abs() < 1e-5);
+        assert!((at(0.5, &[("green", 0.1)])[2] - 0.1).abs() < 1e-5);
+    }
+
+    #[test]
+    fn broken_controls_are_refused() {
+        for control in [
+            r#"{"id":"Speed","name":"S","default":1,"min":0.5,"max":2,"speed":true}"#,
+            r#"{"id":"s","name":"S","default":3,"min":0.5,"max":2}"#,
+            r#"{"id":"s","name":"S","default":1,"min":0,"max":2,"speed":true}"#,
+            r#"{"id":"s","name":"S","default":1,"min":0,"max":2,"scale":[[1,"amount"]]}"#,
+            r#"{"id":"s","name":"S","default":1,"min":0,"max":2,"set":[[0,"nothing"]]}"#,
+            r#"{"id":"s","name":" ","default":1,"min":0,"max":2}"#,
+        ] {
+            let text = format!(
+                r#"{{"version":1,"id":"a","name":"A","controls":[{control}],"passes":[{{"block":"flash"}}]}}"#
+            );
+            assert!(
+                matches!(read(&text), Err(RecipeError::Control(_))),
+                "{control}"
+            );
+        }
+        let twice = r#"{"id":"s","name":"S","default":1,"min":0,"max":2}"#;
+        let text = format!(
+            r#"{{"version":1,"id":"a","name":"A","controls":[{twice},{twice}],"passes":[{{"block":"flash"}}]}}"#
+        );
+        assert!(matches!(read(&text), Err(RecipeError::Control(_))));
     }
 
     #[test]

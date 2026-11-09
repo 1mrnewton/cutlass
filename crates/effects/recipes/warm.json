@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "id": "warm",
+  "name": "Warm",
+  "category": "Basic",
+  "preview": "beach",
+  "controls": [
+    {"id": "amount", "name": "Amount", "default": 0.12, "min": 0, "max": 0.5, "unit": "percent", "set": [[0, "amount"]]}
+  ],
+  "passes": [
+    {"block": "flash", "params": {"amount": 0.12, "red": 1, "green": 0.6, "blue": 0.2}},
+    {"block": "grade", "params": {"saturation": 1.1}}
+  ]
+}

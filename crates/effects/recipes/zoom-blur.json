@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "id": "zoom-blur",
+  "name": "Zoom Blur",
+  "category": "Blur",
+  "preview": "road",
+  "controls": [
+    {"id": "blur", "name": "Blur", "default": 1, "min": 0, "max": 3, "unit": "percent", "scale": [[0, "amount"]]}
+  ],
+  "passes": [
+    { "block": "zoom_blur", "params": {"amount": 0.15} }
+  ]
+}

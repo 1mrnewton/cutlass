@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "diamond-open",
+  "name": "Diamond Open",
+  "category": "Shape",
+  "cross": {"kind": 5, "soft": 0.02}
+}

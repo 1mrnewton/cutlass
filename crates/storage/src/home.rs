@@ -21,6 +21,8 @@ const PROXIES: &str = "Proxies";
 const MODELS: &str = "Models";
 const LOGS: &str = "Logs";
 const SETTINGS: &str = "settings.json";
+const PRESETS: &str = "Presets";
+const TEXT_PRESETS: &str = "text.json";
 
 /// The Cutlass root and the folders under it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -119,6 +121,13 @@ impl Home {
     #[must_use]
     pub fn settings_file(&self) -> PathBuf {
         self.root.join(SETTINGS)
+    }
+
+    /// The looks saved with a text's "Save as preset". Its folder is made
+    /// when the first look is saved.
+    #[must_use]
+    pub fn text_presets_file(&self) -> PathBuf {
+        self.root.join(PRESETS).join(TEXT_PRESETS)
     }
 
     fn folders(&self) -> [PathBuf; 6] {
@@ -243,6 +252,10 @@ mod tests {
         assert_eq!(home.models(), root.join("Models"));
         assert_eq!(home.logs(), root.join("Logs"));
         assert_eq!(home.settings_file(), root.join("settings.json"));
+        assert_eq!(
+            home.text_presets_file(),
+            root.join("Presets").join("text.json")
+        );
     }
 
     #[test]

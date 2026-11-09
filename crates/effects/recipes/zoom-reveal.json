@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "id": "zoom-reveal",
+  "name": "Zoom Reveal",
+  "category": "Reveal",
+  "preview": "portrait",
+  "poster": 0.3,
+  "controls": [
+    {"id": "speed", "name": "Speed", "default": 1, "min": 0.25, "max": 3, "unit": "times", "speed": true},
+    {"id": "soft", "name": "Edge", "default": 0.06, "min": 0, "max": 0.5, "unit": "percent", "set": [[1, "soft"]]}
+  ],
+  "passes": [
+    {"block": "transform", "params": {"scale": {"keys": [[0, 1.4], [0.6, 1]]}}},
+    {"block": "reveal", "params": {"progress": {"keys": [[0, 0], [0.6, 1]]}, "kind": 1, "soft": 0.06}}
+  ]
+}

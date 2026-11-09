@@ -3,6 +3,8 @@
 mod audio;
 mod cf;
 mod image;
+#[cfg(target_os = "macos")]
+mod menu;
 mod metal;
 #[cfg(target_os = "macos")]
 mod open;
@@ -16,6 +18,8 @@ use cutlass_decode::{CodecId, DecodeFactory};
 use cutlass_encode::EncodeFactory;
 
 pub use image::{decode_file, encode_file};
+#[cfg(target_os = "macos")]
+pub use menu::menu_keys_shown_only;
 pub use metal::import_surface;
 #[cfg(target_os = "macos")]
 pub use open::{listen_for_opened_files, take_opened_files, wake_on_opened_files};
@@ -87,7 +91,7 @@ const VIDEO: [CodecId; 9] = [
     CodecId::Prores,
 ];
 
-const AUDIO: [CodecId; 8] = [
+const AUDIO: [CodecId; 9] = [
     CodecId::Aac,
     CodecId::Opus,
     CodecId::Mp3,
@@ -96,6 +100,7 @@ const AUDIO: [CodecId; 8] = [
     CodecId::Vorbis,
     CodecId::Alac,
     CodecId::Ac3,
+    CodecId::Eac3,
 ];
 
 const STILL: [CodecId; 4] = [CodecId::Jpeg, CodecId::Png, CodecId::Webp, CodecId::Gif];

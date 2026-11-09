@@ -154,7 +154,7 @@ fn tool_list() -> Vec<Value> {
 
 /// Tools whose arguments are a JSON object rather than one `input` text.
 pub(crate) fn takes_object(tool: &str) -> bool {
-    matches!(tool, "draft.apply" | "sandbox.run")
+    matches!(tool, "draft.apply" | "sandbox.run" | "track.start")
 }
 
 pub(crate) fn input_schema(tool: &str) -> Value {
@@ -170,6 +170,39 @@ pub(crate) fn input_schema(tool: &str) -> Value {
                 "input": { "description": "Any JSON value the script reads as `input`." },
             },
             "required": ["source"],
+        });
+    }
+    if tool == "track.start" {
+        return json!({
+            "type": "object",
+            "properties": {
+                "target": { "type": "string", "description": "The video clip's id." },
+                "at_us": {
+                    "type": "integer",
+                    "description": "The timeline time the box is on, in microseconds.",
+                },
+                "box": {
+                    "type": "array",
+                    "items": { "type": "number" },
+                    "minItems": 4,
+                    "maxItems": 4,
+                    "description": "x0, y0, x1, y1: two opposite corners in canvas units, \
+                        as clip positions are (0 the middle, 1 half the canvas, y up).",
+                },
+                "mode": { "type": "string", "enum": ["object", "plane"] },
+                "followers": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "The video, sticker or text clips that move with it.",
+                },
+                "masks": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "The video or sticker clips whose mask moves with it \
+                        instead; a clip with no mask gets a box. The target may be one.",
+                },
+            },
+            "required": ["target", "at_us", "box"],
         });
     }
     if tool == "draft.apply" {
@@ -212,6 +245,7 @@ fn input_hint(tool: &str) -> &'static str {
         "media.probe" => "A file path.",
         "speech.start" => "<start_us> <duration_us>",
         "speech.poll" => "The job id speech_start returned.",
+        "track.poll" => "The job id track_start returned.",
         "catalog.search" => "Words to search for.",
         "package.ensure" => "A package id.",
         "export.start" => "new <path> | replace <path>",

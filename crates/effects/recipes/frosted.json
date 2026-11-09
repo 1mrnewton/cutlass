@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "id": "frosted",
+  "name": "Frosted",
+  "category": "Blur",
+  "preview": "flowers",
+  "controls": [
+    {"id": "blur", "name": "Blur", "default": 1, "min": 0, "max": 3, "unit": "percent", "scale": [[0, "radius"]]},
+    {"id": "frost", "name": "Frost", "default": 1, "min": 0, "max": 3, "unit": "percent", "scale": [[1, "amount"]]}
+  ],
+  "passes": [
+    {"block": "blur", "params": {"radius": 0.012}},
+    {"block": "noise", "params": {"amount": 0.15, "seed": 3}},
+    {"block": "grade", "params": {"brightness": 0.08, "saturation": 0.8}}
+  ]
+}

@@ -2,7 +2,8 @@ use serde::{Deserialize, Serialize};
 
 use cutlass_model::{
     AnimType, CommonKeyframeGroup, Crop, FreezeInfo, MaterialAudio, MaterialId, MaterialTransition,
-    MaterialVideo, Micros, Segment, SegmentId, SpeedPoint, TrackId, TrackType, WordColumns,
+    MaterialVideo, Micros, Segment, SegmentId, ShapeKind, ShapePoint, SpeedPoint, TimeRange,
+    TrackId, TrackType, WordColumns,
 };
 
 /// A media record stored in the library. A segment places it later.
@@ -13,6 +14,17 @@ pub enum ImportedMedium {
     Video(Box<MaterialVideo>),
     /// A sound. Its track type is supplied by the import, not by lane category.
     Audio(Box<MaterialAudio>),
+}
+
+/// One timed caption a subtitle file brings in.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SubtitleCue {
+    pub segment_id: SegmentId,
+    pub material_id: MaterialId,
+    /// Where the caption sits on the timeline, in microseconds.
+    pub target: TimeRange,
+    /// Word times are milliseconds from the start of `target`.
+    pub words: WordColumns,
 }
 
 /// Which edge of a segment a trim moves.
@@ -73,14 +85,52 @@ pub enum Request {
     },
     /// Place one caption for `source_id` and store its words.
     ///
-    /// The caption uses the source clip's timeline range. `track_id` is created
-    /// when it is missing. Word times are milliseconds on that range.
+    /// The caption uses the source clip's timeline range, or `span` inside
+    /// it, so one transcript can be placed as a caption per line. `track_id`
+    /// is created when it is missing. Word times are milliseconds on the
+    /// caption's own range.
     AddCaption {
         source_id: SegmentId,
         track_id: TrackId,
         segment_id: SegmentId,
         material_id: MaterialId,
         words: WordColumns,
+        /// Boxed, so a request stays small.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        span: Option<Box<TimeRange>>,
+        /// The font file the caption is set in, as `AddText`'s `face`.
+        #[serde(default)]
+        face: String,
+    },
+    /// Place subtitle cues as captions on a new text lane `track_id`.
+    ///
+    /// The lane is flagged as subtitles and each cue becomes a caption clip
+    /// with its own words. An existing `track_id`, no cues, or cues that
+    /// overlap are refused, and the draft stays as it was.
+    AddSubtitles {
+        track_id: TrackId,
+        cues: Vec<SubtitleCue>,
+        /// The font file the captions are set in, as `AddText`'s `face`.
+        #[serde(default)]
+        face: String,
+    },
+    /// Place one caption on the lane of caption `like`, looking like it.
+    ///
+    /// The new caption copies `like`'s text look and its place on the
+    /// canvas, then takes `cue`'s words. `like` must be a caption on an
+    /// unlocked text lane, and the cue must fit beside the lane's clips.
+    InsertCaption { like: SegmentId, cue: SubtitleCue },
+    /// Give the clip `source_id` was heard from new caption lines: every
+    /// caption linked to it on `like`'s lane comes off, and each line is
+    /// placed there looking like `like`, linked to `source_id`. `like` must
+    /// be one of those captions.
+    RecaptionClip {
+        source_id: SegmentId,
+        like: SegmentId,
+        lines: Vec<SubtitleCue>,
+        /// The font file a line takes when `like` has none.
+        #[serde(default)]
+        face: String,
     },
     /// Place the picture's sound on an audio clip linked to `source_id`.
     ///
@@ -173,6 +223,56 @@ pub enum Request {
     },
     /// Store the crop quad. Ratio and scale stay.
     SetCrop { segment_id: SegmentId, crop: Crop },
+    /// Steady a video clip at `level` (1 cuts least, 2 recommended, 3 most
+    /// stable), or stop at 0 or below. The kept camera path stays.
+    SetStable { segment_id: SegmentId, level: i64 },
+    /// Enhance a video clip's quality at `level` (1 HD, 2 UHD), or stop at
+    /// 0 or below. The enhanced copy is made apart from the draft.
+    SetEnhance { segment_id: SegmentId, level: i64 },
+    /// Reduce a video clip's noise at `level` (1 Weak, 2 Strong), or stop
+    /// at 0 or below. The denoised copy is made apart from the draft.
+    SetDenoise { segment_id: SegmentId, level: i64 },
+    /// Fill a video clip with frames made between its own, to `fps` frames
+    /// a second (30, 50 or 60) however slow it plays, or stop at 0 or
+    /// below. The filled copy is made apart from the draft.
+    SetInterpolate { segment_id: SegmentId, fps: i64 },
+    /// Light a video clip again with the preset `preset` at `strength` (0
+    /// to 1), or stop with an empty preset. The Custom light takes `color`
+    /// (`#rrggbb`, empty for its default) and `angle` (degrees, 0 from the
+    /// right, 90 from above). The depth it is lit from is made apart from
+    /// the draft.
+    SetRelight {
+        segment_id: SegmentId,
+        preset: String,
+        strength: f64,
+        color: String,
+        angle: f64,
+    },
+    /// Cut a video clip to `ratio`, one of `Reframe::RATIOS`, following
+    /// its subject, holding as still as `stability` (1 Flexible, 2
+    /// Default, 3 Stable) and following as fast as `speed` (1 Fast, 2
+    /// Default, 3 Slow); or stop with an empty ratio. Where the subject is
+    /// is found apart from the draft.
+    SetReframe {
+        segment_id: SegmentId,
+        ratio: String,
+        stability: i64,
+        speed: i64,
+    },
+    /// Blur a video clip along how things move through it, or stop when
+    /// `on` is false. `blur` is the blur's length as a share of a frame's
+    /// time and `blend` the share of the sharp frame mixed back in, both 0
+    /// to 1; `direction` is 0 both ways, 1 forward or 2 backward; `times`
+    /// is 1, 2, 4 or 6 frames made across each blur. The blurred copy is
+    /// made apart from the draft.
+    SetMotionBlur {
+        segment_id: SegmentId,
+        on: bool,
+        blur: f64,
+        blend: f64,
+        direction: i64,
+        times: i64,
+    },
     /// Replace the text material's string. Word columns stay as stored.
     SetTextContent {
         segment_id: SegmentId,
@@ -190,12 +290,23 @@ pub enum Request {
         color: String,
         face: String,
     },
-    /// Store left, center, or right. An empty line width takes `line_width`.
+    /// Store left, center, or right across, or top, middle, or bottom down a
+    /// vertical column (3 to 5). An empty line width takes `line_width`, and
+    /// so does turning the text vertical or back.
     SetTextAlign {
         segment_id: SegmentId,
         alignment: i32,
         face: String,
         line_width: f64,
+    },
+    /// Turn bold, italic and underline on or off over the whole text. An
+    /// empty face path is filled.
+    SetTextPattern {
+        segment_id: SegmentId,
+        bold: bool,
+        italic: bool,
+        underline: bool,
+        face: String,
     },
     /// Store extra space between letters, as a fraction of the text size.
     SetLetterSpacing {
@@ -265,6 +376,14 @@ pub enum Request {
         segment_id: SegmentId,
         style: String,
     },
+    /// Record the caption template the caption is styled with, by its id
+    /// and name, or take the record off when `resource_id` is empty. Its
+    /// look is set by the requests that go with it.
+    SetCaptionTemplate {
+        segment_id: SegmentId,
+        resource_id: String,
+        name: String,
+    },
     /// Mark word `word` of the caption as a keyword, drawn in the style's
     /// spoken look while it shows, or take the mark off.
     SetCaptionKeyword {
@@ -285,6 +404,68 @@ pub enum Request {
         duration: Micros,
         content: String,
         face: String,
+    },
+    /// Place a new `kind` shape from `start` for `duration` on `track_id`,
+    /// a sticker row made when it is missing.
+    AddShape {
+        track_id: TrackId,
+        segment_id: SegmentId,
+        material_id: MaterialId,
+        start: Micros,
+        duration: Micros,
+        kind: ShapeKind,
+    },
+    /// Place a shape drawn with the pen through `points`, in canvas pixels
+    /// from the canvas middle with y up, from `start` for `duration` on
+    /// `track_id`. The clip sits where the drawing was. A closed path is
+    /// filled; an open one is a line.
+    DrawShape {
+        track_id: TrackId,
+        segment_id: SegmentId,
+        material_id: MaterialId,
+        start: Micros,
+        duration: Micros,
+        points: Vec<ShapePoint>,
+        closed: bool,
+    },
+    /// Make the shape `width` by `height` canvas pixels. Its points are
+    /// stretched to the new size; the clip's scale stays.
+    SetShapeSize {
+        segment_id: SegmentId,
+        width: f64,
+        height: f64,
+    },
+    /// Fill the shape with `color` at `opacity` from 0 to 1. An empty color
+    /// takes the fill off.
+    SetShapeFill {
+        segment_id: SegmentId,
+        color: String,
+        opacity: f64,
+    },
+    /// Stroke the shape's outline `width` canvas pixels wide in `color` at
+    /// `opacity`, solid (0), dashed (1) or dotted (2). A width of 0 takes
+    /// the stroke off.
+    SetShapeStroke {
+        segment_id: SegmentId,
+        color: String,
+        width: f64,
+        opacity: f64,
+        style: i32,
+    },
+    /// Round the shape's corners by `radius` canvas pixels: one value for
+    /// every corner, or one per corner. Zeros take the rounding off.
+    SetShapeCorners {
+        segment_id: SegmentId,
+        radius: Vec<f64>,
+    },
+    /// Cast a `color` shadow `distance` canvas pixels away at `angle`
+    /// degrees, at `opacity`. An opacity of 0 takes the shadow off.
+    SetShapeShadow {
+        segment_id: SegmentId,
+        color: String,
+        distance: f64,
+        angle: f64,
+        opacity: f64,
     },
     /// Place the bundled effect `effect_id`, such as `recipe/shake`, from
     /// `start` for `duration`. `track_id` is created as an effect row when
@@ -388,6 +569,30 @@ pub enum Request {
         material_id: MaterialId,
         mask: Option<cutlass_effects::Mask>,
     },
+    /// Cut the video clip down to `selection`, the object click-to-select
+    /// found, or take its selection off with `None`.
+    SetSelection {
+        segment_id: SegmentId,
+        material_id: MaterialId,
+        selection: Option<cutlass_effects::Selection>,
+    },
+    /// Make `followers` (video, sticker or text clips) follow the video clip
+    /// `target` along `path`, the target's corners on the canvas frame by
+    /// frame. Each follower keeps its offset from the target at `anchor`,
+    /// the time the box was drawn at. The path is kept as the
+    /// `video_tracking` record `tracking_id`. A clip in `masks` has its
+    /// mask follow instead.
+    Track {
+        target: SegmentId,
+        followers: Vec<SegmentId>,
+        tracking_id: MaterialId,
+        anchor: Micros,
+        path: cutlass_model::TrackPath,
+        /// Clips whose mask follows instead, each with the path in its own
+        /// frame (-1 to 1, y up).
+        #[serde(default)]
+        masks: Vec<(SegmentId, cutlass_model::TrackPath)>,
+    },
     /// Limit the clip's colour work, or an adjustment layer, to `mask`, or
     /// take that limit off with `None`.
     SetColorMask {
@@ -412,6 +617,16 @@ pub enum Request {
         material_id: MaterialId,
         value: f64,
     },
+    /// Set the control `control` (such as `speed`) of the recipe effect the
+    /// clip uses to `value`, inside the control's range. When another clip
+    /// uses that material too, a copy named `material_id` takes its place on
+    /// this clip only.
+    SetEffectControl {
+        segment_id: SegmentId,
+        material_id: MaterialId,
+        control: String,
+        value: f64,
+    },
     /// Replace the segment's keyframe groups.
     SetKeyframes {
         segment_id: SegmentId,
@@ -423,7 +638,21 @@ pub enum Request {
         segment_id: SegmentId,
         offset: Micros,
     },
-    /// Remove every key at `offset` from the clip's start.
+    /// Key each named setting at `offset` from the clip's start: the
+    /// volume (`KFTypeVolume`) or the mask (`KFTypeCommonMask*`), in the
+    /// setting's own units. A key there takes the new value.
+    KeyValues {
+        segment_id: SegmentId,
+        offset: Micros,
+        values: Vec<(String, f64)>,
+    },
+    /// Take the keys on the named settings at `offset` off.
+    UnkeyValues {
+        segment_id: SegmentId,
+        offset: Micros,
+        properties: Vec<String>,
+    },
+    /// Remove the pose keys at `offset` from the clip's start.
     RemoveKeyframe {
         segment_id: SegmentId,
         offset: Micros,
@@ -481,6 +710,14 @@ pub enum Request {
     /// Add an empty lane. Video and mixed lanes are overlays above the main track.
     /// Audio is inserted under the main track. This does not place a segment.
     InsertTrack { track_id: TrackId, kind: TrackType },
+    /// Add an empty lane at `index` in the track list, which is the row order.
+    /// Audio goes under the main track and every other kind above it; an
+    /// index outside the kind's block, or past the end, is refused.
+    InsertTrackAt {
+        track_id: TrackId,
+        kind: TrackType,
+        index: usize,
+    },
     /// Take a lane and its clips off the draft. The main track and a locked
     /// track stay. Each clip leaves as a delete would take it.
     RemoveTrack { track_id: TrackId },

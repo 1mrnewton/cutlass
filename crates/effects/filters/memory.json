@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "memory",
+  "name": "Memory",
+  "category": "Vintage",
+  "adjust": {"fade": 0.35, "clarity": -0.3, "brilliance": 0.2, "temperature": 0.15, "saturation": -0.15}
+}

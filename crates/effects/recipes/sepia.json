@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "id": "sepia",
+  "name": "Sepia",
+  "category": "Retro",
+  "preview": "portrait",
+  "controls": [
+    {"id": "amount", "name": "Amount", "default": 0.3, "min": 0, "max": 1, "unit": "percent", "set": [[1, "amount"]]}
+  ],
+  "passes": [
+    { "block": "grade", "params": {"saturation": 0, "contrast": 1.05} },
+    { "block": "flash", "params": {"amount": 0.3, "red": 1, "green": 0.75, "blue": 0.45} }
+  ]
+}

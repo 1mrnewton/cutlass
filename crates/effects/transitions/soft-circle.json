@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "soft-circle",
+  "name": "Soft Circle",
+  "category": "Shape",
+  "duration": 0.8,
+  "cross": {"kind": 1, "soft": 0.5}
+}

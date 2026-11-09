@@ -1,21 +1,36 @@
-//! The Ogg Opus muxer.
+//! The Ogg Opus and Ogg Vorbis muxer.
 //!
 //! Pages go to the writer as they fill, so a long export does not hold its
 //! packets in memory. The first packet of any stream writes every stream's
-//! beginning-of-stream page (`OpusHead` alone, granule 0), then every
-//! stream's `OpusTags` page (granule 0), as RFC 3533 grouping and RFC 7845
-//! section 3 require. Streams are added and configured before that.
+//! beginning-of-stream page (`OpusHead` or the Vorbis identification
+//! header, alone, granule 0), then every stream's other headers, as RFC
+//! 3533 grouping, RFC 7845 section 3, and Vorbis I section A.2 require.
+//! `OpusTags` takes one page. The Vorbis comment and setup headers may span
+//! pages, and the setup header ends its page; a header page that completes
+//! a packet has granule 0, and one that completes none -1. Streams are
+//! added and configured before that.
 //!
 //! Page policy: an audio page is closed before the next packet once its
-//! body holds [`MUX_PAGE_BYTES`] bytes or its completed packets span
-//! [`MUX_PAGE_SAMPLES`] samples (one second), and whenever its 255 lacing
-//! values are used. A packet that does not fit continues on the next page.
-//! A page's granule position is the end time (pts plus duration) of the
-//! last packet completed on it, or -1 when none completes. The last page of
-//! each stream is written by [`Mux::finish`] with the end-of-stream flag, so
-//! a final packet shorter than its TOC duration becomes RFC 7845 end
-//! trimming. A stream whose packets last less than its pre-skip is refused
-//! at finish, because no reader can play it.
+//! body holds [`MUX_PAGE_BYTES`] bytes or its completed packets span one
+//! second of samples, and whenever its 255 lacing values are used. A packet
+//! that does not fit continues on the next page. A page's granule position
+//! is the end time (pts plus duration) of the last packet completed on it,
+//! or -1 when none completes. The last page of each stream is written by
+//! [`Mux::finish`] with the end-of-stream flag, so a final packet shorter
+//! than its natural duration (an Opus packet's TOC, or a quarter of each of
+//! a Vorbis packet's block and the block before) becomes end trimming. An
+//! Opus stream whose packets last less than its pre-skip is refused at
+//! finish, because no reader can play it.
+//!
+//! A Vorbis stream's timescale is its sample rate. Its first packet has
+//! duration 0, as a Vorbis decoder returns nothing for it. A first packet
+//! read after a seek carries the duration it had after the block before
+//! it; that is taken too, and the stream starts where that packet ends,
+//! since no decoder returns those samples from this file. A stream may
+//! start before 0, as a stream copy cut mid-file does: its first audio page
+//! stays open until a packet ends at 0 or later, and section A.2 reads the
+//! samples before 0 from that page's granule. A stream whose first page
+//! would close before 0, at 255 lacing values, is refused.
 //!
 //! Serial numbers are deterministic: the first stream takes
 //! [`FIRST_SERIAL`] (or the value given to [`OggMux::with_first_serial`])
@@ -30,9 +45,10 @@ use cutlass_container::{
     TrackDuration, TrackId,
 };
 
-use crate::limits::{MAX_OPUS_PACKET_PER_STREAM, MUX_PAGE_BYTES, MUX_PAGE_SAMPLES, OPUS_RATE};
+use crate::limits::{MAX_OPUS_PACKET_PER_STREAM, MUX_PAGE_BYTES, OPUS_RATE};
 use crate::opus::{HEAD_MAGIC, OpusHead, OpusTags, packet_samples};
 use crate::page::{FLAG_BOS, FLAG_CONTINUED, FLAG_EOS, encode};
+use crate::vorbis::{self, VorbisComment, VorbisId, VorbisModes, split_config};
 
 /// Serial number of the first stream: the ASCII bytes `cutl`.
 pub const FIRST_SERIAL: u32 = 0x6375_746C;
@@ -40,14 +56,36 @@ pub const FIRST_SERIAL: u32 = 0x6375_746C;
 /// Vendor string written in `OpusTags`.
 pub const VENDOR: &str = "cutlass";
 
+/// The three Vorbis headers and the modes of the setup header.
+struct VorbisHeaders {
+    id: Vec<u8>,
+    comment: Vec<u8>,
+    setup: Vec<u8>,
+    modes: VorbisModes,
+}
+
+/// What a stream's mapping needs to write it.
+enum Mapping {
+    Opus {
+        head: Option<Vec<u8>>,
+        streams: u8,
+        pre_skip: u16,
+    },
+    Vorbis {
+        headers: Option<VorbisHeaders>,
+        /// Block size of the last packet written.
+        previous: Option<u32>,
+    },
+}
+
 /// One stream being written.
 struct Track {
     id: TrackId,
     serial: u32,
     channels: u16,
-    head: Option<Vec<u8>>,
-    streams: u8,
-    pre_skip: u16,
+    /// Samples per second: the stream's timescale.
+    rate: u32,
+    mapping: Mapping,
     sequence: u32,
     /// Lacing values and body of the page being filled.
     lacing: Vec<u8>,
@@ -56,11 +94,14 @@ struct Track {
     continued: bool,
     /// End of the last packet completed on this page, or -1.
     granule: i64,
+    /// A packet completes on this page.
+    completes: bool,
     /// Samples of packets completed on this page.
     page_samples: i64,
     /// End of the last packet written.
     next: Option<i64>,
-    /// The last packet was shorter than its TOC: only the final packet may be.
+    /// The last packet was shorter than its natural duration: only the
+    /// final packet may be.
     trimmed: bool,
     /// Sum of packet durations.
     sum: i64,
@@ -76,12 +117,20 @@ struct Track {
 impl Track {
     fn page_full(&self) -> bool {
         self.lacing.len() >= 255
-            || (self.granule != -1
-                && (self.body.len() >= MUX_PAGE_BYTES || self.page_samples >= MUX_PAGE_SAMPLES))
+            || (self.completes
+                && self.granule >= 0
+                && (self.body.len() >= MUX_PAGE_BYTES || self.page_samples >= i64::from(self.rate)))
+    }
+
+    const fn mapping_name(&self) -> &'static str {
+        match self.mapping {
+            Mapping::Opus { .. } => "Opus",
+            Mapping::Vorbis { .. } => "Vorbis",
+        }
     }
 }
 
-/// Writes Ogg Opus.
+/// Writes Ogg Opus and Ogg Vorbis.
 pub struct OggMux<W: Write> {
     writer: W,
     limits: Limits,
@@ -156,22 +205,31 @@ impl<W: Write> OggMux<W> {
     }
 
     /// Writes every stream's beginning-of-stream page, then every stream's
-    /// comment header page.
+    /// other header pages.
     fn write_headers(&mut self) -> Result<(), MuxError> {
         if self.headers {
             return Ok(());
         }
         let mut pages = Vec::new();
         for track in &mut self.tracks {
-            let Some(head) = &track.head else {
-                return Err(rejected(format!(
-                    "track {} has no OpusHead: give it in the stream's extradata or set_config",
-                    track.id.get()
-                )));
+            let first = match &track.mapping {
+                Mapping::Opus {
+                    head: Some(head), ..
+                } => head,
+                Mapping::Vorbis {
+                    headers: Some(headers),
+                    ..
+                } => &headers.id,
+                Mapping::Opus { head: None, .. } | Mapping::Vorbis { headers: None, .. } => {
+                    return Err(missing_headers(track));
+                }
             };
-            let lacing = crate::page::lacing_for(head.len());
-            pages.push(encode(FLAG_BOS, 0, track.serial, 0, &lacing, head));
+            let lacing = crate::page::lacing_for(first.len());
+            pages.push(encode(FLAG_BOS, 0, track.serial, 0, &lacing, first));
             track.sequence = 1;
+        }
+        for page in pages {
+            self.emit(&page)?;
         }
         let tags = OpusTags {
             vendor: VENDOR.to_owned(),
@@ -179,13 +237,22 @@ impl<W: Write> OggMux<W> {
             cut: false,
         }
         .encode();
-        for track in &mut self.tracks {
-            let lacing = crate::page::lacing_for(tags.len());
-            pages.push(encode(0, 0, track.serial, track.sequence, &lacing, &tags));
-            track.sequence += 1;
-        }
-        for page in pages {
-            self.emit(&page)?;
+        for index in 0..self.tracks.len() {
+            let packets = match &self.tracks[index].mapping {
+                Mapping::Opus { .. } => vec![tags.clone()],
+                Mapping::Vorbis {
+                    headers: Some(headers),
+                    ..
+                } => vec![headers.comment.clone(), headers.setup.clone()],
+                Mapping::Vorbis { headers: None, .. } => Vec::new(),
+            };
+            for packet in &packets {
+                self.lay(index, packet, 0, 0)?;
+            }
+            self.flush_page(index, false)?;
+            let track = &mut self.tracks[index];
+            track.completed_pages = 0;
+            track.last_packet = None;
         }
         self.headers = true;
         Ok(())
@@ -201,10 +268,20 @@ impl<W: Write> OggMux<W> {
         if eos {
             flags |= FLAG_EOS;
         }
-        let granule = if eos && track.granule == -1 {
-            track.next.unwrap_or(0)
-        } else {
+        let granule = if track.completes {
+            if track.granule < 0 {
+                return Err(rejected(format!(
+                    "a page of Vorbis stream {} would end at {}, before 0; the stream starts at {}",
+                    track.id.get(),
+                    track.granule,
+                    track.first.unwrap_or(0)
+                )));
+            }
             track.granule
+        } else if eos {
+            track.next.unwrap_or(0).max(0)
+        } else {
+            -1
         };
         let page = encode(
             flags,
@@ -215,27 +292,35 @@ impl<W: Write> OggMux<W> {
             &track.body,
         );
         track.sequence = track.sequence.wrapping_add(1);
-        if track.granule != -1 {
+        if track.completes {
             track.completed_pages = track.completed_pages.saturating_add(1);
         }
         track.continued = track.lacing.last() == Some(&255);
         track.lacing.clear();
         track.body.clear();
         track.granule = -1;
+        track.completes = false;
         track.page_samples = 0;
         self.emit(&page)
     }
 
-    /// RFC 7845 section 4.5 reads the first audio page with a completed
-    /// packet, when it is also the last page, as starting at its granule
-    /// minus its samples, or at 0 when the granule is smaller. A stream
-    /// that starts after 0 and trims its end cannot say both on that one
-    /// page, so the packets before the trimmed one go on a page of their
-    /// own. One trimmed packet alone, starting after 0, cannot be written.
+    /// RFC 7845 section 4.5 and Vorbis I section A.2 read the first audio
+    /// page with a completed packet, when it is also the last page, as
+    /// starting at its granule minus its samples, or at 0 when the granule
+    /// is smaller. A stream that starts anywhere but 0 and trims its end
+    /// cannot say both on that one page, so the packets before the trimmed
+    /// one go on a page of their own. One trimmed packet alone, starting
+    /// after 0, cannot be written. A Vorbis stream that starts before 0 and
+    /// trims nothing ends on an empty page of its own.
     fn separate_trim_from_start(&mut self, index: usize) -> Result<(), MuxError> {
         let track = &mut self.tracks[index];
-        if track.completed_pages > 0 || !track.trimmed || track.first.is_none_or(|first| first == 0)
-        {
+        if track.completed_pages > 0 || track.first.is_none_or(|first| first == 0) {
+            return Ok(());
+        }
+        if !track.trimmed {
+            if track.first.is_some_and(|first| first < 0) && track.completes {
+                self.flush_page(index, false)?;
+            }
             return Ok(());
         }
         let Some((sequence, lacing_at, body_at, granule, samples)) = track.last_packet else {
@@ -245,7 +330,8 @@ impl<W: Write> OggMux<W> {
         // page or opens this one.
         if sequence != track.sequence || lacing_at == 0 {
             return Err(rejected(format!(
-                "Opus stream {} is one trimmed packet starting at {}; Ogg reads that as starting at 0",
+                "{} stream {} is one trimmed packet starting at {}; Ogg reads that as starting at 0",
+                track.mapping_name(),
                 track.id.get(),
                 track.first.unwrap_or(0)
             )));
@@ -255,12 +341,14 @@ impl<W: Write> OggMux<W> {
         let end = track.granule;
         let tail_samples = track.page_samples.saturating_sub(samples);
         track.granule = granule;
+        track.completes = true;
         track.page_samples = samples;
         self.flush_page(index, false)?;
         let track = &mut self.tracks[index];
         track.lacing = tail_lacing;
         track.body = tail_body;
         track.granule = end;
+        track.completes = true;
         track.page_samples = tail_samples;
         Ok(())
     }
@@ -295,18 +383,21 @@ impl<W: Write> OggMux<W> {
             offset += len;
             if values.peek().is_none() {
                 track.granule = end;
+                track.completes = true;
                 track.page_samples = track.page_samples.saturating_add(samples);
             }
         }
         Ok(())
     }
 
-    fn check_packet(&self, index: usize, packet: &Packet) -> Result<(i64, i64, i64), MuxError> {
+    /// The packet's start, duration, natural duration, and, for Vorbis,
+    /// block size.
+    fn check_packet(&self, index: usize, packet: &Packet) -> Result<Checked, MuxError> {
         let track = &self.tracks[index];
-        if packet.timescale().ticks_per_second() != OPUS_RATE {
+        if packet.timescale().ticks_per_second() != track.rate {
             return Err(MuxError::TimescaleMismatch {
                 packet: packet.timescale().ticks_per_second(),
-                stream: OPUS_RATE,
+                stream: track.rate,
             });
         }
         let timestamp = packet.timestamp();
@@ -316,27 +407,68 @@ impl<W: Write> OggMux<W> {
             return Err(MuxError::MissingTimestamp);
         };
         let size = u64::try_from(packet.bytes().len()).unwrap_or(u64::MAX);
-        let cap = MAX_OPUS_PACKET_PER_STREAM
-            .saturating_mul(u64::from(track.streams))
-            .min(self.limits.max_packet_bytes);
+        let cap = match &track.mapping {
+            Mapping::Opus { streams, .. } => MAX_OPUS_PACKET_PER_STREAM
+                .saturating_mul(u64::from(*streams))
+                .min(self.limits.max_packet_bytes),
+            Mapping::Vorbis { .. } => self.limits.max_packet_bytes,
+        };
         if size > cap {
             return Err(MuxError::HostileSize {
                 declared: size,
                 limit: cap,
             });
         }
-        let Some(samples) = packet_samples(packet.bytes()) else {
-            return Err(rejected("an Opus packet has a malformed TOC".to_owned()));
+        let (samples, block) = match &track.mapping {
+            Mapping::Opus { .. } => {
+                let Some(samples) = packet_samples(packet.bytes()) else {
+                    return Err(rejected("an Opus packet has a malformed TOC".to_owned()));
+                };
+                (i64::from(samples), None)
+            }
+            Mapping::Vorbis { headers, previous } => {
+                let Some(headers) = headers else {
+                    return Err(missing_headers(track));
+                };
+                let Some(block) = headers.modes.block(packet.bytes()) else {
+                    return Err(rejected(
+                        "a Vorbis packet is empty, a header, or names a mode the setup lacks"
+                            .to_owned(),
+                    ));
+                };
+                (vorbis::packet_samples(*previous, block), Some(block))
+            }
         };
-        let samples = i64::from(samples);
-        if duration > samples {
+        // A first Vorbis packet demuxed after a seek is stamped with what
+        // it returns after the block before it, short or long.
+        let lead = match (&track.mapping, block, track.next) {
+            (
+                Mapping::Vorbis {
+                    headers: Some(headers),
+                    ..
+                },
+                Some(block),
+                None,
+            ) if duration > 0
+                && headers
+                    .modes
+                    .blocksizes
+                    .iter()
+                    .any(|&before| vorbis::packet_samples(Some(before), block) == duration) =>
+            {
+                duration
+            }
+            _ => 0,
+        };
+        if duration - lead > samples {
             return Err(rejected(format!(
-                "packet duration {duration} is longer than its TOC's {samples} samples"
+                "packet duration {duration} is longer than its natural {samples} samples"
             )));
         }
         if track.trimmed {
             return Err(rejected(
-                "only the last packet of a stream may be shorter than its TOC".to_owned(),
+                "only the last packet of a stream may be shorter than its natural duration"
+                    .to_owned(),
             ));
         }
         match track.next {
@@ -347,15 +479,21 @@ impl<W: Write> OggMux<W> {
             }
             Some(next) if pts > next => {
                 return Err(rejected(format!(
-                    "packet at {pts} leaves a gap after {next}; Ogg Opus needs packets that fill it"
+                    "packet at {pts} leaves a gap after {next}; Ogg needs packets that fill it"
                 )));
             }
-            None if pts < 0 => {
+            None if pts < 0 && matches!(track.mapping, Mapping::Opus { .. }) => {
                 return Err(rejected(format!("first packet starts at {pts}")));
             }
             _ => {}
         }
-        Ok((pts, duration, samples))
+        Ok(Checked {
+            pts,
+            duration,
+            samples,
+            block,
+            lead,
+        })
     }
 
     fn store_config(&mut self, index: usize, config: &[u8]) -> Result<(), MuxError> {
@@ -366,18 +504,35 @@ impl<W: Write> OggMux<W> {
                 limit: self.limits.max_extradata_bytes,
             });
         }
-        let head = opus_head(config)?;
-        let parsed = OpusHead::parse(&head, self.tracks[index].serial)
-            .map_err(|error| rejected(error.to_string()))?;
-        if u16::from(parsed.channels) != self.tracks[index].channels {
-            return Err(rejected(format!(
-                "OpusHead has {} channels and the stream has {}",
-                parsed.channels, self.tracks[index].channels
-            )));
+        let track = &mut self.tracks[index];
+        match &mut track.mapping {
+            Mapping::Opus {
+                head,
+                streams,
+                pre_skip,
+            } => {
+                let bytes = opus_head(config)?;
+                let parsed = OpusHead::parse(&bytes, track.serial)
+                    .map_err(|error| rejected(error.to_string()))?;
+                if u16::from(parsed.channels) != track.channels {
+                    return Err(rejected(format!(
+                        "OpusHead has {} channels and the stream has {}",
+                        parsed.channels, track.channels
+                    )));
+                }
+                *streams = parsed.streams;
+                *pre_skip = parsed.pre_skip;
+                *head = Some(bytes);
+            }
+            Mapping::Vorbis { headers, .. } => {
+                *headers = Some(vorbis_headers(
+                    config,
+                    track.serial,
+                    track.channels,
+                    track.rate,
+                )?);
+            }
         }
-        self.tracks[index].streams = parsed.streams;
-        self.tracks[index].pre_skip = parsed.pre_skip;
-        self.tracks[index].head = Some(head);
         Ok(())
     }
 
@@ -389,10 +544,10 @@ impl<W: Write> OggMux<W> {
             if duration.ticks < 0 {
                 return Err(MuxError::NegativeDuration);
             }
-            if duration.timescale.ticks_per_second() != OPUS_RATE {
+            if duration.timescale.ticks_per_second() != track.rate {
                 return Err(MuxError::TimescaleMismatch {
                     packet: duration.timescale.ticks_per_second(),
-                    stream: OPUS_RATE,
+                    stream: track.rate,
                 });
             }
             if duration.ticks != track.sum {
@@ -402,12 +557,15 @@ impl<W: Write> OggMux<W> {
             }
             // RFC 7845 section 4.5: the pre-skip is decoded and dropped, so a
             // stream must last at least that long.
-            if track.next.is_some() && track.sum < i64::from(track.pre_skip) {
+            if let Mapping::Opus { pre_skip, .. } = track.mapping
+                && track.next.is_some()
+                && track.sum < i64::from(pre_skip)
+            {
                 return Err(rejected(format!(
                     "Opus stream {} lasts {} samples, less than its pre-skip of {}",
                     track.id.get(),
                     track.sum,
-                    track.pre_skip
+                    pre_skip
                 )));
             }
         }
@@ -451,6 +609,63 @@ fn opus_head(config: &[u8]) -> Result<Vec<u8>, MuxError> {
     Ok(head)
 }
 
+fn missing_headers(track: &Track) -> MuxError {
+    let what = match track.mapping {
+        Mapping::Opus { .. } => "OpusHead",
+        Mapping::Vorbis { .. } => "Vorbis id, comment, and setup headers",
+    };
+    rejected(format!(
+        "track {} has no {what}: give them in the stream's extradata or set_config",
+        track.id.get()
+    ))
+}
+
+/// A packet that passed [`OggMux::check_packet`].
+struct Checked {
+    pts: i64,
+    duration: i64,
+    /// The packet's natural duration.
+    samples: i64,
+    /// Vorbis: the packet's block size.
+    block: Option<u32>,
+    /// Vorbis: the duration of a first packet cut from the middle of a
+    /// stream, which no decoder of this file returns.
+    lead: i64,
+}
+
+/// The three Vorbis headers of a configuration, checked against the
+/// stream: Xiph lacing (Matroska, and `cutlass-ogg`'s demuxer), three
+/// 16-bit lengths, or the packets back to back. The comment packet is kept
+/// as given.
+fn vorbis_headers(
+    config: &[u8],
+    serial: u32,
+    channels: u16,
+    rate: u32,
+) -> Result<VorbisHeaders, MuxError> {
+    let Some([id, comment, setup]) = split_config(config) else {
+        return Err(rejected(
+            "codec configuration is not three Vorbis headers".to_owned(),
+        ));
+    };
+    let parsed = VorbisId::parse(&id, serial).map_err(|error| rejected(error.to_string()))?;
+    if u16::from(parsed.channels) != channels || parsed.sample_rate != rate {
+        return Err(rejected(format!(
+            "the Vorbis identification header has {} channels at {} Hz and the stream {channels} at {rate} Hz",
+            parsed.channels, parsed.sample_rate
+        )));
+    }
+    VorbisComment::parse(&comment, serial, false).map_err(|error| rejected(error.to_string()))?;
+    let modes =
+        VorbisModes::parse(&setup, &parsed, serial).map_err(|error| rejected(error.to_string()))?;
+    Ok(VorbisHeaders {
+        id,
+        comment,
+        setup,
+        modes,
+    })
+}
+
 fn rejected(message: String) -> MuxError {
     MuxError::Rejected { message }
 }
@@ -468,25 +683,48 @@ impl<W: Write> Mux for OggMux<W> {
                     .to_owned(),
             )));
         }
-        match stream.params.codec() {
-            StreamCodec::Known(CodecId::Opus) => {}
+        let (mapping, rate) = match stream.params.codec() {
+            StreamCodec::Known(CodecId::Opus) => (
+                Mapping::Opus {
+                    head: None,
+                    streams: 1,
+                    pre_skip: 0,
+                },
+                OPUS_RATE,
+            ),
+            StreamCodec::Known(CodecId::Vorbis) => {
+                let Some(rate) = stream.params.sample_rate().filter(|&rate| rate > 0) else {
+                    return Err(
+                        self.fail(rejected("a Vorbis stream needs a sample rate".to_owned()))
+                    );
+                };
+                (
+                    Mapping::Vorbis {
+                        headers: None,
+                        previous: None,
+                    },
+                    rate,
+                )
+            }
             StreamCodec::Unknown(unknown) => {
                 return Err(self.fail(MuxError::UnknownCodec(unknown.clone())));
             }
             StreamCodec::Known(other) => {
                 return Err(self.fail(rejected(format!(
-                    "this Ogg muxer writes the Opus mapping only, not {other:?}"
+                    "this Ogg muxer writes the Opus and Vorbis mappings only, not {other:?}"
                 ))));
             }
-        }
-        if stream.timescale.ticks_per_second() != OPUS_RATE {
+        };
+        if stream.timescale.ticks_per_second() != rate {
             return Err(self.fail(MuxError::TimescaleMismatch {
                 packet: stream.timescale.ticks_per_second(),
-                stream: OPUS_RATE,
+                stream: rate,
             }));
         }
         let Some(channels) = stream.params.channels() else {
-            return Err(self.fail(rejected("an Opus stream needs a channel count".to_owned())));
+            return Err(self.fail(rejected(
+                "an Ogg audio stream needs a channel count".to_owned(),
+            )));
         };
         let count = u32::try_from(self.tracks.len()).unwrap_or(u32::MAX);
         if count >= self.limits.max_tracks {
@@ -500,14 +738,14 @@ impl<W: Write> Mux for OggMux<W> {
             id,
             serial: self.first_serial.wrapping_add(count),
             channels,
-            head: None,
-            streams: 1,
-            pre_skip: 0,
+            rate,
+            mapping,
             sequence: 0,
             lacing: Vec::new(),
             body: Vec::new(),
             continued: false,
             granule: -1,
+            completes: false,
             page_samples: 0,
             next: None,
             trimmed: false,
@@ -531,7 +769,13 @@ impl<W: Write> Mux for OggMux<W> {
         let index = self
             .track_index(packet.stream())
             .map_err(|error| self.fail(error))?;
-        let (pts, duration, samples) = self
+        let Checked {
+            pts,
+            duration,
+            samples,
+            block,
+            lead,
+        } = self
             .check_packet(index, packet)
             .map_err(|error| self.fail(error))?;
         if let Err(error) = self.write_headers() {
@@ -543,10 +787,13 @@ impl<W: Write> Mux for OggMux<W> {
         }
         let track = &mut self.tracks[index];
         if track.next.is_none() {
-            track.first = Some(pts);
+            track.first = Some(pts.saturating_add(lead));
+        }
+        if let Mapping::Vorbis { previous, .. } = &mut track.mapping {
+            *previous = block;
         }
         track.next = Some(end);
-        track.trimmed = duration < samples;
+        track.trimmed = duration - lead < samples;
         track.sum = track.sum.saturating_add(duration);
         if self.last_time.is_some_and(|last| pts < last) {
             self.in_order = false;
@@ -591,8 +838,9 @@ impl<W: Write> Mux for OggMux<W> {
         self.status
     }
 
-    /// Stores the `OpusHead` (or an MP4 `dOps` body) an encoder hands over.
-    /// It must arrive before the first packet of any stream.
+    /// Stores the `OpusHead` (or an MP4 `dOps` body), or the three Vorbis
+    /// headers, an encoder hands over. It must arrive before the first
+    /// packet of any stream.
     fn set_config(&mut self, track: TrackId, config: &[u8]) -> Result<(), MuxError> {
         self.building()?;
         let index = self
@@ -600,7 +848,7 @@ impl<W: Write> Mux for OggMux<W> {
             .map_err(|error| self.fail(error))?;
         if self.headers {
             return Err(self.fail(rejected(
-                "the OpusHead page is already written; set the configuration before packets"
+                "the header pages are already written; set the configuration before packets"
                     .to_owned(),
             )));
         }

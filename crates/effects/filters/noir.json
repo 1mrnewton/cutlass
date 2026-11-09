@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "noir",
+  "name": "Noir",
+  "category": "Mono",
+  "adjust": {"saturation": -1.0, "contrast": 0.45, "blacks": -0.2, "vignette": 0.4}
+}

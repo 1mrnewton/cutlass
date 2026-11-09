@@ -23,12 +23,15 @@ cutlass-download = { path = "../../crates/download", version = "0.1.0", features
 cutlass-session = { path = "../../crates/session", version = "0.1.0" }
 cutlass-eval = { path = "../../crates/eval", version = "0.1.0" }
 cutlass-engine = { path = "../../crates/engine", version = "0.1.0" }
+cutlass-picture = { path = "../../crates/picture", version = "0.1.0" }
 cutlass-transcription = { path = "../../crates/transcription", version = "0.1.0" }
+cutlass-vision = { path = "../../crates/vision", version = "0.1.0" }
 cutlass-font = { path = "../../crates/font", version = "0.1.0" }
 cutlass-icons = { path = "../../crates/icons", version = "0.1.0" }
 cutlass-agent = { path = "../../crates/agent", version = "0.1.0", features = ["script"] }
 cutlass-settings = { path = "../../crates/settings", version = "0.1.0" }
 cutlass-logger = { path = "../../crates/logger", version = "0.1.0" }
+serde_json = "1.0.154"
 cutlass-licenses = { path = "../../crates/licenses", version = "0.1.0" }
 cutlass-renderer-software = { path = "../../crates/renderer-software", version = "0.1.0" }
 cutlass-render = { path = "../../crates/render", version = "0.1.0" }
@@ -96,4 +99,4 @@ pollster = "1.0"
 egui_kittest = { version = "=0.37.0", features = ["wgpu"] }
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 cutlass-color = { path = "../../crates/color", version = "0.1.0" }
-serde_json = "1.0.154"
+cutlass-motion = { path = "../../crates/motion", version = "0.1.0" }

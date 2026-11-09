@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "id": "data-blocks",
+  "name": "Data Blocks",
+  "category": "Glitch",
+  "preview": "city",
+  "controls": [
+    {"id": "speed", "name": "Speed", "default": 1, "min": 0.25, "max": 3, "unit": "times", "speed": true},
+    {"id": "intensity", "name": "Intensity", "default": 1, "min": 0, "max": 2, "unit": "percent", "scale": [[0, "amount"], [0, "shift"]]},
+    {"id": "size", "name": "Block size", "default": 0.06, "min": 0.02, "max": 0.3, "unit": "plain", "set": [[0, "size"]]},
+    {"id": "hue", "name": "Hue", "default": 0, "min": -180, "max": 180, "unit": "degrees", "set": [[1, "degrees"]]}
+  ],
+  "passes": [
+    {"block": "blocks", "params": {"amount": {"jitter": {"rate": 8, "from": 0.05, "to": 0.35, "seed": 102}}, "size": 0.06, "shift": 0.08, "seed": {"jitter": {"rate": 12, "from": 0, "to": 1000, "seed": 103}}, "color": 0.3}},
+    {"block": "hue"}
+  ]
+}

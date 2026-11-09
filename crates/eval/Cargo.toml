@@ -15,11 +15,14 @@ cutlass-generated = { path = "../generated", version = "0.1.0" }
 cutlass-lottie = { path = "../lottie", version = "0.1.0" }
 cutlass-captions = { path = "../captions", version = "0.1.0" }
 cutlass-effects = { path = "../effects", version = "0.1.0" }
+cutlass-motion = { path = "../motion", version = "0.1.0" }
+cutlass-store = { path = "../store", version = "0.1.0" }
 cutlass-picture = { path = "../picture", version = "0.1.0" }
 cutlass-gpu = { path = "../gpu", version = "0.1.0" }
 cutlass-codec = { path = "../codec", version = "0.1.0" }
 cutlass-color = { path = "../color", version = "0.1.0" }
 cutlass-decode = { path = "../decode", version = "0.1.0" }
+cutlass-encode = { path = "../encode", version = "0.1.0" }
 cutlass-logger = { path = "../logger", version = "0.1.0" }
 
 [dev-dependencies]
@@ -27,6 +30,7 @@ cutlass-session = { path = "../session", version = "0.1.0" }
 cutlass-container = { path = "../container", version = "0.1.0" }
 cutlass-pcm = { path = "../codecs/pcm", version = "0.1.0" }
 cutlass-png = { path = "../codecs/png", version = "0.1.0" }
+cutlass-jpeg = { path = "../codecs/jpeg", version = "0.1.0" }
 cutlass-riff = { path = "../containers/riff", version = "0.1.0" }
 cutlass-renderer-software = { path = "../renderer-software", version = "0.1.0" }
 cutlass-still = { path = "../containers/still", version = "0.1.0" }

@@ -68,9 +68,12 @@ magnet         MagnetIcon
 linkage        Link01Icon
 marker         Flag01Icon
 beat           MusicNote01Icon
+normalize      AudioWaveformIcon
+enhanceVoice   AiVoiceIcon
+reduceNoise    VolumeMinusIcon
 zoomIn         ZoomInAreaIcon
 zoomOut        ZoomOutAreaIcon
-zoomFit        FitToScreenIcon
+zoomFit        custom
 guides         RulerIcon
 lock           SquareLock01Icon
 # The phone editor's bars and panels.
@@ -101,6 +104,20 @@ export         Upload04Icon
 close          Cancel01Icon
 saved          CheckmarkCircle02Icon
 share          Share08Icon
+unlock         SquareUnlock01Icon
+view           ViewIcon
+viewOff        ViewOffSlashIcon
+volumeOff      VolumeOffIcon
+more           MoreHorizontalIcon
+solo           HeadphonesIcon
+keyCommand     CommandIcon
+keyShift       ArrowUpBigIcon
+keyOption      OptionIcon
+keyWindows     WindowsOldIcon
+keyBackspace   custom
+splitAt        custom
+trimLeft       custom
+trimRight      custom
 
 # Custom marks.
 blade          custom

@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "mint",
+  "name": "Mint",
+  "category": "Creative",
+  "adjust": {"tint": -0.3, "temperature": -0.1, "fade": 0.2, "saturation": -0.1},
+  "wheels": {"gain": {"hue": 150, "amount": 0.2}}
+}

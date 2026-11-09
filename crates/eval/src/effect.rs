@@ -87,6 +87,9 @@ pub(crate) fn needs_cpu(draft: &Draft, time: Micros, stack: &[StackLayer<'_>]) -
         || stack
             .iter()
             .any(|layer| clip_mask(draft, layer.track_index, layer.segment_index).is_some())
+        || stack
+            .iter()
+            .any(|layer| clip_has_selection(draft, layer.track_index, layer.segment_index))
         || stack.iter().any(|layer| {
             match clip_filter(draft, layer.track_index, layer.segment_index) {
                 ClipFilter::None => false,
@@ -112,6 +115,7 @@ pub(crate) fn present<D: Device>(
             ClipFilter::None
         ) || clip_adjust(draft, layer.track_index, layer.segment_index).is_some()
             || clip_mask(draft, layer.track_index, layer.segment_index).is_some()
+            || clip_has_selection(draft, layer.track_index, layer.segment_index)
     });
     let canvas = project_canvas(
         draft.canvas_config.background.as_deref(),
@@ -202,6 +206,8 @@ fn push_visual<'a, D: Device>(
     };
     let adjust = clip_adjust(pass.draft, layer.track_index, layer.segment_index);
     let mask = clip_mask(pass.draft, layer.track_index, layer.segment_index);
+    // Decoded once for this frame, not once per sample.
+    let selection = cutlass_effects::segment_selection(pass.draft, segment);
     let draft = pass.draft;
     let sample = |time| {
         let input = sample_cpu(layer.source, time)?;
@@ -209,13 +215,20 @@ fn push_visual<'a, D: Device>(
             Some(adjust) => adjusted_in(adjust, input, time, draft, segment),
             None => input,
         };
-        Some(match mask.as_ref() {
-            Some(mask) => masked(mask, draft, segment, input, time),
+        let input = match mask.as_ref() {
+            Some(mask) => {
+                let keyed = mask.at(segment, &draft.keyframe_graph_list, time);
+                masked(&keyed, draft, segment, input, time)
+            }
+            None => input,
+        };
+        Some(match selection.as_ref() {
+            Some(selection) => selected(selection, draft, segment, input, time),
             None => input,
         })
     };
     match filter {
-        ClipFilter::None if adjust.is_none() && mask.is_none() => {
+        ClipFilter::None if adjust.is_none() && mask.is_none() && selection.is_none() => {
             batch.push(Slot::Borrowed(layer.source));
         }
         ClipFilter::None => {
@@ -315,10 +328,7 @@ fn global_marks<'a>(draft: &'a Draft, time: Micros, stack: &[StackLayer<'_>]) ->
         })
         .filter_map(|(track_index, segment_index, segment, _)| {
             // A bundled filter is a look: adjust sliders, not a package.
-            let adjust = cutlass_effects::segment_look(draft, segment).map(|adjust| Colour {
-                adjust,
-                ..cutlass_effects::segment_colour(draft, segment)
-            });
+            let adjust = cutlass_effects::segment_look(draft, segment);
             if adjust.as_ref().is_some_and(Colour::is_identity) {
                 return None;
             }
@@ -380,12 +390,13 @@ fn adjustment_layers<'a>(
 }
 
 /// A recipe effect at one frame: where it sits among the layers, its steps
-/// at that time, and the clip it runs over alone, as track and segment
-/// index, when it is bound to one.
+/// at that time, the clip it runs over alone, as track and segment index,
+/// when it is bound to one, and the mask it shows inside, if any.
 pub(crate) struct RecipeMark {
     pub(crate) key: (i32, usize, usize),
     pub(crate) steps: Vec<Step>,
     pub(crate) bound: Option<(usize, usize)>,
+    pub(crate) mask: Option<cutlass_effects::CanvasMask>,
 }
 
 /// The bundled recipe effects covering `time`, back to front. Their steps
@@ -394,6 +405,7 @@ pub(crate) struct RecipeMark {
 pub(crate) fn recipe_marks(
     draft: &Draft,
     time: Micros,
+    extent: Extent,
     stack: &[StackLayer<'_>],
 ) -> Vec<RecipeMark> {
     let mut marks: Vec<RecipeMark> = effect_segments(draft, time, stack)
@@ -404,15 +416,35 @@ pub(crate) fn recipe_marks(
                 None => None,
             };
             let offset = Micros(time.0.saturating_sub(segment.target.start.0));
+            let controls = match draft.materials.get(segment.material_id.as_str()) {
+                Some(MaterialRef::VideoEffect(effect)) => cutlass_effects::stored_controls(effect),
+                _ => std::collections::BTreeMap::new(),
+            };
             Some(RecipeMark {
                 key: (segment.render_index, track_index, segment_index),
-                steps: recipe.steps_at(offset),
+                steps: recipe.steps_with(offset, &controls),
                 bound,
+                mask: effect_mask(draft, segment, time, extent),
             })
         })
         .collect();
     marks.sort_by_key(|mark| mark.key);
     marks
+}
+
+/// `segment`'s colour mask placed on an `extent` canvas at `time`: where
+/// on the canvas the effect acts, as for an adjustment layer.
+fn effect_mask(
+    draft: &Draft,
+    segment: &Segment,
+    time: Micros,
+    extent: Extent,
+) -> Option<cutlass_effects::CanvasMask> {
+    let mask = cutlass_effects::segment_color_mask(draft, segment)?;
+    let frame = clip_frame(draft, segment, time, (extent.width, extent.height))?;
+    #[allow(clippy::cast_possible_truncation)]
+    let frame = frame.0.map(|value| value as f32);
+    Some(cutlass_effects::CanvasMask { mask, frame })
 }
 
 /// Visible effect segments on visible rows that cover `time` and are not
@@ -493,6 +525,33 @@ fn clip_adjust(draft: &Draft, track_index: usize, segment_index: usize) -> Optio
 
 fn clip_mask(draft: &Draft, track_index: usize, segment_index: usize) -> Option<Mask> {
     cutlass_effects::segment_mask(draft, segment(draft, track_index, segment_index)?)
+}
+
+fn clip_has_selection(draft: &Draft, track_index: usize, segment_index: usize) -> bool {
+    segment(draft, track_index, segment_index)
+        .is_some_and(|segment| cutlass_effects::segment_has_selection(draft, segment))
+}
+
+/// `input`, a canvas-sized picture of `segment`, cut down to `selection`
+/// in the clip's own frame at `time`.
+fn selected(
+    selection: &cutlass_effects::Selection,
+    draft: &Draft,
+    segment: &Segment,
+    input: CpuBytes,
+    time: Micros,
+) -> CpuBytes {
+    let (width, height) = (input.width(), input.height());
+    let Some(frame) = clip_frame(draft, segment, time, (width, height)) else {
+        return input;
+    };
+    let mut rgba = input.rgba().to_vec();
+    #[allow(clippy::cast_possible_truncation)]
+    selection.apply(&mut rgba, width, |x, y| {
+        let (u, v) = frame.apply(f64::from(x), f64::from(y));
+        Some((u as f32, v as f32))
+    });
+    CpuBytes::new(width, height, rgba).unwrap_or(input)
 }
 
 /// `input`, a canvas-sized picture of `segment`, with `mask` cut in the

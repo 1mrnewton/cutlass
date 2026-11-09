@@ -64,15 +64,17 @@ enum Paint {
 }
 
 /// 0 at the window start and 1 at the window end, as numer/denom.
-/// `In`, `Out`, and `Loop` only. Other [`AnimType`] values return `None`.
+/// `In`, `Out`, `Loop`, and `Caption` only. `Group` and `None` return `None`.
 /// `Loop` repeats: numer is `elapsed % duration`, and an exact multiple is 0.
+/// `Caption` has no slot of its own: it plays in the loop slot with its own
+/// duration, so it repeats the same way.
 /// This does not write a draft.
 #[must_use]
 pub fn progress(kind: AnimType, start: Micros, duration: Micros, time: Micros) -> Option<Progress> {
     let window = match kind {
         AnimType::In | AnimType::Out => Window::Linear,
-        AnimType::Loop => Window::Loop,
-        AnimType::Caption | AnimType::Group | AnimType::None => return None,
+        AnimType::Loop | AnimType::Caption => Window::Loop,
+        AnimType::Group | AnimType::None => return None,
     };
     if duration.0 <= 0 {
         return Some(Progress { numer: 0, denom: 1 });
@@ -295,9 +297,9 @@ fn fade(kind: AnimType, ratio: Progress) -> Option<Scale> {
         return None;
     }
     let numer = match kind {
-        AnimType::In | AnimType::Loop => ratio.numer,
+        AnimType::In | AnimType::Loop | AnimType::Caption => ratio.numer,
         AnimType::Out => ratio.denom.checked_sub(ratio.numer)?,
-        AnimType::Caption | AnimType::Group | AnimType::None => return None,
+        AnimType::Group | AnimType::None => return None,
     };
     Some(Scale::Mul {
         numer,
@@ -712,8 +714,19 @@ mod tests {
     }
 
     #[test]
-    fn progress_refuses_caption_group_none_and_overflow() {
-        for kind in [AnimType::Caption, AnimType::Group, AnimType::None] {
+    fn a_caption_runs_in_the_loop_window_with_its_own_duration() {
+        for time in [-1, 0, 5, 10, 25, 200] {
+            assert_eq!(
+                at(AnimType::Caption, 0, 10, time),
+                at(AnimType::Loop, 0, 10, time)
+            );
+        }
+        fraction(AnimType::Caption, 0, 40, 50, 10, 40);
+    }
+
+    #[test]
+    fn progress_refuses_group_none_and_overflow() {
+        for kind in [AnimType::Group, AnimType::None] {
             assert!(at(kind, 0, 10, 0).is_none());
             assert!(at(kind, 0, 0, 0).is_none());
         }
@@ -1257,8 +1270,25 @@ mod tests {
     }
 
     #[test]
-    fn caption_group_and_none_do_not_draw() {
-        for kind in [AnimType::Caption, AnimType::Group, AnimType::None] {
+    fn a_caption_draws_like_a_loop() {
+        let draw_with = |kind| {
+            draw(
+                catalog::SOURCE_OVER,
+                &px([0, 0, 0, 200]),
+                Some(&px([1, 2, 3, 4])),
+                TimeRange::new(0, 100),
+                Some(span(kind, 0, 10)),
+                15,
+            )
+        };
+        let caption = format!("{:?}", draw_with(AnimType::Caption));
+        assert_eq!(caption, format!("{:?}", draw_with(AnimType::Loop)));
+        assert!(!caption.contains("Miss"), "{caption}");
+    }
+
+    #[test]
+    fn group_and_none_do_not_draw() {
+        for kind in [AnimType::Group, AnimType::None] {
             let sample = draw(
                 catalog::SOURCE_OVER,
                 &px([0, 0, 0, 200]),

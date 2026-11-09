@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "sweet",
+  "name": "Sweet",
+  "category": "Food",
+  "adjust": {"tint": 0.15, "brightness": 0.1, "fade": 0.1},
+  "hsl": {"magenta": [0, 0.3, 0], "red": [0, 0.2, 0]}
+}

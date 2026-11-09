@@ -184,6 +184,38 @@ pub enum SeekDuringPlayback {
     Pause,
 }
 
+/// How sharp the preview is drawn. A lower quality draws the frame
+/// smaller and stretches it to the preview, so playback stays smooth on a
+/// heavy project. Export is always drawn at full size.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PreviewQuality {
+    /// The canvas's own size.
+    #[default]
+    Full,
+    /// Half the canvas each way.
+    High,
+    /// A third of the canvas each way.
+    Medium,
+    /// A quarter of the canvas each way.
+    Low,
+}
+
+impl PreviewQuality {
+    pub const ALL: [Self; 4] = [Self::Full, Self::High, Self::Medium, Self::Low];
+
+    /// The part of the canvas, each way, the preview is drawn at.
+    #[must_use]
+    pub fn scale(self) -> f64 {
+        match self {
+            Self::Full => 1.0,
+            Self::High => 1.0 / 2.0,
+            Self::Medium => 1.0 / 3.0,
+            Self::Low => 1.0 / 4.0,
+        }
+    }
+}
+
 /// How the open player behaves. These are not draft fields.
 ///
 /// What an import does with the file.
@@ -220,6 +252,9 @@ pub struct Playback {
     /// reads the source.
     #[serde(default = "default_on")]
     pub proxies: bool,
+    /// How sharp the preview is drawn.
+    #[serde(default)]
+    pub preview_quality: PreviewQuality,
     /// Keys this record does not name.
     #[serde(flatten, default)]
     pub rest: Map<String, Value>,
@@ -232,6 +267,7 @@ impl Default for Playback {
             scrub_audio: false,
             seek_during_playback: SeekDuringPlayback::default(),
             proxies: true,
+            preview_quality: PreviewQuality::Full,
             rest: Map::new(),
         }
     }

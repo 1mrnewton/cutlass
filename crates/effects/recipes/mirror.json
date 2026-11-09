@@ -2,6 +2,8 @@
   "version": 1,
   "id": "mirror",
   "name": "Mirror",
+  "category": "Distort",
+  "preview": "dancer",
   "passes": [
     { "block": "mirror", "params": { "side": 0 } }
   ]

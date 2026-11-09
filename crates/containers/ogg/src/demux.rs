@@ -1,11 +1,12 @@
 //! The Ogg demuxer.
 //!
-//! Open reads the beginning-of-stream pages, then each Opus stream's
-//! `OpusTags`, then the first audio page of each Opus stream (to learn where
-//! its timeline starts). On a random-access input it also reads the end of
-//! the first link to learn each stream's final granule position and the end
-//! trimming on its last page. Reads then return one Opus packet per call in
-//! file order. Seek bisects on page granule positions.
+//! Open reads the beginning-of-stream pages, then each stream's other
+//! header packets (`OpusTags`, or the Vorbis comment and setup headers),
+//! then the first audio page of each stream (to learn where its timeline
+//! starts). On a random-access input it also reads the end of the first
+//! link to learn each stream's final granule position and the end trimming
+//! on its last page. Reads then return one Opus or Vorbis packet per call
+//! in file order. Seek bisects on page granule positions.
 
 use std::collections::VecDeque;
 use std::io::{Read, Seek};
@@ -23,10 +24,11 @@ use crate::limits::{
     MAX_LINK_PROBES, MAX_OPUS_PACKET_PER_STREAM, MAX_SEEK_PROBES, MAX_START_SCAN_BYTES,
     MAX_TAIL_SCAN_BYTES, OPUS_PREROLL, OPUS_RATE,
 };
-use crate::logical::{Counters, Opus, Ready, State};
+use crate::logical::{Counters, Logical, Ready, State, Timing};
 use crate::opus::{HEAD_MAGIC, OpusHead, OpusTags, mapping_tag};
 use crate::page::Page;
 use crate::source::{PageRead, Source};
+use crate::vorbis::{ID_MAGIC, VorbisComment, VorbisId, VorbisModes, xiph_lace};
 
 /// Bytes read per step when scanning backwards from the end of the file.
 const TAIL_CHUNK: u64 = 64 * 1024;
@@ -37,7 +39,7 @@ const BISECT_WINDOW: u64 = 64 * 1024;
 /// A logical stream of the first link.
 #[derive(Clone, Debug)]
 enum Kind {
-    Opus(Opus),
+    Logical(Logical),
     /// A mapping this crate does not read. Its pages are skipped.
     Unknown {
         serial: u32,
@@ -47,7 +49,7 @@ enum Kind {
 impl Kind {
     const fn serial(&self) -> u32 {
         match self {
-            Self::Opus(opus) => opus.serial,
+            Self::Logical(logical) => logical.serial,
             Self::Unknown { serial } => *serial,
         }
     }
@@ -68,6 +70,83 @@ pub struct OpusInfo {
     pub trailing: Option<i64>,
 }
 
+/// What open learned about one Vorbis stream.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VorbisInfo {
+    pub serial: u32,
+    pub id: VorbisId,
+    pub comment: VorbisComment,
+    /// Long-block flag of each mode in the setup header.
+    pub modes: Vec<bool>,
+    /// Granule-domain time of the first sample of the first packet, when
+    /// the stream has an audio page. Below zero when the first page
+    /// completes more samples than its granule.
+    pub start: Option<i64>,
+    /// Granule position of the stream's last page, when it was found.
+    pub end: Option<i64>,
+    /// Samples decoded past `end`: the end trimming on the last page.
+    pub trailing: Option<i64>,
+}
+
+/// What open learned about one stream of a mapping this crate reads.
+#[derive(Clone, Debug)]
+enum Info {
+    Opus(OpusInfo),
+    Vorbis(VorbisInfo),
+}
+
+impl Info {
+    const fn serial(&self) -> u32 {
+        match self {
+            Self::Opus(info) => info.serial,
+            Self::Vorbis(info) => info.serial,
+        }
+    }
+
+    const fn start(&self) -> Option<i64> {
+        match self {
+            Self::Opus(info) => info.start,
+            Self::Vorbis(info) => info.start,
+        }
+    }
+
+    const fn end(&self) -> Option<i64> {
+        match self {
+            Self::Opus(info) => info.end,
+            Self::Vorbis(info) => info.end,
+        }
+    }
+
+    /// Samples a decoder needs before a target (RFC 7845 section 4.6; for
+    /// Vorbis, the packet before the one that holds the target, at most
+    /// half a long block).
+    fn preroll(&self) -> i64 {
+        match self {
+            Self::Opus(_) => OPUS_PREROLL,
+            Self::Vorbis(info) => i64::from(info.id.blocksizes[1] / 2),
+        }
+    }
+}
+
+/// A header packet that begins a stream, by mapping.
+enum Head {
+    Opus(OpusHead),
+    Vorbis(VorbisId),
+    Unknown,
+}
+
+/// Header packets after the first, by mapping.
+enum Headers {
+    Opus(OpusTags),
+    Vorbis {
+        comment: VorbisComment,
+        /// The comment packet for the extradata: as stored, or written again
+        /// from the comments kept when it was cut.
+        comment_bytes: Vec<u8>,
+        setup: Vec<u8>,
+    },
+}
+
 /// Bytes and probes the last seek used.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SeekCost {
@@ -85,7 +164,7 @@ pub struct OggDemux<R> {
     random: bool,
     streams: Vec<Stream>,
     kinds: Vec<Kind>,
-    infos: Vec<Option<OpusInfo>>,
+    infos: Vec<Option<Info>>,
     gaps: Vec<Gap>,
     ready: VecDeque<Ready>,
     replay: VecDeque<Page>,
@@ -153,7 +232,7 @@ impl<R: Read + Seek> OggDemux<R> {
 
         // Beginning-of-stream pages come first, one per logical stream.
         let mut kinds = Vec::new();
-        let mut heads: Vec<Option<OpusHead>> = Vec::new();
+        let mut heads: Vec<Head> = Vec::new();
         let mut extradata = Vec::new();
         let mut bos_sequences = Vec::new();
         let mut current = Some(first);
@@ -202,22 +281,49 @@ impl<R: Read + Seek> OggDemux<R> {
                 let cap = MAX_OPUS_PACKET_PER_STREAM
                     .saturating_mul(u64::from(head.streams))
                     .min(limits.max_packet_bytes);
-                kinds.push(Kind::Opus(Opus {
+                kinds.push(Kind::Logical(Logical {
                     serial: page.serial,
                     track: count,
-                    pre_skip: i64::from(head.pre_skip),
+                    timing: Timing::Opus {
+                        pre_skip: i64::from(head.pre_skip),
+                    },
                     first_audio_sequence: u32::MAX,
                     packet_cap: cap,
                     state: State::fresh(),
                 }));
-                heads.push(Some(head));
+                heads.push(Head::Opus(head));
+                extradata.push(first_piece.to_vec());
+            } else if first_piece.starts_with(ID_MAGIC) {
+                // Vorbis I section A.2: the identification header is alone
+                // on the stream's first page.
+                if pieces.len() != 1 || !pieces[0].complete {
+                    return Err(OggError::BadBosPage {
+                        serial: page.serial,
+                    }
+                    .into());
+                }
+                let id = VorbisId::parse(first_piece, page.serial)?;
+                kinds.push(Kind::Logical(Logical {
+                    serial: page.serial,
+                    track: count,
+                    // The modes come with the setup header.
+                    timing: Timing::Vorbis(VorbisModes {
+                        long: Vec::new(),
+                        bits: 0,
+                        blocksizes: id.blocksizes,
+                    }),
+                    first_audio_sequence: u32::MAX,
+                    packet_cap: limits.max_packet_bytes,
+                    state: State::fresh(),
+                }));
+                heads.push(Head::Vorbis(id));
                 extradata.push(first_piece.to_vec());
             } else {
                 let keep = usize::try_from(limits.max_extradata_bytes).unwrap_or(usize::MAX);
                 kinds.push(Kind::Unknown {
                     serial: page.serial,
                 });
-                heads.push(None);
+                heads.push(Head::Unknown);
                 extradata.push(first_piece[..first_piece.len().min(keep)].to_vec());
             }
             current = match source.read_page()? {
@@ -237,16 +343,19 @@ impl<R: Read + Seek> OggDemux<R> {
             .as_ref()
             .map_or_else(|| source.position(), |page| page.offset);
 
-        // Each Opus stream's comment header, which may span pages.
-        let mut tags = read_tags(
+        // Each stream's other header packets, which may span pages.
+        let (mut headers, headers_end) = read_headers(
             &mut source,
             &mut kinds,
+            &heads,
             &bos_sequences,
             &mut current,
             (!random).then_some(&mut replay),
-            &mut audio_start,
             limits,
         )?;
+        if let Some(end) = headers_end {
+            audio_start = end;
+        }
 
         let mut demux = Self {
             source,
@@ -285,69 +394,37 @@ impl<R: Read + Seek> OggDemux<R> {
             let id = TrackId::new(u32::try_from(index).unwrap_or(u32::MAX));
             let bytes = extradata.get(index).cloned().unwrap_or_default();
             match kind {
-                Kind::Opus(opus) => {
-                    let Some(head) = heads.get(index).cloned().flatten() else {
-                        return Err(OggError::NoPage.into());
-                    };
-                    let start = starts.get(index).copied().flatten();
+                Kind::Logical(logical) => {
                     let (end, trailing) = tails.get(index).copied().unwrap_or((None, None));
-                    let begin = start.unwrap_or(0);
-                    let pre_skip = opus.pre_skip;
-                    let playable = match end {
-                        Some(end) => {
-                            let playable = end - begin - pre_skip;
-                            if playable < 0 && start.is_some() {
-                                return Err(OggError::PreSkipPastEnd {
-                                    serial: opus.serial,
-                                    end,
-                                    pre_skip,
-                                }
-                                .into());
-                            }
-                            playable.max(0)
-                        }
-                        None => 0,
-                    };
-                    let edit =
-                        Edit::try_new(Some(begin + pre_skip), playable, 1, 1).map_err(|_| {
-                            OggError::BadOpusHead {
-                                serial: opus.serial,
-                                reason: "edit does not fit",
-                            }
-                        })?;
-                    let trim = Trim::new(
-                        Some(u64::try_from(pre_skip).unwrap_or(0)),
-                        trailing.and_then(|value: i64| u64::try_from(value).ok()),
-                    );
-                    let params = StreamParams::try_audio(
-                        StreamCodec::Known(CodecId::Opus),
-                        OPUS_RATE,
-                        u16::from(head.channels),
-                        bytes,
-                    )
-                    .map_err(|_| OggError::BadOpusHead {
-                        serial: opus.serial,
-                        reason: "zero output channels",
-                    })?;
-                    streams.push(Stream::new(
-                        id,
-                        params,
-                        Timescale::new(OPUS_RATE),
-                        None,
-                        vec![edit],
-                        trim,
-                    ));
-                    infos.push(Some(OpusInfo {
-                        serial: opus.serial,
-                        head,
-                        tags: tags
-                            .get_mut(index)
-                            .and_then(Option::take)
-                            .unwrap_or_default(),
-                        start,
+                    let span = Span {
+                        start: starts.get(index).copied().flatten(),
                         end,
                         trailing,
-                    }));
+                    };
+                    let header = headers.get_mut(index).and_then(Option::take);
+                    let (stream, info) = match (heads.get(index), header) {
+                        (Some(Head::Opus(head)), Some(Headers::Opus(tags))) => {
+                            opus_stream(id, logical, head.clone(), tags, bytes, span)?
+                        }
+                        (
+                            Some(Head::Vorbis(head)),
+                            Some(Headers::Vorbis {
+                                comment,
+                                comment_bytes,
+                                setup,
+                            }),
+                        ) => {
+                            let bytes = vorbis_extradata(
+                                [&bytes, &comment_bytes, &setup],
+                                &comment,
+                                limits,
+                            )?;
+                            vorbis_stream(id, logical, *head, comment, bytes, span)?
+                        }
+                        _ => return Err(OggError::NoPage.into()),
+                    };
+                    streams.push(stream);
+                    infos.push(Some(info));
                 }
                 Kind::Unknown { .. } => {
                     let tag =
@@ -379,7 +456,7 @@ impl<R: Read + Seek> OggDemux<R> {
             self.source.seek(self.audio_start)?;
         }
         for kind in &mut self.kinds {
-            if let Kind::Opus(opus) = kind {
+            if let Kind::Logical(opus) = kind {
                 opus.state = State::fresh();
             }
         }
@@ -404,7 +481,7 @@ impl<R: Read + Seek> OggDemux<R> {
         let mut scratch = Counters::default();
         loop {
             let waiting = self.kinds.iter().enumerate().any(|(index, kind)| {
-                matches!(kind, Kind::Opus(opus) if starts[index].is_none() && !opus.state.ended)
+                matches!(kind, Kind::Logical(opus) if starts[index].is_none() && !opus.state.ended)
             });
             if !waiting || scanned > MAX_START_SCAN_BYTES {
                 break;
@@ -434,7 +511,7 @@ impl<R: Read + Seek> OggDemux<R> {
             if page.bos() && page.offset >= self.audio_start {
                 break;
             }
-            if let Kind::Opus(opus) = &mut self.kinds[index] {
+            if let Kind::Logical(opus) = &mut self.kinds[index] {
                 let mut out = Vec::new();
                 opus.take_page(&page, &mut out, &mut scratch_gaps, &mut scratch)?;
                 if starts[index].is_none()
@@ -559,7 +636,7 @@ impl<R: Read + Seek> OggDemux<R> {
                     continue;
                 }
                 if let Some(index) = self.index_of(page.serial)
-                    && let Kind::Opus(opus) = &self.kinds[index]
+                    && let Kind::Logical(opus) = &self.kinds[index]
                     && page.sequence >= opus.first_audio_sequence
                 {
                     found[index].push((page.offset, page.granule));
@@ -570,11 +647,10 @@ impl<R: Read + Seek> OggDemux<R> {
                 let keep = chunk.len().saturating_sub(2);
                 marks[index] = chunk.split_off(keep);
             }
-            let done = self
-                .kinds
-                .iter()
-                .enumerate()
-                .all(|(index, kind)| !matches!(kind, Kind::Opus(_)) || marks[index].len() >= 2);
+            let done =
+                self.kinds.iter().enumerate().all(|(index, kind)| {
+                    !matches!(kind, Kind::Logical(_)) || marks[index].len() >= 2
+                });
             if done {
                 break;
             }
@@ -601,7 +677,7 @@ impl<R: Read + Seek> OggDemux<R> {
     /// Samples the last page of stream `index` trims, decoded from the page
     /// before it (or from the stream start).
     fn trailing(&mut self, index: usize, previous: Option<u64>, last: u64) -> Option<i64> {
-        let Kind::Opus(original) = self.kinds.get(index)?.clone() else {
+        let Kind::Logical(original) = self.kinds.get(index)?.clone() else {
             return None;
         };
         let mut opus = original;
@@ -645,7 +721,7 @@ impl<R: Read + Seek> OggDemux<R> {
                 .kinds
                 .iter()
                 .map(|kind| match kind {
-                    Kind::Opus(opus) => Some(opus.state.clone()),
+                    Kind::Logical(opus) => Some(opus.state.clone()),
                     Kind::Unknown { .. } => None,
                 })
                 .collect(),
@@ -662,7 +738,7 @@ impl<R: Read + Seek> OggDemux<R> {
     fn restore(&mut self, snapshot: Snapshot) {
         let _ = self.source.seek(snapshot.position);
         for (kind, state) in self.kinds.iter_mut().zip(snapshot.states) {
-            if let (Kind::Opus(opus), Some(state)) = (kind, state) {
+            if let (Kind::Logical(opus), Some(state)) = (kind, state) {
                 opus.state = state;
             }
         }
@@ -685,18 +761,19 @@ impl<R: Read + Seek> OggDemux<R> {
         let Some(info) = self.infos.get(index).cloned().flatten() else {
             return Err(Fault::Seek(SeekError::Empty));
         };
-        let serial = info.serial;
-        let Some(start) = info.start else {
+        let serial = info.serial();
+        let Some(start) = info.start() else {
             self.end_landing();
             return Ok(landing(Landing::End, 0, 0));
         };
-        if info.end.is_some_and(|end| to.time >= end) || to.end.is_some_and(|end| to.time >= end) {
+        if info.end().is_some_and(|end| to.time >= end) || to.end.is_some_and(|end| to.time >= end)
+        {
             self.end_landing();
             return Ok(landing(Landing::End, 0, 0));
         }
-        let aim = to.time.saturating_sub(OPUS_PREROLL).max(start);
+        let aim = to.time.saturating_sub(info.preroll()).max(start);
         let first_audio = match &self.kinds[index] {
-            Kind::Opus(opus) => opus.first_audio_sequence,
+            Kind::Logical(opus) => opus.first_audio_sequence,
             Kind::Unknown { .. } => return Err(Fault::Seek(SeekError::Empty)),
         };
 
@@ -706,18 +783,28 @@ impl<R: Read + Seek> OggDemux<R> {
         let mut lo = self.audio_start;
         let mut lo_granule = start;
         let mut hi = link_end;
-        let mut hi_granule = info.end;
+        let mut hi_granule = info.end();
         let mut best: Option<(u64, i64)> = None;
+        // Each probe interpolates between the bounds, a quarter window
+        // toward the bound that has not moved yet, so two probes bracket
+        // the target; each further probe on the same side doubles that
+        // step. Three in a row on one side fall back to a midpoint.
+        let mut last_low: Option<bool> = None;
+        let mut same_side = 0_u32;
         while hi.saturating_sub(lo) > BISECT_WINDOW && cost.probes < MAX_SEEK_PROBES {
             cost.probes += 1;
             let mid = match hi_granule {
-                Some(hi_g) if cost.probes <= 2 && hi_g > lo_granule => {
+                Some(hi_g) if same_side < 3 && hi_g > lo_granule => {
                     let span = i128::from(hi - lo);
                     let along = i128::from(aim - lo_granule) * span / i128::from(hi_g - lo_granule);
-                    let guess = u64::try_from(along).unwrap_or(0);
-                    lo.saturating_add(guess)
-                        .saturating_sub(BISECT_WINDOW / 4)
-                        .clamp(lo, hi - 1)
+                    let guess = lo.saturating_add(u64::try_from(along).unwrap_or(0));
+                    let step = (BISECT_WINDOW / 4) << same_side.saturating_sub(1);
+                    let biased = if last_low == Some(true) {
+                        guess.saturating_add(step)
+                    } else {
+                        guess.saturating_sub(step)
+                    };
+                    biased.clamp(lo, hi - 1)
                 }
                 _ => lo + (hi - lo) / 2,
             };
@@ -743,6 +830,13 @@ impl<R: Read + Seek> OggDemux<R> {
                     Err(error) => return Err(error),
                 }
             }
+            let low = hit.as_ref().is_some_and(|page| page.granule <= aim);
+            same_side = if last_low == Some(low) {
+                same_side + 1
+            } else {
+                1
+            };
+            last_low = Some(low);
             match hit {
                 Some(page) if page.granule <= aim => {
                     best = Some((page.offset, page.granule));
@@ -789,7 +883,7 @@ impl<R: Read + Seek> OggDemux<R> {
         let resume_at = match best {
             Some((offset, _)) => {
                 for (position, kind) in self.kinds.iter_mut().enumerate() {
-                    if let Kind::Opus(opus) = kind {
+                    if let Kind::Logical(opus) = kind {
                         opus.state = State::resume(position == index);
                     }
                 }
@@ -797,7 +891,7 @@ impl<R: Read + Seek> OggDemux<R> {
             }
             None => {
                 for kind in &mut self.kinds {
-                    if let Kind::Opus(opus) = kind {
+                    if let Kind::Logical(opus) = kind {
                         opus.state = State::fresh();
                     }
                 }
@@ -878,9 +972,19 @@ impl<R: Read> OggDemux<R> {
     /// The parsed headers and timing facts of an Opus track.
     #[must_use]
     pub fn opus(&self, track: u32) -> Option<&OpusInfo> {
-        self.infos
-            .get(usize::try_from(track).ok()?)
-            .and_then(Option::as_ref)
+        match self.infos.get(usize::try_from(track).ok()?)? {
+            Some(Info::Opus(info)) => Some(info),
+            _ => None,
+        }
+    }
+
+    /// The parsed headers and timing facts of a Vorbis track.
+    #[must_use]
+    pub fn vorbis(&self, track: u32) -> Option<&VorbisInfo> {
+        match self.infos.get(usize::try_from(track).ok()?)? {
+            Some(Info::Vorbis(info)) => Some(info),
+            _ => None,
+        }
     }
 
     /// `OpusTags` of an Opus track: vendor and comments.
@@ -932,6 +1036,15 @@ impl<R: Read> OggDemux<R> {
     #[must_use]
     pub const fn dropped_pieces(&self) -> u64 {
         self.counters.dropped_pieces
+    }
+
+    /// Pages since open or the last seek whose granule position disagreed
+    /// with the packet durations by less than the shortest packet, and was
+    /// taken as rounding. A remux that rebuilds granules from millisecond
+    /// timestamps writes such pages.
+    #[must_use]
+    pub const fn granule_drift(&self) -> u64 {
+        self.counters.granule_drift
     }
 
     /// Pages of a serial the first link did not begin.
@@ -1012,7 +1125,7 @@ impl<R: Read> OggDemux<R> {
             self.finished = true;
             return Ok(false);
         }
-        if let Kind::Opus(opus) = &mut self.kinds[index] {
+        if let Kind::Logical(opus) = &mut self.kinds[index] {
             let mut out = Vec::new();
             let mut gaps = Vec::new();
             let result = opus.take_page(&page, &mut out, &mut gaps, &mut self.counters);
@@ -1053,38 +1166,232 @@ impl<R: Read> OggDemux<R> {
 
 /// Reads `OpusTags` for every Opus stream. Updates each stream's first audio
 /// sequence number and the audio start offset.
-fn read_tags<R: Read>(
+/// Where a stream's samples begin and end in the granule domain.
+#[derive(Clone, Copy)]
+struct Span {
+    start: Option<i64>,
+    end: Option<i64>,
+    trailing: Option<i64>,
+}
+
+/// The track of an Opus stream (RFC 7845 section 4): the edit starts after
+/// the pre-skip, which the decoder drops.
+fn opus_stream(
+    id: TrackId,
+    opus: &Logical,
+    head: OpusHead,
+    tags: OpusTags,
+    extradata: Vec<u8>,
+    span: Span,
+) -> Result<(Stream, Info), OggError> {
+    let Span {
+        start,
+        end,
+        trailing,
+    } = span;
+    let pre_skip = i64::from(head.pre_skip);
+    let begin = start.unwrap_or(0);
+    let playable = match end {
+        Some(end) => {
+            let playable = end - begin - pre_skip;
+            if playable < 0 && start.is_some() {
+                return Err(OggError::PreSkipPastEnd {
+                    serial: opus.serial,
+                    end,
+                    pre_skip,
+                });
+            }
+            playable.max(0)
+        }
+        None => 0,
+    };
+    let edit = Edit::try_new(Some(begin + pre_skip), playable, 1, 1).map_err(|_| {
+        OggError::BadOpusHead {
+            serial: opus.serial,
+            reason: "edit does not fit",
+        }
+    })?;
+    let trim = Trim::new(
+        Some(u64::try_from(pre_skip).unwrap_or(0)),
+        trailing.and_then(|value| u64::try_from(value).ok()),
+    );
+    let params = StreamParams::try_audio(
+        StreamCodec::Known(CodecId::Opus),
+        OPUS_RATE,
+        u16::from(head.channels),
+        extradata,
+    )
+    .map_err(|_| OggError::BadOpusHead {
+        serial: opus.serial,
+        reason: "zero output channels",
+    })?;
+    let stream = Stream::new(
+        id,
+        params,
+        Timescale::new(OPUS_RATE),
+        None,
+        vec![edit],
+        trim,
+    );
+    let info = Info::Opus(OpusInfo {
+        serial: opus.serial,
+        head,
+        tags,
+        start,
+        end,
+        trailing,
+    });
+    Ok((stream, info))
+}
+
+/// The three Vorbis headers, Xiph-laced. When they exceed
+/// `max_extradata_bytes`, the comment packet is written again with only its
+/// vendor string: a decoder reads nothing else from it.
+fn vorbis_extradata(
+    packets: [&[u8]; 3],
+    comment: &VorbisComment,
+    limits: Limits,
+) -> Result<Vec<u8>, OggError> {
+    let fits =
+        |bytes: &[u8]| u64::try_from(bytes.len()).unwrap_or(u64::MAX) <= limits.max_extradata_bytes;
+    let laced = xiph_lace(packets);
+    if fits(&laced) {
+        return Ok(laced);
+    }
+    let vendor_only = VorbisComment {
+        vendor: comment.vendor.clone(),
+        comments: Vec::new(),
+        cut: true,
+    }
+    .encode();
+    let laced = xiph_lace([packets[0], &vendor_only, packets[2]]);
+    if fits(&laced) {
+        return Ok(laced);
+    }
+    Err(OggError::TooLarge {
+        declared: u64::try_from(laced.len()).unwrap_or(u64::MAX),
+        limit: limits.max_extradata_bytes,
+    })
+}
+
+/// The track of a Vorbis stream (Vorbis I section A.2). The timescale is
+/// the sample rate. Samples before granule zero are leading trim, and the
+/// edit starts at zero or at the first sample, whichever is later.
+fn vorbis_stream(
+    id: TrackId,
+    vorbis: &Logical,
+    head: VorbisId,
+    comment: VorbisComment,
+    extradata: Vec<u8>,
+    span: Span,
+) -> Result<(Stream, Info), OggError> {
+    let Span {
+        start,
+        end,
+        trailing,
+    } = span;
+    let bad = |reason| OggError::BadVorbisHeader {
+        serial: vorbis.serial,
+        reason,
+    };
+    let begin = start.unwrap_or(0).max(0);
+    let playable = end.map_or(0, |end| (end - begin).max(0));
+    let leading = start.map_or(0, |start| start.min(0).unsigned_abs());
+    let edit = Edit::try_new(Some(begin), playable, 1, 1).map_err(|_| bad("edit does not fit"))?;
+    let trim = Trim::new(
+        Some(leading),
+        trailing.and_then(|value| u64::try_from(value).ok()),
+    );
+    let params = StreamParams::try_audio(
+        StreamCodec::Known(CodecId::Vorbis),
+        head.sample_rate,
+        u16::from(head.channels),
+        extradata,
+    )
+    .map_err(|_| bad("audio parameters out of range"))?;
+    let stream = Stream::new(
+        id,
+        params,
+        Timescale::new(head.sample_rate),
+        None,
+        vec![edit],
+        trim,
+    );
+    let modes = match &vorbis.timing {
+        Timing::Vorbis(modes) => modes.long.clone(),
+        Timing::Opus { .. } => Vec::new(),
+    };
+    let info = Info::Vorbis(VorbisInfo {
+        serial: vorbis.serial,
+        id: head,
+        comment,
+        modes,
+        start,
+        end,
+        trailing,
+    });
+    Ok((stream, info))
+}
+
+/// Reads each stream's header packets after the first: `OpusTags` (RFC 7845
+/// section 5.2), or the Vorbis comment and setup headers (Vorbis I section
+/// A.2). The last header packet finishes its page. A comment longer than
+/// `max_header_bytes` is cut; a longer setup header is refused, because the
+/// stream cannot be decoded without all of it. Sets each Vorbis stream's
+/// modes, and each stream's first audio page sequence. Returns the headers
+/// and the offset after the first page where a stream's headers end.
+fn read_headers<R: Read>(
     source: &mut Source<R>,
     kinds: &mut [Kind],
+    heads: &[Head],
     bos_sequences: &[u32],
     current: &mut Option<Page>,
     mut replay: Option<&mut VecDeque<Page>>,
-    audio_start: &mut u64,
     limits: Limits,
-) -> Result<Vec<Option<OpusTags>>, Fault> {
+) -> Result<(Vec<Option<Headers>>, Option<u64>), Fault> {
     struct Pending {
+        /// Header packets completed so far.
+        done: Vec<(Vec<u8>, bool)>,
+        /// Header packets the mapping has after the first.
+        wanted: usize,
         bytes: Vec<u8>,
         len: u64,
-        started: bool,
+        /// A packet is partly read: the next page continues it.
+        open: bool,
         next_sequence: u32,
     }
-    let mut tags: Vec<Option<OpusTags>> = vec![None; kinds.len()];
-    let mut pending: Vec<Option<Pending>> = kinds
+    let mut headers: Vec<Option<Headers>> = Vec::with_capacity(kinds.len());
+    headers.resize_with(kinds.len(), || None);
+    let mut pending: Vec<Option<Pending>> = heads
         .iter()
         .zip(bos_sequences)
-        .map(|(kind, &bos)| match kind {
-            Kind::Opus(_) => Some(Pending {
+        .map(|(head, &bos)| {
+            let wanted = match head {
+                Head::Opus(_) => 1,
+                Head::Vorbis(_) => 2,
+                Head::Unknown => return None,
+            };
+            Some(Pending {
+                done: Vec::new(),
+                wanted,
                 bytes: Vec::new(),
                 len: 0,
-                started: false,
+                open: false,
                 next_sequence: bos.wrapping_add(1),
-            }),
-            Kind::Unknown { .. } => None,
+            })
         })
         .collect();
+    let missing = |head: &Head, serial| match head {
+        Head::Vorbis(_) => OggError::MissingVorbisHeaders { serial },
+        Head::Opus(_) | Head::Unknown => OggError::MissingOpusTags { serial },
+    };
     let cap = limits.max_header_bytes;
+    let wanted = pending.iter().flatten().map(|state| state.wanted).max();
+    let scan_limit = cap
+        .saturating_mul(u64::try_from(wanted.unwrap_or(1)).unwrap_or(u64::MAX))
+        .saturating_add(MAX_START_SCAN_BYTES);
     let mut scanned = 0_u64;
-    let mut first_done = true;
+    let mut audio_start: Option<u64> = None;
     while let Some(waiting) = pending.iter().position(Option::is_some) {
         let page = match current.take() {
             Some(page) => page,
@@ -1096,10 +1403,7 @@ fn read_tags<R: Read>(
                     page
                 }
                 PageRead::End => {
-                    return Err(OggError::MissingOpusTags {
-                        serial: kinds[waiting].serial(),
-                    }
-                    .into());
+                    return Err(missing(&heads[waiting], kinds[waiting].serial()).into());
                 }
                 PageRead::Truncated { expected, got } => {
                     return Err(OggError::TruncatedPage { expected, got }.into());
@@ -1107,19 +1411,16 @@ fn read_tags<R: Read>(
             },
         };
         scanned = scanned.saturating_add(u64::try_from(page.byte_len()).unwrap_or(0));
-        if scanned > cap.saturating_add(MAX_START_SCAN_BYTES) {
+        if scanned > scan_limit {
             return Err(OggError::TooLarge {
                 declared: scanned,
-                limit: cap.saturating_add(MAX_START_SCAN_BYTES),
+                limit: scan_limit,
             }
             .into());
         }
         let Some(index) = kinds.iter().position(|kind| kind.serial() == page.serial) else {
             if page.bos() {
-                return Err(OggError::MissingOpusTags {
-                    serial: kinds[waiting].serial(),
-                }
-                .into());
+                return Err(missing(&heads[waiting], kinds[waiting].serial()).into());
             }
             continue;
         };
@@ -1127,7 +1428,14 @@ fn read_tags<R: Read>(
             continue;
         };
         let serial = page.serial;
-        let bad = |reason| Fault::Ogg(OggError::BadOpusTags { serial, reason });
+        let vorbis = matches!(heads[index], Head::Vorbis(_));
+        let bad = |reason| {
+            Fault::Ogg(if vorbis {
+                OggError::BadVorbisHeader { serial, reason }
+            } else {
+                OggError::BadOpusTags { serial, reason }
+            })
+        };
         if page.bos() {
             return Err(bad("a stream begins twice"));
         }
@@ -1135,13 +1443,16 @@ fn read_tags<R: Read>(
             return Err(bad("a header page is missing"));
         }
         state.next_sequence = page.sequence.wrapping_add(1);
-        let pieces = page.pieces();
-        let mut done = false;
-        for (position, piece) in pieces.iter().enumerate() {
-            if done {
-                return Err(OggError::TagsPageNotFinished { serial }.into());
+        for (position, piece) in page.pieces().iter().enumerate() {
+            if state.done.len() == state.wanted {
+                return Err(if vorbis {
+                    OggError::SetupPageNotFinished { serial }
+                } else {
+                    OggError::TagsPageNotFinished { serial }
+                }
+                .into());
             }
-            if position == 0 && page.continued() != state.started {
+            if position == 0 && page.continued() != state.open {
                 return Err(bad("header page continuation does not match"));
             }
             let data = &page.body[piece.start..piece.end];
@@ -1150,29 +1461,56 @@ fn read_tags<R: Read>(
             state.len = state
                 .len
                 .saturating_add(u64::try_from(data.len()).unwrap_or(u64::MAX));
-            state.started = true;
-            done = piece.complete;
-        }
-        if done {
-            let cut = state.len > cap;
-            let parsed = OpusTags::parse(&state.bytes, serial, cut)?;
-            tags[index] = Some(parsed);
-            pending[index] = None;
-            if let Kind::Opus(opus) = &mut kinds[index] {
-                opus.first_audio_sequence = page.sequence.wrapping_add(1);
-            }
-            let after = page
-                .offset
-                .saturating_add(u64::try_from(page.byte_len()).unwrap_or(0));
-            if first_done {
-                *audio_start = after;
-                first_done = false;
-            } else {
-                *audio_start = (*audio_start).min(after);
+            state.open = !piece.complete;
+            if piece.complete {
+                let cut = state.len > cap;
+                // Vorbis I section A.2: the setup header is the last header.
+                if vorbis && cut && state.done.len() + 1 == state.wanted {
+                    return Err(OggError::TooLarge {
+                        declared: state.len,
+                        limit: cap,
+                    }
+                    .into());
+                }
+                state.done.push((std::mem::take(&mut state.bytes), cut));
+                state.len = 0;
             }
         }
+        if state.done.len() < state.wanted {
+            continue;
+        }
+        let done = std::mem::take(&mut state.done);
+        pending[index] = None;
+        let parsed = match (&heads[index], &mut kinds[index], done.as_slice()) {
+            (Head::Opus(_), _, [(tags, cut)]) => {
+                Headers::Opus(OpusTags::parse(tags, serial, *cut)?)
+            }
+            (Head::Vorbis(id), Kind::Logical(logical), [(comment, cut), (setup, _)]) => {
+                let parsed = VorbisComment::parse(comment, serial, *cut)?;
+                logical.timing = Timing::Vorbis(VorbisModes::parse(setup, id, serial)?);
+                let comment_bytes = if *cut {
+                    parsed.encode()
+                } else {
+                    comment.clone()
+                };
+                Headers::Vorbis {
+                    comment: parsed,
+                    comment_bytes,
+                    setup: setup.clone(),
+                }
+            }
+            _ => return Err(missing(&heads[index], serial).into()),
+        };
+        headers[index] = Some(parsed);
+        if let Kind::Logical(logical) = &mut kinds[index] {
+            logical.first_audio_sequence = page.sequence.wrapping_add(1);
+        }
+        let after = page
+            .offset
+            .saturating_add(u64::try_from(page.byte_len()).unwrap_or(0));
+        audio_start = Some(audio_start.map_or(after, |start| start.min(after)));
     }
-    Ok(tags)
+    Ok((headers, audio_start))
 }
 
 fn open_error(fault: Fault) -> OpenError {
@@ -1218,19 +1556,17 @@ impl<R: Read + Seek + Send> Demux for OggDemux<R> {
         };
         let timestamp = Timestamp::try_new(Some(ready.pts), Some(ready.pts), Some(ready.duration))
             .map_err(|_| ReadError::Source {
-                message: "negative Opus packet duration".to_owned(),
+                message: "negative Ogg packet duration".to_owned(),
             })?;
-        Packet::try_new(
-            ready.track,
-            bytes,
-            timestamp,
-            Timescale::new(OPUS_RATE),
-            true,
-        )
-        .map_err(|error| ReadError::Source {
-            message: error.to_string(),
-        })
-        .map(Some)
+        let timescale = usize::try_from(ready.track)
+            .ok()
+            .and_then(|index| self.streams.get(index))
+            .map_or(Timescale::new(OPUS_RATE), Stream::timescale);
+        Packet::try_new(ready.track, bytes, timestamp, timescale, true)
+            .map_err(|error| ReadError::Source {
+                message: error.to_string(),
+            })
+            .map(Some)
     }
 
     fn seek(&mut self, to: SeekTo) -> Result<SeekLanding, ReadError> {

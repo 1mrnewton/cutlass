@@ -22,9 +22,11 @@
 //!
 //! The factory walks the openers registered for that id, in order, and uses
 //! the first that accepts the parameters. An opener declines with
-//! [`CodecError::Unsupported`]. Any other error means the parameters are
-//! not openable, and the walk stops. The desktop registers a platform opener
-//! first, then the Rust opener.
+//! [`CodecError::Unsupported`]. Any other error from one opener (a platform
+//! decoder that fails to start, say) does not stop the walk either: the next
+//! opener is tried, and the first such error is what the caller sees when
+//! none accepts. The desktop registers a platform opener first, then the
+//! Rust opener.
 
 #![forbid(unsafe_code)]
 
@@ -586,8 +588,8 @@ impl DecodeFactory {
     }
 
     /// Later registrations do not hide an earlier opener that accepts the
-    /// same id. An earlier [`CodecError::Unsupported`] does not hide a
-    /// later opener. The desktop registers a platform opener first, then
+    /// same id. An earlier opener that refuses, for any reason, does not
+    /// hide a later one. The desktop registers a platform opener first, then
     /// the Rust opener.
     pub fn register(
         &mut self,
@@ -597,7 +599,8 @@ impl DecodeFactory {
         self.openers.push(Opener { id, open });
     }
 
-    /// Later video registrations do not hide an earlier one for the same id.
+    /// Later video registrations do not hide an earlier one for the same id,
+    /// and an earlier one that refuses does not hide a later one.
     pub fn register_video(
         &mut self,
         id: CodecId,
@@ -607,39 +610,57 @@ impl DecodeFactory {
     }
 
     pub fn open(&self, params: &CodecParams) -> Result<Box<dyn Decoder>, CodecError> {
-        let mut registered = false;
-        for opener in &self.openers {
-            if opener.id != params.codec {
-                continue;
-            }
-            registered = true;
-            match (opener.open)(params) {
-                Ok(decoder) => return Ok(decoder),
-                Err(CodecError::Unsupported { .. }) => continue,
-                Err(err) => return Err(err),
-            }
-        }
-        if registered {
-            Err(CodecError::Unsupported {
-                what: "no decoder accepted the parameters",
-            })
-        } else {
-            Err(CodecError::Unsupported {
-                what: "codec is not registered",
-            })
-        }
+        first_accepting(
+            self.openers
+                .iter()
+                .filter(|opener| opener.id == params.codec)
+                .map(|opener| opener.open),
+            params,
+            "codec is not registered",
+        )
     }
 
     pub fn open_video(&self, params: &CodecParams) -> Result<Box<dyn VideoDecoder>, CodecError> {
-        for opener in &self.video_openers {
-            if opener.id == params.codec {
-                return (opener.open)(params);
+        first_accepting(
+            self.video_openers
+                .iter()
+                .filter(|opener| opener.id == params.codec)
+                .map(|opener| opener.open),
+            params,
+            "video codec is not registered",
+        )
+    }
+}
+
+/// The first opener that accepts `params`. When none does, the first error
+/// that was not a plain decline, else a decline naming why.
+fn first_accepting<T>(
+    openers: impl Iterator<Item = fn(&CodecParams) -> Result<T, CodecError>>,
+    params: &CodecParams,
+    unregistered: &'static str,
+) -> Result<T, CodecError> {
+    let mut registered = false;
+    let mut failed = None;
+    for open in openers {
+        registered = true;
+        match open(params) {
+            Ok(decoder) => return Ok(decoder),
+            Err(CodecError::Unsupported { .. }) => {}
+            Err(error) => {
+                failed.get_or_insert(error);
             }
         }
-        Err(CodecError::Unsupported {
-            what: "video codec is not registered",
-        })
     }
+    if let Some(error) = failed {
+        return Err(error);
+    }
+    Err(CodecError::Unsupported {
+        what: if registered {
+            "no decoder accepted the parameters"
+        } else {
+            unregistered
+        },
+    })
 }
 
 impl Default for DecodeFactory {
@@ -953,6 +974,39 @@ mod tests {
         Ok(Box::new(Solid))
     }
 
+    fn open_broken_video(_params: &CodecParams) -> Result<Box<dyn VideoDecoder>, CodecError> {
+        Err(CodecError::Malformed {
+            at_bit: 0,
+            what: "platform session",
+        })
+    }
+
+    #[test]
+    fn a_video_opener_that_fails_falls_through_to_the_next() {
+        let mut factory = DecodeFactory::new();
+        factory.register_video(CodecId::H264, open_broken_video);
+        factory.register_video(CodecId::H264, open_solid);
+        let params = CodecParams::video(CodecId::H264, 2, 2);
+        let mut decoder = factory.open_video(&params).expect("fell through");
+        let out = decoder
+            .push(&Packet::video(vec![1], 0, 1, 30, true))
+            .expect("push");
+        assert_eq!(out.len(), 1);
+
+        let mut broken = DecodeFactory::new();
+        broken.register_video(CodecId::H264, open_broken_video);
+        assert!(matches!(
+            broken.open_video(&params),
+            Err(CodecError::Malformed { .. })
+        ));
+        assert!(matches!(
+            DecodeFactory::new().open_video(&params),
+            Err(CodecError::Unsupported {
+                what: "video codec is not registered",
+            })
+        ));
+    }
+
     #[test]
     fn video_factory_uses_the_first_registration() {
         let mut factory = DecodeFactory::new();
@@ -1017,11 +1071,20 @@ mod tests {
     }
 
     #[test]
-    fn a_malformed_configuration_stops_the_walk() {
+    fn a_failing_platform_opener_falls_through_to_the_rust_one() {
         OPEN_RUST.with(|count| count.set(0));
         let mut factory = DecodeFactory::new();
         factory.register(CodecId::Jpeg, open_malformed);
         factory.register(CodecId::Jpeg, open_raw(2));
+        assert!(factory.open(&jpeg(1, 1, PixelFormat::Rgba8)).is_ok());
+        assert_eq!(OPEN_RUST.with(Cell::get), 1);
+    }
+
+    #[test]
+    fn when_none_accepts_the_first_real_error_is_reported() {
+        let mut factory = DecodeFactory::new();
+        factory.register(CodecId::Jpeg, open_raw(1));
+        factory.register(CodecId::Jpeg, open_malformed);
         let err = match factory.open(&jpeg(1, 1, PixelFormat::Rgba8)) {
             Err(err) => err,
             Ok(_) => panic!("malformed"),
@@ -1033,7 +1096,6 @@ mod tests {
                 what: "configuration",
             }
         );
-        assert_eq!(OPEN_RUST.with(Cell::get), 0);
     }
 
     #[test]

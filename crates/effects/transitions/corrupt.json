@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "id": "corrupt",
+  "name": "Corrupt",
+  "category": "Glitch",
+  "duration": 0.5,
+  "outgoing": [
+    {"block": "posterize", "params": {"levels": {"keys": [[0, 256], [0.5, 4], [1, 256]]}}},
+    {"block": "blocks", "params": {"amount": {"keys": [[0, 0], [0.5, 0.9], [1, 0]]}, "color": 0.8, "seed": {"jitter": {"rate": 30, "from": 0, "to": 1000, "seed": 4011}}}},
+    {"block": "hue", "params": {"degrees": {"keys": [[0, 0], [0.3, 90], [0.4, -60], [0.5, 120], [0.6, -90], [0.7, 45], [1, 0]]}}}
+  ],
+  "incoming": [
+    {"block": "posterize", "params": {"levels": {"keys": [[0, 256], [0.5, 4], [1, 256]]}}},
+    {"block": "blocks", "params": {"amount": {"keys": [[0, 0], [0.5, 0.9], [1, 0]]}, "color": 0.8, "seed": {"jitter": {"rate": 30, "from": 0, "to": 1000, "seed": 4011}}}},
+    {"block": "hue", "params": {"degrees": {"keys": [[0, 0], [0.3, 90], [0.4, -60], [0.5, 120], [0.6, -90], [0.7, 45], [1, 0]]}}}
+  ],
+  "cross": {"kind": 8, "progress": {"keys": [[0.49, 0], [0.51, 1]]}}
+}

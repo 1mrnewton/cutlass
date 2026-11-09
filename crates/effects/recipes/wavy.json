@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "id": "wavy",
+  "name": "Wavy",
+  "category": "Distort",
+  "preview": "beach",
+  "controls": [
+    {"id": "speed", "name": "Speed", "default": 1, "min": 0.25, "max": 3, "unit": "times", "speed": true},
+    {"id": "intensity", "name": "Intensity", "default": 1, "min": 0, "max": 2, "unit": "percent", "scale": [[0, "amount"]]}
+  ],
+  "passes": [
+    {
+      "block": "ripple",
+      "params": {
+        "amount": 0.015,
+        "length": 0.25,
+        "phase": {"keys": [[0, 0], [2, 1]], "repeat": 2},
+        "kind": 0
+      }
+    }
+  ]
+}

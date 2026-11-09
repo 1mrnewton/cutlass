@@ -25,6 +25,17 @@ impl Session {
         }
     }
 
+    /// Open a project read from disk: `open`, after dropping every lane other
+    /// than main that holds no clips. Edits already drop a lane they empty;
+    /// this clears the ones a project saved before that rule still holds. It
+    /// is a load repair, not an edit: the revision is 0 and there is nothing
+    /// to undo.
+    #[must_use]
+    pub fn open_project(mut draft: Draft) -> Self {
+        drop_empty_lanes(&mut draft);
+        Self::open(draft)
+    }
+
     /// Follow and cut switches. A new draft starts with all of them on.
     #[must_use]
     pub fn linkage(&self) -> LinkageSettings {
@@ -106,8 +117,12 @@ impl Session {
         self.history.can_redo()
     }
 
-    /// Restore the draft from before the last apply. The revision still advances.
+    /// Restore the draft from before the last apply. The revision still
+    /// advances. Refused while a transaction is open.
     pub fn undo(&mut self) -> Result<u64, EditError> {
+        if self.history.is_open() {
+            return Err(EditError::HistoryOpen);
+        }
         let previous = self.history.pop_undo().ok_or(EditError::EmptyUndo)?;
         let current = std::mem::replace(&mut self.draft, previous);
         self.history.push_redo(current);
@@ -116,7 +131,11 @@ impl Session {
     }
 
     /// Reapply the draft that undo removed. The revision advances again.
+    /// Refused while a transaction is open.
     pub fn redo(&mut self) -> Result<u64, EditError> {
+        if self.history.is_open() {
+            return Err(EditError::HistoryOpen);
+        }
         let next = self.history.pop_redo().ok_or(EditError::EmptyRedo)?;
         let current = std::mem::replace(&mut self.draft, next);
         self.history.push_undo(current);
@@ -124,7 +143,8 @@ impl Session {
         Ok(self.revision)
     }
 
-    /// Snapshot the open draft. `apply` still pushes undo on its own.
+    /// Open a transaction: the applies until [`Self::commit`] are one undo
+    /// step.
     pub fn begin(&mut self) -> Result<(), EditError> {
         self.history.begin(&self.draft)
     }
@@ -139,19 +159,22 @@ impl Session {
         self.history.is_recording()
     }
 
-    /// Close the transaction. A changed draft is one recorded step, not a second undo push.
+    /// Close the transaction. A changed draft is one undo step.
     pub fn commit(&mut self) -> Result<(), EditError> {
         self.history.commit(&self.draft)
     }
 
-    /// Fold the open draft into the last recorded step.
+    /// Close the transaction into the undo step before it.
     pub fn amend(&mut self) -> Result<(), EditError> {
         self.history.amend(&self.draft)
     }
 
-    /// Put the open draft back where it was at [`Self::begin`] or [`Self::record`].
+    /// Put the open draft back where it was at [`Self::begin`] or
+    /// [`Self::record`]. The revision advances, as for any change a reader
+    /// of the draft must notice.
     pub fn rollback(&mut self) -> Result<(), EditError> {
         self.draft = self.history.rollback()?;
+        self.revision = self.revision.saturating_add(1);
         Ok(())
     }
 
@@ -171,11 +194,18 @@ impl Session {
     }
 }
 
+/// Take every lane other than main that holds no clips.
+pub fn drop_empty_lanes(draft: &mut Draft) {
+    draft
+        .tracks
+        .retain(|track| track.is_main() || !track.segments.is_empty());
+}
+
 #[cfg(test)]
 mod tests {
     use cutlass_model::{
-        ConstantSpeedError, Draft, MaterialAudioFade, MaterialId, MaterialSpeed, MaterialText,
-        MaterialTransition, Micros, Segment, SpeedMode, SpeedPoint, TimeRange, Track,
+        ConstantSpeedError, MaterialAudioFade, MaterialId, MaterialSpeed, MaterialText,
+        MaterialTransition, Micros, Segment, SegmentId, SpeedMode, SpeedPoint, TimeRange, Track,
         TrackAttribute, TrackId, WordColumns,
     };
 
@@ -183,12 +213,49 @@ mod tests {
     use crate::request::{Request, TrimEdge};
 
     fn session() -> (Session, TrackId) {
-        let mut draft = Draft::empty("D");
+        let mut draft = crate::edit::test_draft("D");
         // These cases check the requested span. Packing is covered in the magnet tests.
         draft.config.maintrack_adsorb = false;
         let track_id = TrackId::new("main");
         draft.tracks[0].id = track_id.clone();
         (Session::open(draft), track_id)
+    }
+
+    #[test]
+    fn a_project_opens_without_its_empty_lanes_but_keeps_main_and_full_ones() {
+        let mut draft = crate::edit::test_draft("D");
+        draft.tracks[0].segments.clear();
+        let mut sound = Track::main(TrackId::new("sound"));
+        sound.kind = cutlass_model::TrackType::Audio;
+        sound.flag = cutlass_model::TrackFlag::None;
+        sound.attribute = TrackAttribute(TrackAttribute::MUTE);
+        let mut words = Track::main(TrackId::new("words"));
+        words.kind = cutlass_model::TrackType::Text;
+        words.flag = cutlass_model::TrackFlag::None;
+        words
+            .segments
+            .push(Segment::new("hello", "text", TimeRange::new(0, 1_000_000)));
+        draft.tracks.insert(0, words);
+        draft.tracks.push(sound.clone());
+        sound.id = TrackId::new("sound-2");
+        draft.tracks.push(sound);
+
+        let session = Session::open_project(draft);
+        let ids: Vec<&str> = session
+            .draft()
+            .tracks
+            .iter()
+            .map(|track| track.id.as_str())
+            .collect();
+        assert_eq!(
+            ids.len(),
+            2,
+            "the empty main stays and the text lane stays: {ids:?}"
+        );
+        assert_eq!(ids[0], "words");
+        assert!(session.draft().tracks[1].is_main());
+        assert_eq!(session.revision(), 0);
+        assert!(!session.can_undo());
     }
 
     fn place(track_id: &TrackId, id: &str, start: i64, duration: i64) -> Request {
@@ -852,7 +919,7 @@ mod tests {
     }
 
     #[test]
-    fn rollback_restores_the_draft_from_begin_and_drops_the_undo_apply_pushed() {
+    fn rollback_restores_the_draft_from_begin_and_bumps_the_revision() {
         let (mut session, track) = session();
         session
             .apply(0, &[place(&track, "a", 0, 1_000_000)])
@@ -865,7 +932,8 @@ mod tests {
         assert_eq!(session.draft().tracks[0].segments.len(), 2);
         session.rollback().unwrap();
         assert_eq!(session.draft(), &at_begin);
-        assert_eq!(session.revision(), 2);
+        // The apply was 2; the rollback changed the draft again.
+        assert_eq!(session.revision(), 3);
         assert_eq!(session.recorded_steps(), 0);
         session.undo().unwrap();
         assert!(session.draft().tracks[0].segments.is_empty());
@@ -873,12 +941,17 @@ mod tests {
     }
 
     #[test]
-    fn commit_records_one_step_and_apply_still_pushes_one_undo() {
+    fn a_committed_transaction_is_one_undo_step() {
         let (mut session, track) = session();
         session.begin().unwrap();
         session
             .apply(0, &[place(&track, "a", 0, 1_000_000)])
             .unwrap();
+        session
+            .apply(1, &[place(&track, "b", 1_000_000, 500_000)])
+            .unwrap();
+        assert!(!session.can_undo(), "no step until the commit");
+        assert_eq!(session.undo().unwrap_err(), EditError::HistoryOpen);
         session.commit().unwrap();
         assert_eq!(session.recorded_steps(), 1);
         assert_eq!(
@@ -887,45 +960,61 @@ mod tests {
         );
         assert_eq!(
             session.recorded_after().map(|draft| draft.duration),
-            Some(Micros(1_000_000))
+            Some(Micros(1_500_000))
         );
         assert!(session.commit().is_err());
         session.undo().unwrap();
-        assert_eq!(session.draft().duration, Micros(0));
+        assert!(session.draft().tracks[0].segments.is_empty());
         assert_eq!(session.undo().unwrap_err(), EditError::EmptyUndo);
+        session.redo().unwrap();
+        assert_eq!(session.draft().tracks[0].segments.len(), 2);
     }
 
     #[test]
-    fn amend_folds_into_the_last_recorded_step() {
+    fn a_transaction_that_changes_nothing_adds_no_step() {
         let (mut session, track) = session();
+        session.begin().unwrap();
+        session.commit().unwrap();
+        assert!(!session.can_undo());
         session.begin().unwrap();
         session
             .apply(0, &[place(&track, "a", 0, 1_000_000)])
             .unwrap();
-        session.commit().unwrap();
-        session.begin().unwrap();
         session
+            .apply(
+                1,
+                &[Request::Remove {
+                    segment_id: SegmentId::new("a"),
+                }],
+            )
+            .unwrap();
+        session.commit().unwrap();
+        assert!(!session.can_undo());
+    }
+
+    #[test]
+    fn amend_joins_the_open_transaction_to_the_step_before_it() {
+        let (mut edited, track) = session();
+        edited
+            .apply(0, &[place(&track, "a", 0, 1_000_000)])
+            .unwrap();
+        edited.begin().unwrap();
+        edited
             .apply(1, &[place(&track, "b", 1_000_000, 500_000)])
             .unwrap();
-        session.amend().unwrap();
-        assert_eq!(session.recorded_steps(), 1);
-        assert_eq!(session.draft().tracks[0].segments.len(), 2);
-        assert_eq!(
-            session
-                .recorded_after()
-                .map(|draft| draft.tracks[0].segments.len()),
-            Some(2)
-        );
-        assert_eq!(
-            session
-                .recorded_before()
-                .map(|draft| draft.tracks[0].segments.len()),
-            Some(0)
-        );
-        session.undo().unwrap();
-        assert_eq!(session.draft().tracks[0].segments.len(), 1);
-        session.undo().unwrap();
-        assert!(session.draft().tracks[0].segments.is_empty());
+        edited.amend().unwrap();
+        assert_eq!(edited.draft().tracks[0].segments.len(), 2);
+        edited.undo().unwrap();
+        assert!(edited.draft().tracks[0].segments.is_empty());
+        assert_eq!(edited.undo().unwrap_err(), EditError::EmptyUndo);
+
+        // With no step before it, amend is a commit.
+        let (mut fresh, track) = session();
+        fresh.begin().unwrap();
+        fresh.apply(0, &[place(&track, "a", 0, 1_000_000)]).unwrap();
+        fresh.amend().unwrap();
+        fresh.undo().unwrap();
+        assert!(fresh.draft().tracks[0].segments.is_empty());
     }
 
     #[test]
@@ -943,13 +1032,71 @@ mod tests {
         session.rollback().unwrap();
         assert!(!session.is_recording());
         assert!(session.draft().tracks[0].segments.is_empty());
-        assert_eq!(session.revision(), 2);
+        assert_eq!(session.revision(), 3);
         session.record().unwrap();
-        session.apply(2, &[place(&track, "c", 0, 250_000)]).unwrap();
+        session.apply(3, &[place(&track, "c", 0, 250_000)]).unwrap();
         session.commit().unwrap();
         assert!(!session.is_recording());
         assert_eq!(session.recorded_steps(), 1);
         assert_eq!(session.draft().tracks[0].segments.len(), 1);
+        session.undo().unwrap();
+        assert!(session.draft().tracks[0].segments.is_empty());
+    }
+
+    #[test]
+    fn the_undo_stack_drops_its_oldest_steps_past_its_byte_budget() {
+        let (mut stack, track) = session();
+        let step = crate::history::json_bytes(stack.draft());
+        // Room for about three steps of this size.
+        stack.history.set_byte_budget(step * 3 + step / 2);
+        for index in 0..6_u64 {
+            let start = i64::try_from(index).unwrap() * 1_000_000;
+            stack
+                .apply(
+                    index,
+                    &[place(&track, &format!("c{index}"), start, 1_000_000)],
+                )
+                .unwrap();
+        }
+        assert!(
+            stack.history.undo_bytes() <= step * 4,
+            "the stack kept too much"
+        );
+        let mut undone = 0;
+        while stack.undo().is_ok() {
+            undone += 1;
+        }
+        assert!((1..6).contains(&undone), "{undone} steps were kept");
+        assert_eq!(stack.history.undo_bytes(), 0);
+
+        // A single step larger than the budget still stays.
+        let (mut tight, track) = session();
+        tight.history.set_byte_budget(1);
+        tight.apply(0, &[place(&track, "a", 0, 1_000_000)]).unwrap();
+        tight
+            .apply(1, &[place(&track, "b", 1_000_000, 1_000_000)])
+            .unwrap();
+        tight.undo().unwrap();
+        assert_eq!(tight.undo().unwrap_err(), EditError::EmptyUndo);
+    }
+
+    #[test]
+    fn a_place_naming_no_material_is_refused_and_the_draft_stays() {
+        let (mut session, track) = session();
+        let before = session.draft().clone();
+        let stray = Request::Place {
+            track_id: track.clone(),
+            segment: Box::new(Segment::new("a", "nowhere", TimeRange::new(0, 1_000_000))),
+        };
+        assert_eq!(
+            session.apply(0, &[stray]).unwrap_err(),
+            EditError::MissingMaterial
+        );
+        assert_eq!(session.draft(), &before);
+        assert_eq!(session.revision(), 0);
+        session
+            .apply(0, &[place(&track, "a", 0, 1_000_000)])
+            .unwrap();
     }
 
     #[test]
@@ -958,7 +1105,8 @@ mod tests {
         let before = session.draft().clone();
         assert_eq!(session.rollback().unwrap_err(), EditError::HistoryClosed);
         assert_eq!(session.commit().unwrap_err(), EditError::HistoryClosed);
-        assert_eq!(session.amend().unwrap_err(), EditError::NothingToAmend);
+        assert_eq!(session.amend().unwrap_err(), EditError::HistoryClosed);
+        assert_eq!(session.revision(), 0);
         session.begin().unwrap();
         assert_eq!(session.begin().unwrap_err(), EditError::HistoryOpen);
         assert_eq!(session.draft(), &before);
@@ -1139,7 +1287,7 @@ mod tests {
         assert_eq!(session.draft().tracks[0].segments.len(), 1);
         session.rollback().unwrap();
         assert_eq!(session.draft().tracks[0].segments.len(), 1);
-        assert_eq!(session.revision(), 1);
+        assert_eq!(session.revision(), 2);
     }
 
     fn blend(id: &str, duration: i64, overlap: bool) -> MaterialTransition {

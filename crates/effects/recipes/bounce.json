@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "id": "bounce",
+  "name": "Bounce",
+  "category": "Motion",
+  "preview": "dancer",
+  "poster": 0.1,
+  "controls": [
+    {"id": "speed", "name": "Speed", "default": 1, "min": 0.25, "max": 3, "unit": "times", "speed": true},
+    {"id": "intensity", "name": "Intensity", "default": 1, "min": 0, "max": 2, "unit": "percent", "scale": [[0, "y"]]}
+  ],
+  "passes": [
+    {
+      "block": "transform",
+      "params": {
+        "scale": 1.12,
+        "y": {"keys": [[0, -0.05], [0.25, 0], [0.4, -0.02], [0.55, 0], [0.65, -0.006], [0.75, 0]], "repeat": 1.5}
+      }
+    }
+  ]
+}

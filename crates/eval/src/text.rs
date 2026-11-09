@@ -9,7 +9,7 @@
 //! The caption's style pages the words and sets each word's color, box,
 //! size and lift; rotation is not applied.
 
-use cutlass_captions::{CaptionQuery, KeywordRange, PageLimits, RangeStyles, Rgba, sample_caption};
+use cutlass_captions::{CaptionQuery, KeywordRange, RangeStyles, Rgba, sample_caption};
 use cutlass_engine::DisplayQuarter;
 use std::collections::HashMap;
 
@@ -103,15 +103,22 @@ pub(crate) fn text_layers(
             if !covers(segment.target.start.0, segment.target.duration.0, time.0) {
                 continue;
             }
-            let Some(MaterialRef::Text(material)) =
-                draft.materials.get(segment.material_id.as_str())
+            let Some(MaterialRef::Text(stored)) = draft.materials.get(segment.material_id.as_str())
             else {
                 continue;
             };
+            // Keyed letters take their color at `time`, and are drawn for
+            // each frame and not kept.
+            let keyed = cutlass_model::text_color_at(segment, &draft.keyframe_graph_list, time);
+            let recolored = keyed.map(|rgb| recolor(stored, rgb));
+            let material = recolored.as_ref().unwrap_or(stored);
+            // Text with no face draws nothing; the log says so once.
             if material.font_path.is_empty() {
+                logged::<(), _>("text", segment, Err("it has no font file"));
                 continue;
             }
             let Some(face) = fonts.face(&material.font_path) else {
+                logged::<(), _>("text", segment, Err("its font file is not here"));
                 continue;
             };
             let Some((clip, uniform)) = cutlass_model::animated_at(draft, segment, time) else {
@@ -134,6 +141,7 @@ pub(crate) fn text_layers(
                     segment,
                     time,
                     wanted,
+                    f64::from(width),
                 ) else {
                     continue;
                 };
@@ -145,7 +153,7 @@ pub(crate) fn text_layers(
                 let steps = cutlass_model::letters_at(draft, segment, time);
                 let kept = rasters
                     .get(&segment.id)
-                    .filter(|(drawn, _)| *drawn == wanted && steps.is_empty())
+                    .filter(|(drawn, _)| *drawn == wanted && steps.is_empty() && keyed.is_none())
                     .cloned();
                 let Some((drawn, bytes)) = kept.or_else(|| {
                     title_picture(
@@ -160,7 +168,7 @@ pub(crate) fn text_layers(
                 }) else {
                     continue;
                 };
-                if steps.is_empty() {
+                if steps.is_empty() && keyed.is_none() {
                     rasters.insert(segment.id.clone(), (drawn, bytes.clone()));
                 }
                 (bytes, transform.dense(drawn))
@@ -179,6 +187,24 @@ pub(crate) fn text_layers(
         }
     }
     layers
+}
+
+/// `material` with its letters, and every rich range's, in `rgb`.
+fn recolor(material: &MaterialText, rgb: [f64; 3]) -> MaterialText {
+    let mut text = material.clone();
+    let byte = |unit: f64| {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let byte = (unit.clamp(0.0, 1.0) * 255.0).round() as u8;
+        byte
+    };
+    text.text_color = format!(
+        "#{:02X}{:02X}{:02X}",
+        byte(rgb[0]),
+        byte(rgb[1]),
+        byte(rgb[2])
+    );
+    text.paint_rich(rgb);
+    text
 }
 
 /// A title drawn with `density` pixels to each shown pixel, and that
@@ -260,6 +286,51 @@ pub fn text_size(draft: &Draft, fonts: &dyn Fonts, segment: &Segment) -> Option<
     if material.font_path.is_empty() || words_present(material) {
         return None;
     }
+    title_size(draft, fonts, segment, material)
+}
+
+/// The size a title's or caption's text picture is drawn at `time`, before
+/// placement, as [`text_layers`] draws it on a canvas of the draft's width.
+/// A caption has the size of the page of words showing then, and none
+/// between pages; a clip whose face is missing has none.
+#[must_use]
+pub fn text_size_at(
+    draft: &Draft,
+    fonts: &dyn Fonts,
+    segment: &Segment,
+    time: Micros,
+) -> Option<(u32, u32)> {
+    let Some(MaterialRef::Text(material)) = draft.materials.get(segment.material_id.as_str())
+    else {
+        return None;
+    };
+    if material.font_path.is_empty() {
+        return None;
+    }
+    if !words_present(material) {
+        return title_size(draft, fonts, segment, material);
+    }
+    let face = fonts.face(&material.font_path)?;
+    let canvas_width = f64::from(draft.canvas_config.width.max(1));
+    let (_, bytes) = caption_picture(
+        Faces { fonts, face },
+        material,
+        glow(draft, segment).as_ref(),
+        segment,
+        time,
+        1.0,
+        canvas_width,
+    )?;
+    let extent = bytes.extent();
+    Some((extent.width, extent.height))
+}
+
+fn title_size(
+    draft: &Draft,
+    fonts: &dyn Fonts,
+    segment: &Segment,
+    material: &MaterialText,
+) -> Option<(u32, u32)> {
     let face = fonts.face(&material.font_path)?;
     let glow = glow(draft, segment);
     let faces = Faces { fonts, face };
@@ -342,6 +413,9 @@ fn columns_present(columns: &WordColumns) -> bool {
 /// not opaque white replaces it. Position is a pixel shift, right and down;
 /// scale sizes a word about its middle, and a background is a round box
 /// behind the word. Rotation on the style is not applied.
+/// The share of the canvas width a caption with no line width wraps at.
+const CAPTION_WIDTH: f64 = 0.9;
+
 fn caption_picture(
     faces: Faces<'_>,
     material: &MaterialText,
@@ -349,18 +423,13 @@ fn caption_picture(
     segment: &Segment,
     time: Micros,
     density: f64,
+    canvas_width: f64,
 ) -> Option<(f64, CpuBytes)> {
     let style = cutlass_captions::caption_style(&material.caption_style);
     let styles = style.map_or_else(RangeStyles::identity, |style| {
         style.styles(material.font_size)
     });
-    let limits = style.map_or(
-        PageLimits {
-            words_per_line: 0,
-            lines_per_page: 0,
-        },
-        |style| style.limits,
-    );
+    let limits = cutlass_captions::caption_limits(&material.caption_style);
     let frame = sample_caption(&CaptionQuery {
         material,
         font: faces.face,
@@ -384,6 +453,10 @@ fn caption_picture(
         let mut page = material.clone();
         page.content.clone_from(&frame.letters.text);
         page.is_rich_text = false;
+        // A caption with no line width wraps inside the canvas.
+        if page.line_max_width <= 0.0 {
+            page.line_max_width = canvas_width * CAPTION_WIDTH;
+        }
         page.font_size *= density;
         page.line_max_width *= density;
         let mut source = logged(
@@ -891,6 +964,65 @@ mod tests {
     }
 
     #[test]
+    fn a_caption_reports_the_size_of_the_page_showing_at_a_time() {
+        let mut draft = text_segment("", false);
+        draft.materials.texts[0].words = words(&[("A", 0, 400), ("AB", 500, 1_000)]);
+        let segment = draft.tracks[0].segments[0].clone();
+        let at = |time: i64| super::text_size_at(&draft, &OneFont, &segment, Micros(time));
+        let (width, height) = at(0).expect("the first page has a size");
+        // The box is the picture the preview places: the whole page, with
+        // the words still to come drawn clear.
+        let drawn = |time: i64| {
+            let layers = super::text_layers(
+                &draft,
+                &OneFont,
+                256,
+                256,
+                Micros(time),
+                &mut std::collections::HashMap::new(),
+            );
+            let extent = layers[0].placed.raster.extent();
+            (extent.width, extent.height)
+        };
+        assert_eq!((width, height), drawn(0));
+        assert_eq!(at(700_000), Some(drawn(700_000)));
+        // Past its words a caption shows nothing and has no size.
+        assert_eq!(at(1_000_000), None);
+        // The timeless size still has none for a caption.
+        assert_eq!(super::text_size(&draft, &OneFont, &segment), None);
+        // A title measures the same with or without a time.
+        let title = text_segment("A", false);
+        let line = &title.tracks[0].segments[0];
+        assert_eq!(
+            super::text_size_at(&title, &OneFont, line, Micros(0)),
+            super::text_size(&title, &OneFont, line)
+        );
+        let mut faceless = draft.clone();
+        faceless.materials.texts[0].font_path.clear();
+        assert_eq!(
+            super::text_size_at(&faceless, &OneFont, &segment, Micros(0)),
+            None
+        );
+    }
+
+    #[test]
+    fn keyed_letters_change_color_between_their_keys() {
+        let mut draft = text_segment("A", false);
+        let segment = &mut draft.tracks[0].segments[0];
+        for (offset, rgb) in [(0, [1.0, 0.0, 0.0]), (1_000_000, [0.0, 0.0, 1.0])] {
+            for (name, value) in cutlass_model::TEXT_COLOR_KEYS.iter().zip(rgb) {
+                cutlass_model::put_key(segment, name, Micros(offset), value);
+            }
+        }
+        let has =
+            |time: i64, rgba: [u8; 4]| pixels(&draft, time).chunks(4).any(|pixel| pixel == rgba);
+        assert!(has(0, [255, 0, 0, 255]));
+        assert!(!has(0, [255, 255, 255, 255]));
+        assert!(has(500_000, [128, 0, 128, 255]));
+        assert!(has(999_999, [0, 0, 255, 255]));
+    }
+
+    #[test]
     fn a_caption_word_uses_the_material_color() {
         let mut draft = text_segment("", false);
         draft.materials.texts[0].text_color = "#FF0000".to_owned();
@@ -1065,5 +1197,59 @@ mod tests {
         draft.materials.texts[0].caption_stagger_ms = 150;
         let staggered = pixels(&draft, 210_000);
         assert_ne!(together, staggered);
+    }
+
+    #[test]
+    fn a_long_plain_caption_shows_the_page_being_spoken_inside_the_canvas() {
+        let mut draft = text_segment("", false);
+        draft.materials.texts[0].font_size = 24.0;
+        // Thirty words, a tenth of a second each, with no style and no line
+        // width: Plain.
+        let rows: Vec<(String, i64, i64)> = (0..30)
+            .map(|index| {
+                (
+                    match index / 12 {
+                        0 => "AB",
+                        1 => "BA",
+                        _ => "AA",
+                    }
+                    .to_owned(),
+                    index * 30,
+                    index * 30 + 30,
+                )
+            })
+            .collect();
+        let rows: Vec<(&str, i64, i64)> = rows
+            .iter()
+            .map(|(text, start, end)| (text.as_str(), *start, *end))
+            .collect();
+        draft.materials.texts[0].words = words(&rows);
+        assert!(draft.materials.texts[0].caption_style.is_empty());
+        assert_eq!(draft.materials.texts[0].line_max_width, 0.0);
+        let width = 256;
+        let first = pixels(&draft, 0);
+        let later = pixels(&draft, 700_000);
+        assert!(ink(&first) && ink(&later));
+        // The page moves on as the words are spoken.
+        assert_ne!(first, later);
+        // A page is two short lines, not thirty words on one.
+        let (wide, tall) = inked_span(&first, width);
+        assert!(wide <= width * 9 / 10, "{wide}");
+        assert!(tall < 24 * 4, "{tall}");
+        // Six words a line are wider than the canvas at a larger size: the
+        // line wraps inside it.
+        draft.materials.texts[0].font_size = 48.0;
+        let big = pixels(&draft, 0);
+        let (wide, _) = inked_span(&big, width);
+        assert!(ink(&big));
+        assert!(wide <= width * 9 / 10 + 2, "{wide}");
+        assert_eq!(
+            cutlass_captions::caption_limits(""),
+            cutlass_captions::PLAIN_LIMITS
+        );
+        assert_eq!(
+            cutlass_captions::caption_limits("one-word"),
+            cutlass_captions::caption_style("one-word").unwrap().limits
+        );
     }
 }

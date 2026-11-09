@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "cream",
+  "name": "Cream",
+  "category": "Portrait",
+  "adjust": {"fade": 0.2, "temperature": 0.15, "saturation": -0.15},
+  "curves": {"rgb": [[0, 0.06], [1, 0.96]]}
+}

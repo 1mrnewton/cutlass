@@ -25,6 +25,8 @@ allow = [
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",
     "BSD-3-Clause",
+    # xxhash-rust, under burn's cubecl-common.
+    "BSL-1.0",
     # tiny-keccak, under egui's ahash.
     "CC0-1.0",
     # The Mozilla root certificates in webpki-roots, for HTTPS downloads.
@@ -39,15 +41,27 @@ allow = [
     "Zlib",
 ]
 
+# turso_core's cfg_block names a license file, not an expression. The file
+# is the Apache 2.0 license.
+[[licenses.clarify]]
+crate = "cfg_block"
+expression = "Apache-2.0"
+license-files = []
+
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
 deny = [
     # ring, rustls's crypto for HTTPS downloads, builds its C and assembly
-    # with cc. Nothing else may.
-    { crate = "cc", wrappers = ["ring"] },
+    # with cc. burn's kernel cache (cutlass-vision on macOS) stores compiled
+    # GPU kernels in turso, whose aegis and simsimd build C with cc. Nothing
+    # else may.
+    { crate = "cc", wrappers = ["ring", "aegis", "simsimd"] },
     "cmake",
-    "bindgen",
+    # turso_sdk_kit and turso_sync_sdk_kit list bindgen as a build
+    # dependency and never call it: the first's build script only writes a
+    # Windows version resource, and the second has none.
+    { crate = "bindgen", wrappers = ["turso_sdk_kit", "turso_sync_sdk_kit"] },
     "nasm-rs",
     "ffmpeg-sys",
     "ffmpeg-sys-next",

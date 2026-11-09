@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "circle-close",
+  "name": "Circle Close",
+  "category": "Shape",
+  "cross": {"kind": 1, "soft": 0.02, "close": 1}
+}

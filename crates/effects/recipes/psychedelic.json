@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "id": "psychedelic",
+  "name": "Psychedelic",
+  "category": "Distort",
+  "preview": "flowers",
+  "poster": 0.8,
+  "controls": [
+    {"id": "speed", "name": "Speed", "default": 1, "min": 0.25, "max": 3, "unit": "times", "speed": true}
+  ],
+  "passes": [
+    {
+      "block": "swirl",
+      "params": {
+        "angle": {"wave": {"period": 3, "from": -180, "to": 180}},
+        "radius": 0.9
+      }
+    },
+    { "block": "hue", "params": {"degrees": {"keys": [[0, -180], [3, 180]], "repeat": 3}} },
+    { "block": "grade", "params": {"saturation": 1.5} }
+  ]
+}

@@ -122,44 +122,7 @@ impl OpusTags {
         if !bytes.starts_with(TAGS_MAGIC) {
             return Err(bad("second packet is not OpusTags"));
         }
-        let mut at = TAGS_MAGIC.len();
-        let vendor_len = read_len(bytes, at).ok_or_else(|| bad("no vendor length"))?;
-        at += 4;
-        let Some(vendor) = take(bytes, at, vendor_len) else {
-            return Err(bad("vendor string runs past the packet"));
-        };
-        at += vendor.len();
-        let vendor = String::from_utf8_lossy(vendor).into_owned();
-        let count = read_len(bytes, at).ok_or_else(|| bad("no comment count"))?;
-        at += 4;
-        let remaining = bytes.len() - at;
-        // Each comment needs at least its 4-byte length.
-        if !cut && count > remaining / 4 {
-            return Err(bad("comment count needs more bytes than the packet has"));
-        }
-        if count > usize::try_from(MAX_COMMENTS).unwrap_or(usize::MAX) {
-            return Err(OggError::TooLarge {
-                declared: u64::try_from(count).unwrap_or(u64::MAX),
-                limit: u64::from(MAX_COMMENTS),
-            });
-        }
-        let mut comments = Vec::with_capacity(count.min(remaining / 4));
-        for _ in 0..count {
-            let Some(len) = read_len(bytes, at) else {
-                if cut {
-                    break;
-                }
-                return Err(bad("comment length runs past the packet"));
-            };
-            let Some(text) = take(bytes, at + 4, len) else {
-                if cut {
-                    break;
-                }
-                return Err(bad("comment runs past the packet"));
-            };
-            at += 4 + text.len();
-            comments.push(String::from_utf8_lossy(text).into_owned());
-        }
+        let (vendor, comments, _) = read_comment_list(bytes, TAGS_MAGIC.len(), cut, bad)?;
         Ok(Self {
             vendor,
             comments,
@@ -184,7 +147,58 @@ impl OpusTags {
     }
 }
 
-fn push_string(out: &mut Vec<u8>, text: &[u8]) {
+/// The vendor string and comments that follow a comment header's magic at
+/// `at`, and the offset after the last comment. The list is the same in
+/// `OpusTags` (RFC 7845 section 5.2) and the Vorbis comment header (Vorbis
+/// I section 5). With `cut`, a comment that runs past the bytes ends the
+/// list.
+pub(crate) fn read_comment_list(
+    bytes: &[u8],
+    mut at: usize,
+    cut: bool,
+    bad: impl Fn(&'static str) -> OggError,
+) -> Result<(String, Vec<String>, usize), OggError> {
+    let vendor_len = read_len(bytes, at).ok_or_else(|| bad("no vendor length"))?;
+    at += 4;
+    let Some(vendor) = take(bytes, at, vendor_len) else {
+        return Err(bad("vendor string runs past the packet"));
+    };
+    at += vendor.len();
+    let vendor = String::from_utf8_lossy(vendor).into_owned();
+    let count = read_len(bytes, at).ok_or_else(|| bad("no comment count"))?;
+    at += 4;
+    let remaining = bytes.len() - at;
+    // Each comment needs at least its 4-byte length.
+    if !cut && count > remaining / 4 {
+        return Err(bad("comment count needs more bytes than the packet has"));
+    }
+    if count > usize::try_from(MAX_COMMENTS).unwrap_or(usize::MAX) {
+        return Err(OggError::TooLarge {
+            declared: u64::try_from(count).unwrap_or(u64::MAX),
+            limit: u64::from(MAX_COMMENTS),
+        });
+    }
+    let mut comments = Vec::with_capacity(count.min(remaining / 4));
+    for _ in 0..count {
+        let Some(len) = read_len(bytes, at) else {
+            if cut {
+                break;
+            }
+            return Err(bad("comment length runs past the packet"));
+        };
+        let Some(text) = take(bytes, at + 4, len) else {
+            if cut {
+                break;
+            }
+            return Err(bad("comment runs past the packet"));
+        };
+        at += 4 + text.len();
+        comments.push(String::from_utf8_lossy(text).into_owned());
+    }
+    Ok((vendor, comments, at))
+}
+
+pub(crate) fn push_string(out: &mut Vec<u8>, text: &[u8]) {
     out.extend_from_slice(&u32::try_from(text.len()).unwrap_or(u32::MAX).to_le_bytes());
     out.extend_from_slice(text);
 }
@@ -237,7 +251,6 @@ pub fn packet_samples(packet: &[u8]) -> Option<u32> {
 #[must_use]
 pub fn mapping_tag(bos: &[u8]) -> Vec<u8> {
     const KNOWN: &[(&[u8], &str)] = &[
-        (b"\x01vorbis", "ogg:vorbis"),
         (b"\x7fFLAC", "ogg:flac"),
         (b"fLaC", "ogg:flac"),
         (b"\x80theora", "ogg:theora"),
@@ -400,7 +413,6 @@ mod tests {
 
     #[test]
     fn unknown_mappings_get_a_tag_from_their_magic() {
-        assert_eq!(mapping_tag(b"\x01vorbis\0\0\0\0"), b"ogg:vorbis");
         assert_eq!(mapping_tag(b"\x7fFLAC\x01\x00"), b"ogg:flac");
         assert_eq!(mapping_tag(b"\x80theora"), b"ogg:theora");
         assert_eq!(mapping_tag(b"Speex   1.2"), b"ogg:speex");

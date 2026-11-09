@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "circle-from-corner",
+  "name": "Circle From Corner",
+  "category": "Shape",
+  "duration": 0.7,
+  "cross": {"kind": 1, "soft": 0.03, "x": -0.5, "y": 0.5}
+}

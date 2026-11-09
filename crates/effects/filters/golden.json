@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "golden",
+  "name": "Golden",
+  "category": "Portrait",
+  "adjust": {"temperature": 0.45, "highlights": 0.15, "saturation": 0.15}
+}

@@ -326,7 +326,7 @@ pub fn check_against_gstreamer(
             "{name} GStreamer packet {index} end"
         );
     }
-    let samples = gstreamer_decoded_samples(path, dir).expect("gst decode");
+    let samples = gstreamer_decoded_samples(path, dir, "opusdec", 48_000).expect("gst decode");
     assert_eq!(samples, decoded, "{name} GStreamer decoded samples");
 }
 

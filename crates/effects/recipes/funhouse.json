@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "id": "funhouse",
+  "name": "Funhouse",
+  "category": "Distort",
+  "preview": "portrait",
+  "poster": 1.0,
+  "controls": [
+    {"id": "speed", "name": "Speed", "default": 1, "min": 0.25, "max": 3, "unit": "times", "speed": true}
+  ],
+  "passes": [
+    {"block": "stretch", "params": {"x": {"wave": {"period": 2, "from": 0.85, "to": 1.15}}, "y": {"wave": {"period": 2, "from": 1.1, "to": 0.9}}}}
+  ]
+}

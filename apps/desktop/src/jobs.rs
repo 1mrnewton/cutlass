@@ -24,6 +24,8 @@ struct State {
     stage: String,
     began: Instant,
     fraction: Option<f32>,
+    /// The last quarter of the stage the log was told about.
+    logged_quarter: u8,
 }
 
 impl Default for State {
@@ -32,7 +34,19 @@ impl Default for State {
             stage: String::new(),
             began: Instant::now(),
             fraction: None,
+            logged_quarter: 0,
         }
+    }
+}
+
+/// The quarter of a stage `done` has reached: 0 below 25%, 4 at the end.
+fn quarter(done: f32) -> u8 {
+    match done {
+        done if done >= 1.0 => 4,
+        done if done >= 0.75 => 3,
+        done if done >= 0.5 => 2,
+        done if done >= 0.25 => 1,
+        _ => 0,
     }
 }
 
@@ -47,8 +61,13 @@ pub fn time_left(elapsed: Duration, fraction: f32) -> Option<Duration> {
 }
 
 /// The worker's side: report where it is, and look for a cancel.
+///
+/// Each stage, and each quarter of a stage, is logged at INFO under the
+/// job's label. The fractions between are not, as an export reports one
+/// per frame.
 #[derive(Default)]
 pub struct Progress {
+    label: String,
     state: Mutex<State>,
     cancel: AtomicBool,
 }
@@ -56,18 +75,27 @@ pub struct Progress {
 impl Progress {
     /// A new step, with no fraction until the step reports one.
     pub fn stage(&self, text: &str) {
+        cutlass_logger::info!("job {}: {text}", self.label);
         *self.state.lock().unwrap_or_else(PoisonError::into_inner) = State {
             stage: text.to_owned(),
-            began: Instant::now(),
-            fraction: None,
+            ..State::default()
         };
     }
 
     pub fn fraction(&self, done: f32) {
-        self.state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .fraction = Some(done.clamp(0.0, 1.0));
+        let done = done.clamp(0.0, 1.0);
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state.fraction = Some(done);
+        let reached = quarter(done);
+        if reached > state.logged_quarter {
+            state.logged_quarter = reached;
+            cutlass_logger::info!(
+                "job {}: {} {}%",
+                self.label,
+                state.stage,
+                u32::from(reached) * 25
+            );
+        }
     }
 
     /// The window asked the job to stop.
@@ -81,6 +109,7 @@ pub struct Job<L> {
     label: String,
     progress: Arc<Progress>,
     done: mpsc::Receiver<L>,
+    started: Instant,
 }
 
 /// How a poll found the job.
@@ -96,7 +125,10 @@ impl<L: Send + 'static> Job<L> {
         label: &str,
         work: impl FnOnce(&Progress) -> L + Send + 'static,
     ) -> std::io::Result<Self> {
-        let progress = Arc::new(Progress::default());
+        let progress = Arc::new(Progress {
+            label: label.to_owned(),
+            ..Progress::default()
+        });
         let (sender, done) = mpsc::channel();
         let shared = Arc::clone(&progress);
         std::thread::Builder::new()
@@ -106,11 +138,18 @@ impl<L: Send + 'static> Job<L> {
                 // A cancelled job has no one waiting.
                 let _ = sender.send(landing);
             })?;
+        cutlass_logger::info!("job {label} started");
         Ok(Self {
             label: label.to_owned(),
             progress,
             done,
+            started: Instant::now(),
         })
+    }
+
+    /// How long ago the job started.
+    pub fn elapsed(&self) -> Duration {
+        self.started.elapsed()
     }
 
     pub fn view(&self) -> JobView {
@@ -168,6 +207,46 @@ mod tests {
                 other => return other,
             }
         }
+    }
+
+    #[test]
+    fn a_stage_logs_once_per_quarter_however_many_fractions_come() {
+        crate::test_log::path();
+        let progress = super::Progress {
+            label: "quarter-log-job".to_owned(),
+            ..super::Progress::default()
+        };
+        progress.stage("Encoding");
+        for step in 0..=400 {
+            progress.fraction(step as f32 / 400.0);
+        }
+        progress.fraction(0.5);
+        let log = crate::test_log::text();
+        let lines: Vec<&str> = log
+            .lines()
+            .filter(|line| line.contains("job quarter-log-job:"))
+            .collect();
+        assert_eq!(
+            lines.len(),
+            5,
+            "the stage and four quarters, not one per fraction: {lines:?}"
+        );
+        for percent in [
+            "Encoding 25%",
+            "Encoding 50%",
+            "Encoding 75%",
+            "Encoding 100%",
+        ] {
+            assert!(
+                lines.iter().any(|line| line.ends_with(percent)),
+                "{lines:?}"
+            );
+        }
+        assert_eq!(super::quarter(0.0), 0);
+        assert_eq!(super::quarter(0.249), 0);
+        assert_eq!(super::quarter(0.25), 1);
+        assert_eq!(super::quarter(0.99), 3);
+        assert_eq!(super::quarter(1.0), 4);
     }
 
     #[test]

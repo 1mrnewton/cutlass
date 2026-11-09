@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "dream",
+  "name": "Dream",
+  "category": "Creative",
+  "adjust": {"brilliance": 0.3, "fade": 0.25, "clarity": -0.4, "saturation": 0.1}
+}

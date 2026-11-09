@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "id": "muted",
+  "name": "Muted",
+  "category": "Basic",
+  "preview": "road",
+  "controls": [
+    {"id": "saturation", "name": "Saturation", "default": 0.5, "min": 0, "max": 1, "unit": "percent", "set": [[0, "saturation"]]}
+  ],
+  "passes": [
+    {"block": "grade", "params": {"saturation": 0.5}}
+  ]
+}

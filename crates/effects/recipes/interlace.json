@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "id": "interlace",
+  "name": "Interlace",
+  "category": "Glitch",
+  "preview": "city",
+  "controls": [
+    {"id": "speed", "name": "Speed", "default": 1, "min": 0.25, "max": 3, "unit": "times", "speed": true},
+    {"id": "intensity", "name": "Intensity", "default": 1, "min": 0, "max": 2, "unit": "percent", "scale": [[0, "amount"], [1, "amount"]]}
+  ],
+  "passes": [
+    {"block": "scanlines", "params": {"amount": {"jitter": {"rate": 10, "from": 0.2, "to": 0.6, "seed": 120}}, "count": 180}},
+    {"block": "slices", "params": {"count": 60, "amount": {"jitter": {"rate": 8, "from": 0, "to": 0.03, "seed": 121}}, "seed": {"jitter": {"rate": 8, "from": 0, "to": 1000, "seed": 122}}}}
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "id": "vivid",
+  "name": "Vivid",
+  "category": "Basic",
+  "preview": "portrait",
+  "controls": [
+    {"id": "saturation", "name": "Saturation", "default": 1.5, "min": 0, "max": 3, "unit": "percent", "set": [[0, "saturation"]]}
+  ],
+  "passes": [
+    { "block": "grade", "params": {"saturation": 1.5, "contrast": 1.15} }
+  ]
+}

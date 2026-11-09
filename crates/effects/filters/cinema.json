@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "cinema",
+  "name": "Cinema",
+  "category": "Cinema",
+  "adjust": {"temperature": 0.15, "contrast": 0.2, "saturation": 0.2, "shadows": -0.1, "vignette": 0.2}
+}

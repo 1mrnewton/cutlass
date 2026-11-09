@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "spicy",
+  "name": "Spicy",
+  "category": "Food",
+  "adjust": {"contrast": 0.2, "temperature": 0.1},
+  "hsl": {"red": [0, 0.5, 0], "orange": [0, 0.3, 0]}
+}

@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "muted",
+  "name": "Muted",
+  "category": "Moody",
+  "adjust": {"saturation": -0.4, "fade": 0.2}
+}

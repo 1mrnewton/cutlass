@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "morning",
+  "name": "Morning",
+  "category": "Bright",
+  "adjust": {"exposure": 0.1, "temperature": 0.15, "fade": 0.1},
+  "wheels": {"gain": {"hue": 40, "amount": 0.2}}
+}

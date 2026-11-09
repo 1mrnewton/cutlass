@@ -5,7 +5,7 @@
 use cutlass_model::{ANIMATION_PRESETS, AnimType};
 
 use crate::effect_shelf::{effect_cards, filter_cards};
-use crate::transition_shelf::TRANSITION_OFFERS;
+use crate::transition_shelf::transition_offers;
 
 /// One line per bundled item: its kind, the id a request takes, then its
 /// name. `effect recipe/shake Shake`, `transition cutlass-dissolve Dissolve`.
@@ -21,7 +21,7 @@ pub fn catalog_entries() -> Vec<String> {
             .unwrap_or(&card);
         entries.push(format!("filter {id} {name}"));
     }
-    for offer in TRANSITION_OFFERS {
+    for offer in transition_offers() {
         entries.push(format!(
             "transition {} {}",
             offer.kind.effect_id(),
@@ -43,6 +43,15 @@ pub fn catalog_entries() -> Vec<String> {
         ));
     }
     entries
+}
+
+/// Whether `id` names an item Cutlass ships. Every package is bundled in
+/// the first release, so this is the whole answer to `package.ensure`.
+#[must_use]
+pub fn is_bundled(id: &str) -> bool {
+    catalog_entries()
+        .iter()
+        .any(|entry| entry.split(' ').nth(1) == Some(id))
 }
 
 /// The entries every word of `query` is in, ignoring case. A blank query
@@ -71,13 +80,30 @@ mod tests {
         }
         assert_eq!(catalog_search("").len(), all.len());
         let dissolve = catalog_search("Transition DISSOLVE");
-        assert_eq!(dissolve.len(), 1, "{dissolve:?}");
         assert!(
-            dissolve[0].starts_with("transition cutlass-"),
+            dissolve.contains(&"transition cutlass-dissolve Dissolve".to_owned()),
+            "{dissolve:?}"
+        );
+        assert!(
+            dissolve
+                .iter()
+                .all(|entry| entry.starts_with("transition cutlass-")),
             "{dissolve:?}"
         );
         let fades = catalog_search("animation fade");
         assert!(fades.iter().any(|entry| entry.contains("Fade In")));
         assert!(catalog_search("no such thing at all").is_empty());
+    }
+
+    #[test]
+    fn a_listed_id_is_bundled_and_a_name_or_kind_is_not() {
+        for entry in catalog_entries() {
+            let id = entry.split(' ').nth(1).unwrap_or_default();
+            assert!(is_bundled(id), "{entry}");
+        }
+        assert!(is_bundled("cutlass-dissolve"));
+        assert!(!is_bundled("Dissolve"));
+        assert!(!is_bundled("transition"));
+        assert!(!is_bundled("recipe/not-a-package"));
     }
 }

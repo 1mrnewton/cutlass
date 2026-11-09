@@ -12,6 +12,26 @@ use cutlass_session::Request;
 
 use super::{Shell, ShellError};
 
+/// A setting keyed apart from the clip's pose.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeyedSetting {
+    Mask,
+    Volume,
+    TextColor,
+}
+
+impl KeyedSetting {
+    /// The key names the setting is stored under.
+    #[must_use]
+    pub fn names(self) -> &'static [&'static str] {
+        match self {
+            Self::Mask => &cutlass_model::MASK_KEYS,
+            Self::Volume => &[cutlass_model::VOLUME_KEY],
+            Self::TextColor => &cutlass_model::TEXT_COLOR_KEYS,
+        }
+    }
+}
+
 impl Shell {
     /// The panel the selected clip opens.
     #[must_use]
@@ -81,6 +101,47 @@ impl Shell {
         self.apply(Request::SetEffectStrength {
             segment_id,
             material_id,
+            value,
+        })
+    }
+
+    /// The selected recipe effect's own controls, each with the value its
+    /// clip holds, or its default. `None` when the selection is not a
+    /// recipe effect; empty when the recipe has no controls.
+    #[must_use]
+    pub fn effect_controls(&self) -> Option<Vec<(cutlass_effects::Control, f32)>> {
+        let draft = self.draft()?;
+        let segment = self.selected_segment()?;
+        let MaterialRef::VideoEffect(effect) = draft.materials.get(segment.material_id.as_str())?
+        else {
+            return None;
+        };
+        let recipe = cutlass_effects::bundled_recipe(&effect.effect_id)?;
+        let stored = cutlass_effects::stored_controls(effect);
+        Some(
+            recipe
+                .controls
+                .iter()
+                .map(|control| {
+                    let value = stored
+                        .get(&control.id)
+                        .map_or(control.default, |value| control.clamp(*value));
+                    (control.clone(), value)
+                })
+                .collect(),
+        )
+    }
+
+    /// Store `value` for the selected effect's control `control`. A split
+    /// clip's halves get their own once one changes. One undo restores it.
+    pub fn set_effect_control(&mut self, control: &str, value: f64) -> Result<(), ShellError> {
+        let segment_id = self.selected_or_refuse()?;
+        self.refuse_locked(&segment_id)?;
+        let material_id = MaterialId::new(self.fresh("effect"));
+        self.apply(Request::SetEffectControl {
+            segment_id,
+            material_id,
+            control: control.to_owned(),
             value,
         })
     }
@@ -171,6 +232,129 @@ impl Shell {
             fonts: &*self.face,
         };
         cutlass_editor::clip_keys(draft, segment_id, self.playhead, &sizes)
+    }
+
+    /// The selected clip's keys on `setting`, and the one under the
+    /// playhead.
+    pub fn setting_keys(&self, setting: KeyedSetting) -> Option<cutlass_editor::ClipKeys> {
+        let segment_id = self.selected()?;
+        let draft = self.draft()?;
+        cutlass_editor::value_keys(draft, segment_id, self.playhead, setting.names())
+    }
+
+    /// Whether the selected clip has keys on `setting`.
+    pub fn setting_keyed(&self, setting: KeyedSetting) -> bool {
+        self.setting_keys(setting)
+            .is_some_and(|keys| !keys.times.is_empty())
+    }
+
+    /// Remove the selected clip's `setting` key under the playhead, or key
+    /// `setting` there as it is now. One undo step.
+    pub fn toggle_setting_key(&mut self, setting: KeyedSetting) -> Result<(), ShellError> {
+        let segment_id = self.selected().cloned().ok_or(ShellError::NoProject)?;
+        self.refuse_locked(&segment_id)?;
+        let keys = self.setting_keys(setting).ok_or(ShellError::NoProject)?;
+        let offset = keys.offset_at(self.playhead).ok_or_else(|| {
+            ShellError::Unavailable("move the playhead onto the clip to key it".to_owned())
+        })?;
+        if keys.here.is_some() {
+            return self.apply(Request::UnkeyValues {
+                segment_id,
+                offset,
+                properties: setting
+                    .names()
+                    .iter()
+                    .map(|&name| name.to_owned())
+                    .collect(),
+            });
+        }
+        let values = self.setting_values(setting).ok_or_else(|| {
+            ShellError::Unavailable(match setting {
+                KeyedSetting::Mask => "pick a mask shape first".to_owned(),
+                KeyedSetting::Volume => "the clip has no sound to key".to_owned(),
+                KeyedSetting::TextColor => "a color key belongs on text".to_owned(),
+            })
+        })?;
+        self.apply(Request::KeyValues {
+            segment_id,
+            offset,
+            values,
+        })
+    }
+
+    /// Move the playhead to the selected clip's `setting` key before it,
+    /// or after it when `forward`.
+    pub fn step_setting_key(&mut self, setting: KeyedSetting, forward: bool) {
+        let target = self.setting_keys(setting).and_then(|keys| {
+            if forward {
+                keys.after(self.playhead)
+            } else {
+                keys.before(self.playhead)
+            }
+        });
+        if let Some(time) = target {
+            self.seek(time);
+        }
+    }
+
+    /// The selected clip's `setting` as it is at the playhead, as key
+    /// values.
+    fn setting_values(&self, setting: KeyedSetting) -> Option<Vec<(String, f64)>> {
+        let inspection = self.inspection()?;
+        let values: Vec<f64> = match setting {
+            KeyedSetting::Mask => {
+                let mask = inspection.mask?;
+                [
+                    mask.x,
+                    mask.y,
+                    mask.width,
+                    mask.height,
+                    mask.rotation,
+                    mask.feather,
+                    mask.round,
+                ]
+                .map(f64::from)
+                .to_vec()
+            }
+            KeyedSetting::Volume => vec![inspection.volume],
+            KeyedSetting::TextColor => {
+                if inspection.text_color.is_empty() && self.text_look().is_none() {
+                    return None;
+                }
+                unit_rgb(&inspection.text_color).to_vec()
+            }
+        };
+        Some(
+            setting
+                .names()
+                .iter()
+                .map(|&name| name.to_owned())
+                .zip(values)
+                .collect(),
+        )
+    }
+
+    /// The request that keys `setting` at the playhead as `values`, when
+    /// the selected clip has keys on it and the playhead is on the clip.
+    pub(super) fn key_setting_here(
+        &self,
+        setting: KeyedSetting,
+        values: Vec<f64>,
+    ) -> Option<Request> {
+        let keys = self
+            .setting_keys(setting)
+            .filter(|keys| !keys.times.is_empty())?;
+        let offset = keys.offset_at(self.playhead)?;
+        Some(Request::KeyValues {
+            segment_id: self.selected()?.clone(),
+            offset,
+            values: setting
+                .names()
+                .iter()
+                .map(|&name| name.to_owned())
+                .zip(values)
+                .collect(),
+        })
     }
 
     /// Remove the selected clip's key under the playhead, or key its pose
@@ -288,7 +472,7 @@ impl Shell {
                 round: 0.0,
             });
         }
-        self.apply_requests(&requests)
+        self.apply_text_requests(requests)
     }
 
     /// Give the selected title the look on the Effects page with `id`, or
@@ -300,10 +484,69 @@ impl Shell {
             .ok_or_else(|| ShellError::Unavailable(format!("no text effect is called {id}")))?;
         let segment_id = self.text_segment()?;
         self.refuse_locked(&segment_id)?;
-        let glow_id = MaterialId::new(self.fresh("glow"));
+        // With "Apply to all main captions" every caption on the row takes
+        // it, each with a glow of its own.
+        let clips: Vec<SegmentId> = match self.draft() {
+            Some(draft)
+                if self.all_captions
+                    && cutlass_editor::main_caption_lane(draft, &segment_id).is_some() =>
+            {
+                cutlass_editor::caption_rows(draft, &segment_id)
+                    .into_iter()
+                    .map(|row| row.segment_id)
+                    .collect()
+            }
+            _ => vec![segment_id],
+        };
         let face = self.face.name().to_owned();
-        let requests = cutlass_editor::text_effect_requests(effect, &segment_id, glow_id, &face);
+        let mut requests = Vec::new();
+        for clip in &clips {
+            let glow_id = MaterialId::new(self.fresh("glow"));
+            requests.extend(cutlass_editor::text_effect_requests(
+                effect, clip, glow_id, &face,
+            ));
+        }
         self.apply_requests(&requests)
+    }
+
+    /// Give the selected title the bubble on the Bubble page with `id`:
+    /// its shape, box and letters. One undo restores it.
+    pub fn set_bubble_look(&mut self, id: &str) -> Result<(), ShellError> {
+        let look = cutlass_editor::BUBBLE_LOOKS
+            .iter()
+            .find(|look| look.id == id)
+            .ok_or_else(|| ShellError::Unavailable(format!("no bubble is called {id}")))?;
+        let segment_id = self.text_segment()?;
+        self.refuse_locked(&segment_id)?;
+        let face = self.face.name().to_owned();
+        self.apply_text_requests(cutlass_editor::bubble_look_requests(
+            look,
+            &segment_id,
+            &face,
+        ))
+    }
+
+    /// The picture on the tile for `tile`: a short text styled as it, in
+    /// the shell's face. `None` when it does not draw.
+    #[must_use]
+    pub fn tile_picture(&self, tile: cutlass_editor::CatalogTile<'_>) -> Option<super::Picture> {
+        let (session, time) = cutlass_editor::tile_session(tile, self.face.name());
+        let mut device = cutlass_renderer_software::SoftwareDevice::new();
+        let picture = cutlass_playback::FrameCache::new()
+            .frame(
+                &session,
+                &mut device,
+                time,
+                self.preview_readers(),
+                None,
+                &*self.face,
+            )
+            .ok()?;
+        Some(super::Picture {
+            width: picture.width,
+            height: picture.height,
+            rgba: picture.rgba,
+        })
     }
 
     /// Make the selected title glow in `color`. A split clip's halves glow
@@ -362,14 +605,22 @@ impl Shell {
         })
     }
 
-    /// Align the selected title left (0), center (1), or right (2). A title
-    /// with no line width takes the canvas width. One undo restores it.
+    /// Align the selected title left (0), center (1), or right (2), or stand
+    /// it in vertical columns at the top (3), middle (4), or bottom (5). A
+    /// title with no line width takes the canvas width, and a column the
+    /// canvas height. One undo restores it.
     pub fn set_text_align(&mut self, alignment: i32) -> Result<(), ShellError> {
         let segment_id = self.text_segment()?;
         self.refuse_locked(&segment_id)?;
         let line_width = f64::from(
             self.draft()
-                .map(|draft| draft.canvas_config.width)
+                .map(|draft| {
+                    if alignment >= 3 {
+                        draft.canvas_config.height
+                    } else {
+                        draft.canvas_config.width
+                    }
+                })
                 .unwrap_or(0),
         );
         let face = self.face.name().to_owned();
@@ -378,6 +629,28 @@ impl Shell {
             alignment,
             face,
             line_width,
+        })
+    }
+
+    /// Turn bold, italic and underline on or off over the selected text.
+    /// One undo step; with "Apply to all main captions" on, every caption on
+    /// the row takes it. The pattern the text already has is not a step.
+    pub fn set_text_pattern(
+        &mut self,
+        pattern: cutlass_session::TextPattern,
+    ) -> Result<(), ShellError> {
+        let segment_id = self.text_segment()?;
+        self.refuse_locked(&segment_id)?;
+        if self.inspection().map(|seen| seen.text_pattern) == Some(pattern) {
+            return Ok(());
+        }
+        let face = self.face.name().to_owned();
+        self.apply(Request::SetTextPattern {
+            segment_id,
+            bold: pattern.bold,
+            italic: pattern.italic,
+            underline: pattern.underline,
+            face,
         })
     }
 
@@ -541,6 +814,155 @@ impl Shell {
         self.apply(Request::SetWords { material_id, words })
     }
 
+    /// Every caption on the selected caption's lane, in timeline order.
+    #[must_use]
+    pub fn caption_rows(&self) -> Vec<cutlass_editor::CaptionRow> {
+        match (self.draft(), self.selected()) {
+            (Some(draft), Some(segment_id)) => cutlass_editor::caption_rows(draft, segment_id),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Make caption `segment_id` say `text`. Its words are rematched, so
+    /// the ones that stay keep their times. One undo restores it.
+    pub fn set_caption_line(
+        &mut self,
+        segment_id: &SegmentId,
+        text: &str,
+    ) -> Result<(), ShellError> {
+        self.refuse_locked(segment_id)?;
+        let draft = self.session_draft()?;
+        let request = cutlass_editor::caption_text_request(draft, segment_id, text.trim())
+            .map_err(caption_miss)?;
+        match request {
+            Some(request) => self.apply(request),
+            None => Ok(()),
+        }
+    }
+
+    /// Add a caption after `segment_id`, looking like it: in the gap after
+    /// it, or in the second half of its time. One undo step.
+    pub fn add_caption_after(&mut self, segment_id: &SegmentId) -> Result<(), ShellError> {
+        self.refuse_locked(segment_id)?;
+        let mut ids = Vec::new();
+        for prefix in ["caption", "caption"] {
+            ids.push(self.fresh(prefix));
+        }
+        let mut ids = ids.into_iter();
+        let draft = self.session_draft()?;
+        let requests = cutlass_editor::add_after_requests(draft, segment_id, &mut |prefix| {
+            ids.next().unwrap_or_else(|| prefix.to_owned())
+        })
+        .map_err(caption_miss)?;
+        self.apply_requests(&requests)
+    }
+
+    /// The selected caption's paragraphs: its pages, or its lines.
+    #[must_use]
+    pub fn caption_paragraphs(&self) -> Vec<cutlass_editor::Paragraph> {
+        match (self.draft(), self.selected()) {
+            (Some(draft), Some(segment_id)) => {
+                cutlass_editor::caption_paragraphs(draft, segment_id)
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// Make paragraph `index` of the selected caption say `text`, its own
+    /// words rematched so the ones that stay keep their times. One undo
+    /// restores it.
+    pub fn set_caption_paragraph(&mut self, index: usize, text: &str) -> Result<(), ShellError> {
+        let segment_id = self.text_segment()?;
+        self.refuse_locked(&segment_id)?;
+        let draft = self.session_draft()?;
+        match cutlass_editor::paragraph_request(draft, &segment_id, index, text)
+            .map_err(caption_miss)?
+        {
+            Some(request) => self.apply(request),
+            None => Ok(()),
+        }
+    }
+
+    /// The template the selected caption was styled with, by its id.
+    #[must_use]
+    pub fn caption_template(&self) -> Option<String> {
+        match (self.draft(), self.selected()) {
+            (Some(draft), Some(segment_id)) => {
+                cutlass_editor::caption_template_of(draft, segment_id)
+            }
+            _ => None,
+        }
+    }
+
+    /// Style the selected caption as template `id`: its style, caption
+    /// animation, stagger and look. While "Apply to all main captions" is
+    /// on, every caption on its subtitle row takes it. One undo step.
+    pub fn set_caption_template(&mut self, id: &str) -> Result<(), ShellError> {
+        let segment_id = self.text_segment()?;
+        self.refuse_locked(&segment_id)?;
+        let template = cutlass_editor::caption_template(id).ok_or_else(|| {
+            ShellError::Unavailable("there is no such caption template".to_owned())
+        })?;
+        let draft = self.session_draft()?;
+        if cutlass_editor::caption_rows(draft, &segment_id).is_empty() {
+            return Err(caption_miss(cutlass_editor::CaptionListMiss::NotCaption));
+        }
+        let requests = cutlass_editor::caption_template_requests(
+            draft,
+            &segment_id,
+            template,
+            self.all_captions(),
+        );
+        self.apply_requests(&requests)
+    }
+
+    /// Take the selected caption's template off: the plain style, no
+    /// stagger and no caption animation, on every main caption while
+    /// "Apply to all main captions" is on. One undo restores it.
+    pub fn clear_caption_template(&mut self) -> Result<(), ShellError> {
+        let segment_id = self.text_segment()?;
+        self.refuse_locked(&segment_id)?;
+        let draft = self.session_draft()?;
+        if cutlass_editor::caption_rows(draft, &segment_id).is_empty() {
+            return Err(caption_miss(cutlass_editor::CaptionListMiss::NotCaption));
+        }
+        let requests =
+            cutlass_editor::plain_caption_requests(draft, &segment_id, self.all_captions());
+        self.apply_requests(&requests)
+    }
+
+    /// Replace `find` with `with`, case ignored, in every caption on the
+    /// selected caption's lane. Each changed caption keeps the times of the
+    /// words that stay. One undo step; how many were replaced.
+    pub fn replace_in_captions(&mut self, find: &str, with: &str) -> Result<usize, ShellError> {
+        let segment_id = self.text_segment()?;
+        self.refuse_locked(&segment_id)?;
+        if find.trim().is_empty() {
+            return Err(ShellError::Unavailable("type the words to find".to_owned()));
+        }
+        let draft = self.session_draft()?;
+        let replaced = cutlass_editor::replace_in_captions(draft, &segment_id, find, with.trim())
+            .map_err(|miss| match miss {
+            cutlass_editor::CaptionListMiss::Empty => ShellError::Unavailable(
+                "that would leave a caption with no words; delete it instead".to_owned(),
+            ),
+            miss => caption_miss(miss),
+        })?;
+        if replaced.count == 0 {
+            return Err(ShellError::Unavailable("no caption says that".to_owned()));
+        }
+        if !replaced.requests.is_empty() {
+            self.apply_requests(&replaced.requests)?;
+        }
+        Ok(replaced.count)
+    }
+
+    /// Take caption `segment_id` off the timeline. One undo restores it.
+    pub fn remove_caption(&mut self, segment_id: &SegmentId) -> Result<(), ShellError> {
+        self.refuse_locked(segment_id)?;
+        self.apply(cutlass_editor::remove_caption_request(segment_id))
+    }
+
     fn caption_words(
         &self,
         segment_id: &SegmentId,
@@ -564,6 +986,55 @@ impl Shell {
             }
         })
     }
+}
+
+fn caption_miss(miss: cutlass_editor::CaptionListMiss) -> ShellError {
+    use cutlass_editor::CaptionListMiss as Miss;
+    ShellError::Unavailable(
+        match miss {
+            Miss::NotCaption => "that clip is not a caption",
+            Miss::Empty => "a caption needs a word; delete it instead",
+            Miss::TooLong => "that line is too long to match its words",
+            Miss::NoRoom => "there is no room after this caption",
+        }
+        .to_owned(),
+    )
+}
+
+/// The red, green and blue of `#rrggbb`, each from 0 to 1, when it reads.
+pub(super) fn hex_rgb(color: &str) -> Option<[f64; 3]> {
+    let body = color.trim().trim_start_matches('#');
+    if body.len() != 6 || !body.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(unit_rgb(body))
+}
+
+/// `#RRGGBB` for red, green and blue from 0 to 1.
+pub(super) fn rgb_hex(rgb: [f64; 3]) -> String {
+    let byte = |unit: f64| {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let byte = (unit.clamp(0.0, 1.0) * 255.0).round() as u8;
+        byte
+    };
+    format!(
+        "#{:02X}{:02X}{:02X}",
+        byte(rgb[0]),
+        byte(rgb[1]),
+        byte(rgb[2])
+    )
+}
+
+/// The red, green and blue of `#rrggbb`, each from 0 to 1; white when it
+/// does not read.
+fn unit_rgb(color: &str) -> [f64; 3] {
+    let body = color.trim().trim_start_matches('#');
+    let channel = |at: usize| {
+        body.get(at..at + 2)
+            .and_then(|pair| u8::from_str_radix(pair, 16).ok())
+            .map_or(1.0, |byte| f64::from(byte) / 255.0)
+    };
+    [channel(0), channel(2), channel(4)]
 }
 
 #[cfg(test)]
@@ -875,6 +1346,91 @@ mod tests {
     }
 
     #[test]
+    fn a_keyed_volume_is_set_where_the_playhead_is() {
+        let temp = Temp::new();
+        let mut desktop = every_kind(&temp);
+        pick(&mut desktop, "sound");
+        assert!(!desktop.setting_keyed(super::KeyedSetting::Volume));
+        desktop.seek(cutlass_model::Micros(1_000_000));
+        desktop
+            .toggle_setting_key(super::KeyedSetting::Volume)
+            .unwrap();
+        desktop.seek(cutlass_model::Micros(3_000_000));
+        // With keys, a change keys the volume at the playhead.
+        desktop.set_volume(0.5).unwrap();
+        let keys = desktop.setting_keys(super::KeyedSetting::Volume).unwrap();
+        assert_eq!(
+            keys.times,
+            [
+                cutlass_model::Micros(1_000_000),
+                cutlass_model::Micros(3_000_000)
+            ]
+        );
+        desktop.seek(cutlass_model::Micros(2_000_000));
+        assert!((desktop.inspection().unwrap().volume - 0.75).abs() < 1e-9);
+        // The pose's keys are apart.
+        assert!(desktop.keys().is_none_or(|keys| keys.times.is_empty()));
+        desktop.seek(cutlass_model::Micros(3_000_000));
+        desktop
+            .toggle_setting_key(super::KeyedSetting::Volume)
+            .unwrap();
+        let keys = desktop.setting_keys(super::KeyedSetting::Volume).unwrap();
+        assert_eq!(keys.times, [cutlass_model::Micros(1_000_000)]);
+        desktop.step_setting_key(super::KeyedSetting::Volume, false);
+        assert_eq!(desktop.playhead(), cutlass_model::Micros(1_000_000));
+    }
+
+    #[test]
+    fn a_keyed_mask_moves_and_goes_with_its_keys() {
+        let temp = Temp::new();
+        let mut desktop = every_kind(&temp);
+        pick(&mut desktop, "main");
+        let circle = cutlass_effects::Mask::new(cutlass_effects::MaskShape::Circle);
+        desktop.set_mask(Some(circle)).unwrap();
+        desktop.seek(cutlass_model::Micros(0));
+        desktop
+            .toggle_setting_key(super::KeyedSetting::Mask)
+            .unwrap();
+        desktop.seek(cutlass_model::Micros(2_000_000));
+        desktop
+            .set_mask(Some(cutlass_effects::Mask { x: 0.5, ..circle }))
+            .unwrap();
+        desktop.seek(cutlass_model::Micros(1_000_000));
+        let mask = desktop.inspection().unwrap().mask.unwrap();
+        assert!((mask.x - 0.25).abs() < 1e-6, "{mask:?}");
+        // One undo step takes the last key off, and the mask is back.
+        desktop.undo().unwrap();
+        let mask = desktop.inspection().unwrap().mask.unwrap();
+        assert!(mask.x.abs() < 1e-6, "{mask:?}");
+        desktop.set_mask(None).unwrap();
+        assert!(!desktop.setting_keyed(super::KeyedSetting::Mask));
+        assert!(desktop.inspection().unwrap().mask.is_none());
+    }
+
+    #[test]
+    fn a_title_pattern_shows_in_the_inspector_and_undoes_in_one_step() {
+        let temp = Temp::new();
+        let mut desktop = every_kind(&temp);
+        pick(&mut desktop, "words");
+        let off = cutlass_session::TextPattern::default();
+        assert_eq!(desktop.inspection().unwrap().text_pattern, off);
+        let all = cutlass_session::TextPattern {
+            bold: true,
+            italic: true,
+            underline: true,
+        };
+        desktop.set_text_pattern(all).unwrap();
+        assert_eq!(desktop.inspection().unwrap().text_pattern, all);
+        let revision = desktop.revision();
+        desktop.set_text_pattern(all).unwrap();
+        assert_eq!(desktop.revision(), revision);
+        desktop.undo().unwrap();
+        assert_eq!(desktop.inspection().unwrap().text_pattern, off);
+        pick(&mut desktop, "main");
+        assert!(desktop.set_text_pattern(all).is_err());
+    }
+
+    #[test]
     fn a_title_face_alignment_and_case_are_one_step_each() {
         let temp = Temp::new();
         let mut desktop = every_kind(&temp);
@@ -1138,6 +1694,274 @@ mod tests {
     }
 
     #[test]
+    fn the_caption_list_edits_adds_and_deletes_lines_one_step_each() {
+        let temp = Temp::new();
+        let mut desktop = every_kind(&temp);
+        pick(&mut desktop, "subtitle");
+        let before = desktop.draft().unwrap().clone();
+        let rows = desktop.caption_rows();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].text, "one two");
+        let id = rows[0].segment_id.clone();
+
+        desktop.set_caption_line(&id, " one three ").unwrap();
+        let inspection = desktop.inspection().unwrap();
+        assert_eq!(inspection.words.text, ["one", "three"]);
+        assert_eq!(inspection.words.start_time[0], 0);
+        assert_eq!(inspection.words.end_time[1], 900);
+        assert!(desktop.set_caption_line(&id, "   ").is_err());
+
+        desktop.add_caption_after(&id).unwrap();
+        let rows = desktop.caption_rows();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[1].text, cutlass_editor::NEW_CAPTION_TEXT);
+        let added = rows[1].segment_id.clone();
+        desktop.remove_caption(&added).unwrap();
+        assert_eq!(desktop.caption_rows().len(), 1);
+
+        for _ in 0..3 {
+            desktop.undo().unwrap();
+        }
+        assert_eq!(desktop.draft().unwrap(), &before);
+
+        pick(&mut desktop, "main");
+        assert!(desktop.caption_rows().is_empty());
+    }
+
+    #[test]
+    fn a_caption_paragraph_edit_keeps_its_word_times() {
+        let temp = Temp::new();
+        let mut desktop = every_kind(&temp);
+        pick(&mut desktop, "subtitle");
+        let paragraphs = desktop.caption_paragraphs();
+        assert_eq!(paragraphs.len(), 1);
+        assert_eq!(paragraphs[0].text, "one two");
+        desktop.set_caption_paragraph(0, "one too").unwrap();
+        let inspection = desktop.inspection().unwrap();
+        assert_eq!(inspection.words.text, ["one", "too"]);
+        assert_eq!(inspection.words.start_time, [0, 500]);
+        assert!(desktop.set_caption_paragraph(4, "x").is_err());
+        desktop.undo().unwrap();
+        assert_eq!(desktop.caption_paragraphs()[0].text, "one two");
+    }
+
+    /// Two captions on a subtitle row and a title on a plain text row.
+    fn subtitle_row(temp: &Temp) -> Shell {
+        let mut draft = Draft::empty("D");
+        for (id, words) in [("first", "one"), ("second", "two"), ("title", "hi")] {
+            let mut text = MaterialText::new(id);
+            text.kind = if id == "title" { "text" } else { "subtitle" }.to_owned();
+            text.content = words.to_owned();
+            text.font_size = 15.0;
+            draft.materials.texts.push(text);
+        }
+        let mut subs = row(
+            "subs",
+            TrackType::Text,
+            TrackFlag::TextSubtitle,
+            "first",
+            "first",
+        );
+        subs.segments.push(Segment::new(
+            "second",
+            "second",
+            TimeRange::new(2_000_000, 1_000_000),
+        ));
+        draft.tracks.push(subs);
+        draft
+            .tracks
+            .push(row("t", TrackType::Text, TrackFlag::None, "title", "title"));
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop
+    }
+
+    fn sizes(desktop: &Shell) -> Vec<f64> {
+        let draft = desktop.draft().unwrap();
+        ["first", "second", "title"]
+            .iter()
+            .map(|id| {
+                draft
+                    .materials
+                    .texts
+                    .iter()
+                    .find(|text| text.id.as_str() == *id)
+                    .unwrap()
+                    .font_size
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_main_caption_style_change_reaches_its_row_only_while_apply_to_all_is_on() {
+        let temp = Temp::new();
+        let mut desktop = subtitle_row(&temp);
+        pick(&mut desktop, "first");
+        assert!(desktop.all_captions());
+        assert!(desktop.on_main_captions());
+        desktop.set_text_size(40.0).unwrap();
+        assert_eq!(sizes(&desktop), [40.0, 40.0, 15.0]);
+        desktop.undo().unwrap();
+        assert_eq!(sizes(&desktop), [15.0, 15.0, 15.0]);
+
+        desktop.set_all_captions(false);
+        desktop.set_text_size(30.0).unwrap();
+        assert_eq!(sizes(&desktop), [30.0, 15.0, 15.0]);
+
+        desktop.set_all_captions(true);
+        pick(&mut desktop, "title");
+        assert!(!desktop.on_main_captions());
+        desktop.set_text_size(20.0).unwrap();
+        assert_eq!(sizes(&desktop), [30.0, 15.0, 20.0]);
+    }
+
+    #[test]
+    fn a_main_caption_takes_a_pattern_preset_and_bubble_with_its_row() {
+        let temp = Temp::new();
+        let mut desktop = subtitle_row(&temp);
+        pick(&mut desktop, "first");
+        let field = |desktop: &Shell, read: fn(&MaterialText) -> String| -> Vec<String> {
+            let draft = desktop.draft().unwrap();
+            ["first", "second", "title"]
+                .iter()
+                .map(|id| {
+                    read(
+                        draft
+                            .materials
+                            .texts
+                            .iter()
+                            .find(|text| text.id.as_str() == *id)
+                            .unwrap(),
+                    )
+                })
+                .collect()
+        };
+        desktop
+            .set_text_pattern(cutlass_session::TextPattern {
+                underline: true,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(
+            field(&desktop, |text| text.underline.to_string()),
+            ["true", "true", "false"]
+        );
+        let paper = cutlass_editor::TEXT_PRESETS
+            .iter()
+            .position(|preset| preset.name == "Paper box")
+            .unwrap();
+        desktop.set_text_preset(paper).unwrap();
+        assert_eq!(
+            field(&desktop, |text| text.background_color.clone()),
+            ["#FFFFFF", "#FFFFFF", ""]
+        );
+        desktop.set_text_bubble("speech").unwrap();
+        assert_eq!(
+            field(&desktop, |text| text.bubble.clone()),
+            ["speech", "speech", ""]
+        );
+        desktop.undo().unwrap();
+        assert_eq!(field(&desktop, |text| text.bubble.clone()), ["", "", ""]);
+    }
+
+    #[test]
+    fn a_main_caption_takes_an_effect_and_a_bubble_look_with_its_row() {
+        let temp = Temp::new();
+        let mut desktop = subtitle_row(&temp);
+        pick(&mut desktop, "first");
+        // Each clip's look, by its material: the first two are the row's.
+        let looks = |desktop: &Shell| -> Vec<TextLook> {
+            let draft = desktop.draft().unwrap();
+            ["first", "second", "title"]
+                .iter()
+                .map(|id| {
+                    let segment = draft
+                        .tracks
+                        .iter()
+                        .flat_map(|track| &track.segments)
+                        .find(|segment| segment.material_id.as_str() == *id)
+                        .unwrap();
+                    cutlass_editor::text_look(draft, segment).unwrap()
+                })
+                .collect()
+        };
+        desktop.set_text_effect("gold-glow").unwrap();
+        let worn = looks(&desktop);
+        assert_eq!(worn[0].glow_color, "#FFB800");
+        assert_eq!(worn[1].glow_color, "#FFB800");
+        assert!(worn[2].glow_color.is_empty());
+        // Each caption glows with a glow of its own.
+        let draft = desktop.draft().unwrap();
+        let glows: std::collections::HashSet<_> = draft
+            .tracks
+            .iter()
+            .flat_map(|track| &track.segments)
+            .flat_map(|segment| &segment.extra_material_refs)
+            .filter(|id| id.as_str().starts_with("glow"))
+            .collect();
+        assert_eq!(glows.len(), 2);
+        desktop.set_bubble_look("burst-red").unwrap();
+        let worn = looks(&desktop);
+        for look in &worn[..2] {
+            assert_eq!(
+                cutlass_editor::bubble_look_of(look).map(|b| b.id),
+                Some("burst-red")
+            );
+        }
+        assert!(worn[2].bubble.is_empty());
+        desktop.undo().unwrap();
+        desktop.undo().unwrap();
+        assert!(
+            looks(&desktop)
+                .iter()
+                .all(|look| look.glow_color.is_empty())
+        );
+        // With the box off, only the picked caption takes it.
+        desktop.set_all_captions(false);
+        desktop.set_text_effect("neon-blue").unwrap();
+        let worn = looks(&desktop);
+        assert_eq!(worn[0].glow_color, "#00C2FF");
+        assert!(worn[1].glow_color.is_empty());
+    }
+
+    #[test]
+    fn each_catalog_tile_draws_its_own_picture() {
+        let temp = Temp::new();
+        let desktop = subtitle_row(&temp);
+        let mut seen = std::collections::HashSet::new();
+        let tiles = cutlass_editor::CAPTION_TEMPLATES
+            .iter()
+            .take(3)
+            .map(cutlass_editor::CatalogTile::Template)
+            .chain(
+                cutlass_editor::TEXT_EFFECTS
+                    .iter()
+                    .take(3)
+                    .map(cutlass_editor::CatalogTile::Effect),
+            )
+            .chain(
+                cutlass_editor::BUBBLE_LOOKS
+                    .iter()
+                    .take(3)
+                    .map(cutlass_editor::CatalogTile::Bubble),
+            );
+        for tile in tiles {
+            let picture = desktop.tile_picture(tile).unwrap();
+            let side = u32::try_from(cutlass_editor::TILE_SIDE).unwrap();
+            assert_eq!((picture.width, picture.height), (side, side));
+            assert!(
+                picture
+                    .rgba
+                    .chunks(4)
+                    .any(|pixel| pixel[3] > 0 && pixel[..3] != [0, 0, 0]),
+                "{tile:?} draws"
+            );
+            assert!(seen.insert(picture.rgba), "{tile:?} draws its own");
+        }
+    }
+
+    #[test]
     fn a_caption_word_keeps_its_time_and_is_one_step() {
         let temp = Temp::new();
         let mut desktop = every_kind(&temp);
@@ -1196,5 +2020,85 @@ mod tests {
             desktop.set_caption_word(0, "won").unwrap_err().to_string(),
             "the track is locked"
         );
+    }
+
+    #[test]
+    fn a_caption_template_styles_the_row_while_apply_to_all_is_on() {
+        let temp = Temp::new();
+        let mut desktop = subtitle_row(&temp);
+        pick(&mut desktop, "first");
+        let before = desktop.draft().unwrap().clone();
+        desktop.set_caption_template("cutlass-caption-pop").unwrap();
+        assert_eq!(
+            desktop.caption_template().as_deref(),
+            Some("cutlass-caption-pop")
+        );
+        let styles = |desktop: &Shell| -> Vec<String> {
+            ["first", "second", "title"]
+                .iter()
+                .map(|id| {
+                    let draft = desktop.draft().unwrap();
+                    let text = draft
+                        .materials
+                        .texts
+                        .iter()
+                        .find(|t| t.id.as_str() == *id)
+                        .unwrap();
+                    text.caption_style.clone()
+                })
+                .collect()
+        };
+        assert_eq!(styles(&desktop), ["pop", "pop", ""]);
+        desktop.undo().unwrap();
+        assert_eq!(desktop.draft().unwrap(), &before);
+
+        desktop.set_all_captions(false);
+        desktop
+            .set_caption_template("cutlass-caption-neon")
+            .unwrap();
+        assert_eq!(styles(&desktop), ["neon", "", ""]);
+
+        assert!(desktop.set_caption_template("nope").is_err());
+        pick(&mut desktop, "title");
+        assert!(desktop.set_caption_template("cutlass-caption-pop").is_err());
+        assert_eq!(desktop.caption_template(), None);
+    }
+
+    #[test]
+    fn find_and_replace_reaches_every_caption_on_the_row_as_one_step() {
+        let temp = Temp::new();
+        let mut desktop = subtitle_row(&temp);
+        pick(&mut desktop, "first");
+        let before = desktop.draft().unwrap().clone();
+        let lines = |desktop: &Shell| -> Vec<String> {
+            desktop
+                .caption_rows()
+                .into_iter()
+                .map(|row| row.text)
+                .collect()
+        };
+        assert_eq!(desktop.replace_in_captions("O", "1").unwrap(), 2);
+        assert_eq!(lines(&desktop), ["1ne", "tw1"]);
+        let title = desktop
+            .draft()
+            .unwrap()
+            .materials
+            .texts
+            .iter()
+            .find(|t| t.id.as_str() == "title")
+            .unwrap()
+            .content
+            .clone();
+        assert_eq!(title, "hi");
+        desktop.undo().unwrap();
+        assert_eq!(desktop.draft().unwrap(), &before);
+
+        let revision = desktop.revision();
+        assert!(desktop.replace_in_captions("zebra", "x").is_err());
+        assert!(desktop.replace_in_captions(" ", "x").is_err());
+        assert!(desktop.replace_in_captions("one", "").is_err());
+        assert_eq!(desktop.revision(), revision);
+        pick(&mut desktop, "title");
+        assert!(desktop.replace_in_captions("hi", "yo").is_err());
     }
 }

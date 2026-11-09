@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "sunkissed",
+  "name": "Sunkissed",
+  "category": "Portrait",
+  "adjust": {"temperature": 0.35, "highlights": -0.1, "brilliance": 0.2},
+  "wheels": {"gain": {"hue": 45, "amount": 0.3}}
+}

@@ -28,13 +28,28 @@ pub const FILTER_CARD_PREFIX: &str = "filter:";
 /// The bundled filters as `(card id, name)`, in shelf order.
 #[must_use]
 pub fn filter_cards() -> Vec<(String, &'static str)> {
-    cutlass_effects::LOOKS
+    cutlass_effects::looks()
         .iter()
         .map(|look| {
             (
                 format!("{FILTER_CARD_PREFIX}{}", look.effect_id()),
-                look.name,
+                look.name.as_str(),
             )
+        })
+        .collect()
+}
+
+/// The filters shelf's categories that hold at least one filter, in shelf
+/// order.
+#[must_use]
+pub fn filter_categories() -> Vec<&'static str> {
+    cutlass_effects::FILTER_CATEGORIES
+        .iter()
+        .copied()
+        .filter(|category| {
+            cutlass_effects::looks()
+                .iter()
+                .any(|look| look.category == *category)
         })
         .collect()
 }
@@ -53,6 +68,8 @@ pub struct EffectCard {
     /// What [`Request::AddEffect`] takes, such as `recipe/shake`.
     pub effect_id: String,
     pub name: String,
+    /// The shelf category, one of [`cutlass_effects::EFFECT_CATEGORIES`].
+    pub category: String,
 }
 
 /// The bundled effects, in shelf order.
@@ -66,8 +83,20 @@ pub fn effect_cards() -> Vec<EffectCard> {
                 id: format!("{EFFECT_CARD_PREFIX}{effect_id}"),
                 effect_id,
                 name: recipe.name.clone(),
+                category: recipe.category.clone(),
             }
         })
+        .collect()
+}
+
+/// The shelf's categories that hold at least one effect, in shelf order.
+#[must_use]
+pub fn effect_categories() -> Vec<&'static str> {
+    let cards = effect_cards();
+    cutlass_effects::EFFECT_CATEGORIES
+        .iter()
+        .copied()
+        .filter(|category| cards.iter().any(|card| card.category == *category))
         .collect()
 }
 
@@ -157,11 +186,18 @@ mod filter_tests {
     #[test]
     fn every_filter_card_names_its_look() {
         let cards = filter_cards();
-        assert_eq!(cards.len(), 20);
+        assert_eq!(cards.len(), cutlass_effects::looks().len());
         for (id, name) in cards {
-            assert_eq!(filter_of_card(&id).map(|look| look.name), Some(name));
+            assert_eq!(
+                filter_of_card(&id).map(|look| look.name.as_str()),
+                Some(name)
+            );
         }
         assert!(filter_of_card("effect:look/warm").is_none());
+        assert_eq!(
+            super::filter_categories(),
+            cutlass_effects::FILTER_CATEGORIES.to_vec()
+        );
     }
 }
 
@@ -183,9 +219,10 @@ mod tests {
     }
 
     #[test]
-    fn ten_cards_each_naming_a_bundled_effect() {
+    fn every_card_names_a_bundled_effect() {
         let cards = effect_cards();
-        assert_eq!(cards.len(), 10);
+        assert_eq!(cards.len(), bundled().len());
+        assert!(cards.len() >= 40);
         for card in &cards {
             assert_eq!(
                 effect_of_card(&card.id).as_deref(),
@@ -194,6 +231,16 @@ mod tests {
         }
         assert_eq!(effect_of_card("effect:recipe/none"), None);
         assert_eq!(effect_of_card("recipe/shake"), None);
+        // Only categories with an effect in them, in shelf order.
+        let categories = effect_categories();
+        assert_eq!(categories.first(), Some(&"Basic"));
+        for card in &cards {
+            assert!(
+                categories.contains(&card.category.as_str()),
+                "{}",
+                card.name
+            );
+        }
     }
 
     #[test]

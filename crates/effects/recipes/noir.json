@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "id": "noir",
+  "name": "Noir",
+  "category": "Basic",
+  "preview": "portrait",
+  "controls": [
+    {"id": "contrast", "name": "Contrast", "default": 1.5, "min": 0.5, "max": 3, "unit": "percent", "set": [[0, "contrast"]]}
+  ],
+  "passes": [
+    {"block": "grade", "params": {"saturation": 0, "contrast": 1.5, "brightness": -0.05}},
+    {"block": "vignette", "params": {"amount": 0.6, "size": 0.5}}
+  ]
+}

@@ -15,7 +15,7 @@ use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
 use std::time::SystemTime;
 
-use cutlass_model::Draft;
+use cutlass_model::{Draft, LinkageSettings};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -32,7 +32,7 @@ const META_FILE: &str = "draft_meta_info.json";
 const TIMELINES_DIR: &str = "Timelines";
 const ATTACHMENT_DIR: &str = "common_attachment";
 const ID_MAP_FILE: &str = "attachment_id_mapping.json";
-const RESOURCES_DIR: &str = "Resources";
+pub(crate) const RESOURCES_DIR: &str = "Resources";
 const BIZ_CONFIG_FILE: &str = "draft_biz_config.json";
 const VIRTUAL_STORE_FILE: &str = "draft_virtual_store.json";
 const DESKTOP_OS: &[&str] = &["windows", "mac", "macOS"];
@@ -274,25 +274,34 @@ impl Folder {
 
     /// Record the linkage switch for this draft. Other keys in the file stay.
     pub fn set_linkage_enabled(&mut self, enabled: bool) {
-        let timeline_id = self.draft.id.as_str().to_owned();
-        let root = self
-            .biz_config
-            .get_or_insert_with(|| Value::Object(Map::new()));
-        let Some(root) = root.as_object_mut() else {
-            return;
-        };
-        let timelines = root
-            .entry("timeline_settings")
-            .or_insert_with(|| Value::Object(Map::new()));
-        let Some(timelines) = timelines.as_object_mut() else {
-            return;
-        };
-        let timeline = timelines
-            .entry(timeline_id)
-            .or_insert_with(|| Value::Object(Map::new()));
-        if let Some(timeline) = timeline.as_object_mut() {
+        if let Some(timeline) = self.timeline_settings() {
             timeline.insert("linkage_enabled".to_owned(), Value::Bool(enabled));
         }
+    }
+
+    /// Record the linkage switch and the follow and cut kinds for this
+    /// draft. Other keys in the file stay.
+    pub fn set_linkage(&mut self, settings: LinkageSettings) {
+        if let Some(timeline) = self.timeline_settings() {
+            timeline.insert("linkage_enabled".to_owned(), Value::Bool(settings.enabled));
+            timeline.insert("follow".to_owned(), settings.follow.to_biz());
+            timeline.insert("cut".to_owned(), settings.cut.to_biz());
+        }
+    }
+
+    /// This draft's object under `timeline_settings`, made when missing.
+    /// `None` when the file holds something other than objects there.
+    fn timeline_settings(&mut self) -> Option<&mut Map<String, Value>> {
+        let timeline_id = self.draft.id.as_str().to_owned();
+        self.biz_config
+            .get_or_insert_with(|| Value::Object(Map::new()))
+            .as_object_mut()?
+            .entry("timeline_settings")
+            .or_insert_with(|| Value::Object(Map::new()))
+            .as_object_mut()?
+            .entry(timeline_id)
+            .or_insert_with(|| Value::Object(Map::new()))
+            .as_object_mut()
     }
 
     /// Write the folder. The top draft file is a byte copy of the main timeline.
@@ -685,7 +694,7 @@ fn write_sidecars(root: &Path, folder: &Folder) -> Result<(), StoreError> {
     Ok(())
 }
 
-fn write_bytes(root: &Path, path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
+pub(crate) fn write_bytes(root: &Path, path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
     stay_inside(root, path)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| io_error(parent, error))?;
@@ -724,7 +733,7 @@ fn canonicalize_root(path: &Path) -> Result<PathBuf, StoreError> {
 /// Refuse a path whose existing ancestor, or whose own target, sits outside `root`.
 /// `root` is already canonical. A missing tail is allowed only when every existing
 /// ancestor is still inside the folder and the lexical path does not climb out.
-fn stay_inside(root: &Path, path: &Path) -> Result<(), StoreError> {
+pub(crate) fn stay_inside(root: &Path, path: &Path) -> Result<(), StoreError> {
     if path
         .components()
         .any(|component| component == Component::ParentDir)
@@ -777,7 +786,7 @@ fn read_optional(path: &Path) -> Result<Option<Vec<u8>>, StoreError> {
     }
 }
 
-fn io_error(path: &Path, error: std::io::Error) -> StoreError {
+pub(crate) fn io_error(path: &Path, error: std::io::Error) -> StoreError {
     StoreError::Io {
         path: path.to_path_buf(),
         message: error.to_string(),
@@ -1269,6 +1278,22 @@ mod tests {
         assert_eq!(biz["kept"], 1);
         assert_eq!(biz["timeline_settings"]["D"]["follow"]["audio"], false);
         assert_eq!(biz["timeline_settings"]["D"]["linkage_enabled"], false);
+    }
+
+    #[test]
+    fn set_linkage_writes_the_kinds_and_keeps_the_other_keys() {
+        let mut folder = Folder::new(Draft::empty("D"));
+        folder.biz_config = Some(serde_json::json!({ "kept": 1 }));
+        let mut settings = cutlass_model::LinkageSettings::default();
+        settings.follow.audio = false;
+        settings.cut.audio = false;
+        folder.set_linkage(settings);
+        let biz = folder.biz_config.unwrap();
+        assert_eq!(biz["kept"], 1);
+        assert_eq!(
+            cutlass_model::linkage_from_biz(Some(&biz), "D", false),
+            settings
+        );
     }
 
     #[test]

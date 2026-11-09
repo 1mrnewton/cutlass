@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "id": "white-in",
+  "name": "White In",
+  "category": "Basic",
+  "preview": "beach",
+  "poster": 0.25,
+  "controls": [
+    {"id": "speed", "name": "Speed", "default": 1, "min": 0.25, "max": 3, "unit": "times", "speed": true}
+  ],
+  "passes": [
+    {"block": "flash", "params": {"amount": {"keys": [[0, 1], [0.5, 0]]}}}
+  ]
+}

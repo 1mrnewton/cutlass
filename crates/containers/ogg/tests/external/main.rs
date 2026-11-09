@@ -13,3 +13,4 @@ mod measure;
 mod mux_oracle;
 mod oracle;
 mod support;
+mod vorbis_oracle;

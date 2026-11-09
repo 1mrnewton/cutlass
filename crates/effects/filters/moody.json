@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "moody",
+  "name": "Moody",
+  "category": "Moody",
+  "adjust": {"exposure": -0.15, "contrast": 0.25, "saturation": -0.2, "vignette": 0.35}
+}

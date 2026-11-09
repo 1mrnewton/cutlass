@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "star-open",
+  "name": "Star Open",
+  "category": "Shape",
+  "duration": 0.7,
+  "cross": {"kind": 12, "soft": 0.02}
+}

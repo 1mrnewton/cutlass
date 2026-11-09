@@ -430,13 +430,75 @@ pub const POSE_KEYS: [&str; 5] = [
 /// The opacity property.
 pub const ALPHA_KEY: &str = "KFTypeAlpha";
 
+/// The clip's volume, as a linear gain.
+pub const VOLUME_KEY: &str = "KFTypeVolume";
+
+/// The clip mask's place, size, turn, feather and round corners, in the
+/// mask's own units.
+pub const MASK_KEYS: [&str; 7] = [
+    "KFTypeCommonMaskPositionX",
+    "KFTypeCommonMaskPositionY",
+    "KFTypeCommonMaskSizeWidth",
+    "KFTypeCommonMaskSizeHeight",
+    "KFTypeCommonMaskRotation",
+    "KFTypeCommonMaskFeather",
+    "KFTypeCommonMaskRoundCorner",
+];
+
+/// Whether `property` is part of the clip's pose: place, size, turn or
+/// opacity, under any name [`clip_at`] reads.
+#[must_use]
+pub fn is_pose_key(property: &str) -> bool {
+    POSE_KEYS.contains(&property)
+        || matches!(property, ALPHA_KEY | "alpha" | "rotation" | "KFTypeScale")
+}
+
+/// A text's letter color: red, green and blue, each from 0 to 1, keyed as
+/// three settings. These are Cutlass's own names; the reference editor's
+/// are not known.
+pub const TEXT_COLOR_KEYS: [&str; 3] = ["KFTypeTextColorR", "KFTypeTextColorG", "KFTypeTextColorB"];
+
+/// Whether a key on `property` is played: the pose, the volume, the mask
+/// or a text's color.
+#[must_use]
+pub fn is_keyable(property: &str) -> bool {
+    is_pose_key(property)
+        || matches!(property, VOLUME_KEY | "volume")
+        || MASK_KEYS.contains(&property)
+        || TEXT_COLOR_KEYS.contains(&property)
+}
+
+/// The keyed letter color of `segment` at timeline `time`, red, green and
+/// blue from 0 to 1; `None` when it has no color keys or one does not read.
+#[must_use]
+pub fn text_color_at(
+    segment: &Segment,
+    graphs: &[KeyframeGraph],
+    time: Micros,
+) -> Option<[f64; 3]> {
+    let offset = time.0.saturating_sub(segment.target.start.0);
+    let mut rgb = [0.0; 3];
+    for (channel, name) in rgb.iter_mut().zip(TEXT_COLOR_KEYS) {
+        *channel = sample(&segment.common_keyframes, graphs, &[name], offset)??.clamp(0.0, 1.0);
+    }
+    Some(rgb)
+}
+
 /// The offsets from the segment start that hold a key, earliest first, each
 /// once.
 #[must_use]
 pub fn key_offsets(segment: &Segment) -> Vec<Micros> {
+    key_offsets_where(segment, |_| true)
+}
+
+/// The offsets that hold a key on a property `keep` takes, earliest first,
+/// each once.
+#[must_use]
+pub fn key_offsets_where(segment: &Segment, keep: impl Fn(&str) -> bool) -> Vec<Micros> {
     let mut offsets: Vec<Micros> = segment
         .common_keyframes
         .iter()
+        .filter(|group| keep(&group.property_type))
         .flat_map(|group| &group.keyframe_list)
         .map(|key| key.time_offset)
         .collect();
@@ -513,8 +575,21 @@ pub fn add_keys(segment: &mut Segment, graphs: &[KeyframeGraph], offset: Micros)
 /// Remove every key at `offset`. A group left with no keys is dropped.
 /// Whether any key was there.
 pub fn remove_keys(segment: &mut Segment, offset: Micros) -> bool {
+    remove_keys_where(segment, offset, |_| true)
+}
+
+/// Remove the keys at `offset` on the properties `keep` takes. A group
+/// left with no keys is dropped. Whether any key was there.
+pub fn remove_keys_where(
+    segment: &mut Segment,
+    offset: Micros,
+    keep: impl Fn(&str) -> bool,
+) -> bool {
     let mut removed = false;
     for group in &mut segment.common_keyframes {
+        if !keep(&group.property_type) {
+            continue;
+        }
         let before = group.keyframe_list.len();
         group.keyframe_list.retain(|key| key.time_offset != offset);
         removed |= group.keyframe_list.len() != before;

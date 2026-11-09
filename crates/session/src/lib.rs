@@ -14,9 +14,10 @@ pub use cutlass_model::{
     Draft, LinkageSettings, Micros, SegmentId, TrackAttribute, TrackId, linkage_from_biz,
 };
 pub use edit::{
-    CANVAS_SHAPES, CanvasShape, EditError, MAX_CAPTION_STAGGER_MS, NEW_TEXT_SIZE, canvas_for,
-    follow_first_picture, ratio_request,
+    BOLD_WIDTH, CANVAS_SHAPES, CAPTION_KIND, CanvasShape, EditError, ITALIC_DEGREE,
+    MAX_CAPTION_STAGGER_MS, NEW_TEXT_SIZE, TextPattern, canvas_for, follow_first_picture,
+    lane_fits, new_lane_index, ratio_request,
 };
-pub use history::UNDO_LIMIT;
-pub use request::{Arrange, ImportedMedium, Request, TrimEdge};
-pub use session::Session;
+pub use history::{UNDO_BYTES, UNDO_LIMIT};
+pub use request::{Arrange, ImportedMedium, Request, SubtitleCue, TrimEdge};
+pub use session::{Session, drop_empty_lanes};

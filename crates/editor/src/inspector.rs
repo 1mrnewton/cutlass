@@ -4,9 +4,10 @@
 //! style presets.
 
 use cutlass_model::{
-    Draft, MaterialEffect, MaterialRef, MaterialText, Segment, Track, TrackFlag, TrackType,
-    segment_bloom,
+    Draft, MaterialEffect, MaterialRef, MaterialText, Segment, SegmentId, Track, TrackFlag,
+    TrackType, segment_bloom,
 };
+use cutlass_session::Request;
 
 /// The panel a clip opens in the inspector, from its material and its row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -27,6 +28,8 @@ pub enum Panel {
     Filter,
     Adjust,
     Sticker,
+    /// A shape from the library: a rectangle, a circle, a line and so on.
+    Shape,
     /// A clip this build has no panel for.
     Other,
 }
@@ -46,6 +49,7 @@ impl Panel {
             Self::Filter => "Filter",
             Self::Adjust => "Adjustment",
             Self::Sticker => "Sticker",
+            Self::Shape => "Shape",
             Self::Other => "Clip",
         }
     }
@@ -109,9 +113,10 @@ pub fn panel_of(draft: &Draft, track: &Track, segment: &Segment) -> Panel {
         Some(MaterialRef::Draft(_)) => picture(false),
         Some(MaterialRef::Color(_)) => picture(true),
         Some(MaterialRef::Audio(_)) => Panel::Audio,
-        Some(MaterialRef::Text(text)) if caption(track, text) => Panel::Caption,
+        Some(MaterialRef::Text(text)) if is_caption(track, text) => Panel::Caption,
         Some(MaterialRef::Text(_)) => Panel::Text,
         Some(MaterialRef::VideoEffect(_) | MaterialRef::Plugin(_)) => Panel::Effect,
+        Some(MaterialRef::Shape(_)) => Panel::Shape,
         _ => match track.kind {
             TrackType::Audio | TrackType::TextToVideoTextAudio => Panel::Audio,
             TrackType::Text | TrackType::TextToVideoText => Panel::Text,
@@ -132,7 +137,10 @@ pub fn panel_of(draft: &Draft, track: &Track, segment: &Segment) -> Panel {
     }
 }
 
-fn caption(track: &Track, text: &MaterialText) -> bool {
+/// True when `text` on `track` is a caption: its row is a caption or
+/// lyric row, its kind says so, or it has recognized words.
+#[must_use]
+pub fn is_caption(track: &Track, text: &MaterialText) -> bool {
     matches!(
         track.flag,
         TrackFlag::TextSubtitle
@@ -245,25 +253,88 @@ pub fn starting(color: &str, value: f64, start: f64) -> f64 {
     }
 }
 
-/// Title style presets: name, fill color, box color. "None" clears both.
-pub const TEXT_PRESETS: [(&str, &str, &str); 16] = [
-    ("None", "", ""),
-    ("Plain", "#FFFFFF", "#3A3A3A"),
-    ("Yellow", "#FFE14A", "#3A3A3A"),
-    ("Red", "#FF4D4D", "#3A3A3A"),
-    ("Orange", "#FF9A3C", "#3A3A3A"),
-    ("Blue", "#5AA7FF", "#3A3A3A"),
-    ("Green", "#3DDC6A", "#1C1C1C"),
-    ("Gray", "#D0D0D0", "#2A2A2A"),
-    ("Ink", "#1A1A1A", "#F3F3F3"),
-    ("Gold", "#F2C14E", "#2A2418"),
-    ("Violet", "#FFFFFF", "#7A3CFF"),
-    ("Paper", "#7A3CFF", "#FFFFFF"),
-    ("Night", "#FFFFFF", "#111111"),
-    ("Lime", "#D6FF4A", "#111111"),
-    ("Rose", "#FF6A9A", "#2A1218"),
-    ("Cyan", "#3DE0FF", "#102028"),
+/// A preset look for a title or caption: the letters' color and, each
+/// left off when empty, an outline, a box behind them, and a shadow.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TextPreset {
+    pub name: &'static str,
+    pub color: &'static str,
+    pub outline: &'static str,
+    pub plate: &'static str,
+    pub shadow: &'static str,
+}
+
+const fn preset(
+    name: &'static str,
+    color: &'static str,
+    outline: &'static str,
+    plate: &'static str,
+    shadow: &'static str,
+) -> TextPreset {
+    TextPreset {
+        name,
+        color,
+        outline,
+        plate,
+        shadow,
+    }
+}
+
+/// The preset tiles, in the order the inspector shows them. "None" puts
+/// white letters back with every part off.
+pub const TEXT_PRESETS: [TextPreset; 16] = [
+    preset("None", "#FFFFFF", "", "", ""),
+    preset("Outline", "#FFFFFF", "#000000", "", ""),
+    preset("Ink outline", "#000000", "#FFFFFF", "", ""),
+    preset("Yellow outline", "#FFE14A", "#000000", "", ""),
+    preset("Red outline", "#FF4D4D", "#FFFFFF", "", ""),
+    preset("Blue outline", "#5AA7FF", "#FFFFFF", "", ""),
+    preset("Green outline", "#3DDC6A", "#000000", "", ""),
+    preset("Pop", "#FF6A9A", "#FFFFFF", "", "#000000"),
+    preset("Shadow", "#FFFFFF", "", "", "#000000"),
+    preset("Gold shadow", "#F2C14E", "#2A2418", "", "#000000"),
+    preset("Night box", "#FFFFFF", "", "#111111", ""),
+    preset("Paper box", "#111111", "", "#FFFFFF", ""),
+    preset("Yellow box", "#111111", "", "#FFE14A", ""),
+    preset("Red box", "#FFFFFF", "", "#E5383B", ""),
+    preset("Violet box", "#FFFFFF", "", "#7A3CFF", ""),
+    preset("Lime box", "#D6FF4A", "", "#111111", ""),
 ];
+
+/// The requests that give `segment_id` the whole `preset` look, one undo
+/// step when applied together. An empty `font_path` takes `face`.
+#[must_use]
+pub fn preset_requests(segment_id: &SegmentId, preset: &TextPreset, face: &str) -> Vec<Request> {
+    vec![
+        Request::SetTextColor {
+            segment_id: segment_id.clone(),
+            color: preset.color.to_owned(),
+            face: face.to_owned(),
+        },
+        Request::SetTextOutline {
+            segment_id: segment_id.clone(),
+            color: preset.outline.to_owned(),
+            width: if preset.outline.is_empty() {
+                0.0
+            } else {
+                OUTLINE_START
+            },
+        },
+        Request::SetTextBackground {
+            segment_id: segment_id.clone(),
+            color: preset.plate.to_owned(),
+            alpha: BACKGROUND_ALPHA_START,
+            round: BACKGROUND_ROUND_START,
+        },
+        Request::SetTextShadow {
+            segment_id: segment_id.clone(),
+            color: preset.shadow.to_owned(),
+            distance: SHADOW_DISTANCE_START,
+            angle: SHADOW_ANGLE,
+            blur: SHADOW_BLUR_START,
+        },
+    ]
+}
 
 /// A clip's stored position (-1 to 1 each way, Y up) as canvas pixels from
 /// the middle, Y down, rounded, as the position fields show it.
@@ -321,6 +392,24 @@ mod tests {
     }
 
     #[test]
+    fn a_shape_opens_the_shape_panel() {
+        let mut draft = Draft::empty("D");
+        draft
+            .materials
+            .shapes
+            .push(cutlass_model::MaterialShape::preset(
+                "sq".into(),
+                cutlass_model::ShapeKind::Rectangle,
+                320.0,
+                320.0,
+            ));
+        let segment = Segment::new("a", "sq", cutlass_model::TimeRange::new(0, 1));
+        let mut row = Track::main("stickers");
+        row.kind = TrackType::Sticker;
+        assert_eq!(panel_of(&draft, &row, &segment), Panel::Shape);
+    }
+
+    #[test]
     fn a_picture_on_a_sticker_row_opens_the_sticker_panel() {
         let mut draft = Draft::empty("D");
         let mut heart = cutlass_model::MaterialVideo::new("heart");
@@ -335,6 +424,25 @@ mod tests {
             panel_of(&draft, &row, &segment),
             Panel::Main { still: false }
         );
+    }
+
+    #[test]
+    fn a_caption_without_words_still_opens_the_caption_panel() {
+        let mut draft = Draft::empty("D");
+        let mut line = MaterialText::new("line");
+        line.kind = "subtitle".to_owned();
+        draft.materials.texts.push(line);
+        let mut title = MaterialText::new("title");
+        title.kind = "text".to_owned();
+        draft.materials.texts.push(title);
+        let mut row = Track::main("captions");
+        row.kind = TrackType::Text;
+        let caption = Segment::new("a", "line", cutlass_model::TimeRange::new(0, 1));
+        let plain = Segment::new("b", "title", cutlass_model::TimeRange::new(0, 1));
+        assert_eq!(panel_of(&draft, &row, &caption), Panel::Caption);
+        assert_eq!(panel_of(&draft, &row, &plain), Panel::Text);
+        row.flag = TrackFlag::TextSubtitle;
+        assert_eq!(panel_of(&draft, &row, &plain), Panel::Caption);
     }
 
     #[test]

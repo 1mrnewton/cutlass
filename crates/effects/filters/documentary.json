@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "documentary",
+  "name": "Documentary",
+  "category": "Cinema",
+  "adjust": {"contrast": 0.1, "saturation": -0.2, "clarity": 0.15, "fade": 0.05}
+}

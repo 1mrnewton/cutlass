@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "album",
+  "name": "Album",
+  "category": "Vintage",
+  "adjust": {"fade": 0.2, "temperature": 0.25, "tint": -0.05, "vignette": 0.35},
+  "curves": {"rgb": [[0, 0], [0.25, 0.22], [0.75, 0.78], [1, 1]]}
+}

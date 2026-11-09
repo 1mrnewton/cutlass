@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "bakery",
+  "name": "Bakery",
+  "category": "Food",
+  "adjust": {"temperature": 0.3, "fade": 0.1, "brilliance": 0.2},
+  "wheels": {"gain": {"hue": 40, "amount": 0.25}}
+}

@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "neon",
+  "name": "Neon",
+  "category": "Cinema",
+  "adjust": {"tint": 0.2, "saturation": 0.3, "contrast": 0.15},
+  "wheels": {"lift": {"hue": 280, "amount": 0.4}, "gain": {"hue": 190, "amount": 0.25}}
+}

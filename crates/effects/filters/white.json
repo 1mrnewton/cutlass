@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "white",
+  "name": "White",
+  "category": "Bright",
+  "adjust": {"exposure": 0.3, "shadows": 0.3, "saturation": -0.2, "highlights": 0.1, "fade": 0.05}
+}

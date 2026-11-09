@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "id": "pan-left",
+  "name": "Pan Left",
+  "category": "Motion",
+  "preview": "beach",
+  "poster": 1.0,
+  "controls": [
+    {"id": "speed", "name": "Speed", "default": 1, "min": 0.25, "max": 3, "unit": "times", "speed": true},
+    {"id": "intensity", "name": "Intensity", "default": 1, "min": 0, "max": 2, "unit": "percent", "scale": [[0, "x"]]}
+  ],
+  "passes": [
+    {"block": "transform", "params": {"scale": 1.2, "x": {"keys": [[0, 0.08], [3, -0.08]]}}}
+  ]
+}

@@ -11,14 +11,14 @@ use cutlass_isobmff::IsoBmffFile;
 use cutlass_still::{StillDemux, still_limits};
 
 /// The codecs [`crate::register_codecs`] installs, plus ISOBMFF, WAV, AIFF,
-/// FLAC, Ogg Opus, MP3, and stills.
+/// FLAC, Ogg (Opus and Vorbis), MP3, and stills.
 #[cfg(test)]
 pub(crate) fn installed_readers() -> ReaderFactory {
     readers_with(crate::register_codecs().0)
 }
 
-/// ISOBMFF, WAV, AIFF, FLAC, Ogg Opus, MP3, and stills, decoded with
-/// `decoders`.
+/// ISOBMFF, WAV, AIFF, FLAC, Ogg (Opus and Vorbis), MP3, and stills,
+/// decoded with `decoders`.
 pub(crate) fn readers_with(decoders: DecodeFactory) -> ReaderFactory {
     let mut readers = ReaderFactory::new();
     readers.register_container(probe_isobmff, open_isobmff);
@@ -284,6 +284,94 @@ mod tests {
         assert!(snr > 30.0, "SNR {snr:.1} dB after a seek");
     }
 
+    /// An `.ogg` Vorbis file opens, probes, and plays the decoder's own
+    /// samples from the start and after a seek. There is no encoder delay.
+    #[test]
+    fn an_ogg_vorbis_file_opens_seeks_and_decodes() {
+        use cutlass_encode::{AudioInput, ChannelLayout, CodecParams, Encoder, Pcm, SideData};
+
+        let path =
+            std::env::temp_dir().join(format!("cutlass-readers-vorbis-{}.ogg", std::process::id()));
+        let rate = 44_100_u32;
+        let frames = rate as usize * 2;
+        let samples: Vec<f32> = (0..frames * 2)
+            .map(|i| ((i as f32) * 0.02).sin() * 0.25)
+            .collect();
+        let spec = CodecParams::audio(CodecId::Vorbis, rate, ChannelLayout::stereo());
+        let mut encoder = cutlass_vorbis::VorbisEncoder::open(&spec).expect("encoder");
+        let pcm = Pcm::from_f32(rate, ChannelLayout::stereo(), samples).expect("pcm");
+        let mut packets = encoder.push(&AudioInput { pcm }).expect("push");
+        packets.extend(encoder.drain().expect("drain"));
+        let config = packets
+            .iter()
+            .find_map(|packet| {
+                packet.side.iter().find_map(|side| match side {
+                    SideData::Config(config) => Some(config.clone()),
+                    _ => None,
+                })
+            })
+            .expect("headers");
+        let mut mux = cutlass_ogg::OggMux::new(std::fs::File::create(&path).expect("create"));
+        let params =
+            StreamParams::try_audio(StreamCodec::Known(CodecId::Vorbis), rate, 2, config.clone())
+                .expect("params");
+        let track = mux
+            .add_stream(NewStream {
+                params,
+                timescale: Timescale::new(rate),
+                language: None,
+            })
+            .expect("stream");
+        let mut ticks = 0;
+        for packet in &packets {
+            let timestamp =
+                Timestamp::try_new(Some(packet.pts), Some(packet.pts), Some(packet.duration))
+                    .expect("timestamp");
+            let out = Packet::try_new(
+                track.get(),
+                packet.data.clone(),
+                timestamp,
+                Timescale::new(rate),
+                true,
+            )
+            .expect("packet");
+            mux.write_packet(&out).expect("write");
+            ticks += packet.duration;
+        }
+        mux.finish(&[TrackDuration {
+            track,
+            timescale: Timescale::new(rate),
+            ticks,
+        }])
+        .expect("finish");
+        drop(mux);
+
+        let mut decoder = cutlass_vorbis::VorbisDecoder::from_config(&config).expect("decoder");
+        let mut expected = Vec::new();
+        for packet in &packets {
+            expected.extend(decoder.decode(&packet.data).expect("decode"));
+        }
+        expected.truncate(frames * 2);
+
+        let readers = installed_readers();
+        let info = readers.probe(&path).expect("probe");
+        assert_eq!(info.duration.map(|d| d.0), Some(2_000_000));
+        let mut media = readers.open(&path).expect("open");
+        let window = 4_096_usize;
+        let first = media
+            .audio_from(cutlass_model::Micros(0), window as u32)
+            .expect("audio");
+        let first = first.as_f32().expect("f32");
+        assert_eq!(first, &expected[..window * 2]);
+        let later = media
+            .audio_from(cutlass_model::Micros(1_000_000), window as u32)
+            .expect("seek");
+        std::fs::remove_file(&path).expect("remove");
+        let later = later.as_f32().expect("f32");
+        let at = rate as usize * 2;
+        assert_eq!(later, &expected[at..at + window * 2]);
+    }
+
     #[test]
     fn a_flac_file_opens_seeks_and_decodes_exactly() {
         let path =
@@ -439,6 +527,748 @@ mod tests {
         let ready = media.pull_audio().expect("pull").expect("pcm");
         assert_eq!(ready.pcm.rate, 44_100);
         assert_eq!(ready.pcm.layout.len(), 2);
+    }
+
+    /// An AC-3 or E-AC-3 movie opens, plays the tone, seeks, and opens again.
+    #[test]
+    fn an_ac3_movie_opens_seeks_and_reopens() {
+        use cutlass_encode::{AudioInput, ChannelLayout, CodecParams, Encoder, Pcm, SideData};
+
+        for codec in [CodecId::Ac3, CodecId::Eac3] {
+            let path = std::env::temp_dir().join(format!(
+                "cutlass-readers-{codec:?}-{}.mp4",
+                std::process::id()
+            ));
+            let rate = 48_000u32;
+            let layout = ChannelLayout::stereo();
+            let samples: Vec<f32> = (0..rate as usize)
+                .flat_map(|i| {
+                    let t = i as f32 / rate as f32;
+                    let left = (t * 1_000.0 * std::f32::consts::TAU).sin() * 0.4;
+                    [left, left * 0.5]
+                })
+                .collect();
+            let mut spec = CodecParams::audio(codec, rate, layout.clone());
+            spec.bitrate = 192_000;
+            let mut encoder = cutlass_ac3::Ac3Encoder::open(&spec).expect("encoder");
+            let pcm = Pcm::from_f32(rate, layout, samples).expect("pcm");
+            let mut packets = encoder.push(&AudioInput { pcm }).expect("push");
+            packets.extend(encoder.drain().expect("drain"));
+            let mut mux =
+                cutlass_isobmff::Mp4Mux::new(std::fs::File::create(&path).expect("create"));
+            let params = StreamParams::try_audio(StreamCodec::Known(codec), rate, 2, Vec::new())
+                .expect("params");
+            let track = mux
+                .add_stream(NewStream {
+                    params,
+                    timescale: Timescale::new(rate),
+                    language: None,
+                })
+                .expect("stream");
+            let mut ticks = 0i64;
+            for packet in &packets {
+                for side in &packet.side {
+                    if let SideData::Config(config) = side {
+                        mux.set_config(track, config).expect("config");
+                    }
+                }
+                let timestamp =
+                    Timestamp::try_new(Some(packet.pts), Some(packet.pts), Some(packet.duration))
+                        .expect("time");
+                let out = Packet::try_new(
+                    track.get(),
+                    packet.data.clone(),
+                    timestamp,
+                    Timescale::new(rate),
+                    true,
+                )
+                .expect("packet");
+                mux.write_packet(&out).expect("write");
+                ticks += packet.duration;
+            }
+            mux.finish(&[TrackDuration {
+                track,
+                timescale: Timescale::new(rate),
+                ticks,
+            }])
+            .expect("finish");
+            drop(mux);
+
+            let window = |at| {
+                let mut media = installed_readers().open(&path).expect("open");
+                media
+                    .audio_from(cutlass_model::Micros(at), 2_048)
+                    .expect("audio")
+            };
+            let start = window(100_000);
+            let later = window(500_000);
+            let info = installed_readers().probe(&path).expect("probe");
+            assert!(info.duration.is_some(), "{codec:?}");
+            installed_readers().open(&path).expect("reopen");
+            std::fs::remove_file(&path).expect("remove");
+            for (name, pcm) in [("start", &start), ("seek", &later)] {
+                let samples = pcm.as_f32().expect("f32");
+                assert_eq!(samples.len(), 2 * 2_048, "{codec:?} {name}");
+                assert!(
+                    tone_margin(samples, rate, 1_000.0) > 20.0,
+                    "{codec:?} {name}"
+                );
+            }
+        }
+    }
+
+    /// A CRC-failed syncframe in the middle of an AC-3 file is passed over.
+    /// Its time is silence, and the sweep after it plays at its own time,
+    /// sample for sample as the intact file plays it.
+    #[test]
+    fn a_bad_ac3_frame_is_skipped_and_the_rest_plays() {
+        use cutlass_decode::Decoder;
+        use cutlass_encode::{AudioInput, ChannelLayout, CodecParams, Encoder, Pcm, SideData};
+
+        let rate = 48_000u32;
+        let layout = ChannelLayout::stereo();
+        // A sweep from 200 Hz to 4 kHz: one frame early is a different pitch.
+        let samples: Vec<f32> = (0..rate as usize)
+            .flat_map(|i| {
+                let t = f64::from(i as u32) / f64::from(rate);
+                let phase = std::f64::consts::TAU * (200.0 * t + 1_900.0 * t * t);
+                let left = (phase.sin() * 0.4) as f32;
+                [left, left * 0.5]
+            })
+            .collect();
+        let mut spec = CodecParams::audio(CodecId::Ac3, rate, layout.clone());
+        spec.bitrate = 192_000;
+        let mut encoder = cutlass_ac3::Ac3Encoder::open(&spec).expect("encoder");
+        let pcm = Pcm::from_f32(rate, layout, samples).expect("pcm");
+        let mut packets = encoder.push(&AudioInput { pcm }).expect("push");
+        packets.extend(encoder.drain().expect("drain"));
+        assert!(packets.len() > 8, "need a frame in the middle");
+        let mut damaged = packets.clone();
+        damaged[3].data[20] ^= 0xff;
+        let mut check = cutlass_ac3::Ac3Decoder::open(&spec).expect("decoder");
+        for (index, packet) in damaged.iter().enumerate().take(5) {
+            let pushed = check.push(packet);
+            if index == 3 {
+                assert!(pushed.is_err(), "the damaged frame was accepted");
+            } else {
+                pushed.expect("a good frame");
+            }
+        }
+        let write = |name: &str, packets: &[cutlass_encode::Packet]| {
+            let path = std::env::temp_dir().join(format!(
+                "cutlass-readers-{name}-ac3-{}.mp4",
+                std::process::id()
+            ));
+            let mut mux =
+                cutlass_isobmff::Mp4Mux::new(std::fs::File::create(&path).expect("create"));
+            let params =
+                StreamParams::try_audio(StreamCodec::Known(CodecId::Ac3), rate, 2, Vec::new())
+                    .expect("params");
+            let track = mux
+                .add_stream(NewStream {
+                    params,
+                    timescale: Timescale::new(rate),
+                    language: None,
+                })
+                .expect("stream");
+            let mut ticks = 0i64;
+            for packet in packets {
+                for side in &packet.side {
+                    if let SideData::Config(config) = side {
+                        mux.set_config(track, config).expect("config");
+                    }
+                }
+                let timestamp =
+                    Timestamp::try_new(Some(packet.pts), Some(packet.pts), Some(packet.duration))
+                        .expect("time");
+                let out = Packet::try_new(
+                    track.get(),
+                    packet.data.clone(),
+                    timestamp,
+                    Timescale::new(rate),
+                    true,
+                )
+                .expect("packet");
+                mux.write_packet(&out).expect("write");
+                ticks += packet.duration;
+            }
+            mux.finish(&[TrackDuration {
+                track,
+                timescale: Timescale::new(rate),
+                ticks,
+            }])
+            .expect("finish");
+            path
+        };
+        let clean_path = write("clean", &packets);
+        let bad_path = write("bad", &damaged);
+
+        // One window, then the same span in 1024-frame windows that run on
+        // without a seek.
+        let frames = 8 * 1_536;
+        let read = |path: &std::path::Path, step: u32| {
+            let mut media = installed_readers().open(path).expect("open");
+            let mut out = Vec::new();
+            let mut at = 0u32;
+            while at < frames {
+                let micros = i64::from(at) * 1_000_000 / i64::from(rate);
+                let pcm = media
+                    .audio_from(cutlass_model::Micros(micros), step)
+                    .expect("audio");
+                out.extend_from_slice(pcm.as_f32().expect("f32"));
+                at += step;
+            }
+            out
+        };
+        let clean = read(&clean_path, frames);
+        let whole = read(&bad_path, frames);
+        let stepped = read(&bad_path, 1_024);
+        let seek = |path: &std::path::Path| {
+            installed_readers()
+                .open(path)
+                .expect("open")
+                .audio_from(cutlass_model::Micros(250_000), 2_048)
+                .expect("audio")
+                .as_f32()
+                .expect("f32")
+                .to_vec()
+        };
+        let clean_later = seek(&clean_path);
+        let bad_later = seek(&bad_path);
+        std::fs::remove_file(&clean_path).expect("remove");
+        std::fs::remove_file(&bad_path).expect("remove");
+
+        // The decoder trims the 256-sample delay from the head of the
+        // stream, so syncframe `k`'s own sound plays from `1536 k`.
+        let frame = |k: usize| 1_536 * k * 2;
+        let peak = |samples: &[f32]| samples.iter().fold(0.0f32, |top, x| top.max(x.abs()));
+        for (name, bad) in [("one window", &whole), ("stepped", &stepped)] {
+            assert_eq!(bad.len(), clean.len(), "{name}");
+            assert_eq!(bad[..frame(3)], clean[..frame(3)], "{name} before");
+            assert_eq!(peak(&bad[frame(3)..frame(4)]), 0.0, "{name} hole");
+            // Syncframe 4 overlaps onto syncframe 2, not 3. From syncframe 5
+            // on the decoder is back on the intact file's samples.
+            let after = &bad[frame(5)..];
+            let reference = &clean[frame(5)..];
+            let worst = after
+                .iter()
+                .zip(reference)
+                .fold(0.0f32, |top, (a, b)| top.max((a - b).abs()));
+            assert!(worst < 1e-4, "{name} after the hole is off by {worst}");
+            assert!(peak(after) > 0.1, "{name} after the hole is quiet");
+        }
+        assert_eq!(bad_later, clean_later, "seek past the hole");
+        assert_eq!(bad_later.len(), 2 * 2_048);
+    }
+
+    /// A real recording is imported, exported as AC-3 and E-AC-3, then
+    /// reopened and seeked. The file's edit skips the encoder delay, so
+    /// playback lines up with the source.
+    #[test]
+    fn a_real_recording_exports_as_ac3_and_eac3_and_plays_back() {
+        use cutlass_encode::EncodeFactory;
+        use cutlass_eval::NoFonts;
+        use cutlass_export::{AudioExport, ExportRequest, MovieSources, write_sound};
+        use cutlass_model::{
+            Draft, FrameRate, MaterialAudio, MaterialId, Micros, Segment, TimeRange, Track,
+            TrackType,
+        };
+
+        let Some(root) = local_media() else {
+            return;
+        };
+        let name = "06 First Person Shooter (feat. J. Cole).m4a";
+        let source_path = root.join(name);
+        if !source_path.is_file() {
+            if std::env::var_os("AC3_REQUIRE_ORACLES").is_some_and(|value| value == "1") {
+                panic!("missing {}", source_path.display());
+            }
+            return;
+        }
+        let source_at = |at| {
+            installed_readers()
+                .open(&source_path)
+                .expect("import")
+                .audio_from(Micros(at), 16_384)
+                .expect("source")
+        };
+        let start = source_at(40_000_000);
+        let later = source_at(41_000_000);
+        assert_eq!(start.rate, 48_000);
+        assert!(
+            rms(start.as_f32().expect("f32")) > 0.01,
+            "the imported window is silent"
+        );
+
+        let mut draft = Draft::empty("song");
+        draft.duration = Micros(2_000_000);
+        draft.materials.audios.push(MaterialAudio {
+            id: MaterialId::new("song"),
+            path: name.to_owned(),
+            duration: Micros(42_000_000),
+            ..MaterialAudio::default()
+        });
+        let mut track = Track::main("song");
+        track.kind = TrackType::Audio;
+        let mut segment = Segment::new("song", "song", TimeRange::new(0, 2_000_000));
+        segment.source_range = Some(TimeRange::new(40_000_000, 2_000_000));
+        track.segments.push(segment);
+        draft.tracks.push(track);
+
+        for codec in [CodecId::Ac3, CodecId::Eac3] {
+            let bitrate = if codec == CodecId::Ac3 {
+                192_000
+            } else {
+                128_000
+            };
+            let dir =
+                std::env::temp_dir().join(format!("cutlass-real-{codec:?}-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).expect("dir");
+            let path = dir.join("cut.m4a");
+            let mut encoders = EncodeFactory::new();
+            cutlass_ac3::register_encoders(&mut encoders);
+            let readers = installed_readers();
+            let sources = MovieSources {
+                draft: &draft,
+                root: Some(&root),
+                readers: &readers,
+                fonts: &NoFonts,
+                renderer: None,
+                encoders: &encoders,
+            };
+            let request = ExportRequest {
+                range: TimeRange::new(0, 2_000_000),
+                short_side: 0,
+                codec,
+                bitrate: 0,
+                frame_rate: FrameRate::FPS_30,
+                container: cutlass_codec::ContainerId::Isobmff,
+                audio: Some(AudioExport {
+                    codec,
+                    bitrate,
+                    sample_rate: 48_000,
+                    channels: 2,
+                    limiter: 0,
+                }),
+                sidecar: None,
+                late_by: 0,
+                constant_rate: false,
+                prores: cutlass_export::ProresProfile::Standard,
+            };
+            write_sound(&sources, &request, &path, &mut |_, _| true).expect("export");
+
+            let file = cutlass_isobmff::IsoBmffFile::open(
+                std::fs::File::open(&path).expect("open export"),
+            )
+            .expect("movie");
+            let edit = cutlass_container::Demux::streams(&file)[0].edits()[0];
+            assert_eq!(
+                edit.media_time(),
+                Some(i64::from(cutlass_ac3::ENCODER_DELAY)),
+                "{codec:?}"
+            );
+
+            let played = installed_readers()
+                .open(&path)
+                .expect("playback")
+                .audio_from(Micros(0), 16_384)
+                .expect("play");
+            let seeked = installed_readers()
+                .open(&path)
+                .expect("reopen")
+                .audio_from(Micros(1_000_000), 16_384)
+                .expect("seek");
+            installed_readers().open(&path).expect("reopen");
+            std::fs::remove_dir_all(&dir).expect("remove");
+            assert_aligned(&start, &played, codec);
+            assert_aligned(&later, &seeked, codec);
+        }
+    }
+
+    fn local_media() -> Option<std::path::PathBuf> {
+        let path =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../local-files");
+        if path.is_dir() {
+            return Some(path);
+        }
+        if std::env::var_os("AC3_REQUIRE_ORACLES").is_some_and(|value| value == "1") {
+            panic!("missing {}", path.display());
+        }
+        None
+    }
+
+    fn rms(samples: &[f32]) -> f64 {
+        let energy: f64 = samples
+            .iter()
+            .map(|sample| f64::from(*sample).powi(2))
+            .sum();
+        (energy / f64::from(u32::try_from(samples.len()).unwrap_or(1).max(1))).sqrt()
+    }
+
+    fn left(pcm: &cutlass_codec::access::Pcm) -> Vec<f32> {
+        let channels = pcm.layout.len().max(1);
+        pcm.as_f32()
+            .expect("f32")
+            .iter()
+            .step_by(channels)
+            .copied()
+            .collect()
+    }
+
+    fn assert_aligned(
+        source: &cutlass_codec::access::Pcm,
+        played: &cutlass_codec::access::Pcm,
+        codec: CodecId,
+    ) {
+        assert_eq!(
+            (played.rate, played.layout.len()),
+            (source.rate, 2),
+            "{codec:?}"
+        );
+        let reference = left(source);
+        let got = left(played);
+        let mut best_lag = 0;
+        let mut best = f64::MIN;
+        for lag in -8..=8 {
+            let score = lagged_snr(&reference, &got, lag);
+            if score > best {
+                best = score;
+                best_lag = lag;
+            }
+        }
+        let at_zero = lagged_snr(&reference, &got, 0);
+        assert_eq!(
+            best_lag, 0,
+            "{codec:?} lines up at lag {best_lag} ({best:.1} dB), not at 0 ({at_zero:.1} dB)"
+        );
+        assert!(at_zero > 15.0, "{codec:?} {at_zero:.1} dB");
+    }
+
+    /// A positive `lag` drops the start of `got`: the playback is that many
+    /// samples late.
+    fn lagged_snr(reference: &[f32], got: &[f32], lag: i32) -> f64 {
+        let (reference, got) = aligned(reference, got, lag);
+        let n = reference.len().min(got.len());
+        if n == 0 {
+            return f64::MIN;
+        }
+        let (mut signal, mut noise) = (0.0, 0.0);
+        for index in 0..n {
+            let sample = f64::from(reference[index]);
+            let error = sample - f64::from(got[index]);
+            signal += sample * sample;
+            noise += error * error;
+        }
+        if noise == 0.0 {
+            return 200.0;
+        }
+        10.0 * (signal / noise).log10()
+    }
+
+    fn aligned<'a>(reference: &'a [f32], got: &'a [f32], lag: i32) -> (&'a [f32], &'a [f32]) {
+        let shift = usize::try_from(lag.unsigned_abs()).unwrap_or(0);
+        if lag > 0 {
+            let got = got.get(shift..).unwrap_or(&[]);
+            let reference = reference
+                .get(..reference.len().saturating_sub(shift))
+                .unwrap_or(&[]);
+            (reference, got)
+        } else {
+            let reference = reference.get(shift..).unwrap_or(&[]);
+            let got = got.get(..got.len().saturating_sub(shift)).unwrap_or(&[]);
+            (reference, got)
+        }
+    }
+
+    /// A 5.1 AC-3 or E-AC-3 movie keeps each speaker, including LFE, at
+    /// the start and after a seek. Surrounds stay side channels.
+    #[test]
+    fn a_surround_movie_keeps_each_speaker_through_seek() {
+        use cutlass_decode::Channel::{
+            self, FrontCenter, FrontLeft, FrontRight, Lfe, SideLeft, SideRight,
+        };
+        use cutlass_encode::{AudioInput, ChannelLayout, CodecParams, Encoder, Pcm, SideData};
+
+        let speakers = [
+            (FrontLeft, 300.0),
+            (FrontRight, 600.0),
+            (FrontCenter, 900.0),
+            (Lfe, 50.0),
+            (SideLeft, 1_200.0),
+            (SideRight, 1_500.0),
+        ];
+        let order: Vec<Channel> = speakers.iter().map(|(channel, _)| *channel).collect();
+        for codec in [CodecId::Ac3, CodecId::Eac3] {
+            let path = std::env::temp_dir().join(format!(
+                "cutlass-readers-51-{codec:?}-{}.mp4",
+                std::process::id()
+            ));
+            let rate = 48_000u32;
+            let layout = ChannelLayout::new(order.clone()).expect("layout");
+            let frames = rate as usize;
+            let mut samples = Vec::with_capacity(frames * speakers.len());
+            for index in 0..frames {
+                let t = index as f32 / rate as f32;
+                for (_, hz) in &speakers {
+                    samples.push((t * *hz as f32 * std::f32::consts::TAU).sin() * 0.4);
+                }
+            }
+            let bitrate = if codec == CodecId::Ac3 {
+                448_000
+            } else {
+                384_000
+            };
+            let mut spec = CodecParams::audio(codec, rate, layout.clone());
+            spec.bitrate = bitrate;
+            let mut encoder = cutlass_ac3::Ac3Encoder::open(&spec).expect("encoder");
+            let pcm = Pcm::from_f32(rate, layout, samples).expect("pcm");
+            let mut packets = encoder.push(&AudioInput { pcm }).expect("push");
+            packets.extend(encoder.drain().expect("drain"));
+            let mut mux =
+                cutlass_isobmff::Mp4Mux::new(std::fs::File::create(&path).expect("create"));
+            let params = StreamParams::try_audio(
+                StreamCodec::Known(codec),
+                rate,
+                u16::try_from(speakers.len()).expect("channels"),
+                Vec::new(),
+            )
+            .expect("params");
+            let track = mux
+                .add_stream(NewStream {
+                    params,
+                    timescale: Timescale::new(rate),
+                    language: None,
+                })
+                .expect("stream");
+            let mut ticks = 0i64;
+            for packet in &packets {
+                for side in &packet.side {
+                    match side {
+                        SideData::Config(config) => mux.set_config(track, config).expect("config"),
+                        SideData::Gapless {
+                            encoder_delay,
+                            trailing_padding,
+                            ..
+                        } => mux
+                            .set_trim(
+                                track,
+                                cutlass_container::Trim::new(
+                                    Some(u64::from(*encoder_delay)),
+                                    Some(u64::from(*trailing_padding)),
+                                ),
+                            )
+                            .expect("trim"),
+                        _ => {}
+                    }
+                }
+                let timestamp =
+                    Timestamp::try_new(Some(packet.pts), Some(packet.pts), Some(packet.duration))
+                        .expect("time");
+                let out = Packet::try_new(
+                    track.get(),
+                    packet.data.clone(),
+                    timestamp,
+                    Timescale::new(rate),
+                    true,
+                )
+                .expect("packet");
+                mux.write_packet(&out).expect("write");
+                ticks += packet.duration;
+            }
+            mux.finish(&[TrackDuration {
+                track,
+                timescale: Timescale::new(rate),
+                ticks,
+            }])
+            .expect("finish");
+            drop(mux);
+
+            let info = installed_readers().probe(&path).expect("probe");
+            assert_eq!(info.streams[0].channels, Some(6), "{codec:?}");
+            for at in [100_000, 500_000] {
+                let played = installed_readers()
+                    .open(&path)
+                    .expect("open")
+                    .audio_from(cutlass_model::Micros(at), 4_096)
+                    .expect("audio");
+                assert_eq!(
+                    played.layout.channels(),
+                    order.as_slice(),
+                    "{codec:?} at {at}"
+                );
+                let floats = played.as_f32().expect("f32");
+                let n = speakers.len();
+                assert_eq!(floats.len(), n * 4_096, "{codec:?}");
+                for (index, (channel, hz)) in speakers.iter().enumerate() {
+                    let mine: Vec<f32> = floats.iter().skip(index).step_by(n).copied().collect();
+                    let own = goertzel(&mine, rate, *hz);
+                    for (_, other) in speakers.iter().filter(|(_, tone)| *tone != *hz) {
+                        let leak = goertzel(&mine, rate, *other);
+                        let margin = if *channel == Lfe { 10.0 } else { 50.0 };
+                        assert!(
+                            own > leak * margin,
+                            "{codec:?} {channel:?} at {at} carries {other} Hz"
+                        );
+                    }
+                }
+            }
+            installed_readers().open(&path).expect("reopen");
+            std::fs::remove_file(&path).expect("remove");
+        }
+    }
+
+    /// A 7.1 E-AC-3 movie keeps the side pair and the back pair after a seek.
+    #[test]
+    fn a_seven_point_one_movie_keeps_each_speaker_through_seek() {
+        use cutlass_decode::Channel::{
+            self, BackLeft, BackRight, FrontCenter, FrontLeft, FrontRight, Lfe, SideLeft, SideRight,
+        };
+        use cutlass_encode::{AudioInput, ChannelLayout, CodecParams, Encoder, Pcm, SideData};
+
+        let speakers = [
+            (FrontLeft, 300.0),
+            (FrontRight, 600.0),
+            (FrontCenter, 900.0),
+            (Lfe, 50.0),
+            (BackLeft, 1_200.0),
+            (BackRight, 1_500.0),
+            (SideLeft, 1_800.0),
+            (SideRight, 2_100.0),
+        ];
+        let order: Vec<Channel> = speakers.iter().map(|(channel, _)| *channel).collect();
+        let path =
+            std::env::temp_dir().join(format!("cutlass-readers-71-{}.mp4", std::process::id()));
+        let rate = 48_000u32;
+        let layout = ChannelLayout::new(order.clone()).expect("layout");
+        let frames = rate as usize;
+        let mut samples = Vec::with_capacity(frames * speakers.len());
+        for index in 0..frames {
+            let t = index as f32 / rate as f32;
+            for (_, hz) in &speakers {
+                samples.push((t * *hz as f32 * std::f32::consts::TAU).sin() * 0.25);
+            }
+        }
+        let mut spec = CodecParams::audio(CodecId::Eac3, rate, layout.clone());
+        spec.bitrate = 1_024_000;
+        let mut encoder = cutlass_ac3::Ac3Encoder::open(&spec).expect("encoder");
+        let pcm = Pcm::from_f32(rate, layout, samples).expect("pcm");
+        let mut packets = encoder.push(&AudioInput { pcm }).expect("push");
+        packets.extend(encoder.drain().expect("drain"));
+        let mut mux = cutlass_isobmff::Mp4Mux::new(std::fs::File::create(&path).expect("create"));
+        let params = StreamParams::try_audio(
+            StreamCodec::Known(CodecId::Eac3),
+            rate,
+            u16::try_from(speakers.len()).expect("channels"),
+            Vec::new(),
+        )
+        .expect("params");
+        let track = mux
+            .add_stream(NewStream {
+                params,
+                timescale: Timescale::new(rate),
+                language: None,
+            })
+            .expect("stream");
+        let mut ticks = 0i64;
+        for packet in &packets {
+            for side in &packet.side {
+                match side {
+                    SideData::Config(config) => mux.set_config(track, config).expect("config"),
+                    SideData::Gapless {
+                        encoder_delay,
+                        trailing_padding,
+                        ..
+                    } => mux
+                        .set_trim(
+                            track,
+                            cutlass_container::Trim::new(
+                                Some(u64::from(*encoder_delay)),
+                                Some(u64::from(*trailing_padding)),
+                            ),
+                        )
+                        .expect("trim"),
+                    _ => {}
+                }
+            }
+            let timestamp =
+                Timestamp::try_new(Some(packet.pts), Some(packet.pts), Some(packet.duration))
+                    .expect("time");
+            let out = Packet::try_new(
+                track.get(),
+                packet.data.clone(),
+                timestamp,
+                Timescale::new(rate),
+                true,
+            )
+            .expect("packet");
+            mux.write_packet(&out).expect("write");
+            ticks += packet.duration;
+        }
+        mux.finish(&[TrackDuration {
+            track,
+            timescale: Timescale::new(rate),
+            ticks,
+        }])
+        .expect("finish");
+        drop(mux);
+
+        let info = installed_readers().probe(&path).expect("probe");
+        assert_eq!(info.streams[0].channels, Some(8));
+        for at in [100_000, 500_000] {
+            let played = installed_readers()
+                .open(&path)
+                .expect("open")
+                .audio_from(cutlass_model::Micros(at), 4_096)
+                .expect("audio");
+            assert_eq!(played.layout.channels(), order.as_slice());
+            let floats = played.as_f32().expect("f32");
+            let n = speakers.len();
+            assert_eq!(floats.len(), n * 4_096);
+            for (index, (channel, hz)) in speakers.iter().enumerate() {
+                let mine: Vec<f32> = floats.iter().skip(index).step_by(n).copied().collect();
+                let own = goertzel(&mine, rate, *hz);
+                for (_, other) in speakers.iter().filter(|(_, tone)| *tone != *hz) {
+                    let leak = goertzel(&mine, rate, *other);
+                    let margin = if *channel == Lfe { 10.0 } else { 50.0 };
+                    assert!(
+                        own > leak * margin,
+                        "{channel:?} at {at} carries {other} Hz"
+                    );
+                }
+            }
+        }
+        installed_readers().open(&path).expect("reopen");
+        std::fs::remove_file(&path).expect("remove");
+    }
+
+    fn goertzel(samples: &[f32], rate: u32, hz: f64) -> f64 {
+        let w = 2.0 * std::f64::consts::PI * hz / f64::from(rate);
+        let coeff = 2.0 * w.cos();
+        let (mut s1, mut s2) = (0.0f64, 0.0f64);
+        for sample in samples {
+            let s = f64::from(*sample) + coeff * s1 - s2;
+            s2 = s1;
+            s1 = s;
+        }
+        s2 * s2 + s1 * s1 - coeff * s1 * s2
+    }
+
+    /// How far, in dB, the left channel's energy at `freq` sits above the
+    /// energy an octave up.
+    fn tone_margin(interleaved: &[f32], rate: u32, freq: f64) -> f64 {
+        let left: Vec<f32> = interleaved.iter().step_by(2).copied().collect();
+        let at = |hz: f64| {
+            let w = 2.0 * std::f64::consts::PI * hz / f64::from(rate);
+            let coeff = 2.0 * w.cos();
+            let (mut s1, mut s2) = (0.0f64, 0.0f64);
+            for sample in &left {
+                let s = f64::from(*sample) + coeff * s1 - s2;
+                s2 = s1;
+                s1 = s;
+            }
+            s2 * s2 + s1 * s1 - coeff * s1 * s2
+        };
+        10.0 * (at(freq) / at(freq * 2.0).max(1e-12)).log10()
     }
 
     fn aiff_s16(frame: &[u8]) -> Vec<u8> {

@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "faded",
+  "name": "Faded",
+  "category": "Vintage",
+  "adjust": {"fade": 0.5, "contrast": -0.15, "saturation": -0.15}
+}

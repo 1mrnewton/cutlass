@@ -6,7 +6,7 @@ use cutlass_session::{Request, TrimEdge};
 
 use crate::hit::{BadScale, Pointer, TimelineScale, hit_test, time_at};
 use crate::lane::{Lane, lanes_for};
-use crate::snap::snap_guides;
+use crate::snap::{snap, snap_span};
 
 /// Why a gesture could not name a request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -27,8 +27,9 @@ pub enum GestureOutcome {
     /// The pointer is outside every lane.
     Miss,
     /// The lane under the pointer and the upper lane of this type are taken.
-    /// This crate does not insert the track.
-    NewLane { kind: TrackType },
+    /// `start` is the target start, after snap, on the new lane. This crate
+    /// does not insert the track.
+    NewLane { kind: TrackType, start: Micros },
 }
 
 /// Where a segment can land. The draft's tracks are not changed.
@@ -60,8 +61,6 @@ pub struct DropGesture {
     pub playhead: Micros,
     /// How far, in microseconds, a snap target may sit from the pointer time.
     pub snap_threshold: Micros,
-    /// Vertical guides. Hidden guides are left out by the caller.
-    pub guides: Vec<Micros>,
 }
 
 /// A drag of a segment that is already on the draft.
@@ -73,8 +72,6 @@ pub struct MoveGesture {
     pub playhead: Micros,
     /// How far, in microseconds, a snap target may sit from the pointer time.
     pub snap_threshold: Micros,
-    /// Vertical guides. Hidden guides are left out by the caller.
-    pub guides: Vec<Micros>,
 }
 
 /// Turn the drag into one session request.
@@ -89,17 +86,15 @@ pub fn move_gesture(draft: &Draft, gesture: &MoveGesture) -> Result<GestureOutco
         Ok(None) => return Ok(GestureOutcome::Miss),
         Err(BadScale) => return Err(GestureError::BadScale),
     };
-    let start = match snap_guides(
+    let start = snap_span(
         draft,
         hit.time,
+        located.segment.target.duration,
         gesture.playhead,
         gesture.snap_threshold,
         Some(&gesture.segment_id),
-        &gesture.guides,
-    ) {
-        Some(target) => target.time,
-        None => hit.time,
-    };
+    )
+    .map_or(hit.time, |(start, _)| start);
     let rows = lanes_for(draft, gesture.scale.empty_lanes);
     let placed = placement(
         draft,
@@ -116,7 +111,7 @@ pub fn move_gesture(draft: &Draft, gesture: &MoveGesture) -> Result<GestureOutco
             track_id,
             start,
         }),
-        Placement::NewLane { kind } => GestureOutcome::NewLane { kind },
+        Placement::NewLane { kind } => GestureOutcome::NewLane { kind, start },
     })
 }
 
@@ -135,13 +130,12 @@ pub fn drop_gesture(draft: &Draft, gesture: &DropGesture) -> Result<DropOutcome,
         Ok(None) => return Ok(DropOutcome::Miss),
         Err(BadScale) => return Err(GestureError::BadScale),
     };
-    let snapped = snap_guides(
+    let snapped = snap(
         draft,
         hit.time,
         gesture.playhead,
         gesture.snap_threshold,
         None,
-        &gesture.guides,
     )
     .map(|target| target.time)
     .unwrap_or(hit.time);
@@ -171,8 +165,6 @@ pub struct TrimGesture {
     pub scale: TimelineScale,
     pub playhead: Micros,
     pub snap_threshold: Micros,
-    /// Vertical guides. Hidden guides are left out by the caller.
-    pub guides: Vec<Micros>,
 }
 
 /// The trim a gesture would apply. The draft is unchanged.
@@ -206,13 +198,12 @@ pub fn trim_gesture(draft: &Draft, gesture: &TrimGesture) -> Result<TrimPlan, Ge
     let located = locate(draft, &gesture.segment_id).ok_or(GestureError::UnknownSegment)?;
     let pointer_time =
         time_at(gesture.scale.pixel_size, gesture.pointer.x).ok_or(GestureError::BadScale)?;
-    let snapped_to = snap_guides(
+    let snapped_to = snap(
         draft,
         pointer_time,
         gesture.playhead,
         gesture.snap_threshold,
         Some(&gesture.segment_id),
-        &gesture.guides,
     )
     .map(|target| target.time);
     let chosen = snapped_to.unwrap_or(pointer_time);
@@ -533,7 +524,6 @@ mod tests {
             scale: scale(),
             playhead: Micros(9_000_000),
             snap_threshold: Micros(threshold),
-            guides: Vec::new(),
         }
     }
 
@@ -547,6 +537,7 @@ mod tests {
     #[test]
     fn a_move_becomes_one_request_and_the_draft_matches() {
         let mut draft = Draft::empty("D");
+        draft.materials.videos.push(MaterialVideo::new("media"));
         draft.config.maintrack_adsorb = false;
         let track = TrackId::new("main");
         draft.tracks[0].id = track.clone();
@@ -581,6 +572,7 @@ mod tests {
     #[test]
     fn a_miss_leaves_the_draft() {
         let mut draft = Draft::empty("D");
+        draft.materials.videos.push(MaterialVideo::new("media"));
         let track = TrackId::new("main");
         draft.tracks[0].id = track.clone();
         let mut session = Session::open(draft);
@@ -597,6 +589,7 @@ mod tests {
     #[test]
     fn a_snap_lands_on_an_edge() {
         let mut draft = Draft::empty("D");
+        draft.materials.videos.push(MaterialVideo::new("media"));
         let track = TrackId::new("main");
         draft.tracks[0].id = track.clone();
         let mut session = Session::open(draft);
@@ -638,6 +631,7 @@ mod tests {
     #[test]
     fn a_locked_lane_refuses_the_gesture_and_leaves_the_draft() {
         let mut draft = Draft::empty("D");
+        draft.materials.videos.push(MaterialVideo::new("media"));
         draft.tracks[0].id = TrackId::new("main");
         draft.tracks[0].attribute = TrackAttribute(TrackAttribute::LOCK);
         draft.tracks[0]
@@ -660,6 +654,7 @@ mod tests {
     #[test]
     fn placement_tries_the_pointer_then_the_upper_lane_then_a_new_lane() {
         let mut draft = Draft::empty("D");
+        draft.materials.videos.push(MaterialVideo::new("media"));
         draft.config.maintrack_adsorb = false;
         draft.tracks[0].id = TrackId::new("main");
         draft.tracks[0]
@@ -727,7 +722,8 @@ mod tests {
         assert_eq!(
             outcome,
             GestureOutcome::NewLane {
-                kind: TrackType::Video
+                kind: TrackType::Video,
+                start: Micros(0),
             }
         );
         assert_eq!(draft, before);
@@ -737,6 +733,7 @@ mod tests {
     #[test]
     fn an_upper_lane_move_is_one_request() {
         let mut draft = Draft::empty("D");
+        draft.materials.videos.push(MaterialVideo::new("media"));
         draft.config.maintrack_adsorb = false;
         draft.tracks[0].id = TrackId::new("main");
         draft.tracks[0]
@@ -784,6 +781,7 @@ mod tests {
     #[test]
     fn a_segment_does_not_block_its_own_lane() {
         let mut draft = Draft::empty("D");
+        draft.materials.videos.push(MaterialVideo::new("media"));
         draft.tracks[0].id = TrackId::new("main");
         draft.tracks[0]
             .segments
@@ -829,13 +827,13 @@ mod tests {
             scale: scale(),
             playhead: Micros(playhead),
             snap_threshold: Micros(threshold),
-            guides: Vec::new(),
         }
     }
 
     #[test]
     fn a_drop_on_the_main_lane_names_that_lane_and_the_snapped_time() {
         let mut draft = Draft::empty("D");
+        draft.materials.videos.push(MaterialVideo::new("media"));
         draft.tracks[0].id = TrackId::new("main");
         let outcome = drop_gesture(
             &draft,
@@ -855,6 +853,7 @@ mod tests {
     #[test]
     fn a_drop_keeps_a_time_outside_the_snap_window() {
         let mut draft = Draft::empty("D");
+        draft.materials.videos.push(MaterialVideo::new("media"));
         draft.tracks[0].id = TrackId::new("main");
         let outcome = drop_gesture(
             &draft,
@@ -908,6 +907,7 @@ mod tests {
     #[test]
     fn a_blocked_video_lane_asks_for_a_new_lane() {
         let mut draft = Draft::empty("D");
+        draft.materials.videos.push(MaterialVideo::new("media"));
         draft.config.maintrack_adsorb = false;
         draft.tracks[0].id = TrackId::new("main");
         draft.tracks[0]
@@ -930,6 +930,7 @@ mod tests {
     #[test]
     fn a_magnet_drop_on_a_taken_main_lane_stays_on_that_lane() {
         let mut draft = Draft::empty("D");
+        draft.materials.videos.push(MaterialVideo::new("media"));
         draft.tracks[0].id = TrackId::new("main");
         draft.tracks[0]
             .segments
@@ -978,7 +979,6 @@ mod tests {
             scale: scale(),
             playhead: Micros(9_000_000),
             snap_threshold: Micros(threshold),
-            guides: Vec::new(),
         }
     }
 
@@ -1025,6 +1025,7 @@ mod tests {
     #[test]
     fn trimming_the_start_stays_inside_the_source_and_the_previous_clip() {
         let mut draft = Draft::empty("D");
+        draft.materials.videos.push(MaterialVideo::new("media"));
         draft.config.maintrack_adsorb = false;
         draft.materials.audios.push(MaterialAudio {
             id: "sound".into(),
@@ -1095,6 +1096,7 @@ mod tests {
     #[test]
     fn dragging_past_the_other_edge_keeps_one_microsecond() {
         let mut draft = Draft::empty("D");
+        draft.materials.videos.push(MaterialVideo::new("media"));
         draft.tracks[0].segments.push(Segment::new(
             "a",
             "color",
@@ -1116,6 +1118,7 @@ mod tests {
     #[test]
     fn a_trim_with_a_bad_scale_is_refused() {
         let mut draft = Draft::empty("D");
+        draft.materials.videos.push(MaterialVideo::new("media"));
         draft.tracks[0]
             .segments
             .push(Segment::new("a", "color", TimeRange::new(0, 1_000_000)));

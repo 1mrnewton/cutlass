@@ -6,6 +6,14 @@ publish.workspace = true
 license.workspace = true
 description = "The av1 codec."
 
+[features]
+# Counts which coding tools the decoder sees (for test coverage reports).
+stats = []
+# Lets environment variables override encoder tuning constants (sweeps only).
+tune = []
+# Times the stages of the threaded decoder (`dec::decoder::prof`).
+prof = []
+
 [dependencies]
 cutlass-decode = { path = "../../decode", version = "0.1.0" }
 cutlass-encode = { path = "../../encode", version = "0.1.0" }

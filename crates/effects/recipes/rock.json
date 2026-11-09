@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "id": "rock",
+  "name": "Rock",
+  "category": "Motion",
+  "preview": "dancer",
+  "poster": 0.4,
+  "controls": [
+    {"id": "speed", "name": "Speed", "default": 1, "min": 0.25, "max": 3, "unit": "times", "speed": true},
+    {"id": "intensity", "name": "Intensity", "default": 1, "min": 0, "max": 2, "unit": "percent", "scale": [[0, "rotate"]]}
+  ],
+  "passes": [
+    {"block": "transform", "params": {"scale": 1.12, "rotate": {"wave": {"period": 1.6, "from": -4, "to": 4}}}}
+  ]
+}

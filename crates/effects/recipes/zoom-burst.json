@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "id": "zoom-burst",
+  "name": "Zoom Burst",
+  "category": "Blur",
+  "preview": "road",
+  "poster": 0.1,
+  "controls": [
+    {"id": "speed", "name": "Speed", "default": 1, "min": 0.25, "max": 3, "unit": "times", "speed": true}
+  ],
+  "passes": [
+    { "block": "transform", "params": {"scale": {"keys": [[0, 1.15], [0.4, 1]]}} },
+    { "block": "zoom_blur", "params": {"amount": {"keys": [[0, 0.35], [0.4, 0]]}} }
+  ]
+}

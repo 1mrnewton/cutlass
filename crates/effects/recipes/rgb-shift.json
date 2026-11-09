@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "id": "rgb-shift",
+  "name": "RGB Shift",
+  "category": "Glitch",
+  "preview": "city",
+  "controls": [
+    {"id": "speed", "name": "Speed", "default": 1, "min": 0.25, "max": 3, "unit": "times", "speed": true},
+    {"id": "intensity", "name": "Intensity", "default": 1, "min": 0, "max": 2, "unit": "percent", "scale": [[0, "x"], [0, "y"]]}
+  ],
+  "passes": [
+    {
+      "block": "rgb_split",
+      "params": {
+        "x": {"jitter": {"rate": 6, "from": -0.02, "to": 0.02, "seed": 71}},
+        "y": {"jitter": {"rate": 6, "from": -0.015, "to": 0.015, "seed": 72}}
+      }
+    }
+  ]
+}

@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "doors-close",
+  "name": "Doors Close",
+  "category": "Shape",
+  "cross": {"kind": 3, "soft": 0.02, "close": 1}
+}

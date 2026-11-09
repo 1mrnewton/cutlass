@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "shadow",
+  "name": "Shadow",
+  "category": "Moody",
+  "adjust": {"shadows": -0.3, "blacks": -0.2, "contrast": 0.2, "vignette": 0.4}
+}

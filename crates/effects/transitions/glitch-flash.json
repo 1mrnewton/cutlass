@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "id": "glitch-flash",
+  "name": "Glitch Flash",
+  "category": "Glitch",
+  "duration": 0.4,
+  "outgoing": [
+    {"block": "blocks", "params": {"amount": {"keys": [[0, 0], [0.5, 0.7], [1, 0]]}, "seed": {"jitter": {"rate": 30, "from": 0, "to": 1000, "seed": 4010}}}},
+    {"block": "flash", "params": {"amount": {"keys": [[0, 0], [0.5, 0.7], [1, 0]]}}},
+    {"block": "rgb_split", "params": {"x": {"keys": [[0, 0], [0.5, 0.05], [1, 0]]}}}
+  ],
+  "incoming": [
+    {"block": "blocks", "params": {"amount": {"keys": [[0, 0], [0.5, 0.7], [1, 0]]}, "seed": {"jitter": {"rate": 30, "from": 0, "to": 1000, "seed": 4010}}}},
+    {"block": "flash", "params": {"amount": {"keys": [[0, 0], [0.5, 0.7], [1, 0]]}}},
+    {"block": "rgb_split", "params": {"x": {"keys": [[0, 0], [0.5, 0.05], [1, 0]]}}}
+  ],
+  "cross": {"kind": 8, "progress": {"keys": [[0.49, 0], [0.51, 1]]}}
+}

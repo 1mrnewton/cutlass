@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "pop",
+  "name": "Pop",
+  "category": "Bright",
+  "adjust": {"saturation": 0.5, "contrast": 0.2}
+}

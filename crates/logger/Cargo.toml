@@ -4,12 +4,16 @@ version.workspace = true
 edition.workspace = true
 publish.workspace = true
 license.workspace = true
-description = "File log for every build, and stderr unless this is a public release."
+description = "Leveled file log for every build, and stderr unless this is a public release."
 autobins = false
 
 [features]
 # A public release passes this. `cargo run --release` does not, so it still logs.
 public-release = []
+
+[dependencies]
+# Other crates (wgpu, eframe, burn) report through the `log` facade.
+log = { version = "0.4.34", features = ["std"] }
 
 [[bin]]
 name = "emit"

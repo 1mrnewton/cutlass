@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "vivid",
+  "name": "Vivid",
+  "category": "Landscape",
+  "adjust": {"saturation": 0.45, "contrast": 0.15}
+}

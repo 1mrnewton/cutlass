@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "id": "desert",
+  "name": "Desert",
+  "category": "Landscape",
+  "adjust": {"temperature": 0.35, "contrast": 0.15},
+  "wheels": {"gain": {"hue": 30, "amount": 0.2}},
+  "hsl": {"orange": [0, 0.3, 0], "yellow": [0, 0.2, 0]}
+}

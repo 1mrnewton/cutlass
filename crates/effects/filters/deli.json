@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "deli",
+  "name": "Deli",
+  "category": "Food",
+  "adjust": {"contrast": 0.25, "saturation": 0.15, "highlights": -0.2, "shadows": 0.1, "clarity": 0.2}
+}

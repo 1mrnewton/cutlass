@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "id": "swirl",
+  "name": "Swirl",
+  "category": "Distort",
+  "preview": "flowers",
+  "controls": [
+    {"id": "twist", "name": "Twist", "default": 1, "min": 0, "max": 3, "unit": "percent", "scale": [[0, "angle"]]}
+  ],
+  "passes": [
+    { "block": "swirl", "params": {"angle": 180, "radius": 0.6} }
+  ]
+}

@@ -445,6 +445,10 @@ pub fn request_name(request: &Request) -> &'static str {
         Request::Trim { .. } => "trim",
         Request::SetWords { .. } => "set_words",
         Request::AddCaption { .. } => "add_caption",
+        Request::RecaptionClip { .. } => "recaption_clip",
+        Request::AddSubtitles { .. } => "add_subtitles",
+        Request::InsertCaption { .. } => "insert_caption",
+        Request::SetCaptionTemplate { .. } => "set_caption_template",
         Request::ExtractAudio { .. } => "extract_audio",
         Request::SetTrackAttribute { .. } => "set_track_attribute",
         Request::SetConstantSpeed { .. } => "set_constant_speed",
@@ -466,10 +470,18 @@ pub fn request_name(request: &Request) -> &'static str {
         Request::SetVolume { .. } => "set_volume",
         Request::SetFade { .. } => "set_fade",
         Request::SetCrop { .. } => "set_crop",
+        Request::SetStable { .. } => "set_stable",
+        Request::SetEnhance { .. } => "set_enhance",
+        Request::SetDenoise { .. } => "set_denoise",
+        Request::SetInterpolate { .. } => "set_interpolate",
+        Request::SetRelight { .. } => "set_relight",
+        Request::SetReframe { .. } => "set_reframe",
+        Request::SetMotionBlur { .. } => "set_motion_blur",
         Request::SetTextContent { .. } => "set_text_content",
         Request::SetTextSize { .. } => "set_text_size",
         Request::SetTextColor { .. } => "set_text_color",
         Request::SetTextAlign { .. } => "set_text_align",
+        Request::SetTextPattern { .. } => "set_text_pattern",
         Request::SetLetterSpacing { .. } => "set_letter_spacing",
         Request::SetLineSpacing { .. } => "set_line_spacing",
         Request::SetLineWidth { .. } => "set_line_width",
@@ -483,6 +495,13 @@ pub fn request_name(request: &Request) -> &'static str {
         Request::SetCaptionStagger { .. } => "set_caption_stagger",
         Request::SetTextGlow { .. } => "set_text_glow",
         Request::AddText { .. } => "add_text",
+        Request::AddShape { .. } => "add_shape",
+        Request::DrawShape { .. } => "draw_shape",
+        Request::SetShapeSize { .. } => "set_shape_size",
+        Request::SetShapeFill { .. } => "set_shape_fill",
+        Request::SetShapeStroke { .. } => "set_shape_stroke",
+        Request::SetShapeCorners { .. } => "set_shape_corners",
+        Request::SetShapeShadow { .. } => "set_shape_shadow",
         Request::AddEffect { .. } => "add_effect",
         Request::BindEffect { .. } => "bind_effect",
         Request::SetBlend { .. } => "set_blend",
@@ -495,11 +514,16 @@ pub fn request_name(request: &Request) -> &'static str {
         Request::SetLut { .. } => "set_lut",
         Request::SetChroma { .. } => "set_chroma",
         Request::SetMask { .. } => "set_mask",
+        Request::SetSelection { .. } => "set_selection",
+        Request::Track { .. } => "track",
         Request::SetColorMask { .. } => "set_color_mask",
         Request::SetEffectStrength { .. } => "set_effect_strength",
+        Request::SetEffectControl { .. } => "set_effect_control",
         Request::SetKeyframes { .. } => "set_keyframes",
         Request::AddKeyframe { .. } => "add_keyframe",
         Request::RemoveKeyframe { .. } => "remove_keyframe",
+        Request::KeyValues { .. } => "key_values",
+        Request::UnkeyValues { .. } => "unkey_values",
         Request::SetKeyframeGraph { .. } => "set_keyframe_graph",
         Request::SetAnimation { .. } => "set_animation",
         Request::KeyPose { .. } => "key_pose",
@@ -509,6 +533,7 @@ pub fn request_name(request: &Request) -> &'static str {
         Request::Ungroup { .. } => "ungroup",
         Request::SetInside { .. } => "set_inside",
         Request::InsertTrack { .. } => "insert_track",
+        Request::InsertTrackAt { .. } => "insert_track_at",
         Request::RemoveTrack { .. } => "remove_track",
         Request::RenameTrack { .. } => "rename_track",
         Request::AddTimeMark { .. } => "add_time_mark",
@@ -768,6 +793,7 @@ mod tests {
 
     fn open_tools() -> (DraftTools, TrackId) {
         let mut draft = Draft::empty("D");
+        draft.materials.videos.push(MaterialVideo::new("media"));
         let track_id = TrackId::new("main");
         draft.tracks[0].id = track_id.clone();
         (DraftTools::new(Session::open(draft)), track_id)
@@ -908,6 +934,7 @@ mod tests {
     #[test]
     fn query_segment_returns_range_and_revision() {
         let mut draft = Draft::empty("D");
+        draft.materials.videos.push(MaterialVideo::new("media"));
         draft.tracks[0].id = TrackId::new("main");
         let other = TrackId::new("other");
         draft.tracks.push(Track::main(other.clone()));

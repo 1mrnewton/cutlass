@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "sun-faded",
+  "name": "Sun Faded",
+  "category": "Vintage",
+  "adjust": {"fade": 0.4, "exposure": 0.1, "saturation": -0.35, "temperature": 0.2},
+  "hsl": {"red": [0, -0.3, 0]}
+}

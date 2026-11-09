@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "sixties",
+  "name": "Sixties",
+  "category": "Vintage",
+  "adjust": {"fade": 0.3, "saturation": -0.3, "temperature": 0.2, "vignette": 0.3},
+  "curves": {"blue": [[0, 0.1], [1, 0.9]]}
+}

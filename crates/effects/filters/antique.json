@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "antique",
+  "name": "Antique",
+  "category": "Vintage",
+  "adjust": {"saturation": -0.6, "temperature": 0.4, "fade": 0.2, "vignette": 0.5, "grain": 0.3}
+}

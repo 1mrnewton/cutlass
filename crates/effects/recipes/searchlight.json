@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "id": "searchlight",
+  "name": "Searchlight",
+  "category": "Light",
+  "preview": "city",
+  "poster": 0.75,
+  "controls": [
+    {"id": "speed", "name": "Speed", "default": 1, "min": 0.25, "max": 3, "unit": "times", "speed": true}
+  ],
+  "passes": [
+    {
+      "block": "spotlight",
+      "params": {
+        "amount": 0.9,
+        "x": {"wave": {"period": 3, "from": -0.35, "to": 0.35}},
+        "y": -0.1,
+        "size": 0.2,
+        "soft": 0.1
+      }
+    }
+  ]
+}

@@ -40,6 +40,9 @@ const AUDIO_PREROLL: i64 = 100_000;
 /// a seek to an open-GOP keyframe, the leading pictures reference frames
 /// before the seek and cannot be decoded.
 const SKIPPED_PICTURES: u32 = 16;
+/// Malformed audio packets one pull may pass over. A bad syncframe must
+/// not end the rest of the file. The decoder is left as it was.
+const SKIPPED_AUDIO: u32 = 16;
 /// Samples from another stream that may sit ahead of the wanted one.
 /// A movie can store an audio chunk before the next picture.
 const OTHER_STREAM_PACKETS: u32 = 4_096;
@@ -398,6 +401,22 @@ impl AudioRun {
         self.samples.len() / self.layout.len().max(1)
     }
 
+    /// Sample index just past the last held frame.
+    fn end(&self) -> i64 {
+        self.next
+            .saturating_add(i64::try_from(self.frames()).unwrap_or(i64::MAX))
+    }
+
+    /// Hold `frames` frames of silence after the last held frame.
+    fn pad(&mut self, frames: i64) {
+        let frames = usize::try_from(frames.max(0)).unwrap_or(0);
+        let len = self
+            .samples
+            .len()
+            .saturating_add(frames.saturating_mul(self.layout.len()));
+        self.samples.resize(len, 0.0);
+    }
+
     /// Drop up to `frames` leading frames.
     fn skip(&mut self, frames: i64) {
         let frames = usize::try_from(frames.max(0))
@@ -441,7 +460,10 @@ impl Media {
 
     /// [`Self::decode_at`], asking `steer` after each picture decoded on the
     /// way. It can move the target to a later time, which the decode then
-    /// stops at, or stop the decode. A stopped decode is
+    /// stops at, or stop the decode. A later time more than
+    /// [`FORWARD_REACH`] past the picture just decoded seeks to the keyframe
+    /// before it instead of decoding every picture on the way. A stopped
+    /// decode is
     /// [`EngineError::Interrupted`], and the stream stays where it got to, so
     /// a later time continues from there without a seek.
     pub fn decode_steered(
@@ -463,16 +485,7 @@ impl Media {
         let (mut ahead, mut previous) = match cursor {
             Some(cursor) => (cursor.ahead, Some(cursor.last)),
             None => {
-                let (track, timescale) = {
-                    let Some(pipe) = self.picture.as_mut() else {
-                        return Err(EngineError::NoDecoder {
-                            codec: "picture".to_owned(),
-                        });
-                    };
-                    pipe.reset();
-                    (pipe.track, pipe.timescale)
-                };
-                self.seek_picture(source, track, timescale)?;
+                self.restart_picture(source)?;
                 (None, None)
             }
         };
@@ -497,6 +510,12 @@ impl Media {
             };
             match steer(&held) {
                 Steer::Go => {}
+                Steer::Retarget(later) if later.0.saturating_sub(held.end.0) > FORWARD_REACH => {
+                    source = later;
+                    self.restart_picture(source)?;
+                    previous = None;
+                    continue;
+                }
                 Steer::Retarget(later) if later.0 >= held.start.0 => source = later,
                 Steer::Retarget(_) | Steer::Stop => {
                     self.keep(held, None);
@@ -519,6 +538,21 @@ impl Media {
             previous = Some(held);
         }
         Err(EngineError::DecodeLimit)
+    }
+
+    /// Drop what the picture decoder holds and seek to the keyframe before
+    /// `source`.
+    fn restart_picture(&mut self, source: Micros) -> Result<(), EngineError> {
+        let (track, timescale) = {
+            let Some(pipe) = self.picture.as_mut() else {
+                return Err(EngineError::NoDecoder {
+                    codec: "picture".to_owned(),
+                });
+            };
+            pipe.reset();
+            (pipe.track, pipe.timescale)
+        };
+        self.seek_picture(source, track, timescale)
     }
 
     /// Remember `last` for the next [`Media::decode_at`] and return it.
@@ -775,6 +809,25 @@ impl Media {
                 .and_then(|value| value.checked_div(i64::from(output.timescale.max(1))))
                 .unwrap_or(0)
                 .saturating_add(i64::from(output.skip_leading));
+            // Sample ticks one stream tick may round away.
+            let slack = i64::from(output.pcm.rate.div_ceil(output.timescale.max(1))) + 1;
+            if let Some(run) = self.run.as_mut() {
+                if run.frames() == 0 && run.next < want {
+                    // Nothing held: the frames before the window are not kept.
+                    run.next = want.min(start);
+                }
+                let end = run.end();
+                let limit = want.saturating_add(needed).max(end);
+                if start > limit.saturating_add(slack) {
+                    // This output starts past the window. The window ends in
+                    // silence, and the output waits for the next call.
+                    run.pad(limit - end);
+                    if let Some(pipe) = self.audio.as_mut() {
+                        pipe.heard.push_front(output);
+                    }
+                    break;
+                }
+            }
             let pcm = audible(output)?.pcm;
             if pcm.rate == 0 {
                 return Err(EngineError::NoClock);
@@ -792,7 +845,12 @@ impl Media {
                     if run.rate != pcm.rate || run.layout != pcm.layout {
                         return Err(EngineError::Layout);
                     }
-                    run.samples.extend_from_slice(&floats);
+                    let late = start - run.end();
+                    if late.abs() <= slack {
+                        run.samples.extend_from_slice(&floats);
+                    } else {
+                        place(run, start, &floats);
+                    }
                 }
                 None => {
                     if pcm.rate != rate {
@@ -925,6 +983,7 @@ impl Media {
         }
         let mut taken = 0_u32;
         let mut others = 0_u32;
+        let mut skipped = 0_u32;
         loop {
             if taken == DECODE_PACKETS {
                 return Err(EngineError::DecodeLimit);
@@ -944,7 +1003,14 @@ impl Media {
                 return Ok(None);
             };
             let access = pipe.access(&packet);
-            let outputs = pipe.decoder.push(&access)?;
+            let outputs = match pipe.decoder.push(&access) {
+                Ok(outputs) => outputs,
+                Err(CodecError::Malformed { .. }) if skipped < SKIPPED_AUDIO => {
+                    skipped = skipped.saturating_add(1);
+                    continue;
+                }
+                Err(error) => return Err(EngineError::Codec(error)),
+            };
             pipe.heard
                 .extend(outputs.into_iter().filter_map(|output| match output {
                     Output::Audio(audio) => Some(audio),
@@ -954,6 +1020,33 @@ impl Media {
                 return Ok(Some(output));
             }
         }
+    }
+}
+
+/// Hold `floats`, decoded for sample `start`, at its own time in `run`.
+///
+/// A packet the decoder refused leaves a hole that becomes silence, so later
+/// sound stays on its timestamps. Output that starts before the held sound
+/// ends repeats time already held, and only its later frames are kept. A
+/// clock more than a second back is a new timeline, and plays on in order.
+fn place(run: &mut AudioRun, start: i64, floats: &[f32]) {
+    let end = run.end();
+    if start > end {
+        run.pad(start - end);
+        run.samples.extend_from_slice(floats);
+        return;
+    }
+    let overlap = end - start;
+    if overlap > i64::from(run.rate) {
+        run.samples.extend_from_slice(floats);
+        return;
+    }
+    let channels = run.layout.len().max(1);
+    let held = usize::try_from(overlap)
+        .unwrap_or(usize::MAX)
+        .saturating_mul(channels);
+    if let Some(rest) = floats.get(held..) {
+        run.samples.extend_from_slice(rest);
     }
 }
 

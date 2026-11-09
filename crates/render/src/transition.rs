@@ -206,6 +206,79 @@ mod tests {
     }
 
     #[test]
+    fn every_recipe_transition_starts_on_the_outgoing_and_ends_on_the_incoming() {
+        let Some(renderer) = Renderer::for_test().expect("a GPU is required") else {
+            eprintln!("skipped: no GPU");
+            return;
+        };
+        let (w, h) = (64u32, 48u32);
+        let scene = |seed: u32| -> Vec<u8> {
+            (0..w * h)
+                .flat_map(|at| {
+                    let (x, y) = (at % w, at / w);
+                    let value =
+                        |k: u32| u8::try_from((x * 4 * k + y * 5 + seed * 40) % 256).unwrap();
+                    [value(1), value(2), value(3), 255]
+                })
+                .collect()
+        };
+        let (outgoing, incoming) = (scene(1), scene(4));
+        let canvas = renderer.canvas(w, h).expect("canvas");
+        let draw = |kind, t| {
+            let picture = |bytes| Rgba {
+                width: w,
+                height: h,
+                bytes,
+            };
+            renderer
+                .draw(
+                    &canvas,
+                    &[Layer::Transition {
+                        kind,
+                        t,
+                        outgoing: picture(&outgoing),
+                        incoming: picture(&incoming),
+                    }],
+                )
+                .expect("draw");
+            renderer.read(&canvas).expect("read")
+        };
+        let apart = |a: &[u8], b: &[u8]| {
+            let total: u64 = a
+                .iter()
+                .zip(b)
+                .map(|(a, b)| u64::from(a.abs_diff(*b)))
+                .sum();
+            total as f64 / a.len() as f64
+        };
+        let recipes: Vec<TransitionKind> = TransitionKind::every()
+            .into_iter()
+            .filter(|kind| kind.recipe().is_some())
+            .collect();
+        assert!(!recipes.is_empty());
+        for kind in recipes {
+            let key = kind.key();
+            let start = draw(kind, 0.0);
+            assert!(
+                apart(&start, &outgoing) < 3.0,
+                "{key} starts at {}",
+                apart(&start, &outgoing)
+            );
+            let end = draw(kind, 1.0);
+            assert!(
+                apart(&end, &incoming) < 3.0,
+                "{key} ends at {}",
+                apart(&end, &incoming)
+            );
+            let middle = draw(kind, 0.5);
+            assert!(
+                apart(&middle, &outgoing) > 2.0 && apart(&middle, &incoming) > 2.0,
+                "{key} does nothing in the middle"
+            );
+        }
+    }
+
+    #[test]
     fn every_transition_on_the_gpu_matches_the_cpu() {
         let Some(renderer) = Renderer::for_test().expect("a GPU is required") else {
             eprintln!("skipped: no GPU");

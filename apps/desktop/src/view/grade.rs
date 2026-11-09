@@ -8,9 +8,10 @@ use egui::{Color32, CornerRadius, Pos2, RichText, Sense, Shape, Stroke, Ui, Vec2
 use cutlass_effects::{CurveChannel, Grade, HSL_COLORS, Wheel, WheelSetting, curve_table};
 
 use crate::shell::{Inspection, Shell};
-use crate::tokens;
+use crate::{tokens, ui};
 
-use super::inspector::{InspectorState, note, send, slider};
+use super::audio::{choice_row, later_value};
+use super::inspector::{InspectorState, LATER, later_badge, note, send, slider};
 
 /// Where each HSL colour's swatch sits on the hue circle, in degrees.
 const SWATCH_HUES: [f32; 8] = [0.0, 30.0, 60.0, 120.0, 180.0, 240.0, 275.0, 310.0];
@@ -70,7 +71,7 @@ pub(super) fn hsl_page(
     if ui
         .add_enabled(
             stored.iter().any(|value| *value != 0.0),
-            egui::Button::new(RichText::new("Reset color").size(12.0)),
+            ui::Button::new("Reset color").text_size(12.0),
         )
         .clicked()
     {
@@ -80,44 +81,87 @@ pub(super) fn hsl_page(
     }
 }
 
-/// The Curves page: a channel switch, then the curve to drag. A click
-/// adds a point, a drag moves one, a double-click takes one away.
+/// The curves' names, in [`CurveChannel::ALL`] order.
+const CURVE_NAMES: [&str; 4] = ["Luma", "Red (R)", "Green (G)", "Blue (B)"];
+
+/// The Curves page: every channel's curve, one under another, each with
+/// its own reset, and a reset for all of them. A click adds a point, a
+/// drag moves one, a double-click takes one away.
 pub(super) fn curves_page(
     shell: &mut Shell,
     ui: &mut Ui,
     state: &mut InspectorState,
     inspection: &Inspection,
 ) {
-    ui.add_space(10.0);
-    ui.horizontal(|ui| {
-        for (index, channel) in CurveChannel::ALL.into_iter().enumerate() {
-            let on = state.curve_channel == index;
-            let text = RichText::new(channel.label()).size(12.0).color(if on {
-                Color32::WHITE
-            } else {
-                tokens::MUTED
-            });
-            if ui.selectable_label(on, text).clicked() {
-                state.curve_channel = index;
-                state.curve_drag = None;
-            }
-        }
-    });
     ui.add_space(6.0);
-    let channel = CurveChannel::ALL[state.curve_channel.min(3)];
+    let bent = |channel| !inspection.grade.curve(channel).is_empty();
+    let any = CurveChannel::ALL.into_iter().any(bent);
+    if curve_header(ui, "All", any) {
+        state.curve_drag = None;
+        send(shell, |shell| {
+            for channel in CurveChannel::ALL {
+                shell.set_curve(channel, &[])?;
+            }
+            Ok(())
+        });
+    }
+    for (index, channel) in CurveChannel::ALL.into_iter().enumerate() {
+        if curve_header(ui, CURVE_NAMES[index], bent(channel)) {
+            state.curve_drag = None;
+            send(shell, |shell| shell.set_curve(channel, &[]));
+        }
+        curve_graph(shell, ui, state, inspection, index);
+        ui.add_space(8.0);
+    }
+}
+
+/// A curve's name and its reset; true when the reset is clicked.
+fn curve_header(ui: &mut Ui, name: &str, reset: bool) -> bool {
+    let mut clicked = false;
+    ui.horizontal(|ui| {
+        ui.set_min_height(32.0);
+        ui.label(RichText::new(name).size(13.0).color(Color32::WHITE));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            clicked = ui
+                .add_enabled(
+                    reset,
+                    ui::Button::icon("reset")
+                        .min_size(Vec2::splat(24.0))
+                        .tip(format!("Reset {name}")),
+                )
+                .clicked();
+        });
+    });
+    clicked
+}
+
+/// One channel's curve to drag, the panel's width across.
+fn curve_graph(
+    shell: &mut Shell,
+    ui: &mut Ui,
+    state: &mut InspectorState,
+    inspection: &Inspection,
+    index: usize,
+) {
+    let channel = CurveChannel::ALL[index];
     let stored = curve_points(&inspection.grade, channel);
-    let side = ui.available_width().min(240.0);
-    let (rect, response) = ui.allocate_exact_size(Vec2::splat(side), Sense::click_and_drag());
-    let to_screen = |(x, y): (f32, f32)| pos2(rect.min.x + x * side, rect.max.y - y * side);
+    let width = ui.available_width().max(40.0);
+    let height = (width * 0.66).max(40.0);
+    let (rect, response) =
+        ui.allocate_exact_size(Vec2::new(width, height), Sense::click_and_drag());
+    let to_screen = |(x, y): (f32, f32)| pos2(rect.min.x + x * width, rect.max.y - y * height);
     let to_curve = |pos: Pos2| {
         (
-            ((pos.x - rect.min.x) / side).clamp(0.0, 1.0),
-            ((rect.max.y - pos.y) / side).clamp(0.0, 1.0),
+            ((pos.x - rect.min.x) / width).clamp(0.0, 1.0),
+            ((rect.max.y - pos.y) / height).clamp(0.0, 1.0),
         )
     };
+    // A drag belongs to the curve it started on.
+    let dragging = state.curve_channel == index;
     let mut points = state
         .curve_drag
         .as_ref()
+        .filter(|_| dragging)
         .map_or_else(|| stored.clone(), |(_, points)| points.clone());
     let near = |points: &[(f32, f32)], pos: Pos2| {
         points
@@ -127,42 +171,44 @@ pub(super) fn curves_page(
     let mut changed = false;
     if response.double_clicked()
         && let Some(pos) = response.interact_pointer_pos()
-        && let Some(index) = near(&points, pos)
+        && let Some(at) = near(&points, pos)
         && points.len() > 2
     {
-        points.remove(index);
+        points.remove(at);
         changed = true;
     } else if response.drag_started()
         && let Some(pos) = ui
             .input(|input| input.pointer.press_origin())
             .or_else(|| response.interact_pointer_pos())
     {
-        let index = near(&points, pos).unwrap_or_else(|| {
+        let at = near(&points, pos).unwrap_or_else(|| {
             points.push(to_curve(pos));
             points.sort_by(|a, b| a.0.total_cmp(&b.0));
             near(&points, pos).unwrap_or_default()
         });
-        state.curve_drag = Some((index, points.clone()));
+        state.curve_channel = index;
+        state.curve_drag = Some((at, points.clone()));
     } else if response.dragged()
+        && dragging
         && let Some(pos) = response.interact_pointer_pos()
-        && let Some((index, _)) = state.curve_drag
-        && index < points.len()
+        && let Some((at, _)) = state.curve_drag
+        && at < points.len()
     {
         // A point stays between its neighbours.
         let (mut x, y) = to_curve(pos);
-        let low = if index == 0 {
+        let low = if at == 0 {
             0.0
         } else {
-            points[index - 1].0 + 0.01
+            points[at - 1].0 + 0.01
         };
-        let high = if index + 1 == points.len() {
+        let high = if at + 1 == points.len() {
             1.0
         } else {
-            points[index + 1].0 - 0.01
+            points[at + 1].0 - 0.01
         };
         x = x.clamp(low, high.max(low));
-        points[index] = (x, y);
-        state.curve_drag = Some((index, points.clone()));
+        points[at] = (x, y);
+        state.curve_drag = Some((at, points.clone()));
         changed = true;
     } else if response.clicked()
         && let Some(pos) = response.interact_pointer_pos()
@@ -173,18 +219,18 @@ pub(super) fn curves_page(
         points.sort_by(|a, b| a.0.total_cmp(&b.0));
         changed = true;
     }
-    if response.drag_stopped() {
+    if response.drag_stopped() && dragging {
         state.curve_drag = None;
     }
     if changed {
         send(shell, |shell| shell.set_curve(channel, &points));
     }
 
-    let painter = ui.painter_at(rect);
+    let painter = ui.painter_at(rect.expand(6.0));
     painter.rect_filled(
         rect,
         CornerRadius::same(4),
-        Color32::from_rgb(0x1e, 0x1e, 0x1e),
+        Color32::from_rgb(0x0b, 0x0b, 0x0d),
     );
     for step in 1..4 {
         #[allow(clippy::cast_precision_loss)]
@@ -198,39 +244,26 @@ pub(super) fn curves_page(
             Stroke::new(1.0, GRID),
         );
     }
-    painter.line_segment(
-        [to_screen((0.0, 0.0)), to_screen((1.0, 1.0))],
-        Stroke::new(1.0, GRID),
-    );
+    let color = channel_color(channel);
     let table = curve_table(&points);
     let line: Vec<Pos2> = table
         .iter()
         .enumerate()
-        .map(|(index, y)| {
+        .map(|(at, y)| {
             #[allow(clippy::cast_precision_loss)]
-            let x = index as f32 / 255.0;
+            let x = at as f32 / 255.0;
             to_screen((x, *y))
         })
         .collect();
-    painter.add(Shape::line(line, Stroke::new(2.0, channel_color(channel))));
+    painter.add(Shape::line(line, Stroke::new(1.5, color)));
     for point in &points {
-        painter.circle_filled(to_screen(*point), 4.5, Color32::WHITE);
-    }
-    ui.add_space(6.0);
-    if ui
-        .add_enabled(
-            !inspection.grade.curve(channel).is_empty(),
-            egui::Button::new(RichText::new("Reset curve").size(12.0)),
-        )
-        .clicked()
-    {
-        state.curve_drag = None;
-        send(shell, |shell| shell.set_curve(channel, &[]));
+        painter.circle_filled(to_screen(*point), 4.5, color);
     }
 }
 
-/// The Color wheel page: lift, gamma and gain, each a puck to drag inside
-/// a hue ring and a slider for its brightness. A double-click on a wheel
+/// The Color wheel page: shadows, middle grey and highlights (lift, gamma
+/// and gain), each a puck to drag inside a hue ring and a slider for its
+/// brightness, with a reset each. A double-click on a wheel
 /// puts its puck back in the middle.
 pub(super) fn wheels_page(
     shell: &mut Shell,
@@ -239,13 +272,40 @@ pub(super) fn wheels_page(
     inspection: &Inspection,
 ) {
     ui.add_space(10.0);
+    ui.add_enabled_ui(false, |ui| {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Wheels").size(12.0));
+            later_badge(ui);
+        });
+        choice_row(ui, None, "Primary");
+    })
+    .response
+    .on_disabled_hover_text(LATER);
+    later_value(ui, "Intensity", 100.0);
     for wheel in Wheel::ALL {
         let setting = inspection.grade.wheel(wheel);
-        ui.label(
-            RichText::new(wheel.label())
-                .size(13.0)
-                .color(Color32::WHITE),
-        );
+        let name = wheel_name(wheel);
+        let mut reset = false;
+        ui.horizontal(|ui| {
+            ui.set_min_height(28.0);
+            ui.label(RichText::new(name).size(13.0).color(Color32::WHITE));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                reset = ui
+                    .add_enabled(
+                        setting != WheelSetting::default(),
+                        ui::Button::icon("reset")
+                            .min_size(Vec2::splat(24.0))
+                            .tip(format!("Reset {name}")),
+                    )
+                    .clicked();
+            });
+        });
+        if reset {
+            send(shell, |shell| {
+                shell.set_wheel(wheel, WheelSetting::default())
+            });
+            continue;
+        }
         let side = 120.0;
         let (rect, response) = ui.allocate_exact_size(Vec2::splat(side), Sense::click_and_drag());
         let centre = rect.center();
@@ -312,6 +372,28 @@ pub(super) fn wheels_page(
             send(shell, |shell| shell.set_wheel(wheel, next));
         }
         ui.add_space(8.0);
+    }
+    ui.add_enabled_ui(false, |ui| {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Offset").size(13.0));
+            later_badge(ui);
+        });
+        ui.label(
+            RichText::new("Shift every tone at once.")
+                .size(12.0)
+                .color(tokens::MUTED),
+        );
+    })
+    .response
+    .on_disabled_hover_text(LATER);
+}
+
+/// A wheel's name as the reference shows it.
+fn wheel_name(wheel: Wheel) -> &'static str {
+    match wheel {
+        Wheel::Lift => "Shadows",
+        Wheel::Gamma => "Middle grey",
+        Wheel::Gain => "Highlights",
     }
 }
 

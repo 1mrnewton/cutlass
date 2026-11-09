@@ -264,6 +264,10 @@ mod tests {
 
     fn open_main() -> DraftTools {
         let mut draft = Draft::empty("D");
+        draft
+            .materials
+            .videos
+            .push(cutlass_model::MaterialVideo::new("media"));
         draft.tracks[0].id = TrackId::new("main");
         DraftTools::new(Session::open(draft))
     }
@@ -361,6 +365,10 @@ mod tests {
     #[test]
     fn child_apply_is_refused_and_the_draft_stays() {
         let mut draft = Draft::empty("D");
+        draft
+            .materials
+            .videos
+            .push(cutlass_model::MaterialVideo::new("media"));
         draft.tracks[0].id = TrackId::new("main");
         draft.tracks[0]
             .segments

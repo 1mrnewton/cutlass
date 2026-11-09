@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "autumn",
+  "name": "Autumn",
+  "category": "Landscape",
+  "adjust": {"temperature": 0.2},
+  "hsl": {"green": [-0.8, 0.1, 0], "yellow": [-0.3, 0, 0], "orange": [0, 0.3, 0]}
+}

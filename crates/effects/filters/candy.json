@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "candy",
+  "name": "Candy",
+  "category": "Bright",
+  "adjust": {"tint": 0.15, "saturation": 0.35, "brightness": 0.1},
+  "hsl": {"magenta": [0, 0.3, 0], "blue": [0, 0.2, 0]}
+}

@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "id": "vaporwave",
+  "name": "Vaporwave",
+  "category": "Creative",
+  "adjust": {"tint": 0.25, "fade": 0.2},
+  "wheels": {"lift": {"hue": 300, "amount": 0.3}, "gain": {"hue": 180, "amount": 0.2}},
+  "hsl": {"blue": [0.5, 0, 0], "cyan": [0.3, 0, 0]}
+}

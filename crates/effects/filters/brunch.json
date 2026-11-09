@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "brunch",
+  "name": "Brunch",
+  "category": "Food",
+  "adjust": {"exposure": 0.15, "shadows": 0.2, "saturation": 0.1, "temperature": 0.1}
+}

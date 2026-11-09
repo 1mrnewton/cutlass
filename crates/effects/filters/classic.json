@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "classic",
+  "name": "Classic",
+  "category": "Portrait",
+  "adjust": {"contrast": 0.1, "temperature": 0.05, "vignette": 0.25}
+}

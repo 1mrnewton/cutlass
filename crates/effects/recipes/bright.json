@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "id": "bright",
+  "name": "Bright",
+  "category": "Basic",
+  "preview": "portrait",
+  "controls": [
+    {"id": "brightness", "name": "Brightness", "default": 0.12, "min": 0, "max": 0.5, "unit": "percent", "set": [[0, "brightness"]]}
+  ],
+  "passes": [
+    {"block": "grade", "params": {"brightness": 0.12, "contrast": 1.05}}
+  ]
+}

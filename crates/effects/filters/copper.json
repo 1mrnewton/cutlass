@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "copper",
+  "name": "Copper",
+  "category": "Mono",
+  "adjust": {"temperature": 0.6, "tint": 0.1, "contrast": 0.1},
+  "hsl": {"red": [0, -1, 0], "orange": [0, -1, 0], "yellow": [0, -1, 0], "green": [0, -1, 0], "cyan": [0, -1, 0], "blue": [0, -1, 0], "purple": [0, -1, 0], "magenta": [0, -1, 0]}
+}

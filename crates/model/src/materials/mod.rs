@@ -6,6 +6,7 @@ use crate::id::MaterialId;
 mod adjust;
 mod audio;
 mod beat;
+mod caption;
 mod color;
 mod draft;
 mod effect;
@@ -24,6 +25,7 @@ pub use beat::{
     VisibleBeat, beat_timeline_time, new_beats, segment_beats, set_user_beats, source_time_at,
     track_holds_beats, user_beats, visible_beats,
 };
+pub use caption::{CaptionTemplateInfo, Kept, SubtitleKeywords, TextRange, keywords_in_ranges};
 pub use color::{MaterialCanvas, MaterialColorConfig};
 pub use draft::MaterialDraft;
 pub use effect::{
@@ -37,7 +39,10 @@ pub use mark::{
 pub use rich::{
     RichFill, RichFont, RichPaint, RichShadow, RichSolid, RichStroke, RichStyle, RichText,
 };
-pub use shape::MaterialShape;
+pub use shape::{
+    MaterialShape, SHAPE_ARROW, SHAPE_CONTOUR, SHAPE_FILL, SHAPE_LINE, SHAPE_LINE_WIDTH, SHAPE_PEN,
+    SHAPE_SHADOW, SHAPE_SIZE, SHAPE_STROKE_WIDTH, ShapeKind, ShapePoint,
+};
 pub use speed::{
     ConstantSpeedError, CurveSpeed, MaterialSpeed, SpeedPoint, SpeedPreset,
     constant_target_duration, curve_speed_at, curve_speed_factor, curve_target_duration,
@@ -45,7 +50,10 @@ pub use speed::{
 };
 pub use text::{Bubble, CAPTION_STYLE_KEYS, MaterialText};
 pub use transition::{MaterialTransition, blend_extents, blend_window};
-pub use video::{Crop, FreezeInfo, MaterialVideo};
+pub use video::{
+    Algorithm, Crop, FreezeInfo, MaterialVideo, MotionBlur, Reframe, Relight, VideoAlgorithm,
+    VideoStable,
+};
 pub use words::WordColumns;
 
 /// A material this model does not name field by field. `id` and `type` are lifted out.

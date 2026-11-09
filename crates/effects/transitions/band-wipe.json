@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "band-wipe",
+  "name": "Band Wipe",
+  "category": "Wipe",
+  "cross": {"kind": 2, "angle": 0, "count": 3, "soft": 0.03}
+}

@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "golden-age",
+  "name": "Golden Age",
+  "category": "Cinema",
+  "adjust": {"temperature": 0.2, "contrast": 0.2, "fade": 0.1, "vignette": 0.4, "grain": 0.15},
+  "wheels": {"gain": {"hue": 45, "amount": 0.2}}
+}

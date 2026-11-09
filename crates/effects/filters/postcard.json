@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "postcard",
+  "name": "Postcard",
+  "category": "Vintage",
+  "adjust": {"saturation": 0.3, "fade": 0.2, "temperature": 0.15, "contrast": -0.1},
+  "hsl": {"blue": [-0.2, 0.3, 0]}
+}

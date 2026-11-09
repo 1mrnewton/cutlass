@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "ocean",
+  "name": "Ocean",
+  "category": "Landscape",
+  "adjust": {"temperature": -0.1, "contrast": 0.1},
+  "hsl": {"blue": [0, 0.4, 0], "cyan": [0, 0.3, 0]}
+}

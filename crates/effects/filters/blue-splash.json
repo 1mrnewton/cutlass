@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "blue-splash",
+  "name": "Blue Splash",
+  "category": "Creative",
+  "adjust": {"contrast": 0.15},
+  "hsl": {"red": [0, -1.0, 0], "orange": [0, -1.0, 0], "yellow": [0, -1.0, 0], "green": [0, -1.0, 0], "cyan": [0, 0.4, 0], "blue": [0, 0.4, 0], "purple": [0, -1.0, 0], "magenta": [0, -1.0, 0]}
+}

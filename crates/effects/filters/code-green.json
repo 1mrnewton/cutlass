@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "code-green",
+  "name": "Code Green",
+  "category": "Cinema",
+  "adjust": {"tint": -0.4, "saturation": -0.3, "contrast": 0.2},
+  "wheels": {"lift": {"hue": 120, "amount": 0.3}}
+}

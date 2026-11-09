@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "id": "dutch-angle",
+  "name": "Dutch Angle",
+  "category": "Distort",
+  "preview": "dancer",
+  "controls": [
+    {"id": "angle", "name": "Angle", "default": 8, "min": -15, "max": 15, "unit": "degrees", "set": [[0, "rotate"]]}
+  ],
+  "passes": [
+    { "block": "transform", "params": {"scale": 1.25, "rotate": 8} }
+  ]
+}

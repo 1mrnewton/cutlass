@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "arctic",
+  "name": "Arctic",
+  "category": "Cinema",
+  "adjust": {"temperature": -0.5, "saturation": -0.3, "exposure": 0.1, "whites": 0.1}
+}

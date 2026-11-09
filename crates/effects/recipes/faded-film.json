@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "id": "faded-film",
+  "name": "Faded Film",
+  "category": "Retro",
+  "preview": "beach",
+  "controls": [
+    {"id": "grain", "name": "Grain", "default": 1, "min": 0, "max": 3, "unit": "percent", "scale": [[2, "amount"]]}
+  ],
+  "passes": [
+    {"block": "grade", "params": {"contrast": 0.85, "saturation": 0.8, "brightness": 0.04}},
+    {"block": "flash", "params": {"amount": 0.1, "red": 1, "green": 0.9, "blue": 0.7}},
+    {"block": "noise", "params": {"amount": 0.12, "seed": {"jitter": {"rate": 24, "from": 0, "to": 1000, "seed": 701}}}}
+  ]
+}

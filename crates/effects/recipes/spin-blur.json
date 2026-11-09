@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "id": "spin-blur",
+  "name": "Spin Blur",
+  "category": "Blur",
+  "preview": "dancer",
+  "controls": [
+    {"id": "angle", "name": "Spin", "default": 12, "min": 0, "max": 90, "unit": "degrees", "set": [[0, "angle"]]},
+    {"id": "size", "name": "Sharp area", "default": 0.3, "min": 0, "max": 1, "unit": "percent", "set": [[0, "size"]]}
+  ],
+  "passes": [
+    {"block": "focus", "params": {"amount": 0.05, "kind": 2, "size": 0.3, "angle": 12}}
+  ]
+}

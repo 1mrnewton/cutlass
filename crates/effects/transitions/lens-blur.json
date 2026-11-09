@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "id": "lens-blur",
+  "name": "Lens Blur",
+  "category": "Blur",
+  "duration": 0.7,
+  "outgoing": [
+    {"block": "focus", "params": {"kind": 1, "amount": {"keys": [[0, 0], [0.5, 0.08], [1, 0]]}, "size": 0.15}}
+  ],
+  "incoming": [
+    {"block": "focus", "params": {"kind": 1, "amount": {"keys": [[0, 0], [0.5, 0.08], [1, 0]]}, "size": 0.15}}
+  ],
+  "cross": {"kind": 8}
+}

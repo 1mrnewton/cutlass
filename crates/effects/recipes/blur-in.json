@@ -2,6 +2,12 @@
   "version": 1,
   "id": "blur-in",
   "name": "Blur In",
+  "category": "Blur",
+  "preview": "portrait",
+  "poster": 0.4,
+  "controls": [
+    {"id": "speed", "name": "Speed", "default": 1, "min": 0.25, "max": 3, "unit": "times", "speed": true}
+  ],
   "passes": [
     {
       "block": "blur",

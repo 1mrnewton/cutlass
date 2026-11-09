@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "id": "heartbeat",
+  "name": "Heartbeat",
+  "category": "Motion",
+  "preview": "portrait",
+  "poster": 0.08,
+  "controls": [
+    {"id": "speed", "name": "Speed", "default": 1, "min": 0.25, "max": 3, "unit": "times", "speed": true}
+  ],
+  "passes": [
+    {
+      "block": "transform",
+      "params": {
+        "scale": {"keys": [[0, 1], [0.08, 1.1], [0.18, 1], [0.28, 1.07], [0.45, 1]], "repeat": 0.9}
+      }
+    }
+  ]
+}

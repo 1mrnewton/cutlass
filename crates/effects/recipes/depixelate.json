@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "id": "depixelate",
+  "name": "Depixelate",
+  "category": "Distort",
+  "preview": "dancer",
+  "poster": 0.4,
+  "controls": [
+    {"id": "speed", "name": "Speed", "default": 1, "min": 0.25, "max": 3, "unit": "times", "speed": true}
+  ],
+  "passes": [
+    { "block": "pixelate", "params": {"size": {"keys": [[0, 0.1], [1, 0]]}} }
+  ]
+}

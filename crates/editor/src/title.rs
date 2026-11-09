@@ -32,54 +32,17 @@ pub struct TitleStyle {
     pub enter: Option<&'static str>,
 }
 
-/// The text shelf, in order.
-pub const TITLE_STYLES: &[TitleStyle] = &[
-    TitleStyle {
-        id: "default",
-        name: "Default text",
-        meta: "Plain",
-        size: 80.0,
-        color: "#FFFFFF",
-        y: 0.0,
-        enter: None,
-    },
-    TitleStyle {
-        id: "serif",
-        name: "Serif title",
-        meta: "Rise",
-        size: 96.0,
-        color: "#E7D7B4",
-        y: 0.0,
-        enter: Some("Slide Up"),
-    },
-    TitleStyle {
-        id: "lower-third",
-        name: "Lower third",
-        meta: "Slide",
-        size: 56.0,
-        color: "#EFC56A",
-        y: -0.7,
-        enter: Some("Slide Right"),
-    },
-    TitleStyle {
-        id: "end-card",
-        name: "End card",
-        meta: "Fade",
-        size: 88.0,
-        color: "#F0E2C4",
-        y: 0.0,
-        enter: Some("Fade In"),
-    },
-    TitleStyle {
-        id: "kinetic",
-        name: "Kinetic line",
-        meta: "Types on",
-        size: 72.0,
-        color: "#FFFFFF",
-        y: 0.0,
-        enter: Some("Typewriter"),
-    },
-];
+/// The text shelf, in order: only plain text, as title templates live on
+/// their own shelf.
+pub const TITLE_STYLES: &[TitleStyle] = &[TitleStyle {
+    id: "default",
+    name: "Default text",
+    meta: "Plain",
+    size: 80.0,
+    color: "#FFFFFF",
+    y: 0.0,
+    enter: None,
+}];
 
 impl TitleStyle {
     /// The library card id for this style.
@@ -192,7 +155,16 @@ mod tests {
 
     #[test]
     fn a_lower_third_lands_low_in_its_color_and_slides_in() {
-        let style = title_style("title:lower-third").unwrap();
+        // No shelf card is styled now, but a style still places as one.
+        let style = &TitleStyle {
+            id: "lower-third",
+            name: "Lower third",
+            meta: "Slide",
+            size: 56.0,
+            color: "#EFC56A",
+            y: -0.7,
+            enter: Some("Slide Right"),
+        };
         let mut session = Session::open(Draft::empty("D"));
         session.apply(0, &title_requests(style, &place())).unwrap();
         let draft = session.draft();

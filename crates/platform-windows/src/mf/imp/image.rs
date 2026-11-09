@@ -96,7 +96,6 @@ pub struct StillEncoder {
 
 pub fn open_decoder(params: &CodecParams) -> Result<Box<dyn Decoder>, CodecError> {
     still_size(params)?;
-    com::enter()?;
     factory()?;
     Ok(Box::new(StillDecoder {
         codec: params.codec,
@@ -105,7 +104,6 @@ pub fn open_decoder(params: &CodecParams) -> Result<Box<dyn Decoder>, CodecError
 
 pub fn open_encoder(params: &CodecParams) -> Result<Box<dyn Encoder>, CodecError> {
     still_size(params)?;
-    com::enter()?;
     factory()?;
     Ok(Box::new(StillEncoder {
         codec: params.codec,
@@ -147,7 +145,6 @@ impl Decoder for StillDecoder {
 
     fn decode_picture(&mut self, packet: &Packet) -> Result<Vec<StillOutput>, CodecError> {
         packet_ok(packet.data.len())?;
-        com::enter()?;
         let image = decode_bytes(&packet.data)?;
         Ok(vec![StillOutput {
             image,
@@ -171,7 +168,6 @@ impl Encoder for StillEncoder {
         if self.cancel.load(Ordering::Relaxed) {
             return Err(CodecError::Cancelled);
         }
-        com::enter()?;
         let data = encode_image(self.codec, &input.image)?;
         Ok(vec![Encoded {
             stream: 0,
@@ -354,7 +350,10 @@ pub fn encode_image(codec: CodecId, image: &StillImage) -> Result<Vec<u8>, Codec
     read_stream(&stream)
 }
 
+/// The WIC factory, with COM entered on this thread first: the free
+/// functions are called from threads that never opened a codec.
 fn factory() -> Result<Com, CodecError> {
+    com::enter()?;
     let mut raw = ptr::null_mut();
     let code = unsafe {
         CoCreateInstance(

@@ -1,11 +1,16 @@
 //! The process log.
 //!
-//! Every level is written to `cutlass.log`. `cargo run` and
+//! Records at the current level and above are written to `cutlass.log`.
+//! The level is INFO unless `CUTLASS_LOG` names another one when [`init`]
+//! runs, and [`set_level`] changes it later. `cargo run` and
 //! `cargo run --release` also write those lines to stderr. A public build
 //! passes the `public-release` feature and does not write the console.
 //! Stdout is never written, because `cutlass mcp` speaks on stdout.
+//! Crates that report through the `log` facade (wgpu, eframe, burn) land
+//! here too, at WARN and above only.
 //!
-//! A call formats one line, writes it, and flushes before it returns.
+//! A call formats one line, writes it, and flushes before it returns. A
+//! record below the level is dropped before its message is formatted.
 //! Keep it off the per-frame and per-sample paths. Call [`init`] once at
 //! process start with the logs folder of the Cutlass root. A record before
 //! that is discarded.
@@ -19,6 +24,8 @@ use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use std::thread;
 use std::time::SystemTime;
@@ -38,7 +45,14 @@ pub const PREVIOUS_NAME: &str = "cutlass.log.1";
 const MAX_TARGET_BYTES: usize = 200;
 const TRUNCATED: &str = " (truncated)";
 
+/// Environment variable that sets the level when [`init`] runs.
+pub const LEVEL_ENV: &str = "CUTLASS_LOG";
+
+/// The level when `CUTLASS_LOG` is unset.
+pub const DEFAULT_LEVEL: Level = Level::Info;
+
 static STATE: Mutex<Option<Logger>> = Mutex::new(None);
+static MAX_LEVEL: AtomicU8 = AtomicU8::new(DEFAULT_LEVEL as u8);
 
 /// Why the log file could not be opened.
 #[derive(Debug, PartialEq, Eq)]
@@ -72,11 +86,13 @@ impl fmt::Display for InitError {
 
 impl std::error::Error for InitError {}
 
-/// How serious a record is. None of these are filtered out.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// How serious a record is, most serious first. A record is kept when
+/// its level is at or above the current one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(u8)]
 pub enum Level {
     /// The operation failed.
-    Error,
+    Error = 1,
     /// The operation continued with a problem.
     Warn,
     /// A normal step.
@@ -99,6 +115,55 @@ impl Level {
     }
 }
 
+/// A `CUTLASS_LOG` value that names no level.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ParseLevelError {
+    /// The value that was refused.
+    pub value: String,
+}
+
+impl fmt::Display for ParseLevelError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "{LEVEL_ENV}={:?} is not error, warn, info, debug or trace",
+            self.value
+        )
+    }
+}
+
+impl std::error::Error for ParseLevelError {}
+
+impl FromStr for Level {
+    type Err = ParseLevelError;
+
+    /// The level name in any case, with surrounding space ignored.
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "error" => Ok(Self::Error),
+            "warn" | "warning" => Ok(Self::Warn),
+            "info" => Ok(Self::Info),
+            "debug" => Ok(Self::Debug),
+            "trace" => Ok(Self::Trace),
+            _ => Err(ParseLevelError {
+                value: value.to_owned(),
+            }),
+        }
+    }
+}
+
+impl Level {
+    fn from_u8(value: u8) -> Self {
+        match value {
+            1 => Self::Error,
+            2 => Self::Warn,
+            3 => Self::Info,
+            4 => Self::Debug,
+            _ => Self::Trace,
+        }
+    }
+}
+
 impl fmt::Display for Level {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(self.as_str())
@@ -114,15 +179,51 @@ pub const fn console_enabled() -> bool {
     cfg!(not(feature = "public-release"))
 }
 
-/// Open `cutlass.log` in `directory`, creating the directory if needed.
+/// Open `cutlass.log` in `directory`, creating the directory if needed,
+/// and take the level from `CUTLASS_LOG`, or INFO when it is unset.
 ///
 /// The returned path is the live file. A second call switches to that
 /// directory. On failure the error is also recorded when a console sink
-/// is available.
+/// is available. A `CUTLASS_LOG` that names no level keeps INFO and is
+/// recorded as a warning.
 pub fn init(directory: &Path) -> Result<PathBuf, InitError> {
+    let chosen = level_from_env(std::env::var(LEVEL_ENV).ok().as_deref());
+    set_level(*chosen.as_ref().unwrap_or(&DEFAULT_LEVEL));
+    install_bridge();
     let result = install(directory, process_console(), MAX_FILE_BYTES);
     report_open(&result);
+    if let Err(error) = chosen {
+        record(Level::Warn, "cutlass_logger", &error.to_string());
+    }
     result
+}
+
+/// The level a `CUTLASS_LOG` value asks for. Unset or empty is INFO.
+pub fn level_from_env(value: Option<&str>) -> Result<Level, ParseLevelError> {
+    match value {
+        None => Ok(DEFAULT_LEVEL),
+        Some(value) if value.trim().is_empty() => Ok(DEFAULT_LEVEL),
+        Some(value) => value.parse(),
+    }
+}
+
+/// Keep records at `level` and above from now on.
+pub fn set_level(level: Level) {
+    MAX_LEVEL.store(level as u8, Ordering::Relaxed);
+}
+
+/// The least serious level that is kept.
+#[must_use]
+pub fn level() -> Level {
+    Level::from_u8(MAX_LEVEL.load(Ordering::Relaxed))
+}
+
+/// A record at `level` would be kept. The macros check this before they
+/// format the message.
+#[must_use]
+#[inline]
+pub fn enabled(level: Level) -> bool {
+    level as u8 <= MAX_LEVEL.load(Ordering::Relaxed)
 }
 
 /// The folder the installed log writes to, or `None` before [`init`] or
@@ -165,25 +266,24 @@ pub fn export(directory: &Path, destination: &Path) -> std::io::Result<()> {
     written
 }
 
-/// Write one record. Before [`init`], this does nothing.
+/// Write one record. Before [`init`], or below the level, this does
+/// nothing.
 pub fn record(level: Level, target: &str, message: &str) {
-    let line = format_line(level, target, message);
-    let mut guard = lock();
-    let Some(logger) = guard.as_mut() else {
+    if !enabled(level) {
         return;
-    };
-    if let Some(file) = logger.file.as_mut() {
-        let _ = write_file(file, &line);
     }
-    write_console(&mut logger.console, &line);
+    let line = format_line(level, target, message);
+    write_line(&mut lock(), &line);
 }
 
 /// Record an error.
 #[macro_export]
 macro_rules! error {
     ($($arg:tt)*) => {{
-        let message = ::std::format!($($arg)*);
-        $crate::record($crate::Level::Error, module_path!(), &message);
+        if $crate::enabled($crate::Level::Error) {
+            let message = ::std::format!($($arg)*);
+            $crate::record($crate::Level::Error, ::std::module_path!(), &message);
+        }
     }};
 }
 
@@ -191,8 +291,10 @@ macro_rules! error {
 #[macro_export]
 macro_rules! warn {
     ($($arg:tt)*) => {{
-        let message = ::std::format!($($arg)*);
-        $crate::record($crate::Level::Warn, module_path!(), &message);
+        if $crate::enabled($crate::Level::Warn) {
+            let message = ::std::format!($($arg)*);
+            $crate::record($crate::Level::Warn, ::std::module_path!(), &message);
+        }
     }};
 }
 
@@ -200,8 +302,10 @@ macro_rules! warn {
 #[macro_export]
 macro_rules! info {
     ($($arg:tt)*) => {{
-        let message = ::std::format!($($arg)*);
-        $crate::record($crate::Level::Info, module_path!(), &message);
+        if $crate::enabled($crate::Level::Info) {
+            let message = ::std::format!($($arg)*);
+            $crate::record($crate::Level::Info, ::std::module_path!(), &message);
+        }
     }};
 }
 
@@ -209,8 +313,10 @@ macro_rules! info {
 #[macro_export]
 macro_rules! debug {
     ($($arg:tt)*) => {{
-        let message = ::std::format!($($arg)*);
-        $crate::record($crate::Level::Debug, module_path!(), &message);
+        if $crate::enabled($crate::Level::Debug) {
+            let message = ::std::format!($($arg)*);
+            $crate::record($crate::Level::Debug, ::std::module_path!(), &message);
+        }
     }};
 }
 
@@ -218,9 +324,131 @@ macro_rules! debug {
 #[macro_export]
 macro_rules! trace {
     ($($arg:tt)*) => {{
-        let message = ::std::format!($($arg)*);
-        $crate::record($crate::Level::Trace, module_path!(), &message);
+        if $crate::enabled($crate::Level::Trace) {
+            let message = ::std::format!($($arg)*);
+            $crate::record($crate::Level::Trace, ::std::module_path!(), &message);
+        }
     }};
+}
+
+/// Record every panic at ERROR, with its thread, place, message and a
+/// backtrace, before the hook that was set before runs. Call once at
+/// process start, after [`init`].
+///
+/// A panic inside the logger itself, with the log held on that thread,
+/// gives up on the record after a short wait rather than deadlocking. A
+/// second call changes nothing, so a panic is never recorded twice.
+pub fn install_panic_hook() {
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    INSTALLED.call_once(chain_panic_hook);
+}
+
+fn chain_panic_hook() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        record_panic(info);
+        previous(info);
+    }));
+}
+
+fn record_panic(info: &std::panic::PanicHookInfo<'_>) {
+    let payload = info.payload();
+    let message = payload
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("(a payload that is not text)");
+    let place = info.location().map_or_else(
+        || "an unknown place".to_owned(),
+        |location| {
+            format!(
+                "{}:{}:{}",
+                location.file(),
+                location.line(),
+                location.column()
+            )
+        },
+    );
+    let current = thread::current();
+    let name = current.name().unwrap_or("unnamed");
+    let backtrace = std::backtrace::Backtrace::force_capture();
+    let line = format_line(
+        Level::Error,
+        "panic",
+        &format!("thread {name} panicked at {place}: {message}\nbacktrace:\n{backtrace}"),
+    );
+    // The log may already be held on this thread, if the panic came from
+    // inside a write. Waiting for it then would never end.
+    for _ in 0..PANIC_LOCK_TRIES {
+        match STATE.try_lock() {
+            Ok(mut guard) => return write_line(&mut guard, &line),
+            Err(std::sync::TryLockError::Poisoned(error)) => {
+                return write_line(&mut error.into_inner(), &line);
+            }
+            Err(std::sync::TryLockError::WouldBlock) => {
+                thread::sleep(std::time::Duration::from_millis(1));
+            }
+        }
+    }
+}
+
+const PANIC_LOCK_TRIES: u32 = 200;
+
+fn write_line(guard: &mut Option<Logger>, line: &str) {
+    let Some(logger) = guard.as_mut() else {
+        return;
+    };
+    if let Some(file) = logger.file.as_mut() {
+        let _ = write_file(file, line);
+    }
+    write_console(&mut logger.console, line);
+}
+
+/// The most detail kept from crates that report through the `log` facade
+/// (wgpu, eframe, burn). Their INFO and below runs every frame.
+pub const OTHER_CRATES_LEVEL: Level = Level::Warn;
+
+struct Bridge;
+
+static BRIDGE: Bridge = Bridge;
+
+impl Bridge {
+    fn level(level: log::Level) -> Level {
+        match level {
+            log::Level::Error => Level::Error,
+            log::Level::Warn => Level::Warn,
+            log::Level::Info => Level::Info,
+            log::Level::Debug => Level::Debug,
+            log::Level::Trace => Level::Trace,
+        }
+    }
+}
+
+impl log::Log for Bridge {
+    fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+        let level = Self::level(metadata.level());
+        level <= OTHER_CRATES_LEVEL && enabled(level)
+    }
+
+    fn log(&self, entry: &log::Record<'_>) {
+        if log::Log::enabled(self, entry.metadata()) {
+            record(
+                Self::level(entry.level()),
+                entry.target(),
+                &entry.args().to_string(),
+            );
+        }
+    }
+
+    fn flush(&self) {}
+}
+
+/// Send `log` facade records at WARN and above into this log. A second
+/// call, or a process that set another `log` logger first, changes nothing.
+fn install_bridge() {
+    if log::set_logger(&BRIDGE).is_ok() {
+        log::set_max_level(log::LevelFilter::Warn);
+    }
 }
 
 struct Logger {
@@ -300,7 +528,7 @@ fn report_open(result: &Result<PathBuf, InitError>) {
         Ok(path) => record(
             Level::Info,
             "cutlass_logger",
-            &format!("log file {}", path.display()),
+            &format!("log file {}, level {}", path.display(), level()),
         ),
         Err(error) => record(
             Level::Error,
@@ -544,6 +772,7 @@ fn installed_max_bytes() -> Option<u64> {
 #[cfg(test)]
 fn reset() {
     *lock() = None;
+    set_level(DEFAULT_LEVEL);
 }
 
 #[cfg(test)]
@@ -554,9 +783,10 @@ mod tests {
     use std::sync::{Mutex, MutexGuard};
 
     use super::{
-        FILE_NAME, InitError, Level, MAX_FILE_BYTES, MAX_MESSAGE_BYTES, PREVIOUS_NAME,
-        console_bytes, console_enabled, console_kind, directory, export, init, init_capture,
-        installed_max_bytes, record, reset,
+        DEFAULT_LEVEL, FILE_NAME, InitError, Level, MAX_FILE_BYTES, MAX_MESSAGE_BYTES,
+        PREVIOUS_NAME, ParseLevelError, console_bytes, console_enabled, console_kind, directory,
+        enabled, export, init, init_capture, installed_max_bytes, level, level_from_env, record,
+        reset, set_level,
     };
 
     struct Temp {
@@ -637,9 +867,10 @@ mod tests {
     }
 
     #[test]
-    fn every_level_reaches_the_file_and_the_console_sink() {
+    fn every_level_reaches_the_file_and_the_console_sink_at_trace() {
         let env = Env::new();
         let path = init_capture(&env.temp.path, MAX_FILE_BYTES).unwrap();
+        set_level(Level::Trace);
         error!("err-token");
         warn!("warn-token");
         info!("info-token");
@@ -661,6 +892,134 @@ mod tests {
         for line in text.lines() {
             assert!(valid_record(line), "{line}");
         }
+    }
+
+    #[test]
+    fn the_default_level_keeps_info_and_drops_debug_and_trace() {
+        let env = Env::new();
+        let path = init_capture(&env.temp.path, MAX_FILE_BYTES).unwrap();
+        assert_eq!(level(), DEFAULT_LEVEL);
+        assert_eq!(DEFAULT_LEVEL, Level::Info);
+        error!("err-token");
+        warn!("warn-token");
+        info!("info-token");
+        debug!("debug-token");
+        trace!("trace-token");
+        let text = fs::read_to_string(&path).unwrap();
+        for token in ["err-token", "warn-token", "info-token"] {
+            assert!(text.contains(token), "{token} missing in {text}");
+        }
+        for token in ["debug-token", "trace-token"] {
+            assert!(!text.contains(token), "{token} kept in {text}");
+        }
+        assert!(!text.contains(" DEBUG ") && !text.contains(" TRACE "));
+        assert_eq!(fs::read(&path).unwrap(), console_bytes());
+    }
+
+    #[test]
+    fn set_level_moves_the_cut_both_ways() {
+        let env = Env::new();
+        let path = init_capture(&env.temp.path, MAX_FILE_BYTES).unwrap();
+        set_level(Level::Warn);
+        info!("quiet-info");
+        warn!("loud-warn");
+        set_level(Level::Debug);
+        debug!("now-debug");
+        trace!("still-no-trace");
+        set_level(Level::Error);
+        warn!("quiet-warn");
+        error!("loud-error");
+        record(Level::Info, "direct", "quiet-direct");
+        let text = fs::read_to_string(&path).unwrap();
+        for token in ["loud-warn", "now-debug", "loud-error"] {
+            assert!(text.contains(token), "{token} missing in {text}");
+        }
+        for token in ["quiet-info", "still-no-trace", "quiet-warn", "quiet-direct"] {
+            assert!(!text.contains(token), "{token} kept in {text}");
+        }
+    }
+
+    #[test]
+    fn a_dropped_record_is_never_formatted() {
+        use std::cell::Cell;
+        use std::fmt;
+
+        struct Counted<'a>(&'a Cell<u32>);
+        impl fmt::Display for Counted<'_> {
+            fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                self.0.set(self.0.get() + 1);
+                formatter.write_str("counted")
+            }
+        }
+
+        let env = Env::new();
+        init_capture(&env.temp.path, MAX_FILE_BYTES).unwrap();
+        let calls = Cell::new(0);
+        debug!("{}", Counted(&calls));
+        trace!("{}", Counted(&calls));
+        assert_eq!(calls.get(), 0);
+        info!("{}", Counted(&calls));
+        assert_eq!(calls.get(), 1);
+    }
+
+    #[test]
+    fn other_crates_reach_the_file_at_warn_and_above_only() {
+        let env = Env::new();
+        let path = init_capture(&env.temp.path, MAX_FILE_BYTES).unwrap();
+        super::install_bridge();
+        set_level(Level::Trace);
+        log::error!(target: "wgpu_core::device", "bridged-error");
+        log::warn!(target: "eframe", "bridged-warn");
+        log::info!(target: "wgpu_core::device", "bridged-info");
+        log::debug!(target: "eframe", "bridged-debug");
+        set_level(Level::Error);
+        log::warn!(target: "eframe", "bridged-quiet-warn");
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains(" ERROR "), "{text}");
+        assert!(text.contains(" wgpu_core::device bridged-error"), "{text}");
+        assert!(text.contains(" eframe bridged-warn"), "{text}");
+        for token in ["bridged-info", "bridged-debug", "bridged-quiet-warn"] {
+            assert!(!text.contains(token), "{token} kept in {text}");
+        }
+    }
+
+    #[test]
+    fn levels_order_from_most_to_least_serious() {
+        let _env = Env::new();
+        assert!(Level::Error < Level::Warn);
+        assert!(Level::Warn < Level::Info);
+        assert!(Level::Info < Level::Debug);
+        assert!(Level::Debug < Level::Trace);
+        set_level(Level::Info);
+        assert!(enabled(Level::Error) && enabled(Level::Warn) && enabled(Level::Info));
+        assert!(!enabled(Level::Debug) && !enabled(Level::Trace));
+        set_level(Level::Trace);
+        assert_eq!(level(), Level::Trace);
+        assert!(enabled(Level::Trace));
+    }
+
+    #[test]
+    fn the_env_value_names_a_level_or_is_refused() {
+        assert_eq!(level_from_env(None), Ok(Level::Info));
+        assert_eq!(level_from_env(Some("")), Ok(Level::Info));
+        assert_eq!(level_from_env(Some("  ")), Ok(Level::Info));
+        assert_eq!(level_from_env(Some("DEBUG")), Ok(Level::Debug));
+        assert_eq!(level_from_env(Some(" trace ")), Ok(Level::Trace));
+        assert_eq!(level_from_env(Some("Warning")), Ok(Level::Warn));
+        assert_eq!(level_from_env(Some("error")), Ok(Level::Error));
+        assert_eq!(
+            level_from_env(Some("loud")),
+            Err(ParseLevelError {
+                value: "loud".to_owned()
+            })
+        );
+        assert!(
+            ParseLevelError {
+                value: "loud".to_owned()
+            }
+            .to_string()
+            .contains("CUTLASS_LOG")
+        );
     }
 
     #[test]
@@ -850,6 +1209,7 @@ mod tests {
         assert_eq!(console_enabled(), cfg!(not(feature = "public-release")));
         let text = fs::read_to_string(&path).unwrap();
         assert!(text.contains("log file"));
+        assert!(text.contains(&format!("level {}", level())));
         assert!(text.contains("INFO"));
         if console_enabled() {
             assert_eq!(console_kind(), "stderr");

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "id": "pop-out",
+  "name": "Pop Out",
+  "category": "Zoom",
+  "duration": 0.6,
+  "outgoing": [
+    {"block": "place", "params": {"scale": {"keys": [[0, 1], [0.25, 1.1], [1, 0]]}}}
+  ],
+  "cross": {"kind": 11}
+}

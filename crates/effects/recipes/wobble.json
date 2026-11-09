@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "id": "wobble",
+  "name": "Wobble",
+  "category": "Motion",
+  "preview": "dancer",
+  "poster": 0.2,
+  "controls": [
+    {"id": "speed", "name": "Speed", "default": 1, "min": 0.25, "max": 3, "unit": "times", "speed": true},
+    {"id": "intensity", "name": "Intensity", "default": 1, "min": 0, "max": 2, "unit": "percent", "scale": [[0, "rotate"], [0, "x"]]}
+  ],
+  "passes": [
+    {"block": "transform", "params": {"scale": 1.1, "rotate": {"wave": {"period": 0.5, "from": -3, "to": 3}}, "x": {"wave": {"period": 0.7, "from": -0.01, "to": 0.01}}}}
+  ]
+}

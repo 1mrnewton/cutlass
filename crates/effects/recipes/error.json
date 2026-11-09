@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "id": "error",
+  "name": "Error",
+  "category": "Glitch",
+  "preview": "city",
+  "controls": [
+    {"id": "speed", "name": "Speed", "default": 1, "min": 0.25, "max": 3, "unit": "times", "speed": true},
+    {"id": "intensity", "name": "Intensity", "default": 1, "min": 0, "max": 2, "unit": "percent", "scale": [[0, "amount"], [1, "amount"]]}
+  ],
+  "passes": [
+    {"block": "blocks", "params": {"amount": {"jitter": {"rate": 8, "from": 0.05, "to": 0.3, "seed": 131}}, "size": 0.08, "shift": 0.12, "seed": {"jitter": {"rate": 8, "from": 0, "to": 1000, "seed": 132}}, "color": 0}},
+    {"block": "flash", "params": {"amount": {"jitter": {"rate": 8, "from": 0, "to": 0.25, "seed": 133}}, "red": 1, "green": 0, "blue": 0.1}}
+  ]
+}

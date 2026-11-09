@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "id": "soft-blur",
+  "name": "Soft Blur",
+  "category": "Blur",
+  "duration": 0.8,
+  "outgoing": [
+    {"block": "blur", "params": {"radius": {"keys": [[0, 0], [0.5, 0.015], [1, 0.015]]}}}
+  ],
+  "incoming": [
+    {"block": "blur", "params": {"radius": {"keys": [[0, 0.015], [0.5, 0.015], [1, 0]]}}}
+  ],
+  "cross": {"kind": 8}
+}

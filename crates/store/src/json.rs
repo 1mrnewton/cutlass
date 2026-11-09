@@ -15,11 +15,18 @@ use serde_json::Value;
 use crate::StoreError;
 
 /// Read one draft. Unknown keys, including keys inside a known record, stay on the draft.
+///
+/// A caption that marks no words of its own takes the words its
+/// `subtitle_keywords` spans, so keywords marked in the reference editor show.
 pub fn parse_draft(bytes: &[u8], path: &Path) -> Result<Draft, StoreError> {
-    serde_json::from_slice(bytes).map_err(|error| StoreError::Json {
+    let mut draft: Draft = serde_json::from_slice(bytes).map_err(|error| StoreError::Json {
         path: path.to_path_buf(),
         message: error.to_string(),
-    })
+    })?;
+    for text in &mut draft.materials.texts {
+        text.adopt_subtitle_keywords();
+    }
+    Ok(draft)
 }
 
 /// Write one draft. A missing animation duration stays missing.
@@ -120,6 +127,21 @@ mod tests {
         assert_eq!(
             value["materials"]["material_animations"][0]["animations"][0]["duration"],
             0
+        );
+    }
+
+    #[test]
+    fn marked_spans_load_as_caption_keywords_and_stay_on_the_draft() {
+        let path = Path::new("draft_info.json");
+        let raw = br#"{"id":"D","version":1,"materials":{"texts":[{"id":"t","type":"subtitle","content":"so very good","subtitle_keywords":{"range":[{"location":8,"length":4,"source_type":0}]},"words":{"start_time":[0,100,200],"end_time":[100,200,300],"text":["so","very","good"]}}]}}"#;
+        let draft = parse_draft(raw, path).unwrap();
+        assert_eq!(draft.materials.texts[0].caption_keywords, [2]);
+        let value: Value = serde_json::from_slice(&write_draft(&draft).unwrap()).unwrap();
+        let text = &value["materials"]["texts"][0];
+        assert_eq!(text["cutlass_caption_keywords"], serde_json::json!([2]));
+        assert_eq!(
+            text["subtitle_keywords"],
+            serde_json::json!({"range":[{"location":8,"length":4,"source_type":0}]})
         );
     }
 

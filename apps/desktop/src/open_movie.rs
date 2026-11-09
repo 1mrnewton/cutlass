@@ -745,7 +745,7 @@ fn decodes_on_gpu(frame: &cutlass_eval::FrameLayers) -> bool {
         cutlass_eval::GpuSource::Nested(child)
         | cutlass_eval::GpuSource::Blend { layers: child, .. } => decodes_on_gpu(child),
         cutlass_eval::GpuSource::Rgba(_)
-        | cutlass_eval::GpuSource::Effect(_)
+        | cutlass_eval::GpuSource::Effect(..)
         | cutlass_eval::GpuSource::Vector(_)
         | cutlass_eval::GpuSource::Transition { .. } => false,
     })
@@ -761,7 +761,7 @@ fn decodes_in_place(frame: &cutlass_eval::FrameLayers) -> bool {
         cutlass_eval::GpuSource::Nested(child)
         | cutlass_eval::GpuSource::Blend { layers: child, .. } => decodes_in_place(child),
         cutlass_eval::GpuSource::Rgba(_)
-        | cutlass_eval::GpuSource::Effect(_)
+        | cutlass_eval::GpuSource::Effect(..)
         | cutlass_eval::GpuSource::Vector(_)
         | cutlass_eval::GpuSource::Transition { .. } => false,
     })

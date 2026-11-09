@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "slow-fade",
+  "name": "Slow Fade",
+  "category": "Basic",
+  "duration": 1.2,
+  "cross": {"kind": 8}
+}

@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "split-down",
+  "name": "Split Down",
+  "category": "Wipe",
+  "cross": {"kind": 3, "angle": 0, "soft": 0.03}
+}

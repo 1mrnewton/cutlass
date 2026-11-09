@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "line-wipe",
+  "name": "Line Wipe",
+  "category": "Wipe",
+  "cross": {"kind": 0, "angle": 0, "soft": 0.01, "edge": 0.015}
+}

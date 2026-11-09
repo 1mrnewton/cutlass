@@ -171,6 +171,18 @@ pub fn caption_style(key: &str) -> Option<&'static CaptionStyle> {
     CAPTION_STYLES.iter().find(|style| style.key == key)
 }
 
+/// How a Plain caption, or one in a style Cutlass does not know, pages:
+/// as Classic does, so a long caption shows the page being spoken and
+/// moves on, instead of every word at once.
+pub const PLAIN_LIMITS: PageLimits = limits(6, 2);
+
+/// How caption style `key` pages its words; Plain and unknown styles page
+/// by [`PLAIN_LIMITS`].
+#[must_use]
+pub fn caption_limits(key: &str) -> PageLimits {
+    caption_style(key).map_or(PLAIN_LIMITS, |style| style.limits)
+}
+
 impl CaptionStyle {
     /// The curves [`crate::sample_caption`] reads, for a caption drawn at
     /// `font_size` pixels: one held value each.

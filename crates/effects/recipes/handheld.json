@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "id": "handheld",
+  "name": "Handheld",
+  "category": "Motion",
+  "preview": "road",
+  "poster": 1.0,
+  "controls": [
+    {"id": "speed", "name": "Speed", "default": 1, "min": 0.25, "max": 3, "unit": "times", "speed": true},
+    {"id": "intensity", "name": "Intensity", "default": 1, "min": 0, "max": 2, "unit": "percent", "scale": [[0, "x"], [0, "y"], [0, "rotate"]]}
+  ],
+  "passes": [
+    {"block": "transform", "params": {"scale": 1.08, "x": {"wave": {"period": 3.1, "from": -0.015, "to": 0.015}}, "y": {"wave": {"period": 2.3, "from": -0.012, "to": 0.012}}, "rotate": {"wave": {"period": 4.1, "from": -0.6, "to": 0.6}}}}
+  ]
+}

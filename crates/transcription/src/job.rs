@@ -219,13 +219,9 @@ mod tests {
         session
             .apply(
                 0,
-                &[Request::Place {
-                    track_id: session.draft().tracks[0].id.clone(),
-                    segment: Box::new(cutlass_model::Segment::new(
-                        "a",
-                        "media",
-                        TimeRange::new(0, 1_000_000),
-                    )),
+                // Any edit moves the revision the job read.
+                &[Request::SetMagnet {
+                    on: !session.draft().config.maintrack_adsorb,
                 }],
             )
             .unwrap();

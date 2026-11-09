@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "honey",
+  "name": "Honey",
+  "category": "Portrait",
+  "adjust": {"contrast": 0.05},
+  "wheels": {"gain": {"hue": 40, "amount": 0.35}, "lift": {"hue": 30, "amount": 0.15}}
+}

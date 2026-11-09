@@ -1,133 +1,209 @@
 # AV1 support record
 
-Checkout: branch `av1`. Native safe Rust in `cutlass-av1`. No `unsafe`. No libaom, dav1d, SVT-AV1, rav1e, or FFmpeg linked into the build. Those programs are test oracles only.
+Safe Rust (`#![forbid(unsafe_code)]`), no C libraries, no dependencies
+outside this workspace. FFmpeg 6.1 with libdav1d, libaom, SVT-AV1 and rav1e
+is the oracle and the baseline; nothing of it is linked. Every number below
+was measured on the development machine (4 cores, shared, so wall times
+carry a few percent of noise) with the scripts in `tools/`.
 
-This record is the scope written before the implementation. The readiness section at the bottom is filled after the checks that actually ran.
+Specification: AV1 Bitstream & Decoding Process Specification v1.0.0 with
+errata 1. Tables (CDFs, scans, quantizer lookups, filters) are generated
+from the specification text.
 
-## Specifications
+## Decoder
 
-- AOMedia AV1 Bitstream & Decoding Process Specification, version 1.0.0 with Errata 1 (8 January 2019). Tag `v1.0.0-errata1`. This supersedes 1.0.0. The syntax, decoding process, parsing process, and the default CDF, scan, quantizer, and block-size tables in that document are normative.
-- Annex A of that specification for Main profile and levels. Annex B is the length-delimited temporal-unit format. This crate reads low-overhead OBUs (`obu_has_size_field = 1`), which is what an IVF frame and an ISOBMFF sample carry after the container strips its own length. It also reads one Annex B temporal unit as a packet.
-- There is no later AV1 bitstream amendment that changes the 1.0.0-errata1 decoding process. AV1 in ISOBMFF (`av1C`) and AV1 in Matroska are container bindings. They are out of this crate. Film grain synthesis is part of the output process in that specification. It is applied to output pictures and is not stored in reference frames.
+### Coverage
 
-## Sources read before the Cutlass code
+| Area | Status |
+| --- | --- |
+| Profiles 0/1/2; 8/10/12-bit; 4:2:0, 4:2:2, 4:4:4, monochrome | done |
+| OBUs: sequence header, temporal delimiter, frame, frame header, redundant header, tile group, metadata, padding | done |
+| Annex B length-delimited input (`Av1Core::decode_annexb`) | done |
+| Large-scale tile (`OBU_TILE_LIST`) | not implemented (also absent from libdav1d/FFmpeg) |
+| Operating point selection (`Av1Decoder::select_operating_point`), layer dropping | done |
+| Level limit: past level 6.3 is `Limit`; a tile that reads past its data is refused | done |
+| Picture metadata: colour (named and CICP), chroma position, per-frame render size, timing info, decoding tick, `seq_level_idx` of the decoded point | done |
+| Frame types: key, inter, intra-only, switch; hidden frames, show_existing_frame, error resilience, frame ids, order hints, frame size with refs | done |
+| Superblocks 64/128, uniform and explicit tiles, multiple tile groups, context update tile | done |
+| Intra: all modes, angle deltas, edge filter/upsampling, filter intra, CFL, palette, intra block copy | done |
+| Inter: all single/compound modes, MV stack incl. temporal projection, OBMC, local and global warp, wedge, difference-weighted, distance-weighted, inter-intra (smooth and wedge), skip mode, dual/switchable filters | done |
+| Scaled references and reference frame size changes | done |
+| Transforms 4..64, all types, lossless WHT, quantizer matrices | done |
+| Segmentation, delta q, delta lf | done |
+| Deblocking, CDEF, loop restoration (Wiener, self-guided), super resolution | done |
+| Film grain synthesis on output pictures | done |
 
-- The specification markdown for syntax (section 5), semantics, the decoding process (section 7), the symbol parser (section 8), Annex A, and the default CDF and scan tables.
-- FFmpeg 8.1 `libavcodec/av1dec.c` parses headers, reference frames, and film-grain metadata, then reconstructs only through a hardware accelerator. It is not a software tile decoder. `libdav1d.c` is the software decoder and it calls dav1d. `libaomenc.c` and `libsvtav1.c` call libaom and SVT-AV1. `cbs_av1` parses the same OBU syntax. Where a wrapper and the specification disagree, the specification wins.
-- GStreamer `gstav1parse` splits low-overhead and Annex B streams into OBUs and temporal units. It does not reconstruct samples. The gst-plugins-rs dav1d and rav1e elements were not in the tree that was checked out; the plugin that was read is a parser in front of an external decoder.
-- dav1d 1.5.x (`obu.c`, `msac.c`, `decode.c`, `recon_tmpl.c`, `ipred_tmpl.c`, `itx_1d.c`, `lf_apply_tmpl.c`) is the production decoder that was read. The arithmetic coder keeps the complement of the raw bits in its window. The specification's `read_symbol` is the rule this crate implements.
-- rav1e (`encoder.rs`, `ec.rs`, `predict.rs`) is the production encoder that was read. It chooses partitions and modes, then range-codes symbols. libaom is the reference encoder behind `aomenc`. SVT-AV1 is a second production encoder behind FFmpeg's wrapper. This crate does not copy those sources.
+### Correctness
 
-## What this crate is required to do
+- `tools/conf.py` + `tools/cases.py` generate 46 streams with FFmpeg's
+  libaom, SVT-AV1 and rav1e encoders (intra and inter, every chroma format
+  and bit depth, odd sizes, tiles, 128x128 superblocks, screen content with
+  palette and intra block copy, lossless, super resolution, film grain,
+  frame resizing with scaled references, long alt-ref GOPs, a stream with
+  OBMC/warp/wedge/difference-weighted/distance-weighted/inter-intra enabled).
+  `tools/checkall.sh`: **46/46 identical to libdav1d** (`-autoscale 0`, film
+  grain applied), at 1, 2, 3 and 4 threads.
+- Fixtures (`fixtures/`, 177 files, 86 streams from aomenc and hand-made
+  OBU edits): every frame of 85 streams matches the libdav1d 1.5.3
+  digests in `tests/libdav1d-digests.txt` (FFmpeg 8.1.1,
+  `-c:v libdav1d -threads 1 -noautoscale -fps_mode passthrough`; grey
+  streams on luma, with neutral chroma checked), checked by
+  `tests/fixtures.rs` in CI without FFmpeg. `wide.ivf` (16448x64) is
+  refused as past level 6.3, as libdav1d refuses it.
+- Mutation fuzzing (`examples/av1fuzz.rs`): no panics. Corrupt packets
+  return an error and leave the reference slots as they were; frame size is
+  limited (`Av1Core::max_pixels`) to bound memory.
 
-Progressive 8-bit 4:2:0, `seq_profile` 0, the selected operating point, dimensions inside the largest defined level (6.3: width 16384, height 8704, at most 35,651,584 luma samples). Sequence headers, including a still picture that uses the full header or the reduced header, frame headers, temporal delimiters, frame OBUs, tile groups, padding, and metadata OBUs that are skipped. Eight reference slots. Decode order versus presentation order, including `show_frame = 0` and `show_existing_frame`. Key, intra-only, and inter frames. Single-reference inter prediction. Square and rectangular partitions that the specification uses for a 64×64 or 128×128 superblock. Intra DC, vertical, horizontal, smooth, Paeth, and directional modes. A 128×128 frame leaves the intra edge filter off. Inverse DCT through 64 points, ADST where a 8- or 16-point intra set needs it, and the reduced transform set on a 256×256 keyframe and inter frame. Loop filtering, including sharpness 7. A real quantizer and a rate update on the encoder, not a fixed-quantizer demo.
+### Speed
 
-Main profile allows 10-bit 4:2:0 and monochrome. Profile 1 is 4:4:4 at 8-bit and at 10-bit and matches dav1d. Profile 2 is 4:2:2 at 8-bit and at 10-bit and matches dav1d. 12-bit 4:2:0, 4:2:2, and 4:4:4 match dav1d. Film grain at 12-bit is refused, and so is 12-bit monochrome. 8-bit self-guided restoration matches on 4:4:4 and on 4:2:2. 10-bit restoration matches on 4:4:4 and on 4:2:2. 12-bit luma self-guided restoration matches on a 256×128 4:2:0 frame. A 512×128 12-bit 4:2:0 frame is Wiener on every plane, and luma has two units. A 512×128 12-bit 4:4:4 frame and a 256×512 12-bit 4:2:2 frame are Wiener on every plane. An 8-bit or 10-bit monochrome picture is one gray plane and matches dav1d. The 10-bit monochrome pair leaves film grain off. A 10-bit 4:2:0 picture keeps native samples and matches dav1d, including a frame that is reconstructed narrower than it is shown, keyframes restored by Wiener or self-guided filtering, and film grain on the shown picture. This is not yet a Main-profile-compliant decoder.
+`bench1080.ivf`: 1920x1080, 60 frames, 8-bit 4:2:0 (libaom). Wall time
+including process start, median of 7 interleaved runs; same machine and
+load for both (load average 7-9 on the 4 processors). CPU is user plus
+system time.
 
-Film grain is legal in profile 0 and is not required to be switched on. When a frame sends its own parameters, the noise is added to the shown picture and the reference keeps the picture from before that step, at 8-bit and at 10-bit, for 4:2:0, 4:4:4, and 4:2:2. A 128×128 frame uses a lag-3 filter and does not clip to the restricted range. Another 128×128 frame uses a grain sample shift of 1. Another 128×128 frame uses a grain scaling shift of 10. A 128×128 4:4:4 frame with an identity matrix clips restricted grain chroma to the luma limit. A frame that copies grain parameters from another frame is rejected, and a show-existing frame does not re-apply the reference's grain. Wiener, self-guided, and switchable restoration are applied for 8-bit 4:2:0 after CDEF. Self-guided restoration also matches on 8-bit 4:4:4 and 4:2:2 when a chroma plane has more than one unit. A 4:2:0 chroma restoration stripe is 32 samples tall and matches dav1d. A 512×128 frame is Wiener on every plane, and the Wiener CDF is updated between its four luma units. The next frame loads that saved Wiener CDF. Wiener, self-guided, and switchable luma restoration match on 10-bit 4:2:0 keyframes. 10-bit restoration matches on 4:4:4, including switchable chroma, and on 4:2:2. Super resolution is applied for 8-bit and 10-bit 4:2:0: the frame is reconstructed at the coded width and the shown picture is the upscaled width. The encoder leaves both off. A frame whose two luma loop-filter levels are zero is left unfiltered, including when a reference delta is present.
+| Threads | cutlass-av1 | libdav1d (FFmpeg) | cutlass-av1 CPU | libdav1d CPU |
+| --- | --- | --- | --- | --- |
+| 1 | 0.74 s | 0.45 s | 0.70 s | 0.43 s |
+| 2 | 0.44 s | 0.31 s | 0.85 s | 0.49 s |
+| 3 | 0.49 s | 0.32 s | 0.89 s | 0.52 s |
+| 4 | 0.41 s | 0.32 s | 0.93 s | 0.54 s |
 
-Also rejected, with the same rule: large-scale tile lists. A sequence may name more than one operating point. The selected point is decoded, and a temporal layer outside that point is dropped. The default point is 0. 8-bit and 10-bit 4:2:2 match dav1d. 8-bit and 10-bit 4:4:4 match dav1d. 12-bit 4:2:0, 4:2:2, and 4:4:4 match dav1d. Film grain at 12-bit is refused. 8-bit and 10-bit film grain on 4:4:4 and on 4:2:2 matches dav1d. A palette block and an intra block copy match dav1d on screen-content streams. An inter frame may be forced to integer motion vectors. A frame with `base_q_idx` 0 reconstructs with the 4×4 Walsh-Hadamard transform. A lossless segment inside a lossy frame uses that transform and matches dav1d. An inter frame may signal LAST and GOLDEN and derive the other five reference slots from the stored order hints. That 64×64 six-frame picture matches dav1d. A DC luma block no larger than 32 on a side may use the recursive intra filter. A frame may name a quantizer matrix level per plane. The matrix scales the quantizer before the inverse transform. Level 15 and an identity transform leave the quantizer unchanged. A segment may add its own quantizer delta. The encoder emits neither a quantizer matrix nor segmentation. Chroma-from-luma is implemented for profile 0 and matched on an `aomenc` stream that uses it. CDEF is applied after the loop filter for 8-bit 4:2:0 and for the matched 10-bit 4:2:0 stream. The encoder still leaves it off. Colour primaries, transfer, matrix, and chroma sample position are published on the picture. A 128×128 frame publishes a vertical chroma position. A display size that differs from the frame size is published too, and the sample buffer stays the frame size. Timing info is kept. Decoder-model info is parsed and the samples still decode. The schedule is not run. `seq_level_idx` is stored. A 4352×64 level 3.0 picture matches dav1d. A picture past every defined level is `Limit` before the frame is allocated. The cap is level 6.3. A 64×64 keyframe and inter frame that select filter intra match dav1d. A 64×64 inter frame that selects an interintra wedge matches dav1d. A global-motion block on a scaled reference uses the scaled motion filter and matches dav1d.
+(Best runs: 0.69, 0.41, 0.45 and 0.34 s against libdav1d's 0.40, 0.31,
+0.30 and 0.30 s. In the same interleaved runs the previous round's
+decoder took 0.75, 0.45, 0.49 and 0.40 s (medians); an 11-run comparison
+at 4 threads gave 0.53 s against its 0.56 s and libdav1d's 0.40 s.
+Single threaded, callgrind counts 4.60G instructions (4.72G before
+the MC pass rework below, 4.77G before that)
+against libdav1d's 2.3G; its coefficient decoding is about as costly as
+ours (1.2G), the rest is its assembly kernels. The previous design,
+which parsed every frame on the calling thread, took 0.85 s, 0.71 s and
+0.85 s at 2, 3 and 4 threads at a similar load.) Single
+threaded the decoder takes about 1.7x the time of libdav1d, which uses
+hand-written assembly for its kernels; this crate relies on
+autovectorization only (baseline x86-64: SSE2). With 2-4 threads the gap
+is set by the processor time (see below).
+Threading (2+ threads): the calling thread only reads the frame headers.
+Each frame is a task on a thread of its own (the decoder keeps a pool of
+them) that waits for what its parse depends on, and nothing else: the
+CDFs of its primary reference frame (known when that frame's parse ends,
+or at its start when the frame end CDF update is disabled) and the motion
+fields and segment ids of the references it reads (when their parses
+end). Frames no later frame depends on (half of bench1080) are parsed
+beside the chain of referenced ones. With one tile column, a frame's
+task hands each chunk of parsed blocks to a backend thread that
+reconstructs it a superblock row behind and runs deblocking (in place,
+as soon as a row is reconstructed: the row below predicts from a saved
+copy of its unfiltered bottom row, as in libdav1d) and CDEF and loop
+restoration (one row behind). A reconstruction that reads a reference
+still being decoded reads the bands of rows that reference publishes as
+final (only frames something waits for publish them; the bands are
+shared, not copied): a block whose rows lie in one band is predicted
+from it in place, others go through the edge-emulation copy. It waits
+per chunk of blocks for the rows the chunk's motion may reach (warped
+blocks and scaled references wait for the whole picture), and reads the
+finished picture in place once it is done.
+Multi-tile and super-resolved frames are decoded whole by their task
+once the references are done. Up to as many frames as threads decode at
+once; `Av1Core::decode_delayed`/`drain` return the shown frames with a
+delay of as many frames (`Av1Decoder` uses them), and a tile data error
+found later fails the frame's picture and the frames depending on it;
+`Av1Core::decode` waits for the frames of each unit. Motion field
+estimation runs alongside parsing, band by band. Tiles are not decoded in
+parallel yet. The parse is no longer the critical path: on this file the
+referenced frames' parses take about 0.2 s of processor time, the others
+0.13 s, reconstruction and filters 0.55 s. Threaded decoding costs about
+1.3x the processor time of single-threaded decoding (the parse records
+blocks, about 70 bytes each, that reconstruction replays, and writes
+the mode info a second time; callgrind counts 6% more instructions at 4
+threads; page faults of the larger working set: about 38-40k against
+14k, mostly pictures, published bands and block logs, with a resident
+peak near 155 MB against 58 MB), so on a loaded machine the threaded
+times suffer more than libdav1d's (libdav1d's processor time grows by
+about a quarter from 1 to 4 threads, about as much as ours, so most of
+the growth is the shared cores and caches). Frames others depend on get
+no priority over the others yet: every frame task has a thread of its
+own. The `prof` feature prints the stage times, the
+processor time of each kind of thread and the page faults from
+`av1bench`.
+The coefficient reader keeps the arithmetic decoder state in registers and
+updates small CDFs as packed lanes; callgrind puts the whole decode at
+4.60G instructions single threaded. The largest kernels: CDEF 0.75G
+(filter 0.46G, direction search 0.16G, which stays scalar: attempts to
+vectorize its weighted squares with 16-bit products made the compiler
+scalarize the partial sums instead), motion compensation 0.43G (the
+vertical passes read a window of row slices checked once per row, and
+the 2D path for widths 2-16 filters 1-4 rows of the intermediate as one
+8/16-lane step with pre-splat taps: the compound hv kernel went from
+0.25G to 0.17G; whole-sample copies of constant widths no longer call
+memcpy per row), loop
+filter 0.27G, inverse transforms about 0.3G. CDEF filters fixed-stride padded blocks one 8-lane vector at a
+time (0.46G of the total), and the motion field projection is shared by
+runs of equal motion vectors. CDEF and loop restoration filter the
+deblocked picture in place: CDEF keeps the pre-CDEF rows next to each
+64-row boundary, loop restoration the deblocked rows next to each stripe
+boundary (as libdav1d does), so no stage copies the picture. Deblocking
+and the 8-bit Wiener filter run on 16-bit lanes.
 
-## Gates declared before tuning
+## Encoder
 
-- Decoder versus dav1d 1.5.3, and versus `aomdec` when it is present: exact 8-bit 4:2:0 samples on streams whose tools are in the supported set. dav1d with `--inloopfilters none` is only a reconstruction diagnostic. The acceptance compare uses the default in-loop filters.
-- Encoder: `dav1d` accepts the bitstream. Pixels match this decoder. Over 30 frames of 320×180 at 500 kbit/s, the average rate lands in 0.60×–1.40× of the target. A 64×64 step pattern at quality index 40 has luma PSNR at least 28 dB against the source after an independent decode. These are lossy gates. Byte-identical encoder output is not required.
-- One packet that fails does not change reference frames. A second `drain` is empty. `reset` drops references and keeps the configuration.
-- Hostile input returns `Truncated`, `Malformed`, `Unsupported`, or `Limit`. It does not panic.
-- Fuzz budget: 30 minutes on the decoder packet entry. A short random test is the CI stand-in. The 30-minute run is recorded only if it finished.
-- Speed budget: one thread, release, on this machine. 720×480 4:2:0 at 30 fps is the playback target (real time). A miss stays a miss.
-- Memory: one sequence stays within eight reference frames plus the frame being decoded, each plane bounded by the largest defined level.
+### Coverage
 
-## Fixture rules
+Produces 8/10/12-bit 4:2:0, 4:2:2, 4:4:4, monochrome, any size
+(`tools/encmatrix.sh`: every format decodes in libdav1d to exactly the
+encoder's reconstruction). Tools in use: hierarchical mini-GOPs with hidden
+alt-refs and up to seven references (up to 32 frames long on static
+content, whose alt-refs are temporally filtered), RD partition search to
+64x64, all intra modes with angle deltas, filter intra, CFL, luma and U/V
+palettes (screen content), compound prediction with the NEAREST/NEAR/NEW
+mode combinations, temporal MV prediction, switchable filters, local
+warped motion, OBMC, skip mode, mode decisions charged with the exact
+signalling cost from the CDFs, RD transform type and size, RDOQ with exact
+coefficient rates, per-frame deblocking and CDEF strength search, constant
+q or bitrate rate control. Optional: global motion, alt-ref temporal
+filtering on all content. Not used: intra block copy,
+wedge/difference-weighted compound, inter-intra, loop restoration, super
+resolution, segmentation.
 
-`aomenc` and `dav1d` are oracles. A test skips, and says so, when the binary or `../local-files` is absent. Local media stays in that folder. An AV1 sample in that folder is opened by extracting its video payload with the oracle, not by a container parser in this crate.
+### Quality and speed against FFmpeg's encoders
 
-## Readiness
+`tools/rdcmp.sh`, single thread each. Ours at speed 6 (q 60..220); libaom
+`-cpu-used 6` (crf 25..49); SVT-AV1 `-preset 8` (crf 25..49); rav1e
+`-speed 8` (qp 60..180). BD-rate: bits ours needs relative to the other
+encoder for equal PSNR (negative = fewer bits).
 
-This is what the code does after `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, and `cargo deny check`. Those four passed on this machine. Nothing was published.
+| Clip | vs libaom cpu-used 6 | vs SVT-AV1 preset 8 | vs rav1e speed 8 |
+| --- | --- | --- | --- |
+| natural, 352x288, 30 frames (aom test clip) | +0.4% | +15.7% | -17.6% |
+| synthetic `testsrc2`, 640x360, 10 frames | +24.1% | -6.8% | -29.7% |
 
-### Decoder
+(BD-rate over the overlapping PSNR range of each pair; the synthetic clip's
+numbers are higher than in earlier versions of this file mostly because
+the q grid now reaches lower rates, where the gap is wider.)
 
-Partial. Progressive 8-bit 4:2:0 keyframes, intra-only frames, and single-reference inter frames are reconstructed. Sequence headers, including a still picture that uses the full header or the reduced header, frame headers, temporal delimiters, frame OBUs, eight reference slots, `show_existing_frame`, and a hidden frame (`show_frame = 0`, empty output) are implemented. A failed packet does not change the slots. `drain` is empty. `reset` drops the slots and keeps the sequence. An inter frame reads each reference's frame-id delta when the sequence numbers frames.
+Encoding speed on the natural clip: ours 10-15 fps, libaom 24-32, SVT-AV1
+29-43, rav1e 9-27.
 
-Matched exactly against dav1d 1.5.3, with default in-loop filters:
+Multi-threaded, 1920x1080, 20 frames, 4 threads each (wall time; the
+encoder splits HD frames into tile columns and codes them in parallel, with
+output independent of the thread count): ours 7.3 s, libaom
+`-cpu-used 6 -row-mt 1` 2.7 s, SVT-AV1 `-preset 8` 1.5 s, rav1e `-speed 8`
+13.0 s.
 
-- The embedded 64×64 constrained keyframe in the crate.
-- An embedded 64×64 three-frame `aomenc` stream: one keyframe and two single-reference inter frames. That stream is error resilient, keeps the largest transform, uses identity global motion, turns CDF updates off, and leaves compound, warped, overlapped, reference-motion, order-hint, CDEF, restoration, and film grain off. The second frame's luma is the first frame shifted by 8 samples.
-- An embedded 64×64 three-frame `aomenc` stream with order hint on. Each error-resilient frame repeats the eight reference hints. The pictures match dav1d. Changing one signaled hint makes the frame fail, and the stored reference is still usable.
-- Two embedded `aomenc` keyframes with CDEF on and the loop filter off: a 64×64 step, and a 64×128 ramp that crosses a 64-sample stripe. Both match dav1d with the filter applied. A 128×128 frame uses damping 6 and a luma primary strength of 14. Treating the damping as 3 changes that picture.
-- One 128×128 keyframe whose only block is 128×128. That block reads one CDEF index and the index covers all four 64×64 units. The picture matches dav1d.
-- One embedded `aomenc` keyframe that codes a 64×64 horizontal ramp at width 43 and upscales it. The shown picture matches dav1d. Inter frames that use super resolution are not in that stream.
-- One embedded `aomenc` keyframe whose luma uses the self-guided restoration filter. Chroma selects no restoration. The shown picture matches dav1d.
-- One embedded `aomenc` keyframe whose luma uses the Wiener restoration filter. Chroma selects no restoration. The shown picture matches dav1d.
-- One embedded `aomenc` keyframe whose luma chooses the restoration filter per unit. Chroma selects no restoration. The shown picture matches dav1d.
-- One 512×128 keyframe whose luma uses self-guided restoration on four 128×128 units. CDF update is on, so each unit after the first reads the adapted probability. Chroma selects no restoration. The picture matches dav1d.
-- Film grain on embedded `aomenc` 64×64 frames: luma-only grain, lag-1 chroma grain with overlap, chroma grain scaled from luma at lag 2, and a second frame that predicts the first. The shown pictures match dav1d. The second frame matches only if the reference was stored before grain.
-- Three embedded `aomenc` 64×64 frames. The two inter frames copy the keyframe's grain parameters and keep their own seed. The shown pictures match dav1d. A show-existing frame shows the stored picture from before grain. Predicting the next frame after that still matches dav1d. A copy that names an empty slot is refused, and the sequence stays usable.
-- One embedded `aomenc` 128×128 keyframe in a uniform 2×2 tile grid. Each tile is its own entropy stream. Prediction does not cross a tile edge. The shown picture matches dav1d.
-- Two embedded `aomenc` 320×192 keyframes with non-uniform tile spacing. The columns are 2, 2, and 1 superblocks wide and the rows are 2 and 1 superblocks tall. Both pictures match dav1d. A 4-row chroma block just inside the shorter row does not read the tile above.
-- Two embedded `aomenc` 128×128 frames whose headers and tiles are separate OBUs. Each frame is a 2×2 grid and each tile is its own group. The second frame is inter. Both pictures match dav1d. A tile group with no header, a short frame, or a gap in the tile numbers is refused, and the stored reference stays.
-- Those same two frames wrapped as Annex B temporal units. Each unit, and both frame units in one temporal unit, match dav1d. A length that disagrees with `obu_size`, or a short unit, is refused, and the stored reference stays.
-- Two embedded `aomenc` 128×128 frames with CDF update, CDEF, restoration, the loop filter, and order hint off. The inter frame is a 2×2 grid of 64×64 tiles. Both frame OBUs match dav1d. The same tiles, wrapped as a large-scale tile list anchored at reference slot 0, match dav1d's inter frame. A reordered list matches that picture with the columns swapped. The list does not refresh reference slots. An anchor of 8, a list with no header, a short tile, or a missing reference is refused, and the stored reference stays. Samples outside a listed tile stay 0 for luma and 128 for chroma.
-- One embedded `aomenc` 64×64 keyframe whose chroma is not flat. Chroma above-right availability is taken in the chroma 4×4 grid. The shown picture matches dav1d.
-- One embedded `aomenc` 64×64 keyframe that names a quantizer matrix. Luma and chroma both use level 3. The shown picture matches dav1d.
-- One embedded `aomenc` 128×128 keyframe and inter frame. Both add 2 to the chroma DC and AC quantizers and leave the luma DC delta at 0. U and V share that offset. No quantizer matrix. Both pictures match dav1d.
-- One embedded `aomenc` 128×128 keyframe whose header signals a superblock quantizer delta. The running index moves at the first coded block of a superblock. The shown picture matches dav1d.
-- One embedded `aomenc` 64×64 keyframe that uses the recursive intra filter on DC luma (horizontal and Paeth). The shown picture matches dav1d.
-- One embedded `aomenc` 64×64 keyframe that selects the transform size and may use the extended intra set. The shown picture matches dav1d. Horizontal-only and vertical-only coefficient contexts use the specification's class numbers.
-- One embedded `aomenc` 64×64 two-frame stream. The keyframe and the inter frame both select the transform size. The inter frame is not error resilient, loads its primary reference, and splits one inter transform. Both pictures match dav1d.
-- One embedded `aomenc` 128×128 three-frame stream. The inter frame uses a rotation-zoom global model, high-precision motion vectors, and switchable filters in both directions. A large `GLOBALMV` block is warped. All three pictures match dav1d.
-- One embedded `aomenc` 64×64 two-frame stream. The inter frame blends one 16×16 block with DC intra (smooth interintra, wedge symbol 0). Both pictures match dav1d.
-- One embedded `aomenc` 64×64 two-frame stream. Six blocks on the inter frame blend one reference with intra through a luma wedge. The wedge sign is 0. Restoration, CDEF, and super resolution are off. Both pictures match dav1d.
-- One embedded `aomenc` 64×64 five-frame stream. Three inter frames set `reference_select` and average two references. Masked compound and distance weights are off. All five pictures match dav1d. Skip mode is not in that stream.
-- One embedded `aomenc` 64×64 five-frame stream with order hint. Three inter frames set `reference_select` and the sequence allows distance weights. One of those frames weights a compound block by the order-hint distance. Masked compound is off and the frames do not signal skip mode. All five pictures match dav1d.
-- One embedded `aomenc` 64×64 five-frame stream with masked compound and order hint off. Three inter frames set `reference_select`. A compound block blends with a wedge. All five pictures match dav1d.
-- One embedded `aomenc` 64×64 five-frame stream with difference-weighted compound and wedge compound off. A compound block blends by the predictor gap. All five pictures match dav1d. Skip mode is not signaled.
-- One embedded `aomenc` 64×64 sixteen-frame stream with a short golden-frame pyramid. Some temporal units carry a hidden reference ahead of the shown frame. Skip-mode blocks use the nearest compound pair and no residual. All sixteen pictures match dav1d.
-- One embedded `aomenc` 64×64 eight-frame stream of a rotating ramp. Local warp is on and overlapped motion is off. A block warps from the neighboring motion. All eight pictures match dav1d.
-- One embedded `aomenc` 64×64 eight-frame stream of that ramp with overlapped motion on and local warp off. A block blends the neighboring predictors. All eight pictures match dav1d.
-- One embedded `aomenc` 64×64 eight-frame stream of a translating ramp. Order hint and reference motion vectors are on. A block's candidate stack includes the field projected from an earlier frame. All eight pictures match dav1d. Short reference signaling is not in that stream.
-- One embedded `aomenc` 128×128 four-frame stream with order hint on and reference motion vectors off. The inter frames match dav1d. Treating the tool as on desynchronizes those frames.
-- One embedded `aomenc` four-frame stream shown at 64×64 with super resolution on. The inter frames reconstruct at the coded width and sample the upscaled reference. All four pictures match dav1d.
-- One embedded `aomenc` four-frame stream whose sequence is 64×64 and whose frames are 32×32. A later frame copies that size from a reference. All four pictures match dav1d.
-- One embedded `aomenc` four-frame stream whose key is 32×32 and whose later frames are 64×64. The first inter frame samples the smaller reference with the eight-tap smooth filter. The next frame uses the eight-tap sharp filter. Treating either filter as eight-tap regular changes that picture. All four pictures match dav1d.
-- One embedded `aomenc` three-frame stream whose key is 64×64 and whose inter frames are 128×128. The first inter frame's global model is rotation-zoom, and those blocks sample the smaller reference through the scaled motion filter. Local warp is off. All three pictures match dav1d.
-- One embedded four-frame stream whose keyframe sets the intra loop-filter delta to -16. Later frames keep that delta when they do not write a new one. All four pictures match dav1d.
-- One embedded `aomenc` 128×128 two-frame stream. Each keyframe adds one loop-filter delta per superblock, shared by every plane and both luma directions. The luma filter levels are non-zero. Both pictures match dav1d.
-- One embedded `aomenc` 128×128 four-frame stream with variance adaptive quantization. The keyframe assigns a quantizer delta to each of eight segments. A later frame keeps the previous segment map and does not rewrite the feature values. All four pictures match dav1d. That stream does not set a segment loop-filter, skip, reference, or global-motion feature.
-- One embedded realtime 128×128 four-frame stream. The right half is segment 1, and that segment forces LAST. The reference symbol is not in the bitstream. All four pictures match dav1d. That stream does not set a segment loop-filter, skip, or global-motion feature.
-- One embedded `aomenc --lossless=1` 128×128 stream: a keyframe and three inter frames. `base_q_idx` is 0, so each block is a 4×4 Walsh-Hadamard transform, and the frame header omits loop-filter levels and CDEF strengths. All four pictures match dav1d.
-- One 64×64 two-frame stream whose inter frame has `base_q_idx` 8 and segment 0 at quantizer index 0. The other segments stay at 8. Those segment-0 blocks are 4×4 Walsh-Hadamard transforms. Both pictures match dav1d.
-- One 64×64 six-frame stream. The last frame signals LAST and GOLDEN and derives the other five slots from the stored order hints. Blocks in that frame predict from LAST2. All six pictures match dav1d.
-- Two 64×64 two-frame streams with film grain. One is 8-bit 4:4:4 and one is 8-bit 4:2:2. Chroma grain uses the full template on an axis that is not subsampled. All four pictures match dav1d.
-- One embedded `aomenc --sb-size=128` set of 256×256 streams: a flat keyframe, a two-frame partition stream, a two-frame stream with CDEF, and a two-frame stream with a superblock quantizer delta. A block wider than 64 is residual-coded in 64×64 chunks. A 128×128 block reads one CDEF index and that index covers all four 64×64 units. A skipped inter transform edge that is not a prediction edge is left unfiltered. All seven pictures match dav1d.
-- One embedded 3840×2160 three-frame stream on 128×128 superblocks and an 8×4 uniform tile grid. A skipped block smaller than the superblock still reads the quantizer delta. A motion candidate or a warp sample in another tile is unavailable. All three shown pictures match dav1d.
-- One embedded 128×128 six-frame stream with a switch frame. That frame is predicted as an inter frame, is error resilient, and refreshes every reference slot. The frames after it use those slots. All six pictures match dav1d.
-- A reserved OBU before that flat 128 superblock keyframe is skipped. The shown picture still matches dav1d. A reserved OBU whose size runs past the packet is truncated.
-- The same keyframe with the size field removed from its last OBU still matches dav1d. The packet length is the size. Dropping the last byte fails.
-- Chroma decoded-neighbor flags use the chroma superblock grid. An extended intra edge stops at the tile boundary. A 2160p keyframe from `../local-files` matches dav1d when that file and dav1d are present.
-- Every shown frame of that same 8-bit 4:2:0 file matches `ffmpeg -c:v libdav1d -threads 1`. The file is 3840×2160 and both decoders show 2797 frames. One release run on this Apple M5 Pro spent 466.1 s in `Av1Decoder::push` and 481.9 s of wall time, including the oracle read. The same compare inside `cargo test --workspace` is a debug build and finished in 17787.6 s. FFmpeg is 8.1.1. The test skips when `../local-files` or ffmpeg is missing.
-- Every shown frame of a second 3840×2160 8-bit 4:2:0 file matches the same oracle. Both decoders show 5326 frames. One release run on this Apple M5 Pro finished in 361.0 s. The debug run was not repeated. The test skips when `../local-files` or ffmpeg is missing.
-- One embedded `aomenc --monochrome` 128×128 three-frame stream. The sequence is profile 0 and 8-bit, with one plane. Filter intra and an interintra wedge are off. Each shown picture is gray, 128×128, and matches `ffmpeg -c:v libdav1d -threads 1 -pix_fmt gray`. `AsView` does not invent chroma planes for that picture.
-- One embedded `aomenc --bit-depth=10` 64×64 two-frame stream. The sequence is profile 0 and 10-bit 4:2:0. Restoration, super resolution, and film grain are off. The keyframe and the inter frame match `ffmpeg -c:v libdav1d -threads 1 -pix_fmt yuv420p10le`. Each sample is a little-endian `u16` in the low 10 bits.
-- One embedded `aomenc --bit-depth=10 --superres-mode=1` pair. The shown picture is 64×64 and the coded width is narrower. Restoration and film grain are off. The inter frame samples the upscaled reference. Both pictures match dav1d.
-- Two embedded `aomenc --bit-depth=10` 64×64 keyframes with restoration on. One luma plane uses Wiener and one uses self-guided restoration. Chroma selects none. Both pictures match dav1d.
-- One embedded `aomenc --bit-depth=10 --film-grain-test=1` 64×64 pair. The keyframe carries film grain and the inter frame predicts from the picture before that grain. Both shown pictures match dav1d.
-- When the files are present: `aomenc` streams for a step, a ramp, chroma-from-luma, AB partitions, angle delta, rectangular transforms, and 64-point transforms. Deblocking runs on the constrained keyframe (loop-filter levels are non-zero there) and those samples match.
+So the encoder beats rav1e at its default speed on natural video and is
+behind libaom and SVT-AV1, which have years of tuning (temporal dependency
+models, more search, assembly kernels). `tools/kbd.sh` (q 60..220 against
+libaom crf 20..50, long GOP) now puts ours 3.5% ahead of libaom on the
+30-frame natural clip, 1% behind on 60 frames (whose static second scene
+alone is 16% behind) and 8% behind on a single key frame; synthetic
+content (`testsrc2`, 10 frames) is 23% behind.
 
-Within-frame CDF adaptation is implemented. An inter frame loads the CDFs saved for its primary reference and clears the adaptation counters. The error-resilient inter streams above turned CDF updates off.
+## Checks
 
-Unsupported, refused with a typed error before a picture is published: film grain at 12-bit, 12-bit monochrome, and the other tools named above. An 8-bit or 10-bit monochrome sequence is published as one gray plane. The 10-bit monochrome pair leaves film grain off. A 10-bit 4:2:0 sequence is published as little-endian samples, including after super resolution, Wiener or self-guided restoration, and film grain. A keyframe or an inter frame may select its transform size. A single-reference inter frame may use high-precision motion vectors, two interpolation filters, an eight-tap smooth frame filter, an eight-tap sharp frame filter, smooth interintra, a rotation-zoom or affine global model, a local warp from neighboring motion, overlapped motion from those neighbors, or a motion vector projected from an earlier frame. An inter frame may average two references, weight them by order-hint distance, or blend them with a wedge or a difference mask. A skip-mode block uses that nearest pair and writes no residual. A 2160p Main-profile sample from `../local-files` was pushed after `ffmpeg` copied the video out of the container. All 2797 shown frames match `ffmpeg -c:v libdav1d -threads 1`.
-
-### Encoder
-
-Partial. It emits a temporal delimiter, a sequence header, and a keyframe of DC-predicted 4×4 and 8×8 blocks with the 2D DCT, loop filter off, and CDF update off. A repeated picture is a frame that shows reference slot 0. dav1d 1.5.3 accepted one 64×64 step bitstream and its pixels matched this decoder. A constant-128 picture is exact. The same step at quality index 40 has luma PSNR at least 28 dB against the source. Thirty 320×180 frames at 500 kbit/s landed inside 0.60×–1.40× of the target. One scaled 64×64 frame from `../local-files` round-tripped through this encoder and this decoder.
-
-The encoder does not emit inter frames, film grain, super resolution, restoration, or CDEF. The decoder applies film grain; the encoder still leaves it off.
-
-### Gates still open
-
-- Fuzz: not run. The 30-minute packet campaign did not run. The stand-in is 200 random packets, which leave the stored reference usable and return an error. A LEB128 value that does not fit in `u32` returns `Limit` instead of panicking.
-- Speed: miss. One release thread encoded and decoded one 720×480 4:2:0 frame in 0.19s. That is about five round trips a second, short of 30 fps playback. `cargo bench -p cutlass-av1 --bench decode` decodes one 3840×2160 keyframe from `../local-files` on an Apple M5 Pro. The first runs, before the decode speed work, had medians 0.329 s and 0.331 s. After skipping a zero-strength CDEF, reusing the transform buffers, decoding the four tiles together, and filtering each loop-filter edge from one loaded line, one run of five samples reported 0.0627 s (minimum 0.0609 s, one sample 0.0788 s). Sharing the loop-filter rows across the cores that had finished a tile, and skipping transform rows that are all zeros, brought a later run to 0.0295 s (minimum 0.0286 s, maximum 0.0320 s). FFmpeg's libdav1d decoded that same frame in 0.0064 s on one thread and 0.0019 s with its default threads. The pixels matched. The bench build has no link-time optimization. One dav1d thread is still about five times faster than this decoder on eighteen cores; the inverse transform is still scalar.
-- Memory: the decoder keeps eight reference pictures plus the frame being decoded. Planes are cropped to the visible size, and a picture past every defined level is `Limit`. Peak resident memory was not measured.
-- Containers: not this crate. AV1 inside MP4, WebM, and AVIF stays with the container crates.
+`cargo fmt`, `cargo clippy -p cutlass-av1 --all-targets -- -D warnings`
+and `cargo test -p cutlass-av1 --release` (126 tests pass, 2 ignored: transform,
+filter, predictor and coder kernels against spec transliterations, header
+and OBU round trips, Annex B, encoder/decoder API including reordered GOPs
+and error recovery, thread-independent tile coding; in `tests/`, the
+libdav1d fixture check, picture metadata, operating points, the level
+refusal, and OBU framing). The same suite passes in a debug build,
+which checks arithmetic overflow.

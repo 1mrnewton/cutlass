@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "savory",
+  "name": "Savory",
+  "category": "Food",
+  "adjust": {"temperature": 0.25, "contrast": 0.2, "shadows": -0.1},
+  "hsl": {"orange": [0, 0.2, 0], "red": [0, 0.15, 0]}
+}

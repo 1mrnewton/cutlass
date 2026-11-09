@@ -23,7 +23,15 @@ pub struct TextEffect {
     pub shadow: (&'static str, f64, f64, f64),
     /// Color, strength and range.
     pub glow: (&'static str, f64, f64),
+    /// The groups the Effects page files it under, as
+    /// [`EFFECT_CATEGORIES`] names them.
+    pub categories: &'static [&'static str],
 }
+
+/// The groups the Effects page offers, in its order.
+pub const EFFECT_CATEGORIES: &[&str] = &[
+    "Trending", "Classic", "Shadow", "Glow", "Neon", "Bold", "Retro",
+];
 
 const OFF_SHADOW: (&str, f64, f64, f64) = ("", 0.0, crate::inspector::SHADOW_ANGLE, 0.0);
 
@@ -36,6 +44,7 @@ pub const TEXT_EFFECTS: &[TextEffect] = &[
         outline: ("#000000", 0.08),
         shadow: OFF_SHADOW,
         glow: ("", 0.0, 0.0),
+        categories: &["Trending", "Classic"],
     },
     TextEffect {
         id: "shadow",
@@ -44,6 +53,7 @@ pub const TEXT_EFFECTS: &[TextEffect] = &[
         outline: ("", 0.0),
         shadow: ("#000000", 8.0, -45.0, 0.5),
         glow: ("", 0.0, 0.0),
+        categories: &["Classic", "Shadow"],
     },
     TextEffect {
         id: "glow",
@@ -52,6 +62,7 @@ pub const TEXT_EFFECTS: &[TextEffect] = &[
         outline: ("", 0.0),
         shadow: OFF_SHADOW,
         glow: ("#FFFFFF", 0.6, 0.5),
+        categories: &["Glow"],
     },
     TextEffect {
         id: "neon",
@@ -60,6 +71,7 @@ pub const TEXT_EFFECTS: &[TextEffect] = &[
         outline: ("", 0.0),
         shadow: OFF_SHADOW,
         glow: ("#FF2BD6", 0.8, 0.6),
+        categories: &["Trending", "Neon"],
     },
     TextEffect {
         id: "pop",
@@ -68,6 +80,7 @@ pub const TEXT_EFFECTS: &[TextEffect] = &[
         outline: ("#000000", 0.1),
         shadow: ("#000000", 10.0, -45.0, 0.0),
         glow: ("", 0.0, 0.0),
+        categories: &["Trending", "Bold"],
     },
     TextEffect {
         id: "retro",
@@ -76,6 +89,169 @@ pub const TEXT_EFFECTS: &[TextEffect] = &[
         outline: ("#FFFFFF", 0.06),
         shadow: ("#2A1B6B", 12.0, -45.0, 0.0),
         glow: ("", 0.0, 0.0),
+        categories: &["Retro"],
+    },
+    TextEffect {
+        id: "thick-outline",
+        name: "Thick outline",
+        fill: None,
+        outline: ("#000000", 0.16),
+        shadow: OFF_SHADOW,
+        glow: ("", 0.0, 0.0),
+        categories: &["Classic", "Bold"],
+    },
+    TextEffect {
+        id: "white-outline",
+        name: "White outline",
+        fill: Some("#111111"),
+        outline: ("#FFFFFF", 0.1),
+        shadow: OFF_SHADOW,
+        glow: ("", 0.0, 0.0),
+        categories: &["Classic"],
+    },
+    TextEffect {
+        id: "soft-shadow",
+        name: "Soft shadow",
+        fill: None,
+        outline: ("", 0.0),
+        shadow: ("#000000", 6.0, -45.0, 1.0),
+        glow: ("", 0.0, 0.0),
+        categories: &["Shadow"],
+    },
+    TextEffect {
+        id: "long-shadow",
+        name: "Long shadow",
+        fill: None,
+        outline: ("", 0.0),
+        shadow: ("#000000", 18.0, -45.0, 0.0),
+        glow: ("", 0.0, 0.0),
+        categories: &["Shadow", "Retro"],
+    },
+    TextEffect {
+        id: "haze",
+        name: "Haze",
+        fill: None,
+        outline: ("", 0.0),
+        shadow: ("#000000", 0.0, -45.0, 1.0),
+        glow: ("", 0.0, 0.0),
+        categories: &["Shadow"],
+    },
+    TextEffect {
+        id: "pink-drop",
+        name: "Pink drop",
+        fill: Some("#FFFFFF"),
+        outline: ("", 0.0),
+        shadow: ("#FF4FA3", 10.0, -45.0, 0.0),
+        glow: ("", 0.0, 0.0),
+        categories: &["Shadow", "Bold"],
+    },
+    TextEffect {
+        id: "gold-glow",
+        name: "Gold glow",
+        fill: Some("#FFE08A"),
+        outline: ("", 0.0),
+        shadow: OFF_SHADOW,
+        glow: ("#FFB800", 0.7, 0.5),
+        categories: &["Trending", "Glow"],
+    },
+    TextEffect {
+        id: "ice-glow",
+        name: "Ice glow",
+        fill: Some("#FFFFFF"),
+        outline: ("", 0.0),
+        shadow: OFF_SHADOW,
+        glow: ("#3EE6FF", 0.7, 0.5),
+        categories: &["Glow"],
+    },
+    TextEffect {
+        id: "outlined-glow",
+        name: "Outlined glow",
+        fill: Some("#FFFFFF"),
+        outline: ("#000000", 0.06),
+        shadow: OFF_SHADOW,
+        glow: ("#FFFFFF", 0.5, 0.4),
+        categories: &["Glow", "Classic"],
+    },
+    TextEffect {
+        id: "neon-blue",
+        name: "Neon blue",
+        fill: Some("#FFFFFF"),
+        outline: ("", 0.0),
+        shadow: OFF_SHADOW,
+        glow: ("#00C2FF", 0.9, 0.7),
+        categories: &["Neon"],
+    },
+    TextEffect {
+        id: "neon-green",
+        name: "Neon green",
+        fill: Some("#FFFFFF"),
+        outline: ("", 0.0),
+        shadow: OFF_SHADOW,
+        glow: ("#7CFF3B", 0.9, 0.7),
+        categories: &["Neon"],
+    },
+    TextEffect {
+        id: "neon-red",
+        name: "Neon red",
+        fill: Some("#FFFFFF"),
+        outline: ("", 0.0),
+        shadow: OFF_SHADOW,
+        glow: ("#FF2E2E", 0.9, 0.7),
+        categories: &["Neon"],
+    },
+    TextEffect {
+        id: "comic",
+        name: "Comic",
+        fill: Some("#FFFFFF"),
+        outline: ("#000000", 0.12),
+        shadow: ("#FF2E2E", 10.0, -45.0, 0.0),
+        glow: ("", 0.0, 0.0),
+        categories: &["Trending", "Bold"],
+    },
+    TextEffect {
+        id: "sticker",
+        name: "Sticker",
+        fill: Some("#FF4FA3"),
+        outline: ("#FFFFFF", 0.14),
+        shadow: ("#000000", 4.0, -45.0, 0.3),
+        glow: ("", 0.0, 0.0),
+        categories: &["Bold"],
+    },
+    TextEffect {
+        id: "lime-pop",
+        name: "Lime pop",
+        fill: Some("#B6FF3B"),
+        outline: ("#000000", 0.1),
+        shadow: ("#000000", 6.0, -45.0, 0.0),
+        glow: ("", 0.0, 0.0),
+        categories: &["Bold"],
+    },
+    TextEffect {
+        id: "candy",
+        name: "Candy",
+        fill: Some("#FFFFFF"),
+        outline: ("#FF4FA3", 0.1),
+        shadow: ("#7A2BFF", 8.0, -45.0, 0.0),
+        glow: ("", 0.0, 0.0),
+        categories: &["Trending", "Retro"],
+    },
+    TextEffect {
+        id: "sunset",
+        name: "Sunset",
+        fill: Some("#FFD400"),
+        outline: ("#FF5A36", 0.08),
+        shadow: ("#7A1B3B", 12.0, -45.0, 0.0),
+        glow: ("", 0.0, 0.0),
+        categories: &["Retro"],
+    },
+    TextEffect {
+        id: "arcade",
+        name: "Arcade",
+        fill: Some("#3EE6FF"),
+        outline: ("#1B1B6B", 0.1),
+        shadow: ("#FF2BD6", 8.0, -45.0, 0.0),
+        glow: ("", 0.0, 0.0),
+        categories: &["Retro"],
     },
 ];
 
@@ -87,6 +263,7 @@ pub const NO_TEXT_EFFECT: TextEffect = TextEffect {
     outline: ("", 0.0),
     shadow: OFF_SHADOW,
     glow: ("", 0.0, 0.0),
+    categories: &[],
 };
 
 /// The requests that give `segment_id` the look `effect`, in one step. A
@@ -199,8 +376,9 @@ mod tests {
                 Some(effect.id)
             );
         }
-        let retro = &session.draft().materials.texts[0];
-        assert_eq!(retro.text_color, "#FF5A36");
+        // The last look's fill is kept.
+        let last = TEXT_EFFECTS.last().unwrap().fill.unwrap();
+        assert_eq!(session.draft().materials.texts[0].text_color, last);
         let revision = session.revision();
         session
             .apply(
@@ -212,6 +390,6 @@ mod tests {
         assert_eq!(text_effect_of(&plain).map(|e| e.id), Some("none"));
         assert!(plain.glow_color.is_empty() && plain.shadow_color.is_empty());
         // None keeps the letters' color.
-        assert_eq!(session.draft().materials.texts[0].text_color, "#FF5A36");
+        assert_eq!(session.draft().materials.texts[0].text_color, last);
     }
 }

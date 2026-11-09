@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "id": "newsprint",
+  "name": "Newsprint",
+  "category": "Retro",
+  "preview": "portrait",
+  "controls": [
+    {"id": "size", "name": "Dots", "default": 1, "min": 0.25, "max": 3, "unit": "percent", "scale": [[1, "size"]]}
+  ],
+  "passes": [
+    {"block": "grade", "params": {"contrast": 1.2}},
+    {"block": "halftone", "params": {"size": 0.015}}
+  ]
+}

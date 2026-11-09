@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "id": "pastel",
+  "name": "Pastel",
+  "category": "Basic",
+  "preview": "flowers",
+  "controls": [
+    {"id": "saturation", "name": "Saturation", "default": 0.7, "min": 0, "max": 2, "unit": "percent", "set": [[0, "saturation"]]}
+  ],
+  "passes": [
+    {"block": "grade", "params": {"saturation": 0.7, "brightness": 0.1, "contrast": 0.85}},
+    {"block": "flash", "params": {"amount": 0.08, "red": 1, "green": 0.85, "blue": 0.9}}
+  ]
+}

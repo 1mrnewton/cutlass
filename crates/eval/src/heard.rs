@@ -8,6 +8,7 @@
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 
+use cutlass_codec::access::{ChannelLayout, Pcm};
 use cutlass_engine::{
     ClipPcm, EngineError, MapError, Media, ReaderFactory, map_timeline, media_path, placement_of,
     speed_at,
@@ -83,8 +84,7 @@ impl Heard {
         let Some(path) = media_file(ask.root, stored) else {
             return Ok(ClipPcm::Missing);
         };
-        let (source, speed) = source_at(owner, segment, ask.time);
-        let Some(source) = source else {
+        let Some(at) = source_at(owner, segment, ask.time) else {
             return Ok(ClipPcm::Missing);
         };
         let Ok(media) = self.cached(ask.readers, &path) else {
@@ -97,14 +97,16 @@ impl Heard {
             .find_map(|stream| stream.sample_rate)
             .filter(|rate| *rate > 0)
             .unwrap_or(ask.rate);
-        let count = source_frames(ask.frames, ask.rate, file_rate, speed);
+        let count = source_frames(ask.frames, ask.rate, file_rate, at.speed);
         if count == 0 {
             return Ok(ClipPcm::Missing);
         }
-        match media.audio_from(source, count) {
-            Ok(pcm) => Ok(ClipPcm::Ready(pcm)),
-            Err(_) => Ok(ClipPcm::Missing),
-        }
+        let read = match at.read {
+            Read::Silent => silence(file_rate, count),
+            Read::Forward => media.audio_from(at.source, count).ok(),
+            Read::Backward(first) => backward(media, at.source, first, count, file_rate),
+        };
+        Ok(read.map_or(ClipPcm::Missing, ClipPcm::Ready))
     }
 
     fn prepare(&mut self, revision: u64) {
@@ -151,18 +153,115 @@ fn find<'a>(
     None
 }
 
-fn source_at(draft: &Draft, segment: &Segment, time: Micros) -> (Option<Micros>, f64) {
+/// How the file is read for one window.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Read {
+    /// From the source time on.
+    Forward,
+    /// Back from the source time, no earlier than the first source
+    /// microsecond, then played last sample first.
+    Backward(Micros),
+    /// A frozen picture holds still and makes no sound.
+    Silent,
+}
+
+/// Where a window starts in the file, how fast it is read, and which way.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct SourceAt {
+    source: Micros,
+    speed: f64,
+    read: Read,
+}
+
+fn source_at(draft: &Draft, segment: &Segment, time: Micros) -> Option<SourceAt> {
     match placement_of(draft, segment) {
-        Ok(map) => match (speed_at(&map, time), map_timeline(&map, time)) {
-            (Ok(speed), Ok(source)) => (Some(source), speed),
-            _ => (None, 1.0),
-        },
+        Ok(map) => {
+            let speed = speed_at(&map, time).ok()?;
+            let source = map_timeline(&map, time).ok()?;
+            let read = if map.freeze.is_some() {
+                Read::Silent
+            } else if map.reverse {
+                // `map_timeline` gives the last microsecond still to play;
+                // the window ends just after it.
+                Read::Backward(map.source.start)
+            } else {
+                Read::Forward
+            };
+            let source = match read {
+                Read::Backward(_) => Micros(source.0.saturating_add(1)),
+                Read::Forward | Read::Silent => source,
+            };
+            Some(SourceAt {
+                source,
+                speed,
+                read,
+            })
+        }
         Err(MapError::NoSource) => {
             let elapsed = time.0.saturating_sub(segment.target.start.0).max(0);
-            (Some(Micros(elapsed)), 1.0)
+            Some(SourceAt {
+                source: Micros(elapsed),
+                speed: 1.0,
+                read: Read::Forward,
+            })
         }
-        Err(_) => (None, 1.0),
+        Err(_) => None,
     }
+}
+
+/// `count` frames of mono silence, so an export still has every clip ready.
+fn silence(rate: u32, count: u32) -> Option<Pcm> {
+    let frames = usize::try_from(count).ok()?;
+    Pcm::from_f32(rate, ChannelLayout::mono(), vec![0.0; frames]).ok()
+}
+
+/// The `count` frames that end at `end`, last frame first. Near the start of
+/// the source range the window is shorter, and the mix reads it as ending
+/// early.
+fn backward(media: &mut Media, end: Micros, first: Micros, count: u32, rate: u32) -> Option<Pcm> {
+    let span = i64::from(count)
+        .checked_mul(1_000_000)?
+        .checked_div(i64::from(rate))?;
+    let (start, frames) = if end.0.saturating_sub(span) >= first.0 {
+        (Micros(end.0.saturating_sub(span)), count)
+    } else {
+        let available = i128::from(end.0.saturating_sub(first.0).max(0));
+        let frames = available
+            .checked_mul(i128::from(rate))?
+            .checked_div(1_000_000)?;
+        (first, u32::try_from(frames).ok()?.min(count))
+    };
+    if frames == 0 {
+        return silence(rate, 1);
+    }
+    let pcm = media.audio_from(start, frames).ok()?;
+    reversed(&pcm)
+}
+
+/// `pcm` with its frames in the opposite order; each frame keeps its
+/// channels in place.
+fn reversed(pcm: &Pcm) -> Option<Pcm> {
+    let channels = pcm.layout.len();
+    if channels == 0 {
+        return None;
+    }
+    if let Some(samples) = pcm.as_f32() {
+        let flipped = samples
+            .chunks_exact(channels)
+            .rev()
+            .flatten()
+            .copied()
+            .collect();
+        return Pcm::from_f32(pcm.rate, pcm.layout.clone(), flipped).ok();
+    }
+    let samples = pcm.as_i16()?;
+    let flipped = samples
+        .chunks_exact(channels)
+        .rev()
+        .flatten()
+        .copied()
+        .collect();
+    Pcm::from_i16(pcm.rate, pcm.layout.clone(), flipped).ok()
 }
 
 fn source_frames(timeline: u32, mix_rate: u32, file_rate: u32, speed: f64) -> u32 {
@@ -213,8 +312,8 @@ mod tests {
     use cutlass_container::{Demux, OpenError};
     use cutlass_engine::{ClipPcm, ClockKind};
     use cutlass_model::{
-        Draft, MaterialAudio, MaterialDraft, MaterialId, Micros, Segment, TimeRange, Track,
-        TrackAttribute, TrackType,
+        Draft, FreezeInfo, MaterialAudio, MaterialDraft, MaterialId, MaterialVideo, Micros,
+        Segment, TimeRange, Track, TrackAttribute, TrackType,
     };
 
     use super::{ClipAsk, Heard};
@@ -339,6 +438,81 @@ mod tests {
         let mixed = mix_at(&missing, None);
         assert_eq!(mixed.contributed, 0);
         assert!(matches!(heard_pcm(&missing), ClipPcm::Missing));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    fn ramp(name: &str) -> PathBuf {
+        let path = temp(name);
+        let samples: Vec<i16> = (0..48).map(|index| index * 100).collect();
+        write_tone(&path, &samples);
+        path
+    }
+
+    fn ask_at(draft: &Draft, time: i64, frames: u32) -> ClipPcm {
+        let readers = readers();
+        Heard::new()
+            .clip(ClipAsk {
+                readers: &readers,
+                draft,
+                revision: 1,
+                segment: &draft.tracks[0].segments[0].id,
+                time: Micros(time),
+                frames,
+                rate: 48_000,
+                root: None,
+            })
+            .expect("clip")
+    }
+
+    fn values(pcm: &ClipPcm) -> Vec<i32> {
+        let ClipPcm::Ready(pcm) = pcm else {
+            panic!("not ready: {pcm:?}");
+        };
+        if let Some(samples) = pcm.as_i16() {
+            return samples.iter().map(|sample| i32::from(*sample)).collect();
+        }
+        let samples = pcm.as_f32().expect("f32");
+        #[allow(clippy::cast_possible_truncation)]
+        samples
+            .iter()
+            .map(|sample| (sample * 32_768.0).round() as i32)
+            .collect()
+    }
+
+    #[test]
+    fn a_reversed_clip_plays_its_file_backward_from_the_end() {
+        let path = ramp("reverse");
+        let mut draft = audio_draft(&path.display().to_string(), 1.0, false);
+        draft.tracks[0].segments[0].target = TimeRange::new(0, 1_000);
+        draft.tracks[0].segments[0].source_range = Some(TimeRange::new(0, 1_000));
+        assert_eq!(values(&ask_at(&draft, 0, 4)), vec![0, 100, 200, 300]);
+
+        draft.tracks[0].segments[0].reverse = true;
+        assert_eq!(
+            values(&ask_at(&draft, 0, 4)),
+            vec![4_700, 4_600, 4_500, 4_400]
+        );
+        // The last window stops at the first sample instead of reading past it.
+        let last = values(&ask_at(&draft, 980, 4));
+        assert_eq!(last.last(), Some(&0), "{last:?}");
+        assert!(last.windows(2).all(|pair| pair[0] > pair[1]), "{last:?}");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_frozen_clip_is_ready_silence() {
+        let path = ramp("freeze");
+        let mut draft = audio_draft(&path.display().to_string(), 1.0, false);
+        let mut video = MaterialVideo::new("tone");
+        video.path = path.display().to_string();
+        video.freeze = Some(FreezeInfo {
+            timestamp: Micros(500),
+            ..FreezeInfo::default()
+        });
+        draft.materials.audios.clear();
+        draft.materials.videos.push(video);
+        let heard = values(&ask_at(&draft, 0, 4));
+        assert_eq!(heard, vec![0; 4]);
         let _ = std::fs::remove_file(&path);
     }
 

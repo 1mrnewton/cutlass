@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "id": "pixel-glitch",
+  "name": "Pixel Glitch",
+  "category": "Glitch",
+  "preview": "dancer",
+  "controls": [
+    {"id": "speed", "name": "Speed", "default": 1, "min": 0.25, "max": 3, "unit": "times", "speed": true},
+    {"id": "intensity", "name": "Intensity", "default": 1, "min": 0, "max": 2, "unit": "percent", "scale": [[0, "size"], [1, "amount"]]}
+  ],
+  "passes": [
+    {"block": "pixelate", "params": {"size": {"jitter": {"rate": 6, "from": 0, "to": 0.05, "seed": 126}}}},
+    {"block": "blocks", "params": {"amount": {"jitter": {"rate": 6, "from": 0, "to": 0.3, "seed": 127}}, "size": 0.1, "shift": 0.06, "seed": {"jitter": {"rate": 6, "from": 0, "to": 1000, "seed": 128}}, "color": 0.2}}
+  ]
+}

@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "id": "float",
+  "name": "Float",
+  "category": "Motion",
+  "preview": "dancer",
+  "controls": [
+    {"id": "speed", "name": "Speed", "default": 1, "min": 0.25, "max": 3, "unit": "times", "speed": true},
+    {"id": "intensity", "name": "Intensity", "default": 1, "min": 0, "max": 2, "unit": "percent", "scale": [[0, "y"]]}
+  ],
+  "passes": [
+    {
+      "block": "transform",
+      "params": {
+        "scale": 1.06,
+        "y": {"wave": {"period": 2.5, "from": -0.02, "to": 0.02}}
+      }
+    }
+  ]
+}

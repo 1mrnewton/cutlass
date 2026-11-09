@@ -13,9 +13,7 @@
 //! is drawn at, which only a host with the faces knows: it answers through
 //! [`TextSizes`].
 
-use cutlass_model::{
-    Crop, Draft, KeyframeGraph, MaterialRef, Segment, TrackAttribute, clip_at, key_offsets,
-};
+use cutlass_model::{Crop, Draft, KeyframeGraph, MaterialRef, Segment, TrackAttribute, clip_at};
 use cutlass_session::{Micros, Request, SegmentId};
 
 /// A centre or an edge snaps within this share of the canvas's short side.
@@ -111,16 +109,18 @@ pub struct StageGesture {
     keyed: Option<Micros>,
 }
 
-/// The size a title's text picture is drawn at, before placement.
+/// The size a title's or caption's text picture is drawn at `time`, before
+/// placement. A caption shows a different page of words as time goes on,
+/// so its size depends on the time.
 pub trait TextSizes {
-    fn text_size(&self, segment: &Segment) -> Option<(f64, f64)>;
+    fn text_size(&self, segment: &Segment, time: Micros) -> Option<(f64, f64)>;
 }
 
 /// No faces: titles have no box.
 pub struct NoText;
 
 impl TextSizes for NoText {
-    fn text_size(&self, _segment: &Segment) -> Option<(f64, f64)> {
+    fn text_size(&self, _segment: &Segment, _time: Micros) -> Option<(f64, f64)> {
         None
     }
 }
@@ -136,8 +136,8 @@ pub fn canvas_size(draft: &Draft) -> (f64, f64) {
     }
 }
 
-/// The box of the picture or title clip `segment_id` at `time`. Other
-/// clips, and ones with no size, have none.
+/// The box of the picture, title or shape clip `segment_id` at `time`.
+/// Other clips, and ones with no size, have none.
 #[must_use]
 pub fn stage_box(
     draft: &Draft,
@@ -151,7 +151,7 @@ pub fn stage_box(
         .flat_map(|track| &track.segments)
         .find(|segment| segment.id == *segment_id)?;
     let canvas = canvas_size(draft);
-    let fitted = fitted(draft, segment, canvas, sizes)?;
+    let fitted = fitted(draft, segment, canvas, time, sizes)?;
     Some(box_at(
         segment_id,
         canvas,
@@ -277,7 +277,7 @@ pub fn stage_gesture(
     Some(StageGesture {
         segment_id: segment_id.clone(),
         canvas,
-        fitted: fitted(draft, segment, canvas, sizes)?,
+        fitted: fitted(draft, segment, canvas, time, sizes)?,
         start: pose_of(segment, &draft.keyframe_graph_list, time),
         keyed: key_at(segment, time),
     })
@@ -417,7 +417,8 @@ pub fn keyed_pose(draft: &Draft, segment_id: &SegmentId, time: Micros) -> Option
 fn key_at(segment: &Segment, time: Micros) -> Option<Micros> {
     let offset = time.0.checked_sub(segment.target.start.0)?;
     let on = (0..=segment.target.duration.0).contains(&offset);
-    (on && !key_offsets(segment).is_empty()).then_some(Micros(offset))
+    (on && !cutlass_model::key_offsets_where(segment, cutlass_model::is_pose_key).is_empty())
+        .then_some(Micros(offset))
 }
 
 /// The clip's placement at `time`. Keys that do not read leave the stored one.
@@ -466,6 +467,7 @@ fn fitted(
     draft: &Draft,
     segment: &Segment,
     canvas: (f64, f64),
+    time: Micros,
     sizes: &dyn TextSizes,
 ) -> Option<(f64, f64)> {
     let (width, height, native) = match draft.materials.get(segment.material_id.as_str())? {
@@ -479,8 +481,14 @@ fn fitted(
             (width, height, false)
         }
         MaterialRef::Text(_) => {
-            let (width, height) = sizes.text_size(segment)?;
+            let (width, height) = sizes.text_size(segment, time)?;
             (width, height, true)
+        }
+        // A shape is its own size in canvas pixels; a line is as tall as
+        // its stroke.
+        MaterialRef::Shape(shape) => {
+            let (width, height) = shape.size();
+            (width, height.max(shape.border_width).max(1.0), true)
         }
         _ => return None,
     };
@@ -573,6 +581,41 @@ mod tests {
     }
 
     #[test]
+    fn a_shape_is_boxed_at_its_own_size() {
+        let mut draft = draft();
+        draft
+            .materials
+            .shapes
+            .push(cutlass_model::MaterialShape::preset(
+                cutlass_model::MaterialId::new("sq"),
+                cutlass_model::ShapeKind::Rectangle,
+                320.0,
+                200.0,
+            ));
+        draft
+            .materials
+            .shapes
+            .push(cutlass_model::MaterialShape::preset(
+                cutlass_model::MaterialId::new("line"),
+                cutlass_model::ShapeKind::Line,
+                400.0,
+                0.0,
+            ));
+        let mut row = Track::main("shapes");
+        row.kind = cutlass_model::TrackType::Sticker;
+        row.segments
+            .push(Segment::new("shape", "sq", TimeRange::new(0, 10)));
+        row.segments
+            .push(Segment::new("line", "line", TimeRange::new(0, 10)));
+        draft.tracks.push(row);
+        let stage = stage_box(&draft, &SegmentId::new("shape"), Micros(0), &NoText).unwrap();
+        assert!(near(stage.width, 320.0) && near(stage.height, 200.0));
+        assert!(near(stage.center_x, 960.0) && near(stage.center_y, 540.0));
+        let line = stage_box(&draft, &SegmentId::new("line"), Micros(0), &NoText).unwrap();
+        assert!(near(line.width, 400.0) && near(line.height, 8.0));
+    }
+
+    #[test]
     fn a_picture_fits_the_canvas_and_its_box_follows_the_placement() {
         let mut draft = draft();
         let main = SegmentId::new("main");
@@ -628,7 +671,7 @@ mod tests {
     struct Sized(f64, f64);
 
     impl TextSizes for Sized {
-        fn text_size(&self, _segment: &Segment) -> Option<(f64, f64)> {
+        fn text_size(&self, _segment: &Segment, _time: Micros) -> Option<(f64, f64)> {
             Some((self.0, self.1))
         }
     }

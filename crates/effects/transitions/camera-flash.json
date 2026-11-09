@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "id": "camera-flash",
+  "name": "Camera Flash",
+  "category": "Light",
+  "outgoing": [
+    {"block": "flash", "params": {"amount": {"keys": [[0, 0], [0.1, 1], [1, 0]]}}},
+    {"block": "blur", "params": {"radius": {"keys": [[0, 0], [0.1, 0.01], [1, 0]]}}}
+  ],
+  "incoming": [
+    {"block": "flash", "params": {"amount": {"keys": [[0, 0], [0.1, 1], [1, 0]]}}},
+    {"block": "blur", "params": {"radius": {"keys": [[0, 0], [0.1, 0.01], [1, 0]]}}}
+  ],
+  "cross": {"kind": 8, "progress": {"keys": [[0.09, 0], [0.11, 1]]}}
+}

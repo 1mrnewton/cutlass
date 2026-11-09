@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "id": "moody",
+  "name": "Moody",
+  "category": "Basic",
+  "preview": "city",
+  "controls": [
+    {"id": "saturation", "name": "Saturation", "default": 0.75, "min": 0, "max": 2, "unit": "percent", "set": [[0, "saturation"]]}
+  ],
+  "passes": [
+    {"block": "grade", "params": {"brightness": -0.1, "contrast": 1.2, "saturation": 0.75}},
+    {"block": "vignette", "params": {"amount": 0.5, "size": 0.5}}
+  ]
+}

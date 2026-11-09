@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "low-key",
+  "name": "Low Key",
+  "category": "Mono",
+  "adjust": {"saturation": -1, "exposure": -0.25, "contrast": 0.35, "blacks": -0.2, "vignette": 0.3}
+}

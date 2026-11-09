@@ -128,7 +128,13 @@ impl Shell {
                 ));
             });
         match spawned {
-            Ok(_) => self.updates.checking = Some((receive, asked)),
+            Ok(_) => {
+                cutlass_logger::info!(
+                    "update check started ({}), running {RUNNING_VERSION}",
+                    if asked { "asked" } else { "daily" }
+                );
+                self.updates.checking = Some((receive, asked));
+            }
             Err(error) => cutlass_logger::warn!("update check: {error}"),
         }
     }
@@ -153,10 +159,12 @@ impl Shell {
                 cutlass_logger::info!("update: Cutlass {} is available", offer.version);
                 self.updates.offer = Some(offer);
             }
-            Ok(None) if asked => {
-                self.set_notice(format!("Cutlass {RUNNING_VERSION} is the latest version"));
+            Ok(None) => {
+                cutlass_logger::info!("update: {RUNNING_VERSION} is the latest version");
+                if asked {
+                    self.set_notice(format!("Cutlass {RUNNING_VERSION} is the latest version"));
+                }
             }
-            Ok(None) => {}
             Err(error) => {
                 cutlass_logger::warn!("update check: {error}");
                 if asked {
@@ -181,7 +189,9 @@ impl Shell {
 
     /// The user said later.
     pub fn decline_update(&mut self) {
-        self.updates.offer = None;
+        if let Some(offer) = self.updates.offer.take() {
+            cutlass_logger::info!("update: Cutlass {} declined for now", offer.version);
+        }
     }
 
     /// Download the offered release as a job and install it. Once it lands,
@@ -397,6 +407,7 @@ mod tests {
 
     #[test]
     fn a_newer_release_is_offered_and_the_latest_says_so() {
+        crate::test_log::path();
         let mut shell = new_shell(Settings::default());
         let (base, _) = serve(|base| release(base, "v99.0.0", b"package"));
         shell.updates.feed = format!("{base}/feed");
@@ -427,6 +438,19 @@ mod tests {
             "{}",
             shell.notice()
         );
+        let log = crate::test_log::text();
+        let has = |level: &str, words: &str| {
+            log.lines()
+                .any(|line| line.contains(&format!(" {level} ")) && line.contains(words))
+        };
+        assert!(has("INFO", "update check started (asked)"), "{log}");
+        assert!(has("INFO", "update: Cutlass 99.0.0 is available"), "{log}");
+        assert!(
+            has("INFO", "update: Cutlass 99.0.0 declined for now"),
+            "{log}"
+        );
+        assert!(has("INFO", "is the latest version"), "{log}");
+        assert!(has("WARN", "update check: "), "{log}");
     }
 
     #[test]

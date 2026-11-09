@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "id": "invert-flash",
+  "name": "Invert Flash",
+  "category": "Glitch",
+  "duration": 0.4,
+  "outgoing": [
+    {"block": "invert", "params": {"amount": {"keys": [[0, 0], [0.4, 0], [0.42, 1], [0.58, 1], [0.6, 0], [1, 0]]}}}
+  ],
+  "incoming": [
+    {"block": "invert", "params": {"amount": {"keys": [[0, 0], [0.4, 0], [0.42, 1], [0.58, 1], [0.6, 0], [1, 0]]}}}
+  ],
+  "cross": {"kind": 8, "progress": {"keys": [[0.49, 0], [0.51, 1]]}}
+}

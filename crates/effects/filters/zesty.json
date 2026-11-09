@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "zesty",
+  "name": "Zesty",
+  "category": "Food",
+  "adjust": {"exposure": 0.05, "tint": -0.05},
+  "hsl": {"yellow": [0, 0.4, 0], "green": [0, 0.3, 0]}
+}

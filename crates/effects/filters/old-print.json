@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "old-print",
+  "name": "Old Print",
+  "category": "Vintage",
+  "adjust": {"contrast": -0.15, "fade": 0.3, "saturation": -0.25, "temperature": 0.15, "grain": 0.2, "vignette": 0.25}
+}

@@ -2,6 +2,12 @@
   "version": 1,
   "id": "rgb-split",
   "name": "RGB Split",
+  "category": "Glitch",
+  "preview": "city",
+  "controls": [
+    {"id": "speed", "name": "Speed", "default": 1, "min": 0.25, "max": 3, "unit": "times", "speed": true},
+    {"id": "intensity", "name": "Intensity", "default": 1, "min": 0, "max": 2, "unit": "percent", "scale": [[0, "x"], [0, "y"]]}
+  ],
   "passes": [
     {
       "block": "rgb_split",

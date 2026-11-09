@@ -10,11 +10,15 @@
 
 mod atomic;
 mod backup;
+mod enhance;
 mod folder;
 mod hold;
 mod json;
 mod projects;
+mod reframe;
+mod relight;
 mod repair;
+mod stable;
 mod upgrade;
 
 use std::fmt;
@@ -22,6 +26,7 @@ use std::path::PathBuf;
 
 pub use backup::copy_backup;
 pub use cutlass_model::Draft;
+pub use enhance::{EnhanceKey, enhanced_file, find_enhanced};
 pub use folder::{
     DockItem, DraftMeta, Folder, IdMap, IdPair, MaterialBin, Opened, ProjectIndex, TimelineEntry,
     TimelineLayout, open,
@@ -29,7 +34,10 @@ pub use folder::{
 pub use hold::{Hold, held_address, hold};
 pub use json::{parse_draft, write_draft};
 pub use projects::{ListedProject, create_project, list_projects, listed_project};
+pub use reframe::{ReframeKey, SubjectPath, load_subject_path, save_subject_path};
+pub use relight::{RelightKey, find_relight, relight_file};
 pub use repair::{RepairNote, repair};
+pub use stable::{StableKey, load_camera_path, save_camera_path};
 pub use upgrade::{BUILD, Protocol, upgrade};
 
 /// Why a folder could not be read or written.

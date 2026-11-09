@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "id": "crt",
+  "name": "CRT",
+  "category": "Retro",
+  "preview": "city",
+  "controls": [
+    {"id": "lines", "name": "Lines", "default": 1, "min": 0, "max": 2, "unit": "percent", "scale": [[2, "amount"]]}
+  ],
+  "passes": [
+    { "block": "blur", "params": {"radius": 0.001} },
+    { "block": "rgb_split", "params": {"x": 0.003} },
+    { "block": "scanlines", "params": {"amount": 0.35, "count": 240} },
+    { "block": "grade", "params": {"brightness": 0.05, "contrast": 1.1} },
+    { "block": "vignette", "params": {"amount": 0.6, "size": 0.5} }
+  ]
+}

@@ -154,6 +154,74 @@ pub fn set_effect_strength(
     Ok(())
 }
 
+/// Set the control `control` of the recipe effect `segment_id` uses to
+/// `value`. A material other clips also use is copied to `material_id`
+/// first, so only this clip changes.
+pub fn set_effect_control(
+    draft: &mut Draft,
+    segment_id: &SegmentId,
+    material_id: &MaterialId,
+    control: &str,
+    value: f64,
+) -> Result<(), EditError> {
+    let (track_index, segment_index) = super::locate(draft, segment_id)?;
+    ensure_unlocked(draft.tracks[track_index].attribute)?;
+    let current = draft.tracks[track_index].segments[segment_index]
+        .material_id
+        .clone();
+    let Some(MaterialRef::VideoEffect(effect)) = draft.materials.get(current.as_str()) else {
+        return Err(EditError::NotEffect);
+    };
+    let recipe = bundled_recipe(&effect.effect_id).ok_or(EditError::NotEffect)?;
+    let found = recipe
+        .controls
+        .iter()
+        .find(|found| found.id == control)
+        .ok_or(EditError::EffectControl)?;
+    #[allow(clippy::cast_possible_truncation)]
+    let narrow = value as f32;
+    if !value.is_finite() || narrow < found.min || narrow > found.max {
+        return Err(EditError::EffectControl);
+    }
+    let default = found.default;
+    let users = draft
+        .tracks
+        .iter()
+        .flat_map(|track| &track.segments)
+        .filter(|segment| segment.material_id == current)
+        .count();
+    let target = if users > 1 {
+        if material_id.is_empty() {
+            return Err(EditError::MissingMaterial);
+        }
+        if draft.materials.get(material_id.as_str()).is_some() {
+            return Err(EditError::DuplicateMaterial);
+        }
+        let mut copy = draft
+            .materials
+            .video_effects
+            .iter()
+            .find(|effect| effect.id == current)
+            .cloned()
+            .ok_or(EditError::MissingMaterial)?;
+        copy.id = material_id.clone();
+        draft.materials.video_effects.push(copy);
+        draft.tracks[track_index].segments[segment_index].material_id = material_id.clone();
+        material_id.clone()
+    } else {
+        current
+    };
+    if let Some(effect) = draft
+        .materials
+        .video_effects
+        .iter_mut()
+        .find(|effect| effect.id == target)
+    {
+        cutlass_effects::store_control(effect, control, narrow, default);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use cutlass_model::{
@@ -307,6 +375,79 @@ mod tests {
                 .apply(0, &[add("fx", "y", 3_000_000, "recipe/vhs")])
                 .unwrap_err(),
             EditError::LockedTrack
+        );
+    }
+
+    fn control(segment: &str, material: &str, name: &str, value: f64) -> Request {
+        Request::SetEffectControl {
+            segment_id: SegmentId::new(segment),
+            material_id: MaterialId::new(material),
+            control: name.to_owned(),
+            value,
+        }
+    }
+
+    #[test]
+    fn an_effect_control_is_stored_in_range_and_undoes_in_one_step() {
+        let mut session = open();
+        session
+            .apply(0, &[add("fx", "drop", 0, "recipe/photo-drop")])
+            .unwrap();
+        session
+            .apply(1, &[control("drop", "", "speed", 2.0)])
+            .unwrap();
+        let stored = |session: &Session| {
+            let draft = session.draft();
+            let Some(MaterialRef::VideoEffect(effect)) = draft.materials.get("m-drop") else {
+                panic!("the effect's material");
+            };
+            cutlass_effects::stored_controls(effect)
+                .get("speed")
+                .copied()
+        };
+        assert_eq!(stored(&session), Some(2.0));
+        for (request, error) in [
+            (control("drop", "", "speed", 9.0), EditError::EffectControl),
+            (
+                control("drop", "", "speed", f64::NAN),
+                EditError::EffectControl,
+            ),
+            (control("drop", "", "colour", 1.0), EditError::EffectControl),
+            (control("a", "", "speed", 1.0), EditError::NotEffect),
+        ] {
+            assert_eq!(session.apply(2, &[request]), Err(error));
+        }
+        session.undo().unwrap();
+        assert_eq!(stored(&session), None);
+    }
+
+    #[test]
+    fn an_effect_takes_a_mask_that_limits_where_it_acts() {
+        let mut session = open();
+        session
+            .apply(0, &[add("fx", "drop", 0, "recipe/photo-drop")])
+            .unwrap();
+        let mask = cutlass_effects::Mask::new(cutlass_effects::MaskShape::Circle);
+        session
+            .apply(
+                1,
+                &[Request::SetColorMask {
+                    segment_id: SegmentId::new("drop"),
+                    material_id: MaterialId::new("drop-mask"),
+                    mask: Some(mask),
+                }],
+            )
+            .unwrap();
+        let draft = session.draft();
+        let segment = draft
+            .tracks
+            .iter()
+            .flat_map(|track| &track.segments)
+            .find(|segment| segment.id.as_str() == "drop")
+            .unwrap();
+        assert_eq!(
+            cutlass_effects::segment_color_mask(draft, segment),
+            Some(mask)
         );
     }
 

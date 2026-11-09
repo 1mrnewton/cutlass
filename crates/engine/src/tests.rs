@@ -25,6 +25,7 @@ use cutlass_picture::{Picture, PictureSource, Sample, rgba_len};
 use cutlass_png::PngDecoder;
 use cutlass_still::{StillDemux, StillProbe, still_limits};
 
+use crate::ahead::ReadAhead;
 use crate::clock::ClockKind;
 use crate::error::EngineError;
 use crate::map::ticks_to_micros;
@@ -683,6 +684,118 @@ fn a_steered_decode_moves_to_a_later_time_or_stops_where_it_got_to() {
     assert_eq!(seen, [tick(0), tick(1), tick(2), tick(3)]);
 }
 
+#[test]
+fn a_steered_decode_seeks_to_a_target_moved_far_ahead() {
+    let mut readers = ReaderFactory::new();
+    readers.register_container(probe_script, open_two_hundred);
+    readers
+        .decoders_mut()
+        .register(CodecId::Jpeg, open_one_picture);
+    let mut media = readers.open(&fixture("pattern.jpg")).expect("open");
+    let tick = |ticks: i64| ticks_to_micros(ticks, Timescale::new(30)).expect("time");
+    let cover = TimeRange::new(0, 10_000_000);
+    let mut seen = Vec::new();
+    let landed = media
+        .decode_steered(Micros(tick(2).0 + 10), &cover, &mut |held| {
+            seen.push(held.start);
+            if held.start == tick(2) {
+                // Five seconds on: past the reach decoding forward covers.
+                Steer::Retarget(Micros(tick(150).0 + 10))
+            } else {
+                Steer::Go
+            }
+        })
+        .expect("landed");
+    assert_eq!(landed.start, tick(150), "{seen:?}");
+    // Every picture here is a keyframe, so the seek lands on the asked one
+    // and none of the pictures between were decoded.
+    assert_eq!(seen, [tick(2), tick(150)]);
+}
+
+#[test]
+fn a_seek_back_shows_the_old_picture_until_the_asked_one_is_ready() {
+    let mut readers = ReaderFactory::new();
+    readers.register_container(probe_script, open_sparse_keyframes);
+    readers
+        .decoders_mut()
+        .register(CodecId::Jpeg, |_params| Ok(Box::new(SlowPicture)));
+    let media = readers.open(&fixture("pattern.jpg")).expect("open");
+    let tick = |ticks: i64| ticks_to_micros(ticks, Timescale::new(30)).expect("time");
+    let ahead = ReadAhead::start(media, TimeRange::new(0, 10_000_000), 2).expect("thread");
+    let first = ahead.picture(Micros(tick(150).0 + 10)).expect("first");
+    assert_eq!(first.start, tick(150));
+    // The keyframe before 119 is 90, so the decode passes 29 pictures first.
+    let back = Micros(tick(119).0 + 10);
+    let mut shown = Vec::new();
+    loop {
+        if let Some(held) = ahead.try_picture(back).expect("decodes") {
+            assert_eq!(held.start, tick(119));
+            break;
+        }
+        if let Some(near) = ahead.nearest(back) {
+            shown.push(near.start);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    assert!(!shown.is_empty());
+    assert!(shown.iter().all(|start| *start == tick(150)), "{shown:?}");
+}
+
+/// [`OnePicture`], three milliseconds a picture, so a test sees a decode on
+/// its way.
+struct SlowPicture;
+
+impl Decoder for SlowPicture {
+    fn codec(&self) -> CodecId {
+        CodecId::Jpeg
+    }
+
+    fn push(&mut self, packet: &Packet) -> Result<Vec<Output>, CodecError> {
+        std::thread::sleep(std::time::Duration::from_millis(3));
+        OnePicture.push(packet)
+    }
+
+    fn drain(&mut self) -> Result<Vec<Output>, CodecError> {
+        Ok(Vec::new())
+    }
+
+    fn reset(&mut self) {}
+
+    fn decode_picture(
+        &mut self,
+        packet: &Packet,
+    ) -> Result<Vec<cutlass_decode::StillOutput>, CodecError> {
+        OnePicture.decode_picture(packet)
+    }
+}
+
+/// Two hundred pictures with a keyframe every thirty, seeking to the
+/// keyframe at or before the asked time.
+fn open_sparse_keyframes(_path: &Path) -> Result<Box<dyn Demux>, OpenError> {
+    let mut movie = scripted(0, 200);
+    movie.lands = true;
+    movie.packets = (0..200)
+        .map(|index| {
+            let packet = file_packet(1, index);
+            FilePacket::try_new(
+                1,
+                packet.bytes().to_vec(),
+                packet.timestamp(),
+                packet.timescale(),
+                index % 30 == 0,
+            )
+            .expect("packet")
+        })
+        .collect();
+    Ok(Box::new(movie))
+}
+
+fn open_two_hundred(_path: &Path) -> Result<Box<dyn Demux>, OpenError> {
+    let mut movie = scripted(0, 200);
+    movie.lands = true;
+    Ok(Box::new(movie))
+}
+
 fn open_eight(_path: &Path) -> Result<Box<dyn Demux>, OpenError> {
     Ok(Box::new(scripted(0, 8)))
 }
@@ -852,6 +965,8 @@ struct Scripted {
     packets: Vec<FilePacket>,
     cursor: usize,
     cancelled: bool,
+    /// Seek to the asked picture, every one a keyframe, instead of the start.
+    lands: bool,
 }
 
 fn scripted(foreign: usize, pictures: usize) -> Scripted {
@@ -885,6 +1000,7 @@ fn scripted(foreign: usize, pictures: usize) -> Scripted {
         packets,
         cursor: 0,
         cancelled: false,
+        lands: false,
     }
 }
 
@@ -929,15 +1045,32 @@ impl Demux for Scripted {
         Ok(Some(packet.clone()))
     }
 
-    fn seek(&mut self, _to: SeekTo) -> Result<SeekLanding, ReadError> {
+    fn seek(&mut self, to: SeekTo) -> Result<SeekLanding, ReadError> {
         if self.cancelled {
             return Err(ReadError::Cancelled);
         }
-        self.cursor = 0;
+        let time = if self.lands {
+            self.cursor = self
+                .packets
+                .iter()
+                .rposition(|packet| {
+                    packet.stream() == to.track
+                        && packet.keyframe()
+                        && packet
+                            .timestamp()
+                            .presentation()
+                            .is_some_and(|pts| pts <= to.time)
+                })
+                .unwrap_or(0);
+            to.time
+        } else {
+            self.cursor = 0;
+            0
+        };
         Ok(SeekLanding {
             landing: Landing::Packet {
-                ordinal: 0,
-                time: 0,
+                ordinal: u32::try_from(self.cursor).unwrap_or(0),
+                time,
                 keyframe: true,
                 preroll: 0,
                 byte_position: 0,
@@ -1049,6 +1182,157 @@ fn audio_windows_join_without_a_seam_and_a_seek_lands_on_the_sample() {
     let back = fresh.audio_from(Micros(20_000), 48).expect("seek back");
     assert_eq!(back.as_f32().expect("f32"), &expected(960, 48)[..]);
     std::fs::remove_file(&path).expect("remove");
+}
+
+/// Frames in one [`Ramp`] packet.
+const RAMP_FRAMES: i64 = 480;
+
+/// A mono decoder whose sample at stream tick `t` is `t / 100_000`, so a
+/// sample out of place shows its own time. A packet whose first byte is
+/// `0xff` is malformed.
+struct Ramp;
+
+impl Decoder for Ramp {
+    fn codec(&self) -> CodecId {
+        CodecId::Pcm
+    }
+
+    fn push(&mut self, packet: &Packet) -> Result<Vec<Output>, CodecError> {
+        if packet.data.first() == Some(&0xff) {
+            return Err(CodecError::Malformed {
+                at_bit: 0,
+                what: "marked packet",
+            });
+        }
+        let samples = (0..RAMP_FRAMES)
+            .map(|index| ramp_at(packet.pts + index))
+            .collect();
+        let pcm = cutlass_codec::access::Pcm::from_f32(
+            48_000,
+            cutlass_codec::access::ChannelLayout::mono(),
+            samples,
+        )
+        .map_err(|_| CodecError::Limit { what: "pcm" })?;
+        Ok(vec![Output::Audio(cutlass_decode::AudioOutput {
+            pcm,
+            pts: packet.pts,
+            timescale: packet.timescale,
+            skip_leading: 0,
+            skip_trailing: 0,
+            concealed: false,
+        })])
+    }
+
+    fn drain(&mut self) -> Result<Vec<Output>, CodecError> {
+        Ok(Vec::new())
+    }
+
+    fn reset(&mut self) {}
+}
+
+fn ramp_at(tick: i64) -> f32 {
+    tick as f32 / 100_000.0
+}
+
+fn open_ramp_decoder(_params: &CodecParams) -> Result<Box<dyn Decoder>, CodecError> {
+    Ok(Box::new(Ramp))
+}
+
+/// Twenty ramp packets at 48 kHz. Packet 5 is malformed, and packet 10
+/// comes twice.
+fn open_ramp(_path: &Path) -> Result<Box<dyn Demux>, OpenError> {
+    let scale = Timescale::new(48_000);
+    let params = StreamParams::try_audio(StreamCodec::Known(CodecId::Pcm), 48_000, 1, Vec::new())
+        .map_err(|_| OpenError::Source {
+        message: "params".to_owned(),
+    })?;
+    let stream = Stream::new(
+        TrackId::new(1),
+        params,
+        scale,
+        None,
+        Vec::new(),
+        Trim::default(),
+    );
+    let mut packets = Vec::new();
+    for index in (0..20_i64).chain([10]) {
+        let pts = index * RAMP_FRAMES;
+        let timestamp =
+            Timestamp::try_new(Some(pts), Some(pts), Some(RAMP_FRAMES)).map_err(|_| {
+                OpenError::Source {
+                    message: "time".to_owned(),
+                }
+            })?;
+        let data = if index == 5 { vec![0xff] } else { vec![0] };
+        let packet = FilePacket::try_new(1, data, timestamp, scale, true).map_err(|_| {
+            OpenError::Source {
+                message: "packet".to_owned(),
+            }
+        })?;
+        packets.push(packet);
+    }
+    // The repeat of packet 10 sits right after the first one.
+    let repeat = packets.remove(20);
+    packets.insert(11, repeat);
+    Ok(Box::new(Scripted {
+        streams: vec![stream],
+        packets,
+        cursor: 0,
+        cancelled: false,
+        lands: true,
+    }))
+}
+
+/// The ramp the reader should return from `from` for `count` frames:
+/// silence where packet 5 was refused, the ramp everywhere else.
+fn ramp_expected(from: i64, count: i64) -> Vec<f32> {
+    (from..from + count)
+        .map(|tick| {
+            if (5 * RAMP_FRAMES..6 * RAMP_FRAMES).contains(&tick) {
+                0.0
+            } else {
+                ramp_at(tick)
+            }
+        })
+        .collect()
+}
+
+#[test]
+fn a_refused_audio_packet_is_silence_and_later_sound_keeps_its_time() {
+    let mut readers = ReaderFactory::new();
+    readers.register_container(probe_script, open_ramp);
+    readers
+        .decoders_mut()
+        .register(CodecId::Pcm, open_ramp_decoder);
+
+    // One window across the refused packet and the repeated one.
+    let mut media = readers.open(&fixture("pattern.jpg")).expect("open");
+    let whole = media.audio_from(Micros(0), 7_200).expect("window");
+    assert_eq!(whole.as_f32().expect("f32"), &ramp_expected(0, 7_200)[..]);
+
+    // Windows shorter than the hole join on the same times. One ends inside
+    // the hole and the next starts there, with no seek.
+    for size in [100_i64, 480, 1_000] {
+        let mut media = readers.open(&fixture("pattern.jpg")).expect("open");
+        let mut joined = Vec::new();
+        let mut at = 0_i64;
+        while at + size <= 7_200 {
+            let pcm = media
+                .audio_from(
+                    Micros(at * 1_000_000 / 48_000),
+                    u32::try_from(size).expect("size"),
+                )
+                .expect("window");
+            joined.extend_from_slice(pcm.as_f32().expect("f32"));
+            at += size;
+        }
+        assert_eq!(joined, ramp_expected(0, at), "windows of {size}");
+    }
+
+    // A seek past the hole lands on the asked sample.
+    let mut media = readers.open(&fixture("pattern.jpg")).expect("open");
+    let later = media.audio_from(Micros(70_000), 960).expect("seek");
+    assert_eq!(later.as_f32().expect("f32"), &ramp_expected(3_360, 960)[..]);
 }
 
 /// A 16-bit WAVEFORMATEXTENSIBLE file with `channels` interleaved channels
@@ -1492,4 +1776,76 @@ fn a_stand_in_opens_in_place_of_its_source_and_probing_still_reads_the_source() 
         gone.open(&source).expect("open").info().streams[0].codec,
         "Png"
     );
+}
+
+#[test]
+fn a_copy_of_a_stretch_is_read_at_its_place_in_that_stretch() {
+    let factory = factory();
+    let path = fixture("pattern.jpg");
+    let (mut draft, id) = draft_for(&path);
+    let segment = &mut draft.tracks[0].segments[0];
+    segment.source_range = Some(TimeRange::new(3_000_000, 1_000_000));
+    // The copy starts 2 s into the source, so the clip's 3 s is its 1 s.
+    let from = crate::open_segment_from(
+        &factory,
+        &draft,
+        &id,
+        ClockKind::Export,
+        2,
+        path.clone(),
+        Micros(2_000_000),
+    )
+    .expect("copy");
+    assert_eq!(from.map.source, TimeRange::new(1_000_000, 1_000_000));
+    assert_eq!(from.path(), path.as_path());
+    let whole = open_segment(&factory, &draft, &id, ClockKind::Export, 2).expect("source");
+    assert_eq!(
+        from.map.target, whole.map.target,
+        "the timeline place stays"
+    );
+    // A held frame moves with the copy.
+    let frozen = {
+        let mut held = draft.clone();
+        held.materials.videos[0].freeze = Some(cutlass_model::FreezeInfo {
+            timestamp: Micros(3_500_000),
+            ..cutlass_model::FreezeInfo::default()
+        });
+        held
+    };
+    let still = crate::open_segment_from(
+        &factory,
+        &frozen,
+        &id,
+        ClockKind::Export,
+        2,
+        path.clone(),
+        Micros(2_000_000),
+    );
+    let plain = open_segment(&factory, &frozen, &id, ClockKind::Export, 2).expect("frozen");
+    let held = plain.map.freeze.expect("a held frame");
+    assert_eq!(
+        still.expect("frozen copy").map.freeze,
+        Some(Micros(held.0 - 2_000_000))
+    );
+    // A copy that starts after the clip, or no such clip, is refused.
+    let late = crate::open_segment_from(
+        &factory,
+        &draft,
+        &id,
+        ClockKind::Export,
+        2,
+        path.clone(),
+        Micros(3_000_001),
+    );
+    assert!(matches!(late, Err(EngineError::Outside)));
+    let missing = crate::open_segment_from(
+        &factory,
+        &draft,
+        &SegmentId::new("nope"),
+        ClockKind::Export,
+        2,
+        path,
+        Micros(0),
+    );
+    assert!(matches!(missing, Err(EngineError::MissingSegment)));
 }

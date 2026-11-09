@@ -31,7 +31,7 @@ const CLOCK_STEPS: [(i64, f64); 18] = [
     (1, 3e-4),
 ];
 
-/// One of the eight rates.
+/// One of the nine project rates.
 struct RateSteps {
     fps: f64,
     nominal: i64,
@@ -41,7 +41,7 @@ struct RateSteps {
     frames: &'static [(i64, f64)],
 }
 
-const RATES: [RateSteps; 8] = [
+const RATES: [RateSteps; 9] = [
     RateSteps {
         fps: 24_000.0 / 1001.0,
         nominal: 24,
@@ -135,12 +135,28 @@ const RATES: [RateSteps; 8] = [
             (2, 0.012),
         ],
     },
+    // A frame is half as long as at 60, so each step is twice the frames
+    // at the same width, and the finest step zooms in twice as far.
+    RateSteps {
+        fps: 120.0,
+        nominal: 120,
+        clock_minors: 10,
+        frames: &[
+            (60, 0.0006),
+            (30, 0.00085),
+            (20, 0.001),
+            (10, 0.003),
+            (6, 0.006),
+            (4, 0.009),
+            (2, 0.018),
+        ],
+    },
 ];
 
 /// Minor ticks inside a frame step of that many frames.
 fn frame_minors(frames: i64) -> i64 {
     match frames {
-        30 | 20 | 10 => 10,
+        60 | 30 | 20 | 10 => 10,
         25 | 15 | 5 => 5,
         12 | 6 => 6,
         8 | 4 => 4,
@@ -441,5 +457,24 @@ mod tests {
             Micros(10_000_000),
         );
         assert_eq!(labels(&plain), ["00:00", "00:10"]);
+    }
+
+    #[test]
+    fn a_hundred_and_twenty_counts_its_own_frames() {
+        let rate = FrameRate::FPS_120;
+        let labels = |pixel_size: f64| -> Vec<(i64, String)> {
+            ruler_ticks(rate, false, pixel_size, Micros(0), Micros(1_100_000))
+                .into_iter()
+                .filter_map(|tick| tick.label.map(|label| (tick.time.0, label)))
+                .collect()
+        };
+        // One second is labeled 00:01, not half a second.
+        let seconds = labels(3e-4);
+        assert_eq!(seconds[1], (1_000_000, "00:01".to_owned()), "{seconds:?}");
+        // A frame step names frames out of 120.
+        let frames = labels(0.001);
+        assert_eq!(frames[1], (166_667, "20f".to_owned()), "{frames:?}");
+        assert!(frames.iter().any(|label| label.1 == "00:01"), "{frames:?}");
+        assert!((zoom_ceiling(rate) - 0.018).abs() < 1e-12);
     }
 }

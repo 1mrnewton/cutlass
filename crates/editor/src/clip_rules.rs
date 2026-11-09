@@ -4,12 +4,17 @@ use cutlass_model::{Draft, MaterialRef, Segment, TrackAttribute, TrackType};
 use cutlass_session::Request;
 
 /// The clip draws a picture that can turn, flip and move on the canvas:
-/// video, text, a compound clip, or a sticker. A clip with no material
+/// video, text, a compound clip, a sticker, or a shape. A clip with no material
 /// counts when its row holds titles, stickers or compounds.
 #[must_use]
 pub fn can_turn(draft: &Draft, segment: &Segment, kind: &TrackType) -> bool {
     match draft.materials.get(segment.material_id.as_str()) {
-        Some(MaterialRef::Video(_) | MaterialRef::Text(_) | MaterialRef::Draft(_)) => true,
+        Some(
+            MaterialRef::Video(_)
+            | MaterialRef::Text(_)
+            | MaterialRef::Draft(_)
+            | MaterialRef::Shape(_),
+        ) => true,
         Some(MaterialRef::Other(_)) => draft
             .materials
             .stickers
@@ -43,6 +48,22 @@ mod tests {
     use cutlass_model::{MaterialAudio, MaterialId, MaterialVideo, TimeRange};
 
     use super::*;
+
+    #[test]
+    fn a_shape_turns() {
+        let mut draft = Draft::empty("D");
+        draft
+            .materials
+            .shapes
+            .push(cutlass_model::MaterialShape::preset(
+                MaterialId::new("sq"),
+                cutlass_model::ShapeKind::Rectangle,
+                320.0,
+                320.0,
+            ));
+        let shape = Segment::new("s", "sq", TimeRange::new(0, 1));
+        assert!(can_turn(&draft, &shape, &TrackType::Sticker));
+    }
 
     #[test]
     fn pictures_turn_and_sounds_do_not() {

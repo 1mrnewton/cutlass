@@ -1,0 +1,249 @@
+//! Frame buffers and per-frame decode state.
+
+use crate::dsp::Pixel;
+
+use super::obu::{FrameHeader, SequenceHeader};
+use super::types::{MiInfo, Mv};
+
+#[derive(Clone)]
+pub struct Plane<P> {
+    pub data: Vec<P>,
+    pub stride: usize,
+    /// Visible size of this plane.
+    pub w: usize,
+    pub h: usize,
+    /// Allocated rows.
+    pub alloc_h: usize,
+}
+
+impl<P: Pixel> Plane<P> {
+    pub fn new(w: usize, h: usize, alloc_w: usize, alloc_h: usize) -> Self {
+        let stride = alloc_w.max(w);
+        let alloc_h = alloc_h.max(h);
+        Self {
+            data: vec![P::default(); stride * alloc_h],
+            stride,
+            w,
+            h,
+            alloc_h,
+        }
+    }
+}
+
+/// One decoded picture (up to three planes).
+#[derive(Clone)]
+pub struct Picture<P> {
+    pub planes: Vec<Plane<P>>,
+    pub bd: u32,
+    pub sub_x: bool,
+    pub sub_y: bool,
+}
+
+impl<P: Pixel> Picture<P> {
+    /// Allocates a picture whose planes hold the visible size `w x h` and
+    /// enough room for whole superblocks.
+    pub fn new(w: usize, h: usize, num_planes: usize, sub_x: bool, sub_y: bool, bd: u32) -> Self {
+        let aw = (w + 127 + 160) & !63;
+        let ah = (h + 127 + 160) & !63;
+        let mut planes = Vec::with_capacity(num_planes);
+        for p in 0..num_planes {
+            let (sx, sy) = if p > 0 {
+                (sub_x, sub_y)
+            } else {
+                (false, false)
+            };
+            let pw = (w + usize::from(sx)) >> u32::from(sx);
+            let ph = (h + usize::from(sy)) >> u32::from(sy);
+            planes.push(Plane::new(pw, ph, aw >> u32::from(sx), ah >> u32::from(sy)));
+        }
+        Self {
+            planes,
+            bd,
+            sub_x,
+            sub_y,
+        }
+    }
+}
+
+/// Loop restoration parameters of one unit.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct LrUnitParams {
+    pub kind: u8,
+    pub wiener: [[i8; 3]; 2],
+    pub sgr_set: u8,
+    pub sgr_xqd: [i8; 2],
+}
+
+/// What a reference slot keeps besides its picture (spec 7.20).
+#[derive(Clone)]
+pub struct RefData {
+    pub mi_cols: usize,
+    pub mi_rows: usize,
+    pub frame_type: u8,
+    /// MfRefFrames / MfMvs at 8x8 granularity (the odd 4x4 positions).
+    pub mf_ref: Vec<i8>,
+    pub mf_mv: Vec<Mv>,
+    pub segment_ids: Vec<u8>,
+    pub saved_order_hints: [u32; 8],
+}
+
+/// The loop restoration units of each plane (all unset), with their
+/// columns and rows.
+#[allow(clippy::type_complexity)]
+fn lr_units(
+    seq: &SequenceHeader,
+    hdr: &FrameHeader,
+) -> ([Vec<LrUnitParams>; 3], [usize; 3], [usize; 3]) {
+    let mut lr: [Vec<LrUnitParams>; 3] = Default::default();
+    let mut lr_cols = [0; 3];
+    let mut lr_rows = [0; 3];
+    for p in 0..seq.num_planes() {
+        if hdr.lr.frame_type[p] != 0 {
+            let (sx, sy) = if p > 0 {
+                (u32::from(seq.subsampling_x), u32::from(seq.subsampling_y))
+            } else {
+                (0, 0)
+            };
+            let size = hdr.lr.unit_size[p] as usize;
+            let count = |unit: usize, frame: usize| ((frame + (unit >> 1)) / unit).max(1);
+            let rw = (hdr.upscaled_width as usize + ((1 << sx) >> 1)) >> sx;
+            let rh = (hdr.frame_height as usize + ((1 << sy) >> 1)) >> sy;
+            lr_cols[p] = count(size, rw);
+            lr_rows[p] = count(size, rh);
+            lr[p] = vec![LrUnitParams::default(); lr_cols[p] * lr_rows[p]];
+        }
+    }
+    (lr, lr_cols, lr_rows)
+}
+
+/// Mutable state of the frame being decoded.
+pub struct FrameState {
+    pub mi_cols: usize,
+    pub mi_rows: usize,
+    pub mi_stride: usize,
+    pub mi: Vec<MiInfo>,
+    /// uv_mode of the last intra block with chroma at each 4x4.
+    pub uv_modes: Vec<u8>,
+    pub tx_types: Vec<u8>,
+    pub inter_tx_sizes: Vec<u8>,
+    /// LoopfilterTxSizes per plane, indexed in that plane's 4x4 units with `mi_stride`.
+    pub lf_tx: [Vec<u8>; 3],
+    pub segment_ids: Vec<u8>,
+    /// The data of the primary reference frame, when it has the size of
+    /// this frame (its segment ids predict this frame's).
+    pub prev_segment_ids: Option<std::sync::Arc<RefData>>,
+    /// cdef_idx per 64x64 block, -1 = unset.
+    pub cdef_idx: Vec<i8>,
+    pub cdef_stride: usize,
+    pub lr: [Vec<LrUnitParams>; 3],
+    pub lr_cols: [usize; 3],
+    pub lr_rows: [usize; 3],
+    /// MotionFieldMvs[ref][y8][x8] for ref = 1..=7 (index 0 unused).
+    pub motion_field: Vec<super::mvpred::MfEntry>,
+}
+
+impl FrameState {
+    pub fn new(seq: &SequenceHeader, hdr: &FrameHeader) -> Self {
+        let mi_cols = hdr.mi_cols as usize;
+        let mi_rows = hdr.mi_rows as usize;
+        // Room for a whole superblock past the frame edge.
+        let mi_stride = (mi_cols + 32) & !31;
+        let rows = (mi_rows + 32) & !31;
+        let n = mi_stride * rows;
+        let cdef_stride = mi_stride / 16 + 1;
+        let (lr, lr_cols, lr_rows) = lr_units(seq, hdr);
+        Self {
+            mi_cols,
+            mi_rows,
+            mi_stride,
+            mi: vec![MiInfo::default(); n],
+            uv_modes: vec![0; n],
+            tx_types: vec![0; n],
+            inter_tx_sizes: vec![0; n],
+            lf_tx: [vec![0; n], vec![0; n], vec![0; n]],
+            segment_ids: vec![0; n],
+            prev_segment_ids: None,
+            cdef_idx: vec![-1; cdef_stride * (rows / 16 + 1)],
+            cdef_stride,
+            lr,
+            lr_cols,
+            lr_rows,
+            motion_field: Vec::new(),
+        }
+    }
+
+    /// [`Self::new`], reusing the arrays of `old` (the state of an earlier
+    /// frame) when the frame has the same size in 4x4 units. Every 4x4 of
+    /// the frame is written by its block before it is read, and the 4x4s
+    /// past the frame edges are never written, so only the CDEF indices,
+    /// loop restoration units and per-frame extras start afresh.
+    pub fn reuse(old: Option<Self>, seq: &SequenceHeader, hdr: &FrameHeader) -> Self {
+        match old {
+            Some(mut fs)
+                if fs.mi_cols == hdr.mi_cols as usize && fs.mi_rows == hdr.mi_rows as usize =>
+            {
+                let (lr, lr_cols, lr_rows) = lr_units(seq, hdr);
+                fs.cdef_idx.fill(-1);
+                fs.lr = lr;
+                fs.lr_cols = lr_cols;
+                fs.lr_rows = lr_rows;
+                fs.prev_segment_ids = None;
+                fs.motion_field.clear();
+                fs
+            }
+            _ => Self::new(seq, hdr),
+        }
+    }
+    /// A state of the same size holding only what the in-loop filters read
+    /// (mode info, loop filter transform sizes, CDEF indices), to be filled
+    /// row by row.
+    pub fn filter_shell(&self) -> Self {
+        Self {
+            mi_cols: self.mi_cols,
+            mi_rows: self.mi_rows,
+            mi_stride: self.mi_stride,
+            mi: vec![MiInfo::default(); self.mi.len()],
+            uv_modes: vec![0; self.uv_modes.len()],
+            tx_types: Vec::new(),
+            inter_tx_sizes: Vec::new(),
+            lf_tx: std::array::from_fn(|p| vec![0; self.lf_tx[p].len()]),
+            segment_ids: Vec::new(),
+            prev_segment_ids: None,
+            cdef_idx: vec![-1; self.cdef_idx.len()],
+            cdef_stride: self.cdef_stride,
+            lr: Default::default(),
+            lr_cols: self.lr_cols,
+            lr_rows: self.lr_rows,
+            motion_field: Vec::new(),
+        }
+    }
+
+    /// Whether `self`, a [`Self::filter_shell`], has the array sizes of a
+    /// filter shell of `fs` (its contents are rewritten row by row).
+    pub fn fits_filter_shell(&self, fs: &FrameState) -> bool {
+        self.mi_stride == fs.mi_stride
+            && self.mi.len() == fs.mi.len()
+            && self.uv_modes.len() == fs.uv_modes.len()
+            && self.cdef_idx.len() == fs.cdef_idx.len()
+            && self
+                .lf_tx
+                .iter()
+                .zip(&fs.lf_tx)
+                .all(|(a, b)| a.len() == b.len())
+    }
+
+    /// Takes on the dimensions of `fs` (see [`Self::fits_filter_shell`]).
+    pub fn reshape_filter_shell(mut self, fs: &FrameState) -> Self {
+        self.mi_cols = fs.mi_cols;
+        self.mi_rows = fs.mi_rows;
+        self.cdef_stride = fs.cdef_stride;
+        self.lr_cols = fs.lr_cols;
+        self.lr_rows = fs.lr_rows;
+        self
+    }
+
+    #[inline(always)]
+    pub fn mi_at(&self, row: usize, col: usize) -> &MiInfo {
+        &self.mi[row * self.mi_stride + col]
+    }
+}

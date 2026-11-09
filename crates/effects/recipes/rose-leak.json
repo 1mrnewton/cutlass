@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "id": "rose-leak",
+  "name": "Rose Leak",
+  "category": "Light",
+  "preview": "portrait",
+  "controls": [
+    {"id": "speed", "name": "Speed", "default": 1, "min": 0.25, "max": 3, "unit": "times", "speed": true},
+    {"id": "intensity", "name": "Intensity", "default": 1, "min": 0, "max": 2, "unit": "percent", "scale": [[0, "amount"]]}
+  ],
+  "passes": [
+    {
+      "block": "light_leak",
+      "params": {
+        "amount": {"wave": {"period": 2, "from": 0.3, "to": 0.8}},
+        "x": 0.6,
+        "y": -0.4,
+        "size": 1.1,
+        "red": 1,
+        "green": 0.35,
+        "blue": 0.55
+      }
+    }
+  ]
+}

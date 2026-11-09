@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "id": "fade-in",
+  "name": "Fade In",
+  "category": "Basic",
+  "preview": "portrait",
+  "poster": 0.25,
+  "controls": [
+    {"id": "speed", "name": "Speed", "default": 1, "min": 0.25, "max": 3, "unit": "times", "speed": true}
+  ],
+  "passes": [
+    {
+      "block": "flash",
+      "params": {
+        "amount": {"keys": [[0, 1], [0.6, 0]]},
+        "red": 0,
+        "green": 0,
+        "blue": 0
+      }
+    }
+  ]
+}

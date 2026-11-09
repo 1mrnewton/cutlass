@@ -8,7 +8,12 @@ pub fn run() -> eframe::Result {
     let mut viewport = egui::ViewportBuilder::default()
         .with_title("Cutlass")
         .with_inner_size([1280.0, 800.0])
-        .with_min_inner_size([tokens::MIN_WINDOW_WIDTH, tokens::MIN_WINDOW_HEIGHT]);
+        .with_min_inner_size([tokens::MIN_WINDOW_WIDTH, tokens::MIN_WINDOW_HEIGHT])
+        // eframe takes one transparency setting from the main window for
+        // every window it opens. Menus need it for their rounded corners and
+        // shadow; the main window still looks solid, since the view paints
+        // its whole area each frame.
+        .with_transparent(true);
     match icon(ICON) {
         Some(icon) => viewport = viewport.with_icon(icon),
         None => cutlass_logger::error!("the window icon did not decode"),
@@ -40,6 +45,7 @@ pub fn run() -> eframe::Result {
             let (decoders, encoders) = crate::register_codecs_with(&loaded.settings.hardware);
             let mut shell = Shell::new(decoders, encoders, loaded.settings);
             shell.keep_settings_file(file, loaded.generation);
+            shell.keep_presets_file(Shell::home().text_presets_file());
             // At most once a day, and never with the switch off.
             shell.check_updates_at_launch();
             // A project folder or files named on the command line, as a
@@ -49,7 +55,7 @@ pub fn run() -> eframe::Result {
                 .map(std::path::PathBuf::from)
                 .collect();
             if let Err(error) = shell.drop_files(&named) {
-                shell.set_notice(error.to_string());
+                shell.notice_error(&error);
             }
             if let Some(state) = creation.wgpu_render_state.as_ref() {
                 shell.attach_gpu(state);
@@ -140,6 +146,12 @@ struct DesktopWindow {
 }
 
 impl eframe::App for DesktopWindow {
+    /// Clear to nothing: the view paints the whole main window, and a menu's
+    /// window shows only its panel and shadow.
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        [0.0; 4]
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let now = ui.input(|input| input.time);
         advance_if_playing(&mut self.shell, &mut self.last_time, now);
@@ -151,7 +163,7 @@ impl eframe::App for DesktopWindow {
             if !opened.is_empty() {
                 cutlass_logger::info!("finder opened {} item(s)", opened.len());
                 if let Err(error) = self.shell.drop_files(&opened) {
-                    self.shell.set_notice(error.to_string());
+                    self.shell.notice_error(&error);
                 }
             }
         }
@@ -165,7 +177,13 @@ impl eframe::App for DesktopWindow {
             }
         }
         #[cfg(target_os = "macos")]
-        if let Some(bar) = self.menu_bar.as_ref() {
+        {
+            self.view.system_menus = self.menu_bar.is_some();
+        }
+        #[cfg(target_os = "macos")]
+        if let Some(bar) = self.menu_bar.as_mut() {
+            let settings = self.shell.settings();
+            bar.show_keys(|action| settings.keys_for(action));
             for id in bar.take() {
                 crate::view::run_menu(&mut self.shell, &mut self.view, Some(frame), &id);
             }

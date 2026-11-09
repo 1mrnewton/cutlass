@@ -1902,6 +1902,136 @@ mod tests {
             .collect()
     }
 
+    /// A textured picture that moves `n` quarter samples right and down,
+    /// so the Rust MPEG-4 encoder writes quarter-sample vectors.
+    fn drifting(width: usize, height: usize, n: usize) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(width * height * 3 / 2);
+        for row in 0..height {
+            for col in 0..width {
+                let (x, y) = (col * 4 + n * 3, row * 4 + n);
+                bytes.push(
+                    u8::try_from((x * 7 + y * 5 + ((x ^ y) >> 2)) / 4 % 200 + 28).unwrap_or(0),
+                );
+            }
+        }
+        for plane in 0..2 {
+            for row in 0..height / 2 {
+                for col in 0..width / 2 {
+                    let v = (col * 3 + row * (2 + plane) + n) % 60 + 98;
+                    bytes.push(u8::try_from(v).unwrap_or(128));
+                }
+            }
+        }
+        bytes
+    }
+
+    /// The Rust encoder's export, Simple and Advanced Simple, decoded by
+    /// VideoToolbox against the Rust decoder. Today the session does not
+    /// open: an `mp4v` format description without its `esds` is refused
+    /// with -12909, so playback falls back to the Rust decoder and this
+    /// test says it skipped. When the session opens, the pictures must
+    /// match: Apple's inverse transform is not FFmpeg's, and FFmpeg's own
+    /// Simple streams come back from Apple's decoder at 42 to 51 dB.
+    #[test]
+    fn videotoolbox_decodes_the_rust_mpeg4_export() {
+        for extra in [Vec::new(), cutlass_mpeg4::ADVANCED_SIMPLE.to_vec()] {
+            mpeg4_export_through_videotoolbox(extra);
+        }
+    }
+
+    fn mpeg4_export_through_videotoolbox(extra: Vec<u8>) {
+        use cutlass_encode::EncodeFactory;
+
+        let (width, height) = (176u32, 144u32);
+        let advanced = !extra.is_empty();
+        let mut factory = EncodeFactory::new();
+        cutlass_mpeg4::register_engine_encoders(&mut factory);
+        let mut params =
+            CodecParams::with_format(CodecId::Mpeg4, width, height, PixelFormat::Yuv420p);
+        params.bitrate = 600_000;
+        params.extra = extra;
+        let mut encoder = factory.open(&params).expect("rust mpeg4 encoder");
+        let mut packets = Vec::new();
+        for n in 0..12 {
+            let frame = CpuFrame::new(
+                width,
+                height,
+                PixelFormat::Yuv420p,
+                drifting(176, 144, n),
+                FrameTime::new(i64::try_from(n).unwrap_or(0), 1, 30).expect("time"),
+            )
+            .expect("frame");
+            packets.extend(encoder.push_frame(&FrameInput::Cpu(frame)).expect("encode"));
+        }
+        packets.extend(encoder.drain().expect("drain"));
+        let config = packets
+            .iter()
+            .find_map(|packet| {
+                packet.side.iter().find_map(|side| match side {
+                    SideData::Config(bytes) => Some(bytes.clone()),
+                    _ => None,
+                })
+            })
+            .expect("layer headers");
+        let kinds: Vec<u8> = packets.iter().map(|p| p.data[4] >> 6).collect();
+        assert_eq!(kinds.contains(&2), advanced, "B-VOPs: {kinds:?}");
+
+        let mut decode =
+            CodecParams::with_format(CodecId::Mpeg4, width, height, PixelFormat::Yuv420p);
+        decode.extra = config;
+        let pictures = |decoder: &mut dyn Decoder| -> Vec<(i64, Vec<u8>)> {
+            decode_all(decoder, &packets)
+                .expect("decode")
+                .into_iter()
+                .filter_map(|output| match output {
+                    Output::Picture(picture) => match picture.samples() {
+                        PictureSamples::Cpu(bytes) => Some((picture.pts(), bytes.to_vec())),
+                        _ => None,
+                    },
+                    Output::Audio(_) => None,
+                })
+                .collect()
+        };
+        let mut rust = cutlass_mpeg4::EngineDecoder::open(&decode).expect("rust decoder");
+        let want = pictures(&mut rust);
+        let mut platform = match open_decoder(&decode) {
+            Ok(decoder) => decoder,
+            Err(CodecError::Unsupported { what }) => {
+                eprintln!(
+                    "skipped: VideoToolbox declines MPEG-4 Visual ({what}), advanced {advanced}"
+                );
+                return;
+            }
+            Err(error) => panic!("VideoToolbox open: {error}"),
+        };
+        let got = pictures(platform.as_mut());
+        let times = |p: &[(i64, Vec<u8>)]| p.iter().map(|p| p.0).collect::<Vec<_>>();
+        assert_eq!(times(&want), (0..12).collect::<Vec<_>>());
+        assert_eq!(times(&got), times(&want), "VideoToolbox order");
+        let mut worst = f64::INFINITY;
+        for ((_, a), (pts, b)) in want.iter().zip(&got) {
+            assert_eq!(a.len(), b.len());
+            let luma = (width * height) as usize;
+            let se: f64 = a[..luma]
+                .iter()
+                .zip(&b[..luma])
+                .map(|(&x, &y)| (f64::from(x) - f64::from(y)).powi(2))
+                .sum();
+            let mse = se / luma as f64;
+            let psnr = if mse == 0.0 {
+                99.0
+            } else {
+                10.0 * (255.0 * 255.0 / mse).log10()
+            };
+            eprintln!("videotoolbox mpeg4 advanced {advanced} picture {pts} luma psnr {psnr:.2}");
+            worst = worst.min(psnr);
+        }
+        assert!(
+            worst >= 35.0,
+            "VideoToolbox differs from the Rust decoder: {worst:.2} dB"
+        );
+    }
+
     #[test]
     fn a_surface_picture_holds_the_samples_the_planar_copy_does() {
         let Some((packets, config)) = encoded(CodecId::H264, 6) else {

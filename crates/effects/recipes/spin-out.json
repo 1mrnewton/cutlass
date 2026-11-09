@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "id": "spin-out",
+  "name": "Spin Out",
+  "category": "Blur",
+  "preview": "dancer",
+  "poster": 0.7,
+  "controls": [
+    {"id": "speed", "name": "Speed", "default": 1, "min": 0.25, "max": 3, "unit": "times", "speed": true}
+  ],
+  "passes": [
+    {"block": "transform", "params": {"scale": 1.2, "rotate": {"keys": [[0, 0], [1, 20]]}}},
+    {"block": "focus", "params": {"amount": 0.05, "kind": 2, "size": 0.05, "angle": {"keys": [[0, 0], [1, 60]]}}}
+  ]
+}

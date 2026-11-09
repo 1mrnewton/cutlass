@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "cyberpunk",
+  "name": "Cyberpunk",
+  "category": "Creative",
+  "adjust": {"tint": 0.35, "temperature": -0.3, "contrast": 0.2, "saturation": 0.3},
+  "wheels": {"lift": {"hue": 280, "amount": 0.4}}
+}

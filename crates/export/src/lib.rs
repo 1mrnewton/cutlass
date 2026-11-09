@@ -12,6 +12,7 @@
 
 mod config;
 mod movie;
+mod pictures;
 mod prerender;
 mod proxy;
 mod run;
@@ -26,6 +27,7 @@ pub use config::{
 pub use movie::{
     MOVIE_SOUND, MovieSources, part_path, video_bitrate, write_animation, write_movie, write_sound,
 };
+pub use pictures::{PictureMovie, write_pictures};
 pub use prerender::{
     PREVIEW_SIDE, read_render_name, render_key, render_name, render_request, render_side, stand_in,
 };

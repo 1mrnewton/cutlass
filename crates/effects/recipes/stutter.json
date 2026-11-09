@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "id": "stutter",
+  "name": "Stutter",
+  "category": "Glitch",
+  "preview": "dancer",
+  "controls": [
+    {"id": "speed", "name": "Speed", "default": 1, "min": 0.25, "max": 3, "unit": "times", "speed": true},
+    {"id": "intensity", "name": "Intensity", "default": 1, "min": 0, "max": 2, "unit": "percent", "scale": [[0, "x"], [1, "amount"]]}
+  ],
+  "passes": [
+    {
+      "block": "transform",
+      "params": {
+        "scale": 1.05,
+        "x": {"jitter": {"rate": 8, "from": -0.02, "to": 0.02, "seed": 81}}
+      }
+    },
+    {
+      "block": "slices",
+      "params": {
+        "count": 12,
+        "amount": {"jitter": {"rate": 8, "from": 0, "to": 0.05, "seed": 82}},
+        "seed": {"jitter": {"rate": 8, "from": 0, "to": 1000, "seed": 83}}
+      }
+    }
+  ]
+}

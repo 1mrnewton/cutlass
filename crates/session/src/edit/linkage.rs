@@ -46,17 +46,29 @@ pub fn remove(draft: &mut Draft, segment_id: &SegmentId) -> Result<(), EditError
     remove_segment(draft, segment_id)
 }
 
+/// Every segment of a draft by id: what [`after_request`] compares the
+/// edited draft against. The segments are all linkage reads, so the rest of
+/// the draft (its materials, most of its size) is not copied per request.
+pub type Segments = std::collections::BTreeMap<SegmentId, Segment>;
+
+/// The segments of `draft`, kept before a request runs.
+#[must_use]
+pub fn segments_of(draft: &Draft) -> Segments {
+    index(draft)
+}
+
 /// Apply follow, cut, and group movement for the edit that just landed.
+/// `before` is [`segments_of`] the draft before that edit.
 pub fn after_request(
     draft: &mut Draft,
-    before: &Draft,
+    before: &Segments,
     settings: &LinkageSettings,
 ) -> Result<(), EditError> {
-    let before_segments = index(before);
+    let before_segments = before;
     let after_segments = index(draft);
     let mut removed = Vec::new();
     let mut edits = Vec::new();
-    for (id, old) in &before_segments {
+    for (id, old) in before_segments {
         match after_segments.get(id) {
             None => removed.push(id.clone()),
             Some(new) => edits.push((old.clone(), new.clone())),
@@ -95,7 +107,7 @@ fn on_removed(
 
 fn on_edit(
     draft: &mut Draft,
-    before: &Draft,
+    before: &Segments,
     old: &Segment,
     new: &Segment,
     settings: &LinkageSettings,
@@ -280,7 +292,7 @@ fn group_mates(draft: &Draft, segment: &Segment) -> BTreeSet<SegmentId> {
 }
 
 fn split_pieces(
-    before: &Draft,
+    before: &Segments,
     after: &Draft,
     old: &Segment,
     new: &Segment,
@@ -290,10 +302,9 @@ fn split_pieces(
     }
     let cut = new.target.start.0.checked_add(new.target.duration.0)?;
     let old_end = old.target.start.0.checked_add(old.target.duration.0)?;
-    let before_ids = index(before);
     for track in &after.tracks {
         for segment in &track.segments {
-            if before_ids.contains_key(&segment.id) {
+            if before.contains_key(&segment.id) {
                 continue;
             }
             let Some(end) = segment
@@ -483,7 +494,7 @@ fn overlaps(
     Ok(false)
 }
 
-fn index(draft: &Draft) -> std::collections::BTreeMap<SegmentId, Segment> {
+fn index(draft: &Draft) -> Segments {
     let mut segments = std::collections::BTreeMap::new();
     for track in &draft.tracks {
         for segment in &track.segments {
@@ -570,7 +581,7 @@ mod tests {
     use crate::session::Session;
 
     fn open() -> (Session, TrackId, TrackId) {
-        let mut draft = Draft::empty("D");
+        let mut draft = crate::edit::test_draft("D");
         draft.config.maintrack_adsorb = false;
         draft.tracks[0].id = TrackId::new("main");
         let mut overlay = Track::main("over");
@@ -794,7 +805,7 @@ mod tests {
 
     #[test]
     fn trim_and_duration_scale_the_dependent_and_leave_the_child_draft() {
-        let mut draft = Draft::empty("D");
+        let mut draft = crate::edit::test_draft("D");
         draft.config.maintrack_adsorb = false;
         draft.tracks[0].id = TrackId::new("main");
         let mut overlay = Track::main("over");
@@ -897,7 +908,8 @@ mod tests {
                 }],
             )
             .unwrap();
-        assert!(session.draft().tracks[1].segments.is_empty());
+        // The dependent's row, now empty, goes with it.
+        assert_eq!(session.draft().tracks.len(), 1);
         assert!(session.draft().relationships[0].id_to_id.is_empty());
 
         let (mut session, main, over) = open();
@@ -922,8 +934,9 @@ mod tests {
                 }],
             )
             .unwrap();
+        // Main stays empty; the dependent's emptied row goes.
+        assert_eq!(session.draft().tracks.len(), 1);
         assert!(session.draft().tracks[0].segments.is_empty());
-        assert!(session.draft().tracks[1].segments.is_empty());
         assert!(session.draft().relationships[0].id_to_id.is_empty());
     }
 
@@ -978,6 +991,7 @@ mod tests {
             id: "media".into(),
             ..cutlass_model::MaterialVideo::default()
         });
+        let videos = draft.materials.videos.len();
         let mut session = Session::open(draft);
         session
             .apply(
@@ -1011,7 +1025,7 @@ mod tests {
             .unwrap();
         let draft = session.draft();
         assert!(draft.materials.audio_fades.is_empty());
-        assert_eq!(draft.materials.videos.len(), 1);
+        assert_eq!(draft.materials.videos.len(), videos);
         // With linkage off "b" stays, and no pair names the clip that went.
         assert_eq!(draft.tracks[1].segments.len(), 1);
         assert!(draft.relationships[0].id_to_id.is_empty());

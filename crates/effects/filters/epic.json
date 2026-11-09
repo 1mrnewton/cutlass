@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "epic",
+  "name": "Epic",
+  "category": "Landscape",
+  "adjust": {"contrast": 0.3, "clarity": 0.3, "saturation": 0.2, "vignette": 0.2},
+  "curves": {"rgb": [[0, 0], [0.25, 0.2], [0.75, 0.8], [1, 1]]}
+}

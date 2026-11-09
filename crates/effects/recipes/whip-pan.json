@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "id": "whip-pan",
+  "name": "Whip Pan",
+  "category": "Motion",
+  "preview": "dancer",
+  "poster": 0.06,
+  "controls": [
+    {"id": "speed", "name": "Speed", "default": 1, "min": 0.25, "max": 3, "unit": "times", "speed": true}
+  ],
+  "passes": [
+    { "block": "transform", "params": {"x": {"keys": [[0, -0.4], [0.18, 0]]}} },
+    { "block": "motion_blur", "params": {"length": {"keys": [[0, 0.2], [0.18, 0]]}} }
+  ]
+}

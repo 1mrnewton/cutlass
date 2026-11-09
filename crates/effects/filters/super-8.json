@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "super-8",
+  "name": "Super 8",
+  "category": "Film",
+  "adjust": {"temperature": 0.35, "grain": 0.5, "vignette": 0.5, "fade": 0.2, "saturation": -0.1, "clarity": -0.2}
+}

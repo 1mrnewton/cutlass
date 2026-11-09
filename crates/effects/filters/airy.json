@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "airy",
+  "name": "Airy",
+  "category": "Portrait",
+  "adjust": {"exposure": 0.2, "shadows": 0.3, "fade": 0.1, "saturation": -0.1}
+}

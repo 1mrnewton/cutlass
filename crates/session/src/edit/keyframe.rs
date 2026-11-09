@@ -253,8 +253,8 @@ pub fn key_values(
 
 /// Whether `value` is one `property` can hold, as the edit that stores it
 /// takes: a scale above zero, an opacity from 0 to 1, an Adjust slider
-/// from -1 to 1, a colour strength from 0 to 1, a text style its edit
-/// takes, anything else finite.
+/// from -1 to 1, a colour strength from 0 to 1, a text or shape style its
+/// edit takes, anything else finite.
 fn in_range(property: &str, value: f64) -> bool {
     if !value.is_finite() {
         return false;
@@ -272,6 +272,9 @@ fn in_range(property: &str, value: f64) -> bool {
         return (0.0..=1.0).contains(&value);
     }
     if let Some(key) = cutlass_model::TextStyleKey::of(property) {
+        return key.takes(value);
+    }
+    if let Some(key) = cutlass_model::ShapeStyleKey::of(property) {
         return key.takes(value);
     }
     true
@@ -541,6 +544,8 @@ mod tests {
             ("KFTypeChromaShadow", -0.5),
             ("KFTypeTextSize", 0.0),
             ("KFTypeTextStrokeWidth", 1.0),
+            ("KFTypeShapeFillAlpha", 2.0),
+            ("KFTypeShapeWidth", -1.0),
         ] {
             assert_eq!(
                 session.apply(1, &[values(0, &[(name, value)])]),

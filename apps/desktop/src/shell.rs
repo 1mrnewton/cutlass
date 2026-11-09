@@ -8916,8 +8916,14 @@ fn request_names(requests: &[Request]) -> String {
 const REQUEST_NAMES_LOGGED: usize = 8;
 
 /// The source file a notice came from, from `src/` on.
-fn notice_file(file: &str) -> &str {
-    file.find("src/").map_or(file, |at| &file[at..])
+/// The source file from its `src/` folder on, with `/` on every platform:
+/// Windows reports `apps\desktop\src\shell.rs`.
+fn notice_file(file: &str) -> String {
+    let file = file.replace('\\', "/");
+    match file.find("src/") {
+        Some(at) => file[at..].to_owned(),
+        None => file,
+    }
 }
 
 #[cfg(test)]
@@ -10898,6 +10904,19 @@ mod tests {
         let names = super::request_names(&many);
         assert!(names.ends_with("+3 more"), "{names}");
         assert!(!names.contains("secret"), "{names}");
+    }
+
+    #[test]
+    fn a_notice_place_reads_the_same_on_every_platform() {
+        assert_eq!(
+            super::notice_file("apps/desktop/src/shell.rs"),
+            "src/shell.rs"
+        );
+        assert_eq!(
+            super::notice_file(r"apps\desktop\src\shell.rs"),
+            "src/shell.rs"
+        );
+        assert_eq!(super::notice_file("build.rs"), "build.rs");
     }
 
     #[test]

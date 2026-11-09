@@ -12,12 +12,12 @@ use egui::{Align2, Color32, FontId, Rect, Sense, Ui, Vec2};
 use cutlass_effects::{RELIGHT_PRESETS, RelightGroup, lighting, relight_preset, relight_tile};
 use cutlass_model::Relight;
 
-use crate::shell::Shell;
+use crate::shell::{KeyedSetting, Shell};
 use crate::{tokens, ui};
 
 use super::inspector::{
-    CATALOG_TILE, InspectorState, body, color_row, none_tile, note, section, send, slider,
-    tile_frame,
+    CATALOG_TILE, InspectorState, body, color_row, none_tile, note, section, send, setting_row,
+    slider, tile_frame,
 };
 
 /// The tabs: each group, then Custom.
@@ -152,15 +152,18 @@ pub(super) fn relight(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState
             return;
         };
         ui.add_space(8.0);
-        if let Some(value) = slider(
-            ui,
-            state,
-            "relight strength",
-            "Strength",
-            (lit.strength * 100.0).round(),
-            0.0..=100.0,
-            |v| format!("{v:.0}%"),
-        ) {
+        let changed = setting_row(shell, ui, KeyedSetting::RelightStrength, true, |ui| {
+            slider(
+                ui,
+                state,
+                "relight strength",
+                "Strength",
+                (lit.strength * 100.0).round(),
+                0.0..=100.0,
+                |v| format!("{v:.0}%"),
+            )
+        });
+        if let Some(value) = changed {
             let (preset, color) = (lit.preset.clone(), lit.color.clone());
             send(shell, move |shell| {
                 shell.set_relight(&preset, value / 100.0, &color, lit.angle)
@@ -176,21 +179,27 @@ pub(super) fn relight(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState
         } else {
             lit.color.clone()
         };
-        if let Some(hex) = color_row(ui, state, "relight color", "Color", &shown) {
+        let picked = setting_row(shell, ui, KeyedSetting::RelightColor, true, |ui| {
+            color_row(ui, state, "relight color", "Color", &shown)
+        });
+        if let Some(hex) = picked {
             let preset = lit.preset.clone();
             send(shell, move |shell| {
                 shell.set_relight(&preset, lit.strength, &hex.to_ascii_lowercase(), lit.angle)
             });
         }
-        if let Some(value) = slider(
-            ui,
-            state,
-            "relight angle",
-            "Angle",
-            lit.angle.round(),
-            0.0..=360.0,
-            |v| format!("{v:.0}°"),
-        ) {
+        let changed = setting_row(shell, ui, KeyedSetting::RelightAngle, true, |ui| {
+            slider(
+                ui,
+                state,
+                "relight angle",
+                "Angle",
+                lit.angle.round(),
+                0.0..=360.0,
+                |v| format!("{v:.0}°"),
+            )
+        });
+        if let Some(value) = changed {
             let (preset, color) = (lit.preset.clone(), lit.color.clone());
             send(shell, move |shell| {
                 shell.set_relight(&preset, lit.strength, &color, value)

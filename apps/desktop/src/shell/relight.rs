@@ -13,7 +13,7 @@ use cutlass_store::find_relight;
 use cutlass_vision::{Compute, DEPTH_WEIGHTS, DepthModel, EnhanceJobError, relight_clip};
 
 use super::enhance::model_dir;
-use super::{Landing, Shell, ShellError};
+use super::{KeyedSetting, Landing, Shell, ShellError};
 
 /// The job's label, which the inspector looks for to show its progress.
 pub(crate) const RELIGHT_JOB: &str = "Relight";
@@ -56,13 +56,37 @@ impl Shell {
         if !preset.is_empty() {
             self.make_depth(&segment_id)?;
         }
-        self.apply(Request::SetRelight {
+        let now = self.relight();
+        let mut requests = vec![Request::SetRelight {
             segment_id,
             preset: preset.to_owned(),
             strength,
             color: color.to_owned(),
             angle,
-        })
+        }];
+        // A keyed strength, color or angle plays its keys, so a change to
+        // one keys it here.
+        if let Some(now) = now.filter(|_| !preset.is_empty()) {
+            let parts = [
+                (
+                    KeyedSetting::RelightStrength,
+                    now.strength != strength,
+                    vec![strength],
+                ),
+                (
+                    KeyedSetting::RelightColor,
+                    !now.color.eq_ignore_ascii_case(color),
+                    relight_rgb(color).to_vec(),
+                ),
+                (KeyedSetting::RelightAngle, now.angle != angle, vec![angle]),
+            ];
+            for (setting, changed, values) in parts {
+                if changed && let Some(key) = self.key_setting_here(setting, values) {
+                    requests.push(key);
+                }
+            }
+        }
+        self.apply_requests(&requests)
     }
 
     /// Start a job guessing clip `segment_id`'s depth when the project
@@ -131,14 +155,20 @@ impl Shell {
         })
     }
 
-    /// The selected clip's light, `None` when it is not relit.
+    /// The selected clip's light, its keyed settings as keyed at the
+    /// playhead; `None` when it is not relit.
     #[must_use]
     pub fn relight(&self) -> Option<Relight> {
         let draft = self.draft()?;
         let segment_id = self.selected()?;
         let (segment, _) = super::placed(draft, segment_id)?;
         match draft.materials.get(segment.material_id.as_str()) {
-            Some(MaterialRef::Video(video)) => video.relight(),
+            Some(MaterialRef::Video(video)) => Some(cutlass_model::relight_at(
+                &video.relight()?,
+                segment,
+                &draft.keyframe_graph_list,
+                self.playhead,
+            )),
             _ => None,
         }
     }
@@ -149,6 +179,21 @@ impl Shell {
         self.job()
             .filter(|job| job.label == RELIGHT_JOB)
             .map(|job| job.fraction.unwrap_or(0.0))
+    }
+}
+
+/// The Custom light's `color` (`#rrggbb`) as red, green and blue from 0
+/// to 1; an empty or unreadable color is the light's own.
+pub(super) fn relight_rgb(color: &str) -> [f64; 3] {
+    let body = color.trim().trim_start_matches('#');
+    let channel = |at: usize| {
+        body.get(at..at + 2)
+            .and_then(|pair| u8::from_str_radix(pair, 16).ok())
+            .map(|byte| f64::from(byte) / 255.0)
+    };
+    match (channel(0), channel(2), channel(4)) {
+        (Some(r), Some(g), Some(b)) if body.len() == 6 => [r, g, b],
+        _ => cutlass_effects::CUSTOM_COLOR.map(|c| f64::from(c.powf(1.0 / 2.2))),
     }
 }
 

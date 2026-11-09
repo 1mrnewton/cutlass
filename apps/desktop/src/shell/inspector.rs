@@ -52,6 +52,12 @@ pub enum KeyedSetting {
     GlowStrength,
     /// How far a title's glow reaches.
     GlowRange,
+    /// A clip's Relight strength.
+    RelightStrength,
+    /// The Custom light's color.
+    RelightColor,
+    /// The Custom light's direction.
+    RelightAngle,
 }
 
 impl KeyedSetting {
@@ -97,6 +103,9 @@ impl KeyedSetting {
             Self::WheelLuma(wheel) => wheel.luma_keys(),
             Self::GlowStrength => &cutlass_model::GLOW_STRENGTH_KEYS,
             Self::GlowRange => &cutlass_model::GLOW_RANGE_KEYS,
+            Self::RelightStrength => &cutlass_model::RELIGHT_STRENGTH_KEYS,
+            Self::RelightColor => &cutlass_model::RELIGHT_COLOR_KEYS,
+            Self::RelightAngle => &cutlass_model::RELIGHT_ANGLE_KEYS,
             Self::TextColor => &cutlass_model::TEXT_COLOR_KEYS,
         }
     }
@@ -437,6 +446,9 @@ impl Shell {
                 KeyedSetting::GlowStrength | KeyedSetting::GlowRange => {
                     "switch the glow on first".to_owned()
                 }
+                KeyedSetting::RelightStrength
+                | KeyedSetting::RelightColor
+                | KeyedSetting::RelightAngle => "pick a light first".to_owned(),
                 KeyedSetting::Hsl(..) | KeyedSetting::WheelPuck(_) | KeyedSetting::WheelLuma(_) => {
                     "colour keys belong on a picture".to_owned()
                 }
@@ -514,6 +526,11 @@ impl Shell {
                 vec![keyed.unwrap_or_else(|| key.get(text))]
             }
             KeyedSetting::ShapeStyle(key) => key.get(&self.shape()?),
+            KeyedSetting::RelightStrength => vec![self.relight()?.strength],
+            KeyedSetting::RelightColor => {
+                super::relight::relight_rgb(&self.relight()?.color).to_vec()
+            }
+            KeyedSetting::RelightAngle => vec![self.relight()?.angle],
             KeyedSetting::GlowStrength | KeyedSetting::GlowRange => {
                 let look = self
                     .text_look()
@@ -1835,7 +1852,9 @@ mod tests {
         pick(&mut desktop, "words");
         desktop.set_text_glow("#FFFFFF", 0.2, 0.5).unwrap();
         desktop.seek(cutlass_model::Micros(1_000_000));
-        desktop.toggle_setting_key(KeyedSetting::GlowStrength).unwrap();
+        desktop
+            .toggle_setting_key(KeyedSetting::GlowStrength)
+            .unwrap();
         desktop.seek(cutlass_model::Micros(3_000_000));
         desktop.set_text_glow("#FFFFFF", 0.6, 0.5).unwrap();
         // Range has no keys, so it is stored all along the title.

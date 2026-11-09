@@ -555,9 +555,14 @@ fn effect_panel(
     body(ui, |ui| {
         if let Some(stored) = shell.effect_strength() {
             let amount = (stored * 100.0).round();
-            if let Some(value) = slider(ui, state, "amount", "Amount", amount, 0.0..=100.0, |v| {
-                format!("{v:.0}")
-            }) {
+            // Only a filter's Amount is played, so only it keys.
+            let keyed = filter && shell.is_filter();
+            let changed = setting_row(shell, ui, KeyedSetting::FilterStrength, keyed, |ui| {
+                slider(ui, state, "amount", "Amount", amount, 0.0..=100.0, |v| {
+                    format!("{v:.0}")
+                })
+            });
+            if let Some(value) = changed {
                 send(shell, |shell| shell.set_effect_strength(value / 100.0));
             }
         } else {
@@ -1262,6 +1267,26 @@ pub(super) fn animation_tab(
     later_slider(ui, "Duration", 2.0, "2.0s");
 }
 
+/// `row` with `setting`'s own keyframe buttons at its end when `keyed`,
+/// acting on a press of them. The row's own result.
+pub(super) fn setting_row<R>(
+    shell: &mut Shell,
+    ui: &mut Ui,
+    setting: KeyedSetting,
+    keyed: bool,
+    row: impl FnOnce(&mut Ui) -> R,
+) -> R {
+    let keys = if keyed {
+        shell.setting_keys(setting)
+    } else {
+        None
+    };
+    let mut step = None;
+    let inner = keyed_row(ui, keys.as_ref(), shell.playhead(), &mut step, row);
+    setting_step(shell, setting, step);
+    inner
+}
+
 /// Act on a press of `setting`'s keyframe buttons.
 pub(super) fn setting_step(shell: &mut Shell, setting: KeyedSetting, step: Option<KeyStep>) {
     match step {
@@ -1684,15 +1709,18 @@ fn lut_section(
         ui.add_space(ROW_GAP);
         if let Some((_, strength)) = &inspection.lut {
             let stored = (f64::from(*strength) * 100.0).round();
-            if let Some(value) = slider(
-                ui,
-                state,
-                "lut-strength",
-                "Intensity",
-                stored,
-                0.0..=100.0,
-                |v| format!("{v:.0}"),
-            ) {
+            let changed = setting_row(shell, ui, KeyedSetting::LutStrength, true, |ui| {
+                slider(
+                    ui,
+                    state,
+                    "lut-strength",
+                    "Intensity",
+                    stored,
+                    0.0..=100.0,
+                    |v| format!("{v:.0}"),
+                )
+            });
+            if let Some(value) = changed {
                 send(shell, |shell| shell.set_lut_strength(value / 100.0));
             }
         }

@@ -30,6 +30,11 @@ pub enum KeyedSetting {
     TextColor,
     /// One colour Adjust slider.
     Adjust(cutlass_effects::AdjustKey),
+    /// A filter's Amount.
+    FilterStrength,
+    LutStrength,
+    ChromaStrength,
+    ChromaShadow,
 }
 
 impl KeyedSetting {
@@ -61,6 +66,10 @@ impl KeyedSetting {
             Self::MaskRound => &cutlass_model::MASK_ROUND_KEYS,
             Self::Volume => &[cutlass_model::VOLUME_KEY],
             Self::Adjust(key) => key.keyframes(),
+            Self::FilterStrength => &cutlass_model::FILTER_STRENGTH_KEYS,
+            Self::LutStrength => &cutlass_model::LUT_STRENGTH_KEYS,
+            Self::ChromaStrength => &cutlass_model::CHROMA_STRENGTH_KEYS,
+            Self::ChromaShadow => &cutlass_model::CHROMA_SHADOW_KEYS,
             Self::TextColor => &cutlass_model::TEXT_COLOR_KEYS,
         }
     }
@@ -111,12 +120,33 @@ impl Shell {
         })
     }
 
+    /// Whether the selected clip is a bundled filter, whose Amount is
+    /// played and so can be keyed.
+    #[must_use]
+    pub fn is_filter(&self) -> bool {
+        let (Some(draft), Some(segment)) = (self.draft(), self.selected_segment()) else {
+            return false;
+        };
+        cutlass_effects::segment_look(draft, segment).is_some()
+    }
+
     /// The selected effect, filter, or adjustment's strength from 0 to 1. A
     /// filter with none stored reads as the halfway default.
     #[must_use]
     pub fn effect_strength(&self) -> Option<f64> {
         let draft = self.draft()?;
         let segment = self.selected_segment()?;
+        // A filter's keyed Amount shows where the playhead is.
+        if self.is_filter()
+            && let Some(keyed) = cutlass_effects::keyed_unit(
+                segment,
+                &draft.keyframe_graph_list,
+                &cutlass_model::FILTER_STRENGTH_KEYS,
+                self.playhead,
+            )
+        {
+            return Some(f64::from(keyed));
+        }
         match draft.materials.get(segment.material_id.as_str())? {
             MaterialRef::VideoEffect(effect) => Some(effect.value),
             MaterialRef::Effect(effect) if effect.kind != MaterialEffect::BLOOM => {
@@ -131,6 +161,11 @@ impl Shell {
     pub fn set_effect_strength(&mut self, value: f64) -> Result<(), ShellError> {
         let segment_id = self.selected_or_refuse()?;
         self.refuse_locked(&segment_id)?;
+        if self.is_filter()
+            && let Some(key) = self.key_setting_here(KeyedSetting::FilterStrength, vec![value])
+        {
+            return self.apply(key);
+        }
         let material_id = MaterialId::new(self.fresh("effect"));
         self.apply(Request::SetEffectStrength {
             segment_id,
@@ -316,6 +351,11 @@ impl Shell {
                 | KeyedSetting::MaskRound => "pick a mask shape first".to_owned(),
                 KeyedSetting::Volume => "the clip has no sound to key".to_owned(),
                 KeyedSetting::Adjust(_) => "adjustments belong on a picture".to_owned(),
+                KeyedSetting::FilterStrength => "an Amount key belongs on a filter".to_owned(),
+                KeyedSetting::LutStrength => "pick a LUT first".to_owned(),
+                KeyedSetting::ChromaStrength | KeyedSetting::ChromaShadow => {
+                    "switch Chroma key on first".to_owned()
+                }
                 KeyedSetting::TextColor => "a color key belongs on text".to_owned(),
             })
         })?;
@@ -371,6 +411,13 @@ impl Shell {
                 self.adjust_segment().ok()?;
                 vec![f64::from(inspection.adjust.get(key))]
             }
+            KeyedSetting::FilterStrength => {
+                self.is_filter().then_some(())?;
+                vec![self.effect_strength()?]
+            }
+            KeyedSetting::LutStrength => vec![f64::from(inspection.lut?.1)],
+            KeyedSetting::ChromaStrength => vec![f64::from(inspection.chroma?.strength)],
+            KeyedSetting::ChromaShadow => vec![f64::from(inspection.chroma?.shadow)],
             KeyedSetting::TextColor => {
                 if inspection.text_color.is_empty() && self.text_look().is_none() {
                     return None;
@@ -1530,6 +1577,44 @@ mod tests {
         assert!(desktop.inspection().unwrap().adjust.is_identity());
         desktop.undo().unwrap();
         assert_eq!(times(&desktop, exposure).len(), 2);
+    }
+
+    #[test]
+    fn a_chroma_key_keys_its_intensity_and_shadow_apart() {
+        use super::KeyedSetting;
+        let temp = Temp::new();
+        let mut desktop = every_kind(&temp);
+        pick(&mut desktop, "main");
+        desktop.set_chroma("#00ff00", 0.5, 0.0).unwrap();
+        desktop.seek(cutlass_model::Micros(0));
+        desktop
+            .toggle_setting_key(KeyedSetting::ChromaStrength)
+            .unwrap();
+        desktop.seek(cutlass_model::Micros(2_000_000));
+        desktop.set_chroma("#00ff00", 1.0, 0.0).unwrap();
+        // The shadow is not keyed, so it is stored all along the clip.
+        desktop.set_chroma("#00ff00", 1.0, 0.25).unwrap();
+        let times = |desktop: &Shell, setting| desktop.setting_keys(setting).unwrap().times;
+        assert_eq!(times(&desktop, KeyedSetting::ChromaStrength).len(), 2);
+        assert!(times(&desktop, KeyedSetting::ChromaShadow).is_empty());
+        desktop.seek(cutlass_model::Micros(1_000_000));
+        let chroma = desktop.inspection().unwrap().chroma.unwrap();
+        assert!((chroma.strength - 0.75).abs() < 1e-6, "{chroma:?}");
+        assert!((chroma.shadow - 0.25).abs() < 1e-6, "{chroma:?}");
+        // Taking the key off takes its keys too, in one undo step.
+        desktop.set_chroma("", 0.0, 0.0).unwrap();
+        assert!(desktop.inspection().unwrap().chroma.is_none());
+        assert!(times(&desktop, KeyedSetting::ChromaStrength).is_empty());
+        desktop.undo().unwrap();
+        assert_eq!(times(&desktop, KeyedSetting::ChromaStrength).len(), 2);
+        // A clip that is not a bundled filter has no Amount to key.
+        pick(&mut desktop, "fx");
+        assert!(!desktop.is_filter());
+        assert!(
+            desktop
+                .toggle_setting_key(KeyedSetting::FilterStrength)
+                .is_err()
+        );
     }
 
     #[test]

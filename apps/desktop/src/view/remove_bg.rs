@@ -6,13 +6,13 @@
 
 use egui::{RichText, Ui, Vec2};
 
-use crate::shell::{Inspection, Shell};
+use crate::shell::{Inspection, KeyedSetting, Shell};
 use crate::{tokens, ui};
 
 use super::audio::{later_section, later_slider, later_value, name_tile, right_button};
 use super::inspector::{
     InspectorState, LATER, ROW_GAP, body, color_row, later_badge, none_tile, note, row_label,
-    section, send, slider,
+    section, send, setting_row, slider,
 };
 
 /// The outlines Stroke can draw around what is kept.
@@ -231,26 +231,32 @@ fn chroma_key(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState, inspec
         });
         ui.add_space(ROW_GAP);
         let hex = key.hex();
-        if let Some(value) = slider(
-            ui,
-            state,
-            "chroma-strength",
-            "Intensity",
-            (strength * 100.0).round(),
-            0.0..=100.0,
-            |v| format!("{v:.0}"),
-        ) {
+        let changed = setting_row(shell, ui, KeyedSetting::ChromaStrength, true, |ui| {
+            slider(
+                ui,
+                state,
+                "chroma-strength",
+                "Intensity",
+                (strength * 100.0).round(),
+                0.0..=100.0,
+                |v| format!("{v:.0}"),
+            )
+        });
+        if let Some(value) = changed {
             send(shell, |shell| shell.set_chroma(&hex, value / 100.0, shadow));
         }
-        if let Some(value) = slider(
-            ui,
-            state,
-            "chroma-shadow",
-            "Shadow",
-            (shadow * 100.0).round(),
-            0.0..=100.0,
-            |v| format!("{v:.0}"),
-        ) {
+        let changed = setting_row(shell, ui, KeyedSetting::ChromaShadow, true, |ui| {
+            slider(
+                ui,
+                state,
+                "chroma-shadow",
+                "Shadow",
+                (shadow * 100.0).round(),
+                0.0..=100.0,
+                |v| format!("{v:.0}"),
+            )
+        });
+        if let Some(value) = changed {
             send(shell, |shell| {
                 shell.set_chroma(&hex, strength, value / 100.0)
             });

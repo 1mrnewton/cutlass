@@ -4544,8 +4544,18 @@ impl Shell {
                 self.playhead,
             ),
             grade: cutlass_effects::segment_grade(draft, segment),
-            lut: cutlass_effects::segment_lut(draft, segment).map(|lut| (lut.name, lut.strength)),
-            chroma: cutlass_effects::segment_chroma(draft, segment),
+            // A keyed LUT intensity and chroma key show where the playhead is.
+            lut: cutlass_effects::segment_lut(draft, segment).map(|lut| {
+                let strength = cutlass_effects::keyed_unit(
+                    segment,
+                    &draft.keyframe_graph_list,
+                    &cutlass_model::LUT_STRENGTH_KEYS,
+                    self.playhead,
+                )
+                .unwrap_or(lut.strength);
+                (lut.name, strength)
+            }),
+            chroma: cutlass_effects::segment_colour_at(draft, segment, self.playhead).chroma,
             mask: cutlass_effects::segment_mask(draft, segment)
                 .map(|mask| mask.at(segment, &draft.keyframe_graph_list, self.playhead)),
             selected: cutlass_effects::segment_has_selection(draft, segment),
@@ -5986,13 +5996,57 @@ impl Shell {
         let segment_id = self.picture_segment("a chroma key belongs on a picture")?;
         self.refuse_locked(&segment_id)?;
         let material_id = MaterialId::new(self.fresh("chroma"));
-        self.apply(Request::SetChroma {
-            segment_id,
+        let was = self.inspection().and_then(|inspection| inspection.chroma);
+        let mut requests = vec![Request::SetChroma {
+            segment_id: segment_id.clone(),
             material_id,
             color: color.to_owned(),
             strength,
             shadow,
-        })
+        }];
+        let names = [KeyedSetting::ChromaStrength, KeyedSetting::ChromaShadow];
+        if color.is_empty() {
+            // Taking the key off takes its keys with it.
+            if let Some(segment) = self.selected_segment()
+                && names
+                    .iter()
+                    .any(|setting| cutlass_model::has_keys(segment, setting.names()))
+            {
+                requests.push(Request::SetKeyframes {
+                    segment_id,
+                    keyframes: segment
+                        .common_keyframes
+                        .iter()
+                        .filter(|group| {
+                            !names.iter().any(|setting| {
+                                setting.names().contains(&group.property_type.as_str())
+                            })
+                        })
+                        .cloned()
+                        .collect(),
+                });
+            }
+        } else {
+            // Each keyed part that changed is keyed here.
+            let parts = [
+                (
+                    KeyedSetting::ChromaStrength,
+                    strength,
+                    was.map(|was| was.strength),
+                ),
+                (
+                    KeyedSetting::ChromaShadow,
+                    shadow,
+                    was.map(|was| was.shadow),
+                ),
+            ];
+            for (setting, value, before) in parts {
+                if before.is_none_or(|before| (f64::from(before) - value).abs() > 1e-6) {
+                    requests.extend(self.key_setting_here(setting, vec![value]));
+                }
+            }
+        }
+        self.apply_requests(&requests)
     }
 
     /// Put `mask` on the selected picture, in its own frame, or take its
@@ -6076,6 +6130,9 @@ impl Shell {
     pub fn set_lut_strength(&mut self, strength: f64) -> Result<(), ShellError> {
         let segment_id = self.adjust_segment()?;
         self.refuse_locked(&segment_id)?;
+        if let Some(key) = self.key_setting_here(KeyedSetting::LutStrength, vec![strength]) {
+            return self.apply(key);
+        }
         let material_id = MaterialId::new(self.fresh("lut"));
         self.apply(Request::SetLut {
             segment_id,

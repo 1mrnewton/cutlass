@@ -13845,6 +13845,47 @@ mod tests {
     }
 
     #[test]
+    fn each_shape_setting_keys_on_its_own() {
+        use super::KeyedSetting;
+        use cutlass_model::ShapeStyleKey as Key;
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        draft.canvas_config.width = 1920;
+        draft.canvas_config.height = 1080;
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.add_shape("shape:Rectangle").unwrap();
+        desktop.set_shape_fill("#ff0000", 1.0).unwrap();
+        desktop.set_shape_stroke("#000000", 4.0, 1.0, 0).unwrap();
+        desktop.set_shape_fill("#ff0000", 0.2).unwrap();
+        desktop
+            .toggle_setting_key(KeyedSetting::ShapeStyle(Key::FillOpacity))
+            .unwrap();
+        desktop.seek(Micros(2_000_000));
+        desktop.set_shape_fill("#ff0000", 1.0).unwrap();
+        // Not keyed: stored all along the shape.
+        desktop.set_shape_stroke("#000000", 10.0, 1.0, 0).unwrap();
+        let times = |desktop: &Shell, key| {
+            desktop
+                .setting_keys(KeyedSetting::ShapeStyle(key))
+                .unwrap()
+                .times
+        };
+        assert_eq!(times(&desktop, Key::FillOpacity).len(), 2);
+        for other in [Key::Size, Key::StrokeWidth, Key::StrokeOpacity, Key::Corners] {
+            assert!(times(&desktop, other).is_empty(), "{other:?}");
+        }
+        assert!(!desktop.setting_keyed(KeyedSetting::Position));
+        assert!(!desktop.setting_keyed(KeyedSetting::Scale));
+        desktop.seek(Micros(1_000_000));
+        let shape = desktop.shape().unwrap();
+        assert!((shape.global_alpha - 0.6).abs() < 1e-6);
+        assert!((shape.border_width - 10.0).abs() < 1e-6);
+        assert_eq!(shape.color, "#ff0000");
+    }
+
+    #[test]
     fn each_pose_part_keys_on_its_own() {
         let temp = Temp::new();
         let mut draft = Draft::empty("draft");

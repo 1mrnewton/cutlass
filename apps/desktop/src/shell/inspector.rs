@@ -39,6 +39,8 @@ pub enum KeyedSetting {
     EffectControl(&'static str),
     /// One of a text's style settings.
     TextStyle(cutlass_model::TextStyleKey),
+    /// One of a shape's own settings.
+    ShapeStyle(cutlass_model::ShapeStyleKey),
 }
 
 impl KeyedSetting {
@@ -76,6 +78,7 @@ impl KeyedSetting {
             Self::ChromaShadow => &cutlass_model::CHROMA_SHADOW_KEYS,
             Self::EffectControl(name) => std::slice::from_ref(name),
             Self::TextStyle(key) => key.names(),
+            Self::ShapeStyle(key) => key.names(),
             Self::TextColor => &cutlass_model::TEXT_COLOR_KEYS,
         }
     }
@@ -412,6 +415,7 @@ impl Shell {
                 }
                 KeyedSetting::EffectControl(_) => "this setting cannot be keyed".to_owned(),
                 KeyedSetting::TextStyle(_) => "a text style key belongs on text".to_owned(),
+                KeyedSetting::ShapeStyle(_) => "a shape key belongs on a shape".to_owned(),
                 KeyedSetting::TextColor => "a color key belongs on text".to_owned(),
             })
         })?;
@@ -485,6 +489,7 @@ impl Shell {
                 let keyed = super::text_style_now(draft, segment, self.playhead, key);
                 vec![keyed.unwrap_or_else(|| key.get(text))]
             }
+            KeyedSetting::ShapeStyle(key) => key.get(&self.shape()?),
             KeyedSetting::EffectControl(name) => {
                 let (_, value) = self
                     .effect_controls()?

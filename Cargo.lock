@@ -3115,6 +3115,7 @@ dependencies = [
  "cutlass-picture",
  "cutlass-renderer-software",
  "cutlass-session",
+ "cutlass-storage",
  "pollster",
  "wgpu",
 ]

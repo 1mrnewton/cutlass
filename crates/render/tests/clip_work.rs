@@ -3,12 +3,15 @@
 
 #![cfg(test)]
 
-use cutlass_effects::{Mask, MaskShape, Selection};
+use cutlass_effects::{Located, Mask, MaskShape, PackageError, PackageStore, Selection};
 use cutlass_eval::{Composed, GpuSource, Micros, OpenClips, ReaderFactory, Snapshot};
-use cutlass_model::{Draft, MaterialColorConfig, Segment, SegmentId, TimeRange, Track};
+use cutlass_model::{
+    Draft, MaterialColorConfig, MaterialEffect, Segment, SegmentId, TimeRange, Track, TrackType,
+};
 use cutlass_render::Renderer;
 use cutlass_renderer_software::SoftwareDevice;
 use cutlass_session::{Request, Session};
+use cutlass_storage::ResourceId;
 
 const WIDTH: u32 = 64;
 const HEIGHT: u32 = 40;
@@ -59,10 +62,21 @@ fn clip() -> SegmentId {
     SegmentId::new("clip")
 }
 
-/// The frame on both paths. The GPU one must not fall back to the CPU.
+/// The frame on both paths, with no effect packages.
 fn both(renderer: &Renderer, draft: &Draft, time: i64) -> (Vec<u8>, Vec<u8>, Vec<GpuSource>) {
+    both_with(renderer, draft, time, &cutlass_effects::MissingPackages)
+}
+
+/// The frame on both paths, packages read from `store`. The GPU one must
+/// not fall back to the CPU.
+fn both_with(
+    renderer: &Renderer,
+    draft: &Draft,
+    time: i64,
+    store: &dyn PackageStore,
+) -> (Vec<u8>, Vec<u8>, Vec<GpuSource>) {
     let media = ReaderFactory::new();
-    let snapshot = Snapshot::new(draft);
+    let snapshot = Snapshot::with_packages(draft, store);
     let mut device = SoftwareDevice::new();
     let mut clips = OpenClips::new();
     let cpu = cutlass_eval::frame(&snapshot, Micros(time), &mut device, &media, &mut clips, 0)
@@ -307,4 +321,188 @@ fn a_bundled_filter_matches_over_the_clips_below_it() {
         }],
     );
     check(&renderer, "filter", &draft);
+}
+
+/// Every catalog package, published from a scratch folder.
+struct Store {
+    folder: std::path::PathBuf,
+    files: std::collections::BTreeMap<String, Located>,
+}
+
+impl Store {
+    fn new(label: &str) -> Self {
+        let folder =
+            std::env::temp_dir().join(format!("cutlass-clip-work-{label}-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).expect("folder");
+        let mut files = std::collections::BTreeMap::new();
+        for row in cutlass_effects::entries() {
+            let path = folder.join(row.id);
+            std::fs::write(&path, b"zzzz").expect("package");
+            files.insert(
+                row.id.to_owned(),
+                Located {
+                    path,
+                    size: 4,
+                    checksum_hex: None,
+                },
+            );
+        }
+        Self { folder, files }
+    }
+}
+
+impl Drop for Store {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.folder);
+    }
+}
+
+impl PackageStore for Store {
+    fn locate(&self, id: &ResourceId) -> Result<Located, PackageError> {
+        self.files
+            .get(id.as_str())
+            .cloned()
+            .ok_or_else(|| PackageError::Missing {
+                id: id.as_str().to_owned(),
+            })
+    }
+}
+
+/// An effect segment running `package` over everything below it.
+fn global(draft: &mut Draft, id: &str, package: &str, render_index: i32) {
+    let mut effect = MaterialEffect::new(id);
+    effect.effect_id = package.to_owned();
+    draft.materials.effects.push(effect);
+    let mut segment = Segment::new(id, id, TimeRange::new(0, 1_000_000));
+    segment.render_index = render_index;
+    let mut track = Track::main(id);
+    track.kind = TrackType::Effect;
+    track.segments.push(segment);
+    draft.tracks.push(track);
+}
+
+/// `package` on the orange clip itself.
+fn on_clip(draft: &mut Draft, id: &str, package: &str) {
+    let mut effect = MaterialEffect::new(id);
+    effect.effect_id = package.to_owned();
+    draft.materials.effects.push(effect);
+    draft.tracks[1].segments[0]
+        .extra_material_refs
+        .push(id.into());
+}
+
+/// `draft` on both paths, which must agree, and differ from `draft`
+/// without its packages.
+fn packaged(renderer: &Renderer, store: &Store, label: &str, draft: &Draft) -> Vec<GpuSource> {
+    let mut unpackaged = draft.clone();
+    unpackaged.materials.effects.clear();
+    let plain = both_with(renderer, &unpackaged, 300_000, store).1;
+    let (gpu, cpu, sources) = both_with(renderer, draft, 300_000, store);
+    assert_ne!(cpu, plain, "{label} changes the frame");
+    agree(label, &gpu, &cpu);
+    sources
+}
+
+#[test]
+fn effect_packages_over_the_clips_below_match() {
+    let Some(renderer) = renderer() else { return };
+    let store = Store::new("global");
+    // A feathered edge, so pixelating has steps to keep.
+    let edged = apply(
+        scene(),
+        &[Request::SetMask {
+            segment_id: clip(),
+            material_id: "mask".into(),
+            mask: Some(Mask {
+                feather: 0.6,
+                ..Mask::new(MaskShape::Heart)
+            }),
+        }],
+    );
+    // Contrast doubles the edge's one-level rounding, so it runs on the
+    // flat clips, which both paths draw alike.
+    for (package, base) in [
+        (cutlass_effects::INVERT, &edged),
+        (cutlass_effects::CONTRAST, &scene()),
+        (cutlass_effects::PIXELATE, &edged),
+    ] {
+        let mut draft = base.clone();
+        global(&mut draft, "fx", package, 11_000);
+        let sources = packaged(&renderer, &store, package, &draft);
+        assert!(
+            matches!(sources.last(), Some(GpuSource::Package(_))),
+            "{package}: {sources:?}"
+        );
+    }
+    // Two, with a clip drawn between them.
+    let mut draft = scene();
+    draft.tracks[1].segments[0].render_index = 12_000;
+    global(&mut draft, "first", cutlass_effects::PIXELATE, 11_000);
+    global(&mut draft, "second", cutlass_effects::INVERT, 13_000);
+    packaged(&renderer, &store, "pixelate under, invert over", &draft);
+}
+
+#[test]
+fn a_clips_own_package_runs_after_its_colour_and_mask() {
+    let Some(renderer) = renderer() else { return };
+    let store = Store::new("clip");
+    let mut draft = apply(
+        scene(),
+        &[
+            adjust("exposure", 0.4, "a"),
+            Request::SetMask {
+                segment_id: clip(),
+                material_id: "mask".into(),
+                mask: Some(Mask {
+                    feather: 0.3,
+                    ..Mask::new(MaskShape::Circle)
+                }),
+            },
+        ],
+    );
+    on_clip(&mut draft, "fx", cutlass_effects::INVERT);
+    packaged(&renderer, &store, "inverted clip", &draft);
+    let mut faded = scene();
+    on_clip(&mut faded, "fx", cutlass_effects::ANIM_IN);
+    packaged(&renderer, &store, "fading in", &faded);
+}
+
+#[test]
+fn a_blend_package_mixes_its_clip_with_the_clips_below() {
+    let Some(renderer) = renderer() else { return };
+    let store = Store::new("blend");
+    for row in cutlass_effects::entries() {
+        if !matches!(row.kind, cutlass_effects::PackageKind::Blend(_)) {
+            continue;
+        }
+        let mut draft = scene();
+        on_clip(&mut draft, "fx", row.id);
+        let (gpu, cpu, sources) = both_with(&renderer, &draft, 300_000, &store);
+        agree(row.id, &gpu, &cpu);
+        assert!(
+            sources
+                .iter()
+                .any(|source| matches!(source, GpuSource::Blend { .. })),
+            "{}: {sources:?}",
+            row.id
+        );
+    }
+}
+
+#[test]
+fn a_package_the_store_does_not_have_leaves_the_picture() {
+    let Some(renderer) = renderer() else { return };
+    let store = Store::new("none");
+    let mut draft = scene();
+    global(&mut draft, "fx", "not-published", 11_000);
+    on_clip(&mut draft, "mul", "not-published-either");
+    let (gpu, cpu, sources) = both_with(&renderer, &draft, 300_000, &store);
+    assert_eq!(cpu, both_with(&renderer, &scene(), 300_000, &store).1);
+    agree("missing", &gpu, &cpu);
+    assert!(
+        !sources
+            .iter()
+            .any(|source| matches!(source, GpuSource::Package(_) | GpuSource::Blend { .. })),
+        "{sources:?}"
+    );
 }

@@ -153,6 +153,10 @@ pub enum Layer<'a> {
     /// is drawn, so it belongs on a [`Layer::Nested`] canvas, which is
     /// drawn whole.
     Relight(crate::Relit<'a>),
+    /// Everything drawn before it in the same list, painted by an effect
+    /// package's stand-in. A blend package's own pass is only its fade;
+    /// [`Layer::Blend`] mixes.
+    Package(&'a cutlass_effects::PackagePass),
     /// `layers` drawn on a canvas the size of this one, then mixed by
     /// `mode` with everything drawn before it in the same list.
     Blend {

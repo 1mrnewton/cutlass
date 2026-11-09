@@ -90,7 +90,10 @@ pub use relight::{
 pub use selection::{
     MAX_SELECTION_SIDE, SELECTION, Selection, segment_has_selection, segment_selection,
 };
-pub use source::{AnimSpan, EffectSource, Progress, progress};
+pub use source::{
+    AnimSpan, EffectSource, PACKAGE_UNIFORM_BYTES, PACKAGE_WGSL, PackagePaint, PackagePass,
+    Progress, progress, segment_pass,
+};
 pub use transitions::{
     BUILT_IN_PREFIX, TRANSITION_WGSL, TransitionKind, blur_radius as transition_blur_radius,
     mix as mix_transition,

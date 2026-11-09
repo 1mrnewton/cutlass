@@ -8,10 +8,9 @@
 //! mixed with the layers before it. A clip's colour work, mask and
 //! selection run over that clip alone, and a look or an adjustment layer's
 //! colour work over the layers before it. A relit clip is drawn upright on
-//! a canvas of its own, lit there from its depth, then placed. A frame
-//! with an effect package
-//! is composed on the CPU as before, and its recipe effects still run on
-//! the GPU over that picture.
+//! a canvas of its own, lit there from its depth, then placed. An effect
+//! package's stand-in is a layer over the layers before it, or over its
+//! clip alone, and a blend package mixes its faded clip like a blend mode.
 
 use std::sync::Arc;
 
@@ -52,6 +51,9 @@ pub enum GpuSource {
     Cut(CanvasMask),
     /// Every layer before it, kept only where a clip's selection is.
     Select(SelectionCut),
+    /// Every layer before it, painted by an effect package's stand-in; for
+    /// a blend package, the clip's fade before [`GpuSource::Blend`] mixes.
+    Package(cutlass_effects::PackagePass),
     /// Every layer before it, lit again by `lighting` from `depth`, a grey
     /// picture nearer when lighter, stretched to the canvas. Only on a
     /// relit clip's own upright canvas.
@@ -156,6 +158,16 @@ impl GpuLayer {
                 seed,
                 mask,
             },
+            placement: Placement::canvas(width, height),
+            backdrop: None,
+        }
+    }
+
+    /// An effect package over everything below it on a `width` by
+    /// `height` canvas.
+    pub(crate) fn package(pass: cutlass_effects::PackagePass, width: u32, height: u32) -> Self {
+        Self {
+            source: GpuSource::Package(pass),
             placement: Placement::canvas(width, height),
             backdrop: None,
         }

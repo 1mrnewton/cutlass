@@ -9,7 +9,7 @@ use cutlass_picture::{CpuBytes, Picture, Sample};
 
 use crate::canvas::canvas_rgba;
 use crate::effect::{
-    RecipeMark, StackLayer, clip_passes, colour_marks, needs_cpu, present, recipe_marks,
+    RecipeMark, StackLayer, clip_package, clip_passes, colour_marks, present, recipe_marks,
 };
 use crate::gpu::{Composed, FrameLayers, GpuLayer};
 use crate::lottie::{LottieLayer, PlacedLottie, lottie_layers, shape_layers};
@@ -165,13 +165,13 @@ pub fn frame_in<D: Device>(
     compose(snapshot, time, device, media, clips, revision, &[])
 }
 
-/// The frame as GPU layers, or composed pixels when it needs the CPU.
-///
-/// A frame with an effect mark or a clip filter is composed on the CPU, as
-/// [`frame_in`] composes it. Any other frame is the project background, then
-/// every layer in order: a clip the GPU path covers is its decoded picture
-/// and placement, a solid is one stretched pixel, and the rest are their
-/// CPU pictures.
+/// The frame as GPU layers: the project background, then every layer in
+/// order. A clip the GPU path covers is its decoded picture and placement,
+/// a solid is one stretched pixel, and the rest are their CPU pictures.
+/// Effects, looks, adjustment layers and effect packages are layers of
+/// their own over the layers before them, and a clip's own colour work,
+/// mask, selection and package run over that clip alone, as [`frame_in`]
+/// runs them on the CPU.
 pub fn layers_in<D: Device>(
     snapshot: &Snapshot<'_>,
     time: Micros,
@@ -186,7 +186,6 @@ pub fn layers_in<D: Device>(
 }
 
 /// [`layers_in`] for a draft under `ancestors`, as a compound's child is.
-/// A frame that needs the CPU is composed again on the CPU path.
 pub(crate) fn compose_layers<D: Device>(
     snapshot: &Snapshot<'_>,
     time: Micros,
@@ -196,6 +195,7 @@ pub(crate) fn compose_layers<D: Device>(
     revision: u64,
     ancestors: &[cutlass_model::DraftId],
 ) -> Result<Composed, EvalError<D::Error>> {
+    let store = snapshot.packages();
     let layers = with_layers(
         snapshot,
         time,
@@ -208,43 +208,22 @@ pub(crate) fn compose_layers<D: Device>(
         |draft, _device, extent, layers| {
             let stack = stack_of(layers);
             let effects = recipe_marks(draft, time, extent, &stack);
-            if needs_cpu(draft, time, &stack) {
-                return Ok(Err(effects));
-            }
-            let colours = colour_marks(draft, time, extent, &stack);
-            Ok(Ok(gpu_layers(
-                draft, time, extent, layers, effects, colours,
-            )))
+            let colours = colour_marks(draft, store, time, extent, &stack);
+            Ok(gpu_layers(
+                draft, store, time, extent, layers, effects, colours,
+            ))
         },
     )?;
-    match layers {
-        Ok(layers) => Ok(Composed::Layers(layers)),
-        Err(effects) => {
-            let frame = compose(snapshot, time, device, media, clips, revision, ancestors)?;
-            if effects.is_empty() {
-                return Ok(Composed::Frame(frame));
-            }
-            // The CPU picture is one layer; the recipe effects run over it.
-            // One bound to a clip cannot reach that clip alone here, so it
-            // is not run.
-            let (width, height) = (frame.extent.width, frame.extent.height);
-            let mut layers = FrameLayers::pixels(frame).ok_or(EvalError::Canvas)?;
-            layers.layers.extend(
-                effects
-                    .into_iter()
-                    .filter(|mark| mark.bound.is_none())
-                    .map(|mark| GpuLayer::effect(mark.steps, mark.mask, width, height)),
-            );
-            Ok(Composed::Layers(layers))
-        }
-    }
+    Ok(Composed::Layers(layers))
 }
 
-/// `layers` as GPU layers, with `effects` (recipes) and `colours` (looks
-/// and adjustment layers) each over the layers before it, and every clip's
-/// own colour work, mask, selection and bound recipes over that clip alone.
+/// `layers` as GPU layers, with `effects` (recipes) and `colours` (looks,
+/// adjustment layers and effect packages) each over the layers before it,
+/// and every clip's own colour work, mask, selection, package and bound
+/// recipes over that clip alone.
 fn gpu_layers(
     draft: &Draft,
+    store: &dyn PackageStore,
     time: Micros,
     extent: Extent,
     layers: &[Ordered<'_>],
@@ -300,6 +279,19 @@ fn gpu_layers(
             },
         };
         let mut own = clip_passes(draft, time, extent, layer.key.1, layer.key.2);
+        let package = clip_package(draft, store, time, layer.key.1, layer.key.2);
+        let package_blend = package.as_ref().and_then(|pass| pass.blend);
+        // A blend package's own pass is its fade, left out when it has none.
+        if let Some(pass) = package.filter(|pass| {
+            pass.blend.is_none()
+                || pass
+                    .faded
+                    .iter()
+                    .enumerate()
+                    .any(|(alpha, faded)| usize::from(*faded) != alpha)
+        }) {
+            own.push(GpuLayer::package(pass, extent.width, extent.height));
+        }
         own.extend(
             bound
                 .iter()
@@ -315,7 +307,8 @@ fn gpu_layers(
             .tracks
             .get(layer.key.1)
             .and_then(|track| track.segments.get(layer.key.2))
-            .and_then(|segment| cutlass_effects::segment_blend(draft, segment));
+            .and_then(|segment| cutlass_effects::segment_blend(draft, segment))
+            .or(package_blend);
         if drawn.is_empty() {
             // Nothing of this clip shows at this time.
         } else if let Some(mode) = mode {

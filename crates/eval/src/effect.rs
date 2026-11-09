@@ -78,24 +78,6 @@ impl PictureSource for Held {
     }
 }
 
-/// The frame runs an effect package, over the layers below it or on a
-/// clip, so it composes on the CPU. Colour work, masks, selections, looks,
-/// adjustment layers and a blend mode the app ships run on the GPU and do
-/// not count.
-pub(crate) fn needs_cpu(draft: &Draft, time: Micros, stack: &[StackLayer<'_>]) -> bool {
-    global_marks(draft, time, stack)
-        .iter()
-        .any(|mark| mark.adjust.is_none())
-        || stack.iter().any(|layer| {
-            match clip_filter(draft, layer.track_index, layer.segment_index) {
-                ClipFilter::None => false,
-                ClipFilter::Blend => segment(draft, layer.track_index, layer.segment_index)
-                    .is_none_or(|segment| cutlass_effects::segment_blend(draft, segment).is_none()),
-                ClipFilter::Unary => true,
-            }
-        })
-}
-
 pub(crate) fn present<D: Device>(
     draft: &Draft,
     store: &dyn PackageStore,
@@ -385,11 +367,13 @@ fn adjustment_layers<'a>(
         })
 }
 
-/// The looks and adjustment layers covering `time`, as GPU layers over
-/// the layers before them, with their place among the layers. Effect
-/// packages are left to the CPU.
+/// The looks, adjustment layers and effect packages covering `time`, as
+/// GPU layers over the layers before them, with their place among the
+/// layers. A package the store does not have leaves the picture, as on
+/// the CPU.
 pub(crate) fn colour_marks(
     draft: &Draft,
+    store: &dyn PackageStore,
     time: Micros,
     extent: Extent,
     stack: &[StackLayer<'_>],
@@ -397,14 +381,44 @@ pub(crate) fn colour_marks(
     global_marks(draft, time, stack)
         .into_iter()
         .filter_map(|mark| {
-            let colour = mark.adjust?;
+            let key = (mark.render_index, mark.track_index, mark.segment_index);
+            let Some(colour) = mark.adjust else {
+                let pass = cutlass_effects::segment_pass(store, draft, mark.segment, time)
+                    .filter(|pass| pass.blend.is_none())?;
+                return Some((key, GpuLayer::package(pass, extent.width, extent.height)));
+            };
             let mask = effect_mask(draft, mark.segment, time, extent);
             Some((
-                (mark.render_index, mark.track_index, mark.segment_index),
+                key,
                 GpuLayer::colour(colour, grain_seed(time), mask, extent.width, extent.height),
             ))
         })
         .collect()
+}
+
+/// A drawn clip's effect package at `time`, run over that clip alone
+/// after its colour work, mask and selection, as the CPU runs it: what it
+/// paints, or for a blend package its fade and the mode it mixes with.
+/// `None` for a clip with no package, a blend mode the app ships, or a
+/// package the store does not have.
+pub(crate) fn clip_package(
+    draft: &Draft,
+    store: &dyn PackageStore,
+    time: Micros,
+    track_index: usize,
+    segment_index: usize,
+) -> Option<cutlass_effects::PackagePass> {
+    let segment = segment(draft, track_index, segment_index)?;
+    let blends = match clip_filter(draft, track_index, segment_index) {
+        ClipFilter::None => return None,
+        ClipFilter::Blend if cutlass_effects::segment_blend(draft, segment).is_some() => {
+            return None;
+        }
+        ClipFilter::Blend => true,
+        ClipFilter::Unary => false,
+    };
+    cutlass_effects::segment_pass(store, draft, segment, time)
+        .filter(|pass| pass.blend.is_some() == blends)
 }
 
 /// A drawn clip's own colour work, mask and selection at `time` as GPU

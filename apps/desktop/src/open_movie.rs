@@ -750,6 +750,7 @@ fn decodes_on_gpu(frame: &cutlass_eval::FrameLayers) -> bool {
         | cutlass_eval::GpuSource::Cut(_)
         | cutlass_eval::GpuSource::Select(_)
         | cutlass_eval::GpuSource::Relight { .. }
+        | cutlass_eval::GpuSource::Package(_)
         | cutlass_eval::GpuSource::Vector(_)
         | cutlass_eval::GpuSource::Transition { .. } => false,
     })
@@ -770,6 +771,7 @@ fn decodes_in_place(frame: &cutlass_eval::FrameLayers) -> bool {
         | cutlass_eval::GpuSource::Cut(_)
         | cutlass_eval::GpuSource::Select(_)
         | cutlass_eval::GpuSource::Relight { .. }
+        | cutlass_eval::GpuSource::Package(_)
         | cutlass_eval::GpuSource::Vector(_)
         | cutlass_eval::GpuSource::Transition { .. } => false,
     })

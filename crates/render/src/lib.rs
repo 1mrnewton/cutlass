@@ -28,6 +28,7 @@ mod frame;
 mod keep;
 mod layer;
 mod mix;
+mod package;
 mod relight;
 mod target;
 mod transition;
@@ -91,6 +92,7 @@ pub struct Renderer {
     colours: colour::Colours,
     cuts: cut::Cuts,
     relights: relight::Relights,
+    packages: package::Packages,
     keep: keep::Keep,
     cross: cross::Cross,
     mix: mix::Mix,
@@ -117,6 +119,7 @@ impl Renderer {
         let colours = colour::Colours::new(&device);
         let cuts = cut::Cuts::new(&device);
         let relights = relight::Relights::new(&device);
+        let packages = package::Packages::new(&device);
         let keep = keep::Keep::new(&device);
         let cross = cross::Cross::new(&device);
         let mix = mix::Mix::new(&device);
@@ -131,6 +134,7 @@ impl Renderer {
             colours,
             cuts,
             relights,
+            packages,
             keep,
             cross,
             mix,
@@ -488,6 +492,20 @@ impl Renderer {
                         device,
                         queue,
                         &canvas_picture(kept, size),
+                        Placement::canvas(size.0, size.1),
+                    ));
+                }
+                Layer::Package(pass) => {
+                    let first = blur::scratch(device, size);
+                    Self::paint(&self.layers, encoder, &first, &bound);
+                    let painted = blur::scratch(device, size);
+                    self.packages
+                        .run(device, queue, encoder, &first, &painted, pass, scale);
+                    bound.clear();
+                    bound.push(self.layers.bind(
+                        device,
+                        queue,
+                        &canvas_picture(painted, size),
                         Placement::canvas(size.0, size.1),
                     ));
                 }

@@ -463,6 +463,18 @@ pub const MASK_KEYS: [&str; 7] = [
     "KFTypeCommonMaskRoundCorner",
 ];
 
+/// Each part of the mask that keys on its own, a share of [`MASK_KEYS`].
+pub const MASK_POSITION_KEYS: [&str; 2] =
+    ["KFTypeCommonMaskPositionX", "KFTypeCommonMaskPositionY"];
+/// The mask's width and height.
+pub const MASK_SIZE_KEYS: [&str; 2] = ["KFTypeCommonMaskSizeWidth", "KFTypeCommonMaskSizeHeight"];
+/// The mask's turn.
+pub const MASK_ROTATION_KEYS: [&str; 1] = ["KFTypeCommonMaskRotation"];
+/// The mask's feather.
+pub const MASK_FEATHER_KEYS: [&str; 1] = ["KFTypeCommonMaskFeather"];
+/// The mask's round corners.
+pub const MASK_ROUND_KEYS: [&str; 1] = ["KFTypeCommonMaskRoundCorner"];
+
 /// Whether `property` is part of the clip's pose: place, size, turn or
 /// opacity, under any name [`clip_at`] reads.
 #[must_use]
@@ -740,6 +752,19 @@ mod tests {
         {
             assert!(is_pose_key(name), "{name}");
         }
+    }
+
+    #[test]
+    fn the_mask_parts_are_the_mask_keys_in_order() {
+        let parts: Vec<&str> = MASK_POSITION_KEYS
+            .iter()
+            .chain(&MASK_SIZE_KEYS)
+            .chain(&MASK_ROTATION_KEYS)
+            .chain(&MASK_FEATHER_KEYS)
+            .chain(&MASK_ROUND_KEYS)
+            .copied()
+            .collect();
+        assert_eq!(parts, MASK_KEYS);
     }
 
     #[test]

@@ -659,11 +659,14 @@ pub enum Request {
     },
     /// Ease the span that ends at the key `offset` from the clip's start
     /// along the Graphs panel curve named `graph`, or make it straight with
-    /// `None`.
+    /// `None`. Only the keys on `properties` are eased; none eases every
+    /// pose key, as before.
     SetKeyframeGraph {
         segment_id: SegmentId,
         offset: Micros,
         graph: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        properties: Vec<String>,
     },
     /// Give the clip the in or out animation whose resource id is
     /// `animation`, lasting `duration`, or clear that side with `None`.

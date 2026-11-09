@@ -179,11 +179,24 @@ impl ClipKeys {
     /// or makes it straight with `None`.
     #[must_use]
     pub fn ease(&self, segment_id: &SegmentId, graph: Option<String>) -> Option<Request> {
+        self.ease_only(segment_id, graph, &[])
+    }
+
+    /// [`ClipKeys::ease`] on the keys named `properties` only; none eases
+    /// every pose key.
+    #[must_use]
+    pub fn ease_only(
+        &self,
+        segment_id: &SegmentId,
+        graph: Option<String>,
+        properties: &[&str],
+    ) -> Option<Request> {
         let end = self.span?;
         Some(Request::SetKeyframeGraph {
             segment_id: segment_id.clone(),
             offset: Micros(end.0 - self.start.0),
             graph,
+            properties: properties.iter().map(|name| (*name).to_owned()).collect(),
         })
     }
 }

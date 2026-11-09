@@ -70,6 +70,7 @@ pub fn set_keyframe_graph(
     segment_id: &SegmentId,
     offset: Micros,
     graph: Option<&str>,
+    properties: &[String],
 ) -> Result<(), EditError> {
     let preset = match graph {
         Some(name) => Some(
@@ -83,8 +84,16 @@ pub fn set_keyframe_graph(
     let segment = keyed(draft, segment_id, offset)?;
     let owner = segment.id.as_str().to_owned();
     let (mut old, mut new, mut spans) = (Vec::new(), Vec::new(), 0);
+    // Only the named keys are eased; none names every pose key.
+    let eases = |property: &str| {
+        if properties.is_empty() {
+            is_pose_key(property)
+        } else {
+            properties.iter().any(|name| name == property)
+        }
+    };
     for group in &mut segment.common_keyframes {
-        if !is_pose_key(&group.property_type) {
+        if !eases(&group.property_type) {
             continue;
         }
         let earlier = group
@@ -611,6 +620,7 @@ mod tests {
             segment_id: "a".into(),
             offset: Micros(offset),
             graph: graph.map(str::to_owned),
+            properties: Vec::new(),
         }
     }
 
@@ -677,6 +687,54 @@ mod tests {
             )
             .unwrap();
         assert!(session.draft().keyframe_graph_list.is_empty());
+    }
+
+    #[test]
+    fn a_curve_on_named_keys_eases_only_those() {
+        let mut session = open();
+        let x = cutlass_model::MASK_KEYS[0];
+        let revision = session
+            .apply(
+                1,
+                &[
+                    values(
+                        0,
+                        &[(x, 0.0), ("KFTypeVolume", 1.0), ("KFTypePositionX", 0.0)],
+                    ),
+                    values(
+                        800_000,
+                        &[(x, 1.0), ("KFTypeVolume", 0.0), ("KFTypePositionX", 1.0)],
+                    ),
+                ],
+            )
+            .unwrap();
+        let ease = |properties: &[&str]| Request::SetKeyframeGraph {
+            segment_id: "a".into(),
+            offset: Micros(800_000),
+            graph: Some("Ease In".to_owned()),
+            properties: properties.iter().map(|name| (*name).to_owned()).collect(),
+        };
+        session.apply(revision, &[ease(&[x])]).unwrap();
+        let draft = session.draft();
+        assert_eq!(draft.keyframe_graph_list.len(), 1);
+        let segment = &draft.tracks[0].segments[0];
+        let eased: Vec<&str> = segment
+            .common_keyframes
+            .iter()
+            .filter(|group| {
+                group
+                    .keyframe_list
+                    .iter()
+                    .any(|key| !key.graph_id.is_empty())
+            })
+            .map(|group| group.property_type.as_str())
+            .collect();
+        assert_eq!(eased, [x]);
+        // A name with no span there eases nothing.
+        assert_eq!(
+            session.apply(session.revision(), &[ease(&["KFTypeRotation"])]),
+            Err(EditError::NoKey)
+        );
     }
 
     fn values(offset: i64, values: &[(&str, f64)]) -> Request {

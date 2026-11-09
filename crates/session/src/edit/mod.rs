@@ -712,7 +712,8 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             segment_id,
             offset,
             graph,
-        } => keyframe::set_keyframe_graph(draft, segment_id, *offset, graph.as_deref()),
+            properties,
+        } => keyframe::set_keyframe_graph(draft, segment_id, *offset, graph.as_deref(), properties),
         Request::SetAnimation {
             segment_id,
             kind,

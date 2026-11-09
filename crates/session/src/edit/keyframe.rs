@@ -1,6 +1,7 @@
 use cutlass_model::{
-    CommonKeyframeGroup, Draft, GRAPH_PRESETS, KeyframeGraph, Micros, OPACITY_KEYS, POSITION_KEYS,
-    ROTATION_KEYS, SCALE_KEYS, Segment, SegmentId, has_keys, is_keyable, is_pose_key,
+    ADJUST_KEYS, CommonKeyframeGroup, Draft, GRAPH_PRESETS, KeyframeGraph, Micros, OPACITY_KEYS,
+    POSITION_KEYS, ROTATION_KEYS, SCALE_KEYS, Segment, SegmentId, has_keys, is_keyable,
+    is_pose_key,
 };
 
 use super::locate;
@@ -251,7 +252,8 @@ pub fn key_values(
 }
 
 /// Whether `value` is one `property` can hold, as the edit that stores it
-/// takes: a scale above zero, an opacity from 0 to 1, anything else finite.
+/// takes: a scale above zero, an opacity from 0 to 1, an Adjust slider
+/// from -1 to 1, anything else finite.
 fn in_range(property: &str, value: f64) -> bool {
     if !value.is_finite() {
         return false;
@@ -261,6 +263,9 @@ fn in_range(property: &str, value: f64) -> bool {
     }
     if OPACITY_KEYS.contains(&property) {
         return (0.0..=1.0).contains(&value);
+    }
+    if ADJUST_KEYS.contains(&property) {
+        return (-1.0..=1.0).contains(&value);
     }
     true
 }
@@ -524,6 +529,7 @@ mod tests {
             ("KFTypeAlpha", 1.5),
             ("alpha", -0.1),
             ("KFTypeRotation", f64::NAN),
+            ("KFTypeAdjustExposure", 1.5),
         ] {
             assert_eq!(
                 session.apply(1, &[values(0, &[(name, value)])]),

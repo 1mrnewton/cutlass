@@ -4,7 +4,7 @@
 
 use cutlass_editor::{
     BACKGROUND_ALPHA_START, BACKGROUND_ROUND_START, GLOW_RANGE_START, GLOW_STRENGTH_START,
-    OUTLINE_START, SHADOW_BLUR_START, SHADOW_DISTANCE_START, panel_of, starting, text_look,
+    OUTLINE_START, SHADOW_BLUR_START, SHADOW_DISTANCE_START, panel_of, starting,
 };
 pub use cutlass_editor::{LetterCase, Panel, SILENT_DB, TextLook, gain_of_db, volume_db};
 use cutlass_model::{MaterialEffect, MaterialId, MaterialRef, Micros, SegmentId, WordColumns};
@@ -37,6 +37,8 @@ pub enum KeyedSetting {
     ChromaShadow,
     /// A recipe effect's control, by the key name its bundled recipe gives.
     EffectControl(&'static str),
+    /// One of a text's style settings.
+    TextStyle(cutlass_model::TextStyleKey),
 }
 
 impl KeyedSetting {
@@ -73,6 +75,7 @@ impl KeyedSetting {
             Self::ChromaStrength => &cutlass_model::CHROMA_STRENGTH_KEYS,
             Self::ChromaShadow => &cutlass_model::CHROMA_SHADOW_KEYS,
             Self::EffectControl(name) => std::slice::from_ref(name),
+            Self::TextStyle(key) => key.names(),
             Self::TextColor => &cutlass_model::TEXT_COLOR_KEYS,
         }
     }
@@ -96,7 +99,25 @@ impl Shell {
     /// The selected title's outline, shadow, box, and glow.
     #[must_use]
     pub fn text_look(&self) -> Option<TextLook> {
-        text_look(self.draft()?, self.selected_segment()?)
+        cutlass_editor::text_look_at(self.draft()?, self.selected_segment()?, self.playhead)
+    }
+
+    /// The keys for each keyed text style setting in `parts` (the setting
+    /// and its new value) whose value changes, at the playhead.
+    fn style_keys(&self, parts: &[(cutlass_model::TextStyleKey, f64)]) -> Vec<Request> {
+        let (Some(draft), Some(segment)) = (self.draft(), self.selected_segment()) else {
+            return Vec::new();
+        };
+        parts
+            .iter()
+            .filter(|(key, value)| {
+                super::text_style_now(draft, segment, self.playhead, *key)
+                    .is_some_and(|now| (now - value).abs() > 1e-9)
+            })
+            .filter_map(|(key, value)| {
+                self.key_setting_here(KeyedSetting::TextStyle(*key), vec![*value])
+            })
+            .collect()
     }
 
     /// The selected effect, filter, or adjustment's stored name.
@@ -390,6 +411,7 @@ impl Shell {
                     "switch Chroma key on first".to_owned()
                 }
                 KeyedSetting::EffectControl(_) => "this setting cannot be keyed".to_owned(),
+                KeyedSetting::TextStyle(_) => "a text style key belongs on text".to_owned(),
                 KeyedSetting::TextColor => "a color key belongs on text".to_owned(),
             })
         })?;
@@ -452,6 +474,17 @@ impl Shell {
             KeyedSetting::LutStrength => vec![f64::from(inspection.lut?.1)],
             KeyedSetting::ChromaStrength => vec![f64::from(inspection.chroma?.strength)],
             KeyedSetting::ChromaShadow => vec![f64::from(inspection.chroma?.shadow)],
+            KeyedSetting::TextStyle(key) => {
+                let segment = self.selected_segment()?;
+                let draft = self.draft()?;
+                let Some(MaterialRef::Text(text)) =
+                    draft.materials.get(segment.material_id.as_str())
+                else {
+                    return None;
+                };
+                let keyed = super::text_style_now(draft, segment, self.playhead, key);
+                vec![keyed.unwrap_or_else(|| key.get(text))]
+            }
             KeyedSetting::EffectControl(name) => {
                 let (_, value) = self
                     .effect_controls()?
@@ -574,11 +607,14 @@ impl Shell {
     pub fn set_text_outline(&mut self, color: &str, width: f64) -> Result<(), ShellError> {
         let segment_id = self.text_segment()?;
         self.refuse_locked(&segment_id)?;
-        self.apply(Request::SetTextOutline {
+        let width = starting(color, width, OUTLINE_START);
+        let mut requests = vec![Request::SetTextOutline {
             segment_id,
             color: color.to_owned(),
-            width: starting(color, width, OUTLINE_START),
-        })
+            width,
+        }];
+        requests.extend(self.style_keys(&[(cutlass_model::TextStyleKey::StrokeWidth, width)]));
+        self.apply_requests(&requests)
     }
 
     /// Cast the selected title's shadow in `color`, `distance` hundredths of
@@ -593,13 +629,22 @@ impl Shell {
     ) -> Result<(), ShellError> {
         let segment_id = self.text_segment()?;
         self.refuse_locked(&segment_id)?;
-        self.apply(Request::SetTextShadow {
+        let distance = starting(color, distance, SHADOW_DISTANCE_START);
+        let blur = starting(color, blur, SHADOW_BLUR_START);
+        let mut requests = vec![Request::SetTextShadow {
             segment_id,
             color: color.to_owned(),
-            distance: starting(color, distance, SHADOW_DISTANCE_START),
+            distance,
             angle,
-            blur: starting(color, blur, SHADOW_BLUR_START),
-        })
+            blur,
+        }];
+        use cutlass_model::TextStyleKey as Key;
+        requests.extend(self.style_keys(&[
+            (Key::ShadowDistance, distance),
+            (Key::ShadowAngle, angle),
+            (Key::ShadowBlur, blur),
+        ]));
+        self.apply_requests(&requests)
     }
 
     /// Fill a box behind the selected title in `color` at `alpha`, its
@@ -613,12 +658,19 @@ impl Shell {
     ) -> Result<(), ShellError> {
         let segment_id = self.text_segment()?;
         self.refuse_locked(&segment_id)?;
-        self.apply(Request::SetTextBackground {
+        let alpha = starting(color, alpha, BACKGROUND_ALPHA_START);
+        let round = starting(color, round, BACKGROUND_ROUND_START);
+        let mut requests = vec![Request::SetTextBackground {
             segment_id,
             color: color.to_owned(),
-            alpha: starting(color, alpha, BACKGROUND_ALPHA_START),
-            round: starting(color, round, BACKGROUND_ROUND_START),
-        })
+            alpha,
+            round,
+        }];
+        use cutlass_model::TextStyleKey as Key;
+        requests.extend(
+            self.style_keys(&[(Key::BackgroundAlpha, alpha), (Key::BackgroundRound, round)]),
+        );
+        self.apply_requests(&requests)
     }
 
     /// Shape the selected title's background as the bubble keyed `bubble`.
@@ -1697,6 +1749,52 @@ mod tests {
             .map(|group| group.property_type.as_str())
             .collect();
         assert_eq!(names, ["KFTypeEffectControl_intensity"]);
+    }
+
+    #[test]
+    fn each_text_style_keys_on_its_own() {
+        use super::KeyedSetting;
+        use cutlass_model::TextStyleKey as Style;
+        let temp = Temp::new();
+        let mut desktop = every_kind(&temp);
+        pick(&mut desktop, "words");
+        desktop.set_text_size(20.0).unwrap();
+        desktop.set_text_shadow("#000000", 10.0, 45.0, 0.5).unwrap();
+        let (start, end) = (
+            cutlass_model::Micros(1_000_000),
+            cutlass_model::Micros(3_000_000),
+        );
+        desktop.seek(start);
+        desktop
+            .toggle_setting_key(KeyedSetting::TextStyle(Style::Size))
+            .unwrap();
+        desktop
+            .toggle_setting_key(KeyedSetting::TextStyle(Style::ShadowDistance))
+            .unwrap();
+        desktop.seek(end);
+        desktop.set_text_size(60.0).unwrap();
+        desktop.set_text_shadow("#000000", 50.0, 45.0, 0.5).unwrap();
+        // Not keyed, so stored all along the title.
+        desktop.set_letter_spacing(0.5).unwrap();
+        desktop.set_text_shadow("#000000", 50.0, 90.0, 0.5).unwrap();
+        let times = |desktop: &Shell, key| {
+            desktop
+                .setting_keys(KeyedSetting::TextStyle(key))
+                .unwrap()
+                .times
+        };
+        assert_eq!(times(&desktop, Style::Size).len(), 2);
+        assert_eq!(times(&desktop, Style::ShadowDistance).len(), 2);
+        for other in [Style::LetterSpacing, Style::ShadowAngle, Style::ShadowBlur] {
+            assert!(times(&desktop, other).is_empty(), "{other:?}");
+        }
+        desktop.seek(cutlass_model::Micros(2_000_000));
+        let inspection = desktop.inspection().unwrap();
+        assert!((inspection.text_size - 40.0).abs() < 1e-6);
+        assert!((inspection.letter_spacing - 0.5).abs() < 1e-6);
+        let look = desktop.text_look().unwrap();
+        assert!((look.shadow_distance - 30.0).abs() < 1e-6, "{look:?}");
+        assert!((look.shadow_angle - 90.0).abs() < 1e-6, "{look:?}");
     }
 
     #[test]

@@ -4482,6 +4482,14 @@ impl Shell {
         let (material, text, words) = material_label(draft, &segment.material_id);
         let (text_size, text_color, text_align, letter_spacing, line_spacing, line_width, font) =
             text_style(draft, &segment.material_id);
+        // A keyed text style shows its value where the playhead is.
+        let styled = |key: cutlass_model::TextStyleKey, stored: f64| {
+            text_style_now(draft, segment, self.playhead, key).unwrap_or(stored)
+        };
+        let text_size = styled(cutlass_model::TextStyleKey::Size, text_size);
+        let letter_spacing = styled(cutlass_model::TextStyleKey::LetterSpacing, letter_spacing);
+        let line_spacing = styled(cutlass_model::TextStyleKey::LineSpacing, line_spacing);
+        let line_width = styled(cutlass_model::TextStyleKey::LineWidth, line_width);
         // A keyed clip shows its pose where the playhead is.
         let keyed = cutlass_editor::keyed_pose(draft, id, self.playhead).map(|(_, pose)| pose);
         let (scale_x, scale_y) =
@@ -6495,6 +6503,10 @@ impl Shell {
     pub fn set_text_size(&mut self, size: f64) -> Result<(), ShellError> {
         let segment_id = self.text_segment()?;
         self.refuse_locked(&segment_id)?;
+        let style = KeyedSetting::TextStyle(cutlass_model::TextStyleKey::Size);
+        if let Some(key) = self.key_setting_here(style, vec![size]) {
+            return self.apply(key);
+        }
         let face = self.face.name().to_owned();
         self.apply(Request::SetTextSize {
             segment_id,
@@ -6508,6 +6520,10 @@ impl Shell {
     pub fn set_letter_spacing(&mut self, spacing: f64) -> Result<(), ShellError> {
         let segment_id = self.text_segment()?;
         self.refuse_locked(&segment_id)?;
+        let style = KeyedSetting::TextStyle(cutlass_model::TextStyleKey::LetterSpacing);
+        if let Some(key) = self.key_setting_here(style, vec![spacing]) {
+            return self.apply(key);
+        }
         let face = self.face.name().to_owned();
         self.apply(Request::SetLetterSpacing {
             segment_id,
@@ -6520,6 +6536,10 @@ impl Shell {
     pub fn set_line_width(&mut self, width: f64) -> Result<(), ShellError> {
         let segment_id = self.text_segment()?;
         self.refuse_locked(&segment_id)?;
+        let style = KeyedSetting::TextStyle(cutlass_model::TextStyleKey::LineWidth);
+        if let Some(key) = self.key_setting_here(style, vec![width]) {
+            return self.apply(key);
+        }
         let face = self.face.name().to_owned();
         self.apply(Request::SetLineWidth {
             segment_id,
@@ -6533,6 +6553,10 @@ impl Shell {
     pub fn set_line_spacing(&mut self, spacing: f64) -> Result<(), ShellError> {
         let segment_id = self.text_segment()?;
         self.refuse_locked(&segment_id)?;
+        let style = KeyedSetting::TextStyle(cutlass_model::TextStyleKey::LineSpacing);
+        if let Some(key) = self.key_setting_here(style, vec![spacing]) {
+            return self.apply(key);
+        }
         let face = self.face.name().to_owned();
         self.apply(Request::SetLineSpacing {
             segment_id,
@@ -8569,6 +8593,22 @@ fn picture_scale(segment: &Segment) -> (f64, f64) {
     } else {
         (segment.clip.scale.x, segment.clip.scale.y)
     }
+}
+
+/// The text style setting `key` of `segment`'s text as keyed at `time`,
+/// when it keys it.
+pub(crate) fn text_style_now(
+    draft: &Draft,
+    segment: &Segment,
+    time: Micros,
+    key: cutlass_model::TextStyleKey,
+) -> Option<f64> {
+    let Some(MaterialRef::Text(text)) = draft.materials.get(segment.material_id.as_str()) else {
+        return None;
+    };
+    cutlass_model::has_keys(segment, key.names()).then_some(())?;
+    let keyed = cutlass_model::text_style_at(text, segment, &draft.keyframe_graph_list, time)?;
+    Some(key.get(&keyed))
 }
 
 fn text_style(

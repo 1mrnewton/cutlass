@@ -35,6 +35,8 @@ pub(super) const ROW_GAP: f32 = 6.0;
 /// The widest and narrowest gap between the inspector's tabs.
 const TAB_GAP: f32 = 18.0;
 const TAB_GAP_MIN: f32 = 8.0;
+use cutlass_model::TextStyleKey as Style;
+
 pub(super) const LATER: &str = "Later: Cutlass has no edit for this yet";
 
 /// Which tab, page, and sections are open. They reset when another clip
@@ -1881,15 +1883,24 @@ fn text_basic(
         }
         font_row(shell, ui, inspection);
         let size = inspection.text_size.round();
-        if let Some(value) = slider(
+        let changed = setting_row(
+            shell,
             ui,
-            state,
-            "font-size",
-            "Font size",
-            size,
-            1.0..=512.0,
-            |v| format!("{v:.0}"),
-        ) {
+            KeyedSetting::TextStyle(Style::Size),
+            true,
+            |ui| {
+                slider(
+                    ui,
+                    state,
+                    "font-size",
+                    "Font size",
+                    size,
+                    1.0..=512.0,
+                    |v| format!("{v:.0}"),
+                )
+            },
+        );
+        if let Some(value) = changed {
             send(shell, |shell| shell.set_text_size(value));
         }
         pattern_row(shell, ui, inspection);
@@ -1919,12 +1930,20 @@ fn text_basic(
         }
         setting_step(shell, KeyedSetting::TextColor, step);
         spacing_row(shell, ui, state, inspection);
-        let (width, _) = pair_row(
+        let (width, _) = setting_row(
+            shell,
             ui,
-            state,
-            "Line width",
-            ("px", inspection.line_width.round()),
-            ("", f64::NAN),
+            KeyedSetting::TextStyle(Style::LineWidth),
+            true,
+            |ui| {
+                pair_row(
+                    ui,
+                    state,
+                    "Line width",
+                    ("px", inspection.line_width.round()),
+                    ("", f64::NAN),
+                )
+            },
         );
         if let Some(value) = width {
             send(shell, |shell| shell.set_line_width(value.max(0.0)));
@@ -2132,16 +2151,40 @@ fn spacing_row(
     state: &mut InspectorState,
     inspection: &Inspection,
 ) {
-    let (letters, lines) = pair_row(
+    // Each spacing keys on its own, so each has its own row.
+    let (letters, _) = setting_row(
+        shell,
         ui,
-        state,
-        "Character",
-        ("", inspection.letter_spacing),
-        ("Line", inspection.line_spacing),
+        KeyedSetting::TextStyle(Style::LetterSpacing),
+        true,
+        |ui| {
+            pair_row(
+                ui,
+                state,
+                "Character",
+                ("", inspection.letter_spacing),
+                ("", f64::NAN),
+            )
+        },
     );
     if let Some(value) = letters {
         send(shell, |shell| shell.set_letter_spacing(value));
     }
+    let (lines, _) = setting_row(
+        shell,
+        ui,
+        KeyedSetting::TextStyle(Style::LineSpacing),
+        true,
+        |ui| {
+            pair_row(
+                ui,
+                state,
+                "Line spacing",
+                ("", inspection.line_spacing),
+                ("", f64::NAN),
+            )
+        },
+    );
     if let Some(value) = lines {
         send(shell, |shell| shell.set_line_spacing(value));
     }
@@ -2301,15 +2344,24 @@ fn text_parts(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState, look: 
             }
             // Thickness 100 is the widest outline a title takes.
             let thickness = (look.outline_width / 0.25 * 100.0).round();
-            if let Some(value) = slider(
+            let changed = setting_row(
+                shell,
                 ui,
-                state,
-                "thickness",
-                "Thickness",
-                thickness,
-                0.0..=100.0,
-                percent,
-            ) {
+                KeyedSetting::TextStyle(Style::StrokeWidth),
+                true,
+                |ui| {
+                    slider(
+                        ui,
+                        state,
+                        "thickness",
+                        "Thickness",
+                        thickness,
+                        0.0..=100.0,
+                        percent,
+                    )
+                },
+            );
+            if let Some(value) = changed {
                 send(shell, |shell| {
                     shell.set_text_outline(&look.outline_color, value / 100.0 * 0.25)
                 });
@@ -2346,15 +2398,24 @@ fn text_parts(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState, look: 
                 });
             }
             let alpha = (look.background_alpha * 100.0).round();
-            if let Some(value) = slider(
+            let changed = setting_row(
+                shell,
                 ui,
-                state,
-                "box-opacity",
-                "Opacity",
-                alpha,
-                0.0..=100.0,
-                |v| format!("{v:.0}%"),
-            ) {
+                KeyedSetting::TextStyle(Style::BackgroundAlpha),
+                true,
+                |ui| {
+                    slider(
+                        ui,
+                        state,
+                        "box-opacity",
+                        "Opacity",
+                        alpha,
+                        0.0..=100.0,
+                        |v| format!("{v:.0}%"),
+                    )
+                },
+            );
+            if let Some(value) = changed {
                 send(shell, |shell| {
                     shell.set_text_background(
                         &look.background_color,
@@ -2434,9 +2495,18 @@ fn text_parts(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState, look: 
             }
             later_slider(ui, "Opacity", 90.0, "90%");
             let blur = (look.shadow_blur * 100.0).round();
-            if let Some(value) = slider(ui, state, "blur", "Bluriness", blur, 0.0..=100.0, |v| {
-                format!("{v:.0}%")
-            }) {
+            let changed = setting_row(
+                shell,
+                ui,
+                KeyedSetting::TextStyle(Style::ShadowBlur),
+                true,
+                |ui| {
+                    slider(ui, state, "blur", "Bluriness", blur, 0.0..=100.0, |v| {
+                        format!("{v:.0}%")
+                    })
+                },
+            );
+            if let Some(value) = changed {
                 send(shell, |shell| {
                     shell.set_text_shadow(
                         &look.shadow_color,
@@ -2447,15 +2517,24 @@ fn text_parts(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState, look: 
                 });
             }
             let distance = look.shadow_distance.round();
-            if let Some(value) = slider(
+            let changed = setting_row(
+                shell,
                 ui,
-                state,
-                "distance",
-                "Distance",
-                distance,
-                0.0..=100.0,
-                percent,
-            ) {
+                KeyedSetting::TextStyle(Style::ShadowDistance),
+                true,
+                |ui| {
+                    slider(
+                        ui,
+                        state,
+                        "distance",
+                        "Distance",
+                        distance,
+                        0.0..=100.0,
+                        percent,
+                    )
+                },
+            );
+            if let Some(value) = changed {
                 send(shell, |shell| {
                     shell.set_text_shadow(
                         &look.shadow_color,
@@ -2466,9 +2545,18 @@ fn text_parts(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState, look: 
                 });
             }
             let angle = look.shadow_angle.round();
-            if let Some(value) = slider(ui, state, "angle", "Angle", angle, -180.0..=180.0, |v| {
-                format!("{v:.0}°")
-            }) {
+            let changed = setting_row(
+                shell,
+                ui,
+                KeyedSetting::TextStyle(Style::ShadowAngle),
+                true,
+                |ui| {
+                    slider(ui, state, "angle", "Angle", angle, -180.0..=180.0, |v| {
+                        format!("{v:.0}°")
+                    })
+                },
+            );
+            if let Some(value) = changed {
                 send(shell, |shell| {
                     shell.set_text_shadow(
                         &look.shadow_color,

@@ -253,7 +253,7 @@ pub fn key_values(
 
 /// Whether `value` is one `property` can hold, as the edit that stores it
 /// takes: a scale above zero, an opacity from 0 to 1, an Adjust slider
-/// from -1 to 1, anything else finite.
+/// from -1 to 1, a colour strength from 0 to 1, anything else finite.
 fn in_range(property: &str, value: f64) -> bool {
     if !value.is_finite() {
         return false;
@@ -266,6 +266,9 @@ fn in_range(property: &str, value: f64) -> bool {
     }
     if ADJUST_KEYS.contains(&property) {
         return (-1.0..=1.0).contains(&value);
+    }
+    if cutlass_model::is_unit_colour_key(property) {
+        return (0.0..=1.0).contains(&value);
     }
     true
 }
@@ -530,6 +533,8 @@ mod tests {
             ("alpha", -0.1),
             ("KFTypeRotation", f64::NAN),
             ("KFTypeAdjustExposure", 1.5),
+            ("KFTypeLutStrength", 1.5),
+            ("KFTypeChromaShadow", -0.5),
         ] {
             assert_eq!(
                 session.apply(1, &[values(0, &[(name, value)])]),

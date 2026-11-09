@@ -52,7 +52,7 @@ pub use crossing::{
 };
 pub use grade::{
     COLOR_CURVES, COLOR_WHEELS, Colour, CurveChannel, Grade, HSL, HSL_COLORS, MAX_CURVE_POINTS,
-    Wheel, WheelSetting, curve_table, is_colour_work, points_json, segment_colour,
+    Wheel, WheelSetting, curve_table, is_colour_work, keyed_unit, points_json, segment_colour,
     segment_colour_at, segment_grade, tidy_points, wheel_json,
 };
 pub use look::{

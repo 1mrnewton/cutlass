@@ -520,6 +520,50 @@ pub static CHROMA_STRENGTH_KEYS: [&str; 1] = ["KFTypeChromaIntensity"];
 /// A chroma key's shadow, from 0 to 1. A Cutlass name.
 pub static CHROMA_SHADOW_KEYS: [&str; 1] = ["KFTypeChromaShadow"];
 
+/// HSL's sliders, -1 to 1: for each of its eight colours (red, orange,
+/// yellow, green, cyan, blue, purple, magenta) the hue, saturation and
+/// lightness, in that order. Cutlass names.
+pub static HSL_KEYS: [&str; 24] = [
+    "KFTypeHslRedHue",
+    "KFTypeHslRedSaturation",
+    "KFTypeHslRedLightness",
+    "KFTypeHslOrangeHue",
+    "KFTypeHslOrangeSaturation",
+    "KFTypeHslOrangeLightness",
+    "KFTypeHslYellowHue",
+    "KFTypeHslYellowSaturation",
+    "KFTypeHslYellowLightness",
+    "KFTypeHslGreenHue",
+    "KFTypeHslGreenSaturation",
+    "KFTypeHslGreenLightness",
+    "KFTypeHslCyanHue",
+    "KFTypeHslCyanSaturation",
+    "KFTypeHslCyanLightness",
+    "KFTypeHslBlueHue",
+    "KFTypeHslBlueSaturation",
+    "KFTypeHslBlueLightness",
+    "KFTypeHslPurpleHue",
+    "KFTypeHslPurpleSaturation",
+    "KFTypeHslPurpleLightness",
+    "KFTypeHslMagentaHue",
+    "KFTypeHslMagentaSaturation",
+    "KFTypeHslMagentaLightness",
+];
+
+/// The colour wheels' settings, -1 to 1: for lift, gamma and gain the
+/// puck's x and y, then the brightness ring. Cutlass names.
+pub static WHEEL_KEYS: [&str; 9] = [
+    "KFTypeWheelLiftX",
+    "KFTypeWheelLiftY",
+    "KFTypeWheelLiftLuma",
+    "KFTypeWheelGammaX",
+    "KFTypeWheelGammaY",
+    "KFTypeWheelGammaLuma",
+    "KFTypeWheelGainX",
+    "KFTypeWheelGainY",
+    "KFTypeWheelGainLuma",
+];
+
 /// Whether `property` is a keyed share from 0 to 1 of the clip's colour
 /// work: a filter's Amount, a LUT's intensity, a chroma key's intensity or
 /// shadow.
@@ -567,6 +611,8 @@ pub fn is_keyable(property: &str) -> bool {
         || MASK_KEYS.contains(&property)
         || TEXT_COLOR_KEYS.contains(&property)
         || ADJUST_KEYS.contains(&property)
+        || HSL_KEYS.contains(&property)
+        || WHEEL_KEYS.contains(&property)
         || is_unit_colour_key(property)
         || effect_control_id(property).is_some()
         || crate::text_keys::TEXT_STYLE_KEYS.contains(&property)
@@ -840,6 +886,16 @@ mod tests {
             .copied()
             .collect();
         assert_eq!(parts, MASK_KEYS);
+    }
+
+    #[test]
+    fn every_hsl_and_wheel_key_is_keyable_and_named_once() {
+        let mut seen = std::collections::HashSet::new();
+        for name in HSL_KEYS.iter().chain(&WHEEL_KEYS) {
+            assert!(is_keyable(name), "{name}");
+            assert!(seen.insert(*name), "{name}");
+        }
+        assert!(!is_keyable("KFTypeHslPinkHue"));
     }
 
     #[test]

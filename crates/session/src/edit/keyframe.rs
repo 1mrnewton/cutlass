@@ -265,7 +265,10 @@ fn in_range(property: &str, value: f64) -> bool {
     if OPACITY_KEYS.contains(&property) {
         return (0.0..=1.0).contains(&value);
     }
-    if ADJUST_KEYS.contains(&property) {
+    if ADJUST_KEYS.contains(&property)
+        || cutlass_model::HSL_KEYS.contains(&property)
+        || cutlass_model::WHEEL_KEYS.contains(&property)
+    {
         return (-1.0..=1.0).contains(&value);
     }
     if cutlass_model::is_unit_colour_key(property) {
@@ -546,6 +549,8 @@ mod tests {
             ("KFTypeTextStrokeWidth", 1.0),
             ("KFTypeShapeFillAlpha", 2.0),
             ("KFTypeShapeWidth", -1.0),
+            ("KFTypeHslRedHue", 1.5),
+            ("KFTypeWheelGainLuma", -2.0),
         ] {
             assert_eq!(
                 session.apply(1, &[values(0, &[(name, value)])]),

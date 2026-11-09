@@ -4551,7 +4551,12 @@ impl Shell {
                 &draft.keyframe_graph_list,
                 self.playhead,
             ),
-            grade: cutlass_effects::segment_grade(draft, segment),
+            grade: cutlass_effects::keyed_grade(
+                cutlass_effects::segment_grade(draft, segment),
+                segment,
+                &draft.keyframe_graph_list,
+                self.playhead,
+            ),
             // A keyed LUT intensity and chroma key show where the playhead is.
             lut: cutlass_effects::segment_lut(draft, segment).map(|lut| {
                 let strength = cutlass_effects::keyed_unit(
@@ -5931,15 +5936,31 @@ impl Shell {
         let segment_id = self.adjust_segment()?;
         self.refuse_locked(&segment_id)?;
         let material_id = MaterialId::new(self.fresh("hsl"));
+        let now = self.inspection().map(|inspection| inspection.grade);
         let [hue, saturation, lightness] = values;
-        self.apply(Request::SetHsl {
+        let mut requests = vec![Request::SetHsl {
             segment_id,
             material_id,
             color,
             hue,
             saturation,
             lightness,
-        })
+        }];
+        // A keyed slider plays its keys, so a change to one keys it here.
+        for (part, value) in (0_u8..).zip(values) {
+            let was = now
+                .as_ref()
+                .and_then(|grade| grade.hsl.get(usize::from(color)))
+                .and_then(|values| values.get(usize::from(part)))
+                .map(|was| f64::from(*was));
+            if was.is_some_and(|was| (was - value).abs() > 1e-6)
+                && let Some(key) =
+                    self.key_setting_here(KeyedSetting::Hsl(color, part), vec![value])
+            {
+                requests.push(key);
+            }
+        }
+        self.apply_requests(&requests)
     }
 
     /// Set one curve on the selected picture; no points is the straight line.
@@ -6174,14 +6195,37 @@ impl Shell {
         self.refuse_locked(&segment_id)?;
         let material_id = MaterialId::new(self.fresh("wheels"));
         let setting = setting.held();
-        self.apply(Request::SetWheel {
+        let now = self
+            .inspection()
+            .map(|inspection| inspection.grade.wheel(wheel));
+        let mut requests = vec![Request::SetWheel {
             segment_id,
             material_id,
             wheel: wheel.key().to_owned(),
             x: f64::from(setting.x),
             y: f64::from(setting.y),
             luma: f64::from(setting.luma),
-        })
+        }];
+        // A keyed puck or ring plays its keys, so a change to one keys it here.
+        if let Some(now) = now {
+            if (now.x, now.y) != (setting.x, setting.y)
+                && let Some(key) = self.key_setting_here(
+                    KeyedSetting::WheelPuck(wheel),
+                    vec![f64::from(setting.x), f64::from(setting.y)],
+                )
+            {
+                requests.push(key);
+            }
+            if now.luma != setting.luma
+                && let Some(key) = self.key_setting_here(
+                    KeyedSetting::WheelLuma(wheel),
+                    vec![f64::from(setting.luma)],
+                )
+            {
+                requests.push(key);
+            }
+        }
+        self.apply_requests(&requests)
     }
 
     /// Put every adjust slider on the selected picture back to zero, as one
@@ -13873,7 +13917,12 @@ mod tests {
                 .times
         };
         assert_eq!(times(&desktop, Key::FillOpacity).len(), 2);
-        for other in [Key::Size, Key::StrokeWidth, Key::StrokeOpacity, Key::Corners] {
+        for other in [
+            Key::Size,
+            Key::StrokeWidth,
+            Key::StrokeOpacity,
+            Key::Corners,
+        ] {
             assert!(times(&desktop, other).is_empty(), "{other:?}");
         }
         assert!(!desktop.setting_keyed(KeyedSetting::Position));
@@ -14387,6 +14436,57 @@ mod tests {
         desktop.undo().unwrap();
         desktop.undo().unwrap();
         assert!(desktop.inspection().unwrap().grade.is_identity());
+    }
+
+    #[test]
+    fn each_hsl_slider_and_wheel_part_keys_on_its_own() {
+        use super::KeyedSetting;
+        use cutlass_effects::{Wheel, WheelSetting};
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        let mut video = MaterialVideo::new("picture");
+        video.path = "clip.mp4".to_owned();
+        draft.materials.videos.push(video);
+        draft.tracks[0].segments.push(Segment::new(
+            "picture",
+            "picture",
+            TimeRange::new(0, 1_000_000),
+        ));
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.select(Some(SegmentId::new("picture")));
+        let saturation = KeyedSetting::Hsl(3, 1);
+        let ring = KeyedSetting::WheelLuma(Wheel::Gain);
+        desktop.toggle_setting_key(saturation).unwrap();
+        desktop.toggle_setting_key(ring).unwrap();
+        desktop.seek(Micros(800_000));
+        desktop.set_hsl(3, [0.0, 0.8, 0.0]).unwrap();
+        let wheel = |luma| WheelSetting {
+            x: 0.0,
+            y: 0.0,
+            luma,
+        };
+        desktop.set_wheel(Wheel::Gain, wheel(0.4)).unwrap();
+        // Not keyed: stored all along the clip.
+        desktop.set_hsl(3, [0.5, 0.8, 0.0]).unwrap();
+        let times = |desktop: &Shell, setting| desktop.setting_keys(setting).unwrap().times;
+        assert_eq!(times(&desktop, saturation).len(), 2);
+        assert_eq!(times(&desktop, ring).len(), 2);
+        for other in [
+            KeyedSetting::Hsl(3, 0),
+            KeyedSetting::Hsl(3, 2),
+            KeyedSetting::Hsl(0, 1),
+            KeyedSetting::WheelPuck(Wheel::Gain),
+            KeyedSetting::WheelLuma(Wheel::Lift),
+        ] {
+            assert!(times(&desktop, other).is_empty(), "{other:?}");
+        }
+        desktop.seek(Micros(400_000));
+        let grade = desktop.inspection().unwrap().grade;
+        assert!((grade.hsl[3][1] - 0.4).abs() < 1e-6);
+        assert!((grade.hsl[3][0] - 0.5).abs() < 1e-6);
+        assert!((grade.wheel(Wheel::Gain).luma - 0.2).abs() < 1e-6);
     }
 
     #[test]

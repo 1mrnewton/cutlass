@@ -41,6 +41,13 @@ pub enum KeyedSetting {
     TextStyle(cutlass_model::TextStyleKey),
     /// One of a shape's own settings.
     ShapeStyle(cutlass_model::ShapeStyleKey),
+    /// One HSL slider: the colour, 0 red to 7 magenta, and the part, 0
+    /// hue, 1 saturation, 2 lightness.
+    Hsl(u8, u8),
+    /// A colour wheel's puck.
+    WheelPuck(cutlass_effects::Wheel),
+    /// A colour wheel's brightness ring.
+    WheelLuma(cutlass_effects::Wheel),
 }
 
 impl KeyedSetting {
@@ -79,6 +86,11 @@ impl KeyedSetting {
             Self::EffectControl(name) => std::slice::from_ref(name),
             Self::TextStyle(key) => key.names(),
             Self::ShapeStyle(key) => key.names(),
+            Self::Hsl(color, part) => {
+                cutlass_effects::hsl_keys(usize::from(*color), usize::from(*part))
+            }
+            Self::WheelPuck(wheel) => wheel.puck_keys(),
+            Self::WheelLuma(wheel) => wheel.luma_keys(),
             Self::TextColor => &cutlass_model::TEXT_COLOR_KEYS,
         }
     }
@@ -416,6 +428,9 @@ impl Shell {
                 KeyedSetting::EffectControl(_) => "this setting cannot be keyed".to_owned(),
                 KeyedSetting::TextStyle(_) => "a text style key belongs on text".to_owned(),
                 KeyedSetting::ShapeStyle(_) => "a shape key belongs on a shape".to_owned(),
+                KeyedSetting::Hsl(..) | KeyedSetting::WheelPuck(_) | KeyedSetting::WheelLuma(_) => {
+                    "colour keys belong on a picture".to_owned()
+                }
                 KeyedSetting::TextColor => "a color key belongs on text".to_owned(),
             })
         })?;
@@ -490,6 +505,20 @@ impl Shell {
                 vec![keyed.unwrap_or_else(|| key.get(text))]
             }
             KeyedSetting::ShapeStyle(key) => key.get(&self.shape()?),
+            KeyedSetting::Hsl(color, part) => {
+                self.adjust_segment().ok()?;
+                let values = inspection.grade.hsl.get(usize::from(color))?;
+                vec![f64::from(*values.get(usize::from(part))?)]
+            }
+            KeyedSetting::WheelPuck(wheel) => {
+                self.adjust_segment().ok()?;
+                let setting = inspection.grade.wheel(wheel);
+                vec![f64::from(setting.x), f64::from(setting.y)]
+            }
+            KeyedSetting::WheelLuma(wheel) => {
+                self.adjust_segment().ok()?;
+                vec![f64::from(inspection.grade.wheel(wheel).luma)]
+            }
             KeyedSetting::EffectControl(name) => {
                 let (_, value) = self
                     .effect_controls()?

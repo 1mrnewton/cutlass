@@ -7,11 +7,11 @@ use egui::{Color32, CornerRadius, Pos2, RichText, Sense, Shape, Stroke, Ui, Vec2
 
 use cutlass_effects::{CurveChannel, Grade, HSL_COLORS, Wheel, WheelSetting, curve_table};
 
-use crate::shell::{Inspection, Shell};
+use crate::shell::{Inspection, KeyedSetting, Shell};
 use crate::{tokens, ui};
 
 use super::audio::{choice_row, later_value};
-use super::inspector::{InspectorState, LATER, later_badge, note, send, slider};
+use super::inspector::{InspectorState, LATER, later_badge, note, send, setting_row, slider};
 
 /// Where each HSL colour's swatch sits on the hue circle, in degrees.
 const SWATCH_HUES: [f32; 8] = [0.0, 30.0, 60.0, 120.0, 180.0, 240.0, 275.0, 310.0];
@@ -55,9 +55,14 @@ pub(super) fn hsl_page(
     for (index, label) in ["Hue", "Saturation", "Lightness"].into_iter().enumerate() {
         let shown = (values[index] * 100.0).round();
         let key = format!("hsl-{color}-{index}");
-        if let Some(value) = slider(ui, state, &key, label, shown, -100.0..=100.0, |v| {
-            format!("{v:.0}")
-        }) {
+        #[allow(clippy::cast_possible_truncation)]
+        let setting = KeyedSetting::Hsl(color as u8, index as u8);
+        let changed = setting_row(shell, ui, setting, true, |ui| {
+            slider(ui, state, &key, label, shown, -100.0..=100.0, |v| {
+                format!("{v:.0}")
+            })
+        });
+        if let Some(value) = changed {
             values[index] = value / 100.0;
             moved = true;
         }
@@ -286,18 +291,21 @@ pub(super) fn wheels_page(
         let setting = inspection.grade.wheel(wheel);
         let name = wheel_name(wheel);
         let mut reset = false;
-        ui.horizontal(|ui| {
-            ui.set_min_height(28.0);
-            ui.label(RichText::new(name).size(13.0).color(Color32::WHITE));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                reset = ui
-                    .add_enabled(
-                        setting != WheelSetting::default(),
-                        ui::Button::icon("reset")
-                            .min_size(Vec2::splat(24.0))
-                            .tip(format!("Reset {name}")),
-                    )
-                    .clicked();
+        // The name row keys the puck; the Brightness row keys the ring.
+        setting_row(shell, ui, KeyedSetting::WheelPuck(wheel), true, |ui| {
+            ui.horizontal(|ui| {
+                ui.set_min_height(28.0);
+                ui.label(RichText::new(name).size(13.0).color(Color32::WHITE));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    reset = ui
+                        .add_enabled(
+                            setting != WheelSetting::default(),
+                            ui::Button::icon("reset")
+                                .min_size(Vec2::splat(24.0))
+                                .tip(format!("Reset {name}")),
+                        )
+                        .clicked();
+                });
             });
         });
         if reset {
@@ -358,9 +366,12 @@ pub(super) fn wheels_page(
         }
         let shown = (f64::from(setting.luma) * 100.0).round();
         let key = format!("wheel-{}", wheel.key());
-        if let Some(value) = slider(ui, state, &key, "Brightness", shown, -100.0..=100.0, |v| {
-            format!("{v:.0}")
-        }) {
+        let changed = setting_row(shell, ui, KeyedSetting::WheelLuma(wheel), true, |ui| {
+            slider(ui, state, &key, "Brightness", shown, -100.0..=100.0, |v| {
+                format!("{v:.0}")
+            })
+        });
+        if let Some(value) = changed {
             #[allow(clippy::cast_possible_truncation)]
             let luma = (value / 100.0) as f32;
             next = Some(WheelSetting {

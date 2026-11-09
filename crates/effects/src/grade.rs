@@ -327,8 +327,38 @@ pub fn segment_colour(draft: &Draft, segment: &Segment) -> Colour {
 #[must_use]
 pub fn segment_colour_at(draft: &Draft, segment: &Segment, time: Micros) -> Colour {
     let mut colour = segment_colour(draft, segment);
-    colour.adjust = keyed_adjust(colour.adjust, segment, &draft.keyframe_graph_list, time);
+    let graphs = &draft.keyframe_graph_list;
+    colour.adjust = keyed_adjust(colour.adjust, segment, graphs, time);
+    let keyed = |names: &[&str]| keyed_unit(segment, graphs, names, time);
+    if let Some(lut) = colour.lut.as_mut()
+        && let Some(strength) = keyed(&cutlass_model::LUT_STRENGTH_KEYS)
+    {
+        lut.strength = strength;
+    }
+    if let Some(chroma) = colour.chroma.as_mut() {
+        if let Some(strength) = keyed(&cutlass_model::CHROMA_STRENGTH_KEYS) {
+            chroma.strength = strength;
+        }
+        if let Some(shadow) = keyed(&cutlass_model::CHROMA_SHADOW_KEYS) {
+            chroma.shadow = shadow;
+        }
+    }
     colour
+}
+
+/// The keyed share from 0 to 1 `names` holds at timeline `time`, when
+/// `segment` keys it and the keys read.
+#[must_use]
+pub fn keyed_unit(
+    segment: &Segment,
+    graphs: &[cutlass_model::KeyframeGraph],
+    names: &[&str],
+    time: Micros,
+) -> Option<f32> {
+    let offset = time.0.saturating_sub(segment.target.start.0);
+    let value = cutlass_model::sample(&segment.common_keyframes, graphs, names, offset)??;
+    #[allow(clippy::cast_possible_truncation)]
+    Some(value.clamp(0.0, 1.0) as f32)
 }
 
 /// The curves, wheels and HSL `segment` lists among its extra materials.

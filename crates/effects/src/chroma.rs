@@ -149,7 +149,7 @@ fn smoothstep(low: f32, high: f32, value: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use cutlass_model::{Draft, MaterialId, RawMaterial, Segment, TimeRange};
+    use cutlass_model::{Draft, MaterialId, Micros, RawMaterial, Segment, TimeRange};
     use serde_json::json;
 
     use super::{CHROMA, Chroma, parse_hex, segment_chroma};
@@ -219,5 +219,20 @@ mod tests {
         assert_eq!(chroma.hex(), "#0000ff");
         assert!((chroma.strength - 0.4).abs() < 1e-6);
         assert_eq!(chroma.shadow, 1.0);
+
+        // Keys move the intensity and the shadow apart, held to 0 to 1.
+        segment.target = TimeRange::new(0, 2_000);
+        cutlass_model::put_key(&mut segment, "KFTypeChromaIntensity", Micros(0), 0.0);
+        cutlass_model::put_key(&mut segment, "KFTypeChromaIntensity", Micros(2_000), 1.0);
+        cutlass_model::put_key(&mut segment, "KFTypeChromaShadow", Micros(0), 5.0);
+        let keyed = crate::segment_colour_at(&draft, &segment, Micros(1_000))
+            .chroma
+            .unwrap();
+        assert!((keyed.strength - 0.5).abs() < 1e-6);
+        assert_eq!(keyed.shadow, 1.0);
+        assert_eq!(keyed.hex(), "#0000ff");
+        // Without a key the stored setting holds.
+        let plain = crate::segment_colour(&draft, &segment).chroma.unwrap();
+        assert!((plain.strength - 0.4).abs() < 1e-6);
     }
 }

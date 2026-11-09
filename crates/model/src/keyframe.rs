@@ -553,6 +553,41 @@ pub fn hex_color_at(
     Some(format!("#{r:02x}{g:02x}{b:02x}"))
 }
 
+/// Motion blur's Blur, its length from 0 to 1 of a frame's time. A
+/// Cutlass name.
+pub static MOTION_BLUR_LENGTH_KEYS: [&str; 1] = ["KFTypeMotionBlurLength"];
+/// Motion blur's Blend, the share of the sharp frame from 0 to 1. A
+/// Cutlass name.
+pub static MOTION_BLUR_BLEND_KEYS: [&str; 1] = ["KFTypeMotionBlurBlend"];
+
+/// `blur` with its Blur and Blend as `segment` keys them where the clip
+/// shows its file's time `source`, in microseconds, each held to 0 to 1.
+/// A time the clip does not show, or a curved speed, keeps them as stored.
+#[must_use]
+pub fn motion_blur_at(
+    blur: &crate::materials::MotionBlur,
+    segment: &Segment,
+    graphs: &[KeyframeGraph],
+    source: i64,
+) -> crate::materials::MotionBlur {
+    let mut out = blur.clone();
+    let Some(at) = crate::materials::beat_timeline_time(segment, source) else {
+        return out;
+    };
+    let offset = at.0.saturating_sub(segment.target.start.0);
+    let keyed = |names: &[&str]| match sample(&segment.common_keyframes, graphs, names, offset) {
+        Some(Some(value)) if value.is_finite() => Some(value.clamp(0.0, 1.0)),
+        _ => None,
+    };
+    if let Some(length) = keyed(&MOTION_BLUR_LENGTH_KEYS) {
+        out.blur = length;
+    }
+    if let Some(blend) = keyed(&MOTION_BLUR_BLEND_KEYS) {
+        out.blend = blend;
+    }
+    out
+}
+
 /// A clip's Relight strength, from 0 to 1. A Cutlass name.
 pub static RELIGHT_STRENGTH_KEYS: [&str; 1] = ["KFTypeRelightStrength"];
 /// The Custom light's color, red, green and blue from 0 to 1. Cutlass names.
@@ -684,6 +719,8 @@ pub fn is_keyable(property: &str) -> bool {
         || ADJUST_KEYS.contains(&property)
         || HSL_KEYS.contains(&property)
         || CANVAS_COLOR_KEYS.contains(&property)
+        || MOTION_BLUR_LENGTH_KEYS.contains(&property)
+        || MOTION_BLUR_BLEND_KEYS.contains(&property)
         || RELIGHT_STRENGTH_KEYS.contains(&property)
         || RELIGHT_COLOR_KEYS.contains(&property)
         || RELIGHT_ANGLE_KEYS.contains(&property)
@@ -1024,6 +1061,34 @@ mod tests {
         put_key(&mut segment, CANVAS_COLOR_KEYS[2], Micros(0), 2.0);
         assert_eq!(at(&segment).as_deref(), Some("#8000ff"));
         assert!(CANVAS_COLOR_KEYS.iter().all(|name| is_keyable(name)));
+    }
+
+    #[test]
+    fn a_keyed_motion_blur_follows_the_clip_shown_from_its_file() {
+        let blur = crate::materials::MotionBlur {
+            blur: 1.0,
+            blend: 0.0,
+            direction: 0,
+            times: 1,
+        };
+        // The clip shows its file from 5 s, on the timeline from 1 s.
+        let mut segment = Segment::new("s", "m", crate::time::TimeRange::new(1_000_000, 1_000_000));
+        segment.source_range = Some(crate::time::TimeRange::new(5_000_000, 1_000_000));
+        assert_eq!(motion_blur_at(&blur, &segment, &[], 5_500_000), blur);
+        put_key(&mut segment, MOTION_BLUR_LENGTH_KEYS[0], Micros(0), 0.0);
+        put_key(
+            &mut segment,
+            MOTION_BLUR_LENGTH_KEYS[0],
+            Micros(1_000_000),
+            1.0,
+        );
+        put_key(&mut segment, MOTION_BLUR_BLEND_KEYS[0], Micros(0), 3.0);
+        let half = motion_blur_at(&blur, &segment, &[], 5_500_000);
+        assert!((half.blur - 0.5).abs() < 1e-6);
+        assert_eq!(half.blend, 1.0);
+        // A time the clip does not show keeps the stored settings.
+        assert_eq!(motion_blur_at(&blur, &segment, &[], 9_000_000), blur);
+        assert!(is_keyable(MOTION_BLUR_LENGTH_KEYS[0]) && is_keyable(MOTION_BLUR_BLEND_KEYS[0]));
     }
 
     #[test]

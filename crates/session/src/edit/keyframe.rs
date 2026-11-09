@@ -297,6 +297,8 @@ fn in_range(property: &str, value: f64) -> bool {
         || cutlass_model::RELIGHT_STRENGTH_KEYS.contains(&property)
         || cutlass_model::RELIGHT_COLOR_KEYS.contains(&property)
         || cutlass_model::CANVAS_COLOR_KEYS.contains(&property)
+        || cutlass_model::MOTION_BLUR_LENGTH_KEYS.contains(&property)
+        || cutlass_model::MOTION_BLUR_BLEND_KEYS.contains(&property)
         || cutlass_model::GLOW_RANGE_KEYS.contains(&property)
     {
         return (0.0..=1.0).contains(&value);
@@ -582,6 +584,7 @@ mod tests {
             ("KFTypeTextGlowRange", 1.5),
             ("KFTypeRelightColorG", -0.5),
             ("KFTypeCanvasColorB", 1.5),
+            ("KFTypeMotionBlurBlend", -0.1),
         ] {
             assert_eq!(
                 session.apply(1, &[values(0, &[(name, value)])]),

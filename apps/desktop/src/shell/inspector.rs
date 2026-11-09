@@ -35,6 +35,8 @@ pub enum KeyedSetting {
     LutStrength,
     ChromaStrength,
     ChromaShadow,
+    /// A recipe effect's control, by the key name its bundled recipe gives.
+    EffectControl(&'static str),
 }
 
 impl KeyedSetting {
@@ -52,7 +54,7 @@ impl KeyedSetting {
 impl KeyedSetting {
     /// The key names the setting is stored under.
     #[must_use]
-    pub fn names(self) -> &'static [&'static str] {
+    pub fn names(&self) -> &[&'static str] {
         match self {
             Self::Position => &cutlass_model::POSITION_KEYS,
             Self::Scale => &cutlass_model::SCALE_KEYS,
@@ -70,6 +72,7 @@ impl KeyedSetting {
             Self::LutStrength => &cutlass_model::LUT_STRENGTH_KEYS,
             Self::ChromaStrength => &cutlass_model::CHROMA_STRENGTH_KEYS,
             Self::ChromaShadow => &cutlass_model::CHROMA_SHADOW_KEYS,
+            Self::EffectControl(name) => std::slice::from_ref(name),
             Self::TextColor => &cutlass_model::TEXT_COLOR_KEYS,
         }
     }
@@ -186,7 +189,14 @@ impl Shell {
             return None;
         };
         let recipe = cutlass_effects::bundled_recipe(&effect.effect_id)?;
-        let stored = cutlass_effects::stored_controls(effect);
+        // Keyed controls show where the playhead is.
+        let stored = cutlass_effects::keyed_controls(
+            recipe,
+            cutlass_effects::stored_controls(effect),
+            segment,
+            &draft.keyframe_graph_list,
+            self.playhead,
+        );
         Some(
             recipe
                 .controls
@@ -201,11 +211,34 @@ impl Shell {
         )
     }
 
+    /// The keyed setting for the selected recipe effect's control `id`,
+    /// when it can be keyed.
+    #[must_use]
+    pub fn effect_control_setting(&self, id: &str) -> Option<KeyedSetting> {
+        let draft = self.draft()?;
+        let segment = self.selected_segment()?;
+        let MaterialRef::VideoEffect(effect) = draft.materials.get(segment.material_id.as_str())?
+        else {
+            return None;
+        };
+        let recipe = cutlass_effects::bundled_recipe(&effect.effect_id)?;
+        let control = recipe
+            .controls
+            .iter()
+            .find(|control| control.id == id && control.keyable())?;
+        Some(KeyedSetting::EffectControl(control.keyframe.as_str()))
+    }
+
     /// Store `value` for the selected effect's control `control`. A split
     /// clip's halves get their own once one changes. One undo restores it.
     pub fn set_effect_control(&mut self, control: &str, value: f64) -> Result<(), ShellError> {
         let segment_id = self.selected_or_refuse()?;
         self.refuse_locked(&segment_id)?;
+        if let Some(setting) = self.effect_control_setting(control)
+            && let Some(key) = self.key_setting_here(setting, vec![value])
+        {
+            return self.apply(key);
+        }
         let material_id = MaterialId::new(self.fresh("effect"));
         self.apply(Request::SetEffectControl {
             segment_id,
@@ -356,6 +389,7 @@ impl Shell {
                 KeyedSetting::ChromaStrength | KeyedSetting::ChromaShadow => {
                     "switch Chroma key on first".to_owned()
                 }
+                KeyedSetting::EffectControl(_) => "this setting cannot be keyed".to_owned(),
                 KeyedSetting::TextColor => "a color key belongs on text".to_owned(),
             })
         })?;
@@ -418,6 +452,13 @@ impl Shell {
             KeyedSetting::LutStrength => vec![f64::from(inspection.lut?.1)],
             KeyedSetting::ChromaStrength => vec![f64::from(inspection.chroma?.strength)],
             KeyedSetting::ChromaShadow => vec![f64::from(inspection.chroma?.shadow)],
+            KeyedSetting::EffectControl(name) => {
+                let (_, value) = self
+                    .effect_controls()?
+                    .into_iter()
+                    .find(|(control, _)| control.keyable() && control.keyframe == name)?;
+                vec![f64::from(value)]
+            }
             KeyedSetting::TextColor => {
                 if inspection.text_color.is_empty() && self.text_look().is_none() {
                     return None;
@@ -1615,6 +1656,47 @@ mod tests {
                 .toggle_setting_key(KeyedSetting::FilterStrength)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn a_recipe_control_keys_on_its_own_and_speed_is_never_keyed() {
+        let temp = Temp::new();
+        let mut desktop = every_kind(&temp);
+        pick(&mut desktop, "fx");
+        assert_eq!(desktop.effect_control_setting("speed"), None);
+        let intensity = desktop.effect_control_setting("intensity").unwrap();
+        desktop.seek(cutlass_model::Micros(1_000_000));
+        desktop.toggle_setting_key(intensity).unwrap();
+        desktop.seek(cutlass_model::Micros(3_000_000));
+        desktop.set_effect_control("intensity", 2.0).unwrap();
+        desktop.set_effect_control("speed", 2.0).unwrap();
+        assert_eq!(desktop.setting_keys(intensity).unwrap().times.len(), 2);
+        desktop.seek(cutlass_model::Micros(2_000_000));
+        let value = |desktop: &Shell, id: &str| {
+            desktop
+                .effect_controls()
+                .unwrap()
+                .into_iter()
+                .find(|(control, _)| control.id == id)
+                .unwrap()
+                .1
+        };
+        assert!((value(&desktop, "intensity") - 1.5).abs() < 1e-6);
+        // Speed was stored, the same all along the effect.
+        assert_eq!(value(&desktop, "speed"), 2.0);
+        let draft = desktop.draft().unwrap();
+        let fx = draft
+            .tracks
+            .iter()
+            .flat_map(|track| &track.segments)
+            .find(|segment| segment.id.as_str() == "fx")
+            .unwrap();
+        let names: Vec<&str> = fx
+            .common_keyframes
+            .iter()
+            .map(|group| group.property_type.as_str())
+            .collect();
+        assert_eq!(names, ["KFTypeEffectControl_intensity"]);
     }
 
     #[test]

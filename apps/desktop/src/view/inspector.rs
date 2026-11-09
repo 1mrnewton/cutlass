@@ -605,7 +605,15 @@ fn recipe_pages(
             );
         }
         for (control, value) in controls {
-            if let Some(next) = control_slider(ui, state, control, *value) {
+            // A speed control is not keyed; it has no buttons.
+            let setting = shell.effect_control_setting(&control.id);
+            let moved = match setting {
+                Some(setting) => setting_row(shell, ui, setting, true, |ui| {
+                    control_slider(ui, state, control, *value)
+                }),
+                None => control_slider(ui, state, control, *value),
+            };
+            if let Some(next) = moved {
                 let id = control.id.clone();
                 send(shell, move |shell| shell.set_effect_control(&id, next));
             }

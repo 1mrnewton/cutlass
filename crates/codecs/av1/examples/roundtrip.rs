@@ -33,9 +33,11 @@ fn roundtrip(ffmpeg: &Path, dir: &Path) -> Result<(), String> {
     let reference = ffmpeg_raw(ffmpeg, &ivf, &yuv)?;
     let params = CodecParams::video(CodecId::Av1, 64, 64);
     let mut decoder = Av1Decoder::open(&params).map_err(|err| format!("open {err:?}"))?;
-    let decoded = decoder
+    let mut decoded = decoder
         .push(&Packet::video(packet.to_vec(), 0, 1, 30, true))
         .map_err(|err| format!("decode {err:?}"))?;
+    // The picture may come out of the drain, after the decoding threads.
+    decoded.extend(decoder.drain().map_err(|err| format!("drain {err:?}"))?);
     let picture = decoded
         .first()
         .and_then(|output| output.as_video())

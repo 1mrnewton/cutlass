@@ -14,10 +14,10 @@
 //!   `gain`, each `[x, y, luma]`: where the puck sits in the unit circle and
 //!   how far the ring below it is turned, from -1 to 1.
 
-use cutlass_model::{Draft, MaterialRef, Segment};
+use cutlass_model::{Draft, MaterialRef, Micros, Segment};
 use serde_json::{Value, json};
 
-use crate::adjust::{Adjust, adjust_rgba, segment_adjust};
+use crate::adjust::{Adjust, adjust_rgba, keyed_adjust, segment_adjust};
 use crate::chroma::{Chroma, segment_chroma};
 use crate::lut::{ClipLut, segment_lut};
 
@@ -320,6 +320,15 @@ pub fn segment_colour(draft: &Draft, segment: &Segment) -> Colour {
         adjust: segment_adjust(draft, segment),
         lut: segment_lut(draft, segment),
     }
+}
+
+/// [`segment_colour`] with its keyed settings as they are at timeline
+/// `time`.
+#[must_use]
+pub fn segment_colour_at(draft: &Draft, segment: &Segment, time: Micros) -> Colour {
+    let mut colour = segment_colour(draft, segment);
+    colour.adjust = keyed_adjust(colour.adjust, segment, &draft.keyframe_graph_list, time);
+    colour
 }
 
 /// The curves, wheels and HSL `segment` lists among its extra materials.

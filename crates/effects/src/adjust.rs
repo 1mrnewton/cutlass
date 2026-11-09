@@ -10,7 +10,7 @@
 //! hue, fade, then clarity and sharpen (which look at neighbours), then
 //! vignette and grain (which look at the position).
 
-use cutlass_model::{Draft, MaterialRef, Segment};
+use cutlass_model::{Draft, KeyframeGraph, MaterialRef, Micros, Segment};
 
 /// The material `type` of an adjustment layer: a clip on an adjust row
 /// whose sliders run over every picture below it.
@@ -125,6 +125,18 @@ impl AdjustKey {
         }
     }
 
+    /// The keyframe property the slider keys under.
+    #[must_use]
+    pub fn keyframe(self) -> &'static str {
+        cutlass_model::ADJUST_KEYS[self.index()]
+    }
+
+    /// [`Self::keyframe`] as the one name of a keyed setting.
+    #[must_use]
+    pub fn keyframes(self) -> &'static [&'static str] {
+        std::slice::from_ref(&cutlass_model::ADJUST_KEYS[self.index()])
+    }
+
     fn index(self) -> usize {
         Self::ALL
             .iter()
@@ -169,6 +181,34 @@ pub fn segment_adjust(draft: &Draft, segment: &Segment) -> Adjust {
         {
             #[allow(clippy::cast_possible_truncation)]
             adjust.set(key, effect.value.unwrap_or_default() as f32);
+        }
+    }
+    adjust
+}
+
+/// `adjust` with each slider `segment` keys set as keyed at timeline
+/// `time`. A slider with no keys, or keys that do not read, keeps its value.
+#[must_use]
+pub fn keyed_adjust(
+    mut adjust: Adjust,
+    segment: &Segment,
+    graphs: &[KeyframeGraph],
+    time: Micros,
+) -> Adjust {
+    if !segment
+        .common_keyframes
+        .iter()
+        .any(|group| cutlass_model::ADJUST_KEYS.contains(&group.property_type.as_str()))
+    {
+        return adjust;
+    }
+    let offset = time.0.saturating_sub(segment.target.start.0);
+    for key in AdjustKey::ALL {
+        if let Some(Some(value)) =
+            cutlass_model::sample(&segment.common_keyframes, graphs, &[key.keyframe()], offset)
+        {
+            #[allow(clippy::cast_possible_truncation)]
+            adjust.set(key, value as f32);
         }
     }
     adjust
@@ -548,8 +588,46 @@ mod tests {
     use cutlass_model::{Draft, MaterialEffect, MaterialId, Segment, TimeRange};
 
     use super::{
-        AUTO_KEYS, Adjust, AdjustKey, adjust_rgba, auto_adjust, match_adjust, segment_adjust,
+        AUTO_KEYS, Adjust, AdjustKey, adjust_rgba, auto_adjust, keyed_adjust, match_adjust,
+        segment_adjust,
     };
+
+    #[test]
+    fn a_keyed_slider_moves_between_its_keys_and_leaves_the_others() {
+        let mut segment = Segment::new("s", "m", TimeRange::new(1_000, 2_000));
+        let exposure = AdjustKey::Exposure.keyframe();
+        cutlass_model::put_key(&mut segment, exposure, cutlass_model::Micros(0), -1.0);
+        cutlass_model::put_key(&mut segment, exposure, cutlass_model::Micros(2_000), 1.0);
+        let mut stored = Adjust::default();
+        stored.set(AdjustKey::Contrast, 0.5);
+        stored.set(AdjustKey::Exposure, 0.25);
+        let at = |segment: &Segment, time: i64| {
+            keyed_adjust(stored, segment, &[], cutlass_model::Micros(time))
+        };
+        assert_eq!(at(&segment, 1_000).get(AdjustKey::Exposure), -1.0);
+        assert_eq!(at(&segment, 2_000).get(AdjustKey::Exposure), 0.0);
+        assert_eq!(at(&segment, 9_000).get(AdjustKey::Exposure), 1.0);
+        assert_eq!(at(&segment, 2_000).get(AdjustKey::Contrast), 0.5);
+        // A key past the range is held to it; no keys keep the stored value.
+        cutlass_model::put_key(
+            &mut segment,
+            AdjustKey::Grain.keyframe(),
+            cutlass_model::Micros(0),
+            -1.0,
+        );
+        assert_eq!(at(&segment, 1_000).get(AdjustKey::Grain), 0.0);
+        let plain = Segment::new("p", "m", TimeRange::new(0, 1));
+        assert_eq!(
+            keyed_adjust(stored, &plain, &[], cutlass_model::Micros(0)),
+            stored
+        );
+        // Every slider has its own name.
+        let mut names: Vec<&str> = AdjustKey::ALL.iter().map(|key| key.keyframe()).collect();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), AdjustKey::ALL.len());
+        assert!(names.iter().all(|name| cutlass_model::is_keyable(name)));
+    }
 
     fn grey(level: u8, alpha: u8) -> Vec<u8> {
         let mut bytes = Vec::new();

@@ -83,7 +83,7 @@ pub(crate) fn needs_cpu(draft: &Draft, time: Micros, stack: &[StackLayer<'_>]) -
     !global_marks(draft, time, stack).is_empty()
         || stack
             .iter()
-            .any(|layer| clip_adjust(draft, layer.track_index, layer.segment_index).is_some())
+            .any(|layer| clip_adjust(draft, layer.track_index, layer.segment_index, time).is_some())
         || stack
             .iter()
             .any(|layer| clip_mask(draft, layer.track_index, layer.segment_index).is_some())
@@ -113,7 +113,7 @@ pub(crate) fn present<D: Device>(
         !matches!(
             clip_filter(draft, layer.track_index, layer.segment_index),
             ClipFilter::None
-        ) || clip_adjust(draft, layer.track_index, layer.segment_index).is_some()
+        ) || clip_adjust(draft, layer.track_index, layer.segment_index, time).is_some()
             || clip_mask(draft, layer.track_index, layer.segment_index).is_some()
             || clip_has_selection(draft, layer.track_index, layer.segment_index)
     });
@@ -204,7 +204,12 @@ fn push_visual<'a, D: Device>(
         batch.push(Slot::Borrowed(layer.source));
         return Ok(());
     };
-    let adjust = clip_adjust(pass.draft, layer.track_index, layer.segment_index);
+    let adjust = clip_adjust(
+        pass.draft,
+        layer.track_index,
+        layer.segment_index,
+        pass.time,
+    );
     let mask = clip_mask(pass.draft, layer.track_index, layer.segment_index);
     // Decoded once for this frame, not once per sample.
     let selection = cutlass_effects::segment_selection(pass.draft, segment);
@@ -328,7 +333,7 @@ fn global_marks<'a>(draft: &'a Draft, time: Micros, stack: &[StackLayer<'_>]) ->
         })
         .filter_map(|(track_index, segment_index, segment, _)| {
             // A bundled filter is a look: adjust sliders, not a package.
-            let adjust = cutlass_effects::segment_look(draft, segment);
+            let adjust = cutlass_effects::segment_look_at(draft, segment, time);
             if adjust.as_ref().is_some_and(Colour::is_identity) {
                 return None;
             }
@@ -378,7 +383,7 @@ fn adjustment_layers<'a>(
                 )
         })
         .filter_map(move |(track_index, segment_index, segment)| {
-            let adjust = cutlass_effects::segment_colour(draft, segment);
+            let adjust = cutlass_effects::segment_colour_at(draft, segment, time);
             (!adjust.is_identity()).then_some(Mark {
                 render_index: segment.render_index,
                 track_index,
@@ -516,10 +521,19 @@ fn clip_filter(draft: &Draft, track_index: usize, segment_index: usize) -> ClipF
     }
 }
 
-/// The colour work on a drawn clip, when any is set.
-fn clip_adjust(draft: &Draft, track_index: usize, segment_index: usize) -> Option<Colour> {
-    let colour =
-        cutlass_effects::segment_colour(draft, segment(draft, track_index, segment_index)?);
+/// The colour work on a drawn clip at `time`, keyed sliders as keyed
+/// there, when any is set.
+fn clip_adjust(
+    draft: &Draft,
+    track_index: usize,
+    segment_index: usize,
+    time: Micros,
+) -> Option<Colour> {
+    let colour = cutlass_effects::segment_colour_at(
+        draft,
+        segment(draft, track_index, segment_index)?,
+        time,
+    );
     (!colour.is_identity()).then_some(colour)
 }
 
@@ -975,6 +989,25 @@ mod tests {
             .extra_material_refs
             .push("mul".into());
         assert_eq!(draw(&blended, &store, 0), [78, 0, 0, 255]);
+    }
+
+    #[test]
+    fn a_keyed_adjust_slider_changes_the_picture_over_the_clip() {
+        let store = Store::new();
+        let mut draft = red_draft();
+        let segment = &mut draft.tracks[0].segments[0];
+        let brightness = cutlass_effects::AdjustKey::Brightness.keyframe();
+        cutlass_model::put_key(segment, brightness, Micros(0), 0.0);
+        cutlass_model::put_key(segment, brightness, Micros(1_000_000), -1.0);
+        assert_eq!(draw(&draft, &store, 0), RED);
+        let late = draw(&draft, &store, 900_000);
+        let middle = draw(&draft, &store, 500_000);
+        assert!(
+            late[0] < middle[0] && middle[0] < RED[0],
+            "{late:?} {middle:?}"
+        );
+        // The same draft and time give the same frame.
+        assert_eq!(draw(&draft, &store, 500_000), middle);
     }
 
     #[test]

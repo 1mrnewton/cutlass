@@ -34,8 +34,8 @@ pub mod source;
 pub mod transitions;
 
 pub use adjust::{
-    ADJUSTMENT, AUTO_KEYS, Adjust, AdjustKey, PictureStats, adjust_rgba, auto_adjust, match_adjust,
-    segment_adjust,
+    ADJUSTMENT, AUTO_KEYS, Adjust, AdjustKey, PictureStats, adjust_rgba, auto_adjust, keyed_adjust,
+    match_adjust, segment_adjust,
 };
 pub use blend::{BLEND_WGSL, blend_pixel, blend_unit, segment_blend};
 pub use catalog::{
@@ -52,12 +52,12 @@ pub use crossing::{
 };
 pub use grade::{
     COLOR_CURVES, COLOR_WHEELS, Colour, CurveChannel, Grade, HSL, HSL_COLORS, MAX_CURVE_POINTS,
-    Wheel, WheelSetting, curve_table, is_colour_work, points_json, segment_colour, segment_grade,
-    tidy_points, wheel_json,
+    Wheel, WheelSetting, curve_table, is_colour_work, points_json, segment_colour,
+    segment_colour_at, segment_grade, tidy_points, wheel_json,
 };
 pub use look::{
     FILTER, FILTER_CATEGORIES, LOOK_PREFIX, Look, bundled_look, look_poster, looks, read_look,
-    segment_look,
+    segment_look, segment_look_at,
 };
 pub use lut::{ClipLut, KEPT_SIZE, LUT, Lut, LutError, MAX_CUBE_SIZE, segment_lut};
 pub use mask::{

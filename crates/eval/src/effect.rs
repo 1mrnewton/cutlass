@@ -1018,6 +1018,19 @@ mod tests {
     }
 
     #[test]
+    fn a_keyed_hsl_slider_changes_the_picture_over_the_clip() {
+        let store = Store::new();
+        let mut draft = red_draft();
+        let segment = &mut draft.tracks[0].segments[0];
+        let red_lightness = cutlass_effects::hsl_keys(0, 2)[0];
+        cutlass_model::put_key(segment, red_lightness, Micros(0), 0.0);
+        cutlass_model::put_key(segment, red_lightness, Micros(1_000_000), -1.0);
+        assert_eq!(draw(&draft, &store, 0), RED);
+        let late = draw(&draft, &store, 900_000);
+        assert!(late[0] < RED[0], "{late:?}");
+    }
+
+    #[test]
     fn a_blend_on_an_effect_segment_leaves_the_picture() {
         let temp = Temp::new("blend");
         let mut store = Store::new();

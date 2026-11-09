@@ -52,8 +52,8 @@ pub use crossing::{
 };
 pub use grade::{
     COLOR_CURVES, COLOR_WHEELS, Colour, CurveChannel, Grade, HSL, HSL_COLORS, MAX_CURVE_POINTS,
-    Wheel, WheelSetting, curve_table, is_colour_work, keyed_unit, points_json, segment_colour,
-    segment_colour_at, segment_grade, tidy_points, wheel_json,
+    Wheel, WheelSetting, curve_table, hsl_keys, is_colour_work, keyed_grade, keyed_unit,
+    points_json, segment_colour, segment_colour_at, segment_grade, tidy_points, wheel_json,
 };
 pub use look::{
     FILTER, FILTER_CATEGORIES, LOOK_PREFIX, Look, bundled_look, look_poster, looks, read_look,

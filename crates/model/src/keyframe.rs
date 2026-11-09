@@ -430,6 +430,24 @@ pub const POSE_KEYS: [&str; 5] = [
 /// The opacity property.
 pub const ALPHA_KEY: &str = "KFTypeAlpha";
 
+/// Each part of the pose that keys on its own: the names [`clip_at`] reads
+/// for it, the ones a new key is written under first.
+pub const POSITION_KEYS: [&str; 2] = ["KFTypePositionX", "KFTypePositionY"];
+/// Size: both axes, and the one name that drives both.
+pub const SCALE_KEYS: [&str; 3] = ["KFTypeScaleX", "KFTypeScaleY", "KFTypeScale"];
+/// Turn, under its current and its older name.
+pub const ROTATION_KEYS: [&str; 2] = ["KFTypeRotation", "rotation"];
+/// Opacity, under its current and its older name.
+pub const OPACITY_KEYS: [&str; 2] = [ALPHA_KEY, "alpha"];
+
+/// Whether `segment` has a key on any of `names`.
+#[must_use]
+pub fn has_keys(segment: &Segment, names: &[&str]) -> bool {
+    segment.common_keyframes.iter().any(|group| {
+        names.contains(&group.property_type.as_str()) && !group.keyframe_list.is_empty()
+    })
+}
+
 /// The clip's volume, as a linear gain.
 pub const VOLUME_KEY: &str = "KFTypeVolume";
 
@@ -694,6 +712,34 @@ mod tests {
         assert!(!remove_keys(&mut segment, Micros(500)));
         assert_eq!(segment.common_keyframes.len(), 1);
         assert_eq!(key_offsets(&segment), [Micros(900)]);
+    }
+
+    #[test]
+    fn each_pose_part_is_keyed_apart() {
+        let mut segment = segment();
+        assert!(!has_keys(&segment, &POSITION_KEYS));
+        put_key(&mut segment, "KFTypePositionX", Micros(0), 0.5);
+        assert!(has_keys(&segment, &POSITION_KEYS));
+        assert!(!has_keys(&segment, &SCALE_KEYS));
+        assert!(!has_keys(&segment, &ROTATION_KEYS));
+        assert!(!has_keys(&segment, &OPACITY_KEYS));
+        put_key(&mut segment, "alpha", Micros(0), 0.5);
+        assert!(has_keys(&segment, &OPACITY_KEYS));
+        // An empty group is not a key.
+        remove_keys(&mut segment, Micros(0));
+        segment.common_keyframes.push(CommonKeyframeGroup {
+            property_type: "KFTypeScale".to_owned(),
+            ..CommonKeyframeGroup::default()
+        });
+        assert!(!has_keys(&segment, &SCALE_KEYS));
+        for name in POSITION_KEYS
+            .iter()
+            .chain(&SCALE_KEYS)
+            .chain(&ROTATION_KEYS)
+            .chain(&OPACITY_KEYS)
+        {
+            assert!(is_pose_key(name), "{name}");
+        }
     }
 
     #[test]

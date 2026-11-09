@@ -60,6 +60,10 @@ pub enum KeyedSetting {
     RelightAngle,
     /// A clip's canvas color, under its letterbox.
     CanvasColor,
+    /// Motion blur's Blur.
+    MotionBlurLength,
+    /// Motion blur's Blend.
+    MotionBlurBlend,
 }
 
 impl KeyedSetting {
@@ -109,6 +113,8 @@ impl KeyedSetting {
             Self::RelightColor => &cutlass_model::RELIGHT_COLOR_KEYS,
             Self::RelightAngle => &cutlass_model::RELIGHT_ANGLE_KEYS,
             Self::CanvasColor => &cutlass_model::CANVAS_COLOR_KEYS,
+            Self::MotionBlurLength => &cutlass_model::MOTION_BLUR_LENGTH_KEYS,
+            Self::MotionBlurBlend => &cutlass_model::MOTION_BLUR_BLEND_KEYS,
             Self::TextColor => &cutlass_model::TEXT_COLOR_KEYS,
         }
     }
@@ -407,6 +413,19 @@ impl Shell {
     /// Remove the selected clip's `setting` key under the playhead, or key
     /// `setting` there as it is now. One undo step.
     pub fn toggle_setting_key(&mut self, setting: KeyedSetting) -> Result<(), ShellError> {
+        self.toggle_setting_key_alone(setting)?;
+        // Motion blur's copy is made from its keys, so new keys make it
+        // again.
+        if matches!(
+            setting,
+            KeyedSetting::MotionBlurLength | KeyedSetting::MotionBlurBlend
+        ) {
+            self.remake_motion_blur();
+        }
+        Ok(())
+    }
+
+    fn toggle_setting_key_alone(&mut self, setting: KeyedSetting) -> Result<(), ShellError> {
         let segment_id = self.selected().cloned().ok_or(ShellError::NoProject)?;
         self.refuse_locked(&segment_id)?;
         let keys = self.setting_keys(setting).ok_or(ShellError::NoProject)?;
@@ -453,6 +472,9 @@ impl Shell {
                 | KeyedSetting::RelightColor
                 | KeyedSetting::RelightAngle => "pick a light first".to_owned(),
                 KeyedSetting::CanvasColor => "switch Canvas on first".to_owned(),
+                KeyedSetting::MotionBlurLength | KeyedSetting::MotionBlurBlend => {
+                    "switch Motion blur on first".to_owned()
+                }
                 KeyedSetting::Hsl(..) | KeyedSetting::WheelPuck(_) | KeyedSetting::WheelLuma(_) => {
                     "colour keys belong on a picture".to_owned()
                 }
@@ -535,6 +557,8 @@ impl Shell {
                 super::relight::relight_rgb(&self.relight()?.color).to_vec()
             }
             KeyedSetting::RelightAngle => vec![self.relight()?.angle],
+            KeyedSetting::MotionBlurLength => vec![self.motion_blur()?.blur],
+            KeyedSetting::MotionBlurBlend => vec![self.motion_blur()?.blend],
             KeyedSetting::CanvasColor => {
                 (!inspection.letterbox.is_empty()).then_some(())?;
                 unit_rgb(&inspection.letterbox).to_vec()

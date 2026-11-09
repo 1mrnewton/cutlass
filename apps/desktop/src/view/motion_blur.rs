@@ -9,10 +9,10 @@ use egui::Ui;
 
 use cutlass_model::MotionBlur;
 
-use crate::shell::Shell;
+use crate::shell::{KeyedSetting, Shell};
 use crate::ui;
 
-use super::inspector::{InspectorState, body, label_row, note, section, send, slider};
+use super::inspector::{InspectorState, body, label_row, note, section, send, setting_row, slider};
 
 /// What each choice is called.
 const DIRECTIONS: [(i64, &str); 3] = [
@@ -60,20 +60,33 @@ pub(super) fn motion_blur(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorS
             note(ui, &format!("Processing {:.1}%", done * 100.0));
         }
         let held = ui.input(|input| input.pointer.any_down());
-        for (key, label, stored) in [
-            ("motion blur length", "Blur", blur.blur),
-            ("motion blur blend", "Blend", blur.blend),
+        for (key, label, stored, setting) in [
+            (
+                "motion blur length",
+                "Blur",
+                blur.blur,
+                KeyedSetting::MotionBlurLength,
+            ),
+            (
+                "motion blur blend",
+                "Blend",
+                blur.blend,
+                KeyedSetting::MotionBlurBlend,
+            ),
         ] {
             let pending = format!("{key} pending");
-            if let Some(value) = slider(
-                ui,
-                state,
-                key,
-                label,
-                (stored * 100.0).round(),
-                0.0..=100.0,
-                |v| format!("{v:.0}"),
-            ) {
+            let changed = setting_row(shell, ui, setting, true, |ui| {
+                slider(
+                    ui,
+                    state,
+                    key,
+                    label,
+                    (stored * 100.0).round(),
+                    0.0..=100.0,
+                    |v| format!("{v:.0}"),
+                )
+            });
+            if let Some(value) = changed {
                 state.fields.insert(pending.clone(), value.to_string());
             }
             // Sent once the slider is let go.

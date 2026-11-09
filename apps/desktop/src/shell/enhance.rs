@@ -20,7 +20,7 @@ use cutlass_vision::{
     INTERPOLATE_WEIGHTS, Interpolator, enhance_clip,
 };
 
-use super::{Landing, Shell, ShellError};
+use super::{KeyedSetting, Landing, Shell, ShellError};
 
 /// The jobs' labels, which the inspector looks for to show their progress.
 /// A copy that is enhanced runs as the first, one denoised but not
@@ -207,7 +207,57 @@ impl Shell {
                 return Err(ShellError::Edit(cutlass_session::EditError::MotionBlur));
             }
         }
+        // A keyed Blur or Blend plays its keys, so a change to one keys it
+        // here, and the copy is made again from the keys.
+        if let (Some(next), Some(now), Some(stored)) =
+            (blur.as_ref(), self.motion_blur(), self.stored_motion_blur())
+        {
+            let mut keys = Vec::new();
+            let mut rest = next.clone();
+            for (setting, value, was) in [
+                (KeyedSetting::MotionBlurLength, next.blur, now.blur),
+                (KeyedSetting::MotionBlurBlend, next.blend, now.blend),
+            ] {
+                if (value - was).abs() > 1e-9
+                    && let Some(key) = self.key_setting_here(setting, vec![value])
+                {
+                    keys.push(key);
+                    if setting == KeyedSetting::MotionBlurLength {
+                        rest.blur = stored.blur;
+                    } else {
+                        rest.blend = stored.blend;
+                    }
+                }
+            }
+            if !keys.is_empty() {
+                if rest != stored {
+                    self.set_copied(Copied::MotionBlur(Some(rest)), 0)?;
+                }
+                self.apply_requests(&keys)?;
+                self.remake_motion_blur();
+                return Ok(());
+            }
+        }
         self.set_copied(Copied::MotionBlur(blur), 0)
+    }
+
+    /// Make the selected clip's copy again when its Motion blur keys
+    /// changed and the project lacks the copy they make. A refusal is
+    /// logged: the clip draws its own file until a copy is made.
+    pub(super) fn remake_motion_blur(&mut self) {
+        let Ok(segment_id) = self.enhance_segment() else {
+            return;
+        };
+        let Ok(draft) = self.session_draft() else {
+            return;
+        };
+        let levels = levels_of(draft, &segment_id);
+        if levels.motion_blur.is_none() {
+            return;
+        }
+        if let Err(error) = self.make_copies(&[(segment_id, levels)]) {
+            cutlass_logger::warn!("the clip's blurred copy was not started: {error}");
+        }
     }
 
     fn set_copied(&mut self, which: Copied, level: i64) -> Result<(), ShellError> {
@@ -480,6 +530,31 @@ impl Shell {
     /// The selected clip's Motion blur, `None` when it is off.
     #[must_use]
     pub fn motion_blur(&self) -> Option<MotionBlur> {
+        let draft = self.draft()?;
+        let segment = self.selected_segment()?;
+        let mut blur = self.stored_motion_blur()?;
+        // A keyed Blur or Blend shows as keyed at the playhead.
+        let offset = self.playhead.0.saturating_sub(segment.target.start.0);
+        let keyed = |names: &[&str]| match cutlass_model::sample(
+            &segment.common_keyframes,
+            &draft.keyframe_graph_list,
+            names,
+            offset,
+        ) {
+            Some(Some(value)) if value.is_finite() => Some(value.clamp(0.0, 1.0)),
+            _ => None,
+        };
+        if let Some(length) = keyed(&cutlass_model::MOTION_BLUR_LENGTH_KEYS) {
+            blur.blur = length;
+        }
+        if let Some(blend) = keyed(&cutlass_model::MOTION_BLUR_BLEND_KEYS) {
+            blur.blend = blend;
+        }
+        Some(blur)
+    }
+
+    /// The selected clip's Motion blur as stored, its keys aside.
+    fn stored_motion_blur(&self) -> Option<MotionBlur> {
         let draft = self.draft()?;
         let segment_id = self.selected()?;
         let (segment, _) = super::placed(draft, segment_id)?;

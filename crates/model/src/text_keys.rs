@@ -217,7 +217,11 @@ mod tests {
             assert!(is_keyable(name), "{name}");
             assert!(!key.takes(f64::NAN), "{name}");
             let mut text = MaterialText::default();
-            let value = if key == TextStyleKey::Size { 30.0 } else { 0.125 };
+            let value = if key == TextStyleKey::Size {
+                30.0
+            } else {
+                0.125
+            };
             assert!(key.takes(value), "{name}");
             key.set(&mut text, value);
             assert_eq!(key.get(&text), value, "{name}");

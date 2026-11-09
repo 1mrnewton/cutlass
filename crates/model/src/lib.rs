@@ -25,6 +25,7 @@ mod meta;
 mod relationship;
 mod segment;
 mod serde_util;
+mod shape_keys;
 mod text_keys;
 mod time;
 mod track;
@@ -73,6 +74,10 @@ pub use materials::{
 pub use meta::MetaType;
 pub use relationship::{LinkPair, Relationship};
 pub use segment::{APPLY_ONE_CLIP, HdrSettings, ResponsiveLayout, Segment};
+pub use shape_keys::{
+    MAX_SHAPE_SHADOW_DISTANCE, MAX_SHAPE_SIZE, MAX_SHAPE_STROKE, SHAPE_STYLE_KEYS, ShapeStyleKey,
+    shape_style_at,
+};
 pub use text_keys::{TEXT_STYLE_KEYS, TextStyleKey, text_style_at};
 pub use time::{FrameError, FrameRate, Micros, RangeError, TimeRange, TimecodeLabel};
 pub use track::Track;

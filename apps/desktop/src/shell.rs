@@ -6001,18 +6001,19 @@ impl Shell {
         }];
         match mask {
             Some(mask) => {
-                let values = [
-                    mask.x,
-                    mask.y,
-                    mask.width,
-                    mask.height,
-                    mask.rotation,
-                    mask.feather,
-                    mask.round,
-                ]
-                .map(f64::from)
-                .to_vec();
-                requests.extend(self.key_setting_here(KeyedSetting::Mask, values));
+                // Each keyed part that changed is keyed here; the others
+                // are only stored.
+                let values = inspector::mask_values(&mask);
+                let was = self
+                    .inspection()
+                    .and_then(|inspection| inspection.mask)
+                    .map(|mask| inspector::mask_values(&mask));
+                for (part, range) in KeyedSetting::MASK_PARTS {
+                    let changed = was.is_none_or(|was| was[range.clone()] != values[range.clone()]);
+                    if changed {
+                        requests.extend(self.key_setting_here(part, values[range].to_vec()));
+                    }
+                }
             }
             None if self.setting_keyed(KeyedSetting::Mask) => {
                 let draft = self.session_draft()?;

@@ -19,9 +19,27 @@ pub enum KeyedSetting {
     Scale,
     Rotation,
     Opacity,
+    /// Every mask value at once, as taking the mask off clears them.
     Mask,
+    MaskPosition,
+    MaskSize,
+    MaskRotation,
+    MaskFeather,
+    MaskRound,
     Volume,
     TextColor,
+}
+
+impl KeyedSetting {
+    /// The mask's parts, each keyed on its own, with where its values sit
+    /// in [`cutlass_model::MASK_KEYS`].
+    pub const MASK_PARTS: [(Self, std::ops::Range<usize>); 5] = [
+        (Self::MaskPosition, 0..2),
+        (Self::MaskSize, 2..4),
+        (Self::MaskRotation, 4..5),
+        (Self::MaskFeather, 5..6),
+        (Self::MaskRound, 6..7),
+    ];
 }
 
 impl KeyedSetting {
@@ -34,6 +52,11 @@ impl KeyedSetting {
             Self::Rotation => &cutlass_model::ROTATION_KEYS,
             Self::Opacity => &cutlass_model::OPACITY_KEYS,
             Self::Mask => &cutlass_model::MASK_KEYS,
+            Self::MaskPosition => &cutlass_model::MASK_POSITION_KEYS,
+            Self::MaskSize => &cutlass_model::MASK_SIZE_KEYS,
+            Self::MaskRotation => &cutlass_model::MASK_ROTATION_KEYS,
+            Self::MaskFeather => &cutlass_model::MASK_FEATHER_KEYS,
+            Self::MaskRound => &cutlass_model::MASK_ROUND_KEYS,
             Self::Volume => &[cutlass_model::VOLUME_KEY],
             Self::TextColor => &cutlass_model::TEXT_COLOR_KEYS,
         }
@@ -282,7 +305,12 @@ impl Shell {
                 | KeyedSetting::Scale
                 | KeyedSetting::Rotation
                 | KeyedSetting::Opacity => "keyframes belong on a picture or title".to_owned(),
-                KeyedSetting::Mask => "pick a mask shape first".to_owned(),
+                KeyedSetting::Mask
+                | KeyedSetting::MaskPosition
+                | KeyedSetting::MaskSize
+                | KeyedSetting::MaskRotation
+                | KeyedSetting::MaskFeather
+                | KeyedSetting::MaskRound => "pick a mask shape first".to_owned(),
                 KeyedSetting::Volume => "the clip has no sound to key".to_owned(),
                 KeyedSetting::TextColor => "a color key belongs on text".to_owned(),
             })
@@ -322,19 +350,17 @@ impl Shell {
                 self.keys()?;
                 self.pose_values(setting, &inspection)?
             }
-            KeyedSetting::Mask => {
-                let mask = inspection.mask?;
-                [
-                    mask.x,
-                    mask.y,
-                    mask.width,
-                    mask.height,
-                    mask.rotation,
-                    mask.feather,
-                    mask.round,
-                ]
-                .map(f64::from)
-                .to_vec()
+            KeyedSetting::Mask => mask_values(&inspection.mask?).to_vec(),
+            KeyedSetting::MaskPosition
+            | KeyedSetting::MaskSize
+            | KeyedSetting::MaskRotation
+            | KeyedSetting::MaskFeather
+            | KeyedSetting::MaskRound => {
+                let values = mask_values(&inspection.mask?);
+                let (_, range) = KeyedSetting::MASK_PARTS
+                    .into_iter()
+                    .find(|(part, _)| *part == setting)?;
+                values[range].to_vec()
             }
             KeyedSetting::Volume => vec![inspection.volume],
             KeyedSetting::TextColor => {
@@ -375,7 +401,7 @@ impl Shell {
             }
             KeyedSetting::Rotation => vec![inspection.rotation],
             KeyedSetting::Opacity => vec![inspection.opacity],
-            KeyedSetting::Mask | KeyedSetting::Volume | KeyedSetting::TextColor => return None,
+            _ => return None,
         })
     }
 
@@ -1082,6 +1108,21 @@ fn unit_rgb(color: &str) -> [f64; 3] {
     [channel(0), channel(2), channel(4)]
 }
 
+/// The mask's values in the order of [`cutlass_model::MASK_KEYS`].
+#[must_use]
+pub fn mask_values(mask: &cutlass_effects::Mask) -> [f64; 7] {
+    [
+        mask.x,
+        mask.y,
+        mask.width,
+        mask.height,
+        mask.rotation,
+        mask.feather,
+        mask.round,
+    ]
+    .map(f64::from)
+}
+
 #[cfg(test)]
 mod tests {
     use cutlass_model::{
@@ -1450,6 +1491,53 @@ mod tests {
         desktop.set_mask(None).unwrap();
         assert!(!desktop.setting_keyed(super::KeyedSetting::Mask));
         assert!(desktop.inspection().unwrap().mask.is_none());
+    }
+
+    #[test]
+    fn each_mask_part_keys_on_its_own() {
+        use super::KeyedSetting;
+        let temp = Temp::new();
+        let mut desktop = every_kind(&temp);
+        pick(&mut desktop, "main");
+        let circle = cutlass_effects::Mask::new(cutlass_effects::MaskShape::Circle);
+        desktop.set_mask(Some(circle)).unwrap();
+        desktop.seek(cutlass_model::Micros(0));
+        desktop
+            .toggle_setting_key(KeyedSetting::MaskFeather)
+            .unwrap();
+        desktop.seek(cutlass_model::Micros(2_000_000));
+        desktop
+            .set_mask(Some(cutlass_effects::Mask {
+                feather: 1.0,
+                ..circle
+            }))
+            .unwrap();
+        let times = |desktop: &Shell, part| desktop.setting_keys(part).unwrap().times;
+        assert_eq!(times(&desktop, KeyedSetting::MaskFeather).len(), 2);
+        // Moving the mask is stored, not keyed, and the feather keys stay.
+        desktop
+            .set_mask(Some(cutlass_effects::Mask {
+                x: 0.5,
+                feather: 1.0,
+                ..circle
+            }))
+            .unwrap();
+        for part in [
+            KeyedSetting::MaskPosition,
+            KeyedSetting::MaskSize,
+            KeyedSetting::MaskRotation,
+            KeyedSetting::MaskRound,
+        ] {
+            assert!(times(&desktop, part).is_empty(), "{part:?}");
+        }
+        assert_eq!(times(&desktop, KeyedSetting::MaskFeather).len(), 2);
+        desktop.seek(cutlass_model::Micros(1_000_000));
+        let mask = desktop.inspection().unwrap().mask.unwrap();
+        assert!((mask.x - 0.5).abs() < 1e-6, "{mask:?}");
+        assert!(
+            (mask.feather - (circle.feather + 1.0) / 2.0).abs() < 1e-6,
+            "{mask:?}"
+        );
     }
 
     #[test]

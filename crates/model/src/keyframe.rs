@@ -488,14 +488,38 @@ pub fn is_pose_key(property: &str) -> bool {
 /// are not known.
 pub const TEXT_COLOR_KEYS: [&str; 3] = ["KFTypeTextColorR", "KFTypeTextColorG", "KFTypeTextColorB"];
 
-/// Whether a key on `property` is played: the pose, the volume, the mask
-/// or a text's color.
+/// The colour Adjust sliders, from -1 to 1 (0 to 1 for Fade, Sharpen and
+/// Grain), in the order the inspector shows them. These are Cutlass's own
+/// names.
+pub static ADJUST_KEYS: [&str; 17] = [
+    "KFTypeAdjustExposure",
+    "KFTypeAdjustBrightness",
+    "KFTypeAdjustContrast",
+    "KFTypeAdjustSaturation",
+    "KFTypeAdjustBrilliance",
+    "KFTypeAdjustHighlights",
+    "KFTypeAdjustShadows",
+    "KFTypeAdjustWhites",
+    "KFTypeAdjustBlacks",
+    "KFTypeAdjustTemperature",
+    "KFTypeAdjustTint",
+    "KFTypeAdjustHue",
+    "KFTypeAdjustFade",
+    "KFTypeAdjustClarity",
+    "KFTypeAdjustSharpen",
+    "KFTypeAdjustVignette",
+    "KFTypeAdjustGrain",
+];
+
+/// Whether a key on `property` is played: the pose, the volume, the mask,
+/// a text's color or an Adjust slider.
 #[must_use]
 pub fn is_keyable(property: &str) -> bool {
     is_pose_key(property)
         || matches!(property, VOLUME_KEY | "volume")
         || MASK_KEYS.contains(&property)
         || TEXT_COLOR_KEYS.contains(&property)
+        || ADJUST_KEYS.contains(&property)
 }
 
 /// The keyed letter color of `segment` at timeline `time`, red, green and

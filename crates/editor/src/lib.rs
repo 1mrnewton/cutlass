@@ -87,7 +87,7 @@ pub use inspector::{
     BACKGROUND_ALPHA_START, BACKGROUND_ROUND_START, GLOW_RANGE_START, GLOW_STRENGTH_START,
     LetterCase, OUTLINE_START, Panel, SHADOW_ANGLE, SHADOW_BLUR_START, SHADOW_DISTANCE_START,
     SILENT_DB, TEXT_PRESETS, TextLook, TextPreset, canvas_pixels, gain_of_db, is_caption, panel_of,
-    preset_requests, starting, stored_position, text_look, volume_db,
+    preset_requests, starting, stored_position, text_look, text_look_at, volume_db,
 };
 pub use keys::{ClipKeys, KeyGraph, clip_keys, key_graphs, move_key, value_keys};
 pub use lane::{Lane, lane_category, lanes, lanes_for};

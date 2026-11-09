@@ -4,7 +4,7 @@
 //! style presets.
 
 use cutlass_model::{
-    Draft, MaterialEffect, MaterialRef, MaterialText, Segment, SegmentId, Track, TrackFlag,
+    Draft, MaterialEffect, MaterialRef, MaterialText, Micros, Segment, SegmentId, Track, TrackFlag,
     TrackType, segment_bloom,
 };
 use cutlass_session::Request;
@@ -158,6 +158,21 @@ pub fn text_look(draft: &Draft, segment: &Segment) -> Option<TextLook> {
     let Some(MaterialRef::Text(text)) = draft.materials.get(segment.material_id.as_str()) else {
         return None;
     };
+    look_of(draft, segment, text)
+}
+
+/// [`text_look`] with the title's keyed style settings as they are at
+/// timeline `time`.
+#[must_use]
+pub fn text_look_at(draft: &Draft, segment: &Segment, time: Micros) -> Option<TextLook> {
+    let Some(MaterialRef::Text(text)) = draft.materials.get(segment.material_id.as_str()) else {
+        return None;
+    };
+    let keyed = cutlass_model::text_style_at(text, segment, &draft.keyframe_graph_list, time);
+    look_of(draft, segment, keyed.as_ref().unwrap_or(text))
+}
+
+fn look_of(draft: &Draft, segment: &Segment, text: &MaterialText) -> Option<TextLook> {
     let on = |on: bool, color: &str| if on { color.to_owned() } else { String::new() };
     // No glow reads as no amounts, so a first glow color takes the starts.
     let (glow_color, glow_strength, glow_range) = segment_bloom(&draft.materials, segment)
@@ -366,6 +381,28 @@ fn halves(canvas: (i32, i32)) -> (f64, f64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_keyed_text_style_shows_where_the_time_is() {
+        let mut draft = Draft::empty("D");
+        draft.materials.texts.push(MaterialText {
+            id: "t".into(),
+            has_shadow: true,
+            shadow_color: "#000000".to_owned(),
+            shadow_distance: 10.0,
+            border_width: 0.1,
+            ..MaterialText::default()
+        });
+        let mut segment = Segment::new("s", "t", cutlass_model::TimeRange::new(0, 2_000));
+        let distance = cutlass_model::TextStyleKey::ShadowDistance.names()[0];
+        cutlass_model::put_key(&mut segment, distance, Micros(0), 0.0);
+        cutlass_model::put_key(&mut segment, distance, Micros(2_000), 40.0);
+        let look = text_look_at(&draft, &segment, Micros(1_000)).unwrap();
+        assert_eq!(look.shadow_distance, 20.0);
+        assert_eq!(look.outline_width, 0.1);
+        // The timeless look keeps what is stored.
+        assert_eq!(text_look(&draft, &segment).unwrap().shadow_distance, 10.0);
+    }
 
     #[test]
     fn decibels_round_trip_and_floor_at_silence() {

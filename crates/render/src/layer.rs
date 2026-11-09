@@ -134,6 +134,14 @@ pub enum Layer<'a> {
     },
     /// An effect over everything drawn before it in the same list.
     Effect(&'a [Step], Option<&'a cutlass_effects::CanvasMask>),
+    /// Colour work (a chroma key, grades, adjust sliders, a LUT) over
+    /// everything drawn before it in the same list, shown only inside
+    /// `mask` when it has one. `seed` moves the grain.
+    Colour {
+        colour: &'a cutlass_effects::Colour,
+        seed: u32,
+        mask: Option<&'a cutlass_effects::CanvasMask>,
+    },
     /// `layers` drawn on a canvas the size of this one, then mixed by
     /// `mode` with everything drawn before it in the same list.
     Blend {

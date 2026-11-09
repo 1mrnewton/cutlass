@@ -25,6 +25,7 @@ mod meta;
 mod relationship;
 mod segment;
 mod serde_util;
+mod text_keys;
 mod time;
 mod track;
 mod tracking;
@@ -72,6 +73,7 @@ pub use materials::{
 pub use meta::MetaType;
 pub use relationship::{LinkPair, Relationship};
 pub use segment::{APPLY_ONE_CLIP, HdrSettings, ResponsiveLayout, Segment};
+pub use text_keys::{TEXT_STYLE_KEYS, TextStyleKey, text_style_at};
 pub use time::{FrameError, FrameRate, Micros, RangeError, TimeRange, TimecodeLabel};
 pub use track::Track;
 pub use tracking::{TrackMode, TrackPath, TrackSample, VIDEO_TRACKING};

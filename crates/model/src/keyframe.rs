@@ -559,7 +559,7 @@ pub fn effect_control_id(property: &str) -> Option<&str> {
 
 /// Whether a key on `property` is played: the pose, the volume, the mask,
 /// a text's color, an Adjust slider, or a filter, LUT or chroma key's
-/// strength, or a recipe effect's control.
+/// strength, a recipe effect's control, or a text's style.
 #[must_use]
 pub fn is_keyable(property: &str) -> bool {
     is_pose_key(property)
@@ -569,6 +569,7 @@ pub fn is_keyable(property: &str) -> bool {
         || ADJUST_KEYS.contains(&property)
         || is_unit_colour_key(property)
         || effect_control_id(property).is_some()
+        || crate::text_keys::TEXT_STYLE_KEYS.contains(&property)
 }
 
 /// The keyed letter color of `segment` at timeline `time`, red, green and

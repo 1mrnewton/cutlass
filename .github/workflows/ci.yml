@@ -117,9 +117,11 @@ jobs:
         with:
           tool: cargo-nextest
       - name: Test
+        # Benches use their own harness, which nextest cannot list; clippy in
+        # the lint job still builds them.
         env:
           CUTLASS_REQUIRE_GPU: "1"
-        run: cargo nextest run --workspace --all-targets --no-fail-fast
+        run: cargo nextest run --workspace --lib --bins --tests --no-fail-fast
       - name: Desktop smoke test
         run: |
           cargo build -p cutlass

@@ -33,10 +33,22 @@ pub fn add_keyframe(
     draft: &mut Draft,
     segment_id: &SegmentId,
     offset: Micros,
+    properties: &[String],
 ) -> Result<(), EditError> {
+    // Only the pose takes these keys; another name is keyed by value.
+    let pose = [
+        cutlass_model::POSE_KEYS.as_slice(),
+        &[cutlass_model::ALPHA_KEY],
+    ]
+    .concat();
+    if properties.iter().any(|name| !pose.contains(&name.as_str())) {
+        return Err(EditError::KeyValue);
+    }
     let graphs = draft.keyframe_graph_list.clone();
     let segment = keyed(draft, segment_id, offset)?;
-    cutlass_model::add_keys(segment, &graphs, offset).ok_or(EditError::KeyTime)
+    let keep =
+        |property: &str| properties.is_empty() || properties.iter().any(|name| name == property);
+    cutlass_model::add_keys_where(segment, &graphs, offset, keep).ok_or(EditError::KeyTime)
 }
 
 /// Remove the pose keys at `offset` from the clip's start.
@@ -387,6 +399,7 @@ mod tests {
                 &[Request::AddKeyframe {
                     segment_id: "a".into(),
                     offset: Micros(0),
+                    properties: Vec::new(),
                 }],
             )
             .unwrap();
@@ -633,6 +646,7 @@ mod tests {
                 &[Request::AddKeyframe {
                     segment_id: "a".into(),
                     offset: Micros(0),
+                    properties: Vec::new(),
                 }],
             )
             .unwrap();
@@ -687,6 +701,30 @@ mod tests {
             )
             .unwrap();
         assert!(session.draft().keyframe_graph_list.is_empty());
+    }
+
+    #[test]
+    fn an_add_keyframe_with_names_keys_only_those_pose_parts() {
+        let mut session = open();
+        let add = |properties: &[&str]| Request::AddKeyframe {
+            segment_id: "a".into(),
+            offset: Micros(0),
+            properties: properties.iter().map(|name| (*name).to_owned()).collect(),
+        };
+        assert_eq!(
+            session.apply(1, &[add(&["KFTypeVolume"])]),
+            Err(EditError::KeyValue)
+        );
+        session
+            .apply(1, &[add(&["KFTypePositionX", "KFTypePositionY"])])
+            .unwrap();
+        let segment = &session.draft().tracks[0].segments[0];
+        let keyed: Vec<&str> = segment
+            .common_keyframes
+            .iter()
+            .map(|group| group.property_type.as_str())
+            .collect();
+        assert_eq!(keyed, ["KFTypePositionX", "KFTypePositionY"]);
     }
 
     #[test]
@@ -758,6 +796,7 @@ mod tests {
                     Request::AddKeyframe {
                         segment_id: "a".into(),
                         offset: Micros(800_000),
+                        properties: Vec::new(),
                     },
                 ],
             )

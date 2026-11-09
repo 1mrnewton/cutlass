@@ -138,6 +138,7 @@ impl ClipKeys {
             .then(|| Request::AddKeyframe {
                 segment_id: segment_id.clone(),
                 offset: Micros(offset),
+                properties: Vec::new(),
             })
     }
 }

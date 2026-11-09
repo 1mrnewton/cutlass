@@ -692,9 +692,11 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             segment_id,
             keyframes,
         } => keyframe::set_keyframes(draft, segment_id, keyframes),
-        Request::AddKeyframe { segment_id, offset } => {
-            keyframe::add_keyframe(draft, segment_id, *offset)
-        }
+        Request::AddKeyframe {
+            segment_id,
+            offset,
+            properties,
+        } => keyframe::add_keyframe(draft, segment_id, *offset, properties),
         Request::RemoveKeyframe { segment_id, offset } => {
             keyframe::remove_keyframe(draft, segment_id, *offset)
         }

@@ -779,6 +779,17 @@ pub fn put_key(segment: &mut Segment, property: &str, offset: Micros, value: f64
 /// from the segment start. A clip whose keys do not read is refused.
 #[must_use]
 pub fn add_keys(segment: &mut Segment, graphs: &[KeyframeGraph], offset: Micros) -> Option<()> {
+    add_keys_where(segment, graphs, offset, |_| true)
+}
+
+/// [`add_keys`] on the pose names `keep` takes only: the rest of the pose
+/// is left as it is, keyed or not.
+pub fn add_keys_where(
+    segment: &mut Segment,
+    graphs: &[KeyframeGraph],
+    offset: Micros,
+    keep: impl Fn(&str) -> bool,
+) -> Option<()> {
     let at = Micros(segment.target.start.0.saturating_add(offset.0));
     let (clip, uniform) = clip_at(segment, graphs, at)?;
     let (scale_x, scale_y) = if uniform.on {
@@ -794,9 +805,13 @@ pub fn add_keys(segment: &mut Segment, graphs: &[KeyframeGraph], offset: Micros)
         scale_y,
     ];
     for (property, value) in POSE_KEYS.iter().zip(values) {
-        put_key(segment, property, offset, value);
+        if keep(property) {
+            put_key(segment, property, offset, value);
+        }
     }
-    put_key(segment, ALPHA_KEY, offset, clip.alpha);
+    if keep(ALPHA_KEY) {
+        put_key(segment, ALPHA_KEY, offset, clip.alpha);
+    }
     Some(())
 }
 

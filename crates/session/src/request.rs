@@ -634,9 +634,14 @@ pub enum Request {
     },
     /// Key the clip's place, size, turn, and opacity as they are at
     /// `offset` from its start. A key there takes those values again.
+    /// Named `properties` (pose names such as `KFTypePositionX` or
+    /// `KFTypeAlpha`) key only those parts and leave the rest of the pose
+    /// alone; none keys the whole pose.
     AddKeyframe {
         segment_id: SegmentId,
         offset: Micros,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        properties: Vec<String>,
     },
     /// Key each named setting at `offset` from the clip's start: the
     /// volume (`KFTypeVolume`) or the mask (`KFTypeCommonMask*`), in the

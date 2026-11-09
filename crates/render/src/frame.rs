@@ -81,6 +81,19 @@ fn layers_of(frame: &FrameLayers) -> Result<Vec<Layer<'_>>, RenderError> {
                 placement: layer.placement,
             },
             GpuSource::Effect(steps, mask) => Layer::Effect(steps, mask.as_ref()),
+            GpuSource::Colour { colour, seed, mask } => Layer::Colour {
+                colour,
+                seed: *seed,
+                mask: mask.as_ref(),
+            },
+            GpuSource::Cut(mask) => Layer::Cut(mask),
+            GpuSource::Select(cut) => Layer::Select(crate::Selected {
+                width: cut.width,
+                height: cut.height,
+                alpha: &cut.alpha,
+                invert: cut.invert,
+                frame: cut.frame,
+            }),
             GpuSource::Vector(scene) => Layer::Vector {
                 scene,
                 placement: layer.placement,

@@ -8,7 +8,9 @@ use cutlass_model::{Draft, Micros};
 use cutlass_picture::{CpuBytes, Picture, Sample};
 
 use crate::canvas::canvas_rgba;
-use crate::effect::{RecipeMark, StackLayer, needs_cpu, present, recipe_marks};
+use crate::effect::{
+    RecipeMark, StackLayer, clip_passes, colour_marks, needs_cpu, present, recipe_marks,
+};
 use crate::gpu::{Composed, FrameLayers, GpuLayer};
 use crate::lottie::{LottieLayer, PlacedLottie, lottie_layers, shape_layers};
 use crate::media::{OpenClips, Placed, video_layers};
@@ -209,7 +211,10 @@ pub(crate) fn compose_layers<D: Device>(
             if needs_cpu(draft, time, &stack) {
                 return Ok(Err(effects));
             }
-            Ok(Ok(gpu_layers(draft, time, extent, layers, effects)))
+            let colours = colour_marks(draft, time, extent, &stack);
+            Ok(Ok(gpu_layers(
+                draft, time, extent, layers, effects, colours,
+            )))
         },
     )?;
     match layers {
@@ -235,19 +240,29 @@ pub(crate) fn compose_layers<D: Device>(
     }
 }
 
+/// `layers` as GPU layers, with `effects` (recipes) and `colours` (looks
+/// and adjustment layers) each over the layers before it, and every clip's
+/// own colour work, mask, selection and bound recipes over that clip alone.
 fn gpu_layers(
     draft: &Draft,
     time: Micros,
     extent: Extent,
     layers: &[Ordered<'_>],
     effects: Vec<RecipeMark>,
+    colours: Vec<((i32, usize, usize), GpuLayer)>,
 ) -> FrameLayers {
     let mut out = Vec::new();
     let (bound, effects): (Vec<RecipeMark>, Vec<RecipeMark>) =
         effects.into_iter().partition(|mark| mark.bound.is_some());
-    let mut effects = effects.into_iter().peekable();
     let effect =
         |mark: RecipeMark| GpuLayer::effect(mark.steps, mark.mask, extent.width, extent.height);
+    let mut marks: Vec<((i32, usize, usize), GpuLayer)> = effects
+        .into_iter()
+        .map(|mark| (mark.key, effect(mark)))
+        .chain(colours)
+        .collect();
+    marks.sort_by_key(|(key, _)| *key);
+    let mut effects = marks.into_iter().peekable();
     if let Some(pixel) = draft
         .canvas_config
         .background
@@ -258,8 +273,8 @@ fn gpu_layers(
         out.push(GpuLayer::fill(pixel));
     }
     for layer in layers {
-        while let Some(mark) = effects.next_if(|mark| mark.key < layer.key) {
-            out.push(effect(mark));
+        while let Some((_, mark)) = effects.next_if(|(key, _)| *key < layer.key) {
+            out.push(mark);
         }
         let gpu = match &layer.paint {
             Paint::Video(placed) => placed.gpu(time),
@@ -284,16 +299,18 @@ fn gpu_layers(
                 Sample::Ready(Picture::Platform(_)) | Sample::Miss => Vec::new(),
             },
         };
-        let own: Vec<GpuLayer> = bound
-            .iter()
-            .filter(|mark| mark.bound == Some((layer.key.1, layer.key.2)))
-            .map(|mark| {
-                effect(RecipeMark {
-                    steps: mark.steps.clone(),
-                    ..*mark
-                })
-            })
-            .collect();
+        let mut own = clip_passes(draft, time, extent, layer.key.1, layer.key.2);
+        own.extend(
+            bound
+                .iter()
+                .filter(|mark| mark.bound == Some((layer.key.1, layer.key.2)))
+                .map(|mark| {
+                    effect(RecipeMark {
+                        steps: mark.steps.clone(),
+                        ..*mark
+                    })
+                }),
+        );
         let mode = draft
             .tracks
             .get(layer.key.1)
@@ -326,7 +343,7 @@ fn gpu_layers(
             }));
         }
     }
-    out.extend(effects.map(effect));
+    out.extend(effects.map(|(_, layer)| layer));
     FrameLayers {
         width: extent.width,
         height: extent.height,
@@ -796,7 +813,7 @@ mod tests {
     }
 
     #[test]
-    fn an_adjusted_clip_composes_on_the_cpu_with_its_sliders() {
+    fn an_adjusted_clip_runs_its_sliders_over_itself_on_the_gpu_path() {
         let draft = color_clip("0xFF404040", false);
         assert_eq!(pixels(&draft, 0), [64, 64, 64, 255].repeat(2));
         let mut session = cutlass_session::Session::open(draft);
@@ -815,18 +832,131 @@ mod tests {
         assert_eq!(pixels(&draft, 0), [128, 128, 128, 255].repeat(2));
         let mut device = SoftwareDevice::new();
         let mut clips = OpenClips::new();
-        assert!(!matches!(
-            layers_in(
-                &Snapshot::new(&draft),
-                Micros(0),
-                &mut device,
-                &media(),
-                &mut clips,
+        let Ok(Composed::Layers(frame)) = layers_in(
+            &Snapshot::new(&draft),
+            Micros(0),
+            &mut device,
+            &media(),
+            &mut clips,
+            0,
+            None,
+        ) else {
+            panic!("colour work stays on the GPU path");
+        };
+        // The clip on a canvas of its own, its sliders over it alone.
+        let [layer] = frame.layers.as_slice() else {
+            panic!("one layer: {frame:?}");
+        };
+        let crate::GpuSource::Nested(child) = &layer.source else {
+            panic!("a nested clip: {layer:?}");
+        };
+        let Some(crate::GpuSource::Colour { colour, .. }) =
+            child.layers.last().map(|layer| &layer.source)
+        else {
+            panic!("colour last: {child:?}");
+        };
+        assert_eq!(colour.adjust.get(cutlass_effects::AdjustKey::Exposure), 0.5);
+    }
+
+    fn gpu_frame(draft: &Draft) -> FrameLayers {
+        let mut device = SoftwareDevice::new();
+        let mut clips = OpenClips::new();
+        let Ok(Composed::Layers(frame)) = layers_in(
+            &Snapshot::new(draft),
+            Micros(0),
+            &mut device,
+            &media(),
+            &mut clips,
+            0,
+            None,
+        ) else {
+            panic!("the frame stays on the GPU path");
+        };
+        frame
+    }
+
+    #[test]
+    fn a_clip_mask_and_selection_cut_the_clip_alone_after_its_colour() {
+        let mut draft = color_clip("0xFF404040", false);
+        let mask = cutlass_effects::Mask::new(cutlass_effects::MaskShape::Circle);
+        let selection =
+            cutlass_effects::Selection::from_alpha(2, 1, &[0, 255], Micros(0)).expect("selection");
+        let mut add = |id: &str, kind: &str, fields| {
+            draft
+                .materials
+                .common_mask
+                .push(cutlass_model::RawMaterial {
+                    id: id.into(),
+                    kind: kind.to_owned(),
+                    fields,
+                });
+            draft.tracks[0].segments[0]
+                .extra_material_refs
+                .push(id.into());
+        };
+        add("cut", cutlass_effects::MASK, mask.to_fields());
+        add("object", cutlass_effects::SELECTION, selection.to_fields());
+        let frame = gpu_frame(&draft);
+        let [layer] = frame.layers.as_slice() else {
+            panic!("one layer: {frame:?}");
+        };
+        let crate::GpuSource::Nested(child) = &layer.source else {
+            panic!("a nested clip: {layer:?}");
+        };
+        let kinds: Vec<&str> = child
+            .layers
+            .iter()
+            .map(|layer| match &layer.source {
+                crate::GpuSource::Cut(_) => "cut",
+                crate::GpuSource::Select(_) => "select",
+                _ => "picture",
+            })
+            .collect();
+        assert_eq!(kinds, ["picture", "cut", "select"]);
+        let Some(crate::GpuSource::Select(cut)) = child.layers.last().map(|layer| &layer.source)
+        else {
+            unreachable!();
+        };
+        assert_eq!(
+            (cut.width, cut.height, cut.alpha.as_slice()),
+            (2, 1, &[0, 255][..])
+        );
+    }
+
+    #[test]
+    fn an_adjustment_layer_is_a_colour_layer_over_the_clips_before_it() {
+        let draft = color_clip("0xFF404040", false);
+        let mut session = cutlass_session::Session::open(draft);
+        let layer = cutlass_model::SegmentId::new("layer");
+        session
+            .apply(
                 0,
-                None,
-            ),
-            Ok(Composed::Layers(_))
-        ));
+                &[
+                    cutlass_session::Request::AddAdjustment {
+                        track_id: "look".into(),
+                        segment_id: layer.clone(),
+                        material_id: "adj".into(),
+                        start: Micros(0),
+                        duration: Micros(1_000),
+                    },
+                    cutlass_session::Request::SetAdjust {
+                        segment_id: layer,
+                        material_id: "bright".into(),
+                        key: "exposure".to_owned(),
+                        value: 0.5,
+                    },
+                ],
+            )
+            .unwrap();
+        let frame = gpu_frame(session.draft());
+        let [clip, adjust] = frame.layers.as_slice() else {
+            panic!("the clip, then the layer: {frame:?}");
+        };
+        assert!(matches!(clip.source, crate::GpuSource::Rgba(_)), "{clip:?}");
+        assert!(
+            matches!(adjust.source, crate::GpuSource::Colour { mask: None, .. }),
+            "{adjust:?}"
+        );
     }
 
     #[test]

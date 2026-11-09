@@ -158,7 +158,7 @@ pub fn text_look(draft: &Draft, segment: &Segment) -> Option<TextLook> {
     let Some(MaterialRef::Text(text)) = draft.materials.get(segment.material_id.as_str()) else {
         return None;
     };
-    look_of(draft, segment, text)
+    look_of(draft, segment, text, None)
 }
 
 /// [`text_look`] with the title's keyed style settings as they are at
@@ -169,17 +169,28 @@ pub fn text_look_at(draft: &Draft, segment: &Segment, time: Micros) -> Option<Te
         return None;
     };
     let keyed = cutlass_model::text_style_at(text, segment, &draft.keyframe_graph_list, time);
-    look_of(draft, segment, keyed.as_ref().unwrap_or(text))
+    look_of(draft, segment, keyed.as_ref().unwrap_or(text), Some(time))
 }
 
-fn look_of(draft: &Draft, segment: &Segment, text: &MaterialText) -> Option<TextLook> {
+/// The look of `text` on `segment`, its glow keyed as it is at `time` when
+/// one is given.
+fn look_of(
+    draft: &Draft,
+    segment: &Segment,
+    text: &MaterialText,
+    time: Option<Micros>,
+) -> Option<TextLook> {
     let on = |on: bool, color: &str| if on { color.to_owned() } else { String::new() };
+    let glow = match time {
+        Some(time) => {
+            cutlass_model::glow_at(&draft.materials, segment, &draft.keyframe_graph_list, time)
+        }
+        None => segment_bloom(&draft.materials, segment).and_then(MaterialEffect::bloom),
+    };
     // No glow reads as no amounts, so a first glow color takes the starts.
-    let (glow_color, glow_strength, glow_range) = segment_bloom(&draft.materials, segment)
-        .and_then(MaterialEffect::bloom)
-        .map_or((String::new(), 0.0, 0.0), |glow| {
-            (glow.color, glow.strength, glow.range)
-        });
+    let (glow_color, glow_strength, glow_range) = glow.map_or((String::new(), 0.0, 0.0), |glow| {
+        (glow.color, glow.strength, glow.range)
+    });
     Some(TextLook {
         outline_color: text.border_color.clone(),
         outline_width: text.border_width,

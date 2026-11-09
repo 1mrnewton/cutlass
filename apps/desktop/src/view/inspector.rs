@@ -2444,21 +2444,27 @@ fn text_parts(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState, look: 
                 });
             }
             let strength = (look.glow_strength * 100.0).round();
-            if let Some(value) = slider(
-                ui,
-                state,
-                "intensity",
-                "Intensity",
-                strength,
-                0.0..=100.0,
-                percent,
-            ) {
+            let changed = setting_row(shell, ui, KeyedSetting::GlowStrength, on, |ui| {
+                slider(
+                    ui,
+                    state,
+                    "intensity",
+                    "Intensity",
+                    strength,
+                    0.0..=100.0,
+                    percent,
+                )
+            });
+            if let Some(value) = changed {
                 send(shell, |shell| {
                     shell.set_text_glow(&look.glow_color, value / 100.0, look.glow_range)
                 });
             }
             let range = (look.glow_range * 100.0).round();
-            if let Some(value) = slider(ui, state, "range", "Range", range, 0.0..=100.0, percent) {
+            let changed = setting_row(shell, ui, KeyedSetting::GlowRange, on, |ui| {
+                slider(ui, state, "range", "Range", range, 0.0..=100.0, percent)
+            });
+            if let Some(value) = changed {
                 send(shell, |shell| {
                     shell.set_text_glow(&look.glow_color, look.glow_strength, value / 100.0)
                 });

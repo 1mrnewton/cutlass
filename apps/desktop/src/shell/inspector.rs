@@ -48,6 +48,10 @@ pub enum KeyedSetting {
     WheelPuck(cutlass_effects::Wheel),
     /// A colour wheel's brightness ring.
     WheelLuma(cutlass_effects::Wheel),
+    /// A title's glow Intensity.
+    GlowStrength,
+    /// How far a title's glow reaches.
+    GlowRange,
 }
 
 impl KeyedSetting {
@@ -91,6 +95,8 @@ impl KeyedSetting {
             }
             Self::WheelPuck(wheel) => wheel.puck_keys(),
             Self::WheelLuma(wheel) => wheel.luma_keys(),
+            Self::GlowStrength => &cutlass_model::GLOW_STRENGTH_KEYS,
+            Self::GlowRange => &cutlass_model::GLOW_RANGE_KEYS,
             Self::TextColor => &cutlass_model::TEXT_COLOR_KEYS,
         }
     }
@@ -428,6 +434,9 @@ impl Shell {
                 KeyedSetting::EffectControl(_) => "this setting cannot be keyed".to_owned(),
                 KeyedSetting::TextStyle(_) => "a text style key belongs on text".to_owned(),
                 KeyedSetting::ShapeStyle(_) => "a shape key belongs on a shape".to_owned(),
+                KeyedSetting::GlowStrength | KeyedSetting::GlowRange => {
+                    "switch the glow on first".to_owned()
+                }
                 KeyedSetting::Hsl(..) | KeyedSetting::WheelPuck(_) | KeyedSetting::WheelLuma(_) => {
                     "colour keys belong on a picture".to_owned()
                 }
@@ -505,6 +514,16 @@ impl Shell {
                 vec![keyed.unwrap_or_else(|| key.get(text))]
             }
             KeyedSetting::ShapeStyle(key) => key.get(&self.shape()?),
+            KeyedSetting::GlowStrength | KeyedSetting::GlowRange => {
+                let look = self
+                    .text_look()
+                    .filter(|look| !look.glow_color.is_empty())?;
+                vec![if setting == KeyedSetting::GlowStrength {
+                    look.glow_strength
+                } else {
+                    look.glow_range
+                }]
+            }
             KeyedSetting::Hsl(color, part) => {
                 self.adjust_segment().ok()?;
                 let values = inspection.grade.hsl.get(usize::from(color))?;
@@ -813,13 +832,36 @@ impl Shell {
         let segment_id = self.text_segment()?;
         self.refuse_locked(&segment_id)?;
         let glow_id = MaterialId::new(self.fresh("glow"));
-        self.apply(Request::SetTextGlow {
+        let strength = starting(color, strength, GLOW_STRENGTH_START);
+        let range = starting(color, range, GLOW_RANGE_START);
+        let now = self.text_look();
+        let mut requests = vec![Request::SetTextGlow {
             segment_id,
             glow_id,
             color: color.to_owned(),
-            strength: starting(color, strength, GLOW_STRENGTH_START),
-            range: starting(color, range, GLOW_RANGE_START),
-        })
+            strength,
+            range,
+        }];
+        // A keyed Intensity or Range plays its keys, so a change keys it here.
+        for (setting, value, was) in [
+            (
+                KeyedSetting::GlowStrength,
+                strength,
+                now.as_ref().map(|look| look.glow_strength),
+            ),
+            (
+                KeyedSetting::GlowRange,
+                range,
+                now.as_ref().map(|look| look.glow_range),
+            ),
+        ] {
+            if was.is_some_and(|was| (was - value).abs() > 1e-9)
+                && let Some(key) = self.key_setting_here(setting, vec![value])
+            {
+                requests.push(key);
+            }
+        }
+        self.apply_requests(&requests)
     }
 
     /// The selected title's words without any rich styling.
@@ -1783,6 +1825,28 @@ mod tests {
             .map(|group| group.property_type.as_str())
             .collect();
         assert_eq!(names, ["KFTypeEffectControl_intensity"]);
+    }
+
+    #[test]
+    fn a_glow_intensity_keys_without_its_range() {
+        use super::KeyedSetting;
+        let temp = Temp::new();
+        let mut desktop = every_kind(&temp);
+        pick(&mut desktop, "words");
+        desktop.set_text_glow("#FFFFFF", 0.2, 0.5).unwrap();
+        desktop.seek(cutlass_model::Micros(1_000_000));
+        desktop.toggle_setting_key(KeyedSetting::GlowStrength).unwrap();
+        desktop.seek(cutlass_model::Micros(3_000_000));
+        desktop.set_text_glow("#FFFFFF", 0.6, 0.5).unwrap();
+        // Range has no keys, so it is stored all along the title.
+        desktop.set_text_glow("#FFFFFF", 0.6, 0.9).unwrap();
+        let times = |desktop: &Shell, setting| desktop.setting_keys(setting).unwrap().times;
+        assert_eq!(times(&desktop, KeyedSetting::GlowStrength).len(), 2);
+        assert!(times(&desktop, KeyedSetting::GlowRange).is_empty());
+        desktop.seek(cutlass_model::Micros(2_000_000));
+        let look = desktop.text_look().unwrap();
+        assert!((look.glow_strength - 0.4).abs() < 1e-6);
+        assert!((look.glow_range - 0.9).abs() < 1e-6);
     }
 
     #[test]

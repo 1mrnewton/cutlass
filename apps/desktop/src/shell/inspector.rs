@@ -680,6 +680,27 @@ impl Shell {
         self.apply(request)
     }
 
+    /// Ease the span of `setting`'s keys the playhead is in along the Graphs
+    /// curve `graph`, or make it straight with `None`; every other
+    /// setting's keys keep their easing. One undo step.
+    pub fn ease_setting_keys(
+        &mut self,
+        setting: KeyedSetting,
+        graph: Option<String>,
+    ) -> Result<(), ShellError> {
+        let segment_id = self.selected().cloned().ok_or(ShellError::NoProject)?;
+        self.refuse_locked(&segment_id)?;
+        let request = self
+            .setting_keys(setting)
+            .and_then(|keys| keys.ease_only(&segment_id, graph, setting.names()))
+            .ok_or_else(|| {
+                ShellError::Unavailable(
+                    "move the playhead between two keyframes to ease them".to_owned(),
+                )
+            })?;
+        self.apply(request)
+    }
+
     /// Ring the selected title's letters in `color`, `width` ems wide. An
     /// empty color takes the outline off. One undo restores it.
     pub fn set_text_outline(&mut self, color: &str, width: f64) -> Result<(), ShellError> {

@@ -13953,6 +13953,45 @@ mod tests {
     }
 
     #[test]
+    fn a_curve_on_one_pose_part_leaves_the_others_straight() {
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        let mut video = MaterialVideo::new("picture");
+        video.path = "clip.mp4".to_owned();
+        video.width = 640;
+        video.height = 360;
+        draft.materials.videos.push(video);
+        let mut picture = Segment::new("picture", "picture", TimeRange::new(0, 2_000_000));
+        picture.source_range = Some(TimeRange::new(0, 2_000_000));
+        draft.tracks[0].segments.push(picture);
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.select(Some(SegmentId::new("picture")));
+        use super::KeyedSetting;
+        desktop.toggle_setting_key(KeyedSetting::Position).unwrap();
+        desktop.toggle_setting_key(KeyedSetting::Scale).unwrap();
+        desktop.seek(Micros(2_000_000));
+        desktop.set_position(0.5, 0.0).unwrap();
+        desktop.set_scale(2.0).unwrap();
+        desktop.seek(Micros(1_000_000));
+        let curve = cutlass_editor::key_graphs()[0].name.clone();
+        desktop
+            .ease_setting_keys(KeyedSetting::Position, Some(curve.clone()))
+            .unwrap();
+        let graph = |desktop: &Shell, setting| desktop.setting_keys(setting).unwrap().graph;
+        assert_eq!(graph(&desktop, KeyedSetting::Position), Some(curve));
+        assert_eq!(graph(&desktop, KeyedSetting::Scale), None);
+        // Scale is still a straight line halfway along.
+        assert!((desktop.inspection().unwrap().scale_x - 1.5).abs() < 1e-6);
+        assert!(
+            desktop
+                .ease_setting_keys(KeyedSetting::Rotation, None)
+                .is_err()
+        );
+    }
+
+    #[test]
     fn each_pose_part_keys_on_its_own() {
         let temp = Temp::new();
         let mut draft = Draft::empty("draft");

@@ -70,6 +70,8 @@ pub(super) struct InspectorState {
     /// The pictures drawn for the Templates, Bubble and Effects tiles, by
     /// item id. They outlast a pick of another clip.
     pub(super) tiles: HashMap<String, egui::TextureHandle>,
+    /// The pose part the Graphs row eases.
+    ease_part: Option<KeyedSetting>,
 }
 
 /// Where a clip menu row sends the inspector.
@@ -777,10 +779,8 @@ pub(super) fn placement(
         if let (Some(value), _) = turned {
             send(shell, |shell| shell.set_rotation(value));
         }
-        if let Some(keys) = keys.as_ref().filter(|keys| keys.span.is_some())
-            && let Some(graph) = graph_row(ui, keys)
-        {
-            send(shell, |shell| shell.ease_keyframes(graph));
+        if keys.is_some() {
+            ease_rows(shell, ui, state);
         }
         if rotate_label == Some("Rotate") {
             use cutlass_editor::StageAlign;
@@ -1433,6 +1433,54 @@ fn key_buttons(ui: &mut Ui, keys: &cutlass_editor::ClipKeys, playhead: Micros) -
 /// The Graphs row for the span of keys the playhead is in: None, then
 /// each curve drawn in its tile, the one easing the span outlined. A
 /// press answers the curve to ease along, or `None` inside for none.
+/// The pose parts the Graphs row can ease, and their names on its chips.
+const EASED_PARTS: [(KeyedSetting, &str); 4] = [
+    (KeyedSetting::Position, "Position"),
+    (KeyedSetting::Scale, "Scale"),
+    (KeyedSetting::Rotation, "Rotate"),
+    (KeyedSetting::Opacity, "Opacity"),
+];
+
+/// A chip for each pose part with keys on both sides of the playhead, and
+/// the Graphs row for the one picked: a curve eases that part's keys only.
+fn ease_rows(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState) {
+    let parts: Vec<(KeyedSetting, &str, cutlass_editor::ClipKeys)> = EASED_PARTS
+        .into_iter()
+        .filter_map(|(part, name)| {
+            let keys = shell.setting_keys(part)?;
+            keys.span.is_some().then_some((part, name, keys))
+        })
+        .collect();
+    let Some(first) = parts.first().map(|(part, _, _)| *part) else {
+        return;
+    };
+    let picked = state
+        .ease_part
+        .filter(|part| parts.iter().any(|(each, _, _)| each == part))
+        .unwrap_or(first);
+    if parts.len() > 1 {
+        ui.add_space(ROW_GAP);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            for (part, name, _) in &parts {
+                let chip = ui::Button::new(*name)
+                    .on(*part == picked)
+                    .text_size(12.0)
+                    .radius(12);
+                if ui.add(chip).on_hover_text(format!("Ease {name}")).clicked() {
+                    state.ease_part = Some(*part);
+                }
+            }
+        });
+    }
+    let Some((_, _, keys)) = parts.iter().find(|(part, _, _)| *part == picked) else {
+        return;
+    };
+    if let Some(graph) = graph_row(ui, keys) {
+        send(shell, |shell| shell.ease_setting_keys(picked, graph));
+    }
+}
+
 fn graph_row(ui: &mut Ui, keys: &cutlass_editor::ClipKeys) -> Option<Option<String>> {
     let mut picked = None;
     ui.add_space(ROW_GAP);

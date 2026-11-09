@@ -6,7 +6,9 @@
 
 use std::collections::BTreeMap;
 
-use cutlass_model::MaterialVideoEffect;
+use cutlass_model::{KeyframeGraph, MaterialVideoEffect, Micros, Segment};
+
+use crate::recipe::Recipe;
 use serde_json::{Value, json};
 
 /// The control values stored on `effect`, by control id.
@@ -23,6 +25,32 @@ pub fn stored_controls(effect: &MaterialVideoEffect) -> BTreeMap<String, f32> {
             Some((name.to_owned(), value as f32))
         })
         .collect()
+}
+
+/// `stored` with each control of `recipe` that `segment` keys set as keyed
+/// at timeline `time`. A speed control is never keyed. Keys that do not
+/// read leave the stored value.
+#[must_use]
+pub fn keyed_controls(
+    recipe: &Recipe,
+    mut stored: BTreeMap<String, f32>,
+    segment: &Segment,
+    graphs: &[KeyframeGraph],
+    time: Micros,
+) -> BTreeMap<String, f32> {
+    let offset = time.0.saturating_sub(segment.target.start.0);
+    for control in recipe.controls.iter().filter(|control| control.keyable()) {
+        if let Some(Some(value)) = cutlass_model::sample(
+            &segment.common_keyframes,
+            graphs,
+            &[control.keyframe.as_str()],
+            offset,
+        ) {
+            #[allow(clippy::cast_possible_truncation)]
+            stored.insert(control.id.clone(), control.clamp(value as f32));
+        }
+    }
+    stored
 }
 
 /// Store `value` for the control `id` on `effect`, with its `default`
@@ -44,6 +72,40 @@ pub fn store_control(effect: &mut MaterialVideoEffect, id: &str, value: f32, def
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_keyed_control_moves_along_the_clip_and_speed_is_never_keyed() {
+        let recipe = crate::bundled_recipe("recipe/8-bit").unwrap();
+        let size = recipe.controls.iter().find(|c| c.id == "size").unwrap();
+        assert!(size.keyable());
+        assert_eq!(size.keyframe, "KFTypeEffectControl_size");
+        let mut segment = Segment::new("s", "m", cutlass_model::TimeRange::new(1_000, 2_000));
+        cutlass_model::put_key(&mut segment, &size.keyframe, Micros(0), 0.5);
+        cutlass_model::put_key(&mut segment, &size.keyframe, Micros(2_000), 2.5);
+        cutlass_model::put_key(&mut segment, &size.keyframe, Micros(4_000), 9.0);
+        let at = |time: i64| keyed_controls(recipe, BTreeMap::new(), &segment, &[], Micros(time))["size"];
+        assert_eq!(at(1_000), 0.5);
+        // Past the range is held to the control's own.
+        assert!((at(2_000) - 1.5).abs() < 1e-6);
+        assert_eq!(at(5_000), size.max);
+        // No key keeps what is stored.
+        let plain = Segment::new("p", "m", cutlass_model::TimeRange::new(0, 1));
+        let stored = BTreeMap::from([("size".to_owned(), 2.0)]);
+        assert_eq!(
+            keyed_controls(recipe, stored.clone(), &plain, &[], Micros(0)),
+            stored
+        );
+        for recipe in crate::recipe::bundled() {
+            for control in &recipe.controls {
+                assert_eq!(control.keyable(), !control.speed, "{}", recipe.id);
+                assert!(
+                    cutlass_model::is_keyable(&control.keyframe),
+                    "{}",
+                    recipe.id
+                );
+            }
+        }
+    }
 
     #[test]
     fn a_stored_value_reads_back_and_replaces_the_last() {

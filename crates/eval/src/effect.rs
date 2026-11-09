@@ -421,10 +421,17 @@ pub(crate) fn recipe_marks(
                 None => None,
             };
             let offset = Micros(time.0.saturating_sub(segment.target.start.0));
-            let controls = match draft.materials.get(segment.material_id.as_str()) {
+            let stored = match draft.materials.get(segment.material_id.as_str()) {
                 Some(MaterialRef::VideoEffect(effect)) => cutlass_effects::stored_controls(effect),
                 _ => std::collections::BTreeMap::new(),
             };
+            let controls = cutlass_effects::keyed_controls(
+                recipe,
+                stored,
+                segment,
+                &draft.keyframe_graph_list,
+                time,
+            );
             Some(RecipeMark {
                 key: (segment.render_index, track_index, segment_index),
                 steps: recipe.steps_with(offset, &controls),

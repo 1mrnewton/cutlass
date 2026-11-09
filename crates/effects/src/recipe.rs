@@ -593,9 +593,20 @@ pub struct Control {
     pub scale: Vec<Target>,
     #[serde(default)]
     pub set: Vec<Target>,
+    /// The keyframe property it keys under, named when the recipe is read.
+    #[serde(skip)]
+    pub keyframe: String,
 }
 
 impl Control {
+    /// Whether the control can be keyed. A speed control cannot: it
+    /// multiplies the effect's own time, so a key on it would jump the
+    /// effect back and forth rather than speed it up.
+    #[must_use]
+    pub fn keyable(&self) -> bool {
+        !self.speed
+    }
+
     /// `value` kept inside this control's range; the default when it is
     /// not a number.
     #[must_use]
@@ -731,9 +742,12 @@ impl Recipe {
         if version > RECIPE_VERSION {
             return Err(RecipeError::Newer(version));
         }
-        let recipe: Self =
+        let mut recipe: Self =
             serde_json::from_slice(bytes).map_err(|error| RecipeError::Shape(error.to_string()))?;
         recipe.check()?;
+        for control in &mut recipe.controls {
+            control.keyframe = cutlass_model::effect_control_key(&control.id);
+        }
         Ok(recipe)
     }
 

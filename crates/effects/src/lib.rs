@@ -44,7 +44,7 @@ pub use catalog::{
     Transition, entries, entry,
 };
 pub use chroma::{CHROMA, Chroma, parse_hex, segment_chroma};
-pub use controls::{store_control, stored_controls};
+pub use controls::{keyed_controls, store_control, stored_controls};
 pub use crossing::{
     CROSS, CrossKind, Crossing, DEFAULT_CROSSING_SECONDS, PREVIEW_PAIRS, TRANSITION_CATEGORIES,
     TRANSITION_PREVIEW_LOOP, TransitionRecipe, bundled_transitions, transition_preview_t,

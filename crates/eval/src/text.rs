@@ -107,11 +107,19 @@ pub(crate) fn text_layers(
             else {
                 continue;
             };
-            // Keyed letters take their color at `time`, and are drawn for
-            // each frame and not kept.
-            let keyed = cutlass_model::text_color_at(segment, &draft.keyframe_graph_list, time);
-            let recolored = keyed.map(|rgb| recolor(stored, rgb));
-            let material = recolored.as_ref().unwrap_or(stored);
+            // Keyed letters take their color and style at `time`, and are
+            // drawn for each frame and not kept.
+            let graphs = &draft.keyframe_graph_list;
+            let colored =
+                cutlass_model::text_color_at(segment, graphs, time).map(|rgb| recolor(stored, rgb));
+            let styled = cutlass_model::text_style_at(
+                colored.as_ref().unwrap_or(stored),
+                segment,
+                graphs,
+                time,
+            );
+            let keyed = (colored.is_some() || styled.is_some()).then_some(());
+            let material = styled.as_ref().or(colored.as_ref()).unwrap_or(stored);
             // Text with no face draws nothing; the log says so once.
             if material.font_path.is_empty() {
                 logged::<(), _>("text", segment, Err("it has no font file"));
@@ -300,10 +308,12 @@ pub fn text_size_at(
     segment: &Segment,
     time: Micros,
 ) -> Option<(u32, u32)> {
-    let Some(MaterialRef::Text(material)) = draft.materials.get(segment.material_id.as_str())
-    else {
+    let Some(MaterialRef::Text(stored)) = draft.materials.get(segment.material_id.as_str()) else {
         return None;
     };
+    // A keyed style sizes the letters as they are drawn at `time`.
+    let styled = cutlass_model::text_style_at(stored, segment, &draft.keyframe_graph_list, time);
+    let material = styled.as_ref().unwrap_or(stored);
     if material.font_path.is_empty() {
         return None;
     }
@@ -1020,6 +1030,34 @@ mod tests {
         assert!(!has(0, [255, 255, 255, 255]));
         assert!(has(500_000, [128, 0, 128, 255]));
         assert!(has(999_999, [0, 0, 255, 255]));
+    }
+
+    #[test]
+    fn keyed_text_size_grows_the_letters_between_its_keys() {
+        let mut draft = text_segment("A", false);
+        let stored = draft.materials.texts[0].font_size;
+        let segment = &mut draft.tracks[0].segments[0];
+        let size = cutlass_model::TextStyleKey::Size.names()[0];
+        cutlass_model::put_key(segment, size, Micros(0), stored / 2.0);
+        cutlass_model::put_key(segment, size, Micros(1_000_000), stored);
+        let lit = |time: i64| {
+            pixels(&draft, time)
+                .chunks(4)
+                .filter(|pixel| pixel[3] > 0)
+                .count()
+        };
+        let (small, middle, large) = (lit(0), lit(500_000), lit(999_999));
+        assert!(small < middle && middle < large, "{small} {middle} {large}");
+        // The drawn picture follows the key each frame, not a kept one.
+        assert_eq!(lit(0), small);
+        // The box the stage shows follows the keyed size too.
+        let segment = &draft.tracks[0].segments[0];
+        let box_at = |time: i64| super::text_size_at(&draft, &OneFont, segment, Micros(time));
+        let (small, large) = (box_at(0).unwrap(), box_at(999_999).unwrap());
+        assert!(
+            small.0 < large.0 && small.1 < large.1,
+            "{small:?} {large:?}"
+        );
     }
 
     #[test]

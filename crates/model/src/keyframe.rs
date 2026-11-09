@@ -520,6 +520,52 @@ pub static CHROMA_STRENGTH_KEYS: [&str; 1] = ["KFTypeChromaIntensity"];
 /// A chroma key's shadow, from 0 to 1. A Cutlass name.
 pub static CHROMA_SHADOW_KEYS: [&str; 1] = ["KFTypeChromaShadow"];
 
+/// A clip's Relight strength, from 0 to 1. A Cutlass name.
+pub static RELIGHT_STRENGTH_KEYS: [&str; 1] = ["KFTypeRelightStrength"];
+/// The Custom light's color, red, green and blue from 0 to 1. Cutlass names.
+pub static RELIGHT_COLOR_KEYS: [&str; 3] = [
+    "KFTypeRelightColorR",
+    "KFTypeRelightColorG",
+    "KFTypeRelightColorB",
+];
+/// The Custom light's direction in degrees. A Cutlass name.
+pub static RELIGHT_ANGLE_KEYS: [&str; 1] = ["KFTypeRelightAngle"];
+
+/// `relight` with its strength, color and angle as `segment` keys them at
+/// timeline `time`: the strength held to 0 to 1, the color as `#rrggbb`.
+#[must_use]
+pub fn relight_at(
+    relight: &crate::materials::Relight,
+    segment: &Segment,
+    graphs: &[KeyframeGraph],
+    time: Micros,
+) -> crate::materials::Relight {
+    let mut out = relight.clone();
+    let offset = time.0.saturating_sub(segment.target.start.0);
+    let keyed = |name: &str| match sample(&segment.common_keyframes, graphs, &[name], offset) {
+        Some(Some(value)) if value.is_finite() => Some(value),
+        _ => None,
+    };
+    if let Some(strength) = keyed(RELIGHT_STRENGTH_KEYS[0]) {
+        out.strength = strength.clamp(0.0, 1.0);
+    }
+    if let Some(angle) = keyed(RELIGHT_ANGLE_KEYS[0]) {
+        out.angle = angle;
+    }
+    let rgb: Option<Vec<f64>> = RELIGHT_COLOR_KEYS.iter().map(|name| keyed(name)).collect();
+    if let Some(rgb) = rgb {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let byte = |value: f64| (value.clamp(0.0, 1.0) * 255.0).round() as u8;
+        out.color = format!(
+            "#{:02x}{:02x}{:02x}",
+            byte(rgb[0]),
+            byte(rgb[1]),
+            byte(rgb[2])
+        );
+    }
+    out
+}
+
 /// HSL's sliders, -1 to 1: for each of its eight colours (red, orange,
 /// yellow, green, cyan, blue, purple, magenta) the hue, saturation and
 /// lightness, in that order. Cutlass names.
@@ -612,6 +658,9 @@ pub fn is_keyable(property: &str) -> bool {
         || TEXT_COLOR_KEYS.contains(&property)
         || ADJUST_KEYS.contains(&property)
         || HSL_KEYS.contains(&property)
+        || RELIGHT_STRENGTH_KEYS.contains(&property)
+        || RELIGHT_COLOR_KEYS.contains(&property)
+        || RELIGHT_ANGLE_KEYS.contains(&property)
         || WHEEL_KEYS.contains(&property)
         || is_unit_colour_key(property)
         || effect_control_id(property).is_some()
@@ -888,6 +937,38 @@ mod tests {
             .copied()
             .collect();
         assert_eq!(parts, MASK_KEYS);
+    }
+
+    #[test]
+    fn a_keyed_relight_moves_its_strength_and_color_and_leaves_its_angle() {
+        let relight = crate::materials::Relight {
+            preset: crate::materials::Relight::CUSTOM.to_owned(),
+            strength: 0.5,
+            color: "#ffffff".to_owned(),
+            angle: 135.0,
+        };
+        let mut segment = Segment::new("s", "m", crate::time::TimeRange::new(1_000, 2_000));
+        assert_eq!(relight_at(&relight, &segment, &[], Micros(1_500)), relight);
+        put_key(&mut segment, RELIGHT_STRENGTH_KEYS[0], Micros(0), 0.0);
+        put_key(&mut segment, RELIGHT_STRENGTH_KEYS[0], Micros(2_000), 2.0);
+        for (name, value) in RELIGHT_COLOR_KEYS.iter().zip([1.0, 0.0, 0.5]) {
+            put_key(&mut segment, name, Micros(0), value);
+        }
+        let keyed = relight_at(&relight, &segment, &[], Micros(1_500));
+        assert!((keyed.strength - 0.5).abs() < 1e-9);
+        assert_eq!(keyed.color, "#ff0080");
+        assert_eq!(keyed.angle, 135.0);
+        assert_eq!(
+            relight_at(&relight, &segment, &[], Micros(3_000)).strength,
+            1.0
+        );
+        for name in RELIGHT_STRENGTH_KEYS
+            .iter()
+            .chain(&RELIGHT_COLOR_KEYS)
+            .chain(&RELIGHT_ANGLE_KEYS)
+        {
+            assert!(is_keyable(name), "{name}");
+        }
     }
 
     #[test]

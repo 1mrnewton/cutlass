@@ -15,8 +15,8 @@ use std::collections::HashMap;
 
 use cutlass_gpu::{Affine, Placement};
 use cutlass_model::{
-    BloomParams, Clip, Draft, LetterPose, LetterStep, MaterialRef, MaterialText,
-    Micros, Segment, SegmentId, TrackAttribute, UniformScale, WordColumns,
+    BloomParams, Clip, Draft, LetterPose, LetterStep, MaterialRef, MaterialText, Micros, Segment,
+    SegmentId, TrackAttribute, UniformScale, WordColumns,
 };
 use cutlass_picture::{CpuBytes, Picture, PictureSource, Sample};
 use cutlass_text::{GlyphLook, TextSource, text_fill};

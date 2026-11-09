@@ -226,3 +226,17 @@ fn a_depth_is_stretched_to_the_picture_with_its_centres_matched() {
     assert_eq!((lit.width(), lit.height()), (4, 2));
     assert_ne!(lit.rgba(), picture.rgba());
 }
+
+#[test]
+fn a_keyed_strength_lights_the_clip_as_keyed_and_none_at_zero() {
+    let (_, mut draft) = project(Some(("rainbow_spots", 1.0)));
+    let segment = &mut draft.tracks[0].segments[0];
+    let strength = cutlass_model::RELIGHT_STRENGTH_KEYS[0];
+    cutlass_model::put_key(segment, strength, Micros(0), 0.0);
+    cutlass_model::put_key(segment, strength, Micros(1_000_000), 1.0);
+    let segment = &draft.tracks[0].segments[0];
+    // Off where the key is 0, and half way along at half strength.
+    assert_eq!(light_at(&draft, segment, Micros(2_000_000)), None);
+    let half = light_at(&draft, segment, Micros(2_500_000)).unwrap();
+    assert!((half.strength - 0.5).abs() < 1e-6);
+}

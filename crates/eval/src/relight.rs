@@ -98,14 +98,16 @@ pub(crate) fn relight_depth(
     Some((path, held.start))
 }
 
-/// The light over `segment` at `time`, when it has a Relight preset this
-/// build knows and some strength. Moving lights are timed from the clip's
+/// The light over `segment` at `time`, its keyed settings as keyed then,
+/// when it has a Relight preset this build knows and some strength. Moving lights are timed from the clip's
 /// start.
 pub(crate) fn light_at(draft: &Draft, segment: &Segment, time: Micros) -> Option<Lighting> {
     let Some(MaterialRef::Video(video)) = draft.materials.get(segment.material_id.as_str()) else {
         return None;
     };
-    let relight = video.relight()?;
+    // A keyed strength, color or angle lights the clip as keyed at `time`.
+    let relight =
+        cutlass_model::relight_at(&video.relight()?, segment, &draft.keyframe_graph_list, time);
     let seconds = time.0.saturating_sub(segment.target.start.0) as f64 / 1e6;
     lighting(&relight, seconds).filter(|lit| lit.strength > 0.0)
 }

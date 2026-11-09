@@ -49,9 +49,10 @@ pub use keyframe::{
     CommonKeyframeGroup, EFFECT_CONTROL_PREFIX, FILTER_STRENGTH_KEYS, GraphPoint, HSL_KEYS,
     KeyframeGraph, LUT_STRENGTH_KEYS, MASK_FEATHER_KEYS, MASK_KEYS, MASK_POSITION_KEYS,
     MASK_ROTATION_KEYS, MASK_ROUND_KEYS, MASK_SIZE_KEYS, OPACITY_KEYS, POSE_KEYS, POSITION_KEYS,
-    ROTATION_KEYS, SCALE_KEYS, TEXT_COLOR_KEYS, VOLUME_KEY, WHEEL_KEYS, add_keys, clip_at,
-    effect_control_id, effect_control_key, has_keys, is_keyable, is_pose_key, is_unit_colour_key,
-    key_offsets, key_offsets_where, put_key, remove_keys, remove_keys_where, sample, shift_keys,
+    RELIGHT_ANGLE_KEYS, RELIGHT_COLOR_KEYS, RELIGHT_STRENGTH_KEYS, ROTATION_KEYS, SCALE_KEYS,
+    TEXT_COLOR_KEYS, VOLUME_KEY, WHEEL_KEYS, add_keys, clip_at, effect_control_id,
+    effect_control_key, has_keys, is_keyable, is_pose_key, is_unit_colour_key, key_offsets,
+    key_offsets_where, put_key, relight_at, remove_keys, remove_keys_where, sample, shift_keys,
     text_color_at,
 };
 pub use linkage::{KindSwitches, LinkageSettings, linkage_from_biz};

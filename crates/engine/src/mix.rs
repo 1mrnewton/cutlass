@@ -10,7 +10,7 @@
 
 use cutlass_audio::{FadeCurve, downmix, fade, limit, resample, stretch};
 use cutlass_codec::access::{ChannelLayout, Pcm};
-use cutlass_model::{Draft, MaterialRef, Micros, Segment, Track, TrackAttribute};
+use cutlass_model::{Draft, KeyframeGraph, MaterialRef, Micros, Segment, Track, TrackAttribute};
 
 use crate::clock::ClockKind;
 use crate::error::EngineError;
@@ -177,7 +177,7 @@ fn covers(range: &cutlass_model::TimeRange, time: Micros) -> bool {
 
 fn clip_for(draft: &Draft, track: &Track, segment: &Segment, time: Micros) -> MixClip {
     let offset = Micros(time.0.saturating_sub(segment.target.start.0));
-    let volume = clip_volume(segment, offset);
+    let volume = clip_volume(segment, &draft.keyframe_graph_list, offset);
     let (fade_in_us, fade_out_us, fade_curve) = fade_of(draft, segment);
     let speed = map::placement_of(draft, segment)
         .and_then(|placement| map::speed_at(&placement, time))
@@ -195,27 +195,21 @@ fn clip_for(draft: &Draft, track: &Track, segment: &Segment, time: Micros) -> Mi
     }
 }
 
-/// The clip's gain `offset` into it, its volume keyframes applied. 1 is the
-/// file as recorded.
+/// The clip's gain `offset` into it, its volume keyframes applied with
+/// their curves and `graphs`, as every other keyed setting is played. 1 is
+/// the file as recorded. Keys that do not read leave the stored volume.
 #[must_use]
-pub fn clip_volume(segment: &Segment, offset: Micros) -> f64 {
-    volume_from(segment, offset).unwrap_or(segment.volume)
-}
-
-fn volume_from(segment: &Segment, offset: Micros) -> Result<f64, EngineError> {
-    let mut keys = Vec::new();
-    for group in &segment.common_keyframes {
-        if group.property_type != "KFTypeVolume" && group.property_type != "volume" {
-            continue;
-        }
-        for key in &group.keyframe_list {
-            let Some(value) = key.values.first().copied() else {
-                continue;
-            };
-            keys.push((key.time_offset, value));
-        }
+pub fn clip_volume(segment: &Segment, graphs: &[KeyframeGraph], offset: Micros) -> f64 {
+    let keyed = cutlass_model::sample(
+        &segment.common_keyframes,
+        graphs,
+        &[cutlass_model::VOLUME_KEY, "volume"],
+        offset.0,
+    );
+    match keyed {
+        Some(Some(value)) if value.is_finite() => value,
+        _ => segment.volume,
     }
-    volume_at(segment.volume, &keys, offset)
 }
 
 fn fade_of(draft: &Draft, segment: &Segment) -> (i64, i64, i32) {
@@ -517,6 +511,42 @@ mod tests {
         assert_eq!(clips[0].fade_in_us, 10);
         assert_eq!(clips[0].fade_curve, 2);
         assert!(matches!(clips[0].pcm, ClipPcm::Missing));
+    }
+
+    #[test]
+    fn a_volume_key_eases_along_its_graph_as_the_inspector_shows_it() {
+        let mut draft = Draft::empty("D");
+        let mut segment = Segment::new("a", "audio", TimeRange::new(0, 1_000));
+        cutlass_model::put_key(&mut segment, cutlass_model::VOLUME_KEY, Micros(0), 0.0);
+        cutlass_model::put_key(&mut segment, cutlass_model::VOLUME_KEY, Micros(1_000), 1.0);
+        assert!((clip_volume(&segment, &[], Micros(500)) - 0.5).abs() < 1e-9);
+        let ease_in = cutlass_model::GRAPH_PRESETS
+            .iter()
+            .find(|preset| preset.name == "Ease In")
+            .expect("ease in");
+        segment.common_keyframes[0].keyframe_list[1].graph_id = "ease".to_owned();
+        draft
+            .keyframe_graph_list
+            .push(KeyframeGraph::of("ease", ease_in));
+        let eased = clip_volume(&segment, &draft.keyframe_graph_list, Micros(500));
+        let shown = cutlass_model::sample(
+            &segment.common_keyframes,
+            &draft.keyframe_graph_list,
+            &[cutlass_model::VOLUME_KEY],
+            500,
+        )
+        .flatten()
+        .expect("shown");
+        assert!(eased < 0.4, "{eased}");
+        assert_eq!(eased, shown);
+        draft.tracks[0].segments.push(segment);
+        let clips = mix_inputs(&draft, Micros(500));
+        assert_eq!(clips[0].volume, eased);
+        // A key that does not read leaves the stored volume.
+        let mut broken = Segment::new("b", "audio", TimeRange::new(0, 1_000));
+        broken.volume = 0.25;
+        cutlass_model::put_key(&mut broken, cutlass_model::VOLUME_KEY, Micros(0), f64::NAN);
+        assert_eq!(clip_volume(&broken, &[], Micros(0)), 0.25);
     }
 
     #[test]

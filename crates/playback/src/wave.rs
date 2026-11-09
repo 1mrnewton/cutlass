@@ -102,7 +102,8 @@ pub fn clip_wave(
             _ => 0.0,
         };
         let offset = Micros((x / pixel_size) as i64);
-        let gain = cutlass_engine::clip_volume(segment, offset).max(0.0) as f32;
+        let gain = cutlass_engine::clip_volume(segment, &draft.keyframe_graph_list, offset).max(0.0)
+            as f32;
         levels.push((level * gain).min(1.0));
         gains.push(gain);
         x += 1.0;

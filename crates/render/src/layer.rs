@@ -142,6 +142,12 @@ pub enum Layer<'a> {
         seed: u32,
         mask: Option<&'a cutlass_effects::CanvasMask>,
     },
+    /// Everything drawn before it in the same list, kept as much as the
+    /// mask keeps: a clip's own mask.
+    Cut(&'a cutlass_effects::CanvasMask),
+    /// Everything drawn before it in the same list, kept only where a
+    /// clip's selection is.
+    Select(crate::Selected<'a>),
     /// `layers` drawn on a canvas the size of this one, then mixed by
     /// `mode` with everything drawn before it in the same list.
     Blend {

@@ -22,6 +22,7 @@
 mod blur;
 mod colour;
 mod cross;
+mod cut;
 mod effect;
 mod frame;
 mod keep;
@@ -31,6 +32,7 @@ mod target;
 mod transition;
 mod vector;
 
+pub use cut::Selected;
 pub use cutlass_decode::Surface;
 pub use cutlass_effects::{Block, Recipe, Step};
 pub use cutlass_gpu::{Affine, Placement};
@@ -85,6 +87,7 @@ pub struct Renderer {
     blurs: blur::Blurs,
     effects: effect::Effects,
     colours: colour::Colours,
+    cuts: cut::Cuts,
     keep: keep::Keep,
     cross: cross::Cross,
     mix: mix::Mix,
@@ -109,6 +112,7 @@ impl Renderer {
         let blurs = blur::Blurs::new(&device);
         let effects = effect::Effects::new(&device);
         let colours = colour::Colours::new(&device);
+        let cuts = cut::Cuts::new(&device);
         let keep = keep::Keep::new(&device);
         let cross = cross::Cross::new(&device);
         let mix = mix::Mix::new(&device);
@@ -121,6 +125,7 @@ impl Renderer {
             blurs,
             effects,
             colours,
+            cuts,
             keep,
             cross,
             mix,
@@ -446,6 +451,41 @@ impl Renderer {
                         Placement::canvas(size.0, size.1),
                     ));
                 }
+                Layer::Cut(mask) => {
+                    let first = blur::scratch(device, size);
+                    Self::paint(&self.layers, encoder, &first, &bound);
+                    let kept = blur::scratch(device, size);
+                    let mask = scaled_mask(mask, scale);
+                    self.cuts.mask(device, queue, encoder, &first, &kept, &mask);
+                    bound.clear();
+                    bound.push(self.layers.bind(
+                        device,
+                        queue,
+                        &canvas_picture(kept, size),
+                        Placement::canvas(size.0, size.1),
+                    ));
+                }
+                Layer::Select(selected) => {
+                    let first = blur::scratch(device, size);
+                    Self::paint(&self.layers, encoder, &first, &bound);
+                    let kept = blur::scratch(device, size);
+                    let frame = scaled_frame(selected.frame, scale);
+                    self.cuts.select(
+                        device,
+                        queue,
+                        encoder,
+                        &first,
+                        &kept,
+                        &Selected { frame, ..*selected },
+                    )?;
+                    bound.clear();
+                    bound.push(self.layers.bind(
+                        device,
+                        queue,
+                        &canvas_picture(kept, size),
+                        Placement::canvas(size.0, size.1),
+                    ));
+                }
                 Layer::Effect(steps, mask) => {
                     if steps.is_empty() {
                         continue;
@@ -597,13 +637,23 @@ fn scaled_mask(
     if sx == 1.0 && sy == 1.0 {
         return *mask;
     }
-    #[allow(clippy::cast_possible_truncation)]
-    let (sx, sy) = (sx as f32, sy as f32);
-    let [a, b, c, d, e, f] = mask.frame;
     cutlass_effects::CanvasMask {
-        frame: [a / sx, b / sy, c, d / sx, e / sy, f],
+        frame: scaled_frame(mask.frame, scale),
         ..*mask
     }
+}
+
+/// `frame`, from full-size canvas pixels to a layer's own frame, from the
+/// pixels of a canvas `scale` times that size each way.
+fn scaled_frame(frame: [f32; 6], scale: (f64, f64)) -> [f32; 6] {
+    let (sx, sy) = scale;
+    if sx == 1.0 && sy == 1.0 {
+        return frame;
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    let (sx, sy) = (sx as f32, sy as f32);
+    let [a, b, c, d, e, f] = frame;
+    [a / sx, b / sy, c, d / sx, e / sy, f]
 }
 
 /// A canvas-sized texture as a picture the layer pass draws.

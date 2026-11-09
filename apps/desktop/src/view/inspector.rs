@@ -708,15 +708,18 @@ pub(super) fn placement(
         (draft.canvas_config.width, draft.canvas_config.height)
     });
     let keys = shell.keys();
+    let scale_keys = pose_keys(shell, KeyedSetting::Scale);
+    let place_keys = pose_keys(shell, KeyedSetting::Position);
+    let turn_keys = pose_keys(shell, KeyedSetting::Rotation);
     let playhead = shell.playhead();
-    let mut step = None;
+    let (mut scale_step, mut place_step, mut turn_step) = (None, None, None);
     let shape = if size { shell.shape() } else { None };
     body(ui, |ui| {
         if let Some(shape) = &shape {
             super::shape::size_row(shell, ui, state, shape);
         }
         let scale = (inspection.scale_x * 100.0).round();
-        let scaled = keyed_row(ui, keys.as_ref(), playhead, &mut step, |ui| {
+        let scaled = keyed_row(ui, scale_keys.as_ref(), playhead, &mut scale_step, |ui| {
             slider(ui, state, "scale", "Scale", scale, 1.0..=500.0, |v| {
                 format!("{v:.0}%")
             })
@@ -728,7 +731,7 @@ pub(super) fn placement(
         // The prototype counts canvas pixels from the middle, with Y down.
         let (x, y) =
             cutlass_editor::canvas_pixels((inspection.transform_x, inspection.transform_y), canvas);
-        let (new_x, new_y) = keyed_row(ui, keys.as_ref(), playhead, &mut step, |ui| {
+        let (new_x, new_y) = keyed_row(ui, place_keys.as_ref(), playhead, &mut place_step, |ui| {
             pair_row(ui, state, "Position", ("X", x), ("Y", y))
         });
         if new_x.is_some() || new_y.is_some() {
@@ -748,16 +751,13 @@ pub(super) fn placement(
         }
         let rotation = inspection.rotation;
         let turned = rotate_label.map_or((None, None), |label| {
-            keyed_row(ui, keys.as_ref(), playhead, &mut step, |ui| {
+            keyed_row(ui, turn_keys.as_ref(), playhead, &mut turn_step, |ui| {
                 pair_row(ui, state, label, ("°", rotation), ("", f64::NAN))
             })
         });
-        match step {
-            Some(KeyStep::Back) => shell.step_keyframe(false),
-            Some(KeyStep::Toggle) => send(shell, Shell::toggle_keyframe),
-            Some(KeyStep::Forward) => shell.step_keyframe(true),
-            None => {}
-        }
+        setting_step(shell, KeyedSetting::Scale, scale_step);
+        setting_step(shell, KeyedSetting::Position, place_step);
+        setting_step(shell, KeyedSetting::Rotation, turn_step);
         if let (Some(value), _) = turned {
             send(shell, |shell| shell.set_rotation(value));
         }
@@ -1076,11 +1076,24 @@ pub(super) fn opacity_slider(
     inspection: &Inspection,
 ) {
     let opacity = (inspection.opacity * 100.0).round();
-    if let Some(value) = slider(ui, state, "opacity", "Opacity", opacity, 0.0..=100.0, |v| {
-        format!("{v:.0}%")
-    }) {
+    let keys = pose_keys(shell, KeyedSetting::Opacity);
+    let mut step = None;
+    let changed = keyed_row(ui, keys.as_ref(), shell.playhead(), &mut step, |ui| {
+        slider(ui, state, "opacity", "Opacity", opacity, 0.0..=100.0, |v| {
+            format!("{v:.0}%")
+        })
+    });
+    if let Some(value) = changed {
         send(shell, |shell| shell.set_opacity(value / 100.0));
     }
+    setting_step(shell, KeyedSetting::Opacity, step);
+}
+
+/// The selected clip's keys on the pose part `setting`, when it is a
+/// picture or title, which has a pose to key.
+fn pose_keys(shell: &Shell, setting: KeyedSetting) -> Option<cutlass_editor::ClipKeys> {
+    shell.keys()?;
+    shell.setting_keys(setting)
 }
 
 fn canvas(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState, inspection: &Inspection) {
@@ -1272,9 +1285,9 @@ const KEY_GAP: f32 = 2.0;
 /// The room the ◀ ◆ ▶ buttons take at a row's end.
 const KEYS_WIDTH: f32 = 3.0 * KEY_BUTTON + 2.0 * KEY_GAP;
 
-/// `row` with the clip's keyframe buttons at its end, when the clip takes
-/// keys. The model keys a clip's whole pose at once, so each row's buttons
-/// step through and toggle the same keys.
+/// `row` with the keyframe buttons for its own setting at its end, when the
+/// clip takes keys. Each row steps through and toggles only its setting's
+/// keys.
 pub(super) fn keyed_row<R>(
     ui: &mut Ui,
     keys: Option<&cutlass_editor::ClipKeys>,

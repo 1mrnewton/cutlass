@@ -12,9 +12,13 @@ use cutlass_session::Request;
 
 use super::{Shell, ShellError};
 
-/// A setting keyed apart from the clip's pose.
+/// A setting keyed on its own: a key on one never keys another.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KeyedSetting {
+    Position,
+    Scale,
+    Rotation,
+    Opacity,
     Mask,
     Volume,
     TextColor,
@@ -25,6 +29,10 @@ impl KeyedSetting {
     #[must_use]
     pub fn names(self) -> &'static [&'static str] {
         match self {
+            Self::Position => &cutlass_model::POSITION_KEYS,
+            Self::Scale => &cutlass_model::SCALE_KEYS,
+            Self::Rotation => &cutlass_model::ROTATION_KEYS,
+            Self::Opacity => &cutlass_model::OPACITY_KEYS,
             Self::Mask => &cutlass_model::MASK_KEYS,
             Self::Volume => &[cutlass_model::VOLUME_KEY],
             Self::TextColor => &cutlass_model::TEXT_COLOR_KEYS,
@@ -270,6 +278,10 @@ impl Shell {
         }
         let values = self.setting_values(setting).ok_or_else(|| {
             ShellError::Unavailable(match setting {
+                KeyedSetting::Position
+                | KeyedSetting::Scale
+                | KeyedSetting::Rotation
+                | KeyedSetting::Opacity => "keyframes belong on a picture or title".to_owned(),
                 KeyedSetting::Mask => "pick a mask shape first".to_owned(),
                 KeyedSetting::Volume => "the clip has no sound to key".to_owned(),
                 KeyedSetting::TextColor => "a color key belongs on text".to_owned(),
@@ -302,6 +314,14 @@ impl Shell {
     fn setting_values(&self, setting: KeyedSetting) -> Option<Vec<(String, f64)>> {
         let inspection = self.inspection()?;
         let values: Vec<f64> = match setting {
+            KeyedSetting::Position
+            | KeyedSetting::Scale
+            | KeyedSetting::Rotation
+            | KeyedSetting::Opacity => {
+                // Only a picture or title has a pose to key.
+                self.keys()?;
+                self.pose_values(setting, &inspection)?
+            }
             KeyedSetting::Mask => {
                 let mask = inspection.mask?;
                 [
@@ -332,6 +352,31 @@ impl Shell {
                 .zip(values)
                 .collect(),
         )
+    }
+
+    /// The pose part `setting` as the inspector shows it at the playhead,
+    /// one value for each of its key names, in order. Scale keys the name
+    /// that drives both axes only when the clip already keys it, since that
+    /// name wins over the two axes while uniform scale is on.
+    fn pose_values(
+        &self,
+        setting: KeyedSetting,
+        inspection: &super::Inspection,
+    ) -> Option<Vec<f64>> {
+        Some(match setting {
+            KeyedSetting::Position => vec![inspection.transform_x, inspection.transform_y],
+            KeyedSetting::Scale => {
+                let segment = self.selected_segment()?;
+                let mut values = vec![inspection.scale_x, inspection.scale_y];
+                if cutlass_model::has_keys(segment, &cutlass_model::SCALE_KEYS[2..]) {
+                    values.push(inspection.scale_x);
+                }
+                values
+            }
+            KeyedSetting::Rotation => vec![inspection.rotation],
+            KeyedSetting::Opacity => vec![inspection.opacity],
+            KeyedSetting::Mask | KeyedSetting::Volume | KeyedSetting::TextColor => return None,
+        })
     }
 
     /// The request that keys `setting` at the playhead as `values`, when

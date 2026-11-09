@@ -4505,7 +4505,14 @@ impl Shell {
             rotation: keyed.map_or(segment.clip.rotation, |pose| pose.rotation),
             transform_x: keyed.map_or(segment.clip.transform.x, |pose| pose.x),
             transform_y: keyed.map_or(segment.clip.transform.y, |pose| pose.y),
-            opacity: segment.clip.alpha,
+            opacity: cutlass_model::sample(
+                &segment.common_keyframes,
+                &draft.keyframe_graph_list,
+                &cutlass_model::OPACITY_KEYS,
+                self.playhead.0.saturating_sub(segment.target.start.0),
+            )
+            .flatten()
+            .unwrap_or(segment.clip.alpha),
             text_size,
             // Keyed letters show their color where the playhead is.
             text_color: cutlass_model::text_color_at(
@@ -5857,8 +5864,6 @@ impl Shell {
         })
     }
 
-    /// Set how solid the selected picture is. `1` is solid and `0` is clear.
-    /// One undo restores the previous opacity.
     /// Mix the selected picture with what is below it by `mode`. Normal
     /// takes the blend off. One undo step.
     pub fn set_blend(&mut self, mode: cutlass_effects::BlendMode) -> Result<(), ShellError> {
@@ -6285,9 +6290,14 @@ impl Shell {
         Ok(picture.rgba)
     }
 
+    /// Set how solid the selected picture is, keyed at the playhead when
+    /// its opacity has keys. One undo restores the previous opacity.
     pub fn set_opacity(&mut self, opacity: f64) -> Result<(), ShellError> {
         let segment_id = self.picture_segment("an opacity belongs on a picture")?;
         self.refuse_locked(&segment_id)?;
+        if let Some(key) = self.key_setting_here(KeyedSetting::Opacity, vec![opacity]) {
+            return self.apply(key);
+        }
         self.apply(Request::SetOpacity {
             segment_id,
             opacity,
@@ -13709,6 +13719,72 @@ mod tests {
             .set_animation(cutlass_model::AnimType::In, None, Micros(0))
             .unwrap();
         assert_eq!(desktop.animations().unwrap().enter, None);
+    }
+
+    #[test]
+    fn each_pose_part_keys_on_its_own() {
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        let mut video = MaterialVideo::new("picture");
+        video.path = "clip.mp4".to_owned();
+        video.width = 640;
+        video.height = 360;
+        draft.materials.videos.push(video);
+        let mut picture = Segment::new("picture", "picture", TimeRange::new(0, 2_000_000));
+        picture.source_range = Some(TimeRange::new(0, 2_000_000));
+        draft.tracks[0].segments.push(picture);
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.select(Some(SegmentId::new("picture")));
+        use super::KeyedSetting;
+        let keyed = |desktop: &Shell, setting| desktop.setting_keys(setting).unwrap().times;
+
+        // Key the position alone, at both ends.
+        desktop.toggle_setting_key(KeyedSetting::Position).unwrap();
+        desktop.seek(Micros(2_000_000));
+        desktop.set_position(0.5, 0.0).unwrap();
+        assert_eq!(
+            keyed(&desktop, KeyedSetting::Position),
+            vec![Micros(0), Micros(2_000_000)]
+        );
+        for other in [
+            KeyedSetting::Scale,
+            KeyedSetting::Rotation,
+            KeyedSetting::Opacity,
+        ] {
+            assert!(keyed(&desktop, other).is_empty(), "{other:?}");
+        }
+
+        // A scale or turn edit is stored, the same all along the clip.
+        desktop.set_scale(1.5).unwrap();
+        desktop.set_rotation(30.0).unwrap();
+        assert!(keyed(&desktop, KeyedSetting::Scale).is_empty());
+        assert!(keyed(&desktop, KeyedSetting::Rotation).is_empty());
+        desktop.seek(Micros(1_000_000));
+        let halfway = desktop.inspection().unwrap();
+        assert_eq!(halfway.scale_x, 1.5);
+        assert_eq!(halfway.rotation, 30.0);
+        assert!((halfway.transform_x - 0.25).abs() < 1e-9);
+
+        // Opacity keys apart, and its slider keys it once it has keys.
+        desktop.seek(Micros(0));
+        desktop.toggle_setting_key(KeyedSetting::Opacity).unwrap();
+        desktop.seek(Micros(2_000_000));
+        desktop.set_opacity(0.0).unwrap();
+        assert_eq!(
+            keyed(&desktop, KeyedSetting::Opacity),
+            vec![Micros(0), Micros(2_000_000)]
+        );
+        desktop.seek(Micros(1_000_000));
+        assert!((desktop.inspection().unwrap().opacity - 0.5).abs() < 1e-9);
+        assert_eq!(keyed(&desktop, KeyedSetting::Position).len(), 2);
+
+        // Taking the position key off leaves the opacity's.
+        desktop.seek(Micros(2_000_000));
+        desktop.toggle_setting_key(KeyedSetting::Position).unwrap();
+        assert_eq!(keyed(&desktop, KeyedSetting::Position), vec![Micros(0)]);
+        assert_eq!(keyed(&desktop, KeyedSetting::Opacity).len(), 2);
     }
 
     #[test]

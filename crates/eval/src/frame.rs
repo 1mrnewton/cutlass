@@ -1580,6 +1580,22 @@ mod tests {
         let blur = framed(&path, None, Some(canvas("canvas_blur", "", 0.0, "")));
         assert_eq!(row(&blur, 16, 0), row(covered.rgba(), 16, 0));
         assert_eq!(rows(&blur, 16, 1, 16), picture);
+
+        // A keyed color fills the letterbox as keyed at the frame's time.
+        let [r, g, b] = cutlass_model::CANVAS_COLOR_KEYS;
+        let keys = [
+            (r, 0, 1.0),
+            (r, 1_000_000, 0.0),
+            (g, 0, 0.0),
+            (b, 0, 0.0),
+            (b, 1_000_000, 1.0),
+        ];
+        let red = Some(canvas("canvas_color", "#00FF00", 0.0, ""));
+        let start = framed_at(&path, None, red.clone(), &keys, 0);
+        assert_eq!(row(&start, 16, 0), [255, 0, 0, 255].repeat(16));
+        let middle = framed_at(&path, None, red, &keys, 500_000);
+        assert_eq!(row(&middle, 16, 0), [128, 0, 128, 255].repeat(16));
+        assert_eq!(rows(&middle, 16, 1, 16), picture);
     }
 
     fn canvas(kind: &str, color: &str, blur: f64, image: &str) -> MaterialCanvas {
@@ -1594,6 +1610,18 @@ mod tests {
     }
 
     fn framed(path: &Path, background: Option<&str>, canvas: Option<MaterialCanvas>) -> Vec<u8> {
+        framed_at(path, background, canvas, &[], 0)
+    }
+
+    /// [`framed`] with `keys` (name, offset, value) on the still's clip,
+    /// drawn at `time`.
+    fn framed_at(
+        path: &Path,
+        background: Option<&str>,
+        canvas: Option<MaterialCanvas>,
+        keys: &[(&str, i64, f64)],
+        time: i64,
+    ) -> Vec<u8> {
         let mut draft = Draft::empty("draft");
         draft.canvas_config.width = 16;
         draft.canvas_config.height = 18;
@@ -1603,6 +1631,9 @@ mod tests {
         draft.materials.videos.push(video);
         let mut segment = Segment::new("still", "still", TimeRange::new(0, 1_000_000));
         segment.source_range = Some(TimeRange::new(0, 1_000_000));
+        for (name, offset, value) in keys {
+            cutlass_model::put_key(&mut segment, name, Micros(*offset), *value);
+        }
         if let Some(canvas) = canvas {
             segment.extra_material_refs.push(canvas.id.clone());
             draft.materials.canvases.push(canvas);
@@ -1614,7 +1645,7 @@ mod tests {
         let mut clips = OpenClips::new();
         let rgba = frame(
             &Snapshot::new(&draft),
-            Micros(0),
+            Micros(time),
             &mut device,
             &media,
             &mut clips,

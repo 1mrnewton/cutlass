@@ -520,6 +520,39 @@ pub static CHROMA_STRENGTH_KEYS: [&str; 1] = ["KFTypeChromaIntensity"];
 /// A chroma key's shadow, from 0 to 1. A Cutlass name.
 pub static CHROMA_SHADOW_KEYS: [&str; 1] = ["KFTypeChromaShadow"];
 
+/// A clip's canvas color, under its letterbox: red, green and blue from 0
+/// to 1. Cutlass names.
+pub static CANVAS_COLOR_KEYS: [&str; 3] = [
+    "KFTypeCanvasColorR",
+    "KFTypeCanvasColorG",
+    "KFTypeCanvasColorB",
+];
+
+/// The color `names` (red, green and blue keys from 0 to 1) holds on
+/// `segment` at timeline `time` as `#rrggbb`; `None` unless all three are
+/// keyed and read.
+#[must_use]
+pub fn hex_color_at(
+    segment: &Segment,
+    graphs: &[KeyframeGraph],
+    names: &[&str; 3],
+    time: Micros,
+) -> Option<String> {
+    let offset = time.0.saturating_sub(segment.target.start.0);
+    let mut bytes = [0_u8; 3];
+    for (byte, name) in bytes.iter_mut().zip(names) {
+        let value = sample(&segment.common_keyframes, graphs, &[name], offset)??;
+        if !value.is_finite() {
+            return None;
+        }
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let channel = (value.clamp(0.0, 1.0) * 255.0).round() as u8;
+        *byte = channel;
+    }
+    let [r, g, b] = bytes;
+    Some(format!("#{r:02x}{g:02x}{b:02x}"))
+}
+
 /// A clip's Relight strength, from 0 to 1. A Cutlass name.
 pub static RELIGHT_STRENGTH_KEYS: [&str; 1] = ["KFTypeRelightStrength"];
 /// The Custom light's color, red, green and blue from 0 to 1. Cutlass names.
@@ -552,16 +585,8 @@ pub fn relight_at(
     if let Some(angle) = keyed(RELIGHT_ANGLE_KEYS[0]) {
         out.angle = angle;
     }
-    let rgb: Option<Vec<f64>> = RELIGHT_COLOR_KEYS.iter().map(|name| keyed(name)).collect();
-    if let Some(rgb) = rgb {
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let byte = |value: f64| (value.clamp(0.0, 1.0) * 255.0).round() as u8;
-        out.color = format!(
-            "#{:02x}{:02x}{:02x}",
-            byte(rgb[0]),
-            byte(rgb[1]),
-            byte(rgb[2])
-        );
+    if let Some(color) = hex_color_at(segment, graphs, &RELIGHT_COLOR_KEYS, time) {
+        out.color = color;
     }
     out
 }
@@ -658,6 +683,7 @@ pub fn is_keyable(property: &str) -> bool {
         || TEXT_COLOR_KEYS.contains(&property)
         || ADJUST_KEYS.contains(&property)
         || HSL_KEYS.contains(&property)
+        || CANVAS_COLOR_KEYS.contains(&property)
         || RELIGHT_STRENGTH_KEYS.contains(&property)
         || RELIGHT_COLOR_KEYS.contains(&property)
         || RELIGHT_ANGLE_KEYS.contains(&property)
@@ -969,6 +995,20 @@ mod tests {
         {
             assert!(is_keyable(name), "{name}");
         }
+    }
+
+    #[test]
+    fn a_keyed_canvas_color_reads_as_hex_once_all_three_are_keyed() {
+        let mut segment = Segment::new("s", "m", crate::time::TimeRange::new(0, 1_000));
+        let at = |segment: &Segment| hex_color_at(segment, &[], &CANVAS_COLOR_KEYS, Micros(500));
+        assert_eq!(at(&segment), None);
+        put_key(&mut segment, CANVAS_COLOR_KEYS[0], Micros(0), 0.0);
+        put_key(&mut segment, CANVAS_COLOR_KEYS[0], Micros(1_000), 1.0);
+        assert_eq!(at(&segment), None);
+        put_key(&mut segment, CANVAS_COLOR_KEYS[1], Micros(0), 0.0);
+        put_key(&mut segment, CANVAS_COLOR_KEYS[2], Micros(0), 2.0);
+        assert_eq!(at(&segment).as_deref(), Some("#8000ff"));
+        assert!(CANVAS_COLOR_KEYS.iter().all(|name| is_keyable(name)));
     }
 
     #[test]

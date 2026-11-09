@@ -235,6 +235,7 @@ fn place_child<D: Device>(
         pass.clips,
         pass.width,
         pass.height,
+        time,
     );
     let on_gpu = gpu
         && matches!(

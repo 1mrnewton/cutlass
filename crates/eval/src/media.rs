@@ -561,7 +561,7 @@ pub(crate) fn video_layers<'a>(
                 };
                 clips.sources.insert(segment.id.clone(), source);
             }
-            let backdrop = backdrop_for(draft, segment, media, clips, width, height);
+            let backdrop = backdrop_for(draft, segment, media, clips, width, height, time);
             let steady = crate::steady::steady_at(clips, draft, segment, time);
             let light = clips.light(media, draft, segment, time);
             chosen.push((
@@ -647,7 +647,7 @@ pub(crate) fn video_picture(
         )?;
         clips.sources.insert(segment.id.clone(), source);
     }
-    let backdrop = backdrop_for(draft, segment, media, clips, width, height);
+    let backdrop = backdrop_for(draft, segment, media, clips, width, height, time);
     let steady = crate::steady::steady_at(clips, draft, segment, time);
     let light = clips.light(media, draft, segment, time);
     let source = clips.sources.get(&segment.id)?;
@@ -676,10 +676,23 @@ pub(crate) fn backdrop_for(
     clips: &mut OpenClips,
     width: u32,
     height: u32,
+    time: Micros,
 ) -> Backdrop {
-    let Some(canvas) = segment_canvas(draft, segment) else {
+    let Some(stored) = segment_canvas(draft, segment) else {
         return Backdrop::None;
     };
+    // A keyed color fills the letterbox as keyed at `time`.
+    let keyed = cutlass_model::hex_color_at(
+        segment,
+        &draft.keyframe_graph_list,
+        &cutlass_model::CANVAS_COLOR_KEYS,
+        time,
+    )
+    .map(|color| MaterialCanvas {
+        color,
+        ..stored.clone()
+    });
+    let canvas = keyed.as_ref().unwrap_or(stored);
     if canvas.kind == "canvas_image" {
         let image = canvas_image(canvas, media, clips, width, height);
         return image_backdrop(canvas, image);

@@ -1,19 +1,33 @@
 name: check
 
+# A pull request runs the checks once; a push runs them only on main, so a
+# push to a branch with an open pull request does not run them twice. Any
+# other branch can be checked by hand from the Actions tab.
 on:
   push:
+    branches: [main]
   pull_request:
+  workflow_dispatch:
+
+# A newer push to the same pull request or branch cancels the run before it.
+# Runs on main always finish.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  # Line tables keep panic backtraces readable while linking far less debug
+  # information than a full debug build. Local builds keep full debug info.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
 
 jobs:
-  rust:
+  lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: GTK file dialogs, a software GPU and ALSA
-        # mesa-vulkan-drivers brings lavapipe, a Vulkan device on the CPU, so
-        # the wgpu tests run here instead of skipping. ALSA's null device
-        # lets the preview queue write without sound hardware.
-        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev mesa-vulkan-drivers libasound2-dev
+      - name: GTK file dialogs and ALSA
+        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libasound2-dev
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
@@ -79,14 +93,6 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
-      - name: Test
-        env:
-          CUTLASS_REQUIRE_GPU: "1"
-        run: cargo test --workspace --all-targets
-      - name: Desktop smoke test
-        run: |
-          cargo build -p cutlass
-          python3 scripts/smoke.py target/debug/cutlass
       - name: Public release logger
         run: |
           cargo clippy -p cutlass-logger --all-targets --features public-release -- -D warnings
@@ -95,6 +101,41 @@ jobs:
           cargo check -p cutlass --features public-release
       - name: Dependency policy
         uses: EmbarkStudios/cargo-deny-action@v2
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: GTK file dialogs, a software GPU and ALSA
+        # mesa-vulkan-drivers brings lavapipe, a Vulkan device on the CPU, so
+        # the wgpu tests run here instead of skipping. ALSA's null device
+        # lets the preview queue write without sound hardware.
+        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev mesa-vulkan-drivers libasound2-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - name: Test
+        env:
+          CUTLASS_REQUIRE_GPU: "1"
+        run: cargo nextest run --workspace --all-targets --no-fail-fast
+      - name: Desktop smoke test
+        run: |
+          cargo build -p cutlass
+          python3 scripts/smoke.py target/debug/cutlass
+
+  rust:
+    # The check main's branch protection requires: it passes when the lint
+    # and test jobs both pass.
+    if: always()
+    needs: [lint, test]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Lint and test passed
+        run: |
+          test "${{ needs.lint.result }}" = success
+          test "${{ needs.test.result }}" = success
 
   desktop:
     # The Linux job above covers the whole workspace. Here the desktop app
@@ -119,10 +160,13 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
       - name: Clippy
         run: cargo clippy -p cutlass -p ${{ matrix.platform }} --all-targets -- -D warnings
       - name: Test
-        run: cargo test -p cutlass -p ${{ matrix.platform }} --all-targets
+        run: cargo nextest run -p cutlass -p ${{ matrix.platform }} --all-targets --no-fail-fast
       - name: Smoke test
         run: |
           cargo build -p cutlass
@@ -132,6 +176,9 @@ jobs:
     # The Linux release build as an AppImage, on the oldest supported
     # Ubuntu so its glibc runs on newer systems. The built AppImage runs the
     # same smoke test as the plain binary, then is kept as an artifact.
+    # Release packaging runs on main and on pull requests into main; other
+    # pull requests skip it. release.yml builds the published packages.
+    if: github.event_name != 'pull_request' || github.base_ref == 'main'
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -162,6 +209,9 @@ jobs:
     # Developer ID is set up (CODESIGN_IDENTITY and NOTARY_PROFILE). The
     # binary inside the bundle runs the same smoke test, and the DMG is kept
     # as an artifact.
+    # Release packaging runs on main and on pull requests into main; other
+    # pull requests skip it. release.yml builds the published packages.
+    if: github.event_name != 'pull_request' || github.base_ref == 'main'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -183,6 +233,9 @@ jobs:
     # a code signing certificate is set up (SIGNTOOL_CERT). The installer is
     # run silently, the installed binary runs the smoke test, and the
     # uninstaller removes it and its registry keys; the installer is kept.
+    # Release packaging runs on main and on pull requests into main; other
+    # pull requests skip it. release.yml builds the published packages.
+    if: github.event_name != 'pull_request' || github.base_ref == 'main'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4

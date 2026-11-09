@@ -28,6 +28,8 @@ pub enum KeyedSetting {
     MaskRound,
     Volume,
     TextColor,
+    /// One colour Adjust slider.
+    Adjust(cutlass_effects::AdjustKey),
 }
 
 impl KeyedSetting {
@@ -58,6 +60,7 @@ impl KeyedSetting {
             Self::MaskFeather => &cutlass_model::MASK_FEATHER_KEYS,
             Self::MaskRound => &cutlass_model::MASK_ROUND_KEYS,
             Self::Volume => &[cutlass_model::VOLUME_KEY],
+            Self::Adjust(key) => key.keyframes(),
             Self::TextColor => &cutlass_model::TEXT_COLOR_KEYS,
         }
     }
@@ -312,6 +315,7 @@ impl Shell {
                 | KeyedSetting::MaskFeather
                 | KeyedSetting::MaskRound => "pick a mask shape first".to_owned(),
                 KeyedSetting::Volume => "the clip has no sound to key".to_owned(),
+                KeyedSetting::Adjust(_) => "adjustments belong on a picture".to_owned(),
                 KeyedSetting::TextColor => "a color key belongs on text".to_owned(),
             })
         })?;
@@ -363,6 +367,10 @@ impl Shell {
                 values[range].to_vec()
             }
             KeyedSetting::Volume => vec![inspection.volume],
+            KeyedSetting::Adjust(key) => {
+                self.adjust_segment().ok()?;
+                vec![f64::from(inspection.adjust.get(key))]
+            }
             KeyedSetting::TextColor => {
                 if inspection.text_color.is_empty() && self.text_look().is_none() {
                     return None;
@@ -1491,6 +1499,37 @@ mod tests {
         desktop.set_mask(None).unwrap();
         assert!(!desktop.setting_keyed(super::KeyedSetting::Mask));
         assert!(desktop.inspection().unwrap().mask.is_none());
+    }
+
+    #[test]
+    fn each_adjust_slider_keys_on_its_own_and_reset_takes_the_keys_off() {
+        use super::KeyedSetting;
+        use cutlass_effects::AdjustKey;
+        let temp = Temp::new();
+        let mut desktop = every_kind(&temp);
+        pick(&mut desktop, "main");
+        let exposure = KeyedSetting::Adjust(AdjustKey::Exposure);
+        desktop.seek(cutlass_model::Micros(0));
+        desktop.toggle_setting_key(exposure).unwrap();
+        desktop.seek(cutlass_model::Micros(2_000_000));
+        desktop.set_adjust(AdjustKey::Exposure, 0.5).unwrap();
+        // Contrast is not keyed, so it is stored all along the clip.
+        desktop.set_adjust(AdjustKey::Contrast, 0.25).unwrap();
+        let times = |desktop: &Shell, setting| desktop.setting_keys(setting).unwrap().times;
+        assert_eq!(times(&desktop, exposure).len(), 2);
+        assert!(times(&desktop, KeyedSetting::Adjust(AdjustKey::Contrast)).is_empty());
+        desktop.seek(cutlass_model::Micros(1_000_000));
+        let adjust = desktop.inspection().unwrap().adjust;
+        assert!((adjust.get(AdjustKey::Exposure) - 0.25).abs() < 1e-6);
+        assert!((adjust.get(AdjustKey::Contrast) - 0.25).abs() < 1e-6);
+        // Nothing in the pose was keyed.
+        assert!(desktop.keys().is_none_or(|keys| keys.times.is_empty()));
+
+        desktop.reset_adjust().unwrap();
+        assert!(times(&desktop, exposure).is_empty());
+        assert!(desktop.inspection().unwrap().adjust.is_identity());
+        desktop.undo().unwrap();
+        assert_eq!(times(&desktop, exposure).len(), 2);
     }
 
     #[test]

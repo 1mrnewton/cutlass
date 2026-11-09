@@ -4536,7 +4536,13 @@ impl Shell {
             letterbox: letterbox_color(draft, segment),
             blend: cutlass_effects::segment_blend(draft, segment)
                 .unwrap_or(cutlass_effects::BlendMode::SourceOver),
-            adjust: cutlass_effects::segment_adjust(draft, segment),
+            // Keyed sliders show their value where the playhead is.
+            adjust: cutlass_effects::keyed_adjust(
+                cutlass_effects::segment_adjust(draft, segment),
+                segment,
+                &draft.keyframe_graph_list,
+                self.playhead,
+            ),
             grade: cutlass_effects::segment_grade(draft, segment),
             lut: cutlass_effects::segment_lut(draft, segment).map(|lut| (lut.name, lut.strength)),
             chroma: cutlass_effects::segment_chroma(draft, segment),
@@ -5889,6 +5895,9 @@ impl Shell {
     ) -> Result<(), ShellError> {
         let segment_id = self.adjust_segment()?;
         self.refuse_locked(&segment_id)?;
+        if let Some(key) = self.key_setting_here(KeyedSetting::Adjust(key), vec![value]) {
+            return self.apply(key);
+        }
         let material_id = MaterialId::new(self.fresh("adjust"));
         self.apply(Request::SetAdjust {
             segment_id,
@@ -6115,10 +6124,13 @@ impl Shell {
     pub fn reset_adjust(&mut self) -> Result<(), ShellError> {
         let segment_id = self.adjust_segment()?;
         self.refuse_locked(&segment_id)?;
-        let Some(adjust) = self.inspection().map(|inspection| inspection.adjust) else {
+        let Some(segment) = self.selected_segment() else {
             return Ok(());
         };
-        let requests: Vec<Request> = cutlass_effects::AdjustKey::ALL
+        let draft = self.session_draft()?;
+        // The stored sliders go to zero, and their keys come off.
+        let adjust = cutlass_effects::segment_adjust(draft, segment);
+        let mut requests: Vec<Request> = cutlass_effects::AdjustKey::ALL
             .into_iter()
             .filter(|key| adjust.get(*key) != 0.0)
             .map(|key| Request::SetAdjust {
@@ -6128,6 +6140,19 @@ impl Shell {
                 value: 0.0,
             })
             .collect();
+        if cutlass_model::has_keys(segment, &cutlass_model::ADJUST_KEYS) {
+            requests.push(Request::SetKeyframes {
+                segment_id: segment_id.clone(),
+                keyframes: segment
+                    .common_keyframes
+                    .iter()
+                    .filter(|group| {
+                        !cutlass_model::ADJUST_KEYS.contains(&group.property_type.as_str())
+                    })
+                    .cloned()
+                    .collect(),
+            });
+        }
         if requests.is_empty() {
             return Ok(());
         }
@@ -6378,7 +6403,7 @@ impl Shell {
 
     /// The selected picture, adjustment layer, or filter: the clips that
     /// take adjust sliders.
-    fn adjust_segment(&self) -> Result<SegmentId, ShellError> {
+    pub(crate) fn adjust_segment(&self) -> Result<SegmentId, ShellError> {
         if let Some(segment_id) = self.selected()
             && let Some((_, TrackType::Adjust | TrackType::Filter)) =
                 placed(self.session_draft()?, segment_id)

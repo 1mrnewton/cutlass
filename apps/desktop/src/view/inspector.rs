@@ -564,13 +564,14 @@ fn effect_panel(
             later_slider(ui, "Amount", 0.0, "0");
         }
         if filter {
-            let key = cutlass_effects::AdjustKey::Temperature;
-            let stored = (f64::from(inspection.adjust.get(key)) * 100.0).round();
-            if let Some(value) = slider(ui, state, "temp", "Temp", stored, -100.0..=100.0, |v| {
-                format!("{v:.0}")
-            }) {
-                send(shell, |shell| shell.set_adjust(key, value / 100.0));
-            }
+            adjust_row(
+                shell,
+                ui,
+                state,
+                inspection,
+                cutlass_effects::AdjustKey::Temperature,
+                "Temp",
+            );
         }
     });
 }
@@ -1775,18 +1776,36 @@ fn adjust_sliders(
             ui.label(RichText::new(title).size(12.0).color(tokens::MUTED));
             divider(ui);
             for key in keys {
-                let key = *key;
-                let stored = (f64::from(inspection.adjust.get(key)) * 100.0).round();
-                let low = f64::from(key.min()) * 100.0;
-                let id = format!("adjust-{}", key.kind());
-                if let Some(value) = slider(ui, state, &id, key.label(), stored, low..=100.0, |v| {
-                    format!("{v:.0}")
-                }) {
-                    send(shell, |shell| shell.set_adjust(key, value / 100.0));
-                }
+                adjust_row(shell, ui, state, inspection, *key, key.label());
             }
         }
     });
+}
+
+/// One Adjust slider named `label`, with its own keyframe buttons.
+fn adjust_row(
+    shell: &mut Shell,
+    ui: &mut Ui,
+    state: &mut InspectorState,
+    inspection: &Inspection,
+    key: cutlass_effects::AdjustKey,
+    label: &str,
+) {
+    let setting = KeyedSetting::Adjust(key);
+    let keys = shell.setting_keys(setting);
+    let mut step = None;
+    let stored = (f64::from(inspection.adjust.get(key)) * 100.0).round();
+    let low = f64::from(key.min()) * 100.0;
+    let id = format!("adjust-{}", key.kind());
+    let changed = keyed_row(ui, keys.as_ref(), shell.playhead(), &mut step, |ui| {
+        slider(ui, state, &id, label, stored, low..=100.0, |v| {
+            format!("{v:.0}")
+        })
+    });
+    if let Some(value) = changed {
+        send(shell, |shell| shell.set_adjust(key, value / 100.0));
+    }
+    setting_step(shell, setting, step);
 }
 
 // The text panel's Basic page.

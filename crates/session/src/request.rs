@@ -673,8 +673,10 @@ pub enum Request {
         animation: Option<String>,
         duration: Micros,
     },
-    /// Store the picture's place, size, and turn, as the three requests
-    /// above do, and key them at `offset` from the clip's start.
+    /// Change the picture's place, size, and turn at `offset` from the
+    /// clip's start. Each part that changed is keyed there when it already
+    /// has keys and stored, as the three requests above do, when it has
+    /// none. A part that did not change is left alone.
     KeyPose {
         segment_id: SegmentId,
         offset: Micros,

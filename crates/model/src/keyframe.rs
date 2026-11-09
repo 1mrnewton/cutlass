@@ -534,9 +534,32 @@ pub fn is_unit_colour_key(property: &str) -> bool {
     .contains(&property)
 }
 
+/// What a recipe effect's control keys are named by: this, then the
+/// control's id. A Cutlass name.
+pub const EFFECT_CONTROL_PREFIX: &str = "KFTypeEffectControl_";
+
+/// The keyframe property recipe control `id` keys under.
+#[must_use]
+pub fn effect_control_key(id: &str) -> String {
+    format!("{EFFECT_CONTROL_PREFIX}{id}")
+}
+
+/// The control id `property` keys, when it is a recipe control's key: a
+/// non-empty id of at most 64 lowercase letters, digits and underscores.
+#[must_use]
+pub fn effect_control_id(property: &str) -> Option<&str> {
+    let id = property.strip_prefix(EFFECT_CONTROL_PREFIX)?;
+    let fits = !id.is_empty()
+        && id.len() <= 64
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_');
+    fits.then_some(id)
+}
+
 /// Whether a key on `property` is played: the pose, the volume, the mask,
 /// a text's color, an Adjust slider, or a filter, LUT or chroma key's
-/// strength.
+/// strength, or a recipe effect's control.
 #[must_use]
 pub fn is_keyable(property: &str) -> bool {
     is_pose_key(property)
@@ -545,6 +568,7 @@ pub fn is_keyable(property: &str) -> bool {
         || TEXT_COLOR_KEYS.contains(&property)
         || ADJUST_KEYS.contains(&property)
         || is_unit_colour_key(property)
+        || effect_control_id(property).is_some()
 }
 
 /// The keyed letter color of `segment` at timeline `time`, red, green and
@@ -814,6 +838,25 @@ mod tests {
             .copied()
             .collect();
         assert_eq!(parts, MASK_KEYS);
+    }
+
+    #[test]
+    fn an_effect_control_key_names_its_control() {
+        let key = effect_control_key("intensity");
+        assert_eq!(key, "KFTypeEffectControl_intensity");
+        assert_eq!(effect_control_id(&key), Some("intensity"));
+        assert!(is_keyable(&key));
+        for bad in [
+            "KFTypeEffectControl_",
+            "KFTypeEffectControl_Big",
+            "KFTypeEffectControl_a-b",
+            "KFTypeEffectControl_../x",
+            "intensity",
+        ] {
+            assert_eq!(effect_control_id(bad), None, "{bad}");
+            assert!(!is_keyable(bad), "{bad}");
+        }
+        assert!(!is_keyable(&effect_control_key(&"a".repeat(65))));
     }
 
     #[test]

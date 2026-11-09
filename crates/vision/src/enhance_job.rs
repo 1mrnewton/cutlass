@@ -160,10 +160,6 @@ pub fn enhance_clip(
     let count = frames.len();
     let blends = frames.blends().to_vec();
     let samples = frames.samples().to_vec();
-    let mix = ask
-        .motion_blur
-        .as_ref()
-        .map_or(0.0, |blur| blur.blend as f32);
     let blurred = ask.motion_blur.is_some();
     let mut stream = denoiser
         .map(|denoiser| denoiser.stream(count, source.0, source.1, noise_for_level(ask.denoise)))
@@ -257,6 +253,10 @@ pub fn enhance_clip(
                     for sample in across {
                         made.push(window.frame(*sample, count, source, interpolator, &mut own)?);
                     }
+                    // A keyed Blend mixes each frame's own share back in.
+                    #[allow(clippy::cast_possible_truncation)]
+                    let mix =
+                        usize::try_from(index).map_or(0.0, |index| ask.blend_at(index) as f32);
                     Ok(shutter(&made, &sharp, mix))
                 })
                 .and_then(|rgb| match enhancer {

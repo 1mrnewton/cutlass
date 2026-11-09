@@ -91,9 +91,22 @@ pub struct EnhanceAsk {
     pub interpolate: i64,
     /// The Motion blur each frame of the copy gets, if any.
     pub motion_blur: Option<MotionBlur>,
+    /// With Blur or Blend keyed, each frame of the copy's own Blur and
+    /// Blend, in order; empty when neither is keyed.
+    pub keyed_blur: Vec<(f64, f64)>,
 }
 
 impl EnhanceAsk {
+    /// The share of the sharp frame mixed into frame `index` of the copy.
+    #[must_use]
+    pub fn blend_at(&self, index: usize) -> f64 {
+        self.keyed_blur
+            .get(index)
+            .map(|(_, blend)| *blend)
+            .or_else(|| self.motion_blur.as_ref().map(|blur| blur.blend))
+            .unwrap_or(0.0)
+    }
+
     /// The name its copy is kept under.
     #[must_use]
     pub fn key(&self) -> EnhanceKey {
@@ -115,10 +128,16 @@ impl EnhanceAsk {
             denoise: self.denoise.max(0),
             interpolate: self.interpolate.max(0),
             motion_blur: self.motion_blur.as_ref().map_or_else(String::new, |blur| {
-                format!(
+                let settings = format!(
                     "b{:.3}-m{:.3}-d{}-x{}",
                     blur.blur, blur.blend, blur.direction, blur.times
-                )
+                );
+                // Keyed settings make another copy whenever a key moves.
+                if self.keyed_blur.is_empty() {
+                    settings
+                } else {
+                    format!("{settings}-k{:016x}", keyed_digest(&self.keyed_blur))
+                }
             }),
             model,
             rate: self.rate,
@@ -166,6 +185,28 @@ pub fn copy_ask(
     } else {
         own_rate
     };
+    let keyed_blur = match motion_blur {
+        Some(blur)
+            if cutlass_model::has_keys(segment, &cutlass_model::MOTION_BLUR_LENGTH_KEYS)
+                || cutlass_model::has_keys(segment, &cutlass_model::MOTION_BLUR_BLEND_KEYS) =>
+        {
+            let copy = source_times(&range, rate).map_err(|error| EnhanceError::Clip {
+                reason: error.to_string().replace("steady", "blur"),
+            })?;
+            copy.iter()
+                .map(|time| {
+                    let keyed = cutlass_model::motion_blur_at(
+                        blur,
+                        segment,
+                        &draft.keyframe_graph_list,
+                        time.0,
+                    );
+                    (keyed.blur, keyed.blend)
+                })
+                .collect()
+        }
+        _ => Vec::new(),
+    };
     Ok(EnhanceAsk {
         source,
         range,
@@ -174,7 +215,26 @@ pub fn copy_ask(
         denoise: denoise.max(0),
         interpolate: interpolate.max(0),
         motion_blur: motion_blur.cloned(),
+        keyed_blur,
     })
+}
+
+/// A digest of each frame's keyed Blur and Blend, the same on every run
+/// and build, to name the copy they make.
+fn keyed_digest(frames: &[(f64, f64)]) -> u64 {
+    // FNV-1a over the values to the copy name's three places.
+    let mut digest: u64 = 0xcbf2_9ce4_8422_2325;
+    for (blur, blend) in frames {
+        for value in [blur, blend] {
+            #[allow(clippy::cast_possible_truncation)]
+            let rounded = (value * 1_000.0).round() as i64;
+            for byte in rounded.to_le_bytes() {
+                digest ^= u64::from(byte);
+                digest = digest.wrapping_mul(0x0100_0000_01b3);
+            }
+        }
+    }
+    digest
 }
 
 /// The file clip `segment_id` shows, the stretch of it on the timeline,
@@ -305,7 +365,7 @@ impl EnhanceFrames {
         let shutter = ask
             .motion_blur
             .as_ref()
-            .map(|blur| shutter_times(&copy, ask.rate, blur));
+            .map(|blur| shutter_times(&copy, ask.rate, blur, &ask.keyed_blur));
         let (times, blends) = if ask.interpolate > 0 || ask.motion_blur.is_some() {
             let times = file_times(&mut media, &ask.range)?;
             let blends = blends(&times, &copy);
@@ -413,18 +473,27 @@ fn file_times(media: &mut Media, range: &TimeRange) -> Result<Vec<Micros>, Enhan
 
 /// The times averaged into each frame of a copy at `copy`, `rate` frames a
 /// second: `2 × times + 1` evenly across the blur, which is `blur` of a
-/// frame's time long and reaches after the frame, before it, or both.
-fn shutter_times(copy: &[Micros], rate: f64, blur: &MotionBlur) -> Vec<Vec<Micros>> {
+/// frame's time long (each frame's own from `keyed`, when Blur is keyed)
+/// and reaches after the frame, before it, or both.
+fn shutter_times(
+    copy: &[Micros],
+    rate: f64,
+    blur: &MotionBlur,
+    keyed: &[(f64, f64)],
+) -> Vec<Vec<Micros>> {
     let frame = 1_000_000.0 / rate;
-    let length = blur.blur.clamp(0.0, 1.0) * frame;
-    let start = match blur.direction {
-        MotionBlur::FORWARD => 0.0,
-        MotionBlur::BACKWARD => -length,
-        _ => -length / 2.0,
-    };
     let count = (2 * blur.times.clamp(1, 6) + 1) as usize;
     copy.iter()
-        .map(|at| {
+        .enumerate()
+        .map(|(index, at)| {
+            // A keyed Blur sets each frame's own length.
+            let share = keyed.get(index).map_or(blur.blur, |(length, _)| *length);
+            let length = share.clamp(0.0, 1.0) * frame;
+            let start = match blur.direction {
+                MotionBlur::FORWARD => 0.0,
+                MotionBlur::BACKWARD => -length,
+                _ => -length / 2.0,
+            };
             (0..count)
                 .map(|j| {
                     let offset = start + length * j as f64 / (count - 1) as f64;

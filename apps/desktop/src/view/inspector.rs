@@ -2594,15 +2594,16 @@ pub(super) struct Header {
 }
 
 /// A section header: an optional on switch (`(on, editable)`), the name
-/// with a chevron that folds the section, and, with `keys`, the reset and
-/// keyframe buttons.
+/// with a chevron that folds the section, and, with `reset`, a reset
+/// button. Keyframe buttons sit on each keyed row, not on the header, so a
+/// key on one setting never keys the section's others.
 pub(super) fn section(
     ui: &mut Ui,
     state: &mut InspectorState,
     key: &str,
     label: &str,
     check: Option<(bool, bool)>,
-    keys: bool,
+    reset: bool,
 ) -> Header {
     let mut header = Header {
         open: state.open.contains(key),
@@ -2633,15 +2634,8 @@ pub(super) fn section(
                 state.open.remove(key);
             }
         }
-        if keys {
+        if reset {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.add_enabled_ui(false, |ui| {
-                    icon_toggle(ui, "chevron", "Next keyframe", false);
-                    icon_toggle(ui, "keyframe", "Add keyframe", false);
-                    icon_toggle(ui, "chevronLeft", "Previous keyframe", false);
-                })
-                .response
-                .on_disabled_hover_text(LATER);
                 header.reset = icon_toggle(ui, "reset", &format!("Reset {label}"), false).clicked();
             });
         }

@@ -58,6 +58,8 @@ pub enum KeyedSetting {
     RelightColor,
     /// The Custom light's direction.
     RelightAngle,
+    /// A clip's canvas color, under its letterbox.
+    CanvasColor,
 }
 
 impl KeyedSetting {
@@ -106,6 +108,7 @@ impl KeyedSetting {
             Self::RelightStrength => &cutlass_model::RELIGHT_STRENGTH_KEYS,
             Self::RelightColor => &cutlass_model::RELIGHT_COLOR_KEYS,
             Self::RelightAngle => &cutlass_model::RELIGHT_ANGLE_KEYS,
+            Self::CanvasColor => &cutlass_model::CANVAS_COLOR_KEYS,
             Self::TextColor => &cutlass_model::TEXT_COLOR_KEYS,
         }
     }
@@ -449,6 +452,7 @@ impl Shell {
                 KeyedSetting::RelightStrength
                 | KeyedSetting::RelightColor
                 | KeyedSetting::RelightAngle => "pick a light first".to_owned(),
+                KeyedSetting::CanvasColor => "switch Canvas on first".to_owned(),
                 KeyedSetting::Hsl(..) | KeyedSetting::WheelPuck(_) | KeyedSetting::WheelLuma(_) => {
                     "colour keys belong on a picture".to_owned()
                 }
@@ -531,6 +535,10 @@ impl Shell {
                 super::relight::relight_rgb(&self.relight()?.color).to_vec()
             }
             KeyedSetting::RelightAngle => vec![self.relight()?.angle],
+            KeyedSetting::CanvasColor => {
+                (!inspection.letterbox.is_empty()).then_some(())?;
+                unit_rgb(&inspection.letterbox).to_vec()
+            }
             KeyedSetting::GlowStrength | KeyedSetting::GlowRange => {
                 let look = self
                     .text_look()
@@ -1339,7 +1347,7 @@ pub(super) fn rgb_hex(rgb: [f64; 3]) -> String {
 
 /// The red, green and blue of `#rrggbb`, each from 0 to 1; white when it
 /// does not read.
-fn unit_rgb(color: &str) -> [f64; 3] {
+pub(super) fn unit_rgb(color: &str) -> [f64; 3] {
     let body = color.trim().trim_start_matches('#');
     let channel = |at: usize| {
         body.get(at..at + 2)

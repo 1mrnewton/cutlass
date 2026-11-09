@@ -4541,7 +4541,15 @@ impl Shell {
             line_spacing,
             line_width,
             font,
-            letterbox: letterbox_color(draft, segment),
+            // A keyed canvas color shows where the playhead is.
+            letterbox: cutlass_model::hex_color_at(
+                segment,
+                &draft.keyframe_graph_list,
+                &cutlass_model::CANVAS_COLOR_KEYS,
+                self.playhead,
+            )
+            .filter(|_| !letterbox_color(draft, segment).is_empty())
+            .unwrap_or_else(|| letterbox_color(draft, segment)),
             blend: cutlass_effects::segment_blend(draft, segment)
                 .unwrap_or(cutlass_effects::BlendMode::SourceOver),
             // Keyed sliders show their value where the playhead is.
@@ -4998,11 +5006,21 @@ impl Shell {
         let segment_id = self.letterbox_segment()?;
         self.refuse_locked(&segment_id)?;
         let canvas_id = MaterialId::new(self.fresh("canvas"));
-        self.apply(Request::SetLetterbox {
+        let mut requests = vec![Request::SetLetterbox {
             segment_id,
             color: color.to_owned(),
             canvas_id,
-        })
+        }];
+        // A keyed color plays its keys, so a new one keys it here.
+        if !color.is_empty()
+            && let Some(key) = self.key_setting_here(
+                KeyedSetting::CanvasColor,
+                inspector::unit_rgb(color).to_vec(),
+            )
+        {
+            requests.push(key);
+        }
+        self.apply_requests(&requests)
     }
 
     fn letterbox_segment(&self) -> Result<SegmentId, ShellError> {
@@ -15224,6 +15242,26 @@ mod tests {
             desktop.set_letterbox("white").unwrap_err().to_string(),
             "the canvas color is not a hex color"
         );
+
+        // A keyed color moves along the clip.
+        desktop.set_letterbox("#FF0000").unwrap();
+        desktop
+            .toggle_setting_key(super::KeyedSetting::CanvasColor)
+            .unwrap();
+        desktop.seek(Micros(900_000));
+        desktop.set_letterbox("#0000FF").unwrap();
+        let keys = desktop
+            .setting_keys(super::KeyedSetting::CanvasColor)
+            .unwrap();
+        assert_eq!(keys.times.len(), 2);
+        desktop.seek(Micros(450_000));
+        assert_eq!(desktop.inspection().unwrap().letterbox, "#800080");
+        let middle = desktop.preview_bytes().unwrap();
+        assert_eq!(&middle.rgba[..4], &[0x80, 0x00, 0x80, 0xFF]);
+        for _ in 0..3 {
+            desktop.undo().unwrap();
+        }
+        assert_eq!(desktop.inspection().unwrap().letterbox, "");
 
         let lane = desktop.draft().unwrap().tracks[0].id.clone();
         desktop

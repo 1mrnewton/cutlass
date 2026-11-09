@@ -1125,9 +1125,10 @@ fn canvas(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState, inspection
     }
     if header.open {
         body(ui, |ui| {
-            if let Some(color) =
+            let picked = setting_row(shell, ui, KeyedSetting::CanvasColor, on, |ui| {
                 color_row(ui, state, "canvas-color", "Color", &inspection.letterbox)
-            {
+            });
+            if let Some(color) = picked {
                 send(shell, |shell| shell.set_letterbox(&color));
             }
             later_button(ui, "Apply to all");

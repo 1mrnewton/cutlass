@@ -271,7 +271,10 @@ fn in_range(property: &str, value: f64) -> bool {
     {
         return (-1.0..=1.0).contains(&value);
     }
-    if cutlass_model::is_unit_colour_key(property) {
+    if cutlass_model::is_unit_colour_key(property)
+        || cutlass_model::GLOW_STRENGTH_KEYS.contains(&property)
+        || cutlass_model::GLOW_RANGE_KEYS.contains(&property)
+    {
         return (0.0..=1.0).contains(&value);
     }
     if let Some(key) = cutlass_model::TextStyleKey::of(property) {
@@ -551,6 +554,7 @@ mod tests {
             ("KFTypeShapeWidth", -1.0),
             ("KFTypeHslRedHue", 1.5),
             ("KFTypeWheelGainLuma", -2.0),
+            ("KFTypeTextGlowRange", 1.5),
         ] {
             assert_eq!(
                 session.apply(1, &[values(0, &[(name, value)])]),

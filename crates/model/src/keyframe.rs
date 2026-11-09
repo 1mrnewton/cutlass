@@ -616,6 +616,8 @@ pub fn is_keyable(property: &str) -> bool {
         || is_unit_colour_key(property)
         || effect_control_id(property).is_some()
         || crate::text_keys::TEXT_STYLE_KEYS.contains(&property)
+        || crate::text_keys::GLOW_STRENGTH_KEYS.contains(&property)
+        || crate::text_keys::GLOW_RANGE_KEYS.contains(&property)
         || crate::shape_keys::SHAPE_STYLE_KEYS.contains(&property)
 }
 

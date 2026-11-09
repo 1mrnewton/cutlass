@@ -3,7 +3,7 @@
 //! material, keyed on the segment under a Cutlass name.
 
 use crate::keyframe::{KeyframeGraph, sample};
-use crate::materials::MaterialText;
+use crate::materials::{BloomParams, MaterialEffect, MaterialText, Materials, segment_bloom};
 use crate::segment::Segment;
 use crate::time::Micros;
 
@@ -20,6 +20,42 @@ pub static TEXT_STYLE_KEYS: [&str; 10] = [
     "KFTypeTextShadowAngle",
     "KFTypeTextShadowBlur",
 ];
+
+/// A title's glow strength, from 0 to 1. A Cutlass name.
+pub static GLOW_STRENGTH_KEYS: [&str; 1] = ["KFTypeTextGlowStrength"];
+/// How far a title's glow reaches, from 0 to 1. A Cutlass name.
+pub static GLOW_RANGE_KEYS: [&str; 1] = ["KFTypeTextGlowRange"];
+
+/// The glow `segment` points at, with its strength and range as keyed at
+/// timeline `time`, each held to 0 to 1; `None` with no glow.
+#[must_use]
+pub fn glow_at(
+    materials: &Materials,
+    segment: &Segment,
+    graphs: &[KeyframeGraph],
+    time: Micros,
+) -> Option<BloomParams> {
+    let mut glow = segment_bloom(materials, segment).and_then(MaterialEffect::bloom)?;
+    let offset = time.0.saturating_sub(segment.target.start.0);
+    let keyed = |names: &[&str]| match sample(&segment.common_keyframes, graphs, names, offset) {
+        Some(Some(value)) if value.is_finite() => Some(value.clamp(0.0, 1.0)),
+        _ => None,
+    };
+    if let Some(strength) = keyed(&GLOW_STRENGTH_KEYS) {
+        glow.strength = strength;
+    }
+    if let Some(range) = keyed(&GLOW_RANGE_KEYS) {
+        glow.range = range;
+    }
+    Some(glow)
+}
+
+/// Whether `segment` keys its glow.
+#[must_use]
+pub fn glow_keyed(segment: &Segment) -> bool {
+    crate::keyframe::has_keys(segment, &GLOW_STRENGTH_KEYS)
+        || crate::keyframe::has_keys(segment, &GLOW_RANGE_KEYS)
+}
 
 /// One keyed text style setting.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -207,6 +243,37 @@ mod tests {
         );
         let held = text_style_at(&text, &segment, &[], Micros(1_000)).unwrap();
         assert_eq!(held.shadow_smoothing, 1.0);
+    }
+
+    #[test]
+    fn a_keyed_glow_moves_its_strength_and_leaves_its_range() {
+        let mut materials = Materials::default();
+        let bloom = BloomParams {
+            color: "#ffffff".to_owned(),
+            strength: 0.5,
+            range: 0.3,
+            dir_x: 0.0,
+            dir_y: 0.0,
+            rest: serde_json::Map::new(),
+        };
+        materials.effects.push(MaterialEffect::glow("g", &bloom));
+        let mut segment = Segment::new("s", "t", TimeRange::new(1_000, 2_000));
+        assert_eq!(glow_at(&materials, &segment, &[], Micros(1_000)), None);
+        segment.extra_material_refs.push("g".into());
+        assert_eq!(
+            glow_at(&materials, &segment, &[], Micros(1_000)),
+            Some(bloom.clone())
+        );
+        assert!(!glow_keyed(&segment));
+        put_key(&mut segment, GLOW_STRENGTH_KEYS[0], Micros(0), 0.0);
+        put_key(&mut segment, GLOW_STRENGTH_KEYS[0], Micros(2_000), 2.0);
+        assert!(glow_keyed(&segment));
+        let keyed = glow_at(&materials, &segment, &[], Micros(1_500)).unwrap();
+        assert!((keyed.strength - 0.5).abs() < 1e-9);
+        assert_eq!(keyed.range, 0.3);
+        let end = glow_at(&materials, &segment, &[], Micros(3_000)).unwrap();
+        assert_eq!(end.strength, 1.0);
+        assert!(is_keyable(GLOW_STRENGTH_KEYS[0]) && is_keyable(GLOW_RANGE_KEYS[0]));
     }
 
     #[test]

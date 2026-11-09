@@ -511,8 +511,32 @@ pub static ADJUST_KEYS: [&str; 17] = [
     "KFTypeAdjustGrain",
 ];
 
+/// A filter's Amount, from 0 to 1. A Cutlass name.
+pub static FILTER_STRENGTH_KEYS: [&str; 1] = ["KFTypeFilterStrength"];
+/// A LUT's intensity, from 0 to 1. A Cutlass name.
+pub static LUT_STRENGTH_KEYS: [&str; 1] = ["KFTypeLutStrength"];
+/// A chroma key's intensity, from 0 to 1. A Cutlass name.
+pub static CHROMA_STRENGTH_KEYS: [&str; 1] = ["KFTypeChromaIntensity"];
+/// A chroma key's shadow, from 0 to 1. A Cutlass name.
+pub static CHROMA_SHADOW_KEYS: [&str; 1] = ["KFTypeChromaShadow"];
+
+/// Whether `property` is a keyed share from 0 to 1 of the clip's colour
+/// work: a filter's Amount, a LUT's intensity, a chroma key's intensity or
+/// shadow.
+#[must_use]
+pub fn is_unit_colour_key(property: &str) -> bool {
+    [
+        FILTER_STRENGTH_KEYS[0],
+        LUT_STRENGTH_KEYS[0],
+        CHROMA_STRENGTH_KEYS[0],
+        CHROMA_SHADOW_KEYS[0],
+    ]
+    .contains(&property)
+}
+
 /// Whether a key on `property` is played: the pose, the volume, the mask,
-/// a text's color or an Adjust slider.
+/// a text's color, an Adjust slider, or a filter, LUT or chroma key's
+/// strength.
 #[must_use]
 pub fn is_keyable(property: &str) -> bool {
     is_pose_key(property)
@@ -520,6 +544,7 @@ pub fn is_keyable(property: &str) -> bool {
         || MASK_KEYS.contains(&property)
         || TEXT_COLOR_KEYS.contains(&property)
         || ADJUST_KEYS.contains(&property)
+        || is_unit_colour_key(property)
 }
 
 /// The keyed letter color of `segment` at timeline `time`, red, green and

@@ -2787,12 +2787,23 @@ impl<P: PicturePixel> InlineFilter<'_, P> {
         if self.lf_on {
             postfilter::loop_filter_rows_with(seq, hdr, fs, info, cur, a, b, last);
         }
-        if let Some((c, d)) = self.to_filter.take() {
-            self.filter_ready_rows(seq, hdr, fs, info, cur, c, d, false);
-            // Luma rows above 4 * d are final: deblocking below changes
-            // none of them, and the loop restoration stripes done end 8
-            // rows higher.
-            let done = if self.lr_on { 4 * d - 8 } else { 4 * d };
+        // CDEF and loop restoration take whole 64-row areas and read up
+        // to 3 rows past them. Deblocking the next superblock row will
+        // still change the 7 rows above it, so every area but the last
+        // one deblocked is ready: with 128x128 superblocks that is the
+        // upper half of this row, as well as the row above.
+        let start = self.to_filter.take().map_or(a, |(c, _)| c);
+        if last {
+            self.filter_ready_rows(seq, hdr, fs, info, cur, start, b, true);
+            return;
+        }
+        let ready = b.saturating_sub(16).max(start);
+        if ready > start {
+            self.filter_ready_rows(seq, hdr, fs, info, cur, start, ready, false);
+            // Luma rows above 4 * ready are final: deblocking below
+            // changes none of them, and the loop restoration stripes done
+            // end 8 rows higher.
+            let done = if self.lr_on { 4 * ready - 8 } else { 4 * ready };
             if done > self.published && self.publish.watched() {
                 let tc = std::time::Instant::now();
                 let bufs = lock(self.spares).bands.pop().unwrap_or_else(|| {
@@ -2805,11 +2816,7 @@ impl<P: PicturePixel> InlineFilter<'_, P> {
                 self.published = done;
             }
         }
-        if last {
-            self.filter_ready_rows(seq, hdr, fs, info, cur, a, b, true);
-        } else {
-            self.to_filter = Some((a, b));
-        }
+        self.to_filter = Some((ready, b));
     }
 
     /// Runs CDEF and loop restoration on luma 4x4 rows `a..b` (to the

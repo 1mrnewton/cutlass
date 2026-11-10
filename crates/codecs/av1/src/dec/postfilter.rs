@@ -185,30 +185,35 @@ impl FilterInfo {
         rows: core::ops::Range<usize>,
     ) {
         let st = fs.mi_stride;
-        for r in rows.start..rows.end.min(fs.mi_rows) {
-            let (Some(mi), Some(out)) = (
-                fs.mi.get(r * st..r * st + fs.mi_cols),
-                self.units.get_mut(r * st..r * st + fs.mi_cols),
-            ) else {
+        let rows = rows.start..rows.end.min(fs.mi_rows);
+        for r in rows.clone() {
+            let Some(mi) = fs.mi.get(r * st..r * st + fs.mi_cols) else {
                 return;
             };
-            // A block is as wide in every row it covers, and starts at a
-            // multiple of its width: one info for its units of the row.
+            // A block starts at a multiple of its width and of its
+            // height: its info is worked out once, at its first row
+            // here, and stored in all its rows.
             let mut c = 0;
             while c < mi.len() {
                 let m = &mi[c];
-                let w = bw4(m.bsize).max(1);
+                let (w, h) = (bw4(m.bsize).max(1), bh4(m.bsize).max(1));
                 let end = ((c / w + 1) * w).min(mi.len());
-                let info = levels.info(
-                    hdr,
-                    m.ref_frame[0],
-                    m.segment_id,
-                    m.y_mode,
-                    m.skip,
-                    m.bsize,
-                    m.delta_lf,
-                );
-                out[c..end].fill(info);
+                if r % h == 0 || r == rows.start {
+                    let info = levels.info(
+                        hdr,
+                        m.ref_frame[0],
+                        m.segment_id,
+                        m.y_mode,
+                        m.skip,
+                        m.bsize,
+                        m.delta_lf,
+                    );
+                    for rr in r..(r - r % h + h).min(rows.end) {
+                        if let Some(out) = self.units.get_mut(rr * st + c..rr * st + end) {
+                            out.fill(info);
+                        }
+                    }
+                }
                 c = end;
             }
         }
@@ -300,16 +305,27 @@ impl<'a> LfPlane<'a> {
         };
         let li = self.li;
         let yp = ur * 4;
-        for uc in usize::from(pass0)..self.nc_vis {
+        let mut uc = usize::from(pass0);
+        while uc < self.nc_vis {
             let tx = tx_row[uc];
+            // The units of this transform block left in the row: none of
+            // them starts a vertical edge, and they all lie on a
+            // horizontal edge or none does. A transform block starts at
+            // a multiple of its width.
+            let at = uc;
+            let rest = (at | ((tx_w(tx) >> 2) - 1)) + 1;
             let (t, pos) = if pass0 {
-                (tx_w(tx), uc * 4)
+                uc = rest;
+                (tx_w(tx), at * 4)
             } else {
+                uc += 1;
                 (tx_h(tx), yp)
             };
             if pos & (t - 1) != 0 {
+                uc = rest;
                 continue;
             }
+            let uc = at;
             let c = (uc << sx) | sx;
             let m = &mi_row[c];
             if m.flags & LF_BLOCK_EDGES != 0 {
@@ -436,13 +452,23 @@ fn lf_chunk<P: Pixel>(job: &LfJob<'_, '_>, data: &mut [P], row0: usize, sharp: u
     // each column.
     let mut grid = vec![(0u8, 0u8); LF_STRIP_UNITS * nc];
     let mut col = [(0u8, 0u8); LF_STRIP_UNITS];
+    // The columns with an edge in the strip: with large transforms most
+    // have none.
+    let mut edged = vec![false; nc];
     for strip in (u0..u1).step_by(LF_STRIP_UNITS) {
         let rows = (u1 - strip).min(LF_STRIP_UNITS);
+        edged.fill(false);
         for i in 0..rows {
-            job.vert
-                .row_edges(strip + i, &mut grid[i * nc..(i + 1) * nc]);
+            let row = &mut grid[i * nc..(i + 1) * nc];
+            job.vert.row_edges(strip + i, row);
+            for (e, d) in edged.iter_mut().zip(row.iter()) {
+                *e |= d.1 != 0;
+            }
         }
         for uc in 1..nc {
+            if !edged[uc] {
+                continue;
+            }
             for i in 0..rows {
                 col[i] = grid[i * nc + uc];
             }

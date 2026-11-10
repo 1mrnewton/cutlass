@@ -140,11 +140,11 @@ fn prune(root: &Path, budget: u64) {
 /// every pixel is opaque, else a PNG.
 fn encoded(thumb: &Thumb) -> Option<(Vec<u8>, &'static str)> {
     let mut bytes = Vec::new();
-    let opaque = thumb.rgba.chunks_exact(4).all(|pixel| pixel[3] == u8::MAX);
+    let (pixels, _) = thumb.rgba.as_chunks::<4>();
+    let opaque = pixels.iter().all(|pixel| pixel[3] == u8::MAX);
     if opaque {
-        let rgb: Vec<u8> = thumb
-            .rgba
-            .chunks_exact(4)
+        let rgb: Vec<u8> = pixels
+            .iter()
             .flat_map(|pixel| [pixel[0], pixel[1], pixel[2]])
             .collect();
         image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, JPEG_QUALITY)
@@ -285,7 +285,13 @@ mod tests {
             .map(|(a, b)| u64::from(a.abs_diff(*b)))
             .sum();
         assert!(apart / (opaque.rgba.len() as u64) < 4, "{apart}");
-        assert!(back.rgba.chunks_exact(4).all(|pixel| pixel[3] == 255));
+        assert!(
+            back.rgba
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|pixel| pixel[3] == 255)
+        );
         // One that is not opaque is kept whole, alpha and all.
         assert_eq!(later.load(&key(&source, 2_000_000)), Some(clear));
         assert!(later.load(&key(&source, 1_000_000)).is_none());

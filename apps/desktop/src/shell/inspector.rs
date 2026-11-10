@@ -384,71 +384,163 @@ impl Shell {
                 })
             })
             .unwrap_or(to);
-        let offset = Micros((snapped.0 - start).clamp(0, length));
-        if offset.0 == from.0 - start {
+        let from_offset = Micros(from.0 - start);
+        // Dragging one of several picked keys moves them all by as much,
+        // as far as the first and last of them can go on the clip.
+        let together: Vec<Micros> = self
+            .selected_keys
+            .iter()
+            .filter(|(id, _)| id == segment_id)
+            .map(|(_, offset)| *offset)
+            .collect();
+        if together.len() > 1 && together.contains(&from_offset) {
+            let first = together.iter().map(|offset| offset.0).min().unwrap_or(0);
+            let last = together.iter().map(|offset| offset.0).max().unwrap_or(0);
+            let delta =
+                (snapped.0 - start - from_offset.0).clamp(-first, (length - last).max(-first));
+            if delta == 0 {
+                return Ok(());
+            }
+            let request = cutlass_editor::move_keys(draft, segment_id, &together, delta)
+                .ok_or_else(|| ShellError::Unavailable("a key is already there".to_owned()))?;
+            self.apply(request)?;
+            for (id, offset) in &mut self.selected_keys {
+                if id == segment_id {
+                    offset.0 += delta;
+                }
+            }
             return Ok(());
         }
-        let request =
-            cutlass_editor::move_key(draft, segment_id, Micros(from.0 - start), offset)
-                .ok_or_else(|| ShellError::Unavailable("a key is already there".to_owned()))?;
+        let offset = Micros((snapped.0 - start).clamp(0, length));
+        if offset == from_offset {
+            return Ok(());
+        }
+        let request = cutlass_editor::move_key(draft, segment_id, from_offset, offset)
+            .ok_or_else(|| ShellError::Unavailable("a key is already there".to_owned()))?;
         self.apply(request)?;
         // The key that was dragged stays the picked one.
-        self.selected_key = Some((segment_id.clone(), offset));
+        self.selected_keys = vec![(segment_id.clone(), offset)];
         Ok(())
     }
 
-    /// Pick the keyframe of clip `segment_id` at timeline time `time`, so
-    /// Delete takes it and not the clip. A time with no key picks nothing.
-    pub fn select_clip_key(&mut self, segment_id: &SegmentId, time: Micros) {
-        self.selected_key = self.clip_key_times(segment_id).contains(&time).then(|| {
-            let start = self
-                .draft()
-                .into_iter()
-                .flat_map(|draft| &draft.tracks)
-                .flat_map(|track| &track.segments)
-                .find(|segment| segment.id == *segment_id)
-                .map_or(0, |segment| segment.target.start.0);
-            (segment_id.clone(), Micros(time.0 - start))
-        });
-    }
-
-    /// The picked keyframe, as its clip and its timeline time, while the
-    /// clip is still selected and still has a key there.
-    #[must_use]
-    pub fn selected_clip_key(&self) -> Option<(SegmentId, Micros)> {
-        let (segment_id, offset) = self.selected_key.as_ref()?;
-        if !self.is_selected(segment_id) {
+    /// The key of clip `segment_id` at timeline time `time`, as the clip
+    /// and the time from its start, when it has one there.
+    fn key_at(&self, segment_id: &SegmentId, time: Micros) -> Option<(SegmentId, Micros)> {
+        if !self.clip_key_times(segment_id).contains(&time) {
             return None;
         }
-        let segment = self
+        let start = self
             .draft()?
             .tracks
             .iter()
             .flat_map(|track| &track.segments)
-            .find(|segment| segment.id == *segment_id)?;
-        cutlass_model::key_offsets(segment)
-            .contains(offset)
-            .then(|| {
-                (
-                    segment_id.clone(),
-                    Micros(segment.target.start.0.saturating_add(offset.0)),
-                )
-            })
+            .find(|segment| segment.id == *segment_id)?
+            .target
+            .start
+            .0;
+        Some((segment_id.clone(), Micros(time.0 - start)))
     }
 
-    /// Take the picked keyframe off its clip: every key at that time,
-    /// whatever it keys. The clip stays. One undo step.
+    /// Pick the keyframe of clip `segment_id` at timeline time `time`
+    /// alone, so Delete takes it and not the clip. A time with no key
+    /// picks nothing.
+    pub fn select_clip_key(&mut self, segment_id: &SegmentId, time: Micros) {
+        self.selected_keys = self.key_at(segment_id, time).into_iter().collect();
+    }
+
+    /// Add the keyframe of clip `segment_id` at timeline time `time` to
+    /// the picked ones, or take it out when it is one of them: a click
+    /// with Shift or Command held.
+    pub fn toggle_clip_key(&mut self, segment_id: &SegmentId, time: Micros) {
+        let Some(key) = self.key_at(segment_id, time) else {
+            return;
+        };
+        match self.selected_keys.iter().position(|picked| *picked == key) {
+            Some(at) => {
+                self.selected_keys.remove(at);
+            }
+            None => self.selected_keys.push(key),
+        }
+    }
+
+    /// Whether the keyframe of clip `segment_id` at timeline time `time`
+    /// is one of the picked ones.
+    #[must_use]
+    pub fn clip_key_picked(&self, segment_id: &SegmentId, time: Micros) -> bool {
+        self.selected_clip_keys()
+            .iter()
+            .any(|(id, at)| id == segment_id && *at == time)
+    }
+
+    /// The picked keyframes, each as its clip and its timeline time, in
+    /// the order they were picked. One whose clip is no longer selected,
+    /// or that has no key there any more, is left out.
+    #[must_use]
+    pub fn selected_clip_keys(&self) -> Vec<(SegmentId, Micros)> {
+        let Some(draft) = self.draft() else {
+            return Vec::new();
+        };
+        self.selected_keys
+            .iter()
+            .filter(|(segment_id, _)| self.is_selected(segment_id))
+            .filter_map(|(segment_id, offset)| {
+                let segment = draft
+                    .tracks
+                    .iter()
+                    .flat_map(|track| &track.segments)
+                    .find(|segment| segment.id == *segment_id)?;
+                cutlass_model::key_offsets(segment)
+                    .contains(offset)
+                    .then(|| {
+                        (
+                            segment_id.clone(),
+                            Micros(segment.target.start.0.saturating_add(offset.0)),
+                        )
+                    })
+            })
+            .collect()
+    }
+
+    /// The keyframe picked last, as its clip and its timeline time.
+    #[must_use]
+    pub fn selected_clip_key(&self) -> Option<(SegmentId, Micros)> {
+        self.selected_clip_keys().pop()
+    }
+
+    /// Take the picked keyframes off their clips: every key at each of
+    /// those times, whatever it keys. The clips stay. One undo step.
     pub fn remove_selected_key(&mut self) -> Result<(), ShellError> {
-        let (segment_id, offset) = self
-            .selected_key
-            .clone()
-            .filter(|_| self.selected_clip_key().is_some())
-            .ok_or_else(|| ShellError::Unavailable("no keyframe is selected".to_owned()))?;
-        self.refuse_locked(&segment_id)?;
-        let request = cutlass_editor::remove_key(self.session_draft()?, &segment_id, offset)
-            .ok_or_else(|| ShellError::Unavailable("no keyframe is selected".to_owned()))?;
-        self.apply(request)?;
-        self.selected_key = None;
+        let live = self.selected_clip_keys();
+        let nothing = || ShellError::Unavailable("no keyframe is selected".to_owned());
+        if live.is_empty() {
+            return Err(nothing());
+        }
+        // The picked keys by clip, as times from each clip's start.
+        let mut by_clip: Vec<(SegmentId, Vec<Micros>)> = Vec::new();
+        for (segment_id, offset) in &self.selected_keys {
+            if !live.iter().any(|(id, _)| id == segment_id) {
+                continue;
+            }
+            match by_clip.iter_mut().find(|(id, _)| id == segment_id) {
+                Some((_, offsets)) => offsets.push(*offset),
+                None => by_clip.push((segment_id.clone(), vec![*offset])),
+            }
+        }
+        for (segment_id, _) in &by_clip {
+            self.refuse_locked(segment_id)?;
+        }
+        let draft = self.session_draft()?;
+        let requests: Vec<_> = by_clip
+            .iter()
+            .filter_map(|(segment_id, offsets)| {
+                cutlass_editor::remove_keys(draft, segment_id, offsets)
+            })
+            .collect();
+        if requests.is_empty() {
+            return Err(nothing());
+        }
+        self.apply_requests(&requests)?;
+        self.selected_keys.clear();
         Ok(())
     }
 

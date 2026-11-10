@@ -839,7 +839,9 @@ pub struct Shell {
     /// its lane into view once.
     reveal: Option<SegmentId>,
     /// The picked keyframe: its clip, and its time from the clip's start.
-    selected_key: Option<(SegmentId, Micros)>,
+    /// The picked keyframes: each its clip and its time from the clip's
+    /// start, in the order they were picked.
+    selected_keys: Vec<(SegmentId, Micros)>,
     /// The library files Export selected clips was asked for, as material
     /// ids. Empty when the export is of the timeline.
     library_export: Vec<String>,
@@ -988,7 +990,7 @@ impl Shell {
             sound_known: RefCell::new(std::collections::HashMap::new()),
             attributes: None,
             reveal: None,
-            selected_key: None,
+            selected_keys: Vec::new(),
             library_export: Vec::new(),
             selected_transition: None,
             asked_transition: None,
@@ -1443,7 +1445,7 @@ impl Shell {
         self.beating = false;
         self.selected_beat = None;
         self.selected_transition = None;
-        self.selected_key = None;
+        self.selected_keys.clear();
         self.cancel_clip_drag();
         self.fitted = false;
         self.notice.clear();
@@ -1621,7 +1623,7 @@ impl Shell {
         self.beating = false;
         self.selected_beat = None;
         self.selected_transition = None;
-        self.selected_key = None;
+        self.selected_keys.clear();
         self.cancel_clip_drag();
         self.pixel_size = opening_pixel_size(rate);
         self.fitted = false;
@@ -4322,7 +4324,7 @@ impl Shell {
         self.selected_marker = None;
         self.selected_beat = None;
         self.selected_transition = None;
-        self.selected_key = None;
+        self.selected_keys.clear();
         self.selection.clear();
         if let Some(id) = id {
             self.selection = self.group_mates(&id);
@@ -4336,7 +4338,7 @@ impl Shell {
         self.selected_marker = None;
         self.selected_beat = None;
         self.selected_transition = None;
-        self.selected_key = None;
+        self.selected_keys.clear();
         let mates = self.group_mates(&id);
         if self.selection.contains(&id) {
             self.selection
@@ -4356,7 +4358,7 @@ impl Shell {
         self.selected_marker = None;
         self.selected_beat = None;
         self.selected_transition = None;
-        self.selected_key = None;
+        self.selected_keys.clear();
         if !keep {
             self.selection.clear();
         }
@@ -4401,8 +4403,8 @@ impl Shell {
     /// Remove the selected keyframe when one is picked; else the selected
     /// clips; else the selected marker, beat or transition.
     pub fn delete_target(&mut self) -> Result<(), ShellError> {
-        // A picked keyframe goes before the clip it is on.
-        if self.selected_clip_key().is_some() {
+        // Picked keyframes go before the clip they are on.
+        if !self.selected_clip_keys().is_empty() {
             return self.remove_selected_key();
         }
         if self.selection.is_empty() {
@@ -7210,7 +7212,7 @@ impl Shell {
         });
         self.selected_beat = None;
         self.selected_transition = None;
-        self.selected_key = None;
+        self.selected_keys.clear();
         self.selection.clear();
     }
 
@@ -7339,7 +7341,7 @@ impl Shell {
         self.selected_beat = Some(BeatPick { segment_id, source });
         self.selected_marker = None;
         self.selected_transition = None;
-        self.selected_key = None;
+        self.selected_keys.clear();
         self.selection.clear();
     }
 
@@ -7394,7 +7396,7 @@ impl Shell {
         if !present {
             self.selected_beat = None;
             self.selected_transition = None;
-            self.selected_key = None;
+            self.selected_keys.clear();
             return Ok(());
         }
         self.apply(Request::RemoveBeat {
@@ -7403,7 +7405,7 @@ impl Shell {
         })?;
         self.selected_beat = None;
         self.selected_transition = None;
-        self.selected_key = None;
+        self.selected_keys.clear();
         Ok(())
     }
 
@@ -18970,6 +18972,79 @@ mod tests {
         desktop.undo().unwrap();
         assert_eq!(desktop.draft().unwrap(), &before);
         assert!(desktop.link_media_enabled());
+    }
+
+    #[test]
+    fn several_picked_keyframes_move_and_delete_together() {
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        draft.config.maintrack_adsorb = false;
+        let mut clip = Segment::new("a", "color", TimeRange::new(2_000_000, 6_000_000));
+        for offset in [0, 1_000_000, 2_000_000, 4_000_000] {
+            cutlass_model::put_key(&mut clip, "KFTypePositionX", Micros(offset), 0.0);
+        }
+        draft.tracks[0].segments.push(clip);
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        let id = SegmentId::new("a");
+        desktop.select(Some(id.clone()));
+        let at = |seconds: i64| Micros(seconds * 1_000_000);
+        let picked = |desktop: &Shell| -> Vec<i64> {
+            desktop
+                .selected_clip_keys()
+                .iter()
+                .map(|(_, time)| time.0 / 1_000_000)
+                .collect()
+        };
+
+        // A plain pick is alone; a toggle adds, and takes out again.
+        desktop.select_clip_key(&id, at(3));
+        desktop.toggle_clip_key(&id, at(4));
+        desktop.toggle_clip_key(&id, at(6));
+        assert_eq!(picked(&desktop), [3, 4, 6]);
+        assert!(desktop.clip_key_picked(&id, at(4)));
+        desktop.toggle_clip_key(&id, at(6));
+        assert_eq!(picked(&desktop), [3, 4]);
+        // A time with no key adds nothing.
+        desktop.toggle_clip_key(&id, Micros(3_500_000));
+        assert_eq!(picked(&desktop), [3, 4]);
+        assert!(!desktop.clip_key_picked(&id, at(6)));
+
+        // Dragging one of the two a second later takes both, as one step.
+        desktop.move_clip_key(&id, at(3), at(4)).unwrap();
+        assert_eq!(desktop.clip_key_times(&id), [at(2), at(4), at(5), at(6)]);
+        assert_eq!(picked(&desktop), [4, 5]);
+        // They stop where the last of them meets the key that is not
+        // moving, and at the clip's start the other way.
+        assert_eq!(
+            desktop
+                .move_clip_key(&id, at(4), at(5))
+                .unwrap_err()
+                .to_string(),
+            "a key is already there"
+        );
+        desktop.move_clip_key(&id, at(4), at(-9)).unwrap_err();
+        assert_eq!(picked(&desktop), [4, 5]);
+        desktop.undo().unwrap();
+        assert_eq!(desktop.clip_key_times(&id), [at(2), at(3), at(4), at(6)]);
+
+        // Delete takes every picked key in one step and leaves the clip.
+        desktop.select_clip_key(&id, at(3));
+        desktop.toggle_clip_key(&id, at(6));
+        desktop.run_action("delete").unwrap();
+        assert_eq!(desktop.clip_key_times(&id), [at(2), at(4)]);
+        assert!(desktop.selected_clip_keys().is_empty());
+        assert_eq!(desktop.draft().unwrap().tracks[0].segments.len(), 1);
+        desktop.undo().unwrap();
+        assert_eq!(desktop.clip_key_times(&id).len(), 4);
+
+        // A key dragged that is not one of the picked ones moves alone and
+        // becomes the only pick.
+        desktop.select_clip_key(&id, at(3));
+        desktop.toggle_clip_key(&id, at(4));
+        desktop.move_clip_key(&id, at(6), at(7)).unwrap();
+        assert_eq!(picked(&desktop), [7]);
     }
 
     #[test]

@@ -8273,10 +8273,12 @@ fn paint_clip_keys(
     let painter = ui.painter().with_clip_rect(clip_rect.intersect(row));
     let pixel_size = shell.pixel_size() as f32;
     let y = clip_rect.bottom() - 8.0;
-    let picked = shell
-        .selected_clip_key()
+    let picked: Vec<Micros> = shell
+        .selected_clip_keys()
+        .into_iter()
         .filter(|(id, _)| *id == clip.id)
-        .map(|(_, time)| time);
+        .map(|(_, time)| time)
+        .collect();
     for time in shell.clip_key_times(&clip.id) {
         let x = clip_rect.left() + (time.0 - clip.start.0) as f32 * pixel_size;
         let hit = Rect::from_center_size(Pos2::new(x, y), Vec2::new(12.0, 14.0));
@@ -8306,7 +8308,7 @@ fn paint_clip_keys(
         };
         let c = Pos2::new(at, y);
         // The picked key is a size larger, filled, with a white edge.
-        let chosen = picked == Some(time);
+        let chosen = picked.contains(&time);
         let (reach, fill, edge) = if chosen {
             (KEY_REACH_PICKED, tokens::EXPORT, Color32::WHITE)
         } else {
@@ -8322,7 +8324,9 @@ fn paint_clip_keys(
             fill,
             egui::Stroke::new(if chosen { 1.5 } else { 1.0 }, edge),
         ));
-        if response.drag_started_by(egui::PointerButton::Primary) {
+        // A drag that starts on a key not yet picked picks it alone; one
+        // that starts on a picked key takes all the picked ones along.
+        if response.drag_started_by(egui::PointerButton::Primary) && !chosen {
             shell.select_clip_key(&clip.id, time);
         }
         if response.drag_stopped_by(egui::PointerButton::Primary)
@@ -8335,11 +8339,18 @@ fn paint_clip_keys(
                 shell.notice_error(&error);
             }
         } else if response.clicked() {
-            shell.seek(time);
-            shell.select_clip_key(&clip.id, time);
+            // With Shift or Command held the key joins or leaves the
+            // picked ones, and the playhead stays.
+            let more = ui.input(|input| input.modifiers.shift || input.modifiers.command);
+            if more {
+                shell.toggle_clip_key(&clip.id, time);
+            } else {
+                shell.seek(time);
+                shell.select_clip_key(&clip.id, time);
+            }
         }
         response.on_hover_text(
-            "Keyframe: click to pick it and go to it, drag to move it, Delete to remove it",
+            "Keyframe: click to pick it and go to it, Shift-click to pick more, drag to move, Delete to remove",
         );
     }
 }
@@ -15629,6 +15640,63 @@ mod tests {
         let output = frame(&mut shell, &mut view, Vec::new());
         assert_eq!(diamonds(&output, 10.0).len(), 1);
         assert!(diamonds(&output, 13.0).is_empty());
+
+        // A click picks one key; a Shift-click on another picks both and
+        // leaves the playhead; Delete then takes both and not the clip.
+        shell.undo().unwrap();
+        let output = frame(&mut shell, &mut view, Vec::new());
+        let mut keys = diamonds(&output, 10.0);
+        keys.extend(diamonds(&output, 13.0));
+        keys.sort_by(|a, b| a.x.total_cmp(&b.x));
+        assert_eq!(keys.len(), 2, "{keys:?}");
+        frame(
+            &mut shell,
+            &mut view,
+            vec![
+                egui::Event::PointerMoved(keys[0]),
+                press(keys[0], true),
+                press(keys[0], false),
+            ],
+        );
+        assert_eq!(shell.playhead(), Micros(0));
+        let shift = |pos: Pos2, pressed: bool| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::SHIFT,
+        };
+        frame(
+            &mut shell,
+            &mut view,
+            vec![
+                egui::Event::ModifiersChanged(egui::Modifiers::SHIFT),
+                egui::Event::PointerMoved(keys[1]),
+                shift(keys[1], true),
+                shift(keys[1], false),
+            ],
+        );
+        frame(
+            &mut shell,
+            &mut view,
+            vec![egui::Event::ModifiersChanged(egui::Modifiers::NONE)],
+        );
+        assert_eq!(shell.selected_clip_keys().len(), 2);
+        assert_eq!(shell.playhead(), Micros(0), "the playhead stayed");
+        let output = frame(&mut shell, &mut view, Vec::new());
+        assert_eq!(diamonds(&output, 13.0).len(), 2);
+        frame(
+            &mut shell,
+            &mut view,
+            vec![egui::Event::Key {
+                key: egui::Key::Delete,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        assert!(shell.clip_key_times(&id).is_empty());
+        assert_eq!(shell.draft().unwrap().tracks[0].segments.len(), 1);
         let _ = std::fs::remove_dir_all(&temp);
     }
 

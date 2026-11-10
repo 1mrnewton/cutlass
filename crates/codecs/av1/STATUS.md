@@ -248,6 +248,49 @@ the edges (dav1d builds bit masks as it reads a block, at next to no
 cost). With all threads both decoders spend about 1.8x the processor
 time they spend on one, so the same gaps hold there.
 
+Then the inverse transforms of 8-bit blocks moved to a vector kernel
+in `cutlass-simd` (same machine, same way of measuring):
+
+| File | Threads | Before | After | dav1d |
+|---|---|---|---|---|
+| 4x1 tiles | 18 | 0.62 s | 0.59 s | 0.30 s |
+| 4x1 tiles | 1 | 4.16 s | 3.97 s | 2.60 s |
+| 8x4 tiles | 18 | 0.59 s | 0.54 s | 0.31 s |
+| 8x4 tiles | 1 | 3.62 s | 3.21 s | 1.92 s |
+
+The whole files took 7.8 s and 15.2 s at 18 threads in one run each,
+against dav1d's 5.1 s and 8.5 s in the same sitting.
+
+Both passes of a block run in 16-bit vectors, eight rows and then
+eight columns to a vector, and the residual is added to sixteen samples
+at a time. A one-dimensional DCT or ADST is straight-line code expanded
+from its table of steps, once for each count of inputs that can be
+non-zero (1, 4, 8, 16, 32): a step on entries known to be zero is no
+code, and a rotation of one non-zero entry is two multiplies. The
+identity transforms scale in 32 bits as outputs are rounded, and a
+block with two of them touches only the samples under its
+coefficients. A block with one row of coefficients, or only its first
+coefficient, adds one row of residuals to every row. In isolation:
+
+| Block, coefficients | Before | After |
+|---|---|---|
+| 64x64 DCT, 2x2 | 1.93 us | 0.66 us |
+| 64x64 DCT, 32x32 | 3.43 us | 1.67 us |
+| 32x32 DCT, 2x2 | 0.65 us | 0.18 us |
+| 32x32 DCT, 32x32 | 1.20 us | 0.61 us |
+| 16x16 DCT, 16x16 | 317 ns | 153 ns |
+| 8x8 DCT, 8x8 | 96 ns | 50 ns |
+| 8x8 ADST, 8x8 | 98 ns | 60 ns |
+| 16x16 identity, 4x4 | 92 ns | 23 ns |
+| 64x64, first coefficient only | 268 ns | 68 ns |
+
+On one thread of the 8x4 file the inverse transforms now take about
+0.29 s where they took 0.72 s, against dav1d's 0.20 s. 4x4 blocks with
+a DCT or an ADST stay on the older code, which is the faster one for
+them, as do 10-bit and 12-bit streams and builds without NEON. What is
+left of the gap on these files is deblocking (its edge decisions
+first), inter prediction, and reading blocks and coefficients.
+
 Threading (2+ threads): the calling thread only reads the frame headers.
 Each frame is a task on a thread of its own (the decoder keeps a pool of
 them) that waits for what its parse depends on, and nothing else: the

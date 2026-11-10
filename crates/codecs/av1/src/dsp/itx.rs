@@ -12,6 +12,11 @@
 //! are skipped, and DC-only blocks and DC-only rows or columns of a DCT take
 //! shortcuts.
 //!
+//! Blocks of 8-bit samples go to the vector kernel of `cutlass-simd`
+//! instead where the build has one (`on_kernel`): all but the 4x4 blocks
+//! with a DCT or an ADST. The kernel runs the same step tables, which live
+//! there, as straight-line code.
+//!
 //! The arithmetic inside the 1D transforms wraps. For a conformant stream the
 //! spec guarantees that every butterfly result fits its clamping range, which
 //! makes `x * c0 - y * c1 + 2048` fit an `i32` exactly, so the results are

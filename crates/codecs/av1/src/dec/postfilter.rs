@@ -6,8 +6,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::dsp::Pixel;
 use crate::dsp::cdef::{
-    CDEF_BORDER, CDEF_PAD_STRIDE, CDEF_UNAVAILABLE, adjust_luma_pri_strength, cdef_damping,
-    cdef_direction, cdef_filter, cdef_filter_inner, cdef_uv_dir,
+    CDEF_BORDER, CDEF_PAD_STRIDE, CDEF_UNAVAILABLE, CdefTaps, adjust_luma_pri_strength,
+    cdef_damping, cdef_direction, cdef_filter, cdef_filter_inner, cdef_filter_taps, cdef_uv_dir,
 };
 use crate::dsp::lf::{filter_horizontal_edge, filter_vertical_edge};
 use crate::dsp::lr::{LrPlane, LrScratch, LrUnit, lr_planes, lr_planes_stripes, lr_save_bounds};
@@ -789,7 +789,17 @@ fn plane_sub(seq: &SequenceHeader, p: usize) -> (u32, u32) {
 /// columns are the pre-CDEF left columns of the next area).
 struct CdefWork<P> {
     pads: [[Vec<u16>; 2]; 3],
+    /// The taps of the 8-bit blocks filtered last, by [`taps_slot`]:
+    /// blocks share a few strengths and eight directions.
+    taps: Vec<Option<CdefTaps>>,
     _p: core::marker::PhantomData<P>,
+}
+
+/// Where [`CdefWork::taps`] keeps the taps for a plane's block with these
+/// strengths and this direction.
+#[inline(always)]
+fn taps_slot(chroma: bool, pri: i32, dir: u8) -> usize {
+    usize::from(dir & 7) | ((pri as usize & 15) << 3) | (usize::from(chroma) << 7)
 }
 
 impl<P: Pixel> CdefWork<P> {
@@ -798,6 +808,7 @@ impl<P: Pixel> CdefWork<P> {
             pads: core::array::from_fn(|_| {
                 core::array::from_fn(|_| vec![0u16; CDEF_PAD_STRIDE * CDEF_PAD_STRIDE])
             }),
+            taps: vec![None; 256],
             _p: core::marker::PhantomData,
         }
     }
@@ -1173,7 +1184,8 @@ fn cdef_plane_block<P: Pixel>(
     let sb_x = (area.sbc * 4) >> sx;
     let sb_y = (area.sbr * 4) >> sy;
     let (aw, ah) = (64 >> sx, 64 >> sy);
-    let [pad, prev] = &mut sc.pads[plane];
+    let CdefWork { pads, taps, .. } = sc;
+    let [pad, prev] = &mut pads[plane];
     if !*padded {
         let avail_w = (fs.mi_cols * 4) >> sx;
         let avail_h = (fs.mi_rows * 4) >> sy;
@@ -1205,15 +1217,32 @@ fn cdef_plane_block<P: Pixel>(
     let avail_w = (fs.mi_cols * 4) >> sx;
     let avail_h = (fs.mi_rows * 4) >> sy;
     let inner = x0 >= b && y0 >= b && x0 + w + b <= avail_w && y0 + h + b <= avail_h;
+    let at = (y0 - row0) * ds + x0;
+    let src = &pad[(y0 - sb_y) * ps + (x0 - sb_x)..];
+    if inner
+        && area.bd == 8
+        && let Some(bytes) = P::bytes_mut(&mut dst[plane][at..])
+    {
+        // 8-bit and inside the picture: the byte kernel, with the taps
+        // of the last block that had these strengths and direction.
+        let slot = &mut taps[taps_slot(plane > 0, pri, dir)];
+        let ready = match slot {
+            Some(t) if t.is_for(pri, sec, dir, damping) => *t,
+            _ => *slot.insert(CdefTaps::new(pri, sec, dir, damping)),
+        };
+        if cdef_filter_taps(bytes, ds, src, w, h, &ready) {
+            return;
+        }
+    }
     let filter = if inner {
         cdef_filter_inner::<P>
     } else {
         cdef_filter::<P>
     };
     filter(
-        &mut dst[plane][(y0 - row0) * ds + x0..],
+        &mut dst[plane][at..],
         ds,
-        &pad[(y0 - sb_y) * ps + (x0 - sb_x)..],
+        src,
         ps,
         w,
         h,

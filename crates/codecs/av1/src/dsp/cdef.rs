@@ -366,6 +366,63 @@ fn filter_block<P: Pixel>(
 
 const _: () = assert!(CDEF_PAD_STRIDE == kernel::STRIDE && TAP_SPAN == kernel::CENTRE);
 
+/// What [`cdef_filter_inner`] derives from the strengths, the direction
+/// and the damping of an 8-bit block before it filters, kept for the
+/// blocks that share them (see [`cdef_filter_taps`]).
+#[derive(Clone, Copy)]
+pub struct CdefTaps {
+    key: (i32, i32, u8, i32),
+    filter: kernel::Filter,
+}
+
+impl CdefTaps {
+    /// The taps of 8-bit blocks in a padded source of stride
+    /// [`CDEF_PAD_STRIDE`]. `pri` and `sec` are not both 0.
+    pub fn new(pri: i32, sec: i32, dir: u8, damping: i32) -> Self {
+        let k = Kernel::new(&Params::new(CDEF_PAD_STRIDE, pri, sec, dir, damping, 8));
+        Self {
+            key: (pri, sec, dir, damping),
+            filter: kernel::Filter {
+                pri: k.pri_thr,
+                sec: k.sec_thr,
+                pri_shift: k.pri_shift,
+                sec_shift: k.sec_shift,
+                pri_taps: k.pt,
+                pri_at: k.pri_o,
+                sec_at: k.sec_o,
+            },
+        }
+    }
+
+    /// Whether these are the taps for the arguments of [`Self::new`].
+    #[inline(always)]
+    pub fn is_for(&self, pri: i32, sec: i32, dir: u8, damping: i32) -> bool {
+        self.key == (pri, sec, dir, damping)
+    }
+}
+
+/// [`cdef_filter_inner`] for an 8x8, 4x4 or 4x8 block of 8-bit samples
+/// with its taps ready, on the byte kernel. Returns `false`, having
+/// written nothing, when the build has no kernel or the block is not one
+/// it takes: the caller then calls [`cdef_filter_inner`].
+#[inline(always)]
+pub fn cdef_filter_taps(
+    dst: &mut [u8],
+    dst_stride: usize,
+    src: &[u16],
+    w: usize,
+    h: usize,
+    taps: &CdefTaps,
+) -> bool {
+    if !cutlass_simd::ACCELERATED || !matches!((w, h), (8, 8) | (4, 4) | (4, 8)) {
+        return false;
+    }
+    let Some(win) = src.first_chunk::<{ kernel::WINDOW }>() else {
+        return false;
+    };
+    kernel::filter_inner_u8(dst, dst_stride, win, &taps.filter, w == 8, h)
+}
+
 /// [`cdef_filter`] on the kernel of `cutlass-simd`, for the block sizes
 /// and the padded source it takes. Returns whether it filtered the block.
 fn filter_kernel<P: Pixel>(
@@ -1025,6 +1082,22 @@ mod tests {
                     let got: Vec<i32> = out.iter().map(|v| v.to_i32()).collect();
                     assert_eq!(got, expect, "inner iter {iter} bd {bd}");
                     inner += 1;
+                    if let Some(bytes) = P::bytes_mut(&mut out)
+                        && pstride == CDEF_PAD_STRIDE
+                    {
+                        // With the taps ready, where the build has the
+                        // byte kernel.
+                        let taps = super::CdefTaps::new(pri, sec_raw, dir, damping);
+                        assert!(taps.is_for(pri, sec_raw, dir, damping));
+                        assert!(!taps.is_for(pri, sec_raw, dir ^ 1, damping));
+                        bytes.fill(0);
+                        if super::cdef_filter_taps(bytes, bw, &long, bw, bh, &taps) {
+                            let got: Vec<i32> = bytes.iter().map(|&v| i32::from(v)).collect();
+                            assert_eq!(got, expect, "ready taps iter {iter}");
+                        } else {
+                            assert!(!cutlass_simd::ACCELERATED || (bw, bh) == (8, 4));
+                        }
+                    }
                 }
             }
             assert!(pad.contains(&CDEF_UNAVAILABLE) || (bx > 0 && by > 0));

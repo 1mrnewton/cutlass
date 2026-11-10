@@ -92,6 +92,7 @@ fn a_stored_block_covers_its_units_inside_the_frame() {
         lvl: [9, 9, 9, 9],
         flags: LF_SKIP,
         bsize: BLOCK_64X64,
+        pad: [0; 2],
     };
     // A 64x64 block at row 8: 4 of its 16 rows are in the 12-row frame.
     info.store((8, 0), (fs.mi_rows, fs.mi_cols), block);

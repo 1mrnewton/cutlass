@@ -69,7 +69,7 @@ pub const LF_BLOCK_EDGES: u8 = 2;
 
 /// What the loop filter and CDEF read of a block, kept for each of its
 /// 4x4 units: its filter level for each loop filter index (7.14.5), its
-/// size and its flags. A quarter the size of the mode info, and the
+/// size and its flags. Under a third the size of the mode info, and the
 /// levels are worked out once for a block, not for each of its units in
 /// each pass.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -77,6 +77,9 @@ pub struct LfInfo {
     pub lvl: [u8; 4],
     pub flags: u8,
     pub bsize: u8,
+    /// Makes the info 8 bytes, which a run of units is filled with as
+    /// whole words.
+    pub pad: [u8; 2],
 }
 
 /// The filter levels of a frame's blocks.
@@ -137,6 +140,7 @@ impl LfLevels {
             flags: u8::from(skip) * LF_SKIP
                 + u8::from(skip && ref_frame > INTRA_FRAME) * LF_BLOCK_EDGES,
             bsize,
+            pad: [0; 2],
         }
     }
 }
@@ -185,35 +189,43 @@ impl FilterInfo {
         rows: core::ops::Range<usize>,
     ) {
         let st = fs.mi_stride;
+        let cols = fs.mi_cols;
         let rows = rows.start..rows.end.min(fs.mi_rows);
+        // For the column a block starts at: the row it ends at and its
+        // width. A row then steps over the blocks that began above it
+        // without reading their mode info again (a block starts at a
+        // multiple of its width and of its height).
+        let mut ends = vec![(0u16, 0u8); cols];
         for r in rows.clone() {
-            let Some(mi) = fs.mi.get(r * st..r * st + fs.mi_cols) else {
+            let Some(mi) = fs.mi.get(r * st..r * st + cols) else {
                 return;
             };
-            // A block starts at a multiple of its width and of its
-            // height: its info is worked out once, at its first row
-            // here, and stored in all its rows.
             let mut c = 0;
-            while c < mi.len() {
+            while c < cols {
+                let (until, width) = ends[c];
+                if usize::from(until) > r {
+                    c += usize::from(width);
+                    continue;
+                }
                 let m = &mi[c];
                 let (w, h) = (bw4(m.bsize).max(1), bh4(m.bsize).max(1));
-                let end = ((c / w + 1) * w).min(mi.len());
-                if r % h == 0 || r == rows.start {
-                    let info = levels.info(
-                        hdr,
-                        m.ref_frame[0],
-                        m.segment_id,
-                        m.y_mode,
-                        m.skip,
-                        m.bsize,
-                        m.delta_lf,
-                    );
-                    for rr in r..(r - r % h + h).min(rows.end) {
-                        if let Some(out) = self.units.get_mut(rr * st + c..rr * st + end) {
-                            out.fill(info);
-                        }
+                let end = ((c / w + 1) * w).min(cols);
+                let bottom = (r - r % h + h).min(rows.end);
+                let info = levels.info(
+                    hdr,
+                    m.ref_frame[0],
+                    m.segment_id,
+                    m.y_mode,
+                    m.skip,
+                    m.bsize,
+                    m.delta_lf,
+                );
+                for rr in r..bottom {
+                    if let Some(out) = self.units.get_mut(rr * st + c..rr * st + end) {
+                        out.fill(info);
                     }
                 }
+                ends[c] = (bottom as u16, (end - c) as u8);
                 c = end;
             }
         }
@@ -539,15 +551,27 @@ pub fn loop_filter<P: Pixel>(
     pic: &mut Picture<P>,
     threads: usize,
 ) {
+    loop_filter_scratch(seq, hdr, fs, pic, threads, &mut FilterInfo::default());
+}
+
+/// [`loop_filter`] with the block info worked out in `info`, scratch a
+/// caller keeps from frame to frame.
+pub fn loop_filter_scratch<P: Pixel>(
+    seq: &SequenceHeader,
+    hdr: &FrameHeader,
+    fs: &FrameState,
+    pic: &mut Picture<P>,
+    threads: usize,
+    info: &mut FilterInfo,
+) {
     if hdr.loop_filter.level[0] == 0 && hdr.loop_filter.level[1] == 0 {
         return;
     }
     let bd = pic.bd;
     let sharp = hdr.loop_filter.sharpness;
-    let mut info = FilterInfo::default();
     info.size_for(fs);
     info.fill_rows(hdr, &LfLevels::new(hdr), fs, 0..fs.mi_rows);
-    let info = &info;
+    let info = &*info;
     let mut lps = Vec::new();
     for plane in 0..seq.num_planes() {
         if plane > 0 && hdr.loop_filter.level[1 + plane] == 0 {

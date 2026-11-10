@@ -3361,6 +3361,13 @@ fn decode_frame_sync<P: PicturePixel>(
     if let Some(p) = mf {
         fs.motion_field = p.run(threads);
     }
+    let (mut cdef_sc, mut bounds, mut info) = lock(spares).filters.pop().unwrap_or_else(|| {
+        (
+            postfilter::cdef_pads(),
+            postfilter::LrBounds::default(),
+            postfilter::FilterInfo::default(),
+        )
+    });
     let saved = {
         let tiles_span = prof::Span(prof::TILES, std::time::Instant::now());
         // Intra block copy reads the frame being decoded: its tiles stay on
@@ -3394,18 +3401,12 @@ fn decode_frame_sync<P: PicturePixel>(
         // decode_frame_wrapup: in-loop filters, CDEF and loop restoration
         // in place.
         let _filter_span = prof::Span(prof::FILTER, std::time::Instant::now());
-        postfilter::loop_filter(seq, hdr, fs, &mut cur, threads);
+        postfilter::loop_filter_scratch(seq, hdr, fs, &mut cur, threads, &mut info);
         saved
     };
     let _filter_span = prof::Span(prof::FILTER, std::time::Instant::now());
     let lr = hdr.lr.uses_lr;
-    let (mut cdef_sc, mut bounds, info) = lock(spares).filters.pop().unwrap_or_else(|| {
-        (
-            postfilter::cdef_pads(),
-            postfilter::LrBounds::default(),
-            postfilter::FilterInfo::default(),
-        )
-    });
+
     let mut final_pic = if hdr.use_superres {
         if lr {
             let d = postfilter::superres(seq, hdr, &cur);

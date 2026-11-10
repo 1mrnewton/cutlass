@@ -5546,6 +5546,22 @@ mod intra8 {
 }
 
 #[cfg(test)]
+mod corner {
+    use super::corner_block;
+
+    #[test]
+    fn each_quarter_reads_its_own_corner() {
+        // Blocks are numbered `y * 4 + x`; the corners are 0, 3, 12 and 15.
+        let want = [0, 0, 3, 3, 0, 0, 3, 3, 12, 12, 15, 15, 12, 12, 15, 15];
+        for by in 0..4 {
+            for bx in 0..4 {
+                assert_eq!(corner_block(bx, by), want[by * 4 + bx], "block {bx},{by}");
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 mod oracle {
     use std::process::Command;
 
@@ -5896,6 +5912,80 @@ mod oracle {
         }
         if count != 0 {
             panic!("temporal mismatches {count} max {max} first {first:?}");
+        }
+    }
+
+    /// B pictures whose direct blocks read a co-located macroblock split
+    /// smaller than 8×8. With `direct_8x8_inference_flag` the block read is
+    /// the corner one of each quarter, which differs from the quarter's
+    /// first block only for such macroblocks.
+    #[test]
+    fn direct_blocks_over_small_partitions_match_ffmpeg() {
+        let Some(ffmpeg) = ffmpeg() else {
+            eprintln!("skip: ffmpeg is not installed");
+            return;
+        };
+        for direct in ["spatial", "temporal"] {
+            let dir = std::env::temp_dir().join(format!("cutlass-h264-corner-{direct}"));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let coded = dir.join("corner.h264");
+            let yuv = dir.join("corner.yuv");
+            let tools = format!(
+                "partitions=all:bframes=3:direct={direct}:8x8dct=0:b-pyramid=none:scenecut=0:threads=1"
+            );
+            let encoded = Command::new(&ffmpeg)
+                .args([
+                    "-y",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "testsrc2=size=320x240:rate=30",
+                    "-vf",
+                    "noise=alls=20:allf=t",
+                    "-frames:v",
+                    "12",
+                    "-c:v",
+                    "libx264",
+                    "-profile:v",
+                    "high",
+                    "-preset",
+                    "slow",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-b:v",
+                    "1500k",
+                    "-x264-params",
+                    &tools,
+                    "-f",
+                    "h264",
+                ])
+                .arg(&coded)
+                .status()
+                .unwrap();
+            assert!(encoded.success(), "ffmpeg encode failed");
+            let decoded = Command::new(&ffmpeg)
+                .args(["-y", "-i"])
+                .arg(&coded)
+                .args(["-f", "rawvideo", "-pix_fmt", "yuv420p"])
+                .arg(&yuv)
+                .status()
+                .unwrap();
+            assert!(decoded.success(), "ffmpeg decode failed");
+            let bytes = std::fs::read(&coded).unwrap();
+            let expected = std::fs::read(&yuv).unwrap();
+            let params = CodecParams::video(CodecId::H264, 320, 240);
+            let mut decoder = H264Decoder::open(&params).unwrap();
+            let mut got = Vec::new();
+            for unit in access_units(&bytes) {
+                let packet = Packet::video(unit, 0, 1, 30, false);
+                got.extend(pictures(&decoder.push(&packet).unwrap()));
+            }
+            got.extend(pictures(&decoder.drain().unwrap()));
+            assert_eq!(got.len(), expected.len(), "{direct}: picture bytes");
+            let wrong = got.iter().zip(&expected).filter(|(a, b)| a != b).count();
+            assert_eq!(wrong, 0, "{direct} direct: samples differ from ffmpeg");
+            let _ = std::fs::remove_dir_all(&dir);
         }
     }
 
@@ -8495,7 +8585,7 @@ fn temporal_block(
     }
     let part = (by / 2) * 2 + (bx / 2);
     let index = if slice.sps.direct_8x8_inference {
-        (by & !1) * 4 + (bx & !1)
+        corner_block(bx, by)
     } else {
         by * 4 + bx
     };
@@ -8596,7 +8686,7 @@ fn apply_direct<S: Sample>(
     for &(bx, by) in blocks {
         let index = by * 4 + bx;
         let col = if slice.sps.direct_8x8_inference {
-            (by & !1) * 4 + (bx & !1)
+            corner_block(bx, by)
         } else {
             index
         };
@@ -8662,6 +8752,17 @@ fn col_macroblock<'a, S: Sample>(
     }
     let col = frame.mb_at(addr)?;
     (!col.intra && !col.pcm).then_some(col)
+}
+
+/// The co-located 4×4 block for block (`bx`, `by`) under
+/// `direct_8x8_inference_flag`, clause 8.4.1.2.1: the block in the
+/// macroblock's own corner of the 8×8 quarter that holds it
+/// (luma4x4BlkIdx 5 × mbPartIdx: 0, 5, 10, 15), not that quarter's first
+/// block. The two differ when the co-located macroblock has partitions
+/// smaller than 8×8.
+fn corner_block(bx: usize, by: usize) -> usize {
+    let corner = |at: usize| if at < 2 { 0 } else { 3 };
+    corner(by) * 4 + corner(bx)
 }
 
 /// colZeroFlag of clause 8.4.1.2.2 for block `index` of that macroblock.

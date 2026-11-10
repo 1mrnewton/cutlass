@@ -36,6 +36,8 @@ struct ChromaPaint<'a> {
     cr_dc: &'a [i32],
     cb_ac: &'a [[i32; 16]],
     cr_ac: &'a [[i32; 16]],
+    /// The residual's `used`: which of the arrays hold levels.
+    used: u8,
 }
 
 struct ChromaResidual {
@@ -1381,6 +1383,7 @@ fn intra_base<S: Sample>(
                 cr_dc: &chroma.cr_dc,
                 cb_ac: &chroma.cb_ac,
                 cr_ac: &chroma.cr_ac,
+                used: chroma.used,
             },
             (qp, true, slice_id),
             false,
@@ -1518,6 +1521,7 @@ fn motion_base<S: Sample>(
                 cr_dc: &chroma.cr_dc,
                 cb_ac: &chroma.cb_ac,
                 cr_ac: &chroma.cr_ac,
+                used: chroma.used,
             },
             (qp, false, slice_id),
             false,
@@ -3429,6 +3433,7 @@ fn decode_intra<S: Sample>(
             cr_dc: &chroma_res.cr_dc,
             cb_ac: &chroma_res.cb_ac,
             cr_ac: &chroma_res.cr_ac,
+            used: chroma_res.used,
         },
         *qp,
     );
@@ -4473,6 +4478,7 @@ fn recon_intra<S: Sample>(
         cr_dc,
         cb_ac,
         cr_ac,
+        used,
     } = chroma;
     let x0 = mx * 16;
     let span = luma_span(my, mb.field_mb);
@@ -4552,6 +4558,11 @@ fn recon_intra<S: Sample>(
                 0,
             );
             put_block(&mut pic.y, pic.w, x0 + bx, span.at(by), &pred, 8, step);
+            // A block the coded block pattern leaves out was not read and
+            // holds no levels.
+            if mb.cbp & (1 << i) == 0 {
+                continue;
+            }
             let mode = mb.mode4[(by / 4) * 4 + bx / 4];
             let bypass = qp_bypass::<S>(slice, qp);
             if bypass && (mode == 0 || mode == 1) {
@@ -4591,6 +4602,10 @@ fn recon_intra<S: Sample>(
                 4,
                 step,
             );
+            // As for the 8×8 blocks: nothing was read for this quarter.
+            if mb.cbp & (1 << ((by / 2) * 2 + bx / 2)) == 0 {
+                continue;
+            }
             let mode = mb.mode4[by * 4 + bx];
             let bypass = qp_bypass::<S>(slice, qp);
             if bypass && (mode == 0 || mode == 1) {
@@ -4629,6 +4644,7 @@ fn recon_intra<S: Sample>(
                 cr_dc,
                 cb_ac,
                 cr_ac,
+                used,
             },
             (qp, true, mb.slice),
             true,
@@ -5058,6 +5074,7 @@ fn recon_chroma<S: Sample>(
         cr_dc,
         cb_ac,
         cr_ac,
+        used,
     } = paint;
     let (qp, intra, slice_id) = flags;
     let x0 = mx * 8;
@@ -5109,8 +5126,10 @@ fn recon_chroma<S: Sample>(
             continue;
         }
         // No coefficients in this plane: every block below would add zero.
-        if dc.iter().take(4).all(|&level| level == 0)
-            && ac.iter().take(4).all(|block| block[..15] == [0; 15])
+        // An array nothing was read into is known to be zero.
+        if used & DC_USED == 0
+            || (dc.iter().take(4).all(|&level| level == 0)
+                && (used & AC_USED == 0 || ac.iter().take(4).all(|block| block[..15] == [0; 15])))
         {
             continue;
         }
@@ -5121,12 +5140,14 @@ fn recon_chroma<S: Sample>(
             let by = i >> 1;
             let mut block = [0i32; 16];
             block[0] = scaled[i];
-            // A zero level scales to zero.
-            for n in super::nonzero_levels(&ac[i][..15]) {
-                let pos = scan[n + 1];
-                let (ry, rx) = (pos / 4, pos % 4);
-                let w = i32::from(slice.pps.weight4[list][pos]);
-                block[pos] = recon::scale4(ac[i][n], qp_c, rx, ry, w);
+            if used & AC_USED != 0 {
+                // A zero level scales to zero.
+                for n in super::nonzero_levels(&ac[i][..15]) {
+                    let pos = scan[n + 1];
+                    let (ry, rx) = (pos / 4, pos % 4);
+                    let w = i32::from(slice.pps.weight4[list][pos]);
+                    block[pos] = recon::scale4(ac[i][n], qp_c, rx, ry, w);
+                }
             }
             recon::add_idct4(
                 plane,
@@ -5155,6 +5176,7 @@ fn recon_chroma422<S: Sample>(
         cr_dc,
         cb_ac,
         cr_ac,
+        ..
     } = paint;
     let (qp, intra, slice_id) = flags;
     let x0 = mx * 8;
@@ -7668,8 +7690,8 @@ fn read_col<S: Sample>(
         let first = y as usize * stride + x as usize;
         let step = down as usize * stride;
         if first + (out.len() - 1) * step < plane.len() {
-            for (slot, sample) in out.iter_mut().zip(plane[first..].iter().step_by(step)) {
-                *slot = *sample;
+            for (k, slot) in out.iter_mut().enumerate() {
+                *slot = plane[first + k * step];
             }
             return;
         }
@@ -7836,6 +7858,7 @@ fn decode_inter<S: Sample>(
                     cr_dc: &chroma_res.cr_dc,
                     cb_ac: &chroma_res.cb_ac,
                     cr_ac: &chroma_res.cr_ac,
+                    used: chroma_res.used,
                 },
                 (*qp, false, mb.slice),
                 false,

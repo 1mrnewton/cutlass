@@ -1,6 +1,7 @@
 //! Frame-level decoding: OBU dispatch, reference frames, tiles, filters and output.
 
 use std::collections::VecDeque;
+use std::ops::Range;
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError};
 
@@ -17,12 +18,12 @@ use super::mvpred::{MfEntry, MfPlan, motion_field_plan};
 use super::obu::{
     FrameHeader, GrainParams, HeaderContext, KEY_FRAME, OBU_FRAME, OBU_FRAME_HEADER,
     OBU_REDUNDANT_FRAME_HEADER, OBU_SEQUENCE_HEADER, OBU_TEMPORAL_DELIMITER, OBU_TILE_GROUP,
-    OBU_TILE_LIST, PRIMARY_REF_NONE, RefHeaderState, SequenceHeader, TRANSLATION,
+    OBU_TILE_LIST, PRIMARY_REF_NONE, RESTORE_NONE, RefHeaderState, SequenceHeader, TRANSLATION,
     parse_frame_header, parse_sequence_header, relative_dist, split_obus,
 };
 use super::postfilter;
 use super::recon::Scratch;
-use super::tile::{Block, ReconLog, RefView, RowHook, TileDec, malformed};
+use super::tile::{Block, ReconLog, RefView, RowHook, TileDec, lr_unit_span, malformed};
 use super::types::{GLOBAL_GLOBALMV, GLOBALMV, INTRA_FRAME, LOCALWARP, Mv};
 
 type R<T> = Result<T, CodecError>;
@@ -187,6 +188,7 @@ struct Slot {
 
 /// Time spent in the stages of the threaded decoder (summed over threads),
 /// gathered with the `prof` feature.
+mod parse;
 mod tiles;
 
 pub mod prof {
@@ -788,7 +790,7 @@ impl<P: Pixel> PixState<P> {
         let mut sp = lock(&self.spares);
         sp.shells.truncate(8);
         sp.lr.truncate(4);
-        sp.states.truncate(8);
+        sp.states.truncate(16);
         sp.scratch.truncate(8);
         sp.filters.truncate(8);
     }
@@ -829,6 +831,11 @@ pub struct Av1Core {
     /// with [`Self::decode_delayed`] up to as many frames as threads
     /// decode at once.
     pub threads: usize,
+    /// Whether frames decode beside each other when there are threads
+    /// for it (the default). Off, a frame waits for its references and
+    /// only its tiles decode at once: slower, with fewer frames and
+    /// their buffers alive at a time.
+    pub frames_at_once: bool,
     /// Shown frames [`Self::decode_delayed`] may keep back (it returns
     /// earlier ones as soon as they are done); `None` (the default) keeps
     /// back as many as there are [`Self::threads`].
@@ -872,6 +879,7 @@ impl Av1Core {
             unit_jobs: Vec::new(),
             max_pixels: 35_651_584,
             threads: std::thread::available_parallelism().map_or(1, usize::from),
+            frames_at_once: true,
             frame_delay: None,
             operating_point: 0,
             workers: Arc::default(),
@@ -901,10 +909,11 @@ impl Av1Core {
     /// still decoding finish on their threads and are discarded).
     pub fn reset(&mut self) {
         let seq = self.seq.take();
-        let (grain, max, threads, delay, op) = (
+        let (grain, max, threads, at_once, delay, op) = (
             self.apply_grain,
             self.max_pixels,
             self.threads,
+            self.frames_at_once,
             self.frame_delay,
             self.operating_point,
         );
@@ -913,6 +922,7 @@ impl Av1Core {
         self.apply_grain = grain;
         self.max_pixels = max;
         self.threads = threads;
+        self.frames_at_once = at_once;
         self.frame_delay = delay;
         self.operating_point = op;
     }
@@ -1344,6 +1354,7 @@ impl Av1Core {
             ref_jobs,
             ref_hdr: self.ref_hdr.clone(),
             threads: self.threads,
+            at_once: self.frames_at_once,
             workers: self.workers.clone(),
             job: job.clone(),
             cdf_out: cdf_out.clone(),
@@ -1534,6 +1545,8 @@ struct TaskParts {
     ref_jobs: [Option<Arc<FrameJob>>; 8],
     ref_hdr: [RefHeaderState; 8],
     threads: usize,
+    /// [`Av1Core::frames_at_once`].
+    at_once: bool,
     workers: Arc<Workers>,
     /// The final picture, the CDFs saved for later frames and the motion
     /// field and segmentation data.
@@ -1724,7 +1737,12 @@ impl<P: PicturePixel> FrameTask<P> {
             &spares,
             &t.workers,
             t.threads,
+            t.at_once,
             mf_plan.as_ref(),
+            &FrameOut {
+                data,
+                cdf: (!hdr.disable_frame_end_update_cdf).then_some(&t.cdf_out),
+            },
         )?;
         drop(mf_plan);
         if !hdr.disable_frame_end_update_cdf {
@@ -1743,9 +1761,15 @@ impl<P: PicturePixel> FrameTask<P> {
 }
 
 /// MfRefFrames and MfMvs (7.19) of band `k` of the frame of `fs`, whose
-/// rows are parsed.
-fn mf_band(seq: &SequenceHeader, hdr: &FrameHeader, fs: &FrameState, k: usize) -> MfBand {
-    let w8 = fs.mi_cols >> 1;
+/// rows are parsed, in the columns `cols` of 8x8 positions.
+fn mf_band(
+    seq: &SequenceHeader,
+    hdr: &FrameHeader,
+    fs: &FrameState,
+    k: usize,
+    cols: Range<usize>,
+) -> MfBand {
+    let w8 = cols.len();
     let h8 = fs.mi_rows >> 1;
     let rows = h8.saturating_sub(k * MF_BAND_ROWS).min(MF_BAND_ROWS);
     let mut band = MfBand {
@@ -1770,7 +1794,7 @@ fn mf_band(seq: &SequenceHeader, hdr: &FrameHeader, fs: &FrameState, k: usize) -
     };
     for y in 0..rows {
         let at = (2 * (k * MF_BAND_ROWS + y) + 1) * fs.mi_stride;
-        let Some(mi) = fs.mi.get(at..at + 2 * w8) else {
+        let Some(mi) = fs.mi.get(at + 2 * cols.start..at + 2 * cols.end) else {
             break;
         };
         let refs = &mut band.refs[y * w8..][..w8];
@@ -1811,7 +1835,7 @@ fn save_motion(
     let per = 2 * MF_BAND_ROWS;
     for k in r0 / per..r1.min(fs.mi_rows).div_ceil(per).min(rd.bands()) {
         if !rd.has_band(k) {
-            rd.set_band(k, mf_band(seq, hdr, fs, k));
+            rd.set_band(k, mf_band(seq, hdr, fs, k, 0..fs.mi_cols >> 1));
         }
     }
 }
@@ -2042,7 +2066,7 @@ fn decode_tile_part<P: Pixel>(
     refs: &[Option<&Picture<P>>; 8],
     ref_hdr: &[RefHeaderState; 8],
     carry: &mut TileCarry<'_>,
-    rows: std::ops::Range<usize>,
+    rows: Range<usize>,
     bufs: &mut TileBufs<P>,
     logs: Option<&Mutex<RowPools>>,
     mut feed: Option<&mut MfFeed>,
@@ -2202,69 +2226,6 @@ fn decode_tile<P: Pixel>(
     Ok(carry.cdf)
 }
 
-/// [`decode_tiles`] in superblock rows across the tiles of each tile row
-/// (the tiles' first rows, then their second rows...), so `on_row` sees
-/// the parts of a frame's superblock rows one after another.
-fn decode_tiles_by_rows<P: Pixel>(
-    seq: &SequenceHeader,
-    hdr: &FrameHeader,
-    fs: &mut FrameState,
-    tiles: &[(usize, Vec<u8>)],
-    cdf: &CdfContext,
-    refs: &[Option<&Picture<P>>; 8],
-    ref_hdr: &[RefHeaderState; 8],
-    cur: &mut Picture<P>,
-    logs: &Mutex<RowPools>,
-    mut feed: Option<&mut MfFeed>,
-    on_row: &mut RowHook<'_, P>,
-) -> R<Box<CdfContext>> {
-    let ti = &hdr.tile_info;
-    let sb4 = if seq.use_128x128_superblock { 32 } else { 16 };
-    let mut bufs = TileBufs::new(fs, Scratch::<P>::parsing());
-    let mut saved: Option<Box<CdfContext>> = None;
-    let mut rest = tiles;
-    while let Some((first, _)) = rest.first() {
-        let tr = first / ti.cols;
-        let n = rest.iter().take_while(|(t, _)| t / ti.cols == tr).count();
-        let (row, tail) = rest.split_at(n);
-        rest = tail;
-        let mut carries: Vec<TileCarry<'_>> = row
-            .iter()
-            .map(|(t, d)| TileCarry::new(hdr, cdf, *t, d))
-            .collect();
-        let (r0, r1) = (
-            ti.mi_row_starts[tr] as usize,
-            ti.mi_row_starts[tr + 1] as usize,
-        );
-        let mut r = r0;
-        while r < r1 {
-            for carry in &mut carries {
-                decode_tile_part(
-                    seq,
-                    hdr,
-                    fs,
-                    cur,
-                    refs,
-                    ref_hdr,
-                    carry,
-                    r..r + sb4,
-                    &mut bufs,
-                    Some(logs),
-                    feed.as_deref_mut(),
-                    on_row,
-                )?;
-            }
-            r += sb4;
-        }
-        for c in carries {
-            if c.tile_num == ti.context_update_tile_id as usize {
-                saved = Some(c.cdf);
-            }
-        }
-    }
-    Ok(saved.unwrap_or_else(|| Box::new(cdf.clone())))
-}
-
 /// Decodes the tiles of a frame into `cur`, calling `on_row(fs, cur, r0,
 /// r1)` after each superblock row of each tile (luma 4x4 rows `r0..r1`).
 /// With `logs`, the tiles record what reconstruction needs (see
@@ -2321,27 +2282,99 @@ fn decode_tiles<P: Pixel>(
     Ok(saved.unwrap_or_else(|| Box::new(cdf.clone())))
 }
 
-/// What the in-loop filters need of one parsed superblock row besides the
-/// mode info reconstruction stores: luma 4x4 rows `r0..r1`, their loop
-/// filter transform sizes and CDEF indices, and the loop restoration units.
+/// Rows `rows` and columns `cols` of a row-major array, copied out.
+#[derive(Default)]
+struct Rect<T> {
+    rows: Range<usize>,
+    cols: Range<usize>,
+    data: Vec<T>,
+}
+
+impl<T: Copy> Rect<T> {
+    /// Copies the area out of `src`, `stride` wide, clipped to it.
+    fn take(&mut self, src: &[T], stride: usize, rows: Range<usize>, cols: Range<usize>) {
+        self.data.clear();
+        let height = src.len() / stride.max(1);
+        let rows = rows.start.min(height)..rows.end.min(height);
+        let cols = cols.start.min(stride)..cols.end.min(stride);
+        for r in rows.clone() {
+            self.data
+                .extend_from_slice(&src[r * stride + cols.start..r * stride + cols.end]);
+        }
+        self.rows = rows;
+        self.cols = cols;
+    }
+
+    /// Writes the area into `dst`, `stride` wide.
+    fn put(&self, dst: &mut [T], stride: usize) {
+        let w = self.cols.len();
+        if w == 0 {
+            return;
+        }
+        for (r, row) in self.rows.clone().zip(self.data.chunks_exact(w)) {
+            let at = r * stride + self.cols.start;
+            if let Some(d) = dst.get_mut(at..at + w) {
+                d.copy_from_slice(row);
+            }
+        }
+    }
+}
+
+/// What the in-loop filters need of one tile's part of a parsed superblock
+/// row besides the mode info reconstruction stores: luma 4x4 rows
+/// `r0..r1`, and in the tile's columns their loop filter transform sizes,
+/// CDEF indices and loop restoration units.
 #[derive(Default)]
 struct RowMsg {
     r0: usize,
     r1: usize,
     last: bool,
-    /// First 4x4 row copied of the transform size rows (the last row
-    /// reaches the end of the arrays).
-    mi_row0: usize,
-    lf_tx: [Vec<u8>; 3],
-    cdef_row0: usize,
-    cdef: Vec<i8>,
-    /// Loop restoration units of every plane (when the frame uses them).
-    lr: [Vec<LrUnitParams>; 3],
+    /// Whether this is the last tile column's part: the row is whole.
+    row_end: bool,
+    lf_tx: [Rect<u8>; 3],
+    cdef: Rect<i8>,
+    lr: [Rect<LrUnitParams>; 3],
 }
 
-/// Motion field bands arriving from the thread computing them, in order.
+/// The motion field of a frame, band by band as a thread computes it. A
+/// tile parser waits for the bands it reads.
+struct MfShared {
+    bands: Vec<OnceLock<Vec<MfEntry>>>,
+    w8: usize,
+    h8: usize,
+}
+
+impl MfShared {
+    fn new(plan: &MfPlan) -> Self {
+        Self {
+            bands: (0..plan.bands()).map(|_| OnceLock::new()).collect(),
+            w8: plan.w8,
+            h8: plan.h8,
+        }
+    }
+
+    /// An unset band of the field.
+    fn blank(&self, k: usize) -> Vec<MfEntry> {
+        let rows = self.h8.saturating_sub(8 * k).min(8);
+        vec![MfEntry::default(); rows * self.w8]
+    }
+}
+
+/// Ends a motion field when its thread does: the bands it did not get to
+/// stay unset, and no parser waits for them.
+struct MfClose(Arc<MfShared>);
+
+impl Drop for MfClose {
+    fn drop(&mut self) {
+        for (k, b) in self.0.bands.iter().enumerate() {
+            let _ = b.set(self.0.blank(k));
+        }
+    }
+}
+
+/// One tile parser's copy of the motion field, in its frame state.
 struct MfFeed {
-    rx: Receiver<(usize, Vec<MfEntry>)>,
+    shared: Arc<MfShared>,
     /// Bands already in the frame state.
     have: usize,
 }
@@ -2349,15 +2382,14 @@ struct MfFeed {
 impl MfFeed {
     /// Waits for the bands luma 4x4 rows up to `r1` use and stores them.
     fn need(&mut self, fs: &mut FrameState, r1: usize) {
-        let w8 = fs.mi_cols >> 1;
-        let need = r1.div_ceil(2).div_ceil(8);
+        let need = r1.div_ceil(2).div_ceil(8).min(self.shared.bands.len());
         while self.have < need {
-            let Ok((k, band)) = self.rx.recv() else {
-                return;
-            };
-            let at = 8 * k * w8;
-            fs.motion_field[at..at + band.len()].copy_from_slice(&band);
-            self.have = k + 1;
+            let band = self.shared.bands[self.have].wait();
+            let at = 8 * self.have * self.shared.w8;
+            if let Some(d) = fs.motion_field.get_mut(at..at + band.len()) {
+                d.copy_from_slice(band);
+            }
+            self.have += 1;
         }
     }
 }
@@ -2374,57 +2406,57 @@ pub(crate) struct RowPools {
 
 impl RowMsg {
     /// Copies the transform sizes, CDEF indices and loop restoration units
-    /// of luma 4x4 rows `r0..r1`.
+    /// of luma 4x4 rows `r0..r1` in the tile columns `cols` (to the end
+    /// of the arrays for the last column, `last_col`, and the last row).
     fn fill_meta(
         &mut self,
+        seq: &SequenceHeader,
+        hdr: &FrameHeader,
         fs: &FrameState,
-        sb4: usize,
         r0: usize,
         r1: usize,
-        last: bool,
-        sub_y: bool,
+        cols: Range<usize>,
+        last_col: bool,
     ) {
+        let last = r1 >= fs.mi_rows;
         self.r0 = r0;
         self.r1 = r1;
         self.last = last;
+        self.row_end = false;
         let st = fs.mi_stride;
-        self.mi_row0 = r0;
         // The transform size maps are indexed in each plane's 4x4 units.
         for (p, (d, s)) in self.lf_tx.iter_mut().zip(&fs.lf_tx).enumerate() {
-            let sy = usize::from(p > 0 && sub_y);
-            let e = if last { s.len() } else { (r1 >> sy) * st };
-            d.clear();
-            d.extend_from_slice(&s[(r0 >> sy) * st..e]);
+            let sx = usize::from(p > 0 && seq.subsampling_x);
+            let sy = usize::from(p > 0 && seq.subsampling_y);
+            let rows = (r0 >> sy)..if last { usize::MAX } else { r1 >> sy };
+            let c = (cols.start >> sx)..if last_col { st } else { cols.end >> sx };
+            d.take(s, st, rows, c);
         }
+        // CDEF indices are per 64x64 luma: 16 4x4s.
         let cs = fs.cdef_stride;
-        let c0 = r0 >> 4;
-        let c1 = if last {
-            fs.cdef_idx.len()
-        } else {
-            ((r0 + sb4) >> 4) * cs
-        };
-        self.cdef_row0 = c0;
-        self.cdef.clear();
-        self.cdef
-            .extend_from_slice(&fs.cdef_idx[(c0 * cs).min(c1)..c1.min(fs.cdef_idx.len())]);
-        for (d, s) in self.lr.iter_mut().zip(&fs.lr) {
-            d.clear();
-            d.extend_from_slice(s);
+        let rows = (r0 >> 4)..if last { usize::MAX } else { r1.div_ceil(16) };
+        let c = (cols.start >> 4)..if last_col { cs } else { cols.end >> 4 };
+        self.cdef.take(&fs.cdef_idx, cs, rows, c);
+        for (p, (d, s)) in self.lr.iter_mut().zip(&fs.lr).enumerate() {
+            if hdr.lr.frame_type[p] == RESTORE_NONE || s.is_empty() {
+                d.take(s, 1, 0..0, 0..0);
+                continue;
+            }
+            let (ur, uc) = lr_unit_span(seq, hdr, fs, p, r0..r1, cols.clone());
+            d.take(s, fs.lr_cols[p], ur, uc);
         }
     }
 
     /// Writes the transform sizes, CDEF indices and loop restoration units
     /// into `fs` (whose mode info reconstruction wrote).
-    fn apply_meta(&self, fs: &mut FrameState, sub_y: bool) {
-        for (p, (d, s)) in fs.lf_tx.iter_mut().zip(&self.lf_tx).enumerate() {
-            let o = (self.mi_row0 >> usize::from(p > 0 && sub_y)) * fs.mi_stride;
-            d[o..o + s.len()].copy_from_slice(s);
+    fn apply_meta(&self, fs: &mut FrameState) {
+        let st = fs.mi_stride;
+        for (d, s) in fs.lf_tx.iter_mut().zip(&self.lf_tx) {
+            s.put(d, st);
         }
-        let o = self.cdef_row0 * fs.cdef_stride;
-        fs.cdef_idx[o..o + self.cdef.len()].copy_from_slice(&self.cdef);
-        for (d, s) in fs.lr.iter_mut().zip(&self.lr) {
-            d.clear();
-            d.extend_from_slice(s);
+        self.cdef.put(&mut fs.cdef_idx, fs.cdef_stride);
+        for (p, s) in self.lr.iter().enumerate() {
+            s.put(&mut fs.lr[p], fs.lr_cols[p]);
         }
     }
 }
@@ -2474,9 +2506,14 @@ fn recon_worker<'r, P: PicturePixel>(
             f.whole = true;
         }
     }
-    // The largest downward motion so far, in eighth samples: blocks also
-    // predict with the motion of earlier neighbours (OBMC, small chroma).
-    let mut max_down = 0i32;
+    // The largest downward motion into each reference frame, in eighth
+    // samples, in the superblock row above and in the row being
+    // reconstructed: blocks also predict with the motion of the
+    // neighbours above and left of them (OBMC, small chroma).
+    let mut down = [[0i32; 8]; 2];
+    // The copy each reference frame is read through, if any.
+    let mirror_of: [Option<usize>; 8] =
+        std::array::from_fn(|i| refs[i].as_ref().and_then(|rv| rv.mirror));
     let mut cdf = CdfContext::new(hdr.quant.base_q_idx);
     let sb128 = seq.use_128x128_superblock;
     let mut td = TileDec {
@@ -2543,7 +2580,8 @@ fn recon_worker<'r, P: PicturePixel>(
                 bottom = bottom.max(4 * (b.mi_row as usize + super::types::bh4(b.bsize)));
                 for l in 0..2 {
                     if b.ref_frame[l] > INTRA_FRAME {
-                        max_down = max_down.max(i32::from(b.mv[l].row));
+                        let d = &mut down[1][b.ref_frame[l] as usize & 7];
+                        *d = (*d).max(i32::from(b.mv[l].row));
                     }
                 }
                 warp |= b.motion_mode == LOCALWARP
@@ -2553,9 +2591,17 @@ fn recon_worker<'r, P: PicturePixel>(
             if bottom > 0 {
                 // The 8-tap filters read 4 rows below a sample; chroma
                 // positions round, and 16 luma rows cover both.
-                let need = bottom + (max_down.max(0) as usize).div_ceil(8) + 16;
                 for f in &mut fills {
-                    let need = if warp || f.whole { usize::MAX } else { need };
+                    let reach = (1..8)
+                        .filter(|&r| mirror_of[r] == Some(f.mirror))
+                        .map(|r| down[0][r].max(down[1][r]))
+                        .max()
+                        .unwrap_or(0);
+                    let need = if warp || f.whole {
+                        usize::MAX
+                    } else {
+                        bottom + (reach.max(0) as usize).div_ceil(8) + 16
+                    };
                     let Some(pic) = f.fill(&mut td.mirrors[f.mirror], need, filt.spares)? else {
                         continue;
                     };
@@ -2586,6 +2632,15 @@ fn recon_worker<'r, P: PicturePixel>(
             lock(rows).logs.push(log);
             continue;
         };
+        if !m.row_end {
+            // One tile's part of the row: the filters wait for the rest.
+            m.apply_meta(td.fs);
+            let mut pool = lock(rows);
+            pool.msgs.push(m);
+            pool.logs.push(log);
+            continue;
+        }
+        down = [down[1], [0; 8]];
         let tf = std::time::Instant::now();
         if filt.lf_on && !m.last {
             // The row is deblocked now; the next one predicts from its
@@ -2659,7 +2714,7 @@ impl<P: PicturePixel> InlineFilter<'_, P> {
         cur: &mut Picture<P>,
         m: &RowMsg,
     ) {
-        m.apply_meta(fs, seq.subsampling_y);
+        m.apply_meta(fs);
         self.deblock(seq, hdr, fs, cur, m.r0, m.r1, m.last);
     }
 
@@ -2759,7 +2814,9 @@ fn decode_frame<P: PicturePixel>(
     spares: &Arc<Mutex<Spares<P>>>,
     workers: &Arc<Workers>,
     threads: usize,
+    at_once: bool,
     mf: Option<&Arc<MfPlan>>,
+    out: &FrameOut<'_>,
 ) -> R<Box<CdfContext>> {
     let lf_on = hdr.loop_filter.level[0] != 0 || hdr.loop_filter.level[1] != 0;
     let cdef_on = seq.enable_cdef
@@ -2770,14 +2827,15 @@ fn decode_frame<P: PicturePixel>(
             || hdr.cdef.y_sec[0] != 0
             || hdr.cdef.uv_pri[0] != 0
             || hdr.cdef.uv_sec[0] != 0);
-    // With one tile column, superblock rows complete in order: they are
-    // reconstructed and filtered on threads of their own, a superblock row
-    // behind parsing.
-    let pipeline = threads > 1 && !hdr.use_superres && (lf_on || cdef_on || hdr.lr.uses_lr);
+    // The tiles are parsed here, on several threads, and their superblock
+    // rows are reconstructed and filtered in order on threads of their
+    // own, a superblock row behind parsing.
+    let pipeline =
+        at_once && threads > 1 && !hdr.use_superres && (lf_on || cdef_on || hdr.lr.uses_lr);
     if pipeline {
         return decode_frame_async(
             seq, hdr, fs, tiles, cdf, ref_jobs, ref_hdr, cur, job, rows, spares, workers, mf,
-            lf_on, cdef_on,
+            lf_on, cdef_on, threads, out,
         );
     }
     let mut held: [Option<Arc<AnyPicture>>; 8] = Default::default();
@@ -2847,20 +2905,18 @@ fn decode_frame_async<P: PicturePixel>(
     mf: Option<&Arc<MfPlan>>,
     lf_on: bool,
     cdef_on: bool,
+    threads: usize,
+    out: &FrameOut<'_>,
 ) -> R<Box<CdfContext>> {
-    let (rc_fs, lr_scratch) = {
+    let (mut rc_fs, lr_scratch) = {
         let mut sp = lock(spares);
         (
             take_shell(&mut sp.shells, fs),
             sp.lr.pop().unwrap_or_default(),
         )
     };
-    // The motion field is computed band by band on a thread of its own
-    // while the tiles are parsed (see MfFeed).
-    if let Some(p) = mf {
-        fs.motion_field.clear();
-        fs.motion_field.resize(p.w8 * p.h8, MfEntry::default());
-    }
+    // The loop restoration units arrive part by part: all unset first.
+    rc_fs.lr.clone_from(&fs.lr);
     let (rtx, rrx) = std::sync::mpsc::channel::<(Option<RowMsg>, ReconLog)>();
     let backend = Backend {
         seq: seq.clone(),
@@ -2883,107 +2939,46 @@ fn decode_frame_async<P: PicturePixel>(
         prof::cpu_since(prof::CPU_BACKEND, t);
     }));
     // Parsing reads only the presence and size of the references.
-    let empty = || Picture::<P> {
+    let placeholder = Picture::<P> {
         planes: Vec::new(),
         bd: seq.bit_depth,
         sub_x: seq.subsampling_x,
         sub_y: seq.subsampling_y,
     };
-    let placeholder = empty();
     let parse_refs: [Option<&Picture<P>>; 8] =
         std::array::from_fn(|i| ref_jobs[i].as_ref().map(|_| &placeholder));
-    let mut no_pixels = empty();
     let t_parse = std::time::Instant::now();
-    let sb4 = if seq.use_128x128_superblock { 32 } else { 16 };
-    let sub_y = seq.subsampling_y;
-    let rows = &**rows;
-    // The motion field bands come from a job on the pool (it stops once
-    // the parse no longer listens).
-    let mut feed = mf.filter(|p| p.bands() > 0).map(|plan| {
-        let (mtx, rx) = std::sync::mpsc::channel::<(usize, Vec<MfEntry>)>();
-        let plan = plan.clone();
+    // The motion field is computed band by band on a thread of its own
+    // while the tiles are parsed (see MfFeed).
+    let field = mf.filter(|p| p.bands() > 0).map(|plan| {
+        let field = Arc::new(MfShared::new(plan));
+        let (plan, to) = (plan.clone(), MfClose(field.clone()));
         workers.run(Box::new(move || {
             let t = prof::thread_cpu();
-            for k in 0..plan.bands() {
-                let rows = (plan.h8 - 8 * k).min(8);
-                let mut band = vec![MfEntry::default(); rows * plan.w8];
+            for (k, b) in to.0.bands.iter().enumerate() {
+                let mut band = to.0.blank(k);
                 plan.run_band(k, &mut band);
-                if mtx.send((k, band)).is_err() {
-                    break;
-                }
+                let _ = b.set(band);
             }
             prof::cpu_since(prof::CPU_MF, t);
         }));
-        MfFeed { rx, have: 0 }
+        field
     });
-    // Tiles are parsed one after another, but reconstruction and the
-    // filters take whole superblock rows in order: the chunks of every
-    // tile column but the last wait in `held` until the last column ends
-    // the row, then the row goes out column by column, its message with
-    // the last chunk.
-    let col_starts = &hdr.tile_info.mi_col_starts;
-    let cols = hdr.tile_info.cols;
-    let mut held: Vec<VecDeque<(usize, ReconLog)>> = (0..cols).map(|_| VecDeque::new()).collect();
-    let mut col = 0;
-    let saved = {
-        decode_tiles_by_rows(
-            seq,
-            hdr,
-            fs,
-            tiles,
-            cdf,
-            &parse_refs,
-            ref_hdr,
-            &mut no_pixels,
-            rows,
-            feed.as_mut(),
-            &mut |fs: &FrameState,
-                  _: &Picture<P>,
-                  log: Option<&mut ReconLog>,
-                  r0: usize,
-                  r1: usize,
-                  done: bool| {
-                if let Some(sb) = log.as_ref().and_then(|l| l.sbs.first()) {
-                    col = col_starts
-                        .partition_point(|&c| c as usize <= sb.tile[2])
-                        .saturating_sub(1);
-                }
-                let last_col = col + 1 >= cols;
-                let m = (done && last_col).then(|| {
-                    let mut m = lock(rows).msgs.pop().unwrap_or_default();
-                    m.fill_meta(fs, sb4, r0, r1, r1 >= fs.mi_rows, sub_y);
-                    m
-                });
-                let mut spare = lock(rows).logs.pop().unwrap_or_else(|| {
-                    prof::count(prof::NEW_LOG);
-                    ReconLog::default()
-                });
-                // Room for a typical chunk, so that logs rarely grow while
-                // the parser fills them.
-                spare.blocks.reserve(LOG_RESERVE_BLOCKS);
-                spare.ops.reserve(4 * LOG_RESERVE_BLOCKS);
-                spare.coefs.reserve(32 * LOG_RESERVE_BLOCKS);
-                let log = log.map_or_else(ReconLog::default, |l| std::mem::replace(l, spare));
-                if !last_col || !done {
-                    if let Some(q) = held.get_mut(col) {
-                        q.push_back((r0, log));
-                    }
-                    return;
-                }
-                // A send only fails once reconstruction stopped (it failed):
-                // the job reports that.
-                for q in &mut held {
-                    while q.front().is_some_and(|(r, _)| *r == r0) {
-                        if let Some((_, l)) = q.pop_front() {
-                            let _ = rtx.send((None, l));
-                        }
-                    }
-                }
-                let _ = rtx.send((m, log));
-            },
-        )
-    };
-    drop(feed);
+    let saved = parse::parse_tiles(
+        seq,
+        hdr,
+        fs,
+        tiles,
+        cdf,
+        &parse_refs,
+        ref_hdr,
+        rows,
+        spares,
+        field.as_ref(),
+        threads,
+        &rtx,
+        out,
+    );
     // A failed parse fails the job before reconstruction sees the end of
     // its input.
     if let Err(e) = &saved {
@@ -2992,6 +2987,25 @@ fn decode_frame_async<P: PicturePixel>(
     drop(rtx);
     prof::add(prof::PARSE, t_parse);
     saved
+}
+
+/// What a frame's parse gives later frames before it ends.
+struct FrameOut<'a> {
+    /// The frame's saved motion and segment ids, when it is referenced.
+    data: Option<&'a RefData>,
+    /// The CDFs of the context tile, when the frame saves them.
+    cdf: Option<&'a CdfPromise>,
+}
+
+impl FrameOut<'_> {
+    /// Hands on the CDFs the context tile ended with.
+    fn save_cdf(&self, c: &CdfContext) {
+        if let Some(p) = self.cdf {
+            let mut c = Box::new(c.clone());
+            c.clear_counts();
+            p.set(Ok(Arc::from(c)));
+        }
+    }
 }
 
 /// The reconstruction and in-loop filters of one frame, run on threads of

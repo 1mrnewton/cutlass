@@ -65,13 +65,21 @@ fn core(threads: usize) -> Av1Core {
     core
 }
 
+/// A decoder that takes one frame at a time, so the tiles of a frame
+/// decode into shells.
+fn one_frame_core(threads: usize) -> Av1Core {
+    let mut core = core(threads);
+    core.frames_at_once = false;
+    core
+}
+
 #[test]
 fn helpers_decode_tiles_and_give_their_shells_back() {
     // 4352x64 in two tile columns: a key frame, then an inter frame.
     let packets = ivf("level.ivf");
     let one = samples(&decode(&mut core(1), &packets).expect("one thread"));
     assert_eq!(one.len(), 2);
-    let mut four = core(4);
+    let mut four = one_frame_core(4);
     let got = samples(&decode(&mut four, &packets).expect("four threads"));
     assert_eq!(got, one);
     let sp = super::super::lock(&four.px8.spares);
@@ -84,7 +92,7 @@ fn helpers_decode_tiles_and_give_their_shells_back() {
 fn a_frame_decodes_its_tiles_alone_when_every_shell_is_lent() {
     let packets = ivf("level.ivf");
     let one = samples(&decode(&mut core(1), &packets).expect("one thread"));
-    let mut four = core(4);
+    let mut four = one_frame_core(4);
     super::super::lock(&four.px8.spares).tile_shells_out = 3;
     let got = samples(&decode(&mut four, &packets).expect("four threads"));
     assert_eq!(got, one);
@@ -100,9 +108,30 @@ fn many_tiles_on_few_threads_match_one_thread() {
     let packets = ivf("sb128-tiles.ivf");
     let one = samples(&decode(&mut core(1), &packets).expect("one thread"));
     for threads in [2, 3, 5] {
-        let got = samples(&decode(&mut core(threads), &packets).expect("threads"));
+        let got = samples(&decode(&mut one_frame_core(threads), &packets).expect("threads"));
         assert_eq!(got, one, "{threads} threads");
     }
+}
+
+#[test]
+fn a_frame_taken_alone_shows_what_frames_at_once_show() {
+    for name in ["level.ivf", "sb128-tiles.ivf"] {
+        let packets = ivf(name);
+        let at_once = samples(&decode(&mut core(4), &packets).expect("at once"));
+        let alone = samples(&decode(&mut one_frame_core(4), &packets).expect("alone"));
+        assert_eq!(alone, at_once, "{name}");
+    }
+}
+
+#[test]
+fn a_reset_keeps_the_choice_of_one_frame_at_a_time() {
+    let mut core = one_frame_core(3);
+    core.reset();
+    assert!(!core.frames_at_once);
+    assert!(
+        Av1Core::new().frames_at_once,
+        "frames decode at once by default"
+    );
 }
 
 #[test]
@@ -112,9 +141,11 @@ fn a_bad_tile_fails_the_frame_as_it_does_on_one_thread() {
     let n = packets[1].len();
     packets[1].truncate(n - n / 4);
     let one = decode(&mut core(1), &packets).map(|f| f.len());
-    let four = decode(&mut core(4), &packets).map(|f| f.len());
     assert!(one.is_err(), "the cut frame fails");
-    assert_eq!(format!("{four:?}"), format!("{one:?}"));
+    for mut four in [core(4), one_frame_core(4)] {
+        let four = decode(&mut four, &packets).map(|f| f.len());
+        assert_eq!(format!("{four:?}"), format!("{one:?}"));
+    }
 }
 
 #[test]

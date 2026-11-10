@@ -98,6 +98,29 @@ start (the chain of referenced frames decodes one frame at a time, about
 at 4K, and a frame decoding beside another may find no shell left
 (57 of 258 frames on the 8x4 file).
 
+Vector kernels: `cutlass-simd` holds NEON kernels the decoder calls on
+aarch64. Each is a safe function on fixed-size arrays with a scalar twin
+from the specification; other targets keep the lane code. So far: the
+CDEF direction search, the 8-bit deblocking sample filter (sixteen lines
+of an edge at a time), and the CDEF block filter for blocks with both
+strengths. The first 240 frames of the two 4K files above, same output:
+
+| File | Threads | Before the kernels | With them | libdav1d (FFmpeg) |
+|---|---|---|---|---|
+| 4x1 tiles | 1 | 5.88 s | 5.13 s | 2.54 s |
+| 4x1 tiles | 18 | 1.24 s | 1.09 s | |
+| 8x4 tiles | 1 | 4.75 s | 4.44 s | 1.88 s |
+| 8x4 tiles | 18 | 1.30 s | 1.19 s | |
+
+The lane code was already compiled to vectors, so a kernel wins only
+where it packs more samples in a vector (8-bit deblocking) or where the
+compiler had not found one (deblocking a vertical edge, the CDEF filter
+with both strengths: 737 ns to 78 ns a block, a case neither file uses).
+A vector is loaded from an array through two integer registers, not in
+one instruction: a direct load needs a second kind of `unsafe`. Not on a
+kernel yet: inter prediction, the inverse transforms, loop restoration,
+and deblocking's edge decisions (about 12% of one thread's time).
+
 Threading (2+ threads): the calling thread only reads the frame headers.
 Each frame is a task on a thread of its own (the decoder keeps a pool of
 them) that waits for what its parse depends on, and nothing else: the

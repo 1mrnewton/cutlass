@@ -74,17 +74,109 @@ pub struct LrUnitParams {
     pub sgr_xqd: [i8; 2],
 }
 
+/// Rows of 8x8 positions in a band of a frame's saved motion: the rows a
+/// 64x64 superblock row covers, and the rows motion field estimation
+/// projects together (7.9).
+pub const MF_BAND_ROWS: usize = 8;
+
+/// MfRefFrames and MfMvs of one band: whole rows of 8x8 positions (the
+/// odd 4x4 positions).
+#[derive(Clone, Default)]
+pub struct MfBand {
+    pub refs: Vec<i8>,
+    pub mvs: Vec<Mv>,
+}
+
 /// What a reference slot keeps besides its picture (spec 7.20).
+///
+/// The frame's size and order hints are known from its header. Its saved
+/// motion arrives band by band while the frame is parsed, and its segment
+/// ids when the parse ends: a reader waits for the band or the ids it
+/// asks for. Whoever makes one must [`close`](Self::close) it, or its
+/// readers wait for ever.
 #[derive(Clone)]
 pub struct RefData {
     pub mi_cols: usize,
     pub mi_rows: usize,
     pub frame_type: u8,
-    /// MfRefFrames / MfMvs at 8x8 granularity (the odd 4x4 positions).
-    pub mf_ref: Vec<i8>,
-    pub mf_mv: Vec<Mv>,
-    pub segment_ids: Vec<u8>,
     pub saved_order_hints: [u32; 8],
+    mf: Vec<std::sync::OnceLock<MfBand>>,
+    segment_ids: std::sync::OnceLock<Vec<u8>>,
+}
+
+impl RefData {
+    /// The data of a frame not parsed yet.
+    pub fn new(
+        mi_cols: usize,
+        mi_rows: usize,
+        frame_type: u8,
+        saved_order_hints: [u32; 8],
+    ) -> Self {
+        let bands = (mi_rows >> 1).div_ceil(MF_BAND_ROWS);
+        Self {
+            mi_cols,
+            mi_rows,
+            frame_type,
+            saved_order_hints,
+            mf: (0..bands).map(|_| std::sync::OnceLock::new()).collect(),
+            segment_ids: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// Number of motion bands.
+    pub fn bands(&self) -> usize {
+        self.mf.len()
+    }
+
+    /// Rows of 8x8 positions in band `k`.
+    pub fn band_rows(&self, k: usize) -> usize {
+        (self.mi_rows >> 1)
+            .saturating_sub(k * MF_BAND_ROWS)
+            .min(MF_BAND_ROWS)
+    }
+
+    /// Whether band `k` has its motion (or there is no such band).
+    pub fn has_band(&self, k: usize) -> bool {
+        self.mf.get(k).is_none_or(|b| b.get().is_some())
+    }
+
+    /// Gives band `k` its motion. Only the first call for a band counts.
+    pub fn set_band(&self, k: usize, band: MfBand) {
+        if let Some(b) = self.mf.get(k) {
+            let _ = b.set(band);
+        }
+    }
+
+    /// The motion of band `k`, once the frame's parse has got there.
+    /// `None` past the last band.
+    pub fn band(&self, k: usize) -> Option<&MfBand> {
+        self.mf.get(k).map(std::sync::OnceLock::wait)
+    }
+
+    /// Gives the frame its segment ids (the first call counts).
+    pub fn set_segment_ids(&self, ids: Vec<u8>) {
+        let _ = self.segment_ids.set(ids);
+    }
+
+    /// The segment ids, indexed like [`FrameState::segment_ids`], once
+    /// the frame's parse has ended. Empty when that parse failed.
+    pub fn segment_ids(&self) -> &[u8] {
+        self.segment_ids.wait()
+    }
+
+    /// Ends the data: bands still without motion get none, and so do
+    /// the segment ids. A frame that failed leaves its readers this.
+    pub fn close(&self) {
+        let w8 = self.mi_cols >> 1;
+        for (k, b) in self.mf.iter().enumerate() {
+            let n = w8 * self.band_rows(k);
+            let _ = b.set(MfBand {
+                refs: vec![-1; n],
+                mvs: vec![Mv::ZERO; n],
+            });
+        }
+        let _ = self.segment_ids.set(Vec::new());
+    }
 }
 
 /// The loop restoration units of each plane (all unset), with their
@@ -245,5 +337,98 @@ impl FrameState {
     #[inline(always)]
     pub fn mi_at(&self, row: usize, col: usize) -> &MiInfo {
         &self.mi[row * self.mi_stride + col]
+    }
+}
+
+#[cfg(test)]
+mod ref_data_tests {
+    use super::{MF_BAND_ROWS, MfBand, RefData};
+    use crate::dec::types::Mv;
+
+    /// 40 rows of 4x4 units: 20 rows of 8x8 in bands of 8, 8 and 4.
+    fn data() -> RefData {
+        RefData::new(16, 40, 1, [0; 8])
+    }
+
+    #[test]
+    fn bands_cover_the_rows_of_8x8_positions() {
+        let rd = data();
+        assert_eq!(rd.bands(), 3);
+        assert_eq!(
+            [rd.band_rows(0), rd.band_rows(1), rd.band_rows(2)],
+            [MF_BAND_ROWS, MF_BAND_ROWS, 4]
+        );
+        assert_eq!(rd.band_rows(3), 0);
+        assert!(rd.band(3).is_none(), "no band past the last");
+        assert!(rd.has_band(3), "nothing to wait for there");
+    }
+
+    #[test]
+    fn a_reader_waits_for_the_band_it_asks_for() {
+        let rd = std::sync::Arc::new(data());
+        rd.set_band(
+            0,
+            MfBand {
+                refs: vec![1; 64],
+                mvs: vec![Mv::ZERO; 64],
+            },
+        );
+        // Band 0 is there while band 1 is not.
+        assert!(rd.has_band(0) && !rd.has_band(1));
+        assert_eq!(rd.band(0).map(|b| b.refs[0]), Some(1));
+        let reader = {
+            let rd = rd.clone();
+            std::thread::spawn(move || rd.band(1).map(|b| b.refs[0]))
+        };
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        assert!(!reader.is_finished(), "band 1 has no motion yet");
+        rd.set_band(
+            1,
+            MfBand {
+                refs: vec![3; 64],
+                mvs: vec![Mv::ZERO; 64],
+            },
+        );
+        assert_eq!(reader.join().ok().flatten(), Some(3));
+    }
+
+    #[test]
+    fn only_the_first_motion_of_a_band_counts() {
+        let rd = data();
+        for r in [2, 5] {
+            rd.set_band(
+                2,
+                MfBand {
+                    refs: vec![r; 32],
+                    mvs: vec![Mv::ZERO; 32],
+                },
+            );
+        }
+        assert_eq!(rd.band(2).map(|b| b.refs[0]), Some(2));
+    }
+
+    #[test]
+    fn closing_leaves_readers_no_motion_and_no_ids() {
+        let rd = std::sync::Arc::new(data());
+        rd.set_band(
+            0,
+            MfBand {
+                refs: vec![4; 64],
+                mvs: vec![Mv::ZERO; 64],
+            },
+        );
+        let reader = {
+            let rd = rd.clone();
+            std::thread::spawn(move || (rd.band(2).map(|b| b.refs.clone()), rd.segment_ids().len()))
+        };
+        rd.close();
+        let (last, ids) = reader.join().unwrap_or_default();
+        // 4 rows of 8 positions, all without a reference.
+        assert_eq!(last, Some(vec![-1; 32]));
+        assert_eq!(ids, 0);
+        assert_eq!(rd.band(0).map(|b| b.refs[0]), Some(4), "saved motion stays");
+        // Ids that come after the close are too late.
+        rd.set_segment_ids(vec![1; 8]);
+        assert!(rd.segment_ids().is_empty());
     }
 }

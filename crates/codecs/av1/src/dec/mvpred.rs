@@ -5,7 +5,7 @@ use crate::dsp::Pixel;
 use super::coder::Coder;
 use crate::spec::tables::DIV_MULT;
 
-use super::frame::RefData;
+use super::frame::{MF_BAND_ROWS, RefData};
 use super::obu::{FrameHeader, SequenceHeader, TRANSLATION, relative_dist};
 use super::tile::TileDec;
 use super::types::{
@@ -927,8 +927,16 @@ impl Projection {
         let dst_sign = self.dst_sign;
         let num = self.ref_to_cur * dst_sign;
         for y8 in y0..y0 + rows {
-            let row_ref = &rd.mf_ref[y8 * w8..y8 * w8 + w8];
-            let row_mv = &rd.mf_mv[y8 * w8..y8 * w8 + w8];
+            // Waits until the reference's parse has saved these rows.
+            let Some(src) = rd.band(y8 / MF_BAND_ROWS) else {
+                return;
+            };
+            let at = (y8 % MF_BAND_ROWS) * w8;
+            let (Some(row_ref), Some(row_mv)) =
+                (src.refs.get(at..at + w8), src.mvs.get(at..at + w8))
+            else {
+                return;
+            };
             let mut x8 = 0;
             while x8 < w8 {
                 let src_ref = row_ref[x8];

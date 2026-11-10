@@ -11,7 +11,7 @@ use crate::dsp::fg::{FilmGrainParams, apply_film_grain};
 use crate::dsp::lr::LrScratch;
 
 use super::cdf::CdfContext;
-use super::frame::{FrameState, LrUnitParams, Picture, Plane, RefData};
+use super::frame::{FrameState, LrUnitParams, MF_BAND_ROWS, MfBand, Picture, Plane, RefData};
 use super::msac::Msac;
 use super::mvpred::{MfEntry, MfPlan, motion_field_plan};
 use super::obu::{
@@ -1559,11 +1559,15 @@ struct FrameTask<P> {
 
 /// Fails what a task did not deliver when it ends without a result (its
 /// thread panicked).
-struct TaskGuard(Option<(Arc<FrameJob>, CdfPromise, DataPromise)>);
+struct TaskGuard {
+    open: Option<(Arc<FrameJob>, CdfPromise, DataPromise)>,
+    /// The frame's data for later frames, which they may already read.
+    data: Option<Arc<RefData>>,
+}
 
 impl TaskGuard {
     fn fail(&mut self, e: CodecError) {
-        if let Some((job, cdf, data)) = self.0.take() {
+        if let Some((job, cdf, data)) = self.open.take() {
             job.finish(Err(e));
             cdf.set(Err(e));
             data.set(Err(e));
@@ -1574,6 +1578,10 @@ impl TaskGuard {
 impl Drop for TaskGuard {
     fn drop(&mut self) {
         self.fail(malformed("decoding thread"));
+        // Whatever happened, no reader waits for motion that never comes.
+        if let Some(d) = &self.data {
+            d.close();
+        }
     }
 }
 
@@ -1618,21 +1626,39 @@ fn launch<P: PicturePixel>(px: &mut PixState<P>, t: TaskParts, inline: bool) -> 
 
 impl<P: PicturePixel> FrameTask<P> {
     fn run(self) -> R<()> {
-        let mut guard = TaskGuard(Some((
-            self.t.job.clone(),
-            self.t.cdf_out.clone(),
-            self.t.data_out.clone(),
-        )));
-        let r = self.parse();
+        // Later frames get this frame's data now and wait for the rows
+        // they read, not for the end of its parse.
+        let hdr = &self.t.hdr;
+        let data = (hdr.refresh_frame_flags != 0).then(|| {
+            Arc::new(RefData::new(
+                hdr.mi_cols as usize,
+                hdr.mi_rows as usize,
+                hdr.frame_type,
+                hdr.order_hints,
+            ))
+        });
+        self.t.data_out.set(match &data {
+            Some(d) => Ok(d.clone()),
+            None => Err(malformed("frame not referenced")),
+        });
+        let mut guard = TaskGuard {
+            open: Some((
+                self.t.job.clone(),
+                self.t.cdf_out.clone(),
+                self.t.data_out.clone(),
+            )),
+            data: data.clone(),
+        };
+        let r = self.parse(data.as_deref());
         match r {
             Err(e) => guard.fail(e),
             // The reconstruction thread finishes the job.
-            Ok(()) => guard.0 = None,
+            Ok(()) => guard.open = None,
         }
         r
     }
 
-    fn parse(self) -> R<()> {
+    fn parse(self, data: Option<&RefData>) -> R<()> {
         let Self {
             t,
             cur,
@@ -1706,63 +1732,87 @@ impl<P: PicturePixel> FrameTask<P> {
             saved.clear_counts();
             t.cdf_out.set(Ok(Arc::from(saved)));
         }
-        t.data_out.set(if hdr.refresh_frame_flags != 0 {
-            Ok(Arc::new(ref_data(seq, hdr, &fs)))
-        } else {
-            Err(malformed("frame not referenced"))
-        });
+        if let Some(rd) = data {
+            // The bands the parse did not save on its way.
+            save_motion(seq, hdr, &fs, rd, 0, fs.mi_rows);
+            rd.set_segment_ids(fs.segment_ids.clone());
+        }
         lock(&spares).states.push(fs);
         Ok(())
     }
 }
 
-fn ref_data(seq: &SequenceHeader, hdr: &FrameHeader, fs: &FrameState) -> RefData {
+/// MfRefFrames and MfMvs (7.19) of band `k` of the frame of `fs`, whose
+/// rows are parsed.
+fn mf_band(seq: &SequenceHeader, hdr: &FrameHeader, fs: &FrameState, k: usize) -> MfBand {
     let w8 = fs.mi_cols >> 1;
     let h8 = fs.mi_rows >> 1;
-    let mut mf_ref = vec![-1i8; w8 * h8];
-    let mut mf_mv = vec![Mv::ZERO; w8 * h8];
-    if !hdr.frame_is_intra {
-        // Whether each reference frame lies before this one.
-        let past: [bool; 8] = std::array::from_fn(|r| {
-            r > INTRA_FRAME as usize && {
-                let ref_idx = hdr.ref_frame_idx[r - 1] as usize;
-                relative_dist(seq, hdr.ref_order_hint[ref_idx], hdr.order_hint) < 0
-            }
-        });
-        let ok = |r: i8, mv: Mv| {
-            r > INTRA_FRAME
-                && past[r as usize & 7]
-                && i32::from(mv.row).abs() < (1 << 12)
-                && i32::from(mv.col).abs() < (1 << 12)
+    let rows = h8.saturating_sub(k * MF_BAND_ROWS).min(MF_BAND_ROWS);
+    let mut band = MfBand {
+        refs: vec![-1i8; w8 * rows],
+        mvs: vec![Mv::ZERO; w8 * rows],
+    };
+    if hdr.frame_is_intra {
+        return band;
+    }
+    // Whether each reference frame lies before this one.
+    let past: [bool; 8] = std::array::from_fn(|r| {
+        r > INTRA_FRAME as usize && {
+            let ref_idx = hdr.ref_frame_idx[r - 1] as usize;
+            relative_dist(seq, hdr.ref_order_hint[ref_idx], hdr.order_hint) < 0
+        }
+    });
+    let ok = |r: i8, mv: Mv| {
+        r > INTRA_FRAME
+            && past[r as usize & 7]
+            && i32::from(mv.row).abs() < (1 << 12)
+            && i32::from(mv.col).abs() < (1 << 12)
+    };
+    for y in 0..rows {
+        let at = (2 * (k * MF_BAND_ROWS + y) + 1) * fs.mi_stride;
+        let Some(mi) = fs.mi.get(at..at + 2 * w8) else {
+            break;
         };
-        for y8 in 0..h8 {
-            let at = (2 * y8 + 1) * fs.mi_stride;
-            let Some(mi) = fs.mi.get(at..at + 2 * w8) else {
-                break;
-            };
-            let refs = &mut mf_ref[y8 * w8..][..w8];
-            let mvs = &mut mf_mv[y8 * w8..][..w8];
-            for ((m, r), v) in mi.as_chunks::<2>().0.iter().zip(refs).zip(mvs) {
-                let m = &m[1];
-                // The second list wins when both qualify.
-                for list in [1, 0] {
-                    if ok(m.ref_frame[list], m.mv[list]) {
-                        *r = m.ref_frame[list];
-                        *v = m.mv[list];
-                        break;
-                    }
+        let refs = &mut band.refs[y * w8..][..w8];
+        let mvs = &mut band.mvs[y * w8..][..w8];
+        for ((m, r), v) in mi.as_chunks::<2>().0.iter().zip(refs).zip(mvs) {
+            let m = &m[1];
+            // The second list wins when both qualify.
+            for list in [1, 0] {
+                if ok(m.ref_frame[list], m.mv[list]) {
+                    *r = m.ref_frame[list];
+                    *v = m.mv[list];
+                    break;
                 }
             }
         }
     }
-    RefData {
-        mi_cols: fs.mi_cols,
-        mi_rows: fs.mi_rows,
-        frame_type: hdr.frame_type,
-        mf_ref,
-        mf_mv,
-        segment_ids: fs.segment_ids.clone(),
-        saved_order_hints: hdr.order_hints,
+    band
+}
+
+/// The data of the parsed frame of `fs`, whole.
+fn ref_data(seq: &SequenceHeader, hdr: &FrameHeader, fs: &FrameState) -> RefData {
+    let rd = RefData::new(fs.mi_cols, fs.mi_rows, hdr.frame_type, hdr.order_hints);
+    save_motion(seq, hdr, fs, &rd, 0, fs.mi_rows);
+    rd.set_segment_ids(fs.segment_ids.clone());
+    rd
+}
+
+/// Saves the motion of the bands of luma 4x4 rows `r0..r1` of the frame
+/// of `fs` in `rd`, for the frames that project it.
+fn save_motion(
+    seq: &SequenceHeader,
+    hdr: &FrameHeader,
+    fs: &FrameState,
+    rd: &RefData,
+    r0: usize,
+    r1: usize,
+) {
+    let per = 2 * MF_BAND_ROWS;
+    for k in r0 / per..r1.min(fs.mi_rows).div_ceil(per).min(rd.bands()) {
+        if !rd.has_band(k) {
+            rd.set_band(k, mf_band(seq, hdr, fs, k));
+        }
     }
 }
 

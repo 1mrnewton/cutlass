@@ -2629,13 +2629,16 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
         let Some(prev) = &self.fs.prev_segment_ids else {
             return 0;
         };
-        let prev = &prev.segment_ids;
+        // Waits for the end of that frame's parse. A frame that failed
+        // has no ids: this frame predicts 0 and fails with it.
+        let prev = prev.segment_ids();
         let xm = (self.fs.mi_cols - b.mi_col).min(bw4(b.bsize));
         let ym = (self.fs.mi_rows - b.mi_row).min(bh4(b.bsize));
         let mut seg = 7;
         for y in 0..ym {
-            for x in 0..xm {
-                seg = seg.min(prev[(b.mi_row + y) * self.fs.mi_stride + b.mi_col + x]);
+            let at = (b.mi_row + y) * self.fs.mi_stride + b.mi_col;
+            for &id in prev.get(at..at + xm).unwrap_or(&[0]) {
+                seg = seg.min(id);
             }
         }
         seg

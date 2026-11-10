@@ -113,3 +113,52 @@ pub fn filter_u16(win: &[u16; WINDOW], f: &Filter, rows: usize) -> [[u16; 8]; 8]
     #[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
     scalar::filter(win, f, rows)
 }
+
+/// Filters a block of 8-bit samples with every sample its taps read
+/// inside the picture into `dst`, rows `dst_stride` apart: `win` (see
+/// [`filter_u8`]) holds no [`UNAVAILABLE`] sample among them. The block
+/// is 8 columns wide (`wide`) or 4, and `rows` high (at most 8). The
+/// filter runs on bytes, sixteen samples to a vector: a 4x4 block in one.
+///
+/// With an unavailable sample among the taps the result is not the
+/// filter's (it is still only a value): the caller checks the block's
+/// place in the picture. Returns `false`, having written nothing, when
+/// `dst` has no room for the block.
+#[inline]
+pub fn filter_inner_u8(
+    dst: &mut [u8],
+    dst_stride: usize,
+    win: &[u16; WINDOW],
+    f: &Filter,
+    wide: bool,
+    rows: usize,
+) -> bool {
+    let rows = rows.min(8);
+    let w = if wide { 8 } else { 4 };
+    if rows == 0 || (rows - 1) * dst_stride + w > dst.len() {
+        return false;
+    }
+    let f = &Filter {
+        pri_shift: f.pri_shift.min(15),
+        sec_shift: f.sec_shift.min(15),
+        pri_at: f.pri_at.map(|at| at.min(2 * CENTRE)),
+        sec_at: f.sec_at.map(|at| at.min(2 * CENTRE)),
+        ..*f
+    };
+    #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+    {
+        // SAFETY: the `cfg` above proves NEON is enabled for this build,
+        // and the kernel names AES only where the build has it too.
+        #[allow(unsafe_code)]
+        unsafe {
+            neon::filter_inner(dst, dst_stride, win, f, wide, rows);
+        }
+    }
+    #[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
+    for (r, row) in scalar::filter(win, f, rows).iter().enumerate().take(rows) {
+        for (d, &v) in dst[r * dst_stride..r * dst_stride + w].iter_mut().zip(row) {
+            *d = v as u8;
+        }
+    }
+    true
+}

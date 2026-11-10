@@ -1,6 +1,6 @@
 use super::{
-    CENTRE, Filter, STRIDE, UNAVAILABLE, WINDOW, direction_u8, direction_u16, filter_u8,
-    filter_u16, scalar,
+    CENTRE, Filter, STRIDE, UNAVAILABLE, WINDOW, direction_u8, direction_u16, filter_inner_u8,
+    filter_u8, filter_u16, scalar,
 };
 
 /// A small fixed-seed generator: the same blocks on every run.
@@ -246,4 +246,89 @@ fn tap_positions_out_of_range_are_clamped() {
     clamped.pri_at = [2 * CENTRE; 2];
     clamped.sec_shift = 15;
     assert_eq!(filter_u8(&win, &f, 8), filter_u8(&win, &clamped, 8));
+}
+
+/// The byte filter's block as rows of 8, from a destination with rows
+/// `stride` apart that started as `fill`.
+fn inner(win: &[u16; WINDOW], f: &Filter, wide: bool, rows: usize) -> (Vec<u8>, bool) {
+    let mut dst = vec![0xEE; 8 * 11];
+    let done = filter_inner_u8(&mut dst, 11, win, f, wide, rows);
+    (dst, done)
+}
+
+#[test]
+fn the_byte_filter_matches_the_specification_inside_the_picture() {
+    let mut rng = Rng(0x000B_17E5);
+    let mut changed = 0;
+    for round in 0..8000u32 {
+        // Every sample available: the byte filter's whole contract.
+        let win = window(&mut rng, 8, 0);
+        let (pri, sec) = match round % 5 {
+            0 => (1 + rng.next() % 15, 0),
+            1 => (0, [1, 2, 4][(rng.next() % 3) as usize]),
+            _ => (rng.next() % 16, [0, 1, 2, 4][(rng.next() % 4) as usize]),
+        };
+        if pri == 0 && sec == 0 {
+            continue;
+        }
+        let damping = 3 + rng.next() % 4;
+        let f = filter_for(
+            pri as u16,
+            sec as u16,
+            (rng.next() % 8) as usize,
+            damping,
+            8,
+        );
+        let want = scalar::filter(&win, &f, 8).map(|r| r.map(|v| v as u8));
+        for (wide, w) in [(true, 8), (false, 4)] {
+            for rows in [8, 4] {
+                let (dst, done) = inner(&win, &f, wide, rows);
+                assert!(done);
+                for (r, row) in dst.chunks(11).enumerate() {
+                    if r < rows {
+                        assert_eq!(row[..w], want[r][..w], "{w} wide row {r} of {rows}, {f:?}");
+                    }
+                    // Past the block's columns and rows nothing is written.
+                    let from = if r < rows { w } else { 0 };
+                    assert!(row[from..].iter().all(|&v| v == 0xEE), "{w} wide row {r}");
+                }
+            }
+        }
+        changed += usize::from(u16::from(want[0][0]) != win[CENTRE]);
+    }
+    assert!(
+        changed > 1500,
+        "{changed} blocks changed their first sample"
+    );
+}
+
+#[test]
+fn the_byte_filter_clamps_what_the_caller_derived() {
+    let mut rng = Rng(11);
+    let win = window(&mut rng, 8, 0);
+    let mut f = filter_for(9, 2, 5, 5, 8);
+    f.pri_at = [usize::MAX, 5000];
+    f.sec_shift = 400;
+    let mut clamped = f;
+    clamped.pri_at = [2 * CENTRE; 2];
+    clamped.sec_shift = 15;
+    for wide in [true, false] {
+        assert_eq!(inner(&win, &f, wide, 99), inner(&win, &clamped, wide, 8));
+    }
+    // A flat block stays flat whatever the strengths.
+    let flat = [77u16; WINDOW];
+    let (dst, _) = inner(&flat, &filter_for(15, 4, 3, 6, 8), true, 8);
+    assert!(dst.chunks(11).all(|r| r[..8] == [77u8; 8]));
+}
+
+#[test]
+fn the_byte_filter_declines_a_destination_too_short() {
+    let mut rng = Rng(12);
+    let win = window(&mut rng, 8, 0);
+    let f = filter_for(9, 0, 5, 5, 8);
+    let mut dst = vec![5u8; 3 * 11 + 7];
+    assert!(!filter_inner_u8(&mut dst, 11, &win, &f, true, 4));
+    assert!(!filter_inner_u8(&mut dst, 11, &win, &f, false, 0));
+    assert!(dst.iter().all(|&v| v == 5));
+    assert!(filter_inner_u8(&mut dst, 11, &win, &f, false, 4));
 }

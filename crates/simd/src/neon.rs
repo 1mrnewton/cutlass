@@ -132,6 +132,21 @@ pub(crate) fn halves(v: uint8x16_t) -> ([u8; 8], [u8; 8]) {
     ((v as u64).to_le_bytes(), ((v >> 64) as u64).to_le_bytes())
 }
 
+/// The lanes of `v` as four 32-bit integers, lanes 0 to 3 in the first:
+/// each is four bytes to store at once.
+#[inline]
+#[cfg_attr(target_feature = "aes", target_feature(enable = "neon,aes"))]
+#[cfg_attr(not(target_feature = "aes"), target_feature(enable = "neon"))]
+pub(crate) fn quarters(v: uint8x16_t) -> [u32; 4] {
+    let v = narrow(v);
+    [
+        v as u32,
+        (v >> 32) as u32,
+        (v >> 64) as u32,
+        (v >> 96) as u32,
+    ]
+}
+
 /// The lanes of `v` as sixteen bytes.
 #[inline]
 #[cfg_attr(target_feature = "aes", target_feature(enable = "neon,aes"))]

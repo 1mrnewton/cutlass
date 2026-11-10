@@ -167,6 +167,19 @@ pub enum Request {
         segment_id: SegmentId,
         transition: Box<MaterialTransition>,
     },
+    /// Give the clips one group, so they move together, or take them out
+    /// of their groups with an empty `group_id`.
+    SetGroup {
+        segment_ids: Vec<SegmentId>,
+        group_id: String,
+    },
+    /// Paste what Copy attributes took onto each clip that can take it:
+    /// the placement onto clips that draw, the volume onto clips that
+    /// sound. At least one clip must take something.
+    PasteAttributes {
+        segment_ids: Vec<SegmentId>,
+        attributes: Box<crate::ClipAttributes>,
+    },
     /// Take the blend off the outgoing segment, and its material off the
     /// draft. A segment with no blend is refused.
     RemoveTransition { segment_id: SegmentId },

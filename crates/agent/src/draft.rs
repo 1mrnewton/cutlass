@@ -457,6 +457,8 @@ pub fn request_name(request: &Request) -> &'static str {
         Request::SetChangePitch { .. } => "set_change_pitch",
         Request::SetTransition { .. } => "set_transition",
         Request::RemoveTransition { .. } => "remove_transition",
+        Request::SetGroup { .. } => "set_group",
+        Request::PasteAttributes { .. } => "paste_attributes",
         Request::Split { .. } => "split",
         Request::Link { .. } => "link",
         Request::Remove { .. } => "remove",

@@ -13,6 +13,7 @@ mod fade;
 mod follow;
 mod freeze;
 mod grade;
+mod group;
 mod import;
 mod keyframe;
 mod lane;
@@ -51,6 +52,7 @@ use cutlass_model::{
 use crate::request::Request;
 
 pub use canvas::{CANVAS_SHAPES, CanvasShape, canvas_for, follow_first_picture, ratio_request};
+pub use group::ClipAttributes;
 pub use move_segment::move_segment;
 pub use place::place;
 pub use text::{
@@ -314,6 +316,14 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             freeze::set_freeze(draft, segment_id, freeze.clone())
         }
         Request::SetActive { segment_id, active } => mirror::set_active(draft, segment_id, *active),
+        Request::SetGroup {
+            segment_ids,
+            group_id,
+        } => group::set_group(draft, segment_ids, group_id),
+        Request::PasteAttributes {
+            segment_ids,
+            attributes,
+        } => group::paste_attributes(draft, segment_ids, attributes),
         Request::SetMirror {
             segment_id,
             horizontal,

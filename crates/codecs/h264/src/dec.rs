@@ -525,6 +525,9 @@ macro_rules! decode_depth {
             &mut $grain,
             $self.pool.as_ref(),
         )?;
+        if let Some(frame) = dpb.last() {
+            $self.picture_samples = frame.w.saturating_mul(frame.h);
+        }
         $self.dpb = Store::$variant(dpb);
         decoded
             .into_iter()
@@ -548,6 +551,9 @@ pub struct H264Decoder {
     /// Pictures that were ready when a call ended in an error. The next
     /// call returns them first.
     stash: Vec<VideoOutput>,
+    /// Luma samples in the last picture read, for sizing what may be in
+    /// flight.
+    picture_samples: usize,
 }
 
 pub fn register_decoders(factory: &mut DecodeFactory) {
@@ -590,6 +596,7 @@ impl H264Decoder {
             pool: None,
             outbox: std::collections::VecDeque::new(),
             stash: Vec::new(),
+            picture_samples: 0,
         };
         if !params.extra.is_empty() {
             dec.apply_extra(&params.extra)?;
@@ -597,15 +604,23 @@ impl H264Decoder {
         Ok(dec)
     }
 
-    /// Decodes pictures on `threads` threads. A picture starts as soon as
-    /// its headers are read and waits, row by row, for the rows of other
-    /// pictures it predicts from, so several are in flight at once.
+    /// Decodes pictures on other threads, sized for `threads` processor
+    /// cores. A picture starts as soon as its headers are read and waits,
+    /// row by row, for the rows of other pictures it predicts from, so
+    /// several are in flight at once.
+    ///
+    /// A picture that is waiting holds a thread but no core, and in a
+    /// chain of pictures most are waiting on the one in front. So more
+    /// pictures are kept in flight than there are cores, four times as
+    /// many, each on its own thread, within a budget of memory for the
+    /// pictures themselves.
     ///
     /// The pictures and their order are the same as on one thread. Two
-    /// things differ. A picture comes out up to `threads` calls later than
-    /// it otherwise would, so [`VideoDecoder::drain`] returns more. And an
-    /// error in a picture's data is returned by the call that would have
-    /// returned that picture, not by the call that pushed it.
+    /// things differ. A picture comes out later than it otherwise would,
+    /// by up to the number of pictures in flight, so
+    /// [`VideoDecoder::drain`] returns more. And an error in a picture's
+    /// data is returned by the call that would have returned that picture,
+    /// not by the call that pushed it.
     ///
     /// Interlaced, 4:2:2, 4:4:4, multi-view and scalable pictures are
     /// decoded on the calling thread as before. One thread or none keeps
@@ -636,6 +651,10 @@ impl H264Decoder {
             .pool
             .as_ref()
             .map_or((0, 0), |pool| (pool.depth, pool.flying()));
+        // A picture in flight holds its planes, the rows it has published,
+        // its macroblocks and its output form: about eight bytes a sample.
+        let affordable = IN_FLIGHT_BYTES / self.picture_samples.saturating_mul(8).max(1);
+        let depth = depth.min(affordable.max(2));
         let mut flying = flying;
         while let Some(front) = self.outbox.front() {
             let fed = flying > depth || self.outbox.len() > 4 * depth + 8;
@@ -1287,7 +1306,12 @@ fn decode_au<S: Sample>(
         // The picture leaves for another thread with the references as its
         // slices saw them. What stays here is its description, which is
         // all that marking, ordering and the next pictures' headers need.
-        let published = std::sync::Arc::new(progress::Published::new(pic.w, pic.h, pic.mb_w));
+        let published = std::sync::Arc::new(progress::Published::new(
+            pic.w,
+            pic.h,
+            pic.mb_w,
+            pool.permits.clone(),
+        ));
         let mut meta = pic.clone();
         meta.pending = Some(published.clone());
         present(&mut meta, &messages, grain, idr_pic)?;
@@ -4613,6 +4637,13 @@ impl Queued {
     }
 }
 
+/// Pictures kept in flight for each core asked for. Most pictures in a
+/// chain wait on the one in front and use no core while they do.
+const IN_FLIGHT_PER_CORE: usize = 4;
+/// Memory the pictures in flight may take together, which holds their
+/// number down for large pictures.
+const IN_FLIGHT_BYTES: usize = 768 << 20;
+
 type Task = Box<dyn FnOnce() + Send>;
 
 /// The threads that decode pictures.
@@ -4624,6 +4655,9 @@ struct Pool {
     depth: usize,
     /// Tasks handed over and not yet finished.
     flying: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// One permit per core asked for. `None` runs tasks where they are
+    /// handed over, with nothing to share.
+    permits: Option<std::sync::Arc<progress::Permits>>,
 }
 
 /// Counts a task as finished when it ends, however it ends.
@@ -4636,12 +4670,16 @@ impl Drop for Lands {
 }
 
 impl Pool {
-    fn new(threads: usize) -> Self {
+    /// For `cores` processor cores: that many permits to decode, and a
+    /// thread for each picture that may be in flight.
+    fn new(cores: usize) -> Self {
         let (sender, receiver) = std::sync::mpsc::channel::<Task>();
         let receiver = std::sync::Arc::new(std::sync::Mutex::new(receiver));
+        let permits = std::sync::Arc::new(progress::Permits::new(cores));
         let mut workers = Vec::new();
-        for index in 0..threads {
+        for index in 0..cores.saturating_mul(IN_FLIGHT_PER_CORE) {
             let receiver = receiver.clone();
+            let permits = permits.clone();
             let spawned = std::thread::Builder::new()
                 .name(format!("h264-{index}"))
                 .spawn(move || {
@@ -4655,7 +4693,9 @@ impl Pool {
                         };
                         // A task that unwinds has already marked its
                         // picture failed; the thread goes on to the next.
+                        permits.take();
                         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(task));
+                        permits.give();
                     }
                 });
             if let Ok(worker) = spawned {
@@ -4671,6 +4711,7 @@ impl Pool {
             workers,
             depth,
             flying: std::sync::Arc::default(),
+            permits: Some(permits),
         }
     }
 
@@ -4680,6 +4721,7 @@ impl Pool {
             workers: Vec::new(),
             depth: 0,
             flying: std::sync::Arc::default(),
+            permits: None,
         }
     }
 

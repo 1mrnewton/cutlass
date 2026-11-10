@@ -50,8 +50,10 @@ fn main() -> Result<(), String> {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).map_err(|err| err.to_string())?;
 
-    // ffmpeg picks its own thread count from the machine; this decoder is
-    // given every thread the machine reports.
+    // ffmpeg picks its own thread count from the machine. This decoder is
+    // told how many cores the machine reports; it keeps more pictures in
+    // flight than that, each on a thread, but lets only that many compute
+    // at once.
     let threads = std::thread::available_parallelism().map_or(1, usize::from);
     println!("1280x720, High profile, CABAC, {DECODE_FRAMES} frames, median of {RUNS} runs");
     println!("both sides: split the stream, decode every picture, drop it");
@@ -99,7 +101,7 @@ fn main() -> Result<(), String> {
         print_row("ffmpeg, 1 thread", DECODE_FRAMES, one);
         print_row("  whole process", DECODE_FRAMES, median(one_process));
         print_ratio(one, ours);
-        print_row(&format!("cutlass, {threads} threads"), DECODE_FRAMES, ours_all);
+        print_row(&format!("cutlass, {threads} cores"), DECODE_FRAMES, ours_all);
         print_row("ffmpeg, all threads", DECODE_FRAMES, all);
         print_ratio(all, ours_all);
     }

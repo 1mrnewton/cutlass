@@ -43,6 +43,43 @@ pub(crate) struct Planes<S: Sample> {
     pub output: Mutex<Option<cutlass_decode::VideoOutput>>,
 }
 
+/// How many threads may be decoding at once. A thread takes a permit to
+/// decode and gives it up while it waits for another picture's rows, so a
+/// waiting picture costs no core and another can use it.
+pub(crate) struct Permits {
+    free: Mutex<usize>,
+    freed: Condvar,
+}
+
+impl Permits {
+    pub(crate) fn new(count: usize) -> Self {
+        Self {
+            free: Mutex::new(count.max(1)),
+            freed: Condvar::new(),
+        }
+    }
+
+    pub(crate) fn take(&self) {
+        let Ok(mut free) = self.free.lock() else {
+            return;
+        };
+        while *free == 0 {
+            match self.freed.wait(free) {
+                Ok(woken) => free = woken,
+                Err(_) => return,
+            }
+        }
+        *free -= 1;
+    }
+
+    pub(crate) fn give(&self) {
+        if let Ok(mut free) = self.free.lock() {
+            *free += 1;
+        }
+        self.freed.notify_one();
+    }
+}
+
 /// One band or row, set once.
 type Slot<T> = OnceLock<Box<[T]>>;
 
@@ -60,6 +97,9 @@ pub(crate) struct Published<S: Sample> {
     done: OnceLock<Result<Planes<S>, CodecError>>,
     gate: Mutex<()>,
     changed: Condvar,
+    /// The decoding threads' permits, when they have them. A reader that
+    /// has to wait here is one of those threads.
+    permits: Option<std::sync::Arc<Permits>>,
 }
 
 /// A block of a published plane: the samples to read, the distance between
@@ -85,7 +125,12 @@ fn slots<T>(count: usize) -> Vec<Slot<T>> {
 
 impl<S: Sample> Published<S> {
     /// For a 4:2:0 frame of `w`×`h` luma samples, `h` a multiple of 16.
-    pub(crate) fn new(w: usize, h: usize, mb_w: usize) -> Self {
+    pub(crate) fn new(
+        w: usize,
+        h: usize,
+        mb_w: usize,
+        permits: Option<std::sync::Arc<Permits>>,
+    ) -> Self {
         let bands = h / 16 + BANDS_ABOVE as usize + 1;
         Self {
             w,
@@ -98,6 +143,7 @@ impl<S: Sample> Published<S> {
             done: OnceLock::new(),
             gate: Mutex::new(()),
             changed: Condvar::new(),
+            permits,
         }
     }
 
@@ -112,6 +158,18 @@ impl<S: Sample> Published<S> {
         if let Some(held) = slot.get() {
             return Ok(held);
         }
+        // This thread's core goes to another picture while it waits.
+        if let Some(permits) = &self.permits {
+            permits.give();
+        }
+        let found = self.wait_parked(slot);
+        if let Some(permits) = &self.permits {
+            permits.take();
+        }
+        found
+    }
+
+    fn wait_parked<'a, T>(&'a self, slot: &'a Slot<T>) -> Result<&'a [T], CodecError> {
         let mut guard = self.gate.lock().map_err(|_| broken())?;
         loop {
             if let Some(held) = slot.get() {
@@ -284,7 +342,7 @@ mod tests {
         let y: Vec<u8> = (0..w * h).map(|i| (i * 7 % 251) as u8).collect();
         let u: Vec<u8> = (0..w * h / 4).map(|i| (i * 13 % 241) as u8).collect();
         let v: Vec<u8> = (0..w * h / 4).map(|i| (i * 29 % 239) as u8).collect();
-        let published = Published::<u8>::new(w, h, w / 16);
+        let published = Published::<u8>::new(w, h, w / 16, None);
         published.fill_bands((&y, &u, &v), 0..published.luma.len());
         let (pic_w, pic_h) = (w as i32, h as i32);
         for by in -80..pic_h + 80 {
@@ -327,7 +385,7 @@ mod tests {
 
     #[test]
     fn a_failed_picture_lets_its_readers_go() {
-        let published = std::sync::Arc::new(Published::<u8>::new(32, 32, 2));
+        let published = std::sync::Arc::new(Published::<u8>::new(32, 32, 2, None));
         let reader = {
             let published = published.clone();
             std::thread::spawn(move || {

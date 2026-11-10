@@ -5941,7 +5941,6 @@ fn paint_clip_menu(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
             "compound" => shell.create_compound(),
             "render-preview" => shell.render_selected(false),
             "render-full" => shell.render_selected(true),
-            "make-proxies" => shell.make_proxies(),
             "arrange-forward" => shell.arrange(cutlass_session::Arrange::Forward),
             "arrange-backward" => shell.arrange(cutlass_session::Arrange::Backward),
             "arrange-front" => shell.arrange(cutlass_session::Arrange::Front),

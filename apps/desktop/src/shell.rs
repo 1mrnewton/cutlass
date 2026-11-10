@@ -916,7 +916,7 @@ impl Shell {
             transport: Transport::new(),
             preview_cache: RefCell::new(FrameCache::new()),
             renders: render::Renders::new(Self::home().renders()),
-            proxies: proxy::Proxies::new(Self::home().proxies()),
+            proxies: proxy::Proxies::new(proxy::home_folder()),
             lanes_cache: RefCell::new(None),
             settings,
             settings_file: None,
@@ -1367,6 +1367,7 @@ impl Shell {
             cutlass_logger::info!("close project {}", path.display());
         }
         self.session = None;
+        self.close_proxies();
         self.waiting_imports.clear();
         self.lanes_cache.replace(None);
         self.card_waves.clear();
@@ -1566,7 +1567,7 @@ impl Shell {
         self.transport.forget_files();
         self.silence();
         self.find_renders();
-        self.find_proxies();
+        self.open_proxies();
         Ok(())
     }
 
@@ -2417,7 +2418,7 @@ impl Shell {
     pub(crate) fn set_readers(&mut self, readers: ReaderFactory) {
         self.transport.forget_mixer();
         self.readers = readers;
-        self.find_proxies();
+        self.sync_proxies();
         self.preview_cache.borrow_mut().clear();
         self.transport.forget_files();
     }
@@ -2456,9 +2457,7 @@ impl Shell {
                 Some(render) => (&render.session, &self.renders.cache, None),
                 None => (main, &self.preview_cache, Some(main.revision())),
             };
-        let readers = self
-            .proxies
-            .preview(&self.readers, self.settings.playback.proxies);
+        let readers = self.proxies.preview(&self.readers);
         let Some(gpu) = self.gpu.as_mut() else {
             return Ok(None);
         };
@@ -2717,9 +2716,6 @@ impl Shell {
     pub fn update_settings(&mut self, change: impl FnOnce(&mut Settings)) {
         let before = self.settings.clone();
         change(&mut self.settings);
-        if self.settings.playback.proxies != before.playback.proxies {
-            self.preview_cache.borrow_mut().clear();
-        }
         if self.settings != before {
             cutlass_logger::info!(
                 "settings changed: {}",

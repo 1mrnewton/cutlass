@@ -7152,10 +7152,11 @@ fn read_parts<S: Sample>(
 ) -> Result<(), CodecError> {
     let (mx, my, spec) = at;
     let parts = partitions(super::syntax_kind(slice.kind), spec);
-    let mut from_layer0 = vec![false; parts.len()];
-    let mut from_layer1 = vec![false; parts.len()];
-    let mut synthesis0 = vec![false; parts.len()];
-    let mut synthesis1 = vec![false; parts.len()];
+    // One flag per partition; there are at most two.
+    let mut from_layer0 = [false; 2];
+    let mut from_layer1 = [false; 2];
+    let mut synthesis0 = [false; 2];
+    let mut synthesis1 = [false; 2];
     if slice.adaptive_motion || slice.motion_pred {
         for (index, part) in parts.iter().enumerate() {
             if part.l0 {
@@ -7221,7 +7222,7 @@ fn read_parts<S: Sample>(
     }
     // A partition that does not use list 0 is still decoded. Its blocks stay
     // available so the next partition does not replace C with D.
-    for part in &parts {
+    for part in parts.iter() {
         if !part.l0 {
             mark_decoded(mb, part.x, part.y, part.w, part.h);
         }
@@ -7531,6 +7532,7 @@ fn layer_motion<S: Sample>(
     Ok((mv, index))
 }
 
+#[derive(Clone, Copy)]
 struct Part {
     x: usize,
     y: usize,
@@ -7540,19 +7542,43 @@ struct Part {
     l1: bool,
 }
 
-fn partitions(kind: u8, spec: u32) -> Vec<Part> {
+/// A macroblock's partitions: none, one or two. Held in place, since this
+/// is made for every inter macroblock.
+struct Parts {
+    items: [Part; 2],
+    len: usize,
+}
+
+impl Parts {
+    fn new(parts: &[Part]) -> Self {
+        let mut items = [part(0, 0, 16, 16, false, false); 2];
+        let len = parts.len().min(2);
+        items[..len].copy_from_slice(&parts[..len]);
+        Self { items, len }
+    }
+}
+
+impl std::ops::Deref for Parts {
+    type Target = [Part];
+
+    fn deref(&self) -> &[Part] {
+        &self.items[..self.len]
+    }
+}
+
+fn partitions(kind: u8, spec: u32) -> Parts {
     if kind == 0 {
         return match spec {
-            0 => vec![part(0, 0, 16, 16, true, false)],
-            1 => vec![
+            0 => Parts::new(&[part(0, 0, 16, 16, true, false)]),
+            1 => Parts::new(&[
                 part(0, 0, 16, 8, true, false),
                 part(0, 8, 16, 8, true, false),
-            ],
-            2 => vec![
+            ]),
+            2 => Parts::new(&[
                 part(0, 0, 8, 16, true, false),
                 part(8, 0, 8, 16, true, false),
-            ],
-            _ => Vec::new(),
+            ]),
+            _ => Parts::new(&[]),
         };
     }
     let (a, b, wide) = match spec {
@@ -7577,22 +7603,22 @@ fn partitions(kind: u8, spec: u32) -> Vec<Part> {
         19 => (1, 0, false),
         20 => (1, 1, true),
         21 => (1, 1, false),
-        _ => return vec![part(0, 0, 16, 16, true, false)],
+        _ => return Parts::new(&[part(0, 0, 16, 16, true, false)]),
     };
     let _ = (a, b);
     let lists = b_lists(spec);
     if wide && matches!(spec, 4 | 6 | 8 | 10 | 12 | 14 | 16 | 18 | 20) {
-        vec![
+        Parts::new(&[
             part(0, 0, 16, 8, lists.0.0, lists.0.1),
             part(0, 8, 16, 8, lists.1.0, lists.1.1),
-        ]
+        ])
     } else if matches!(spec, 5 | 7 | 9 | 11 | 13 | 15 | 17 | 19 | 21) {
-        vec![
+        Parts::new(&[
             part(0, 0, 8, 16, lists.0.0, lists.0.1),
             part(8, 0, 8, 16, lists.1.0, lists.1.1),
-        ]
+        ])
     } else {
-        vec![part(0, 0, 16, 16, lists.0.0, lists.0.1)]
+        Parts::new(&[part(0, 0, 16, 16, lists.0.0, lists.0.1)])
     }
 }
 
@@ -7929,12 +7955,9 @@ fn mvp<S: Sample>(
         b = a;
         c = a;
     }
-    let same = [a, b, c]
-        .into_iter()
-        .filter(|n| n.reference == reference)
-        .collect::<Vec<_>>();
-    if same.len() == 1 {
-        return same[0].mv;
+    let mut same = [a, b, c].into_iter().filter(|n| n.reference == reference);
+    if let (Some(only), None) = (same.next(), same.next()) {
+        return only.mv;
     }
     [
         median(a.mv[0], b.mv[0], c.mv[0]),
@@ -8240,18 +8263,13 @@ fn read_sub<S: Sample>(
     Ok(())
 }
 
-fn sub_origins(x0: usize, y0: usize, w: usize, h: usize) -> Vec<(usize, usize)> {
-    let mut origins = Vec::new();
-    let mut y = y0;
-    while y < y0 + 8 {
-        let mut x = x0;
-        while x < x0 + 8 {
-            origins.push((x, y));
-            x += w;
-        }
-        y += h;
-    }
-    origins
+/// The origins of an 8×8 block's sub-partitions of `w`×`h`, in decoding
+/// order.
+fn sub_origins(x0: usize, y0: usize, w: usize, h: usize) -> impl Iterator<Item = (usize, usize)> {
+    let (w, h) = (w.max(1), h.max(1));
+    (y0..y0 + 8)
+        .step_by(h)
+        .flat_map(move |y| (x0..x0 + 8).step_by(w).map(move |x| (x, y)))
 }
 
 fn sub_lists(kind: u8, spec: u32) -> (bool, bool) {
@@ -8685,7 +8703,7 @@ fn predict_inter<S: Sample>(
     mb: &Mb,
 ) -> Result<(), CodecError> {
     if mb.alc && slice.weighted {
-        for part in partitions(super::syntax_kind(slice.kind), mb.alc_spec) {
+        for part in partitions(super::syntax_kind(slice.kind), mb.alc_spec).iter() {
             if !part.l0 {
                 continue;
             }

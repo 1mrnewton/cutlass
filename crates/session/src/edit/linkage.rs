@@ -132,27 +132,44 @@ fn on_edit(
     Ok(())
 }
 
-/// Shift followers by the extra distance a packed main clip moved.
+/// Shift followers and group mates by the extra distance a packed main
+/// clip moved, so they stay with it: a grouped clip the magnet takes back
+/// takes its group back too.
 ///
-/// The clip itself is already at its packed start. Group mates are left
-/// where the edit put them.
+/// The clip itself is already at its packed start, and so are the clips
+/// on the main lane with it. Followers move only while linkage is on;
+/// a group moves either way. `moved` holds the groups this pack has
+/// shifted already, so one with two clips on the main lane moves once.
 pub(super) fn follow_pack_shift(
     draft: &mut Draft,
     owner: &SegmentId,
     delta: i64,
     settings: &LinkageSettings,
+    moved: &mut BTreeSet<String>,
 ) -> Result<(), EditError> {
-    if delta == 0 || !settings.enabled {
+    if delta == 0 {
         return Ok(());
     }
-    let dependents = following(draft, owner, settings);
-    for dependent_id in dependents {
-        if track_of(draft, &dependent_id).is_some_and(|index| draft.tracks[index].is_main()) {
+    let mut ids = BTreeSet::new();
+    if let Some(packed) = segment(draft, owner).cloned()
+        && !packed.group_id.is_empty()
+        && moved.insert(packed.group_id.clone())
+    {
+        ids = group_mates(draft, &packed);
+    }
+    if settings.enabled {
+        ids.extend(following(draft, owner, settings));
+    }
+    for id in ids {
+        if track_of(draft, &id).is_some_and(|index| draft.tracks[index].is_main()) {
             continue;
         }
-        shift_start(draft, &dependent_id, delta)?;
+        shift_start(draft, &id, delta)?;
     }
-    reap(draft, owner, settings)
+    if settings.enabled {
+        reap(draft, owner, settings)?;
+    }
+    Ok(())
 }
 
 fn on_move(

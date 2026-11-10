@@ -185,6 +185,93 @@ mod tests {
         assert_eq!(clip(&session, "s").group_id, "g1");
     }
 
+    /// With the magnet on: `a` then `b` packed on main, and a sound `s`
+    /// under `b`, grouped with it.
+    fn magnetic() -> Session {
+        let mut draft = session().draft().clone();
+        draft.config.maintrack_adsorb = true;
+        draft.tracks[0].segments[1].target = TimeRange::new(1_000_000, 1_000_000);
+        draft.tracks[1].segments[0].target = TimeRange::new(1_000_000, 1_000_000);
+        let mut session = Session::open(draft);
+        session.apply(0, &[group(&["b", "s"], "g")]).unwrap();
+        session
+    }
+
+    fn start(session: &Session, id: &str) -> i64 {
+        clip(session, id).target.start.0
+    }
+
+    #[test]
+    fn a_group_held_by_the_magnet_comes_back_whole() {
+        // With linkage on and off: a group is not a link.
+        for linked in [true, false] {
+            let mut session = magnetic();
+            let mut settings = session.linkage();
+            settings.enabled = linked;
+            session.set_linkage(settings);
+
+            // The main clip dragged a little later: the magnet puts it
+            // back, and its sound comes back with it.
+            let moved = |id: &str, row: &str, to: i64| Request::Move {
+                segment_id: id.into(),
+                track_id: TrackId::new(row),
+                start: Micros(to),
+            };
+            session.apply(1, &[moved("b", "main", 1_400_000)]).unwrap();
+            assert_eq!(start(&session, "b"), 1_000_000, "linked {linked}");
+            assert_eq!(start(&session, "s"), 1_000_000, "linked {linked}");
+
+            // The sound dragged instead takes the main clip with it, which
+            // the magnet puts back, and so the sound too.
+            session.apply(2, &[moved("s", "sound", 1_700_000)]).unwrap();
+            assert_eq!(start(&session, "b"), 1_000_000);
+            assert_eq!(start(&session, "s"), 1_000_000);
+
+            // The clip before it deleted: the main clip closes the gap,
+            // and its sound goes with it.
+            session
+                .apply(
+                    3,
+                    &[Request::Remove {
+                        segment_id: "a".into(),
+                    }],
+                )
+                .unwrap();
+            assert_eq!(start(&session, "b"), 0);
+            assert_eq!(start(&session, "s"), 0);
+        }
+    }
+
+    #[test]
+    fn a_group_with_two_clips_on_the_main_lane_moves_its_others_once() {
+        // Both main clips are in the group with the sound under the second.
+        let mut draft = session().draft().clone();
+        draft.config.maintrack_adsorb = true;
+        draft.tracks[0].segments[1].target = TimeRange::new(1_000_000, 1_000_000);
+        draft.tracks[1].segments[0].target = TimeRange::new(1_000_000, 1_000_000);
+        // A clip ahead of them, to delete.
+        draft.tracks[0]
+            .segments
+            .insert(0, Segment::new("first", "m", TimeRange::new(0, 500_000)));
+        draft.tracks[0].segments[1].target = TimeRange::new(500_000, 1_000_000);
+        draft.tracks[0].segments[2].target = TimeRange::new(1_500_000, 1_000_000);
+        draft.tracks[1].segments[0].target = TimeRange::new(1_500_000, 1_000_000);
+        let mut session = Session::open(draft);
+        session.apply(0, &[group(&["a", "b", "s"], "g")]).unwrap();
+        session
+            .apply(
+                1,
+                &[Request::Remove {
+                    segment_id: "first".into(),
+                }],
+            )
+            .unwrap();
+        // Both main clips closed up by half a second; the sound moved by
+        // that much, not by it twice.
+        assert_eq!((start(&session, "a"), start(&session, "b")), (0, 1_000_000));
+        assert_eq!(start(&session, "s"), 1_000_000);
+    }
+
     #[test]
     fn a_group_with_a_missing_or_locked_clip_changes_nothing() {
         let mut session = session();

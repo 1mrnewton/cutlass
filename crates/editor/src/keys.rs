@@ -254,6 +254,75 @@ pub fn remove_key(draft: &Draft, segment_id: &SegmentId, at: Micros) -> Option<R
     })
 }
 
+/// The request that moves the keys at `offsets` from the clip's start by
+/// `delta` together, several marks dragged as one. `None` when none of
+/// the offsets has a key, `delta` is nothing, a key would leave the clip,
+/// or one would land on a key that is not moving.
+#[must_use]
+pub fn move_keys(
+    draft: &Draft,
+    segment_id: &SegmentId,
+    offsets: &[Micros],
+    delta: i64,
+) -> Option<Request> {
+    let segment = draft
+        .tracks
+        .iter()
+        .flat_map(|track| &track.segments)
+        .find(|segment| segment.id == *segment_id)?;
+    let all = key_offsets(segment);
+    let moving: Vec<Micros> = all
+        .iter()
+        .copied()
+        .filter(|offset| offsets.contains(offset))
+        .collect();
+    if moving.is_empty() || delta == 0 {
+        return None;
+    }
+    for offset in &moving {
+        let to = offset.0.checked_add(delta)?;
+        let on = (0..=segment.target.duration.0).contains(&to);
+        let taken = all.contains(&Micros(to)) && !moving.contains(&Micros(to));
+        if !on || taken {
+            return None;
+        }
+    }
+    let mut keyframes = segment.common_keyframes.clone();
+    for group in &mut keyframes {
+        for key in &mut group.keyframe_list {
+            if moving.contains(&key.time_offset) {
+                key.time_offset = Micros(key.time_offset.0 + delta);
+            }
+        }
+        group.keyframe_list.sort_by_key(|key| key.time_offset.0);
+    }
+    Some(Request::SetKeyframes {
+        segment_id: segment_id.clone(),
+        keyframes,
+    })
+}
+
+/// The request that removes every key at each of `offsets` from the
+/// clip's start: several marks deleted as one. `None` when the clip is
+/// not on the timeline or has a key at none of them.
+#[must_use]
+pub fn remove_keys(draft: &Draft, segment_id: &SegmentId, offsets: &[Micros]) -> Option<Request> {
+    let mut segment = draft
+        .tracks
+        .iter()
+        .flat_map(|track| &track.segments)
+        .find(|segment| segment.id == *segment_id)?
+        .clone();
+    let mut removed = false;
+    for offset in offsets {
+        removed |= cutlass_model::remove_keys_where(&mut segment, *offset, |_| true);
+    }
+    removed.then(|| Request::SetKeyframes {
+        segment_id: segment_id.clone(),
+        keyframes: segment.common_keyframes,
+    })
+}
+
 /// A Graphs panel curve to show: its name and its line through the unit
 /// square, x the share of time and y the share of the change.
 #[derive(Clone, Debug, PartialEq)]
@@ -315,6 +384,67 @@ mod tests {
 
     use super::*;
     use crate::stage::NoText;
+
+    #[test]
+    fn several_keys_move_together_and_are_removed_together() {
+        let mut draft = Draft::empty("D");
+        let mut segment = Segment::new("c", "v", TimeRange::new(0, 4_000_000));
+        for offset in [0, 1_000_000, 2_000_000, 3_000_000] {
+            put_key(&mut segment, "KFTypePositionX", Micros(offset), 0.0);
+        }
+        put_key(&mut segment, "KFTypeAlpha", Micros(2_000_000), 0.5);
+        draft.tracks[0].segments.push(segment);
+        let id = SegmentId::new("c");
+        let times = |request: Option<Request>| -> Option<Vec<Vec<i64>>> {
+            let Request::SetKeyframes { keyframes, .. } = request? else {
+                return None;
+            };
+            Some(
+                keyframes
+                    .iter()
+                    .map(|group| {
+                        group
+                            .keyframe_list
+                            .iter()
+                            .map(|key| key.time_offset.0)
+                            .collect()
+                    })
+                    .collect(),
+            )
+        };
+        let picked = [Micros(1_000_000), Micros(2_000_000)];
+        // Half a second later, both keys and the opacity key with them.
+        assert_eq!(
+            times(move_keys(&draft, &id, &picked, 500_000)),
+            Some(vec![
+                vec![0, 1_500_000, 2_500_000, 3_000_000],
+                vec![2_500_000]
+            ])
+        );
+        // One second later the first lands where the second was, which is
+        // moving too, but the second lands on a key that is not.
+        assert_eq!(move_keys(&draft, &id, &picked, 1_000_000), None);
+        // A key may not leave the clip, and nothing moves by nothing.
+        assert_eq!(move_keys(&draft, &id, &picked, -1_500_000), None);
+        assert_eq!(move_keys(&draft, &id, &picked, 2_500_000), None);
+        assert_eq!(move_keys(&draft, &id, &picked, 0), None);
+        assert_eq!(move_keys(&draft, &id, &picked, i64::MAX), None);
+        assert_eq!(move_keys(&draft, &id, &[Micros(7)], 1), None);
+        assert_eq!(move_keys(&draft, &SegmentId::new("gone"), &picked, 1), None);
+
+        assert_eq!(
+            times(remove_keys(&draft, &id, &picked)),
+            Some(vec![vec![0, 3_000_000]])
+        );
+        // A time with no key among them is passed over.
+        assert_eq!(
+            times(remove_keys(&draft, &id, &[Micros(7), Micros(0)])),
+            Some(vec![vec![1_000_000, 2_000_000, 3_000_000], vec![2_000_000]])
+        );
+        assert_eq!(remove_keys(&draft, &id, &[Micros(7)]), None);
+        assert_eq!(remove_keys(&draft, &id, &[]), None);
+        assert_eq!(remove_keys(&draft, &SegmentId::new("gone"), &picked), None);
+    }
 
     #[test]
     fn a_key_is_removed_from_every_setting_keyed_at_its_time() {

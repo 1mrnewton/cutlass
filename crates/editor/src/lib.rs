@@ -91,7 +91,10 @@ pub use inspector::{
     SILENT_DB, TEXT_PRESETS, TextLook, TextPreset, canvas_pixels, gain_of_db, is_caption, panel_of,
     preset_requests, starting, stored_position, text_look, text_look_at, volume_db,
 };
-pub use keys::{ClipKeys, KeyGraph, clip_keys, key_graphs, move_key, remove_key, value_keys};
+pub use keys::{
+    ClipKeys, KeyGraph, clip_keys, key_graphs, move_key, move_keys, remove_key, remove_keys,
+    value_keys,
+};
 pub use lane::{Lane, lane_category, lanes, lanes_for};
 pub use library::{
     LIBRARY_TOP, LibraryFile, LibraryShelf, LibrarySort, NEW_FOLDER_NAME, add_folder,

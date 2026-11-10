@@ -109,11 +109,18 @@ fn main() -> Result<(), String> {
     drop(encoded);
     drop(encoded_ours);
     drop(encoded_ffmpeg);
-    let encode_ours = time_encode(&inputs)?;
-    let encode_ffmpeg = time_ffmpeg_encode(&ffmpeg, &raw_path)?;
+    let _ = time_encode(&inputs)?;
+    let mut encode_ours = Vec::new();
+    let mut encode_ffmpeg = Vec::new();
+    for _ in 0..RUNS {
+        encode_ours.push(time_encode(&inputs)?);
+        encode_ffmpeg.push(time_ffmpeg_encode(&ffmpeg, &raw_path)?);
+    }
+    let encode_ours = median(encode_ours);
+    let encode_ffmpeg = median(encode_ffmpeg);
 
     println!();
-    println!("encode testsrc2, {ENCODE_FRAMES} frames, one run, one thread, {BITRATE} bits/s");
+    println!("encode testsrc2, {ENCODE_FRAMES} frames, one thread, {BITRATE} bits/s");
     println!("reconstruction matches ffmpeg, zero sample difference");
     println!("libx264 is preset ultrafast and searches far less than this encoder");
     print_row("cutlass, 1 thread", ENCODE_FRAMES, encode_ours);

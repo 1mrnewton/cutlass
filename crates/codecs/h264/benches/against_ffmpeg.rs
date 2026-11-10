@@ -1,10 +1,20 @@
-//! Throughput against ffmpeg on one thread.
+//! Throughput against ffmpeg on the same machine.
 //!
 //! `cargo bench -p cutlass-h264`
 //!
-//! Decode is the same High annex-B stream. Encode is the same `testsrc2`
-//! pictures. libx264 is ultrafast; this encoder has no preset. The numbers
-//! are wall time, not a quality match.
+//! Decode runs two High annex-B streams: an easy one (clean `testsrc2`,
+//! mostly skipped macroblocks) and a hard one (the same pictures with noise
+//! at 5 Mb/s, so most macroblocks carry a residual). Both sides are timed
+//! over the same work: split the file's bytes into access units, decode
+//! every picture, and drop it. This decoder is timed around that loop.
+//! ffmpeg is timed by its own `-benchmark` clock, which starts after the
+//! process has loaded and probed the input, so neither side pays for
+//! process startup. ffmpeg's whole-process time is printed beside it.
+//! This decoder uses one thread; ffmpeg is shown on one thread and on all.
+//!
+//! Encode is the same `testsrc2` pictures. libx264 is ultrafast; this
+//! encoder has no preset, and it searches far more than ultrafast does. The
+//! encode numbers are wall time, not a quality match.
 //!
 //! Before any speed is printed, decode samples must match ffmpeg with zero
 //! difference, and this encoder's bitstream must reconstruct to the same
@@ -22,7 +32,8 @@ use cutlass_h264::{H264Decoder, H264Encoder};
 
 const WIDTH: u32 = 1280;
 const HEIGHT: u32 = 720;
-const DECODE_FRAMES: usize = 120;
+const DECODE_FRAMES: usize = 300;
+const RUNS: usize = 5;
 const ENCODE_FRAMES: usize = 30;
 const BITRATE: u32 = 2_000_000;
 const Y_LEN: usize = 1280 * 720;
@@ -38,18 +49,46 @@ fn main() -> Result<(), String> {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).map_err(|err| err.to_string())?;
 
-    let coded = dir.join("high.h264");
-    generate_stream(&ffmpeg, &coded)?;
-    let bytes = std::fs::read(&coded).map_err(|err| err.to_string())?;
-    let units = access_units(&bytes)?;
-    let packets = packets(&units)?;
-    let decoded = reconstruct(&packets, DECODE_FRAMES)?;
-    let reference = ffmpeg_yuv(&ffmpeg, &coded, &dir.join("decoded.yuv"), DECODE_FRAMES)?;
-    same_samples("decode", &decoded, &reference)?;
-    drop(decoded);
-    drop(reference);
-    let decode_ours = median_seconds(|| time_decode(&packets))?;
-    let decode_ffmpeg = median_seconds(|| time_ffmpeg_decode(&ffmpeg, &coded))?;
+    println!("1280x720, High profile, CABAC, {DECODE_FRAMES} frames, median of {RUNS} runs");
+    println!("both sides: split the stream, decode every picture, drop it");
+    println!("ffmpeg's time is its own -benchmark clock, without process startup");
+    for stream in STREAMS {
+        let coded = dir.join(stream.file);
+        generate_stream(&ffmpeg, &coded, stream)?;
+        let bytes = std::fs::read(&coded).map_err(|err| err.to_string())?;
+        let packets = packets(&access_units(&bytes)?)?;
+        let decoded = reconstruct(&packets, DECODE_FRAMES)?;
+        drop(packets);
+        let reference = ffmpeg_yuv(&ffmpeg, &coded, &dir.join("decoded.yuv"), DECODE_FRAMES)?;
+        same_samples(stream.name, &decoded, &reference)?;
+        drop(decoded);
+        drop(reference);
+        let _ = time_decode(&bytes)?;
+        let mut ours = Vec::new();
+        let mut one = Vec::new();
+        let mut one_process = Vec::new();
+        let mut all = Vec::new();
+        // The three are run in turn so a busy moment on the machine hits
+        // them alike.
+        for _ in 0..RUNS {
+            ours.push(time_decode(&bytes)?);
+            let (clock, process) = time_ffmpeg_decode(&ffmpeg, &coded, Some(1))?;
+            one.push(clock);
+            one_process.push(process);
+            all.push(time_ffmpeg_decode(&ffmpeg, &coded, None)?.0);
+        }
+        let ours = median(ours);
+        let one = median(one);
+        let megabits = bytes.len() as f64 * 8.0 * 30.0 / DECODE_FRAMES as f64 / 1e6;
+        println!();
+        println!("decode {}, {megabits:.1} Mb/s", stream.name);
+        println!("pixels match ffmpeg, zero sample difference");
+        print_row("cutlass, 1 thread", DECODE_FRAMES, ours);
+        print_row("ffmpeg, 1 thread", DECODE_FRAMES, one);
+        print_row("  whole process", DECODE_FRAMES, median(one_process));
+        print_row("ffmpeg, all threads", DECODE_FRAMES, median(all));
+        print_ratio(one, ours);
+    }
 
     let raw_path = dir.join("source.yuv");
     generate_yuv(&ffmpeg, &raw_path)?;
@@ -73,23 +112,40 @@ fn main() -> Result<(), String> {
     let encode_ours = time_encode(&inputs)?;
     let encode_ffmpeg = time_ffmpeg_encode(&ffmpeg, &raw_path)?;
 
-    println!("1280x720, one thread");
-    println!("cutlass times the codec loop. ffmpeg times include process startup.");
-    println!("decode pixels match ffmpeg, zero sample difference, {DECODE_FRAMES} frames");
-    println!("decode High annex-B, {DECODE_FRAMES} frames, median of 3");
-    print_row("cutlass", DECODE_FRAMES, decode_ours);
-    print_row("ffmpeg", DECODE_FRAMES, decode_ffmpeg);
-    print_ratio(decode_ffmpeg, decode_ours);
-    println!(
-        "encode reconstruction matches ffmpeg, zero sample difference, {ENCODE_FRAMES} frames"
-    );
-    println!("encode testsrc2, {ENCODE_FRAMES} frames, one run, {BITRATE} bits/s");
-    println!("libx264 preset ultrafast, profile high");
-    print_row("cutlass", ENCODE_FRAMES, encode_ours);
-    print_row("ffmpeg", ENCODE_FRAMES, encode_ffmpeg);
+    println!();
+    println!("encode testsrc2, {ENCODE_FRAMES} frames, one run, one thread, {BITRATE} bits/s");
+    println!("reconstruction matches ffmpeg, zero sample difference");
+    println!("libx264 is preset ultrafast and searches far less than this encoder");
+    print_row("cutlass, 1 thread", ENCODE_FRAMES, encode_ours);
+    print_row("ffmpeg, 1 thread", ENCODE_FRAMES, encode_ffmpeg);
     print_ratio(encode_ffmpeg, encode_ours);
     Ok(())
 }
+
+/// One decode test stream and how libx264 makes it.
+struct Stream {
+    name: &'static str,
+    file: &'static str,
+    /// A filter over `testsrc2`, if any.
+    filter: Option<&'static str>,
+    /// libx264 options after the profile.
+    coding: &'static [&'static str],
+}
+
+const STREAMS: &[Stream] = &[
+    Stream {
+        name: "easy: clean testsrc2, preset veryfast, 2 B-frames",
+        file: "easy.h264",
+        filter: None,
+        coding: &["-preset", "veryfast", "-x264-params", "cabac=1:bframes=2"],
+    },
+    Stream {
+        name: "hard: noisy testsrc2, preset medium",
+        file: "hard.h264",
+        filter: Some("noise=alls=12:allf=t"),
+        coding: &["-preset", "medium", "-b:v", "5M"],
+    },
+];
 
 fn same_samples(what: &str, got: &[u8], want: &[u8]) -> Result<(), String> {
     if got.len() != want.len() {
@@ -216,7 +272,7 @@ fn ffmpeg_yuv(ffmpeg: &str, input: &Path, output: &Path, frames: usize) -> Resul
 
 fn print_row(name: &str, frames: usize, seconds: f64) {
     let fps = fps(frames, seconds);
-    println!("{name:<8} {seconds:>8.2} s   {fps:>8.1} fps");
+    println!("{name:<20} {seconds:>8.3} s   {fps:>8.1} fps");
 }
 
 fn print_ratio(ffmpeg_seconds: f64, ours_seconds: f64) {
@@ -230,21 +286,21 @@ fn fps(frames: usize, seconds: f64) -> f64 {
     f64::from(frames) / seconds
 }
 
-fn median_seconds(mut once: impl FnMut() -> Result<f64, String>) -> Result<f64, String> {
-    let _ = once()?;
-    let mut samples = [once()?, once()?, once()?];
+fn median(mut samples: Vec<f64>) -> f64 {
     samples.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
-    Ok(samples[1])
+    samples.get(samples.len() / 2).copied().unwrap_or(0.0)
 }
 
-fn time_decode(packets: &[Packet]) -> Result<f64, String> {
+/// Seconds to split `bytes` into access units and decode them all.
+fn time_decode(bytes: &[u8]) -> Result<f64, String> {
     let mut params = CodecParams::video(CodecId::H264, WIDTH, HEIGHT);
     params.nal_length_size = 0;
     let mut decoder = H264Decoder::open(&params).map_err(|err| err.to_string())?;
     let started = Instant::now();
+    let packets = packets(&access_units(bytes)?)?;
     let mut pictures = 0usize;
     let mut luma = 0usize;
-    for packet in packets {
+    for packet in &packets {
         let frames = decoder.push(packet).map_err(|err| err.to_string())?;
         pictures += frames.len();
         luma += frames
@@ -291,36 +347,58 @@ fn time_encode(inputs: &[VideoInput]) -> Result<f64, String> {
     Ok(seconds)
 }
 
-fn time_ffmpeg_decode(ffmpeg: &str, path: &Path) -> Result<f64, String> {
+/// ffmpeg's own clock and the whole process's wall time, in seconds, to
+/// decode `path` on `threads` threads (all of them when `None`).
+fn time_ffmpeg_decode(
+    ffmpeg: &str,
+    path: &Path,
+    threads: Option<u32>,
+) -> Result<(f64, f64), String> {
+    let mut command = Command::new(ffmpeg);
+    command.args(BENCHMARK);
+    if let Some(threads) = threads {
+        command.args(["-threads", &threads.to_string()]);
+    }
+    command.arg("-i").arg(path).args(["-f", "null", "-"]);
     let started = Instant::now();
-    let output = Command::new(ffmpeg)
-        .args([
-            "-nostdin",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-threads",
-            "1",
-            "-i",
-        ])
-        .arg(path)
-        .args(["-f", "null", "-"])
-        .output()
-        .map_err(|err| err.to_string())?;
+    let output = command.output().map_err(|err| err.to_string())?;
+    let process = started.elapsed().as_secs_f64();
     if !output.status.success() {
         return Err(tail(&output.stderr));
     }
-    Ok(started.elapsed().as_secs_f64())
+    let pictures = format!("frame={DECODE_FRAMES:>5} ");
+    if !String::from_utf8_lossy(&output.stderr).contains(&pictures) {
+        return Err(format!("ffmpeg did not decode {DECODE_FRAMES} frames"));
+    }
+    Ok((benchmark_seconds(&output.stderr)?, process))
+}
+
+/// Options that make ffmpeg print its own timing and nothing per frame.
+const BENCHMARK: [&str; 6] = [
+    "-nostdin",
+    "-hide_banner",
+    "-loglevel",
+    "info",
+    "-nostats",
+    "-benchmark",
+];
+
+/// The real time ffmpeg's `-benchmark` reports: from the first packet read
+/// to the last frame written, after the process has started and opened its
+/// input.
+fn benchmark_seconds(stderr: &[u8]) -> Result<f64, String> {
+    let text = String::from_utf8_lossy(stderr);
+    text.split("rtime=")
+        .nth(1)
+        .and_then(|rest| rest.split('s').next())
+        .and_then(|seconds| seconds.parse().ok())
+        .ok_or_else(|| format!("ffmpeg printed no benchmark time: {}", tail(stderr)))
 }
 
 fn time_ffmpeg_encode(ffmpeg: &str, yuv: &Path) -> Result<f64, String> {
-    let started = Instant::now();
     let output = Command::new(ffmpeg)
+        .args(BENCHMARK)
         .args([
-            "-nostdin",
-            "-hide_banner",
-            "-loglevel",
-            "error",
             "-f",
             "rawvideo",
             "-pix_fmt",
@@ -354,41 +432,30 @@ fn time_ffmpeg_encode(ffmpeg: &str, yuv: &Path) -> Result<f64, String> {
     if !output.status.success() {
         return Err(tail(&output.stderr));
     }
-    Ok(started.elapsed().as_secs_f64())
+    benchmark_seconds(&output.stderr)
 }
 
-fn generate_stream(ffmpeg: &str, path: &Path) -> Result<(), String> {
+fn generate_stream(ffmpeg: &str, path: &Path, stream: &Stream) -> Result<(), String> {
     let frames = DECODE_FRAMES.to_string();
-    let output = Command::new(ffmpeg)
-        .args([
-            "-nostdin",
-            "-y",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-f",
-            "lavfi",
-            "-i",
-            "testsrc2=size=1280x720:rate=30",
-            "-frames:v",
-        ])
-        .arg(&frames)
-        .args([
-            "-c:v",
-            "libx264",
-            "-profile:v",
-            "high",
-            "-preset",
-            "veryfast",
-            "-pix_fmt",
-            "yuv420p",
-            "-threads",
-            "1",
-            "-x264-params",
-            "cabac=1:bframes=2",
-            "-f",
-            "h264",
-        ])
+    let mut command = Command::new(ffmpeg);
+    command.args([
+        "-nostdin",
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-f",
+        "lavfi",
+        "-i",
+        "testsrc2=size=1280x720:rate=30",
+    ]);
+    if let Some(filter) = stream.filter {
+        command.args(["-vf", filter]);
+    }
+    let output = command
+        .args(["-frames:v", &frames, "-c:v", "libx264", "-profile:v", "high"])
+        .args(stream.coding)
+        .args(["-pix_fmt", "yuv420p", "-threads", "1", "-f", "h264"])
         .arg(path)
         .output()
         .map_err(|err| err.to_string())?;

@@ -1509,10 +1509,24 @@ fn copy_rows<S: Sample, const W: usize>(
     src: &Src<'_, S>,
     h: usize,
 ) {
-    for row in 0..h {
-        let from = (src.y + row) * src.stride + src.x;
-        dst[row * dst_stride..row * dst_stride + W].copy_from_slice(&src.samples[from..from + W]);
+    if h == 0 || dst_stride < W || src.stride < W {
+        return;
     }
+    // The block is cut from each plane once. Every row but the last is
+    // then a whole stride-long piece, at least `W` long, so taking its
+    // first `W` samples needs no further test.
+    let from = src.y * src.stride + src.x;
+    let source = &src.samples[from..from + (h - 1) * src.stride + W];
+    let target = &mut dst[..(h - 1) * dst_stride + W];
+    let (source, last_source) = source.split_at((h - 1) * src.stride);
+    let (target, last_target) = target.split_at_mut((h - 1) * dst_stride);
+    let rows = target
+        .chunks_exact_mut(dst_stride)
+        .zip(source.chunks_exact(src.stride));
+    for (out, row) in rows {
+        out[..W].copy_from_slice(&row[..W]);
+    }
+    last_target[..W].copy_from_slice(&last_source[..W]);
 }
 
 fn half_h_block<S: Sample>(

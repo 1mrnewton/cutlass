@@ -8484,6 +8484,14 @@ fn apply_direct<S: Sample>(
         )
     };
     let addr = my * pic.mb_w + mx;
+    // The co-located block is asked about only for a reference index of 0,
+    // and its macroblock is the same for every block here.
+    let col_matters = !zero && (ref0 == 0 || ref1 == 0);
+    let col_mb = if col_matters {
+        col_macroblock(dpb, slice, addr)
+    } else {
+        None
+    };
     for &(bx, by) in blocks {
         let index = by * 4 + bx;
         let col = if slice.sps.direct_8x8_inference {
@@ -8491,7 +8499,7 @@ fn apply_direct<S: Sample>(
         } else {
             index
         };
-        let col_zero = col_zero(dpb, slice, addr, col);
+        let col_zero = col_matters && col_mb.is_some_and(|mb| col_zero(mb, col));
         mb.mv0[index] = if zero || ref0 < 0 || (ref0 == 0 && col_zero) {
             [0, 0]
         } else {
@@ -8539,22 +8547,24 @@ fn min_positive(left: i8, right: i8) -> i8 {
     }
 }
 
-fn col_zero<S: Sample>(dpb: &[Frame<S>], slice: &Slice<'_>, addr: usize, index: usize) -> bool {
-    let Some(&frame_index) = slice.ref1.first() else {
-        return false;
-    };
-    let Some(frame) = dpb.get(frame_index) else {
-        return false;
-    };
+/// The co-located macroblock, when it is one whose motion can make a
+/// direct block's vector zero: an inter macroblock of a short-term first
+/// list-1 picture.
+fn col_macroblock<'a, S: Sample>(
+    dpb: &'a [Frame<S>],
+    slice: &Slice<'_>,
+    addr: usize,
+) -> Option<&'a Mb> {
+    let frame = dpb.get(*slice.ref1.first()?)?;
     if frame.long_term {
-        return false;
+        return None;
     }
-    let Some(col) = frame.mb.get(addr) else {
-        return false;
-    };
-    if col.intra || col.pcm {
-        return false;
-    }
+    let col = frame.mb.get(addr)?;
+    (!col.intra && !col.pcm).then_some(col)
+}
+
+/// colZeroFlag of clause 8.4.1.2.2 for block `index` of that macroblock.
+fn col_zero(col: &Mb, index: usize) -> bool {
     let part = (index / 4 / 2) * 2 + ((index % 4) / 2);
     let (mv, reference) = if col.ref0[part] >= 0 {
         (col.mv0[index], col.ref0[part])

@@ -101,7 +101,11 @@ fn main() -> Result<(), String> {
         print_row("ffmpeg, 1 thread", DECODE_FRAMES, one);
         print_row("  whole process", DECODE_FRAMES, median(one_process));
         print_ratio(one, ours);
-        print_row(&format!("cutlass, {threads} cores"), DECODE_FRAMES, ours_all);
+        print_row(
+            &format!("cutlass, {threads} cores"),
+            DECODE_FRAMES,
+            ours_all,
+        );
         print_row("ffmpeg, all threads", DECODE_FRAMES, all);
         print_ratio(all, ours_all);
     }

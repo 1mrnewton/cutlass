@@ -43,6 +43,78 @@ struct ChromaResidual {
     cr_dc: [i32; 8],
     cb_ac: [[i32; 16]; 8],
     cr_ac: [[i32; 16]; 8],
+    /// Which of the arrays hold levels: `DC_USED`, `AC_USED`. The rest are
+    /// all zero.
+    used: u8,
+}
+
+const DC_USED: u8 = 1;
+const AC_USED: u8 = 2;
+
+impl ChromaResidual {
+    fn zero() -> Self {
+        Self {
+            cb_dc: [0; 8],
+            cr_dc: [0; 8],
+            cb_ac: [[0; 16]; 8],
+            cr_ac: [[0; 16]; 8],
+            used: 0,
+        }
+    }
+
+    /// Back to all zero, clearing only the arrays that were written.
+    fn reset(&mut self) {
+        if self.used & DC_USED != 0 {
+            self.cb_dc = [0; 8];
+            self.cr_dc = [0; 8];
+        }
+        if self.used & AC_USED != 0 {
+            self.cb_ac = [[0; 16]; 8];
+            self.cr_ac = [[0; 16]; 8];
+        }
+        self.used = 0;
+    }
+}
+
+/// The coefficient levels of the macroblock being read. One of these lasts
+/// a whole slice, and each macroblock clears only the blocks the one before
+/// it wrote, so a macroblock does not pay to zero every array.
+pub(crate) struct Coeffs {
+    ac: [[i32; 16]; 16],
+    block8: [[i32; 64]; 4],
+    chroma: ChromaResidual,
+    /// One bit per block of `ac` that holds levels.
+    ac_used: u16,
+    /// One bit per block of `block8` that holds levels.
+    block8_used: u8,
+}
+
+impl Coeffs {
+    pub(crate) fn new() -> Self {
+        Self {
+            ac: [[0; 16]; 16],
+            block8: [[0; 64]; 4],
+            chroma: ChromaResidual::zero(),
+            ac_used: 0,
+            block8_used: 0,
+        }
+    }
+
+    /// Luma arrays back to all zero, clearing only the blocks written.
+    fn reset_luma(&mut self) {
+        let mut used = self.ac_used;
+        while used != 0 {
+            self.ac[used.trailing_zeros() as usize] = [0; 16];
+            used &= used - 1;
+        }
+        let mut used = self.block8_used;
+        while used != 0 {
+            self.block8[used.trailing_zeros() as usize] = [0; 64];
+            used &= used - 1;
+        }
+        self.ac_used = 0;
+        self.block8_used = 0;
+    }
 }
 
 /// A list slot the initialisation process left as "no reference picture".
@@ -537,6 +609,7 @@ pub(crate) fn decode_mbs<S: Sample>(
         run: 0,
         kind: false,
     };
+    let mut coeffs = Coeffs::new();
     while addr < total {
         if !super::intra_slice(slice.kind) {
             match &mut entropy {
@@ -623,8 +696,15 @@ pub(crate) fn decode_mbs<S: Sample>(
             }
             qp
         } else {
-            let (qp, residual) =
-                one_mb(pic, dpb, slice, slice_id, addr, (qp, layer), &mut entropy)?;
+            let (qp, residual) = one_mb(
+                pic,
+                dpb,
+                slice,
+                slice_id,
+                addr,
+                (qp, layer, &mut coeffs),
+                &mut entropy,
+            )?;
             if residual {
                 let Some(layer) = layer else {
                     return Err(CodecError::Unsupported {
@@ -829,12 +909,7 @@ fn skip_mb<S: Sample>(
         predict_inter(pic, dpb, slice, mx, my, &mb)?;
         if slice.kind == 3 {
             let luma = [[0i32; 16]; 16];
-            let chroma = ChromaResidual {
-                cb_dc: [0; 8],
-                cr_dc: [0; 8],
-                cb_ac: [[0; 16]; 8],
-                cr_ac: [[0; 16]; 8],
-            };
+            let chroma = ChromaResidual::zero();
             write_sp(
                 pic,
                 slice,
@@ -2757,10 +2832,10 @@ fn one_mb<S: Sample>(
     slice: &Slice<'_>,
     slice_id: u16,
     addr: usize,
-    coded: (i32, Option<&Frame<S>>),
+    coded: (i32, Option<&Frame<S>>, &mut Coeffs),
     entropy: &mut Entropy<'_, '_>,
 ) -> Result<(i32, bool), CodecError> {
-    let (qp, layer) = coded;
+    let (qp, layer, coeffs) = coded;
     let mbaff = slice.sps.mbaff && !pic.field;
     let (mx, my) = locate(pic, addr, mbaff);
     let slot = my * pic.mb_w + mx;
@@ -2794,8 +2869,7 @@ fn one_mb<S: Sample>(
             slice,
             Place { mx, my },
             spec,
-            &mut mb,
-            &mut qp,
+            (&mut mb, &mut qp, coeffs),
         )?;
         false
     } else {
@@ -2806,7 +2880,7 @@ fn one_mb<S: Sample>(
             slice,
             Place { mx, my },
             spec,
-            (&mut mb, &mut qp, layer),
+            (&mut mb, &mut qp, layer, coeffs),
         )?
     };
     mb.qp = qp as i8;
@@ -3115,10 +3189,10 @@ fn decode_intra<S: Sample>(
     slice: &Slice<'_>,
     at: Place,
     spec: u32,
-    mb: &mut Mb,
-    qp: &mut i32,
+    work: (&mut Mb, &mut i32, &mut Coeffs),
 ) -> Result<(), CodecError> {
     let Place { mx, my } = at;
+    let (mb, qp, coeffs) = work;
     if spec > 25 {
         return Err(CodecError::Malformed {
             at_bit: 0,
@@ -3175,8 +3249,14 @@ fn decode_intra<S: Sample>(
     }
     mb.qpd = delta as i8;
     let mut luma_dc = [0i32; 16];
-    let mut ac = [[0i32; 16]; 16];
-    let mut block8 = [[0i32; 64]; 4];
+    coeffs.reset_luma();
+    let Coeffs {
+        ac,
+        block8,
+        chroma: chroma_res,
+        ac_used,
+        block8_used,
+    } = coeffs;
     if i16 {
         luma_dc = read_block(
             pic,
@@ -3188,6 +3268,7 @@ fn decode_intra<S: Sample>(
             0,
         )?;
         if luma_cbp != 0 {
+            *ac_used = u16::MAX;
             for (i, slot) in ac.iter_mut().enumerate() {
                 *slot = read_block(
                     pic,
@@ -3206,6 +3287,7 @@ fn decode_intra<S: Sample>(
     } else if transform8 {
         for (i, slot) in block8.iter_mut().enumerate() {
             if luma_cbp & (1 << i) != 0 {
+                *block8_used |= 1 << i;
                 *slot = read8(pic, entropy, mx, my, i, mb, 0)?;
             }
         }
@@ -3213,6 +3295,7 @@ fn decode_intra<S: Sample>(
         for (i, slot) in ac.iter_mut().enumerate() {
             let bit = 1 << ((blk_y(i) / 2) * 2 + blk_x(i) / 2);
             if luma_cbp & bit != 0 {
+                *ac_used |= 1 << i;
                 *slot = read_block(
                     pic,
                     entropy,
@@ -3228,18 +3311,13 @@ fn decode_intra<S: Sample>(
             }
         }
     }
-    let chroma_res = if slice.sps.chroma == 3 {
-        ChromaResidual {
-            cb_dc: [0; 8],
-            cr_dc: [0; 8],
-            cb_ac: [[0; 16]; 8],
-            cr_ac: [[0; 16]; 8],
-        }
+    if slice.sps.chroma == 3 {
+        chroma_res.reset();
     } else {
-        read_chroma(pic, entropy, mx, my, chroma_cbp, mb)?
-    };
+        read_chroma_into(pic, entropy, (mx, my), chroma_cbp, mb, chroma_res)?;
+    }
     if mb.si {
-        recon_si(pic, slice, Place { mx, my }, mb, &ac, &chroma_res, *qp)?;
+        recon_si(pic, slice, Place { mx, my }, mb, ac, chroma_res, *qp)?;
         return Ok(());
     }
     recon_intra(
@@ -3252,8 +3330,8 @@ fn decode_intra<S: Sample>(
             mode16,
             chroma_mode: chroma,
             dc: luma_dc,
-            ac: &ac,
-            block8: &block8,
+            ac,
+            block8,
         },
         ChromaPaint {
             cb_dc: &chroma_res.cb_dc,
@@ -3813,15 +3891,27 @@ fn read_chroma<S: Sample>(
     cbp: u8,
     mb: &mut Mb,
 ) -> Result<ChromaResidual, CodecError> {
-    let mut residual = ChromaResidual {
-        cb_dc: [0; 8],
-        cr_dc: [0; 8],
-        cb_ac: [[0; 16]; 8],
-        cr_ac: [[0; 16]; 8],
-    };
+    let mut residual = ChromaResidual::zero();
+    read_chroma_into(pic, entropy, (mx, my), cbp, mb, &mut residual)?;
+    Ok(residual)
+}
+
+/// Reads the chroma levels of a macroblock into `residual`, which is left
+/// all zero where nothing is coded.
+fn read_chroma_into<S: Sample>(
+    pic: &Frame<S>,
+    entropy: &mut Entropy<'_, '_>,
+    at: (usize, usize),
+    cbp: u8,
+    mb: &mut Mb,
+    residual: &mut ChromaResidual,
+) -> Result<(), CodecError> {
+    let (mx, my) = at;
+    residual.reset();
     if cbp == 0 {
-        return Ok(residual);
+        return Ok(());
     }
+    residual.used = DC_USED;
     let blocks = if pic.chroma() == 2 { 8 } else { 4 };
     let dc0 = read_block(
         pic,
@@ -3844,6 +3934,7 @@ fn read_chroma<S: Sample>(
     )?;
     residual.cr_dc[..blocks].copy_from_slice(&dc1[..blocks]);
     if cbp == 2 {
+        residual.used |= AC_USED;
         for (plane, ac) in [
             (1u8, residual.cb_ac.as_mut_slice()),
             (2, residual.cr_ac.as_mut_slice()),
@@ -3862,7 +3953,7 @@ fn read_chroma<S: Sample>(
             }
         }
     }
-    Ok(residual)
+    Ok(())
 }
 
 fn nc_of<S: Sample>(pic: &Frame<S>, at: Place, cell: Cell, mb: &Mb, plane: u8) -> i32 {
@@ -7501,10 +7592,10 @@ fn decode_inter<S: Sample>(
     slice: &Slice<'_>,
     at: Place,
     spec: u32,
-    work: (&mut Mb, &mut i32, Option<&Frame<S>>),
+    work: (&mut Mb, &mut i32, Option<&Frame<S>>, &mut Coeffs),
 ) -> Result<bool, CodecError> {
     let Place { mx, my } = at;
-    let (mb, qp, layer) = work;
+    let (mb, qp, layer, coeffs) = work;
     let sub = if slice.kind == 1 {
         spec == 22
     } else {
@@ -7632,7 +7723,8 @@ fn decode_inter<S: Sample>(
     if slice.sps.chroma == 3 && !slice.sps.separate {
         recon_444(pic, entropy, slice, Place { mx, my }, mb, *qp, None)?;
     } else {
-        let chroma_res = read_chroma(pic, entropy, mx, my, chroma_cbp, mb)?;
+        let chroma_res = &mut coeffs.chroma;
+        read_chroma_into(pic, entropy, (mx, my), chroma_cbp, mb, chroma_res)?;
         if !pic.levels.is_empty() {
             let slot = my * pic.mb_w + mx;
             pic.note_chroma(slot, 0, &chroma_res.cb_dc, &chroma_res.cb_ac);

@@ -24,6 +24,7 @@
 //!
 //! Block widths and heights are at most 128 (the largest AV1 block).
 
+use cutlass_simd::av1::mc as kernel;
 use std::sync::OnceLock;
 
 use super::{Pixel, clip_px, round2};
@@ -397,6 +398,68 @@ fn rnd_of(sh: u32) -> i32 {
     (1 << sh) >> 1
 }
 
+/// A block of 8-bit samples for the two-pass kernel of `cutlass-simd`,
+/// with the filter rows as the kernel takes them.
+struct KernelBlock<'a> {
+    src: &'a [u8],
+    start: usize,
+    src_stride: usize,
+    w: usize,
+    h: usize,
+    fh: [i8; 8],
+    fv: [i8; 8],
+}
+
+impl KernelBlock<'_> {
+    fn with<R>(&self, f: impl FnOnce(&kernel::Block<'_>) -> R) -> R {
+        f(&kernel::Block {
+            src: self.src,
+            start: self.start,
+            src_stride: self.src_stride,
+            w: self.w,
+            h: self.h,
+            fh: &self.fh,
+            fv: &self.fv,
+        })
+    }
+}
+
+/// The block for the kernel, when the build has it and the samples are
+/// 8-bit: `(filter, fraction)` choose each filter row, and `src_off`
+/// indexes the block's first sample.
+#[inline(always)]
+fn kernel_block<P: Pixel>(
+    src: &[P],
+    src_off: usize,
+    src_stride: usize,
+    w: usize,
+    h: usize,
+    (fx, mx): (usize, usize),
+    (fy, my): (usize, usize),
+    bd: u32,
+) -> Option<KernelBlock<'_>> {
+    if !kernel::ACCELERATED || P::HBD || bd != 8 {
+        return None;
+    }
+    // Every tap of a row with a fraction fits a signed byte.
+    let row = |f: &[i16; 8]| -> Option<[i8; 8]> {
+        let mut out = [0i8; 8];
+        for (o, &t) in out.iter_mut().zip(f) {
+            *o = i8::try_from(t).ok()?;
+        }
+        Some(out)
+    };
+    Some(KernelBlock {
+        src: P::bytes(src)?,
+        start: src_off.checked_sub(3 * src_stride + 3)?,
+        src_stride,
+        w,
+        h,
+        fh: row(&SUBPEL_FILTERS[fx][mx])?,
+        fv: row(&SUBPEL_FILTERS[fy][my])?,
+    })
+}
+
 /// Horizontal then vertical filtering through an `i16` intermediate.
 /// `wr(A, B)` receives the split vertical sums.
 #[inline]
@@ -660,6 +723,14 @@ pub fn put<P: Pixel>(
             }
         }
         (true, true) => {
+            if let Some(b) = kernel_block(src, src_off, src_stride, w, h, (fx, mx), (fy, my), bd)
+                && let Some(out) = P::bytes_mut(dst)
+                && with_mid((h + 7) * w, |mid| {
+                    b.with(|b| kernel::put_hv_u8(out, dst_stride, b, mid))
+                })
+            {
+                return;
+            }
             // Round2(2 * (256 * A + B), r1) with n = r1 - 1 >= 8.
             let n = r1 - 1;
             let rnd = 1i16 << (n - 1);
@@ -831,6 +902,13 @@ pub fn prep<P: Pixel>(
                 );
             }
         }
+        (true, true)
+            if kernel_block(src, src_off, src_stride, w, h, (fx, mx), (fy, my), bd)
+                .is_some_and(|b| {
+                    with_mid((h + 7) * w, |mid| {
+                        b.with(|b| kernel::prep_hv_u8(tmp, w, b, mid))
+                    })
+                }) => {}
         // pred = Round2(2 * (256 * A + B), 7) = 4 * A + Round2(B, 6).
         (true, true) => hv::<P, i16>(
             tmp,

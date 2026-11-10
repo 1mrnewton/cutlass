@@ -25,6 +25,8 @@ pub trait Pixel:
     fn to_i32(self) -> i32;
     /// The samples as bytes, for the 8-bit vector kernels. `None` for `u16`.
     fn bytes_mut(buf: &mut [Self]) -> Option<&mut [u8]>;
+    /// [`Self::bytes_mut`] for samples that are only read.
+    fn bytes(buf: &[Self]) -> Option<&[u8]>;
 }
 
 impl Pixel for u8 {
@@ -41,6 +43,10 @@ impl Pixel for u8 {
     fn bytes_mut(buf: &mut [Self]) -> Option<&mut [u8]> {
         Some(buf)
     }
+    #[inline(always)]
+    fn bytes(buf: &[Self]) -> Option<&[u8]> {
+        Some(buf)
+    }
 }
 
 impl Pixel for u16 {
@@ -55,6 +61,10 @@ impl Pixel for u16 {
     }
     #[inline(always)]
     fn bytes_mut(_: &mut [Self]) -> Option<&mut [u8]> {
+        None
+    }
+    #[inline(always)]
+    fn bytes(_: &[Self]) -> Option<&[u8]> {
         None
     }
 }

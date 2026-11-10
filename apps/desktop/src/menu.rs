@@ -491,10 +491,13 @@ pub const LIBRARY_EMPTY: &[Entry] = &[
 ];
 
 const PAD: f32 = tokens::MENU_PAD as f32;
-const ROW: f32 = 32.0;
+/// A row's height. With the separator's, measured against the reference
+/// editor's menus, so a menu of as many rows stands as tall as its own.
+const ROW: f32 = 28.0;
 const ROW_PAD: f32 = 10.0;
 const GAP: f32 = 16.0;
-const SEPARATOR: f32 = 13.0;
+/// The height a separator takes between two rows.
+const SEPARATOR: f32 = 7.0;
 const RADIUS: u8 = tokens::MENU_RADIUS;
 const ROW_RADIUS: u8 = 8;
 const LABEL_SIZE: f32 = 13.0;
@@ -1948,9 +1951,9 @@ mod tests {
 
     #[test]
     fn a_menu_stays_under_the_app_windows_top_and_scrolls_when_too_tall() {
-        // A 14-inch laptop's screen, which the video clip menu outgrows.
-        let screen = Vec2::new(1512.0, 982.0);
-        let window = Rect::from_min_size(Pos2::new(40.0, 34.0), Vec2::new(1400.0, 900.0));
+        // A small laptop's screen, which the video clip menu outgrows.
+        let screen = Vec2::new(1280.0, 800.0);
+        let window = Rect::from_min_size(Pos2::new(40.0, 34.0), Vec2::new(1200.0, 700.0));
         let area = menu_area(window, Some(screen));
         // Not above the app window, where the system's menu bar is, and
         // down to the monitor's foot.
@@ -1985,6 +1988,14 @@ mod tests {
             assert!(canvas.top() >= window.top());
             assert!(canvas.bottom() <= screen.y);
             assert!(canvas.contains_rect(menu));
+        });
+        output.textures_delta.clear();
+
+        // On a 14-inch laptop the whole of it shows, as the reference
+        // editor's does: its rows and separators are no taller than theirs.
+        let roomy = menu_area(window, Some(Vec2::new(1512.0, 982.0))).shrink(EDGE);
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            assert!(size(ui.ctx(), VIDEO).y <= roomy.height());
         });
         output.textures_delta.clear();
 

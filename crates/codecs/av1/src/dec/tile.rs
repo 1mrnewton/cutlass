@@ -1,6 +1,8 @@
 //! Tile decoding: partition, mode info, transform sizes, palette and coefficients
 //! (spec 5.11 with the CDF selection of 8.3.2).
 
+use std::ops::Range;
+
 use cutlass_decode::CodecError;
 
 use crate::dsp::Pixel;
@@ -48,6 +50,37 @@ pub type R<T> = Result<T, CodecError>;
 /// luma 4x4 rows `r0..r1` of the row.
 pub type RowHook<'h, P> =
     dyn FnMut(&FrameState, &Picture<P>, Option<&mut ReconLog>, usize, usize, bool) + 'h;
+
+/// The loop restoration units of `plane` that the superblocks covering
+/// luma 4x4 rows `rows` and columns `cols` read (see
+/// [`TileDec::read_lr`]): the unit rows and the unit columns. The spans of
+/// neighbouring superblocks meet, so those of a tile's superblocks make
+/// the span of the tile.
+pub fn lr_unit_span(
+    seq: &SequenceHeader,
+    hdr: &FrameHeader,
+    fs: &FrameState,
+    plane: usize,
+    rows: Range<usize>,
+    cols: Range<usize>,
+) -> (Range<usize>, Range<usize>) {
+    let (sx, sy) = if plane > 0 {
+        (u32::from(seq.subsampling_x), u32::from(seq.subsampling_y))
+    } else {
+        (0, 0)
+    };
+    let unit_size = hdr.lr.unit_size[plane] as usize;
+    let row_start = (rows.start * (4 >> sy)).div_ceil(unit_size);
+    let row_end = fs.lr_rows[plane].min((rows.end * (4 >> sy)).div_ceil(unit_size));
+    let (num, den) = if hdr.use_superres {
+        ((4 >> sx) * hdr.superres_denom as usize, unit_size * 8)
+    } else {
+        (4 >> sx, unit_size)
+    };
+    let col_start = (cols.start * num).div_ceil(den);
+    let col_end = fs.lr_cols[plane].min((cols.end * num).div_ceil(den));
+    (row_start..row_end, col_start..col_end)
+}
 
 /// While recording, the superblocks after which the log is handed on
 /// before the end of their row (see [`TileDec::decode_tile_rows`]).
@@ -1079,21 +1112,9 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
             if ftype == RESTORE_NONE {
                 continue;
             }
-            let (sx, sy) = self.plane_sub(plane);
-            let unit_size = self.hdr.lr.unit_size[plane] as usize;
-            let unit_rows = self.fs.lr_rows[plane];
-            let unit_cols = self.fs.lr_cols[plane];
-            let row_start = (r * (4 >> sy)).div_ceil(unit_size);
-            let row_end = unit_rows.min(((r + h) * (4 >> sy)).div_ceil(unit_size));
-            let (num, den) = if self.hdr.use_superres {
-                ((4 >> sx) * self.hdr.superres_denom as usize, unit_size * 8)
-            } else {
-                (4 >> sx, unit_size)
-            };
-            let col_start = (c * num).div_ceil(den);
-            let col_end = unit_cols.min(((c + w) * num).div_ceil(den));
-            for ur in row_start..row_end {
-                for uc in col_start..col_end {
+            let (rows, cols) = lr_unit_span(self.seq, self.hdr, self.fs, plane, r..r + h, c..c + w);
+            for ur in rows {
+                for uc in cols.clone() {
                     self.read_lr_unit(plane, ur, uc, ftype)?;
                 }
             }

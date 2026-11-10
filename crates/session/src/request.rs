@@ -141,6 +141,10 @@ pub enum Request {
         segment_id: SegmentId,
         material_id: MaterialId,
     },
+    /// Give a picture whose sound was extracted its own sound back, and
+    /// take the clip that sound went to off the timeline when it is still
+    /// linked to the picture.
+    RecoverAudio { segment_id: SegmentId },
     /// Turn one track-attribute bit on or off. Mute and solo are not gains.
     SetTrackAttribute {
         track_id: TrackId,

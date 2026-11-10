@@ -450,6 +450,7 @@ pub fn request_name(request: &Request) -> &'static str {
         Request::InsertCaption { .. } => "insert_caption",
         Request::SetCaptionTemplate { .. } => "set_caption_template",
         Request::ExtractAudio { .. } => "extract_audio",
+        Request::RecoverAudio { .. } => "recover_audio",
         Request::SetTrackAttribute { .. } => "set_track_attribute",
         Request::SetConstantSpeed { .. } => "set_constant_speed",
         Request::SetCurveSpeed { .. } => "set_curve_speed",

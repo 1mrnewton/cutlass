@@ -124,6 +124,8 @@ pub enum EditError {
     NoSound,
     /// The picture's sound is already its own clip.
     AlreadyExtracted,
+    /// Recover audio on a picture that still has its own sound.
+    SoundNotSeparate,
     /// A track with this id is already on the draft, or this type cannot be a lane.
     TrackKind,
     /// The main track cannot be removed.
@@ -274,6 +276,7 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             segment_id,
             material_id,
         } => extract::extract_audio(draft, source_id, track_id, segment_id, material_id),
+        Request::RecoverAudio { segment_id } => extract::recover_audio(draft, segment_id),
         Request::SetTrackAttribute { track_id, bit, on } => {
             track::set_track_attribute(draft, track_id, *bit, *on)
         }

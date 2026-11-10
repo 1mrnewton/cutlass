@@ -68,6 +68,7 @@ mod select;
 mod shape;
 mod speech_model;
 mod stable;
+mod sync;
 mod update;
 
 pub use assistant::AgentRun;

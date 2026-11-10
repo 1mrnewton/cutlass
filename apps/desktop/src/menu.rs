@@ -111,7 +111,7 @@ const PASTE_ATTRIBUTES: Entry<'static> = done("paste-attributes", "Paste attribu
 const DELETE: Entry<'static> = done("delete", "Delete", "⌫");
 const DEACTIVATE: Entry<'static> = done("deactivate", "Deactivate clip", "V");
 const REPLACE_SOUND: Entry<'static> = done("replace", "Replace", "");
-const SYNC: Entry<'static> = todo("sync", "Sync video and audio", "");
+const SYNC: Entry<'static> = done("sync", "Sync video and audio", "");
 const COMPOUND: Entry<'static> = done("compound", "Create compound clip (subproject)", "⌥G");
 const MULTICAM: Entry<'static> = todo("multicam", "Create multi-camera clip", "");
 const SAVE_PRESET: Entry<'static> = todo("save-preset", "Save preset", "");
@@ -1449,7 +1449,6 @@ mod tests {
             "Edit more",
             "Pre-process compound clip (subproject)",
             // Greyed until now; nothing in this build does them yet.
-            "Sync video and audio",
             "Create multi-camera clip",
             "Trim clip",
         ];
@@ -1616,10 +1615,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(
-            later,
-            ["separate-audio", "sync", "multicam", "save-preset",]
-        );
+        assert_eq!(later, ["separate-audio", "multicam", "save-preset"]);
     }
 
     #[test]

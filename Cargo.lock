@@ -2390,6 +2390,7 @@ dependencies = [
  "cutlass-agent",
  "cutlass-aiff",
  "cutlass-alac",
+ "cutlass-audio",
  "cutlass-av1",
  "cutlass-avi",
  "cutlass-caf",

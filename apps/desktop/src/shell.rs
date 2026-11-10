@@ -4695,11 +4695,8 @@ impl Shell {
         })?;
         self.refuse_locked(&segment_id)?;
         let (stored, written) = self.save_freeze_image(&segment_id, &point.freeze)?;
-        let mut next_id = self.next_id;
-        let mut fresh = |prefix: &str| {
-            next_id = next_id.saturating_add(1);
-            format!("{prefix}-{next_id}")
-        };
+        let mut ids = FreshIds::new(self.session_draft()?, self.next_id);
+        let mut fresh = |prefix: &str| ids.make(prefix);
         let requests = cutlass_editor::freeze_requests(
             self.session_draft()?,
             &segment_id,
@@ -4709,6 +4706,7 @@ impl Shell {
             cutlass_eval::FREEZE_DURATION,
             &mut fresh,
         );
+        let next_id = ids.next;
         self.next_id = next_id;
         let mut written = CopyGuard(Some(written));
         let requests = requests
@@ -5146,11 +5144,8 @@ impl Shell {
         words: &WordColumns,
     ) -> Result<(), ShellError> {
         let face = self.face.name().to_owned();
-        let mut next_id = self.next_id;
-        let mut fresh = |prefix: &str| {
-            next_id = next_id.saturating_add(1);
-            format!("{prefix}-{next_id}")
-        };
+        let mut ids = FreshIds::new(self.session_draft()?, self.next_id);
+        let mut fresh = |prefix: &str| ids.make(prefix);
         let requests = cutlass_transcription::rerun_requests(
             self.session_draft()?,
             caption,
@@ -5160,6 +5155,7 @@ impl Shell {
             &mut fresh,
         )
         .map_err(heard_error);
+        let next_id = ids.next;
         self.next_id = next_id;
         let requests = requests?;
         // The re-run lines replace the selected caption: the one now under
@@ -5384,16 +5380,14 @@ impl Shell {
     }
 
     fn write_caption(&mut self, clip: &HeardClip, words: WordColumns) -> Result<(), ShellError> {
-        let mut next_id = self.next_id;
-        let mut fresh = |prefix: &str| {
-            next_id = next_id.saturating_add(1);
-            format!("{prefix}-{next_id}")
-        };
+        let mut ids = FreshIds::new(self.session_draft()?, self.next_id);
+        let mut fresh = |prefix: &str| ids.make(prefix);
         // One caption clip per line, back to back, as one undo step.
         // Captions are set in the shell's face, as a new title is.
         let face = self.face.name().to_owned();
         let requests = caption_requests(self.session_draft()?, clip, words, &face, &mut fresh)
             .map_err(heard_error);
+        let next_id = ids.next;
         self.next_id = next_id;
         self.apply_requests(&requests?)
     }
@@ -5491,12 +5485,10 @@ impl Shell {
     }
 
     fn place_extracted(&mut self, source_id: &SegmentId) -> Result<(), ShellError> {
-        let mut next_id = self.next_id;
-        let mut fresh = |prefix: &str| {
-            next_id = next_id.saturating_add(1);
-            format!("{prefix}-{next_id}")
-        };
+        let mut ids = FreshIds::new(self.session_draft()?, self.next_id);
+        let mut fresh = |prefix: &str| ids.make(prefix);
         let request = cutlass_editor::extract_request(self.session_draft()?, source_id, &mut fresh);
+        let next_id = ids.next;
         self.next_id = next_id;
         let request = request
             .ok_or_else(|| ShellError::Unavailable("the clip is not on the timeline".to_owned()))?;
@@ -6864,14 +6856,14 @@ impl Shell {
     /// Place the copied clips at the playhead, keeping the gaps between them.
     pub fn paste(&mut self) -> Result<(), ShellError> {
         let playhead = self.playhead;
+        // Refused before the clipboard is lent out, so it is never lost.
+        self.session_draft()?;
         let copies = std::mem::take(&mut self.clipboard);
-        let mut next_id = self.next_id;
-        let mut fresh = |prefix: &str| {
-            next_id = next_id.saturating_add(1);
-            format!("{prefix}-{next_id}")
-        };
+        let mut ids = FreshIds::new(self.session_draft()?, self.next_id);
+        let mut fresh = |prefix: &str| ids.make(prefix);
         let planned = paste_requests(self.session_draft()?, &copies, playhead, &mut fresh)
             .map_err(clipboard_error);
+        let next_id = ids.next;
         self.next_id = next_id;
         self.clipboard = copies;
         let (requests, ids) = planned?;
@@ -8439,6 +8431,37 @@ pub const EMPTY_SPAN: Micros = Micros(10_000_000);
 
 /// [`EMPTY_SPAN`] across a third of `lane_width`, no closer than the
 /// finest ruler step.
+/// New ids `prefix-N` for several requests planned at once, each past
+/// every `prefix-N` the draft already holds. The counter starts at zero
+/// each launch, so a reopened project would otherwise be handed ids it
+/// already uses and the edit would be refused as a duplicate.
+struct FreshIds<'a> {
+    draft: &'a Draft,
+    /// The last number handed out.
+    next: u64,
+    /// The prefixes the draft has been searched for, once each.
+    looked: Vec<String>,
+}
+
+impl<'a> FreshIds<'a> {
+    fn new(draft: &'a Draft, next: u64) -> Self {
+        Self {
+            draft,
+            next,
+            looked: Vec::new(),
+        }
+    }
+
+    fn make(&mut self, prefix: &str) -> String {
+        if !self.looked.iter().any(|looked| looked == prefix) {
+            self.next = self.next.max(highest_suffix(self.draft, prefix));
+            self.looked.push(prefix.to_owned());
+        }
+        self.next = self.next.saturating_add(1);
+        format!("{prefix}-{}", self.next)
+    }
+}
+
 /// The largest `N` of any string `prefix-N` in `draft`, or zero.
 fn highest_suffix(draft: &Draft, prefix: &str) -> u64 {
     fn walk(value: &serde_json::Value, prefix: &str, best: &mut u64) {
@@ -19485,6 +19508,52 @@ mod tests {
         );
     }
 
+    /// A project saved by an earlier run already holds `seg-1` and
+    /// `seg-2`; this run's counter starts at zero again.
+    #[test]
+    fn a_paste_in_a_reopened_project_takes_ids_the_project_does_not_use() {
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        draft.config.maintrack_adsorb = false;
+        draft.materials.videos.push(MaterialVideo::new("color"));
+        for (id, start) in [("seg-1", 0), ("seg-2", 2_000_000)] {
+            draft.tracks[0].segments.push(Segment::new(
+                id,
+                "color",
+                TimeRange::new(start, 1_000_000),
+            ));
+        }
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.select(Some(SegmentId::new("seg-1")));
+        desktop.copy_selected().unwrap();
+        desktop.seek(Micros(5_000_000));
+        desktop.paste().unwrap();
+        let ids = |desktop: &Shell| -> Vec<String> {
+            desktop
+                .draft()
+                .unwrap()
+                .tracks
+                .iter()
+                .flat_map(|track| &track.segments)
+                .map(|segment| segment.id.as_str().to_owned())
+                .collect()
+        };
+        assert_eq!(ids(&desktop), ["seg-1", "seg-2", "seg-3"]);
+
+        // Onto a clip, the new row's id is the project's to take as well.
+        desktop.seek(Micros(2_000_000));
+        desktop.paste().unwrap();
+        let draft = desktop.draft().unwrap();
+        assert_eq!(draft.tracks.len(), 2, "{}", desktop.notice());
+        assert_eq!(draft.tracks[0].segments[0].target.start, Micros(2_000_000));
+        let mut all = ids(&desktop);
+        all.sort();
+        all.dedup();
+        assert_eq!(all.len(), 4, "every clip has its own id");
+    }
+
     #[test]
     fn paste_lands_at_the_playhead_and_keeps_the_gap() {
         let temp = Temp::new();
@@ -19503,14 +19572,29 @@ mod tests {
         desktop.select_box(ids, false);
         desktop.copy_selected().unwrap();
         assert!(desktop.has_clipboard());
-        assert_eq!(
-            desktop.paste().unwrap_err().to_string(),
-            "the clips overlap"
-        );
-        assert_eq!(desktop.draft().unwrap().tracks[0].segments.len(), 2);
+        // Pasted where the copied clips still are, the copies go on a new
+        // row above at the playhead, and the row under them is as it was.
+        let under = desktop.draft().unwrap().tracks[0].clone();
+        desktop.paste().unwrap();
+        let draft = desktop.draft().unwrap();
+        assert_eq!(draft.tracks.len(), 2, "{}", desktop.notice());
+        assert_eq!(draft.tracks[1], under);
+        let targets = |track: &Track| -> Vec<TimeRange> {
+            track
+                .segments
+                .iter()
+                .map(|segment| segment.target.clone())
+                .collect()
+        };
+        assert_eq!(targets(&draft.tracks[0]), targets(&under));
+        assert_eq!(draft.tracks[0].kind, under.kind);
+        assert_eq!(desktop.selection().len(), 2);
+        desktop.undo().unwrap();
+        assert_eq!(desktop.draft().unwrap().tracks, vec![under]);
         desktop.seek(Micros(4_000_000));
         desktop.paste().unwrap();
         let draft = desktop.draft().unwrap();
+        assert_eq!(draft.tracks.len(), 1, "a clear row takes the copies");
         assert_eq!(draft.tracks[0].segments.len(), 4);
         assert_eq!(
             draft.tracks[0].segments[2].target,

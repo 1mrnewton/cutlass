@@ -167,7 +167,7 @@ impl Column {
 }
 
 /// The end of the row `r0..r1` of the tile in `col`, read from the frame
-/// state `fs` its parser wrote.
+/// state `fs` its parser wrote, in the message `msg`.
 fn row_end(
     seq: &SequenceHeader,
     hdr: &FrameHeader,
@@ -175,10 +175,9 @@ fn row_end(
     col: &Column,
     r0: usize,
     r1: usize,
-    rows: &Mutex<RowPools>,
+    mut msg: RowMsg,
     saves: bool,
 ) -> RowEnd {
-    let mut msg = lock(rows).msgs.pop().unwrap_or_default();
     msg.fill_meta(seq, hdr, fs, r0, r1, col.cols.clone(), col.last);
     let mut motion = Vec::new();
     let mut seg = Rect::default();
@@ -208,17 +207,60 @@ fn row_end(
 /// can use the threads.
 const PARSE_THREADS: usize = 4;
 
-/// Spare logs a tile parser takes from the pool at once.
-const LOG_BATCH: usize = 8;
+/// Spare logs and row messages a tile parser takes from the pool at once:
+/// the pool is shared by every frame being decoded, and a lock for each
+/// log made the parsers wait on each other.
+const POOL_BATCH: usize = 32;
+
+/// The logs and messages a tile parser holds: spares from the pool, and
+/// the logs of the superblock row it is parsing.
+#[derive(Default)]
+struct Stash {
+    logs: Vec<ReconLog>,
+    msgs: Vec<RowMsg>,
+    pending: Vec<ReconLog>,
+}
+
+impl Stash {
+    fn log(&mut self, pool: &Mutex<RowPools>) -> ReconLog {
+        if self.logs.is_empty() {
+            let mut pool = lock(pool);
+            let keep = pool.logs.len().saturating_sub(POOL_BATCH);
+            self.logs.extend(pool.logs.drain(keep..));
+        }
+        self.logs.pop().unwrap_or_else(|| {
+            prof::count(prof::NEW_LOG);
+            ReconLog::default()
+        })
+    }
+
+    fn msg(&mut self, pool: &Mutex<RowPools>) -> RowMsg {
+        if self.msgs.is_empty() {
+            let mut pool = lock(pool);
+            let keep = pool.msgs.len().saturating_sub(POOL_BATCH);
+            self.msgs.extend(pool.msgs.drain(keep..));
+        }
+        self.msgs.pop().unwrap_or_default()
+    }
+
+    /// Gives the unused spares back.
+    fn give_back(&mut self, pool: &Mutex<RowPools>) {
+        let mut pool = lock(pool);
+        pool.logs.append(&mut self.logs);
+        pool.msgs.append(&mut self.msgs);
+    }
+}
 
 /// Parses the tiles of a frame on up to `threads` threads, handing each
 /// superblock row to `tx` once all its tiles have parsed it (see
 /// [`Sink`]), and to `out` the CDFs of the context tile as soon as that
 /// tile ends and the frame's saved motion row by row.
 ///
-/// This thread parses into `fs`, the others into frame states from the
-/// pool of `spares`. Returns the error of the first tile that fails, else
-/// the CDFs of the context tile.
+/// The next frame's parse waits for the context tile, so this thread
+/// starts on it at once, into `fs`, while another starts the rest. The
+/// other threads parse into frame states from the pool of `spares`.
+/// Returns the error of the first tile that fails, else the CDFs of the
+/// context tile.
 pub(super) fn parse_tiles<P: PicturePixel>(
     seq: &SequenceHeader,
     hdr: &FrameHeader,
@@ -238,33 +280,23 @@ pub(super) fn parse_tiles<P: PicturePixel>(
     let field_len = field.map_or(0, |f| f.w8 * f.h8);
     fs.motion_field.clear();
     fs.motion_field.resize(field_len, MfEntry::default());
-    // A frame state for every thread but this one.
+    let prev_ids = fs.prev_segment_ids.clone();
+    let (mi_cols, mi_rows) = (fs.mi_cols, fs.mi_rows);
+    // A pooled frame state for every thread but this one, each made
+    // ready by its thread.
     let helpers = threads
         .min(tiles.len())
         .min(PARSE_THREADS)
         .saturating_sub(1);
-    let mut states: Vec<FrameState> = {
-        let mut pooled = Vec::new();
-        {
-            let mut sp = lock(spares);
-            while pooled.len() < helpers {
+    let pooled: Vec<Option<FrameState>> = {
+        let mut sp = lock(spares);
+        (0..helpers)
+            .map(|_| {
                 let i = sp
                     .states
                     .iter()
-                    .position(|f| f.mi_cols == fs.mi_cols && f.mi_rows == fs.mi_rows);
-                pooled.push(i.map(|i| sp.states.swap_remove(i)));
-            }
-        }
-        pooled
-            .into_iter()
-            .map(|old| {
-                if old.is_none() {
-                    prof::count(prof::NEW_STATE);
-                }
-                let mut s = FrameState::reuse(old, seq, hdr);
-                s.motion_field.resize(field_len, MfEntry::default());
-                s.prev_segment_ids.clone_from(&fs.prev_segment_ids);
-                s
+                    .position(|f| f.mi_cols == mi_cols && f.mi_rows == mi_rows);
+                i.map(|i| sp.states.swap_remove(i))
             })
             .collect()
     };
@@ -284,9 +316,15 @@ pub(super) fn parse_tiles<P: PicturePixel>(
         ],
         seg_stride: fs.mi_stride,
     });
-    // Tiles are taken in order, so when tile `i` fails every tile before it
-    // has been taken, and the tiles after it need not be parsed.
+    // The tiles in the order they are taken: the context tile first.
+    let mut order: Vec<usize> = (0..tiles.len()).collect();
+    if let Some(at) = tiles.iter().position(|(t, _)| *t == ctx) {
+        order[..=at].rotate_right(1);
+    }
+    let order = &order;
     let next = AtomicUsize::new(0);
+    // The first tile to fail, by its place in the frame: the tiles after
+    // it need not be parsed, the ones before it may fail before it.
     let failed = AtomicUsize::new(usize::MAX);
     let one_column = hdr.tile_info.cols <= 1;
     let work = |fs: &mut FrameState| {
@@ -301,16 +339,15 @@ pub(super) fn parse_tiles<P: PicturePixel>(
             shared: f.clone(),
             have: 0,
         });
-        // Logs to record into, and the logs of the row being parsed: the
-        // pool and the sink are locked once in a while, not per log.
-        let mut spares: Vec<ReconLog> = Vec::new();
-        let mut pending: Vec<ReconLog> = Vec::new();
+        let mut stash = Stash::default();
         let mut done = Vec::new();
         loop {
-            let i = next.fetch_add(1, Ordering::Relaxed);
-            if i >= tiles.len() || i > failed.load(Ordering::Relaxed) {
-                lock(rows).logs.append(&mut spares);
+            let Some(&i) = order.get(next.fetch_add(1, Ordering::Relaxed)) else {
+                stash.give_back(rows);
                 return done;
+            };
+            if i > failed.load(Ordering::Relaxed) {
+                continue;
             }
             let (tile_num, data) = &tiles[i];
             let col = Column::of(hdr, *tile_num);
@@ -333,30 +370,25 @@ pub(super) fn parse_tiles<P: PicturePixel>(
                       r0: usize,
                       r1: usize,
                       done: bool| {
-                    if spares.is_empty() {
-                        let mut pool = lock(rows);
-                        let keep = pool.logs.len().saturating_sub(LOG_BATCH);
-                        spares.extend(pool.logs.drain(keep..));
+                    // With other tile columns the row waits for them
+                    // anyway: the tile keeps one log for the row.
+                    if !done && !one_column {
+                        return;
                     }
-                    let mut spare = spares.pop().unwrap_or_else(|| {
-                        prof::count(prof::NEW_LOG);
-                        ReconLog::default()
-                    });
+                    let mut spare = stash.log(rows);
                     // Room for a typical chunk, so that logs rarely grow
                     // while the parser fills them.
                     spare.blocks.reserve(LOG_RESERVE_BLOCKS);
                     spare.ops.reserve(4 * LOG_RESERVE_BLOCKS);
                     spare.coefs.reserve(32 * LOG_RESERVE_BLOCKS);
-                    pending
+                    stash
+                        .pending
                         .push(log.map_or_else(ReconLog::default, |l| std::mem::replace(l, spare)));
-                    // With other tile columns the row waits for them
-                    // anyway: its logs go over together at its end.
-                    if !done && !one_column {
-                        return;
-                    }
-                    let end =
-                        done.then(|| row_end(seq, hdr, fs, &col, r0, r1, rows, out.data.is_some()));
-                    lock(&sink).push(col.index, r0, &mut pending, end);
+                    let end = done.then(|| {
+                        let msg = stash.msg(rows);
+                        row_end(seq, hdr, fs, &col, r0, r1, msg, out.data.is_some())
+                    });
+                    lock(&sink).push(col.index, r0, &mut stash.pending, end);
                 },
             );
             match &res {
@@ -370,18 +402,40 @@ pub(super) fn parse_tiles<P: PicturePixel>(
             done.push((i, res));
         }
     };
+    // A helper readies its frame state, parses, and gives the state back.
+    let help = |old: Option<FrameState>| {
+        if old.is_none() {
+            prof::count(prof::NEW_STATE);
+        }
+        let mut st = FrameState::reuse(old, seq, hdr);
+        st.motion_field.resize(field_len, MfEntry::default());
+        st.prev_segment_ids.clone_from(&prev_ids);
+        let done = work(&mut st);
+        lock(spares).states.push(st);
+        done
+    };
     let (mine, theirs) = std::thread::scope(|s| {
-        let work = &work;
-        let handles: Vec<_> = states
-            .iter_mut()
-            .map(|st| s.spawn(move || work(st)))
-            .collect();
+        let (work, help) = (&work, &help);
+        // One spawn before this thread starts on the context tile; the
+        // first helper starts the others.
+        let mut pooled = pooled.into_iter();
+        let first = pooled.next().map(|old| {
+            s.spawn(move || {
+                let others: Vec<_> = pooled.map(|old| s.spawn(move || help(old))).collect();
+                let mut all = vec![Some(help(old))];
+                all.extend(others.into_iter().map(|h| h.join().ok()));
+                all
+            })
+        });
         let mine = work(fs);
-        let theirs: Vec<_> = handles.into_iter().map(|h| h.join().ok()).collect();
+        let theirs = match first.map(|h| h.join()) {
+            None => Vec::new(),
+            Some(Ok(all)) => all,
+            Some(Err(_)) => vec![None],
+        };
         (mine, theirs)
     });
     let seg = std::mem::take(&mut lock(&sink).seg);
-    lock(spares).states.append(&mut states);
     let mut first_err: Option<(usize, CodecError)> = None;
     let mut saved = None;
     for done in std::iter::once(Some(mine)).chain(theirs) {

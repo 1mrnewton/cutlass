@@ -3136,6 +3136,7 @@ impl<P: PicturePixel> FilterStage<P> {
             overlap: band_overlap(seq.use_128x128_superblock),
         };
         let mut block = Block::default();
+        let mut back: (Vec<ReconLog>, Vec<RowMsg>) = Default::default();
         for (mut log, m, samples) in rx {
             log.store_mode_info(&mut fs, &mut block);
             log.clear();
@@ -3156,9 +3157,20 @@ impl<P: PicturePixel> FilterStage<P> {
                         prof::add(prof::FILTER, tf);
                     }
                 }
-                lock(&rows).msgs.push(m);
+                back.1.push(m);
             }
-            lock(&rows).logs.push(log);
+            back.0.push(log);
+            // The pool is shared by every frame: give back in batches.
+            if back.0.len() >= 32 {
+                let mut pool = lock(&rows);
+                pool.logs.append(&mut back.0);
+                pool.msgs.append(&mut back.1);
+            }
+        }
+        {
+            let mut pool = lock(&rows);
+            pool.logs.append(&mut back.0);
+            pool.msgs.append(&mut back.1);
         }
         let filter_rows = (filt.cdef, filt.lr_bounds);
         lock(&spares).filters.push(filter_rows);

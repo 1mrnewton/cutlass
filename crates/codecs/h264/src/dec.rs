@@ -4843,7 +4843,8 @@ fn add_scaled<S: Sample>(
     coeffs: &[i32],
     quant: (i32, bool),
     weight: &[u8],
-    n: usize,
+    // The block's size, and whether its coefficients are in field order.
+    (n, field): (usize, bool),
 ) {
     let (x, y, step) = origin;
     let (qp, bypass) = quant;
@@ -4868,15 +4869,16 @@ fn add_scaled<S: Sample>(
         return;
     }
     if n == 4 {
+        let scan = set::scan4(field);
         let mut block = [0i32; 16];
         if bypass {
-            for (i, &pos) in ZIGZAG4.iter().enumerate() {
+            for (i, &pos) in scan.iter().enumerate() {
                 block[pos] = coeffs.get(i).copied().unwrap_or(0);
             }
         } else {
             // A zero level scales to zero, and most are zero.
             for i in set_places(set) {
-                let (Some(&pos), Some(&level)) = (ZIGZAG4.get(i), coeffs.get(i)) else {
+                let (Some(&pos), Some(&level)) = (scan.get(i), coeffs.get(i)) else {
                     break;
                 };
                 let (ry, rx) = (pos / 4, pos % 4);
@@ -4888,14 +4890,15 @@ fn add_scaled<S: Sample>(
         }
         recon::add_block(plane, stride, x, y, &block, 4, step);
     } else {
+        let scan = set::scan8(field);
         let mut block = [0i32; 64];
         if bypass {
-            for (i, &pos) in ZIGZAG8.iter().enumerate() {
+            for (i, &pos) in scan.iter().enumerate() {
                 block[pos] = coeffs.get(i).copied().unwrap_or(0);
             }
         } else {
             for i in set_places(set) {
-                let (Some(&pos), Some(&level)) = (ZIGZAG8.get(i), coeffs.get(i)) else {
+                let (Some(&pos), Some(&level)) = (scan.get(i), coeffs.get(i)) else {
                     break;
                 };
                 let (ry, rx) = (pos / 8, pos % 8);

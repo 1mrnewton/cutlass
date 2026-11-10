@@ -73,22 +73,68 @@ const SEP: Entry = Entry::Separator;
 
 const COPY: Entry = done("copy", "Copy", "⌘C");
 const CUT: Entry = done("cut", "Cut", "⌘X");
+const COPY_ATTRIBUTES: Entry = todo("copy-attributes", "Copy attributes", "⇧⌘C");
+const PASTE_ATTRIBUTES: Entry = todo("paste-attributes", "Paste attributes", "⇧⌘V");
 const DELETE: Entry = done("delete", "Delete", "⌫");
-const DEACTIVATE: Entry = done("deactivate", "Deactivate", "");
-const REPLACE: Entry = todo("replace", "Replace", "");
+const DEACTIVATE: Entry = done("deactivate", "Deactivate clip", "V");
 const REPLACE_SOUND: Entry = done("replace", "Replace", "");
+const SYNC: Entry = done("sync", "Sync video and audio", "");
+const COMPOUND: Entry = done("compound", "Create compound clip (subproject)", "⌥G");
+const MULTICAM: Entry = done("multicam", "Create multi-camera clip", "");
+const SAVE_PRESET: Entry = todo("save-preset", "Save preset", "");
+const GROUP: Entry = done("group", "Group", "");
+const UNGROUP: Entry = done("ungroup", "Ungroup", "");
+const VARIABLE_SPEED: Entry = done("variable-speed", "Show variable speed animation", "⌥K");
+
+const RANGE: Entry = sub(
+    "range",
+    "Range",
+    &[
+        done("range-in", "Set in", ""),
+        done("range-out", "Set out", ""),
+    ],
+);
+
+/// The reference editor's stems, none of which this build separates yet.
+const SEPARATE_AUDIO: Entry = sub(
+    "separate-audio",
+    "Separate audio",
+    &[
+        todo("separate-vocals", "Vocals", ""),
+        todo("separate-instruments", "Instruments", ""),
+        todo("separate-drums", "Drums", ""),
+        todo("separate-guitar", "Guitar", ""),
+        todo("separate-bass", "Bass", ""),
+        todo("separate-strings", "Strings", ""),
+        todo("separate-others", "Others", ""),
+    ],
+);
+
+/// Stack a picture clip above or below the clips it overlaps, with Free
+/// layer on in the project settings.
+const ARRANGE: Entry = sub(
+    "arrange",
+    "Arrange",
+    &[
+        done("arrange-forward", "Bring forward", ""),
+        done("arrange-backward", "Send backward", ""),
+        done("arrange-front", "Bring to front", ""),
+        done("arrange-back", "Send to back", ""),
+    ],
+);
 
 /// The video clip menu: every row of the reference editor's, in its order
 /// and by its names, with a Later badge on the ones this build does not do
-/// yet, and this build's own Open compound clip and Arrange rows. `$sound`
-/// stands for the rows that depend on whether the clip still has its sound.
+/// yet, and this build's own Arrange row. `$sound` stands for the rows
+/// that depend on whether the clip still has its sound, and `$compound`
+/// for the rows only a compound clip has.
 macro_rules! video_menu {
-    ($($sound:expr),* $(,)?) => {
+    (sound: [$($sound:expr),* $(,)?], compound: [$($compound:expr),* $(,)?]) => {
         &[
             COPY,
             CUT,
-            todo("copy-attributes", "Copy attributes", "⇧⌘C"),
-            todo("paste-attributes", "Paste attributes", "⇧⌘V"),
+            COPY_ATTRIBUTES,
+            PASTE_ATTRIBUTES,
             DELETE,
             SEP,
             sub(
@@ -108,17 +154,17 @@ macro_rules! video_menu {
             done("split-scenes", "Split scenes", ""),
             done("transcript", "Transcript", ""),
             $($sound,)*
-            done("sync", "Sync video and audio", ""),
+            SYNC,
             SEP,
-            done("compound", "Create compound clip (subproject)", "⌥G"),
-            done("open-compound", "Open compound clip", ""),
-            done("multicam", "Create multi-camera clip", ""),
-            todo("save-preset", "Save preset", ""),
-            done("group", "Group", ""),
-            done("ungroup", "Ungroup", ""),
+            COMPOUND,
+            $($compound,)*
+            MULTICAM,
+            SAVE_PRESET,
+            GROUP,
+            UNGROUP,
             SEP,
             done("export", "Export selected clips", ""),
-            done("deactivate", "Deactivate clip", "V"),
+            DEACTIVATE,
             done("trim", "Trim clip", ""),
             done("replace", "Replace clip", ""),
             todo("restore-lut", "Restore LUT", ""),
@@ -127,15 +173,8 @@ macro_rules! video_menu {
             ARRANGE,
             SEP,
             done("edit-effects", "Edit effects", ""),
-            done("variable-speed", "Show variable speed animation", "⌥K"),
-            sub(
-                "range",
-                "Range",
-                &[
-                    done("range-in", "Set in", ""),
-                    done("range-out", "Set out", ""),
-                ],
-            ),
+            VARIABLE_SPEED,
+            RANGE,
             sub(
                 "render",
                 "Render",
@@ -149,36 +188,49 @@ macro_rules! video_menu {
 }
 
 /// The menu of a video clip that has its own sound.
-const VIDEO: &[Entry] = video_menu![
-    sub(
-        "separate-audio",
-        "Separate audio",
-        &[
-            todo("separate-vocals", "Vocals", ""),
-            todo("separate-instruments", "Instruments", ""),
-            todo("separate-drums", "Drums", ""),
-            todo("separate-guitar", "Guitar", ""),
-            todo("separate-bass", "Bass", ""),
-            todo("separate-strings", "Strings", ""),
-            todo("separate-others", "Others", ""),
-        ],
-    ),
-    done("extract-audio", "Extract audio", "⇧⌘S"),
-];
+const VIDEO: &[Entry] = video_menu!(
+    sound: [SEPARATE_AUDIO, done("extract-audio", "Extract audio", "⇧⌘S")],
+    compound: []
+);
 
 /// The menu of a video clip whose sound was extracted: there is none to
 /// separate, and the extract row gives the sound back.
-const VIDEO_SILENT: &[Entry] = video_menu![done("recover-audio", "Recover audio", "⇧⌘S")];
+const VIDEO_SILENT: &[Entry] = video_menu!(
+    sound: [done("recover-audio", "Recover audio", "⇧⌘S")],
+    compound: []
+);
 
-/// The audio clip menu: the prototype's rows in its order, with this
-/// build's Volume, Speed, Fade and Beat rows after Delete and its Replace
-/// row with the clip rows.
+/// The menu of a compound clip, which the reference editor also shows for
+/// a template: the video rows, and after Create compound clip its own Edit
+/// more and Pre-process rows and this build's Open compound clip.
+const VIDEO_COMPOUND: &[Entry] = video_menu!(
+    sound: [SEPARATE_AUDIO, done("extract-audio", "Extract audio", "⇧⌘S")],
+    compound: [
+        done("open-compound", "Open compound clip", ""),
+        todo("edit-more", "Edit more", ""),
+        todo("preprocess-compound", "Pre-process compound clip (subproject)", ""),
+    ]
+);
+
+/// A compound clip whose sound was extracted.
+const VIDEO_COMPOUND_SILENT: &[Entry] = video_menu!(
+    sound: [done("recover-audio", "Recover audio", "⇧⌘S")],
+    compound: [
+        done("open-compound", "Open compound clip", ""),
+        todo("edit-more", "Edit more", ""),
+        todo("preprocess-compound", "Pre-process compound clip (subproject)", ""),
+    ]
+);
+
+/// The audio clip menu: the reference editor's rows in its order, with
+/// this build's Volume, Speed, Fade and Beat rows after Delete and its
+/// Replace row with the clip rows.
 const AUDIO: &[Entry] = &[
     todo("generate-video", "Generate video", ""),
     COPY,
     CUT,
-    todo("copy-attributes", "Copy attributes", "⇧⌘C"),
-    todo("paste-attributes", "Paste attributes", ""),
+    COPY_ATTRIBUTES,
+    PASTE_ATTRIBUTES,
     DELETE,
     SEP,
     done("volume", "Volume", ""),
@@ -187,125 +239,89 @@ const AUDIO: &[Entry] = &[
     done("beat", "Beat", ""),
     SEP,
     done("transcript", "Transcript", ""),
-    sub(
-        "separate-audio",
-        "Separate audio",
-        &[
-            todo("separate-vocals", "Vocals", ""),
-            todo("separate-instruments", "Instruments", ""),
-            todo("separate-drums", "Drums", ""),
-            todo("separate-guitar", "Guitar", ""),
-            todo("separate-bass", "Bass", ""),
-            todo("separate-strings", "Strings", ""),
-            todo("separate-others", "Others", ""),
-        ],
-    ),
-    done("sync", "Sync video and audio", ""),
+    SEPARATE_AUDIO,
+    SYNC,
     SEP,
-    done("compound", "Create compound clip", "⌥G"),
-    done("multicam", "Create multi-camera clip", ""),
-    todo("save-preset", "Save preset", ""),
-    done("group", "Group", ""),
-    done("ungroup", "Ungroup", ""),
+    COMPOUND,
+    MULTICAM,
+    SAVE_PRESET,
+    GROUP,
+    UNGROUP,
     SEP,
-    done("deactivate", "Deactivate clip", "V"),
+    DEACTIVATE,
     REPLACE_SOUND,
     done("link-media", "Link to media", ""),
     done("open-file", "Open file location", ""),
     SEP,
-    sub(
-        "range",
-        "Range",
-        &[
-            done("range-in", "Set in", ""),
-            done("range-out", "Set out", ""),
-        ],
-    ),
+    RANGE,
 ];
 
-/// Stack a picture clip above or below the clips it overlaps, with Free
-/// layer on in the project settings.
-const ARRANGE: Entry = sub(
-    "arrange",
-    "Arrange",
-    &[
-        done("arrange-forward", "Bring forward", ""),
-        done("arrange-backward", "Send backward", ""),
-        done("arrange-front", "Bring to front", ""),
-        done("arrange-back", "Send to back", ""),
+/// The menu the reference editor gives a clip that is not media: a title,
+/// a sticker, an effect, a filter or an adjustment. `$own` are this
+/// build's rows for the kind, which open its settings, and `$turn` the
+/// rows the reference puts just above Deactivate clip.
+macro_rules! lane_menu {
+    (own: [$($own:expr),* $(,)?], turn: [$($turn:expr),* $(,)?]) => {
+        &[
+            COPY,
+            CUT,
+            COPY_ATTRIBUTES,
+            PASTE_ATTRIBUTES,
+            DELETE,
+            SEP,
+            $($own,)*
+            SYNC,
+            SEP,
+            COMPOUND,
+            MULTICAM,
+            SAVE_PRESET,
+            GROUP,
+            UNGROUP,
+            SEP,
+            $($turn,)*
+            DEACTIVATE,
+            SEP,
+            VARIABLE_SPEED,
+            RANGE,
+        ]
+    };
+}
+
+const TEXT: &[Entry] = lane_menu!(
+    own: [
+        done("edit-text", "Edit text", ""),
+        done("style", "Style", ""),
+        ARRANGE,
     ],
+    turn: []
 );
 
-const TEXT: &[Entry] = &[
-    COPY,
-    CUT,
-    DELETE,
-    SEP,
-    done("edit-text", "Edit text", ""),
-    done("style", "Style", ""),
-    ARRANGE,
-    SEP,
-    DEACTIVATE,
-    REPLACE,
-];
+const STICKER: &[Entry] = lane_menu!(
+    own: [ARRANGE],
+    turn: [done("flip", "Mirror", "")]
+);
 
-const STICKER: &[Entry] = &[
-    COPY,
-    CUT,
-    DELETE,
-    SEP,
-    done("flip", "Flip", ""),
-    ARRANGE,
-    SEP,
-    DEACTIVATE,
-    REPLACE,
-];
+const EFFECT: &[Entry] = lane_menu!(
+    own: [done("edit-effect", "Edit effect", "")],
+    turn: []
+);
 
-const EFFECT: &[Entry] = &[
-    COPY,
-    CUT,
-    DELETE,
-    SEP,
-    done("edit-effect", "Edit effect", ""),
-    SEP,
-    DEACTIVATE,
-    REPLACE,
-];
+const FILTER: &[Entry] = lane_menu!(
+    own: [done("edit-filter", "Edit filter", "")],
+    turn: []
+);
 
-const FILTER: &[Entry] = &[
-    COPY,
-    CUT,
-    DELETE,
-    SEP,
-    done("edit-filter", "Edit filter", ""),
-    SEP,
-    DEACTIVATE,
-    REPLACE,
-];
+const ADJUST: &[Entry] = lane_menu!(
+    own: [done("edit-adjust", "Edit adjustment", "")],
+    turn: []
+);
 
-const ADJUST: &[Entry] = &[
-    COPY,
-    CUT,
-    DELETE,
-    SEP,
-    done("edit-adjust", "Edit adjustment", ""),
-    SEP,
-    DEACTIVATE,
-    REPLACE,
-];
+const COMPOSITION: &[Entry] = lane_menu!(
+    own: [done("render-preview", "Render", "")],
+    turn: []
+);
 
-const COMPOSITION: &[Entry] = &[
-    COPY,
-    CUT,
-    DELETE,
-    SEP,
-    done("render-preview", "Render", ""),
-    SEP,
-    DEACTIVATE,
-    REPLACE,
-];
-
-const OTHER: &[Entry] = &[COPY, CUT, DELETE, SEP, DEACTIVATE, REPLACE];
+const OTHER: &[Entry] = lane_menu!(own: [], turn: []);
 
 /// The menu for two or more selected clips: only rows that act on every
 /// one of them. Range spans from the first clip's start to the last one's
@@ -315,33 +331,29 @@ pub const MULTI: &[Entry] = &[
     CUT,
     DELETE,
     SEP,
-    done("compound", "Create compound clip", "⌥G"),
-    todo("paste-attributes", "Paste attributes", ""),
+    COMPOUND,
+    PASTE_ATTRIBUTES,
     SEP,
     done("deactivate", "Deactivate clips", "V"),
     done("export", "Export selected clips", ""),
     SEP,
-    sub(
-        "range",
-        "Range",
-        &[
-            done("range-in", "Set in", ""),
-            done("range-out", "Set out", ""),
-        ],
-    ),
+    RANGE,
 ];
 
-/// The menu for a clip on a track of `kind`.
+/// [`clip_entries`] for the clip as it is: a video clip whose sound was
+/// extracted (`silent`), and a compound clip, each have rows of their own.
 #[must_use]
-/// [`clip_entries`] for a clip that is `silent`: a video clip whose sound
-/// was extracted has its own menu.
-pub fn clip_entries_for(kind: &TrackType, silent: bool) -> &'static [Entry] {
-    match kind {
-        TrackType::Video if silent => VIDEO_SILENT,
-        kind => clip_entries(kind),
+pub fn clip_entries_for(kind: &TrackType, silent: bool, compound: bool) -> &'static [Entry] {
+    match (kind, silent, compound) {
+        (TrackType::Video, false, true) => VIDEO_COMPOUND,
+        (TrackType::Video, true, true) => VIDEO_COMPOUND_SILENT,
+        (TrackType::Video, true, false) => VIDEO_SILENT,
+        (kind, _, _) => clip_entries(kind),
     }
 }
 
+/// The menu for a clip on a track of `kind`.
+#[must_use]
 pub fn clip_entries(kind: &TrackType) -> &'static [Entry] {
     match kind {
         TrackType::Video => VIDEO,
@@ -1040,7 +1052,6 @@ mod tests {
                 "extract-audio",
                 "sync",
                 "compound",
-                "open-compound",
                 "multicam",
                 "save-preset",
                 "group",
@@ -1152,10 +1163,146 @@ mod tests {
         }
     }
 
+    /// The rows of `menu` by label, a submenu's children left out.
+    fn labels(menu: &[Entry]) -> Vec<&'static str> {
+        menu.iter()
+            .filter_map(|entry| match entry {
+                Entry::Item(item) => Some(item.label),
+                Entry::Separator => None,
+            })
+            .collect()
+    }
+
+    /// `rows` appear in `menu` in that order, whatever else sits between.
+    fn in_order(menu: &[Entry], rows: &[&str]) -> bool {
+        let mut shown = labels(menu).into_iter();
+        rows.iter().all(|row| shown.any(|label| label == *row))
+    }
+
+    #[test]
+    fn every_clip_menu_has_the_reference_editors_rows_in_its_order() {
+        // A title, an effect, a filter and an adjustment share one list.
+        let plain = [
+            "Copy",
+            "Cut",
+            "Copy attributes",
+            "Paste attributes",
+            "Delete",
+            "Sync video and audio",
+            "Create compound clip (subproject)",
+            "Create multi-camera clip",
+            "Save preset",
+            "Group",
+            "Ungroup",
+            "Deactivate clip",
+            "Show variable speed animation",
+            "Range",
+        ];
+        for kind in [
+            TrackType::Text,
+            TrackType::Effect,
+            TrackType::Filter,
+            TrackType::Adjust,
+        ] {
+            assert!(in_order(clip_entries(&kind), &plain), "{kind:?}");
+        }
+        // A sticker has Mirror just above Deactivate clip.
+        let mut sticker = plain.to_vec();
+        sticker.insert(11, "Mirror");
+        assert!(in_order(STICKER, &sticker), "{:?}", labels(STICKER));
+        assert!(!labels(TEXT).contains(&"Mirror"));
+
+        assert!(in_order(
+            AUDIO,
+            &[
+                "Generate video",
+                "Copy",
+                "Cut",
+                "Copy attributes",
+                "Paste attributes",
+                "Delete",
+                "Transcript",
+                "Separate audio",
+                "Sync video and audio",
+                "Create compound clip (subproject)",
+                "Create multi-camera clip",
+                "Save preset",
+                "Group",
+                "Ungroup",
+                "Deactivate clip",
+                "Link to media",
+                "Open file location",
+                "Range",
+            ]
+        ));
+
+        // A compound clip, as a template is, has two rows more after
+        // Create compound clip, and this build's row that opens it.
+        let compound = clip_entries_for(&TrackType::Video, false, true);
+        assert!(in_order(
+            compound,
+            &[
+                "Create compound clip (subproject)",
+                "Edit more",
+                "Pre-process compound clip (subproject)",
+                "Create multi-camera clip",
+            ]
+        ));
+        assert!(labels(compound).contains(&"Open compound clip"));
+        assert!(!labels(VIDEO).contains(&"Open compound clip"));
+        assert!(!labels(VIDEO).contains(&"Edit more"));
+        let quiet = clip_entries_for(&TrackType::Video, true, true);
+        assert!(labels(quiet).contains(&"Recover audio") && labels(quiet).contains(&"Edit more"));
+
+        // What this build does not do yet wears the Later badge, in every
+        // menu it is in; what it does is live.
+        let menus = [
+            VIDEO,
+            VIDEO_SILENT,
+            VIDEO_COMPOUND,
+            VIDEO_COMPOUND_SILENT,
+            AUDIO,
+            TEXT,
+            STICKER,
+            EFFECT,
+            FILTER,
+            ADJUST,
+            COMPOSITION,
+            OTHER,
+            MULTI,
+        ];
+        let later = [
+            "Copy attributes",
+            "Paste attributes",
+            "Generate video",
+            "AI edit",
+            "AI extend",
+            "Separate audio",
+            "Save preset",
+            "Restore LUT",
+            "Edit more",
+            "Pre-process compound clip (subproject)",
+        ];
+        for menu in menus {
+            for entry in menu {
+                let Entry::Item(item) = entry else {
+                    continue;
+                };
+                assert_eq!(
+                    !item.built,
+                    later.contains(&item.label),
+                    "{} in {:?}",
+                    item.label,
+                    labels(menu)
+                );
+            }
+        }
+    }
+
     #[test]
     fn a_video_clip_without_its_sound_offers_to_recover_it() {
-        let with = ids(clip_entries_for(&TrackType::Video, false));
-        let without = ids(clip_entries_for(&TrackType::Video, true));
+        let with = ids(clip_entries_for(&TrackType::Video, false, false));
+        let without = ids(clip_entries_for(&TrackType::Video, true, false));
         assert_eq!(with, ids(VIDEO));
         assert!(with.contains(&"extract-audio") && with.contains(&"separate-audio"));
         assert!(!with.contains(&"recover-audio"));
@@ -1175,7 +1322,7 @@ mod tests {
         assert_eq!(without, expected);
         // Only a video clip has the other menu.
         assert_eq!(
-            ids(clip_entries_for(&TrackType::Audio, true)),
+            ids(clip_entries_for(&TrackType::Audio, true, true)),
             ids(clip_entries(&TrackType::Audio))
         );
     }

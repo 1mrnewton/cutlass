@@ -6117,7 +6117,11 @@ fn paint_clip_menu(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
     let entries = if shell.selection().len() > 1 {
         crate::menu::MULTI
     } else {
-        crate::menu::clip_entries_for(&kind, shell.recover_audio_enabled())
+        crate::menu::clip_entries_for(
+            &kind,
+            shell.recover_audio_enabled(),
+            shell.compound_selected(),
+        )
     };
     let enabled = |id: &str| match id {
         "edit-freeze" => shell.freeze_enabled(),
@@ -6131,6 +6135,8 @@ fn paint_clip_menu(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
         "flip" => shell.mirror_enabled(),
         "open-file" => shell.selected_has_file(),
         "open-compound" | "ungroup" => shell.compound_selected(),
+        // Only a video clip plays on a speed curve.
+        "variable-speed" => kind == cutlass_model::TrackType::Video,
         id if crate::menu::CLIP_OFF.contains(&id) => false,
         _ => true,
     };

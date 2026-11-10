@@ -65,7 +65,7 @@ pub use caption_templates::{
 pub use caption_words::{LINE_BREAK, breaks_before, join_words, retype_word, toggle_line_break};
 pub use catalog::{catalog_entries, catalog_search, is_bundled};
 pub use clip_rules::{can_turn, magnet_request};
-pub use clipboard::{ClipboardMiss, CopiedClip, copy_clips, paste_requests};
+pub use clipboard::{ClipboardMiss, CopiedClip, copy_clips, paste_requests, rehome};
 pub use controls::{MAX_VOLUME, SPEED_MARKS, speed_at, speed_position, volume_at, volume_position};
 pub use effect_shelf::{
     ADJUSTMENT_CARD, EFFECT_CARD_PREFIX, EFFECT_LENGTH, EffectCard, EffectPlace,

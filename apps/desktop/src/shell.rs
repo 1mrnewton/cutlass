@@ -6861,6 +6861,13 @@ impl Shell {
         self.clipboard = copies;
         let (requests, ids) = planned?;
         self.apply_requests(&requests)?;
+        // A cut clip whose lane went with it calls the lane it landed on
+        // its own, so the next paste goes there too.
+        let mut copies = std::mem::take(&mut self.clipboard);
+        if let Some(draft) = self.draft() {
+            cutlass_editor::rehome(&mut copies, &requests, draft);
+        }
+        self.clipboard = copies;
         self.selection = ids;
         self.clip_menu = None;
         Ok(())
@@ -8523,7 +8530,6 @@ fn clipboard_error(miss: ClipboardMiss) -> ShellError {
     match miss {
         ClipboardMiss::Empty => ShellError::Unavailable("nothing to paste".to_owned()),
         ClipboardMiss::Locked => ShellError::Locked,
-        ClipboardMiss::LaneGone => ShellError::Unavailable("the lane is gone".to_owned()),
     }
 }
 
@@ -19807,6 +19813,52 @@ mod tests {
         all.sort();
         all.dedup();
         assert_eq!(all.len(), 4, "every clip has its own id");
+    }
+
+    #[test]
+    fn a_clip_cut_from_a_lane_it_was_alone_on_pastes_back_onto_one() {
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        draft.config.maintrack_adsorb = false;
+        draft.materials.videos.push(MaterialVideo::new("color"));
+        draft.tracks[0]
+            .segments
+            .push(Segment::new("under", "color", TimeRange::new(0, 4_000_000)));
+        let mut overlay = Track::main("overlay");
+        overlay.flag = cutlass_model::TrackFlag::SubVideo;
+        overlay
+            .segments
+            .push(Segment::new("alone", "color", TimeRange::new(0, 1_000_000)));
+        draft.tracks.insert(0, overlay);
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.select(Some(SegmentId::new("alone")));
+        desktop.cut_selected().unwrap();
+        // The lane held only that clip, so it went with it.
+        assert_eq!(desktop.draft().unwrap().tracks.len(), 1);
+
+        desktop.seek(Micros(2_000_000));
+        desktop.paste().unwrap();
+        let draft = desktop.draft().unwrap();
+        assert_eq!(draft.tracks.len(), 2, "{}", desktop.notice());
+        assert!(!draft.tracks[0].is_main(), "the lane is back above main");
+        assert_eq!(
+            draft.tracks[0].segments[0].target,
+            TimeRange::new(2_000_000, 1_000_000)
+        );
+        assert_eq!(draft.tracks[1].segments.len(), 1, "main is as it was");
+
+        // Pasted again where that lane is clear, it takes the same lane.
+        desktop.seek(Micros(6_000_000));
+        desktop.paste().unwrap();
+        let draft = desktop.draft().unwrap();
+        assert_eq!(draft.tracks.len(), 2);
+        assert_eq!(draft.tracks[0].segments.len(), 2);
+        // Undo takes each paste back, the lane with the first.
+        desktop.undo().unwrap();
+        desktop.undo().unwrap();
+        assert_eq!(desktop.draft().unwrap().tracks.len(), 1);
     }
 
     #[test]

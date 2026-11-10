@@ -7,18 +7,27 @@
 //! the same kind above that is clear, and on a new row when none is. The
 //! new row opens just above the row the clip was copied from. Nothing on
 //! the timeline moves to make room.
+//!
+//! A row that held only the clips that were cut goes with them. Their
+//! paste opens a row of the same kind where that one stood, between the
+//! rows that were beside it.
 
 use cutlass_model::{
-    Draft, MaterialId, Micros, Segment, SegmentId, TimeMarkItem, TimeRange, TrackAttribute,
-    TrackId, beat_timeline_time, segment_beats, segment_time_mark, time_mark_items,
-    track_holds_beats, user_beats,
+    Draft, MaterialId, Micros, Segment, SegmentId, TimeMarkItem, TimeRange, Track, TrackAttribute,
+    TrackFlag, TrackId, TrackType, beat_timeline_time, segment_beats, segment_time_mark,
+    time_mark_items, track_holds_beats, user_beats,
 };
-use cutlass_session::Request;
+use cutlass_session::{Request, lane_fits, new_lane_index};
 
 /// One clip kept for paste.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CopiedClip {
     pub track_id: TrackId,
+    /// The kind of its row, and the rows just above and below it, so a
+    /// paste can open the row again where it stood once it is gone.
+    pub kind: TrackType,
+    pub above: Option<TrackId>,
+    pub below: Option<TrackId>,
     /// Its start after the earliest copied clip's start.
     pub offset: Micros,
     /// The clip without its own marker and beat materials.
@@ -36,8 +45,6 @@ pub enum ClipboardMiss {
     Empty,
     /// A clip's row is locked.
     Locked,
-    /// A copied clip's row was removed.
-    LaneGone,
 }
 
 /// Copy the selected clips in row order.
@@ -46,7 +53,12 @@ pub fn copy_clips(
     selection: &[SegmentId],
 ) -> Result<Vec<CopiedClip>, ClipboardMiss> {
     let mut copies = Vec::new();
-    for track in &draft.tracks {
+    for (index, track) in draft.tracks.iter().enumerate() {
+        let beside = |index: Option<usize>| {
+            index
+                .and_then(|index| draft.tracks.get(index))
+                .map(|track| track.id.clone())
+        };
         for segment in &track.segments {
             if !selection.contains(&segment.id) {
                 continue;
@@ -72,6 +84,9 @@ pub fn copy_clips(
                 .retain(|ref_id| !owned.contains(&ref_id.as_str()));
             copies.push(CopiedClip {
                 track_id: track.id.clone(),
+                kind: track.kind.clone(),
+                above: beside(index.checked_sub(1)),
+                below: beside(index.checked_add(1)),
                 offset: segment.target.start,
                 segment,
                 marks,
@@ -90,10 +105,38 @@ pub fn copy_clips(
     Ok(copies)
 }
 
+/// After `requests` from [`paste_requests`] have landed on `draft`: each
+/// copy whose own row is gone takes the row its paste went to as its own,
+/// with that row's neighbours. The next paste then looks to that row first
+/// instead of opening another.
+pub fn rehome(copies: &mut [CopiedClip], requests: &[Request], draft: &Draft) {
+    let landed = requests.iter().filter_map(|request| match request {
+        Request::Place { track_id, .. } => Some(track_id),
+        _ => None,
+    });
+    for (item, row) in copies.iter_mut().zip(landed) {
+        let at = |id: &TrackId| draft.tracks.iter().position(|track| &track.id == id);
+        if at(&item.track_id).is_some() {
+            continue;
+        }
+        let Some(index) = at(row) else {
+            continue;
+        };
+        let beside = |index: Option<usize>| {
+            index
+                .and_then(|index| draft.tracks.get(index))
+                .map(|track| track.id.clone())
+        };
+        item.track_id = row.clone();
+        item.above = beside(index.checked_sub(1));
+        item.below = beside(index.checked_add(1));
+    }
+}
+
 /// Whether `range` runs into a clip already on `track`, or one this paste
 /// has put there. A range that cannot be compared counts as taken.
 fn taken(
-    track: Option<&cutlass_model::Track>,
+    track: Option<&Track>,
     track_id: &TrackId,
     range: &TimeRange,
     pasted: &[(TrackId, TimeRange)],
@@ -120,13 +163,15 @@ pub fn paste_requests(
     if copies.is_empty() {
         return Err(ClipboardMiss::Empty);
     }
+    // A row that is gone is opened again further down; one that is there
+    // and locked refuses.
     for item in copies {
-        let track = draft
+        let locked = draft
             .tracks
             .iter()
             .find(|track| track.id == item.track_id)
-            .ok_or(ClipboardMiss::LaneGone)?;
-        if track.attribute.contains(TrackAttribute::LOCK) {
+            .is_some_and(|track| track.attribute.contains(TrackAttribute::LOCK));
+        if locked {
             return Err(ClipboardMiss::Locked);
         }
     }
@@ -142,7 +187,18 @@ pub fn paste_requests(
     let mut opened: Vec<(TrackId, TrackId)> = Vec::new();
     // The rows top to bottom as they will stand once this paste's new rows
     // are in, so each new row is asked for at the place it ends up.
-    let mut order: Vec<TrackId> = draft.tracks.iter().map(|track| track.id.clone()).collect();
+    // Each stands for its row by id, kind and flag, which is all a new
+    // row's place is read from.
+    let mut order: Vec<Track> = draft
+        .tracks
+        .iter()
+        .map(|track| {
+            let mut row = Track::main(track.id.clone());
+            row.kind = track.kind.clone();
+            row.flag = track.flag;
+            row
+        })
+        .collect();
     for item in copies {
         let id = SegmentId::new(fresh("seg"));
         let start = at.saturating_add(item.offset.0);
@@ -176,7 +232,7 @@ pub fn paste_requests(
                         .is_some_and(|track| !track.attribute.contains(TrackAttribute::LOCK))
                 })
         });
-        let track_id = if clear(&item.track_id, &pasted) {
+        let track_id = if own.is_some() && clear(&item.track_id, &pasted) {
             item.track_id.clone()
         } else if let Some(lane) = above.filter(|lane| clear(&lane.track_id, &pasted)) {
             lane.track_id.clone()
@@ -186,19 +242,32 @@ pub fn paste_requests(
         {
             row.clone()
         } else {
-            let kind = track_of(&item.track_id)
-                .map(|track| track.kind.clone())
-                .ok_or(ClipboardMiss::LaneGone)?;
             let row = TrackId::new(fresh("track"));
-            // Just above the row the clip was copied from.
-            let index = order
-                .iter()
-                .position(|id| id == &item.track_id)
-                .ok_or(ClipboardMiss::LaneGone)?;
-            order.insert(index, row.clone());
+            let at_row = |id: &TrackId| order.iter().position(|row| &row.id == id);
+            // Just above the row the clip was copied from; for a row that
+            // is gone, where it stood between its neighbours.
+            let wanted = at_row(&item.track_id)
+                .or_else(|| item.below.as_ref().and_then(at_row))
+                .or_else(|| {
+                    item.above
+                        .as_ref()
+                        .and_then(at_row)
+                        .map(|above| above.saturating_add(1))
+                });
+            let index = wanted
+                .filter(|index| lane_fits(&order, &item.kind, *index))
+                .unwrap_or_else(|| new_lane_index(&order, &item.kind));
+            let mut opening = Track::main(row.clone());
+            opening.kind = item.kind.clone();
+            opening.flag = if matches!(item.kind, TrackType::Video | TrackType::Mixed) {
+                TrackFlag::SubVideo
+            } else {
+                TrackFlag::None
+            };
+            order.insert(index.min(order.len()), opening);
             places.push(Request::InsertTrackAt {
                 track_id: row.clone(),
-                kind,
+                kind: item.kind.clone(),
                 index,
             });
             opened.push((item.track_id.clone(), row.clone()));
@@ -357,7 +426,7 @@ mod tests {
                     },
                     Request::InsertTrack {
                         track_id: TrackId::new("sound"),
-                        kind: cutlass_model::TrackType::Audio,
+                        kind: TrackType::Audio,
                     },
                 ],
             )
@@ -439,7 +508,7 @@ mod tests {
                     overlay("top"),
                     Request::InsertTrack {
                         track_id: TrackId::new("sound"),
-                        kind: cutlass_model::TrackType::Audio,
+                        kind: TrackType::Audio,
                     },
                     Request::Place {
                         track_id: TrackId::new("top"),
@@ -485,16 +554,146 @@ mod tests {
         let holds = |row: usize| session.draft().tracks[row].segments.len();
         assert_eq!((holds(1), holds(5)), (1, 1), "{after:?}");
         assert_eq!(session.draft().tracks[1].kind, kind);
-        assert_eq!(
-            session.draft().tracks[5].kind,
-            cutlass_model::TrackType::Audio
-        );
+        assert_eq!(session.draft().tracks[5].kind, TrackType::Audio);
         session.undo().unwrap();
         assert_eq!(order(&session), ["top", "from", "low", "main", "sound"]);
     }
 
     #[test]
-    fn nothing_selected_a_locked_row_and_a_gone_row_refuse() {
+    fn a_cut_clip_whose_row_went_with_it_pastes_onto_a_row_opened_where_it_stood() {
+        // Top to bottom: an overlay, the row that will be cut empty, main,
+        // and two sound rows, the lower of which is cut empty too.
+        let mut draft = session().draft().clone();
+        draft.materials.audios.push(cutlass_model::MaterialAudio {
+            id: MaterialId::new("tone"),
+            ..Default::default()
+        });
+        let mut session = Session::open(draft);
+        let kind = session.draft().tracks[0].kind.clone();
+        let sound = TrackType::Audio;
+        let overlay = |id: &str| Request::InsertTrackAt {
+            track_id: TrackId::new(id),
+            kind: kind.clone(),
+            index: 0,
+        };
+        let place = |row: &str, id: &str, material: &str| Request::Place {
+            track_id: TrackId::new(row),
+            segment: Box::new(Segment::new(id, material, TimeRange::new(0, 1_000_000))),
+        };
+        let revision = session.revision();
+        session
+            .apply(
+                revision,
+                &[
+                    overlay("cut"),
+                    overlay("top"),
+                    Request::InsertTrackAt {
+                        track_id: TrackId::new("low"),
+                        kind: sound.clone(),
+                        index: 3,
+                    },
+                    Request::InsertTrackAt {
+                        track_id: TrackId::new("high"),
+                        kind: sound.clone(),
+                        index: 3,
+                    },
+                    place("top", "t", "m"),
+                    place("cut", "c", "m"),
+                    place("high", "h", "tone"),
+                    place("low", "l", "tone"),
+                ],
+            )
+            .unwrap();
+        let order = |session: &Session| -> Vec<(String, usize)> {
+            session
+                .draft()
+                .tracks
+                .iter()
+                .map(|track| (track.id.as_str().to_owned(), track.segments.len()))
+                .collect()
+        };
+        let names = |session: &Session| -> Vec<String> {
+            order(session).into_iter().map(|(id, _)| id).collect()
+        };
+        assert_eq!(names(&session), ["top", "cut", "main", "high", "low"]);
+
+        // Cut: copy, then remove. Each row that held only its clip goes.
+        let copies =
+            copy_clips(session.draft(), &[SegmentId::new("c"), SegmentId::new("l")]).unwrap();
+        assert_eq!(copies[0].kind, kind);
+        assert_eq!(
+            (copies[0].above.clone(), copies[0].below.clone()),
+            (Some(TrackId::new("top")), Some(TrackId::new("main")))
+        );
+        assert_eq!(copies[1].below, None);
+        let revision = session.revision();
+        session
+            .apply(
+                revision,
+                &[
+                    Request::Remove {
+                        segment_id: SegmentId::new("c"),
+                    },
+                    Request::Remove {
+                        segment_id: SegmentId::new("l"),
+                    },
+                ],
+            )
+            .unwrap();
+        assert_eq!(names(&session), ["top", "main", "high"]);
+
+        // Pasted, each clip is back on a row of its kind where its own stood:
+        // the overlay between top and main, the sound under high.
+        let mut fresh = counter();
+        let (requests, ids) =
+            paste_requests(session.draft(), &copies, Micros(0), &mut fresh).unwrap();
+        assert_eq!(ids.len(), 2);
+        let revision = session.revision();
+        session.apply(revision, &requests).unwrap();
+        let after = order(&session);
+        assert_eq!(after.len(), 5, "{after:?}");
+        assert_eq!(
+            [&after[0].0, &after[2].0, &after[3].0],
+            ["top", "main", "high"]
+        );
+        assert_eq!((after[1].1, after[4].1), (1, 1), "{after:?}");
+        assert_eq!(session.draft().tracks[1].kind, kind);
+        assert_eq!(session.draft().tracks[4].kind, sound);
+
+        // The copies now call those rows their own, so pasted again further
+        // on they go there and no more rows open.
+        let mut copies = copies;
+        rehome(&mut copies, &requests, session.draft());
+        assert_eq!(copies[0].track_id, session.draft().tracks[1].id);
+        assert_eq!(copies[0].above, Some(TrackId::new("top")));
+        assert_eq!(copies[1].track_id, session.draft().tracks[4].id);
+        let (again, _) =
+            paste_requests(session.draft(), &copies, Micros(5_000_000), &mut fresh).unwrap();
+        assert!(
+            again
+                .iter()
+                .all(|request| matches!(request, Request::Place { .. })),
+            "{again:?}"
+        );
+
+        // With the rows that stood beside it gone as well, the new row
+        // goes where a row of its kind does by default.
+        let mut bare = session.draft().clone();
+        bare.tracks.retain(|track| track.is_main());
+        let (requests, _) = paste_requests(&bare, &copies, Micros(0), &mut fresh).unwrap();
+        let mut alone = Session::open(bare);
+        alone.apply(0, &requests).unwrap();
+        let kinds: Vec<_> = alone
+            .draft()
+            .tracks
+            .iter()
+            .map(|track| (track.kind.clone(), track.is_main()))
+            .collect();
+        assert_eq!(kinds, [(kind.clone(), false), (kind, true), (sound, false)]);
+    }
+
+    #[test]
+    fn nothing_selected_and_a_locked_row_refuse() {
         let session = session();
         assert_eq!(copy_clips(session.draft(), &[]), Err(ClipboardMiss::Empty));
         let copies = copy_clips(session.draft(), &[SegmentId::new("a")]).unwrap();
@@ -507,12 +706,6 @@ mod tests {
         assert_eq!(
             paste_requests(&locked, &copies, Micros(0), &mut counter()).map(|_| ()),
             Err(ClipboardMiss::Locked)
-        );
-        let mut gone = session.draft().clone();
-        gone.tracks[0].id = TrackId::new("other");
-        assert_eq!(
-            paste_requests(&gone, &copies, Micros(0), &mut counter()).map(|_| ()),
-            Err(ClipboardMiss::LaneGone)
         );
     }
 }

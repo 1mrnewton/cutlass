@@ -5,11 +5,14 @@
 //! pitch follow the speed is a resample. Fades are per clip. The limiter
 //! runs on the mixed buffer.
 //!
+//! [`align`] lines two recordings of the same moment up by their sound.
+//!
 //! Volume keyframes, mute, and the output device stay in the engine and
 //! the player. This crate does not open a file.
 
 #![forbid(unsafe_code)]
 
+mod align;
 mod buffer;
 mod downmix;
 mod fade;
@@ -17,6 +20,7 @@ mod limit;
 mod resample;
 mod stretch;
 
+pub use align::{Alignment, ENVELOPE_RATE, Envelope, align};
 pub use downmix::{downmix, downmix_into};
 pub use fade::{FadeCurve, fade};
 pub use limit::limit;

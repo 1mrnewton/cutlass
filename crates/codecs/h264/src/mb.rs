@@ -4720,7 +4720,14 @@ fn pred8_block<S: Sample>(
             )
         };
         if upper_right(0) && upper_right(1) {
-            read_row(&pic.y, pic.w, pic.h, x + 8, y - 1, &mut raw_above[8..]);
+            read_row(
+                samples,
+                stride,
+                height,
+                x + 8,
+                y - down,
+                &mut raw_above[8..],
+            );
         } else {
             let edge = raw_above[7];
             raw_above[8..].fill(edge);

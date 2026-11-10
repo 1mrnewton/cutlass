@@ -158,15 +158,35 @@ fn side(edge: i32) -> u32 {
     u32::try_from(edge).unwrap_or(0)
 }
 
+/// Every movie material of `draft` and of the compound clips in it.
+fn movie_materials(draft: &Draft) -> Vec<&cutlass_model::MaterialVideo> {
+    let mut found = Vec::new();
+    let mut drafts = vec![draft];
+    while let Some(draft) = drafts.pop() {
+        found.extend(
+            draft
+                .materials
+                .videos
+                .iter()
+                .filter(|video| video.kind == "video"),
+        );
+        drafts.extend(
+            draft
+                .materials
+                .drafts
+                .iter()
+                .filter_map(|inside| inside.draft.as_deref()),
+        );
+    }
+    found
+}
+
 /// The movie files `draft` uses, each once, and the file of every movie
 /// material.
 fn movies(draft: &Draft, root: Option<&Path>) -> (Vec<Movie>, HashMap<String, PathBuf>) {
     let mut found: Vec<Movie> = Vec::new();
     let mut by_material = HashMap::new();
-    for video in &draft.materials.videos {
-        if video.kind != "video" {
-            continue;
-        }
+    for video in movie_materials(draft) {
         let stored = Path::new(&video.path);
         let located = if stored.is_absolute() {
             Some(stored.to_path_buf())
@@ -195,12 +215,10 @@ fn movies(draft: &Draft, root: Option<&Path>) -> (Vec<Movie>, HashMap<String, Pa
 /// or went, or one whose file changed.
 fn movies_mark(draft: &Draft) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    for video in &draft.materials.videos {
-        if video.kind == "video" {
-            video.id.as_str().hash(&mut hasher);
-            video.path.hash(&mut hasher);
-            (video.width, video.height, video.duration.0).hash(&mut hasher);
-        }
+    for video in movie_materials(draft) {
+        video.id.as_str().hash(&mut hasher);
+        video.path.hash(&mut hasher);
+        (video.width, video.height, video.duration.0).hash(&mut hasher);
     }
     hasher.finish()
 }
@@ -352,18 +370,29 @@ impl Shell {
     /// the ones no longer wanted.
     pub(super) fn sync_proxies(&mut self) {
         self.proxies.looks += 1;
-        let Some(draft) = self.draft() else {
+        // Inside a compound clip the open draft is the clip's own, so the
+        // project's movies are read from the draft around it.
+        let inside = !self.outer.is_empty();
+        let draft = if inside {
+            self.root_draft().map(std::borrow::Cow::Owned)
+        } else {
+            self.draft().map(std::borrow::Cow::Borrowed)
+        };
+        let Some(draft) = draft else {
             return;
         };
+        let draft = draft.as_ref();
         let makes = self.project_proxies();
         let choices = self
             .folder
             .as_ref()
             .map(cutlass_store::Folder::proxies)
             .unwrap_or_default();
+        // Looked at again on the way out of a compound clip.
         let seen = self
             .session
             .as_ref()
+            .filter(|_| !inside)
             .map(|session| (session.revision(), movies_mark(draft)));
         let (found, by_material) = movies(draft, self.path.as_deref());
         let mut played = HashMap::new();
@@ -1023,6 +1052,87 @@ mod tests {
         let mut new = self::desktop(&temp, true);
         new.open_folder(&fresh).unwrap();
         assert!(new.project_proxies());
+    }
+
+    /// A real 4K file from `../local-files`, imported the way the window
+    /// does it. Skipped where that folder is missing, as on CI.
+    #[test]
+    #[ignore = "reads a real 4K movie; run on a machine that has ../local-files"]
+    fn a_real_4k_import_gets_its_proxy_by_itself() {
+        let real = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../local-files/9489379-uhd_4096_2160_25fps.mp4");
+        if !real.is_file() {
+            return;
+        }
+        let temp = Temp::new();
+        let folder = temp.path.join("project");
+        project(&folder, Vec::new());
+        let mut desktop = desktop(&temp, true);
+        desktop.open_folder(&folder).unwrap();
+        desktop.start_import(&real).unwrap();
+        crate::shell::tests::land_job(&mut desktop);
+        let id = desktop.draft().unwrap().materials.videos[0]
+            .id
+            .as_str()
+            .to_owned();
+
+        // The import has landed and the proxy is on its way beside it.
+        assert!(desktop.poll_proxies());
+        assert!(matches!(desktop.proxy_state(&id), ProxyState::Making(_)));
+        assert!(desktop.job().is_none());
+        let began = std::time::Instant::now();
+        let until = began + std::time::Duration::from_secs(1_800);
+        while desktop.poll_proxies() && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(
+            desktop.proxy_state(&id),
+            ProxyState::Made,
+            "{}",
+            desktop.notice()
+        );
+        let source = desktop.proxied().remove(0);
+        let shown = desktop.preview_readers().open(&source).unwrap();
+        let kept = desktop.readers.open(&source).unwrap();
+        let (shown, kept) = (shown.info(), kept.info());
+        assert_eq!(shown.width.unwrap().min(shown.height.unwrap()), 480);
+        assert_eq!(kept.width.unwrap().min(kept.height.unwrap()), 2160);
+        cutlass_logger::info!(
+            "real proxy: {} bytes from {} in {:.1?}",
+            shown.byte_size,
+            kept.byte_size,
+            began.elapsed()
+        );
+    }
+
+    #[test]
+    fn a_movie_inside_a_compound_clip_keeps_its_proxy() {
+        let temp = Temp::new();
+        let file = temp.path.join("source.mp4");
+        std::fs::write(&file, b"held, so never read").unwrap();
+        let folder = temp.path.join("project");
+        project(&folder, vec![movie("movie", &file, 3840, 2160)]);
+        let mut desktop = desktop(&temp, true);
+        desktop.hold_proxies();
+        desktop.open_folder(&folder).unwrap();
+        let making =
+            |desktop: &Shell| matches!(desktop.proxy_state("movie"), ProxyState::Making(_));
+        assert!(making(&desktop));
+
+        // Its clip made into a compound clip, then that clip opened and
+        // left: the proxy stays on its way throughout.
+        desktop.select(Some(cutlass_model::SegmentId::new("clip")));
+        desktop.create_compound().unwrap();
+        desktop.poll_proxies();
+        assert!(making(&desktop));
+        desktop.open_compound().unwrap();
+        desktop.poll_proxies();
+        desktop.sync_proxies();
+        assert!(making(&desktop));
+        assert_eq!(desktop.proxies.waiting.len(), 1);
+        desktop.close_compound().unwrap();
+        desktop.poll_proxies();
+        assert!(making(&desktop));
     }
 
     #[test]

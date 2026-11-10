@@ -105,6 +105,7 @@ mod recon;
 mod sei;
 mod set;
 mod sp;
+mod subpel;
 mod tables;
 
 pub use dec::{H264Decoder, register_decoders};

@@ -17,6 +17,7 @@ use cutlass_encode::{VideoEncoder, VideoInput};
 
 use crate::dec::H264Decoder;
 use crate::nal;
+use crate::subpel::{MAX_BLOCK, Subpel};
 use crate::tables::{CABAC_MN, RANGE_LPS, TRANS_LPS, TRANS_MPS};
 
 pub struct H264Encoder {
@@ -61,6 +62,8 @@ struct Planes {
     y: Vec<u8>,
     u: Vec<u8>,
     v: Vec<u8>,
+    /// Half-sample luma for the motion search, shared by clones of this picture.
+    sub: Arc<Subpel>,
 }
 
 pub fn register_encoders(factory: &mut cutlass_encode::EncodeFactory) {
@@ -298,7 +301,8 @@ impl H264Encoder {
                     what: "reference picture",
                 });
             };
-            self.anchor = Some(Planes { y, u, v });
+            let sub = Arc::new(Subpel::new(&y, self.width, self.height));
+            self.anchor = Some(Planes { y, u, v, sub });
         }
         Ok(())
     }
@@ -982,6 +986,17 @@ fn sad_bi(
     mv0: [i16; 2],
     mv1: [i16; 2],
 ) -> i32 {
+    let mut a = [0u8; MAX_BLOCK * MAX_BLOCK];
+    let mut b = [0u8; MAX_BLOCK * MAX_BLOCK];
+    if inside(src, area)
+        && past.sub.block(bounds(area), mv0, &mut a).is_some()
+        && future.sub.block(bounds(area), mv1, &mut b).is_some()
+    {
+        for (p, &q) in a.iter_mut().zip(&b) {
+            *p = ((u16::from(*p) + u16::from(q) + 1) >> 1) as u8;
+        }
+        return sad_rows(src, area, &a);
+    }
     let mut cost = 0i32;
     for row in 0..area.h {
         for col in 0..area.w {
@@ -1515,6 +1530,10 @@ fn sad_qpel(src: &Source<'_>, reference: &Planes, area: Area, qx: i32, qy: i32) 
         i16::try_from(qx).unwrap_or(0),
         i16::try_from(qy).unwrap_or(0),
     ];
+    let mut pred = [0u8; MAX_BLOCK * MAX_BLOCK];
+    if inside(src, area) && reference.sub.block(bounds(area), mv, &mut pred).is_some() {
+        return sad_rows(src, area, &pred);
+    }
     let mut cost = 0i32;
     for row in 0..area.h {
         for col in 0..area.w {
@@ -1531,6 +1550,34 @@ fn sad_qpel(src: &Source<'_>, reference: &Planes, area: Area, qx: i32, qy: i32) 
         }
     }
     cost
+}
+
+/// The block lies inside the coded picture, so its source samples need no edge value.
+fn inside(src: &Source<'_>, area: Area) -> bool {
+    area.x + area.w <= src.width && area.y + area.h <= src.height
+}
+
+fn bounds(area: Area) -> (u32, u32, u32, u32) {
+    (area.x, area.y, area.w, area.h)
+}
+
+/// Sum of absolute differences between the source block and `pred`, whose
+/// rows are [`MAX_BLOCK`] apart. The block must be [`inside`] the picture.
+fn sad_rows(src: &Source<'_>, area: Area, pred: &[u8; MAX_BLOCK * MAX_BLOCK]) -> i32 {
+    let w = area.w as usize;
+    let stride = src.width as usize;
+    let mut cost = 0u32;
+    for row in 0..area.h as usize {
+        let start = (area.y as usize + row) * stride + area.x as usize;
+        let source = &src.y[start..start + w];
+        let predicted = &pred[row * MAX_BLOCK..row * MAX_BLOCK + w];
+        cost += source
+            .iter()
+            .zip(predicted)
+            .map(|(&s, &p)| u32::from(s.abs_diff(p)))
+            .sum::<u32>();
+    }
+    cost as i32
 }
 
 fn choose_partition(

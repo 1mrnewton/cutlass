@@ -829,7 +829,7 @@ pub fn sample<S: Sample>(plane: &[S], stride: usize, w: i32, h: i32, x: i32, y: 
     pel(plane[y * stride + x])
 }
 
-fn tap<S: Sample>(
+pub(crate) fn tap<S: Sample>(
     plane: &[S],
     stride: usize,
     w: i32,

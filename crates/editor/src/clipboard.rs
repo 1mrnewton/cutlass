@@ -4,8 +4,9 @@
 //!
 //! A pasted clip goes on the row it was copied from when that row is clear
 //! where it lands. When a clip is in the way it goes on the nearest row of
-//! the same kind above that is clear, and on a new row when none is, the
-//! way a dragged clip does. Nothing on the timeline moves to make room.
+//! the same kind above that is clear, and on a new row when none is. The
+//! new row opens just above the row the clip was copied from. Nothing on
+//! the timeline moves to make room.
 
 use cutlass_model::{
     Draft, MaterialId, Micros, Segment, SegmentId, TimeMarkItem, TimeRange, TrackAttribute,
@@ -108,7 +109,8 @@ fn taken(
 /// and the new clips' ids. `fresh` makes an unused id from a prefix such as
 /// `seg` or `track`. Markers past a clip's end and beats outside it are
 /// dropped. A clip whose row is taken where it lands goes on the nearest
-/// clear row of its kind above, or on a new row this paste opens.
+/// clear row of its kind above, or on a new row this paste opens just
+/// above the row it was copied from.
 pub fn paste_requests(
     draft: &Draft,
     copies: &[CopiedClip],
@@ -138,6 +140,9 @@ pub fn paste_requests(
     // each with the row its clips were copied from.
     let mut pasted: Vec<(TrackId, TimeRange)> = Vec::new();
     let mut opened: Vec<(TrackId, TrackId)> = Vec::new();
+    // The rows top to bottom as they will stand once this paste's new rows
+    // are in, so each new row is asked for at the place it ends up.
+    let mut order: Vec<TrackId> = draft.tracks.iter().map(|track| track.id.clone()).collect();
     for item in copies {
         let id = SegmentId::new(fresh("seg"));
         let start = at.saturating_add(item.offset.0);
@@ -185,9 +190,16 @@ pub fn paste_requests(
                 .map(|track| track.kind.clone())
                 .ok_or(ClipboardMiss::LaneGone)?;
             let row = TrackId::new(fresh("track"));
-            places.push(Request::InsertTrack {
+            // Just above the row the clip was copied from.
+            let index = order
+                .iter()
+                .position(|id| id == &item.track_id)
+                .ok_or(ClipboardMiss::LaneGone)?;
+            order.insert(index, row.clone());
+            places.push(Request::InsertTrackAt {
                 track_id: row.clone(),
                 kind,
+                index,
             });
             opened.push((item.track_id.clone(), row.clone()));
             row
@@ -302,7 +314,7 @@ mod tests {
             let (requests, ids) =
                 paste_requests(session.draft(), &copies, Micros(at), &mut fresh).unwrap();
             assert!(
-                matches!(requests[0], Request::InsertTrack { ref kind, .. }
+                matches!(requests[0], Request::InsertTrackAt { ref kind, .. }
                     if *kind == session.draft().tracks[0].kind),
                 "{requests:?}"
             );
@@ -320,7 +332,7 @@ mod tests {
             // another opens; pasted where it is clear, the copy goes home.
             let (again, _) =
                 paste_requests(session.draft(), &copies, Micros(at), &mut fresh).unwrap();
-            assert!(matches!(again[0], Request::InsertTrack { .. }));
+            assert!(matches!(again[0], Request::InsertTrackAt { .. }));
             let (clear, _) =
                 paste_requests(session.draft(), &copies, Micros(20_000_000), &mut fresh).unwrap();
             assert!(
@@ -371,7 +383,7 @@ mod tests {
         assert!(
             !requests
                 .iter()
-                .any(|request| matches!(request, Request::InsertTrack { .. }))
+                .any(|request| matches!(request, Request::InsertTrackAt { .. }))
         );
         let revision = session.revision();
         session.apply(revision, &requests).unwrap();
@@ -390,7 +402,7 @@ mod tests {
         let opened: Vec<&TrackId> = requests
             .iter()
             .filter_map(|request| match request {
-                Request::InsertTrack { track_id, .. } => Some(track_id),
+                Request::InsertTrackAt { track_id, .. } => Some(track_id),
                 _ => None,
             })
             .collect();
@@ -399,6 +411,86 @@ mod tests {
             Request::Place { track_id, .. } => track_id == opened[0],
             _ => true,
         }));
+    }
+
+    #[test]
+    fn a_new_row_opens_just_above_the_row_the_clip_was_copied_from() {
+        // Top to bottom: a full overlay, the row copied from, another
+        // overlay, main, and a sound row under main.
+        let mut draft = session().draft().clone();
+        draft.materials.audios.push(cutlass_model::MaterialAudio {
+            id: MaterialId::new("tone"),
+            ..Default::default()
+        });
+        let mut session = Session::open(draft);
+        let kind = session.draft().tracks[0].kind.clone();
+        let revision = session.revision();
+        let overlay = |id: &str| Request::InsertTrackAt {
+            track_id: TrackId::new(id),
+            kind: kind.clone(),
+            index: 0,
+        };
+        session
+            .apply(
+                revision,
+                &[
+                    overlay("low"),
+                    overlay("from"),
+                    overlay("top"),
+                    Request::InsertTrack {
+                        track_id: TrackId::new("sound"),
+                        kind: cutlass_model::TrackType::Audio,
+                    },
+                    Request::Place {
+                        track_id: TrackId::new("top"),
+                        segment: Box::new(Segment::new("t", "m", TimeRange::new(0, 9_000_000))),
+                    },
+                    Request::Place {
+                        track_id: TrackId::new("from"),
+                        segment: Box::new(Segment::new("f", "m", TimeRange::new(0, 1_000_000))),
+                    },
+                    Request::Place {
+                        track_id: TrackId::new("sound"),
+                        segment: Box::new(Segment::new("s", "tone", TimeRange::new(0, 1_000_000))),
+                    },
+                ],
+            )
+            .unwrap();
+        let order = |session: &Session| -> Vec<String> {
+            session
+                .draft()
+                .tracks
+                .iter()
+                .map(|track| track.id.as_str().to_owned())
+                .collect()
+        };
+        assert_eq!(order(&session), ["top", "from", "low", "main", "sound"]);
+
+        // The overlay clip and the sound clip pasted onto themselves: each
+        // new row sits right above its own, not at the top of the stack.
+        let copies =
+            copy_clips(session.draft(), &[SegmentId::new("f"), SegmentId::new("s")]).unwrap();
+        let mut fresh = counter();
+        let (requests, _) =
+            paste_requests(session.draft(), &copies, Micros(0), &mut fresh).unwrap();
+        let revision = session.revision();
+        session.apply(revision, &requests).unwrap();
+        let after = order(&session);
+        assert_eq!(after.len(), 7);
+        assert_eq!(after[0], "top");
+        assert_eq!(after[2], "from");
+        assert_eq!(after[3], "low");
+        assert_eq!(after[4], "main");
+        assert_eq!(after[6], "sound");
+        let holds = |row: usize| session.draft().tracks[row].segments.len();
+        assert_eq!((holds(1), holds(5)), (1, 1), "{after:?}");
+        assert_eq!(session.draft().tracks[1].kind, kind);
+        assert_eq!(
+            session.draft().tracks[5].kind,
+            cutlass_model::TrackType::Audio
+        );
+        session.undo().unwrap();
+        assert_eq!(order(&session), ["top", "from", "low", "main", "sound"]);
     }
 
     #[test]

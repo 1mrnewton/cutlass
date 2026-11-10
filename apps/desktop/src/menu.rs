@@ -498,6 +498,25 @@ pub struct Shown {
     pub dismissed: bool,
 }
 
+/// Frames a menu must have been gone for before its window is counted
+/// closed: one for the app to stop drawing it, one for the window to be
+/// let go, and one for the system to take it off the screen.
+const SETTLE_FRAMES: u64 = 3;
+
+fn last_shown_id() -> Id {
+    Id::unique("cutlass menu last shown")
+}
+
+/// Whether every menu's own window has had time to close: none was drawn
+/// in the last few frames. A file dialog a menu row asks for waits for
+/// this. Begun in the frame the menu's window is being let go, the dialog
+/// has been seen to leave that window on the screen for good.
+#[must_use]
+pub fn settled(ctx: &Context) -> bool {
+    let shown: Option<u64> = ctx.data(|data| data.get_temp(last_shown_id()));
+    shown.is_none_or(|shown| ctx.cumulative_frame_nr().saturating_sub(shown) >= SETTLE_FRAMES)
+}
+
 /// Room around a menu's own window for its shadow to fall in.
 const SHADOW_ROOM: f32 = 48.0;
 
@@ -514,6 +533,8 @@ pub fn show(
     entries: &'static [Entry],
     enabled: &dyn Fn(&str) -> bool,
 ) -> Shown {
+    let frame = ctx.cumulative_frame_nr();
+    ctx.data_mut(|data| data.insert_temp(last_shown_id(), frame));
     let window = ctx.input(|input| input.viewport().inner_rect);
     let (Some(window), false) = (window, ctx.embed_viewports()) else {
         return show_in(
@@ -1794,6 +1815,36 @@ mod tests {
             assert_eq!(sub_reach(ui.ctx(), screen, menu, full.y, GAP_ROW), None);
         });
         output.textures_delta.clear();
+    }
+
+    #[test]
+    fn a_menu_is_settled_a_few_frames_after_it_was_last_drawn() {
+        let ctx = Context::default();
+        // A frame that draws no menu, and whether menus are settled in it.
+        let quiet = |ctx: &Context| {
+            let mut still = false;
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                still = settled(ui.ctx());
+            });
+            output.textures_delta.clear();
+            still
+        };
+        // No menu has been drawn: nothing to wait for.
+        assert!(quiet(&ctx));
+        // After one is drawn, the frames it takes its window to close
+        // are not settled; the one after them is.
+        frame(&ctx, 1000.0, Vec::new());
+        frame(&ctx, 1000.0, Vec::new());
+        let mut waited = 0;
+        while !quiet(&ctx) {
+            waited += 1;
+            assert!(waited <= 10, "it never settles");
+        }
+        assert_eq!(waited, SETTLE_FRAMES - 1);
+        assert!(quiet(&ctx));
+        // Drawn again, the wait starts over.
+        frame(&ctx, 1000.0, Vec::new());
+        assert!(!quiet(&ctx));
     }
 
     #[test]

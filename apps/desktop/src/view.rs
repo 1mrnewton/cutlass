@@ -365,8 +365,15 @@ pub fn show(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Option
     if std::mem::take(&mut view.inspector.wants_lut) {
         view.dialogs.lut(parent);
     }
-    if std::mem::take(&mut view.wants_replace) {
-        view.dialogs.replace(parent);
+    // Replace clip is asked for from a menu, whose own window is closing:
+    // the dialog waits until that window is gone.
+    if view.wants_replace {
+        if crate::menu::settled(ui.ctx()) {
+            view.wants_replace = false;
+            view.dialogs.replace(parent);
+        } else {
+            ui.ctx().request_repaint();
+        }
     }
     style(ui);
     shell.hold_edits(ui.input(|input| input.pointer.any_down()));

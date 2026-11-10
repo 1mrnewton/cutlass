@@ -6115,7 +6115,8 @@ fn paint_clip_menu(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
     };
     // Two or more clips picked: the menu of rows that act on all of them.
     let entries = if shell.selection().len() > 1 {
-        crate::menu::MULTI
+        let mix = shell.selection_mix();
+        crate::menu::multi_entries(mix.media, mix.sound, mix.compound)
     } else {
         crate::menu::clip_entries_for(
             &kind,
@@ -6137,7 +6138,6 @@ fn paint_clip_menu(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
         "open-compound" | "ungroup" => shell.compound_selected(),
         // Only a video clip plays on a speed curve.
         "variable-speed" => kind == cutlass_model::TrackType::Video,
-        id if crate::menu::CLIP_OFF.contains(&id) => false,
         _ => true,
     };
     let shown = crate::menu::show(
@@ -15554,10 +15554,11 @@ mod tests {
         assert_eq!(shell.selection().len(), 2, "both clips stay picked");
         assert!(shell.clip_menu().is_some(), "the menu is open");
         let output = frame(&mut shell, &mut view, Vec::new());
-        assert!(
-            text_pos(&output, "Deactivate clips").is_some(),
-            "the menu for several clips"
-        );
+        // The menu for several clips: it has no row for one clip alone.
+        assert!(text_pos(&output, "Deactivate clip").is_some());
+        assert!(text_pos(&output, "Group").is_some());
+        assert!(text_pos(&output, "Split scenes").is_none());
+        assert!(text_pos(&output, "Trim clip").is_none());
         let _ = std::fs::remove_dir_all(&temp);
     }
 

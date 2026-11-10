@@ -5418,11 +5418,47 @@ impl Shell {
         self.selected_video().is_some() && self.selected_video_has_sound() != Some(false)
     }
 
+    /// What the selected clips are between them, for the menu several
+    /// clips share.
+    #[must_use]
+    pub fn selection_mix(&self) -> SelectionMix {
+        let mut mix = SelectionMix {
+            media: !self.selection.is_empty(),
+            ..SelectionMix::default()
+        };
+        let Some(draft) = self.draft() else {
+            return SelectionMix::default();
+        };
+        for track in &draft.tracks {
+            for segment in &track.segments {
+                if !self.selection.contains(&segment.id) {
+                    continue;
+                }
+                let material = draft.materials.get(segment.material_id.as_str());
+                mix.media &= matches!(track.kind, TrackType::Video | TrackType::Audio);
+                mix.compound |= matches!(material, Some(MaterialRef::Draft(_)));
+                mix.sound |= match material {
+                    Some(MaterialRef::Audio(_)) => true,
+                    Some(MaterialRef::Video(video)) => {
+                        !cutlass_engine::original_sound_is_separate(draft, segment)
+                            && self.video_has_sound(video) != Some(false)
+                            && video.kind != "photo"
+                    }
+                    _ => false,
+                };
+            }
+        }
+        mix
+    }
+
     /// Whether the selected video's file carries sound. `None` when no
     /// video is selected or the file cannot be read, so nothing is ruled
     /// out on a guess. The file is read once and remembered.
     fn selected_video_has_sound(&self) -> Option<bool> {
-        let video = self.selected_video()?;
+        self.video_has_sound(self.selected_video()?)
+    }
+
+    fn video_has_sound(&self, video: &MaterialVideo) -> Option<bool> {
         let file = self.sound_file(&video.path).ok()?;
         if let Some(known) = self.sound_known.borrow().get(&file) {
             return Some(*known);
@@ -8681,6 +8717,17 @@ struct RunningJob {
     job: crate::jobs::Job<Landing>,
     project: Option<PathBuf>,
     stopping: bool,
+}
+
+/// What several selected clips are between them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SelectionMix {
+    /// Every one is on a video or an audio lane.
+    pub media: bool,
+    /// One of them has sound of its own.
+    pub sound: bool,
+    /// One of them is a compound clip.
+    pub compound: bool,
 }
 
 /// What a finished job does on the window thread.
@@ -18228,6 +18275,69 @@ mod tests {
             assert_eq!(desktop.extract_audio_enabled(), sounds);
             assert_eq!(desktop.sound_known.borrow().len(), 1);
         }
+    }
+
+    #[test]
+    fn several_picked_clips_say_what_they_are_between_them() {
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        draft.config.maintrack_adsorb = false;
+        let mut movie = MaterialVideo::new("movie");
+        movie.kind = "video".to_owned();
+        let mut quiet = MaterialVideo::new("quiet");
+        quiet.kind = "video".to_owned();
+        quiet.has_sound_separated = true;
+        let mut photo = MaterialVideo::new("photo");
+        photo.kind = "photo".to_owned();
+        draft.materials.videos.extend([movie, quiet, photo]);
+        for (id, start) in [("movie", 0), ("quiet", 1_000_000), ("photo", 2_000_000)] {
+            draft.tracks[0]
+                .segments
+                .push(Segment::new(id, id, TimeRange::new(start, 1_000_000)));
+        }
+        draft.materials.audios.push(MaterialAudio {
+            id: MaterialId::new("tone"),
+            ..MaterialAudio::default()
+        });
+        let mut sound = Track::main("sound");
+        sound.kind = TrackType::Audio;
+        sound
+            .segments
+            .push(Segment::new("tone", "tone", TimeRange::new(0, 1_000_000)));
+        draft.tracks.push(sound);
+        draft.materials.texts.push(MaterialText {
+            id: MaterialId::new("title"),
+            ..MaterialText::default()
+        });
+        let mut words = Track::main("words");
+        words.kind = TrackType::Text;
+        words
+            .segments
+            .push(Segment::new("title", "title", TimeRange::new(0, 1_000_000)));
+        draft.tracks.insert(0, words);
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        let mut mix = |ids: &[&str]| {
+            desktop.select_box(ids.iter().map(|id| SegmentId::new(*id)), false);
+            let mix = desktop.selection_mix();
+            (mix.media, mix.sound, mix.compound)
+        };
+        // A movie and a sound: all media, with sound.
+        assert_eq!(mix(&["movie", "tone"]), (true, true, false));
+        // A title among them is not media.
+        assert_eq!(mix(&["movie", "tone", "title"]), (false, true, false));
+        // A photo and a movie whose sound was extracted have none.
+        assert_eq!(mix(&["quiet", "photo"]), (true, false, false));
+        assert_eq!(mix(&["title", "photo"]), (false, false, false));
+        // Made into one, the two are a compound clip.
+        desktop.select_box([SegmentId::new("movie"), SegmentId::new("quiet")], false);
+        desktop.create_compound().unwrap();
+        let compound = desktop.selection()[0].clone();
+        desktop.select_box([compound, SegmentId::new("title")], false);
+        assert!(desktop.selection_mix().compound);
+        desktop.select(None);
+        assert_eq!(desktop.selection_mix(), super::SelectionMix::default());
     }
 
     #[test]

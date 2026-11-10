@@ -188,6 +188,8 @@ struct Slot {
 
 /// Time spent in the stages of the threaded decoder (summed over threads),
 /// gathered with the `prof` feature.
+#[cfg(test)]
+mod band_tests;
 mod parse;
 mod tiles;
 
@@ -357,9 +359,12 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 /// Final sample rows of a frame still being decoded: luma rows `y0..y1`
 /// (chroma rows scaled by the subsampling) of each plane.
 pub struct Band {
+    /// The luma rows this band adds to the ones before it.
     y0: usize,
     y1: usize,
-    /// First row held of each plane, and the number of rows.
+    /// First row held of each plane, and the number of rows: the rows
+    /// added, and above them the last rows of the bands before, so that
+    /// the rows of a block lie in one band (see [`band_overlap`]).
     row0: [usize; 3],
     nrows: [usize; 3],
     /// Samples of each row held (the visible width), rows packed.
@@ -383,13 +388,14 @@ impl<P> Mirror<P> {
     }
 
     /// Rows `y0..y1` of plane `p` when one band holds them all: its
-    /// samples from row `y0` on, and their stride.
+    /// samples from row `y0` on, and their stride. Bands overlap, and the
+    /// first one that reaches `y1` starts the highest.
     #[inline]
     pub fn rows(&self, p: usize, y0: usize, y1: usize) -> Option<(&[P], usize)> {
         let p = p.min(2);
-        let i = self.bands.partition_point(|b| b.row0[p] + b.nrows[p] <= y0);
+        let i = self.bands.partition_point(|b| b.row0[p] + b.nrows[p] < y1);
         let b = self.bands.get(i)?;
-        if b.row0[p] > y0 || b.row0[p] + b.nrows[p] < y1 {
+        if b.row0[p] > y0 || y1 <= y0 {
             return None;
         }
         let rows = (self.view)(&b.rows)?;
@@ -537,12 +543,24 @@ fn visible_rows<P>(pl: &Plane<P>, y0: usize, y1: usize, sy: usize) -> (usize, us
     (a, b.max(a), pl.w.min(pl.stride))
 }
 
-/// Luma rows the buffers of a [`Band`] have room for.
-const BAND_ROWS: usize = 136;
+/// Luma rows a [`Band`] holds above the rows it adds: enough that the
+/// rows any block predicts from lie in one band. A block is at most a
+/// superblock high and its filters read 7 rows more; in chroma that is
+/// half the height and still 7 rows.
+fn band_overlap(sb128: bool) -> usize {
+    if sb128 { 128 + 16 } else { 64 + 16 }
+}
 
 /// Copies the visible samples of luma rows `y0..y1` of every plane of
-/// `src` into a [`Band`], in the buffers `bufs`.
-fn band_of<P: PicturePixel>(src: &Picture<P>, y0: usize, y1: usize, bufs: [Vec<P>; 3]) -> Band {
+/// `src`, and of the `overlap` luma rows above them, into a [`Band`], in
+/// the buffers `bufs`.
+fn band_of<P: PicturePixel>(
+    src: &Picture<P>,
+    y0: usize,
+    y1: usize,
+    overlap: usize,
+    bufs: [Vec<P>; 3],
+) -> Band {
     let sub_y = usize::from(src.sub_y);
     let mut row0 = [0; 3];
     let mut nrows = [0; 3];
@@ -555,12 +573,10 @@ fn band_of<P: PicturePixel>(src: &Picture<P>, y0: usize, y1: usize, bufs: [Vec<P
         };
         let sy = if p > 0 { sub_y } else { 0 };
         let (a, b, w) = visible_rows(pl, y0, y1, sy);
+        let a = a.saturating_sub(overlap >> sy);
         row0[p] = a;
         nrows[p] = if w == 0 { 0 } else { b - a };
         widths[p] = w;
-        // Room for the largest band (a superblock row and the 8 rows loop
-        // restoration holds back), so that pooled buffers stop growing.
-        v.reserve(((b - a).max(BAND_ROWS >> sy) * w).saturating_sub(v.len()));
         for r in a..b {
             v.extend_from_slice(&pl.data[r * pl.stride..r * pl.stride + w]);
         }
@@ -2557,8 +2573,10 @@ fn recon_worker<'r, P: PicturePixel>(
     // The largest downward motion into each reference frame, in eighth
     // samples, in the superblock row above and in the row being
     // reconstructed: blocks also predict with the motion of the
-    // neighbours above and left of them (OBMC, small chroma).
-    let mut down = [[0i32; 8]; 2];
+    // neighbours above and left of them (OBMC, small chroma). `UNREAD`
+    // for a reference frame no block of the row predicts from.
+    const UNREAD: i32 = i32::MIN;
+    let mut down = [[UNREAD; 8]; 2];
     // The copy each reference frame is read through, if any.
     let mirror_of: [Option<usize>; 8] =
         std::array::from_fn(|i| refs[i].as_ref().and_then(|rv| rv.mirror));
@@ -2643,7 +2661,12 @@ fn recon_worker<'r, P: PicturePixel>(
                         .filter(|&r| mirror_of[r] == Some(f.mirror))
                         .map(|r| down[0][r].max(down[1][r]))
                         .max()
-                        .unwrap_or(0);
+                        .unwrap_or(UNREAD);
+                    if reach == UNREAD && !warp {
+                        // Nothing here reads this reference: no need to
+                        // wait for it.
+                        continue;
+                    }
                     let need = if warp || f.whole {
                         usize::MAX
                     } else {
@@ -2676,7 +2699,7 @@ fn recon_worker<'r, P: PicturePixel>(
         // picture of their own: this one stays unfiltered for the intra
         // prediction of the rows below.
         let samples = m.as_ref().filter(|m| m.row_end).map(|m| {
-            down = [down[1], [0; 8]];
+            down = [down[1], [UNREAD; 8]];
             let bufs = lock(spares).bands.pop().unwrap_or_default();
             copy_rows_out(td.cur, m.r0, m.r1, m.last, bufs)
         });
@@ -2712,6 +2735,8 @@ struct InlineFilter<'a, P> {
     /// Deblocked luma 4x4 rows waiting for CDEF and loop restoration.
     to_filter: Option<(usize, usize)>,
     published: usize,
+    /// [`band_overlap`] of the frame.
+    overlap: usize,
 }
 
 impl<P: PicturePixel> InlineFilter<'_, P> {
@@ -2754,7 +2779,7 @@ impl<P: PicturePixel> InlineFilter<'_, P> {
                     Default::default()
                 });
                 self.publish
-                    .publish(band_of(cur, self.published, done, bufs));
+                    .publish(band_of(cur, self.published, done, self.overlap, bufs));
                 prof::add(prof::PUBLISH, tc);
                 self.published = done;
             }
@@ -3108,6 +3133,7 @@ impl<P: PicturePixel> FilterStage<P> {
             spares: &spares,
             to_filter: None,
             published: 0,
+            overlap: band_overlap(seq.use_128x128_superblock),
         };
         let mut block = Block::default();
         for (mut log, m, samples) in rx {

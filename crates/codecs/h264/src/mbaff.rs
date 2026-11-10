@@ -469,6 +469,52 @@ fn field_implicit<S: Sample>(
     super::implicit_pair(pic.field_poc[parity], poc0, poc1, long0 || long1)
 }
 
+/// The block of a list-1 picture that lies where part of a macroblock of
+/// this picture does: its macroblock, as a slot in the grid, and the 4×4
+/// block in it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct Col {
+    pub(super) slot: usize,
+    pub(super) block: usize,
+}
+
+/// Clause 8.4.1.2.1, Table 8-8, for a macroblock-adaptive frame, which
+/// always has `direct_8x8_inference_flag`: the co-located block for the 8×8
+/// quarter (`qx`, `qy`) of the macroblock at grid position `at`.
+///
+/// When both pictures code the pair the same way it is the same
+/// macroblock's corner block. A frame macroblock over a field pair takes
+/// the field nearer to `current_poc`, this frame's order count, and the
+/// half of it the macroblock covers. A field macroblock over a frame pair
+/// has its upper half in the top macroblock and its lower half in the
+/// bottom one.
+pub(super) fn col_block<S: Sample>(
+    col: &Frame<S>,
+    current_poc: i32,
+    at: (usize, usize),
+    field: bool,
+    (qx, qy): (usize, usize),
+) -> Col {
+    let (mx, my) = at;
+    let pair = my & !1;
+    let col_field = col
+        .mb_at(pair * col.mb_w + mx)
+        .is_some_and(|mb| mb.field_mb);
+    let (row, block_row) = match (field, col_field) {
+        (false, false) | (true, true) => (my, qy * 3),
+        (false, true) => {
+            let apart =
+                |parity: usize| (i64::from(col.field_poc[parity]) - i64::from(current_poc)).abs();
+            (pair + usize::from(apart(0) >= apart(1)), 2 * (my & 1) + qy)
+        }
+        (true, false) => (pair + qy, 2 * qy),
+    };
+    Col {
+        slot: row * col.mb_w + mx,
+        block: block_row * 4 + qx * 3,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::super::Mb;

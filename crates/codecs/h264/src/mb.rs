@@ -9155,6 +9155,28 @@ fn temporal_direct<S: Sample>(
     mb: &mut Mb,
     blocks: &[(usize, usize)],
 ) {
+    if pic.mbaff {
+        let col = slice.ref1.first().and_then(|&index| dpb.get(index));
+        for &(bx, by) in blocks {
+            let (ref0, mv0, mv1) = col.map_or((0, [0, 0], [0, 0]), |col| {
+                temporal_quarter(
+                    pic,
+                    dpb,
+                    slice,
+                    col,
+                    (mx, my, mb.field_mb),
+                    (bx / 2, by / 2),
+                )
+            });
+            let index = by * 4 + bx;
+            mb.mv0[index] = mv0;
+            mb.mv1[index] = mv1;
+            mb.ref0[(by / 2) * 2 + (bx / 2)] = ref0;
+            mb.ref1[(by / 2) * 2 + (bx / 2)] = 0;
+            mb.ready |= 1 << index;
+        }
+        return;
+    }
     let addr = my * pic.mb_w + mx;
     let col = slice
         .ref1
@@ -9227,6 +9249,97 @@ fn temporal_block(
     (ref0, mv0, mv1)
 }
 
+/// Clause 8.4.1.2.3 for one 8×8 quarter of a macroblock in a
+/// macroblock-adaptive frame. `at` is the macroblock's grid position and
+/// whether it is a field macroblock; `col` is the first list-1 picture.
+///
+/// The co-located block may be of the other kind. Its vertical vector is
+/// then doubled, for a frame macroblock over a field one, or halved. A frame
+/// macroblock predicts from the frame the co-located block's reference
+/// belongs to. A field macroblock predicts from the very field a co-located
+/// field block used, or from the field of its own parity of a frame block's
+/// reference, and its distances are measured between fields.
+fn temporal_quarter<S: Sample>(
+    pic: &Frame<S>,
+    dpb: &[Frame<S>],
+    slice: &Slice<'_>,
+    col: &Frame<S>,
+    at: (usize, usize, bool),
+    quarter: (usize, usize),
+) -> (i8, [i16; 2], [i16; 2]) {
+    let still = (0, [0, 0], [0, 0]);
+    let (mx, my, field) = at;
+    let place = mbaff::col_block(col, slice.poc, (mx, my), field, quarter);
+    let Some(block) = col.mb_at(place.slot) else {
+        return still;
+    };
+    if block.intra || block.pcm {
+        return still;
+    }
+    let part = place.block / 8 * 2 + place.block % 4 / 2;
+    let (mv_col, ref_poc, ref_col) = if block.ref0[part] >= 0 {
+        (
+            block.mv0[place.block],
+            block.ref_poc0[part],
+            block.ref0[part],
+        )
+    } else if block.ref1[part] >= 0 {
+        (
+            block.mv1[place.block],
+            block.ref_poc1[part],
+            block.ref1[part],
+        )
+    } else {
+        return still;
+    };
+    // The frame that reference belongs to, by its place in this slice's list 0.
+    let frame0 = slice
+        .poc0
+        .iter()
+        .position(|&poc| poc == ref_poc)
+        .unwrap_or(0);
+    let (Some(&frame_poc), Some(&slot)) = (slice.poc0.get(frame0), slice.ref0.get(frame0)) else {
+        return still;
+    };
+    let (index, vertical) = match (field, block.field_mb) {
+        (false, false) => (frame0, mv_col[1]),
+        (true, true) => (2 * frame0 + usize::from(ref_col & 1 == 1), mv_col[1]),
+        (false, true) => (frame0, mv_col[1].saturating_mul(2)),
+        (true, false) => (2 * frame0, mv_col[1] / 2),
+    };
+    let Ok(ref0) = i8::try_from(index) else {
+        return still;
+    };
+    let mv_col = [mv_col[0], vertical];
+    let (current, pic0, pic1) = if field {
+        let parity = my & 1;
+        let Some(first) = dpb.get(slot) else {
+            return still;
+        };
+        (
+            pic.field_poc[parity],
+            first.field_poc[parity ^ (index & 1)],
+            col.field_poc[parity],
+        )
+    } else {
+        (slice.poc, frame_poc, col.poc)
+    };
+    let long = slice.long0.get(frame0).copied().unwrap_or(false);
+    let td = (pic1 - pic0).clamp(-128, 127);
+    if long || td == 0 {
+        return (ref0, mv_col, [0, 0]);
+    }
+    let tb = (current - pic0).clamp(-128, 127);
+    let tx = (16_384 + (td.abs() / 2)) / td;
+    let factor = ((tb * tx + 32) >> 6).clamp(-1024, 1023);
+    let mv0 = [scale_mv(factor, mv_col[0]), scale_mv(factor, mv_col[1])];
+    let mv1 = [
+        clip_mv(i32::from(mv0[0]) - i32::from(mv_col[0])),
+        clip_mv(i32::from(mv0[1]) - i32::from(mv_col[1])),
+    ];
+    (ref0, mv0, mv1)
+}
+
 fn scale_mv(factor: i32, component: i16) -> i16 {
     clip_mv((factor * i32::from(component) + 128) >> 8)
 }
@@ -9280,15 +9393,26 @@ fn apply_direct<S: Sample>(
     // The co-located block is asked about only for a reference index of 0,
     // and its macroblock is the same for every block here.
     let col_matters = !zero && (ref0 == 0 || ref1 == 0);
-    let col_mb = if col_matters {
+    let col_mb = if col_matters && !pic.mbaff {
         col_macroblock(dpb, slice, addr)
+    } else {
+        None
+    };
+    // In a macroblock-adaptive frame the co-located block depends on how
+    // each of the two pictures coded the pair, quarter by quarter.
+    let col_frame = if col_matters && pic.mbaff {
+        slice
+            .ref1
+            .first()
+            .and_then(|&index| dpb.get(index))
+            .filter(|frame| !frame.long_term)
     } else {
         None
     };
     // A whole macroblock whose blocks all get the same answer from the
     // co-located one is filled at once: no co-located macroblock to ask,
     // or, with 8×8 inference, four corner blocks that agree.
-    if blocks.len() == 16 {
+    if blocks.len() == 16 && col_frame.is_none() {
         let agreed = match col_mb {
             None => Some(false),
             Some(col) if slice.sps.direct_8x8_inference => {
@@ -9312,12 +9436,19 @@ fn apply_direct<S: Sample>(
     }
     for &(bx, by) in blocks {
         let index = by * 4 + bx;
-        let col = if slice.sps.direct_8x8_inference {
-            corner_block(bx, by)
+        let col_zero = if let Some(frame) = col_frame {
+            let place = mbaff::col_block(frame, slice.poc, (mx, my), mb.field_mb, (bx / 2, by / 2));
+            frame
+                .mb_at(place.slot)
+                .is_some_and(|col| !col.intra && !col.pcm && col_zero(col, place.block))
         } else {
-            index
+            let col = if slice.sps.direct_8x8_inference {
+                corner_block(bx, by)
+            } else {
+                index
+            };
+            col_matters && col_mb.is_some_and(|mb| col_zero(mb, col))
         };
-        let col_zero = col_matters && col_mb.is_some_and(|mb| col_zero(mb, col));
         mb.mv0[index] = if zero || ref0 < 0 || (ref0 == 0 && col_zero) {
             [0, 0]
         } else {

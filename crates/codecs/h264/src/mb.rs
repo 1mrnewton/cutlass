@@ -4837,7 +4837,8 @@ fn pred8_block<S: Sample>(
     out
 }
 
-/// A directional 8×8 prediction, sample by sample.
+/// A directional 8×8 prediction whose edges are present. The mode is
+/// chosen once, so each sample's rule is worked out with its place known.
 fn fill8<S: Sample>(
     out: &mut [S; 64],
     mode: u8,
@@ -4846,9 +4847,25 @@ fn fill8<S: Sample>(
     corner: S,
     present: (bool, bool),
 ) {
-    for row in 0..8 {
-        for col in 0..8 {
-            out[row * 8 + col] = pred8_at(mode, (col, row), above, left, corner, present);
+    match mode {
+        3 => fill8_with(out, |x, y| pred8_down_left(x, y, above)),
+        4 => fill8_with(out, |x, y| pred8_down_right(x, y, above, left, corner)),
+        5 => fill8_with(out, |x, y| pred8_vertical_right(x, y, above, left, corner)),
+        6 => fill8_with(out, |x, y| pred8_horizontal_down(x, y, above, left, corner)),
+        7 => fill8_with(out, |x, y| pred8_vertical_left(x, y, above)),
+        8 => fill8_with(out, |x, y| pred8_horizontal_up(x, y, left)),
+        _ => fill8_with(out, |x, y| {
+            pred8_at(mode, (x, y), above, left, corner, present)
+        }),
+    }
+}
+
+/// Every sample of an 8×8 block from `at`, which takes its column and row.
+#[inline]
+fn fill8_with<S: Sample>(out: &mut [S; 64], at: impl Fn(usize, usize) -> S) {
+    for (row, samples) in out.as_chunks_mut::<8>().0.iter_mut().enumerate() {
+        for (col, sample) in samples.iter_mut().enumerate() {
+            *sample = at(col, row);
         }
     }
 }

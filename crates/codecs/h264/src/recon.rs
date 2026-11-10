@@ -691,6 +691,29 @@ pub fn pred4<S: Sample>(
     if !directional {
         return [S::clip(dc4(above, left, above_ok, left_ok)); 16];
     }
+    // Each mode has its own copy of the rules, so the choice of mode is
+    // made once here and not for every sample.
+    match mode {
+        0 => pred4_rule::<S, 0>(above, left, corner, above_ok, left_ok),
+        1 => pred4_rule::<S, 1>(above, left, corner, above_ok, left_ok),
+        3 => pred4_rule::<S, 3>(above, left, corner, above_ok, left_ok),
+        4 => pred4_rule::<S, 4>(above, left, corner, above_ok, left_ok),
+        5 => pred4_rule::<S, 5>(above, left, corner, above_ok, left_ok),
+        6 => pred4_rule::<S, 6>(above, left, corner, above_ok, left_ok),
+        7 => pred4_rule::<S, 7>(above, left, corner, above_ok, left_ok),
+        8 => pred4_rule::<S, 8>(above, left, corner, above_ok, left_ok),
+        _ => pred4_rule::<S, 2>(above, left, corner, above_ok, left_ok),
+    }
+}
+
+/// [`pred4`] for the one mode `MODE`, sample by sample.
+fn pred4_rule<S: Sample, const MODE: u8>(
+    above: &[S; 8],
+    left: &[S; 4],
+    corner: S,
+    above_ok: bool,
+    left_ok: bool,
+) -> [S; 16] {
     let mut out = [S::default(); 16];
     let p = |x: i32, y: i32| -> i32 {
         if y == -1 && x == -1 {
@@ -705,7 +728,7 @@ pub fn pred4<S: Sample>(
     };
     for y in 0..4 {
         for x in 0..4 {
-            let sample = match mode {
+            let sample = match MODE {
                 0 if above_ok => p(x, -1),
                 1 if left_ok => p(-1, y),
                 2 => dc4(above, left, above_ok, left_ok),

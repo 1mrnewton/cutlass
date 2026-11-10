@@ -48,6 +48,26 @@ mod ops {
         x.map(i16::saturating_neg)
     }
 
+    /// The ADST of four values (7.13.2.6). The sums are exact in 32
+    /// bits; an output of 32768 becomes 32767, which the rounding after
+    /// it cannot tell apart.
+    pub(super) fn adst4(t: [V; 4]) -> [V; 4] {
+        let mut out = [[0i16; 8]; 4];
+        for l in 0..8 {
+            let [t0, t1, t2, t3] = t.map(|v| i32::from(v[l]));
+            let b7 = i32::from((t0 - t2 + t3) as i16);
+            let s0 = t0 * 1321 + t2 * 3803 + t3 * 2482;
+            let s1 = t0 * 2482 - t2 * 1321 - t3 * 3803;
+            let s3 = t1 * 3344;
+            let s2 = b7 * 3344;
+            for (o, x) in out.iter_mut().zip([s0 + s3, s1 + s3, s2, s0 + s1 - s3]) {
+                let r = (x >> 12) + ((x >> 11) & 1);
+                o[l] = (r - i32::from(r == 32768)) as i16;
+            }
+        }
+        out
+    }
+
     /// The identity transform of `n` values on one of them (7.13.2.15):
     /// a scaling by `sqrt(2)`, 2, `2 sqrt(2)` or 4.
     fn identity(x: i32, n: usize) -> i32 {
@@ -93,7 +113,11 @@ pub(super) fn add(b: &mut Block<'_>) {
     let mut mid = [[0i16; 64]; 32];
     for r0 in (0..nr).step_by(8) {
         let mut t = [[0i16; 8]; 64];
-        for (k, v) in t.iter_mut().enumerate().take(nc.next_multiple_of(8)) {
+        for (k, v) in t
+            .iter_mut()
+            .enumerate()
+            .take(nc.next_multiple_of(8).min(tw))
+        {
             for (l, x) in v.iter_mut().enumerate() {
                 if r0 + l < nr {
                     *x = b.coefs[(r0 + l) * tw + k] as i16;
@@ -129,7 +153,7 @@ pub(super) fn add(b: &mut Block<'_>) {
                 // Round2(x, 4), which no 16-bit value overflows.
                 v.map(|x| (x >> 4) + ((x >> 3) & 1))
             };
-            for (l, &r) in res.iter().enumerate() {
+            for (l, &r) in res.iter().enumerate().take(w) {
                 let col = if b.flip_lr { w - 1 - (j0 + l) } else { j0 + l };
                 let px = &mut b.dst[y * b.stride + col];
                 *px = (i16::from(*px) + r).clamp(0, 255) as u8;

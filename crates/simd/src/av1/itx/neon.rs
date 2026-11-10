@@ -2,11 +2,12 @@
 //! of a vector, one lane for each of eight rows or eight columns.
 
 use core::arch::aarch64::{
-    int16x8_t, vaddw_high_u8, vaddw_u8, vcombine_s16, vcombine_u8, vdupq_n_s16, vdupq_n_s32,
-    vdupq_n_u8, vextq_s16, vget_lane_u64, vget_low_u8, vmovn_s32, vqaddq_u8, vqmovun_high_s16,
-    vqmovun_s16, vqsubq_u8, vreinterpret_u64_u8, vreinterpretq_s16_s64, vreinterpretq_s16_u16,
-    vreinterpretq_s32_s16, vreinterpretq_s64_s32, vreinterpretq_u16_s16, vrev64q_s16, vrshlq_s16,
-    vrshrq_n_s16, vtrn1q_s16, vtrn1q_s32, vtrn1q_s64, vtrn2q_s16, vtrn2q_s32, vtrn2q_s64,
+    int16x8_t, vaddw_high_u8, vaddw_u8, vcombine_s16, vcombine_u8, vdup_n_s16, vdupq_n_s16,
+    vdupq_n_s32, vdupq_n_u8, vextq_s16, vget_lane_u64, vget_low_u8, vmovn_s32, vqaddq_u8,
+    vqmovun_high_s16, vqmovun_s16, vqsubq_u8, vreinterpret_u64_u8, vreinterpretq_s16_s64,
+    vreinterpretq_s16_u16, vreinterpretq_s32_s16, vreinterpretq_s64_s32, vreinterpretq_u16_s16,
+    vrev64q_s16, vrshlq_s16, vrshrq_n_s16, vtrn1q_s16, vtrn1q_s32, vtrn1q_s64, vtrn2q_s16,
+    vtrn2q_s32, vtrn2q_s64,
 };
 
 use super::steps::{Prog, Step, kind, plan, table};
@@ -18,10 +19,12 @@ type V = int16x8_t;
 /// The arithmetic of a step on the eight values of an entry.
 mod ops {
     use core::arch::aarch64::{
-        int16x8_t, int32x4_t, vaddq_s32, vdupq_n_s16, vget_low_s16, vmlal_high_n_s16, vmlal_n_s16,
-        vmlsl_high_n_s16, vmlsl_n_s16, vmovl_high_s16, vmovl_s16, vmull_high_n_s16, vmull_n_s16,
+        int16x8_t, int32x4_t, vaddq_s16, vaddq_s32, vceqq_s32, vcombine_s16, vdupq_n_s16,
+        vdupq_n_s32, vget_high_s16, vget_low_s16, vmlal_high_n_s16, vmlal_n_s16, vmlsl_high_n_s16,
+        vmlsl_n_s16, vmovl_high_s16, vmovl_s16, vmovn_s32, vmull_high_n_s16, vmull_n_s16,
         vmulq_n_s32, vqaddq_s16, vqmovn_high_s32, vqmovn_s32, vqnegq_s16, vqrdmulhq_n_s16,
-        vqsubq_s16, vrshlq_s32, vrshrn_high_n_s32, vrshrn_n_s32, vrshrq_n_s32, vshlq_n_s32,
+        vqsubq_s16, vreinterpretq_s32_u32, vrshlq_s32, vrshrn_high_n_s32, vrshrn_n_s32,
+        vrshrq_n_s32, vshlq_n_s32, vsubq_s16, vsubq_s32,
     };
 
     pub(super) type V = int16x8_t;
@@ -76,6 +79,57 @@ mod ops {
     #[cfg_attr(not(target_feature = "aes"), target_feature(enable = "neon"))]
     pub(super) fn neg(x: V) -> V {
         vqnegq_s16(x)
+    }
+
+    /// The ADST of four values (7.13.2.6). The sums are exact in 32
+    /// bits; an output of 32768 becomes 32767, which the rounding after
+    /// it cannot tell apart.
+    #[inline]
+    #[cfg_attr(target_feature = "aes", target_feature(enable = "neon,aes"))]
+    #[cfg_attr(not(target_feature = "aes"), target_feature(enable = "neon"))]
+    pub(super) fn adst4(t: [V; 4]) -> [V; 4] {
+        let [t0, t1, t2, t3] = t;
+        // `t0 - t2 + t3` in 16 bits, as the specification keeps it.
+        let b7 = vaddq_s16(vsubq_s16(t0, t2), t3);
+        let top = vdupq_n_s32(32768);
+        // The four outputs of the low or the high four lanes.
+        let half = |t0, t1, t2, t3, b7| {
+            let s0 = vmlal_n_s16(vmlal_n_s16(vmull_n_s16(t0, 1321), t2, 3803), t3, 2482);
+            let s1 = vmlsl_n_s16(vmlsl_n_s16(vmull_n_s16(t0, 2482), t2, 1321), t3, 3803);
+            let s3 = vmull_n_s16(t1, 3344);
+            let s2 = vmull_n_s16(b7, 3344);
+            [
+                vaddq_s32(s0, s3),
+                vaddq_s32(s1, s3),
+                s2,
+                vsubq_s32(vaddq_s32(s0, s1), s3),
+            ]
+            .map(|x| {
+                let r = vrshrq_n_s32::<12>(x);
+                // All ones, which is minus one, where it is 32768.
+                vmovn_s32(vaddq_s32(r, vreinterpretq_s32_u32(vceqq_s32(r, top))))
+            })
+        };
+        let lo = half(
+            vget_low_s16(t0),
+            vget_low_s16(t1),
+            vget_low_s16(t2),
+            vget_low_s16(t3),
+            vget_low_s16(b7),
+        );
+        let hi = half(
+            vget_high_s16(t0),
+            vget_high_s16(t1),
+            vget_high_s16(t2),
+            vget_high_s16(t3),
+            vget_high_s16(b7),
+        );
+        [
+            vcombine_s16(lo[0], hi[0]),
+            vcombine_s16(lo[1], hi[1]),
+            vcombine_s16(lo[2], hi[2]),
+            vcombine_s16(lo[3], hi[3]),
+        ]
     }
 
     /// The identity transform of `n` values on four of them (7.13.2.15):
@@ -162,11 +216,19 @@ fn transpose(r: [V; 8]) -> [V; 8] {
     ]
 }
 
-/// Eight coefficients from `at` on, their low 16 bits; zero past the end.
+/// Eight coefficients from `at` on (`four`: four of them), their low 16
+/// bits; zero past the end.
 #[inline]
 #[cfg_attr(target_feature = "aes", target_feature(enable = "neon,aes"))]
 #[cfg_attr(not(target_feature = "aes"), target_feature(enable = "neon"))]
-fn coefs8(coefs: &[i32], at: usize) -> V {
+fn coefs8(coefs: &[i32], at: usize, four: bool) -> V {
+    if four {
+        // A row of a block four wide: the other four lanes are zero.
+        let Some(c) = coefs.get(at..).and_then(|c| c.first_chunk::<4>()) else {
+            return vdupq_n_s16(0);
+        };
+        return vcombine_s16(vmovn_s32(i32x4(*c)), vdup_n_s16(0));
+    }
     let Some(c) = coefs.get(at..).and_then(|c| c.first_chunk::<8>()) else {
         return vdupq_n_s16(0);
     };
@@ -191,25 +253,31 @@ pub(super) fn add(b: &mut Block<'_>) {
     // By width and by rows of coefficients, so the values between the
     // two passes take no more room than the block has.
     match (b.w, b.h.min(32)) {
-        (8, 8) => sized::<8, 8>(b),
-        (8, 16) => sized::<8, 16>(b),
-        (8, _) => sized::<8, 32>(b),
-        (16, 8) => sized::<16, 8>(b),
-        (16, 16) => sized::<16, 16>(b),
-        (16, _) => sized::<16, 32>(b),
-        (32, 8) => sized::<32, 8>(b),
-        (32, 16) => sized::<32, 16>(b),
-        (32, _) => sized::<32, 32>(b),
-        (_, 8) => sized::<64, 8>(b),
-        (_, 16) => sized::<64, 16>(b),
-        _ => sized::<64, 32>(b),
+        (4, 4) => sized::<4, 8, 4>(b),
+        (4, 8) => sized::<4, 8, 8>(b),
+        (4, _) => sized::<4, 8, 16>(b),
+        (8, 4) => sized::<8, 8, 4>(b),
+        (8, 8) => sized::<8, 8, 8>(b),
+        (8, 16) => sized::<8, 8, 16>(b),
+        (8, _) => sized::<8, 8, 32>(b),
+        (16, 4) => sized::<16, 16, 4>(b),
+        (16, 8) => sized::<16, 16, 8>(b),
+        (16, 16) => sized::<16, 16, 16>(b),
+        (16, _) => sized::<16, 16, 32>(b),
+        (32, 8) => sized::<32, 32, 8>(b),
+        (32, 16) => sized::<32, 32, 16>(b),
+        (32, _) => sized::<32, 32, 32>(b),
+        (_, 16) => sized::<64, 64, 16>(b),
+        _ => sized::<64, 64, 32>(b),
     }
 }
 
-/// [`add`] for a block `W` wide with `TH` rows of coefficients.
+/// [`add`] for a block `W` wide with `TH` rows of coefficients. `MW` is
+/// the width in whole vectors: 8 for a block 4 wide, whose vectors have
+/// four lanes that nothing reads.
 #[cfg_attr(target_feature = "aes", target_feature(enable = "neon,aes"))]
 #[cfg_attr(not(target_feature = "aes"), target_feature(enable = "neon"))]
-fn sized<const W: usize, const TH: usize>(b: &mut Block<'_>) {
+fn sized<const W: usize, const MW: usize, const TH: usize>(b: &mut Block<'_>) {
     // Everything of the block in values of its own: a store to a sample
     // then says nothing about them.
     let (h, stride, coefs) = (b.h, b.stride, b.coefs);
@@ -231,17 +299,12 @@ fn sized<const W: usize, const TH: usize>(b: &mut Block<'_>) {
         // these; a caller that does takes the long way.)
         for r in 0..nr {
             for k0 in (0..nc).step_by(8) {
-                let Some(px) = dst
-                    .get_mut(r * stride + k0..)
-                    .and_then(|d| d.first_chunk_mut::<8>())
-                else {
-                    continue;
-                };
-                let mut v = coefs8(coefs, r * tw + k0);
+                let mut v = coefs8(coefs, r * tw + k0, W == 4);
                 if rect {
                     v = ops::scale(v, 2896);
                 }
-                add8(px, ops::identity_col(ops::identity_row(v, W, shift32), h));
+                let res = ops::identity_col(ops::identity_row(v, W, shift32), h);
+                add_some::<W>(dst, r * stride + k0, res);
             }
         }
         return;
@@ -250,7 +313,7 @@ fn sized<const W: usize, const TH: usize>(b: &mut Block<'_>) {
     // the rest it never reads.
     let mut t = [zero; 64];
     // The values after the row transforms, by row.
-    let mut mid = [[0i16; W]; TH];
+    let mut mid = [[0i16; MW]; TH];
     let read = made_for(nc).min(tw);
     for r0 in (0..nr).step_by(8) {
         // Eight rows of eight coefficients become eight entries of `T`.
@@ -259,7 +322,7 @@ fn sized<const W: usize, const TH: usize>(b: &mut Block<'_>) {
             if k0 < nc {
                 for (l, row) in m.iter_mut().enumerate() {
                     if r0 + l < nr {
-                        *row = coefs8(coefs, (r0 + l) * tw + k0);
+                        *row = coefs8(coefs, (r0 + l) * tw + k0, W == 4);
                     }
                 }
                 m = transpose(m);
@@ -300,8 +363,13 @@ fn sized<const W: usize, const TH: usize>(b: &mut Block<'_>) {
             }
         }
     }
-    // Rows the row transforms did not reach are zero in `mid`.
-    let read = made_for(nr).min(TH);
+    // Rows the row transforms did not reach are zero in `mid`. The ADST
+    // of four values is not made for fewer inputs: it reads all four.
+    let read = if col_kind == Kind::Adst && h == 4 {
+        4
+    } else {
+        made_for(nr).min(TH)
+    };
     if nr == 1 && col_kind == Kind::Dct {
         // One row of values: every column is flat (the DCT of its first
         // input alone), so every row of the block gets the same residual.
@@ -310,19 +378,17 @@ fn sized<const W: usize, const TH: usize>(b: &mut Block<'_>) {
             *v = vrshrq_n_s16::<4>(ops::scale(i16x8(*m), 2896));
         }
         if flip_lr {
-            res[..W / 8].reverse();
+            res[..MW / 8].reverse();
             for v in &mut res {
-                *v = back(*v);
+                *v = back::<W>(*v);
             }
         }
         for y in 0..h {
             let Some(row) = dst.get_mut(y * stride..).and_then(|d| d.get_mut(..W)) else {
                 continue;
             };
-            if W == 8 {
-                if let Some(px) = row.first_chunk_mut::<8>() {
-                    add8(px, res[0]);
-                }
+            if W <= 8 {
+                add_some::<W>(row, 0, res[0]);
                 continue;
             }
             for (px, r) in row
@@ -349,17 +415,12 @@ fn sized<const W: usize, const TH: usize>(b: &mut Block<'_>) {
                 }
             }
             run_1d(col_kind, h, nr, &mut t);
-            let x0 = if flip_lr { W - 8 - j0 } else { j0 };
+            let x0 = if flip_lr { MW - 8 - j0 } else { j0 };
             for (i, &v) in t.iter().enumerate().take(h) {
                 let y = if flip_ud { h - 1 - i } else { i };
-                let Some(px) = dst
-                    .get_mut(y * stride + x0..)
-                    .and_then(|d| d.first_chunk_mut::<8>())
-                else {
-                    continue;
-                };
                 let res = residual(v, col_identity, h);
-                add8(px, if flip_lr { back(res) } else { res });
+                let res = if flip_lr { back::<W>(res) } else { res };
+                add_some::<W>(dst, y * stride + x0, res);
             }
         }
         return;
@@ -393,7 +454,7 @@ fn sized<const W: usize, const TH: usize>(b: &mut Block<'_>) {
             let mut hi = residual(hi, col_identity, h);
             if flip_lr {
                 // The columns from the right: the second group first.
-                (lo, hi) = (back(hi), back(lo));
+                (lo, hi) = (back::<W>(hi), back::<W>(lo));
             }
             add16(px, lo, hi);
         }
@@ -437,13 +498,35 @@ fn residual(v: V, identity: bool, h: usize) -> V {
     }
 }
 
-/// The eight lanes back to front.
+/// The lanes of a block `W` wide back to front: all eight, or the first
+/// four of a block 4 wide.
 #[inline]
 #[cfg_attr(target_feature = "aes", target_feature(enable = "neon,aes"))]
 #[cfg_attr(not(target_feature = "aes"), target_feature(enable = "neon"))]
-fn back(v: V) -> V {
+fn back<const W: usize>(v: V) -> V {
     let r = vrev64q_s16(v);
-    vextq_s16::<4>(r, r)
+    if W == 4 { r } else { vextq_s16::<4>(r, r) }
+}
+
+/// [`add8`] on the samples from `at` on of a block `W` wide: eight, or
+/// the four of a block 4 wide. Samples past the end are left alone.
+#[inline]
+#[cfg_attr(target_feature = "aes", target_feature(enable = "neon,aes"))]
+#[cfg_attr(not(target_feature = "aes"), target_feature(enable = "neon"))]
+fn add_some<const W: usize>(dst: &mut [u8], at: usize, res: V) {
+    let Some(d) = dst.get_mut(at..) else {
+        return;
+    };
+    if W == 4 {
+        if let Some(px) = d.first_chunk_mut::<4>() {
+            let mut eight = [0u8; 8];
+            eight[..4].copy_from_slice(px);
+            add8(&mut eight, res);
+            px.copy_from_slice(&eight[..4]);
+        }
+    } else if let Some(px) = d.first_chunk_mut::<8>() {
+        add8(px, res);
+    }
 }
 
 #[cfg_attr(target_feature = "aes", target_feature(enable = "neon,aes"))]

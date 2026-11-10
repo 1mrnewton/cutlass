@@ -175,6 +175,13 @@ macro_rules! transforms {
         tx1d!($(#[$attr])* adst16_8, rep64, 16, ADST16, ADST16_IN, ADST16_OUT, true, 8);
         tx1d!($(#[$attr])* adst16_16, rep64, 16, ADST16, ADST16_IN, ADST16_OUT, true, 16);
 
+        /// The ADST of four values (7.13.2.6), which is no table of steps.
+        $(#[$attr])*
+        fn adst4(t: &mut [ops::V; 64]) {
+            let out = ops::adst4([t[0], t[1], t[2], t[3]]);
+            t[..4].copy_from_slice(&out);
+        }
+
         $(#[$attr])*
         pub(super) fn run_1d(kind: Kind, n: usize, nz: usize, t: &mut [ops::V; 64]) -> bool {
             match (kind, n, nz) {
@@ -197,6 +204,7 @@ macro_rules! transforms {
                 (Kind::Dct, 64, 5..=8) => dct64_8(t),
                 (Kind::Dct, 64, 9..=16) => dct64_16(t),
                 (Kind::Dct, 64, _) => dct64_32(t),
+                (Kind::Adst, 4, _) => adst4(t),
                 (Kind::Adst, 8, 0 | 1) => adst8_1(t),
                 (Kind::Adst, 8, 2..=4) => adst8_4(t),
                 (Kind::Adst, 8, _) => adst8_8(t),
@@ -206,7 +214,7 @@ macro_rules! transforms {
                 (Kind::Adst, 16, _) => adst16_16(t),
                 // The identity scales each value: its caller does that as
                 // it rounds the outputs.
-                (Kind::Identity, 8 | 16 | 32, _) => {}
+                (Kind::Identity, 4 | 8 | 16 | 32, _) => {}
                 _ => return false,
             }
             true

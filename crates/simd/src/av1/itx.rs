@@ -63,14 +63,21 @@ pub const ACCELERATED: bool = cfg!(all(target_arch = "aarch64", target_feature =
 const fn has(kind: Kind, n: usize) -> bool {
     matches!(
         (kind, n),
-        (Kind::Dct, 8 | 16 | 32 | 64) | (Kind::Adst, 8 | 16) | (Kind::Identity, 8 | 16 | 32)
+        (Kind::Dct, 4 | 8 | 16 | 32 | 64)
+            | (Kind::Adst, 4 | 8 | 16)
+            | (Kind::Identity, 4 | 8 | 16 | 32)
     )
 }
 
-/// Whether [`add`] takes a block of this size and these transforms.
+/// Whether [`add`] takes a block of this size and these transforms: a
+/// side is at most four times the other, as in every AV1 transform size.
+/// A 4x4 block is taken only with two identity transforms: for the
+/// others, getting sixteen values in and out of vectors costs more than
+/// it saves.
 #[must_use]
 pub const fn supports(w: usize, h: usize, row: Kind, col: Kind) -> bool {
-    has(row, w) && has(col, h)
+    let small = w == 4 && h == 4 && !matches!((row, col), (Kind::Identity, Kind::Identity));
+    has(row, w) && has(col, h) && w <= 4 * h && h <= 4 * w && !small
 }
 
 /// Whether the slices of `b` hold the block.

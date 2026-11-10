@@ -165,6 +165,32 @@ fn a_dct_of_its_first_input_alone_is_flat() {
     }
 }
 
+#[test]
+fn the_adst_of_four_values_follows_the_specification() {
+    // 7.13.2.6 with one input each: the sines times it, rounded.
+    let round = |x: i32| ((x + 2048) >> 12) as i16;
+    let cases: [(usize, [i32; 4]); 4] = [
+        (0, [1321, 2482, 3344, 3803]),
+        (1, [3344, 3344, 0, -3344]),
+        (2, [3803, -1321, -3344, 2482]),
+        (3, [2482, -3803, 3344, -1321]),
+    ];
+    for (input, sines) in cases {
+        let mut t = [[0i16; 8]; 64];
+        // Not -32768: the specification keeps `t0 - t2 + t3` in 16 bits.
+        t[input] = [1, -1, 100, -100, 4096, 9999, -32767, 32767];
+        let x = t[input];
+        assert!(scalar::one_dimension(Kind::Adst, 4, 4, &mut t));
+        for (i, s) in sines.into_iter().enumerate() {
+            assert_eq!(
+                t[i],
+                x.map(|v| round(i32::from(v) * s)),
+                "input {input} output {i}"
+            );
+        }
+    }
+}
+
 /// A block of the given size with random coefficients in its first rows
 /// and columns, over a random prediction.
 struct Case {

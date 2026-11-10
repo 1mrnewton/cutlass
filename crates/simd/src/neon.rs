@@ -5,7 +5,7 @@
 use core::arch::aarch64::{
     int16x8_t, int32x4_t, uint8x8_t, uint8x16_t, uint16x8_t, vcombine_u64, vcreate_u8, vcreate_u64,
     vgetq_lane_u64, vreinterpretq_s16_u64, vreinterpretq_s32_u64, vreinterpretq_u8_u64,
-    vreinterpretq_u16_u64, vreinterpretq_u64_u8,
+    vreinterpretq_u16_u64, vreinterpretq_u64_u8, vreinterpretq_u64_u16,
 };
 
 /// Eight bytes as eight lanes.
@@ -88,4 +88,16 @@ pub(crate) fn bytes(v: uint8x16_t) -> [u8; 16] {
     let v = vreinterpretq_u64_u8(v);
     let x = u128::from(vgetq_lane_u64::<0>(v)) | u128::from(vgetq_lane_u64::<1>(v)) << 64;
     x.to_le_bytes()
+}
+
+/// The lanes of `v` as eight 16-bit values.
+#[inline]
+#[target_feature(enable = "neon")]
+pub(crate) fn u16x8_array(v: uint16x8_t) -> [u16; 8] {
+    let v = vreinterpretq_u64_u16(v);
+    let (lo, hi) = (vgetq_lane_u64::<0>(v), vgetq_lane_u64::<1>(v));
+    core::array::from_fn(|i| {
+        let half = if i < 4 { lo } else { hi };
+        (half >> (16 * (i % 4))) as u16
+    })
 }

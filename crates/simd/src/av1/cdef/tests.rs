@@ -1,4 +1,7 @@
-use super::{direction_u8, direction_u16, scalar};
+use super::{
+    CENTRE, Filter, STRIDE, UNAVAILABLE, WINDOW, direction_u8, direction_u16, filter_u8,
+    filter_u16, scalar,
+};
 
 /// A small fixed-seed generator: the same blocks on every run.
 struct Rng(u64);
@@ -104,4 +107,143 @@ fn a_depth_outside_the_range_is_clamped() {
         direction_u16(&[[200; 8]; 8], 0),
         direction_u16(&[[200; 8]; 8], 8)
     );
+}
+
+/// `Cdef_Directions` of the specification: `(row, column)` steps.
+const DIRECTIONS: [[[i32; 2]; 2]; 8] = [
+    [[-1, 1], [-2, 2]],
+    [[0, 1], [-1, 2]],
+    [[0, 1], [0, 2]],
+    [[0, 1], [1, 2]],
+    [[1, 1], [2, 2]],
+    [[1, 0], [2, 1]],
+    [[1, 0], [2, 0]],
+    [[1, 0], [2, -1]],
+];
+
+/// The filter for strengths `pri`, `sec` (already scaled), a direction, a
+/// damping and a bit depth, as 7.15.3 derives it.
+fn filter_for(pri: u16, sec: u16, dir: usize, damping: u32, bd: u32) -> Filter {
+    let at = |d: usize, k: usize| {
+        let [dy, dx] = DIRECTIONS[d & 7][k];
+        (CENTRE as i32 + dy * STRIDE as i32 + dx) as usize
+    };
+    let shift = |v: u16| {
+        if v == 0 {
+            0
+        } else {
+            damping.saturating_sub(15 - v.leading_zeros())
+        }
+    };
+    Filter {
+        pri,
+        sec,
+        pri_shift: shift(pri),
+        sec_shift: shift(sec),
+        pri_taps: if (pri >> (bd - 8)) & 1 == 1 {
+            [3, 3]
+        } else {
+            [4, 2]
+        },
+        pri_at: [at(dir, 0), at(dir, 1)],
+        sec_at: [
+            at(dir + 2, 0),
+            at(dir + 6, 0),
+            at(dir + 2, 1),
+            at(dir + 6, 1),
+        ],
+    }
+}
+
+/// A window of textured samples of `bd` bits, with `edges` choosing which
+/// sides lie outside the picture.
+fn window(rng: &mut Rng, bd: u32, edges: u32) -> [u16; WINDOW] {
+    let max = (1u32 << bd) - 1;
+    let span = [max + 1, 3, 9, 60][(rng.next() % 4) as usize].min(max + 1);
+    let base = rng.next() % (max + 2 - span);
+    core::array::from_fn(|n| {
+        let (row, col) = (n / STRIDE, n % STRIDE);
+        let out = (edges & 1 != 0 && row < 2)
+            || (edges & 2 != 0 && row >= 10)
+            || (edges & 4 != 0 && col < 2)
+            || (edges & 8 != 0 && (10..12).contains(&col));
+        if out {
+            UNAVAILABLE
+        } else {
+            (base + rng.next() % span) as u16
+        }
+    })
+}
+
+#[test]
+fn the_filter_matches_the_specification() {
+    let mut rng = Rng(0x00F1_17E4);
+    let mut changed = 0;
+    for round in 0..6000u32 {
+        let bd = [8, 8, 10, 12][(round % 4) as usize];
+        let edges = if round % 3 == 0 { rng.next() % 16 } else { 0 };
+        let win = window(&mut rng, bd, edges);
+        let (pri, sec) = match round % 5 {
+            0 => (rng.next() % 16, 0),
+            1 => (0, [1, 2, 4][(rng.next() % 3) as usize]),
+            _ => (rng.next() % 16, [0, 1, 2, 4][(rng.next() % 4) as usize]),
+        };
+        let (pri, sec) = ((pri << (bd - 8)) as u16, (sec << (bd - 8)) as u16);
+        if pri == 0 && sec == 0 {
+            continue;
+        }
+        let damping = 3 + rng.next() % 4 + (bd - 8);
+        let f = filter_for(pri, sec, (rng.next() % 8) as usize, damping, bd);
+        let rows = [8, 8, 4][(round % 3) as usize];
+        let want = scalar::filter(&win, &f, rows);
+        assert_eq!(filter_u16(&win, &f, rows), want, "{bd} bits {f:?}");
+        if bd == 8 {
+            assert_eq!(filter_u8(&win, &f, rows), want.map(|r| r.map(|v| v as u8)));
+        }
+        changed += usize::from(want[0][0] != win[CENTRE]);
+    }
+    assert!(
+        changed > 1000,
+        "{changed} blocks changed their first sample"
+    );
+}
+
+#[test]
+fn rows_past_the_count_come_back_zero() {
+    let mut rng = Rng(5);
+    let win = window(&mut rng, 8, 0);
+    let f = filter_for(7, 2, 3, 5, 8);
+    let got = filter_u8(&win, &f, 4);
+    assert_eq!(got[4..], [[0u8; 8]; 4]);
+    assert_eq!(got[..4], filter_u8(&win, &f, 8)[..4]);
+    // More rows than a block has are the block's eight.
+    assert_eq!(filter_u8(&win, &f, 99), filter_u8(&win, &f, 8));
+}
+
+#[test]
+fn a_block_alone_in_its_picture_is_unchanged() {
+    // Every tap is outside the picture: nothing to pull the samples toward.
+    let win: [u16; WINDOW] = core::array::from_fn(|n| {
+        let (row, col) = (n / STRIDE, n % STRIDE);
+        if (2..10).contains(&row) && (2..10).contains(&col) {
+            200
+        } else {
+            UNAVAILABLE
+        }
+    });
+    let got = filter_u8(&win, &filter_for(15, 4, 0, 6, 8), 8);
+    assert_eq!(got, [[200u8; 8]; 8]);
+}
+
+#[test]
+fn tap_positions_out_of_range_are_clamped() {
+    let mut rng = Rng(9);
+    let win = window(&mut rng, 8, 0);
+    let mut f = filter_for(6, 2, 1, 5, 8);
+    f.pri_at = [usize::MAX, 5000];
+    f.sec_shift = 400;
+    let mut clamped = f;
+    clamped.pri_at = [2 * CENTRE; 2];
+    clamped.sec_shift = 15;
+    assert_eq!(filter_u8(&win, &f, 8), filter_u8(&win, &clamped, 8));
 }

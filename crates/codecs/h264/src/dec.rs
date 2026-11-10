@@ -145,18 +145,43 @@ impl Mb {
 /// that fails leaves no trace. A stored picture is almost always only read
 /// after that, and sharing makes its copy free. The first write through a
 /// shared buffer copies it, so a clone still never sees the other's writes.
+///
+/// A picture being decoded is written to constantly and by one holder, so
+/// its planes start out [`Shared::owned`]: plain buffers, with nothing to
+/// check on each write. They are [`Shared::freeze`]d into the shared form
+/// when the picture is done. Cloning one that is still owned copies it.
 #[derive(Clone, Debug)]
-pub(crate) struct Shared<T>(std::sync::Arc<Vec<T>>);
+pub(crate) struct Shared<T>(Hold<T>);
+
+#[derive(Clone, Debug)]
+enum Hold<T> {
+    Owned(Vec<T>),
+    Split(std::sync::Arc<Vec<T>>),
+}
+
+impl<T> Shared<T> {
+    /// A buffer with one holder, for the picture being decoded.
+    pub(crate) fn owned(held: Vec<T>) -> Self {
+        Self(Hold::Owned(held))
+    }
+
+    /// Makes clones from here on share the buffer.
+    pub(crate) fn freeze(&mut self) {
+        if let Hold::Owned(held) = &mut self.0 {
+            self.0 = Hold::Split(std::sync::Arc::new(std::mem::take(held)));
+        }
+    }
+}
 
 impl<T> Default for Shared<T> {
     fn default() -> Self {
-        Self(std::sync::Arc::new(Vec::new()))
+        Self(Hold::Owned(Vec::new()))
     }
 }
 
 impl<T> From<Vec<T>> for Shared<T> {
     fn from(held: Vec<T>) -> Self {
-        Self(std::sync::Arc::new(held))
+        Self(Hold::Split(std::sync::Arc::new(held)))
     }
 }
 
@@ -165,14 +190,20 @@ impl<T> std::ops::Deref for Shared<T> {
 
     #[inline]
     fn deref(&self) -> &Vec<T> {
-        &self.0
+        match &self.0 {
+            Hold::Owned(held) => held,
+            Hold::Split(held) => held,
+        }
     }
 }
 
 impl<T: Clone> std::ops::DerefMut for Shared<T> {
     #[inline]
     fn deref_mut(&mut self) -> &mut Vec<T> {
-        std::sync::Arc::make_mut(&mut self.0)
+        match &mut self.0 {
+            Hold::Owned(held) => held,
+            Hold::Split(held) => std::sync::Arc::make_mut(held),
+        }
     }
 }
 
@@ -300,6 +331,15 @@ impl Shown {
 }
 
 impl<S: Sample> Frame<S> {
+    /// The picture is finished: from here its copies share its planes.
+    fn seal(&mut self) {
+        self.y.freeze();
+        self.u.freeze();
+        self.v.freeze();
+        self.mb.freeze();
+        self.levels.freeze();
+    }
+
     /// The macroblock at address `addr`. For a picture another thread is
     /// decoding this waits for that macroblock's row.
     pub(crate) fn mb_at(&self, addr: usize) -> Option<&Mb> {
@@ -1089,6 +1129,7 @@ fn decode_au<S: Sample>(
                         });
                         if keep_base {
                             base.output = false;
+                            base.seal();
                             dpb.push(base);
                         }
                         index += 1;
@@ -1531,6 +1572,7 @@ fn finish_picture<S: Sample>(
         }
     }
     let reorder = pic_reorder(&pic);
+    pic.seal();
     dpb.push(pic);
     dpb.retain(|frame| frame.referenced || frame.output);
     Ok(take_output(dpb, reorder))
@@ -3917,10 +3959,10 @@ fn new_frame<S: Sample>(
         (0, 0, 0)
     };
     Ok(Frame {
-        y: vec![S::default(); luma].into(),
-        u: vec![S::mid(); chroma].into(),
-        v: vec![S::mid(); chroma].into(),
-        mb: vec![Mb::new(u16::MAX); blocks].into(),
+        y: Shared::owned(vec![S::default(); luma]),
+        u: Shared::owned(vec![S::mid(); chroma]),
+        v: Shared::owned(vec![S::mid(); chroma]),
+        mb: Shared::owned(vec![Mb::new(u16::MAX); blocks]),
         w,
         h,
         mb_w,
@@ -4495,14 +4537,15 @@ fn run_picture<S: Sample>(job: PictureJob<S>) {
     let ends = EndsPicture(published);
     // The planes are made here, on the thread that fills them.
     let blocks = pic.mb_w.saturating_mul(pic.h / 16);
-    pic.y = vec![S::default(); pic.w.saturating_mul(pic.h)].into();
-    pic.u = vec![S::mid(); (pic.w / 2).saturating_mul(pic.h / 2)].into();
-    pic.v = vec![S::mid(); (pic.w / 2).saturating_mul(pic.h / 2)].into();
-    pic.mb = vec![Mb::new(u16::MAX); blocks].into();
+    pic.y = Shared::owned(vec![S::default(); pic.w.saturating_mul(pic.h)]);
+    pic.u = Shared::owned(vec![S::mid(); (pic.w / 2).saturating_mul(pic.h / 2)]);
+    pic.v = Shared::owned(vec![S::mid(); (pic.w / 2).saturating_mul(pic.h / 2)]);
+    pic.mb = Shared::owned(vec![Mb::new(u16::MAX); blocks]);
     let result = decode_picture(&mut pic, &dpb, &slices).map(|()| {
         // The picture is put in its output form here too, so the caller
         // only has to pick it up.
         pic.shown = shown;
+        pic.seal();
         let output = if pic.output { emit_whole(&pic) } else { None };
         progress::Planes {
             y: std::mem::take(&mut pic.y),

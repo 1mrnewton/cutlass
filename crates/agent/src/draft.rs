@@ -455,6 +455,7 @@ pub fn request_name(request: &Request) -> &'static str {
         Request::SetCurveSpeed { .. } => "set_curve_speed",
         Request::SetChangePitch { .. } => "set_change_pitch",
         Request::SetTransition { .. } => "set_transition",
+        Request::RemoveTransition { .. } => "remove_transition",
         Request::Split { .. } => "split",
         Request::Link { .. } => "link",
         Request::Remove { .. } => "remove",

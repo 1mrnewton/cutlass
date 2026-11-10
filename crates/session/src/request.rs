@@ -163,6 +163,9 @@ pub enum Request {
         segment_id: SegmentId,
         transition: Box<MaterialTransition>,
     },
+    /// Take the blend off the outgoing segment, and its material off the
+    /// draft. A segment with no blend is refused.
+    RemoveTransition { segment_id: SegmentId },
     /// Split `segment_id` at `at`. The time must sit outside every blend window on the track.
     Split {
         segment_id: SegmentId,

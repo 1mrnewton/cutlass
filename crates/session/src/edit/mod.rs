@@ -292,6 +292,9 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             segment_id,
             transition,
         } => transition::set_transition(draft, segment_id, (**transition).clone()),
+        Request::RemoveTransition { segment_id } => {
+            transition::remove_transition(draft, segment_id)
+        }
         Request::Split {
             segment_id,
             at,
@@ -842,12 +845,16 @@ pub fn apply_all(
         .filter(|track| !track.segments.is_empty())
         .map(|track| track.id.clone())
         .collect();
+    let blended = transition::on_cuts(draft);
     for request in requests {
         let before = linkage::segments_of(draft);
         apply_request(draft, request)?;
         linkage::after_request(draft, &before, linkage)?;
         magnet::pack(draft, linkage)?;
     }
+    // A blend whose two clips no longer meet goes with the edit that
+    // parted them.
+    transition::drop_parted(draft, &blended);
     drop_emptied_lanes(draft, &held);
     sync_duration(draft);
     Ok(())

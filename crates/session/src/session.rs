@@ -1299,6 +1299,153 @@ mod tests {
         }
     }
 
+    /// Two touching clips `a` and `b` and a third, `c`, after a gap, with a
+    /// blend on the cut between the first two.
+    fn blended() -> (Session, TrackId) {
+        let (mut session, track) = session();
+        session
+            .apply(
+                0,
+                &[
+                    place(&track, "a", 0, 1_000_000),
+                    place(&track, "b", 1_000_000, 1_000_000),
+                    place(&track, "c", 5_000_000, 1_000_000),
+                    Request::SetTransition {
+                        segment_id: "a".into(),
+                        transition: Box::new(blend("blend", 200_000, true)),
+                    },
+                ],
+            )
+            .unwrap();
+        (session, track)
+    }
+
+    fn blends(session: &Session) -> Vec<(String, usize)> {
+        session
+            .draft()
+            .tracks
+            .iter()
+            .flat_map(|track| &track.segments)
+            .map(|segment| {
+                (
+                    segment.id.as_str().to_owned(),
+                    segment.extra_material_refs.len(),
+                )
+            })
+            .filter(|(_, refs)| *refs > 0)
+            .collect()
+    }
+
+    #[test]
+    fn a_blend_is_removed_by_request_and_a_clip_without_one_refuses() {
+        let (mut session, _) = blended();
+        assert_eq!(blends(&session), [("a".to_owned(), 1)]);
+        let before = session.draft().clone();
+        let error = session
+            .apply(
+                1,
+                &[Request::RemoveTransition {
+                    segment_id: "b".into(),
+                }],
+            )
+            .unwrap_err();
+        assert_eq!(error, EditError::MissingMaterial);
+        assert_eq!(session.draft(), &before);
+        session
+            .apply(
+                1,
+                &[Request::RemoveTransition {
+                    segment_id: "a".into(),
+                }],
+            )
+            .unwrap();
+        assert!(blends(&session).is_empty());
+        assert!(session.draft().materials.transitions.is_empty());
+        // Neither clip moved.
+        assert_eq!(
+            session.draft().tracks[0].segments[1].target,
+            TimeRange::new(1_000_000, 1_000_000)
+        );
+        session.undo().unwrap();
+        assert_eq!(session.draft(), &before);
+    }
+
+    #[test]
+    fn a_blend_goes_when_its_clips_part_and_stays_while_they_meet() {
+        // The incoming clip moved away, and deleted.
+        for parting in [
+            Request::Move {
+                segment_id: "b".into(),
+                track_id: TrackId::new("main"),
+                start: Micros(2_000_000),
+            },
+            Request::Remove {
+                segment_id: "b".into(),
+            },
+            Request::Trim {
+                segment_id: "a".into(),
+                edge: TrimEdge::End,
+                time: Micros(900_000),
+            },
+        ] {
+            let (mut session, track) = blended();
+            let before = session.draft().clone();
+            let parting = match parting {
+                Request::Move {
+                    segment_id, start, ..
+                } => Request::Move {
+                    segment_id,
+                    track_id: track.clone(),
+                    start,
+                },
+                other => other,
+            };
+            session.apply(1, std::slice::from_ref(&parting)).unwrap();
+            assert!(blends(&session).is_empty(), "{parting:?}");
+            assert!(
+                session.draft().materials.transitions.is_empty(),
+                "{parting:?}"
+            );
+            // Undo brings the blend back with the cut.
+            session.undo().unwrap();
+            assert_eq!(session.draft(), &before);
+        }
+
+        // An edit that leaves the cut alone leaves the blend.
+        let (mut session, track) = blended();
+        session
+            .apply(
+                1,
+                &[Request::Move {
+                    segment_id: "c".into(),
+                    track_id: track,
+                    start: Micros(7_000_000),
+                }],
+            )
+            .unwrap();
+        assert_eq!(blends(&session), [("a".to_owned(), 1)]);
+
+        // A blend stored where no clip follows was never on a cut, so an
+        // edit elsewhere does not take it.
+        let (mut session, _) = blended();
+        session
+            .apply(
+                1,
+                &[
+                    Request::SetTransition {
+                        segment_id: "c".into(),
+                        transition: Box::new(blend("alone", 100_000, false)),
+                    },
+                    Request::SetActive {
+                        segment_id: "a".into(),
+                        active: false,
+                    },
+                ],
+            )
+            .unwrap();
+        assert_eq!(blends(&session).len(), 2);
+    }
+
     #[test]
     fn a_blend_stays_on_the_outgoing_segment_and_a_split_inside_it_is_refused() {
         let (mut session, track) = session();

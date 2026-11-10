@@ -454,10 +454,12 @@ pub fn show(
     let full = size(ctx, entries);
     let at = window.min + at.to_vec2();
     let menu = place(bounds, at, Vec2::new(full.x, full.y.min(bounds.height())));
-    let sub_key = id.with("sub-on-screen");
-    let last_sub: Option<Rect> = ctx.data(|data| data.get_temp(sub_key)).flatten();
-    let canvas = last_sub
-        .map_or(menu, |sub| menu.union(sub))
+    // The window is as large as the menu and every place a submenu of it
+    // can open, from the first frame to the last. Sized to the submenu
+    // that happens to be open, it was resized and moved each time one
+    // opened or closed, and a pointer swept down the rows made it flicker.
+    let canvas = sub_reach(ctx, bounds, menu, full.y, entries)
+        .map_or(menu, |reach| menu.union(reach))
         .expand(SHADOW_ROOM);
 
     // The menu is another window, so a press, a scroll, or Escape in the app
@@ -482,11 +484,11 @@ pub fn show(
         .with_position(canvas.min)
         .with_inner_size(canvas.size());
     let offset = canvas.min.to_vec2();
-    let (mut shown, rects, menu_focused) = ctx.show_viewport_immediate(
+    let (mut shown, menu_focused) = ctx.show_viewport_immediate(
         egui::ViewportId::from_hash_of(id.with("menu-window")),
         builder,
         |child, _| {
-            let (shown, rects) = show_in(
+            let (shown, _) = show_in(
                 child,
                 id,
                 bounds.translate(-offset),
@@ -495,21 +497,12 @@ pub fn show(
                 enabled,
             );
             let focused = child.input(|input| input.viewport().focused);
-            let rects: Vec<Rect> = rects.iter().map(|rect| rect.translate(offset)).collect();
-            (shown, rects, focused)
+            (shown, focused)
         },
     );
-    let sub = rects.get(1).copied();
-    if sub != last_sub {
-        ctx.data_mut(|data| data.insert_temp(sub_key, sub));
-        ctx.request_repaint();
-    }
     // Another app took the focus from both windows.
     let away = app_focused == Some(false) && menu_focused == Some(false);
     shown.dismissed |= pressed || wheel || escape || away;
-    if shown.picked.is_some() || shown.dismissed {
-        ctx.data_mut(|data| data.remove::<Option<Rect>>(sub_key));
-    }
     shown
 }
 
@@ -686,14 +679,7 @@ fn show_in(
     );
     let mut rects = vec![rect];
     if let Some((children, row)) = submenu {
-        let size = size(ctx, children);
-        let right = Pos2::new(row.right() - PAD, row.top() - PAD);
-        let corner = if right.x + size.x > screen.right() {
-            Pos2::new(row.left() - size.x + PAD, right.y)
-        } else {
-            right
-        };
-        let sub_rect = place(screen, corner, size);
+        let sub_rect = sub_place(ctx, screen, row, children);
         // A sublayer always paints just above its parent.
         ctx.set_sublayer(
             LayerId::new(Order::Foreground, id),
@@ -733,6 +719,58 @@ fn show_in(
         });
     }
     (shown, rects)
+}
+
+/// Where the submenu `children` of the row at `row` opens: beside the row
+/// on its right, on its left when the right has no room, and inside
+/// `screen`.
+fn sub_place(ctx: &Context, screen: Rect, row: Rect, children: &[Entry]) -> Rect {
+    let size = size(ctx, children);
+    let right = Pos2::new(row.right() - PAD, row.top() - PAD);
+    let corner = if right.x + size.x > screen.right() {
+        Pos2::new(row.left() - size.x + PAD, right.y)
+    } else {
+        right
+    };
+    place(screen, corner, size)
+}
+
+/// Everywhere a submenu of `entries` can open, for the menu at `rect`
+/// whose rows are `full_height` tall in all: each submenu's place with the
+/// menu scrolled to its top and to its foot, and so anywhere between.
+/// `None` when no row has a submenu.
+fn sub_reach(
+    ctx: &Context,
+    screen: Rect,
+    rect: Rect,
+    full_height: f32,
+    entries: &[Entry],
+) -> Option<Rect> {
+    let furthest = (full_height - rect.height()).max(0.0);
+    let (left, right) = (rect.left() + PAD, rect.right() - PAD);
+    let mut top = rect.top() + PAD;
+    let mut reach: Option<Rect> = None;
+    for entry in entries {
+        let item = match entry {
+            Entry::Separator => {
+                top += SEPARATOR;
+                continue;
+            }
+            Entry::Item(item) => item,
+        };
+        if !item.children.is_empty() {
+            for scroll in [0.0, furthest] {
+                let row = Rect::from_min_max(
+                    Pos2::new(left, top - scroll),
+                    Pos2::new(right, top - scroll + ROW),
+                );
+                let sub = sub_place(ctx, screen, row, item.children);
+                reach = Some(reach.map_or(sub, |reach| reach.union(sub)));
+            }
+        }
+        top += ROW;
+    }
+    reach
 }
 
 /// The menu's size: its widest row and every row's height.
@@ -1198,6 +1236,84 @@ mod tests {
                 .expect("stacked")
         };
         assert!(at(id.with("sub")) > at(id));
+    }
+
+    /// The menu's own window is sized once to [`sub_reach`]. Were a
+    /// submenu to open outside it, the window would cut it off.
+    #[test]
+    fn every_submenu_opens_inside_the_room_the_window_keeps_for_it() {
+        // A wide screen, one too narrow for a submenu on the right, and one
+        // too short for the menu, which then scrolls.
+        for (screen, at) in [
+            (Vec2::new(1600.0, 1400.0), Pos2::new(100.0, 100.0)),
+            (Vec2::new(520.0, 1400.0), Pos2::new(260.0, 100.0)),
+            (Vec2::new(1600.0, 420.0), Pos2::new(100.0, 40.0)),
+        ] {
+            let ctx = Context::default();
+            let screen = Rect::from_min_size(Pos2::ZERO, screen);
+            let bounds = screen.shrink(EDGE);
+            let frame = |events: Vec<egui::Event>| {
+                let mut reach = None;
+                let mut rects = Vec::new();
+                let mut output = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(screen),
+                        events,
+                        ..Default::default()
+                    },
+                    |ui| {
+                        let id = ui.scope_id().with("menu");
+                        let full = size(ui.ctx(), VIDEO);
+                        let menu =
+                            place(bounds, at, Vec2::new(full.x, full.y.min(bounds.height())));
+                        reach = sub_reach(ui.ctx(), bounds, menu, full.y, VIDEO);
+                        rects = show_in(ui.ctx(), id, bounds, at, VIDEO, &|_| true).1;
+                    },
+                );
+                output.textures_delta.clear();
+                (rects, reach)
+            };
+            let mut opened = 0;
+            // Down the menu a few points at a time, with the wheel turned
+            // to its foot on the way, as a tall menu is read.
+            for step in 0..400 {
+                let y = bounds.top() + 4.0 + (step % 200) as f32 * (bounds.height() - 8.0) / 200.0;
+                let pointer = Pos2::new(at.x + 60.0, y);
+                let mut events = vec![egui::Event::PointerMoved(pointer)];
+                if step == 200 {
+                    events.push(egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Point,
+                        delta: Vec2::new(0.0, -4000.0),
+                        phase: egui::TouchPhase::Move,
+                        source: egui::MouseWheelSource::Wheel,
+                        modifiers: egui::Modifiers::default(),
+                    });
+                }
+                frame(events);
+                let (rects, reach) = frame(vec![egui::Event::PointerMoved(pointer)]);
+                if let Some(sub) = rects.get(1) {
+                    opened += 1;
+                    let reach = reach.expect("a menu with submenus has their reach");
+                    assert!(
+                        reach.expand(0.5).contains_rect(*sub),
+                        "screen {screen:?}: {sub:?} is outside {reach:?}"
+                    );
+                }
+            }
+            assert!(
+                opened > 4,
+                "screen {screen:?}: only {opened} submenus opened"
+            );
+        }
+        // A menu with no submenu keeps no room for one.
+        let ctx = Context::default();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+            let full = size(ui.ctx(), GAP_ROW);
+            let menu = place(screen, Pos2::new(10.0, 10.0), full);
+            assert_eq!(sub_reach(ui.ctx(), screen, menu, full.y, GAP_ROW), None);
+        });
+        output.textures_delta.clear();
     }
 
     #[test]

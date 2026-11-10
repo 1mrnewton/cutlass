@@ -4847,6 +4847,12 @@ fn recon_chroma<S: Sample>(
             );
             continue;
         }
+        // No coefficients in this plane: every block below would add zero.
+        if dc.iter().take(4).all(|&level| level == 0)
+            && ac.iter().take(4).all(|block| block[..15] == [0; 15])
+        {
+            continue;
+        }
         let weight = i32::from(slice.pps.weight4[list][0]);
         let scaled = recon::chroma_dc(dc[0], dc[1], dc[2], dc[3], qp_c, weight);
         for i in 0..4 {

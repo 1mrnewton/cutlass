@@ -1491,9 +1491,31 @@ fn src_at<S: Sample>(samples: &[S], stride: usize, x: i32, y: i32) -> Src<'_, S>
 
 fn copy_block<S: Sample>(dst: &mut [S], dst_stride: usize, src: Src<'_, S>, size: (usize, usize)) {
     let (w, h) = size;
+    // The usual widths get a copy of known length, which is a few moves
+    // rather than a call.
+    match w {
+        16 => copy_rows::<S, 16>(dst, dst_stride, &src, h),
+        8 => copy_rows::<S, 8>(dst, dst_stride, &src, h),
+        4 => copy_rows::<S, 4>(dst, dst_stride, &src, h),
+        _ => {
+            for row in 0..h {
+                let from = (src.y + row) * src.stride + src.x;
+                dst[row * dst_stride..row * dst_stride + w]
+                    .copy_from_slice(&src.samples[from..from + w]);
+            }
+        }
+    }
+}
+
+fn copy_rows<S: Sample, const W: usize>(
+    dst: &mut [S],
+    dst_stride: usize,
+    src: &Src<'_, S>,
+    h: usize,
+) {
     for row in 0..h {
         let from = (src.y + row) * src.stride + src.x;
-        dst[row * dst_stride..row * dst_stride + w].copy_from_slice(&src.samples[from..from + w]);
+        dst[row * dst_stride..row * dst_stride + W].copy_from_slice(&src.samples[from..from + W]);
     }
 }
 

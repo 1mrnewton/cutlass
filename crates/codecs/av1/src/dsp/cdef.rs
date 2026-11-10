@@ -78,10 +78,29 @@ fn weighted_squares(v: &[Lanes; 2], w: &[i32; 16]) -> i32 {
 /// Direction search on the 8x8 luma block at `src` (7.15.2). Returns
 /// `(yDir, var)`.
 ///
+/// A build with vector kernels runs the one in `cutlass-simd`.
+pub fn cdef_direction<P: Pixel>(src: &[P], stride: usize, bd: u32) -> (u8, i32) {
+    if !cutlass_simd::ACCELERATED {
+        return direction_lanes(src, stride, bd);
+    }
+    let row = |i: usize| &src[i * stride..i * stride + 8];
+    if P::HBD {
+        let px: [[u16; 8]; 8] =
+            std::array::from_fn(|i| std::array::from_fn(|j| row(i)[j].to_i32() as u16));
+        cutlass_simd::av1::cdef::direction_u16(&px, bd)
+    } else {
+        let px: [[u8; 8]; 8] =
+            std::array::from_fn(|i| std::array::from_fn(|j| row(i)[j].to_i32() as u8));
+        cutlass_simd::av1::cdef::direction_u8(&px)
+    }
+}
+
+/// [`cdef_direction`] where the build has no vector kernel.
+///
 /// The partial sums run on 16-bit lanes (a sum covers at most 16 samples
 /// of `-128..=127`): every row is added at its own lane offset, so the
 /// sums along the diagonals become sums of whole lane vectors.
-pub fn cdef_direction<P: Pixel>(src: &[P], stride: usize, bd: u32) -> (u8, i32) {
+fn direction_lanes<P: Pixel>(src: &[P], stride: usize, bd: u32) -> (u8, i32) {
     let sh = bd - 8;
     let mut img = [[0i16; 8]; 8];
     for (i, r) in img.iter_mut().enumerate() {
@@ -810,6 +829,8 @@ mod tests {
             let (rd, rv) = ref_direction(&f, stride, dx0, dy0, bd);
             let (gd, gv) = cdef_direction(&plane[dy0 * stride + dx0..], stride, bd);
             assert_eq!((gd as i32, gv), (rd, rv), "direction iter {iter}");
+            let (ld, lv) = super::direction_lanes(&plane[dy0 * stride + dx0..], stride, bd);
+            assert_eq!((ld as i32, lv), (rd, rv), "lanes direction iter {iter}");
             dirs_seen[gd as usize] += 1;
 
             let pri_raw = rng.range(16) << (bd - 8);

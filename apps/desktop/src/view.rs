@@ -5529,6 +5529,17 @@ fn ruler_and_lanes(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
         .iter()
         .map(|lane| (lane.main, lane_height(view, lane)))
         .collect();
+    // A clip that just landed by a paste or from the library has its lane
+    // scrolled into view.
+    if let Some(landed) = shell.take_reveal()
+        && let Some(index) = rows
+            .iter()
+            .position(|lane| lane.clips.iter().any(|clip| clip.id == landed))
+    {
+        (view.lanes_up, view.lanes_down) =
+            reveal_row(&kinds, lane_area, index, view.lanes_up, view.lanes_down);
+        ui.ctx().request_repaint();
+    }
     // Main stays put. The lanes above it and the lanes under it each scroll
     // in their own band, and one wheel runs through the two in turn.
     let still = lane_layout(&kinds, lane_area, view.lanes_up, view.lanes_down);
@@ -5789,6 +5800,84 @@ impl LaneLayout {
             })
             .collect()
     }
+}
+
+/// The scroll, as `(up, down)`, that shows row `index` whole in its band,
+/// starting from the scroll the lanes have and moving them no further than
+/// that takes. A row above main is brought down from the top or back out
+/// from under main; a row under main is brought up from the foot, and
+/// unfolded first when the lanes above main had folded it away. A row
+/// taller than its band shows as much as fits.
+fn reveal_row(kinds: &[(bool, f32)], area: Rect, index: usize, up: f32, down: f32) -> (f32, f32) {
+    let main = kinds.iter().position(|(main, _)| *main);
+    let above = main.is_some_and(|main| index < main);
+    let (mut up, mut down) = (up, down);
+    // Each pass settles one thing; a few reach any row.
+    for _ in 0..24 {
+        let laid = lane_layout(kinds, area, up, down);
+        up = up.clamp(0.0, laid.up_max);
+        down = down.clamp(0.0, laid.down_max);
+        let (Some(row), Some(band)) = (laid.rows.get(index), laid.bands.get(index)) else {
+            break;
+        };
+        if laid.peek && main.is_some_and(|main| index > main) {
+            up = 0.0;
+            continue;
+        }
+        // Main's band is only what shows of it, so main is held to the
+        // sheet itself.
+        let band = if main == Some(index) { &area } else { band };
+        // A band too short for the row is given room first. Above main the
+        // stack is let back down, then main is sunk; under main, main is
+        // lifted back, then the stack is carried up.
+        let short = row.height() - band.height();
+        if short > 0.5 {
+            let before = (up, down);
+            if above {
+                if down > 0.0 {
+                    down = (down - short).max(0.0);
+                } else {
+                    up = (up + short).min(laid.up_max);
+                }
+            } else if up > 0.0 {
+                // Main had sunk; lifting it gives the lanes under it room.
+                up = (up - short).max(0.0);
+            } else {
+                down = (down + short).min(laid.down_max);
+            }
+            if (up, down) == before {
+                break;
+            }
+            continue;
+        }
+        let lack = band.top() - row.top();
+        let over = row.bottom() - band.bottom();
+        let step = if lack > 0.5 {
+            lack
+        } else if over > 0.5 {
+            -over
+        } else {
+            break;
+        };
+        // A row above main comes down as `up` grows; every other row
+        // comes down as `down` shrinks.
+        let before = (up, down);
+        if above {
+            let wanted = up + step;
+            up = wanted.clamp(0.0, laid.up_max);
+            // What the lanes above main cannot give, the whole stack does.
+            down = (down - (wanted - up)).clamp(0.0, laid.down_max);
+        } else {
+            let wanted = down - step;
+            down = wanted.clamp(0.0, laid.down_max);
+            // What the stack cannot give, lifting main back does.
+            up = (up - (wanted - down).max(0.0)).max(0.0);
+        }
+        if (up, down) == before {
+            break;
+        }
+    }
+    (up, down)
 }
 
 /// Lay the lanes out for rows given as (main, height).
@@ -16228,6 +16317,57 @@ mod tests {
         for shown in &top.shown()[..10] {
             assert!(shown.bottom() <= sunk.top());
         }
+    }
+
+    #[test]
+    fn a_lane_out_of_view_is_scrolled_in_whole_and_one_in_view_is_left_alone() {
+        let area = Rect::from_min_size(Pos2::new(0.0, 100.0), Vec2::new(800.0, 400.0));
+        let whole = |kinds: &[(bool, f32)], index: usize, up: f32, down: f32| {
+            let laid = lane_layout(kinds, area, up, down);
+            let main = kinds.iter().position(|(main, _)| *main);
+            let folded = laid.peek && main.is_some_and(|main| index > main);
+            let band = if main == Some(index) {
+                area
+            } else {
+                laid.bands[index]
+            };
+            let row = laid.rows[index];
+            !folded && row.top() >= band.top() - 0.5 && row.bottom() <= band.bottom() + 0.5
+        };
+        // Ten lanes above main and eight under it, and a stack with no main.
+        let no_main = vec![(false, 62.0); 14];
+        for kinds in [crowded(8), crowded(1), no_main] {
+            let rest = lane_layout(&kinds, area, 0.0, 0.0);
+            let starts = [
+                (0.0, 0.0),
+                (rest.up_max, 0.0),
+                (0.0, rest.down_max),
+                (rest.up_max / 2.0, rest.down_max / 2.0),
+            ];
+            for index in 0..kinds.len() {
+                for (up, down) in starts {
+                    let (to_up, to_down) = reveal_row(&kinds, area, index, up, down);
+                    assert!(
+                        whole(&kinds, index, to_up, to_down),
+                        "lane {index} of {} from ({up}, {down}) at ({to_up}, {to_down})",
+                        kinds.len()
+                    );
+                    // A lane that showed whole already keeps the scroll it had.
+                    if whole(&kinds, index, up, down) {
+                        assert_eq!((to_up, to_down), (up, down), "lane {index}");
+                    }
+                    // Revealed, asking again moves nothing more.
+                    assert_eq!(
+                        reveal_row(&kinds, area, index, to_up, to_down),
+                        (to_up, to_down)
+                    );
+                }
+            }
+        }
+        // A lane taller than the sheet shows what fits and does not loop.
+        let tall = vec![(false, 900.0), (true, 90.0)];
+        let (up, down) = reveal_row(&tall, area, 0, 0.0, 0.0);
+        assert!(up.is_finite() && down.is_finite());
     }
 
     #[test]

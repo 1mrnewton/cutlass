@@ -823,6 +823,9 @@ pub struct Shell {
     /// The beat tool drops a mark on an audio clip.
     beating: bool,
     selected_beat: Option<BeatPick>,
+    /// A clip that just landed on the timeline, for the window to bring
+    /// its lane into view once.
+    reveal: Option<SegmentId>,
     /// The picked transition, by the clip it leads out of.
     selected_transition: Option<SegmentId>,
     /// A transition dropped on a cut that has one, held until the user
@@ -965,6 +968,7 @@ impl Shell {
             selected_marker: None,
             beating: false,
             selected_beat: None,
+            reveal: None,
             selected_transition: None,
             asked_transition: None,
             clip_drag: None,
@@ -3638,6 +3642,7 @@ impl Shell {
         let requests = media_requests(self.session_draft()?, &place, self.linkage_enabled());
         let segment_id = place.segment_id;
         self.apply_requests(&requests)?;
+        self.reveal = Some(segment_id.clone());
         self.select(Some(segment_id));
         if first_clip {
             let _ = self.zoom_fit();
@@ -4230,6 +4235,12 @@ impl Shell {
 
     pub fn selected(&self) -> Option<&SegmentId> {
         self.selection.last()
+    }
+
+    /// The clip that just landed by a paste or from the library, once: the
+    /// window scrolls its lane into view.
+    pub fn take_reveal(&mut self) -> Option<SegmentId> {
+        self.reveal.take()
     }
 
     pub fn selection(&self) -> &[SegmentId] {
@@ -6868,6 +6879,10 @@ impl Shell {
             cutlass_editor::rehome(&mut copies, &requests, draft);
         }
         self.clipboard = copies;
+        // The pasted clips start at the playhead; their lane may be out of
+        // view, or the playhead itself.
+        self.reveal = ids.first().cloned();
+        self.reveal_playhead();
         self.selection = ids;
         self.clip_menu = None;
         Ok(())
@@ -19839,7 +19854,12 @@ mod tests {
         assert_eq!(desktop.draft().unwrap().tracks.len(), 1);
 
         desktop.seek(Micros(2_000_000));
+        assert!(desktop.take_reveal().is_none());
         desktop.paste().unwrap();
+        // The window is told once which clip landed, to scroll to its lane.
+        let landed = desktop.selection()[0].clone();
+        assert_eq!(desktop.take_reveal(), Some(landed));
+        assert!(desktop.take_reveal().is_none());
         let draft = desktop.draft().unwrap();
         assert_eq!(draft.tracks.len(), 2, "{}", desktop.notice());
         assert!(!draft.tracks[0].is_main(), "the lane is back above main");

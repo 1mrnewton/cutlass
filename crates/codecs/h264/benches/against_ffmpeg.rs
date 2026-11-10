@@ -301,8 +301,13 @@ fn print_row(name: &str, frames: usize, seconds: f64) {
 }
 
 fn print_ratio(ffmpeg_seconds: f64, ours_seconds: f64) {
-    if ffmpeg_seconds > 0.0 {
-        println!("ffmpeg was {:.1}x as fast", ours_seconds / ffmpeg_seconds);
+    if ffmpeg_seconds <= 0.0 || ours_seconds <= 0.0 {
+        return;
+    }
+    if ours_seconds <= ffmpeg_seconds {
+        println!("cutlass was {:.2}x as fast", ffmpeg_seconds / ours_seconds);
+    } else {
+        println!("ffmpeg was {:.2}x as fast", ours_seconds / ffmpeg_seconds);
     }
 }
 

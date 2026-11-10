@@ -5989,6 +5989,264 @@ mod oracle {
         }
     }
 
+    /// libx264 settings that between them reach most of what a frame
+    /// picture can hold. Each is encoded, decoded by ffmpeg and by this
+    /// decoder on one thread and on four, and every sample must agree.
+    ///
+    /// Interlaced settings are not here yet: this decoder rejects
+    /// libx264's interlaced streams, which is being fixed separately.
+    #[test]
+    fn many_encoder_settings_match_ffmpeg() {
+        let Some(ffmpeg) = ffmpeg() else {
+            eprintln!("skip: ffmpeg is not installed");
+            return;
+        };
+        const NOISE: &str = "noise=alls=14:allf=t";
+        const CLEAN: &str = "null";
+        // Name, picture size, filter over the test pattern, encoder options.
+        let settings: &[(&str, &str, &str, &[&str])] = &[
+            (
+                "ultrafast",
+                "320x240",
+                NOISE,
+                &["-preset", "ultrafast", "-b:v", "700k"],
+            ),
+            (
+                "veryfast",
+                "320x240",
+                NOISE,
+                &["-preset", "veryfast", "-b:v", "700k"],
+            ),
+            (
+                "medium",
+                "320x240",
+                NOISE,
+                &["-preset", "medium", "-b:v", "700k"],
+            ),
+            (
+                "slow",
+                "320x240",
+                NOISE,
+                &["-preset", "slow", "-b:v", "700k"],
+            ),
+            (
+                "veryslow",
+                "320x240",
+                NOISE,
+                &["-preset", "veryslow", "-b:v", "700k"],
+            ),
+            (
+                "baseline",
+                "320x240",
+                NOISE,
+                &["-profile:v", "baseline", "-b:v", "700k"],
+            ),
+            (
+                "main",
+                "320x240",
+                NOISE,
+                &["-profile:v", "main", "-b:v", "700k"],
+            ),
+            (
+                "cavlc",
+                "320x240",
+                NOISE,
+                &["-b:v", "700k", "-x264-params", "cabac=0"],
+            ),
+            (
+                "slices",
+                "320x240",
+                NOISE,
+                &["-b:v", "700k", "-x264-params", "slices=4"],
+            ),
+            (
+                "slices-cavlc",
+                "320x240",
+                NOISE,
+                &["-b:v", "700k", "-x264-params", "slices=3:cabac=0"],
+            ),
+            (
+                "many-refs",
+                "320x240",
+                NOISE,
+                &[
+                    "-preset",
+                    "slow",
+                    "-b:v",
+                    "700k",
+                    "-x264-params",
+                    "ref=8:bframes=5",
+                ],
+            ),
+            (
+                "strict-pyramid",
+                "320x240",
+                NOISE,
+                &[
+                    "-preset",
+                    "slow",
+                    "-b:v",
+                    "700k",
+                    "-x264-params",
+                    "b-pyramid=strict:bframes=4",
+                ],
+            ),
+            (
+                "no-weights",
+                "320x240",
+                NOISE,
+                &["-b:v", "700k", "-x264-params", "weightp=0:weightb=0"],
+            ),
+            (
+                "fade",
+                "320x240",
+                "fade=in:0:10,noise=alls=14:allf=t",
+                &[
+                    "-preset",
+                    "slow",
+                    "-b:v",
+                    "700k",
+                    "-x264-params",
+                    "weightp=2",
+                ],
+            ),
+            (
+                "temporal-direct",
+                "320x240",
+                NOISE,
+                &[
+                    "-preset",
+                    "slow",
+                    "-b:v",
+                    "700k",
+                    "-x264-params",
+                    "direct=temporal",
+                ],
+            ),
+            (
+                "small-partitions",
+                "320x240",
+                NOISE,
+                &[
+                    "-preset",
+                    "slow",
+                    "-b:v",
+                    "700k",
+                    "-x264-params",
+                    "partitions=all:8x8dct=0:direct=auto",
+                ],
+            ),
+            (
+                "no-deblock",
+                "320x240",
+                NOISE,
+                &["-b:v", "700k", "-x264-params", "no-deblock=1"],
+            ),
+            (
+                "deblock-offsets",
+                "320x240",
+                NOISE,
+                &["-b:v", "700k", "-x264-params", "deblock=-3,3"],
+            ),
+            ("low-qp", "320x240", NOISE, &["-qp", "8"]),
+            ("high-qp", "320x240", NOISE, &["-qp", "44"]),
+            (
+                "intra-only",
+                "320x240",
+                NOISE,
+                &["-b:v", "1500k", "-x264-params", "keyint=1"],
+            ),
+            (
+                "clean",
+                "320x240",
+                CLEAN,
+                &["-preset", "slow", "-b:v", "300k"],
+            ),
+            ("cropped", "358x202", NOISE, &["-b:v", "700k"]),
+            ("tiny", "64x48", NOISE, &["-preset", "slow", "-b:v", "200k"]),
+            (
+                "wide",
+                "640x32",
+                NOISE,
+                &["-preset", "slow", "-b:v", "400k"],
+            ),
+            (
+                "tall",
+                "32x480",
+                NOISE,
+                &["-preset", "slow", "-b:v", "400k"],
+            ),
+            (
+                "constrained-intra",
+                "320x240",
+                NOISE,
+                &["-b:v", "700k", "-x264-params", "constrained-intra=1"],
+            ),
+            (
+                "open-gop",
+                "320x240",
+                NOISE,
+                &["-b:v", "700k", "-x264-params", "open-gop=1:keyint=8"],
+            ),
+        ];
+        let dir = std::env::temp_dir().join("cutlass-h264-settings");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for (name, size, filter, options) in settings {
+            let coded = dir.join(format!("{name}.h264"));
+            let yuv = dir.join(format!("{name}.yuv"));
+            let source = format!("testsrc2=size={size}:rate=30");
+            let encoded = Command::new(&ffmpeg)
+                .args(["-y", "-loglevel", "error", "-f", "lavfi", "-i", &source])
+                .args(["-vf", filter, "-frames:v", "14", "-c:v", "libx264"])
+                .args(["-pix_fmt", "yuv420p", "-threads", "1"])
+                .args(*options)
+                .args(["-f", "h264"])
+                .arg(&coded)
+                .status()
+                .unwrap();
+            assert!(encoded.success(), "{name}: ffmpeg encode failed");
+            let decoded = Command::new(&ffmpeg)
+                .args(["-y", "-loglevel", "error", "-i"])
+                .arg(&coded)
+                .args(["-f", "rawvideo", "-pix_fmt", "yuv420p"])
+                .arg(&yuv)
+                .status()
+                .unwrap();
+            assert!(decoded.success(), "{name}: ffmpeg decode failed");
+            let bytes = std::fs::read(&coded).unwrap();
+            let expected = std::fs::read(&yuv).unwrap();
+            let (width, height) = size.split_once('x').unwrap();
+            let params = CodecParams::video(
+                CodecId::H264,
+                width.parse().unwrap(),
+                height.parse().unwrap(),
+            );
+            for threads in [1, 4] {
+                let mut decoder = H264Decoder::open(&params).unwrap().with_threads(threads);
+                let mut got = Vec::new();
+                for unit in access_units(&bytes) {
+                    let packet = Packet::video(unit, 0, 1, 30, false);
+                    match decoder.push(&packet) {
+                        Ok(frames) => got.extend(pictures(&frames)),
+                        Err(error) => panic!("{name}, {threads} threads: {error:?}"),
+                    }
+                }
+                match decoder.drain() {
+                    Ok(frames) => got.extend(pictures(&frames)),
+                    Err(error) => panic!("{name}, {threads} threads: drain: {error:?}"),
+                }
+                assert_eq!(got.len(), expected.len(), "{name}, {threads} threads: size");
+                let wrong = got.iter().zip(&expected).filter(|(a, b)| a != b).count();
+                assert_eq!(
+                    wrong, 0,
+                    "{name}, {threads} threads: samples differ from ffmpeg"
+                );
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn two_slices_match_ffmpeg_across_the_boundary() {
         let Some(ffmpeg) = ffmpeg() else {

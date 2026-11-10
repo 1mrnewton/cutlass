@@ -10556,6 +10556,11 @@ fn deblock_planes<S: Sample>(
     planes: (&mut [S], &mut [S], &mut [S]),
     rows: std::ops::Range<usize>,
 ) {
+    if pic.mbaff {
+        // Pairs of two kinds meet along edges this loop does not know.
+        mbaff::deblock(pic, chroma, planes, rows);
+        return;
+    }
     let (luma, cb, cr) = planes;
     let mb_w = pic.mb_w;
     let mb_h = pic.h / 16;
@@ -10878,11 +10883,12 @@ fn filter_groups<S: Sample>(
         if group_bs == 0 {
             continue;
         }
-        let shift = group * step * row_step;
+        // Groups follow each other along the edge: down the picture's rows
+        // for a vertical edge, across its columns for a horizontal one.
         let (gx, gy) = if vertical {
-            (x, y + shift)
+            (x, y + group * step * row_step)
         } else {
-            (x + shift, y)
+            (x + group * step, y)
         };
         recon::filter_edge(
             plane,
@@ -11048,6 +11054,17 @@ fn edge_qp<S: Sample>(
 
 /// Clause 8.7.2.1. Compares the pictures actually referenced, on either list.
 fn motion_strength(p: [(i8, [i16; 2]); 2], q: [(i8, [i16; 2]); 2]) -> u8 {
+    motion_strength_by(p, q, mv_apart)
+}
+
+/// [`motion_strength`] with the test for two vectors being far enough apart
+/// passed in: a field macroblock's vertical threshold is half a frame's.
+#[inline]
+fn motion_strength_by(
+    p: [(i8, [i16; 2]); 2],
+    q: [(i8, [i16; 2]); 2],
+    apart: impl Fn([i16; 2], [i16; 2]) -> bool,
+) -> u8 {
     let p_used = u8::from(p[0].0 >= 0) + u8::from(p[1].0 >= 0);
     let q_used = u8::from(q[0].0 >= 0) + u8::from(q[1].0 >= 0);
     if p_used != q_used {
@@ -11059,7 +11076,7 @@ fn motion_strength(p: [(i8, [i16; 2]); 2], q: [(i8, [i16; 2]); 2]) -> u8 {
     if p_used == 1 {
         let p = if p[0].0 >= 0 { p[0] } else { p[1] };
         let q = if q[0].0 >= 0 { q[0] } else { q[1] };
-        return u8::from(p.0 != q.0 || mv_apart(p.1, q.1));
+        return u8::from(p.0 != q.0 || apart(p.1, q.1));
     }
     if !same_pictures(p[0].0, p[1].0, q[0].0, q[1].0) {
         return 1;
@@ -11068,10 +11085,10 @@ fn motion_strength(p: [(i8, [i16; 2]); 2], q: [(i8, [i16; 2]); 2]) -> u8 {
         let q_mv = |slot: i8| {
             if q[0].0 == slot { q[0].1 } else { q[1].1 }
         };
-        return u8::from(mv_apart(p[0].1, q_mv(p[0].0)) || mv_apart(p[1].1, q_mv(p[1].0)));
+        return u8::from(apart(p[0].1, q_mv(p[0].0)) || apart(p[1].1, q_mv(p[1].0)));
     }
-    let same_list = mv_apart(p[0].1, q[0].1) || mv_apart(p[1].1, q[1].1);
-    let crossed = mv_apart(p[0].1, q[1].1) || mv_apart(p[1].1, q[0].1);
+    let same_list = apart(p[0].1, q[0].1) || apart(p[1].1, q[1].1);
+    let crossed = apart(p[0].1, q[1].1) || apart(p[1].1, q[0].1);
     u8::from(same_list && crossed)
 }
 

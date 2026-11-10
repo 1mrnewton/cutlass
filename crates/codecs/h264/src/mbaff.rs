@@ -515,6 +515,384 @@ pub(super) fn col_block<S: Sample>(
     }
 }
 
+/// The three planes of the picture being deblocked, and its chroma format:
+/// 1 is 4:2:0, 2 is 4:2:2, 3 is 4:4:4.
+struct Planes<'a, S> {
+    luma: &'a mut [S],
+    cb: &'a mut [S],
+    cr: &'a mut [S],
+    format: u8,
+}
+
+/// Clause 8.7 for the macroblock rows `rows` of a macroblock-adaptive frame.
+///
+/// Macroblocks are filtered a pair at a time, top then bottom. A field
+/// macroblock's edges run along its own field's lines. Where a pair meets a
+/// pair of the other kind the edge between them is not one edge: see
+/// [`mixed_left`] and [`under_fields`].
+pub(super) fn deblock<S: Sample>(
+    pic: &Frame<S>,
+    format: u8,
+    planes: (&mut [S], &mut [S], &mut [S]),
+    rows: std::ops::Range<usize>,
+) {
+    let (luma, cb, cr) = planes;
+    let mut planes = Planes {
+        luma,
+        cb,
+        cr,
+        format,
+    };
+    for pair in rows.start / 2..rows.end.min(pic.h / 16) / 2 {
+        for mx in 0..pic.mb_w {
+            deblock_mb(pic, &mut planes, mx, pair * 2);
+            deblock_mb(pic, &mut planes, mx, pair * 2 + 1);
+        }
+    }
+}
+
+fn deblock_mb<S: Sample>(pic: &Frame<S>, planes: &mut Planes<'_, S>, mx: usize, my: usize) {
+    let mb_w = pic.mb_w;
+    let Some(cur) = pic.mb.get(my * mb_w + mx) else {
+        return;
+    };
+    if cur.deblock == 1 {
+        return;
+    }
+    let field = cur.field_mb;
+    // No coefficients and one motion: no edge inside is filtered. For a
+    // field macroblock one motion also means one field of the reference,
+    // which the reference index tells, not the frame.
+    let flat = super::inner_edges_flat(cur)
+        && (!field || (cur.ref0 == [cur.ref0[0]; 4] && cur.ref1 == [cur.ref1[0]; 4]));
+    // A slice may keep its filter inside itself.
+    let allowed = |other: &&Mb| cur.deblock != 2 || other.slice == cur.slice;
+    if let Some(left) = mx.checked_sub(1)
+        && let Some(beside) = pic.mb.get((my & !1) * mb_w + left).filter(allowed)
+    {
+        if beside.field_mb == field {
+            plain_edge(pic, planes, (mx, my), pic.mb.get(my * mb_w + left), 0, true);
+        } else {
+            mixed_left(pic, planes, (mx, my));
+        }
+    }
+    for edge in 1..4 {
+        if flat {
+            break;
+        }
+        plain_edge(pic, planes, (mx, my), None, edge, true);
+    }
+    if let Ok(above) = usize::try_from(super::above_my(pic, mx, my))
+        && let Some(over) = pic.mb.get(above * mb_w + mx).filter(allowed)
+    {
+        if !field && my.is_multiple_of(2) && over.field_mb {
+            under_fields(pic, planes, (mx, my));
+        } else {
+            plain_edge(pic, planes, (mx, my), Some(over), 0, false);
+        }
+    }
+    for edge in 1..4 {
+        if flat {
+            break;
+        }
+        plain_edge(pic, planes, (mx, my), None, edge, false);
+    }
+}
+
+/// An edge whose two sides run along the same lines: one inside the
+/// macroblock, or its left or upper edge with `across` on the other side.
+/// `across` is the macroblock [`super::edge_qp`] finds there too.
+fn plain_edge<S: Sample>(
+    pic: &Frame<S>,
+    planes: &mut Planes<'_, S>,
+    (mx, my): (usize, usize),
+    across: Option<&Mb>,
+    edge: usize,
+    vertical: bool,
+) {
+    let Some(cur) = pic.mb.get(my * pic.mb_w + mx) else {
+        return;
+    };
+    let bs = strengths(cur, across, edge, vertical);
+    if bs == [0; 4] {
+        return;
+    }
+    let off = (i32::from(cur.off_a), i32::from(cur.off_b));
+    let span = super::luma_span(my, cur.field_mb);
+    // An 8×8 transform has no luma edge at 4 or 12.
+    if !(cur.transform8 && edge % 2 == 1) {
+        let at = if vertical {
+            (mx * 16 + edge * 4, span.y)
+        } else {
+            (mx * 16, span.at(edge * 4))
+        };
+        let qp = super::edge_qp(pic, mx, my, true, true, vertical, edge == 0);
+        let kind = (vertical, false, 4, span.step);
+        super::filter_groups(planes.luma, pic.w, at, kind, bs, qp, off);
+    }
+    if !pic.separate_plane {
+        let at = super::ChromaEdge {
+            mx,
+            my,
+            edge,
+            vertical,
+            transform8: cur.transform8,
+            format: planes.format,
+        };
+        super::filter_chroma(pic, (&mut *planes.cb, &mut *planes.cr), at, bs, off);
+    }
+}
+
+/// Clause 8.7.2.1: the strength of each quarter of an edge of `cur`.
+/// `across` is the macroblock on the far side of edge 0.
+fn strengths(cur: &Mb, across: Option<&Mb>, edge: usize, vertical: bool) -> [u8; 4] {
+    let other = across.unwrap_or(cur);
+    if edge != 0 {
+        if cur.intra {
+            return [3; 4];
+        }
+    } else if cur.intra || other.intra {
+        // The strongest filter is for a vertical macroblock edge, or a
+        // horizontal one between two frame macroblocks.
+        let frames = !cur.field_mb && !other.field_mb;
+        return if vertical || frames { [4; 4] } else { [3; 4] };
+    }
+    // A field macroblock under a frame pair: the two sides do not share
+    // lines, so their motion is not compared.
+    let mixed = other.field_mb != cur.field_mb;
+    let q_mask = super::coded_mask(cur);
+    let p_mask = super::coded_mask(other);
+    let before = if edge == 0 { 3 } else { edge - 1 };
+    let mut out = [0u8; 4];
+    for (line, strength) in out.iter_mut().enumerate() {
+        let (q, p) = if vertical {
+            ((edge, line), (before, line))
+        } else {
+            ((line, edge), (line, before))
+        };
+        *strength = if (q_mask >> (q.1 * 4 + q.0) | p_mask >> (p.1 * 4 + p.0)) & 1 == 1 {
+            2
+        } else if mixed {
+            1
+        } else {
+            motion_between(other, p, cur, q)
+        };
+    }
+    out
+}
+
+/// Whether the blocks `p` and `q` predict differently enough to filter the
+/// edge between them. Both macroblocks are of one kind.
+fn motion_between(p_mb: &Mb, p: (usize, usize), q_mb: &Mb, q: (usize, usize)) -> u8 {
+    // The threshold is four quarter samples of the frame. A field
+    // macroblock's vertical vector counts field lines, each two of those.
+    let tall = if q_mb.field_mb { 2 } else { 4 };
+    let apart = |a: [i16; 2], b: [i16; 2]| {
+        (i32::from(a[0]) - i32::from(b[0])).abs() >= 4
+            || (i32::from(a[1]) - i32::from(b[1])).abs() >= tall
+    };
+    super::motion_strength_by(preds(p_mb, p), preds(q_mb, q), apart)
+}
+
+/// What the block (`bx`, `by`) predicts from, on each list: the reference
+/// and the vector. A field macroblock's reference is one field of a frame.
+/// The two sides of an edge between field macroblocks are fields of one
+/// parity, so the low bit of the index tells the fields apart.
+fn preds(mb: &Mb, (bx, by): (usize, usize)) -> [(i8, [i16; 2]); 2] {
+    let index = by * 4 + bx;
+    let part = by / 2 * 2 + bx / 2;
+    let picture = |slot: i8, reference: i8| {
+        if slot < 0 {
+            -1
+        } else if mb.field_mb {
+            slot.saturating_mul(2).saturating_add(reference & 1)
+        } else {
+            slot.saturating_mul(2)
+        }
+    };
+    [
+        (picture(mb.slot0[part], mb.ref0[part]), mb.mv0[index]),
+        (picture(mb.slot1[part], mb.ref1[part]), mb.mv1[index]),
+    ]
+}
+
+/// One plane's share of a macroblock: where its first sample is, how many
+/// lines it has there, and how its samples are filtered.
+#[derive(Clone, Copy)]
+struct Share {
+    x: usize,
+    lines: usize,
+    stride: usize,
+    /// The chroma filter, which changes one sample each side.
+    chroma: bool,
+}
+
+/// The planes to filter for a macroblock at column `mx`: luma, then Cb and
+/// Cr unless they are separate pictures.
+fn shares<S: Sample>(pic: &Frame<S>, format: u8, mx: usize) -> [Option<Share>; 3] {
+    let luma = Share {
+        x: mx * 16,
+        lines: 16,
+        stride: pic.w,
+        chroma: false,
+    };
+    let chroma = match format {
+        3 => luma,
+        2 => Share {
+            x: mx * 8,
+            lines: 16,
+            stride: pic.w / 2,
+            chroma: true,
+        },
+        _ => Share {
+            x: mx * 8,
+            lines: 8,
+            stride: pic.w / 2,
+            chroma: true,
+        },
+    };
+    let chroma = (!pic.separate_plane).then_some(chroma);
+    [Some(luma), chroma, chroma]
+}
+
+/// The average quantiser across an edge between `cur` and `other`, for plane
+/// 0 (luma), 1 (Cb) or 2 (Cr).
+fn qp_between(cur: &Mb, other: &Mb, plane: usize) -> i32 {
+    let of = |mb: &Mb| {
+        i32::from(match plane {
+            0 => mb.qp,
+            1 => mb.qp_c,
+            _ => mb.qp_cr,
+        })
+    };
+    (of(cur) + of(other) + 1) >> 1
+}
+
+/// The left edge of a macroblock whose pair is not the kind of the pair to
+/// its left (clause 8.7.1). Each line of the macroblock continues into the
+/// macroblock that holds that line of the picture, so the edge has two
+/// neighbours and eight strengths, one for each two luma lines.
+///
+/// A field macroblock's upper eight lines border the top frame macroblock
+/// and the rest the bottom one. A frame macroblock's lines alternate
+/// between the top field macroblock and the bottom one. Motion is not
+/// compared across such an edge: its strength is at least 1.
+fn mixed_left<S: Sample>(pic: &Frame<S>, planes: &mut Planes<'_, S>, (mx, my): (usize, usize)) {
+    let mb_w = pic.mb_w;
+    let pair = my & !1;
+    let (Some(cur), Some(left)) = (pic.mb.get(my * mb_w + mx), mx.checked_sub(1)) else {
+        return;
+    };
+    let (Some(upper), Some(lower)) = (
+        pic.mb.get(pair * mb_w + left),
+        pic.mb.get((pair + 1) * mb_w + left),
+    ) else {
+        return;
+    };
+    let field = cur.field_mb;
+    let sides = [upper, lower];
+    let q_mask = super::coded_mask(cur);
+    let p_masks = [super::coded_mask(upper), super::coded_mask(lower)];
+    let mut bs = [0u8; 8];
+    for (i, strength) in bs.iter_mut().enumerate() {
+        // The neighbour beside these two lines, and its row of blocks there.
+        let (side, row) = if field {
+            (i / 4, i % 4)
+        } else {
+            (i % 2, my % 2 * 2 + i / 4)
+        };
+        *strength = if cur.intra || sides[side].intra {
+            4
+        } else if (q_mask >> (i / 2 * 4) | p_masks[side] >> (row * 4 + 3)) & 1 == 1 {
+            2
+        } else {
+            1
+        };
+    }
+    // The strengths along each neighbour, top to bottom.
+    let along = if field {
+        [[bs[0], bs[1], bs[2], bs[3]], [bs[4], bs[5], bs[6], bs[7]]]
+    } else {
+        [[bs[0], bs[2], bs[4], bs[6]], [bs[1], bs[3], bs[5], bs[7]]]
+    };
+    let off = (i32::from(cur.off_a), i32::from(cur.off_b));
+    for (plane, share) in shares(pic, planes.format, mx).into_iter().enumerate() {
+        let Some(share) = share else {
+            continue;
+        };
+        let samples = match plane {
+            0 => &mut *planes.luma,
+            1 => &mut *planes.cb,
+            _ => &mut *planes.cr,
+        };
+        let span = super::chroma_span(my, share.lines, field);
+        for (side, other) in sides.into_iter().enumerate() {
+            // Half of a field macroblock's lines, or every other line of a
+            // frame macroblock's: each time lines two picture rows apart.
+            let y = if field {
+                span.at(share.lines / 2 * side)
+            } else {
+                span.y + side
+            };
+            let kind = (true, share.chroma, share.lines / 8, 2);
+            let qp = qp_between(cur, other, plane);
+            super::filter_groups(
+                samples,
+                share.stride,
+                (share.x, y),
+                kind,
+                along[side],
+                qp,
+                off,
+            );
+        }
+    }
+}
+
+/// The upper edge of a top frame macroblock under a field pair (clause
+/// 8.7.1). It is filtered twice, once along each field: the macroblock's
+/// even lines with the top field macroblock above and its odd lines with the
+/// bottom one, each three lines deep in steps of two. Motion is not
+/// compared, and an intra side gives strength 3.
+fn under_fields<S: Sample>(pic: &Frame<S>, planes: &mut Planes<'_, S>, (mx, my): (usize, usize)) {
+    let mb_w = pic.mb_w;
+    let (Some(cur), Some(above)) = (pic.mb.get(my * mb_w + mx), my.checked_sub(2)) else {
+        return;
+    };
+    let q_mask = super::coded_mask(cur);
+    let off = (i32::from(cur.off_a), i32::from(cur.off_b));
+    for parity in 0..2 {
+        let Some(over) = pic.mb.get((above + parity) * mb_w + mx) else {
+            continue;
+        };
+        let p_mask = super::coded_mask(over);
+        let mut bs = [3u8; 4];
+        if !cur.intra && !over.intra {
+            for (column, strength) in bs.iter_mut().enumerate() {
+                let coded = (q_mask >> column | p_mask >> (12 + column)) & 1 == 1;
+                *strength = if coded { 2 } else { 1 };
+            }
+        }
+        for (plane, share) in shares(pic, planes.format, mx).into_iter().enumerate() {
+            let Some(share) = share else {
+                continue;
+            };
+            let samples = match plane {
+                0 => &mut *planes.luma,
+                1 => &mut *planes.cb,
+                _ => &mut *planes.cr,
+            };
+            let y = my * share.lines + parity;
+            // A quarter of the edge is four luma samples, two of 4:2:0 or
+            // 4:2:2 chroma.
+            let quarter = if share.chroma { 2 } else { 4 };
+            let kind = (false, share.chroma, quarter, 2);
+            let qp = qp_between(cur, over, plane);
+            super::filter_groups(samples, share.stride, (share.x, y), kind, bs, qp, off);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::super::Mb;

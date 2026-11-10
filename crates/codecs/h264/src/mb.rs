@@ -4855,16 +4855,16 @@ fn recon_chroma<S: Sample>(
             let mut coeffs = [0i32; 16];
             coeffs[1..].copy_from_slice(&ac[i][..15]);
             let mut block = [0i32; 16];
-            for n in 0..16 {
+            block[0] = scaled[i];
+            for n in 1..16 {
+                // A zero level scales to zero.
+                if coeffs[n] == 0 {
+                    continue;
+                }
                 let pos = ZIGZAG4[n];
                 let (ry, rx) = (pos / 4, pos % 4);
-                let level = if n == 0 { scaled[i] } else { coeffs[n] };
                 let w = i32::from(slice.pps.weight4[list][pos]);
-                block[ry * 4 + rx] = if n == 0 {
-                    level
-                } else {
-                    recon::scale4(level, qp_c, rx, ry, w)
-                };
+                block[ry * 4 + rx] = recon::scale4(coeffs[n], qp_c, rx, ry, w);
             }
             recon::idct4(&mut block);
             recon::add_block(plane, stride, x0 + bx * 4, span.at(by * 4), &block, 4, step);
@@ -9202,8 +9202,22 @@ fn predict_chroma<S: Sample>(
     let (x, y) = at;
     let (w, h) = size;
     if frame.chroma() == 3 {
-        predict_qpel(u, dst_stride, &frame.u, (frame.w, frame.h), (x, y, w, h), mv);
-        predict_qpel(v, dst_stride, &frame.v, (frame.w, frame.h), (x, y, w, h), mv);
+        predict_qpel(
+            u,
+            dst_stride,
+            &frame.u,
+            (frame.w, frame.h),
+            (x, y, w, h),
+            mv,
+        );
+        predict_qpel(
+            v,
+            dst_stride,
+            &frame.v,
+            (frame.w, frame.h),
+            (x, y, w, h),
+            mv,
+        );
         return;
     }
     let mvx = i32::from(mv[0]);
@@ -9408,11 +9422,7 @@ fn inner_edges_flat(mb: &Mb) -> bool {
         && mb.mv1 == [mb.mv1[0]; 16]
 }
 
-fn deblock_planes<S: Sample>(
-    pic: &Frame<S>,
-    chroma: u8,
-    planes: (&mut [S], &mut [S], &mut [S]),
-) {
+fn deblock_planes<S: Sample>(pic: &Frame<S>, chroma: u8, planes: (&mut [S], &mut [S], &mut [S])) {
     let (luma, cb, cr) = planes;
     let mb_w = pic.mb_w;
     let mb_h = pic.h / 16;

@@ -399,15 +399,7 @@ fn time_ffmpeg_encode(ffmpeg: &str, yuv: &Path) -> Result<f64, String> {
     let output = Command::new(ffmpeg)
         .args(BENCHMARK)
         .args([
-            "-f",
-            "rawvideo",
-            "-pix_fmt",
-            "yuv420p",
-            "-s",
-            "1280x720",
-            "-r",
-            "30",
-            "-i",
+            "-f", "rawvideo", "-pix_fmt", "yuv420p", "-s", "1280x720", "-r", "30", "-i",
         ])
         .arg(yuv)
         .args([
@@ -453,7 +445,14 @@ fn generate_stream(ffmpeg: &str, path: &Path, stream: &Stream) -> Result<(), Str
         command.args(["-vf", filter]);
     }
     let output = command
-        .args(["-frames:v", &frames, "-c:v", "libx264", "-profile:v", "high"])
+        .args([
+            "-frames:v",
+            &frames,
+            "-c:v",
+            "libx264",
+            "-profile:v",
+            "high",
+        ])
         .args(stream.coding)
         .args(["-pix_fmt", "yuv420p", "-threads", "1", "-f", "h264"])
         .arg(path)

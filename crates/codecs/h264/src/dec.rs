@@ -4098,14 +4098,14 @@ fn add_scaled<S: Sample>(
             }
         } else {
             for (i, &pos) in ZIGZAG4.iter().enumerate() {
+                let level = coeffs.get(i).copied().unwrap_or(0);
+                // A zero level scales to zero.
+                if level == 0 {
+                    continue;
+                }
                 let (ry, rx) = (pos / 4, pos % 4);
-                block[ry * 4 + rx] = recon::scale4(
-                    coeffs.get(i).copied().unwrap_or(0),
-                    qp + S::QP_BD,
-                    rx,
-                    ry,
-                    i32::from(weight[ry * 4 + rx]),
-                );
+                block[ry * 4 + rx] =
+                    recon::scale4(level, qp + S::QP_BD, rx, ry, i32::from(weight[ry * 4 + rx]));
             }
             recon::idct4(&mut block);
         }
@@ -4118,14 +4118,13 @@ fn add_scaled<S: Sample>(
             }
         } else {
             for (i, &pos) in ZIGZAG8.iter().enumerate() {
+                let level = coeffs.get(i).copied().unwrap_or(0);
+                if level == 0 {
+                    continue;
+                }
                 let (ry, rx) = (pos / 8, pos % 8);
-                block[ry * 8 + rx] = recon::scale8(
-                    coeffs.get(i).copied().unwrap_or(0),
-                    qp + S::QP_BD,
-                    rx,
-                    ry,
-                    i32::from(weight[pos]),
-                );
+                block[ry * 8 + rx] =
+                    recon::scale8(level, qp + S::QP_BD, rx, ry, i32::from(weight[pos]));
             }
             recon::idct8(&mut block);
         }

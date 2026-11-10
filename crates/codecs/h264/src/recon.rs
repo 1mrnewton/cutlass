@@ -131,6 +131,16 @@ pub fn scale8(coeff: i32, qp: i32, i: usize, j: usize, weight: i32) -> i32 {
 }
 
 pub fn idct4(block: &mut [i32; 16]) {
+    // Only the DC coefficient: both passes spread it over the block as it
+    // is, so every sample is the same rounded value.
+    if block[1..] == [0; 15] {
+        *block = [(block[0] + 32) >> 6; 16];
+        return;
+    }
+    idct4_full(block);
+}
+
+fn idct4_full(block: &mut [i32; 16]) {
     let mut mid = [0i32; 16];
     for i in 0..4 {
         let d0 = block[i * 4];
@@ -248,6 +258,15 @@ pub fn chroma_dc422(raster: &[i32; 8], qp: i32, weight: i32) -> [i32; 8] {
 }
 
 pub fn idct8(block: &mut [i32; 64]) {
+    // Only the DC coefficient, as in [`idct4`].
+    if block[1..] == [0; 63] {
+        *block = [(block[0] + 32) >> 6; 64];
+        return;
+    }
+    idct8_full(block);
+}
+
+fn idct8_full(block: &mut [i32; 64]) {
     let mut mid = [0i32; 64];
     for i in 0..8 {
         idct8_1d(&block[i * 8..i * 8 + 8], &mut mid[i * 8..i * 8 + 8]);
@@ -392,11 +411,13 @@ pub fn add_block<S: Sample>(
     n: usize,
     step: usize,
 ) {
-    for y in 0..n {
-        for x in 0..n {
-            let at = (y0 + y * step) * stride + x0 + x;
-            let sample = pel(plane[at]) + block[y * n + x];
-            plane[at] = S::clip(sample);
+    if n == 0 || block.iter().all(|&value| value == 0) {
+        return;
+    }
+    for (y, residual) in block.chunks_exact(n).take(n).enumerate() {
+        let at = (y0 + y * step) * stride + x0;
+        for (sample, &value) in plane[at..at + n].iter_mut().zip(residual) {
+            *sample = S::clip(pel(*sample) + value);
         }
     }
 }
@@ -1575,6 +1596,26 @@ mod tests {
         assert_eq!(chroma_qps(26, 0, 30), (56, 26));
         assert_eq!(chroma_qps(26, 0, 36), (62, 26));
         assert_eq!(chroma_qps(51, 0, 36), (75, 39));
+    }
+
+    #[test]
+    fn a_dc_only_block_takes_the_same_values_as_the_full_transform() {
+        for dc in [
+            -4000, -65, -64, -33, -32, -31, -1, 0, 1, 31, 32, 33, 64, 100, 4000,
+        ] {
+            let mut four = [0i32; 16];
+            four[0] = dc;
+            let mut full = four;
+            super::idct4(&mut four);
+            super::idct4_full(&mut full);
+            assert_eq!(four, full, "4x4 dc {dc}");
+            let mut eight = [0i32; 64];
+            eight[0] = dc;
+            let mut full = eight;
+            super::idct8(&mut eight);
+            super::idct8_full(&mut full);
+            assert_eq!(eight, full, "8x8 dc {dc}");
+        }
     }
 
     #[test]

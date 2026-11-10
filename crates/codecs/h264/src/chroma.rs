@@ -230,6 +230,115 @@ fn x264_interlaced_422_matches_ffmpeg() {
     }
 }
 
+/// Noisy pictures from libx264, compared with FFmpeg at the chroma
+/// resolution they were coded in, on one thread and on four. Noise puts
+/// coefficients in every block of every plane, which a clean test picture
+/// does not. Under CABAC a 4:4:4 macroblock on the 8×8 transform then sits
+/// beside macroblocks on the 4×4 transform that hold coefficients, where
+/// its coded_block_flag contexts must read them as empty (clause
+/// 9.3.3.1.1.9), and a lossless macroblock is written as I_PCM in the middle
+/// of a CABAC slice, which must leave the contexts as they are (clause
+/// 9.3.1.2).
+#[test]
+fn x264_noise_422_and_444_match_ffmpeg() {
+    let Some(ffmpeg) = ffmpeg_bin() else {
+        eprintln!("skipped: ffmpeg is not installed");
+        return;
+    };
+    const RATE: &[&str] = &["-preset", "slow", "-b:v", "3000k"];
+    const LOSSLESS: &[&str] = &["-qp", "0"];
+    const LARGE: (usize, usize) = (640, 360);
+    const SMALL: (usize, usize) = (320, 240);
+    // Name, chroma format, bit depth, picture size, encoder options, libx264 parameters.
+    type Case = (
+        &'static str,
+        Format,
+        u32,
+        (usize, usize),
+        &'static [&'static str],
+        &'static str,
+    );
+    let cases: &[Case] = &[
+        ("444 cabac", Format::C444, 8, LARGE, RATE, "keyint=4"),
+        ("444 cabac intra", Format::C444, 8, LARGE, RATE, "keyint=1"),
+        (
+            "444 cavlc",
+            Format::C444,
+            8,
+            LARGE,
+            RATE,
+            "keyint=4:cabac=0",
+        ),
+        ("422 cabac", Format::C422, 8, LARGE, RATE, "keyint=4"),
+        (
+            "422 cavlc",
+            Format::C422,
+            8,
+            LARGE,
+            RATE,
+            "keyint=4:cabac=0",
+        ),
+        (
+            "444 cabac 10-bit",
+            Format::C444,
+            10,
+            SMALL,
+            RATE,
+            "keyint=4",
+        ),
+        (
+            "422 cabac 10-bit",
+            Format::C422,
+            10,
+            SMALL,
+            RATE,
+            "keyint=4",
+        ),
+        ("444 lossless", Format::C444, 8, SMALL, LOSSLESS, "keyint=4"),
+        (
+            "422 lossless pcm",
+            Format::C422,
+            8,
+            SMALL,
+            LOSSLESS,
+            "keyint=4",
+        ),
+    ];
+    for &(name, format, depth, size, options, x264_params) in cases {
+        let pix = pix_fmt(format, depth);
+        let Some(annex) = x264_noise(&ffmpeg, &pix, size, options, x264_params) else {
+            if depth == 8 {
+                panic!("ffmpeg could not encode {name}");
+            }
+            eprintln!("skipped: this ffmpeg cannot encode {name}");
+            continue;
+        };
+        let raw = ffmpeg_file(&ffmpeg, &pix, &annex).unwrap_or_else(|err| {
+            panic!("{name} oracle failed: {err}");
+        });
+        let (width, height) = size;
+        let frame_len = raw_len(format, depth, width, height);
+        for threads in [1, 4] {
+            let frames = decode_stream(&annex, size, threads, name);
+            assert_eq!(
+                raw.len(),
+                frames.len() * frame_len,
+                "{name}, {threads} threads: frame count"
+            );
+            assert!(frames.len() > 1, "{name} produced one picture");
+            for (index, picture) in frames.iter().enumerate() {
+                let start = index * frame_len;
+                let (y, u, v) = planes(picture, format, depth);
+                let (fy, fu, fv) =
+                    split_sized(format, depth, width, height, &raw[start..start + frame_len]);
+                assert!(y == fy, "{name}, {threads} threads: picture {index} luma");
+                assert!(u == fu, "{name}, {threads} threads: picture {index} cb");
+                assert!(v == fv, "{name}, {threads} threads: picture {index} cr");
+            }
+        }
+    }
+}
+
 #[test]
 fn monochrome_chroma_format_is_refused() {
     let annex = annex_chroma0();
@@ -466,6 +575,73 @@ fn x264(ffmpeg: &PathBuf, profile: &str, pix: &str) -> Option<Vec<u8>> {
     let annex = std::fs::read(&path).ok();
     let _ = std::fs::remove_file(&path);
     annex
+}
+
+/// Twelve frames of a moving test picture under noise, from libx264 with
+/// the given options.
+fn x264_noise(
+    ffmpeg: &PathBuf,
+    pix: &str,
+    size: (usize, usize),
+    options: &[&str],
+    x264_params: &str,
+) -> Option<Vec<u8>> {
+    let n = TEMP.fetch_add(1, Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!(
+        "cutlass-h264-noise-{pix}-{}-{n}.h264",
+        std::process::id()
+    ));
+    let source = format!("testsrc2=size={}x{}:rate=30", size.0, size.1);
+    let status = Command::new(ffmpeg)
+        .args(["-nostdin", "-y", "-hide_banner", "-loglevel", "error"])
+        .args(["-f", "lavfi", "-i", &source])
+        .args(["-vf", "noise=alls=14:allf=t", "-an", "-frames:v", "12"])
+        .args(["-c:v", "libx264", "-pix_fmt", pix])
+        .args(options)
+        .args(["-x264-params", x264_params, "-f", "h264"])
+        .arg(&path)
+        .status()
+        .ok()?;
+    if !status.success() {
+        let _ = std::fs::remove_file(&path);
+        return None;
+    }
+    let annex = std::fs::read(&path).ok();
+    let _ = std::fs::remove_file(&path);
+    annex
+}
+
+/// Every picture of an Annex B stream, decoded on `threads` threads.
+fn decode_stream(
+    annex: &[u8],
+    size: (usize, usize),
+    threads: usize,
+    label: &str,
+) -> Vec<VideoOutput> {
+    let mut params = CodecParams::video(CodecId::H264, size.0 as u32, size.1 as u32);
+    params.nal_length_size = 0;
+    let mut decoder = H264Decoder::open(&params)
+        .expect("open")
+        .with_threads(threads);
+    let mut frames = Vec::new();
+    for (index, unit) in access_units(annex).iter().enumerate() {
+        let pictures = decoder
+            .push(&Packet::video(
+                unit.clone(),
+                index as i64,
+                1,
+                30,
+                index == 0,
+            ))
+            .unwrap_or_else(|err| panic!("{label}, {threads} threads, access unit {index}: {err}"));
+        frames.extend(pictures);
+    }
+    frames.extend(
+        decoder
+            .drain()
+            .unwrap_or_else(|err| panic!("{label}, {threads} threads, drain: {err}")),
+    );
+    frames
 }
 
 /// Twelve interlaced frames of a moving test picture under noise, which

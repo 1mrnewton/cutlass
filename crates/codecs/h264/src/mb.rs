@@ -4220,7 +4220,8 @@ fn cabac_residual(
     let (sig_base, last_base, level_base) = (SIG[row][which], LAST[row][which], LEVEL[which]);
     let max = coeffs.len();
     let dc422 = cat == 3 && max == 8;
-    let mut index = [0usize; 64];
+    // The places of the significant coefficients; a block has at most 64.
+    let mut index = [0u8; 64];
     let mut count = 0usize;
     let last_coded = max.saturating_sub(1);
     let mut pos = 0;
@@ -4246,7 +4247,7 @@ fn cabac_residual(
                     what: "cabac residual",
                 });
             };
-            *slot = pos;
+            *slot = pos as u8;
             count += 1;
             let last_ctx = last_base
                 + if matches!(cat, 5 | 9 | 13) {
@@ -4272,7 +4273,7 @@ fn cabac_residual(
                 what: "cabac residual",
             });
         };
-        *slot = pos;
+        *slot = pos as u8;
         count += 1;
     }
     if count == 0 {
@@ -4290,7 +4291,7 @@ fn cabac_residual(
     let trans1 = [1usize, 2, 3, 3, 4, 5, 6, 7];
     let trans_gt = [4usize, 4, 4, 4, 5, 6, 7, 7];
     for scan in index[..count].iter().rev() {
-        let scan = *scan;
+        let scan = usize::from(*scan);
         if cab.decision(level_base + level1[node])? == 0 {
             node = trans1[node];
             let sign = cab.bypass()?;

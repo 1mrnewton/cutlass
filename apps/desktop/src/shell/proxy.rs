@@ -220,6 +220,18 @@ fn movies_mark(draft: &Draft) -> u64 {
     hasher.finish()
 }
 
+/// The size a `width` by `height` picture shows at once the file's turn
+/// `display` is made. A movie stored on its side, as a phone writes one
+/// shot upright, is drawn the way it shows, so its proxy is stored upright
+/// with no turn of its own and the viewer turns nothing twice.
+fn upright(width: u32, height: u32, display: cutlass_container::DisplayQuarter) -> (u32, u32) {
+    use cutlass_container::DisplayQuarter;
+    match display {
+        DisplayQuarter::Clockwise90 | DisplayQuarter::Clockwise270 => (height, width),
+        DisplayQuarter::Zero | DisplayQuarter::Half => (width, height),
+    }
+}
+
 /// Draw the proxy of `wanted.source` with the short side `side` at the
 /// project's `fps`. It is written aside first, so a stopped proxy is never
 /// found.
@@ -241,12 +253,7 @@ fn draw_proxy(
             "the movie's size or length could not be read".to_owned(),
         ));
     };
-    // A turned picture would be turned again over its proxy.
-    if info.display != cutlass_container::DisplayQuarter::Zero {
-        return Err(ShellError::Unavailable(
-            "a movie stored on its side has no proxy yet".to_owned(),
-        ));
-    }
+    let (width, height) = upright(width, height, info.display);
     let draft = cutlass_export::proxy_draft(&wanted.source, width, height, duration, fps);
     let request = cutlass_export::proxy_request(&draft, side);
     let mut report = |done: u64, total: u64| {
@@ -1237,6 +1244,100 @@ mod tests {
         desktop.close_compound().unwrap();
         desktop.poll_proxies();
         assert!(making(&desktop));
+    }
+
+    #[test]
+    fn a_movie_stored_on_its_side_is_drawn_the_way_it_shows() {
+        use cutlass_container::DisplayQuarter;
+        assert_eq!(
+            super::upright(1920, 1080, DisplayQuarter::Zero),
+            (1920, 1080)
+        );
+        assert_eq!(
+            super::upright(1920, 1080, DisplayQuarter::Half),
+            (1920, 1080)
+        );
+        assert_eq!(
+            super::upright(1920, 1080, DisplayQuarter::Clockwise90),
+            (1080, 1920)
+        );
+        assert_eq!(
+            super::upright(1920, 1080, DisplayQuarter::Clockwise270),
+            (1080, 1920)
+        );
+    }
+
+    /// A real phone movie stored on its side, from `../local-files`: its
+    /// proxy is upright, and the viewer shows the same picture through it
+    /// as from the file. Skipped where that folder is missing, as on CI.
+    #[test]
+    #[ignore = "reads a real phone movie; run on a machine that has ../local-files"]
+    fn a_real_movie_stored_on_its_side_shows_the_same_through_its_proxy() {
+        let real =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../local-files/IMG_9420.MOV");
+        if !real.is_file() {
+            return;
+        }
+        let temp = Temp::new();
+        let folder = temp.path.join("project");
+        project(&folder, Vec::new());
+        let mut desktop = desktop(&temp, false);
+        desktop.open_folder(&folder).unwrap();
+        desktop.start_import(&real).unwrap();
+        crate::shell::tests::land_job(&mut desktop);
+        let video = desktop.draft().unwrap().materials.videos[0].clone();
+        let id = video.id.as_str().to_owned();
+        // The project makes none by itself; this look finds the new movie.
+        assert!(!desktop.poll_proxies());
+        let turned = desktop
+            .readers
+            .probe(&desktop.proxies.by_material[&id])
+            .unwrap();
+        assert_ne!(
+            turned.display,
+            cutlass_container::DisplayQuarter::Zero,
+            "the file is not stored on its side"
+        );
+        desktop.add_medium(&id).unwrap();
+        desktop.seek(Micros(1_000_000));
+        let live = desktop.preview_bytes().unwrap();
+
+        desktop.make_proxy(&[id.clone()]).unwrap();
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(1_800);
+        while desktop.poll_proxies() && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(
+            desktop.proxy_state(&id),
+            ProxyState::Made,
+            "{}",
+            desktop.notice()
+        );
+        let source = desktop.proxied().remove(0);
+        let proxy = desktop.preview_readers().open(&source).unwrap();
+        let (stored, shown) = (turned, proxy.info());
+        assert_eq!(shown.display, cutlass_container::DisplayQuarter::Zero);
+        let (width, height) = super::upright(
+            stored.width.unwrap(),
+            stored.height.unwrap(),
+            stored.display,
+        );
+        assert_eq!(
+            shown.width.unwrap() > shown.height.unwrap(),
+            width > height,
+            "the proxy stands the way the movie shows"
+        );
+        assert_eq!(shown.width.unwrap().min(shown.height.unwrap()), 720);
+
+        let through = desktop.preview_bytes().unwrap();
+        assert_eq!((through.width, through.height), (live.width, live.height));
+        let apart: u64 = through
+            .rgba
+            .iter()
+            .zip(&live.rgba)
+            .map(|(a, b)| u64::from(a.abs_diff(*b)))
+            .sum();
+        assert!(apart / (live.rgba.len() as u64) < 12, "{apart}");
     }
 
     #[test]

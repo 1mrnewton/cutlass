@@ -4585,30 +4585,18 @@ fn pred4_block<S: Sample>(
     let above_ok = row_ok(pic, ax, ay as i32 - 1, mb.slice, constrained, here);
     let left_ok = col_ok(pic, ax as i32 - 1, ay, mb.slice, constrained, here);
     if above_ok {
-        for (k, slot) in above[..4].iter_mut().enumerate() {
-            *slot = pix(samples, stride, height, (ax * 4 + k) as i32, row0 - down);
-        }
-        let right_ok = above_right_ok(pic, mx, my, bx, by, mb.slice, constrained);
-        let fill = above[3];
-        for (k, slot) in above[4..].iter_mut().enumerate() {
-            let x = ax * 4 + k + 4;
-            *slot = if right_ok {
-                pix(samples, stride, height, x as i32, row0 - down)
-            } else {
-                fill
-            };
+        let x = ax as i32 * 4;
+        if above_right_ok(pic, mx, my, bx, by, mb.slice, constrained) {
+            read_row(samples, stride, height, x, row0 - down, &mut above);
+        } else {
+            read_row(samples, stride, height, x, row0 - down, &mut above[..4]);
+            let fill = above[3];
+            above[4..].fill(fill);
         }
     }
     if left_ok {
-        for (k, slot) in left.iter_mut().enumerate() {
-            *slot = pix(
-                samples,
-                stride,
-                height,
-                ax as i32 * 4 - 1,
-                row0 + k as i32 * down,
-            );
-        }
+        let from = (ax as i32 * 4 - 1, row0, down);
+        read_col(samples, stride, height, from, &mut left);
     }
     let corner = if above_ok && left_ok {
         pix(samples, stride, height, ax as i32 * 4 - 1, row0 - down)
@@ -4665,19 +4653,7 @@ fn pred8_block<S: Sample>(
         here,
     );
     if above_ok {
-        for (k, slot) in raw_above[..8].iter_mut().enumerate() {
-            *slot = pix(samples, stride, height, x + k as i32, y - down);
-        }
-        // Clause 8.3.2.2: p[8..15, -1] that are not yet constructed take p[7, -1].
-        let fill = raw_above[7];
-        let right = above8_right(pic, x, y, down, mb.slice, constrained);
-        for (k, slot) in raw_above[8..].iter_mut().enumerate() {
-            *slot = if right {
-                pix(samples, stride, height, x + 8 + k as i32, y - down)
-            } else {
-                fill
-            };
-        }
+        read_row(samples, stride, height, x, y - down, &mut raw_above[..8]);
         // Clause 8.3.2.2: when p[8..15, -1] are not available, they take p[7, -1]
         // before the clause 8.3.2.2.1 filter. That block is the one to the upper right.
         let upper_right = |dx: usize| {
@@ -4691,18 +4667,14 @@ fn pred8_block<S: Sample>(
             )
         };
         if upper_right(0) && upper_right(1) {
-            for (k, slot) in raw_above[8..].iter_mut().enumerate() {
-                *slot = pix(&pic.y, pic.w, pic.h, x + 8 + k as i32, y - 1);
-            }
+            read_row(&pic.y, pic.w, pic.h, x + 8, y - 1, &mut raw_above[8..]);
         } else {
             let edge = raw_above[7];
             raw_above[8..].fill(edge);
         }
     }
     if left_ok {
-        for (k, slot) in raw_left.iter_mut().enumerate() {
-            *slot = pix(samples, stride, height, x - 1, y + k as i32 * down);
-        }
+        read_col(samples, stride, height, (x - 1, y, down), &mut raw_left);
     }
     let corner = if above_ok && left_ok {
         pix(samples, stride, height, x - 1, y - down)
@@ -4919,29 +4891,6 @@ fn left_at<S: Sample>(left: &[S; 8], corner: S, index: i32) -> S {
 fn avg2<S: Sample>(a: S, b: S) -> S {
     let (a, b): (i32, i32) = (a.into(), b.into());
     S::clip((a + b + 1) >> 1)
-}
-
-/// The eight samples to the right of an Intra_8x8 block's above row.
-///
-/// They belong to one macroblock. A later macroblock in this slice is not
-/// constructed yet, so it is not a neighbour.
-fn above8_right<S: Sample>(
-    pic: &Frame<S>,
-    x: i32,
-    y: i32,
-    step: i32,
-    slice: u16,
-    constrained: bool,
-) -> bool {
-    let sx = x + 8;
-    let sy = y - step;
-    if sx < 0 || sy < 0 {
-        return false;
-    }
-    let Some(side) = neighbor(pic, sx / 16, sy / 16, slice) else {
-        return false;
-    };
-    !constrained || side.intra
 }
 
 fn filter_row<S: Sample>(raw: &[S; 16], corner: S, above_ok: bool, left_ok: bool) -> [S; 16] {
@@ -7108,21 +7057,19 @@ fn edge16<S: Sample>(
     let mut left = Edge::new(17);
     let above_y = span.y as i32 - span.step as i32;
     if above_ok {
-        for (k, slot) in above[..16].iter_mut().enumerate() {
-            *slot = pix(samples, stride, height, (mx * 16 + k) as i32, above_y);
-        }
+        read_row(
+            samples,
+            stride,
+            height,
+            mx as i32 * 16,
+            above_y,
+            &mut above[..16],
+        );
         above[16] = pix(samples, stride, height, (mx * 16 + 16) as i32, above_y);
     }
     if left_ok {
-        for (k, slot) in left[..16].iter_mut().enumerate() {
-            *slot = pix(
-                samples,
-                stride,
-                height,
-                mx as i32 * 16 - 1,
-                span.at(k) as i32,
-            );
-        }
+        let from = (mx as i32 * 16 - 1, span.y as i32, span.step as i32);
+        read_col(samples, stride, height, from, &mut left[..16]);
         left[16] = pix(
             samples,
             stride,
@@ -7157,15 +7104,19 @@ fn edge_chroma<S: Sample>(
     let mut left = Edge::new(rows + 1);
     let above_y = span.y as i32 - span.step as i32;
     if above_ok {
-        for (k, slot) in above[..8].iter_mut().enumerate() {
-            *slot = pix(plane, stride, height, (mx * 8 + k) as i32, above_y);
-        }
+        read_row(
+            plane,
+            stride,
+            height,
+            mx as i32 * 8,
+            above_y,
+            &mut above[..8],
+        );
         above[8] = pix(plane, stride, height, (mx * 8 + 8) as i32, above_y);
     }
     if left_ok {
-        for (k, slot) in left[..rows].iter_mut().enumerate() {
-            *slot = pix(plane, stride, height, mx as i32 * 8 - 1, span.at(k) as i32);
-        }
+        let from = (mx as i32 * 8 - 1, span.y as i32, span.step as i32);
+        read_col(plane, stride, height, from, &mut left[..rows]);
         left[rows] = pix(
             plane,
             stride,
@@ -7583,6 +7534,53 @@ fn pix<S: Sample>(plane: &[S], stride: usize, height: usize, x: i32, y: i32) -> 
     let x = x.clamp(0, stride as i32 - 1) as usize;
     let y = y.clamp(0, height as i32 - 1) as usize;
     plane.get(y * stride + x).copied().unwrap_or(S::mid())
+}
+
+/// Fills `out` with the samples of row `y` from column `x` on, as `pix`
+/// reads them. A run that lies inside the plane is copied in one piece.
+fn read_row<S: Sample>(plane: &[S], stride: usize, height: usize, x: i32, y: i32, out: &mut [S]) {
+    if x >= 0 && y >= 0 && (y as usize) < height && x as usize + out.len() <= stride {
+        let at = y as usize * stride + x as usize;
+        if let Some(run) = plane.get(at..at + out.len()) {
+            out.copy_from_slice(run);
+            return;
+        }
+    }
+    for (k, slot) in out.iter_mut().enumerate() {
+        *slot = pix(plane, stride, height, x + k as i32, y);
+    }
+}
+
+/// Fills `out` with the samples of column `x` from row `y` on, `down` rows
+/// apart, as `pix` reads them.
+fn read_col<S: Sample>(
+    plane: &[S],
+    stride: usize,
+    height: usize,
+    at: (i32, i32, i32),
+    out: &mut [S],
+) {
+    let (x, y, down) = at;
+    let last = y + (out.len() as i32 - 1) * down;
+    if x >= 0
+        && (x as usize) < stride
+        && y >= 0
+        && down > 0
+        && last >= y
+        && (last as usize) < height
+    {
+        let first = y as usize * stride + x as usize;
+        let step = down as usize * stride;
+        if first + (out.len() - 1) * step < plane.len() {
+            for (slot, sample) in out.iter_mut().zip(plane[first..].iter().step_by(step)) {
+                *slot = *sample;
+            }
+            return;
+        }
+    }
+    for (k, slot) in out.iter_mut().enumerate() {
+        *slot = pix(plane, stride, height, x, y + k as i32 * down);
+    }
 }
 
 fn decode_inter<S: Sample>(

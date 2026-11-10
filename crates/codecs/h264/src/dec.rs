@@ -217,6 +217,9 @@ pub(crate) struct Frame<S: Sample = u8> {
     h: usize,
     mb_w: usize,
     poc: i32,
+    /// Order counts of the top and the bottom field. A frame's own count is
+    /// the smaller. Field macroblocks measure distances between fields.
+    field_poc: [i32; 2],
     frame_num: u32,
     referenced: bool,
     long_term: bool,
@@ -1856,6 +1859,7 @@ fn absent_frame<S: Sample>(sps: &Sps, frame_num: u32, poc: i32) -> Frame<S> {
         h: sps.height as usize,
         mb_w: sps.mb_width,
         poc,
+        field_poc: [poc; 2],
         frame_num,
         referenced: true,
         long_term: false,
@@ -2490,6 +2494,13 @@ fn decode_slice<S: Sample>(
         fill_frame_num_gap(&sps, poc_state, dpb, header.frame_num)?;
     }
     let (poc, frame_num_offset) = picture_order(&header, &sps, poc_state, idr)?;
+    let field_poc = field_orders(&sps, &header, poc);
+    // Clause 8.2.1: a frame's order count is the smaller of its fields'.
+    let poc = if header.field {
+        poc
+    } else {
+        field_poc[0].min(field_poc[1])
+    };
     let _ = frame_num_offset;
     let fresh = picture.is_none();
     if fresh {
@@ -2508,14 +2519,9 @@ fn decode_slice<S: Sample>(
         }
         let keep_levels = sets.subset.iter().flatten().any(|sps| sps.seq_tcoeff);
         let here = jobs.is_none();
-        *picture = Some(new_frame(
-            &sps,
-            &header,
-            poc,
-            packet,
-            idr,
-            (here, keep_levels),
-        )?);
+        let mut frame = new_frame(&sps, &header, poc, packet, idr, (here, keep_levels))?;
+        frame.field_poc = field_poc;
+        *picture = Some(frame);
         *next_mb = 0;
         if header.nal_ref {
             poc_state.prev_frame_num = header.frame_num;
@@ -2960,11 +2966,12 @@ fn read_header(
         let _ = bits.ue()?;
     }
     let mut poc_lsb = 0i32;
+    // For order count type 0 the second entry is delta_pic_order_cnt_bottom.
     let mut delta_poc = [0i32; 2];
     if sps.poc_type == 0 {
         poc_lsb = bits.u(u32::from(sps.log2_max_poc_lsb))? as i32;
         if pps.bottom_field_pic_order && !field {
-            let _ = bits.se()?;
+            delta_poc[1] = bits.se()?;
         }
     } else if sps.poc_type == 1 && !sps.delta_pic_order_always_zero {
         delta_poc[0] = bits.se()?;
@@ -3851,6 +3858,26 @@ fn picture_order(
     Ok((poc, offset))
 }
 
+/// Clause 8.2.1: the order counts of a frame's top and bottom fields, from
+/// the count [`picture_order`] gave. Type 0 gives the top field's and sends
+/// the bottom one as a difference; type 1 gives the smaller of the two,
+/// which lie a known distance apart; type 2 gives both the same. A field
+/// picture has the one count.
+fn field_orders(sps: &Sps, header: &Header, poc: i32) -> [i32; 2] {
+    if header.field {
+        return [poc; 2];
+    }
+    match sps.poc_type {
+        0 => [poc, poc.saturating_add(header.delta_poc[1])],
+        1 => {
+            let apart = sps.offset_top_bottom.saturating_add(header.delta_poc[1]);
+            let top = poc.saturating_sub(apart.min(0));
+            [top, top.saturating_add(apart)]
+        }
+        _ => [poc; 2],
+    }
+}
+
 /// Clause 8.2.1.2. A frame's order count is the smaller of the two fields.
 fn poc_type1(
     sps: &Sps,
@@ -3967,6 +3994,7 @@ fn new_frame<S: Sample>(
         h,
         mb_w,
         poc,
+        field_poc: [poc; 2],
         frame_num: header.frame_num,
         referenced: header.nal_ref,
         long_term: header.long_term_ref,
@@ -4969,6 +4997,33 @@ mod tests {
         assert!(super::poc_type1(&wide, 0, 2, true, [0, 0]).is_err());
     }
 
+    /// Clause 8.2.1: each field of a frame has its own order count. Type 0
+    /// sends the bottom field's as a difference from the top's; type 1
+    /// places the fields a set distance apart around the smaller count.
+    #[test]
+    fn a_frame_keeps_the_order_count_of_each_field() {
+        let mut header = p_header(1, 1, Vec::new());
+        let mut sps = type1_sps(&[2, 4], -1, 1);
+        sps.poc_type = 0;
+        header.delta_poc = [0, -1];
+        assert_eq!(super::field_orders(&sps, &header, 8), [8, 7]);
+        header.delta_poc = [0, 3];
+        assert_eq!(super::field_orders(&sps, &header, 8), [8, 11]);
+        // Type 1: `poc` is already the smaller of the two.
+        sps.poc_type = 1;
+        header.delta_poc = [0, 0];
+        assert_eq!(super::field_orders(&sps, &header, 8), [8, 9]);
+        header.delta_poc = [0, -4];
+        assert_eq!(super::field_orders(&sps, &header, 8), [11, 8]);
+        sps.poc_type = 2;
+        assert_eq!(super::field_orders(&sps, &header, 8), [8, 8]);
+        // A field picture has the one count.
+        sps.poc_type = 0;
+        header.field = true;
+        header.delta_poc = [0, 5];
+        assert_eq!(super::field_orders(&sps, &header, 8), [8, 8]);
+    }
+
     #[test]
     fn frame_num_gap_slides_real_references_out() {
         let mut sps = type1_sps(&[], 0, 0);
@@ -5149,6 +5204,7 @@ mod tests {
             h: 16,
             mb_w: 1,
             poc: i32::try_from(frame_num).unwrap_or(0),
+            field_poc: [i32::try_from(frame_num).unwrap_or(0); 2],
             frame_num,
             referenced: true,
             long_term: false,

@@ -5534,6 +5534,7 @@ mod intra8 {
             h: height,
             mb_w,
             poc: 0,
+            field_poc: [0; 2],
             frame_num: 0,
             referenced: true,
             long_term: false,

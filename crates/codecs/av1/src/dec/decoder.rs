@@ -1902,6 +1902,143 @@ fn recycle<P: Pixel>(pool: &mut Vec<Picture<P>>, p: Picture<P>) {
     }
 }
 
+/// What a tile decode reuses from one tile to the next: the above
+/// contexts, the palette color maps and the prediction scratch.
+struct TileBufs<P> {
+    above_level: [Vec<u8>; 3],
+    above_dc: [Vec<u8>; 3],
+    above_seg_pred: Vec<u8>,
+    above_palette: [Vec<[u16; 8]>; 2],
+    color_map_y: Vec<u8>,
+    color_map_uv: Vec<u8>,
+    scratch: Scratch<P>,
+}
+
+impl<P: Pixel> TileBufs<P> {
+    /// Buffers for the tiles of frames with the size of `fs`.
+    fn new(fs: &FrameState, scratch: Scratch<P>) -> Self {
+        let n_above = fs.mi_stride + 64;
+        Self {
+            above_level: std::array::from_fn(|_| vec![0u8; n_above]),
+            above_dc: std::array::from_fn(|_| vec![0u8; n_above]),
+            above_seg_pred: vec![0u8; n_above],
+            above_palette: std::array::from_fn(|_| vec![[0u16; 8]; n_above]),
+            color_map_y: vec![0u8; 128 * 128],
+            color_map_uv: vec![0u8; 128 * 128],
+            scratch,
+        }
+    }
+}
+
+/// Decodes tile `tile_num` of a frame into `fs` and `cur` (see
+/// [`decode_tiles`]). Returns the CDFs at the end of the tile.
+fn decode_tile<P: Pixel>(
+    seq: &SequenceHeader,
+    hdr: &FrameHeader,
+    fs: &mut FrameState,
+    cur: &mut Picture<P>,
+    cdf: &CdfContext,
+    refs: &[Option<&Picture<P>>; 8],
+    ref_hdr: &[RefHeaderState; 8],
+    tile_num: usize,
+    data: &[u8],
+    bufs: &mut TileBufs<P>,
+    logs: Option<&Mutex<RowPools>>,
+    mut feed: Option<&mut MfFeed>,
+    on_row: &mut RowHook<'_, P>,
+) -> R<Box<CdfContext>> {
+    let num_planes = seq.num_planes();
+    let sb128 = seq.use_128x128_superblock;
+    let ti = &hdr.tile_info;
+    let tile_row = tile_num / ti.cols;
+    let tile_col = tile_num % ti.cols;
+    let mut tile_cdf = Box::new(cdf.clone());
+    let ref_views: [Option<RefView<'_, P>>; 8] = std::array::from_fn(|i| {
+        if i == 0 {
+            return None;
+        }
+        let slot = hdr.ref_frame_idx[i - 1] as usize;
+        refs[i].map(|pic| RefView {
+            pic,
+            mirror: None,
+            upscaled_width: ref_hdr[slot].upscaled_width as usize,
+            frame_height: ref_hdr[slot].frame_height as usize,
+            frame_width: ref_hdr[slot].frame_width as usize,
+        })
+    });
+    let mut td = TileDec {
+        seq,
+        hdr,
+        fs: &mut *fs,
+        cur: &mut *cur,
+        refs: ref_views,
+        mirrors: Vec::new(),
+        msac: Msac::new(data, hdr.disable_cdf_update),
+        cdf: &mut tile_cdf,
+        mi_row_start: ti.mi_row_starts[tile_row] as usize,
+        mi_row_end: ti.mi_row_starts[tile_row + 1] as usize,
+        mi_col_start: ti.mi_col_starts[tile_col] as usize,
+        mi_col_end: ti.mi_col_starts[tile_col + 1] as usize,
+        sb_size: if sb128 { 15 } else { 12 },
+        sb_size4: if sb128 { 32 } else { 16 },
+        bd: seq.bit_depth,
+        sub_x: seq.subsampling_x,
+        sub_y: seq.subsampling_y,
+        num_planes,
+        above_level: std::mem::take(&mut bufs.above_level),
+        above_dc: std::mem::take(&mut bufs.above_dc),
+        above_seg_pred: std::mem::take(&mut bufs.above_seg_pred),
+        left_level: [[0; 32]; 3],
+        left_dc: [[0; 32]; 3],
+        left_seg_pred: [0; 32],
+        above_palette: std::mem::take(&mut bufs.above_palette),
+        left_palette: [[[0; 8]; 32]; 2],
+        delta_lf: [0; 4],
+        current_q_index: i32::from(hdr.quant.base_q_idx),
+        read_deltas: false,
+        ref_lr_wiener: [[[0; 3]; 2]; 3],
+        ref_sgr_xqd: [[0; 2]; 3],
+        block_decoded: [[[false; 35]; 35]; 3],
+        b: Default::default(),
+        pb: Default::default(),
+        plan: Default::default(),
+        src: None,
+        enc: Default::default(),
+        mode: Default::default(),
+        me_scratch: crate::enc::me::MeScratch::empty(),
+        plan_q: 0,
+        cfl_choice: (0, 0),
+        intra_choice: (0, None),
+        est_hint: (0, 0),
+        cur_filters: [0, 0],
+        plan_delta_lf: [0; 4],
+        color_map_y: std::mem::take(&mut bufs.color_map_y),
+        color_map_uv: std::mem::take(&mut bufs.color_map_uv),
+        scratch: std::mem::replace(&mut bufs.scratch, Scratch::empty()),
+        rec: logs.map(|l| Box::new(lock(l).logs.pop().unwrap_or_default())),
+    };
+    let res = td.decode_tile_rows(&mut *on_row, &mut |fs: &mut FrameState, r1: usize| {
+        if let Some(f) = feed.as_deref_mut() {
+            f.need(fs, r1);
+        }
+    });
+    bufs.above_level = std::mem::take(&mut td.above_level);
+    bufs.above_dc = std::mem::take(&mut td.above_dc);
+    bufs.above_seg_pred = std::mem::take(&mut td.above_seg_pred);
+    bufs.above_palette = std::mem::take(&mut td.above_palette);
+    bufs.color_map_y = std::mem::take(&mut td.color_map_y);
+    bufs.color_map_uv = std::mem::take(&mut td.color_map_uv);
+    bufs.scratch = std::mem::replace(&mut td.scratch, Scratch::empty());
+    // The log left holds the buffers of a spare: back to the pool.
+    if let (Some(l), Some(mut log)) = (logs, td.rec.take()) {
+        log.clear();
+        lock(l).logs.push(*log);
+    }
+    drop(td);
+    res?;
+    Ok(tile_cdf)
+}
+
 /// Decodes the tiles of a frame into `cur`, calling `on_row(fs, cur, r0,
 /// r1)` after each superblock row of each tile (luma 4x4 rows `r0..r1`).
 /// With `logs`, the tiles record what reconstruction needs (see
@@ -1921,118 +2058,39 @@ fn decode_tiles<P: Pixel>(
     on_row: &mut RowHook<'_, P>,
     spares: Option<&Mutex<Spares<P>>>,
 ) -> R<Box<CdfContext>> {
-    let num_planes = seq.num_planes();
-    let mut saved: Option<Box<CdfContext>> = None;
-    let sb128 = seq.use_128x128_superblock;
     let ti = &hdr.tile_info;
     // Recording tiles only parse: the prediction buffers stay empty.
-    let mut scratch = if logs.is_some() {
+    let scratch = if logs.is_some() {
         Scratch::<P>::parsing()
     } else {
         spares
             .and_then(|s| lock(s).scratch.pop())
             .unwrap_or_default()
     };
-    let n_above = fs.mi_stride + 64;
-    let mut above_level: [Vec<u8>; 3] = std::array::from_fn(|_| vec![0u8; n_above]);
-    let mut above_dc: [Vec<u8>; 3] = std::array::from_fn(|_| vec![0u8; n_above]);
-    let mut above_seg_pred = vec![0u8; n_above];
-    let mut above_palette: [Vec<[u16; 8]>; 2] = std::array::from_fn(|_| vec![[0u16; 8]; n_above]);
-    let mut color_map_y = vec![0u8; 128 * 128];
-    let mut color_map_uv = vec![0u8; 128 * 128];
+    let mut bufs = TileBufs::new(fs, scratch);
+    let mut saved: Option<Box<CdfContext>> = None;
     for (tile_num, data) in tiles {
-        let tile_row = tile_num / ti.cols;
-        let tile_col = tile_num % ti.cols;
-        let mut tile_cdf = Box::new(cdf.clone());
-        let ref_views: [Option<RefView<'_, P>>; 8] = std::array::from_fn(|i| {
-            if i == 0 {
-                return None;
-            }
-            let slot = hdr.ref_frame_idx[i - 1] as usize;
-            refs[i].map(|pic| RefView {
-                pic,
-                mirror: None,
-                upscaled_width: ref_hdr[slot].upscaled_width as usize,
-                frame_height: ref_hdr[slot].frame_height as usize,
-                frame_width: ref_hdr[slot].frame_width as usize,
-            })
-        });
-        let mut td = TileDec {
+        let tile_cdf = decode_tile(
             seq,
             hdr,
-            fs: &mut *fs,
-            cur: &mut *cur,
-            refs: ref_views,
-            mirrors: Vec::new(),
-            msac: Msac::new(data, hdr.disable_cdf_update),
-            cdf: &mut tile_cdf,
-            mi_row_start: ti.mi_row_starts[tile_row] as usize,
-            mi_row_end: ti.mi_row_starts[tile_row + 1] as usize,
-            mi_col_start: ti.mi_col_starts[tile_col] as usize,
-            mi_col_end: ti.mi_col_starts[tile_col + 1] as usize,
-            sb_size: if sb128 { 15 } else { 12 },
-            sb_size4: if sb128 { 32 } else { 16 },
-            bd: seq.bit_depth,
-            sub_x: seq.subsampling_x,
-            sub_y: seq.subsampling_y,
-            num_planes,
-            above_level: std::mem::take(&mut above_level),
-            above_dc: std::mem::take(&mut above_dc),
-            above_seg_pred: std::mem::take(&mut above_seg_pred),
-            left_level: [[0; 32]; 3],
-            left_dc: [[0; 32]; 3],
-            left_seg_pred: [0; 32],
-            above_palette: std::mem::take(&mut above_palette),
-            left_palette: [[[0; 8]; 32]; 2],
-            delta_lf: [0; 4],
-            current_q_index: i32::from(hdr.quant.base_q_idx),
-            read_deltas: false,
-            ref_lr_wiener: [[[0; 3]; 2]; 3],
-            ref_sgr_xqd: [[0; 2]; 3],
-            block_decoded: [[[false; 35]; 35]; 3],
-            b: Default::default(),
-            pb: Default::default(),
-            plan: Default::default(),
-            src: None,
-            enc: Default::default(),
-            mode: Default::default(),
-            me_scratch: crate::enc::me::MeScratch::empty(),
-            plan_q: 0,
-            cfl_choice: (0, 0),
-            intra_choice: (0, None),
-            est_hint: (0, 0),
-            cur_filters: [0, 0],
-            plan_delta_lf: [0; 4],
-            color_map_y: std::mem::take(&mut color_map_y),
-            color_map_uv: std::mem::take(&mut color_map_uv),
-            scratch: std::mem::replace(&mut scratch, Scratch::empty()),
-            rec: logs.map(|l| Box::new(lock(l).logs.pop().unwrap_or_default())),
-        };
-        let res = td.decode_tile_rows(&mut *on_row, &mut |fs: &mut FrameState, r1: usize| {
-            if let Some(f) = feed.as_deref_mut() {
-                f.need(fs, r1);
-            }
-        });
-        above_level = std::mem::take(&mut td.above_level);
-        above_dc = std::mem::take(&mut td.above_dc);
-        above_seg_pred = std::mem::take(&mut td.above_seg_pred);
-        above_palette = std::mem::take(&mut td.above_palette);
-        color_map_y = std::mem::take(&mut td.color_map_y);
-        color_map_uv = std::mem::take(&mut td.color_map_uv);
-        scratch = std::mem::replace(&mut td.scratch, Scratch::empty());
-        // The log left holds the buffers of a spare: back to the pool.
-        if let (Some(l), Some(mut log)) = (logs, td.rec.take()) {
-            log.clear();
-            lock(l).logs.push(*log);
-        }
-        drop(td);
-        res?;
+            fs,
+            cur,
+            cdf,
+            refs,
+            ref_hdr,
+            *tile_num,
+            data,
+            &mut bufs,
+            logs,
+            feed.as_deref_mut(),
+            on_row,
+        )?;
         if *tile_num == ti.context_update_tile_id as usize {
             saved = Some(tile_cdf);
         }
     }
     if let (Some(s), None) = (spares, logs) {
-        lock(s).scratch.push(scratch);
+        lock(s).scratch.push(bufs.scratch);
     }
     Ok(saved.unwrap_or_else(|| Box::new(cdf.clone())))
 }

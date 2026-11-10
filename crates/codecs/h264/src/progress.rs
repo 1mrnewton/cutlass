@@ -8,9 +8,12 @@
 //! it, and readers wait for the band they need.
 //!
 //! A band is a run of rows with the picture's edge samples repeated around
-//! it, wide and tall enough that any block whose first sample lies in the
-//! band's own rows finds every sample it reads inside the band. A reader
-//! therefore gets one unbroken slice and never needs edge handling.
+//! it. Band `e` ends at the last row that is final once `e` macroblock rows
+//! are deblocked, and is tall enough that any block whose last row read
+//! falls in the band's last sixteen rows finds every row it reads inside.
+//! So a band is handed out the moment its rows are final, a reader waits
+//! for exactly the rows it needs and no more, and it gets one unbroken
+//! slice with no edge handling to do.
 
 use std::sync::{Condvar, Mutex, OnceLock};
 
@@ -23,14 +26,30 @@ use crate::recon::Sample;
 /// within 19 samples of the picture, and the filter reads 2 before a block
 /// and 3 after one of at most 16.
 const LUMA_PAD: usize = 24;
-/// Rows in a luma band: 2 above its 16, then 16 and 3 more below.
-const LUMA_ROWS: usize = 37;
+/// Rows in a luma band. A block's last row read is one of the band's last
+/// 16, and its first is at most 16 + 2 + 3 − 1 rows before that.
+const LUMA_ROWS: usize = 36;
+/// Deblocking macroblock row `e` changes up to three luma rows above it,
+/// so with `e` rows done the last final luma row is `16e − 4`.
+const LUMA_UNSETTLED: i32 = 3;
 /// Samples repeated left and right of a chroma row.
 const CHROMA_PAD: usize = 12;
-/// Rows in a chroma band: its 8, then 8 and 1 more below.
-const CHROMA_ROWS: usize = 17;
-/// Bands above the picture, for block origins above its first row.
-const BANDS_ABOVE: i32 = 2;
+/// Rows in a chroma band: a last row read among its last 8, and up to 8
+/// rows before that.
+const CHROMA_ROWS: usize = 16;
+/// Deblocking changes one chroma row above a macroblock row, so with `e`
+/// rows done the last final chroma row is `8e − 2`.
+const CHROMA_UNSETTLED: i32 = 1;
+
+/// The first row of luma band `band`.
+fn luma_first(band: i32) -> i32 {
+    band * 16 - LUMA_UNSETTLED - LUMA_ROWS as i32
+}
+
+/// The first row of chroma band `band`.
+fn chroma_first(band: i32) -> i32 {
+    band * 8 - CHROMA_UNSETTLED - CHROMA_ROWS as i32
+}
 
 /// A finished picture's planes and macroblocks.
 pub(crate) struct Planes<S: Sample> {
@@ -131,7 +150,9 @@ impl<S: Sample> Published<S> {
         mb_w: usize,
         permits: Option<std::sync::Arc<Permits>>,
     ) -> Self {
-        let bands = h / 16 + BANDS_ABOVE as usize + 1;
+        // A block held to within 19 rows of the picture and 16 rows tall
+        // reads at most 19 rows past the bottom.
+        let bands = h / 16 + 3;
         Self {
             w,
             h,
@@ -188,10 +209,6 @@ impl<S: Sample> Published<S> {
     /// Publishes what `deblocked` finished macroblock rows of `pic` make
     /// final, or everything when `last` is set. `from` is how many rows
     /// were published before; the new count comes back.
-    ///
-    /// Deblocking row `k` later changes up to three luma rows and one
-    /// chroma row above it, so after rows `0..=k` are done the samples
-    /// above those are final. Band `b` reaches 19 rows past its own 16.
     pub(crate) fn publish(
         &self,
         pic: &Frame<S>,
@@ -207,8 +224,11 @@ impl<S: Sample> Published<S> {
                 let _ = self.mbs[row].set(mbs.into());
             }
         }
-        let bands = if last { self.luma.len() } else { done };
-        self.fill_bands((&pic.y, &pic.u, &pic.v), from.min(bands)..bands);
+        // With `done` rows deblocked, bands 0 to `done` are final. Band 0
+        // is the picture's first row repeated, final with the first row.
+        let count = |rows: usize| if rows == 0 { 0 } else { rows + 1 };
+        let bands = if last { self.luma.len() } else { count(done) };
+        self.fill_bands((&pic.y, &pic.u, &pic.v), count(from).min(bands)..bands);
         self.wake();
         done
     }
@@ -218,11 +238,12 @@ impl<S: Sample> Published<S> {
         let (y, u, v) = planes;
         let (cw, ch) = (self.w / 2, self.h / 2);
         for index in bands.start..bands.end.min(self.luma.len()) {
-            let band = index as i32 - BANDS_ABOVE;
-            let luma = band_of(y, (self.w, self.h), band * 16 - 2, LUMA_ROWS, LUMA_PAD);
+            let band = index as i32;
+            let luma = band_of(y, (self.w, self.h), luma_first(band), LUMA_ROWS, LUMA_PAD);
             let _ = self.luma[index].set(luma);
-            let _ = self.cb[index].set(band_of(u, (cw, ch), band * 8, CHROMA_ROWS, CHROMA_PAD));
-            let _ = self.cr[index].set(band_of(v, (cw, ch), band * 8, CHROMA_ROWS, CHROMA_PAD));
+            let first = chroma_first(band);
+            let _ = self.cb[index].set(band_of(u, (cw, ch), first, CHROMA_ROWS, CHROMA_PAD));
+            let _ = self.cr[index].set(band_of(v, (cw, ch), first, CHROMA_ROWS, CHROMA_PAD));
         }
     }
 
@@ -257,42 +278,49 @@ impl<S: Sample> Published<S> {
         }
     }
 
-    /// The luma samples for a block of at most 16×16 whose first full
-    /// sample is at (`x`, `y`), which may lie outside the picture.
-    pub(crate) fn luma(&self, x: i32, y: i32) -> Result<Window<'_, S>, CodecError> {
+    /// The luma samples for a block at most 16 wide and `height` rows
+    /// tall, at most 16, whose first full sample is at (`x`, `y`), which
+    /// may lie outside the picture. Waits until the last row the block can
+    /// read, three below its own, is final.
+    pub(crate) fn luma(&self, x: i32, y: i32, height: usize) -> Result<Window<'_, S>, CodecError> {
         // Past these, every sample the block reads is the same edge sample.
         let x = x.clamp(-19, self.w as i32 + 2);
         let y = y.clamp(-19, self.h as i32 + 1);
-        let band = y.div_euclid(16);
-        let slot = self
-            .luma
-            .get((band + BANDS_ABOVE) as usize)
-            .ok_or_else(broken)?;
+        let last = y + height.clamp(1, 16) as i32 + 2;
+        // The first band whose final rows reach `last`.
+        let band = (last + LUMA_UNSETTLED + 16).div_euclid(16);
+        let slot = self.luma.get(band as usize).ok_or_else(broken)?;
         Ok(Window {
             samples: self.wait(slot)?,
             stride: self.w + 2 * LUMA_PAD,
             rows: LUMA_ROWS,
             x: x + LUMA_PAD as i32,
-            y: y - (band * 16 - 2),
+            y: y - luma_first(band),
         })
     }
 
-    /// The chroma samples for a block of at most 8×8 at (`x`, `y`) in the
-    /// chroma plane, Cb when `cb` is set.
-    pub(crate) fn chroma(&self, cb: bool, x: i32, y: i32) -> Result<Window<'_, S>, CodecError> {
+    /// The chroma samples for a block at most 8 wide and `height` rows
+    /// tall, at most 8, at (`x`, `y`) in the chroma plane, Cb when `cb` is
+    /// set. Waits until the row below the block is final.
+    pub(crate) fn chroma(
+        &self,
+        cb: bool,
+        x: i32,
+        y: i32,
+        height: usize,
+    ) -> Result<Window<'_, S>, CodecError> {
         let x = x.clamp(-9, self.w as i32 / 2);
         let y = y.clamp(-9, self.h as i32 / 2);
-        let band = y.div_euclid(8);
+        let last = y + height.clamp(1, 8) as i32;
+        let band = (last + CHROMA_UNSETTLED + 8).div_euclid(8);
         let planes = if cb { &self.cb } else { &self.cr };
-        let slot = planes
-            .get((band + BANDS_ABOVE) as usize)
-            .ok_or_else(broken)?;
+        let slot = planes.get(band as usize).ok_or_else(broken)?;
         Ok(Window {
             samples: self.wait(slot)?,
             stride: self.w / 2 + 2 * CHROMA_PAD,
             rows: CHROMA_ROWS,
             x: x + CHROMA_PAD as i32,
-            y: y - band * 8,
+            y: y - chroma_first(band),
         })
     }
 
@@ -346,41 +374,59 @@ mod tests {
         published.fill_bands((&y, &u, &v), 0..published.luma.len());
         let (pic_w, pic_h) = (w as i32, h as i32);
         for by in -80..pic_h + 80 {
-            for bx in -80..pic_w + 80 {
-                let window = published.luma(bx, by).unwrap();
-                // Two samples before a 16×16 block and three after it.
-                for dy in -2..19 {
-                    for dx in -2..19 {
-                        let at =
-                            (window.y + dy) as usize * window.stride + (window.x + dx) as usize;
-                        let want = sample(&y, w, pic_w, pic_h, bx + dx, by + dy);
-                        assert_eq!(
-                            i32::from(window.samples[at]),
-                            want,
-                            "luma {bx},{by} +{dx},{dy}"
-                        );
+            for bx in (-80..pic_w + 80).step_by(3) {
+                for height in [4usize, 8, 16] {
+                    let window = published.luma(bx, by, height).unwrap();
+                    // Two samples before the block and three after it.
+                    for dy in -2..height as i32 + 3 {
+                        for dx in -2..19 {
+                            let at =
+                                (window.y + dy) as usize * window.stride + (window.x + dx) as usize;
+                            let want = sample(&y, w, pic_w, pic_h, bx + dx, by + dy);
+                            let got = i32::from(window.samples[at]);
+                            assert_eq!(got, want, "luma {bx},{by} +{dx},{dy} height {height}");
+                        }
                     }
+                    assert!(window.y >= 2 && window.y + height as i32 + 3 <= window.rows as i32);
                 }
-                assert!(window.y >= 2 && window.y + 16 + 3 <= window.rows as i32);
             }
         }
         for by in -40..pic_h / 2 + 40 {
             for bx in -40..pic_w / 2 + 40 {
                 for (cb, plane) in [(true, &u), (false, &v)] {
-                    let window = published.chroma(cb, bx, by).unwrap();
-                    // An 8×8 block and one sample after it each way.
-                    for dy in 0..9 {
-                        for dx in 0..9 {
-                            let at =
-                                (window.y + dy) as usize * window.stride + (window.x + dx) as usize;
-                            let want = sample(plane, w / 2, pic_w / 2, pic_h / 2, bx + dx, by + dy);
-                            assert_eq!(i32::from(window.samples[at]), want, "chroma {bx},{by}");
+                    for height in [2usize, 4, 8] {
+                        let window = published.chroma(cb, bx, by, height).unwrap();
+                        // The block and one sample after it each way.
+                        for dy in 0..height as i32 + 1 {
+                            for dx in 0..9 {
+                                let at = (window.y + dy) as usize * window.stride
+                                    + (window.x + dx) as usize;
+                                let want =
+                                    sample(plane, w / 2, pic_w / 2, pic_h / 2, bx + dx, by + dy);
+                                let got = i32::from(window.samples[at]);
+                                assert_eq!(got, want, "chroma {bx},{by} height {height}");
+                            }
                         }
+                        assert!(window.y >= 0 && window.y + (height as i32) < window.rows as i32);
                     }
-                    assert!(window.y >= 0 && window.y + 8 < window.rows as i32);
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_band_is_out_as_soon_as_its_rows_are_final() {
+        // With `e` macroblock rows deblocked, a 16-row block two rows up
+        // can be read: its last row read, three below its own, is final.
+        let (w, h) = (32usize, 96usize);
+        let published = Published::<u8>::new(w, h, 2, None);
+        let (y, c) = (vec![0u8; w * h], vec![0u8; w * h / 4]);
+        published.fill_bands((&y, &c, &c), 0..4);
+        // Three rows done: bands 0 to 3. A block at row 16 reads to row 34.
+        assert!(published.luma[3].get().is_some() && published.luma[4].get().is_none());
+        assert_eq!((34 + super::LUMA_UNSETTLED + 16).div_euclid(16), 3);
+        // The same block one row lower needs the fourth row done.
+        assert_eq!((50 + super::LUMA_UNSETTLED + 16).div_euclid(16), 4);
     }
 
     #[test]
@@ -390,7 +436,7 @@ mod tests {
             let published = published.clone();
             std::thread::spawn(move || {
                 (
-                    published.luma(0, 0).is_err(),
+                    published.luma(0, 0, 16).is_err(),
                     published.mb(0).is_none(),
                     published.planes().is_err(),
                 )

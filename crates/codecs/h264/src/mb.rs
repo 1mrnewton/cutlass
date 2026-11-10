@@ -9287,7 +9287,7 @@ fn predict_block<S: Sample>(
         i32::try_from(x).unwrap_or(0) + (mvx >> 2),
         i32::try_from(y).unwrap_or(0) + (mvy >> 2),
     );
-    let Ok(window) = published.luma(at.0, at.1) else {
+    let Ok(window) = published.luma(at.0, at.1, h) else {
         return;
     };
     recon::put_luma_block(
@@ -9365,7 +9365,7 @@ fn predict_chroma<S: Sample>(
             i32::try_from(y / 2).unwrap_or(0) + (mvy >> 3),
         );
         for (cb, dst) in [(true, u), (false, v)] {
-            let Ok(window) = published.chroma(cb, at.0, at.1) else {
+            let Ok(window) = published.chroma(cb, at.0, at.1, h) else {
                 return;
             };
             recon::put_chroma_block(

@@ -2078,6 +2078,81 @@ impl Shell {
         imported
     }
 
+    /// The selected clip's file is no longer where the project stored it,
+    /// so Link to media can point the clip at where it is now.
+    #[must_use]
+    pub fn link_media_enabled(&self) -> bool {
+        self.selected_segment()
+            .and_then(|segment| self.library_path(segment.material_id.as_str()))
+            .filter(|stored| !stored.is_empty())
+            .is_some_and(|stored| {
+                !self
+                    .media_file(Some(&stored))
+                    .is_some_and(|file| file.is_file())
+            })
+    }
+
+    /// Point the selected clip's media at the file at `path`, for a file
+    /// that has moved. Every clip that plays the missing file plays this
+    /// one from then on, each keeping its edits, in one undo step. Like an
+    /// import the file is read and copied as a job.
+    pub fn start_link(&mut self, path: &Path) -> Result<(), ShellError> {
+        cutlass_logger::info!("link the selected clip's media to {}", path.display());
+        let project = self.path.clone().ok_or(ShellError::NoProject)?;
+        let segment = self
+            .selected_segment()
+            .ok_or_else(|| ShellError::Unavailable("nothing is selected".to_owned()))?;
+        let missing = self
+            .library_path(segment.material_id.as_str())
+            .filter(|stored| !stored.is_empty())
+            .ok_or_else(|| ShellError::Unavailable("the clip has no file".to_owned()))?;
+        self.refuse_busy()?;
+        let source = path.to_path_buf();
+        let name = source
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .ok_or_else(|| ShellError::Io("the file has no name".to_owned()))?;
+        let link = self.settings.import.link;
+        self.start_job("Link", move |progress| {
+            progress.stage(&format!("Reading {name}"));
+            let placed = probe::probe(&source)
+                .map_err(|error| ShellError::Probe(error.to_string()))
+                .and_then(|probed| {
+                    progress.stage(&format!("Copying {name}"));
+                    let (stored, copied) =
+                        place_in_project(&project, &source, Some(progress), link)?;
+                    Ok((probed, stored, CopyGuard(copied)))
+                });
+            Box::new(move |shell: &mut Shell| {
+                let (probed, stored, mut copy) = placed?;
+                let requests = link_requests(shell.session_draft()?, &missing, &probed, &stored);
+                if requests.is_empty() {
+                    return Err(ShellError::Unavailable(format!(
+                        "{name} is not the kind of file the clip plays"
+                    )));
+                }
+                let count = requests.len();
+                shell
+                    .apply_requests(&requests)
+                    .map_err(|error| match error {
+                        ShellError::Edit(EditError::SourceBounds) => ShellError::Unavailable(
+                            format!("{name} is shorter than the part the clip plays"),
+                        ),
+                        other => other,
+                    })?;
+                copy.keep();
+                // The pictures and waves drawn for the missing file are stale.
+                shell.preview_cache.borrow_mut().clear();
+                shell.transport.forget_files();
+                shell.set_notice(match count {
+                    1 => format!("Linked to {name}"),
+                    n => format!("Linked {n} materials to {name}"),
+                });
+                Ok(())
+            })
+        })
+    }
+
     /// Play the file at `path` in the selected clip in place of its media,
     /// keeping the clip's edits. Like an import it is read and copied as a
     /// job; the new media joins the library and the clip takes it in one
@@ -8752,6 +8827,49 @@ struct RunningJob {
 
 /// The folder of the Cutlass cache that holds filmstrip thumbnails.
 const FILM_CACHE_FOLDER: &str = "Thumbnails";
+
+/// The requests that point every material stored at `missing` at the file
+/// stored at `stored`, which probed as `probed`. A movie takes a movie, a
+/// still a still, and a sound a sound; a material of another kind is left.
+fn link_requests(draft: &Draft, missing: &str, probed: &Probed, stored: &str) -> Vec<Request> {
+    let mut requests = Vec::new();
+    match probed {
+        Probed::Video {
+            meta,
+            width,
+            height,
+            duration,
+        } => {
+            // A photo, an image and a GIF are stills; only a movie is not.
+            let movie = *meta == MetaType::Video;
+            for video in &draft.materials.videos {
+                if video.path == missing && (video.kind == MetaType::Video.as_str()) == movie {
+                    requests.push(Request::LinkMedia {
+                        material_id: video.id.clone(),
+                        path: stored.to_owned(),
+                        width: *width,
+                        height: *height,
+                        duration: Micros(*duration),
+                    });
+                }
+            }
+        }
+        Probed::Audio { duration } => {
+            for audio in &draft.materials.audios {
+                if audio.path == missing {
+                    requests.push(Request::LinkMedia {
+                        material_id: audio.id.clone(),
+                        path: stored.to_owned(),
+                        width: 0,
+                        height: 0,
+                        duration: Micros(*duration),
+                    });
+                }
+            }
+        }
+    }
+    requests
+}
 
 /// What several selected clips are between them.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -18575,6 +18693,72 @@ mod tests {
         assert_eq!(clip(&desktop, "tone").volume, 1.0);
         // The copy is still held, to paste again.
         assert!(desktop.paste_attributes_enabled());
+    }
+
+    #[test]
+    fn a_clip_whose_file_is_gone_is_linked_to_where_it_is_now() {
+        let temp = Temp::new();
+        let project = temp.path.join("project");
+        let gone = temp.path.join("moved-away.png");
+        let mut draft = Draft::empty("draft");
+        draft.config.maintrack_adsorb = false;
+        // Two materials on the one missing still, and one that has its file.
+        let pattern = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../crates/engine/fixtures/pattern.png");
+        for (id, path) in [("first", &gone), ("second", &gone), ("here", &pattern)] {
+            let mut still = MaterialVideo::new(id);
+            still.kind = "photo".to_owned();
+            still.path = path.to_string_lossy().into_owned();
+            draft.materials.videos.push(still);
+        }
+        for (id, start) in [("first", 0), ("second", 1_000_000), ("here", 2_000_000)] {
+            let mut clip = Segment::new(id, id, TimeRange::new(start, 1_000_000));
+            clip.clip.alpha = 0.5;
+            draft.tracks[0].segments.push(clip);
+        }
+        Folder::new(draft).save(&project).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&project).unwrap();
+
+        // Only a clip whose file is missing can be linked.
+        assert!(!desktop.link_media_enabled(), "nothing is selected");
+        desktop.select(Some(SegmentId::new("here")));
+        assert!(!desktop.link_media_enabled(), "its file is there");
+        desktop.select(Some(SegmentId::new("first")));
+        assert!(desktop.link_media_enabled());
+
+        // A file that is not media is refused and nothing changes.
+        let before = desktop.draft().unwrap().clone();
+        let text = temp.path.join("notes.txt");
+        std::fs::write(&text, b"not a picture").unwrap();
+        desktop.start_link(&text).unwrap();
+        land_job(&mut desktop);
+        assert_eq!(desktop.draft().unwrap(), &before);
+        assert!(desktop.link_media_enabled());
+
+        // Linked, both clips of the missing file play the new one, and the
+        // clip keeps what was done to it.
+        desktop.start_link(&pattern).unwrap();
+        land_job(&mut desktop);
+        assert_eq!(desktop.notice(), "Linked 2 materials to pattern.png");
+        let draft = desktop.draft().unwrap();
+        for id in ["first", "second"] {
+            let material = draft
+                .materials
+                .videos
+                .iter()
+                .find(|video| video.id.as_str() == id)
+                .unwrap();
+            assert!(material.path.ends_with("pattern.png"), "{}", material.path);
+            assert_eq!((material.width, material.height), (16, 16));
+        }
+        assert_eq!(draft.tracks[0].segments[0].clip.alpha, 0.5);
+        assert_eq!(draft.tracks[0].segments, before.tracks[0].segments);
+        assert!(!desktop.link_media_enabled(), "its file is there now");
+        // One undo unlinks both.
+        desktop.undo().unwrap();
+        assert_eq!(desktop.draft().unwrap(), &before);
+        assert!(desktop.link_media_enabled());
     }
 
     #[test]

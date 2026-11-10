@@ -163,6 +163,8 @@ pub struct ViewState {
     preview: Option<egui::TextureHandle>,
     /// The clip menu asked for a file to replace the clip's media with.
     wants_replace: bool,
+    /// The clip menu asked where the clip's missing file is now.
+    wants_link: bool,
     export_open: bool,
     /// The project dialog's unsaved choices while it is open.
     project_dialog: Option<cutlass_editor::ProjectSettings>,
@@ -289,6 +291,7 @@ impl Default for ViewState {
             system_menus: false,
             preview: None,
             wants_replace: false,
+            wants_link: false,
             export_open: false,
             project_dialog: None,
             never_ask_transition: false,
@@ -365,12 +368,16 @@ pub fn show(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Option
     if std::mem::take(&mut view.inspector.wants_lut) {
         view.dialogs.lut(parent);
     }
-    // Replace clip is asked for from a menu, whose own window is closing:
-    // the dialog waits until that window is gone.
-    if view.wants_replace {
+    // Replace clip and Link to media are asked for from a menu, whose own
+    // window is closing: the dialog waits until that window is gone.
+    if view.wants_replace || view.wants_link {
         if crate::menu::settled(ui.ctx()) {
-            view.wants_replace = false;
-            view.dialogs.replace(parent);
+            if std::mem::take(&mut view.wants_replace) {
+                view.dialogs.replace(parent);
+            }
+            if std::mem::take(&mut view.wants_link) {
+                view.dialogs.link(parent);
+            }
         } else {
             ui.ctx().request_repaint();
         }
@@ -6143,6 +6150,7 @@ fn paint_clip_menu(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
         "flip" => shell.mirror_enabled(),
         "open-file" => shell.selected_has_file(),
         "open-compound" => shell.compound_selected(),
+        "link-media" => shell.link_media_enabled(),
         "group" => shell.group_enabled(),
         "ungroup" => shell.ungroup_enabled(),
         "copy-attributes" => shell.copy_attributes_enabled(),
@@ -6196,6 +6204,10 @@ fn paint_clip_menu(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
                 Ok(())
             }
             "open-compound" => shell.open_compound(),
+            "link-media" => {
+                view.wants_link = true;
+                Ok(())
+            }
             "group" => shell.group_selected(),
             "ungroup" => shell.ungroup_selected(),
             "copy-attributes" => shell.copy_attributes(),
@@ -9453,6 +9465,7 @@ fn apply_dialog(shell: &mut Shell, view: &mut ViewState, finished: Finished) {
         }
         Picker::Lut => shell.load_lut(&path),
         Picker::Replace => shell.start_replace(&path),
+        Picker::Link => shell.start_link(&path),
         Picker::SaveLog => Shell::export_log(&path).map(|()| {
             shell.set_notice(format!("Saved the log to {}", path.display()));
         }),

@@ -83,7 +83,7 @@ const COMPOUND: Entry = done("compound", "Create compound clip (subproject)", "�
 const MULTICAM: Entry = todo("multicam", "Create multi-camera clip", "");
 const SAVE_PRESET: Entry = todo("save-preset", "Save preset", "");
 const GROUP: Entry = done("group", "Group", "⌘G");
-const LINK_MEDIA: Entry = todo("link-media", "Link to media", "");
+const LINK_MEDIA: Entry = done("link-media", "Link to media", "");
 const UNGROUP: Entry = done("ungroup", "Ungroup", "⇧⌘G");
 const VARIABLE_SPEED: Entry = done("variable-speed", "Show variable speed animation", "⌥K");
 
@@ -1411,7 +1411,6 @@ mod tests {
             "Sync video and audio",
             "Create multi-camera clip",
             "Trim clip",
-            "Link to media",
             "Edit effects",
         ];
         for menu in menus {
@@ -1579,13 +1578,7 @@ mod tests {
             .collect();
         assert_eq!(
             later,
-            [
-                "separate-audio",
-                "sync",
-                "multicam",
-                "save-preset",
-                "link-media",
-            ]
+            ["separate-audio", "sync", "multicam", "save-preset",]
         );
     }
 

@@ -29,6 +29,13 @@ const fn default_on() -> bool {
     true
 }
 
+/// The short side a new project's proxies are drawn at.
+pub const DEFAULT_PROXY_SIDE: u32 = 720;
+
+const fn default_proxy_side() -> u32 {
+    DEFAULT_PROXY_SIDE
+}
+
 const fn default_step_cap() -> u32 {
     DEFAULT_STEP_CAP
 }
@@ -253,6 +260,10 @@ pub struct Playback {
     /// always reads the source.
     #[serde(default = "default_on")]
     pub proxies: bool,
+    /// The short side a new project draws its proxies at, in pixels. A
+    /// movie larger than this gets one.
+    #[serde(default = "default_proxy_side")]
+    pub proxy_side: u32,
     /// How sharp the preview is drawn.
     #[serde(default)]
     pub preview_quality: PreviewQuality,
@@ -268,6 +279,7 @@ impl Default for Playback {
             scrub_audio: false,
             seek_during_playback: SeekDuringPlayback::default(),
             proxies: true,
+            proxy_side: DEFAULT_PROXY_SIDE,
             preview_quality: PreviewQuality::Full,
             rest: Map::new(),
         }
@@ -471,6 +483,7 @@ mod tests {
             SeekDuringPlayback::KeepPlaying
         );
         assert!(settings.playback.proxies, "proxies play by default");
+        assert_eq!(settings.playback.proxy_side, 720);
         assert!(settings.hardware.decode);
         assert!(settings.hardware.encode);
         assert!(!settings.import.link, "imports copy by default");
@@ -485,6 +498,9 @@ mod tests {
         let without: Settings =
             serde_json::from_str(r#"{"playback":{"loop_playback":true}}"#).unwrap();
         assert!(without.playback.proxies && without.playback.loop_playback);
+        assert_eq!(without.playback.proxy_side, 720);
+        let smaller: Settings = serde_json::from_str(r#"{"playback":{"proxy_side":540}}"#).unwrap();
+        assert_eq!(smaller.playback.proxy_side, 540);
         assert_eq!(parsed.model, ModelChoice::default());
         assert_eq!(parsed.sandbox, SandboxChoice::default());
     }

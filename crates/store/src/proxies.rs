@@ -13,6 +13,7 @@ use crate::Folder;
 const PROXIES: &str = "proxies";
 const ENABLED: &str = "enabled";
 const FILES: &str = "files";
+const RESOLUTION: &str = "resolution";
 
 /// A project's proxy choices.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -20,6 +21,9 @@ pub struct ProjectProxies {
     /// Whether the project makes proxies by itself. `None` when the
     /// project has never said, so the app's own setting decides.
     pub enabled: Option<bool>,
+    /// The short side its proxies are drawn at, in pixels. A movie larger
+    /// than this gets one. `None` when the project has never said.
+    pub side: Option<u32>,
     /// The files chosen by hand, by the path their material stores: true
     /// has a proxy whatever the project makes by itself, false has none.
     pub files: BTreeMap<String, bool>,
@@ -49,6 +53,10 @@ impl Folder {
         };
         ProjectProxies {
             enabled: stored.get(ENABLED).and_then(Value::as_bool),
+            side: stored
+                .get(RESOLUTION)
+                .and_then(Value::as_u64)
+                .and_then(|side| u32::try_from(side).ok()),
             files: stored
                 .get(FILES)
                 .and_then(Value::as_object)
@@ -84,6 +92,10 @@ impl Folder {
             Some(on) => stored.insert(ENABLED.to_owned(), Value::Bool(on)),
             None => stored.remove(ENABLED),
         };
+        match proxies.side {
+            Some(side) => stored.insert(RESOLUTION.to_owned(), Value::from(side)),
+            None => stored.remove(RESOLUTION),
+        };
         let files = proxies
             .files
             .iter()
@@ -106,6 +118,9 @@ mod tests {
             serde_json::json!([1, 2]),
             serde_json::json!({ "proxies": "on" }),
             serde_json::json!({ "proxies": { "enabled": "yes", "files": [true] } }),
+            serde_json::json!({ "proxies": { "resolution": -540 } }),
+            serde_json::json!({ "proxies": { "resolution": 99_999_999_999_u64 } }),
+            serde_json::json!({ "proxies": { "resolution": "540P" } }),
             serde_json::json!({ "proxies": { "files": { "a.mp4": 1, "b.mp4": null } } }),
         ] {
             folder.biz_config = Some(hostile);
@@ -136,6 +151,7 @@ mod tests {
         }));
         let mut proxies = ProjectProxies {
             enabled: Some(true),
+            side: Some(540),
             ..ProjectProxies::default()
         };
         proxies.files.insert("Resources/a.mp4".to_owned(), false);
@@ -157,6 +173,8 @@ mod tests {
                 .get("enabled")
                 .is_none()
         );
+        let biz = crate::open(&temp).unwrap().folder.biz_config.unwrap();
+        assert_eq!(biz["proxies"]["resolution"], 540);
         std::fs::remove_dir_all(&temp).unwrap();
     }
 

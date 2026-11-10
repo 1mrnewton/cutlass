@@ -53,12 +53,29 @@ impl Subpel {
         let src_stride = width as usize;
         // The centre needs the raw horizontal taps three rows below and two above.
         let raw_rows = rows + 5;
+        let edge = |x: i32, y: i32, horizontal: bool| {
+            recon::tap(plane, src_stride, w, h, x, y, horizontal)
+        };
+        // Columns whose six horizontal taps all fall inside the picture, as
+        // offsets into a margined row. The rest clamp through `recon::tap`.
+        let inner_x = (MARGIN + 2) as usize..(MARGIN + w - 3).max(MARGIN + 2) as usize;
         let mut raw = vec![0i32; stride * raw_rows];
-        for ry in 0..raw_rows {
+        for (ry, line) in raw.chunks_exact_mut(stride).enumerate() {
             let y = ry as i32 - MARGIN - 2;
-            for rx in 0..stride {
-                let x = rx as i32 - MARGIN;
-                raw[ry * stride + rx] = recon::tap(plane, src_stride, w, h, x, y, true);
+            let yc = y.clamp(0, h - 1) as usize;
+            let src = &plane[yc * src_stride..(yc + 1) * src_stride];
+            for (rx, value) in line.iter_mut().enumerate() {
+                if !inner_x.contains(&rx) {
+                    *value = edge(rx as i32 - MARGIN, y, true);
+                }
+            }
+            if inner_x.is_empty() {
+                continue;
+            }
+            let start = inner_x.start;
+            for (i, value) in line[inner_x.clone()].iter_mut().enumerate() {
+                let s = &src[start + i - MARGIN as usize - 2..start + i - MARGIN as usize + 4];
+                *value = six(s[0], s[1], s[2], s[3], s[4], s[5]);
             }
         }
         let mut full = vec![0u8; stride * rows];
@@ -67,16 +84,47 @@ impl Subpel {
         let mut centre = vec![0u8; stride * rows];
         for row in 0..rows {
             let y = row as i32 - MARGIN;
-            for col in 0..stride {
-                let x = col as i32 - MARGIN;
-                let index = row * stride + col;
-                full[index] = clip(recon::sample(plane, src_stride, w, h, x, y));
-                half_h[index] = clip((raw[(row + 2) * stride + col] + 16) >> 5);
-                half_v[index] =
-                    clip((recon::tap(plane, src_stride, w, h, x, y, false) + 16) >> 5);
-                let tap = |k: usize| raw[(row + k) * stride + col];
-                let acc = tap(0) - 5 * tap(1) + 20 * tap(2) + 20 * tap(3) - 5 * tap(4) + tap(5);
-                centre[index] = clip((acc + 512) >> 10);
+            let line = row * stride..(row + 1) * stride;
+            let yc = y.clamp(0, h - 1) as usize;
+            let src = &plane[yc * src_stride..(yc + 1) * src_stride];
+            for (col, value) in full[line.clone()].iter_mut().enumerate() {
+                *value = src[(col as i32 - MARGIN).clamp(0, w - 1) as usize];
+            }
+            let taps = &raw[(row + 2) * stride..(row + 3) * stride];
+            for (value, &tap) in half_h[line.clone()].iter_mut().zip(taps) {
+                *value = clip((tap + 16) >> 5);
+            }
+            let out = &mut half_v[line.clone()];
+            if (2..h - 3).contains(&y) {
+                // Six whole rows: only the columns past the picture's sides clamp.
+                let at = |k: i32| {
+                    let r = (y + k) as usize;
+                    &plane[r * src_stride..(r + 1) * src_stride]
+                };
+                let rows6 = [at(-2), at(-1), at(0), at(1), at(2), at(3)];
+                for (col, value) in out.iter_mut().enumerate() {
+                    let x = (col as i32 - MARGIN).clamp(0, w - 1) as usize;
+                    let tap = six(
+                        rows6[0][x],
+                        rows6[1][x],
+                        rows6[2][x],
+                        rows6[3][x],
+                        rows6[4][x],
+                        rows6[5][x],
+                    );
+                    *value = clip((tap + 16) >> 5);
+                }
+            } else {
+                for (col, value) in out.iter_mut().enumerate() {
+                    *value = clip((edge(col as i32 - MARGIN, y, false) + 16) >> 5);
+                }
+            }
+            let r = |k: usize| &raw[(row + k) * stride..(row + k + 1) * stride];
+            let (r0, r1, r2, r3, r4, r5) = (r(0), r(1), r(2), r(3), r(4), r(5));
+            for (col, value) in centre[line].iter_mut().enumerate() {
+                let acc =
+                    r0[col] - 5 * r1[col] + 20 * r2[col] + 20 * r3[col] - 5 * r4[col] + r5[col];
+                *value = clip((acc + 512) >> 10);
             }
         }
         Self {
@@ -169,6 +217,12 @@ fn reads(x_frac: i32, y_frac: i32) -> (Read, Option<Read>) {
     }
 }
 
+/// The six-tap half-sample filter of clause 8.4.2.2.1, before rounding.
+fn six(a: u8, b: u8, c: u8, d: u8, e: u8, f: u8) -> i32 {
+    let p = |v: u8| i32::from(v);
+    p(a) - 5 * p(b) + 20 * p(c) + 20 * p(d) - 5 * p(e) + p(f)
+}
+
 fn clip(value: i32) -> u8 {
     value.clamp(0, 255) as u8
 }
@@ -181,7 +235,13 @@ mod tests {
     /// per-sample filter the decoder uses.
     #[test]
     fn matches_qpel_everywhere() {
-        let (w, h) = (20u32, 12u32);
+        // Wide enough for the unclamped inner loops, and too small for them.
+        for (w, h) in [(20u32, 12u32), (7, 6), (3, 2)] {
+            matches_qpel_at(w, h);
+        }
+    }
+
+    fn matches_qpel_at(w: u32, h: u32) {
         let plane: Vec<u8> = (0..w * h)
             .map(|i| ((i * 97 + (i / w) * 31) % 256) as u8)
             .collect();
@@ -209,7 +269,10 @@ mod tests {
                                 },
                             );
                             let got = out[row as usize * MAX_BLOCK + col as usize];
-                            assert_eq!(got, want, "mv {mv:?} block {bx},{by} at {col},{row}");
+                            assert_eq!(
+                                got, want,
+                                "{w}x{h} mv {mv:?} block {bx},{by} at {col},{row}"
+                            );
                         }
                     }
                 }

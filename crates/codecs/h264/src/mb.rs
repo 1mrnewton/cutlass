@@ -2871,7 +2871,7 @@ fn one_mb<S: Sample>(
     mb.direct16 = !intra && slice.kind == 1 && spec == 0;
     if intra && spec == 25 {
         mb.pcm = true;
-        read_pcm(pic, entropy, mx, my, mb.field_mb, slice)?;
+        read_pcm(pic, entropy, mx, my, mb.field_mb)?;
         mb.nnz_y = [16; 16];
         mb.nnz_c = [16; 32];
         mb.qp = 0;
@@ -3946,7 +3946,7 @@ fn read8<S: Sample>(
             // is that flag. 4:4:4 reads it for luma and for both chroma planes.
             // Separate colour planes are monochrome, so that flag stays absent.
             if plane != 0 || (pic.chroma() == 3 && !pic.separate_plane) {
-                let inc = cbf_inc(pic, Place { mx, my }, Cell { bx, by }, mb, plane, false);
+                let inc = cbf8_inc(pic, Place { mx, my }, Cell { bx, by }, mb, plane);
                 let Some(base) = CBF_BASE.get(cat).copied() else {
                     return Err(CodecError::Malformed {
                         at_bit: 0,
@@ -4187,6 +4187,36 @@ fn cbf_inc<S: Sample>(
     let left = left.unwrap_or(u8::from(mb.intra));
     let above = above.unwrap_or(u8::from(mb.intra));
     usize::from(left > 0) + 2 * usize::from(above > 0)
+}
+
+/// Clause 9.3.3.1.1.9 for an 8×8 block that carries a coded_block_flag,
+/// which is every 8×8 block of a 4:4:4 picture. A neighbouring macroblock
+/// that does not use the 8×8 transform has no 8×8 block to offer, so it
+/// counts as 0 whatever its 4×4 blocks hold, unless it is I_PCM.
+fn cbf8_inc<S: Sample>(pic: &Frame<S>, at: Place, cell: Cell, mb: &Mb, plane: u8) -> usize {
+    let Place { mx, my } = at;
+    let Cell { bx, by } = cell;
+    let coded = |block: (i32, i32)| -> bool {
+        let outside = if block.0 < 0 {
+            let (left_x, left_y, _) = left_of(pic, mx, my, by * 4);
+            Some((left_x, left_y))
+        } else if block.1 < 0 {
+            Some((mx as i32, above_my(pic, mx, my)))
+        } else {
+            None
+        };
+        if let Some((nx, ny)) = outside {
+            match neighbor(pic, nx, ny, mb.slice) {
+                None => return mb.intra,
+                Some(side) if side.pcm => return true,
+                Some(side) if !side.transform8 => return false,
+                Some(_) => {}
+            }
+        }
+        nnz_at(pic, Place { mx, my }, block, mb, plane).is_some_and(|count| count > 0)
+    };
+    usize::from(coded((bx as i32 - 1, by as i32)))
+        + 2 * usize::from(coded((bx as i32, by as i32 - 1)))
 }
 
 fn cabac_residual(
@@ -5767,6 +5797,48 @@ mod intra8 {
         );
         assert_eq!(pred, [0, 0]);
     }
+
+    /// Clause 9.3.3.1.1.9. An 8×8 block's coded_block_flag looks at 8×8
+    /// blocks only: a neighbouring macroblock on the 4×4 transform counts as
+    /// 0 however many coefficients it holds, I_PCM counts as 1, and a missing
+    /// neighbour counts as 1 for an intra macroblock and 0 for an inter one.
+    #[test]
+    fn an_8x8_coded_block_flag_ignores_4x4_neighbours() {
+        let at = super::Place { mx: 1, my: 1 };
+        let corner = super::Cell { bx: 0, by: 0 };
+        let mut pic = frame(32, 32);
+        let mut current = Mb::new(3);
+        let inc = |pic: &Frame, current: &Mb, cell| super::cbf8_inc(pic, at, cell, current, 0);
+        assert_eq!(inc(&pic, &current, corner), 0, "inter, no neighbours");
+        current.intra = true;
+        assert_eq!(inc(&pic, &current, corner), 3, "intra, no neighbours");
+
+        let mut left = Mb::new(3);
+        left.nnz_y = [5; 16];
+        pic.mb[2] = left;
+        let mut above = Mb::new(3);
+        above.nnz_y = [5; 16];
+        pic.mb[1] = above;
+        assert_eq!(inc(&pic, &current, corner), 0, "4x4 neighbours");
+        pic.mb[2].transform8 = true;
+        assert_eq!(inc(&pic, &current, corner), 1, "8x8 block to the left");
+        pic.mb[1].transform8 = true;
+        assert_eq!(inc(&pic, &current, corner), 3, "8x8 blocks on both sides");
+        pic.mb[1].nnz_y = [0; 16];
+        assert_eq!(inc(&pic, &current, corner), 1, "empty 8x8 block above");
+        pic.mb[1].transform8 = false;
+        pic.mb[1].pcm = true;
+        assert_eq!(inc(&pic, &current, corner), 3, "I_PCM above");
+
+        // Inside the macroblock the neighbours are its own 8×8 blocks.
+        current.nnz_y[1] = 2;
+        current.nnz_y[4] = 0;
+        let inner = super::Cell { bx: 2, by: 2 };
+        assert_eq!(inc(&pic, &current, inner), 0);
+        current.nnz_y[2 * 4 + 1] = 1;
+        current.nnz_y[4 + 2] = 1;
+        assert_eq!(inc(&pic, &current, inner), 3);
+    }
 }
 
 #[cfg(test)]
@@ -6373,6 +6445,9 @@ mod oracle {
                 &["-b:v", "700k", "-x264-params", "deblock=-3,3"],
             ),
             ("low-qp", "320x240", NOISE, &["-qp", "8"]),
+            // Lossless noise can cost more bits than raw samples, so libx264
+            // writes a few macroblocks of the I picture as I_PCM, under CABAC.
+            ("lossless-pcm", "320x240", NOISE, &["-qp", "0"]),
             ("high-qp", "320x240", NOISE, &["-qp", "44"]),
             (
                 "intra-only",
@@ -10525,7 +10600,6 @@ fn read_pcm<S: Sample>(
     mx: usize,
     my: usize,
     field: bool,
-    slice: &Slice<'_>,
 ) -> Result<(), CodecError> {
     let x0 = mx * 16;
     let span = luma_span(my, field);
@@ -10580,11 +10654,7 @@ fn read_pcm<S: Sample>(
                 at_bit: 0,
                 what: "pcm",
             })?;
-            **cab = Cabac::open(
-                rest,
-                slice.qp,
-                if super::intra_slice(slice.kind) { 0 } else { 1 },
-            )?;
+            cab.restart(rest)?;
         }
     }
     Ok(())

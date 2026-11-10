@@ -137,12 +137,49 @@ impl Mb {
     }
 }
 
+/// A buffer that a clone shares until one side writes to it.
+///
+/// The decoder copies its picture buffer before each access unit, so one
+/// that fails leaves no trace. A stored picture is almost always only read
+/// after that, and sharing makes its copy free. The first write through a
+/// shared buffer copies it, so a clone still never sees the other's writes.
+#[derive(Clone, Debug)]
+pub(crate) struct Shared<T>(std::sync::Arc<Vec<T>>);
+
+impl<T> Default for Shared<T> {
+    fn default() -> Self {
+        Self(std::sync::Arc::new(Vec::new()))
+    }
+}
+
+impl<T> From<Vec<T>> for Shared<T> {
+    fn from(held: Vec<T>) -> Self {
+        Self(std::sync::Arc::new(held))
+    }
+}
+
+impl<T> std::ops::Deref for Shared<T> {
+    type Target = Vec<T>;
+
+    #[inline]
+    fn deref(&self) -> &Vec<T> {
+        &self.0
+    }
+}
+
+impl<T: Clone> std::ops::DerefMut for Shared<T> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut Vec<T> {
+        std::sync::Arc::make_mut(&mut self.0)
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct Frame<S: Sample = u8> {
-    y: Vec<S>,
-    u: Vec<S>,
-    v: Vec<S>,
-    mb: Vec<Mb>,
+    y: Shared<S>,
+    u: Shared<S>,
+    v: Shared<S>,
+    mb: Shared<Mb>,
     w: usize,
     h: usize,
     mb_w: usize,
@@ -200,7 +237,7 @@ pub(crate) struct Frame<S: Sample = u8> {
     svc_bottom: i32,
     /// Luma 4×4 levels, 256 per macroblock, raster inside each block.
     /// Empty unless a stored subset has `seq_tcoeff_level_prediction_flag`.
-    levels: Vec<i32>,
+    levels: Shared<i32>,
 }
 
 /// Output time and the grain blended at emit. `pts` on the frame stays the
@@ -1243,15 +1280,15 @@ fn weave<S: Sample>(first: Frame<S>, second: Frame<S>) -> Result<Frame<S>, Codec
     let key = top.key || bottom.key;
     let referenced = top.referenced || bottom.referenced;
     let mut frame = top;
-    frame.y = y;
-    frame.u = u;
-    frame.v = v;
+    frame.y = y.into();
+    frame.u = u.into();
+    frame.v = v.into();
     frame.h = h;
     frame.vis_h = frame.vis_h.saturating_mul(2);
     frame.crop_y = frame.crop_y.saturating_mul(2);
     frame.field = false;
     frame.bottom = false;
-    frame.mb = vec![Mb::new(u16::MAX); frame.mb_w.saturating_mul(h / 16)];
+    frame.mb = vec![Mb::new(u16::MAX); frame.mb_w.saturating_mul(h / 16)].into();
     frame.poc = poc;
     frame.key = key;
     frame.referenced = referenced;
@@ -1547,10 +1584,10 @@ fn ghost_order(sps: &Sps, state: &Poc, frame_num: u32) -> Result<(i32, u32), Cod
 
 fn absent_frame<S: Sample>(sps: &Sps, frame_num: u32, poc: i32) -> Frame<S> {
     Frame {
-        y: Vec::new(),
-        u: Vec::new(),
-        v: Vec::new(),
-        mb: Vec::new(),
+        y: Shared::default(),
+        u: Shared::default(),
+        v: Shared::default(),
+        mb: Shared::default(),
         w: sps.width as usize,
         h: sps.height as usize,
         mb_w: sps.mb_width,
@@ -1595,7 +1632,7 @@ fn absent_frame<S: Sample>(sps: &Sps, frame_num: u32, poc: i32) -> Frame<S> {
         svc_top: 0,
         svc_right: 0,
         svc_bottom: 0,
-        levels: Vec::new(),
+        levels: Vec::new().into(),
     }
 }
 
@@ -3523,10 +3560,10 @@ fn new_frame<S: Sample>(
         0
     };
     Ok(Frame {
-        y: vec![S::default(); w.saturating_mul(h)],
-        u: vec![S::mid(); chroma],
-        v: vec![S::mid(); chroma],
-        mb: vec![Mb::new(u16::MAX); mb_w.saturating_mul(mb_h)],
+        y: vec![S::default(); w.saturating_mul(h)].into(),
+        u: vec![S::mid(); chroma].into(),
+        v: vec![S::mid(); chroma].into(),
+        mb: vec![Mb::new(u16::MAX); mb_w.saturating_mul(mb_h)].into(),
         w,
         h,
         mb_w,
@@ -3586,7 +3623,8 @@ fn new_frame<S: Sample>(
             vec![0; mb_w.saturating_mul(mb_h).saturating_mul(stride)]
         } else {
             Vec::new()
-        },
+        }
+        .into(),
     })
 }
 
@@ -4325,10 +4363,10 @@ mod tests {
     fn held(frame_num: u32) -> super::Frame {
         use cutlass_decode::{ColorMatrix, ColorPrimaries, ColorRange, SampleAspect, Transfer};
         super::Frame {
-            y: Vec::new(),
-            u: Vec::new(),
-            v: Vec::new(),
-            mb: Vec::new(),
+            y: Vec::new().into(),
+            u: Vec::new().into(),
+            v: Vec::new().into(),
+            mb: Vec::new().into(),
             w: 16,
             h: 16,
             mb_w: 1,
@@ -4373,7 +4411,7 @@ mod tests {
             svc_top: 0,
             svc_right: 0,
             svc_bottom: 0,
-            levels: Vec::new(),
+            levels: Vec::new().into(),
         }
     }
 

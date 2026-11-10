@@ -5291,10 +5291,10 @@ mod intra8 {
         let mb_w = width / 16;
         let mb_h = height / 16;
         Frame {
-            y: vec![0; width * height],
-            u: vec![128; (width / 2) * (height / 2)],
-            v: vec![128; (width / 2) * (height / 2)],
-            mb: vec![Mb::new(u16::MAX); mb_w * mb_h],
+            y: vec![0; width * height].into(),
+            u: vec![128; (width / 2) * (height / 2)].into(),
+            v: vec![128; (width / 2) * (height / 2)].into(),
+            mb: vec![Mb::new(u16::MAX); mb_w * mb_h].into(),
             w: width,
             h: height,
             mb_w,
@@ -5339,7 +5339,7 @@ mod intra8 {
             svc_top: 0,
             svc_right: 0,
             svc_bottom: 0,
-            levels: Vec::new(),
+            levels: Vec::new().into(),
         }
     }
 
@@ -9899,13 +9899,13 @@ pub(crate) fn resample_intra<S: Sample>(
     let mut intra = Mb::new(0);
     intra.intra = true;
     let mut frame = base.clone();
-    frame.y = y;
-    frame.u = u;
-    frame.v = v;
+    frame.y = y.into();
+    frame.u = u.into();
+    frame.v = v.into();
     frame.w = out_w;
     frame.h = out_h;
     frame.mb_w = mb_w;
-    frame.mb = vec![intra; mb_w.saturating_mul(mb_h)];
+    frame.mb = vec![intra; mb_w.saturating_mul(mb_h)].into();
     Ok(frame)
 }
 

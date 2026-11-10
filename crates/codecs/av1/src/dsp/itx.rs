@@ -1262,8 +1262,9 @@ fn row_dispatch<E: Lane>(log2w: u32, kind: Kind, p: &Params, coefs: &[i32], tmp:
             }
         };
     }
-    // Four rows at a time when there are at most four rows to transform.
-    match (log2w, p.ts == 4 || p.nz_rows <= 4) {
+    // Four rows at a time only when the block has four: with more, a few
+    // non-zero rows still go eight at a time, which is the faster code.
+    match (log2w, p.ts == 4) {
         (2, true) if p.ts == 4 => go!(1, 4),
         (2, true) => go!(4, 4),
         (2, false) => go!(8, 4),

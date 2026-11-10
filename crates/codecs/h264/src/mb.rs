@@ -9103,7 +9103,10 @@ fn read_sub<S: Sample>(
 /// decoding order, as a mask over the macroblock's sixteen.
 fn earlier_blocks(index: usize) -> u16 {
     const BLOCKS: [u16; 4] = [0x0033, 0x00cc, 0x3300, 0xcc00];
-    BLOCKS.iter().take(index).fold(0, |mask, block| mask | block)
+    BLOCKS
+        .iter()
+        .take(index)
+        .fold(0, |mask, block| mask | block)
 }
 
 /// The origins of an 8×8 block's sub-partitions of `w`×`h`, in decoding

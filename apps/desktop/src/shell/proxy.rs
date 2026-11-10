@@ -1302,7 +1302,7 @@ mod tests {
         desktop.seek(Micros(1_000_000));
         let live = desktop.preview_bytes().unwrap();
 
-        desktop.make_proxy(&[id.clone()]).unwrap();
+        desktop.make_proxy(std::slice::from_ref(&id)).unwrap();
         let until = std::time::Instant::now() + std::time::Duration::from_secs(1_800);
         while desktop.poll_proxies() && std::time::Instant::now() < until {
             std::thread::sleep(std::time::Duration::from_millis(20));

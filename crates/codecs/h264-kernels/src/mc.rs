@@ -42,6 +42,11 @@ pub fn avg16(a: &[u8; 16], b: &[u8; 16]) -> [u8; 16] {
     kernel!(avg16(a, b))
 }
 
+/// [`avg16`] for eight samples.
+pub fn avg8(a: &[u8; 8], b: &[u8; 8]) -> [u8; 8] {
+    kernel!(avg8(a, b))
+}
+
 /// Eight chroma samples, clause 8.4.2.2.2, from the nine samples above and
 /// the nine below. `xf` and `yf` are the eighth-sample offsets, 0 to 7.
 pub fn chroma8(top: &[u8; 9], bottom: &[u8; 9], xf: u8, yf: u8) -> [u8; 8] {
@@ -155,6 +160,8 @@ mod tests {
         for _ in 0..20_000 {
             let (a, b) = (rng.line(), rng.line());
             assert_eq!(super::avg16(&a, &b), scalar::avg16(&a, &b));
+            let (a, b) = (rng.line(), rng.line());
+            assert_eq!(super::avg8(&a, &b), scalar::avg8(&a, &b));
         }
     }
 

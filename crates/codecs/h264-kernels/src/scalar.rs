@@ -144,6 +144,11 @@ pub fn avg16(a: &[u8; 16], b: &[u8; 16]) -> [u8; 16] {
     core::array::from_fn(|index| ((u16::from(a[index]) + u16::from(b[index]) + 1) >> 1) as u8)
 }
 
+/// See [`crate::mc::avg8`].
+pub fn avg8(a: &[u8; 8], b: &[u8; 8]) -> [u8; 8] {
+    core::array::from_fn(|index| ((u16::from(a[index]) + u16::from(b[index]) + 1) >> 1) as u8)
+}
+
 /// See [`crate::mc::chroma8`].
 pub fn chroma8(top: &[u8; 9], bottom: &[u8; 9], xf: u8, yf: u8) -> [u8; 8] {
     let (xf, yf) = (i32::from(xf.min(7)), i32::from(yf.min(7)));

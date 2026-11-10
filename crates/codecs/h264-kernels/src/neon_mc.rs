@@ -135,6 +135,11 @@ pub(crate) fn avg16(a: &[u8; 16], b: &[u8; 16]) -> [u8; 16] {
 }
 
 #[target_feature(enable = "neon")]
+pub(crate) fn avg8(a: &[u8; 8], b: &[u8; 8]) -> [u8; 8] {
+    store8(core::arch::aarch64::vrhadd_u8(load8(a), load8(b)))
+}
+
+#[target_feature(enable = "neon")]
 pub(crate) fn chroma8(top: &[u8; 9], bottom: &[u8; 9], xf: u8, yf: u8) -> [u8; 8] {
     let (xf, yf) = (xf.min(7), yf.min(7));
     // Samples 0..8 in the low half and 1..9 in the high half.

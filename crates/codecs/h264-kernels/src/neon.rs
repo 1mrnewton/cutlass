@@ -15,7 +15,9 @@ use core::arch::aarch64::{
 
 use crate::deblock::{ChromaRows, Lines, Rows};
 
-pub(crate) use crate::neon_mc::{avg16, centre8, centre16, chroma8, half8, half16, raw8, raw16};
+pub(crate) use crate::neon_mc::{
+    avg8, avg16, centre8, centre16, chroma8, half8, half16, raw8, raw16,
+};
 
 /// A vector of the 16 samples in `bytes`.
 #[target_feature(enable = "neon")]

@@ -1,6 +1,11 @@
 //! Copy and paste of clips. A copy keeps each clip, its row, its gap to the
 //! earliest copied clip, and its own markers and beats. A paste places the
 //! copies at a time with fresh ids, as one undo step.
+//!
+//! A pasted clip goes on the row it was copied from when that row is clear
+//! where it lands. When a clip is in the way it goes on the nearest row of
+//! the same kind above that is clear, and on a new row when none is, the
+//! way a dragged clip does. Nothing on the timeline moves to make room.
 
 use cutlass_model::{
     Draft, MaterialId, Micros, Segment, SegmentId, TimeMarkItem, TimeRange, TrackAttribute,
@@ -84,9 +89,26 @@ pub fn copy_clips(
     Ok(copies)
 }
 
+/// Whether `range` runs into a clip already on `track`, or one this paste
+/// has put there. A range that cannot be compared counts as taken.
+fn taken(
+    track: Option<&cutlass_model::Track>,
+    track_id: &TrackId,
+    range: &TimeRange,
+    pasted: &[(TrackId, TimeRange)],
+) -> bool {
+    let hits = |other: &TimeRange| range.overlaps(other).unwrap_or(true);
+    track.is_some_and(|track| track.segments.iter().any(|segment| hits(&segment.target)))
+        || pasted
+            .iter()
+            .any(|(on, other)| on == track_id && hits(other))
+}
+
 /// The requests that paste `copies` from `at` (time zero at the earliest),
 /// and the new clips' ids. `fresh` makes an unused id from a prefix such as
-/// `seg`. Markers past a clip's end and beats outside it are dropped.
+/// `seg` or `track`. Markers past a clip's end and beats outside it are
+/// dropped. A clip whose row is taken where it lands goes on the nearest
+/// clear row of its kind above, or on a new row this paste opens.
 pub fn paste_requests(
     draft: &Draft,
     copies: &[CopiedClip],
@@ -111,6 +133,11 @@ pub fn paste_requests(
     let mut marks = Vec::new();
     let mut beats = Vec::new();
     let mut ids = Vec::new();
+    let rows = crate::lanes_for(draft, true);
+    // Where this paste has put a clip so far, and the rows it has opened,
+    // each with the row its clips were copied from.
+    let mut pasted: Vec<(TrackId, TimeRange)> = Vec::new();
+    let mut opened: Vec<(TrackId, TrackId)> = Vec::new();
     for item in copies {
         let id = SegmentId::new(fresh("seg"));
         let start = at.saturating_add(item.offset.0);
@@ -129,8 +156,45 @@ pub fn paste_requests(
                 beats.push((id.clone(), Micros(*source)));
             }
         }
+        let range = segment.target.clone();
+        let track_of = |id: &TrackId| draft.tracks.iter().find(|track| &track.id == id);
+        let clear = |id: &TrackId, pasted: &[(TrackId, TimeRange)]| {
+            !taken(track_of(id), id, &range, pasted)
+        };
+        let own = rows.iter().find(|lane| lane.track_id == item.track_id);
+        let above = own.and_then(|own| {
+            rows.iter()
+                .rev()
+                .filter(|lane| lane.row < own.row && lane.kind == own.kind)
+                .find(|lane| {
+                    track_of(&lane.track_id)
+                        .is_some_and(|track| !track.attribute.contains(TrackAttribute::LOCK))
+                })
+        });
+        let track_id = if clear(&item.track_id, &pasted) {
+            item.track_id.clone()
+        } else if let Some(lane) = above.filter(|lane| clear(&lane.track_id, &pasted)) {
+            lane.track_id.clone()
+        } else if let Some((_, row)) = opened
+            .iter()
+            .find(|(from, row)| from == &item.track_id && clear(row, &pasted))
+        {
+            row.clone()
+        } else {
+            let kind = track_of(&item.track_id)
+                .map(|track| track.kind.clone())
+                .ok_or(ClipboardMiss::LaneGone)?;
+            let row = TrackId::new(fresh("track"));
+            places.push(Request::InsertTrack {
+                track_id: row.clone(),
+                kind,
+            });
+            opened.push((item.track_id.clone(), row.clone()));
+            row
+        };
+        pasted.push((track_id.clone(), range));
         places.push(Request::Place {
-            track_id: item.track_id.clone(),
+            track_id,
             segment: Box::new(segment),
         });
         ids.push(id);
@@ -201,6 +265,140 @@ mod tests {
             .collect();
         assert!(starts.contains(&10_000_000) && starts.contains(&12_000_000));
         assert_eq!(session.revision(), revision + 1);
+    }
+
+    fn rows(session: &Session) -> Vec<(String, Vec<(i64, i64)>)> {
+        session
+            .draft()
+            .tracks
+            .iter()
+            .map(|track| {
+                let mut clips: Vec<(i64, i64)> = track
+                    .segments
+                    .iter()
+                    .map(|segment| (segment.target.start.0, segment.target.duration.0))
+                    .collect();
+                clips.sort_unstable();
+                (track.id.as_str().to_owned(), clips)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_paste_onto_a_clip_goes_on_a_new_row_and_moves_nothing() {
+        for magnet in [false, true] {
+            let mut session = session();
+            if magnet {
+                let revision = session.revision();
+                session
+                    .apply(revision, &[Request::SetMagnet { on: true }])
+                    .unwrap();
+            }
+            let before = rows(&session);
+            let copies = copy_clips(session.draft(), &[SegmentId::new("a")]).unwrap();
+            // The playhead is inside the second clip of the same row.
+            let at = session.draft().tracks[0].segments[1].target.start.0 + 500_000;
+            let mut fresh = counter();
+            let (requests, ids) =
+                paste_requests(session.draft(), &copies, Micros(at), &mut fresh).unwrap();
+            assert!(
+                matches!(requests[0], Request::InsertTrack { ref kind, .. }
+                    if *kind == session.draft().tracks[0].kind),
+                "{requests:?}"
+            );
+            let revision = session.revision();
+            session.apply(revision, &requests).unwrap();
+            assert_eq!(session.revision(), revision + 1, "one undo step");
+            let after = rows(&session);
+            assert_eq!(after.len(), 2, "magnet {magnet}: {after:?}");
+            // The new row is above, holding the copy where the playhead is.
+            assert_eq!(after[0].1, vec![(at, 1_000_000)]);
+            assert_eq!(after[1], before[0], "the row pasted over is as it was");
+            assert_eq!(ids.len(), 1);
+
+            // Pasted there again, the row just opened is taken too, so
+            // another opens; pasted where it is clear, the copy goes home.
+            let (again, _) =
+                paste_requests(session.draft(), &copies, Micros(at), &mut fresh).unwrap();
+            assert!(matches!(again[0], Request::InsertTrack { .. }));
+            let (clear, _) =
+                paste_requests(session.draft(), &copies, Micros(20_000_000), &mut fresh).unwrap();
+            assert!(
+                matches!(&clear[0], Request::Place { track_id, .. } if track_id.as_str() == "main"),
+                "{clear:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_paste_takes_the_clear_row_above_before_opening_one() {
+        let mut session = session();
+        let revision = session.revision();
+        let kind = session.draft().tracks[0].kind.clone();
+        session
+            .apply(
+                revision,
+                &[
+                    Request::InsertTrack {
+                        track_id: TrackId::new("upper"),
+                        kind: kind.clone(),
+                    },
+                    Request::InsertTrack {
+                        track_id: TrackId::new("sound"),
+                        kind: cutlass_model::TrackType::Audio,
+                    },
+                ],
+            )
+            .unwrap();
+        let copies =
+            copy_clips(session.draft(), &[SegmentId::new("a"), SegmentId::new("b")]).unwrap();
+        // Both copies land on clips of their own row: a at 1s, b at 3s.
+        let mut fresh = counter();
+        let (requests, _) =
+            paste_requests(session.draft(), &copies, Micros(1_200_000), &mut fresh).unwrap();
+        let on: Vec<&str> = requests
+            .iter()
+            .filter_map(|request| match request {
+                Request::Place { track_id, .. } => Some(track_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            on,
+            ["upper", "upper"],
+            "a row of another kind is passed over"
+        );
+        assert!(
+            !requests
+                .iter()
+                .any(|request| matches!(request, Request::InsertTrack { .. }))
+        );
+        let revision = session.revision();
+        session.apply(revision, &requests).unwrap();
+
+        // The row above now taken there, and locked besides, a new one opens
+        // and both copies share it.
+        let mut draft = session.draft().clone();
+        let upper = draft
+            .tracks
+            .iter_mut()
+            .find(|track| track.id.as_str() == "upper")
+            .unwrap();
+        upper.segments.clear();
+        upper.attribute = TrackAttribute(TrackAttribute::LOCK);
+        let (requests, _) = paste_requests(&draft, &copies, Micros(1_200_000), &mut fresh).unwrap();
+        let opened: Vec<&TrackId> = requests
+            .iter()
+            .filter_map(|request| match request {
+                Request::InsertTrack { track_id, .. } => Some(track_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(opened.len(), 1, "{requests:?}");
+        assert!(requests.iter().all(|request| match request {
+            Request::Place { track_id, .. } => track_id == opened[0],
+            _ => true,
+        }));
     }
 
     #[test]

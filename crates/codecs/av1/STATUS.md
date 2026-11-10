@@ -121,16 +121,41 @@ one instruction: a direct load needs a second kind of `unsafe`. Not on a
 kernel yet: inter prediction, the inverse transforms, loop restoration,
 and deblocking's edge decisions (about 12% of one thread's time).
 
+Multi-tile frames in the pipeline, same two files, first 240 frames,
+medians of 7 runs taken in turn on a busy machine, same output:
+
+| File | Threads | Tiles parsed in turn | Tiles parsed at once |
+|---|---|---|---|
+| 4x1 tiles | 18 | 1.31 s | 1.12 s |
+| 4x1 tiles | 8 | 1.33 s | 1.14 s |
+| 4x1 tiles | 4 | 1.64 s | 1.60 s |
+| 8x4 tiles | 18 | 1.28 s | 1.23 s |
+| 8x4 tiles | 8 | 1.62 s | 1.55 s |
+
+The whole files take 13.8 s (2.9 GB) and 31.7 s (3.4 GB) at 18 threads
+against libdav1d's 5.7 s and 7.8 s. What holds them back now: a
+frame's reconstruction and filters run on one thread, and a frame can
+follow its reference no closer than the two superblock rows the filters
+trail by plus its motion, so about 8 frames move at once on the first
+file and 4 on the second (128x128 superblocks, and one frame in five
+has a warped block and waits for whole references). Memory grows with
+the frames in flight (16 at most).
+
 Threading (2+ threads): the calling thread only reads the frame headers.
 Each frame is a task on a thread of its own (the decoder keeps a pool of
 them) that waits for what its parse depends on, and nothing else: the
-CDFs of its primary reference frame (known when that frame's parse ends,
-or at its start when the frame end CDF update is disabled) and the motion
-fields and segment ids of the references it reads (when their parses
-end). Frames no later frame depends on (half of bench1080) are parsed
-beside the chain of referenced ones. With one tile column, a frame's
-task hands each chunk of parsed blocks to a backend thread that
-reconstructs it a superblock row behind and runs deblocking (in place,
+CDFs of its primary reference frame (known when that frame's context
+tile is parsed, or at its start when the frame end CDF update is
+disabled), the saved motion of the references it projects (band by band
+of 8 rows of 8x8 positions, as their parses save it) and the segment ids
+of its primary reference (when that parse ends, and only when the frame
+predicts from them). Frames no later frame depends on (half of bench1080)
+are parsed beside the chain of referenced ones. A frame's tiles are
+parsed on up to four threads, each into a frame state of its own; a
+tile hands over its part of every superblock row (its block logs, loop
+filter sizes, CDEF indices, restoration units and saved motion) and
+whole rows go on in order to a backend thread that
+reconstructs them a superblock row behind and runs deblocking (in place,
 as soon as a row is reconstructed: the row below predicts from a saved
 copy of its unfiltered bottom row, as in libdav1d) and CDEF and loop
 restoration (one row behind). A reconstruction that reads a reference
@@ -138,10 +163,12 @@ still being decoded reads the bands of rows that reference publishes as
 final (only frames something waits for publish them; the bands are
 shared, not copied): a block whose rows lie in one band is predicted
 from it in place, others go through the edge-emulation copy. It waits
-per chunk of blocks for the rows the chunk's motion may reach (warped
-blocks and scaled references wait for the whole picture), and reads the
-finished picture in place once it is done.
-Multi-tile and super-resolved frames are decoded whole by their task
+per chunk of blocks for the rows the motion into each reference may
+reach, taking the largest downward motion of the superblock row it is
+in and the row above (warped blocks and scaled references wait for the
+whole picture), and reads the finished picture in place once it is done.
+Super-resolved frames, frames without in-loop filters, and every frame
+when `Av1Core::frames_at_once` is off are decoded whole by their task
 once the references are done. With 2+ threads the tiles of such a frame
 (but not one using intra block copy) are decoded at the same time: the
 frame's task decodes tiles into the frame, and helper threads into

@@ -164,23 +164,33 @@ impl Shell {
     pub fn effect_name(&self) -> Option<String> {
         let draft = self.draft()?;
         let segment = self.selected_segment()?;
-        let name = match draft.materials.get(segment.material_id.as_str())? {
-            MaterialRef::VideoEffect(effect) => effect.name.clone(),
-            MaterialRef::Effect(effect) => effect.name.clone(),
-            MaterialRef::Plugin(effect) => effect.plugin_id.clone(),
-            MaterialRef::Other(raw) => raw
-                .fields
-                .get("name")
-                .and_then(|name| name.as_str())
-                .unwrap_or_default()
-                .to_owned(),
-            _ => String::new(),
+        Some(cutlass_editor::effect_title(draft, segment))
+    }
+
+    /// The effects that run over the one selected clip alone, for its
+    /// menu's Edit effects row. Empty with several clips picked.
+    #[must_use]
+    pub fn clip_effects(&self) -> Vec<cutlass_editor::ClipEffect> {
+        let (Some(draft), [clip]) = (self.draft(), self.selection()) else {
+            return Vec::new();
         };
-        Some(if name.is_empty() {
-            segment.material_id.as_str().to_owned()
-        } else {
-            name
-        })
+        cutlass_editor::effects_on(draft, clip)
+    }
+
+    /// Pick the effect `effect` that runs over the selected clip, so the
+    /// inspector shows its settings as it does for any effect clip.
+    pub fn edit_clip_effect(&mut self, effect: &SegmentId) -> Result<(), ShellError> {
+        if !self
+            .clip_effects()
+            .iter()
+            .any(|on| on.segment_id == *effect)
+        {
+            return Err(ShellError::Unavailable(
+                "that effect is not on the selected clip".to_owned(),
+            ));
+        }
+        self.select(Some(effect.clone()));
+        Ok(())
     }
 
     /// Whether the selected clip is a bundled filter, whose Amount is

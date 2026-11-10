@@ -12,23 +12,23 @@ use crate::tokens;
 
 /// One menu row, or the line between two groups.
 #[derive(Clone, Copy, Debug)]
-pub enum Entry {
+pub enum Entry<'a> {
     Separator,
-    Item(Item),
+    Item(Item<'a>),
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct Item {
-    pub id: &'static str,
-    pub label: &'static str,
+pub struct Item<'a> {
+    pub id: &'a str,
+    pub label: &'a str,
     /// Empty for none.
     pub shortcut: &'static str,
     /// False marks a row this build cannot do yet.
     pub built: bool,
-    pub children: &'static [Entry],
+    pub children: &'a [Entry<'a>],
 }
 
-const fn done(id: &'static str, label: &'static str, shortcut: &'static str) -> Entry {
+const fn done(id: &'static str, label: &'static str, shortcut: &'static str) -> Entry<'static> {
     Entry::Item(Item {
         id,
         label,
@@ -38,7 +38,7 @@ const fn done(id: &'static str, label: &'static str, shortcut: &'static str) -> 
     })
 }
 
-const fn todo(id: &'static str, label: &'static str, shortcut: &'static str) -> Entry {
+const fn todo(id: &'static str, label: &'static str, shortcut: &'static str) -> Entry<'static> {
     Entry::Item(Item {
         id,
         label,
@@ -49,7 +49,11 @@ const fn todo(id: &'static str, label: &'static str, shortcut: &'static str) -> 
 }
 
 /// A row that opens a submenu. It is built when every child is.
-const fn sub(id: &'static str, label: &'static str, children: &'static [Entry]) -> Entry {
+const fn sub(
+    id: &'static str,
+    label: &'static str,
+    children: &'static [Entry<'static>],
+) -> Entry<'static> {
     let mut built = true;
     let mut index = 0;
     while index < children.len() {
@@ -69,25 +73,55 @@ const fn sub(id: &'static str, label: &'static str, children: &'static [Entry]) 
     })
 }
 
-const SEP: Entry = Entry::Separator;
+/// A row whose id and name are made at run time, such as one for each
+/// effect on a clip.
+#[must_use]
+pub const fn named<'a>(id: &'a str, label: &'a str) -> Entry<'a> {
+    Entry::Item(Item {
+        id,
+        label,
+        shortcut: "",
+        built: true,
+        children: &[],
+    })
+}
 
-const COPY: Entry = done("copy", "Copy", "⌘C");
-const CUT: Entry = done("cut", "Cut", "⌘X");
-const COPY_ATTRIBUTES: Entry = done("copy-attributes", "Copy attributes", "⇧⌘C");
-const PASTE_ATTRIBUTES: Entry = done("paste-attributes", "Paste attributes", "⇧⌘V");
-const DELETE: Entry = done("delete", "Delete", "⌫");
-const DEACTIVATE: Entry = done("deactivate", "Deactivate clip", "V");
-const REPLACE_SOUND: Entry = done("replace", "Replace", "");
-const SYNC: Entry = todo("sync", "Sync video and audio", "");
-const COMPOUND: Entry = done("compound", "Create compound clip (subproject)", "⌥G");
-const MULTICAM: Entry = todo("multicam", "Create multi-camera clip", "");
-const SAVE_PRESET: Entry = todo("save-preset", "Save preset", "");
-const GROUP: Entry = done("group", "Group", "⌘G");
-const LINK_MEDIA: Entry = done("link-media", "Link to media", "");
-const UNGROUP: Entry = done("ungroup", "Ungroup", "⇧⌘G");
-const VARIABLE_SPEED: Entry = done("variable-speed", "Show variable speed animation", "⌥K");
+/// `entries` with `children` as the submenu of the row `id`.
+#[must_use]
+pub fn with_children<'a>(
+    entries: &[Entry<'a>],
+    id: &str,
+    children: &'a [Entry<'a>],
+) -> Vec<Entry<'a>> {
+    entries
+        .iter()
+        .map(|entry| match entry {
+            Entry::Item(item) if item.id == id => Entry::Item(Item { children, ..*item }),
+            entry => *entry,
+        })
+        .collect()
+}
 
-const RANGE: Entry = sub(
+const SEP: Entry<'static> = Entry::Separator;
+
+const COPY: Entry<'static> = done("copy", "Copy", "⌘C");
+const CUT: Entry<'static> = done("cut", "Cut", "⌘X");
+const COPY_ATTRIBUTES: Entry<'static> = done("copy-attributes", "Copy attributes", "⇧⌘C");
+const PASTE_ATTRIBUTES: Entry<'static> = done("paste-attributes", "Paste attributes", "⇧⌘V");
+const DELETE: Entry<'static> = done("delete", "Delete", "⌫");
+const DEACTIVATE: Entry<'static> = done("deactivate", "Deactivate clip", "V");
+const REPLACE_SOUND: Entry<'static> = done("replace", "Replace", "");
+const SYNC: Entry<'static> = todo("sync", "Sync video and audio", "");
+const COMPOUND: Entry<'static> = done("compound", "Create compound clip (subproject)", "⌥G");
+const MULTICAM: Entry<'static> = todo("multicam", "Create multi-camera clip", "");
+const SAVE_PRESET: Entry<'static> = todo("save-preset", "Save preset", "");
+const GROUP: Entry<'static> = done("group", "Group", "⌘G");
+const LINK_MEDIA: Entry<'static> = done("link-media", "Link to media", "");
+const UNGROUP: Entry<'static> = done("ungroup", "Ungroup", "⇧⌘G");
+const VARIABLE_SPEED: Entry<'static> =
+    done("variable-speed", "Show variable speed animation", "⌥K");
+
+const RANGE: Entry<'static> = sub(
     "range",
     "Range",
     &[
@@ -97,7 +131,7 @@ const RANGE: Entry = sub(
 );
 
 /// The reference editor's stems, none of which this build separates yet.
-const SEPARATE_AUDIO: Entry = sub(
+const SEPARATE_AUDIO: Entry<'static> = sub(
     "separate-audio",
     "Separate audio",
     &[
@@ -113,7 +147,7 @@ const SEPARATE_AUDIO: Entry = sub(
 
 /// Stack a picture clip above or below the clips it overlaps, with Free
 /// layer on in the project settings.
-const ARRANGE: Entry = sub(
+const ARRANGE: Entry<'static> = sub(
     "arrange",
     "Arrange",
     &[
@@ -170,7 +204,7 @@ macro_rules! video_menu {
             done("open-file", "Open file location", ""),
             ARRANGE,
             SEP,
-            todo("edit-effects", "Edit effects", ""),
+            done("edit-effects", "Edit effects", ""),
             VARIABLE_SPEED,
             RANGE,
             sub(
@@ -186,14 +220,14 @@ macro_rules! video_menu {
 }
 
 /// The menu of a video clip that has its own sound.
-const VIDEO: &[Entry] = video_menu!(
+const VIDEO: &[Entry<'static>] = video_menu!(
     sound: [SEPARATE_AUDIO, done("extract-audio", "Extract audio", "⇧⌘S")],
     compound: []
 );
 
 /// The menu of a video clip whose sound was extracted: there is none to
 /// separate, and the extract row gives the sound back.
-const VIDEO_SILENT: &[Entry] = video_menu!(
+const VIDEO_SILENT: &[Entry<'static>] = video_menu!(
     sound: [done("recover-audio", "Recover audio", "⇧⌘S")],
     compound: []
 );
@@ -201,7 +235,7 @@ const VIDEO_SILENT: &[Entry] = video_menu!(
 /// The menu of a compound clip, which the reference editor also shows for
 /// a template: the video rows, and after Create compound clip its own Edit
 /// more and Pre-process rows and this build's Open compound clip.
-const VIDEO_COMPOUND: &[Entry] = video_menu!(
+const VIDEO_COMPOUND: &[Entry<'static>] = video_menu!(
     sound: [SEPARATE_AUDIO, done("extract-audio", "Extract audio", "⇧⌘S")],
     compound: [
         done("open-compound", "Open compound clip", ""),
@@ -211,7 +245,7 @@ const VIDEO_COMPOUND: &[Entry] = video_menu!(
 );
 
 /// A compound clip whose sound was extracted.
-const VIDEO_COMPOUND_SILENT: &[Entry] = video_menu!(
+const VIDEO_COMPOUND_SILENT: &[Entry<'static>] = video_menu!(
     sound: [done("recover-audio", "Recover audio", "⇧⌘S")],
     compound: [
         done("open-compound", "Open compound clip", ""),
@@ -223,7 +257,7 @@ const VIDEO_COMPOUND_SILENT: &[Entry] = video_menu!(
 /// The audio clip menu: the reference editor's rows in its order, with
 /// this build's Volume, Speed, Fade and Beat rows after Delete and its
 /// Replace row with the clip rows.
-const AUDIO: &[Entry] = &[
+const AUDIO: &[Entry<'static>] = &[
     COPY,
     CUT,
     COPY_ATTRIBUTES,
@@ -284,7 +318,7 @@ macro_rules! lane_menu {
     };
 }
 
-const TEXT: &[Entry] = lane_menu!(
+const TEXT: &[Entry<'static>] = lane_menu!(
     own: [
         done("edit-text", "Edit text", ""),
         done("style", "Style", ""),
@@ -293,32 +327,32 @@ const TEXT: &[Entry] = lane_menu!(
     turn: []
 );
 
-const STICKER: &[Entry] = lane_menu!(
+const STICKER: &[Entry<'static>] = lane_menu!(
     own: [ARRANGE],
     turn: [done("flip", "Mirror", "")]
 );
 
-const EFFECT: &[Entry] = lane_menu!(
+const EFFECT: &[Entry<'static>] = lane_menu!(
     own: [done("edit-effect", "Edit effect", "")],
     turn: []
 );
 
-const FILTER: &[Entry] = lane_menu!(
+const FILTER: &[Entry<'static>] = lane_menu!(
     own: [done("edit-filter", "Edit filter", "")],
     turn: []
 );
 
-const ADJUST: &[Entry] = lane_menu!(
+const ADJUST: &[Entry<'static>] = lane_menu!(
     own: [done("edit-adjust", "Edit adjustment", "")],
     turn: []
 );
 
-const COMPOSITION: &[Entry] = lane_menu!(
+const COMPOSITION: &[Entry<'static>] = lane_menu!(
     own: [done("render-preview", "Render", "")],
     turn: []
 );
 
-const OTHER: &[Entry] = lane_menu!(own: [], turn: []);
+const OTHER: &[Entry<'static>] = lane_menu!(own: [], turn: []);
 
 /// The menu for two or more selected clips, as the reference editor lists
 /// it, with this build's Export selected clips row. `$sound` is Separate
@@ -353,18 +387,19 @@ macro_rules! multi_menu {
     };
 }
 
-const EDIT_MORE: Entry = todo("edit-more", "Edit more", "");
+const EDIT_MORE: Entry<'static> = todo("edit-more", "Edit more", "");
 
 /// The plainest of the multi-select menus: clips with no sound among them.
-pub const MULTI: &[Entry] = multi_menu!(sound: [], compound: []);
-const MULTI_SOUND: &[Entry] = multi_menu!(sound: [SEPARATE_AUDIO], compound: []);
-const MULTI_COMPOUND: &[Entry] = multi_menu!(sound: [], compound: [EDIT_MORE]);
-const MULTI_SOUND_COMPOUND: &[Entry] = multi_menu!(sound: [SEPARATE_AUDIO], compound: [EDIT_MORE]);
+pub const MULTI: &[Entry<'static>] = multi_menu!(sound: [], compound: []);
+const MULTI_SOUND: &[Entry<'static>] = multi_menu!(sound: [SEPARATE_AUDIO], compound: []);
+const MULTI_COMPOUND: &[Entry<'static>] = multi_menu!(sound: [], compound: [EDIT_MORE]);
+const MULTI_SOUND_COMPOUND: &[Entry<'static>] =
+    multi_menu!(sound: [SEPARATE_AUDIO], compound: [EDIT_MORE]);
 
 /// The menu for several selected clips: `sound` when one of them has
 /// sound, `compound` when one is a compound clip.
 #[must_use]
-pub fn multi_entries(sound: bool, compound: bool) -> &'static [Entry] {
+pub fn multi_entries(sound: bool, compound: bool) -> &'static [Entry<'static>] {
     match (sound, compound) {
         (false, false) => MULTI,
         (true, false) => MULTI_SOUND,
@@ -376,7 +411,11 @@ pub fn multi_entries(sound: bool, compound: bool) -> &'static [Entry] {
 /// [`clip_entries`] for the clip as it is: a video clip whose sound was
 /// extracted (`silent`), and a compound clip, each have rows of their own.
 #[must_use]
-pub fn clip_entries_for(kind: &TrackType, silent: bool, compound: bool) -> &'static [Entry] {
+pub fn clip_entries_for(
+    kind: &TrackType,
+    silent: bool,
+    compound: bool,
+) -> &'static [Entry<'static>] {
     match (kind, silent, compound) {
         (TrackType::Video, false, true) => VIDEO_COMPOUND,
         (TrackType::Video, true, true) => VIDEO_COMPOUND_SILENT,
@@ -387,7 +426,7 @@ pub fn clip_entries_for(kind: &TrackType, silent: bool, compound: bool) -> &'sta
 
 /// The menu for a clip on a track of `kind`.
 #[must_use]
-pub fn clip_entries(kind: &TrackType) -> &'static [Entry] {
+pub fn clip_entries(kind: &TrackType) -> &'static [Entry<'static>] {
     match kind {
         TrackType::Video => VIDEO,
         TrackType::Audio | TrackType::TextToVideoTextAudio => AUDIO,
@@ -402,11 +441,11 @@ pub fn clip_entries(kind: &TrackType) -> &'static [Entry] {
 }
 
 /// The menu for a gap between clips on a row.
-pub const GAP_ROW: &[Entry] = &[done("close-gap", "Close gap", "")];
+pub const GAP_ROW: &[Entry<'static>] = &[done("close-gap", "Close gap", "")];
 
 /// The menu for a track's head. The prototype has none; these rows add,
 /// name and delete tracks.
-pub const TRACK_HEAD: &[Entry] = &[
+pub const TRACK_HEAD: &[Entry<'static>] = &[
     done("add-video", "Add video track", ""),
     done("add-audio", "Add audio track", ""),
     done("add-text", "Add text track", ""),
@@ -418,7 +457,7 @@ pub const TRACK_HEAD: &[Entry] = &[
 
 /// The menu for the picked file cards in the library. The rows in
 /// [`LIBRARY_CARD_OFF`] are there but greyed, as in the prototype.
-pub const LIBRARY_CARD: &[Entry] = &[
+pub const LIBRARY_CARD: &[Entry<'static>] = &[
     done("open-file", "Open file location", ""),
     done("delete", "Delete", ""),
     done("new-folder-with", "New folder with selected item", ""),
@@ -430,7 +469,7 @@ pub const LIBRARY_CARD: &[Entry] = &[
 
 /// [`LIBRARY_CARD`] when every picked movie has a proxy or is getting
 /// one: the proxy row cancels it.
-pub const LIBRARY_CARD_PROXIED: &[Entry] = &[
+pub const LIBRARY_CARD_PROXIED: &[Entry<'static>] = &[
     done("open-file", "Open file location", ""),
     done("delete", "Delete", ""),
     done("new-folder-with", "New folder with selected item", ""),
@@ -442,7 +481,7 @@ pub const LIBRARY_CARD_PROXIED: &[Entry] = &[
 
 /// The menu for a folder in the library. The rows in
 /// [`LIBRARY_FOLDER_OFF`] are there but greyed, as in the prototype.
-pub const LIBRARY_FOLDER: &[Entry] = &[
+pub const LIBRARY_FOLDER: &[Entry<'static>] = &[
     done("delete", "Delete", ""),
     done("open-file", "Open file location", ""),
     done("new-folder-with", "New folder with selected item", ""),
@@ -458,7 +497,7 @@ pub const LIBRARY_CARD_OFF: &[&str] = &["link-media"];
 pub const LIBRARY_FOLDER_OFF: &[&str] = &["open-file", "new-folder-with", "link-media"];
 
 /// The menu for the empty space between library cards.
-pub const LIBRARY_EMPTY: &[Entry] = &[
+pub const LIBRARY_EMPTY: &[Entry<'static>] = &[
     done("new-folder", "New folder", ""),
     sub(
         "sort",
@@ -491,9 +530,9 @@ const EDGE: f32 = 8.0;
 
 /// What a menu did this frame.
 #[derive(Clone, Copy, Debug, Default)]
-pub struct Shown {
+pub struct Shown<'a> {
     /// The row clicked. The menu should close.
-    pub picked: Option<Item>,
+    pub picked: Option<Item<'a>>,
     /// A press outside, Escape, or a scroll outside. The menu should close.
     pub dismissed: bool,
 }
@@ -526,13 +565,13 @@ const SHADOW_ROOM: f32 = 48.0;
 /// can reach past the app window's edge and keeps its full size however small
 /// the window is; it stays inside the monitor. Where egui draws every
 /// viewport inside one window, as in tests, it is drawn inside the window.
-pub fn show(
+pub fn show<'a>(
     ctx: &Context,
     id: Id,
     at: Pos2,
-    entries: &'static [Entry],
+    entries: &'a [Entry<'a>],
     enabled: &dyn Fn(&str) -> bool,
-) -> Shown {
+) -> Shown<'a> {
     let frame = ctx.cumulative_frame_nr();
     ctx.data_mut(|data| data.insert_temp(last_shown_id(), frame));
     let window = ctx.input(|input| input.viewport().inner_rect);
@@ -748,17 +787,19 @@ fn menu_area(window: Rect, monitor: Option<Vec2>) -> Rect {
 /// pointer. `enabled` says whether a built row can run now; a Later row
 /// always can, so a click on it can say it is not built yet. Returns what the
 /// menu did and the panels it painted: the menu, then any open submenu.
-fn show_in(
+fn show_in<'a>(
     ctx: &Context,
     id: Id,
     screen: Rect,
     at: Pos2,
-    entries: &'static [Entry],
+    entries: &'a [Entry<'a>],
     enabled: &dyn Fn(&str) -> bool,
-) -> (Shown, Vec<Rect>) {
+) -> (Shown<'a>, Vec<Rect>) {
     let open_key = id.with("open");
     let scroll_key = id.with("scroll");
-    let mut open: Option<&'static str> = ctx.data(|data| data.get_temp(open_key)).flatten();
+    // The open row is kept by its id's hash: a row's name may be made for
+    // this frame only.
+    let mut open: Option<Id> = ctx.data(|data| data.get_temp(open_key)).flatten();
     let full = size(ctx, entries);
     let rect = place(screen, at, Vec2::new(full.x, full.y.min(screen.height())));
     let (pressed, pointer, escape, wheel) = ctx.input(|input| {
@@ -791,7 +832,7 @@ fn show_in(
             if response.hovered() {
                 hovered = Some(item.id);
             }
-            if !item.children.is_empty() && open == Some(item.id) {
+            if !item.children.is_empty() && open == Some(Id::unique(item.id)) {
                 submenu = Some((item.children, row));
             }
             if response.clicked() && item.children.is_empty() {
@@ -830,14 +871,14 @@ fn show_in(
         let next = rows
             .iter()
             .find(|item| item.id == hovered && !item.children.is_empty())
-            .map(|item| item.id);
+            .map(|item| Id::unique(item.id));
         ctx.data_mut(|data| data.insert_temp(open_key, next));
     }
     let outside = pointer.is_none_or(|pos| !rects.iter().any(|rect| rect.contains(pos)));
     shown.dismissed = escape || (outside && (pressed || wheel != 0.0));
     if shown.picked.is_some() || shown.dismissed {
         ctx.data_mut(|data| {
-            data.remove::<Option<&'static str>>(open_key);
+            data.remove::<Option<Id>>(open_key);
             data.remove::<f32>(scroll_key);
         });
     }
@@ -906,7 +947,7 @@ fn paint_scroll_hints(ctx: &Context, id: Id, rect: Rect, scroll: f32, furthest: 
 /// Where the submenu `children` of the row at `row` opens: beside the row
 /// on its right, on its left when the right has no room, and inside
 /// `screen`.
-fn sub_place(ctx: &Context, screen: Rect, row: Rect, children: &[Entry]) -> Rect {
+fn sub_place(ctx: &Context, screen: Rect, row: Rect, children: &[Entry<'_>]) -> Rect {
     let size = size(ctx, children);
     let right = Pos2::new(row.right() - PAD, row.top() - PAD);
     let corner = if right.x + size.x > screen.right() {
@@ -926,7 +967,7 @@ fn sub_reach(
     screen: Rect,
     rect: Rect,
     full_height: f32,
-    entries: &[Entry],
+    entries: &[Entry<'_>],
 ) -> Option<Rect> {
     let furthest = (full_height - rect.height()).max(0.0);
     let (left, right) = (rect.left() + PAD, rect.right() - PAD);
@@ -956,7 +997,7 @@ fn sub_reach(
 }
 
 /// The menu's size: its widest row and every row's height.
-fn size(ctx: &Context, entries: &[Entry]) -> Vec2 {
+fn size(ctx: &Context, entries: &[Entry<'_>]) -> Vec2 {
     let mut width = tokens::MENU_WIDTH - 2.0 * PAD;
     let mut height = 2.0 * PAD;
     for entry in entries {
@@ -1019,16 +1060,16 @@ fn badge_width(ctx: &Context) -> f32 {
 /// up by `scroll`, and report each row in view to `row`. Returns the rows'
 /// items.
 #[allow(clippy::too_many_arguments)]
-fn paint_menu(
+fn paint_menu<'a>(
     ctx: &Context,
     id: Id,
     rect: Rect,
     scroll: f32,
-    entries: &'static [Entry],
-    open: Option<&str>,
+    entries: &'a [Entry<'a>],
+    open: Option<Id>,
     enabled: &dyn Fn(&str) -> bool,
-    row: &mut dyn FnMut(&Item, Rect, &egui::Response),
-) -> Vec<Item> {
+    row: &mut dyn FnMut(&Item<'a>, Rect, &egui::Response),
+) -> Vec<Item<'a>> {
     let layer = LayerId::new(Order::Foreground, id);
     // A layer painted by a bare Ui has no place in egui's stacking order
     // until it is raised, and then its paint order among equals is not fixed.
@@ -1078,7 +1119,7 @@ fn paint_menu(
             id.with(item.id),
             if live { Sense::click() } else { Sense::hover() },
         );
-        if live && (response.hovered() || open == Some(item.id)) {
+        if live && (response.hovered() || open == Some(Id::unique(item.id))) {
             painter.rect_filled(bounds, CornerRadius::same(ROW_RADIUS), tokens::MENU_HOVER);
         }
         let (ink, key) = if live {
@@ -1133,7 +1174,7 @@ fn paint_menu(
 mod tests {
     use super::*;
 
-    fn ids(entries: &[Entry]) -> Vec<&'static str> {
+    fn ids(entries: &[Entry<'static>]) -> Vec<&'static str> {
         entries
             .iter()
             .filter_map(|entry| match entry {
@@ -1292,7 +1333,7 @@ mod tests {
     }
 
     /// The rows of `menu` by label, a submenu's children left out.
-    fn labels(menu: &[Entry]) -> Vec<&'static str> {
+    fn labels(menu: &[Entry<'static>]) -> Vec<&'static str> {
         menu.iter()
             .filter_map(|entry| match entry {
                 Entry::Item(item) => Some(item.label),
@@ -1302,7 +1343,7 @@ mod tests {
     }
 
     /// `rows` appear in `menu` in that order, whatever else sits between.
-    fn in_order(menu: &[Entry], rows: &[&str]) -> bool {
+    fn in_order(menu: &[Entry<'static>], rows: &[&str]) -> bool {
         let mut shown = labels(menu).into_iter();
         rows.iter().all(|row| shown.any(|label| label == *row))
     }
@@ -1411,7 +1452,6 @@ mod tests {
             "Sync video and audio",
             "Create multi-camera clip",
             "Trim clip",
-            "Edit effects",
         ];
         for menu in menus {
             for entry in menu {
@@ -1583,6 +1623,63 @@ mod tests {
     }
 
     #[test]
+    fn a_row_takes_children_made_at_run_time_and_the_rest_stay() {
+        let names = ["Shake".to_owned(), "Glow".to_owned()];
+        let ids = ["edit-effects:0".to_owned(), "edit-effects:1".to_owned()];
+        let children: Vec<Entry<'_>> = ids
+            .iter()
+            .zip(&names)
+            .map(|(id, name)| named(id, name))
+            .collect();
+        let menu = with_children(VIDEO, "edit-effects", &children);
+        assert_eq!(menu.len(), VIDEO.len());
+        for (made, was) in menu.iter().zip(VIDEO) {
+            match (made, was) {
+                (Entry::Separator, Entry::Separator) => {}
+                (Entry::Item(made), Entry::Item(was)) => {
+                    assert_eq!(
+                        (made.id, made.label, made.built),
+                        (was.id, was.label, was.built)
+                    );
+                    if made.id == "edit-effects" {
+                        let rows: Vec<(&str, &str, bool)> = made
+                            .children
+                            .iter()
+                            .filter_map(|entry| match entry {
+                                Entry::Item(item) => Some((item.id, item.label, item.built)),
+                                Entry::Separator => None,
+                            })
+                            .collect();
+                        assert_eq!(
+                            rows,
+                            [
+                                ("edit-effects:0", "Shake", true),
+                                ("edit-effects:1", "Glow", true)
+                            ]
+                        );
+                    } else {
+                        assert_eq!(made.children.len(), was.children.len());
+                    }
+                }
+                _ => std::panic::resume_unwind(Box::new("a row changed its kind")),
+            }
+        }
+        // A menu without the row comes back as it was.
+        assert_eq!(
+            with_children(AUDIO, "edit-effects", &children).len(),
+            AUDIO.len()
+        );
+        assert!(
+            with_children(AUDIO, "edit-effects", &children)
+                .iter()
+                .all(|entry| match entry {
+                    Entry::Item(item) => !item.id.starts_with("edit-effects"),
+                    Entry::Separator => true,
+                })
+        );
+    }
+
+    #[test]
     fn a_submenu_is_built_only_when_every_child_is() {
         let built = |id: &str| {
             VIDEO.iter().find_map(|entry| match entry {
@@ -1613,7 +1710,11 @@ mod tests {
         }
     }
 
-    fn frame(ctx: &Context, height: f32, events: Vec<egui::Event>) -> (Shown, egui::FullOutput) {
+    fn frame(
+        ctx: &Context,
+        height: f32,
+        events: Vec<egui::Event>,
+    ) -> (Shown<'static>, egui::FullOutput) {
         let mut shown = Shown::default();
         let mut output = ctx.run_ui(
             egui::RawInput {

@@ -2435,7 +2435,7 @@ fn library_action(
     shell: &mut Shell,
     view: &mut ViewState,
     target: &LibraryTarget,
-    item: crate::menu::Item,
+    item: crate::menu::Item<'_>,
 ) {
     let picked = view.library_picked.clone();
     let result = match (item.id, target) {
@@ -6113,6 +6113,10 @@ fn secondary_click(ui: &Ui) -> Option<Pos2> {
     })
 }
 
+/// What the id of an Edit effects submenu row starts with; the effect's
+/// place in the clip's list follows.
+const EDIT_EFFECT_ROW: &str = "edit-effects:";
+
 fn paint_clip_menu(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
     let Some(menu) = shell.clip_menu() else {
         return;
@@ -6138,7 +6142,26 @@ fn paint_clip_menu(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
             shell.compound_selected(),
         )
     };
+    // Edit effects picks the clip's one effect, or opens a row for each
+    // when it has several. The rows are made for this frame.
+    let effects = shell.clip_effects();
+    let effect_ids: Vec<String> = (0..effects.len())
+        .map(|index| format!("{EDIT_EFFECT_ROW}{index}"))
+        .collect();
+    let effect_rows: Vec<crate::menu::Entry<'_>> = effects
+        .iter()
+        .zip(&effect_ids)
+        .map(|(effect, id)| crate::menu::named(id, &effect.name))
+        .collect();
+    let with_effects;
+    let entries: &[crate::menu::Entry<'_>] = if effect_rows.len() > 1 {
+        with_effects = crate::menu::with_children(entries, "edit-effects", &effect_rows);
+        &with_effects
+    } else {
+        entries
+    };
     let enabled = |id: &str| match id {
+        "edit-effects" => !effects.is_empty(),
         "edit-freeze" => shell.freeze_enabled(),
         "edit-reverse" => shell.reverse_enabled(),
         "edit-mirror" => shell.mirror_enabled(),
@@ -6204,6 +6227,20 @@ fn paint_clip_menu(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
                 Ok(())
             }
             "open-compound" => shell.open_compound(),
+            "edit-effects" => match effects.first() {
+                Some(effect) => shell.edit_clip_effect(&effect.segment_id),
+                None => Ok(()),
+            },
+            id if id.starts_with(EDIT_EFFECT_ROW) => {
+                let effect = id[EDIT_EFFECT_ROW.len()..]
+                    .parse::<usize>()
+                    .ok()
+                    .and_then(|index| effects.get(index));
+                match effect {
+                    Some(effect) => shell.edit_clip_effect(&effect.segment_id),
+                    None => Ok(()),
+                }
+            }
             "link-media" => {
                 view.wants_link = true;
                 Ok(())
@@ -15630,6 +15667,106 @@ mod tests {
         assert!(text_pos(&output, "Group").is_some());
         assert!(text_pos(&output, "Split scenes").is_none());
         assert!(text_pos(&output, "Trim clip").is_none());
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn edit_effects_picks_the_clips_effect_or_lists_them_by_name() {
+        let temp = std::env::temp_dir().join(format!("cutlass-fxmenu-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let mut draft = cutlass_model::Draft::empty("draft");
+        draft.canvas_config.width = 2;
+        draft.canvas_config.height = 1;
+        draft.tracks[0].segments.push(cutlass_model::Segment::new(
+            "a",
+            "color",
+            cutlass_model::TimeRange::new(0, 2_000_000),
+        ));
+        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let frame = |shell: &mut Shell, view: &mut ViewState, events: Vec<egui::Event>| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: screen,
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, view, None),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        let click = |pos: Pos2| {
+            let press = |pressed| egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::default(),
+            };
+            vec![egui::Event::PointerMoved(pos), press(true), press(false)]
+        };
+        let clip = SegmentId::new("a");
+        let cards = cutlass_editor::effect_cards();
+        let at = Pos2::new(300.0, 80.0);
+        let open = |shell: &mut Shell| {
+            shell.select(Some(SegmentId::new("a")));
+            shell.open_clip_menu(at.x, at.y);
+        };
+        frame(&mut shell, &mut view, Vec::new());
+
+        // No effect on the clip: the row is there, greyed, and a click on
+        // it does nothing.
+        open(&mut shell);
+        frame(&mut shell, &mut view, Vec::new());
+        let output = frame(&mut shell, &mut view, Vec::new());
+        let row = text_pos(&output, "Edit effects").expect("the row");
+        frame(&mut shell, &mut view, click(row + Vec2::new(4.0, 0.0)));
+        frame(&mut shell, &mut view, Vec::new());
+        assert_eq!(shell.selected(), Some(&clip));
+        shell.close_clip_menu();
+
+        // One effect: the row picks it.
+        shell
+            .effect_onto(&cards[0].id, clip.clone(), Micros(0), Micros(2_000_000))
+            .unwrap();
+        open(&mut shell);
+        frame(&mut shell, &mut view, Vec::new());
+        let output = frame(&mut shell, &mut view, Vec::new());
+        let row = text_pos(&output, "Edit effects").expect("the row");
+        assert!(text_pos(&output, "Later").is_none_or(|badge| (badge.y - row.y).abs() > 6.0));
+        frame(&mut shell, &mut view, click(row + Vec2::new(4.0, 0.0)));
+        frame(&mut shell, &mut view, Vec::new());
+        assert!(shell.clip_menu().is_none(), "the menu closed");
+        assert_eq!(
+            shell.selected_track_kind(),
+            Some(cutlass_model::TrackType::Effect)
+        );
+        assert_eq!(shell.effect_name().as_deref(), Some(cards[0].name.as_str()));
+
+        // Two effects: the row opens their names, and a name picks its own.
+        shell
+            .effect_onto(&cards[1].id, clip.clone(), Micros(0), Micros(2_000_000))
+            .unwrap();
+        open(&mut shell);
+        frame(&mut shell, &mut view, Vec::new());
+        let output = frame(&mut shell, &mut view, Vec::new());
+        let row = text_pos(&output, "Edit effects").expect("the row") + Vec2::new(4.0, 0.0);
+        // The name is not on the menu until the row is under the pointer.
+        let second = cards[1].name.as_str();
+        frame(&mut shell, &mut view, vec![egui::Event::PointerMoved(row)]);
+        frame(&mut shell, &mut view, Vec::new());
+        let output = frame(&mut shell, &mut view, Vec::new());
+        let name = text_pos(&output, second).expect("the second effect's name");
+        assert!(text_pos(&output, cards[0].name.as_str()).is_some());
+        frame(&mut shell, &mut view, click(name + Vec2::new(4.0, 0.0)));
+        frame(&mut shell, &mut view, Vec::new());
+        assert!(shell.clip_menu().is_none(), "the menu closed");
+        assert_eq!(shell.effect_name().as_deref(), Some(second));
         let _ = std::fs::remove_dir_all(&temp);
     }
 

@@ -4077,9 +4077,7 @@ impl Shell {
                 })
         };
         if let Some((clip, start, duration)) = on_clip {
-            let track_id = effect_row_for(self.session_draft()?, &clip)
-                .unwrap_or_else(|| TrackId::new(self.fresh("track")));
-            return self.place_effect(card_id, track_id, start, duration, Some(clip));
+            return self.effect_onto(card_id, clip, start, duration);
         }
         let outcome = {
             let gesture = DropGesture {
@@ -4103,6 +4101,20 @@ impl Shell {
             DropOutcome::NewLane { start, .. } => (TrackId::new(self.fresh("track")), start),
         };
         self.place_effect(card_id, track_id, start, EFFECT_LENGTH, None)
+    }
+
+    /// Place the effects shelf's `card_id` over the picture clip `clip`
+    /// alone, for the clip's span from `start`.
+    pub(crate) fn effect_onto(
+        &mut self,
+        card_id: &str,
+        clip: SegmentId,
+        start: Micros,
+        duration: Micros,
+    ) -> Result<(), ShellError> {
+        let track_id = effect_row_for(self.session_draft()?, &clip)
+            .unwrap_or_else(|| TrackId::new(self.fresh("track")));
+        self.place_effect(card_id, track_id, start, duration, Some(clip))
     }
 
     /// Add an adjustment layer at the playhead, on the first adjust row
@@ -12388,6 +12400,67 @@ mod tests {
         desktop.undo().unwrap();
         assert_eq!(effects(&desktop).len(), 1);
         assert!(desktop.add_effect("effect:recipe/none").is_err());
+    }
+
+    #[test]
+    fn a_clip_lists_its_own_effects_and_picks_one_to_edit() {
+        let temp = Temp::new();
+        touching_cut(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        let cards = cutlass_editor::effect_cards();
+        let right = SegmentId::new("right");
+        let span = (Micros(1_000_000), Micros(1_000_000));
+        desktop.select(Some(right.clone()));
+        assert!(desktop.clip_effects().is_empty());
+
+        for card in &cards[..2] {
+            desktop
+                .effect_onto(&card.id, right.clone(), span.0, span.1)
+                .unwrap();
+        }
+        // One over every picture is not the clip's own.
+        desktop.seek(Micros(0));
+        desktop.add_effect(&cards[2].id).unwrap();
+
+        // The other clip has none, and neither do two clips together.
+        desktop.select(Some(SegmentId::new("left")));
+        assert!(desktop.clip_effects().is_empty());
+        desktop.toggle_selected(right.clone());
+        assert!(desktop.clip_effects().is_empty());
+
+        desktop.select(Some(right.clone()));
+        let effects = desktop.clip_effects();
+        let mut names: Vec<&str> = effects.iter().map(|effect| effect.name.as_str()).collect();
+        names.sort_unstable();
+        let mut wanted = [cards[0].name.as_str(), cards[1].name.as_str()];
+        wanted.sort_unstable();
+        assert_eq!(names, wanted);
+
+        // An effect that is not this clip's is refused and the clip stays
+        // picked.
+        let refused = desktop
+            .edit_clip_effect(&SegmentId::new("left"))
+            .unwrap_err();
+        assert_eq!(
+            refused.to_string(),
+            "that effect is not on the selected clip"
+        );
+        assert_eq!(desktop.selected(), Some(&right));
+
+        // Picking one selects its clip on the effect row, so the inspector
+        // reads its name and settings.
+        let revision = desktop.draft().unwrap().clone();
+        desktop.edit_clip_effect(&effects[1].segment_id).unwrap();
+        assert_eq!(desktop.selected(), Some(&effects[1].segment_id));
+        assert_eq!(
+            desktop.effect_name().as_deref(),
+            Some(effects[1].name.as_str())
+        );
+        assert_eq!(desktop.selected_track_kind(), Some(TrackType::Effect));
+        assert_eq!(desktop.draft().unwrap(), &revision, "nothing was edited");
+        // The effect clip is not a picture clip, so it has none of its own.
+        assert!(desktop.clip_effects().is_empty());
     }
 
     #[test]

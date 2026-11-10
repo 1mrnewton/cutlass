@@ -16,6 +16,10 @@ use cutlass_model::{FrameRate, TimeRange};
 /// Video short-side steps, in pixels.
 pub const VIDEO_SHORT_SIDES: [u32; 6] = [480, 720, 1080, 1440, 2160, 4320];
 
+/// The short sides a proxy is drawn at, in pixels. 540 is not an export
+/// step: it is half of 1080 and a quarter of 2160 each way.
+pub const PROXY_SHORT_SIDES: [u32; 2] = [720, 540];
+
 /// GIF short-side steps, in pixels.
 pub const GIF_SHORT_SIDES: [u32; 3] = [240, 320, 640];
 
@@ -226,7 +230,10 @@ pub fn validate(request: &ExportRequest) -> Result<(), ExportError> {
             GIF_SHORT_SIDES.contains(&request.short_side)
                 || VIDEO_SHORT_SIDES.contains(&request.short_side)
         }
-        _ => VIDEO_SHORT_SIDES.contains(&request.short_side),
+        _ => {
+            VIDEO_SHORT_SIDES.contains(&request.short_side)
+                || PROXY_SHORT_SIDES.contains(&request.short_side)
+        }
     };
     if !allowed {
         return Err(ExportError::Resolution {

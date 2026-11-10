@@ -1,5 +1,5 @@
 //! Proxies: a smaller copy of a source movie that the preview plays in its
-//! place, so 4K and long clips scrub and play smoothly.
+//! place, so large clips scrub and play smoothly.
 //!
 //! A proxy is named by the source file as it is on disk, its path, size and
 //! time of change, so a changed file is not shown through a stale proxy. It
@@ -13,26 +13,41 @@ use cutlass_model::{Draft, MaterialVideo, Micros, Segment, TimeRange, Track};
 use crate::ExportRequest;
 use crate::prerender::render_request;
 
-/// The short side a proxy is drawn at: the smallest export step.
-pub const PROXY_SIDE: u32 = crate::VIDEO_SHORT_SIDES[0];
+/// The short sides a proxy can be drawn at, largest first.
+pub const PROXY_SIDES: [u32; 2] = crate::config::PROXY_SHORT_SIDES;
 
-/// A source whose short side is above this wants a proxy.
-const LARGE_SIDE: u32 = 1080;
+/// The short side a proxy is drawn at when nothing else is chosen.
+pub const DEFAULT_PROXY_SIDE: u32 = PROXY_SIDES[0];
 
-/// A source at least this long wants a proxy, whatever its size.
-const LONG: Micros = Micros(20 * 60 * 1_000_000);
-
-/// Whether a movie of `width` by `height` lasting `duration` is heavy
-/// enough that the preview should play a proxy of it.
+/// `side` when it is one of [`PROXY_SIDES`], and the default otherwise, so
+/// a stored size this build does not draw is not taken.
 #[must_use]
-pub fn wants_proxy(width: u32, height: u32, duration: Micros) -> bool {
-    width.min(height) > LARGE_SIDE || duration.0 >= LONG.0
+pub fn proxy_side(side: u32) -> u32 {
+    if PROXY_SIDES.contains(&side) {
+        side
+    } else {
+        DEFAULT_PROXY_SIDE
+    }
 }
 
-/// The file name the proxy of `source` takes, or `None` when the file
-/// cannot be read.
+/// Whether a movie of `width` by `height` is larger than a proxy with the
+/// short side `side`, so its proxy is smaller than it.
 #[must_use]
-pub fn proxy_name(source: &Path) -> Option<String> {
+pub fn wants_proxy(width: u32, height: u32, side: u32) -> bool {
+    width.min(height) > side
+}
+
+/// The bits a second a proxy with the short side `side` is coded at: small
+/// enough to read fast, and enough for a viewer.
+#[must_use]
+pub fn proxy_bitrate(side: u32) -> u32 {
+    if side > 540 { 4_000_000 } else { 2_500_000 }
+}
+
+/// The file name the proxy of `source` with the short side `side` takes,
+/// or `None` when the file cannot be read.
+#[must_use]
+pub fn proxy_name(source: &Path, side: u32) -> Option<String> {
     let canonical = source.canonicalize().ok()?;
     let meta = std::fs::metadata(&canonical).ok()?;
     let changed = meta
@@ -45,7 +60,7 @@ pub fn proxy_name(source: &Path) -> Option<String> {
     let key = seed.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
         (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
     });
-    Some(format!("{key:016x}-{PROXY_SIDE}.mp4"))
+    Some(format!("{key:016x}-{side}.mp4"))
 }
 
 /// A draft that plays all of `source`, `width` by `height` and `duration`
@@ -74,10 +89,14 @@ pub fn proxy_draft(source: &Path, width: u32, height: u32, duration: Micros, fps
     draft
 }
 
-/// What a proxy of `draft`, made by [`proxy_draft`], writes.
+/// What a proxy of `draft`, made by [`proxy_draft`], writes with the short
+/// side `side`.
 #[must_use]
-pub fn proxy_request(draft: &Draft) -> ExportRequest {
-    render_request(draft, TimeRange::new(0, draft.duration.0), PROXY_SIDE)
+pub fn proxy_request(draft: &Draft, side: u32) -> ExportRequest {
+    ExportRequest {
+        bitrate: proxy_bitrate(side),
+        ..render_request(draft, TimeRange::new(0, draft.duration.0), side)
+    }
 }
 
 #[cfg(test)]
@@ -85,11 +104,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn large_and_long_movies_want_a_proxy() {
-        assert!(wants_proxy(3840, 2160, Micros(1_000_000)));
-        assert!(wants_proxy(2160, 3840, Micros(1_000_000)));
-        assert!(!wants_proxy(1920, 1080, Micros(60_000_000)));
-        assert!(wants_proxy(1280, 720, LONG));
+    fn a_movie_larger_than_the_proxy_wants_one() {
+        assert!(wants_proxy(3840, 2160, 720));
+        assert!(wants_proxy(2160, 3840, 720));
+        assert!(wants_proxy(1920, 1080, 720));
+        assert!(!wants_proxy(1280, 720, 720));
+        assert!(wants_proxy(1280, 720, 540));
+        assert!(!wants_proxy(960, 540, 540));
+        assert!(!wants_proxy(0, 0, 540));
+    }
+
+    #[test]
+    fn a_size_this_build_does_not_draw_becomes_the_default() {
+        assert_eq!(PROXY_SIDES, [720, 540]);
+        for side in PROXY_SIDES {
+            assert_eq!(proxy_side(side), side);
+        }
+        for side in [0, 480, 1080, u32::MAX] {
+            assert_eq!(proxy_side(side), DEFAULT_PROXY_SIDE);
+        }
     }
 
     #[test]
@@ -98,12 +131,15 @@ mod tests {
         std::fs::create_dir_all(&folder).unwrap();
         let file = folder.join("clip.mp4");
         std::fs::write(&file, b"one").unwrap();
-        let first = proxy_name(&file).unwrap();
-        assert_eq!(proxy_name(&file), Some(first.clone()));
-        assert!(first.ends_with("-480.mp4"));
+        let first = proxy_name(&file, 720).unwrap();
+        assert_eq!(proxy_name(&file, 720), Some(first.clone()));
+        assert!(first.ends_with("-720.mp4"));
+        let smaller = proxy_name(&file, 540).unwrap();
+        assert!(smaller.ends_with("-540.mp4"));
+        assert_eq!(smaller[..16], first[..16], "the same source");
         std::fs::write(&file, b"longer").unwrap();
-        assert_ne!(proxy_name(&file), Some(first));
-        assert_eq!(proxy_name(&folder.join("gone.mp4")), None);
+        assert_ne!(proxy_name(&file, 720), Some(first));
+        assert_eq!(proxy_name(&folder.join("gone.mp4"), 720), None);
         std::fs::remove_dir_all(&folder).unwrap();
     }
 
@@ -122,10 +158,15 @@ mod tests {
         );
         assert_eq!(draft.materials.videos[0].path, "/m/clip.mp4");
         assert_eq!(draft.tracks[0].segments[0].target.duration.0, 5_000_000);
-        let request = proxy_request(&draft);
-        assert_eq!(request.short_side, PROXY_SIDE);
-        assert!(request.audio.is_none());
-        assert_eq!(request.range, TimeRange::new(0, 5_000_000));
-        assert!(crate::validate(&request).is_ok());
+        for side in PROXY_SIDES {
+            let request = proxy_request(&draft, side);
+            assert_eq!(request.short_side, side);
+            assert!(request.audio.is_none());
+            assert_eq!(request.range, TimeRange::new(0, 5_000_000));
+            assert!(crate::validate(&request).is_ok(), "{side}");
+            // Well under an export of that size, so the file reads fast.
+            assert!(request.bitrate < crate::video_bitrate(side));
+        }
+        assert!(proxy_bitrate(540) < proxy_bitrate(720));
     }
 }

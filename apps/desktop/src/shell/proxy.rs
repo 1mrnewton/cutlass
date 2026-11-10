@@ -1,9 +1,9 @@
 //! Proxies: smaller copies of movies in the Cutlass `Proxies` folder, which
 //! the preview plays in place of the source.
 //!
-//! A project that makes proxies draws one for each 4K or long movie as it
-//! comes in, one after another on a thread of their own, so importing,
-//! editing and export go on meanwhile. A file chosen by hand in the
+//! A project that makes proxies draws one for each movie larger than the
+//! resolution it chose, as the movie comes in, one after another on a
+//! thread of their own, so importing, editing and export go on meanwhile. A file chosen by hand in the
 //! library has a proxy, or has none, whatever the project makes by itself.
 //!
 //! Only the preview's pictures read a proxy. Probing, thumbnails, sound
@@ -40,10 +40,8 @@ struct Movie {
     stored: String,
     /// The file on disk.
     file: PathBuf,
-    /// 4K or long: a project that makes proxies makes this one.
-    heavy: bool,
-    /// Its short side is above a proxy's, so a proxy is smaller than it.
-    larger: bool,
+    /// Its shorter edge in pixels, as its material says.
+    short: u32,
 }
 
 /// One proxy to draw.
@@ -56,6 +54,7 @@ struct Wanted {
 /// The proxy being drawn.
 struct Running {
     source: PathBuf,
+    proxy: PathBuf,
     job: Job<Result<(), ShellError>>,
 }
 
@@ -154,8 +153,8 @@ impl Proxies {
     }
 }
 
-fn side(edge: i32) -> u32 {
-    u32::try_from(edge).unwrap_or(0)
+fn edge(pixels: i32) -> u32 {
+    u32::try_from(pixels).unwrap_or(0)
 }
 
 /// Every movie material of `draft` and of the compound clips in it.
@@ -200,12 +199,10 @@ fn movies(draft: &Draft, root: Option<&Path>) -> (Vec<Movie>, HashMap<String, Pa
         if found.iter().any(|movie| movie.file == file) {
             continue;
         }
-        let (width, height) = (side(video.width), side(video.height));
         found.push(Movie {
             stored: video.path.clone(),
             file,
-            heavy: cutlass_export::wants_proxy(width, height, video.duration),
-            larger: width.min(height) > cutlass_export::PROXY_SIDE,
+            short: edge(video.width).min(edge(video.height)),
         });
     }
     (found, by_material)
@@ -223,10 +220,12 @@ fn movies_mark(draft: &Draft) -> u64 {
     hasher.finish()
 }
 
-/// Draw the proxy of `wanted.source` at the project's `fps`. It is written
-/// aside first, so a stopped proxy is never found.
+/// Draw the proxy of `wanted.source` with the short side `side` at the
+/// project's `fps`. It is written aside first, so a stopped proxy is never
+/// found.
 fn draw_proxy(
     wanted: &Wanted,
+    side: u32,
     fps: f64,
     readers: &ReaderFactory,
     encoders: &cutlass_encode::EncodeFactory,
@@ -249,7 +248,7 @@ fn draw_proxy(
         ));
     }
     let draft = cutlass_export::proxy_draft(&wanted.source, width, height, duration, fps);
-    let request = cutlass_export::proxy_request(&draft);
+    let request = cutlass_export::proxy_request(&draft, side);
     let mut report = |done: u64, total: u64| {
         if total > 0 {
             progress.fraction(done as f32 / total as f32);
@@ -295,14 +294,39 @@ impl Shell {
         sources
     }
 
-    /// Whether the open project makes proxies of its 4K and long movies
-    /// by itself.
+    /// Whether the open project makes proxies by itself, of each movie
+    /// larger than [`Self::project_proxy_side`].
     #[must_use]
     pub fn project_proxies(&self) -> bool {
         self.folder
             .as_ref()
             .and_then(|folder| folder.proxies().enabled)
             .unwrap_or(self.settings.playback.proxies)
+    }
+
+    /// The short side the open project draws its proxies at, in pixels.
+    #[must_use]
+    pub fn project_proxy_side(&self) -> u32 {
+        cutlass_export::proxy_side(
+            self.folder
+                .as_ref()
+                .and_then(|folder| folder.proxies().side)
+                .unwrap_or(self.settings.playback.proxy_side),
+        )
+    }
+
+    /// Draw the open project's proxies with the short side `side`, one of
+    /// [`cutlass_export::PROXY_SIDES`]. The ones at the old size stay in
+    /// the folder and are no longer played. This is not an undo step.
+    pub fn set_project_proxy_side(&mut self, side: u32) -> Result<(), ShellError> {
+        if !cutlass_export::PROXY_SIDES.contains(&side) {
+            return Err(ShellError::Unavailable(format!(
+                "a proxy is not drawn at {side}p"
+            )));
+        }
+        self.choose_proxies(|choices| choices.side = Some(side))?;
+        self.sync_proxies();
+        Ok(())
     }
 
     /// Have the open project make proxies by itself, or stop. A file
@@ -335,11 +359,13 @@ impl Shell {
     /// so a later change to the setting is for new projects.
     pub(super) fn open_proxies(&mut self) {
         self.close_proxies();
-        let default = self.settings.playback.proxies;
+        let makes = self.settings.playback.proxies;
+        let side = cutlass_export::proxy_side(self.settings.playback.proxy_side);
         if let Some(folder) = self.folder.as_mut() {
             let mut choices = folder.proxies();
-            if choices.enabled.is_none() {
-                choices.enabled = Some(default);
+            if choices.enabled.is_none() || choices.side.is_none() {
+                choices.enabled.get_or_insert(makes);
+                choices.side.get_or_insert(side);
                 folder.set_proxies(&choices);
             }
         }
@@ -383,6 +409,7 @@ impl Shell {
         };
         let draft = draft.as_ref();
         let makes = self.project_proxies();
+        let side = self.project_proxy_side();
         let choices = self
             .folder
             .as_ref()
@@ -398,10 +425,10 @@ impl Shell {
         let mut played = HashMap::new();
         let mut missing = Vec::new();
         for movie in &found {
-            if !choices.wants(&movie.stored, makes && movie.heavy) {
+            if !choices.wants(&movie.stored, makes && movie.short > side) {
                 continue;
             }
-            let Some(name) = cutlass_export::proxy_name(&movie.file) else {
+            let Some(name) = cutlass_export::proxy_name(&movie.file, side) else {
                 continue;
             };
             let proxy = self.proxies.folder.join(name);
@@ -418,12 +445,13 @@ impl Shell {
         proxies.movies = found;
         proxies.by_material = by_material;
         proxies.seen = seen;
-        let wanted = |source: &Path| missing.iter().any(|movie| movie.source == source);
-        proxies.waiting.retain(|movie| wanted(&movie.source));
+        // A proxy at another size is another file, so it is another want.
+        let wanted = |proxy: &Path| missing.iter().any(|movie| movie.proxy == proxy);
+        proxies.waiting.retain(|movie| wanted(&movie.proxy));
         if proxies
             .running
             .as_ref()
-            .is_some_and(|running| !wanted(&running.source))
+            .is_some_and(|running| !wanted(&running.proxy))
             && let Some(running) = proxies.running.take()
         {
             cutlass_logger::info!("proxy of {} stopped", running.source.display());
@@ -463,18 +491,19 @@ impl Shell {
         let Some(next) = self.proxies.waiting.pop_front() else {
             return;
         };
-        let source = next.source.clone();
+        let (source, proxy) = (next.source.clone(), next.proxy.clone());
+        let side = self.project_proxy_side();
         let readers = self.readers.clone();
         let encoders = self.encoders.clone();
         let fonts = Arc::clone(&self.face);
         let started = std::fs::create_dir_all(&self.proxies.folder).and_then(|()| {
             Job::start("Proxy", move |progress| {
                 progress.stage(&next.source.display().to_string());
-                draw_proxy(&next, fps, &readers, &encoders, &fonts, progress)
+                draw_proxy(&next, side, fps, &readers, &encoders, &fonts, progress)
             })
         });
         match started {
-            Ok(job) => self.proxies.running = Some(Running { source, job }),
+            Ok(job) => self.proxies.running = Some(Running { source, proxy, job }),
             Err(error) => {
                 cutlass_logger::error!("proxy of {}: {error}", source.display());
                 self.proxies.failed.insert(source);
@@ -580,11 +609,11 @@ impl Shell {
 
     /// The paths the project's choices name for the movies among `ids`,
     /// each once, and their files.
-    fn chosen_movies(&self, ids: &[String]) -> Vec<(String, PathBuf, bool)> {
-        let mut chosen: Vec<(String, PathBuf, bool)> = Vec::new();
+    fn chosen_movies(&self, ids: &[String]) -> Vec<(String, PathBuf, u32)> {
+        let mut chosen: Vec<(String, PathBuf, u32)> = Vec::new();
         for movie in ids.iter().filter_map(|id| self.proxies.movie_of(id)) {
             if !chosen.iter().any(|(_, file, _)| file == &movie.file) {
-                chosen.push((movie.stored.clone(), movie.file.clone(), movie.larger));
+                chosen.push((movie.stored.clone(), movie.file.clone(), movie.short));
             }
         }
         chosen
@@ -600,11 +629,11 @@ impl Shell {
                 "only a movie can have a proxy".to_owned(),
             ));
         }
-        chosen.retain(|(_, _, larger)| *larger);
+        let side = self.project_proxy_side();
+        chosen.retain(|(_, _, short)| *short > side);
         if chosen.is_empty() {
             return Err(ShellError::Unavailable(format!(
-                "a movie {}p or smaller needs no proxy",
-                cutlass_export::PROXY_SIDE
+                "a movie {side}p or smaller needs no proxy"
             )));
         }
         for (_, file, _) in &chosen {
@@ -689,7 +718,7 @@ mod tests {
             .join("../../crates/engine/fixtures/pattern.png");
         let mut draft = cutlass_export::proxy_draft(&pattern, 64, 32, Micros(200_000), 30.0);
         draft.materials.videos[0].kind = "photo".to_owned();
-        let request = cutlass_export::proxy_request(&draft);
+        let request = cutlass_export::proxy_request(&draft, 720);
         let (decoders, encoders) = crate::register_codecs();
         let readers = crate::readers::readers_with(decoders);
         let fonts = crate::face::FaceTable::default();
@@ -771,8 +800,8 @@ mod tests {
         project(
             &folder,
             vec![
-                movie("movie", &file, 1280, 720),
-                movie("small", &small, 640, 360),
+                movie("movie", &file, 1920, 1080),
+                movie("small", &small, 1280, 720),
             ],
         );
         let proxies = temp.path.join("proxies");
@@ -794,7 +823,7 @@ mod tests {
         let refused = desktop.make_proxy(&ids(&["small"])).unwrap_err();
         assert_eq!(
             refused.to_string(),
-            "a movie 480p or smaller needs no proxy"
+            "a movie 720p or smaller needs no proxy"
         );
         assert!(!desktop.unsaved(), "a refusal changes nothing");
 
@@ -880,19 +909,21 @@ mod tests {
         let heavy = temp.path.join("heavy.mp4");
         std::fs::copy(&light, &heavy).unwrap();
         let folder = temp.path.join("project");
-        project(&folder, vec![movie("light", &light, 1920, 1080)]);
+        project(&folder, vec![movie("light", &light, 1280, 720)]);
+        let proxies = temp.path.join("proxies");
         let mut desktop = desktop(&temp, true);
         desktop.open_folder(&folder).unwrap();
         assert!(desktop.project_proxies());
+        assert_eq!(desktop.project_proxy_side(), 720);
 
-        // A movie that is neither 4K nor long gets none.
+        // A movie no larger than the proxy resolution gets none.
         assert!(!desktop.poll_proxies());
         assert_eq!(desktop.proxy_state("light"), ProxyState::None);
 
-        // A 4K one is queued the moment it is in the library.
+        // A larger one is queued the moment it is in the library.
         desktop
             .apply(Request::Import {
-                medium: ImportedMedium::Video(Box::new(movie("heavy", &heavy, 3840, 2160))),
+                medium: ImportedMedium::Video(Box::new(movie("heavy", &heavy, 1920, 1080))),
             })
             .unwrap();
         assert!(desktop.poll_proxies());
@@ -922,6 +953,50 @@ mod tests {
         assert!(!desktop.poll_proxies());
         desktop.make_proxy(&ids(&["heavy"])).unwrap();
         assert_eq!(desktop.proxy_state("heavy"), ProxyState::Made);
+
+        // A smaller resolution draws them again at that size, and takes in
+        // the movie that was no larger than the old one.
+        assert_eq!(
+            desktop.set_project_proxy_side(480).unwrap_err().to_string(),
+            "a proxy is not drawn at 480p"
+        );
+        desktop.set_project_proxy_side(540).unwrap();
+        assert_eq!(desktop.project_proxy_side(), 540);
+        assert!(desktop.proxied().is_empty(), "the 720p one is not played");
+        assert!(matches!(
+            desktop.proxy_state("heavy"),
+            ProxyState::Making(_)
+        ));
+        assert!(matches!(
+            desktop.proxy_state("light"),
+            ProxyState::Making(_)
+        ));
+        land_proxies(&mut desktop);
+        assert_eq!(desktop.proxy_state("heavy"), ProxyState::Made);
+        assert_eq!(desktop.proxy_state("light"), ProxyState::Made);
+        let names: Vec<String> = files_in(&proxies)
+            .iter()
+            .map(|file| file.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        let ending = |end: &str| names.iter().filter(|name| name.ends_with(end)).count();
+        assert_eq!(
+            (ending("-720.mp4"), ending("-540.mp4")),
+            (1, 2),
+            "{names:?}"
+        );
+        let shown = desktop
+            .preview_readers()
+            .open(&heavy.canonicalize().unwrap())
+            .unwrap();
+        let shown = shown.info();
+        assert_eq!(shown.width.unwrap().min(shown.height.unwrap()), 540);
+
+        // Back at 720p the kept proxy plays at once, and the light movie's
+        // is no longer wanted.
+        desktop.set_project_proxy_side(720).unwrap();
+        assert!(!desktop.poll_proxies());
+        assert_eq!(desktop.proxy_state("heavy"), ProxyState::Made);
+        assert_eq!(desktop.proxy_state("light"), ProxyState::None);
 
         // The import undone, its proxy is no longer played.
         desktop.undo().unwrap();
@@ -953,6 +1028,24 @@ mod tests {
         assert!(desktop.proxies.running.is_some());
         assert_eq!(desktop.proxies.waiting.len(), 1);
         assert_eq!(desktop.proxy_state("second"), ProxyState::Making(None));
+
+        // Another resolution stops the one being drawn for its new size.
+        let old = desktop.proxies.running.as_ref().unwrap().proxy.clone();
+        assert!(old.to_string_lossy().ends_with("-720.mp4"));
+        desktop.set_project_proxy_side(540).unwrap();
+        assert_eq!(desktop.proxies.stopping.len(), 1);
+        assert_eq!(desktop.proxies.waiting.len(), 2);
+        assert!(
+            desktop
+                .proxies
+                .waiting
+                .iter()
+                .all(|wanted| wanted.proxy.to_string_lossy().ends_with("-540.mp4"))
+        );
+        while desktop.proxies.running.is_none() {
+            desktop.poll_proxies();
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
 
         // The waiting one cancelled is gone from the queue.
         desktop.cancel_proxy(&ids(&["second"])).unwrap();
@@ -1038,20 +1131,31 @@ mod tests {
         again.open_folder(&folder).unwrap();
         assert!(!again.project_proxies());
 
-        // The project's own switch is kept with it.
+        // The project's own switch and resolution are kept with it.
         again.set_project_proxies(true).unwrap();
+        again.set_project_proxy_side(540).unwrap();
         assert!(again.unsaved());
         again.save().unwrap();
         drop(again);
         let mut last = self::desktop(&temp, false);
         last.open_folder(&folder).unwrap();
         assert!(last.project_proxies());
+        assert_eq!(last.project_proxy_side(), 540);
 
         let fresh = temp.path.join("fresh");
         project(&fresh, Vec::new());
         let mut new = self::desktop(&temp, true);
+        new.update_settings(|settings| settings.playback.proxy_side = 540);
         new.open_folder(&fresh).unwrap();
         assert!(new.project_proxies());
+        assert_eq!(new.project_proxy_side(), 540);
+        // A size this build does not draw is not taken from the settings.
+        new.close_project().unwrap();
+        let odd = temp.path.join("odd");
+        project(&odd, Vec::new());
+        new.update_settings(|settings| settings.playback.proxy_side = 333);
+        new.open_folder(&odd).unwrap();
+        assert_eq!(new.project_proxy_side(), 720);
     }
 
     /// A real 4K file from `../local-files`, imported the way the window
@@ -1095,7 +1199,7 @@ mod tests {
         let shown = desktop.preview_readers().open(&source).unwrap();
         let kept = desktop.readers.open(&source).unwrap();
         let (shown, kept) = (shown.info(), kept.info());
-        assert_eq!(shown.width.unwrap().min(shown.height.unwrap()), 480);
+        assert_eq!(shown.width.unwrap().min(shown.height.unwrap()), 720);
         assert_eq!(kept.width.unwrap().min(kept.height.unwrap()), 2160);
         cutlass_logger::info!(
             "real proxy: {} bytes from {} in {:.1?}",

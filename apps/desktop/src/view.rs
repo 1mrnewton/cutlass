@@ -166,8 +166,12 @@ pub struct ViewState {
     export_open: bool,
     /// The project dialog's unsaved choices while it is open.
     project_dialog: Option<cutlass_editor::ProjectSettings>,
+    /// The project dialog shows its Performance tab, not Details.
+    project_performance: bool,
     /// The project dialog's proxy switch, once it has been flipped.
     project_proxies: Option<bool>,
+    /// The project dialog's proxy resolution, once another is picked.
+    project_proxy_side: Option<u32>,
     /// The third-party notices, read when the Licenses window opens.
     licenses: Option<cutlass_licenses::Notices>,
     settings_open: bool,
@@ -285,7 +289,9 @@ impl Default for ViewState {
             wants_replace: false,
             export_open: false,
             project_dialog: None,
+            project_performance: false,
             project_proxies: None,
+            project_proxy_side: None,
             licenses: None,
             settings_open: false,
             settings_tab: SettingsTab::General,
@@ -1347,10 +1353,31 @@ fn settings_window(
                             &mut settings.playback.scrub_audio,
                             "Play sound while the playhead is dragged",
                         ));
-                        ui.add(ui::Check::new(
-                            &mut settings.playback.proxies,
-                            "Make proxies of 4K and long clips in new projects",
-                        ));
+                        // One row: off, or the resolution a new project's
+                        // proxies are drawn at.
+                        choices_row(ui, "Proxies", |ui| {
+                            let playback = &mut settings.playback;
+                            let hint = "A new project makes a smaller copy of each clip larger than this for the viewer. Each project keeps its own choice in its settings.";
+                            if ui
+                                .add(ui::Choice::new(!playback.proxies, "Off"))
+                                .on_hover_text(hint)
+                                .clicked()
+                            {
+                                playback.proxies = false;
+                            }
+                            for value in cutlass_export::PROXY_SIDES {
+                                let chosen = playback.proxies
+                                    && cutlass_export::proxy_side(playback.proxy_side) == value;
+                                if ui
+                                    .add(ui::Choice::new(chosen, format!("{value}p")))
+                                    .on_hover_text(hint)
+                                    .clicked()
+                                {
+                                    playback.proxies = true;
+                                    playback.proxy_side = value;
+                                }
+                            }
+                        });
                         choices_row(ui, "Preview", |ui| {
                             let quality = &mut settings.playback.preview_quality;
                             for (value, name, _) in PREVIEW_QUALITIES {
@@ -8868,17 +8895,59 @@ fn export_extension(view: &ViewState) -> &'static str {
     }
 }
 
-/// Name, canvas, frame rate and color space, saved together.
+/// The proxy switch and the resolution proxies are drawn at.
+fn project_performance(
+    ui: &mut Ui,
+    proxies: &mut Option<bool>,
+    side: &mut Option<u32>,
+    now: (bool, u32),
+) {
+    let mut on = proxies.unwrap_or(now.0);
+    widgets::form_row(ui, "Proxy", |ui| {
+        if widgets::switch(ui, &mut on, true).changed() {
+            *proxies = Some(on);
+        }
+    });
+    let current = format!("{}p", side.unwrap_or(now.1));
+    let labels: Vec<String> = cutlass_export::PROXY_SIDES
+        .iter()
+        .map(|side| format!("{side}p"))
+        .collect();
+    let names: Vec<&str> = labels.iter().map(String::as_str).collect();
+    widgets::form_row(ui, "Resolution", |ui| {
+        if let Some(index) = widgets::select(ui, "project-proxy-side", &current, &names) {
+            *side = Some(cutlass_export::PROXY_SIDES[index]);
+        }
+    });
+    widgets::form_hint(
+        ui,
+        "Only clips larger than this get a smaller copy for the viewer. Export reads the original files.",
+    );
+}
+
+/// Name, canvas, frame rate and color space under Details, and proxies
+/// under Performance, saved together.
 fn project_dialog(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
     let folder = shell.project_folder().map(short_folder);
-    let mut proxies = view
-        .project_proxies
-        .unwrap_or_else(|| shell.project_proxies());
-    let flipped = &mut view.project_proxies;
+    let now = (shell.project_proxies(), shell.project_proxy_side());
+    let performance = &mut view.project_performance;
+    let (proxies, side) = (&mut view.project_proxies, &mut view.project_proxy_side);
     let Some(settings) = view.project_dialog.as_mut() else {
         return;
     };
     let ((), end) = widgets::sheet(ui, "Project settings", 560.0, "Save", |ui| {
+        ui::Segmented::show(ui, |ui| {
+            for (tab, name) in [(false, "Details"), (true, "Performance")] {
+                if ui.add(ui::Choice::new(*performance == tab, name)).clicked() {
+                    *performance = tab;
+                }
+            }
+        });
+        ui.add_space(8.0);
+        if *performance {
+            project_performance(ui, proxies, side, now);
+            return;
+        }
         widgets::form_section(ui, "Details");
         widgets::form_row(ui, "Name", |ui| {
             widgets::text_box(ui, &mut settings.name);
@@ -8913,15 +8982,6 @@ fn project_dialog(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
         widgets::form_hint(
             ui,
             "Picture clips stack by the order Arrange gives them, not by their tracks.",
-        );
-        widgets::form_row(ui, "Proxies", |ui| {
-            if widgets::switch(ui, &mut proxies, true).changed() {
-                *flipped = Some(proxies);
-            }
-        });
-        widgets::form_hint(
-            ui,
-            "4K and long clips get a smaller copy for the viewer as they come in. Export reads the original files.",
         );
 
         ui.add_space(8.0);
@@ -8985,7 +9045,9 @@ fn project_dialog(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
         widgets::SheetEnd::Open => {}
         widgets::SheetEnd::Cancel => {
             view.project_dialog = None;
+            view.project_performance = false;
             view.project_proxies = None;
+            view.project_proxy_side = None;
         }
         widgets::SheetEnd::Confirm => {
             if let Some(settings) = view.project_dialog.take() {
@@ -8994,9 +9056,15 @@ fn project_dialog(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
                     view.project_dialog = Some(settings);
                 } else {
                     view.name_buffer.clear();
-                    if let Some(on) = view.project_proxies.take()
-                        && let Err(error) = shell.set_project_proxies(on)
-                    {
+                    view.project_performance = false;
+                    // The resolution first, so a project just turned on
+                    // draws at the size it was given.
+                    let side = view.project_proxy_side.take();
+                    let on = view.project_proxies.take();
+                    let saved = side
+                        .map_or(Ok(()), |side| shell.set_project_proxy_side(side))
+                        .and_then(|()| on.map_or(Ok(()), |on| shell.set_project_proxies(on)));
+                    if let Err(error) = saved {
                         shell.notice_error(&error);
                     }
                 }
@@ -12272,6 +12340,8 @@ mod tests {
         shell.set_proxies_folder(temp.join("proxies"));
         shell.hold_proxies();
         shell.open_folder(&project).unwrap();
+        // The project makes none by itself, so the menu is what asks.
+        shell.set_project_proxies(false).unwrap();
         let mut view = ViewState::new();
         let ctx = egui::Context::default();
         let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
@@ -12309,7 +12379,7 @@ mod tests {
         };
         let output = frame(&mut shell, &mut view, Vec::new());
         let name = text_pos(&output, "clip.mp4").expect("library card");
-        // A 1080p movie gets no proxy by itself, so there is no clock.
+        // Nothing is on the way, so there is no clock.
         assert!(!making(&shell));
         assert!(!clock(&output));
         let card = name + Vec2::new(20.0, -30.0);
@@ -12360,9 +12430,10 @@ mod tests {
     }
 
     #[test]
-    fn the_project_dialog_turns_the_projects_proxies_off_on_save() {
+    fn the_project_dialogs_performance_tab_sets_the_proxy_switch_and_resolution() {
         let (mut shell, temp) = open_span("proxies-switch", 1_000_000);
         assert!(shell.project_proxies());
+        assert_eq!(shell.project_proxy_side(), 720);
         let mut view = ViewState::new();
         let ctx = egui::Context::default();
         let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
@@ -12390,47 +12461,126 @@ mod tests {
                 vec![event(false)],
             ]
         };
-        // The switch's knob is the 9-point circle on the Proxies row.
+        let press = |shell: &mut Shell, view: &mut ViewState, label: &str| {
+            let output = frame(shell, view, Vec::new());
+            let at = last_text_pos(&output, label).unwrap_or_else(|| panic!("no {label}"));
+            for events in click(at) {
+                frame(shell, view, events);
+            }
+        };
+        // The switch's knob is the 9-point circle on the Proxy row.
         let flip = |shell: &mut Shell, view: &mut ViewState| {
             let output = frame(shell, view, Vec::new());
-            let label = last_text_pos(&output, "Proxies").expect("the Proxies row");
+            let label = last_text_pos(&output, "Proxy").expect("the Proxy row");
             let knob = circles(&output)
                 .into_iter()
                 .find(|(center, radius)| {
                     (radius - 9.0).abs() < 0.01 && (center.y - label.y).abs() < 14.0
                 })
-                .expect("the Proxies switch")
+                .expect("the Proxy switch")
                 .0;
             for events in click(knob) {
                 frame(shell, view, events);
             }
         };
-        let press = |shell: &mut Shell, view: &mut ViewState, button: &str| {
+        let pick = |shell: &mut Shell, view: &mut ViewState, name: &str| {
             let output = frame(shell, view, Vec::new());
-            let at = last_text_pos(&output, button).expect("the dialog's button");
-            for events in click(at) {
+            let picker =
+                last_text_pos(&output, "Resolution").expect("Resolution") + Vec2::new(240.0, 0.0);
+            for events in click(picker) {
                 frame(shell, view, events);
             }
+            press(shell, view, name);
         };
 
-        // Flipped and cancelled, the project is as it was.
+        // A line only the Details tab has; the window behind the dialog
+        // names the frame rate and the rest too.
+        const DETAILS: &str = "Picture clips stack by the order";
+        // Details is shown first; proxies are under Performance.
         view.project_dialog = shell.project_settings();
+        let text = painted_text(&frame(&mut shell, &mut view, Vec::new()));
+        assert!(text.contains(DETAILS) && !text.contains("Proxy"), "{text}");
+        press(&mut shell, &mut view, "Performance");
+        let text = painted_text(&frame(&mut shell, &mut view, Vec::new()));
+        assert!(!text.contains(DETAILS), "{text}");
+        assert!(text.contains("720p"), "{text}");
+        assert!(text.contains("Only clips larger than this"), "{text}");
+
+        // Changed and cancelled, the project is as it was.
         flip(&mut shell, &mut view);
+        pick(&mut shell, &mut view, "540p");
         assert_eq!(view.project_proxies, Some(false));
+        assert_eq!(view.project_proxy_side, Some(540));
         press(&mut shell, &mut view, "Cancel");
         assert!(view.project_dialog.is_none());
         assert!(shell.project_proxies());
+        assert_eq!(shell.project_proxy_side(), 720);
         assert!(!shell.unsaved());
 
-        // Flipped and saved, it is off, and that is not an undo step.
+        // Changed and saved, both are kept, and that is not an undo step.
         view.project_dialog = shell.project_settings();
+        let text = painted_text(&frame(&mut shell, &mut view, Vec::new()));
+        assert!(text.contains(DETAILS), "the dialog opens on Details again");
+        press(&mut shell, &mut view, "Performance");
         flip(&mut shell, &mut view);
+        pick(&mut shell, &mut view, "540p");
         press(&mut shell, &mut view, "Save");
         assert!(view.project_dialog.is_none(), "{}", shell.notice());
         assert!(!shell.project_proxies());
+        assert_eq!(shell.project_proxy_side(), 540);
         assert!(shell.unsaved());
-        assert!(shell.undo().is_err(), "the switch is not an edit");
+        assert!(shell.undo().is_err(), "the choices are not an edit");
         let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn settings_turns_new_projects_proxies_off_or_picks_their_resolution() {
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        let mut view = ViewState::new();
+        view.settings_open = true;
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let frame = |shell: &mut Shell, view: &mut ViewState, events: Vec<egui::Event>| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: screen,
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, view, None),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        let press = |shell: &mut Shell, view: &mut ViewState, label: &str| {
+            let output = frame(shell, view, Vec::new());
+            let pos = last_text_pos(&output, label).unwrap_or_else(|| panic!("no {label}"));
+            let event = |pressed| egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::default(),
+            };
+            frame(
+                shell,
+                view,
+                vec![egui::Event::PointerMoved(pos), event(true)],
+            );
+            frame(shell, view, vec![event(false)]);
+            frame(shell, view, Vec::new());
+        };
+        let chosen = |shell: &Shell| {
+            let playback = &shell.settings().playback;
+            (playback.proxies, playback.proxy_side)
+        };
+        assert_eq!(chosen(&shell), (true, 720));
+        press(&mut shell, &mut view, "540p");
+        assert_eq!(chosen(&shell), (true, 540));
+        press(&mut shell, &mut view, "Off");
+        assert_eq!(chosen(&shell), (false, 540), "the resolution is kept");
+        press(&mut shell, &mut view, "720p");
+        assert_eq!(chosen(&shell), (true, 720));
     }
 
     #[test]

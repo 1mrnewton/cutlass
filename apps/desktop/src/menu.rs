@@ -544,7 +544,8 @@ pub fn show(
         .0;
     };
     let monitor = ctx.input(|input| input.viewport().monitor_size);
-    let bounds = monitor_bounds(window, monitor).shrink(EDGE);
+    let area = menu_area(window, monitor);
+    let bounds = area.shrink(EDGE);
     let full = size(ctx, entries);
     let at = window.min + at.to_vec2();
     let menu = place(bounds, at, Vec2::new(full.x, full.y.min(bounds.height())));
@@ -555,6 +556,13 @@ pub fn show(
     let canvas = sub_reach(ctx, bounds, menu, full.y, entries)
         .map_or(menu, |reach| menu.union(reach))
         .expand(SHADOW_ROOM);
+    // The shadow's room stops where the menu's does. A window asked for
+    // above the top of the screen is pushed down by the system, and what
+    // it draws lands that much lower, with its foot off the screen.
+    let canvas = Rect::from_x_y_ranges(
+        canvas.x_range(),
+        canvas.top().max(area.top())..=canvas.bottom().min(area.bottom()),
+    );
 
     // The menu is another window, so a press, a scroll, or Escape in the app
     // window is outside it.
@@ -715,6 +723,22 @@ fn monitor_bounds(window: Rect, monitor: Option<Vec2>) -> Rect {
         .unwrap_or(Rect::EVERYTHING)
 }
 
+/// Where a menu's own window may be, in screen points: from the app
+/// window's top down to the foot of its monitor, and as wide as the
+/// monitor. A menu can run past the app window's sides and foot, but not
+/// above its top, where the system's own menu bar may be; one taller than
+/// that scrolls. With the monitor unknown it stops at the app window's
+/// foot, so it still has an end to scroll within.
+fn menu_area(window: Rect, monitor: Option<Vec2>) -> Rect {
+    let monitor = monitor_bounds(window, monitor);
+    let bottom = if monitor.bottom().is_finite() {
+        monitor.bottom().max(window.bottom())
+    } else {
+        window.bottom()
+    };
+    Rect::from_x_y_ranges(monitor.x_range(), window.top()..=bottom)
+}
+
 /// Draw the menu `id` with its corner at `at`, kept inside `screen`, in
 /// `ctx`'s own coordinates. A menu taller than `screen` scrolls under the
 /// pointer. `enabled` says whether a built row can run now; a Later row
@@ -771,6 +795,7 @@ fn show_in(
             }
         },
     );
+    paint_scroll_hints(ctx, id, rect, scroll, full.y - rect.height());
     let mut rects = vec![rect];
     if let Some((children, row)) = submenu {
         let sub_rect = sub_place(ctx, screen, row, children);
@@ -813,6 +838,65 @@ fn show_in(
         });
     }
     (shown, rects)
+}
+
+/// The height of the strip at an end of a menu that says more rows lie
+/// past it.
+const SCROLL_HINT: f32 = 18.0;
+
+/// A menu taller than its room shows a small arrow at each end that has
+/// rows past it: at the foot until it is scrolled to its last row, and at
+/// the top once it has been scrolled at all. `furthest` is how far it can
+/// scroll.
+fn paint_scroll_hints(ctx: &Context, id: Id, rect: Rect, scroll: f32, furthest: f32) {
+    if furthest <= 0.5 {
+        return;
+    }
+    let painter = ctx
+        .layer_painter(LayerId::new(Order::Foreground, id))
+        .with_clip_rect(rect);
+    let stroke = egui::Stroke::new(1.5, tokens::MENU_CHEVRON);
+    for (more, up) in [(scroll > 0.5, true), (scroll < furthest - 0.5, false)] {
+        if !more {
+            continue;
+        }
+        let strip = if up {
+            Rect::from_min_max(rect.min, Pos2::new(rect.right(), rect.top() + SCROLL_HINT))
+        } else {
+            Rect::from_min_max(
+                Pos2::new(rect.left(), rect.bottom() - SCROLL_HINT),
+                rect.max,
+            )
+        };
+        // The strip covers the row sliding under it, so the arrow reads.
+        let corner = RADIUS;
+        let radius = if up {
+            CornerRadius {
+                nw: corner,
+                ne: corner,
+                sw: 0,
+                se: 0,
+            }
+        } else {
+            CornerRadius {
+                nw: 0,
+                ne: 0,
+                sw: corner,
+                se: corner,
+            }
+        };
+        painter.rect_filled(strip, radius, tokens::MENU);
+        let center = strip.center();
+        let tip = if up { -3.0 } else { 3.0 };
+        painter.line_segment(
+            [center + Vec2::new(-5.0, -tip), center + Vec2::new(0.0, tip)],
+            stroke,
+        );
+        painter.line_segment(
+            [center + Vec2::new(5.0, -tip), center + Vec2::new(0.0, tip)],
+            stroke,
+        );
+    }
 }
 
 /// Where the submenu `children` of the row at `row` opens: beside the row
@@ -1753,6 +1837,74 @@ mod tests {
         assert!(after.y < before.y, "Transcript stayed at {}", after.y);
     }
 
+    /// The strokes `output` draws in the middle of a menu's width, wholly
+    /// above `top` or wholly below `bottom` and inside the menu: the
+    /// arrows that say it has rows past an end.
+    fn end_arrows(output: &egui::FullOutput, top: f32, bottom: f32) -> (usize, usize) {
+        let (mut above, mut below) = (0, 0);
+        for clipped in &output.shapes {
+            let egui::Shape::LineSegment { points, .. } = &clipped.shape else {
+                continue;
+            };
+            let menu = clipped.clip_rect;
+            let middle = points
+                .iter()
+                .all(|point| menu.contains(*point) && (point.x - menu.center().x).abs() < 8.0);
+            if !middle {
+                continue;
+            }
+            if points.iter().all(|point| point.y < top) {
+                above += 1;
+            } else if points.iter().all(|point| point.y > bottom) {
+                below += 1;
+            }
+        }
+        (above, below)
+    }
+
+    #[test]
+    fn a_menu_with_rows_past_an_end_points_that_way() {
+        let wheel = |by: f32| egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: Vec2::new(0.0, by),
+            phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Wheel,
+            modifiers: egui::Modifiers::default(),
+        };
+        let height = 400.0;
+        let ends = |output: &egui::FullOutput| {
+            end_arrows(output, EDGE + SCROLL_HINT, height - EDGE - SCROLL_HINT)
+        };
+        let over = Pos2::new(160.0, 200.0);
+        let ctx = Context::default();
+        // At the top there is more below only: one arrow of two strokes.
+        let (_, output) = frame(&ctx, height, Vec::new());
+        assert_eq!(ends(&output), (0, 2));
+        // Scrolled a little, there is more both ways.
+        frame(
+            &ctx,
+            height,
+            vec![egui::Event::PointerMoved(over), wheel(-120.0)],
+        );
+        let (_, output) = frame(&ctx, height, vec![egui::Event::PointerMoved(over)]);
+        assert_eq!(ends(&output), (2, 2));
+        // At the last row, only above.
+        frame(
+            &ctx,
+            height,
+            vec![egui::Event::PointerMoved(over), wheel(-9000.0)],
+        );
+        let (_, output) = frame(&ctx, height, vec![egui::Event::PointerMoved(over)]);
+        assert_eq!(ends(&output), (2, 0));
+        // A menu that fits has no arrows.
+        let ctx = Context::default();
+        let (_, output) = frame(&ctx, 2000.0, Vec::new());
+        assert_eq!(
+            end_arrows(&output, EDGE + SCROLL_HINT, 2000.0 - EDGE - SCROLL_HINT),
+            (0, 0)
+        );
+    }
+
     #[test]
     fn escape_and_a_press_outside_close_the_menu() {
         let ctx = Context::default();
@@ -1792,6 +1944,61 @@ mod tests {
             monitor_bounds(elsewhere, Some(Vec2::new(1728.0, 1117.0))),
             Rect::EVERYTHING
         );
+    }
+
+    #[test]
+    fn a_menu_stays_under_the_app_windows_top_and_scrolls_when_too_tall() {
+        // A 14-inch laptop's screen, which the video clip menu outgrows.
+        let screen = Vec2::new(1512.0, 982.0);
+        let window = Rect::from_min_size(Pos2::new(40.0, 34.0), Vec2::new(1400.0, 900.0));
+        let area = menu_area(window, Some(screen));
+        // Not above the app window, where the system's menu bar is, and
+        // down to the monitor's foot.
+        assert_eq!(area.top(), window.top());
+        assert_eq!(area.bottom(), screen.y);
+        assert_eq!((area.left(), area.right()), (0.0, screen.x));
+
+        // The video clip menu is taller than that: it takes the room there
+        // is, starts at the top of it, and has the rest to scroll.
+        let ctx = Context::default();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let bounds = area.shrink(EDGE);
+            let full = size(ui.ctx(), VIDEO);
+            assert!(full.y > bounds.height(), "the menu outgrew the screen");
+            let click = Pos2::new(700.0, 600.0);
+            let menu = place(
+                bounds,
+                click,
+                Vec2::new(full.x, full.y.min(bounds.height())),
+            );
+            assert_eq!(menu.top(), bounds.top());
+            assert_eq!(menu.bottom(), bounds.bottom());
+            assert!(full.y - menu.height() > 0.0, "there is something to scroll");
+            // Its window, shadow and all, asks for nothing outside the area.
+            let canvas = sub_reach(ui.ctx(), bounds, menu, full.y, VIDEO)
+                .map_or(menu, |reach| menu.union(reach))
+                .expand(SHADOW_ROOM);
+            let canvas = Rect::from_x_y_ranges(
+                canvas.x_range(),
+                canvas.top().max(area.top())..=canvas.bottom().min(area.bottom()),
+            );
+            assert!(canvas.top() >= window.top());
+            assert!(canvas.bottom() <= screen.y);
+            assert!(canvas.contains_rect(menu));
+        });
+        output.textures_delta.clear();
+
+        // On a monitor it cannot place, the menu ends with the app window.
+        let elsewhere = window.translate(Vec2::new(-3000.0, 0.0));
+        let area = menu_area(elsewhere, Some(screen));
+        assert_eq!(
+            (area.top(), area.bottom()),
+            (elsewhere.top(), elsewhere.bottom())
+        );
+        assert!(!area.left().is_finite(), "its sides are not held");
+        // A window hanging below the monitor still shows its menus.
+        let low = window.translate(Vec2::new(0.0, 400.0));
+        assert_eq!(menu_area(low, Some(screen)).bottom(), low.bottom());
     }
 
     #[test]

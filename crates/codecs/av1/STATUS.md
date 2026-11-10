@@ -82,6 +82,22 @@ threaded the decoder takes about 1.7x the time of libdav1d, which uses
 hand-written assembly for its kernels; this crate relies on
 autovectorization only (baseline x86-64: SSE2). With 2-4 threads the gap
 is set by the processor time (see below).
+Multi-tile 4K (real files, 3840x2160 8-bit 4:2:0, Apple M5 Pro, 18
+threads, wall time of the whole file, median of 3 interleaved runs at a
+load average near 6; peak resident memory):
+
+| File | Tiles | Before tile threads | Tile threads | libdav1d (FFmpeg) |
+| --- | --- | --- | --- | --- |
+| 2797 frames, 23.976 fps | 4x1 | 40.7 s, 683 MB | 23.3 s, 1099 MB | 5.7 s, 413 MB |
+| 5326 frames, 25 fps | 8x4 | 66.8 s, 827 MB | 32.2 s, 1425 MB | 7.8 s, 423 MB |
+
+Single threaded the same files take about 2.3x libdav1d's time. What is
+left: every frame waits for its references to be done before its tiles
+start (the chain of referenced frames decodes one frame at a time, about
+3.7 ms each against libdav1d's 1.2 ms), the shells cost about 33 MB each
+at 4K, and a frame decoding beside another may find no shell left
+(57 of 258 frames on the 8x4 file).
+
 Threading (2+ threads): the calling thread only reads the frame headers.
 Each frame is a task on a thread of its own (the decoder keeps a pool of
 them) that waits for what its parse depends on, and nothing else: the
@@ -103,13 +119,18 @@ per chunk of blocks for the rows the chunk's motion may reach (warped
 blocks and scaled references wait for the whole picture), and reads the
 finished picture in place once it is done.
 Multi-tile and super-resolved frames are decoded whole by their task
-once the references are done. Up to as many frames as threads decode at
+once the references are done. With 2+ threads the tiles of such a frame
+(but not one using intra block copy) are decoded at the same time: the
+frame's task decodes tiles into the frame, and helper threads into
+shells of their own (a frame state and picture of the frame's size, from
+a pool of at most `threads - 1` lent at once to all frames; a frame
+finding none decodes its tiles alone), and what a helper's tile wrote is
+then copied into the frame in bands of rows on several threads. Up to as many frames as threads decode at
 once; `Av1Core::decode_delayed`/`drain` return the shown frames with a
 delay of as many frames (`Av1Decoder` uses them), and a tile data error
 found later fails the frame's picture and the frames depending on it;
 `Av1Core::decode` waits for the frames of each unit. Motion field
-estimation runs alongside parsing, band by band. Tiles are not decoded in
-parallel yet. The parse is no longer the critical path: on this file the
+estimation runs alongside parsing, band by band. The parse is no longer the critical path: on this file the
 referenced frames' parses take about 0.2 s of processor time, the others
 0.13 s, reconstruction and filters 0.55 s. Threaded decoding costs about
 1.3x the processor time of single-threaded decoding (the parse records

@@ -24,6 +24,12 @@ libaom `-cpu-used 6`). Regenerate test streams with `tools/conf.py`.
 Decoder:
 - Large-scale tile (`OBU_TILE_LIST`); libdav1d/FFmpeg lack it too.
 
+Decoder speed (multi-tile frames, `STATUS.md`):
+- Start a multi-tile frame while its references are still decoding
+  (rows they publish, as the one-column pipeline does), instead of after.
+- Shells of the tile threads: about 33 MB each at 4K, and a frame beside
+  another may find none left.
+
 Encoder tools the decoder supports but the encoder never chooses:
 - Intra block copy (screen content; ts10 is ~+21% vs libaom).
 - Wedge and difference-weighted compound, inter-intra.

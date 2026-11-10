@@ -73,9 +73,12 @@ cargo test --release -p cutlass-av1 --test fixtures -- --ignored write_libdav1d_
 ```
 
 With several threads (`Av1Core::threads`) parsing, reconstruction and the
-post filters run in a pipeline. It takes about 1.9x the time of libdav1d
-single threaded and 1.6x with 4 threads; libdav1d uses hand-written
-assembly (numbers in `STATUS.md`).
+post filters of a one-tile-column frame run in a pipeline, and the tiles
+of a multi-tile frame are decoded at the same time. On the 1080p
+benchmark it takes about 1.9x the time of libdav1d single threaded and
+1.6x with 4 threads; on multi-tile 4K files with 18 threads about 4x,
+since those frames still wait for their references to be done
+(libdav1d uses hand-written assembly; numbers in `STATUS.md`).
 
 ## Encoder
 

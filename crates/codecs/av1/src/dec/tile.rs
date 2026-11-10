@@ -988,9 +988,11 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
 
     /// Start of decode_tile(): clears the above context and the per-tile state.
     pub fn begin_tile(&mut self) {
-        let s = self.mi_col_start;
-        let e = (self.mi_col_end + 32).min(self.above_seg_pred.len());
+        // Each plane's contexts are indexed in that plane's 4x4 units.
         for p in 0..3 {
+            let (sx, _) = self.plane_sub(p);
+            let s = self.mi_col_start >> sx;
+            let e = ((self.mi_col_end >> sx) + 32).min(self.above_seg_pred.len());
             for v in &mut self.above_level[p][s..e] {
                 *v = 0;
             }
@@ -998,6 +1000,8 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
                 *v = 0;
             }
         }
+        let s = self.mi_col_start;
+        let e = (self.mi_col_end + 32).min(self.above_seg_pred.len());
         for v in &mut self.above_seg_pred[s..e] {
             *v = 0;
         }

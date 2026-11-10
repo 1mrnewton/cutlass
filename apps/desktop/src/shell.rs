@@ -5438,12 +5438,9 @@ impl Shell {
     /// clips share.
     #[must_use]
     pub fn selection_mix(&self) -> SelectionMix {
-        let mut mix = SelectionMix {
-            media: !self.selection.is_empty(),
-            ..SelectionMix::default()
-        };
+        let mut mix = SelectionMix::default();
         let Some(draft) = self.draft() else {
-            return SelectionMix::default();
+            return mix;
         };
         for track in &draft.tracks {
             for segment in &track.segments {
@@ -5451,7 +5448,6 @@ impl Shell {
                     continue;
                 }
                 let material = draft.materials.get(segment.material_id.as_str());
-                mix.media &= matches!(track.kind, TrackType::Video | TrackType::Audio);
                 mix.compound |= matches!(material, Some(MaterialRef::Draft(_)));
                 mix.sound |= match material {
                     Some(MaterialRef::Audio(_)) => true,
@@ -8741,8 +8737,6 @@ const FILM_CACHE_FOLDER: &str = "Thumbnails";
 /// What several selected clips are between them.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SelectionMix {
-    /// Every one is on a video or an audio lane.
-    pub media: bool,
     /// One of them has sound of its own.
     pub sound: bool,
     /// One of them is a compound clip.
@@ -18439,15 +18433,14 @@ mod tests {
         let mut mix = |ids: &[&str]| {
             desktop.select_box(ids.iter().map(|id| SegmentId::new(*id)), false);
             let mix = desktop.selection_mix();
-            (mix.media, mix.sound, mix.compound)
+            (mix.sound, mix.compound)
         };
-        // A movie and a sound: all media, with sound.
-        assert_eq!(mix(&["movie", "tone"]), (true, true, false));
-        // A title among them is not media.
-        assert_eq!(mix(&["movie", "tone", "title"]), (false, true, false));
+        // A movie and a sound, and with a title among them: there is sound.
+        assert_eq!(mix(&["movie", "tone"]), (true, false));
+        assert_eq!(mix(&["movie", "tone", "title"]), (true, false));
         // A photo and a movie whose sound was extracted have none.
-        assert_eq!(mix(&["quiet", "photo"]), (true, false, false));
-        assert_eq!(mix(&["title", "photo"]), (false, false, false));
+        assert_eq!(mix(&["quiet", "photo"]), (false, false));
+        assert_eq!(mix(&["title", "photo"]), (false, false));
         // Made into one, the two are a compound clip.
         desktop.select_box([SegmentId::new("movie"), SegmentId::new("quiet")], false);
         desktop.create_compound().unwrap();

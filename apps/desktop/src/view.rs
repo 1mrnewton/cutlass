@@ -6116,7 +6116,7 @@ fn paint_clip_menu(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
     // Two or more clips picked: the menu of rows that act on all of them.
     let entries = if shell.selection().len() > 1 {
         let mix = shell.selection_mix();
-        crate::menu::multi_entries(mix.media, mix.sound, mix.compound)
+        crate::menu::multi_entries(mix.sound, mix.compound)
     } else {
         crate::menu::clip_entries_for(
             &kind,

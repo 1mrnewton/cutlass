@@ -149,9 +149,6 @@ macro_rules! video_menu {
                     done("edit-crop", "Crop", ""),
                 ],
             ),
-            todo("generate-video", "Generate video", ""),
-            todo("ai-edit", "AI edit", ""),
-            todo("ai-extend", "AI extend", ""),
             done("split-scenes", "Split scenes", ""),
             done("transcript", "Transcript", ""),
             $($sound,)*
@@ -227,7 +224,6 @@ const VIDEO_COMPOUND_SILENT: &[Entry] = video_menu!(
 /// this build's Volume, Speed, Fade and Beat rows after Delete and its
 /// Replace row with the clip rows.
 const AUDIO: &[Entry] = &[
-    todo("generate-video", "Generate video", ""),
     COPY,
     CUT,
     COPY_ATTRIBUTES,
@@ -325,14 +321,12 @@ const COMPOSITION: &[Entry] = lane_menu!(
 const OTHER: &[Entry] = lane_menu!(own: [], turn: []);
 
 /// The menu for two or more selected clips, as the reference editor lists
-/// it, with this build's Export selected clips row. `$top` is Generate
-/// video, there when every picked clip is a movie or a sound; `$sound` is
-/// Separate audio, there when one of them has sound; `$compound` is Edit
-/// more, there when one of them is a compound clip.
+/// it, with this build's Export selected clips row. `$sound` is Separate
+/// audio, there when one of the clips has sound; `$compound` is Edit more,
+/// there when one of them is a compound clip.
 macro_rules! multi_menu {
-    (top: [$($top:expr),*], sound: [$($sound:expr),*], compound: [$($compound:expr),*]) => {
+    (sound: [$($sound:expr),*], compound: [$($compound:expr),*]) => {
         &[
-            $($top,)*
             COPY,
             CUT,
             COPY_ATTRIBUTES,
@@ -359,37 +353,23 @@ macro_rules! multi_menu {
     };
 }
 
-const GENERATE_VIDEO: Entry = todo("generate-video", "Generate video", "");
 const EDIT_MORE: Entry = todo("edit-more", "Edit more", "");
 
 /// The plainest of the multi-select menus: clips with no sound among them.
-pub const MULTI: &[Entry] = multi_menu!(top: [], sound: [], compound: []);
-const MULTI_SOUND: &[Entry] = multi_menu!(top: [], sound: [SEPARATE_AUDIO], compound: []);
-const MULTI_COMPOUND: &[Entry] = multi_menu!(top: [], sound: [], compound: [EDIT_MORE]);
-const MULTI_SOUND_COMPOUND: &[Entry] =
-    multi_menu!(top: [], sound: [SEPARATE_AUDIO], compound: [EDIT_MORE]);
-const MULTI_MEDIA: &[Entry] = multi_menu!(top: [GENERATE_VIDEO], sound: [], compound: []);
-const MULTI_MEDIA_SOUND: &[Entry] =
-    multi_menu!(top: [GENERATE_VIDEO], sound: [SEPARATE_AUDIO], compound: []);
-const MULTI_MEDIA_COMPOUND: &[Entry] =
-    multi_menu!(top: [GENERATE_VIDEO], sound: [], compound: [EDIT_MORE]);
-const MULTI_MEDIA_SOUND_COMPOUND: &[Entry] =
-    multi_menu!(top: [GENERATE_VIDEO], sound: [SEPARATE_AUDIO], compound: [EDIT_MORE]);
+pub const MULTI: &[Entry] = multi_menu!(sound: [], compound: []);
+const MULTI_SOUND: &[Entry] = multi_menu!(sound: [SEPARATE_AUDIO], compound: []);
+const MULTI_COMPOUND: &[Entry] = multi_menu!(sound: [], compound: [EDIT_MORE]);
+const MULTI_SOUND_COMPOUND: &[Entry] = multi_menu!(sound: [SEPARATE_AUDIO], compound: [EDIT_MORE]);
 
-/// The menu for several selected clips: `media` when every one is a movie
-/// or a sound, `sound` when one of them has sound, `compound` when one is
-/// a compound clip.
+/// The menu for several selected clips: `sound` when one of them has
+/// sound, `compound` when one is a compound clip.
 #[must_use]
-pub fn multi_entries(media: bool, sound: bool, compound: bool) -> &'static [Entry] {
-    match (media, sound, compound) {
-        (false, false, false) => MULTI,
-        (false, true, false) => MULTI_SOUND,
-        (false, false, true) => MULTI_COMPOUND,
-        (false, true, true) => MULTI_SOUND_COMPOUND,
-        (true, false, false) => MULTI_MEDIA,
-        (true, true, false) => MULTI_MEDIA_SOUND,
-        (true, false, true) => MULTI_MEDIA_COMPOUND,
-        (true, true, true) => MULTI_MEDIA_SOUND_COMPOUND,
+pub fn multi_entries(sound: bool, compound: bool) -> &'static [Entry] {
+    match (sound, compound) {
+        (false, false) => MULTI,
+        (true, false) => MULTI_SOUND,
+        (false, true) => MULTI_COMPOUND,
+        (true, true) => MULTI_SOUND_COMPOUND,
     }
 }
 
@@ -1173,9 +1153,6 @@ mod tests {
                 "paste-attributes",
                 "delete",
                 "edit",
-                "generate-video",
-                "ai-edit",
-                "ai-extend",
                 "split-scenes",
                 "transcript",
                 "separate-audio",
@@ -1345,7 +1322,6 @@ mod tests {
         assert!(in_order(
             AUDIO,
             &[
-                "Generate video",
                 "Copy",
                 "Cut",
                 "Copy attributes",
@@ -1403,17 +1379,10 @@ mod tests {
             MULTI_SOUND,
             MULTI_COMPOUND,
             MULTI_SOUND_COMPOUND,
-            MULTI_MEDIA,
-            MULTI_MEDIA_SOUND,
-            MULTI_MEDIA_COMPOUND,
-            MULTI_MEDIA_SOUND_COMPOUND,
         ];
         let later = [
             "Copy attributes",
             "Paste attributes",
-            "Generate video",
-            "AI edit",
-            "AI extend",
             "Separate audio",
             "Save preset",
             "Restore LUT",
@@ -1475,7 +1444,7 @@ mod tests {
     fn the_multi_select_menu_holds_only_rows_for_every_clip() {
         // Two clips with nothing in common, as a title and a silent movie.
         assert_eq!(
-            labels(multi_entries(false, false, false)),
+            labels(multi_entries(false, false)),
             [
                 "Copy",
                 "Cut",
@@ -1495,20 +1464,16 @@ mod tests {
                 "Range",
             ]
         );
-        // A movie and a sound: Generate video leads, and Separate audio
-        // comes before Sync.
-        let media = labels(multi_entries(true, true, false));
-        assert_eq!(media[0], "Generate video");
+        // With a clip that has sound among them, Separate audio comes
+        // before Sync.
         assert!(in_order(
-            multi_entries(true, true, false),
+            multi_entries(true, false),
             &["Delete", "Separate audio", "Sync video and audio"]
         ));
-        // Every kind at once, a compound clip among them: no Generate
-        // video, and Edit more after Create compound clip.
-        let all = multi_entries(false, true, true);
-        assert!(!labels(all).contains(&"Generate video"));
+        // With a compound clip among them, Edit more after Create compound
+        // clip.
         assert!(in_order(
-            all,
+            multi_entries(true, true),
             &[
                 "Separate audio",
                 "Create compound clip (subproject)",
@@ -1516,15 +1481,44 @@ mod tests {
                 "Create multi-camera clip",
             ]
         ));
-        // Each of the three is there or not on its own.
-        for media in [false, true] {
-            for sound in [false, true] {
-                for compound in [false, true] {
-                    let rows = labels(multi_entries(media, sound, compound));
-                    assert_eq!(rows.contains(&"Generate video"), media);
-                    assert_eq!(rows.contains(&"Separate audio"), sound);
-                    assert_eq!(rows.contains(&"Edit more"), compound);
-                }
+        // Each of the two is there or not on its own.
+        for sound in [false, true] {
+            for compound in [false, true] {
+                let rows = labels(multi_entries(sound, compound));
+                assert_eq!(rows.contains(&"Separate audio"), sound);
+                assert_eq!(rows.contains(&"Edit more"), compound);
+            }
+        }
+    }
+
+    /// Rows the reference editor has that this editor leaves out.
+    #[test]
+    fn no_menu_offers_to_generate_video_or_edit_with_ai() {
+        let menus = [
+            VIDEO,
+            VIDEO_SILENT,
+            VIDEO_COMPOUND,
+            VIDEO_COMPOUND_SILENT,
+            AUDIO,
+            TEXT,
+            STICKER,
+            EFFECT,
+            FILTER,
+            ADJUST,
+            COMPOSITION,
+            OTHER,
+            MULTI,
+            MULTI_SOUND,
+            MULTI_COMPOUND,
+            MULTI_SOUND_COMPOUND,
+        ];
+        for menu in menus {
+            for gone in ["Generate video", "AI edit", "AI extend"] {
+                assert!(
+                    !labels(menu).contains(&gone),
+                    "{gone} in {:?}",
+                    labels(menu)
+                );
             }
         }
     }
@@ -1534,7 +1528,6 @@ mod tests {
         assert_eq!(
             ids(AUDIO),
             [
-                "generate-video",
                 "copy",
                 "cut",
                 "copy-attributes",
@@ -1569,7 +1562,6 @@ mod tests {
         assert_eq!(
             later,
             [
-                "generate-video",
                 "copy-attributes",
                 "paste-attributes",
                 "separate-audio",
@@ -1599,9 +1591,6 @@ mod tests {
         for later in [
             "copy-attributes",
             "paste-attributes",
-            "generate-video",
-            "ai-edit",
-            "ai-extend",
             "save-preset",
             "restore-lut",
         ] {

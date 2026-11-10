@@ -206,7 +206,14 @@ pub mod prof {
     pub const PUBLISH: usize = 5;
     /// Copying them into the copies of the references.
     pub const MIRROR: usize = 6;
-    const NAMES: [&str; 7] = [
+    /// Decoding the tiles of a frame the pipeline does not take, from the
+    /// first tile to the last (the frame's wall time, on any number of
+    /// threads).
+    pub const TILES: usize = 7;
+    /// Copying the tiles decoded into shells into the frame (part of
+    /// `tiles`).
+    pub const TILE_COPY: usize = 8;
+    const NAMES: [&str; 9] = [
         "wait_out",
         "wait_refs",
         "parse",
@@ -214,8 +221,10 @@ pub mod prof {
         "filter",
         "publish",
         "mirror",
+        "tiles",
+        "tile_copy",
     ];
-    static T: [AtomicU64; 7] = [const { AtomicU64::new(0) }; 7];
+    static T: [AtomicU64; 9] = [const { AtomicU64::new(0) }; 9];
 
     /// Adds its lifetime to a stage.
     pub struct Span(pub usize, pub std::time::Instant);
@@ -2566,11 +2575,13 @@ fn decode_frame<P: PicturePixel>(
         );
     }
     let mut held: [Option<Arc<AnyPicture>>; 8] = Default::default();
+    let waited = std::time::Instant::now();
     for (h, j) in held.iter_mut().zip(ref_jobs) {
         if let Some(j) = j {
             *h = Some(j.wait()?);
         }
     }
+    prof::add(prof::WAIT_REFS, waited);
     let refs: [Option<&Picture<P>>; 8] =
         std::array::from_fn(|i| held[i].as_deref().and_then(P::view));
     let mut lr_scratch = lock(spares).lr.pop().unwrap_or_default();
@@ -2914,6 +2925,7 @@ fn decode_frame_sync<P: PicturePixel>(
         fs.motion_field = p.run(threads);
     }
     let saved = {
+        let tiles_span = prof::Span(prof::TILES, std::time::Instant::now());
         // Intra block copy reads the frame being decoded: its tiles stay on
         // this thread.
         let saved = if threads > 1 && tiles.len() > 1 && !hdr.allow_intrabc {
@@ -2941,11 +2953,14 @@ fn decode_frame_sync<P: PicturePixel>(
                 Some(spares),
             )?
         };
+        drop(tiles_span);
         // decode_frame_wrapup: in-loop filters, CDEF and loop restoration
         // in place.
+        let _filter_span = prof::Span(prof::FILTER, std::time::Instant::now());
         postfilter::loop_filter(seq, hdr, fs, &mut cur, threads);
         saved
     };
+    let _filter_span = prof::Span(prof::FILTER, std::time::Instant::now());
     let lr = hdr.lr.uses_lr;
     let (mut cdef_sc, mut bounds) = lock(spares)
         .filters

@@ -187,6 +187,8 @@ struct Slot {
 
 /// Time spent in the stages of the threaded decoder (summed over threads),
 /// gathered with the `prof` feature.
+mod tiles;
+
 pub mod prof {
     use std::sync::atomic::{AtomicU64, Ordering};
     /// The calling thread waiting for pictures.
@@ -721,6 +723,10 @@ struct Spares<P> {
     scratch: Vec<Scratch<P>>,
     /// The saved boundary rows of the in-loop filters of the backends.
     filters: Vec<FilterRows<P>>,
+    /// Shells of the threads decoding tiles (see [`tiles`]), and how many
+    /// are lent out.
+    tile_shells: Vec<tiles::TileShell<P>>,
+    tile_shells_out: usize,
 }
 
 /// The CDEF scratch and loop restoration boundaries of an [`InlineFilter`].
@@ -760,6 +766,8 @@ impl<P> Default for PixState<P> {
                 bands: Vec::new(),
                 scratch: Vec::new(),
                 filters: Vec::new(),
+                tile_shells: Vec::new(),
+                tile_shells_out: 0,
             })),
         }
     }
@@ -2906,25 +2914,33 @@ fn decode_frame_sync<P: PicturePixel>(
         fs.motion_field = p.run(threads);
     }
     let saved = {
-        let saved = decode_tiles(
-            seq,
-            hdr,
-            fs,
-            tiles,
-            cdf,
-            &refs,
-            ref_hdr,
-            &mut cur,
-            None,
-            None,
-            &mut |_: &FrameState,
-                  _: &Picture<P>,
-                  _: Option<&mut ReconLog>,
-                  _: usize,
-                  _: usize,
-                  _: bool| {},
-            Some(spares),
-        )?;
+        // Intra block copy reads the frame being decoded: its tiles stay on
+        // this thread.
+        let saved = if threads > 1 && tiles.len() > 1 && !hdr.allow_intrabc {
+            tiles::decode_tiles_threaded(
+                seq, hdr, fs, tiles, cdf, &refs, ref_hdr, &mut cur, spares, threads,
+            )?
+        } else {
+            decode_tiles(
+                seq,
+                hdr,
+                fs,
+                tiles,
+                cdf,
+                &refs,
+                ref_hdr,
+                &mut cur,
+                None,
+                None,
+                &mut |_: &FrameState,
+                      _: &Picture<P>,
+                      _: Option<&mut ReconLog>,
+                      _: usize,
+                      _: usize,
+                      _: bool| {},
+                Some(spares),
+            )?
+        };
         // decode_frame_wrapup: in-loop filters, CDEF and loop restoration
         // in place.
         postfilter::loop_filter(seq, hdr, fs, &mut cur, threads);

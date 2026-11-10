@@ -261,9 +261,11 @@ mod tests {
 
     /// Every edge of a macroblock: left alone, or filtered at some
     /// strength, at random.
-    fn mb_edges(rng: &mut Lcg, at: usize, down: usize) -> super::MbEdges {
+    fn mb_edges(rng: &mut Lcg, at: usize, down: usize, odd: bool) -> super::MbEdges {
         let mut pick = |allowed: bool| {
             let (alpha, beta, tc0) = thresholds(rng);
+            let alpha = u8::try_from(alpha).expect("a table value");
+            let beta = u8::try_from(beta).expect("a table value");
             match rng.next() % 4 {
                 _ if !allowed => None,
                 0 => None,
@@ -280,8 +282,10 @@ mod tests {
             }
         };
         // The first edge of each kind needs samples before the macroblock.
-        let vertical = [pick(at % down >= 4), pick(true), pick(true), pick(true)];
-        let horizontal = [pick(at >= 4 * down), pick(true), pick(true), pick(true)];
+        // `odd` is whether the second and fourth edges may be filtered:
+        // 4:2:0 chroma has none there.
+        let vertical = [pick(at % down >= 4), pick(odd), pick(true), pick(odd)];
+        let horizontal = [pick(at >= 4 * down), pick(odd), pick(true), pick(odd)];
         super::MbEdges {
             at,
             down,
@@ -303,7 +307,7 @@ mod tests {
             let x = [0, 4, 8, 20][(rng.next() % 4) as usize];
             let y = [0, 3, 4, 16, 24][(rng.next() % 5) as usize];
             for luma in [true, false] {
-                let edges = mb_edges(&mut rng, y * down + x, down);
+                let edges = mb_edges(&mut rng, y * down + x, down, luma || round % 8 == 0);
                 let mut fast = before.clone();
                 let mut plain = before.clone();
                 let (done, wanted) = if luma {

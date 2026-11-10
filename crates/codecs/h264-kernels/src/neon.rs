@@ -4,16 +4,17 @@
 //! callers in this crate that promise NEON is present reach them.
 
 use core::arch::aarch64::{
-    int16x8_t, uint8x8_t, uint8x16_t, uint16x8_t, vabdq_s16, vabdq_u8, vaddq_s16, vandq_s16,
-    vandq_u8, vandq_u16, vbslq_s16, vbslq_u8, vcgezq_s8, vcgezq_s16, vcltq_s16, vcltq_u8,
-    vcombine_s8, vcombine_u8, vcombine_u64, vcreate_u64, vdupq_n_s8, vdupq_n_s16, vdupq_n_u8,
-    vget_high_u8, vget_low_u8, vgetq_lane_u64, vhaddq_u8, vmaxq_s8, vmaxq_s16, vmaxq_u8, vmaxvq_u8,
-    vminq_s8, vminq_s16, vminq_u8, vmovl_u8, vnegq_s8, vnegq_s16, vqaddq_u8, vqmovun_s16,
-    vqrshrn_n_s16, vqsubq_u8, vreinterpretq_s8_u8, vreinterpretq_s16_u16, vreinterpretq_u8_s8,
+    int16x8_t, uint8x8_t, uint8x16_t, uint16x8_t, vabdq_s16, vabdq_u8, vaddl_u8, vaddq_s16,
+    vaddq_u8, vaddq_u16, vaddw_u8, vandq_s16, vandq_u8, vandq_u16, vbicq_u8, vbslq_s16, vbslq_u8,
+    vcgezq_s8, vcgezq_s16, vcltq_s16, vcltq_u8, vcombine_s8, vcombine_u8, vcombine_u64,
+    vcreate_u64, vdup_n_u8, vdupq_n_s8, vdupq_n_s16, vdupq_n_u8, vget_high_u8, vget_low_u8,
+    vgetq_lane_u64, vhaddq_u8, vmaxq_s8, vmaxq_s16, vmaxq_u8, vmaxvq_u8, vminq_s8, vminq_s16,
+    vminq_u8, vmovl_u8, vnegq_s8, vnegq_s16, vqaddq_u8, vqmovun_s16, vqrshrn_n_s16, vqsubq_u8,
+    vreinterpret_u8_u64, vreinterpretq_s8_u8, vreinterpretq_s16_u16, vreinterpretq_u8_s8,
     vreinterpretq_u8_u16, vreinterpretq_u8_u32, vreinterpretq_u8_u64, vreinterpretq_u16_u8,
-    vreinterpretq_u32_u8, vreinterpretq_u64_u8, vrhaddq_u8, vshlq_n_s16, vshrq_n_s16, vsubl_u8,
-    vsubq_s16, vsubq_u8, vtrn1q_u8, vtrn1q_u16, vtrn1q_u32, vtrn2q_u8, vtrn2q_u16, vtrn2q_u32,
-    vuzp1q_u8, vuzp2q_u8, vzip1q_u64, vzip2q_u64,
+    vreinterpretq_u32_u8, vreinterpretq_u64_u8, vrhaddq_u8, vrshrn_n_u16, vshlq_n_s16, vshlq_n_u16,
+    vshrq_n_s16, vsubl_u8, vsubq_s16, vsubq_u8, vtrn1q_u8, vtrn1q_u16, vtrn1q_u32, vtrn2q_u8,
+    vtrn2q_u16, vtrn2q_u32, vuzp1q_u8, vuzp2q_u8, vzip1_u8, vzip1q_u64, vzip2_u8, vzip2q_u64,
 };
 
 use crate::deblock::{ChromaRows, Lines, Rows};
@@ -149,12 +150,6 @@ fn low(v: uint8x16_t) -> int16x8_t {
     vreinterpretq_s16_u16(vmovl_u8(vget_low_u8(v)))
 }
 
-/// The high eight samples of `v` as 16-bit numbers.
-#[target_feature(enable = "neon")]
-fn high(v: uint8x16_t) -> int16x8_t {
-    vreinterpretq_s16_u16(vmovl_u8(vget_high_u8(v)))
-}
-
 /// A sample is at most 255 and a threshold fits 16 bits with room to spare.
 fn narrow(value: i32) -> i16 {
     value.clamp(0, i32::from(i16::MAX)) as i16
@@ -287,8 +282,13 @@ pub(crate) fn luma_normal_lines(lines: &mut Lines, alpha: i32, beta: i32, tc0: [
 
 #[target_feature(enable = "neon")]
 pub(crate) fn luma_strong_rows(rows: &mut Rows, alpha: i32, beta: i32) {
+    let Some((alpha, beta)) = small(alpha, beta, None) else {
+        return crate::scalar::luma_strong_rows(rows, alpha, beta);
+    };
     let v = load_rows(rows);
-    let out = strong(v, alpha, beta);
+    let Some(out) = strong(v, alpha, beta) else {
+        return;
+    };
     for (row, vector) in rows.iter_mut().zip(out).skip(1).take(6) {
         store16(vector, row);
     }
@@ -296,78 +296,78 @@ pub(crate) fn luma_strong_rows(rows: &mut Rows, alpha: i32, beta: i32) {
 
 #[target_feature(enable = "neon")]
 pub(crate) fn luma_strong_lines(lines: &mut Lines, alpha: i32, beta: i32) {
+    let Some((alpha, beta)) = small(alpha, beta, None) else {
+        return crate::scalar::luma_strong_lines(lines, alpha, beta);
+    };
     let v = load_lines(lines);
-    store_lines(strong(v, alpha, beta), lines);
+    if let Some(out) = strong(v, alpha, beta) {
+        store_lines(out, lines);
+    }
 }
 
-/// 8.7.2.4 on sixteen lines. `v` is p3 to q3. Gives all eight back; p3 and
-/// q3 are as they came.
+/// 8.7.2.4 on sixteen lines. `v` is p3 to q3. Gives all eight back, p3 and
+/// q3 as they came, or `None` when no line passes the thresholds and
+/// nothing changes. The tests are made in the samples' own 8 bits; the
+/// sums of up to eight samples take 16, eight lines at a time.
+#[inline]
 #[target_feature(enable = "neon")]
-fn strong(v: [uint8x16_t; 8], alpha: i32, beta: i32) -> [uint8x16_t; 8] {
-    let small = vdupq_n_s16(narrow((alpha >> 2) + 2));
-    let alpha = vdupq_n_s16(narrow(alpha));
-    let beta = vdupq_n_s16(narrow(beta));
-    let first = strong8(v.map(|x| low(x)), alpha, beta, small);
-    let second = strong8(v.map(|x| high(x)), alpha, beta, small);
-    [
-        v[0],
-        vcombine_u8(first[0], second[0]),
-        vcombine_u8(first[1], second[1]),
-        vcombine_u8(first[2], second[2]),
-        vcombine_u8(first[3], second[3]),
-        vcombine_u8(first[4], second[4]),
-        vcombine_u8(first[5], second[5]),
-        v[7],
-    ]
-}
-
-/// [`strong`] on eight lines. Gives the new p2, p1, p0, q0, q1, q2.
-#[target_feature(enable = "neon")]
-fn strong8(
-    v: [int16x8_t; 8],
-    alpha: int16x8_t,
-    beta: int16x8_t,
-    small: int16x8_t,
-) -> [uint8x8_t; 6] {
+fn strong(v: [uint8x16_t; 8], alpha: u8, beta: u8) -> Option<[uint8x16_t; 8]> {
     let [p3, p2, p1, p0, q0, q1, q2, q3] = v;
-    let gap = vabdq_s16(p0, q0);
-    let filtered = vandq_u16(
-        vandq_u16(vcltq_s16(gap, alpha), vcltq_s16(vabdq_s16(p1, p0), beta)),
-        vcltq_s16(vabdq_s16(q1, q0), beta),
+    let gap = vabdq_u8(p0, q0);
+    let within = vdupq_n_u8(beta);
+    let filtered = vandq_u8(
+        vandq_u8(
+            vcltq_u8(gap, vdupq_n_u8(alpha)),
+            vcltq_u8(vabdq_u8(p1, p0), within),
+        ),
+        vcltq_u8(vabdq_u8(q1, q0), within),
     );
-    let close = vandq_u16(filtered, vcltq_s16(gap, small));
-    // One side of the edge: `a` are its samples from the edge outwards, and
-    // `b0`, `b1` the two nearest on the other side. Gives the new a0, a1, a2.
-    let side = |a: [int16x8_t; 4], b0: int16x8_t, b1: int16x8_t| {
+    if vmaxvq_u8(filtered) == 0 {
+        return None;
+    }
+    // (alpha >> 2) + 2 is at most 65.
+    let close = vandq_u8(filtered, vcltq_u8(gap, vdupq_n_u8((alpha >> 2) + 2)));
+    // Eight lines of one side: `a0` to `a3` are its samples from the edge
+    // outwards, and `b0`, `b1` the two nearest on the other side.
+    let sums = |a: [uint8x8_t; 4], b0: uint8x8_t, b1: uint8x8_t| {
         let [a0, a1, a2, a3] = a;
-        let deep = vandq_u16(close, vcltq_s16(vabdq_s16(a2, a0), beta));
-        let sum = vaddq_s16(vaddq_s16(a0, b0), a1);
-        // (a2 + 2·a1 + 2·a0 + 2·b0 + b1 + 4) >> 3
-        let strong0 = vshrq_n_s16::<3>(vaddq_s16(
-            vaddq_s16(vshlq_n_s16::<1>(sum), vaddq_s16(a2, b1)),
-            vdupq_n_s16(4),
-        ));
-        // (a2 + a1 + a0 + b0 + 2) >> 2
-        let strong1 = vshrq_n_s16::<2>(vaddq_s16(vaddq_s16(sum, a2), vdupq_n_s16(2)));
-        // (2·a3 + 3·a2 + a1 + a0 + b0 + 4) >> 3
-        let strong2 = vshrq_n_s16::<3>(vaddq_s16(
-            vaddq_s16(vshlq_n_s16::<1>(vaddq_s16(a3, a2)), vaddq_s16(a2, sum)),
-            vdupq_n_s16(4),
-        ));
-        // (2·a1 + a0 + b1 + 2) >> 2
-        let weak0 = vshrq_n_s16::<2>(vaddq_s16(
-            vaddq_s16(vshlq_n_s16::<1>(a1), vaddq_s16(a0, b1)),
-            vdupq_n_s16(2),
-        ));
+        let three = vaddw_u8(vaddl_u8(a0, b0), a1);
+        let four = vaddw_u8(three, a2);
+        (
+            // (a2 + 2·a1 + 2·a0 + 2·b0 + b1 + 4) >> 3
+            vrshrn_n_u16::<3>(vaddw_u8(vaddq_u16(three, four), b1)),
+            // (a2 + a1 + a0 + b0 + 2) >> 2
+            vrshrn_n_u16::<2>(four),
+            // (2·a3 + 3·a2 + a1 + a0 + b0 + 4) >> 3
+            vrshrn_n_u16::<3>(vaddq_u16(vshlq_n_u16::<1>(vaddl_u8(a3, a2)), four)),
+        )
+    };
+    // Gives the new a0, a1, a2.
+    let side = |a: [uint8x16_t; 4], b0: uint8x16_t, b1: uint8x16_t| {
+        let [a0, a1, a2, _] = a;
+        let deep = vandq_u8(close, vcltq_u8(vabdq_u8(a2, a0), within));
+        let (low0, low1, low2) = sums(a.map(|x| vget_low_u8(x)), vget_low_u8(b0), vget_low_u8(b1));
+        let (high0, high1, high2) = sums(
+            a.map(|x| vget_high_u8(x)),
+            vget_high_u8(b0),
+            vget_high_u8(b1),
+        );
+        // (2·a1 + a0 + b1 + 2) >> 2 is the rounded average of a1 and the
+        // halved sum of a0 and b1.
+        let weak0 = vrhaddq_u8(vhaddq_u8(a0, b1), a1);
         [
-            vqmovun_s16(vbslq_s16(filtered, vbslq_s16(deep, strong0, weak0), a0)),
-            vqmovun_s16(vbslq_s16(deep, strong1, a1)),
-            vqmovun_s16(vbslq_s16(deep, strong2, a2)),
+            vbslq_u8(
+                filtered,
+                vbslq_u8(deep, vcombine_u8(low0, high0), weak0),
+                a0,
+            ),
+            vbslq_u8(deep, vcombine_u8(low1, high1), a1),
+            vbslq_u8(deep, vcombine_u8(low2, high2), a2),
         ]
     };
     let [new_p0, new_p1, new_p2] = side([p0, p1, p2, p3], q0, q1);
     let [new_q0, new_q1, new_q2] = side([q0, q1, q2, q3], p0, p1);
-    [new_p2, new_p1, new_p0, new_q0, new_q1, new_q2]
+    Some([p3, new_p2, new_p1, new_p0, new_q0, new_q1, new_q2, q3])
 }
 
 /// The eight samples in `bytes` as 16-bit numbers.
@@ -503,8 +503,8 @@ macro_rules! filter8 {
         match filter.tc0 {
             Some(tc0) => normal!(
                 [v[1], v[2], v[3], v[4], v[5], v[6]],
-                u8::try_from(filter.alpha).unwrap_or(u8::MAX),
-                u8::try_from(filter.beta).unwrap_or(u8::MAX),
+                filter.alpha,
+                filter.beta,
                 tc0,
             )
             .map(|[p1, p0, q0, q1]| {
@@ -514,7 +514,7 @@ macro_rules! filter8 {
                 v[5] = q1;
                 (v, 2usize..6)
             }),
-            None => Some((strong(v, filter.alpha, filter.beta), 1usize..7)),
+            None => strong(v, filter.alpha, filter.beta).map(|out| (out, 1usize..7)),
         }
     }};
 }
@@ -549,10 +549,6 @@ macro_rules! inner_edge {
                 $columns[$first + 5],
                 $columns[$first + 6],
             ];
-            let (alpha, beta) = (
-                u8::try_from(alpha).unwrap_or(u8::MAX),
-                u8::try_from(beta).unwrap_or(u8::MAX),
-            );
             if let Some([p1, p0, q0, q1]) = normal!(from, alpha, beta, tc0) {
                 $columns[$first + 2] = p1;
                 $columns[$first + 3] = p0;
@@ -576,11 +572,13 @@ macro_rules! inside {
 /// threshold is one the 8-bit filters take, and no edge inside the
 /// macroblock is filtered at strength 4, which only its boundary can be.
 fn plain_edges(edges: &crate::edge::MbEdges) -> bool {
-    let fits = |filter: &Option<crate::edge::Filter>| {
-        filter.is_none_or(|filter| small(filter.alpha, filter.beta, filter.tc0).is_some())
+    let fits = |filter: &Option<crate::edge::Filter>| match filter {
+        Some(filter) => filter.tame(),
+        None => true,
     };
-    let inner = |filter: &Option<crate::edge::Filter>| {
-        fits(filter) && filter.is_none_or(|filter| filter.tc0.is_some())
+    let inner = |filter: &Option<crate::edge::Filter>| match filter {
+        Some(filter) => filter.tc0.is_some() && filter.tame(),
+        None => true,
     };
     let [v0, v1, v2, v3] = &edges.vertical;
     let [h0, h1, h2, h3] = &edges.horizontal;
@@ -825,7 +823,124 @@ pub(crate) fn luma_mb(plane: &mut [u8], edges: &crate::edge::MbEdges) -> bool {
     true
 }
 
-/// Every edge of an 8×8 chroma macroblock, as [`luma_mb`] does for luma.
+/// What two chroma edges filtered side by side need, the first edge in the
+/// low eight lanes and the second in the high eight: alpha, beta, 0xff in
+/// the lanes of an edge filtered at strength 4, and the clipping value of
+/// each lane. An edge that is not filtered has an alpha of 0, which no
+/// sample passes. The thresholds are ones [`small`] took.
+#[inline]
+#[target_feature(enable = "neon")]
+fn chroma_thresholds(
+    first: Option<crate::edge::Filter>,
+    second: Option<crate::edge::Filter>,
+) -> [uint8x16_t; 4] {
+    // Alpha, beta, 0xff for strength 4, and the four clipping values.
+    let half = |edge: Option<crate::edge::Filter>| -> (u8, u8, u8, u32) {
+        match edge {
+            None => (0, 0, 0, 0),
+            Some(crate::edge::Filter {
+                alpha,
+                beta,
+                tc0: None,
+            }) => (alpha, beta, 0xff, 0),
+            Some(crate::edge::Filter {
+                alpha,
+                beta,
+                tc0: Some(tc0),
+            }) => (
+                alpha,
+                beta,
+                0,
+                u32::from_le_bytes(tc0.map(|value| value as u8)),
+            ),
+        }
+    };
+    let (low, high) = (half(first), half(second));
+    let both = |low: u8, high: u8| vcombine_u8(vdup_n_u8(low), vdup_n_u8(high));
+    // Each clipping value covers two samples: the eight bytes zipped with
+    // themselves.
+    let eight = vreinterpret_u8_u64(vcreate_u64(u64::from(low.3) | u64::from(high.3) << 32));
+    [
+        both(low.0, high.0),
+        both(low.1, high.1),
+        both(low.2, high.2),
+        vcombine_u8(vzip1_u8(eight, eight), vzip2_u8(eight, eight)),
+    ]
+}
+
+/// The chroma filters of 8.7.2.3 and 8.7.2.4 on sixteen lanes, in the
+/// samples' own 8 bits, each lane at the strength [`chroma_thresholds`]
+/// gave it. `v` is p1, p0, q0, q1. Gives the new p0 and q0, or `None` when
+/// no lane passes the thresholds and nothing changes.
+/// A macro, so it is part of the function that uses it.
+macro_rules! chroma_both {
+    ($v:expr, $thresholds:expr) => {
+        'filter: {
+            let v: [uint8x16_t; 4] = $v;
+            let thresholds: [uint8x16_t; 4] = $thresholds;
+            let [p1, p0, q0, q1] = v;
+            let [alpha, beta, strong, tc0] = thresholds;
+            let filtered = vandq_u8(
+                vandq_u8(
+                    vcltq_u8(vabdq_u8(p0, q0), alpha),
+                    vcltq_u8(vabdq_u8(p1, p0), beta),
+                ),
+                vcltq_u8(vabdq_u8(q1, q0), beta),
+            );
+            if vmaxvq_u8(filtered) == 0 {
+                break 'filter None;
+            }
+            // Below strength 4: the lanes that are filtered, not at strength 4, and
+            // whose clipping value is not negative. There tc is tc0 + 1; elsewhere
+            // it is zero, so nothing moves.
+            let below = vandq_u8(
+                vbicq_u8(filtered, strong),
+                vcgezq_s8(vreinterpretq_s8_u8(tc0)),
+            );
+            let tc = vreinterpretq_s8_u8(vandq_u8(vaddq_u8(tc0, vdupq_n_u8(1)), below));
+            // (4·(q0 − p0) + (p1 − q1) + 4) >> 3 needs 16 bits on the way. It is
+            // narrowed with saturation, which the clip to ±tc then hides.
+            let half = |p1: uint8x8_t, p0: uint8x8_t, q0: uint8x8_t, q1: uint8x8_t| {
+                let gap = vreinterpretq_s16_u16(vsubl_u8(q0, p0));
+                let lean = vreinterpretq_s16_u16(vsubl_u8(p1, q1));
+                vqrshrn_n_s16::<3>(vaddq_s16(vshlq_n_s16::<2>(gap), lean))
+            };
+            let raw = vcombine_s8(
+                half(
+                    vget_low_u8(p1),
+                    vget_low_u8(p0),
+                    vget_low_u8(q0),
+                    vget_low_u8(q1),
+                ),
+                half(
+                    vget_high_u8(p1),
+                    vget_high_u8(p0),
+                    vget_high_u8(q0),
+                    vget_high_u8(q1),
+                ),
+            );
+            let delta = vmaxq_s8(vminq_s8(raw, tc), vnegq_s8(tc));
+            let zero = vdupq_n_s8(0);
+            let rise = vreinterpretq_u8_s8(vmaxq_s8(delta, zero));
+            let fall = vreinterpretq_u8_s8(vmaxq_s8(vnegq_s8(delta), zero));
+            let p0_below = vqsubq_u8(vqaddq_u8(p0, rise), fall);
+            let q0_below = vqaddq_u8(vqsubq_u8(q0, rise), fall);
+            // At strength 4: (2·p1 + p0 + q1 + 2) >> 2, which is the rounded
+            // average of p1 and the halved sum of p0 and q1.
+            let hard = vandq_u8(filtered, strong);
+            let p0_hard = vrhaddq_u8(vhaddq_u8(p0, q1), p1);
+            let q0_hard = vrhaddq_u8(vhaddq_u8(q0, p1), q1);
+            Some([
+                vbslq_u8(hard, p0_hard, p0_below),
+                vbslq_u8(hard, q0_hard, q0_below),
+            ])
+        }
+    };
+}
+
+/// Every edge of an 8×8 chroma macroblock. Its rows are found in the plane
+/// once, and the two edges of each direction, which share no sample, are
+/// filtered side by side in one vector.
 #[target_feature(enable = "neon")]
 pub(crate) fn chroma_mb(plane: &mut [u8], edges: &crate::edge::MbEdges) -> bool {
     let crate::edge::MbEdges {
@@ -837,59 +952,104 @@ pub(crate) fn chroma_mb(plane: &mut [u8], edges: &crate::edge::MbEdges) -> bool 
     if !crate::edge::mb_fits(plane.len(), edges, 8, 2) {
         return false;
     }
-    let Some(above) = down
+    let [v0, v1, v2, v3] = vertical;
+    let [h0, h1, h2, h3] = horizontal;
+    // This takes the edges of 4:2:0 chroma, at 0 and 4, with thresholds
+    // the 8-bit filter takes, in a macroblock with two rows above it and
+    // two samples before it. Anything else is filtered edge by edge.
+    let fits = |filter: &Option<crate::edge::Filter>| match filter {
+        Some(filter) => filter.tame(),
+        None => true,
+    };
+    let plain = v1.is_none()
+        && v3.is_none()
+        && h1.is_none()
+        && h3.is_none()
+        && fits(&v0)
+        && fits(&v2)
+        && fits(&h0)
+        && fits(&h2);
+    let above = down
         .checked_mul(2)
-        .and_then(|rows| at.checked_sub(rows + 2))
-    else {
+        .and_then(|rows| at.checked_sub(rows + 2));
+    let Some(above) = above.filter(|_| plain) else {
         crate::edge::each_edge(edges, 2, |edge| {
             chroma_edge(plane, edge);
         });
         return true;
     };
-    if vertical.iter().any(Option::is_some) {
-        let Some(window) = plane.get_mut(at - 2..) else {
-            return false;
+    let Some(window) = plane.get_mut(above..) else {
+        return false;
+    };
+    // Ten rows from two above the macroblock, each from two samples before
+    // it: the macroblock's row `n` is `rows[n + 2]`, and its column `n` is
+    // sample `n + 2` of a row.
+    let rows = rows!(window, down, 10, [r0, r1, r2, r3, r4, r5, r6, r7, r8, r9]);
+    if v0.is_some() || v2.is_some() {
+        let thresholds = chroma_thresholds(v0, v2);
+        // The first eight samples of each of the macroblock's rows hold
+        // both edges: p1, p0, q0, q1 of the one at 0, then of the one at 4.
+        let line = |row: &[u8; 10]| {
+            let mut samples = [0u8; 8];
+            samples.copy_from_slice(&row[..8]);
+            pair(u64::from_le_bytes(samples), 0)
         };
-        let mut rows = rows!(window, down, 10, [r0, r1, r2, r3, r4, r5, r6, r7]);
-        for (index, filter) in vertical.iter().enumerate() {
-            let Some(filter) = *filter else {
-                continue;
+        // `c[n]` holds sample `n` of all eight lines in its low half.
+        let c = turn!([
+            line(rows[2]),
+            line(rows[3]),
+            line(rows[4]),
+            line(rows[5]),
+            line(rows[6]),
+            line(rows[7]),
+            line(rows[8]),
+            line(rows[9]),
+        ]);
+        let (p1, _) = zip_halves(c[0], c[4]);
+        let (p0, _) = zip_halves(c[1], c[5]);
+        let (q0, _) = zip_halves(c[2], c[6]);
+        let (q1, _) = zip_halves(c[3], c[7]);
+        if let Some([p0, q0]) = chroma_both!([p1, p0, q0, q1], thresholds) {
+            let (p0_first, p0_second) = zip_halves(p0, p0);
+            let (q0_first, q0_second) = zip_halves(q0, q0);
+            let back = turn!([
+                c[0], p0_first, q0_first, c[3], c[4], p0_second, q0_second, c[7]
+            ]);
+            let put = |row: &mut [u8; 10], line: uint8x16_t| {
+                let samples = vgetq_lane_u64::<0>(vreinterpretq_u64_u8(line));
+                row[..8].copy_from_slice(&samples.to_le_bytes());
             };
-            // Eight lines across the edge, each p1, p0, q0, q1.
-            let from = index * 2;
-            let mut lines = [[0u8; 4]; 8];
-            for (line, row) in lines.iter_mut().zip(rows.iter()) {
-                line.copy_from_slice(&row[from..from + 4]);
-            }
-            let mut four = chroma_lines(&lines);
-            match filter.tc0 {
-                Some(tc0) => chroma_normal(&mut four, filter.alpha, filter.beta, tc0),
-                None => chroma_strong(&mut four, filter.alpha, filter.beta),
-            }
-            // A chroma filter changes only p0 and q0.
-            for (line, row) in rows.iter_mut().enumerate() {
-                row[from + 1] = four[1][line];
-                row[from + 2] = four[2][line];
-            }
+            put(rows[2], back[0]);
+            put(rows[3], back[1]);
+            put(rows[4], back[2]);
+            put(rows[5], back[3]);
+            put(rows[6], back[4]);
+            put(rows[7], back[5]);
+            put(rows[8], back[6]);
+            put(rows[9], back[7]);
         }
     }
-    if horizontal.iter().any(Option::is_some) {
-        let Some(window) = plane.get_mut(above + 2..) else {
-            return false;
+    if h0.is_some() || h2.is_some() {
+        let thresholds = chroma_thresholds(h0, h2);
+        // The first eight rows hold both edges the same way.
+        let row = |row: &[u8; 10]| {
+            let mut samples = [0u8; 8];
+            samples.copy_from_slice(&row[2..]);
+            u64::from_le_bytes(samples)
         };
-        let rows = rows!(window, down, 8, [r0, r1, r2, r3, r4, r5, r6, r7, r8, r9]);
-        for (index, filter) in horizontal.iter().enumerate() {
-            let Some(filter) = *filter else {
-                continue;
+        let p1 = pair(row(rows[0]), row(rows[4]));
+        let p0 = pair(row(rows[1]), row(rows[5]));
+        let q0 = pair(row(rows[2]), row(rows[6]));
+        let q1 = pair(row(rows[3]), row(rows[7]));
+        if let Some([p0, q0]) = chroma_both!([p1, p0, q0, q1], thresholds) {
+            let put = |row: &mut [u8; 10], samples: u64| {
+                row[2..].copy_from_slice(&samples.to_le_bytes());
             };
-            let top = index * 2;
-            let mut four = [*rows[top], *rows[top + 1], *rows[top + 2], *rows[top + 3]];
-            match filter.tc0 {
-                Some(tc0) => chroma_normal(&mut four, filter.alpha, filter.beta, tc0),
-                None => chroma_strong(&mut four, filter.alpha, filter.beta),
-            }
-            *rows[top + 1] = four[1];
-            *rows[top + 2] = four[2];
+            let (p0, q0) = (vreinterpretq_u64_u8(p0), vreinterpretq_u64_u8(q0));
+            put(rows[1], vgetq_lane_u64::<0>(p0));
+            put(rows[2], vgetq_lane_u64::<0>(q0));
+            put(rows[5], vgetq_lane_u64::<1>(p0));
+            put(rows[6], vgetq_lane_u64::<1>(q0));
         }
     }
     true

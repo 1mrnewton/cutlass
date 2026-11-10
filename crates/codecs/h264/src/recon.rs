@@ -1802,8 +1802,8 @@ pub fn whole_edge(bs: [u8; 4], qpav: i32, offsets: (i32, i32)) -> Option<Option<
         return None;
     };
     Some(Some(EdgeFilter {
-        alpha: i32::from(ALPHA[index_a]),
-        beta: i32::from(BETA[index_b]),
+        alpha: ALPHA[index_a],
+        beta: BETA[index_b],
         tc0,
     }))
 }

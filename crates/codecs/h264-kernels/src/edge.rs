@@ -23,13 +23,27 @@ pub struct Edge {
     pub tc0: Option<[i8; 4]>,
 }
 
-/// How one edge of a macroblock is filtered: its thresholds, and `tc0` as
-/// in [`Edge`].
+/// How one edge of a macroblock of 8-bit samples is filtered: its
+/// thresholds, and `tc0` as in [`Edge`].
 #[derive(Clone, Copy, Debug)]
 pub struct Filter {
-    pub alpha: i32,
-    pub beta: i32,
+    pub alpha: u8,
+    pub beta: u8,
     pub tc0: Option<[i8; 4]>,
+}
+
+impl Filter {
+    /// Whether the clipping values leave room for the two a filter may add
+    /// to them in 8 bits: none is above 125. The tables stop at 25.
+    #[cfg(target_arch = "aarch64")]
+    pub(crate) fn tame(&self) -> bool {
+        let Some(tc0) = self.tc0 else {
+            return true;
+        };
+        // A byte with its top bit clear and its low seven at 126 or 127.
+        let all = u32::from_le_bytes(tc0.map(|value| value as u8));
+        ((all & 0x7f7f_7f7f) + 0x0202_0202) & !all & 0x8080_8080 == 0
+    }
 }
 
 /// The edges of one macroblock in one plane, filtered in the order the
@@ -103,8 +117,8 @@ pub(crate) fn each_edge(edges: &MbEdges, step: usize, mut filter: impl FnMut(Edg
                 at: edges.at + step * index,
                 down: edges.down,
                 vertical: true,
-                alpha: entry.alpha,
-                beta: entry.beta,
+                alpha: i32::from(entry.alpha),
+                beta: i32::from(entry.beta),
                 tc0: entry.tc0,
             });
         }
@@ -115,8 +129,8 @@ pub(crate) fn each_edge(edges: &MbEdges, step: usize, mut filter: impl FnMut(Edg
                 at: edges.at + step * index * edges.down,
                 down: edges.down,
                 vertical: false,
-                alpha: entry.alpha,
-                beta: entry.beta,
+                alpha: i32::from(entry.alpha),
+                beta: i32::from(entry.beta),
                 tc0: entry.tc0,
             });
         }

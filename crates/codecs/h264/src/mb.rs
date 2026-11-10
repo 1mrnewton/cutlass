@@ -9062,7 +9062,7 @@ fn store_block<S: Sample>(
         Mix::Avg => {
             for row in 0..h {
                 let at = (y + row) * stride + x;
-                avg_row(
+                recon::avg_row(
                     &mut dst[at..at + w],
                     &left[row * w..row * w + w],
                     &right[row * w..row * w + w],
@@ -9078,7 +9078,7 @@ fn store_block<S: Sample>(
         {
             for row in 0..h {
                 let at = (y + row) * stride + x;
-                avg_row(
+                recon::avg_row(
                     &mut dst[at..at + w],
                     &left[row * w..row * w + w],
                     &right[row * w..row * w + w],
@@ -9096,12 +9096,6 @@ fn store_block<S: Sample>(
                 );
             }
         }
-    }
-}
-
-fn avg_row<S: Sample>(dst: &mut [S], a: &[S], b: &[S]) {
-    for (sample, (&left, &right)) in dst.iter_mut().zip(a.iter().zip(b)) {
-        *sample = recon::avg(left, right);
     }
 }
 
@@ -9620,7 +9614,8 @@ fn filter_groups<S: Sample>(
     let (x, y) = at;
     let (vertical, chroma, step, row_step) = kind;
     let (offset_a, offset_b) = off;
-    if !chroma && step == 4 {
+    // A whole luma edge of 16 samples, or a whole chroma edge of 8.
+    if (!chroma && step == 4) || (chroma && step == 2) {
         let whole = recon::Edge {
             vertical,
             bs: 0,
@@ -9628,7 +9623,7 @@ fn filter_groups<S: Sample>(
             offset_a,
             offset_b,
             chroma,
-            len: 16,
+            len: step * 4,
             row_step,
         };
         if recon::filter_luma16(plane, stride, x, y, whole, bs) {

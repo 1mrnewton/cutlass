@@ -13,7 +13,7 @@ use core::arch::aarch64::{
     vtrn2q_u8, vtrn2q_u16, vtrn2q_u32,
 };
 
-use crate::deblock::{Lines, Rows};
+use crate::deblock::{ChromaRows, Lines, Rows};
 
 pub(crate) use crate::neon_mc::{avg16, centre8, centre16, chroma8, half8, half16, raw8, raw16};
 
@@ -313,4 +313,86 @@ fn strong8(
     let [new_p0, new_p1, new_p2] = side([p0, p1, p2, p3], q0, q1);
     let [new_q0, new_q1, new_q2] = side([q0, q1, q2, q3], p0, p1);
     [new_p2, new_p1, new_p0, new_q0, new_q1, new_q2]
+}
+
+/// The eight samples in `bytes` as 16-bit numbers.
+#[target_feature(enable = "neon")]
+fn wide8(bytes: &[u8; 8]) -> int16x8_t {
+    low(pair(u64::from_le_bytes(*bytes), 0))
+}
+
+/// The eight samples of `vector` as bytes.
+#[target_feature(enable = "neon")]
+fn bytes8(vector: uint8x8_t) -> [u8; 8] {
+    halves(vcombine_u8(vector, vector)).0
+}
+
+/// Whether each chroma line is filtered at all: the three threshold tests.
+#[target_feature(enable = "neon")]
+fn chroma_filtered(v: [int16x8_t; 4], alpha: i32, beta: i32) -> uint16x8_t {
+    let [p1, p0, q0, q1] = v;
+    let alpha = vdupq_n_s16(narrow(alpha));
+    let beta = vdupq_n_s16(narrow(beta));
+    vandq_u16(
+        vandq_u16(
+            vcltq_s16(vabdq_s16(p0, q0), alpha),
+            vcltq_s16(vabdq_s16(p1, p0), beta),
+        ),
+        vcltq_s16(vabdq_s16(q1, q0), beta),
+    )
+}
+
+#[target_feature(enable = "neon")]
+pub(crate) fn chroma_normal(rows: &mut ChromaRows, alpha: i32, beta: i32, tc0: [i8; 4]) {
+    let v = [
+        wide8(&rows[0]),
+        wide8(&rows[1]),
+        wide8(&rows[2]),
+        wide8(&rows[3]),
+    ];
+    let [p1, p0, q0, q1] = v;
+    // Each `tc0` covers two samples.
+    let mut clip = [0u8; 8];
+    for (pair, value) in clip.as_chunks_mut::<2>().0.iter_mut().zip(tc0) {
+        *pair = [value as u8; 2];
+    }
+    // Sign-extended: a negative one stays negative.
+    let tc0 = vsubq_s16(
+        vandq_s16(wide8(&clip), vdupq_n_s16(0x7f)),
+        vandq_s16(wide8(&clip), vdupq_n_s16(0x80)),
+    );
+    let filtered = vandq_u16(chroma_filtered(v, alpha, beta), vcgezq_s16(tc0));
+    let tc = vaddq_s16(tc0, vdupq_n_s16(1));
+    let raw = vshrq_n_s16::<3>(vaddq_s16(
+        vaddq_s16(vshlq_n_s16::<2>(vsubq_s16(q0, p0)), vsubq_s16(p1, q1)),
+        vdupq_n_s16(4),
+    ));
+    let delta = vandq_s16(
+        vmaxq_s16(vminq_s16(raw, tc), vnegq_s16(tc)),
+        vreinterpretq_s16_u16(filtered),
+    );
+    rows[1] = bytes8(vqmovun_s16(vaddq_s16(p0, delta)));
+    rows[2] = bytes8(vqmovun_s16(vsubq_s16(q0, delta)));
+}
+
+#[target_feature(enable = "neon")]
+pub(crate) fn chroma_strong(rows: &mut ChromaRows, alpha: i32, beta: i32) {
+    let v = [
+        wide8(&rows[0]),
+        wide8(&rows[1]),
+        wide8(&rows[2]),
+        wide8(&rows[3]),
+    ];
+    let [p1, p0, q0, q1] = v;
+    let filtered = chroma_filtered(v, alpha, beta);
+    // (2·near + own + far + 2) >> 2
+    let weak = |near: int16x8_t, own: int16x8_t, far: int16x8_t| {
+        let sum = vaddq_s16(
+            vaddq_s16(vshlq_n_s16::<1>(near), vaddq_s16(own, far)),
+            vdupq_n_s16(2),
+        );
+        bytes8(vqmovun_s16(vbslq_s16(filtered, vshrq_n_s16::<2>(sum), own)))
+    };
+    rows[1] = weak(p1, p0, q1);
+    rows[2] = weak(q1, q0, p1);
 }

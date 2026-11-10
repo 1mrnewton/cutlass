@@ -340,6 +340,45 @@ pub trait Sample: Copy + Default + Into<i32> {
     fn deblock_luma16(_plane: &mut [Self], _edge: LumaEdge) -> bool {
         false
     }
+
+    /// [`Self::deblock_luma16`] for an 8-sample chroma edge. The clipping
+    /// values are per group of two samples.
+    fn deblock_chroma8(_plane: &mut [Self], _edge: LumaEdge) -> bool {
+        false
+    }
+
+    /// Inter prediction with a vector kernel, when this sample width has
+    /// one for the block's size. `false` means nothing was done and the
+    /// caller runs its own loop. `kind` picks the samples.
+    fn predict_fast(
+        _kind: Predict,
+        _dst: &mut [Self],
+        _dst_stride: usize,
+        _src: &[Self],
+        _src_stride: usize,
+        _place: ((usize, usize), (usize, usize)),
+    ) -> bool {
+        false
+    }
+
+    /// The rounded average of two rows with a vector kernel. `false` as for
+    /// [`Self::predict_fast`].
+    fn avg_fast(_dst: &mut [Self], _a: &[Self], _b: &[Self]) -> bool {
+        false
+    }
+}
+
+/// Which samples [`Sample::predict_fast`] makes.
+#[derive(Clone, Copy)]
+pub enum Predict {
+    /// Luma half samples along a row.
+    HalfH,
+    /// Luma half samples down a column.
+    HalfV,
+    /// Luma centre samples.
+    Centre,
+    /// Chroma at these eighth-sample offsets.
+    Chroma(u8, u8),
 }
 
 /// One 16-sample luma edge for [`Sample::deblock_luma16`].
@@ -356,6 +395,43 @@ pub struct LumaEdge {
     /// below 4, negative for a group that is not filtered. `None` is
     /// strength 4.
     tc0: Option<[i8; 4]>,
+}
+
+fn deblock_chroma8_eight(plane: &mut [u8], edge: LumaEdge) -> bool {
+    use cutlass_h264_kernels::deblock;
+    let LumaEdge {
+        at,
+        down,
+        vertical,
+        alpha,
+        beta,
+        tc0,
+    } = edge;
+    // Sample `along` of row `row` (p1, p0, q0, q1) of the edge.
+    let (across, along) = if vertical { (1, down) } else { (down, 1) };
+    let Some(first) = at.checked_sub(2 * across) else {
+        return false;
+    };
+    if first + 3 * across + 7 * along >= plane.len() {
+        return false;
+    }
+    let mut rows = [[0u8; 8]; 4];
+    for (index, row) in rows.iter_mut().enumerate() {
+        for (step, sample) in row.iter_mut().enumerate() {
+            *sample = plane[first + index * across + step * along];
+        }
+    }
+    match tc0 {
+        Some(tc0) => deblock::chroma_normal(&mut rows, alpha, beta, tc0),
+        None => deblock::chroma_strong(&mut rows, alpha, beta),
+    }
+    // A chroma filter changes only p0 and q0.
+    for (index, row) in rows.iter().enumerate().skip(1).take(2) {
+        for (step, &sample) in row.iter().enumerate() {
+            plane[first + index * across + step * along] = sample;
+        }
+    }
+    true
 }
 
 fn deblock_luma16_eight(plane: &mut [u8], edge: LumaEdge) -> bool {
@@ -440,6 +516,37 @@ impl Sample for u8 {
 
     fn deblock_luma16(plane: &mut [Self], edge: LumaEdge) -> bool {
         deblock_luma16_eight(plane, edge)
+    }
+
+    fn deblock_chroma8(plane: &mut [Self], edge: LumaEdge) -> bool {
+        deblock_chroma8_eight(plane, edge)
+    }
+
+    fn predict_fast(
+        kind: Predict,
+        dst: &mut [Self],
+        dst_stride: usize,
+        src: &[Self],
+        src_stride: usize,
+        place: ((usize, usize), (usize, usize)),
+    ) -> bool {
+        let (at, size) = place;
+        let block = crate::fast::Block {
+            src,
+            stride: src_stride,
+            at,
+            size,
+        };
+        match kind {
+            Predict::HalfH => crate::fast::half_h(dst, dst_stride, block),
+            Predict::HalfV => crate::fast::half_v(dst, dst_stride, block),
+            Predict::Centre => crate::fast::diag(dst, dst_stride, block),
+            Predict::Chroma(xf, yf) => crate::fast::chroma(dst, dst_stride, block, (xf, yf)),
+        }
+    }
+
+    fn avg_fast(dst: &mut [Self], a: &[Self], b: &[Self]) -> bool {
+        crate::fast::avg_row(dst, a, b)
     }
 }
 
@@ -1155,6 +1262,10 @@ pub fn put_chroma_block<S: Sample>(
         copy_block(dst, dst_stride, src_at(src, src_stride, x, y), (w, h));
         return;
     }
+    let kind = Predict::Chroma(xf as u8, yf as u8);
+    if S::predict_fast(kind, dst, dst_stride, src, src_stride, ((x0, y0), (w, h))) {
+        return;
+    }
     if yf == 0 {
         let wa = 8 - xf;
         for row in 0..h {
@@ -1323,11 +1434,21 @@ fn avg_blocks<S: Sample>(
     fill(&mut left, &mut right);
     for row in 0..h {
         let out = &mut dst[row * dst_stride..row * dst_stride + w];
-        let a = &left[row * w..row * w + w];
-        let b = &right[row * w..row * w + w];
-        for (sample, (&left_px, &right_px)) in out.iter_mut().zip(a.iter().zip(b)) {
-            *sample = avg(left_px, right_px);
-        }
+        avg_row(
+            out,
+            &left[row * w..row * w + w],
+            &right[row * w..row * w + w],
+        );
+    }
+}
+
+/// The rounded average of two rows of samples.
+pub fn avg_row<S: Sample>(dst: &mut [S], a: &[S], b: &[S]) {
+    if S::avg_fast(dst, a, b) {
+        return;
+    }
+    for (sample, (&left, &right)) in dst.iter_mut().zip(a.iter().zip(b)) {
+        *sample = avg(left, right);
     }
 }
 
@@ -1361,6 +1482,17 @@ fn half_h_block<S: Sample>(
     src: Src<'_, S>,
     size: (usize, usize),
 ) {
+    let place = ((src.x, src.y), size);
+    if S::predict_fast(
+        Predict::HalfH,
+        dst,
+        dst_stride,
+        src.samples,
+        src.stride,
+        place,
+    ) {
+        return;
+    }
     let (w, h) = size;
     for row in 0..h {
         let start = (src.y + row) * src.stride + src.x - 2;
@@ -1378,6 +1510,17 @@ fn half_v_block<S: Sample>(
     src: Src<'_, S>,
     size: (usize, usize),
 ) {
+    let place = ((src.x, src.y), size);
+    if S::predict_fast(
+        Predict::HalfV,
+        dst,
+        dst_stride,
+        src.samples,
+        src.stride,
+        place,
+    ) {
+        return;
+    }
     let (w, h) = size;
     for row in 0..h {
         let mut rows = [&[][..]; 6];
@@ -1399,6 +1542,17 @@ fn half_v_block<S: Sample>(
 }
 
 fn diag_block<S: Sample>(dst: &mut [S], dst_stride: usize, src: Src<'_, S>, size: (usize, usize)) {
+    let place = ((src.x, src.y), size);
+    if S::predict_fast(
+        Predict::Centre,
+        dst,
+        dst_stride,
+        src.samples,
+        src.stride,
+        place,
+    ) {
+        return;
+    }
     let (w, h) = size;
     let mut tmp = [0i32; 21 * 16];
     for vy in 0..h + 5 {
@@ -1503,8 +1657,9 @@ pub struct Edge {
     pub row_step: usize,
 }
 
-/// Filters a whole 16-sample luma edge at once. `bs` is the strength of each
-/// group of four samples and `edge.bs` is not read. `false` means nothing
+/// Filters a whole edge at once: 16 luma samples, or 8 chroma samples when
+/// `edge.chroma` is set. `bs` is the strength of each quarter of the edge
+/// and `edge.bs` is not read. `false` means nothing
 /// was done: the sample width has no vector kernel, or the strengths mix 4
 /// with less.
 pub fn filter_luma16<S: Sample>(
@@ -1530,17 +1685,19 @@ pub fn filter_luma16<S: Sample>(
     } else {
         return false;
     };
-    S::deblock_luma16(
-        plane,
-        LumaEdge {
-            at: y * stride + x,
-            down: stride * edge.row_step,
-            vertical: edge.vertical,
-            alpha: i32::from(ALPHA[index_a]) << S::SHIFT,
-            beta: i32::from(BETA[index_b]) << S::SHIFT,
-            tc0,
-        },
-    )
+    let whole = LumaEdge {
+        at: y * stride + x,
+        down: stride * edge.row_step,
+        vertical: edge.vertical,
+        alpha: i32::from(ALPHA[index_a]) << S::SHIFT,
+        beta: i32::from(BETA[index_b]) << S::SHIFT,
+        tc0,
+    };
+    if edge.chroma {
+        S::deblock_chroma8(plane, whole)
+    } else {
+        S::deblock_luma16(plane, whole)
+    }
 }
 
 pub fn filter_edge<S: Sample>(plane: &mut [S], stride: usize, x: usize, y: usize, edge: Edge) {

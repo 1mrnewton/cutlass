@@ -98,6 +98,7 @@ mod cabac;
 mod cavlc;
 mod dec;
 mod enc;
+mod fast;
 mod fmo;
 mod grain;
 mod nal;

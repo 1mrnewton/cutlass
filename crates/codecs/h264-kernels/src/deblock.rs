@@ -11,6 +11,21 @@ pub type Rows = [[u8; 16]; 8];
 /// is p3, p2, p1, p0, q0, q1, q2, q3.
 pub type Lines = [[u8; 8]; 16];
 
+/// The four rows around an 8-sample chroma edge: p1, p0, then q0, q1.
+/// Chroma filters change only p0 and q0.
+pub type ChromaRows = [[u8; 8]; 4];
+
+/// The chroma filter for a strength below 4. `tc0` is per group of two
+/// samples along the edge; a negative one leaves its group alone.
+pub fn chroma_normal(rows: &mut ChromaRows, alpha: i32, beta: i32, tc0: [i8; 4]) {
+    kernel!(chroma_normal(rows, alpha, beta, tc0));
+}
+
+/// The chroma filter for strength 4.
+pub fn chroma_strong(rows: &mut ChromaRows, alpha: i32, beta: i32) {
+    kernel!(chroma_strong(rows, alpha, beta));
+}
+
 /// The filter for a strength below 4 (8.7.2.3), on rows.
 ///
 /// `alpha` and `beta` are the edge's thresholds. `tc0` is the clipping
@@ -139,6 +154,38 @@ mod tests {
             scalar::luma_strong_lines(&mut plain, alpha, beta);
             assert_eq!(fast, plain, "lines, alpha {alpha} beta {beta}");
         }
+    }
+
+    #[test]
+    fn the_chroma_filters_match_the_plain_ones() {
+        let mut rng = Lcg(4);
+        let mut changed = 0;
+        for round in 0..60_000 {
+            let spread = [0, 1, 3, 8, 30][round % 5];
+            let (alpha, beta, tc0) = thresholds(&mut rng);
+            let mut rows = [[0u8; 8]; 4];
+            for column in 0..8 {
+                let base = match rng.next() % 6 {
+                    0 => 0,
+                    1 => 255,
+                    _ => rng.next() as u8,
+                };
+                for row in &mut rows {
+                    row[column] = rng.sample(base, spread);
+                }
+            }
+            let (mut fast, mut plain) = (rows, rows);
+            super::chroma_normal(&mut fast, alpha, beta, tc0);
+            scalar::chroma_normal(&mut plain, alpha, beta, tc0);
+            assert_eq!(fast, plain, "normal, alpha {alpha} beta {beta} tc0 {tc0:?}");
+            changed += usize::from(fast != rows);
+            let (mut fast, mut plain) = (rows, rows);
+            super::chroma_strong(&mut fast, alpha, beta);
+            scalar::chroma_strong(&mut plain, alpha, beta);
+            assert_eq!(fast, plain, "strong, alpha {alpha} beta {beta}");
+            assert_eq!((fast[0], fast[3]), (rows[0], rows[3]));
+        }
+        assert!(changed > 5_000, "only {changed} blocks were filtered");
     }
 
     #[test]

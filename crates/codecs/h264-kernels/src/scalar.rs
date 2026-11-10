@@ -1,7 +1,7 @@
 //! The plain version of every kernel. It is what a CPU without a vector
 //! version runs, and what each vector version is tested against.
 
-use crate::deblock::{Lines, Rows};
+use crate::deblock::{ChromaRows, Lines, Rows};
 
 /// See [`crate::deblock::luma_normal_rows`].
 pub fn luma_normal_rows(rows: &mut Rows, alpha: i32, beta: i32, tc0: [i8; 4]) {
@@ -154,4 +154,42 @@ pub fn chroma8(top: &[u8; 9], bottom: &[u8; 9], xf: u8, yf: u8) -> [u8; 8] {
             + xf * yf * i32::from(bottom[index + 1]);
         clip((value + 32) >> 6)
     })
+}
+
+/// See [`crate::deblock::chroma_normal`].
+pub fn chroma_normal(rows: &mut ChromaRows, alpha: i32, beta: i32, tc0: [i8; 4]) {
+    for column in 0..8 {
+        let tc0 = i32::from(tc0[column / 2]);
+        if tc0 < 0 {
+            continue;
+        }
+        let [p1, p0, q0, q1] = chroma_line(rows, column);
+        if (p0 - q0).abs() >= alpha || (p1 - p0).abs() >= beta || (q1 - q0).abs() >= beta {
+            continue;
+        }
+        let tc = tc0 + 1;
+        let delta = ((((q0 - p0) << 2) + (p1 - q1) + 4) >> 3).clamp(-tc, tc);
+        rows[1][column] = clip(p0 + delta);
+        rows[2][column] = clip(q0 - delta);
+    }
+}
+
+/// See [`crate::deblock::chroma_strong`].
+pub fn chroma_strong(rows: &mut ChromaRows, alpha: i32, beta: i32) {
+    for column in 0..8 {
+        let [p1, p0, q0, q1] = chroma_line(rows, column);
+        if (p0 - q0).abs() >= alpha || (p1 - p0).abs() >= beta || (q1 - q0).abs() >= beta {
+            continue;
+        }
+        rows[1][column] = clip((2 * p1 + p0 + q1 + 2) >> 2);
+        rows[2][column] = clip((2 * q1 + q0 + p1 + 2) >> 2);
+    }
+}
+
+fn chroma_line(rows: &ChromaRows, column: usize) -> [i32; 4] {
+    let mut line = [0i32; 4];
+    for (sample, row) in line.iter_mut().zip(rows) {
+        *sample = i32::from(row[column]);
+    }
+    line
 }

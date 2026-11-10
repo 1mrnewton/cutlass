@@ -138,6 +138,9 @@ impl std::fmt::Display for ShellError {
             Self::Edit(EditError::NotAudio) => formatter.write_str("a beat belongs on audio"),
             Self::Edit(EditError::NotVideo) => formatter.write_str("an extract belongs on video"),
             Self::Edit(EditError::NoSound) => formatter.write_str("the clip has no sound"),
+            Self::Edit(EditError::SoundNotSeparate) => {
+                formatter.write_str("the clip still has its sound")
+            }
             Self::Edit(EditError::AlreadyExtracted) => {
                 formatter.write_str("the sound is already on its own clip")
             }
@@ -2693,6 +2696,8 @@ impl Shell {
             Some("copy") => self.copy_selected(),
             Some("cut") => self.cut_selected(),
             Some("paste") => self.paste(),
+            // One key for both: it gives the sound back once it is off.
+            Some("extract_audio") if self.recover_audio_enabled() => self.recover_audio(),
             Some("extract_audio") => self.extract_audio(),
             Some("select_all") => self.select_all(),
             Some("delete_left") => self.delete_side(TrimEdge::Start),
@@ -5051,6 +5056,10 @@ impl Shell {
         let Some(segment) = self.selected_segment() else {
             return false;
         };
+        // A picture whose sound was extracted has nothing to hear.
+        if self.recover_audio_enabled() {
+            return false;
+        }
         matches!(
             draft.materials.get(segment.material_id.as_str()),
             Some(MaterialRef::Video(_) | MaterialRef::Audio(_))
@@ -5400,6 +5409,30 @@ impl Shell {
     #[must_use]
     pub fn extract_audio_enabled(&self) -> bool {
         self.selected_video().is_some()
+    }
+
+    /// The selected video's own sound was extracted, so Recover audio can
+    /// give it back.
+    #[must_use]
+    pub fn recover_audio_enabled(&self) -> bool {
+        let (Some(draft), Some(segment)) = (self.draft(), self.selected_segment()) else {
+            return false;
+        };
+        cutlass_engine::original_sound_is_separate(draft, segment)
+    }
+
+    /// Give the selected video its own sound back, and take the clip that
+    /// sound was extracted to off the timeline when it is still there. One
+    /// undo step.
+    pub fn recover_audio(&mut self) -> Result<(), ShellError> {
+        let segment_id = self
+            .selected()
+            .cloned()
+            .ok_or_else(|| ShellError::Unavailable("nothing is selected".to_owned()))?;
+        self.refuse_locked(&segment_id)?;
+        self.apply(Request::RecoverAudio { segment_id })?;
+        self.set_notice("The clip has its sound again".to_owned());
+        Ok(())
     }
 
     /// Place the selected video's sound on an audio track, lined up with that
@@ -18140,6 +18173,71 @@ mod tests {
                 .to_string(),
             "no project is open"
         );
+    }
+
+    #[test]
+    fn a_clip_whose_sound_was_extracted_recovers_it() {
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        draft.config.maintrack_adsorb = false;
+        let mut quiet = MaterialVideo::new("quiet");
+        quiet.kind = "video".to_owned();
+        quiet.path = "clip.mp4".to_owned();
+        quiet.duration = Micros(1_000_000);
+        // As Extract audio leaves it once the sound clip has been deleted.
+        quiet.has_sound_separated = true;
+        let mut loud = quiet.clone();
+        loud.id = MaterialId::new("loud");
+        loud.has_sound_separated = false;
+        draft.materials.videos.extend([quiet, loud]);
+        for (id, material, start) in [("quiet", "quiet", 0), ("loud", "loud", 1_000_000)] {
+            draft.tracks[0].segments.push(Segment::new(
+                id,
+                material,
+                TimeRange::new(start, 1_000_000),
+            ));
+        }
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+
+        // A clip with its sound: nothing to recover, and it can be heard.
+        desktop.select(Some(SegmentId::new("loud")));
+        assert!(!desktop.recover_audio_enabled());
+        assert!(desktop.transcribe_enabled());
+        assert_eq!(
+            desktop.recover_audio().unwrap_err().to_string(),
+            "the clip still has its sound"
+        );
+
+        // The clip without it: no transcript, no second extract, and the
+        // mix leaves it out.
+        desktop.select(Some(SegmentId::new("quiet")));
+        assert!(desktop.recover_audio_enabled());
+        assert!(!desktop.transcribe_enabled());
+        let silent = |desktop: &Shell, id: &str| {
+            let draft = desktop.draft().unwrap();
+            let segment = draft.tracks[0]
+                .segments
+                .iter()
+                .find(|segment| segment.id.as_str() == id)
+                .unwrap();
+            !cutlass_engine::contributes_sound(draft, segment)
+        };
+        assert!(silent(&desktop, "quiet"));
+        assert!(!silent(&desktop, "loud"));
+
+        // Recover gives it back in one undo step; the shortcut that
+        // extracts does the same while the sound is off.
+        desktop.recover_audio().unwrap();
+        assert_eq!(desktop.notice(), "The clip has its sound again");
+        assert!(!silent(&desktop, "quiet"));
+        assert!(!desktop.recover_audio_enabled());
+        assert!(desktop.transcribe_enabled());
+        desktop.undo().unwrap();
+        assert!(silent(&desktop, "quiet"));
+        desktop.run_action("extract_audio").unwrap();
+        assert!(!silent(&desktop, "quiet"));
     }
 
     #[test]

@@ -6117,9 +6117,13 @@ fn paint_clip_menu(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
     let entries = if shell.selection().len() > 1 {
         crate::menu::MULTI
     } else {
-        crate::menu::clip_entries(&kind)
+        crate::menu::clip_entries_for(&kind, shell.recover_audio_enabled())
     };
     let enabled = |id: &str| match id {
+        "edit-freeze" => shell.freeze_enabled(),
+        "edit-reverse" => shell.reverse_enabled(),
+        "edit-mirror" => shell.mirror_enabled(),
+        "edit-rotate" => shell.rotate_enabled(),
         "edit-crop" => shell.crop_enabled(),
         "split-scenes" => shell.split_scenes_enabled(),
         "transcript" => shell.transcribe_enabled(),
@@ -6147,10 +6151,15 @@ fn paint_clip_menu(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
             "copy" => shell.copy_selected(),
             "cut" => shell.cut_selected(),
             "delete" => shell.remove_selected(),
+            "edit-freeze" => shell.freeze_frame(),
+            "edit-reverse" => shell.toggle_reverse(),
+            "edit-mirror" => shell.toggle_mirror(),
+            "edit-rotate" => shell.turn_clockwise(),
             "edit-crop" => shell.toggle_crop(),
             "split-scenes" => shell.split_scenes(),
             "transcript" => shell.transcribe(),
             "extract-audio" => shell.extract_audio(),
+            "recover-audio" => shell.recover_audio(),
             "flip" => shell.toggle_mirror(),
             "deactivate" => shell.toggle_active(),
             "open-file" => shell.reveal_selected_file(),

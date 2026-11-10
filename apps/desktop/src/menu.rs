@@ -78,23 +78,69 @@ const DEACTIVATE: Entry = done("deactivate", "Deactivate", "");
 const REPLACE: Entry = todo("replace", "Replace", "");
 const REPLACE_SOUND: Entry = done("replace", "Replace", "");
 
-const VIDEO: &[Entry] = &[
-    COPY,
-    CUT,
-    DELETE,
-    SEP,
-    sub(
-        "edit",
-        "Edit",
+/// The video clip menu, with `$sound` for the rows that depend on whether
+/// the clip still has its own sound.
+macro_rules! video_menu {
+    ($($sound:expr),* $(,)?) => {
         &[
-            done("edit-speed", "Speed", ""),
-            done("edit-animation", "Animation", ""),
-            done("edit-crop", "Crop", ""),
-            done("edit-opacity", "Opacity", ""),
-        ],
-    ),
-    done("split-scenes", "Split scenes", ""),
-    done("transcript", "Transcript", ""),
+            COPY,
+            CUT,
+            DELETE,
+            SEP,
+            sub(
+                "edit",
+                "Edit",
+                &[
+                    done("edit-freeze", "Freeze", ""),
+                    done("edit-reverse", "Reverse", ""),
+                    done("edit-mirror", "Mirror", ""),
+                    done("edit-rotate", "Rotate", ""),
+                    done("edit-crop", "Crop", ""),
+                ],
+            ),
+            done("split-scenes", "Split scenes", ""),
+            done("transcript", "Transcript", ""),
+            $($sound,)*
+            done("sync", "Sync video and audio", ""),
+            SEP,
+            done("compound", "Create compound clip", "⌥G"),
+            done("open-compound", "Open compound clip", ""),
+            done("multicam", "Create multi-camera clip", ""),
+            done("group", "Group", ""),
+            done("ungroup", "Ungroup", ""),
+            SEP,
+            done("export", "Export selected clips", ""),
+            done("deactivate", "Deactivate clip", "V"),
+            done("trim", "Trim clip", ""),
+            done("replace", "Replace clip", ""),
+            done("link-media", "Link to media", ""),
+            done("open-file", "Open file location", ""),
+            ARRANGE,
+            SEP,
+            done("edit-effects", "Edit effects", ""),
+            done("variable-speed", "Show variable speed animation", "⌥K"),
+            sub(
+                "range",
+                "Range",
+                &[
+                    done("range-in", "Set in", ""),
+                    done("range-out", "Set out", ""),
+                ],
+            ),
+            sub(
+                "render",
+                "Render",
+                &[
+                    done("render-preview", "Preview", ""),
+                    done("render-full", "Full", ""),
+                ],
+            ),
+        ]
+    };
+}
+
+/// The menu of a video clip that has its own sound.
+const VIDEO: &[Entry] = video_menu![
     sub(
         "isolate-voice",
         "Isolate voice",
@@ -104,41 +150,11 @@ const VIDEO: &[Entry] = &[
         ],
     ),
     done("extract-audio", "Extract audio", "⇧⌘S"),
-    done("sync", "Sync video and audio", ""),
-    SEP,
-    done("compound", "Create compound clip", "⌥G"),
-    done("open-compound", "Open compound clip", ""),
-    done("multicam", "Create multi-camera clip", ""),
-    done("group", "Group", ""),
-    done("ungroup", "Ungroup", ""),
-    SEP,
-    done("export", "Export selected clips", ""),
-    done("deactivate", "Deactivate clip", "V"),
-    done("trim", "Trim clip", ""),
-    done("replace", "Replace clip", ""),
-    done("link-media", "Link to media", ""),
-    done("open-file", "Open file location", ""),
-    ARRANGE,
-    SEP,
-    done("edit-effects", "Edit effects", ""),
-    done("variable-speed", "Show variable speed animation", "⌥K"),
-    sub(
-        "range",
-        "Range",
-        &[
-            done("range-in", "Set in", ""),
-            done("range-out", "Set out", ""),
-        ],
-    ),
-    sub(
-        "render",
-        "Render",
-        &[
-            done("render-preview", "Preview", ""),
-            done("render-full", "Full", ""),
-        ],
-    ),
 ];
+
+/// The menu of a video clip whose sound was extracted: there is no voice
+/// to isolate, and the extract row gives the sound back.
+const VIDEO_SILENT: &[Entry] = video_menu![done("recover-audio", "Recover audio", "⇧⌘S")];
 
 /// The audio clip menu: the prototype's rows in its order, with this
 /// build's Volume, Speed, Fade and Beat rows after Delete and its Replace
@@ -303,6 +319,15 @@ pub const MULTI: &[Entry] = &[
 
 /// The menu for a clip on a track of `kind`.
 #[must_use]
+/// [`clip_entries`] for a clip that is `silent`: a video clip whose sound
+/// was extracted has its own menu.
+pub fn clip_entries_for(kind: &TrackType, silent: bool) -> &'static [Entry] {
+    match kind {
+        TrackType::Video if silent => VIDEO_SILENT,
+        kind => clip_entries(kind),
+    }
+}
+
 pub fn clip_entries(kind: &TrackType) -> &'static [Entry] {
     match kind {
         TrackType::Video => VIDEO,
@@ -1038,6 +1063,66 @@ mod tests {
         for name in ["keyCommand", "keyShift", "keyOption", "keyBackspace"] {
             assert!(crate::icons::require(name).is_ok(), "{name}");
         }
+    }
+
+    #[test]
+    fn a_video_clip_edits_by_freeze_reverse_mirror_rotate_and_crop() {
+        for menu in [VIDEO, VIDEO_SILENT] {
+            let edit = menu
+                .iter()
+                .find_map(|entry| match entry {
+                    Entry::Item(item) if item.id == "edit" => Some(item),
+                    _ => None,
+                })
+                .expect("an Edit row");
+            let rows: Vec<(&str, &str)> = edit
+                .children
+                .iter()
+                .filter_map(|entry| match entry {
+                    Entry::Item(item) => Some((item.id, item.label)),
+                    Entry::Separator => None,
+                })
+                .collect();
+            assert_eq!(
+                rows,
+                [
+                    ("edit-freeze", "Freeze"),
+                    ("edit-reverse", "Reverse"),
+                    ("edit-mirror", "Mirror"),
+                    ("edit-rotate", "Rotate"),
+                    ("edit-crop", "Crop"),
+                ]
+            );
+            assert!(edit.built, "every row runs");
+        }
+    }
+
+    #[test]
+    fn a_video_clip_without_its_sound_offers_to_recover_it() {
+        let with = ids(clip_entries_for(&TrackType::Video, false));
+        let without = ids(clip_entries_for(&TrackType::Video, true));
+        assert_eq!(with, ids(VIDEO));
+        assert!(with.contains(&"extract-audio") && with.contains(&"isolate-voice"));
+        assert!(!with.contains(&"recover-audio"));
+        // The same rows in the same order, but for the sound ones.
+        let expected: Vec<&str> = with
+            .iter()
+            .copied()
+            .filter(|id| *id != "isolate-voice")
+            .map(|id| {
+                if id == "extract-audio" {
+                    "recover-audio"
+                } else {
+                    id
+                }
+            })
+            .collect();
+        assert_eq!(without, expected);
+        // Only a video clip has the other menu.
+        assert_eq!(
+            ids(clip_entries_for(&TrackType::Audio, true)),
+            ids(clip_entries(&TrackType::Audio))
+        );
     }
 
     #[test]

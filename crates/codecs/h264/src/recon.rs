@@ -333,6 +333,86 @@ pub trait Sample: Copy + Default + Into<i32> {
 
     /// The sample in a `u16` plane. 8-bit has no wide plane.
     fn pack_wide(self) -> Option<u16>;
+
+    /// Filters one 16-sample luma edge with a vector kernel, when this
+    /// sample width has one. `false` means nothing was done and the caller
+    /// filters the edge itself.
+    fn deblock_luma16(_plane: &mut [Self], _edge: LumaEdge) -> bool {
+        false
+    }
+}
+
+/// One 16-sample luma edge for [`Sample::deblock_luma16`].
+#[derive(Clone, Copy)]
+pub struct LumaEdge {
+    /// The first q0 sample.
+    at: usize,
+    /// Samples between one picture row of the edge and the next.
+    down: usize,
+    vertical: bool,
+    alpha: i32,
+    beta: i32,
+    /// The clipping value of each group of four samples for a strength
+    /// below 4, negative for a group that is not filtered. `None` is
+    /// strength 4.
+    tc0: Option<[i8; 4]>,
+}
+
+fn deblock_luma16_eight(plane: &mut [u8], edge: LumaEdge) -> bool {
+    use cutlass_h264_kernels::deblock;
+    let LumaEdge {
+        at,
+        down,
+        vertical,
+        alpha,
+        beta,
+        tc0,
+    } = edge;
+    if vertical {
+        // Sixteen lines across the edge, eight samples each.
+        let Some(first) = at.checked_sub(4) else {
+            return false;
+        };
+        if first + 15 * down + 8 > plane.len() {
+            return false;
+        }
+        let mut lines = [[0u8; 8]; 16];
+        for (index, line) in lines.iter_mut().enumerate() {
+            let start = first + index * down;
+            line.copy_from_slice(&plane[start..start + 8]);
+        }
+        match tc0 {
+            Some(tc0) => deblock::luma_normal_lines(&mut lines, alpha, beta, tc0),
+            None => deblock::luma_strong_lines(&mut lines, alpha, beta),
+        }
+        for (index, line) in lines.iter().enumerate() {
+            let start = first + index * down;
+            plane[start..start + 8].copy_from_slice(line);
+        }
+        return true;
+    }
+    // Eight rows around the edge, sixteen samples each.
+    let Some(first) = at.checked_sub(4 * down) else {
+        return false;
+    };
+    if first + 7 * down + 16 > plane.len() {
+        return false;
+    }
+    let mut rows = [[0u8; 16]; 8];
+    for (index, row) in rows.iter_mut().enumerate() {
+        let start = first + index * down;
+        row.copy_from_slice(&plane[start..start + 16]);
+    }
+    match tc0 {
+        Some(tc0) => deblock::luma_normal_rows(&mut rows, alpha, beta, tc0),
+        None => deblock::luma_strong_rows(&mut rows, alpha, beta),
+    }
+    // The filter never changes p3 or q3.
+    for (index, row) in rows.iter().enumerate().skip(1).take(6) {
+        let start = first + index * down;
+        plane[start..start + 16].copy_from_slice(row);
+    }
+    true
 }
 
 impl Sample for u8 {
@@ -356,6 +436,10 @@ impl Sample for u8 {
 
     fn pack_wide(self) -> Option<u16> {
         None
+    }
+
+    fn deblock_luma16(plane: &mut [Self], edge: LumaEdge) -> bool {
+        deblock_luma16_eight(plane, edge)
     }
 }
 
@@ -1417,6 +1501,46 @@ pub struct Edge {
     pub len: usize,
     /// Frame rows between samples. Field macroblocks step by two.
     pub row_step: usize,
+}
+
+/// Filters a whole 16-sample luma edge at once. `bs` is the strength of each
+/// group of four samples and `edge.bs` is not read. `false` means nothing
+/// was done: the sample width has no vector kernel, or the strengths mix 4
+/// with less.
+pub fn filter_luma16<S: Sample>(
+    plane: &mut [S],
+    stride: usize,
+    x: usize,
+    y: usize,
+    edge: Edge,
+    bs: [u8; 4],
+) -> bool {
+    if bs == [0; 4] {
+        return true;
+    }
+    let index_a = (edge.qpav + edge.offset_a).clamp(0, 51) as usize;
+    let index_b = (edge.qpav + edge.offset_b).clamp(0, 51) as usize;
+    let tc0 = if bs == [4; 4] {
+        None
+    } else if bs.iter().all(|&group| group < 4) {
+        Some(bs.map(|group| match group {
+            0 => -1,
+            _ => TC0[usize::from(group) - 1][index_a] as i8,
+        }))
+    } else {
+        return false;
+    };
+    S::deblock_luma16(
+        plane,
+        LumaEdge {
+            at: y * stride + x,
+            down: stride * edge.row_step,
+            vertical: edge.vertical,
+            alpha: i32::from(ALPHA[index_a]) << S::SHIFT,
+            beta: i32::from(BETA[index_b]) << S::SHIFT,
+            tc0,
+        },
+    )
 }
 
 pub fn filter_edge<S: Sample>(plane: &mut [S], stride: usize, x: usize, y: usize, edge: Edge) {

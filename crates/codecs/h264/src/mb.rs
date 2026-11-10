@@ -9620,6 +9620,21 @@ fn filter_groups<S: Sample>(
     let (x, y) = at;
     let (vertical, chroma, step, row_step) = kind;
     let (offset_a, offset_b) = off;
+    if !chroma && step == 4 {
+        let whole = recon::Edge {
+            vertical,
+            bs: 0,
+            qpav,
+            offset_a,
+            offset_b,
+            chroma,
+            len: 16,
+            row_step,
+        };
+        if recon::filter_luma16(plane, stride, x, y, whole, bs) {
+            return;
+        }
+    }
     if bs[0] != 0 && bs[1] == bs[0] && bs[2] == bs[0] && bs[3] == bs[0] {
         recon::filter_edge(
             plane,

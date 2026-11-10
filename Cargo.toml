@@ -13,6 +13,7 @@ members = [
     "crates/codecs/flac",
     "crates/codecs/gif",
     "crates/codecs/h264",
+    "crates/codecs/h264-kernels",
     "crates/codecs/hevc",
     "crates/codecs/jpeg",
     "crates/codecs/mjpeg",

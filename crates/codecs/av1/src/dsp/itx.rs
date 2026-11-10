@@ -19,11 +19,14 @@
 //! panic.
 
 use super::Pixel;
+// The DCT and ADST as tables of steps, shared with the vector kernel.
 use crate::spec::tables::{
-    ADST_ADST, ADST_DCT, ADST_FLIPADST, COS128_LOOKUP, DCT_ADST, DCT_DCT, DCT_FLIPADST,
-    FLIPADST_ADST, FLIPADST_DCT, FLIPADST_FLIPADST, H_ADST, H_DCT, H_FLIPADST, SINPI_1_9,
-    SINPI_2_9, SINPI_3_9, SINPI_4_9, TRANSFORM_ROW_SHIFT, TX_HEIGHT_LOG2, TX_WIDTH_LOG2, V_ADST,
-    V_DCT, V_FLIPADST,
+    ADST_ADST, ADST_DCT, ADST_FLIPADST, DCT_ADST, DCT_DCT, DCT_FLIPADST, FLIPADST_ADST,
+    FLIPADST_DCT, FLIPADST_FLIPADST, H_ADST, H_DCT, H_FLIPADST, SINPI_1_9, SINPI_2_9, SINPI_3_9,
+    SINPI_4_9, TRANSFORM_ROW_SHIFT, TX_HEIGHT_LOG2, TX_WIDTH_LOG2, V_ADST, V_DCT, V_FLIPADST,
+};
+use cutlass_simd::av1::itx::steps::{
+    Prog, Step as Op, adst_in_perm, adst_out_perm, adst8_prog, adst16_prog, dct_perm, dct_prog,
 };
 
 /// Returns `(flip_ud, flip_lr)` for a transform type (spec 7.12.3).
@@ -71,58 +74,6 @@ fn col_kind(tx_type: usize) -> Kind {
 // ---------------------------------------------------------------------------
 // Permutation tables, computed at compile time.
 
-const fn brev(num_bits: u32, x: usize) -> usize {
-    let mut t = 0;
-    let mut i = 0;
-    while i < num_bits {
-        let bit = (x >> i) & 1;
-        t += bit << (num_bits - 1 - i);
-        i += 1;
-    }
-    t
-}
-
-/// Position in T of input `k` for the DCT (spec 7.13.2.2). `brev` is its own
-/// inverse.
-const fn dct_perm<const N: usize>() -> [u8; N] {
-    let n = N.trailing_zeros();
-    let mut p = [0u8; N];
-    let mut k = 0;
-    while k < N {
-        p[k] = brev(n, k) as u8;
-        k += 1;
-    }
-    p
-}
-
-/// Position in T of input `k` for the ADST8/16 (inverse of spec 7.13.2.4).
-const fn adst_in_perm<const N: usize>() -> [u8; N] {
-    let mut p = [0u8; N];
-    let mut k = 0;
-    while k < N {
-        p[k] = if k & 1 == 0 { k + 1 } else { N - 1 - k } as u8;
-        k += 1;
-    }
-    p
-}
-
-/// Source index of output `i` for the ADST8/16 (spec 7.13.2.5); odd outputs
-/// are negated.
-const fn adst_out_perm<const N: usize>() -> [u8; N] {
-    let n = N.trailing_zeros();
-    let mut p = [0u8; N];
-    let mut i = 0;
-    while i < N {
-        let a = (i >> 3) & 1;
-        let b = ((i >> 2) & 1) ^ ((i >> 3) & 1);
-        let c = ((i >> 1) & 1) ^ ((i >> 2) & 1);
-        let d = (i & 1) ^ ((i >> 1) & 1);
-        p[i] = (((d << 3) | (c << 2) | (b << 1) | a) >> (4 - n)) as u8;
-        i += 1;
-    }
-    p
-}
-
 const fn ident_perm() -> [u8; 64] {
     let mut p = [0u8; 64];
     let mut k = 0;
@@ -160,25 +111,6 @@ fn in_perm(kind: Kind, n: usize) -> &'static [u8] {
 
 // ---------------------------------------------------------------------------
 // Butterflies over lanes.
-
-#[inline(always)]
-const fn cos128(angle: i32) -> i32 {
-    let a2 = (angle & 255) as usize;
-    if a2 <= 64 {
-        COS128_LOOKUP[a2] as i32
-    } else if a2 <= 128 {
-        -(COS128_LOOKUP[128 - a2] as i32)
-    } else if a2 <= 192 {
-        -(COS128_LOOKUP[a2 - 128] as i32)
-    } else {
-        COS128_LOOKUP[256 - a2] as i32
-    }
-}
-
-#[inline(always)]
-const fn sin128(angle: i32) -> i32 {
-    cos128(angle - 64)
-}
 
 /// `Round2(x, 12)` for a sum that the spec guarantees fits after rounding.
 #[inline(always)]
@@ -355,416 +287,6 @@ fn hd<E: Lane, const L: usize, const N: usize>(
 
 // ---------------------------------------------------------------------------
 // 1D transforms on permuted input.
-
-/// One step of a 1D transform: the butterfly `B(a, b, angle, flip)` or the
-/// Hadamard rotation `H(a, b, flip)` (spec 7.13.2.1).
-#[derive(Clone, Copy)]
-struct Op {
-    had: bool,
-    flip: bool,
-    a: u8,
-    b: u8,
-    /// `cos128(angle)` and `sin128(angle)`.
-    cos: i16,
-    sin: i16,
-}
-
-/// A transform written out as its sequence of steps, built at compile time.
-/// Running the steps from a table (rather than unrolled code) keeps LLVM
-/// vectorizing across the lanes of each step.
-struct Prog<const M: usize> {
-    ops: [Op; M],
-    len: usize,
-}
-
-impl<const M: usize> Prog<M> {
-    const fn new() -> Self {
-        let nop = Op {
-            had: false,
-            flip: false,
-            a: 0,
-            b: 0,
-            cos: 0,
-            sin: 0,
-        };
-        Prog {
-            ops: [nop; M],
-            len: 0,
-        }
-    }
-
-    const fn push(mut self, had: bool, a: usize, b: usize, angle: usize, flip: bool) -> Self {
-        if self.len < M {
-            self.ops[self.len] = Op {
-                had,
-                flip,
-                a: a as u8,
-                b: b as u8,
-                cos: cos128(angle as i32) as i16,
-                sin: sin128(angle as i32) as i16,
-            };
-        }
-        self.len += 1;
-        self
-    }
-
-    /// `B(a, b, angle, flip)`; angles are given modulo 256.
-    const fn bf(self, a: usize, b: usize, angle: usize, flip: bool) -> Self {
-        self.push(false, a, b, angle & 255, flip)
-    }
-
-    /// `H(a, b, flip)`.
-    const fn h(self, a: usize, b: usize, flip: bool) -> Self {
-        self.push(true, a, b, 0, flip)
-    }
-}
-
-/// The inverse DCT of length `1 << n` (spec 7.13.2.3, steps 2 to 31; the
-/// permutation of step 1 is applied by the loaders).
-const fn dct_prog<const M: usize>(n: u32) -> Prog<M> {
-    let mut p = Prog::<M>::new();
-    let mut i;
-    let mut j;
-    if n == 6 {
-        i = 0;
-        while i < 16 {
-            p = p.bf(32 + i, 63 - i, 63 - 4 * brev(4, i), false);
-            i += 1;
-        }
-    }
-    if n >= 5 {
-        i = 0;
-        while i < 8 {
-            p = p.bf(16 + i, 31 - i, 6 + (brev(3, 7 - i) << 3), false);
-            i += 1;
-        }
-    }
-    if n == 6 {
-        i = 0;
-        while i < 16 {
-            p = p.h(32 + i * 2, 33 + i * 2, i & 1 != 0);
-            i += 1;
-        }
-    }
-    if n >= 4 {
-        i = 0;
-        while i < 4 {
-            p = p.bf(8 + i, 15 - i, 12 + (brev(2, 3 - i) << 4), false);
-            i += 1;
-        }
-    }
-    if n >= 5 {
-        i = 0;
-        while i < 8 {
-            p = p.h(16 + 2 * i, 17 + 2 * i, i & 1 != 0);
-            i += 1;
-        }
-    }
-    if n == 6 {
-        i = 0;
-        while i < 4 {
-            j = 0;
-            while j < 2 {
-                p = p.bf(
-                    62 - i * 4 - j,
-                    33 + i * 4 + j,
-                    60 - 16 * brev(2, i) + 64 * j,
-                    true,
-                );
-                j += 1;
-            }
-            i += 1;
-        }
-    }
-    if n >= 3 {
-        i = 0;
-        while i < 2 {
-            p = p.bf(4 + i, 7 - i, 56 - 32 * i, false);
-            i += 1;
-        }
-    }
-    if n >= 4 {
-        i = 0;
-        while i < 4 {
-            p = p.h(8 + 2 * i, 9 + 2 * i, i & 1 != 0);
-            i += 1;
-        }
-    }
-    if n >= 5 {
-        i = 0;
-        while i < 2 {
-            j = 0;
-            while j < 2 {
-                p = p.bf(
-                    30 - 4 * i - j,
-                    17 + 4 * i + j,
-                    24 + (j << 6) + ((1 - i) << 5),
-                    true,
-                );
-                j += 1;
-            }
-            i += 1;
-        }
-    }
-    if n == 6 {
-        i = 0;
-        while i < 8 {
-            j = 0;
-            while j < 2 {
-                p = p.h(32 + i * 4 + j, 35 + i * 4 - j, i & 1 != 0);
-                j += 1;
-            }
-            i += 1;
-        }
-    }
-    i = 0;
-    while i < 2 {
-        p = p.bf(2 * i, 2 * i + 1, 32 + 16 * i, i == 0);
-        i += 1;
-    }
-    if n >= 3 {
-        i = 0;
-        while i < 2 {
-            p = p.h(4 + 2 * i, 5 + 2 * i, i != 0);
-            i += 1;
-        }
-    }
-    if n >= 4 {
-        i = 0;
-        while i < 2 {
-            p = p.bf(14 - i, 9 + i, 48 + 64 * i, true);
-            i += 1;
-        }
-    }
-    if n >= 5 {
-        i = 0;
-        while i < 4 {
-            j = 0;
-            while j < 2 {
-                p = p.h(16 + 4 * i + j, 19 + 4 * i - j, i & 1 != 0);
-                j += 1;
-            }
-            i += 1;
-        }
-    }
-    if n == 6 {
-        i = 0;
-        while i < 2 {
-            j = 0;
-            while j < 4 {
-                p = p.bf(
-                    61 - i * 8 - j,
-                    34 + i * 8 + j,
-                    56 + 256 - i * 32 + (j >> 1) * 64,
-                    true,
-                );
-                j += 1;
-            }
-            i += 1;
-        }
-    }
-    i = 0;
-    while i < 2 {
-        p = p.h(i, 3 - i, false);
-        i += 1;
-    }
-    if n >= 3 {
-        p = p.bf(6, 5, 32, true);
-    }
-    if n >= 4 {
-        i = 0;
-        while i < 2 {
-            j = 0;
-            while j < 2 {
-                p = p.h(8 + 4 * i + j, 11 + 4 * i - j, i != 0);
-                j += 1;
-            }
-            i += 1;
-        }
-    }
-    if n >= 5 {
-        i = 0;
-        while i < 4 {
-            p = p.bf(29 - i, 18 + i, 48 + (i >> 1) * 64, true);
-            i += 1;
-        }
-    }
-    if n == 6 {
-        i = 0;
-        while i < 4 {
-            j = 0;
-            while j < 4 {
-                p = p.h(32 + 8 * i + j, 39 + 8 * i - j, i & 1 != 0);
-                j += 1;
-            }
-            i += 1;
-        }
-    }
-    if n >= 3 {
-        i = 0;
-        while i < 4 {
-            p = p.h(i, 7 - i, false);
-            i += 1;
-        }
-    }
-    if n >= 4 {
-        i = 0;
-        while i < 2 {
-            p = p.bf(13 - i, 10 + i, 32, true);
-            i += 1;
-        }
-    }
-    if n >= 5 {
-        i = 0;
-        while i < 2 {
-            j = 0;
-            while j < 4 {
-                p = p.h(16 + i * 8 + j, 23 + i * 8 - j, i != 0);
-                j += 1;
-            }
-            i += 1;
-        }
-    }
-    if n == 6 {
-        i = 0;
-        while i < 8 {
-            p = p.bf(59 - i, 36 + i, if i < 4 { 48 } else { 112 }, true);
-            i += 1;
-        }
-    }
-    if n >= 4 {
-        i = 0;
-        while i < 8 {
-            p = p.h(i, 15 - i, false);
-            i += 1;
-        }
-    }
-    if n >= 5 {
-        i = 0;
-        while i < 4 {
-            p = p.bf(27 - i, 20 + i, 32, true);
-            i += 1;
-        }
-    }
-    if n == 6 {
-        i = 0;
-        while i < 8 {
-            p = p.h(32 + i, 47 - i, false);
-            p = p.h(48 + i, 63 - i, true);
-            i += 1;
-        }
-    }
-    if n >= 5 {
-        i = 0;
-        while i < 16 {
-            p = p.h(i, 31 - i, false);
-            i += 1;
-        }
-    }
-    if n == 6 {
-        i = 0;
-        while i < 8 {
-            p = p.bf(55 - i, 40 + i, 32, true);
-            i += 1;
-        }
-        i = 0;
-        while i < 32 {
-            p = p.h(i, 63 - i, false);
-            i += 1;
-        }
-    }
-    p
-}
-
-/// The inverse ADST8 (spec 7.13.2.7, steps 2 to 6).
-const fn adst8_prog<const M: usize>() -> Prog<M> {
-    let mut p = Prog::<M>::new();
-    let mut i = 0;
-    while i < 4 {
-        p = p.bf(2 * i, 2 * i + 1, 60 - 16 * i, true);
-        i += 1;
-    }
-    i = 0;
-    while i < 4 {
-        p = p.h(i, 4 + i, false);
-        i += 1;
-    }
-    i = 0;
-    while i < 2 {
-        p = p.bf(4 + 3 * i, 5 + i, 48 - 32 * i, true);
-        i += 1;
-    }
-    i = 0;
-    while i < 2 {
-        let mut j = 0;
-        while j < 2 {
-            p = p.h(4 * j + i, 2 + 4 * j + i, false);
-            j += 1;
-        }
-        i += 1;
-    }
-    i = 0;
-    while i < 2 {
-        p = p.bf(2 + 4 * i, 3 + 4 * i, 32, true);
-        i += 1;
-    }
-    p
-}
-
-/// The inverse ADST16 (spec 7.13.2.8, steps 2 to 8).
-const fn adst16_prog<const M: usize>() -> Prog<M> {
-    let mut p = Prog::<M>::new();
-    let mut i = 0;
-    let mut j;
-    while i < 8 {
-        p = p.bf(2 * i, 2 * i + 1, 62 - 8 * i, true);
-        i += 1;
-    }
-    i = 0;
-    while i < 8 {
-        p = p.h(i, 8 + i, false);
-        i += 1;
-    }
-    i = 0;
-    while i < 2 {
-        p = p.bf(8 + 2 * i, 9 + 2 * i, 56 - 32 * i, true);
-        p = p.bf(13 + 2 * i, 12 + 2 * i, 8 + 32 * i, true);
-        i += 1;
-    }
-    i = 0;
-    while i < 4 {
-        j = 0;
-        while j < 2 {
-            p = p.h(8 * j + i, 4 + 8 * j + i, false);
-            j += 1;
-        }
-        i += 1;
-    }
-    i = 0;
-    while i < 2 {
-        j = 0;
-        while j < 2 {
-            p = p.bf(4 + 8 * j + 3 * i, 5 + 8 * j + i, 48 - 32 * i, true);
-            j += 1;
-        }
-        i += 1;
-    }
-    i = 0;
-    while i < 2 {
-        j = 0;
-        while j < 4 {
-            p = p.h(4 * j + i, 2 + 4 * j + i, false);
-            j += 1;
-        }
-        i += 1;
-    }
-    i = 0;
-    while i < 4 {
-        p = p.bf(2 + 4 * i, 3 + 4 * i, 32, true);
-        i += 1;
-    }
-    p
-}
 
 /// Drops the steps of `full` whose two inputs are known to be zero, given
 /// that only the inputs `0..nz` can be non-zero and input `k` sits at
@@ -1353,6 +875,55 @@ fn run<P: Pixel, E: Lane, const TMP: usize>(
     col_dispatch::<P, E>(log2h, col_kind(tx_type), &p, &tmp, dst, stride);
 }
 
+/// The block of an 8-bit stream on the vector kernel, where there is one
+/// and it has the block's transforms. `false` when the block is still to
+/// be done.
+fn on_kernel<P: Pixel>(
+    dst: &mut [P],
+    stride: usize,
+    coefs: &[i32],
+    tx_size: usize,
+    tx_type: usize,
+    nz_rows: usize,
+    nz_cols: usize,
+) -> bool {
+    use cutlass_simd::av1::itx as kernel;
+    if !kernel::ACCELERATED {
+        return false;
+    }
+    let of = |k: Kind| match k {
+        Kind::Dct => kernel::Kind::Dct,
+        Kind::Adst => kernel::Kind::Adst,
+        Kind::Idt => kernel::Kind::Identity,
+    };
+    let (w, h) = (
+        1usize << TX_WIDTH_LOG2[tx_size],
+        1usize << TX_HEIGHT_LOG2[tx_size],
+    );
+    let (row, col) = (of(row_kind(tx_type)), of(col_kind(tx_type)));
+    if !kernel::supports(w, h, row, col) {
+        return false;
+    }
+    let Some(dst) = P::bytes_mut(dst) else {
+        return false;
+    };
+    let (flip_ud, flip_lr) = tx_type_flips(tx_type);
+    kernel::add(&mut kernel::Block {
+        dst,
+        stride,
+        coefs,
+        w,
+        h,
+        row,
+        col,
+        nz_rows,
+        nz_cols,
+        shift: u32::from(TRANSFORM_ROW_SHIFT[tx_size]),
+        flip_ud,
+        flip_lr,
+    })
+}
+
 /// `run` with the lane type chosen: 16-bit lanes for 8-bit streams.
 fn run_sized<P: Pixel, const TMP: usize>(
     dst: &mut [P],
@@ -1365,6 +936,9 @@ fn run_sized<P: Pixel, const TMP: usize>(
     bd: u32,
 ) {
     if !P::HBD && bd == 8 {
+        if on_kernel(dst, stride, coefs, tx_size, tx_type, nz_rows, nz_cols) {
+            return;
+        }
         run::<P, i16, TMP>(dst, stride, coefs, tx_size, tx_type, nz_rows, nz_cols, bd);
     } else {
         run::<P, i32, TMP>(dst, stride, coefs, tx_size, tx_type, nz_rows, nz_cols, bd);
@@ -2157,6 +1731,11 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn the_kernel_crate_has_the_cosine_table_of_the_spec() {
+        assert_eq!(cutlass_simd::av1::itx::steps::COS128, COS128_LOOKUP);
     }
 
     #[test]

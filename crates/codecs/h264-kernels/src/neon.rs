@@ -15,22 +15,24 @@ use core::arch::aarch64::{
 
 use crate::deblock::{Lines, Rows};
 
+pub(crate) use crate::neon_mc::{avg16, centre8, centre16, chroma8, half8, half16, raw8, raw16};
+
 /// A vector of the 16 samples in `bytes`.
 #[target_feature(enable = "neon")]
-fn load16(bytes: &[u8; 16]) -> uint8x16_t {
+pub(crate) fn load16(bytes: &[u8; 16]) -> uint8x16_t {
     let value = u128::from_le_bytes(*bytes);
     pair(value as u64, (value >> 64) as u64)
 }
 
 /// A vector whose low half is `low`'s bytes and whose high half is `high`'s.
 #[target_feature(enable = "neon")]
-fn pair(low: u64, high: u64) -> uint8x16_t {
+pub(crate) fn pair(low: u64, high: u64) -> uint8x16_t {
     vreinterpretq_u8_u64(vcombine_u64(vcreate_u64(low), vcreate_u64(high)))
 }
 
 /// The two halves of `vector` as bytes.
 #[target_feature(enable = "neon")]
-fn halves(vector: uint8x16_t) -> ([u8; 8], [u8; 8]) {
+pub(crate) fn halves(vector: uint8x16_t) -> ([u8; 8], [u8; 8]) {
     let wide = vreinterpretq_u64_u8(vector);
     (
         vgetq_lane_u64::<0>(wide).to_le_bytes(),
@@ -39,7 +41,7 @@ fn halves(vector: uint8x16_t) -> ([u8; 8], [u8; 8]) {
 }
 
 #[target_feature(enable = "neon")]
-fn store16(vector: uint8x16_t, bytes: &mut [u8; 16]) {
+pub(crate) fn store16(vector: uint8x16_t, bytes: &mut [u8; 16]) {
     let (low, high) = halves(vector);
     bytes[..8].copy_from_slice(&low);
     bytes[8..].copy_from_slice(&high);

@@ -17,59 +17,23 @@ pub type Lines = [[u8; 8]; 16];
 /// value of each group of four samples along the edge; a negative one
 /// leaves its group alone.
 pub fn luma_normal_rows(rows: &mut Rows, alpha: i32, beta: i32, tc0: [i8; 4]) {
-    #[cfg(target_arch = "aarch64")]
-    {
-        // SAFETY: the callee needs NEON, which every aarch64 CPU has.
-        #[allow(unsafe_code)]
-        unsafe {
-            crate::neon::luma_normal_rows(rows, alpha, beta, tc0);
-        }
-    }
-    #[cfg(not(target_arch = "aarch64"))]
-    crate::scalar::luma_normal_rows(rows, alpha, beta, tc0);
+    kernel!(luma_normal_rows(rows, alpha, beta, tc0));
 }
 
 /// The filter for strength 4 (8.7.2.4), on rows.
 pub fn luma_strong_rows(rows: &mut Rows, alpha: i32, beta: i32) {
-    #[cfg(target_arch = "aarch64")]
-    {
-        // SAFETY: the callee needs NEON, which every aarch64 CPU has.
-        #[allow(unsafe_code)]
-        unsafe {
-            crate::neon::luma_strong_rows(rows, alpha, beta);
-        }
-    }
-    #[cfg(not(target_arch = "aarch64"))]
-    crate::scalar::luma_strong_rows(rows, alpha, beta);
+    kernel!(luma_strong_rows(rows, alpha, beta));
 }
 
 /// [`luma_normal_rows`] for an edge that runs down the picture. `tc0` is
 /// per group of four lines.
 pub fn luma_normal_lines(lines: &mut Lines, alpha: i32, beta: i32, tc0: [i8; 4]) {
-    #[cfg(target_arch = "aarch64")]
-    {
-        // SAFETY: the callee needs NEON, which every aarch64 CPU has.
-        #[allow(unsafe_code)]
-        unsafe {
-            crate::neon::luma_normal_lines(lines, alpha, beta, tc0);
-        }
-    }
-    #[cfg(not(target_arch = "aarch64"))]
-    crate::scalar::luma_normal_lines(lines, alpha, beta, tc0);
+    kernel!(luma_normal_lines(lines, alpha, beta, tc0));
 }
 
 /// [`luma_strong_rows`] for an edge that runs down the picture.
 pub fn luma_strong_lines(lines: &mut Lines, alpha: i32, beta: i32) {
-    #[cfg(target_arch = "aarch64")]
-    {
-        // SAFETY: the callee needs NEON, which every aarch64 CPU has.
-        #[allow(unsafe_code)]
-        unsafe {
-            crate::neon::luma_strong_lines(lines, alpha, beta);
-        }
-    }
-    #[cfg(not(target_arch = "aarch64"))]
-    crate::scalar::luma_strong_lines(lines, alpha, beta);
+    kernel!(luma_strong_lines(lines, alpha, beta));
 }
 
 #[cfg(test)]

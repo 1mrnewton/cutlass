@@ -17,9 +17,32 @@
 //! Every vector kernel is tested against its [`scalar`] twin on random and
 //! edge-like samples, and must give the same samples.
 
+/// Calls a kernel's vector version where the build has one, and its plain
+/// version elsewhere. This is the crate's only `unsafe`.
+macro_rules! kernel {
+    ($name:ident($($argument:expr),*)) => {{
+        #[cfg(target_arch = "aarch64")]
+        {
+            // SAFETY: the callee is built for NEON, which every aarch64 CPU
+            // has. It is otherwise a safe function.
+            #[allow(unsafe_code)]
+            unsafe {
+                crate::neon::$name($($argument),*)
+            }
+        }
+        #[cfg(not(target_arch = "aarch64"))]
+        {
+            crate::scalar::$name($($argument),*)
+        }
+    }};
+}
+
 pub mod deblock;
+pub mod mc;
 
 #[cfg(target_arch = "aarch64")]
 mod neon;
+#[cfg(target_arch = "aarch64")]
+mod neon_mc;
 
 pub mod scalar;

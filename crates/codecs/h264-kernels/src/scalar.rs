@@ -99,3 +99,59 @@ fn turn_back(rows: &Rows, lines: &mut Lines) {
         }
     }
 }
+
+/// The six-tap filter's sum at one sample.
+fn six(taps: [i32; 6]) -> i32 {
+    taps[0] - 5 * taps[1] + 20 * taps[2] + 20 * taps[3] - 5 * taps[4] + taps[5]
+}
+
+fn six_at<T: Copy + Into<i32>, const N: usize>(taps: [&[T; N]; 6], index: usize) -> i32 {
+    six(taps.map(|line| line[index].into()))
+}
+
+/// See [`crate::mc::half16`].
+pub fn half16(taps: [&[u8; 16]; 6]) -> [u8; 16] {
+    core::array::from_fn(|index| clip((six_at(taps, index) + 16) >> 5))
+}
+
+/// See [`crate::mc::half8`].
+pub fn half8(taps: [&[u8; 8]; 6]) -> [u8; 8] {
+    core::array::from_fn(|index| clip((six_at(taps, index) + 16) >> 5))
+}
+
+/// See [`crate::mc::raw16`].
+pub fn raw16(taps: [&[u8; 16]; 6]) -> [i16; 16] {
+    core::array::from_fn(|index| six_at(taps, index) as i16)
+}
+
+/// See [`crate::mc::raw8`].
+pub fn raw8(taps: [&[u8; 8]; 6]) -> [i16; 8] {
+    core::array::from_fn(|index| six_at(taps, index) as i16)
+}
+
+/// See [`crate::mc::centre16`].
+pub fn centre16(taps: [&[i16; 16]; 6]) -> [u8; 16] {
+    core::array::from_fn(|index| clip((six_at(taps, index) + 512) >> 10))
+}
+
+/// See [`crate::mc::centre8`].
+pub fn centre8(taps: [&[i16; 8]; 6]) -> [u8; 8] {
+    core::array::from_fn(|index| clip((six_at(taps, index) + 512) >> 10))
+}
+
+/// See [`crate::mc::avg16`].
+pub fn avg16(a: &[u8; 16], b: &[u8; 16]) -> [u8; 16] {
+    core::array::from_fn(|index| ((u16::from(a[index]) + u16::from(b[index]) + 1) >> 1) as u8)
+}
+
+/// See [`crate::mc::chroma8`].
+pub fn chroma8(top: &[u8; 9], bottom: &[u8; 9], xf: u8, yf: u8) -> [u8; 8] {
+    let (xf, yf) = (i32::from(xf.min(7)), i32::from(yf.min(7)));
+    core::array::from_fn(|index| {
+        let value = (8 - xf) * (8 - yf) * i32::from(top[index])
+            + xf * (8 - yf) * i32::from(top[index + 1])
+            + (8 - xf) * yf * i32::from(bottom[index])
+            + xf * yf * i32::from(bottom[index + 1]);
+        clip((value + 32) >> 6)
+    })
+}

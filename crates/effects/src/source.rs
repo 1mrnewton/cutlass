@@ -239,6 +239,164 @@ impl PictureSource for EffectSource {
     }
 }
 
+/// What a package's stand-in paints, for a GPU pass.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PackagePaint {
+    /// The picture as it is.
+    Keep,
+    /// Each colour byte from 255.
+    Invert,
+    /// Each colour byte twice as far from 128.
+    Contrast,
+    /// Each [`catalog::PIXELATE_BLOCK`] square of canvas pixels the colour
+    /// of its first.
+    Pixelate,
+}
+
+/// A segment's package at one moment, as the GPU draws it: what it paints
+/// over the picture below and each alpha byte after its fade, and for a
+/// blend the mode it mixes the faded clip with what is below.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PackagePass {
+    pub paint: PackagePaint,
+    /// A blend package's mode; `None` paints the picture on its own.
+    pub blend: Option<BlendMode>,
+    /// `faded[a]` is alpha byte `a` after the fade.
+    pub faded: Box<[u8; 256]>,
+}
+
+/// Bytes in [`PackagePass::uniform`]'s block.
+pub const PACKAGE_UNIFORM_BYTES: usize = (2 + 64) * 16;
+
+impl PackagePass {
+    /// The uniform block [`PACKAGE_WGSL`] reads, for a target `scale`
+    /// times the canvas the package was laid out on, each way.
+    #[must_use]
+    pub fn uniform(&self, scale: (f32, f32)) -> Vec<u8> {
+        let paint: u32 = match self.paint {
+            PackagePaint::Keep => 0,
+            PackagePaint::Invert => 1,
+            PackagePaint::Contrast => 2,
+            PackagePaint::Pixelate => 3,
+        };
+        let mut bytes = Vec::with_capacity(PACKAGE_UNIFORM_BYTES);
+        for value in [paint, catalog::PIXELATE_BLOCK, 0, 0] {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        for value in [scale.0, scale.1, 0.0, 0.0] {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        for alpha in self.faded.iter() {
+            bytes.extend_from_slice(&u32::from(*alpha).to_le_bytes());
+        }
+        bytes
+    }
+}
+
+/// The CPU stand-ins as a GPU pass: `package_pixel` paints target pixel
+/// `p` of `package_picture`, the premultiplied picture below, as
+/// [`EffectSource`] paints its CPU bytes, from the [`PackagePass::uniform`]
+/// block bound as `package_params`. Kept beside the CPU arithmetic so the two
+/// change together.
+pub const PACKAGE_WGSL: &str = r"
+struct PackageParams {
+    // Paint (0 keep, 1 invert, 2 contrast, 3 pixelate), the block side.
+    paint: vec4<u32>,
+    // Target pixels per canvas pixel, across and down.
+    scale: vec4<f32>,
+    // Each alpha byte after the fade, four to a row.
+    faded: array<vec4<u32>, 64>,
+};
+
+fn package_contrast(c: vec3<f32>) -> vec3<f32> {
+    return clamp(128.0 + (c - 128.0) * 2.0, vec3<f32>(0.0), vec3<f32>(255.0));
+}
+
+fn package_pixel(p: vec2<u32>) -> vec4<f32> {
+    var at = vec2<i32>(p);
+    if (package_params.paint.x == 3u) {
+        // The block is laid out on the full canvas.
+        let size = vec2<i32>(textureDimensions(package_picture));
+        let scale = package_params.scale.xy;
+        let full = vec2<u32>(floor((vec2<f32>(p) + 0.5) / scale));
+        let block = package_params.paint.y;
+        let origin = (full / block) * block;
+        at = clamp(vec2<i32>(floor((vec2<f32>(origin) + 0.5) * scale)), vec2<i32>(0), size - 1);
+    }
+    let c = floor(textureLoad(package_picture, at, 0) * 255.0 + 0.5);
+    let a = u32(c.a);
+    let alpha = f32(package_params.faded[a / 4u][a % 4u]);
+    var rgb = c.rgb;
+    if (package_params.paint.x == 1u) {
+        rgb = 255.0 - rgb;
+    } else if (package_params.paint.x == 2u) {
+        rgb = package_contrast(rgb);
+    }
+    return vec4<f32>(rgb, alpha) / 255.0;
+}
+";
+
+/// The package `segment` names, at `time`, as a GPU pass: what
+/// [`EffectSource::open_segment`] would sample. `None` where the CPU
+/// sample leaves the picture as it is: no package, one the store cannot
+/// read, one not in the catalog, a transition, or a time outside the
+/// segment.
+#[must_use]
+pub fn segment_pass(
+    store: &dyn PackageStore,
+    draft: &Draft,
+    segment: &Segment,
+    time: Micros,
+) -> Option<PackagePass> {
+    let package = package::load_segment(store, draft, segment).ok()?;
+    let source = EffectSource {
+        range: segment.target.clone(),
+        kind: catalog::entry(package.id()).map(|row| row.kind),
+        package_id: Some(package.id().to_owned()),
+        input: None,
+        backdrop: None,
+        anim: None,
+    };
+    source.pass(time)
+}
+
+impl EffectSource {
+    /// This source's sample at `time` as a GPU pass, `None` where the
+    /// sample misses for any reason but its pictures.
+    #[must_use]
+    pub fn pass(&self, time: Micros) -> Option<PackagePass> {
+        if !contains(&self.range, time) {
+            return None;
+        }
+        let kind = self.kind?;
+        let scale = normalize(self.scale_at(time, kind)?)?;
+        let (paint, blend) = match kind {
+            PackageKind::Blend(mode) => (PackagePaint::Keep, Some(mode)),
+            PackageKind::Distort(distort) => (
+                match paint_of(distort) {
+                    Paint::Invert => PackagePaint::Invert,
+                    Paint::Contrast => PackagePaint::Contrast,
+                    Paint::Pixelate => PackagePaint::Pixelate,
+                    Paint::Keep => PackagePaint::Keep,
+                },
+                None,
+            ),
+            PackageKind::TextAnim(_) => (PackagePaint::Keep, None),
+            PackageKind::Transition(_) => return None,
+        };
+        let faded = Box::new(std::array::from_fn(|alpha| {
+            #[allow(clippy::cast_possible_truncation)]
+            let alpha = alpha as u8;
+            apply_alpha([0, 0, 0, alpha], scale)[3]
+        }));
+        Some(PackagePass {
+            paint,
+            blend,
+            faded,
+        })
+    }
+}
+
 fn contains(range: &TimeRange, time: Micros) -> bool {
     if range.duration.0 <= 0 {
         return false;

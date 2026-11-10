@@ -240,7 +240,7 @@ impl WheelSetting {
 
     /// The colour offset the wheel adds: the puck's hue with its own grey
     /// taken out, plus the ring as grey.
-    fn offset(&self) -> [f32; 3] {
+    pub(crate) fn offset(&self) -> [f32; 3] {
         let amount = (self.x * self.x + self.y * self.y).sqrt();
         let mut offset = [self.luma; 3];
         if amount > 0.0 {
@@ -534,7 +534,7 @@ fn read_wheel(value: Option<&Value>) -> WheelSetting {
 
 /// A curve with no bend: fewer than two points, or every point on the
 /// diagonal from one end to the other.
-fn straight(points: &[(f32, f32)]) -> bool {
+pub(crate) fn straight(points: &[(f32, f32)]) -> bool {
     let (Some(first), Some(last)) = (points.first(), points.last()) else {
         return true;
     };

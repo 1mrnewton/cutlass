@@ -815,13 +815,11 @@ impl Placed<'_> {
     ///
     /// `None` when the GPU path does not reproduce the CPU path: a picture
     /// that is not 4:2:0 or whose tags the color crate does not map, a crop
-    /// quad that is not a parallelogram, or a blur or image backdrop. The
-    /// caller then uses the CPU picture.
+    /// quad that is not a parallelogram, or a blur or image backdrop (a
+    /// relit clip's blur too). The caller then uses the CPU picture. A
+    /// relit clip whose depth is decoded is drawn upright on its own
+    /// canvas and lit there.
     pub(crate) fn gpu(&self, time: Micros) -> Option<Vec<GpuLayer>> {
-        // Relight is drawn on the CPU.
-        if self.relight.is_some() {
-            return None;
-        }
         let (backdrop, blur) = match &self.backdrop {
             Backdrop::None => (None, None),
             Backdrop::Color(pixel) => (
@@ -883,7 +881,21 @@ impl Placed<'_> {
             to_texture: gpu_turn(display, width, height),
             opacity: f64::from(self.transform.opacity) / 255.0,
         };
+        let source = GpuSource::Yuv {
+            width,
+            height,
+            samples,
+            tone,
+        };
         let mut layers: Vec<GpuLayer> = backdrop.into_iter().collect();
+        if let Some((depth, lighting)) = self.lit_depth(time) {
+            // A blurred backdrop is a copy of the lit picture: the CPU's.
+            if blur.is_some() {
+                return None;
+            }
+            layers.push(relit_layer(source, depth, lighting, placement));
+            return Some(layers);
+        }
         let backdrop = match blur {
             Some(radius) => Some(GpuBackdrop {
                 cover: Placement {
@@ -896,16 +908,70 @@ impl Placed<'_> {
             None => None,
         };
         layers.push(GpuLayer {
-            source: GpuSource::Yuv {
-                width,
-                height,
-                samples,
-                tone,
-            },
+            source,
             placement,
             backdrop,
         });
         Some(layers)
+    }
+
+    /// The clip's depth at `time`, upright, and the light over it, when it
+    /// is relit and that depth is decoded: what [`Self::relit`] lights
+    /// from. `None` draws the clip unlit, as the CPU path does then.
+    fn lit_depth(&self, time: Micros) -> Option<(CpuBytes, cutlass_effects::Lighting)> {
+        let (depth, lit) = self.relight.as_ref()?;
+        let Sample::Ready(Picture::Cpu(near)) = depth.sample(time) else {
+            return None;
+        };
+        let near = orient(near, depth.display())?;
+        if near.width() == 0 || near.height() == 0 {
+            return None;
+        }
+        Some((near, lit.clone()))
+    }
+}
+
+/// A relit clip as one layer: its decoded picture drawn upright on a
+/// canvas of its own oriented size, lit there from `depth`, then that
+/// canvas placed as `placement` places the picture, with no turn left.
+fn relit_layer(
+    source: GpuSource,
+    depth: CpuBytes,
+    lighting: cutlass_effects::Lighting,
+    placement: Placement,
+) -> GpuLayer {
+    let oriented = placement.oriented;
+    let upright = Placement {
+        to_picture: Affine::IDENTITY,
+        picture: oriented,
+        to_oriented: Affine::IDENTITY,
+        oriented,
+        to_texture: placement.to_texture,
+        opacity: 1.0,
+    };
+    let child = crate::gpu::FrameLayers {
+        width: oriented.0,
+        height: oriented.1,
+        layers: vec![
+            GpuLayer {
+                source,
+                placement: upright,
+                backdrop: None,
+            },
+            GpuLayer {
+                source: GpuSource::Relight { depth, lighting },
+                placement: Placement::canvas(oriented.0, oriented.1),
+                backdrop: None,
+            },
+        ],
+    };
+    GpuLayer {
+        source: GpuSource::Nested(Box::new(child)),
+        placement: Placement {
+            to_texture: Affine::IDENTITY,
+            ..placement
+        },
+        backdrop: None,
     }
 }
 

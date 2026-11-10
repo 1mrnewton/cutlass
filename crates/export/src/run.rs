@@ -23,7 +23,7 @@ use cutlass_eval::{
 };
 use cutlass_gpu::Extent;
 use cutlass_model::{Draft, FrameRate, Micros, SegmentId, TimeRange};
-use cutlass_render::{RenderError, Renderer, frame_layers};
+use cutlass_render::{RenderError, Renderer};
 
 use crate::config::{
     AudioExport, ExportError, ExportRequest, check_audio, coded_size, output_size, validate,
@@ -631,9 +631,9 @@ fn evaluated_frame<D: Device>(input: FrameInputs<'_, D>) -> Result<Evaluated, Ex
     let snapshot = Snapshot::with_fonts(draft, fonts);
     let picture = match renderer {
         Some(renderer) => {
-            let composed =
+            let layers =
                 layers_in(&snapshot, time, device, media, clips, 0, root).map_err(map_eval)?;
-            drawn(renderer, composed)?
+            drawn(renderer, &layers)?
         }
         None => frame_in(&snapshot, time, device, media, clips, 0, root).map_err(map_eval)?,
     };
@@ -683,13 +683,12 @@ pub(crate) fn still_rgba<D: Device>(
     ))
 }
 
-/// `composed` drawn on the GPU and read back.
-fn drawn(renderer: &Renderer, composed: cutlass_eval::Composed) -> Result<Frame, ExportError> {
-    let layers = frame_layers(composed).map_err(drawing)?;
+/// `layers` drawn on the GPU and read back.
+fn drawn(renderer: &Renderer, layers: &cutlass_eval::FrameLayers) -> Result<Frame, ExportError> {
     let canvas = renderer
         .canvas(layers.width, layers.height)
         .map_err(drawing)?;
-    renderer.draw_frame(&canvas, &layers).map_err(drawing)?;
+    renderer.draw_frame(&canvas, layers).map_err(drawing)?;
     Ok(Frame {
         extent: Extent {
             width: layers.width,

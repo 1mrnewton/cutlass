@@ -307,7 +307,7 @@ mod tests {
 
     use super::raster_size;
     use super::*;
-    use crate::{Composed, Snapshot, frame_in, layers_in};
+    use crate::{Snapshot, frame_in, layers_in};
 
     const SQUARE: &str = include_str!("../../lottie/tests/fixtures/square.json");
 
@@ -550,7 +550,7 @@ mod tests {
         let media = ReaderFactory::new();
         let mut device = SoftwareDevice::new();
         let mut clips = OpenClips::new();
-        let composed = layers_in(
+        let layers = layers_in(
             &Snapshot::new(&draft),
             Micros(1_000_000),
             &mut device,
@@ -560,9 +560,6 @@ mod tests {
             None,
         )
         .unwrap();
-        let Composed::Layers(layers) = composed else {
-            panic!("composed on the CPU");
-        };
         let vectors: Vec<_> = layers
             .layers
             .iter()

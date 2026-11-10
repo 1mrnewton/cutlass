@@ -2475,7 +2475,7 @@ impl Shell {
         let mut device = SoftwareDevice::new();
         let mut cache = preview_cache.borrow_mut();
         cache.set_patient(false);
-        let composed = cache
+        let layers = cache
             .layers(
                 session,
                 &mut device,
@@ -2498,8 +2498,6 @@ impl Shell {
             self.preview_stale = true;
             return Ok(Some(held));
         }
-        let layers = cutlass_render::frame_layers(composed)
-            .map_err(|error| ShellError::Eval(error.to_string()))?;
         let shown = gpu
             .show(layers, key)
             .map_err(|error| ShellError::Eval(error.to_string()))?;

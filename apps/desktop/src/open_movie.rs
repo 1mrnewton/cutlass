@@ -746,6 +746,11 @@ fn decodes_on_gpu(frame: &cutlass_eval::FrameLayers) -> bool {
         | cutlass_eval::GpuSource::Blend { layers: child, .. } => decodes_on_gpu(child),
         cutlass_eval::GpuSource::Rgba(_)
         | cutlass_eval::GpuSource::Effect(..)
+        | cutlass_eval::GpuSource::Colour { .. }
+        | cutlass_eval::GpuSource::Cut(_)
+        | cutlass_eval::GpuSource::Select(_)
+        | cutlass_eval::GpuSource::Relight { .. }
+        | cutlass_eval::GpuSource::Package(_)
         | cutlass_eval::GpuSource::Vector(_)
         | cutlass_eval::GpuSource::Transition { .. } => false,
     })
@@ -762,6 +767,11 @@ fn decodes_in_place(frame: &cutlass_eval::FrameLayers) -> bool {
         | cutlass_eval::GpuSource::Blend { layers: child, .. } => decodes_in_place(child),
         cutlass_eval::GpuSource::Rgba(_)
         | cutlass_eval::GpuSource::Effect(..)
+        | cutlass_eval::GpuSource::Colour { .. }
+        | cutlass_eval::GpuSource::Cut(_)
+        | cutlass_eval::GpuSource::Select(_)
+        | cutlass_eval::GpuSource::Relight { .. }
+        | cutlass_eval::GpuSource::Package(_)
         | cutlass_eval::GpuSource::Vector(_)
         | cutlass_eval::GpuSource::Transition { .. } => false,
     })
@@ -788,7 +798,7 @@ fn the_gpu_compositor_matches_the_cpu_frame() {
         return;
     };
     let fonts = crate::face::installed();
-    let cases: [(&str, (u32, u32), Edit); 10] = [
+    let cases: [(&str, (u32, u32), Edit); 13] = [
         ("same size", (848, 608), |_| {}),
         ("shrunk to fit", (424, 240), |_| {}),
         ("centered", (1000, 700), |_| {}),
@@ -885,11 +895,197 @@ fn the_gpu_compositor_matches_the_cpu_frame() {
             title.clip.alpha = 0.9;
             draft.tracks[0].segments.push(title);
         }),
+        ("graded", (848, 608), |draft| {
+            let movie = draft.tracks[0].segments[1].id.clone();
+            colour_edit(
+                draft,
+                &movie,
+                vec![
+                    adjust_request(&movie, "exposure", 0.3),
+                    adjust_request(&movie, "temperature", -0.4),
+                    adjust_request(&movie, "clear", 0.5),
+                    adjust_request(&movie, "vignetting", 0.6),
+                    cutlass_session::Request::SetCurve {
+                        segment_id: movie.clone(),
+                        material_id: "curves".into(),
+                        channel: "rgb".to_owned(),
+                        points: vec![[0.0, 0.05], [0.5, 0.58], [1.0, 0.95]],
+                    },
+                    cutlass_session::Request::SetHsl {
+                        segment_id: movie.clone(),
+                        material_id: "hsl".into(),
+                        color: 0,
+                        hue: 0.4,
+                        saturation: 0.3,
+                        lightness: -0.2,
+                    },
+                ],
+            );
+        }),
+        ("masked and moved", (848, 608), |draft| {
+            let movie = draft.tracks[0].segments[1].id.clone();
+            let clip = &mut draft.tracks[0].segments[1].clip;
+            clip.scale.x = 0.7;
+            clip.scale.y = 0.7;
+            clip.rotation = 10.0;
+            colour_edit(
+                draft,
+                &movie,
+                vec![cutlass_session::Request::SetMask {
+                    segment_id: movie.clone(),
+                    material_id: "mask".into(),
+                    mask: Some(cutlass_effects::Mask {
+                        feather: 0.3,
+                        ..cutlass_effects::Mask::new(cutlass_effects::MaskShape::Star)
+                    }),
+                }],
+            );
+        }),
+        ("selected", (848, 608), |draft| {
+            let movie = draft.tracks[0].segments[1].id.clone();
+            let (w, h) = (64u32, 48u32);
+            let alpha: Vec<u8> = (0..w * h)
+                .map(|index| {
+                    if (index % w) * 3 > (index / w) * 2 + 40 {
+                        255
+                    } else {
+                        0
+                    }
+                })
+                .collect();
+            let selection =
+                cutlass_effects::Selection::from_alpha(w, h, &alpha, Micros(0)).unwrap();
+            colour_edit(
+                draft,
+                &movie,
+                vec![cutlass_session::Request::SetSelection {
+                    segment_id: movie.clone(),
+                    material_id: "object".into(),
+                    selection: Some(selection),
+                }],
+            );
+        }),
     ];
     let readers = crate::readers::installed_readers();
     for (name, size, edit) in cases {
         gpu_matches_cpu(&renderer, &fonts, &readers, &path, name, size, edit);
     }
+}
+
+/// The materials `requests` give the clip `movie`, put on `draft`. Only
+/// the materials and the clip's list of them are taken: a session lays the
+/// main row out again, which would move the movie off the frame's time.
+fn colour_edit(
+    draft: &mut Draft,
+    movie: &cutlass_model::SegmentId,
+    requests: Vec<cutlass_session::Request>,
+) {
+    let mut session = cutlass_session::Session::open(draft.clone());
+    session.apply(0, &requests).unwrap();
+    let edited = session.draft();
+    let refs = edited
+        .tracks
+        .iter()
+        .flat_map(|track| &track.segments)
+        .find(|segment| &segment.id == movie)
+        .unwrap()
+        .extra_material_refs
+        .clone();
+    draft.materials = edited.materials.clone();
+    let segment = draft
+        .tracks
+        .iter_mut()
+        .flat_map(|track| &mut track.segments)
+        .find(|segment| &segment.id == movie)
+        .unwrap();
+    segment.extra_material_refs = refs;
+}
+
+fn adjust_request(
+    movie: &cutlass_model::SegmentId,
+    key: &str,
+    value: f64,
+) -> cutlass_session::Request {
+    cutlass_session::Request::SetAdjust {
+        segment_id: movie.clone(),
+        material_id: format!("adjust-{key}").into(),
+        key: key.to_owned(),
+        value,
+    }
+}
+
+/// The movie lit by Relight presets from a depth the job kept in the
+/// project: the GPU lights its upright picture as the CPU does, moved and
+/// turned or not.
+#[test]
+fn a_relit_movie_lights_on_the_gpu_like_the_cpu() {
+    let movies = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../local-files");
+    let path = movies.join("IMG_8143.MP4");
+    if !path.is_file() {
+        eprintln!("skipped: ../local-files/IMG_8143.MP4 is missing");
+        return;
+    }
+    let Some(renderer) = importing_renderer() else {
+        eprintln!("skipped: no GPU");
+        return;
+    };
+    let root = std::env::temp_dir().join(format!("cutlass-relit-gpu-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    // The depth "video" is a still whose red varies across it.
+    let mut draft = movie_draft(&path, 848, 608, true).unwrap();
+    relit_with::<0>(&mut draft);
+    let ask = cutlass_eval::relight_ask(&draft, Some(&root), &"movie".into()).unwrap();
+    let depth =
+        cutlass_store::relight_file(&root, &ask.key(), &TimeRange::new(0, 1_000_000)).unwrap();
+    std::fs::copy(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../crates/engine/fixtures/pattern.jpg"),
+        &depth,
+    )
+    .unwrap();
+    let fonts = crate::face::installed();
+    let readers = crate::readers::installed_readers();
+    let cases: [(&str, (u32, u32), Edit); 3] = [
+        ("relit", (848, 608), relit_with::<0>),
+        ("relit from behind, shrunk", (424, 304), relit_with::<1>),
+        ("relit, moved and turned", (848, 608), |draft| {
+            relit_with::<2>(draft);
+            let clip = &mut draft.tracks[0].segments[1].clip;
+            clip.scale.x = 0.6;
+            clip.scale.y = 0.5;
+            clip.rotation = 25.0;
+            clip.alpha = 0.8;
+        }),
+    ];
+    for (name, size, edit) in cases {
+        gpu_matches_cpu_in(
+            &renderer,
+            &fonts,
+            &readers,
+            &path,
+            name,
+            size,
+            edit,
+            Some(&root),
+        );
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The movie lit by preset `PRESET` of a few: a warm key, a rim from
+/// behind, and coloured moving spots.
+fn relit_with<const PRESET: usize>(draft: &mut Draft) {
+    let preset = ["warm_key", "rim_glow", "rainbow_spots"][PRESET];
+    draft.materials.videos[0].video_algorithm = Some(cutlass_model::VideoAlgorithm {
+        algorithms: vec![cutlass_model::Algorithm {
+            kind: cutlass_model::Algorithm::RELIGHT.into(),
+            level: 1,
+            preset: preset.into(),
+            strength: Some(0.9),
+            ..cutlass_model::Algorithm::default()
+        }],
+        ..cutlass_model::VideoAlgorithm::default()
+    });
 }
 
 /// A BT.2020 HLG movie takes the GPU path, and the shader's transfer and
@@ -935,7 +1131,7 @@ fn an_hdr_movie_converts_on_the_gpu_like_the_cpu() {
     }
     // The decoder reads the file's HLG tag, so the shader decodes HLG.
     let draft = movie_draft(&path, 960, 540, false).unwrap();
-    let composed = cutlass_eval::layers_in(
+    let layers = cutlass_eval::layers_in(
         &Snapshot::with_fonts(&draft, &fonts),
         Micros(500_000),
         &mut SoftwareDevice::new(),
@@ -945,9 +1141,6 @@ fn an_hdr_movie_converts_on_the_gpu_like_the_cpu() {
         None,
     )
     .unwrap();
-    let cutlass_eval::Composed::Layers(layers) = composed else {
-        panic!("composed on the CPU");
-    };
     let tones: Vec<_> = layers
         .layers
         .iter()
@@ -967,37 +1160,51 @@ fn gpu_matches_cpu(
     readers: &ReaderFactory,
     path: &Path,
     name: &str,
+    size: (u32, u32),
+    edit: Edit,
+) {
+    gpu_matches_cpu_in(renderer, fonts, readers, path, name, size, edit, None);
+}
+
+/// [`gpu_matches_cpu`] in the project folder `root`, where the jobs keep
+/// what they make.
+#[allow(clippy::too_many_arguments)]
+fn gpu_matches_cpu_in(
+    renderer: &cutlass_render::Renderer,
+    fonts: &crate::face::FaceTable,
+    readers: &ReaderFactory,
+    path: &Path,
+    name: &str,
     (width, height): (u32, u32),
     edit: Edit,
+    root: Option<&Path>,
 ) {
     let mut draft = movie_draft(path, width, height, true).unwrap();
     edit(&mut draft);
     let time = Micros(500_000);
     let mut device = SoftwareDevice::new();
-    let cpu = frame(
+    let cpu = cutlass_eval::frame_in(
         &Snapshot::with_fonts(&draft, fonts),
         time,
         &mut device,
         readers,
         &mut OpenClips::new(),
         0,
+        root,
     )
     .unwrap()
     .rgba;
     let mut clips = OpenClips::new();
-    let composed = cutlass_eval::layers_in(
+    let layers = cutlass_eval::layers_in(
         &Snapshot::with_fonts(&draft, fonts),
         time,
         &mut device,
         readers,
         &mut clips,
         0,
-        None,
+        root,
     )
     .unwrap();
-    let cutlass_eval::Composed::Layers(layers) = composed else {
-        panic!("{name}: composed on the CPU");
-    };
     assert!(
         decodes_on_gpu(&layers),
         "{name}: the movie did not reach the GPU"
@@ -1006,6 +1213,18 @@ fn gpu_matches_cpu(
         assert!(
             decodes_in_place(&layers),
             "{name}: the movie was copied off the GPU"
+        );
+    }
+    if name.starts_with("relit") {
+        assert!(
+            layers.layers.iter().any(|layer| matches!(
+                &layer.source,
+                cutlass_eval::GpuSource::Nested(child) if child.layers.iter().any(|inner| matches!(
+                    inner.source,
+                    cutlass_eval::GpuSource::Relight { .. }
+                ))
+            )),
+            "{name}: the movie was not lit on the GPU"
         );
     }
     if name == "title over video" && !fonts.name().is_empty() {

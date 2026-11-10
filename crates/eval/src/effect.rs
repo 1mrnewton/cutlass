@@ -24,6 +24,7 @@ use cutlass_picture::{CpuBytes, Picture, PictureSource, Sample, rgba_len};
 
 use crate::EvalError;
 use crate::canvas::project_canvas;
+use crate::gpu::{GpuLayer, GpuSource, SelectionCut};
 use crate::media::clip_frame;
 
 pub(crate) struct StackLayer<'a> {
@@ -75,29 +76,6 @@ impl PictureSource for Held {
     fn sample(&self, _time: Micros) -> Sample {
         Sample::Ready(Picture::Cpu(self.0.clone()))
     }
-}
-
-/// The frame has an effect mark or a clip filter, so it composes on the CPU.
-/// A blend mode the app ships runs on the GPU and does not count.
-pub(crate) fn needs_cpu(draft: &Draft, time: Micros, stack: &[StackLayer<'_>]) -> bool {
-    !global_marks(draft, time, stack).is_empty()
-        || stack
-            .iter()
-            .any(|layer| clip_adjust(draft, layer.track_index, layer.segment_index, time).is_some())
-        || stack
-            .iter()
-            .any(|layer| clip_mask(draft, layer.track_index, layer.segment_index).is_some())
-        || stack
-            .iter()
-            .any(|layer| clip_has_selection(draft, layer.track_index, layer.segment_index))
-        || stack.iter().any(|layer| {
-            match clip_filter(draft, layer.track_index, layer.segment_index) {
-                ClipFilter::None => false,
-                ClipFilter::Blend => segment(draft, layer.track_index, layer.segment_index)
-                    .is_none_or(|segment| cutlass_effects::segment_blend(draft, segment).is_none()),
-                ClipFilter::Unary => true,
-            }
-        })
 }
 
 pub(crate) fn present<D: Device>(
@@ -394,6 +372,127 @@ fn adjustment_layers<'a>(
         })
 }
 
+/// The looks, adjustment layers and effect packages covering `time`, as
+/// GPU layers over the layers before them, with their place among the
+/// layers. A package the store does not have leaves the picture, as on
+/// the CPU.
+pub(crate) fn colour_marks(
+    draft: &Draft,
+    store: &dyn PackageStore,
+    time: Micros,
+    extent: Extent,
+    stack: &[StackLayer<'_>],
+) -> Vec<((i32, usize, usize), GpuLayer)> {
+    global_marks(draft, time, stack)
+        .into_iter()
+        .filter_map(|mark| {
+            let key = (mark.render_index, mark.track_index, mark.segment_index);
+            let Some(colour) = mark.adjust else {
+                let pass = cutlass_effects::segment_pass(store, draft, mark.segment, time)
+                    .filter(|pass| pass.blend.is_none())?;
+                return Some((key, GpuLayer::package(pass, extent.width, extent.height)));
+            };
+            let mask = effect_mask(draft, mark.segment, time, extent);
+            Some((
+                key,
+                GpuLayer::colour(colour, grain_seed(time), mask, extent.width, extent.height),
+            ))
+        })
+        .collect()
+}
+
+/// A drawn clip's effect package at `time`, run over that clip alone
+/// after its colour work, mask and selection, as the CPU runs it: what it
+/// paints, or for a blend package its fade and the mode it mixes with.
+/// `None` for a clip with no package, a blend mode the app ships, or a
+/// package the store does not have.
+pub(crate) fn clip_package(
+    draft: &Draft,
+    store: &dyn PackageStore,
+    time: Micros,
+    track_index: usize,
+    segment_index: usize,
+) -> Option<cutlass_effects::PackagePass> {
+    let segment = segment(draft, track_index, segment_index)?;
+    let blends = match clip_filter(draft, track_index, segment_index) {
+        ClipFilter::None => return None,
+        ClipFilter::Blend if cutlass_effects::segment_blend(draft, segment).is_some() => {
+            return None;
+        }
+        ClipFilter::Blend => true,
+        ClipFilter::Unary => false,
+    };
+    cutlass_effects::segment_pass(store, draft, segment, time)
+        .filter(|pass| pass.blend.is_some() == blends)
+}
+
+/// A drawn clip's own colour work, mask and selection at `time` as GPU
+/// layers over that clip alone, in the order the CPU runs them: the colour
+/// kept to its colour mask, then the mask, then the selection. A cut whose
+/// clip has no frame on the canvas is left out, as the CPU leaves it.
+pub(crate) fn clip_passes(
+    draft: &Draft,
+    time: Micros,
+    extent: Extent,
+    track_index: usize,
+    segment_index: usize,
+) -> Vec<GpuLayer> {
+    let Some(segment) = segment(draft, track_index, segment_index) else {
+        return Vec::new();
+    };
+    let (width, height) = (extent.width, extent.height);
+    let mut passes = Vec::new();
+    if let Some(colour) = clip_adjust(draft, track_index, segment_index) {
+        let mask = effect_mask(draft, segment, time, extent);
+        passes.push(GpuLayer::colour(
+            colour,
+            grain_seed(time),
+            mask,
+            width,
+            height,
+        ));
+    }
+    let frame = clip_frame(draft, segment, time, (width, height)).map(|frame| {
+        #[allow(clippy::cast_possible_truncation)]
+        let frame = frame.0.map(|value| value as f32);
+        frame
+    });
+    let Some(frame) = frame else {
+        return passes;
+    };
+    if let Some(mask) = clip_mask(draft, track_index, segment_index) {
+        let mask = mask.at(segment, &draft.keyframe_graph_list, time);
+        passes.push(GpuLayer::cut(
+            GpuSource::Cut(cutlass_effects::CanvasMask { mask, frame }),
+            width,
+            height,
+        ));
+    }
+    if let Some(selection) = cutlass_effects::segment_selection(draft, segment)
+        && let Some(alpha) = selection.alpha()
+    {
+        passes.push(GpuLayer::cut(
+            GpuSource::Select(SelectionCut {
+                width: selection.width,
+                height: selection.height,
+                alpha,
+                invert: selection.invert,
+                frame,
+            }),
+            width,
+            height,
+        ));
+    }
+    passes
+}
+
+/// The grain's seed at `time`: it moves once a frame at 30 frames a second.
+fn grain_seed(time: Micros) -> u32 {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let seed = (time.0 / 33_333) as u32;
+    seed
+}
+
 /// A recipe effect at one frame: where it sits among the layers, its steps
 /// at that time, the clip it runs over alone, as track and segment index,
 /// when it is bound to one, and the mask it shows inside, if any.
@@ -627,14 +726,11 @@ fn adjusted_in(
     CpuBytes::new(width, height, rgba).unwrap_or(after)
 }
 
-/// `input` with `adjust` run over it. The grain moves once a frame at 30
-/// frames a second.
+/// `input` with `adjust` run over it, its grain at `time`.
 fn adjusted(colour: &Colour, input: CpuBytes, time: Micros) -> CpuBytes {
     let (width, height) = (input.width(), input.height());
     let mut rgba = input.rgba().to_vec();
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let seed = (time.0 / 33_333) as u32;
-    colour.apply(&mut rgba, width, height, seed);
+    colour.apply(&mut rgba, width, height, grain_seed(time));
     CpuBytes::new(width, height, rgba).unwrap_or(input)
 }
 

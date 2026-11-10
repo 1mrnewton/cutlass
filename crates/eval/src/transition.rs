@@ -584,7 +584,7 @@ mod tests {
             cutlass_effects::TransitionKind::WipeLeft.effect_id();
         let media = ReaderFactory::new();
         let mut device = SoftwareDevice::new();
-        let composed = crate::frame::layers_in(
+        let frame_layers = crate::frame::layers_in(
             &Snapshot::new(&draft),
             Micros(90),
             &mut device,
@@ -594,9 +594,6 @@ mod tests {
             None,
         )
         .expect("layers");
-        let crate::Composed::Layers(frame_layers) = composed else {
-            panic!("composed on the CPU");
-        };
         let moments: Vec<_> = frame_layers
             .layers
             .iter()

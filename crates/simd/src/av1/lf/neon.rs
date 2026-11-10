@@ -2,13 +2,13 @@
 //! 8-bit lanes of a vector, one vector per sample of the line.
 
 use core::arch::aarch64::{
-    uint8x16_t, uint16x8_t, vabdq_u8, vaddw_high_u8, vaddw_u8, vandq_s8, vandq_u8, vbicq_s8,
-    vbslq_u8, vcgtq_u8, vcleq_u8, vcombine_u8, vdupq_n_s8, vdupq_n_u8, vdupq_n_u16, veorq_u8,
-    vget_low_u8, vmaxq_u8, vmaxvq_u8, vqaddq_s8, vqaddq_u8, vqsubq_s8, vreinterpretq_s8_u8,
-    vreinterpretq_u8_s8, vreinterpretq_u8_u16, vreinterpretq_u8_u32, vreinterpretq_u8_u64,
-    vreinterpretq_u16_u8, vreinterpretq_u32_u8, vreinterpretq_u64_u8, vrshrn_n_u16, vrshrq_n_s8,
-    vshrq_n_s8, vshrq_n_u8, vsubw_high_u8, vsubw_u8, vtrn1q_u8, vtrn1q_u16, vtrn1q_u32, vtrn1q_u64,
-    vtrn2q_u8, vtrn2q_u16, vtrn2q_u32, vtrn2q_u64,
+    uint8x16_t, uint16x8_t, vabdq_u8, vaddl_high_u8, vaddl_u8, vaddq_u16, vandq_s8, vandq_u8,
+    vbicq_s8, vbicq_u8, vbslq_u8, vcgtq_u8, vcleq_u8, vcombine_u8, vdupq_n_s8, vdupq_n_u8,
+    vdupq_n_u16, veorq_u8, vget_low_u8, vmaxq_u8, vmaxvq_u8, vqaddq_s8, vqaddq_u8, vqsubq_s8,
+    vreinterpretq_s8_u8, vreinterpretq_u8_s8, vreinterpretq_u8_u16, vreinterpretq_u8_u32,
+    vreinterpretq_u8_u64, vreinterpretq_u16_u8, vreinterpretq_u32_u8, vreinterpretq_u64_u8,
+    vrshrn_n_u16, vrshrq_n_s8, vshrq_n_s8, vshrq_n_u8, vsubl_high_u8, vsubl_u8, vtrn1q_u8,
+    vtrn1q_u16, vtrn1q_u32, vtrn1q_u64, vtrn2q_u8, vtrn2q_u16, vtrn2q_u32, vtrn2q_u64,
 };
 
 use super::{Limits, Size};
@@ -19,18 +19,34 @@ type V = uint8x16_t;
 /// Sixteen 16-bit sums, one for each line.
 type Sums = (uint16x8_t, uint16x8_t);
 
+/// `a + b`, each lane widened to 16 bits.
 #[inline]
 #[cfg_attr(target_feature = "aes", target_feature(enable = "neon,aes"))]
 #[cfg_attr(not(target_feature = "aes"), target_feature(enable = "neon"))]
-fn add(sum: Sums, v: V) -> Sums {
-    (vaddw_u8(sum.0, vget_low_u8(v)), vaddw_high_u8(sum.1, v))
+fn sum2(a: V, b: V) -> Sums {
+    (
+        vaddl_u8(vget_low_u8(a), vget_low_u8(b)),
+        vaddl_high_u8(a, b),
+    )
+}
+
+/// `a - b`, each lane widened to 16 bits (a negative lane wraps, and
+/// adds as its negative).
+#[inline]
+#[cfg_attr(target_feature = "aes", target_feature(enable = "neon,aes"))]
+#[cfg_attr(not(target_feature = "aes"), target_feature(enable = "neon"))]
+fn diff(a: V, b: V) -> Sums {
+    (
+        vsubl_u8(vget_low_u8(a), vget_low_u8(b)),
+        vsubl_high_u8(a, b),
+    )
 }
 
 #[inline]
 #[cfg_attr(target_feature = "aes", target_feature(enable = "neon,aes"))]
 #[cfg_attr(not(target_feature = "aes"), target_feature(enable = "neon"))]
-fn sub(sum: Sums, v: V) -> Sums {
-    (vsubw_u8(sum.0, vget_low_u8(v)), vsubw_high_u8(sum.1, v))
+fn plus(a: Sums, b: Sums) -> Sums {
+    (vaddq_u16(a.0, b.0), vaddq_u16(a.1, b.1))
 }
 
 /// The wide filter (7.14.6.4) for taps `-N .. N` of the lines `o`,
@@ -41,27 +57,63 @@ fn sub(sum: Sums, v: V) -> Sums {
 /// reach replaced by the last one inside it. So each output's sum is the
 /// one before it with one sample entering and one leaving each of the two
 /// windows. A sum of at most 16 samples fits 16 bits.
+///
+/// What enters and leaves is worked out apart from the running sum, so
+/// only one addition for each output waits for the output before it.
 #[inline]
 #[cfg_attr(target_feature = "aes", target_feature(enable = "neon,aes"))]
 #[cfg_attr(not(target_feature = "aes"), target_feature(enable = "neon"))]
 fn wide<const N: i32, const N2: i32, const LOG2: i32>(o: &[V; 14], out: &mut [V; 14], on: V) {
     let at = |p: i32| o[(7 + p.clamp(-(N + 1), N)) as usize];
-    let mut sum = (vdupq_n_u16(0), vdupq_n_u16(0));
-    for j in -N..=N {
-        sum = add(sum, at(j - N));
+    // The first output's samples, two at a time: an even count, the
+    // window of `2 N + 1` and the `2 N2 + 1` counted twice.
+    let first = |k: i32| {
+        let j = if k <= 2 * N {
+            k - N
+        } else {
+            k - 2 * N - 1 - N2
+        };
+        at(j - N)
+    };
+    let zero = (vdupq_n_u16(0), vdupq_n_u16(0));
+    let mut parts = [zero; 2];
+    for pair in 0..N + N2 + 1 {
+        let s = sum2(first(2 * pair), first(2 * pair + 1));
+        parts[(pair & 1) as usize] = plus(parts[(pair & 1) as usize], s);
     }
-    for j in -N2..=N2 {
-        sum = add(sum, at(j - N));
-    }
+    let mut sum = plus(parts[0], parts[1]);
     for i in -N..N {
         if i > -N {
-            sum = sub(add(sum, at(i + N)), at(i - 1 - N));
-            sum = sub(add(sum, at(i + N2)), at(i - 1 - N2));
+            let moved = plus(
+                diff(at(i + N), at(i - 1 - N)),
+                diff(at(i + N2), at(i - 1 - N2)),
+            );
+            sum = plus(sum, moved);
         }
         let r = vcombine_u8(vrshrn_n_u16::<LOG2>(sum.0), vrshrn_n_u16::<LOG2>(sum.1));
         let k = (7 + i) as usize;
         out[k] = vbslq_u8(on, r, out[k]);
     }
+}
+
+/// The wide filters of size 16 for the flat lines, kept out of
+/// [`filter`]: with them inline that function is too large to be inlined
+/// itself, and every size-16 edge then passes its fourteen vectors
+/// through memory. This takes and gives back the lines by value, so the
+/// caller keeps its vectors in registers on the way here.
+#[inline(never)]
+#[cfg_attr(target_feature = "aes", target_feature(enable = "neon,aes"))]
+#[cfg_attr(not(target_feature = "aes"), target_feature(enable = "neon"))]
+fn widest(o: [V; 14], mut out: [V; 14], flat: V, flat2: V) -> [V; 14] {
+    // The filter over `p2 .. q2`, unless every flat line takes the one
+    // over `p5 .. q5`, which writes over it.
+    if vmaxvq_u8(vbicq_u8(flat, flat2)) != 0 {
+        wide::<3, 0, 3>(&o, &mut out, flat);
+    }
+    if vmaxvq_u8(flat2) != 0 {
+        wide::<6, 1, 4>(&o, &mut out, flat2);
+    }
+    out
 }
 
 #[inline]
@@ -120,37 +172,38 @@ fn filter<const SIZE: usize>(v: &mut [V; 14], lim: Limits) -> bool {
         );
         flat2 = vandq_u8(vcleq_u8(f, one), flat);
     }
-    // The narrow filter (7.14.6.3) on `sample - 128` as signed bytes. A
-    // saturating add of the saturated difference three times equals the
-    // clamp of `f + 3 * (qs0 - ps0)`: the sum moves one way only, so it
-    // can only stick at the bound the exact value passes.
-    let sign = vdupq_n_u8(0x80);
-    let ps1 = vreinterpretq_s8_u8(veorq_u8(p1, sign));
-    let ps0 = vreinterpretq_s8_u8(veorq_u8(p0, sign));
-    let qs0 = vreinterpretq_s8_u8(veorq_u8(q0, sign));
-    let qs1 = vreinterpretq_s8_u8(veorq_u8(q1, sign));
-    let hev_s = vreinterpretq_s8_u8(hev);
-    let d = vqsubq_s8(qs0, ps0);
-    let f = vandq_s8(vqsubq_s8(ps1, qs1), hev_s);
-    let f = vqaddq_s8(vqaddq_s8(vqaddq_s8(f, d), d), d);
-    // A line that fails the mask moves by 0.
-    let f = vandq_s8(f, vreinterpretq_s8_u8(pass));
-    let f1 = vshrq_n_s8::<3>(vqaddq_s8(f, vdupq_n_s8(4)));
-    let f2 = vshrq_n_s8::<3>(vqaddq_s8(f, vdupq_n_s8(3)));
-    let f3 = vbicq_s8(vrshrq_n_s8::<1>(f1), hev_s);
-    v[5] = veorq_u8(vreinterpretq_u8_s8(vqaddq_s8(ps1, f3)), sign);
-    v[6] = veorq_u8(vreinterpretq_u8_s8(vqaddq_s8(ps0, f2)), sign);
-    v[7] = veorq_u8(vreinterpretq_u8_s8(vqsubq_s8(qs0, f1)), sign);
-    v[8] = veorq_u8(vreinterpretq_u8_s8(vqsubq_s8(qs1, f3)), sign);
-    if SIZE >= 6 && vmaxvq_u8(flat) != 0 {
-        if SIZE == 6 {
-            wide::<2, 1, 3>(&o, v, flat);
-        } else {
-            wide::<3, 0, 3>(&o, v, flat);
-        }
+    // The narrow filter (7.14.6.3), unless every line that passed takes
+    // a wide one.
+    if SIZE == 4 || vmaxvq_u8(vbicq_u8(pass, flat)) != 0 {
+        // On `sample - 128` as signed bytes. A saturating add of the
+        // saturated difference three times equals the clamp of
+        // `f + 3 * (qs0 - ps0)`: the sum moves one way only, so it can
+        // only stick at the bound the exact value passes.
+        let sign = vdupq_n_u8(0x80);
+        let ps1 = vreinterpretq_s8_u8(veorq_u8(p1, sign));
+        let ps0 = vreinterpretq_s8_u8(veorq_u8(p0, sign));
+        let qs0 = vreinterpretq_s8_u8(veorq_u8(q0, sign));
+        let qs1 = vreinterpretq_s8_u8(veorq_u8(q1, sign));
+        let hev_s = vreinterpretq_s8_u8(hev);
+        let d = vqsubq_s8(qs0, ps0);
+        let f = vandq_s8(vqsubq_s8(ps1, qs1), hev_s);
+        let f = vqaddq_s8(vqaddq_s8(vqaddq_s8(f, d), d), d);
+        // A line that fails the mask moves by 0.
+        let f = vandq_s8(f, vreinterpretq_s8_u8(pass));
+        let f1 = vshrq_n_s8::<3>(vqaddq_s8(f, vdupq_n_s8(4)));
+        let f2 = vshrq_n_s8::<3>(vqaddq_s8(f, vdupq_n_s8(3)));
+        let f3 = vbicq_s8(vrshrq_n_s8::<1>(f1), hev_s);
+        v[5] = veorq_u8(vreinterpretq_u8_s8(vqaddq_s8(ps1, f3)), sign);
+        v[6] = veorq_u8(vreinterpretq_u8_s8(vqaddq_s8(ps0, f2)), sign);
+        v[7] = veorq_u8(vreinterpretq_u8_s8(vqsubq_s8(qs0, f1)), sign);
+        v[8] = veorq_u8(vreinterpretq_u8_s8(vqsubq_s8(qs1, f3)), sign);
     }
-    if SIZE == 16 && vmaxvq_u8(flat2) != 0 {
-        wide::<6, 1, 4>(&o, v, flat2);
+    if SIZE >= 6 && vmaxvq_u8(flat) != 0 {
+        match SIZE {
+            6 => wide::<2, 1, 3>(&o, v, flat),
+            8 => wide::<3, 0, 3>(&o, v, flat),
+            _ => *v = widest(o, *v, flat, flat2),
+        }
     }
     true
 }

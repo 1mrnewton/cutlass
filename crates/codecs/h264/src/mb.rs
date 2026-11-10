@@ -5734,6 +5734,48 @@ mod intra8 {
         );
         assert_eq!(pred, [0, 0]);
     }
+
+    /// Clause 9.3.3.1.1.9. An 8×8 block's coded_block_flag looks at 8×8
+    /// blocks only: a neighbouring macroblock on the 4×4 transform counts as
+    /// 0 however many coefficients it holds, I_PCM counts as 1, and a missing
+    /// neighbour counts as 1 for an intra macroblock and 0 for an inter one.
+    #[test]
+    fn an_8x8_coded_block_flag_ignores_4x4_neighbours() {
+        let at = super::Place { mx: 1, my: 1 };
+        let corner = super::Cell { bx: 0, by: 0 };
+        let mut pic = frame(32, 32);
+        let mut current = Mb::new(3);
+        let inc = |pic: &Frame, current: &Mb, cell| super::cbf8_inc(pic, at, cell, current, 0);
+        assert_eq!(inc(&pic, &current, corner), 0, "inter, no neighbours");
+        current.intra = true;
+        assert_eq!(inc(&pic, &current, corner), 3, "intra, no neighbours");
+
+        let mut left = Mb::new(3);
+        left.nnz_y = [5; 16];
+        pic.mb[2] = left;
+        let mut above = Mb::new(3);
+        above.nnz_y = [5; 16];
+        pic.mb[1] = above;
+        assert_eq!(inc(&pic, &current, corner), 0, "4x4 neighbours");
+        pic.mb[2].transform8 = true;
+        assert_eq!(inc(&pic, &current, corner), 1, "8x8 block to the left");
+        pic.mb[1].transform8 = true;
+        assert_eq!(inc(&pic, &current, corner), 3, "8x8 blocks on both sides");
+        pic.mb[1].nnz_y = [0; 16];
+        assert_eq!(inc(&pic, &current, corner), 1, "empty 8x8 block above");
+        pic.mb[1].transform8 = false;
+        pic.mb[1].pcm = true;
+        assert_eq!(inc(&pic, &current, corner), 3, "I_PCM above");
+
+        // Inside the macroblock the neighbours are its own 8×8 blocks.
+        current.nnz_y[1] = 2;
+        current.nnz_y[4] = 0;
+        let inner = super::Cell { bx: 2, by: 2 };
+        assert_eq!(inc(&pic, &current, inner), 0);
+        current.nnz_y[2 * 4 + 1] = 1;
+        current.nnz_y[4 + 2] = 1;
+        assert_eq!(inc(&pic, &current, inner), 3);
+    }
 }
 
 #[cfg(test)]

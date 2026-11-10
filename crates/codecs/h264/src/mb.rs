@@ -9694,6 +9694,10 @@ fn deblock_planes<S: Sample>(
     let mbaff = pic.mbaff;
     let first = rows.start.min(mb_h).saturating_mul(mb_w);
     let count = rows.end.min(mb_h).saturating_mul(mb_w);
+    // What each macroblock's edges need to know about it, kept for the
+    // macroblock to its right and the one below, so it is worked out once.
+    let mut above: Vec<Option<(u16, bool)>> = vec![None; mb_w];
+    let mut left: Option<(u16, bool)> = None;
     for addr in first..count {
         let (mx, my) = if mbaff {
             let pair = addr / 2;
@@ -9702,6 +9706,8 @@ fn deblock_planes<S: Sample>(
             (addr % mb_w, addr / mb_w)
         };
         let index = my * mb_w + mx;
+        let beside = if mx == 0 { None } else { left.take() };
+        let over = above.get_mut(mx).and_then(|kept| kept.take());
         if pic
             .mb
             .get(index)
@@ -9717,6 +9723,12 @@ fn deblock_planes<S: Sample>(
             .mb
             .get(index)
             .map_or((0, false), |mb| (coded_mask(mb), single_motion(mb)));
+        if !mbaff {
+            left = Some(known);
+            if let Some(kept) = above.get_mut(mx) {
+                *kept = Some(known);
+            }
+        }
         let span = luma_span(my, field);
         let off = offsets(pic, index);
         for edge in 0..4 {
@@ -9727,7 +9739,7 @@ fn deblock_planes<S: Sample>(
                 break;
             }
             let x = mx * 16 + edge * 4;
-            let bs = edge_strength(pic, (mx, my), edge, true, known);
+            let bs = edge_strength(pic, (mx, my), edge, true, (known, beside));
             // An 8×8 transform has no luma edge at 4 or 12.
             if x >= 4 && !(transform8 && (edge == 1 || edge == 3)) {
                 let qpav = edge_qp(pic, mx, my, true, true, true, edge == 0);
@@ -9761,7 +9773,7 @@ fn deblock_planes<S: Sample>(
                 break;
             }
             let y = span.at(edge * 4);
-            let bs = edge_strength(pic, (mx, my), edge, false, known);
+            let bs = edge_strength(pic, (mx, my), edge, false, (known, over));
             if y >= 4 && !(transform8 && (edge == 1 || edge == 3)) {
                 let qpav = edge_qp(pic, mx, my, true, true, false, edge == 0);
                 filter_groups(
@@ -9802,16 +9814,17 @@ struct ChromaEdge {
 }
 
 /// `known` is the current macroblock's [`coded_mask`] and whether it has a
-/// [`single_motion`].
+/// [`single_motion`], then the same for the macroblock across edge 0 when
+/// the caller has it.
 fn edge_strength<S: Sample>(
     pic: &Frame<S>,
     at: (usize, usize),
     edge: usize,
     vertical: bool,
-    known: (u16, bool),
+    known: ((u16, bool), Option<(u16, bool)>),
 ) -> [u8; 4] {
     let (mx, my) = at;
-    let (q_mask, single) = known;
+    let ((q_mask, single), across_known) = known;
     let Some(current) = pic.mb.get(my * pic.mb_w + mx) else {
         return [0; 4];
     };
@@ -9835,8 +9848,10 @@ fn edge_strength<S: Sample>(
     }
     // The blocks on the far side: the neighbour's last row or column across
     // the macroblock edge, this macroblock's previous one inside it.
+    let far =
+        neighbor.map(|mb| across_known.unwrap_or_else(|| (coded_mask(mb), single_motion(mb))));
     let (p_mask, across) = if edge == 0 {
-        (neighbor.map_or(0, coded_mask), 3)
+        (far.map_or(0, |(mask, _)| mask), 3)
     } else {
         (q_mask, edge - 1)
     };
@@ -9849,7 +9864,7 @@ fn edge_strength<S: Sample>(
         Some(0)
     } else {
         neighbor
-            .filter(|mb| single_motion(mb))
+            .filter(|_| far.is_some_and(|(_, single)| single))
             .map(|mb| motion_strength(preds_at(mb, 3, 3), preds_at(current, 0, 0)))
     };
     let mut out = [0u8; 4];

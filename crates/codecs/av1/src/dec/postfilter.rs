@@ -16,29 +16,19 @@ use crate::dsp::superres::upscale_plane;
 use super::frame::{FrameState, Picture};
 use super::obu::{FrameHeader, SequenceHeader};
 use super::types::{
-    GLOBAL_GLOBALMV, GLOBALMV, INTRA_FRAME, MiInfo, NEARESTMV, NONE, block_height, block_width,
+    GLOBAL_GLOBALMV, GLOBALMV, INTRA_FRAME, NEARESTMV, NONE, bh4, block_height, block_width, bw4,
     plane_residual_size, tx_h, tx_w,
 };
 
-/// Filter level (7.14.5) of the block `m` for loop filter index `i`
-/// (0, 1: luma vertical / horizontal edges, 2, 3: U, V), with the block's
-/// `delta_lf` value `delta_lf`.
-fn filter_level_of(hdr: &FrameHeader, m: &MiInfo, i: usize, delta_lf: i32) -> u8 {
-    level_for(
-        hdr,
-        i,
-        delta_lf,
-        m.segment_id as usize,
-        m.ref_frame[0],
-        mode_type(m),
-    )
-}
-
 #[inline]
-fn mode_type(m: &MiInfo) -> usize {
-    usize::from(m.y_mode >= NEARESTMV && m.y_mode != GLOBALMV && m.y_mode != GLOBAL_GLOBALMV)
+fn mode_type(y_mode: u8) -> usize {
+    usize::from(y_mode >= NEARESTMV && y_mode != GLOBALMV && y_mode != GLOBAL_GLOBALMV)
 }
 
+/// Filter level (7.14.5) for loop filter index `i` (0, 1: luma vertical /
+/// horizontal edges, 2, 3: U, V) of a block with the `delta_lf` value
+/// `delta_lf`, the segment `seg`, the first reference frame `rf` and the
+/// mode type `mode_type`.
 fn level_for(
     hdr: &FrameHeader,
     i: usize,
@@ -66,15 +56,176 @@ fn level_for(
     lvl as u8
 }
 
-/// Number of `ref_frame[0]` classes in [`LfPlane::lut`]: 0..=7, and one for
+/// Number of `ref_frame[0]` classes in [`LfLevels`]: 0..=7, and one for
 /// every negative value.
 const LF_REFS: usize = 9;
+
+/// [`LfInfo::flags`]: the block is skipped (CDEF leaves an 8x8 of
+/// skipped blocks alone).
+pub const LF_SKIP: u8 = 1;
+/// [`LfInfo::flags`]: the block is skipped and inter, so only its own
+/// edges are filtered, not those of its transform blocks (7.14.2).
+pub const LF_BLOCK_EDGES: u8 = 2;
+
+/// What the loop filter and CDEF read of a block, kept for each of its
+/// 4x4 units: its filter level for each loop filter index (7.14.5), its
+/// size and its flags. A quarter the size of the mode info, and the
+/// levels are worked out once for a block, not for each of its units in
+/// each pass.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LfInfo {
+    pub lvl: [u8; 4],
+    pub flags: u8,
+    pub bsize: u8,
+}
+
+/// The filter levels of a frame's blocks.
+pub struct LfLevels {
+    multi: bool,
+    /// Levels for `delta_lf == 0`, by `[index][segment][ref class][mode type]`.
+    lut: [[[[u8; 2]; LF_REFS]; 8]; 4],
+}
+
+impl LfLevels {
+    pub fn new(hdr: &FrameHeader) -> Self {
+        let mut lut = [[[[0u8; 2]; LF_REFS]; 8]; 4];
+        for (li, t) in lut.iter_mut().enumerate() {
+            for (seg, t) in t.iter_mut().enumerate() {
+                for (rc, t) in t.iter_mut().enumerate() {
+                    let rf = if rc < 8 { rc as i8 } else { NONE };
+                    for (mt, t) in t.iter_mut().enumerate() {
+                        *t = level_for(hdr, li, 0, seg, rf, mt);
+                    }
+                }
+            }
+        }
+        Self {
+            multi: hdr.delta_lf_multi,
+            lut,
+        }
+    }
+
+    /// What the filters read of a block with these fields.
+    #[inline]
+    pub fn info(
+        &self,
+        hdr: &FrameHeader,
+        ref_frame: i8,
+        segment_id: u8,
+        y_mode: u8,
+        skip: bool,
+        bsize: u8,
+        delta_lf: [i8; 4],
+    ) -> LfInfo {
+        let seg = usize::from(segment_id & 7);
+        let rc = if ref_frame >= 0 {
+            (ref_frame as usize).min(8)
+        } else {
+            8
+        };
+        let mt = mode_type(y_mode);
+        let lvl = core::array::from_fn(|li| {
+            let d = delta_lf[if self.multi { li } else { 0 }];
+            if d == 0 {
+                self.lut[li][seg][rc][mt]
+            } else {
+                level_for(hdr, li, i32::from(d), seg, ref_frame, mt)
+            }
+        });
+        LfInfo {
+            lvl,
+            flags: u8::from(skip) * LF_SKIP
+                + u8::from(skip && ref_frame > INTRA_FRAME) * LF_BLOCK_EDGES,
+            bsize,
+        }
+    }
+}
+
+/// The [`LfInfo`] of every 4x4 unit of a frame, laid out like
+/// [`FrameState::mi`].
+#[derive(Default)]
+pub struct FilterInfo {
+    pub units: Vec<LfInfo>,
+    pub stride: usize,
+}
+
+impl FilterInfo {
+    /// Sizes the array for the frame of `fs`. Units keep stale values
+    /// until their blocks are stored.
+    pub fn size_for(&mut self, fs: &FrameState) {
+        self.stride = fs.mi_stride;
+        self.units.resize(fs.lf_tx[0].len(), LfInfo::default());
+    }
+
+    /// Stores the info of a block at luma 4x4 position `(row, col)`, in
+    /// its units inside the `mi_rows` x `mi_cols` frame.
+    #[inline]
+    pub fn store(
+        &mut self,
+        (row, col): (usize, usize),
+        (mi_rows, mi_cols): (usize, usize),
+        info: LfInfo,
+    ) {
+        let w4 = bw4(info.bsize).min(mi_cols.saturating_sub(col));
+        let h4 = bh4(info.bsize).min(mi_rows.saturating_sub(row));
+        for y in 0..h4 {
+            let at = (row + y) * self.stride + col;
+            if let Some(d) = self.units.get_mut(at..at + w4) {
+                d.fill(info);
+            }
+        }
+    }
+
+    /// Fills luma 4x4 rows `rows` from the mode info of `fs`.
+    pub fn fill_rows(
+        &mut self,
+        hdr: &FrameHeader,
+        levels: &LfLevels,
+        fs: &FrameState,
+        rows: core::ops::Range<usize>,
+    ) {
+        let st = fs.mi_stride;
+        for r in rows.start..rows.end.min(fs.mi_rows) {
+            let (Some(mi), Some(out)) = (
+                fs.mi.get(r * st..r * st + fs.mi_cols),
+                self.units.get_mut(r * st..r * st + fs.mi_cols),
+            ) else {
+                return;
+            };
+            // A block is as wide in every row it covers, and starts at a
+            // multiple of its width: one info for its units of the row.
+            let mut c = 0;
+            while c < mi.len() {
+                let m = &mi[c];
+                let w = bw4(m.bsize).max(1);
+                let end = ((c / w + 1) * w).min(mi.len());
+                let info = levels.info(
+                    hdr,
+                    m.ref_frame[0],
+                    m.segment_id,
+                    m.y_mode,
+                    m.skip,
+                    m.bsize,
+                    m.delta_lf,
+                );
+                out[c..end].fill(info);
+                c = end;
+            }
+        }
+    }
+
+    /// Whether the block at luma 4x4 position `(row, col)` is skipped.
+    #[inline(always)]
+    pub fn skip(&self, row: usize, col: usize) -> bool {
+        self.units[row * self.stride + col].flags & LF_SKIP != 0
+    }
+}
 
 /// Edge decisions for one plane and pass of the loop filter (7.14.2 -
 /// 7.14.5).
 struct LfPlane<'a> {
-    hdr: &'a FrameHeader,
     fs: &'a FrameState,
+    info: &'a FilterInfo,
     tx: &'a [u8],
     plane: usize,
     pass: usize,
@@ -87,34 +238,24 @@ struct LfPlane<'a> {
     nr_vis: usize,
     /// Loop filter index `i` of 7.14.5.
     li: usize,
-    /// Levels for `delta_lf == 0`, by `[segment][ref class][mode type]`.
-    lut: [[[u8; 2]; LF_REFS]; 8],
 }
 
 impl<'a> LfPlane<'a> {
     fn new(
         hdr: &'a FrameHeader,
         fs: &'a FrameState,
+        info: &'a FilterInfo,
         plane: usize,
         pass: usize,
         sx: usize,
         sy: usize,
     ) -> Self {
         let li = if plane == 0 { pass } else { plane + 1 };
-        let mut lut = [[[0u8; 2]; LF_REFS]; 8];
-        for (seg, t) in lut.iter_mut().enumerate() {
-            for (rc, t) in t.iter_mut().enumerate() {
-                let rf = if rc < 8 { rc as i8 } else { NONE };
-                for (mt, t) in t.iter_mut().enumerate() {
-                    *t = level_for(hdr, li, 0, seg, rf, mt);
-                }
-            }
-        }
         let nc = fs.mi_cols.div_ceil(1 << sx);
         let nr = fs.mi_rows.div_ceil(1 << sy);
         Self {
-            hdr,
             fs,
+            info,
             tx: &fs.lf_tx[plane],
             plane,
             pass,
@@ -124,23 +265,6 @@ impl<'a> LfPlane<'a> {
             nc_vis: (hdr.frame_width as usize).div_ceil(4 << sx).min(nc),
             nr_vis: (hdr.frame_height as usize).div_ceil(4 << sy).min(nr),
             li,
-            lut,
-        }
-    }
-
-    #[inline]
-    fn level(&self, m: &MiInfo) -> u8 {
-        let d = if self.hdr.delta_lf_multi {
-            m.delta_lf[self.li]
-        } else {
-            m.delta_lf[0]
-        };
-        if d == 0 {
-            let rf = m.ref_frame[0];
-            let rc = if rf >= 0 { rf as usize } else { 8 };
-            self.lut[m.segment_id as usize & 7][rc.min(8)][mode_type(m)]
-        } else {
-            filter_level_of(self.hdr, m, self.li, i32::from(d))
         }
     }
 
@@ -163,16 +287,18 @@ impl<'a> LfPlane<'a> {
         } else {
             &self.tx[(ur - 1) * st..(ur - 1) * st + self.nc]
         };
-        // MiInfo row holding the unit's bottom-right 4x4 for chroma, and the
-        // row above it for the horizontal edges.
+        // The row of block info holding the unit's bottom-right 4x4 for
+        // chroma, and the row above it for the horizontal edges.
         let r = (ur << sy) | sy;
-        let mi_row = &fs.mi[r * st..(r + 1) * st];
+        let units = &self.info.units;
+        let mi_row = &units[r * st..(r + 1) * st];
         let mi_prev = if pass0 {
             mi_row
         } else {
             let pr = r - (1 << sy);
-            &fs.mi[pr * st..(pr + 1) * st]
+            &units[pr * st..(pr + 1) * st]
         };
+        let li = self.li;
         let yp = ur * 4;
         for uc in usize::from(pass0)..self.nc_vis {
             let tx = tx_row[uc];
@@ -186,7 +312,7 @@ impl<'a> LfPlane<'a> {
             }
             let c = (uc << sx) | sx;
             let m = &mi_row[c];
-            if m.skip && m.ref_frame[0] > INTRA_FRAME {
+            if m.flags & LF_BLOCK_EDGES != 0 {
                 let psz = plane_residual_size(m.bsize, sx != 0, sy != 0);
                 let bs = if pass0 {
                     block_width(psz)
@@ -209,9 +335,9 @@ impl<'a> LfPlane<'a> {
             } else {
                 4
             };
-            let mut lvl = self.level(m);
+            let mut lvl = m.lvl[li];
             if lvl == 0 {
-                lvl = self.level(pm);
+                lvl = pm.lvl[li];
             }
             out[uc] = (filter_size as u8, lvl);
         }
@@ -392,6 +518,10 @@ pub fn loop_filter<P: Pixel>(
     }
     let bd = pic.bd;
     let sharp = hdr.loop_filter.sharpness;
+    let mut info = FilterInfo::default();
+    info.size_for(fs);
+    info.fill_rows(hdr, &LfLevels::new(hdr), fs, 0..fs.mi_rows);
+    let info = &info;
     let mut lps = Vec::new();
     for plane in 0..seq.num_planes() {
         if plane > 0 && hdr.loop_filter.level[1 + plane] == 0 {
@@ -407,8 +537,8 @@ pub fn loop_filter<P: Pixel>(
         };
         lps.push((
             plane,
-            LfPlane::new(hdr, fs, plane, 0, sx, sy),
-            LfPlane::new(hdr, fs, plane, 1, sx, sy),
+            LfPlane::new(hdr, fs, info, plane, 0, sx, sy),
+            LfPlane::new(hdr, fs, info, plane, 1, sx, sy),
             fs.mi_rows.div_ceil(1 << sy),
         ));
     }
@@ -495,6 +625,30 @@ pub fn loop_filter_rows<P: Pixel>(
     if hdr.loop_filter.level[0] == 0 && hdr.loop_filter.level[1] == 0 {
         return;
     }
+    // The horizontal edges at the top of these rows read the row above.
+    let mut info = FilterInfo::default();
+    info.size_for(fs);
+    let end = if last { fs.mi_rows } else { mi_r1 };
+    info.fill_rows(hdr, &LfLevels::new(hdr), fs, mi_r0.saturating_sub(2)..end);
+    loop_filter_rows_with(seq, hdr, fs, &info, pic, mi_r0, mi_r1, last);
+}
+
+/// [`loop_filter_rows`] with the block info of the rows (and of the two
+/// rows of 4x4 units above them) in `info`: `fs` gives the frame's size
+/// and its transform sizes, not its mode info.
+pub fn loop_filter_rows_with<P: Pixel>(
+    seq: &SequenceHeader,
+    hdr: &FrameHeader,
+    fs: &FrameState,
+    info: &FilterInfo,
+    pic: &mut Picture<P>,
+    mi_r0: usize,
+    mi_r1: usize,
+    last: bool,
+) {
+    if hdr.loop_filter.level[0] == 0 && hdr.loop_filter.level[1] == 0 {
+        return;
+    }
     let bd = pic.bd;
     let sharp = hdr.loop_filter.sharpness;
     for plane in 0..seq.num_planes() {
@@ -509,8 +663,8 @@ pub fn loop_filter_rows<P: Pixel>(
         } else {
             (0, 0)
         };
-        let vert = LfPlane::new(hdr, fs, plane, 0, sx, sy);
-        let horz = LfPlane::new(hdr, fs, plane, 1, sx, sy);
+        let vert = LfPlane::new(hdr, fs, info, plane, 0, sx, sy);
+        let horz = LfPlane::new(hdr, fs, info, plane, 1, sx, sy);
         let nr = fs.mi_rows.div_ceil(1 << sy);
         let u0 = mi_r0 >> sy;
         let u1 = if last { nr } else { (mi_r1 >> sy).min(nr) };
@@ -629,7 +783,7 @@ pub fn cdef_sb_rows<P: Pixel>(
 ) {
     let ks = mi_r0 / 16..mi_r1.div_ceil(16) + 1;
     cdef_save_lines(seq, fs, src, &mut pads.lines, ks);
-    cdef_areas(seq, hdr, fs, dst, mi_r0, mi_r1, pads);
+    cdef_areas(seq, hdr, fs, None, dst, mi_r0, mi_r1, pads);
 }
 
 /// CDEF (7.15) in place of the deblocked 64x64 areas whose first luma 4x4
@@ -637,10 +791,14 @@ pub fn cdef_sb_rows<P: Pixel>(
 /// frame in order, each with the same `sc`, and the rows below these areas
 /// that CDEF reads must be deblocked: their pre-CDEF rows next to the
 /// boundaries are saved in `sc` for the next call.
+///
+/// With `info`, the skipped blocks are read from it and `fs` gives the
+/// frame's size and its CDEF indices, not its mode info.
 pub fn cdef_sb_rows_in_place<P: Pixel>(
     seq: &SequenceHeader,
     hdr: &FrameHeader,
     fs: &FrameState,
+    info: Option<&FilterInfo>,
     pic: &mut Picture<P>,
     mi_r0: usize,
     mi_r1: usize,
@@ -648,7 +806,7 @@ pub fn cdef_sb_rows_in_place<P: Pixel>(
 ) {
     let ks = mi_r0 / 16 + 1..mi_r1.div_ceil(16) + 1;
     cdef_save_lines(seq, fs, pic, &mut sc.lines, ks);
-    cdef_areas(seq, hdr, fs, pic, mi_r0, mi_r1, sc);
+    cdef_areas(seq, hdr, fs, info, pic, mi_r0, mi_r1, sc);
 }
 
 /// CDEF in place of the areas of `mi_r0..mi_r1` with the boundaries in `sc`.
@@ -656,6 +814,7 @@ fn cdef_areas<P: Pixel>(
     seq: &SequenceHeader,
     hdr: &FrameHeader,
     fs: &FrameState,
+    info: Option<&FilterInfo>,
     pic: &mut Picture<P>,
     mi_r0: usize,
     mi_r1: usize,
@@ -677,6 +836,7 @@ fn cdef_areas<P: Pixel>(
         seq,
         hdr,
         fs,
+        info,
         bd,
         &mut chunks,
         &out,
@@ -775,6 +935,7 @@ fn cdef_threads<P: Pixel>(
                 seq,
                 hdr,
                 fs,
+                None,
                 bd,
                 &mut chunks,
                 &out,
@@ -805,6 +966,7 @@ fn cdef_rows<P: Pixel>(
     seq: &SequenceHeader,
     hdr: &FrameHeader,
     fs: &FrameState,
+    info: Option<&FilterInfo>,
     bd: u32,
     dst: &mut [&mut [P]],
     out: &CdefOut,
@@ -853,10 +1015,17 @@ fn cdef_rows<P: Pixel>(
                     for c in (sbc..c_end).step_by(2) {
                         let rr = (r + 1).min(fs.mi_rows - 1);
                         let cc = (c + 1).min(fs.mi_cols - 1);
-                        let skip = fs.mi_at(r, c).skip
-                            && fs.mi_at(rr, c).skip
-                            && fs.mi_at(r, cc).skip
-                            && fs.mi_at(rr, cc).skip;
+                        let skip = match info {
+                            Some(i) => {
+                                i.skip(r, c) && i.skip(rr, c) && i.skip(r, cc) && i.skip(rr, cc)
+                            }
+                            None => {
+                                fs.mi_at(r, c).skip
+                                    && fs.mi_at(rr, c).skip
+                                    && fs.mi_at(r, cc).skip
+                                    && fs.mi_at(rr, cc).skip
+                            }
+                        };
                         if skip {
                             continue;
                         }
@@ -1253,3 +1422,6 @@ pub fn loop_restoration_stripes<P: Pixel>(
     let planes = lr_plane_args(seq, hdr, fs, pic, bounds, units);
     lr_planes_stripes(planes, scratch, stripes);
 }
+
+#[cfg(test)]
+mod tests;

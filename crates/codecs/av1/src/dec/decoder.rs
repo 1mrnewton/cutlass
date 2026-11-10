@@ -740,7 +740,10 @@ impl Workers {
 struct Spares<P> {
     /// Pictures nothing holds any more (see [`recycle`]).
     pics: Vec<Picture<P>>,
+    /// Frame states of reconstruction ([`FrameState::recon_shell`]) and
+    /// of the filters ([`FrameState::filter_shell`]).
     shells: Vec<FrameState>,
+    filter_shells: Vec<FrameState>,
     lr: Vec<LrScratch>,
     /// Frame states of parsed frames.
     states: Vec<FrameState>,
@@ -757,7 +760,11 @@ struct Spares<P> {
 }
 
 /// The CDEF scratch and loop restoration boundaries of an [`InlineFilter`].
-type FilterRows<P> = (postfilter::CdefScratch<P>, postfilter::LrBounds<P>);
+type FilterRows<P> = (
+    postfilter::CdefScratch<P>,
+    postfilter::LrBounds<P>,
+    postfilter::FilterInfo,
+);
 
 /// Band buffers kept for reuse, at most.
 const MAX_BANDS: usize = 96;
@@ -788,6 +795,7 @@ impl<P> Default for PixState<P> {
             spares: Arc::new(Mutex::new(Spares {
                 pics: Vec::new(),
                 shells: Vec::new(),
+                filter_shells: Vec::new(),
                 lr: Vec::new(),
                 states: Vec::new(),
                 bands: Vec::new(),
@@ -804,7 +812,8 @@ impl<P: Pixel> PixState<P> {
     /// Trims the spares.
     fn collect(&mut self) {
         let mut sp = lock(&self.spares);
-        sp.shells.truncate(2 * MAX_IN_FLIGHT);
+        sp.shells.truncate(MAX_IN_FLIGHT);
+        sp.filter_shells.truncate(MAX_IN_FLIGHT);
         sp.lr.truncate(4);
         sp.states.truncate(16);
         sp.scratch.truncate(8);
@@ -2479,15 +2488,25 @@ impl RowMsg {
     }
 }
 
-/// A [`FrameState::filter_shell`] of `fs`, from `shells` when one fits.
-fn take_shell(shells: &mut Vec<FrameState>, fs: &FrameState) -> FrameState {
-    match shells.iter().position(|f| f.fits_filter_shell(fs)) {
-        Some(i) => shells.swap_remove(i).reshape_filter_shell(fs),
+/// The shells of reconstruction and of the filters for the frame of
+/// `fs`, from the pools when one fits.
+fn take_shells<P>(sp: &mut Spares<P>, fs: &FrameState) -> (FrameState, FrameState) {
+    let recon = match sp.shells.iter().position(|f| f.fits_recon_shell(fs)) {
+        Some(i) => sp.shells.swap_remove(i).reshape_shell(fs),
         None => {
             prof::count(prof::NEW_SHELL);
-            fs.filter_shell()
+            fs.recon_shell()
         }
-    }
+    };
+    let filter = match sp
+        .filter_shells
+        .iter()
+        .position(|f| f.fits_filter_shell(fs))
+    {
+        Some(i) => sp.filter_shells.swap_remove(i).reshape_shell(fs),
+        None => fs.filter_shell(),
+    };
+    (recon, filter)
 }
 
 /// What reconstruction hands the in-loop filters of its frame: a log of
@@ -2746,11 +2765,12 @@ impl<P: PicturePixel> InlineFilter<'_, P> {
         seq: &SequenceHeader,
         hdr: &FrameHeader,
         fs: &mut FrameState,
+        info: &postfilter::FilterInfo,
         cur: &mut Picture<P>,
         m: &RowMsg,
     ) {
         m.apply_meta(fs);
-        self.deblock(seq, hdr, fs, cur, m.r0, m.r1, m.last);
+        self.deblock(seq, hdr, fs, info, cur, m.r0, m.r1, m.last);
     }
 
     fn deblock(
@@ -2758,16 +2778,17 @@ impl<P: PicturePixel> InlineFilter<'_, P> {
         seq: &SequenceHeader,
         hdr: &FrameHeader,
         fs: &FrameState,
+        info: &postfilter::FilterInfo,
         cur: &mut Picture<P>,
         a: usize,
         b: usize,
         last: bool,
     ) {
         if self.lf_on {
-            postfilter::loop_filter_rows(seq, hdr, fs, cur, a, b, last);
+            postfilter::loop_filter_rows_with(seq, hdr, fs, info, cur, a, b, last);
         }
         if let Some((c, d)) = self.to_filter.take() {
-            self.filter_ready_rows(seq, hdr, fs, cur, c, d, false);
+            self.filter_ready_rows(seq, hdr, fs, info, cur, c, d, false);
             // Luma rows above 4 * d are final: deblocking below changes
             // none of them, and the loop restoration stripes done end 8
             // rows higher.
@@ -2785,7 +2806,7 @@ impl<P: PicturePixel> InlineFilter<'_, P> {
             }
         }
         if last {
-            self.filter_ready_rows(seq, hdr, fs, cur, a, b, true);
+            self.filter_ready_rows(seq, hdr, fs, info, cur, a, b, true);
         } else {
             self.to_filter = Some((a, b));
         }
@@ -2799,6 +2820,7 @@ impl<P: PicturePixel> InlineFilter<'_, P> {
         seq: &SequenceHeader,
         hdr: &FrameHeader,
         fs: &FrameState,
+        info: &postfilter::FilterInfo,
         cur: &mut Picture<P>,
         a: usize,
         b: usize,
@@ -2809,7 +2831,7 @@ impl<P: PicturePixel> InlineFilter<'_, P> {
             postfilter::lr_save_frame_bounds(seq, hdr, cur, &mut self.lr_bounds, stripes.clone());
         }
         if self.cdef_on {
-            postfilter::cdef_sb_rows_in_place(seq, hdr, fs, cur, a, b, &mut self.cdef);
+            postfilter::cdef_sb_rows_in_place(seq, hdr, fs, Some(info), cur, a, b, &mut self.cdef);
         }
         if self.lr_on {
             let units = postfilter::lr_units(seq, fs);
@@ -2947,9 +2969,10 @@ fn decode_frame_async<P: PicturePixel>(
     // and a picture: the unfiltered one, from the pool, and the final one.
     let (rc_fs, mut ft_fs, lr_scratch, rec) = {
         let mut sp = lock(spares);
+        let (rc_fs, ft_fs) = take_shells(&mut sp, fs);
         (
-            take_shell(&mut sp.shells, fs),
-            take_shell(&mut sp.shells, fs),
+            rc_fs,
+            ft_fs,
             sp.lr.pop().unwrap_or_default(),
             take_picture::<P>(
                 &mut sp.pics,
@@ -3118,10 +3141,17 @@ impl<P: PicturePixel> FilterStage<P> {
             spares,
             job,
         } = self;
-        let (cdef, lr_bounds) = lock(&spares)
-            .filters
-            .pop()
-            .unwrap_or_else(|| (postfilter::cdef_pads(), postfilter::LrBounds::default()));
+        let (cdef, lr_bounds, mut info) = lock(&spares).filters.pop().unwrap_or_else(|| {
+            (
+                postfilter::cdef_pads(),
+                postfilter::LrBounds::default(),
+                postfilter::FilterInfo::default(),
+            )
+        });
+        // What the filters read of the blocks, stored from their logs.
+        info.size_for(&fs);
+        let levels = postfilter::LfLevels::new(&hdr);
+        let size = (fs.mi_rows, fs.mi_cols);
         let mut filt = InlineFilter {
             cdef_on,
             lr_on: hdr.lr.uses_lr,
@@ -3135,10 +3165,22 @@ impl<P: PicturePixel> FilterStage<P> {
             published: 0,
             overlap: band_overlap(seq.use_128x128_superblock),
         };
-        let mut block = Block::default();
         let mut back: (Vec<ReconLog>, Vec<RowMsg>) = Default::default();
         for (mut log, m, samples) in rx {
-            log.store_mode_info(&mut fs, &mut block);
+            for rec in &log.blocks {
+                let b = &rec.b;
+                let at = (b.mi_row as usize, b.mi_col as usize);
+                let of = levels.info(
+                    &hdr,
+                    b.ref_frame[0],
+                    b.segment_id,
+                    b.y_mode,
+                    b.skip,
+                    b.bsize,
+                    b.delta_lf,
+                );
+                info.store(at, size, of);
+            }
             log.clear();
             if let Some(m) = m {
                 match samples {
@@ -3153,7 +3195,7 @@ impl<P: PicturePixel> FilterStage<P> {
                                 sp.bands.push(bufs);
                             }
                         }
-                        filt.row(&seq, &hdr, &mut fs, &mut cur, &m);
+                        filt.row(&seq, &hdr, &mut fs, &info, &mut cur, &m);
                         prof::add(prof::FILTER, tf);
                     }
                 }
@@ -3172,7 +3214,7 @@ impl<P: PicturePixel> FilterStage<P> {
             pool.logs.append(&mut back.0);
             pool.msgs.append(&mut back.1);
         }
-        let filter_rows = (filt.cdef, filt.lr_bounds);
+        let filter_rows = (filt.cdef, filt.lr_bounds, info);
         lock(&spares).filters.push(filter_rows);
         (cur, fs, lr_scratch)
     }
@@ -3287,7 +3329,7 @@ impl<P: PicturePixel> Backend<P> {
         set_visible_size(&seq, &hdr, &mut fin);
         {
             let mut sp = lock(&spares);
-            sp.shells.push(ft_fs);
+            sp.filter_shells.push(ft_fs);
             sp.lr.push(lr_scratch);
         }
         let bands = job.finish_take(res.map(|()| Arc::new(P::wrap(fin))));
@@ -3357,10 +3399,13 @@ fn decode_frame_sync<P: PicturePixel>(
     };
     let _filter_span = prof::Span(prof::FILTER, std::time::Instant::now());
     let lr = hdr.lr.uses_lr;
-    let (mut cdef_sc, mut bounds) = lock(spares)
-        .filters
-        .pop()
-        .unwrap_or_else(|| (postfilter::cdef_pads(), postfilter::LrBounds::default()));
+    let (mut cdef_sc, mut bounds, info) = lock(spares).filters.pop().unwrap_or_else(|| {
+        (
+            postfilter::cdef_pads(),
+            postfilter::LrBounds::default(),
+            postfilter::FilterInfo::default(),
+        )
+    });
     let mut final_pic = if hdr.use_superres {
         if lr {
             let d = postfilter::superres(seq, hdr, &cur);
@@ -3392,7 +3437,7 @@ fn decode_frame_sync<P: PicturePixel>(
             threads,
         );
     }
-    lock(spares).filters.push((cdef_sc, bounds));
+    lock(spares).filters.push((cdef_sc, bounds, info));
     set_visible_size(seq, hdr, &mut final_pic);
     Ok((final_pic, saved))
 }

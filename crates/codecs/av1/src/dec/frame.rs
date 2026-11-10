@@ -286,22 +286,41 @@ impl FrameState {
             _ => Self::new(seq, hdr),
         }
     }
+    /// A state of the same size holding only what reconstruction keeps of
+    /// the blocks it replays (their mode info), to be filled row by row.
+    pub fn recon_shell(&self) -> Self {
+        Self {
+            mi: vec![MiInfo::default(); self.mi.len()],
+            uv_modes: vec![0; self.uv_modes.len()],
+            ..self.empty_shell()
+        }
+    }
+
     /// A state of the same size holding only what the in-loop filters read
-    /// (mode info, loop filter transform sizes, CDEF indices), to be filled
-    /// row by row.
+    /// besides their block info (loop filter transform sizes, CDEF
+    /// indices, loop restoration units), to be filled row by row.
     pub fn filter_shell(&self) -> Self {
+        Self {
+            lf_tx: std::array::from_fn(|p| vec![0; self.lf_tx[p].len()]),
+            cdef_idx: vec![-1; self.cdef_idx.len()],
+            ..self.empty_shell()
+        }
+    }
+
+    /// A state with the dimensions of this one and no arrays.
+    fn empty_shell(&self) -> Self {
         Self {
             mi_cols: self.mi_cols,
             mi_rows: self.mi_rows,
             mi_stride: self.mi_stride,
-            mi: vec![MiInfo::default(); self.mi.len()],
-            uv_modes: vec![0; self.uv_modes.len()],
+            mi: Vec::new(),
+            uv_modes: Vec::new(),
             tx_types: Vec::new(),
             inter_tx_sizes: Vec::new(),
-            lf_tx: std::array::from_fn(|p| vec![0; self.lf_tx[p].len()]),
+            lf_tx: Default::default(),
             segment_ids: Vec::new(),
             prev_segment_ids: None,
-            cdef_idx: vec![-1; self.cdef_idx.len()],
+            cdef_idx: Vec::new(),
             cdef_stride: self.cdef_stride,
             lr: Default::default(),
             lr_cols: self.lr_cols,
@@ -310,12 +329,19 @@ impl FrameState {
         }
     }
 
+    /// Whether `self`, a [`Self::recon_shell`], has the array sizes of a
+    /// reconstruction shell of `fs` (its contents are rewritten row by
+    /// row).
+    pub fn fits_recon_shell(&self, fs: &FrameState) -> bool {
+        self.mi_stride == fs.mi_stride
+            && self.mi.len() == fs.mi.len()
+            && self.uv_modes.len() == fs.uv_modes.len()
+    }
+
     /// Whether `self`, a [`Self::filter_shell`], has the array sizes of a
     /// filter shell of `fs` (its contents are rewritten row by row).
     pub fn fits_filter_shell(&self, fs: &FrameState) -> bool {
         self.mi_stride == fs.mi_stride
-            && self.mi.len() == fs.mi.len()
-            && self.uv_modes.len() == fs.uv_modes.len()
             && self.cdef_idx.len() == fs.cdef_idx.len()
             && self
                 .lf_tx
@@ -324,8 +350,8 @@ impl FrameState {
                 .all(|(a, b)| a.len() == b.len())
     }
 
-    /// Takes on the dimensions of `fs` (see [`Self::fits_filter_shell`]).
-    pub fn reshape_filter_shell(mut self, fs: &FrameState) -> Self {
+    /// Takes on the dimensions of `fs`, whose shell it fits.
+    pub fn reshape_shell(mut self, fs: &FrameState) -> Self {
         self.mi_cols = fs.mi_cols;
         self.mi_rows = fs.mi_rows;
         self.cdef_stride = fs.cdef_stride;

@@ -4,7 +4,33 @@
 //! full samples in a line. Along a row the six inputs are six windows of
 //! that row, each one sample further right; down a column they are six rows.
 
-pub use crate::mc_block::Block;
+pub use crate::mc_block::{BiWeight, Block};
+
+/// The rounded average of two predictions of `size` (width, height), whose
+/// rows are `size.0` apart, into `dst` with rows `dst_stride` apart.
+/// `false` means a block does not fit its slice and nothing was done.
+pub fn avg_block(
+    dst: &mut [u8],
+    dst_stride: usize,
+    a: &[u8],
+    b: &[u8],
+    size: (usize, usize),
+) -> bool {
+    kernel!(avg_block(dst, dst_stride, a, b, size))
+}
+
+/// Two predictions mixed by `weight`, laid out as for [`avg_block`].
+/// `false` also when the weights are outside the kernels' range.
+pub fn weight_block(
+    dst: &mut [u8],
+    dst_stride: usize,
+    a: &[u8],
+    b: &[u8],
+    size: (usize, usize),
+    weight: BiWeight,
+) -> bool {
+    kernel!(weight_block(dst, dst_stride, a, b, size, weight))
+}
 
 /// A luma block at quarter-sample offsets `frac` (each 0 to 3), written to
 /// `dst`, whose rows are `dst_stride` apart. Covers blocks 8 or 16 wide and
@@ -264,6 +290,69 @@ mod tests {
         for row in 0..4 {
             assert_eq!(out[row * 16..row * 16 + 16], *line((6 + row) * stride + 5));
         }
+    }
+
+    #[test]
+    fn mixed_blocks_match_the_plain_ones() {
+        let mut rng = Lcg(17);
+        for round in 0..30_000u32 {
+            let w = [4usize, 8, 12, 16][(round % 4) as usize];
+            let h = [4usize, 8, 16][(round / 4 % 3) as usize];
+            let a: Vec<u8> = (0..w * h).map(|_| rng.sample()).collect();
+            let b: Vec<u8> = (0..w * h).map(|_| rng.sample()).collect();
+            let stride = 20;
+            let (mut fast, mut plain) = (vec![9u8; stride * 16], vec![9u8; stride * 16]);
+            assert!(super::avg_block(&mut fast, stride, &a, &b, (w, h)));
+            assert!(scalar::avg_block(&mut plain, stride, &a, &b, (w, h)));
+            assert_eq!(fast, plain, "average {w}x{h}");
+            // Weights as a stream can give them: implicit ones sum to 64,
+            // explicit ones are any pair, with an offset.
+            let weight = super::BiWeight {
+                w0: (rng.next() % 257) as i32 - 128,
+                w1: (rng.next() % 257) as i32 - 128,
+                shift: 1 + (rng.next() % 8) as i32,
+                offset: (rng.next() % 257) as i32 - 128,
+            };
+            let (mut fast, mut plain) = (vec![9u8; stride * 16], vec![9u8; stride * 16]);
+            assert!(super::weight_block(
+                &mut fast,
+                stride,
+                &a,
+                &b,
+                (w, h),
+                weight
+            ));
+            assert!(scalar::weight_block(
+                &mut plain,
+                stride,
+                &a,
+                &b,
+                (w, h),
+                weight
+            ));
+            assert_eq!(fast, plain, "{weight:?} {w}x{h}");
+            // And against the clause's formula, written out here.
+            let at = (rng.next() as usize) % (w * h);
+            let sum = i32::from(a[at]) * weight.w0 + i32::from(b[at]) * weight.w1;
+            let want =
+                (((sum + (1 << (weight.shift - 1))) >> weight.shift) + weight.offset).clamp(0, 255);
+            assert_eq!(i32::from(plain[at / w * stride + at % w]), want);
+        }
+        let weight = super::BiWeight {
+            w0: 1 << 20,
+            w1: 0,
+            shift: 6,
+            offset: 0,
+        };
+        let mut out = vec![0u8; 16];
+        assert!(!super::weight_block(
+            &mut out,
+            4,
+            &[0; 16],
+            &[0; 16],
+            (4, 4),
+            weight
+        ));
     }
 
     #[test]

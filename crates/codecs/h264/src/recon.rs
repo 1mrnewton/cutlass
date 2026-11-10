@@ -368,6 +368,19 @@ pub trait Sample: Copy + Default + Into<i32> + Send + Sync + 'static {
         false
     }
 
+    /// Two predictions of `size`, rows `size.0` apart, mixed into `dst`
+    /// with a vector kernel: averaged when `weight` is `None`. `false` as
+    /// for [`Self::predict_fast`].
+    fn mix_fast(
+        _dst: &mut [Self],
+        _dst_stride: usize,
+        _predictions: (&[Self], &[Self]),
+        _size: (usize, usize),
+        _weight: Option<BiWeight>,
+    ) -> bool {
+        false
+    }
+
     /// The rounded average of two rows with a vector kernel. `false` as for
     /// [`Self::predict_fast`].
     fn avg_fast(_dst: &mut [Self], _a: &[Self], _b: &[Self]) -> bool {
@@ -476,6 +489,31 @@ impl Sample for u8 {
 
     fn idct4_add_fast(plane: &mut [Self], at: usize, down: usize, block: &[i32; 16]) -> bool {
         cutlass_h264_kernels::residual::idct4_add(plane, at, down, block)
+    }
+
+    fn mix_fast(
+        dst: &mut [Self],
+        dst_stride: usize,
+        predictions: (&[Self], &[Self]),
+        size: (usize, usize),
+        weight: Option<BiWeight>,
+    ) -> bool {
+        use cutlass_h264_kernels::mc;
+        let (a, b) = predictions;
+        let Some(weight) = weight else {
+            return mc::avg_block(dst, dst_stride, a, b, size);
+        };
+        let shift = weight.denom + 1;
+        if !(1..=15).contains(&shift) {
+            return false;
+        }
+        let weight = mc::BiWeight {
+            w0: weight.w0,
+            w1: weight.w1,
+            shift,
+            offset: (weight.o0 + weight.o1 + 1) >> 1,
+        };
+        mc::weight_block(dst, dst_stride, a, b, size, weight)
     }
 
     fn avg_fast(dst: &mut [Self], a: &[Self], b: &[Self]) -> bool {

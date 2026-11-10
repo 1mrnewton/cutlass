@@ -9197,6 +9197,23 @@ fn store_block<S: Sample>(
     let (x, y) = origin;
     let (w, h) = size;
     let (left, right) = pred;
+    // Two predictions mixed: the whole block at once where there is a
+    // kernel for it.
+    let whole = match mix {
+        Mix::Avg => Some(None),
+        Mix::Weighted(weight) => {
+            let plain =
+                (weight.w0, weight.w1, weight.o0, weight.o1, weight.denom) == (32, 32, 0, 0, 5);
+            Some((!plain).then_some(weight))
+        }
+        _ => None,
+    };
+    if let Some(weight) = whole
+        && let Some(target) = dst.get_mut(y * stride + x..)
+        && S::mix_fast(target, stride, (left, right), size, weight)
+    {
+        return;
+    }
     match mix {
         Mix::Fill => {
             for row in 0..h {

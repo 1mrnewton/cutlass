@@ -199,6 +199,16 @@ fn chroma_line(rows: &ChromaRows, column: usize) -> [i32; 4] {
     line
 }
 
+/// See [`crate::mc::weight_block`]; sixteen samples of it.
+pub fn weight16(a: &[u8; 16], b: &[u8; 16], weight: crate::mc_block::BiWeight) -> [u8; 16] {
+    core::array::from_fn(|index| crate::mc_block::weight_one(a[index], b[index], weight))
+}
+
+/// [`weight16`] for eight samples.
+pub fn weight8(a: &[u8; 8], b: &[u8; 8], weight: crate::mc_block::BiWeight) -> [u8; 8] {
+    core::array::from_fn(|index| crate::mc_block::weight_one(a[index], b[index], weight))
+}
+
 crate::mc_block::block_kernels!(pub,);
 
 /// Eight lines of four samples as four rows of eight.

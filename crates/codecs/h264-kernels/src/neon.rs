@@ -16,8 +16,8 @@ use core::arch::aarch64::{
 use crate::deblock::{ChromaRows, Lines, Rows};
 
 pub(crate) use crate::neon_mc::{
-    avg_row, avg8, avg16, centre8, centre16, chroma_block, chroma8, half8, half16, luma_block,
-    raw8, raw16,
+    avg_block, avg_row, avg8, avg16, centre8, centre16, chroma_block, chroma8, half8, half16,
+    luma_block, raw8, raw16, weight_block,
 };
 pub(crate) use crate::neon_residual::idct4_add;
 

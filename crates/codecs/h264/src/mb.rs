@@ -8740,6 +8740,32 @@ fn predict_inter<S: Sample>(
         }
         return Ok(());
     }
+    // One motion for the whole macroblock, as in a skipped or 16×16 one:
+    // the search for equal neighbours below would find just this.
+    if mb.mv0 == [mb.mv0[0]; 16]
+        && mb.mv1 == [mb.mv1[0]; 16]
+        && mb.ref0 == [mb.ref0[0]; 4]
+        && mb.ref1 == [mb.ref1[0]; 4]
+    {
+        return mc_block(
+            pic,
+            dpb,
+            slice,
+            Block {
+                x: mx * 16,
+                y: my * 16,
+                w: 16,
+                h: 16,
+            },
+            McMotion {
+                r0: mb.ref0[0],
+                r1: mb.ref1[0],
+                mv0: mb.mv0[0],
+                mv1: mb.mv1[0],
+            },
+            None,
+        );
+    }
     let mut done = [false; 16];
     for by in 0..4 {
         for bx in 0..4 {

@@ -4872,8 +4872,14 @@ fn recon_chroma<S: Sample>(
                 let w = i32::from(slice.pps.weight4[list][pos]);
                 block[ry * 4 + rx] = recon::scale4(coeffs[n], qp_c, rx, ry, w);
             }
-            recon::idct4(&mut block);
-            recon::add_block(plane, stride, x0 + bx * 4, span.at(by * 4), &block, 4, step);
+            recon::add_idct4(
+                plane,
+                stride,
+                x0 + bx * 4,
+                span.at(by * 4),
+                &mut block,
+                step,
+            );
         }
     }
 }

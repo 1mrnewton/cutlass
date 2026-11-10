@@ -213,3 +213,46 @@ fn chroma_lines(lines: &[[u8; 4]; 8]) -> ChromaRows {
 }
 
 crate::edge::edge_kernels!(pub,);
+
+/// The transform of clause 8.5.12.2, then each sample plus its residual,
+/// clipped.
+fn idct4_rows(block: &[i32; 16], rows: [[u8; 4]; 4]) -> [[u8; 4]; 4] {
+    let mut mid = [0i32; 16];
+    for i in 0..4 {
+        let [d0, d1, d2, d3] = [
+            block[i * 4],
+            block[i * 4 + 1],
+            block[i * 4 + 2],
+            block[i * 4 + 3],
+        ];
+        let e0 = d0.wrapping_add(d2);
+        let e1 = d0.wrapping_sub(d2);
+        let e2 = (d1 >> 1).wrapping_sub(d3);
+        let e3 = d1.wrapping_add(d3 >> 1);
+        mid[i * 4] = e0.wrapping_add(e3);
+        mid[i * 4 + 1] = e1.wrapping_add(e2);
+        mid[i * 4 + 2] = e1.wrapping_sub(e2);
+        mid[i * 4 + 3] = e0.wrapping_sub(e3);
+    }
+    let mut out = rows;
+    for j in 0..4 {
+        let [d0, d1, d2, d3] = [mid[j], mid[4 + j], mid[8 + j], mid[12 + j]];
+        let e0 = d0.wrapping_add(d2);
+        let e1 = d0.wrapping_sub(d2);
+        let e2 = (d1 >> 1).wrapping_sub(d3);
+        let e3 = d1.wrapping_add(d3 >> 1);
+        let column = [
+            e0.wrapping_add(e3),
+            e1.wrapping_add(e2),
+            e1.wrapping_sub(e2),
+            e0.wrapping_sub(e3),
+        ];
+        for (row, value) in out.iter_mut().zip(column) {
+            let residual = value.wrapping_add(32) >> 6;
+            row[j] = clip(i32::from(row[j]).saturating_add(residual));
+        }
+    }
+    out
+}
+
+crate::residual::residual_kernels!(pub,);

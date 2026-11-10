@@ -361,6 +361,13 @@ pub trait Sample: Copy + Default + Into<i32> {
         false
     }
 
+    /// The 4×4 inverse transform of `block` added to the samples from `at`,
+    /// rows `down` apart, with a vector kernel. `false` as for
+    /// [`Self::predict_fast`].
+    fn idct4_add_fast(_plane: &mut [Self], _at: usize, _down: usize, _block: &[i32; 16]) -> bool {
+        false
+    }
+
     /// The rounded average of two rows with a vector kernel. `false` as for
     /// [`Self::predict_fast`].
     fn avg_fast(_dst: &mut [Self], _a: &[Self], _b: &[Self]) -> bool {
@@ -467,6 +474,10 @@ impl Sample for u8 {
         }
     }
 
+    fn idct4_add_fast(plane: &mut [Self], at: usize, down: usize, block: &[i32; 16]) -> bool {
+        cutlass_h264_kernels::residual::idct4_add(plane, at, down, block)
+    }
+
     fn avg_fast(dst: &mut [Self], a: &[Self], b: &[Self]) -> bool {
         cutlass_h264_kernels::mc::avg_row(dst, a, b)
     }
@@ -513,6 +524,25 @@ impl<const BITS: u32> Sample for Depth<BITS> {
 
 fn pel<S: Sample>(value: S) -> i32 {
     value.into()
+}
+
+/// Inverse-transforms a 4×4 block of scaled coefficients and adds it to
+/// the plane at (`x0`, `y0`), rows `step` picture rows apart.
+pub fn add_idct4<S: Sample>(
+    plane: &mut [S],
+    stride: usize,
+    x0: usize,
+    y0: usize,
+    block: &mut [i32; 16],
+    step: usize,
+) {
+    // A lone DC is one value for the whole block; `idct4` knows.
+    let lone_dc = block[1..] == [0; 15];
+    if !lone_dc && S::idct4_add_fast(plane, y0 * stride + x0, stride * step, block) {
+        return;
+    }
+    idct4(block);
+    add_block(plane, stride, x0, y0, block, 4, step);
 }
 
 pub fn add_block<S: Sample>(
@@ -1289,10 +1319,18 @@ fn edge_window<S: Sample>(
     for (row, out) in window.chunks_exact_mut(width).take(height).enumerate() {
         let sy = (y0 + i32::try_from(row).unwrap_or(0)).clamp(0, pic_h - 1) as usize;
         let line = &src[sy * src_stride..sy * src_stride + pic_w as usize];
-        for (col, sample) in out.iter_mut().enumerate() {
-            let sx = (x0 + i32::try_from(col).unwrap_or(0)).clamp(0, pic_w - 1) as usize;
-            *sample = line[sx];
-        }
+        // The part of the row inside the picture is copied whole; the rest
+        // repeats the picture's first or last sample.
+        let before = usize::try_from(-x0).unwrap_or(0).min(width);
+        let inside = usize::try_from(pic_w - x0.max(0))
+            .unwrap_or(0)
+            .min(width - before);
+        let first = usize::try_from(x0).unwrap_or(0).min(pic_w as usize);
+        let (left, rest) = out.split_at_mut(before);
+        let (middle, right) = rest.split_at_mut(inside);
+        left.fill(line[0]);
+        middle.copy_from_slice(&line[first..first + inside]);
+        right.fill(line[pic_w as usize - 1]);
     }
 }
 
@@ -1845,6 +1883,42 @@ mod tests {
         assert_eq!(chroma_qps(26, 0, 30), (56, 26));
         assert_eq!(chroma_qps(26, 0, 36), (62, 26));
         assert_eq!(chroma_qps(51, 0, 36), (75, 39));
+    }
+
+    #[test]
+    fn an_edge_window_repeats_the_picture_edge() {
+        let (pic_w, pic_h, stride) = (6i32, 5i32, 8usize);
+        let plane: Vec<u8> = (0..stride * 5).map(|i| (i * 7 % 251) as u8).collect();
+        // Windows inside, across each edge and corner, and wholly outside.
+        for y0 in -9..9 {
+            for x0 in -9..12 {
+                for (width, height) in [(1usize, 1usize), (4, 3), (9, 9)] {
+                    let mut window = vec![0u8; width * height];
+                    super::edge_window(
+                        &mut window,
+                        (width, height),
+                        &plane,
+                        stride,
+                        (pic_w, pic_h),
+                        (x0, y0),
+                    );
+                    for row in 0..height {
+                        for col in 0..width {
+                            let want = super::sample(
+                                &plane,
+                                stride,
+                                pic_w,
+                                pic_h,
+                                x0 + col as i32,
+                                y0 + row as i32,
+                            );
+                            let got = i32::from(window[row * width + col]);
+                            assert_eq!(got, want, "window {width}x{height} at {x0},{y0}");
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]

@@ -1667,6 +1667,13 @@ fn wide_plane<S: Sample>(len: usize) -> Option<Vec<u16>> {
 }
 
 fn pack_row<S: Sample>(src: &[S], eight: &mut [u8], mut wide: Option<&mut Vec<u16>>) {
+    // 8-bit pictures have no wide plane; the row is a plain copy.
+    if wide.is_none() {
+        for (out, sample) in eight.iter_mut().zip(src) {
+            *out = sample.pack_eight();
+        }
+        return;
+    }
     for (out, sample) in eight.iter_mut().zip(src) {
         *out = sample.pack_eight();
         if let (Some(plane), Some(value)) = (wide.as_mut(), sample.pack_wide()) {
@@ -4079,6 +4086,24 @@ fn put_block<S: Sample>(
     }
 }
 
+/// The places of the levels of `coeffs` that are not zero, first to last.
+/// The levels are tested without a branch each, and only the ones that are
+/// set are visited after that; most of a block is zero.
+fn nonzero_levels(coeffs: &[i32]) -> impl Iterator<Item = usize> {
+    let mut set = 0u64;
+    for (index, &level) in coeffs.iter().enumerate().take(64) {
+        set |= u64::from(level != 0) << index;
+    }
+    core::iter::from_fn(move || {
+        if set == 0 {
+            return None;
+        }
+        let index = set.trailing_zeros() as usize;
+        set &= set - 1;
+        Some(index)
+    })
+}
+
 fn add_scaled<S: Sample>(
     plane: &mut [S],
     stride: usize,
@@ -4101,17 +4126,17 @@ fn add_scaled<S: Sample>(
                 block[pos] = coeffs.get(i).copied().unwrap_or(0);
             }
         } else {
-            for (i, &pos) in ZIGZAG4.iter().enumerate() {
-                let level = coeffs.get(i).copied().unwrap_or(0);
-                // A zero level scales to zero.
-                if level == 0 {
-                    continue;
-                }
+            // A zero level scales to zero, and most are zero.
+            for i in nonzero_levels(coeffs) {
+                let (Some(&pos), Some(&level)) = (ZIGZAG4.get(i), coeffs.get(i)) else {
+                    break;
+                };
                 let (ry, rx) = (pos / 4, pos % 4);
                 block[ry * 4 + rx] =
                     recon::scale4(level, qp + S::QP_BD, rx, ry, i32::from(weight[ry * 4 + rx]));
             }
-            recon::idct4(&mut block);
+            recon::add_idct4(plane, stride, x, y, &mut block, step);
+            return;
         }
         recon::add_block(plane, stride, x, y, &block, 4, step);
     } else {
@@ -4121,11 +4146,10 @@ fn add_scaled<S: Sample>(
                 block[pos] = coeffs.get(i).copied().unwrap_or(0);
             }
         } else {
-            for (i, &pos) in ZIGZAG8.iter().enumerate() {
-                let level = coeffs.get(i).copied().unwrap_or(0);
-                if level == 0 {
-                    continue;
-                }
+            for i in nonzero_levels(coeffs) {
+                let (Some(&pos), Some(&level)) = (ZIGZAG8.get(i), coeffs.get(i)) else {
+                    break;
+                };
                 let (ry, rx) = (pos / 8, pos % 8);
                 block[ry * 8 + rx] =
                     recon::scale8(level, qp + S::QP_BD, rx, ry, i32::from(weight[pos]));

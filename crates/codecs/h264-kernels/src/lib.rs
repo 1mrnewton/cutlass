@@ -41,10 +41,13 @@ pub mod deblock;
 mod edge;
 pub mod mc;
 mod mc_block;
+pub mod residual;
 
 #[cfg(target_arch = "aarch64")]
 mod neon;
 #[cfg(target_arch = "aarch64")]
 mod neon_mc;
+#[cfg(target_arch = "aarch64")]
+mod neon_residual;
 
 pub mod scalar;

@@ -3044,6 +3044,7 @@ dependencies = [
  "cutlass-eval",
  "cutlass-font",
  "cutlass-gpu",
+ "cutlass-logger",
  "cutlass-model",
  "cutlass-pcm",
  "cutlass-platform-android",
@@ -3053,6 +3054,7 @@ dependencies = [
  "cutlass-renderer-software",
  "cutlass-riff",
  "cutlass-session",
+ "image",
 ]
 
 [[package]]

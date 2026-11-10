@@ -18,6 +18,7 @@
 mod apple;
 mod faces;
 mod film;
+mod film_cache;
 mod meter;
 mod mixer;
 mod playhead;
@@ -32,6 +33,7 @@ pub use apple::{
 pub use cutlass_engine::{Thumb, ThumbKey, Thumbnails, Waveforms};
 pub use faces::{FaceTable, MAX_FACE_BYTES, MAX_FACES, PREFERRED_FACES, face_label};
 pub use film::{FilmCell, film_cells, media_file};
+pub use film_cache::{FILM_CACHE_BYTES, FilmCache};
 pub use meter::{
     ChannelReading, FALL_DB_PER_SECOND, HOLD as METER_HOLD, LevelMeter, METER_FLOOR_DB, level_db,
     meter_fraction, window_peak,

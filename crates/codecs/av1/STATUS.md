@@ -189,6 +189,65 @@ frames). Memory is mostly per frame in flight: two pictures, the mode
 info, the block logs of the whole frame, the published bands (each
 with the rows above it) and the frame states of its tile parsers.
 
+A later turn of work, measured against the `dav1d` 1.5.3 command line
+tool (`--muxer null`) rather than through FFmpeg, on a machine busy with
+other work (best of 5 runs at 18 threads, of 3 at one):
+
+| File | Threads | Before | After | dav1d |
+|---|---|---|---|---|
+| 4x1 tiles | 18 | 0.63 s | 0.61 s | 0.30 s |
+| 4x1 tiles | 1 | 4.49 s | 4.14 s | 2.55 s |
+| 8x4 tiles | 18 | 0.89 s | 0.61 s | 0.31 s |
+| 8x4 tiles | 1 | 3.87 s | 3.60 s | 1.91 s |
+
+The whole files take 9.1 s (2.6 GB) and 15.8 s (3.6 GB) at 18 threads
+against dav1d's 4.8 s and 7.8 s (0.4 GB each).
+
+What changed: a warped block waits for the rows it reads of a reference
+still being decoded and no longer for the whole reference (the warp
+filter takes its 15 rows from the band that holds them); any block that
+finds rows not published yet stops, the worker waits for those rows and
+the block is predicted again, so the wait ahead of each chunk of blocks
+is a shortcut and not what keeps reads in bounds (on these files no
+block has to stop: the wait ahead already covers the rows). 8-bit CDEF
+blocks whose taps all lie in the picture go through a byte kernel,
+sixteen samples to a vector (9.7 ns against 13.9 for a 4x4 block with
+one strength), and the taps derived from a block's strengths, direction
+and damping are kept for the next block that shares them. Deblocking
+gathers a row's edges into runs as it scans, and its kernel skips the
+filters no line of a group takes. The row pass of an inverse transform
+goes eight rows at a time whenever the block has eight, also with few
+non-zero rows: the four-lane code is the slower one.
+Tried and dropped: a vector kernel running the steps of the inverse
+transforms (butterfly and Hadamard rotations on eight 16-bit columns)
+from the same step tables. It took as long as the compiler's code for
+the same loop: the time is in running a transform as a table of steps
+through memory, not in the arithmetic of a step.
+
+Where one thread's time goes against dav1d's, from samples at 1 ms of
+both decoders on the same clips (approximate: dav1d's unnamed assembly
+is assigned by address to the nearest named routine, and about 140 of
+its samples have no owner; its deblocking is taken from its own
+`--inloopfilters` switch, which gives 0.2 to 0.45 s):
+
+| Stage, 8x4 tiles | cutlass-av1 | dav1d |
+|---|---|---|
+| Inter prediction | 0.94 s | 0.68 s |
+| Inverse transforms | 0.72 s | 0.20 s |
+| Deblocking | 0.68 s | about 0.25 s |
+| Reading blocks and coefficients, mode info | 0.60 s | 0.34 s |
+| Clearing and copying memory | 0.17 s | 0.02 s |
+| Intra prediction | 0.14 s | 0.06 s |
+| Motion vector prediction, motion field | 0.14 s | 0.17 s |
+
+On the 4x1 file: CDEF 0.86 s against 0.67 s, deblocking 0.73 s against
+0.25 to 0.45 s, inter prediction 0.62 s against 0.62 s, inverse
+transforms 0.30 s against 0.10 s. So the inverse transforms are the
+widest gap (3 to 3.5x), then deblocking, of which 0.28 s is deciding
+the edges (dav1d builds bit masks as it reads a block, at next to no
+cost). With all threads both decoders spend about 1.8x the processor
+time they spend on one, so the same gaps hold there.
+
 Threading (2+ threads): the calling thread only reads the frame headers.
 Each frame is a task on a thread of its own (the decoder keeps a pool of
 them) that waits for what its parse depends on, and nothing else: the
@@ -213,8 +272,9 @@ shared, not copied): a block whose rows lie in one band is predicted
 from it in place, others go through the edge-emulation copy. It waits
 per chunk of blocks for the rows the motion into each reference may
 reach, taking the largest downward motion of the superblock row it is
-in and the row above (warped blocks and scaled references wait for the
-whole picture), and reads the finished picture in place once it is done.
+in and the row above (a scaled reference is waited for whole; a block
+that still finds rows missing, as a warped block may, stops until they
+are published), and reads the finished picture in place once it is done.
 Super-resolved frames, frames without in-loop filters, and every frame
 when `Av1Core::frames_at_once` is off are decoded whole by their task
 once the references are done. With 2+ threads the tiles of such a frame

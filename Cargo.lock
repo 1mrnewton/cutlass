@@ -5622,6 +5622,46 @@ dependencies = [
 ]
 
 [[package]]
+name = "media-bench"
+version = "0.1.0"
+dependencies = [
+ "cutlass-aac",
+ "cutlass-ac3",
+ "cutlass-adts",
+ "cutlass-aiff",
+ "cutlass-alac",
+ "cutlass-av1",
+ "cutlass-codec",
+ "cutlass-container",
+ "cutlass-decode",
+ "cutlass-encode",
+ "cutlass-engine",
+ "cutlass-flac",
+ "cutlass-flac-container",
+ "cutlass-gif",
+ "cutlass-h264",
+ "cutlass-hevc",
+ "cutlass-isobmff",
+ "cutlass-jpeg",
+ "cutlass-mjpeg",
+ "cutlass-mp3",
+ "cutlass-mp3-container",
+ "cutlass-mpeg2",
+ "cutlass-mpeg4",
+ "cutlass-ogg",
+ "cutlass-opus",
+ "cutlass-pcm",
+ "cutlass-png",
+ "cutlass-prores",
+ "cutlass-riff",
+ "cutlass-still",
+ "cutlass-vorbis",
+ "cutlass-vp8",
+ "cutlass-vp9",
+ "cutlass-webp",
+]
+
+[[package]]
 name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"

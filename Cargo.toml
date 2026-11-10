@@ -82,6 +82,7 @@ members = [
     "crates/motion",
     "tools/icongen",
     "tools/licenses",
+    "tools/media-bench",
 ]
 
 [workspace.package]

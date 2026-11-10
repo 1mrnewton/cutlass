@@ -4812,10 +4812,20 @@ impl Drop for Pool {
 /// The levels are tested without a branch each, and only the ones that are
 /// set are visited after that; most of a block is zero.
 fn nonzero_levels(coeffs: &[i32]) -> impl Iterator<Item = usize> {
+    set_places(level_set(coeffs))
+}
+
+/// One bit for each of the first 64 levels of `coeffs` that is not zero.
+fn level_set(coeffs: &[i32]) -> u64 {
     let mut set = 0u64;
     for (index, &level) in coeffs.iter().enumerate().take(64) {
         set |= u64::from(level != 0) << index;
     }
+    set
+}
+
+/// The places of the bits of `set`, lowest first.
+fn set_places(mut set: u64) -> impl Iterator<Item = usize> {
     core::iter::from_fn(move || {
         if set == 0 {
             return None;
@@ -4838,9 +4848,23 @@ fn add_scaled<S: Sample>(
     let (x, y, step) = origin;
     let (qp, bypass) = quant;
     // A block whose flag said it holds no coefficients adds nothing. The
-    // levels are combined without stopping early, which is one pass the
+    // levels are tested without stopping early, which is one pass the
     // compiler can widen; most of a block is zero either way.
-    if coeffs.iter().fold(0, |any, &level| any | level) == 0 {
+    let set = level_set(coeffs);
+    if set == 0 {
+        return;
+    }
+    // A lone DC level is one value for the whole block.
+    if set == 1 && !bypass && (n == 4 || n == 8) {
+        let (Some(&level), Some(&weight)) = (coeffs.first(), weight.first()) else {
+            return;
+        };
+        let dc = if n == 4 {
+            recon::scale4(level, qp + S::QP_BD, 0, 0, i32::from(weight))
+        } else {
+            recon::scale8(level, qp + S::QP_BD, 0, 0, i32::from(weight))
+        };
+        recon::add_dc(plane, stride, (x, y, step), (dc + 32) >> 6, n);
         return;
     }
     if n == 4 {
@@ -4851,7 +4875,7 @@ fn add_scaled<S: Sample>(
             }
         } else {
             // A zero level scales to zero, and most are zero.
-            for i in nonzero_levels(coeffs) {
+            for i in set_places(set) {
                 let (Some(&pos), Some(&level)) = (ZIGZAG4.get(i), coeffs.get(i)) else {
                     break;
                 };
@@ -4870,7 +4894,7 @@ fn add_scaled<S: Sample>(
                 block[pos] = coeffs.get(i).copied().unwrap_or(0);
             }
         } else {
-            for i in nonzero_levels(coeffs) {
+            for i in set_places(set) {
                 let (Some(&pos), Some(&level)) = (ZIGZAG8.get(i), coeffs.get(i)) else {
                     break;
                 };

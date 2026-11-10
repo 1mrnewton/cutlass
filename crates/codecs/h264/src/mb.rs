@@ -4421,21 +4421,16 @@ fn recon_intra<S: Sample>(
             for (i, samples) in ac.iter().enumerate() {
                 let bx = blk_x(i);
                 let by = blk_y(i);
-                let mut coeffs = [0i32; 16];
-                if mb.cbp & 15 != 0 {
-                    coeffs[1..].copy_from_slice(&samples[..15]);
-                }
                 let mut block = [0i32; 16];
                 block[0] = dc[by * 4 + bx];
-                for n in 1..16 {
+                if mb.cbp & 15 != 0 {
                     // A zero level scales to zero.
-                    if coeffs[n] == 0 {
-                        continue;
+                    for n in super::nonzero_levels(&samples[..15]) {
+                        let pos = ZIGZAG4[n + 1];
+                        let (ry, rx) = (pos / 4, pos % 4);
+                        let weight = i32::from(slice.pps.weight4[0][pos]);
+                        block[pos] = recon::scale4(samples[n], qp + S::QP_BD, rx, ry, weight);
                     }
-                    let pos = ZIGZAG4[n];
-                    let (ry, rx) = (pos / 4, pos % 4);
-                    let weight = i32::from(slice.pps.weight4[0][pos]);
-                    block[ry * 4 + rx] = recon::scale4(coeffs[n], qp + S::QP_BD, rx, ry, weight);
                 }
                 recon::add_idct4(
                     &mut pic.y,
@@ -5022,19 +5017,14 @@ fn recon_chroma<S: Sample>(
         for i in 0..4 {
             let bx = i & 1;
             let by = i >> 1;
-            let mut coeffs = [0i32; 16];
-            coeffs[1..].copy_from_slice(&ac[i][..15]);
             let mut block = [0i32; 16];
             block[0] = scaled[i];
-            for n in 1..16 {
-                // A zero level scales to zero.
-                if coeffs[n] == 0 {
-                    continue;
-                }
-                let pos = ZIGZAG4[n];
+            // A zero level scales to zero.
+            for n in super::nonzero_levels(&ac[i][..15]) {
+                let pos = ZIGZAG4[n + 1];
                 let (ry, rx) = (pos / 4, pos % 4);
                 let w = i32::from(slice.pps.weight4[list][pos]);
-                block[ry * 4 + rx] = recon::scale4(coeffs[n], qp_c, rx, ry, w);
+                block[pos] = recon::scale4(ac[i][n], qp_c, rx, ry, w);
             }
             recon::add_idct4(
                 plane,

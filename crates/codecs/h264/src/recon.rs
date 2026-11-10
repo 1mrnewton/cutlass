@@ -130,10 +130,17 @@ pub fn scale8(coeff: i32, qp: i32, i: usize, j: usize, weight: i32) -> i32 {
     scaled as i32
 }
 
+/// Every coefficient of `block` after the first is zero. The values are
+/// combined without stopping early, which is one short pass with no branch
+/// per value.
+fn only_dc(block: &[i32]) -> bool {
+    block.iter().skip(1).fold(0, |any, &value| any | value) == 0
+}
+
 pub fn idct4(block: &mut [i32; 16]) {
     // Only the DC coefficient: both passes spread it over the block as it
     // is, so every sample is the same rounded value.
-    if block[1..] == [0; 15] {
+    if only_dc(block) {
         *block = [(block[0] + 32) >> 6; 16];
         return;
     }
@@ -259,7 +266,7 @@ pub fn chroma_dc422(raster: &[i32; 8], qp: i32, weight: i32) -> [i32; 8] {
 
 pub fn idct8(block: &mut [i32; 64]) {
     // Only the DC coefficient, as in [`idct4`].
-    if block[1..] == [0; 63] {
+    if only_dc(block) {
         *block = [(block[0] + 32) >> 6; 64];
         return;
     }
@@ -575,17 +582,8 @@ pub fn add_idct4<S: Sample>(
     step: usize,
 ) {
     // A lone DC is one value for the whole block, as in `idct4`.
-    if block[1..] == [0; 15] {
-        let dc = (block[0] + 32) >> 6;
-        if dc == 0 {
-            return;
-        }
-        for row in 0..4 {
-            let at = (y0 + row * step) * stride + x0;
-            for sample in &mut plane[at..at + 4] {
-                *sample = S::clip(pel(*sample) + dc);
-            }
-        }
+    if only_dc(block) {
+        add_dc(plane, stride, (x0, y0, step), (block[0] + 32) >> 6, 4);
         return;
     }
     if S::idct4_add_fast(plane, y0 * stride + x0, stride * step, block) {
@@ -593,6 +591,27 @@ pub fn add_idct4<S: Sample>(
     }
     idct4(block);
     add_block(plane, stride, x0, y0, block, 4, step);
+}
+
+/// Adds `dc` to every sample of the `n`×`n` block at `origin`: its column,
+/// its row, and the picture rows between its rows.
+pub fn add_dc<S: Sample>(
+    plane: &mut [S],
+    stride: usize,
+    origin: (usize, usize, usize),
+    dc: i32,
+    n: usize,
+) {
+    let (x0, y0, step) = origin;
+    if dc == 0 {
+        return;
+    }
+    for row in 0..n {
+        let at = (y0 + row * step) * stride + x0;
+        for sample in &mut plane[at..at + n] {
+            *sample = S::clip(pel(*sample) + dc);
+        }
+    }
 }
 
 pub fn add_block<S: Sample>(

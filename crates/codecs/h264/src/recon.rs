@@ -946,7 +946,7 @@ pub fn put_luma_block<S: Sample>(
         x_frac,
         y_frac,
     } = block;
-    if w == 0 || h == 0 || w > 16 || h > 16 || dst.len() < h * dst_stride {
+    if w == 0 || h == 0 || w > 16 || h > 16 || dst.len() < (h - 1) * dst_stride + w {
         return;
     }
     let (pic_w, pic_h) = pic;
@@ -1030,7 +1030,7 @@ pub fn put_chroma_block<S: Sample>(
         x_frac,
         y_frac,
     } = block;
-    if w == 0 || h == 0 || dst.len() < h * dst_stride {
+    if w == 0 || h == 0 || dst.len() < (h - 1) * dst_stride + w {
         return;
     }
     let (pic_w, pic_h) = pic;

@@ -2492,13 +2492,13 @@ fn layer_chroma<S: Sample>(
     let mut cv = [S::default(); 4];
     if refs.0 >= 0 {
         let frame = dpb_slot(dpb, slots.0)?;
-        predict_chroma((&mut cu, &mut cv), frame, origin, (2, 2), motion.0);
+        predict_chroma((&mut cu, &mut cv), 2, frame, origin, (2, 2), motion.0);
     }
     if refs.1 >= 0 {
         let frame = dpb_slot(dpb, slots.1)?;
         let mut ou = [S::default(); 4];
         let mut ov = [S::default(); 4];
-        predict_chroma((&mut ou, &mut ov), frame, origin, (2, 2), motion.1);
+        predict_chroma((&mut ou, &mut ov), 2, frame, origin, (2, 2), motion.1);
         if refs.0 >= 0 {
             for i in 0..4 {
                 cu[i] = recon::avg(cu[i], ou[i]);
@@ -8810,16 +8810,6 @@ fn mc_block<S: Sample>(
 ) -> Result<(), CodecError> {
     let Block { x, y, w, h } = block;
     let McMotion { r0, r1, mv0, mv1 } = motion;
-    let mut luma0 = [S::default(); 256];
-    let mut luma1 = [S::default(); 256];
-    if r0 >= 0 {
-        let frame = reference_frame(dpb, slice, 0, r0)?;
-        predict_luma(&mut luma0, frame, x, y, w, h, mv0);
-    }
-    if r1 >= 0 {
-        let frame = reference_frame(dpb, slice, 1, r1)?;
-        predict_luma(&mut luma1, frame, x, y, w, h, mv1);
-    }
     let chroma = pic.chroma();
     let separate = pic.separate_plane;
     let (cw, ch) = match chroma {
@@ -8827,18 +8817,6 @@ fn mc_block<S: Sample>(
         2 => (w / 2, h),
         _ => (w / 2, h / 2),
     };
-    let mut u0 = [S::default(); 256];
-    let mut v0 = [S::default(); 256];
-    let mut u1 = [S::default(); 256];
-    let mut v1 = [S::default(); 256];
-    if !separate && r0 >= 0 && cw > 0 && ch > 0 {
-        let frame = reference_frame(dpb, slice, 0, r0)?;
-        predict_chroma((&mut u0, &mut v0), frame, (x, y), (cw, ch), mv0);
-    }
-    if !separate && r1 >= 0 && cw > 0 && ch > 0 {
-        let frame = reference_frame(dpb, slice, 1, r1)?;
-        predict_chroma((&mut u1, &mut v1), frame, (x, y), (cw, ch), mv1);
-    }
     let luma_mix = if let Some(AlcWeight { weight, denom }) = alc {
         Mix::Uni {
             weight,
@@ -8869,15 +8847,34 @@ fn mc_block<S: Sample>(
     } else {
         mix(slice, r0, r1, 1)
     };
-    store_block(
-        &mut pic.y,
-        pic.w,
-        (x, y),
-        (w, h),
-        (&luma0, &luma1),
-        luma_mix,
-        S::default(),
-    );
+    // One reference stored as it is: predict straight into the picture.
+    if let Mix::Copy(list) = luma_mix {
+        let (reference, mv) = if list == 0 { (r0, mv0) } else { (r1, mv1) };
+        let frame = reference_frame(dpb, slice, list, reference)?;
+        let stride = pic.w;
+        let dst = &mut pic.y[y * stride + x..];
+        predict_qpel(dst, stride, &frame.y, (frame.w, frame.h), (x, y, w, h), mv);
+    } else {
+        let mut luma0 = [S::default(); 256];
+        let mut luma1 = [S::default(); 256];
+        if r0 >= 0 {
+            let frame = reference_frame(dpb, slice, 0, r0)?;
+            predict_luma(&mut luma0, frame, x, y, w, h, mv0);
+        }
+        if r1 >= 0 {
+            let frame = reference_frame(dpb, slice, 1, r1)?;
+            predict_luma(&mut luma1, frame, x, y, w, h, mv1);
+        }
+        store_block(
+            &mut pic.y,
+            pic.w,
+            (x, y),
+            (w, h),
+            (&luma0, &luma1),
+            luma_mix,
+            S::default(),
+        );
+    }
     if !separate && cw > 0 && ch > 0 {
         let stride = if chroma == 3 { pic.w } else { pic.w / 2 };
         let origin = match chroma {
@@ -8886,6 +8883,26 @@ fn mc_block<S: Sample>(
             _ => (x / 2, y / 2),
         };
         let size = (cw, ch);
+        if let (Mix::Copy(list), Mix::Copy(_)) = (chroma_mix, chroma_v) {
+            let (reference, mv) = if list == 0 { (r0, mv0) } else { (r1, mv1) };
+            let frame = reference_frame(dpb, slice, list, reference)?;
+            let at = origin.1 * stride + origin.0;
+            let planes = (&mut pic.u[at..], &mut pic.v[at..]);
+            predict_chroma(planes, stride, frame, (x, y), size, mv);
+            return Ok(());
+        }
+        let mut u0 = [S::default(); 256];
+        let mut v0 = [S::default(); 256];
+        let mut u1 = [S::default(); 256];
+        let mut v1 = [S::default(); 256];
+        if r0 >= 0 {
+            let frame = reference_frame(dpb, slice, 0, r0)?;
+            predict_chroma((&mut u0, &mut v0), cw, frame, (x, y), size, mv0);
+        }
+        if r1 >= 0 {
+            let frame = reference_frame(dpb, slice, 1, r1)?;
+            predict_chroma((&mut u1, &mut v1), cw, frame, (x, y), size, mv1);
+        }
         store_block(
             &mut pic.u,
             stride,
@@ -8975,21 +8992,29 @@ fn uni_mix(slice: &Slice<'_>, list: usize, reference: i8, plane: i8) -> Mix {
         return Mix::Copy(list);
     }
     let index = usize::try_from(reference).unwrap_or(0);
-    if plane < 0 {
-        Mix::Uni {
-            weight: slice.yw[list][index],
-            offset: slice.yo[list][index],
-            denom: slice.luma_denom,
-            from: list,
-        }
+    let (weight, offset, denom) = if plane < 0 {
+        (
+            slice.yw[list][index],
+            slice.yo[list][index],
+            slice.luma_denom,
+        )
     } else {
         let plane = usize::try_from(plane).unwrap_or(0);
-        Mix::Uni {
-            weight: slice.cw[list][index][plane],
-            offset: slice.co[list][index][plane],
-            denom: slice.chroma_denom,
-            from: list,
-        }
+        (
+            slice.cw[list][index][plane],
+            slice.co[list][index][plane],
+            slice.chroma_denom,
+        )
+    };
+    // The default weight, 2^denom with no offset, gives the sample back.
+    if offset == 0 && (0..15).contains(&denom) && weight == 1 << denom {
+        return Mix::Copy(list);
+    }
+    Mix::Uni {
+        weight,
+        offset,
+        denom,
+        from: list,
     }
 }
 
@@ -9028,19 +9053,20 @@ fn store_block<S: Sample>(
             let src = if from == 0 { left } else { right };
             for row in 0..h {
                 let at = (y + row) * stride + x;
-                for col in 0..w {
-                    dst[at + col] = recon::weight_uni(src[row * w + col], weight, offset, denom);
+                let out = &mut dst[at..at + w];
+                for (sample, &pred) in out.iter_mut().zip(&src[row * w..row * w + w]) {
+                    *sample = recon::weight_uni(pred, weight, offset, denom);
                 }
             }
         }
         Mix::Avg => {
             for row in 0..h {
                 let at = (y + row) * stride + x;
-                let a = &left[row * w..row * w + w];
-                let b = &right[row * w..row * w + w];
-                for col in 0..w {
-                    dst[at + col] = recon::avg(a[col], b[col]);
-                }
+                avg_row(
+                    &mut dst[at..at + w],
+                    &left[row * w..row * w + w],
+                    &right[row * w..row * w + w],
+                );
             }
         }
         Mix::Weighted(weight)
@@ -9052,11 +9078,11 @@ fn store_block<S: Sample>(
         {
             for row in 0..h {
                 let at = (y + row) * stride + x;
-                let a = &left[row * w..row * w + w];
-                let b = &right[row * w..row * w + w];
-                for col in 0..w {
-                    dst[at + col] = recon::avg(a[col], b[col]);
-                }
+                avg_row(
+                    &mut dst[at..at + w],
+                    &left[row * w..row * w + w],
+                    &right[row * w..row * w + w],
+                );
             }
         }
         Mix::Weighted(weight) => {
@@ -9070,6 +9096,12 @@ fn store_block<S: Sample>(
                 );
             }
         }
+    }
+}
+
+fn avg_row<S: Sample>(dst: &mut [S], a: &[S], b: &[S]) {
+    for (sample, (&left, &right)) in dst.iter_mut().zip(a.iter().zip(b)) {
+        *sample = recon::avg(left, right);
     }
 }
 
@@ -9120,11 +9152,13 @@ fn predict_luma<S: Sample>(
     h: usize,
     mv: [i16; 2],
 ) {
-    predict_qpel(dst, &frame.y, (frame.w, frame.h), (x, y, w, h), mv);
+    predict_qpel(dst, w, &frame.y, (frame.w, frame.h), (x, y, w, h), mv);
 }
 
+/// `dst` starts at the block's first sample and its rows are `stride` apart.
 fn predict_qpel<S: Sample>(
     dst: &mut [S],
+    stride: usize,
     src: &[S],
     pic: (usize, usize),
     block: (usize, usize, usize, usize),
@@ -9136,7 +9170,7 @@ fn predict_qpel<S: Sample>(
     let mvy = i32::from(mv[1]);
     recon::put_luma_block(
         dst,
-        w,
+        stride,
         src,
         pic_w,
         (
@@ -9154,8 +9188,11 @@ fn predict_qpel<S: Sample>(
     );
 }
 
+/// Each of `planes` starts at the block's first sample and its rows are
+/// `dst_stride` apart.
 fn predict_chroma<S: Sample>(
     planes: (&mut [S], &mut [S]),
+    dst_stride: usize,
     frame: &Frame<S>,
     at: (usize, usize),
     size: (usize, usize),
@@ -9165,8 +9202,8 @@ fn predict_chroma<S: Sample>(
     let (x, y) = at;
     let (w, h) = size;
     if frame.chroma() == 3 {
-        predict_qpel(u, &frame.u, (frame.w, frame.h), (x, y, w, h), mv);
-        predict_qpel(v, &frame.v, (frame.w, frame.h), (x, y, w, h), mv);
+        predict_qpel(u, dst_stride, &frame.u, (frame.w, frame.h), (x, y, w, h), mv);
+        predict_qpel(v, dst_stride, &frame.v, (frame.w, frame.h), (x, y, w, h), mv);
         return;
     }
     let mvx = i32::from(mv[0]);
@@ -9190,8 +9227,8 @@ fn predict_chroma<S: Sample>(
         i32::try_from(pic_h).unwrap_or(0),
     );
     let stride = frame.w / 2;
-    recon::put_chroma_block(u, w, &frame.u, stride, pic, block);
-    recon::put_chroma_block(v, w, &frame.v, stride, pic, block);
+    recon::put_chroma_block(u, dst_stride, &frame.u, stride, pic, block);
+    recon::put_chroma_block(v, dst_stride, &frame.v, stride, pic, block);
 }
 
 /// Clause 8.4.3.2. Implicit bipred weights from the picture-order distance.

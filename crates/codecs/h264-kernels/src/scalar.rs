@@ -224,6 +224,28 @@ fn chroma_lines(lines: &[[u8; 4]; 8]) -> ChromaRows {
 
 crate::edge::edge_kernels!(pub,);
 
+/// See [`crate::deblock::luma_mb`]: each edge in turn.
+pub fn luma_mb(plane: &mut [u8], edges: &crate::edge::MbEdges) -> bool {
+    if !crate::edge::mb_fits(plane.len(), edges, 16, 4) {
+        return false;
+    }
+    crate::edge::each_edge(edges, 4, |edge| {
+        luma_edge(plane, edge);
+    });
+    true
+}
+
+/// See [`crate::deblock::chroma_mb`]: each edge in turn.
+pub fn chroma_mb(plane: &mut [u8], edges: &crate::edge::MbEdges) -> bool {
+    if !crate::edge::mb_fits(plane.len(), edges, 8, 2) {
+        return false;
+    }
+    crate::edge::each_edge(edges, 2, |edge| {
+        chroma_edge(plane, edge);
+    });
+    true
+}
+
 /// The transform of clause 8.5.12.2, then each sample plus its residual,
 /// clipped.
 fn idct4_rows(block: &[i32; 16], rows: [[u8; 4]; 4]) -> [[u8; 4]; 4] {

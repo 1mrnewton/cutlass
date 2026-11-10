@@ -23,6 +23,106 @@ pub struct Edge {
     pub tc0: Option<[i8; 4]>,
 }
 
+/// How one edge of a macroblock is filtered: its thresholds, and `tc0` as
+/// in [`Edge`].
+#[derive(Clone, Copy, Debug)]
+pub struct Filter {
+    pub alpha: i32,
+    pub beta: i32,
+    pub tc0: Option<[i8; 4]>,
+}
+
+/// The edges of one macroblock in one plane, filtered in the order the
+/// standard gives: those that run down the picture, left to right, then
+/// those that run along it, top to bottom. `None` is an edge left alone.
+///
+/// Edge `n` is `4 * n` samples into a 16×16 luma macroblock and `2 * n`
+/// into an 8×8 chroma one.
+#[derive(Clone, Copy, Debug)]
+pub struct MbEdges {
+    /// The macroblock's first sample.
+    pub at: usize,
+    /// Samples between one picture row and the next.
+    pub down: usize,
+    pub vertical: [Option<Filter>; 4],
+    pub horizontal: [Option<Filter>; 4],
+}
+
+impl MbEdges {
+    /// No edge is filtered.
+    pub fn is_empty(&self) -> bool {
+        self.vertical
+            .iter()
+            .chain(&self.horizontal)
+            .all(Option::is_none)
+    }
+
+    /// Whether every sample these edges touch is in a plane of `len`
+    /// samples, for a macroblock `size` samples wide and high there: 16 in
+    /// luma, 8 in 4:2:0 chroma.
+    pub fn fits(&self, len: usize, size: usize) -> bool {
+        mb_fits(len, self, size, size / 4)
+    }
+}
+
+/// Whether every sample the edges of a macroblock touch is in a plane of
+/// `len` samples. `size` is the macroblock's width and height there, and
+/// `reach` how many samples before an edge its filter reads.
+pub(crate) fn mb_fits(len: usize, edges: &MbEdges, size: usize, reach: usize) -> bool {
+    let MbEdges {
+        at,
+        down,
+        vertical,
+        horizontal,
+    } = *edges;
+    if down < size + reach {
+        return false;
+    }
+    let Some(end) = (size - 1)
+        .checked_mul(down)
+        .and_then(|rows| rows.checked_add(size))
+        .and_then(|span| span.checked_add(at))
+    else {
+        return false;
+    };
+    if end > len {
+        return false;
+    }
+    if vertical[0].is_some() && at < reach {
+        return false;
+    }
+    !(horizontal[0].is_some() && at < reach * down)
+}
+
+/// Calls `filter` with each edge of `edges` that is filtered, in order.
+/// `step` is the samples between one edge and the next.
+pub(crate) fn each_edge(edges: &MbEdges, step: usize, mut filter: impl FnMut(Edge)) {
+    for (index, entry) in edges.vertical.iter().enumerate() {
+        if let Some(entry) = entry {
+            filter(Edge {
+                at: edges.at + step * index,
+                down: edges.down,
+                vertical: true,
+                alpha: entry.alpha,
+                beta: entry.beta,
+                tc0: entry.tc0,
+            });
+        }
+    }
+    for (index, entry) in edges.horizontal.iter().enumerate() {
+        if let Some(entry) = entry {
+            filter(Edge {
+                at: edges.at + step * index * edges.down,
+                down: edges.down,
+                vertical: false,
+                alpha: entry.alpha,
+                beta: entry.beta,
+                tc0: entry.tc0,
+            });
+        }
+    }
+}
+
 /// The edge functions over whichever filters are in scope where this is
 /// used: `luma_normal_rows`, `luma_strong_rows`, `luma_normal_lines`,
 /// `luma_strong_lines`, `chroma_normal`, `chroma_strong`, and

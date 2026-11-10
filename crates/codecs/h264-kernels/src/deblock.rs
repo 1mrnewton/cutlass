@@ -11,7 +11,7 @@ pub type Rows = [[u8; 16]; 8];
 /// is p3, p2, p1, p0, q0, q1, q2, q3.
 pub type Lines = [[u8; 8]; 16];
 
-pub use crate::edge::Edge;
+pub use crate::edge::{Edge, Filter, MbEdges};
 
 /// Filters one 16-sample luma edge of `plane` in place. `false` means the
 /// edge's samples are not all in the plane and nothing was done.
@@ -23,6 +23,19 @@ pub fn luma_edge(plane: &mut [u8], edge: Edge) -> bool {
 /// two samples. `false` as for [`luma_edge`].
 pub fn chroma_edge(plane: &mut [u8], edge: Edge) -> bool {
     kernel!(chroma_edge(plane, edge))
+}
+
+/// Filters every edge of one 16×16 luma macroblock of `plane` in place,
+/// as [`luma_edge`] on each in turn would. `false` means the macroblock's
+/// samples are not all in the plane and nothing was done.
+pub fn luma_mb(plane: &mut [u8], edges: &MbEdges) -> bool {
+    kernel!(luma_mb(plane, edges))
+}
+
+/// [`luma_mb`] for one 8×8 chroma macroblock, as [`chroma_edge`] on each
+/// edge in turn would.
+pub fn chroma_mb(plane: &mut [u8], edges: &MbEdges) -> bool {
+    kernel!(chroma_mb(plane, edges))
 }
 
 /// The four rows around an 8-sample chroma edge: p1, p0, then q0, q1.
@@ -244,6 +257,94 @@ mod tests {
             super::Edge { at: 60, ..edge }
         ));
         assert_eq!(plane, vec![9u8; 64]);
+    }
+
+    /// Every edge of a macroblock: left alone, or filtered at some
+    /// strength, at random.
+    fn mb_edges(rng: &mut Lcg, at: usize, down: usize) -> super::MbEdges {
+        let mut pick = |allowed: bool| {
+            let (alpha, beta, tc0) = thresholds(rng);
+            match rng.next() % 4 {
+                _ if !allowed => None,
+                0 => None,
+                1 => Some(super::Filter {
+                    alpha,
+                    beta,
+                    tc0: None,
+                }),
+                _ => Some(super::Filter {
+                    alpha,
+                    beta,
+                    tc0: Some(tc0),
+                }),
+            }
+        };
+        // The first edge of each kind needs samples before the macroblock.
+        let vertical = [pick(at % down >= 4), pick(true), pick(true), pick(true)];
+        let horizontal = [pick(at >= 4 * down), pick(true), pick(true), pick(true)];
+        super::MbEdges {
+            at,
+            down,
+            vertical,
+            horizontal,
+        }
+    }
+
+    #[test]
+    fn whole_macroblocks_match_the_plain_ones() {
+        let mut rng = Lcg(7);
+        let mut changed = 0;
+        for round in 0..6_000 {
+            let spread = [0, 2, 6, 30][round % 4];
+            let down = 40 + (rng.next() % 9) as usize;
+            let base = rng.next() as u8;
+            let before: Vec<u8> = (0..down * 44).map(|_| rng.sample(base, spread)).collect();
+            // Anywhere, the top row and the first column included.
+            let x = [0, 4, 8, 20][(rng.next() % 4) as usize];
+            let y = [0, 3, 4, 16, 24][(rng.next() % 5) as usize];
+            for luma in [true, false] {
+                let edges = mb_edges(&mut rng, y * down + x, down);
+                let mut fast = before.clone();
+                let mut plain = before.clone();
+                let (done, wanted) = if luma {
+                    (
+                        super::luma_mb(&mut fast, &edges),
+                        scalar::luma_mb(&mut plain, &edges),
+                    )
+                } else {
+                    (
+                        super::chroma_mb(&mut fast, &edges),
+                        scalar::chroma_mb(&mut plain, &edges),
+                    )
+                };
+                assert_eq!(done, wanted, "round {round}, luma {luma}: {edges:?}");
+                assert_eq!(fast, plain, "round {round}, luma {luma}: {edges:?}");
+                changed += usize::from(fast != before);
+            }
+        }
+        assert!(changed > 4_000, "only {changed} macroblocks were filtered");
+    }
+
+    #[test]
+    fn a_macroblock_outside_the_plane_is_left_alone() {
+        let down = 32;
+        let before = vec![90u8; down * 20];
+        let strong = Some(super::Filter {
+            alpha: 40,
+            beta: 10,
+            tc0: None,
+        });
+        for at in [down * 5, down * 4 + 20, down * 30] {
+            let edges = super::MbEdges {
+                at,
+                down,
+                vertical: [None, strong, strong, strong],
+                horizontal: [None, strong, strong, strong],
+            };
+            let mut plane = before.clone();
+            assert!(!super::luma_mb(&mut plane, &edges));
+            assert_eq!(plane, before);
+        }
     }
 
     #[test]

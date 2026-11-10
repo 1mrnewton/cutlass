@@ -8683,6 +8683,31 @@ fn apply_direct<S: Sample>(
     } else {
         None
     };
+    // A whole macroblock whose blocks all get the same answer from the
+    // co-located one is filled at once: no co-located macroblock to ask,
+    // or, with 8×8 inference, four corner blocks that agree.
+    if blocks.len() == 16 {
+        let agreed = match col_mb {
+            None => Some(false),
+            Some(col) if slice.sps.direct_8x8_inference => {
+                let first = col_zero(col, 0);
+                [3, 12, 15]
+                    .into_iter()
+                    .all(|corner| col_zero(col, corner) == first)
+                    .then_some(first)
+            }
+            Some(_) => None,
+        };
+        if let Some(col_zero) = agreed {
+            let still = |reference: i8| zero || reference < 0 || (reference == 0 && col_zero);
+            mb.mv0 = [if still(ref0) { [0, 0] } else { pred0 }; 16];
+            mb.mv1 = [if still(ref1) { [0, 0] } else { pred1 }; 16];
+            mb.ref0 = [if zero { 0 } else { ref0 }; 4];
+            mb.ref1 = [if zero { 0 } else { ref1 }; 4];
+            mb.ready = u16::MAX;
+            return;
+        }
+    }
     for &(bx, by) in blocks {
         let index = by * 4 + bx;
         let col = if slice.sps.direct_8x8_inference {

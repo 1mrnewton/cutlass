@@ -25,7 +25,9 @@ const W_ALT: [i32; 16] = [
     420, 210, 140, 105, 105, 105, 105, 105, 140, 210, 420, 0, 0, 0, 0, 0,
 ];
 
-#[target_feature(enable = "neon")]
+#[inline]
+#[cfg_attr(target_feature = "aes", target_feature(enable = "neon,aes"))]
+#[cfg_attr(not(target_feature = "aes"), target_feature(enable = "neon"))]
 pub(super) fn direction_u8(px: &[[u8; 8]; 8]) -> (u8, i32) {
     let mid = vdupq_n_s16(128);
     direction(
@@ -34,7 +36,9 @@ pub(super) fn direction_u8(px: &[[u8; 8]; 8]) -> (u8, i32) {
     )
 }
 
-#[target_feature(enable = "neon")]
+#[inline]
+#[cfg_attr(target_feature = "aes", target_feature(enable = "neon,aes"))]
+#[cfg_attr(not(target_feature = "aes"), target_feature(enable = "neon"))]
 pub(super) fn direction_u16(px: &[[u16; 8]; 8], bd: u32) -> (u8, i32) {
     let mid = vdupq_n_s16(128);
     // A shift left by a negative count shifts right.
@@ -50,7 +54,8 @@ type Sums = (int16x8_t, int16x8_t);
 
 /// Sum of `lane^2 * weight` over the sixteen lanes.
 #[inline]
-#[target_feature(enable = "neon")]
+#[cfg_attr(target_feature = "aes", target_feature(enable = "neon,aes"))]
+#[cfg_attr(not(target_feature = "aes"), target_feature(enable = "neon"))]
 fn weighted_squares(v: Sums, w: &[i32; 16]) -> i32 {
     let w = |i: usize| i32x4([w[i], w[i + 1], w[i + 2], w[i + 3]]);
     let a = vmulq_s32(vmull_s16(vget_low_s16(v.0), vget_low_s16(v.0)), w(0));
@@ -65,7 +70,8 @@ fn weighted_squares(v: Sums, w: &[i32; 16]) -> i32 {
 /// A sum along a diagonal is a sum of whole vectors once row `i` is
 /// shifted `i` lanes up: the eight lanes of a row land in sixteen.
 #[inline]
-#[target_feature(enable = "neon")]
+#[cfg_attr(target_feature = "aes", target_feature(enable = "neon,aes"))]
+#[cfg_attr(not(target_feature = "aes"), target_feature(enable = "neon"))]
 fn direction(r: [int16x8_t; 8]) -> (u8, i32) {
     let z = vdupq_n_s16(0);
     // Adds `v` to lanes `i..i + 8` of the sums.
@@ -137,7 +143,8 @@ fn direction(r: [int16x8_t; 8]) -> (u8, i32) {
 
 /// Eight samples of the window from `at`.
 #[inline]
-#[target_feature(enable = "neon")]
+#[cfg_attr(target_feature = "aes", target_feature(enable = "neon,aes"))]
+#[cfg_attr(not(target_feature = "aes"), target_feature(enable = "neon"))]
 fn window(win: &[u16; WINDOW], at: usize) -> uint16x8_t {
     // `at + 8 <= WINDOW` for every row and tap: the entry clamps both.
     let at = at.min(WINDOW - 8);
@@ -164,7 +171,8 @@ struct Row {
 /// keeps every real sample and clears the mark, so it never wins the
 /// maximum.
 #[inline]
-#[target_feature(enable = "neon")]
+#[cfg_attr(target_feature = "aes", target_feature(enable = "neon,aes"))]
+#[cfg_attr(not(target_feature = "aes"), target_feature(enable = "neon"))]
 fn tap<const RANGE: bool>(
     win: &[u16; WINDOW],
     base: usize,
@@ -195,7 +203,8 @@ fn tap<const RANGE: bool>(
 /// or both. With one of them the result cannot leave the range of the
 /// samples read (the weights add up to 12 of 16), so only both clamp.
 #[inline]
-#[target_feature(enable = "neon")]
+#[cfg_attr(target_feature = "aes", target_feature(enable = "neon,aes"))]
+#[cfg_attr(not(target_feature = "aes"), target_feature(enable = "neon"))]
 fn filter_with<const PRI: bool, const SEC: bool, const BOTH: bool>(
     win: &[u16; WINDOW],
     f: &Filter,
@@ -232,7 +241,9 @@ fn filter_with<const PRI: bool, const SEC: bool, const BOTH: bool>(
     out
 }
 
-#[target_feature(enable = "neon")]
+#[inline]
+#[cfg_attr(target_feature = "aes", target_feature(enable = "neon,aes"))]
+#[cfg_attr(not(target_feature = "aes"), target_feature(enable = "neon"))]
 pub(super) fn filter(win: &[u16; WINDOW], f: &Filter, rows: usize) -> [[u16; 8]; 8] {
     match (f.pri != 0, f.sec != 0) {
         (true, true) => filter_with::<true, true, true>(win, f, rows),

@@ -9,10 +9,12 @@ mod tests;
 /// Direction search on an 8x8 block of 8-bit luma (7.15.2). Returns
 /// `(yDir, var)`.
 #[must_use]
+#[inline]
 pub fn direction_u8(px: &[[u8; 8]; 8]) -> (u8, i32) {
     #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
     {
-        // SAFETY: the `cfg` above proves NEON is enabled for this build.
+        // SAFETY: the `cfg` above proves NEON is enabled for this build,
+        // and the kernel names AES only where the build has it too.
         #[allow(unsafe_code)]
         unsafe {
             neon::direction_u8(px)
@@ -25,11 +27,13 @@ pub fn direction_u8(px: &[[u8; 8]; 8]) -> (u8, i32) {
 /// Direction search on an 8x8 block of luma of `bd` bits, 8 to 12
 /// (7.15.2). Returns `(yDir, var)`.
 #[must_use]
+#[inline]
 pub fn direction_u16(px: &[[u16; 8]; 8], bd: u32) -> (u8, i32) {
     let bd = bd.clamp(8, 12);
     #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
     {
-        // SAFETY: the `cfg` above proves NEON is enabled for this build.
+        // SAFETY: the `cfg` above proves NEON is enabled for this build,
+        // and the kernel names AES only where the build has it too.
         #[allow(unsafe_code)]
         unsafe {
             neon::direction_u16(px, bd)
@@ -78,12 +82,14 @@ pub struct Filter {
 /// and samples outside the picture hold [`UNAVAILABLE`]. A narrower block
 /// ignores the columns it does not have. Rows past `rows` come back zero.
 #[must_use]
+#[inline]
 pub fn filter_u8(win: &[u16; WINDOW], f: &Filter, rows: usize) -> [[u8; 8]; 8] {
     filter_u16(win, f, rows).map(|r| r.map(|v| v as u8))
 }
 
 /// [`filter_u8`] for samples of up to 12 bits.
 #[must_use]
+#[inline]
 pub fn filter_u16(win: &[u16; WINDOW], f: &Filter, rows: usize) -> [[u16; 8]; 8] {
     let rows = rows.min(8);
     // Whatever the caller derived, no tap leaves the window and no shift
@@ -97,7 +103,8 @@ pub fn filter_u16(win: &[u16; WINDOW], f: &Filter, rows: usize) -> [[u16; 8]; 8]
     };
     #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
     {
-        // SAFETY: the `cfg` above proves NEON is enabled for this build.
+        // SAFETY: the `cfg` above proves NEON is enabled for this build,
+        // and the kernel names AES only where the build has it too.
         #[allow(unsafe_code)]
         unsafe {
             neon::filter(win, f, rows)

@@ -20,13 +20,15 @@ type V = uint8x16_t;
 type Sums = (uint16x8_t, uint16x8_t);
 
 #[inline]
-#[target_feature(enable = "neon")]
+#[cfg_attr(target_feature = "aes", target_feature(enable = "neon,aes"))]
+#[cfg_attr(not(target_feature = "aes"), target_feature(enable = "neon"))]
 fn add(sum: Sums, v: V) -> Sums {
     (vaddw_u8(sum.0, vget_low_u8(v)), vaddw_high_u8(sum.1, v))
 }
 
 #[inline]
-#[target_feature(enable = "neon")]
+#[cfg_attr(target_feature = "aes", target_feature(enable = "neon,aes"))]
+#[cfg_attr(not(target_feature = "aes"), target_feature(enable = "neon"))]
 fn sub(sum: Sums, v: V) -> Sums {
     (vsubw_u8(sum.0, vget_low_u8(v)), vsubw_high_u8(sum.1, v))
 }
@@ -40,7 +42,8 @@ fn sub(sum: Sums, v: V) -> Sums {
 /// one before it with one sample entering and one leaving each of the two
 /// windows. A sum of at most 16 samples fits 16 bits.
 #[inline]
-#[target_feature(enable = "neon")]
+#[cfg_attr(target_feature = "aes", target_feature(enable = "neon,aes"))]
+#[cfg_attr(not(target_feature = "aes"), target_feature(enable = "neon"))]
 fn wide<const N: i32, const N2: i32, const LOG2: i32>(o: &[V; 14], out: &mut [V; 14], on: V) {
     let at = |p: i32| o[(7 + p.clamp(-(N + 1), N)) as usize];
     let mut sum = (vdupq_n_u16(0), vdupq_n_u16(0));
@@ -62,7 +65,8 @@ fn wide<const N: i32, const N2: i32, const LOG2: i32>(o: &[V; 14], out: &mut [V;
 }
 
 #[inline]
-#[target_feature(enable = "neon")]
+#[cfg_attr(target_feature = "aes", target_feature(enable = "neon,aes"))]
+#[cfg_attr(not(target_feature = "aes"), target_feature(enable = "neon"))]
 fn max3(a: V, b: V, c: V) -> V {
     vmaxq_u8(a, vmaxq_u8(b, c))
 }
@@ -70,7 +74,8 @@ fn max3(a: V, b: V, c: V) -> V {
 /// Filters the sixteen lines in `v` (index 7 is `q0`). `SIZE` is 4, 6, 8
 /// or 16. Returns whether any line passed the filter mask.
 #[inline]
-#[target_feature(enable = "neon")]
+#[cfg_attr(target_feature = "aes", target_feature(enable = "neon,aes"))]
+#[cfg_attr(not(target_feature = "aes"), target_feature(enable = "neon"))]
 fn filter<const SIZE: usize>(v: &mut [V; 14], lim: Limits) -> bool {
     let o = *v;
     let (p1, p0, q0, q1) = (o[5], o[6], o[7], o[8]);
@@ -151,7 +156,8 @@ fn filter<const SIZE: usize>(v: &mut [V; 14], lim: Limits) -> bool {
 }
 
 #[inline]
-#[target_feature(enable = "neon")]
+#[cfg_attr(target_feature = "aes", target_feature(enable = "neon,aes"))]
+#[cfg_attr(not(target_feature = "aes"), target_feature(enable = "neon"))]
 fn filter_size(v: &mut [V; 14], size: Size, lim: Limits) -> bool {
     match size {
         Size::Four => filter::<4>(v, lim),
@@ -161,7 +167,9 @@ fn filter_size(v: &mut [V; 14], size: Size, lim: Limits) -> bool {
     }
 }
 
-#[target_feature(enable = "neon")]
+#[inline]
+#[cfg_attr(target_feature = "aes", target_feature(enable = "neon,aes"))]
+#[cfg_attr(not(target_feature = "aes"), target_feature(enable = "neon"))]
 pub(super) fn by_sample(taps: &mut [[u8; 16]; 14], size: Size, lim: Limits) -> bool {
     let (lo, hi) = size.reads();
     let mut v = [vdupq_n_u8(0); 14];
@@ -182,7 +190,8 @@ pub(super) fn by_sample(taps: &mut [[u8; 16]; 14], size: Size, lim: Limits) -> b
 /// half of the vectors apart: lane `l` of row `r` becomes lane `r` of
 /// column `l` (and lane `8 + r` of column `l` from lane `8 + l`).
 #[inline]
-#[target_feature(enable = "neon")]
+#[cfg_attr(target_feature = "aes", target_feature(enable = "neon,aes"))]
+#[cfg_attr(not(target_feature = "aes"), target_feature(enable = "neon"))]
 fn transpose(r: [V; 8]) -> [V; 8] {
     let pair8 = |a: V, b: V| (vtrn1q_u8(a, b), vtrn2q_u8(a, b));
     let pair16 = |a: V, b: V| {
@@ -214,7 +223,9 @@ fn transpose(r: [V; 8]) -> [V; 8] {
     [d0, d1, d2, d3, d4, d5, d6, d7]
 }
 
-#[target_feature(enable = "neon")]
+#[inline]
+#[cfg_attr(target_feature = "aes", target_feature(enable = "neon,aes"))]
+#[cfg_attr(not(target_feature = "aes"), target_feature(enable = "neon"))]
 pub(super) fn by_line(lines: &mut [[u8; 8]; 16], size: Size, lim: Limits) -> bool {
     // Lines `l` and `8 + l` share a vector, so the columns come out with
     // all sixteen lines in order.
@@ -237,7 +248,8 @@ pub(super) fn by_line(lines: &mut [[u8; 8]; 16], size: Size, lim: Limits) -> boo
 /// Swaps the halves of two sets of half-transposed vectors: sixteen
 /// vectors of sixteen lanes, fully transposed.
 #[inline]
-#[target_feature(enable = "neon")]
+#[cfg_attr(target_feature = "aes", target_feature(enable = "neon,aes"))]
+#[cfg_attr(not(target_feature = "aes"), target_feature(enable = "neon"))]
 fn transpose16(r: &[V; 16]) -> [V; 16] {
     let top: [V; 8] = core::array::from_fn(|l| r[l]);
     let bottom: [V; 8] = core::array::from_fn(|l| r[8 + l]);
@@ -255,7 +267,9 @@ fn transpose16(r: &[V; 16]) -> [V; 16] {
     })
 }
 
-#[target_feature(enable = "neon")]
+#[inline]
+#[cfg_attr(target_feature = "aes", target_feature(enable = "neon,aes"))]
+#[cfg_attr(not(target_feature = "aes"), target_feature(enable = "neon"))]
 pub(super) fn by_line_16(lines: &mut [[u8; 16]; 16], lim: Limits) -> bool {
     let rows: [V; 16] = core::array::from_fn(|l| u8x16(&lines[l]));
     let mut cols = transpose16(&rows);

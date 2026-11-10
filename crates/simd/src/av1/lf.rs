@@ -66,10 +66,12 @@ pub const IDLE: (u8, u8) = (0, 255);
 /// rows around a horizontal edge lie in a picture. Only the samples
 /// [`Size::reads`] names are read, and only those [`Size::writes`] names
 /// change. Returns whether any line passed the filter mask.
+#[inline]
 pub fn by_sample(taps: &mut [[u8; 16]; 14], size: Size, lim: Limits) -> bool {
     #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
     {
-        // SAFETY: the `cfg` above proves NEON is enabled for this build.
+        // SAFETY: the `cfg` above proves NEON is enabled for this build,
+        // and the kernel names AES only where the build has it too.
         #[allow(unsafe_code)]
         unsafe {
             neon::by_sample(taps, size, lim)
@@ -83,13 +85,15 @@ pub fn by_sample(taps: &mut [[u8; 16]; 14], size: Size, lim: Limits) -> bool {
 /// then `q0 .. q3`. This is how the columns around a vertical edge lie in
 /// a picture. `size` is not [`Size::Sixteen`], which filters nothing here.
 /// Returns whether any line passed the filter mask.
+#[inline]
 pub fn by_line(lines: &mut [[u8; 8]; 16], size: Size, lim: Limits) -> bool {
     if size == Size::Sixteen {
         return false;
     }
     #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
     {
-        // SAFETY: the `cfg` above proves NEON is enabled for this build.
+        // SAFETY: the `cfg` above proves NEON is enabled for this build,
+        // and the kernel names AES only where the build has it too.
         #[allow(unsafe_code)]
         unsafe {
             neon::by_line(lines, size, lim)
@@ -101,10 +105,12 @@ pub fn by_line(lines: &mut [[u8; 8]; 16], size: Size, lim: Limits) -> bool {
 
 /// [`by_line`] for [`Size::Sixteen`], sixteen samples a line: one unused
 /// sample, `p6 .. p0`, `q0 .. q6`, one unused sample.
+#[inline]
 pub fn by_line_16(lines: &mut [[u8; 16]; 16], lim: Limits) -> bool {
     #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
     {
-        // SAFETY: the `cfg` above proves NEON is enabled for this build.
+        // SAFETY: the `cfg` above proves NEON is enabled for this build,
+        // and the kernel names AES only where the build has it too.
         #[allow(unsafe_code)]
         unsafe {
             neon::by_line_16(lines, lim)

@@ -10640,6 +10640,23 @@ fn deblock_planes<S: Sample>(
         }
         let span = luma_span(my, field);
         let off = offsets(pic, index);
+        // A frame macroblock of an 8-bit 4:2:0 picture has every edge
+        // worked out first, then filtered in one go for each plane.
+        if S::BITS == 8
+            && chroma == 1
+            && span.step == 1
+            && !pic.separate_plane
+            && deblock_whole(
+                pic,
+                (&mut *luma, &mut *cb, &mut *cr),
+                (mx, my),
+                (transform8, flat),
+                (known, beside, over),
+                off,
+            )
+        {
+            continue;
+        }
         for edge in 0..4 {
             if edge == 0 && (mx == 0 || !filter_boundary(pic, mx, my, true)) {
                 continue;
@@ -10708,6 +10725,99 @@ fn deblock_planes<S: Sample>(
             }
         }
     }
+}
+
+/// What [`edge_strength`] is told about a macroblock: its [`coded_mask`] and
+/// whether it has a [`single_motion`].
+type Known = (u16, bool);
+
+/// Every edge of the frame macroblock at `at` in a 4:2:0 picture, worked
+/// out as the loop in [`deblock_planes`] does and filtered for each plane
+/// at once. `shape` is whether the macroblock has the 8×8 transform and
+/// whether its inner edges are flat; `known` is this macroblock's, the one
+/// to its left's and the one above's. `false` means nothing was filtered:
+/// an edge mixes strength 4 with less, or the samples have no such kernel.
+fn deblock_whole<S: Sample>(
+    pic: &Frame<S>,
+    planes: (&mut [S], &mut [S], &mut [S]),
+    at: (usize, usize),
+    shape: (bool, bool),
+    known: (Known, Option<Known>, Option<Known>),
+    off: (i32, i32),
+) -> bool {
+    let (mx, my) = at;
+    let (transform8, flat) = shape;
+    let (own, beside, over) = known;
+    // For each plane, the edges that run down the picture and then those
+    // that run along it.
+    let mut luma = [[None; 4]; 2];
+    let mut cb = [[None; 4]; 2];
+    let mut cr = [[None; 4]; 2];
+    let ways = luma.iter_mut().zip(cb.iter_mut().zip(cr.iter_mut()));
+    for (way, (for_luma, (for_cb, for_cr))) in ways.enumerate() {
+        let vertical = way == 0;
+        let across = if vertical { beside } else { over };
+        let slots = for_luma
+            .iter_mut()
+            .zip(for_cb.iter_mut().zip(for_cr.iter_mut()));
+        for (edge, (luma_slot, (cb_slot, cr_slot))) in slots.enumerate() {
+            if edge == 0 {
+                let outside = if vertical {
+                    mx == 0
+                } else {
+                    above_my(pic, mx, my) < 0
+                };
+                if outside || !filter_boundary(pic, mx, my, vertical) {
+                    continue;
+                }
+            } else if flat {
+                break;
+            }
+            let bs = edge_strength(pic, (mx, my), edge, vertical, (own, across));
+            // An 8×8 transform has no luma edge at 4 or 12.
+            if !(transform8 && (edge == 1 || edge == 3)) {
+                let qpav = edge_qp(pic, mx, my, true, true, vertical, edge == 0);
+                let Some(filter) = recon::whole_edge(bs, qpav, off) else {
+                    return false;
+                };
+                *luma_slot = filter;
+            }
+            // Chroma has an edge under every other luma one.
+            if bs != [0; 4] && edge.is_multiple_of(2) {
+                for (slot, first) in [(&mut *cb_slot, true), (&mut *cr_slot, false)] {
+                    let qpc = edge_qp(pic, mx, my, false, first, vertical, edge == 0);
+                    let Some(filter) = recon::whole_edge(bs, qpc, off) else {
+                        return false;
+                    };
+                    *slot = filter;
+                }
+            }
+        }
+    }
+    let stride = pic.w;
+    let chroma_stride = pic.w / 2;
+    let chroma_at = my * 8 * chroma_stride + mx * 8;
+    let all = [
+        recon::MbEdges {
+            at: my * 16 * stride + mx * 16,
+            down: stride,
+            vertical: luma[0],
+            horizontal: luma[1],
+        },
+        recon::MbEdges {
+            at: chroma_at,
+            down: chroma_stride,
+            vertical: cb[0],
+            horizontal: cb[1],
+        },
+        recon::MbEdges {
+            at: chroma_at,
+            down: chroma_stride,
+            vertical: cr[0],
+            horizontal: cr[1],
+        },
+    ];
+    S::deblock_mb(planes, &all)
 }
 
 /// One edge of a macroblock, for its chroma. `format` is the picture's

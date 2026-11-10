@@ -354,6 +354,14 @@ pub trait Sample: Copy + Default + Into<i32> + Send + Sync + 'static {
         false
     }
 
+    /// Filters every edge of one macroblock of a 4:2:0 frame with vector
+    /// kernels: `edges` are its luma, Cb and Cr edges, for the planes in
+    /// that order. `false` means nothing was done and the caller filters
+    /// each edge itself.
+    fn deblock_mb(_planes: (&mut [Self], &mut [Self], &mut [Self]), _edges: &[MbEdges; 3]) -> bool {
+        false
+    }
+
     /// Inter prediction with a vector kernel, when this sample width has
     /// one for the block's size. `false` means nothing was done and the
     /// caller runs its own loop. `kind` picks the samples.
@@ -470,6 +478,21 @@ impl Sample for u8 {
 
     fn deblock_chroma8(plane: &mut [Self], edge: LumaEdge) -> bool {
         deblock_chroma8_eight(plane, edge)
+    }
+
+    fn deblock_mb(planes: (&mut [Self], &mut [Self], &mut [Self]), edges: &[MbEdges; 3]) -> bool {
+        use cutlass_h264_kernels::deblock;
+        let (luma, cb, cr) = planes;
+        let [for_luma, for_cb, for_cr] = edges;
+        // All three planes or none: each kernel then has its samples.
+        if !(for_luma.fits(luma.len(), 16) && for_cb.fits(cb.len(), 8) && for_cr.fits(cr.len(), 8))
+        {
+            return false;
+        }
+        // A plane with no edge to filter is not visited.
+        (for_luma.is_empty() || deblock::luma_mb(luma, for_luma))
+            && (for_cb.is_empty() || deblock::chroma_mb(cb, for_cb))
+            && (for_cr.is_empty() || deblock::chroma_mb(cr, for_cr))
     }
 
     fn predict_fast(
@@ -1754,6 +1777,35 @@ pub struct Edge {
     pub len: usize,
     /// Frame rows between samples. Field macroblocks step by two.
     pub row_step: usize,
+}
+
+pub use cutlass_h264_kernels::deblock::{Filter as EdgeFilter, MbEdges};
+
+/// How a whole edge of 8-bit samples is filtered, from the strength of each
+/// quarter of it: the inner `None` is an edge with nothing to filter. The
+/// outer `None` is strengths that mix 4 with less, which no whole-edge
+/// filter takes. The thresholds are the ones [`filter_luma16`] works out.
+pub fn whole_edge(bs: [u8; 4], qpav: i32, offsets: (i32, i32)) -> Option<Option<EdgeFilter>> {
+    if bs == [0; 4] {
+        return Some(None);
+    }
+    let index_a = (qpav + offsets.0).clamp(0, 51) as usize;
+    let index_b = (qpav + offsets.1).clamp(0, 51) as usize;
+    let tc0 = if bs == [4; 4] {
+        None
+    } else if bs.iter().all(|&group| group < 4) {
+        Some(bs.map(|group| match group {
+            0 => -1,
+            _ => TC0[usize::from(group) - 1][index_a] as i8,
+        }))
+    } else {
+        return None;
+    };
+    Some(Some(EdgeFilter {
+        alpha: i32::from(ALPHA[index_a]),
+        beta: i32::from(BETA[index_b]),
+        tc0,
+    }))
 }
 
 /// Filters a whole edge at once: 16 luma samples, or 8 chroma samples when

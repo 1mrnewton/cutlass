@@ -722,10 +722,8 @@ fn write_b(
             w: 16,
             h: 16,
         };
-        let mv0 = search_area(src, past, area, pred0);
-        let mv1 = search_area(src, future, area, pred1);
-        let cost0 = sad_mv(src, past, area, mv0);
-        let cost1 = sad_mv(src, future, area, mv1);
+        let (mv0, cost0) = search_area(src, past, area, pred0);
+        let (mv1, cost1) = search_area(src, future, area, pred1);
         let cost_bi = sad_bi(src, past, future, area, mv0, mv1);
         let (kind, use0, use1) = if cost_bi <= cost0 && cost_bi <= cost1 {
             (3u8, Some(mv0), Some(mv1))
@@ -1396,7 +1394,14 @@ struct Area {
 }
 
 /// Integer diamond of radius 1, for up to 16 steps, then half-pel and quarter-pel.
-fn search_area(src: &Source<'_>, reference: &Planes, area: Area, predicted: [i16; 2]) -> [i16; 2] {
+/// The vector found and its SAD. A step never goes back to where it came
+/// from: that position already cost more than the one it left for.
+fn search_area(
+    src: &Source<'_>,
+    reference: &Planes,
+    area: Area,
+    predicted: [i16; 2],
+) -> ([i16; 2], i32) {
     let mut bx = (i32::from(predicted[0]) >> 2).clamp(-SEARCH, SEARCH);
     let mut by = (i32::from(predicted[1]) >> 2).clamp(-SEARCH, SEARCH);
     let mut best = sad_qpel(src, reference, area, bx * 4, by * 4);
@@ -1406,12 +1411,13 @@ fn search_area(src: &Source<'_>, reference: &Planes, area: Area, predicted: [i16
         bx = 0;
         by = 0;
     }
+    let mut came = (0, 0);
     for _ in 0..SEARCH {
         let mut step = None;
         for (dx, dy) in [(0, -1), (0, 1), (-1, 0), (1, 0)] {
             let x = bx + dx;
             let y = by + dy;
-            if x.abs() > SEARCH || y.abs() > SEARCH {
+            if (dx, dy) == came || x.abs() > SEARCH || y.abs() > SEARCH {
                 continue;
             }
             let cost = sad_qpel(src, reference, area, x * 4, y * 4);
@@ -1423,15 +1429,19 @@ fn search_area(src: &Source<'_>, reference: &Planes, area: Area, predicted: [i16
         let Some((x, y)) = step else {
             break;
         };
+        came = (bx - x, by - y);
         bx = x;
         by = y;
     }
-    let (qx, qy) = refine_subpel(src, reference, area, (bx * 4, by * 4), (2, 2));
-    let (qx, qy) = refine_subpel(src, reference, area, (qx, qy), (1, 2));
-    [
-        i16::try_from(qx).unwrap_or(0),
-        i16::try_from(qy).unwrap_or(0),
-    ]
+    let (qx, qy, best) = refine_subpel(src, reference, area, (bx * 4, by * 4, best), (2, 2));
+    let (qx, qy, best) = refine_subpel(src, reference, area, (qx, qy, best), (1, 2));
+    (
+        [
+            i16::try_from(qx).unwrap_or(0),
+            i16::try_from(qy).unwrap_or(0),
+        ],
+        best,
+    )
 }
 
 /// Half-pel steps are 2 quarter-units. Quarter-pel steps are 1. Same four-point diamond.
@@ -1439,18 +1449,18 @@ fn refine_subpel(
     src: &Source<'_>,
     reference: &Planes,
     area: Area,
-    origin: (i32, i32),
+    origin: (i32, i32, i32),
     step_iters: (i32, i32),
-) -> (i32, i32) {
-    let (mut qx, mut qy) = origin;
+) -> (i32, i32, i32) {
+    let (mut qx, mut qy, mut best) = origin;
     let (step, iters) = step_iters;
-    let mut best = sad_qpel(src, reference, area, qx, qy);
+    let mut came = (0, 0);
     for _ in 0..iters {
         let mut step_to = None;
         for (dx, dy) in [(0, -step), (0, step), (-step, 0), (step, 0)] {
             let x = qx + dx;
             let y = qy + dy;
-            if x.abs() > SEARCH * 4 || y.abs() > SEARCH * 4 {
+            if (dx, dy) == came || x.abs() > SEARCH * 4 || y.abs() > SEARCH * 4 {
                 continue;
             }
             let cost = sad_qpel(src, reference, area, x, y);
@@ -1462,10 +1472,11 @@ fn refine_subpel(
         let Some((x, y)) = step_to else {
             break;
         };
+        came = (qx - x, qy - y);
         qx = x;
         qy = y;
     }
-    (qx, qy)
+    (qx, qy, best)
 }
 
 fn sad_qpel(src: &Source<'_>, reference: &Planes, area: Area, qx: i32, qy: i32) -> i32 {
@@ -1542,8 +1553,7 @@ fn choose_partition(
         h: 16,
     };
     let pred = predict_part(grid, &none, mb_w, (mx, my), (0, 0, 16, 16));
-    let mv = search_area(src, reference, whole, pred);
-    let mut best_cost = sad_mv(src, reference, whole, mv);
+    let (mv, mut best_cost) = search_area(src, reference, whole, pred);
     let mut best_kind = 0u8;
     let mut best = [mv; 16];
     for kind in [1u8, 2, 3] {
@@ -1561,8 +1571,8 @@ fn choose_partition(
                 w,
                 h,
             };
-            let mv = search_area(src, reference, area, pred);
-            cost += sad_mv(src, reference, area, mv);
+            let (mv, part_cost) = search_area(src, reference, area, pred);
+            cost += part_cost;
             fill_local(&mut here, (x, y, w, h), mv);
             fill_array(&mut blocks, (x, y, w, h), mv);
         }
@@ -1573,10 +1583,6 @@ fn choose_partition(
         }
     }
     (best_kind, best)
-}
-
-fn sad_mv(src: &Source<'_>, reference: &Planes, area: Area, mv: [i16; 2]) -> i32 {
-    sad_qpel(src, reference, area, i32::from(mv[0]), i32::from(mv[1]))
 }
 
 fn pieces(kind: u8) -> [(u32, u32, u32, u32); 4] {

@@ -761,6 +761,9 @@ pub struct Shell {
     proxies: proxy::Proxies,
     /// The lanes as last built, with the revision they were built at.
     lanes_cache: RefCell<Option<(u64, Arc<[LaneView]>)>>,
+    /// The transitions on cuts, kept with the lanes: built again when the
+    /// revision moves and dropped wherever the lanes are.
+    bars_cache: RefCell<Option<(u64, Arc<[cutlass_editor::TransitionBar]>)>>,
     settings: Settings,
     /// Where the settings are saved, and the generation on disk.
     settings_file: Option<(PathBuf, u64)>,
@@ -925,6 +928,7 @@ impl Shell {
             renders: render::Renders::new(Self::home().renders()),
             proxies: proxy::Proxies::new(proxy::home_folder()),
             lanes_cache: RefCell::new(None),
+            bars_cache: RefCell::new(None),
             settings,
             settings_file: None,
             presets_file: None,
@@ -1379,6 +1383,7 @@ impl Shell {
         self.close_proxies();
         self.waiting_imports.clear();
         self.lanes_cache.replace(None);
+        self.bars_cache.replace(None);
         self.card_waves.clear();
         self.folder = None;
         self.socket = None;
@@ -1415,6 +1420,14 @@ impl Shell {
 
     pub fn pixel_size(&self) -> f64 {
         self.pixel_size
+    }
+
+    /// Draw the lanes at `size` pixels a microsecond and keep it, as a
+    /// zoom the user chose is kept.
+    #[cfg(test)]
+    pub(crate) fn pixel_size_for_test(&mut self, size: f64) {
+        self.pixel_size = size;
+        self.fitted = true;
     }
 
     /// The time at the left edge of the lanes.
@@ -1472,6 +1485,7 @@ impl Shell {
         }
         self.session = Some(session);
         self.lanes_cache.replace(None);
+        self.bars_cache.replace(None);
         Ok(())
     }
 
@@ -1542,6 +1556,7 @@ impl Shell {
         self.saved = Some((session.revision(), Instant::now()));
         self.session = Some(session);
         self.lanes_cache.replace(None);
+        self.bars_cache.replace(None);
         self.folder = Some(opened.folder);
         self.library_edits = 0;
         self.library_saved = 0;
@@ -12494,8 +12509,14 @@ mod tests {
     fn blends(desktop: &Shell) -> Vec<(String, String, i64)> {
         desktop
             .transitions()
-            .into_iter()
-            .map(|bar| (bar.segment_id.as_str().to_owned(), bar.name, bar.duration.0))
+            .iter()
+            .map(|bar| {
+                (
+                    bar.segment_id.as_str().to_owned(),
+                    bar.name.clone(),
+                    bar.duration.0,
+                )
+            })
             .collect()
     }
 

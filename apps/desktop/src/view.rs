@@ -166,6 +166,8 @@ pub struct ViewState {
     export_open: bool,
     /// The project dialog's unsaved choices while it is open.
     project_dialog: Option<cutlass_editor::ProjectSettings>,
+    /// "Do not ask again" is ticked in the replace-transition question.
+    never_ask_transition: bool,
     /// The project dialog shows its Performance tab, not Details.
     project_performance: bool,
     /// The project dialog's proxy switch, once it has been flipped.
@@ -289,6 +291,7 @@ impl Default for ViewState {
             wants_replace: false,
             export_open: false,
             project_dialog: None,
+            never_ask_transition: false,
             project_performance: false,
             project_proxies: None,
             project_proxy_side: None,
@@ -428,6 +431,9 @@ pub fn show(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Option
         paint_library_ghost(shell, ui);
         if view.export_open {
             export_dialog(shell, ui, view, parent);
+        }
+        if shell.asked_transition().is_some() {
+            transition_prompt(shell, ui, view);
         }
         if view.project_dialog.is_some() {
             project_dialog(shell, ui, view);
@@ -4614,7 +4620,8 @@ fn inspector_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
         .unwrap_or_default();
     ui.ctx()
         .data_mut(|data| data.insert_temp(egui::Id::unique(INSPECTED), inspected));
-    let project = shell.inspection().is_none();
+    let transition = shell.selected_transition();
+    let project = shell.inspection().is_none() && transition.is_none();
     // The project's details keep Modify in a band at the foot.
     let body = if project && shell.draft().is_some() {
         let (body, foot) = rect.split_top_bottom_at_y(rect.bottom() - PROJECT_FOOT);
@@ -4658,7 +4665,10 @@ fn inspector_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
         .content_margin(egui::Margin::symmetric(16, 0))
         .show(&mut details, |ui| {
             ui.set_width(content_width);
-            if let Some(inspection) = shell.inspection() {
+            if let Some(bar) = &transition {
+                ui.add_space(6.0);
+                inspector::transition_panel(shell, ui, view, bar);
+            } else if let Some(inspection) = shell.inspection() {
                 ui.add_space(6.0);
                 inspector::clip_panel(shell, ui, view, &inspection, content_width);
             } else {
@@ -6859,7 +6869,7 @@ fn paint_lane(
     {
         shell.open_gap_menu(&lane.track_id, time, pos.x, pos.y);
     }
-    paint_transitions(shell, ui, lane, row, lanes_left);
+    paint_transitions(shell, ui, lane, row, lanes_left, index);
     for preview in &followers {
         paint_move_follower(shell, ui, lane, preview, row, lanes_left);
     }
@@ -7216,52 +7226,142 @@ fn row_height(size: RowSize) -> f32 {
     clip_height(size) + 2.0 * clip_inset(size)
 }
 
-fn paint_transitions(
+/// The narrowest a transition's bar is drawn, so one on a wide view of
+/// the timeline can still be picked.
+const TRANSITION_MIN_WIDTH: f32 = 14.0;
+
+/// The width of the thick edge at each side of a transition's bar, which
+/// is also the strip that drags it longer or shorter.
+const TRANSITION_EDGE: f32 = 4.0;
+
+/// Where a transition's bar is drawn on its `row`: over the blend's
+/// window, as tall as the clips, and no narrower than
+/// [`TRANSITION_MIN_WIDTH`] about its middle.
+fn transition_rect(
     shell: &Shell,
-    ui: &Ui,
+    lane: &crate::shell::LaneView,
+    bar: &cutlass_editor::TransitionBar,
+    row: Rect,
+    lanes_left: f32,
+) -> Rect {
+    let span = Micros(bar.end.0.saturating_sub(bar.start.0));
+    let rect = clip_bounds(shell, lane_size(lane), bar.start, span, row, lanes_left);
+    let width = (span.0 as f32 * shell.pixel_size() as f32).max(TRANSITION_MIN_WIDTH);
+    Rect::from_center_size(
+        Pos2::new(
+            rect.left() + span.0 as f32 * shell.pixel_size() as f32 / 2.0,
+            rect.center().y,
+        ),
+        Vec2::new(width, rect.height()),
+    )
+}
+
+/// The transitions of `lane`, each a pale bar over its cut with a thick
+/// edge at each side. A click picks one, Delete then takes it off, and an
+/// edge dragged makes it longer or shorter between its limits.
+fn paint_transitions(
+    shell: &mut Shell,
+    ui: &mut Ui,
     lane: &crate::shell::LaneView,
     row: Rect,
     lanes_left: f32,
+    index: usize,
 ) {
-    let Some(draft) = shell.draft() else {
+    let bars = shell.transitions();
+    if bars.is_empty() {
         return;
-    };
-    let Some(track) = draft.tracks.iter().find(|track| track.id == lane.track_id) else {
-        return;
-    };
-    for segment in &track.segments {
-        let Some(transition) = segment.extra_material_refs.iter().find_map(|id| {
-            draft
-                .materials
-                .transitions
-                .iter()
-                .find(|item| &item.id == id)
-        }) else {
-            continue;
-        };
-        let Some((start, end)) = cutlass_model::blend_window(
-            segment.target.end(),
-            transition.duration,
-            transition.is_overlap,
-        ) else {
-            continue;
-        };
-        let x0 = lane_x(
-            lanes_left,
-            shell.pixel_size(),
-            shell.view_origin().0,
-            start.0,
-        );
-        let x1 = lane_x(lanes_left, shell.pixel_size(), shell.view_origin().0, end.0);
-        if x1 <= x0 {
+    }
+    let picked = shell.selected_transition().map(|bar| bar.segment_id);
+    for bar in bars.iter().filter(|bar| bar.track_id == lane.track_id) {
+        let rect = transition_rect(shell, lane, bar, row, lanes_left);
+        let visible = rect.intersect(row);
+        if visible.width() <= 0.0 || visible.height() <= 0.0 {
             continue;
         }
-        let mark = Rect::from_min_max(
-            Pos2::new(x0, row.bottom() - 6.0),
-            Pos2::new(x1, row.bottom() - 2.0),
+        let selected = picked.as_ref() == Some(&bar.segment_id);
+        let painter = ui.painter().with_clip_rect(row);
+        let radius = CornerRadius::same(CLIP_RADIUS);
+        painter.rect_filled(
+            rect,
+            radius,
+            Color32::from_white_alpha(if selected { 96 } else { 64 }),
         );
-        ui.painter()
-            .rect_filled(mark.intersect(row), CornerRadius::ZERO, tokens::EXPORT);
+        for x in [rect.left(), rect.right() - TRANSITION_EDGE] {
+            painter.rect_filled(
+                Rect::from_min_size(
+                    Pos2::new(x, rect.top()),
+                    Vec2::new(TRANSITION_EDGE, rect.height()),
+                ),
+                radius,
+                Color32::WHITE,
+            );
+        }
+        painter.rect_stroke(
+            rect,
+            radius,
+            egui::Stroke::new(if selected { 2.0 } else { 1.0 }, Color32::WHITE),
+            egui::StrokeKind::Inside,
+        );
+        if rect.width() >= 30.0 {
+            let _ = icons::paint(
+                &painter,
+                Rect::from_center_size(rect.center(), Vec2::splat(14.0)),
+                "transitions",
+                Color32::WHITE,
+            );
+        }
+        let id = bar.segment_id.clone();
+        let salt = ("transition", index, id.as_str().to_owned());
+        // The body takes the press whole, so the clips under the bar are
+        // neither picked nor dragged through it.
+        let body = Rect::from_min_max(
+            Pos2::new(visible.left() + TRANSITION_EDGE, visible.top()),
+            Pos2::new(visible.right() - TRANSITION_EDGE, visible.bottom()),
+        );
+        if body.width() > 0.0 {
+            let response = ui
+                .interact(body, ui.scope_id().with(&salt), Sense::click_and_drag())
+                .on_hover_text(format!(
+                    "{} · {:.1}s",
+                    bar.name,
+                    bar.duration.0 as f64 / 1_000_000.0
+                ));
+            if response.clicked() || response.drag_started() {
+                shell.select_transition(Some(id.clone()));
+            }
+        }
+        for (edge, x) in [
+            (cutlass_editor::BarEdge::Start, visible.left()),
+            (
+                cutlass_editor::BarEdge::End,
+                visible.right() - TRANSITION_EDGE,
+            ),
+        ] {
+            let strip = Rect::from_min_size(
+                Pos2::new(x, visible.top()),
+                Vec2::new(TRANSITION_EDGE, visible.height()),
+            )
+            .expand2(Vec2::new(2.0, 0.0));
+            let response = ui.interact(
+                strip,
+                ui.scope_id()
+                    .with((&salt, edge == cutlass_editor::BarEdge::Start)),
+                Sense::drag(),
+            );
+            if response.hovered() || response.dragged() {
+                ui.set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+            }
+            if response.drag_started() {
+                shell.select_transition(Some(id.clone()));
+            }
+            if response.dragged()
+                && let Some(pos) = pointer_pos(ui, &response)
+                && let Err(error) =
+                    shell.drag_transition_edge(&id, edge, f64::from(pos.x - lanes_left))
+            {
+                shell.notice_error(&error);
+            }
+        }
     }
 }
 
@@ -8925,6 +9025,33 @@ fn export_extension(view: &ViewState) -> &'static str {
         view.export.audio.extension()
     } else {
         view.export.gif.map_or("gif", |gif| gif.extension())
+    }
+}
+
+/// The question a transition dropped on a cut that has one asks: replace
+/// it or leave it, with a tick that stops the question from then on.
+fn transition_prompt(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
+    let Some((old, new)) = shell.asked_transition() else {
+        return;
+    };
+    let never = &mut view.never_ask_transition;
+    let ((), end) = widgets::sheet(ui, "Replace transition", 420.0, "Replace", |ui| {
+        ui.label(
+            RichText::new(format!("This cut has {old}. Replace it with {new}?"))
+                .size(tokens::TYPE_SIZE + 1.0)
+                .color(tokens::TEXT),
+        );
+        ui.add_space(12.0);
+        ui.add(ui::Check::new(never, "Do not ask again"));
+    });
+    let answered = match end {
+        widgets::SheetEnd::Open => return,
+        widgets::SheetEnd::Cancel => shell.answer_transition(false, false),
+        widgets::SheetEnd::Confirm => shell.answer_transition(true, view.never_ask_transition),
+    };
+    view.never_ask_transition = false;
+    if let Err(error) = answered {
+        shell.notice_error(&error);
     }
 }
 
@@ -12632,6 +12759,243 @@ mod tests {
         assert_eq!(chosen(&shell), (false, 540), "the resolution is kept");
         press(&mut shell, &mut view, "720p");
         assert_eq!(chosen(&shell), (true, 720));
+    }
+
+    /// The pale bars `output` paints for transitions: each filled rectangle
+    /// of the unpicked or the picked bar's white.
+    fn transition_bars_painted(output: &egui::FullOutput) -> Vec<Rect> {
+        fn collect(shape: &egui::Shape, found: &mut Vec<Rect>) {
+            match shape {
+                egui::Shape::Rect(rect)
+                    if rect.fill == Color32::from_white_alpha(64)
+                        || rect.fill == Color32::from_white_alpha(96) =>
+                {
+                    found.push(rect.rect);
+                }
+                egui::Shape::Vec(shapes) => {
+                    for shape in shapes {
+                        collect(shape, found);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut found = Vec::new();
+        for clipped in &output.shapes {
+            collect(&clipped.shape, &mut found);
+        }
+        found
+    }
+
+    #[test]
+    fn a_transition_is_a_bar_over_its_cut_that_is_picked_resized_and_deleted() {
+        let temp =
+            std::env::temp_dir().join(format!("cutlass-transition-bar-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let mut draft = cutlass_model::Draft::empty("draft");
+        draft.config.maintrack_adsorb = false;
+        draft.canvas_config.width = 2;
+        draft.canvas_config.height = 1;
+        for (id, start) in [("a", 0), ("b", 4_000_000)] {
+            draft.tracks[0].segments.push(cutlass_model::Segment::new(
+                id,
+                "color",
+                cutlass_model::TimeRange::new(start, 4_000_000),
+            ));
+        }
+        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let frame = |shell: &mut Shell, view: &mut ViewState, events: Vec<egui::Event>| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: screen,
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, view, None),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        let button = |pos: Pos2, pressed: bool| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        // No transition, no bar.
+        let output = frame(&mut shell, &mut view, Vec::new());
+        assert!(transition_bars_painted(&output).is_empty());
+
+        // One second of Dissolve on the cut at four seconds.
+        let card = crate::shell::transition_offers()[0].card_id();
+        shell.pixel_size_for_test(0.000_05);
+        shell
+            .drop_transition(
+                &card,
+                4_000_000.0 * shell.pixel_size(),
+                tokens::LANE_HEIGHT / 2.0,
+            )
+            .unwrap();
+        shell.select(None);
+        let a = SegmentId::new("a");
+        shell.set_transition_length(&a, Micros(1_000_000)).unwrap();
+        let output = frame(&mut shell, &mut view, Vec::new());
+        let bars = transition_bars_painted(&output);
+        assert_eq!(bars.len(), 1, "{bars:?}");
+        let bar = bars[0];
+        // A second at this zoom is 50 points, half each side of the cut.
+        assert!((bar.width() - 50.0).abs() < 1.0, "{bar:?}");
+        assert!(shell.selected_transition().is_none());
+
+        // A click on the bar picks the transition, not the clip under it.
+        frame(
+            &mut shell,
+            &mut view,
+            vec![
+                egui::Event::PointerMoved(bar.center()),
+                button(bar.center(), true),
+            ],
+        );
+        frame(&mut shell, &mut view, vec![button(bar.center(), false)]);
+        assert_eq!(
+            shell.selected_transition().map(|bar| bar.segment_id),
+            Some(a.clone())
+        );
+        assert!(shell.selection().is_empty());
+        let output = frame(&mut shell, &mut view, Vec::new());
+        let text = painted_text(&output);
+        for label in ["Transition", "Dissolve", "Duration", "Apply to all"] {
+            assert!(text.contains(label), "no {label} in the panel: {text}");
+        }
+
+        // Its right edge dragged 25 points out makes it a second longer,
+        // as it grows both ways, in one undo step.
+        let edge = Pos2::new(bar.right() - 2.0, bar.center().y);
+        let out = edge + Vec2::new(25.0, 0.0);
+        frame(
+            &mut shell,
+            &mut view,
+            vec![egui::Event::PointerMoved(edge), button(edge, true)],
+        );
+        for step in 1..=5 {
+            let at = edge + Vec2::new(5.0 * step as f32, 0.0);
+            frame(&mut shell, &mut view, vec![egui::Event::PointerMoved(at)]);
+        }
+        frame(&mut shell, &mut view, vec![button(out, false)]);
+        let length = shell.selected_transition().unwrap().duration.0;
+        assert!((length - 2_000_000).abs() < 100_000, "{length}");
+        shell.undo().unwrap();
+        assert_eq!(shell.selected_transition().unwrap().duration.0, 1_000_000);
+        assert_eq!(
+            shell.draft().unwrap().tracks[0].segments[1].target.start,
+            Micros(4_000_000),
+            "no clip moved"
+        );
+
+        // Delete takes the picked transition off and leaves both clips.
+        frame(
+            &mut shell,
+            &mut view,
+            vec![key(egui::Key::Delete, egui::Modifiers::NONE)],
+        );
+        assert!(shell.transitions().is_empty(), "{}", shell.notice());
+        assert_eq!(shell.draft().unwrap().tracks[0].segments.len(), 2);
+        let output = frame(&mut shell, &mut view, Vec::new());
+        assert!(transition_bars_painted(&output).is_empty());
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn a_transition_dropped_on_another_asks_and_can_stop_asking() {
+        let temp =
+            std::env::temp_dir().join(format!("cutlass-transition-ask-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let mut draft = cutlass_model::Draft::empty("draft");
+        draft.config.maintrack_adsorb = false;
+        for (id, start) in [("a", 0), ("b", 4_000_000)] {
+            draft.tracks[0].segments.push(cutlass_model::Segment::new(
+                id,
+                "color",
+                cutlass_model::TimeRange::new(start, 4_000_000),
+            ));
+        }
+        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        shell.pixel_size_for_test(0.000_05);
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let frame = |shell: &mut Shell, view: &mut ViewState, events: Vec<egui::Event>| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: screen,
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, view, None),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        let press = |shell: &mut Shell, view: &mut ViewState, label: &str| {
+            let output = frame(shell, view, Vec::new());
+            let pos = last_text_pos(&output, label).unwrap_or_else(|| panic!("no {label}"));
+            let event = |pressed| egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::default(),
+            };
+            frame(
+                shell,
+                view,
+                vec![egui::Event::PointerMoved(pos), event(true)],
+            );
+            frame(shell, view, vec![event(false)]);
+            frame(shell, view, Vec::new());
+        };
+        let offers = crate::shell::transition_offers();
+        let (x, y) = (4_000_000.0 * shell.pixel_size(), tokens::LANE_HEIGHT / 2.0);
+        shell.drop_transition(&offers[0].card_id(), x, y).unwrap();
+        let text = painted_text(&frame(&mut shell, &mut view, Vec::new()));
+        assert!(!text.contains("Replace transition"), "{text}");
+
+        // A second one opens the question; Cancel leaves the first.
+        shell.drop_transition(&offers[1].card_id(), x, y).unwrap();
+        let text = painted_text(&frame(&mut shell, &mut view, Vec::new()));
+        assert!(
+            text.contains("This cut has Dissolve. Replace it with Dip to Black?"),
+            "{text}"
+        );
+        assert!(text.contains("Do not ask again"), "{text}");
+        press(&mut shell, &mut view, "Cancel");
+        assert!(shell.asked_transition().is_none());
+        assert_eq!(shell.transitions()[0].name, "Dissolve");
+
+        // Ticked and replaced, the next one lands without the question.
+        shell.drop_transition(&offers[1].card_id(), x, y).unwrap();
+        press(&mut shell, &mut view, "Do not ask again");
+        assert!(view.never_ask_transition);
+        press(&mut shell, &mut view, "Replace");
+        assert_eq!(shell.transitions()[0].name, "Dip to Black");
+        assert!(shell.settings().confirm.replace_transition_unasked);
+        assert!(
+            !view.never_ask_transition,
+            "the tick is cleared for next time"
+        );
+        shell.drop_transition(&offers[0].card_id(), x, y).unwrap();
+        assert_eq!(shell.transitions()[0].name, "Dissolve");
+        let text = painted_text(&frame(&mut shell, &mut view, Vec::new()));
+        assert!(!text.contains("Replace transition"), "{text}");
+        let _ = std::fs::remove_dir_all(&temp);
     }
 
     #[test]

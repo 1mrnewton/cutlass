@@ -7,6 +7,8 @@ use cutlass_editor::{
     transition_everywhere, transition_length_request, transition_limits, transition_of_card,
     transition_offers, transition_request,
 };
+use std::sync::Arc;
+
 use cutlass_model::{MaterialId, Micros, SegmentId};
 use cutlass_session::Request;
 
@@ -40,10 +42,23 @@ fn miss(miss: TransitionMiss) -> ShellError {
 }
 
 impl Shell {
-    /// The transitions on cuts, as the lanes draw them.
+    /// The transitions on cuts, as the lanes draw them: built again only
+    /// when the revision moves.
     #[must_use]
-    pub fn transitions(&self) -> Vec<TransitionBar> {
-        self.draft().map(transition_bars).unwrap_or_default()
+    pub fn transitions(&self) -> Arc<[TransitionBar]> {
+        let Some(session) = self.session.as_ref() else {
+            return Arc::from([]);
+        };
+        let revision = session.revision();
+        if let Some((built, bars)) = self.bars_cache.borrow().as_ref()
+            && *built == revision
+        {
+            return Arc::clone(bars);
+        }
+        let built: Arc<[TransitionBar]> = transition_bars(session.draft()).into();
+        self.bars_cache
+            .replace(Some((revision, Arc::clone(&built))));
+        built
     }
 
     /// The picked transition, while it is still on its cut.
@@ -51,8 +66,9 @@ impl Shell {
     pub fn selected_transition(&self) -> Option<TransitionBar> {
         let picked = self.selected_transition.as_ref()?;
         self.transitions()
-            .into_iter()
+            .iter()
             .find(|bar| &bar.segment_id == picked)
+            .cloned()
     }
 
     /// Pick the transition that leads out of clip `segment_id`, and let go
@@ -114,8 +130,9 @@ impl Shell {
     ) -> Result<(), ShellError> {
         let bar = self
             .transitions()
-            .into_iter()
+            .iter()
             .find(|bar| &bar.segment_id == segment_id)
+            .cloned()
             .ok_or_else(|| ShellError::Unavailable("the clip has no transition".to_owned()))?;
         let time = self
             .lane_time_at(x)
@@ -234,9 +251,10 @@ impl Shell {
         };
         let old = self
             .transitions()
-            .into_iter()
+            .iter()
             .find(|bar| &bar.segment_id == segment_id)?
-            .name;
+            .name
+            .clone();
         Some((old, transition.name.clone()))
     }
 

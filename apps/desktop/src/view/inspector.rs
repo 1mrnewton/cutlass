@@ -152,6 +152,57 @@ pub(super) fn clip_panel(
     });
 }
 
+/// The picked transition: its name, how long it lasts between its
+/// limits, Reset back to the shelf's length, and Apply to all.
+pub(super) fn transition_panel(
+    shell: &mut Shell,
+    ui: &mut Ui,
+    view: &mut ViewState,
+    bar: &cutlass_editor::TransitionBar,
+) {
+    let state = &mut view.inspector;
+    let id = bar.segment_id.clone();
+    tabs(ui, &["Transition"], &mut 0);
+    ui.horizontal(|ui| {
+        row_label(ui, "Name");
+        ui.label(RichText::new(&bar.name).size(12.0).color(tokens::TEXT));
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if icon_toggle(ui, "reset", "Reset the duration", false).clicked() {
+                send(shell, |shell| shell.reset_transition_length(&id));
+            }
+        });
+    });
+    ui.add_space(ROW_GAP);
+    let seconds = |time: Micros| (time.0 as f64 / 100_000.0).round() / 10.0;
+    if let Some((shortest, longest)) = shell.transition_limits(&id) {
+        let key = format!("transition {}", id.as_str());
+        let moved = slider(
+            ui,
+            state,
+            &key,
+            "Duration",
+            seconds(bar.duration),
+            seconds(shortest)..=seconds(longest),
+            |v| format!("{v:.1}s"),
+        );
+        if let Some(moved) = moved {
+            let duration = Micros((moved * 1_000_000.0).round() as i64);
+            send(shell, |shell| shell.set_transition_length(&id, duration));
+        }
+    }
+    ui.add_space(12.0);
+    if ui
+        .add(
+            ui::Button::new("Apply to all")
+                .text_size(12.0)
+                .tip("Put this transition on every other cut of the track"),
+        )
+        .clicked()
+    {
+        send(shell, |shell| shell.apply_transition_to_all(&id));
+    }
+}
+
 // Panels.
 
 fn video_panel(

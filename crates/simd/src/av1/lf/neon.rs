@@ -2,13 +2,13 @@
 //! 8-bit lanes of a vector, one vector per sample of the line.
 
 use core::arch::aarch64::{
-    uint8x16_t, uint16x8_t, vabdq_u8, vandq_s8, vandq_u8, vbicq_s8, vbslq_u8, vcgtq_u8, vcleq_u8,
-    vcombine_u8, vdupq_n_s8, vdupq_n_u8, vdupq_n_u16, veorq_u8, vget_low_u8, vmaxq_u8, vmaxvq_u8,
-    vmlal_high_u8, vmlal_u8, vmlsl_high_u8, vmlsl_u8, vqaddq_s8, vqaddq_u8, vqsubq_s8,
-    vreinterpretq_s8_u8, vreinterpretq_u8_s8, vreinterpretq_u8_u16, vreinterpretq_u8_u32,
-    vreinterpretq_u8_u64, vreinterpretq_u16_u8, vreinterpretq_u32_u8, vreinterpretq_u64_u8,
-    vrshrn_n_u16, vrshrq_n_s8, vshrq_n_s8, vshrq_n_u8, vtrn1q_u8, vtrn1q_u16, vtrn1q_u32,
-    vtrn1q_u64, vtrn2q_u8, vtrn2q_u16, vtrn2q_u32, vtrn2q_u64,
+    uint8x16_t, uint16x8_t, vabdq_u8, vaddw_high_u8, vaddw_u8, vandq_s8, vandq_u8, vbicq_s8,
+    vbslq_u8, vcgtq_u8, vcleq_u8, vcombine_u8, vdupq_n_s8, vdupq_n_u8, vdupq_n_u16, veorq_u8,
+    vget_low_u8, vmaxq_u8, vmaxvq_u8, vqaddq_s8, vqaddq_u8, vqsubq_s8, vreinterpretq_s8_u8,
+    vreinterpretq_u8_s8, vreinterpretq_u8_u16, vreinterpretq_u8_u32, vreinterpretq_u8_u64,
+    vreinterpretq_u16_u8, vreinterpretq_u32_u8, vreinterpretq_u64_u8, vrshrn_n_u16, vrshrq_n_s8,
+    vshrq_n_s8, vshrq_n_u8, vsubw_high_u8, vsubw_u8, vtrn1q_u8, vtrn1q_u16, vtrn1q_u32, vtrn1q_u64,
+    vtrn2q_u8, vtrn2q_u16, vtrn2q_u32, vtrn2q_u64,
 };
 
 use super::{Limits, Size};
@@ -16,72 +16,47 @@ use crate::neon::{bytes, halves, u8x16, u8x16_pair};
 
 type V = uint8x16_t;
 
-/// How much each sample of a line weighs in each output of a wide filter
-/// (7.14.6.4): row `i + n` is output `i` of `-n .. n`, column `7 + p` is
-/// sample `p`.
-const fn weights(n: i32, n2: i32) -> [[i8; 14]; 12] {
-    let mut w = [[0i8; 14]; 12];
-    let mut i = -n;
-    while i < n {
-        let mut j = -n;
-        while j <= n {
-            let mut p = i + j;
-            if p < -(n + 1) {
-                p = -(n + 1);
-            }
-            if p > n {
-                p = n;
-            }
-            let near = if j < 0 { -j <= n2 } else { j <= n2 };
-            w[(i + n) as usize][(7 + p) as usize] += if near { 2 } else { 1 };
-            j += 1;
-        }
-        i += 1;
-    }
-    w
-}
+/// Sixteen 16-bit sums, one for each line.
+type Sums = (uint16x8_t, uint16x8_t);
 
-/// Adds `w` times the lanes of `v` to the 16-bit sums.
 #[inline]
 #[target_feature(enable = "neon")]
-fn weigh(sum: (uint16x8_t, uint16x8_t), v: V, w: i8) -> (uint16x8_t, uint16x8_t) {
-    let k = vdupq_n_u8(w.unsigned_abs());
-    if w > 0 {
-        (
-            vmlal_u8(sum.0, vget_low_u8(v), vget_low_u8(k)),
-            vmlal_high_u8(sum.1, v, k),
-        )
-    } else if w < 0 {
-        (
-            vmlsl_u8(sum.0, vget_low_u8(v), vget_low_u8(k)),
-            vmlsl_high_u8(sum.1, v, k),
-        )
-    } else {
-        sum
-    }
+fn add(sum: Sums, v: V) -> Sums {
+    (vaddw_u8(sum.0, vget_low_u8(v)), vaddw_high_u8(sum.1, v))
 }
 
-/// The wide filter for taps `-N .. N` of the lines `o`, written to `out`
-/// in the lanes `on` selects. A sum of at most 16 samples fits 16 bits.
-/// Each output's sum is the one before it plus the few samples whose
-/// weight changes.
+#[inline]
+#[target_feature(enable = "neon")]
+fn sub(sum: Sums, v: V) -> Sums {
+    (vsubw_u8(sum.0, vget_low_u8(v)), vsubw_high_u8(sum.1, v))
+}
+
+/// The wide filter (7.14.6.4) for taps `-N .. N` of the lines `o`,
+/// written to `out` in the lanes `on` selects.
+///
+/// Output `i` is the rounded mean of the samples `i - N ..= i + N`, the
+/// ones within `N2` of `i` counted twice, and a sample past the filter's
+/// reach replaced by the last one inside it. So each output's sum is the
+/// one before it with one sample entering and one leaving each of the two
+/// windows. A sum of at most 16 samples fits 16 bits.
 #[inline]
 #[target_feature(enable = "neon")]
 fn wide<const N: i32, const N2: i32, const LOG2: i32>(o: &[V; 14], out: &mut [V; 14], on: V) {
-    let w = const { weights(N, N2) };
+    let at = |p: i32| o[(7 + p.clamp(-(N + 1), N)) as usize];
     let mut sum = (vdupq_n_u16(0), vdupq_n_u16(0));
-    let outputs = (2 * N) as usize;
-    for i in 0..outputs {
-        for m in 0..14 {
-            let d = if i == 0 {
-                w[0][m]
-            } else {
-                w[i][m] - w[i - 1][m]
-            };
-            sum = weigh(sum, o[m], d);
+    for j in -N..=N {
+        sum = add(sum, at(j - N));
+    }
+    for j in -N2..=N2 {
+        sum = add(sum, at(j - N));
+    }
+    for i in -N..N {
+        if i > -N {
+            sum = sub(add(sum, at(i + N)), at(i - 1 - N));
+            sum = sub(add(sum, at(i + N2)), at(i - 1 - N2));
         }
         let r = vcombine_u8(vrshrn_n_u16::<LOG2>(sum.0), vrshrn_n_u16::<LOG2>(sum.1));
-        let k = 7 + i - N as usize;
+        let k = (7 + i) as usize;
         out[k] = vbslq_u8(on, r, out[k]);
     }
 }

@@ -1230,14 +1230,15 @@ fn p_skip_mv<S: Sample>(pic: &Frame<S>, mx: usize, my: usize, current: &Mb) -> [
     if still(left) || still(above) {
         [0, 0]
     } else {
-        mvp(
+        // The prediction starts from the same two neighbours.
+        mvp_from(
             pic,
             Place { mx, my },
             Cell { bx: 0, by: 0 },
             (16, 16),
-            0,
-            0,
+            (0, 0),
             current,
+            (left, above),
         )
     }
 }
@@ -8686,9 +8687,27 @@ fn mvp<S: Sample>(
 ) -> [i16; 2] {
     let Place { mx, my } = at;
     let Cell { bx, by } = cell;
-    let (w, h) = size;
     let a = part_motion(pic, mx, my, bx as i32 - 1, by as i32, list, current);
-    let mut b = part_motion(pic, mx, my, bx as i32, by as i32 - 1, list, current);
+    let b = part_motion(pic, mx, my, bx as i32, by as i32 - 1, list, current);
+    mvp_from(pic, at, cell, size, (list, reference), current, (a, b))
+}
+
+/// [`mvp`] with the motion to the left of the partition and above it already
+/// found: `near` is those two, and `wanted` the list and reference index.
+fn mvp_from<S: Sample>(
+    pic: &Frame<S>,
+    at: Place,
+    cell: Cell,
+    size: (usize, usize),
+    wanted: (usize, i8),
+    current: &Mb,
+    near: (Motion, Motion),
+) -> [i16; 2] {
+    let Place { mx, my } = at;
+    let Cell { bx, by } = cell;
+    let (w, h) = size;
+    let (list, reference) = wanted;
+    let (a, mut b) = near;
     let above_right = part_motion(
         pic,
         mx,
@@ -8790,6 +8809,23 @@ fn motion_near<S: Sample>(
         mv: [0, 0],
         reference: -1,
     };
+    if !pic.mbaff {
+        // Every macroblock is of one kind, so a neighbour's motion is read
+        // as it stands.
+        let (mbx, ox) = shift(mx, bx, 4);
+        let (mby, oy) = shift(my, by, 4);
+        let index = oy * 4 + ox;
+        if mbx == mx as i32 && mby == my as i32 {
+            if current.ready & (1 << index) == 0 {
+                return absent;
+            }
+            return motion_of(current, index, list);
+        }
+        return match neighbor(pic, mbx, mby, current.slice) {
+            Some(mb) => motion_of(mb, index, list),
+            None => absent,
+        };
+    }
     let Some((mbx, mby, index)) = near_block(pic, (mx, my), current.field_mb, (bx, by, low)) else {
         return absent;
     };

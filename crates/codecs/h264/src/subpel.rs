@@ -148,6 +148,72 @@ impl Subpel {
         mv: [i16; 2],
         out: &mut [u8; MAX_BLOCK * MAX_BLOCK],
     ) -> Option<()> {
+        let (left, top, first, second) = self.place((x, y, w, h), mv)?;
+        let w = w as usize;
+        for row in 0..h as usize {
+            let line = &mut out[row * MAX_BLOCK..row * MAX_BLOCK + w];
+            let a = self.row(first, left, top + row as i32, w);
+            match second {
+                None => line.copy_from_slice(a),
+                Some(second) => {
+                    let b = self.row(second, left, top + row as i32, w);
+                    for ((dst, &p), &q) in line.iter_mut().zip(a).zip(b) {
+                        *dst = ((u16::from(p) + u16::from(q) + 1) >> 1) as u8;
+                    }
+                }
+            }
+        }
+        Some(())
+    }
+
+    /// The sum of absolute differences between the `w`×`h` prediction at
+    /// (`x`, `y`) moved by `mv` and the same block of `src`, a picture with
+    /// rows `src_stride` apart that holds the whole block. `None` as for
+    /// [`Self::block`]. Reads the planes in place, without a copy.
+    pub fn sad(
+        &self,
+        (x, y, w, h): (u32, u32, u32, u32),
+        mv: [i16; 2],
+        src: &[u8],
+        src_stride: usize,
+    ) -> Option<u32> {
+        let (left, top, first, second) = self.place((x, y, w, h), mv)?;
+        let w = w as usize;
+        let mut cost = 0u32;
+        for row in 0..h as usize {
+            let start = (y as usize + row) * src_stride + x as usize;
+            let source = &src[start..start + w];
+            let a = self.row(first, left, top + row as i32, w);
+            cost += match second {
+                None => source
+                    .iter()
+                    .zip(a)
+                    .map(|(&s, &p)| u32::from(s.abs_diff(p)))
+                    .sum::<u32>(),
+                Some(second) => {
+                    let b = self.row(second, left, top + row as i32, w);
+                    source
+                        .iter()
+                        .zip(a)
+                        .zip(b)
+                        .map(|((&s, &p), &q)| {
+                            let avg = ((u16::from(p) + u16::from(q) + 1) >> 1) as u8;
+                            u32::from(s.abs_diff(avg))
+                        })
+                        .sum::<u32>()
+                }
+            };
+        }
+        Some(cost)
+    }
+
+    /// The moved block's top-left integer sample and its plane reads, or
+    /// `None` when a read leaves the margin.
+    fn place(
+        &self,
+        (x, y, w, h): (u32, u32, u32, u32),
+        mv: [i16; 2],
+    ) -> Option<(i32, i32, Read, Option<Read>)> {
         if w as usize > MAX_BLOCK || h as usize > MAX_BLOCK {
             return None;
         }
@@ -164,21 +230,7 @@ impl Subpel {
             return None;
         }
         let (first, second) = reads(mvx & 3, mvy & 3);
-        let w = w as usize;
-        for row in 0..h as usize {
-            let line = &mut out[row * MAX_BLOCK..row * MAX_BLOCK + w];
-            let a = self.row(first, left, top + row as i32, w);
-            match second {
-                None => line.copy_from_slice(a),
-                Some(second) => {
-                    let b = self.row(second, left, top + row as i32, w);
-                    for ((dst, &p), &q) in line.iter_mut().zip(a).zip(b) {
-                        *dst = ((u16::from(p) + u16::from(q) + 1) >> 1) as u8;
-                    }
-                }
-            }
-        }
-        Some(())
+        Some((left, top, first, second))
     }
 
     fn row(&self, (plane, dx, dy): Read, x: i32, y: i32, w: usize) -> &[u8] {
@@ -275,6 +327,37 @@ mod tests {
                             );
                         }
                     }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sad_matches_the_copied_block() {
+        let (w, h) = (40u32, 24u32);
+        let plane: Vec<u8> = (0..w * h)
+            .map(|i| ((i * 53 + (i / w) * 17) % 256) as u8)
+            .collect();
+        let src: Vec<u8> = (0..w * h).map(|i| ((i * 29 + 7) % 256) as u8).collect();
+        let sub = Subpel::new(&plane, w, h);
+        let mut out = [0u8; MAX_BLOCK * MAX_BLOCK];
+        for mvy in -40..40i16 {
+            for mvx in -40..40i16 {
+                for area in [(16, 8, 16, 16), (20, 0, 8, 4), (0, 16, 4, 8)] {
+                    let Some(got) = sub.sad(area, [mvx, mvy], &src, w as usize) else {
+                        continue;
+                    };
+                    sub.block(area, [mvx, mvy], &mut out).unwrap();
+                    let (x, y, bw, bh) = area;
+                    let mut want = 0u32;
+                    for row in 0..bh {
+                        for col in 0..bw {
+                            let s = src[((y + row) * w + x + col) as usize];
+                            let p = out[(row as usize) * MAX_BLOCK + col as usize];
+                            want += u32::from(s.abs_diff(p));
+                        }
+                    }
+                    assert_eq!(got, want, "mv {mvx},{mvy} area {area:?}");
                 }
             }
         }

@@ -1473,9 +1473,12 @@ fn sad_qpel(src: &Source<'_>, reference: &Planes, area: Area, qx: i32, qy: i32) 
         i16::try_from(qx).unwrap_or(0),
         i16::try_from(qy).unwrap_or(0),
     ];
-    let mut pred = [0u8; MAX_BLOCK * MAX_BLOCK];
-    if inside(src, area) && reference.sub.block(bounds(area), mv, &mut pred).is_some() {
-        return sad_rows(src, area, &pred);
+    if inside(src, area)
+        && let Some(cost) = reference
+            .sub
+            .sad(bounds(area), mv, src.y, src.width as usize)
+    {
+        return cost as i32;
     }
     let mut cost = 0i32;
     for row in 0..area.h {

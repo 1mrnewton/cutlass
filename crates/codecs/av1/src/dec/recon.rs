@@ -15,6 +15,11 @@ use super::types::{
 
 /// Reusable buffers for one tile.
 pub struct Scratch<P> {
+    /// Set when prediction stops for rows of a reference still being
+    /// decoded that are not published yet: the copy read through
+    /// ([`super::tile::RefView::mirror`]) and the luma rows needed, up to
+    /// which the caller waits before it resumes.
+    pub want_rows: Option<(usize, usize)>,
     pub levels: Box<[u16; super::tile::LEVELS_LEN]>,
     /// [`super::tile::level_table`] entries of the nonzero levels of the
     /// transform block being read,
@@ -48,6 +53,7 @@ pub struct Scratch<P> {
 impl<P: Pixel> Scratch<P> {
     pub fn new() -> Self {
         Self {
+            want_rows: None,
             levels: Box::new([0; super::tile::LEVELS_LEN]),
             nz_scan: Box::new([0; 1024]),
             want: vec![0; 1024],
@@ -76,6 +82,7 @@ impl<P: Pixel> Scratch<P> {
     /// A placeholder that allocates nothing.
     pub fn empty() -> Self {
         Self {
+            want_rows: None,
             levels: Box::new([0; super::tile::LEVELS_LEN]),
             nz_scan: Box::new([0; 1024]),
             want: Vec::new(),

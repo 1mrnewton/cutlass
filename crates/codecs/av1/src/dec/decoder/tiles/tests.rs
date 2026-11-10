@@ -123,6 +123,44 @@ fn a_frame_taken_alone_shows_what_frames_at_once_show() {
     }
 }
 
+/// The packets of the fixture files `name_0.obu`, `name_1.obu`, and so on.
+fn obus(name: &str, count: usize) -> Vec<Vec<u8>> {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+    (0..count)
+        .map(|i| std::fs::read(dir.join(format!("{name}_{i}.obu"))).expect("fixture"))
+        .collect()
+}
+
+#[test]
+fn a_block_that_stops_for_reference_rows_is_predicted_again_once_they_are_final() {
+    // Without the wait ahead of each chunk of blocks, a block stops at the
+    // first rows of a reference still being decoded that are not
+    // published, and is taken up again: ordinary and warped blocks alike.
+    let streams = [
+        ivf("sb128-tiles.ivf"),
+        ivf("level.ivf"),
+        obus("warp", 8),
+        obus("rotzoom", 3),
+    ];
+    let mut waits = 0;
+    // Whether a reference is still being decoded when a frame reads it is
+    // a matter of timing: some round has one that is.
+    for _ in 0..50 {
+        for packets in &streams {
+            let one = samples(&decode(&mut core(1), packets).expect("one thread"));
+            let mut four = core(4);
+            super::super::lock(&four.px8.spares).rows_ahead = false;
+            let got = samples(&decode(&mut four, packets).expect("four threads"));
+            assert_eq!(got, one);
+            waits += super::super::lock(&four.px8.spares).row_waits;
+        }
+        if waits > 0 {
+            break;
+        }
+    }
+    assert!(waits > 0, "no block waited for rows");
+}
+
 #[test]
 fn a_reset_keeps_the_choice_of_one_frame_at_a_time() {
     let mut core = one_frame_core(3);

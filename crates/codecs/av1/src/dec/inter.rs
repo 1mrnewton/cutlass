@@ -607,6 +607,14 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
                     (None, None) => false,
                 };
                 if !ok {
+                    // Rows of a reference still being decoded that are
+                    // not published yet: the caller waits for them and
+                    // predicts the block again.
+                    if let Some(k) = rv.and_then(|rv| rv.mirror) {
+                        let last = (ey + fh as isize - 1).clamp(0, ph as isize - 1) as usize;
+                        let sy = self.plane_sub(plane).1;
+                        self.scratch.want_rows = Some((k, (last + 1) << sy));
+                    }
                     return Err(super::tile::malformed("reference rows"));
                 }
                 (&self.scratch.emu[..], fw, 3 * fw + 3)
@@ -694,18 +702,33 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         let Some(rv) = self.refs[ref_frame as usize].as_ref() else {
             return Err(super::tile::malformed("missing reference"));
         };
-        // Warped blocks are reconstructed once their references are done
-        // (`recon_worker`), so the reference is never read from bands.
-        if rv.mirror.is_some() {
-            return Err(super::tile::malformed(
-                "warp from a reference still decoding",
-            ));
-        }
-        let rp = &rv.pic.planes[plane];
         for i8 in 0..h.div_ceil(8) {
             for j8 in 0..w.div_ceil(8) {
                 let bx = x + j8 * 8;
                 let by = y + i8 * 8;
+                // The whole plane of a reference that is done, or the
+                // rows this 8x8 reads of one still being decoded, from the
+                // band that holds them.
+                let (refp, ref_stride, row0): (&[P], usize, usize) = match rv.mirror {
+                    None => {
+                        let rp = &rv.pic.planes[plane];
+                        (&rp.data, rp.stride, 0)
+                    }
+                    Some(k) => {
+                        let (first, last) = mc::warp_rows(mat, bx, by, sx != 0, sy != 0, ph);
+                        let rows = self
+                            .mirrors
+                            .get(k)
+                            .and_then(|m| m.rows(plane, first, last + 1));
+                        let Some((rows, stride)) = rows else {
+                            // Not published yet: the caller waits for
+                            // them and predicts the block again.
+                            self.scratch.want_rows = Some((k, (last + 1) << sy));
+                            return Err(super::tile::malformed("reference rows"));
+                        };
+                        (rows, stride, first)
+                    }
+                };
                 match dst {
                     Dst::Tmp(l) => {
                         let tmp = if *l == 0 {
@@ -713,11 +736,12 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
                         } else {
                             &mut self.scratch.tmp1[..]
                         };
-                        mc::warp_8x8_prep(
+                        mc::warp_8x8_prep_rows(
                             &mut tmp[i8 * 8 * w + j8 * 8..],
                             w,
-                            &rp.data,
-                            rp.stride,
+                            refp,
+                            ref_stride,
+                            row0,
                             pw,
                             ph,
                             mat,
@@ -732,11 +756,12 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
                     _ => {
                         let pl = &mut self.cur.planes[plane];
                         let st = pl.stride;
-                        mc::warp_8x8_put(
+                        mc::warp_8x8_put_rows(
                             &mut pl.data[by * st + bx..],
                             st,
-                            &rp.data,
-                            rp.stride,
+                            refp,
+                            ref_stride,
+                            row0,
                             pw,
                             ph,
                             mat,

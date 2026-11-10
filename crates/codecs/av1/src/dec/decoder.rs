@@ -18,13 +18,13 @@ use super::mvpred::{MfEntry, MfPlan, motion_field_plan};
 use super::obu::{
     FrameHeader, GrainParams, HeaderContext, KEY_FRAME, OBU_FRAME, OBU_FRAME_HEADER,
     OBU_REDUNDANT_FRAME_HEADER, OBU_SEQUENCE_HEADER, OBU_TEMPORAL_DELIMITER, OBU_TILE_GROUP,
-    OBU_TILE_LIST, PRIMARY_REF_NONE, RESTORE_NONE, RefHeaderState, SequenceHeader, TRANSLATION,
+    OBU_TILE_LIST, PRIMARY_REF_NONE, RESTORE_NONE, RefHeaderState, SequenceHeader,
     parse_frame_header, parse_sequence_header, relative_dist, split_obus,
 };
 use super::postfilter;
 use super::recon::Scratch;
 use super::tile::{Block, ReconLog, RefView, RowHook, TileDec, lr_unit_span, malformed};
-use super::types::{GLOBAL_GLOBALMV, GLOBALMV, INTRA_FRAME, LOCALWARP, Mv};
+use super::types::{INTRA_FRAME, Mv};
 
 type R<T> = Result<T, CodecError>;
 
@@ -657,6 +657,39 @@ impl RefFill {
         self.have = usize::MAX;
         r.map(Some)
     }
+
+    /// [`Self::fill`] into the mirror of this reference; once the
+    /// reference is done, the views of it in `refs` read its picture in
+    /// place (kept in `finals`) instead.
+    fn bring<'r, P: PicturePixel>(
+        &mut self,
+        need: usize,
+        mirrors: &mut [Mirror<P>],
+        refs: &mut [Option<RefView<'r, P>>; 8],
+        finals: &'r [OnceLock<Arc<AnyPicture>>],
+        spares: &Mutex<Spares<P>>,
+    ) -> R<()> {
+        let Some(m) = mirrors.get_mut(self.mirror) else {
+            return Ok(());
+        };
+        let Some(pic) = self.fill(m, need, spares)? else {
+            return Ok(());
+        };
+        let Some(fin) = finals.get(self.mirror) else {
+            return Ok(());
+        };
+        let fin = fin.get_or_init(|| pic);
+        let Some(view) = P::view(fin) else {
+            return Err(malformed("reference sample size"));
+        };
+        for rv in refs.iter_mut().flatten() {
+            if rv.mirror == Some(self.mirror) {
+                rv.pic = view;
+                rv.mirror = None;
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Finishes a job with an error if its thread ends without a result.
@@ -757,6 +790,14 @@ struct Spares<P> {
     /// are lent out.
     tile_shells: Vec<tiles::TileShell<P>>,
     tile_shells_out: usize,
+    /// Whether reconstruction waits for the rows of the references a
+    /// chunk of blocks reads before it starts on the chunk. Without it
+    /// (tests only) every block stops at the first rows that are not
+    /// published and is taken up again once they are, as a warped block
+    /// does when it reads rows its motion vector does not name.
+    rows_ahead: bool,
+    /// Times a block stopped for rows that were not published yet.
+    row_waits: usize,
 }
 
 /// The CDEF scratch and loop restoration boundaries of an [`InlineFilter`].
@@ -803,6 +844,8 @@ impl<P> Default for PixState<P> {
                 filters: Vec::new(),
                 tile_shells: Vec::new(),
                 tile_shells_out: 0,
+                rows_ahead: true,
+                row_waits: 0,
             })),
         }
     }
@@ -2577,7 +2620,7 @@ fn recon_worker<'r, P: PicturePixel>(
     filters: &Sender<Filtered<P>>,
     spares: &Mutex<Spares<P>>,
 ) -> R<(Vec<Mirror<P>>, Scratch<P>)> {
-    // References read through a warp or a scale may need any row.
+    // A reference read through a scale may need any row.
     let scaled = std::array::from_fn::<bool, 8, _>(|i| {
         refs[i].as_ref().is_some_and(|rv| {
             rv.upscaled_width != hdr.frame_width as usize
@@ -2652,10 +2695,10 @@ fn recon_worker<'r, P: PicturePixel>(
         scratch,
         rec: None,
     };
-    for (m, mut log) in rx {
-        if !fills.is_empty() {
+    let ahead = lock(spares).rows_ahead;
+    for (m, log) in rx {
+        if ahead && !fills.is_empty() {
             let mut bottom = 0;
-            let mut warp = false;
             for rec in &log.blocks {
                 let b = &rec.b;
                 if !b.is_inter {
@@ -2668,9 +2711,6 @@ fn recon_worker<'r, P: PicturePixel>(
                         *d = (*d).max(i32::from(b.mv[l].row));
                     }
                 }
-                warp |= b.motion_mode == LOCALWARP
-                    || ((b.y_mode == GLOBALMV || b.y_mode == GLOBAL_GLOBALMV)
-                        && hdr.gm_type.iter().any(|&t| t > TRANSLATION));
             }
             if bottom > 0 {
                 // The 8-tap filters read 4 rows below a sample; chroma
@@ -2681,38 +2721,45 @@ fn recon_worker<'r, P: PicturePixel>(
                         .map(|r| down[0][r].max(down[1][r]))
                         .max()
                         .unwrap_or(UNREAD);
-                    if reach == UNREAD && !warp {
+                    if reach == UNREAD {
                         // Nothing here reads this reference: no need to
                         // wait for it.
                         continue;
                     }
-                    let need = if warp || f.whole {
+                    let need = if f.whole {
                         usize::MAX
                     } else {
                         bottom + (reach.max(0) as usize).div_ceil(8) + 16
                     };
-                    let Some(pic) = f.fill(&mut td.mirrors[f.mirror], need, spares)? else {
-                        continue;
-                    };
-                    // The reference is done: read it in place from now on.
-                    let Some(fin) = finals.get(f.mirror) else {
-                        continue;
-                    };
-                    let fin = fin.get_or_init(|| pic);
-                    let Some(view) = P::view(fin) else {
-                        return Err(malformed("reference sample size"));
-                    };
-                    for rv in td.refs.iter_mut().flatten() {
-                        if rv.mirror == Some(f.mirror) {
-                            rv.pic = view;
-                            rv.mirror = None;
-                        }
-                    }
+                    f.bring(need, &mut td.mirrors, &mut td.refs, finals, spares)?;
                 }
             }
         }
         let tr = std::time::Instant::now();
-        td.replay(&mut log)?;
+        let mut at = (0, 0);
+        while let Err(e) = td.replay(&log, &mut at) {
+            // A warped block reads rows its motion vector does not name:
+            // it stops at the first that are not published yet, and is
+            // predicted again once they are.
+            let Some((k, need)) = td.scratch.want_rows.take() else {
+                return Err(e);
+            };
+            let Some(f) = fills.iter_mut().find(|f| f.mirror == k) else {
+                return Err(e);
+            };
+            let mut need = if f.whole { usize::MAX } else { need };
+            if f.have >= need {
+                // Rows that are published and still cannot be read: only
+                // the finished picture will do, and that was tried if all
+                // of it is here.
+                if f.have == usize::MAX {
+                    return Err(e);
+                }
+                need = usize::MAX;
+            }
+            lock(spares).row_waits += 1;
+            f.bring(need, &mut td.mirrors, &mut td.refs, finals, spares)?;
+        }
         prof::add(prof::RECON, tr);
         // The samples of a whole row go to the filters, which work on a
         // picture of their own: this one stays unfiltered for the intra

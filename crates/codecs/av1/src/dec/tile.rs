@@ -3889,18 +3889,27 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
     }
 
     /// Predicts and reconstructs the blocks of `log`, recorded by a tile
-    /// decoder of the same frame whose mode info `self.fs` holds. The
-    /// blocks are swapped out of the log (it is spent afterwards).
-    pub fn replay(&mut self, log: &mut ReconLog) -> R<()> {
-        let mut bi = 0;
-        for (si, sb) in log.sbs.iter().enumerate() {
+    /// decoder of the same frame whose mode info `self.fs` holds, from the
+    /// superblock and block `from` on (both 0 to start).
+    ///
+    /// When the prediction of a block fails, `from` is left at that block:
+    /// a caller that can mend the cause (rows of a reference that were not
+    /// published yet, see [`Scratch::want_rows`]) calls again with it, and
+    /// the block is predicted afresh. Nothing of it was reconstructed.
+    pub fn replay(&mut self, log: &ReconLog, from: &mut (usize, usize)) -> R<()> {
+        let mut bi = from.1;
+        for (si, sb) in log.sbs.iter().enumerate().skip(from.0) {
             [
                 self.mi_row_start,
                 self.mi_row_end,
                 self.mi_col_start,
                 self.mi_col_end,
             ] = sb.tile;
-            self.clear_block_decoded_flags(sb.r, sb.c, self.num_planes);
+            // A superblock taken up again part way keeps the flags of the
+            // blocks it has done.
+            if bi <= sb.first_block {
+                self.clear_block_decoded_flags(sb.r, sb.c, self.num_planes);
+            }
             let end = log
                 .sbs
                 .get(si + 1)
@@ -3934,7 +3943,10 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
                         b.cand_list[..n].copy_from_slice(&log.cands[cands as usize..][..n]);
                     }
                 }
-                self.compute_prediction()?;
+                if let Err(e) = self.compute_prediction() {
+                    *from = (si, bi);
+                    return Err(e);
+                }
                 let op_end = log
                     .blocks
                     .get(bi + 1)

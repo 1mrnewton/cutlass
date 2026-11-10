@@ -1678,6 +1678,7 @@ pub fn setup_shear(mat: &[i32; 6]) -> Option<[i32; 4]> {
 fn warp_core<P: Pixel>(
     refp: &[P],
     ref_stride: usize,
+    row0: usize,
     plane_w: usize,
     plane_h: usize,
     mat: &[i32; 6],
@@ -1717,7 +1718,7 @@ fn warp_core<P: Pixel>(
     for (k1, irow) in inter.iter_mut().enumerate() {
         let i1 = k1 as i32 - 7;
         let ry = (iy4 + i64::from(i1)).clamp(0, last_y) as usize;
-        let row = &refp[ry * ref_stride..];
+        let row = &refp[(ry - row0) * ref_stride..];
         let mut px = [0i32; 15];
         for k in 0..15 {
             px[k] = row[cols[k]].to_i32();
@@ -1750,6 +1751,29 @@ fn warp_core<P: Pixel>(
     }
 }
 
+/// The rows of the reference plane the block warp process reads for the
+/// 8x8 block at `(x, y)` of the current plane: the first and the last,
+/// after the clamp to the plane's `plane_h` rows.
+pub fn warp_rows(
+    mat: &[i32; 6],
+    x: usize,
+    y: usize,
+    sub_x: bool,
+    sub_y: bool,
+    plane_h: usize,
+) -> (usize, usize) {
+    let (sx_sh, sy_sh) = (u32::from(sub_x), u32::from(sub_y));
+    let src_x = (x as i64 + 4) << sx_sh;
+    let src_y = (y as i64 + 4) << sy_sh;
+    let dst_y = i64::from(mat[4]) * src_x + i64::from(mat[5]) * src_y + i64::from(mat[1]);
+    let iy4 = (dst_y >> sy_sh) >> WARPEDMODEL_PREC_BITS;
+    let last_y = plane_h as i64 - 1;
+    (
+        (iy4 - 7).clamp(0, last_y) as usize,
+        (iy4 + 7).clamp(0, last_y) as usize,
+    )
+}
+
 /// Block warp process (7.11.3.5) for one 8x8 block, written as final pixels
 /// (`isCompound = 0`) to the 8x8 area of `dst`.
 ///
@@ -1775,9 +1799,34 @@ pub fn warp_8x8_put<P: Pixel>(
     sub_y: bool,
     bd: u32,
 ) {
+    warp_8x8_put_rows(
+        dst, dst_stride, refp, ref_stride, 0, plane_w, plane_h, mat, shear, x, y, sub_x, sub_y, bd,
+    );
+}
+
+/// [`warp_8x8_put`] reading rows of the reference plane from row `row0`
+/// on: `refp` starts at that row, and holds the rows [`warp_rows`] names
+/// for the block.
+pub fn warp_8x8_put_rows<P: Pixel>(
+    dst: &mut [P],
+    dst_stride: usize,
+    refp: &[P],
+    ref_stride: usize,
+    row0: usize,
+    plane_w: usize,
+    plane_h: usize,
+    mat: &[i32; 6],
+    shear: &[i32; 4],
+    x: usize,
+    y: usize,
+    sub_x: bool,
+    sub_y: bool,
+    bd: u32,
+) {
     warp_core(
         refp,
         ref_stride,
+        row0,
         plane_w,
         plane_h,
         mat,
@@ -1810,10 +1859,34 @@ pub fn warp_8x8_prep<P: Pixel>(
     sub_y: bool,
     bd: u32,
 ) {
+    warp_8x8_prep_rows(
+        tmp, tmp_stride, refp, ref_stride, 0, plane_w, plane_h, mat, shear, x, y, sub_x, sub_y, bd,
+    );
+}
+
+/// [`warp_8x8_prep`] reading rows of the reference plane from row `row0`
+/// on, as [`warp_8x8_put_rows`] does.
+pub fn warp_8x8_prep_rows<P: Pixel>(
+    tmp: &mut [i16],
+    tmp_stride: usize,
+    refp: &[P],
+    ref_stride: usize,
+    row0: usize,
+    plane_w: usize,
+    plane_h: usize,
+    mat: &[i32; 6],
+    shear: &[i32; 4],
+    x: usize,
+    y: usize,
+    sub_x: bool,
+    sub_y: bool,
+    bd: u32,
+) {
     let bias = prep_bias(bd);
     warp_core(
         refp,
         ref_stride,
+        row0,
         plane_w,
         plane_h,
         mat,
@@ -1901,7 +1974,7 @@ mod tests {
         Pixel, avg, diffwtd_mask, emu_edge, ii_smooth_mask, interintra_blend, mask_blend,
         obmc_blend_above, obmc_blend_left, obmc_mask, prep, prep_bias, prep_scaled, put,
         put_h_rows, put_scaled, put_v_rows, scaled_footprint, setup_shear, w_avg, warp_8x8_prep,
-        warp_8x8_put, wedge_mask,
+        warp_8x8_prep_rows, warp_8x8_put, warp_8x8_put_rows, warp_rows, wedge_mask,
     };
     use crate::spec::tables::{
         DIV_LUT, II_WEIGHTS_1D, NUM_4X4_BLOCKS_HIGH, NUM_4X4_BLOCKS_WIDE, SUBPEL_FILTERS,
@@ -2862,6 +2935,28 @@ mod tests {
                 );
             }
         }
+        // The rows the block reads are all it needs of the plane.
+        let (first, last) = warp_rows(&m, x as usize, y as usize, sx == 1, sy == 1, plane.h);
+        assert!(first <= last && last < plane.h && last - first <= 14);
+        let rows = &pp[first * plane.w..(last + 1) * plane.w];
+        let mut d2 = vec![P::default(); 10 * 8];
+        warp_8x8_put_rows(
+            &mut d2,
+            10,
+            rows,
+            plane.w,
+            first,
+            plane.w,
+            plane.h,
+            &m,
+            &shear,
+            x as usize,
+            y as usize,
+            sx == 1,
+            sy == 1,
+            bd,
+        );
+        assert!(d == d2, "warp put from its rows {m:?}");
         let pred = ref_warp(&plane, &m, x, y, sx, sy, bd, true);
         let mut t = vec![0i16; 16 * 8];
         warp_8x8_prep(
@@ -2879,6 +2974,24 @@ mod tests {
             sy == 1,
             bd,
         );
+        let mut t2 = vec![0i16; 16 * 8];
+        warp_8x8_prep_rows(
+            &mut t2,
+            16,
+            rows,
+            plane.w,
+            first,
+            plane.w,
+            plane.h,
+            &m,
+            &shear,
+            x as usize,
+            y as usize,
+            sx == 1,
+            sy == 1,
+            bd,
+        );
+        assert_eq!(t, t2, "warp prep from its rows");
         let bias = i64::from(prep_bias(bd));
         for r in 0..8 {
             for c in 0..8 {

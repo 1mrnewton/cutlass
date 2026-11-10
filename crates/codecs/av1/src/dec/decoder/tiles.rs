@@ -503,3 +503,6 @@ fn take_shells<P: Pixel>(
     }
     out
 }
+
+#[cfg(test)]
+mod tests;

@@ -10748,6 +10748,13 @@ fn deblock_whole<S: Sample>(
     let (mx, my) = at;
     let (transform8, flat) = shape;
     let (own, beside, over) = known;
+    let Some(current) = pic.mb.get(my * pic.mb_w + mx) else {
+        return false;
+    };
+    // The QP an edge is filtered at in luma, Cb and Cr: this macroblock's
+    // inside it, and the average with its neighbour's on its boundary.
+    let qps = |mb: &Mb| [i32::from(mb.qp), i32::from(mb.qp_c), i32::from(mb.qp_cr)];
+    let inside = qps(current);
     // For each plane, the edges that run down the picture and then those
     // that run along it.
     let mut luma = [[None; 4]; 2];
@@ -10761,36 +10768,60 @@ fn deblock_whole<S: Sample>(
             .iter_mut()
             .zip(for_cb.iter_mut().zip(for_cr.iter_mut()));
         for (edge, (luma_slot, (cb_slot, cr_slot))) in slots.enumerate() {
-            if edge == 0 {
-                let outside = if vertical {
-                    mx == 0
+            // Intra covers the whole macroblock, so its strength needs no
+            // look at coefficients or motion: 4 on the boundary, 3 inside.
+            let (bs, qp) = if edge == 0 {
+                let (nx, ny) = if vertical {
+                    (mx as i32 - 1, my as i32)
                 } else {
-                    above_my(pic, mx, my) < 0
+                    (mx as i32, above_my(pic, mx, my))
                 };
-                if outside || !filter_boundary(pic, mx, my, vertical) {
+                if nx < 0 || ny < 0 || !filter_boundary(pic, mx, my, vertical) {
                     continue;
                 }
-            } else if flat {
-                break;
-            }
-            let bs = edge_strength(pic, (mx, my), edge, vertical, (own, across));
+                let neighbor = coded_mb(pic, nx, ny);
+                let qp = neighbor.map_or(inside, |mb| {
+                    let side = qps(mb);
+                    [
+                        (inside[0] + side[0] + 1) >> 1,
+                        (inside[1] + side[1] + 1) >> 1,
+                        (inside[2] + side[2] + 1) >> 1,
+                    ]
+                });
+                let bs = if current.intra || neighbor.is_some_and(|mb| mb.intra) {
+                    [4; 4]
+                } else {
+                    edge_strength(pic, (mx, my), 0, vertical, (own, across))
+                };
+                (bs, qp)
+            } else {
+                if flat {
+                    break;
+                }
+                let bs = if current.intra {
+                    [3; 4]
+                } else {
+                    edge_strength(pic, (mx, my), edge, vertical, (own, across))
+                };
+                (bs, inside)
+            };
             // An 8×8 transform has no luma edge at 4 or 12.
             if !(transform8 && (edge == 1 || edge == 3)) {
-                let qpav = edge_qp(pic, mx, my, true, true, vertical, edge == 0);
-                let Some(filter) = recon::whole_edge(bs, qpav, off) else {
+                let Some(filter) = recon::whole_edge(bs, qp[0], off) else {
                     return false;
                 };
                 *luma_slot = filter;
             }
             // Chroma has an edge under every other luma one.
             if bs != [0; 4] && edge.is_multiple_of(2) {
-                for (slot, first) in [(&mut *cb_slot, true), (&mut *cr_slot, false)] {
-                    let qpc = edge_qp(pic, mx, my, false, first, vertical, edge == 0);
-                    let Some(filter) = recon::whole_edge(bs, qpc, off) else {
-                        return false;
-                    };
-                    *slot = filter;
-                }
+                let (Some(first), Some(second)) = (
+                    recon::whole_edge(bs, qp[1], off),
+                    recon::whole_edge(bs, qp[2], off),
+                ) else {
+                    return false;
+                };
+                *cb_slot = first;
+                *cr_slot = second;
             }
         }
     }

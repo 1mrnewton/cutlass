@@ -371,12 +371,8 @@ pub trait Sample: Copy + Default + Into<i32> {
 /// Which samples [`Sample::predict_fast`] makes.
 #[derive(Clone, Copy)]
 pub enum Predict {
-    /// Luma half samples along a row.
-    HalfH,
-    /// Luma half samples down a column.
-    HalfV,
-    /// Luma centre samples.
-    Centre,
+    /// Luma at these quarter-sample offsets.
+    Luma(u8, u8),
     /// Chroma at these eighth-sample offsets.
     Chroma(u8, u8),
 }
@@ -551,23 +547,22 @@ impl Sample for u8 {
         src_stride: usize,
         place: ((usize, usize), (usize, usize)),
     ) -> bool {
+        use cutlass_h264_kernels::mc;
         let (at, size) = place;
-        let block = crate::fast::Block {
+        let block = mc::Block {
             src,
             stride: src_stride,
             at,
             size,
         };
         match kind {
-            Predict::HalfH => crate::fast::half_h(dst, dst_stride, block),
-            Predict::HalfV => crate::fast::half_v(dst, dst_stride, block),
-            Predict::Centre => crate::fast::diag(dst, dst_stride, block),
-            Predict::Chroma(xf, yf) => crate::fast::chroma(dst, dst_stride, block, (xf, yf)),
+            Predict::Luma(xf, yf) => mc::luma_block(dst, dst_stride, block, (xf, yf)),
+            Predict::Chroma(xf, yf) => mc::chroma_block(dst, dst_stride, block, (xf, yf)),
         }
     }
 
     fn avg_fast(dst: &mut [Self], a: &[Self], b: &[Self]) -> bool {
-        crate::fast::avg_row(dst, a, b)
+        cutlass_h264_kernels::mc::avg_row(dst, a, b)
     }
 }
 
@@ -1188,6 +1183,19 @@ pub fn put_luma_block<S: Sample>(
         return;
     }
     let size = (w, h);
+    if (x_frac, y_frac) != (0, 0) && (0..4).contains(&x_frac) && (0..4).contains(&y_frac) {
+        let kind = Predict::Luma(x_frac as u8, y_frac as u8);
+        let place = (
+            (
+                usize::try_from(x).unwrap_or(0),
+                usize::try_from(y).unwrap_or(0),
+            ),
+            size,
+        );
+        if S::predict_fast(kind, dst, dst_stride, src, src_stride, place) {
+            return;
+        }
+    }
     let at = |dx, dy| src_at(src, src_stride, x + dx, y + dy);
     match (x_frac, y_frac) {
         (0, 0) => copy_block(dst, dst_stride, at(0, 0), size),
@@ -1525,17 +1533,6 @@ fn half_h_block<S: Sample>(
     src: Src<'_, S>,
     size: (usize, usize),
 ) {
-    let place = ((src.x, src.y), size);
-    if S::predict_fast(
-        Predict::HalfH,
-        dst,
-        dst_stride,
-        src.samples,
-        src.stride,
-        place,
-    ) {
-        return;
-    }
     let (w, h) = size;
     for row in 0..h {
         let start = (src.y + row) * src.stride + src.x - 2;
@@ -1553,17 +1550,6 @@ fn half_v_block<S: Sample>(
     src: Src<'_, S>,
     size: (usize, usize),
 ) {
-    let place = ((src.x, src.y), size);
-    if S::predict_fast(
-        Predict::HalfV,
-        dst,
-        dst_stride,
-        src.samples,
-        src.stride,
-        place,
-    ) {
-        return;
-    }
     let (w, h) = size;
     for row in 0..h {
         let mut rows = [&[][..]; 6];
@@ -1585,17 +1571,6 @@ fn half_v_block<S: Sample>(
 }
 
 fn diag_block<S: Sample>(dst: &mut [S], dst_stride: usize, src: Src<'_, S>, size: (usize, usize)) {
-    let place = ((src.x, src.y), size);
-    if S::predict_fast(
-        Predict::Centre,
-        dst,
-        dst_stride,
-        src.samples,
-        src.stride,
-        place,
-    ) {
-        return;
-    }
     let (w, h) = size;
     let mut tmp = [0i32; 21 * 16];
     for vy in 0..h + 5 {

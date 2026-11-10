@@ -4,6 +4,30 @@
 //! full samples in a line. Along a row the six inputs are six windows of
 //! that row, each one sample further right; down a column they are six rows.
 
+pub use crate::mc_block::Block;
+
+/// A luma block at quarter-sample offsets `frac` (each 0 to 3), written to
+/// `dst`, whose rows are `dst_stride` apart. Covers blocks 8 or 16 wide and
+/// at most 16 high; `false` means nothing was done. The source must hold
+/// the two samples before the block and the three after it, in both
+/// directions.
+pub fn luma_block(dst: &mut [u8], dst_stride: usize, block: Block<'_>, frac: (u8, u8)) -> bool {
+    kernel!(luma_block(dst, dst_stride, block, frac))
+}
+
+/// A chroma block at eighth-sample offsets `frac` (each 0 to 7). Covers
+/// blocks 4 or 8 wide; `false` means nothing was done. The source must
+/// hold one more sample after the block's last column and row.
+pub fn chroma_block(dst: &mut [u8], dst_stride: usize, block: Block<'_>, frac: (u8, u8)) -> bool {
+    kernel!(chroma_block(dst, dst_stride, block, frac))
+}
+
+/// The rounded average of `a` and `b` into `dst`. `false` means the inputs
+/// are shorter than `dst` and nothing was done.
+pub fn avg_row(dst: &mut [u8], a: &[u8], b: &[u8]) -> bool {
+    kernel!(avg_row(dst, a, b))
+}
+
 /// Half samples from six lines of full samples: the filter, rounded and
 /// clipped to a sample.
 pub fn half16(taps: [&[u8; 16]; 6]) -> [u8; 16] {
@@ -151,6 +175,94 @@ mod tests {
                 }; 16]
             });
             assert_eq!(super::centre16(refs(&wide)), scalar::centre16(refs(&wide)));
+        }
+    }
+
+    #[test]
+    fn whole_blocks_match_the_plain_ones() {
+        let mut rng = Lcg(15);
+        let (stride, rows) = (40usize, 40usize);
+        let plane: Vec<u8> = (0..stride * rows).map(|_| rng.sample()).collect();
+        for round in 0..3_000u32 {
+            let w = [8, 16][(round % 2) as usize];
+            let h = [4, 8, 16][(round / 2 % 3) as usize];
+            let at = (
+                2 + (rng.next() % 16) as usize,
+                2 + (rng.next() % 16) as usize,
+            );
+            let block = super::Block {
+                src: &plane,
+                stride,
+                at,
+                size: (w, h),
+            };
+            let frac = ((round / 6 % 4) as u8, (round / 24 % 4) as u8);
+            let dst_stride = 20;
+            let mut fast = vec![7u8; dst_stride * 16];
+            let mut plain = fast.clone();
+            assert!(super::luma_block(&mut fast, dst_stride, block, frac));
+            assert!(scalar::luma_block(&mut plain, dst_stride, block, frac));
+            assert_eq!(fast, plain, "luma {w}x{h} at {at:?} frac {frac:?}");
+            // Samples outside the block stay as they were.
+            assert!(
+                fast.chunks(dst_stride)
+                    .all(|row| row[w..] == [7u8; 20][w..])
+            );
+
+            let block = super::Block {
+                size: (w / 2, h / 2),
+                ..block
+            };
+            let frac = ((round / 6 % 8) as u8, (round / 48 % 8) as u8);
+            let mut fast = vec![7u8; dst_stride * 16];
+            let mut plain = fast.clone();
+            assert!(super::chroma_block(&mut fast, dst_stride, block, frac));
+            assert!(scalar::chroma_block(&mut plain, dst_stride, block, frac));
+            assert_eq!(fast, plain, "chroma {w}x{h} at {at:?} frac {frac:?}");
+
+            let n = 1 + (rng.next() % 40) as usize;
+            let mut fast = vec![0u8; n];
+            let mut plain = vec![0u8; n];
+            assert!(super::avg_row(&mut fast, &plane[..n], &plane[100..100 + n]));
+            assert!(scalar::avg_row(
+                &mut plain,
+                &plane[..n],
+                &plane[100..100 + n]
+            ));
+            assert_eq!(fast, plain, "average of {n}");
+        }
+    }
+
+    #[test]
+    fn a_block_is_the_row_kernels_applied_to_its_rows() {
+        // Ties the block functions to the single-row ones the other tests
+        // check against the clause's formulas.
+        let mut rng = Lcg(16);
+        let stride = 32usize;
+        let plane: Vec<u8> = (0..stride * 32).map(|_| rng.sample()).collect();
+        let block = super::Block {
+            src: &plane,
+            stride,
+            at: (5, 6),
+            size: (16, 4),
+        };
+        let line = |start: usize| -> &[u8; 16] { plane[start..start + 16].try_into().unwrap() };
+        let mut out = vec![0u8; 16 * 4];
+        assert!(scalar::luma_block(&mut out, 16, block, (2, 0)));
+        for row in 0..4 {
+            let start = (6 + row) * stride + 5 - 2;
+            let taps = core::array::from_fn(|tap| line(start + tap));
+            assert_eq!(out[row * 16..row * 16 + 16], scalar::half16(taps));
+        }
+        assert!(scalar::luma_block(&mut out, 16, block, (0, 2)));
+        for row in 0..4 {
+            let start = (6 + row - 2) * stride + 5;
+            let taps = core::array::from_fn(|tap| line(start + tap * stride));
+            assert_eq!(out[row * 16..row * 16 + 16], scalar::half16(taps));
+        }
+        assert!(scalar::luma_block(&mut out, 16, block, (0, 0)));
+        for row in 0..4 {
+            assert_eq!(out[row * 16..row * 16 + 16], *line((6 + row) * stride + 5));
         }
     }
 

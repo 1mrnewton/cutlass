@@ -198,3 +198,5 @@ fn chroma_line(rows: &ChromaRows, column: usize) -> [i32; 4] {
     }
     line
 }
+
+crate::mc_block::block_kernels!(pub,);

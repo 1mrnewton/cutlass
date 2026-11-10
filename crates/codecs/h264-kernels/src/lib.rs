@@ -39,6 +39,7 @@ macro_rules! kernel {
 
 pub mod deblock;
 pub mod mc;
+mod mc_block;
 
 #[cfg(target_arch = "aarch64")]
 mod neon;

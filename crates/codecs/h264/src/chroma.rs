@@ -170,6 +170,66 @@ fn x264_422_and_444_match_ffmpeg() {
     }
 }
 
+/// Interlaced 4:2:2 from libx264: macroblock-adaptive frames with field
+/// pairs beside frame pairs, at 8 and at 10 bits. 4:2:2 chroma has a line
+/// for each luma line, so a field macroblock's chroma is read and deblocked
+/// along the field as its luma is, and the 10-bit stream takes the filters
+/// that have no vector kernel.
+#[test]
+fn x264_interlaced_422_matches_ffmpeg() {
+    let Some(ffmpeg) = ffmpeg_bin() else {
+        eprintln!("skipped: ffmpeg is not installed");
+        return;
+    };
+    let (width, height) = (352usize, 288usize);
+    for (pix, depth) in [("yuv422p", 8u32), ("yuv422p10le", 10)] {
+        let Some(annex) = x264_interlaced(&ffmpeg, pix) else {
+            if depth == 8 {
+                panic!("ffmpeg could not encode interlaced {pix}");
+            }
+            eprintln!("skipped: this ffmpeg cannot encode interlaced {pix}");
+            continue;
+        };
+        let mut params = CodecParams::video(CodecId::H264, width as u32, height as u32);
+        params.nal_length_size = 0;
+        let mut decoder = H264Decoder::open(&params).expect("open");
+        let mut frames = Vec::new();
+        for (index, unit) in access_units(&annex).iter().enumerate() {
+            let pictures = decoder
+                .push(&Packet::video(
+                    unit.clone(),
+                    index as i64,
+                    1,
+                    30,
+                    index == 0,
+                ))
+                .unwrap_or_else(|err| panic!("{pix} access unit {index}: {err}"));
+            frames.extend(pictures);
+        }
+        frames.extend(decoder.drain().expect("drain"));
+        let raw = ffmpeg_file(&ffmpeg, pix, &annex).unwrap_or_else(|err| {
+            panic!("{pix} oracle failed: {err}");
+        });
+        let frame_len = raw_len(Format::C422, depth, width, height);
+        assert_eq!(raw.len(), frames.len() * frame_len, "{pix} frame count");
+        assert!(frames.len() > 1, "{pix} produced one picture");
+        for (index, picture) in frames.iter().enumerate() {
+            let start = index * frame_len;
+            let (y, u, v) = planes(picture, Format::C422, depth);
+            let (fy, fu, fv) = split_sized(
+                Format::C422,
+                depth,
+                width,
+                height,
+                &raw[start..start + frame_len],
+            );
+            assert!(y == fy, "{pix} picture {index} luma");
+            assert!(u == fu, "{pix} picture {index} cb");
+            assert!(v == fv, "{pix} picture {index} cr");
+        }
+    }
+}
+
 #[test]
 fn monochrome_chroma_format_is_refused() {
     let annex = annex_chroma0();
@@ -396,6 +456,32 @@ fn x264(ffmpeg: &PathBuf, profile: &str, pix: &str) -> Option<Vec<u8>> {
             "-f",
             "h264",
         ])
+        .arg(&path)
+        .status()
+        .ok()?;
+    if !status.success() {
+        let _ = std::fs::remove_file(&path);
+        return None;
+    }
+    let annex = std::fs::read(&path).ok();
+    let _ = std::fs::remove_file(&path);
+    annex
+}
+
+/// Twelve interlaced frames of a moving test picture under noise, which
+/// makes libx264 mix field pairs and frame pairs.
+fn x264_interlaced(ffmpeg: &PathBuf, pix: &str) -> Option<Vec<u8>> {
+    let path = std::env::temp_dir().join(format!(
+        "cutlass-h264-interlaced-{pix}-{}.h264",
+        std::process::id()
+    ));
+    let status = Command::new(ffmpeg)
+        .args(["-y", "-hide_banner", "-loglevel", "error", "-f", "lavfi"])
+        .args(["-i", "testsrc2=size=352x288:rate=60"])
+        .args(["-vf", "noise=alls=8:allf=t,interlace=scan=tff", "-an"])
+        .args(["-c:v", "libx264", "-profile:v", "high422", "-pix_fmt", pix])
+        .args(["-preset", "medium", "-threads", "1", "-b:v", "900k"])
+        .args(["-frames:v", "12", "-x264-params", "tff=1", "-f", "h264"])
         .arg(&path)
         .status()
         .ok()?;

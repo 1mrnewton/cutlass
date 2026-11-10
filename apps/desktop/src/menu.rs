@@ -73,8 +73,8 @@ const SEP: Entry = Entry::Separator;
 
 const COPY: Entry = done("copy", "Copy", "⌘C");
 const CUT: Entry = done("cut", "Cut", "⌘X");
-const COPY_ATTRIBUTES: Entry = todo("copy-attributes", "Copy attributes", "⇧⌘C");
-const PASTE_ATTRIBUTES: Entry = todo("paste-attributes", "Paste attributes", "⇧⌘V");
+const COPY_ATTRIBUTES: Entry = done("copy-attributes", "Copy attributes", "⇧⌘C");
+const PASTE_ATTRIBUTES: Entry = done("paste-attributes", "Paste attributes", "⇧⌘V");
 const DELETE: Entry = done("delete", "Delete", "⌫");
 const DEACTIVATE: Entry = done("deactivate", "Deactivate clip", "V");
 const REPLACE_SOUND: Entry = done("replace", "Replace", "");
@@ -82,9 +82,9 @@ const SYNC: Entry = todo("sync", "Sync video and audio", "");
 const COMPOUND: Entry = done("compound", "Create compound clip (subproject)", "⌥G");
 const MULTICAM: Entry = todo("multicam", "Create multi-camera clip", "");
 const SAVE_PRESET: Entry = todo("save-preset", "Save preset", "");
-const GROUP: Entry = todo("group", "Group", "");
+const GROUP: Entry = done("group", "Group", "⌘G");
 const LINK_MEDIA: Entry = todo("link-media", "Link to media", "");
-const UNGROUP: Entry = done("ungroup", "Ungroup", "");
+const UNGROUP: Entry = done("ungroup", "Ungroup", "⇧⌘G");
 const VARIABLE_SPEED: Entry = done("variable-speed", "Show variable speed animation", "⌥K");
 
 const RANGE: Entry = sub(
@@ -1402,8 +1402,6 @@ mod tests {
             MULTI_SOUND_COMPOUND,
         ];
         let later = [
-            "Copy attributes",
-            "Paste attributes",
             "Separate audio",
             "Save preset",
             "Restore LUT",
@@ -1412,7 +1410,6 @@ mod tests {
             // Greyed until now; nothing in this build does them yet.
             "Sync video and audio",
             "Create multi-camera clip",
-            "Group",
             "Trim clip",
             "Link to media",
             "Edit effects",
@@ -1583,13 +1580,10 @@ mod tests {
         assert_eq!(
             later,
             [
-                "copy-attributes",
-                "paste-attributes",
                 "separate-audio",
                 "sync",
                 "multicam",
                 "save-preset",
-                "group",
                 "link-media",
             ]
         );
@@ -1609,15 +1603,19 @@ mod tests {
         assert_eq!(built("render"), Some(true));
         assert_eq!(built("separate-audio"), Some(false));
         // Rows the reference editor has and this build does not do yet.
-        for later in [
-            "copy-attributes",
-            "paste-attributes",
-            "save-preset",
-            "restore-lut",
-        ] {
+        for later in ["save-preset", "restore-lut"] {
             assert_eq!(built(later), Some(false), "{later}");
         }
-        for ready in ["split-scenes", "transcript", "extract-audio", "compound"] {
+        for ready in [
+            "split-scenes",
+            "transcript",
+            "extract-audio",
+            "compound",
+            "copy-attributes",
+            "paste-attributes",
+            "group",
+            "ungroup",
+        ] {
             assert_eq!(built(ready), Some(true), "{ready}");
         }
     }

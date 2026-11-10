@@ -51,6 +51,7 @@ mod assistant;
 mod compound;
 mod effect_preview;
 mod follow;
+mod group;
 pub(crate) use follow::clip_path;
 mod enhance;
 mod hear;
@@ -829,6 +830,8 @@ pub struct Shell {
     /// Whether each movie file read so far carries sound, so a menu does
     /// not open the file every time it is drawn.
     sound_known: RefCell<std::collections::HashMap<PathBuf, bool>>,
+    /// What Copy attributes last took from a clip.
+    attributes: Option<cutlass_session::ClipAttributes>,
     /// A clip that just landed on the timeline, for the window to bring
     /// its lane into view once.
     reveal: Option<SegmentId>,
@@ -975,6 +978,7 @@ impl Shell {
             beating: false,
             selected_beat: None,
             sound_known: RefCell::new(std::collections::HashMap::new()),
+            attributes: None,
             reveal: None,
             selected_transition: None,
             asked_transition: None,
@@ -2725,6 +2729,10 @@ impl Shell {
             Some("ripple_delete") => self.ripple_delete(),
             Some("deactivate") => self.toggle_active(),
             Some("compound") => self.create_compound(),
+            Some("group") => self.group_selected(),
+            Some("ungroup") => self.ungroup_selected(),
+            Some("copy_attributes") => self.copy_attributes(),
+            Some("paste_attributes") => self.paste_attributes(),
             Some("speed_curves") => {
                 self.toggle_speed_curves();
                 Ok(())
@@ -4209,24 +4217,35 @@ impl Shell {
         minimum_pixel_size(self.zoom_bounds())
     }
 
+    /// Pick clip `id` alone, with the clips it is grouped with, or nothing.
+    /// The clip named is the last picked, so it is the one inspected.
     pub fn select(&mut self, id: Option<SegmentId>) {
         self.selected_marker = None;
         self.selected_beat = None;
         self.selected_transition = None;
         self.selection.clear();
         if let Some(id) = id {
+            self.selection = self.group_mates(&id);
             self.selection.push(id);
         }
     }
 
-    /// Add `id` to the selection, or drop it when it is already there.
+    /// Add `id` to the selection, or drop it when it is already there. The
+    /// clips it is grouped with come and go with it.
     pub fn toggle_selected(&mut self, id: SegmentId) {
         self.selected_marker = None;
         self.selected_beat = None;
         self.selected_transition = None;
-        if let Some(index) = self.selection.iter().position(|item| item == &id) {
-            self.selection.remove(index);
+        let mates = self.group_mates(&id);
+        if self.selection.contains(&id) {
+            self.selection
+                .retain(|item| item != &id && !mates.contains(item));
         } else {
+            for mate in mates {
+                if !self.selection.contains(&mate) {
+                    self.selection.push(mate);
+                }
+            }
             self.selection.push(id);
         }
     }
@@ -18387,6 +18406,175 @@ mod tests {
             assert_eq!(desktop.extract_audio_enabled(), sounds);
             assert_eq!(desktop.sound_known.borrow().len(), 1);
         }
+    }
+
+    /// Two pictures on main, a title above and a sound under.
+    fn mixed_project(dir: &Path) {
+        let mut draft = Draft::empty("draft");
+        draft.config.maintrack_adsorb = false;
+        let mut movie = MaterialVideo::new("movie");
+        movie.kind = "video".to_owned();
+        draft.materials.videos.push(movie);
+        for (id, start) in [("a", 0), ("b", 2_000_000)] {
+            draft.tracks[0].segments.push(Segment::new(
+                id,
+                "movie",
+                TimeRange::new(start, 1_000_000),
+            ));
+        }
+        draft.materials.audios.push(MaterialAudio {
+            id: MaterialId::new("tone"),
+            ..MaterialAudio::default()
+        });
+        let mut sound = Track::main("sound");
+        sound.kind = TrackType::Audio;
+        sound
+            .segments
+            .push(Segment::new("tone", "tone", TimeRange::new(0, 1_000_000)));
+        draft.tracks.push(sound);
+        Folder::new(draft).save(dir).unwrap();
+    }
+
+    fn picked(desktop: &Shell) -> Vec<&str> {
+        let mut ids: Vec<&str> = desktop.selection().iter().map(SegmentId::as_str).collect();
+        ids.sort_unstable();
+        ids
+    }
+
+    #[test]
+    fn grouped_clips_are_picked_and_moved_as_one() {
+        let temp = Temp::new();
+        mixed_project(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        let id = |name: &str| SegmentId::new(name);
+
+        // One clip, or none, is nothing to group.
+        assert!(!desktop.group_enabled() && !desktop.ungroup_enabled());
+        desktop.select(Some(id("a")));
+        assert!(!desktop.group_enabled());
+        assert_eq!(
+            desktop.group_selected().unwrap_err().to_string(),
+            "pick two or more clips to group"
+        );
+
+        desktop.select_box([id("a"), id("tone")], false);
+        assert!(desktop.group_enabled());
+        desktop.run_action("group").unwrap();
+        assert_eq!(desktop.notice(), "Grouped 2 clips");
+        // The same clips again are one group already.
+        assert!(!desktop.group_enabled());
+        assert!(desktop.ungroup_enabled());
+
+        // A click on either picks both; a click elsewhere, neither.
+        desktop.select(Some(id("tone")));
+        assert_eq!(picked(&desktop), ["a", "tone"]);
+        assert_eq!(
+            desktop.selected(),
+            Some(&id("tone")),
+            "the one clicked leads"
+        );
+        desktop.select(Some(id("b")));
+        assert_eq!(picked(&desktop), ["b"]);
+        // With Shift, the group comes and goes whole.
+        desktop.toggle_selected(id("a"));
+        assert_eq!(picked(&desktop), ["a", "b", "tone"]);
+        desktop.toggle_selected(id("tone"));
+        assert_eq!(picked(&desktop), ["b"]);
+
+        // Dragged, the picture takes its sound along.
+        desktop.pixel_size = 0.001;
+        let y = crate::tokens::LANE_HEIGHT / 2.0;
+        desktop
+            .drag_segment(id("a"), lane_time(&desktop, 500_000.0), y)
+            .unwrap();
+        let starts = |desktop: &Shell| -> Vec<(String, i64)> {
+            desktop
+                .draft()
+                .unwrap()
+                .tracks
+                .iter()
+                .flat_map(|track| &track.segments)
+                .map(|segment| (segment.id.as_str().to_owned(), segment.target.start.0))
+                .collect()
+        };
+        assert!(starts(&desktop).contains(&("a".to_owned(), 500_000)));
+        assert!(starts(&desktop).contains(&("tone".to_owned(), 500_000)));
+        assert!(starts(&desktop).contains(&("b".to_owned(), 2_000_000)));
+
+        // Ungrouped, each is picked alone again. One undo regroups.
+        desktop.select(Some(id("a")));
+        desktop.run_action("ungroup").unwrap();
+        assert_eq!(desktop.notice(), "Ungrouped");
+        desktop.select(Some(id("a")));
+        assert_eq!(picked(&desktop), ["a"]);
+        assert!(!desktop.ungroup_enabled());
+        desktop.undo().unwrap();
+        desktop.select(Some(id("a")));
+        assert_eq!(picked(&desktop), ["a", "tone"]);
+    }
+
+    #[test]
+    fn attributes_copied_from_one_clip_are_pasted_on_others() {
+        let temp = Temp::new();
+        mixed_project(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        let id = |name: &str| SegmentId::new(name);
+        assert!(!desktop.copy_attributes_enabled() && !desktop.paste_attributes_enabled());
+        assert_eq!(
+            desktop.paste_attributes().unwrap_err().to_string(),
+            "no attributes are copied"
+        );
+
+        // Shape the first picture, then copy what it has.
+        desktop.select(Some(id("a")));
+        desktop
+            .apply_requests(&[
+                super::Request::SetOpacity {
+                    segment_id: id("a"),
+                    opacity: 0.5,
+                },
+                super::Request::SetVolume {
+                    segment_id: id("a"),
+                    volume: 0.25,
+                },
+            ])
+            .unwrap();
+        assert!(desktop.copy_attributes_enabled());
+        desktop.run_action("copy_attributes").unwrap();
+        assert_eq!(desktop.notice(), "Copied attributes");
+        // Two clips picked is no clip to copy from.
+        desktop.select_box([id("a"), id("b")], false);
+        assert!(!desktop.copy_attributes_enabled());
+        assert!(desktop.copy_attributes().is_err());
+
+        // Pasted on the other picture and the sound: each takes its part.
+        desktop.select_box([id("b"), id("tone")], false);
+        assert!(desktop.paste_attributes_enabled());
+        desktop.run_action("paste_attributes").unwrap();
+        assert_eq!(desktop.notice(), "Pasted attributes on 2 clips");
+        let clip = |desktop: &Shell, name: &str| -> Segment {
+            desktop
+                .draft()
+                .unwrap()
+                .tracks
+                .iter()
+                .flat_map(|track| &track.segments)
+                .find(|segment| segment.id.as_str() == name)
+                .unwrap()
+                .clone()
+        };
+        assert_eq!(clip(&desktop, "b").clip.alpha, 0.5);
+        assert_eq!(clip(&desktop, "b").volume, 0.25);
+        assert_eq!(clip(&desktop, "tone").volume, 0.25);
+        assert_eq!(clip(&desktop, "tone").clip.alpha, 1.0);
+        // One undo takes the paste back from both.
+        desktop.undo().unwrap();
+        assert_eq!(clip(&desktop, "b").clip.alpha, 1.0);
+        assert_eq!(clip(&desktop, "tone").volume, 1.0);
+        // The copy is still held, to paste again.
+        assert!(desktop.paste_attributes_enabled());
     }
 
     #[test]

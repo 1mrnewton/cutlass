@@ -6142,7 +6142,11 @@ fn paint_clip_menu(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
         "extract-audio" => shell.extract_audio_enabled(),
         "flip" => shell.mirror_enabled(),
         "open-file" => shell.selected_has_file(),
-        "open-compound" | "ungroup" => shell.compound_selected(),
+        "open-compound" => shell.compound_selected(),
+        "group" => shell.group_enabled(),
+        "ungroup" => shell.ungroup_enabled(),
+        "copy-attributes" => shell.copy_attributes_enabled(),
+        "paste-attributes" => shell.paste_attributes_enabled(),
         // Only a video clip plays on a speed curve.
         "variable-speed" => kind == cutlass_model::TrackType::Video,
         _ => true,
@@ -6192,7 +6196,10 @@ fn paint_clip_menu(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
                 Ok(())
             }
             "open-compound" => shell.open_compound(),
-            "ungroup" => shell.ungroup_compound(),
+            "group" => shell.group_selected(),
+            "ungroup" => shell.ungroup_selected(),
+            "copy-attributes" => shell.copy_attributes(),
+            "paste-attributes" => shell.paste_attributes(),
             "range-in" => shell.mark_clip_in(),
             "range-out" => shell.mark_clip_out(),
             "beat" => {

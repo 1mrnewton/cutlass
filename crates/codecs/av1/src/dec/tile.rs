@@ -102,6 +102,27 @@ pub struct ReconLog {
 }
 
 impl ReconLog {
+    /// Stores the mode info of the log's blocks in `fs`, as
+    /// [`TileDec::replay`] does: what the in-loop filters read of them.
+    /// `b` is scratch.
+    pub fn store_mode_info(&self, fs: &mut FrameState, b: &mut Block) {
+        let stride = fs.mi_stride;
+        for rec in &self.blocks {
+            rec.b.apply(b);
+            let info = mode_info_of(b, rec.b.delta_lf);
+            let w4 = bw4(b.bsize).min(fs.mi_cols.saturating_sub(b.mi_col));
+            let h4 = bh4(b.bsize).min(fs.mi_rows.saturating_sub(b.mi_row));
+            fill_rect(
+                &mut fs.mi,
+                stride,
+                b.mi_row * stride + b.mi_col,
+                w4,
+                h4,
+                info,
+            );
+        }
+    }
+
     pub fn clear(&mut self) {
         self.sbs.clear();
         self.blocks.clear();

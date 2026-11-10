@@ -182,3 +182,51 @@ fn a_motion_field_that_ends_early_leaves_its_bands_unset() {
     assert_eq!(field.bands[1].get(), Some(&vec![MfEntry::default(); 24]));
     assert_eq!(field.bands[2].get(), Some(&vec![MfEntry::default(); 12]));
 }
+
+#[test]
+fn rows_copied_out_of_a_picture_land_in_the_same_rows_of_another() {
+    use super::super::super::frame::Picture;
+    use super::super::{copy_rows_in, copy_rows_out};
+    // 4:2:0, 64x48: chroma rows are half the luma rows.
+    let mut src = Picture::<u8>::new(64, 48, 3, true, true, 8);
+    for (p, pl) in src.planes.iter_mut().enumerate() {
+        let stride = pl.stride;
+        for (i, v) in pl.data.iter_mut().enumerate() {
+            *v = (1 + p + i / stride) as u8;
+        }
+    }
+    let mut dst = Picture::<u8>::new(64, 48, 3, true, true, 8);
+    // Luma 4x4 rows 4..8: luma rows 16..32, chroma rows 8..16.
+    let bufs = copy_rows_out(&src, 4, 8, false, Default::default());
+    assert_eq!(bufs[0].len(), 16 * src.planes[0].stride);
+    assert_eq!(bufs[1].len(), 8 * src.planes[1].stride);
+    copy_rows_in(&mut dst, 4, &bufs);
+    for (p, (d, s)) in dst.planes.iter().zip(&src.planes).enumerate() {
+        let (y0, y1) = if p == 0 { (16, 32) } else { (8, 16) };
+        for (y, (dr, sr)) in d
+            .data
+            .chunks(d.stride)
+            .zip(s.data.chunks(s.stride))
+            .enumerate()
+        {
+            if (y0..y1).contains(&y) {
+                assert_eq!(dr, sr, "plane {p} row {y}");
+            } else {
+                assert!(dr.iter().all(|&v| v == 0), "plane {p} row {y} is untouched");
+            }
+        }
+    }
+    // The last rows run to the end of the planes, past the frame.
+    let bufs = copy_rows_out(&src, 8, 12, true, bufs);
+    let height = src.planes[0].data.len() / src.planes[0].stride;
+    assert!(height > 48);
+    assert_eq!(bufs[0].len(), (height - 32) * src.planes[0].stride);
+    copy_rows_in(&mut dst, 8, &bufs);
+    assert_eq!(
+        dst.planes[0].data[32 * dst.planes[0].stride..],
+        src.planes[0].data[32 * src.planes[0].stride..]
+    );
+    // Rows past the picture copy nothing, and write nothing.
+    let none = copy_rows_out(&src, 4000, 4004, false, bufs);
+    assert!(none.iter().all(Vec::is_empty));
+}

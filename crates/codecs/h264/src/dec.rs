@@ -401,12 +401,15 @@ impl<S: Sample> Frame<S> {
 
 #[derive(Clone)]
 struct Sets {
-    sps: Vec<Option<Sps>>,
+    // Each table is shared between copies until one is written to: the
+    // decoder copies its sets for every access unit, and a parameter set
+    // arrives far less often than that.
+    sps: Shared<Option<Sps>>,
     /// Subset SPS, NAL type 15. A slice extension resolves its id here.
-    subset: Vec<Option<Sps>>,
-    pps: Vec<Option<Pps>>,
+    subset: Shared<Option<Sps>>,
+    pps: Shared<Option<Pps>>,
     /// Depth parameter sets, NAL type 16. Index 0 stays empty.
-    dps: Vec<Option<set::DepthSet>>,
+    dps: Shared<Option<set::DepthSet>>,
     /// First slice header of each view component, for 3D header prediction.
     copies: Vec<HeaderCopy>,
 }
@@ -414,10 +417,10 @@ struct Sets {
 impl Sets {
     fn new() -> Self {
         Self {
-            sps: vec![None; set::MAX_SPS],
-            subset: vec![None; set::MAX_SPS],
-            pps: vec![None; set::MAX_PPS],
-            dps: vec![None; 64],
+            sps: vec![None; set::MAX_SPS].into(),
+            subset: vec![None; set::MAX_SPS].into(),
+            pps: vec![None; set::MAX_PPS].into(),
+            dps: vec![None; 64].into(),
             copies: Vec::new(),
         }
     }
@@ -507,7 +510,7 @@ impl Store {
 }
 
 macro_rules! decode_depth {
-    ($self:ident, $sets:ident, $poc:ident, $packet:ident, $grain:ident, $variant:ident, $sample:ty) => {{
+    ($self:ident, $sets:ident, $poc:ident, $packet:ident, $nals:ident, $grain:ident, $variant:ident, $sample:ty) => {{
         let mut dpb = match &$self.dpb {
             Store::$variant(held) => held.clone(),
             _ => Vec::new(),
@@ -517,7 +520,7 @@ macro_rules! decode_depth {
             &mut $sets,
             &mut $poc,
             &mut dpb,
-            $self.length_size,
+            &$nals,
             $packet,
             &mut $grain,
             $self.pool.as_ref(),
@@ -623,13 +626,25 @@ impl H264Decoder {
     }
 
     /// Moves queued pictures that are ready into `out`, in order. With
-    /// `all` it waits for every one; otherwise it waits only while more are
-    /// queued than the threads can be working on.
+    /// `all` it waits for every one. Otherwise it waits for the next one
+    /// only while every thread has a picture to decode and one more is
+    /// lined up, or while a great many finished pictures are held up
+    /// behind it; short of that the caller is better off bringing the
+    /// next packet.
     fn take_ready(&mut self, out: &mut Vec<VideoOutput>, all: bool) -> Result<(), CodecError> {
-        let depth = self.pool.as_ref().map_or(0, |pool| pool.depth);
+        let (depth, flying) = self
+            .pool
+            .as_ref()
+            .map_or((0, 0), |pool| (pool.depth, pool.flying()));
+        let mut flying = flying;
         while let Some(front) = self.outbox.front() {
-            if !all && self.outbox.len() <= depth && !(front.ready)() {
+            let fed = flying > depth || self.outbox.len() > 4 * depth + 8;
+            if !all && !fed && !(front.ready)() {
                 break;
+            }
+            if !(front.ready)() {
+                // Waiting for it lets at least this one finish.
+                flying = flying.saturating_sub(1);
             }
             let Some(queued) = self.outbox.pop_front() else {
                 break;
@@ -761,7 +776,9 @@ impl VideoDecoder for H264Decoder {
         let mut sets = self.sets.clone();
         let mut poc = self.poc.clone();
         let mut grain = self.grain.clone();
-        let depth = au_depth(&self.sets, &packet.data, self.length_size, self.dpb.depth())?;
+        // The unit is split into NAL units once, for both passes over it.
+        let nals = nal::access_unit(&packet.data, self.length_size)?;
+        let depth = au_depth(&self.sets, &nals, self.dpb.depth())?;
         let mut out = std::mem::take(&mut self.stash);
         let prior = if depth == self.dpb.depth() {
             Vec::new()
@@ -772,13 +789,49 @@ impl VideoDecoder for H264Decoder {
             old.release(0)
         };
         let queued = match depth {
-            8 => decode_depth!(self, sets, poc, packet, grain, Eight, u8),
-            9 => decode_depth!(self, sets, poc, packet, grain, Nine, recon::Depth<9>),
-            10 => decode_depth!(self, sets, poc, packet, grain, Ten, recon::Ten),
-            11 => decode_depth!(self, sets, poc, packet, grain, Eleven, recon::Depth<11>),
-            12 => decode_depth!(self, sets, poc, packet, grain, Twelve, recon::Depth<12>),
-            13 => decode_depth!(self, sets, poc, packet, grain, Thirteen, recon::Depth<13>),
-            14 => decode_depth!(self, sets, poc, packet, grain, Fourteen, recon::Depth<14>),
+            8 => decode_depth!(self, sets, poc, packet, nals, grain, Eight, u8),
+            9 => decode_depth!(self, sets, poc, packet, nals, grain, Nine, recon::Depth<9>),
+            10 => decode_depth!(self, sets, poc, packet, nals, grain, Ten, recon::Ten),
+            11 => decode_depth!(
+                self,
+                sets,
+                poc,
+                packet,
+                nals,
+                grain,
+                Eleven,
+                recon::Depth<11>
+            ),
+            12 => decode_depth!(
+                self,
+                sets,
+                poc,
+                packet,
+                nals,
+                grain,
+                Twelve,
+                recon::Depth<12>
+            ),
+            13 => decode_depth!(
+                self,
+                sets,
+                poc,
+                packet,
+                nals,
+                grain,
+                Thirteen,
+                recon::Depth<13>
+            ),
+            14 => decode_depth!(
+                self,
+                sets,
+                poc,
+                packet,
+                nals,
+                grain,
+                Fourteen,
+                recon::Depth<14>
+            ),
             _ => return Err(CodecError::Unsupported { what: "bit depth" }),
         };
         self.outbox.extend(prior);
@@ -826,10 +879,9 @@ fn held_picture<S: Sample>(dpb: &[Frame<S>], pts: i64) -> Option<VideoOutput> {
     emit(frame)
 }
 
-fn au_depth(sets: &Sets, data: &[u8], length_size: u8, current: u8) -> Result<u8, CodecError> {
-    let nals = nal::access_unit(data, length_size)?;
+fn au_depth(sets: &Sets, nals: &[Nal], current: u8) -> Result<u8, CodecError> {
     let mut sets = sets.clone();
-    for nal in &nals {
+    for nal in nals {
         match nal.kind {
             7 => {
                 let sps = set::parse_sps(&nal.rbsp)?;
@@ -887,12 +939,11 @@ fn decode_au<S: Sample>(
     sets: &mut Sets,
     poc: &mut Poc,
     dpb: &mut Vec<Frame<S>>,
-    length_size: u8,
+    nals: &[Nal],
     packet: &Packet,
     grain: &mut crate::sei::GrainHold,
     pool: Option<&Pool>,
 ) -> Result<Vec<Frame<S>>, CodecError> {
-    let nals = nal::access_unit(&packet.data, length_size)?;
     // A picture goes to another thread only when the unit holds nothing
     // but plain slices; the first slice's headers then have the last word.
     let plain = nals
@@ -1137,7 +1188,7 @@ fn decode_au<S: Sample>(
             }
             1 | 5 | 2 => {
                 let attached = if kind == 2 {
-                    following_parts(&nals, index)?
+                    following_parts(nals, index)?
                 } else {
                     Attached {
                         intra: None,
@@ -1238,10 +1289,6 @@ fn decode_au<S: Sample>(
         // all that marking, ordering and the next pictures' headers need.
         let published = std::sync::Arc::new(progress::Published::new(pic.w, pic.h, pic.mb_w));
         let mut meta = pic.clone();
-        meta.y = Shared::default();
-        meta.u = Shared::default();
-        meta.v = Shared::default();
-        meta.mb = Shared::default();
         meta.pending = Some(published.clone());
         present(&mut meta, &messages, grain, idr_pic)?;
         pic.pending = Some(published);
@@ -1250,6 +1297,7 @@ fn decode_au<S: Sample>(
             pic,
             dpb: dpb.clone(),
             slices: plan.slices,
+            shown: meta.shown.clone(),
         };
         pool.run(Box::new(move || run_picture(job)));
         let mut pictures = prior;
@@ -1860,8 +1908,13 @@ fn emit<S: Sample>(frame: &Frame<S>) -> Option<VideoOutput> {
     if let Some(published) = &frame.pending {
         let mut whole = frame.clone();
         fill(&mut whole, published.planes().ok()?);
-        return emit(&whole);
+        return emit_whole(&whole);
     }
+    emit_whole(frame)
+}
+
+/// [`emit`] for a picture whose planes are here.
+fn emit_whole<S: Sample>(frame: &Frame<S>) -> Option<VideoOutput> {
     if frame.shown.grain.is_some() {
         let mut copy = frame.clone();
         if let Some(grain) = copy.shown.grain.take() {
@@ -2383,7 +2436,15 @@ fn decode_slice<S: Sample>(
             prior.extend(take_output(dpb, 0));
         }
         let keep_levels = sets.subset.iter().flatten().any(|sps| sps.seq_tcoeff);
-        *picture = Some(new_frame(&sps, &header, poc, packet, idr, keep_levels)?);
+        let here = jobs.is_none();
+        *picture = Some(new_frame(
+            &sps,
+            &header,
+            poc,
+            packet,
+            idr,
+            (here, keep_levels),
+        )?);
         *next_mb = 0;
         if header.nal_ref {
             poc_state.prev_frame_num = header.frame_num;
@@ -3767,7 +3828,9 @@ fn new_frame<S: Sample>(
     poc: i32,
     packet: &Packet,
     idr: bool,
-    keep_levels: bool,
+    // Whether to make the planes now, and whether to keep luma levels.
+    // A picture bound for another thread gets its planes there.
+    (planes, keep_levels): (bool, bool),
 ) -> Result<Frame<S>, CodecError> {
     let (mut vis_w, mut vis_h) = sps.visible()?;
     let field_pic = header.field;
@@ -3819,11 +3882,16 @@ fn new_frame<S: Sample>(
     } else {
         0
     };
+    let (luma, chroma, blocks) = if planes {
+        (w.saturating_mul(h), chroma, mb_w.saturating_mul(mb_h))
+    } else {
+        (0, 0, 0)
+    };
     Ok(Frame {
-        y: vec![S::default(); w.saturating_mul(h)].into(),
+        y: vec![S::default(); luma].into(),
         u: vec![S::mid(); chroma].into(),
         v: vec![S::mid(); chroma].into(),
-        mb: vec![Mb::new(u16::MAX); mb_w.saturating_mul(mb_h)].into(),
+        mb: vec![Mb::new(u16::MAX); blocks].into(),
         w,
         h,
         mb_w,
@@ -4365,6 +4433,8 @@ struct PictureJob<S: Sample> {
     pic: Frame<S>,
     dpb: Vec<Frame<S>>,
     slices: Vec<SliceJob>,
+    /// When and how the picture is shown, settled after its slices.
+    shown: Shown,
 }
 
 /// Ends a picture as failed if its thread stops before saying how it went,
@@ -4388,16 +4458,30 @@ fn run_picture<S: Sample>(job: PictureJob<S>) {
         mut pic,
         dpb,
         slices,
+        shown,
     } = job;
     let Some(published) = pic.pending.clone() else {
         return;
     };
     let ends = EndsPicture(published);
-    let result = decode_picture(&mut pic, &dpb, &slices).map(|()| progress::Planes {
-        y: std::mem::take(&mut pic.y),
-        u: std::mem::take(&mut pic.u),
-        v: std::mem::take(&mut pic.v),
-        mb: std::mem::take(&mut pic.mb),
+    // The planes are made here, on the thread that fills them.
+    let blocks = pic.mb_w.saturating_mul(pic.h / 16);
+    pic.y = vec![S::default(); pic.w.saturating_mul(pic.h)].into();
+    pic.u = vec![S::mid(); (pic.w / 2).saturating_mul(pic.h / 2)].into();
+    pic.v = vec![S::mid(); (pic.w / 2).saturating_mul(pic.h / 2)].into();
+    pic.mb = vec![Mb::new(u16::MAX); blocks].into();
+    let result = decode_picture(&mut pic, &dpb, &slices).map(|()| {
+        // The picture is put in its output form here too, so the caller
+        // only has to pick it up.
+        pic.shown = shown;
+        let output = if pic.output { emit_whole(&pic) } else { None };
+        progress::Planes {
+            y: std::mem::take(&mut pic.y),
+            u: std::mem::take(&mut pic.u),
+            v: std::mem::take(&mut pic.v),
+            mb: std::mem::take(&mut pic.mb),
+            output: std::sync::Mutex::new(output),
+        }
     });
     ends.0.finish(result);
 }
@@ -4512,7 +4596,16 @@ impl Queued {
             ready: Box::new(move || pending.as_ref().is_none_or(|pending| pending.finished())),
             take: Box::new(move || {
                 if let Some(pending) = &frame.pending {
-                    pending.planes()?;
+                    // Its thread left the picture ready to hand over.
+                    let made = pending
+                        .planes()?
+                        .output
+                        .lock()
+                        .ok()
+                        .and_then(|mut made| made.take());
+                    if made.is_some() {
+                        return Ok(made);
+                    }
                 }
                 Ok(emit(&frame))
             }),
@@ -4527,9 +4620,19 @@ struct Pool {
     /// `None` runs each task where it is handed over.
     sender: Option<std::sync::mpsc::Sender<Task>>,
     workers: Vec<std::thread::JoinHandle<()>>,
-    /// Pictures that may be queued for output before a call waits for the
-    /// first of them.
+    /// How many pictures the threads can decode at once.
     depth: usize,
+    /// Tasks handed over and not yet finished.
+    flying: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+/// Counts a task as finished when it ends, however it ends.
+struct Lands(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+impl Drop for Lands {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::Release);
+    }
 }
 
 impl Pool {
@@ -4567,6 +4670,7 @@ impl Pool {
             sender: Some(sender),
             workers,
             depth,
+            flying: std::sync::Arc::default(),
         }
     }
 
@@ -4575,10 +4679,22 @@ impl Pool {
             sender: None,
             workers: Vec::new(),
             depth: 0,
+            flying: std::sync::Arc::default(),
         }
     }
 
+    fn flying(&self) -> usize {
+        self.flying.load(std::sync::atomic::Ordering::Acquire)
+    }
+
     fn run(&self, task: Task) {
+        self.flying
+            .fetch_add(1, std::sync::atomic::Ordering::Release);
+        let lands = Lands(self.flying.clone());
+        let task: Task = Box::new(move || {
+            let _lands = lands;
+            task();
+        });
         match &self.sender {
             Some(sender) => {
                 if let Err(unsent) = sender.send(task) {

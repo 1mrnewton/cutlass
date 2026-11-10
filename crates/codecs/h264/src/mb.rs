@@ -429,9 +429,10 @@ fn rows_decoded<S: Sample>(pic: &mut Frame<S>, addr: usize) {
         return;
     }
     deblock_rows(pic, writer.deblocked..ready);
+    // Only a picture kept for reference is ever read by another.
     let published = match pic.pending.clone() {
-        Some(pending) => pending.publish(pic, writer.published, ready, false),
-        None => writer.published,
+        Some(pending) if pic.referenced => pending.publish(pic, writer.published, ready, false),
+        _ => writer.published,
     };
     pic.writer = Some(super::Writer {
         deblocked: ready,
@@ -448,8 +449,8 @@ pub(crate) fn finish_rows<S: Sample>(pic: &mut Frame<S>) {
     let rows = pic.h / 16;
     deblock_rows(pic, writer.deblocked..rows);
     let published = match pic.pending.clone() {
-        Some(pending) => pending.publish(pic, writer.published, rows, true),
-        None => writer.published,
+        Some(pending) if pic.referenced => pending.publish(pic, writer.published, rows, true),
+        _ => writer.published,
     };
     pic.writer = Some(super::Writer {
         deblocked: rows,

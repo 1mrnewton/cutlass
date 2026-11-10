@@ -393,119 +393,25 @@ pub struct LumaEdge {
     tc0: Option<[i8; 4]>,
 }
 
+impl LumaEdge {
+    fn for_kernel(self) -> cutlass_h264_kernels::deblock::Edge {
+        cutlass_h264_kernels::deblock::Edge {
+            at: self.at,
+            down: self.down,
+            vertical: self.vertical,
+            alpha: self.alpha,
+            beta: self.beta,
+            tc0: self.tc0,
+        }
+    }
+}
+
 fn deblock_chroma8_eight(plane: &mut [u8], edge: LumaEdge) -> bool {
-    use cutlass_h264_kernels::deblock;
-    let LumaEdge {
-        at,
-        down,
-        vertical,
-        alpha,
-        beta,
-        tc0,
-    } = edge;
-    let mut rows = [[0u8; 8]; 4];
-    if vertical {
-        // Eight lines across the edge, each p1, p0, q0, q1 in a row.
-        let Some(first) = at.checked_sub(2) else {
-            return false;
-        };
-        if first + 7 * down + 4 > plane.len() {
-            return false;
-        }
-        for line in 0..8 {
-            let start = first + line * down;
-            for (row, &sample) in rows.iter_mut().zip(&plane[start..start + 4]) {
-                row[line] = sample;
-            }
-        }
-        match tc0 {
-            Some(tc0) => deblock::chroma_normal(&mut rows, alpha, beta, tc0),
-            None => deblock::chroma_strong(&mut rows, alpha, beta),
-        }
-        // A chroma filter changes only p0 and q0.
-        for (line, (&p0, &q0)) in rows[1].iter().zip(&rows[2]).enumerate() {
-            let start = first + line * down;
-            plane[start + 1..start + 3].copy_from_slice(&[p0, q0]);
-        }
-        return true;
-    }
-    // Four rows around the edge, eight samples each.
-    let Some(first) = at.checked_sub(2 * down) else {
-        return false;
-    };
-    if first + 3 * down + 8 > plane.len() {
-        return false;
-    }
-    for (index, row) in rows.iter_mut().enumerate() {
-        let start = first + index * down;
-        row.copy_from_slice(&plane[start..start + 8]);
-    }
-    match tc0 {
-        Some(tc0) => deblock::chroma_normal(&mut rows, alpha, beta, tc0),
-        None => deblock::chroma_strong(&mut rows, alpha, beta),
-    }
-    for (index, row) in rows.iter().enumerate().skip(1).take(2) {
-        let start = first + index * down;
-        plane[start..start + 8].copy_from_slice(row);
-    }
-    true
+    cutlass_h264_kernels::deblock::chroma_edge(plane, edge.for_kernel())
 }
 
 fn deblock_luma16_eight(plane: &mut [u8], edge: LumaEdge) -> bool {
-    use cutlass_h264_kernels::deblock;
-    let LumaEdge {
-        at,
-        down,
-        vertical,
-        alpha,
-        beta,
-        tc0,
-    } = edge;
-    if vertical {
-        // Sixteen lines across the edge, eight samples each.
-        let Some(first) = at.checked_sub(4) else {
-            return false;
-        };
-        if first + 15 * down + 8 > plane.len() {
-            return false;
-        }
-        let mut lines = [[0u8; 8]; 16];
-        for (index, line) in lines.iter_mut().enumerate() {
-            let start = first + index * down;
-            line.copy_from_slice(&plane[start..start + 8]);
-        }
-        match tc0 {
-            Some(tc0) => deblock::luma_normal_lines(&mut lines, alpha, beta, tc0),
-            None => deblock::luma_strong_lines(&mut lines, alpha, beta),
-        }
-        for (index, line) in lines.iter().enumerate() {
-            let start = first + index * down;
-            plane[start..start + 8].copy_from_slice(line);
-        }
-        return true;
-    }
-    // Eight rows around the edge, sixteen samples each.
-    let Some(first) = at.checked_sub(4 * down) else {
-        return false;
-    };
-    if first + 7 * down + 16 > plane.len() {
-        return false;
-    }
-    let mut rows = [[0u8; 16]; 8];
-    for (index, row) in rows.iter_mut().enumerate() {
-        let start = first + index * down;
-        row.copy_from_slice(&plane[start..start + 16]);
-    }
-    match tc0 {
-        Some(tc0) => deblock::luma_normal_rows(&mut rows, alpha, beta, tc0),
-        None => deblock::luma_strong_rows(&mut rows, alpha, beta),
-    }
-    // The filter never changes p3 or q3.
-    for (index, row) in rows.iter().enumerate().skip(1).take(6) {
-        let start = first + index * down;
-        plane[start..start + 16].copy_from_slice(row);
-    }
-    true
+    cutlass_h264_kernels::deblock::luma_edge(plane, edge.for_kernel())
 }
 
 impl Sample for u8 {

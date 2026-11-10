@@ -11,6 +11,20 @@ pub type Rows = [[u8; 16]; 8];
 /// is p3, p2, p1, p0, q0, q1, q2, q3.
 pub type Lines = [[u8; 8]; 16];
 
+pub use crate::edge::Edge;
+
+/// Filters one 16-sample luma edge of `plane` in place. `false` means the
+/// edge's samples are not all in the plane and nothing was done.
+pub fn luma_edge(plane: &mut [u8], edge: Edge) -> bool {
+    kernel!(luma_edge(plane, edge))
+}
+
+/// Filters one 8-sample chroma edge of `plane` in place; `edge.tc0` is per
+/// two samples. `false` as for [`luma_edge`].
+pub fn chroma_edge(plane: &mut [u8], edge: Edge) -> bool {
+    kernel!(chroma_edge(plane, edge))
+}
+
 /// The four rows around an 8-sample chroma edge: p1, p0, then q0, q1.
 /// Chroma filters change only p0 and q0.
 pub type ChromaRows = [[u8; 8]; 4];
@@ -186,6 +200,75 @@ mod tests {
             assert_eq!((fast[0], fast[3]), (rows[0], rows[3]));
         }
         assert!(changed > 5_000, "only {changed} blocks were filtered");
+    }
+
+    #[test]
+    fn whole_edges_match_the_plain_ones() {
+        let mut rng = Lcg(5);
+        let stride = 24usize;
+        for round in 0..20_000 {
+            let spread = [0, 1, 3, 8, 30][round % 5];
+            let base = rng.next() as u8;
+            let plane: Vec<u8> = (0..stride * 24).map(|_| rng.sample(base, spread)).collect();
+            let (alpha, beta, tc0) = thresholds(&mut rng);
+            let edge = super::Edge {
+                at: (4 + (rng.next() % 4) as usize) * stride + 4 + (rng.next() % 4) as usize,
+                down: stride,
+                vertical: round % 2 == 0,
+                alpha,
+                beta,
+                tc0: (round % 3 != 0).then_some(tc0),
+            };
+            let (mut fast, mut plain) = (plane.clone(), plane.clone());
+            assert!(super::luma_edge(&mut fast, edge));
+            assert!(scalar::luma_edge(&mut plain, edge));
+            assert_eq!(fast, plain, "luma {round}");
+            let (mut fast, mut plain) = (plane.clone(), plane.clone());
+            assert!(super::chroma_edge(&mut fast, edge));
+            assert!(scalar::chroma_edge(&mut plain, edge));
+            assert_eq!(fast, plain, "chroma {round}");
+        }
+        // An edge too near the plane's start or end is refused untouched.
+        let mut plane = vec![9u8; 64];
+        let edge = super::Edge {
+            at: 1,
+            down: 8,
+            vertical: true,
+            alpha: 255,
+            beta: 18,
+            tc0: None,
+        };
+        assert!(!super::luma_edge(&mut plane, edge));
+        assert!(!super::chroma_edge(
+            &mut plane,
+            super::Edge { at: 60, ..edge }
+        ));
+        assert_eq!(plane, vec![9u8; 64]);
+    }
+
+    #[test]
+    fn a_whole_edge_is_the_row_filter_on_its_rows() {
+        // Ties the plane functions to the row filters the other tests check.
+        let mut rng = Lcg(6);
+        let stride = 16usize;
+        let plane: Vec<u8> = (0..stride * 8).map(|_| rng.sample(100, 3)).collect();
+        let edge = super::Edge {
+            at: 4 * stride,
+            down: stride,
+            vertical: false,
+            alpha: 255,
+            beta: 18,
+            tc0: Some([3; 4]),
+        };
+        let mut filtered = plane.clone();
+        assert!(scalar::luma_edge(&mut filtered, edge));
+        let mut rows = [[0u8; 16]; 8];
+        for (row, samples) in rows.iter_mut().zip(plane.chunks(stride)) {
+            row.copy_from_slice(samples);
+        }
+        scalar::luma_normal_rows(&mut rows, 255, 18, [3; 4]);
+        assert_eq!(filtered, rows.concat());
+        assert_ne!(filtered, plane);
     }
 
     #[test]

@@ -10,7 +10,7 @@ use core::arch::aarch64::{
     vmovl_u8, vnegq_s16, vqmovun_s16, vreinterpretq_s16_u16, vreinterpretq_u8_u16,
     vreinterpretq_u8_u32, vreinterpretq_u8_u64, vreinterpretq_u16_u8, vreinterpretq_u32_u8,
     vreinterpretq_u64_u8, vshlq_n_s16, vshrq_n_s16, vsubq_s16, vtrn1q_u8, vtrn1q_u16, vtrn1q_u32,
-    vtrn2q_u8, vtrn2q_u16, vtrn2q_u32,
+    vtrn2q_u8, vtrn2q_u16, vtrn2q_u32, vuzp1q_u8, vuzp2q_u8,
 };
 
 use crate::deblock::{ChromaRows, Lines, Rows};
@@ -403,3 +403,25 @@ pub(crate) fn chroma_strong(rows: &mut ChromaRows, alpha: i32, beta: i32) {
     rows[1] = weak(p1, p0, q1);
     rows[2] = weak(q1, q0, p1);
 }
+
+/// Eight lines of four samples as four rows of eight.
+#[target_feature(enable = "neon")]
+fn chroma_lines(lines: &[[u8; 4]; 8]) -> ChromaRows {
+    let quad = |index: usize| {
+        u64::from(u32::from_le_bytes(lines[index]))
+            | u64::from(u32::from_le_bytes(lines[index + 1])) << 32
+    };
+    let first = pair(quad(0), quad(2));
+    let second = pair(quad(4), quad(6));
+    // Samples 0 and 2 of every line, then samples 1 and 3.
+    let even = vuzp1q_u8(first, second);
+    let odd = vuzp2q_u8(first, second);
+    [
+        halves(vuzp1q_u8(even, even)).0,
+        halves(vuzp1q_u8(odd, odd)).0,
+        halves(vuzp2q_u8(even, even)).0,
+        halves(vuzp2q_u8(odd, odd)).0,
+    ]
+}
+
+crate::edge::edge_kernels!(pub(crate), #[target_feature(enable = "neon")]);

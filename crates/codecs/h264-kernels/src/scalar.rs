@@ -200,3 +200,16 @@ fn chroma_line(rows: &ChromaRows, column: usize) -> [i32; 4] {
 }
 
 crate::mc_block::block_kernels!(pub,);
+
+/// Eight lines of four samples as four rows of eight.
+fn chroma_lines(lines: &[[u8; 4]; 8]) -> ChromaRows {
+    let mut rows = [[0u8; 8]; 4];
+    for (index, line) in lines.iter().enumerate() {
+        for (row, &sample) in rows.iter_mut().zip(line) {
+            row[index] = sample;
+        }
+    }
+    rows
+}
+
+crate::edge::edge_kernels!(pub,);

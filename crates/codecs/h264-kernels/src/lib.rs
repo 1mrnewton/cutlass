@@ -38,6 +38,7 @@ macro_rules! kernel {
 }
 
 pub mod deblock;
+mod edge;
 pub mod mc;
 mod mc_block;
 

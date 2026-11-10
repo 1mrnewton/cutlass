@@ -9458,12 +9458,7 @@ pub(crate) fn deblock<S: Sample>(pic: &mut Frame<S>) {
 /// edge inside it is filtered: each side of one predicts the same way and
 /// neither holds coefficients, so its strength is 0.
 fn inner_edges_flat(mb: &Mb) -> bool {
-    !mb.intra
-        && mb.nnz_y == [0; 16]
-        && mb.slot0 == [mb.slot0[0]; 4]
-        && mb.slot1 == [mb.slot1[0]; 4]
-        && mb.mv0 == [mb.mv0[0]; 16]
-        && mb.mv1 == [mb.mv1[0]; 16]
+    !mb.intra && mb.nnz_y == [0; 16] && single_motion(mb)
 }
 
 fn deblock_planes<S: Sample>(pic: &Frame<S>, chroma: u8, planes: (&mut [S], &mut [S], &mut [S])) {
@@ -9490,6 +9485,11 @@ fn deblock_planes<S: Sample>(pic: &Frame<S>, chroma: u8, planes: (&mut [S], &mut
         let transform8 = pic.mb.get(index).is_some_and(|mb| mb.transform8);
         let field = pic.mb.get(index).is_some_and(|mb| mb.field_mb);
         let flat = pic.mb.get(index).is_some_and(inner_edges_flat);
+        // Worked out once here, not again for each of the eight edges.
+        let known = pic
+            .mb
+            .get(index)
+            .map_or((0, false), |mb| (coded_mask(mb), single_motion(mb)));
         let span = luma_span(my, field);
         let off = offsets(pic, index);
         for edge in 0..4 {
@@ -9500,7 +9500,7 @@ fn deblock_planes<S: Sample>(pic: &Frame<S>, chroma: u8, planes: (&mut [S], &mut
                 break;
             }
             let x = mx * 16 + edge * 4;
-            let bs = edge_strength(pic, mx, my, edge, true);
+            let bs = edge_strength(pic, (mx, my), edge, true, known);
             // An 8×8 transform has no luma edge at 4 or 12.
             if x >= 4 && !(transform8 && (edge == 1 || edge == 3)) {
                 let qpav = edge_qp(pic, mx, my, true, true, true, edge == 0);
@@ -9534,7 +9534,7 @@ fn deblock_planes<S: Sample>(pic: &Frame<S>, chroma: u8, planes: (&mut [S], &mut
                 break;
             }
             let y = span.at(edge * 4);
-            let bs = edge_strength(pic, mx, my, edge, false);
+            let bs = edge_strength(pic, (mx, my), edge, false, known);
             if y >= 4 && !(transform8 && (edge == 1 || edge == 3)) {
                 let qpav = edge_qp(pic, mx, my, true, true, false, edge == 0);
                 filter_groups(
@@ -9574,13 +9574,17 @@ struct ChromaEdge {
     format: u8,
 }
 
+/// `known` is the current macroblock's [`coded_mask`] and whether it has a
+/// [`single_motion`].
 fn edge_strength<S: Sample>(
     pic: &Frame<S>,
-    mx: usize,
-    my: usize,
+    at: (usize, usize),
     edge: usize,
     vertical: bool,
+    known: (u16, bool),
 ) -> [u8; 4] {
+    let (mx, my) = at;
+    let (q_mask, single) = known;
     let Some(current) = pic.mb.get(my * pic.mb_w + mx) else {
         return [0; 4];
     };
@@ -9602,11 +9606,72 @@ fn edge_strength<S: Sample>(
     } else if current.intra {
         return [3; 4];
     }
+    // The blocks on the far side: the neighbour's last row or column across
+    // the macroblock edge, this macroblock's previous one inside it.
+    let (p_mask, across) = if edge == 0 {
+        (neighbor.map_or(0, coded_mask), 3)
+    } else {
+        (q_mask, edge - 1)
+    };
+    // One motion for the whole macroblock: the two sides of an edge inside
+    // it predict alike. Across the macroblock edge the motion answer is the
+    // same for all four parts when the neighbour has one motion too.
+    let apart = if !single {
+        None
+    } else if edge != 0 {
+        Some(0)
+    } else {
+        neighbor
+            .filter(|mb| single_motion(mb))
+            .map(|mb| motion_strength(preds_at(mb, 3, 3), preds_at(current, 0, 0)))
+    };
     let mut out = [0u8; 4];
     for (line, sample) in out.iter_mut().enumerate() {
-        *sample = inter_strength(current, neighbor, edge, line, vertical);
+        let (q_bit, p_bit) = if vertical {
+            (line * 4 + edge, line * 4 + across)
+        } else {
+            (edge * 4 + line, across * 4 + line)
+        };
+        // Coefficients on either side settle it before any motion is read.
+        *sample = if (q_mask >> q_bit | p_mask >> p_bit) & 1 == 1 {
+            2
+        } else if let Some(apart) = apart {
+            apart
+        } else {
+            inter_strength(current, neighbor, edge, line, vertical)
+        };
     }
     out
+}
+
+/// A bit per 4×4 luma block that counts as holding coefficients for the
+/// deblocking strength, bit `y * 4 + x`. See [`luma_coded`].
+fn coded_mask(mb: &Mb) -> u16 {
+    if mb.pcm {
+        return u16::MAX;
+    }
+    let mut mask = 0u16;
+    for (index, &count) in mb.nnz_y.iter().enumerate() {
+        mask |= u16::from(count > 0) << index;
+    }
+    if mb.transform8 {
+        // The four blocks of an 8×8 block hold coefficients together.
+        for corner in [0, 2, 8, 10] {
+            if mask & (0x33 << corner) != 0 {
+                mask |= 0x33 << corner;
+            }
+        }
+    }
+    mask
+}
+
+/// Every block of the macroblock predicts from the same pictures with the
+/// same vectors.
+fn single_motion(mb: &Mb) -> bool {
+    mb.slot0 == [mb.slot0[0]; 4]
+        && mb.slot1 == [mb.slot1[0]; 4]
+        && mb.mv0 == [mb.mv0[0]; 16]
+        && mb.mv1 == [mb.mv1[0]; 16]
 }
 
 /// The coefficients the 4×4 luma block at `(x, y)` counts for the

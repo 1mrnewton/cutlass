@@ -94,8 +94,8 @@ pub use keys::{ClipKeys, KeyGraph, clip_keys, key_graphs, move_key, remove_key, 
 pub use lane::{Lane, lane_category, lanes, lanes_for};
 pub use library::{
     LIBRARY_TOP, LibraryFile, LibraryShelf, LibrarySort, NEW_FOLDER_NAME, add_folder,
-    delete_folder, folder_trail, hide_file, library_files, library_folders, next_folder_name,
-    parent_of, place, rename_folder,
+    delete_folder, folder_trail, hide_file, library_cut, library_files, library_folders,
+    next_folder_name, parent_of, picked_files, place, rename_folder,
 };
 pub use media_place::{MediaPlace, extract_request, media_requests, sound_row};
 pub use pen::{PEN_DRAG_MIN, PenPath, PenPress};

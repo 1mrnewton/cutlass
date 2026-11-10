@@ -407,29 +407,50 @@ fn deblock_chroma8_eight(plane: &mut [u8], edge: LumaEdge) -> bool {
         beta,
         tc0,
     } = edge;
-    // Sample `along` of row `row` (p1, p0, q0, q1) of the edge.
-    let (across, along) = if vertical { (1, down) } else { (down, 1) };
-    let Some(first) = at.checked_sub(2 * across) else {
+    let mut rows = [[0u8; 8]; 4];
+    if vertical {
+        // Eight lines across the edge, each p1, p0, q0, q1 in a row.
+        let Some(first) = at.checked_sub(2) else {
+            return false;
+        };
+        if first + 7 * down + 4 > plane.len() {
+            return false;
+        }
+        for line in 0..8 {
+            let start = first + line * down;
+            for (row, &sample) in rows.iter_mut().zip(&plane[start..start + 4]) {
+                row[line] = sample;
+            }
+        }
+        match tc0 {
+            Some(tc0) => deblock::chroma_normal(&mut rows, alpha, beta, tc0),
+            None => deblock::chroma_strong(&mut rows, alpha, beta),
+        }
+        // A chroma filter changes only p0 and q0.
+        for line in 0..8 {
+            let start = first + line * down;
+            plane[start + 1..start + 3].copy_from_slice(&[rows[1][line], rows[2][line]]);
+        }
+        return true;
+    }
+    // Four rows around the edge, eight samples each.
+    let Some(first) = at.checked_sub(2 * down) else {
         return false;
     };
-    if first + 3 * across + 7 * along >= plane.len() {
+    if first + 3 * down + 8 > plane.len() {
         return false;
     }
-    let mut rows = [[0u8; 8]; 4];
     for (index, row) in rows.iter_mut().enumerate() {
-        for (step, sample) in row.iter_mut().enumerate() {
-            *sample = plane[first + index * across + step * along];
-        }
+        let start = first + index * down;
+        row.copy_from_slice(&plane[start..start + 8]);
     }
     match tc0 {
         Some(tc0) => deblock::chroma_normal(&mut rows, alpha, beta, tc0),
         None => deblock::chroma_strong(&mut rows, alpha, beta),
     }
-    // A chroma filter changes only p0 and q0.
     for (index, row) in rows.iter().enumerate().skip(1).take(2) {
-        for (step, &sample) in row.iter().enumerate() {
-            plane[first + index * across + step * along] = sample;
-        }
+        let start = first + index * down;
+        plane[start..start + 8].copy_from_slice(row);
     }
     true
 }

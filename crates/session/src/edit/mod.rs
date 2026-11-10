@@ -771,6 +771,13 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             segment_id,
             material_id,
         } => replace::replace_media(draft, segment_id, material_id),
+        Request::LinkMedia {
+            material_id,
+            path,
+            width,
+            height,
+            duration,
+        } => replace::link_media(draft, material_id, path, (*width, *height), *duration),
         Request::InsertTrack { track_id, kind } => track::insert_track(draft, track_id, kind),
         Request::InsertTrackAt {
             track_id,

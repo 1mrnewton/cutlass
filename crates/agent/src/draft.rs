@@ -533,6 +533,7 @@ pub fn request_name(request: &Request) -> &'static str {
         Request::KeyPose { .. } => "key_pose",
         Request::Import { .. } => "import",
         Request::ReplaceMedia { .. } => "replace_media",
+        Request::LinkMedia { .. } => "link_media",
         Request::CreateCompound { .. } => "create_compound",
         Request::Ungroup { .. } => "ungroup",
         Request::SetInside { .. } => "set_inside",

@@ -737,6 +737,16 @@ pub enum Request {
         segment_id: SegmentId,
         material_id: MaterialId,
     },
+    /// Point a material at the file stored at `path`, for media that has
+    /// moved. Every clip of the material plays the new file in place of
+    /// the old, which must reach as far as they do.
+    LinkMedia {
+        material_id: MaterialId,
+        path: String,
+        width: i32,
+        height: i32,
+        duration: Micros,
+    },
     /// Add an empty lane. Video and mixed lanes are overlays above the main track.
     /// Audio is inserted under the main track. This does not place a segment.
     InsertTrack { track_id: TrackId, kind: TrackType },

@@ -442,7 +442,7 @@ pub(crate) fn clip_passes(
     };
     let (width, height) = (extent.width, extent.height);
     let mut passes = Vec::new();
-    if let Some(colour) = clip_adjust(draft, track_index, segment_index) {
+    if let Some(colour) = clip_adjust(draft, track_index, segment_index, time) {
         let mask = effect_mask(draft, segment, time, extent);
         passes.push(GpuLayer::colour(
             colour,

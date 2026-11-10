@@ -22,7 +22,7 @@ use super::obu::{
 };
 use super::postfilter;
 use super::recon::Scratch;
-use super::tile::{ReconLog, RefView, RowHook, TileDec, malformed};
+use super::tile::{Block, ReconLog, RefView, RowHook, TileDec, malformed};
 use super::types::{GLOBAL_GLOBALMV, GLOBALMV, INTRA_FRAME, LOCALWARP, Mv};
 
 type R<T> = Result<T, CodecError>;
@@ -1947,29 +1947,62 @@ impl<P: Pixel> TileBufs<P> {
     }
 }
 
-/// Decodes tile `tile_num` of a frame into `fs` and `cur` (see
-/// [`decode_tiles`]). Returns the CDFs at the end of the tile.
-fn decode_tile<P: Pixel>(
+/// What a tile carries from one superblock row to the next: its symbol
+/// decoder and CDFs, the delta q and delta loop filter values, the loop
+/// restoration references, and the last block.
+struct TileCarry<'d> {
+    tile_num: usize,
+    msac: Msac<'d>,
+    cdf: Box<CdfContext>,
+    delta_lf: [i8; 4],
+    current_q_index: i32,
+    read_deltas: bool,
+    ref_lr_wiener: [[[i8; 3]; 2]; 3],
+    ref_sgr_xqd: [[i8; 2]; 3],
+    b: Block,
+    /// Whether the tile's first row is still to come.
+    fresh: bool,
+}
+
+impl<'d> TileCarry<'d> {
+    fn new(hdr: &FrameHeader, cdf: &CdfContext, tile_num: usize, data: &'d [u8]) -> Self {
+        Self {
+            tile_num,
+            msac: Msac::new(data, hdr.disable_cdf_update),
+            cdf: Box::new(cdf.clone()),
+            delta_lf: [0; 4],
+            current_q_index: i32::from(hdr.quant.base_q_idx),
+            read_deltas: false,
+            ref_lr_wiener: [[[0; 3]; 2]; 3],
+            ref_sgr_xqd: [[0; 2]; 3],
+            b: Block::default(),
+            fresh: true,
+        }
+    }
+}
+
+/// Decodes the superblock rows of tile `carry` starting in luma 4x4 rows
+/// `rows` into `fs` and `cur` (see [`decode_tiles`]), the tile's first
+/// row starting it.
+fn decode_tile_part<P: Pixel>(
     seq: &SequenceHeader,
     hdr: &FrameHeader,
     fs: &mut FrameState,
     cur: &mut Picture<P>,
-    cdf: &CdfContext,
     refs: &[Option<&Picture<P>>; 8],
     ref_hdr: &[RefHeaderState; 8],
-    tile_num: usize,
-    data: &[u8],
+    carry: &mut TileCarry<'_>,
+    rows: std::ops::Range<usize>,
     bufs: &mut TileBufs<P>,
     logs: Option<&Mutex<RowPools>>,
     mut feed: Option<&mut MfFeed>,
     on_row: &mut RowHook<'_, P>,
-) -> R<Box<CdfContext>> {
+) -> R<()> {
     let num_planes = seq.num_planes();
     let sb128 = seq.use_128x128_superblock;
     let ti = &hdr.tile_info;
-    let tile_row = tile_num / ti.cols;
-    let tile_col = tile_num % ti.cols;
-    let mut tile_cdf = Box::new(cdf.clone());
+    let tile_row = carry.tile_num / ti.cols;
+    let tile_col = carry.tile_num % ti.cols;
     let ref_views: [Option<RefView<'_, P>>; 8] = std::array::from_fn(|i| {
         if i == 0 {
             return None;
@@ -1983,6 +2016,7 @@ fn decode_tile<P: Pixel>(
             frame_width: ref_hdr[slot].frame_width as usize,
         })
     });
+    let msac = std::mem::replace(&mut carry.msac, Msac::new(&[], true));
     let mut td = TileDec {
         seq,
         hdr,
@@ -1990,8 +2024,8 @@ fn decode_tile<P: Pixel>(
         cur: &mut *cur,
         refs: ref_views,
         mirrors: Vec::new(),
-        msac: Msac::new(data, hdr.disable_cdf_update),
-        cdf: &mut tile_cdf,
+        msac,
+        cdf: &mut carry.cdf,
         mi_row_start: ti.mi_row_starts[tile_row] as usize,
         mi_row_end: ti.mi_row_starts[tile_row + 1] as usize,
         mi_col_start: ti.mi_col_starts[tile_col] as usize,
@@ -2010,13 +2044,13 @@ fn decode_tile<P: Pixel>(
         left_seg_pred: [0; 32],
         above_palette: std::mem::take(&mut bufs.above_palette),
         left_palette: [[[0; 8]; 32]; 2],
-        delta_lf: [0; 4],
-        current_q_index: i32::from(hdr.quant.base_q_idx),
-        read_deltas: false,
-        ref_lr_wiener: [[[0; 3]; 2]; 3],
-        ref_sgr_xqd: [[0; 2]; 3],
+        delta_lf: carry.delta_lf,
+        current_q_index: carry.current_q_index,
+        read_deltas: carry.read_deltas,
+        ref_lr_wiener: carry.ref_lr_wiener,
+        ref_sgr_xqd: carry.ref_sgr_xqd,
         block_decoded: [[[false; 35]; 35]; 3],
-        b: Default::default(),
+        b: std::mem::take(&mut carry.b),
         pb: Default::default(),
         plan: Default::default(),
         src: None,
@@ -2034,26 +2068,151 @@ fn decode_tile<P: Pixel>(
         scratch: std::mem::replace(&mut bufs.scratch, Scratch::empty()),
         rec: logs.map(|l| Box::new(lock(l).logs.pop().unwrap_or_default())),
     };
-    let res = td.decode_tile_rows(&mut *on_row, &mut |fs: &mut FrameState, r1: usize| {
+    if carry.fresh {
+        td.begin_tile();
+        carry.fresh = false;
+    }
+    let res = td.decode_rows(rows, &mut *on_row, &mut |fs: &mut FrameState, r1: usize| {
         if let Some(f) = feed.as_deref_mut() {
             f.need(fs, r1);
         }
     });
-    bufs.above_level = std::mem::take(&mut td.above_level);
-    bufs.above_dc = std::mem::take(&mut td.above_dc);
-    bufs.above_seg_pred = std::mem::take(&mut td.above_seg_pred);
-    bufs.above_palette = std::mem::take(&mut td.above_palette);
-    bufs.color_map_y = std::mem::take(&mut td.color_map_y);
-    bufs.color_map_uv = std::mem::take(&mut td.color_map_uv);
-    bufs.scratch = std::mem::replace(&mut td.scratch, Scratch::empty());
+    let TileDec {
+        msac,
+        delta_lf,
+        current_q_index,
+        read_deltas,
+        ref_lr_wiener,
+        ref_sgr_xqd,
+        b,
+        above_level,
+        above_dc,
+        above_seg_pred,
+        above_palette,
+        color_map_y,
+        color_map_uv,
+        scratch,
+        rec,
+        ..
+    } = td;
+    carry.msac = msac;
+    carry.delta_lf = delta_lf;
+    carry.current_q_index = current_q_index;
+    carry.read_deltas = read_deltas;
+    carry.ref_lr_wiener = ref_lr_wiener;
+    carry.ref_sgr_xqd = ref_sgr_xqd;
+    carry.b = b;
+    bufs.above_level = above_level;
+    bufs.above_dc = above_dc;
+    bufs.above_seg_pred = above_seg_pred;
+    bufs.above_palette = above_palette;
+    bufs.color_map_y = color_map_y;
+    bufs.color_map_uv = color_map_uv;
+    bufs.scratch = scratch;
     // The log left holds the buffers of a spare: back to the pool.
-    if let (Some(l), Some(mut log)) = (logs, td.rec.take()) {
+    if let (Some(l), Some(mut log)) = (logs, rec) {
         log.clear();
         lock(l).logs.push(*log);
     }
-    drop(td);
-    res?;
-    Ok(tile_cdf)
+    res
+}
+
+/// Decodes tile `tile_num` of a frame into `fs` and `cur` (see
+/// [`decode_tiles`]). Returns the CDFs at the end of the tile.
+fn decode_tile<P: Pixel>(
+    seq: &SequenceHeader,
+    hdr: &FrameHeader,
+    fs: &mut FrameState,
+    cur: &mut Picture<P>,
+    cdf: &CdfContext,
+    refs: &[Option<&Picture<P>>; 8],
+    ref_hdr: &[RefHeaderState; 8],
+    tile_num: usize,
+    data: &[u8],
+    bufs: &mut TileBufs<P>,
+    logs: Option<&Mutex<RowPools>>,
+    feed: Option<&mut MfFeed>,
+    on_row: &mut RowHook<'_, P>,
+) -> R<Box<CdfContext>> {
+    let mut carry = TileCarry::new(hdr, cdf, tile_num, data);
+    decode_tile_part(
+        seq,
+        hdr,
+        fs,
+        cur,
+        refs,
+        ref_hdr,
+        &mut carry,
+        0..usize::MAX,
+        bufs,
+        logs,
+        feed,
+        on_row,
+    )?;
+    Ok(carry.cdf)
+}
+
+/// [`decode_tiles`] in superblock rows across the tiles of each tile row
+/// (the tiles' first rows, then their second rows...), so `on_row` sees
+/// the parts of a frame's superblock rows one after another.
+fn decode_tiles_by_rows<P: Pixel>(
+    seq: &SequenceHeader,
+    hdr: &FrameHeader,
+    fs: &mut FrameState,
+    tiles: &[(usize, Vec<u8>)],
+    cdf: &CdfContext,
+    refs: &[Option<&Picture<P>>; 8],
+    ref_hdr: &[RefHeaderState; 8],
+    cur: &mut Picture<P>,
+    logs: &Mutex<RowPools>,
+    mut feed: Option<&mut MfFeed>,
+    on_row: &mut RowHook<'_, P>,
+) -> R<Box<CdfContext>> {
+    let ti = &hdr.tile_info;
+    let sb4 = if seq.use_128x128_superblock { 32 } else { 16 };
+    let mut bufs = TileBufs::new(fs, Scratch::<P>::parsing());
+    let mut saved: Option<Box<CdfContext>> = None;
+    let mut rest = tiles;
+    while let Some((first, _)) = rest.first() {
+        let tr = first / ti.cols;
+        let n = rest.iter().take_while(|(t, _)| t / ti.cols == tr).count();
+        let (row, tail) = rest.split_at(n);
+        rest = tail;
+        let mut carries: Vec<TileCarry<'_>> = row
+            .iter()
+            .map(|(t, d)| TileCarry::new(hdr, cdf, *t, d))
+            .collect();
+        let (r0, r1) = (
+            ti.mi_row_starts[tr] as usize,
+            ti.mi_row_starts[tr + 1] as usize,
+        );
+        let mut r = r0;
+        while r < r1 {
+            for carry in &mut carries {
+                decode_tile_part(
+                    seq,
+                    hdr,
+                    fs,
+                    cur,
+                    refs,
+                    ref_hdr,
+                    carry,
+                    r..r + sb4,
+                    &mut bufs,
+                    Some(logs),
+                    feed.as_deref_mut(),
+                    on_row,
+                )?;
+            }
+            r += sb4;
+        }
+        for c in carries {
+            if c.tile_num == ti.context_update_tile_id as usize {
+                saved = Some(c.cdf);
+            }
+        }
+    }
+    Ok(saved.unwrap_or_else(|| Box::new(cdf.clone())))
 }
 
 /// Decodes the tiles of a frame into `cur`, calling `on_row(fs, cur, r0,
@@ -2564,10 +2723,7 @@ fn decode_frame<P: PicturePixel>(
     // With one tile column, superblock rows complete in order: they are
     // reconstructed and filtered on threads of their own, a superblock row
     // behind parsing.
-    let pipeline = threads > 1
-        && hdr.tile_info.cols == 1
-        && !hdr.use_superres
-        && (lf_on || cdef_on || hdr.lr.uses_lr);
+    let pipeline = threads > 1 && !hdr.use_superres && (lf_on || cdef_on || hdr.lr.uses_lr);
     if pipeline {
         return decode_frame_async(
             seq, hdr, fs, tiles, cdf, ref_jobs, ref_hdr, cur, job, rows, spares, workers, mf,
@@ -2710,8 +2866,17 @@ fn decode_frame_async<P: PicturePixel>(
         }));
         MfFeed { rx, have: 0 }
     });
+    // Tiles are parsed one after another, but reconstruction and the
+    // filters take whole superblock rows in order: the chunks of every
+    // tile column but the last wait in `held` until the last column ends
+    // the row, then the row goes out column by column, its message with
+    // the last chunk.
+    let col_starts = &hdr.tile_info.mi_col_starts;
+    let cols = hdr.tile_info.cols;
+    let mut held: Vec<VecDeque<(usize, ReconLog)>> = (0..cols).map(|_| VecDeque::new()).collect();
+    let mut col = 0;
     let saved = {
-        decode_tiles(
+        decode_tiles_by_rows(
             seq,
             hdr,
             fs,
@@ -2720,7 +2885,7 @@ fn decode_frame_async<P: PicturePixel>(
             &parse_refs,
             ref_hdr,
             &mut no_pixels,
-            Some(rows),
+            rows,
             feed.as_mut(),
             &mut |fs: &FrameState,
                   _: &Picture<P>,
@@ -2728,7 +2893,13 @@ fn decode_frame_async<P: PicturePixel>(
                   r0: usize,
                   r1: usize,
                   done: bool| {
-                let m = done.then(|| {
+                if let Some(sb) = log.as_ref().and_then(|l| l.sbs.first()) {
+                    col = col_starts
+                        .partition_point(|&c| c as usize <= sb.tile[2])
+                        .saturating_sub(1);
+                }
+                let last_col = col + 1 >= cols;
+                let m = (done && last_col).then(|| {
                     let mut m = lock(rows).msgs.pop().unwrap_or_default();
                     m.fill_meta(fs, sb4, r0, r1, r1 >= fs.mi_rows, sub_y);
                     m
@@ -2743,11 +2914,23 @@ fn decode_frame_async<P: PicturePixel>(
                 spare.ops.reserve(4 * LOG_RESERVE_BLOCKS);
                 spare.coefs.reserve(32 * LOG_RESERVE_BLOCKS);
                 let log = log.map_or_else(ReconLog::default, |l| std::mem::replace(l, spare));
+                if !last_col || !done {
+                    if let Some(q) = held.get_mut(col) {
+                        q.push_back((r0, log));
+                    }
+                    return;
+                }
                 // A send only fails once reconstruction stopped (it failed):
                 // the job reports that.
+                for q in &mut held {
+                    while q.front().is_some_and(|(r, _)| *r == r0) {
+                        if let Some((_, l)) = q.pop_front() {
+                            let _ = rtx.send((None, l));
+                        }
+                    }
+                }
                 let _ = rtx.send((m, log));
             },
-            None,
         )
     };
     drop(feed);

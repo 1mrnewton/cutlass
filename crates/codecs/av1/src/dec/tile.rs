@@ -963,9 +963,21 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
         before_row: &mut dyn FnMut(&mut FrameState, usize),
     ) -> R<()> {
         self.begin_tile();
+        self.decode_rows(self.mi_row_start..self.mi_row_end, on_row, before_row)
+    }
+
+    /// The superblock rows of the tile starting in luma 4x4 rows `rows`
+    /// (a part of [`Self::decode_tile_rows`], after [`Self::begin_tile`]
+    /// and the rows above), with the same hooks.
+    pub fn decode_rows(
+        &mut self,
+        rows: Range<usize>,
+        on_row: &mut RowHook<'_, P>,
+        before_row: &mut dyn FnMut(&mut FrameState, usize),
+    ) -> R<()> {
         let sb4 = self.sb_size4;
-        let mut r = self.mi_row_start;
-        while r < self.mi_row_end {
+        let mut r = rows.start.max(self.mi_row_start);
+        while r < rows.end.min(self.mi_row_end) {
             self.begin_sb_row();
             let r1 = (r + sb4).min(self.mi_row_end);
             before_row(self.fs, r1);

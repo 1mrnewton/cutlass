@@ -2554,12 +2554,18 @@ fn card_grid(
         let folder = card.look == CardLook::Folder;
         let pen = card.look == CardLook::Pen;
         let lit = view.library_picked.contains(&card.id) || (pen && shell.pen().is_some());
-        // A file whose proxy is on the way shows a running clock by its name.
-        let making = match shell.proxy_state(&card.id) {
-            crate::shell::ProxyState::Making(done) if bin => Some(done),
+        // A file whose proxy is on the way shows a running clock by its
+        // name, and one that plays its proxy a Proxy badge.
+        let proxy = if bin {
+            shell.proxy_state(&card.id)
+        } else {
+            crate::shell::ProxyState::None
+        };
+        let making = match proxy {
+            crate::shell::ProxyState::Making(done) => Some(done),
             _ => None,
         };
-        paint_bin_card(ui, rect, card, lit, making.is_some());
+        paint_bin_card(ui, rect, card, lit, proxy);
         if folder && folder_name_field(shell, ui, view, card, rect) {
             continue;
         }
@@ -2722,9 +2728,29 @@ fn paint_proxy_clock(painter: &egui::Painter, center: Pos2, seconds: f64) {
     }
 }
 
+/// The badge before the name of a file that plays its proxy. Returns the
+/// width the name gives up to it.
+fn paint_proxy_badge(painter: &egui::Painter, at: Pos2) -> f32 {
+    let galley = painter.layout_no_wrap(
+        "Proxy".to_owned(),
+        FontId::proportional(11.0),
+        tokens::PANEL,
+    );
+    let chip = Rect::from_min_size(at, galley.size() + Vec2::new(8.0, 2.0));
+    painter.rect_filled(chip, CornerRadius::same(3), tokens::MUTED);
+    painter.galley(chip.min + Vec2::new(4.0, 1.0), galley, tokens::PANEL);
+    chip.width() + 5.0
+}
+
 /// A card: its picture, then its name under it, after a running clock
-/// while a proxy of its file is `making`.
-fn paint_bin_card(ui: &Ui, rect: Rect, card: &BinCard, picked: bool, making: bool) {
+/// while a proxy of its file is being made and a badge once it plays one.
+fn paint_bin_card(
+    ui: &Ui,
+    rect: Rect,
+    card: &BinCard,
+    picked: bool,
+    proxy: crate::shell::ProxyState,
+) {
     let picture = Rect::from_min_size(rect.min, Vec2::new(rect.width(), CARD_H));
     let painter = ui.painter().with_clip_rect(rect);
     paint_card_face(&painter, picture, card);
@@ -2737,14 +2763,21 @@ fn paint_bin_card(ui: &Ui, rect: Rect, card: &BinCard, picked: bool, making: boo
         );
     }
     let font = FontId::proportional(12.0);
-    let room = if making { PROXY_CLOCK_ROOM } else { 0.0 };
-    if making {
-        let seconds = ui.input(|input| input.time);
-        let center = Pos2::new(rect.left() + 8.0, picture.bottom() + 14.0);
-        paint_proxy_clock(&painter, center, seconds);
-        ui.ctx()
-            .request_repaint_after(std::time::Duration::from_millis(50));
-    }
+    let room = match proxy {
+        crate::shell::ProxyState::None => 0.0,
+        crate::shell::ProxyState::Making(_) => {
+            let seconds = ui.input(|input| input.time);
+            let center = Pos2::new(rect.left() + 8.0, picture.bottom() + 14.0);
+            paint_proxy_clock(&painter, center, seconds);
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(50));
+            PROXY_CLOCK_ROOM
+        }
+        crate::shell::ProxyState::Made => paint_proxy_badge(
+            &painter,
+            Pos2::new(rect.left() + 2.0, picture.bottom() + 6.0),
+        ),
+    };
     let name = middle_ellipsis(ui.ctx(), &card.name, &font, rect.width() - 4.0 - room);
     painter.text(
         Pos2::new(rect.left() + 2.0 + room, picture.bottom() + 6.0),
@@ -12426,6 +12459,24 @@ mod tests {
         let output = frame(&mut shell, &mut view, Vec::new());
         assert!(!clock(&output));
         assert_eq!(text_pos(&output, "clip.mp4"), Some(name));
+        assert!(text_pos(&output, "Proxy").is_none());
+
+        // Once its proxy is in the folder, the name wears a Proxy badge
+        // in place of the clock.
+        let made = cutlass_export::proxy_name(&file, shell.project_proxy_side()).unwrap();
+        std::fs::create_dir_all(temp.join("proxies")).unwrap();
+        std::fs::write(temp.join("proxies").join(made), b"a proxy").unwrap();
+        shell.make_proxy(&["movie".to_owned()]).unwrap();
+        assert_eq!(shell.notice(), "The proxy is ready");
+        let output = frame(&mut shell, &mut view, Vec::new());
+        assert!(!clock(&output));
+        let badge = text_pos(&output, "Proxy").expect("a Proxy badge");
+        let moved = text_pos(&output, "clip.mp4").expect("library card");
+        assert!(badge.x < moved.x && moved.x > name.x, "{badge:?} {moved:?}");
+        assert!(
+            (badge.y - moved.y).abs() < 3.0,
+            "the badge is on the name's line"
+        );
         let _ = std::fs::remove_dir_all(&temp);
     }
 

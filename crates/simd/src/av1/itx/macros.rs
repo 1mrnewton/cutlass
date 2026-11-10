@@ -143,8 +143,9 @@ macro_rules! tx1d {
 }
 
 /// Every transform, and [`run_1d`] to pick one: the transform `kind` of
-/// `n` values for inputs that are zero from `nz` on. Returns `false` for
-/// a transform there is none for.
+/// `n` values for inputs that are zero from `nz` on, less the scaling of
+/// an identity transform. Returns `false` for a transform there is none
+/// for.
 macro_rules! transforms {
     ($(#[$attr:meta])*) => {
         tx1d!($(#[$attr])* dct4_1, rep16, 4, DCT4, DCT4_IN, SAME, false, 1);
@@ -166,6 +167,13 @@ macro_rules! transforms {
         tx1d!($(#[$attr])* dct64_8, rep256, 64, DCT64, DCT64_IN, SAME, false, 8);
         tx1d!($(#[$attr])* dct64_16, rep256, 64, DCT64, DCT64_IN, SAME, false, 16);
         tx1d!($(#[$attr])* dct64_32, rep256, 64, DCT64, DCT64_IN, SAME, false, 32);
+        tx1d!($(#[$attr])* adst8_1, rep16, 8, ADST8, ADST8_IN, ADST8_OUT, true, 1);
+        tx1d!($(#[$attr])* adst8_4, rep16, 8, ADST8, ADST8_IN, ADST8_OUT, true, 4);
+        tx1d!($(#[$attr])* adst8_8, rep16, 8, ADST8, ADST8_IN, ADST8_OUT, true, 8);
+        tx1d!($(#[$attr])* adst16_1, rep64, 16, ADST16, ADST16_IN, ADST16_OUT, true, 1);
+        tx1d!($(#[$attr])* adst16_4, rep64, 16, ADST16, ADST16_IN, ADST16_OUT, true, 4);
+        tx1d!($(#[$attr])* adst16_8, rep64, 16, ADST16, ADST16_IN, ADST16_OUT, true, 8);
+        tx1d!($(#[$attr])* adst16_16, rep64, 16, ADST16, ADST16_IN, ADST16_OUT, true, 16);
 
         $(#[$attr])*
         pub(super) fn run_1d(kind: Kind, n: usize, nz: usize, t: &mut [ops::V; 64]) -> bool {
@@ -189,6 +197,16 @@ macro_rules! transforms {
                 (Kind::Dct, 64, 5..=8) => dct64_8(t),
                 (Kind::Dct, 64, 9..=16) => dct64_16(t),
                 (Kind::Dct, 64, _) => dct64_32(t),
+                (Kind::Adst, 8, 0 | 1) => adst8_1(t),
+                (Kind::Adst, 8, 2..=4) => adst8_4(t),
+                (Kind::Adst, 8, _) => adst8_8(t),
+                (Kind::Adst, 16, 0 | 1) => adst16_1(t),
+                (Kind::Adst, 16, 2..=4) => adst16_4(t),
+                (Kind::Adst, 16, 5..=8) => adst16_8(t),
+                (Kind::Adst, 16, _) => adst16_16(t),
+                // The identity scales each value: its caller does that as
+                // it rounds the outputs.
+                (Kind::Identity, 8 | 16 | 32, _) => {}
                 _ => return false,
             }
             true

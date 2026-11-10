@@ -61,7 +61,10 @@ pub const ACCELERATED: bool = cfg!(all(target_arch = "aarch64", target_feature =
 
 /// Whether there is a transform `kind` of `n` values here.
 const fn has(kind: Kind, n: usize) -> bool {
-    matches!((kind, n), (Kind::Dct, 8 | 16 | 32 | 64))
+    matches!(
+        (kind, n),
+        (Kind::Dct, 8 | 16 | 32 | 64) | (Kind::Adst, 8 | 16) | (Kind::Identity, 8 | 16 | 32)
+    )
 }
 
 /// Whether [`add`] takes a block of this size and these transforms.
@@ -99,5 +102,29 @@ pub fn add(b: &mut Block<'_>) -> bool {
     }
     #[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
     scalar::add(b);
+    true
+}
+
+/// Adds `v` to every sample of a block `w` wide (4 to 64, a power of
+/// two) and `h` high, clamped to a sample: what a block with only its
+/// first coefficient comes to. Returns `false`, with nothing done, when
+/// the width is another or `dst` does not hold the block.
+#[inline]
+pub fn add_flat(dst: &mut [u8], stride: usize, w: usize, h: usize, v: i32) -> bool {
+    let known = matches!(w, 4 | 8 | 16 | 32 | 64);
+    if !known || h == 0 || stride < w || dst.len() < (h - 1) * stride + w {
+        return false;
+    }
+    #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+    {
+        // SAFETY: the `cfg` above proves NEON is enabled for this build,
+        // and the kernel names AES only where the build has it too.
+        #[allow(unsafe_code)]
+        unsafe {
+            neon::add_flat(dst, stride, w, h, v);
+        }
+    }
+    #[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
+    scalar::add_flat(dst, stride, w, h, v);
     true
 }

@@ -1,5 +1,5 @@
 use super::steps::{Prog, table};
-use super::{Block, Kind, add, scalar, supports};
+use super::{Block, Kind, add, add_flat, scalar, supports};
 
 /// A small fixed-seed generator: the same blocks on every run.
 struct Rng(u64);
@@ -69,6 +69,22 @@ fn transforms() -> Vec<Transform> {
             table::DCT64_IN,
             table::SAME,
             false,
+        ),
+        (
+            Kind::Adst,
+            8,
+            table::ADST8,
+            table::ADST8_IN,
+            table::ADST8_OUT,
+            true,
+        ),
+        (
+            Kind::Adst,
+            16,
+            table::ADST16,
+            table::ADST16_IN,
+            table::ADST16_OUT,
+            true,
         ),
     ]
 }
@@ -238,7 +254,9 @@ fn the_kernel_matches_the_scalar_block_transform() {
             }
         }
     }
-    assert!(blocks >= 16 * 30);
+    // 4 sizes each way: 16 blocks of DCTs, 4 of ADSTs, 9 of identity
+    // transforms, and the mixes.
+    assert!(blocks >= (16 + 4 + 9) * 30);
 }
 
 #[test]
@@ -277,4 +295,52 @@ fn a_block_the_kernel_does_not_take_or_that_does_not_fit_is_left_alone() {
         Kind::Dct,
         Kind::Dct
     )));
+}
+
+#[test]
+fn a_flat_residual_is_added_to_every_sample_and_clamped() {
+    let mut rng = Rng(3);
+    for w in [4usize, 8, 16, 32, 64] {
+        for h in [4usize, 8, 16, 64] {
+            for v in [
+                0,
+                1,
+                -1,
+                7,
+                -40,
+                200,
+                -200,
+                255,
+                -255,
+                256,
+                -4000,
+                4000,
+                i32::MAX,
+                i32::MIN,
+            ] {
+                let stride = w + rng.below(5) as usize;
+                let old: Vec<u8> = (0..stride * h).map(|_| rng.below(256) as u8).collect();
+                let mut got = old.clone();
+                assert!(add_flat(&mut got, stride, w, h, v));
+                let mut want = old.clone();
+                scalar::add_flat(&mut want, stride, w, h, v);
+                assert_eq!(got, want, "{w}x{h} {v}");
+                // The samples between the rows of the block stay.
+                for y in 0..h {
+                    for x in 0..stride {
+                        let at = y * stride + x;
+                        let add = if x < w { i64::from(v) } else { 0 };
+                        assert_eq!(i64::from(got[at]), (i64::from(old[at]) + add).clamp(0, 255));
+                    }
+                }
+            }
+        }
+    }
+    // Another width, or too few samples: nothing is done.
+    let mut dst = [9u8; 64];
+    assert!(!add_flat(&mut dst, 8, 12, 4, 5));
+    assert!(!add_flat(&mut dst, 4, 8, 4, 5));
+    assert!(!add_flat(&mut dst[..31], 8, 8, 4, 5));
+    assert!(!add_flat(&mut dst, 8, 8, 0, 5));
+    assert_eq!(dst, [9u8; 64]);
 }

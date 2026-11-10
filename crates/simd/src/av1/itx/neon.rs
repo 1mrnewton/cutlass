@@ -2,25 +2,26 @@
 //! of a vector, one lane for each of eight rows or eight columns.
 
 use core::arch::aarch64::{
-    int16x8_t, vaddw_high_u8, vaddw_u8, vcombine_s16, vdupq_n_s16, vextq_s16, vget_lane_u64,
-    vget_low_u8, vmovn_s32, vqmovun_high_s16, vqmovun_s16, vreinterpret_u64_u8,
-    vreinterpretq_s16_s64, vreinterpretq_s16_u16, vreinterpretq_s32_s16, vreinterpretq_s64_s32,
-    vreinterpretq_u16_s16, vrev64q_s16, vrshlq_s16, vrshrq_n_s16, vtrn1q_s16, vtrn1q_s32,
-    vtrn1q_s64, vtrn2q_s16, vtrn2q_s32, vtrn2q_s64,
+    int16x8_t, vaddw_high_u8, vaddw_u8, vcombine_s16, vcombine_u8, vdupq_n_s16, vdupq_n_s32,
+    vdupq_n_u8, vextq_s16, vget_lane_u64, vget_low_u8, vmovn_s32, vqaddq_u8, vqmovun_high_s16,
+    vqmovun_s16, vqsubq_u8, vreinterpret_u64_u8, vreinterpretq_s16_s64, vreinterpretq_s16_u16,
+    vreinterpretq_s32_s16, vreinterpretq_s64_s32, vreinterpretq_u16_s16, vrev64q_s16, vrshlq_s16,
+    vrshrq_n_s16, vtrn1q_s16, vtrn1q_s32, vtrn1q_s64, vtrn2q_s16, vtrn2q_s32, vtrn2q_s64,
 };
 
 use super::steps::{Prog, Step, kind, plan, table};
 use super::{Block, Kind};
-use crate::neon::{bytes, i16x8, i16x8_array, i32x4, u8x8, u8x16};
+use crate::neon::{bytes, halves, i16x8, i16x8_array, i32x4, u8x8, u8x16};
 
 type V = int16x8_t;
 
 /// The arithmetic of a step on the eight values of an entry.
 mod ops {
     use core::arch::aarch64::{
-        int16x8_t, vdupq_n_s16, vget_low_s16, vmlal_high_n_s16, vmlal_n_s16, vmlsl_high_n_s16,
-        vmlsl_n_s16, vmull_high_n_s16, vmull_n_s16, vqaddq_s16, vqnegq_s16, vqrdmulhq_n_s16,
-        vqsubq_s16, vrshrn_high_n_s32, vrshrn_n_s32,
+        int16x8_t, int32x4_t, vaddq_s32, vdupq_n_s16, vget_low_s16, vmlal_high_n_s16, vmlal_n_s16,
+        vmlsl_high_n_s16, vmlsl_n_s16, vmovl_high_s16, vmovl_s16, vmull_high_n_s16, vmull_n_s16,
+        vmulq_n_s32, vqaddq_s16, vqmovn_high_s32, vqmovn_s32, vqnegq_s16, vqrdmulhq_n_s16,
+        vqsubq_s16, vrshlq_s32, vrshrn_high_n_s32, vrshrn_n_s32, vrshrq_n_s32, vshlq_n_s32,
     };
 
     pub(super) type V = int16x8_t;
@@ -75,6 +76,45 @@ mod ops {
     #[cfg_attr(not(target_feature = "aes"), target_feature(enable = "neon"))]
     pub(super) fn neg(x: V) -> V {
         vqnegq_s16(x)
+    }
+
+    /// The identity transform of `n` values on four of them (7.13.2.15):
+    /// a scaling by `sqrt(2)`, 2, `2 sqrt(2)` or 4, in 32 bits.
+    #[inline]
+    #[cfg_attr(target_feature = "aes", target_feature(enable = "neon,aes"))]
+    #[cfg_attr(not(target_feature = "aes"), target_feature(enable = "neon"))]
+    fn identity(x: int32x4_t, n: usize) -> int32x4_t {
+        match n {
+            4 => vaddq_s32(x, vrshrq_n_s32::<12>(vmulq_n_s32(x, 1697))),
+            8 => vshlq_n_s32::<1>(x),
+            16 => vaddq_s32(
+                vshlq_n_s32::<1>(x),
+                vrshrq_n_s32::<12>(vmulq_n_s32(x, 3394)),
+            ),
+            _ => vshlq_n_s32::<2>(x),
+        }
+    }
+
+    /// The outputs of a row identity transform of `n` values, after the
+    /// rounding shift (`shift` holds its negative), clamped to 16 bits.
+    #[inline]
+    #[cfg_attr(target_feature = "aes", target_feature(enable = "neon,aes"))]
+    #[cfg_attr(not(target_feature = "aes"), target_feature(enable = "neon"))]
+    pub(super) fn identity_row(x: V, n: usize, shift: int32x4_t) -> V {
+        let lo = vrshlq_s32(identity(vmovl_s16(vget_low_s16(x)), n), shift);
+        let hi = vrshlq_s32(identity(vmovl_high_s16(x), n), shift);
+        vqmovn_high_s32(vqmovn_s32(lo), hi)
+    }
+
+    /// The residuals of a column identity transform of `n` values:
+    /// `Round2` by 4 of the outputs.
+    #[inline]
+    #[cfg_attr(target_feature = "aes", target_feature(enable = "neon,aes"))]
+    #[cfg_attr(not(target_feature = "aes"), target_feature(enable = "neon"))]
+    pub(super) fn identity_col(x: V, n: usize) -> V {
+        let lo = identity(vmovl_s16(vget_low_s16(x)), n);
+        let hi = identity(vmovl_high_s16(x), n);
+        vrshrn_high_n_s32::<4>(vrshrn_n_s32::<4>(lo), hi)
     }
 }
 
@@ -182,6 +222,30 @@ fn sized<const W: usize, const TH: usize>(b: &mut Block<'_>) {
     let rect = W.max(h) == 2 * W.min(h);
     let zero = vdupq_n_s16(0);
     let shift = vdupq_n_s16(-(b.shift as i16));
+    let shift32 = vdupq_n_s32(-(b.shift as i32));
+    let (row_identity, col_identity) = (row_kind == Kind::Identity, col_kind == Kind::Identity);
+    if row_identity && col_identity && !flip_ud && !flip_lr {
+        // Both transforms scale each value on its own, so only the
+        // samples under the coefficients change: no rows to gather into
+        // vectors and none to spread back. (No transform type flips
+        // these; a caller that does takes the long way.)
+        for r in 0..nr {
+            for k0 in (0..nc).step_by(8) {
+                let Some(px) = dst
+                    .get_mut(r * stride + k0..)
+                    .and_then(|d| d.first_chunk_mut::<8>())
+                else {
+                    continue;
+                };
+                let mut v = coefs8(coefs, r * tw + k0);
+                if rect {
+                    v = ops::scale(v, 2896);
+                }
+                add8(px, ops::identity_col(ops::identity_row(v, W, shift32), h));
+            }
+        }
+        return;
+    }
     // The entries of `T` a transform reads are loaded or cleared here;
     // the rest it never reads.
     let mut t = [zero; 64];
@@ -209,13 +273,26 @@ fn sized<const W: usize, const TH: usize>(b: &mut Block<'_>) {
                 d.copy_from_slice(&m);
             }
         }
+        if row_identity {
+            // The outputs are the inputs: those past the last one read
+            // are zero.
+            for v in t.iter_mut().take(W).skip(read.next_multiple_of(8)) {
+                *v = zero;
+            }
+        }
         run_1d(row_kind, W, nc, &mut t);
         // And back: eight outputs become eight values of each row.
         for j0 in (0..W).step_by(8) {
             let Some(m) = t.get(j0..).and_then(|t| t.first_chunk::<8>()) else {
                 continue;
             };
-            let m = transpose(m.map(|v| vrshlq_s16(v, shift)));
+            let m = transpose(m.map(|v| {
+                if row_identity {
+                    ops::identity_row(v, W, shift32)
+                } else {
+                    vrshlq_s16(v, shift)
+                }
+            }));
             for (row, v) in mid.iter_mut().skip(r0).zip(m) {
                 if let Some(d) = row.as_chunks_mut::<8>().0.get_mut(j0 / 8) {
                     *d = i16x8_array(v);
@@ -266,6 +343,11 @@ fn sized<const W: usize, const TH: usize>(b: &mut Block<'_>) {
                     *v = i16x8(*m);
                 }
             }
+            if col_identity {
+                for v in t.iter_mut().take(h).skip(read) {
+                    *v = zero;
+                }
+            }
             run_1d(col_kind, h, nr, &mut t);
             let x0 = if flip_lr { W - 8 - j0 } else { j0 };
             for (i, &v) in t.iter().enumerate().take(h) {
@@ -276,7 +358,7 @@ fn sized<const W: usize, const TH: usize>(b: &mut Block<'_>) {
                 else {
                     continue;
                 };
-                let res = vrshrq_n_s16::<4>(v);
+                let res = residual(v, col_identity, h);
                 add8(px, if flip_lr { back(res) } else { res });
             }
         }
@@ -291,6 +373,11 @@ fn sized<const W: usize, const TH: usize>(b: &mut Block<'_>) {
                     *v = i16x8(*m);
                 }
             }
+            if col_identity {
+                for v in t.iter_mut().take(h).skip(read) {
+                    *v = zero;
+                }
+            }
             run_1d(col_kind, h, nr, t);
         }
         let x0 = if flip_lr { W - 16 - j0 } else { j0 };
@@ -302,7 +389,8 @@ fn sized<const W: usize, const TH: usize>(b: &mut Block<'_>) {
             else {
                 continue;
             };
-            let (mut lo, mut hi) = (vrshrq_n_s16::<4>(lo), vrshrq_n_s16::<4>(hi));
+            let mut lo = residual(lo, col_identity, h);
+            let mut hi = residual(hi, col_identity, h);
             if flip_lr {
                 // The columns from the right: the second group first.
                 (lo, hi) = (back(hi), back(lo));
@@ -336,6 +424,19 @@ fn add16(px: &mut [u8; 16], lo: V, hi: V) {
     ));
 }
 
+/// The residuals of eight outputs of a column transform of `h` values:
+/// `Round2` by 4, after the scaling of an identity transform.
+#[inline]
+#[cfg_attr(target_feature = "aes", target_feature(enable = "neon,aes"))]
+#[cfg_attr(not(target_feature = "aes"), target_feature(enable = "neon"))]
+fn residual(v: V, identity: bool, h: usize) -> V {
+    if identity {
+        ops::identity_col(v, h)
+    } else {
+        vrshrq_n_s16::<4>(v)
+    }
+}
+
 /// The eight lanes back to front.
 #[inline]
 #[cfg_attr(target_feature = "aes", target_feature(enable = "neon,aes"))]
@@ -343,4 +444,32 @@ fn add16(px: &mut [u8; 16], lo: V, hi: V) {
 fn back(v: V) -> V {
     let r = vrev64q_s16(v);
     vextq_s16::<4>(r, r)
+}
+
+#[cfg_attr(target_feature = "aes", target_feature(enable = "neon,aes"))]
+#[cfg_attr(not(target_feature = "aes"), target_feature(enable = "neon"))]
+pub(super) fn add_flat(dst: &mut [u8], stride: usize, w: usize, h: usize, v: i32) {
+    // Past 255 either way every sample ends at the same end. One of the
+    // two is zero: a saturating add of the one and subtract of the other.
+    let up = vdupq_n_u8(v.clamp(0, 255) as u8);
+    let down = vdupq_n_u8(v.saturating_neg().clamp(0, 255) as u8);
+    for y in 0..h {
+        let Some(row) = dst.get_mut(y * stride..).and_then(|d| d.get_mut(..w)) else {
+            continue;
+        };
+        let (sixteens, rest) = row.as_chunks_mut::<16>();
+        for px in sixteens {
+            *px = bytes(vqsubq_u8(vqaddq_u8(u8x16(px), up), down));
+        }
+        // A row of 8 or 4.
+        if let Some(px) = rest.first_chunk_mut::<8>() {
+            let old = vcombine_u8(u8x8(px), u8x8(px));
+            let new = vqsubq_u8(vqaddq_u8(old, up), down);
+            *px = halves(new).0;
+        } else {
+            for px in rest {
+                *px = i32::from(*px).saturating_add(v).clamp(0, 255) as u8;
+            }
+        }
+    }
 }

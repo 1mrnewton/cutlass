@@ -147,19 +147,47 @@ was busy, so the ratios count more than the times):
 | 8x4 tiles | 8 | 1.59 s | 1.50 s | 1.25 s |
 | 8x4 tiles | 4 | 1.75 s | 1.74 s | 1.38 s |
 
-libdav1d takes 0.32 s and 0.33 s on these with all threads. The whole
-files take about 10.9 s (2.2 GB) and 28 s (3.0 GB) at 18 threads against
-libdav1d's 5.7 s and 7.8 s. At most 8 frames decode at once: 16 took
-the second file to 25 s but both files 1.3 GB higher. What holds them
-back now: the threaded decoder spends about 1.8x the processor time of
-one thread (blocks are recorded and replayed, rows are copied to the
-filters and to the frames that read them, and the mode info is written
-three times), a frame follows its reference no closer than the two
-superblock rows the filters trail by plus its motion, and on the second
-file one frame in five has a warped block and waits for whole
-references. Memory is mostly per frame in flight: two pictures, the
-mode info twice, the block logs of the whole frame and the frame states
-of its tile parsers.
+libdav1d takes 0.30 s and 0.31 s on these with all threads. Then, in
+the same turn of work (best of 9 runs taken in turn, same output):
+
+| File | Threads | Before | After | libdav1d (FFmpeg) |
+|---|---|---|---|---|
+| 4x1 tiles | 18 | 0.79 s | 0.63 s | 0.30 s |
+| 4x1 tiles | 1 | 5.17 s | 4.49 s | 2.6 s |
+| 8x4 tiles | 18 | 1.13 s | 0.89 s | 0.31 s |
+| 8x4 tiles | 1 | 4.51 s | 3.87 s | 1.9 s |
+
+What changed: published bands overlap, so a block's reference rows lie
+in one band (a block across two went through a row-by-row copy, 9% of
+the processor time); a frame no longer waits for a reference no block
+near it reads; the context tile is parsed first on the thread already
+running, and the parsers and the filters take and return logs in
+batches (the parsers spent 15% of their time on the pool's lock); the
+filters read 8 bytes of block info for each 4x4 unit, with the filter
+levels worked out once for a block, where they read the 28-byte mode
+info and worked a level out for every unit in every pass; the kernels
+load a vector in one instruction; blocks taking both subpel filters go
+through a dot product kernel (0.19 to 0.24 ns a sample against 0.34 to
+0.40); and CDEF runs on every 64-row area but the last one deblocked.
+Tried and dropped, each a little slower than what it replaced: a
+deblocking kernel reading the plane's rows itself, and skipping the
+narrower deblocking filters when no line uses their result.
+
+The whole files take about 9 s (2.5 GB) and 22 s (3.4 GB) at 18 threads
+against libdav1d's 5.7 s and 7.8 s. At most 8 frames decode at once.
+On the first file the threaded decoder now keeps as many cores busy as
+libdav1d does (about 11 of 18): what is left there is the work itself,
+1.7x libdav1d's on one thread. A profile of one thread puts 25% in
+CDEF, 21% in deblocking (a third of it the edge decisions), 17% in
+inter prediction and 8% in the inverse transforms on the first file,
+and 26% in inter prediction, 21% in deblocking and 21% in the inverse
+transforms on the second. The second file is also held back by its
+frames following their references: a frame trails by the superblock
+rows the filters need plus its motion, and one frame in five has a
+warped block and waits for whole references (0.7 s of waiting in 250
+frames). Memory is mostly per frame in flight: two pictures, the mode
+info, the block logs of the whole frame, the published bands (each
+with the rows above it) and the frame states of its tile parsers.
 
 Threading (2+ threads): the calling thread only reads the frame headers.
 Each frame is a task on a thread of its own (the decoder keeps a pool of

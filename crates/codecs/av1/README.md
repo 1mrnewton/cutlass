@@ -77,9 +77,10 @@ post filters of a frame run in a pipeline beside those of other frames,
 and the tiles of a frame are parsed at the same time
 (`Av1Core::frames_at_once` turns that off for less memory). On the 1080p
 benchmark it takes about 1.9x the time of libdav1d single threaded and
-1.6x with 4 threads; on multi-tile 4K files with 18 threads about 2x
-to 3.6x, since the threaded decoder spends more processor time than one
-thread does and a frame trails its references by a few superblock rows
+1.6x with 4 threads; on multi-tile 4K files with 18 threads about 1.6x
+to 2.9x, and 1.7x to 2x on one thread: the sample loops are not yet
+all on vector kernels, and a frame trails its references by a few
+superblock rows
 (libdav1d uses hand-written assembly; numbers in `STATUS.md`).
 
 ## Encoder

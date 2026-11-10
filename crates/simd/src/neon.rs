@@ -5,14 +5,18 @@
 //! to one load or store. Elsewhere it is built from two 64-bit integers.
 //! A kernel names the same features as these helpers, so it may call them.
 
+#[cfg(target_feature = "dotprod")]
+use core::arch::aarch64::vreinterpretq_u16_s16;
 use core::arch::aarch64::{
     int16x8_t, int32x4_t, uint8x8_t, uint8x16_t, uint16x8_t, vcombine_u64, vcreate_u8, vcreate_u64,
-    vgetq_lane_u64, vreinterpretq_s16_u64, vreinterpretq_s32_u64, vreinterpretq_u64_u16,
+    vgetq_lane_u16, vreinterpretq_s16_u16, vreinterpretq_s32_u64,
+};
+#[cfg(not(target_feature = "aes"))]
+use core::arch::aarch64::{
+    vgetq_lane_u64, vreinterpretq_u8_u64, vreinterpretq_u16_u64, vreinterpretq_u64_u8,
 };
 #[cfg(target_feature = "aes")]
 use core::arch::aarch64::{vreinterpretq_p128_u8, vreinterpretq_u8_p128, vreinterpretq_u16_p128};
-#[cfg(not(target_feature = "aes"))]
-use core::arch::aarch64::{vreinterpretq_u8_u64, vreinterpretq_u16_u64, vreinterpretq_u64_u8};
 
 /// Eight bytes as eight lanes.
 #[inline]
@@ -22,6 +26,7 @@ pub(crate) fn u8x8(a: &[u8; 8]) -> uint8x8_t {
     vcreate_u8(u64::from_le_bytes(*a))
 }
 
+#[cfg(not(target_feature = "aes"))]
 fn pack16(a: [u16; 4]) -> u64 {
     u64::from(a[0]) | u64::from(a[1]) << 16 | u64::from(a[2]) << 32 | u64::from(a[3]) << 48
 }
@@ -52,10 +57,7 @@ pub(crate) fn u16x8(a: &[u16; 8]) -> uint16x8_t {
 #[cfg_attr(target_feature = "aes", target_feature(enable = "neon,aes"))]
 #[cfg_attr(not(target_feature = "aes"), target_feature(enable = "neon"))]
 pub(crate) fn i16x8(a: [i16; 8]) -> int16x8_t {
-    let a = a.map(|v| v as u16);
-    let lo = pack16([a[0], a[1], a[2], a[3]]);
-    let hi = pack16([a[4], a[5], a[6], a[7]]);
-    vreinterpretq_s16_u64(vcombine_u64(vcreate_u64(lo), vcreate_u64(hi)))
+    vreinterpretq_s16_u16(u16x8(&a.map(|v| v as u16)))
 }
 
 /// Four signed 32-bit values as four lanes.
@@ -138,15 +140,29 @@ pub(crate) fn bytes(v: uint8x16_t) -> [u8; 16] {
     narrow(v).to_le_bytes()
 }
 
-/// The lanes of `v` as eight 16-bit values.
+/// The lanes of `v` as eight 16-bit values. A lane at a time: the
+/// compiler joins the eight into one store.
 #[inline]
 #[cfg_attr(target_feature = "aes", target_feature(enable = "neon,aes"))]
 #[cfg_attr(not(target_feature = "aes"), target_feature(enable = "neon"))]
 pub(crate) fn u16x8_array(v: uint16x8_t) -> [u16; 8] {
-    let v = vreinterpretq_u64_u16(v);
-    let (lo, hi) = (vgetq_lane_u64::<0>(v), vgetq_lane_u64::<1>(v));
-    core::array::from_fn(|i| {
-        let half = if i < 4 { lo } else { hi };
-        (half >> (16 * (i % 4))) as u16
-    })
+    [
+        vgetq_lane_u16::<0>(v),
+        vgetq_lane_u16::<1>(v),
+        vgetq_lane_u16::<2>(v),
+        vgetq_lane_u16::<3>(v),
+        vgetq_lane_u16::<4>(v),
+        vgetq_lane_u16::<5>(v),
+        vgetq_lane_u16::<6>(v),
+        vgetq_lane_u16::<7>(v),
+    ]
+}
+
+/// The lanes of `v` as eight signed 16-bit values.
+#[cfg(target_feature = "dotprod")]
+#[inline]
+#[cfg_attr(target_feature = "aes", target_feature(enable = "neon,aes"))]
+#[cfg_attr(not(target_feature = "aes"), target_feature(enable = "neon"))]
+pub(crate) fn i16x8_array(v: int16x8_t) -> [i16; 8] {
+    u16x8_array(vreinterpretq_u16_s16(v)).map(|x| x as i16)
 }

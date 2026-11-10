@@ -2867,7 +2867,7 @@ fn one_mb<S: Sample>(
     mb.direct16 = !intra && slice.kind == 1 && spec == 0;
     if intra && spec == 25 {
         mb.pcm = true;
-        read_pcm(pic, entropy, mx, my, mb.field_mb, slice)?;
+        read_pcm(pic, entropy, mx, my, mb.field_mb)?;
         mb.nnz_y = [16; 16];
         mb.nnz_c = [16; 32];
         mb.qp = 0;
@@ -6340,6 +6340,9 @@ mod oracle {
                 &["-b:v", "700k", "-x264-params", "deblock=-3,3"],
             ),
             ("low-qp", "320x240", NOISE, &["-qp", "8"]),
+            // Lossless noise can cost more bits than raw samples, so libx264
+            // writes a few macroblocks of the I picture as I_PCM, under CABAC.
+            ("lossless-pcm", "320x240", NOISE, &["-qp", "0"]),
             ("high-qp", "320x240", NOISE, &["-qp", "44"]),
             (
                 "intra-only",
@@ -10484,7 +10487,6 @@ fn read_pcm<S: Sample>(
     mx: usize,
     my: usize,
     field: bool,
-    slice: &Slice<'_>,
 ) -> Result<(), CodecError> {
     let x0 = mx * 16;
     let span = luma_span(my, field);
@@ -10539,11 +10541,7 @@ fn read_pcm<S: Sample>(
                 at_bit: 0,
                 what: "pcm",
             })?;
-            **cab = Cabac::open(
-                rest,
-                slice.qp,
-                if super::intra_slice(slice.kind) { 0 } else { 1 },
-            )?;
+            cab.restart(rest)?;
         }
     }
     Ok(())

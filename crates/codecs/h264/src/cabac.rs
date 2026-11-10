@@ -163,25 +163,24 @@ impl<'a> Cabac<'a> {
         }
     }
 
-    pub fn open(data: &'a [u8], qp: i32, init: usize) -> Result<Self, CodecError> {
+    /// Clause 9.3.1.2 after the samples of an I_PCM macroblock: the
+    /// arithmetic decoder starts again on `data`. The context variables are
+    /// not set up again (clause 9.3.1 does that at the start of a slice
+    /// only), so they carry on from the macroblocks before.
+    pub fn restart(&mut self, data: &'a [u8]) -> Result<(), CodecError> {
         if data.is_empty() {
             return Err(CodecError::Truncated {
                 at_bit: 0,
                 what: "cabac",
             });
         }
-        let mut eng = Self {
-            data,
-            index: 0,
-            cache: 0,
-            bits: 0,
-            range: 510,
-            offset: 0,
-            ctx: [0; CONTEXTS],
-        };
-        eng.offset = eng.read_bits(9)?;
-        eng.init_states(qp, init);
-        Ok(eng)
+        self.data = data;
+        self.index = 0;
+        self.cache = 0;
+        self.bits = 0;
+        self.range = 510;
+        self.offset = self.read_bits(9)?;
+        Ok(())
     }
 
     pub fn tail(&self) -> &'a [u8] {
@@ -252,4 +251,32 @@ pub fn sig8_field(index: usize) -> usize {
 
 pub fn last8(index: usize) -> usize {
     usize::from(LAST_8X8[index])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Cabac;
+    use crate::bits::Bits;
+
+    /// Clause 9.3.1.2 runs again after the samples of an I_PCM macroblock,
+    /// and clause 9.3.1.1 does not: the arithmetic decoder starts over on the
+    /// bytes that follow, and every context keeps what it has learned.
+    #[test]
+    fn restart_after_pcm_keeps_the_context_variables() {
+        let data = [0x5a, 0xc3, 0x3c, 0x99, 0x71, 0x0f, 0xe2, 0x48];
+        let next = [0b1010_0101, 0b1100_0000, 0, 0];
+        let mut bits = Bits::new(&data);
+        let mut cab = Cabac::start(&mut bits, 26, 0).unwrap();
+        let fresh = cab.ctx;
+        for ctx in [5usize, 5, 5, 73, 73, 105, 105, 105] {
+            cab.decision(ctx).unwrap();
+        }
+        let learned = cab.ctx;
+        assert_ne!(learned, fresh, "the decisions moved no context");
+        cab.restart(&next).unwrap();
+        assert_eq!(cab.ctx, learned, "the contexts were set up again");
+        assert_eq!(cab.range, 510);
+        assert_eq!(cab.offset, 0b1_0100_1011);
+        assert!(cab.restart(&[]).is_err());
+    }
 }

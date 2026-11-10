@@ -2205,10 +2205,43 @@ fn moved_chroma(
     mv: &[[i16; 2]; 16],
 ) -> [u8; 64] {
     let mut pred = [128u8; 64];
+    let stride = width as usize;
+    let mut done = [false; 16];
+    // Each 4×4 luma block moves a 2×2 chroma block. One whose 3×3 reads are
+    // all inside the plane needs no clamping, the same weights as `chroma_mc`.
+    for (index, vector) in mv.iter().enumerate() {
+        let (bx, by) = ((index % 4) as i32, (index / 4) as i32);
+        let mvx = i32::from(vector[0]);
+        let mvy = i32::from(vector[1]);
+        let x0 = mx as i32 * 8 + bx * 2 + (mvx >> 3);
+        let y0 = my as i32 * 8 + by * 2 + (mvy >> 3);
+        if x0 < 0 || y0 < 0 || x0 + 3 > width as i32 || y0 + 3 > height as i32 {
+            continue;
+        }
+        let (xf, yf) = (mvx & 7, mvy & 7);
+        let weights = [(8 - xf) * (8 - yf), xf * (8 - yf), (8 - xf) * yf, xf * yf];
+        for row in 0..2usize {
+            let top = (y0 as usize + row) * stride + x0 as usize;
+            let a = &plane[top..top + 3];
+            let c = &plane[top + stride..top + stride + 3];
+            for col in 0..2usize {
+                let value = weights[0] * i32::from(a[col])
+                    + weights[1] * i32::from(a[col + 1])
+                    + weights[2] * i32::from(c[col])
+                    + weights[3] * i32::from(c[col + 1]);
+                let out = (by as usize * 2 + row) * 8 + bx as usize * 2 + col;
+                pred[out] = ((value + 32) >> 6).clamp(0, 255) as u8;
+            }
+        }
+        done[index] = true;
+    }
     for row in 0..8i32 {
         for col in 0..8i32 {
             let bx = (col * 2 / 4) as usize;
             let by = (row * 2 / 4) as usize;
+            if done[by * 4 + bx] {
+                continue;
+            }
             let vector = mv[by * 4 + bx];
             let mvx = i32::from(vector[0]);
             let mvy = i32::from(vector[1]);
@@ -3246,6 +3279,52 @@ mod tests {
             err += (back[i] - residual[i]).abs();
         }
         assert!(err < 64 * 6, "8x8 round trip error {err}");
+    }
+
+    /// The unclamped 2×2 path and the clamped per-sample path give the same
+    /// chroma prediction, inside the plane and past each edge.
+    #[test]
+    fn moved_chroma_matches_chroma_mc() {
+        let (w, h) = (24u32, 16u32);
+        let plane: Vec<u8> = (0..w * h)
+            .map(|i| ((i * 71 + (i / w) * 13) % 256) as u8)
+            .collect();
+        for (mx, my) in [(0u32, 0u32), (1, 1), (2, 0)] {
+            for step in 0..400i16 {
+                let mut mv = [[0i16; 2]; 16];
+                for (k, vector) in mv.iter_mut().enumerate() {
+                    let k = k as i16;
+                    *vector = [
+                        (step * 7 + k * 13) % 160 - 80,
+                        (step * 11 + k * 5) % 120 - 60,
+                    ];
+                }
+                let got = super::moved_chroma(&plane, w, h, mx, my, &mv);
+                for row in 0..8i32 {
+                    for col in 0..8i32 {
+                        let vector = mv[(row / 2) as usize * 4 + (col / 2) as usize];
+                        let (mvx, mvy) = (i32::from(vector[0]), i32::from(vector[1]));
+                        let want = crate::recon::chroma_mc(
+                            &plane,
+                            w as usize,
+                            w as i32,
+                            h as i32,
+                            crate::recon::Pel {
+                                x: mx as i32 * 8 + col + (mvx >> 3),
+                                y: my as i32 * 8 + row + (mvy >> 3),
+                                x_frac: mvx & 7,
+                                y_frac: mvy & 7,
+                            },
+                        );
+                        assert_eq!(
+                            got[(row * 8 + col) as usize],
+                            want,
+                            "mb {mx},{my} step {step}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]

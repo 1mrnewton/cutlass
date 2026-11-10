@@ -166,6 +166,8 @@ pub struct ViewState {
     export_open: bool,
     /// The project dialog's unsaved choices while it is open.
     project_dialog: Option<cutlass_editor::ProjectSettings>,
+    /// The project dialog's proxy switch, once it has been flipped.
+    project_proxies: Option<bool>,
     /// The third-party notices, read when the Licenses window opens.
     licenses: Option<cutlass_licenses::Notices>,
     settings_open: bool,
@@ -283,6 +285,7 @@ impl Default for ViewState {
             wants_replace: false,
             export_open: false,
             project_dialog: None,
+            project_proxies: None,
             licenses: None,
             settings_open: false,
             settings_tab: SettingsTab::General,
@@ -360,6 +363,10 @@ pub fn show(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Option
     shell.hold_edits(ui.input(|input| input.pointer.any_down()));
     shell.chrome = crate::shell::Chrome::default();
     if shell.poll_job() {
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(100));
+    }
+    if shell.poll_proxies() {
         ui.ctx()
             .request_repaint_after(std::time::Duration::from_millis(100));
     }
@@ -1342,7 +1349,7 @@ fn settings_window(
                         ));
                         ui.add(ui::Check::new(
                             &mut settings.playback.proxies,
-                            "Play proxies of 4K and long clips in the viewer",
+                            "Make proxies of 4K and long clips in new projects",
                         ));
                         choices_row(ui, "Preview", |ui| {
                             let quality = &mut settings.playback.preview_quality;
@@ -2344,8 +2351,15 @@ fn library_menu(shell: &mut Shell, ui: &Ui, view: &mut ViewState) {
         view.library_menu = None;
         return;
     }
+    // Make proxy while a picked movie has none, Cancel proxy once each has
+    // one or is getting one, and a greyed row when no movie is picked.
+    let proxy = match menu.target {
+        LibraryTarget::Files => shell.proxy_offer(&view.library_picked),
+        LibraryTarget::Empty | LibraryTarget::Folder(_) => None,
+    };
     let entries = match menu.target {
         LibraryTarget::Empty => crate::menu::LIBRARY_EMPTY,
+        LibraryTarget::Files if proxy == Some(false) => crate::menu::LIBRARY_CARD_PROXIED,
         LibraryTarget::Files => crate::menu::LIBRARY_CARD,
         LibraryTarget::Folder(_) => crate::menu::LIBRARY_FOLDER,
     };
@@ -2359,7 +2373,7 @@ fn library_menu(shell: &mut Shell, ui: &Ui, view: &mut ViewState) {
         ui.scope_id().with("library-menu"),
         menu.at,
         entries,
-        &|id| !off.contains(&id),
+        &|id| !off.contains(&id) && (id != "make-proxy" || proxy.is_some()),
     );
     if let Some(item) = shown.picked {
         view.library_menu = None;
@@ -2398,6 +2412,8 @@ fn library_action(
             Some(id) => shell.reveal_library_file(id),
             None => Ok(()),
         },
+        ("make-proxy", LibraryTarget::Files) => shell.make_proxy(&picked),
+        ("cancel-proxy", LibraryTarget::Files) => shell.cancel_proxy(&picked),
         ("delete", LibraryTarget::Files) => {
             let files: Vec<String> = picked
                 .iter()
@@ -2511,7 +2527,12 @@ fn card_grid(
         let folder = card.look == CardLook::Folder;
         let pen = card.look == CardLook::Pen;
         let lit = view.library_picked.contains(&card.id) || (pen && shell.pen().is_some());
-        paint_bin_card(ui, rect, card, lit);
+        // A file whose proxy is on the way shows a running clock by its name.
+        let making = match shell.proxy_state(&card.id) {
+            crate::shell::ProxyState::Making(done) if bin => Some(done),
+            _ => None,
+        };
+        paint_bin_card(ui, rect, card, lit, making.is_some());
         if folder && folder_name_field(shell, ui, view, card, rect) {
             continue;
         }
@@ -2571,7 +2592,12 @@ fn card_grid(
                 view.library_menu = Some(LibraryMenu { at, target });
             }
         }
-        response.on_hover_text(&card.name);
+        match making {
+            Some(done) => {
+                response.on_hover_text(format!("{}\n{}", card.name, proxy_progress(done)))
+            }
+            None => response.on_hover_text(&card.name),
+        };
         if folder {
             continue;
         }
@@ -2643,8 +2669,35 @@ fn card_plus(ui: &mut Ui, card: Rect, id: &str) -> bool {
     response.clicked()
 }
 
-/// A card: its picture, then its name under it.
-fn paint_bin_card(ui: &Ui, rect: Rect, card: &BinCard, picked: bool) {
+/// What a card says of the proxy being made for its file, `done` of it
+/// drawn once the drawing has begun.
+fn proxy_progress(done: Option<f32>) -> String {
+    match done {
+        Some(done) => format!("Making a proxy: {:.0}%", done.clamp(0.0, 1.0) * 100.0),
+        None => "Waiting to make a proxy".to_owned(),
+    }
+}
+
+/// The width a card's name gives up to the proxy clock before it.
+const PROXY_CLOCK_ROOM: f32 = 16.0;
+
+/// A small clock with its hands going round, `seconds` into the app's run:
+/// the long hand turns once in two seconds and the short one a twelfth as
+/// fast.
+fn paint_proxy_clock(painter: &egui::Painter, center: Pos2, seconds: f64) {
+    const RADIUS: f32 = 5.5;
+    let stroke = egui::Stroke::new(1.2, tokens::MUTED);
+    painter.circle_stroke(center, RADIUS, stroke);
+    let turn = (seconds / 2.0).fract() as f32 * std::f32::consts::TAU;
+    for (angle, reach) in [(turn, RADIUS - 1.8), (turn / 12.0, RADIUS - 3.0)] {
+        let hand = Vec2::new(angle.sin(), -angle.cos()) * reach;
+        painter.line_segment([center, center + hand], stroke);
+    }
+}
+
+/// A card: its picture, then its name under it, after a running clock
+/// while a proxy of its file is `making`.
+fn paint_bin_card(ui: &Ui, rect: Rect, card: &BinCard, picked: bool, making: bool) {
     let picture = Rect::from_min_size(rect.min, Vec2::new(rect.width(), CARD_H));
     let painter = ui.painter().with_clip_rect(rect);
     paint_card_face(&painter, picture, card);
@@ -2657,9 +2710,17 @@ fn paint_bin_card(ui: &Ui, rect: Rect, card: &BinCard, picked: bool) {
         );
     }
     let font = FontId::proportional(12.0);
-    let name = middle_ellipsis(ui.ctx(), &card.name, &font, rect.width() - 4.0);
+    let room = if making { PROXY_CLOCK_ROOM } else { 0.0 };
+    if making {
+        let seconds = ui.input(|input| input.time);
+        let center = Pos2::new(rect.left() + 8.0, picture.bottom() + 14.0);
+        paint_proxy_clock(&painter, center, seconds);
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(50));
+    }
+    let name = middle_ellipsis(ui.ctx(), &card.name, &font, rect.width() - 4.0 - room);
     painter.text(
-        Pos2::new(rect.left() + 2.0, picture.bottom() + 6.0),
+        Pos2::new(rect.left() + 2.0 + room, picture.bottom() + 6.0),
         Align2::LEFT_TOP,
         name,
         font,
@@ -8810,6 +8871,10 @@ fn export_extension(view: &ViewState) -> &'static str {
 /// Name, canvas, frame rate and color space, saved together.
 fn project_dialog(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
     let folder = shell.project_folder().map(short_folder);
+    let mut proxies = view
+        .project_proxies
+        .unwrap_or_else(|| shell.project_proxies());
+    let flipped = &mut view.project_proxies;
     let Some(settings) = view.project_dialog.as_mut() else {
         return;
     };
@@ -8848,6 +8913,15 @@ fn project_dialog(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
         widgets::form_hint(
             ui,
             "Picture clips stack by the order Arrange gives them, not by their tracks.",
+        );
+        widgets::form_row(ui, "Proxies", |ui| {
+            if widgets::switch(ui, &mut proxies, true).changed() {
+                *flipped = Some(proxies);
+            }
+        });
+        widgets::form_hint(
+            ui,
+            "4K and long clips get a smaller copy for the viewer as they come in. Export reads the original files.",
         );
 
         ui.add_space(8.0);
@@ -8909,7 +8983,10 @@ fn project_dialog(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
     });
     match end {
         widgets::SheetEnd::Open => {}
-        widgets::SheetEnd::Cancel => view.project_dialog = None,
+        widgets::SheetEnd::Cancel => {
+            view.project_dialog = None;
+            view.project_proxies = None;
+        }
         widgets::SheetEnd::Confirm => {
             if let Some(settings) = view.project_dialog.take() {
                 if let Err(error) = shell.save_project_settings(&settings) {
@@ -8917,6 +8994,11 @@ fn project_dialog(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
                     view.project_dialog = Some(settings);
                 } else {
                     view.name_buffer.clear();
+                    if let Some(on) = view.project_proxies.take()
+                        && let Err(error) = shell.set_project_proxies(on)
+                    {
+                        shell.notice_error(&error);
+                    }
                 }
             }
         }
@@ -12145,6 +12227,209 @@ mod tests {
                 .is_empty()
         );
         assert!(shell.unsaved());
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    /// Every circle `output` paints: its middle and its radius.
+    fn circles(output: &egui::FullOutput) -> Vec<(Pos2, f32)> {
+        fn collect(shape: &egui::Shape, found: &mut Vec<(Pos2, f32)>) {
+            match shape {
+                egui::Shape::Circle(circle) => found.push((circle.center, circle.radius)),
+                egui::Shape::Vec(shapes) => {
+                    for shape in shapes {
+                        collect(shape, found);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut found = Vec::new();
+        for clipped in &output.shapes {
+            collect(&clipped.shape, &mut found);
+        }
+        found
+    }
+
+    #[test]
+    fn a_library_movie_makes_and_cancels_its_proxy_from_its_menu_under_a_clock() {
+        let temp = std::env::temp_dir().join(format!("cutlass-proxy-menu-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        std::fs::create_dir_all(&temp).unwrap();
+        let file = temp.join("clip.mp4");
+        std::fs::write(&file, b"held, so never read").unwrap();
+        let mut draft = cutlass_model::Draft::empty("draft");
+        let mut movie = cutlass_model::MaterialVideo::new("movie");
+        movie.kind = "video".to_owned();
+        movie.path = file.to_string_lossy().into_owned();
+        movie.width = 1920;
+        movie.height = 1080;
+        movie.duration = Micros(1_000_000);
+        draft.materials.videos.push(movie);
+        let project = temp.join("project");
+        cutlass_store::Folder::new(draft).save(&project).unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.set_proxies_folder(temp.join("proxies"));
+        shell.hold_proxies();
+        shell.open_folder(&project).unwrap();
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let frame = |shell: &mut Shell, view: &mut ViewState, events: Vec<egui::Event>| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: screen,
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, view, None),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        let click = |pos: Pos2, button: egui::PointerButton| {
+            let event = |pressed| egui::Event::PointerButton {
+                pos,
+                button,
+                pressed,
+                modifiers: egui::Modifiers::default(),
+            };
+            vec![egui::Event::PointerMoved(pos), event(true), event(false)]
+        };
+        let clock = |output: &egui::FullOutput| {
+            circles(output)
+                .iter()
+                .any(|(_, radius)| (radius - 5.5).abs() < 0.01)
+        };
+        let making = |shell: &Shell| {
+            matches!(
+                shell.proxy_state("movie"),
+                crate::shell::ProxyState::Making(_)
+            )
+        };
+        let output = frame(&mut shell, &mut view, Vec::new());
+        let name = text_pos(&output, "clip.mp4").expect("library card");
+        // A 1080p movie gets no proxy by itself, so there is no clock.
+        assert!(!making(&shell));
+        assert!(!clock(&output));
+        let card = name + Vec2::new(20.0, -30.0);
+
+        // The menu makes one, and the clock runs by the name.
+        frame(
+            &mut shell,
+            &mut view,
+            click(card, egui::PointerButton::Secondary),
+        );
+        let output = frame(&mut shell, &mut view, Vec::new());
+        let text = painted_text(&output);
+        assert!(!text.contains("Cancel proxy"), "{text}");
+        let row = text_pos(&output, "Make proxy").expect("the Make proxy row");
+        frame(
+            &mut shell,
+            &mut view,
+            click(row + Vec2::new(4.0, 6.0), egui::PointerButton::Primary),
+        );
+        assert_eq!(shell.notice(), "Making 1 proxy");
+        assert!(making(&shell));
+        let output = frame(&mut shell, &mut view, Vec::new());
+        assert!(clock(&output), "no clock by the name");
+        let moved = text_pos(&output, "clip.mp4").expect("library card");
+        assert!(moved.x > name.x, "the name makes room for the clock");
+
+        // While it is on the way the menu cancels it, and the clock goes.
+        frame(
+            &mut shell,
+            &mut view,
+            click(card, egui::PointerButton::Secondary),
+        );
+        let output = frame(&mut shell, &mut view, Vec::new());
+        let text = painted_text(&output);
+        assert!(!text.contains("Make proxy"), "{text}");
+        let row = text_pos(&output, "Cancel proxy").expect("the Cancel proxy row");
+        frame(
+            &mut shell,
+            &mut view,
+            click(row + Vec2::new(4.0, 6.0), egui::PointerButton::Primary),
+        );
+        assert_eq!(shell.notice(), "Cancelled 1 proxy");
+        assert!(!making(&shell));
+        let output = frame(&mut shell, &mut view, Vec::new());
+        assert!(!clock(&output));
+        assert_eq!(text_pos(&output, "clip.mp4"), Some(name));
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn the_project_dialog_turns_the_projects_proxies_off_on_save() {
+        let (mut shell, temp) = open_span("proxies-switch", 1_000_000);
+        assert!(shell.project_proxies());
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let frame = |shell: &mut Shell, view: &mut ViewState, events: Vec<egui::Event>| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: screen,
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, view, None),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        let click = |pos: Pos2| {
+            let event = |pressed| egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::default(),
+            };
+            [
+                vec![egui::Event::PointerMoved(pos), event(true)],
+                vec![event(false)],
+            ]
+        };
+        // The switch's knob is the 9-point circle on the Proxies row.
+        let flip = |shell: &mut Shell, view: &mut ViewState| {
+            let output = frame(shell, view, Vec::new());
+            let label = last_text_pos(&output, "Proxies").expect("the Proxies row");
+            let knob = circles(&output)
+                .into_iter()
+                .find(|(center, radius)| {
+                    (radius - 9.0).abs() < 0.01 && (center.y - label.y).abs() < 14.0
+                })
+                .expect("the Proxies switch")
+                .0;
+            for events in click(knob) {
+                frame(shell, view, events);
+            }
+        };
+        let press = |shell: &mut Shell, view: &mut ViewState, button: &str| {
+            let output = frame(shell, view, Vec::new());
+            let at = last_text_pos(&output, button).expect("the dialog's button");
+            for events in click(at) {
+                frame(shell, view, events);
+            }
+        };
+
+        // Flipped and cancelled, the project is as it was.
+        view.project_dialog = shell.project_settings();
+        flip(&mut shell, &mut view);
+        assert_eq!(view.project_proxies, Some(false));
+        press(&mut shell, &mut view, "Cancel");
+        assert!(view.project_dialog.is_none());
+        assert!(shell.project_proxies());
+        assert!(!shell.unsaved());
+
+        // Flipped and saved, it is off, and that is not an undo step.
+        view.project_dialog = shell.project_settings();
+        flip(&mut shell, &mut view);
+        press(&mut shell, &mut view, "Save");
+        assert!(view.project_dialog.is_none(), "{}", shell.notice());
+        assert!(!shell.project_proxies());
+        assert!(shell.unsaved());
+        assert!(shell.undo().is_err(), "the switch is not an edit");
         let _ = std::fs::remove_dir_all(&temp);
     }
 

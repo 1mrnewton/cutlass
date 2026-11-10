@@ -96,6 +96,9 @@ pub(crate) fn home_folder() -> PathBuf {
 impl Drop for Proxies {
     fn drop(&mut self) {
         self.stop();
+        for job in &self.stopping {
+            job.cancel();
+        }
     }
 }
 
@@ -618,6 +621,19 @@ impl Shell {
             n => format!("Cancelled {n} proxies"),
         });
         Ok(())
+    }
+
+    /// Keep every proxy waiting, as one that is still stopping does, so a
+    /// test sees a proxy on its way for as long as it looks.
+    #[cfg(test)]
+    pub(crate) fn hold_proxies(&mut self) {
+        let held = Job::start("Held proxy", |progress| {
+            while !progress.cancelled() {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            Ok(())
+        });
+        self.proxies.stopping.extend(held);
     }
 
     #[cfg(test)]

@@ -58,6 +58,7 @@ mod hear;
 mod inspector;
 mod listen;
 mod proxy;
+pub use proxy::ProxyState;
 mod reframe;
 mod relight;
 mod render;

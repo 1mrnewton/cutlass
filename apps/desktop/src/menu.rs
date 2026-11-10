@@ -349,6 +349,19 @@ pub const LIBRARY_CARD: &[Entry] = &[
     done("delete", "Delete", ""),
     done("new-folder-with", "New folder with selected item", ""),
     done("link-media", "Link to media", ""),
+    done("make-proxy", "Make proxy", ""),
+    todo("split-scenes", "Split scenes", ""),
+    todo("export", "Export selected clips", ""),
+];
+
+/// [`LIBRARY_CARD`] when every picked movie has a proxy or is getting
+/// one: the proxy row cancels it.
+pub const LIBRARY_CARD_PROXIED: &[Entry] = &[
+    done("open-file", "Open file location", ""),
+    done("delete", "Delete", ""),
+    done("new-folder-with", "New folder with selected item", ""),
+    done("link-media", "Link to media", ""),
+    done("cancel-proxy", "Cancel proxy", ""),
     todo("split-scenes", "Split scenes", ""),
     todo("export", "Export selected clips", ""),
 ];

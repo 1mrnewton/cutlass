@@ -248,8 +248,9 @@ pub struct Playback {
     /// Keep playing or pause when the playhead is seeked during playback.
     #[serde(default)]
     pub seek_during_playback: SeekDuringPlayback,
-    /// Play a clip's proxy in the preview when it has one. Export always
-    /// reads the source.
+    /// Whether a new project makes proxies of its 4K and long movies by
+    /// itself. A project keeps its own switch once it has opened. Export
+    /// always reads the source.
     #[serde(default = "default_on")]
     pub proxies: bool,
     /// How sharp the preview is drawn.

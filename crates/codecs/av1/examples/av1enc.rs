@@ -19,6 +19,8 @@ struct Y4m {
     sub_y: bool,
     mono: bool,
     fps: f64,
+    /// The `F` ratio as written, for the IVF time base.
+    rate: (u32, u32),
     data: Vec<u8>,
     pos: usize,
 }
@@ -37,6 +39,7 @@ fn parse_y4m(data: Vec<u8>) -> Result<Y4m, String> {
         sub_y: true,
         mono: false,
         fps: 30.0,
+        rate: (30, 1),
         data,
         pos: end + 1,
     };
@@ -47,9 +50,12 @@ fn parse_y4m(data: Vec<u8>) -> Result<Y4m, String> {
             "H" => y.h = v.parse().map_err(|_| "H")?,
             "F" => {
                 let mut it = v.split(':');
-                let n: f64 = it.next().and_then(|s| s.parse().ok()).unwrap_or(30.0);
-                let d: f64 = it.next().and_then(|s| s.parse().ok()).unwrap_or(1.0);
-                y.fps = n / d.max(1.0);
+                let n: u32 = it.next().and_then(|s| s.parse().ok()).unwrap_or(30);
+                let d: u32 = it.next().and_then(|s| s.parse().ok()).unwrap_or(1);
+                if n > 0 && d > 0 {
+                    y.rate = (n, d);
+                    y.fps = f64::from(n) / f64::from(d);
+                }
             }
             "C" => {
                 let c = v.to_string();
@@ -189,8 +195,9 @@ fn main() -> Result<(), String> {
     ivf.extend_from_slice(b"AV01");
     ivf.extend_from_slice(&(y.w as u16).to_le_bytes());
     ivf.extend_from_slice(&(y.h as u16).to_le_bytes());
-    ivf.extend_from_slice(&30u32.to_le_bytes());
-    ivf.extend_from_slice(&1u32.to_le_bytes());
+    // Packet timestamps count frames, so the time base is one frame.
+    ivf.extend_from_slice(&y.rate.0.to_le_bytes());
+    ivf.extend_from_slice(&y.rate.1.to_le_bytes());
     ivf.extend_from_slice(&0u32.to_le_bytes());
     ivf.extend_from_slice(&0u32.to_le_bytes());
     let mut recon =

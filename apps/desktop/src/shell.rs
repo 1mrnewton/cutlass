@@ -1030,9 +1030,25 @@ impl Shell {
     }
 
     /// Decode timeline thumbnails on their own thread. `ready` runs there
-    /// after each one is stored.
+    /// after each one is stored. They are kept in the Cutlass cache folder,
+    /// so a project opened again shows its filmstrips without decoding
+    /// them; a test keeps none unless it names a folder.
     pub fn start_thumbnails(&mut self, ready: impl Fn() + Send + 'static) {
-        self.thumbnails = Some(Thumbnails::start(self.readers.clone(), ready));
+        let kept = (!cfg!(test)).then(|| Self::home().cache().join(FILM_CACHE_FOLDER));
+        self.start_thumbnails_in(kept, ready);
+    }
+
+    /// [`Self::start_thumbnails`], keeping the thumbnails under `folder`,
+    /// or only in memory with none.
+    pub(crate) fn start_thumbnails_in(
+        &mut self,
+        folder: Option<PathBuf>,
+        ready: impl Fn() + Send + 'static,
+    ) {
+        let cache = folder.map(|folder| -> Box<dyn cutlass_engine::ThumbCache> {
+            Box::new(cutlass_playback::FilmCache::new(folder))
+        });
+        self.thumbnails = Some(Thumbnails::start_with(self.readers.clone(), cache, ready));
     }
 
     /// The filmstrip of clip `id`, drawn `clip_width` by `height` pixels:
@@ -1064,7 +1080,7 @@ impl Shell {
         self.film_asks.extend(
             cells
                 .iter()
-                .filter(|cell| cell.thumb.is_none())
+                .filter(|cell| cell.waiting)
                 .map(|cell| cell.key.clone()),
         );
         cells
@@ -8719,6 +8735,9 @@ struct RunningJob {
     stopping: bool,
 }
 
+/// The folder of the Cutlass cache that holds filmstrip thumbnails.
+const FILM_CACHE_FOLDER: &str = "Thumbnails";
+
 /// What several selected clips are between them.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SelectionMix {
@@ -10613,6 +10632,105 @@ mod tests {
             assert!(thumb.rgba.chunks(4).any(|pixel| pixel[..3] != [0, 0, 0]));
         }
         assert_ne!(cells[0].thumb, cells[4].thumb);
+    }
+
+    /// Real movies from `../local-files`, one stored upright and one a
+    /// phone stored on its side. Skipped where that folder is missing.
+    #[test]
+    fn a_filmstrip_made_once_comes_back_from_disk_without_decoding() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../local-files");
+        for name in ["16929689_1920_1080_30fps.mp4", "IMG_9420.MOV"] {
+            let movie = root.join(name);
+            if !movie.is_file() {
+                eprintln!("skipped: {} is missing", movie.display());
+                return;
+            }
+            let temp = Temp::new();
+            let kept = temp.path.join("thumbnails");
+            let project = temp.path.join("project");
+            let mut draft = crate::open_movie::movie_draft(&movie, 1920, 1080, false).unwrap();
+            draft.tracks[0].segments[0].target = TimeRange::new(0, 4_000_000);
+            draft.tracks[0].segments[0].source_range = Some(TimeRange::new(0, 4_000_000));
+            draft.duration = Micros(4_000_000);
+            Folder::new(draft).save(&project).unwrap();
+            let id = SegmentId::new("movie");
+            let strip = |desktop: &mut Shell| {
+                desktop.pixel_size = 400.0 / 4_000_000.0;
+                desktop.film(&id, 400.0, 48.0, 0.0..400.0)
+            };
+            let wait = |desktop: &mut Shell, receiver: &std::sync::mpsc::Receiver<()>| {
+                // The tiles may change shape once the file is opened, so
+                // ask until none is waiting.
+                for _ in 0..40 {
+                    if strip(desktop).iter().all(|cell| !cell.waiting) {
+                        break;
+                    }
+                    desktop.send_timeline_asks();
+                    let _ = receiver.recv_timeout(std::time::Duration::from_secs(10));
+                }
+                strip(desktop)
+            };
+
+            // The first run decodes each tile and keeps it.
+            let mut desktop = shell();
+            desktop.open_folder(&project).unwrap();
+            let (sender, receiver) = std::sync::mpsc::channel();
+            desktop.start_thumbnails_in(Some(kept.clone()), move || {
+                let _ = sender.send(());
+            });
+            let first = strip(&mut desktop);
+            assert!(
+                first
+                    .iter()
+                    .all(|cell| cell.waiting && cell.thumb.is_none())
+            );
+            let made = wait(&mut desktop, &receiver);
+            assert!(made.len() >= 4, "{name}: {} tiles", made.len());
+            assert!(
+                made.iter()
+                    .all(|cell| !cell.waiting && cell.thumb.is_some())
+            );
+            let files = || -> usize {
+                std::fs::read_dir(&kept)
+                    .unwrap()
+                    .map(|folder| std::fs::read_dir(folder.unwrap().path()).unwrap().count())
+                    .sum()
+            };
+            let on_disk = files();
+            assert!(on_disk >= made.len(), "{name}: {on_disk} kept");
+            drop(desktop);
+
+            // The next run has no decoder at all: every tile is read back.
+            let mut again = shell();
+            again.set_readers(ReaderFactory::default());
+            again.open_folder(&project).unwrap();
+            let (sender, receiver) = std::sync::mpsc::channel();
+            again.start_thumbnails_in(Some(kept.clone()), move || {
+                let _ = sender.send(());
+            });
+            let back = wait(&mut again, &receiver);
+            assert_eq!(back.len(), made.len(), "{name}");
+            for (was, now) in made.iter().zip(&back) {
+                assert_eq!(was.key, now.key, "{name}");
+                assert!(!now.waiting, "{name}: {:?} was not kept", now.key.time);
+                let (was, now) = (was.thumb.as_ref().unwrap(), now.thumb.as_ref().unwrap());
+                assert_eq!((was.width, was.height), (now.width, now.height));
+                let apart: u64 = was
+                    .rgba
+                    .iter()
+                    .zip(&now.rgba)
+                    .map(|(a, b)| u64::from(a.abs_diff(*b)))
+                    .sum();
+                assert!(apart / (was.rgba.len() as u64) < 6, "{name}: {apart}");
+            }
+            assert_eq!(files(), on_disk, "nothing is written twice");
+
+            // A tile still waiting borrows the nearest frame it has.
+            again.pixel_size = 400.0 / 2_000_000.0;
+            let zoomed = again.film(&id, 800.0, 48.0, 0.0..400.0);
+            assert!(zoomed.iter().any(|cell| cell.waiting));
+            assert!(zoomed.iter().all(|cell| cell.thumb.is_some()), "{name}");
+        }
     }
 
     #[test]

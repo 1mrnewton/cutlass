@@ -18,12 +18,11 @@ use cutlass_decode::{CodecId, CodecParams, DecodeFactory};
 use cutlass_editor::{
     Append, AppendLane, ClipMove, ClipboardMiss, CopiedClip, DropGesture, DropOutcome,
     EFFECT_LENGTH, EffectPlace, GestureError, MediaPlace, MoveGesture, MovePlan, Pointer,
-    TITLE_LENGTH, TimelineScale, TitlePlace, TransitionMiss, TrimGesture, TrimPlan, Zoom,
-    ZoomBounds, append_placement, copy_clips, drop_gesture, effect_of_card, effect_requests,
-    effect_row_for, effect_target, fit_pixel_size, free_row, hit_test, last_accuracy_step,
-    material_span, media_requests, minimum_pixel_size, move_requests, paste_requests, plan_move,
-    plan_move_between, title_requests, title_style, transition_of_card, transition_request,
-    trim_gesture,
+    TITLE_LENGTH, TimelineScale, TitlePlace, TrimGesture, TrimPlan, Zoom, ZoomBounds,
+    append_placement, copy_clips, drop_gesture, effect_of_card, effect_requests, effect_row_for,
+    effect_target, fit_pixel_size, free_row, hit_test, last_accuracy_step, material_span,
+    media_requests, minimum_pixel_size, move_requests, paste_requests, plan_move,
+    plan_move_between, title_requests, title_style, trim_gesture,
 };
 use cutlass_encode::EncodeFactory;
 use cutlass_engine::{Thumb, ThumbKey, Thumbnails, Waveforms};
@@ -59,6 +58,8 @@ mod inspector;
 mod listen;
 mod proxy;
 pub use proxy::ProxyState;
+mod transition;
+pub use transition::TransitionDrop;
 mod reframe;
 mod relight;
 mod render;
@@ -819,6 +820,11 @@ pub struct Shell {
     /// The beat tool drops a mark on an audio clip.
     beating: bool,
     selected_beat: Option<BeatPick>,
+    /// The picked transition, by the clip it leads out of.
+    selected_transition: Option<SegmentId>,
+    /// A transition dropped on a cut that has one, held until the user
+    /// says whether it takes the other's place.
+    asked_transition: Option<Request>,
     clip_drag: Option<ClipDrag>,
     /// A clip whose drag Escape called off; its release does nothing.
     escaped_drag: Option<SegmentId>,
@@ -955,6 +961,8 @@ impl Shell {
             selected_marker: None,
             beating: false,
             selected_beat: None,
+            selected_transition: None,
+            asked_transition: None,
             clip_drag: None,
             escaped_drag: None,
             pending_trim: None,
@@ -1388,6 +1396,7 @@ impl Shell {
         self.selected_marker = None;
         self.beating = false;
         self.selected_beat = None;
+        self.selected_transition = None;
         self.cancel_clip_drag();
         self.fitted = false;
         self.notice.clear();
@@ -1554,6 +1563,7 @@ impl Shell {
         self.selected_marker = None;
         self.beating = false;
         self.selected_beat = None;
+        self.selected_transition = None;
         self.cancel_clip_drag();
         self.pixel_size = opening_pixel_size(rate);
         self.fitted = false;
@@ -3418,7 +3428,8 @@ impl Shell {
             return placed;
         }
         if material_id.starts_with(cutlass_editor::TRANSITION_CARD_PREFIX) {
-            self.drop_transition(material_id, x, y)
+            // A taken cut asks first; the window shows the question.
+            self.drop_transition(material_id, x, y).map(|_| ())
         } else if material_id.starts_with(cutlass_editor::TITLE_CARD_PREFIX) {
             self.drop_title(material_id, x, y)
         } else if material_id.starts_with(cutlass_editor::EFFECT_CARD_PREFIX) {
@@ -4093,46 +4104,6 @@ impl Shell {
         Ok(())
     }
 
-    /// Store a blend on the main-track cut nearest the pointer.
-    ///
-    /// The two clips must touch. The blend does not open a lane and does not
-    /// move either clip. A preset longer than the clips is shortened to fit.
-    pub fn drop_transition(&mut self, card_id: &str, x: f64, y: f64) -> Result<(), ShellError> {
-        let offer = transition_of_card(card_id).ok_or_else(|| {
-            ShellError::Unavailable("the transition is not in the library".to_owned())
-        })?;
-        let pointer = Pointer {
-            x: self.time_zero_x(x),
-            y,
-        };
-        let material_id = MaterialId::new(self.fresh("transition"));
-        let request = transition_request(
-            self.session_draft()?,
-            offer,
-            pointer,
-            self.scale(),
-            snap_window(self.pixel_size),
-            material_id,
-        )
-        .map_err(|miss| match miss {
-            TransitionMiss::Locked => ShellError::Locked,
-            TransitionMiss::BadScale => {
-                ShellError::Unavailable("the drag could not be read".to_owned())
-            }
-            TransitionMiss::OffLanes => {
-                ShellError::Unavailable("the drag missed the lanes".to_owned())
-            }
-            TransitionMiss::NotMain => {
-                ShellError::Unavailable("a transition sits on the main track".to_owned())
-            }
-            TransitionMiss::NoCut => ShellError::Unavailable("the drop missed the cut".to_owned()),
-            TransitionMiss::TooShort => {
-                ShellError::Unavailable("the clips are too short".to_owned())
-            }
-        })?;
-        self.apply(request)
-    }
-
     pub fn zoom_in(&mut self) -> Result<(), ShellError> {
         self.pixel_size = self
             .stored_zoom()?
@@ -4196,6 +4167,7 @@ impl Shell {
     pub fn select(&mut self, id: Option<SegmentId>) {
         self.selected_marker = None;
         self.selected_beat = None;
+        self.selected_transition = None;
         self.selection.clear();
         if let Some(id) = id {
             self.selection.push(id);
@@ -4206,6 +4178,7 @@ impl Shell {
     pub fn toggle_selected(&mut self, id: SegmentId) {
         self.selected_marker = None;
         self.selected_beat = None;
+        self.selected_transition = None;
         if let Some(index) = self.selection.iter().position(|item| item == &id) {
             self.selection.remove(index);
         } else {
@@ -4217,6 +4190,7 @@ impl Shell {
     pub fn select_box(&mut self, ids: impl IntoIterator<Item = SegmentId>, keep: bool) {
         self.selected_marker = None;
         self.selected_beat = None;
+        self.selected_transition = None;
         if !keep {
             self.selection.clear();
         }
@@ -4252,7 +4226,8 @@ impl Shell {
         self.selection.iter().any(|item| item == id)
     }
 
-    /// Remove the selected clips, or the selected marker or beat when no clip is selected.
+    /// Remove the selected clips, or the selected marker, beat or
+    /// transition when no clip is selected.
     pub fn delete_target(&mut self) -> Result<(), ShellError> {
         if self.selection.is_empty() {
             if self.selected_marker.is_some() {
@@ -4260,6 +4235,9 @@ impl Shell {
             }
             if self.selected_beat.is_some() {
                 return self.remove_selected_beat();
+            }
+            if self.selected_transition.is_some() {
+                return self.remove_selected_transition();
             }
             return Ok(());
         }
@@ -6967,6 +6945,7 @@ impl Shell {
             stored_start,
         });
         self.selected_beat = None;
+        self.selected_transition = None;
         self.selection.clear();
     }
 
@@ -7094,6 +7073,7 @@ impl Shell {
         }
         self.selected_beat = Some(BeatPick { segment_id, source });
         self.selected_marker = None;
+        self.selected_transition = None;
         self.selection.clear();
     }
 
@@ -7147,6 +7127,7 @@ impl Shell {
             .any(|beat| beat.segment_id == pick.segment_id && beat.source == pick.source);
         if !present {
             self.selected_beat = None;
+            self.selected_transition = None;
             return Ok(());
         }
         self.apply(Request::RemoveBeat {
@@ -7154,6 +7135,7 @@ impl Shell {
             source: Micros(pick.source),
         })?;
         self.selected_beat = None;
+        self.selected_transition = None;
         Ok(())
     }
 
@@ -12456,14 +12438,11 @@ mod tests {
         desktop.pixel_size = 0.001;
         let y = crate::tokens::LANE_HEIGHT / 2.0;
         let card = super::transition_offers()[0].card_id();
-        let missed = desktop
-            .drop_transition(&card, lane_time(&desktop, 100_000.0), y)
-            .unwrap_err();
-        assert_eq!(missed.to_string(), "the drop missed the cut");
         assert!(desktop.draft().unwrap().materials.transitions.is_empty());
-        desktop
+        let dropped = desktop
             .drop_transition(&card, lane_time(&desktop, 1_000_000.0), y)
             .unwrap();
+        assert_eq!(dropped, super::TransitionDrop::Placed);
         let draft = desktop.draft().unwrap();
         assert_eq!(draft.tracks.len(), 1);
         assert_eq!(
@@ -12494,6 +12473,249 @@ mod tests {
                 .extra_material_refs
                 .is_empty()
         );
+    }
+
+    /// Three touching clips of two seconds each on the main track.
+    fn three_cuts(dir: &Path) {
+        let mut draft = Draft::empty("draft");
+        draft.config.maintrack_adsorb = false;
+        draft.canvas_config.width = 2;
+        draft.canvas_config.height = 1;
+        for (id, start) in [("a", 0), ("b", 2_000_000), ("c", 4_000_000)] {
+            draft.tracks[0].segments.push(Segment::new(
+                id,
+                "media",
+                TimeRange::new(start, 2_000_000),
+            ));
+        }
+        Folder::new(draft).save(dir).unwrap();
+    }
+
+    fn blends(desktop: &Shell) -> Vec<(String, String, i64)> {
+        desktop
+            .transitions()
+            .into_iter()
+            .map(|bar| (bar.segment_id.as_str().to_owned(), bar.name, bar.duration.0))
+            .collect()
+    }
+
+    #[test]
+    fn a_transition_dropped_on_a_clip_goes_on_the_cut_it_begins_at() {
+        let temp = Temp::new();
+        three_cuts(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.pixel_size = 0.001;
+        let y = crate::tokens::LANE_HEIGHT / 2.0;
+        let card = super::transition_offers()[0].card_id();
+        // The middle of the last clip: the cut between b and c.
+        desktop
+            .drop_transition(&card, lane_time(&desktop, 5_000_000.0), y)
+            .unwrap();
+        assert_eq!(
+            blends(&desktop),
+            [("b".to_owned(), "Dissolve".to_owned(), 500_000)]
+        );
+        // It is picked as it lands.
+        assert_eq!(
+            desktop.selected_transition().map(|bar| bar.segment_id),
+            Some(SegmentId::new("b"))
+        );
+        assert!(desktop.selection().is_empty());
+        // The middle of the first clip, which nothing touches before: the
+        // cut it ends at.
+        desktop
+            .drop_transition(&card, lane_time(&desktop, 1_000_000.0), y)
+            .unwrap();
+        assert_eq!(blends(&desktop).len(), 2);
+        assert_eq!(blends(&desktop)[0].0, "a");
+        desktop.undo().unwrap();
+        desktop.undo().unwrap();
+        assert!(blends(&desktop).is_empty());
+        assert!(desktop.selected_transition().is_none());
+    }
+
+    #[test]
+    fn a_picked_transition_is_deleted_resized_reset_and_put_on_every_cut() {
+        let temp = Temp::new();
+        three_cuts(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.pixel_size = 0.001;
+        let y = crate::tokens::LANE_HEIGHT / 2.0;
+        let card = super::transition_offers()[0].card_id();
+        desktop
+            .drop_transition(&card, lane_time(&desktop, 2_000_000.0), y)
+            .unwrap();
+        let a = SegmentId::new("a");
+
+        // Picking a clip lets go of the transition, and the other way round.
+        desktop.select(Some(SegmentId::new("c")));
+        assert!(desktop.selected_transition().is_none());
+        desktop.select_transition(Some(SegmentId::new("c")));
+        assert!(desktop.selected_transition().is_none(), "c has none");
+        desktop.select(Some(SegmentId::new("c")));
+        desktop.select_transition(Some(a.clone()));
+        assert!(desktop.selection().is_empty());
+        assert!(desktop.selected_transition().is_some());
+
+        // Its length is held between the shortest and what the clips hold.
+        assert_eq!(
+            desktop.transition_limits(&a),
+            Some((
+                Micros(cutlass_editor::TRANSITION_SHORTEST),
+                Micros(4_000_000)
+            ))
+        );
+        desktop.set_transition_length(&a, Micros(800_000)).unwrap();
+        assert_eq!(blends(&desktop)[0].2, 800_000);
+        desktop.set_transition_length(&a, Micros(1)).unwrap();
+        assert_eq!(blends(&desktop)[0].2, cutlass_editor::TRANSITION_SHORTEST);
+        desktop
+            .set_transition_length(&a, Micros(99_000_000))
+            .unwrap();
+        assert_eq!(blends(&desktop)[0].2, 4_000_000);
+        assert!(
+            desktop
+                .set_transition_length(&SegmentId::new("b"), Micros(500_000))
+                .is_err(),
+            "b has no transition"
+        );
+
+        // An edge dragged to 1.7s leaves 0.3s each side of the 2s cut; a
+        // drag held down is one undo step.
+        desktop.set_transition_length(&a, Micros(500_000)).unwrap();
+        let before = desktop.draft().unwrap().clone();
+        desktop.hold_edits(true);
+        for time in [1_900_000.0, 1_800_000.0, 1_700_000.0] {
+            desktop
+                .drag_transition_edge(
+                    &a,
+                    cutlass_editor::BarEdge::Start,
+                    lane_time(&desktop, time),
+                )
+                .unwrap();
+        }
+        desktop.hold_edits(false);
+        let bar = desktop.selected_transition().unwrap();
+        assert_eq!((bar.start, bar.end), (Micros(1_700_000), Micros(2_300_000)));
+        desktop.undo().unwrap();
+        assert_eq!(desktop.draft().unwrap(), &before);
+        desktop.redo().unwrap();
+
+        // Reset puts the shelf's length back.
+        assert_eq!(desktop.transition_preset(&a), Some(Micros(500_000)));
+        desktop.reset_transition_length(&a).unwrap();
+        assert_eq!(blends(&desktop)[0].2, 500_000);
+
+        // Apply to all puts it on the other cut, as one step.
+        desktop.apply_transition_to_all(&a).unwrap();
+        assert_eq!(desktop.notice(), "Applied to 1 other cut");
+        assert_eq!(
+            blends(&desktop),
+            [
+                ("a".to_owned(), "Dissolve".to_owned(), 500_000),
+                ("b".to_owned(), "Dissolve".to_owned(), 500_000)
+            ]
+        );
+        desktop.undo().unwrap();
+        assert_eq!(blends(&desktop).len(), 1);
+
+        // Delete takes the picked transition and leaves the clips.
+        desktop.delete_target().unwrap();
+        assert!(blends(&desktop).is_empty());
+        assert_eq!(desktop.draft().unwrap().tracks[0].segments.len(), 3);
+        assert!(desktop.draft().unwrap().materials.transitions.is_empty());
+        desktop.undo().unwrap();
+        assert_eq!(blends(&desktop).len(), 1);
+    }
+
+    #[test]
+    fn a_transition_goes_when_its_clips_are_pulled_apart() {
+        let temp = Temp::new();
+        three_cuts(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.pixel_size = 0.001;
+        let y = crate::tokens::LANE_HEIGHT / 2.0;
+        let card = super::transition_offers()[0].card_id();
+        desktop
+            .drop_transition(&card, lane_time(&desktop, 4_000_000.0), y)
+            .unwrap();
+        assert_eq!(blends(&desktop)[0].0, "b");
+        // The last clip dragged a second later leaves a gap after b.
+        desktop
+            .drag_segment(SegmentId::new("c"), lane_time(&desktop, 5_000_000.0), y)
+            .unwrap();
+        assert_eq!(
+            desktop.draft().unwrap().tracks[0].segments[2].target.start,
+            Micros(5_000_000)
+        );
+        assert!(blends(&desktop).is_empty());
+        assert!(desktop.selected_transition().is_none());
+        desktop.undo().unwrap();
+        assert_eq!(blends(&desktop).len(), 1);
+    }
+
+    #[test]
+    fn a_transition_dropped_on_one_asks_before_it_takes_its_place() {
+        let temp = Temp::new();
+        touching_cut(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.pixel_size = 0.001;
+        let y = crate::tokens::LANE_HEIGHT / 2.0;
+        let x = lane_time(&desktop, 1_000_000.0);
+        let dissolve = super::transition_offers()[0].card_id();
+        let dip = super::transition_offers()[1].card_id();
+        assert_eq!(
+            desktop.drop_transition(&dissolve, x, y).unwrap(),
+            super::TransitionDrop::Placed
+        );
+        assert!(desktop.asked_transition().is_none());
+
+        // A second one waits for an answer; No leaves the first.
+        let revision = desktop.session.as_ref().unwrap().revision();
+        assert_eq!(
+            desktop.drop_transition(&dip, x, y).unwrap(),
+            super::TransitionDrop::Asks
+        );
+        assert_eq!(
+            desktop.asked_transition(),
+            Some(("Dissolve".to_owned(), "Dip to Black".to_owned()))
+        );
+        assert_eq!(desktop.session.as_ref().unwrap().revision(), revision);
+        desktop.answer_transition(false, true).unwrap();
+        assert!(desktop.asked_transition().is_none());
+        assert_eq!(blends(&desktop)[0].1, "Dissolve");
+        assert!(
+            !desktop.settings().confirm.replace_transition_unasked,
+            "not replacing does not stop the question"
+        );
+
+        // Yes replaces it in one undo step, on the same cut.
+        desktop.drop_transition(&dip, x, y).unwrap();
+        desktop.answer_transition(true, false).unwrap();
+        assert_eq!(
+            blends(&desktop),
+            [("left".to_owned(), "Dip to Black".to_owned(), 400_000)]
+        );
+        assert_eq!(desktop.draft().unwrap().materials.transitions.len(), 1);
+        desktop.undo().unwrap();
+        assert_eq!(blends(&desktop)[0].1, "Dissolve");
+
+        // Yes with "Do not ask again" replaces from then on without asking.
+        desktop.drop_transition(&dip, x, y).unwrap();
+        desktop.answer_transition(true, true).unwrap();
+        assert!(desktop.settings().confirm.replace_transition_unasked);
+        assert_eq!(
+            desktop.drop_transition(&dissolve, x, y).unwrap(),
+            super::TransitionDrop::Placed
+        );
+        assert_eq!(blends(&desktop)[0].1, "Dissolve");
+        // An answer with no question open does nothing.
+        desktop.answer_transition(true, false).unwrap();
+        assert_eq!(blends(&desktop).len(), 1);
     }
 
     #[test]
@@ -12533,7 +12755,19 @@ mod tests {
                 crate::tokens::LANE_HEIGHT / 2.0,
             )
             .unwrap_err();
-        assert_eq!(gap.to_string(), "the drop missed the cut");
+        assert_eq!(
+            gap.to_string(),
+            "a transition goes between two clips that touch"
+        );
+        // On a clip that touches nothing there is no cut either.
+        let alone = desktop
+            .drop_transition(
+                &card,
+                lane_time(&desktop, 500_000.0),
+                crate::tokens::LANE_HEIGHT / 2.0,
+            )
+            .unwrap_err();
+        assert_eq!(alone.to_string(), gap.to_string());
         let other = desktop
             .drop_transition(
                 &card,

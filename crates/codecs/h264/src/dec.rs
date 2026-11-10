@@ -4090,6 +4090,10 @@ fn add_scaled<S: Sample>(
 ) {
     let (x, y, step) = origin;
     let (qp, bypass) = quant;
+    // A block whose flag said it holds no coefficients adds nothing.
+    if coeffs.iter().all(|&level| level == 0) {
+        return;
+    }
     if n == 4 {
         let mut block = [0i32; 16];
         if bypass {

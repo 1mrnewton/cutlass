@@ -1084,7 +1084,7 @@ pub fn put_luma_block<S: Sample>(
         return;
     }
     let (pic_w, pic_h) = pic;
-    if !luma_window_inside(x, y, w, h, pic_w, pic_h) {
+    if !luma_window_inside((x, y), (w, h), (x_frac, y_frac), (pic_w, pic_h)) {
         put_luma_extended(dst, dst_stride, src, src_stride, pic, block);
         return;
     }
@@ -1183,11 +1183,10 @@ pub fn put_chroma_block<S: Sample>(
     let (pic_w, pic_h) = pic;
     let xf = x_frac.clamp(0, 7);
     let yf = y_frac.clamp(0, 7);
-    if x < 0
-        || y < 0
-        || x + i32::try_from(w).unwrap_or(i32::MAX) >= pic_w
-        || y + i32::try_from(h).unwrap_or(i32::MAX) >= pic_h
-    {
+    // The sample after the block is read only along a fractional offset.
+    let right = x + i32::try_from(w).unwrap_or(i32::MAX);
+    let below = y + i32::try_from(h).unwrap_or(i32::MAX);
+    if x < 0 || y < 0 || right + i32::from(xf != 0) > pic_w || below + i32::from(yf != 0) > pic_h {
         put_chroma_extended(dst, dst_stride, src, src_stride, pic, block);
         return;
     }
@@ -1197,8 +1196,12 @@ pub fn put_chroma_block<S: Sample>(
         copy_block(dst, dst_stride, src_at(src, src_stride, x, y), (w, h));
         return;
     }
+    // The kernel reads the sample after the block both ways.
     let kind = Predict::Chroma(xf as u8, yf as u8);
-    if S::predict_fast(kind, dst, dst_stride, src, src_stride, ((x0, y0), (w, h))) {
+    if right < pic_w
+        && below < pic_h
+        && S::predict_fast(kind, dst, dst_stride, src, src_stride, ((x0, y0), (w, h)))
+    {
         return;
     }
     if yf == 0 {
@@ -1248,10 +1251,49 @@ pub fn put_chroma_block<S: Sample>(
     }
 }
 
-fn luma_window_inside(x: i32, y: i32, w: usize, h: usize, pic_w: i32, pic_h: i32) -> bool {
-    let bw = i32::try_from(w).unwrap_or(i32::MAX);
-    let bh = i32::try_from(h).unwrap_or(i32::MAX);
-    x >= 2 && y >= 2 && x + bw + 3 <= pic_w && y + bh + 3 <= pic_h
+/// Whether every sample the block reads lies in the picture. The six-tap
+/// filter reaches two samples before the block and three after it, but
+/// only along a direction with a fractional offset: a full-sample offset
+/// reads the block alone.
+fn luma_window_inside(
+    at: (i32, i32),
+    size: (usize, usize),
+    frac: (i32, i32),
+    pic: (i32, i32),
+) -> bool {
+    let (x, y) = at;
+    let bw = i32::try_from(size.0).unwrap_or(i32::MAX);
+    let bh = i32::try_from(size.1).unwrap_or(i32::MAX);
+    let (before_x, after_x) = if frac.0 != 0 { (2, 3) } else { (0, 0) };
+    let (before_y, after_y) = if frac.1 != 0 { (2, 3) } else { (0, 0) };
+    x >= before_x && y >= before_y && x + bw + after_x <= pic.0 && y + bh + after_y <= pic.1
+}
+
+/// Copies the `width`×`height` window whose top-left sample is (`x0`, `y0`)
+/// out of the picture, repeating the picture's edge samples where the
+/// window hangs past it.
+fn edge_window<S: Sample>(
+    window: &mut [S],
+    size: (usize, usize),
+    src: &[S],
+    src_stride: usize,
+    pic: (i32, i32),
+    origin: (i32, i32),
+) {
+    let (width, height) = size;
+    let (pic_w, pic_h) = pic;
+    let (x0, y0) = origin;
+    if pic_w <= 0 || pic_h <= 0 {
+        return;
+    }
+    for (row, out) in window.chunks_exact_mut(width).take(height).enumerate() {
+        let sy = (y0 + i32::try_from(row).unwrap_or(0)).clamp(0, pic_h - 1) as usize;
+        let line = &src[sy * src_stride..sy * src_stride + pic_w as usize];
+        for (col, sample) in out.iter_mut().enumerate() {
+            let sx = (x0 + i32::try_from(col).unwrap_or(0)).clamp(0, pic_w - 1) as usize;
+            *sample = line[sx];
+        }
+    }
 }
 
 fn put_chroma_extended<S: Sample>(
@@ -1266,13 +1308,14 @@ fn put_chroma_extended<S: Sample>(
     let width = block.w + 1;
     let height = block.h + 1;
     let mut window = [S::default(); 17 * 17];
-    for row in 0..height {
-        for col in 0..width {
-            let sx = block.x + i32::try_from(col).unwrap_or(0);
-            let sy = block.y + i32::try_from(row).unwrap_or(0);
-            window[row * width + col] = S::clip(sample(src, src_stride, pic_w, pic_h, sx, sy));
-        }
-    }
+    edge_window(
+        &mut window,
+        (width, height),
+        src,
+        src_stride,
+        (pic_w, pic_h),
+        (block.x, block.y),
+    );
     let wide = i32::try_from(width).unwrap_or(0);
     let high = i32::try_from(height).unwrap_or(0);
     put_chroma_block(
@@ -1304,13 +1347,14 @@ fn put_luma_extended<S: Sample>(
     let width = block.w + 5;
     let height = block.h + 5;
     let mut window = [S::default(); 21 * 21];
-    for row in 0..height {
-        for col in 0..width {
-            let sx = block.x - 2 + i32::try_from(col).unwrap_or(0);
-            let sy = block.y - 2 + i32::try_from(row).unwrap_or(0);
-            window[row * width + col] = S::clip(sample(src, src_stride, pic_w, pic_h, sx, sy));
-        }
-    }
+    edge_window(
+        &mut window,
+        (width, height),
+        src,
+        src_stride,
+        (pic_w, pic_h),
+        (block.x - 2, block.y - 2),
+    );
     let wide = i32::try_from(width).unwrap_or(0);
     let high = i32::try_from(height).unwrap_or(0);
     put_luma_block(

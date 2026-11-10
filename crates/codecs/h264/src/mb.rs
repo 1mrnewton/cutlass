@@ -4630,12 +4630,12 @@ fn pred8_block<S: Sample>(
     let mut out = [S::default(); 64];
     match mode {
         0 if above_ok => {
-            for row in out.chunks_exact_mut(8) {
+            for row in out.as_chunks_mut::<8>().0 {
                 row.copy_from_slice(&above[..8]);
             }
         }
         1 if left_ok => {
-            for (row, &sample) in out.chunks_exact_mut(8).zip(&left) {
+            for (row, &sample) in out.as_chunks_mut::<8>().0.iter_mut().zip(&left) {
                 row.fill(sample);
             }
         }

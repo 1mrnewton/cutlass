@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use crate::dsp::Pixel;
 use crate::dsp::cdef::{
     CDEF_BORDER, CDEF_PAD_STRIDE, CDEF_UNAVAILABLE, adjust_luma_pri_strength, cdef_damping,
-    cdef_direction, cdef_filter, cdef_uv_dir,
+    cdef_direction, cdef_filter, cdef_filter_inner, cdef_uv_dir,
 };
 use crate::dsp::lf::{filter_horizontal_edge, filter_vertical_edge};
 use crate::dsp::lr::{LrPlane, LrScratch, LrUnit, lr_planes, lr_planes_stripes, lr_save_bounds};
@@ -1199,7 +1199,18 @@ fn cdef_plane_block<P: Pixel>(
     let h = 8 >> sy;
     let x0 = (c * 4) >> sx;
     let y0 = (r * 4) >> sy;
-    cdef_filter(
+    // A block with the border CDEF reads inside the picture has every
+    // tap available.
+    let b = CDEF_BORDER;
+    let avail_w = (fs.mi_cols * 4) >> sx;
+    let avail_h = (fs.mi_rows * 4) >> sy;
+    let inner = x0 >= b && y0 >= b && x0 + w + b <= avail_w && y0 + h + b <= avail_h;
+    let filter = if inner {
+        cdef_filter_inner::<P>
+    } else {
+        cdef_filter::<P>
+    };
+    filter(
         &mut dst[plane][(y0 - row0) * ds + x0..],
         ds,
         &pad[(y0 - sb_y) * ps + (x0 - sb_x)..],

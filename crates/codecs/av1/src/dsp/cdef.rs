@@ -302,6 +302,48 @@ pub fn cdef_filter<P: Pixel>(
     damping: i32,
     bd: u32,
 ) {
+    filter_block(
+        dst, dst_stride, src, src_stride, w, h, pri, sec, dir, damping, bd, false,
+    );
+}
+
+/// [`cdef_filter`] for a block at least [`CDEF_BORDER`] samples from
+/// every edge of the picture: no sample its taps read is
+/// [`CDEF_UNAVAILABLE`]. A build with vector kernels then filters 8-bit
+/// samples as bytes, sixteen to a vector.
+pub fn cdef_filter_inner<P: Pixel>(
+    dst: &mut [P],
+    dst_stride: usize,
+    src: &[u16],
+    src_stride: usize,
+    w: usize,
+    h: usize,
+    pri: i32,
+    sec: i32,
+    dir: u8,
+    damping: i32,
+    bd: u32,
+) {
+    filter_block(
+        dst, dst_stride, src, src_stride, w, h, pri, sec, dir, damping, bd, true,
+    );
+}
+
+#[inline(always)]
+fn filter_block<P: Pixel>(
+    dst: &mut [P],
+    dst_stride: usize,
+    src: &[u16],
+    src_stride: usize,
+    w: usize,
+    h: usize,
+    pri: i32,
+    sec: i32,
+    dir: u8,
+    damping: i32,
+    bd: u32,
+    inner: bool,
+) {
     if pri == 0 && sec == 0 {
         // Every tap constrains to 0: the block is unchanged.
         for i in 0..h {
@@ -313,7 +355,10 @@ pub fn cdef_filter<P: Pixel>(
         return;
     }
     let p = Params::new(src_stride, pri, sec, dir, damping, bd);
-    if cutlass_simd::ACCELERATED && filter_kernel(dst, dst_stride, src, src_stride, w, h, &p) {
+    // The byte kernel takes 8-bit blocks inside the picture.
+    let bytes = inner && !P::HBD && bd == 8;
+    if cutlass_simd::ACCELERATED && filter_kernel(dst, dst_stride, src, src_stride, w, h, &p, bytes)
+    {
         return;
     }
     filter_lanes(dst, dst_stride, src, src_stride, w, h, &p);
@@ -331,13 +376,14 @@ fn filter_kernel<P: Pixel>(
     w: usize,
     h: usize,
     p: &Params,
+    bytes: bool,
 ) -> bool {
     if src_stride != CDEF_PAD_STRIDE || !matches!((w, h), (8, 8) | (4, 4) | (4, 8)) {
         return false;
     }
-    // With one strength the lanes are as fast as the kernel, and they
-    // filter a 4-wide block two rows at a time.
-    if p.pri == 0 || p.sec == 0 {
+    // On 16-bit lanes, with one strength the lanes below are as fast as
+    // the kernel, and they filter a 4-wide block two rows at a time.
+    if !bytes && (p.pri == 0 || p.sec == 0) {
         return false;
     }
     // The kernel filters eight columns of every row, so it wants the
@@ -355,6 +401,12 @@ fn filter_kernel<P: Pixel>(
         pri_at: k.pri_o,
         sec_at: k.sec_o,
     };
+    if bytes {
+        let Some(out) = P::bytes_mut(dst) else {
+            return false;
+        };
+        return kernel::filter_inner_u8(out, dst_stride, win, &f, w == 8, h);
+    }
     let rows = kernel::filter_u16(win, &f, h);
     for (i, row) in rows.iter().enumerate().take(h) {
         let Some(out) = dst.get_mut(i * dst_stride..i * dst_stride + w) else {
@@ -853,6 +905,7 @@ mod tests {
         let mut rng = Rng(seed);
         let max = (1 << bd) - 1;
         let mut dirs_seen = [0u32; 8];
+        let mut inner = 0;
         for iter in 0..3000 {
             let mi_cols = 2 + 2 * rng.range(4);
             let mi_rows = 2 + 2 * rng.range(4);
@@ -963,10 +1016,21 @@ mod tests {
                 );
                 let got: Vec<i32> = out.iter().map(|v| v.to_i32()).collect();
                 assert_eq!(got, expect, "long source iter {iter} bd {bd}");
+                if !pad.contains(&CDEF_UNAVAILABLE) {
+                    // Inside the picture: the byte kernel's blocks.
+                    let mut out = vec![P::default(); bw * bh];
+                    super::cdef_filter_inner(
+                        &mut out, bw, &long, pstride, bw, bh, pri, sec_raw, dir, damping, bd,
+                    );
+                    let got: Vec<i32> = out.iter().map(|v| v.to_i32()).collect();
+                    assert_eq!(got, expect, "inner iter {iter} bd {bd}");
+                    inner += 1;
+                }
             }
             assert!(pad.contains(&CDEF_UNAVAILABLE) || (bx > 0 && by > 0));
         }
         assert!(dirs_seen.iter().all(|&c| c > 0), "{dirs_seen:?}");
+        assert!(inner > 20, "{inner} blocks inside the picture");
     }
 
     #[test]

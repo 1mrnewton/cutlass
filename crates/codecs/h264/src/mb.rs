@@ -9553,6 +9553,9 @@ fn predict_inter<S: Sample>(
     my: usize,
     mb: &Mb,
 ) -> Result<(), CodecError> {
+    if mb.field_mb {
+        return mbaff::predict_field(pic, dpb, slice, (mx, my), mb);
+    }
     if mb.alc && slice.weighted {
         for part in partitions(super::syntax_kind(slice.kind), mb.alc_spec).iter() {
             if !part.l0 {
@@ -10237,11 +10240,17 @@ fn implicit_weights(slice: &Slice<'_>, r0: i8, r1: i8) -> (i32, i32) {
         return (32, 32);
     };
     let long = listed(&slice.long0, r0).unwrap_or(true) || listed(&slice.long1, r1).unwrap_or(true);
+    implicit_pair(slice.poc, poc0, poc1, long)
+}
+
+/// The weights for a picture, or field, with order count `current` that
+/// predicts from two with order counts `poc0` and `poc1`.
+fn implicit_pair(current: i32, poc0: i32, poc1: i32, long: bool) -> (i32, i32) {
     let td = (poc1 - poc0).clamp(-128, 127);
     if td == 0 || long {
         return (32, 32);
     }
-    let tb = (slice.poc - poc0).clamp(-128, 127);
+    let tb = (current - poc0).clamp(-128, 127);
     let tx = (16_384 + (td / 2).abs()) / td;
     let dist = ((tb * tx + 32) >> 6).clamp(-1024, 1023);
     let w1 = dist >> 2;

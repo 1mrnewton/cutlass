@@ -965,6 +965,17 @@ impl Media {
         cutlass_codec::access::Pcm::from_f32(rate, layout, samples).map_err(|_| EngineError::Layout)
     }
 
+    /// The next picture in display order from where the read stands, or
+    /// [`None`] when the stream ends.
+    ///
+    /// For a walk over a whole file, such as a measurement or a check:
+    /// nothing is seeked and no picture is kept.
+    pub fn next_picture(&mut self) -> Result<Option<HeldFrame>, EngineError> {
+        self.cursor = None;
+        self.run = None;
+        self.pull_picture(&TimeRange::new(0, i64::MAX))
+    }
+
     /// The next decoded audio buffer, or [`None`] when the stream ends or there is no audio.
     pub fn pull_audio(&mut self) -> Result<Option<PcmReady>, EngineError> {
         self.cursor = None;

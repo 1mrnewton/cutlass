@@ -237,6 +237,23 @@ pub fn move_key(
     })
 }
 
+/// The request that removes every key at `at` from the clip's start,
+/// whatever it keys: a key's mark deleted. `None` when the clip is not on
+/// the timeline or has no key there.
+#[must_use]
+pub fn remove_key(draft: &Draft, segment_id: &SegmentId, at: Micros) -> Option<Request> {
+    let mut segment = draft
+        .tracks
+        .iter()
+        .flat_map(|track| &track.segments)
+        .find(|segment| segment.id == *segment_id)?
+        .clone();
+    cutlass_model::remove_keys_where(&mut segment, at, |_| true).then(|| Request::SetKeyframes {
+        segment_id: segment_id.clone(),
+        keyframes: segment.common_keyframes,
+    })
+}
+
 /// A Graphs panel curve to show: its name and its line through the unit
 /// square, x the share of time and y the share of the change.
 #[derive(Clone, Debug, PartialEq)]
@@ -298,6 +315,34 @@ mod tests {
 
     use super::*;
     use crate::stage::NoText;
+
+    #[test]
+    fn a_key_is_removed_from_every_setting_keyed_at_its_time() {
+        let mut draft = Draft::empty("D");
+        let mut segment = Segment::new("c", "v", TimeRange::new(0, 3_000_000));
+        for offset in [0, 1_000_000] {
+            put_key(&mut segment, "KFTypePositionX", Micros(offset), 0.0);
+        }
+        put_key(&mut segment, "KFTypeAlpha", Micros(1_000_000), 0.5);
+        draft.tracks[0].segments.push(segment);
+        let id = SegmentId::new("c");
+        let Some(Request::SetKeyframes { keyframes, .. }) =
+            remove_key(&draft, &id, Micros(1_000_000))
+        else {
+            std::panic::resume_unwind(Box::new("no removal"));
+        };
+        let left: Vec<i64> = keyframes
+            .iter()
+            .flat_map(|group| &group.keyframe_list)
+            .map(|key| key.time_offset.0)
+            .collect();
+        assert_eq!(left, [0]);
+        // Nothing to remove: a time with no key, and a clip that is gone.
+        assert!(remove_key(&draft, &id, Micros(500_000)).is_none());
+        assert!(remove_key(&draft, &SegmentId::new("gone"), Micros(0)).is_none());
+        // The draft itself is untouched until the request is applied.
+        assert_eq!(draft.tracks[0].segments[0].common_keyframes.len(), 2);
+    }
 
     #[test]
     fn a_key_moves_to_a_free_time_on_the_clip_and_keeps_its_order() {

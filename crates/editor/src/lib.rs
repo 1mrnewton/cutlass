@@ -38,6 +38,7 @@ mod shape_shelf;
 mod snap;
 mod stage;
 mod subtitles;
+mod sync;
 mod template;
 mod text_catalog;
 mod text_effect;
@@ -116,6 +117,7 @@ pub use stage::{
     stage_align, stage_box, stage_gesture, stage_pick,
 };
 pub use subtitles::{SubtitleFormat, SubtitleMiss, subtitle_request};
+pub use sync::{SyncMiss, SyncPlan, sync_plan, sync_requests};
 pub use template::{
     TEMPLATE_CARD_PREFIX, TITLE_TEMPLATES, TemplatePlace, TitleTemplate, Widget, template_requests,
     title_template,

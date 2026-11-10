@@ -1443,75 +1443,114 @@ fn filter_span<S: Sample, const VERTICAL: bool>(
     plane: &mut [S],
     stride: usize,
     row_step: usize,
-    mut at: usize,
+    at: usize,
     run: FilterRun,
 ) {
-    let FilterRun {
-        len,
-        bs,
-        alpha,
-        beta,
-        index_a,
-        chroma,
-    } = run;
+    let len = run.len;
     let vert = stride * row_step;
-    let across = if VERTICAL { 1 } else { vert };
-    let along = if VERTICAL { vert } else { 1 };
-    for _ in 0..len {
-        let p0 = pel(plane[at - across]);
-        let q0 = pel(plane[at]);
-        let p1 = pel(plane[at - 2 * across]);
-        let q1 = pel(plane[at + across]);
-        if (p0 - q0).abs() >= alpha || (p1 - p0).abs() >= beta || (q1 - q0).abs() >= beta {
-            at += along;
-            continue;
-        }
-        let p2 = pel(plane[at - 3 * across]);
-        let q2 = pel(plane[at + 2 * across]);
-        let p3 = pel(plane[at - 4 * across]);
-        let q3 = pel(plane[at + 3 * across]);
-        if bs < 4 {
-            let tc0 = i32::from(TC0[bs as usize - 1][index_a]) << S::SHIFT;
-            let ap = (p2 - p0).abs();
-            let aq = (q2 - q0).abs();
-            let tc = if chroma {
-                tc0 + 1
-            } else {
-                tc0 + i32::from(ap < beta) + i32::from(aq < beta)
+    let tc0 = if run.bs < 4 {
+        i32::from(TC0[usize::from(run.bs) - 1][run.index_a]) << S::SHIFT
+    } else {
+        0
+    };
+    if VERTICAL {
+        // The edge runs down the picture: each line across it is eight
+        // samples in a row.
+        let mut at = at;
+        for _ in 0..len {
+            let Some(line) = plane.get_mut(at - 4..at + 4) else {
+                return;
             };
-            let delta = ((((q0 - p0) << 2) + (p1 - q1) + 4) >> 3).clamp(-tc, tc);
-            plane[at - across] = S::clip(p0 + delta);
-            plane[at] = S::clip(q0 - delta);
-            if !chroma && ap < beta {
-                let d = ((p2 + ((p0 + q0 + 1) >> 1) - (p1 << 1)) >> 1).clamp(-tc0, tc0);
-                plane[at - 2 * across] = S::clip(p1 + d);
+            if let Ok(line) = <&mut [S; 8]>::try_from(line) {
+                filter_line(line, &run, tc0);
             }
-            if !chroma && aq < beta {
-                let d = ((q2 + ((p0 + q0 + 1) >> 1) - (q1 << 1)) >> 1).clamp(-tc0, tc0);
-                plane[at + across] = S::clip(q1 + d);
-            }
-        } else {
-            let strong_p =
-                !chroma && (p2 - p0).abs() < beta && (p0 - q0).abs() < ((alpha >> 2) + 2);
-            let strong_q =
-                !chroma && (q2 - q0).abs() < beta && (p0 - q0).abs() < ((alpha >> 2) + 2);
-            if strong_p {
-                plane[at - across] = S::clip((p2 + 2 * p1 + 2 * p0 + 2 * q0 + q1 + 4) >> 3);
-                plane[at - 2 * across] = S::clip((p2 + p1 + p0 + q0 + 2) >> 2);
-                plane[at - 3 * across] = S::clip((2 * p3 + 3 * p2 + p1 + p0 + q0 + 4) >> 3);
-            } else {
-                plane[at - across] = S::clip((2 * p1 + p0 + q1 + 2) >> 2);
-            }
-            if strong_q {
-                plane[at] = S::clip((p1 + 2 * p0 + 2 * q0 + 2 * q1 + q2 + 4) >> 3);
-                plane[at + across] = S::clip((p0 + q0 + q1 + q2 + 2) >> 2);
-                plane[at + 2 * across] = S::clip((2 * q3 + 3 * q2 + q1 + q0 + p0 + 4) >> 3);
-            } else {
-                plane[at] = S::clip((2 * q1 + q0 + p1 + 2) >> 2);
-            }
+            at += vert;
         }
-        at += along;
+        return;
     }
+    // The edge runs along a row: the eight rows around it, four above and
+    // four below, each `len` long.
+    let first = at - 4 * vert;
+    let Some(window) = plane.get_mut(first..first + 7 * vert + len) else {
+        return;
+    };
+    let (r0, rest) = window.split_at_mut(vert);
+    let (r1, rest) = rest.split_at_mut(vert);
+    let (r2, rest) = rest.split_at_mut(vert);
+    let (r3, rest) = rest.split_at_mut(vert);
+    let (r4, rest) = rest.split_at_mut(vert);
+    let (r5, rest) = rest.split_at_mut(vert);
+    let (r6, r7) = rest.split_at_mut(vert);
+    let (r0, r1, r2, r3) = (&r0[..len], &mut r1[..len], &mut r2[..len], &mut r3[..len]);
+    let (r4, r5, r6, r7) = (&mut r4[..len], &mut r5[..len], &mut r6[..len], &r7[..len]);
+    for i in 0..len {
+        let mut line = [r0[i], r1[i], r2[i], r3[i], r4[i], r5[i], r6[i], r7[i]];
+        if filter_line(&mut line, &run, tc0) {
+            r1[i] = line[1];
+            r2[i] = line[2];
+            r3[i] = line[3];
+            r4[i] = line[4];
+            r5[i] = line[5];
+            r6[i] = line[6];
+        }
+    }
+}
+
+/// Clause 8.7.2.3 and 8.7.2.4 on one line of samples across an edge:
+/// p3, p2, p1, p0, then q0, q1, q2, q3. Says whether the line was filtered.
+/// `tc0` is the table value for a strength below 4.
+#[inline(always)]
+fn filter_line<S: Sample>(line: &mut [S; 8], run: &FilterRun, tc0: i32) -> bool {
+    let (alpha, beta, chroma) = (run.alpha, run.beta, run.chroma);
+    let p1 = pel(line[2]);
+    let p0 = pel(line[3]);
+    let q0 = pel(line[4]);
+    let q1 = pel(line[5]);
+    if (p0 - q0).abs() >= alpha || (p1 - p0).abs() >= beta || (q1 - q0).abs() >= beta {
+        return false;
+    }
+    let p3 = pel(line[0]);
+    let p2 = pel(line[1]);
+    let q2 = pel(line[6]);
+    let q3 = pel(line[7]);
+    if run.bs < 4 {
+        let ap = (p2 - p0).abs();
+        let aq = (q2 - q0).abs();
+        let tc = if chroma {
+            tc0 + 1
+        } else {
+            tc0 + i32::from(ap < beta) + i32::from(aq < beta)
+        };
+        let delta = ((((q0 - p0) << 2) + (p1 - q1) + 4) >> 3).clamp(-tc, tc);
+        line[3] = S::clip(p0 + delta);
+        line[4] = S::clip(q0 - delta);
+        if !chroma && ap < beta {
+            let d = ((p2 + ((p0 + q0 + 1) >> 1) - (p1 << 1)) >> 1).clamp(-tc0, tc0);
+            line[2] = S::clip(p1 + d);
+        }
+        if !chroma && aq < beta {
+            let d = ((q2 + ((p0 + q0 + 1) >> 1) - (q1 << 1)) >> 1).clamp(-tc0, tc0);
+            line[5] = S::clip(q1 + d);
+        }
+    } else {
+        let strong_p = !chroma && (p2 - p0).abs() < beta && (p0 - q0).abs() < ((alpha >> 2) + 2);
+        let strong_q = !chroma && (q2 - q0).abs() < beta && (p0 - q0).abs() < ((alpha >> 2) + 2);
+        if strong_p {
+            line[3] = S::clip((p2 + 2 * p1 + 2 * p0 + 2 * q0 + q1 + 4) >> 3);
+            line[2] = S::clip((p2 + p1 + p0 + q0 + 2) >> 2);
+            line[1] = S::clip((2 * p3 + 3 * p2 + p1 + p0 + q0 + 4) >> 3);
+        } else {
+            line[3] = S::clip((2 * p1 + p0 + q1 + 2) >> 2);
+        }
+        if strong_q {
+            line[4] = S::clip((p1 + 2 * p0 + 2 * q0 + 2 * q1 + q2 + 4) >> 3);
+            line[5] = S::clip((p0 + q0 + q1 + q2 + 2) >> 2);
+            line[6] = S::clip((2 * q3 + 3 * q2 + q1 + q0 + p0 + 4) >> 3);
+        } else {
+            line[4] = S::clip((2 * q1 + q0 + p1 + 2) >> 2);
+        }
+    }
+    true
 }
 
 #[cfg(test)]

@@ -9384,6 +9384,36 @@ fn xy<S: Sample>(pic: &Frame<S>, addr: usize) -> (usize, usize) {
 }
 
 pub(crate) fn deblock<S: Sample>(pic: &mut Frame<S>) {
+    let chroma = pic.chroma();
+    // The planes leave the picture for the pass, so each is borrowed for
+    // writing once and the macroblocks stay readable beside them.
+    let mut y = std::mem::take(&mut pic.y);
+    let mut u = std::mem::take(&mut pic.u);
+    let mut v = std::mem::take(&mut pic.v);
+    deblock_planes(pic, chroma, (&mut y, &mut u, &mut v));
+    pic.y = y;
+    pic.u = u;
+    pic.v = v;
+}
+
+/// A macroblock with no luma coefficients and one motion for all of it. No
+/// edge inside it is filtered: each side of one predicts the same way and
+/// neither holds coefficients, so its strength is 0.
+fn inner_edges_flat(mb: &Mb) -> bool {
+    !mb.intra
+        && mb.nnz_y == [0; 16]
+        && mb.slot0 == [mb.slot0[0]; 4]
+        && mb.slot1 == [mb.slot1[0]; 4]
+        && mb.mv0 == [mb.mv0[0]; 16]
+        && mb.mv1 == [mb.mv1[0]; 16]
+}
+
+fn deblock_planes<S: Sample>(
+    pic: &Frame<S>,
+    chroma: u8,
+    planes: (&mut [S], &mut [S], &mut [S]),
+) {
+    let (luma, cb, cr) = planes;
     let mb_w = pic.mb_w;
     let mb_h = pic.h / 16;
     let mbaff = pic.mbaff;
@@ -9405,11 +9435,15 @@ pub(crate) fn deblock<S: Sample>(pic: &mut Frame<S>) {
         }
         let transform8 = pic.mb.get(index).is_some_and(|mb| mb.transform8);
         let field = pic.mb.get(index).is_some_and(|mb| mb.field_mb);
+        let flat = pic.mb.get(index).is_some_and(inner_edges_flat);
         let span = luma_span(my, field);
         let off = offsets(pic, index);
         for edge in 0..4 {
             if edge == 0 && (mx == 0 || !filter_boundary(pic, mx, my, true)) {
                 continue;
+            }
+            if edge != 0 && flat {
+                break;
             }
             let x = mx * 16 + edge * 4;
             let bs = edge_strength(pic, mx, my, edge, true);
@@ -9417,7 +9451,7 @@ pub(crate) fn deblock<S: Sample>(pic: &mut Frame<S>) {
             if x >= 4 && !(transform8 && (edge == 1 || edge == 3)) {
                 let qpav = edge_qp(pic, mx, my, true, true, true, edge == 0);
                 filter_groups(
-                    &mut pic.y,
+                    luma,
                     pic.w,
                     (x, span.y),
                     (true, false, 4, span.step),
@@ -9426,20 +9460,31 @@ pub(crate) fn deblock<S: Sample>(pic: &mut Frame<S>) {
                     off,
                 );
             }
-            if !pic.separate_plane {
-                filter_chroma(pic, (mx, my), edge, true, transform8, bs, off);
+            if !pic.separate_plane && bs != [0; 4] {
+                let at = ChromaEdge {
+                    mx,
+                    my,
+                    edge,
+                    vertical: true,
+                    transform8,
+                    format: chroma,
+                };
+                filter_chroma(pic, (cb, cr), at, bs, off);
             }
         }
         for edge in 0..4 {
             if edge == 0 && (above_my(pic, mx, my) < 0 || !filter_boundary(pic, mx, my, false)) {
                 continue;
             }
+            if edge != 0 && flat {
+                break;
+            }
             let y = span.at(edge * 4);
             let bs = edge_strength(pic, mx, my, edge, false);
             if y >= 4 && !(transform8 && (edge == 1 || edge == 3)) {
                 let qpav = edge_qp(pic, mx, my, true, true, false, edge == 0);
                 filter_groups(
-                    &mut pic.y,
+                    luma,
                     pic.w,
                     (mx * 16, y),
                     (false, false, 4, span.step),
@@ -9448,11 +9493,31 @@ pub(crate) fn deblock<S: Sample>(pic: &mut Frame<S>) {
                     off,
                 );
             }
-            if !pic.separate_plane {
-                filter_chroma(pic, (mx, my), edge, false, transform8, bs, off);
+            if !pic.separate_plane && bs != [0; 4] {
+                let at = ChromaEdge {
+                    mx,
+                    my,
+                    edge,
+                    vertical: false,
+                    transform8,
+                    format: chroma,
+                };
+                filter_chroma(pic, (cb, cr), at, bs, off);
             }
         }
     }
+}
+
+/// One edge of a macroblock, for its chroma. `format` is the picture's
+/// chroma format: 1 is 4:2:0, 2 is 4:2:2, 3 is 4:4:4.
+#[derive(Clone, Copy)]
+struct ChromaEdge {
+    mx: usize,
+    my: usize,
+    edge: usize,
+    vertical: bool,
+    transform8: bool,
+    format: u8,
 }
 
 fn edge_strength<S: Sample>(
@@ -9601,16 +9666,21 @@ fn offsets<S: Sample>(pic: &Frame<S>, index: usize) -> (i32, i32) {
 }
 
 fn filter_chroma<S: Sample>(
-    pic: &mut Frame<S>,
-    at: (usize, usize),
-    edge: usize,
-    vertical: bool,
-    transform8: bool,
+    pic: &Frame<S>,
+    planes: (&mut [S], &mut [S]),
+    at: ChromaEdge,
     bs: [u8; 4],
     off: (i32, i32),
 ) {
-    let (mx, my) = at;
-    let chroma = pic.chroma();
+    let ChromaEdge {
+        mx,
+        my,
+        edge,
+        vertical,
+        transform8,
+        format: chroma,
+    } = at;
+    let (plane_cb, plane_cr) = planes;
     let field = pic.mb.get(my * pic.mb_w + mx).is_some_and(|mb| mb.field_mb);
     if chroma == 3 {
         if transform8 && (edge == 1 || edge == 3) {
@@ -9633,11 +9703,7 @@ fn filter_chroma<S: Sample>(
         let stride = pic.w;
         for cb in [true, false] {
             let qpc = edge_qp(pic, mx, my, false, cb, vertical, edge == 0);
-            let plane = if cb {
-                pic.u.as_mut_slice()
-            } else {
-                pic.v.as_mut_slice()
-            };
+            let plane = if cb { &mut *plane_cb } else { &mut *plane_cr };
             filter_groups(
                 plane,
                 stride,
@@ -9678,11 +9744,7 @@ fn filter_chroma<S: Sample>(
     let stride = pic.w / 2;
     for cb in [true, false] {
         let qpc = edge_qp(pic, mx, my, false, cb, vertical, edge == 0);
-        let plane = if cb {
-            pic.u.as_mut_slice()
-        } else {
-            pic.v.as_mut_slice()
-        };
+        let plane = if cb { &mut *plane_cb } else { &mut *plane_cr };
         filter_groups(
             plane,
             stride,

@@ -46,7 +46,9 @@ pub use source::{
     VideoSource, decoded_picture, media_in_project, open_segment, open_segment_from,
     open_segment_in,
 };
-pub use thumbs::{MAX_THUMB_BYTES, MAX_THUMBS, THUMB_HEIGHT, Thumb, ThumbKey, Thumbnails};
+pub use thumbs::{
+    MAX_THUMB_BYTES, MAX_THUMBS, THUMB_HEIGHT, Thumb, ThumbCache, ThumbKey, Thumbnails,
+};
 pub use waveform::{MAX_BUCKETS, Peak, Waveform};
 pub use waves::{BUCKETS_PER_SECOND, Peaks, Waveforms};
 

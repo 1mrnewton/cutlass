@@ -132,14 +132,34 @@ medians of 7 runs taken in turn on a busy machine, same output:
 | 8x4 tiles | 18 | 1.28 s | 1.23 s |
 | 8x4 tiles | 8 | 1.62 s | 1.55 s |
 
-The whole files take 13.8 s (2.9 GB) and 31.7 s (3.4 GB) at 18 threads
-against libdav1d's 5.7 s and 7.8 s. What holds them back now: a
-frame's reconstruction and filters run on one thread, and a frame can
-follow its reference no closer than the two superblock rows the filters
-trail by plus its motion, so about 8 frames move at once on the first
-file and 4 on the second (128x128 superblocks, and one frame in five
-has a warped block and waits for whole references). Memory grows with
-the frames in flight (16 at most).
+Reconstruction and the filters of a frame then got a thread each:
+reconstruction keeps an unfiltered picture and hands every superblock
+row it completes to the filters as a copy, and the filters work in the
+final picture. Same files, medians of 7 runs taken in turn (the machine
+was busy, so the ratios count more than the times):
+
+| File | Threads | Before the pipeline took tiles | Tiles parsed at once | Filters on their own thread |
+|---|---|---|---|---|
+| 4x1 tiles | 18 | 1.19 s | 0.99 s | 0.86 s |
+| 4x1 tiles | 8 | 1.18 s | 1.01 s | 0.87 s |
+| 4x1 tiles | 4 | 1.55 s | 1.53 s | 1.18 s |
+| 8x4 tiles | 18 | 1.25 s | 1.19 s | 1.22 s |
+| 8x4 tiles | 8 | 1.59 s | 1.50 s | 1.25 s |
+| 8x4 tiles | 4 | 1.75 s | 1.74 s | 1.38 s |
+
+libdav1d takes 0.32 s and 0.33 s on these with all threads. The whole
+files take about 10.9 s (2.2 GB) and 28 s (3.0 GB) at 18 threads against
+libdav1d's 5.7 s and 7.8 s. At most 8 frames decode at once: 16 took
+the second file to 25 s but both files 1.3 GB higher. What holds them
+back now: the threaded decoder spends about 1.8x the processor time of
+one thread (blocks are recorded and replayed, rows are copied to the
+filters and to the frames that read them, and the mode info is written
+three times), a frame follows its reference no closer than the two
+superblock rows the filters trail by plus its motion, and on the second
+file one frame in five has a warped block and waits for whole
+references. Memory is mostly per frame in flight: two pictures, the
+mode info twice, the block logs of the whole frame and the frame states
+of its tile parsers.
 
 Threading (2+ threads): the calling thread only reads the frame headers.
 Each frame is a task on a thread of its own (the decoder keeps a pool of
@@ -155,10 +175,10 @@ parsed on up to four threads, each into a frame state of its own; a
 tile hands over its part of every superblock row (its block logs, loop
 filter sizes, CDEF indices, restoration units and saved motion) and
 whole rows go on in order to a backend thread that
-reconstructs them a superblock row behind and runs deblocking (in place,
-as soon as a row is reconstructed: the row below predicts from a saved
-copy of its unfiltered bottom row, as in libdav1d) and CDEF and loop
-restoration (one row behind). A reconstruction that reads a reference
+reconstructs them a superblock row behind, in a picture that stays
+unfiltered. Each finished row goes as a copy to a third thread, which
+runs deblocking in the final picture as soon as the row arrives, and
+CDEF and loop restoration one row behind. A reconstruction that reads a reference
 still being decoded reads the bands of rows that reference publishes as
 final (only frames something waits for publish them; the bands are
 shared, not copied): a block whose rows lie in one band is predicted

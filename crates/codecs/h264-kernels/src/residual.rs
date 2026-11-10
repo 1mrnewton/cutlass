@@ -13,6 +13,14 @@ pub fn idct4_add(plane: &mut [u8], at: usize, down: usize, block: &[i32; 16]) ->
     kernel!(idct4_add(plane, at, down, block))
 }
 
+/// Adds `dc` to each sample of the `size`×`size` block of `plane` whose
+/// first sample is at `at`, with rows `down` apart, and holds each to 0 to
+/// 255. `size` is 4 or 8. `false` means it is another size or the samples
+/// are not all in the plane, and nothing was done.
+pub fn dc_add(plane: &mut [u8], at: usize, down: usize, dc: i32, size: usize) -> bool {
+    kernel!(dc_add(plane, at, down, dc, size))
+}
+
 /// The plane reads and writes around whichever `idct4_rows` is in scope: it
 /// takes the block and the four rows of four samples, and gives the rows
 /// back with the residual added.
@@ -36,6 +44,33 @@ macro_rules! residual_kernels {
             }
             true
         }
+
+        /// See [`crate::residual::dc_add`]. `dc_row` adds to the eight
+        /// samples in a `u64`.
+        $(#[$feature])*
+        $visibility fn dc_add(plane: &mut [u8], at: usize, down: usize, dc: i32, size: usize) -> bool {
+            if !(size == 4 || size == 8) {
+                return false;
+            }
+            let Some(rest) = plane.len().checked_sub(at) else {
+                return false;
+            };
+            if (size - 1).checked_mul(down).is_none_or(|rows| rows + size > rest) {
+                return false;
+            }
+            for index in 0..size {
+                let row = &mut plane[at + index * down..];
+                if size == 8 {
+                    if let Some(row) = row.first_chunk_mut::<8>() {
+                        *row = dc_row(u64::from_le_bytes(*row), dc).to_le_bytes();
+                    }
+                } else if let Some(row) = row.first_chunk_mut::<4>() {
+                    let samples = u64::from(u32::from_le_bytes(*row));
+                    *row = (dc_row(samples, dc) as u32).to_le_bytes();
+                }
+            }
+            true
+        }
     };
 }
 pub(crate) use residual_kernels;
@@ -53,6 +88,28 @@ mod tests {
                 .wrapping_mul(6_364_136_223_846_793_005)
                 .wrapping_add(1_442_695_040_888_963_407);
             (self.0 >> 33) as u32
+        }
+    }
+
+    #[test]
+    fn the_dc_add_matches_the_plain_one() {
+        let mut rng = Lcg(11);
+        for round in 0..20_000 {
+            let down = 9 + (rng.next() % 8) as usize;
+            let before: Vec<u8> = (0..down * 12).map(|_| rng.next() as u8).collect();
+            let size = [4, 8, 5][round % 3];
+            // Mostly inside the plane, sometimes off its end.
+            let at = (rng.next() as usize) % (down * 6);
+            let dc = (rng.next() % 1201) as i32 - 600;
+            let mut fast = before.clone();
+            let mut plain = before.clone();
+            let done = super::dc_add(&mut fast, at, down, dc, size);
+            let wanted = scalar::dc_add(&mut plain, at, down, dc, size);
+            assert_eq!(done, wanted, "round {round}");
+            assert_eq!(fast, plain, "round {round}: dc {dc}, size {size}");
+            if !done {
+                assert_eq!(fast, before);
+            }
         }
     }
 

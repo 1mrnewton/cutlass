@@ -4836,13 +4836,6 @@ impl Drop for Pool {
     }
 }
 
-/// The places of the levels of `coeffs` that are not zero, first to last.
-/// The levels are tested without a branch each, and only the ones that are
-/// set are visited after that; most of a block is zero.
-fn nonzero_levels(coeffs: &[i32]) -> impl Iterator<Item = usize> {
-    set_places(level_set(coeffs))
-}
-
 /// One bit for each of the first 64 levels of `coeffs` that is not zero.
 fn level_set(coeffs: &[i32]) -> u64 {
     let mut set = 0u64;
@@ -4913,7 +4906,8 @@ fn add_scaled<S: Sample>(
                 block[ry * 4 + rx] =
                     recon::scale4(level, qp + S::QP_BD, rx, ry, i32::from(weight[ry * 4 + rx]));
             }
-            recon::add_idct4(plane, stride, x, y, &mut block, step);
+            // A lone DC went the short way above.
+            recon::add_idct4_full(plane, stride, x, y, &mut block, step);
             return;
         }
         recon::add_block(plane, stride, x, y, &block, 4, step);
@@ -4933,7 +4927,8 @@ fn add_scaled<S: Sample>(
                 block[ry * 8 + rx] =
                     recon::scale8(level, qp + S::QP_BD, rx, ry, i32::from(weight[pos]));
             }
-            recon::idct8(&mut block);
+            // A lone DC went the short way above.
+            recon::idct8_full(&mut block);
         }
         recon::add_block(plane, stride, x, y, &block, 8, step);
     }

@@ -273,7 +273,7 @@ pub fn idct8(block: &mut [i32; 64]) {
     idct8_full(block);
 }
 
-fn idct8_full(block: &mut [i32; 64]) {
+pub(crate) fn idct8_full(block: &mut [i32; 64]) {
     let mut mid = [0i32; 64];
     for i in 0..8 {
         idct8_1d(&block[i * 8..i * 8 + 8], &mut mid[i * 8..i * 8 + 8]);
@@ -380,6 +380,12 @@ pub trait Sample: Copy + Default + Into<i32> + Send + Sync + 'static {
     /// rows `down` apart, with a vector kernel. `false` as for
     /// [`Self::predict_fast`].
     fn idct4_add_fast(_plane: &mut [Self], _at: usize, _down: usize, _block: &[i32; 16]) -> bool {
+        false
+    }
+
+    /// `dc` added to the `size`×`size` samples from `at`, rows `down`
+    /// apart, with a vector kernel. `false` as for [`Self::predict_fast`].
+    fn add_dc_fast(_plane: &mut [Self], _at: usize, _down: usize, _dc: i32, _size: usize) -> bool {
         false
     }
 
@@ -525,6 +531,10 @@ impl Sample for u8 {
         cutlass_h264_kernels::residual::idct4_add(plane, at, down, block)
     }
 
+    fn add_dc_fast(plane: &mut [Self], at: usize, down: usize, dc: i32, size: usize) -> bool {
+        cutlass_h264_kernels::residual::dc_add(plane, at, down, dc, size)
+    }
+
     fn mix_fast(
         dst: &mut [Self],
         dst_stride: usize,
@@ -599,8 +609,11 @@ fn pel<S: Sample>(value: S) -> i32 {
 }
 
 /// Inverse-transforms a 4×4 block of scaled coefficients and adds it to
-/// the plane at (`x0`, `y0`), rows `step` picture rows apart.
-pub fn add_idct4<S: Sample>(
+/// the plane at (`x0`, `y0`), rows `step` picture rows apart. The caller
+/// sends a block with a lone DC to [`add_dc`] instead, so this one is not
+/// scanned to find out; a block that has only a DC is still transformed
+/// correctly.
+pub fn add_idct4_full<S: Sample>(
     plane: &mut [S],
     stride: usize,
     x0: usize,
@@ -608,15 +621,10 @@ pub fn add_idct4<S: Sample>(
     block: &mut [i32; 16],
     step: usize,
 ) {
-    // A lone DC is one value for the whole block, as in `idct4`.
-    if only_dc(block) {
-        add_dc(plane, stride, (x0, y0, step), (block[0] + 32) >> 6, 4);
-        return;
-    }
     if S::idct4_add_fast(plane, y0 * stride + x0, stride * step, block) {
         return;
     }
-    idct4(block);
+    idct4_full(block);
     add_block(plane, stride, x0, y0, block, 4, step);
 }
 
@@ -631,6 +639,9 @@ pub fn add_dc<S: Sample>(
 ) {
     let (x0, y0, step) = origin;
     if dc == 0 {
+        return;
+    }
+    if S::add_dc_fast(plane, y0 * stride + x0, stride * step, dc, n) {
         return;
     }
     for row in 0..n {

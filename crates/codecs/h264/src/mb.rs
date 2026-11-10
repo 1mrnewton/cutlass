@@ -4522,18 +4522,30 @@ fn recon_intra<S: Sample>(
             for (i, samples) in ac.iter().enumerate() {
                 let bx = blk_x(i);
                 let by = blk_y(i);
-                let mut block = [0i32; 16];
-                block[0] = dc[by * 4 + bx];
-                if mb.cbp & 15 != 0 {
-                    // A zero level scales to zero.
-                    for n in super::nonzero_levels(&samples[..15]) {
-                        let pos = scan[n + 1];
-                        let (ry, rx) = (pos / 4, pos % 4);
-                        let weight = i32::from(slice.pps.weight4[0][pos]);
-                        block[pos] = recon::scale4(samples[n], qp + S::QP_BD, rx, ry, weight);
-                    }
+                // The levels that are not zero; none were read when the
+                // coded block pattern leaves luma out.
+                let set = if mb.cbp & 15 != 0 {
+                    super::level_set(&samples[..15])
+                } else {
+                    0
+                };
+                let own = dc[by * 4 + bx];
+                if set == 0 {
+                    // A lone DC is one value for the whole block.
+                    let origin = (x0 + bx * 4, span.at(by * 4), step);
+                    recon::add_dc(&mut pic.y, pic.w, origin, (own + 32) >> 6, 4);
+                    continue;
                 }
-                recon::add_idct4(
+                let mut block = [0i32; 16];
+                block[0] = own;
+                // A zero level scales to zero.
+                for n in super::set_places(set) {
+                    let pos = scan[n + 1];
+                    let (ry, rx) = (pos / 4, pos % 4);
+                    let weight = i32::from(slice.pps.weight4[0][pos]);
+                    block[pos] = recon::scale4(samples[n], qp + S::QP_BD, rx, ry, weight);
+                }
+                recon::add_idct4_full(
                     &mut pic.y,
                     pic.w,
                     x0 + bx * 4,
@@ -5139,18 +5151,29 @@ fn recon_chroma<S: Sample>(
         for i in 0..4 {
             let bx = i & 1;
             let by = i >> 1;
+            // The levels that are not zero; none were read into an array
+            // that is not in use.
+            let set = if used & AC_USED != 0 {
+                super::level_set(&ac[i][..15])
+            } else {
+                0
+            };
+            if set == 0 {
+                // A lone DC is one value for the whole block.
+                let origin = (x0 + bx * 4, span.at(by * 4), step);
+                recon::add_dc(plane, stride, origin, (scaled[i] + 32) >> 6, 4);
+                continue;
+            }
             let mut block = [0i32; 16];
             block[0] = scaled[i];
-            if used & AC_USED != 0 {
-                // A zero level scales to zero.
-                for n in super::nonzero_levels(&ac[i][..15]) {
-                    let pos = scan[n + 1];
-                    let (ry, rx) = (pos / 4, pos % 4);
-                    let w = i32::from(slice.pps.weight4[list][pos]);
-                    block[pos] = recon::scale4(ac[i][n], qp_c, rx, ry, w);
-                }
+            // A zero level scales to zero.
+            for n in super::set_places(set) {
+                let pos = scan[n + 1];
+                let (ry, rx) = (pos / 4, pos % 4);
+                let w = i32::from(slice.pps.weight4[list][pos]);
+                block[pos] = recon::scale4(ac[i][n], qp_c, rx, ry, w);
             }
-            recon::add_idct4(
+            recon::add_idct4_full(
                 plane,
                 stride,
                 x0 + bx * 4,

@@ -86,4 +86,19 @@ fn idct4_rows(block: &[i32; 16], rows: [[u8; 4]; 4]) -> [[u8; 4]; 4] {
     ]
 }
 
+/// `dc` added to each of the eight samples in `samples`, each held to 0 to
+/// 255: its positive part added and its negative part taken away, both
+/// saturating.
+#[inline]
+#[target_feature(enable = "neon")]
+fn dc_row(samples: u64, dc: i32) -> u64 {
+    use core::arch::aarch64::{
+        vcreate_u8, vdup_n_u8, vget_lane_u64, vqadd_u8, vqsub_u8, vreinterpret_u64_u8,
+    };
+    let rise = vdup_n_u8(dc.clamp(0, 255) as u8);
+    let fall = vdup_n_u8((-dc.clamp(-255, 0)) as u8);
+    let moved = vqsub_u8(vqadd_u8(vcreate_u8(samples), rise), fall);
+    vget_lane_u64::<0>(vreinterpret_u64_u8(moved))
+}
+
 crate::residual::residual_kernels!(pub(crate), #[target_feature(enable = "neon")]);

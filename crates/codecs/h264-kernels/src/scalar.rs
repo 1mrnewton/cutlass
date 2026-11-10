@@ -287,4 +287,14 @@ fn idct4_rows(block: &[i32; 16], rows: [[u8; 4]; 4]) -> [[u8; 4]; 4] {
     out
 }
 
+/// `dc` added to each of the eight samples in `samples`, each held to 0 to
+/// 255.
+fn dc_row(samples: u64, dc: i32) -> u64 {
+    u64::from_le_bytes(
+        samples
+            .to_le_bytes()
+            .map(|sample| (i32::from(sample) + dc.clamp(-255, 255)).clamp(0, 255) as u8),
+    )
+}
+
 crate::residual::residual_kernels!(pub,);

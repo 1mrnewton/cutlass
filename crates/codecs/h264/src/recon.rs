@@ -427,9 +427,9 @@ fn deblock_chroma8_eight(plane: &mut [u8], edge: LumaEdge) -> bool {
             None => deblock::chroma_strong(&mut rows, alpha, beta),
         }
         // A chroma filter changes only p0 and q0.
-        for line in 0..8 {
+        for (line, (&p0, &q0)) in rows[1].iter().zip(&rows[2]).enumerate() {
             let start = first + line * down;
-            plane[start + 1..start + 3].copy_from_slice(&[rows[1][line], rows[2][line]]);
+            plane[start + 1..start + 3].copy_from_slice(&[p0, q0]);
         }
         return true;
     }

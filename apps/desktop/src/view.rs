@@ -7228,14 +7228,56 @@ fn row_height(size: RowSize) -> f32 {
 
 /// The narrowest a transition's bar is drawn, so one on a wide view of
 /// the timeline can still be picked.
-const TRANSITION_MIN_WIDTH: f32 = 14.0;
+const TRANSITION_MIN_WIDTH: f32 = 22.0;
 
-/// The width of the thick edge at each side of a transition's bar, which
-/// is also the strip that drags it longer or shorter.
-const TRANSITION_EDGE: f32 = 4.0;
+/// The width of the strip at each side of a transition's bar that drags it
+/// longer or shorter.
+const TRANSITION_EDGE: f32 = 6.0;
+
+/// How far a transition's bar stands above and below the clips it joins.
+const TRANSITION_RISE: f32 = 2.0;
+
+/// The pale fill of a transition's bar: frosted over the clips while it
+/// rests, lighter under the pointer, and clearer once picked, when its
+/// outline carries it.
+const TRANSITION_FILL: Color32 = Color32::from_rgba_premultiplied(92, 92, 92, 92);
+const TRANSITION_FILL_HOVERED: Color32 = Color32::from_rgba_premultiplied(120, 120, 120, 120);
+const TRANSITION_FILL_PICKED: Color32 = Color32::from_rgba_premultiplied(56, 56, 56, 56);
+
+/// The mark in the middle of a transition's bar: two triangles that meet
+/// point to point at `center`, one clip handing over to the next.
+fn paint_transition_mark(painter: &egui::Painter, center: Pos2) {
+    const HALF: f32 = 5.0;
+    const REACH: f32 = 6.0;
+    for side in [-1.0, 1.0] {
+        painter.add(egui::Shape::convex_polygon(
+            vec![
+                center + Vec2::new(side * REACH, -HALF),
+                center + Vec2::new(side * REACH, HALF),
+                center,
+            ],
+            Color32::WHITE,
+            egui::Stroke::NONE,
+        ));
+    }
+}
+
+/// The grip inside each end of a picked transition's bar: a short upright
+/// line that says the end can be dragged.
+fn paint_transition_grips(painter: &egui::Painter, rect: Rect) {
+    for x in [rect.left() + 6.0, rect.right() - 6.0] {
+        painter.line_segment(
+            [
+                Pos2::new(x, rect.center().y - 6.0),
+                Pos2::new(x, rect.center().y + 6.0),
+            ],
+            egui::Stroke::new(2.0, Color32::from_white_alpha(230)),
+        );
+    }
+}
 
 /// Where a transition's bar is drawn on its `row`: over the blend's
-/// window, as tall as the clips, and no narrower than
+/// window, a little taller than the clips, and no narrower than
 /// [`TRANSITION_MIN_WIDTH`] about its middle.
 fn transition_rect(
     shell: &Shell,
@@ -7252,13 +7294,14 @@ fn transition_rect(
             rect.left() + span.0 as f32 * shell.pixel_size() as f32 / 2.0,
             rect.center().y,
         ),
-        Vec2::new(width, rect.height()),
+        Vec2::new(width, rect.height() + 2.0 * TRANSITION_RISE),
     )
 }
 
-/// The transitions of `lane`, each a pale bar over its cut with a thick
-/// edge at each side. A click picks one, Delete then takes it off, and an
-/// edge dragged makes it longer or shorter between its limits.
+/// The transitions of `lane`, each a frosted bar over its cut with a mark
+/// in its middle. A click picks one, which then wears a white outline and
+/// a grip inside each end; Delete takes it off, and an end dragged makes
+/// it longer or shorter between its limits.
 fn paint_transitions(
     shell: &mut Shell,
     ui: &mut Ui,
@@ -7281,34 +7324,27 @@ fn paint_transitions(
         let selected = picked.as_ref() == Some(&bar.segment_id);
         let painter = ui.painter().with_clip_rect(row);
         let radius = CornerRadius::same(CLIP_RADIUS);
-        painter.rect_filled(
-            rect,
-            radius,
-            Color32::from_white_alpha(if selected { 96 } else { 64 }),
-        );
-        for x in [rect.left(), rect.right() - TRANSITION_EDGE] {
-            painter.rect_filled(
-                Rect::from_min_size(
-                    Pos2::new(x, rect.top()),
-                    Vec2::new(TRANSITION_EDGE, rect.height()),
-                ),
+        let hovered = ui.rect_contains_pointer(visible);
+        let fill = match (selected, hovered) {
+            (true, _) => TRANSITION_FILL_PICKED,
+            (false, true) => TRANSITION_FILL_HOVERED,
+            (false, false) => TRANSITION_FILL,
+        };
+        painter.rect_filled(rect, radius, fill);
+        if selected {
+            painter.rect_stroke(
+                rect,
                 radius,
-                Color32::WHITE,
+                egui::Stroke::new(2.0, Color32::WHITE),
+                egui::StrokeKind::Inside,
             );
         }
-        painter.rect_stroke(
-            rect,
-            radius,
-            egui::Stroke::new(if selected { 2.0 } else { 1.0 }, Color32::WHITE),
-            egui::StrokeKind::Inside,
-        );
-        if rect.width() >= 30.0 {
-            let _ = icons::paint(
-                &painter,
-                Rect::from_center_size(rect.center(), Vec2::splat(14.0)),
-                "transitions",
-                Color32::WHITE,
-            );
+        // The mark needs its own width, and the grips room beside it.
+        if rect.width() >= 18.0 {
+            paint_transition_mark(&painter, rect.center());
+        }
+        if selected && rect.width() >= 40.0 {
+            paint_transition_grips(&painter, rect);
         }
         let id = bar.segment_id.clone();
         let salt = ("transition", index, id.as_str().to_owned());
@@ -12762,13 +12798,17 @@ mod tests {
     }
 
     /// The pale bars `output` paints for transitions: each filled rectangle
-    /// of the unpicked or the picked bar's white.
+    /// in one of the bar's fills.
     fn transition_bars_painted(output: &egui::FullOutput) -> Vec<Rect> {
         fn collect(shape: &egui::Shape, found: &mut Vec<Rect>) {
             match shape {
                 egui::Shape::Rect(rect)
-                    if rect.fill == Color32::from_white_alpha(64)
-                        || rect.fill == Color32::from_white_alpha(96) =>
+                    if [
+                        TRANSITION_FILL,
+                        TRANSITION_FILL_HOVERED,
+                        TRANSITION_FILL_PICKED,
+                    ]
+                    .contains(&rect.fill) =>
                 {
                     found.push(rect.rect);
                 }

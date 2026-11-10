@@ -484,15 +484,19 @@ impl Sample for u8 {
         use cutlass_h264_kernels::deblock;
         let (luma, cb, cr) = planes;
         let [for_luma, for_cb, for_cr] = edges;
-        // All three planes or none: each kernel then has its samples.
-        if !(for_luma.fits(luma.len(), 16) && for_cb.fits(cb.len(), 8) && for_cr.fits(cr.len(), 8))
+        // A plane with no edge to filter is not visited. For the others
+        // it is all of them or none: each kernel then has its samples.
+        let (some_luma, some_cb, some_cr) =
+            (!for_luma.is_empty(), !for_cb.is_empty(), !for_cr.is_empty());
+        if (some_luma && !for_luma.fits(luma.len(), 16))
+            || (some_cb && !for_cb.fits(cb.len(), 8))
+            || (some_cr && !for_cr.fits(cr.len(), 8))
         {
             return false;
         }
-        // A plane with no edge to filter is not visited.
-        (for_luma.is_empty() || deblock::luma_mb(luma, for_luma))
-            && (for_cb.is_empty() || deblock::chroma_mb(cb, for_cb))
-            && (for_cr.is_empty() || deblock::chroma_mb(cr, for_cr))
+        (!some_luma || deblock::luma_mb(luma, for_luma))
+            && (!some_cb || deblock::chroma_mb(cb, for_cb))
+            && (!some_cr || deblock::chroma_mb(cr, for_cr))
     }
 
     fn predict_fast(

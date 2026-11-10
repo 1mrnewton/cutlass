@@ -10626,12 +10626,21 @@ fn deblock_planes<S: Sample>(
         }
         let transform8 = pic.mb.get(index).is_some_and(|mb| mb.transform8);
         let field = pic.mb.get(index).is_some_and(|mb| mb.field_mb);
-        let flat = pic.mb.get(index).is_some_and(inner_edges_flat);
-        // Worked out once here, not again for each of the eight edges.
-        let known = pic
-            .mb
-            .get(index)
-            .map_or((0, false), |mb| (coded_mask(mb), single_motion(mb)));
+        // Worked out once here, not again for each of the eight edges. An
+        // intra macroblock's edges take their strength from that alone, on
+        // its own edges and its neighbours', so its summary is never read.
+        let known = pic.mb.get(index).map_or((0, false), |mb| {
+            if mb.intra {
+                (0, false)
+            } else {
+                (coded_mask(mb), single_motion(mb))
+            }
+        });
+        let flat = known.1
+            && pic
+                .mb
+                .get(index)
+                .is_some_and(|mb| !mb.intra && mb.nnz_y == [0; 16]);
         if !mbaff {
             left = Some(known);
             if let Some(kept) = above.get_mut(mx) {

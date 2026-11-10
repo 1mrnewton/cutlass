@@ -65,10 +65,10 @@ pub struct MbEdges {
 impl MbEdges {
     /// No edge is filtered.
     pub fn is_empty(&self) -> bool {
-        self.vertical
-            .iter()
-            .chain(&self.horizontal)
-            .all(Option::is_none)
+        matches!(
+            (&self.vertical, &self.horizontal),
+            ([None, None, None, None], [None, None, None, None])
+        )
     }
 
     /// Whether every sample these edges touch is in a plane of `len`

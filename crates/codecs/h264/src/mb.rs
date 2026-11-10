@@ -4335,28 +4335,23 @@ fn recon_intra<S: Sample>(
                     coeffs[1..].copy_from_slice(&samples[..15]);
                 }
                 let mut block = [0i32; 16];
-                for n in 0..16 {
+                block[0] = dc[by * 4 + bx];
+                for n in 1..16 {
+                    // A zero level scales to zero.
+                    if coeffs[n] == 0 {
+                        continue;
+                    }
                     let pos = ZIGZAG4[n];
                     let (ry, rx) = (pos / 4, pos % 4);
-                    let level = if n == 0 { dc[by * 4 + bx] } else { coeffs[n] };
                     let weight = i32::from(slice.pps.weight4[0][pos]);
-                    block[ry * 4 + rx] = if n == 0 {
-                        level
-                    } else {
-                        recon::scale4(level, qp + S::QP_BD, rx, ry, weight)
-                    };
+                    block[ry * 4 + rx] = recon::scale4(coeffs[n], qp + S::QP_BD, rx, ry, weight);
                 }
-                if mb.cbp & 15 == 0 {
-                    block[0] = dc[by * 4 + bx];
-                }
-                recon::idct4(&mut block);
-                recon::add_block(
+                recon::add_idct4(
                     &mut pic.y,
                     pic.w,
                     x0 + bx * 4,
                     span.at(by * 4),
-                    &block,
-                    4,
+                    &mut block,
                     step,
                 );
             }
@@ -4630,14 +4625,44 @@ fn pred8_block<S: Sample>(
     } else {
         corner
     };
+    // The three plain modes fill the block from one value or one edge; a
+    // mode whose edge is missing falls to DC, as in `pred8_at`.
     let mut out = [S::default(); 64];
-    for row in 0..8 {
-        for col in 0..8 {
-            out[row * 8 + col] =
-                pred8_at(mode, (col, row), &above, &left, corner, (above_ok, left_ok));
+    match mode {
+        0 if above_ok => {
+            for row in out.chunks_exact_mut(8) {
+                row.copy_from_slice(&above[..8]);
+            }
         }
+        1 if left_ok => {
+            for (row, &sample) in out.chunks_exact_mut(8).zip(&left) {
+                row.fill(sample);
+            }
+        }
+        3 | 7 if above_ok => fill8(&mut out, mode, &above, &left, corner, (above_ok, left_ok)),
+        4..=6 if above_ok && left_ok => {
+            fill8(&mut out, mode, &above, &left, corner, (above_ok, left_ok));
+        }
+        8 if left_ok => fill8(&mut out, mode, &above, &left, corner, (above_ok, left_ok)),
+        _ => out = [dc8(&above, &left, above_ok, left_ok); 64],
     }
     out
+}
+
+/// A directional 8×8 prediction, sample by sample.
+fn fill8<S: Sample>(
+    out: &mut [S; 64],
+    mode: u8,
+    above: &[S; 16],
+    left: &[S; 8],
+    corner: S,
+    present: (bool, bool),
+) {
+    for row in 0..8 {
+        for col in 0..8 {
+            out[row * 8 + col] = pred8_at(mode, (col, row), above, left, corner, present);
+        }
+    }
 }
 
 fn pred8_at<S: Sample>(
@@ -6941,6 +6966,37 @@ fn corner_sample<S: Sample>(
     pix(plane, stride, height, x, y)
 }
 
+/// The samples along one edge of a macroblock, at most 17 of them, held in
+/// place: an edge is gathered for every intra macroblock.
+struct Edge<S> {
+    samples: [S; 17],
+    len: usize,
+}
+
+impl<S: Sample> Edge<S> {
+    /// `len` samples of the mid value.
+    fn new(len: usize) -> Self {
+        Self {
+            samples: [S::mid(); 17],
+            len: len.min(17),
+        }
+    }
+}
+
+impl<S> std::ops::Deref for Edge<S> {
+    type Target = [S];
+
+    fn deref(&self) -> &[S] {
+        &self.samples[..self.len]
+    }
+}
+
+impl<S> std::ops::DerefMut for Edge<S> {
+    fn deref_mut(&mut self) -> &mut [S] {
+        &mut self.samples[..self.len]
+    }
+}
+
 fn edge16<S: Sample>(
     pic: &Frame<S>,
     mx: usize,
@@ -6948,7 +7004,7 @@ fn edge16<S: Sample>(
     slice: u16,
     constrained: bool,
     plane: u8,
-) -> (Vec<S>, Vec<S>, bool, bool) {
+) -> (Edge<S>, Edge<S>, bool, bool) {
     let (samples, stride, height) = plane_samples(pic, plane);
     let field = pic.mb.get(my * pic.mb_w + mx).is_some_and(|mb| mb.field_mb);
     let span = luma_span(my, field);
@@ -6957,8 +7013,8 @@ fn edge16<S: Sample>(
     let left_ok = mx > 0
         && neighbor(pic, mx as i32 - 1, my as i32, slice)
             .is_some_and(|mb| !constrained || mb.intra);
-    let mut above = vec![S::mid(); 17];
-    let mut left = vec![S::mid(); 17];
+    let mut above = Edge::new(17);
+    let mut left = Edge::new(17);
     let above_y = span.y as i32 - span.step as i32;
     if above_ok {
         for (k, slot) in above[..16].iter_mut().enumerate() {
@@ -6995,7 +7051,7 @@ fn edge_chroma<S: Sample>(
     slice_id: u16,
     constrained: bool,
     rows: usize,
-) -> (Vec<S>, Vec<S>, bool, bool) {
+) -> (Edge<S>, Edge<S>, bool, bool) {
     let plane = if cb { &pic.u } else { &pic.v };
     let stride = pic.chroma_stride();
     let height = pic.chroma_height();
@@ -7006,8 +7062,8 @@ fn edge_chroma<S: Sample>(
     let left_ok = mx > 0
         && neighbor(pic, mx as i32 - 1, my as i32, slice_id)
             .is_some_and(|mb| !constrained || mb.intra);
-    let mut above = vec![S::mid(); 9];
-    let mut left = vec![S::mid(); rows + 1];
+    let mut above = Edge::new(9);
+    let mut left = Edge::new(rows + 1);
     let above_y = span.y as i32 - span.step as i32;
     if above_ok {
         for (k, slot) in above[..8].iter_mut().enumerate() {

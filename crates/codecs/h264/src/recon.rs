@@ -574,9 +574,21 @@ pub fn add_idct4<S: Sample>(
     block: &mut [i32; 16],
     step: usize,
 ) {
-    // A lone DC is one value for the whole block; `idct4` knows.
-    let lone_dc = block[1..] == [0; 15];
-    if !lone_dc && S::idct4_add_fast(plane, y0 * stride + x0, stride * step, block) {
+    // A lone DC is one value for the whole block, as in `idct4`.
+    if block[1..] == [0; 15] {
+        let dc = (block[0] + 32) >> 6;
+        if dc == 0 {
+            return;
+        }
+        for row in 0..4 {
+            let at = (y0 + row * step) * stride + x0;
+            for sample in &mut plane[at..at + 4] {
+                *sample = S::clip(pel(*sample) + dc);
+            }
+        }
+        return;
+    }
+    if S::idct4_add_fast(plane, y0 * stride + x0, stride * step, block) {
         return;
     }
     idct4(block);
@@ -612,6 +624,16 @@ pub fn pred4<S: Sample>(
     above_ok: bool,
     left_ok: bool,
 ) -> [S; 16] {
+    // DC, and every mode whose edge is missing, is one value for the block.
+    let directional = match mode {
+        0 | 3 | 7 => above_ok,
+        1 | 8 => left_ok,
+        4..=6 => above_ok && left_ok,
+        _ => false,
+    };
+    if !directional {
+        return [S::clip(dc4(above, left, above_ok, left_ok)); 16];
+    }
     let mut out = [S::default(); 16];
     let p = |x: i32, y: i32| -> i32 {
         if y == -1 && x == -1 {

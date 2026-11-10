@@ -4473,10 +4473,12 @@ fn put_block<S: Sample>(
     n: usize,
     step: usize,
 ) {
-    for row in 0..n {
-        for col in 0..n {
-            plane[(y + row * step) * stride + x + col] = src[row * n + col];
-        }
+    if n == 0 {
+        return;
+    }
+    for (row, samples) in src.chunks_exact(n).take(n).enumerate() {
+        let at = (y + row * step) * stride + x;
+        plane[at..at + n].copy_from_slice(samples);
     }
 }
 
@@ -4835,8 +4837,10 @@ fn add_scaled<S: Sample>(
 ) {
     let (x, y, step) = origin;
     let (qp, bypass) = quant;
-    // A block whose flag said it holds no coefficients adds nothing.
-    if coeffs.iter().all(|&level| level == 0) {
+    // A block whose flag said it holds no coefficients adds nothing. The
+    // levels are combined without stopping early, which is one pass the
+    // compiler can widen; most of a block is zero either way.
+    if coeffs.iter().fold(0, |any, &level| any | level) == 0 {
         return;
     }
     if n == 4 {

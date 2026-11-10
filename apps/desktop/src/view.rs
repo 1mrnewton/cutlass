@@ -445,6 +445,10 @@ pub fn show(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Option
         paint_library_ghost(shell, ui);
         if view.export_open {
             export_dialog(shell, ui, view, parent);
+        } else if !shell.library_export().is_empty() {
+            // The library's files were for that one dialog; the next
+            // export is of the timeline again.
+            shell.clear_library_export();
         }
         if shell.asked_transition().is_some() {
             transition_prompt(shell, ui, view);
@@ -2486,6 +2490,16 @@ fn library_action(
         ("rename", LibraryTarget::Folder(id)) => {
             start_folder_name(shell, view, id.clone());
             Ok(())
+        }
+        ("export", LibraryTarget::Files | LibraryTarget::Folder(_)) => {
+            let asked = match target {
+                LibraryTarget::Folder(id) => shell.export_library(std::slice::from_ref(id)),
+                _ => shell.export_library(&picked),
+            };
+            asked.map(|()| {
+                view.export.span = crate::shell::ExportSpan::Library;
+                view.export_open = true;
+            })
         }
         _ => {
             shell.set_notice(format!("{} is not built yet", item.label));
@@ -8920,19 +8934,30 @@ fn export_choices(shell: &Shell, ui: &mut Ui, view: &mut ViewState) {
     choices_row(ui, "Range", |ui| {
         let picked = !shell.selection().is_empty();
         let marked = shell.marked_span().is_some();
+        let files = shell.library_export().len();
         let offered = |span| match span {
             ExportSpan::Whole => true,
             ExportSpan::Selected => picked,
             ExportSpan::Marked => marked,
+            ExportSpan::Library => files > 0,
         };
         if !offered(export.span) {
             export.span = ExportSpan::Whole;
         }
+        // The library's own row is there only when its menu asked.
+        let library = match files {
+            0 => None,
+            1 => Some((ExportSpan::Library, "Library file")),
+            _ => Some((ExportSpan::Library, "Library files")),
+        };
         for (span, name) in [
             (ExportSpan::Whole, "Whole timeline"),
             (ExportSpan::Marked, "In to out"),
             (ExportSpan::Selected, "Selected clips"),
-        ] {
+        ]
+        .into_iter()
+        .chain(library)
+        {
             let label = ui::Choice::new(export.span == span, name);
             if ui.add_enabled(offered(span), label).clicked() {
                 export.span = span;

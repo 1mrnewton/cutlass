@@ -584,6 +584,8 @@ pub enum ExportSpan {
     Selected,
     /// From the in mark, or the start, to the out mark, or the end.
     Marked,
+    /// Not the timeline: the library files picked for export, end to end.
+    Library,
 }
 
 /// How many bits a second a movie spends, around the recommended rate.
@@ -837,6 +839,9 @@ pub struct Shell {
     reveal: Option<SegmentId>,
     /// The picked keyframe: its clip, and its time from the clip's start.
     selected_key: Option<(SegmentId, Micros)>,
+    /// The library files Export selected clips was asked for, as material
+    /// ids. Empty when the export is of the timeline.
+    library_export: Vec<String>,
     /// The picked transition, by the clip it leads out of.
     selected_transition: Option<SegmentId>,
     /// A transition dropped on a cut that has one, held until the user
@@ -983,6 +988,7 @@ impl Shell {
             attributes: None,
             reveal: None,
             selected_key: None,
+            library_export: Vec::new(),
             selected_transition: None,
             asked_transition: None,
             clip_drag: None,
@@ -7644,7 +7650,10 @@ impl Shell {
         {
             return Err(ShellError::Io("the export has no file name".to_owned()));
         }
-        let draft = self.session_draft()?.clone();
+        let draft = match request.span {
+            ExportSpan::Library => self.library_cut()?,
+            _ => self.session_draft()?.clone(),
+        };
         let range = self.export_range(&draft, request.span)?;
         let frame_rate = request
             .frame_rate
@@ -7942,6 +7951,40 @@ impl Shell {
         })
     }
 
+    /// Ask for the picked library cards and folders to be exported: the
+    /// files in them, folders opened all the way down, played end to end
+    /// as one movie. The export that follows with [`ExportSpan::Library`]
+    /// writes them; the timeline is not touched.
+    pub fn export_library(&mut self, picked: &[String]) -> Result<(), ShellError> {
+        let draft = self.session_draft()?;
+        let files = cutlass_editor::picked_files(draft, self.library_store(), picked);
+        if cutlass_editor::library_cut(draft, &files).is_none() {
+            return Err(ShellError::Unavailable(
+                "there is no file to export there".to_owned(),
+            ));
+        }
+        self.library_export = files;
+        Ok(())
+    }
+
+    /// The library files waiting to be exported, as material ids.
+    #[must_use]
+    pub fn library_export(&self) -> &[String] {
+        &self.library_export
+    }
+
+    /// Forget the library files asked for export, so the next export is
+    /// of the timeline.
+    pub fn clear_library_export(&mut self) {
+        self.library_export.clear();
+    }
+
+    /// The cut of the library files asked for export.
+    fn library_cut(&self) -> Result<Draft, ShellError> {
+        cutlass_editor::library_cut(self.session_draft()?, &self.library_export)
+            .ok_or_else(|| ShellError::Unavailable("there is no file to export there".to_owned()))
+    }
+
     /// The stretch of the timeline `span` names.
     fn export_range(&self, draft: &Draft, span: ExportSpan) -> Result<TimeRange, ShellError> {
         let range = match span {
@@ -7966,6 +8009,9 @@ impl Shell {
                 };
                 TimeRange::new(start, end - start)
             }
+            // The cut made of the files starts at zero and ends with its
+            // last clip.
+            ExportSpan::Library => TimeRange::new(0, draft.duration.0),
             ExportSpan::Marked => {
                 let (start, end) = self.marked_span().ok_or_else(|| {
                     ShellError::Unavailable("mark an in or an out first".to_owned())
@@ -16496,6 +16542,81 @@ mod tests {
         assert_eq!(desktop.draft().unwrap().materials.videos.len(), 1);
         assert_eq!(desktop.take_imported(), Some(super::ImportedKind::Video));
         assert_eq!(desktop.take_imported(), None);
+    }
+
+    #[test]
+    fn picked_library_files_export_as_a_movie_and_leave_the_timeline_alone() {
+        let temp = Temp::new();
+        // A small canvas, as the other export tests use, with no clip.
+        let mut draft = Draft::empty("draft");
+        draft.canvas_config.width = 64;
+        draft.canvas_config.height = 32;
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        let picture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../crates/engine/fixtures/pattern.png");
+        desktop.start_import(&picture).unwrap();
+        land_job(&mut desktop);
+        let file = desktop.draft().unwrap().materials.videos[0]
+            .id
+            .as_str()
+            .to_owned();
+        let before = desktop.draft().unwrap().clone();
+
+        // Nothing picked, an id that is no file, and an empty folder are
+        // refused, and nothing waits for export.
+        let folder = desktop
+            .new_library_folder(cutlass_editor::LIBRARY_TOP, &[])
+            .unwrap();
+        for picked in [vec![], vec!["gone".to_owned()], vec![folder.clone()]] {
+            assert_eq!(
+                desktop.export_library(&picked).unwrap_err().to_string(),
+                "there is no file to export there"
+            );
+        }
+        assert!(desktop.library_export().is_empty());
+        let destination = temp.path.join("files.mp4");
+        let asked = |path: &Path| ExportRequest {
+            path: path.to_path_buf(),
+            short_side: 480,
+            span: super::ExportSpan::Library,
+            ..ExportRequest::default()
+        };
+        assert_eq!(
+            desktop.export(asked(&destination)).unwrap_err().to_string(),
+            "there is no file to export there"
+        );
+        // The timeline is empty, so there is nothing of it to export.
+        let whole = desktop.export(ExportRequest {
+            path: destination.clone(),
+            short_side: 480,
+            ..ExportRequest::default()
+        });
+        assert!(whole.is_err());
+
+        // The file, and the folder it is moved into, each export it.
+        desktop.export_library(std::slice::from_ref(&file)).unwrap();
+        assert_eq!(desktop.library_export(), std::slice::from_ref(&file));
+        desktop.export(asked(&destination)).unwrap();
+        land_job(&mut desktop);
+        assert_eq!(desktop.notice(), "Exported files.mp4");
+        assert_eq!(&std::fs::read(&destination).unwrap()[4..8], b"ftyp");
+
+        desktop.move_library_item(&file, &folder).unwrap();
+        desktop.clear_library_export();
+        desktop
+            .export_library(std::slice::from_ref(&folder))
+            .unwrap();
+        assert_eq!(desktop.library_export(), std::slice::from_ref(&file));
+        let second = temp.path.join("folder.mp4");
+        desktop.export(asked(&second)).unwrap();
+        land_job(&mut desktop);
+        assert_eq!(&std::fs::read(&second).unwrap()[4..8], b"ftyp");
+
+        // The project's timeline has no clip still, and nothing to undo.
+        assert_eq!(desktop.draft().unwrap(), &before);
+        assert!(desktop.draft().unwrap().tracks[0].segments.is_empty());
     }
 
     #[test]

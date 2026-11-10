@@ -464,7 +464,7 @@ pub const LIBRARY_CARD: &[Entry<'static>] = &[
     done("link-media", "Link to media", ""),
     done("make-proxy", "Make proxy", ""),
     todo("split-scenes", "Split scenes", ""),
-    todo("export", "Export selected clips", ""),
+    done("export", "Export selected clips", ""),
 ];
 
 /// [`LIBRARY_CARD`] when every picked movie has a proxy or is getting
@@ -476,7 +476,7 @@ pub const LIBRARY_CARD_PROXIED: &[Entry<'static>] = &[
     done("link-media", "Link to media", ""),
     done("cancel-proxy", "Cancel proxy", ""),
     todo("split-scenes", "Split scenes", ""),
-    todo("export", "Export selected clips", ""),
+    done("export", "Export selected clips", ""),
 ];
 
 /// The menu for a folder in the library. The rows in
@@ -487,7 +487,7 @@ pub const LIBRARY_FOLDER: &[Entry<'static>] = &[
     done("new-folder-with", "New folder with selected item", ""),
     done("rename", "Rename", ""),
     done("link-media", "Link to media", ""),
-    todo("export", "Export selected clips", ""),
+    done("export", "Export selected clips", ""),
 ];
 
 /// The card menu's rows the prototype greys.

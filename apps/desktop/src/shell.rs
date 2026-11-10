@@ -826,6 +826,9 @@ pub struct Shell {
     /// The beat tool drops a mark on an audio clip.
     beating: bool,
     selected_beat: Option<BeatPick>,
+    /// Whether each movie file read so far carries sound, so a menu does
+    /// not open the file every time it is drawn.
+    sound_known: RefCell<std::collections::HashMap<PathBuf, bool>>,
     /// A clip that just landed on the timeline, for the window to bring
     /// its lane into view once.
     reveal: Option<SegmentId>,
@@ -971,6 +974,7 @@ impl Shell {
             selected_marker: None,
             beating: false,
             selected_beat: None,
+            sound_known: RefCell::new(std::collections::HashMap::new()),
             reveal: None,
             selected_transition: None,
             asked_transition: None,
@@ -5056,8 +5060,9 @@ impl Shell {
         let Some(segment) = self.selected_segment() else {
             return false;
         };
-        // A picture whose sound was extracted has nothing to hear.
-        if self.recover_audio_enabled() {
+        // A picture whose sound was extracted has nothing to hear, and
+        // neither has one whose file carries no sound.
+        if self.recover_audio_enabled() || self.selected_video_has_sound() == Some(false) {
             return false;
         }
         matches!(
@@ -5405,10 +5410,26 @@ impl Shell {
         self.apply_requests(&requests?)
     }
 
-    /// The selected clip is a video, so its sound can be placed on its own clip.
+    /// The selected clip is a video whose file carries sound, so that
+    /// sound can be placed on its own clip. A picture, or a movie recorded
+    /// with no sound, has none to extract.
     #[must_use]
     pub fn extract_audio_enabled(&self) -> bool {
-        self.selected_video().is_some()
+        self.selected_video().is_some() && self.selected_video_has_sound() != Some(false)
+    }
+
+    /// Whether the selected video's file carries sound. `None` when no
+    /// video is selected or the file cannot be read, so nothing is ruled
+    /// out on a guess. The file is read once and remembered.
+    fn selected_video_has_sound(&self) -> Option<bool> {
+        let video = self.selected_video()?;
+        let file = self.sound_file(&video.path).ok()?;
+        if let Some(known) = self.sound_known.borrow().get(&file) {
+            return Some(*known);
+        }
+        let heard = self.readers.carries_sound(&file).ok()?;
+        self.sound_known.borrow_mut().insert(file, heard);
+        Some(heard)
     }
 
     /// The selected video's own sound was extracted, so Recover audio can
@@ -18173,6 +18194,40 @@ mod tests {
                 .to_string(),
             "no project is open"
         );
+    }
+
+    /// Real movies from `../local-files`: one recorded with no sound and
+    /// one with. Skipped where that folder is missing, as on CI.
+    #[test]
+    fn a_movie_with_no_sound_has_none_to_extract_or_hear() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../local-files");
+        let quiet = root.join("7150172-hd_720_1280_50fps.mp4");
+        let loud = root.join("IMG_9420.MOV");
+        if !quiet.is_file() || !loud.is_file() {
+            eprintln!("skipped: {} is missing", root.display());
+            return;
+        }
+        for (movie, sounds) in [(quiet, false), (loud, true)] {
+            let temp = Temp::new();
+            let draft = crate::open_movie::movie_draft(&movie, 1920, 1080, false).unwrap();
+            Folder::new(draft).save(&temp.path).unwrap();
+            let mut desktop = shell();
+            desktop.open_folder(&temp.path).unwrap();
+            assert!(!desktop.extract_audio_enabled(), "nothing is selected");
+            desktop.select(Some(SegmentId::new("movie")));
+            assert_eq!(
+                desktop.extract_audio_enabled(),
+                sounds,
+                "{}",
+                movie.display()
+            );
+            assert_eq!(desktop.transcribe_enabled(), sounds);
+            assert!(!desktop.recover_audio_enabled());
+            // Asked again, the answer comes from what was read the first time.
+            assert_eq!(desktop.sound_known.borrow().len(), 1);
+            assert_eq!(desktop.extract_audio_enabled(), sounds);
+            assert_eq!(desktop.sound_known.borrow().len(), 1);
+        }
     }
 
     #[test]

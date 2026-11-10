@@ -432,15 +432,34 @@ impl log::Log for Bridge {
 
     fn log(&self, entry: &log::Record<'_>) {
         if log::Log::enabled(self, entry.metadata()) {
-            record(
-                Self::level(entry.level()),
-                entry.target(),
-                &entry.args().to_string(),
-            );
+            let text = entry.args().to_string();
+            // A kernel the GPU refused before it ran is kept as detail.
+            let level = if refused_kernel(entry.target(), &text) {
+                Level::Debug
+            } else {
+                Self::level(entry.level())
+            };
+            if enabled(level) {
+                record(level, entry.target(), &text);
+            }
         }
     }
 
     fn flush(&self) {}
+}
+
+/// Whether a record from another crate is burn's GPU runtime saying a
+/// kernel asked for more than this GPU gives one, such as more than
+/// Metal's 32 KB of shared memory, so the kernel was refused before it ran.
+///
+/// The runtime tries several ways to run an operation and keeps one that
+/// the GPU takes; each refusal is still reported as a warning, once a size.
+/// Nothing went wrong: the models' GPU output is checked against PyTorch's
+/// with these refusals happening. A kernel that fails any other way, to
+/// compile or while it runs, is not matched and stays a warning.
+fn refused_kernel(target: &str, text: &str) -> bool {
+    target.starts_with("cubecl_runtime")
+        && text.contains("Too many resources were requested during launch")
 }
 
 /// Send `log` facade records at WARN and above into this log. A second
@@ -981,6 +1000,39 @@ mod tests {
         for token in ["bridged-info", "bridged-debug", "bridged-quiet-warn"] {
             assert!(!text.contains(token), "{token} kept in {text}");
         }
+    }
+
+    #[test]
+    fn a_kernel_the_gpu_refused_is_detail_and_any_other_failure_a_warning() {
+        let env = Env::new();
+        let path = init_capture(&env.temp.path, MAX_FILE_BYTES).unwrap();
+        super::install_bridge();
+        let refusal = "A launch error happened\nCaused by:\n  Too many resources were requested \
+                       during launch\nToo much shared memory requested.\nRequested 34160 bytes, \
+                       maximum 32768 bytes available.";
+        set_level(Level::Info);
+        log::warn!(target: "cubecl_runtime::logging::server", "{refusal} first");
+        // The same words from another crate, and another failure from the
+        // runtime, stay warnings.
+        log::warn!(target: "eframe", "{refusal} elsewhere");
+        log::warn!(
+            target: "cubecl_runtime::logging::server",
+            "A launch error happened\nCaused by:\n  the shader did not compile"
+        );
+        set_level(Level::Debug);
+        log::warn!(target: "cubecl_runtime::logging::server", "{refusal} second");
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("first"), "{text}");
+        assert!(text.contains("elsewhere"), "{text}");
+        assert!(text.contains("the shader did not compile"), "{text}");
+        let detail = text
+            .lines()
+            .find(|line| line.contains("cubecl_runtime") && line.contains(" DEBUG "));
+        assert!(detail.is_some(), "{text}");
+        assert!(text.contains("second"), "{text}");
+        assert!(super::refused_kernel("cubecl_runtime", refusal));
+        assert!(!super::refused_kernel("cubecl_runtime", ""));
+        assert!(!super::refused_kernel("", refusal));
     }
 
     #[test]

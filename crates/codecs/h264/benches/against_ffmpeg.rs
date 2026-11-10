@@ -10,7 +10,8 @@
 //! ffmpeg is timed by its own `-benchmark` clock, which starts after the
 //! process has loaded and probed the input, so neither side pays for
 //! process startup. ffmpeg's whole-process time is printed beside it.
-//! This decoder uses one thread; ffmpeg is shown on one thread and on all.
+//! Both are shown on one thread and on all of the machine's threads; the
+//! threaded pictures are checked against ffmpeg's as well.
 //!
 //! Encode is the same `testsrc2` pictures. libx264 is ultrafast; this
 //! encoder has no preset, and it searches far more than ultrafast does. The
@@ -49,6 +50,9 @@ fn main() -> Result<(), String> {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).map_err(|err| err.to_string())?;
 
+    // ffmpeg picks its own thread count from the machine; this decoder is
+    // given every thread the machine reports.
+    let threads = std::thread::available_parallelism().map_or(1, usize::from);
     println!("1280x720, High profile, CABAC, {DECODE_FRAMES} frames, median of {RUNS} runs");
     println!("both sides: split the stream, decode every picture, drop it");
     println!("ffmpeg's time is its own -benchmark clock, without process startup");
@@ -57,37 +61,47 @@ fn main() -> Result<(), String> {
         generate_stream(&ffmpeg, &coded, stream)?;
         let bytes = std::fs::read(&coded).map_err(|err| err.to_string())?;
         let packets = packets(&access_units(&bytes)?)?;
-        let decoded = reconstruct(&packets, DECODE_FRAMES)?;
-        drop(packets);
+        let decoded = reconstruct(&packets, DECODE_FRAMES, 1)?;
         let reference = ffmpeg_yuv(&ffmpeg, &coded, &dir.join("decoded.yuv"), DECODE_FRAMES)?;
         same_samples(stream.name, &decoded, &reference)?;
         drop(decoded);
+        let threaded = reconstruct(&packets, DECODE_FRAMES, threads)?;
+        same_samples(stream.name, &threaded, &reference)?;
+        drop(threaded);
+        drop(packets);
         drop(reference);
-        let _ = time_decode(&bytes)?;
+        let _ = time_decode(&bytes, 1)?;
+        let _ = time_decode(&bytes, threads)?;
         let mut ours = Vec::new();
+        let mut ours_all = Vec::new();
         let mut one = Vec::new();
         let mut one_process = Vec::new();
         let mut all = Vec::new();
         // The three are run in turn so a busy moment on the machine hits
         // them alike.
         for _ in 0..RUNS {
-            ours.push(time_decode(&bytes)?);
+            ours.push(time_decode(&bytes, 1)?);
+            ours_all.push(time_decode(&bytes, threads)?);
             let (clock, process) = time_ffmpeg_decode(&ffmpeg, &coded, Some(1))?;
             one.push(clock);
             one_process.push(process);
             all.push(time_ffmpeg_decode(&ffmpeg, &coded, None)?.0);
         }
         let ours = median(ours);
+        let ours_all = median(ours_all);
         let one = median(one);
+        let all = median(all);
         let megabits = bytes.len() as f64 * 8.0 * 30.0 / DECODE_FRAMES as f64 / 1e6;
         println!();
         println!("decode {}, {megabits:.1} Mb/s", stream.name);
-        println!("pixels match ffmpeg, zero sample difference");
+        println!("pixels match ffmpeg, zero sample difference, on one thread and on {threads}");
         print_row("cutlass, 1 thread", DECODE_FRAMES, ours);
         print_row("ffmpeg, 1 thread", DECODE_FRAMES, one);
         print_row("  whole process", DECODE_FRAMES, median(one_process));
-        print_row("ffmpeg, all threads", DECODE_FRAMES, median(all));
         print_ratio(one, ours);
+        print_row(&format!("cutlass, {threads} threads"), DECODE_FRAMES, ours_all);
+        print_row("ffmpeg, all threads", DECODE_FRAMES, all);
+        print_ratio(all, ours_all);
     }
 
     let raw_path = dir.join("source.yuv");
@@ -98,7 +112,7 @@ fn main() -> Result<(), String> {
     let encoded = encode_packets(&inputs)?;
     let encoded_path = dir.join("encoded.h264");
     write_annex(&encoded, &encoded_path)?;
-    let encoded_ours = reconstruct(&encoded, ENCODE_FRAMES)?;
+    let encoded_ours = reconstruct(&encoded, ENCODE_FRAMES, 1)?;
     let encoded_ffmpeg = ffmpeg_yuv(
         &ffmpeg,
         &encoded_path,
@@ -186,10 +200,12 @@ fn same_samples(what: &str, got: &[u8], want: &[u8]) -> Result<(), String> {
     ))
 }
 
-fn reconstruct(packets: &[Packet], frames: usize) -> Result<Vec<u8>, String> {
+fn reconstruct(packets: &[Packet], frames: usize, threads: usize) -> Result<Vec<u8>, String> {
     let mut params = CodecParams::video(CodecId::H264, WIDTH, HEIGHT);
     params.nal_length_size = 0;
-    let mut decoder = H264Decoder::open(&params).map_err(|err| err.to_string())?;
+    let mut decoder = H264Decoder::open(&params)
+        .map_err(|err| err.to_string())?
+        .with_threads(threads);
     let mut packed = Vec::new();
     let mut pictures = 0usize;
     for packet in packets {
@@ -279,7 +295,7 @@ fn ffmpeg_yuv(ffmpeg: &str, input: &Path, output: &Path, frames: usize) -> Resul
 
 fn print_row(name: &str, frames: usize, seconds: f64) {
     let fps = fps(frames, seconds);
-    println!("{name:<20} {seconds:>8.3} s   {fps:>8.1} fps");
+    println!("{name:<22} {seconds:>8.3} s   {fps:>8.1} fps");
 }
 
 fn print_ratio(ffmpeg_seconds: f64, ours_seconds: f64) {
@@ -298,11 +314,14 @@ fn median(mut samples: Vec<f64>) -> f64 {
     samples.get(samples.len() / 2).copied().unwrap_or(0.0)
 }
 
-/// Seconds to split `bytes` into access units and decode them all.
-fn time_decode(bytes: &[u8]) -> Result<f64, String> {
+/// Seconds to split `bytes` into access units and decode them all on
+/// `threads` threads.
+fn time_decode(bytes: &[u8], threads: usize) -> Result<f64, String> {
     let mut params = CodecParams::video(CodecId::H264, WIDTH, HEIGHT);
     params.nal_length_size = 0;
-    let mut decoder = H264Decoder::open(&params).map_err(|err| err.to_string())?;
+    let mut decoder = H264Decoder::open(&params)
+        .map_err(|err| err.to_string())?
+        .with_threads(threads);
     let started = Instant::now();
     let packets = packets(&access_units(bytes)?)?;
     let mut pictures = 0usize;

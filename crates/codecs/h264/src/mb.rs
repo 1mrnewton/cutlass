@@ -9091,18 +9091,6 @@ fn read_sub<S: Sample>(
             direct_8(pic, dpb, slice, Place { mx, my }, (x0, y0), mb);
         }
     }
-    for (i, kind) in kinds.iter().copied().enumerate() {
-        if direct(kind) {
-            continue;
-        }
-        let (l0, _, _, _) = sub_shape(super::syntax_kind(slice.kind), kind);
-        if l0 {
-            continue;
-        }
-        let x0 = (i & 1) * 8;
-        let y0 = (i >> 1) * 8;
-        mark_decoded(mb, x0, y0, 8, 8);
-    }
     for list in 0..2 {
         for (i, kind) in kinds.iter().copied().enumerate() {
             if direct(kind) {
@@ -9112,6 +9100,12 @@ fn read_sub<S: Sample>(
             if (list == 0 && !l0) || (list == 1 && !l1) {
                 continue;
             }
+            // Clause 6.4.11.7: a neighbouring partition is available by its
+            // place in the macroblock, not by what has been parsed. The
+            // vectors come one list at a time, so a later 8×8 block may
+            // already hold list 0 motion, direct motion, or no use of this
+            // list at all, and it is still not there for this block.
+            mb.ready = earlier_blocks(i);
             let x0 = (i & 1) * 8;
             let y0 = (i >> 1) * 8;
             for (px, py) in sub_origins(x0, y0, w, h) {
@@ -9167,7 +9161,18 @@ fn read_sub<S: Sample>(
             }
         }
     }
+    mb.ready = u16::MAX;
     Ok(())
+}
+
+/// The 4×4 blocks of the 8×8 blocks that come before 8×8 block `index` in
+/// decoding order, as a mask over the macroblock's sixteen.
+fn earlier_blocks(index: usize) -> u16 {
+    const BLOCKS: [u16; 4] = [0x0033, 0x00cc, 0x3300, 0xcc00];
+    BLOCKS
+        .iter()
+        .take(index)
+        .fold(0, |mask, block| mask | block)
 }
 
 /// The origins of an 8×8 block's sub-partitions of `w`×`h`, in decoding

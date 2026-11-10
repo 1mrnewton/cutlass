@@ -413,49 +413,99 @@ fn same_long<S: Sample>(dpb: &[Frame<S>], slot: usize, long_num: u32) -> bool {
 }
 
 /// For a picture decoded on its own thread: when decoding has just passed
-/// the end of a macroblock row, deblocks the rows that are now safe and
-/// publishes the samples that makes final. A row is deblocked once the row
-/// below it is decoded, since that row's intra prediction reads this one
-/// unfiltered.
+/// the end of a macroblock row, deblocks that row and publishes the
+/// samples that makes final.
 fn rows_decoded<S: Sample>(pic: &mut Frame<S>, addr: usize) {
-    let Some(writer) = pic.writer else {
+    if pic.writer.is_none() || pic.mb_w == 0 || !addr.is_multiple_of(pic.mb_w) {
+        return;
+    }
+    let decoded = addr / pic.mb_w;
+    let Some(mut writer) = pic.writer.take() else {
         return;
     };
-    if pic.mb_w == 0 || !addr.is_multiple_of(pic.mb_w) {
-        return;
+    while writer.deblocked < decoded.min(pic.h / 16) {
+        deblock_next_row(pic, &mut writer);
     }
-    let ready = (addr / pic.mb_w).saturating_sub(1);
-    if ready <= writer.deblocked {
-        return;
-    }
-    deblock_rows(pic, writer.deblocked..ready);
     // Only a picture kept for reference is ever read by another.
-    let published = match pic.pending.clone() {
-        Some(pending) if pic.referenced => pending.publish(pic, writer.published, ready, false),
-        _ => writer.published,
-    };
-    pic.writer = Some(super::Writer {
-        deblocked: ready,
-        published,
-    });
+    if pic.referenced
+        && let Some(pending) = pic.pending.clone()
+    {
+        writer.published = pending.publish(pic, writer.published, writer.deblocked, false);
+    }
+    pic.writer = Some(writer);
 }
 
-/// Deblocks and publishes the rows [`rows_decoded`] left, once every
+/// Deblocks the next macroblock row, which is decoded, without waiting for
+/// the row below it.
+///
+/// That row's intra prediction reads this row's last line as it was before
+/// deblocking. So the line is copied first, and after deblocking the copy
+/// goes back into the picture while the filtered line is set aside; the
+/// two are exchanged again before the next row is deblocked. The
+/// unfiltered line is never published: a band ends above it.
+fn deblock_next_row<S: Sample>(pic: &mut Frame<S>, writer: &mut super::Writer<S>) {
+    let row = writer.deblocked;
+    if row > 0 {
+        swap_last_line(pic, row - 1, &mut writer.edge);
+    }
+    for (kept, (plane, at, len)) in writer.edge.iter_mut().zip(last_lines(pic, row)) {
+        kept.clear();
+        kept.extend_from_slice(&plane[at..at + len]);
+    }
+    deblock_rows(pic, row..row + 1);
+    swap_last_line(pic, row, &mut writer.edge);
+    writer.deblocked = row + 1;
+}
+
+/// Where the last line of macroblock row `row` lies in each plane of a
+/// 4:2:0 picture: the plane, the line's first sample and its length.
+fn last_lines<S: Sample>(pic: &Frame<S>, row: usize) -> [(&[S], usize, usize); 3] {
+    let (w, cw) = (pic.w, pic.w / 2);
+    [
+        (&pic.y, (row * 16 + 15) * w, w),
+        (&pic.u, (row * 8 + 7) * cw, cw),
+        (&pic.v, (row * 8 + 7) * cw, cw),
+    ]
+}
+
+/// Exchanges the last line of macroblock row `row` with `kept`, plane by
+/// plane.
+fn swap_last_line<S: Sample>(pic: &mut Frame<S>, row: usize, kept: &mut [Vec<S>; 3]) {
+    let (w, cw) = (pic.w, pic.w / 2);
+    let lines = [
+        (&mut pic.y, (row * 16 + 15) * w, w),
+        (&mut pic.u, (row * 8 + 7) * cw, cw),
+        (&mut pic.v, (row * 8 + 7) * cw, cw),
+    ];
+    for ((plane, at, len), kept) in lines.into_iter().zip(kept.iter_mut()) {
+        if kept.len() == len
+            && let Some(line) = plane.get_mut(at..at + len)
+        {
+            line.swap_with_slice(kept);
+        }
+    }
+}
+
+/// Deblocks and publishes whatever [`rows_decoded`] left, once every
 /// macroblock of the picture is decoded.
 pub(crate) fn finish_rows<S: Sample>(pic: &mut Frame<S>) {
-    let Some(writer) = pic.writer else {
+    let Some(mut writer) = pic.writer.take() else {
         return;
     };
     let rows = pic.h / 16;
-    deblock_rows(pic, writer.deblocked..rows);
-    let published = match pic.pending.clone() {
-        Some(pending) if pic.referenced => pending.publish(pic, writer.published, rows, true),
-        _ => writer.published,
-    };
-    pic.writer = Some(super::Writer {
-        deblocked: rows,
-        published,
-    });
+    while writer.deblocked < rows {
+        deblock_next_row(pic, &mut writer);
+    }
+    // The last row's filtered line goes back for good.
+    if rows > 0 {
+        swap_last_line(pic, rows - 1, &mut writer.edge);
+    }
+    if pic.referenced
+        && let Some(pending) = pic.pending.clone()
+    {
+        writer.published = pending.publish(pic, writer.published, rows, true);
+    }
+    pic.writer = Some(writer);
 }
 
 pub(crate) fn decode_mbs<S: Sample>(

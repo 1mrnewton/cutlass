@@ -245,16 +245,21 @@ pub(crate) struct Frame<S: Sample = u8> {
     /// picture is whole and settled here.
     pending: Option<std::sync::Arc<progress::Published<S>>>,
     /// The thread decoding this picture keeps its place here.
-    writer: Option<Writer>,
+    writer: Option<Writer<S>>,
 }
 
 /// How far the thread decoding a picture has taken its rows.
-#[derive(Clone, Copy, Debug, Default)]
-struct Writer {
+#[derive(Clone, Debug, Default)]
+struct Writer<S> {
     /// Macroblock rows deblocked.
     deblocked: usize,
     /// Macroblock rows whose samples are published.
     published: usize,
+    /// The last line of the last deblocked row, in each plane. The row
+    /// below predicts from that line as it was before deblocking, so while
+    /// that row is decoded the picture holds the line unfiltered and the
+    /// filtered one waits here.
+    edge: [Vec<S>; 3],
 }
 
 /// Output time and the grain blended at emit. `pts` on the frame stays the

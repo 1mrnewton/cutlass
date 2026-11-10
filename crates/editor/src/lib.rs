@@ -133,8 +133,11 @@ pub use title::{
 };
 pub use tools::{Bar, Tool, ToolId, clip_bar, tools};
 pub use transition_shelf::{
-    MainCut, TRANSITION_CARD_PREFIX, TransitionMiss, TransitionOffer, fit_transition, main_cut,
-    transition_categories, transition_of_card, transition_offers, transition_request,
+    BarEdge, MainCut, TRANSITION_CARD_PREFIX, TRANSITION_LONGEST, TRANSITION_SHORTEST,
+    TransitionBar, TransitionMiss, TransitionOffer, bar_length, blend_of, drop_cut, fit_transition,
+    main_cut, transition_bars, transition_categories, transition_everywhere,
+    transition_length_request, transition_limits, transition_of_card, transition_offers,
+    transition_request,
 };
 pub use transport::{Marks, SHUTTLE_TOP, Shuttle, shuttle_rate};
 pub use view_zoom::{

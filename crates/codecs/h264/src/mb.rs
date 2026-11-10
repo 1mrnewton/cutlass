@@ -7844,7 +7844,8 @@ fn decode_inter<S: Sample>(
                 }
             }
         }
-    } else {
+    } else if luma_cbp != 0 {
+        // Nothing to read or add when the coded block pattern has no luma.
         for i in 0..16 {
             let bit = 1 << ((blk_y(i) / 2) * 2 + blk_x(i) / 2);
             if luma_cbp & bit != 0 {
@@ -7888,7 +7889,8 @@ fn decode_inter<S: Sample>(
             pic.note_chroma(slot, 0, &chroma_res.cb_dc, &chroma_res.cb_ac);
             pic.note_chroma(slot, 1, &chroma_res.cr_dc, &chroma_res.cr_ac);
         }
-        if !merge {
+        // With no chroma levels read there is nothing to add.
+        if !merge && chroma_res.used != 0 {
             recon_chroma(
                 pic,
                 slice,
@@ -10878,23 +10880,21 @@ fn deblock_whole<S: Sample>(
                 };
                 (bs, inside)
             };
+            if bs == [0; 4] {
+                continue;
+            }
+            // Worked out once for the three planes.
+            let Some(strong) = recon::whole_edge_strong(bs) else {
+                return false;
+            };
             // An 8×8 transform has no luma edge at 4 or 12.
             if !(transform8 && (edge == 1 || edge == 3)) {
-                let Some(filter) = recon::whole_edge(bs, qp[0], off) else {
-                    return false;
-                };
-                *luma_slot = filter;
+                *luma_slot = Some(recon::whole_edge(bs, strong, qp[0], off));
             }
             // Chroma has an edge under every other luma one.
-            if bs != [0; 4] && edge.is_multiple_of(2) {
-                let (Some(first), Some(second)) = (
-                    recon::whole_edge(bs, qp[1], off),
-                    recon::whole_edge(bs, qp[2], off),
-                ) else {
-                    return false;
-                };
-                *cb_slot = first;
-                *cr_slot = second;
+            if edge.is_multiple_of(2) {
+                *cb_slot = Some(recon::whole_edge(bs, strong, qp[1], off));
+                *cr_slot = Some(recon::whole_edge(bs, strong, qp[2], off));
             }
         }
     }

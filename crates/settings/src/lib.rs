@@ -61,6 +61,8 @@ pub struct Settings {
     #[serde(default)]
     pub import: Import,
     #[serde(default)]
+    pub confirm: Confirm,
+    #[serde(default)]
     pub model: ModelChoice,
     #[serde(default)]
     pub sandbox: SandboxChoice,
@@ -93,6 +95,7 @@ impl Default for Settings {
             playback: Playback::default(),
             hardware: Hardware::default(),
             import: Import::default(),
+            confirm: Confirm::default(),
             model: ModelChoice::default(),
             sandbox: SandboxChoice::default(),
             mcp_servers: Vec::new(),
@@ -236,6 +239,18 @@ pub struct Import {
     /// Point at the file where it is instead of copying it in.
     #[serde(default)]
     pub link: bool,
+    /// Keys this record does not name.
+    #[serde(flatten, default)]
+    pub rest: Map<String, Value>,
+}
+
+/// The questions the app no longer asks, each turned off by its own "Do
+/// not ask again".
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+pub struct Confirm {
+    /// Put a transition on a cut that already has one without asking.
+    #[serde(default)]
+    pub replace_transition_unasked: bool,
     /// Keys this record does not name.
     #[serde(flatten, default)]
     pub rest: Map<String, Value>,
@@ -487,6 +502,10 @@ mod tests {
         assert!(settings.hardware.decode);
         assert!(settings.hardware.encode);
         assert!(!settings.import.link, "imports copy by default");
+        assert!(
+            !settings.confirm.replace_transition_unasked,
+            "replacing a transition asks by default"
+        );
         assert!(settings.mcp_servers.is_empty());
         assert!(settings.skill_folders.is_empty());
         assert!(settings.updates.check, "updates are checked by default");

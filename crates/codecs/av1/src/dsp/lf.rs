@@ -16,6 +16,7 @@
 //! samples), and seven before / seven after the edge for size 16 (writing six).
 
 use super::Pixel;
+use cutlass_simd::av1::lf::{IDLE, Limits, Size, by_line, by_line_16, by_sample};
 
 /// Filter limits derived from a level and sharpness (7.14.4).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -125,6 +126,16 @@ fn edge<P: Pixel, const FS: usize, const HORZ: bool>(
     lim: LfLimits,
     bd: u32,
 ) {
+    // The kernel takes a vertical edge's lines whole: 4 samples on each
+    // side, or 8 for size 16. An edge closer to the plane's side than
+    // that (no decoder has one) stays on the lanes below.
+    let reach = if FS == 16 { 8 } else { 4 };
+    if cutlass_simd::ACCELERATED
+        && (HORZ || (x >= reach && x + reach <= stride))
+        && let Some(bytes) = P::bytes_mut(buf)
+    {
+        return edge_bytes::<FS, HORZ>(bytes, stride, x, y, n, lim);
+    }
     let mut i = 0;
     while i + 8 <= n {
         lanes::<P, FS, HORZ, 8>(buf, stride, x, y, i, lim, bd);
@@ -137,6 +148,128 @@ fn edge<P: Pixel, const FS: usize, const HORZ: bool>(
     while i < n {
         lanes::<P, FS, HORZ, 1>(buf, stride, x, y, i, lim, bd);
         i += 1;
+    }
+}
+
+/// [`edge`] for 8-bit samples on the vector kernel, sixteen lines at a
+/// time. A shorter last group leaves the other lines of the kernel idle.
+#[inline(always)]
+fn edge_bytes<const FS: usize, const HORZ: bool>(
+    buf: &mut [u8],
+    stride: usize,
+    x: usize,
+    y: usize,
+    n: usize,
+    lim: LfLimits,
+) {
+    let size = match FS {
+        4 => Size::Four,
+        6 => Size::Six,
+        8 => Size::Eight,
+        _ => Size::Sixteen,
+    };
+    // Levels are at most 63, so every limit fits a byte (7.14.4).
+    let lim = Limits {
+        limit: lim.limit as u8,
+        blimit: lim.blimit as u8,
+        thresh: lim.thresh as u8,
+    };
+    let mut i = 0;
+    while i < n {
+        // Whole groups first, so their copies have a fixed length.
+        let m = match n - i {
+            16.. => 16,
+            8.. => 8,
+            4.. => 4,
+            _ => 1,
+        };
+        if HORZ {
+            match m {
+                16 => across_rows::<16>(buf, stride, x + i, y, size, lim),
+                8 => across_rows::<8>(buf, stride, x + i, y, size, lim),
+                4 => across_rows::<4>(buf, stride, x + i, y, size, lim),
+                _ => across_rows::<1>(buf, stride, x + i, y, size, lim),
+            }
+        } else if FS == 16 {
+            across_columns_16(buf, stride, x, y + i, m, lim);
+        } else {
+            across_columns(buf, stride, x, y + i, m, size, lim);
+        }
+        i += m;
+    }
+}
+
+/// `M` lines of a horizontal edge: columns `x .. x + M` of the rows
+/// around row `y`.
+#[inline(always)]
+fn across_rows<const M: usize>(
+    buf: &mut [u8],
+    stride: usize,
+    x: usize,
+    y: usize,
+    size: Size,
+    lim: Limits,
+) {
+    let mut taps: [[u8; 16]; 14] =
+        core::array::from_fn(|k| [if k < 7 { IDLE.0 } else { IDLE.1 }; 16]);
+    let (lo, hi) = size.reads();
+    for k in lo..hi {
+        let row = (y + k - 7) * stride + x;
+        taps[k][..M].copy_from_slice(&buf[row..row + M]);
+    }
+    if !by_sample(&mut taps, size, lim) {
+        return;
+    }
+    let (lo, hi) = size.writes();
+    for k in lo..hi {
+        let row = (y + k - 7) * stride + x;
+        buf[row..row + M].copy_from_slice(&taps[k][..M]);
+    }
+}
+
+/// `m` lines of a vertical edge of size 4, 6 or 8: rows `y .. y + m`,
+/// columns `x - 4 .. x + 4`, which [`edge`] checked are in the plane.
+#[inline(always)]
+fn across_columns(
+    buf: &mut [u8],
+    stride: usize,
+    x: usize,
+    y: usize,
+    m: usize,
+    size: Size,
+    lim: Limits,
+) {
+    let (p, q) = IDLE;
+    let mut lines = [[p, p, p, p, q, q, q, q]; 16];
+    for (l, line) in lines.iter_mut().enumerate().take(m) {
+        let at = (y + l) * stride + x;
+        line.copy_from_slice(&buf[at - 4..at + 4]);
+    }
+    if !by_line(&mut lines, size, lim) {
+        return;
+    }
+    for (l, line) in lines.iter().enumerate().take(m) {
+        let at = (y + l) * stride + x;
+        buf[at - 4..at + 4].copy_from_slice(line);
+    }
+}
+
+/// `m` lines of a vertical edge of size 16: rows `y .. y + m`, columns
+/// `x - 8 .. x + 8`, which [`edge`] checked are in the plane.
+#[inline(always)]
+fn across_columns_16(buf: &mut [u8], stride: usize, x: usize, y: usize, m: usize, lim: Limits) {
+    let (p, q) = IDLE;
+    let mut lines: [[u8; 16]; 16] = [core::array::from_fn(|k| if k < 8 { p } else { q }); 16];
+    for (l, line) in lines.iter_mut().enumerate().take(m) {
+        let at = (y + l) * stride + x;
+        line.copy_from_slice(&buf[at - 8..at + 8]);
+    }
+    if !by_line_16(&mut lines, lim) {
+        return;
+    }
+    for (l, line) in lines.iter().enumerate().take(m) {
+        let at = (y + l) * stride + x;
+        buf[at - 8..at + 8].copy_from_slice(line);
     }
 }
 
@@ -752,6 +885,13 @@ mod tests {
     #[test]
     fn lf_matches_spec_8bit() {
         run::<u8>(8, 0x1234_5678_9abc_def1);
+    }
+
+    #[test]
+    fn lf_lanes_match_spec_at_8_bits() {
+        // 8-bit values in 16-bit samples: the lanes, where a build with
+        // vector kernels would send 8-bit samples to the kernel.
+        run::<u16>(8, 0x1234_5678_9abc_def1);
     }
 
     #[test]

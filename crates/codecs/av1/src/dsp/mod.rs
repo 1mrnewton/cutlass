@@ -23,6 +23,8 @@ pub trait Pixel:
     /// Converts a value already inside `0..=(1 << bd) - 1`.
     fn from_i32(v: i32) -> Self;
     fn to_i32(self) -> i32;
+    /// The samples as bytes, for the 8-bit vector kernels. `None` for `u16`.
+    fn bytes_mut(buf: &mut [Self]) -> Option<&mut [u8]>;
 }
 
 impl Pixel for u8 {
@@ -35,6 +37,10 @@ impl Pixel for u8 {
     fn to_i32(self) -> i32 {
         i32::from(self)
     }
+    #[inline(always)]
+    fn bytes_mut(buf: &mut [Self]) -> Option<&mut [u8]> {
+        Some(buf)
+    }
 }
 
 impl Pixel for u16 {
@@ -46,6 +52,10 @@ impl Pixel for u16 {
     #[inline(always)]
     fn to_i32(self) -> i32 {
         i32::from(self)
+    }
+    #[inline(always)]
+    fn bytes_mut(_: &mut [Self]) -> Option<&mut [u8]> {
+        None
     }
 }
 

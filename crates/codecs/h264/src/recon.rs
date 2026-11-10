@@ -312,7 +312,7 @@ fn idct8_1d(d: &[i32], f: &mut [i32]) {
 }
 
 /// One sample width. `u8` is 8-bit. [`Depth`] is 9 through 14 bits.
-pub trait Sample: Copy + Default + Into<i32> {
+pub trait Sample: Copy + Default + Into<i32> + Send + Sync + 'static {
     const LIMIT: i32;
     const MID: i32;
     const SHIFT: i32;

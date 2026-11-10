@@ -412,6 +412,51 @@ fn same_long<S: Sample>(dpb: &[Frame<S>], slot: usize, long_num: u32) -> bool {
     })
 }
 
+/// For a picture decoded on its own thread: when decoding has just passed
+/// the end of a macroblock row, deblocks the rows that are now safe and
+/// publishes the samples that makes final. A row is deblocked once the row
+/// below it is decoded, since that row's intra prediction reads this one
+/// unfiltered.
+fn rows_decoded<S: Sample>(pic: &mut Frame<S>, addr: usize) {
+    let Some(writer) = pic.writer else {
+        return;
+    };
+    if pic.mb_w == 0 || !addr.is_multiple_of(pic.mb_w) {
+        return;
+    }
+    let ready = (addr / pic.mb_w).saturating_sub(1);
+    if ready <= writer.deblocked {
+        return;
+    }
+    deblock_rows(pic, writer.deblocked..ready);
+    let published = match pic.pending.clone() {
+        Some(pending) => pending.publish(pic, writer.published, ready, false),
+        None => writer.published,
+    };
+    pic.writer = Some(super::Writer {
+        deblocked: ready,
+        published,
+    });
+}
+
+/// Deblocks and publishes the rows [`rows_decoded`] left, once every
+/// macroblock of the picture is decoded.
+pub(crate) fn finish_rows<S: Sample>(pic: &mut Frame<S>) {
+    let Some(writer) = pic.writer else {
+        return;
+    };
+    let rows = pic.h / 16;
+    deblock_rows(pic, writer.deblocked..rows);
+    let published = match pic.pending.clone() {
+        Some(pending) => pending.publish(pic, writer.published, rows, true),
+        None => writer.published,
+    };
+    pic.writer = Some(super::Writer {
+        deblocked: rows,
+        published,
+    });
+}
+
 pub(crate) fn decode_mbs<S: Sample>(
     pic: &mut Frame<S>,
     dpb: &[Frame<S>],
@@ -466,6 +511,7 @@ pub(crate) fn decode_mbs<S: Sample>(
                             skip_mb(pic, dpb, slice, slice_id, addr, qp, flag)?;
                         }
                         addr = step(next, addr, &mut decoded, total)?;
+                        rows_decoded(pic, addr);
                     }
                     if addr >= total || (run > 0 && !bits.more_rbsp()) {
                         break;
@@ -483,6 +529,7 @@ pub(crate) fn decode_mbs<S: Sample>(
                             false
                         };
                         addr = step(next, addr, &mut decoded, total)?;
+                        rows_decoded(pic, addr);
                         if end {
                             break;
                         }
@@ -553,6 +600,7 @@ pub(crate) fn decode_mbs<S: Sample>(
             }
         };
         addr = step(next, addr, &mut decoded, total)?;
+        rows_decoded(pic, addr);
         if end {
             break;
         }
@@ -5352,6 +5400,8 @@ mod intra8 {
             svc_right: 0,
             svc_bottom: 0,
             levels: Vec::new().into(),
+            pending: None,
+            writer: None,
         }
     }
 
@@ -8367,7 +8417,7 @@ fn temporal_direct<S: Sample>(
         .ref1
         .first()
         .and_then(|&index| dpb.get(index))
-        .and_then(|frame| frame.mb.get(addr).map(|col| (frame.poc, col)));
+        .and_then(|frame| frame.mb_at(addr).map(|col| (frame.poc, col)));
     for &(bx, by) in blocks {
         let index = by * 4 + bx;
         let part = (by / 2) * 2 + (bx / 2);
@@ -8559,7 +8609,7 @@ fn col_macroblock<'a, S: Sample>(
     if frame.long_term {
         return None;
     }
-    let col = frame.mb.get(addr)?;
+    let col = frame.mb_at(addr)?;
     (!col.intra && !col.pcm).then_some(col)
 }
 
@@ -8919,7 +8969,7 @@ fn mc_block<S: Sample>(
         let frame = reference_frame(dpb, slice, list, reference)?;
         let stride = pic.w;
         let dst = &mut pic.y[y * stride + x..];
-        predict_qpel(dst, stride, &frame.y, (frame.w, frame.h), (x, y, w, h), mv);
+        predict_block(dst, stride, frame, (x, y, w, h), mv);
     } else {
         let mut luma0 = [S::default(); 256];
         let mut luma1 = [S::default(); 256];
@@ -9212,7 +9262,51 @@ fn predict_luma<S: Sample>(
     h: usize,
     mv: [i16; 2],
 ) {
-    predict_qpel(dst, w, &frame.y, (frame.w, frame.h), (x, y, w, h), mv);
+    predict_block(dst, w, frame, (x, y, w, h), mv);
+}
+
+/// A luma block of `frame` moved by `mv`, into `dst` with rows `stride`
+/// apart. A picture another thread is decoding is read through the rows it
+/// has published, waiting for them if need be; if that picture failed,
+/// `dst` is left alone and the picture reading it fails when it ends.
+fn predict_block<S: Sample>(
+    dst: &mut [S],
+    stride: usize,
+    frame: &Frame<S>,
+    block: (usize, usize, usize, usize),
+    mv: [i16; 2],
+) {
+    let Some(published) = &frame.pending else {
+        predict_qpel(dst, stride, &frame.y, (frame.w, frame.h), block, mv);
+        return;
+    };
+    let (x, y, w, h) = block;
+    let (mvx, mvy) = (i32::from(mv[0]), i32::from(mv[1]));
+    let at = (
+        i32::try_from(x).unwrap_or(0) + (mvx >> 2),
+        i32::try_from(y).unwrap_or(0) + (mvy >> 2),
+    );
+    let Ok(window) = published.luma(at.0, at.1) else {
+        return;
+    };
+    recon::put_luma_block(
+        dst,
+        stride,
+        window.samples,
+        window.stride,
+        (
+            i32::try_from(window.stride).unwrap_or(0),
+            i32::try_from(window.rows).unwrap_or(0),
+        ),
+        recon::BlockMc {
+            x: window.x,
+            y: window.y,
+            w,
+            h,
+            x_frac: mvx & 3,
+            y_frac: mvy & 3,
+        },
+    );
 }
 
 /// `dst` starts at the block's first sample and its rows are `stride` apart.
@@ -9261,6 +9355,39 @@ fn predict_chroma<S: Sample>(
     let (u, v) = planes;
     let (x, y) = at;
     let (w, h) = size;
+    // A picture another thread is decoding is 4:2:0 and is read through
+    // its published rows, as in `predict_block`.
+    if let Some(published) = &frame.pending {
+        let (mvx, mvy) = (i32::from(mv[0]), i32::from(mv[1]));
+        let at = (
+            i32::try_from(x / 2).unwrap_or(0) + (mvx >> 3),
+            i32::try_from(y / 2).unwrap_or(0) + (mvy >> 3),
+        );
+        for (cb, dst) in [(true, u), (false, v)] {
+            let Ok(window) = published.chroma(cb, at.0, at.1) else {
+                return;
+            };
+            recon::put_chroma_block(
+                dst,
+                dst_stride,
+                window.samples,
+                window.stride,
+                (
+                    i32::try_from(window.stride).unwrap_or(0),
+                    i32::try_from(window.rows).unwrap_or(0),
+                ),
+                recon::BlockMc {
+                    x: window.x,
+                    y: window.y,
+                    w,
+                    h,
+                    x_frac: mvx & 7,
+                    y_frac: mvy & 7,
+                },
+            );
+        }
+        return;
+    }
     if frame.chroma() == 3 {
         predict_qpel(
             u,
@@ -9458,13 +9585,23 @@ fn xy<S: Sample>(pic: &Frame<S>, addr: usize) -> (usize, usize) {
 }
 
 pub(crate) fn deblock<S: Sample>(pic: &mut Frame<S>) {
+    let rows = pic.h / 16;
+    deblock_rows(pic, 0..rows);
+}
+
+/// Deblocks the macroblock rows `rows` of a picture. The filter goes
+/// through macroblocks in raster order, and a row reads only itself and
+/// the row above, so the rows of a picture can be filtered in turn as they
+/// are decoded, each once the row below it is decoded too: intra prediction
+/// of that row reads this one unfiltered.
+pub(crate) fn deblock_rows<S: Sample>(pic: &mut Frame<S>, rows: std::ops::Range<usize>) {
     let chroma = pic.chroma();
     // The planes leave the picture for the pass, so each is borrowed for
     // writing once and the macroblocks stay readable beside them.
     let mut y = std::mem::take(&mut pic.y);
     let mut u = std::mem::take(&mut pic.u);
     let mut v = std::mem::take(&mut pic.v);
-    deblock_planes(pic, chroma, (&mut y, &mut u, &mut v));
+    deblock_planes(pic, chroma, (&mut y, &mut u, &mut v), rows);
     pic.y = y;
     pic.u = u;
     pic.v = v;
@@ -9477,13 +9614,19 @@ fn inner_edges_flat(mb: &Mb) -> bool {
     !mb.intra && mb.nnz_y == [0; 16] && single_motion(mb)
 }
 
-fn deblock_planes<S: Sample>(pic: &Frame<S>, chroma: u8, planes: (&mut [S], &mut [S], &mut [S])) {
+fn deblock_planes<S: Sample>(
+    pic: &Frame<S>,
+    chroma: u8,
+    planes: (&mut [S], &mut [S], &mut [S]),
+    rows: std::ops::Range<usize>,
+) {
     let (luma, cb, cr) = planes;
     let mb_w = pic.mb_w;
     let mb_h = pic.h / 16;
     let mbaff = pic.mbaff;
-    let count = mb_w.saturating_mul(mb_h);
-    for addr in 0..count {
+    let first = rows.start.min(mb_h).saturating_mul(mb_w);
+    let count = rows.end.min(mb_h).saturating_mul(mb_w);
+    for addr in first..count {
         let (mx, my) = if mbaff {
             let pair = addr / 2;
             (pair % mb_w, (pair / mb_w) * 2 + (addr % 2))

@@ -21,6 +21,21 @@ impl<'a> Bits<'a> {
         }
     }
 
+    /// A reader that starts `bit` bits into `data`.
+    pub fn at(data: &'a [u8], bit: usize) -> Result<Self, CodecError> {
+        let mut bits = Self {
+            data,
+            index: (bit / 8).min(data.len()),
+            cache: 0,
+            bits: 0,
+        };
+        let skip = (bit % 8) as u32;
+        if skip > 0 {
+            bits.u(skip)?;
+        }
+        Ok(bits)
+    }
+
     pub fn pos(&self) -> usize {
         self.index * 8 - self.bits as usize
     }

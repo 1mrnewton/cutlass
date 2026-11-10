@@ -15,6 +15,8 @@ use crate::set::{self, Pps, Sps, ZIGZAG4, ZIGZAG8};
 
 #[path = "mb.rs"]
 mod mb;
+#[path = "progress.rs"]
+mod progress;
 
 pub(crate) const CBP_INTRA: [u8; 48] = [
     47, 31, 15, 0, 23, 27, 29, 30, 7, 11, 13, 14, 39, 43, 45, 46, 16, 3, 5, 10, 12, 19, 21, 26, 28,
@@ -238,6 +240,21 @@ pub(crate) struct Frame<S: Sample = u8> {
     /// Luma 4×4 levels, 256 per macroblock, raster inside each block.
     /// Empty unless a stored subset has `seq_tcoeff_level_prediction_flag`.
     levels: Shared<i32>,
+    /// Set when another thread decodes, or decoded, this picture: its rows
+    /// as they are finished. The planes above are then empty until the
+    /// picture is whole and settled here.
+    pending: Option<std::sync::Arc<progress::Published<S>>>,
+    /// The thread decoding this picture keeps its place here.
+    writer: Option<Writer>,
+}
+
+/// How far the thread decoding a picture has taken its rows.
+#[derive(Clone, Copy, Debug, Default)]
+struct Writer {
+    /// Macroblock rows deblocked.
+    deblocked: usize,
+    /// Macroblock rows whose samples are published.
+    published: usize,
 }
 
 /// Output time and the grain blended at emit. `pts` on the frame stays the
@@ -278,6 +295,15 @@ impl Shown {
 }
 
 impl<S: Sample> Frame<S> {
+    /// The macroblock at address `addr`. For a picture another thread is
+    /// decoding this waits for that macroblock's row.
+    pub(crate) fn mb_at(&self, addr: usize) -> Option<&Mb> {
+        match &self.pending {
+            Some(published) => published.mb(addr),
+            None => self.mb.get(addr),
+        }
+    }
+
     /// 1 is 4:2:0, 2 is 4:2:2, 3 is 4:4:4. The plane lengths decide it.
     pub(crate) fn chroma(&self) -> u8 {
         let y = self.w.saturating_mul(self.h);
@@ -461,15 +487,21 @@ impl Store {
         }
     }
 
-    fn release(&mut self, keep: usize) -> Vec<VideoOutput> {
+    fn release(&mut self, keep: usize) -> Vec<Queued> {
+        fn queue<S: Sample>(dpb: &mut Vec<Frame<S>>, keep: usize) -> Vec<Queued> {
+            take_output(dpb, keep)
+                .into_iter()
+                .map(Queued::new)
+                .collect()
+        }
         match self {
-            Store::Eight(dpb) => take_output(dpb, keep),
-            Store::Nine(dpb) => take_output(dpb, keep),
-            Store::Ten(dpb) => take_output(dpb, keep),
-            Store::Eleven(dpb) => take_output(dpb, keep),
-            Store::Twelve(dpb) => take_output(dpb, keep),
-            Store::Thirteen(dpb) => take_output(dpb, keep),
-            Store::Fourteen(dpb) => take_output(dpb, keep),
+            Store::Eight(dpb) => queue(dpb, keep),
+            Store::Nine(dpb) => queue(dpb, keep),
+            Store::Ten(dpb) => queue(dpb, keep),
+            Store::Eleven(dpb) => queue(dpb, keep),
+            Store::Twelve(dpb) => queue(dpb, keep),
+            Store::Thirteen(dpb) => queue(dpb, keep),
+            Store::Fourteen(dpb) => queue(dpb, keep),
         }
     }
 }
@@ -480,17 +512,21 @@ macro_rules! decode_depth {
             Store::$variant(held) => held.clone(),
             _ => Vec::new(),
         };
+        settle_finished(&mut dpb);
         let decoded = decode_au::<$sample>(
             &mut $sets,
             &mut $poc,
             &mut dpb,
-            &$packet.data,
             $self.length_size,
             $packet,
             &mut $grain,
+            $self.pool.as_ref(),
         )?;
         $self.dpb = Store::$variant(dpb);
         decoded
+            .into_iter()
+            .map(Queued::new)
+            .collect::<Vec<Queued>>()
     }};
 }
 
@@ -502,6 +538,13 @@ pub struct H264Decoder {
     drained: bool,
     extra: Vec<u8>,
     grain: crate::sei::GrainHold,
+    /// Threads that decode pictures, when asked for.
+    pool: Option<Pool>,
+    /// Pictures chosen for output, in order, that may still be decoding.
+    outbox: std::collections::VecDeque<Queued>,
+    /// Pictures that were ready when a call ended in an error. The next
+    /// call returns them first.
+    stash: Vec<VideoOutput>,
 }
 
 pub fn register_decoders(factory: &mut DecodeFactory) {
@@ -541,11 +584,66 @@ impl H264Decoder {
             drained: false,
             extra: params.extra.clone(),
             grain: crate::sei::GrainHold::default(),
+            pool: None,
+            outbox: std::collections::VecDeque::new(),
+            stash: Vec::new(),
         };
         if !params.extra.is_empty() {
             dec.apply_extra(&params.extra)?;
         }
         Ok(dec)
+    }
+
+    /// Decodes pictures on `threads` threads. A picture starts as soon as
+    /// its headers are read and waits, row by row, for the rows of other
+    /// pictures it predicts from, so several are in flight at once.
+    ///
+    /// The pictures and their order are the same as on one thread. Two
+    /// things differ. A picture comes out up to `threads` calls later than
+    /// it otherwise would, so [`VideoDecoder::drain`] returns more. And an
+    /// error in a picture's data is returned by the call that would have
+    /// returned that picture, not by the call that pushed it.
+    ///
+    /// Interlaced, 4:2:2, 4:4:4, multi-view and scalable pictures are
+    /// decoded on the calling thread as before. One thread or none keeps
+    /// everything on the calling thread.
+    #[must_use]
+    pub fn with_threads(mut self, threads: usize) -> Self {
+        self.pool = (threads > 1).then(|| Pool::new(threads));
+        self
+    }
+
+    /// As [`Self::with_threads`], with each picture decoded to its end on
+    /// the calling thread. For testing the row-by-row path without threads.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_rows_inline(mut self) -> Self {
+        self.pool = Some(Pool::inline());
+        self
+    }
+
+    /// Moves queued pictures that are ready into `out`, in order. With
+    /// `all` it waits for every one; otherwise it waits only while more are
+    /// queued than the threads can be working on.
+    fn take_ready(&mut self, out: &mut Vec<VideoOutput>, all: bool) -> Result<(), CodecError> {
+        let depth = self.pool.as_ref().map_or(0, |pool| pool.depth);
+        while let Some(front) = self.outbox.front() {
+            if !all && self.outbox.len() <= depth && !(front.ready)() {
+                break;
+            }
+            let Some(queued) = self.outbox.pop_front() else {
+                break;
+            };
+            match (queued.take)() {
+                Ok(Some(picture)) => out.push(picture),
+                Ok(None) => {}
+                Err(error) => {
+                    self.stash = std::mem::take(out);
+                    return Err(error);
+                }
+            }
+        }
+        Ok(())
     }
 
     fn apply_extra(&mut self, extra: &[u8]) -> Result<(), CodecError> {
@@ -664,7 +762,8 @@ impl VideoDecoder for H264Decoder {
         let mut poc = self.poc.clone();
         let mut grain = self.grain.clone();
         let depth = au_depth(&self.sets, &packet.data, self.length_size, self.dpb.depth())?;
-        let mut prior = if depth == self.dpb.depth() {
+        let mut out = std::mem::take(&mut self.stash);
+        let prior = if depth == self.dpb.depth() {
             Vec::new()
         } else {
             poc = Poc::new();
@@ -672,7 +771,7 @@ impl VideoDecoder for H264Decoder {
             let mut old = self.dpb.clone();
             old.release(0)
         };
-        let out = match depth {
+        let queued = match depth {
             8 => decode_depth!(self, sets, poc, packet, grain, Eight, u8),
             9 => decode_depth!(self, sets, poc, packet, grain, Nine, recon::Depth<9>),
             10 => decode_depth!(self, sets, poc, packet, grain, Ten, recon::Ten),
@@ -682,12 +781,13 @@ impl VideoDecoder for H264Decoder {
             14 => decode_depth!(self, sets, poc, packet, grain, Fourteen, recon::Depth<14>),
             _ => return Err(CodecError::Unsupported { what: "bit depth" }),
         };
-        prior.extend(out);
-        let out = prior;
+        self.outbox.extend(prior);
+        self.outbox.extend(queued);
         self.sets = sets;
         self.poc = poc;
         self.grain = grain;
         self.drained = false;
+        self.take_ready(&mut out, false)?;
         Ok(out)
     }
 
@@ -695,11 +795,17 @@ impl VideoDecoder for H264Decoder {
         if self.drained {
             return Ok(Vec::new());
         }
+        let mut out = std::mem::take(&mut self.stash);
+        let rest = self.dpb.release(0);
+        self.outbox.extend(rest);
+        self.take_ready(&mut out, true)?;
         self.drained = true;
-        Ok(self.dpb.release(0))
+        Ok(out)
     }
 
     fn reset(&mut self) {
+        self.outbox.clear();
+        self.stash.clear();
         self.dpb = Store::Eight(Vec::new());
         self.poc = Poc::new();
         self.drained = false;
@@ -781,12 +887,21 @@ fn decode_au<S: Sample>(
     sets: &mut Sets,
     poc: &mut Poc,
     dpb: &mut Vec<Frame<S>>,
-    data: &[u8],
     length_size: u8,
     packet: &Packet,
     grain: &mut crate::sei::GrainHold,
-) -> Result<Vec<VideoOutput>, CodecError> {
-    let nals = nal::access_unit(data, length_size)?;
+    pool: Option<&Pool>,
+) -> Result<Vec<Frame<S>>, CodecError> {
+    let nals = nal::access_unit(&packet.data, length_size)?;
+    // A picture goes to another thread only when the unit holds nothing
+    // but plain slices; the first slice's headers then have the last word.
+    let plain = nals
+        .iter()
+        .all(|nal| !matches!(nal.kind, 2 | 3 | 4 | 14 | 15 | 16 | 20 | 21));
+    let mut plan = (pool.is_some() && plain).then(RowPlan::default);
+    if plan.is_none() {
+        settle(dpb)?;
+    }
     let mut picture: Option<Frame<S>> = None;
     let mut prior = Vec::new();
     let mut slice_id = 0u16;
@@ -842,6 +957,7 @@ fn decode_au<S: Sample>(
                                 planes: &mut planes,
                                 held: &mut held_field,
                                 layer: None,
+                                jobs: &mut None,
                             },
                         )?;
                         if built {
@@ -887,6 +1003,7 @@ fn decode_au<S: Sample>(
                                 planes: &mut planes,
                                 held: &mut held_field,
                                 layer: Some(&base),
+                                jobs: &mut None,
                             },
                         )?;
                         if built {
@@ -925,6 +1042,7 @@ fn decode_au<S: Sample>(
                                 planes: &mut planes,
                                 held: &mut held_field,
                                 layer: None,
+                                jobs: &mut None,
                             },
                         )?;
                         if built {
@@ -968,6 +1086,7 @@ fn decode_au<S: Sample>(
                                 planes: &mut planes,
                                 held: &mut held_field,
                                 layer: None,
+                                jobs: &mut None,
                             },
                         )?;
                         if built {
@@ -1002,6 +1121,7 @@ fn decode_au<S: Sample>(
                                 planes: &mut planes,
                                 held: &mut held_field,
                                 layer: None,
+                                jobs: &mut None,
                             },
                         )?;
                         if built {
@@ -1048,6 +1168,7 @@ fn decode_au<S: Sample>(
                         planes: &mut planes,
                         held: &mut held_field,
                         layer: None,
+                        jobs: &mut plan,
                     },
                 )?;
                 if built {
@@ -1110,6 +1231,30 @@ fn decode_au<S: Sample>(
             at_bit: 0,
             what: "incomplete picture",
         });
+    }
+    if let (Some(plan), Some(pool)) = (plan.take(), pool) {
+        // The picture leaves for another thread with the references as its
+        // slices saw them. What stays here is its description, which is
+        // all that marking, ordering and the next pictures' headers need.
+        let published = std::sync::Arc::new(progress::Published::new(pic.w, pic.h, pic.mb_w));
+        let mut meta = pic.clone();
+        meta.y = Shared::default();
+        meta.u = Shared::default();
+        meta.v = Shared::default();
+        meta.mb = Shared::default();
+        meta.pending = Some(published.clone());
+        present(&mut meta, &messages, grain, idr_pic)?;
+        pic.pending = Some(published);
+        pic.writer = Some(Writer::default());
+        let job = PictureJob {
+            pic,
+            dpb: dpb.clone(),
+            slices: plan.slices,
+        };
+        pool.run(Box::new(move || run_picture(job)));
+        let mut pictures = prior;
+        pictures.extend(finish_picture(poc, dpb, meta)?);
+        return Ok(pictures);
     }
     if pic.separate_plane {
         mb::deblock(&mut pic);
@@ -1299,7 +1444,7 @@ fn finish_picture<S: Sample>(
     _poc: &mut Poc,
     dpb: &mut Vec<Frame<S>>,
     mut pic: Frame<S>,
-) -> Result<Vec<VideoOutput>, CodecError> {
+) -> Result<Vec<Frame<S>>, CodecError> {
     let max_ref = dpb_max(dpb, &pic);
     if pic.referenced {
         if pic.adaptive {
@@ -1633,10 +1778,15 @@ fn absent_frame<S: Sample>(sps: &Sps, frame_num: u32, poc: i32) -> Frame<S> {
         svc_right: 0,
         svc_bottom: 0,
         levels: Vec::new().into(),
+        pending: None,
+        writer: None,
     }
 }
 
-fn take_output<S: Sample>(dpb: &mut Vec<Frame<S>>, keep: usize) -> Vec<VideoOutput> {
+/// The pictures whose turn it is to be shown, in order. Each is still to
+/// be turned into an output; one decoded on another thread may not be
+/// finished yet.
+fn take_output<S: Sample>(dpb: &mut Vec<Frame<S>>, keep: usize) -> Vec<Frame<S>> {
     let mut out = Vec::new();
     loop {
         let pending: Vec<usize> = dpb
@@ -1650,8 +1800,8 @@ fn take_output<S: Sample>(dpb: &mut Vec<Frame<S>>, keep: usize) -> Vec<VideoOutp
         }
         let pos = pending.into_iter().min_by_key(|&i| dpb[i].poc).unwrap_or(0);
         dpb[pos].output = false;
-        if let Some(picture) = emit(&dpb[pos]) {
-            out.push(picture);
+        if !dpb[pos].nonexisting {
+            out.push(dpb[pos].clone());
         }
     }
     dpb.retain(|frame| frame.referenced || frame.output);
@@ -1705,6 +1855,12 @@ fn wide_output<S: Sample>(
 fn emit<S: Sample>(frame: &Frame<S>) -> Option<VideoOutput> {
     if frame.nonexisting {
         return None;
+    }
+    // A picture decoded on another thread is shown once it is whole.
+    if let Some(published) = &frame.pending {
+        let mut whole = frame.clone();
+        fill(&mut whole, published.planes().ok()?);
+        return emit(&whole);
     }
     if frame.shown.grain.is_some() {
         let mut copy = frame.clone();
@@ -1972,8 +2128,10 @@ fn output_of<S: Sample>(
 }
 
 pub(crate) struct Slice<'a> {
-    sps: &'a Sps,
-    pps: &'a Pps,
+    /// Borrowed while the slice is decoded where it was read; owned once
+    /// it has been handed to another thread.
+    sps: std::borrow::Cow<'a, Sps>,
+    pps: std::borrow::Cow<'a, Pps>,
     kind: u8,
     poc: i32,
     qp: i32,
@@ -2041,6 +2199,60 @@ pub(crate) struct Slice<'a> {
     residual_v: Vec<i32>,
 }
 
+impl Slice<'_> {
+    /// The same slice holding its own parameter sets, so it can leave the
+    /// thread that read it.
+    fn into_owned(self) -> Slice<'static> {
+        Slice {
+            sps: std::borrow::Cow::Owned(self.sps.into_owned()),
+            pps: std::borrow::Cow::Owned(self.pps.into_owned()),
+            kind: self.kind,
+            poc: self.poc,
+            qp: self.qp,
+            cabac: self.cabac,
+            deblock: self.deblock,
+            off_a: self.off_a,
+            off_b: self.off_b,
+            ref0: self.ref0,
+            ref1: self.ref1,
+            poc0: self.poc0,
+            poc1: self.poc1,
+            long0: self.long0,
+            long1: self.long1,
+            weighted: self.weighted,
+            luma_denom: self.luma_denom,
+            chroma_denom: self.chroma_denom,
+            yw: self.yw,
+            yo: self.yo,
+            cw: self.cw,
+            co: self.co,
+            num_ref_l0: self.num_ref_l0,
+            num_ref_l1: self.num_ref_l1,
+            spatial_direct: self.spatial_direct,
+            origin: self.origin,
+            group_next: self.group_next,
+            sp_switch: self.sp_switch,
+            qs: self.qs,
+            base_mode: self.base_mode,
+            adaptive_base: self.adaptive_base,
+            adaptive_motion: self.adaptive_motion,
+            motion_pred: self.motion_pred,
+            residual_pred: self.residual_pred,
+            tcoeff: self.tcoeff,
+            adaptive_residual: self.adaptive_residual,
+            scale: self.scale,
+            dmvp: self.dmvp,
+            vsp: self.vsp,
+            disparity_scale: self.disparity_scale,
+            disparity_offset: self.disparity_offset,
+            ndr: self.ndr,
+            residual_y: self.residual_y,
+            residual_u: self.residual_u,
+            residual_v: self.residual_v,
+        }
+    }
+}
+
 struct SliceCursor<'a> {
     nal: &'a Nal,
     idr: bool,
@@ -2055,11 +2267,14 @@ struct SliceCursor<'a> {
 struct AuScratch<'a, S: Sample> {
     picture: &'a mut Option<Frame<S>>,
     next_mb: &'a mut usize,
-    prior: &'a mut Vec<VideoOutput>,
+    prior: &'a mut Vec<Frame<S>>,
     planes: &'a mut ColourPlanes,
     held: &'a mut Option<Frame<S>>,
     /// Reference layer for inter-layer intra prediction.
     layer: Option<&'a Frame<S>>,
+    /// Where this picture's slices are kept when it will be decoded on
+    /// another thread. `None` decodes each slice here as it is read.
+    jobs: &'a mut Option<RowPlan>,
 }
 
 fn decode_slice<S: Sample>(
@@ -2084,6 +2299,7 @@ fn decode_slice<S: Sample>(
         planes,
         held,
         layer,
+        jobs,
     } = scratch;
     let mut bits = Bits::new(&nal.rbsp);
     let header = read_header(&mut bits, sets, idr, nal.ref_idc != 0, slice_class(nal))?;
@@ -2106,6 +2322,29 @@ fn decode_slice<S: Sample>(
     };
     if sps.bit_depth != S::BITS as u8 {
         return Err(CodecError::Unsupported { what: "bit depth" });
+    }
+    if jobs.is_some() {
+        // Rows are handed over as they finish only for a plain 4:2:0
+        // frame decoded in raster order. Anything else is decoded here,
+        // with every picture it may read brought here whole first.
+        let pps = sets
+            .pps
+            .get(usize::from(header.pps_id))
+            .and_then(|pps| pps.as_ref());
+        let rows = !header.field
+            && sps.frame_mbs_only
+            && sps.chroma == 1
+            && !sps.separate
+            && pps.is_some_and(|pps| pps.groups.minus1 == 0)
+            && sets.subset.iter().all(|subset| subset.is_none())
+            && layer.is_none();
+        if !rows {
+            if picture.is_some() {
+                return Err(bits.malformed("picture structure"));
+            }
+            *jobs = None;
+            settle(dpb)?;
+        }
     }
     if header.field
         && let Some(existing) = picture.as_ref()
@@ -2171,6 +2410,20 @@ fn decode_slice<S: Sample>(
         return Err(bits.malformed("picture"));
     };
     let total = pic.mb_w.saturating_mul(pic.h / 16);
+    if let Some(plan) = jobs.as_mut() {
+        // Kept for the thread that will decode the picture. It checks
+        // there that the slices follow one another and cover the picture.
+        let cabac_init = slice.cabac.then(|| cabac_init(&header));
+        plan.slices.push(SliceJob {
+            rbsp: nal.rbsp.clone(),
+            start_bit: bits.pos(),
+            slice: slice.into_owned(),
+            slice_id,
+            cabac_init,
+        });
+        *next_mb = total;
+        return Ok(true);
+    }
     let wrong_start = if slice.group_next.is_empty() {
         slice.origin != *next_mb
     } else {
@@ -3632,6 +3885,8 @@ fn new_frame<S: Sample>(
             Vec::new()
         }
         .into(),
+        pending: None,
+        writer: None,
     })
 }
 
@@ -3827,8 +4082,8 @@ fn make_slice<'a, S: Sample>(
     }
     let disparity = disparity_tables(sets, sps, header)?;
     Ok(Slice {
-        sps,
-        pps,
+        sps: std::borrow::Cow::Borrowed(sps),
+        pps: std::borrow::Cow::Borrowed(pps),
         kind: header.kind,
         poc,
         qp: header.qp,
@@ -4082,6 +4337,265 @@ fn put_block<S: Sample>(
     for row in 0..n {
         for col in 0..n {
             plane[(y + row * step) * stride + x + col] = src[row * n + col];
+        }
+    }
+}
+
+/// One slice of a picture, held so any thread can decode it.
+struct SliceJob {
+    rbsp: Vec<u8>,
+    /// Where the slice data starts in `rbsp`, in bits.
+    start_bit: usize,
+    slice: Slice<'static>,
+    slice_id: u16,
+    /// The CABAC table choice. `None` is a CAVLC slice.
+    cabac_init: Option<usize>,
+}
+
+/// The slices of the access unit being read, when its picture will be
+/// decoded on another thread.
+#[derive(Default)]
+struct RowPlan {
+    slices: Vec<SliceJob>,
+}
+
+/// A picture to decode: its empty planes, the pictures its slices refer to
+/// as the decoded picture buffer stood when they were read, and the slices.
+struct PictureJob<S: Sample> {
+    pic: Frame<S>,
+    dpb: Vec<Frame<S>>,
+    slices: Vec<SliceJob>,
+}
+
+/// Ends a picture as failed if its thread stops before saying how it went,
+/// so nothing waits on it for ever.
+struct EndsPicture<S: Sample>(std::sync::Arc<progress::Published<S>>);
+
+impl<S: Sample> Drop for EndsPicture<S> {
+    fn drop(&mut self) {
+        if !self.0.finished() {
+            self.0.finish(Err(CodecError::Malformed {
+                at_bit: 0,
+                what: "picture",
+            }));
+        }
+    }
+}
+
+/// Decodes one picture and publishes it, rows first and then whole.
+fn run_picture<S: Sample>(job: PictureJob<S>) {
+    let PictureJob {
+        mut pic,
+        dpb,
+        slices,
+    } = job;
+    let Some(published) = pic.pending.clone() else {
+        return;
+    };
+    let ends = EndsPicture(published);
+    let result = decode_picture(&mut pic, &dpb, &slices).map(|()| progress::Planes {
+        y: std::mem::take(&mut pic.y),
+        u: std::mem::take(&mut pic.u),
+        v: std::mem::take(&mut pic.v),
+        mb: std::mem::take(&mut pic.mb),
+    });
+    ends.0.finish(result);
+}
+
+fn decode_picture<S: Sample>(
+    pic: &mut Frame<S>,
+    dpb: &[Frame<S>],
+    slices: &[SliceJob],
+) -> Result<(), CodecError> {
+    let total = pic.mb_w.saturating_mul(pic.h / 16);
+    let mut next_mb = 0usize;
+    for job in slices {
+        if job.slice.origin != next_mb {
+            return Err(CodecError::Malformed {
+                at_bit: 0,
+                what: "first macroblock",
+            });
+        }
+        let mut bits = Bits::at(&job.rbsp, job.start_bit)?;
+        let entropy_slice = &job.slice;
+        match job.cabac_init {
+            Some(init) => {
+                let mut cab = Cabac::start(&mut bits, entropy_slice.qp, init)?;
+                mb::decode_mbs(
+                    pic,
+                    dpb,
+                    entropy_slice,
+                    job.slice_id,
+                    &mut next_mb,
+                    Entropy::Cabac(&mut cab),
+                    None,
+                )?;
+            }
+            None => mb::decode_mbs(
+                pic,
+                dpb,
+                entropy_slice,
+                job.slice_id,
+                &mut next_mb,
+                Entropy::Cavlc(Cavlc::plain(bits)),
+                None,
+            )?,
+        }
+    }
+    if next_mb != total {
+        return Err(CodecError::Malformed {
+            at_bit: 0,
+            what: "incomplete picture",
+        });
+    }
+    mb::finish_rows(pic);
+    // A picture that read from one that failed is not to be shown either.
+    for job in slices {
+        for &index in job.slice.ref0.iter().chain(&job.slice.ref1) {
+            let failure = dpb
+                .get(index)
+                .and_then(|frame| frame.pending.as_ref())
+                .and_then(|pending| pending.failure());
+            if let Some(error) = failure {
+                return Err(error);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Gives a picture decoded on another thread its finished planes.
+fn fill<S: Sample>(frame: &mut Frame<S>, planes: &progress::Planes<S>) {
+    frame.y = planes.y.clone();
+    frame.u = planes.u.clone();
+    frame.v = planes.v.clone();
+    frame.mb = planes.mb.clone();
+    frame.pending = None;
+}
+
+/// Waits for every picture still being decoded and brings each here
+/// whole, for code that reads pictures directly.
+fn settle<S: Sample>(dpb: &mut [Frame<S>]) -> Result<(), CodecError> {
+    for frame in dpb {
+        if let Some(published) = frame.pending.clone() {
+            fill(frame, published.planes()?);
+        }
+    }
+    Ok(())
+}
+
+/// [`settle`] for the pictures that are already finished, without waiting.
+fn settle_finished<S: Sample>(dpb: &mut [Frame<S>]) {
+    for frame in dpb {
+        if let Some(published) = frame.pending.clone()
+            && published.finished()
+            && let Ok(planes) = published.planes()
+        {
+            fill(frame, planes);
+        }
+    }
+}
+
+/// A picture waiting its turn to be returned.
+struct Queued {
+    /// Whether taking it will not wait.
+    ready: Box<dyn Fn() -> bool + Send>,
+    /// The picture, `None` when it has nothing to show, or the error that
+    /// ended its decoding.
+    take: Box<dyn FnOnce() -> Result<Option<VideoOutput>, CodecError> + Send>,
+}
+
+impl Queued {
+    fn new<S: Sample>(frame: Frame<S>) -> Self {
+        let pending = frame.pending.clone();
+        Self {
+            ready: Box::new(move || pending.as_ref().is_none_or(|pending| pending.finished())),
+            take: Box::new(move || {
+                if let Some(pending) = &frame.pending {
+                    pending.planes()?;
+                }
+                Ok(emit(&frame))
+            }),
+        }
+    }
+}
+
+type Task = Box<dyn FnOnce() + Send>;
+
+/// The threads that decode pictures.
+struct Pool {
+    /// `None` runs each task where it is handed over.
+    sender: Option<std::sync::mpsc::Sender<Task>>,
+    workers: Vec<std::thread::JoinHandle<()>>,
+    /// Pictures that may be queued for output before a call waits for the
+    /// first of them.
+    depth: usize,
+}
+
+impl Pool {
+    fn new(threads: usize) -> Self {
+        let (sender, receiver) = std::sync::mpsc::channel::<Task>();
+        let receiver = std::sync::Arc::new(std::sync::Mutex::new(receiver));
+        let mut workers = Vec::new();
+        for index in 0..threads {
+            let receiver = receiver.clone();
+            let spawned = std::thread::Builder::new()
+                .name(format!("h264-{index}"))
+                .spawn(move || {
+                    loop {
+                        let task = match receiver.lock() {
+                            Ok(receiver) => receiver.recv(),
+                            Err(_) => return,
+                        };
+                        let Ok(task) = task else {
+                            return;
+                        };
+                        // A task that unwinds has already marked its
+                        // picture failed; the thread goes on to the next.
+                        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(task));
+                    }
+                });
+            if let Ok(worker) = spawned {
+                workers.push(worker);
+            }
+        }
+        if workers.is_empty() {
+            return Self::inline();
+        }
+        let depth = workers.len();
+        Self {
+            sender: Some(sender),
+            workers,
+            depth,
+        }
+    }
+
+    fn inline() -> Self {
+        Self {
+            sender: None,
+            workers: Vec::new(),
+            depth: 0,
+        }
+    }
+
+    fn run(&self, task: Task) {
+        match &self.sender {
+            Some(sender) => {
+                if let Err(unsent) = sender.send(task) {
+                    (unsent.0)();
+                }
+            }
+            None => task(),
+        }
+    }
+}
+
+impl Drop for Pool {
+    fn drop(&mut self) {
+        // Closing the channel ends each thread once it has no task left.
+        self.sender = None;
+        for worker in self.workers.drain(..) {
+            let _ = worker.join();
         }
     }
 }
@@ -4439,6 +4953,8 @@ mod tests {
             svc_right: 0,
             svc_bottom: 0,
             levels: Vec::new().into(),
+            pending: None,
+            writer: None,
         }
     }
 
@@ -4816,6 +5332,126 @@ mod tests {
             }
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Pictures with motion in every direction, some of it off the edges.
+    fn moving_pictures(width: u32, height: u32, count: usize) -> Vec<Packet> {
+        let mut params = CodecParams::video(CodecId::H264, width, height);
+        params.nal_length_size = 0;
+        params.bitrate = 600_000;
+        let mut encoder = H264Encoder::open(&params).unwrap();
+        let (w, h) = (width as usize, height as usize);
+        let mut packets = Vec::new();
+        for index in 0..count {
+            let shift = index * 3;
+            let luma = |x: usize, y: usize| {
+                let (x, y) = (x + shift, y + shift / 2);
+                (((x / 8) ^ (y / 8)) * 37 + x * 2 + y) as u8
+            };
+            let y: Vec<u8> = (0..w * h).map(|i| luma(i % w, i / w)).collect();
+            let u: Vec<u8> = (0..w * h / 4)
+                .map(|i| luma(i % (w / 2), i / (w / 2)) / 2 + 60)
+                .collect();
+            let v: Vec<u8> = (0..w * h / 4)
+                .map(|i| 200 - luma(i / (w / 2), i % (w / 2)) / 2)
+                .collect();
+            let input = VideoInput {
+                picture: Yuv420p::try_new(width, height, y, u, v).unwrap(),
+                pts: index as i64,
+                duration: 1,
+                timescale: 30,
+                force_keyframe: index == 0,
+            };
+            packets.extend(encoder.push(&input).unwrap());
+        }
+        packets.extend(encoder.drain().unwrap());
+        packets
+    }
+
+    type Shown = (i64, Vec<u8>, Vec<u8>, Vec<u8>);
+
+    fn shown(decoder: &mut H264Decoder, packets: &[Packet]) -> Vec<Shown> {
+        let mut out = Vec::new();
+        for packet in packets {
+            out.extend(decoder.push(packet).unwrap());
+        }
+        out.extend(decoder.drain().unwrap());
+        out.into_iter()
+            .map(|frame| {
+                (
+                    frame.pts,
+                    frame.picture.y().to_vec(),
+                    frame.picture.u().to_vec(),
+                    frame.picture.v().to_vec(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn threads_give_the_same_pictures_in_the_same_order() {
+        let packets = moving_pictures(176, 144, 40);
+        let mut params = CodecParams::video(CodecId::H264, 176, 144);
+        params.nal_length_size = 0;
+        let want = shown(&mut H264Decoder::open(&params).unwrap(), &packets);
+        assert_eq!(want.len(), 40);
+        let inline = shown(
+            &mut H264Decoder::open(&params).unwrap().with_rows_inline(),
+            &packets,
+        );
+        assert!(inline == want, "rows decoded in turn on one thread differ");
+        for threads in [2, 3, 8] {
+            for _ in 0..4 {
+                let mut decoder = H264Decoder::open(&params).unwrap().with_threads(threads);
+                let got = shown(&mut decoder, &packets);
+                assert!(got == want, "{threads} threads differ");
+            }
+        }
+    }
+
+    #[test]
+    fn a_threaded_decoder_can_be_reset_and_used_again() {
+        let packets = moving_pictures(64, 48, 12);
+        let mut params = CodecParams::video(CodecId::H264, 64, 48);
+        params.nal_length_size = 0;
+        let want = shown(&mut H264Decoder::open(&params).unwrap(), &packets);
+        let mut decoder = H264Decoder::open(&params).unwrap().with_threads(4);
+        // Stop part of the way through, with pictures still in flight.
+        for packet in &packets[..7] {
+            decoder.push(packet).unwrap();
+        }
+        decoder.reset();
+        assert!(shown(&mut decoder, &packets) == want);
+    }
+
+    #[test]
+    fn threads_report_a_broken_picture_and_do_not_hang() {
+        let mut packets = moving_pictures(64, 48, 12);
+        // Cut a later picture's slice data short.
+        let cut = packets[5].data.len() / 2;
+        packets[5].data.truncate(cut);
+        let mut params = CodecParams::video(CodecId::H264, 64, 48);
+        params.nal_length_size = 0;
+        let mut decoder = H264Decoder::open(&params).unwrap().with_threads(4);
+        let mut errors = 0;
+        let mut pictures = 0;
+        for packet in &packets {
+            match decoder.push(packet) {
+                Ok(out) => pictures += out.len(),
+                Err(_) => errors += 1,
+            }
+        }
+        for _ in 0..packets.len() + 2 {
+            match decoder.drain() {
+                Ok(out) => {
+                    pictures += out.len();
+                    break;
+                }
+                Err(_) => errors += 1,
+            }
+        }
+        assert!(errors > 0, "the broken picture was not reported");
+        assert!(pictures < packets.len());
     }
 
     #[test]

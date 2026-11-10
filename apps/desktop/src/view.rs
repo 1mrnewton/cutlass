@@ -8203,8 +8203,13 @@ fn paint_clip(
     }
 }
 
+/// How far a key's diamond reaches from its middle, and the picked one's.
+const KEY_REACH: f32 = 5.0;
+const KEY_REACH_PICKED: f32 = 6.5;
+
 /// The selected clip's keys as diamonds along its foot. A click puts the
-/// playhead on the key; a drag moves it, landing on the nearest frame.
+/// playhead on the key and picks it, so Delete takes the key and not the
+/// clip; a drag moves it, landing on the nearest frame.
 fn paint_clip_keys(
     shell: &mut Shell,
     ui: &mut Ui,
@@ -8215,6 +8220,10 @@ fn paint_clip_keys(
     let painter = ui.painter().with_clip_rect(clip_rect.intersect(row));
     let pixel_size = shell.pixel_size() as f32;
     let y = clip_rect.bottom() - 8.0;
+    let picked = shell
+        .selected_clip_key()
+        .filter(|(id, _)| *id == clip.id)
+        .map(|(_, time)| time);
     for time in shell.clip_key_times(&clip.id) {
         let x = clip_rect.left() + (time.0 - clip.start.0) as f32 * pixel_size;
         let hit = Rect::from_center_size(Pos2::new(x, y), Vec2::new(12.0, 14.0));
@@ -8243,16 +8252,26 @@ fn paint_clip_keys(
             Color32::WHITE
         };
         let c = Pos2::new(at, y);
+        // The picked key is a size larger, filled, with a white edge.
+        let chosen = picked == Some(time);
+        let (reach, fill, edge) = if chosen {
+            (KEY_REACH_PICKED, tokens::EXPORT, Color32::WHITE)
+        } else {
+            (KEY_REACH, color, Color32::BLACK)
+        };
         painter.add(egui::Shape::convex_polygon(
             vec![
-                c + Vec2::new(0.0, -5.0),
-                c + Vec2::new(5.0, 0.0),
-                c + Vec2::new(0.0, 5.0),
-                c + Vec2::new(-5.0, 0.0),
+                c + Vec2::new(0.0, -reach),
+                c + Vec2::new(reach, 0.0),
+                c + Vec2::new(0.0, reach),
+                c + Vec2::new(-reach, 0.0),
             ],
-            color,
-            egui::Stroke::new(1.0, Color32::BLACK),
+            fill,
+            egui::Stroke::new(if chosen { 1.5 } else { 1.0 }, edge),
         ));
+        if response.drag_started_by(egui::PointerButton::Primary) {
+            shell.select_clip_key(&clip.id, time);
+        }
         if response.drag_stopped_by(egui::PointerButton::Primary)
             && let Some(pos) = ui.input(|input| input.pointer.interact_pos())
         {
@@ -8264,8 +8283,11 @@ fn paint_clip_keys(
             }
         } else if response.clicked() {
             shell.seek(time);
+            shell.select_clip_key(&clip.id, time);
         }
-        response.on_hover_text("Keyframe: click to go to it, drag to move it");
+        response.on_hover_text(
+            "Keyframe: click to pick it and go to it, drag to move it, Delete to remove it",
+        );
     }
 }
 
@@ -15521,6 +15543,28 @@ mod tests {
             (times[1].0 - 2_000_000).abs() <= 34_000,
             "the key landed at {times:?}"
         );
+        // The key that was clicked and dragged is the picked one: it is
+        // drawn larger, and Delete takes it and leaves the clip.
+        assert_eq!(shell.selected_clip_key(), Some((id.clone(), times[1])));
+        let output = frame(&mut shell, &mut view, Vec::new());
+        assert_eq!(diamonds(&output, 10.0).len(), 1);
+        assert_eq!(diamonds(&output, 13.0).len(), 1);
+        frame(
+            &mut shell,
+            &mut view,
+            vec![egui::Event::Key {
+                key: egui::Key::Delete,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        assert_eq!(shell.clip_key_times(&id), [Micros(0)]);
+        assert_eq!(shell.draft().unwrap().tracks[0].segments.len(), 1);
+        let output = frame(&mut shell, &mut view, Vec::new());
+        assert_eq!(diamonds(&output, 10.0).len(), 1);
+        assert!(diamonds(&output, 13.0).is_empty());
         let _ = std::fs::remove_dir_all(&temp);
     }
 

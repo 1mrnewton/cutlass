@@ -835,6 +835,8 @@ pub struct Shell {
     /// A clip that just landed on the timeline, for the window to bring
     /// its lane into view once.
     reveal: Option<SegmentId>,
+    /// The picked keyframe: its clip, and its time from the clip's start.
+    selected_key: Option<(SegmentId, Micros)>,
     /// The picked transition, by the clip it leads out of.
     selected_transition: Option<SegmentId>,
     /// A transition dropped on a cut that has one, held until the user
@@ -980,6 +982,7 @@ impl Shell {
             sound_known: RefCell::new(std::collections::HashMap::new()),
             attributes: None,
             reveal: None,
+            selected_key: None,
             selected_transition: None,
             asked_transition: None,
             clip_drag: None,
@@ -1433,6 +1436,7 @@ impl Shell {
         self.beating = false;
         self.selected_beat = None;
         self.selected_transition = None;
+        self.selected_key = None;
         self.cancel_clip_drag();
         self.fitted = false;
         self.notice.clear();
@@ -1610,6 +1614,7 @@ impl Shell {
         self.beating = false;
         self.selected_beat = None;
         self.selected_transition = None;
+        self.selected_key = None;
         self.cancel_clip_drag();
         self.pixel_size = opening_pixel_size(rate);
         self.fitted = false;
@@ -4298,6 +4303,7 @@ impl Shell {
         self.selected_marker = None;
         self.selected_beat = None;
         self.selected_transition = None;
+        self.selected_key = None;
         self.selection.clear();
         if let Some(id) = id {
             self.selection = self.group_mates(&id);
@@ -4311,6 +4317,7 @@ impl Shell {
         self.selected_marker = None;
         self.selected_beat = None;
         self.selected_transition = None;
+        self.selected_key = None;
         let mates = self.group_mates(&id);
         if self.selection.contains(&id) {
             self.selection
@@ -4330,6 +4337,7 @@ impl Shell {
         self.selected_marker = None;
         self.selected_beat = None;
         self.selected_transition = None;
+        self.selected_key = None;
         if !keep {
             self.selection.clear();
         }
@@ -4371,9 +4379,13 @@ impl Shell {
         self.selection.iter().any(|item| item == id)
     }
 
-    /// Remove the selected clips, or the selected marker, beat or
-    /// transition when no clip is selected.
+    /// Remove the selected keyframe when one is picked; else the selected
+    /// clips; else the selected marker, beat or transition.
     pub fn delete_target(&mut self) -> Result<(), ShellError> {
+        // A picked keyframe goes before the clip it is on.
+        if self.selected_clip_key().is_some() {
+            return self.remove_selected_key();
+        }
         if self.selection.is_empty() {
             if self.selected_marker.is_some() {
                 return self.remove_selected_marker();
@@ -7179,6 +7191,7 @@ impl Shell {
         });
         self.selected_beat = None;
         self.selected_transition = None;
+        self.selected_key = None;
         self.selection.clear();
     }
 
@@ -7307,6 +7320,7 @@ impl Shell {
         self.selected_beat = Some(BeatPick { segment_id, source });
         self.selected_marker = None;
         self.selected_transition = None;
+        self.selected_key = None;
         self.selection.clear();
     }
 
@@ -7361,6 +7375,7 @@ impl Shell {
         if !present {
             self.selected_beat = None;
             self.selected_transition = None;
+            self.selected_key = None;
             return Ok(());
         }
         self.apply(Request::RemoveBeat {
@@ -7369,6 +7384,7 @@ impl Shell {
         })?;
         self.selected_beat = None;
         self.selected_transition = None;
+        self.selected_key = None;
         Ok(())
     }
 
@@ -18759,6 +18775,89 @@ mod tests {
         desktop.undo().unwrap();
         assert_eq!(desktop.draft().unwrap(), &before);
         assert!(desktop.link_media_enabled());
+    }
+
+    #[test]
+    fn delete_takes_a_picked_keyframe_before_the_clip_it_is_on() {
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        draft.config.maintrack_adsorb = false;
+        let mut clip = Segment::new("a", "color", TimeRange::new(2_000_000, 4_000_000));
+        // Position keyed at the clip's start and a second in; opacity
+        // keyed a second in as well.
+        for offset in [0, 1_000_000] {
+            cutlass_model::put_key(&mut clip, "KFTypePositionX", Micros(offset), 0.0);
+        }
+        cutlass_model::put_key(&mut clip, "KFTypeAlpha", Micros(1_000_000), 0.5);
+        draft.tracks[0].segments.push(clip);
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        let id = SegmentId::new("a");
+        desktop.select(Some(id.clone()));
+        assert_eq!(
+            desktop.clip_key_times(&id),
+            [Micros(2_000_000), Micros(3_000_000)]
+        );
+        assert!(desktop.selected_clip_key().is_none());
+
+        // A time with no key picks nothing.
+        desktop.select_clip_key(&id, Micros(2_500_000));
+        assert!(desktop.selected_clip_key().is_none());
+        assert_eq!(
+            desktop.remove_selected_key().unwrap_err().to_string(),
+            "no keyframe is selected"
+        );
+
+        // The key a second in is picked; Delete takes it, on every setting
+        // keyed there, and leaves the clip and its other key.
+        desktop.select_clip_key(&id, Micros(3_000_000));
+        assert_eq!(
+            desktop.selected_clip_key(),
+            Some((id.clone(), Micros(3_000_000)))
+        );
+        desktop.run_action("delete").unwrap();
+        assert_eq!(desktop.draft().unwrap().tracks[0].segments.len(), 1);
+        assert_eq!(desktop.clip_key_times(&id), [Micros(2_000_000)]);
+        assert!(desktop.selected_clip_key().is_none());
+        assert_eq!(
+            desktop.selection(),
+            std::slice::from_ref(&id),
+            "the clip stays picked"
+        );
+        // One undo brings the key back on both settings.
+        desktop.undo().unwrap();
+        assert_eq!(desktop.clip_key_times(&id).len(), 2);
+        let keyed = |desktop: &Shell, property: &str| {
+            desktop.draft().unwrap().tracks[0].segments[0]
+                .common_keyframes
+                .iter()
+                .find(|group| group.property_type == property)
+                .map_or(0, |group| group.keyframe_list.len())
+        };
+        assert_eq!(
+            (
+                keyed(&desktop, "KFTypePositionX"),
+                keyed(&desktop, "KFTypeAlpha")
+            ),
+            (2, 1)
+        );
+
+        // A key dragged stays the picked one at its new time.
+        desktop.select_clip_key(&id, Micros(3_000_000));
+        desktop
+            .move_clip_key(&id, Micros(3_000_000), Micros(4_000_000))
+            .unwrap();
+        assert_eq!(
+            desktop.selected_clip_key(),
+            Some((id.clone(), Micros(4_000_000)))
+        );
+        // Picking the clip again lets go of the key, so Delete takes the
+        // clip as before.
+        desktop.select(Some(id.clone()));
+        assert!(desktop.selected_clip_key().is_none());
+        desktop.run_action("delete").unwrap();
+        assert!(desktop.draft().unwrap().tracks[0].segments.is_empty());
     }
 
     #[test]

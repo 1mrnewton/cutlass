@@ -381,7 +381,65 @@ impl Shell {
         let request =
             cutlass_editor::move_key(draft, segment_id, Micros(from.0 - start), offset)
                 .ok_or_else(|| ShellError::Unavailable("a key is already there".to_owned()))?;
-        self.apply(request)
+        self.apply(request)?;
+        // The key that was dragged stays the picked one.
+        self.selected_key = Some((segment_id.clone(), offset));
+        Ok(())
+    }
+
+    /// Pick the keyframe of clip `segment_id` at timeline time `time`, so
+    /// Delete takes it and not the clip. A time with no key picks nothing.
+    pub fn select_clip_key(&mut self, segment_id: &SegmentId, time: Micros) {
+        self.selected_key = self.clip_key_times(segment_id).contains(&time).then(|| {
+            let start = self
+                .draft()
+                .into_iter()
+                .flat_map(|draft| &draft.tracks)
+                .flat_map(|track| &track.segments)
+                .find(|segment| segment.id == *segment_id)
+                .map_or(0, |segment| segment.target.start.0);
+            (segment_id.clone(), Micros(time.0 - start))
+        });
+    }
+
+    /// The picked keyframe, as its clip and its timeline time, while the
+    /// clip is still selected and still has a key there.
+    #[must_use]
+    pub fn selected_clip_key(&self) -> Option<(SegmentId, Micros)> {
+        let (segment_id, offset) = self.selected_key.as_ref()?;
+        if !self.is_selected(segment_id) {
+            return None;
+        }
+        let segment = self
+            .draft()?
+            .tracks
+            .iter()
+            .flat_map(|track| &track.segments)
+            .find(|segment| segment.id == *segment_id)?;
+        cutlass_model::key_offsets(segment)
+            .contains(offset)
+            .then(|| {
+                (
+                    segment_id.clone(),
+                    Micros(segment.target.start.0.saturating_add(offset.0)),
+                )
+            })
+    }
+
+    /// Take the picked keyframe off its clip: every key at that time,
+    /// whatever it keys. The clip stays. One undo step.
+    pub fn remove_selected_key(&mut self) -> Result<(), ShellError> {
+        let (segment_id, offset) = self
+            .selected_key
+            .clone()
+            .filter(|_| self.selected_clip_key().is_some())
+            .ok_or_else(|| ShellError::Unavailable("no keyframe is selected".to_owned()))?;
+        self.refuse_locked(&segment_id)?;
+        let request = cutlass_editor::remove_key(self.session_draft()?, &segment_id, offset)
+            .ok_or_else(|| ShellError::Unavailable("no keyframe is selected".to_owned()))?;
+        self.apply(request)?;
+        self.selected_key = None;
+        Ok(())
     }
 
     /// The selected picture or title's keyframes, read at the playhead.

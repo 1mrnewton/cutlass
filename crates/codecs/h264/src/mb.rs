@@ -908,9 +908,9 @@ fn skip_mb<S: Sample>(
         }
         let (mv, reference) = if slice.dmvp {
             dmvp_skip_motion(pic, dpb, slice, mx, my)
-                .unwrap_or_else(|| (p_skip_mv(pic, mx, my, slice_id), 0))
+                .unwrap_or_else(|| (p_skip_mv(pic, mx, my, &mb), 0))
         } else {
-            (p_skip_mv(pic, mx, my, slice_id), 0)
+            (p_skip_mv(pic, mx, my, &mb), 0)
         };
         for part in 0..4 {
             mb.ref0[part] = reference;
@@ -1220,14 +1220,14 @@ fn inverse_raster(index: usize, width: usize, height: usize, span: usize, vertic
     }
 }
 
-fn p_skip_mv<S: Sample>(pic: &Frame<S>, mx: usize, my: usize, slice: u16) -> [i16; 2] {
-    let left = neighbor(pic, mx as i32 - 1, my as i32, slice);
-    let above = neighbor(pic, mx as i32, above_my(pic, mx, my), slice);
-    let zero = |mb: &Mb, bx: usize, by: usize| {
-        let part = (by / 2) * 2 + (bx / 2);
-        mb.ref0[part] == 0 && mb.mv0[by * 4 + bx] == [0, 0]
-    };
-    if left.is_none_or(|mb| zero(mb, 3, 0)) || above.is_none_or(|mb| zero(mb, 0, 3)) {
+/// Clause 8.4.1.1. `current` is the skipped macroblock so far: its slice and
+/// whether it is a field macroblock, which is what its neighbours' motion is
+/// measured in.
+fn p_skip_mv<S: Sample>(pic: &Frame<S>, mx: usize, my: usize, current: &Mb) -> [i16; 2] {
+    let left = part_motion(pic, mx, my, -1, 0, 0, current);
+    let above = part_motion(pic, mx, my, 0, -1, 0, current);
+    let still = |near: Motion| !near.available || (near.reference == 0 && near.mv == [0, 0]);
+    if still(left) || still(above) {
         [0, 0]
     } else {
         mvp(
@@ -1237,7 +1237,7 @@ fn p_skip_mv<S: Sample>(pic: &Frame<S>, mx: usize, my: usize, slice: u16) -> [i1
             (16, 16),
             0,
             0,
-            &Mb::new(slice),
+            current,
         )
     }
 }
@@ -4143,15 +4143,6 @@ fn shift(mb: usize, block: i32, grid: usize) -> (i32, usize) {
         (mb as i32 + 1, 0)
     } else {
         (mb as i32, block as usize)
-    }
-}
-
-fn shift_field(mb: usize, block: i32, grid: usize, field: bool) -> (i32, usize) {
-    let (row, off) = shift(mb, block, grid);
-    if field && block < 0 {
-        (row - 1, off)
-    } else {
-        (row, off)
     }
 }
 
@@ -7897,10 +7888,10 @@ fn read_parts<S: Sample>(
                 part,
                 list0_interview(pic, dpb, slice)?,
             );
-        } else if slice.num_ref_l0 > 1 {
+        } else if ref_count(slice, 0, mb) > 1 {
             let r = read_te(
                 entropy,
-                slice.num_ref_l0,
+                ref_count(slice, 0, mb),
                 ref_ctx(pic, mx, my, part.x / 4, part.y / 4, 0, mb),
             )?;
             fill_ref(&mut mb.ref0, &mut mb.uses0, part, r as i8);
@@ -7918,10 +7909,10 @@ fn read_parts<S: Sample>(
         if from_layer1[index] {
             let (_, reference) = layer_motion(layer, mx, my, part, 1)?;
             fill_ref(&mut mb.ref1, &mut mb.uses1, part, reference);
-        } else if slice.num_ref_l1 > 1 {
+        } else if ref_count(slice, 1, mb) > 1 {
             let r = read_te(
                 entropy,
-                slice.num_ref_l1,
+                ref_count(slice, 1, mb),
                 ref_ctx(pic, mx, my, part.x / 4, part.y / 4, 1, mb),
             )?;
             fill_ref(&mut mb.ref1, &mut mb.uses1, part, r as i8);
@@ -8006,6 +7997,18 @@ fn read_parts<S: Sample>(
         }
     }
     Ok(())
+}
+
+/// How many reference indices `list` offers this macroblock (clause 7.4.5.1).
+/// A field macroblock of a frame picks among the fields of the listed
+/// frames, twice as many.
+fn ref_count(slice: &Slice<'_>, list: usize, mb: &Mb) -> usize {
+    let frames = if list == 0 {
+        slice.num_ref_l0
+    } else {
+        slice.num_ref_l1
+    };
+    frames << usize::from(mb.field_mb)
 }
 
 fn read_flag(entropy: &mut Entropy<'_, '_>) -> Result<bool, CodecError> {
@@ -8404,12 +8407,16 @@ fn ref_ctx<S: Sample>(
     list: usize,
     mb: &Mb,
 ) -> usize {
-    let left = ref_at(pic, mx, my, bx as i32 - 1, by as i32, list, mb);
-    let above = ref_at(pic, mx, my, bx as i32, by as i32 - 1, list, mb);
-    usize::from(left > 0) + 2 * usize::from(above > 0)
+    let left = ref_above_zero(pic, mx, my, bx as i32 - 1, by as i32, list, mb);
+    let above = ref_above_zero(pic, mx, my, bx as i32, by as i32 - 1, list, mb);
+    usize::from(left) + 2 * usize::from(above)
 }
 
-fn ref_at<S: Sample>(
+/// Clause 9.3.3.1.1.6: whether the partition holding the block (`bx`, `by`),
+/// which may lie just outside this macroblock, raises the `ref_idx` context.
+/// It does when its reference index is above 0, or above 1 for a field
+/// macroblock beside a frame macroblock, whose indices count fields.
+fn ref_above_zero<S: Sample>(
     pic: &Frame<S>,
     mx: usize,
     my: usize,
@@ -8417,24 +8424,60 @@ fn ref_at<S: Sample>(
     by: i32,
     list: usize,
     current: &Mb,
-) -> i8 {
-    let (mbx, ox) = if bx < 0 {
-        (mx as i32 - 1, 1)
-    } else {
-        (mx as i32, (bx as usize) / 2)
+) -> bool {
+    let Some((mbx, mby, index)) = near_block(pic, (mx, my), current.field_mb, (bx, by, false))
+    else {
+        return false;
     };
-    let (mby, oy) = if by < 0 {
-        (above_my(pic, mx, my), 1)
-    } else {
-        (my as i32, (by as usize) / 2)
-    };
-    let index = oy * 2 + ox.min(1);
+    let part = index / 8 * 2 + index % 4 / 2;
     if mbx == mx as i32 && mby == my as i32 {
-        return listed_ref(current, index, list);
+        return listed_ref(current, part, list) > 0;
     }
-    neighbor(pic, mbx, mby, current.slice)
-        .map(|mb| listed_ref(mb, index, list))
-        .unwrap_or(-1)
+    neighbor(pic, mbx, mby, current.slice).is_some_and(|mb| {
+        let floor = i8::from(mb.field_mb && !current.field_mb);
+        listed_ref(mb, part, list) > floor
+    })
+}
+
+/// The 4×4 block (`bx`, `by`) of the macroblock at grid position `at`, where
+/// either may be one step outside the macroblock's own four by four: the
+/// macroblock that holds it, by grid column and row, and the block's index
+/// there. `field` is whether the macroblock at `at` is a field macroblock.
+/// `None` is a block the picture's layout rules out; one in a macroblock not
+/// decoded yet is still returned.
+///
+/// In a macroblock-adaptive frame the lines of a block left of the
+/// macroblock may lie in two macroblocks. `low` asks for the one holding the
+/// block's last line, which is what borders a partition from above and to
+/// the left; otherwise it is the one holding its first line.
+#[inline]
+fn near_block<S: Sample>(
+    pic: &Frame<S>,
+    at: (usize, usize),
+    field: bool,
+    (bx, by, low): (i32, i32, bool),
+) -> Option<(i32, i32, usize)> {
+    let (mx, my) = at;
+    if (0..4).contains(&bx) && (0..4).contains(&by) {
+        return Some((mx as i32, my as i32, (by * 4 + bx) as usize));
+    }
+    if pic.mbaff {
+        let (xn, ox) = match bx {
+            ..0 => (-1, 3),
+            4.. => (16, 0),
+            _ => (bx * 4, bx as usize),
+        };
+        let yn = if by < 0 {
+            -1
+        } else {
+            by * 4 + 3 * i32::from(low)
+        };
+        let near = mbaff::locate((&pic.mb, pic.mb_w), at, field, xn, yn)?;
+        return Some((near.mx as i32, near.my as i32, near.row / 4 * 4 + ox));
+    }
+    let (mbx, ox) = shift(mx, bx, 4);
+    let (mby, oy) = shift(my, by, 4);
+    Some((mbx, mby, oy * 4 + ox))
 }
 
 /// Clause 9.3.3.1.1.6. Direct, skip, intra, and the other list contribute no reference.
@@ -8594,9 +8637,10 @@ fn mvd_at<S: Sample>(
     let Place { mx, my } = at;
     let (bx, by) = cell;
     let (list, comp) = which;
-    let (mbx, ox) = shift(mx, bx, 4);
-    let (mby, oy) = shift_field(my, by, 4, current.field_mb);
-    let index = oy * 4 + ox;
+    let Some((mbx, mby, index)) = near_block(pic, (mx, my), current.field_mb, (bx, by, false))
+    else {
+        return 0;
+    };
     if mbx == mx as i32 && mby == my as i32 {
         let mv = if list == 0 {
             current.mvd0[index]
@@ -8607,11 +8651,19 @@ fn mvd_at<S: Sample>(
     }
     neighbor(pic, mbx, mby, current.slice)
         .map(|mb| {
-            i32::from(if list == 0 {
+            let size = i32::from(if list == 0 {
                 mb.mvd0[index][comp]
             } else {
                 mb.mvd1[index][comp]
             })
+            .abs();
+            // Clause 9.3.3.1.1.7: a vertical difference is counted in this
+            // macroblock's lines, a field's being twice a frame's.
+            match (comp, current.field_mb, mb.field_mb) {
+                (1, true, false) => size / 2,
+                (1, false, true) => size * 2,
+                _ => size,
+            }
         })
         .unwrap_or(0)
 }
@@ -8649,7 +8701,7 @@ fn mvp<S: Sample>(
     let mut c = if above_right.available {
         above_right
     } else {
-        part_motion(pic, mx, my, bx as i32 - 1, by as i32 - 1, list, current)
+        corner_motion(pic, mx, my, bx as i32, by as i32, list, current)
     };
     if w == 16 && h == 8 && by == 0 && b.reference == reference {
         return b.mv;
@@ -8695,6 +8747,7 @@ fn mark_decoded(mb: &mut Mb, x: usize, y: usize, w: usize, h: usize) {
     }
 }
 
+#[inline]
 fn part_motion<S: Sample>(
     pic: &Frame<S>,
     mx: usize,
@@ -8704,27 +8757,65 @@ fn part_motion<S: Sample>(
     list: usize,
     current: &Mb,
 ) -> Motion {
-    let (mbx, ox) = shift(mx, bx, 4);
-    let (mby, oy) = shift_field(my, by, 4, current.field_mb);
-    let index = oy * 4 + ox;
+    motion_near(pic, (mx, my), (bx, by, false), list, current)
+}
+
+/// The motion above and to the left of the partition whose first block is
+/// (`bx`, `by`): that of the block holding the sample one up and one left of
+/// the partition's first sample.
+fn corner_motion<S: Sample>(
+    pic: &Frame<S>,
+    mx: usize,
+    my: usize,
+    bx: i32,
+    by: i32,
+    list: usize,
+    current: &Mb,
+) -> Motion {
+    motion_near(pic, (mx, my), (bx - 1, by - 1, true), list, current)
+}
+
+/// The motion of a block of this macroblock or beside it, as [`near_block`]
+/// finds it, in this macroblock's terms.
+#[inline]
+fn motion_near<S: Sample>(
+    pic: &Frame<S>,
+    (mx, my): (usize, usize),
+    (bx, by, low): (i32, i32, bool),
+    list: usize,
+    current: &Mb,
+) -> Motion {
+    let absent = Motion {
+        available: false,
+        mv: [0, 0],
+        reference: -1,
+    };
+    let Some((mbx, mby, index)) = near_block(pic, (mx, my), current.field_mb, (bx, by, low)) else {
+        return absent;
+    };
     if mbx == mx as i32 && mby == my as i32 {
         if current.ready & (1 << index) == 0 {
-            return Motion {
-                available: false,
-                mv: [0, 0],
-                reference: -1,
-            };
+            return absent;
         }
         return motion_of(current, index, list);
     }
     let Some(mb) = neighbor(pic, mbx, mby, current.slice) else {
-        return Motion {
-            available: false,
-            mv: [0, 0],
-            reference: -1,
-        };
+        return absent;
     };
-    motion_of(mb, index, list)
+    let mut motion = motion_of(mb, index, list);
+    // Clause 8.4.1.3.1: a neighbour of the other kind is read in this
+    // macroblock's terms. A field's lines are twice as far apart as a
+    // frame's, and a field macroblock's index counts two fields a frame.
+    if motion.reference >= 0 && mb.field_mb != current.field_mb {
+        if current.field_mb {
+            motion.mv[1] /= 2;
+            motion.reference = motion.reference.saturating_mul(2);
+        } else {
+            motion.mv[1] = motion.mv[1].saturating_mul(2);
+            motion.reference >>= 1;
+        }
+    }
+    motion
 }
 
 fn motion_of(mb: &Mb, index: usize, list: usize) -> Motion {
@@ -8841,10 +8932,11 @@ fn read_sub<S: Sample>(
         }
         let x = (i & 1) * 2;
         let y = (i >> 1) * 2;
-        let r = if ref0_forced || slice.num_ref_l0 <= 1 {
+        let count = ref_count(slice, 0, mb);
+        let r = if ref0_forced || count <= 1 {
             0
         } else {
-            read_te(entropy, slice.num_ref_l0, ref_ctx(pic, mx, my, x, y, 0, mb))? as i8
+            read_te(entropy, count, ref_ctx(pic, mx, my, x, y, 0, mb))? as i8
         };
         let index = (y / 2) * 2 + (x / 2);
         mb.ref0[index] = r;
@@ -8870,10 +8962,11 @@ fn read_sub<S: Sample>(
         }
         let x = (i & 1) * 2;
         let y = (i >> 1) * 2;
-        let r = if slice.num_ref_l1 <= 1 {
+        let count = ref_count(slice, 1, mb);
+        let r = if count <= 1 {
             0
         } else {
-            read_te(entropy, slice.num_ref_l1, ref_ctx(pic, mx, my, x, y, 1, mb))? as i8
+            read_te(entropy, count, ref_ctx(pic, mx, my, x, y, 1, mb))? as i8
         };
         let index = (y / 2) * 2 + (x / 2);
         mb.ref1[index] = r;
@@ -9250,7 +9343,7 @@ fn direct_refs<S: Sample>(pic: &Frame<S>, mx: usize, my: usize, mb: &Mb) -> (i8,
         let c = if right.available {
             right
         } else {
-            part_motion(pic, mx, my, -1, -1, list, mb)
+            corner_motion(pic, mx, my, 0, 0, list, mb)
         };
         min_positive(a.reference, min_positive(b.reference, c.reference))
     };
@@ -10860,11 +10953,13 @@ fn preds_at(mb: &Mb, bx: usize, by: usize) -> [(i8, [i16; 2]); 2] {
 }
 
 fn bind_refs(mb: &mut Mb, slice: &Slice<'_>) {
+    // A field macroblock's index counts fields, two to a listed frame.
+    let halve = u32::from(mb.field_mb);
     for i in 0..4 {
-        mb.slot0[i] = ref_slot(&slice.ref0, mb.ref0[i]);
-        mb.slot1[i] = ref_slot(&slice.ref1, mb.ref1[i]);
-        mb.ref_poc0[i] = listed_poc(&slice.poc0, mb.ref0[i]);
-        mb.ref_poc1[i] = listed_poc(&slice.poc1, mb.ref1[i]);
+        mb.slot0[i] = ref_slot(&slice.ref0, mb.ref0[i] >> halve);
+        mb.slot1[i] = ref_slot(&slice.ref1, mb.ref1[i] >> halve);
+        mb.ref_poc0[i] = listed_poc(&slice.poc0, mb.ref0[i] >> halve);
+        mb.ref_poc1[i] = listed_poc(&slice.poc1, mb.ref1[i] >> halve);
     }
 }
 

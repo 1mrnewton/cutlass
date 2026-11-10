@@ -120,6 +120,9 @@ impl Coeffs {
 /// A list slot the initialisation process left as "no reference picture".
 const NO_PICTURE: usize = usize::MAX;
 
+#[path = "mbaff.rs"]
+mod mbaff;
+
 /// SliceQPY after `mb_qp_delta`. The result stays in `-QpBdOffsetY..=51`.
 fn next_qp<S: Sample>(qp: i32, delta: i32) -> i32 {
     let span = 52 + S::QP_BD;
@@ -841,7 +844,7 @@ fn rle_context<S: Sample>(
         return false;
     }
     let (mx, my) = locate(pic, addr, mbaff);
-    let left = neighbor(pic, mx as i32 - 1, my as i32, slice_id);
+    let left = left_mb(pic, mx, my, slice_id);
     let above = neighbor(pic, mx as i32, above_my(pic, mx, my), slice_id);
     left.is_none_or(|mb| mb.skip) && above.is_none_or(|mb| mb.skip)
 }
@@ -855,7 +858,7 @@ fn cabac_skip<S: Sample>(
     mbaff: bool,
 ) -> Result<bool, CodecError> {
     let (mx, my) = locate(pic, addr, mbaff);
-    let left = neighbor(pic, mx as i32 - 1, my as i32, slice_id);
+    let left = left_mb(pic, mx, my, slice_id);
     let above = neighbor(pic, mx as i32, above_my(pic, mx, my), slice_id);
     let mut ctx = 0;
     if left.is_some_and(|mb| !mb.skip) {
@@ -3040,9 +3043,52 @@ fn block_span<S: Sample>(pic: &Frame<S>, my: usize, field: bool, plane: u8) -> S
     }
 }
 
+/// Grid row of the macroblock above this one, whose last row of blocks
+/// borders it. A frame macroblock has the row before it. A field macroblock
+/// continues its own field (clause 6.4.12.2): the bottom field always ends in
+/// the bottom macroblock of the pair above, and the top field ends in that
+/// pair's top macroblock when it is a field pair and its bottom one when it
+/// is a frame pair.
 fn above_my<S: Sample>(pic: &Frame<S>, mx: usize, my: usize) -> i32 {
-    let field = pic.mb.get(my * pic.mb_w + mx).is_some_and(|mb| mb.field_mb);
-    my as i32 - if field { 2 } else { 1 }
+    let field_at = |row: usize| {
+        pic.mb
+            .get(row * pic.mb_w + mx)
+            .is_some_and(|mb| mb.field_mb)
+    };
+    if !field_at(my) {
+        return my as i32 - 1;
+    }
+    if my % 2 == 1 {
+        return my as i32 - 2;
+    }
+    match my.checked_sub(2) {
+        Some(above) if field_at(above) => above as i32,
+        Some(above) => above as i32 + 1,
+        None => -1,
+    }
+}
+
+/// The macroblock left of luma row `row` of this one, as a grid column and
+/// row, and the luma row there that lies beside it. Only a macroblock-adaptive
+/// frame makes this more than the same row one column back: a frame pair
+/// beside a field pair meets both of its macroblocks.
+#[inline]
+fn left_of<S: Sample>(pic: &Frame<S>, mx: usize, my: usize, row: usize) -> (i32, i32, usize) {
+    if pic.mbaff {
+        let field = pic.mb.get(my * pic.mb_w + mx).is_some_and(|mb| mb.field_mb);
+        if let Some(near) = mbaff::locate((&pic.mb, pic.mb_w), (mx, my), field, -1, row as i32) {
+            return (near.mx as i32, near.my as i32, near.row);
+        }
+    }
+    (mx as i32 - 1, my as i32, row)
+}
+
+/// The macroblock that holds the sample left of this one's first sample,
+/// when it is in the same slice (clause 6.4.8.1, mbAddrA).
+#[inline]
+fn left_mb<S: Sample>(pic: &Frame<S>, mx: usize, my: usize, slice: u16) -> Option<&Mb> {
+    let (nx, ny, _) = left_of(pic, mx, my, 0);
+    neighbor(pic, nx, ny, slice)
 }
 
 /// CAVLC `mb_type` 0 in an SI slice. It is not an intra spec.
@@ -3138,7 +3184,7 @@ fn cabac_mb_type<S: Sample>(
 fn direct_ctx<S: Sample>(pic: &Frame<S>, mx: usize, my: usize, slice: u16) -> usize {
     // Clause 9.3.3.1.1.3: a missing neighbor, B_Skip, or B_Direct_16x16 contributes 0.
     let coded = |mb: &Mb| !mb.skip && !mb.direct16;
-    let left = neighbor(pic, mx as i32 - 1, my as i32, slice).is_some_and(coded);
+    let left = left_mb(pic, mx, my, slice).is_some_and(coded);
     let above = neighbor(pic, mx as i32, above_my(pic, mx, my), slice).is_some_and(coded);
     usize::from(left) + usize::from(above)
 }
@@ -3155,7 +3201,7 @@ fn cabac_intra_type<S: Sample>(
     let intra16 = |mb: &Mb| mb.intra16 || mb.pcm;
     if intra_slice {
         let mut ctx = 0;
-        if neighbor(pic, mx as i32 - 1, my as i32, slice).is_some_and(intra16) {
+        if left_mb(pic, mx, my, slice).is_some_and(intra16) {
             ctx += 1;
         }
         if neighbor(pic, mx as i32, above_my(pic, mx, my), slice).is_some_and(intra16) {
@@ -3444,19 +3490,15 @@ fn mode_at<S: Sample>(
     current: &Mb,
     constrained: bool,
 ) -> Option<u8> {
-    let (mbx, ox) = if bx < 0 {
-        (mx as i32 - 1, 3)
-    } else if bx > 3 {
-        (mx as i32 + 1, 0)
+    let (mbx, mby, ox, oy) = if bx < 0 {
+        // Clauses 8.3.1.1 and 8.3.2.1: the block beside this row in the
+        // macroblock to the left.
+        let (left_x, left_y, row) = left_of(pic, mx, my, by.max(0) as usize * 4);
+        (left_x, left_y, 3, row / 4)
+    } else if by < 0 {
+        (mx as i32, above_my(pic, mx, my), bx.min(3) as usize, 3)
     } else {
-        (mx as i32, bx as usize)
-    };
-    let (mby, oy) = if by < 0 {
-        (above_my(pic, mx, my), 3)
-    } else if by > 3 {
-        (my as i32 + 1, 0)
-    } else {
-        (my as i32, by as usize)
+        (mx as i32, my as i32, bx.min(3) as usize, by.min(3) as usize)
     };
     if mbx == mx as i32 && mby == my as i32 {
         return Some(current.mode4[oy * 4 + ox]);
@@ -3520,7 +3562,7 @@ fn read_chroma_mode<S: Sample>(
         }
         Entropy::Cabac(cab) => {
             let mut ctx = 0;
-            if neighbor(pic, mx as i32 - 1, my as i32, slice)
+            if left_mb(pic, mx, my, slice)
                 .is_some_and(|mb| mb.intra && !mb.pcm && mb.chroma_mode != 0)
             {
                 ctx += 1;
@@ -3590,7 +3632,8 @@ fn read_cbp<S: Sample>(
             if chroma == 3 {
                 return Ok((luma, 0));
             }
-            let left = cbp_chroma(pic, mx as i32 - 1, my as i32, slice);
+            let (left_x, left_y, _) = left_of(pic, mx, my, 0);
+            let left = cbp_chroma(pic, left_x, left_y, slice);
             let above = cbp_chroma(pic, mx as i32, above_my(pic, mx, my), slice);
             let mut ctx = usize::from(left > 0) + 2 * usize::from(above > 0);
             if cab.decision(77 + ctx)? == 0 {
@@ -3619,7 +3662,10 @@ fn cbp_ctx<S: Sample>(
     let left_coded = if bit == 1 || bit == 3 {
         current & left_bit != 0
     } else {
-        coded_bit(pic, mx as i32 - 1, my as i32, left_bit, slice)
+        // The 8×8 block beside this one, in the right-hand column of the
+        // macroblock to the left: block 1 or 3 by the row it is found at.
+        let (left_x, left_y, row) = left_of(pic, mx, my, bit * 4);
+        coded_bit(pic, left_x, left_y, 0x02 << (row / 8 * 2), slice)
     };
     let above_coded = if bit == 2 || bit == 3 {
         current & above_bit != 0
@@ -3699,7 +3745,7 @@ fn transform8_flag<S: Sample>(
     slice: u16,
 ) -> Result<bool, CodecError> {
     let on = |mb: &Mb| mb.transform8;
-    let left = neighbor(pic, mx as i32 - 1, my as i32, slice).is_some_and(on);
+    let left = left_mb(pic, mx, my, slice).is_some_and(on);
     let above = neighbor(pic, mx as i32, above_my(pic, mx, my), slice).is_some_and(on);
     flag(entropy, 399 + usize::from(left) + usize::from(above))
 }
@@ -3987,8 +4033,16 @@ fn nnz_at<S: Sample>(
             _ => (2, 2),
         }
     };
-    let (mbx, ox) = shift(mx, bx, gx);
-    let (mby, oy) = shift_field(my, by, gy, current.field_mb);
+    let (mbx, mby, ox, oy) = if bx < 0 {
+        // Rows of blocks are 16 / gy luma rows apart, in chroma too.
+        let tall = 16 / gy;
+        let (left_x, left_y, row) = left_of(pic, mx, my, by.max(0) as usize * tall);
+        (left_x, left_y, gx - 1, row / tall)
+    } else if by < 0 {
+        (mx as i32, above_my(pic, mx, my), bx as usize, gy - 1)
+    } else {
+        (mx as i32, my as i32, bx as usize, by as usize)
+    };
     let index = if plane == 0 {
         oy * 4 + ox
     } else {
@@ -4013,8 +4067,8 @@ fn nnz_at<S: Sample>(
 }
 
 fn cbf_dc_plane<S: Sample>(pic: &Frame<S>, mx: usize, my: usize, mb: &Mb, plane: u8) -> usize {
-    let flag = |dx: i32, dy: i32| -> usize {
-        let Some(side) = neighbor(pic, mx as i32 + dx, my as i32 + dy, mb.slice) else {
+    let flag = |nx: i32, ny: i32| -> usize {
+        let Some(side) = neighbor(pic, nx, ny, mb.slice) else {
             return usize::from(mb.intra);
         };
         if side.pcm {
@@ -4033,8 +4087,8 @@ fn cbf_dc_plane<S: Sample>(pic: &Frame<S>, mx: usize, my: usize, mb: &Mb, plane:
                 .unwrap_or(0)
         }
     };
-    let up = if mb.field_mb { -2 } else { -1 };
-    flag(-1, 0) + 2 * flag(0, up)
+    let (left_x, left_y, _) = left_of(pic, mx, my, 0);
+    flag(left_x, left_y) + 2 * flag(mx as i32, above_my(pic, mx, my))
 }
 
 fn shift(mb: usize, block: i32, grid: usize) -> (i32, usize) {
@@ -4059,8 +4113,8 @@ fn shift_field(mb: usize, block: i32, grid: usize, field: bool) -> (i32, usize) 
 
 /// Clause 9.3.3.1.1.9 for ctxBlockCat 3. The neighbour contributes its chroma DC flag.
 fn cbf_dc_chroma<S: Sample>(pic: &Frame<S>, mx: usize, my: usize, mb: &Mb, which: usize) -> usize {
-    let flag = |dx: i32, dy: i32| -> usize {
-        let Some(side) = neighbor(pic, mx as i32 + dx, my as i32 + dy, mb.slice) else {
+    let flag = |nx: i32, ny: i32| -> usize {
+        let Some(side) = neighbor(pic, nx, ny, mb.slice) else {
             return usize::from(mb.intra);
         };
         if side.pcm {
@@ -4071,8 +4125,8 @@ fn cbf_dc_chroma<S: Sample>(pic: &Frame<S>, mx: usize, my: usize, mb: &Mb, which
         }
         side.dc_c.get(which).copied().map(usize::from).unwrap_or(0)
     };
-    let up = if mb.field_mb { -2 } else { -1 };
-    flag(-1, 0) + 2 * flag(0, up)
+    let (left_x, left_y, _) = left_of(pic, mx, my, 0);
+    flag(left_x, left_y) + 2 * flag(mx as i32, above_my(pic, mx, my))
 }
 
 fn cbf_inc<S: Sample>(

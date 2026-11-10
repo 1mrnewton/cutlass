@@ -1051,6 +1051,14 @@ pub fn inv_txfm_add<P: Pixel>(
             .max(cmin)
             .min(cmax);
         let v = rnd12(v.wrapping_mul(2896)).wrapping_add(8) >> 4;
+        // 8-bit samples take the flat residual on the vector kernel.
+        if bd == 8
+            && cutlass_simd::av1::itx::ACCELERATED
+            && let Some(bytes) = P::bytes_mut(dst)
+            && cutlass_simd::av1::itx::add_flat(bytes, dst_stride, w, h, v)
+        {
+            return;
+        }
         let pmax = (1i32 << bd) - 1;
         for y in 0..h {
             let row = &mut dst[y * dst_stride..y * dst_stride + w];

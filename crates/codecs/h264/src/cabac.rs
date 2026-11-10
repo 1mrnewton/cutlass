@@ -17,9 +17,36 @@ pub struct Cabac<'a> {
     bits: u32,
     range: u32,
     offset: u32,
-    state: [u8; CONTEXTS],
-    mps: [u8; CONTEXTS],
+    /// Each context is `pStateIdx << 1 | valMPS`.
+    ctx: [u8; CONTEXTS],
 }
+
+/// `rangeTabLPS` by packed context.
+static LPS_RANGE: [[u8; 4]; 128] = {
+    let mut table = [[0u8; 4]; 128];
+    let mut packed = 0;
+    while packed < 128 {
+        table[packed] = RANGE_LPS[packed >> 1];
+        packed += 1;
+    }
+    table
+};
+
+/// The packed context after one bin. The first half is after its most
+/// probable symbol, the second half after its least probable one, where
+/// state 0 also swaps which symbol is the most probable.
+static AFTER: [u8; 256] = {
+    let mut table = [0u8; 256];
+    let mut packed = 0;
+    while packed < 128 {
+        let mps = packed as u8 & 1;
+        table[packed] = (TRANS_MPS[packed >> 1] << 1) | mps;
+        let swapped = if packed >> 1 == 0 { 1 - mps } else { mps };
+        table[packed + 128] = (TRANS_LPS[packed >> 1] << 1) | swapped;
+        packed += 1;
+    }
+    table
+};
 
 impl<'a> Cabac<'a> {
     pub fn start(bits: &mut Bits<'a>, qp: i32, init: usize) -> Result<Self, CodecError> {
@@ -35,8 +62,7 @@ impl<'a> Cabac<'a> {
             bits: 0,
             range: 510,
             offset: 0,
-            state: [0; CONTEXTS],
-            mps: [0; CONTEXTS],
+            ctx: [0; CONTEXTS],
         };
         eng.offset = eng.read_bits(9)?;
         eng.init_states(qp, init);
@@ -47,7 +73,17 @@ impl<'a> Cabac<'a> {
         u64::try_from(self.index.saturating_mul(8)).unwrap_or(u64::MAX) - u64::from(self.bits)
     }
 
+    /// Pulls bytes into the cache: four at once while the stream has them,
+    /// then one at a time. Called with fewer than 32 bits held.
     fn fill(&mut self) {
+        if self.bits <= 32
+            && let Some(&[a, b, c, d]) = self.data.get(self.index..self.index + 4)
+        {
+            self.cache = (self.cache << 32) | u64::from(u32::from_be_bytes([a, b, c, d]));
+            self.index += 4;
+            self.bits += 32;
+            return;
+        }
         while self.bits <= 56 && self.index < self.data.len() {
             self.cache = (self.cache << 8) | u64::from(self.data[self.index]);
             self.index += 1;
@@ -55,14 +91,17 @@ impl<'a> Cabac<'a> {
         }
     }
 
+    /// `n` is at most 9, and may be 0.
     #[inline(always)]
     fn read_bits(&mut self, n: u32) -> Result<u32, CodecError> {
-        self.fill();
         if self.bits < n {
-            return Err(CodecError::Truncated {
-                at_bit: self.at_bit(),
-                what: "cabac",
-            });
+            self.fill();
+            if self.bits < n {
+                return Err(CodecError::Truncated {
+                    at_bit: self.at_bit(),
+                    what: "cabac",
+                });
+            }
         }
         self.bits -= n;
         let mask = (1u64 << n) - 1;
@@ -84,25 +123,23 @@ impl<'a> Cabac<'a> {
 
     #[inline(always)]
     pub fn decision(&mut self, ctx: usize) -> Result<u8, CodecError> {
-        let state = usize::from(self.state[ctx]);
-        let mps = self.mps[ctx];
-        let range_lps = u32::from(RANGE_LPS[state][((self.range >> 6) & 3) as usize]);
-        self.range -= range_lps;
-        let bin = if self.offset >= self.range {
-            let bin = 1 - mps;
-            self.offset -= self.range;
-            self.range = range_lps;
-            if state == 0 {
-                self.mps[ctx] = 1 - mps;
-            }
-            self.state[ctx] = TRANS_LPS[state];
-            bin
-        } else {
-            self.state[ctx] = TRANS_MPS[state];
-            mps
-        };
-        self.renorm()?;
-        Ok(bin)
+        // Which symbol comes out is as good as random to the CPU, so
+        // nothing here branches on it: the two outcomes differ by a mask
+        // and a table half.
+        let packed = usize::from(self.ctx[ctx] & 127);
+        let range_lps = u32::from(LPS_RANGE[packed][((self.range >> 6) & 3) as usize]);
+        let range_mps = self.range - range_lps;
+        let lps = u32::from(self.offset >= range_mps);
+        let mask = lps.wrapping_neg();
+        self.ctx[ctx] = AFTER[packed + ((lps as usize) << 7)];
+        let offset = self.offset - (range_mps & mask);
+        let range = range_mps ^ ((range_mps ^ range_lps) & mask);
+        // One shift brings `range` back to 256..510; it is 0 when `range`
+        // is already there.
+        let shift = range.leading_zeros() - 23;
+        self.range = range << shift;
+        self.offset = (offset << shift) | self.read_bits(shift)?;
+        Ok((packed as u8 & 1) ^ lps as u8)
     }
 
     #[inline(always)]
@@ -140,8 +177,7 @@ impl<'a> Cabac<'a> {
             bits: 0,
             range: 510,
             offset: 0,
-            state: [0; CONTEXTS],
-            mps: [0; CONTEXTS],
+            ctx: [0; CONTEXTS],
         };
         eng.offset = eng.read_bits(9)?;
         eng.init_states(qp, init);
@@ -156,22 +192,27 @@ impl<'a> Cabac<'a> {
 
     fn init_states(&mut self, qp: i32, init: usize) {
         let slice_qp = qp.clamp(0, 51);
+        let mut state = [0u8; CONTEXTS];
+        let mut mps = [0u8; CONTEXTS];
         for (ctx, &(m, n)) in CABAC_MN[init].iter().enumerate() {
             if ctx == 276 {
-                self.state[276] = 63;
-                self.mps[276] = 0;
+                state[276] = 63;
+                mps[276] = 0;
                 continue;
             }
             let pre = (((i32::from(m) * slice_qp) >> 4) + i32::from(n)).clamp(1, 126);
             if pre <= 63 {
-                self.state[ctx] = (63 - pre) as u8;
-                self.mps[ctx] = 0;
+                state[ctx] = (63 - pre) as u8;
+                mps[ctx] = 0;
             } else {
-                self.state[ctx] = (pre - 64) as u8;
-                self.mps[ctx] = 1;
+                state[ctx] = (pre - 64) as u8;
+                mps[ctx] = 1;
             }
         }
-        init_rle(&mut self.state, &mut self.mps, slice_qp);
+        init_rle(&mut state, &mut mps, slice_qp);
+        for (packed, (state, mps)) in self.ctx.iter_mut().zip(state.iter().zip(&mps)) {
+            *packed = (state << 1) | mps;
+        }
     }
 }
 

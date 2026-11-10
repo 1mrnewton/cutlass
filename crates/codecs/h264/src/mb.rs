@@ -3941,7 +3941,7 @@ fn read8<S: Sample>(
             // is that flag. 4:4:4 reads it for luma and for both chroma planes.
             // Separate colour planes are monochrome, so that flag stays absent.
             if plane != 0 || (pic.chroma() == 3 && !pic.separate_plane) {
-                let inc = cbf_inc(pic, Place { mx, my }, Cell { bx, by }, mb, plane, false);
+                let inc = cbf8_inc(pic, Place { mx, my }, Cell { bx, by }, mb, plane);
                 let Some(base) = CBF_BASE.get(cat).copied() else {
                     return Err(CodecError::Malformed {
                         at_bit: 0,
@@ -4182,6 +4182,36 @@ fn cbf_inc<S: Sample>(
     let left = left.unwrap_or(u8::from(mb.intra));
     let above = above.unwrap_or(u8::from(mb.intra));
     usize::from(left > 0) + 2 * usize::from(above > 0)
+}
+
+/// Clause 9.3.3.1.1.9 for an 8×8 block that carries a coded_block_flag,
+/// which is every 8×8 block of a 4:4:4 picture. A neighbouring macroblock
+/// that does not use the 8×8 transform has no 8×8 block to offer, so it
+/// counts as 0 whatever its 4×4 blocks hold, unless it is I_PCM.
+fn cbf8_inc<S: Sample>(pic: &Frame<S>, at: Place, cell: Cell, mb: &Mb, plane: u8) -> usize {
+    let Place { mx, my } = at;
+    let Cell { bx, by } = cell;
+    let coded = |block: (i32, i32)| -> bool {
+        let outside = if block.0 < 0 {
+            let (left_x, left_y, _) = left_of(pic, mx, my, by * 4);
+            Some((left_x, left_y))
+        } else if block.1 < 0 {
+            Some((mx as i32, above_my(pic, mx, my)))
+        } else {
+            None
+        };
+        if let Some((nx, ny)) = outside {
+            match neighbor(pic, nx, ny, mb.slice) {
+                None => return mb.intra,
+                Some(side) if side.pcm => return true,
+                Some(side) if !side.transform8 => return false,
+                Some(_) => {}
+            }
+        }
+        nnz_at(pic, Place { mx, my }, block, mb, plane).is_some_and(|count| count > 0)
+    };
+    usize::from(coded((bx as i32 - 1, by as i32)))
+        + 2 * usize::from(coded((bx as i32, by as i32 - 1)))
 }
 
 fn cabac_residual(

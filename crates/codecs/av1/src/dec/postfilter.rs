@@ -285,12 +285,11 @@ impl<'a> LfPlane<'a> {
         }
     }
 
-    /// `(filter_size, lvl)` of the edges of the unit row `ur` (plane 4x4
-    /// units) into `out[..nc]`; `lvl == 0` where the edge is not filtered.
-    /// `filter_size` follows [`crate::dsp::lf`].
-    fn row_edges(&self, ur: usize, out: &mut [(u8, u8)]) {
-        let out = &mut out[..self.nc];
-        out.fill((0, 0));
+    /// Calls `emit(unit, filter_size, lvl)` for the filtered edges of the
+    /// unit row `ur` (plane 4x4 units), from left to right. `filter_size`
+    /// follows [`crate::dsp::lf`], and `lvl` is not 0.
+    #[inline]
+    fn row_edges(&self, ur: usize, mut emit: impl FnMut(usize, u8, u8)) {
         let pass0 = self.pass == 0;
         if ur >= self.nr_vis || (!pass0 && ur == 0) {
             return;
@@ -367,25 +366,41 @@ impl<'a> LfPlane<'a> {
             if lvl == 0 {
                 lvl = pm.lvl[li];
             }
-            out[uc] = (filter_size as u8, lvl);
+            if lvl != 0 {
+                emit(uc, filter_size as u8, lvl);
+            }
         }
     }
 }
 
-/// Calls `f(start, len, filter_size, lvl)` for every maximal run of equal
-/// filtered edges in `edges`.
-#[inline]
-fn edge_runs(edges: &[(u8, u8)], mut f: impl FnMut(usize, usize, u8, u8)) {
-    let mut run = (0u8, 0u8);
-    let mut start = 0;
-    for (i, &e) in edges.iter().chain(core::iter::once(&(0, 0))).enumerate() {
-        if e != run {
-            if run.1 != 0 {
-                f(start, i - start, run.0, run.1);
-            }
-            run = e;
-            start = i;
+/// A run of edges with one filter size and level: `len` units from
+/// `start`, along a row or down a column. `lvl == 0`: no run.
+#[derive(Clone, Copy, Default)]
+struct EdgeRun {
+    start: u32,
+    len: u32,
+    size: u8,
+    lvl: u8,
+}
+
+impl EdgeRun {
+    /// Takes the edge at unit `at`: the run grows when the edge follows
+    /// it with the same filter. Otherwise the edge starts a run, and the
+    /// run it ends is returned (it may be no run).
+    #[inline(always)]
+    fn take(&mut self, at: usize, size: u8, lvl: u8) -> Option<EdgeRun> {
+        if self.lvl == lvl && self.size == size && (self.start + self.len) as usize == at {
+            self.len += 1;
+            return None;
         }
+        let ended = *self;
+        *self = EdgeRun {
+            start: at as u32,
+            len: 1,
+            size,
+            lvl,
+        };
+        Some(ended)
     }
 }
 
@@ -460,76 +475,80 @@ fn lf_own_rows(u0: usize, u1: usize, first: bool, last: bool) -> core::ops::Rang
 fn lf_chunk<P: Pixel>(job: &LfJob<'_, '_>, data: &mut [P], row0: usize, sharp: u8, bd: u32) {
     let (u0, u1, stride) = (job.u0, job.u1, job.stride);
     let nc = job.vert.nc;
-    // Vertical edges: decisions for a strip of unit rows, then runs down
-    // each column.
-    let mut grid = vec![(0u8, 0u8); LF_STRIP_UNITS * nc];
-    let mut col = [(0u8, 0u8); LF_STRIP_UNITS];
-    // The columns with an edge in the strip: with large transforms most
-    // have none.
-    let mut edged = vec![false; nc];
+    // Vertical edges: the edges of a strip of unit rows, gathered into
+    // runs down each column that has any. A column's run is filtered when
+    // an edge does not continue it, and at the end of the strip.
+    let mut cols = vec![EdgeRun::default(); nc];
+    let mut open: Vec<u32> = Vec::new();
     for strip in (u0..u1).step_by(LF_STRIP_UNITS) {
         let rows = (u1 - strip).min(LF_STRIP_UNITS);
-        edged.fill(false);
+        let down = |uc: usize, run: EdgeRun, data: &mut [P]| {
+            filter_vertical_edge(
+                data,
+                stride,
+                uc * 4,
+                (strip + run.start as usize) * 4 - row0,
+                run.len as usize * 4,
+                usize::from(run.size),
+                run.lvl,
+                sharp,
+                bd,
+            );
+        };
         for i in 0..rows {
-            let row = &mut grid[i * nc..(i + 1) * nc];
-            job.vert.row_edges(strip + i, row);
-            for (e, d) in edged.iter_mut().zip(row.iter()) {
-                *e |= d.1 != 0;
-            }
-        }
-        for uc in 1..nc {
-            if !edged[uc] {
-                continue;
-            }
-            for i in 0..rows {
-                col[i] = grid[i * nc + uc];
-            }
-            edge_runs(&col[..rows], |start, len, size, lvl| {
-                filter_vertical_edge(
-                    data,
-                    stride,
-                    uc * 4,
-                    (strip + start) * 4 - row0,
-                    len * 4,
-                    usize::from(size),
-                    lvl,
-                    sharp,
-                    bd,
-                );
+            job.vert.row_edges(strip + i, |uc, size, lvl| {
+                let Some(col) = cols.get_mut(uc) else {
+                    return;
+                };
+                match col.take(i, size, lvl) {
+                    Some(ended) if ended.lvl != 0 => down(uc, ended, data),
+                    Some(_) => open.push(uc as u32),
+                    None => {}
+                }
             });
+        }
+        for uc in open.drain(..) {
+            let run = std::mem::take(&mut cols[uc as usize]);
+            down(uc as usize, run, data);
         }
     }
     // Horizontal edges whose samples stay inside the chunk.
-    let mut row = vec![(0u8, 0u8); nc];
     for ur in lf_own_rows(u0, u1, job.first, job.last) {
-        lf_horz_row(job.horz, ur, &mut row, data, stride, row0, sharp, bd);
+        lf_horz_row(job.horz, ur, data, stride, row0, sharp, bd);
     }
 }
 
 fn lf_horz_row<P: Pixel>(
     lp: &LfPlane<'_>,
     ur: usize,
-    row: &mut [(u8, u8)],
     data: &mut [P],
     stride: usize,
     row0: usize,
     sharp: u8,
     bd: u32,
 ) {
-    lp.row_edges(ur, row);
-    edge_runs(row, |start, len, size, lvl| {
-        filter_horizontal_edge(
-            data,
-            stride,
-            start * 4,
-            ur * 4 - row0,
-            len * 4,
-            usize::from(size),
-            lvl,
-            sharp,
-            bd,
-        );
+    let across = |run: EdgeRun, data: &mut [P]| {
+        if run.lvl != 0 {
+            filter_horizontal_edge(
+                data,
+                stride,
+                run.start as usize * 4,
+                ur * 4 - row0,
+                run.len as usize * 4,
+                usize::from(run.size),
+                run.lvl,
+                sharp,
+                bd,
+            );
+        }
+    };
+    let mut run = EdgeRun::default();
+    lp.row_edges(ur, |uc, size, lvl| {
+        if let Some(ended) = run.take(uc, size, lvl) {
+            across(ended, data);
+        }
     });
+    across(run, data);
 }
 
 /// Loop filter process (7.14), on up to `threads` threads.
@@ -646,11 +665,10 @@ pub fn loop_filter_scratch<P: Pixel>(
                     own[ur] = true;
                 }
             }
-            let mut row = vec![(0u8, 0u8); l.2.nc];
             let data = &mut pic.planes[l.0].data[..];
             for ur in 1..nr {
                 if !own[ur] {
-                    lf_horz_row(&l.2, ur, &mut row, data, strides[i], 0, sharp, bd);
+                    lf_horz_row(&l.2, ur, data, strides[i], 0, sharp, bd);
                 }
             }
         }

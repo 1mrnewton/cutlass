@@ -612,6 +612,8 @@ pub(crate) fn decode_mbs<S: Sample>(
         run: 0,
         kind: false,
     };
+    // The bottom macroblock's skip flag, read with a skipped top one.
+    let mut ahead = None;
     let mut coeffs = Coeffs::new();
     while addr < total {
         if !super::intra_slice(slice.kind) {
@@ -645,10 +647,17 @@ pub(crate) fn decode_mbs<S: Sample>(
                     }
                 }
                 Entropy::Cabac(cab) => {
-                    let skipped = rle_skip(pic, cab, slice, slice_id, addr, mbaff, &mut rle)?;
+                    let skipped = if mbaff {
+                        pair_skip(pic, cab, slice, slice_id, addr, &mut ahead)?
+                    } else {
+                        rle_skip(pic, cab, slice, slice_id, addr, mbaff, &mut rle)?
+                    };
                     if skipped {
                         fresh(pic, addr, mbaff, !next.is_empty())?;
-                        let flag = cabac_skip_field(pic, cab, slice_id, addr, mbaff)?;
+                        // `pair_skip` left the pair's field flag on the macroblock.
+                        let (mx, my) = locate(pic, addr, mbaff);
+                        let flag =
+                            mbaff && pic.mb.get(my * pic.mb_w + mx).is_some_and(|mb| mb.field_mb);
                         skip_mb(pic, dpb, slice, slice_id, addr, qp, flag)?;
                         let end = if !mbaff || pair_bottom(pic, addr, true) {
                             cab.terminate()?
@@ -2957,24 +2966,59 @@ fn skip_field_flag<S: Sample>(
     Ok(inferred_field(pic, mx, my, slice_id))
 }
 
-fn cabac_skip_field<S: Sample>(
-    pic: &Frame<S>,
+/// `mb_skip_flag` in a macroblock-adaptive frame under CABAC (clause 7.3.4).
+///
+/// A pair's `mb_field_decoding_flag` comes with its first macroblock that is
+/// not skipped. So when the top one is skipped, the bottom one's skip flag is
+/// read ahead and kept in `ahead`, and the field flag follows it unless the
+/// bottom one is skipped too. Until the flag is read the pair counts as the
+/// kind of the pair to its left, or else of the one above (clause 7.4.4),
+/// and both skip flags take their contexts from that. Either way the flag is
+/// left on both macroblocks of the pair.
+fn pair_skip<S: Sample>(
+    pic: &mut Frame<S>,
     cab: &mut Cabac<'_>,
+    slice: &Slice<'_>,
     slice_id: u16,
     addr: usize,
-    mbaff: bool,
+    ahead: &mut Option<bool>,
 ) -> Result<bool, CodecError> {
-    if !mbaff {
+    let kind = super::syntax_kind(slice.kind);
+    let (mx, my) = locate(pic, addr, true);
+    let slot = my * pic.mb_w + mx;
+    let set = |pic: &mut Frame<S>, slot: usize, field: bool| {
+        if let Some(mb) = pic.mb.get_mut(slot) {
+            mb.field_mb = field;
+        }
+    };
+    if my % 2 == 1 {
+        if let Some(skipped) = ahead.take() {
+            return Ok(skipped);
+        }
+        // The top macroblock was coded and carried the pair's flag.
+        let field = pic
+            .mb
+            .get(slot.saturating_sub(pic.mb_w))
+            .is_some_and(|mb| mb.field_mb);
+        set(pic, slot, field);
+        return cabac_skip(pic, cab, kind, slice_id, addr, true);
+    }
+    *ahead = None;
+    let below = slot + pic.mb_w;
+    let inferred = inferred_field(pic, mx, my, slice_id);
+    set(pic, slot, inferred);
+    set(pic, below, inferred);
+    if !cabac_skip(pic, cab, kind, slice_id, addr, true)? {
         return Ok(false);
     }
-    let (mx, my) = locate(pic, addr, true);
-    if my % 2 == 1 {
-        return Ok(pic
-            .mb
-            .get((my - 1) * pic.mb_w + mx)
-            .is_some_and(|mb| mb.field_mb));
+    let bottom = cabac_skip(pic, cab, kind, slice_id, addr + 1, true)?;
+    if !bottom {
+        let field = field_flag(pic, &mut Entropy::Cabac(cab), slice_id, mx, my, true)?;
+        set(pic, slot, field);
+        set(pic, below, field);
     }
-    field_flag(pic, &mut Entropy::Cabac(cab), slice_id, mx, my, true)
+    *ahead = Some(bottom);
+    Ok(true)
 }
 
 fn inferred_field<S: Sample>(pic: &Frame<S>, mx: usize, my: usize, slice: u16) -> bool {

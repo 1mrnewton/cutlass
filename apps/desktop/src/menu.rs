@@ -78,13 +78,17 @@ const DEACTIVATE: Entry = done("deactivate", "Deactivate", "");
 const REPLACE: Entry = todo("replace", "Replace", "");
 const REPLACE_SOUND: Entry = done("replace", "Replace", "");
 
-/// The video clip menu, with `$sound` for the rows that depend on whether
-/// the clip still has its own sound.
+/// The video clip menu: every row of the reference editor's, in its order
+/// and by its names, with a Later badge on the ones this build does not do
+/// yet, and this build's own Open compound clip and Arrange rows. `$sound`
+/// stands for the rows that depend on whether the clip still has its sound.
 macro_rules! video_menu {
     ($($sound:expr),* $(,)?) => {
         &[
             COPY,
             CUT,
+            todo("copy-attributes", "Copy attributes", "⇧⌘C"),
+            todo("paste-attributes", "Paste attributes", "⇧⌘V"),
             DELETE,
             SEP,
             sub(
@@ -98,14 +102,18 @@ macro_rules! video_menu {
                     done("edit-crop", "Crop", ""),
                 ],
             ),
+            todo("generate-video", "Generate video", ""),
+            todo("ai-edit", "AI edit", ""),
+            todo("ai-extend", "AI extend", ""),
             done("split-scenes", "Split scenes", ""),
             done("transcript", "Transcript", ""),
             $($sound,)*
             done("sync", "Sync video and audio", ""),
             SEP,
-            done("compound", "Create compound clip", "⌥G"),
+            done("compound", "Create compound clip (subproject)", "⌥G"),
             done("open-compound", "Open compound clip", ""),
             done("multicam", "Create multi-camera clip", ""),
+            todo("save-preset", "Save preset", ""),
             done("group", "Group", ""),
             done("ungroup", "Ungroup", ""),
             SEP,
@@ -113,6 +121,7 @@ macro_rules! video_menu {
             done("deactivate", "Deactivate clip", "V"),
             done("trim", "Trim clip", ""),
             done("replace", "Replace clip", ""),
+            todo("restore-lut", "Restore LUT", ""),
             done("link-media", "Link to media", ""),
             done("open-file", "Open file location", ""),
             ARRANGE,
@@ -142,18 +151,23 @@ macro_rules! video_menu {
 /// The menu of a video clip that has its own sound.
 const VIDEO: &[Entry] = video_menu![
     sub(
-        "isolate-voice",
-        "Isolate voice",
+        "separate-audio",
+        "Separate audio",
         &[
-            todo("isolate-keep-voice", "Keep voice", ""),
-            todo("isolate-keep-background", "Keep background", ""),
+            todo("separate-vocals", "Vocals", ""),
+            todo("separate-instruments", "Instruments", ""),
+            todo("separate-drums", "Drums", ""),
+            todo("separate-guitar", "Guitar", ""),
+            todo("separate-bass", "Bass", ""),
+            todo("separate-strings", "Strings", ""),
+            todo("separate-others", "Others", ""),
         ],
     ),
     done("extract-audio", "Extract audio", "⇧⌘S"),
 ];
 
-/// The menu of a video clip whose sound was extracted: there is no voice
-/// to isolate, and the extract row gives the sound back.
+/// The menu of a video clip whose sound was extracted: there is none to
+/// separate, and the extract row gives the sound back.
 const VIDEO_SILENT: &[Entry] = video_menu![done("recover-audio", "Recover audio", "⇧⌘S")];
 
 /// The audio clip menu: the prototype's rows in its order, with this
@@ -1013,22 +1027,29 @@ mod tests {
             [
                 "copy",
                 "cut",
+                "copy-attributes",
+                "paste-attributes",
                 "delete",
                 "edit",
+                "generate-video",
+                "ai-edit",
+                "ai-extend",
                 "split-scenes",
                 "transcript",
-                "isolate-voice",
+                "separate-audio",
                 "extract-audio",
                 "sync",
                 "compound",
                 "open-compound",
                 "multicam",
+                "save-preset",
                 "group",
                 "ungroup",
                 "export",
                 "deactivate",
                 "trim",
                 "replace",
+                "restore-lut",
                 "link-media",
                 "open-file",
                 "arrange",
@@ -1036,6 +1057,40 @@ mod tests {
                 "variable-speed",
                 "range",
                 "render",
+            ]
+        );
+        // The reference editor's names for the rows this build renamed.
+        let label = |id: &str| {
+            VIDEO.iter().find_map(|entry| match entry {
+                Entry::Item(item) if item.id == id => Some(item.label),
+                _ => None,
+            })
+        };
+        assert_eq!(label("compound"), Some("Create compound clip (subproject)"));
+        assert_eq!(label("separate-audio"), Some("Separate audio"));
+        let separate: Vec<&str> = VIDEO
+            .iter()
+            .find_map(|entry| match entry {
+                Entry::Item(item) if item.id == "separate-audio" => Some(item.children),
+                _ => None,
+            })
+            .unwrap()
+            .iter()
+            .filter_map(|entry| match entry {
+                Entry::Item(item) => Some(item.label),
+                Entry::Separator => None,
+            })
+            .collect();
+        assert_eq!(
+            separate,
+            [
+                "Vocals",
+                "Instruments",
+                "Drums",
+                "Guitar",
+                "Bass",
+                "Strings",
+                "Others"
             ]
         );
     }
@@ -1102,13 +1157,13 @@ mod tests {
         let with = ids(clip_entries_for(&TrackType::Video, false));
         let without = ids(clip_entries_for(&TrackType::Video, true));
         assert_eq!(with, ids(VIDEO));
-        assert!(with.contains(&"extract-audio") && with.contains(&"isolate-voice"));
+        assert!(with.contains(&"extract-audio") && with.contains(&"separate-audio"));
         assert!(!with.contains(&"recover-audio"));
         // The same rows in the same order, but for the sound ones.
         let expected: Vec<&str> = with
             .iter()
             .copied()
-            .filter(|id| *id != "isolate-voice")
+            .filter(|id| *id != "separate-audio")
             .map(|id| {
                 if id == "extract-audio" {
                     "recover-audio"
@@ -1203,7 +1258,22 @@ mod tests {
         assert_eq!(built("copy"), Some(true));
         assert_eq!(built("range"), Some(true));
         assert_eq!(built("render"), Some(true));
-        assert_eq!(built("isolate-voice"), Some(false));
+        assert_eq!(built("separate-audio"), Some(false));
+        // Rows the reference editor has and this build does not do yet.
+        for later in [
+            "copy-attributes",
+            "paste-attributes",
+            "generate-video",
+            "ai-edit",
+            "ai-extend",
+            "save-preset",
+            "restore-lut",
+        ] {
+            assert_eq!(built(later), Some(false), "{later}");
+        }
+        for ready in ["split-scenes", "transcript", "extract-audio", "compound"] {
+            assert_eq!(built(ready), Some(true), "{ready}");
+        }
     }
 
     fn frame(ctx: &Context, height: f32, events: Vec<egui::Event>) -> (Shown, egui::FullOutput) {
@@ -1405,16 +1475,15 @@ mod tests {
     fn a_click_on_a_todo_row_picks_it_as_not_built() {
         let ctx = Context::default();
         let (_, output) = frame(&ctx, 1000.0, Vec::new());
-        let isolate = label_at(&output, "Isolate voice").expect("the Isolate voice row")
+        let isolate = label_at(&output, "Separate audio").expect("the Separate audio row")
             + Vec2::new(4.0, 6.0);
         frame(&ctx, 1000.0, vec![egui::Event::PointerMoved(isolate)]);
         let (_, output) = frame(&ctx, 1000.0, vec![egui::Event::PointerMoved(isolate)]);
-        let row =
-            label_at(&output, "Keep voice").expect("the Keep voice row") + Vec2::new(4.0, 6.0);
+        let row = label_at(&output, "Vocals").expect("the Vocals row") + Vec2::new(4.0, 6.0);
         frame(&ctx, 1000.0, vec![egui::Event::PointerMoved(row)]);
         let (shown, _) = frame(&ctx, 1000.0, click(row));
         let picked = shown.picked.expect("a pick");
-        assert_eq!((picked.id, picked.built), ("isolate-keep-voice", false));
+        assert_eq!((picked.id, picked.built), ("separate-vocals", false));
     }
 
     #[test]

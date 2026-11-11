@@ -9295,7 +9295,7 @@ fn corner_motion<S: Sample>(
 
 /// The motion of a block of this macroblock or beside it, as [`near_block`]
 /// finds it, in this macroblock's terms.
-#[inline]
+#[inline(always)]
 fn motion_near<S: Sample>(
     pic: &Frame<S>,
     (mx, my): (usize, usize),
@@ -9303,39 +9303,53 @@ fn motion_near<S: Sample>(
     list: usize,
     current: &Mb,
 ) -> Motion {
-    let absent = Motion {
-        available: false,
-        mv: [0, 0],
-        reference: -1,
-    };
-    if !pic.mbaff {
-        // Every macroblock is of one kind, so a neighbour's motion is read
-        // as it stands.
-        let (mbx, ox) = shift(mx, bx, 4);
-        let (mby, oy) = shift(my, by, 4);
-        let index = oy * 4 + ox;
-        if mbx == mx as i32 && mby == my as i32 {
-            if current.ready & (1 << index) == 0 {
-                return absent;
-            }
-            return motion_of(current, index, list);
-        }
-        return match neighbor(pic, mbx, mby, current.slice) {
-            Some(mb) => motion_of(mb, index, list),
-            None => absent,
-        };
+    if pic.mbaff {
+        return motion_near_mbaff(pic, (mx, my), (bx, by, low), list, current);
     }
+    // Every macroblock is of one kind, so a neighbour's motion is read as
+    // it stands.
+    let (mbx, ox) = shift(mx, bx, 4);
+    let (mby, oy) = shift(my, by, 4);
+    let index = oy * 4 + ox;
+    if mbx == mx as i32 && mby == my as i32 {
+        if current.ready & (1 << index) == 0 {
+            return ABSENT;
+        }
+        return motion_of(current, index, list);
+    }
+    match neighbor(pic, mbx, mby, current.slice) {
+        Some(mb) => motion_of(mb, index, list),
+        None => ABSENT,
+    }
+}
+
+/// A neighbour's motion that is not there.
+const ABSENT: Motion = Motion {
+    available: false,
+    mv: [0, 0],
+    reference: -1,
+};
+
+/// [`motion_near`] in a macroblock-adaptive frame.
+#[inline(never)]
+fn motion_near_mbaff<S: Sample>(
+    pic: &Frame<S>,
+    (mx, my): (usize, usize),
+    (bx, by, low): (i32, i32, bool),
+    list: usize,
+    current: &Mb,
+) -> Motion {
     let Some((mbx, mby, index)) = near_block(pic, (mx, my), current.field_mb, (bx, by, low)) else {
-        return absent;
+        return ABSENT;
     };
     if mbx == mx as i32 && mby == my as i32 {
         if current.ready & (1 << index) == 0 {
-            return absent;
+            return ABSENT;
         }
         return motion_of(current, index, list);
     }
     let Some(mb) = neighbor(pic, mbx, mby, current.slice) else {
-        return absent;
+        return ABSENT;
     };
     let mut motion = motion_of(mb, index, list);
     // Clause 8.4.1.3.1: a neighbour of the other kind is read in this
@@ -9353,6 +9367,7 @@ fn motion_near<S: Sample>(
     motion
 }
 
+#[inline(always)]
 fn motion_of(mb: &Mb, index: usize, list: usize) -> Motion {
     if mb.intra {
         return Motion {

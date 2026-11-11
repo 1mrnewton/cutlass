@@ -24,6 +24,7 @@
 //!
 //! Block widths and heights are at most 128 (the largest AV1 block).
 
+use cutlass_simd::av1::blend;
 use cutlass_simd::av1::mc as kernel;
 use std::sync::OnceLock;
 
@@ -1360,8 +1361,8 @@ pub fn mask_blend<P: Pixel>(
 }
 
 /// [`mask_blend`] for 8-bit samples (`6 + InterPostRound` is 10 and there
-/// is no bias). A row's weights are worked out first, then blended, so
-/// both loops run on whole vectors.
+/// is no bias). A row's weights are worked out first, then blended on
+/// the kernel of `cutlass-simd`.
 #[inline(never)]
 fn mask_blend_u8(
     dst: &mut [u8],
@@ -1402,11 +1403,20 @@ fn mask_blend_u8(
         let d = &mut dst[r * dst_stride..][..w];
         let a = &t0[r * w..][..w];
         let b = &t1[r * w..][..w];
-        for c in 0..w {
+        // Eight samples at a time on the kernel, the rest of a row 4 wide
+        // here.
+        let (d8, d_rest) = d.as_chunks_mut::<8>();
+        let (a8, a_rest) = a.as_chunks::<8>();
+        let (b8, b_rest) = b.as_chunks::<8>();
+        let (m8, m_rest) = m.as_chunks::<8>();
+        for (((d, a), b), m) in d8.iter_mut().zip(a8).zip(b8).zip(m8) {
+            *d = blend::mask_blend8(a, b, m);
+        }
+        for (((d, &a), &b), &m) in d_rest.iter_mut().zip(a_rest).zip(b_rest).zip(m_rest) {
             // `m a + (64 - m) b` is `m (a - b) + 64 b`.
-            let (a, b) = (i32::from(a[c]), i32::from(b[c]));
-            let v = (i32::from(m[c]) * (a - b) + 64 * b + 512) >> 10;
-            d[c] = v.clamp(0, 255) as u8;
+            let (a, b) = (i32::from(a), i32::from(b));
+            let v = (i32::from(m) * (a - b) + 64 * b + 512) >> 10;
+            *d = v.clamp(0, 255) as u8;
         }
     }
 }

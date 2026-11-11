@@ -3712,6 +3712,34 @@ fn read_cbp<S: Sample>(
             };
             Ok((value & 15, value >> 4))
         }
+        Entropy::Cabac(cab) if !pic.mbaff => {
+            // Outside a macroblock-adaptive frame each 8×8 block's left and
+            // upper neighbours lie in one macroblock each way, so their
+            // patterns are read once, as FFmpeg does. A neighbour that is
+            // not there counts as coded for luma and as not for chroma.
+            let left = neighbor(pic, mx as i32 - 1, my as i32, slice);
+            let above = neighbor(pic, mx as i32, above_my(pic, mx, my), slice);
+            let pattern = |mb: Option<&Mb>| match mb {
+                Some(mb) if mb.pcm => (15, 2),
+                Some(mb) => (mb.cbp & 15, mb.cbp >> 4),
+                None => (15, 0),
+            };
+            let ((left, left_c), (above, above_c)) = (pattern(left), pattern(above));
+            let ctx = |left: u8, above: u8| usize::from(left == 0) + 2 * usize::from(above == 0);
+            let mut luma = cab.decision(73 + ctx(left & 2, above & 4))?;
+            luma |= cab.decision(73 + ctx(luma & 1, above & 8))? << 1;
+            luma |= cab.decision(73 + ctx(left & 8, luma & 1))? << 2;
+            luma |= cab.decision(73 + ctx(luma & 4, luma & 2))? << 3;
+            if chroma == 3 {
+                return Ok((luma, 0));
+            }
+            let ctx = usize::from(left_c > 0) + 2 * usize::from(above_c > 0);
+            if cab.decision(77 + ctx)? == 0 {
+                return Ok((luma, 0));
+            }
+            let ctx = 4 + usize::from(left_c == 2) + 2 * usize::from(above_c == 2);
+            Ok((luma, 1 + cab.decision(77 + ctx)?))
+        }
         Entropy::Cabac(cab) => {
             let mut luma = 0u8;
             for bit in 0..4 {

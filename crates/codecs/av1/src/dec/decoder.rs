@@ -618,6 +618,15 @@ fn band_of<P: PicturePixel>(
         row0[p] = a;
         nrows[p] = if w == 0 { 0 } else { b - a };
         widths[p] = w;
+        // Room for exactly these rows: a buffer grown row by row would
+        // double past them, and the pool keeps buffers as large as the
+        // largest band they held.
+        let need = nrows[p] * w;
+        if v.capacity() > 2 * need {
+            *v = Vec::with_capacity(need);
+        } else {
+            v.reserve_exact(need);
+        }
         for r in a..b {
             v.extend_from_slice(&pl.data[r * pl.stride..r * pl.stride + w]);
         }

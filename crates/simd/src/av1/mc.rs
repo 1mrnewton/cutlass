@@ -1,6 +1,7 @@
 //! Sub-sample motion compensation (AV1 specification 7.11.3.4) for 8-bit
 //! samples and unscaled references: the block predicted through the
-//! horizontal filter and then the vertical one.
+//! horizontal filter and then the vertical one, or through one of them
+//! when the other fraction is 0.
 //!
 //! An entry returns `false`, having written nothing, for a block it does
 //! not take: the caller then filters the block its own way.
@@ -114,5 +115,119 @@ pub fn put_hv_u8(dst: &mut [u8], dst_stride: usize, b: &Block<'_>) -> bool {
         target_feature = "dotprod"
     )))]
     scalar::put_hv(dst, dst_stride, b);
+    true
+}
+
+/// The compound intermediate of a block whose vertical fraction is 0:
+/// `Round2` of the horizontal sums by 3. `b.fv` is not read.
+#[inline]
+pub fn prep_h_u8(dst: &mut [i16], dst_stride: usize, b: &Block<'_>) -> bool {
+    if !b.taken(dst.len(), dst_stride) {
+        return false;
+    }
+    #[cfg(all(
+        target_arch = "aarch64",
+        target_feature = "neon",
+        target_feature = "dotprod"
+    ))]
+    {
+        // SAFETY: as in `prep_hv_u8`.
+        #[allow(unsafe_code)]
+        unsafe {
+            neon::h(neon::Out::Prep(dst), dst_stride, b);
+        }
+    }
+    #[cfg(not(all(
+        target_arch = "aarch64",
+        target_feature = "neon",
+        target_feature = "dotprod"
+    )))]
+    scalar::prep_h(dst, dst_stride, b);
+    true
+}
+
+/// The final samples of a block whose vertical fraction is 0: `Round2`
+/// of the horizontal sums by 7, clipped to 8 bits. `b.fv` is not read.
+#[inline]
+pub fn put_h_u8(dst: &mut [u8], dst_stride: usize, b: &Block<'_>) -> bool {
+    if !b.taken(dst.len(), dst_stride) {
+        return false;
+    }
+    #[cfg(all(
+        target_arch = "aarch64",
+        target_feature = "neon",
+        target_feature = "dotprod"
+    ))]
+    {
+        // SAFETY: as in `prep_hv_u8`.
+        #[allow(unsafe_code)]
+        unsafe {
+            neon::h(neon::Out::Put(dst), dst_stride, b);
+        }
+    }
+    #[cfg(not(all(
+        target_arch = "aarch64",
+        target_feature = "neon",
+        target_feature = "dotprod"
+    )))]
+    scalar::put_h(dst, dst_stride, b);
+    true
+}
+
+/// The compound intermediate of a block whose horizontal fraction is 0:
+/// `Round2` of the vertical sums of the samples by 3. `b.fh` is not read,
+/// and the taps of `b.fv` must be even (as every AV1 filter's are).
+#[inline]
+pub fn prep_v_u8(dst: &mut [i16], dst_stride: usize, b: &Block<'_>) -> bool {
+    if !b.taken(dst.len(), dst_stride) || b.fv.iter().any(|&f| f & 1 != 0) {
+        return false;
+    }
+    #[cfg(all(
+        target_arch = "aarch64",
+        target_feature = "neon",
+        target_feature = "dotprod"
+    ))]
+    {
+        // SAFETY: as in `prep_hv_u8`.
+        #[allow(unsafe_code)]
+        unsafe {
+            neon::v(neon::Out::Prep(dst), dst_stride, b);
+        }
+    }
+    #[cfg(not(all(
+        target_arch = "aarch64",
+        target_feature = "neon",
+        target_feature = "dotprod"
+    )))]
+    scalar::prep_v(dst, dst_stride, b);
+    true
+}
+
+/// The final samples of a block whose horizontal fraction is 0: `Round2`
+/// of the vertical sums of the samples by 7, clipped to 8 bits. `b.fh` is
+/// not read, and the taps of `b.fv` must be even.
+#[inline]
+pub fn put_v_u8(dst: &mut [u8], dst_stride: usize, b: &Block<'_>) -> bool {
+    if !b.taken(dst.len(), dst_stride) || b.fv.iter().any(|&f| f & 1 != 0) {
+        return false;
+    }
+    #[cfg(all(
+        target_arch = "aarch64",
+        target_feature = "neon",
+        target_feature = "dotprod"
+    ))]
+    {
+        // SAFETY: as in `prep_hv_u8`.
+        #[allow(unsafe_code)]
+        unsafe {
+            neon::v(neon::Out::Put(dst), dst_stride, b);
+        }
+    }
+    #[cfg(not(all(
+        target_arch = "aarch64",
+        target_feature = "neon",
+        target_feature = "dotprod"
+    )))]
+    scalar::put_v(dst, dst_stride, b);
     true
 }

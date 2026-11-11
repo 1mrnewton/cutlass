@@ -1,4 +1,7 @@
-//! The two-pass subpel filter as the specification writes it.
+//! The subpel filters as the specification writes them. With a fraction
+//! of 0 the filter is the identity (one tap of 128): the horizontal pass
+//! then gives `16 x` for a sample `x`, and the vertical one returns its
+//! input times 128.
 
 use super::Block;
 
@@ -61,6 +64,87 @@ pub(super) fn put_hv(dst: &mut [u8], dst_stride: usize, b: &Block<'_>) {
     for r in 0..b.h {
         for c in 0..b.w {
             dst[r * dst_stride + c] = round2(vertical(b, &mid, r, c), 11).clamp(0, 255) as u8;
+        }
+    }
+}
+
+/// The vertical sum of the samples for output `(r, c)`.
+fn vertical_samples(b: &Block<'_>, r: usize, c: usize) -> i32 {
+    (0..8)
+        .map(|t| i32::from(b.fv[t]) * i32::from(b.src[b.start + 3 + (r + t) * b.src_stride + c]))
+        .sum()
+}
+
+#[cfg_attr(
+    all(
+        target_arch = "aarch64",
+        target_feature = "neon",
+        target_feature = "dotprod",
+        not(test)
+    ),
+    allow(dead_code)
+)]
+pub(super) fn prep_h(dst: &mut [i16], dst_stride: usize, b: &Block<'_>) {
+    let mid = horizontal(b);
+    for r in 0..b.h {
+        for c in 0..b.w {
+            // Round2(128 * mid, 7).
+            dst[r * dst_stride + c] = mid[(r + 3) * b.w + c];
+        }
+    }
+}
+
+#[cfg_attr(
+    all(
+        target_arch = "aarch64",
+        target_feature = "neon",
+        target_feature = "dotprod",
+        not(test)
+    ),
+    allow(dead_code)
+)]
+pub(super) fn put_h(dst: &mut [u8], dst_stride: usize, b: &Block<'_>) {
+    let mid = horizontal(b);
+    for r in 0..b.h {
+        for c in 0..b.w {
+            let v = round2(128 * i32::from(mid[(r + 3) * b.w + c]), 11);
+            dst[r * dst_stride + c] = v.clamp(0, 255) as u8;
+        }
+    }
+}
+
+#[cfg_attr(
+    all(
+        target_arch = "aarch64",
+        target_feature = "neon",
+        target_feature = "dotprod",
+        not(test)
+    ),
+    allow(dead_code)
+)]
+pub(super) fn prep_v(dst: &mut [i16], dst_stride: usize, b: &Block<'_>) {
+    for r in 0..b.h {
+        for c in 0..b.w {
+            // Round2(sum * 16, 7).
+            dst[r * dst_stride + c] = round2(16 * vertical_samples(b, r, c), 7) as i16;
+        }
+    }
+}
+
+#[cfg_attr(
+    all(
+        target_arch = "aarch64",
+        target_feature = "neon",
+        target_feature = "dotprod",
+        not(test)
+    ),
+    allow(dead_code)
+)]
+pub(super) fn put_v(dst: &mut [u8], dst_stride: usize, b: &Block<'_>) {
+    for r in 0..b.h {
+        for c in 0..b.w {
+            let v = round2(16 * vertical_samples(b, r, c), 11);
+            dst[r * dst_stride + c] = v.clamp(0, 255) as u8;
         }
     }
 }

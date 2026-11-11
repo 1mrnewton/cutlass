@@ -1,4 +1,4 @@
-use super::{Block, prep_hv_u8, put_hv_u8, scalar};
+use super::{Block, prep_h_u8, prep_hv_u8, prep_v_u8, put_h_u8, put_hv_u8, put_v_u8, scalar};
 
 /// A small fixed-seed generator: the same blocks on every run.
 struct Rng(u64);
@@ -305,4 +305,97 @@ fn a_source_must_hold_one_sample_past_the_last_one_read() {
     assert!(prep_hv_u8(&mut got, w, &block(&src)));
     scalar::prep_hv(&mut want, w, &block(&src));
     assert_eq!(got, want);
+}
+
+/// Runs one entry against its scalar twin on a block, from a destination
+/// that starts as `fill`.
+fn check<T: Copy + PartialEq + core::fmt::Debug>(
+    name: &str,
+    fill: T,
+    stride: usize,
+    b: &Block<'_>,
+    entry: fn(&mut [T], usize, &Block<'_>) -> bool,
+    twin: fn(&mut [T], usize, &Block<'_>),
+) {
+    let mut got = vec![fill; stride * b.h];
+    let mut want = got.clone();
+    assert!(entry(&mut got, stride, b), "{name} taken");
+    twin(&mut want, stride, b);
+    assert_eq!(got, want, "{name} {}x{} {:?} {:?}", b.w, b.h, b.fh, b.fv);
+}
+
+#[test]
+fn one_pass_outputs_match_the_specification_for_every_block_size() {
+    let mut rng = Rng(0x0001_FA55);
+    let src = source(&mut rng);
+    for (w, h) in [
+        (8, 8),
+        (8, 4),
+        (8, 32),
+        (16, 16),
+        (16, 64),
+        (32, 8),
+        (32, 32),
+        (64, 64),
+        (128, 128),
+        (64, 3),
+    ] {
+        for round in 0..12 {
+            let fh = &FILTERS[(rng.next() % 8) as usize];
+            let fv = &FILTERS[(round + rng.next() as usize) % 8];
+            let start = (rng.next() as usize % 8) * STRIDE + rng.next() as usize % 16;
+            let stride = w + round % 3;
+            let b = Block {
+                src: &src,
+                start,
+                src_stride: STRIDE,
+                w,
+                h,
+                fh,
+                fv,
+            };
+            check("prep h", 7i16, stride, &b, prep_h_u8, scalar::prep_h);
+            check("put h", 9u8, stride, &b, put_h_u8, scalar::put_h);
+            check("prep v", 7i16, stride, &b, prep_v_u8, scalar::prep_v);
+            check("put v", 9u8, stride, &b, put_v_u8, scalar::put_v);
+        }
+    }
+}
+
+#[test]
+fn one_pass_final_samples_are_clipped_and_odd_vertical_taps_are_refused() {
+    // A sharp filter over steps from 0 to 255 overshoots both ways.
+    let src: Vec<u8> = (0..STRIDE * 40)
+        .map(|i| {
+            if i % STRIDE >= 12 || i / STRIDE >= 12 {
+                255
+            } else {
+                0
+            }
+        })
+        .collect();
+    let b = Block {
+        src: &src,
+        start: 0,
+        src_stride: STRIDE,
+        w: 16,
+        h: 16,
+        fh: &FILTERS[4],
+        fv: &FILTERS[4],
+    };
+    type Entry = fn(&mut [u8], usize, &Block<'_>) -> bool;
+    type Twin = fn(&mut [u8], usize, &Block<'_>);
+    let pairs: [(Entry, Twin); 2] = [(put_h_u8, scalar::put_h), (put_v_u8, scalar::put_v)];
+    for (entry, twin) in pairs {
+        let mut out = vec![9u8; 16 * 16];
+        assert!(entry(&mut out, 16, &b));
+        let mut want = vec![0u8; 16 * 16];
+        twin(&mut want, 16, &b);
+        assert_eq!(out, want);
+        assert!(out.contains(&0) && out.contains(&255));
+    }
+    let odd = [0, 1, -5, 126, 8, -2, 0, 0];
+    let b = Block { fv: &odd, ..b };
+    assert!(!put_v_u8(&mut [0u8; 256], 16, &b));
+    assert!(!prep_v_u8(&mut [0i16; 256], 16, &b));
 }

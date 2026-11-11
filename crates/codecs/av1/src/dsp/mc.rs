@@ -425,8 +425,9 @@ impl KernelBlock<'_> {
     }
 }
 
-/// The block for the kernel, when the build has it and the samples are
-/// 8-bit: `(filter, fraction)` choose each filter row, and `src_off`
+/// The block for the kernels, when the build has them and the samples are
+/// 8-bit: `(filter, fraction)` choose each filter row (zeros for a
+/// fraction of 0, which the one-pass kernels do not read), and `src_off`
 /// indexes the block's first sample.
 #[inline(always)]
 fn kernel_block<P: Pixel>(
@@ -443,8 +444,11 @@ fn kernel_block<P: Pixel>(
         return None;
     }
     // Every tap of a row with a fraction fits a signed byte.
-    let row = |f: &[i16; 8]| -> Option<[i8; 8]> {
+    let row = |f: &[i16; 8], frac: usize| -> Option<[i8; 8]> {
         let mut out = [0i8; 8];
+        if frac == 0 {
+            return Some(out);
+        }
         for (o, &t) in out.iter_mut().zip(f) {
             *o = i8::try_from(t).ok()?;
         }
@@ -456,8 +460,8 @@ fn kernel_block<P: Pixel>(
         src_stride,
         w,
         h,
-        fh: row(&SUBPEL_FILTERS[fx][mx])?,
-        fv: row(&SUBPEL_FILTERS[fy][my])?,
+        fh: row(&SUBPEL_FILTERS[fx][mx], mx)?,
+        fv: row(&SUBPEL_FILTERS[fy][my], my)?,
     })
 }
 
@@ -674,6 +678,12 @@ pub fn put<P: Pixel>(
             _ => copy_w::<P, 0>(dst, dst_stride, src, src_off, src_stride, w, h),
         },
         (true, false) => {
+            if let Some(b) = kernel_block(src, src_off, src_stride, w, h, (fx, mx), (fy, my), bd)
+                && let Some(out) = P::bytes_mut(dst)
+                && b.with(|b| kernel::put_h_u8(out, dst_stride, b))
+            {
+                return;
+            }
             // The vertical filter is the identity: Round2(i * 128, r1).
             let sh = r1 - 7;
             let rnd = 1i16 << (sh - 1);
@@ -693,6 +703,12 @@ pub fn put<P: Pixel>(
         (false, true) => {
             // The horizontal filter is exact (intermediate = px << (7 - r0)),
             // so pred = Round2(sum(f * px), r1 + r0 - 7) = Round2(2 * S, 7).
+            if let Some(b) = kernel_block(src, src_off, src_stride, w, h, (fx, mx), (fy, my), bd)
+                && let Some(out) = P::bytes_mut(dst)
+                && b.with(|b| kernel::put_v_u8(out, dst_stride, b))
+            {
+                return;
+            }
             let top = src_off - 3 * src_stride;
             if P::HBD {
                 v_pass_dyn::<P, P, V_SPLIT>(
@@ -855,6 +871,12 @@ pub fn prep<P: Pixel>(
             128 => prep_copy::<P, 128>(tmp, src, src_off, src_stride, w, h, 7 - r0, bias),
             _ => prep_copy::<P, 0>(tmp, src, src_off, src_stride, w, h, 7 - r0, bias),
         },
+        (true, false)
+            if kernel_block(src, src_off, src_stride, w, h, (fx, mx), (fy, my), bd)
+                .is_some_and(|b| b.with(|b| kernel::prep_h_u8(tmp, w, b))) => {}
+        (false, true)
+            if kernel_block(src, src_off, src_stride, w, h, (fx, mx), (fy, my), bd)
+                .is_some_and(|b| b.with(|b| kernel::prep_v_u8(tmp, w, b))) => {}
         (true, false) => h_pass_dyn::<P, i16>(
             tmp,
             w,

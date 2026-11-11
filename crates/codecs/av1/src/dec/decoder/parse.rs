@@ -131,6 +131,10 @@ impl Sink<'_> {
                 for b in 0..n {
                     let rows = rd.band_rows(k0 + b);
                     let mut band = MfBand::default();
+                    let n: usize = motion.iter().map(|part| part[b].refs.len()).sum();
+                    band.refs.reserve_exact(n);
+                    band.mvs
+                        .reserve_exact(motion.iter().map(|part| part[b].mvs.len()).sum());
                     for y in 0..rows {
                         for part in &motion {
                             let w = part[b].refs.len() / rows.max(1);

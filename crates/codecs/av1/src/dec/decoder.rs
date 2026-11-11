@@ -2523,6 +2523,9 @@ impl<T: Copy> Rect<T> {
         let height = src.len() / stride.max(1);
         let rows = rows.start.min(height)..rows.end.min(height);
         let cols = cols.start.min(stride)..cols.end.min(stride);
+        // Room for the area at once: grown row by row, the buffer is
+        // copied each time it doubles.
+        self.data.reserve(rows.len() * cols.len());
         for r in rows.clone() {
             self.data
                 .extend_from_slice(&src[r * stride + cols.start..r * stride + cols.end]);

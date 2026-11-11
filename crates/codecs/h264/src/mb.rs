@@ -105,10 +105,20 @@ struct LevelScale {
     lists: (usize, usize, usize),
     /// One bit per QP′Y whose entry in `tables` is made.
     ready: u128,
-    tables: Vec<([i32; 16], [i32; 64])>,
-    /// The same for Cb and Cr 4×4 blocks, by QP′C.
-    chroma_ready: [u128; 2],
-    chroma: [Vec<[i32; 16]>; 2],
+    tables: Vec<QpScale>,
+}
+
+/// What scales the levels of one kind of macroblock at one QP′Y.
+#[derive(Clone, Copy)]
+struct QpScale {
+    /// The luma 4×4 and 8×8 multipliers.
+    mul4: [i32; 16],
+    mul8: [i32; 64],
+    /// QP′C of Cb and Cr, their 4×4 multipliers, and the weights of their
+    /// DC levels.
+    chroma_qp: [i32; 2],
+    chroma: [[i32; 16]; 2],
+    chroma_dc: [i32; 2],
 }
 
 /// QP′Y runs to 51 plus 36 for 14-bit samples.
@@ -120,48 +130,43 @@ impl LevelScale {
             lists,
             ready: 0,
             tables: Vec::new(),
-            chroma_ready: [0; 2],
-            chroma: [Vec::new(), Vec::new()],
         }
     }
 
-    /// The 4×4 and 8×8 multipliers at `qp`, or `None` for a QP the tables
-    /// do not take.
-    fn at(&mut self, qp: i32, pps: &crate::set::Pps) -> Option<(&[i32; 16], &[i32; 64])> {
-        let index = usize::try_from(qp)
+    /// The multipliers at QPY `qp`, or `None` for a QP the tables do not
+    /// take.
+    fn at<S: Sample>(&mut self, qp: i32, pps: &crate::set::Pps) -> Option<&QpScale> {
+        let index = usize::try_from(qp + S::QP_BD)
             .ok()
             .filter(|&index| index < QP_TABLES)?;
         if self.ready & (1 << index) == 0 {
             if self.tables.is_empty() {
-                self.tables = vec![([0; 16], [0; 64]); QP_TABLES];
+                let zero = QpScale {
+                    mul4: [0; 16],
+                    mul8: [0; 64],
+                    chroma_qp: [0; 2],
+                    chroma: [[0; 16]; 2],
+                    chroma_dc: [0; 2],
+                };
+                self.tables = vec![zero; QP_TABLES];
             }
-            self.tables[index] = (
-                recon::dequant4(qp, pps.weight4.get(self.lists.0)?)?,
-                recon::dequant8(qp, pps.weight8.get(self.lists.1)?)?,
-            );
+            let (luma4, luma8, cb) = self.lists;
+            let chroma_qp = [pps.chroma_qp_offset, pps.second_chroma_qp_offset]
+                .map(|offset| recon::chroma_qps(qp, offset, S::QP_BD).0);
+            let weights = [pps.weight4.get(cb)?, pps.weight4.get(cb + 1)?];
+            self.tables[index] = QpScale {
+                mul4: recon::dequant4(qp + S::QP_BD, pps.weight4.get(luma4)?)?,
+                mul8: recon::dequant8(qp + S::QP_BD, pps.weight8.get(luma8)?)?,
+                chroma_qp,
+                chroma: [
+                    recon::dequant4(chroma_qp[0], weights[0])?,
+                    recon::dequant4(chroma_qp[1], weights[1])?,
+                ],
+                chroma_dc: weights.map(|weight| i32::from(weight[0])),
+            };
             self.ready |= 1 << index;
         }
-        let (mul4, mul8) = self.tables.get(index)?;
-        Some((mul4, mul8))
-    }
-
-    /// The 4×4 multipliers of Cb (`which` 0) or Cr at QP′C `qp`.
-    fn chroma_at(&mut self, which: usize, qp: i32, pps: &crate::set::Pps) -> Option<[i32; 16]> {
-        let index = usize::try_from(qp)
-            .ok()
-            .filter(|&index| index < QP_TABLES)?;
-        let (ready, tables) = (
-            self.chroma_ready.get_mut(which)?,
-            self.chroma.get_mut(which)?,
-        );
-        if *ready & (1 << index) == 0 {
-            if tables.is_empty() {
-                *tables = vec![[0; 16]; QP_TABLES];
-            }
-            tables[index] = recon::dequant4(qp, pps.weight4.get(self.lists.2 + which)?)?;
-            *ready |= 1 << index;
-        }
-        tables.get(index).copied()
+        self.tables.get(index)
     }
 }
 
@@ -3446,21 +3451,10 @@ fn decode_intra<S: Sample>(
     mb.qpd = delta as i8;
     if let Entropy::Cabac(cab) = entropy
         && intra_frame_fast(pic, slice, mb, *qp)
-        && let Some(chroma) = chroma_muls::<S>(&mut coeffs.intra, slice, *qp)
-        && let Some(muls) = coeffs.intra.at(*qp + S::QP_BD, &slice.pps)
+        && let Some(scales) = coeffs.intra.at::<S>(*qp, &slice.pps)
     {
         let i16 = i16.then_some(mode16);
-        return intra_frame_scaled(
-            pic,
-            cab,
-            slice,
-            Place { mx, my },
-            mb,
-            i16,
-            *qp,
-            muls,
-            chroma,
-        );
+        return intra_frame_scaled(pic, cab, slice, Place { mx, my }, mb, i16, *qp, scales);
     }
     let mut luma_dc = [0i32; 16];
     coeffs.reset_luma();
@@ -4632,41 +4626,28 @@ fn inter_luma_scaled<S: Sample>(
     Ok(())
 }
 
-/// QP′C of Cb and Cr for a macroblock at QP `qp`, and their 4×4
-/// multipliers under `scales`.
-fn chroma_muls<S: Sample>(
-    scales: &mut LevelScale,
-    slice: &Slice<'_>,
-    qp: i32,
-) -> Option<([i32; 2], [[i32; 16]; 2])> {
-    let qps = [
-        recon::chroma_qps(qp, slice.pps.chroma_qp_offset, S::QP_BD).0,
-        recon::chroma_qps(qp, slice.pps.second_chroma_qp_offset, S::QP_BD).0,
-    ];
-    let muls = [
-        scales.chroma_at(0, qps[0], &slice.pps)?,
-        scales.chroma_at(1, qps[1], &slice.pps)?,
-    ];
-    Some((qps, muls))
-}
-
 /// The chroma residual of a macroblock of a 4:2:0 picture that is not
 /// macroblock-adaptive, under CABAC, added to its prediction: what
 /// [`read_chroma_into`] and [`recon_chroma`] do, with the AC levels scaled
-/// by `muls` as they are read and put in raster order, and each block's
-/// left and upper level counts taken from the neighbours found once, as
-/// FFmpeg's caches do. `cbp` is the chroma coded block pattern, 1 or 2,
-/// and `dc_weights` the Cb and Cr DC weights of the macroblock's kind; the
-/// transform is not bypassed.
+/// by the chroma multipliers of `scales` as they are read and put in
+/// raster order, and each block's left and upper level counts taken from
+/// the neighbours found once, as FFmpeg's caches do. `cbp` is the chroma
+/// coded block pattern, 1 or 2, and `scales` are those of the
+/// macroblock's kind; the transform is not bypassed.
 fn chroma_scaled<S: Sample>(
     pic: &mut Frame<S>,
     cab: &mut Cabac<'_>,
     at: Place,
     mb: &mut Mb,
     cbp: u8,
-    (qps, muls): ([i32; 2], [[i32; 16]; 2]),
-    dc_weights: [i32; 2],
+    scales: &QpScale,
 ) -> Result<(), CodecError> {
+    let QpScale {
+        chroma_qp: qps,
+        chroma: muls,
+        chroma_dc: dc_weights,
+        ..
+    } = scales;
     let Place { mx, my } = at;
     let field = mb.field_mb || pic.field;
     // The neighbours, found once for every flag's context. Outside
@@ -4815,9 +4796,9 @@ fn intra_frame_scaled<S: Sample>(
     mb: &mut Mb,
     i16: Option<u8>,
     qp: i32,
-    (mul4, mul8): (&[i32; 16], &[i32; 64]),
-    chroma: ([i32; 2], [[i32; 16]; 2]),
+    scales: &QpScale,
 ) -> Result<(), CodecError> {
+    let (mul4, mul8) = (&scales.mul4, &scales.mul8);
     let Place { mx, my } = at;
     let near = IntraNear::find(pic, (mx, my), mb.slice, slice.pps.constrained_intra);
     let (x0, y0, stride) = (mx * 16, my * 16, pic.w);
@@ -5063,8 +5044,7 @@ fn intra_frame_scaled<S: Sample>(
         put_block(plane, chroma_stride, cx, cy, &pred, 8, 1);
     }
     if chroma_cbp != 0 {
-        let dc_weights = [1, 2].map(|list| i32::from(slice.pps.weight4[list][0]));
-        chroma_scaled(pic, cab, at, mb, chroma_cbp, chroma, dc_weights)?;
+        chroma_scaled(pic, cab, at, mb, chroma_cbp, scales)?;
     }
     Ok(())
 }
@@ -8656,8 +8636,9 @@ fn decode_inter<S: Sample>(
         && pic.chroma() != 3
         && !qp_bypass::<S>(slice, *qp);
     if let (true, Entropy::Cabac(cab)) = (scaled, &mut *entropy)
-        && let Some(muls) = coeffs.inter.at(*qp + S::QP_BD, &slice.pps)
+        && let Some(scales) = coeffs.inter.at::<S>(*qp, &slice.pps)
     {
+        let muls = (&scales.mul4, &scales.mul8);
         inter_luma_scaled(pic, cab, Place { mx, my }, mb, (luma_cbp, field), muls)?;
     } else if mb.transform8 {
         for i in 0..4 {
@@ -8728,10 +8709,9 @@ fn decode_inter<S: Sample>(
             && pic.levels.is_empty()
             && !qp_bypass::<S>(slice, *qp),
         &mut *entropy,
-    ) && let Some(muls) = chroma_muls::<S>(&mut coeffs.inter, slice, *qp)
+    ) && let Some(scales) = coeffs.inter.at::<S>(*qp, &slice.pps)
     {
-        let dc_weights = [4, 5].map(|list| i32::from(slice.pps.weight4[list][0]));
-        chroma_scaled(pic, cab, Place { mx, my }, mb, chroma_cbp, muls, dc_weights)?;
+        chroma_scaled(pic, cab, Place { mx, my }, mb, chroma_cbp, scales)?;
     } else {
         let chroma_res = &mut coeffs.chroma;
         read_chroma_into(pic, entropy, (mx, my), chroma_cbp, mb, chroma_res)?;

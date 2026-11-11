@@ -4088,13 +4088,30 @@ fn track_layer(
     };
     let area = placed.intersect(frame);
     let response = ui
-        .interact(area, ui.scope_id().with("preview-track"), Sense::drag())
+        .interact(
+            area,
+            ui.scope_id().with("preview-track"),
+            Sense::click_and_drag(),
+        )
         .on_hover_cursor(egui::CursorIcon::Crosshair);
     let pointer = response
         .interact_pointer_pos()
         .map(|pos| canvas_pixel(placed, size, pos));
+    // A click finds the object under it and boxes it; a drag draws the box.
+    if response.clicked()
+        && shell.track_subject_enabled()
+        && let Some((x, y)) = pointer
+        && let Err(error) = shell.pick_track_subject(x, y)
+    {
+        shell.notice_error(&error);
+    }
     if response.drag_started() {
-        view.track_drag = pointer;
+        // From where the press began: a drag is told from a click only
+        // once the pointer has moved.
+        view.track_drag = ui
+            .input(|input| input.pointer.press_origin())
+            .map(|pos| canvas_pixel(placed, size, pos))
+            .or(pointer);
     }
     let dragged = view.track_drag.zip(pointer);
     if response.drag_stopped() {
@@ -15252,7 +15269,7 @@ mod tests {
         assert!(
             galleys(&output)
                 .iter()
-                .any(|line| line.starts_with("Drag a box")),
+                .any(|line| line.starts_with("Drag a box") || line.starts_with("Click the subject")),
             "{:?}",
             galleys(&output)
         );

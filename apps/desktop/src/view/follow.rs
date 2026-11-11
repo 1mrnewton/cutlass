@@ -120,7 +120,7 @@ pub(super) fn follow_tab(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorSt
             note(
                 ui,
                 &reason.map_or_else(
-                    || "Pick Custom, then draw a box around the subject on the preview.".to_owned(),
+                    || "Pick Custom, then click the subject on the preview or draw a box around it.".to_owned(),
                     |error| format!("To track, {error}."),
                 ),
             );
@@ -188,12 +188,15 @@ fn drawing(
     what: &str,
 ) {
     let target = shell.tracking_target_name().unwrap_or_default();
+    let way = if shell.track_subject_enabled() {
+        "Click the subject on the preview, or drag a box around it"
+    } else {
+        "Drag a box around the subject on the preview"
+    };
     let text = match (boxed, fixing) {
-        (false, false) => format!(
-            "Drag a box around the subject on the preview. The {what} keeps its place against it."
-        ),
-        (false, true) => "Drag the box again where the subject is at the playhead.".to_owned(),
-        (true, _) => format!("Tracking {target}. Drag again to redraw the box."),
+        (false, false) => format!("{way}. The {what} keeps its place against it."),
+        (false, true) => format!("{way} where it is at the playhead."),
+        (true, _) => format!("Tracking {target}. Click or drag again to change the box."),
     };
     note(ui, &text);
     if !fixing {
@@ -208,7 +211,7 @@ fn drawing(
                 boxed && shell.track_ready(),
                 ui::Button::new("Start tracking").text_size(12.0),
             )
-            .on_disabled_hover_text("Draw a box on the preview first")
+            .on_disabled_hover_text("Click the subject or draw a box on the preview first")
             .clicked();
         if ui.add(ui::Button::new("Cancel").text_size(12.0)).clicked() {
             shell.stop_tracking();

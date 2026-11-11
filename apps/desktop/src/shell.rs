@@ -10144,6 +10144,57 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "runs the selection model and the tracker on a real movie"]
+    fn a_click_on_the_walking_man_boxes_him_and_a_sticker_follows() {
+        let movie = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../local-files/16929689_1920_1080_30fps.mp4");
+        if !movie.is_file() || !super::select::vision_model_here() {
+            eprintln!("skipped: the movie or the selection model is missing");
+            return;
+        }
+        let temp = Temp::new();
+        let mut draft = crate::open_movie::movie_draft(&movie, 1920, 1080, false).unwrap();
+        draft.tracks[0].segments[0].target = TimeRange::new(0, 4_000_000);
+        draft.tracks[0].segments[0].source_range = Some(TimeRange::new(0, 4_000_000));
+        draft.materials.videos[0].duration = Micros(4_000_000);
+        draft.duration = Micros(4_000_000);
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.seek(Micros(1_000_000));
+        desktop.add_sticker("sticker:heart").unwrap();
+        desktop.start_following().unwrap();
+        assert!(desktop.track_subject_enabled());
+        let started = std::time::Instant::now();
+        // The shirt's middle.
+        desktop.pick_track_subject(997.0, 517.0).unwrap();
+        let until = started + std::time::Duration::from_secs(600);
+        while desktop.poll_job() && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let ((x0, y0), (x1, y1)) = desktop
+            .tracking()
+            .and_then(|t| t.canvas_box)
+            .unwrap_or_else(|| panic!("a box; notice {:?}", desktop.notice()));
+        eprintln!(
+            "found in {:.1}s: box ({x0:.0}, {y0:.0}) to ({x1:.0}, {y1:.0})",
+            started.elapsed().as_secs_f64()
+        );
+        // Around the click, and smaller than the frame.
+        assert!(x0 < 997.0 && 997.0 < x1 && y0 < 517.0 && 517.0 < y1);
+        assert!(x1 - x0 < 960.0 && y1 - y0 < 900.0);
+        desktop.run_tracking().unwrap();
+        while desktop.poll_job() && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(
+            desktop.following().is_some(),
+            "notice {:?}",
+            desktop.notice()
+        );
+    }
+
+    #[test]
     #[ignore = "runs the selection model on a real movie; slow in a debug build"]
     fn a_click_on_a_real_movie_cuts_the_clip_down_to_the_object() {
         let movie = PathBuf::from(env!("CARGO_MANIFEST_DIR"))

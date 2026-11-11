@@ -15,6 +15,11 @@
 //! slices, after one check per block that every byte they touch is inside
 //! them. Their modules say what that check covers.
 //!
+//! [`growing`] is the other exception, and the one piece here that is not
+//! a sample loop: a buffer one thread fills from the front while others
+//! read what is filled, which needs `unsafe` to share. Its module says why
+//! that is sound.
+//!
 //! The one `unsafe` per kernel is the call into its vector version. The
 //! compiler asks for it because that function is built for a CPU feature,
 //! and the caller has to promise the CPU has it. On 64-bit ARM the feature
@@ -46,6 +51,7 @@ macro_rules! kernel {
 
 pub mod deblock;
 mod edge;
+pub mod growing;
 pub mod mc;
 mod mc_block;
 pub mod residual;

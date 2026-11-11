@@ -99,9 +99,21 @@ Not run: official ProRes conformance streams.
 
 ## Speed against FFmpeg
 
-Measured on 10 November 2026 at commit `ed0743d2`, on an Apple M5 Pro (18 cores, 48 GB) running macOS 27.0.1, against FFmpeg 8.1.1. Built with `cargo build --release` and rustc 1.99.1.
+Measured on 11 November 2026 at commit `07266d8f`, on an Apple M5 Pro (18 cores, 48 GB) running macOS 27.0.1, against FFmpeg 8.1.1. Built with `cargo build --release` and rustc 1.99.1.
 
-**Decode, prores: not measured.** The run stopped with: `media-bench: picture dumps differ in size: 933120000 and 2488320000 samples`
+**Decode, prores.** Input: 300 frames of 1920×1080 at 30 frames a second (191 MB), written by FFmpeg with `-c:v prores_ks -profile:v 2 -pix_fmt yuv422p10le`.
+
+|  | Cutlass | FFmpeg (`prores`) |
+| --- | ---: | ---: |
+| Wall time | 0.95 s | 0.46 s |
+| Speed | 316 frames/s | 652 frames/s |
+| CPU time | 3.91 s | 3.55 s |
+| Peak memory | 17 MB | 164 MB |
+| Threads allowed | 16 | 16 |
+
+Cutlass is **2.1× slower** than FFmpeg here. The two outputs are not bit-identical: 55.69 dB PSNR between them, largest single difference 3. The Rust decoder returns `yuv420p` pictures, so FFmpeg's time includes converting each picture to that layout with libswscale.
+
+The stream is 10-bit 4:2:2. The Rust decoder hands the app 8-bit 4:2:0 and converts to it inside the decoder, so FFmpeg is asked for 8-bit 4:2:0 too, and the two conversions round differently.
 
 How it was measured: both sides get the same input from disk, do all of the work, and throw the result away. Each side is a whole process timed with `/usr/bin/time -l`, start-up included, run five times in turn; the tables show the median run. FFmpeg is given as many threads as the Rust code used. The Rust side is [`tools/media-bench`](../../../tools/media-bench), which registers only the Rust codecs. For decoding and packet reading the FFmpeg side is [`scripts/ffmpeg_decode.c`](../../../scripts/ffmpeg_decode.c), which calls libavformat and libavcodec directly; for encoding it is the `ffmpeg` command. The pictures come from a 4K street scene scaled to 1920×1080, and the sound from a music recording.
 

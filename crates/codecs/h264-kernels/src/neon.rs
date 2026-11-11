@@ -12,8 +12,9 @@
 //! to [`chroma_left_edge`] and [`chroma_top_edge`]: they read and write
 //! the plane through a pointer, within the span [`crate::edge::mb_fits`]
 //! has checked, so the samples go straight between plane and registers.
-//! [`prefetch`] also takes a pointer into a plane, but only to name it in
-//! a hint to the cache, which reads and writes nothing.
+//! [`prefetch`] and [`prefetch_item`] also take a pointer into a plane or
+//! an item, but only to name it in a hint to the cache, which reads and
+//! writes nothing.
 
 use core::arch::aarch64::{
     int16x8_t, uint8x8_t, uint8x16_t, uint16x8_t, vabdq_s16, vabdq_u8, vaddl_u8, vaddq_s16,
@@ -663,6 +664,37 @@ pub(crate) fn prefetch(plane: &[u8], at: usize, stride: usize, rows: usize) {
             return;
         };
         index = next;
+    }
+}
+
+/// Asks for each cache line of `items[at]` to be brought in, with
+/// `prfm pldl1keep`. Nothing is asked for when `at` is outside `items`.
+#[inline]
+#[target_feature(enable = "neon")]
+pub(crate) fn prefetch_item<T>(items: &[T], at: usize) {
+    let Some(item) = items.get(at) else {
+        return;
+    };
+    let size = size_of::<T>();
+    if size == 0 {
+        return;
+    }
+    let start = core::ptr::from_ref(item).cast::<u8>();
+    let mut offset = 0;
+    while offset < size + 63 {
+        // The last line asked for is the one holding the last byte.
+        let byte = start.wrapping_add(offset.min(size - 1));
+        // SAFETY: a prefetch is a hint that reads, writes and faults on
+        // nothing; the address is inside `item` all the same.
+        #[allow(unsafe_code)]
+        unsafe {
+            core::arch::asm!(
+                "prfm pldl1keep, [{byte}]",
+                byte = in(reg) byte,
+                options(nostack, readonly, preserves_flags)
+            );
+        }
+        offset += 64;
     }
 }
 

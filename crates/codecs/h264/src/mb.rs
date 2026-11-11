@@ -700,7 +700,17 @@ pub(crate) fn decode_mbs<S: Sample>(
     // The bottom macroblock's skip flag, read with a skipped top one.
     let mut ahead = None;
     let mut coeffs = Coeffs::new();
+    // A B slice's direct prediction reads the co-located macroblock of the
+    // first list-1 picture, which is asked for two macroblocks ahead, as
+    // that picture's motion is far from anything else read here.
+    let colocated = (super::syntax_kind(slice.kind) == 1 && !mbaff)
+        .then(|| slice.ref1.first().and_then(|&index| dpb.get(index)))
+        .flatten()
+        .filter(|frame| frame.pending.is_none());
     while addr < total {
+        if let Some(frame) = colocated {
+            cutlass_h264_kernels::prefetch_item(&frame.mb, addr + 2);
+        }
         if !super::intra_slice(slice.kind) {
             match &mut entropy {
                 Entropy::Cavlc(bits) => {

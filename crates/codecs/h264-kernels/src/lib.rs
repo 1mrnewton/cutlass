@@ -49,6 +49,15 @@ macro_rules! kernel {
     }};
 }
 
+/// Asks for `items[at]` to be brought into the cache before it is read,
+/// the way [`mc::prefetch`] asks for a reference's rows. Nothing is asked
+/// for when `at` is outside `items`, and nothing changes that a caller
+/// could see.
+#[inline]
+pub fn prefetch_item<T>(items: &[T], at: usize) {
+    kernel!(prefetch_item(items, at));
+}
+
 pub mod deblock;
 mod edge;
 pub mod growing;
@@ -68,3 +77,27 @@ mod neon_qpel;
 mod neon_residual;
 
 pub mod scalar;
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn asking_for_an_item_changes_nothing() {
+        // Items over several cache lines, a line exactly, and none at all;
+        // places inside, at the end, and far past it.
+        let wide: Vec<[u8; 340]> = (0..4u8).map(|seed| [seed; 340]).collect();
+        let line = [[7u8; 64]; 3];
+        let empty = [(); 5];
+        for at in [0, 1, 3, 4, usize::MAX] {
+            super::prefetch_item(&wide, at);
+            super::prefetch_item(&line, at);
+            super::prefetch_item(&empty, at);
+            super::prefetch_item::<u32>(&[], at);
+        }
+        assert!(
+            wide.iter()
+                .zip(0u8..)
+                .all(|(item, seed)| item.iter().all(|&byte| byte == seed))
+        );
+        assert!(line.iter().flatten().all(|&byte| byte == 7));
+    }
+}

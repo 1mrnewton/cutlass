@@ -9,7 +9,8 @@
 //! its type keeps it in bounds. A wrong index in a kernel is a panic, not
 //! a stray read or write.
 //!
-//! The whole-block NEON predictors in `neon_pel` and `neon_qpel` are the
+//! The whole-block NEON predictors in `neon_pel` and `neon_qpel`, and the
+//! NEON filters of a macroblock's boundary alone in `neon`, are the
 //! exception: they load and store through pointers into the caller's
 //! slices, after one check per block that every byte they touch is inside
 //! them. Their modules say what that check covers.

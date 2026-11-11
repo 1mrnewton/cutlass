@@ -6,20 +6,26 @@
 //! each touches at most the array's own bytes. Each function is built for
 //! NEON, so only the callers in this crate that promise NEON is present
 //! reach them.
+//!
+//! The exception is a macroblock's boundary filtered on its own, which
+//! [`luma_mb`] hands to [`left_edge`] and [`top_edge`]: they read and write
+//! the plane through a pointer, within the span [`crate::edge::mb_fits`]
+//! has checked, so the samples go straight between plane and registers.
 
 use core::arch::aarch64::{
     int16x8_t, uint8x8_t, uint8x16_t, uint16x8_t, vabdq_s16, vabdq_u8, vaddl_u8, vaddq_s16,
     vaddq_u8, vaddq_u16, vaddw_u8, vandq_s16, vandq_u8, vandq_u16, vbicq_u8, vbslq_s16, vbslq_u8,
     vcgezq_s8, vcgezq_s16, vcltq_s16, vcltq_u8, vcombine_s8, vcombine_u8, vcombine_u64,
     vcreate_u64, vdup_n_u8, vdupq_n_s8, vdupq_n_s16, vdupq_n_u8, vget_high_u8, vget_low_u8,
-    vgetq_lane_u64, vhaddq_u8, vld1_u8, vld1q_u8, vmaxq_s8, vmaxq_s16, vmaxq_u8, vmaxvq_u8,
-    vminq_s8, vminq_s16, vminq_u8, vmovl_u8, vnegq_s8, vnegq_s16, vqaddq_u8, vqmovun_s16,
-    vqrshrn_n_s16, vqsubq_u8, vreinterpret_u8_u64, vreinterpretq_s8_u8, vreinterpretq_s16_u16,
-    vreinterpretq_u8_s8, vreinterpretq_u8_u16, vreinterpretq_u8_u32, vreinterpretq_u8_u64,
-    vreinterpretq_u16_u8, vreinterpretq_u32_u8, vreinterpretq_u64_u8, vrhaddq_u8, vrshrn_n_u16,
-    vshlq_n_s16, vshlq_n_u16, vshrq_n_s16, vst1_u8, vst1q_u8, vsubl_u8, vsubq_s16, vsubq_u8,
-    vtrn1q_u8, vtrn1q_u16, vtrn1q_u32, vtrn2q_u8, vtrn2q_u16, vtrn2q_u32, vuzp1q_u8, vuzp2q_u8,
-    vzip1_u8, vzip1q_u64, vzip2_u8, vzip2q_u64,
+    vgetq_lane_u32, vgetq_lane_u64, vhaddq_u8, vld1_u8, vld1q_u8, vmaxq_s8, vmaxq_s16, vmaxq_u8,
+    vmaxvq_u8, vminq_s8, vminq_s16, vminq_u8, vmovl_u8, vnegq_s8, vnegq_s16, vqaddq_u8,
+    vqmovun_s16, vqrshrn_n_s16, vqsubq_u8, vreinterpret_u8_u64, vreinterpretq_s8_u8,
+    vreinterpretq_s16_u16, vreinterpretq_u8_s8, vreinterpretq_u8_u16, vreinterpretq_u8_u32,
+    vreinterpretq_u8_u64, vreinterpretq_u16_u8, vreinterpretq_u32_u8, vreinterpretq_u64_u8,
+    vrhaddq_u8, vrshrn_n_u16, vshlq_n_s16, vshlq_n_u16, vshrq_n_s16, vst1_u8, vst1q_u8, vsubl_u8,
+    vsubq_s16, vsubq_u8, vtrn1q_u8, vtrn1q_u16, vtrn1q_u32, vtrn2q_u8, vtrn2q_u16, vtrn2q_u32,
+    vuzp1q_u8, vuzp2q_u8, vzip1_u8, vzip1q_u8, vzip1q_u16, vzip1q_u64, vzip2_u8, vzip2q_u8,
+    vzip2q_u16, vzip2q_u64,
 };
 
 use crate::deblock::{ChromaRows, Lines, Rows};
@@ -628,6 +634,123 @@ fn plain_edges(edges: &crate::edge::MbEdges) -> bool {
         && inner(h3)
 }
 
+/// The four bytes from lane `LANE` of `v`, as 32-bit lanes, to `out`.
+///
+/// # Safety
+///
+/// Four bytes from `out` must be writable.
+#[inline]
+#[target_feature(enable = "neon")]
+#[allow(unsafe_code)]
+unsafe fn put4<const LANE: i32>(out: *mut u8, v: uint8x16_t) {
+    let four = vgetq_lane_u32::<LANE>(vreinterpretq_u32_u8(v));
+    // SAFETY: the caller's promise; the write needs no alignment.
+    unsafe { out.cast::<u32>().write_unaligned(four) };
+}
+
+/// A macroblock's left edge, 16 lines whose q0 is at `q0` and the lines
+/// `down` apart, filtered as FFmpeg's `h264_h_loop_filter_luma` does it: the
+/// eight samples around the edge on each line go straight to registers,
+/// are turned so each vector holds one of them down all sixteen lines, and
+/// only the samples the filter changed are turned back and written.
+///
+/// # Safety
+///
+/// Four samples before `q0` and four from it, on each of the sixteen
+/// lines, must be readable and writable. The thresholds are ones [`small`]
+/// takes.
+#[inline]
+#[target_feature(enable = "neon")]
+#[allow(unsafe_code)]
+unsafe fn left_edge(q0: *mut u8, down: usize, filter: crate::edge::Filter) {
+    // SAFETY: every line's eight samples are the caller's promise.
+    unsafe {
+        let p = q0.sub(4);
+        let line = |n: usize| -> uint8x16_t {
+            vcombine_u8(vld1_u8(p.add(n * down)), vld1_u8(p.add((n + 8) * down)))
+        };
+        let v = turn!([
+            line(0),
+            line(1),
+            line(2),
+            line(3),
+            line(4),
+            line(5),
+            line(6),
+            line(7)
+        ]);
+        let Some((v, changed)) = filter8!(v, filter) else {
+            return;
+        };
+        if changed.start == 1 {
+            // p2 to q2 changed: all eight samples of each line go back.
+            let out = turn!(v);
+            for (n, vector) in out.into_iter().enumerate() {
+                vst1_u8(p.add(n * down), vget_low_u8(vector));
+                vst1_u8(p.add((n + 8) * down), vget_high_u8(vector));
+            }
+            return;
+        }
+        // p1 to q1 changed: four samples a line. Bytes of p1 and p0, and of
+        // q0 and q1, side by side, then those pairs side by side, give each
+        // line's four in one 32-bit lane.
+        let pp_low = vreinterpretq_u16_u8(vzip1q_u8(v[2], v[3]));
+        let pp_high = vreinterpretq_u16_u8(vzip2q_u8(v[2], v[3]));
+        let qq_low = vreinterpretq_u16_u8(vzip1q_u8(v[4], v[5]));
+        let qq_high = vreinterpretq_u16_u8(vzip2q_u8(v[4], v[5]));
+        let quads = [
+            vreinterpretq_u8_u16(vzip1q_u16(pp_low, qq_low)),
+            vreinterpretq_u8_u16(vzip2q_u16(pp_low, qq_low)),
+            vreinterpretq_u8_u16(vzip1q_u16(pp_high, qq_high)),
+            vreinterpretq_u8_u16(vzip2q_u16(pp_high, qq_high)),
+        ];
+        let at = p.add(2);
+        for (group, quad) in quads.into_iter().enumerate() {
+            let first = group * 4;
+            put4::<0>(at.add(first * down), quad);
+            put4::<1>(at.add((first + 1) * down), quad);
+            put4::<2>(at.add((first + 2) * down), quad);
+            put4::<3>(at.add((first + 3) * down), quad);
+        }
+    }
+}
+
+/// A macroblock's top edge, 16 samples whose q0 row starts at `q0` with
+/// rows `down` apart: the four rows above and four below go straight to
+/// registers and the ones the filter changed straight back.
+///
+/// # Safety
+///
+/// Sixteen samples on each of the four rows above `q0` and the four from
+/// it must be readable and writable. The thresholds are ones [`small`]
+/// takes.
+#[inline]
+#[target_feature(enable = "neon")]
+#[allow(unsafe_code)]
+unsafe fn top_edge(q0: *mut u8, down: usize, filter: crate::edge::Filter) {
+    // SAFETY: the eight rows are the caller's promise.
+    unsafe {
+        let p = q0.sub(4 * down);
+        let row = |n: usize| vld1q_u8(p.add(n * down));
+        let v = [
+            row(0),
+            row(1),
+            row(2),
+            row(3),
+            row(4),
+            row(5),
+            row(6),
+            row(7),
+        ];
+        let Some((v, changed)) = filter8!(v, filter) else {
+            return;
+        };
+        for n in changed {
+            vst1q_u8(p.add(n * down), v[n]);
+        }
+    }
+}
+
 /// Every edge of a 16×16 luma macroblock. Its rows are found in the plane
 /// once. The edge on the macroblock's boundary is filtered first, on its
 /// own; the three inside it are then filtered together from vectors that
@@ -643,6 +766,29 @@ pub(crate) fn luma_mb(plane: &mut [u8], edges: &crate::edge::MbEdges) -> bool {
     } = *edges;
     if !crate::edge::mb_fits(plane.len(), edges, 16, 4) {
         return false;
+    }
+    // Most macroblocks filter their boundary alone, if anything: each of
+    // its two edges then goes straight between the plane and registers.
+    let tame = |filter: &Option<crate::edge::Filter>| filter.is_none_or(|filter| filter.tame());
+    if let ([v0, None, None, None], [h0, None, None, None]) = (vertical, horizontal)
+        && tame(&v0)
+        && tame(&h0)
+    {
+        let base = plane.as_mut_ptr();
+        // SAFETY: `mb_fits` found the macroblock's sixteen rows of sixteen
+        // inside the plane, the rows at least 20 apart, and four samples
+        // before it when the left edge is filtered and four rows above it
+        // when the top one is: every sample either edge reads or writes.
+        #[allow(unsafe_code)]
+        unsafe {
+            if let Some(filter) = v0 {
+                left_edge(base.add(at), down, filter);
+            }
+            if let Some(filter) = h0 {
+                top_edge(base.add(at), down, filter);
+            }
+        }
+        return true;
     }
     // The rows are taken from four samples before the macroblock and four
     // rows above it. At the picture's top row and its first macroblock

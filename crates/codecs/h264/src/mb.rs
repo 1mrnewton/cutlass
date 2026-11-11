@@ -93,24 +93,37 @@ pub(crate) struct Coeffs {
     inter: InterScale,
 }
 
-/// The multipliers that scale inter luma levels at `qp`, under the slice's
-/// inter luma weights, made again when the QP changes.
+/// The multipliers that scale inter luma levels under the slice's inter
+/// luma weights, made for each QP′Y the first time it comes up: a QP that
+/// changes from one macroblock to the next does not make them again.
 struct InterScale {
-    qp: i32,
-    mul4: [i32; 16],
-    mul8: [i32; 64],
+    /// One bit per QP′Y whose entry in `tables` is made.
+    ready: u128,
+    tables: Vec<([i32; 16], [i32; 64])>,
 }
+
+/// QP′Y runs to 51 plus 36 for 14-bit samples.
+const QP_TABLES: usize = 88;
 
 impl InterScale {
     /// The 4×4 and 8×8 multipliers at `qp`, or `None` for a QP the tables
     /// do not take.
     fn at(&mut self, qp: i32, pps: &crate::set::Pps) -> Option<(&[i32; 16], &[i32; 64])> {
-        if qp != self.qp {
-            self.mul4 = recon::dequant4(qp, &pps.weight4[3])?;
-            self.mul8 = recon::dequant8(qp, &pps.weight8[1])?;
-            self.qp = qp;
+        let index = usize::try_from(qp)
+            .ok()
+            .filter(|&index| index < QP_TABLES)?;
+        if self.ready & (1 << index) == 0 {
+            if self.tables.is_empty() {
+                self.tables = vec![([0; 16], [0; 64]); QP_TABLES];
+            }
+            self.tables[index] = (
+                recon::dequant4(qp, &pps.weight4[3])?,
+                recon::dequant8(qp, &pps.weight8[1])?,
+            );
+            self.ready |= 1 << index;
         }
-        Some((&self.mul4, &self.mul8))
+        let (mul4, mul8) = self.tables.get(index)?;
+        Some((mul4, mul8))
     }
 }
 
@@ -123,9 +136,8 @@ impl Coeffs {
             ac_used: 0,
             block8_used: 0,
             inter: InterScale {
-                qp: -1,
-                mul4: [0; 16],
-                mul8: [0; 64],
+                ready: 0,
+                tables: Vec::new(),
             },
         }
     }

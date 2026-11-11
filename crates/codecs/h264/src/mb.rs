@@ -100,6 +100,9 @@ struct InterScale {
     /// One bit per QP′Y whose entry in `tables` is made.
     ready: u128,
     tables: Vec<([i32; 16], [i32; 64])>,
+    /// The same for inter Cb and Cr 4×4 blocks, by QP′C.
+    chroma_ready: [u128; 2],
+    chroma: [Vec<[i32; 16]>; 2],
 }
 
 /// QP′Y runs to 51 plus 36 for 14-bit samples.
@@ -125,6 +128,25 @@ impl InterScale {
         let (mul4, mul8) = self.tables.get(index)?;
         Some((mul4, mul8))
     }
+
+    /// The 4×4 multipliers of inter Cb (`which` 0) or Cr at QP′C `qp`.
+    fn chroma_at(&mut self, which: usize, qp: i32, pps: &crate::set::Pps) -> Option<[i32; 16]> {
+        let index = usize::try_from(qp)
+            .ok()
+            .filter(|&index| index < QP_TABLES)?;
+        let (ready, tables) = (
+            self.chroma_ready.get_mut(which)?,
+            self.chroma.get_mut(which)?,
+        );
+        if *ready & (1 << index) == 0 {
+            if tables.is_empty() {
+                *tables = vec![[0; 16]; QP_TABLES];
+            }
+            tables[index] = recon::dequant4(qp, &pps.weight4[4 + which])?;
+            *ready |= 1 << index;
+        }
+        tables.get(index).copied()
+    }
 }
 
 impl Coeffs {
@@ -138,6 +160,8 @@ impl Coeffs {
             inter: InterScale {
                 ready: 0,
                 tables: Vec::new(),
+                chroma_ready: [0; 2],
+                chroma: [Vec::new(), Vec::new()],
             },
         }
     }
@@ -4517,6 +4541,116 @@ fn inter_luma_scaled<S: Sample>(
     Ok(())
 }
 
+/// QP′C of Cb and Cr for a macroblock at QP `qp`, and their inter 4×4
+/// multipliers.
+fn chroma_muls<S: Sample>(
+    scales: &mut InterScale,
+    slice: &Slice<'_>,
+    qp: i32,
+) -> Option<([i32; 2], [[i32; 16]; 2])> {
+    let qps = [
+        recon::chroma_qps(qp, slice.pps.chroma_qp_offset, S::QP_BD).0,
+        recon::chroma_qps(qp, slice.pps.second_chroma_qp_offset, S::QP_BD).0,
+    ];
+    let muls = [
+        scales.chroma_at(0, qps[0], &slice.pps)?,
+        scales.chroma_at(1, qps[1], &slice.pps)?,
+    ];
+    Some((qps, muls))
+}
+
+/// The chroma residual of an inter macroblock of a 4:2:0 picture that is
+/// not macroblock-adaptive, under CABAC, added to its prediction: what
+/// [`read_chroma_into`] and [`recon_chroma`] do, with the AC levels scaled
+/// by `muls` as they are read and put in raster order, and each block's
+/// left and upper level counts taken from the neighbours found once, as
+/// FFmpeg's caches do. `cbp` is the chroma coded block pattern, 1 or 2;
+/// the transform is not bypassed.
+fn inter_chroma_scaled<S: Sample>(
+    pic: &mut Frame<S>,
+    cab: &mut Cabac<'_>,
+    at: Place,
+    mb: &mut Mb,
+    cbp: u8,
+    (qps, muls): ([i32; 2], [[i32; 16]; 2]),
+    pps: &crate::set::Pps,
+) -> Result<(), CodecError> {
+    let Place { mx, my } = at;
+    let field = mb.field_mb || pic.field;
+    let mut dc = [[0i32; 4]; 2];
+    for (which, levels) in dc.iter_mut().enumerate() {
+        let inc = cbf_dc_chroma(pic, mx, my, mb, which);
+        if cab.decision(CBF_BASE[3] + inc)? == 1 {
+            mb.dc_c[which] = true;
+            cabac_levels(cab, (3, 4), field, |n, level| levels[n] = level)?;
+        }
+    }
+    let mut ac = [[[0i32; 16]; 4]; 2];
+    let mut counts = [[0usize; 4]; 2];
+    if cbp == 2 {
+        let scan = scan4(field);
+        let left_mb = neighbor(pic, mx as i32 - 1, my as i32, mb.slice);
+        let above_mb = neighbor(pic, mx as i32, above_my(pic, mx, my), mb.slice);
+        let missing = u8::from(mb.intra);
+        for which in 0..2 {
+            let base = which * 16;
+            // The counts beside the left column and above the top row.
+            let side = |near: Option<&Mb>, first: usize, second: usize| match near {
+                Some(near) if near.pcm => [16, 16],
+                Some(near) => [near.nnz_c[base + first], near.nnz_c[base + second]],
+                None => [missing; 2],
+            };
+            let (left, above) = (side(left_mb, 1, 3), side(above_mb, 2, 3));
+            let mul = &muls[which];
+            for i in 0..4 {
+                let (bx, by) = (i & 1, i >> 1);
+                let l = if bx > 0 {
+                    mb.nnz_c[base + by * 2]
+                } else {
+                    left[by]
+                };
+                let a = if by > 0 {
+                    mb.nnz_c[base + bx]
+                } else {
+                    above[bx]
+                };
+                if cab.decision(CBF_BASE[4] + usize::from(l > 0) + 2 * usize::from(a > 0))? == 0 {
+                    continue;
+                }
+                let block = &mut ac[which][i];
+                let count = cabac_levels(cab, (4, 15), field, |n, level| {
+                    let pos = scan[n + 1];
+                    block[pos] = recon::dequantize(level, mul[pos]);
+                })?;
+                mb.nnz_c[base + by * 2 + bx] = count as u8;
+                counts[which][i] = count;
+            }
+        }
+    }
+    let span = chroma_span(my, 8, mb.field_mb);
+    let stride = pic.w / 2;
+    for which in 0..2 {
+        if dc[which] == [0; 4] && counts[which] == [0; 4] {
+            continue;
+        }
+        let [c0, c1, c2, c3] = dc[which];
+        let weight = i32::from(pps.weight4[4 + which][0]);
+        let scaled = recon::chroma_dc(c0, c1, c2, c3, qps[which], weight);
+        let plane = if which == 0 { &mut pic.u } else { &mut pic.v };
+        for i in 0..4 {
+            let (x, y) = (mx * 8 + (i & 1) * 4, span.at((i >> 1) * 4));
+            if counts[which][i] == 0 {
+                recon::add_dc(plane, stride, (x, y, span.step), (scaled[i] + 32) >> 6, 4);
+                continue;
+            }
+            let mut block = ac[which][i];
+            block[0] = scaled[i];
+            recon::add_idct4_full(plane, stride, x, y, &mut block, span.step);
+        }
+    }
+    Ok(())
+}
+
 /// Clause 8.5. `qp` is SliceQPY. Bypass applies when the flag is set and QP′Y is 0.
 fn qp_bypass<S: Sample>(slice: &Slice<'_>, qp: i32) -> bool {
     slice.sps.bypass && qp + S::QP_BD == 0
@@ -8132,6 +8266,18 @@ fn decode_inter<S: Sample>(
     }
     if slice.sps.chroma == 3 && !slice.sps.separate {
         recon_444(pic, entropy, slice, Place { mx, my }, mb, *qp, None)?;
+    } else if chroma_cbp == 0 && pic.levels.is_empty() {
+        // No chroma levels: nothing to read, keep or add.
+    } else if let (true, Entropy::Cabac(cab)) = (
+        !merge
+            && !pic.mbaff
+            && pic.chroma() == 1
+            && pic.levels.is_empty()
+            && !qp_bypass::<S>(slice, *qp),
+        &mut *entropy,
+    ) && let Some(muls) = chroma_muls::<S>(&mut coeffs.inter, slice, *qp)
+    {
+        inter_chroma_scaled(pic, cab, Place { mx, my }, mb, chroma_cbp, muls, &slice.pps)?;
     } else {
         let chroma_res = &mut coeffs.chroma;
         read_chroma_into(pic, entropy, (mx, my), chroma_cbp, mb, chroma_res)?;

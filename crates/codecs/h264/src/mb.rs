@@ -3162,7 +3162,18 @@ fn block_span<S: Sample>(pic: &Frame<S>, my: usize, field: bool, plane: u8) -> S
 /// the bottom macroblock of the pair above, and the top field ends in that
 /// pair's top macroblock when it is a field pair and its bottom one when it
 /// is a frame pair.
+#[inline(always)]
 fn above_my<S: Sample>(pic: &Frame<S>, mx: usize, my: usize) -> i32 {
+    // Only a macroblock-adaptive frame has field macroblocks among frame
+    // ones.
+    if !pic.mbaff {
+        return my as i32 - 1;
+    }
+    above_my_mbaff(pic, mx, my)
+}
+
+#[inline(never)]
+fn above_my_mbaff<S: Sample>(pic: &Frame<S>, mx: usize, my: usize) -> i32 {
     let field_at = |row: usize| {
         pic.mb
             .get(row * pic.mb_w + mx)
@@ -8950,7 +8961,7 @@ fn ref_above_zero<S: Sample>(
 /// macroblock may lie in two macroblocks. `low` asks for the one holding the
 /// block's last line, which is what borders a partition from above and to
 /// the left; otherwise it is the one holding its first line.
-#[inline]
+#[inline(always)]
 fn near_block<S: Sample>(
     pic: &Frame<S>,
     at: (usize, usize),
@@ -8962,22 +8973,33 @@ fn near_block<S: Sample>(
         return Some((mx as i32, my as i32, (by * 4 + bx) as usize));
     }
     if pic.mbaff {
-        let (xn, ox) = match bx {
-            ..0 => (-1, 3),
-            4.. => (16, 0),
-            _ => (bx * 4, bx as usize),
-        };
-        let yn = if by < 0 {
-            -1
-        } else {
-            by * 4 + 3 * i32::from(low)
-        };
-        let near = mbaff::locate((&pic.mb, pic.mb_w), at, field, xn, yn)?;
-        return Some((near.mx as i32, near.my as i32, near.row / 4 * 4 + ox));
+        return near_block_mbaff(pic, at, field, (bx, by, low));
     }
     let (mbx, ox) = shift(mx, bx, 4);
     let (mby, oy) = shift(my, by, 4);
     Some((mbx, mby, oy * 4 + ox))
+}
+
+/// [`near_block`] outside this macroblock in a macroblock-adaptive frame.
+#[inline(never)]
+fn near_block_mbaff<S: Sample>(
+    pic: &Frame<S>,
+    at: (usize, usize),
+    field: bool,
+    (bx, by, low): (i32, i32, bool),
+) -> Option<(i32, i32, usize)> {
+    let (xn, ox) = match bx {
+        ..0 => (-1, 3),
+        4.. => (16, 0),
+        _ => (bx * 4, bx as usize),
+    };
+    let yn = if by < 0 {
+        -1
+    } else {
+        by * 4 + 3 * i32::from(low)
+    };
+    let near = mbaff::locate((&pic.mb, pic.mb_w), at, field, xn, yn)?;
+    Some((near.mx as i32, near.my as i32, near.row / 4 * 4 + ox))
 }
 
 /// Clause 9.3.3.1.1.6. Direct, skip, intra, and the other list contribute no reference.
@@ -9127,6 +9149,7 @@ fn mvd_sum<S: Sample>(
     left.abs() + above.abs()
 }
 
+#[inline(always)]
 fn mvd_at<S: Sample>(
     pic: &Frame<S>,
     at: Place,

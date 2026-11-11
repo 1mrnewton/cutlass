@@ -1481,7 +1481,7 @@ pub fn put_luma_block<S: Sample>(
         return;
     }
     let size = (w, h);
-    if (x_frac, y_frac) != (0, 0) && (0..4).contains(&x_frac) && (0..4).contains(&y_frac) {
+    if (0..4).contains(&x_frac) && (0..4).contains(&y_frac) {
         let kind = Predict::Luma(x_frac as u8, y_frac as u8);
         let place = (
             (
@@ -1584,16 +1584,16 @@ pub fn put_chroma_block<S: Sample>(
     }
     let x0 = usize::try_from(x).unwrap_or(0);
     let y0 = usize::try_from(y).unwrap_or(0);
-    if xf == 0 && yf == 0 {
-        copy_block(dst, dst_stride, src_at(src, src_stride, x, y), (w, h));
-        return;
-    }
     // The kernel reads the sample after the block both ways.
     let kind = Predict::Chroma(xf as u8, yf as u8);
     if right < pic_w
         && below < pic_h
         && S::predict_fast(kind, dst, dst_stride, src, src_stride, ((x0, y0), (w, h)))
     {
+        return;
+    }
+    if xf == 0 && yf == 0 {
+        copy_block(dst, dst_stride, src_at(src, src_stride, x, y), (w, h));
         return;
     }
     if yf == 0 {
@@ -1746,7 +1746,10 @@ fn put_luma_extended<S: Sample>(
     let (pic_w, pic_h) = pic;
     let width = block.w + 5;
     let height = block.h + 5;
-    let mut window = [S::default(); 21 * 21];
+    // The vector kernels load whole rows of 16 or 32 from two samples left
+    // of the block; the last row's loads reach past the window's 21 by up
+    // to 11 samples, which the spare ones at its end hold.
+    let mut window = [S::default(); 21 * 21 + 16];
     edge_window(
         &mut window,
         (width, height),

@@ -9054,16 +9054,9 @@ fn read_mvd_part<S: Sample>(
             mb,
         )
     };
-    let dx = read_mvd(
-        entropy,
-        mvd_sum(pic, Place { mx, my }, Cell { bx: x, by: y }, (list, 0), mb),
-        40,
-    )?;
-    let dy = read_mvd(
-        entropy,
-        mvd_sum(pic, Place { mx, my }, Cell { bx: x, by: y }, (list, 1), mb),
-        47,
-    )?;
+    let sums = mvd_sums(pic, Place { mx, my }, Cell { bx: x, by: y }, list, mb);
+    let dx = read_mvd(entropy, sums[0], 40)?;
+    let dy = read_mvd(entropy, sums[1], 47)?;
     let mv = [
         super::clip_ref(i32::from(pred[0]) + dx),
         super::clip_ref(i32::from(pred[1]) + dy),
@@ -9140,72 +9133,57 @@ fn read_mvd(entropy: &mut Entropy<'_, '_>, sum: i32, base: usize) -> Result<i32,
     }
 }
 
-fn mvd_sum<S: Sample>(
-    pic: &Frame<S>,
-    at: Place,
-    cell: Cell,
-    which: (usize, usize),
-    mb: &Mb,
-) -> i32 {
-    let Place { mx, my } = at;
+/// The sums of the left and upper blocks' motion vector difference sizes
+/// for list `list`, horizontal and vertical: each neighbour is found once
+/// for both.
+fn mvd_sums<S: Sample>(pic: &Frame<S>, at: Place, cell: Cell, list: usize, mb: &Mb) -> [i32; 2] {
     let Cell { bx, by } = cell;
-    let (list, comp) = which;
-    let left = mvd_at(
-        pic,
-        Place { mx, my },
-        (bx as i32 - 1, by as i32),
-        (list, comp),
-        mb,
-    );
-    let above = mvd_at(
-        pic,
-        Place { mx, my },
-        (bx as i32, by as i32 - 1),
-        (list, comp),
-        mb,
-    );
-    left.abs() + above.abs()
+    let left = mvd_at(pic, at, (bx as i32 - 1, by as i32), list, mb);
+    let above = mvd_at(pic, at, (bx as i32, by as i32 - 1), list, mb);
+    [left[0] + above[0], left[1] + above[1]]
 }
 
+/// The sizes of the motion vector difference of list `list` at block
+/// `cell`, which may be in a neighbouring macroblock, horizontal and
+/// vertical; 0 where there is none.
 #[inline(always)]
 fn mvd_at<S: Sample>(
     pic: &Frame<S>,
     at: Place,
     cell: (i32, i32),
-    which: (usize, usize),
+    list: usize,
     current: &Mb,
-) -> i32 {
+) -> [i32; 2] {
     let Place { mx, my } = at;
     let (bx, by) = cell;
-    let (list, comp) = which;
     let Some((mbx, mby, index)) = near_block(pic, (mx, my), current.field_mb, (bx, by, false))
     else {
-        return 0;
+        return [0; 2];
+    };
+    let of = |mb: &Mb| {
+        let [x, y] = if list == 0 {
+            mb.mvd0[index]
+        } else {
+            mb.mvd1[index]
+        };
+        [i32::from(x), i32::from(y)]
     };
     if mbx == mx as i32 && mby == my as i32 {
-        let mv = if list == 0 {
-            current.mvd0[index]
-        } else {
-            current.mvd1[index]
-        };
-        return i32::from(mv[comp]);
+        return of(current);
     }
     neighbor(pic, mbx, mby, current.slice)
         .map(|mb| {
-            let size = i32::from(if list == 0 {
-                mb.mvd0[index][comp]
-            } else {
-                mb.mvd1[index][comp]
-            });
+            let [x, y] = of(mb);
             // Clause 9.3.3.1.1.7: a vertical difference is counted in this
             // macroblock's lines, a field's being twice a frame's.
-            match (comp, current.field_mb, mb.field_mb) {
-                (1, true, false) => size / 2,
-                (1, false, true) => size * 2,
-                _ => size,
-            }
+            let y = match (current.field_mb, mb.field_mb) {
+                (true, false) => y / 2,
+                (false, true) => y * 2,
+                _ => y,
+            };
+            [x, y]
         })
-        .unwrap_or(0)
+        .unwrap_or([0; 2])
 }
 
 #[derive(Clone, Copy)]

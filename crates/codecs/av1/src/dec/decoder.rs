@@ -2029,8 +2029,7 @@ fn take_picture<P: Pixel>(
     sub_y: bool,
     bd: u32,
 ) -> Picture<P> {
-    let fresh_geometry = |w: usize, h: usize| ((w + 127 + 160) & !63, (h + 127 + 160) & !63);
-    let (aw, ah) = fresh_geometry(w, h);
+    let (aw, ah) = Picture::<P>::geometry(w, h);
     if let Some(i) = pool.iter().position(|p| {
         p.planes.len() == num_planes
             && p.sub_x == sub_x

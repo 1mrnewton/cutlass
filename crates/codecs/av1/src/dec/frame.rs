@@ -40,9 +40,9 @@ pub struct Picture<P> {
 }
 
 impl<P: Pixel> Picture<P> {
-    /// Allocates a picture whose planes hold the visible size `w x h` and
-    /// enough room for whole superblocks.
-    pub fn new(w: usize, h: usize, num_planes: usize, sub_x: bool, sub_y: bool, bd: u32) -> Self {
+    /// The luma stride and allocated height of a picture of visible size
+    /// `w x h`.
+    pub fn geometry(w: usize, h: usize) -> (usize, usize) {
         let mut aw = (w + 127 + 160) & !63;
         // A row a multiple of 1024 samples long puts the rows of a block
         // in the same few cache sets (4K luma would be 4096): 64 more
@@ -50,7 +50,13 @@ impl<P: Pixel> Picture<P> {
         if aw.is_multiple_of(1024) {
             aw += 64;
         }
-        let ah = (h + 127 + 160) & !63;
+        (aw, (h + 127 + 160) & !63)
+    }
+
+    /// Allocates a picture whose planes hold the visible size `w x h` and
+    /// enough room for whole superblocks.
+    pub fn new(w: usize, h: usize, num_planes: usize, sub_x: bool, sub_y: bool, bd: u32) -> Self {
+        let (aw, ah) = Self::geometry(w, h);
         let mut planes = Vec::with_capacity(num_planes);
         for p in 0..num_planes {
             let (sx, sy) = if p > 0 {

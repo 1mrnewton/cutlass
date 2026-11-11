@@ -3,7 +3,7 @@
 //! Identifies a JPEG, PNG, WebP, or GIF, splits it into packets, and writes
 //! those packets back. Pixel decoding stays in the codec crates. Huffman,
 //! inflate, and LZW are not implemented here. The support record is
-//! `SUPPORT.md` next to this crate.
+//! `README.md` next to this crate.
 
 #![forbid(unsafe_code)]
 

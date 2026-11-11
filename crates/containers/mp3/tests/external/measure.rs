@@ -1,7 +1,7 @@
 //! Release timing on an in-memory constant-bitrate file.
 //!
 //! Debug builds still check the seek window. Wall-clock budgets apply when
-//! debug assertions are off. Hardware for the recorded run is in SUPPORT.md.
+//! debug assertions are off. Hardware for the recorded run is in README.md.
 
 use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::sync::Arc;

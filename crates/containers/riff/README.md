@@ -1,24 +1,49 @@
 # cutlass-riff
 
-## What this crate is
+`cutlass-riff` reads and writes WAV files, both classic RIFF WAVE and RF64. It demuxes a file into packets of stored sample bytes and muxes packets back into a file. It does not decode or convert the samples. The crate is safe Rust (`#![forbid(unsafe_code)]`). The desktop app opens WAV files with `WavDemux`, and the export crate writes PCM WAV files with `WavMux`.
 
-`cutlass-riff` demuxes and muxes WAV. Classic RIFF WAVE and RF64 are both in scope. The implementation is native safe Rust, and the crate forbids `unsafe`. It finds chunks, the codec id, extradata, and timestamps. The timestamp unit is one tick of the sample rate. Sample bytes stay in the packet.
+## What it supports
 
-FFmpeg 8.1.1 at `/opt/homebrew/bin/ffmpeg` is the benchmark oracle. The crate links `cutlass-codec` and `cutlass-container`.
+A file has one sound track. Timestamps are ticks of the sample rate.
 
-## Specification
+| Kind | Demux | Mux |
+| --- | --- | --- |
+| RIFF WAVE | Opens | `WavMux::new` |
+| RF64 with `ds64` | Sizes of `0xFFFFFFFF` are taken from `ds64` | `WavMux::rf64`, which writes `ds64` for a small file too |
+| Integer PCM (tag `0x0001`), 8, 16, 24, 32, or 64 bits | One sample frame per packet | `PCMWAVEFORMAT`, no `fact` |
+| Float PCM (tag `0x0003`), 32 or 64 bits | One sample frame per packet | Written with a `fact` chunk |
+| `WAVEFORMATEXTENSIBLE` | The channel mask is in the stream extradata at byte 8 | Written when the stream has a channel mask, more than two channels, a valid-bit width that differs from the stored width, or came from an extensible file |
+| A-law (`0x0006`), μ-law (`0x0007`) | One sample frame per packet, codec tag `wav:0006` or `wav:0007` | Refused |
+| MPEG sound (`0x0050`, `0x0055`) | One MPEG frame per packet. `0x0055` is `CodecId::Mp3` | One frame per packet |
+| ADPCM and other block codecs | One `nBlockAlign` block per packet | The packet duration must match the block |
+| AAC (`0x00FF`, `0x1600`, `0x706D`, `0x4143`, `0xA106`), AC-3 (`0x2000`), FLAC (`0xF1AC`), E-AC-3 (by GUID) | Mapped to that codec id | Stored |
+| Any other format tag | Stream kept, codec tag `wav:XXXX` | Refused |
+| Unknown extensible GUID | Stream kept, codec tag `wav-guid:…` | Refused |
+| Unknown chunk up to 64 KiB | Kept (`WavDemux::kept`) | Written before `data` (`WavMux::keep_chunk`) |
+| Unknown chunk above 64 KiB | Skipped and named (`WavDemux::dropped`) | Not written |
+| Odd-length chunk | The pad byte is skipped | The pad byte is written |
 
-- Multimedia Programming Interface and Data Specifications 1.0 (IBM/Microsoft, 1991), for RIFF and WAVE.
-- Microsoft `WAVEFORMATEX` and Multiple Channel Audio Data and WAVE Files, for `WAVEFORMATEXTENSIBLE`.
-- EBU Tech 3306, for RF64. The first chunk inside an RF64 file is `ds64`.
+When the block align is 1 and the tag is not one of the sample or MPEG tags, the whole `data` chunk is one packet if it fits the packet limit.
 
-A declared chunk size that runs past its parent is an error. The longer record of sources and limits is `SUPPORT.md`.
+For PCM the length is the `data` chunk size divided by the block align, also when `fact` disagrees. For compressed sound, `fact` and the `ds64` sample count must agree.
 
-## API
+`PCMWAVEFORMAT` is kept for 16-bit stereo at any sample rate. The sample rate alone does not make the file extensible.
 
-`WavDemux` implements `cutlass_container::Demux`. `WavMux` implements `cutlass_container::Mux`. `probe` and `WavFamily` recognize a 12-byte header. `WavFormat` is the parsed `fmt ` chunk: tag, channel count, sample rate, block align, bits, float, and extensible layout.
+What is refused:
 
-`WavDemux::open` takes a random-access reader and the file length. `open_forward` refuses seek and stops at `data`. `duration_samples` is the sample count for a constant block size. MPEG leaves that count empty until the frames are read. `read_packet` returns one access unit. For PCM, A-law, and μ-law that unit is one interleaved sample frame. For MPEG tags `0x0050` and `0x0055` it is one MPEG frame. For other compressed audio it is one `nBlockAlign` block, or the whole `data` chunk when the block align is 1 and the chunk fits in the packet limit. Packet timestamps use the sample rate as their timescale.
+- `RIFX` and `BW64`: `probe` and `open` report `UnsupportedBrand`.
+- A chunk size that runs past its parent or the file: `OpenError::HostileSize`. The size is not clipped to the bytes that are present.
+- `ds64` values that disagree with the `data` chunk: `OpenError::Source`.
+- A truncated header, or `LIST` nesting deeper than 8: an open error and no stream list.
+- In the muxer: A-law, μ-law, and unknown codecs; a second track; a packet that is not a whole number of frames or whose duration does not match its bytes; a classic RIFF file above 4 GiB (`MuxError::HostileSize`); a track duration that does not equal the sum of the packets (`MuxError::DurationMismatch`), in which case nothing is written.
+
+## Using it
+
+- `probe` and `WavFamily` decide from the first 12 bytes.
+- `WavDemux::open(reader, length)` takes a `Read + Seek` reader and the file length. `open_forward` takes a reader it will not seek; it stops at `data`, and `seek` returns `SeekError::ForwardOnly`.
+- `WavDemux` implements `cutlass_container::Demux`. `format()` returns the parsed `fmt ` chunk as a `WavFormat`. `duration_samples()` is the sample count, or `None` for MPEG sound until the frames are read.
+- `WavMux` implements `cutlass_container::Mux`.
+- `FEATURES` lists what the build reads and writes as data.
 
 ```rust
 use std::fs::File;
@@ -37,8 +62,6 @@ while let Some(packet) = demux.read_packet()? {
     let _bytes = packet.bytes();
 }
 ```
-
-`WavMux::new` writes RIFF WAVE. `WavMux::rf64` writes RF64 and `ds64` even when the file would fit in a 32-bit RIFF size. `fact` is written when the stored format tag is not `0x0001`. Integer PCM stays `PCMWAVEFORMAT` unless the stream carries a channel mask, more than two channels, a valid-bit width that differs from the stored width, or the source was already extensible. Finish checks the track duration against the packets, then writes the file.
 
 ```rust
 use std::io::Cursor;
@@ -68,108 +91,76 @@ mux.finish(&[TrackDuration {
 let bytes = mux.into_inner().into_inner();
 ```
 
-## Support
+A PCM packet handed to the muxer may hold any whole number of sample frames.
 
-One audio track. PCM duration is the `data` chunk length divided by the block align.
+Seek on PCM and other constant-block sound is arithmetic: `data` start plus index times block size. It reads no payload. Seek on MPEG sound walks the frame headers from the start of `data`.
 
-| Kind | Demux | Mux |
-| --- | --- | --- |
-| RIFF WAVE | Opens | Writes |
-| RF64 and `ds64` | `0xFFFFFFFF` sizes come from `ds64` | `WavMux::rf64` writes `ds64` for a small file too |
-| PCM integer (`0x0001`) | One sample frame per packet | `PCMWAVEFORMAT`, no `fact` |
-| IEEE float (`0x0003`) | One sample frame per packet | Writes `fact` |
-| `WAVEFORMATEXTENSIBLE` | Channel mask at extradata offset 8 | Written for a mask, more than two channels, a valid-bit width, or a source that was already extensible |
-| A-law (`0x0006`) and μ-law (`0x0007`) | One sample frame per packet | Refused |
-| MPEG in WAV (`0x0050`, `0x0055`) | One MPEG frame per packet. `0x0055` is `CodecId::Mp3` | One frame per packet |
-| ADPCM and other block codecs | One block per packet. IMA ADPCM is `0x0011` | Packet duration must match the block |
-| AAC, AC-3, and FLAC tags | Mapped to those codec ids | Stored when the packet framing matches |
-| Unknown codec tag | Stream kept, tag `wav:XXXX` | Refused |
-| Unknown chunk up to 64 KiB | Kept | Written back before `data` |
-| Unknown chunk above 64 KiB | Named on `DroppedChunk` | Left out |
-| `fact` | PCM uses the data size when `fact` disagrees | Written when the stored tag is not `0x0001` |
-| Odd chunk pad | Pad is outside the payload | Pad byte written outside the size field |
-| RIFX, BW64 | Family matches, `open` returns `UnsupportedBrand` | Left unwritten |
+`cargo run --release -p cutlass-riff --example demux` writes eight silent stereo frames with `WavMux`, reads them with `WavDemux`, and prints the sample rate, channels, packet count, and sample count.
 
-A 96 kHz 16-bit stereo stream stays `PCMWAVEFORMAT`. `WAVEFORMATEXTENSIBLE` is written for a channel mask, a channel count above two, a valid-bit width, or a source that was already extensible.
+## How it is tested
 
-## Accuracy
-
-One comparison, run before the timed reads. ffmpeg wrote a 16-bit stereo WAV. This crate opened it. ffprobe and an ffmpeg PCM read are the oracles. ffprobe groups PCM into 11 packets. This crate returns one sample frame per packet, so the packet counts differ. The sample count, the timestamp span, and the concatenated payload are what the check requires.
-
-Copied from that run:
-
-```text
-accuracy codec cutlass=pcm ffprobe=pcm_s16le
-accuracy sample_rate cutlass=44100 ffprobe=44100
-accuracy channels cutlass=2 ffprobe=2
-accuracy packets cutlass=44100 ffprobe=11
-accuracy samples=44100 ffprobe_duration_ts=44100 ffprobe_duration_sum=44100
-accuracy first_pts cutlass=0 ffprobe=0 last_pts cutlass=44099 ffprobe=40960 ffprobe_start_pts=N/A
-accuracy span cutlass=0+44100 ffprobe=0+44100
-accuracy payload_bytes cutlass=176400 ffmpeg=176400
-mux codec=pcm_s16le sample_rate=44100 channels=2 duration_ts=44100 packets=11 first_pts=0
+```sh
+cargo test -p cutlass-riff
 ```
 
-Sample rate is 44100 on both sides. Channel count is 2. This crate read 44100 packets and 44100 samples. ffprobe `duration_ts` is 44100, and the sum of ffprobe packet durations is 44100. The first presentation timestamp is 0 on both sides. The stream `start_pts` field is `N/A`. The last packet timestamp is 44099 here and 40960 in ffprobe, because ffprobe's last packet holds the remaining frames. Both spans are `0+44100`. The payload is 176400 bytes here and 176400 bytes from ffmpeg's `s16le` read.
+- Unit tests in `src/behavior.rs` build files in memory. They cover each row of the table above, RF64 and `ds64` disagreement, `fact` handling, kept and dropped chunks, odd padding, forward readers, `data` before `fmt `, seek without reading payload, cancel, hostile sizes, and mux round trips.
+- `tests/external/oracle.rs` asks FFmpeg for a 16-bit PCM file and a float file, and writes a WAV and an RF64 file with `WavMux`. `ffprobe` must report the same sample rate, channel count, codec name, and length. Python's `wave` module must read the same frame bytes from the FFmpeg file and from the muxed file. The test prints `skipped` and passes when `ffmpeg` or `ffprobe` is not on the `PATH`. `afinfo` and GStreamer's `wavparse` are also asked when they are installed.
+- `fuzz_seeds_do_not_panic` runs 64 fixed seeds on every test run. `fuzz_campaign` is `#[ignore]`d; it runs for `WAV_FUZZ_SECS` seconds (default 1800) with `cargo test -p cutlass-riff -- --ignored`.
+- `pcm_open_and_seek_stay_in_budget` checks that a PCM seek reads no payload. In a release build it also fails if open takes 50 ms or seek takes 20 ms.
+- Two tests also look for real WAV files in a folder kept outside the repository. They check nothing extra when the folder is absent.
+- `cargo bench -p cutlass-riff` compares sample count, time span, and payload bytes of one FFmpeg-written PCM file before it times anything.
 
-The same PCM, written by `WavMux` and read by ffprobe, is `pcm_s16le`, 44100 Hz, 2 channels, `duration_ts` 44100, 11 ffprobe packets, first timestamp 0.
+FFmpeg groups PCM into larger packets than this crate, so the tests compare sample counts and the joined payload, not packet counts.
 
-## Performance
+## Speed against FFmpeg
 
-One sample. Median of 3 timed passes after 1 warmup. The ffmpeg read starts a new process on every pass, so that time includes process startup. The cutlass read stays in this process: open the file and pull every packet.
+Measured on 10 November 2026 at commit `ed0743d2`, on an Apple M5 Pro (18 cores, 48 GB) running macOS 27.0.1, against FFmpeg 8.1.1. Built with `cargo build --release` and rustc 1.99.1.
 
-Command: `cargo bench -p cutlass-riff`
+**Read every packet, wav.** Input: one 53 MB file. Nothing is decoded.
 
-`sysctl -n machdep.cpu.brand_string`: `Apple M5 Pro`
+|  | Cutlass | FFmpeg (libavformat) |
+| --- | ---: | ---: |
+| Wall time | 4.23 s | 0.03 s |
+| CPU time | 4.21 s | 0.03 s |
+| Peak memory | 2.6 MB | 13 MB |
+| Packets returned | 13,230,000 | 3,230 |
 
-Date: `Thu Oct 29 21:08:47 GMT 2026`
+Cutlass is **141.0× slower** than FFmpeg here.
 
-ffmpeg version: `ffmpeg version 8.1.1 Copyright (c) 2000-2026 the FFmpeg developers`
+Writing files was not measured.
 
-Bench stdout:
+How it was measured: both sides get the same input from disk, do all of the work, and throw the result away. Each side is a whole process timed with `/usr/bin/time -l`, start-up included, run five times in turn; the tables show the median run. FFmpeg is given as many threads as the Rust code used. The Rust side is [`tools/media-bench`](../../../tools/media-bench), which registers only the Rust codecs. For decoding and packet reading the FFmpeg side is [`scripts/ffmpeg_decode.c`](../../../scripts/ffmpeg_decode.c), which calls libavformat and libavcodec directly; for encoding it is the `ffmpeg` command. The pictures come from a 4K street scene scaled to 1920×1080, and the sound from a music recording.
 
-```text
-cpu: Apple M5 Pro
-date: Thu Oct 29 21:08:47 GMT 2026
-command: cargo bench -p cutlass-riff
-ffmpeg: /opt/homebrew/bin/ffmpeg
-ffprobe: /opt/homebrew/bin/ffprobe
-ffmpeg version 8.1.1 Copyright (c) 2000-2026 the FFmpeg developers
-sample: one 16-bit stereo WAV written by ffmpeg
-reps: 3 after 1 warmup, median of the timed passes
-ffmpeg time includes process startup
-accuracy codec cutlass=pcm ffprobe=pcm_s16le
-accuracy sample_rate cutlass=44100 ffprobe=44100
-accuracy channels cutlass=2 ffprobe=2
-accuracy packets cutlass=44100 ffprobe=11
-accuracy samples=44100 ffprobe_duration_ts=44100 ffprobe_duration_sum=44100
-accuracy first_pts cutlass=0 ffprobe=0 last_pts cutlass=44099 ffprobe=40960 ffprobe_start_pts=N/A
-accuracy span cutlass=0+44100 ffprobe=0+44100
-accuracy payload_bytes cutlass=176400 ffmpeg=176400
-mux codec=pcm_s16le sample_rate=44100 channels=2 duration_ts=44100 packets=11 first_pts=0
+To run it again: `cargo build --release -p media-bench`, then `python3 scripts/bench_media.py --video <clip> --audio <song> --work <folder>`.
 
-side     op             median          min          max        bytes
-cutlass  read         13568 µs     13502 µs     13617 µs       176400
-ffmpeg   read         26613 µs     26355 µs     26740 µs       176400
-```
+## Limits and gaps
 
-The cutlass median is 13568 µs. The ffmpeg median is 26613 µs.
+| Limit | Value |
+| --- | --- |
+| Tracks | 1 |
+| `LIST` and `RIFF` nesting | 8 |
+| Chunk headers in one file | 4,096 |
+| Unknown chunk kept | 64 KiB |
+| `ds64` table rows | 64 |
+| MPEG resync window | 64 KiB |
+| Header bytes | 8 MiB |
+| One packet | 16 MiB |
+| Extradata | 1 MiB |
 
-## Example
+Gaps:
 
-`examples/demux.rs` writes eight silent 16-bit stereo frames at 44100 Hz with `WavMux`, opens that buffer with `WavDemux`, and prints the stream.
+- PCM, A-law, and μ-law are returned one sample frame per packet. Every packet is its own read call and its own allocation, so one second of 44.1 kHz sound is 44,100 reads. `WavDemux` does not buffer, and the desktop app hands it an unbuffered `File`. Reading a long WAV file is slow because of this. No test times a full read of a long file; the budget test times only open and seek.
+- `WavMux` keeps every packet in memory and builds the whole file in memory at `finish`. Nothing reaches the writer before that.
+- `WavMux::new` does not switch to RF64 when the file passes 4 GiB. It fails at `finish`. The caller has to pick `WavMux::rf64` up front.
+- `RIFX` (big-endian) and `BW64` files do not open.
+- A-law and μ-law streams are labeled with an unknown codec tag, not a named codec id.
+- A forward reader does not see chunks after `data`. A non-`data` chunk larger than 64 KiB on a forward reader is an error.
+- The language on `NewStream` is accepted and not written.
+- `wavl` and SMV files are not handled.
+- Of the block codecs, only IMA ADPCM has a test.
 
-```text
-cargo run --release -p cutlass-riff --example demux
-```
+## Specifications
 
-```text
-sample_rate 44100
-channels 2
-packets 8
-samples 8
-```
-
-## Gaps
-
-`open` returns `UnsupportedBrand` for RIFX and BW64, and the muxer leaves both unwritten. The muxer refuses A-law, μ-law, and an unknown codec tag. A language value on `NewStream` is accepted and left out of the file. A forward reader stops at `data`, and seek on that reader is `SeekError::ForwardOnly`. AIFF, wavl, and SMV are outside this crate. Payload bytes are returned as stored. `crates/engine` and `crates/export` leave this family unregistered, so playback and export were not run. The timed read is the one generated PCM file above.
+- Multimedia Programming Interface and Data Specifications 1.0 (IBM and Microsoft, 1991), for RIFF and WAVE.
+- Microsoft `WAVEFORMATEX` and `WAVEFORMATEXTENSIBLE`.
+- EBU Tech 3306, for RF64 and `ds64`.

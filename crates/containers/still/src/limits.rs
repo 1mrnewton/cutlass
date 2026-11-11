@@ -51,7 +51,7 @@ pub const WEBP_DEFAULT_DELAY_MS: i64 = 100;
 
 /// Cases this crate names and does not implement.
 ///
-/// Removing a line is a matrix change. The support record in `SUPPORT.md`
+/// Removing a line is a matrix change. The support record in `README.md`
 /// describes each one.
 pub const UNSUPPORTED: &[&str] = &[
     "apng frame sequence",

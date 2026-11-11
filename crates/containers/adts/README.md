@@ -1,58 +1,47 @@
 # cutlass-adts
 
-## What this crate is
+`cutlass-adts` frames one AAC-LC stream as raw ADTS, the layout of an `.aac` file. It demuxes a file into raw access units with the ADTS header removed, and muxes access units back into ADTS frames. It does not decode AAC. The crate is safe Rust (`#![forbid(unsafe_code)]`). The same crate also holds a LOAS/LATM reader and writer and a small one-track M4A reader and writer.
 
-`cutlass-adts` frames one AAC-LC stream as raw ADTS. It is safe Rust: the crate sets `#![forbid(unsafe_code)]`, and the workspace lint forbids `unsafe` as well. A read returns the raw access unit with the ADTS header removed. A write puts that access unit back into an ADTS frame.
+The desktop app does not open ADTS files. The probe crate uses `AdtsFile` only to recognize a raw AAC file and refuse it with a message, because the stream cannot seek.
 
-ADTS stores no per-frame timestamp. Each raw block is stamped on the sample-rate clock: presentation time starts at 0, and each block lasts 1024 samples.
+## What it supports
 
-The same package also exposes LOAS/LATM (`LatmFile`, `LatmDemuxer`, `LatmMuxer`) and a one-track M4A reader and writer (`Mp4Demuxer`, `Mp4Muxer`). The rest of this note is the ADTS path.
+ADTS, reading:
 
-## Specification
+| Field | Accepted |
+| --- | --- |
+| Header kind | MPEG-4 (ID 0) and MPEG-2 (ID 1) |
+| Profile | AAC-LC only (2-bit profile value 1) |
+| Sample rate | 96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000 Hz; 7350 Hz in an MPEG-4 header only |
+| Channel configuration | 1 (mono), 2 (stereo), 3, 4, 5, 6 (5.1), 7 (wide 7.1) |
+| Protection | No CRC (7-byte header), or a 16-bit CRC with one raw block |
+| Raw blocks per frame | One. Two to four when the header carries each block's position and the header CRC matches |
+| Frame length | Up to 8191 bytes, header included |
 
-ISO/IEC 13818-7:2006 clause 6.2 defines the ADTS frame: syncword, fixed header, variable header, then the raw block, with an optional CRC. The CRC is the check in ISO/IEC 11172-3 subclause 2.4.3.1. MPEG-4 ADTS uses the same frame with the ID bit clear. This crate accepts 7350 Hz only in that MPEG-4 header.
+ADTS stores no timestamps. Each raw block gets a presentation time on the sample-rate clock: the first is 0 and each lasts 1024 samples. When a frame has a CRC, the CRC (and for a single block, the 7 header bytes) is kept on the packet as `SideData::Protection`.
 
-The parser reads these fields:
+Bytes that are not a frame header are skipped until a header is found, up to 1 MiB.
 
-- syncword `0xFFF`
-- ID: 1 means MPEG-2, 0 means MPEG-4
-- layer, which must be 0
-- `protection_absent`
-- profile, accepted only when the 2-bit value is 1 (AAC-LC, audio object type 2)
-- `sampling_frequency_index`
-- `channel_configuration`
-- `aac_frame_length`, counting the header, at most 8191 bytes
-- `number_of_raw_data_blocks_in_frame` (the frame holds that value plus one raw block)
+ADTS, writing: one AAC stream, profile 1, a 7-byte header, buffer fullness `0x7FF`, one raw block per `write_packet`. A packet that carries `SideData::Protection` is written with its CRC. `write_blocks` writes two to four raw blocks in one frame with positions and a header CRC. `set_mpeg2(true)` sets the MPEG-2 ID bit.
 
-On read, the private bit, original/copy, home, copyright bits, and buffer fullness are ignored. The muxer writes those bits as 0, and writes buffer fullness `0x7FF` (variable rate).
+What is refused (all as `cutlass_codec::access::CodecError`):
 
-| index | Hz | header |
-| --- | --- | --- |
-| 0 | 96000 | MPEG-2 and MPEG-4 |
-| 1 | 88200 | MPEG-2 and MPEG-4 |
-| 2 | 64000 | MPEG-2 and MPEG-4 |
-| 3 | 48000 | MPEG-2 and MPEG-4 |
-| 4 | 44100 | MPEG-2 and MPEG-4 |
-| 5 | 32000 | MPEG-2 and MPEG-4 |
-| 6 | 24000 | MPEG-2 and MPEG-4 |
-| 7 | 22050 | MPEG-2 and MPEG-4 |
-| 8 | 16000 | MPEG-2 and MPEG-4 |
-| 9 | 12000 | MPEG-2 and MPEG-4 |
-| 10 | 11025 | MPEG-2 and MPEG-4 |
-| 11 | 8000 | MPEG-2 and MPEG-4 |
-| 12 | 7350 | MPEG-4 only |
+- A profile other than AAC-LC: `Unsupported` (`main`, `ssr`, or `ltp`).
+- Channel configuration 0: `Unsupported { what: "program config" }`.
+- Sample-rate index 13, 14, or 15: `Malformed`. 7350 Hz in an MPEG-2 header: `Unsupported`.
+- Several raw blocks without a CRC, which means without positions: `Unsupported`.
+- A header CRC that does not match on a multi-block frame: `Malformed { what: "crc" }`.
+- A change of sample rate, channel layout, or MPEG ID inside the stream: `Unsupported { what: "configuration change" }`.
+- A partial frame at the end: `Truncated`.
+- In the muxer: a second stream, a codec other than AAC, an empty packet, a frame over 8191 bytes, a sample rate outside the table, or a layout that matches no channel configuration from 1 to 7.
 
-Indexes 13, 14, and 15 are rejected. Index 15 is the explicit-rate escape.
+LOAS/LATM (`LatmDemuxer`, `LatmMuxer`, `LatmFile`): one program, one layer, `audioMuxVersion` 0, one subframe, `frameLengthType` 0, no other-data, no LATM CRC. The `AudioSpecificConfig` must name AAC-LC, alone or under an SBR or PS object type. Anything else is `Unsupported`. The muxer needs the `AudioSpecificConfig` in `CodecParams::extra`.
 
-`protection_absent = 1` means a 7-byte header and one or more raw blocks with no CRC. More than one raw block in that form is rejected, because the byte positions are missing.
+M4A (`Mp4Demuxer`, `Mp4Muxer`): one AAC track in an `M4A ` file with an edit list for encoder delay and trailing padding. Video tracks, fragmented files, and a second track are refused. The whole file is held in memory. The app does not use this pair; it reads and writes M4A with `cutlass-isobmff`.
 
-`protection_absent = 0` and one raw block: a 16-bit CRC follows the 7-byte header. The CRC and the header are stored on the packet as `SideData::Protection`. That CRC is not checked.
+## Using it
 
-`protection_absent = 0` and several raw blocks: the header is followed by a 16-bit position for each block after the first, then the header CRC (`adts_header_error_check` over the fixed header, the variable header, and those positions). Each raw block is followed by its own 16-bit CRC. The packet payload is the block with that CRC removed. The header CRC is checked. The per-block CRC is stored and left unchecked.
-
-## API
-
-`AdtsFile<R: Read>` is the shared demuxer. It implements `cutlass_container::Demux`.
+`AdtsFile<R: Read>` owns a reader and implements `cutlass_container::Demux`. `LatmFile` is the same for LOAS. `seek` always returns `ReadError::Seek(SeekError::ForwardOnly)`.
 
 ```rust
 use cutlass_adts::AdtsFile;
@@ -68,22 +57,7 @@ while let Some(packet) = file.read_packet()? {
 }
 ```
 
-`family` is `ContainerId::Adts`. The stream timescale is the sample rate. `gaps` is empty. `seek` returns `ReadError::Seek(SeekError::ForwardOnly)`. `cancel` makes the next read return `ReadError::Cancelled`. Open reads until the first frame has produced a stream. A trailing partial frame is `CodecError::Truncated`, surfaced as an open or read error.
-
-`AdtsDemuxer` is the byte feeder `AdtsFile` uses. It implements the crate `Demuxer` trait (`id`, `streams`, `next_packet`). `push_bytes` and `finish_bytes` are inherent. `next_packet` returns `cutlass_codec::access::Packet`: `data` is the raw access unit, `pts` and `duration` are sample-rate ticks, and `timescale` is the sample rate.
-
-```rust
-use cutlass_adts::{AdtsDemuxer, Demuxer};
-
-let mut demux = AdtsDemuxer::new();
-demux.push_bytes(bytes)?;
-demux.finish_bytes()?;
-while let Some(packet) = demux.next_packet()? {
-    let _ = (&packet.data, packet.pts, packet.duration, packet.timescale);
-}
-```
-
-`AdtsMuxer` implements the crate `Muxer` trait (`id`, `add_stream`, `write_packet`, `finish`).
+`AdtsDemuxer` is the byte feeder underneath: `push_bytes`, `finish_bytes`, then `next_packet` from the crate's own `Demuxer` trait. `AdtsMuxer` implements the crate's `Muxer` trait and returns the finished bytes.
 
 ```rust
 use cutlass_adts::{AdtsMuxer, Muxer};
@@ -100,209 +74,71 @@ mux.write_packet(&Packet::audio(unit, 0, 1024, 48_000))?;
 let adts = mux.finish()?;
 ```
 
-`set_mpeg2(true)` sets the MPEG-2 ID bit before `add_stream`. `write_blocks` writes two, three, or four raw blocks in one frame; each packet carries `SideData::Protection` for that block. `bytes` returns the ADTS written so far. A second `finish` is `CodecError::InvalidApi`. There is no `cutlass_container::Mux` implementation.
+`cargo run --release -p cutlass-adts --example demux` writes two access units with `AdtsMuxer`, reads them with `AdtsFile`, and prints the frame count and the first timestamp.
 
-`StreamInfo` is the stream index, `CodecParams`, and the timescale. Also public, and outside this ADTS API: `LatmDemuxer`, `LatmMuxer`, `LatmFile`, `Mp4Demuxer`, `Mp4Muxer`.
+## How it is tested
 
-## Support
-
-Demux accepts one AAC-LC ADTS stream.
-
-- MPEG-4 (ID 0) and MPEG-2 (ID 1).
-- The sample rates in the table above.
-- Channel configuration 1 mono, 2 stereo, 3 front center/left/right, 4 that set plus back center, 5 front plus back left/right, 6 the 5.1 layout, 7 the wide 7.1 layout.
-- One raw block per frame, with or without the 16-bit CRC.
-- Several raw blocks when the header carries their positions and the header CRC matches.
-- A sync search that skips non-header bytes, up to 1 MiB.
-- At most 1 MiB buffered. `AdtsFile` pulls the reader in 4096-byte reads.
-
-A configuration change (sample rate, channel layout, or MPEG ID) is rejected. Profile 0, 2, and 3 are rejected.
-
-Mux writes one AAC stream, profile 1, a 7-byte header, buffer fullness `0x7FF`, and one raw block per `write_packet`. `write_blocks` writes up to four blocks. A second stream, a codec other than AAC, an empty packet, a frame longer than 8191 bytes, or a layout that maps to no channel configuration 1 through 7 is an error.
-
-## Accuracy
-
-ffprobe 8.1.1 read one ADTS file that ffmpeg wrote in the bench: lavfi `sine=frequency=440:sample_rate=48000:duration=0.5`, AAC at 64 kb/s, format `adts`. These figures are the `frame` rows from that run.
-
-The file is 4506 bytes. Both sides report 25 frames. The stream is 48000 Hz, 1 channel. ffprobe's time base is 1/28224000.
-
-ffprobe `size` is the on-disk ADTS frame. The demuxed payload is that frame minus the header. On every frame the header is 7 bytes and `payload + header = ffprobe_size`. Presentation time matches as ticks of the two clocks: `pts / 48000 = ffprobe_pts / 28224000`. Duration is 1024 samples on every frame, which ffprobe reports as 602112 ticks.
-
-```
-index pts duration payload header ffprobe_pts ffprobe_duration ffprobe_size
-frame 0 0 1024 190 7 0 602112 197
-frame 1 1024 1024 235 7 602112 602112 242
-frame 2 2048 1024 158 7 1204224 602112 165
-frame 3 3072 1024 213 7 1806336 602112 220
-frame 4 4096 1024 197 7 2408448 602112 204
-frame 5 5120 1024 148 7 3010560 602112 155
-frame 6 6144 1024 185 7 3612672 602112 192
-frame 7 7168 1024 161 7 4214784 602112 168
-frame 8 8192 1024 160 7 4816896 602112 167
-frame 9 9216 1024 172 7 5419008 602112 179
-frame 10 10240 1024 200 7 6021120 602112 207
-frame 11 11264 1024 191 7 6623232 602112 198
-frame 12 12288 1024 177 7 7225344 602112 184
-frame 13 13312 1024 137 7 7827456 602112 144
-frame 14 14336 1024 151 7 8429568 602112 158
-frame 15 15360 1024 154 7 9031680 602112 161
-frame 16 16384 1024 156 7 9633792 602112 163
-frame 17 17408 1024 158 7 10235904 602112 165
-frame 18 18432 1024 201 7 10838016 602112 208
-frame 19 19456 1024 216 7 11440128 602112 223
-frame 20 20480 1024 147 7 12042240 602112 154
-frame 21 21504 1024 140 7 12644352 602112 147
-frame 22 22528 1024 162 7 13246464 602112 169
-frame 23 23552 1024 174 7 13848576 602112 181
-frame 24 24576 1024 148 7 14450688 602112 155
+```sh
+cargo test -p cutlass-adts
 ```
 
-`AdtsMuxer` wrote those 25 access units back out. ffprobe read that file as 4506 bytes and the same 25 rows (`mux_bytes 4506`, `mux_frames 25`). Each `mux` row in the bench stdout is the same numbers as the `frame` row of the same index.
+- Round trips of raw access units through each of the three framings, including a CRC-protected block, two raw blocks with positions, and a priming edit in M4A.
+- Feeding one byte at a time gives the same packets as feeding the whole buffer.
+- Refusals: a false sync before the frame is skipped; a truncated tail, unpositioned blocks, 7350 Hz under MPEG-2, a second LATM program, a video track, and an ADTS frame handed to `Mp4Muxer` as a sample are errors.
+- Random bytes into each of the three demuxers must not panic.
+- Three FFmpeg tests, one per framing. FFmpeg encodes a short AAC file, the crate demuxes and muxes it again, and FFmpeg must decode both files to the same PCM. When `ffmpeg` is not found they print `skipped` and pass, unless `AAC_REQUIRE_ORACLES` is set.
+- `thirty_minute_adts_campaign` feeds random bytes for 30 minutes. It is `#[ignore]`d and runs only with `cargo test -p cutlass-adts -- --ignored`.
+- `cargo bench -p cutlass-adts` checks frame count, frame sizes, and presentation times of one FFmpeg-written ADTS file against `ffprobe` before it times anything, then does the same for the file `AdtsMuxer` writes back.
 
-## Performance
+## Speed against FFmpeg
 
-One sample: the 4506-byte file above. The cutlass figure is a full `AdtsFile` read in this process. The ffprobe figure is a full packet dump in a new process, so it includes process startup. The value is the median of 3 runs after 1 warmup.
+Measured on 10 November 2026 at commit `ed0743d2`, on an Apple M5 Pro (18 cores, 48 GB) running macOS 27.0.1, against FFmpeg 8.1.1. Built with `cargo build --release` and rustc 1.99.1.
 
-Command: `cargo bench -p cutlass-adts`
+**Read every packet, adts.** Input: one 29 MB file. Nothing is decoded.
 
-Date: Thu Oct 29 21:10:40 GMT 2026
+|  | Cutlass | FFmpeg (libavformat) |
+| --- | ---: | ---: |
+| Wall time | 0.01 s | 0.04 s |
+| CPU time | 0.00 s | 0.03 s |
+| Peak memory | 3.0 MB | 14 MB |
+| Packets returned | 77,875 | 77,875 |
 
-`sysctl -n machdep.cpu.brand_string`: Apple M5 Pro
+Cutlass is **4.0× faster** than FFmpeg here.
 
-ffmpeg version: `ffmpeg version 8.1.1 Copyright (c) 2000-2026 the FFmpeg developers`
+Writing files was not measured. LOAS/LATM was not measured.
 
-From that run, `cutlass_read_us median 15` and `ffprobe_read_us median 18814`. The ffprobe time includes process startup.
+How it was measured: both sides get the same input from disk, do all of the work, and throw the result away. Each side is a whole process timed with `/usr/bin/time -l`, start-up included, run five times in turn; the tables show the median run. FFmpeg is given as many threads as the Rust code used. The Rust side is [`tools/media-bench`](../../../tools/media-bench), which registers only the Rust codecs. For decoding and packet reading the FFmpeg side is [`scripts/ffmpeg_decode.c`](../../../scripts/ffmpeg_decode.c), which calls libavformat and libavcodec directly; for encoding it is the `ffmpeg` command. The pictures come from a 4K street scene scaled to 1920×1080, and the sound from a music recording.
 
-Stdout of `cargo bench -p cutlass-adts`:
+To run it again: `cargo build --release -p media-bench`, then `python3 scripts/bench_media.py --video <clip> --audio <song> --work <folder>`.
 
-```
-running 22 tests
-test latm::tests::a_second_program_is_rejected ... ignored
-test latm::tests::ffmpeg_decodes_a_latm_remux_of_its_own_aac ... ignored
-test latm::tests::one_program_round_trips_and_reuses_the_config ... ignored
-test latm::tests::random_bytes_fail_closed ... ignored
-test m4a::tests::a_video_track_is_rejected ... ignored
-test m4a::tests::an_adts_sample_is_rejected ... ignored
-test m4a::tests::ffmpeg_m4a_round_trips_through_our_boxes ... ignored
-test m4a::tests::priming_edit_round_trips_raw_samples ... ignored
-test m4a::tests::random_bytes_fail_closed ... ignored
-test tests::a_false_sync_before_the_frame_is_skipped ... ignored
-test tests::a_protected_block_keeps_its_crc_and_payload ... ignored
-test tests::a_raw_unit_round_trips_through_adts ... ignored
-test tests::a_truncated_tail_is_not_a_packet ... ignored
-test tests::ffmpeg_adts_survives_our_demux_and_mux ... ignored
-test tests::mpeg2_rejects_the_7350_hz_index ... ignored
-test tests::one_byte_at_a_time_matches_the_whole_buffer ... ignored
-test tests::random_bytes_fail_closed ... ignored
-test tests::seven_point_one_does_not_fit_the_header ... ignored
-test tests::the_shared_demux_returns_the_same_access_unit ... ignored
-test tests::thirty_minute_adts_campaign ... ignored
-test tests::two_raw_blocks_round_trip_when_positions_are_present ... ignored
-test tests::unpositioned_multiple_blocks_are_rejected ... ignored
+## Limits and gaps
 
-test result: ok. 0 passed; 0 failed; 22 ignored; 0 measured; 0 filtered out; finished in 0.00s
+Limits:
 
-sample lavfi sine=frequency=440:sample_rate=48000:duration=0.5 codec aac bitrate 64k format adts
-file_bytes 4506
-frames 25
-sample_rate 48000 channels 1 time_base 1/28224000
-size_check payload_plus_header_equals_ffprobe_size
-pts_check presentation_ticks_match
-index pts duration payload header ffprobe_pts ffprobe_duration ffprobe_size
-frame 0 0 1024 190 7 0 602112 197
-frame 1 1024 1024 235 7 602112 602112 242
-frame 2 2048 1024 158 7 1204224 602112 165
-frame 3 3072 1024 213 7 1806336 602112 220
-frame 4 4096 1024 197 7 2408448 602112 204
-frame 5 5120 1024 148 7 3010560 602112 155
-frame 6 6144 1024 185 7 3612672 602112 192
-frame 7 7168 1024 161 7 4214784 602112 168
-frame 8 8192 1024 160 7 4816896 602112 167
-frame 9 9216 1024 172 7 5419008 602112 179
-frame 10 10240 1024 200 7 6021120 602112 207
-frame 11 11264 1024 191 7 6623232 602112 198
-frame 12 12288 1024 177 7 7225344 602112 184
-frame 13 13312 1024 137 7 7827456 602112 144
-frame 14 14336 1024 151 7 8429568 602112 158
-frame 15 15360 1024 154 7 9031680 602112 161
-frame 16 16384 1024 156 7 9633792 602112 163
-frame 17 17408 1024 158 7 10235904 602112 165
-frame 18 18432 1024 201 7 10838016 602112 208
-frame 19 19456 1024 216 7 11440128 602112 223
-frame 20 20480 1024 147 7 12042240 602112 154
-frame 21 21504 1024 140 7 12644352 602112 147
-frame 22 22528 1024 162 7 13246464 602112 169
-frame 23 23552 1024 174 7 13848576 602112 181
-frame 24 24576 1024 148 7 14450688 602112 155
-mux_bytes 4506
-mux_frames 25
-mux_size_check payload_plus_header_equals_ffprobe_size
-mux_pts_check presentation_ticks_match
-mux 0 0 1024 190 7 0 602112 197
-mux 1 1024 1024 235 7 602112 602112 242
-mux 2 2048 1024 158 7 1204224 602112 165
-mux 3 3072 1024 213 7 1806336 602112 220
-mux 4 4096 1024 197 7 2408448 602112 204
-mux 5 5120 1024 148 7 3010560 602112 155
-mux 6 6144 1024 185 7 3612672 602112 192
-mux 7 7168 1024 161 7 4214784 602112 168
-mux 8 8192 1024 160 7 4816896 602112 167
-mux 9 9216 1024 172 7 5419008 602112 179
-mux 10 10240 1024 200 7 6021120 602112 207
-mux 11 11264 1024 191 7 6623232 602112 198
-mux 12 12288 1024 177 7 7225344 602112 184
-mux 13 13312 1024 137 7 7827456 602112 144
-mux 14 14336 1024 151 7 8429568 602112 158
-mux 15 15360 1024 154 7 9031680 602112 161
-mux 16 16384 1024 156 7 9633792 602112 163
-mux 17 17408 1024 158 7 10235904 602112 165
-mux 18 18432 1024 201 7 10838016 602112 208
-mux 19 19456 1024 216 7 11440128 602112 223
-mux 20 20480 1024 147 7 12042240 602112 154
-mux 21 21504 1024 140 7 12644352 602112 147
-mux 22 22528 1024 162 7 13246464 602112 169
-mux 23 23552 1024 174 7 13848576 602112 181
-mux 24 24576 1024 148 7 14450688 602112 155
-timing median of 3 after 1 warmup
-cutlass_read_us median 15 min 14 max 15 samples 15 14 15
-ffprobe_read_us median 18814 min 18657 max 19013 samples 19013 18814 18657
-ffprobe time includes process startup
-```
+| Limit | Value |
+| --- | --- |
+| ADTS frame | 8191 bytes |
+| Bytes buffered by `AdtsDemuxer` or `LatmDemuxer` | 1 MiB |
+| Bytes skipped while looking for a header | 1 MiB |
+| File held by `Mp4Demuxer` | 32 MiB |
+| Samples in an `Mp4Demuxer` file | 100,000 |
 
-Cargo also printed, on the same run:
+`AdtsFile` reads its input 4096 bytes at a time. `AdtsMuxer`, `LatmMuxer`, and `Mp4Muxer` build the whole output in memory and return it from `finish`.
 
-```
-    Finished `bench` profile [optimized] target(s) in 0.03s
-     Running unittests src/lib.rs (target/release/deps/cutlass_adts-2f172aa1ad540bbd)
-     Running benches/against_ffmpeg.rs (target/release/deps/against_ffmpeg-bba14452e1be2aa0)
-```
+Gaps:
 
-## Example
+- No seek. This is why the app refuses raw AAC files.
+- There is no `cutlass_container::Mux` implementation for ADTS, LOAS, or the M4A pair. The muxers only implement this crate's own `Muxer` trait.
+- A header is accepted on its own. The demuxer does not check that another header follows the frame, so bytes that look like a header inside leading junk can be taken as the first frame.
+- ID3 and APE tags are not parsed. They are skipped as junk, within the 1 MiB limit.
+- Every ADTS raw block is stamped as 1024 samples, also when the stream uses 960-sample frames.
+- The CRC of a single-block frame and the per-block CRCs are stored and not checked. Only the multi-block header CRC is checked.
+- Spectral band replication and parametric stereo are not signaled in an ADTS header. They stay inside the access unit for the decoder.
+- `ChannelLayout::seven_one()` matches no channel configuration, so the muxer refuses it. Configuration 7 is `ChannelLayout::seven_one_wide()`.
+- One stream only.
 
-```
-cargo run --release -p cutlass-adts --example demux
-```
+## Specifications
 
-```
-frames 2
-first 0/48000
-```
-
-`examples/demux.rs` writes two raw access units with `AdtsMuxer` and reads them with `AdtsFile`. `first 0/48000` is presentation tick 0 on a 48000 Hz clock. The access units are framed bytes, not decoded PCM.
-
-## Gaps
-
-- Seek is forward-only.
-- Muxing is `AdtsMuxer`. The shared `cutlass_container::Mux` trait has no ADTS implementation.
-- Profiles other than AAC-LC are rejected. The muxer always writes profile 1.
-- Channel configuration 0 (a program-config element in the raw block) is rejected. The side-channel 7.1 layout does not fit the 3-bit field. Configuration 7 is the wide 7.1 layout.
-- Sample-rate indexes 13, 14, and 15 are rejected. 7350 Hz is rejected when the ID bit is MPEG-2.
-- Spectral band replication and parametric stereo are left inside the raw access unit. The header has no field for them here.
-- Every raw block is stamped as 1024 samples. A 960-sample window is still stamped 1024.
-- The single-block CRC and the per-block CRCs are stored and unchecked. The multi-block header CRC is checked.
-- ID3 and APE tags are not parsed. Bytes before a valid header are skipped, up to the 1 MiB resync limit.
-- One stream. A mid-file change of rate, channels, or MPEG ID is rejected.
-- The desktop package depends on this crate. No editor path opens `AdtsFile`.
-- LOAS/LATM and M4A are in this package. The bench measures one ADTS file.
-- The ignored `thirty_minute_adts_campaign` test was not run.
-- This crate frames AAC. It does not decode AAC to PCM.
+- ISO/IEC 13818-7, for the ADTS frame and `adts_header_error_check`.
+- ISO/IEC 11172-3, for the CRC.
+- ISO/IEC 14496-3 subclause 1.7, for LOAS and LATM.

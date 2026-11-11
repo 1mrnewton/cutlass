@@ -2352,6 +2352,93 @@ fn decode_tiles<P: Pixel>(
     Ok(saved.unwrap_or_else(|| Box::new(cdf.clone())))
 }
 
+/// What [`decode_tiles_by_rows`] calls after each superblock row.
+type AfterRow<'h, P> = dyn FnMut(&FrameState, &mut Picture<P>, usize, usize, bool) + 'h;
+
+/// [`decode_tiles`] one superblock row of the frame at a time: each row
+/// of every tile of a tile row in turn, then `after_row(fs, cur, r0, r1,
+/// last)` for the luma 4x4 rows `r0..r1` the row covers (`last`: the
+/// bottom of the frame). The tiles decode to the same result, since a
+/// tile reads only its own earlier rows and the reference frames. `None`
+/// when `tiles` is not every tile of the frame once.
+fn decode_tiles_by_rows<P: Pixel>(
+    seq: &SequenceHeader,
+    hdr: &FrameHeader,
+    fs: &mut FrameState,
+    tiles: &[(usize, Vec<u8>)],
+    cdf: &CdfContext,
+    refs: &[Option<&Picture<P>>; 8],
+    ref_hdr: &[RefHeaderState; 8],
+    cur: &mut Picture<P>,
+    spares: &Mutex<Spares<P>>,
+    after_row: &mut AfterRow<'_, P>,
+) -> Option<R<Box<CdfContext>>> {
+    let ti = &hdr.tile_info;
+    let n = ti.rows * ti.cols;
+    let mut data: Vec<Option<&[u8]>> = vec![None; n];
+    for (num, d) in tiles {
+        match data.get_mut(*num) {
+            Some(slot @ None) => *slot = Some(d),
+            _ => return None,
+        }
+    }
+    if data.iter().any(Option::is_none) {
+        return None;
+    }
+    let scratch = lock(spares).scratch.pop().unwrap_or_default();
+    let mut bufs = TileBufs::new(fs, scratch);
+    let sb4 = if seq.use_128x128_superblock { 32 } else { 16 };
+    let ctx = ti.context_update_tile_id as usize;
+    let mut saved = None;
+    for tr in 0..ti.rows {
+        let mut carries: Vec<TileCarry<'_>> = (0..ti.cols)
+            .map(|tc| {
+                let num = tr * ti.cols + tc;
+                TileCarry::new(hdr, cdf, num, data[num].unwrap_or_default())
+            })
+            .collect();
+        let (r0, r1) = (
+            ti.mi_row_starts[tr] as usize,
+            ti.mi_row_starts[tr + 1] as usize,
+        );
+        let mut r = r0;
+        while r < r1 {
+            let end = (r + sb4).min(r1);
+            for carry in &mut carries {
+                let res = decode_tile_part(
+                    seq,
+                    hdr,
+                    fs,
+                    cur,
+                    refs,
+                    ref_hdr,
+                    carry,
+                    r..end,
+                    &mut bufs,
+                    None,
+                    None,
+                    &mut |_: &FrameState,
+                          _: &Picture<P>,
+                          _: Option<&mut ReconLog>,
+                          _: usize,
+                          _: usize,
+                          _: bool| {},
+                );
+                if let Err(e) = res {
+                    return Some(Err(e));
+                }
+            }
+            after_row(fs, cur, r, end, tr + 1 == ti.rows && end == r1);
+            r = end;
+        }
+        if let Some(c) = carries.into_iter().find(|c| c.tile_num == ctx) {
+            saved = Some(c.cdf);
+        }
+    }
+    lock(spares).scratch.push(bufs.scratch);
+    Some(Ok(saved.unwrap_or_else(|| Box::new(cdf.clone()))))
+}
+
 /// Rows `rows` and columns `cols` of a row-major array, copied out.
 #[derive(Default)]
 struct Rect<T> {
@@ -2795,7 +2882,9 @@ struct InlineFilter<'a, P> {
     /// The deblocked rows next to the loop restoration stripe boundaries.
     lr_bounds: postfilter::LrBounds<P>,
     lf_on: bool,
-    publish: &'a FrameJob,
+    /// No job: nothing waits on the rows (the frame is done on one
+    /// thread).
+    publish: Option<&'a FrameJob>,
     /// Where the buffers of the bands come from.
     spares: &'a Mutex<Spares<P>>,
     /// Deblocked luma 4x4 rows waiting for CDEF and loop restoration.
@@ -2851,14 +2940,16 @@ impl<P: PicturePixel> InlineFilter<'_, P> {
             // changes none of them, and the loop restoration stripes done
             // end 8 rows higher.
             let done = if self.lr_on { 4 * ready - 8 } else { 4 * ready };
-            if done > self.published && self.publish.watched() {
+            if let Some(job) = self.publish
+                && done > self.published
+                && job.watched()
+            {
                 let tc = std::time::Instant::now();
                 let bufs = lock(self.spares).bands.pop().unwrap_or_else(|| {
                     prof::count(prof::NEW_BAND);
                     Default::default()
                 });
-                self.publish
-                    .publish(band_of(cur, self.published, done, self.overlap, bufs));
+                job.publish(band_of(cur, self.published, done, self.overlap, bufs));
                 prof::add(prof::PUBLISH, tc);
                 self.published = done;
             }
@@ -3213,7 +3304,7 @@ impl<P: PicturePixel> FilterStage<P> {
             cdef,
             lr_bounds,
             lf_on,
-            publish: &job,
+            publish: Some(&job),
             spares: &spares,
             to_filter: None,
             published: 0,
@@ -3422,6 +3513,62 @@ fn decode_frame_sync<P: PicturePixel>(
             postfilter::FilterInfo::default(),
         )
     });
+    // On one thread, each superblock row is filtered as soon as it is
+    // decoded, while its samples are still in the cache.
+    let lf_on = hdr.loop_filter.level[0] != 0 || hdr.loop_filter.level[1] != 0;
+    if threads <= 1 && !hdr.use_superres && (lf_on || cdef_on || hdr.lr.uses_lr) {
+        info.size_for(fs);
+        let levels = postfilter::LfLevels::new(hdr);
+        let mut waiting = None;
+        let mut filt = InlineFilter {
+            cdef_on,
+            lr_on: hdr.lr.uses_lr,
+            lr_scratch,
+            cdef: cdef_sc,
+            lr_bounds: bounds,
+            lf_on,
+            publish: None,
+            spares,
+            to_filter: None,
+            published: 0,
+            overlap: band_overlap(seq.use_128x128_superblock),
+        };
+        let res = decode_tiles_by_rows(
+            seq,
+            hdr,
+            fs,
+            tiles,
+            cdf,
+            &refs,
+            ref_hdr,
+            &mut cur,
+            spares,
+            &mut |fs: &FrameState, cur: &mut Picture<P>, a: usize, b: usize, last: bool| {
+                // Deblocking reads the blocks' levels, CDEF their skips.
+                if lf_on || cdef_on {
+                    info.fill_rows(hdr, &levels, fs, a..b);
+                }
+                // Intra prediction in this row read the samples of the
+                // row above as they were before the filters: that row
+                // is filtered now. Filtering it changes no sample of
+                // this row.
+                if let Some((pa, pb)) = waiting.replace((a, b)) {
+                    filt.deblock(seq, hdr, fs, &info, cur, pa, pb, false);
+                }
+                if last {
+                    filt.deblock(seq, hdr, fs, &info, cur, a, b, true);
+                }
+            },
+        );
+        cdef_sc = filt.cdef;
+        bounds = filt.lr_bounds;
+        if let Some(res) = res {
+            lock(spares).filters.push((cdef_sc, bounds, info));
+            let saved = res?;
+            set_visible_size(seq, hdr, &mut cur);
+            return Ok((cur, saved));
+        }
+    }
     let saved = {
         let tiles_span = prof::Span(prof::TILES, std::time::Instant::now());
         // Intra block copy reads the frame being decoded: its tiles stay on

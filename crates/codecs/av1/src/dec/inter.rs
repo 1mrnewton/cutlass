@@ -141,11 +141,12 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         let is_ii = self.b.is_inter && self.b.ref_frame[1] == INTRA_FRAME;
         if is_ii {
             // Save the intra prediction; the inter prediction goes to the frame.
+            let cy = y - self.row0(plane);
             let pl = &self.cur.planes[plane];
             let st = pl.stride;
             for i in 0..h {
                 self.scratch.obmc[i * w..i * w + w]
-                    .copy_from_slice(&pl.data[(y + i) * st + x..][..w]);
+                    .copy_from_slice(&pl.data[(cy + i) * st + x..][..w]);
             }
         }
         for ref_list in 0..1 + usize::from(is_compound) {
@@ -190,9 +191,10 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         } else {
             (0, 0)
         };
+        let cy = y - self.row0(plane);
         let pl = &mut self.cur.planes[plane];
         let st = pl.stride;
-        let dstp = &mut pl.data[y * st + x..];
+        let dstp = &mut pl.data[cy * st + x..];
         if is_compound {
             let t0 = &self.scratch.tmp0[..w * h];
             let t1 = &self.scratch.tmp1[..w * h];
@@ -348,10 +350,11 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         ) else {
             return false;
         };
+        let cy = y - self.row0(plane);
         let pl = &mut self.cur.planes[plane];
         let st = pl.stride;
         mc::avg_copy(
-            &mut pl.data[y * st + x..],
+            &mut pl.data[cy * st + x..],
             st,
             (&s0[offs[0].0..], st0),
             (&s1[offs[1].0..], st1),
@@ -625,9 +628,10 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         match dst {
             Dst::Frame | Dst::Obmc => {
                 let (out, ostride): (&mut [P], usize) = if matches!(dst, Dst::Frame) {
+                    let cy = y - self.row0(plane);
                     let pl = &mut self.cur.planes[plane];
                     let st = pl.stride;
-                    (&mut pl.data[y * st + x..], st)
+                    (&mut pl.data[cy * st + x..], st)
                 } else {
                     (&mut self.scratch.obmc[..], w)
                 };
@@ -754,10 +758,11 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
                         );
                     }
                     _ => {
+                        let cy = by - self.row0(plane);
                         let pl = &mut self.cur.planes[plane];
                         let st = pl.stride;
                         mc::warp_8x8_put_rows(
-                            &mut pl.data[by * st + bx..],
+                            &mut pl.data[cy * st + bx..],
                             st,
                             refp,
                             ref_stride,
@@ -809,10 +814,11 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
                         cand.interp_filter(),
                         &Dst::Obmc,
                     )?;
+                    let cy = py - self.row0(plane);
                     let pl = &mut self.cur.planes[plane];
                     let st = pl.stride;
                     mc::obmc_blend_above(
-                        &mut pl.data[py * st + px..],
+                        &mut pl.data[cy * st + px..],
                         st,
                         &self.scratch.obmc,
                         pred_w,
@@ -850,10 +856,11 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
                         cand.interp_filter(),
                         &Dst::Obmc,
                     )?;
+                    let cy = py - self.row0(plane);
                     let pl = &mut self.cur.planes[plane];
                     let st = pl.stride;
                     mc::obmc_blend_left(
-                        &mut pl.data[py * st + px..],
+                        &mut pl.data[cy * st + px..],
                         st,
                         &self.scratch.obmc,
                         pred_w,

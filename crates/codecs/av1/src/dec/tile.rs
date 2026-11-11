@@ -557,6 +557,7 @@ pub struct PlannedTx {
 }
 
 /// A reference frame as the tile decoder sees it.
+#[derive(Clone, Copy)]
 pub struct RefView<'a, P> {
     pub pic: &'a Picture<P>,
     /// The samples are in [`TileDec::mirrors`] at this index instead of
@@ -652,6 +653,14 @@ pub struct TileDec<'a, P: Pixel, C: Coder = Msac<'a>> {
     /// When set, blocks are parsed but not predicted or reconstructed: what
     /// reconstruction needs is appended here for [`TileDec::replay`].
     pub rec: Option<Box<ReconLog>>,
+    /// The luma row `cur` starts at (its chroma planes start at the
+    /// subsampled row): reconstruction can write one band of rows of a
+    /// picture. 0 for a whole picture.
+    pub y0: usize,
+    /// The mode-info row the grids of `fs` that reconstruction reads and
+    /// writes (`mi`, `uv_modes`, `delta_lf`) start at. 0 for a whole
+    /// frame's.
+    pub mi_r0: usize,
 }
 
 #[inline]
@@ -913,7 +922,13 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
 
     #[inline]
     pub fn mi(&self, r: usize, c: usize) -> &MiInfo {
-        &self.fs.mi[r * self.fs.mi_stride + c]
+        &self.fs.mi[(r - self.mi_r0) * self.fs.mi_stride + c]
+    }
+
+    /// The first row of plane `plane` in `cur` (see [`Self::y0`]).
+    #[inline]
+    pub fn row0(&self, plane: usize) -> usize {
+        self.y0 >> self.plane_sub(plane).1
     }
 
     fn seg_feature_active(&self, feature: usize) -> bool {
@@ -1595,7 +1610,7 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
         let h4 = bh4(b.bsize).min(self.fs.mi_rows - b.mi_row);
         let stride = self.fs.mi_stride;
         let set_uv = b.ref_frame[0] == INTRA_FRAME && b.has_chroma;
-        let at = b.mi_row * stride + b.mi_col;
+        let at = (b.mi_row - self.mi_r0) * stride + b.mi_col;
         // Stores of the value, not a library copy per row.
         fill_rect(&mut self.fs.mi, stride, at, w4, h4, *info);
         if set_uv {

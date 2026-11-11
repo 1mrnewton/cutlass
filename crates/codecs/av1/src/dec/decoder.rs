@@ -643,6 +643,7 @@ fn band_of<P: PicturePixel>(
 
 /// The bands of a reference still being decoded ([`RefView::mirror`]),
 /// brought up to the rows reconstruction reads.
+#[derive(Clone)]
 struct RefFill {
     job: Arc<FrameJob>,
     /// Reference frame (1..=7) of the view; other views of the same job
@@ -832,6 +833,8 @@ struct Spares<P> {
     states: Vec<FrameState>,
     /// Buffers of [`Band`]s.
     bands: Vec<[Vec<P>; 3]>,
+    /// Pictures of a superblock row (see [`take_sb_row`]).
+    sb_rows: Vec<Picture<P>>,
     /// Reconstruction scratch of the backends.
     scratch: Vec<Scratch<P>>,
     /// The saved boundary rows of the in-loop filters of the backends.
@@ -859,6 +862,9 @@ type FilterRows<P> = (
 
 /// Band buffers kept for reuse, at most.
 const MAX_BANDS: usize = 96;
+
+/// Superblock rows ([`Spares::sb_rows`]) kept for reuse, at most.
+const MAX_SB_ROWS: usize = 64;
 
 impl<P: PicturePixel> Spares<P> {
     /// Keeps the buffers of `b` for reuse when this is its last holder
@@ -890,6 +896,7 @@ impl<P> Default for PixState<P> {
                 lr: Vec::new(),
                 states: Vec::new(),
                 bands: Vec::new(),
+                sb_rows: Vec::new(),
                 scratch: Vec::new(),
                 filters: Vec::new(),
                 tile_shells: Vec::new(),
@@ -911,6 +918,7 @@ impl<P: Pixel> PixState<P> {
         sp.states.truncate(16);
         sp.scratch.truncate(8);
         sp.filters.truncate(8);
+        sp.sb_rows.truncate(MAX_SB_ROWS);
     }
 }
 
@@ -2265,6 +2273,8 @@ fn decode_tile_part<P: Pixel>(
         color_map_uv: std::mem::take(&mut bufs.color_map_uv),
         scratch: std::mem::replace(&mut bufs.scratch, Scratch::empty()),
         rec: logs.map(|l| Box::new(lock(l).logs.pop().unwrap_or_default())),
+        y0: 0,
+        mi_r0: 0,
     };
     if carry.fresh {
         td.begin_tile();
@@ -2485,7 +2495,7 @@ fn decode_tiles_by_rows<P: Pixel>(
             }
             // The row's filters may run now: intra prediction below reads
             // its last lines as they are.
-            bufs.scratch.save_edge(cur, 4 * end);
+            bufs.scratch.save_edge(cur, 4 * end, 0);
             after_row(fs, cur, r, end, tr + 1 == ti.rows && end == r1);
             r = end;
         }
@@ -2681,13 +2691,25 @@ impl RowMsg {
 
 /// The shells of reconstruction and of the filters for the frame of
 /// `fs`, from the pools when one fits.
-fn take_shells<P>(sp: &mut Spares<P>, fs: &FrameState) -> (FrameState, FrameState) {
-    let recon = match sp.shells.iter().position(|f| f.fits_recon_shell(fs)) {
-        Some(i) => sp.shells.swap_remove(i).reshape_shell(fs),
-        None => {
-            prof::count(prof::NEW_SHELL);
-            fs.recon_shell()
-        }
+fn take_shells<P>(
+    sp: &mut Spares<P>,
+    fs: &FrameState,
+    band: Option<usize>,
+) -> (FrameState, FrameState) {
+    let recon = match band {
+        // Reconstruction keeps the mode info of `rows` rows (see
+        // TileDec::mi_r0).
+        Some(rows) => match sp.shells.iter().position(|f| f.fits_band_shell(fs, rows)) {
+            Some(i) => sp.shells.swap_remove(i).reshape_shell(fs),
+            None => fs.band_recon_shell(rows),
+        },
+        None => match sp.shells.iter().position(|f| f.fits_recon_shell(fs)) {
+            Some(i) => sp.shells.swap_remove(i).reshape_shell(fs),
+            None => {
+                prof::count(prof::NEW_SHELL);
+                fs.recon_shell()
+            }
+        },
     };
     let filter = match sp
         .filter_shells
@@ -2705,7 +2727,91 @@ fn take_shells<P>(sp: &mut Spares<P>, fs: &FrameState) -> (FrameState, FrameStat
 /// its tile's part of the row's filter data when it is the tile's last of
 /// a superblock row, and with the row's unfiltered samples when it is
 /// the row's last.
-type Filtered<P> = (ReconLog, Option<RowMsg>, Option<[Vec<P>; 3]>);
+type Filtered<P> = (ReconLog, Option<RowMsg>, Option<Samples<P>>);
+
+/// The unfiltered samples of a superblock row, for its filters.
+enum Samples<P> {
+    /// Its whole rows (see [`copy_rows_out`]).
+    Rows([Vec<P>; 3]),
+    /// A picture of the row alone (see [`take_sb_row`]).
+    Row(Picture<P>),
+}
+
+/// A picture of one superblock row of a frame, which reconstruction
+/// writes (see [`TileDec::y0`]) and hands to the filters as it is, from
+/// the pool when one fits.
+fn take_sb_row<P: Pixel>(
+    sp: &mut Spares<P>,
+    seq: &SequenceHeader,
+    hdr: &FrameHeader,
+) -> Picture<P> {
+    let (w, h) = (hdr.frame_width as usize, hdr.frame_height as usize);
+    let (aw, _) = Picture::<P>::geometry(w, h);
+    let sb = if seq.use_128x128_superblock { 128 } else { 64 };
+    let (sub_x, sub_y, bd) = (seq.subsampling_x, seq.subsampling_y, seq.bit_depth);
+    let np = seq.num_planes();
+    let i = sp.sb_rows.iter().position(|p| {
+        p.planes.len() == np
+            && p.sub_x == sub_x
+            && p.sub_y == sub_y
+            && p.planes[0].stride == aw
+            && p.planes[0].alloc_h == sb
+    });
+    let mut p = match i {
+        Some(i) => sp.sb_rows.swap_remove(i),
+        None => {
+            let planes = (0..np)
+                .map(|k| {
+                    let (sx, sy) = if k > 0 {
+                        (usize::from(sub_x), usize::from(sub_y))
+                    } else {
+                        (0, 0)
+                    };
+                    Plane::new((w + sx) >> sx, sb >> sy, aw >> sx, sb >> sy)
+                })
+                .collect();
+            Picture {
+                planes,
+                bd,
+                sub_x,
+                sub_y,
+            }
+        }
+    };
+    p.bd = bd;
+    for (k, pl) in p.planes.iter_mut().enumerate() {
+        let sx = usize::from(k > 0 && sub_x);
+        pl.w = (w + sx) >> sx;
+    }
+    p
+}
+
+/// Mode-info rows of reconstruction's shell when it writes a superblock
+/// row at a time (see [`take_sb_row`]): the row's, and the last of the row
+/// above.
+fn band_rows(seq: &SequenceHeader) -> usize {
+    if seq.use_128x128_superblock { 33 } else { 17 }
+}
+
+/// Keeps `p`, a picture of a superblock row, for reuse.
+fn give_sb_row<P>(sp: &mut Spares<P>, p: Picture<P>) {
+    if sp.sb_rows.len() < MAX_SB_ROWS {
+        sp.sb_rows.push(p);
+    }
+}
+
+/// Writes `src`, a superblock row from luma 4x4 row `r0` (see
+/// [`take_sb_row`]), into `pic`, a picture of the same stride.
+fn copy_row_in<P: Pixel>(pic: &mut Picture<P>, r0: usize, src: &Picture<P>) {
+    let sub_y = pic.sub_y;
+    for (p, (d, s)) in pic.planes.iter_mut().zip(&src.planes).enumerate() {
+        let at = ((4 * r0) >> usize::from(p > 0 && sub_y)) * d.stride;
+        let n = s.data.len().min(d.data.len().saturating_sub(at));
+        if d.stride == s.stride {
+            d.data[at..at + n].copy_from_slice(&s.data[..n]);
+        }
+    }
+}
 
 /// The samples of luma 4x4 rows `r0..r1` of `pic` (to the end of the
 /// planes when `last`), whole rows of each plane, copied into `bufs`.
@@ -2821,6 +2927,11 @@ impl<P: PicturePixel> InPlace<'_, P> {
 ///
 /// With `inplace`, the filters run here instead, in `cur` (see [`InPlace`]),
 /// and nothing goes to `filters`.
+///
+/// With `banded`, `cur` is a picture of one superblock row and `fs` holds
+/// the mode info of one superblock row and the row above it: each row
+/// done goes to the filters as it is, and the next is reconstructed into
+/// a new one.
 fn recon_worker<'r, P: PicturePixel>(
     seq: &SequenceHeader,
     hdr: &FrameHeader,
@@ -2835,6 +2946,7 @@ fn recon_worker<'r, P: PicturePixel>(
     filters: &Sender<Filtered<P>>,
     mut inplace: Option<&mut InPlace<'_, P>>,
     spares: &Mutex<Spares<P>>,
+    banded: bool,
 ) -> R<(Vec<Mirror<P>>, Scratch<P>)> {
     // A reference read through a scale may need any row.
     let scaled = std::array::from_fn::<bool, 8, _>(|i| {
@@ -2910,6 +3022,8 @@ fn recon_worker<'r, P: PicturePixel>(
         color_map_uv: vec![0u8; 128 * 128],
         scratch,
         rec: None,
+        y0: 0,
+        mi_r0: 0,
     };
     let ahead = lock(spares).rows_ahead;
     td.scratch.edge_y = usize::MAX;
@@ -2978,9 +3092,10 @@ fn recon_worker<'r, P: PicturePixel>(
             f.bring(need, &mut td.mirrors, &mut td.refs, finals, spares)?;
         }
         prof::add(prof::RECON, tr);
-        if let Some(m) = m.as_ref().filter(|m| m.row_end) {
+        let done = m.as_ref().filter(|m| m.row_end);
+        if let Some(m) = done {
             down = [down[1], [UNREAD; 8]];
-            td.scratch.save_edge(td.cur, 4 * m.r1);
+            td.scratch.save_edge(td.cur, 4 * m.r1, td.y0);
         }
         if let Some(ip) = inplace.as_deref_mut() {
             ip.take(seq, hdr, td.cur, log, m);
@@ -2989,10 +3104,31 @@ fn recon_worker<'r, P: PicturePixel>(
         // The samples of a whole row go to the filters, which work on a
         // picture of their own: this one stays unfiltered for the intra
         // prediction of the rows below.
-        let samples = m.as_ref().filter(|m| m.row_end).map(|m| {
-            let bufs = lock(spares).bands.pop().unwrap_or_default();
-            copy_rows_out(td.cur, m.r0, m.r1, m.last, bufs)
-        });
+        let samples = match done {
+            None => None,
+            Some(m) if !banded => {
+                let bufs = lock(spares).bands.pop().unwrap_or_default();
+                Some(Samples::Rows(copy_rows_out(
+                    td.cur, m.r0, m.r1, m.last, bufs,
+                )))
+            }
+            Some(m) => {
+                let row = std::mem::replace(td.cur, take_sb_row(&mut lock(spares), seq, hdr));
+                // The next row's blocks read the mode info of the last row
+                // of this one.
+                let st = td.fs.mi_stride;
+                let from = (m.r1 - 1 - td.mi_r0) * st;
+                if td.fs.mi.len() >= from + st {
+                    td.fs.mi.copy_within(from..from + st, 0);
+                }
+                if td.fs.uv_modes.len() >= from + st {
+                    td.fs.uv_modes.copy_within(from..from + st, 0);
+                }
+                td.mi_r0 = m.r1 - 1;
+                td.y0 = 4 * m.r1;
+                Some(Samples::Row(row))
+            }
+        };
         if filters.send((log, m, samples)).is_err() {
             // The filters stopped: their thread failed.
             return Err(malformed("filter thread"));
@@ -3258,19 +3394,31 @@ fn decode_frame_async<P: PicturePixel>(
     // from being final for a superblock row more: then they run on a
     // thread of their own, on a copy of the rows, and the rows other
     // frames wait for are final sooner.
+    //
+    // Such rows are reconstructed each into a picture of its own (see
+    // take_sb_row) that then goes to the filters as it is, to be copied
+    // once into the final picture; intra prediction reads the last lines
+    // of the row above from a copy (Scratch::edge). Intra block copy reads
+    // any row above, and superres frames take the whole picture.
+    let banded = hdr.refresh_frame_flags != 0
+        && (cdef_on || hdr.lr.uses_lr)
+        && !hdr.allow_intrabc
+        && !hdr.use_superres;
     let in_place = hdr.refresh_frame_flags == 0 || !(cdef_on || hdr.lr.uses_lr);
     let (rc_fs, mut ft_fs, lr_scratch, rec, cur) = {
         let mut sp = lock(spares);
-        let (rc_fs, ft_fs) = take_shells(&mut sp, fs);
+        let (rc_fs, ft_fs) = take_shells(&mut sp, fs, banded.then(|| band_rows(seq)));
         let lr = sp.lr.pop().unwrap_or_default();
-        let (rec, cur) = if in_place {
-            let none = Picture::<P> {
-                planes: Vec::new(),
-                bd: seq.bit_depth,
-                sub_x: seq.subsampling_x,
-                sub_y: seq.subsampling_y,
-            };
-            (cur, none)
+        let none = || Picture::<P> {
+            planes: Vec::new(),
+            bd: seq.bit_depth,
+            sub_x: seq.subsampling_x,
+            sub_y: seq.subsampling_y,
+        };
+        let (rec, cur) = if banded {
+            (take_sb_row(&mut sp, seq, hdr), cur)
+        } else if in_place {
+            (cur, none())
         } else {
             let rec = take_picture::<P>(
                 &mut sp.pics,
@@ -3311,6 +3459,7 @@ fn decode_frame_async<P: PicturePixel>(
         spares: spares.clone(),
         job: job.clone(),
         rx: rrx,
+        banded,
         in_place,
     };
     workers.run(Box::new(move || {
@@ -3399,7 +3548,8 @@ struct Backend<P> {
     hdr: FrameHeader,
     ref_jobs: [Option<Arc<FrameJob>>; 8],
     ref_hdr: [RefHeaderState; 8],
-    /// The picture reconstruction writes, which stays unfiltered.
+    /// The picture reconstruction writes, which stays unfiltered (a
+    /// superblock row's with `banded`).
     rec: Picture<P>,
     rc_fs: FrameState,
     filters: FilterStage<P>,
@@ -3408,6 +3558,9 @@ struct Backend<P> {
     job: Arc<FrameJob>,
     /// The parsed chunks.
     rx: Receiver<(Option<RowMsg>, ReconLog)>,
+    /// Whether `rec` is a picture of a superblock row (see
+    /// [`take_sb_row`]) and `rc_fs` a shell of as many rows.
+    banded: bool,
     /// Whether the filters run in place in `rec`, the final picture.
     in_place: bool,
 }
@@ -3492,7 +3645,14 @@ impl<P: PicturePixel> FilterStage<P> {
                 match samples {
                     // One tile's part of the row: wait for the rest.
                     None => m.apply_meta(&mut fs),
-                    Some(bufs) => {
+                    Some(Samples::Row(pic)) => {
+                        let tf = std::time::Instant::now();
+                        copy_row_in(&mut cur, m.r0, &pic);
+                        give_sb_row(&mut lock(&spares), pic);
+                        filt.row(&seq, &hdr, &mut fs, &info, &mut cur, &m);
+                        prof::add(prof::FILTER, tf);
+                    }
+                    Some(Samples::Rows(bufs)) => {
                         let tf = std::time::Instant::now();
                         copy_rows_in(&mut cur, m.r0, &bufs);
                         {
@@ -3540,6 +3700,7 @@ impl<P: PicturePixel> Backend<P> {
             spares,
             job,
             rx,
+            banded,
             in_place: filter_here,
         } = self;
         let _guard = FinishGuard(job.clone());
@@ -3621,7 +3782,7 @@ impl<P: PicturePixel> Backend<P> {
             match parked {
                 None => recon_worker(
                     &seq, &hdr, &mut rc_fs, &mut rec, refs, mirrors, &finals, scratch, fills, rx,
-                    &ftx, None, &spares,
+                    &ftx, None, &spares, banded,
                 ),
                 Some(stage) => {
                     let FilterStage {
@@ -3675,6 +3836,7 @@ impl<P: PicturePixel> Backend<P> {
                         &ftx,
                         Some(&mut ip),
                         &spares,
+                        false,
                     );
                     ip.give_back();
                     let InPlace {
@@ -3723,7 +3885,9 @@ impl<P: PicturePixel> Backend<P> {
         {
             let mut sp = lock(&spares);
             sp.shells.push(rc_fs);
-            if !rec.planes.is_empty() {
+            if banded {
+                give_sb_row(&mut sp, rec);
+            } else if !rec.planes.is_empty() {
                 recycle(&mut sp.pics, rec);
             }
         }

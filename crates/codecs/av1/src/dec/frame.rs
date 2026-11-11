@@ -339,6 +339,17 @@ impl FrameState {
         }
     }
 
+    /// [`Self::recon_shell`] for `rows` mode-info rows of the frame (see
+    /// [`crate::dec::tile::TileDec::mi_r0`]).
+    pub fn band_recon_shell(&self, rows: usize) -> Self {
+        let n = (rows * self.mi_stride).min(self.mi.len());
+        Self {
+            mi: vec![MiInfo::default(); n],
+            uv_modes: vec![0; n.min(self.uv_modes.len())],
+            ..self.empty_shell()
+        }
+    }
+
     /// A state of the same size holding only what the in-loop filters read
     /// besides their block info (loop filter transform sizes, CDEF
     /// indices, loop restoration units), to be filled row by row.
@@ -380,6 +391,15 @@ impl FrameState {
         self.mi_stride == fs.mi_stride
             && self.mi.len() == fs.mi.len()
             && self.uv_modes.len() == fs.uv_modes.len()
+    }
+
+    /// Whether `self`, a [`Self::band_recon_shell`] of `rows` rows, has the
+    /// array sizes of one of `fs`.
+    pub fn fits_band_shell(&self, fs: &FrameState, rows: usize) -> bool {
+        let n = (rows * fs.mi_stride).min(fs.mi.len());
+        self.mi_stride == fs.mi_stride
+            && self.mi.len() == n
+            && self.uv_modes.len() == n.min(fs.uv_modes.len())
     }
 
     /// Whether `self`, a [`Self::filter_shell`], has the array sizes of a

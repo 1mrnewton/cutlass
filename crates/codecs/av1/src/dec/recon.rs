@@ -59,12 +59,13 @@ pub struct Scratch<P> {
 }
 
 impl<P: Pixel> Scratch<P> {
-    /// Saves the last lines of the superblock row of `pic` that ends at
-    /// luma row `y` (see [`Self::edge`]).
-    pub fn save_edge(&mut self, pic: &Picture<P>, y: usize) {
+    /// Saves the last lines of the superblock row of `pic`, whose first
+    /// row is luma row `y0`, that ends at luma row `y` (see
+    /// [`Self::edge`]).
+    pub fn save_edge(&mut self, pic: &Picture<P>, y: usize, y0: usize) {
         for (p, (e, pl)) in self.edge.iter_mut().zip(&pic.planes).enumerate() {
             let sy = usize::from(p > 0 && pic.sub_y);
-            let r = (y >> sy).saturating_sub(1);
+            let r = (y >> sy).saturating_sub(1).saturating_sub(y0 >> sy);
             e.clear();
             if let Some(line) = pl.data.get(r * pl.stride..(r + 1) * pl.stride) {
                 e.extend_from_slice(line);
@@ -209,7 +210,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
                 if m.ref_frame[0] > INTRA_FRAME {
                     return false;
                 }
-                self.fs.uv_modes[r * self.fs.mi_stride + c]
+                self.fs.uv_modes[(r - self.mi_r0) * self.fs.mi_stride + c]
             };
             (SMOOTH_PRED..=SMOOTH_PRED + 2).contains(&mode)
         };
@@ -277,6 +278,8 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         } else {
             false
         };
+        // Rows of `cur` from its first (`y` stays a row of the plane).
+        let ry = y - self.row0(plane);
         let pl = &mut self.cur.planes[plane];
         let stride = pl.stride;
         let buf = &mut pl.data;
@@ -289,10 +292,10 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         } else if y << sy == self.scratch.edge_y {
             &self.scratch.edge[plane]
         } else {
-            &buf[(y - 1) * stride..]
+            &buf[(ry - 1) * stride..]
         };
         if !have_above && have_left {
-            let v = buf[y * stride + x - 1];
+            let v = buf[ry * stride + x - 1];
             for i in 0..n {
                 above[EDGE_OFF + i] = v;
             }
@@ -324,7 +327,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         } else {
             let lim = max_y.min(y + if have_below_left { 2 * h } else { h } - 1);
             let avail = (lim + 1 - y).min(n);
-            let col = &buf[y * stride + x - 1..];
+            let col = &buf[ry * stride + x - 1..];
             let dst = &mut left[EDGE_OFF..EDGE_OFF + n];
             for (d, s) in dst[..avail].iter_mut().zip(col.iter().step_by(stride)) {
                 *d = *s;
@@ -337,13 +340,13 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         } else if have_above {
             up[x]
         } else if have_left {
-            buf[y * stride + x - 1]
+            buf[ry * stride + x - 1]
         } else {
             P::from_i32(base)
         };
         above[EDGE_OFF - 1] = corner;
         left[EDGE_OFF - 1] = corner;
-        let dst = &mut buf[y * stride + x..];
+        let dst = &mut buf[ry * stride + x..];
         if plane == 0 && self.b.use_filter_intra {
             ipred::filter_intra(dst, stride, w, h, self.b.filter_intra_mode, above, left, bd);
         } else {
@@ -390,9 +393,10 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         } else {
             self.b.cfl_alpha_v
         });
+        let (y0, cy0) = (self.y0, self.row0(plane));
         let (luma, rest) = self.cur.planes.split_at_mut(1);
         let lp = &luma[0];
-        let off = (sy0 << sys) * lp.stride + (sx0 << sxs);
+        let off = ((sy0 << sys) - y0) * lp.stride + (sx0 << sxs);
         ipred::cfl_ac(
             &mut self.scratch.ac,
             &lp.data[off..],
@@ -407,7 +411,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         let cp = &mut rest[plane - 1];
         let stride = cp.stride;
         ipred::cfl_pred(
-            &mut cp.data[sy0 * stride + sx0..],
+            &mut cp.data[(sy0 - cy0) * stride + sx0..],
             stride,
             w,
             h,
@@ -442,10 +446,11 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
             }
             (&self.color_map_uv, bw)
         };
+        let r0 = self.row0(plane);
         let pl = &mut self.cur.planes[plane];
         let stride = pl.stride;
         for i in 0..h {
-            let row = &mut pl.data[(sy0 + i) * stride + sx0..][..w];
+            let row = &mut pl.data[(sy0 + i - r0) * stride + sx0..][..w];
             let mrow = &map[(y * 4 + i) * mstride + x * 4..];
             for j in 0..w {
                 row[j] = P::from_i32(i32::from(palette[mrow[j] as usize]));
@@ -456,6 +461,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
     /// Reconstruct process (7.12.3): inverse transform of the dequantized
     /// coefficients, added to the prediction.
     pub fn reconstruct(&mut self, plane: usize, x: usize, y: usize, tx: u8) {
+        let y = y - self.row0(plane);
         let pl = &mut self.cur.planes[plane];
         let stride = pl.stride;
         let _ = (tx_w_log2(tx), tx_h_log2(tx));

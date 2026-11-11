@@ -1004,6 +1004,8 @@ fn tile_dec<'a, P: Pixel>(
         color_map_uv: vec![0u8; 128 * 128],
         scratch: Default::default(),
         rec: None,
+        y0: 0,
+        mi_r0: 0,
     }
 }
 

@@ -19,11 +19,13 @@
 #![allow(unsafe_code)]
 
 use core::arch::aarch64::{
-    int16x8_t, uint8x8_t, uint8x16_t, vaddl_high_s16, vaddl_high_u8, vaddl_s16, vaddl_u8,
-    vcombine_u8, vcombine_u16, vdup_n_u8, vextq_u8, vget_lane_u32, vget_low_s16, vget_low_u8,
-    vld1_u8, vld1q_u8, vmlal_u8, vmlaq_n_s32, vmlaq_n_u16, vmlsq_n_s32, vmlsq_n_u16, vmull_u8,
-    vqmovn_u16, vqrshrun_high_n_s16, vqrshrun_n_s16, vqrshrun_n_s32, vreinterpret_u32_u8,
-    vreinterpretq_s16_u16, vrhadd_u8, vrhaddq_u8, vrshrn_n_u16, vst1_u8, vst1q_u8,
+    int16x4_t, int16x8_t, int32x4_t, uint8x8_t, uint8x16_t, vaddl_high_s16, vaddl_high_u8,
+    vaddl_s16, vaddl_u8, vaddq_s32, vcombine_s16, vcombine_u8, vcombine_u16, vdup_n_s16, vdup_n_u8,
+    vdup_n_u32, vdupq_n_s32, vextq_u8, vget_high_u8, vget_lane_u32, vget_low_s16, vget_low_u8,
+    vld1_u8, vld1q_u8, vmlal_high_s16, vmlal_s16, vmlal_u8, vmlaq_n_s32, vmlaq_n_u16, vmlsq_n_s32,
+    vmlsq_n_u16, vmovl_u8, vmull_high_s16, vmull_s16, vmull_u8, vqmovn_u16, vqmovun_s32,
+    vqrshrun_high_n_s16, vqrshrun_n_s16, vqrshrun_n_s32, vreinterpret_u8_u32, vreinterpret_u32_u8,
+    vreinterpretq_s16_u16, vrhadd_u8, vrhaddq_u8, vrshlq_s32, vrshrn_n_u16, vst1_u8, vst1q_u8,
 };
 
 use crate::mc_block::{Block, Source, quarter_sources};
@@ -446,6 +448,171 @@ pub(crate) fn chroma_block(
                 at.cast::<u32>().write_unaligned(four);
             }
             top = bottom;
+        }
+    }
+    true
+}
+
+/// Two predictions of eight samples mixed by `weight` (see
+/// [`crate::mc::weight_block`]) in 32 bits, then clipped to 8.
+#[inline]
+#[target_feature(enable = "neon")]
+fn weigh8(
+    a: uint8x8_t,
+    b: uint8x8_t,
+    w: (int16x4_t, int16x4_t, int32x4_t, int32x4_t),
+) -> uint8x8_t {
+    let (w0, w1, shift, offset) = w;
+    let a = vreinterpretq_s16_u16(vmovl_u8(a));
+    let b = vreinterpretq_s16_u16(vmovl_u8(b));
+    let low = vmlal_s16(vmull_s16(vget_low_s16(a), w0), vget_low_s16(b), w1);
+    let high = vmlal_high_s16(
+        vmull_high_s16(a, vcombine_s16(w0, w0)),
+        b,
+        vcombine_s16(w1, w1),
+    );
+    // A rounding shift right is the add of half and the shift.
+    let low = vaddq_s32(vrshlq_s32(low, shift), offset);
+    let high = vaddq_s32(vrshlq_s32(high, shift), offset);
+    vqmovn_u16(vcombine_u16(vqmovun_s32(low), vqmovun_s32(high)))
+}
+
+/// Checks a mix of two blocks of `size` packed `size.0` to a row into `dst`
+/// with rows `dst_stride` apart: widths a multiple of 4 up to 16.
+fn mix_fits(dst: &[u8], dst_stride: usize, a: &[u8], b: &[u8], size: (usize, usize)) -> bool {
+    let (w, h) = size;
+    w > 0
+        && w <= 16
+        && w % 4 == 0
+        && h > 0
+        && a.len() >= w * h
+        && b.len() >= w * h
+        && dst_stride >= w
+        && (h - 1) * dst_stride + w <= dst.len()
+}
+
+/// Four samples from `p` in the low lanes.
+///
+/// # Safety
+///
+/// Four bytes from `p` must be readable.
+#[inline]
+#[target_feature(enable = "neon")]
+unsafe fn load4(p: *const u8) -> uint8x8_t {
+    // SAFETY: the caller's promise.
+    let four = unsafe { p.cast::<u32>().read_unaligned() };
+    vreinterpret_u8_u32(vdup_n_u32(four))
+}
+
+/// The low four lanes of `v` to `p`.
+///
+/// # Safety
+///
+/// Four bytes from `p` must be writable.
+#[inline]
+#[target_feature(enable = "neon")]
+unsafe fn store4(p: *mut u8, v: uint8x8_t) {
+    // SAFETY: the caller's promise.
+    unsafe {
+        p.cast::<u32>()
+            .write_unaligned(vget_lane_u32::<0>(vreinterpret_u32_u8(v)))
+    };
+}
+
+/// One row of two blocks mixed into `out`, 16 then 8 then 4 samples at a
+/// time, by `wide` on sixteen and `narrow` on eight.
+///
+/// # Safety
+///
+/// `w` bytes from `a`, `b` and `out` must be in their slices.
+#[inline]
+#[target_feature(enable = "neon")]
+unsafe fn mix_row(
+    (a, b, out): (*const u8, *const u8, *mut u8),
+    w: usize,
+    wide: impl Fn(uint8x16_t, uint8x16_t) -> uint8x16_t,
+    narrow: impl Fn(uint8x8_t, uint8x8_t) -> uint8x8_t,
+) {
+    let mut done = 0;
+    // SAFETY: each step reads and writes inside the `w` bytes.
+    unsafe {
+        if w == 16 {
+            vst1q_u8(out, wide(vld1q_u8(a), vld1q_u8(b)));
+            return;
+        }
+        if w >= 8 {
+            vst1_u8(out, narrow(vld1_u8(a), vld1_u8(b)));
+            done = 8;
+        }
+        if done < w {
+            let (a, b, out) = (a.add(done), b.add(done), out.add(done));
+            store4(out, narrow(load4(a), load4(b)));
+        }
+    }
+}
+
+/// See [`crate::mc::avg_block`].
+#[target_feature(enable = "neon")]
+pub(crate) fn avg_block(
+    dst: &mut [u8],
+    dst_stride: usize,
+    a: &[u8],
+    b: &[u8],
+    size: (usize, usize),
+) -> bool {
+    if !mix_fits(dst, dst_stride, a, b, size) {
+        return false;
+    }
+    let (w, h) = size;
+    let (a, b, out) = (a.as_ptr(), b.as_ptr(), dst.as_mut_ptr());
+    for row in 0..h {
+        // SAFETY: `mix_fits` checked `w * h` bytes of `a` and `b` and `h`
+        // rows of `w` in `dst`.
+        unsafe {
+            let at = (a.add(row * w), b.add(row * w), out.add(row * dst_stride));
+            mix_row(at, w, |x, y| vrhaddq_u8(x, y), |x, y| vrhadd_u8(x, y));
+        }
+    }
+    true
+}
+
+/// See [`crate::mc::weight_block`].
+#[target_feature(enable = "neon")]
+pub(crate) fn weight_block(
+    dst: &mut [u8],
+    dst_stride: usize,
+    a: &[u8],
+    b: &[u8],
+    size: (usize, usize),
+    weight: crate::mc_block::BiWeight,
+) -> bool {
+    if !weight.fits() || !mix_fits(dst, dst_stride, a, b, size) {
+        return false;
+    }
+    let (w, h) = size;
+    let (Ok(w0), Ok(w1)) = (i16::try_from(weight.w0), i16::try_from(weight.w1)) else {
+        return false;
+    };
+    let mix = (
+        vdup_n_s16(w0),
+        vdup_n_s16(w1),
+        vdupq_n_s32(-weight.shift),
+        vdupq_n_s32(weight.offset),
+    );
+    let (a, b, out) = (a.as_ptr(), b.as_ptr(), dst.as_mut_ptr());
+    for row in 0..h {
+        // SAFETY: as in `avg_block`.
+        unsafe {
+            let at = (a.add(row * w), b.add(row * w), out.add(row * dst_stride));
+            mix_row(
+                at,
+                w,
+                |x, y| {
+                    let low = weigh8(vget_low_u8(x), vget_low_u8(y), mix);
+                    vcombine_u8(low, weigh8(vget_high_u8(x), vget_high_u8(y), mix))
+                },
+                |x, y| weigh8(x, y, mix),
+            );
         }
     }
     true

@@ -20,10 +20,9 @@ use core::arch::aarch64::{
 use crate::deblock::{ChromaRows, Lines, Rows};
 
 pub(crate) use crate::neon_mc::{
-    avg_block, avg_row, avg8, avg16, centre8, centre16, chroma8, half8, half16, raw8, raw16,
-    weight_block,
+    avg_row, avg8, avg16, centre8, centre16, chroma8, half8, half16, raw8, raw16,
 };
-pub(crate) use crate::neon_qpel::{chroma_block, luma_block};
+pub(crate) use crate::neon_qpel::{avg_block, chroma_block, luma_block, weight_block};
 pub(crate) use crate::neon_residual::{dc_add, idct4_add};
 
 /// A vector of the 16 samples in `bytes`.

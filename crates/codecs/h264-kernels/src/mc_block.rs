@@ -105,71 +105,6 @@ pub(crate) fn quarter_sources(frac: (u8, u8)) -> Option<(Source, Source)> {
 /// the attribute, if any, go on each.
 macro_rules! block_kernels {
     ($visibility:vis, $(#[$feature:meta])*) => {
-        /// The rounded average of two blocks of `size`, whose rows are
-        /// `size.0` apart, into `dst` with rows `dst_stride` apart.
-        $(#[$feature])*
-        $visibility fn avg_block(
-            dst: &mut [u8],
-            dst_stride: usize,
-            a: &[u8],
-            b: &[u8],
-            size: (usize, usize),
-        ) -> bool {
-            let (w, h) = size;
-            if w == 0 || h == 0 || a.len() < w * h || b.len() < w * h {
-                return false;
-            }
-            if dst.len() < (h - 1) * dst_stride + w {
-                return false;
-            }
-            for row in 0..h {
-                let out = &mut dst[row * dst_stride..row * dst_stride + w];
-                avg_row(out, &a[row * w..row * w + w], &b[row * w..row * w + w]);
-            }
-            true
-        }
-
-        /// Two blocks mixed by `weight`, laid out as for `avg_block`.
-        /// `false` means the weights are out of the kernels' range, or a
-        /// block does not fit, and nothing was done.
-        $(#[$feature])*
-        $visibility fn weight_block(
-            dst: &mut [u8],
-            dst_stride: usize,
-            a: &[u8],
-            b: &[u8],
-            size: (usize, usize),
-            weight: $crate::mc_block::BiWeight,
-        ) -> bool {
-            use $crate::mc_block::{at8, at16, weight_one};
-            let (w, h) = size;
-            if !weight.fits() || w == 0 || h == 0 || a.len() < w * h || b.len() < w * h {
-                return false;
-            }
-            if dst.len() < (h - 1) * dst_stride + w {
-                return false;
-            }
-            for row in 0..h {
-                let out = &mut dst[row * dst_stride..row * dst_stride + w];
-                let (a, b) = (&a[row * w..row * w + w], &b[row * w..row * w + w]);
-                let mut done = 0;
-                while done + 16 <= w {
-                    let mixed = weight16(at16(a, done), at16(b, done), weight);
-                    out[done..done + 16].copy_from_slice(&mixed);
-                    done += 16;
-                }
-                if done + 8 <= w {
-                    let mixed = weight8(at8(a, done), at8(b, done), weight);
-                    out[done..done + 8].copy_from_slice(&mixed);
-                    done += 8;
-                }
-                for ((sample, &left), &right) in out[done..].iter_mut().zip(&a[done..]).zip(&b[done..]) {
-                    *sample = weight_one(left, right, weight);
-                }
-            }
-            true
-        }
-
         /// The rounded average of `a` and `b` into `dst`, all of one length.
         $(#[$feature])*
         $visibility fn avg_row(dst: &mut [u8], a: &[u8], b: &[u8]) -> bool {
@@ -264,6 +199,71 @@ macro_rules! predict_kernels {
                     let top = nine::<5>(src, start);
                     let bottom = nine::<5>(src, start + stride);
                     out.copy_from_slice(&chroma8(&top, &bottom, xf, yf)[..4]);
+                }
+            }
+            true
+        }
+
+        /// The rounded average of two blocks of `size`, whose rows are
+        /// `size.0` apart, into `dst` with rows `dst_stride` apart.
+        $(#[$feature])*
+        $visibility fn avg_block(
+            dst: &mut [u8],
+            dst_stride: usize,
+            a: &[u8],
+            b: &[u8],
+            size: (usize, usize),
+        ) -> bool {
+            let (w, h) = size;
+            if w == 0 || h == 0 || a.len() < w * h || b.len() < w * h {
+                return false;
+            }
+            if dst.len() < (h - 1) * dst_stride + w {
+                return false;
+            }
+            for row in 0..h {
+                let out = &mut dst[row * dst_stride..row * dst_stride + w];
+                avg_row(out, &a[row * w..row * w + w], &b[row * w..row * w + w]);
+            }
+            true
+        }
+
+        /// Two blocks mixed by `weight`, laid out as for `avg_block`.
+        /// `false` means the weights are out of the kernels' range, or a
+        /// block does not fit, and nothing was done.
+        $(#[$feature])*
+        $visibility fn weight_block(
+            dst: &mut [u8],
+            dst_stride: usize,
+            a: &[u8],
+            b: &[u8],
+            size: (usize, usize),
+            weight: $crate::mc_block::BiWeight,
+        ) -> bool {
+            use $crate::mc_block::{at8, at16, weight_one};
+            let (w, h) = size;
+            if !weight.fits() || w == 0 || h == 0 || a.len() < w * h || b.len() < w * h {
+                return false;
+            }
+            if dst.len() < (h - 1) * dst_stride + w {
+                return false;
+            }
+            for row in 0..h {
+                let out = &mut dst[row * dst_stride..row * dst_stride + w];
+                let (a, b) = (&a[row * w..row * w + w], &b[row * w..row * w + w]);
+                let mut done = 0;
+                while done + 16 <= w {
+                    let mixed = weight16(at16(a, done), at16(b, done), weight);
+                    out[done..done + 16].copy_from_slice(&mixed);
+                    done += 16;
+                }
+                if done + 8 <= w {
+                    let mixed = weight8(at8(a, done), at8(b, done), weight);
+                    out[done..done + 8].copy_from_slice(&mixed);
+                    done += 8;
+                }
+                for ((sample, &left), &right) in out[done..].iter_mut().zip(&a[done..]).zip(&b[done..]) {
+                    *sample = weight_one(left, right, weight);
                 }
             }
             true

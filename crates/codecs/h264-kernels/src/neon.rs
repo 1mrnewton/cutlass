@@ -1,20 +1,25 @@
-//! The NEON version of each kernel. Everything here is safe Rust: a vector
-//! is made from an array's bytes and written back to an array, and no
-//! function takes a pointer. Each function is built for NEON, so only the
-//! callers in this crate that promise NEON is present reach them.
+//! The NEON version of each kernel. No function takes a pointer: a vector
+//! is loaded from a fixed-size array and stored back to one. The loads and
+//! stores in [`load16`], [`store16`], [`load_two`] and [`store_two`] go
+//! straight between the array and a vector register, rather than through
+//! general registers, and the array's type alone keeps them in bounds:
+//! each touches at most the array's own bytes. Each function is built for
+//! NEON, so only the callers in this crate that promise NEON is present
+//! reach them.
 
 use core::arch::aarch64::{
     int16x8_t, uint8x8_t, uint8x16_t, uint16x8_t, vabdq_s16, vabdq_u8, vaddl_u8, vaddq_s16,
     vaddq_u8, vaddq_u16, vaddw_u8, vandq_s16, vandq_u8, vandq_u16, vbicq_u8, vbslq_s16, vbslq_u8,
     vcgezq_s8, vcgezq_s16, vcltq_s16, vcltq_u8, vcombine_s8, vcombine_u8, vcombine_u64,
     vcreate_u64, vdup_n_u8, vdupq_n_s8, vdupq_n_s16, vdupq_n_u8, vget_high_u8, vget_low_u8,
-    vgetq_lane_u64, vhaddq_u8, vmaxq_s8, vmaxq_s16, vmaxq_u8, vmaxvq_u8, vminq_s8, vminq_s16,
-    vminq_u8, vmovl_u8, vnegq_s8, vnegq_s16, vqaddq_u8, vqmovun_s16, vqrshrn_n_s16, vqsubq_u8,
-    vreinterpret_u8_u64, vreinterpretq_s8_u8, vreinterpretq_s16_u16, vreinterpretq_u8_s8,
-    vreinterpretq_u8_u16, vreinterpretq_u8_u32, vreinterpretq_u8_u64, vreinterpretq_u16_u8,
-    vreinterpretq_u32_u8, vreinterpretq_u64_u8, vrhaddq_u8, vrshrn_n_u16, vshlq_n_s16, vshlq_n_u16,
-    vshrq_n_s16, vsubl_u8, vsubq_s16, vsubq_u8, vtrn1q_u8, vtrn1q_u16, vtrn1q_u32, vtrn2q_u8,
-    vtrn2q_u16, vtrn2q_u32, vuzp1q_u8, vuzp2q_u8, vzip1_u8, vzip1q_u64, vzip2_u8, vzip2q_u64,
+    vgetq_lane_u64, vhaddq_u8, vld1_u8, vld1q_u8, vmaxq_s8, vmaxq_s16, vmaxq_u8, vmaxvq_u8,
+    vminq_s8, vminq_s16, vminq_u8, vmovl_u8, vnegq_s8, vnegq_s16, vqaddq_u8, vqmovun_s16,
+    vqrshrn_n_s16, vqsubq_u8, vreinterpret_u8_u64, vreinterpretq_s8_u8, vreinterpretq_s16_u16,
+    vreinterpretq_u8_s8, vreinterpretq_u8_u16, vreinterpretq_u8_u32, vreinterpretq_u8_u64,
+    vreinterpretq_u16_u8, vreinterpretq_u32_u8, vreinterpretq_u64_u8, vrhaddq_u8, vrshrn_n_u16,
+    vshlq_n_s16, vshlq_n_u16, vshrq_n_s16, vst1_u8, vst1q_u8, vsubl_u8, vsubq_s16, vsubq_u8,
+    vtrn1q_u8, vtrn1q_u16, vtrn1q_u32, vtrn2q_u8, vtrn2q_u16, vtrn2q_u32, vuzp1q_u8, vuzp2q_u8,
+    vzip1_u8, vzip1q_u64, vzip2_u8, vzip2q_u64,
 };
 
 use crate::deblock::{ChromaRows, Lines, Rows};
@@ -32,8 +37,12 @@ pub(crate) use crate::neon_residual::{dc_add, idct4_add, idct8_add};
 #[inline]
 #[target_feature(enable = "neon")]
 pub(crate) fn load16(bytes: &[u8; 16]) -> uint8x16_t {
-    let value = u128::from_le_bytes(*bytes);
-    pair(value as u64, (value >> 64) as u64)
+    // SAFETY: `bytes` is sixteen readable bytes, exactly what the load
+    // reads, and it needs no alignment.
+    #[allow(unsafe_code)]
+    unsafe {
+        vld1q_u8(bytes.as_ptr())
+    }
 }
 
 /// A vector whose low half is `low`'s bytes and whose high half is `high`'s.
@@ -57,9 +66,41 @@ pub(crate) fn halves(vector: uint8x16_t) -> ([u8; 8], [u8; 8]) {
 #[inline]
 #[target_feature(enable = "neon")]
 pub(crate) fn store16(vector: uint8x16_t, bytes: &mut [u8; 16]) {
-    let (low, high) = halves(vector);
-    bytes[..8].copy_from_slice(&low);
-    bytes[8..].copy_from_slice(&high);
+    // SAFETY: `bytes` is sixteen writable bytes, exactly what the store
+    // writes, and it needs no alignment.
+    #[allow(unsafe_code)]
+    unsafe {
+        vst1q_u8(bytes.as_mut_ptr(), vector);
+    }
+}
+
+/// A vector of the first eight bytes of `low`, then the first eight of
+/// `high`.
+#[inline]
+#[target_feature(enable = "neon")]
+fn load_two<const N: usize>(low: &[u8; N], high: &[u8; N]) -> uint8x16_t {
+    const { assert!(N >= 8) };
+    // SAFETY: each array holds at least the eight readable bytes its load
+    // reads, which need no alignment.
+    #[allow(unsafe_code)]
+    unsafe {
+        vcombine_u8(vld1_u8(low.as_ptr()), vld1_u8(high.as_ptr()))
+    }
+}
+
+/// The low half of `vector` into the first eight bytes of `low`, and its
+/// high half into the first eight of `high`.
+#[inline]
+#[target_feature(enable = "neon")]
+fn store_two<const N: usize>(vector: uint8x16_t, low: &mut [u8; N], high: &mut [u8; N]) {
+    const { assert!(N >= 8) };
+    // SAFETY: each array holds at least the eight writable bytes its store
+    // writes, which need no alignment.
+    #[allow(unsafe_code)]
+    unsafe {
+        vst1_u8(low.as_mut_ptr(), vget_low_u8(vector));
+        vst1_u8(high.as_mut_ptr(), vget_high_u8(vector));
+    }
 }
 
 /// Turns the 8×8 block in the low halves of `v`, and the one in the high
@@ -118,12 +159,7 @@ fn load_rows(rows: &Rows) -> [uint8x16_t; 8] {
 /// each half is turned, so vector `n` holds sample `n` of all sixteen lines.
 #[target_feature(enable = "neon")]
 fn load_lines(lines: &Lines) -> [uint8x16_t; 8] {
-    let row = |index: usize| {
-        pair(
-            u64::from_le_bytes(lines[index]),
-            u64::from_le_bytes(lines[index + 8]),
-        )
-    };
+    let row = |index: usize| load_two(&lines[index], &lines[index + 8]);
     turn!([
         row(0),
         row(1),
@@ -140,10 +176,9 @@ fn load_lines(lines: &Lines) -> [uint8x16_t; 8] {
 #[target_feature(enable = "neon")]
 fn store_lines(columns: [uint8x16_t; 8], lines: &mut Lines) {
     let rows = turn!(columns);
-    for (index, row) in rows.into_iter().enumerate() {
-        let (low, high) = halves(row);
-        lines[index] = low;
-        lines[index + 8] = high;
+    let (first, second) = lines.split_at_mut(8);
+    for ((row, low), high) in rows.into_iter().zip(first).zip(second) {
+        store_two(row, low, high);
     }
 }
 
@@ -630,7 +665,7 @@ pub(crate) fn luma_mb(plane: &mut [u8], edges: &crate::edge::MbEdges) -> bool {
             return false;
         };
         // Each row from four samples before the macroblock to its end.
-        let rows = rows!(
+        let mut rows = rows!(
             window,
             down,
             20,
@@ -639,44 +674,46 @@ pub(crate) fn luma_mb(plane: &mut [u8], edges: &crate::edge::MbEdges) -> bool {
             ]
         );
         if let Some(filter) = v0 {
-            // The boundary: sixteen lines of the eight samples around it.
-            let line = |row: &[u8; 20]| {
-                let mut samples = [0u8; 8];
-                samples.copy_from_slice(&row[..8]);
-                u64::from_le_bytes(samples)
-            };
+            // The boundary: sixteen lines of the eight samples around it,
+            // rows 0 to 7 in the low halves and 8 to 15 in the high ones.
+            let [
+                r0,
+                r1,
+                r2,
+                r3,
+                r4,
+                r5,
+                r6,
+                r7,
+                r8,
+                r9,
+                r10,
+                r11,
+                r12,
+                r13,
+                r14,
+                r15,
+            ] = &mut rows;
             let v = turn!([
-                pair(line(rows[0]), line(rows[8])),
-                pair(line(rows[1]), line(rows[9])),
-                pair(line(rows[2]), line(rows[10])),
-                pair(line(rows[3]), line(rows[11])),
-                pair(line(rows[4]), line(rows[12])),
-                pair(line(rows[5]), line(rows[13])),
-                pair(line(rows[6]), line(rows[14])),
-                pair(line(rows[7]), line(rows[15])),
+                load_two(r0, r8),
+                load_two(r1, r9),
+                load_two(r2, r10),
+                load_two(r3, r11),
+                load_two(r4, r12),
+                load_two(r5, r13),
+                load_two(r6, r14),
+                load_two(r7, r15),
             ]);
             if let Some((v, _)) = filter8!(v, filter) {
-                let put = |row: &mut [u8; 20], line: u64| {
-                    row[..8].copy_from_slice(&line.to_le_bytes());
-                };
-                let [b0, b1, b2, b3, b4, b5, b6, b7] =
-                    turn!(v).map(|line| vreinterpretq_u64_u8(line));
-                put(rows[0], vgetq_lane_u64::<0>(b0));
-                put(rows[1], vgetq_lane_u64::<0>(b1));
-                put(rows[2], vgetq_lane_u64::<0>(b2));
-                put(rows[3], vgetq_lane_u64::<0>(b3));
-                put(rows[4], vgetq_lane_u64::<0>(b4));
-                put(rows[5], vgetq_lane_u64::<0>(b5));
-                put(rows[6], vgetq_lane_u64::<0>(b6));
-                put(rows[7], vgetq_lane_u64::<0>(b7));
-                put(rows[8], vgetq_lane_u64::<1>(b0));
-                put(rows[9], vgetq_lane_u64::<1>(b1));
-                put(rows[10], vgetq_lane_u64::<1>(b2));
-                put(rows[11], vgetq_lane_u64::<1>(b3));
-                put(rows[12], vgetq_lane_u64::<1>(b4));
-                put(rows[13], vgetq_lane_u64::<1>(b5));
-                put(rows[14], vgetq_lane_u64::<1>(b6));
-                put(rows[15], vgetq_lane_u64::<1>(b7));
+                let [b0, b1, b2, b3, b4, b5, b6, b7] = turn!(v);
+                store_two(b0, r0, r8);
+                store_two(b1, r1, r9);
+                store_two(b2, r2, r10);
+                store_two(b3, r3, r11);
+                store_two(b4, r4, r12);
+                store_two(b5, r5, r13);
+                store_two(b6, r6, r14);
+                store_two(b7, r7, r15);
             }
         }
         if v1.is_some() || v2.is_some() || v3.is_some() {

@@ -4,9 +4,10 @@
 //! # Memory safety
 //!
 //! No kernel takes a pointer or a length. Each takes fixed-size arrays and
-//! reads and writes only those, in safe Rust: a vector is built from an
-//! array's bytes and written back to one, never loaded through an address.
-//! A wrong index in a kernel is a panic, not a stray read or write.
+//! reads and writes only those: a vector is loaded from an array and
+//! stored back to one, through a load or store no wider than the array, so
+//! its type keeps it in bounds. A wrong index in a kernel is a panic, not
+//! a stray read or write.
 //!
 //! The whole-block NEON predictors in `neon_qpel` are the exception: they
 //! load and store through pointers into the caller's slices, after one

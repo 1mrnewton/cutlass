@@ -5584,12 +5584,25 @@ mod tests {
             "cabac=1:slices=4:bframes=2:ref=2:keyint=30:scenecut=0".to_owned(),
             "main",
         ));
+        // Constrained intra prediction over noise: intra 8×8 blocks of
+        // P and B pictures whose upper-left neighbour is inter, so the
+        // corner sample is missing while those above and left are not.
+        cases.push((
+            "high constrained intra noisy".to_owned(),
+            "cabac=1:8x8dct=1:constrained-intra=1:bframes=2:keyint=8:scenecut=0".to_owned(),
+            "high",
+        ));
         for (index, (name, params, profile)) in cases.iter().enumerate() {
+            let noise = if name.contains("noisy") {
+                ",noise=alls=80:allf=t"
+            } else {
+                ""
+            };
             let h264 = dir.join(format!("{index}.h264"));
             let yuv = dir.join(format!("{index}.yuv"));
             let encoded = Command::new(&ff)
                 .args(["-y", "-loglevel", "error", "-f", "lavfi", "-i"])
-                .arg(format!("testsrc2=size={width}x{height}:rate=30"))
+                .arg(format!("testsrc2=size={width}x{height}:rate=30{noise}"))
                 .args([
                     "-frames:v",
                     &frames.to_string(),

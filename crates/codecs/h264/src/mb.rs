@@ -4762,6 +4762,7 @@ struct IntraNear {
     left: bool,
     above: bool,
     above_right: bool,
+    above_left: bool,
 }
 
 impl IntraNear {
@@ -4780,6 +4781,7 @@ impl IntraNear {
             left: there(-1, 0),
             above: there(0, -1),
             above_right: there(1, -1),
+            above_left: there(-1, -1),
         }
     }
 }
@@ -4934,13 +4936,25 @@ fn intra_frame_scaled<S: Sample>(
                     *sample = pic.y[(y + row) * stride + x - 1];
                 }
             }
-            let corner = if above_ok && left_ok {
+            // The corner: over the macroblock above and left, the one
+            // above, the one left, or inside this one.
+            let corner_ok = match i {
+                0 => near.above_left,
+                1 => near.above,
+                2 => near.left,
+                _ => true,
+            };
+            let corner = if corner_ok {
                 pic.y[(y - 1) * stride + x - 1]
             } else {
                 S::mid()
             };
             let mode = mb.mode4[by * 4 + bx];
-            let pred = pred8_from(mode, (&raw_above, &raw_left, corner), (above_ok, left_ok));
+            let pred = pred8_from(
+                mode,
+                (&raw_above, &raw_left, corner),
+                (above_ok, left_ok, corner_ok),
+            );
             put_block(&mut pic.y, stride, x, y, &pred, 8, 1);
             if luma_cbp & (1 << i) == 0 {
                 continue;
@@ -5535,29 +5549,47 @@ fn pred8_block<S: Sample>(
     if left_ok {
         read_col(samples, stride, height, (x - 1, y, down), &mut raw_left);
     }
-    let corner = if above_ok && left_ok {
+    // The corner is there on its own terms: under constrained intra
+    // prediction, or past the start of a slice, the block above and left
+    // can be missing while those above and left are not.
+    let corner_ok = (mx * 4 + bx).checked_sub(1).is_some_and(|ax| {
+        row_ok(
+            pic,
+            ax,
+            (my * 4 + by) as i32 - 1,
+            mb.slice,
+            constrained,
+            here,
+        )
+    });
+    let corner = if corner_ok {
         pix(samples, stride, height, x - 1, y - down)
     } else {
         S::mid()
     };
-    pred8_from(mode, (&raw_above, &raw_left, corner), (above_ok, left_ok))
+    pred8_from(
+        mode,
+        (&raw_above, &raw_left, corner),
+        (above_ok, left_ok, corner_ok),
+    )
 }
 
 /// Clause 8.3.2: an 8×8 block of `mode` from the samples above it (with
 /// those above and to the right), left of it and at its corner, before
-/// the reference sample filter, and whether those above and left are
-/// there.
+/// the reference sample filter of clause 8.3.2.2.1, and whether those
+/// above, left and at the corner are there.
 fn pred8_from<S: Sample>(
     mode: u8,
     (raw_above, raw_left, corner): (&[S; 16], &[S; 8], S),
-    (above_ok, left_ok): (bool, bool),
+    (above_ok, left_ok, corner_ok): (bool, bool, bool),
 ) -> [S; 64] {
-    let above = filter_row(raw_above, corner, above_ok, left_ok);
-    let left = filter_col(raw_left, corner, above_ok, left_ok);
-    let corner = if above_ok && left_ok {
-        avg3(raw_above[0], corner, raw_left[0])
-    } else {
-        corner
+    let above = filter_row(raw_above, corner, above_ok, corner_ok);
+    let left = filter_col(raw_left, corner, left_ok, corner_ok);
+    let corner = match (corner_ok, above_ok, left_ok) {
+        (true, true, true) => avg3(raw_above[0], corner, raw_left[0]),
+        (true, true, false) => avg3(corner, corner, raw_above[0]),
+        (true, false, true) => avg3(corner, corner, raw_left[0]),
+        _ => corner,
     };
     // The three plain modes fill the block from one value or one edge; a
     // mode whose edge is missing falls to DC, as in `pred8_at`.
@@ -5781,12 +5813,15 @@ fn avg2<S: Sample>(a: S, b: S) -> S {
     S::clip((a + b + 1) >> 1)
 }
 
-fn filter_row<S: Sample>(raw: &[S; 16], corner: S, above_ok: bool, left_ok: bool) -> [S; 16] {
+/// The samples above an 8×8 block after the filter of clause 8.3.2.2.1:
+/// none when they are not there, and the first from `corner` only when
+/// that is there.
+fn filter_row<S: Sample>(raw: &[S; 16], corner: S, above_ok: bool, corner_ok: bool) -> [S; 16] {
     let mut out = *raw;
     if !above_ok {
         return out;
     }
-    let left = if left_ok { corner } else { raw[0] };
+    let left = if corner_ok { corner } else { raw[0] };
     out[0] = avg3(left, raw[0], raw[1]);
     for i in 1..15 {
         out[i] = avg3(raw[i - 1], raw[i], raw[i + 1]);
@@ -5795,12 +5830,14 @@ fn filter_row<S: Sample>(raw: &[S; 16], corner: S, above_ok: bool, left_ok: bool
     out
 }
 
-fn filter_col<S: Sample>(raw: &[S; 8], corner: S, above_ok: bool, left_ok: bool) -> [S; 8] {
+/// The samples left of an 8×8 block after that filter, as for
+/// [`filter_row`].
+fn filter_col<S: Sample>(raw: &[S; 8], corner: S, left_ok: bool, corner_ok: bool) -> [S; 8] {
     let mut out = *raw;
     if !left_ok {
         return out;
     }
-    let up = if above_ok { corner } else { raw[0] };
+    let up = if corner_ok { corner } else { raw[0] };
     out[0] = avg3(up, raw[0], raw[1]);
     for i in 1..7 {
         out[i] = avg3(raw[i - 1], raw[i], raw[i + 1]);

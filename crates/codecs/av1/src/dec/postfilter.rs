@@ -14,9 +14,10 @@ use crate::dsp::lf::{filter_horizontal_edge, filter_vertical_edge};
 use crate::dsp::lr::{LrPlane, LrScratch, LrUnit, lr_planes, lr_planes_stripes, lr_save_bounds};
 use crate::dsp::superres::upscale_plane;
 
-use super::frame::{FrameState, Picture, lf_h4, lf_w4};
+use super::frame::{FrameState, Picture};
 use super::obu::{FrameHeader, SequenceHeader};
 use super::types::{GLOBAL_GLOBALMV, GLOBALMV, INTRA_FRAME, NEARESTMV, NONE, bh4, bw4};
+use cutlass_simd::av1::lfmask::{self, EdgeUnits, Edges, edge_codes};
 
 #[inline]
 fn mode_type(y_mode: u8) -> usize {
@@ -143,11 +144,30 @@ impl LfLevels {
     }
 }
 
-/// The [`LfInfo`] of every 4x4 unit of a frame, laid out like
-/// [`FrameState::mi`].
+impl LfInfo {
+    /// The info as the bytes [`FilterInfo`] keeps: the levels first.
+    #[inline(always)]
+    pub fn bytes(self) -> [u8; 8] {
+        let [a, b, c, d] = self.lvl;
+        [a, b, c, d, self.flags, self.bsize, self.pad[0], self.pad[1]]
+    }
+
+    /// The info of [`Self::bytes`].
+    pub fn of(b: [u8; 8]) -> Self {
+        Self {
+            lvl: [b[0], b[1], b[2], b[3]],
+            flags: b[4],
+            bsize: b[5],
+            pad: [b[6], b[7]],
+        }
+    }
+}
+
+/// The [`LfInfo`] of every 4x4 unit of a frame as its
+/// [`bytes`](LfInfo::bytes), laid out like [`FrameState::mi`].
 #[derive(Default)]
 pub struct FilterInfo {
-    pub units: Vec<LfInfo>,
+    pub units: Vec<[u8; 8]>,
     pub stride: usize,
 }
 
@@ -156,7 +176,7 @@ impl FilterInfo {
     /// until their blocks are stored.
     pub fn size_for(&mut self, fs: &FrameState) {
         self.stride = fs.mi_stride;
-        self.units.resize(fs.lf_tx[0].len(), LfInfo::default());
+        self.units.resize(fs.lf_tx[0].len(), [0; 8]);
     }
 
     /// Stores the info of a block at luma 4x4 position `(row, col)`, in
@@ -173,7 +193,7 @@ impl FilterInfo {
         for y in 0..h4 {
             let at = (row + y) * self.stride + col;
             if let Some(d) = self.units.get_mut(at..at + w4) {
-                d.fill(info);
+                d.fill(info.bytes());
             }
         }
     }
@@ -224,7 +244,7 @@ impl FilterInfo {
                 );
                 for rr in r..bottom {
                     if let Some(out) = self.units.get_mut(rr * st + c..rr * st + end) {
-                        out.fill(info);
+                        out.fill(info.bytes());
                     }
                 }
                 ends[c] = (bottom as u16, (end - c) as u8);
@@ -236,7 +256,7 @@ impl FilterInfo {
     /// Whether the block at luma 4x4 position `(row, col)` is skipped.
     #[inline(always)]
     pub fn skip(&self, row: usize, col: usize) -> bool {
-        self.units[row * self.stride + col].flags & LF_SKIP != 0
+        self.units[row * self.stride + col][4] & LF_SKIP != 0
     }
 }
 
@@ -287,79 +307,213 @@ impl<'a> LfPlane<'a> {
         }
     }
 
-    /// Calls `emit(unit, filter_size, lvl)` for the filtered edges of the
-    /// unit row `ur` (plane 4x4 units), from left to right. `filter_size`
-    /// follows [`crate::dsp::lf`], and `lvl` is not 0.
-    #[inline]
-    fn row_edges(&self, ur: usize, mut emit: impl FnMut(usize, u8, u8)) {
+    /// Writes the edges of the unit row `ur` (plane 4x4 units) to
+    /// `row.codes`: for a unit whose left side (pass 0) or top side
+    /// (pass 1) is an edge with a level, its filter size (following
+    /// [`crate::dsp::lf`]) times 256 plus the level; 0 for the other
+    /// units. Returns how many units the row has, 0 for a row without
+    /// edges.
+    ///
+    /// Branch free, so the compiler works on many units at once: a unit
+    /// starts a vertical edge when its column is a multiple of its
+    /// transform's width, and a horizontal one when its row is a
+    /// multiple of the transform's height. The filter size follows from
+    /// the smaller of the transform sizes on the two sides.
+    fn row_codes(&self, ur: usize, row: &mut LfRow) -> usize {
         let pass0 = self.pass == 0;
-        if ur >= self.nr_vis || (!pass0 && ur == 0) {
-            return;
+        let n = self.nc_vis;
+        if ur >= self.nr_vis || (!pass0 && ur == 0) || n == 0 {
+            return 0;
         }
-        let (sx, sy) = (self.sx, self.sy);
-        let fs = self.fs;
-        let st = fs.mi_stride;
-        let tx_row = &self.tx[ur * st..ur * st + self.nc];
-        let prev_row = if pass0 {
-            tx_row
-        } else {
-            &self.tx[(ur - 1) * st..(ur - 1) * st + self.nc]
-        };
+        let sy = self.sy;
+        let st = self.fs.mi_stride;
+        let units = &self.info.units;
         // The row of block info holding the unit's bottom-right 4x4 for
         // chroma, and the row above it for the horizontal edges.
         let r = (ur << sy) | sy;
-        let units = &self.info.units;
-        let mi_row = &units[r * st..(r + 1) * st];
-        let mi_prev = if pass0 {
-            mi_row
+        let cur = &self.tx[ur * st..ur * st + n];
+        let key = (self.plane, self.pass, ur);
+        let (across, edges) = if pass0 {
+            (cur, None)
         } else {
-            let pr = r - (1 << sy);
-            &units[pr * st..(pr + 1) * st]
+            // The row above's levels, if they are the last ones made.
+            if row.lvl_of == Some((self.plane, 1, ur - 1)) {
+                core::mem::swap(&mut row.lvl, &mut row.lvl_prev);
+            } else {
+                let pr = r - (1 << sy);
+                self.levels(&units[pr * st..(pr + 1) * st], &mut row.lvl_prev[..n]);
+            }
+            let zeros = ur.trailing_zeros().min(7) as u8;
+            (
+                &self.tx[(ur - 1) * st..(ur - 1) * st + n],
+                Some(Edges::Top { zeros }),
+            )
         };
+        self.levels(&units[r * st..(r + 1) * st], &mut row.lvl[..n]);
+        row.lvl_of = Some(key);
+        let luma = self.plane == 0;
+        row.n = n;
+        let codes = &mut row.codes[..n];
+        let masks = &mut row.masks[..n.div_ceil(16)];
+        let (out, _) = codes.as_chunks_mut::<16>();
+        let whole = out.len() * 16;
+        let dims = cur.as_chunks::<16>().0;
+        let lvl = row.lvl.as_chunks::<16>().0;
+        // For vertical edges, the sixteen units before: none at first.
+        let before = |c: &[[u8; 16]], k: usize| if k == 0 { [0; 16] } else { c[k - 1] };
+        let (across_c, lvl_prev) = (across.as_chunks::<16>().0, row.lvl_prev.as_chunks::<16>().0);
+        for (k, (o, mask)) in out.iter_mut().zip(masks.iter_mut()).enumerate() {
+            let u = if pass0 {
+                EdgeUnits {
+                    dims: dims[k],
+                    across: before(dims, k),
+                    lvl: lvl[k],
+                    lvl_across: before(lvl, k),
+                }
+            } else {
+                EdgeUnits {
+                    dims: dims[k],
+                    across: across_c[k],
+                    lvl: lvl[k],
+                    lvl_across: lvl_prev[k],
+                }
+            };
+            (*o, *mask) = edge_codes(
+                &u,
+                edges.unwrap_or(Edges::Left {
+                    first: (16 * k) as u8,
+                }),
+                luma,
+            );
+        }
+        if whole < n {
+            // The last units, with idle lanes after them.
+            let rest = n - whole;
+            let pad = |s: &[u8]| {
+                let mut a = [0u8; 16];
+                a[..rest].copy_from_slice(&s[whole..n]);
+                a
+            };
+            let k = whole / 16;
+            let u = if pass0 {
+                EdgeUnits {
+                    dims: pad(cur),
+                    across: before(dims, k),
+                    lvl: pad(&row.lvl),
+                    lvl_across: before(lvl, k),
+                }
+            } else {
+                EdgeUnits {
+                    dims: pad(cur),
+                    across: pad(across),
+                    lvl: pad(&row.lvl),
+                    lvl_across: pad(&row.lvl_prev),
+                }
+            };
+            let first = Edges::Left { first: whole as u8 };
+            let (c, mask) = edge_codes(&u, edges.unwrap_or(first), luma);
+            codes[whole..].copy_from_slice(&c[..rest]);
+            masks[k] = mask & ((1 << rest) - 1);
+        }
+        if pass0 {
+            // Nothing to the left of the frame.
+            codes[0] = 0;
+            masks[0] &= !1;
+        }
+        n
+    }
+
+    /// The level (of this plane and pass) of each unit of a row whose
+    /// blocks' info is `mi`.
+    fn levels(&self, mi: &[[u8; 8]], out: &mut [u8]) {
         let li = self.li;
-        let mut uc = usize::from(pass0);
-        while uc < self.nc_vis {
-            let tx = tx_row[uc];
-            // The units of this transform block left in the row: none of
-            // them starts a vertical edge, and they all lie on a
-            // horizontal edge or none does. A transform block starts at
-            // a multiple of its width.
-            let at = uc;
-            let rest = (at | (lf_w4(tx) - 1)) + 1;
-            let (t, pos) = if pass0 {
-                uc = rest;
-                (lf_w4(tx), at)
-            } else {
-                uc += 1;
-                (lf_h4(tx), ur)
-            };
-            if pos & (t - 1) != 0 {
-                uc = rest;
-                continue;
+        let mut done = 0;
+        if self.sx == 0 {
+            for (o, m) in out
+                .as_chunks_mut::<16>()
+                .0
+                .iter_mut()
+                .zip(mi.as_chunks::<16>().0)
+            {
+                *o = lfmask::levels(m, li);
+                done += 16;
             }
-            let uc = at;
-            let c = (uc << sx) | sx;
-            let m = &mi_row[c];
-            // In samples.
-            let (base, pm) = if pass0 {
-                (4 * lf_w4(tx_row[uc - 1]).min(t), &mi_row[c - (1 << sx)])
-            } else {
-                (4 * lf_h4(prev_row[uc]).min(t), &mi_prev[c])
-            };
-            let filter_size = if self.plane == 0 {
-                base.min(16)
-            } else if base >= 8 {
-                6
-            } else {
-                4
-            };
-            let mut lvl = m.lvl[li];
-            if lvl == 0 {
-                lvl = pm.lvl[li];
+        } else {
+            for (o, m) in out
+                .as_chunks_mut::<16>()
+                .0
+                .iter_mut()
+                .zip(mi.as_chunks::<32>().0)
+            {
+                *o = lfmask::levels_odd(m, li);
+                done += 16;
             }
-            if lvl != 0 {
-                emit(uc, filter_size as u8, lvl);
+        }
+        let sx = self.sx;
+        for (i, o) in out.iter_mut().enumerate().skip(done) {
+            *o = mi[(i << sx) | sx][li];
+        }
+    }
+}
+
+/// Scratch for [`LfPlane::row_codes`], as long as a plane row of units.
+struct LfRow {
+    codes: Vec<u16>,
+    /// The units whose code is not 0, sixteen to an entry.
+    masks: Vec<u16>,
+    /// The units of the last row.
+    n: usize,
+    /// The plane, pass and row `lvl` holds the levels of.
+    lvl_of: Option<(usize, usize, usize)>,
+    lvl: Vec<u8>,
+    lvl_prev: Vec<u8>,
+}
+
+impl LfRow {
+    fn new(nc: usize) -> Self {
+        Self {
+            codes: vec![0; nc],
+            masks: vec![0; nc.div_ceil(16)],
+            n: 0,
+            lvl_of: None,
+            lvl: vec![0; nc],
+            lvl_prev: vec![0; nc],
+        }
+    }
+}
+
+impl LfRow {
+    /// Calls `edge(unit, code)` for each unit of the row
+    /// [`LfPlane::row_codes`] gave with an edge, from left to right.
+    #[inline]
+    fn edges(&self, mut edge: impl FnMut(usize, u16)) {
+        for (k, &m) in self.masks[..self.n.div_ceil(16)].iter().enumerate() {
+            let mut m = m;
+            while m != 0 {
+                let i = 16 * k + m.trailing_zeros() as usize;
+                m &= m - 1;
+                edge(i, self.codes[i]);
             }
+        }
+    }
+
+    /// Calls `run(start, len, code)` for the runs of units of one code,
+    /// from left to right.
+    #[inline]
+    fn runs(&self, mut run: impl FnMut(usize, usize, u16)) {
+        let (mut start, mut len, mut code) = (0, 0, 0);
+        self.edges(|i, c| {
+            if c == code && start + len == i {
+                len += 1;
+                return;
+            }
+            if len != 0 {
+                run(start, len, code);
+            }
+            (start, len, code) = (i, 1, c);
+        });
+        if len != 0 {
+            run(start, len, code);
         }
     }
 }
@@ -466,6 +620,7 @@ fn lf_own_rows(u0: usize, u1: usize, first: bool, last: bool) -> core::ops::Rang
 fn lf_chunk<P: Pixel>(job: &LfJob<'_, '_>, data: &mut [P], row0: usize, sharp: u8, bd: u32) {
     let (u0, u1, stride) = (job.u0, job.u1, job.stride);
     let nc = job.vert.nc;
+    let mut row = LfRow::new(nc);
     // Vertical edges: the edges of a strip of unit rows, gathered into
     // runs down each column that has any. A column's run is filtered when
     // an edge does not continue it, and at the end of the strip.
@@ -487,11 +642,14 @@ fn lf_chunk<P: Pixel>(job: &LfJob<'_, '_>, data: &mut [P], row0: usize, sharp: u
             );
         };
         for i in 0..rows {
-            job.vert.row_edges(strip + i, |uc, size, lvl| {
+            if job.vert.row_codes(strip + i, &mut row) == 0 {
+                continue;
+            }
+            row.edges(|uc, code| {
                 let Some(col) = cols.get_mut(uc) else {
                     return;
                 };
-                match col.take(i, size, lvl) {
+                match col.take(i, (code >> 8) as u8, code as u8) {
                     Some(ended) if ended.lvl != 0 => down(uc, ended, data),
                     Some(_) => open.push(uc as u32),
                     None => {}
@@ -505,7 +663,7 @@ fn lf_chunk<P: Pixel>(job: &LfJob<'_, '_>, data: &mut [P], row0: usize, sharp: u
     }
     // Horizontal edges whose samples stay inside the chunk.
     for ur in lf_own_rows(u0, u1, job.first, job.last) {
-        lf_horz_row(job.horz, ur, data, stride, row0, sharp, bd);
+        lf_horz_row(job.horz, ur, data, stride, row0, sharp, bd, &mut row);
     }
 }
 
@@ -517,29 +675,24 @@ fn lf_horz_row<P: Pixel>(
     row0: usize,
     sharp: u8,
     bd: u32,
+    row: &mut LfRow,
 ) {
-    let across = |run: EdgeRun, data: &mut [P]| {
-        if run.lvl != 0 {
-            filter_horizontal_edge(
-                data,
-                stride,
-                run.start as usize * 4,
-                ur * 4 - row0,
-                run.len as usize * 4,
-                usize::from(run.size),
-                run.lvl,
-                sharp,
-                bd,
-            );
-        }
-    };
-    let mut run = EdgeRun::default();
-    lp.row_edges(ur, |uc, size, lvl| {
-        if let Some(ended) = run.take(uc, size, lvl) {
-            across(ended, data);
-        }
+    if lp.row_codes(ur, row) == 0 {
+        return;
+    }
+    row.runs(|start, len, code| {
+        filter_horizontal_edge(
+            data,
+            stride,
+            start * 4,
+            ur * 4 - row0,
+            len * 4,
+            usize::from(code >> 8),
+            code as u8,
+            sharp,
+            bd,
+        );
     });
-    across(run, data);
 }
 
 /// Loop filter process (7.14), on up to `threads` threads.
@@ -657,9 +810,10 @@ pub fn loop_filter_scratch<P: Pixel>(
                 }
             }
             let data = &mut pic.planes[l.0].data[..];
+            let mut row = LfRow::new(l.2.nc);
             for ur in 1..nr {
                 if !own[ur] {
-                    lf_horz_row(&l.2, ur, data, strides[i], 0, sharp, bd);
+                    lf_horz_row(&l.2, ur, data, strides[i], 0, sharp, bd, &mut row);
                 }
             }
         }

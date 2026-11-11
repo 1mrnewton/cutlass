@@ -101,7 +101,7 @@ fn a_stored_block_covers_its_units_inside_the_frame() {
         for c in 0..fs.mi_cols {
             let inside = (8..12).contains(&r);
             assert_eq!(
-                info.units[r * st + c] == block,
+                info.units[r * st + c] == block.bytes(),
                 inside,
                 "row {r} column {c}"
             );
@@ -183,6 +183,6 @@ fn rows_filled_from_the_mode_info_match_blocks_stored_one_by_one() {
         part.units[4 * st..4 * st + 16],
         want.units[4 * st..4 * st + 16]
     );
-    assert!(part.units[..4 * st].iter().all(|u| *u == LfInfo::default()));
-    assert!(part.units[8 * st..].iter().all(|u| *u == LfInfo::default()));
+    assert!(part.units[..4 * st].iter().all(|u| *u == [0; 8]));
+    assert!(part.units[8 * st..].iter().all(|u| *u == [0; 8]));
 }

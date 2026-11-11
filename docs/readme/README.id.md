@@ -82,7 +82,7 @@ Katakan apa yang Anda inginkan, dan asisten menyunting proyek yang sedang terbuk
 <a name="formats"></a>
 ## Format
 
-Dekoder dan enkoder di bawah ini adalah kode Rust di [`crates/codecs`](../../crates/codecs) dan [`crates/containers`](../../crates/containers), yang diuji terhadap FFmpeg sebagai acuan luar. Sebagian besar crate menyimpan catatan tentang apa yang didukungnya di samping kode sumbernya.
+Dekoder dan enkoder di bawah ini adalah kode Rust di [`crates/codecs`](../../crates/codecs) dan [`crates/containers`](../../crates/containers), yang diuji terhadap FFmpeg sebagai acuan luar. README tiap crate menjelaskan apa yang didukungnya dan bagaimana kecepatannya dibandingkan dengan FFmpeg.
 
 | | Buka | Ekspor |
 | --- | :---: | :---: |

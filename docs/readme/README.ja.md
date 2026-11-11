@@ -82,7 +82,7 @@ Cutlass はタイムライン型の動画エディタです。映像、音声、
 <a name="formats"></a>
 ## フォーマット
 
-以下のデコーダとエンコーダは、[`crates/codecs`](../../crates/codecs) と [`crates/containers`](../../crates/containers) にある Rust のコードで、FFmpeg を外部の基準としてテストされています。ほとんどのクレートは、対応している内容の記録をソースの横に置いています。
+以下のデコーダとエンコーダは、[`crates/codecs`](../../crates/codecs) と [`crates/containers`](../../crates/containers) にある Rust のコードで、FFmpeg を外部の基準としてテストされています。各クレートの README に、対応している内容と、FFmpeg と比べた速度が書かれています。
 
 | | 開く | 書き出し |
 | --- | :---: | :---: |

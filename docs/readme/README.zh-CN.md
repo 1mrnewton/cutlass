@@ -82,7 +82,7 @@ Cutlass 是一款时间线视频编辑器。导入视频、声音和图片，在
 <a name="formats"></a>
 ## 格式
 
-下面的解码器和编码器是 [`crates/codecs`](../../crates/codecs) 和 [`crates/containers`](../../crates/containers) 里的 Rust 代码，以 FFmpeg 作为外部参照来测试。大多数 crate 在源码旁边记录了自己支持什么。
+下面的解码器和编码器是 [`crates/codecs`](../../crates/codecs) 和 [`crates/containers`](../../crates/containers) 里的 Rust 代码，以 FFmpeg 作为外部参照来测试。每个 crate 的 README 都写明它支持什么，以及它的速度和 FFmpeg 相比如何。
 
 | | 打开 | 导出 |
 | --- | :---: | :---: |

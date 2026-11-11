@@ -82,7 +82,7 @@ Cutlass 是一款時間軸影片剪輯軟體。匯入影片、聲音和圖片，
 <a name="formats"></a>
 ## 格式
 
-下面的解碼器和編碼器是 [`crates/codecs`](../../crates/codecs) 和 [`crates/containers`](../../crates/containers) 裡的 Rust 程式碼，以 FFmpeg 作為外部參照來測試。大多數 crate 在原始碼旁邊記錄了自己支援什麼。
+下面的解碼器和編碼器是 [`crates/codecs`](../../crates/codecs) 和 [`crates/containers`](../../crates/containers) 裡的 Rust 程式碼，以 FFmpeg 作為外部參照來測試。每個 crate 的 README 都寫明它支援什麼，以及它的速度和 FFmpeg 相比如何。
 
 | | 開啟 | 匯出 |
 | --- | :---: | :---: |

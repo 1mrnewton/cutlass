@@ -82,7 +82,7 @@ Di lo que quieres, y el asistente edita el proyecto abierto con las mismas petic
 <a name="formats"></a>
 ## Formatos
 
-Los decodificadores y codificadores de abajo son código Rust en [`crates/codecs`](../../crates/codecs) y [`crates/containers`](../../crates/containers), probado contra FFmpeg como referencia externa. La mayoría de los crates guardan junto a su código un registro de lo que admiten.
+Los decodificadores y codificadores de abajo son código Rust en [`crates/codecs`](../../crates/codecs) y [`crates/containers`](../../crates/containers), probado contra FFmpeg como referencia externa. El README de cada crate dice qué admite y cómo es su velocidad frente a la de FFmpeg.
 
 | | Abrir | Exportar |
 | --- | :---: | :---: |

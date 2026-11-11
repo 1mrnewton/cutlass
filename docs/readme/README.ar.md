@@ -84,7 +84,7 @@ Cutlass محرر فيديو بخط زمني. أحضر اللقطات والصو�
 <a name="formats"></a>
 ## الصيغ
 
-برامج فك الترميز والترميز أدناه هي شيفرة Rust في [`crates/codecs`](../../crates/codecs) و [`crates/containers`](../../crates/containers)، وتُختبر بمقارنتها مع FFmpeg كمرجع خارجي. معظم الحزم تحتفظ بجانب شيفرتها بسجل لما تدعمه.
+برامج فك الترميز والترميز أدناه هي شيفرة Rust في [`crates/codecs`](../../crates/codecs) و [`crates/containers`](../../crates/containers)، وتُختبر بمقارنتها مع FFmpeg كمرجع خارجي. ملف README في كل حزمة يذكر ما تدعمه وسرعتها مقارنةً بـ FFmpeg.
 
 | | الفتح | التصدير |
 | --- | :---: | :---: |

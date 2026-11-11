@@ -82,7 +82,7 @@ Dites ce que vous voulez, et l'assistant modifie le projet ouvert avec les même
 <a name="formats"></a>
 ## Formats
 
-Les décodeurs et encodeurs ci-dessous sont du code Rust dans [`crates/codecs`](../../crates/codecs) et [`crates/containers`](../../crates/containers), testé face à FFmpeg comme référence externe. La plupart des crates tiennent, à côté de leur code, un relevé de ce qu'ils prennent en charge.
+Les décodeurs et encodeurs ci-dessous sont du code Rust dans [`crates/codecs`](../../crates/codecs) et [`crates/containers`](../../crates/containers), testé face à FFmpeg comme référence externe. Le README de chaque crate indique ce qu'il prend en charge et sa vitesse comparée à celle de FFmpeg.
 
 | | Ouvrir | Exporter |
 | --- | :---: | :---: |

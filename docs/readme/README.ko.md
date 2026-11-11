@@ -82,7 +82,7 @@ Cutlass는 타임라인 동영상 편집기입니다. 영상, 소리, 사진을 
 <a name="formats"></a>
 ## 포맷
 
-아래의 디코더와 인코더는 [`crates/codecs`](../../crates/codecs) 와 [`crates/containers`](../../crates/containers) 에 있는 Rust 코드이며, FFmpeg를 외부 기준으로 삼아 테스트합니다. 대부분의 크레이트는 무엇을 지원하는지에 대한 기록을 소스 옆에 둡니다.
+아래의 디코더와 인코더는 [`crates/codecs`](../../crates/codecs) 와 [`crates/containers`](../../crates/containers) 에 있는 Rust 코드이며, FFmpeg를 외부 기준으로 삼아 테스트합니다. 각 크레이트의 README에 무엇을 지원하는지, 그리고 FFmpeg와 비교한 속도가 적혀 있습니다.
 
 | | 열기 | 내보내기 |
 | --- | :---: | :---: |

@@ -78,7 +78,7 @@ Say what you want, and the assistant edits the open project with the same reques
 
 ## Formats
 
-The decoders and encoders below are Rust code in [`crates/codecs`](crates/codecs) and [`crates/containers`](crates/containers), tested against FFmpeg as an outside reference. Most crates keep a record of what they support beside their source.
+The decoders and encoders below are Rust code in [`crates/codecs`](crates/codecs) and [`crates/containers`](crates/containers), tested against FFmpeg as an outside reference. Each crate's README says what it supports and how its speed compares with FFmpeg's.
 
 | | Open | Export |
 | --- | :---: | :---: |

@@ -3,7 +3,8 @@
 //!
 //! Vector image is the clip's Transform with the shape's own size first,
 //! then Fill, Stroke, Corner radius and Shadow, each switched on or off by
-//! its box. Each number row keys on its own; Tracking comes later.
+//! its box. Each number row keys on its own; Tracking is the item's own, in
+//! `follow.rs`.
 
 use cutlass_model::{
     MaterialShape, SHAPE_FILL, SHAPE_SHADOW, SHAPE_STROKE_WIDTH, ShapeKind, ShapeStyleKey as Key,
@@ -11,7 +12,6 @@ use cutlass_model::{
 use egui::{ComboBox, RichText, Ui};
 
 use crate::shell::{Inspection, KeyedSetting, Shell};
-use crate::tokens;
 
 use super::inspector::{
     InspectorState, LATER, ROW_GAP, animation_tab, body, color_row, later_badge, opacity_slider,
@@ -60,7 +60,7 @@ pub(super) fn shape_panel(
             return;
         }
         2 => {
-            tracking_tab(ui);
+            super::follow::follow_tab(shell, ui, state, super::follow::Tiles::Motion);
             return;
         }
         _ => {}
@@ -446,23 +446,4 @@ fn percent(
         |v| format!("{v:.0}%"),
     )
     .map(|value| value / 100.0)
-}
-
-/// Tracking sits on the item that follows, as in the reference; it comes
-/// later.
-fn tracking_tab(ui: &mut Ui) {
-    ui.add_space(8.0);
-    ui.add_enabled_ui(false, |ui| {
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("Tracking").size(13.0).color(tokens::TEXT));
-            later_badge(ui);
-        });
-        ui.add_space(ROW_GAP);
-        ui.horizontal(|ui| {
-            super::inspector::none_tile(ui, true);
-            super::audio::name_tile(ui, "Motion tracking", false);
-        });
-    })
-    .response
-    .on_disabled_hover_text(LATER);
 }

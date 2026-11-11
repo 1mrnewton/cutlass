@@ -8232,7 +8232,7 @@ impl Shell {
         }
     }
 
-    fn apply(&mut self, request: Request) -> Result<(), ShellError> {
+    pub(crate) fn apply(&mut self, request: Request) -> Result<(), ShellError> {
         if self.all_captions
             && let Some(draft) = self.draft()
         {

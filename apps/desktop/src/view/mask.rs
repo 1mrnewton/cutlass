@@ -3,7 +3,8 @@
 //!
 //! On a video clip's Video tab the mask cuts the clip; on its Adjust tab
 //! it keeps the colour work inside the shape. Text, brush and pen masks,
-//! more than one mask, and tracking a mask come later, dimmed and marked.
+//! and more than one mask come later, dimmed and marked. Track mask is in
+//! `follow.rs`.
 
 use egui::{Align, Align2, FontId, Layout, Pos2, Rect, RichText, Sense, Shape, Stroke, Ui, Vec2};
 
@@ -12,7 +13,6 @@ use cutlass_effects::{Mask, MaskShape};
 use crate::shell::{KeyedSetting, Shell, ShellError};
 use crate::{icons, tokens, ui};
 
-use super::audio::{choice_row, right_button};
 use super::inspector::{
     InspectorState, LATER, ROW_GAP, body, keyed_row, later_badge, pair_row, section, send,
     setting_step, slider, tile_frame,
@@ -82,13 +82,13 @@ pub(super) fn mask_page(
             .color(tokens::MUTED),
         );
         ui.add_space(ROW_GAP);
-        track_mask(ui);
+        super::follow::track_mask(shell, ui, state, colour);
         return;
     };
     if let Some(next) = settings(shell, ui, state, mask, prefix, colour) {
         send(shell, |shell| set(shell, Some(next)));
     }
-    track_mask(ui);
+    super::follow::track_mask(shell, ui, state, colour);
 }
 
 /// The mask's name as a chip, and + for another mask, which comes later.
@@ -425,19 +425,4 @@ fn settings(
     }
     super::inspector::divider(ui);
     changed
-}
-
-/// Track mask: which way to track and Track, both still to come.
-fn track_mask(ui: &mut Ui) {
-    ui.add_enabled_ui(false, |ui| {
-        ui.horizontal(|ui| {
-            ui.set_min_height(36.0);
-            ui.label(RichText::new("Track mask").size(13.0));
-            later_badge(ui);
-        });
-        choice_row(ui, Some("Direction"), "Both");
-        right_button(ui, "Track");
-    })
-    .response
-    .on_disabled_hover_text(LATER);
 }

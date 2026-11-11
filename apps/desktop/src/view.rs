@@ -21,6 +21,7 @@ use crate::widgets;
 mod ai_stylize;
 mod assistant;
 mod audio;
+mod follow;
 mod grade;
 mod inspector;
 mod mask;
@@ -15178,6 +15179,127 @@ mod tests {
             assert!((got - want).abs() <= px, "{got} vs {want}");
         }
         assert_eq!(shell.tracking().unwrap().time, Micros(500_000));
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn a_sticker_follows_a_box_drawn_from_its_tracking_tab_and_stops() {
+        let temp = std::env::temp_dir().join(format!("cutlass-follow-tab-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let mut draft = cutlass_model::Draft::empty("draft");
+        draft.canvas_config.width = 1920;
+        draft.canvas_config.height = 1080;
+        draft.duration = Micros(2_000_000);
+        draft.materials.videos.push(cutlass_model::MaterialVideo {
+            id: "m".into(),
+            width: 1920,
+            height: 1080,
+            path: "missing.mp4".into(),
+            ..cutlass_model::MaterialVideo::default()
+        });
+        draft.tracks[0].segments.push(cutlass_model::Segment::new(
+            "v",
+            "m",
+            cutlass_model::TimeRange::new(0, 2_000_000),
+        ));
+        let mut stickers = cutlass_model::Track::main("stickers");
+        stickers.kind = cutlass_model::TrackType::Sticker;
+        stickers.segments.push(cutlass_model::Segment::new(
+            "s",
+            "sticker-art",
+            cutlass_model::TimeRange::new(0, 2_000_000),
+        ));
+        draft.tracks.push(stickers);
+        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        shell.select(Some("s".into()));
+        shell.seek(Micros(500_000));
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let draw = |shell: &mut Shell, view: &mut ViewState| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: screen,
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, view, None),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        let _ = draw(&mut shell, &mut view);
+        let output = draw(&mut shell, &mut view);
+        let tab = text_pos(&output, "Tracking").expect("the sticker's Tracking tab");
+        click(&ctx, tab + Vec2::new(4.0, 4.0), &mut shell, &mut view);
+        let output = draw(&mut shell, &mut view);
+        let lines = galleys(&output);
+        for label in ["Face", "Body", "Hand", "Custom"] {
+            assert!(lines.iter().any(|line| line == label), "{label}: {lines:?}");
+        }
+        let custom = text_pos(&output, "Custom").expect("the Custom tile");
+        click(&ctx, custom + Vec2::new(4.0, 4.0), &mut shell, &mut view);
+        let tracking = shell.tracking().expect("a track is being set up").clone();
+        assert_eq!(
+            tracking.segment_id,
+            SegmentId::new("v"),
+            "the video under it"
+        );
+        assert_eq!(tracking.followers, vec![SegmentId::new("s")]);
+        let output = draw(&mut shell, &mut view);
+        assert!(
+            galleys(&output)
+                .iter()
+                .any(|line| line.starts_with("Drag a box")),
+            "{:?}",
+            galleys(&output)
+        );
+        let placed = view.preview_canvas.expect("the canvas");
+        let size = Vec2::new(1920.0, 1080.0);
+        let from = screen_point(placed, size, (200.0, 100.0));
+        let to = screen_point(placed, size, (600.0, 500.0));
+        drag(&ctx, from, to, &mut shell, &mut view);
+        assert!(shell.tracking().unwrap().canvas_box.is_some());
+        assert!(shell.track_ready());
+        let output = draw(&mut shell, &mut view);
+        assert!(text_pos(&output, "Start tracking").is_some());
+        let cancel = text_pos(&output, "Cancel").expect("Cancel");
+        click(&ctx, cancel + Vec2::new(4.0, 4.0), &mut shell, &mut view);
+        assert!(shell.tracking().is_none());
+
+        // A track that has landed: the tab names what it follows, and Stop
+        // following takes it off.
+        let path = cutlass_model::TrackPath {
+            mode: cutlass_model::TrackMode::Object,
+            samples: (0..10)
+                .map(|i| cutlass_model::TrackSample {
+                    time: Micros(500_000 + i * 33_333),
+                    corners: [(-0.1, 0.1), (0.1, 0.1), (0.1, -0.1), (-0.1, -0.1)],
+                })
+                .collect(),
+        };
+        shell
+            .apply(cutlass_session::Request::Track {
+                target: "v".into(),
+                followers: vec!["s".into()],
+                tracking_id: "t".into(),
+                anchor: Micros(500_000),
+                path,
+                masks: Vec::new(),
+            })
+            .unwrap();
+        let output = draw(&mut shell, &mut view);
+        let lines = galleys(&output);
+        assert!(
+            lines.iter().any(|line| line.starts_with("Follows ")),
+            "{lines:?}"
+        );
+        assert!(text_pos(&output, "Fix frame").is_some());
+        let stop = text_pos(&output, "Stop following").expect("Stop following");
+        click(&ctx, stop + Vec2::new(4.0, 4.0), &mut shell, &mut view);
+        assert!(shell.following().is_none());
         let _ = std::fs::remove_dir_all(&temp);
     }
 

@@ -372,10 +372,7 @@ fn text_panel(
             }
         }
         "Animation" => animation_tab(shell, ui, state, &["In", "Out", "Loop"], TEXT_MOTIONS),
-        "Tracking" => {
-            later_tiles(ui, &["Face", "Body", "Hand", "Custom"]);
-            later_button(ui, "Start tracking");
-        }
+        "Tracking" => super::follow::follow_tab(shell, ui, state, super::follow::Tiles::Subjects),
         _ => {
             later_note(ui, "Text to speech");
             later_tiles(
@@ -571,9 +568,13 @@ fn sticker_panel(
     inspection: &Inspection,
 ) {
     let tab = state.tab;
-    tabs(ui, &["Sticker", "Animation"], &mut state.tab);
+    tabs(ui, &["Sticker", "Animation", "Tracking"], &mut state.tab);
     if tab != state.tab {
         state.page = 0;
+    }
+    if state.tab == 2 {
+        super::follow::follow_tab(shell, ui, state, super::follow::Tiles::Subjects);
+        return;
     }
     if state.tab == 1 {
         animation_tab(

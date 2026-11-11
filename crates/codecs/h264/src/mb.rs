@@ -4675,7 +4675,10 @@ fn chroma_scaled<S: Sample>(
         Some(near) => [near.nnz_c[base + first], near.nnz_c[base + second]],
         None => [missing; 2],
     };
-    let sides = [0, 16].map(|base| (side(left_mb, base, 1, 3), side(above_mb, base, 2, 3)));
+    let sides = [
+        (side(left_mb, 0, 1, 3), side(above_mb, 0, 2, 3)),
+        (side(left_mb, 16, 1, 3), side(above_mb, 16, 2, 3)),
+    ];
     // The DC levels come first, so each AC block is finished and added as
     // soon as it is read; a block with no AC levels gets its DC alone.
     let span = chroma_span(my, 8, mb.field_mb);

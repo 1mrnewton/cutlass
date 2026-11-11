@@ -244,6 +244,38 @@ pub mod prof {
     pub fn add(k: usize, t: std::time::Instant) {
         if cfg!(feature = "prof") {
             T[k].fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            mark(k, t);
+        }
+    }
+
+    /// Spans on the timeline only (see [`mark`]), past the stages: a
+    /// frame's backend from start to end, a parse waiting for the CDFs of
+    /// its primary reference frame, the moment a frame's CDFs are ready,
+    /// and a parse waiting for a band of the motion field.
+    pub const BACKEND: usize = 9;
+    pub const CDF_WAIT: usize = 10;
+    pub const CDF_SET: usize = 11;
+    pub const MF_WAIT: usize = 12;
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    static LINE: std::sync::Mutex<Vec<(usize, u64, u64, u64)>> = std::sync::Mutex::new(Vec::new());
+    static NEXT_THREAD: AtomicU64 = AtomicU64::new(0);
+    thread_local! {
+        static THREAD: u64 = NEXT_THREAD.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Records the span of kind `k` from `t` to now, and the thread, on
+    /// the timeline [`report`] writes to the file `AV1_TIMELINE` names, as
+    /// lines of the kind, start and end in nanoseconds, and thread.
+    pub fn mark(k: usize, t: std::time::Instant) {
+        if !cfg!(feature = "prof") {
+            return;
+        }
+        let s = *START.get_or_init(std::time::Instant::now);
+        let a = t.saturating_duration_since(s).as_nanos() as u64;
+        let b = s.elapsed().as_nanos() as u64;
+        let th = THREAD.with(|t| *t);
+        if let Ok(mut l) = LINE.lock() {
+            l.push((k, a, b, th));
         }
     }
 
@@ -315,6 +347,15 @@ pub mod prof {
     }
 
     pub fn report() -> String {
+        if let Some(path) = std::env::var_os("AV1_TIMELINE")
+            && let Ok(l) = LINE.lock()
+        {
+            let text: String = l
+                .iter()
+                .map(|(k, a, b, t)| format!("{k} {a} {b} {t}\n"))
+                .collect();
+            let _ = std::fs::write(path, text);
+        }
         cpu(CPU_MAIN);
         let mut s: String = NAMES
             .iter()
@@ -1752,7 +1793,10 @@ impl<P: PicturePixel> FrameTask<P> {
         let mut cdf: Box<CdfContext> = match &t.primary_cdf {
             None => CdfContext::new(hdr.quant.base_q_idx),
             Some(p) => {
-                let mut c = Box::new((*p.wait()?).clone());
+                let tw = std::time::Instant::now();
+                let w = p.wait();
+                prof::mark(prof::CDF_WAIT, tw);
+                let mut c = Box::new((*w?).clone());
                 c.clear_counts();
                 c
             }
@@ -2540,7 +2584,9 @@ impl MfFeed {
     fn need(&mut self, fs: &mut FrameState, r1: usize) {
         let need = r1.div_ceil(2).div_ceil(8).min(self.shared.bands.len());
         while self.have < need {
+            let tw = std::time::Instant::now();
             let band = self.shared.bands[self.have].wait();
+            prof::mark(prof::MF_WAIT, tw);
             let at = 8 * self.have * self.shared.w8;
             if let Some(d) = fs.motion_field.get_mut(at..at + band.len()) {
                 d.copy_from_slice(band);
@@ -3158,7 +3204,9 @@ fn decode_frame_async<P: PicturePixel>(
     };
     workers.run(Box::new(move || {
         let t = prof::thread_cpu();
+        let t0 = std::time::Instant::now();
         backend.run();
+        prof::mark(prof::BACKEND, t0);
         prof::cpu_since(prof::CPU_BACKEND, t);
     }));
     // Parsing reads only the presence and size of the references.
@@ -3227,6 +3275,7 @@ impl FrameOut<'_> {
             let mut c = Box::new(c.clone());
             c.clear_counts();
             p.set(Ok(Arc::from(c)));
+            prof::mark(prof::CDF_SET, std::time::Instant::now());
         }
     }
 }

@@ -4507,6 +4507,26 @@ fn inter_luma_scaled<S: Sample>(
         return Ok(());
     }
     let scan = scan4(field);
+    // Outside a macroblock-adaptive frame the counts beside the left
+    // column and above the top row come from one macroblock each way.
+    let sides = (!pic.mbaff).then(|| {
+        let missing = u8::from(mb.intra);
+        let side = |near: Option<&Mb>, slots: [usize; 4]| match near {
+            Some(near) if near.pcm => [16; 4],
+            Some(near) => slots.map(|slot| near.nnz_y[slot]),
+            None => [missing; 4],
+        };
+        (
+            side(
+                neighbor(pic, mx as i32 - 1, my as i32, mb.slice),
+                [3, 7, 11, 15],
+            ),
+            side(
+                neighbor(pic, mx as i32, above_my(pic, mx, my), mb.slice),
+                [12, 13, 14, 15],
+            ),
+        )
+    });
     for i in 0..16 {
         let cell = Cell {
             bx: blk_x(i),
@@ -4515,7 +4535,23 @@ fn inter_luma_scaled<S: Sample>(
         if cbp & (1 << ((cell.by / 2) * 2 + cell.bx / 2)) == 0 {
             continue;
         }
-        let inc = cbf_inc(pic, at, cell, mb, 0, false);
+        let inc = match sides {
+            Some((left, above)) => {
+                let (bx, by) = (cell.bx, cell.by);
+                let l = if bx > 0 {
+                    mb.nnz_y[by * 4 + bx - 1]
+                } else {
+                    left[by]
+                };
+                let a = if by > 0 {
+                    mb.nnz_y[(by - 1) * 4 + bx]
+                } else {
+                    above[bx]
+                };
+                usize::from(l > 0) + 2 * usize::from(a > 0)
+            }
+            None => cbf_inc(pic, at, cell, mb, 0, false),
+        };
         if cab.decision(CBF_BASE[2] + inc)? == 0 {
             continue;
         }

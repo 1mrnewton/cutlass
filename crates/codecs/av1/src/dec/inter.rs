@@ -179,7 +179,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
                 self.warp_block(plane, ref_frame, &mat, x, y, w, h, &dst)?;
             } else {
                 let mv = cand.mv[ref_list];
-                self.block_pred(plane, ref_frame, x, y, w, h, mv, cand.interp_filter, &dst)?;
+                self.block_pred(plane, ref_frame, x, y, w, h, mv, cand.interp_filter(), &dst)?;
             }
         }
         // Combine.
@@ -806,7 +806,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
                         pred_w,
                         pred_h,
                         cand.mv[0],
-                        cand.interp_filter,
+                        cand.interp_filter(),
                         &Dst::Obmc,
                     )?;
                     let pl = &mut self.cur.planes[plane];
@@ -847,7 +847,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
                         pred_w,
                         pred_h,
                         cand.mv[0],
-                        cand.interp_filter,
+                        cand.interp_filter(),
                         &Dst::Obmc,
                     )?;
                     let pl = &mut self.cur.planes[plane];

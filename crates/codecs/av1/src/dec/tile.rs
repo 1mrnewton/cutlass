@@ -35,12 +35,12 @@ use super::types::{
     ALTREF_FRAME, ALTREF2_FRAME, BLOCK_4X4, BLOCK_8X8, BLOCK_32X32, BLOCK_64X64, BLOCK_128X128,
     BWDREF_FRAME, COMPOUND_AVERAGE, COMPOUND_DIFFWTD, COMPOUND_DISTANCE, COMPOUND_INTRA,
     COMPOUND_WEDGE, DC_PRED, GLOBAL_GLOBALMV, GLOBALMV, GOLDEN_FRAME, H_ADST, H_DCT, H_FLIPADST,
-    IDTX, INTRA_FRAME, LAST_FRAME, LAST2_FRAME, LAST3_FRAME, LOCALWARP, MiInfo, Mv, NEAR_NEARMV,
-    NEAR_NEWMV, NEAREST_NEARESTMV, NEAREST_NEWMV, NEARESTMV, NEARMV, NEW_NEARESTMV, NEW_NEARMV,
-    NEW_NEWMV, NEWMV, NONE, OBMC, SIMPLE, TX_4X4, TX_16X32, TX_16X64, TX_32X16, TX_32X32, TX_64X16,
-    TX_64X64, UV_CFL_PRED, V_ADST, V_DCT, V_FLIPADST, bh4, block_height, block_width, bw4,
-    find_tx_size, is_directional, mi_height_log2, mi_width_log2, plane_residual_size, tx_h,
-    tx_h_log2, tx_w, tx_w_log2,
+    IDTX, INTRA_FRAME, LAST_FRAME, LAST2_FRAME, LAST3_FRAME, LOCALWARP, MiFields, MiInfo, Mv,
+    NEAR_NEARMV, NEAR_NEWMV, NEAREST_NEARESTMV, NEAREST_NEWMV, NEARESTMV, NEARMV, NEW_NEARESTMV,
+    NEW_NEARMV, NEW_NEWMV, NEWMV, NONE, OBMC, SIMPLE, TX_4X4, TX_16X32, TX_16X64, TX_32X16,
+    TX_32X32, TX_64X16, TX_64X64, UV_CFL_PRED, V_ADST, V_DCT, V_FLIPADST, bh4, block_height,
+    block_width, bw4, find_tx_size, is_directional, mi_height_log2, mi_width_log2,
+    plane_residual_size, tx_h, tx_h_log2, tx_w, tx_w_log2,
 };
 
 pub type R<T> = Result<T, CodecError>;
@@ -274,7 +274,7 @@ impl RecBlock {
 /// The mode info stored for block `b` (see [`TileDec::write_mode_info`]).
 #[inline(always)]
 fn mode_info_of(b: &Block) -> MiInfo {
-    MiInfo {
+    MiFields {
         ref_frame: b.ref_frame,
         mv: if b.ref_frame[1] > INTRA_FRAME {
             b.mv
@@ -294,6 +294,7 @@ fn mode_info_of(b: &Block) -> MiInfo {
         interp_filter: b.interp_filter,
         motion_mode: b.motion_mode,
     }
+    .into()
 }
 
 /// A transform block of a [`ReconLog`]: the arguments of transform_block(),
@@ -1559,7 +1560,7 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
     /// it before compute_prediction). Returns the mode info stored.
     fn store_mode_info_pre(&mut self) {
         let info = mode_info_of(&self.b);
-        // Kept in memory so each store is a plain 24-byte copy (field by
+        // Kept in memory so each store is a plain 16-byte copy (field by
         // field stores of the scalarized value cost several times more).
         let info = std::hint::black_box(info);
         self.write_mode_info(&info, self.delta_lf);
@@ -1833,10 +1834,10 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
         }
         let mut ctx = 0;
         if self.b.avail_u {
-            ctx += usize::from(self.mi(self.b.mi_row - 1, self.b.mi_col).skip);
+            ctx += usize::from(self.mi(self.b.mi_row - 1, self.b.mi_col).skip());
         }
         if self.b.avail_l {
-            ctx += usize::from(self.mi(self.b.mi_row, self.b.mi_col - 1).skip);
+            ctx += usize::from(self.mi(self.b.mi_row, self.b.mi_col - 1).skip());
         }
         self.b.skip = self.msac.bool_adapt(&mut self.cdf.skip[ctx], self.pb.skip);
     }
@@ -1855,10 +1856,10 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
         }
         let mut ctx = 0;
         if self.b.avail_u {
-            ctx += usize::from(self.mi(self.b.mi_row - 1, self.b.mi_col).skip_mode);
+            ctx += usize::from(self.mi(self.b.mi_row - 1, self.b.mi_col).skip_mode());
         }
         if self.b.avail_l {
-            ctx += usize::from(self.mi(self.b.mi_row, self.b.mi_col - 1).skip_mode);
+            ctx += usize::from(self.mi(self.b.mi_row, self.b.mi_col - 1).skip_mode());
         }
         self.b.skip_mode = self
             .msac
@@ -2076,12 +2077,12 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
     fn palette_cache(&self, plane_type: usize) -> ([u16; 16], usize) {
         let b = &self.b;
         let above_n = if !(b.mi_row * 4).is_multiple_of(64) {
-            self.mi(b.mi_row - 1, b.mi_col).palette_size[plane_type] as usize
+            self.mi(b.mi_row - 1, b.mi_col).palette_size()[plane_type] as usize
         } else {
             0
         };
         let left_n = if b.avail_l {
-            self.mi(b.mi_row, b.mi_col - 1).palette_size[plane_type] as usize
+            self.mi(b.mi_row, b.mi_col - 1).palette_size()[plane_type] as usize
         } else {
             0
         };
@@ -2210,10 +2211,10 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
         let bsize_ctx = (mi_width_log2(bs) + mi_height_log2(bs) - 2) as usize;
         if self.b.y_mode == DC_PRED {
             let mut ctx = 0;
-            if self.b.avail_u && self.mi(self.b.mi_row - 1, self.b.mi_col).palette_size[0] > 0 {
+            if self.b.avail_u && self.mi(self.b.mi_row - 1, self.b.mi_col).palette_size()[0] > 0 {
                 ctx += 1;
             }
-            if self.b.avail_l && self.mi(self.b.mi_row, self.b.mi_col - 1).palette_size[0] > 0 {
+            if self.b.avail_l && self.mi(self.b.mi_row, self.b.mi_col - 1).palette_size()[0] > 0 {
                 ctx += 1;
             }
             if self.msac.bool_adapt(
@@ -2420,7 +2421,7 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
                 return 64;
             }
             let m = self.mi(row - 1, col);
-            if m.skip && m.is_inter {
+            if m.skip() && m.is_inter() {
                 return block_width(m.bsize);
             }
         }
@@ -2433,7 +2434,7 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
                 return 64;
             }
             let m = self.mi(row, col - 1);
-            if m.skip && m.is_inter {
+            if m.skip() && m.is_inter() {
                 return block_height(m.bsize);
             }
         }
@@ -2451,14 +2452,14 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
         self.b.tx_size = max_rect;
         if bs > BLOCK_4X4 && allow_select && self.hdr.tx_mode == TX_MODE_SELECT {
             let (r, c) = (self.b.mi_row, self.b.mi_col);
-            let above_w = if self.b.avail_u && self.mi(r - 1, c).is_inter {
+            let above_w = if self.b.avail_u && self.mi(r - 1, c).is_inter() {
                 block_width(self.mi(r - 1, c).bsize)
             } else if self.b.avail_u {
                 self.above_tx_width(r, c)
             } else {
                 0
             };
-            let left_h = if self.b.avail_l && self.mi(r, c - 1).is_inter {
+            let left_h = if self.b.avail_l && self.mi(r, c - 1).is_inter() {
                 block_height(self.mi(r, c - 1).bsize)
             } else if self.b.avail_l {
                 self.left_tx_height(r, c)
@@ -3133,13 +3134,13 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
         if b.avail_l {
             let m = self.mi(b.mi_row, b.mi_col - 1);
             if m.ref_frame[0] == b.ref_frame[0] || m.ref_frame[1] == b.ref_frame[0] {
-                left_type = m.interp_filter[dir];
+                left_type = m.interp_filter()[dir];
             }
         }
         if b.avail_u {
             let m = self.mi(b.mi_row - 1, b.mi_col);
             if m.ref_frame[0] == b.ref_frame[0] || m.ref_frame[1] == b.ref_frame[0] {
-                above_type = m.interp_filter[dir];
+                above_type = m.interp_filter()[dir];
             }
         }
         ctx += if left_type == above_type {
@@ -3285,14 +3286,14 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
                 let mut ctx = 0;
                 if au {
                     if above[1] > INTRA_FRAME {
-                        ctx += self.mi(r - 1, c).comp_group_idx as usize;
+                        ctx += self.mi(r - 1, c).comp_group_idx() as usize;
                     } else if above[0] == ALTREF_FRAME {
                         ctx += 3;
                     }
                 }
                 if al {
                     if left[1] > INTRA_FRAME {
-                        ctx += self.mi(r, c - 1).comp_group_idx as usize;
+                        ctx += self.mi(r, c - 1).comp_group_idx() as usize;
                     } else if left[0] == ALTREF_FRAME {
                         ctx += 3;
                     }
@@ -3322,14 +3323,14 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
                     let mut ctx = if fwd == bck { 3 } else { 0 };
                     if au {
                         if above[1] > INTRA_FRAME {
-                            ctx += self.mi(r - 1, c).compound_idx as usize;
+                            ctx += self.mi(r - 1, c).compound_idx() as usize;
                         } else if above[0] == ALTREF_FRAME {
                             ctx += 1;
                         }
                     }
                     if al {
                         if left[1] > INTRA_FRAME {
-                            ctx += self.mi(r, c - 1).compound_idx as usize;
+                            ctx += self.mi(r, c - 1).compound_idx() as usize;
                         } else if left[0] == ALTREF_FRAME {
                             ctx += 1;
                         }

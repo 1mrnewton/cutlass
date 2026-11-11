@@ -299,7 +299,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         weight: u32,
         found: &mut bool,
     ) {
-        if !m.is_inter {
+        if !m.is_inter() {
             return;
         }
         if !is_compound {

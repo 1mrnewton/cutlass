@@ -293,7 +293,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         let first = first?;
         if pa == PARTITION_NONE
             && self.mode.inter_frame
-            && (self.fs.mi[nd.r * self.fs.mi_stride + nd.c].skip
+            && (self.fs.mi[nd.r * self.fs.mi_stride + nd.c].skip()
                 || (self.mode.merge_accept > 0.0 && {
                     let h = n / 2;
                     let es = self.est_block(x, y, h, h)

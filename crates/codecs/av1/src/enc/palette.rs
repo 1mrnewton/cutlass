@@ -222,13 +222,13 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         let (r, c) = (y >> 2, x >> 2);
         let mut out: Vec<u16> = Vec::with_capacity(16);
         if r > self.mi_row_start && !y.is_multiple_of(64) {
-            let n = usize::from(self.mi(r - 1, c).palette_size[0]);
+            let n = usize::from(self.mi(r - 1, c).palette_size()[0]);
             if let Some(p) = self.above_palette[0].get(c) {
                 out.extend_from_slice(&p[..n.min(8)]);
             }
         }
         if c > self.mi_col_start {
-            let n = usize::from(self.mi(r, c - 1).palette_size[0]);
+            let n = usize::from(self.mi(r, c - 1).palette_size()[0]);
             let ly = (r & (self.sb_size4 - 1)) & 31;
             out.extend_from_slice(&self.left_palette[0][ly][..n.min(8)]);
         }

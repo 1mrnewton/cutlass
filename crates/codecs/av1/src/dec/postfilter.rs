@@ -15,9 +15,7 @@ use crate::dsp::superres::upscale_plane;
 
 use super::frame::{FrameState, Picture, lf_h4, lf_w4};
 use super::obu::{FrameHeader, SequenceHeader};
-use super::types::{
-    GLOBAL_GLOBALMV, GLOBALMV, INTRA_FRAME, NEARESTMV, NONE, bh4, bw4,
-};
+use super::types::{GLOBAL_GLOBALMV, GLOBALMV, INTRA_FRAME, NEARESTMV, NONE, bh4, bw4};
 
 #[inline]
 fn mode_type(y_mode: u8) -> usize {
@@ -213,9 +211,9 @@ impl FilterInfo {
                 let info = levels.info(
                     hdr,
                     m.ref_frame[0],
-                    m.segment_id,
+                    m.segment_id(),
                     m.y_mode,
-                    m.skip,
+                    m.skip(),
                     m.bsize,
                     if hdr.delta_lf_present {
                         fs.delta_lf.get(r * st + c).copied().unwrap_or_default()
@@ -1091,10 +1089,10 @@ fn cdef_rows<P: Pixel>(
                                 i.skip(r, c) && i.skip(rr, c) && i.skip(r, cc) && i.skip(rr, cc)
                             }
                             None => {
-                                fs.mi_at(r, c).skip
-                                    && fs.mi_at(rr, c).skip
-                                    && fs.mi_at(r, cc).skip
-                                    && fs.mi_at(rr, cc).skip
+                                fs.mi_at(r, c).skip()
+                                    && fs.mi_at(rr, c).skip()
+                                    && fs.mi_at(r, cc).skip()
+                                    && fs.mi_at(rr, cc).skip()
                             }
                         };
                         if skip {

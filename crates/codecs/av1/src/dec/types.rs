@@ -101,9 +101,29 @@ impl Mv {
     }
 }
 
-/// Mode info kept for every 4x4 luma unit of the frame.
-#[derive(Clone, Copy, Debug)]
+/// Mode info kept for every 4x4 luma unit of the frame: 16 bytes, so a
+/// block writes one vector to each of its units. The small fields are
+/// packed; [`MiFields`] has them apart, to build one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MiInfo {
+    pub ref_frame: [i8; 2],
+    pub mv: [Mv; 2],
+    pub bsize: u8,
+    pub y_mode: u8,
+    /// is_inter, skip, skip_mode, comp_group_idx, compound_idx (bits 0 to
+    /// 4) and motion_mode (bits 5 and 6).
+    flags: u8,
+    /// The luma palette size (bits 0 to 3) and the chroma one.
+    palette: u8,
+    /// The two interpolation filters, 3 bits each.
+    interp: u8,
+    /// tx_size (bits 0 to 4) and segment_id.
+    tx_seg: u8,
+}
+
+/// The fields of a [`MiInfo`], unpacked.
+#[derive(Clone, Copy, Debug)]
+pub struct MiFields {
     pub ref_frame: [i8; 2],
     pub mv: [Mv; 2],
     pub bsize: u8,
@@ -120,7 +140,7 @@ pub struct MiInfo {
     pub motion_mode: u8,
 }
 
-impl Default for MiInfo {
+impl Default for MiFields {
     fn default() -> Self {
         Self {
             ref_frame: [NOT_WRITTEN, NONE],
@@ -140,6 +160,78 @@ impl Default for MiInfo {
         }
     }
 }
+
+impl From<MiFields> for MiInfo {
+    #[inline(always)]
+    fn from(f: MiFields) -> Self {
+        Self {
+            ref_frame: f.ref_frame,
+            mv: f.mv,
+            bsize: f.bsize,
+            y_mode: f.y_mode,
+            flags: u8::from(f.is_inter)
+                | u8::from(f.skip) << 1
+                | u8::from(f.skip_mode) << 2
+                | (f.comp_group_idx & 1) << 3
+                | (f.compound_idx & 1) << 4
+                | (f.motion_mode & 3) << 5,
+            palette: (f.palette_size[0] & 15) | f.palette_size[1] << 4,
+            interp: (f.interp_filter[0] & 7) | (f.interp_filter[1] & 7) << 3,
+            tx_seg: (f.tx_size & 31) | f.segment_id << 5,
+        }
+    }
+}
+
+impl Default for MiInfo {
+    fn default() -> Self {
+        MiFields::default().into()
+    }
+}
+
+impl MiInfo {
+    #[inline(always)]
+    pub fn is_inter(&self) -> bool {
+        self.flags & 1 != 0
+    }
+    #[inline(always)]
+    pub fn skip(&self) -> bool {
+        self.flags & 2 != 0
+    }
+    #[inline(always)]
+    pub fn skip_mode(&self) -> bool {
+        self.flags & 4 != 0
+    }
+    #[inline(always)]
+    pub fn comp_group_idx(&self) -> u8 {
+        (self.flags >> 3) & 1
+    }
+    #[inline(always)]
+    pub fn compound_idx(&self) -> u8 {
+        (self.flags >> 4) & 1
+    }
+    #[inline(always)]
+    pub fn motion_mode(&self) -> u8 {
+        (self.flags >> 5) & 3
+    }
+    #[inline(always)]
+    pub fn palette_size(&self) -> [u8; 2] {
+        [self.palette & 15, self.palette >> 4]
+    }
+    #[inline(always)]
+    pub fn interp_filter(&self) -> [u8; 2] {
+        [self.interp & 7, (self.interp >> 3) & 7]
+    }
+    #[inline(always)]
+    pub fn tx_size(&self) -> u8 {
+        self.tx_seg & 31
+    }
+    #[inline(always)]
+    pub fn segment_id(&self) -> u8 {
+        self.tx_seg >> 5
+    }
+}
+
+const _: () = assert!(size_of::<MiInfo>() == 16);
 
 #[inline(always)]
 pub fn bw4(bsize: u8) -> usize {

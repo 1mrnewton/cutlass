@@ -1,7 +1,7 @@
 use super::super::frame::FrameState;
 use super::super::obu::{FrameHeader, SequenceHeader};
 use super::super::types::{
-    BLOCK_8X8, BLOCK_16X16, BLOCK_64X64, GLOBALMV, INTRA_FRAME, MiInfo, NEWMV,
+    BLOCK_8X8, BLOCK_16X16, BLOCK_64X64, GLOBALMV, INTRA_FRAME, MiFields, MiInfo, NEWMV,
 };
 use super::{FilterInfo, LF_BLOCK_EDGES, LF_SKIP, LfInfo, LfLevels};
 
@@ -129,14 +129,15 @@ fn rows_filled_from_the_mode_info_match_blocks_stored_one_by_one() {
     let mut n = 0u8;
     let mut put = |fs: &mut FrameState, want: &mut FilterInfo, r: usize, c: usize, bsize: u8| {
         n += 1;
-        let m = MiInfo {
+        let m: MiInfo = MiFields {
             ref_frame: [(n % 5) as i8, -1],
             bsize,
             y_mode: GLOBALMV - 2 + n % 4,
             skip: n.is_multiple_of(3),
             segment_id: n % 8,
-            ..MiInfo::default()
-        };
+            ..MiFields::default()
+        }
+        .into();
         let delta_lf = [(n % 7) as i8 - 3, 0, 0, 0];
         let size = if bsize == BLOCK_16X16 { 4 } else { 2 };
         for y in 0..size {
@@ -146,9 +147,9 @@ fn rows_filled_from_the_mode_info_match_blocks_stored_one_by_one() {
         let of = lv.info(
             &hdr,
             m.ref_frame[0],
-            m.segment_id,
+            m.segment_id(),
             m.y_mode,
-            m.skip,
+            m.skip(),
             bsize,
             delta_lf,
         );

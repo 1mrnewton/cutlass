@@ -328,6 +328,53 @@ time, most of it the filters themselves (the size-16 wide filter alone
 is 6%); inter prediction's 8-tap filter is 15%; and reading blocks and
 coefficients, and the mode info, follow.
 
+A further turn, measured the same way (cycles best of 3; at 18 threads
+best of 5, wall time and processor time):
+
+| File | Threads | Before | After | dav1d |
+|---|---|---|---|---|
+| 8x4 tiles, instructions | 1 | 47.4G | 45.6G | 27.1G |
+| 8x4 tiles, cycles | 1 | 11.8G | 10.2G | 8.1G |
+| 4x1 tiles, instructions | 1 | 71.8G | 66.3G | 45.8G |
+| 4x1 tiles, cycles | 1 | 15.7G | 13.5G | 11.0G |
+| 8x4 tiles | 18 | 0.54 s | 0.46 s (4.3 s CPU) | 0.29 s (3.5 s) |
+| 4x1 tiles | 18 | 0.59 s | 0.52 s (6.1 s CPU) | 0.28 s (4.1 s) |
+
+One thread now takes 1.25x dav1d's cycles (1.45x before). What changed,
+among smaller steps: 8-bit compound predictions blend with their masks
+eight samples at a time in a `cutlass-simd` kernel on 16-bit lanes, and
+the difference-weighted mask of 8-bit predictions is worked out on
+16-bit lanes; a picture's rows are 64 samples longer when they would be
+a multiple of 1024 samples (4K luma rows were 4096), so that the rows
+of a block fall in different cache sets (about 4% fewer cycles); the
+pool of pictures looks pictures up by that row length (it found no 4K
+picture until then). Intra prediction at the top of a superblock row
+reads a copy of the row above's last lines as reconstruction left them,
+so a row's filters can run as soon as it is reconstructed. With threads,
+a frame that no frame references, or that has no CDEF and no loop
+restoration (its rows are then final 8 rows behind the last one
+deblocked), is filtered in place behind its reconstruction on the same
+thread, in the final picture: no second picture, no copy of every row,
+no filter thread (22% less processor time on the 8x4 file, wall time
+the same).
+Tried and dropped: reconstructing the tile columns of a frame on threads
+of their own, each into a picture of its own with the filters gathering
+the rows (16% more processor time and slower: the extra pictures and
+shells, and the frames waited longer for their references); filtering
+every frame in place (18% less processor time, but 30% more wall time:
+frames that others wait for are then final later, with recon and
+filters of a row one after the other). Where the wall time goes at 18
+threads (the `prof` timeline): 8 frames are always in flight, the most
+allowed, and each new frame starts as one ends, about 1.8 ms apart on
+the 4x1 file; a frame's parse takes 1.34 ms from receiving its primary
+reference's CDFs to passing its own on (one tile's parse, as the
+context tile is parsed first), against dav1d's whole frame interval of
+1.2 ms. Allowing 12 frames in flight takes the 8x4 file to 0.41 s but
+needs 0.3 GB more (2.0 GB at the peak against dav1d's 0.4 GB), so the
+per-frame memory comes first: the frame states of the tile parsers
+(full size, about 14 MB each at 4K), the published bands (with their
+overlap, about twice the rows) and the second picture.
+
 Threading (2+ threads): the calling thread only reads the frame headers.
 Each frame is a task on a thread of its own (the decoder keeps a pool of
 them) that waits for what its parse depends on, and nothing else: the

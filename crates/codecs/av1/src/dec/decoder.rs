@@ -915,10 +915,12 @@ impl<P: Pixel> PixState<P> {
 }
 
 /// Frames that may be decoding at once (parsing, reconstruction or
-/// filters), at most. Each keeps two pictures, its mode info twice and
-/// its block logs, about 120 MB at 4K, and past eight the frames mostly
-/// wait for the rows of their references.
-const MAX_IN_FLIGHT: usize = 8;
+/// filters), at most. Each keeps up to two pictures, its mode info twice,
+/// its block logs and the bands of rows it publishes, and past twelve the
+/// frames mostly wait for the rows of their references (on 18 threads
+/// and 4K, eight to twelve takes one clip from 0.46 s to 0.41 s for
+/// 0.3 GB more).
+const MAX_IN_FLIGHT: usize = 12;
 
 /// The decoder state that persists between temporal units.
 pub struct Av1Core {

@@ -2428,7 +2428,8 @@ fn decode_tiles_by_rows<P: Pixel>(
     if data.iter().any(Option::is_none) {
         return None;
     }
-    let scratch = lock(spares).scratch.pop().unwrap_or_default();
+    let mut scratch = lock(spares).scratch.pop().unwrap_or_default();
+    scratch.edge_y = usize::MAX;
     let mut bufs = TileBufs::new(fs, scratch);
     let sb4 = if seq.use_128x128_superblock { 32 } else { 16 };
     let ctx = ti.context_update_tile_id as usize;
@@ -2471,6 +2472,9 @@ fn decode_tiles_by_rows<P: Pixel>(
                     return Some(Err(e));
                 }
             }
+            // The row's filters may run now: intra prediction below reads
+            // its last lines as they are.
+            bufs.scratch.save_edge(cur, 4 * end);
             after_row(fs, cur, r, end, tr + 1 == ti.rows && end == r1);
             r = end;
         }
@@ -2478,6 +2482,7 @@ fn decode_tiles_by_rows<P: Pixel>(
             saved = Some(c.cdf);
         }
     }
+    bufs.scratch.edge_y = usize::MAX;
     lock(spares).scratch.push(bufs.scratch);
     Some(Ok(saved.unwrap_or_else(|| Box::new(cdf.clone()))))
 }
@@ -2978,7 +2983,11 @@ impl<P: PicturePixel> InlineFilter<'_, P> {
             self.filter_ready_rows(seq, hdr, fs, info, cur, start, b, true);
             return;
         }
-        let ready = b.saturating_sub(16).max(start);
+        // Deblocking the next row changes up to 6 luma rows above it (3
+        // chroma rows): with no CDEF or loop restoration, the rows 8 above
+        // it are final.
+        let lag = if self.cdef_on || self.lr_on { 16 } else { 2 };
+        let ready = b.saturating_sub(lag).max(start);
         if ready > start {
             self.filter_ready_rows(seq, hdr, fs, info, cur, start, ready, false);
             // Luma rows above 4 * ready are final: deblocking below
@@ -3567,7 +3576,6 @@ fn decode_frame_sync<P: PicturePixel>(
     if threads <= 1 && !hdr.use_superres && (lf_on || cdef_on || hdr.lr.uses_lr) {
         info.size_for(fs);
         let levels = postfilter::LfLevels::new(hdr);
-        let mut waiting = None;
         let mut filt = InlineFilter {
             cdef_on,
             lr_on: hdr.lr.uses_lr,
@@ -3596,16 +3604,9 @@ fn decode_frame_sync<P: PicturePixel>(
                 if lf_on || cdef_on {
                     info.fill_rows(hdr, &levels, fs, a..b);
                 }
-                // Intra prediction in this row read the samples of the
-                // row above as they were before the filters: that row
-                // is filtered now. Filtering it changes no sample of
-                // this row.
-                if let Some((pa, pb)) = waiting.replace((a, b)) {
-                    filt.deblock(seq, hdr, fs, &info, cur, pa, pb, false);
-                }
-                if last {
-                    filt.deblock(seq, hdr, fs, &info, cur, a, b, true);
-                }
+                // Intra prediction in the row below reads this row's last
+                // lines as they were before the filters, from a copy.
+                filt.deblock(seq, hdr, fs, &info, cur, a, b, last);
             },
         );
         cdef_sc = filt.cdef;

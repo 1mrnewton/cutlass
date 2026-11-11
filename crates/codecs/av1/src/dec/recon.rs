@@ -6,6 +6,7 @@ use super::coder::Coder;
 use crate::dsp::ipred::{self, EDGE_LEN, EDGE_OFF};
 use crate::spec::tables::{AC_QLOOKUP, DC_QLOOKUP, QM_OFFSET, QUANTIZER_MATRIX};
 
+use super::frame::Picture;
 use super::obu::SEG_LVL_ALT_Q;
 use super::tile::{DequantInfo, TileDec};
 use super::types::{
@@ -48,6 +49,29 @@ pub struct Scratch<P> {
     pub enc_i32: [Vec<i32>; 4],
     pub enc_px: [Vec<P>; 4],
     pub enc_q: Option<Box<crate::enc::quant::QuantScratch>>,
+    /// The last line of each plane of the superblock row that ends at luma
+    /// row `edge_y`, as reconstruction left it: intra prediction at the
+    /// top of the next row reads it instead of the picture's, which the
+    /// in-loop filters may have changed by then (see [`Self::save_edge`]).
+    /// `usize::MAX` when the picture's lines are read.
+    pub edge: [Vec<P>; 3],
+    pub edge_y: usize,
+}
+
+impl<P: Pixel> Scratch<P> {
+    /// Saves the last lines of the superblock row of `pic` that ends at
+    /// luma row `y` (see [`Self::edge`]).
+    pub fn save_edge(&mut self, pic: &Picture<P>, y: usize) {
+        for (p, (e, pl)) in self.edge.iter_mut().zip(&pic.planes).enumerate() {
+            let sy = usize::from(p > 0 && pic.sub_y);
+            let r = (y >> sy).saturating_sub(1);
+            e.clear();
+            if let Some(line) = pl.data.get(r * pl.stride..(r + 1) * pl.stride) {
+                e.extend_from_slice(line);
+            }
+        }
+        self.edge_y = y;
+    }
 }
 
 impl<P: Pixel> Scratch<P> {
@@ -74,6 +98,8 @@ impl<P: Pixel> Scratch<P> {
             enc_i32: Default::default(),
             enc_px: Default::default(),
             enc_q: None,
+            edge: Default::default(),
+            edge_y: usize::MAX,
         }
     }
 }
@@ -103,6 +129,8 @@ impl<P: Pixel> Scratch<P> {
             enc_i32: Default::default(),
             enc_px: Default::default(),
             enc_q: None,
+            edge: Default::default(),
+            edge_y: usize::MAX,
         }
     }
 }
@@ -258,6 +286,8 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         let n = w + h;
         let up: &[P] = if !have_above {
             &[]
+        } else if y << sy == self.scratch.edge_y {
+            &self.scratch.edge[plane]
         } else {
             &buf[(y - 1) * stride..]
         };

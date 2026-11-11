@@ -168,6 +168,22 @@ impl<T> Shared<T> {
         Self(Hold::Owned(held))
     }
 
+    /// Whether nothing else holds the buffer.
+    fn sole(&mut self) -> bool {
+        match &mut self.0 {
+            Hold::Owned(_) => true,
+            Hold::Split(held) => std::sync::Arc::get_mut(held).is_some(),
+        }
+    }
+
+    /// The buffer, when nothing else holds it, leaving this one empty.
+    fn take_sole(&mut self) -> Option<Vec<T>> {
+        match &mut self.0 {
+            Hold::Owned(held) => Some(std::mem::take(held)),
+            Hold::Split(held) => std::sync::Arc::get_mut(held).map(std::mem::take),
+        }
+    }
+
     /// Makes clones from here on share the buffer.
     pub(crate) fn freeze(&mut self) {
         if let Hold::Owned(held) = &mut self.0 {
@@ -1942,16 +1958,15 @@ fn wide_plane<S: Sample>(len: usize) -> Option<Vec<u16>> {
     }
 }
 
-fn pack_row<S: Sample>(src: &[S], eight: &mut [u8], mut wide: Option<&mut Vec<u16>>) {
-    // 8-bit pictures have no wide plane; the row is a plain copy.
+fn pack_row<S: Sample>(src: &[S], eight: &mut Vec<u8>, mut wide: Option<&mut Vec<u16>>) {
+    // 8-bit pictures have no wide plane; the row is a plain copy, added
+    // straight on the end, so the plane is never zeroed first.
     if wide.is_none() {
-        for (out, sample) in eight.iter_mut().zip(src) {
-            *out = sample.pack_eight();
-        }
+        eight.extend(src.iter().map(|sample| sample.pack_eight()));
         return;
     }
-    for (out, sample) in eight.iter_mut().zip(src) {
-        *out = sample.pack_eight();
+    for sample in src {
+        eight.push(sample.pack_eight());
         if let (Some(plane), Some(value)) = (wide.as_mut(), sample.pack_wide()) {
             plane.push(value);
         }
@@ -1991,6 +2006,48 @@ fn emit<S: Sample>(frame: &Frame<S>) -> Option<VideoOutput> {
     emit_whole(frame)
 }
 
+/// [`emit`] for a picture nothing here needs any more. When its planes
+/// are held nowhere else, are 8-bit 4:2:0, and its visible part is their
+/// first rows, those rows are the output as they stand, without a copy,
+/// as FFmpeg hands out the very buffer a picture was decoded into.
+fn emit_owned<S: Sample>(mut frame: Frame<S>) -> Option<VideoOutput> {
+    let (w, h) = (frame.vis_w as usize, frame.vis_h as usize);
+    let in_place = S::BITS == 8
+        && !frame.nonexisting
+        && frame.pending.is_none()
+        && frame.shown.grain.is_none()
+        && frame.chroma() == 1
+        && frame.crop_x == 0
+        && frame.crop_y == 0
+        && w == frame.w
+        && w % 2 == 0
+        && h <= frame.h
+        && frame.y.sole()
+        && frame.u.sole()
+        && frame.v.sole();
+    if !in_place {
+        return emit(&frame);
+    }
+    let mut planes = [&mut frame.y, &mut frame.u, &mut frame.v]
+        .map(|plane| plane.take_sole().map(S::into_eight));
+    let sizes = [w * h, (w / 2) * (h / 2), (w / 2) * (h / 2)];
+    let [Some(Ok(y)), Some(Ok(u)), Some(Ok(v))] = &mut planes else {
+        return None;
+    };
+    for (plane, size) in [&mut *y, &mut *u, &mut *v].into_iter().zip(sizes) {
+        plane.truncate(size);
+    }
+    let picture = Yuv420p::try_new(
+        frame.vis_w,
+        frame.vis_h,
+        std::mem::take(y),
+        std::mem::take(u),
+        std::mem::take(v),
+    )
+    .ok()?;
+    Some(output_420(&frame, picture, None, None))
+}
+
 /// [`emit`] for a picture whose planes are here.
 fn emit_whole<S: Sample>(frame: &Frame<S>) -> Option<VideoOutput> {
     if frame.shown.grain.is_some() {
@@ -2027,38 +2084,35 @@ fn emit_420<S: Sample>(frame: &Frame<S>) -> Option<VideoOutput> {
     let y0 = frame.crop_y as usize;
     let w = frame.vis_w as usize;
     let h = frame.vis_h as usize;
-    let mut y = vec![0u8; w * h];
-    let mut u = vec![0u8; (w / 2) * (h / 2)];
-    let mut v = vec![0u8; (w / 2) * (h / 2)];
+    let mut y = Vec::with_capacity(w * h);
+    let mut u = Vec::with_capacity((w / 2) * (h / 2));
+    let mut v = Vec::with_capacity((w / 2) * (h / 2));
     let mut y_wide = wide_plane::<S>(w * h);
     let mut u_wide = wide_plane::<S>((w / 2) * (h / 2));
     let mut v_wide = wide_plane::<S>((w / 2) * (h / 2));
     for row in 0..h {
         let src = (y0 + row) * frame.w + x0;
-        pack_row(
-            &frame.y[src..src + w],
-            &mut y[row * w..row * w + w],
-            y_wide.as_mut(),
-        );
+        pack_row(&frame.y[src..src + w], &mut y, y_wide.as_mut());
     }
     for row in 0..h / 2 {
         let src = (y0 / 2 + row) * (frame.w / 2) + x0 / 2;
         let n = w / 2;
-        pack_row(
-            &frame.u[src..src + n],
-            &mut u[row * n..row * n + n],
-            u_wide.as_mut(),
-        );
-        pack_row(
-            &frame.v[src..src + n],
-            &mut v[row * n..row * n + n],
-            v_wide.as_mut(),
-        );
+        pack_row(&frame.u[src..src + n], &mut u, u_wide.as_mut());
+        pack_row(&frame.v[src..src + n], &mut v, v_wide.as_mut());
     }
     let picture = Yuv420p::try_new(frame.vis_w, frame.vis_h, y, u, v).ok()?;
     let (yuv420p10, yuv420_high) =
         wide_output::<S>(frame.vis_w, frame.vis_h, y_wide, u_wide, v_wide);
-    Some(VideoOutput {
+    Some(output_420(frame, picture, yuv420p10, yuv420_high))
+}
+
+fn output_420<S: Sample>(
+    frame: &Frame<S>,
+    picture: Yuv420p,
+    yuv420p10: Option<Yuv420p10>,
+    yuv420_high: Option<Yuv420High>,
+) -> VideoOutput {
+    VideoOutput {
         picture,
         yuv420p10,
         yuv420_high,
@@ -2080,7 +2134,7 @@ fn emit_420<S: Sample>(frame: &Frame<S>) -> Option<VideoOutput> {
             time_scale: frame.time_scale,
             fixed: frame.fixed_rate,
         },
-    })
+    }
 }
 
 fn emit_422<S: Sample>(frame: &Frame<S>) -> Option<VideoOutput> {
@@ -2215,12 +2269,12 @@ fn pack_rect<S: Sample>(
     if w == 0 || h == 0 {
         return None;
     }
-    let mut eight = vec![0u8; w * h];
+    let mut eight = Vec::with_capacity(w * h);
     let mut wide = wide_plane::<S>(w * h);
     for row in 0..h {
         let start = (y0 + row).checked_mul(stride)?.checked_add(x0)?;
         let src = plane.get(start..start + w)?;
-        pack_row(src, &mut eight[row * w..row * w + w], wide.as_mut());
+        pack_row(src, &mut eight, wide.as_mut());
     }
     Some((eight, wide))
 }
@@ -4740,7 +4794,7 @@ impl Queued {
                         return Ok(made);
                     }
                 }
-                Ok(emit(&frame))
+                Ok(emit_owned(frame))
             }),
         }
     }

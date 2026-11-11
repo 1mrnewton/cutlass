@@ -370,6 +370,11 @@ pub trait Sample: Copy + Default + Into<i32> + Send + Sync + 'static {
     /// The sample in a `u16` plane. 8-bit has no wide plane.
     fn pack_wide(self) -> Option<u16>;
 
+    /// The plane as 8-bit samples as it stands, when that is what it holds.
+    fn into_eight(plane: Vec<Self>) -> Result<Vec<u8>, Vec<Self>> {
+        Err(plane)
+    }
+
     /// Filters one 16-sample luma edge with a vector kernel, when this
     /// sample width has one. `false` means nothing was done and the caller
     /// filters the edge itself.
@@ -554,6 +559,10 @@ impl Sample for u8 {
 
     fn pack_wide(self) -> Option<u16> {
         None
+    }
+
+    fn into_eight(plane: Vec<Self>) -> Result<Vec<u8>, Vec<Self>> {
+        Ok(plane)
     }
 
     fn deblock_luma16(plane: &mut [Self], edge: LumaEdge) -> bool {

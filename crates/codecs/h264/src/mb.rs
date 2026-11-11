@@ -2925,7 +2925,19 @@ fn one_mb<S: Sample>(
     mb.off_a = slice.off_a as i8;
     mb.off_b = slice.off_b as i8;
     mb.deblock = slice.deblock;
-    pic.mb[slot] = mb.clone();
+    // The macroblock is seen by its own slice from here on. A slot never
+    // decoded holds `Mb::new(u16::MAX)`, so setting what differs from that
+    // is the same as storing `mb` and spares copying all of it.
+    match pic.mb.get_mut(slot) {
+        Some(held) if held.slice == u16::MAX => {
+            held.slice = slice_id;
+            held.field_mb = mb.field_mb;
+            held.off_a = mb.off_a;
+            held.off_b = mb.off_b;
+            held.deblock = mb.deblock;
+        }
+        _ => pic.mb[slot] = mb.clone(),
+    }
     let (intra, mut spec) = mb_type(pic, entropy, slice.kind, mx, my, slice_id)?;
     if spec == SI_MB {
         mb.si = true;

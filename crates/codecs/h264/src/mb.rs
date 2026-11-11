@@ -10679,6 +10679,70 @@ fn predict_inter<S: Sample>(
         }
         return Ok(());
     }
+    prefetch_motion(pic, dpb, slice, (mx, my), mb, 0);
+    predict_parts(pic, dpb, slice, mx, my, mb)?;
+    prefetch_motion(pic, dpb, slice, (mx, my), mb, 1);
+    Ok(())
+}
+
+/// Asks the cache for reference samples a macroblock four further along
+/// the row is likely to read, from where this one's first block points in
+/// list `list`, as FFmpeg's `prefetch_motion` does: 64 luma samples to the
+/// right, eight rows, and in each chroma plane four, the rows taking turns
+/// over two macroblocks so that all of them come. Eight rows at a time
+/// beat FFmpeg's four on a 4K film; sixteen did no better.
+fn prefetch_motion<S: Sample>(
+    pic: &Frame<S>,
+    dpb: &[Frame<S>],
+    slice: &Slice<'_>,
+    (mx, my): (usize, usize),
+    mb: &Mb,
+    list: usize,
+) {
+    let (reference, mv) = if list == 0 {
+        (mb.ref0[0], mb.mv0[0])
+    } else {
+        (mb.ref1[0], mb.mv1[0])
+    };
+    if reference < 0 || pic.chroma() != 1 {
+        return;
+    }
+    let Ok(frame) = reference_frame(dpb, slice, list, reference) else {
+        return;
+    };
+    if frame.pending.is_some() {
+        return;
+    }
+    let (Ok(mx), Ok(my)) = (i64::try_from(mx), i64::try_from(my)) else {
+        return;
+    };
+    let x = i64::from(mv[0] >> 2) + 16 * mx + 8;
+    let y = i64::from(mv[1] >> 2) + 16 * my;
+    let stride = frame.w;
+    let Ok(down) = i64::try_from(stride) else {
+        return;
+    };
+    let at = x + 64 + (y + (mx & 1) * 8) * down;
+    if let Ok(at) = usize::try_from(at) {
+        S::prefetch(&frame.y, at, stride, 8);
+    }
+    let at = (x >> 1) + 64 + ((y >> 1) + (mx & 1) * 4) * (down / 2);
+    if let Ok(at) = usize::try_from(at) {
+        S::prefetch(&frame.u, at, stride / 2, 4);
+        S::prefetch(&frame.v, at, stride / 2, 4);
+    }
+}
+
+/// The partitions of a frame macroblock that is not ALC-weighted, each
+/// predicted in turn.
+fn predict_parts<S: Sample>(
+    pic: &mut Frame<S>,
+    dpb: &[Frame<S>],
+    slice: &Slice<'_>,
+    mx: usize,
+    my: usize,
+    mb: &Mb,
+) -> Result<(), CodecError> {
     // One motion for the whole macroblock, as in a skipped or 16×16 one:
     // the search for equal neighbours below would find just this.
     if mb.mv0 == [mb.mv0[0]; 16]

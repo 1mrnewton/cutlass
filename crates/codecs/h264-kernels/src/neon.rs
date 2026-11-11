@@ -8,9 +8,12 @@
 //! reach them.
 //!
 //! The exception is a macroblock's boundary filtered on its own, which
-//! [`luma_mb`] hands to [`left_edge`] and [`top_edge`]: they read and write
+//! [`luma_mb`] hands to [`left_edge`] and [`top_edge`] and [`chroma_mb`]
+//! to [`chroma_left_edge`] and [`chroma_top_edge`]: they read and write
 //! the plane through a pointer, within the span [`crate::edge::mb_fits`]
 //! has checked, so the samples go straight between plane and registers.
+//! [`prefetch`] also takes a pointer into a plane, but only to name it in
+//! a hint to the cache, which reads and writes nothing.
 
 use core::arch::aarch64::{
     int16x8_t, uint8x8_t, uint8x16_t, uint16x8_t, vabdq_s16, vabdq_u8, vaddl_u8, vaddq_s16,
@@ -632,6 +635,35 @@ fn plain_edges(edges: &crate::edge::MbEdges) -> bool {
         && inner(h1)
         && inner(h2)
         && inner(h3)
+}
+
+/// Asks the cache for `rows` rows of `plane`, `stride` apart from sample
+/// `at`, with `prfm pldl1strm`, as FFmpeg's `ff_prefetch_aarch64` does. A
+/// row outside `plane` ends the request.
+#[inline]
+#[target_feature(enable = "neon")]
+pub(crate) fn prefetch(plane: &[u8], at: usize, stride: usize, rows: usize) {
+    let mut index = at;
+    for _ in 0..rows {
+        if index >= plane.len() {
+            return;
+        }
+        let sample = plane.as_ptr().wrapping_add(index);
+        // SAFETY: a prefetch is a hint that reads, writes and faults on
+        // nothing; the address is inside `plane` all the same.
+        #[allow(unsafe_code)]
+        unsafe {
+            core::arch::asm!(
+                "prfm pldl1strm, [{sample}]",
+                sample = in(reg) sample,
+                options(nostack, readonly, preserves_flags)
+            );
+        }
+        let Some(next) = index.checked_add(stride) else {
+            return;
+        };
+        index = next;
+    }
 }
 
 /// The four bytes from lane `LANE` of `v`, as 32-bit lanes, to `out`.

@@ -69,6 +69,16 @@ pub fn luma_block(dst: &mut [u8], dst_stride: usize, block: Block<'_>, frac: (u8
     kernel!(luma_block(dst, dst_stride, block, frac))
 }
 
+/// Asks for `rows` rows of `plane`, `stride` apart from sample `at`, to be
+/// brought into the cache before they are read, as FFmpeg's
+/// `prefetch_motion` does for the reference a macroblock further along is
+/// likely to read. Rows outside `plane` are left out. Nothing changes that
+/// a caller could see.
+#[inline]
+pub fn prefetch(plane: &[u8], at: usize, stride: usize, rows: usize) {
+    kernel!(prefetch(plane, at, stride, rows));
+}
+
 /// A chroma block at eighth-sample offsets `frac` (each 0 to 7). Covers
 /// blocks 4 or 8 wide; `false` means nothing was done. The source must
 /// hold one more sample after the block's last column and row.

@@ -405,6 +405,11 @@ pub trait Sample: Copy + Default + Into<i32> + Send + Sync + 'static {
         false
     }
 
+    /// Asks the cache for `rows` rows of `plane`, `stride` apart from
+    /// sample `at`, ahead of motion compensation reading them. Nothing
+    /// changes; without a kernel, nothing is done.
+    fn prefetch(_plane: &[Self], _at: usize, _stride: usize, _rows: usize) {}
+
     /// The 4×4 inverse transform of `block` added to the samples from `at`,
     /// rows `down` apart, with a vector kernel. `false` as for
     /// [`Self::predict_fast`].
@@ -598,6 +603,11 @@ impl Sample for u8 {
             Predict::Luma(xf, yf) => mc::luma_block(dst, dst_stride, block, (xf, yf)),
             Predict::Chroma(xf, yf) => mc::chroma_block(dst, dst_stride, block, (xf, yf)),
         }
+    }
+
+    #[inline]
+    fn prefetch(plane: &[Self], at: usize, stride: usize, rows: usize) {
+        cutlass_h264_kernels::mc::prefetch(plane, at, stride, rows);
     }
 
     fn idct4_add_fast(plane: &mut [Self], at: usize, down: usize, block: &[i32; 16]) -> bool {

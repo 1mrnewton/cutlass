@@ -471,3 +471,6 @@ pub fn scale_block(
     }
     true
 }
+
+/// A cache hint, which has no plain counterpart: it does nothing here.
+pub fn prefetch(_plane: &[u8], _at: usize, _stride: usize, _rows: usize) {}

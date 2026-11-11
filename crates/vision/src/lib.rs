@@ -22,11 +22,15 @@
 //! pixel of a frame is, from which the light finds the way each surface
 //! faces; [`relight_clip`] writes a clip's guesses as a grey video, and
 //! [`find_subjects`] finds what stands out nearest for Auto reframe.
+//!
+//! The sixth is finding a face, a body or a hand for tracking to start from:
+//! [`Detector`] runs YuNet or MediaPipe's person or palm detector.
 
 #![forbid(unsafe_code)]
 
 mod denoise;
 mod depth;
+mod detect;
 mod device;
 mod enhance;
 mod enhance_job;
@@ -49,6 +53,7 @@ pub use denoise::{
 pub use depth::{
     DEPTH_MAX_SIDE, DEPTH_SIDE, DEPTH_WEIGHTS, DepthMap, DepthModel, convert_depth_anything,
 };
+pub use detect::{BODY_WEIGHTS, Detector, FACE_WEIGHTS, Found, HAND_WEIGHTS, Part};
 pub use device::{Compute, gpu_available, keep_kernels_in};
 pub use enhance::{ENHANCE_MAX_SIDE, ENHANCE_WEIGHTS, Enhanced, Enhancer, SCALE, convert_pytorch};
 pub use enhance_job::{CopyModels, EnhanceJobError, enhance_clip, enhanced_size, noise_for_level};

@@ -105,73 +105,6 @@ pub(crate) fn quarter_sources(frac: (u8, u8)) -> Option<(Source, Source)> {
 /// the attribute, if any, go on each.
 macro_rules! block_kernels {
     ($visibility:vis, $(#[$feature:meta])*) => {
-        /// A luma block at quarter offsets `frac`, for blocks 8 or 16 wide
-        /// and at most 16 high. `false` means nothing was done.
-        $(#[$feature])*
-        $visibility fn luma_block(
-            dst: &mut [u8],
-            dst_stride: usize,
-            block: $crate::mc_block::Block<'_>,
-            frac: (u8, u8),
-        ) -> bool {
-            let (w, h) = block.size;
-            if h > 16 {
-                return false;
-            }
-            match w {
-                16 => luma16(dst, dst_stride, block, frac),
-                8 => luma8(dst, dst_stride, block, frac),
-                _ => return false,
-            }
-            true
-        }
-
-        $crate::mc_block::luma_rows!(
-            $(#[$feature])* luma16, luma16_row, 16, at16, half16, raw16, centre16, avg16
-        );
-        $crate::mc_block::luma_rows!(
-            $(#[$feature])* luma8, luma8_row, 8, at8, half8, raw8, centre8, avg8
-        );
-
-        /// A chroma block at eighth offsets `frac`, for blocks 4 or 8 wide.
-        /// The block's last column and row each have one more sample after
-        /// them in the source. `false` means nothing was done.
-        $(#[$feature])*
-        $visibility fn chroma_block(
-            dst: &mut [u8],
-            dst_stride: usize,
-            block: $crate::mc_block::Block<'_>,
-            frac: (u8, u8),
-        ) -> bool {
-            use $crate::mc_block::nine;
-            let $crate::mc_block::Block {
-                src,
-                stride,
-                at: (x, y),
-                size: (w, h),
-            } = block;
-            let (xf, yf) = frac;
-            if w != 4 && w != 8 {
-                return false;
-            }
-            for row in 0..h {
-                let start = (y + row) * stride + x;
-                let out = &mut dst[row * dst_stride..row * dst_stride + w];
-                if w == 8 {
-                    let top = nine::<9>(src, start);
-                    let bottom = nine::<9>(src, start + stride);
-                    out.copy_from_slice(&chroma8(&top, &bottom, xf, yf));
-                } else {
-                    // A block of 4 uses the first five samples; the rest
-                    // stay zero and only feed outputs that are dropped.
-                    let top = nine::<5>(src, start);
-                    let bottom = nine::<5>(src, start + stride);
-                    out.copy_from_slice(&chroma8(&top, &bottom, xf, yf)[..4]);
-                }
-            }
-            true
-        }
-
         /// The rounded average of two blocks of `size`, whose rows are
         /// `size.0` apart, into `dst` with rows `dst_stride` apart.
         $(#[$feature])*
@@ -263,6 +196,82 @@ macro_rules! block_kernels {
     };
 }
 pub(crate) use block_kernels;
+
+/// The whole-block predictors over whichever row kernels are in scope
+/// where this is used, as for [`block_kernels`]. The NEON build has its own
+/// in `neon_qpel`; this one is the plain twin.
+macro_rules! predict_kernels {
+    ($visibility:vis, $(#[$feature:meta])*) => {
+        /// A luma block at quarter offsets `frac`, for blocks 8 or 16 wide
+        /// and at most 16 high. `false` means nothing was done.
+        $(#[$feature])*
+        $visibility fn luma_block(
+            dst: &mut [u8],
+            dst_stride: usize,
+            block: $crate::mc_block::Block<'_>,
+            frac: (u8, u8),
+        ) -> bool {
+            let (w, h) = block.size;
+            if h > 16 {
+                return false;
+            }
+            match w {
+                16 => luma16(dst, dst_stride, block, frac),
+                8 => luma8(dst, dst_stride, block, frac),
+                _ => return false,
+            }
+            true
+        }
+
+        $crate::mc_block::luma_rows!(
+            $(#[$feature])* luma16, luma16_row, 16, at16, half16, raw16, centre16, avg16
+        );
+        $crate::mc_block::luma_rows!(
+            $(#[$feature])* luma8, luma8_row, 8, at8, half8, raw8, centre8, avg8
+        );
+
+        /// A chroma block at eighth offsets `frac`, for blocks 4 or 8 wide.
+        /// The block's last column and row each have one more sample after
+        /// them in the source. `false` means nothing was done.
+        $(#[$feature])*
+        $visibility fn chroma_block(
+            dst: &mut [u8],
+            dst_stride: usize,
+            block: $crate::mc_block::Block<'_>,
+            frac: (u8, u8),
+        ) -> bool {
+            use $crate::mc_block::nine;
+            let $crate::mc_block::Block {
+                src,
+                stride,
+                at: (x, y),
+                size: (w, h),
+            } = block;
+            let (xf, yf) = frac;
+            if w != 4 && w != 8 {
+                return false;
+            }
+            for row in 0..h {
+                let start = (y + row) * stride + x;
+                let out = &mut dst[row * dst_stride..row * dst_stride + w];
+                if w == 8 {
+                    let top = nine::<9>(src, start);
+                    let bottom = nine::<9>(src, start + stride);
+                    out.copy_from_slice(&chroma8(&top, &bottom, xf, yf));
+                } else {
+                    // A block of 4 uses the first five samples; the rest
+                    // stay zero and only feed outputs that are dropped.
+                    let top = nine::<5>(src, start);
+                    let bottom = nine::<5>(src, start + stride);
+                    out.copy_from_slice(&chroma8(&top, &bottom, xf, yf)[..4]);
+                }
+            }
+            true
+        }
+
+    };
+}
+pub(crate) use predict_kernels;
 
 /// A luma block of one width at any quarter offset: each row is made from
 /// its one or two sources straight into `dst`.

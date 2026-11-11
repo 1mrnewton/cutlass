@@ -8,6 +8,11 @@
 //! array's bytes and written back to one, never loaded through an address.
 //! A wrong index in a kernel is a panic, not a stray read or write.
 //!
+//! The whole-block NEON predictors in `neon_qpel` are the exception: they
+//! load and store through pointers into the caller's slices, after one
+//! check per block that every byte they touch is inside them. Their module
+//! says what that check covers.
+//!
 //! The one `unsafe` per kernel is the call into its vector version. The
 //! compiler asks for it because that function is built for a CPU feature,
 //! and the caller has to promise the CPU has it. On 64-bit ARM the feature
@@ -47,6 +52,8 @@ pub mod residual;
 mod neon;
 #[cfg(target_arch = "aarch64")]
 mod neon_mc;
+#[cfg(target_arch = "aarch64")]
+mod neon_qpel;
 #[cfg(target_arch = "aarch64")]
 mod neon_residual;
 

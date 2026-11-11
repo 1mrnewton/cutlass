@@ -210,6 +210,7 @@ pub fn weight8(a: &[u8; 8], b: &[u8; 8], weight: crate::mc_block::BiWeight) -> [
 }
 
 crate::mc_block::block_kernels!(pub,);
+crate::mc_block::predict_kernels!(pub,);
 
 /// Eight lines of four samples as four rows of eight.
 fn chroma_lines(lines: &[[u8; 4]; 8]) -> ChromaRows {

@@ -4,9 +4,9 @@ use core::arch::aarch64::{
     int8x16_t, uint8x8_t, uint8x16x4_t, vaddq_s8, vaddq_u8, vdup_n_u8, vqtbl4q_u8,
 };
 use core::arch::aarch64::{
-    int16x8_t, vaddq_s16, vaddq_s32, vaddvq_s16, vaddvq_s32, vdupq_n_s16, vextq_s16, vget_low_s16,
-    vmovl_u8, vmull_high_s16, vmull_s16, vmulq_s32, vnegq_s16, vpaddq_s16, vreinterpretq_s16_u16,
-    vrev64q_s16, vshlq_u16, vsubq_s16,
+    int16x8_t, int32x4_t, vaddq_s16, vaddq_s32, vdupq_n_s16, vdupq_n_s32, vextq_s16, vget_low_s16,
+    vmovl_u8, vmull_high_s16, vmull_s16, vmulq_s32, vnegq_s16, vpaddq_s16, vpaddq_s32,
+    vreinterpretq_s16_u16, vrev64q_s16, vshlq_u16, vsubq_s16,
 };
 use core::arch::aarch64::{
     uint8x16_t, vabdq_u8, vcltq_u8, vcombine_s8, vcombine_u8, vdupq_n_s8, vdupq_n_u8, veorq_u8,
@@ -21,7 +21,7 @@ use core::arch::aarch64::{
 
 use super::scalar::best;
 use super::{CENTRE, Filter, STRIDE, WINDOW};
-use crate::neon::{halves, i32x4, quarters, u8x8, u8x16, u16x8, u16x8_array};
+use crate::neon::{halves, i32x4, i32x4_array, quarters, u8x8, u8x16, u16x8, u16x8_array};
 
 /// Weights of the diagonal sums: a lane summing `n` samples gets
 /// `Div_Table[n]`. Lane 15 sums nothing.
@@ -60,17 +60,27 @@ pub(super) fn direction_u16(px: &[[u16; 8]; 8], bd: u32) -> (u8, i32) {
 /// Sixteen lanes of partial sums.
 type Sums = (int16x8_t, int16x8_t);
 
-/// Sum of `lane^2 * weight` over the sixteen lanes.
+/// `lane^2 * weight` over the sixteen lanes, summed into four.
 #[inline]
 #[cfg_attr(target_feature = "aes", target_feature(enable = "neon,aes"))]
 #[cfg_attr(not(target_feature = "aes"), target_feature(enable = "neon"))]
-fn weighted_squares(v: Sums, w: &[i32; 16]) -> i32 {
+fn weighted_squares(v: Sums, w: &[i32; 16]) -> int32x4_t {
     let w = |i: usize| i32x4([w[i], w[i + 1], w[i + 2], w[i + 3]]);
     let a = vmulq_s32(vmull_s16(vget_low_s16(v.0), vget_low_s16(v.0)), w(0));
     let b = vmulq_s32(vmull_high_s16(v.0, v.0), w(4));
     let c = vmulq_s32(vmull_s16(vget_low_s16(v.1), vget_low_s16(v.1)), w(8));
     let d = vmulq_s32(vmull_high_s16(v.1, v.1), w(12));
-    vaddvq_s32(vaddq_s32(vaddq_s32(a, b), vaddq_s32(c, d)))
+    vaddq_s32(vaddq_s32(a, b), vaddq_s32(c, d))
+}
+
+/// `lane^2 * 105` over eight lanes, summed into four.
+#[inline]
+#[cfg_attr(target_feature = "aes", target_feature(enable = "neon,aes"))]
+#[cfg_attr(not(target_feature = "aes"), target_feature(enable = "neon"))]
+fn flat_squares(v: int16x8_t) -> int32x4_t {
+    let a = vmull_s16(vget_low_s16(v), vget_low_s16(v));
+    let b = vmull_high_s16(v, v);
+    vmulq_s32(vaddq_s32(a, b), vdupq_n_s32(105))
 }
 
 /// The direction process on rows of `sample - 128`.
@@ -98,14 +108,12 @@ fn direction(r: [int16x8_t; 8]) -> (u8, i32) {
         ((z, z), (z, z), (z, z), (z, z), (z, z), (z, z));
     // partial[6]: the columns. partial[2]: the rows.
     let mut cols = z;
-    let mut rows = [0i16; 8];
     macro_rules! row {
         ($i:tt) => {{
             let v = r[$i];
             let rev = vrev64q_s16(v);
             let rev = vextq_s16::<4>(rev, rev);
             cols = vaddq_s16(cols, v);
-            rows[$i] = vaddvq_s16(v);
             add_at!(d0, v, $i);
             add_at!(d1, rev, $i);
             // Sums of column pairs in lanes 0..4.
@@ -134,18 +142,31 @@ fn direction(r: [int16x8_t; 8]) -> (u8, i32) {
     add_at!(a3, p1, 1);
     add_at!(a3, p2, 2);
     add_at!(a3, p3, 3);
-    let flat = [105i32; 16];
-    let rows = crate::neon::i16x8(rows);
-    let cost = [
+    // The row sums by pairwise additions: lane i is row i.
+    let rows = vpaddq_s16(
+        vpaddq_s16(vpaddq_s16(r[0], r[1]), vpaddq_s16(r[2], r[3])),
+        vpaddq_s16(vpaddq_s16(r[4], r[5]), vpaddq_s16(r[6], r[7])),
+    );
+    let c = [
         weighted_squares(d0, &W_DIAG),
         weighted_squares(a0, &W_ALT),
-        weighted_squares((rows, z), &flat),
+        flat_squares(rows),
         weighted_squares(a1, &W_ALT),
         weighted_squares(d1, &W_DIAG),
         weighted_squares(a2, &W_ALT),
-        weighted_squares((cols, z), &flat),
+        flat_squares(cols),
         weighted_squares(a3, &W_ALT),
     ];
+    // Each cost's four lanes summed, the eight costs in two vectors.
+    let lo = vpaddq_s32(vpaddq_s32(c[0], c[1]), vpaddq_s32(c[2], c[3]));
+    let hi = vpaddq_s32(vpaddq_s32(c[4], c[5]), vpaddq_s32(c[6], c[7]));
+    let mut cost = [0i32; 8];
+    if let Some((a, b)) = cost.split_first_chunk_mut::<4>() {
+        *a = i32x4_array(lo);
+        if let Some(b) = b.first_chunk_mut::<4>() {
+            *b = i32x4_array(hi);
+        }
+    }
     best(&cost)
 }
 

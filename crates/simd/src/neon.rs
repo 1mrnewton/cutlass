@@ -9,7 +9,7 @@
 use core::arch::aarch64::vgetq_lane_u16;
 use core::arch::aarch64::{
     int16x8_t, int32x4_t, uint8x8_t, uint8x16_t, uint16x8_t, vcombine_u64, vcreate_u8, vcreate_u64,
-    vreinterpretq_s16_u16, vreinterpretq_s32_u64, vreinterpretq_u16_s16,
+    vreinterpretq_s16_u16, vreinterpretq_s32_u64, vreinterpretq_u16_s16, vreinterpretq_u16_s32,
 };
 #[cfg(not(target_feature = "aes"))]
 use core::arch::aarch64::{
@@ -193,4 +193,13 @@ pub(crate) fn u16x8_array(v: uint16x8_t) -> [u16; 8] {
 #[cfg_attr(not(target_feature = "aes"), target_feature(enable = "neon"))]
 pub(crate) fn i16x8_array(v: int16x8_t) -> [i16; 8] {
     u16x8_array(vreinterpretq_u16_s16(v)).map(|x| x as i16)
+}
+
+/// The lanes of `v` as four signed 32-bit values.
+#[inline]
+#[cfg_attr(target_feature = "aes", target_feature(enable = "neon,aes"))]
+#[cfg_attr(not(target_feature = "aes"), target_feature(enable = "neon"))]
+pub(crate) fn i32x4_array(v: int32x4_t) -> [i32; 4] {
+    let h = u16x8_array(vreinterpretq_u16_s32(v));
+    core::array::from_fn(|i| (u32::from(h[2 * i]) | u32::from(h[2 * i + 1]) << 16) as i32)
 }

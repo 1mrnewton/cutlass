@@ -1318,6 +1318,11 @@ pub fn mask_blend<P: Pixel>(
 ) {
     let sh = 6 + inter_post_round(bd, true);
     let off = (1 << (sh - 1)) + 64 * prep_bias(bd);
+    if let Some(dst) = P::bytes_mut(dst)
+        && w <= 128
+    {
+        return mask_blend_u8(dst, dst_stride, t0, t1, w, h, mask, mask_stride, sub_x, sub_y);
+    }
     for r in 0..h {
         let d = &mut dst[r * dst_stride..][..w];
         let a = &t0[r * w..][..w];
@@ -1339,6 +1344,58 @@ pub fn mask_blend<P: Pixel>(
                     bd,
                 );
             }
+        }
+    }
+}
+
+/// [`mask_blend`] for 8-bit samples (`6 + InterPostRound` is 10 and there
+/// is no bias). A row's weights are worked out first, then blended, so
+/// both loops run on whole vectors.
+#[inline(never)]
+fn mask_blend_u8(
+    dst: &mut [u8],
+    dst_stride: usize,
+    t0: &[i16],
+    t1: &[i16],
+    w: usize,
+    h: usize,
+    mask: &[u8],
+    mask_stride: usize,
+    sub_x: bool,
+    sub_y: bool,
+) {
+    let mut weights = [0u8; 128];
+    for r in 0..h {
+        let m: &[u8] = match (sub_x, sub_y) {
+            (false, false) => &mask[r * mask_stride..][..w],
+            (true, false) => {
+                let a = &mask[r * mask_stride..][..2 * w];
+                for (m, a) in weights[..w].iter_mut().zip(a.as_chunks::<2>().0) {
+                    *m = ((u16::from(a[0]) + u16::from(a[1]) + 1) >> 1) as u8;
+                }
+                &weights[..w]
+            }
+            // The specification averages the 2x2 quad also when only
+            // `subY` is set.
+            _ => {
+                let a = &mask[2 * r * mask_stride..][..2 * w];
+                let b = &mask[(2 * r + 1) * mask_stride..][..2 * w];
+                let pairs = a.as_chunks::<2>().0.iter().zip(b.as_chunks::<2>().0);
+                for (m, (a, b)) in weights[..w].iter_mut().zip(pairs) {
+                    let s = u16::from(a[0]) + u16::from(a[1]) + u16::from(b[0]) + u16::from(b[1]);
+                    *m = ((s + 2) >> 2) as u8;
+                }
+                &weights[..w]
+            }
+        };
+        let d = &mut dst[r * dst_stride..][..w];
+        let a = &t0[r * w..][..w];
+        let b = &t1[r * w..][..w];
+        for c in 0..w {
+            // `m a + (64 - m) b` is `m (a - b) + 64 b`.
+            let (a, b) = (i32::from(a[c]), i32::from(b[c]));
+            let v = (i32::from(m[c]) * (a - b) + 64 * b + 512) >> 10;
+            d[c] = v.clamp(0, 255) as u8;
         }
     }
 }

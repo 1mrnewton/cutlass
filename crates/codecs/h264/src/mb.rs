@@ -4449,8 +4449,7 @@ fn inter_luma_scaled<S: Sample>(
                     8,
                 );
             } else {
-                recon::idct8_full(&mut block);
-                recon::add_block(&mut pic.y, pic.w, x, y, &block, 8, span.step);
+                recon::add_idct8_full(&mut pic.y, pic.w, x, y, &mut block, span.step);
             }
         }
         return Ok(());

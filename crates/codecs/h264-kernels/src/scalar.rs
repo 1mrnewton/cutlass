@@ -288,6 +288,67 @@ fn idct4_rows(block: &[i32; 16], rows: [[u8; 4]; 4]) -> [[u8; 4]; 4] {
     out
 }
 
+/// One line of the 8×8 transform, clause 8.5.13.2, wrapping as the
+/// decoder's 32-bit arithmetic does.
+fn idct8_line(d: [i32; 8]) -> [i32; 8] {
+    let a0 = d[0].wrapping_add(d[4]);
+    let a2 = d[0].wrapping_sub(d[4]);
+    let a4 = (d[2] >> 1).wrapping_sub(d[6]);
+    let a6 = (d[6] >> 1).wrapping_add(d[2]);
+    let b0 = a0.wrapping_add(a6);
+    let b2 = a2.wrapping_add(a4);
+    let b4 = a2.wrapping_sub(a4);
+    let b6 = a0.wrapping_sub(a6);
+    let a1 = d[5]
+        .wrapping_sub(d[3])
+        .wrapping_sub(d[7])
+        .wrapping_sub(d[7] >> 1);
+    let a3 = d[1]
+        .wrapping_add(d[7])
+        .wrapping_sub(d[3])
+        .wrapping_sub(d[3] >> 1);
+    let a5 = d[7]
+        .wrapping_sub(d[1])
+        .wrapping_add(d[5])
+        .wrapping_add(d[5] >> 1);
+    let a7 = d[3]
+        .wrapping_add(d[5])
+        .wrapping_add(d[1])
+        .wrapping_add(d[1] >> 1);
+    let b1 = (a7 >> 2).wrapping_add(a1);
+    let b3 = a3.wrapping_add(a5 >> 2);
+    let b5 = (a3 >> 2).wrapping_sub(a5);
+    let b7 = a7.wrapping_sub(a1 >> 2);
+    [
+        b0.wrapping_add(b7),
+        b2.wrapping_add(b5),
+        b4.wrapping_add(b3),
+        b6.wrapping_add(b1),
+        b6.wrapping_sub(b1),
+        b4.wrapping_sub(b3),
+        b2.wrapping_sub(b5),
+        b0.wrapping_sub(b7),
+    ]
+}
+
+/// The transform of clause 8.5.13 along each row and then down each
+/// column, then each sample plus its residual, clipped.
+fn idct8_rows(block: &[i32; 64], rows: [[u8; 8]; 8]) -> [[u8; 8]; 8] {
+    let mut mid = [[0i32; 8]; 8];
+    for (i, line) in mid.iter_mut().enumerate() {
+        *line = idct8_line(core::array::from_fn(|k| block[i * 8 + k]));
+    }
+    let mut out = rows;
+    for j in 0..8 {
+        let column = idct8_line(core::array::from_fn(|i| mid[i][j]));
+        for (row, value) in out.iter_mut().zip(column) {
+            let residual = value.wrapping_add(32) >> 6;
+            row[j] = clip(i32::from(row[j]).saturating_add(residual));
+        }
+    }
+    out
+}
+
 /// `dc` added to each of the eight samples in `samples`, each held to 0 to
 /// 255.
 fn dc_row(samples: u64, dc: i32) -> u64 {

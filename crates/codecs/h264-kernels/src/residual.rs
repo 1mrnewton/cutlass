@@ -1,5 +1,5 @@
-//! The inverse transform of a 4×4 residual block added to the picture,
-//! clause 8.5.12.
+//! The inverse transform of a 4×4 or 8×8 residual block added to the
+//! picture, clauses 8.5.12 and 8.5.13.
 //!
 //! The arithmetic is 32-bit, as wide as the decoder's own, so the vector
 //! version gives the same samples as the plain one for any coefficients,
@@ -11,6 +11,11 @@
 /// nothing was done.
 pub fn idct4_add(plane: &mut [u8], at: usize, down: usize, block: &[i32; 16]) -> bool {
     kernel!(idct4_add(plane, at, down, block))
+}
+
+/// [`idct4_add`] for an 8×8 block, clause 8.5.13.
+pub fn idct8_add(plane: &mut [u8], at: usize, down: usize, block: &[i32; 64]) -> bool {
+    kernel!(idct8_add(plane, at, down, block))
 }
 
 /// Adds `dc` to each sample of the `size`×`size` block of `plane` whose
@@ -41,6 +46,25 @@ macro_rules! residual_kernels {
             for (index, row) in rows.iter().enumerate() {
                 let start = at + index * down;
                 plane[start..start + 4].copy_from_slice(row);
+            }
+            true
+        }
+
+        /// See [`crate::residual::idct8_add`].
+        $(#[$feature])*
+        $visibility fn idct8_add(plane: &mut [u8], at: usize, down: usize, block: &[i32; 64]) -> bool {
+            if at + 7 * down + 8 > plane.len() {
+                return false;
+            }
+            let mut rows = [[0u8; 8]; 8];
+            for (index, row) in rows.iter_mut().enumerate() {
+                let start = at + index * down;
+                row.copy_from_slice(&plane[start..start + 8]);
+            }
+            let rows = idct8_rows(block, rows);
+            for (index, row) in rows.iter().enumerate() {
+                let start = at + index * down;
+                plane[start..start + 8].copy_from_slice(row);
             }
             true
         }
@@ -139,6 +163,35 @@ mod tests {
             assert!(scalar::idct4_add(&mut plain, at, stride, &block));
             assert_eq!(fast, plain, "round {round} block {block:?}");
         }
+    }
+
+    #[test]
+    fn the_8x8_transform_and_add_match_the_plain_ones() {
+        let mut rng = Lcg(31);
+        let stride = 20usize;
+        for round in 0..40_000u32 {
+            let plane: Vec<u8> = (0..stride * 12)
+                .map(|_| match rng.next() % 6 {
+                    0 => 0,
+                    1 => 255,
+                    _ => rng.next() as u8,
+                })
+                .collect();
+            let span = [16, 1 << 9, 1 << 15, 1 << 26][(round % 4) as usize];
+            let fill = 1 + rng.next() % 64;
+            let mut block = [0i32; 64];
+            for _ in 0..fill {
+                let at = (rng.next() % 64) as usize;
+                block[at] = (rng.next() % (2 * span)) as i32 - span as i32;
+            }
+            let at = (rng.next() % 4) as usize * stride + (rng.next() % 12) as usize;
+            let (mut fast, mut plain) = (plane.clone(), plane.clone());
+            assert!(super::idct8_add(&mut fast, at, stride, &block));
+            assert!(scalar::idct8_add(&mut plain, at, stride, &block));
+            assert_eq!(fast, plain, "round {round} block {block:?}");
+        }
+        let mut plane = vec![9u8; 64];
+        assert!(!super::idct8_add(&mut plane, 1, 8, &[0; 64]));
     }
 
     #[test]

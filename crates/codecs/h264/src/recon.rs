@@ -412,6 +412,11 @@ pub trait Sample: Copy + Default + Into<i32> + Send + Sync + 'static {
         false
     }
 
+    /// [`Self::idct4_add_fast`] for an 8×8 block.
+    fn idct8_add_fast(_plane: &mut [Self], _at: usize, _down: usize, _block: &[i32; 64]) -> bool {
+        false
+    }
+
     /// `dc` added to the `size`×`size` samples from `at`, rows `down`
     /// apart, with a vector kernel. `false` as for [`Self::predict_fast`].
     fn add_dc_fast(_plane: &mut [Self], _at: usize, _down: usize, _dc: i32, _size: usize) -> bool {
@@ -586,6 +591,10 @@ impl Sample for u8 {
         cutlass_h264_kernels::residual::idct4_add(plane, at, down, block)
     }
 
+    fn idct8_add_fast(plane: &mut [Self], at: usize, down: usize, block: &[i32; 64]) -> bool {
+        cutlass_h264_kernels::residual::idct8_add(plane, at, down, block)
+    }
+
     fn add_dc_fast(plane: &mut [Self], at: usize, down: usize, dc: i32, size: usize) -> bool {
         cutlass_h264_kernels::residual::dc_add(plane, at, down, dc, size)
     }
@@ -721,6 +730,22 @@ pub fn add_idct4_full<S: Sample>(
     }
     idct4_full(block);
     add_block(plane, stride, x0, y0, block, 4, step);
+}
+
+/// [`add_idct4_full`] for an 8×8 block of scaled coefficients.
+pub fn add_idct8_full<S: Sample>(
+    plane: &mut [S],
+    stride: usize,
+    x0: usize,
+    y0: usize,
+    block: &mut [i32; 64],
+    step: usize,
+) {
+    if S::idct8_add_fast(plane, y0 * stride + x0, stride * step, block) {
+        return;
+    }
+    idct8_full(block);
+    add_block(plane, stride, x0, y0, block, 8, step);
 }
 
 /// Adds `dc` to every sample of the `n`×`n` block at `origin`: its column,

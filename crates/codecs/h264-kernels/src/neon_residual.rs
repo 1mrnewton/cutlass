@@ -1,11 +1,12 @@
-//! The NEON 4×4 inverse transform. Safe Rust on fixed-size arrays, as in
+//! The NEON 4×4 and 8×8 inverse transforms. Safe Rust on fixed-size arrays, as in
 //! [`crate::neon`].
 
 use core::arch::aarch64::{
     int32x4_t, vaddq_s32, vcombine_s16, vcombine_u64, vcreate_u8, vcreate_u64, vdupq_n_s32,
-    vget_lane_u64, vget_low_u16, vmovl_u8, vmovl_u16, vqaddq_s32, vqmovn_s32, vqmovun_s16,
-    vreinterpret_u64_u8, vreinterpretq_s32_s64, vreinterpretq_s32_u32, vreinterpretq_s32_u64,
-    vreinterpretq_s64_s32, vshrq_n_s32, vsubq_s32, vtrn1q_s32, vtrn1q_s64, vtrn2q_s32, vtrn2q_s64,
+    vget_lane_u64, vget_low_u16, vmovl_high_u16, vmovl_u8, vmovl_u16, vqaddq_s32, vqmovn_s32,
+    vqmovun_s16, vreinterpret_u64_u8, vreinterpretq_s32_s64, vreinterpretq_s32_u32,
+    vreinterpretq_s32_u64, vreinterpretq_s64_s32, vshrq_n_s32, vsubq_s32, vtrn1q_s32, vtrn1q_s64,
+    vtrn2q_s32, vtrn2q_s64,
 };
 
 /// Four 32-bit numbers as a vector.
@@ -84,6 +85,89 @@ fn idct4_rows(block: &[i32; 16], rows: [[u8; 4]; 4]) -> [[u8; 4]; 4] {
         finish(out[2], rows[2]),
         finish(out[3], rows[3]),
     ]
+}
+
+/// One pass of the 8×8 transform on four lines at once, as [`pass`] is for
+/// the 4×4 one: `d` are the eight inputs of every line.
+#[inline]
+#[target_feature(enable = "neon")]
+fn pass8(d: [int32x4_t; 8]) -> [int32x4_t; 8] {
+    let half = |v: int32x4_t| vshrq_n_s32::<1>(v);
+    let quarter = |v: int32x4_t| vshrq_n_s32::<2>(v);
+    let a0 = vaddq_s32(d[0], d[4]);
+    let a2 = vsubq_s32(d[0], d[4]);
+    let a4 = vsubq_s32(half(d[2]), d[6]);
+    let a6 = vaddq_s32(half(d[6]), d[2]);
+    let b0 = vaddq_s32(a0, a6);
+    let b2 = vaddq_s32(a2, a4);
+    let b4 = vsubq_s32(a2, a4);
+    let b6 = vsubq_s32(a0, a6);
+    let a1 = vsubq_s32(vsubq_s32(vsubq_s32(d[5], d[3]), d[7]), half(d[7]));
+    let a3 = vsubq_s32(vsubq_s32(vaddq_s32(d[1], d[7]), d[3]), half(d[3]));
+    let a5 = vaddq_s32(vaddq_s32(vsubq_s32(d[7], d[1]), d[5]), half(d[5]));
+    let a7 = vaddq_s32(vaddq_s32(vaddq_s32(d[3], d[5]), d[1]), half(d[1]));
+    let b1 = vaddq_s32(quarter(a7), a1);
+    let b3 = vaddq_s32(a3, quarter(a5));
+    let b5 = vsubq_s32(quarter(a3), a5);
+    let b7 = vsubq_s32(a7, quarter(a1));
+    [
+        vaddq_s32(b0, b7),
+        vaddq_s32(b2, b5),
+        vaddq_s32(b4, b3),
+        vaddq_s32(b6, b1),
+        vsubq_s32(b6, b1),
+        vsubq_s32(b4, b3),
+        vsubq_s32(b2, b5),
+        vsubq_s32(b0, b7),
+    ]
+}
+
+/// The 8×8 transform as four-line passes: each half of the rows goes
+/// along its rows with its 4×4 corners turned to columns, and is turned
+/// back; then each half of the columns goes down them.
+#[inline]
+#[target_feature(enable = "neon")]
+fn idct8_rows(block: &[i32; 64], rows: [[u8; 8]; 8]) -> [[u8; 8]; 8] {
+    let at = |row: usize, col: usize| {
+        let start = row * 8 + col;
+        load4([
+            block[start],
+            block[start + 1],
+            block[start + 2],
+            block[start + 3],
+        ])
+    };
+    // `mid[i]` is row `i` of the first pass, its left and right halves.
+    let mut mid = [[vdupq_n_s32(0); 2]; 8];
+    for top in [0, 4] {
+        let left = turn4([at(top, 0), at(top + 1, 0), at(top + 2, 0), at(top + 3, 0)]);
+        let right = turn4([at(top, 4), at(top + 1, 4), at(top + 2, 4), at(top + 3, 4)]);
+        let f = pass8([
+            left[0], left[1], left[2], left[3], right[0], right[1], right[2], right[3],
+        ]);
+        let left = turn4([f[0], f[1], f[2], f[3]]);
+        let right = turn4([f[4], f[5], f[6], f[7]]);
+        for i in 0..4 {
+            mid[top + i] = [left[i], right[i]];
+        }
+    }
+    let left = pass8(core::array::from_fn(|i| mid[i][0]));
+    let right = pass8(core::array::from_fn(|i| mid[i][1]));
+    let round = vdupq_n_s32(32);
+    let mut out = rows;
+    for (i, row) in out.iter_mut().enumerate() {
+        let residual = |v: int32x4_t| vshrq_n_s32::<6>(vaddq_s32(v, round));
+        let wide = vmovl_u8(vcreate_u8(u64::from_le_bytes(*row)));
+        let low = vreinterpretq_s32_u32(vmovl_u16(vget_low_u16(wide)));
+        let high = vreinterpretq_s32_u32(vmovl_high_u16(wide));
+        // Saturating at each narrowing clips the sum to a sample.
+        let sum = vcombine_s16(
+            vqmovn_s32(vqaddq_s32(low, residual(left[i]))),
+            vqmovn_s32(vqaddq_s32(high, residual(right[i]))),
+        );
+        *row = vget_lane_u64::<0>(vreinterpret_u64_u8(vqmovun_s16(sum))).to_le_bytes();
+    }
+    out
 }
 
 /// `dc` added to each of the eight samples in `samples`, each held to 0 to

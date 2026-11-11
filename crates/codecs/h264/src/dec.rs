@@ -4939,7 +4939,8 @@ fn add_scaled<S: Sample>(
                     recon::scale8(level, qp + S::QP_BD, rx, ry, i32::from(weight[pos]));
             }
             // A lone DC went the short way above.
-            recon::idct8_full(&mut block);
+            recon::add_idct8_full(plane, stride, x, y, &mut block, step);
+            return;
         }
         recon::add_block(plane, stride, x, y, &block, 8, step);
     }
